@@ -30,6 +30,10 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
     r->query_in_flight = false;
     r->zpass_pixel_count_result = 0;
 
+    r->query_results_buf = g_malloc_n(r->max_queries_in_flight, sizeof(uint64_t));
+    r->report_pool = g_malloc_n(r->max_queries_in_flight, sizeof(QueryReport));
+    r->report_pool_next = 0;
+
     VkQueryPoolCreateInfo pool_create_info = (VkQueryPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_OCCLUSION,
@@ -43,11 +47,12 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    QueryReport *report;
-    while ((report = QSIMPLEQ_FIRST(&r->report_queue)) != NULL) {
-        QSIMPLEQ_REMOVE_HEAD(&r->report_queue, entry);
-        g_free(report);
-    }
+    QSIMPLEQ_INIT(&r->report_queue);
+
+    g_free(r->query_results_buf);
+    r->query_results_buf = NULL;
+    g_free(r->report_pool);
+    r->report_pool = NULL;
 
     vkDestroyQueryPool(r->device, r->query_pool, NULL);
 }
@@ -57,7 +62,8 @@ void pgraph_vk_clear_report_value(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    QueryReport *report = g_malloc(sizeof(QueryReport)); // FIXME: Pre-allocate
+    QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
+    r->report_pool_next++;
     report->clear = true;
     report->parameter = 0;
     report->query_count = r->num_queries_in_flight;
@@ -74,7 +80,8 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     uint8_t type = GET_MASK(parameter, NV097_GET_REPORT_TYPE);
     assert(type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT);
 
-    QueryReport *report = g_malloc(sizeof(QueryReport)); // FIXME: Pre-allocate
+    QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
+    r->report_pool_next++;
     report->clear = false;
     report->parameter = parameter;
     report->query_count = r->num_queries_in_flight;
@@ -93,12 +100,10 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
     assert(!r->in_command_buffer);
 
     // Fetch all query results
-    g_autofree uint64_t *query_results = NULL;
+    uint64_t *query_results = r->query_results_buf;
 
     if (r->num_queries_in_flight > 0) {
         size_t size_of_results = r->num_queries_in_flight * sizeof(uint64_t);
-        query_results = g_malloc_n(r->num_queries_in_flight,
-                                   sizeof(uint64_t)); // FIXME: Pre-allocate
         VkResult result;
         do {
             result = vkGetQueryPoolResults(
@@ -133,7 +138,6 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
         }
 
         QSIMPLEQ_REMOVE_HEAD(&r->report_queue, entry);
-        g_free(report);
     }
 
     // Add remaining results
@@ -142,6 +146,7 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
     }
 
     r->num_queries_in_flight = 0;
+    r->report_pool_next = 0;
     NV2A_VK_DGROUP_END();
 }
 

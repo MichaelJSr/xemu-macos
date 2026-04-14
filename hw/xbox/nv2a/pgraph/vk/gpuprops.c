@@ -451,8 +451,14 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
         .pCommandBuffers = &r->command_buffer,
     };
 
-    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, VK_NULL_HANDLE));
-    VK_CHECK(vkQueueWaitIdle(r->queue));
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+    VkFence props_fence;
+    VK_CHECK(vkCreateFence(r->device, &fence_info, NULL, &props_fence));
+    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, props_fence));
+    VK_CHECK(vkWaitForFences(r->device, 1, &props_fence, VK_TRUE, UINT64_MAX));
+    vkDestroyFence(r->device, props_fence, NULL);
 
     void *data;
     VK_CHECK(

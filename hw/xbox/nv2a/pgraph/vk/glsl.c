@@ -19,10 +19,71 @@
 
 #include "ui/xemu-settings.h"
 #include "renderer.h"
+#include "qemu/fast-hash.h"
 
 #include <assert.h>
 #include <glslang/Include/glslang_c_interface.h>
+#include "xemu-version.h"
 #include <stdio.h>
+#include <sys/stat.h>
+
+static char *get_spirv_cache_dir(void)
+{
+    const char *base = xemu_settings_get_base_path();
+    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d", base,
+                                xemu_version_major, xemu_version_minor,
+                                xemu_version_patch);
+    mkdir(dir, 0755);
+    return dir;
+}
+
+static char *get_spirv_cache_path(uint64_t hash)
+{
+    char *dir = get_spirv_cache_dir();
+    char *path = g_strdup_printf("%s/%016llx.spv", dir,
+                                 (unsigned long long)hash);
+    g_free(dir);
+    return path;
+}
+
+static GByteArray *load_spirv_from_cache(uint64_t hash)
+{
+    char *path = get_spirv_cache_path(hash);
+    FILE *f = fopen(path, "rb");
+    g_free(path);
+    if (!f) {
+        return NULL;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    guint8 *data = g_malloc(size);
+    if (fread(data, 1, size, f) != size) {
+        g_free(data);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    return g_byte_array_new_take(data, size);
+}
+
+static void save_spirv_to_cache(uint64_t hash, GByteArray *spv)
+{
+    char *path = get_spirv_cache_path(hash);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(spv->data, 1, spv->len, f);
+        fclose(f);
+    }
+    g_free(path);
+}
 
 static const glslang_resource_t
     resource_limits = { .max_lights = 32,
@@ -227,7 +288,7 @@ GByteArray *pgraph_vk_compile_glsl_to_spv(glslang_stage_t stage,
 
     const char *spirv_messages = glslang_program_SPIRV_get_messages(program);
     if (spirv_messages) {
-        printf("%s\b", spirv_messages);
+        fprintf(stderr, "%s\n", spirv_messages);
     }
 
     size_t num_program_bytes =
@@ -370,8 +431,18 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     ShaderModuleInfo *info = g_malloc0(sizeof(*info));
     info->refcnt = 0;
     info->glsl = strdup(glsl);
-    info->spirv = pgraph_vk_compile_glsl_to_spv(
-        vk_shader_stage_to_glslang_stage(stage), glsl);
+
+    uint64_t glsl_hash = fast_hash((const uint8_t *)glsl, strlen(glsl));
+
+    info->spirv = load_spirv_from_cache(glsl_hash);
+    if (info->spirv) {
+        nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
+    } else {
+        info->spirv = pgraph_vk_compile_glsl_to_spv(
+            vk_shader_stage_to_glslang_stage(stage), glsl);
+        save_spirv_to_cache(glsl_hash, info->spirv);
+    }
+
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
     init_layout_from_spv(info);
     return info;
