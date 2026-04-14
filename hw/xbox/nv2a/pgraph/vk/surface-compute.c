@@ -23,11 +23,69 @@
 #include "renderer.h"
 #include <vulkan/vulkan_core.h>
 
-// TODO: Swizzle/Unswizzle
 // TODO: Float depth format (low priority, but would be better for accuracy)
 
 // FIXME: Below pipeline creation assumes identical 3 buffer setup. For
 //        swizzle shader we will need more flexibility.
+
+/*
+ * Z-order unswizzle compute shader: transforms Xbox-tiled (Morton/Z-order)
+ * surface data to linear layout. Operates on 32-bit elements (4 bpp).
+ * Push constants: width, height (in pixels).
+ * Binding 0: swizzled input (uint[]), binding 1: linear output (uint[]).
+ */
+const char *unswizzle_z_order_glsl =
+    "layout(push_constant) uniform PushConstants { uint width, height; };\n"
+    "layout(set = 0, binding = 0) buffer SwizzledIn { uint swizzled_in[]; };\n"
+    "layout(set = 0, binding = 1) buffer LinearOut { uint linear_out[]; };\n"
+    "uint morton_x(uint x) {\n"
+    "    x &= 0x55555555u;\n"
+    "    x = (x | (x >> 1u)) & 0x33333333u;\n"
+    "    x = (x | (x >> 2u)) & 0x0f0f0f0fu;\n"
+    "    x = (x | (x >> 4u)) & 0x00ff00ffu;\n"
+    "    x = (x | (x >> 8u)) & 0x0000ffffu;\n"
+    "    return x;\n"
+    "}\n"
+    "void main() {\n"
+    "    uint idx = gl_GlobalInvocationID.x;\n"
+    "    if (idx >= width * height) return;\n"
+    "    uint mx = morton_x(idx);\n"
+    "    uint my = morton_x(idx >> 1u);\n"
+    "    if (mx < width && my < height) {\n"
+    "        linear_out[my * width + mx] = swizzled_in[idx];\n"
+    "    }\n"
+    "}\n";
+
+/*
+ * YUV (YUY2 / CR8YB8CB8YA8) to RGBA compute shader: converts packed YUV
+ * to RGBA for PVIDEO overlay and textures. Operates on pairs of pixels.
+ * Push constants: width (in pixels, must be even).
+ * Binding 0: YUV input (uint[]), binding 1: RGBA output (uint[]).
+ */
+const char *yuv_to_rgba_glsl =
+    "layout(push_constant) uniform PushConstants { uint width, height; };\n"
+    "layout(set = 0, binding = 0) buffer YuvIn { uint yuv_in[]; };\n"
+    "layout(set = 0, binding = 1) buffer RgbaOut { uint rgba_out[]; };\n"
+    "void main() {\n"
+    "    uint pair_idx = gl_GlobalInvocationID.x;\n"
+    "    uint row = pair_idx / (width / 2u);\n"
+    "    uint col = (pair_idx % (width / 2u)) * 2u;\n"
+    "    if (row >= height || col >= width) return;\n"
+    "    uint packed = yuv_in[pair_idx];\n"
+    "    float y0 = float((packed >> 8u) & 0xffu);\n"
+    "    float u  = float(packed & 0xffu) - 128.0;\n"
+    "    float y1 = float((packed >> 24u) & 0xffu);\n"
+    "    float v  = float((packed >> 16u) & 0xffu) - 128.0;\n"
+    "    float r0 = clamp(y0 + 1.402 * v, 0.0, 255.0);\n"
+    "    float g0 = clamp(y0 - 0.344 * u - 0.714 * v, 0.0, 255.0);\n"
+    "    float b0 = clamp(y0 + 1.772 * u, 0.0, 255.0);\n"
+    "    float r1 = clamp(y1 + 1.402 * v, 0.0, 255.0);\n"
+    "    float g1 = clamp(y1 - 0.344 * u - 0.714 * v, 0.0, 255.0);\n"
+    "    float b1 = clamp(y1 + 1.772 * u, 0.0, 255.0);\n"
+    "    uint pixel_idx = row * width + col;\n"
+    "    rgba_out[pixel_idx]     = uint(r0) | (uint(g0) << 8u) | (uint(b0) << 16u) | 0xff000000u;\n"
+    "    rgba_out[pixel_idx + 1u] = uint(r1) | (uint(g1) << 8u) | (uint(b1) << 16u) | 0xff000000u;\n"
+    "}\n";
 
 const char *pack_d24_unorm_s8_uint_to_z24s8_glsl =
     "layout(push_constant) uniform PushConstants { uint width_in, width_out; };\n"
@@ -586,6 +644,19 @@ static void pipeline_cache_finalize(PGRAPHVkState *r)
     r->compute.pipeline_cache_entries = NULL;
 }
 
+static VkPipeline create_2buf_compute_pipeline(PGRAPHVkState *r,
+                                                const char *shader_body,
+                                                int workgroup_size)
+{
+    gchar *glsl = g_strdup_printf(
+        "#version 450\n"
+        "layout(local_size_x = %d, local_size_y = 1, local_size_z = 1) in;\n"
+        "%s", workgroup_size, shader_body);
+    VkPipeline pipeline = create_compute_pipeline(r, glsl);
+    g_free(glsl);
+    return pipeline;
+}
+
 void pgraph_vk_init_compute(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -595,6 +666,11 @@ void pgraph_vk_init_compute(PGRAPHState *pg)
     create_descriptor_sets(pg);
     create_compute_pipeline_layout(pg);
     pipeline_cache_init(r);
+
+    r->compute.unswizzle_pipeline =
+        create_2buf_compute_pipeline(r, unswizzle_z_order_glsl, 256);
+    r->compute.yuv_to_rgba_pipeline =
+        create_2buf_compute_pipeline(r, yuv_to_rgba_glsl, 256);
 }
 
 void pgraph_vk_finalize_compute(PGRAPHState *pg)
@@ -603,9 +679,87 @@ void pgraph_vk_finalize_compute(PGRAPHState *pg)
 
     assert(!r->in_command_buffer);
 
+    if (r->compute.unswizzle_pipeline) {
+        vkDestroyPipeline(r->device, r->compute.unswizzle_pipeline, NULL);
+        r->compute.unswizzle_pipeline = VK_NULL_HANDLE;
+    }
+    if (r->compute.yuv_to_rgba_pipeline) {
+        vkDestroyPipeline(r->device, r->compute.yuv_to_rgba_pipeline, NULL);
+        r->compute.yuv_to_rgba_pipeline = VK_NULL_HANDLE;
+    }
+
     pipeline_cache_finalize(r);
     destroy_compute_pipeline_layout(r);
     destroy_descriptor_sets(pg);
     destroy_descriptor_set_layout(pg);
     destroy_descriptor_pool(pg);
+}
+
+void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  VkBuffer src, VkBuffer dst,
+                                  unsigned int width, unsigned int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    size_t pixel_count = (size_t)width * height;
+    size_t buf_size = pixel_count * 4;
+
+    VkDescriptorBufferInfo buffers[] = {
+        { .buffer = src, .offset = 0, .range = buf_size },
+        { .buffer = dst, .offset = 0, .range = buf_size },
+        { .buffer = dst, .offset = 0, .range = buf_size },
+    };
+    update_descriptor_sets(pg, buffers, ARRAY_SIZE(buffers));
+
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, "Unswizzle %ux%u",
+                                 width, height);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      r->compute.unswizzle_pipeline);
+    vkCmdBindDescriptorSets(
+        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
+        &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
+        NULL);
+
+    uint32_t push_constants[2] = { width, height };
+    vkCmdPushConstants(cmd, r->compute.pipeline_layout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+
+    size_t group_count = (pixel_count + 255) / 256;
+    vkCmdDispatch(cmd, group_count, 1, 1);
+    pgraph_vk_end_debug_marker(r, cmd);
+}
+
+void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,
+                                    VkBuffer src, VkBuffer dst,
+                                    unsigned int width, unsigned int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    size_t yuv_size = (size_t)(width / 2) * height * 4;
+    size_t rgba_size = (size_t)width * height * 4;
+
+    VkDescriptorBufferInfo buffers[] = {
+        { .buffer = src, .offset = 0, .range = yuv_size },
+        { .buffer = dst, .offset = 0, .range = rgba_size },
+        { .buffer = dst, .offset = 0, .range = rgba_size },
+    };
+    update_descriptor_sets(pg, buffers, ARRAY_SIZE(buffers));
+
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, "YUV->RGBA %ux%u",
+                                 width, height);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      r->compute.yuv_to_rgba_pipeline);
+    vkCmdBindDescriptorSets(
+        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
+        &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
+        NULL);
+
+    uint32_t push_constants[2] = { width, height };
+    vkCmdPushConstants(cmd, r->compute.pipeline_layout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+
+    size_t pair_count = (size_t)(width / 2) * height;
+    size_t group_count = (pair_count + 255) / 256;
+    vkCmdDispatch(cmd, group_count, 1, 1);
+    pgraph_vk_end_debug_marker(r, cmd);
 }

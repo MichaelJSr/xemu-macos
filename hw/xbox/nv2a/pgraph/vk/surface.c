@@ -164,7 +164,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         surface->color || use_compute_to_convert_depth_stencil_format ||
         surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM;
 
-    assert(no_conversion_necessary);
+    nv2a_vk_assert(no_conversion_necessary);
 
     bool compute_needs_finish = (use_compute_to_convert_depth_stencil_format &&
                                  pgraph_vk_compute_needs_finish(r));
@@ -190,7 +190,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     uint8_t *swizzle_buf = pixels;
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
-        assert(pg->surface_scale_factor == 1 || downscale);
+        nv2a_vk_assert(pg->surface_scale_factor == 1 || downscale);
         swizzle_buf = (uint8_t *)g_malloc(surface->size);
         gl_read_buf = swizzle_buf;
     }
@@ -285,7 +285,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     size_t downloaded_image_size = surface->host_fmt.host_bytes_per_pixel *
                                    surface->width * surface->height;
-    assert((downloaded_image_size) <=
+    nv2a_vk_assert((downloaded_image_size) <=
            r->storage_buffers[BUFFER_STAGING_DST].buffer_size);
 
     int copy_buffer_idx = use_compute_to_convert_depth_stencil_format ?
@@ -635,20 +635,21 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
 
     trace_nv2a_pgraph_surface_invalidated(surface->vram_addr);
 
-    // FIXME: We may be reading from the surface in the current command buffer!
-    // Add a detection to handle it. For now, finish to be safe.
-    pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_SURFACE_DOWN);
+    if (r->in_command_buffer &&
+        surface->draw_time >= r->command_buffer_start_time) {
+        pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_SURFACE_DOWN);
+    }
 
-    assert((!r->in_command_buffer ||
+    nv2a_vk_assert((!r->in_command_buffer ||
             surface->draw_time < r->command_buffer_start_time) &&
            "Surface evicted while in use!");
 
     if (surface == r->color_binding) {
-        assert(d->pgraph.surface_color.buffer_dirty);
+        nv2a_vk_assert(d->pgraph.surface_color.buffer_dirty);
         unbind_surface(d, true);
     }
     if (surface == r->zeta_binding) {
-        assert(d->pgraph.surface_zeta.buffer_dirty);
+        nv2a_vk_assert(d->pgraph.surface_zeta.buffer_dirty);
         unbind_surface(d, false);
     }
 
@@ -686,7 +687,7 @@ static void surface_put(NV2AState *d, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 
-    assert(pgraph_vk_surface_get(d, surface->vram_addr) == NULL);
+    nv2a_vk_assert(pgraph_vk_surface_get(d, surface->vram_addr) == NULL);
 
     invalidate_overlapping_surfaces(d, surface);
     register_cpu_access_callback(d, surface);
@@ -767,8 +768,8 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     unsigned int height = surface->height ? surface->height : 1;
     pgraph_apply_scaling_factor(pg, &width, &height);
 
-    assert(!surface->image);
-    assert(!surface->image_scratch);
+    nv2a_vk_assert(!surface->image);
+    nv2a_vk_assert(!surface->image_scratch);
 
     NV2A_VK_DPRINTF(
         "Creating new surface image width=%d height=%d @ %08" HWADDR_PRIx,
@@ -817,19 +818,18 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &surface->image_view));
 
-    // FIXME: Go right into main command buffer
-    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
-    pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
+    {
+        VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+        pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-    nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_3);
-    pgraph_vk_end_debug_marker(r, cmd);
-    pgraph_vk_end_single_time_commands(pg, cmd);
+        pgraph_vk_end_debug_marker(r, cmd);
+    }
     nv2a_profile_inc_counter(NV2A_PROF_SURF_CREATE);
 }
 
@@ -977,7 +977,11 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     g_autofree uint8_t *swizzle_buf = NULL;
     uint8_t *gl_read_buf = NULL;
 
-    if (surface->swizzle) {
+    bool use_gpu_unswizzle = surface->swizzle &&
+                             surface->fmt.bytes_per_pixel == 4 &&
+                             r->compute.unswizzle_pipeline != VK_NULL_HANDLE;
+
+    if (surface->swizzle && !use_gpu_unswizzle) {
         swizzle_buf = (uint8_t*)g_malloc(surface->size);
         gl_read_buf = swizzle_buf;
         unswizzle_rect(data + surface->vram_addr,
@@ -986,6 +990,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                        surface->pitch,
                        surface->fmt.bytes_per_pixel);
         nv2a_profile_inc_counter(NV2A_PROF_SURF_SWIZZLE);
+    } else if (!surface->swizzle) {
+        gl_read_buf = buf;
     } else {
         gl_read_buf = buf;
     }
@@ -995,9 +1001,15 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     //
 
     StorageBuffer *copy_buffer = &r->storage_buffers[BUFFER_STAGING_SRC];
+
+    if (copy_buffer->buffer_offset > 0) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        copy_buffer->buffer_offset = 0;
+    }
+
     size_t uploaded_image_size = surface->height * surface->width *
                                  surface->fmt.bytes_per_pixel;
-    assert(uploaded_image_size <= copy_buffer->buffer_size);
+    nv2a_vk_assert(uploaded_image_size <= copy_buffer->buffer_size);
 
     void *mapped_memory_ptr = NULL;
     VK_CHECK(vmaMapMemory(r->allocator, copy_buffer->allocation,
@@ -1010,7 +1022,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     bool no_conversion_necessary =
         surface->color || surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
         use_compute_to_convert_depth_stencil_format;
-    assert(no_conversion_necessary);
+    nv2a_vk_assert(no_conversion_necessary);
 
     memcpy_image(mapped_memory_ptr, gl_read_buf,
                  surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
@@ -1034,6 +1046,46 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
                          &host_barrier, 0, NULL);
+
+    VkBuffer upload_src_buffer = copy_buffer->buffer;
+
+    if (use_gpu_unswizzle) {
+        VkBufferCopy swz_copy = { .size = uploaded_image_size };
+        vkCmdCopyBuffer(cmd, copy_buffer->buffer,
+                        r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                        1, &swz_copy);
+
+        VkBufferMemoryBarrier pre_compute = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .buffer = r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+            .size = VK_WHOLE_SIZE
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
+                             1, &pre_compute, 0, NULL);
+
+        pgraph_vk_dispatch_unswizzle(
+            pg, cmd,
+            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+            surface->width, surface->height);
+
+        VkBufferMemoryBarrier post_compute = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .buffer = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+            .size = VK_WHOLE_SIZE
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL,
+                             1, &post_compute, 0, NULL);
+
+        upload_src_buffer = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+        nv2a_profile_inc_counter(NV2A_PROF_SURF_SWIZZLE);
+    }
 
     // Set up image copy regions (which may be modified by compute unpack)
 
@@ -1179,7 +1231,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
 
-    vkCmdCopyBufferToImage(cmd, copy_buffer->buffer, surface->image_scratch,
+    vkCmdCopyBufferToImage(cmd, upload_src_buffer, surface->image_scratch,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, num_regions,
                            regions);
 
@@ -1314,8 +1366,8 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     if (color) {
         surface = &pg->surface_color;
         dma_address = pg->dma_color;
-        assert(pg->surface_shape.color_format != 0);
-        assert(pg->surface_shape.color_format <
+        nv2a_vk_assert(pg->surface_shape.color_format != 0);
+        nv2a_vk_assert(pg->surface_shape.color_format <
                ARRAY_SIZE(kelvin_surface_color_format_vk_map));
         fmt = kelvin_surface_color_format_map[pg->surface_shape.color_format];
         host_fmt = kelvin_surface_color_format_vk_map[pg->surface_shape.color_format];
@@ -1327,8 +1379,8 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     } else {
         surface = &pg->surface_zeta;
         dma_address = pg->dma_zeta;
-        assert(pg->surface_shape.zeta_format != 0);
-        assert(pg->surface_shape.zeta_format <
+        nv2a_vk_assert(pg->surface_shape.zeta_format != 0);
+        nv2a_vk_assert(pg->surface_shape.zeta_format <
                ARRAY_SIZE(r->kelvin_surface_zeta_vk_map));
         fmt = kelvin_surface_zeta_format_map[pg->surface_shape.zeta_format];
         host_fmt = r->kelvin_surface_zeta_vk_map[pg->surface_shape.zeta_format];
@@ -1339,12 +1391,12 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     // There's a bunch of bugs that could cause us to hit this function
     // at the wrong time and get a invalid dma object.
     // Check that it's sane.
-    assert(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
+    nv2a_vk_assert(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
     // assert(dma.address + surface->offset != 0);
-    assert(surface->offset <= dma.limit);
-    assert(surface->offset + surface->pitch * height <= dma.limit + 1);
-    assert(surface->pitch % fmt.bytes_per_pixel == 0);
-    assert((dma.address & ~0x07FFFFFF) == 0);
+    nv2a_vk_assert(surface->offset <= dma.limit);
+    nv2a_vk_assert(surface->offset + surface->pitch * height <= dma.limit + 1);
+    nv2a_vk_assert(surface->pitch % fmt.bytes_per_pixel == 0);
+    nv2a_vk_assert((dma.address & ~0x07FFFFFF) == 0);
 
     target->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;
@@ -1462,7 +1514,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                      surface->shape.clip_y, surface->shape.clip_height,
                      surface->pitch);
 
-            assert(!(target.swizzle && pg->clearing));
+            nv2a_vk_assert(!(target.swizzle && pg->clearing));
 
 #if 0
             if (surface->swizzle != target.swizzle) {
@@ -1650,8 +1702,8 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
 
     // Sanity check color and zeta dimensions match
     if (r->color_binding && r->zeta_binding) {
-        assert(r->color_binding->width == r->zeta_binding->width);
-        assert(r->color_binding->height == r->zeta_binding->height);
+        nv2a_vk_assert(r->color_binding->width == r->zeta_binding->width);
+        nv2a_vk_assert(r->color_binding->height == r->zeta_binding->height);
     }
 
     expire_old_surfaces(d);
@@ -1699,7 +1751,7 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
     bool color_formats_supported = check_surface_internal_formats_supported(
         r, kelvin_surface_color_format_vk_map,
         ARRAY_SIZE(kelvin_surface_color_format_vk_map));
-    assert(color_formats_supported);
+    nv2a_vk_assert(color_formats_supported);
 
     // Check if the device supports preferred VK_FORMAT_D24_UNORM_S8_UINT
     // format, fall back to D32_SFLOAT_S8_UINT otherwise.
@@ -1713,7 +1765,7 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
         r->kelvin_surface_zeta_vk_map[NV097_SET_SURFACE_FORMAT_ZETA_Z24S8] =
             zeta_d32_sfloat_s8_uint;
     } else {
-        assert(!"No suitable depth-stencil format supported");
+        nv2a_vk_assert(!"No suitable depth-stencil format supported");
     }
 
     QTAILQ_INIT(&r->surfaces);
