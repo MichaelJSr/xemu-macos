@@ -132,7 +132,7 @@ class LibInstaller:
 
 		for fpath in tb.getnames():
 			extracted_path = os.path.abspath(os.path.join(self._extract_path, fpath))
-			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fname}'
+			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fpath}'
 
 		print(f'    [*] Extracting to {self._extract_path}')
 		tb.extractall(self._extract_path, numeric_owner=True)

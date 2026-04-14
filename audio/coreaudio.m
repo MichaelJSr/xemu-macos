@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include <CoreAudio/CoreAudio.h>
 #include <pthread.h>            /* pthread_X */
+#include <os/lock.h>
 
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -35,7 +36,7 @@
 
 typedef struct coreaudioVoiceOut {
     HWVoiceOut hw;
-    pthread_mutex_t buf_mutex;
+    os_unfair_lock buf_lock;
     AudioDeviceID outputDeviceID;
     int frameSizeSetting;
     uint32_t bufferCount;
@@ -244,27 +245,15 @@ static void G_GNUC_PRINTF (3, 4) coreaudio_logerr2 (
 
 static int coreaudio_buf_lock (coreaudioVoiceOut *core, const char *fn_name)
 {
-    int err;
-
-    err = pthread_mutex_lock (&core->buf_mutex);
-    if (err) {
-        dolog ("Could not lock voice for %s\nReason: %s\n",
-               fn_name, strerror (err));
-        return -1;
-    }
+    (void)fn_name;
+    os_unfair_lock_lock(&core->buf_lock);
     return 0;
 }
 
 static int coreaudio_buf_unlock (coreaudioVoiceOut *core, const char *fn_name)
 {
-    int err;
-
-    err = pthread_mutex_unlock (&core->buf_mutex);
-    if (err) {
-        dolog ("Could not unlock voice for %s\nReason: %s\n",
-               fn_name, strerror (err));
-        return -1;
-    }
+    (void)fn_name;
+    os_unfair_lock_unlock(&core->buf_lock);
     return 0;
 }
 
@@ -567,8 +556,9 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
     struct audsettings obt_as;
 
     /* create mutex */
-    err = pthread_mutex_init(&core->buf_mutex, NULL);
-    if (err) {
+    core->buf_lock = OS_UNFAIR_LOCK_INIT;
+    err = 0;
+    if (0) {
         dolog("Could not create mutex\nReason: %s\n", strerror (err));
         return -1;
     }
@@ -625,10 +615,8 @@ static void coreaudio_fini_out (HWVoiceOut *hw)
     fini_out_device(core);
 
     /* destroy mutex */
-    err = pthread_mutex_destroy(&core->buf_mutex);
-    if (err) {
-        dolog("Could not destroy mutex\nReason: %s\n", strerror (err));
-    }
+    /* os_unfair_lock requires no explicit destruction */
+    (void)err;
 }
 
 static void coreaudio_enable_out(HWVoiceOut *hw, bool enable)

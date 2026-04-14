@@ -23,6 +23,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
                            int output_w, int output_h);
 IOSurfaceRef metalfx_temporal_get_output_surface(void);
 void metalfx_temporal_set_depth_texture(void *mtl_texture);
+void metalfx_temporal_reset(void);
 bool metalfx_temporal_upscale(IOSurfaceRef colorSurface);
 void metalfx_temporal_destroy(void);
 

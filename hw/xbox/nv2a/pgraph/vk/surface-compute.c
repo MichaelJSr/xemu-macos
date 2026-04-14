@@ -57,6 +57,39 @@ const char *unswizzle_z_order_glsl =
     "}\n";
 
 /*
+ * Z-order unswizzle compute shader for 2 bytes-per-pixel surfaces (R5G6B5,
+ * etc.). Operates on 16-bit elements packed into uint SSBOs.
+ * Push constants: width, height (in pixels).
+ */
+const char *unswizzle_z_order_2bpp_glsl =
+    "layout(push_constant) uniform PushConstants { uint width, height; };\n"
+    "layout(set = 0, binding = 0) buffer SwizzledIn { uint swizzled_in[]; };\n"
+    "layout(set = 0, binding = 1) buffer LinearOut { uint linear_out[]; };\n"
+    "uint morton_x(uint x) {\n"
+    "    x &= 0x55555555u;\n"
+    "    x = (x | (x >> 1u)) & 0x33333333u;\n"
+    "    x = (x | (x >> 2u)) & 0x0f0f0f0fu;\n"
+    "    x = (x | (x >> 4u)) & 0x00ff00ffu;\n"
+    "    x = (x | (x >> 8u)) & 0x0000ffffu;\n"
+    "    return x;\n"
+    "}\n"
+    "void main() {\n"
+    "    uint idx = gl_GlobalInvocationID.x;\n"
+    "    if (idx >= width * height) return;\n"
+    "    uint mx = morton_x(idx);\n"
+    "    uint my = morton_x(idx >> 1u);\n"
+    "    if (mx >= width || my >= height) return;\n"
+    "    uint src_word = swizzled_in[idx >> 1u];\n"
+    "    uint val = (idx & 1u) == 0u ? (src_word & 0xffffu) : (src_word >> 16u);\n"
+    "    uint dst_idx = my * width + mx;\n"
+    "    uint dst_word = linear_out[dst_idx >> 1u];\n"
+    "    if ((dst_idx & 1u) == 0u)\n"
+    "        linear_out[dst_idx >> 1u] = (dst_word & 0xffff0000u) | val;\n"
+    "    else\n"
+    "        linear_out[dst_idx >> 1u] = (dst_word & 0x0000ffffu) | (val << 16u);\n"
+    "}\n";
+
+/*
  * YUV (YUY2 / CR8YB8CB8YA8) to RGBA compute shader: converts packed YUV
  * to RGBA for PVIDEO overlay and textures. Operates on pairs of pixels.
  * Push constants: width (in pixels, must be even).
@@ -239,10 +272,10 @@ static void create_descriptor_set_layout(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    const int num_buffers = 3;
+#define COMPUTE_NUM_BUFFERS 3
 
-    VkDescriptorSetLayoutBinding bindings[num_buffers];
-    for (int i = 0; i < num_buffers; i++) {
+    VkDescriptorSetLayoutBinding bindings[COMPUTE_NUM_BUFFERS];
+    for (int i = 0; i < COMPUTE_NUM_BUFFERS; i++) {
         bindings[i] = (VkDescriptorSetLayoutBinding){
             .binding = i,
             .descriptorCount = 1,
@@ -399,10 +432,8 @@ static int get_workgroup_size_for_output_units(PGRAPHVkState *r, int output_unit
     //        evenly divides output_units.
 
     while (group_size > 1) {
-        if (group_size > r->device_props.limits.maxComputeWorkGroupSize[0]) {
-            continue;
-        }
-        if (output_units % group_size == 0) {
+        if (group_size <= r->device_props.limits.maxComputeWorkGroupSize[0] &&
+            output_units % group_size == 0) {
             break;
         }
         group_size /= 2;
@@ -669,6 +700,8 @@ void pgraph_vk_init_compute(PGRAPHState *pg)
 
     r->compute.unswizzle_pipeline =
         create_2buf_compute_pipeline(r, unswizzle_z_order_glsl, 256);
+    r->compute.unswizzle_2bpp_pipeline =
+        create_2buf_compute_pipeline(r, unswizzle_z_order_2bpp_glsl, 256);
     r->compute.yuv_to_rgba_pipeline =
         create_2buf_compute_pipeline(r, yuv_to_rgba_glsl, 256);
 }
@@ -682,6 +715,10 @@ void pgraph_vk_finalize_compute(PGRAPHState *pg)
     if (r->compute.unswizzle_pipeline) {
         vkDestroyPipeline(r->device, r->compute.unswizzle_pipeline, NULL);
         r->compute.unswizzle_pipeline = VK_NULL_HANDLE;
+    }
+    if (r->compute.unswizzle_2bpp_pipeline) {
+        vkDestroyPipeline(r->device, r->compute.unswizzle_2bpp_pipeline, NULL);
+        r->compute.unswizzle_2bpp_pipeline = VK_NULL_HANDLE;
     }
     if (r->compute.yuv_to_rgba_pipeline) {
         vkDestroyPipeline(r->device, r->compute.yuv_to_rgba_pipeline, NULL);
@@ -714,6 +751,41 @@ void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
                                  width, height);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                       r->compute.unswizzle_pipeline);
+    vkCmdBindDescriptorSets(
+        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
+        &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
+        NULL);
+
+    uint32_t push_constants[2] = { width, height };
+    vkCmdPushConstants(cmd, r->compute.pipeline_layout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+
+    size_t group_count = (pixel_count + 255) / 256;
+    vkCmdDispatch(cmd, group_count, 1, 1);
+    pgraph_vk_end_debug_marker(r, cmd);
+}
+
+void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
+                                      VkBuffer src, VkBuffer dst,
+                                      unsigned int width, unsigned int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    size_t pixel_count = (size_t)width * height;
+    size_t buf_size = pixel_count * 2;
+    size_t buf_size_aligned = ROUND_UP(buf_size, 4);
+
+    VkDescriptorBufferInfo buffers[] = {
+        { .buffer = src, .offset = 0, .range = buf_size_aligned },
+        { .buffer = dst, .offset = 0, .range = buf_size_aligned },
+        { .buffer = dst, .offset = 0, .range = buf_size_aligned },
+    };
+    update_descriptor_sets(pg, buffers, ARRAY_SIZE(buffers));
+
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, "Unswizzle2bpp %ux%u",
+                                 width, height);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      r->compute.unswizzle_2bpp_pipeline);
     vkCmdBindDescriptorSets(
         cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
         &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,

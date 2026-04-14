@@ -81,6 +81,7 @@ static enum S3TC_DECOMPRESS_FORMAT kelvin_format_to_s3tc_format(int color_format
         return S3TC_DECOMPRESS_FORMAT_DXT5;
     default:
         nv2a_vk_assert(false);
+        __builtin_unreachable();
     }
 }
 
@@ -134,6 +135,10 @@ static size_t get_cubemap_layer_size(PGRAPHState *pg, TextureShape s)
     return ROUND_UP(length, NV2A_CUBEMAP_FACE_ALIGNMENT);
 }
 
+typedef struct DecodeTaskBatch {
+    volatile int remaining;
+} DecodeTaskBatch;
+
 typedef struct DecodeTask {
     void *src_data;
     void *palette_data;
@@ -145,6 +150,7 @@ typedef struct DecodeTask {
     bool is_3d;
     void *decoded_data;
     size_t decoded_size;
+    DecodeTaskBatch *batch;
 } DecodeTask;
 
 static void decode_task_func(gpointer data, gpointer user_data)
@@ -205,11 +211,21 @@ static void decode_task_func(gpointer data, gpointer user_data)
             }
         }
     }
+
+    qatomic_dec(&task->batch->remaining);
+}
+
+static void decode_batch_wait(DecodeTaskBatch *batch)
+{
+    while (qatomic_read(&batch->remaining) > 0) {
+        g_usleep(10);
+    }
 }
 
 static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
+    PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape s = pgraph_get_texture_shape(pg, texture_idx);
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
 
@@ -303,9 +319,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         int total_tasks = num_layers * s.levels;
 
         DecodeTask *tasks = g_malloc0_n(total_tasks, sizeof(DecodeTask));
-        GThreadPool *pool = g_thread_pool_new(decode_task_func, NULL,
-                                              MIN(total_tasks, (int)g_get_num_processors()),
-                                              FALSE, NULL);
+        DecodeTaskBatch batch = { .remaining = total_tasks };
         int task_idx = 0;
         for (int layer = 0; layer < num_layers; layer++) {
             unsigned int width = adjusted_width, height = adjusted_height;
@@ -327,8 +341,9 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 t->is_compressed = is_compressed;
                 t->block_size = block_size;
                 t->is_3d = false;
+                t->batch = &batch;
 
-                g_thread_pool_push(pool, t, NULL);
+                g_thread_pool_push(r->decode_thread_pool, t, NULL);
 
                 if (is_compressed) {
                     unsigned int pw = (width + 3) & ~3;
@@ -344,7 +359,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             }
         }
 
-        g_thread_pool_free(pool, FALSE, TRUE);
+        decode_batch_wait(&batch);
 
         task_idx = 0;
         for (int layer = 0; layer < num_layers; layer++) {
@@ -374,9 +389,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         nv2a_vk_assert(!f.linear);
         int total_tasks = s.levels;
         DecodeTask *tasks = g_malloc0_n(total_tasks, sizeof(DecodeTask));
-        GThreadPool *pool = g_thread_pool_new(decode_task_func, NULL,
-                                              MIN(total_tasks, (int)g_get_num_processors()),
-                                              FALSE, NULL);
+        DecodeTaskBatch batch3d = { .remaining = total_tasks };
 
         unsigned int width = adjusted_width, height = adjusted_height,
                      depth = adjusted_depth;
@@ -396,8 +409,9 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             t->is_compressed = is_compressed;
             t->block_size = block_size;
             t->is_3d = true;
+            t->batch = &batch3d;
 
-            g_thread_pool_push(pool, t, NULL);
+            g_thread_pool_push(r->decode_thread_pool, t, NULL);
 
             if (is_compressed) {
                 unsigned int pw = (width + 3) & ~3;
@@ -412,7 +426,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             depth /= 2;
         }
 
-        g_thread_pool_free(pool, FALSE, TRUE);
+        decode_batch_wait(&batch3d);
 
         for (int level = 0; level < s.levels; level++) {
             DecodeTask *t = &tasks[level];
@@ -549,9 +563,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     VkDeviceSize base_offset = staging->buffer_offset;
 
-    uint8_t *mapped_memory_ptr;
-    VK_CHECK(vmaMapMemory(r->allocator, staging->allocation,
-                          (void *)&mapped_memory_ptr));
+    uint8_t *mapped_memory_ptr = staging->mapped;
 
     int num_regions = num_layers * state->levels;
     g_autofree VkBufferImageCopy *regions =
@@ -589,8 +601,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     staging->buffer_offset = buffer_offset;
 
-    vmaFlushAllocation(r->allocator, staging->allocation, 0, VK_WHOLE_SIZE);
-    vmaUnmapMemory(r->allocator, staging->allocation);
+    vmaFlushAllocation(r->allocator, staging->allocation,
+                       base_offset, texture_data_size);
 
     {
         VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
@@ -670,7 +682,7 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
                  scaled_height = surface->height;
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
-    size_t copied_image_size =
+    size_t __attribute__((unused)) copied_image_size =
         scaled_width * scaled_height * surface->host_fmt.host_bytes_per_pixel;
     size_t stencil_buffer_offset = 0;
     size_t stencil_buffer_size = 0;
@@ -1551,7 +1563,7 @@ static bool texture_cache_entry_compare(Lru *lru, LruNode *node,
 
 static void texture_cache_init(PGRAPHVkState *r)
 {
-    const size_t texture_cache_size = 1024;
+    const size_t texture_cache_size = 4096;
     lru_init(&r->texture_cache);
     r->texture_cache_entries = g_malloc_n(texture_cache_size, sizeof(TextureBinding));
     nv2a_vk_assert(r->texture_cache_entries != NULL);
@@ -1601,6 +1613,9 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
             r->physical_device, kelvin_color_format_vk_map[i].vk_format,
             &r->texture_format_properties[i]);
     }
+
+    r->decode_thread_pool = g_thread_pool_new(
+        decode_task_func, NULL, (int)g_get_num_processors(), FALSE, NULL);
 }
 
 void pgraph_vk_finalize_textures(PGRAPHState *pg)
@@ -1608,6 +1623,11 @@ void pgraph_vk_finalize_textures(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     nv2a_vk_assert(!r->in_command_buffer);
+
+    if (r->decode_thread_pool) {
+        g_thread_pool_free(r->decode_thread_pool, FALSE, TRUE);
+        r->decode_thread_pool = NULL;
+    }
 
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         r->texture_bindings[i] = NULL;

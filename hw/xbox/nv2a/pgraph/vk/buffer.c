@@ -63,7 +63,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
     r->storage_buffers[BUFFER_STAGING_DST] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .buffer_size = 4096 * 4096 * 4,
+        .buffer_size = 256 * 1024 * 1024,
     };
 
     r->storage_buffers[BUFFER_STAGING_SRC] = (StorageBuffer){
@@ -146,7 +146,9 @@ void pgraph_vk_init_buffers(NV2AState *d)
     int buffers_to_map[] = { BUFFER_VERTEX_RAM,
                              BUFFER_INDEX_STAGING,
                              BUFFER_VERTEX_INLINE_STAGING,
-                             BUFFER_UNIFORM_STAGING };
+                             BUFFER_UNIFORM_STAGING,
+                             BUFFER_STAGING_SRC,
+                             BUFFER_STAGING_DST };
 
     for (int i = 0; i < ARRAY_SIZE(buffers_to_map); i++) {
         VK_CHECK(vmaMapMemory(

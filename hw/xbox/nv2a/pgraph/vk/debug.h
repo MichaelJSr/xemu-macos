@@ -34,6 +34,7 @@ extern int nv2a_vk_dgroup_indent;
 
 #define NV2A_VK_DPRINTF(fmt, ...) NV2A_VK_XDPRINTF(DEBUG_VK, fmt, ##__VA_ARGS__)
 
+#if DEBUG_VK
 #define NV2A_VK_DGROUP_BEGIN(fmt, ...)                  \
     do {                                                \
         NV2A_VK_XDPRINTF(DEBUG_VK, fmt, ##__VA_ARGS__); \
@@ -45,6 +46,10 @@ extern int nv2a_vk_dgroup_indent;
         nv2a_vk_dgroup_indent--;            \
         nv2a_vk_assert(nv2a_vk_dgroup_indent >= 0); \
     } while (0)
+#else
+#define NV2A_VK_DGROUP_BEGIN(fmt, ...) ((void)0)
+#define NV2A_VK_DGROUP_END(...)        ((void)0)
+#endif
 
 #define VK_CHECK(x)                                           \
     do {                                                      \

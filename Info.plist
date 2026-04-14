@@ -9,7 +9,7 @@
   <key>CFBundleIconFile</key>
   <string>xemu.icns</string>
   <key>CFBundleIdentifier</key>
-  <string>xemu.app.0</string>
+  <string>app.xemu.xemu</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -25,7 +25,7 @@
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.games</string>
   <key>LSMinimumSystemVersion</key>
-  <string>10.6</string>
+  <string>14.0</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSHighResolutionCapable</key>
@@ -40,6 +40,10 @@
     <string>2</string>
     <key>MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS</key>
     <string>0</string>
+    <key>MVK_CONFIG_FAST_MATH_ENABLED</key>
+    <string>1</string>
+    <key>MVK_CONFIG_RESUME_LOST_DEVICE</key>
+    <string>1</string>
   </dict>
 </dict>
 </plist>

@@ -342,13 +342,14 @@ typedef struct ComputePipeline {
 typedef struct PGRAPHVkComputeState {
     VkDescriptorPool descriptor_pool;
     VkDescriptorSetLayout descriptor_set_layout;
-    VkDescriptorSet descriptor_sets[1024];
+    VkDescriptorSet descriptor_sets[2048];
     int descriptor_set_index;
     VkPipelineLayout pipeline_layout;
     Lru pipeline_cache;
     ComputePipeline *pipeline_cache_entries;
 
     VkPipeline unswizzle_pipeline;
+    VkPipeline unswizzle_2bpp_pipeline;
     VkPipeline yuv_to_rgba_pipeline;
 } PGRAPHVkComputeState;
 
@@ -413,7 +414,7 @@ typedef struct PGRAPHVkState {
 
     VkDescriptorPool descriptor_pool;
     VkDescriptorSetLayout descriptor_set_layout;
-    VkDescriptorSet descriptor_sets[1024];
+    VkDescriptorSet descriptor_sets[2048];
     int descriptor_set_index;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
@@ -446,6 +447,7 @@ typedef struct PGRAPHVkState {
     TextureBinding dummy_texture;
     bool texture_bindings_changed;
     VkFormatProperties *texture_format_properties;
+    GThreadPool *decode_thread_pool;
 
     Lru shader_cache;
     ShaderBinding *shader_cache_entries;
@@ -482,6 +484,8 @@ typedef struct PGRAPHVkState {
 
     PGRAPHVkDisplayState display;
     PGRAPHVkComputeState compute;
+
+    GHashTable *surface_lookup;
 } PGRAPHVkState;
 
 // renderer.c
@@ -593,6 +597,10 @@ void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
 void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
                                   VkBuffer src, VkBuffer dst,
                                   unsigned int width, unsigned int height);
+void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
+                                       VkBuffer src, VkBuffer dst,
+                                       unsigned int width,
+                                       unsigned int height);
 void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,
                                     VkBuffer src, VkBuffer dst,
                                     unsigned int width, unsigned int height);

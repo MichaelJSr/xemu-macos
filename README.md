@@ -24,11 +24,11 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Speedup | Description |
 |---|---|---|
-| **ARM64 Hard FPU** | 3-6x faster x87 ops | Fast bit-level floatx80-to-double conversion replaces QEMU's softfloat integer-only emulation. Branchless normal path (~6 integer ops per conversion). Every x87 instruction (FADD, FMUL, FDIV, etc.) benefits. |
-| **MetalFX Temporal Upscaling** | Better quality at lower GPU cost | Apple's ML-based upscaling from internal resolution (e.g., 1280x960) to 1920x1440 with temporal accumulation and anti-aliasing via `MTLFXTemporalScaler`. |
+| **ARM64 Hard FPU** | 3-6x faster x87 ops | Fast bit-level floatx80-to-double conversion replaces QEMU's softfloat integer-only emulation. Branchless normal path (~6 integer ops per conversion). Every x87 instruction (FADD, FMUL, FDIV, FSQRT, FRNDINT, FIST, etc.) benefits. Hardware `sqrt()`, `rint()`, and `fesetround()` for FSQRT/FRNDINT/rounding mode. |
+| **MetalFX Temporal Upscaling** | Better quality at lower GPU cost | Apple's ML-based upscaling from internal resolution (e.g., 1280x960) to 1920x1440 with temporal accumulation and anti-aliasing via `MTLFXTemporalScaler`. Halton(2,3) sub-pixel jitter sequence enables true temporal super-resolution reconstruction. |
 | **True Frame Interpolation** | 30fps -> 60fps or 120fps | `MTLFXFrameInterpolator` (macOS 26+) generates intermediate frames with correct deltaTime. 2x mode = 1 interpolated frame (dt=0.5), 4x mode = 3 interpolated frames (dt=0.25, 0.5, 0.75). Deferred generation across sync calls for true 120fps. |
 | **Texture Upload Batching** | Eliminates GPU sync per texture | Staging buffer sub-allocation (bump allocator on `BUFFER_STAGING_SRC`) allows multiple texture uploads to batch on the main command buffer. Flush guards prevent corruption between users. |
-| **Texture Decode Parallelization** | Up to 24x throughput on M2 Ultra | `GThreadPool` distributes S3TC decompression, unswizzle, and format conversion across all CPU cores. For cubemap textures with 10 mip levels, that's 60 parallel tasks. |
+| **Texture Decode Parallelization** | Up to 24x throughput on M2 Ultra | Persistent `GThreadPool` distributes S3TC decompression, unswizzle, and format conversion across all CPU cores. Pool is created once at init and reused across frames (no per-texture thread pool allocation). Atomic batch-completion tracking via `DecodeTaskBatch`. |
 
 ### Tier 2: Medium Impact (reduces per-frame overhead)
 
@@ -37,10 +37,15 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Display Command Buffer Merge** | PVIDEO overlay upload + display render pass combined into 1 aux GPU submission instead of 2. Eliminates 1 `vkQueueSubmit` + `vkWaitForFences` per display frame. |
 | **Surface Init on Main CB** | New surface layout transitions use the main command buffer via `pgraph_vk_begin_nondraw_commands` instead of a separate aux submission. |
 | **GPU Compute YUV-to-RGBA** | PVIDEO overlay YUV conversion runs as a Vulkan compute shader dispatch instead of CPU `convert_texture_data`. |
-| **GPU Compute Z-Order Unswizzle** | Surface upload unswizzle for 4bpp surfaces runs as a Vulkan compute shader with Morton address decode. |
+| **GPU Compute Z-Order Unswizzle** | Surface upload unswizzle for 4bpp and 2bpp surfaces runs as Vulkan compute shaders with Morton address decode. 2bpp shader packs/unpacks 16-bit elements in uint SSBOs. |
 | **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp` of vertex descriptions. Only marks dirty when descriptions actually change (compares before/after in vertex bind). |
 | **Vertex Staging Bulk Copy** | Single `memcpy` when source and destination strides match (common case), eliminating per-vertex loop overhead. |
 | **Default Vulkan on macOS** | `get_default_renderer()` prefers Vulkan over OpenGL on `__APPLE__` because the Vulkan path provides IOSurface zero-copy display. |
+| **Staging Buffer Scaling** | `BUFFER_STAGING_SRC/DST` increased from 64 MiB to 256 MiB with persistent VMA mapping. Eliminates per-upload `vmaMapMemory`/`vmaUnmapMemory` overhead and reduces forced `pgraph_vk_finish` stalls from staging buffer exhaustion. |
+| **Narrower Pipeline Barriers** | `VK_PIPELINE_STAGE_ALL_COMMANDS_BIT` replaced with `COLOR_ATTACHMENT_OUTPUT_BIT` / `VERTEX_INPUT_BIT | TRANSFER_BIT` in image transitions and draw submission. Reduces MoltenVK Metal fence overhead. |
+| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` accelerates `pgraph_vk_surface_get` from O(n) QTAILQ scan to O(1) hash lookup. NULL-guarded fallback to linear scan during early init. |
+| **APU Attenuation/Pitch LUTs** | Pre-computed 4096-entry attenuation and 65536-entry pitch lookup tables replace per-voice `powf(10, ...)` and `powf(2, ...)` calls in the audio voice processor hot path. |
+| **CoreAudio Priority-Safe Lock** | `pthread_mutex` replaced with `os_unfair_lock` in CoreAudio IOProc callback, eliminating priority inversion on the real-time audio thread. |
 
 ### Tier 3: Low Impact / Quality of Life
 
@@ -49,10 +54,16 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **STBI_NEON** | ARM NEON SIMD for stb_image JPEG/PNG decoding (IDCT, color conversion, resampling). |
 | **fpng ARM64 CRC32** | Hardware CRC32 instructions (`__crc32d`/`__crc32w`/`__crc32b`) for PNG encoding. Processes 8 bytes per iteration. |
 | **Display Uniform Caching** | 8 uniform locations (`display_size`, `line_offset`, PVIDEO params) resolved once at init via `resolve_display_uniform_locations()`, not per-frame string lookup. |
-| **MoltenVK Environment Tuning** | `Info.plist` `LSEnvironment` sets: `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`, `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`. |
+| **MoltenVK Environment Tuning** | `Info.plist` `LSEnvironment` sets: `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`, `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`, `MVK_CONFIG_FAST_MATH_ENABLED=1`, `MVK_CONFIG_RESUME_LOST_DEVICE=1`. |
 | **Profile Counter Gating** | `nv2a_profile_inc_counter` stripped as no-op when `NV2A_VK_PERF_BUILD=1` (already enabled). Removes atomic increments from every draw/bind/upload/submit call. |
 | **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when `draw_time >= command_buffer_start_time` (surface was drawn in current CB), not unconditionally. |
 | **Separate Compute Queue** | Probes for 2nd queue from same family at device creation. Falls back to single queue on MoltenVK (which only exposes `queueCount=1`). |
+| **Debug Group Counter Gating** | `NV2A_VK_DGROUP_BEGIN/END` macros are complete no-ops when `DEBUG_VK=0`. Previously, the indent counter was incremented/decremented on every call (~55 hot-path uses) even with debug output disabled. |
+| **Descriptor Set Pool Doubling** | Graphics and compute descriptor set arrays increased from 1024 to 2048, reducing forced `pgraph_vk_finish` flushes from descriptor pool exhaustion on complex scenes. |
+| **Invalid Surface Pool Expansion** | `num_invalid_surfaces_to_keep` increased from 10 to 64, reducing `vmaCreateImage` calls for surface recycling on systems with ample memory. |
+| **Scratch Image Skip (macOS)** | On `__APPLE__` at `surface_scale_factor == 1`, the per-surface scratch image allocation is skipped. Upload copies directly from staging buffer to the main image, bypassing the scratch->blit->main chain (AMD Windows driver workaround not needed on Apple Silicon). |
+| **MetalFX Direct IOSurface Output** | On Apple Silicon unified memory, temporal upscaler and frame interpolator write directly to the IOSurface-backed shared texture, eliminating a redundant private->shared GPU blit per frame. |
+| **MetalFX Thread Safety** | `os_unfair_lock` guards all MetalFX global mutable state against concurrent access between render and display threads. |
 
 ### MoltenVK Compatibility Layer
 
@@ -86,6 +97,9 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **floatx80 union overlay on ARM64** | Segfault on launch | x87 80-bit and IEEE 64-bit double have incompatible bit layouts. The union `double fval` field doesn't correspond to `low`/`high` fields on ARM64 (unlike x86_64 where `long double` IS x87 80-bit). |
 | **TCG inline float ops on ARM64** | Segfault during boot ROM translation | TCG float operations (`tcg_gen_add_f64` etc. from `ops_fpu.h`) crash on the ARM64 TCG backend. Fixed by splitting `g_use_hard_fpu` (helper selection) from `g_use_hard_fpu_inline` (TCG inlining, disabled on ARM64). |
 | **Separate compute queue** | No effect on MoltenVK | MoltenVK only exposes 1 queue family with `queueCount=1`. The infrastructure is in place but inactive until a driver supports multiple queues. |
+| **Voice register cache** | Black screen on game load | `__thread` cache of 128-byte voice register blocks served stale data. Xbox hardware/software modifies voice registers outside the `voice_get_mask`/`voice_set_mask` paths (DMA engine, guest CPU MMIO, linked-voice chains), so the cache had no way to detect external writes. |
+| **Surface upload bump allocator** | Black screen / texture corruption | `BUFFER_STAGING_SRC` is shared between texture uploads (main CB) and surface uploads (aux CB with single-time commands). Sub-allocating with offsets between the two CB paths caused the main CB's pending texture copies to reference staging data overwritten by surface uploads. |
+| **SDL event BQL batching** | Deadlock on launch | Holding BQL around the entire `SDL_PollEvent` loop prevents QEMU's cooperative scheduling (timer callbacks, I/O handlers, vCPU thread). Identical to the previously documented failure. |
 
 ---
 
@@ -114,6 +128,10 @@ This fork sets optimal MoltenVK runtime configuration via `Info.plist` `LSEnviro
     <string>2</string>
     <key>MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS</key>
     <string>0</string>
+    <key>MVK_CONFIG_FAST_MATH_ENABLED</key>
+    <string>1</string>
+    <key>MVK_CONFIG_RESUME_LOST_DEVICE</key>
+    <string>1</string>
 </dict>
 ```
 
@@ -122,6 +140,8 @@ This fork sets optimal MoltenVK runtime configuration via `Info.plist` `LSEnviro
 | `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` | 1 | Reduces descriptor binding overhead by using Metal argument buffers |
 | `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | 2 | Prefills Metal command buffers at queue submit time for lower latency |
 | `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` | 0 | Enables asynchronous queue submission for better GPU pipelining |
+| `MVK_CONFIG_FAST_MATH_ENABLED` | 1 | Enables Metal shader fast-math for improved GPU shader throughput |
+| `MVK_CONFIG_RESUME_LOST_DEVICE` | 1 | Prevents device-lost crashes from transient GPU errors |
 
 ### MoltenVK compatibility changes in the codebase
 
@@ -377,7 +397,7 @@ Xbox Game (30fps)
        v
   MetalFX Temporal Upscaler
   (1280x960 -> 1920x1440)
-  [Zero-motion vectors, depth if available]
+  [Halton jitter, depth if available]
        |
        v
   Frame Interpolator (macOS 26+)

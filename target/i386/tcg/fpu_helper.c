@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#include <fenv.h>
 #include "cpu.h"
 #include "tcg-cpu.h"
 #include "exec/cputlb.h"
@@ -319,6 +320,41 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
     return double_to_floatx80_fast((double)a);
 }
 
+HARDFPU_ALWAYS_INLINE
+int32_t floatx80_to_int32__hard(floatx80 a, float_status *status)
+{
+    double d = floatx80_to_double_fast(a);
+    return (int32_t)llrint(d);
+}
+
+HARDFPU_ALWAYS_INLINE
+int32_t floatx80_to_int32_round_to_zero__hard(floatx80 a, float_status *status)
+{
+    double d = floatx80_to_double_fast(a);
+    return (int32_t)d;
+}
+
+HARDFPU_ALWAYS_INLINE
+int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
+{
+    double d = floatx80_to_double_fast(a);
+    return (int64_t)llrint(d);
+}
+
+HARDFPU_ALWAYS_INLINE
+floatx80 floatx80_sqrt__hard(floatx80 a, float_status *status)
+{
+    double d = floatx80_to_double_fast(a);
+    return double_to_floatx80_fast(sqrt(d));
+}
+
+HARDFPU_ALWAYS_INLINE
+floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
+{
+    double d = floatx80_to_double_fast(a);
+    return double_to_floatx80_fast(rint(d));
+}
+
 #endif /* __x86_64__ / __aarch64__ */
 
 #define floatx80_add          floatx80_add__hard
@@ -326,6 +362,11 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
 #define floatx80_mul          floatx80_mul__hard
 #define floatx80_div          floatx80_div__hard
 #define floatx80_compare      floatx80_compare__hard
+#define floatx80_sqrt         floatx80_sqrt__hard
+#define floatx80_round_to_int floatx80_round_to_int__hard
+#define floatx80_to_int32     floatx80_to_int32__hard
+#define floatx80_to_int32_round_to_zero floatx80_to_int32_round_to_zero__hard
+#define floatx80_to_int64     floatx80_to_int64__hard
 #define float32_to_floatx80   float32_to_floatx80__hard
 #define floatx80_to_float32   floatx80_to_float32__hard
 #define float64_to_floatx80   float64_to_floatx80__hard
@@ -1121,6 +1162,13 @@ static void set_x86_rounding_mode(unsigned mode, float_status *status)
     };
     assert(mode < ARRAY_SIZE(x86_round_mode));
     set_float_rounding_mode(x86_round_mode[mode], status);
+
+#if defined(XBOX) && defined(__aarch64__)
+    static const int host_round_mode[4] = {
+        FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO
+    };
+    fesetround(host_round_mode[mode]);
+#endif
 }
 
 void update_fp_status(CPUX86State *env)

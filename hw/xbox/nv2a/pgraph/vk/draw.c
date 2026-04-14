@@ -154,8 +154,6 @@ static bool draw_needs_primitive_emulation(PGRAPHState *pg)
 
 static size_t get_max_emulated_index_count(PGRAPHState *pg, uint32_t in_count)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
@@ -216,8 +214,6 @@ static uint32_t *get_emulated_indices_buf(PGRAPHVkState *r, size_t count)
 static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
                                                 uint32_t count, uint32_t *out)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
@@ -323,8 +319,6 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
                                                    uint32_t in_count,
                                                    uint32_t *out)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
@@ -1505,8 +1499,8 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
     VkBufferCopy copy_region = { .size = b_src->buffer_offset };
     vkCmdCopyBuffer(cmd, b_src->buffer, b_dst->buffer, 1, &copy_region);
 
-    VkAccessFlags dst_access_mask;
-    VkPipelineStageFlags dst_stage_mask;
+    VkAccessFlags dst_access_mask = 0;
+    VkPipelineStageFlags dst_stage_mask = 0;
 
     switch (index_dst) {
     case BUFFER_INDEX:
@@ -1643,7 +1637,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
         r->in_aux_command_buffer = false;
 
-        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo submit_infos[] = {
             {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1747,8 +1742,7 @@ VkCommandBuffer pgraph_vk_begin_nondraw_commands(PGRAPHState *pg)
 
 void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    nv2a_vk_assert(cmd == r->command_buffer);
+    nv2a_vk_assert(cmd == pg->vk_renderer_state->command_buffer);
 }
 
 // FIXME: Add more metrics for determining command buffer 'fullness' and
@@ -1986,11 +1980,12 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
                           r->vertex_ram_buffer_syncs[i].size;
         end_addr = ROUND_UP(end_addr, TARGET_PAGE_SIZE);
 
-        NV2A_VK_DPRINTF("- %d: %08" HWADDR_PRIx " %zd bytes"
-                          " -> %08" HWADDR_PRIx " %zd bytes", i,
+        NV2A_VK_DPRINTF("- %d: %08" HWADDR_PRIx " %llu bytes"
+                          " -> %08" HWADDR_PRIx " %llu bytes", i,
                         r->vertex_ram_buffer_syncs[i].addr,
-                        r->vertex_ram_buffer_syncs[i].size, start_addr,
-                        end_addr - start_addr);
+                        (unsigned long long)r->vertex_ram_buffer_syncs[i].size,
+                        start_addr,
+                        (unsigned long long)(end_addr - start_addr));
 
         r->vertex_ram_buffer_syncs[i].addr = start_addr;
         r->vertex_ram_buffer_syncs[i].size = end_addr - start_addr;
@@ -2030,7 +2025,7 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
         hwaddr addr = merged[i].addr;
         VkDeviceSize size = merged[i].size;
 
-        NV2A_VK_DPRINTF("- %d: %08"HWADDR_PRIx" %zd bytes", i, addr, size);
+        NV2A_VK_DPRINTF("- %d: %08"HWADDR_PRIx" %llu bytes", i, addr, (unsigned long long)size);
 
         if (memory_region_test_and_clear_dirty(d->vram, addr, size,
                                                DIRTY_MEMORY_NV2A)) {
@@ -2577,7 +2572,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
 
         size_t vertex_data_size = pg->inline_buffer_length * sizeof(float) * 4;
         void *data[NV2A_VERTEXSHADER_ATTRIBUTES];
-        size_t sizes[NV2A_VERTEXSHADER_ATTRIBUTES];
+        VkDeviceSize sizes[NV2A_VERTEXSHADER_ATTRIBUTES];
         size_t offset = 0;
 
         pgraph_vk_bind_vertex_attributes_inline(d);

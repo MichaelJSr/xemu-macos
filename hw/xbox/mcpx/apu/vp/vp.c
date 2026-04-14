@@ -91,10 +91,27 @@ static float clampf(float v, float min, float max)
     }
 }
 
+static float g_attenuation_lut[4096];
+static float g_pitch_lut[65536];
+static bool g_apu_luts_initialized = false;
+
+static void apu_init_luts(void)
+{
+    if (g_apu_luts_initialized) return;
+    for (int i = 0; i < 4096; i++) {
+        g_attenuation_lut[i] = powf(10.0f, i / (64.0f * -20.0f));
+    }
+    for (int i = 0; i < 65536; i++) {
+        int16_t signed_val = (int16_t)i;
+        g_pitch_lut[i] = 1.0f / powf(2.0f, signed_val / 4096.0f);
+    }
+    g_apu_luts_initialized = true;
+}
+
 static float attenuate(uint16_t vol)
 {
     vol &= 0xFFF;
-    return (vol == 0xFFF) ? 0.0 : powf(10.0f, vol/(64.0 * -20.0f));
+    return (vol == 0xFFF) ? 0.0f : g_attenuation_lut[vol];
 }
 
 static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
@@ -1316,7 +1333,8 @@ static void voice_process(MCPXAPUState *d,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH);
     int8_t ps = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_ENV0,
                                NV_PAVS_VOICE_CFG_ENV0_EF_PITCHSCALE);
-    float rate = 1.0 / powf(2.0f, (p + ps * 32 * ef_value) / 4096.0f);
+    int pitch_idx = (int)(p + ps * 32 * ef_value);
+    float rate = g_pitch_lut[(uint16_t)pitch_idx];
     dbg->rate = rate;
 
     float ea_value = voice_step_envelope(
@@ -1858,6 +1876,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
 
 void mcpx_apu_vp_init(MCPXAPUState *d)
 {
+    apu_init_luts();
     voice_work_init(d);
 }
 
