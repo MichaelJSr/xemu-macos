@@ -27,6 +27,83 @@
 #include "debug.h"
 #include "renderer.h"
 
+static enum S3TC_DECOMPRESS_FORMAT
+gl_internal_format_to_s3tc_enum(GLint gl_internal_format);
+
+typedef struct GLDecodeTask {
+    const uint8_t *src_data;
+    const uint8_t *palette_data;
+    TextureShape shape;
+    unsigned int width, height, depth;
+    bool is_compressed;
+    bool is_3d;
+    int gl_internal_format;
+    int bytes_per_pixel;
+    uint8_t *decoded_data;
+    size_t decoded_size;
+    bool needs_free_secondary;
+    uint8_t *secondary_data;
+} GLDecodeTask;
+
+static void gl_decode_task_func(gpointer data, gpointer user_data)
+{
+    (void)user_data;
+    GLDecodeTask *t = (GLDecodeTask *)data;
+
+    if (t->is_compressed) {
+        if (t->is_3d) {
+            t->decoded_data = s3tc_decompress_3d(
+                gl_internal_format_to_s3tc_enum(t->gl_internal_format),
+                t->src_data, t->width, t->height, t->depth);
+        } else {
+            t->decoded_data = s3tc_decompress_2d(
+                gl_internal_format_to_s3tc_enum(t->gl_internal_format),
+                t->src_data, t->width, t->height);
+        }
+        t->decoded_size = t->width * t->height *
+                          (t->is_3d ? t->depth : 1) * 4;
+    } else {
+        if (t->is_3d) {
+            unsigned int row_pitch = t->width * t->bytes_per_pixel;
+            unsigned int slice_pitch = row_pitch * t->height;
+            size_t sz = slice_pitch * t->depth;
+            uint8_t *unswizzled = (uint8_t *)g_malloc(sz);
+            unswizzle_box(t->src_data, t->width, t->height, t->depth,
+                          unswizzled, row_pitch, slice_pitch,
+                          t->bytes_per_pixel);
+            uint8_t *converted = pgraph_convert_texture_data(
+                t->shape, unswizzled, t->palette_data,
+                t->width, t->height, t->depth,
+                row_pitch, slice_pitch, NULL);
+            if (converted) {
+                t->decoded_data = converted;
+                t->secondary_data = unswizzled;
+                t->needs_free_secondary = true;
+            } else {
+                t->decoded_data = unswizzled;
+            }
+            t->decoded_size = sz;
+        } else {
+            unsigned int pitch = t->width * t->bytes_per_pixel;
+            size_t sz = t->height * pitch;
+            uint8_t *unswizzled = (uint8_t *)g_malloc(sz);
+            unswizzle_rect(t->src_data, t->width, t->height,
+                           unswizzled, pitch, t->bytes_per_pixel);
+            uint8_t *converted = pgraph_convert_texture_data(
+                t->shape, unswizzled, t->palette_data,
+                t->width, t->height, 1, pitch, 0, NULL);
+            if (converted) {
+                t->decoded_data = converted;
+                t->secondary_data = unswizzled;
+                t->needs_free_secondary = true;
+            } else {
+                t->decoded_data = unswizzled;
+            }
+            t->decoded_size = sz;
+        }
+    }
+}
+
 static TextureBinding* generate_texture(const TextureShape s, const uint8_t *texture_data, const uint8_t *palette_data);
 static void texture_binding_destroy(gpointer data);
 
@@ -474,163 +551,180 @@ static void upload_gl_texture(GLenum gl_target,
     case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
     case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z: {
 
+        /* Parallel decode: pre-decode all mip levels, then upload to GL */
         unsigned int width = adjusted_width, height = adjusted_height;
+        bool is_compressed = (f.gl_format == 0);
+        unsigned int block_size = 0;
+        if (is_compressed) {
+            block_size = (f.gl_internal_format ==
+                          GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+        }
 
-        int level;
-        for (level = 0; level < s.levels; level++) {
-            width = MAX(width, 1);
-            height = MAX(height, 1);
+        GLDecodeTask *tasks = g_malloc0_n(s.levels, sizeof(GLDecodeTask));
+        GThreadPool *pool = g_thread_pool_new(
+            gl_decode_task_func, NULL,
+            MIN(s.levels, (int)g_get_num_processors()), FALSE, NULL);
 
-            if (f.gl_format == 0) { /* compressed */
-                 // https://docs.microsoft.com/en-us/windows/win32/direct3d10/d3d10-graphics-programming-guide-resources-block-compression#virtual-size-versus-physical-size
-                unsigned int block_size =
-                    f.gl_internal_format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ?
-                        8 : 16;
-                unsigned int physical_width = (width + 3) & ~3,
-                             physical_height = (height + 3) & ~3;
-                uint8_t *converted = s3tc_decompress_2d(
-                    gl_internal_format_to_s3tc_enum(f.gl_internal_format),
-                    texture_data, width, height);
-                unsigned int tex_width = width;
-                unsigned int tex_height = height;
+        const uint8_t *td = texture_data;
+        for (int level = 0; level < s.levels; level++) {
+            unsigned int w = MAX(width, 1);
+            unsigned int h = MAX(height, 1);
+            GLDecodeTask *t = &tasks[level];
+            t->src_data = td;
+            t->palette_data = palette_data;
+            t->shape = s;
+            t->width = w;
+            t->height = h;
+            t->depth = 1;
+            t->is_compressed = is_compressed;
+            t->is_3d = false;
+            t->gl_internal_format = f.gl_internal_format;
+            t->bytes_per_pixel = f.bytes_per_pixel;
+            g_thread_pool_push(pool, t, NULL);
 
+            if (is_compressed) {
+                unsigned int pw = (w + 3) & ~3, ph = (h + 3) & ~3;
+                td += pw / 4 * ph / 4 * block_size;
+            } else {
+                td += w * h * f.bytes_per_pixel;
+            }
+            width /= 2;
+            height /= 2;
+        }
+        g_thread_pool_free(pool, FALSE, TRUE);
+
+        /* Sequential GL upload from pre-decoded data */
+        width = adjusted_width;
+        height = adjusted_height;
+        for (int level = 0; level < s.levels; level++) {
+            unsigned int w = MAX(width, 1);
+            unsigned int h = MAX(height, 1);
+            GLDecodeTask *t = &tasks[level];
+            unsigned int tex_w = w, tex_h = h;
+
+            if (is_compressed) {
                 if (s.cubemap && adjusted_width != s.width) {
-                    // FIXME: Consider preserving the border.
-                    // There does not seem to be a way to reference the border
-                    // texels in a cubemap, so they are discarded.
                     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 4);
                     glPixelStorei(GL_UNPACK_SKIP_ROWS, 4);
-                    tex_width = s.width;
-                    tex_height = s.height;
-                    if (physical_width == width) {
+                    tex_w = s.width;
+                    tex_h = s.height;
+                    unsigned int pw = (w + 3) & ~3;
+                    if (pw == w) {
                         glPixelStorei(GL_UNPACK_ROW_LENGTH, adjusted_width);
                     }
                 }
-
-                glTexImage2D(gl_target, level, GL_RGBA, tex_width, tex_height, 0,
-                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, converted);
-                g_free(converted);
+                glTexImage2D(gl_target, level, GL_RGBA, tex_w, tex_h, 0,
+                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                             t->decoded_data);
                 if (s.cubemap && adjusted_width != s.width) {
                     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
                     glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-                    if (physical_width == width) {
+                    unsigned int pw = (w + 3) & ~3;
+                    if (pw == w) {
                         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
                     }
                 }
-                texture_data +=
-                    physical_width / 4 * physical_height / 4 * block_size;
             } else {
-                unsigned int pitch = width * f.bytes_per_pixel;
-                uint8_t *unswizzled = (uint8_t*)g_malloc(height * pitch);
-                unswizzle_rect(texture_data, width, height,
-                               unswizzled, pitch, f.bytes_per_pixel);
-                uint8_t *converted = pgraph_convert_texture_data(
-                    s, unswizzled, palette_data, width, height, 1, pitch, 0,
-                    NULL);
-                uint8_t *pixel_data = converted ? converted : unswizzled;
-                unsigned int tex_width = width;
-                unsigned int tex_height = height;
-
+                uint8_t *pixel_data = t->decoded_data;
                 if (s.cubemap && adjusted_width != s.width) {
-                    // FIXME: Consider preserving the border.
-                    // There does not seem to be a way to reference the border
-                    // texels in a cubemap, so they are discarded.
+                    unsigned int pitch = w * f.bytes_per_pixel;
                     glPixelStorei(GL_UNPACK_ROW_LENGTH, adjusted_width);
-                    tex_width = s.width;
-                    tex_height = s.height;
+                    tex_w = s.width;
+                    tex_h = s.height;
                     pixel_data += 4 * f.bytes_per_pixel + 4 * pitch;
                 }
-
-                glTexImage2D(gl_target, level, f.gl_internal_format, tex_width,
-                             tex_height, 0, f.gl_format, f.gl_type,
+                glTexImage2D(gl_target, level, f.gl_internal_format,
+                             tex_w, tex_h, 0, f.gl_format, f.gl_type,
                              pixel_data);
                 if (s.cubemap && s.border) {
                     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
                 }
-                if (converted) {
-                    g_free(converted);
-                }
-                g_free(unswizzled);
-
-                texture_data += width * height * f.bytes_per_pixel;
             }
 
+            g_free(t->decoded_data);
+            if (t->needs_free_secondary) g_free(t->secondary_data);
             width /= 2;
             height /= 2;
         }
+        g_free(tasks);
 
         break;
     }
     case GL_TEXTURE_3D: {
-
         unsigned int width = adjusted_width;
         unsigned int height = adjusted_height;
         unsigned int depth = adjusted_depth;
 
         assert(f.linear == false);
+        bool is_compressed_3d = (f.gl_format == 0);
+        unsigned int blk_size_3d = 0;
+        if (is_compressed_3d) {
+            blk_size_3d = (f.gl_internal_format ==
+                           GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+        }
 
-        int level;
-        for (level = 0; level < s.levels; level++) {
-            if (f.gl_format == 0) { /* compressed */
-                width = MAX(width, 1);
-                height = MAX(height, 1);
-                unsigned int physical_width = (width + 3) & ~3,
-                             physical_height = (height + 3) & ~3;
-                depth = MAX(depth, 1);
+        GLDecodeTask *tasks_3d = g_malloc0_n(s.levels, sizeof(GLDecodeTask));
+        GThreadPool *pool_3d = g_thread_pool_new(
+            gl_decode_task_func, NULL,
+            MIN(s.levels, (int)g_get_num_processors()), FALSE, NULL);
 
-                unsigned int block_size;
-                if (f.gl_internal_format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) {
-                    block_size = 8;
-                } else {
-                    block_size = 16;
-                }
+        const uint8_t *td3 = texture_data;
+        for (int level = 0; level < s.levels; level++) {
+            unsigned int w = MAX(width, 1);
+            unsigned int h = MAX(height, 1);
+            unsigned int d = MAX(depth, 1);
+            GLDecodeTask *t = &tasks_3d[level];
+            t->src_data = td3;
+            t->palette_data = palette_data;
+            t->shape = s;
+            t->width = w;
+            t->height = h;
+            t->depth = d;
+            t->is_compressed = is_compressed_3d;
+            t->is_3d = true;
+            t->gl_internal_format = f.gl_internal_format;
+            t->bytes_per_pixel = f.bytes_per_pixel;
+            g_thread_pool_push(pool_3d, t, NULL);
 
-                size_t texture_size = physical_width/4 * physical_height/4 * depth * block_size;
-
-                uint8_t *converted = s3tc_decompress_3d(
-                    gl_internal_format_to_s3tc_enum(f.gl_internal_format),
-                    texture_data, width, height, depth);
-
-                glTexImage3D(gl_target, level,  GL_RGBA8,
-                             width, height, depth, 0,
-                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV,
-                             converted);
-
-                g_free(converted);
-
-                texture_data += texture_size;
+            if (is_compressed_3d) {
+                unsigned int pw = (w + 3) & ~3, ph = (h + 3) & ~3;
+                td3 += pw / 4 * ph / 4 * d * blk_size_3d;
             } else {
-                width = MAX(width, 1);
-                height = MAX(height, 1);
-                depth = MAX(depth, 1);
-
-                unsigned int row_pitch = width * f.bytes_per_pixel;
-                unsigned int slice_pitch = row_pitch * height;
-                uint8_t *unswizzled = (uint8_t*)g_malloc(slice_pitch * depth);
-                unswizzle_box(texture_data, width, height, depth, unswizzled,
-                               row_pitch, slice_pitch, f.bytes_per_pixel);
-
-                uint8_t *converted = pgraph_convert_texture_data(
-                    s, unswizzled, palette_data, width, height, depth,
-                    row_pitch, slice_pitch, NULL);
-
-                glTexImage3D(gl_target, level, f.gl_internal_format,
-                             width, height, depth, 0,
-                             f.gl_format, f.gl_type,
-                             converted ? converted : unswizzled);
-
-                if (converted) {
-                    g_free(converted);
-                }
-                g_free(unswizzled);
-
-                texture_data += width * height * depth * f.bytes_per_pixel;
+                td3 += w * h * d * f.bytes_per_pixel;
             }
-
             width /= 2;
             height /= 2;
             depth /= 2;
         }
+        g_thread_pool_free(pool_3d, FALSE, TRUE);
+
+        width = adjusted_width;
+        height = adjusted_height;
+        depth = adjusted_depth;
+        for (int level = 0; level < s.levels; level++) {
+            unsigned int w = MAX(width, 1);
+            unsigned int h = MAX(height, 1);
+            unsigned int d = MAX(depth, 1);
+            GLDecodeTask *t = &tasks_3d[level];
+
+            if (is_compressed_3d) {
+                glTexImage3D(gl_target, level, GL_RGBA8,
+                             w, h, d, 0,
+                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                             t->decoded_data);
+            } else {
+                glTexImage3D(gl_target, level, f.gl_internal_format,
+                             w, h, d, 0,
+                             f.gl_format, f.gl_type,
+                             t->decoded_data);
+            }
+            g_free(t->decoded_data);
+            if (t->needs_free_secondary) g_free(t->secondary_data);
+            width /= 2;
+            height /= 2;
+            depth /= 2;
+        }
+        g_free(tasks_3d);
         break;
     }
     default:

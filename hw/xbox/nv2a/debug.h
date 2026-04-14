@@ -146,7 +146,12 @@ int nv2a_profile_get_counter_value(unsigned int cnt);
 void nv2a_profile_increment(void);
 void nv2a_profile_flip_stall(void);
 
+/* Strip profile counters in release builds for both GL and VK hot paths */
 #ifndef NV2A_STRIP_PROFILE_COUNTERS
+#define NV2A_STRIP_PROFILE_COUNTERS 1
+#endif
+
+#if !NV2A_STRIP_PROFILE_COUNTERS
 static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
 {
     g_nv2a_stats.frame_working.counters[cnt] += 1;

@@ -55,10 +55,10 @@ extern int nv2a_vk_dgroup_indent;
         }                                                     \
     } while (0)
 
-/* Performance build: strip internal invariant asserts and profile counters
- * from VK hot paths. Guest-boundary checks should use regular assert(). */
+/* Performance build: strip internal invariant asserts from VK hot paths.
+ * Guest-boundary checks (VRAM/DMA bounds) should use regular assert().
+ * Profile counter stripping is in the shared hw/xbox/nv2a/debug.h. */
 #define NV2A_VK_PERF_BUILD 1
-#define NV2A_STRIP_PROFILE_COUNTERS 1
 
 #if NV2A_VK_PERF_BUILD
 #define nv2a_vk_assert(x) ((void)0)

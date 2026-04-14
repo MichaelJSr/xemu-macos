@@ -836,7 +836,8 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_set_framebuffer_texture_is_rect(false);
     } else {
 #if defined(__APPLE__)
-        xemu_set_framebuffer_texture_is_rect(true);
+        xemu_set_framebuffer_texture_is_rect(
+            g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN);
 #else
         xemu_set_framebuffer_texture_is_rect(false);
 #endif
