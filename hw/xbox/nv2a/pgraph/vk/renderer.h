@@ -383,8 +383,20 @@ typedef struct PGRAPHVkState {
     VkQueue queue;
     VkQueue compute_queue;
     bool has_compute_queue;
+#define NUM_FLIGHT_SLOTS 1
+
     VkCommandPool command_pool;
-    VkCommandBuffer command_buffers[2];
+
+    struct {
+        VkCommandBuffer main_cb;
+        VkCommandBuffer aux_cb;
+        VkFence fence;
+        VkSemaphore semaphore;
+        VkFramebuffer framebuffers[50];
+        int framebuffer_index;
+        bool submitted;
+    } flight[NUM_FLIGHT_SLOTS];
+    int current_flight;
 
     VkCommandBuffer command_buffer;
     VkSemaphore command_buffer_semaphore;
@@ -397,7 +409,6 @@ typedef struct PGRAPHVkState {
     VkFence aux_fence;
     bool in_aux_command_buffer;
 
-    VkFramebuffer framebuffers[50];
     int framebuffer_index;
     bool framebuffer_dirty;
 
@@ -541,6 +552,8 @@ void pgraph_vk_init_command_buffers(PGRAPHState *pg);
 void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
 VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
 void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
+void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg);
+void pgraph_vk_select_flight_slot(PGRAPHState *pg);
 
 // image.c
 void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,

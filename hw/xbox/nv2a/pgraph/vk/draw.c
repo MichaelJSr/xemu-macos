@@ -610,35 +610,16 @@ static void finalize_render_passes(PGRAPHVkState *r)
 
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
     init_pipeline_cache(pg);
     init_clear_shaders(pg);
-    init_render_passes(r);
-
-    VkSemaphoreCreateInfo semaphore_info = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
-    };
-    VK_CHECK(vkCreateSemaphore(r->device, &semaphore_info, NULL,
-                               &r->command_buffer_semaphore));
-
-    VkFenceCreateInfo fence_info = {
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VK_CHECK(
-        vkCreateFence(r->device, &fence_info, NULL, &r->command_buffer_fence));
+    init_render_passes(pg->vk_renderer_state);
 }
 
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
     finalize_clear_shaders(pg);
     finalize_pipeline_cache(pg);
-    finalize_render_passes(r);
-
-    vkDestroyFence(r->device, r->command_buffer_fence, NULL);
-    vkDestroySemaphore(r->device, r->command_buffer_semaphore, NULL);
+    finalize_render_passes(pg->vk_renderer_state);
 }
 
 static void init_render_pass_state(PGRAPHState *pg, RenderPassState *state)
@@ -778,7 +759,7 @@ static void create_frame_buffer(PGRAPHState *pg)
 
     nv2a_vk_assert(r->color_binding || r->zeta_binding);
 
-    if (r->framebuffer_index >= ARRAY_SIZE(r->framebuffers)) {
+    if (r->framebuffer_index >= ARRAY_SIZE(r->flight[0].framebuffers)) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
     }
 
@@ -804,20 +785,9 @@ static void create_frame_buffer(PGRAPHState *pg)
         .layers = 1,
     };
     pgraph_apply_scaling_factor(pg, &create_info.width, &create_info.height);
+    int slot = r->current_flight;
     VK_CHECK(vkCreateFramebuffer(r->device, &create_info, NULL,
-                                 &r->framebuffers[r->framebuffer_index++]));
-}
-
-static void destroy_framebuffers(PGRAPHState *pg)
-{
-    NV2A_VK_DPRINTF("Destroying framebuffer");
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    for (int i = 0; i < r->framebuffer_index; i++) {
-        vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
-        r->framebuffers[i] = VK_NULL_HANDLE;
-    }
-    r->framebuffer_index = 0;
+                                 &r->flight[slot].framebuffers[r->framebuffer_index++]));
 }
 
 static void create_clear_pipeline(PGRAPHState *pg)
@@ -1577,7 +1547,7 @@ static void begin_render_pass(PGRAPHState *pg)
     VkRenderPassBeginInfo render_pass_begin_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = r->render_pass,
-        .framebuffer = r->framebuffers[r->framebuffer_index - 1],
+        .framebuffer = r->flight[r->current_flight].framebuffers[r->framebuffer_index - 1],
         .renderArea.extent.width = vp_width,
         .renderArea.extent.height = vp_height,
         .clearValueCount = 0,
@@ -1609,6 +1579,17 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
 };
 
+static void destroy_flight_framebuffers(PGRAPHState *pg, int slot)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    for (int i = 0; i < r->flight[slot].framebuffer_index; i++) {
+        vkDestroyFramebuffer(r->device, r->flight[slot].framebuffers[i], NULL);
+        r->flight[slot].framebuffers[i] = VK_NULL_HANDLE;
+    }
+    r->flight[slot].framebuffer_index = 0;
+}
+
 void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1627,7 +1608,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         }
         VK_CHECK(vkEndCommandBuffer(r->command_buffer));
 
-        VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg); // FIXME: Cleanup
+        VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
         sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING, BUFFER_INDEX);
         sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
                                 BUFFER_VERTEX_INLINE);
@@ -1636,6 +1617,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         flush_memory_buffer(pg, cmd);
         VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
         r->in_aux_command_buffer = false;
+
+        int slot = r->current_flight;
 
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                          VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1648,7 +1631,6 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
                 .pSignalSemaphores = &r->command_buffer_semaphore,
             },
             {
-
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1,
                 .pCommandBuffers = &r->command_buffer,
@@ -1661,28 +1643,28 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         vkResetFences(r->device, 1, &r->command_buffer_fence);
         VK_CHECK(vkQueueSubmit(r->queue, ARRAY_SIZE(submit_infos), submit_infos,
                                r->command_buffer_fence));
+        r->flight[slot].submitted = true;
         r->submit_count += 1;
 
         bool check_budget = false;
-
-        // Periodically check memory budget
         const int max_num_submits_before_budget_update = 5;
         if (finish_reason == VK_FINISH_REASON_FLIP_STALL ||
             (r->submit_count - r->allocator_last_submit_index) >
                 max_num_submits_before_budget_update) {
-
-            // VMA queries budget via vmaSetCurrentFrameIndex
             vmaSetCurrentFrameIndex(r->allocator, r->submit_count);
             r->allocator_last_submit_index = r->submit_count;
             check_budget = true;
         }
 
-        VK_CHECK(vkWaitForFences(r->device, 1, &r->command_buffer_fence,
-                                 VK_TRUE, UINT64_MAX));
+        /* Advance to the next flight slot */
+        r->current_flight = (r->current_flight + 1) % NUM_FLIGHT_SLOTS;
+        pgraph_vk_wait_for_previous_flight(pg);
+        pgraph_vk_select_flight_slot(pg);
 
         r->descriptor_set_index = 0;
         r->in_command_buffer = false;
-        destroy_framebuffers(pg);
+        destroy_flight_framebuffers(pg, r->current_flight);
+        r->framebuffer_index = 0;
 
         if (check_budget) {
             pgraph_vk_check_memory_budget(pg);

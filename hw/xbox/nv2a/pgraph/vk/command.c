@@ -42,34 +42,6 @@ static void destroy_command_pool(PGRAPHState *pg)
     vkDestroyCommandPool(r->device, r->command_pool, NULL);
 }
 
-static void create_command_buffers(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = r->command_pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = ARRAY_SIZE(r->command_buffers),
-    };
-    VK_CHECK(
-        vkAllocateCommandBuffers(r->device, &alloc_info, r->command_buffers));
-
-    r->command_buffer = r->command_buffers[0];
-    r->aux_command_buffer = r->command_buffers[1];
-}
-
-static void destroy_command_buffers(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    vkFreeCommandBuffers(r->device, r->command_pool,
-                         ARRAY_SIZE(r->command_buffers), r->command_buffers);
-
-    r->command_buffer = VK_NULL_HANDLE;
-    r->aux_command_buffer = VK_NULL_HANDLE;
-}
-
 VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -109,17 +81,67 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     r->in_aux_command_buffer = false;
 }
 
+void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int slot = r->current_flight;
+
+    if (r->flight[slot].submitted) {
+        VK_CHECK(vkWaitForFences(r->device, 1, &r->flight[slot].fence,
+                                 VK_TRUE, UINT64_MAX));
+        r->flight[slot].submitted = false;
+    }
+}
+
+void pgraph_vk_select_flight_slot(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int slot = r->current_flight;
+
+    r->command_buffer = r->flight[slot].main_cb;
+    r->aux_command_buffer = r->flight[slot].aux_cb;
+    r->command_buffer_fence = r->flight[slot].fence;
+    r->command_buffer_semaphore = r->flight[slot].semaphore;
+}
+
 void pgraph_vk_init_command_buffers(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     create_command_pool(pg);
-    create_command_buffers(pg);
+
+    int total_cbs = NUM_FLIGHT_SLOTS * 2;
+    VkCommandBuffer all_cbs[NUM_FLIGHT_SLOTS * 2];
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = r->command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = total_cbs,
+    };
+    VK_CHECK(vkAllocateCommandBuffers(r->device, &alloc_info, all_cbs));
 
     VkFenceCreateInfo fence_info = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
+    VkSemaphoreCreateInfo sem_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        r->flight[i].main_cb = all_cbs[i * 2];
+        r->flight[i].aux_cb = all_cbs[i * 2 + 1];
+        VK_CHECK(vkCreateFence(r->device, &fence_info, NULL,
+                                &r->flight[i].fence));
+        VK_CHECK(vkCreateSemaphore(r->device, &sem_info, NULL,
+                                    &r->flight[i].semaphore));
+        r->flight[i].submitted = false;
+        r->flight[i].framebuffer_index = 0;
+    }
+
+    r->current_flight = 0;
+    pgraph_vk_select_flight_slot(pg);
+
     VK_CHECK(vkCreateFence(r->device, &fence_info, NULL, &r->aux_fence));
 }
 
@@ -127,7 +149,24 @@ void pgraph_vk_finalize_command_buffers(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    vkDeviceWaitIdle(r->device);
+
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        vkDestroyFence(r->device, r->flight[i].fence, NULL);
+        vkDestroySemaphore(r->device, r->flight[i].semaphore, NULL);
+    }
     vkDestroyFence(r->device, r->aux_fence, NULL);
-    destroy_command_buffers(pg);
+
+    int total_cbs = NUM_FLIGHT_SLOTS * 2;
+    VkCommandBuffer all_cbs[NUM_FLIGHT_SLOTS * 2];
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        all_cbs[i * 2] = r->flight[i].main_cb;
+        all_cbs[i * 2 + 1] = r->flight[i].aux_cb;
+    }
+    vkFreeCommandBuffers(r->device, r->command_pool, total_cbs, all_cbs);
+
+    r->command_buffer = VK_NULL_HANDLE;
+    r->aux_command_buffer = VK_NULL_HANDLE;
+
     destroy_command_pool(pg);
 }

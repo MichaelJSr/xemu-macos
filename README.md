@@ -64,6 +64,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Scratch Image Skip (macOS)** | On `__APPLE__` at `surface_scale_factor == 1`, the per-surface scratch image allocation is skipped. Upload copies directly from staging buffer to the main image, bypassing the scratch->blit->main chain (AMD Windows driver workaround not needed on Apple Silicon). |
 | **MetalFX Direct IOSurface Output** | On Apple Silicon unified memory, temporal upscaler and frame interpolator write directly to the IOSurface-backed shared texture, eliminating a redundant private->shared GPU blit per frame. |
 | **MetalFX Thread Safety** | `os_unfair_lock` guards all MetalFX global mutable state against concurrent access between render and display threads. |
+| **Flight Slot Infrastructure** | Command buffers, fences, semaphores, and framebuffers are organized into `NUM_FLIGHT_SLOTS` independent slots (currently N=1). Each slot has its own `main_cb`, `aux_cb`, `fence`, `semaphore`, and `framebuffers[50]`. Infrastructure is ready for N=2+ pipelined submission when descriptor set and staging buffer partitioning are implemented (see Failed Optimizations). |
 
 ### MoltenVK Compatibility Layer
 
@@ -100,6 +101,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Voice register cache** | Black screen on game load | `__thread` cache of 128-byte voice register blocks served stale data. Xbox hardware/software modifies voice registers outside the `voice_get_mask`/`voice_set_mask` paths (DMA engine, guest CPU MMIO, linked-voice chains), so the cache had no way to detect external writes. |
 | **Surface upload bump allocator** | Black screen / texture corruption | `BUFFER_STAGING_SRC` is shared between texture uploads (main CB) and surface uploads (aux CB with single-time commands). Sub-allocating with offsets between the two CB paths caused the main CB's pending texture copies to reference staging data overwritten by surface uploads. |
 | **SDL event BQL batching** | Deadlock on launch | Holding BQL around the entire `SDL_PollEvent` loop prevents QEMU's cooperative scheduling (timer callbacks, I/O handlers, vCPU thread). Identical to the previously documented failure. |
+| **Flight slots N>1 (ring-of-fences)** | Frame clipping/corruption at N=2, worse at N=3 | Descriptor sets and `BUFFER_STAGING_SRC` are shared globally, not partitioned per flight slot. When the CPU advances to the next slot and resets `descriptor_set_index=0` / `buffer_offset=0`, the GPU may still be reading from those same descriptor sets or staging buffer regions from the previous submission. The flight slot infrastructure is in place (per-slot CBs, fences, semaphores, framebuffers) and works at N=1. To enable N=2+, descriptor sets need per-slot index ranges (split 2048 into 1024 per slot) and the staging buffer needs per-slot offset regions (split 256 MiB into 128 MiB per slot). |
 
 ---
 
