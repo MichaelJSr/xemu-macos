@@ -136,6 +136,15 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
     pg->uniform_attrs = 0;
     pg->swizzle_attrs = 0;
 
+    VkVertexInputAttributeDescription prev_attr_descs[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkVertexInputBindingDescription prev_bind_descs[NV2A_VERTEXSHADER_ATTRIBUTES];
+    int prev_num_attr = r->num_active_vertex_attribute_descriptions;
+    int prev_num_bind = r->num_active_vertex_binding_descriptions;
+    memcpy(prev_attr_descs, r->vertex_attribute_descriptions,
+           prev_num_attr * sizeof(prev_attr_descs[0]));
+    memcpy(prev_bind_descs, r->vertex_binding_descriptions,
+           prev_num_bind * sizeof(prev_bind_descs[0]));
+
     r->num_active_vertex_attribute_descriptions = 0;
     r->num_active_vertex_binding_descriptions = 0;
 
@@ -270,6 +279,16 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         NV2A_VK_DGROUP_END();
     }
 
+    r->vertex_state_dirty =
+        (r->num_active_vertex_attribute_descriptions != prev_num_attr) ||
+        (r->num_active_vertex_binding_descriptions != prev_num_bind) ||
+        memcmp(r->vertex_attribute_descriptions, prev_attr_descs,
+               r->num_active_vertex_attribute_descriptions *
+                   sizeof(prev_attr_descs[0])) ||
+        memcmp(r->vertex_binding_descriptions, prev_bind_descs,
+               r->num_active_vertex_binding_descriptions *
+                   sizeof(prev_bind_descs[0]));
+
     NV2A_VK_DGROUP_END();
 }
 
@@ -281,6 +300,15 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d)
     pg->compressed_attrs = 0;
     pg->uniform_attrs = 0;
     pg->swizzle_attrs = 0;
+
+    int prev_num_attr = r->num_active_vertex_attribute_descriptions;
+    int prev_num_bind = r->num_active_vertex_binding_descriptions;
+    VkVertexInputAttributeDescription prev_attr_descs[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkVertexInputBindingDescription prev_bind_descs[NV2A_VERTEXSHADER_ATTRIBUTES];
+    memcpy(prev_attr_descs, r->vertex_attribute_descriptions,
+           prev_num_attr * sizeof(prev_attr_descs[0]));
+    memcpy(prev_bind_descs, r->vertex_binding_descriptions,
+           prev_num_bind * sizeof(prev_bind_descs[0]));
 
     r->num_active_vertex_attribute_descriptions = 0;
     r->num_active_vertex_binding_descriptions = 0;
@@ -314,4 +342,14 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d)
             pg->uniform_attrs |= 1 << i;
         }
     }
+
+    r->vertex_state_dirty =
+        (r->num_active_vertex_attribute_descriptions != prev_num_attr) ||
+        (r->num_active_vertex_binding_descriptions != prev_num_bind) ||
+        memcmp(r->vertex_attribute_descriptions, prev_attr_descs,
+               r->num_active_vertex_attribute_descriptions *
+                   sizeof(prev_attr_descs[0])) ||
+        memcmp(r->vertex_binding_descriptions, prev_bind_descs,
+               r->num_active_vertex_binding_descriptions *
+                   sizeof(prev_bind_descs[0]));
 }

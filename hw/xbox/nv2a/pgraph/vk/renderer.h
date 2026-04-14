@@ -41,10 +41,17 @@
 #include "constants.h"
 #include "glsl.h"
 
+#if defined(__APPLE__)
+#define HAVE_EXTERNAL_MEMORY 0
+#define HAVE_IOSURFACE_SHARING 1
+#else
 #define HAVE_EXTERNAL_MEMORY 1
+#define HAVE_IOSURFACE_SHARING 0
+#endif
 
 typedef struct QueueFamilyIndices {
     int queue_family;
+    uint32_t queue_count;
 } QueueFamilyIndices;
 
 typedef struct MemorySyncRequirement {
@@ -259,6 +266,17 @@ typedef struct PvideoState {
 typedef struct PGRAPHVkDisplayState {
     ShaderModuleInfo *display_frag;
 
+    // Cached uniform locations (resolved once after shader load)
+    int uloc_display_size;
+    int uloc_line_offset;
+    int uloc_pvideo_enable;
+    int uloc_pvideo_color_key_enable;
+    int uloc_pvideo_color_key;
+    int uloc_pvideo_in_pos;
+    int uloc_pvideo_pos;
+    int uloc_pvideo_scale;
+    bool ulocs_resolved;
+
     VkDescriptorPool descriptor_pool;
     VkDescriptorSetLayout descriptor_set_layout;
     VkDescriptorSet descriptor_set;
@@ -276,6 +294,7 @@ typedef struct PGRAPHVkDisplayState {
 
     struct {
         PvideoState state;
+        PvideoState last_uploaded_state;
         int width, height;
         VkImage image;
         VkImageView image_view;
@@ -284,6 +303,7 @@ typedef struct PGRAPHVkDisplayState {
     } pvideo;
 
     int width, height;
+    VkFormat format;
     int draw_time;
 
     // OpenGL Interop
@@ -294,6 +314,17 @@ typedef struct PGRAPHVkDisplayState {
 #endif
     GLuint gl_memory_obj;
     GLuint gl_texture_id;
+#if HAVE_IOSURFACE_SHARING
+    void *iosurface; // IOSurfaceRef
+
+    // Frame interpolation: deferred generation across sync calls
+    void *interp_prev_surface;    // IOSurfaceRef - previous frame
+    void *interp_cur_surface;     // IOSurfaceRef - current frame
+    int interp_remaining;         // frames left to generate this cycle
+    int interp_total;             // total interpolated frames per cycle (1 or 3)
+    int interp_index;             // which intermediate frame to generate next
+    int interp_width, interp_height;
+#endif
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {
@@ -316,6 +347,9 @@ typedef struct PGRAPHVkComputeState {
     VkPipelineLayout pipeline_layout;
     Lru pipeline_cache;
     ComputePipeline *pipeline_cache_entries;
+
+    VkPipeline unswizzle_pipeline;
+    VkPipeline yuv_to_rgba_pipeline;
 } PGRAPHVkComputeState;
 
 typedef struct PGRAPHVkState {
@@ -325,8 +359,18 @@ typedef struct PGRAPHVkState {
     int debug_depth;
 
     bool debug_utils_extension_enabled;
+
+    // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
+    bool portability_enumeration_extension_enabled;
+
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
+#if HAVE_IOSURFACE_SHARING
+    bool metal_objects_extension_enabled;
+#endif
+
+    // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
+    bool supports_geometry_shaders;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
@@ -336,6 +380,8 @@ typedef struct PGRAPHVkState {
     uint32_t allocator_last_submit_index;
 
     VkQueue queue;
+    VkQueue compute_queue;
+    bool has_compute_queue;
     VkCommandPool command_pool;
     VkCommandBuffer command_buffers[2];
 
@@ -347,6 +393,7 @@ typedef struct PGRAPHVkState {
     uint32_t submit_count;
 
     VkCommandBuffer aux_command_buffer;
+    VkFence aux_fence;
     bool in_aux_command_buffer;
 
     VkFramebuffer framebuffers[50];
@@ -382,6 +429,7 @@ typedef struct PGRAPHVkState {
 
     VkVertexInputBindingDescription vertex_binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     int num_active_vertex_binding_descriptions;
+    bool vertex_state_dirty;
     hwaddr vertex_attribute_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
@@ -415,9 +463,15 @@ typedef struct PGRAPHVkState {
     bool uniforms_changed;
 
     VkQueryPool query_pool;
-    int max_queries_in_flight; // FIXME: Move out to constant
+    int max_queries_in_flight;
     int num_queries_in_flight;
     bool new_query_needed;
+    uint64_t *query_results_buf;
+    QueryReport *report_pool;
+    int report_pool_next;
+
+    uint32_t *emulated_indices_buf;
+    size_t emulated_indices_buf_size;
     bool query_in_flight;
     uint32_t zpass_pixel_count_result;
     QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
@@ -536,6 +590,12 @@ void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
 void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
                                     VkCommandBuffer cmd, VkBuffer src,
                                     VkBuffer dst);
+void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  VkBuffer src, VkBuffer dst,
+                                  unsigned int width, unsigned int height);
+void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,
+                                    VkBuffer src, VkBuffer dst,
+                                    unsigned int width, unsigned int height);
 
 // display.c
 void pgraph_vk_init_display(PGRAPHState *pg);

@@ -253,12 +253,19 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
 
 static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
 {
+#ifdef CONFIG_VULKAN
+#ifdef __APPLE__
+    if (renderers[CONFIG_DISPLAY_RENDERER_VULKAN]) {
+        return CONFIG_DISPLAY_RENDERER_VULKAN;
+    }
+#endif
+#endif
 #ifdef CONFIG_OPENGL
     if (renderers[CONFIG_DISPLAY_RENDERER_OPENGL]) {
         return CONFIG_DISPLAY_RENDERER_OPENGL;
     }
 #endif
-#ifdef CONFIG_VULKAN
+#if defined(CONFIG_VULKAN) && !defined(__APPLE__)
     if (renderers[CONFIG_DISPLAY_RENDERER_VULKAN]) {
         return CONFIG_DISPLAY_RENDERER_VULKAN;
     }
