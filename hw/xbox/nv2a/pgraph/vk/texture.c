@@ -137,6 +137,8 @@ static size_t get_cubemap_layer_size(PGRAPHState *pg, TextureShape s)
 
 typedef struct DecodeTaskBatch {
     volatile int remaining;
+    GMutex mutex;
+    GCond cond;
 } DecodeTaskBatch;
 
 typedef struct DecodeTask {
@@ -212,14 +214,29 @@ static void decode_task_func(gpointer data, gpointer user_data)
         }
     }
 
-    qatomic_dec(&task->batch->remaining);
+    if (qatomic_dec_fetch(&task->batch->remaining) == 0) {
+        g_mutex_lock(&task->batch->mutex);
+        g_cond_signal(&task->batch->cond);
+        g_mutex_unlock(&task->batch->mutex);
+    }
+}
+
+static void decode_batch_init(DecodeTaskBatch *batch, int count)
+{
+    batch->remaining = count;
+    g_mutex_init(&batch->mutex);
+    g_cond_init(&batch->cond);
 }
 
 static void decode_batch_wait(DecodeTaskBatch *batch)
 {
+    g_mutex_lock(&batch->mutex);
     while (qatomic_read(&batch->remaining) > 0) {
-        g_usleep(10);
+        g_cond_wait(&batch->cond, &batch->mutex);
     }
+    g_mutex_unlock(&batch->mutex);
+    g_mutex_clear(&batch->mutex);
+    g_cond_clear(&batch->cond);
 }
 
 static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
@@ -319,7 +336,8 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         int total_tasks = num_layers * s.levels;
 
         DecodeTask *tasks = g_malloc0_n(total_tasks, sizeof(DecodeTask));
-        DecodeTaskBatch batch = { .remaining = total_tasks };
+        DecodeTaskBatch batch;
+        decode_batch_init(&batch, total_tasks);
         int task_idx = 0;
         for (int layer = 0; layer < num_layers; layer++) {
             unsigned int width = adjusted_width, height = adjusted_height;
@@ -343,7 +361,14 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 t->is_3d = false;
                 t->batch = &batch;
 
-                g_thread_pool_push(r->decode_thread_pool, t, NULL);
+                GError *err = NULL;
+                g_thread_pool_push(r->decode_thread_pool, t, &err);
+                if (err) {
+                    fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
+                            err->message);
+                    g_error_free(err);
+                    decode_task_func(t, NULL);
+                }
 
                 if (is_compressed) {
                     unsigned int pw = (width + 3) & ~3;
@@ -389,7 +414,8 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         nv2a_vk_assert(!f.linear);
         int total_tasks = s.levels;
         DecodeTask *tasks = g_malloc0_n(total_tasks, sizeof(DecodeTask));
-        DecodeTaskBatch batch3d = { .remaining = total_tasks };
+        DecodeTaskBatch batch3d;
+        decode_batch_init(&batch3d, total_tasks);
 
         unsigned int width = adjusted_width, height = adjusted_height,
                      depth = adjusted_depth;
@@ -411,7 +437,14 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             t->is_3d = true;
             t->batch = &batch3d;
 
-            g_thread_pool_push(r->decode_thread_pool, t, NULL);
+            GError *err = NULL;
+            g_thread_pool_push(r->decode_thread_pool, t, &err);
+            if (err) {
+                fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
+                        err->message);
+                g_error_free(err);
+                decode_task_func(t, NULL);
+            }
 
             if (is_compressed) {
                 unsigned int pw = (width + 3) & ~3;

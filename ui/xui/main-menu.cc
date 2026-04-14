@@ -1395,7 +1395,7 @@ void MainMenuSnapshotsView::Draw()
                               g_snapshot_mgr.m_extra_data[i].xbe_title_name,
                               (GRegexMatchFlags)0, &match);
                 keep_entry |= g_match_info_matches(match);
-                g_free(match);
+                g_match_info_free(match);
             }
 
             if (!keep_entry) {

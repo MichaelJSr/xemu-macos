@@ -593,6 +593,14 @@ static void determine_triangle_winding_order(uint8_t *pixels, int width,
 
 void pgraph_vk_determine_gpu_properties(NV2AState *d)
 {
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (!r->supports_geometry_shaders) {
+        memset(&pgraph_vk_gpu_properties, 0, sizeof(pgraph_vk_gpu_properties));
+        fprintf(stderr, "VK geometry shader winding: skipped (no GS support)\n");
+        return;
+    }
+
     const int width = 640;
     const int height = 480;
 

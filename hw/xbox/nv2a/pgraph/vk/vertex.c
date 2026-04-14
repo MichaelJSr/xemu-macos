@@ -221,7 +221,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
             update_memory_buffer(d, start, num_elements * stride);
         }
 
-        uint32_t provoking_element_index = provoking_element - min_element;
+        uint32_t provoking_element_index =
+            (provoking_element >= min_element) ?
+                provoking_element - min_element : 0;
         size_t element_size = attr->size * attr->count;
         assert(element_size <= sizeof(attr->inline_value));
         const uint8_t *last_entry;

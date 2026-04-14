@@ -72,11 +72,15 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .buffer_size = r->storage_buffers[BUFFER_STAGING_DST].buffer_size,
     };
 
+    /*
+     * Compute buffers: depth-stencil pack/unpack and surface unswizzle.
+     * Worst case at 10x scale of 640x480: 6400*4800*5 ~ 147 MiB.
+     */
     r->storage_buffers[BUFFER_COMPUTE_DST] = (StorageBuffer){
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .buffer_size = (1024 * 10) * (1024 * 10) * 8,
+        .buffer_size = 256 * 1024 * 1024,
     };
 
     r->storage_buffers[BUFFER_COMPUTE_SRC] = (StorageBuffer){

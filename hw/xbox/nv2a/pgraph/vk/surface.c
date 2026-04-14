@@ -443,21 +443,14 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
 
-    void *mapped_memory_ptr = NULL;
-    VK_CHECK(vmaMapMemory(r->allocator,
-                          r->storage_buffers[BUFFER_STAGING_DST].allocation,
-                          &mapped_memory_ptr));
-
     vmaInvalidateAllocation(r->allocator,
                             r->storage_buffers[BUFFER_STAGING_DST].allocation,
                             0, VK_WHOLE_SIZE);
 
-    memcpy_image(gl_read_buf, mapped_memory_ptr, surface->pitch,
+    memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
+                 surface->pitch,
                  surface->width * surface->fmt.bytes_per_pixel,
                  surface->height);
-
-    vmaUnmapMemory(r->allocator,
-                   r->storage_buffers[BUFFER_STAGING_DST].allocation);
 
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
@@ -1032,10 +1025,6 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                                  surface->fmt.bytes_per_pixel;
     nv2a_vk_assert(uploaded_image_size <= copy_buffer->buffer_size);
 
-    void *mapped_memory_ptr = NULL;
-    VK_CHECK(vmaMapMemory(r->allocator, copy_buffer->allocation,
-                          &mapped_memory_ptr));
-
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
         surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -1044,12 +1033,11 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                    surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
                    use_compute_to_convert_depth_stencil_format);
 
-    memcpy_image(mapped_memory_ptr, gl_read_buf,
+    memcpy_image(copy_buffer->mapped, gl_read_buf,
                  surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
                  surface->height);
 
     vmaFlushAllocation(r->allocator, copy_buffer->allocation, 0, VK_WHOLE_SIZE);
-    vmaUnmapMemory(r->allocator, copy_buffer->allocation);
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);

@@ -25,6 +25,17 @@
 
 // TODO: Float depth format (low priority, but would be better for accuracy)
 
+/*
+ * Apple Silicon GPUs have a SIMD width of 32. Workgroup size 64 provides
+ * good occupancy for memory-bound shaders on TBDR without excessive
+ * register pressure. Non-Apple GPUs prefer 256.
+ */
+#if defined(__APPLE__)
+#define COMPUTE_2BUF_WORKGROUP_SIZE 64
+#else
+#define COMPUTE_2BUF_WORKGROUP_SIZE 256
+#endif
+
 // FIXME: Below pipeline creation assumes identical 3 buffer setup. For
 //        swizzle shader we will need more flexibility.
 
@@ -697,12 +708,12 @@ void pgraph_vk_init_compute(PGRAPHState *pg)
     create_compute_pipeline_layout(pg);
     pipeline_cache_init(r);
 
-    r->compute.unswizzle_pipeline =
-        create_2buf_compute_pipeline(r, unswizzle_z_order_glsl, 256);
-    r->compute.unswizzle_2bpp_pipeline =
-        create_2buf_compute_pipeline(r, unswizzle_z_order_2bpp_glsl, 256);
-    r->compute.yuv_to_rgba_pipeline =
-        create_2buf_compute_pipeline(r, yuv_to_rgba_glsl, 256);
+    r->compute.unswizzle_pipeline = create_2buf_compute_pipeline(
+        r, unswizzle_z_order_glsl, COMPUTE_2BUF_WORKGROUP_SIZE);
+    r->compute.unswizzle_2bpp_pipeline = create_2buf_compute_pipeline(
+        r, unswizzle_z_order_2bpp_glsl, COMPUTE_2BUF_WORKGROUP_SIZE);
+    r->compute.yuv_to_rgba_pipeline = create_2buf_compute_pipeline(
+        r, yuv_to_rgba_glsl, COMPUTE_2BUF_WORKGROUP_SIZE);
 }
 
 void pgraph_vk_finalize_compute(PGRAPHState *pg)
@@ -760,7 +771,8 @@ void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);
 
-    size_t group_count = (pixel_count + 255) / 256;
+    size_t group_count =
+        (pixel_count + COMPUTE_2BUF_WORKGROUP_SIZE - 1) / COMPUTE_2BUF_WORKGROUP_SIZE;
     vkCmdDispatch(cmd, group_count, 1, 1);
     pgraph_vk_end_debug_marker(r, cmd);
 }
@@ -795,7 +807,8 @@ void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);
 
-    size_t group_count = (pixel_count + 255) / 256;
+    size_t group_count =
+        (pixel_count + COMPUTE_2BUF_WORKGROUP_SIZE - 1) / COMPUTE_2BUF_WORKGROUP_SIZE;
     vkCmdDispatch(cmd, group_count, 1, 1);
     pgraph_vk_end_debug_marker(r, cmd);
 }
@@ -830,7 +843,8 @@ void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,
                        push_constants);
 
     size_t pair_count = (size_t)(width / 2) * height;
-    size_t group_count = (pair_count + 255) / 256;
+    size_t group_count =
+        (pair_count + COMPUTE_2BUF_WORKGROUP_SIZE - 1) / COMPUTE_2BUF_WORKGROUP_SIZE;
     vkCmdDispatch(cmd, group_count, 1, 1);
     pgraph_vk_end_debug_marker(r, cmd);
 }

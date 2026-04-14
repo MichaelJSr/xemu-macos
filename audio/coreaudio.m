@@ -216,7 +216,7 @@ static void G_GNUC_PRINTF (2, 3) coreaudio_logerr (
     va_list ap;
 
     va_start (ap, fmt);
-    AUD_log (AUDIO_CAP, fmt, ap);
+    AUD_vlog (AUDIO_CAP, fmt, ap);
     va_end (ap);
 
     coreaudio_logstatus (status);
@@ -243,33 +243,15 @@ static void G_GNUC_PRINTF (3, 4) coreaudio_logerr2 (
 #define coreaudio_playback_logerr(status, ...) \
     coreaudio_logerr2(status, "playback", __VA_ARGS__)
 
-static int coreaudio_buf_lock (coreaudioVoiceOut *core, const char *fn_name)
-{
-    (void)fn_name;
-    os_unfair_lock_lock(&core->buf_lock);
-    return 0;
-}
-
-static int coreaudio_buf_unlock (coreaudioVoiceOut *core, const char *fn_name)
-{
-    (void)fn_name;
-    os_unfair_lock_unlock(&core->buf_lock);
-    return 0;
-}
-
 #define COREAUDIO_WRAPPER_FUNC(name, ret_type, args_decl, args) \
     static ret_type glue(coreaudio_, name)args_decl             \
     {                                                           \
         coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;     \
         ret_type ret;                                           \
                                                                 \
-        if (coreaudio_buf_lock(core, "coreaudio_" #name)) {         \
-            return 0;                                           \
-        }                                                       \
-                                                                \
+        os_unfair_lock_lock(&core->buf_lock);                   \
         ret = glue(audio_generic_, name)args;                   \
-                                                                \
-        coreaudio_buf_unlock(core, "coreaudio_" #name);             \
+        os_unfair_lock_unlock(&core->buf_lock);                 \
         return ret;                                             \
     }
 COREAUDIO_WRAPPER_FUNC(buffer_get_free, size_t, (HWVoiceOut *hw), (hw))
@@ -301,23 +283,18 @@ static OSStatus audioDeviceIOProc(
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hwptr;
     size_t len;
 
-    if (coreaudio_buf_lock (core, "audioDeviceIOProc")) {
-        inInputTime = 0;
-        return 0;
-    }
+    os_unfair_lock_lock(&core->buf_lock);
 
     if (inDevice != core->outputDeviceID) {
-        coreaudio_buf_unlock (core, "audioDeviceIOProc(old device)");
+        os_unfair_lock_unlock(&core->buf_lock);
         return 0;
     }
 
     frameCount = core->audioDevicePropertyBufferFrameSize;
     pending_frames = hw->pending_emul / hw->info.bytes_per_frame;
 
-    /* if there are not enough samples, set signal and return */
     if (pending_frames < frameCount) {
-        inInputTime = 0;
-        coreaudio_buf_unlock (core, "audioDeviceIOProc(empty)");
+        os_unfair_lock_unlock(&core->buf_lock);
         return 0;
     }
 
@@ -337,7 +314,7 @@ static OSStatus audioDeviceIOProc(
         out += write_len;
     }
 
-    coreaudio_buf_unlock (core, "audioDeviceIOProc");
+    os_unfair_lock_unlock(&core->buf_lock);
     return 0;
 }
 
@@ -550,18 +527,11 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
 {
     OSStatus status;
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;
-    int err;
     Audiodev *dev = drv_opaque;
     AudiodevCoreaudioPerDirectionOptions *cpdo = dev->u.coreaudio.out;
     struct audsettings obt_as;
 
-    /* create mutex */
     core->buf_lock = OS_UNFAIR_LOCK_INIT;
-    err = 0;
-    if (0) {
-        dolog("Could not create mutex\nReason: %s\n", strerror (err));
-        return -1;
-    }
 
     obt_as = *as;
     as = &obt_as;
@@ -601,7 +571,6 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
 static void coreaudio_fini_out (HWVoiceOut *hw)
 {
     OSStatus status;
-    int err;
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;
 
     status = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
@@ -614,9 +583,7 @@ static void coreaudio_fini_out (HWVoiceOut *hw)
 
     fini_out_device(core);
 
-    /* destroy mutex */
     /* os_unfair_lock requires no explicit destruction */
-    (void)err;
 }
 
 static void coreaudio_enable_out(HWVoiceOut *hw, bool enable)

@@ -34,51 +34,38 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **Display Command Buffer Merge** | PVIDEO overlay upload + display render pass combined into 1 aux GPU submission instead of 2. Eliminates 1 `vkQueueSubmit` + `vkWaitForFences` per display frame. |
-| **Surface Init on Main CB** | New surface layout transitions use the main command buffer via `pgraph_vk_begin_nondraw_commands` instead of a separate aux submission. |
-| **GPU Compute YUV-to-RGBA** | PVIDEO overlay YUV conversion runs as a Vulkan compute shader dispatch instead of CPU `convert_texture_data`. |
-| **GPU Compute Z-Order Unswizzle** | Surface upload unswizzle for 4bpp and 2bpp surfaces runs as Vulkan compute shaders with Morton address decode. 2bpp shader packs/unpacks 16-bit elements in uint SSBOs. |
-| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp` of vertex descriptions. Only marks dirty when descriptions actually change (compares before/after in vertex bind). |
-| **Vertex Staging Bulk Copy** | Single `memcpy` when source and destination strides match (common case), eliminating per-vertex loop overhead. |
-| **Default Vulkan on macOS** | `get_default_renderer()` prefers Vulkan over OpenGL on `__APPLE__` because the Vulkan path provides IOSurface zero-copy display. |
-| **Staging Buffer Scaling** | `BUFFER_STAGING_SRC/DST` increased from 64 MiB to 256 MiB with persistent VMA mapping. Eliminates per-upload `vmaMapMemory`/`vmaUnmapMemory` overhead and reduces forced `pgraph_vk_finish` stalls from staging buffer exhaustion. |
-| **Narrower Pipeline Barriers** | `VK_PIPELINE_STAGE_ALL_COMMANDS_BIT` replaced with `COLOR_ATTACHMENT_OUTPUT_BIT` / `VERTEX_INPUT_BIT | TRANSFER_BIT` in image transitions and draw submission. Reduces MoltenVK Metal fence overhead. |
-| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` accelerates `pgraph_vk_surface_get` from O(n) QTAILQ scan to O(1) hash lookup. NULL-guarded fallback to linear scan during early init. |
-| **APU Attenuation/Pitch LUTs** | Pre-computed 4096-entry attenuation and 65536-entry pitch lookup tables replace per-voice `powf(10, ...)` and `powf(2, ...)` calls in the audio voice processor hot path. |
-| **CoreAudio Priority-Safe Lock** | `pthread_mutex` replaced with `os_unfair_lock` in CoreAudio IOProc callback, eliminating priority inversion on the real-time audio thread. |
-| **DSP Mixbin Bulk Write** | Replaces 1024 individual `dsp_write_memory` calls per audio frame with a tight float-to-24bit conversion loop + `memcpy` into `dsp->core.mixbuffer`. Eliminates ~200K function call + switch + address range check overhead per second. |
-| **Display IOSurface Rebind Cache** | `CGLTexImageIOSurface2D` skipped when the same IOSurface pointer and dimensions are already bound to the GL texture. Avoids a kernel-crossing CGL/Metal interop call per display frame. |
-| **Display Descriptor Set Cache** | `vkUpdateDescriptorSets` for the display render pass skipped when the surface binding and PVIDEO state haven't changed since the last frame. |
-| **Cached nop_draw Flag** | `r->nop_draw` computed once in `pgraph_vk_draw_begin` and reused in `pgraph_vk_draw_end`, avoiding redundant register reads and bitmask computation on every draw call. |
+| **Display CB Merge** | PVIDEO overlay upload + display render pass combined into 1 GPU submission instead of 2. |
+| **Surface Init on Main CB** | Layout transitions use the main command buffer instead of a separate aux submission. |
+| **GPU Compute Shaders** | YUV-to-RGBA conversion and Z-order unswizzle (4bpp/2bpp) run as Vulkan compute dispatches with Morton address decode. Apple Silicon workgroup size tuned to 64 (SIMD-width aligned). |
+| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. Only marks dirty when descriptions actually change. |
+| **Staging Buffer Scaling** | `BUFFER_STAGING_SRC/DST` increased from 64 MiB to 256 MiB with persistent VMA mapping. `BUFFER_COMPUTE_DST/SRC` reduced from ~800 MiB to 256 MiB. Eliminates per-upload map/unmap overhead. |
+| **Narrower Pipeline Barriers** | `ALL_COMMANDS_BIT` replaced with `COLOR_ATTACHMENT_OUTPUT_BIT` / `VERTEX_INPUT_BIT | TRANSFER_BIT`. Reduces MoltenVK Metal fence overhead. |
+| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. |
+| **APU LUTs + NEON** | Pre-computed attenuation (4096) and pitch (65536) lookup tables. NEON-vectorized `float_to_24b_bulk` (`vcvtnq_s32_f32` 4-wide) for DSP mixbin write, and `vaddq_f32` for VP mixbin reduction. |
+| **CoreAudio `os_unfair_lock`** | Replaces `pthread_mutex` in IOProc callback, eliminating priority inversion on the real-time audio thread. |
+| **Display Caching** | IOSurface rebind, descriptor set updates, and uniform locations cached to skip redundant per-frame kernel/Vulkan calls when state hasn't changed. |
+| **Texture Decode Condvar** | `g_usleep(10)` busy-wait replaced with `GMutex`/`GCond`. Workers signal via `qatomic_dec_fetch` + `g_cond_signal`. Errors caught with inline fallback. |
 
 ### Tier 3: Low Impact / Quality of Life
 
 | Optimization | Description |
 |---|---|
-| **STBI_NEON** | ARM NEON SIMD for stb_image JPEG/PNG decoding (IDCT, color conversion, resampling). |
-| **fpng ARM64 CRC32** | Hardware CRC32 instructions (`__crc32d`/`__crc32w`/`__crc32b`) for PNG encoding. Processes 8 bytes per iteration. |
-| **Display Uniform Caching** | 8 uniform locations (`display_size`, `line_offset`, PVIDEO params) resolved once at init via `resolve_display_uniform_locations()`, not per-frame string lookup. |
-| **MoltenVK Environment Tuning** | `Info.plist` `LSEnvironment` sets: `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`, `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`, `MVK_CONFIG_FAST_MATH_ENABLED=1`, `MVK_CONFIG_RESUME_LOST_DEVICE=1`. |
-| **Profile Counter Gating** | `nv2a_profile_inc_counter` stripped as no-op when `NV2A_VK_PERF_BUILD=1` (already enabled). Removes atomic increments from every draw/bind/upload/submit call. |
-| **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when `draw_time >= command_buffer_start_time` (surface was drawn in current CB), not unconditionally. |
-| **Separate Compute Queue** | Probes for 2nd queue from same family at device creation. Falls back to single queue on MoltenVK (which only exposes `queueCount=1`). |
-| **Debug Group Counter Gating** | `NV2A_VK_DGROUP_BEGIN/END` macros are complete no-ops when `DEBUG_VK=0`. Previously, the indent counter was incremented/decremented on every call (~55 hot-path uses) even with debug output disabled. |
-| **Descriptor Set Pool Doubling** | Graphics and compute descriptor set arrays increased from 1024 to 2048, reducing forced `pgraph_vk_finish` flushes from descriptor pool exhaustion on complex scenes. |
-| **Invalid Surface Pool Expansion** | `num_invalid_surfaces_to_keep` increased from 10 to 64, reducing `vmaCreateImage` calls for surface recycling on systems with ample memory. |
-| **Scratch Image Skip (macOS)** | On `__APPLE__` at `surface_scale_factor == 1`, the per-surface scratch image allocation is skipped. Upload copies directly from staging buffer to the main image, bypassing the scratch->blit->main chain (AMD Windows driver workaround not needed on Apple Silicon). |
-| **MetalFX Direct IOSurface Output** | On Apple Silicon unified memory, temporal upscaler and frame interpolator write directly to the IOSurface-backed shared texture, eliminating a redundant private->shared GPU blit per frame. |
-| **MetalFX Thread Safety** | `os_unfair_lock` guards all MetalFX global mutable state against concurrent access between render and display threads. |
-| **Flight Slot Infrastructure** | Command buffers, fences, semaphores, and framebuffers are organized into `NUM_FLIGHT_SLOTS` independent slots (currently N=1). Each slot has its own `main_cb`, `aux_cb`, `fence`, `semaphore`, and `framebuffers[50]`. Graphics/compute descriptor sets and `BUFFER_STAGING_SRC` are partitioned per-slot with per-slot base/limit ranges. Infrastructure is ready for N=2+ pipelined submission, but remaining shared resources (`BUFFER_UNIFORM_STAGING`, `BUFFER_INDEX_STAGING`, `BUFFER_VERTEX_INLINE_STAGING`, their device-side counterparts, and `uploaded_bitmap`) still need partitioning (see Failed Optimizations). |
+| **STBI_NEON / fpng CRC32** | ARM NEON SIMD for stb_image JPEG/PNG decoding; hardware CRC32 for PNG encoding. |
+| **MoltenVK Tuning** | `Info.plist` sets `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `PREFILL_METAL_COMMAND_BUFFERS=2`, `SYNCHRONOUS_QUEUE_SUBMITS=0`, `FAST_MATH_ENABLED=1`, `RESUME_LOST_DEVICE=1`. |
+| **Counter/Debug Gating** | `nv2a_profile_inc_counter` and `NV2A_VK_DGROUP_BEGIN/END` stripped as no-ops in perf builds. |
+| **Pool Sizing** | Descriptor sets doubled (1024->2048), invalid surface pool expanded (10->64), reducing forced GPU flushes and `vmaCreateImage` calls. |
+| **Scratch Image Skip (macOS)** | At `surface_scale_factor == 1`, scratch image allocation skipped; upload copies directly to main image (AMD workaround not needed on Apple Silicon). |
+| **MetalFX Direct IOSurface** | Temporal upscaler and frame interpolator write directly to IOSurface-backed shared texture on unified memory. `os_unfair_lock` guards all MetalFX state across spatial, temporal, and interpolation paths. |
+| **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when surface was drawn in current command buffer. |
+| **Build: `-mcpu=native`** | ARM64 builds use host chip features instead of fixed `-mcpu=apple-m2`. |
+| **Flight Slot Infrastructure** | CB/fence/semaphore/framebuffer organized into `NUM_FLIGHT_SLOTS` (N=1). Descriptor sets and staging partitioned per-slot. Ready for N>1 pipelining (see Failed Optimizations). |
 
 ### MoltenVK Compatibility Layer
 
 | Change | Description |
 |---|---|
-| **VK_KHR_portability_subset** | Required extension explicitly enabled for Apple Silicon physical device enumeration. Without it, MoltenVK hides the device. |
-| **Geometry Shader Relaxation** | `geometryShader` feature set to not-required on `__APPLE__`. CPU-side primitive emulation handles quads, line loops, triangle fans, and provoking vertex rotation. |
-| **Hardware Depth Fallback** | Fragment shader in `psh.c` uses `gl_FragCoord.z` with `dFdx`/`dFdy` slope approximation when geometry shaders unavailable (MoltenVK). `use_hw_depth` flag in `PshState`. |
-| **VK_EXT_metal_objects** | Enabled for IOSurface import/export. Used to create IOSurface-backed `VkImage` for zero-copy display and MetalFX integration. |
-| **VK_EXT_provoking_vertex** | Workarounds for MoltenVK's incomplete provoking vertex support. Hardware register state used directly for vertex rotation detection. |
+| **Portability Extensions** | `VK_KHR_portability_subset`, `VK_EXT_metal_objects` (IOSurface zero-copy), `VK_EXT_provoking_vertex` workarounds. |
+| **No Geometry Shaders** | `geometryShader` not required on `__APPLE__`. CPU-side primitive emulation for quads, line loops, triangle fans, provoking vertex. Fragment shader depth fallback via `gl_FragCoord.z` + `dFdx`/`dFdy`. GS winding probe skipped when unavailable. |
 
 ### macOS 26 Build Fixes
 
@@ -89,23 +76,36 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **IOSurface bytesPerRow** | macOS 26 creates BGRA8 IOSurfaces with incorrect `bytesPerRow` at widths > ~1920px. MetalFX output capped to 1920px wide; `texture_from_iosurface` validates before Metal texture creation. |
 | **Non-portable exit code** | `exit -1` changed to `exit 1` in `build.sh`. |
 
+### Bug Fixes
+
+| Fix | Description |
+|---|---|
+| **MetalFX Spatial Deadlock** | Lock not released on nil texture early return in `metalfx_upscale()`. |
+| **CoreAudio `va_list` UB** | `coreaudio_logerr` passed `va_list` to variadic `AUD_log`; changed to `AUD_vlog`. Dead lock wrappers removed. |
+| **Image Layout Transition UB** | `assert` in `image.c` compiled out in release; uninitialized barrier stages. Replaced with `abort()`. |
+| **Shader Uniform Leak** | `layout->allocation` not freed in `finalize_uniform_layout` (`glsl.c`). |
+| **GMatchInfo Heap Corruption** | `g_free(match)` on `GMatchInfo*` in `main-menu.cc`; corrected to `g_match_info_free`. |
+
 ---
 
 ## Failed Optimizations (and Why)
 
-| Attempt | What Happened | Root Cause |
+| Attempt | Result | Root Cause |
 |---|---|---|
-| **Depth export via `vkExportMetalObjectsEXT`** | Deadlock on launch, regardless of thread or timing | MoltenVK's internal device mutex conflicts with the PFIFO thread's Vulkan state. The function cannot be safely called from any thread context in xemu's architecture. |
-| **BQL event batching** | Deadlock on launch | QEMU's Big QEMU Lock (BQL) is part of a cooperative scheduling model. Holding it around the entire SDL event loop prevents timer callbacks, I/O handlers, and the vCPU thread from running. |
-| **Deferred auxiliary fence** | Graphics corruption (shuffled textures) | Callers of `pgraph_vk_end_single_time_commands` depend on transfers completing synchronously. The staging buffer was overwritten by subsequent uploads before the GPU executed the pending copy. |
-| **Texture upload on main CB (v1, without sub-allocation)** | Texture corruption | `BUFFER_STAGING_SRC` is shared. Without sub-allocation, each texture upload wrote from offset 0, overwriting previous data before GPU copied it. Fixed with bump allocator approach. |
-| **floatx80 union overlay on ARM64** | Segfault on launch | x87 80-bit and IEEE 64-bit double have incompatible bit layouts. The union `double fval` field doesn't correspond to `low`/`high` fields on ARM64 (unlike x86_64 where `long double` IS x87 80-bit). |
-| **TCG inline float ops on ARM64** | Segfault during boot ROM translation | TCG float operations (`tcg_gen_add_f64` etc. from `ops_fpu.h`) crash on the ARM64 TCG backend. Fixed by splitting `g_use_hard_fpu` (helper selection) from `g_use_hard_fpu_inline` (TCG inlining, disabled on ARM64). |
-| **Separate compute queue** | No effect on MoltenVK | MoltenVK only exposes 1 queue family with `queueCount=1`. The infrastructure is in place but inactive until a driver supports multiple queues. |
-| **Voice register cache** | Black screen on game load | `__thread` cache of 128-byte voice register blocks served stale data. Xbox hardware/software modifies voice registers outside the `voice_get_mask`/`voice_set_mask` paths (DMA engine, guest CPU MMIO, linked-voice chains), so the cache had no way to detect external writes. |
-| **Surface upload bump allocator** | Black screen / texture corruption | `BUFFER_STAGING_SRC` is shared between texture uploads (main CB) and surface uploads (aux CB with single-time commands). Sub-allocating with offsets between the two CB paths caused the main CB's pending texture copies to reference staging data overwritten by surface uploads. |
-| **SDL event BQL batching** | Deadlock on launch | Holding BQL around the entire `SDL_PollEvent` loop prevents QEMU's cooperative scheduling (timer callbacks, I/O handlers, vCPU thread). Identical to the previously documented failure. |
-| **Flight slots N>1 (ring-of-fences)** | Frame clipping/corruption at N=2, worse at N=3 | Graphics/compute descriptor sets and `BUFFER_STAGING_SRC` are now partitioned per-slot, but 7 other shared resources remain unpartitioned: `BUFFER_UNIFORM_STAGING` (8 MiB), `BUFFER_INDEX_STAGING` (~6 MiB), `BUFFER_VERTEX_INLINE_STAGING` (~38 MiB), their device-side counterparts (`BUFFER_UNIFORM`, `BUFFER_INDEX`, `BUFFER_VERTEX_INLINE`), and `uploaded_bitmap`. The staging/device pairs are especially hard: `sync_staging_buffer` copies the full staging range to device offset 0, so both the staging AND device buffers would need per-slot regions, plus all binding offsets (index, vertex, uniform) adjusted. Estimated ~20+ call sites across draw.c, shaders.c, vertex.c. Performance benefit on M2 Ultra estimated at 1-3ms per `pgraph_vk_finish` call (GPU completes quickly on Apple Silicon), likely not worth the risk. |
+| **Depth export (`vkExportMetalObjectsEXT`)** | Deadlock | MoltenVK's internal device mutex conflicts with PFIFO thread Vulkan state. |
+| **BQL event batching** (x2) | Deadlock | Holding BQL around SDL event loop prevents QEMU cooperative scheduling. |
+| **Deferred auxiliary fence** | Texture corruption | Staging buffer overwritten before GPU executed pending copy. |
+| **Texture upload on main CB (v1)** | Texture corruption | Shared `BUFFER_STAGING_SRC` without sub-allocation; fixed with bump allocator. |
+| **floatx80 union overlay (ARM64)** | Segfault | x87 80-bit and IEEE 64-bit have incompatible bit layouts on ARM64. |
+| **TCG inline float ops (ARM64)** | Segfault | `tcg_gen_*_f64` crashes ARM64 TCG backend. Fixed by disabling `g_use_hard_fpu_inline` on ARM64. |
+| **Separate compute queue** | No effect | MoltenVK only exposes `queueCount=1`. Infrastructure in place but inactive. |
+| **Voice register cache** | Black screen | `__thread` cache served stale data; Xbox HW modifies registers via DMA/MMIO outside cached paths. |
+| **Surface upload bump allocator** | Corruption | Staging shared between texture (main CB) and surface (aux CB) uploads; offsets conflicted. |
+| **Flight slots N>1** | Corruption | 7 shared resources (uniform/index/vertex staging+device buffers, uploaded_bitmap) remain unpartitioned. ~20+ call sites need changes; minimal benefit on Apple Silicon. |
+| **Async MetalFX (`dispatch_semaphore`)** | Tearing | IOSurface consumed by GL before Metal finished writing. Writer must complete before reader binds. |
+| **Render pass hash table** | Segfault | Struct field insertion shifted member offsets; stale `.o` files caused wrong memory access. O(5) linear scan not worth the risk. |
+| **VMA memory budget trimming** | Untested | MoltenVK `VK_EXT_memory_budget` may report bad values on unified memory, causing premature texture eviction. |
+| **Dirty-range VRAM flush** | Segfault (then reverted) | `bitmap_clear` before `flush_memory_buffer` zeroed bitmap before read. Minimal benefit on Apple Silicon coherent memory anyway. |
 
 ---
 

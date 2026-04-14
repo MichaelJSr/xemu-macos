@@ -48,6 +48,7 @@ DSPState *dsp_init(void *rw_opaque,
     DPRINTF("dsp_init\n");
 
     DSPState* dsp = (DSPState*)malloc(sizeof(DSPState));
+    assert(dsp);
     memset(dsp, 0, sizeof(*dsp));
 
     dsp->core.read_peripheral = read_peripheral;

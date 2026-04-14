@@ -197,6 +197,16 @@ HARDFPU_ALWAYS_INLINE double floatx80_to_double_fast(floatx80 a)
     /* Single branch for all edge cases: exp80 in [0, 0x7FFF] or overflow */
     if (__builtin_expect((unsigned)(exp80 - 1) >= 0x7FFEu, 0)) {
         if (exp80 == 0) {
+            if (frac == 0) {
+                return (u64_double){ .u = s }.d;
+            }
+            /*
+             * x87 denormal/unnormal: exp80==0, frac!=0.
+             * The true value is +/- 0.frac * 2^(-16382).
+             * IEEE double min subnormal exponent is -1074, so values below
+             * 2^(-1074) flush to zero. The shift needed: 16382 - 1023 + 1 = 15360.
+             * Since 15360 > 64, all x87 denormals underflow to IEEE zero.
+             */
             return (u64_double){ .u = s }.d;
         }
         if (exp80 == 0x7FFF) {

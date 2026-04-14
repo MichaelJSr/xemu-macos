@@ -456,6 +456,8 @@ static void finalize_uniform_layout(ShaderUniformLayout *layout)
     if (layout->uniforms) {
         g_free(layout->uniforms);
     }
+    g_free(layout->allocation);
+    layout->allocation = NULL;
 }
 
 void pgraph_vk_ref_shader_module(ShaderModuleInfo *info)

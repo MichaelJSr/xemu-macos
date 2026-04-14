@@ -192,7 +192,10 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
                 MTLTextureUsageShaderRead);
             g_spatial.cachedInputSurface = inputSurface;
         }
-        if (!g_spatial.inputTexture) return false;
+        if (!g_spatial.inputTexture) {
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         g_spatial.scaler.colorTexture = g_spatial.inputTexture;
         g_spatial.scaler.outputTexture = g_spatial.outputTexture;
@@ -411,7 +414,11 @@ void metalfx_temporal_reset(void)
 
 bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
 {
-    if (!g_temporal.initialized || !colorSurface) return false;
+    os_unfair_lock_lock(&g_metalfx_lock);
+    if (!g_temporal.initialized || !colorSurface) {
+        os_unfair_lock_unlock(&g_metalfx_lock);
+        return false;
+    }
 
     @autoreleasepool {
         if (colorSurface != g_temporal.cachedColorSurface) {
@@ -421,7 +428,10 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
                 MTLTextureUsageShaderRead);
             g_temporal.cachedColorSurface = colorSurface;
         }
-        if (!g_temporal.colorTexture) return false;
+        if (!g_temporal.colorTexture) {
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         g_temporal.scaler.colorTexture = g_temporal.colorTexture;
         g_temporal.scaler.outputTexture = g_temporal.outputTexture;
@@ -432,11 +442,6 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
 
-        /*
-         * Halton(2,3) jitter sequence for temporal sub-pixel reconstruction.
-         * Alternating sub-pixel offsets let the scaler recover detail beyond
-         * the input resolution across successive frames.
-         */
         static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
         static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.333f };
         int jidx = g_temporal.frameIndex % 8;
@@ -467,12 +472,14 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
 
         [cb commit];
         [cb waitUntilCompleted];
+        os_unfair_lock_unlock(&g_metalfx_lock);
         return true;
     }
 }
 
 void metalfx_temporal_destroy(void)
 {
+    os_unfair_lock_lock(&g_metalfx_lock);
     g_temporal.scaler = nil;
     g_temporal.colorTexture = nil;
     g_temporal.directDepthTexture = nil;
@@ -491,6 +498,7 @@ void metalfx_temporal_destroy(void)
     g_temporal.failedInputH = 0;
     g_temporal.failedOutputW = 0;
     g_temporal.failedOutputH = 0;
+    os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
 #pragma mark - Frame Interpolation (macOS 26+)
@@ -632,7 +640,11 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                                     float delta_time)
 {
     if (@available(macOS 26.0, *)) {
-        if (!g_interp.initialized || !colorA || !colorB) return false;
+        os_unfair_lock_lock(&g_metalfx_lock);
+        if (!g_interp.initialized || !colorA || !colorB) {
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         id<MTLFXFrameInterpolator> interp =
             (id<MTLFXFrameInterpolator>)g_interp.interpolator;
@@ -653,8 +665,10 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                     g_interp.width, g_interp.height, readUsage);
                 g_interp.lastColorPrev = colorA;
             }
-            if (!g_interp.cachedColorCur || !g_interp.cachedColorPrev)
+            if (!g_interp.cachedColorCur || !g_interp.cachedColorPrev) {
+                os_unfair_lock_unlock(&g_metalfx_lock);
                 return false;
+            }
 
             if (depthB && depthB != g_interp.lastDepthCur) {
                 g_interp.cachedDepthCur = texture_from_iosurface(
@@ -705,6 +719,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
 
             [cb commit];
             [cb waitUntilCompleted];
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
     }
@@ -714,6 +729,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
 
 void metalfx_interpolation_destroy(void)
 {
+    os_unfair_lock_lock(&g_metalfx_lock);
     g_interp.interpolator = nil;
     g_interp.outputTexture = nil;
     g_interp.outputSharedTexture = nil;
@@ -733,6 +749,7 @@ void metalfx_interpolation_destroy(void)
         g_interp.outputSurface = NULL;
     }
     g_interp.initialized = false;
+    os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
 #endif /* __APPLE__ */

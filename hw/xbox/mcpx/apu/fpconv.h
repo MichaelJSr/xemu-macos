@@ -22,6 +22,9 @@
 #define FLOATCONV_H
 
 #include <stdint.h>
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 static inline float int8_to_float(int8_t x)
 {
@@ -65,6 +68,33 @@ static inline uint32_t float_to_24b(float value)
         int24 = lrint(scaled_value);
     }
     return int24 & 0xffffff;
+}
+
+static inline void float_to_24b_bulk(const float *src, uint32_t *dst, int count)
+{
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    const float32x4_t scale = vdupq_n_f32(8.0f * 0x100000);
+    const int32x4_t max_val = vdupq_n_s32(0x7fffff);
+    const int32x4_t min_val = vdupq_n_s32(-0x800000);
+    const int32x4_t mask = vdupq_n_s32(0xffffff);
+
+    int i = 0;
+    for (; i + 4 <= count; i += 4) {
+        float32x4_t v = vmulq_f32(vld1q_f32(src + i), scale);
+        int32x4_t iv = vcvtnq_s32_f32(v);
+        iv = vminq_s32(iv, max_val);
+        iv = vmaxq_s32(iv, min_val);
+        iv = vandq_s32(iv, mask);
+        vst1q_u32(dst + i, vreinterpretq_u32_s32(iv));
+    }
+    for (; i < count; i++) {
+        dst[i] = float_to_24b(src[i]);
+    }
+#else
+    for (int i = 0; i < count; i++) {
+        dst[i] = float_to_24b(src[i]);
+    }
+#endif
 }
 
 #endif

@@ -275,20 +275,29 @@ static void __attribute__((constructor)) register_renderer(void)
 
 void pgraph_vk_check_memory_budget(PGRAPHState *pg)
 {
-#if 0 // FIXME
+#if 0
+    /*
+     * Disabled: MoltenVK's VK_EXT_memory_budget may report unexpected
+     * values on Apple Silicon unified memory, causing premature texture
+     * cache eviction. Re-enable after validating budget reports.
+     */
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     VkPhysicalDeviceMemoryProperties const *props;
     vmaGetMemoryProperties(r->allocator, &props);
 
-    g_autofree VmaBudget *budgets = g_malloc_n(props->memoryHeapCount, sizeof(VmaBudget));
+    g_autofree VmaBudget *budgets =
+        g_malloc_n(props->memoryHeapCount, sizeof(VmaBudget));
     vmaGetHeapBudgets(r->allocator, budgets);
 
-    const float budget_threshold = 0.8;
+    const float budget_threshold = 0.9;
     bool near_budget = false;
 
-    for (int i = 0; i < props->memoryHeapCount; i++) {
+    for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
         VmaBudget *b = &budgets[i];
+        if (b->budget == 0) {
+            continue;
+        }
         float use_to_budget_ratio =
             (double)b->statistics.allocationBytes / (double)b->budget;
         NV2A_VK_DPRINTF("Heap %d: used %lu/%lu MiB (%.2f%%)", i,
@@ -297,16 +306,8 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
         near_budget |= use_to_budget_ratio > budget_threshold;
     }
 
-    // If any heaps are near budget, free up some resources
     if (near_budget) {
         pgraph_vk_trim_texture_cache(pg);
     }
-#endif
-
-#if 0
-    char *s;
-    vmaBuildStatsString(r->allocator, &s, VK_TRUE);
-    puts(s);
-    vmaFreeStatsString(r->allocator, s);
 #endif
 }

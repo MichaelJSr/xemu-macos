@@ -22,6 +22,29 @@
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "adpcm.h"
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
+static inline void float_accumulate(float *dst, const float *src, int count)
+{
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    int i = 0;
+    for (; i + 4 <= count; i += 4) {
+        float32x4_t a = vld1q_f32(dst + i);
+        float32x4_t b = vld1q_f32(src + i);
+        vst1q_f32(dst + i, vaddq_f32(a, b));
+    }
+    for (; i < count; i++) {
+        dst[i] += src[i];
+    }
+#else
+    for (int i = 0; i < count; i++) {
+        dst[i] += src[i];
+    }
+#endif
+}
+
 static const struct {
     hwaddr top, current, next;
 } voice_list_regs[] = {
@@ -1630,17 +1653,14 @@ static void *voice_worker_thread(void *arg)
 
             qemu_mutex_lock(&vwd->lock);
 
-            // Add voice contributions
             for (int b = 0; b < NUM_MIXBINS; b++) {
-                for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
-                    vwd->mixbins[b][s] += self->mixbins[b][s];
-                }
+                float_accumulate(vwd->mixbins[b], self->mixbins[b],
+                                 NUM_SAMPLES_PER_FRAME);
             }
             if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
-                for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-                    d->vp.sample_buf[i][0] += self->sample_buf[i][0];
-                    d->vp.sample_buf[i][1] += self->sample_buf[i][1];
-                }
+                float_accumulate((float *)d->vp.sample_buf,
+                                 (float *)self->sample_buf,
+                                 NUM_SAMPLES_PER_FRAME * 2);
             }
 
             self->queue_len = 0;
@@ -1767,11 +1787,9 @@ voice_work_dispatch(MCPXAPUState *d,
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
 
-        // Add voice contributions
         for (int b = 0; b < NUM_MIXBINS; b++) {
-            for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
-                mixbins[b][s] += vwd->mixbins[b][s];
-            }
+            float_accumulate(mixbins[b], vwd->mixbins[b],
+                             NUM_SAMPLES_PER_FRAME);
         }
     }
 

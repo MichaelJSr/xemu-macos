@@ -439,14 +439,13 @@ const MemoryRegionOps ep_ops = {
 
 void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
-    /* Write VP results to the GP DSP MIXBUF (bulk convert + memcpy) */
+    /* Write VP results to the GP DSP MIXBUF (bulk NEON convert + memcpy) */
     {
         uint32_t converted[NUM_MIXBINS * NUM_SAMPLES_PER_FRAME];
         for (int i = 0; i < NUM_MIXBINS; i++) {
-            for (int j = 0; j < NUM_SAMPLES_PER_FRAME; j++) {
-                converted[i * NUM_SAMPLES_PER_FRAME + j] =
-                    float_to_24b(mixbins[i][j]);
-            }
+            float_to_24b_bulk(mixbins[i],
+                              &converted[i * NUM_SAMPLES_PER_FRAME],
+                              NUM_SAMPLES_PER_FRAME);
         }
         memcpy(d->gp.dsp->core.mixbuffer, converted, sizeof(converted));
     }

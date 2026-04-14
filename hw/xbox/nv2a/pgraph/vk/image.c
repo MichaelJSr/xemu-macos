@@ -201,7 +201,9 @@ void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
         destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
     } else {
-        assert(!"unsupported layout transition!");
+        fprintf(stderr, "nv2a: unsupported layout transition %d -> %d\n",
+                oldLayout, newLayout);
+        abort();
     }
 
     vkCmdPipelineBarrier(cmd, sourceStage, destinationStage, 0, 0,

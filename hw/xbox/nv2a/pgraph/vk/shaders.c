@@ -229,7 +229,8 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
         };
     }
 
-    vkUpdateDescriptorSets(r->device, 6, descriptor_writes, 0, NULL);
+    vkUpdateDescriptorSets(r->device, ARRAY_SIZE(descriptor_writes),
+                           descriptor_writes, 0, NULL);
 
     r->descriptor_set_index++;
 }
