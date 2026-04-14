@@ -46,6 +46,10 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` accelerates `pgraph_vk_surface_get` from O(n) QTAILQ scan to O(1) hash lookup. NULL-guarded fallback to linear scan during early init. |
 | **APU Attenuation/Pitch LUTs** | Pre-computed 4096-entry attenuation and 65536-entry pitch lookup tables replace per-voice `powf(10, ...)` and `powf(2, ...)` calls in the audio voice processor hot path. |
 | **CoreAudio Priority-Safe Lock** | `pthread_mutex` replaced with `os_unfair_lock` in CoreAudio IOProc callback, eliminating priority inversion on the real-time audio thread. |
+| **DSP Mixbin Bulk Write** | Replaces 1024 individual `dsp_write_memory` calls per audio frame with a tight float-to-24bit conversion loop + `memcpy` into `dsp->core.mixbuffer`. Eliminates ~200K function call + switch + address range check overhead per second. |
+| **Display IOSurface Rebind Cache** | `CGLTexImageIOSurface2D` skipped when the same IOSurface pointer and dimensions are already bound to the GL texture. Avoids a kernel-crossing CGL/Metal interop call per display frame. |
+| **Display Descriptor Set Cache** | `vkUpdateDescriptorSets` for the display render pass skipped when the surface binding and PVIDEO state haven't changed since the last frame. |
+| **Cached nop_draw Flag** | `r->nop_draw` computed once in `pgraph_vk_draw_begin` and reused in `pgraph_vk_draw_end`, avoiding redundant register reads and bitmask computation on every draw call. |
 
 ### Tier 3: Low Impact / Quality of Life
 

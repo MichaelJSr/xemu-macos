@@ -324,7 +324,13 @@ typedef struct PGRAPHVkDisplayState {
     int interp_total;             // total interpolated frames per cycle (1 or 3)
     int interp_index;             // which intermediate frame to generate next
     int interp_width, interp_height;
+
+    void *last_cgl_surface;
+    int last_cgl_width, last_cgl_height;
 #endif
+
+    SurfaceBinding *last_descriptor_surface;
+    bool last_descriptor_pvideo;
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {

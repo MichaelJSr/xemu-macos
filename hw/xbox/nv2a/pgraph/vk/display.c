@@ -856,6 +856,15 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+
+    bool pvideo_on = disp->pvideo.state.enabled;
+    if (surface == disp->last_descriptor_surface &&
+        pvideo_on == disp->last_descriptor_pvideo) {
+        return;
+    }
+    disp->last_descriptor_surface = surface;
+    disp->last_descriptor_pvideo = pvideo_on;
 
     VkDescriptorImageInfo image_infos[2];
     VkWriteDescriptorSet descriptor_writes[2];
@@ -1275,7 +1284,10 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     NULL, NULL, dt)) {
                 IOSurfaceRef interp =
                     metalfx_interpolation_get_output_surface();
-                if (interp) {
+                if (interp &&
+                    ((void *)interp != disp->last_cgl_surface ||
+                     disp->interp_width != disp->last_cgl_width ||
+                     disp->interp_height != disp->last_cgl_height)) {
                     CGLContextObj cgl_ctx = CGLGetCurrentContext();
                     if (cgl_ctx) {
                         glBindTexture(GL_TEXTURE_RECTANGLE,
@@ -1286,6 +1298,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                             GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                             interp, 0);
                         glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+                        disp->last_cgl_surface = (void *)interp;
+                        disp->last_cgl_width = disp->interp_width;
+                        disp->last_cgl_height = disp->interp_height;
                     }
                 }
             }
@@ -1418,19 +1433,26 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             }
         }
 
-        /* Bind to GL texture */
+        /* Bind to GL texture (skip if same IOSurface already bound) */
         if (disp->gl_texture_id) {
             int surf_w = (int)IOSurfaceGetWidth(present_surface);
             int surf_h = (int)IOSurfaceGetHeight(present_surface);
-            CGLContextObj cgl_ctx = CGLGetCurrentContext();
-            if (cgl_ctx) {
-                glBindTexture(GL_TEXTURE_RECTANGLE, disp->gl_texture_id);
-                CGLTexImageIOSurface2D(
-                    cgl_ctx, GL_TEXTURE_RECTANGLE, GL_RGBA,
-                    surf_w, surf_h,
-                    GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
-                    present_surface, 0);
-                glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+            if ((void *)present_surface != disp->last_cgl_surface ||
+                surf_w != disp->last_cgl_width ||
+                surf_h != disp->last_cgl_height) {
+                CGLContextObj cgl_ctx = CGLGetCurrentContext();
+                if (cgl_ctx) {
+                    glBindTexture(GL_TEXTURE_RECTANGLE, disp->gl_texture_id);
+                    CGLTexImageIOSurface2D(
+                        cgl_ctx, GL_TEXTURE_RECTANGLE, GL_RGBA,
+                        surf_w, surf_h,
+                        GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                        present_surface, 0);
+                    glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+                    disp->last_cgl_surface = (void *)present_surface;
+                    disp->last_cgl_width = surf_w;
+                    disp->last_cgl_height = surf_h;
+                }
             }
         }
     }
