@@ -828,12 +828,18 @@ static void gl_render_frame(struct xemu_console *scon)
 
     if (tex == 0) {
         xemu_main_loop_lock();
-        // FIXME: Don't upload if notdirty
         xb_surface_gl_create_texture(scon->surface);
         tex = scon->surface->texture;
         flip_required = true;
         release_surface_texture = true;
         xemu_main_loop_unlock();
+        xemu_set_framebuffer_texture_is_rect(false);
+    } else {
+#if defined(__APPLE__)
+        xemu_set_framebuffer_texture_is_rect(true);
+#else
+        xemu_set_framebuffer_texture_is_rect(false);
+#endif
     }
 
     glClearColor(0, 0, 0, 0);
@@ -851,7 +857,7 @@ static void gl_render_frame(struct xemu_console *scon)
     xemu_main_loop_unlock();
 
     xemu_hud_render();
-    glFinish();
+    glFlush();
 
     if (release_surface_texture) {
         xemu_main_loop_lock();
@@ -893,8 +899,6 @@ static void poll_events(struct xemu_console *scon)
     while (SDL_PollEvent(ev)) {
         xemu_main_loop_lock();
 
-        // HUD must process events first so that if a controller is detached,
-        // a latent rebind request can cancel before the state is freed
         xemu_hud_process_sdl_events(ev);
         xemu_input_process_sdl_events(ev);
 

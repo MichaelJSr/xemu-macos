@@ -22,13 +22,13 @@
 
 #include "gloffscreen.h"
 
-#if HAVE_EXTERNAL_MEMORY
+#if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
 static GloContext *g_gl_context;
 #endif
 
 static void early_context_init(void)
 {
-#if HAVE_EXTERNAL_MEMORY
+#if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
     g_gl_context = glo_context_create();
 #endif
 }
@@ -39,7 +39,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
 
     pg->vk_renderer_state = (PGRAPHVkState *)g_malloc0(sizeof(PGRAPHVkState));
 
-#if HAVE_EXTERNAL_MEMORY
+#if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
     glo_set_current(g_gl_context);
 #endif
 
@@ -64,6 +64,18 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
                                    memory_region_size(d->vram));
 
     pgraph_vk_determine_gpu_properties(d);
+
+    PGRAPHVkState *r = pg->vk_renderer_state;
+#if HAVE_IOSURFACE_SHARING
+    fprintf(stderr, "IOSurface sharing: %s (VK_EXT_metal_objects=%s)\n",
+            r->metal_objects_extension_enabled ? "enabled" : "disabled",
+            r->metal_objects_extension_enabled ? "yes" : "no");
+#elif HAVE_EXTERNAL_MEMORY
+    fprintf(stderr, "External memory sharing: enabled\n");
+#else
+    fprintf(stderr, "Display sharing: none (CPU fallback)\n");
+#endif
+    (void)r;
 }
 
 static void pgraph_vk_finalize(NV2AState *d)
@@ -104,10 +116,20 @@ static void pgraph_vk_flush(NV2AState *d)
     qemu_event_set(&d->pgraph.flush_complete);
 }
 
+static int64_t last_sync_time_ns;
+
 static void pgraph_vk_sync(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
-    pgraph_vk_render_display(pg);
+
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t elapsed = now - last_sync_time_ns;
+    const int64_t min_sync_interval_ns = 8000000; /* ~8ms = 120Hz cap */
+
+    if (elapsed >= min_sync_interval_ns) {
+        pgraph_vk_render_display(pg);
+        last_sync_time_ns = now;
+    }
 
     qatomic_set(&d->pgraph.sync_pending, false);
     qemu_event_set(&d->pgraph.sync_complete);
@@ -197,6 +219,18 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.sync_complete);
     return r->display.gl_texture_id;
+#elif HAVE_IOSURFACE_SHARING
+    if (r->metal_objects_extension_enabled) {
+        qemu_event_reset(&d->pgraph.sync_complete);
+        qatomic_set(&pg->sync_pending, true);
+        pfifo_kick(d);
+        qemu_mutex_unlock(&d->pfifo.lock);
+        qemu_event_wait(&d->pgraph.sync_complete);
+        return r->display.gl_texture_id;
+    }
+    qemu_mutex_unlock(&d->pfifo.lock);
+    pgraph_vk_wait_for_surface_download(surface);
+    return 0;
 #else
     qemu_mutex_unlock(&d->pfifo.lock);
     pgraph_vk_wait_for_surface_download(surface);

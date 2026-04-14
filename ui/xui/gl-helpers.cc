@@ -38,7 +38,8 @@ GLuint g_controller_duke_tex, g_controller_s_tex, g_logo_tex, g_icon_tex, g_xmu_
 
 enum class ShaderType {
     Blit,
-    BlitGamma, // FIMXE: Move to nv2a_get_framebuffer_surface
+    BlitGamma,
+    BlitGammaRect,
     Mask,
     Logo,
 };
@@ -63,7 +64,8 @@ typedef struct DecalShader_
 
 static DecalShader *g_decal_shader,
                    *g_logo_shader,
-                   *g_framebuffer_shader;
+                   *g_framebuffer_shader,
+                   *g_framebuffer_rect_shader;
 
 GLint Fbo::vp[4];
 GLint Fbo::original_fbo;
@@ -254,6 +256,27 @@ void main() {
 }
 )";
 
+    const char *image_gamma_rect_frag_src = R"(
+#version 400 core
+uniform sampler2DRect tex;
+uniform uint palette[256];
+float gamma_ch(int ch, float col)
+{
+    return float(bitfieldExtract(palette[uint(col * 255.0)], ch*8, 8)) / 255.0;
+}
+
+vec4 gamma(vec4 col)
+{
+    return vec4(gamma_ch(0, col.r), gamma_ch(1, col.g), gamma_ch(2, col.b), col.a);
+}
+in  vec2 Texcoord;
+out vec4 out_Color;
+void main() {
+    vec2 ts = vec2(textureSize(tex));
+    out_Color.rgba = gamma(texture(tex, Texcoord * ts));
+}
+)";
+
     // Simple 2-color decal shader
     // - in_ColorFill is first pass
     // - Red channel of the texture is used as primary color, mixed with 1-Red for
@@ -279,8 +302,8 @@ void main() {
     const char *frag_src = NULL;
     switch (type) {
     case ShaderType::Mask: frag_src = mask_frag_src; break;
-    // case ShaderType::Blit: frag_src = image_frag_src; break;
     case ShaderType::BlitGamma: frag_src = image_gamma_frag_src; break;
+    case ShaderType::BlitGammaRect: frag_src = image_gamma_rect_frag_src; break;
     case ShaderType::Logo: frag_src = xemu_logo_frag_src; break;
     default: assert(0);
     }
@@ -457,6 +480,9 @@ void InitCustomRendering(void)
     g_icon_tex = LoadTextureFromMemory(xemu_64x64_data, xemu_64x64_size, false);
 
     g_framebuffer_shader = NewDecalShader(ShaderType::BlitGamma);
+#ifdef __APPLE__
+    g_framebuffer_rect_shader = NewDecalShader(ShaderType::BlitGammaRect);
+#endif
 }
 
 static void RenderMeter(DecalShader *s, float x, float y, float width,
@@ -884,23 +910,39 @@ void ScaleDimensions(int src_width, int src_height, int max_width, int max_heigh
     }
 }
 
+static bool g_framebuffer_is_rect = false;
+
+extern "C" void xemu_set_framebuffer_texture_is_rect(bool is_rect)
+{
+    g_framebuffer_is_rect = is_rect;
+}
+
 void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[2])
 {
+    GLenum tex_target = GL_TEXTURE_2D;
+    DecalShader *s = g_framebuffer_shader;
+
+#ifdef __APPLE__
+    if (g_framebuffer_is_rect && g_framebuffer_rect_shader) {
+        tex_target = GL_TEXTURE_RECTANGLE;
+        s = g_framebuffer_rect_shader;
+    }
+#endif
+
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    
+    glBindTexture(tex_target, tex);
+
+    GLenum filter_mag = GL_LINEAR, filter_min = GL_LINEAR;
     switch (g_config.display.filtering) {
     case CONFIG_DISPLAY_FILTERING_LINEAR:
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        filter_mag = GL_LINEAR; filter_min = GL_LINEAR;
     break;
     case CONFIG_DISPLAY_FILTERING_NEAREST:
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        filter_mag = GL_NEAREST; filter_min = GL_NEAREST;
     break;
     }
-
-    DecalShader *s = g_framebuffer_shader;
+    glTexParameteri(tex_target, GL_TEXTURE_MAG_FILTER, filter_mag);
+    glTexParameteri(tex_target, GL_TEXTURE_MIN_FILTER, filter_min);
     s->flip = flip;
     glViewport(0, 0, width, height);
     glUseProgram(s->prog);
@@ -945,10 +987,17 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip)
     int tw, th;
     float scale[2];
 
+    GLenum query_target = GL_TEXTURE_2D;
+#ifdef __APPLE__
+    if (g_framebuffer_is_rect) {
+        query_target = GL_TEXTURE_RECTANGLE;
+    }
+#endif
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+    glBindTexture(query_target, tex);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_WIDTH, &tw);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_HEIGHT, &th);
+    glBindTexture(query_target, 0);
 
     // Calculate scaling factors
     if (g_config.display.ui.fit == CONFIG_DISPLAY_UI_FIT_STRETCH) {

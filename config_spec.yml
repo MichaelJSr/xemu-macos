@@ -233,6 +233,17 @@ display:
     debug_shaders: bool
     assert_on_validation_msg: bool
     preferred_physical_device: string
+  metalfx_upscale:
+    type: bool
+    default: false
+  metalfx_mode:
+    type: enum
+    values: ["off", spatial, temporal]
+    default: spatial
+  frame_interpolation:
+    type: enum
+    values: ["off", 2x, 4x]
+    default: "off"
   quality:
     surface_scale:
       type: integer

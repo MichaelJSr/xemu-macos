@@ -18,26 +18,15 @@
  */
 
 #include "renderer.h"
+#include "ui/xemu-settings.h"
 #include <math.h>
 
-static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
-                                                   const uint8_t *data_in,
-                                                   unsigned int width,
-                                                   unsigned int height,
-                                                   unsigned int pitch)
-{
-    int x, y;
-    for (y = 0; y < height; y++) {
-        const uint8_t *line = &data_in[y * pitch];
-        const uint32_t row_offset = y * width;
-        for (x = 0; x < width; x++) {
-            uint8_t *pixel = &data_out[(row_offset + x) * 4];
-            convert_yuy2_to_rgb(line, x, &pixel[0], &pixel[1], &pixel[2]);
-            pixel[3] = 255;
-        }
-    }
-    return data_out;
-}
+#if HAVE_IOSURFACE_SHARING
+#include <IOSurface/IOSurface.h>
+#include <OpenGL/CGLIOSurface.h>
+#include <OpenGL/CGLCurrent.h>
+#include "metalfx_upscale.h"
+#endif
 
 static float pvideo_calculate_scale(unsigned int din_dout,
                                     unsigned int output_size)
@@ -130,7 +119,8 @@ static void create_pvideo_image(PGRAPHState *pg, int width, int height)
                              &d->pvideo.sampler));
 }
 
-static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
+static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
+                                VkCommandBuffer cmd)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -138,29 +128,30 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
 
     create_pvideo_image(pg, state.in_width, state.in_height);
 
-    // FIXME: Dirty tracking. We don't necessarily need to upload so much.
+    if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > 0) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = 0;
+    }
 
-    // Copy texture data to mapped device buffer
+    size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;
+
     uint8_t *mapped_memory_ptr;
-
     VK_CHECK(vmaMapMemory(r->allocator,
                           r->storage_buffers[BUFFER_STAGING_SRC].allocation,
                           (void *)&mapped_memory_ptr));
 
-    convert_texture_data__CR8YB8CB8YA8(
-        mapped_memory_ptr, d->vram_ptr + state.base + state.offset,
-        state.in_width, state.in_height, state.pitch);
+    uint8_t *src = d->vram_ptr + state.base + state.offset;
+    for (int y = 0; y < state.in_height; y++) {
+        memcpy(mapped_memory_ptr + y * state.in_width * 2,
+               src + y * state.pitch,
+               state.in_width * 2);
+    }
 
     vmaFlushAllocation(r->allocator,
                        r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
                        VK_WHOLE_SIZE);
-
     vmaUnmapMemory(r->allocator,
                    r->storage_buffers[BUFFER_STAGING_SRC].allocation);
-
-    // FIXME: Merge with display renderer command buffer
-
-    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
 
     VkBufferMemoryBarrier host_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -175,8 +166,44 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
                          &host_barrier, 0, NULL);
 
+    VkBufferCopy yuv_copy = { .size = yuv_size };
+    vkCmdCopyBuffer(cmd, r->storage_buffers[BUFFER_STAGING_SRC].buffer,
+                    r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                    1, &yuv_copy);
+
+    VkBufferMemoryBarrier compute_barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+        .size = VK_WHOLE_SIZE
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
+                         &compute_barrier, 0, NULL);
+
+    pgraph_vk_dispatch_yuv_to_rgba(pg, cmd,
+                                   r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                                   r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                                   state.in_width, state.in_height);
+
+    VkBufferMemoryBarrier post_compute = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+        .size = VK_WHOLE_SIZE
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &post_compute, 0, NULL);
+
     pgraph_vk_transition_image_layout(
-        pg, cmd, disp->pvideo.image, VK_FORMAT_R8_UNORM,
+        pg, cmd, disp->pvideo.image, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkBufferImageCopy region = {
@@ -190,7 +217,7 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
         .imageOffset = (VkOffset3D){ 0, 0, 0 },
         .imageExtent = (VkExtent3D){ state.in_width, state.in_height, 1 },
     };
-    vkCmdCopyBufferToImage(cmd, r->storage_buffers[BUFFER_STAGING_SRC].buffer,
+    vkCmdCopyBufferToImage(cmd, r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                            disp->pvideo.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -198,7 +225,6 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
                                       VK_FORMAT_R8G8B8A8_UNORM,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    pgraph_vk_end_single_time_commands(pg, cmd);
 }
 
 static const char *display_frag_glsl =
@@ -320,7 +346,7 @@ static void create_render_pass(PGRAPHState *pg)
 
     VkAttachmentReference color_reference;
     attachment = (VkAttachmentDescription){
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .format = r->display.format,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -552,6 +578,15 @@ static void destroy_current_display_image(PGRAPHState *pg)
     CloseHandle(d->handle);
     d->handle = 0;
 #endif
+#elif HAVE_IOSURFACE_SHARING
+    if (d->gl_texture_id) {
+        glDeleteTextures(1, &d->gl_texture_id);
+        d->gl_texture_id = 0;
+    }
+    if (d->iosurface) {
+        CFRelease((IOSurfaceRef)d->iosurface);
+        d->iosurface = NULL;
+    }
 #endif
 
     vkDestroyImageView(r->device, d->image_view, NULL);
@@ -566,9 +601,6 @@ static void destroy_current_display_image(PGRAPHState *pg)
     d->draw_time = 0;
 }
 
-// FIXME: We may need to use two images. One for actually rendering display,
-// and another for GL in the correct tiling mode
-
 static void create_display_image(PGRAPHState *pg, int width, int height)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -578,7 +610,6 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         destroy_current_display_image(pg);
     }
 
-    const GLint gl_internal_format = GL_RGBA8;
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY
@@ -601,6 +632,13 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
 
     // Create image
+    VkFormat display_format = VK_FORMAT_R8G8B8A8_UNORM;
+#if HAVE_IOSURFACE_SHARING
+    if (r->metal_objects_extension_enabled) {
+        display_format = VK_FORMAT_B8G8R8A8_UNORM;
+    }
+#endif
+
     VkImageCreateInfo image_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
@@ -609,7 +647,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .extent.depth = 1,
         .mipLevels = 1,
         .arrayLayers = 1,
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .format = display_format,
         .tiling = use_optimal_tiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -617,6 +655,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 #ifdef WIN32
@@ -626,6 +665,54 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
     };
     image_create_info.pNext = &external_memory_image_create_info;
+#elif HAVE_IOSURFACE_SHARING
+    IOSurfaceRef imported_iosurface = NULL;
+    VkImportMetalIOSurfaceInfoEXT import_iosurface_info;
+    VkExportMetalObjectCreateInfoEXT export_metal_info;
+    if (r->metal_objects_extension_enabled) {
+        unsigned bpe = 4;
+        unsigned long long vals[] = {
+            width, height, bpe, width * bpe,
+            width * height * bpe, 'BGRA'
+        };
+        CFStringRef cf_keys[] = {
+            kIOSurfaceWidth, kIOSurfaceHeight,
+            kIOSurfaceBytesPerElement, kIOSurfaceBytesPerRow,
+            kIOSurfaceAllocSize, kIOSurfacePixelFormat
+        };
+        CFNumberRef cf_vals[6];
+        for (int i = 0; i < 6; i++) {
+            cf_vals[i] = CFNumberCreate(NULL, kCFNumberLongLongType, &vals[i]);
+        }
+        CFDictionaryRef props = CFDictionaryCreate(NULL,
+            (const void **)cf_keys, (const void **)cf_vals, 6,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        for (int i = 0; i < 6; i++) {
+            CFRelease(cf_vals[i]);
+        }
+
+        imported_iosurface = IOSurfaceCreate(props);
+        CFRelease(props);
+
+        fprintf(stderr, "[IOSurface] Created IOSurface %dx%d: %p\n",
+                width, height, (void *)imported_iosurface);
+
+        if (imported_iosurface) {
+            import_iosurface_info = (VkImportMetalIOSurfaceInfoEXT){
+                .sType = VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT,
+                .ioSurface = imported_iosurface,
+            };
+            export_metal_info = (VkExportMetalObjectCreateInfoEXT){
+                .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+                .pNext = &import_iosurface_info,
+                .exportObjectType =
+                    VK_EXPORT_METAL_OBJECT_TYPE_METAL_IOSURFACE_BIT_EXT,
+            };
+            image_create_info.pNext = &export_metal_info;
+        }
+    }
+#endif
 
     VK_CHECK(vkCreateImage(r->device, &image_create_info, NULL, &d->image));
 
@@ -641,6 +728,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExportMemoryAllocateInfo export_memory_alloc_info = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .handleTypes =
@@ -652,6 +740,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
             ,
     };
     alloc_info.pNext = &export_memory_alloc_info;
+#endif
 
     VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->memory));
     VK_CHECK(vkBindImageMemory(r->device, d->image, d->memory, 0));
@@ -713,10 +802,53 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                          image_create_info.extent.height, d->gl_memory_obj, 0);
     assert(glGetError() == GL_NO_ERROR);
 
-#endif // HAVE_EXTERNAL_MEMORY
+#elif HAVE_IOSURFACE_SHARING
+    if (r->metal_objects_extension_enabled && imported_iosurface) {
+        d->iosurface = (void *)CFRetain(imported_iosurface);
+
+        CGLContextObj cgl_ctx = CGLGetCurrentContext();
+        if (cgl_ctx) {
+            glGenTextures(1, &d->gl_texture_id);
+            glBindTexture(GL_TEXTURE_RECTANGLE, d->gl_texture_id);
+            CGLError cgl_err = CGLTexImageIOSurface2D(
+                cgl_ctx, GL_TEXTURE_RECTANGLE,
+                GL_RGBA,
+                image_create_info.extent.width,
+                image_create_info.extent.height,
+                GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                imported_iosurface, 0);
+
+            if (cgl_err == kCGLNoError &&
+                glGetError() == GL_NO_ERROR) {
+                glTexParameteri(GL_TEXTURE_RECTANGLE,
+                                GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_RECTANGLE,
+                                GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+                fprintf(stderr,
+                        "IOSurface zero-copy display: %dx%d "
+                        "(GL RECTANGLE tex %u)\n",
+                        image_create_info.extent.width,
+                        image_create_info.extent.height,
+                        d->gl_texture_id);
+            } else {
+                fprintf(stderr,
+                        "IOSurface CGLTexImageIOSurface2D failed "
+                        "(CGL err %d)\n", cgl_err);
+                glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+                glDeleteTextures(1, &d->gl_texture_id);
+                d->gl_texture_id = 0;
+            }
+        } else {
+            fprintf(stderr, "[IOSurface] No CGL context on PFIFO thread!\n");
+        }
+        CFRelease(imported_iosurface);
+    }
+#endif // HAVE_EXTERNAL_MEMORY / HAVE_IOSURFACE_SHARING
 
     d->width = image_create_info.extent.width;
     d->height = image_create_info.extent.height;
+    d->format = image_create_info.format;
 
     create_frame_buffer(pg);
 }
@@ -778,6 +910,7 @@ static PvideoState get_pvideo_state(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PvideoState state;
+    memset(&state, 0, sizeof(state));
 
     // FIXME: This check against PVIDEO_SIZE_IN does not match HW behavior.
     // Many games seem to pass this value when initializing or tearing down
@@ -859,38 +992,54 @@ static PvideoState get_pvideo_state(PGRAPHState *pg)
     return state;
 }
 
+static void resolve_display_uniform_locations(PGRAPHVkDisplayState *disp)
+{
+    if (disp->ulocs_resolved || !disp->display_frag) return;
+    ShaderUniformLayout *l = &disp->display_frag->push_constants;
+    disp->uloc_display_size = uniform_index(l, "display_size");
+    disp->uloc_line_offset = uniform_index(l, "line_offset");
+    disp->uloc_pvideo_enable = uniform_index(l, "pvideo_enable");
+    disp->uloc_pvideo_color_key_enable = uniform_index(l, "pvideo_color_key_enable");
+    disp->uloc_pvideo_color_key = uniform_index(l, "pvideo_color_key");
+    disp->uloc_pvideo_in_pos = uniform_index(l, "pvideo_in_pos");
+    disp->uloc_pvideo_pos = uniform_index(l, "pvideo_pos");
+    disp->uloc_pvideo_scale = uniform_index(l, "pvideo_scale");
+    disp->ulocs_resolved = true;
+}
+
 static void update_uniforms(PGRAPHState *pg, SurfaceBinding *surface)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
-    ShaderUniformLayout *l = &r->display.display_frag->push_constants;
+    PGRAPHVkDisplayState *disp = &r->display;
+    ShaderUniformLayout *l = &disp->display_frag->push_constants;
 
-    int display_size_loc = uniform_index(l, "display_size");  // FIXME: Cache
-    uniform2f(l, display_size_loc, r->display.width, r->display.height);
+    resolve_display_uniform_locations(disp);
+
+    uniform2f(l, disp->uloc_display_size, disp->width, disp->height);
 
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
     int line_offset = vga_display_params.line_offset ?
                           surface->pitch / vga_display_params.line_offset :
                           1;
-    int line_offset_loc = uniform_index(l, "line_offset");
-    uniform1f(l, line_offset_loc, line_offset);
+    uniform1f(l, disp->uloc_line_offset, line_offset);
 
-    PvideoState *pvideo = &r->display.pvideo.state;
-    uniform1i(l, uniform_index(l, "pvideo_enable"), pvideo->enabled);
+    PvideoState *pvideo = &disp->pvideo.state;
+    uniform1i(l, disp->uloc_pvideo_enable, pvideo->enabled);
     if (pvideo->enabled) {
-        uniform1i(l, uniform_index(l, "pvideo_color_key_enable"),
+        uniform1i(l, disp->uloc_pvideo_color_key_enable,
                   pvideo->color_key_enabled);
         uniform3f(
-            l, uniform_index(l, "pvideo_color_key"),
+            l, disp->uloc_pvideo_color_key,
             GET_MASK(pvideo->color_key, NV_PVIDEO_COLOR_KEY_RED) / 255.0,
             GET_MASK(pvideo->color_key, NV_PVIDEO_COLOR_KEY_GREEN) / 255.0,
             GET_MASK(pvideo->color_key, NV_PVIDEO_COLOR_KEY_BLUE) / 255.0);
-        uniform2f(l, uniform_index(l, "pvideo_in_pos"), pvideo->in_s / 16.f,
+        uniform2f(l, disp->uloc_pvideo_in_pos, pvideo->in_s / 16.f,
                   pvideo->in_t / 8.f);
-        uniform4f(l, uniform_index(l, "pvideo_pos"), pvideo->out_x,
+        uniform4f(l, disp->uloc_pvideo_pos, pvideo->out_x,
                   pvideo->out_y, pvideo->out_width, pvideo->out_height);
-        uniform4f(l, uniform_index(l, "pvideo_scale"), pvideo->scale_x,
+        uniform4f(l, disp->uloc_pvideo_scale, pvideo->scale_x,
                   pvideo->scale_y, 1.0f / pg->surface_scale_factor, 1.0);
     }
 }
@@ -901,6 +1050,10 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     PGRAPHVkState *r = pg->vk_renderer_state;
     PGRAPHVkDisplayState *disp = &r->display;
 
+    if (!surface->image || !surface->initialized) {
+        return;
+    }
+
     if (r->in_command_buffer &&
         surface->draw_time >= r->command_buffer_start_time) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_PRESENTING);
@@ -908,24 +1061,29 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     pgraph_vk_upload_surface_data(d, surface, !tcg_enabled());
 
-    disp->pvideo.state = get_pvideo_state(pg);
-    if (disp->pvideo.state.enabled) {
-        upload_pvideo_image(pg, disp->pvideo.state);
-    }
-
     update_uniforms(pg, surface);
-    update_descriptor_set(pg, surface);
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
         "Display Surface %08"HWADDR_PRIx, surface->vram_addr);
+
+    disp->pvideo.state = get_pvideo_state(pg);
+    if (disp->pvideo.state.enabled) {
+        if (memcmp(&disp->pvideo.state, &disp->pvideo.last_uploaded_state,
+                   sizeof(PvideoState)) != 0) {
+            upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
+            disp->pvideo.last_uploaded_state = disp->pvideo.state;
+        }
+    }
+
+    update_descriptor_set(pg, surface);
 
     pgraph_vk_transition_image_layout(pg, cmd, surface->image,
                                       surface->host_fmt.vk_format,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     pgraph_vk_transition_image_layout(
-        pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
+        pg, cmd, disp->image, disp->format,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkRenderPassBeginInfo render_pass_begin_info = {
@@ -990,7 +1148,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     pgraph_vk_transition_image_layout(pg, cmd, disp->image,
-                                      VK_FORMAT_R8G8B8_UNORM,
+                                      disp->format,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -1034,6 +1192,15 @@ static void destroy_surface_sampler(PGRAPHState *pg)
 
 void pgraph_vk_init_display(PGRAPHState *pg)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    r->display.format = VK_FORMAT_R8G8B8A8_UNORM;
+#if HAVE_IOSURFACE_SHARING
+    if (r->metal_objects_extension_enabled) {
+        r->display.format = VK_FORMAT_B8G8R8A8_UNORM;
+    }
+#endif
+
     create_descriptor_pool(pg);
     create_descriptor_set_layout(pg);
     create_descriptor_sets(pg);
@@ -1045,6 +1212,22 @@ void pgraph_vk_init_display(PGRAPHState *pg)
 void pgraph_vk_finalize_display(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+#if HAVE_IOSURFACE_SHARING
+    metalfx_destroy();
+    metalfx_temporal_destroy();
+    metalfx_interpolation_destroy();
+
+    if (r->display.interp_prev_surface) {
+        CFRelease((IOSurfaceRef)r->display.interp_prev_surface);
+        r->display.interp_prev_surface = NULL;
+    }
+    if (r->display.interp_cur_surface) {
+        CFRelease((IOSurfaceRef)r->display.interp_cur_surface);
+        r->display.interp_cur_surface = NULL;
+    }
+    r->display.interp_remaining = 0;
+#endif
 
     destroy_pvideo_image(pg);
 
@@ -1074,6 +1257,45 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         return;
     }
 
+    PGRAPHVkDisplayState *disp = &r->display;
+    if (disp->image && surface->draw_time == disp->draw_time) {
+#if HAVE_IOSURFACE_SHARING
+        /*
+         * No new frame: generate and present the next interpolated frame
+         * from the saved prev/cur frame pair (deferred generation).
+         */
+        if (disp->interp_remaining > 0 &&
+            disp->interp_prev_surface && disp->interp_cur_surface &&
+            metalfx_interpolation_is_supported() && disp->gl_texture_id) {
+            float dt = (float)(disp->interp_index + 1) /
+                       (float)(disp->interp_total + 1);
+            if (metalfx_interpolation_generate(
+                    (IOSurfaceRef)disp->interp_prev_surface,
+                    (IOSurfaceRef)disp->interp_cur_surface,
+                    NULL, NULL, dt)) {
+                IOSurfaceRef interp =
+                    metalfx_interpolation_get_output_surface();
+                if (interp) {
+                    CGLContextObj cgl_ctx = CGLGetCurrentContext();
+                    if (cgl_ctx) {
+                        glBindTexture(GL_TEXTURE_RECTANGLE,
+                                      disp->gl_texture_id);
+                        CGLTexImageIOSurface2D(
+                            cgl_ctx, GL_TEXTURE_RECTANGLE, GL_RGBA,
+                            disp->interp_width, disp->interp_height,
+                            GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                            interp, 0);
+                        glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+                    }
+                }
+            }
+            disp->interp_index++;
+            disp->interp_remaining--;
+        }
+#endif
+        return;
+    }
+
     unsigned int width = 0, height = 0;
     d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
 
@@ -1084,10 +1306,134 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
     pgraph_apply_scaling_factor(pg, &width, &height);
 
-    PGRAPHVkDisplayState *disp = &r->display;
     if (!disp->image || disp->width != width || disp->height != height) {
         create_display_image(pg, width, height);
+        disp->pvideo.last_uploaded_state = (PvideoState){ 0 };
+    }
+
+    if (!disp->image) {
+        return;
     }
 
     render_display(pg, surface);
+
+#if HAVE_IOSURFACE_SHARING
+    if (!disp->iosurface || !r->metal_objects_extension_enabled) {
+        goto done_metalfx;
+    }
+
+    {
+        IOSurfaceRef current_surface = (IOSurfaceRef)disp->iosurface;
+        IOSurfaceRef present_surface = current_surface;
+
+        /* --- MetalFX Upscaling --- */
+        int mfx_mode = 0;
+        if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_SPATIAL) {
+            mfx_mode = 1;
+        } else if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_TEMPORAL) {
+            mfx_mode = 2;
+        } else if (g_config.display.metalfx_upscale) {
+            mfx_mode = 1;
+        }
+
+        /*
+         * macOS 26 IOSurface bug: BGRA8 surfaces wider than ~1920px get
+         * wrong bytesPerRow, breaking Metal texture wrapping. Only run
+         * MetalFX when the display IOSurface is at a safe width.
+         *
+         * At 1x (640x480): temporal 640x480 -> 1920x1440, interp at 1920x1440
+         * At 2x (1280x960): temporal 1280x960 -> 1920x1440, interp at 1920x1440
+         * At 4x (2560x1920): skipped (display too wide), GL scales directly
+         */
+        #define METALFX_SAFE_MAX_OUTPUT 1920
+
+        if (mfx_mode > 0 && (int)disp->width <= METALFX_SAFE_MAX_OUTPUT) {
+            int out_w = METALFX_SAFE_MAX_OUTPUT;
+            int out_h = (int)disp->height * out_w / (int)disp->width;
+            if (out_h > METALFX_SAFE_MAX_OUTPUT) {
+                out_h = METALFX_SAFE_MAX_OUTPUT;
+            }
+
+            if (out_w > (int)disp->width || out_h > (int)disp->height) {
+                IOSurfaceRef upscaled = NULL;
+
+                if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
+                    if (metalfx_temporal_init(disp->width, disp->height,
+                                             out_w, out_h)) {
+                        if (metalfx_temporal_upscale(current_surface)) {
+                            upscaled = metalfx_temporal_get_output_surface();
+                        }
+                    }
+                }
+
+                if (!upscaled) {
+                    if (metalfx_init(disp->width, disp->height, out_w, out_h)) {
+                        if (metalfx_upscale(current_surface)) {
+                            upscaled = metalfx_get_output_surface();
+                        }
+                    }
+                }
+
+                if (upscaled) {
+                    present_surface = upscaled;
+                }
+            }
+        }
+
+        /* --- Frame Interpolation (runs independently of upscaling) --- */
+        int interp_mode = 0;
+        if (g_config.display.frame_interpolation ==
+                CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
+            interp_mode = 2;
+        } else if (g_config.display.frame_interpolation ==
+                       CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
+            interp_mode = 4;
+        }
+
+        /*
+         * Set up deferred frame interpolation for successive sync calls.
+         * 2x: 1 interpolated frame at dt=0.5 (30fps -> 60fps)
+         * 4x: 3 interpolated frames at dt=0.25, 0.5, 0.75 (30fps -> 120fps)
+         */
+        if (interp_mode >= 2 && metalfx_interpolation_is_supported()) {
+            int iw = (int)IOSurfaceGetWidth(present_surface);
+            int ih = (int)IOSurfaceGetHeight(present_surface);
+
+            if (metalfx_interpolation_init(iw, ih)) {
+                /* Release old prev, shift current to prev */
+                if (disp->interp_prev_surface) {
+                    CFRelease((IOSurfaceRef)disp->interp_prev_surface);
+                }
+                disp->interp_prev_surface = disp->interp_cur_surface;
+                disp->interp_cur_surface = (void *)CFRetain(present_surface);
+
+                if (disp->interp_prev_surface) {
+                    int total = (interp_mode == 4) ? 3 : 1;
+                    disp->interp_total = total;
+                    disp->interp_remaining = total;
+                    disp->interp_index = 0;
+                    disp->interp_width = iw;
+                    disp->interp_height = ih;
+                }
+            }
+        }
+
+        /* Bind to GL texture */
+        if (disp->gl_texture_id) {
+            int surf_w = (int)IOSurfaceGetWidth(present_surface);
+            int surf_h = (int)IOSurfaceGetHeight(present_surface);
+            CGLContextObj cgl_ctx = CGLGetCurrentContext();
+            if (cgl_ctx) {
+                glBindTexture(GL_TEXTURE_RECTANGLE, disp->gl_texture_id);
+                CGLTexImageIOSurface2D(
+                    cgl_ctx, GL_TEXTURE_RECTANGLE, GL_RGBA,
+                    surf_w, surf_h,
+                    GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                    present_surface, 0);
+                glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+            }
+        }
+    }
+done_metalfx: (void)0;
+#endif
 }
