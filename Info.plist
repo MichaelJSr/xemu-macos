@@ -32,5 +32,14 @@
   <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Microphone used for peripheral emulation, e.g. Xbox Live Communicator.</string>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS</key>
+    <string>1</string>
+    <key>MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS</key>
+    <string>2</string>
+    <key>MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS</key>
+    <string>0</string>
+  </dict>
 </dict>
 </plist>

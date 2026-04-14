@@ -43,7 +43,7 @@ extern int nv2a_vk_dgroup_indent;
 #define NV2A_VK_DGROUP_END(...)             \
     do {                                    \
         nv2a_vk_dgroup_indent--;            \
-        assert(nv2a_vk_dgroup_indent >= 0); \
+        nv2a_vk_assert(nv2a_vk_dgroup_indent >= 0); \
     } while (0)
 
 #define VK_CHECK(x)                                           \
@@ -51,9 +51,20 @@ extern int nv2a_vk_dgroup_indent;
         VkResult vk_result = (x);                             \
         if (vk_result != VK_SUCCESS) {                        \
             fprintf(stderr, "vk_result = %d\n", vk_result);   \
+            __builtin_unreachable();                           \
         }                                                     \
-        assert(vk_result == VK_SUCCESS && "vk check failed"); \
     } while (0)
+
+/* Performance build: strip internal invariant asserts and profile counters
+ * from VK hot paths. Guest-boundary checks should use regular assert(). */
+#define NV2A_VK_PERF_BUILD 1
+#define NV2A_STRIP_PROFILE_COUNTERS 1
+
+#if NV2A_VK_PERF_BUILD
+#define nv2a_vk_assert(x) ((void)0)
+#else
+#define nv2a_vk_assert(x) assert(x)
+#endif
 
 void pgraph_vk_debug_frame_terminator(void);
 
