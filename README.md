@@ -214,18 +214,38 @@ rm -rf macos-libs/ macos-pkgs/ build/ dist/
 
 ## Configuration
 
-### Recommended `xemu.toml` for Apple Silicon
+### In-App Settings
 
-The config file is at `~/Library/Application Support/xemu/xemu/xemu.toml`.
+Most settings added by this fork are accessible directly in the xemu UI:
+
+**Display tab** (Settings > Display):
+- **MetalFX Mode** dropdown: Off / Spatial / Temporal
+- **Frame Interpolation** dropdown: Off / 2x (60fps) / 4x (120fps)
+- **Internal resolution scale**: 1x through 10x
+- **Backend**: Null / OpenGL / Vulkan
+
+**General tab** (Settings > General):
+- **Hard FPU emulation** toggle: Enable/disable ARM64 hardware FPU (requires restart)
+
+**View menu** (quick access when menu bar is visible):
+- **MetalFX** dropdown
+- **Interpolation** dropdown
+- Plus existing Backend, Display Mode, Filter Method, Aspect Ratio
+
+### xemu.toml Reference
+
+The config file is at `~/Library/Application Support/xemu/xemu/xemu.toml`. Most settings can be changed in-app, but the toml allows manual fine-tuning. Changes take effect on next launch unless noted.
+
+#### Recommended config for Apple Silicon
 
 ```toml
 [display]
 renderer = 'VULKAN'
 metalfx_mode = 'temporal'
-frame_interpolation = '4x'     # 'off', '2x' (60fps), '4x' (120fps)
+frame_interpolation = '4x'
 
 [display.quality]
-surface_scale = 2               # 1=640x480, 2=1280x960, 4=2560x1920
+surface_scale = 2
 
 [display.window]
 fullscreen_on_startup = true
@@ -236,23 +256,105 @@ startup_size = '1920x1080'
 fit = 'stretch'
 ```
 
-### Settings explained
+#### Complete xemu.toml reference (our additions)
 
-| Setting | Values | Notes |
-|---|---|---|
-| `metalfx_mode` | `'off'`, `'spatial'`, `'temporal'` | Temporal is best quality (ML + temporal accumulation) |
-| `frame_interpolation` | `'off'`, `'2x'`, `'4x'` | 2x = true 60fps, 4x = true 120fps with 3 intermediate frames |
-| `surface_scale` | 1, 2, 3, 4 | Higher = sharper textures but more GPU work. At 4x, MetalFX is skipped (already high-res). Sweet spot is 2. |
-| `hard_fpu` | `true`, `false` | Under `[perf]`. Defaults to true. Disable if a specific game has FPU-related issues. |
+```toml
+# ============================================================
+# Display settings
+# ============================================================
+[display]
+renderer = 'VULKAN'            # 'NULL', 'OPENGL', 'VULKAN'
+                                # Vulkan required for MetalFX and IOSurface zero-copy
 
-### Scale + MetalFX interaction
+metalfx_upscale = true          # Legacy boolean (redundant if metalfx_mode is set)
 
-| Scale | Display Size | MetalFX | Interpolation | Result |
+metalfx_mode = 'temporal'       # 'off'     - No MetalFX upscaling
+                                # 'spatial' - Single-frame ML upscaling (fast, softer)
+                                # 'temporal'- Multi-frame ML upscaling (best quality,
+                                #             temporal accumulation reduces aliasing)
+
+frame_interpolation = '4x'      # 'off' - No interpolation, native game framerate
+                                # '2x'  - True 60fps: 1 interpolated frame (dt=0.5)
+                                # '4x'  - True 120fps: 3 interpolated frames
+                                #         (dt=0.25, 0.5, 0.75) matching 120Hz panels
+
+# ============================================================
+# Display quality
+# ============================================================
+[display.quality]
+surface_scale = 2               # Internal rendering resolution multiplier
+                                # 1 = 640x480 (native Xbox, lowest GPU load)
+                                # 2 = 1280x960 (recommended: good balance)
+                                # 3 = 1920x1440 (high quality)
+                                # 4 = 2560x1920 (sharpest, but MetalFX skipped)
+
+# ============================================================
+# Vulkan-specific settings
+# ============================================================
+[display.vulkan]
+preferred_physical_device = 'Apple M2 Ultra'  # GPU selection (auto-detected)
+
+# ============================================================
+# Window settings
+# ============================================================
+[display.window]
+fullscreen_on_startup = true    # Launch directly into fullscreen
+fullscreen_exclusive = true     # Use exclusive fullscreen mode (better latency)
+startup_size = '1920x1080'      # Initial window size before fullscreen
+                                # Options: '640x480', '1280x720', '1920x1080',
+                                #          '2560x1440', '3840x2160', etc.
+vsync = true                    # Sync to display refresh (reduces tearing)
+
+# ============================================================
+# UI settings
+# ============================================================
+[display.ui]
+show_menubar = false            # Show menu bar (press F10 to toggle)
+fit = 'stretch'                 # 'center', 'scale', 'stretch'
+                                # stretch fills the window (breaks aspect ratio)
+                                # scale preserves aspect ratio with black bars
+scale = 2                       # UI element scale (1 or 2)
+
+# ============================================================
+# Performance settings
+# ============================================================
+[perf]
+hard_fpu = true                 # ARM64: Use native double for x87 FPU emulation
+                                # 3-6x faster than softfloat. Disable if a game
+                                # has floating-point precision issues (very rare).
+                                # Requires restart to take effect.
+
+cache_shaders = true            # Cache compiled shaders to disk to reduce stutter
+
+# ============================================================
+# Audio settings
+# ============================================================
+[audio]
+use_dsp = true                  # Enable Xbox audio DSP emulation
+volume_limit = 0.75             # Master volume (0.0 to 1.0)
+
+# ============================================================
+# System settings
+# ============================================================
+[sys]
+mem_limit = '128'               # Xbox RAM size (always '128' for standard Xbox)
+
+[sys.files]
+bootrom_path = '/path/to/mcpx_1.0.bin'           # MCPX boot ROM
+flashrom_path = '/path/to/bios.bin'               # Xbox BIOS
+eeprom_path = '~/Library/.../eeprom.bin'          # EEPROM (auto-created)
+hdd_path = '/path/to/xbox_hdd.qcow2'             # Xbox HDD image
+dvd_path = '/path/to/game.iso'                    # Game disc image
+```
+
+### Settings interaction table
+
+| Scale | Display Size | MetalFX | Interpolation | Effective Output |
 |---|---|---|---|---|
-| 1x | 640x480 | Temporal -> 1920x1440 | Works | Best perf, good quality |
-| 2x | 1280x960 | Temporal -> 1920x1440 | Works | **Recommended**: sharp textures + temporal AA |
-| 3x | 1920x1440 | No upscale needed | Works | High quality, no MetalFX benefit |
-| 4x | 2560x1920 | Skipped (>1920 wide) | Skipped | Sharpest, but no interpolation |
+| 1x | 640x480 | Temporal -> 1920x1440 | 2x=60fps, 4x=120fps | Best perf, good quality |
+| 2x | 1280x960 | Temporal -> 1920x1440 | 2x=60fps, 4x=120fps | **Recommended** |
+| 3x | 1920x1440 | No upscale needed | 2x=60fps, 4x=120fps | High quality, no upscale benefit |
+| 4x | 2560x1920 | Skipped (>1920 wide) | Skipped | Sharpest textures, native framerate only |
 
 ---
 

@@ -207,6 +207,13 @@ void ShowMainMenu()
                          "Linear\0Nearest\0");
             ImGui::Combo("Aspect Ratio", &g_config.display.ui.aspect_ratio,
                          "Native\0Auto\0""4:3\0""16:9\0");
+#ifdef __APPLE__
+            ImGui::Separator();
+            ImGui::Combo("MetalFX", &g_config.display.metalfx_mode,
+                         "Off\0Spatial\0Temporal\0");
+            ImGui::Combo("Interpolation", &g_config.display.frame_interpolation,
+                         "Off\0""2x\0""4x\0");
+#endif
             if (ImGui::MenuItem("Fullscreen", "F11",
                                 xemu_is_fullscreen(), true)) {
                 xemu_toggle_fullscreen();

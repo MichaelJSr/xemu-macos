@@ -59,7 +59,7 @@ void MainMenuGeneralView::Draw()
            "Check for updates whenever xemu is opened");
 #endif
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     SectionTitle("Performance");
     Toggle("Hard FPU emulation", &g_config.perf.hard_fpu,
            "Use hardware-accelerated floating point emulation (requires restart)");
@@ -763,6 +763,20 @@ void MainMenuDisplayView::Draw()
                      "Increase surface scaling factor for higher quality")) {
         nv2a_set_surface_scale_factor(rendering_scale+1);
     }
+
+#ifdef __APPLE__
+    SectionTitle("Apple Silicon");
+    ChevronCombo("MetalFX Mode", &g_config.display.metalfx_mode,
+                 "Off\0"
+                 "Spatial\0"
+                 "Temporal\0",
+                 "MetalFX upscaling mode (Temporal recommended for best quality)");
+    ChevronCombo("Frame Interpolation", &g_config.display.frame_interpolation,
+                 "Off\0"
+                 "2x (60fps)\0"
+                 "4x (120fps)\0",
+                 "Generate intermediate frames for smoother output (requires MetalFX)");
+#endif
 
     SectionTitle("Window");
     bool fs = xemu_is_fullscreen();
