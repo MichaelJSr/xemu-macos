@@ -33,6 +33,10 @@
 	#define FPNG_X86_OR_X64_CPU (0)
 #endif
 
+#if defined(FPNG_USE_ARM_CRC32) && FPNG_USE_ARM_CRC32
+	#include <arm_acle.h>
+#endif
+
 #if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE
 	#ifdef _MSC_VER
 		#include <intrin.h>
@@ -395,6 +399,31 @@ namespace fpng
 #if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE 
 		if (g_cpu_info.can_use_pclmul())
 			return crc32_sse41_simd(static_cast<const uint8_t *>(pData), size, prev_crc32);
+#endif
+
+#if defined(FPNG_USE_ARM_CRC32) && FPNG_USE_ARM_CRC32
+		{
+			const uint8_t *p = static_cast<const uint8_t *>(pData);
+			uint32_t crc = ~prev_crc32;
+			while (size >= 8) {
+				uint64_t v;
+				memcpy(&v, p, 8);
+				crc = __crc32d(crc, v);
+				p += 8;
+				size -= 8;
+			}
+			if (size >= 4) {
+				uint32_t v;
+				memcpy(&v, p, 4);
+				crc = __crc32w(crc, v);
+				p += 4;
+				size -= 4;
+			}
+			while (size--) {
+				crc = __crc32b(crc, *p++);
+			}
+			return ~crc;
+		}
 #endif
 
 		return crc32_slice_by_4(pData, size, prev_crc32);

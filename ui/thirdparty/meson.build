@@ -1,5 +1,10 @@
+stb_image_args = []
+if cpu == 'aarch64'
+  stb_image_args += ['-DSTBI_NEON']
+endif
 libstb_image = static_library('stb_image',
-                              sources: 'stb_image/stb_image_impl.c')
+                              sources: 'stb_image/stb_image_impl.c',
+                              c_args: stb_image_args)
 stb_image = declare_dependency(include_directories: 'stb_image',
                                link_with: libstb_image)
 
@@ -7,6 +12,8 @@ fa = declare_dependency(include_directories: 'fa')
 
 if cpu == 'x86_64'
   libfpng_cpp_args = ['-DFPNG_NO_SSE=0', '-msse4.1', '-mpclmul']
+elif cpu == 'aarch64'
+  libfpng_cpp_args = ['-DFPNG_NO_SSE=1', '-DFPNG_USE_ARM_CRC32=1']
 else
   libfpng_cpp_args = ['-DFPNG_NO_SSE=1']
 endif
