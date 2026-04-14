@@ -551,15 +551,15 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
      * and their copies are batched on the main command buffer. If the
      * staging buffer is too full, flush first to reclaim space.
      */
-    if (staging->buffer_offset + texture_data_size > staging->buffer_size) {
+    VkDeviceSize slot_limit = r->flight[r->current_flight].staging_buffer_limit;
+    if (staging->buffer_offset + texture_data_size > slot_limit) {
         if (r->in_command_buffer) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
         }
-        staging->buffer_offset = 0;
+        staging->buffer_offset = r->flight[r->current_flight].staging_buffer_base;
     }
 
-    nv2a_vk_assert(staging->buffer_offset + texture_data_size <=
-                   staging->buffer_size);
+    nv2a_vk_assert(staging->buffer_offset + texture_data_size <= slot_limit);
 
     VkDeviceSize base_offset = staging->buffer_offset;
 

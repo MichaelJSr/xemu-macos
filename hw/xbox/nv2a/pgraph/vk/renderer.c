@@ -58,6 +58,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     pgraph_vk_init_textures(pg);
     pgraph_vk_init_reports(pg);
     pgraph_vk_init_compute(pg);
+    pgraph_vk_init_flight_partitions(pg);
     pgraph_vk_init_display(pg);
 
     pgraph_vk_update_vertex_ram_buffer(&d->pgraph, 0, d->vram_ptr,

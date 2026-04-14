@@ -93,6 +93,25 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
     }
 }
 
+void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    int ds_per_slot = ARRAY_SIZE(r->descriptor_sets) / NUM_FLIGHT_SLOTS;
+    int cds_per_slot = ARRAY_SIZE(r->compute.descriptor_sets) / NUM_FLIGHT_SLOTS;
+    VkDeviceSize staging_size = r->storage_buffers[BUFFER_STAGING_SRC].buffer_size;
+    VkDeviceSize staging_per_slot = staging_size / NUM_FLIGHT_SLOTS;
+
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        r->flight[i].descriptor_set_base = i * ds_per_slot;
+        r->flight[i].descriptor_set_limit = (i + 1) * ds_per_slot;
+        r->flight[i].compute_descriptor_set_base = i * cds_per_slot;
+        r->flight[i].compute_descriptor_set_limit = (i + 1) * cds_per_slot;
+        r->flight[i].staging_buffer_base = i * staging_per_slot;
+        r->flight[i].staging_buffer_limit = (i + 1) * staging_per_slot;
+    }
+}
+
 void pgraph_vk_select_flight_slot(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;

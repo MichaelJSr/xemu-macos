@@ -1661,9 +1661,10 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         pgraph_vk_wait_for_previous_flight(pg);
         pgraph_vk_select_flight_slot(pg);
 
-        r->descriptor_set_index = 0;
+        int next = r->current_flight;
+        r->descriptor_set_index = r->flight[next].descriptor_set_base;
         r->in_command_buffer = false;
-        destroy_flight_framebuffers(pg, r->current_flight);
+        destroy_flight_framebuffers(pg, next);
         r->framebuffer_index = 0;
 
         if (check_budget) {
@@ -1675,7 +1676,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
     pgraph_vk_process_pending_reports_internal(d);
 
     pgraph_vk_compute_finish_complete(r);
-    r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = 0;
+    r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset =
+        r->flight[r->current_flight].staging_buffer_base;
 }
 
 void pgraph_vk_begin_command_buffer(PGRAPHState *pg)

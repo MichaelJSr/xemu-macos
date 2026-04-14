@@ -391,7 +391,7 @@ static void update_descriptor_sets(PGRAPHState *pg,
     VkWriteDescriptorSet descriptor_writes[3];
 
     assert(r->compute.descriptor_set_index <
-           ARRAY_SIZE(r->compute.descriptor_sets));
+           r->flight[r->current_flight].compute_descriptor_set_limit);
 
     for (int i = 0; i < count; i++) {
         descriptor_writes[i] = (VkWriteDescriptorSet){
@@ -412,15 +412,14 @@ static void update_descriptor_sets(PGRAPHState *pg,
 
 bool pgraph_vk_compute_needs_finish(PGRAPHVkState *r)
 {
-    bool need_descriptor_write_reset = (r->compute.descriptor_set_index >=
-                                        ARRAY_SIZE(r->compute.descriptor_sets));
-
-    return need_descriptor_write_reset;
+    int limit = r->flight[r->current_flight].compute_descriptor_set_limit;
+    return r->compute.descriptor_set_index >= limit;
 }
 
 void pgraph_vk_compute_finish_complete(PGRAPHVkState *r)
 {
-    r->compute.descriptor_set_index = 0;
+    r->compute.descriptor_set_index =
+        r->flight[r->current_flight].compute_descriptor_set_base;
 }
 
 static int get_workgroup_size_for_output_units(PGRAPHVkState *r, int output_units)

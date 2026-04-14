@@ -394,6 +394,12 @@ typedef struct PGRAPHVkState {
         VkSemaphore semaphore;
         VkFramebuffer framebuffers[50];
         int framebuffer_index;
+        int descriptor_set_base;
+        int descriptor_set_limit;
+        int compute_descriptor_set_base;
+        int compute_descriptor_set_limit;
+        VkDeviceSize staging_buffer_base;
+        VkDeviceSize staging_buffer_limit;
         bool submitted;
     } flight[NUM_FLIGHT_SLOTS];
     int current_flight;
@@ -554,6 +560,7 @@ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
 void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
 void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg);
 void pgraph_vk_select_flight_slot(PGRAPHState *pg);
+void pgraph_vk_init_flight_partitions(PGRAPHState *pg);
 
 // image.c
 void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
