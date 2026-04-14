@@ -422,6 +422,7 @@ typedef struct PGRAPHVkState {
     GArray *render_passes; // RenderPass
     bool in_render_pass;
     bool in_draw;
+    bool nop_draw;
 
     Lru pipeline_cache;
     VkPipelineCache vk_pipeline_cache;

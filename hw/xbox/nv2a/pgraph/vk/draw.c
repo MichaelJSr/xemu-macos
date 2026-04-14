@@ -26,6 +26,7 @@
 void pgraph_vk_draw_begin(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
 
     NV2A_VK_DPRINTF("NV097_SET_BEGIN_END: 0x%x", d->pgraph.primitive_mode);
 
@@ -38,11 +39,12 @@ void pgraph_vk_draw_begin(NV2AState *d)
     bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
     bool stencil_test =
         pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
-    bool is_nop_draw = !(color_write || depth_test || stencil_test);
+
+    r->nop_draw = !(color_write || depth_test || stencil_test);
 
     pgraph_vk_surface_update(d, true, true, depth_test || stencil_test);
 
-    if (is_nop_draw) {
+    if (r->nop_draw) {
         NV2A_VK_DPRINTF("nop!");
         return;
     }
@@ -1893,18 +1895,7 @@ void pgraph_vk_draw_end(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
-    bool mask_alpha = control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE;
-    bool mask_red = control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE;
-    bool mask_green = control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE;
-    bool mask_blue = control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE;
-    bool color_write = mask_alpha || mask_red || mask_green || mask_blue;
-    bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
-    bool stencil_test =
-        pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
-    bool is_nop_draw = !(color_write || depth_test || stencil_test);
-
-    if (is_nop_draw) {
+    if (r->nop_draw) {
         // FIXME: Check PGRAPH register 0x880.
         // HW uses bit 11 in 0x880 to enable or disable a color/zeta limit
         // check that will raise an exception in the case that a draw should
@@ -1919,10 +1910,21 @@ void pgraph_vk_draw_end(NV2AState *d)
     pgraph_vk_flush_draw(d);
 
     pg->draw_time++;
-    if (r->color_binding && pgraph_color_write_enabled(pg)) {
+
+    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    bool color_write =
+        (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE) ||
+        (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE) ||
+        (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE) ||
+        (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE);
+    bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
+    bool stencil_test =
+        pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+
+    if (r->color_binding && color_write) {
         r->color_binding->draw_time = pg->draw_time;
     }
-    if (r->zeta_binding && pgraph_zeta_write_enabled(pg)) {
+    if (r->zeta_binding && (depth_test || stencil_test)) {
         r->zeta_binding->draw_time = pg->draw_time;
     }
 
