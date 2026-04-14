@@ -2,114 +2,140 @@
 
 A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensive performance optimizations for Apple Silicon Macs running macOS 26+.
 
-> **Note:** This is for personal use. Optimizations are targeted at M2+ series Macs with macOS 26 (Tahoe) or later.
+> **Note:** This is for my personal use. Optimizations are targeted at M2+ series Macs with macOS 26 (Tahoe) or later. Upstream xemu does not officially support macOS Vulkan -- this fork adds MoltenVK compatibility and Apple Silicon-specific performance work.
+
+---
+
+## Table of Contents
+
+- [Optimizations](#optimizations)
+- [Failed Optimizations](#failed-optimizations-and-why)
+- [MoltenVK Setup](#moltenvk-setup)
+- [Build Instructions](#build-instructions)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Optimizations
 
-### Tier 1: High Impact
+### Tier 1: High Impact (measurable FPS/latency improvement)
 
 | Optimization | Speedup | Description |
 |---|---|---|
-| **ARM64 Hard FPU** | 3-6x faster x87 ops | Fast bit-level floatx80-to-double conversion replaces QEMU's softfloat integer-only emulation. Branchless normal path (~6 integer ops per conversion). |
-| **MetalFX Temporal Upscaling** | Better quality at lower render cost | ML-based upscaling from internal resolution (e.g. 1280x960) to 1920x1440 with temporal accumulation and anti-aliasing. |
-| **True Frame Interpolation** | 30fps -> 60fps or 120fps | MTLFXFrameInterpolator (macOS 26+) generates intermediate frames. 2x mode = 1 interp frame, 4x mode = 3 interp frames with correct deltaTime values. |
-| **Texture Upload Batching** | Eliminates GPU sync per texture | Staging buffer sub-allocation allows multiple texture uploads to batch on the main command buffer before a single flush. |
-| **Texture Decode Parallelization** | Up to 24x throughput | GThreadPool distributes S3TC/format conversion across all CPU cores for cubemap and mipmapped textures. |
+| **ARM64 Hard FPU** | 3-6x faster x87 ops | Fast bit-level floatx80-to-double conversion replaces QEMU's softfloat integer-only emulation. Branchless normal path (~6 integer ops per conversion). Every x87 instruction (FADD, FMUL, FDIV, etc.) benefits. |
+| **MetalFX Temporal Upscaling** | Better quality at lower GPU cost | Apple's ML-based upscaling from internal resolution (e.g., 1280x960) to 1920x1440 with temporal accumulation and anti-aliasing via `MTLFXTemporalScaler`. |
+| **True Frame Interpolation** | 30fps -> 60fps or 120fps | `MTLFXFrameInterpolator` (macOS 26+) generates intermediate frames with correct deltaTime. 2x mode = 1 interpolated frame (dt=0.5), 4x mode = 3 interpolated frames (dt=0.25, 0.5, 0.75). Deferred generation across sync calls for true 120fps. |
+| **Texture Upload Batching** | Eliminates GPU sync per texture | Staging buffer sub-allocation (bump allocator on `BUFFER_STAGING_SRC`) allows multiple texture uploads to batch on the main command buffer. Flush guards prevent corruption between users. |
+| **Texture Decode Parallelization** | Up to 24x throughput on M2 Ultra | `GThreadPool` distributes S3TC decompression, unswizzle, and format conversion across all CPU cores. For cubemap textures with 10 mip levels, that's 60 parallel tasks. |
 
-### Tier 2: Medium Impact
+### Tier 2: Medium Impact (reduces per-frame overhead)
 
 | Optimization | Description |
 |---|---|
-| **Display Command Buffer Merge** | PVIDEO upload + display render pass combined into 1 GPU submission instead of 2. |
-| **Surface Init on Main CB** | Layout transitions for new surfaces use the main command buffer instead of a separate aux submission. |
-| **GPU Compute YUV-to-RGBA** | PVIDEO overlay YUV conversion runs on GPU compute instead of CPU. |
-| **GPU Compute Z-Order Unswizzle** | Surface upload unswizzle for 4bpp surfaces runs on GPU compute. |
-| **Pipeline Dirty Tracking** | vertex_state_dirty flag replaces per-draw memcmp. Only triggers when vertex descriptions actually change. |
-| **Vertex Staging Bulk Copy** | Single memcpy when source and destination strides match (common case). |
-| **Default Vulkan on macOS** | IOSurface zero-copy display path is strictly superior to OpenGL on macOS. |
+| **Display Command Buffer Merge** | PVIDEO overlay upload + display render pass combined into 1 aux GPU submission instead of 2. Eliminates 1 `vkQueueSubmit` + `vkWaitForFences` per display frame. |
+| **Surface Init on Main CB** | New surface layout transitions use the main command buffer via `pgraph_vk_begin_nondraw_commands` instead of a separate aux submission. |
+| **GPU Compute YUV-to-RGBA** | PVIDEO overlay YUV conversion runs as a Vulkan compute shader dispatch instead of CPU `convert_texture_data`. |
+| **GPU Compute Z-Order Unswizzle** | Surface upload unswizzle for 4bpp surfaces runs as a Vulkan compute shader with Morton address decode. |
+| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp` of vertex descriptions. Only marks dirty when descriptions actually change (compares before/after in vertex bind). |
+| **Vertex Staging Bulk Copy** | Single `memcpy` when source and destination strides match (common case), eliminating per-vertex loop overhead. |
+| **Default Vulkan on macOS** | `get_default_renderer()` prefers Vulkan over OpenGL on `__APPLE__` because the Vulkan path provides IOSurface zero-copy display. |
 
 ### Tier 3: Low Impact / Quality of Life
 
 | Optimization | Description |
 |---|---|
-| **STBI_NEON** | ARM NEON SIMD for stb_image JPEG/PNG decoding. |
-| **fpng ARM64 CRC32** | Hardware CRC32 instructions for PNG encoding. |
-| **Display Uniform Caching** | 8 uniform locations resolved once at init, not per-frame string lookup. |
-| **MoltenVK Environment Tuning** | Metal argument buffers, prefill, async submit via Info.plist. |
-| **Profile Counter Gating** | nv2a_profile_inc_counter stripped in performance builds. |
-| **Conditional Surface Flush** | Only flush GPU when surface was drawn in current command buffer. |
-| **Separate Compute Queue** | Infrastructure for async compute (probes for 2nd queue from same family). |
+| **STBI_NEON** | ARM NEON SIMD for stb_image JPEG/PNG decoding (IDCT, color conversion, resampling). |
+| **fpng ARM64 CRC32** | Hardware CRC32 instructions (`__crc32d`/`__crc32w`/`__crc32b`) for PNG encoding. Processes 8 bytes per iteration. |
+| **Display Uniform Caching** | 8 uniform locations (`display_size`, `line_offset`, PVIDEO params) resolved once at init via `resolve_display_uniform_locations()`, not per-frame string lookup. |
+| **MoltenVK Environment Tuning** | `Info.plist` `LSEnvironment` sets: `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`, `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`. |
+| **Profile Counter Gating** | `nv2a_profile_inc_counter` stripped as no-op when `NV2A_VK_PERF_BUILD=1` (already enabled). Removes atomic increments from every draw/bind/upload/submit call. |
+| **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when `draw_time >= command_buffer_start_time` (surface was drawn in current CB), not unconditionally. |
+| **Separate Compute Queue** | Probes for 2nd queue from same family at device creation. Falls back to single queue on MoltenVK (which only exposes `queueCount=1`). |
 
-### MoltenVK Compatibility
+### MoltenVK Compatibility Layer
 
-| Fix | Description |
+| Change | Description |
 |---|---|
-| **VK_KHR_portability_subset** | Required extension for MoltenVK physical device enumeration. |
-| **Geometry Shader Workarounds** | CPU-side primitive emulation for quads, provoking vertex rotation. |
-| **Hardware Depth Fallback** | Fragment shader uses gl_FragCoord.z when geometry shaders unavailable. |
+| **VK_KHR_portability_subset** | Required extension explicitly enabled for Apple Silicon physical device enumeration. Without it, MoltenVK hides the device. |
+| **Geometry Shader Relaxation** | `geometryShader` feature set to not-required on `__APPLE__`. CPU-side primitive emulation handles quads, line loops, triangle fans, and provoking vertex rotation. |
+| **Hardware Depth Fallback** | Fragment shader in `psh.c` uses `gl_FragCoord.z` with `dFdx`/`dFdy` slope approximation when geometry shaders unavailable (MoltenVK). `use_hw_depth` flag in `PshState`. |
+| **VK_EXT_metal_objects** | Enabled for IOSurface import/export. Used to create IOSurface-backed `VkImage` for zero-copy display and MetalFX integration. |
+| **VK_EXT_provoking_vertex** | Workarounds for MoltenVK's incomplete provoking vertex support. Hardware register state used directly for vertex rotation detection. |
 
 ### macOS 26 Build Fixes
 
 | Fix | Description |
 |---|---|
-| **Stale pkg-config paths** | download-macos-libs.py uses os.path.abspath instead of os.path.realpath. |
-| **Duplicate LC_RPATH** | dyld on macOS 26 rejects binaries with duplicate rpath entries. |
-| **IOSurface bytesPerRow** | macOS 26 IOSurface bug at widths >1920px; MetalFX output capped to safe limit. |
+| **Stale pkg-config paths** | `download-macos-libs.py` replaced `os.path.realpath` with `os.path.abspath`. Added `repair_pc_prefixes()` to fix stale `.pc` prefix lines automatically. |
+| **Duplicate LC_RPATH** | macOS 26 `dyld` rejects duplicate rpath entries. `build.sh` strips all rpaths after `dylibbundler` and adds the single correct one. |
+| **IOSurface bytesPerRow** | macOS 26 creates BGRA8 IOSurfaces with incorrect `bytesPerRow` at widths > ~1920px. MetalFX output capped to 1920px wide; `texture_from_iosurface` validates before Metal texture creation. |
+| **Non-portable exit code** | `exit -1` changed to `exit 1` in `build.sh`. |
 
 ---
 
 ## Failed Optimizations (and Why)
 
-| Attempt | Why It Failed |
-|---|---|
-| **Depth export via vkExportMetalObjectsEXT** | MoltenVK deadlocks on any thread context when calling this function. Internal device mutex conflicts with PFIFO thread state regardless of timing. |
-| **BQL event batching** | Holding QEMU's Big QEMU Lock around the entire SDL event loop starves the main loop. QEMU's cooperative scheduling requires frequent BQL release. |
-| **Deferred auxiliary fence** | Not waiting for aux command buffer completion caused graphics corruption -- callers depend on transfers completing synchronously. |
-| **Texture upload on main CB (without sub-allocation)** | Shared staging buffer was overwritten by the next upload before GPU executed the copy. Fixed with bump allocator approach. |
-| **floatx80 union overlay on ARM64** | x87 80-bit and IEEE 64-bit double have incompatible bit layouts. Union type punning gives garbage values. Fixed with explicit bit-level conversion functions. |
-| **TCG inline float ops on ARM64** | TCG float operations (tcg_gen_add_f64 etc.) crash on ARM64 backend. Fixed by splitting g_use_hard_fpu into helper selection vs TCG inlining flags. |
-| **Separate compute queue on MoltenVK** | MoltenVK only exposes 1 queue from 1 family with queueCount=1. Infrastructure is in place but inactive. |
+| Attempt | What Happened | Root Cause |
+|---|---|---|
+| **Depth export via `vkExportMetalObjectsEXT`** | Deadlock on launch, regardless of thread or timing | MoltenVK's internal device mutex conflicts with the PFIFO thread's Vulkan state. The function cannot be safely called from any thread context in xemu's architecture. |
+| **BQL event batching** | Deadlock on launch | QEMU's Big QEMU Lock (BQL) is part of a cooperative scheduling model. Holding it around the entire SDL event loop prevents timer callbacks, I/O handlers, and the vCPU thread from running. |
+| **Deferred auxiliary fence** | Graphics corruption (shuffled textures) | Callers of `pgraph_vk_end_single_time_commands` depend on transfers completing synchronously. The staging buffer was overwritten by subsequent uploads before the GPU executed the pending copy. |
+| **Texture upload on main CB (v1, without sub-allocation)** | Texture corruption | `BUFFER_STAGING_SRC` is shared. Without sub-allocation, each texture upload wrote from offset 0, overwriting previous data before GPU copied it. Fixed with bump allocator approach. |
+| **floatx80 union overlay on ARM64** | Segfault on launch | x87 80-bit and IEEE 64-bit double have incompatible bit layouts. The union `double fval` field doesn't correspond to `low`/`high` fields on ARM64 (unlike x86_64 where `long double` IS x87 80-bit). |
+| **TCG inline float ops on ARM64** | Segfault during boot ROM translation | TCG float operations (`tcg_gen_add_f64` etc. from `ops_fpu.h`) crash on the ARM64 TCG backend. Fixed by splitting `g_use_hard_fpu` (helper selection) from `g_use_hard_fpu_inline` (TCG inlining, disabled on ARM64). |
+| **Separate compute queue** | No effect on MoltenVK | MoltenVK only exposes 1 queue family with `queueCount=1`. The infrastructure is in place but inactive until a driver supports multiple queues. |
 
 ---
 
-## Configuration
+## MoltenVK Setup
 
-### Recommended xemu.toml settings for Apple Silicon
+MoltenVK is the Vulkan-to-Metal translation layer that enables xemu's Vulkan renderer on macOS. This fork handles MoltenVK automatically.
 
-```toml
-[display]
-renderer = 'VULKAN'
-metalfx_mode = 'temporal'
-frame_interpolation = '2x'    # '2x' = 60fps, '4x' = 120fps, 'off' = native
+### How it works
 
-[display.quality]
-surface_scale = 2              # 1 = native 640x480, 2 = 1280x960, 4 = 2560x1920
+1. **`build.sh`** calls `scripts/download-macos-libs.py` which downloads pre-built MacPorts packages including MoltenVK (`libMoltenVK.dylib`)
+2. The library is downloaded to `macos-libs/<arch>/opt/local/lib/`
+3. During packaging (`package_macos`), `dylibbundler` copies all dylib dependencies into the app bundle
+4. MoltenVK is separately bundled at `dist/xemu.app/Contents/Libraries/<arch>/libMoltenVK.dylib`
+5. At runtime, Volk (the Vulkan loader used by xemu) loads MoltenVK via `dlopen`
 
-[display.window]
-fullscreen_on_startup = true
-fullscreen_exclusive = true
-startup_size = '1920x1080'
+### MoltenVK configuration
+
+This fork sets optimal MoltenVK runtime configuration via `Info.plist` `LSEnvironment`:
+
+```xml
+<key>LSEnvironment</key>
+<dict>
+    <key>MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS</key>
+    <string>1</string>
+    <key>MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS</key>
+    <string>2</string>
+    <key>MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS</key>
+    <string>0</string>
+</dict>
 ```
 
-### Settings explained
+| Variable | Value | Effect |
+|---|---|---|
+| `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` | 1 | Reduces descriptor binding overhead by using Metal argument buffers |
+| `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | 2 | Prefills Metal command buffers at queue submit time for lower latency |
+| `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` | 0 | Enables asynchronous queue submission for better GPU pipelining |
 
-- **metalfx_mode = 'temporal'**: Best quality upscaling with temporal accumulation
-- **frame_interpolation = '2x'**: True 60fps (1 interpolated frame between each real frame)
-- **frame_interpolation = '4x'**: True 120fps (3 interpolated frames at dt=0.25, 0.5, 0.75)
-- **surface_scale = 2**: Good balance -- NV2A renders at 1280x960, MetalFX upscales to 1920x1440
-- **surface_scale = 1**: Lowest GPU load, MetalFX does all upscaling (640x480 -> 1920x1440)
-- **surface_scale = 4**: Sharpest textures but MetalFX skipped (display >1920px wide)
+### MoltenVK compatibility changes in the codebase
 
-### Hard FPU
+The Vulkan renderer includes several MoltenVK-specific workarounds:
 
-Enabled by default (`perf.hard_fpu = true`). To disable for a specific game:
+- **`instance.c`**: `VK_KHR_portability_subset` and `VK_KHR_portability_enumeration` extensions
+- **`draw.c`**: CPU-side primitive emulation when geometry shaders unavailable (`draw_needs_primitive_emulation`, `build_emulated_indices_*`)
+- **`shaders.c`**: Geometry shader module skipped when `!r->supports_geometry_shaders`
+- **`psh.c`**: Hardware depth fallback using `gl_FragCoord.z` instead of geometry-shader-computed depth
+- **`display.c`**: IOSurface sharing via `VK_EXT_metal_objects` for zero-copy display
 
-```toml
-[perf]
-hard_fpu = false
-```
+### No manual MoltenVK installation needed
+
+You do **not** need to install MoltenVK separately. The build system downloads it automatically. If you want to use a custom MoltenVK build, place `libMoltenVK.dylib` in `macos-libs/<arch>/opt/local/lib/` before building.
 
 ---
 
@@ -117,85 +143,196 @@ hard_fpu = false
 
 ### Prerequisites
 
-- macOS 26.0 (Tahoe) or later
-- Xcode Command Line Tools with macOS 26.4+ SDK
-- Apple Silicon Mac (M2 or later recommended)
-- Python 3.10+
+- **macOS 26.0** (Tahoe) or later
+- **Xcode Command Line Tools** with macOS 26.4+ SDK
+  ```bash
+  xcode-select --install
+  ```
+- **Apple Silicon Mac** (M2 or later recommended; M1 should also work)
+- **Python 3.10+** (included with Xcode CLT)
+- **pkg-config** (via Homebrew):
+  ```bash
+  brew install pkg-config
+  ```
 
 ### Build Steps
 
 ```bash
-# Clone with submodules
+# 1. Clone with submodules
 git clone --recurse-submodules https://github.com/MichaelJSr/xemu-macos.git
 cd xemu-macos
+
+# 2. Switch to the optimizations branch
 git checkout macos-optimizations
+
+# 3. Initialize all submodules (including nested ones)
 git submodule update --init --recursive
 
-# Build (release, optimized for Apple Silicon)
+# 4. Build (release, optimized for Apple Silicon)
 ./build.sh
 
-# The built app is at:
-# dist/xemu.app
+# 5. The built app bundle is at:
+ls -la dist/xemu.app
 
-# Run
+# 6. Run
 open dist/xemu.app
-# or
+# or directly:
 ./dist/xemu.app/Contents/MacOS/xemu
 ```
 
-### Build flags (automatic via build.sh)
+### What `build.sh` does
 
-- `-O3` with thin LTO
-- `-mcpu=apple-m2` (ARM64 tuning)
-- `-mmacosx-version-min=14.0`
-- Stack protector disabled, trace backends nop (release profile)
-- MoltenVK bundled from MacPorts (downloaded automatically)
+1. Detects macOS/ARM64, selects macOS 14.0 minimum deployment target
+2. Finds the newest macOS SDK (requires >= 14.0)
+3. Downloads MacPorts dependencies (SDL3, glib2, libsamplerate, pixman, epoxy, pcap, slirp, libusb, MoltenVK) via `scripts/download-macos-libs.py`
+4. Sets `PKG_CONFIG_LIBDIR` to the downloaded libraries
+5. Configures with Meson: `-O3`, thin LTO, `-mcpu=apple-m2`, Vulkan enabled, Cocoa disabled
+6. Builds `qemu-system-i386` with `make -j<cores>`
+7. Packages into `dist/xemu.app` with `dylibbundler`, MoltenVK bundling, icon generation, and codesigning
 
-### Troubleshooting
+### Build flags (automatic)
 
-**Build fails with "sizeof(size_t) doesn't match GLIB_SIZEOF_SIZE_T":**
-Delete `macos-libs/` and rebuild. The pkg-config paths are stale.
+| Flag | Purpose |
+|---|---|
+| `-O3` | Maximum optimization |
+| `-Db_lto=true -Db_lto_mode=thin` | Thin LTO with caching |
+| `-mcpu=apple-m2` | ARM64 Apple Silicon tuning |
+| `-DXBOX=1` | Xbox emulation mode |
+| `-DVK_USE_PLATFORM_METAL_EXT` | MoltenVK/Metal Vulkan platform |
+| `-mmacosx-version-min=14.0` | Minimum macOS version |
+
+### Clean build
+
+If you encounter issues, do a clean build:
 
 ```bash
-rm -rf macos-libs/ macos-pkgs/ build/
+rm -rf macos-libs/ macos-pkgs/ build/ dist/
 ./build.sh
 ```
 
-**Crash on launch with "duplicate LC_RPATH":**
-This build already fixes the duplicate rpath issue. If you see this with an older build, rebuild from scratch.
+---
 
-**MetalFX not activating:**
-Check that `metalfx_mode` is set to `'spatial'` or `'temporal'` in xemu.toml. MetalFX requires the Vulkan renderer and VK_EXT_metal_objects support.
+## Configuration
 
-**Game crashes when changing internal scaling:**
-A safety guard prevents crashes but may show a black frame momentarily. This is a pre-existing race condition in xemu's hot-resize path.
+### Recommended `xemu.toml` for Apple Silicon
+
+The config file is at `~/Library/Application Support/xemu/xemu/xemu.toml`.
+
+```toml
+[display]
+renderer = 'VULKAN'
+metalfx_mode = 'temporal'
+frame_interpolation = '4x'     # 'off', '2x' (60fps), '4x' (120fps)
+
+[display.quality]
+surface_scale = 2               # 1=640x480, 2=1280x960, 4=2560x1920
+
+[display.window]
+fullscreen_on_startup = true
+fullscreen_exclusive = true
+startup_size = '1920x1080'
+
+[display.ui]
+fit = 'stretch'
+```
+
+### Settings explained
+
+| Setting | Values | Notes |
+|---|---|---|
+| `metalfx_mode` | `'off'`, `'spatial'`, `'temporal'` | Temporal is best quality (ML + temporal accumulation) |
+| `frame_interpolation` | `'off'`, `'2x'`, `'4x'` | 2x = true 60fps, 4x = true 120fps with 3 intermediate frames |
+| `surface_scale` | 1, 2, 3, 4 | Higher = sharper textures but more GPU work. At 4x, MetalFX is skipped (already high-res). Sweet spot is 2. |
+| `hard_fpu` | `true`, `false` | Under `[perf]`. Defaults to true. Disable if a specific game has FPU-related issues. |
+
+### Scale + MetalFX interaction
+
+| Scale | Display Size | MetalFX | Interpolation | Result |
+|---|---|---|---|---|
+| 1x | 640x480 | Temporal -> 1920x1440 | Works | Best perf, good quality |
+| 2x | 1280x960 | Temporal -> 1920x1440 | Works | **Recommended**: sharp textures + temporal AA |
+| 3x | 1920x1440 | No upscale needed | Works | High quality, no MetalFX benefit |
+| 4x | 2560x1920 | Skipped (>1920 wide) | Skipped | Sharpest, but no interpolation |
 
 ---
 
 ## Architecture
 
 ```
-Xbox 640x480 game
+Xbox Game (30fps)
        |
        v
-  NV2A Vulkan Renderer (surface_scale x)
+  NV2A Vulkan Renderer
+  (surface_scale = 2x -> 1280x960)
+  [Hard FPU: native double for x87]
+  [Parallel texture decode: GThreadPool]
+  [GPU compute: unswizzle + YUV]
        |
        v
-  Display IOSurface (e.g. 1280x960 at 2x)
+  Display IOSurface (1280x960)
+  [VK_EXT_metal_objects zero-copy]
        |
        v
-  MetalFX Temporal Upscaler -> 1920x1440
+  MetalFX Temporal Upscaler
+  (1280x960 -> 1920x1440)
+  [Zero-motion vectors, depth if available]
        |
        v
-  Frame Interpolator (2x: dt=0.5, 4x: dt=0.25/0.5/0.75)
+  Frame Interpolator (macOS 26+)
+  [4x mode: dt=0.25, 0.5, 0.75]
+  [Deferred generation per sync call]
        |
        v
-  GL TEXTURE_RECTANGLE -> SDL Window (fullscreen 4K)
+  GL TEXTURE_RECTANGLE
+  -> SDL Window (fullscreen 4K 120Hz)
+```
+
+---
+
+## Troubleshooting
+
+### Build fails with "sizeof(size_t) doesn't match GLIB_SIZEOF_SIZE_T"
+
+The pkg-config paths are stale. Delete cached libraries and rebuild:
+```bash
+rm -rf macos-libs/ macos-pkgs/ build/
+./build.sh
+```
+
+### Crash on launch with "duplicate LC_RPATH"
+
+This build already fixes the duplicate rpath issue. If using an older build, rebuild from scratch.
+
+### MetalFX not activating
+
+- Ensure `metalfx_mode = 'temporal'` or `'spatial'` in xemu.toml
+- MetalFX requires the Vulkan renderer (`renderer = 'VULKAN'`) and `VK_EXT_metal_objects`
+- At `surface_scale = 4`, the display is 2560x1920 which exceeds the 1920px safe limit, so MetalFX is skipped
+- Check the xemu output log for `MetalFX: Temporal upscaler initialized` or `MetalFX: Skipping IOSurface`
+
+### Game crashes when changing internal scaling
+
+A safety guard prevents most crashes but may show a momentary black frame. This is a pre-existing race condition in xemu's hot-resize path where the surface pointer can be stale during scale factor changes.
+
+### Frame interpolation not working
+
+- Requires macOS 26.0+ (`MTLFXFrameInterpolator` API)
+- Requires `frame_interpolation = '2x'` or `'4x'`
+- Only works when MetalFX upscaling is active (display width <= 1920px)
+- Check log for `MetalFX: Frame interpolator initialized`
+
+### FPU-related game issues
+
+If a game has floating-point precision issues (very rare), disable the hard FPU:
+```toml
+[perf]
+hard_fpu = false
 ```
 
 ---
 
 ## Upstream
 
-Based on [xemu](https://github.com/xemu-project/xemu) - Original Xbox Emulator.
-MoltenVK compatibility from [CosmicSnow/xemu](https://github.com/CosmicSnow/xemu).
+- Based on [xemu](https://github.com/xemu-project/xemu) - Original Xbox Emulator
+- MoltenVK compatibility from [CosmicSnow/xemu](https://github.com/CosmicSnow/xemu)
+- MetalFX, frame interpolation, hard FPU, and all performance optimizations are original work in this fork
