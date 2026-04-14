@@ -94,26 +94,40 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
+    vkResetFences(r->device, 1, &r->aux_fence);
+
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
     };
-    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, VK_NULL_HANDLE));
+    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
-    VK_CHECK(vkQueueWaitIdle(r->queue));
+    VK_CHECK(vkWaitForFences(r->device, 1, &r->aux_fence,
+                             VK_TRUE, UINT64_MAX));
 
     r->in_aux_command_buffer = false;
 }
 
 void pgraph_vk_init_command_buffers(PGRAPHState *pg)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
     create_command_pool(pg);
     create_command_buffers(pg);
+
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    VK_CHECK(vkCreateFence(r->device, &fence_info, NULL, &r->aux_fence));
 }
 
 void pgraph_vk_finalize_command_buffers(PGRAPHState *pg)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    vkDestroyFence(r->device, r->aux_fence, NULL);
     destroy_command_buffers(pg);
     destroy_command_pool(pg);
 }
