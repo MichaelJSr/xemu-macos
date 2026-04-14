@@ -5,6 +5,7 @@ Downloads required libraries for xemu builds on macOS from MacPorts repositories
 # Based on https://github.com/tpoechtrager/osxcross/blob/master/tools/osxcross-macports
 # which is based on https://github.com/maci0/pmmacports
 from urllib.request import urlopen
+import glob
 import re
 import os.path
 from tarfile import TarFile
@@ -31,11 +32,11 @@ class LibInstaller:
 			assert False, "Add arch"
 		self._arch = arch
 
-		self._extract_path = os.path.realpath(f'./macos-libs/{self._arch}')
+		self._extract_path = os.path.abspath(f'./macos-libs/{self._arch}')
 		if not os.path.exists(self._extract_path):
 			os.makedirs(self._extract_path)
 		self._installed_path = os.path.join(self._extract_path, 'INSTALLED')
-		self._pkgs_path = os.path.realpath(os.path.join(f'./macos-pkgs'))
+		self._pkgs_path = os.path.abspath(os.path.join(f'./macos-pkgs'))
 		if not os.path.exists(self._pkgs_path):
 			os.makedirs(self._pkgs_path)
 
@@ -130,7 +131,7 @@ class LibInstaller:
 		print(f'    [*] Checking tarball...')
 
 		for fpath in tb.getnames():
-			extracted_path = os.path.realpath(os.path.join(self._extract_path, fpath))
+			extracted_path = os.path.abspath(os.path.join(self._extract_path, fpath))
 			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fname}'
 
 		print(f'    [*] Extracting to {self._extract_path}')
@@ -138,7 +139,7 @@ class LibInstaller:
 
 		for fpath in tb.getnames():
 			# FIXME: Symlinks
-			extracted_path = os.path.realpath(os.path.join(self._extract_path, fpath))
+			extracted_path = os.path.abspath(os.path.join(self._extract_path, fpath))
 			if extracted_path.endswith('.pc'):
 				print(f'    [*] Fixing {extracted_path}')
 				with open(extracted_path, 'r') as f:
@@ -157,7 +158,7 @@ class LibInstaller:
 
 		if pkg_name == 'glib2':
 			fpath = './opt/local/include/glib-2.0/glib/gi18n.h'
-			extracted_path = os.path.realpath(os.path.join(self._extract_path, fpath))
+			extracted_path = os.path.abspath(os.path.join(self._extract_path, fpath))
 			print(f'    [*] Fixing {extracted_path}')
 			with open(extracted_path, 'r') as f:
 				lines = f.read()
@@ -168,7 +169,28 @@ class LibInstaller:
 
 		self.mark_pkg_installed(pkg_name, pkg_version)
 
+	def repair_pc_prefixes(self):
+		"""Rewrite stale prefix= lines in .pc files when the tree has moved."""
+		pc_dir = os.path.join(self._extract_path, 'opt', 'local', 'lib', 'pkgconfig')
+		if not os.path.isdir(pc_dir):
+			return
+		expected_prefix = f'{self._extract_path}/opt/local'
+		for pc_path in glob.glob(os.path.join(pc_dir, '*.pc')):
+			with open(pc_path, 'r') as f:
+				lines = f.readlines()
+			needs_fix = False
+			for i, l in enumerate(lines):
+				if l.startswith('prefix=') and l.strip() != f'prefix={expected_prefix}':
+					lines[i] = f'prefix={expected_prefix}\n'
+					needs_fix = True
+					break
+			if needs_fix:
+				print(f'[*] Repairing stale prefix in {os.path.basename(pc_path)}')
+				with open(pc_path, 'w') as f:
+					f.write(''.join(lines))
+
 	def install_pkgs(self, requested):
+		self.repair_pc_prefixes()
 		self._queue.extend(requested)
 		while len(self._queue) > 0:
 			pkg_name = self._queue.pop(0)

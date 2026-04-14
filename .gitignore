@@ -26,3 +26,5 @@ build.log
 /macos-libs/
 /macos-pkgs/
 /xemu.iconset/
+.DS_Store
+.cursorignore

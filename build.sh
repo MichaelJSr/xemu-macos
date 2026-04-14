@@ -36,7 +36,9 @@ package_macos() {
     dylibbundler -cd -of -b -x dist/xemu.app/Contents/MacOS/xemu \
         -d ${lib_path}/ \
         -p "@executable_path/${lib_rpath}/" \
-        -s ${PWD}/macos-libs/${target_arch}/opt/local/lib/
+        -s ${PWD}/macos-libs/${target_arch}/opt/local/lib/ \
+        -s /usr/local/lib/ \
+        -s /opt/homebrew/lib/
 
     # Fixup some paths dylibbundler missed
     for dep in $(otool -L "$exe_path" | grep -e '/opt/local/' | cut -d' ' -f1); do
@@ -55,6 +57,36 @@ package_macos() {
         codesign -s - -f "${lib_path}"
       done
     done
+
+    # Strip duplicate/stale rpaths left by dylibbundler; macOS 26+ dyld
+    # rejects binaries with duplicate LC_RPATH entries.
+    for rpath in $(otool -l "$exe_path" | awk '/cmd LC_RPATH/{getline;getline;print $2}'); do
+      install_name_tool -delete_rpath "$rpath" "$exe_path" 2>/dev/null || true
+    done
+    install_name_tool -add_rpath "@executable_path/${lib_rpath}/" "$exe_path"
+
+    # Bundle MoltenVK for Vulkan support (loaded at runtime by Volk via dlopen).
+    # The binary's LC_RPATH already points to the Libraries directory, so
+    # dlopen("libMoltenVK.dylib") will find it there.
+    moltenvk_src=""
+    for candidate in \
+        "${PWD}/macos-libs/${target_arch}/opt/local/lib/libMoltenVK.dylib" \
+        "/usr/local/lib/libMoltenVK.dylib" \
+        "/opt/homebrew/lib/libMoltenVK.dylib"; do
+      if [ -f "$candidate" ]; then
+        moltenvk_src="$candidate"
+        break
+      fi
+    done
+    if [ -n "$moltenvk_src" ]; then
+      moltenvk_dst="dist/xemu.app/Contents/Libraries/${target_arch}/libMoltenVK.dylib"
+      echo "Bundling MoltenVK from $moltenvk_src"
+      cp "$moltenvk_src" "$moltenvk_dst"
+      install_name_tool -id "@rpath/libMoltenVK.dylib" "$moltenvk_dst"
+      codesign -s - -f "$moltenvk_dst"
+    else
+      echo "Warning: libMoltenVK.dylib not found, Vulkan renderer will not be available"
+    fi
 
     # Copy in runtime resources
     mkdir -p dist/xemu.app/Contents/Resources
@@ -163,6 +195,10 @@ target="qemu-system-i386"
 if test ! -z "$debug"; then
     build_cflags='-DXEMU_DEBUG_BUILD=1'
     opts="--enable-debug --enable-trace-backends=log"
+else
+    opts="$opts -Db_lto=true -Db_lto_mode=thin -Db_thinlto_cache=true -Db_thinlto_cache_dir=.lto-cache"
+    opts="$opts -Doptimization=3 -Dqom_cast_debug=false"
+    opts="$opts -Dtrace_backends=nop -Dstack_protector=disabled"
 fi
 
 most_recent_macosx_sdk_ver () {
@@ -223,12 +259,15 @@ case "$platform" in # Adjust compilation options based on platform
                        -target ${target_arch}-apple-macos${macos_min_ver} \
                        -isysroot ${sdk} \
                        -I${lib_prefix}/include \
+                       -I/opt/homebrew/include \
                        -mmacosx-version-min=$macos_min_ver"
         export LDFLAGS="${LDFLAGS} \
                         -arch ${target_arch} \
                         -isysroot ${sdk}"
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
+        elif [ "$target_arch" == "arm64" ]; then
+            sys_cflags='-mcpu=apple-m2'
         fi
         sys_ldflags='-headerpad_max_install_names'
         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
@@ -253,7 +292,7 @@ case "$platform" in # Adjust compilation options based on platform
         ;;
     *)
         echo "Unsupported platform $platform, aborting" >&2
-        exit -1
+        exit 1
         ;;
 esac
 
