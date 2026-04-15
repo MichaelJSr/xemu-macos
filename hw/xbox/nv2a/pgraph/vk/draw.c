@@ -595,9 +595,16 @@ static void finalize_clear_shaders(PGRAPHState *pg)
     pgraph_vk_destroy_shader_module(r, r->solid_frag_module);
 }
 
+static inline gpointer render_pass_state_to_key(const RenderPassState *s)
+{
+    uint64_t v = (uint64_t)s->color_format | ((uint64_t)s->zeta_format << 32);
+    return GSIZE_TO_POINTER((gsize)v);
+}
+
 static void init_render_passes(PGRAPHVkState *r)
 {
     r->render_passes = g_array_new(false, false, sizeof(RenderPass));
+    r->render_pass_lookup = g_hash_table_new(g_direct_hash, g_direct_equal);
 }
 
 static void finalize_render_passes(PGRAPHVkState *r)
@@ -606,6 +613,8 @@ static void finalize_render_passes(PGRAPHVkState *r)
         RenderPass *p = &g_array_index(r->render_passes, RenderPass, i);
         vkDestroyRenderPass(r->device, p->render_pass, NULL);
     }
+    g_hash_table_destroy(r->render_pass_lookup);
+    r->render_pass_lookup = NULL;
     g_array_free(r->render_passes, true);
     r->render_passes = NULL;
 }
@@ -739,16 +748,18 @@ static VkRenderPass add_new_render_pass(PGRAPHVkState *r, RenderPassState *state
     memcpy(&new_pass.state, state, sizeof(*state));
     new_pass.render_pass = create_render_pass(r, state);
     g_array_append_vals(r->render_passes, &new_pass, 1);
+    g_hash_table_insert(r->render_pass_lookup,
+                        render_pass_state_to_key(state),
+                        GSIZE_TO_POINTER((gsize)new_pass.render_pass));
     return new_pass.render_pass;
 }
 
 static VkRenderPass get_render_pass(PGRAPHVkState *r, RenderPassState *state)
 {
-    for (int i = 0; i < r->render_passes->len; i++) {
-        RenderPass *p = &g_array_index(r->render_passes, RenderPass, i);
-        if (!memcmp(&p->state, state, sizeof(*state))) {
-            return p->render_pass;
-        }
+    gpointer key = render_pass_state_to_key(state);
+    gpointer val;
+    if (g_hash_table_lookup_extended(r->render_pass_lookup, key, NULL, &val)) {
+        return (VkRenderPass)(gsize)val;
     }
     return add_new_render_pass(r, state);
 }

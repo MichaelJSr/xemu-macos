@@ -28,3 +28,4 @@ build.log
 /xemu.iconset/
 .DS_Store
 .cursorignore
+xemu-output.log

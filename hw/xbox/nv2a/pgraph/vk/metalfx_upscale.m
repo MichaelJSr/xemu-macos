@@ -233,7 +233,8 @@ typedef struct MetalFXTemporalState {
     id<MTLCommandQueue> commandQueue;
     id<MTLFXTemporalScaler> scaler;
     id<MTLTexture> colorTexture;
-    id<MTLTexture> directDepthTexture;
+    id<MTLTexture> depthTexture;
+    IOSurfaceRef cachedDepthSurface;
     id<MTLTexture> motionTexture;
     id<MTLTexture> outputTexture;
     id<MTLTexture> outputSharedTexture;
@@ -307,7 +308,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
         MTLFXTemporalScalerDescriptor *desc =
             [[MTLFXTemporalScalerDescriptor alloc] init];
         desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm;
-        desc.depthTextureFormat = MTLPixelFormatDepth32Float_Stencil8;
+        desc.depthTextureFormat = MTLPixelFormatR32Float;
         desc.motionTextureFormat = MTLPixelFormatRG16Float;
         desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
         desc.inputWidth = input_w;
@@ -402,17 +403,13 @@ IOSurfaceRef metalfx_temporal_get_output_surface(void)
     return g_temporal.outputSurface;
 }
 
-void metalfx_temporal_set_depth_texture(void *mtl_texture)
-{
-    g_temporal.directDepthTexture = (__bridge id<MTLTexture>)mtl_texture;
-}
-
 void metalfx_temporal_reset(void)
 {
     g_temporal.needsReset = true;
 }
 
-bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
+bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
+                              IOSurfaceRef depthSurface)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     if (!g_temporal.initialized || !colorSurface) {
@@ -433,11 +430,23 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
             return false;
         }
 
+        if (depthSurface && depthSurface != g_temporal.cachedDepthSurface) {
+            g_temporal.depthTexture = texture_from_iosurface(
+                g_temporal.device, depthSurface, MTLPixelFormatR32Float,
+                g_temporal.inputWidth, g_temporal.inputHeight,
+                MTLTextureUsageShaderRead);
+            g_temporal.cachedDepthSurface = depthSurface;
+        }
+        if (!depthSurface) {
+            g_temporal.depthTexture = nil;
+            g_temporal.cachedDepthSurface = NULL;
+        }
+
         g_temporal.scaler.colorTexture = g_temporal.colorTexture;
         g_temporal.scaler.outputTexture = g_temporal.outputTexture;
         g_temporal.scaler.motionTexture = g_temporal.motionTexture;
-        if (g_temporal.directDepthTexture) {
-            g_temporal.scaler.depthTexture = g_temporal.directDepthTexture;
+        if (g_temporal.depthTexture) {
+            g_temporal.scaler.depthTexture = g_temporal.depthTexture;
         }
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
@@ -482,7 +491,8 @@ void metalfx_temporal_destroy(void)
     os_unfair_lock_lock(&g_metalfx_lock);
     g_temporal.scaler = nil;
     g_temporal.colorTexture = nil;
-    g_temporal.directDepthTexture = nil;
+    g_temporal.depthTexture = nil;
+    g_temporal.cachedDepthSurface = NULL;
     g_temporal.motionTexture = nil;
     g_temporal.outputTexture = nil;
     g_temporal.outputSharedTexture = nil;

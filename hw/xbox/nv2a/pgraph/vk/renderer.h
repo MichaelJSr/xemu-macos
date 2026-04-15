@@ -510,6 +510,7 @@ typedef struct PGRAPHVkState {
     PGRAPHVkComputeState compute;
 
     GHashTable *surface_lookup;
+    GHashTable *render_pass_lookup;
 } PGRAPHVkState;
 
 // renderer.c

@@ -275,13 +275,11 @@ static void __attribute__((constructor)) register_renderer(void)
 
 void pgraph_vk_check_memory_budget(PGRAPHState *pg)
 {
-#if 0
-    /*
-     * Disabled: MoltenVK's VK_EXT_memory_budget may report unexpected
-     * values on Apple Silicon unified memory, causing premature texture
-     * cache eviction. Re-enable after validating budget reports.
-     */
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!r->memory_budget_extension_enabled) {
+        return;
+    }
 
     VkPhysicalDeviceMemoryProperties const *props;
     vmaGetMemoryProperties(r->allocator, &props);
@@ -291,6 +289,7 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
     vmaGetHeapBudgets(r->allocator, budgets);
 
     const float budget_threshold = 0.9;
+    const VkDeviceSize min_alloc_for_trim = 512ULL * 1024 * 1024;
     bool near_budget = false;
 
     for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
@@ -303,11 +302,11 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
         NV2A_VK_DPRINTF("Heap %d: used %lu/%lu MiB (%.2f%%)", i,
                         b->statistics.allocationBytes / (1024 * 1024),
                         b->budget / (1024 * 1024), use_to_budget_ratio * 100);
-        near_budget |= use_to_budget_ratio > budget_threshold;
+        near_budget |= (use_to_budget_ratio > budget_threshold &&
+                        b->statistics.allocationBytes > min_alloc_for_trim);
     }
 
     if (near_budget) {
         pgraph_vk_trim_texture_cache(pg);
     }
-#endif
 }

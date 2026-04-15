@@ -58,6 +58,8 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **MetalFX Direct IOSurface** | Temporal upscaler and frame interpolator write directly to IOSurface-backed shared texture on unified memory. `os_unfair_lock` guards all MetalFX state across spatial, temporal, and interpolation paths. |
 | **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when surface was drawn in current command buffer. |
 | **Build: `-mcpu=native`** | ARM64 builds use host chip features instead of fixed `-mcpu=apple-m2`. |
+| **O(1) Render Pass Lookup** | `GHashTable` with packed `uint64_t` key (`color_format | zeta_format << 32`) replaces O(n) linear `GArray` scan in `get_render_pass`. Field added at end of struct to avoid layout issues. |
+| **VMA Memory Budget Trimming** | `pgraph_vk_check_memory_budget` enabled with guards: requires `VK_EXT_memory_budget`, allocation > 512 MiB, and > 90% budget usage before trimming texture cache. Prevents long-session OOM. |
 | **Flight Slot Infrastructure** | CB/fence/semaphore/framebuffer organized into `NUM_FLIGHT_SLOTS` (N=1). Descriptor sets and staging partitioned per-slot. Ready for N>1 pipelining (see Failed Optimizations). |
 
 ### MoltenVK Compatibility Layer
@@ -92,7 +94,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Attempt | Result | Root Cause |
 |---|---|---|
-| **Depth export (`vkExportMetalObjectsEXT`)** | Deadlock | MoltenVK's internal device mutex conflicts with PFIFO thread Vulkan state. |
+| **Depth export (`vkExportMetalObjectsEXT`)** | Deadlock | MoltenVK's internal device mutex conflicts with PFIFO thread Vulkan state. Cannot safely call from any thread in xemu's architecture. |
 | **BQL event batching** (x2) | Deadlock | Holding BQL around SDL event loop prevents QEMU cooperative scheduling. |
 | **Deferred auxiliary fence** | Texture corruption | Staging buffer overwritten before GPU executed pending copy. |
 | **Texture upload on main CB (v1)** | Texture corruption | Shared `BUFFER_STAGING_SRC` without sub-allocation; fixed with bump allocator. |
@@ -103,9 +105,9 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Surface upload bump allocator** | Corruption | Staging shared between texture (main CB) and surface (aux CB) uploads; offsets conflicted. |
 | **Flight slots N>1** | Corruption | 7 shared resources (uniform/index/vertex staging+device buffers, uploaded_bitmap) remain unpartitioned. ~20+ call sites need changes; minimal benefit on Apple Silicon. |
 | **Async MetalFX (`dispatch_semaphore`)** | Tearing | IOSurface consumed by GL before Metal finished writing. Writer must complete before reader binds. |
-| **Render pass hash table** | Segfault | Struct field insertion shifted member offsets; stale `.o` files caused wrong memory access. O(5) linear scan not worth the risk. |
-| **VMA memory budget trimming** | Untested | MoltenVK `VK_EXT_memory_budget` may report bad values on unified memory, causing premature texture eviction. |
+| **Render pass hash table (mid-struct)** | Segfault | Inserting `GHashTable*` field mid-struct shifted member offsets; stale `.o` files read wrong memory. Fixed by adding field at end of struct instead. |
 | **Dirty-range VRAM flush** | Segfault (then reverted) | `bitmap_clear` before `flush_memory_buffer` zeroed bitmap before read. Minimal benefit on Apple Silicon coherent memory anyway. |
+| **Depth export via CPU readback** | Temporal slower than spatial | Copied zeta depth aspect via `vkCmdCopyImageToBuffer` + CPU `memcpy` to R32Float IOSurface every frame. Added 2 GPU sync points + 18+ MiB CPU copy per frame. Quality improvement was subtle; performance cost was 2-5ms/frame. Correct approach requires IOSurface-backed VkImage rendered directly in the NV2A pipeline (avoids CPU round-trip). |
 
 ---
 

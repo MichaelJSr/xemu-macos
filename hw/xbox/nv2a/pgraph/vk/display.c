@@ -1375,7 +1375,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
                     if (metalfx_temporal_init(disp->width, disp->height,
                                              out_w, out_h)) {
-                        if (metalfx_temporal_upscale(current_surface)) {
+                        if (metalfx_temporal_upscale(current_surface, NULL)) {
                             upscaled = metalfx_temporal_get_output_surface();
                         }
                     }
