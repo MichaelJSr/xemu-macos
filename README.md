@@ -212,7 +212,7 @@ open dist/xemu.app
 2. Finds the newest macOS SDK (requires >= 14.0)
 3. Downloads MacPorts dependencies (SDL3, glib2, libsamplerate, pixman, epoxy, pcap, slirp, libusb, MoltenVK) via `scripts/download-macos-libs.py`
 4. Sets `PKG_CONFIG_LIBDIR` to the downloaded libraries
-5. Configures with Meson: `-O3`, thin LTO, `-mcpu=apple-m2`, Vulkan enabled, Cocoa disabled
+5. Configures with Meson: `-O3`, thin LTO, `-mcpu=native`, Vulkan enabled, Cocoa disabled
 6. Builds `qemu-system-i386` with `make -j<cores>`
 7. Packages into `dist/xemu.app` with `dylibbundler`, MoltenVK bundling, icon generation, and codesigning
 
@@ -222,7 +222,7 @@ open dist/xemu.app
 |---|---|
 | `-O3` | Maximum optimization |
 | `-Db_lto=true -Db_lto_mode=thin` | Thin LTO with caching |
-| `-mcpu=apple-m2` | ARM64 Apple Silicon tuning |
+| `-mcpu=native` | ARM64 Apple Silicon tuning (tunes for the build machine's CPU) |
 | `-DXBOX=1` | Xbox emulation mode |
 | `-DVK_USE_PLATFORM_METAL_EXT` | MoltenVK/Metal Vulkan platform |
 | `-mmacosx-version-min=14.0` | Minimum macOS version |

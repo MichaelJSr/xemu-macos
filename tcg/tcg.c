@@ -4992,8 +4992,22 @@ static void temp_load(TCGContext *s, TCGTemp *ts, TCGRegSet desired_regs,
                             preferred_regs, ts->indirect_base);
         if (ts->type <= TCG_TYPE_I64) {
             tcg_out_movi(s, ts->type, reg, ts->val);
-        } else if (ts->type == TCG_TYPE_F32 || ts->type == TCG_TYPE_F64) {
-            assert(0); /* FIXME */
+        } else if (ts->type == TCG_TYPE_F32) {
+            TCGReg tmp = tcg_reg_alloc(s, tcg_target_available_regs[TCG_TYPE_I32],
+                                       allocated_regs, 0, false);
+            tcg_out_movi(s, TCG_TYPE_I32, tmp, (uint32_t)ts->val);
+            /* GPR->FPR cross-class move: use I32 type which handles
+               the GPR(src < 32) -> Vreg(dst >= 32) case in tcg_out_mov
+               via the INS instruction path. */
+            tcg_out_mov(s, TCG_TYPE_I32, reg, tmp);
+        } else if (ts->type == TCG_TYPE_F64) {
+            TCGReg tmp = tcg_reg_alloc(s, tcg_target_available_regs[TCG_TYPE_I64],
+                                       allocated_regs, 0, false);
+            tcg_out_movi(s, TCG_TYPE_I64, tmp, ts->val);
+            /* GPR->FPR cross-class move: use I64 type which handles
+               the GPR(src < 32) -> Vreg(dst >= 32) case in tcg_out_mov
+               via the INS instruction path. */
+            tcg_out_mov(s, TCG_TYPE_I64, reg, tmp);
         } else {
             uint64_t val = ts->val;
             MemOp vece = MO_64;

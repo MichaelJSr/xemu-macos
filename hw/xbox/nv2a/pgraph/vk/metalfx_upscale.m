@@ -86,6 +86,19 @@ static id<MTLTexture> create_metal_texture(id<MTLDevice> device,
 }
 
 
+static NSString *const kSyntheticDepthKernel =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "kernel void syntheticDepth(\n"
+     "    texture2d<float, access::read>  color [[texture(0)]],\n"
+     "    texture2d<float, access::write> depth [[texture(1)]],\n"
+     "    uint2 gid [[thread_position_in_grid]])\n"
+     "{\n"
+     "    if (gid.x >= color.get_width() || gid.y >= color.get_height()) return;\n"
+     "    float4 c = color.read(gid);\n"
+     "    float lum = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));\n"
+     "    depth.write(float4(lum, 0, 0, 0), gid);\n"
+     "}\n";
 
 #pragma mark - Spatial Upscaler
 
@@ -97,6 +110,7 @@ typedef struct MetalFXSpatialState {
     id<MTLTexture> outputTexture;
     IOSurfaceRef outputSurface;
     IOSurfaceRef cachedInputSurface;
+    id<MTLCommandBuffer> pendingCB;
     int inputWidth, inputHeight;
     int outputWidth, outputHeight;
     bool initialized;
@@ -111,23 +125,45 @@ bool metalfx_is_supported(void)
     return [MTLFXSpatialScalerDescriptor supportsDevice:device];
 }
 
+static void metalfx_destroy_locked(void)
+{
+    if (g_spatial.pendingCB) {
+        [g_spatial.pendingCB waitUntilCompleted];
+        g_spatial.pendingCB = nil;
+    }
+    g_spatial.scaler = nil;
+    g_spatial.inputTexture = nil;
+    g_spatial.outputTexture = nil;
+    g_spatial.commandQueue = nil;
+    g_spatial.device = nil;
+    g_spatial.cachedInputSurface = NULL;
+    if (g_spatial.outputSurface) {
+        CFRelease(g_spatial.outputSurface);
+        g_spatial.outputSurface = NULL;
+    }
+    g_spatial.initialized = false;
+}
+
 bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
 {
+    os_unfair_lock_lock(&g_metalfx_lock);
     if (g_spatial.initialized) {
         if (g_spatial.inputWidth == input_w &&
             g_spatial.inputHeight == input_h &&
             g_spatial.outputWidth == output_w &&
             g_spatial.outputHeight == output_h) {
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
-        metalfx_destroy();
+        metalfx_destroy_locked();
     }
 
     @autoreleasepool {
         g_spatial.device = MTLCreateSystemDefaultDevice();
-        if (!g_spatial.device) return false;
-        if (![MTLFXSpatialScalerDescriptor supportsDevice:g_spatial.device])
-            return false;
+        if (!g_spatial.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
+        if (![MTLFXSpatialScalerDescriptor supportsDevice:g_spatial.device]) {
+            os_unfair_lock_unlock(&g_metalfx_lock); return false;
+        }
 
         g_spatial.commandQueue = [g_spatial.device newCommandQueue];
 
@@ -144,10 +180,10 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
 
         g_spatial.scaler =
             [desc newSpatialScalerWithDevice:g_spatial.device];
-        if (!g_spatial.scaler) return false;
+        if (!g_spatial.scaler) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
 
         g_spatial.outputSurface = create_iosurface_bgra(output_w, output_h);
-        if (!g_spatial.outputSurface) return false;
+        if (!g_spatial.outputSurface) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
 
         g_spatial.outputTexture = texture_from_iosurface(
             g_spatial.device, g_spatial.outputSurface,
@@ -156,6 +192,7 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
         if (!g_spatial.outputTexture) {
             CFRelease(g_spatial.outputSurface);
             g_spatial.outputSurface = NULL;
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return false;
         }
 
@@ -167,13 +204,17 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
 
         fprintf(stderr, "MetalFX: Spatial upscaler initialized %dx%d -> %dx%d\n",
                 input_w, input_h, output_w, output_h);
+        os_unfair_lock_unlock(&g_metalfx_lock);
         return true;
     }
 }
 
 IOSurfaceRef metalfx_get_output_surface(void)
 {
-    return g_spatial.outputSurface;
+    os_unfair_lock_lock(&g_metalfx_lock);
+    IOSurfaceRef s = g_spatial.outputSurface;
+    os_unfair_lock_unlock(&g_metalfx_lock);
+    return s;
 }
 
 bool metalfx_upscale(IOSurfaceRef inputSurface)
@@ -185,6 +226,11 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
     }
 
     @autoreleasepool {
+        if (g_spatial.pendingCB) {
+            [g_spatial.pendingCB waitUntilCompleted];
+            g_spatial.pendingCB = nil;
+        }
+
         if (inputSurface != g_spatial.cachedInputSurface) {
             g_spatial.inputTexture = texture_from_iosurface(
                 g_spatial.device, inputSurface, MTLPixelFormatBGRA8Unorm,
@@ -212,17 +258,7 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
 void metalfx_destroy(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
-    g_spatial.scaler = nil;
-    g_spatial.inputTexture = nil;
-    g_spatial.outputTexture = nil;
-    g_spatial.commandQueue = nil;
-    g_spatial.device = nil;
-    g_spatial.cachedInputSurface = NULL;
-    if (g_spatial.outputSurface) {
-        CFRelease(g_spatial.outputSurface);
-        g_spatial.outputSurface = NULL;
-    }
-    g_spatial.initialized = false;
+    metalfx_destroy_locked();
     os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
@@ -248,6 +284,8 @@ typedef struct MetalFXTemporalState {
     uint32_t frameIndex;
     int failedInputW, failedInputH;
     int failedOutputW, failedOutputH;
+    id<MTLComputePipelineState> syntheticDepthPipeline;
+    id<MTLTexture> syntheticDepthTexture;
 } MetalFXTemporalState;
 
 static MetalFXTemporalState g_temporal = { 0 };
@@ -259,34 +297,63 @@ bool metalfx_temporal_is_supported(void)
     return [MTLFXTemporalScalerDescriptor supportsDevice:device];
 }
 
+static void metalfx_temporal_destroy_locked(void)
+{
+    g_temporal.scaler = nil;
+    g_temporal.colorTexture = nil;
+    g_temporal.depthTexture = nil;
+    g_temporal.cachedDepthSurface = NULL;
+    g_temporal.motionTexture = nil;
+    g_temporal.syntheticDepthPipeline = nil;
+    g_temporal.syntheticDepthTexture = nil;
+    g_temporal.outputTexture = nil;
+    g_temporal.outputSharedTexture = nil;
+    g_temporal.commandQueue = nil;
+    g_temporal.device = nil;
+    g_temporal.cachedColorSurface = NULL;
+    if (g_temporal.outputSurface) {
+        CFRelease(g_temporal.outputSurface);
+        g_temporal.outputSurface = NULL;
+    }
+    g_temporal.initialized = false;
+    g_temporal.failedInputW = 0;
+    g_temporal.failedInputH = 0;
+    g_temporal.failedOutputW = 0;
+    g_temporal.failedOutputH = 0;
+}
+
 bool metalfx_temporal_init(int input_w, int input_h,
                            int output_w, int output_h)
 {
     int req_output_w = output_w;
     int req_output_h = output_h;
 
+    os_unfair_lock_lock(&g_metalfx_lock);
     if (g_temporal.initialized) {
         if (g_temporal.inputWidth == input_w &&
             g_temporal.inputHeight == input_h &&
             g_temporal.requestedOutputW == req_output_w &&
             g_temporal.requestedOutputH == req_output_h) {
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
-        metalfx_temporal_destroy();
+        metalfx_temporal_destroy_locked();
     }
 
     if (g_temporal.failedInputW == input_w &&
         g_temporal.failedInputH == input_h &&
         g_temporal.failedOutputW == req_output_w &&
         g_temporal.failedOutputH == req_output_h) {
+        os_unfair_lock_unlock(&g_metalfx_lock);
         return false;
     }
 
     @autoreleasepool {
         g_temporal.device = MTLCreateSystemDefaultDevice();
-        if (!g_temporal.device) return false;
-        if (![MTLFXTemporalScalerDescriptor supportsDevice:g_temporal.device])
-            return false;
+        if (!g_temporal.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
+        if (![MTLFXTemporalScalerDescriptor supportsDevice:g_temporal.device]) {
+            os_unfair_lock_unlock(&g_metalfx_lock); return false;
+        }
 
         float max_scale = [MTLFXTemporalScalerDescriptor
             supportedInputContentMaxScaleForDevice:g_temporal.device];
@@ -327,16 +394,12 @@ bool metalfx_temporal_init(int input_w, int input_h,
             g_temporal.failedInputH = input_h;
             g_temporal.failedOutputW = req_output_w;
             g_temporal.failedOutputH = req_output_h;
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return false;
         }
 
         g_temporal.outputSurface = create_iosurface_bgra(output_w, output_h);
         if (g_temporal.outputSurface) {
-            /*
-             * On Apple Silicon unified memory, write the upscaler output
-             * directly into the IOSurface-backed shared texture to avoid a
-             * redundant private->shared blit every frame.
-             */
             g_temporal.outputTexture = texture_from_iosurface(
                 g_temporal.device, g_temporal.outputSurface,
                 MTLPixelFormatBGRA8Unorm, output_w, output_h,
@@ -350,7 +413,11 @@ bool metalfx_temporal_init(int input_w, int input_h,
                 output_w, output_h,
                 MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead |
                 MTLTextureUsageRenderTarget);
-            if (!g_temporal.outputTexture) return false;
+            if (!g_temporal.outputTexture) {
+                metalfx_temporal_destroy_locked();
+                os_unfair_lock_unlock(&g_metalfx_lock);
+                return false;
+            }
             if (g_temporal.outputSurface) {
                 g_temporal.outputSharedTexture = texture_from_iosurface(
                     g_temporal.device, g_temporal.outputSurface,
@@ -391,21 +458,51 @@ bool metalfx_temporal_init(int input_w, int input_h,
         g_temporal.needsReset = true;
         g_temporal.frameIndex = 0;
 
+        NSError *err = nil;
+        id<MTLLibrary> lib = [g_temporal.device
+            newLibraryWithSource:kSyntheticDepthKernel options:nil error:&err];
+        if (lib) {
+            id<MTLFunction> fn = [lib newFunctionWithName:@"syntheticDepth"];
+            if (fn) {
+                g_temporal.syntheticDepthPipeline =
+                    [g_temporal.device newComputePipelineStateWithFunction:fn
+                                                                    error:&err];
+            }
+        }
+        if (g_temporal.syntheticDepthPipeline) {
+            MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                            width:input_w
+                                           height:input_h
+                                        mipmapped:NO];
+            depthDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            depthDesc.storageMode = MTLStorageModePrivate;
+            g_temporal.syntheticDepthTexture =
+                [g_temporal.device newTextureWithDescriptor:depthDesc];
+            fprintf(stderr, "MetalFX: Synthetic depth enabled for temporal\n");
+        }
+
         fprintf(stderr,
                 "MetalFX: Temporal upscaler initialized %dx%d -> %dx%d\n",
                 input_w, input_h, output_w, output_h);
+        os_unfair_lock_unlock(&g_metalfx_lock);
         return true;
     }
 }
 
 IOSurfaceRef metalfx_temporal_get_output_surface(void)
 {
-    return g_temporal.outputSurface;
+    os_unfair_lock_lock(&g_metalfx_lock);
+    IOSurfaceRef s = g_temporal.outputSurface;
+    os_unfair_lock_unlock(&g_metalfx_lock);
+    return s;
 }
 
 void metalfx_temporal_reset(void)
 {
+    os_unfair_lock_lock(&g_metalfx_lock);
     g_temporal.needsReset = true;
+    os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
 bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
@@ -442,11 +539,30 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
             g_temporal.cachedDepthSurface = NULL;
         }
 
+        id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
+
+        if (!g_temporal.depthTexture && g_temporal.syntheticDepthPipeline &&
+            g_temporal.syntheticDepthTexture && g_temporal.colorTexture) {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:g_temporal.syntheticDepthPipeline];
+            [enc setTexture:g_temporal.colorTexture atIndex:0];
+            [enc setTexture:g_temporal.syntheticDepthTexture atIndex:1];
+            NSUInteger tw = g_temporal.syntheticDepthPipeline.threadExecutionWidth;
+            NSUInteger th = g_temporal.syntheticDepthPipeline.maxTotalThreadsPerThreadgroup / tw;
+            MTLSize tgSize = MTLSizeMake(tw, th, 1);
+            MTLSize gridSize = MTLSizeMake(g_temporal.inputWidth,
+                                           g_temporal.inputHeight, 1);
+            [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+            [enc endEncoding];
+        }
+
         g_temporal.scaler.colorTexture = g_temporal.colorTexture;
         g_temporal.scaler.outputTexture = g_temporal.outputTexture;
         g_temporal.scaler.motionTexture = g_temporal.motionTexture;
         if (g_temporal.depthTexture) {
             g_temporal.scaler.depthTexture = g_temporal.depthTexture;
+        } else if (g_temporal.syntheticDepthTexture) {
+            g_temporal.scaler.depthTexture = g_temporal.syntheticDepthTexture;
         }
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
@@ -461,7 +577,6 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         g_temporal.scaler.reset = g_temporal.needsReset;
         g_temporal.needsReset = false;
 
-        id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
         [g_temporal.scaler encodeToCommandBuffer:cb];
 
         if (g_temporal.outputSharedTexture) {
@@ -489,25 +604,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
 void metalfx_temporal_destroy(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
-    g_temporal.scaler = nil;
-    g_temporal.colorTexture = nil;
-    g_temporal.depthTexture = nil;
-    g_temporal.cachedDepthSurface = NULL;
-    g_temporal.motionTexture = nil;
-    g_temporal.outputTexture = nil;
-    g_temporal.outputSharedTexture = nil;
-    g_temporal.commandQueue = nil;
-    g_temporal.device = nil;
-    g_temporal.cachedColorSurface = NULL;
-    if (g_temporal.outputSurface) {
-        CFRelease(g_temporal.outputSurface);
-        g_temporal.outputSurface = NULL;
-    }
-    g_temporal.initialized = false;
-    g_temporal.failedInputW = 0;
-    g_temporal.failedInputH = 0;
-    g_temporal.failedOutputW = 0;
-    g_temporal.failedOutputH = 0;
+    metalfx_temporal_destroy_locked();
     os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
@@ -546,18 +643,44 @@ bool metalfx_interpolation_is_supported(void)
     return false;
 }
 
+static void metalfx_interpolation_destroy_locked(void)
+{
+    g_interp.interpolator = nil;
+    g_interp.outputTexture = nil;
+    g_interp.outputSharedTexture = nil;
+    g_interp.motionTexture = nil;
+    g_interp.cachedColorCur = nil;
+    g_interp.cachedColorPrev = nil;
+    g_interp.cachedDepthCur = nil;
+    g_interp.cachedDepthPrev = nil;
+    g_interp.commandQueue = nil;
+    g_interp.device = nil;
+    g_interp.lastColorCur = NULL;
+    g_interp.lastColorPrev = NULL;
+    g_interp.lastDepthCur = NULL;
+    g_interp.lastDepthPrev = NULL;
+    if (g_interp.outputSurface) {
+        CFRelease(g_interp.outputSurface);
+        g_interp.outputSurface = NULL;
+    }
+    g_interp.initialized = false;
+}
+
 bool metalfx_interpolation_init(int width, int height)
 {
     if (@available(macOS 26.0, *)) {
+        os_unfair_lock_lock(&g_metalfx_lock);
         if (g_interp.initialized) {
-            if (g_interp.width == width && g_interp.height == height)
+            if (g_interp.width == width && g_interp.height == height) {
+                os_unfair_lock_unlock(&g_metalfx_lock);
                 return true;
-            metalfx_interpolation_destroy();
+            }
+            metalfx_interpolation_destroy_locked();
         }
 
         @autoreleasepool {
             g_interp.device = MTLCreateSystemDefaultDevice();
-            if (!g_interp.device) return false;
+            if (!g_interp.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
 
             g_interp.commandQueue = [g_interp.device newCommandQueue];
 
@@ -577,6 +700,7 @@ bool metalfx_interpolation_init(int width, int height)
             if (!interp) {
                 fprintf(stderr,
                         "MetalFX: Failed to create frame interpolator\n");
+                os_unfair_lock_unlock(&g_metalfx_lock);
                 return false;
             }
             g_interp.interpolator = interp;
@@ -596,7 +720,11 @@ bool metalfx_interpolation_init(int width, int height)
                     width, height,
                     MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead |
                     MTLTextureUsageRenderTarget);
-                if (!g_interp.outputTexture) return false;
+                if (!g_interp.outputTexture) {
+                    metalfx_interpolation_destroy_locked();
+                    os_unfair_lock_unlock(&g_metalfx_lock);
+                    return false;
+                }
                 if (g_interp.outputSurface) {
                     g_interp.outputSharedTexture = texture_from_iosurface(
                         g_interp.device, g_interp.outputSurface,
@@ -631,6 +759,7 @@ bool metalfx_interpolation_init(int width, int height)
             fprintf(stderr,
                     "MetalFX: Frame interpolator initialized %dx%d\n",
                     width, height);
+            os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
     }
@@ -640,7 +769,10 @@ bool metalfx_interpolation_init(int width, int height)
 
 IOSurfaceRef metalfx_interpolation_get_output_surface(void)
 {
-    return g_interp.outputSurface;
+    os_unfair_lock_lock(&g_metalfx_lock);
+    IOSurfaceRef s = g_interp.outputSurface;
+    os_unfair_lock_unlock(&g_metalfx_lock);
+    return s;
 }
 
 bool metalfx_interpolation_generate(IOSurfaceRef colorA,
@@ -740,25 +872,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
 void metalfx_interpolation_destroy(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
-    g_interp.interpolator = nil;
-    g_interp.outputTexture = nil;
-    g_interp.outputSharedTexture = nil;
-    g_interp.motionTexture = nil;
-    g_interp.cachedColorCur = nil;
-    g_interp.cachedColorPrev = nil;
-    g_interp.cachedDepthCur = nil;
-    g_interp.cachedDepthPrev = nil;
-    g_interp.commandQueue = nil;
-    g_interp.device = nil;
-    g_interp.lastColorCur = NULL;
-    g_interp.lastColorPrev = NULL;
-    g_interp.lastDepthCur = NULL;
-    g_interp.lastDepthPrev = NULL;
-    if (g_interp.outputSurface) {
-        CFRelease(g_interp.outputSurface);
-        g_interp.outputSurface = NULL;
-    }
-    g_interp.initialized = false;
+    metalfx_interpolation_destroy_locked();
     os_unfair_lock_unlock(&g_metalfx_lock);
 }
 

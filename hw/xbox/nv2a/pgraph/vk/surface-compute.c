@@ -69,35 +69,48 @@ const char *unswizzle_z_order_glsl =
 
 /*
  * Z-order unswizzle compute shader for 2 bytes-per-pixel surfaces (R5G6B5,
- * etc.). Operates on 16-bit elements packed into uint SSBOs.
+ * etc.). Iterates over destination 32-bit words so each thread writes both
+ * packed 16-bit halves in a single store, avoiding SSBO write races without
+ * atomics. Uses Morton encode to map linear (x,y) back to Z-order source index.
  * Push constants: width, height (in pixels).
  */
 const char *unswizzle_z_order_2bpp_glsl =
     "layout(push_constant) uniform PushConstants { uint width, height; };\n"
     "layout(set = 0, binding = 0) buffer SwizzledIn { uint swizzled_in[]; };\n"
-    "layout(set = 0, binding = 1) buffer LinearOut { uint linear_out[]; };\n"
-    "uint morton_x(uint x) {\n"
-    "    x &= 0x55555555u;\n"
-    "    x = (x | (x >> 1u)) & 0x33333333u;\n"
-    "    x = (x | (x >> 2u)) & 0x0f0f0f0fu;\n"
-    "    x = (x | (x >> 4u)) & 0x00ff00ffu;\n"
-    "    x = (x | (x >> 8u)) & 0x0000ffffu;\n"
-    "    return x;\n"
+    "layout(set = 0, binding = 1) buffer LinearOut  { uint linear_out[]; };\n"
+    "uint morton_encode(uint x, uint y) {\n"
+    "    x = (x | (x << 8u)) & 0x00ff00ffu;\n"
+    "    x = (x | (x << 4u)) & 0x0f0f0f0fu;\n"
+    "    x = (x | (x << 2u)) & 0x33333333u;\n"
+    "    x = (x | (x << 1u)) & 0x55555555u;\n"
+    "    y = (y | (y << 8u)) & 0x00ff00ffu;\n"
+    "    y = (y | (y << 4u)) & 0x0f0f0f0fu;\n"
+    "    y = (y | (y << 2u)) & 0x33333333u;\n"
+    "    y = (y | (y << 1u)) & 0x55555555u;\n"
+    "    return x | (y << 1u);\n"
     "}\n"
     "void main() {\n"
-    "    uint idx = gl_GlobalInvocationID.x;\n"
-    "    if (idx >= width * height) return;\n"
-    "    uint mx = morton_x(idx);\n"
-    "    uint my = morton_x(idx >> 1u);\n"
-    "    if (mx >= width || my >= height) return;\n"
-    "    uint src_word = swizzled_in[idx >> 1u];\n"
-    "    uint val = (idx & 1u) == 0u ? (src_word & 0xffffu) : (src_word >> 16u);\n"
-    "    uint dst_idx = my * width + mx;\n"
-    "    uint dst_word = linear_out[dst_idx >> 1u];\n"
-    "    if ((dst_idx & 1u) == 0u)\n"
-    "        linear_out[dst_idx >> 1u] = (dst_word & 0xffff0000u) | val;\n"
-    "    else\n"
-    "        linear_out[dst_idx >> 1u] = (dst_word & 0x0000ffffu) | (val << 16u);\n"
+    "    uint word_idx = gl_GlobalInvocationID.x;\n"
+    "    uint total_words = (width * height + 1u) / 2u;\n"
+    "    if (word_idx >= total_words) return;\n"
+    "    uint dst_px0 = word_idx * 2u;\n"
+    "    uint dst_px1 = dst_px0 + 1u;\n"
+    "    uint x0 = dst_px0 % width;\n"
+    "    uint y0 = dst_px0 / width;\n"
+    "    uint x1 = dst_px1 % width;\n"
+    "    uint y1 = dst_px1 / width;\n"
+    "    uint lo = 0u, hi = 0u;\n"
+    "    if (y0 < height) {\n"
+    "        uint src0 = morton_encode(x0, y0);\n"
+    "        uint sw0 = swizzled_in[src0 >> 1u];\n"
+    "        lo = (src0 & 1u) == 0u ? (sw0 & 0xffffu) : (sw0 >> 16u);\n"
+    "    }\n"
+    "    if (dst_px1 < width * height && y1 < height) {\n"
+    "        uint src1 = morton_encode(x1, y1);\n"
+    "        uint sw1 = swizzled_in[src1 >> 1u];\n"
+    "        hi = (src1 & 1u) == 0u ? (sw1 & 0xffffu) : (sw1 >> 16u);\n"
+    "    }\n"
+    "    linear_out[word_idx] = lo | (hi << 16u);\n"
     "}\n";
 
 /*
@@ -807,8 +820,9 @@ void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);
 
+    size_t word_count = (pixel_count + 1) / 2;
     size_t group_count =
-        (pixel_count + COMPUTE_2BUF_WORKGROUP_SIZE - 1) / COMPUTE_2BUF_WORKGROUP_SIZE;
+        (word_count + COMPUTE_2BUF_WORKGROUP_SIZE - 1) / COMPUTE_2BUF_WORKGROUP_SIZE;
     vkCmdDispatch(cmd, group_count, 1, 1);
     pgraph_vk_end_debug_marker(r, cmd);
 }

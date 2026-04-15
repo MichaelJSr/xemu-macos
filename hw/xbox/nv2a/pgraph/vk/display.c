@@ -1303,9 +1303,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->last_cgl_height = disp->interp_height;
                     }
                 }
+                disp->interp_index++;
+                disp->interp_remaining--;
             }
-            disp->interp_index++;
-            disp->interp_remaining--;
         }
 #endif
         return;
@@ -1324,6 +1324,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     if (!disp->image || disp->width != width || disp->height != height) {
         create_display_image(pg, width, height);
         disp->pvideo.last_uploaded_state = (PvideoState){ 0 };
+#if HAVE_IOSURFACE_SHARING
+        metalfx_temporal_reset();
+#endif
     }
 
     if (!disp->image) {

@@ -289,7 +289,7 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
     vmaGetHeapBudgets(r->allocator, budgets);
 
     const float budget_threshold = 0.9;
-    const VkDeviceSize min_alloc_for_trim = 512ULL * 1024 * 1024;
+    const VkDeviceSize min_alloc_for_trim = 2048ULL * 1024 * 1024;
     bool near_budget = false;
 
     for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
@@ -299,9 +299,10 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
         }
         float use_to_budget_ratio =
             (double)b->statistics.allocationBytes / (double)b->budget;
-        NV2A_VK_DPRINTF("Heap %d: used %lu/%lu MiB (%.2f%%)", i,
-                        b->statistics.allocationBytes / (1024 * 1024),
-                        b->budget / (1024 * 1024), use_to_budget_ratio * 100);
+        NV2A_VK_DPRINTF("Heap %d: used %llu/%llu MiB (%.2f%%)", i,
+                        (unsigned long long)(b->statistics.allocationBytes / (1024 * 1024)),
+                        (unsigned long long)(b->budget / (1024 * 1024)),
+                        use_to_budget_ratio * 100);
         near_budget |= (use_to_budget_ratio > budget_threshold &&
                         b->statistics.allocationBytes > min_alloc_for_trim);
     }

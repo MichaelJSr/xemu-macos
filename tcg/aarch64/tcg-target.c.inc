@@ -1234,7 +1234,7 @@ static bool tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
             tcg_out_movr(s, type, ret, arg);
             break;
         } else if (ret < 32) {
-            tcg_out_insn(s, 3605, UMOV, type, ret, arg, 0, 0);
+            tcg_out_insn(s, 3605, UMOV, type, ret, arg, 4 << type, 0);
             break;
         } else if (arg < 32) {
             tcg_out_insn(s, 3605, INS, 0, ret, arg, 4 << type, 0);
