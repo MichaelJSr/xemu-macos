@@ -47,7 +47,7 @@ static const VkImageViewType dimensionality_to_vk_image_view_type[] = {
 
 static VkSamplerAddressMode lookup_texture_address_mode(int idx)
 {
-    nv2a_vk_assert(0 < idx && idx < ARRAY_SIZE(pgraph_texture_addr_vk_map));
+    nv2a_vk_bounds_check(0 < idx && idx < ARRAY_SIZE(pgraph_texture_addr_vk_map));
     return pgraph_texture_addr_vk_map[idx];
 }
 
@@ -745,7 +745,7 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
         };
     }
     StorageBuffer *dst_storage_buffer = &r->storage_buffers[BUFFER_COMPUTE_DST];
-    nv2a_vk_assert(dst_storage_buffer->buffer_size >= copied_image_size);
+    nv2a_vk_bounds_check(dst_storage_buffer->buffer_size >= copied_image_size);
 
     pgraph_vk_transition_image_layout(
         pg, cmd, surface->image, surface->host_fmt.vk_format,
@@ -1057,22 +1057,17 @@ static void create_dummy_texture(PGRAPHState *pg)
     VK_CHECK(vkCreateSampler(r->device, &sampler_create_info, NULL,
                              &texture_sampler));
 
-    // Copy texture data to mapped device buffer
-    uint8_t *mapped_memory_ptr;
+    // Copy texture data to persistently mapped staging buffer
+    uint8_t *mapped_memory_ptr = r->storage_buffers[BUFFER_STAGING_SRC].mapped;
+    assert(mapped_memory_ptr);
     size_t texture_data_size =
         image_create_info.extent.width * image_create_info.extent.height;
 
-    VK_CHECK(vmaMapMemory(r->allocator,
-                          r->storage_buffers[BUFFER_STAGING_SRC].allocation,
-                          (void *)&mapped_memory_ptr));
     memset(mapped_memory_ptr, 0xff, texture_data_size);
 
     vmaFlushAllocation(r->allocator,
                        r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
                        VK_WHOLE_SIZE);
-
-    vmaUnmapMemory(r->allocator,
-                   r->storage_buffers[BUFFER_STAGING_SRC].allocation);
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
@@ -1248,7 +1243,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             texture_palette_data_size);
     }
 
-    // Calculate hash of texture data, if necessary
     void *texture_data = (char*)d->vram_ptr + texture_vram_offset;
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
@@ -1285,10 +1279,10 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->hash = content_hash;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
-    nv2a_vk_assert(vkf.vk_format != 0);
-    nv2a_vk_assert(0 < state.dimensionality);
-    nv2a_vk_assert(state.dimensionality < ARRAY_SIZE(dimensionality_to_vk_image_type));
-    nv2a_vk_assert(state.dimensionality <
+    nv2a_vk_bounds_check(vkf.vk_format != 0);
+    nv2a_vk_bounds_check(0 < state.dimensionality);
+    nv2a_vk_bounds_check(state.dimensionality < ARRAY_SIZE(dimensionality_to_vk_image_type));
+    nv2a_vk_bounds_check(state.dimensionality <
            ARRAY_SIZE(dimensionality_to_vk_image_view_type));
 
     VkImageCreateInfo image_create_info = {
@@ -1394,10 +1388,10 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     VkFilter vk_min_filter, vk_mag_filter;
     unsigned int mag_filter = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MAG);
-    nv2a_vk_assert(mag_filter < ARRAY_SIZE(pgraph_texture_mag_filter_vk_map));
+    nv2a_vk_bounds_check(mag_filter < ARRAY_SIZE(pgraph_texture_mag_filter_vk_map));
 
     unsigned int min_filter = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIN);
-    nv2a_vk_assert(min_filter < ARRAY_SIZE(pgraph_texture_min_filter_vk_map));
+    nv2a_vk_bounds_check(min_filter < ARRAY_SIZE(pgraph_texture_min_filter_vk_map));
 
     if (is_linear_filter_supported_for_format(r, state.color_format)) {
         vk_mag_filter = pgraph_texture_min_filter_vk_map[mag_filter];

@@ -110,7 +110,6 @@ typedef struct MetalFXSpatialState {
     id<MTLTexture> outputTexture;
     IOSurfaceRef outputSurface;
     IOSurfaceRef cachedInputSurface;
-    id<MTLCommandBuffer> pendingCB;
     int inputWidth, inputHeight;
     int outputWidth, outputHeight;
     bool initialized;
@@ -127,10 +126,6 @@ bool metalfx_is_supported(void)
 
 static void metalfx_destroy_locked(void)
 {
-    if (g_spatial.pendingCB) {
-        [g_spatial.pendingCB waitUntilCompleted];
-        g_spatial.pendingCB = nil;
-    }
     g_spatial.scaler = nil;
     g_spatial.inputTexture = nil;
     g_spatial.outputTexture = nil;
@@ -226,11 +221,6 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
     }
 
     @autoreleasepool {
-        if (g_spatial.pendingCB) {
-            [g_spatial.pendingCB waitUntilCompleted];
-            g_spatial.pendingCB = nil;
-        }
-
         if (inputSurface != g_spatial.cachedInputSurface) {
             g_spatial.inputTexture = texture_from_iosurface(
                 g_spatial.device, inputSurface, MTLPixelFormatBGRA8Unorm,
@@ -249,8 +239,8 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
         id<MTLCommandBuffer> cb = [g_spatial.commandQueue commandBuffer];
         [g_spatial.scaler encodeToCommandBuffer:cb];
         [cb commit];
-        [cb waitUntilCompleted];
         os_unfair_lock_unlock(&g_metalfx_lock);
+        [cb waitUntilCompleted];
         return true;
     }
 }
@@ -595,8 +585,8 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         }
 
         [cb commit];
-        [cb waitUntilCompleted];
         os_unfair_lock_unlock(&g_metalfx_lock);
+        [cb waitUntilCompleted];
         return true;
     }
 }
@@ -860,8 +850,8 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             }
 
             [cb commit];
-            [cb waitUntilCompleted];
             os_unfair_lock_unlock(&g_metalfx_lock);
+            [cb waitUntilCompleted];
             return true;
         }
     }

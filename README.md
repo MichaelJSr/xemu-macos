@@ -24,7 +24,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
+| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. Inline fucom/fucomi/fcomi comparisons avoid flushing all FP regs to memory — comparison result written directly to fpus/EFLAGS without helper call. ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
 | **MetalFX Temporal Upscaling** | ML-based temporal super-resolution via `MTLFXTemporalScaler`. Halton(2,3) jitter across 8 frames. Color-only accumulation (no depth/motion vectors). |
 | **Frame Interpolation** | `MTLFXFrameInterpolator` (macOS 26+). 2x = 60fps, 4x = 120fps from 30fps source. Deferred generation during idle display syncs. |
 | **Texture Upload Batching** | Bump allocator on `BUFFER_STAGING_SRC`. Multiple textures batch on main command buffer, eliminating per-texture GPU sync. |
@@ -37,22 +37,22 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 |---|---|
 | **Display Path** | PVIDEO + display merged into 1 GPU submission. IOSurface rebind, descriptor set, and uniform caching skip redundant per-frame calls. |
 | **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. |
-| **Staging Buffers** | 256 MiB staging with persistent VMA mapping. Eliminates per-upload map/unmap and reduces forced GPU flushes. |
-| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Reduces MoltenVK Metal fence overhead. |
+| **Staging Buffers** | 256 MiB staging with persistent VMA mapping. All staging users (texture upload, PVIDEO, dummy texture) use the persistent `.mapped` pointer directly — no per-upload map/unmap. |
+| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `flush_memory_buffer` skips `vmaFlushAllocation` on Apple Silicon coherent memory (no-op elided). Reduces MoltenVK Metal fence overhead. |
 | **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
-| **CoreAudio `os_unfair_lock`** | Replaces `pthread_mutex` in IOProc, eliminating real-time thread priority inversion. |
+| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. IOProc uses `os_unfair_lock_trylock` — outputs silence on contention rather than blocking the real-time audio thread. |
 
 ### Low Impact / Quality of Life
 
 | Optimization | Description |
 |---|---|
-| **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. `os_unfair_lock` guards all MetalFX state. |
+| **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. `os_unfair_lock` guards MetalFX state; released before `waitUntilCompleted` so GPU wait doesn't block other threads. |
 | **MoltenVK Tuning** | Argument buffers, prefilled command buffers, async queue submits, fast-math, resume-lost-device. |
 | **Pool Sizing** | Descriptor sets 2048, invalid surface pool 64. Reduces forced flushes. |
 | **Scratch Image Skip** | At scale=1 on macOS, upload copies directly to main image (AMD workaround skipped). |
-| **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. |
+| **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
 | **VMA Budget Trimming** | Texture cache trimmed when allocation > 512 MiB and > 90% budget. Prevents long-session OOM. |
 | **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
@@ -84,6 +84,8 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Shader Uniform Leak** | `layout->allocation` not freed in `finalize_uniform_layout` (`glsl.c`). |
 | **GMatchInfo Heap Corruption** | `g_free(match)` on `GMatchInfo*` in `main-menu.cc`; corrected to `g_match_info_free`. |
 | **Texture Decode Condvar Race** | `GMutex`/`GCond` destroyed by waiter while last worker still inside `g_mutex_unlock` after signaling. Caused `pthread_cond_signal: Invalid argument` crash on level loads and infinite hang on save state. Replaced with `QemuEvent` (no lock held during signal). |
+| **MetalFX Spatial Dead Code** | `g_spatial.pendingCB` never assigned in `metalfx_upscale()`, so the `waitUntilCompleted` guard in `metalfx_destroy_locked()` was dead code. Removed field and dead wait path. |
+| **Redundant `vmaMapMemory`** | `upload_pvideo_to_cmd` (display.c) and `create_dummy_texture` (texture.c) called `vmaMapMemory`/`vmaUnmapMemory` on `BUFFER_STAGING_SRC` which was already persistently mapped at init. Replaced with direct use of `.mapped` pointer. |
 
 ---
 
@@ -105,6 +107,9 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Dirty-range VRAM flush** | Segfault (then reverted) | `bitmap_clear` before `flush_memory_buffer` zeroed bitmap before read. Minimal benefit on Apple Silicon coherent memory anyway. |
 | **Depth export via CPU readback** | Temporal slower than spatial | Copied zeta depth aspect via `vkCmdCopyImageToBuffer` + CPU `memcpy` to R32Float IOSurface every frame. Added 2 GPU sync points + 18+ MiB CPU copy per frame. Quality improvement was subtle; performance cost was 2-5ms/frame. Correct approach requires IOSurface-backed VkImage rendered directly in the NV2A pipeline (avoids CPU round-trip). |
 | **Texture decode GMutex/GCond** | Crash + hang | Waiter destroyed mutex/condvar while last worker still inside `g_mutex_unlock`. Stack-allocated `DecodeTaskBatch` memory reused after `decode_batch_wait` returned. Caused `pthread_cond_signal: Invalid argument` and save-state hangs. Fixed by switching to `QemuEvent` (atomic flag, no lock held during signal). |
+| **Texture hash skip for large textures** | Massive GPU re-upload churn | Skipping `fast_hash` for textures >64 KiB and always re-uploading when the dirty bitmap fired. The VRAM dirty bitmap triggers frequently for unchanged textures (DMA/MMIO writes to nearby pages). The hash comparison was the critical guard preventing redundant multi-MB texture re-uploads every frame. CPU hash cost (~µs) is far cheaper than a GPU staging+copy+upload cycle. |
+| **HRTF NEON vectorization** | Slower than scalar | Manual NEON intrinsics for 31-tap FIR convolution, coefficient smoothing, and normalization. The gather-then-FMA pattern for convolution (pre-loading circular buffer into linear stack array) prevented the M2's out-of-order engine from overlapping load latency with multiply-accumulate. Coefficient smoothing was called per-sample (32x/frame/voice) — NEON setup overhead didn't amortize at 31 elements. Clang `-O3 -mcpu=native` auto-vectorizes these loops more effectively. |
+| **Always-on bounds checks in perf builds** | ~5-10% GPU pipeline regression | Replacing `nv2a_vk_assert` (compiled to `((void)0)`) with `G_UNLIKELY(!(x)) abort()` on ~25 hot-path array bounds checks (pipeline creation, texture binding, surface ops). Even with cold-path hints, the branches added instruction cache pressure in tight per-draw-call loops. Fixed by using `__builtin_unreachable()` instead (zero instructions emitted, compiler optimization hint only). |
 
 ---
 
@@ -288,7 +293,7 @@ fit = 'stretch'
 # Display settings
 # ============================================================
 [display]
-renderer = 'VULKAN'            # 'NULL', 'OPENGL', 'VULKAN'
+renderer = 'VULKAN'            # 'NULL', 'OPENGL', 'VULKAN' (default: VULKAN)
                                 # Vulkan required for MetalFX and IOSurface zero-copy
 
 metalfx_upscale = true          # Legacy boolean (redundant if metalfx_mode is set)

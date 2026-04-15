@@ -227,7 +227,7 @@ display:
   renderer:
     type: enum
     values: ["NULL", OPENGL, VULKAN]
-    default: OPENGL
+    default: VULKAN
   vulkan:
     validation_layers: bool
     debug_shaders: bool

@@ -135,10 +135,8 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;
 
-    uint8_t *mapped_memory_ptr;
-    VK_CHECK(vmaMapMemory(r->allocator,
-                          r->storage_buffers[BUFFER_STAGING_SRC].allocation,
-                          (void *)&mapped_memory_ptr));
+    uint8_t *mapped_memory_ptr = r->storage_buffers[BUFFER_STAGING_SRC].mapped;
+    assert(mapped_memory_ptr);
 
     uint8_t *src = d->vram_ptr + state.base + state.offset;
     for (int y = 0; y < state.in_height; y++) {
@@ -150,8 +148,6 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
     vmaFlushAllocation(r->allocator,
                        r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
                        VK_WHOLE_SIZE);
-    vmaUnmapMemory(r->allocator,
-                   r->storage_buffers[BUFFER_STAGING_SRC].allocation);
 
     VkBufferMemoryBarrier host_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,

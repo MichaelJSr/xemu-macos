@@ -281,7 +281,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     // Copy image to staging buffer, or to compute_dst if we need to pack it
     //
 
-    nv2a_vk_assert((surface->host_fmt.host_bytes_per_pixel *
+    nv2a_vk_bounds_check((surface->host_fmt.host_bytes_per_pixel *
                     surface->width * surface->height) <=
            r->storage_buffers[BUFFER_STAGING_DST].buffer_size);
 
@@ -1023,7 +1023,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     size_t uploaded_image_size = surface->height * surface->width *
                                  surface->fmt.bytes_per_pixel;
-    nv2a_vk_assert(uploaded_image_size <= copy_buffer->buffer_size);
+    nv2a_vk_bounds_check(uploaded_image_size <= copy_buffer->buffer_size);
 
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -1383,8 +1383,8 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     if (color) {
         surface = &pg->surface_color;
         dma_address = pg->dma_color;
-        nv2a_vk_assert(pg->surface_shape.color_format != 0);
-        nv2a_vk_assert(pg->surface_shape.color_format <
+        nv2a_vk_bounds_check(pg->surface_shape.color_format != 0);
+        nv2a_vk_bounds_check(pg->surface_shape.color_format <
                ARRAY_SIZE(kelvin_surface_color_format_vk_map));
         fmt = kelvin_surface_color_format_map[pg->surface_shape.color_format];
         host_fmt = kelvin_surface_color_format_vk_map[pg->surface_shape.color_format];
@@ -1396,8 +1396,8 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     } else {
         surface = &pg->surface_zeta;
         dma_address = pg->dma_zeta;
-        nv2a_vk_assert(pg->surface_shape.zeta_format != 0);
-        nv2a_vk_assert(pg->surface_shape.zeta_format <
+        nv2a_vk_bounds_check(pg->surface_shape.zeta_format != 0);
+        nv2a_vk_bounds_check(pg->surface_shape.zeta_format <
                ARRAY_SIZE(r->kelvin_surface_zeta_vk_map));
         fmt = kelvin_surface_zeta_format_map[pg->surface_shape.zeta_format];
         host_fmt = r->kelvin_surface_zeta_vk_map[pg->surface_shape.zeta_format];
@@ -1408,12 +1408,12 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     // There's a bunch of bugs that could cause us to hit this function
     // at the wrong time and get a invalid dma object.
     // Check that it's sane.
-    nv2a_vk_assert(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
+    nv2a_vk_bounds_check(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
     // assert(dma.address + surface->offset != 0);
-    nv2a_vk_assert(surface->offset <= dma.limit);
-    nv2a_vk_assert(surface->offset + surface->pitch * height <= dma.limit + 1);
-    nv2a_vk_assert(surface->pitch % fmt.bytes_per_pixel == 0);
-    nv2a_vk_assert((dma.address & ~0x07FFFFFF) == 0);
+    nv2a_vk_bounds_check(surface->offset <= dma.limit);
+    nv2a_vk_bounds_check(surface->offset + surface->pitch * height <= dma.limit + 1);
+    nv2a_vk_bounds_check(surface->pitch % fmt.bytes_per_pixel == 0);
+    nv2a_vk_bounds_check((dma.address & ~0x07FFFFFF) == 0);
 
     target->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;

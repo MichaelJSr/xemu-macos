@@ -1184,7 +1184,7 @@ static void create_pipeline(PGRAPHState *pg)
         NV_PGRAPH_SETUPRASTER_CULLENABLE) {
         uint32_t cull_face = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                       NV_PGRAPH_SETUPRASTER_CULLCTRL);
-        nv2a_vk_assert(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
+        nv2a_vk_bounds_check(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
         rasterizer.cullMode = pgraph_cull_face_vk_map[cull_face];
     } else {
         rasterizer.cullMode = VK_CULL_MODE_NONE;
@@ -1205,7 +1205,7 @@ static void create_pipeline(PGRAPHState *pg)
         depth_stencil.depthTestEnable = VK_TRUE;
         uint32_t depth_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
                                        NV_PGRAPH_CONTROL_0_ZFUNC);
-        nv2a_vk_assert(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
+        nv2a_vk_bounds_check(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
         depth_stencil.depthCompareOp = pgraph_depth_func_vk_map[depth_func];
     }
 
@@ -1226,10 +1226,10 @@ static void create_pipeline(PGRAPHState *pg)
         uint32_t op_zpass = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
                                      NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
 
-        nv2a_vk_assert(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
-        nv2a_vk_assert(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_assert(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_assert(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
+        nv2a_vk_bounds_check(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
 
         depth_stencil.front.failOp = pgraph_stencil_op_vk_map[op_fail];
         depth_stencil.front.passOp = pgraph_stencil_op_vk_map[op_zpass];
@@ -1265,8 +1265,8 @@ static void create_pipeline(PGRAPHState *pg)
             GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_SFACTOR);
         uint32_t dfactor =
             GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_DFACTOR);
-        nv2a_vk_assert(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
-        nv2a_vk_assert(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
         color_blend_attachment.srcColorBlendFactor =
             pgraph_blend_factor_vk_map[sfactor];
         color_blend_attachment.dstColorBlendFactor =
@@ -1278,7 +1278,7 @@ static void create_pipeline(PGRAPHState *pg)
 
         uint32_t equation =
             GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_EQN);
-        nv2a_vk_assert(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
+        nv2a_vk_bounds_check(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
 
         color_blend_attachment.colorBlendOp =
             pgraph_blend_equation_vk_map[equation];
@@ -1521,10 +1521,13 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
 static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    StorageBuffer *vram = &r->storage_buffers[BUFFER_VERTEX_RAM];
+    bool is_coherent = vram->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    VK_CHECK(vmaFlushAllocation(
-        r->allocator, r->storage_buffers[BUFFER_VERTEX_RAM].allocation, 0,
-        VK_WHOLE_SIZE));
+    if (!is_coherent) {
+        VK_CHECK(vmaFlushAllocation(r->allocator, vram->allocation, 0,
+                                    VK_WHOLE_SIZE));
+    }
 
     VkBufferMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -1532,7 +1535,7 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
         .dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer = r->storage_buffers[BUFFER_VERTEX_RAM].buffer,
+        .buffer = vram->buffer,
         .offset = 0,
         .size = VK_WHOLE_SIZE,
     };

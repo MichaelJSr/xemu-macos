@@ -1990,6 +1990,20 @@ static void gen_fcom_ST0_FT0(DisasContext *s)
     gen_helper_fp_arith_ST0_FT0(s, 2);
 }
 
+static void gen_fucomi_ST0_FT0_inline(DisasContext *s)
+{
+    gen_compute_eflags(s);
+
+    TCGv_i64 cmp_result = tcg_temp_new_i64();
+    fp_pc_wrapper(gen_fucomi_ST0_FT0)(s, cmp_result);
+
+    TCGv_i64 cc = tcg_temp_new_i64();
+    tcg_gen_extu_tl_i64(cc, cpu_cc_src);
+    tcg_gen_andi_i64(cc, cc, ~(uint64_t)0x45);
+    tcg_gen_or_i64(cc, cc, cmp_result);
+    tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
+}
+
 /* NOTE the exception in "r" op ordering */
 static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
 {
@@ -3357,8 +3371,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             switch (rm) {
             case 1: /* fucompp */
                 gen_fmov_FT0_STN(s, 1);
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-                gen_helper_fucom_ST0_FT0(tcg_env);
+                if (g_use_hard_fpu_inline) {
+                    gen_fcom_ST0_FT0(s);
+                } else {
+                    gen_helper_fucom_ST0_FT0(tcg_env);
+                }
                 gen_fpop(s);
                 gen_fpop(s);
                 break;
@@ -3396,8 +3413,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fucomi_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fucomi_ST0_FT0_inline(s);
+            } else {
+                gen_helper_fucomi_ST0_FT0(tcg_env);
+            }
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x1e: /* fcomi */
@@ -3406,8 +3426,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fcomi_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fucomi_ST0_FT0_inline(s);
+            } else {
+                gen_helper_fcomi_ST0_FT0(tcg_env);
+            }
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x28: /* ffree sti */
@@ -3425,13 +3448,19 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             break;
         case 0x2c: /* fucom st(i) */
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fucom_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fcom_ST0_FT0(s);
+            } else {
+                gen_helper_fucom_ST0_FT0(tcg_env);
+            }
             break;
         case 0x2d: /* fucomp st(i) */
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fucom_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fcom_ST0_FT0(s);
+            } else {
+                gen_helper_fucom_ST0_FT0(tcg_env);
+            }
             gen_fpop(s);
             break;
         case 0x33: /* de/3 */
@@ -3468,8 +3497,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fucomi_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fucomi_ST0_FT0_inline(s);
+            } else {
+                gen_helper_fucomi_ST0_FT0(tcg_env);
+            }
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
@@ -3479,8 +3511,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-            gen_helper_fcomi_ST0_FT0(tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fucomi_ST0_FT0_inline(s);
+            } else {
+                gen_helper_fcomi_ST0_FT0(tcg_env);
+            }
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;

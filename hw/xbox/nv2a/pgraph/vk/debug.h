@@ -71,6 +71,30 @@ extern int nv2a_vk_dgroup_indent;
 #define nv2a_vk_assert(x) assert(x)
 #endif
 
+/*
+ * Bounds check for array indexing that would cause OOB access.
+ * In perf builds: provides UB-free optimization hint without branching.
+ * In debug builds: prints diagnostic and aborts.
+ */
+#if NV2A_VK_PERF_BUILD
+#define nv2a_vk_bounds_check(x)               \
+    do {                                       \
+        if (!(x)) {                            \
+            __builtin_unreachable();           \
+        }                                      \
+    } while (0)
+#else
+#define nv2a_vk_bounds_check(x)               \
+    do {                                       \
+        if (G_UNLIKELY(!(x))) {                \
+            fprintf(stderr,                    \
+                    "%s:%d: bounds check failed: %s\n", \
+                    __FILE__, __LINE__, #x);   \
+            abort();                           \
+        }                                      \
+    } while (0)
+#endif
+
 void pgraph_vk_debug_frame_terminator(void);
 
 #endif

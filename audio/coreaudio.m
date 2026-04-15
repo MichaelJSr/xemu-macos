@@ -267,6 +267,10 @@ COREAUDIO_WRAPPER_FUNC(write, size_t, (HWVoiceOut *hw, void *buf, size_t size),
 /*
  * callback to feed audiooutput buffer. called without BQL.
  * allowed to lock "buf_mutex", but disallowed to have any other locks.
+ *
+ * Uses trylock to avoid blocking the real-time audio thread. If the
+ * emulator thread holds the lock (writing to the ring), we output
+ * silence rather than risk priority inversion.
  */
 static OSStatus audioDeviceIOProc(
     AudioDeviceID inDevice,
@@ -283,10 +287,15 @@ static OSStatus audioDeviceIOProc(
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hwptr;
     size_t len;
 
-    os_unfair_lock_lock(&core->buf_lock);
+    if (!os_unfair_lock_trylock(&core->buf_lock)) {
+        memset(outOutputData->mBuffers[0].mData, 0,
+               outOutputData->mBuffers[0].mDataByteSize);
+        return 0;
+    }
 
     if (inDevice != core->outputDeviceID) {
         os_unfair_lock_unlock(&core->buf_lock);
+        memset(out, 0, outOutputData->mBuffers[0].mDataByteSize);
         return 0;
     }
 
@@ -295,6 +304,7 @@ static OSStatus audioDeviceIOProc(
 
     if (pending_frames < frameCount) {
         os_unfair_lock_unlock(&core->buf_lock);
+        memset(out, 0, outOutputData->mBuffers[0].mDataByteSize);
         return 0;
     }
 

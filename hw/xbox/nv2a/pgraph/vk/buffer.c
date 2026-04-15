@@ -32,6 +32,12 @@ static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
     VK_CHECK(vmaCreateBuffer(r->allocator, &buffer_create_info,
                              &buffer->alloc_info, &buffer->buffer,
                              &buffer->allocation, NULL));
+
+    VmaAllocationInfo ai;
+    vmaGetAllocationInfo(r->allocator, buffer->allocation, &ai);
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(r->physical_device, &mem_props);
+    buffer->properties = mem_props.memoryTypes[ai.memoryType].propertyFlags;
 }
 
 static void destroy_buffer(PGRAPHState *pg, StorageBuffer *buffer)

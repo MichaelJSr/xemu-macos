@@ -125,6 +125,21 @@ static void glue(gen_fcom, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg1,
     /* FIXME: Exceptions */
 }
 
+/*
+ * Inline fucomi/fcomi: compare ST0 vs FT0, return comparison result.
+ * Caller must resolve lazy EFLAGS before using the result.
+ * tcg_gen_com returns ZF|PF|CF bits at positions 6,2,0 — same as EFLAGS.
+ */
+static void glue(gen_fucomi_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
+                                                   TCGv_i64 result)
+{
+    PREC_TYPE st0 = get_st0(s);
+    PREC_TYPE ft0 = get_ft0(s);
+
+    glue(tcg_gen_com, PREC_SUFFIX)(result, st0, ft0);
+    tcg_gen_andi_i64(result, result, 0x45); /* ZF|PF|CF */
+}
+
 /* FIXME: This decode logic should be shared with helper variant */
 
 static void glue(gen_helper_fp_arith_ST0_FT0, PREC_SUFFIX)(DisasContext *s,

@@ -126,7 +126,6 @@ static inline void hrtf_filter_process(HrtfFilter *f,
                 int idx1 = (f->buf_pos - di - k + HRTF_BUFLEN) % HRTF_BUFLEN;
                 float s = buf[idx1];
 
-                // Linear interpolation for fractional part
                 if (dfrac > 0.0f) {
                     int idx2 = (idx1 - 1 + HRTF_BUFLEN) % HRTF_BUFLEN;
                     s = s * (1 - dfrac) + buf[idx2] * dfrac;
