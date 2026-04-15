@@ -1928,6 +1928,12 @@ static void gen_clear_fpus_c2(DisasContext *s)
 static void gen_fsin(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fsin);
+#if defined(__aarch64__)
+    gen_flush_fp(s);
+    gen_helper_fsin(tcg_env);
+    gen_clear_fpus_c2(s);
+    return;
+#endif
     fp_pc_wrapper(gen_fsin)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
@@ -1935,6 +1941,12 @@ static void gen_fsin(DisasContext *s)
 static void gen_fcos(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fcos);
+#if defined(__aarch64__)
+    gen_flush_fp(s);
+    gen_helper_fcos(tcg_env);
+    gen_clear_fpus_c2(s);
+    return;
+#endif
     fp_pc_wrapper(gen_fcos)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
@@ -3204,6 +3216,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 gen_fcom_ST0_FT0(s);
                 break;
             case 5: /* fxam */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fxam_ST0(tcg_env);
                 break;
             default:
@@ -3247,6 +3260,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x0e: /* grp d9/6 */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             switch (rm) {
             case 0: /* f2xm1 */
                 gen_helper_f2xm1(tcg_env);
@@ -3276,6 +3292,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x0f: /* grp d9/7 */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             switch (rm) {
             case 0: /* fprem */
                 gen_helper_fprem(tcg_env);
@@ -3338,6 +3357,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             switch (rm) {
             case 1: /* fucompp */
                 gen_fmov_FT0_STN(s, 1);
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fucom_ST0_FT0(tcg_env);
                 gen_fpop(s);
                 gen_fpop(s);
@@ -3353,10 +3373,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             case 1: /* fdisi (287 only, just do nop here) */
                 break;
             case 2: /* fclex */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fclex(tcg_env);
                 update_fip = false;
                 break;
             case 3: /* fninit */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fninit(tcg_env);
                 update_fip = false;
                 gen_update_eip_next(s);
@@ -3374,6 +3396,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fucomi_ST0_FT0(tcg_env);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
@@ -3383,6 +3406,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fcomi_ST0_FT0(tcg_env);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
@@ -3401,10 +3425,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             break;
         case 0x2c: /* fucom st(i) */
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fucom_ST0_FT0(tcg_env);
             break;
         case 0x2d: /* fucomp st(i) */
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fucom_ST0_FT0(tcg_env);
             gen_fpop(s);
             break;
@@ -3427,6 +3453,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3c: /* df/4 */
             switch (rm) {
             case 0:
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fnstsw(s->tmp2_i32, tcg_env);
                 tcg_gen_extu_i32_tl(s->T0, s->tmp2_i32);
                 gen_op_mov_reg_v(s, MO_16, R_EAX, s->T0);
@@ -3441,6 +3468,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fucomi_ST0_FT0(tcg_env);
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
@@ -3451,6 +3479,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
+            if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
             gen_helper_fcomi_ST0_FT0(tcg_env);
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
@@ -4230,11 +4259,7 @@ void tcg_x86_init(void)
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_hard_fpu = g_config.perf.hard_fpu;
-#if defined(__x86_64__)
     g_use_hard_fpu_inline = g_use_hard_fpu;
-#else
-    g_use_hard_fpu_inline = 0;
-#endif
 #endif
 }
 

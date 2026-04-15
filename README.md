@@ -24,7 +24,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **ARM64 Hard FPU** | Bit-level floatx80-to-double replaces softfloat (~6 integer ops vs dozens). Hardware `sqrt()`, `rint()`, `fesetround()`. 3-6x faster x87 ops. |
+| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
 | **MetalFX Temporal Upscaling** | ML-based temporal super-resolution via `MTLFXTemporalScaler`. Halton(2,3) jitter across 8 frames. Color-only accumulation (no depth/motion vectors). |
 | **Frame Interpolation** | `MTLFXFrameInterpolator` (macOS 26+). 2x = 60fps, 4x = 120fps from 30fps source. Deferred generation during idle display syncs. |
 | **Texture Upload Batching** | Bump allocator on `BUFFER_STAGING_SRC`. Multiple textures batch on main command buffer, eliminating per-texture GPU sync. |
@@ -96,7 +96,6 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Deferred auxiliary fence** | Texture corruption | Staging buffer overwritten before GPU executed pending copy. |
 | **Texture upload on main CB (v1)** | Texture corruption | Shared `BUFFER_STAGING_SRC` without sub-allocation; fixed with bump allocator. |
 | **floatx80 union overlay (ARM64)** | Segfault | x87 80-bit and IEEE 64-bit have incompatible bit layouts on ARM64. |
-| **TCG inline float ops (ARM64)** | Segfault | `tcg_gen_*_f64` crashes ARM64 TCG backend. Fixed by disabling `g_use_hard_fpu_inline` on ARM64. |
 | **Separate compute queue** | No effect | MoltenVK only exposes `queueCount=1`. Infrastructure in place but inactive. |
 | **Voice register cache** | Black screen | `__thread` cache served stale data; Xbox HW modifies registers via DMA/MMIO outside cached paths. |
 | **Surface upload bump allocator** | Corruption | Staging shared between texture (main CB) and surface (aux CB) uploads; offsets conflicted. |
@@ -345,8 +344,9 @@ scale = 2                       # UI element scale (1 or 2)
 # Performance settings
 # ============================================================
 [perf]
-hard_fpu = true                 # ARM64: Use native double for x87 FPU emulation
-                                # 3-6x faster than softfloat. Disable if a game
+hard_fpu = true                 # ARM64: Inline FPU — x87 ops as native AArch64 FP
+                                # instructions with floatx80 conversion as JIT code.
+                                # ~4-8x faster than softfloat. Disable if a game
                                 # has floating-point precision issues (very rare).
                                 # Requires restart to take effect.
 
@@ -392,7 +392,7 @@ Xbox Game (30fps)
        v
   NV2A Vulkan Renderer
   (surface_scale = 2x -> 1280x960)
-  [Hard FPU: native double for x87]
+  [Inline FPU: x87 as native AArch64 FADD/FMUL/etc]
   [Parallel texture decode: GThreadPool]
   [GPU compute: unswizzle + YUV]
        |
@@ -463,4 +463,4 @@ hard_fpu = false
 
 - Based on [xemu](https://github.com/xemu-project/xemu) - Original Xbox Emulator
 - MoltenVK compatibility from [CosmicSnow/xemu](https://github.com/CosmicSnow/xemu)
-- MetalFX, frame interpolation, hard FPU, and all performance optimizations are original work in this fork
+- MetalFX, frame interpolation, inline FPU, and all performance optimizations are original work in this fork

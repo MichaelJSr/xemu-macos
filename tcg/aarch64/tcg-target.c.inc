@@ -649,6 +649,54 @@ typedef enum {
     BTI_C           = 0xd503245f,
     BTI_J           = 0xd503249f,
     BTI_JC          = 0xd50324df,
+
+    /* Scalar floating-point arithmetic (two source). */
+    INSN_FADD_S     = 0x1e202800,
+    INSN_FADD_D     = 0x1e602800,
+    INSN_FSUB_S     = 0x1e203800,
+    INSN_FSUB_D     = 0x1e603800,
+    INSN_FMUL_S     = 0x1e200800,
+    INSN_FMUL_D     = 0x1e600800,
+    INSN_FDIV_S     = 0x1e201800,
+    INSN_FDIV_D     = 0x1e601800,
+
+    /* Scalar floating-point (one source). */
+    INSN_FMOV_S     = 0x1e204000,
+    INSN_FMOV_D     = 0x1e604000,
+    INSN_FABS_S     = 0x1e20c000,
+    INSN_FABS_D     = 0x1e60c000,
+    INSN_FNEG_S     = 0x1e214000,
+    INSN_FNEG_D     = 0x1e614000,
+    INSN_FSQRT_S    = 0x1e21c000,
+    INSN_FSQRT_D    = 0x1e61c000,
+    INSN_FCVT_SD    = 0x1e624000, /* double -> single */
+    INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
+
+    /* Scalar FP compare. */
+    INSN_FCMP_S     = 0x1e202000,
+    INSN_FCMP_D     = 0x1e602000,
+
+    /* FP <-> GPR moves. */
+    INSN_FMOV_SW    = 0x1e270000,
+    INSN_FMOV_WS    = 0x1e260000,
+    INSN_FMOV_DX    = 0x9e670000,
+    INSN_FMOV_XD    = 0x9e660000,
+
+    /* Int -> FP conversion. */
+    INSN_SCVTF_SW   = 0x1e220000,
+    INSN_SCVTF_SX   = 0x9e220000,
+    INSN_SCVTF_DW   = 0x1e620000,
+    INSN_SCVTF_DX   = 0x9e620000,
+
+    /* FP -> Int conversion (round toward zero). */
+    INSN_FCVTZS_WS  = 0x1e380000,
+    INSN_FCVTZS_XS  = 0x9e380000,
+    INSN_FCVTZS_WD  = 0x1e780000,
+    INSN_FCVTZS_XD  = 0x9e780000,
+
+    /* System register access. */
+    INSN_MSR_FPCR   = 0xd51b4400,
+    INSN_MRS_NZCV   = 0xd53b4200,
 } AArch64Insn;
 
 static inline uint32_t tcg_in32(TCGContext *s)
@@ -1251,6 +1299,31 @@ static bool tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
         tcg_out_insn(s, 3616, ORR, 1, 0, ret, arg, arg);
         break;
 
+    case TCG_TYPE_F32:
+        if (ret >= 32 && arg >= 32) {
+            tcg_out32(s, INSN_FMOV_S | ((ret - 32) & 0x1f)
+                      | (((arg - 32) & 0x1f) << 5));
+        } else if (ret >= 32) {
+            tcg_out32(s, INSN_FMOV_SW | ((ret - 32) & 0x1f)
+                      | ((arg & 0x1f) << 5));
+        } else {
+            tcg_out32(s, INSN_FMOV_WS | (ret & 0x1f)
+                      | (((arg - 32) & 0x1f) << 5));
+        }
+        break;
+    case TCG_TYPE_F64:
+        if (ret >= 32 && arg >= 32) {
+            tcg_out32(s, INSN_FMOV_D | ((ret - 32) & 0x1f)
+                      | (((arg - 32) & 0x1f) << 5));
+        } else if (ret >= 32) {
+            tcg_out32(s, INSN_FMOV_DX | ((ret - 32) & 0x1f)
+                      | ((arg & 0x1f) << 5));
+        } else {
+            tcg_out32(s, INSN_FMOV_XD | (ret & 0x1f)
+                      | (((arg - 32) & 0x1f) << 5));
+        }
+        break;
+
     default:
         g_assert_not_reached();
     }
@@ -1270,6 +1343,14 @@ static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret,
         break;
     case TCG_TYPE_I64:
         insn = (ret < 32 ? I3312_LDRX : I3312_LDRVD);
+        lgsz = 3;
+        break;
+    case TCG_TYPE_F32:
+        insn = I3312_LDRVS;
+        lgsz = 2;
+        break;
+    case TCG_TYPE_F64:
+        insn = I3312_LDRVD;
         lgsz = 3;
         break;
     case TCG_TYPE_V64:
@@ -1299,6 +1380,14 @@ static void tcg_out_st(TCGContext *s, TCGType type, TCGReg src,
         break;
     case TCG_TYPE_I64:
         insn = (src < 32 ? I3312_STRX : I3312_STRVD);
+        lgsz = 3;
+        break;
+    case TCG_TYPE_F32:
+        insn = I3312_STRVS;
+        lgsz = 2;
+        break;
+    case TCG_TYPE_F64:
+        insn = I3312_STRVD;
         lgsz = 3;
         break;
     case TCG_TYPE_V64:
@@ -2893,11 +2982,396 @@ static const TCGOutOpStore outop_st = {
     .out_r = tcg_out_st,
 };
 
-static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
-                              const TCGArg args[TCG_MAX_OP_ARGS],
-                              const int const_args[TCG_MAX_OP_ARGS])
+static void tcg_out_fp_1src(TCGContext *s, AArch64Insn insn,
+                            TCGReg rd, TCGReg rn)
 {
-    g_assert_not_reached();
+    tcg_out32(s, insn | ((rd - 32) & 0x1f) | (((rn - 32) & 0x1f) << 5));
+}
+
+static void tcg_out_fp_2src(TCGContext *s, AArch64Insn insn,
+                            TCGReg rd, TCGReg rn, TCGReg rm)
+{
+    tcg_out32(s, insn | ((rd - 32) & 0x1f) | (((rn - 32) & 0x1f) << 5)
+              | (((rm - 32) & 0x1f) << 16));
+}
+
+/*
+ * tcg_out_ld80f_f64 — inline floatx80→IEEE double conversion.
+ * Reads 10-byte floatx80 from [ptr], writes result to D-register rd.
+ * Uses TMP0, TMP1, TMP2 as scratch GPRs. ~15 insns normal path.
+ *
+ * Matches the C reference: floatx80_to_double_fast() in fpu_helper.c.
+ */
+static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
+{
+    /* Load floatx80: 64-bit frac + 16-bit high (sign:1 + exp:15) */
+    tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP0, ptr, 0, 3);
+    tcg_out_ldst(s, I3312_LDRH, TCG_REG_TMP1, ptr, 8, 1);
+
+    /* TMP0 = frac, TMP1 = high16 */
+
+    /* Build sign | frac_trunc in TMP0 */
+    /* frac_trunc = (frac >> 11) & 0x000FFFFFFFFFFFFF */
+    tcg_out_insn(s, 3502, ADD, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0); /* NOP-copy */
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 11, 62);
+    /* UBFM with immr=11,imms=62 extracts bits 62:11 → right-shifted by 11,
+       zero-extending in 64-bit, giving (frac >> 11) & ((1<<52)-1). */
+
+    /* Extract sign from TMP1 and OR into bit 63 of TMP0 */
+    tcg_out_ubfm(s, TCG_TYPE_I32, TCG_REG_TMP2, TCG_REG_TMP1, 15, 15);
+    /* TMP2 = sign bit (0 or 1) */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2, 63);
+    /* TMP0 = frac_trunc | (sign << 63) */
+
+    /* Extract exp80 from TMP1 */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I32,
+                     TCG_REG_TMP1, TCG_REG_TMP1, 0x7FFF);
+    /* TMP1 = exp80 */
+
+    /* Edge case: exp80 == 0 → result is ±0 */
+    tcg_insn_unit *br_zero = s->code_ptr;
+    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP1, 0);
+
+    /* Edge case: exp80 == 0x7FFF → inf or NaN */
+    tcg_out32(s, I3405_MOVZ | (0x7FFF << 5) | TCG_REG_TMP2);
+    /* MOVZ W(TMP2), #0x7FFF */
+    tcg_out_insn(s, 3502, SUBS, TCG_TYPE_I32,
+                 TCG_REG_XZR, TCG_REG_TMP1, TCG_REG_TMP2);
+    tcg_insn_unit *br_infnan = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
+
+    /* === Normal path === */
+    /* exp64 = exp80 - 15360; 15360 = 0x3C00 */
+    tcg_out32(s, I3405_MOVZ | (0x3C00 << 5) | TCG_REG_TMP2);
+    /* MOVZ W(TMP2), #0x3C00 */
+    tcg_out_insn(s, 3502, SUB, TCG_TYPE_I32,
+                 TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP2);
+    /* TMP1 = exp64 (could be negative or > 2046 for edge cases we missed,
+       but AND below masks to 11 bits which is correct for normal range) */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
+                     TCG_REG_TMP1, TCG_REG_TMP1, 0x7FF);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 52);
+    /* TMP0 = sign | (exp64 << 52) | frac_trunc */
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+    /* FMOV Dd, X(TMP0) */
+
+    tcg_insn_unit *br_done = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0); /* B to done (patched below) */
+
+    /* === Cold path: exp80 == 0 → ±0 === */
+    reloc_pc19(br_zero, tcg_splitwx_to_rx(s->code_ptr));
+    /* Result = sign bit only */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+    tcg_insn_unit *br_done2 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+
+    /* === Cold path: exp80 == 0x7FFF → inf or NaN === */
+    reloc_pc19(br_infnan, tcg_splitwx_to_rx(s->code_ptr));
+    /* Reload frac from memory to check for NaN vs inf */
+    tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP1, ptr, 0, 3);
+    /* Test frac & 0x7FFFFFFFFFFFFFFF (clear the integer bit) */
+    tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I64,
+                     TCG_REG_XZR, TCG_REG_TMP1, 0x7FFFFFFFFFFFFFFFULL);
+    /* Build inf pattern: sign | 0x7FF0000000000000 */
+    tcg_out32(s, I3405_MOVZ | TCG_TYPE_I64 << 31
+              | (0x7FF0U << 5) | (3 << 21) | TCG_REG_TMP1);
+    /* MOVZ X(TMP1), #0x7FF0, LSL #48 */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
+                     TCG_REG_TMP2, TCG_REG_TMP0, 0x8000000000000000ULL);
+    /* TMP2 = sign bit from TMP0 */
+    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
+                 TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP2);
+    /* TMP1 = sign | inf */
+    /* If frac was nonzero (NaN), set quiet NaN bit */
+    tcg_out32(s, I3405_MOVZ | TCG_TYPE_I64 << 31
+              | (0x0008U << 5) | (3 << 21) | TCG_REG_TMP2);
+    /* MOVZ X(TMP2), #0x0008, LSL #48 → 0x0008000000000000 */
+    /* CSEL: if NE (frac nonzero from ANDS above), use TMP2, else XZR */
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_XZR, TCG_COND_NE);
+    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP1, TCG_REG_TMP2);
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+
+    /* === Done === */
+    reloc_pc26(br_done, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc26(br_done2, tcg_splitwx_to_rx(s->code_ptr));
+}
+
+/*
+ * tcg_out_st80f_f64 — inline IEEE double→floatx80 conversion.
+ * Reads D-register src, writes 10-byte floatx80 to [ptr].
+ * Uses TMP0, TMP1, TMP2 as scratch GPRs. ~12 insns normal path.
+ *
+ * Matches the C reference: double_to_floatx80_fast() in fpu_helper.c.
+ */
+static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
+{
+    /* Extract IEEE double bits to GPR */
+    tcg_out32(s, INSN_FMOV_XD | (TCG_REG_TMP0 & 0x1f)
+              | (((src - 32) & 0x1f) << 5));
+    /* TMP0 = IEEE double bits */
+
+    /* Extract fields */
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_TMP0, 63, 63);
+    /* TMP1 = sign (0 or 1) */
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP0, 52, 62);
+    /* UBFX with immr=52, imms=62: extracts bits 62:52 = 11-bit exp64 */
+    /* TMP2 = exp64 */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 0x000FFFFFFFFFFFFFULL);
+    /* TMP0 = frac52 */
+
+    /* Edge case: exp64 == 0 → zero or subnormal */
+    tcg_insn_unit *br_zero = s->code_ptr;
+    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP2, 0);
+
+    /* Edge case: exp64 == 0x7FF → inf or NaN */
+    tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
+                 TCG_REG_XZR, TCG_REG_TMP2, 0x7FF);
+    tcg_insn_unit *br_infnan = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
+
+    /* === Normal path === */
+    /* low = 0x8000000000000000 | (frac52 << 11) */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
+    tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
+    /* Store low */
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+
+    /* high = (sign << 15) | (exp64 + 15360) */
+    tcg_out32(s, I3405_MOVZ | (0x3C00 << 5) | TCG_REG_TMP0);
+    /* MOVZ W(TMP0), #0x3C00 = 15360 */
+    tcg_out_insn(s, 3502, ADD, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0);
+    /* TMP2 = exp80 */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
+    /* TMP2 = exp80 | (sign << 15) = high16 */
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
+
+    tcg_insn_unit *br_done = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+
+    /* === Cold path: exp64 == 0 → zero/subnormal === */
+    reloc_pc19(br_zero, tcg_splitwx_to_rx(s->code_ptr));
+    /* low = frac52 << 11 (no integer bit for denormals) */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+    /* high = sign << 15 */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                 TCG_REG_TMP1, TCG_REG_XZR, TCG_REG_TMP1, 15);
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP1, ptr, 8, 1);
+    tcg_insn_unit *br_done2 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+
+    /* === Cold path: exp64 == 0x7FF → inf/NaN === */
+    reloc_pc19(br_infnan, tcg_splitwx_to_rx(s->code_ptr));
+    /* high = (sign << 15) | 0x7FFF */
+    tcg_out32(s, I3405_MOVZ | (0x7FFF << 5) | TCG_REG_TMP2);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
+    /* low: inf → 0x8000..., NaN → 0xC000... | (frac52 << 11) */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
+    tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
+    /* If frac52 was nonzero (NaN), also set bit 62 (QNaN) */
+    tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I64,
+                     TCG_REG_XZR, TCG_REG_TMP0, 0x7FFFFFFFFFFFFFFFULL);
+    /* Load QNaN marker */
+    tcg_out32(s, I3405_MOVZ | TCG_TYPE_I64 << 31
+              | (0x4000U << 5) | (3 << 21) | TCG_REG_TMP1);
+    /* MOVZ X(TMP1), #0x4000, LSL #48 → 0x4000000000000000 */
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64,
+                 TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_XZR, TCG_COND_NE);
+    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1);
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+
+    /* === Done === */
+    reloc_pc26(br_done, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc26(br_done2, tcg_splitwx_to_rx(s->code_ptr));
+}
+
+static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
+                       const TCGArg args[TCG_MAX_OP_ARGS],
+                       const int const_args[TCG_MAX_OP_ARGS])
+{
+    TCGArg a0 = args[0];
+    TCGArg a1 = args[1];
+    TCGArg a2 = args[2];
+    bool dp;
+
+#define OP_f32_f64(x) \
+        case glue(glue(INDEX_op_, x), _f64): \
+            dp = true; /* FALLTHRU */    \
+        case glue(glue(INDEX_op_, x), _f32)
+
+    dp = false;
+    switch (opc) {
+    case INDEX_op_flcr:
+        /*
+         * a0 = MXCSR-like value with RC in bits 13-14.
+         * Map to ARM64 FPCR RMode (bits 22-23) with up/down swap.
+         */
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP0, a0, 13, 13);
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP1, a0, 14, 14);
+        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                     TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 23);
+        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                     TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 22);
+        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I32,
+                         TCG_REG_TMP0, TCG_REG_TMP0, 0x02000000);
+        tcg_out32(s, INSN_MSR_FPCR | (TCG_REG_TMP0 & 0x1f));
+        break;
+
+    OP_f32_f64(ld80f):
+        if (dp) {
+            tcg_out_ld80f_f64(s, a0, a1);
+        } else {
+            /* f32: load as f64 into VEC_TMP0, then FCVT Sd, Dn */
+            tcg_out_ld80f_f64(s, TCG_VEC_TMP0, a1);
+            tcg_out_fp_1src(s, INSN_FCVT_SD, a0, TCG_VEC_TMP0);
+        }
+        break;
+
+    OP_f32_f64(st80f):
+        if (dp) {
+            tcg_out_st80f_f64(s, a0, a1);
+        } else {
+            /* f32: FCVT Dd, Sn into VEC_TMP0, then store as f64 */
+            tcg_out_fp_1src(s, INSN_FCVT_DS, TCG_VEC_TMP0, a0);
+            tcg_out_st80f_f64(s, TCG_VEC_TMP0, a1);
+        }
+        break;
+
+    OP_f32_f64(add):
+        tcg_out_fp_2src(s, dp ? INSN_FADD_D : INSN_FADD_S, a0, a1, a2);
+        break;
+    OP_f32_f64(sub):
+        tcg_out_fp_2src(s, dp ? INSN_FSUB_D : INSN_FSUB_S, a0, a1, a2);
+        break;
+    OP_f32_f64(mul):
+        tcg_out_fp_2src(s, dp ? INSN_FMUL_D : INSN_FMUL_S, a0, a1, a2);
+        break;
+    OP_f32_f64(div):
+        tcg_out_fp_2src(s, dp ? INSN_FDIV_D : INSN_FDIV_S, a0, a1, a2);
+        break;
+    OP_f32_f64(abs):
+        tcg_out_fp_1src(s, dp ? INSN_FABS_D : INSN_FABS_S, a0, a1);
+        break;
+    OP_f32_f64(chs):
+        tcg_out_fp_1src(s, dp ? INSN_FNEG_D : INSN_FNEG_S, a0, a1);
+        break;
+    OP_f32_f64(sqrt):
+        tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
+        break;
+
+    case INDEX_op_mov_f64:
+        dp = true; /* FALLTHRU */
+    case INDEX_op_mov_f32:
+        tcg_out_mov(s, dp ? TCG_TYPE_F64 : TCG_TYPE_F32, a0, a1);
+        break;
+    case INDEX_op_mov64i_f64:
+    case INDEX_op_mov64f_i64:
+        tcg_out_mov(s, TCG_TYPE_F64, a0, a1);
+        break;
+    case INDEX_op_mov32i_f32:
+    case INDEX_op_mov32f_i32:
+        tcg_out_mov(s, TCG_TYPE_F32, a0, a1);
+        break;
+
+    OP_f32_f64(com): {
+        /*
+         * FCMP sets NZCV. Map to x86 EFLAGS: CF=N|V, PF=V, ZF=Z|V.
+         */
+        tcg_out32(s, (dp ? INSN_FCMP_D : INSN_FCMP_S)
+                  | (((a2 - 32) & 0x1f) << 16) | (((a1 - 32) & 0x1f) << 5));
+        tcg_out32(s, INSN_MRS_NZCV | (TCG_REG_TMP0 & 0x1f));
+        /* V (bit 28) */
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP1, TCG_REG_TMP0, 28, 28);
+        /* a0 = V | (V << 2): CF at bit 0, PF at bit 2 */
+        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                     a0, TCG_REG_TMP1, TCG_REG_TMP1, 2);
+        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32, a0, a0, TCG_REG_TMP1);
+        /* N (bit 31) → OR into bit 0 for CF = N|V */
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP1, TCG_REG_TMP0, 31, 31);
+        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32, a0, a0, TCG_REG_TMP1);
+        /* Z (bit 30) */
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP1, TCG_REG_TMP0, 30, 30);
+        /* V (bit 28) again */
+        tcg_out_ubfm(s, TCG_TYPE_I32,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 28, 28);
+        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32,
+                     TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0);
+        /* a0 |= (Z|V) << 6 → ZF at bit 6 */
+        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                     a0, a0, TCG_REG_TMP1, 6);
+        break;
+    }
+
+    OP_f32_f64(cvt32i):
+        tcg_out32(s, (dp ? INSN_SCVTF_DW : INSN_SCVTF_SW)
+                  | ((a0 - 32) & 0x1f) | ((a1 & 0x1f) << 5));
+        break;
+    OP_f32_f64(cvt64i):
+        tcg_out32(s, (dp ? INSN_SCVTF_DX : INSN_SCVTF_SX)
+                  | ((a0 - 32) & 0x1f) | ((a1 & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt32f_i32:
+        tcg_out32(s, INSN_FCVTZS_WS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt32f_i64:
+        tcg_out32(s, INSN_FCVTZS_XS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt64f_i32:
+        tcg_out32(s, INSN_FCVTZS_WD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt64f_i64:
+        tcg_out32(s, INSN_FCVTZS_XD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt32f_f64:
+        /* f32 -> f64: FCVT Dd, Sn */
+        tcg_out_fp_1src(s, INSN_FCVT_DS, a0, a1);
+        break;
+    case INDEX_op_cvt64f_f32:
+        /* f64 -> f32: FCVT Sd, Dn */
+        tcg_out_fp_1src(s, INSN_FCVT_SD, a0, a1);
+        break;
+
+    OP_f32_f64(sin):
+    OP_f32_f64(cos):
+        /* ARM64 has no hardware sin/cos; these should never be emitted
+         * because translate.c flushes + calls the full helper instead. */
+        g_assert_not_reached();
+
+    default:
+        g_assert_not_reached();
+    }
+
+#undef OP_f32_f64
 }
 
 static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
@@ -3388,6 +3862,57 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_aa64_sli_vec:
         return C_O1_I2(w, 0, w);
 
+    /* Scalar floating-point ops */
+    case INDEX_op_flcr:
+        return C_O0_I1(r);
+    case INDEX_op_ld80f_f32:
+    case INDEX_op_ld80f_f64:
+        return C_O1_I1(w, r);
+    case INDEX_op_st80f_f32:
+    case INDEX_op_st80f_f64:
+        return C_O0_I2(w, r);
+    case INDEX_op_add_f32:
+    case INDEX_op_add_f64:
+    case INDEX_op_sub_f32:
+    case INDEX_op_sub_f64:
+    case INDEX_op_mul_f32:
+    case INDEX_op_mul_f64:
+    case INDEX_op_div_f32:
+    case INDEX_op_div_f64:
+        return C_O1_I2(w, w, w);
+    case INDEX_op_abs_f32:
+    case INDEX_op_abs_f64:
+    case INDEX_op_chs_f32:
+    case INDEX_op_chs_f64:
+    case INDEX_op_sqrt_f32:
+    case INDEX_op_sqrt_f64:
+    case INDEX_op_mov_f32:
+    case INDEX_op_mov_f64:
+    case INDEX_op_cvt32f_f64:
+    case INDEX_op_cvt64f_f32:
+    case INDEX_op_sin_f32:
+    case INDEX_op_sin_f64:
+    case INDEX_op_cos_f32:
+    case INDEX_op_cos_f64:
+        return C_O1_I1(w, w);
+    case INDEX_op_cvt32i_f32:
+    case INDEX_op_cvt32i_f64:
+    case INDEX_op_cvt64i_f32:
+    case INDEX_op_cvt64i_f64:
+    case INDEX_op_mov32i_f32:
+    case INDEX_op_mov64i_f64:
+        return C_O1_I1(w, r);
+    case INDEX_op_cvt32f_i32:
+    case INDEX_op_cvt32f_i64:
+    case INDEX_op_cvt64f_i32:
+    case INDEX_op_cvt64f_i64:
+    case INDEX_op_mov32f_i32:
+    case INDEX_op_mov64f_i64:
+        return C_O1_I1(r, w);
+    case INDEX_op_com_f32:
+    case INDEX_op_com_f64:
+        return C_O1_I2(r, w, w);
+
     default:
         return C_NotImplemented;
     }
@@ -3397,6 +3922,8 @@ static void tcg_target_init(TCGContext *s)
 {
     tcg_target_available_regs[TCG_TYPE_I32] = 0xffffffffu;
     tcg_target_available_regs[TCG_TYPE_I64] = 0xffffffffu;
+    tcg_target_available_regs[TCG_TYPE_F32] = 0xffffffff00000000ull;
+    tcg_target_available_regs[TCG_TYPE_F64] = 0xffffffff00000000ull;
     tcg_target_available_regs[TCG_TYPE_V64] = 0xffffffff00000000ull;
     tcg_target_available_regs[TCG_TYPE_V128] = 0xffffffff00000000ull;
 
