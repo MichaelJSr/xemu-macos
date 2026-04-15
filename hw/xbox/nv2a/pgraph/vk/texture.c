@@ -137,8 +137,7 @@ static size_t get_cubemap_layer_size(PGRAPHState *pg, TextureShape s)
 
 typedef struct DecodeTaskBatch {
     volatile int remaining;
-    GMutex mutex;
-    GCond cond;
+    QemuEvent done;
 } DecodeTaskBatch;
 
 typedef struct DecodeTask {
@@ -215,28 +214,20 @@ static void decode_task_func(gpointer data, gpointer user_data)
     }
 
     if (qatomic_dec_fetch(&task->batch->remaining) == 0) {
-        g_mutex_lock(&task->batch->mutex);
-        g_cond_signal(&task->batch->cond);
-        g_mutex_unlock(&task->batch->mutex);
+        qemu_event_set(&task->batch->done);
     }
 }
 
 static void decode_batch_init(DecodeTaskBatch *batch, int count)
 {
     batch->remaining = count;
-    g_mutex_init(&batch->mutex);
-    g_cond_init(&batch->cond);
+    qemu_event_init(&batch->done, false);
 }
 
 static void decode_batch_wait(DecodeTaskBatch *batch)
 {
-    g_mutex_lock(&batch->mutex);
-    while (qatomic_read(&batch->remaining) > 0) {
-        g_cond_wait(&batch->cond, &batch->mutex);
-    }
-    g_mutex_unlock(&batch->mutex);
-    g_mutex_clear(&batch->mutex);
-    g_cond_clear(&batch->cond);
+    qemu_event_wait(&batch->done);
+    qemu_event_destroy(&batch->done);
 }
 
 static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)

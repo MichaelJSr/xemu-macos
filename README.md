@@ -20,47 +20,43 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 ## Optimizations
 
-### Tier 1: High Impact (measurable FPS/latency improvement)
-
-| Optimization | Speedup | Description |
-|---|---|---|
-| **ARM64 Hard FPU** | 3-6x faster x87 ops | Fast bit-level floatx80-to-double conversion replaces QEMU's softfloat integer-only emulation. Branchless normal path (~6 integer ops per conversion). Every x87 instruction (FADD, FMUL, FDIV, FSQRT, FRNDINT, FIST, etc.) benefits. Hardware `sqrt()`, `rint()`, and `fesetround()` for FSQRT/FRNDINT/rounding mode. |
-| **MetalFX Temporal Upscaling** | Better quality at lower GPU cost | Apple's ML-based upscaling from internal resolution (e.g., 1280x960) to 1920x1440 with temporal accumulation and anti-aliasing via `MTLFXTemporalScaler`. Halton(2,3) sub-pixel jitter sequence enables true temporal super-resolution reconstruction. |
-| **True Frame Interpolation** | 30fps -> 60fps or 120fps | `MTLFXFrameInterpolator` (macOS 26+) generates intermediate frames with correct deltaTime. 2x mode = 1 interpolated frame (dt=0.5), 4x mode = 3 interpolated frames (dt=0.25, 0.5, 0.75). Deferred generation across sync calls for true 120fps. |
-| **Texture Upload Batching** | Eliminates GPU sync per texture | Staging buffer sub-allocation (bump allocator on `BUFFER_STAGING_SRC`) allows multiple texture uploads to batch on the main command buffer. Flush guards prevent corruption between users. |
-| **Texture Decode Parallelization** | Up to 24x throughput on M2 Ultra | Persistent `GThreadPool` distributes S3TC decompression, unswizzle, and format conversion across all CPU cores. Pool is created once at init and reused across frames (no per-texture thread pool allocation). Atomic batch-completion tracking via `DecodeTaskBatch`. |
-
-### Tier 2: Medium Impact (reduces per-frame overhead)
+### High Impact
 
 | Optimization | Description |
 |---|---|
-| **Display CB Merge** | PVIDEO overlay upload + display render pass combined into 1 GPU submission instead of 2. |
-| **Surface Init on Main CB** | Layout transitions use the main command buffer instead of a separate aux submission. |
-| **GPU Compute Shaders** | YUV-to-RGBA conversion and Z-order unswizzle (4bpp/2bpp) run as Vulkan compute dispatches with Morton address decode. Apple Silicon workgroup size tuned to 64 (SIMD-width aligned). |
-| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. Only marks dirty when descriptions actually change. |
-| **Staging Buffer Scaling** | `BUFFER_STAGING_SRC/DST` increased from 64 MiB to 256 MiB with persistent VMA mapping. `BUFFER_COMPUTE_DST/SRC` reduced from ~800 MiB to 256 MiB. Eliminates per-upload map/unmap overhead. |
-| **Narrower Pipeline Barriers** | `ALL_COMMANDS_BIT` replaced with `COLOR_ATTACHMENT_OUTPUT_BIT` / `VERTEX_INPUT_BIT | TRANSFER_BIT`. Reduces MoltenVK Metal fence overhead. |
+| **ARM64 Hard FPU** | Bit-level floatx80-to-double replaces softfloat (~6 integer ops vs dozens). Hardware `sqrt()`, `rint()`, `fesetround()`. 3-6x faster x87 ops. |
+| **MetalFX Temporal Upscaling** | ML-based temporal super-resolution via `MTLFXTemporalScaler`. Halton(2,3) jitter across 8 frames. Color-only accumulation (no depth/motion vectors). |
+| **Frame Interpolation** | `MTLFXFrameInterpolator` (macOS 26+). 2x = 60fps, 4x = 120fps from 30fps source. Deferred generation during idle display syncs. |
+| **Texture Upload Batching** | Bump allocator on `BUFFER_STAGING_SRC`. Multiple textures batch on main command buffer, eliminating per-texture GPU sync. |
+| **Texture Decode Parallelization** | `GThreadPool` across all CPU cores for S3TC/unswizzle/conversion. `QemuEvent` for batch completion (no busy-wait). |
+| **GPU Compute Shaders** | YUV-to-RGBA and Z-order unswizzle as Vulkan compute dispatches. Workgroup size 64 on Apple Silicon (SIMD-aligned). |
+
+### Medium Impact
+
+| Optimization | Description |
+|---|---|
+| **Display Path** | PVIDEO + display merged into 1 GPU submission. IOSurface rebind, descriptor set, and uniform caching skip redundant per-frame calls. |
+| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. |
+| **Staging Buffers** | 256 MiB staging with persistent VMA mapping. Eliminates per-upload map/unmap and reduces forced GPU flushes. |
+| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Reduces MoltenVK Metal fence overhead. |
 | **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. |
-| **APU LUTs + NEON** | Pre-computed attenuation (4096) and pitch (65536) lookup tables. NEON-vectorized `float_to_24b_bulk` (`vcvtnq_s32_f32` 4-wide) for DSP mixbin write, and `vaddq_f32` for VP mixbin reduction. |
-| **CoreAudio `os_unfair_lock`** | Replaces `pthread_mutex` in IOProc callback, eliminating priority inversion on the real-time audio thread. |
-| **Display Caching** | IOSurface rebind, descriptor set updates, and uniform locations cached to skip redundant per-frame kernel/Vulkan calls when state hasn't changed. |
-| **Texture Decode Condvar** | `g_usleep(10)` busy-wait replaced with `GMutex`/`GCond`. Workers signal via `qatomic_dec_fetch` + `g_cond_signal`. Errors caught with inline fallback. |
+| **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
+| **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
+| **CoreAudio `os_unfair_lock`** | Replaces `pthread_mutex` in IOProc, eliminating real-time thread priority inversion. |
 
-### Tier 3: Low Impact / Quality of Life
+### Low Impact / Quality of Life
 
 | Optimization | Description |
 |---|---|
-| **STBI_NEON / fpng CRC32** | ARM NEON SIMD for stb_image JPEG/PNG decoding; hardware CRC32 for PNG encoding. |
-| **MoltenVK Tuning** | `Info.plist` sets `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`, `PREFILL_METAL_COMMAND_BUFFERS=2`, `SYNCHRONOUS_QUEUE_SUBMITS=0`, `FAST_MATH_ENABLED=1`, `RESUME_LOST_DEVICE=1`. |
-| **Counter/Debug Gating** | `nv2a_profile_inc_counter` and `NV2A_VK_DGROUP_BEGIN/END` stripped as no-ops in perf builds. |
-| **Pool Sizing** | Descriptor sets doubled (1024->2048), invalid surface pool expanded (10->64), reducing forced GPU flushes and `vmaCreateImage` calls. |
-| **Scratch Image Skip (macOS)** | At `surface_scale_factor == 1`, scratch image allocation skipped; upload copies directly to main image (AMD workaround not needed on Apple Silicon). |
-| **MetalFX Direct IOSurface** | Temporal upscaler and frame interpolator write directly to IOSurface-backed shared texture on unified memory. `os_unfair_lock` guards all MetalFX state across spatial, temporal, and interpolation paths. |
-| **Conditional Surface Flush** | `invalidate_surface` only calls `pgraph_vk_finish` when surface was drawn in current command buffer. |
-| **Build: `-mcpu=native`** | ARM64 builds use host chip features instead of fixed `-mcpu=apple-m2`. |
-| **O(1) Render Pass Lookup** | `GHashTable` with packed `uint64_t` key (`color_format | zeta_format << 32`) replaces O(n) linear `GArray` scan in `get_render_pass`. Field added at end of struct to avoid layout issues. |
-| **VMA Memory Budget Trimming** | `pgraph_vk_check_memory_budget` enabled with guards: requires `VK_EXT_memory_budget`, allocation > 512 MiB, and > 90% budget usage before trimming texture cache. Prevents long-session OOM. |
-| **Flight Slot Infrastructure** | CB/fence/semaphore/framebuffer organized into `NUM_FLIGHT_SLOTS` (N=1). Descriptor sets and staging partitioned per-slot. Ready for N>1 pipelining (see Failed Optimizations). |
+| **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. `os_unfair_lock` guards all MetalFX state. |
+| **MoltenVK Tuning** | Argument buffers, prefilled command buffers, async queue submits, fast-math, resume-lost-device. |
+| **Pool Sizing** | Descriptor sets 2048, invalid surface pool 64. Reduces forced flushes. |
+| **Scratch Image Skip** | At scale=1 on macOS, upload copies directly to main image (AMD workaround skipped). |
+| **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. |
+| **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
+| **VMA Budget Trimming** | Texture cache trimmed when allocation > 512 MiB and > 90% budget. Prevents long-session OOM. |
+| **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
+| **Flight Slot Infrastructure** | CB/fence/semaphore per-slot (N=1). Ready for N>1 pipelining. |
 
 ### MoltenVK Compatibility Layer
 
@@ -87,6 +83,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Image Layout Transition UB** | `assert` in `image.c` compiled out in release; uninitialized barrier stages. Replaced with `abort()`. |
 | **Shader Uniform Leak** | `layout->allocation` not freed in `finalize_uniform_layout` (`glsl.c`). |
 | **GMatchInfo Heap Corruption** | `g_free(match)` on `GMatchInfo*` in `main-menu.cc`; corrected to `g_match_info_free`. |
+| **Texture Decode Condvar Race** | `GMutex`/`GCond` destroyed by waiter while last worker still inside `g_mutex_unlock` after signaling. Caused `pthread_cond_signal: Invalid argument` crash on level loads and infinite hang on save state. Replaced with `QemuEvent` (no lock held during signal). |
 
 ---
 
@@ -108,6 +105,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Render pass hash table (mid-struct)** | Segfault | Inserting `GHashTable*` field mid-struct shifted member offsets; stale `.o` files read wrong memory. Fixed by adding field at end of struct instead. |
 | **Dirty-range VRAM flush** | Segfault (then reverted) | `bitmap_clear` before `flush_memory_buffer` zeroed bitmap before read. Minimal benefit on Apple Silicon coherent memory anyway. |
 | **Depth export via CPU readback** | Temporal slower than spatial | Copied zeta depth aspect via `vkCmdCopyImageToBuffer` + CPU `memcpy` to R32Float IOSurface every frame. Added 2 GPU sync points + 18+ MiB CPU copy per frame. Quality improvement was subtle; performance cost was 2-5ms/frame. Correct approach requires IOSurface-backed VkImage rendered directly in the NV2A pipeline (avoids CPU round-trip). |
+| **Texture decode GMutex/GCond** | Crash + hang | Waiter destroyed mutex/condvar while last worker still inside `g_mutex_unlock`. Stack-allocated `DecodeTaskBatch` memory reused after `decode_batch_wait` returned. Caused `pthread_cond_signal: Invalid argument` and save-state hangs. Fixed by switching to `QemuEvent` (atomic flag, no lock held during signal). |
 
 ---
 
