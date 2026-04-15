@@ -171,10 +171,9 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
     set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
 }
 
-static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
+static void voice_lock_locked(MCPXAPUState *d, uint16_t v, bool lock)
 {
     assert(v < MCPX_HW_MAX_VOICES);
-    qemu_mutex_lock(&d->lock);
 
     uint64_t mask = 1LL << (v % 64);
     if (lock) {
@@ -184,7 +183,6 @@ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
     }
 
     qemu_cond_signal(&d->cond);
-    qemu_mutex_unlock(&d->lock);
 }
 
 static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
@@ -214,7 +212,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     unsigned int selected_handle, list;
     switch (method) {
     case NV1BA0_PIO_VOICE_LOCK:
-        voice_lock(d, d->regs[NV_PAPU_FECV], argument & 1);
+        voice_lock_locked(d, d->regs[NV_PAPU_FECV], argument & 1);
         break;
     case NV1BA0_PIO_SET_ANTECEDENT_VOICE:
         d->regs[NV_PAPU_FEAV] = argument;
@@ -225,7 +223,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
         bool locked = is_voice_locked(d, selected_handle);
         if (!locked) {
-            voice_lock(d, selected_handle, true);
+            voice_lock_locked(d, selected_handle, true);
         }
 
         list = GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_LST);
@@ -306,7 +304,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                        NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 1);
 
         if (!locked) {
-            voice_lock(d, selected_handle, false);
+            voice_lock_locked(d, selected_handle, false);
         }
 
         break;
@@ -319,7 +317,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
         bool locked = is_voice_locked(d, selected_handle);
         if (!locked) {
-            voice_lock(d, selected_handle, true);
+            voice_lock_locked(d, selected_handle, true);
         }
 
         uint16_t rr;
@@ -340,7 +338,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                        NV_PAVS_VOICE_PAR_STATE_EFCUR_RELEASE);
 
         if (!locked) {
-            voice_lock(d, selected_handle, false);
+            voice_lock_locked(d, selected_handle, false);
         }
 
         break;
@@ -683,8 +681,9 @@ static void vp_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     case NV1BA0_PIO_SET_HRTF_HEADROOM:
     case NV1BA0_PIO_SET_SUBMIX_HEADROOM ...
          NV1BA0_PIO_SET_SUBMIX_HEADROOM+4*(NUM_MIXBINS-1):
-        /* TODO: these should instead be queueing up fe commands */
+        qemu_mutex_lock(&d->lock);
         fe_method(d, addr, val);
+        qemu_mutex_unlock(&d->lock);
         break;
 
     case NV1BA0_PIO_GET_VOICE_POSITION:

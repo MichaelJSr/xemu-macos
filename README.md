@@ -24,7 +24,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. Inline fucom/fucomi/fcomi comparisons avoid flushing all FP regs to memory — comparison result written directly to fpus/EFLAGS without helper call. ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
+| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. Inline fucom/fucomi/fcomi comparisons avoid flushing all FP regs to memory — comparison result written directly to fpus/EFLAGS without helper call. Inline fnstsw computes status word from TCG globals (6 integer ops, no flush, no helper). ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
 | **MetalFX Temporal Upscaling** | ML-based temporal super-resolution via `MTLFXTemporalScaler`. Halton(2,3) jitter across 8 frames. Color-only accumulation (no depth/motion vectors). |
 | **Frame Interpolation** | `MTLFXFrameInterpolator` (macOS 26+). 2x = 60fps, 4x = 120fps from 30fps source. Deferred generation during idle display syncs. |
 | **Texture Upload Batching** | Bump allocator on `BUFFER_STAGING_SRC`. Multiple textures batch on main command buffer, eliminating per-texture GPU sync. |
@@ -54,7 +54,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Scratch Image Skip** | At scale=1 on macOS, upload copies directly to main image (AMD workaround skipped). |
 | **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
-| **VMA Budget Trimming** | Texture cache trimmed when allocation > 512 MiB and > 90% budget. Prevents long-session OOM. |
+| **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 512 MiB and > 90% budget. Lowered from 2 GiB threshold for more responsive cache management on high-memory systems. |
 | **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
 | **Flight Slot Infrastructure** | CB/fence/semaphore per-slot (N=1). Ready for N>1 pipelining. |
 
@@ -86,6 +86,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Texture Decode Condvar Race** | `GMutex`/`GCond` destroyed by waiter while last worker still inside `g_mutex_unlock` after signaling. Caused `pthread_cond_signal: Invalid argument` crash on level loads and infinite hang on save state. Replaced with `QemuEvent` (no lock held during signal). |
 | **MetalFX Spatial Dead Code** | `g_spatial.pendingCB` never assigned in `metalfx_upscale()`, so the `waitUntilCompleted` guard in `metalfx_destroy_locked()` was dead code. Removed field and dead wait path. |
 | **Redundant `vmaMapMemory`** | `upload_pvideo_to_cmd` (display.c) and `create_dummy_texture` (texture.c) called `vmaMapMemory`/`vmaUnmapMemory` on `BUFFER_STAGING_SRC` which was already persistently mapped at init. Replaced with direct use of `.mapped` pointer. |
+| **APU VP/FE MMIO Data Race** | `vp_write` → `fe_method` wrote `d->regs[]`, `d->vp.*` (HRTF, SSL, submix headroom, filters) without holding `d->lock`, racing with the APU frame thread. Wrapped `fe_method` in `d->lock`; `voice_lock` refactored to `voice_lock_locked` (assumes lock held) to avoid recursive mutex deadlock. |
 
 ---
 
@@ -271,7 +272,7 @@ The config file is at `~/Library/Application Support/xemu/xemu/xemu.toml`. Most 
 ```toml
 [display]
 renderer = 'VULKAN'
-metalfx_mode = 'temporal'
+metalfx_mode = 'spatial'
 frame_interpolation = '4x'
 
 [display.quality]
@@ -298,10 +299,11 @@ renderer = 'VULKAN'            # 'NULL', 'OPENGL', 'VULKAN' (default: VULKAN)
 
 metalfx_upscale = true          # Legacy boolean (redundant if metalfx_mode is set)
 
-metalfx_mode = 'temporal'       # 'off'     - No MetalFX upscaling
-                                # 'spatial' - Single-frame ML upscaling (fast, softer)
-                                # 'temporal'- Multi-frame ML upscaling (best quality,
-                                #             temporal accumulation reduces aliasing)
+metalfx_mode = 'spatial'        # 'off'     - No MetalFX upscaling
+                                # 'spatial' - Single-frame ML upscaling (recommended,
+                                #             fast and sharp with minimal artifacts)
+                                # 'temporal'- Multi-frame ML upscaling (higher quality
+                                #             but can introduce ghosting artifacts)
 
 frame_interpolation = '4x'      # 'off' - No interpolation, native game framerate
                                 # '2x'  - True 60fps: 1 interpolated frame (dt=0.5)
@@ -382,8 +384,8 @@ dvd_path = '/path/to/game.iso'                    # Game disc image
 
 | Scale | Display Size | MetalFX | Interpolation | Effective Output |
 |---|---|---|---|---|
-| 1x | 640x480 | Temporal -> 1920x1440 | 2x=60fps, 4x=120fps | Best perf, good quality |
-| 2x | 1280x960 | Temporal -> 1920x1440 | 2x=60fps, 4x=120fps | **Recommended** |
+| 1x | 640x480 | Spatial -> 1920x1440 | 2x=60fps, 4x=120fps | Best perf, good quality |
+| 2x | 1280x960 | Spatial -> 1920x1440 | 2x=60fps, 4x=120fps | **Recommended** |
 | 3x | 1920x1440 | No upscale needed | 2x=60fps, 4x=120fps | High quality, no upscale benefit |
 | 4x | 2560x1920 | Skipped (>1920 wide) | Skipped | Sharpest textures, native framerate only |
 
@@ -406,9 +408,9 @@ Xbox Game (30fps)
   [VK_EXT_metal_objects zero-copy]
        |
        v
-  MetalFX Temporal Upscaler
+  MetalFX Spatial Upscaler
   (1280x960 -> 1920x1440)
-  [Halton jitter, depth if available]
+  [Single-frame ML upscaling]
        |
        v
   Frame Interpolator (macOS 26+)

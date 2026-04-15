@@ -2004,6 +2004,17 @@ static void gen_fucomi_ST0_FT0_inline(DisasContext *s)
     tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
 }
 
+static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
+{
+    TCGv_i32 fpus = tcg_temp_new_i32();
+    tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
+    tcg_gen_andi_i32(fpus, fpus, ~0x3800);
+    TCGv_i32 top = tcg_temp_new_i32();
+    tcg_gen_andi_i32(top, fpstt, 0x7);
+    tcg_gen_shli_i32(top, top, 11);
+    tcg_gen_or_i32(result, fpus, top);
+}
+
 /* NOTE the exception in "r" op ordering */
 static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
 {
@@ -3150,7 +3161,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x2f: /* fnstsw mem */
-            gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+            if (g_use_hard_fpu_inline) {
+                gen_fnstsw_inline(s, s->tmp2_i32);
+            } else {
+                gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+            }
             tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                 s->mem_index, MO_LEUW);
             update_fip = update_fdp = false;
@@ -3482,8 +3497,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3c: /* df/4 */
             switch (rm) {
             case 0:
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
-                gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+                if (g_use_hard_fpu_inline) {
+                    gen_fnstsw_inline(s, s->tmp2_i32);
+                } else {
+                    gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+                }
                 tcg_gen_extu_i32_tl(s->T0, s->tmp2_i32);
                 gen_op_mov_reg_v(s, MO_16, R_EAX, s->T0);
                 break;

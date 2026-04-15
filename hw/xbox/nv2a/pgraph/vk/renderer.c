@@ -289,7 +289,7 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
     vmaGetHeapBudgets(r->allocator, budgets);
 
     const float budget_threshold = 0.9;
-    const VkDeviceSize min_alloc_for_trim = 2048ULL * 1024 * 1024;
+    const VkDeviceSize min_alloc_for_trim = 512ULL * 1024 * 1024;
     bool near_budget = false;
 
     for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
