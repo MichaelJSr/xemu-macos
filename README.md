@@ -47,8 +47,11 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **O(1) Surface Lookup** | `GHashTable` for exact match. Sorted range array with binary search for containment queries — O(log n) instead of O(n). |
 | **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore slots with full resource partitioning. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
+| **APU Linear Resampler + RAM Fast Path** | `SRC_LINEAR` replaces `SRC_SINC_FASTEST` for voice pitch shifting (matches Xbox hardware, order-of-magnitude faster). All VP memory access (`voice_get_mask`/`voice_set_mask`, PCM fetch, SGE lookup, SSL reads, notifiers) uses bounds-checked `ram_ptr` direct access with `ldl_le_phys` fallback for out-of-range addresses. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
 | **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. Trylock outputs silence on contention. Buffer at 4096 samples (~85ms at 48kHz). |
+| **Single-Submit Fast Path** | `pgraph_vk_finish` skips aux command buffer + semaphore when all staging buffers are empty and VRAM has no dirty pages. Single `VkSubmitInfo` instead of two. |
+| **Descriptor Set Bind Skip** | `vkCmdBindDescriptorSets` skipped when the same descriptor set is already bound (`last_bound_descriptor_set_index` tracking). |
 | **FPCR Caching Across TBs** | `gen_flcr` only emits `MSR FPCR` when guest rounding mode actually changes. Eliminates ~10-20 cycle pipeline stall per translation block. |
 | **Frame Interpolation Sync Bypass** | Deferred interpolation generation decoupled from 8ms display sync gate. Produces smoother 4x (120fps) output. |
 
@@ -63,6 +66,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). MetalFX/IOSurface `fprintf(stderr)` messages gated behind `METALFX_DPRINTF`/`DISPLAY_DPRINTF` macros (no-ops in release). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
 | **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 2 GiB and > 95% budget. Thresholds tuned for high-memory unified memory systems (e.g. 192 GB M2 Ultra). |
+| **JIT Tightening** | `ld80f` NOP-copy removed (4 bytes saved per x87 reload). `flcr` lowering reduced from 6 to 5 instructions via RBIT bit-swap. Insertion sort replaces `qsort` for vertex sync arrays (N <= 16). |
 | **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
 
 ### MoltenVK Compatibility Layer
@@ -112,6 +116,14 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **MetalFX Config Migration** | Legacy `metalfx_upscale` (bool) and `metalfx_mode` (enum) both existed. Users setting `metalfx_upscale = true` in TOML while `metalfx_mode` was "off" got no upscaling. On config load, `metalfx_upscale = true` now migrates to `metalfx_mode = spatial`. |
 | **Snapshot Search Regex Injection** | User text embedded directly into regex pattern `(.*)%s(.*)` without escaping. Metacharacters in the search box broke the regex or caused expensive backtracking. Now escaped with `g_regex_escape_string`. |
 | **Build LDFLAGS Missing Min Version** | `CFLAGS` included `-mmacosx-version-min` but `LDFLAGS` did not, causing the linker to not embed the correct `LC_BUILD_VERSION`. Added to `LDFLAGS`. |
+| **VkFramebuffer Leak** | Per-flight `framebuffer_index` was never written during creation, so `destroy_flight_framebuffers` always iterated 0 times. Framebuffers leaked every flight cycle. Now saved into `flight[slot].framebuffer_index` before advancing. |
+| **Scatter-Gather Bounds Off-by-One** | `assert(paddr + bytes_to_copy < ram_size)` used `<` instead of `<=`, rejecting valid DMA touching the final byte of RAM. |
+| **EP FIFO Divide-by-Zero** | `cur % (end - base)` with `end == base` was UB. Added guard to clamp and return early. |
+| **EP Silence Buffer Overread** | `assert(len <= sizeof(ep_silence))` compiled out in release. Replaced with runtime clamp. |
+| **Query Pool Error Handling** | `vkGetQueryPoolResults` errors other than `VK_NOT_READY` silently ignored. Now logs error and zeroes results. |
+| **CoreAudio Unknown Device** | `init_out_device` returned success when `outputDeviceID == kAudioDeviceUnknown`. Now returns `-1`. |
+| **PVIDEO State Ordering** | `get_pvideo_state` called after `update_uniforms`, so push constants used previous frame's PVIDEO state. Reordered. |
+| **`memcpy_image` Int Overflow** | `dst_stride * height` computed as `int` before widening to `size_t`. Cast to `size_t` prevents overflow at high scale factors. |
 
 ---
 
