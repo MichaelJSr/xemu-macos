@@ -259,12 +259,16 @@ static void glue(gen_fildll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 
 static void glue(gen_fistl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
-    glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
+    PREC_TYPE rounded = tcg_temp_new_fp();
+    glue(tcg_gen_rint, PREC_SUFFIX)(rounded, get_st0(s));
+    glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, rounded);
 }
 
 static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
-    glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, get_st0(s));
+    PREC_TYPE rounded = tcg_temp_new_fp();
+    glue(tcg_gen_rint, PREC_SUFFIX)(rounded, get_st0(s));
+    glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, rounded);
 }
 
 static void glue(gen_fsts_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)

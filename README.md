@@ -90,6 +90,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Redundant `vmaMapMemory`** | `upload_pvideo_to_cmd` (display.c) and `create_dummy_texture` (texture.c) called `vmaMapMemory`/`vmaUnmapMemory` on `BUFFER_STAGING_SRC` which was already persistently mapped at init. Replaced with direct use of `.mapped` pointer. |
 | **APU VP/FE MMIO Data Race** | `vp_write` → `fe_method` wrote `d->regs[]`, `d->vp.*` (HRTF, SSL, submix headroom, filters) without holding `d->lock`, racing with the APU frame thread. Wrapped `fe_method` in `d->lock`; `voice_lock` refactored to `voice_lock_locked` (assumes lock held) to avoid recursive mutex deadlock. |
 | **FCMOV Uninitialized FP Temp** | `FCMOVB`/`FCMOVNBE` etc. called `get_st0`/`get_stn` inside a conditional TCG block. When the preceding `FUCOMI` flushed all inline FP temps, the `ld80f` reload only executed on the taken branch, leaving the TCG temp undefined on the not-taken path. Subsequent instructions read garbage. Fixed by pre-loading both operands before the conditional branch. |
+| **FIST/FISTP Rounding Mode** | Inline FPU's `FIST`/`FISTP` used AArch64 `FCVTZS` (truncate toward zero), but x87 `FIST`/`FISTP` round using the current control word rounding mode (default: round-to-nearest-even). Broke Azurik's pause menu D-pad navigation: the menu computes `atan2(vertical, horizontal)` of the combined input vector (sticks + D-pad), scales by `(180/π) * (1/90)` to map angles to direction indices (0=right, 1=up, 2=left, 3=down), then uses `FISTP` to quantize. Due to float imprecision in the atan2/multiply chain, the pre-quantization value for pure D-pad UP is `0.999…` (not exactly 1.0). Round-to-nearest correctly gives 1 (UP); truncation gives 0 (RIGHT). Fixed by adding `rint_f32`/`rint_f64` TCG ops backed by AArch64 `FRINTI` (round using FPCR) and x86 `FRNDINT`, inserted before `FCVTZS`/`FCVTZS` in the inline FIST path. |
 | **MetalFX Interpolation Stale Depth** | `metalfx_interpolation_generate` cached depth IOSurface textures but never cleared them when depth inputs transitioned to NULL. Interpolator bound stale depth from a previous frame. Added `else if (!depthB/A)` branches to nil cached textures. |
 | **MetalFX Spatial Init Leak** | If `create_iosurface_bgra` or `texture_from_iosurface` failed after the `MTLFXSpatialScaler` and Metal device/queue were created, the early return leaked those objects. `metalfx_destroy_locked` only ran when `initialized == true`, which was never set. All failure paths now call `metalfx_destroy_locked`. |
 | **DecodeTaskBatch Mixed Sync Model** | `remaining` field declared `volatile int` but updated via `qatomic_dec_fetch` and initialized with plain store. Removed `volatile`; initialization uses `qatomic_set`. |
@@ -468,11 +469,9 @@ A safety guard prevents most crashes but may show a momentary black frame. This 
 
 ### FPU-related game issues
 
-The inline FPU uses IEEE double (52-bit mantissa) instead of x87 extended precision (64-bit mantissa). Most games are unaffected, but rare precision-dependent code paths can behave differently. Known cases:
+The inline FPU uses IEEE double (52-bit mantissa) instead of x87 extended precision (64-bit mantissa). Most games are unaffected, but rare precision-dependent code paths can behave differently.
 
-- **Azurik**: In-game pause menu D-pad navigation broken (main menu and gameplay unaffected). Input processing and analog clamping are verified correct; the divergence is in the menu's internal state machine computation.
-
-If a game has floating-point precision issues, disable the hard FPU:
+If a game has floating-point precision issues (very rare), disable the hard FPU:
 ```toml
 [perf]
 hard_fpu = false

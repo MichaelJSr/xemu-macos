@@ -610,6 +610,8 @@ void tcg_gen_mov_f32(TCGv_f32 ret, TCGv_f32 src);
 void tcg_gen_mov_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_mul_f32(TCGv_f32 ret, TCGv_f32 arg1, TCGv_f32 arg2);
 void tcg_gen_mul_f64(TCGv_f64 ret, TCGv_f64 arg1, TCGv_f64 arg2);
+void tcg_gen_rint_f32(TCGv_f32 ret, TCGv_f32 arg);
+void tcg_gen_rint_f64(TCGv_f64 ret, TCGv_f64 arg);
 void tcg_gen_sin_f32(TCGv_f32 ret, TCGv_f32 arg);
 void tcg_gen_sin_f64(TCGv_f64 ret, TCGv_f64 arg);
 void tcg_gen_sqrt_f32(TCGv_f32 ret, TCGv_f32 arg);

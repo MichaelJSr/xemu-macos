@@ -2771,6 +2771,12 @@ static inline void tcg_out_fcos(TCGContext *s)
     tcg_out8(s, 0xff);
 }
 
+static inline void tcg_out_frndint(TCGContext *s)
+{
+    tcg_out8(s, 0xd9);
+    tcg_out8(s, 0xfc);
+}
+
 static const uint64_t fchs_mask32 = 0x80000000;
 static const uint64_t fchs_mask64 = 0x8000000000000000L;
 static const uint64_t fabs_mask32 = 0x7FFFFFFF;
@@ -3235,6 +3241,17 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     OP_f32_f64(cos):
         tcg_out_fld_xmm(s, a1, dp);
         tcg_out_fcos(s);
+        tcg_out_fstp_xmm(s, a0, dp);
+        break;
+    OP_f32_f64(rint):
+        /*
+         * FRNDINT uses the host x87 CW rounding mode (not MXCSR).
+         * gen_flcr syncs the guest RC to MXCSR but not the x87 CW.
+         * The host default (round-to-nearest) matches the common guest
+         * default; same limitation as fsin/fcos above.
+         */
+        tcg_out_fld_xmm(s, a1, dp);
+        tcg_out_frndint(s);
         tcg_out_fstp_xmm(s, a0, dp);
         break;
     default:
@@ -4461,6 +4478,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_abs_f64:
     case INDEX_op_chs_f32:
     case INDEX_op_chs_f64:
+    case INDEX_op_rint_f32:
+    case INDEX_op_rint_f64:
     case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
     case INDEX_op_cos_f32:
