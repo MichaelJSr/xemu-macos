@@ -3552,6 +3552,25 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 if (!(s->cpuid_features & CPUID_CMOV)) {
                     goto illegal_op;
                 }
+                if (g_use_hard_fpu_inline) {
+                    /*
+                     * Ensure both operands are loaded before the
+                     * conditional branch. If a prior flush (from
+                     * FUCOMI helper, fclex, transcendentals, etc.)
+                     * cleared the inline FP temps, get_st0/get_stn
+                     * inside the conditional block would emit ld80f
+                     * loads that only execute on the taken path,
+                     * leaving TCG temps undefined on the not-taken
+                     * path and corrupting subsequent FP operations.
+                     */
+                    if (fpu_using_double_precision(s)) {
+                        (void)get_st0_f64(s);
+                        (void)get_stn_f64(s, opreg);
+                    } else {
+                        (void)get_st0_f32(s);
+                        (void)get_stn_f32(s, opreg);
+                    }
+                }
                 op1 = fcmov_cc[op & 3] | (((op >> 3) & 1) ^ 1);
                 l1 = gen_new_label();
                 gen_jcc_noeob(s, op1, l1);

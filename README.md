@@ -87,6 +87,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **MetalFX Spatial Dead Code** | `g_spatial.pendingCB` never assigned in `metalfx_upscale()`, so the `waitUntilCompleted` guard in `metalfx_destroy_locked()` was dead code. Removed field and dead wait path. |
 | **Redundant `vmaMapMemory`** | `upload_pvideo_to_cmd` (display.c) and `create_dummy_texture` (texture.c) called `vmaMapMemory`/`vmaUnmapMemory` on `BUFFER_STAGING_SRC` which was already persistently mapped at init. Replaced with direct use of `.mapped` pointer. |
 | **APU VP/FE MMIO Data Race** | `vp_write` → `fe_method` wrote `d->regs[]`, `d->vp.*` (HRTF, SSL, submix headroom, filters) without holding `d->lock`, racing with the APU frame thread. Wrapped `fe_method` in `d->lock`; `voice_lock` refactored to `voice_lock_locked` (assumes lock held) to avoid recursive mutex deadlock. |
+| **FCMOV Uninitialized FP Temp** | `FCMOVB`/`FCMOVNBE` etc. called `get_st0`/`get_stn` inside a conditional TCG block. When the preceding `FUCOMI` flushed all inline FP temps, the `ld80f` reload only executed on the taken branch, leaving the TCG temp undefined on the not-taken path. Subsequent instructions read garbage. Fixed by pre-loading both operands before the conditional branch. |
 
 ---
 
@@ -458,7 +459,11 @@ A safety guard prevents most crashes but may show a momentary black frame. This 
 
 ### FPU-related game issues
 
-If a game has floating-point precision issues (very rare), disable the hard FPU:
+The inline FPU uses IEEE double (52-bit mantissa) instead of x87 extended precision (64-bit mantissa). Most games are unaffected, but rare precision-dependent code paths can behave differently. Known cases:
+
+- **Azurik**: In-game pause menu D-pad navigation broken (main menu and gameplay unaffected). Input processing and analog clamping are verified correct; the divergence is in the menu's internal state machine computation.
+
+If a game has floating-point precision issues, disable the hard FPU:
 ```toml
 [perf]
 hard_fpu = false
