@@ -1464,25 +1464,19 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     NV2A_VK_DGROUP_END();
 }
 
-static bool check_textures_dirty(PGRAPHState *pg)
+static bool check_textures_dirty_and_update_timestamps(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    bool dirty = false;
 
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         if (!r->texture_bindings[i] || pg->texture_dirty[i]) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void update_timestamps(PGRAPHVkState *r)
-{
-    for (int i = 0; i < ARRAY_SIZE(r->texture_bindings); i++) {
-        if (r->texture_bindings[i]) {
+            dirty = true;
+        } else {
             r->texture_bindings[i]->submit_time = r->submit_count;
         }
     }
+    return dirty;
 }
 
 void pgraph_vk_bind_textures(NV2AState *d)
@@ -1497,10 +1491,9 @@ void pgraph_vk_bind_textures(NV2AState *d)
 
     r->texture_bindings_changed = false;
 
-    if (!check_textures_dirty(pg)) {
+    if (!check_textures_dirty_and_update_timestamps(pg)) {
         NV2A_VK_DPRINTF("Not dirty");
         NV2A_VK_DGROUP_END();
-        update_timestamps(r);
         return;
     }
 
@@ -1516,7 +1509,11 @@ void pgraph_vk_bind_textures(NV2AState *d)
     }
 
     r->texture_bindings_changed = true;
-    update_timestamps(r);
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        if (r->texture_bindings[i]) {
+            r->texture_bindings[i]->submit_time = r->submit_count;
+        }
+    }
     NV2A_VK_DGROUP_END();
 }
 

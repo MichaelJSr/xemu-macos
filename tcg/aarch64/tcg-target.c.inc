@@ -3014,10 +3014,7 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
 
     /* TMP0 = frac, TMP1 = high16 */
 
-    /* Build sign | frac_trunc in TMP0 */
     /* frac_trunc = (frac >> 11) & 0x000FFFFFFFFFFFFF */
-    tcg_out_insn(s, 3502, ADD, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0); /* NOP-copy */
     tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 11, 62);
     /* UBFM with immr=11,imms=62 extracts bits 62:11 → right-shifted by 11,
        zero-extending in 64-bit, giving (frac >> 11) & ((1<<52)-1). */
@@ -3228,17 +3225,18 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     switch (opc) {
     case INDEX_op_flcr:
         /*
-         * a0 = MXCSR-like value with RC in bits 13-14.
-         * Map to ARM64 FPCR RMode (bits 22-23) with up/down swap.
+         * a0 = MXCSR-like value with RC in bits [14:13].
+         * Map to ARM64 FPCR RMode (bits [23:22]) with bit swap:
+         * x86 RC {bit14,bit13} → ARM RMode {bit13,bit14}.
+         * RBIT reverses all 32 bits, placing [1:0] at [31:30],
+         * then LSR 8 moves [31:30] to [23:22].
          */
         tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP0, a0, 13, 13);
+                     TCG_REG_TMP0, a0, 13, 14);
+        tcg_out_insn(s, 3507, RBIT, TCG_TYPE_I32,
+                     TCG_REG_TMP0, TCG_REG_TMP0);
         tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP1, a0, 14, 14);
-        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                     TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 23);
-        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                     TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 22);
+                     TCG_REG_TMP0, TCG_REG_TMP0, 8, 31);
         tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I32,
                          TCG_REG_TMP0, TCG_REG_TMP0, 0x02000000);
         tcg_out32(s, INSN_MSR_FPCR | (TCG_REG_TMP0 & 0x1f));

@@ -1422,6 +1422,11 @@ static void bind_descriptor_sets(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
     nv2a_vk_assert(r->descriptor_set_index >= 1);
 
+    if (r->descriptor_set_index == r->last_bound_descriptor_set_index) {
+        return;
+    }
+    r->last_bound_descriptor_set_index = r->descriptor_set_index;
+
     vkCmdBindDescriptorSets(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             r->pipeline_binding->layout, 0, 1,
                             &r->descriptor_sets[r->descriptor_set_index - 1], 0,
@@ -1653,41 +1658,71 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         }
         VK_CHECK(vkEndCommandBuffer(r->command_buffer));
 
-        VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
-        sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING, BUFFER_INDEX);
-        sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
-                                BUFFER_VERTEX_INLINE);
-        sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING, BUFFER_UNIFORM);
-        flush_memory_buffer(pg, cmd);
-        VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
-        r->in_aux_command_buffer = false;
+        bool aux_has_work =
+            r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset >
+                get_staging_slot_base(r, BUFFER_INDEX_STAGING) ||
+            r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset >
+                get_staging_slot_base(r, BUFFER_VERTEX_INLINE_STAGING) ||
+            r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset >
+                get_staging_slot_base(r, BUFFER_UNIFORM_STAGING) ||
+            find_first_bit(r->flight[r->current_flight].uploaded_bitmap,
+                           r->bitmap_size) < r->bitmap_size;
 
         int slot = r->current_flight;
 
-        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                         VK_PIPELINE_STAGE_TRANSFER_BIT;
-        VkSubmitInfo submit_infos[] = {
-            {
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &r->aux_command_buffer,
-                .signalSemaphoreCount = 1,
-                .pSignalSemaphores = &r->command_buffer_semaphore,
-            },
-            {
+        if (aux_has_work) {
+            VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
+            sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING, BUFFER_INDEX);
+            sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
+                                    BUFFER_VERTEX_INLINE);
+            sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING,
+                                    BUFFER_UNIFORM);
+            flush_memory_buffer(pg, cmd);
+            VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
+            r->in_aux_command_buffer = false;
+
+            VkPipelineStageFlags wait_stage =
+                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo submit_infos[] = {
+                {
+                    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &r->aux_command_buffer,
+                    .signalSemaphoreCount = 1,
+                    .pSignalSemaphores = &r->command_buffer_semaphore,
+                },
+                {
+                    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &r->command_buffer,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores = &r->command_buffer_semaphore,
+                    .pWaitDstStageMask = &wait_stage,
+                }
+            };
+            nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT);
+            vkResetFences(r->device, 1, &r->command_buffer_fence);
+            VK_CHECK(vkQueueSubmit(r->queue, ARRAY_SIZE(submit_infos),
+                                   submit_infos, r->command_buffer_fence));
+        } else {
+            if (r->in_aux_command_buffer) {
+                VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
+                r->in_aux_command_buffer = false;
+            }
+
+            VkSubmitInfo submit_info = {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1,
                 .pCommandBuffers = &r->command_buffer,
-                .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &r->command_buffer_semaphore,
-                .pWaitDstStageMask = &wait_stage,
-            }
-        };
-        nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT);
-        vkResetFences(r->device, 1, &r->command_buffer_fence);
-        VK_CHECK(vkQueueSubmit(r->queue, ARRAY_SIZE(submit_infos), submit_infos,
-                               r->command_buffer_fence));
+            };
+            nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT);
+            vkResetFences(r->device, 1, &r->command_buffer_fence);
+            VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info,
+                                   r->command_buffer_fence));
+        }
         r->flight[slot].submitted = true;
+        r->flight[slot].framebuffer_index = r->framebuffer_index;
         r->submit_count += 1;
 
         bool check_budget = false;
@@ -1707,6 +1742,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
         int next = r->current_flight;
         r->descriptor_set_index = r->flight[next].descriptor_set_base;
+        r->last_bound_descriptor_set_index = -1;
         r->in_command_buffer = false;
         destroy_flight_framebuffers(pg, next);
         r->framebuffer_index = 0;

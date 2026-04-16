@@ -450,6 +450,7 @@ typedef struct PGRAPHVkState {
     VkDescriptorSetLayout descriptor_set_layout;
     VkDescriptorSet descriptor_sets[8192];
     int descriptor_set_index;
+    int last_bound_descriptor_set_index;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
 
@@ -494,8 +495,6 @@ typedef struct PGRAPHVkState {
     Lru shader_module_cache;
     ShaderModuleCacheEntry *shader_module_cache_entries;
 
-    // FIXME: Merge these into a structure
-    uint64_t uniform_buffer_hashes[2];
     size_t uniform_buffer_offsets[2];
     bool uniforms_changed;
 
