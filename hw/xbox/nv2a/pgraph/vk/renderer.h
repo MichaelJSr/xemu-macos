@@ -432,6 +432,7 @@ typedef struct PGRAPHVkState {
 
     int framebuffer_index;
     bool framebuffer_dirty;
+    bool render_pass_state_dirty;
 
     VkRenderPass render_pass;
     GArray *render_passes; // RenderPass
@@ -463,6 +464,7 @@ typedef struct PGRAPHVkState {
     VkVertexInputBindingDescription vertex_binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     int num_active_vertex_binding_descriptions;
     bool vertex_state_dirty;
+    uint64_t vertex_layout_hash;
     hwaddr vertex_attribute_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;

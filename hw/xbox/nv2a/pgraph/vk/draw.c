@@ -997,12 +997,7 @@ static bool check_render_pass_dirty(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     nv2a_vk_assert(r->pipeline_binding);
-
-    RenderPassState state;
-    init_render_pass_state(pg, &state);
-
-    return memcmp(&state, &r->pipeline_binding->key.render_pass_state,
-                  sizeof(state)) != 0;
+    return r->render_pass_state_dirty;
 }
 
 // Quickly check for any state changes that would require more analysis
@@ -1077,6 +1072,7 @@ static void create_pipeline(PGRAPHState *pg)
 
     pgraph_clear_dirty_reg_map(pg);
     r->vertex_state_dirty = false;
+    r->render_pass_state_dirty = false;
 
     if (r->pipeline_binding && !pipeline_dirty) {
         NV2A_VK_DPRINTF("Cache hit");
@@ -2521,6 +2517,14 @@ void pgraph_vk_flush_draw(NV2AState *d)
         begin_draw(pg);
         bind_vertex_buffer(pg, remap.attributes, 0);
         if (emulate_primitives) {
+            size_t total_max = 0;
+            for (int i = 0; i < pg->draw_arrays_length; i++) {
+                total_max += get_max_emulated_index_count(
+                    pg, pg->draw_arrays_count[i]);
+            }
+            uint32_t *all_indices = get_emulated_indices_buf(r, total_max);
+            size_t all_offset = 0;
+
             for (int i = 0; i < pg->draw_arrays_length; i++) {
                 uint32_t start = pg->draw_arrays_start[i];
                 uint32_t count = pg->draw_arrays_count[i];
@@ -2529,21 +2533,18 @@ void pgraph_vk_flush_draw(NV2AState *d)
                 if (max_index_count == 0) {
                     continue;
                 }
-
-                uint32_t *indices =
-                    get_emulated_indices_buf(r, max_index_count);
                 size_t index_count = build_emulated_indices_from_array(
-                    pg, start, count, indices);
-                if (index_count == 0) {
-                    continue;
-                }
+                    pg, start, count, all_indices + all_offset);
+                all_offset += index_count;
+            }
 
+            if (all_offset > 0) {
                 VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
-                    pg, indices, index_count * sizeof(indices[0]));
+                    pg, all_indices, all_offset * sizeof(uint32_t));
                 vkCmdBindIndexBuffer(r->command_buffer,
                                      r->storage_buffers[BUFFER_INDEX].buffer,
                                      buffer_offset, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
+                vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0, 0, 0);
             }
         } else {
             for (int i = 0; i < pg->draw_arrays_length; i++) {

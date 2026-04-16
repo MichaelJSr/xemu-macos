@@ -147,10 +147,15 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
     assert(r->storage_buffers[BUFFER_STAGING_SRC].mapped);
 
     uint8_t *src = d->vram_ptr + state.base + state.offset;
-    for (int y = 0; y < state.in_height; y++) {
-        memcpy(mapped_memory_ptr + y * state.in_width * 2,
-               src + y * state.pitch,
-               state.in_width * 2);
+    size_t row_bytes = (size_t)state.in_width * 2;
+    if ((size_t)state.pitch == row_bytes) {
+        memcpy(mapped_memory_ptr, src, row_bytes * state.in_height);
+    } else {
+        for (int y = 0; y < state.in_height; y++) {
+            memcpy(mapped_memory_ptr + y * row_bytes,
+                   src + y * state.pitch,
+                   row_bytes);
+        }
     }
 
     if (!r->storage_buffers[BUFFER_STAGING_SRC].is_coherent) {

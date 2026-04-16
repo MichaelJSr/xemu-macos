@@ -669,6 +669,7 @@ static void bind_surface(PGRAPHVkState *r, SurfaceBinding *surface)
     }
 
     r->framebuffer_dirty = true;
+    r->render_pass_state_dirty = true;
 }
 
 static void unbind_surface(NV2AState *d, bool color)
@@ -680,11 +681,13 @@ static void unbind_surface(NV2AState *d, bool color)
         if (r->color_binding) {
             r->color_binding = NULL;
             r->framebuffer_dirty = true;
+            r->render_pass_state_dirty = true;
         }
     } else {
         if (r->zeta_binding) {
             r->zeta_binding = NULL;
             r->framebuffer_dirty = true;
+            r->render_pass_state_dirty = true;
         }
     }
 }
@@ -1781,8 +1784,12 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         nv2a_vk_assert(r->color_binding->height == r->zeta_binding->height);
     }
 
-    expire_old_surfaces(d);
-    prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
+    static int last_expire_frame_time;
+    if (d->pgraph.frame_time - last_expire_frame_time >= 8) {
+        expire_old_surfaces(d);
+        prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
+        last_expire_frame_time = d->pgraph.frame_time;
+    }
 }
 
 static bool check_format_and_usage_supported(PGRAPHVkState *r, VkFormat format,
@@ -1857,6 +1864,7 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
     r->color_binding = NULL;
     r->zeta_binding = NULL;
     r->framebuffer_dirty = true;
+    r->render_pass_state_dirty = true;
 
     pgraph_vk_reload_surface_scale_factor(pg); // FIXME: Move internal
 }

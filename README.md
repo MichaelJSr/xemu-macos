@@ -35,20 +35,22 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **Display Path** | PVIDEO + display merged into 1 GPU submission. IOSurface rebind, descriptor set, and uniform caching skip redundant per-frame calls. |
-| **Incremental UBO Dirty Tracking** | `uniform_copy` does `memcmp` before `memcpy` and sets a per-layout `dirty` flag. Replaces full-buffer `fast_hash` (XXH3) that ran on every shader bind. Shader binding changes force re-upload. |
-| **Scoped Vertex RAM Barrier** | `flush_memory_buffer` uses `find_first_bit`/`find_last_bit` on the uploaded bitmap to compute the actual dirty page range. Barrier and `vmaFlushAllocation` scope only that subregion instead of `VK_WHOLE_SIZE`. |
-| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. |
-| **Staging Buffers** | 512 MiB staging with persistent VMA mapping. All staging users (texture upload, PVIDEO, dummy texture) use the persistent `.mapped` pointer directly — no per-upload map/unmap. |
-| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Coherent memory flush elided on Apple Silicon. Barriers in PVIDEO upload, surface upload/download, depth-stencil pack/unpack, and texture copy paths scoped to exact byte ranges instead of `VK_WHOLE_SIZE`. Reduces MoltenVK Metal fence overhead. |
-| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` for exact match. Sorted range array with binary search for `surface_get_within` and `download_surfaces_in_range_if_dirty` — O(log n) instead of O(n) scan. |
-| **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore flight slots with full resource partitioning: staging buffers (index, vertex, uniform, texture) divided into per-slot ranges with `buffer_limit`; per-slot `uploaded_bitmap` for vertex RAM dirty tracking with cross-slot conflict detection; per-slot descriptor set index ranges. CPU records slot 1 while GPU executes slot 0. |
+| **Display Path** | PVIDEO + display merged into 1 GPU submission. IOSurface rebind, descriptor set, and uniform caching skip redundant per-frame calls. Single `memcpy` when PVIDEO row pitch is contiguous. |
+| **Incremental UBO Dirty Tracking** | `uniform_copy` does `memcmp` before `memcpy` with per-layout `dirty` flag. Replaces full-buffer `fast_hash` that ran on every shader bind. |
+| **Scoped Vertex RAM Barrier** | `flush_memory_buffer` computes actual dirty page range via `find_first_bit`/`find_last_bit`. Barrier scoped to that subregion instead of `VK_WHOLE_SIZE`. |
+| **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. `render_pass_state_dirty` flag set only when surface bindings change, replacing per-draw struct rebuild + `memcmp`. |
+| **Vertex Layout Fingerprinting** | `fast_hash` of active vertex descriptions replaces paired `memcpy` + `memcmp` of full arrays (~512 bytes of stack copies eliminated per draw). |
+| **Surface Expiry Throttling** | `expire_old_surfaces` + `prune_invalid_surfaces` run every 8 frame ticks instead of every draw begin. Eliminates O(surfaces) scan per draw. |
+| **Emulated Index Batching** | Primitive emulation (quads, line loops, etc.) batches all draw_arrays index runs into one staging allocation + one `vkCmdDrawIndexed`. |
+| **Staging Buffers** | 512 MiB persistent VMA mapping. No per-upload map/unmap. |
+| **Narrower Barriers + Coherent Elision** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory (per-buffer `is_coherent` flag). All barriers scoped to exact byte ranges. |
+| **O(1) Surface Lookup** | `GHashTable` for exact match. Sorted range array with binary search for containment queries — O(log n) instead of O(n). |
+| **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore slots with full resource partitioning. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
-| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. IOProc uses `os_unfair_lock_trylock` — outputs silence on contention rather than blocking the real-time audio thread. Default buffer reduced to 2048 samples (~42ms at 48kHz) for lower latency. |
-| **FPCR Caching Across TBs** | `gen_flcr` compares guest `fpuc` RC bits against a cached value in `CPUX86State` and only emits `MSR FPCR` when rounding mode actually changes. Most Xbox games never change the x87 rounding control after init, so this eliminates a ~10-20 cycle pipeline stall per translation block. |
-| **Coherent Memory Flush Elision** | `vmaFlushAllocation`/`vmaInvalidateAllocation` calls skipped on Apple Silicon unified memory (always HOST_COHERENT). Applies to texture upload, PVIDEO upload, surface download, and surface upload paths. Per-buffer `is_coherent` flag checked once at init. |
-| **Frame Interpolation Sync Bypass** | Deferred interpolation frame generation decoupled from the 8ms (~120Hz) display sync gate. When interpolation frames remain, `pgraph_vk_render_display` runs on every sync call until all deferred frames are generated, producing smoother 4x (120fps) output. |
+| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. Trylock outputs silence on contention. Buffer reduced to 2048 samples (~42ms at 48kHz). |
+| **FPCR Caching Across TBs** | `gen_flcr` only emits `MSR FPCR` when guest rounding mode actually changes. Eliminates ~10-20 cycle pipeline stall per translation block. |
+| **Frame Interpolation Sync Bypass** | Deferred interpolation generation decoupled from 8ms display sync gate. Produces smoother 4x (120fps) output. |
 
 ### Low Impact / Quality of Life
 
