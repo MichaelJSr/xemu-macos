@@ -110,6 +110,7 @@ typedef struct StorageBuffer {
     VkMemoryPropertyFlags properties;
     size_t buffer_offset;
     size_t buffer_size;
+    size_t buffer_limit;
     uint8_t *mapped;
 } StorageBuffer;
 
@@ -389,7 +390,7 @@ typedef struct PGRAPHVkState {
     VkQueue queue;
     VkQueue compute_queue;
     bool has_compute_queue;
-#define NUM_FLIGHT_SLOTS 1
+#define NUM_FLIGHT_SLOTS 2
 
     VkCommandPool command_pool;
 
@@ -412,6 +413,7 @@ typedef struct PGRAPHVkState {
         VkDeviceSize vertex_inline_staging_limit;
         VkDeviceSize uniform_staging_base;
         VkDeviceSize uniform_staging_limit;
+        unsigned long *uploaded_bitmap;
         bool submitted;
     } flight[NUM_FLIGHT_SLOTS];
     int current_flight;

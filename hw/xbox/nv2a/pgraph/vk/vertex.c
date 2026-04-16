@@ -53,17 +53,19 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
     size_t nbits = end_bit - start_bit;
 
-    if (find_next_bit(r->uploaded_bitmap, start_bit + nbits, start_bit) <
-        end_bit) {
-        // Vertex data changed while building the draw list. Finish drawing
-        // before updating RAM buffer.
-        pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        if (r->flight[i].uploaded_bitmap &&
+            find_next_bit(r->flight[i].uploaded_bitmap,
+                          start_bit + nbits, start_bit) < end_bit) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
+            break;
+        }
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
 
-    bitmap_set(r->uploaded_bitmap, start_bit, nbits);
+    bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
 }
 
 static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)

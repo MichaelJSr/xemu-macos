@@ -1468,6 +1468,21 @@ static void end_query(PGRAPHVkState *r)
     r->query_in_flight = false;
 }
 
+static VkDeviceSize get_staging_slot_base(PGRAPHVkState *r, int index_src)
+{
+    int s = r->current_flight;
+    switch (index_src) {
+    case BUFFER_INDEX_STAGING:
+        return r->flight[s].index_staging_base;
+    case BUFFER_VERTEX_INLINE_STAGING:
+        return r->flight[s].vertex_inline_staging_base;
+    case BUFFER_UNIFORM_STAGING:
+        return r->flight[s].uniform_staging_base;
+    default:
+        return 0;
+    }
+}
+
 static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
                                 int index_src, int index_dst)
 {
@@ -1475,12 +1490,16 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
     StorageBuffer *b_src = &r->storage_buffers[index_src];
     StorageBuffer *b_dst = &r->storage_buffers[index_dst];
 
-    if (!b_src->buffer_offset) {
+    VkDeviceSize base = get_staging_slot_base(r, index_src);
+    if (b_src->buffer_offset <= base) {
         return;
     }
 
+    VkDeviceSize size = b_src->buffer_offset - base;
     VkBufferCopy copy_region = {
-        .size = b_src->buffer_offset,
+        .srcOffset = base,
+        .dstOffset = base,
+        .size = size,
     };
     vkCmdCopyBuffer(cmd, b_src->buffer, b_dst->buffer, 1, &copy_region);
 
@@ -1512,7 +1531,8 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = b_dst->buffer,
-        .size = b_src->buffer_offset
+        .offset = base,
+        .size = size,
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage_mask, 0,
                          0, NULL, 1, &barrier, 0, NULL);
@@ -1522,12 +1542,13 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     StorageBuffer *vram = &r->storage_buffers[BUFFER_VERTEX_RAM];
+    unsigned long *slot_bitmap = r->flight[r->current_flight].uploaded_bitmap;
 
-    unsigned long first_dirty = find_first_bit(r->uploaded_bitmap, r->bitmap_size);
+    unsigned long first_dirty = find_first_bit(slot_bitmap, r->bitmap_size);
     if (first_dirty >= r->bitmap_size) {
         return;
     }
-    unsigned long last_dirty = find_last_bit(r->uploaded_bitmap, r->bitmap_size);
+    unsigned long last_dirty = find_last_bit(slot_bitmap, r->bitmap_size);
 
     VkDeviceSize offset = (VkDeviceSize)first_dirty * TARGET_PAGE_SIZE;
     VkDeviceSize end = (VkDeviceSize)(last_dirty + 1) * TARGET_PAGE_SIZE;
@@ -1643,7 +1664,6 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
                                 BUFFER_VERTEX_INLINE);
         sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING, BUFFER_UNIFORM);
         flush_memory_buffer(pg, cmd);
-        bitmap_clear(r->uploaded_bitmap, 0, r->bitmap_size);
         VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
         r->in_aux_command_buffer = false;
 
@@ -1709,12 +1729,20 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
     int cur = r->current_flight;
     r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset =
         r->flight[cur].staging_buffer_base;
+    r->storage_buffers[BUFFER_STAGING_SRC].buffer_limit =
+        r->flight[cur].staging_buffer_limit;
     r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset =
         r->flight[cur].index_staging_base;
+    r->storage_buffers[BUFFER_INDEX_STAGING].buffer_limit =
+        r->flight[cur].index_staging_limit;
     r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset =
         r->flight[cur].vertex_inline_staging_base;
+    r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_limit =
+        r->flight[cur].vertex_inline_staging_limit;
     r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset =
         r->flight[cur].uniform_staging_base;
+    r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_limit =
+        r->flight[cur].uniform_staging_limit;
 }
 
 void pgraph_vk_begin_command_buffer(PGRAPHState *pg)

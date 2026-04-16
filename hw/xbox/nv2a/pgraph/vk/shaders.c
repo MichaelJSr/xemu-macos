@@ -144,7 +144,8 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
     bool need_uniform_write =
         r->uniforms_changed ||
         r->shader_bindings_changed ||
-        !r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset;
+        (r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset ==
+         r->flight[r->current_flight].uniform_staging_base);
 
     if (!(r->shader_bindings_changed || r->texture_bindings_changed ||
           (r->descriptor_set_index == r->flight[r->current_flight].descriptor_set_base) || need_uniform_write)) {

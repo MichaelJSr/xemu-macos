@@ -134,9 +134,10 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     create_pvideo_image(pg, state.in_width, state.in_height);
 
-    if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > 0) {
+    VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
+    if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > staging_base) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = 0;
+        r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = staging_base;
     }
 
     size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;

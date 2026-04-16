@@ -119,6 +119,10 @@ void pgraph_vk_init_buffers(NV2AState *d)
     r->bitmap_size = memory_region_size(d->vram) / 4096;
     r->uploaded_bitmap = bitmap_new(r->bitmap_size);
     bitmap_clear(r->uploaded_bitmap, 0, r->bitmap_size);
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        r->flight[i].uploaded_bitmap = bitmap_new(r->bitmap_size);
+        bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
+    }
 
     r->storage_buffers[BUFFER_VERTEX_INLINE] = (StorageBuffer){
         .alloc_info = device_alloc_create_info,
@@ -148,6 +152,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
     };
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
+        r->storage_buffers[i].buffer_limit = r->storage_buffers[i].buffer_size;
         create_buffer(pg, &r->storage_buffers[i]);
     }
 
@@ -181,6 +186,10 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
 
     g_free(r->uploaded_bitmap);
     r->uploaded_bitmap = NULL;
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        g_free(r->flight[i].uploaded_bitmap);
+        r->flight[i].uploaded_bitmap = NULL;
+    }
 }
 
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
@@ -189,7 +198,7 @@ bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     StorageBuffer *b = &r->storage_buffers[index];
-    return (ROUND_UP(b->buffer_offset, alignment) + size) <= b->buffer_size;
+    return (ROUND_UP(b->buffer_offset, alignment) + size) <= b->buffer_limit;
 }
 
 VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,

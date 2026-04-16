@@ -91,6 +91,10 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
                                  VK_TRUE, UINT64_MAX));
         r->flight[slot].submitted = false;
     }
+
+    if (r->flight[slot].uploaded_bitmap) {
+        bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);
+    }
 }
 
 void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
@@ -123,6 +127,26 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
         r->flight[i].uniform_staging_base = i * uni_per_slot;
         r->flight[i].uniform_staging_limit = (i + 1) * uni_per_slot;
     }
+
+    int s = r->current_flight;
+    r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset =
+        r->flight[s].staging_buffer_base;
+    r->storage_buffers[BUFFER_STAGING_SRC].buffer_limit =
+        r->flight[s].staging_buffer_limit;
+    r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset =
+        r->flight[s].index_staging_base;
+    r->storage_buffers[BUFFER_INDEX_STAGING].buffer_limit =
+        r->flight[s].index_staging_limit;
+    r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset =
+        r->flight[s].vertex_inline_staging_base;
+    r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_limit =
+        r->flight[s].vertex_inline_staging_limit;
+    r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset =
+        r->flight[s].uniform_staging_base;
+    r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_limit =
+        r->flight[s].uniform_staging_limit;
+    r->descriptor_set_index = r->flight[s].descriptor_set_base;
+    r->compute.descriptor_set_index = r->flight[s].compute_descriptor_set_base;
 }
 
 void pgraph_vk_select_flight_slot(PGRAPHState *pg)
