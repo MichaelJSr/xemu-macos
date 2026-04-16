@@ -18,7 +18,42 @@
 
 #import <os/lock.h>
 
+#ifndef NDEBUG
+#define METALFX_DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define METALFX_DPRINTF(fmt, ...) do {} while (0)
+#endif
+
 static os_unfair_lock g_metalfx_lock = OS_UNFAIR_LOCK_INIT;
+
+#pragma mark - Shared Metal Device
+
+static id<MTLDevice> g_shared_device = nil;
+static id<MTLCommandQueue> g_shared_queue = nil;
+static int g_shared_refcount = 0;
+
+static bool shared_metal_acquire(id<MTLDevice> *out_device,
+                                 id<MTLCommandQueue> *out_queue)
+{
+    if (!g_shared_device) {
+        g_shared_device = MTLCreateSystemDefaultDevice();
+        if (!g_shared_device) return false;
+        g_shared_queue = [g_shared_device newCommandQueue];
+    }
+    g_shared_refcount++;
+    *out_device = g_shared_device;
+    *out_queue = g_shared_queue;
+    return true;
+}
+
+static void shared_metal_release(void)
+{
+    if (--g_shared_refcount <= 0) {
+        g_shared_queue = nil;
+        g_shared_device = nil;
+        g_shared_refcount = 0;
+    }
+}
 
 #pragma mark - Helpers
 
@@ -32,7 +67,7 @@ static os_unfair_lock g_metalfx_lock = OS_UNFAIR_LOCK_INIT;
 static IOSurfaceRef create_iosurface_bgra(int w, int h)
 {
     if (w > METALFX_MAX_IOSURFACE_WIDTH) {
-        fprintf(stderr,
+        METALFX_DPRINTF(
                 "MetalFX: Skipping IOSurface %dx%d (width > %d limit)\n",
                 w, h, METALFX_MAX_IOSURFACE_WIDTH);
         return NULL;
@@ -60,7 +95,7 @@ static id<MTLTexture> texture_from_iosurface(id<MTLDevice> device,
     if (bpe == 0) bpe = 4;
     size_t min_bpr = (size_t)w * bpe;
     if (bpr < min_bpr) {
-        fprintf(stderr,
+        METALFX_DPRINTF(
                 "MetalFX: IOSurface %dx%d bytesPerRow=%zu < %zu, "
                 "skipping Metal texture\n", w, h, bpr, min_bpr);
         return nil;
@@ -119,9 +154,12 @@ static MetalFXSpatialState g_spatial = { 0 };
 
 bool metalfx_is_supported(void)
 {
+    static int cached = -1;
+    if (cached >= 0) return cached;
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    if (!device) return false;
-    return [MTLFXSpatialScalerDescriptor supportsDevice:device];
+    if (!device) { cached = 0; return false; }
+    cached = [MTLFXSpatialScalerDescriptor supportsDevice:device] ? 1 : 0;
+    return cached;
 }
 
 static void metalfx_destroy_locked(void)
@@ -129,12 +167,15 @@ static void metalfx_destroy_locked(void)
     g_spatial.scaler = nil;
     g_spatial.inputTexture = nil;
     g_spatial.outputTexture = nil;
-    g_spatial.commandQueue = nil;
-    g_spatial.device = nil;
     g_spatial.cachedInputSurface = NULL;
     if (g_spatial.outputSurface) {
         CFRelease(g_spatial.outputSurface);
         g_spatial.outputSurface = NULL;
+    }
+    if (g_spatial.device) {
+        g_spatial.commandQueue = nil;
+        g_spatial.device = nil;
+        shared_metal_release();
     }
     g_spatial.initialized = false;
 }
@@ -154,13 +195,15 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
     }
 
     @autoreleasepool {
-        g_spatial.device = MTLCreateSystemDefaultDevice();
-        if (!g_spatial.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
-        if (![MTLFXSpatialScalerDescriptor supportsDevice:g_spatial.device]) {
+        if (!shared_metal_acquire(&g_spatial.device, &g_spatial.commandQueue)) {
             os_unfair_lock_unlock(&g_metalfx_lock); return false;
         }
-
-        g_spatial.commandQueue = [g_spatial.device newCommandQueue];
+        if (![MTLFXSpatialScalerDescriptor supportsDevice:g_spatial.device]) {
+            shared_metal_release();
+            g_spatial.device = nil;
+            g_spatial.commandQueue = nil;
+            os_unfair_lock_unlock(&g_metalfx_lock); return false;
+        }
 
         MTLFXSpatialScalerDescriptor *desc =
             [[MTLFXSpatialScalerDescriptor alloc] init];
@@ -204,7 +247,7 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
         g_spatial.outputHeight = output_h;
         g_spatial.initialized = true;
 
-        fprintf(stderr, "MetalFX: Spatial upscaler initialized %dx%d -> %dx%d\n",
+        METALFX_DPRINTF("MetalFX: Spatial upscaler initialized %dx%d -> %dx%d\n",
                 input_w, input_h, output_w, output_h);
         os_unfair_lock_unlock(&g_metalfx_lock);
         return true;
@@ -289,9 +332,12 @@ static MetalFXTemporalState g_temporal = { 0 };
 
 bool metalfx_temporal_is_supported(void)
 {
+    static int cached = -1;
+    if (cached >= 0) return cached;
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    if (!device) return false;
-    return [MTLFXTemporalScalerDescriptor supportsDevice:device];
+    if (!device) { cached = 0; return false; }
+    cached = [MTLFXTemporalScalerDescriptor supportsDevice:device] ? 1 : 0;
+    return cached;
 }
 
 static void metalfx_temporal_destroy_locked(void)
@@ -305,12 +351,15 @@ static void metalfx_temporal_destroy_locked(void)
     g_temporal.syntheticDepthTexture = nil;
     g_temporal.outputTexture = nil;
     g_temporal.outputSharedTexture = nil;
-    g_temporal.commandQueue = nil;
-    g_temporal.device = nil;
     g_temporal.cachedColorSurface = NULL;
     if (g_temporal.outputSurface) {
         CFRelease(g_temporal.outputSurface);
         g_temporal.outputSurface = NULL;
+    }
+    if (g_temporal.device) {
+        g_temporal.commandQueue = nil;
+        g_temporal.device = nil;
+        shared_metal_release();
     }
     g_temporal.initialized = false;
     g_temporal.failedInputW = 0;
@@ -346,9 +395,13 @@ bool metalfx_temporal_init(int input_w, int input_h,
     }
 
     @autoreleasepool {
-        g_temporal.device = MTLCreateSystemDefaultDevice();
-        if (!g_temporal.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
+        if (!shared_metal_acquire(&g_temporal.device, &g_temporal.commandQueue)) {
+            os_unfair_lock_unlock(&g_metalfx_lock); return false;
+        }
         if (![MTLFXTemporalScalerDescriptor supportsDevice:g_temporal.device]) {
+            shared_metal_release();
+            g_temporal.device = nil;
+            g_temporal.commandQueue = nil;
             os_unfair_lock_unlock(&g_metalfx_lock); return false;
         }
 
@@ -361,13 +414,11 @@ bool metalfx_temporal_init(int input_w, int input_h,
         if (max_scale > 0 && max_req > max_scale) {
             output_w = (int)(input_w * max_scale);
             output_h = (int)(input_h * max_scale);
-            fprintf(stderr,
+            METALFX_DPRINTF(
                     "MetalFX: Temporal scale %.1fx exceeds max %.1fx, "
                     "clamping output to %dx%d\n",
                     max_req, max_scale, output_w, output_h);
         }
-
-        g_temporal.commandQueue = [g_temporal.device newCommandQueue];
 
         MTLFXTemporalScalerDescriptor *desc =
             [[MTLFXTemporalScalerDescriptor alloc] init];
@@ -384,7 +435,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
         g_temporal.scaler =
             [desc newTemporalScalerWithDevice:g_temporal.device];
         if (!g_temporal.scaler) {
-            fprintf(stderr,
+            METALFX_DPRINTF(
                     "MetalFX: Failed to create temporal scaler %dx%d -> %dx%d\n",
                     input_w, input_h, output_w, output_h);
             g_temporal.failedInputW = input_w;
@@ -476,10 +527,10 @@ bool metalfx_temporal_init(int input_w, int input_h,
             depthDesc.storageMode = MTLStorageModePrivate;
             g_temporal.syntheticDepthTexture =
                 [g_temporal.device newTextureWithDescriptor:depthDesc];
-            fprintf(stderr, "MetalFX: Synthetic depth enabled for temporal\n");
+            METALFX_DPRINTF("MetalFX: Synthetic depth enabled for temporal\n");
         }
 
-        fprintf(stderr,
+        METALFX_DPRINTF(
                 "MetalFX: Temporal upscaler initialized %dx%d -> %dx%d\n",
                 input_w, input_h, output_w, output_h);
         os_unfair_lock_unlock(&g_metalfx_lock);
@@ -632,11 +683,15 @@ static MetalFXInterpolationState g_interp = { 0 };
 
 bool metalfx_interpolation_is_supported(void)
 {
+    static int cached = -1;
+    if (cached >= 0) return cached;
     if (@available(macOS 26.0, *)) {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) return false;
-        return [MTLFXFrameInterpolatorDescriptor supportsDevice:device];
+        if (!device) { cached = 0; return false; }
+        cached = [MTLFXFrameInterpolatorDescriptor supportsDevice:device] ? 1 : 0;
+        return cached;
     }
+    cached = 0;
     return false;
 }
 
@@ -650,8 +705,6 @@ static void metalfx_interpolation_destroy_locked(void)
     g_interp.cachedColorPrev = nil;
     g_interp.cachedDepthCur = nil;
     g_interp.cachedDepthPrev = nil;
-    g_interp.commandQueue = nil;
-    g_interp.device = nil;
     g_interp.lastColorCur = NULL;
     g_interp.lastColorPrev = NULL;
     g_interp.lastDepthCur = NULL;
@@ -659,6 +712,11 @@ static void metalfx_interpolation_destroy_locked(void)
     if (g_interp.outputSurface) {
         CFRelease(g_interp.outputSurface);
         g_interp.outputSurface = NULL;
+    }
+    if (g_interp.device) {
+        g_interp.commandQueue = nil;
+        g_interp.device = nil;
+        shared_metal_release();
     }
     g_interp.initialized = false;
 }
@@ -676,10 +734,9 @@ bool metalfx_interpolation_init(int width, int height)
         }
 
         @autoreleasepool {
-            g_interp.device = MTLCreateSystemDefaultDevice();
-            if (!g_interp.device) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
-
-            g_interp.commandQueue = [g_interp.device newCommandQueue];
+            if (!shared_metal_acquire(&g_interp.device, &g_interp.commandQueue)) {
+                os_unfair_lock_unlock(&g_metalfx_lock); return false;
+            }
 
             MTLFXFrameInterpolatorDescriptor *desc =
                 [[MTLFXFrameInterpolatorDescriptor alloc] init];
@@ -695,8 +752,9 @@ bool metalfx_interpolation_init(int width, int height)
             id<MTLFXFrameInterpolator> interp =
                 [desc newFrameInterpolatorWithDevice:g_interp.device];
             if (!interp) {
-                fprintf(stderr,
+                METALFX_DPRINTF(
                         "MetalFX: Failed to create frame interpolator\n");
+                metalfx_interpolation_destroy_locked();
                 os_unfair_lock_unlock(&g_metalfx_lock);
                 return false;
             }
@@ -753,7 +811,7 @@ bool metalfx_interpolation_init(int width, int height)
             g_interp.initialized = true;
             g_interp.firstFrame = true;
 
-            fprintf(stderr,
+            METALFX_DPRINTF(
                     "MetalFX: Frame interpolator initialized %dx%d\n",
                     width, height);
             os_unfair_lock_unlock(&g_metalfx_lock);

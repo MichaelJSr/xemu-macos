@@ -549,7 +549,7 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
     audio_pcm_init_info (&hw->info, as);
 
     core->frameSizeSetting = audio_buffer_frames(
-        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 11610);
+        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 4096);
 
     core->bufferCount = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
 

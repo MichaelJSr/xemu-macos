@@ -102,6 +102,13 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
     VkDeviceSize staging_size = r->storage_buffers[BUFFER_STAGING_SRC].buffer_size;
     VkDeviceSize staging_per_slot = staging_size / NUM_FLIGHT_SLOTS;
 
+    VkDeviceSize idx_size = r->storage_buffers[BUFFER_INDEX_STAGING].buffer_size;
+    VkDeviceSize idx_per_slot = idx_size / NUM_FLIGHT_SLOTS;
+    VkDeviceSize vtx_size = r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_size;
+    VkDeviceSize vtx_per_slot = vtx_size / NUM_FLIGHT_SLOTS;
+    VkDeviceSize uni_size = r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_size;
+    VkDeviceSize uni_per_slot = uni_size / NUM_FLIGHT_SLOTS;
+
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         r->flight[i].descriptor_set_base = i * ds_per_slot;
         r->flight[i].descriptor_set_limit = (i + 1) * ds_per_slot;
@@ -109,6 +116,12 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
         r->flight[i].compute_descriptor_set_limit = (i + 1) * cds_per_slot;
         r->flight[i].staging_buffer_base = i * staging_per_slot;
         r->flight[i].staging_buffer_limit = (i + 1) * staging_per_slot;
+        r->flight[i].index_staging_base = i * idx_per_slot;
+        r->flight[i].index_staging_limit = (i + 1) * idx_per_slot;
+        r->flight[i].vertex_inline_staging_base = i * vtx_per_slot;
+        r->flight[i].vertex_inline_staging_limit = (i + 1) * vtx_per_slot;
+        r->flight[i].uniform_staging_base = i * uni_per_slot;
+        r->flight[i].uniform_staging_limit = (i + 1) * uni_per_slot;
     }
 }
 

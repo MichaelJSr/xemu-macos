@@ -406,6 +406,12 @@ typedef struct PGRAPHVkState {
         int compute_descriptor_set_limit;
         VkDeviceSize staging_buffer_base;
         VkDeviceSize staging_buffer_limit;
+        VkDeviceSize index_staging_base;
+        VkDeviceSize index_staging_limit;
+        VkDeviceSize vertex_inline_staging_base;
+        VkDeviceSize vertex_inline_staging_limit;
+        VkDeviceSize uniform_staging_base;
+        VkDeviceSize uniform_staging_limit;
         bool submitted;
     } flight[NUM_FLIGHT_SLOTS];
     int current_flight;
@@ -459,6 +465,7 @@ typedef struct PGRAPHVkState {
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
     QTAILQ_HEAD(, SurfaceBinding) invalid_surfaces;
+    int invalid_surface_count;
     SurfaceBinding *color_binding, *zeta_binding;
     bool downloads_pending;
     QemuEvent downloads_complete;
@@ -511,6 +518,14 @@ typedef struct PGRAPHVkState {
 
     GHashTable *surface_lookup;
     GHashTable *render_pass_lookup;
+
+    struct {
+        hwaddr start;
+        hwaddr end;
+        SurfaceBinding *surface;
+    } *surface_ranges;
+    int surface_range_count;
+    int surface_range_capacity;
 } PGRAPHVkState;
 
 // renderer.c

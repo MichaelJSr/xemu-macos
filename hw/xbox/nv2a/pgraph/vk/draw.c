@@ -1479,7 +1479,9 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
         return;
     }
 
-    VkBufferCopy copy_region = { .size = b_src->buffer_offset };
+    VkBufferCopy copy_region = {
+        .size = b_src->buffer_offset,
+    };
     vkCmdCopyBuffer(cmd, b_src->buffer, b_dst->buffer, 1, &copy_region);
 
     VkAccessFlags dst_access_mask = 0;
@@ -1514,8 +1516,6 @@ static void sync_staging_buffer(PGRAPHState *pg, VkCommandBuffer cmd,
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage_mask, 0,
                          0, NULL, 1, &barrier, 0, NULL);
-
-    b_src->buffer_offset = 0;
 }
 
 static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
@@ -1705,8 +1705,16 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
     pgraph_vk_process_pending_reports_internal(d);
 
     pgraph_vk_compute_finish_complete(r);
+
+    int cur = r->current_flight;
     r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset =
-        r->flight[r->current_flight].staging_buffer_base;
+        r->flight[cur].staging_buffer_base;
+    r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset =
+        r->flight[cur].index_staging_base;
+    r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset =
+        r->flight[cur].vertex_inline_staging_base;
+    r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset =
+        r->flight[cur].uniform_staging_base;
 }
 
 void pgraph_vk_begin_command_buffer(PGRAPHState *pg)

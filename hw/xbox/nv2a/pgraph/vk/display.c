@@ -21,6 +21,12 @@
 #include "ui/xemu-settings.h"
 #include <math.h>
 
+#ifndef NDEBUG
+#define DISPLAY_DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DISPLAY_DPRINTF(fmt, ...) do {} while (0)
+#endif
+
 #if HAVE_IOSURFACE_SHARING
 #include <IOSurface/IOSurface.h>
 #include <OpenGL/CGLIOSurface.h>
@@ -147,7 +153,9 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     vmaFlushAllocation(r->allocator,
                        r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
-                       VK_WHOLE_SIZE);
+                       yuv_size);
+
+    size_t rgba_size = (size_t)state.in_width * state.in_height * 4;
 
     VkBufferMemoryBarrier host_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -156,7 +164,7 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = r->storage_buffers[BUFFER_STAGING_SRC].buffer,
-        .size = VK_WHOLE_SIZE
+        .size = yuv_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -174,7 +182,7 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
-        .size = VK_WHOLE_SIZE
+        .size = yuv_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
@@ -192,7 +200,7 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
-        .size = VK_WHOLE_SIZE
+        .size = rgba_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -691,7 +699,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         imported_iosurface = IOSurfaceCreate(props);
         CFRelease(props);
 
-        fprintf(stderr, "[IOSurface] Created IOSurface %dx%d: %p\n",
+        DISPLAY_DPRINTF("[IOSurface] Created IOSurface %dx%d: %p\n",
                 width, height, (void *)imported_iosurface);
 
         if (imported_iosurface) {
@@ -821,14 +829,14 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                 glTexParameteri(GL_TEXTURE_RECTANGLE,
                                 GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                 glBindTexture(GL_TEXTURE_RECTANGLE, 0);
-                fprintf(stderr,
+                DISPLAY_DPRINTF(
                         "IOSurface zero-copy display: %dx%d "
                         "(GL RECTANGLE tex %u)\n",
                         image_create_info.extent.width,
                         image_create_info.extent.height,
                         d->gl_texture_id);
             } else {
-                fprintf(stderr,
+                DISPLAY_DPRINTF(
                         "IOSurface CGLTexImageIOSurface2D failed "
                         "(CGL err %d)\n", cgl_err);
                 glBindTexture(GL_TEXTURE_RECTANGLE, 0);
@@ -836,7 +844,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                 d->gl_texture_id = 0;
             }
         } else {
-            fprintf(stderr, "[IOSurface] No CGL context on PFIFO thread!\n");
+            DISPLAY_DPRINTF("[IOSurface] No CGL context on PFIFO thread!\n");
         }
         CFRelease(imported_iosurface);
     }
