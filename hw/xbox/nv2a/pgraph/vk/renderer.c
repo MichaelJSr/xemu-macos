@@ -191,13 +191,10 @@ static void pgraph_vk_pre_savevm_wait(NV2AState *d)
 
 static void pgraph_vk_pre_shutdown_trigger(NV2AState *d)
 {
-    // qatomic_set(&d->pgraph.vk_renderer_state->shader_cache_writeback_pending, true);
-    // qemu_event_reset(&d->pgraph.vk_renderer_state->shader_cache_writeback_complete);
 }
 
 static void pgraph_vk_pre_shutdown_wait(NV2AState *d)
 {
-    // qemu_event_wait(&d->pgraph.vk_renderer_state->shader_cache_writeback_complete);   
 }
 
 static int pgraph_vk_get_framebuffer_surface(NV2AState *d)

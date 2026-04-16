@@ -128,7 +128,7 @@ void usb_xid_handle_control(USBDevice *dev, USBPacket *p,
         update_input(s);
         if (value == 0x0100) { /* input */
             if (length <= s->in_state.bLength) {
-                memcpy(data, &s->in_state, s->in_state.bLength);
+                memcpy(data, &s->in_state, length);
                 p->actual_length = length;
             } else {
                 p->status = USB_RET_STALL;
@@ -214,14 +214,6 @@ void usb_xid_handle_control(USBDevice *dev, USBPacket *p,
         break;
     }
 }
-
-#if 0
-static void usb_xid_handle_destroy(USBDevice *dev)
-{
-    USBXIDState *s = DO_UPCAST(USBXIDState, dev, dev);
-    DPRINTF("xid handle_destroy\n");
-}
-#endif
 
 void usb_xbox_gamepad_unrealize(USBDevice *dev)
 {

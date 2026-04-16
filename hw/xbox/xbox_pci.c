@@ -365,54 +365,6 @@ static void xbox_lpc_config_write(PCIDevice *dev,
     XBOXPCI_DPRINTF("%s: %x %x %d\n", __func__, addr, val, len);
 }
 
-#if 0
-/* Xbox 1.1 uses a config register instead of a bar to set the pm base address */
-#define XBOX_LPC_PMBASE 0x84
-#define XBOX_LPC_PMBASE_ADDRESS_MASK 0xff00
-#define XBOX_LPC_PMBASE_DEFAULT 0x1
-
-static void xbox_lpc_pmbase_update(XBOX_LPCState *s)
-{
-    uint32_t pm_io_base = pci_get_long(s->dev.config + XBOX_LPC_PMBASE);
-    pm_io_base &= XBOX_LPC_PMBASE_ADDRESS_MASK;
-
-    xbox_pm_iospace_update(&s->pm, pm_io_base);
-}
-
-static void xbox_lpc_reset(DeviceState *dev)
-{
-    PCIDevice *d = PCI_DEVICE(dev);
-    XBOX_LPCState *s = XBOX_LPC_DEVICE(d);
-
-    pci_set_long(s->dev.config + XBOX_LPC_PMBASE, XBOX_LPC_PMBASE_DEFAULT);
-    xbox_lpc_pmbase_update(s);
-}
-
-static void xbox_lpc_config_write(PCIDevice *dev,
-                                    uint32_t addr, uint32_t val, int len)
-{
-    XBOX_LPCState *s = XBOX_LPC_DEVICE(dev);
-
-    pci_default_write_config(dev, addr, val, len);
-    if (ranges_overlap(addr, len, XBOX_LPC_PMBASE, 2)) {
-        xbox_lpc_pmbase_update(s);
-    }
-}
-
-static int xbox_lpc_post_load(void *opaque, int version_id)
-{
-    XBOX_LPCState *s = opaque;
-    xbox_lpc_pmbase_update(s);
-    return 0;
-}
-
-static const VMStateDescription vmstate_xbox_lpc = {
-    .name = "XBOX LPC",
-    .version_id = 1,
-    .post_load = xbox_lpc_post_load,
-};
-#endif
-
 static void xbox_send_gpe(AcpiDeviceIf *adev, AcpiEventStatusBits ev)
 {
     XBOX_LPCState *s = XBOX_LPC_DEVICE(adev);

@@ -1182,6 +1182,9 @@ static void display_finalize(void)
 {
     if (use_vblank_timer_thread) {
         qemu_thread_join(&vblank_thread);
+    } else if (vblank_timer) {
+        timer_free(vblank_timer);
+        vblank_timer = NULL;
     }
 
     SDL_RemoveEventWatch(event_watch_callback, &scon_list[0]);

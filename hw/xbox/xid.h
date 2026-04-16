@@ -130,8 +130,4 @@ void usb_xid_handle_control(USBDevice *dev, USBPacket *p, int request,
                             int value, int index, int length, uint8_t *data);
 void usb_xbox_gamepad_unrealize(USBDevice *dev);
 
-#if 0
-void usb_xid_handle_destroy(USBDevice *dev);
-#endif
-
 #endif

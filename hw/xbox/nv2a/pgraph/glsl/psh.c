@@ -188,10 +188,6 @@ void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
          * fragment shader, there may be interpolation artifacts. Fix this to
          * support signed textures more appropriately.
          */
-#if 0 // FIXME
-        psh->snorm_tex[i] = (f.gl_internal_format == GL_RGB8_SNORM)
-                                 || (f.gl_internal_format == GL_RG8_SNORM);
-#endif
         state->shadow_map[i] = f.depth;
 
         uint32_t filter = pgraph_reg_r(pg, NV_PGRAPH_TEXFILTER0 + i * 4);

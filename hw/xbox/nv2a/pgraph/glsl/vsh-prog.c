@@ -94,20 +94,6 @@ typedef struct VshOpcodeParams {
     bool C;
 } VshOpcodeParams;
 
-#if 0
-static const VshOpcodeParams ilu_opcode_params[] = {
-    /* ILU OP       ParamA ParamB ParamC */
-    /* ILU_NOP */ { false, false, false }, // Dxbx note : Unused
-    /* ILU_MOV */ { false, false, true  },
-    /* ILU_RCP */ { false, false, true  },
-    /* ILU_RCC */ { false, false, true  },
-    /* ILU_RSQ */ { false, false, true  },
-    /* ILU_EXP */ { false, false, true  },
-    /* ILU_LOG */ { false, false, true  },
-    /* ILU_LIT */ { false, false, true  },
-};
-#endif
-
 static const VshOpcodeParams mac_opcode_params[] = {
     /* MAC OP      ParamA  ParamB ParamC */
     /* MAC_NOP */ { false, false, false }, // Dxbx note : Unused

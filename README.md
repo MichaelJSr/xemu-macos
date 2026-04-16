@@ -42,12 +42,12 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. `render_pass_state_dirty` flag set only when surface bindings change, replacing per-draw struct rebuild + `memcmp`. |
 | **Vertex Layout Fingerprinting** | `fast_hash` of active vertex descriptions replaces paired `memcpy` + `memcmp` of full arrays (~512 bytes of stack copies eliminated per draw). |
 | **Surface Expiry Throttling** | `expire_old_surfaces` + `prune_invalid_surfaces` run every 8 frame ticks instead of every draw begin. Eliminates O(surfaces) scan per draw. |
-| **Emulated Index Batching** | Primitive emulation (quads, line loops, etc.) batches all draw_arrays index runs into one staging allocation + one `vkCmdDrawIndexed`. |
+| **Emulated Index Batching** | Primitive emulation (quads, line loops, etc.) batches all draw_arrays index runs into one staging allocation + one `vkCmdDrawIndexed`. Single-pass sizing (duplicate loop eliminated). |
 | **Staging Buffers** | 512 MiB persistent VMA mapping. No per-upload map/unmap. |
 | **Narrower Barriers + Coherent Elision** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory (per-buffer `is_coherent` flag). All barriers scoped to exact byte ranges. `VK_WHOLE_SIZE` replaced with precise sizes in buffer memory barriers — reduces Metal barrier scope from 512 MiB to actual transfer size on MoltenVK. |
 | **O(1) Surface Lookup** | `GHashTable` for exact match. Sorted range array with binary search for containment queries — O(log n) instead of O(n). |
 | **Texture/Sampler Cache Split** | `TextureKey` split into image data key and `SamplerKey` for sampler state. Separate LRU caches for textures and samplers. Effectively doubles texture cache capacity for games reusing textures with different sampler states. |
-| **Dynamic Blend/Depth Bias** | `NV_PGRAPH_BLENDCOLOR`, `NV_PGRAPH_ZOFFSETBIAS`, `NV_PGRAPH_ZOFFSETFACTOR` removed from pipeline key. Blend constants and depth bias set as Vulkan dynamic state every draw, eliminating pipeline cache misses from frequently-changing registers. |
+| **Dynamic Blend/Depth Bias** | `NV_PGRAPH_BLENDCOLOR`, `NV_PGRAPH_ZOFFSETBIAS`, `NV_PGRAPH_ZOFFSETFACTOR` removed from pipeline key. Blend constants and depth bias set as Vulkan dynamic state every non-clear draw, eliminating pipeline cache misses from frequently-changing registers. Clear pipelines skip dynamic state (no blend/depth bias needed). |
 | **APU VP Batch-Read** | Voice struct (128 bytes) `memcpy`'d to stack-local buffer at start of `voice_process`. All `voice_get_mask`/`voice_set_mask` calls read from the local buffer, eliminating per-field scatter-gather overhead. 20-30% VP frame time reduction. |
 | **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore slots with full resource partitioning. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
@@ -76,6 +76,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **GLSL Source Freeing** | `ShaderModuleInfo.glsl` freed immediately after SPIRV compilation. Prevents hundreds of MB waste with large shader caches (~50K entries). |
 | **Surface Expiry State** | `last_expire_frame_time` moved from process-global `static` to `PGRAPHVkState` field, fixing stale state across save/restore. |
 | **Build** | `-mcpu=native`, `-ffp-contract=fast` (enables FMA contraction on Apple Silicon), thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
+| **Dead Code Removal** | ~180 lines of `#if 0` blocks and commented-out code removed across 12 files: dead surface migration logic, disabled `vkCmdCopyImage` path, `usb_xid_handle_destroy` stub, alternate LPC implementation, unused `ilu_opcode_params`, dead `snorm_tex` assignment, stale `DriveInfo` path, commented shader cache lines, commented `memory_region_init_alias`, and `possibly_dirty_checked` dead flag. |
 
 ### MoltenVK Compatibility Layer
 
@@ -111,7 +112,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **MetalFX Interpolation Stale Depth** | `metalfx_interpolation_generate` cached depth IOSurface textures but never cleared them when depth inputs transitioned to NULL. Interpolator bound stale depth from a previous frame. Added `else if (!depthB/A)` branches to nil cached textures. |
 | **MetalFX Spatial Init Leak** | If `create_iosurface_bgra` or `texture_from_iosurface` failed after the `MTLFXSpatialScaler` and Metal device/queue were created, the early return leaked those objects. `metalfx_destroy_locked` only ran when `initialized == true`, which was never set. All failure paths now call `metalfx_destroy_locked`. |
 | **DecodeTaskBatch Mixed Sync Model** | `remaining` field declared `volatile int` but updated via `qatomic_dec_fetch` and initialized with plain store. Removed `volatile`; initialization uses `qatomic_set`. |
-| **MetalFX `is_supported()` Device Leak** | `metalfx_is_supported()`, `metalfx_temporal_is_supported()`, and `metalfx_interpolation_is_supported()` each called `MTLCreateSystemDefaultDevice()` (retained) on every call without releasing. Called from the display path, causing a slow leak. Cached result in static var. |
+| **MetalFX `is_supported()` Device Leak** | `metalfx_is_supported()`, `metalfx_temporal_is_supported()`, and `metalfx_interpolation_is_supported()` each called `MTLCreateSystemDefaultDevice()` (retained) on every call without releasing. Cached result in static var; device now properly released after each probe. |
 | **MetalFX Interpolation Init Leak** | If `MTLFXFrameInterpolator` creation failed after `MTLDevice` and `MTLCommandQueue` were allocated, the failure path returned without cleanup. Added `metalfx_interpolation_destroy_locked()` on failure, matching the spatial init pattern. |
 | **MetalFX Temporal Init Leak** | If `newTemporalScalerWithDevice:` returned nil after `shared_metal_acquire`, the failure path leaked the shared device refcount and left `g_temporal.device` set. Added `metalfx_temporal_destroy_locked()` on failure. |
 | **PVIDEO Flight-Slot Offset** | `upload_pvideo_to_cmd` wrote YUV data at staging buffer offset 0 regardless of `current_flight`. Flush, barrier, and copy also used offset 0. When `current_flight == 1`, GPU read stale data from slot 0's range. All offsets now based on `staging_buffer_base`. |
@@ -127,7 +128,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **VkFramebuffer Leak** | Per-flight `framebuffer_index` was never written during creation, so `destroy_flight_framebuffers` always iterated 0 times. Framebuffers leaked every flight cycle. Now saved into `flight[slot].framebuffer_index` before advancing. |
 | **Scatter-Gather Bounds Off-by-One** | `assert(paddr + bytes_to_copy < ram_size)` used `<` instead of `<=`, rejecting valid DMA touching the final byte of RAM. |
 | **VP `voice_buf` Use-After-Free** | `voice_should_mute()` triggered bare `return` in `voice_process`, skipping the `cleanup:` label that nulls the stack-local `voice_buf` pointer. Subsequent `voice_get_mask`/`voice_set_mask` calls for that voice dereferenced deallocated stack memory. Changed to `goto cleanup`. |
-| **Stale Blend Constants / Depth Bias** | `vkCmdSetBlendConstants` and `vkCmdSetDepthBias` only called inside `if (must_bind_pipeline)` block, but the corresponding registers were removed from the pipeline dirty check. Blend/depth changes alone never triggered refresh. Moved to unconditional per-draw dynamic state. |
+| **Stale Blend Constants / Depth Bias** | `vkCmdSetBlendConstants` and `vkCmdSetDepthBias` only called inside `if (must_bind_pipeline)` block, but the corresponding registers were removed from the pipeline dirty check. Blend/depth changes alone never triggered refresh. Moved to unconditional per-draw dynamic state, guarded by `!pg->clearing` (clear pipelines don't declare dynamic blend/depth). |
 | **IOSurface Cache Key** | MetalFX texture caches compared `IOSurfaceRef` pointer values, which can be reused after release. Replaced with `IOSurfaceGetID()` for stable cache keys. Added `CFRetain`/`CFRelease` for proper lifetime management. |
 | **Report Pool Overflow** | Missing bounds check on `r->report_pool_next` before indexing `r->report_pool`. Added overflow guard that triggers `pgraph_vk_finish(REPORTS_FULL)`. |
 | **APU IRQ Register Race** | `update_irq` read `NV_PAPU_FECTL`, `NV_PAPU_IEN`, `NV_PAPU_ISTS` non-atomically while other threads wrote them. Changed to `qatomic_read` for all reads. |
@@ -140,6 +141,16 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **CoreAudio Unknown Device** | `init_out_device` returned success when `outputDeviceID == kAudioDeviceUnknown`. Now returns `-1`. |
 | **PVIDEO State Ordering** | `get_pvideo_state` called after `update_uniforms`, so push constants used previous frame's PVIDEO state. Reordered. |
 | **`memcpy_image` Int Overflow** | `dst_stride * height` computed as `int` before widening to `size_t`. Cast to `size_t` prevents overflow at high scale factors. |
+| **IOSurface Per-Frame Leak** | Upscaled and interpolated IOSurfaces created each frame were never released after GL texture bind. `CFRelease` added for both paths in the display loop. |
+| **Clear Pipeline Dynamic State** | Clear pipelines created without `VK_DYNAMIC_STATE_DEPTH_BIAS` / `VK_DYNAMIC_STATE_LINE_WIDTH` but `vkCmdSetBlendConstants`/`vkCmdSetDepthBias` were called unconditionally, violating Vulkan spec. Dynamic state now skipped for clear draws; `has_dynamic_*` flags initialized in pipeline cache. |
+| **ADPCM Bounds Check** | `memcpy` of ADPCM stream data from guest RAM without `ram_size` bounds check. Added guard + `memset` fallback. Stack buffer overflow guard added for `block_size > sizeof(adpcm_block)`. |
+| **VP Multipass Voice List Cap** | Multipass voice linked-list walk had no iteration limit. Corrupted `next_voice` pointer could cause infinite loop. Capped at `MCPX_HW_MAX_VOICES`. |
+| **VP Resample Failure Cleanup** | Resample failure in `voice_process` used `break` instead of `goto cleanup`, leaving partially-filled buffer and skipping `voice_buf` null-out. |
+| **Vblank Timer Leak** | `display_finalize` leaked `vblank_timer` on the non-thread path. Added `timer_free` (which internally calls `timer_del`). |
+| **Atomic `waiting_for_*` Flags** | `waiting_for_flip`, `waiting_for_nop`, `waiting_for_context_switch` read/written with plain loads/stores across threads. Changed to `qatomic_set`/`qatomic_read` for ARM memory ordering correctness. |
+| **Depth-Stencil Upload Buffer** | After depth-stencil unpack, `upload_src_buffer` still pointed to the original staging buffer instead of the unpack buffer. GPU copied from wrong data. Barrier size also used `uploaded_image_size` instead of `unpacked_size`. Both fixed. |
+| **USB HID `GET_REPORT` Overrun** | `memcpy(data, &s->in_state, s->in_state.bLength)` wrote `bLength` bytes into a `length`-byte buffer. When `bLength > length`, overran the host buffer. Changed to `memcpy(..., length)`. |
+| **Pipeline Binding Stale Flag** | `pipeline_binding_changed` not cleared on pipeline cache hits, causing redundant `vkCmdBindPipeline` calls on subsequent draws. |
 
 ---
 

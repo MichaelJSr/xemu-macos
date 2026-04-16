@@ -218,9 +218,6 @@ static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)
 
     /* RAMIN - should be in vram somewhere, but not quite sure where atm */
     memory_region_init_ram(&d->ramin, OBJECT(d), "nv2a-ramin", 0x100000, &error_fatal);
-    /* memory_region_init_alias(&d->ramin, "nv2a-ramin", &d->vram,
-                         memory_region_size(d->vram) - 0x100000,
-                         0x100000); */
 
     memory_region_add_subregion(&d->mmio, 0x700000, &d->ramin);
 
@@ -255,7 +252,6 @@ static void nv2a_init_vga(NV2AState *d)
 
     /* hacky. swap out vga's vram */
     memory_region_destroy(&vga->vram);
-    // memory_region_unref(&vga->vram); // FIXME: Is ths right?
     memory_region_init_alias(&vga->vram, OBJECT(d), "vga.vram",
                              d->vram, 0, memory_region_size(d->vram));
     vga->vram_ptr = memory_region_get_ram_ptr(&vga->vram);
@@ -313,9 +309,9 @@ static void nv2a_reset(NV2AState *d)
     /* seems to start in color mode */
     d->vga.msr = VGA_MIS_COLOR;
 
-    d->pgraph.waiting_for_nop = false;
-    d->pgraph.waiting_for_flip = false;
-    d->pgraph.waiting_for_context_switch = false;
+    qatomic_set(&d->pgraph.waiting_for_nop, false);
+    qatomic_set(&d->pgraph.waiting_for_flip, false);
+    qatomic_set(&d->pgraph.waiting_for_context_switch, false);
 
     d->pmc.pending_interrupts = 0;
     d->pfifo.pending_interrupts = 0;

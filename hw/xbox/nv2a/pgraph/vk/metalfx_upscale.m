@@ -159,6 +159,7 @@ bool metalfx_is_supported(void)
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) { cached = 0; return false; }
     cached = [MTLFXSpatialScalerDescriptor supportsDevice:device] ? 1 : 0;
+    [device release];
     return cached;
 }
 
@@ -343,6 +344,7 @@ bool metalfx_temporal_is_supported(void)
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) { cached = 0; return false; }
     cached = [MTLFXTemporalScalerDescriptor supportsDevice:device] ? 1 : 0;
+    [device release];
     return cached;
 }
 
@@ -634,7 +636,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
 
         static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
-        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, 0.111f };
+        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.444f };
         int jidx = g_temporal.frameIndex % 8;
         g_temporal.scaler.jitterOffsetX = halton_x[jidx];
         g_temporal.scaler.jitterOffsetY = halton_y[jidx];
@@ -707,6 +709,7 @@ bool metalfx_interpolation_is_supported(void)
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { cached = 0; return false; }
         cached = [MTLFXFrameInterpolatorDescriptor supportsDevice:device] ? 1 : 0;
+        [device release];
         return cached;
     }
     cached = 0;
@@ -938,6 +941,8 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             interp.farPlane = 10000.0f;
             if (g_interp.cachedDepthCur) {
                 interp.depthTexture = g_interp.cachedDepthCur;
+            } else {
+                interp.depthTexture = nil;
             }
             interp.shouldResetHistory = g_interp.firstFrame;
             g_interp.firstFrame = false;

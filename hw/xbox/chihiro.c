@@ -253,25 +253,8 @@ static void chihiro_ide_interface_init(const char *rom_file,
         close(fd);
     }
 
-#if 0 // FIXME
-    /* create the device */
-    DriveInfo *dinfo;
-    dinfo = g_malloc0(sizeof(*dinfo));
-    dinfo->id = g_strdup("chihiro-interface");
-    dinfo->bdrv = bdrv_new(dinfo->id);
-    dinfo->type = IF_IDE;
-    dinfo->bus = 0;
-    dinfo->unit = 1;
-    dinfo->refcount = 1;
-
-    assert(!bdrv_memory_open(dinfo->bdrv, interface_space,
-                             memory_region_size(interface)));
-
-    drive_append(dinfo);
-#else
     printf("Chihiro IDE not yet implemented (please fix it)\n");
     assert(0);
-#endif
 }
 
 static void chihiro_init(MachineState *machine)

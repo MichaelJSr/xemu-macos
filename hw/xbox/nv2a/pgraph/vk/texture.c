@@ -1365,7 +1365,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     sampler_key.custom_border_color_enabled = r->custom_border_color_extension_enabled;
 
     bool possibly_dirty = false;
-    bool possibly_dirty_checked = false;
     bool surface_to_texture = false;
 
     // Check active surfaces to see if this texture was a render target
@@ -1540,7 +1539,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         possibly_dirty = true;
     }
 
-    if (!surface_to_texture && !possibly_dirty_checked) {
+    if (!surface_to_texture) {
         possibly_dirty |= check_texture_possibly_dirty(
             d, texture_vram_offset, texture_length, texture_palette_vram_offset,
             texture_palette_data_size);

@@ -1090,6 +1090,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
 
     block_size *= samples_per_block;
 
+    if (adpcm && block_size > sizeof(adpcm_block)) {
+        return -1;
+    }
+
     // FIXME: Restructure this loop
     int sample_count = 0;
     for (; (sample_count < num_samples_requested) && (cbo <= ebo);
@@ -1103,8 +1107,11 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     hwaddr addr = segment_offset + linear_addr;
                     int max_seg_byte = (seg_len >> 6) * block_size;
                     assert(linear_addr + block_size <= max_seg_byte);
-                    memcpy(adpcm_block, &d->ram_ptr[addr],
-                           block_size); // FIXME: Use idiomatic DMA function
+                    if (__builtin_expect(addr + block_size <= d->ram_size, 1)) {
+                        memcpy(adpcm_block, &d->ram_ptr[addr], block_size);
+                    } else {
+                        memset(adpcm_block, 0, block_size);
+                    }
                 } else {
                     linear_addr += ba;
                     for (unsigned int word_index = 0;
@@ -1283,8 +1290,9 @@ static int peek_ahead_multipass_bin(MCPXAPUState *d, uint16_t v,
                                     uint16_t *dst_voice)
 {
     bool first = true;
+    int max_iter = MCPX_HW_MAX_VOICES;
 
-    while (v != 0xFFFF) {
+    while (v != 0xFFFF && max_iter-- > 0) {
         bool multipass = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                         NV_PAVS_VOICE_CFG_FMT_MULTIPASS);
         if (multipass) {
@@ -1442,7 +1450,7 @@ static void voice_process(MCPXAPUState *d,
                 voice_resample(d, v, &samples[sample_count],
                                NUM_SAMPLES_PER_FRAME - sample_count, rate);
             if (count < 0) {
-                break;
+                goto cleanup;
             }
             sample_count += count;
         }

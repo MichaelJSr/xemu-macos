@@ -164,7 +164,6 @@ static void usb_xid_gamepad_class_init(ObjectClass *klass, const void *data)
     uc->handle_reset = usb_xid_handle_reset;
     uc->handle_control = usb_xid_handle_control;
     uc->handle_data = usb_xid_gamepad_handle_data;
-    // uc->handle_destroy = usb_xid_handle_destroy;
     uc->handle_attach = usb_desc_attach;
 }
 

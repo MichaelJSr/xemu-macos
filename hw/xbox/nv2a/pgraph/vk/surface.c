@@ -1153,6 +1153,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                          &host_barrier, 0, NULL);
 
     VkBuffer upload_src_buffer = copy_buffer->buffer;
+    VkDeviceSize upload_data_size = uploaded_image_size;
 
     if (use_gpu_unswizzle) {
         VkBufferCopy swz_copy = { .size = uploaded_image_size };
@@ -1328,6 +1329,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                      r->device_props.limits.minStorageBufferOffsetAlignment);
 
         copy_buffer = unpack_buffer;
+        upload_src_buffer = unpack_buffer->buffer;
+        upload_data_size = unpacked_size;
     }
 
     //
@@ -1365,7 +1368,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer->buffer,
-            .size = uploaded_image_size
+            .size = upload_data_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -1629,23 +1632,6 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                      surface->pitch);
 
             nv2a_vk_assert(!(target.swizzle && pg->clearing));
-
-#if 0
-            if (surface->swizzle != target.swizzle) {
-                // Clears should only be done on linear surfaces. Avoid
-                // synchronization by allowing (1) a surface marked swizzled to
-                // be cleared under the assumption the entire surface is
-                // destined to be cleared and (2) a fully cleared linear surface
-                // to be marked swizzled. Strictly match size to avoid
-                // pathological cases.
-                is_compatible &= (pg->clearing || surface->cleared) &&
-                    check_surface_compatibility(surface, &target, true);
-                if (is_compatible) {
-                    trace_nv2a_pgraph_surface_migrate_type(
-                        target.swizzle ? "swizzled" : "linear");
-                }
-            }
-#endif
 
             if (is_compatible && color &&
                 !check_surface_compatibility(surface, &target, true)) {

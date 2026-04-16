@@ -95,10 +95,10 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         pg->pending_interrupts &= ~val;
 
         if (!(pg->pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
-            pg->waiting_for_nop = false;
+            qatomic_set(&pg->waiting_for_nop, false);
         }
         if (!(pg->pending_interrupts & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
-            pg->waiting_for_context_switch = false;
+            qatomic_set(&pg->waiting_for_context_switch, false);
         }
         pfifo_kick(d);
         break;
@@ -197,7 +197,7 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
         assert(!PG_GET_MASK(NV_PGRAPH_DEBUG_3,
                             NV_PGRAPH_DEBUG_3_HW_CONTEXT_SWITCH));
 
-        pg->waiting_for_context_switch = true;
+        qatomic_set(&pg->waiting_for_context_switch, true);
         qemu_mutex_unlock(&pg->lock);
         bql_lock();
         pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
@@ -854,7 +854,7 @@ DEF_METHOD(NV097, NO_OPERATION)
     pgraph_reg_w(pg, NV_PGRAPH_NSOURCE,
                  NV_PGRAPH_NSOURCE_NOTIFICATION); /* TODO: check this */
     pg->pending_interrupts |= NV_PGRAPH_INTR_ERROR;
-    pg->waiting_for_nop = true;
+    qatomic_set(&pg->waiting_for_nop, true);
 
     qemu_mutex_unlock(&pg->lock);
     bql_lock();
@@ -911,7 +911,7 @@ DEF_METHOD(NV097, FLIP_STALL)
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
-    pg->waiting_for_flip = true;
+    qatomic_set(&pg->waiting_for_flip, true);
 }
 
 // TODO: these should be loading the dma objects from ramin here?

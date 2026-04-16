@@ -425,6 +425,8 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
     snode->draw_time = 0;
+    snode->has_dynamic_line_width = false;
+    snode->has_dynamic_depth_bias = false;
 }
 
 static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -986,6 +988,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
     snode->layout = layout;
     snode->render_pass = pipeline_info.renderPass;
     snode->draw_time = pg->draw_time;
+    snode->has_dynamic_line_width = false;
+    snode->has_dynamic_depth_bias = false;
 
     r->pipeline_binding = snode;
     r->pipeline_binding_changed = true;
@@ -1074,6 +1078,7 @@ static void create_pipeline(PGRAPHState *pg)
 
     if (r->pipeline_binding && !pipeline_dirty) {
         NV2A_VK_DPRINTF("Cache hit");
+        r->pipeline_binding_changed = false;
         NV2A_VK_DGROUP_END();
         return;
     }
@@ -1952,23 +1957,23 @@ static void begin_draw(PGRAPHState *pg)
 
     }
 
-    if (r->pipeline_binding->has_dynamic_depth_bias) {
-        uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
-        uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
-        float depth_bias_constant = *(float *)&zbias_reg;
-        float depth_bias_slope = *(float *)&zfactor_reg;
-        vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
-                          depth_bias_slope);
-    }
-
-    float blend_constants[4] = { 0, 0, 0, 0 };
-    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
-        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
-        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
-    }
-    vkCmdSetBlendConstants(r->command_buffer, blend_constants);
-
     if (!pg->clearing) {
+        if (r->pipeline_binding->has_dynamic_depth_bias) {
+            uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
+            uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
+            float depth_bias_constant = *(float *)&zbias_reg;
+            float depth_bias_slope = *(float *)&zfactor_reg;
+            vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
+                              depth_bias_slope);
+        }
+
+        float blend_constants[4] = { 0, 0, 0, 0 };
+        if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
+            uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
+            pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
+        }
+        vkCmdSetBlendConstants(r->command_buffer, blend_constants);
+
         bind_descriptor_sets(pg);
         push_vertex_attr_values(pg);
     }
@@ -2512,13 +2517,13 @@ void pgraph_vk_flush_draw(NV2AState *d)
 
         // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
         bool emulate_primitives = draw_needs_primitive_emulation(pg);
+        size_t total_emulated_index_count = 0;
         if (emulate_primitives) {
-            size_t total_index_count = 0;
             for (int i = 0; i < pg->draw_arrays_length; i++) {
-                total_index_count += get_max_emulated_index_count(pg, pg->draw_arrays_count[i]);
+                total_emulated_index_count += get_max_emulated_index_count(pg, pg->draw_arrays_count[i]);
             }
             ensure_buffer_space(pg, BUFFER_INDEX_STAGING,
-                                   total_index_count * sizeof(uint32_t));
+                                   total_emulated_index_count * sizeof(uint32_t));
         }
 
         begin_pre_draw(pg);
@@ -2528,12 +2533,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
         begin_draw(pg);
         bind_vertex_buffer(pg, remap.attributes, 0);
         if (emulate_primitives) {
-            size_t total_max = 0;
-            for (int i = 0; i < pg->draw_arrays_length; i++) {
-                total_max += get_max_emulated_index_count(
-                    pg, pg->draw_arrays_count[i]);
-            }
-            uint32_t *all_indices = get_emulated_indices_buf(r, total_max);
+            uint32_t *all_indices = get_emulated_indices_buf(r, total_emulated_index_count);
             size_t all_offset = 0;
 
             for (int i = 0; i < pg->draw_arrays_length; i++) {

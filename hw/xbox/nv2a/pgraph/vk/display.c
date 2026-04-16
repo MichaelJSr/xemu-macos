@@ -1149,24 +1149,6 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     vkCmdEndRenderPass(cmd);
 
-#if 0
-    VkImageCopy region = {
-        .srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .srcSubresource.layerCount = 1,
-        .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .dstSubresource.layerCount = 1,
-        .extent.width = surface->width,
-        .extent.height = surface->height,
-        .extent.depth = 1,
-    };
-    pgraph_apply_scaling_factor(pg, &region.extent.width,
-                                &region.extent.height);
-
-    vkCmdCopyImage(cmd, surface->image,
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, disp->image,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-#endif
-
     pgraph_vk_transition_image_layout(pg, cmd, surface->image,
                                       surface->host_fmt.vk_format,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1319,6 +1301,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->last_cgl_height = disp->interp_height;
                     }
                 }
+                if (interp) CFRelease(interp);
                 disp->interp_index++;
                 disp->interp_remaining--;
             }
@@ -1484,6 +1467,10 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->last_cgl_height = surf_h;
                 }
             }
+        }
+
+        if (present_surface != current_surface) {
+            CFRelease(present_surface);
         }
     }
 done_metalfx: (void)0;
