@@ -348,7 +348,7 @@ typedef struct ComputePipeline {
 typedef struct PGRAPHVkComputeState {
     VkDescriptorPool descriptor_pool;
     VkDescriptorSetLayout descriptor_set_layout;
-    VkDescriptorSet descriptor_sets[4096];
+    VkDescriptorSet descriptor_sets[8192];
     int descriptor_set_index;
     VkPipelineLayout pipeline_layout;
     Lru pipeline_cache;
@@ -438,7 +438,7 @@ typedef struct PGRAPHVkState {
 
     VkDescriptorPool descriptor_pool;
     VkDescriptorSetLayout descriptor_set_layout;
-    VkDescriptorSet descriptor_sets[4096];
+    VkDescriptorSet descriptor_sets[8192];
     int descriptor_set_index;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];

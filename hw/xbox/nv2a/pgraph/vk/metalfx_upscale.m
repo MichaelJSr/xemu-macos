@@ -175,18 +175,25 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
 
         g_spatial.scaler =
             [desc newSpatialScalerWithDevice:g_spatial.device];
-        if (!g_spatial.scaler) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
+        if (!g_spatial.scaler) {
+            metalfx_destroy_locked();
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         g_spatial.outputSurface = create_iosurface_bgra(output_w, output_h);
-        if (!g_spatial.outputSurface) { os_unfair_lock_unlock(&g_metalfx_lock); return false; }
+        if (!g_spatial.outputSurface) {
+            metalfx_destroy_locked();
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         g_spatial.outputTexture = texture_from_iosurface(
             g_spatial.device, g_spatial.outputSurface,
             MTLPixelFormatBGRA8Unorm, output_w, output_h,
             MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead);
         if (!g_spatial.outputTexture) {
-            CFRelease(g_spatial.outputSurface);
-            g_spatial.outputSurface = NULL;
+            metalfx_destroy_locked();
             os_unfair_lock_unlock(&g_metalfx_lock);
             return false;
         }
@@ -807,12 +814,18 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                     g_interp.device, depthB, MTLPixelFormatR32Float,
                     g_interp.width, g_interp.height, readUsage);
                 g_interp.lastDepthCur = depthB;
+            } else if (!depthB) {
+                g_interp.cachedDepthCur = nil;
+                g_interp.lastDepthCur = NULL;
             }
             if (depthA && depthA != g_interp.lastDepthPrev) {
                 g_interp.cachedDepthPrev = texture_from_iosurface(
                     g_interp.device, depthA, MTLPixelFormatR32Float,
                     g_interp.width, g_interp.height, readUsage);
                 g_interp.lastDepthPrev = depthA;
+            } else if (!depthA) {
+                g_interp.cachedDepthPrev = nil;
+                g_interp.lastDepthPrev = NULL;
             }
 
             interp.colorTexture = g_interp.cachedColorCur;

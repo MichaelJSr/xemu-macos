@@ -39,6 +39,7 @@ typedef struct ShaderUniformLayout {
 	size_t num_uniforms;
 	size_t total_size;
 	void *allocation;
+	bool dirty;
 } ShaderUniformLayout;
 
 static inline void uniform_std140(ShaderUniformLayout *layout)
@@ -137,7 +138,10 @@ static inline void uniform_copy(ShaderUniformLayout *layout, int idx,
     while (bytes_remaining) {
         assert((p_out + element_size) <= p_max);
         assert(index < u->dim_a);
-        memcpy(p_out, p_in, element_size);
+        if (memcmp(p_out, p_in, element_size) != 0) {
+            memcpy(p_out, p_in, element_size);
+            layout->dirty = true;
+        }
         bytes_remaining -= element_size;
         p_out += u->stride;
         p_in += element_size;

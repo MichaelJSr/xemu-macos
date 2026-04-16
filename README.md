@@ -36,10 +36,12 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | Optimization | Description |
 |---|---|
 | **Display Path** | PVIDEO + display merged into 1 GPU submission. IOSurface rebind, descriptor set, and uniform caching skip redundant per-frame calls. |
+| **Incremental UBO Dirty Tracking** | `uniform_copy` does `memcmp` before `memcpy` and sets a per-layout `dirty` flag. Replaces full-buffer `fast_hash` (XXH3) that ran on every shader bind. Shader binding changes force re-upload. |
+| **Scoped Vertex RAM Barrier** | `flush_memory_buffer` uses `find_first_bit`/`find_last_bit` on the uploaded bitmap to compute the actual dirty page range. Barrier and `vmaFlushAllocation` scope only that subregion instead of `VK_WHOLE_SIZE`. |
 | **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. |
-| **Staging Buffers** | 256 MiB staging with persistent VMA mapping. All staging users (texture upload, PVIDEO, dummy texture) use the persistent `.mapped` pointer directly — no per-upload map/unmap. |
-| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `flush_memory_buffer` skips `vmaFlushAllocation` on Apple Silicon coherent memory (no-op elided). Reduces MoltenVK Metal fence overhead. |
-| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. |
+| **Staging Buffers** | 512 MiB staging with persistent VMA mapping. All staging users (texture upload, PVIDEO, dummy texture) use the persistent `.mapped` pointer directly — no per-upload map/unmap. |
+| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Coherent memory flush elided on Apple Silicon. Reduces MoltenVK Metal fence overhead. |
+| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. Range query (`surface_get_within`) tries O(1) exact lookup first before falling back to linear scan. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
 | **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. IOProc uses `os_unfair_lock_trylock` — outputs silence on contention rather than blocking the real-time audio thread. |
@@ -50,11 +52,11 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 |---|---|
 | **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. `os_unfair_lock` guards MetalFX state; released before `waitUntilCompleted` so GPU wait doesn't block other threads. |
 | **MoltenVK Tuning** | Argument buffers, prefilled command buffers, async queue submits, fast-math, resume-lost-device. |
-| **Pool Sizing** | Descriptor sets 2048, invalid surface pool 64. Reduces forced flushes. |
+| **Pool Sizing** | Descriptor sets 8192, pipeline cache 4096, texture cache 8192, invalid surface pool 128. Sized for high-memory Apple Silicon systems. |
 | **Scratch Image Skip** | At scale=1 on macOS, upload copies directly to main image (AMD workaround skipped). |
 | **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
-| **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 512 MiB and > 90% budget. Lowered from 2 GiB threshold for more responsive cache management on high-memory systems. |
+| **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 2 GiB and > 95% budget. Thresholds tuned for high-memory unified memory systems (e.g. 192 GB M2 Ultra). |
 | **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
 | **Flight Slot Infrastructure** | CB/fence/semaphore per-slot (N=1). Ready for N>1 pipelining. |
 
@@ -88,6 +90,9 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Redundant `vmaMapMemory`** | `upload_pvideo_to_cmd` (display.c) and `create_dummy_texture` (texture.c) called `vmaMapMemory`/`vmaUnmapMemory` on `BUFFER_STAGING_SRC` which was already persistently mapped at init. Replaced with direct use of `.mapped` pointer. |
 | **APU VP/FE MMIO Data Race** | `vp_write` → `fe_method` wrote `d->regs[]`, `d->vp.*` (HRTF, SSL, submix headroom, filters) without holding `d->lock`, racing with the APU frame thread. Wrapped `fe_method` in `d->lock`; `voice_lock` refactored to `voice_lock_locked` (assumes lock held) to avoid recursive mutex deadlock. |
 | **FCMOV Uninitialized FP Temp** | `FCMOVB`/`FCMOVNBE` etc. called `get_st0`/`get_stn` inside a conditional TCG block. When the preceding `FUCOMI` flushed all inline FP temps, the `ld80f` reload only executed on the taken branch, leaving the TCG temp undefined on the not-taken path. Subsequent instructions read garbage. Fixed by pre-loading both operands before the conditional branch. |
+| **MetalFX Interpolation Stale Depth** | `metalfx_interpolation_generate` cached depth IOSurface textures but never cleared them when depth inputs transitioned to NULL. Interpolator bound stale depth from a previous frame. Added `else if (!depthB/A)` branches to nil cached textures. |
+| **MetalFX Spatial Init Leak** | If `create_iosurface_bgra` or `texture_from_iosurface` failed after the `MTLFXSpatialScaler` and Metal device/queue were created, the early return leaked those objects. `metalfx_destroy_locked` only ran when `initialized == true`, which was never set. All failure paths now call `metalfx_destroy_locked`. |
+| **DecodeTaskBatch Mixed Sync Model** | `remaining` field declared `volatile int` but updated via `qatomic_dec_fetch` and initialized with plain store. Removed `volatile`; initialization uses `qatomic_set`. |
 
 ---
 
@@ -112,6 +117,10 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Texture hash skip for large textures** | Massive GPU re-upload churn | Skipping `fast_hash` for textures >64 KiB and always re-uploading when the dirty bitmap fired. The VRAM dirty bitmap triggers frequently for unchanged textures (DMA/MMIO writes to nearby pages). The hash comparison was the critical guard preventing redundant multi-MB texture re-uploads every frame. CPU hash cost (~µs) is far cheaper than a GPU staging+copy+upload cycle. |
 | **HRTF NEON vectorization** | Slower than scalar | Manual NEON intrinsics for 31-tap FIR convolution, coefficient smoothing, and normalization. The gather-then-FMA pattern for convolution (pre-loading circular buffer into linear stack array) prevented the M2's out-of-order engine from overlapping load latency with multiply-accumulate. Coefficient smoothing was called per-sample (32x/frame/voice) — NEON setup overhead didn't amortize at 31 elements. Clang `-O3 -mcpu=native` auto-vectorizes these loops more effectively. |
 | **Always-on bounds checks in perf builds** | ~5-10% GPU pipeline regression | Replacing `nv2a_vk_assert` (compiled to `((void)0)`) with `G_UNLIKELY(!(x)) abort()` on ~25 hot-path array bounds checks (pipeline creation, texture binding, surface ops). Even with cold-path hints, the branches added instruction cache pressure in tight per-draw-call loops. Fixed by using `__builtin_unreachable()` instead (zero instructions emitted, compiler optimization hint only). |
+| **Async MetalFX (double-buffered IOSurface)** | Segfault (first frame) | Two output IOSurfaces: write to back while presenting front, swap next frame. First `metalfx_get_output_surface` returned the uninitialized back buffer (never rendered to). Needs full display pipeline lifecycle integration to handle the bootstrapping frame. |
+| **Surface upload skip finish** | Black screen / stale state | Removed the unconditional `pgraph_vk_finish` in surface upload when `!in_command_buffer`. Although the GPU drain is a no-op when idle, `pgraph_vk_finish` also runs essential cleanup (pending reports processing, compute descriptor reset, staging offset reset). Skipping it caused stale compute descriptor indices and missing report processing. |
+| **Partial descriptor set writes** | N/A (architecturally infeasible) | Each draw consumes a fresh descriptor set that starts empty, so all bindings (UBOs + textures) must always be written. Partial writes only work with update-after-bind or separate descriptor sets for UBOs vs textures — a larger architectural change. |
+| **Two-level texture quick hash** | Black screen during FMV/logo | Quick hash sampled 192 bytes (head/mid/tail via XOR of three XXH3) to filter false dirty-bitmap triggers before full hash. For video textures with structured layouts (YUV, black borders, swizzled data), the sampled regions matched across frames while actual content changed, causing texture uploads to be silently skipped. Full-content hash is the only reliable guard. |
 
 ---
 

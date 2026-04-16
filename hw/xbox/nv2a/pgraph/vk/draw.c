@@ -534,7 +534,7 @@ static void init_pipeline_cache(PGRAPHState *pg)
 
     g_free(cache_data);
 
-    const size_t pipeline_cache_size = 2048;
+    const size_t pipeline_cache_size = 4096;
     lru_init(&r->pipeline_cache);
     r->pipeline_cache_entries =
         g_malloc_n(pipeline_cache_size, sizeof(PipelineBinding));
@@ -1522,11 +1522,24 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     StorageBuffer *vram = &r->storage_buffers[BUFFER_VERTEX_RAM];
-    bool is_coherent = vram->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+    unsigned long first_dirty = find_first_bit(r->uploaded_bitmap, r->bitmap_size);
+    if (first_dirty >= r->bitmap_size) {
+        return;
+    }
+    unsigned long last_dirty = find_last_bit(r->uploaded_bitmap, r->bitmap_size);
+
+    VkDeviceSize offset = (VkDeviceSize)first_dirty * TARGET_PAGE_SIZE;
+    VkDeviceSize end = (VkDeviceSize)(last_dirty + 1) * TARGET_PAGE_SIZE;
+    if (end > vram->buffer_size) {
+        end = vram->buffer_size;
+    }
+    VkDeviceSize size = end - offset;
+
+    bool is_coherent = vram->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     if (!is_coherent) {
-        VK_CHECK(vmaFlushAllocation(r->allocator, vram->allocation, 0,
-                                    VK_WHOLE_SIZE));
+        VK_CHECK(vmaFlushAllocation(r->allocator, vram->allocation,
+                                    offset, size));
     }
 
     VkBufferMemoryBarrier barrier = {
@@ -1536,8 +1549,8 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = vram->buffer,
-        .offset = 0,
-        .size = VK_WHOLE_SIZE,
+        .offset = offset,
+        .size = size,
     };
 
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,

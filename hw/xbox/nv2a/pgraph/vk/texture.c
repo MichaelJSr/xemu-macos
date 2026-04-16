@@ -136,7 +136,7 @@ static size_t get_cubemap_layer_size(PGRAPHState *pg, TextureShape s)
 }
 
 typedef struct DecodeTaskBatch {
-    volatile int remaining;
+    int remaining;
     QemuEvent done;
 } DecodeTaskBatch;
 
@@ -147,7 +147,6 @@ typedef struct DecodeTask {
     BasicColorFormatInfo fmt_info;
     unsigned int width, height, depth;
     bool is_compressed;
-    size_t block_size;
     bool is_3d;
     void *decoded_data;
     size_t decoded_size;
@@ -220,7 +219,7 @@ static void decode_task_func(gpointer data, gpointer user_data)
 
 static void decode_batch_init(DecodeTaskBatch *batch, int count)
 {
-    batch->remaining = count;
+    qatomic_set(&batch->remaining, count);
     qemu_event_init(&batch->done, false);
 }
 
@@ -348,7 +347,6 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 t->height = height;
                 t->depth = 1;
                 t->is_compressed = is_compressed;
-                t->block_size = block_size;
                 t->is_3d = false;
                 t->batch = &batch;
 
@@ -424,7 +422,6 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             t->height = height;
             t->depth = depth;
             t->is_compressed = is_compressed;
-            t->block_size = block_size;
             t->is_3d = true;
             t->batch = &batch3d;
 
@@ -1581,7 +1578,7 @@ static bool texture_cache_entry_compare(Lru *lru, LruNode *node,
 
 static void texture_cache_init(PGRAPHVkState *r)
 {
-    const size_t texture_cache_size = 4096;
+    const size_t texture_cache_size = 8192;
     lru_init(&r->texture_cache);
     r->texture_cache_entries = g_malloc_n(texture_cache_size, sizeof(TextureBinding));
     nv2a_vk_assert(r->texture_cache_entries != NULL);

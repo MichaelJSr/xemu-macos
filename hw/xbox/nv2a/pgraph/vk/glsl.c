@@ -324,6 +324,7 @@ static void block_to_uniforms(const SpvReflectBlockVariable *block, ShaderUnifor
     layout->uniforms = g_malloc0_n(block->member_count, sizeof(ShaderUniform));
     layout->total_size = block->size;
     layout->allocation = g_malloc0(block->size);
+    layout->dirty = true;
 
     for (uint32_t k = 0; k < block->member_count; ++k) {
         const SpvReflectBlockVariable *member = &block->members[k];

@@ -29,7 +29,7 @@
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
-const int num_invalid_surfaces_to_keep = 64;
+const int num_invalid_surfaces_to_keep = 128;
 const int max_surface_frame_time_delta = 5;
 
 void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -717,6 +717,11 @@ SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 
+    SurfaceBinding *exact = pgraph_vk_surface_get(d, addr);
+    if (exact) {
+        return exact;
+    }
+
     SurfaceBinding *surface;
     QTAILQ_FOREACH (surface, &r->surfaces, entry) {
         if (addr >= surface->vram_addr &&
@@ -968,7 +973,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_UPLOAD);
 
-    pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE); // FIXME: SURFACE_UP
+    pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
 
     trace_nv2a_pgraph_surface_upload(
                  surface->color ? "COLOR" : "ZETA",
@@ -1010,16 +1015,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         gl_read_buf = buf;
     }
 
-    //
-    // Upload image data from host to staging buffer
-    //
-
     StorageBuffer *copy_buffer = &r->storage_buffers[BUFFER_STAGING_SRC];
-
-    if (copy_buffer->buffer_offset > 0) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        copy_buffer->buffer_offset = 0;
-    }
 
     size_t uploaded_image_size = surface->height * surface->width *
                                  surface->fmt.bytes_per_pixel;

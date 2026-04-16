@@ -1374,7 +1374,20 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
                     if (metalfx_temporal_init(disp->width, disp->height,
                                              out_w, out_h)) {
-                        if (metalfx_temporal_upscale(current_surface, NULL)) {
+                        /*
+                         * TODO: Provide real depth via IOSurface-backed zeta.
+                         * The correct approach is to create the NV2A zeta
+                         * surface as an IOSurface-backed VkImage from the
+                         * start, then pass it here instead of NULL. This
+                         * avoids the CPU round-trip that killed the readback
+                         * approach (2-5ms/frame) and the MoltenVK mutex
+                         * deadlock from vkExportMetalObjectsEXT.
+                         * Until then, the temporal scaler uses synthetic
+                         * luminance-based depth.
+                         */
+                        IOSurfaceRef depth_surface = NULL;
+                        if (metalfx_temporal_upscale(current_surface,
+                                                     depth_surface)) {
                             upscaled = metalfx_temporal_get_output_surface();
                         }
                     }

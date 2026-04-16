@@ -143,6 +143,7 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
 
     bool need_uniform_write =
         r->uniforms_changed ||
+        r->shader_bindings_changed ||
         !r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset;
 
     if (!(r->shader_bindings_changed || r->texture_bindings_changed ||
@@ -158,7 +159,7 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
         ubo_buffer_total_size += layouts[i]->total_size;
     }
     bool need_ubo_staging_buffer_reset =
-        r->uniforms_changed &&
+        need_uniform_write &&
         !pgraph_vk_buffer_has_space_for(pg, BUFFER_UNIFORM_STAGING,
                                         ubo_buffer_total_size,
                                         r->device_props.limits.minUniformBufferOffsetAlignment);
@@ -493,10 +494,8 @@ static void update_shader_uniforms(PGRAPHState *pg)
                           PshUniform__COUNT);
 
     for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
-        uint64_t hash =
-            fast_hash(layouts[i]->allocation, layouts[i]->total_size);
-        r->uniforms_changed |= (hash != r->uniform_buffer_hashes[i]);
-        r->uniform_buffer_hashes[i] = hash;
+        r->uniforms_changed |= layouts[i]->dirty;
+        layouts[i]->dirty = false;
     }
 
     nv2a_profile_inc_counter(r->uniforms_changed ?
