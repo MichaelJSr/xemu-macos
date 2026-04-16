@@ -1603,7 +1603,7 @@ static TCGv_ptr gen_stn_ptr(int opreg)
         tcg_gen_andi_i32(offset, offset, 7);
     }
 
-    tcg_gen_muli_i32(offset, offset, sizeof(FPReg));
+    tcg_gen_shli_i32(offset, offset, 4);
     tcg_gen_addi_i32(offset, offset, offsetof(CPUX86State, fpregs[0].d));
     TCGv_ptr ptr = tcg_temp_new_ptr();
     tcg_gen_ext_i32_ptr(ptr, offset);
@@ -1928,6 +1928,12 @@ static void gen_fsqrt(DisasContext *s)
     fp_pc_wrapper(gen_fsqrt)(s);
 }
 
+static void gen_frndint(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(frndint);
+    fp_pc_wrapper(gen_frndint)(s);
+}
+
 static void gen_clear_fpus_c2(DisasContext *s)
 {
     TCGv_i32 v = tcg_temp_new_i32();
@@ -2074,6 +2080,36 @@ static void gen_fldz_FT0(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fldz_FT0);
     fp_pc_wrapper(gen_fldz_FT0)(s);
+}
+
+static void gen_fldl2t_ST0(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(fldl2t_ST0);
+    fp_pc_wrapper(gen_fldl2t_ST0)(s);
+}
+
+static void gen_fldl2e_ST0(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(fldl2e_ST0);
+    fp_pc_wrapper(gen_fldl2e_ST0)(s);
+}
+
+static void gen_fldpi_ST0(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(fldpi_ST0);
+    fp_pc_wrapper(gen_fldpi_ST0)(s);
+}
+
+static void gen_fldlg2_ST0(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(fldlg2_ST0);
+    fp_pc_wrapper(gen_fldlg2_ST0)(s);
+}
+
+static void gen_fldln2_ST0(DisasContext *s)
+{
+    GEN_HELPER_FALLBACK_v_v(fldln2_ST0);
+    fp_pc_wrapper(gen_fldln2_ST0)(s);
 }
 
 static void gen_exception(DisasContext *s, int trapno)
@@ -3272,23 +3308,23 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     break;
                 case 1:
                     gen_fpush(s);
-                    gen_helper_fldl2t_ST0(tcg_env);
+                    gen_fldl2t_ST0(s);
                     break;
                 case 2:
                     gen_fpush(s);
-                    gen_helper_fldl2e_ST0(tcg_env);
+                    gen_fldl2e_ST0(s);
                     break;
                 case 3:
                     gen_fpush(s);
-                    gen_helper_fldpi_ST0(tcg_env);
+                    gen_fldpi_ST0(s);
                     break;
                 case 4:
                     gen_fpush(s);
-                    gen_helper_fldlg2_ST0(tcg_env);
+                    gen_fldlg2_ST0(s);
                     break;
                 case 5:
                     gen_fpush(s);
-                    gen_helper_fldln2_ST0(tcg_env);
+                    gen_fldln2_ST0(s);
                     break;
                 case 6:
                     gen_fpush(s);
@@ -3300,59 +3336,79 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x0e: /* grp d9/6 */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             switch (rm) {
             case 0: /* f2xm1 */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_f2xm1(tcg_env);
                 break;
             case 1: /* fyl2x */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fyl2x(tcg_env);
                 break;
             case 2: /* fptan */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fptan(tcg_env);
                 break;
             case 3: /* fpatan */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fpatan(tcg_env);
                 break;
             case 4: /* fxtract */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fxtract(tcg_env);
                 break;
             case 5: /* fprem1 */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fprem1(tcg_env);
                 break;
             case 6: /* fdecstp */
-                gen_helper_fdecstp(tcg_env);
+            {
+                tcg_gen_subi_i32(fpstt, fpstt, 1);
+                tcg_gen_andi_i32(fpstt, fpstt, 7);
+                s->fpstt_delta -= 1;
+                TCGv_i32 fpus_tmp = tcg_temp_new_i32();
+                tcg_gen_ld16u_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
+                tcg_gen_andi_i32(fpus_tmp, fpus_tmp, ~0x4700);
+                tcg_gen_st16_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
                 break;
+            }
             default:
             case 7: /* fincstp */
-                gen_helper_fincstp(tcg_env);
+            {
+                tcg_gen_addi_i32(fpstt, fpstt, 1);
+                tcg_gen_andi_i32(fpstt, fpstt, 7);
+                s->fpstt_delta += 1;
+                TCGv_i32 fpus_tmp = tcg_temp_new_i32();
+                tcg_gen_ld16u_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
+                tcg_gen_andi_i32(fpus_tmp, fpus_tmp, ~0x4700);
+                tcg_gen_st16_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
                 break;
+            }
             }
             break;
         case 0x0f: /* grp d9/7 */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             switch (rm) {
             case 0: /* fprem */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fprem(tcg_env);
                 break;
             case 1: /* fyl2xp1 */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fyl2xp1(tcg_env);
                 break;
             case 2: /* fsqrt */
                 gen_fsqrt(s);
                 break;
             case 3: /* fsincos */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fsincos(tcg_env);
                 break;
-            case 5: /* fscale */
-                gen_helper_fscale(tcg_env);
-                break;
             case 4: /* frndint */
-                gen_helper_frndint(tcg_env);
+                gen_frndint(s);
+                break;
+            case 5: /* fscale */
+                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
+                gen_helper_fscale(tcg_env);
                 break;
             case 6: /* fsin */
                 gen_fsin(s);

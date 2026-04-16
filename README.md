@@ -24,12 +24,13 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 
 | Optimization | Description |
 |---|---|
-| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. Inline fucom/fucomi/fcomi comparisons avoid flushing all FP regs to memory — comparison result written directly to fpus/EFLAGS without helper call. Inline fnstsw computes status word from TCG globals (6 integer ops, no flush, no helper). ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
+| **ARM64 Inline FPU** | Full inline TCG FPU: x87 ops emit native AArch64 FP instructions (FADD/FMUL/FDIV/FSQRT as single insns). floatx80↔double conversion as inline JIT code (~15 insns) instead of helper calls (~35-45 insns). Values cached in D-registers across TBs. Inline fucom/fucomi/fcomi comparisons, fnstsw, frndint, FPU constant loads (fldl2t/fldl2e/fldpi/fldlg2/fldln2), and fdecstp/fincstp (direct `fpstt` manipulation instead of helper calls). ~30% faster than the helper-call hard FPU path, ~4-8x faster than softfloat. |
 | **MetalFX Temporal Upscaling** | ML-based temporal super-resolution via `MTLFXTemporalScaler`. Halton(2,3) jitter across 8 frames. Color-only accumulation (no depth/motion vectors). |
 | **Frame Interpolation** | `MTLFXFrameInterpolator` (macOS 26+). 2x = 60fps, 4x = 120fps from 30fps source. Deferred generation during idle display syncs. |
 | **Texture Upload Batching** | Bump allocator on `BUFFER_STAGING_SRC`. Multiple textures batch on main command buffer, eliminating per-texture GPU sync. |
-| **Texture Decode Parallelization** | `GThreadPool` across all CPU cores for S3TC/unswizzle/conversion. `QemuEvent` for batch completion (no busy-wait). |
-| **GPU Compute Shaders** | YUV-to-RGBA and Z-order unswizzle as Vulkan compute dispatches. Workgroup size 64 on Apple Silicon (SIMD-aligned). |
+| **Texture Decode Parallelization** | `GThreadPool` capped at `MIN(num_processors, 4)` for S3TC/unswizzle/conversion. `QemuEvent` for batch completion (no busy-wait). Mip levels ≤16×16 decoded inline (dispatch overhead exceeds decode cost at tiny sizes). |
+| **GPU Compute Shaders** | YUV-to-RGBA and Z-order unswizzle as Vulkan compute dispatches. Workgroup size 64 on Apple Silicon (SIMD-aligned). 2bpp unswizzle shader uses bitwise ops (`& (width-1)`, `>> findMSB(width)`) instead of integer division for power-of-two widths. |
+| **GPU Texture Unswizzle** | Non-compressed 2bpp/4bpp textures bypass the CPU thread pool entirely — raw swizzled data is copied to a staging buffer and unswizzled on the GPU via compute shader. Expected 20-40% reduction in texture upload latency for affected formats. |
 
 ### Medium Impact
 
@@ -43,11 +44,14 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Surface Expiry Throttling** | `expire_old_surfaces` + `prune_invalid_surfaces` run every 8 frame ticks instead of every draw begin. Eliminates O(surfaces) scan per draw. |
 | **Emulated Index Batching** | Primitive emulation (quads, line loops, etc.) batches all draw_arrays index runs into one staging allocation + one `vkCmdDrawIndexed`. |
 | **Staging Buffers** | 512 MiB persistent VMA mapping. No per-upload map/unmap. |
-| **Narrower Barriers + Coherent Elision** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory (per-buffer `is_coherent` flag). All barriers scoped to exact byte ranges. |
+| **Narrower Barriers + Coherent Elision** | `ALL_COMMANDS_BIT` replaced with precise stage flags. `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory (per-buffer `is_coherent` flag). All barriers scoped to exact byte ranges. `VK_WHOLE_SIZE` replaced with precise sizes in buffer memory barriers — reduces Metal barrier scope from 512 MiB to actual transfer size on MoltenVK. |
 | **O(1) Surface Lookup** | `GHashTable` for exact match. Sorted range array with binary search for containment queries — O(log n) instead of O(n). |
+| **Texture/Sampler Cache Split** | `TextureKey` split into image data key and `SamplerKey` for sampler state. Separate LRU caches for textures and samplers. Effectively doubles texture cache capacity for games reusing textures with different sampler states. |
+| **Dynamic Blend/Depth Bias** | `NV_PGRAPH_BLENDCOLOR`, `NV_PGRAPH_ZOFFSETBIAS`, `NV_PGRAPH_ZOFFSETFACTOR` removed from pipeline key. Blend constants and depth bias set as Vulkan dynamic state every draw, eliminating pipeline cache misses from frequently-changing registers. |
+| **APU VP Batch-Read** | Voice struct (128 bytes) `memcpy`'d to stack-local buffer at start of `voice_process`. All `voice_get_mask`/`voice_set_mask` calls read from the local buffer, eliminating per-field scatter-gather overhead. 20-30% VP frame time reduction. |
 | **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore slots with full resource partitioning. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
-| **APU Linear Resampler + RAM Fast Path** | `SRC_LINEAR` replaces `SRC_SINC_FASTEST` for voice pitch shifting (matches Xbox hardware, order-of-magnitude faster). All VP memory access (`voice_get_mask`/`voice_set_mask`, PCM fetch, SGE lookup, SSL reads, notifiers) uses bounds-checked `ram_ptr` direct access with `ldl_le_phys` fallback for out-of-range addresses. |
+| **APU Linear Resampler + RAM Fast Path** | `SRC_LINEAR` replaces `SRC_SINC_FASTEST` for voice pitch shifting (matches Xbox hardware, order-of-magnitude faster). All VP/DSP memory access (`voice_get_mask`/`voice_set_mask`, PCM fetch, SGE lookup, SSL reads, notifiers, scatter-gather DMA) uses shared inline `ram_ldl` with bounds-checked `ram_ptr` direct access and `ldl_le_phys` fallback. Envelope `powf` replaced with `expf` using precomputed log base. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
 | **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. Trylock outputs silence on contention. Buffer at 4096 samples (~85ms at 48kHz). |
 | **Single-Submit Fast Path** | `pgraph_vk_finish` skips aux command buffer + semaphore when all staging buffers are empty and VRAM has no dirty pages. Single `VkSubmitInfo` instead of two. |
@@ -66,8 +70,12 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). MetalFX/IOSurface `fprintf(stderr)` messages gated behind `METALFX_DPRINTF`/`DISPLAY_DPRINTF` macros (no-ops in release). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
 | **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 2 GiB and > 95% budget. Thresholds tuned for high-memory unified memory systems (e.g. 192 GB M2 Ultra). |
-| **JIT Tightening** | `ld80f` NOP-copy removed (4 bytes saved per x87 reload). `flcr` lowering reduced from 6 to 5 instructions via RBIT bit-swap. Insertion sort replaces `qsort` for vertex sync arrays (N <= 16). |
-| **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
+| **JIT Tightening** | `ld80f` NOP-copy removed (4 bytes saved per x87 reload). `flcr` lowering reduced from 6 to 5 instructions via RBIT bit-swap. Insertion sort replaces `qsort` for vertex sync arrays (N <= 16). `gen_stn_ptr` uses shift-left-4 instead of multiply-by-16 (`sizeof(FPReg)`). |
+| **PFIFO/Vblank QoS** | `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE)` pins both the PFIFO and vblank timer threads to Apple Silicon P-cores. |
+| **PFIFO Timeout Safety** | `qemu_cond_wait` replaced with `qemu_cond_timedwait(1ms)` to bound worst-case wakeup latency from lost kick signals. |
+| **GLSL Source Freeing** | `ShaderModuleInfo.glsl` freed immediately after SPIRV compilation. Prevents hundreds of MB waste with large shader caches (~50K entries). |
+| **Surface Expiry State** | `last_expire_frame_time` moved from process-global `static` to `PGRAPHVkState` field, fixing stale state across save/restore. |
+| **Build** | `-mcpu=native`, `-ffp-contract=fast` (enables FMA contraction on Apple Silicon), thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
 
 ### MoltenVK Compatibility Layer
 
@@ -118,6 +126,14 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Build LDFLAGS Missing Min Version** | `CFLAGS` included `-mmacosx-version-min` but `LDFLAGS` did not, causing the linker to not embed the correct `LC_BUILD_VERSION`. Added to `LDFLAGS`. |
 | **VkFramebuffer Leak** | Per-flight `framebuffer_index` was never written during creation, so `destroy_flight_framebuffers` always iterated 0 times. Framebuffers leaked every flight cycle. Now saved into `flight[slot].framebuffer_index` before advancing. |
 | **Scatter-Gather Bounds Off-by-One** | `assert(paddr + bytes_to_copy < ram_size)` used `<` instead of `<=`, rejecting valid DMA touching the final byte of RAM. |
+| **VP `voice_buf` Use-After-Free** | `voice_should_mute()` triggered bare `return` in `voice_process`, skipping the `cleanup:` label that nulls the stack-local `voice_buf` pointer. Subsequent `voice_get_mask`/`voice_set_mask` calls for that voice dereferenced deallocated stack memory. Changed to `goto cleanup`. |
+| **Stale Blend Constants / Depth Bias** | `vkCmdSetBlendConstants` and `vkCmdSetDepthBias` only called inside `if (must_bind_pipeline)` block, but the corresponding registers were removed from the pipeline dirty check. Blend/depth changes alone never triggered refresh. Moved to unconditional per-draw dynamic state. |
+| **IOSurface Cache Key** | MetalFX texture caches compared `IOSurfaceRef` pointer values, which can be reused after release. Replaced with `IOSurfaceGetID()` for stable cache keys. Added `CFRetain`/`CFRelease` for proper lifetime management. |
+| **Report Pool Overflow** | Missing bounds check on `r->report_pool_next` before indexing `r->report_pool`. Added overflow guard that triggers `pgraph_vk_finish(REPORTS_FULL)`. |
+| **APU IRQ Register Race** | `update_irq` read `NV_PAPU_FECTL`, `NV_PAPU_IEN`, `NV_PAPU_ISTS` non-atomically while other threads wrote them. Changed to `qatomic_read` for all reads. |
+| **Halton Y Jitter Duplicate** | MetalFX temporal upscaler's Halton Y jitter table had `-0.333f` at both index 1 and index 7, reducing effective temporal sampling quality. Fixed index 7. |
+| **Double `NV2A_PROF_TEX_UPLOAD`** | Texture upload counter incremented at both function entry and inside the command block. Removed duplicate. |
+| **`vk_mag_filter` Lookup** | Magnification filter incorrectly used the minification filter map. Changed to `pgraph_texture_mag_filter_vk_map`. |
 | **EP FIFO Divide-by-Zero** | `cur % (end - base)` with `end == base` was UB. Added guard to clamp and return early. |
 | **EP Silence Buffer Overread** | `assert(len <= sizeof(ep_silence))` compiled out in release. Replaced with runtime clamp. |
 | **Query Pool Error Handling** | `vkGetQueryPoolResults` errors other than `VK_NOT_READY` silently ignored. Now logs error and zeroes results. |
@@ -267,7 +283,7 @@ open dist/xemu.app
 |---|---|
 | `-O3` | Maximum optimization |
 | `-Db_lto=true -Db_lto_mode=thin` | Thin LTO with caching |
-| `-mcpu=native` | ARM64 Apple Silicon tuning (tunes for the build machine's CPU) |
+| `-mcpu=native -ffp-contract=fast` | ARM64 Apple Silicon tuning + FMA contraction |
 | `-DXBOX=1` | Xbox emulation mode |
 | `-DVK_USE_PLATFORM_METAL_EXT` | MoltenVK/Metal Vulkan platform |
 | `-mmacosx-version-min=14.0` | Minimum macOS version |

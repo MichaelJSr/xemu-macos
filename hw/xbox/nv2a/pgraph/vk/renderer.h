@@ -72,7 +72,7 @@ typedef struct PipelineKey {
     bool clear;
     RenderPassState render_pass_state;
     ShaderState shader_state;
-    uint32_t regs[9];
+    uint32_t regs[6];
     VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
 } PipelineKey;
@@ -85,6 +85,7 @@ typedef struct PipelineBinding {
     VkRenderPass render_pass;
     unsigned int draw_time;
     bool has_dynamic_line_width;
+    bool has_dynamic_depth_bias;
 } PipelineBinding;
 
 enum Buffer {
@@ -212,10 +213,6 @@ typedef struct TextureKey {
     hwaddr palette_vram_offset;
     hwaddr palette_length;
     float scale;
-    uint32_t filter;
-    uint32_t address;
-    uint32_t border_color;
-    uint32_t max_anisotropy;
 } TextureKey;
 
 typedef struct TextureBinding {
@@ -225,12 +222,31 @@ typedef struct TextureBinding {
     VkImageLayout current_layout;
     VkImageView image_view;
     VmaAllocation allocation;
-    VkSampler sampler;
     bool possibly_dirty;
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
 } TextureBinding;
+
+typedef struct SamplerKey {
+    uint32_t filter;
+    uint32_t address;
+    uint32_t border_color;
+    uint32_t max_anisotropy;
+    int color_format;
+    int dimensionality;
+    int levels;
+    int min_mipmap_level;
+    int max_mipmap_level;
+    bool linear;
+    bool custom_border_color_enabled;
+} SamplerKey;
+
+typedef struct SamplerCacheEntry {
+    LruNode node;
+    SamplerKey key;
+    VkSampler sampler;
+} SamplerCacheEntry;
 
 typedef struct QueryReport {
     QSIMPLEQ_ENTRY(QueryReport) entry;
@@ -485,6 +501,11 @@ typedef struct PGRAPHVkState {
     VkFormatProperties *texture_format_properties;
     GThreadPool *decode_thread_pool;
 
+    Lru sampler_cache;
+    SamplerCacheEntry *sampler_cache_entries;
+    SamplerCacheEntry *sampler_bindings[NV2A_MAX_TEXTURES];
+    SamplerCacheEntry dummy_sampler;
+
     Lru shader_cache;
     ShaderBinding *shader_cache_entries;
     ShaderBinding *shader_binding;
@@ -529,6 +550,8 @@ typedef struct PGRAPHVkState {
     } *surface_ranges;
     int surface_range_count;
     int surface_range_capacity;
+
+    int last_expire_frame_time;
 } PGRAPHVkState;
 
 // renderer.c
@@ -687,6 +710,7 @@ typedef enum FinishReason {
     VK_FINISH_REASON_FLIP_STALL,
     VK_FINISH_REASON_FLUSH,
     VK_FINISH_REASON_STALLED,
+    VK_FINISH_REASON_REPORTS_FULL,
 } FinishReason;
 
 // draw.c

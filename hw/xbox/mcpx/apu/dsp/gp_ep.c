@@ -56,10 +56,8 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
     while (len > 0) {
         assert(page_entry <= max_sge);
 
-        uint32_t prd_address = ldl_le_phys(&address_space_memory,
-                                           sge_base + page_entry * 8 + 0);
-        // uint32_t prd_control = ldl_le_phys(&address_space_memory,
-        //                                     sge_base + page_entry * 8 + 4);
+        uint32_t prd_address = ram_ldl(d, sge_base + page_entry * 8);
+        // uint32_t prd_control = ram_ldl(d, sge_base + page_entry * 8 + 4);
 
         hwaddr paddr = prd_address + offset_in_page;
 

@@ -268,7 +268,7 @@ case "$platform" in # Adjust compilation options based on platform
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
         elif [ "$target_arch" == "arm64" ]; then
-            sys_cflags='-mcpu=native'
+            sys_cflags='-mcpu=native -ffp-contract=fast'
         fi
         sys_ldflags='-headerpad_max_install_names'
         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"

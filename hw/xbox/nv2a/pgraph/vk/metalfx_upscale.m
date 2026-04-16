@@ -144,7 +144,7 @@ typedef struct MetalFXSpatialState {
     id<MTLTexture> inputTexture;
     id<MTLTexture> outputTexture;
     IOSurfaceRef outputSurface;
-    IOSurfaceRef cachedInputSurface;
+    IOSurfaceID cachedInputSurfaceID;
     int inputWidth, inputHeight;
     int outputWidth, outputHeight;
     bool initialized;
@@ -167,7 +167,7 @@ static void metalfx_destroy_locked(void)
     g_spatial.scaler = nil;
     g_spatial.inputTexture = nil;
     g_spatial.outputTexture = nil;
-    g_spatial.cachedInputSurface = NULL;
+    g_spatial.cachedInputSurfaceID = 0;
     if (g_spatial.outputSurface) {
         CFRelease(g_spatial.outputSurface);
         g_spatial.outputSurface = NULL;
@@ -254,10 +254,12 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h)
     }
 }
 
+/* Caller must CFRelease the returned IOSurfaceRef. */
 IOSurfaceRef metalfx_get_output_surface(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     IOSurfaceRef s = g_spatial.outputSurface;
+    if (s) CFRetain(s);
     os_unfair_lock_unlock(&g_metalfx_lock);
     return s;
 }
@@ -271,14 +273,15 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
     }
 
     @autoreleasepool {
-        if (inputSurface != g_spatial.cachedInputSurface) {
+        IOSurfaceID inputID = IOSurfaceGetID(inputSurface);
+        if (inputID != g_spatial.cachedInputSurfaceID) {
             id<MTLTexture> tex = texture_from_iosurface(
                 g_spatial.device, inputSurface, MTLPixelFormatBGRA8Unorm,
                 g_spatial.inputWidth, g_spatial.inputHeight,
                 MTLTextureUsageShaderRead);
             if (tex) {
                 g_spatial.inputTexture = tex;
-                g_spatial.cachedInputSurface = inputSurface;
+                g_spatial.cachedInputSurfaceID = inputID;
             }
         }
         if (!g_spatial.inputTexture) {
@@ -313,12 +316,12 @@ typedef struct MetalFXTemporalState {
     id<MTLFXTemporalScaler> scaler;
     id<MTLTexture> colorTexture;
     id<MTLTexture> depthTexture;
-    IOSurfaceRef cachedDepthSurface;
+    IOSurfaceID cachedDepthSurfaceID;
     id<MTLTexture> motionTexture;
     id<MTLTexture> outputTexture;
     id<MTLTexture> outputSharedTexture;
     IOSurfaceRef outputSurface;
-    IOSurfaceRef cachedColorSurface;
+    IOSurfaceID cachedColorSurfaceID;
     int inputWidth, inputHeight;
     int outputWidth, outputHeight;
     int requestedOutputW, requestedOutputH;
@@ -348,13 +351,13 @@ static void metalfx_temporal_destroy_locked(void)
     g_temporal.scaler = nil;
     g_temporal.colorTexture = nil;
     g_temporal.depthTexture = nil;
-    g_temporal.cachedDepthSurface = NULL;
+    g_temporal.cachedDepthSurfaceID = 0;
     g_temporal.motionTexture = nil;
     g_temporal.syntheticDepthPipeline = nil;
     g_temporal.syntheticDepthTexture = nil;
     g_temporal.outputTexture = nil;
     g_temporal.outputSharedTexture = nil;
-    g_temporal.cachedColorSurface = NULL;
+    g_temporal.cachedColorSurfaceID = 0;
     if (g_temporal.outputSurface) {
         CFRelease(g_temporal.outputSurface);
         g_temporal.outputSurface = NULL;
@@ -542,10 +545,12 @@ bool metalfx_temporal_init(int input_w, int input_h,
     }
 }
 
+/* Caller must CFRelease the returned IOSurfaceRef. */
 IOSurfaceRef metalfx_temporal_get_output_surface(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     IOSurfaceRef s = g_temporal.outputSurface;
+    if (s) CFRetain(s);
     os_unfair_lock_unlock(&g_metalfx_lock);
     return s;
 }
@@ -567,14 +572,15 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
     }
 
     @autoreleasepool {
-        if (colorSurface != g_temporal.cachedColorSurface) {
+        IOSurfaceID colorID = IOSurfaceGetID(colorSurface);
+        if (colorID != g_temporal.cachedColorSurfaceID) {
             id<MTLTexture> tex = texture_from_iosurface(
                 g_temporal.device, colorSurface, MTLPixelFormatBGRA8Unorm,
                 g_temporal.inputWidth, g_temporal.inputHeight,
                 MTLTextureUsageShaderRead);
             if (tex) {
                 g_temporal.colorTexture = tex;
-                g_temporal.cachedColorSurface = colorSurface;
+                g_temporal.cachedColorSurfaceID = colorID;
             }
         }
         if (!g_temporal.colorTexture) {
@@ -582,19 +588,21 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
             return false;
         }
 
-        if (depthSurface && depthSurface != g_temporal.cachedDepthSurface) {
-            id<MTLTexture> tex = texture_from_iosurface(
-                g_temporal.device, depthSurface, MTLPixelFormatR32Float,
-                g_temporal.inputWidth, g_temporal.inputHeight,
-                MTLTextureUsageShaderRead);
-            if (tex) {
-                g_temporal.depthTexture = tex;
-                g_temporal.cachedDepthSurface = depthSurface;
+        if (depthSurface) {
+            IOSurfaceID depthID = IOSurfaceGetID(depthSurface);
+            if (depthID != g_temporal.cachedDepthSurfaceID) {
+                id<MTLTexture> tex = texture_from_iosurface(
+                    g_temporal.device, depthSurface, MTLPixelFormatR32Float,
+                    g_temporal.inputWidth, g_temporal.inputHeight,
+                    MTLTextureUsageShaderRead);
+                if (tex) {
+                    g_temporal.depthTexture = tex;
+                    g_temporal.cachedDepthSurfaceID = depthID;
+                }
             }
-        }
-        if (!depthSurface) {
+        } else {
             g_temporal.depthTexture = nil;
-            g_temporal.cachedDepthSurface = NULL;
+            g_temporal.cachedDepthSurfaceID = 0;
         }
 
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
@@ -626,7 +634,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
 
         static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
-        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.333f };
+        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, 0.111f };
         int jidx = g_temporal.frameIndex % 8;
         g_temporal.scaler.jitterOffsetX = halton_x[jidx];
         g_temporal.scaler.jitterOffsetY = halton_y[jidx];
@@ -680,10 +688,10 @@ typedef struct MetalFXInterpolationState {
     id<MTLTexture> cachedDepthCur;
     id<MTLTexture> cachedDepthPrev;
     id<MTLTexture> motionTexture;
-    IOSurfaceRef lastColorCur;
-    IOSurfaceRef lastColorPrev;
-    IOSurfaceRef lastDepthCur;
-    IOSurfaceRef lastDepthPrev;
+    IOSurfaceID lastColorCurID;
+    IOSurfaceID lastColorPrevID;
+    IOSurfaceID lastDepthCurID;
+    IOSurfaceID lastDepthPrevID;
     int width, height;
     bool initialized;
     bool firstFrame;
@@ -715,10 +723,10 @@ static void metalfx_interpolation_destroy_locked(void)
     g_interp.cachedColorPrev = nil;
     g_interp.cachedDepthCur = nil;
     g_interp.cachedDepthPrev = nil;
-    g_interp.lastColorCur = NULL;
-    g_interp.lastColorPrev = NULL;
-    g_interp.lastDepthCur = NULL;
-    g_interp.lastDepthPrev = NULL;
+    g_interp.lastColorCurID = 0;
+    g_interp.lastColorPrevID = 0;
+    g_interp.lastDepthCurID = 0;
+    g_interp.lastDepthPrevID = 0;
     if (g_interp.outputSurface) {
         CFRelease(g_interp.outputSurface);
         g_interp.outputSurface = NULL;
@@ -832,10 +840,12 @@ bool metalfx_interpolation_init(int width, int height)
     return false;
 }
 
+/* Caller must CFRelease the returned IOSurfaceRef. */
 IOSurfaceRef metalfx_interpolation_get_output_surface(void)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     IOSurfaceRef s = g_interp.outputSurface;
+    if (s) CFRetain(s);
     os_unfair_lock_unlock(&g_metalfx_lock);
     return s;
 }
@@ -860,22 +870,24 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             MTLTextureUsage readUsage = MTLTextureUsageShaderRead;
 
             /* colorB = current frame, colorA = previous frame */
-            if (colorB != g_interp.lastColorCur) {
+            IOSurfaceID colorBID = IOSurfaceGetID(colorB);
+            if (colorBID != g_interp.lastColorCurID) {
                 id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, colorB, MTLPixelFormatBGRA8Unorm,
                     g_interp.width, g_interp.height, readUsage);
                 if (tex) {
                     g_interp.cachedColorCur = tex;
-                    g_interp.lastColorCur = colorB;
+                    g_interp.lastColorCurID = colorBID;
                 }
             }
-            if (colorA != g_interp.lastColorPrev) {
+            IOSurfaceID colorAID = IOSurfaceGetID(colorA);
+            if (colorAID != g_interp.lastColorPrevID) {
                 id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, colorA, MTLPixelFormatBGRA8Unorm,
                     g_interp.width, g_interp.height, readUsage);
                 if (tex) {
                     g_interp.cachedColorPrev = tex;
-                    g_interp.lastColorPrev = colorA;
+                    g_interp.lastColorPrevID = colorAID;
                 }
             }
             if (!g_interp.cachedColorCur || !g_interp.cachedColorPrev) {
@@ -883,29 +895,35 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                 return false;
             }
 
-            if (depthB && depthB != g_interp.lastDepthCur) {
-                id<MTLTexture> tex = texture_from_iosurface(
-                    g_interp.device, depthB, MTLPixelFormatR32Float,
-                    g_interp.width, g_interp.height, readUsage);
-                if (tex) {
-                    g_interp.cachedDepthCur = tex;
-                    g_interp.lastDepthCur = depthB;
+            if (depthB) {
+                IOSurfaceID depthBID = IOSurfaceGetID(depthB);
+                if (depthBID != g_interp.lastDepthCurID) {
+                    id<MTLTexture> tex = texture_from_iosurface(
+                        g_interp.device, depthB, MTLPixelFormatR32Float,
+                        g_interp.width, g_interp.height, readUsage);
+                    if (tex) {
+                        g_interp.cachedDepthCur = tex;
+                        g_interp.lastDepthCurID = depthBID;
+                    }
                 }
-            } else if (!depthB) {
+            } else {
                 g_interp.cachedDepthCur = nil;
-                g_interp.lastDepthCur = NULL;
+                g_interp.lastDepthCurID = 0;
             }
-            if (depthA && depthA != g_interp.lastDepthPrev) {
-                id<MTLTexture> tex = texture_from_iosurface(
-                    g_interp.device, depthA, MTLPixelFormatR32Float,
-                    g_interp.width, g_interp.height, readUsage);
-                if (tex) {
-                    g_interp.cachedDepthPrev = tex;
-                    g_interp.lastDepthPrev = depthA;
+            if (depthA) {
+                IOSurfaceID depthAID = IOSurfaceGetID(depthA);
+                if (depthAID != g_interp.lastDepthPrevID) {
+                    id<MTLTexture> tex = texture_from_iosurface(
+                        g_interp.device, depthA, MTLPixelFormatR32Float,
+                        g_interp.width, g_interp.height, readUsage);
+                    if (tex) {
+                        g_interp.cachedDepthPrev = tex;
+                        g_interp.lastDepthPrevID = depthAID;
+                    }
                 }
-            } else if (!depthA) {
+            } else {
                 g_interp.cachedDepthPrev = nil;
-                g_interp.lastDepthPrev = NULL;
+                g_interp.lastDepthPrevID = 0;
             }
 
             interp.colorTexture = g_interp.cachedColorCur;

@@ -62,6 +62,9 @@ void pgraph_vk_clear_report_value(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->report_pool_next >= r->max_queries_in_flight) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
+    }
     QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
     r->report_pool_next++;
     report->clear = true;
@@ -80,6 +83,9 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     uint8_t type = GET_MASK(parameter, NV097_GET_REPORT_TYPE);
     assert(type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT);
 
+    if (r->report_pool_next >= r->max_queries_in_flight) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
+    }
     QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
     r->report_pool_next++;
     report->clear = false;

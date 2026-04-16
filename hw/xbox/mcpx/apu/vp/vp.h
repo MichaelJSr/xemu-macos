@@ -42,6 +42,7 @@ typedef struct MCPXAPUVPSSLData {
 
 typedef struct MCPXAPUVoiceFilter {
     uint16_t voice;
+    uint32_t *voice_buf;
     float resample_buf[NUM_SAMPLES_PER_FRAME * 2];
     SRC_STATE *resampler;
     sv_filter svf[2];

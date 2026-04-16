@@ -915,7 +915,7 @@ static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
         image_infos[1] = (VkDescriptorImageInfo){
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .imageView = r->dummy_texture.image_view,
-            .sampler = r->dummy_texture.sampler,
+            .sampler = r->dummy_sampler.sampler,
         };
     }
     descriptor_writes[1] = (VkWriteDescriptorSet){

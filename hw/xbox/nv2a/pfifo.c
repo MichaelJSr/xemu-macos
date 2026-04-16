@@ -20,6 +20,9 @@
  */
 
 #include "nv2a_int.h"
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 typedef struct RAMHTEntry {
     uint32_t handle;
@@ -453,6 +456,10 @@ void *pfifo_thread(void *arg)
 {
     NV2AState *d = (NV2AState *)arg;
 
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+
     pgraph_init_thread(d);
 
     rcu_register_thread();
@@ -473,7 +480,7 @@ void *pfifo_thread(void *arg)
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
 
             // Both the pusher and puller are waiting for some action
-            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
         }
 
         if (d->exiting) {

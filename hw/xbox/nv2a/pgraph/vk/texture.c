@@ -31,6 +31,7 @@
 #include "renderer.h"
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
+static void sampler_cache_release_node_resources(PGRAPHVkState *r, SamplerCacheEntry *snode);
 
 static const VkImageType dimensionality_to_vk_image_type[] = {
     0,
@@ -59,6 +60,8 @@ typedef struct TextureLevel {
     hwaddr vram_addr;
     void *decoded_data;
     size_t decoded_size;
+    bool gpu_unswizzle;
+    unsigned int unswizzle_width, unswizzle_height;
 } TextureLevel;
 
 typedef struct TextureLayer {
@@ -229,6 +232,19 @@ static void decode_batch_wait(DecodeTaskBatch *batch)
     qemu_event_destroy(&batch->done);
 }
 
+static bool texture_format_needs_data_conversion(int color_format)
+{
+    switch (color_format) {
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_I8_A8R8G8B8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_YB8CR8YA8CB8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -323,6 +339,48 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
     if (s.dimensionality == 2) {
         hwaddr layer_size = s.cubemap ? get_cubemap_layer_size(pg, s) : 0;
         const int num_layers = s.cubemap ? 6 : 1;
+
+        bool use_gpu_unswizzle = !is_compressed &&
+            (f.bytes_per_pixel == 2 || f.bytes_per_pixel == 4) &&
+            !texture_format_needs_data_conversion(s.color_format);
+
+        if (use_gpu_unswizzle) {
+            for (int layer = 0; layer < num_layers; layer++) {
+                unsigned int width = adjusted_width, height = adjusted_height;
+                void *layer_ptr = (char *)d->vram_ptr + texture_vram_offset +
+                                  layer * layer_size;
+
+                for (int level = 0; level < s.levels; level++) {
+                    width = MAX(width, 1);
+                    height = MAX(height, 1);
+
+                    size_t sz = width * height * f.bytes_per_pixel;
+                    void *raw_copy = g_malloc(sz);
+                    memcpy(raw_copy, layer_ptr, sz);
+
+                    unsigned int tex_w = width, tex_h = height;
+                    if (s.cubemap && adjusted_width != s.width) {
+                        tex_w = s.width;
+                        tex_h = s.height;
+                    }
+
+                    layout->layers[layer].levels[level] = (TextureLevel){
+                        .width = tex_w,
+                        .height = tex_h,
+                        .depth = 1,
+                        .decoded_size = sz,
+                        .decoded_data = raw_copy,
+                        .gpu_unswizzle = true,
+                        .unswizzle_width = width,
+                        .unswizzle_height = height,
+                    };
+
+                    layer_ptr = (char *)layer_ptr + sz;
+                    width /= 2;
+                    height /= 2;
+                }
+            }
+        } else {
         int total_tasks = num_layers * s.levels;
 
         DecodeTask *tasks = g_malloc0_n(total_tasks, sizeof(DecodeTask));
@@ -350,13 +408,17 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 t->is_3d = false;
                 t->batch = &batch;
 
-                GError *err = NULL;
-                g_thread_pool_push(r->decode_thread_pool, t, &err);
-                if (err) {
-                    fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
-                            err->message);
-                    g_error_free(err);
+                if (width <= 16 && height <= 16) {
                     decode_task_func(t, NULL);
+                } else {
+                    GError *err = NULL;
+                    g_thread_pool_push(r->decode_thread_pool, t, &err);
+                    if (err) {
+                        fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
+                                err->message);
+                        g_error_free(err);
+                        decode_task_func(t, NULL);
+                    }
                 }
 
                 if (is_compressed) {
@@ -399,6 +461,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             }
         }
         g_free(tasks);
+        }
     } else if (s.dimensionality == 3) {
         nv2a_vk_assert(!f.linear);
         int total_tasks = s.levels;
@@ -425,13 +488,17 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             t->is_3d = true;
             t->batch = &batch3d;
 
-            GError *err = NULL;
-            g_thread_pool_push(r->decode_thread_pool, t, &err);
-            if (err) {
-                fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
-                        err->message);
-                g_error_free(err);
+            if (width <= 16 && height <= 16 && depth <= 16) {
                 decode_task_func(t, NULL);
+            } else {
+                GError *err = NULL;
+                g_thread_pool_push(r->decode_thread_pool, t, &err);
+                if (err) {
+                    fprintf(stderr, "nv2a: decode thread pool push failed: %s\n",
+                            err->message);
+                    g_error_free(err);
+                    decode_task_func(t, NULL);
+                }
             }
 
             if (is_compressed) {
@@ -539,8 +606,6 @@ static bool check_texture_possibly_dirty(NV2AState *d,
     return possibly_dirty;
 }
 
-// FIXME: Make sure we update sampler when data matches. Should we add filtering
-// options to the textureshape?
 static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                                  TextureBinding *binding)
 {
@@ -552,6 +617,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     g_autofree TextureLayout *layout = get_texture_layout(pg, texture_idx);
     const int num_layers = state->cubemap ? 6 : 1;
+
+    bool has_gpu_unswizzle = layout->layers[0].levels[0].gpu_unswizzle;
 
     // Calculate decoded texture data size
     size_t texture_data_size = 0;
@@ -565,6 +632,10 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     }
 
     StorageBuffer *staging = &r->storage_buffers[BUFFER_STAGING_SRC];
+
+    if (has_gpu_unswizzle && pgraph_vk_compute_needs_finish(r)) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+    }
 
     /*
      * Sub-allocate from BUFFER_STAGING_SRC using buffer_offset as a bump
@@ -651,9 +722,99 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         binding->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-        vkCmdCopyBufferToImage(cmd, staging->buffer,
-                               binding->image, binding->current_layout,
-                               num_regions, regions);
+        if (has_gpu_unswizzle) {
+            BasicColorFormatInfo f_info =
+                kelvin_color_format_info_map[state->color_format];
+            VkDeviceSize level_offset = base_offset;
+
+            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+                for (int level_idx = 0; level_idx < state->levels;
+                     level_idx++) {
+                    TextureLevel *level =
+                        &layout->layers[layer_idx].levels[level_idx];
+
+                    VkBufferCopy swz_copy = {
+                        .srcOffset = level_offset,
+                        .dstOffset = 0,
+                        .size = level->decoded_size,
+                    };
+                    vkCmdCopyBuffer(
+                        cmd, staging->buffer,
+                        r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 1,
+                        &swz_copy);
+
+                    VkBufferMemoryBarrier pre_compute = {
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer =
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                        .size = level->decoded_size,
+                    };
+                    vkCmdPipelineBarrier(
+                        cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
+                        &pre_compute, 0, NULL);
+
+                    if (f_info.bytes_per_pixel == 2) {
+                        pgraph_vk_dispatch_unswizzle_2bpp(
+                            pg, cmd,
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                            level->unswizzle_width, level->unswizzle_height);
+                    } else {
+                        pgraph_vk_dispatch_unswizzle(
+                            pg, cmd,
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                            level->unswizzle_width, level->unswizzle_height);
+                    }
+
+                    VkBufferMemoryBarrier post_compute = {
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer =
+                            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                        .size = level->decoded_size,
+                    };
+                    vkCmdPipelineBarrier(
+                        cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                        &post_compute, 0, NULL);
+
+                    VkBufferImageCopy image_region = {
+                        .bufferOffset = 0,
+                        .bufferRowLength = 0,
+                        .bufferImageHeight = 0,
+                        .imageSubresource.aspectMask =
+                            VK_IMAGE_ASPECT_COLOR_BIT,
+                        .imageSubresource.mipLevel = level_idx,
+                        .imageSubresource.baseArrayLayer = layer_idx,
+                        .imageSubresource.layerCount = 1,
+                        .imageOffset = (VkOffset3D){ 0, 0, 0 },
+                        .imageExtent = (VkExtent3D){ level->width,
+                                                     level->height,
+                                                     level->depth },
+                    };
+                    vkCmdCopyBufferToImage(
+                        cmd,
+                        r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                        binding->image, binding->current_layout, 1,
+                        &image_region);
+
+                    level_offset += level->decoded_size;
+                }
+            }
+        } else {
+            vkCmdCopyBufferToImage(cmd, staging->buffer,
+                                   binding->image, binding->current_layout,
+                                   num_regions, regions);
+        }
 
         pgraph_vk_transition_image_layout(pg, cmd, binding->image,
                                           vkf.vk_format,
@@ -661,7 +822,6 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         binding->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
         pgraph_vk_end_debug_marker(r, cmd);
     }
 
@@ -1107,6 +1267,9 @@ static void create_dummy_texture(PGRAPHState *pg)
         .current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         .allocation = texture_allocation,
         .image_view = texture_image_view,
+    };
+
+    r->dummy_sampler = (SamplerCacheEntry){
         .sampler = texture_sampler,
     };
 }
@@ -1114,6 +1277,7 @@ static void create_dummy_texture(PGRAPHState *pg)
 static void destroy_dummy_texture(PGRAPHVkState *r)
 {
     texture_cache_release_node_resources(r, &r->dummy_texture);
+    sampler_cache_release_node_resources(r, &r->dummy_sampler);
 }
 
 static void set_texture_label(PGRAPHState *pg, TextureBinding *texture)
@@ -1186,11 +1350,19 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     }
     key.scale = 1;
 
-    // FIXME: Separate sampler from texture
-    key.filter = filter;
-    key.address = address;
-    key.border_color = border_color_pack32;
-    key.max_anisotropy = max_anisotropy;
+    SamplerKey sampler_key;
+    memset(&sampler_key, 0, sizeof(sampler_key));
+    sampler_key.filter = filter;
+    sampler_key.address = address;
+    sampler_key.border_color = border_color_pack32;
+    sampler_key.max_anisotropy = max_anisotropy;
+    sampler_key.color_format = state.color_format;
+    sampler_key.dimensionality = state.dimensionality;
+    sampler_key.levels = state.levels;
+    sampler_key.min_mipmap_level = state.min_mipmap_level;
+    sampler_key.max_mipmap_level = state.max_mipmap_level;
+    sampler_key.linear = f_basic.linear;
+    sampler_key.custom_border_color_enabled = r->custom_border_color_extension_enabled;
 
     bool possibly_dirty = false;
     bool possibly_dirty_checked = false;
@@ -1225,13 +1397,143 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         key.scale = pg->surface_scale_factor;
     }
 
+    // --- Sampler cache lookup ---
+    uint64_t sampler_hash = fast_hash((void *)&sampler_key, sizeof(sampler_key));
+    LruNode *sampler_node = lru_lookup(&r->sampler_cache, sampler_hash, &sampler_key);
+    SamplerCacheEntry *sampler_entry = container_of(sampler_node, SamplerCacheEntry, node);
+    bool sampler_found = sampler_entry->sampler != VK_NULL_HANDLE;
+
+    if (!sampler_found) {
+        memcpy(&sampler_entry->key, &sampler_key, sizeof(sampler_key));
+
+        VkColorFormatInfo vkf_s = kelvin_color_format_vk_map[state.color_format];
+        void *sampler_next_struct = NULL;
+
+        VkSamplerCustomBorderColorCreateInfoEXT custom_border_color_create_info;
+        VkBorderColor vk_border_color;
+
+        bool is_integer_type = vkf_s.vk_format == VK_FORMAT_R32_UINT;
+
+        if (r->custom_border_color_extension_enabled) {
+            vk_border_color = is_integer_type ? VK_BORDER_COLOR_INT_CUSTOM_EXT :
+                                                VK_BORDER_COLOR_FLOAT_CUSTOM_EXT;
+            custom_border_color_create_info =
+                (VkSamplerCustomBorderColorCreateInfoEXT){
+                    .sType =
+                        VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT,
+                    .format = vkf_s.vk_format,
+                    .pNext = sampler_next_struct
+                };
+            if (is_integer_type) {
+                float rgba[4];
+                pgraph_argb_pack32_to_rgba_float(border_color_pack32, rgba);
+                for (int i = 0; i < 4; i++) {
+                    custom_border_color_create_info.customBorderColor.uint32[i] =
+                        (uint32_t)((double)rgba[i] * (double)0xffffffff);
+                }
+            } else {
+                pgraph_argb_pack32_to_rgba_float(
+                    border_color_pack32,
+                    custom_border_color_create_info.customBorderColor.float32);
+            }
+            sampler_next_struct = &custom_border_color_create_info;
+        } else {
+            if (is_integer_type) {
+                vk_border_color = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+            } else if (border_color_pack32 == 0x00000000) {
+                vk_border_color = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+            } else if (border_color_pack32 == 0xff000000) {
+                vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+            } else {
+                vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+            }
+        }
+
+        if (filter & NV_PGRAPH_TEXFILTER0_ASIGNED)
+            NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_ASIGNED");
+        if (filter & NV_PGRAPH_TEXFILTER0_RSIGNED)
+            NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_RSIGNED");
+        if (filter & NV_PGRAPH_TEXFILTER0_GSIGNED)
+            NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_GSIGNED");
+        if (filter & NV_PGRAPH_TEXFILTER0_BSIGNED)
+            NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_BSIGNED");
+
+        VkFilter vk_min_filter, vk_mag_filter;
+        unsigned int mag_filter_val = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MAG);
+        nv2a_vk_bounds_check(mag_filter_val < ARRAY_SIZE(pgraph_texture_mag_filter_vk_map));
+
+        unsigned int min_filter_val = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIN);
+        nv2a_vk_bounds_check(min_filter_val < ARRAY_SIZE(pgraph_texture_min_filter_vk_map));
+
+        if (is_linear_filter_supported_for_format(r, state.color_format)) {
+            vk_mag_filter = pgraph_texture_mag_filter_vk_map[mag_filter_val];
+            vk_min_filter = pgraph_texture_min_filter_vk_map[min_filter_val];
+        } else {
+            vk_mag_filter = vk_min_filter = VK_FILTER_NEAREST;
+        }
+
+        unsigned int mip_levels = f_basic.linear ? 1 : state.levels;
+
+        bool mipmap_en =
+            !f_basic.linear &&
+            !(min_filter_val == NV_PGRAPH_TEXFILTER0_MIN_BOX_LOD0 ||
+              min_filter_val == NV_PGRAPH_TEXFILTER0_MIN_TENT_LOD0 ||
+              min_filter_val == NV_PGRAPH_TEXFILTER0_MIN_CONVOLUTION_2D_LOD0);
+
+        bool mipmap_nearest =
+            f_basic.linear || mip_levels == 1 ||
+            min_filter_val == NV_PGRAPH_TEXFILTER0_MIN_BOX_NEARESTLOD ||
+            min_filter_val == NV_PGRAPH_TEXFILTER0_MIN_TENT_NEARESTLOD;
+
+        float lod_bias = pgraph_convert_lod_bias_to_float(
+            GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIPMAP_LOD_BIAS));
+        if (lod_bias > r->device_props.limits.maxSamplerLodBias) {
+            lod_bias = r->device_props.limits.maxSamplerLodBias;
+        } else if (lod_bias < -r->device_props.limits.maxSamplerLodBias) {
+            lod_bias = -r->device_props.limits.maxSamplerLodBias;
+        }
+        uint32_t sampler_max_anisotropy =
+            MIN(r->device_props.limits.maxSamplerAnisotropy, max_anisotropy);
+
+        VkSamplerCreateInfo sampler_create_info = {
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = vk_mag_filter,
+            .minFilter = vk_min_filter,
+            .addressModeU = lookup_texture_address_mode(
+                GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRU)),
+            .addressModeV = lookup_texture_address_mode(
+                GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRV)),
+            .addressModeW = (state.dimensionality > 2) ? lookup_texture_address_mode(
+                GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRP)) : 0,
+            .anisotropyEnable =
+                r->enabled_physical_device_features.samplerAnisotropy &&
+                sampler_max_anisotropy > 1,
+            .maxAnisotropy = sampler_max_anisotropy,
+            .borderColor = vk_border_color,
+            .compareEnable = VK_FALSE,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
+            .mipmapMode = mipmap_nearest ? VK_SAMPLER_MIPMAP_MODE_NEAREST :
+                                           VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .minLod = mipmap_en ? MIN(state.min_mipmap_level, state.levels - 1) : 0.0,
+            .maxLod = mipmap_en ? MIN(state.max_mipmap_level, state.levels - 1) : 0.0,
+            .mipLodBias = lod_bias,
+            .pNext = sampler_next_struct,
+        };
+
+        VK_CHECK(vkCreateSampler(r->device, &sampler_create_info, NULL,
+                                 &sampler_entry->sampler));
+    }
+
+    r->sampler_bindings[texture_idx] = sampler_entry;
+
+    // --- Texture image cache lookup ---
     uint64_t key_hash = fast_hash((void*)&key, sizeof(key));
     LruNode *node = lru_lookup(&r->texture_cache, key_hash, &key);
     TextureBinding *snode = container_of(node, TextureBinding, node);
     bool binding_found = snode->image != VK_NULL_HANDLE;
 
     if (binding_found) {
-        NV2A_VK_DPRINTF("Cache hit");
+        NV2A_VK_DPRINTF("Texture cache hit");
         r->texture_bindings[texture_idx] = snode;
         possibly_dirty |= snode->possibly_dirty;
     } else {
@@ -1257,7 +1559,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (binding_found) {
         if (surface_to_texture) {
-            // FIXME: Add draw time tracking
             if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
@@ -1272,7 +1573,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         return;
     }
 
-    NV2A_VK_DPRINTF("Cache miss");
+    NV2A_VK_DPRINTF("Texture cache miss");
 
     memcpy(&snode->key, &key, sizeof(key));
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1289,7 +1590,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     VkImageCreateInfo image_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = dimensionality_to_vk_image_type[state.dimensionality],
-        .extent.width = state.width, // FIXME: Use adjusted size?
+        .extent.width = state.width,
         .extent.height = state.height,
         .extent.depth = state.depth,
         .mipLevels = f_basic.linear ? 1 : state.levels,
@@ -1333,122 +1634,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &snode->image_view));
-
-
-    void *sampler_next_struct = NULL;
-
-    VkSamplerCustomBorderColorCreateInfoEXT custom_border_color_create_info;
-    VkBorderColor vk_border_color;
-
-    bool is_integer_type = vkf.vk_format == VK_FORMAT_R32_UINT;
-
-    if (r->custom_border_color_extension_enabled) {
-        vk_border_color = is_integer_type ? VK_BORDER_COLOR_INT_CUSTOM_EXT :
-                                            VK_BORDER_COLOR_FLOAT_CUSTOM_EXT;
-        custom_border_color_create_info =
-            (VkSamplerCustomBorderColorCreateInfoEXT){
-                .sType =
-                    VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT,
-                .format = image_view_create_info.format,
-                .pNext = sampler_next_struct
-            };
-        if (is_integer_type) {
-            float rgba[4];
-            pgraph_argb_pack32_to_rgba_float(border_color_pack32, rgba);
-            for (int i = 0; i < 4; i++) {
-                custom_border_color_create_info.customBorderColor.uint32[i] =
-                    (uint32_t)((double)rgba[i] * (double)0xffffffff);
-            }
-        } else {
-            pgraph_argb_pack32_to_rgba_float(
-                border_color_pack32,
-                custom_border_color_create_info.customBorderColor.float32);
-        }
-        sampler_next_struct = &custom_border_color_create_info;
-    } else {
-        // FIXME: Handle custom color in shader
-        if (is_integer_type) {
-            vk_border_color = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
-        } else if (border_color_pack32 == 0x00000000) {
-            vk_border_color = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-        } else if (border_color_pack32 == 0xff000000) {
-            vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-        } else {
-            vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-        }
-    }
-
-    if (filter & NV_PGRAPH_TEXFILTER0_ASIGNED)
-        NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_ASIGNED");
-    if (filter & NV_PGRAPH_TEXFILTER0_RSIGNED)
-        NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_RSIGNED");
-    if (filter & NV_PGRAPH_TEXFILTER0_GSIGNED)
-        NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_GSIGNED");
-    if (filter & NV_PGRAPH_TEXFILTER0_BSIGNED)
-        NV2A_UNIMPLEMENTED("NV_PGRAPH_TEXFILTER0_BSIGNED");
-
-    VkFilter vk_min_filter, vk_mag_filter;
-    unsigned int mag_filter = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MAG);
-    nv2a_vk_bounds_check(mag_filter < ARRAY_SIZE(pgraph_texture_mag_filter_vk_map));
-
-    unsigned int min_filter = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIN);
-    nv2a_vk_bounds_check(min_filter < ARRAY_SIZE(pgraph_texture_min_filter_vk_map));
-
-    if (is_linear_filter_supported_for_format(r, state.color_format)) {
-        vk_mag_filter = pgraph_texture_min_filter_vk_map[mag_filter];
-        vk_min_filter = pgraph_texture_min_filter_vk_map[min_filter];
-    } else {
-        vk_mag_filter = vk_min_filter = VK_FILTER_NEAREST;
-    }
-
-    bool mipmap_en =
-        !f_basic.linear &&
-        !(min_filter == NV_PGRAPH_TEXFILTER0_MIN_BOX_LOD0 ||
-          min_filter == NV_PGRAPH_TEXFILTER0_MIN_TENT_LOD0 ||
-          min_filter == NV_PGRAPH_TEXFILTER0_MIN_CONVOLUTION_2D_LOD0);
-
-    bool mipmap_nearest =
-        f_basic.linear || image_create_info.mipLevels == 1 ||
-        min_filter == NV_PGRAPH_TEXFILTER0_MIN_BOX_NEARESTLOD ||
-        min_filter == NV_PGRAPH_TEXFILTER0_MIN_TENT_NEARESTLOD;
-
-    float lod_bias = pgraph_convert_lod_bias_to_float(
-        GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIPMAP_LOD_BIAS));
-    if (lod_bias > r->device_props.limits.maxSamplerLodBias) {
-        lod_bias = r->device_props.limits.maxSamplerLodBias;
-    } else if (lod_bias < -r->device_props.limits.maxSamplerLodBias) {
-        lod_bias = -r->device_props.limits.maxSamplerLodBias;
-    }
-    uint32_t sampler_max_anisotropy =
-        MIN(r->device_props.limits.maxSamplerAnisotropy, max_anisotropy);
-
-    VkSamplerCreateInfo sampler_create_info = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = vk_mag_filter,
-        .minFilter = vk_min_filter,
-        .addressModeU = lookup_texture_address_mode(
-            GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRU)),
-        .addressModeV = lookup_texture_address_mode(
-            GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRV)),
-        .addressModeW = (state.dimensionality > 2) ? lookup_texture_address_mode(
-            GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRP)) : 0,
-        .anisotropyEnable =
-            r->enabled_physical_device_features.samplerAnisotropy &&
-            sampler_max_anisotropy > 1,
-        .maxAnisotropy = sampler_max_anisotropy,
-        .borderColor = vk_border_color,
-        .compareEnable = VK_FALSE,
-        .compareOp = VK_COMPARE_OP_ALWAYS,
-        .mipmapMode = mipmap_nearest ? VK_SAMPLER_MIPMAP_MODE_NEAREST :
-                                       VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .minLod = mipmap_en ? MIN(state.min_mipmap_level, state.levels - 1) : 0.0,
-        .maxLod = mipmap_en ? MIN(state.max_mipmap_level, state.levels - 1) : 0.0,
-        .mipLodBias = lod_bias,
-        .pNext = sampler_next_struct,
-    };
-
-    VK_CHECK(vkCreateSampler(r->device, &sampler_create_info, NULL,
-                             &snode->sampler));
 
     set_texture_label(pg, snode);
 
@@ -1500,6 +1685,7 @@ void pgraph_vk_bind_textures(NV2AState *d)
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         if (!pgraph_is_texture_enabled(pg, i)) {
             r->texture_bindings[i] = &r->dummy_texture;
+            r->sampler_bindings[i] = &r->dummy_sampler;
             continue;
         }
 
@@ -1524,20 +1710,22 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->image = VK_NULL_HANDLE;
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
-    snode->sampler = VK_NULL_HANDLE;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)
 {
-    vkDestroySampler(r->device, snode->sampler, NULL);
-    snode->sampler = VK_NULL_HANDLE;
-
     vkDestroyImageView(r->device, snode->image_view, NULL);
     snode->image_view = VK_NULL_HANDLE;
 
     vmaDestroyImage(r->allocator, snode->image, snode->allocation);
     snode->image = VK_NULL_HANDLE;
     snode->allocation = VK_NULL_HANDLE;
+}
+
+static void sampler_cache_release_node_resources(PGRAPHVkState *r, SamplerCacheEntry *snode)
+{
+    vkDestroySampler(r->device, snode->sampler, NULL);
+    snode->sampler = VK_NULL_HANDLE;
 }
 
 static bool texture_cache_entry_pre_evict(Lru *lru, LruNode *node)
@@ -1599,6 +1787,62 @@ static void texture_cache_finalize(PGRAPHVkState *r)
     r->texture_cache_entries = NULL;
 }
 
+static void sampler_cache_entry_init(Lru *lru, LruNode *node, const void *state)
+{
+    SamplerCacheEntry *snode = container_of(node, SamplerCacheEntry, node);
+    snode->sampler = VK_NULL_HANDLE;
+}
+
+static bool sampler_cache_entry_pre_evict(Lru *lru, LruNode *node)
+{
+    PGRAPHVkState *r = container_of(lru, PGRAPHVkState, sampler_cache);
+    SamplerCacheEntry *snode = container_of(node, SamplerCacheEntry, node);
+
+    for (int i = 0; i < ARRAY_SIZE(r->sampler_bindings); i++) {
+        if (r->sampler_bindings[i] == snode) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void sampler_cache_entry_post_evict(Lru *lru, LruNode *node)
+{
+    PGRAPHVkState *r = container_of(lru, PGRAPHVkState, sampler_cache);
+    SamplerCacheEntry *snode = container_of(node, SamplerCacheEntry, node);
+    sampler_cache_release_node_resources(r, snode);
+}
+
+static bool sampler_cache_entry_compare(Lru *lru, LruNode *node,
+                                        const void *key)
+{
+    SamplerCacheEntry *snode = container_of(node, SamplerCacheEntry, node);
+    return memcmp(&snode->key, key, sizeof(SamplerKey));
+}
+
+static void sampler_cache_init(PGRAPHVkState *r)
+{
+    const size_t sampler_cache_size = 256;
+    lru_init(&r->sampler_cache);
+    r->sampler_cache_entries = g_malloc_n(sampler_cache_size, sizeof(SamplerCacheEntry));
+    nv2a_vk_assert(r->sampler_cache_entries != NULL);
+    for (int i = 0; i < sampler_cache_size; i++) {
+        lru_add_free(&r->sampler_cache, &r->sampler_cache_entries[i].node);
+    }
+    r->sampler_cache.init_node = sampler_cache_entry_init;
+    r->sampler_cache.compare_nodes = sampler_cache_entry_compare;
+    r->sampler_cache.pre_node_evict = sampler_cache_entry_pre_evict;
+    r->sampler_cache.post_node_evict = sampler_cache_entry_post_evict;
+}
+
+static void sampler_cache_finalize(PGRAPHVkState *r)
+{
+    lru_flush(&r->sampler_cache);
+    g_free(r->sampler_cache_entries);
+    r->sampler_cache_entries = NULL;
+}
+
 void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1620,6 +1864,7 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     texture_cache_init(r);
+    sampler_cache_init(r);
     create_dummy_texture(pg);
 
     r->texture_format_properties = g_malloc0_n(
@@ -1631,7 +1876,7 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
     }
 
     r->decode_thread_pool = g_thread_pool_new(
-        decode_task_func, NULL, (int)g_get_num_processors(), FALSE, NULL);
+        decode_task_func, NULL, MIN((int)g_get_num_processors(), 4), FALSE, NULL);
 }
 
 void pgraph_vk_finalize_textures(PGRAPHState *pg)
@@ -1647,12 +1892,15 @@ void pgraph_vk_finalize_textures(PGRAPHState *pg)
 
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         r->texture_bindings[i] = NULL;
+        r->sampler_bindings[i] = NULL;
     }
 
     destroy_dummy_texture(r);
+    sampler_cache_finalize(r);
     texture_cache_finalize(r);
 
     nv2a_vk_assert(r->texture_cache.num_used == 0);
+    nv2a_vk_assert(r->sampler_cache.num_used == 0);
 
     g_free(r->texture_format_properties);
     r->texture_format_properties = NULL;

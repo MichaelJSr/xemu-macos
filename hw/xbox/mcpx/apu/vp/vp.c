@@ -53,14 +53,6 @@ static const struct {
     { NV_PAPU_TVLMP, NV_PAPU_CVLMP, NV_PAPU_NVLMP }, // MP
 };
 
-static inline uint32_t ram_ldl(MCPXAPUState *d, hwaddr addr)
-{
-    if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
-        return ldl_le_p(&d->ram_ptr[addr]);
-    }
-    return ldl_le_phys(&address_space_memory, addr);
-}
-
 static inline uint16_t ram_ldw(MCPXAPUState *d, hwaddr addr)
 {
     if (__builtin_expect(addr + 2 <= d->ram_size, 1)) {
@@ -158,6 +150,7 @@ static float clampf(float v, float min, float max)
 
 static float g_attenuation_lut[4096];
 static float g_pitch_lut[65536];
+static float g_decay_base_log; // logf(0.99988799f), precomputed for expf-based envelope decay
 static bool g_apu_luts_initialized = false;
 
 static void apu_init_luts(void)
@@ -170,6 +163,7 @@ static void apu_init_luts(void)
         int16_t signed_val = (int16_t)i;
         g_pitch_lut[i] = 1.0f / powf(2.0f, signed_val / 4096.0f);
     }
+    g_decay_base_log = logf(0.99988799f);
     g_apu_luts_initialized = true;
 }
 
@@ -182,6 +176,10 @@ static float attenuate(uint16_t vol)
 static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
                                hwaddr offset, uint32_t mask)
 {
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
+    if (buf) {
+        return (ldl_le_p(&buf[offset / 4]) & mask) >> ctz32(mask);
+    }
     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
     return (ram_ldl(d, voice + offset) & mask) >> ctz32(mask);
 }
@@ -191,8 +189,18 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
 {
     hwaddr voice = d->regs[NV_PAPU_VPVADDR]
                     + voice_handle * NV_PAVS_SIZE;
-    uint32_t v = ram_ldl(d, voice + offset) & ~mask;
-    ram_stl(d, voice + offset, v | ((val << ctz32(mask)) & mask));
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
+    uint32_t old;
+    if (buf) {
+        old = ldl_le_p(&buf[offset / 4]);
+    } else {
+        old = ram_ldl(d, voice + offset);
+    }
+    uint32_t new_val = (old & ~mask) | ((val << ctz32(mask)) & mask);
+    if (buf) {
+        stl_le_p(&buf[offset / 4], new_val);
+    }
+    ram_stl(d, voice + offset, new_val);
 }
 
 static void voice_off(MCPXAPUState *d, uint16_t v)
@@ -844,8 +852,8 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
         } else {
             // FIXME: This formula and threshold is not accurate, but I can't
             // get it any better for now
-            value = 255.0f * powf(0.99988799f, (decay_rate * 16 - count) *
-                                                   4096 / decay_rate);
+            value = 255.0f * expf(((decay_rate * 16 - count) *
+                                    4096.0f / decay_rate) * g_decay_base_log);
         }
         if (value <= (sustain_level + 0.2f) || (value > 255.0f)) {
             // FIXME: Should we still update lvl?
@@ -890,7 +898,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
             // each round.
             float pos = clampf(1 - count / (release_rate * 16.0), 0, 1);
             uint8_t lvl = voice_get_mask(d, v, lvl_reg, lvl_mask);
-            value = powf(M_E, -6.91*pos)*lvl;
+            value = expf(-6.91f * pos) * lvl;
             count--; // FIXME: Should release count ascend or descend?
             voice_set_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask, count);
         }
@@ -1369,6 +1377,14 @@ static void voice_process(MCPXAPUState *d,
                           uint16_t v, int voice_list)
 {
     assert(v < MCPX_HW_MAX_VOICES);
+
+    hwaddr voice_addr = d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE;
+    uint32_t voice_buf[NV_PAVS_SIZE / 4];
+    if (__builtin_expect(voice_addr + NV_PAVS_SIZE <= d->ram_size, 1)) {
+        memcpy(voice_buf, &d->ram_ptr[voice_addr], NV_PAVS_SIZE);
+        d->vp.filters[v].voice_buf = voice_buf;
+    }
+
     bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                  NV_PAVS_VOICE_CFG_FMT_STEREO);
     unsigned int channels = stereo ? 2 : 1;
@@ -1381,7 +1397,7 @@ static void voice_process(MCPXAPUState *d,
     dbg->paused = paused;
 
     if (paused) {
-        return;
+        goto cleanup;
     }
 
     float ef_value = voice_step_envelope(
@@ -1420,7 +1436,7 @@ static void voice_process(MCPXAPUState *d,
             int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                         NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
             if (!active) {
-                return;
+                goto cleanup;
             }
             int count =
                 voice_resample(d, v, &samples[sample_count],
@@ -1435,7 +1451,7 @@ static void voice_process(MCPXAPUState *d,
     int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
     if (!active) {
-        return;
+        goto cleanup;
     }
 
     int bin[8];
@@ -1499,7 +1515,7 @@ static void voice_process(MCPXAPUState *d,
     }
 
     if (voice_should_mute(v)) {
-        return;
+        goto cleanup;
     }
 
     int fmode = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_MISC,
@@ -1599,6 +1615,9 @@ static void voice_process(MCPXAPUState *d,
             sample_buf[i][1] += g*samples[i][1];
         }
     }
+
+cleanup:
+    d->vp.filters[v].voice_buf = NULL;
 }
 
 static void get_voice_bin_src_dst(MCPXAPUState *d, int v,

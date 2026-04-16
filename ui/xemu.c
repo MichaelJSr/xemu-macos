@@ -58,6 +58,9 @@
 #include <stb_image.h>
 #include <locale.h>
 #include <math.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 #include <SDL3/SDL.h>
 
 #ifndef DEBUG_XEMU_C
@@ -750,6 +753,11 @@ static void vblank_timer_callback(void *opaque)
 static void *vblank_timer_thread(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
+
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     while (!qatomic_read(&qemu_exiting)) {
@@ -848,23 +856,15 @@ static void gl_render_frame(struct xemu_console *scon)
     xemu_snapshots_set_framebuffer_texture(tex, flip_required);
     xemu_hud_set_framebuffer_texture(tex, flip_required);
 
-    /* FIXME: Finer locking. Event handlers in segments of the code expect
-     * to be running on the main thread with the BQL. For now, acquire the
-     * lock and perform rendering, but release before swap to avoid
-     * possible lengthy blocking (for vsync).
-     */
     xemu_main_loop_lock();
     xemu_hud_update();
+    if (release_surface_texture) {
+        xb_surface_gl_destroy_texture(scon->surface);
+    }
     xemu_main_loop_unlock();
 
     xemu_hud_render();
     glFlush();
-
-    if (release_surface_texture) {
-        xemu_main_loop_lock();
-        xb_surface_gl_destroy_texture(scon->surface);
-        xemu_main_loop_unlock();
-    }
 
     nv2a_release_framebuffer_surface();
     SDL_GL_SwapWindow(scon->real_window);

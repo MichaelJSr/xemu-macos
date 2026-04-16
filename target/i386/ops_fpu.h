@@ -311,6 +311,12 @@ static void glue(gen_fcos, PREC_SUFFIX)(DisasContext *s)
     glue(tcg_gen_cos, PREC_SUFFIX)(st0, st0);
 }
 
+static void glue(gen_frndint, PREC_SUFFIX)(DisasContext *s)
+{
+    PREC_TYPE st0 = get_st0(s);
+    glue(tcg_gen_rint, PREC_SUFFIX)(st0, st0);
+}
+
 static void glue(gen_fld1_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.0);
@@ -319,6 +325,31 @@ static void glue(gen_fld1_ST0, PREC_SUFFIX)(DisasContext *s)
 static void glue(gen_fldz_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.0);
+}
+
+static void glue(gen_fldl2t_ST0, PREC_SUFFIX)(DisasContext *s)
+{
+    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.32192809488736234787);
+}
+
+static void glue(gen_fldl2e_ST0, PREC_SUFFIX)(DisasContext *s)
+{
+    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.44269504088896340736);
+}
+
+static void glue(gen_fldpi_ST0, PREC_SUFFIX)(DisasContext *s)
+{
+    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.14159265358979323846);
+}
+
+static void glue(gen_fldlg2_ST0, PREC_SUFFIX)(DisasContext *s)
+{
+    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.30102999566398119521);
+}
+
+static void glue(gen_fldln2_ST0, PREC_SUFFIX)(DisasContext *s)
+{
+    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.69314718055994530942);
 }
 
 static void glue(gen_fldz_FT0, PREC_SUFFIX)(DisasContext *s)

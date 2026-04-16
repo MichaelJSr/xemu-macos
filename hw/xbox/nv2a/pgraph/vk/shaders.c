@@ -209,16 +209,19 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
 
     VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
         TextureBinding *tex_binding = r->texture_bindings[i];
         if (!tex_binding) {
             tex_binding = &r->dummy_texture;
         }
 
+        SamplerCacheEntry *sampler_binding = r->sampler_bindings[i];
+        VkSampler sampler = sampler_binding ? sampler_binding->sampler
+                                            : r->dummy_sampler.sampler;
+
         image_infos[i] = (VkDescriptorImageInfo){
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .imageView = tex_binding->image_view,
-            .sampler = tex_binding->sampler,
+            .sampler = sampler,
         };
         descriptor_writes[2 + i] = (VkWriteDescriptorSet){
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,

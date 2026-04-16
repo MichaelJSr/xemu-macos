@@ -446,6 +446,10 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
 
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
     init_layout_from_spv(info);
+
+    free(info->glsl);
+    info->glsl = NULL;
+
     return info;
 }
 

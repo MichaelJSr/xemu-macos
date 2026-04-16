@@ -176,14 +176,6 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
     }
 }
 
-static bool check_surface_overlaps_range(const SurfaceBinding *surface,
-                                         hwaddr range_start, hwaddr range_len)
-{
-    hwaddr surface_end = surface->vram_addr + surface->size;
-    hwaddr range_end = range_start + range_len;
-    return !(surface->vram_addr >= range_end || range_start >= surface_end);
-}
-
 void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
                                                    hwaddr start, hwaddr size)
 {
@@ -343,6 +335,17 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         };
     }
 
+    size_t image_copy_size;
+    if (num_copy_regions > 1) {
+        image_copy_size = copy_regions[1].bufferOffset +
+                          (size_t)copy_regions[1].imageExtent.width *
+                          copy_regions[1].imageExtent.height;
+    } else {
+        image_copy_size = (size_t)copy_regions[0].imageExtent.width *
+                          copy_regions[0].imageExtent.height *
+                          surface->host_fmt.host_bytes_per_pixel;
+    }
+
     //
     // Copy image to staging buffer, or to compute_dst if we need to pack it
     //
@@ -364,7 +367,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = image_copy_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -400,7 +403,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = image_copy_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
@@ -415,7 +418,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = pack_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = packed_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
@@ -431,7 +434,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = image_copy_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -463,7 +466,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = packed_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -481,7 +484,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = pack_buffer,
-            .size = VK_WHOLE_SIZE
+            .size = packed_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
@@ -492,6 +495,9 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     // Download image data to host
     //
 
+    size_t download_size = (size_t)surface->width *
+                           surface->fmt.bytes_per_pixel * surface->height;
+
     VkBufferMemoryBarrier post_copy_dst_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -499,7 +505,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = copy_buffer,
-        .size = VK_WHOLE_SIZE
+        .size = download_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
@@ -509,8 +515,6 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
 
-    size_t download_size = (size_t)surface->width *
-                           surface->fmt.bytes_per_pixel * surface->height;
     if (!r->storage_buffers[BUFFER_STAGING_DST].is_coherent) {
         vmaInvalidateAllocation(r->allocator,
                                 r->storage_buffers[BUFFER_STAGING_DST].allocation,
@@ -602,13 +606,23 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
 
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     bool wait_for_downloads = false;
+    hwaddr range_end = addr + len;
 
-    SurfaceBinding *surface;
-    QTAILQ_FOREACH(surface, &r->surfaces, entry) {
-        if (!check_surface_overlaps_range(surface, addr, len)) {
-            continue;
+    int lo = 0, hi = r->surface_range_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (r->surface_ranges[mid].end <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
+    }
 
+    for (int i = lo; i < r->surface_range_count; i++) {
+        if (r->surface_ranges[i].start >= range_end) {
+            break;
+        }
+        SurfaceBinding *surface = r->surface_ranges[i].surface;
         hwaddr offset = addr - surface->vram_addr;
 
         if (write) {
@@ -728,27 +742,49 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
     r->invalid_surface_count++;
 }
 
-static bool check_surfaces_overlap(const SurfaceBinding *surface,
-                                   const SurfaceBinding *other_surface)
-{
-    return check_surface_overlaps_range(surface, other_surface->vram_addr,
-                                        other_surface->size);
-}
-
 static void invalidate_overlapping_surfaces(NV2AState *d,
                                             SurfaceBinding const *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 
-    SurfaceBinding *other_surface, *next_surface;
-    QTAILQ_FOREACH_SAFE (other_surface, &r->surfaces, entry, next_surface) {
-        if (check_surfaces_overlap(surface, other_surface)) {
-            trace_nv2a_pgraph_surface_evict_overlapping(
-                other_surface->vram_addr, other_surface->width,
-                other_surface->height, other_surface->pitch);
-            pgraph_vk_surface_download_if_dirty(d, other_surface);
-            invalidate_surface(d, other_surface);
+    hwaddr start = surface->vram_addr;
+    hwaddr range_end = surface->vram_addr + surface->size;
+
+    int lo = 0, hi = r->surface_range_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (r->surface_ranges[mid].end <= start) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
+    }
+
+    int count = 0;
+    for (int i = lo; i < r->surface_range_count; i++) {
+        if (r->surface_ranges[i].start >= range_end) {
+            break;
+        }
+        count++;
+    }
+
+    if (count == 0) {
+        return;
+    }
+
+    // Collect first: invalidate_surface calls surface_ranges_remove,
+    // which mutates the array we searched.
+    SurfaceBinding **to_invalidate = g_newa(SurfaceBinding *, count);
+    for (int i = 0; i < count; i++) {
+        to_invalidate[i] = r->surface_ranges[lo + i].surface;
+    }
+
+    for (int i = 0; i < count; i++) {
+        trace_nv2a_pgraph_surface_evict_overlapping(
+            to_invalidate[i]->vram_addr, to_invalidate[i]->width,
+            to_invalidate[i]->height, to_invalidate[i]->pitch);
+        pgraph_vk_surface_download_if_dirty(d, to_invalidate[i]);
+        invalidate_surface(d, to_invalidate[i]);
     }
 }
 
@@ -1784,11 +1820,10 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         nv2a_vk_assert(r->color_binding->height == r->zeta_binding->height);
     }
 
-    static int last_expire_frame_time;
-    if (d->pgraph.frame_time - last_expire_frame_time >= 8) {
+    if (d->pgraph.frame_time - r->last_expire_frame_time >= 8) {
         expire_old_surfaces(d);
         prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
-        last_expire_frame_time = d->pgraph.frame_time;
+        r->last_expire_frame_time = d->pgraph.frame_time;
     }
 }
 

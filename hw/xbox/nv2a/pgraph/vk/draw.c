@@ -1011,9 +1011,8 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     }
 
     const unsigned int regs[] = {
-        NV_PGRAPH_BLEND,       NV_PGRAPH_BLENDCOLOR,  NV_PGRAPH_CONTROL_0,
-        NV_PGRAPH_CONTROL_1,   NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,
-        NV_PGRAPH_SETUPRASTER, NV_PGRAPH_ZOFFSETBIAS, NV_PGRAPH_ZOFFSETFACTOR,
+        NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
+        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,   NV_PGRAPH_SETUPRASTER,
     };
 
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {
@@ -1048,9 +1047,8 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
     // FIXME: Register masking
     // FIXME: Use more dynamic state updates
     const int regs[] = {
-        NV_PGRAPH_BLEND,       NV_PGRAPH_BLENDCOLOR,  NV_PGRAPH_CONTROL_0,
-        NV_PGRAPH_CONTROL_1,   NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,
-        NV_PGRAPH_SETUPRASTER, NV_PGRAPH_ZOFFSETBIAS, NV_PGRAPH_ZOFFSETFACTOR,
+        NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
+        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,   NV_PGRAPH_SETUPRASTER,
     };
     nv2a_vk_assert(ARRAY_SIZE(regs) == ARRAY_SIZE(key->regs));
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {
@@ -1176,6 +1174,18 @@ static void create_pipeline(PGRAPHState *pg)
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     }
 
+    uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+    uint32_t polygon_mode = GET_MASK(setupraster,
+                                     NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    if ((polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_FILL &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_LINE &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_POINT &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE))) {
+        rasterizer.depthBiasEnable = VK_TRUE;
+    }
+
     if (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
         NV_PGRAPH_SETUPRASTER_CULLENABLE) {
         uint32_t cull_face = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
@@ -1252,8 +1262,6 @@ static void create_pipeline(PGRAPHState *pg)
         .colorWriteMask = write_mask,
     };
 
-    float blend_constant[4] = { 0, 0, 0, 0 };
-
     if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
         color_blend_attachment.blendEnable = VK_TRUE;
 
@@ -1280,9 +1288,6 @@ static void create_pipeline(PGRAPHState *pg)
             pgraph_blend_equation_vk_map[equation];
         color_blend_attachment.alphaBlendOp =
             pgraph_blend_equation_vk_map[equation];
-
-        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
-        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constant);
     }
 
     VkPipelineColorBlendStateCreateInfo color_blending = {
@@ -1291,15 +1296,17 @@ static void create_pipeline(PGRAPHState *pg)
         .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = r->color_binding ? 1 : 0,
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
-        .blendConstants[0] = blend_constant[0],
-        .blendConstants[1] = blend_constant[1],
-        .blendConstants[2] = blend_constant[2],
-        .blendConstants[3] = blend_constant[3],
     };
 
-    VkDynamicState dynamic_states[3] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                         VK_DYNAMIC_STATE_SCISSOR };
-    int num_dynamic_states = 2;
+    VkDynamicState dynamic_states[5] = { VK_DYNAMIC_STATE_VIEWPORT,
+                                         VK_DYNAMIC_STATE_SCISSOR,
+                                         VK_DYNAMIC_STATE_BLEND_CONSTANTS };
+    int num_dynamic_states = 3;
+
+    snode->has_dynamic_depth_bias = rasterizer.depthBiasEnable == VK_TRUE;
+    if (snode->has_dynamic_depth_bias) {
+        dynamic_states[num_dynamic_states++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+    }
 
     snode->has_dynamic_line_width =
         (r->enabled_physical_device_features.wideLines == VK_TRUE) &&
@@ -1316,24 +1323,6 @@ static void create_pipeline(PGRAPHState *pg)
         .dynamicStateCount = num_dynamic_states,
         .pDynamicStates = dynamic_states,
     };
-
-    // FIXME: Dither
-    // if (pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) &
-    //         NV_PGRAPH_CONTROL_0_DITHERENABLE))
-    // FIXME: point size
-    // FIXME: Edge Antialiasing
-    // bool anti_aliasing = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_ANTIALIASING),
-    // NV_PGRAPH_ANTIALIASING_ENABLE);
-    // if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-    //                           NV_PGRAPH_SETUPRASTER_LINESMOOTHENABLE) {
-    // FIXME: VK_EXT_line_rasterization
-    // }
-
-    // if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-    //                           NV_PGRAPH_SETUPRASTER_POLYSMOOTHENABLE) {
-    // FIXME: No direct analog. Just do it with MSAA.
-    // }
-
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1626,6 +1615,7 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_FLIP_STALL] = NV2A_PROF_FINISH_FLIP_STALL,
     [VK_FINISH_REASON_FLUSH] = NV2A_PROF_FINISH_FLUSH,
     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
+    [VK_FINISH_REASON_REPORTS_FULL] = NV2A_PROF_FINISH_REPORTS_FULL,
 };
 
 static void destroy_flight_framebuffers(PGRAPHState *pg, int slot)
@@ -1959,7 +1949,24 @@ static void begin_draw(PGRAPHState *pg)
                 clamp_line_width_to_device_limits(pg, pg->surface_scale_factor);
             vkCmdSetLineWidth(r->command_buffer, line_width);
         }
+
     }
+
+    if (r->pipeline_binding->has_dynamic_depth_bias) {
+        uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
+        uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
+        float depth_bias_constant = *(float *)&zbias_reg;
+        float depth_bias_slope = *(float *)&zfactor_reg;
+        vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
+                          depth_bias_slope);
+    }
+
+    float blend_constants[4] = { 0, 0, 0, 0 };
+    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
+        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
+        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
+    }
+    vkCmdSetBlendConstants(r->command_buffer, blend_constants);
 
     if (!pg->clearing) {
         bind_descriptor_sets(pg);
@@ -2248,35 +2255,6 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
 
     NV2A_VK_DGROUP_END();
 }
-
-#if 0
-static void pgraph_vk_debug_attrs(NV2AState *d)
-{
-    for (int vertex_idx = 0; vertex_idx < pg->draw_arrays_count[i]; vertex_idx++) {
-        NV2A_VK_DGROUP_BEGIN("Vertex %d+%d", pg->draw_arrays_start[i], vertex_idx);
-        for (int attr_idx = 0; attr_idx < NV2A_VERTEXSHADER_ATTRIBUTES; attr_idx++) {
-            VertexAttribute *attr = &pg->vertex_attributes[attr_idx];
-            if (attr->count) {
-                char *p = (char *)d->vram_ptr + r->attribute_offsets[attr_idx] + (pg->draw_arrays_start[i] + vertex_idx) * attr->stride;
-                NV2A_VK_DGROUP_BEGIN("Attribute %d data at %tx", attr_idx, (ptrdiff_t)(p - (char*)d->vram_ptr));
-                for (int count_idx = 0; count_idx < attr->count; count_idx++) {
-                    switch (attr->format) {
-                    case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F:
-                        NV2A_VK_DPRINTF("[%d] %f", count_idx, *(float*)p);
-                        p += sizeof(float);
-                        break;
-                    default:
-                        nv2a_vk_assert(0);
-                        break;
-                    }
-                }
-                NV2A_VK_DGROUP_END();
-            }
-        }
-        NV2A_VK_DGROUP_END();
-    }
-}
-#endif
 
 static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
                                VkDeviceSize offset)

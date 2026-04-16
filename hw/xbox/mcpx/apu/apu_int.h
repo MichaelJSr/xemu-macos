@@ -124,6 +124,14 @@ typedef struct MCPXAPUState {
     } monitor;
 } MCPXAPUState;
 
+static inline uint32_t ram_ldl(MCPXAPUState *d, hwaddr addr)
+{
+    if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
+        return ldl_le_p(&d->ram_ptr[addr]);
+    }
+    return ldl_le_phys(&address_space_memory, addr);
+}
+
 extern MCPXAPUState *g_state; // Used via debug handlers
 extern struct McpxApuDebug g_dbg, g_dbg_cache;
 extern int g_dbg_voice_monitor;

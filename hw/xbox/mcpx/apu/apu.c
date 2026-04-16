@@ -25,20 +25,18 @@ MCPXAPUState *g_state; // Used via debug handlers
 
 static void update_irq(MCPXAPUState *d)
 {
-    if (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
+    if (qatomic_read(&d->regs[NV_PAPU_FECTL]) &
+        NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
         qatomic_or(&d->regs[NV_PAPU_ISTS], NV_PAPU_ISTS_FETINTSTS);
     }
-    if ((d->regs[NV_PAPU_IEN] & NV_PAPU_ISTS_GINTSTS) &&
-        ((d->regs[NV_PAPU_ISTS] & ~NV_PAPU_ISTS_GINTSTS) &
-         d->regs[NV_PAPU_IEN])) {
+    uint32_t ien = qatomic_read(&d->regs[NV_PAPU_IEN]);
+    uint32_t ists = qatomic_read(&d->regs[NV_PAPU_ISTS]);
+    if ((ien & NV_PAPU_ISTS_GINTSTS) &&
+        ((ists & ~NV_PAPU_ISTS_GINTSTS) & ien)) {
         qatomic_or(&d->regs[NV_PAPU_ISTS], NV_PAPU_ISTS_GINTSTS);
-        // fprintf(stderr, "mcpx irq raise ien=%08x ists=%08x\n",
-        //         d->regs[NV_PAPU_IEN], d->regs[NV_PAPU_ISTS]);
         pci_irq_assert(PCI_DEVICE(d));
     } else {
         qatomic_and(&d->regs[NV_PAPU_ISTS], ~NV_PAPU_ISTS_GINTSTS);
-        // fprintf(stderr, "mcpx irq lower ien=%08x ists=%08x\n",
-        //         d->regs[NV_PAPU_IEN], d->regs[NV_PAPU_ISTS]);
         pci_irq_deassert(PCI_DEVICE(d));
     }
 }
