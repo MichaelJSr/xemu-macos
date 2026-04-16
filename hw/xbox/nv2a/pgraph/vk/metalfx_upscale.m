@@ -438,6 +438,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
             METALFX_DPRINTF(
                     "MetalFX: Failed to create temporal scaler %dx%d -> %dx%d\n",
                     input_w, input_h, output_w, output_h);
+            metalfx_temporal_destroy_locked();
             g_temporal.failedInputW = input_w;
             g_temporal.failedInputH = input_h;
             g_temporal.failedOutputW = req_output_w;

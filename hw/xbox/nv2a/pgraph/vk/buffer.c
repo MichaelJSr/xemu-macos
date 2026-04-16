@@ -117,8 +117,6 @@ void pgraph_vk_init_buffers(NV2AState *d)
     };
 
     r->bitmap_size = memory_region_size(d->vram) / 4096;
-    r->uploaded_bitmap = bitmap_new(r->bitmap_size);
-    bitmap_clear(r->uploaded_bitmap, 0, r->bitmap_size);
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         r->flight[i].uploaded_bitmap = bitmap_new(r->bitmap_size);
         bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
@@ -184,8 +182,6 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
         destroy_buffer(pg, &r->storage_buffers[i]);
     }
 
-    g_free(r->uploaded_bitmap);
-    r->uploaded_bitmap = NULL;
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         g_free(r->flight[i].uploaded_bitmap);
         r->flight[i].uploaded_bitmap = NULL;

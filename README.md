@@ -40,25 +40,25 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Scoped Vertex RAM Barrier** | `flush_memory_buffer` uses `find_first_bit`/`find_last_bit` on the uploaded bitmap to compute the actual dirty page range. Barrier and `vmaFlushAllocation` scope only that subregion instead of `VK_WHOLE_SIZE`. |
 | **Pipeline Dirty Tracking** | `vertex_state_dirty` flag replaces per-draw `memcmp`. |
 | **Staging Buffers** | 512 MiB staging with persistent VMA mapping. All staging users (texture upload, PVIDEO, dummy texture) use the persistent `.mapped` pointer directly — no per-upload map/unmap. |
-| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Coherent memory flush elided on Apple Silicon. Reduces MoltenVK Metal fence overhead. |
-| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` replaces O(n) QTAILQ scan. Range query (`surface_get_within`) tries O(1) exact lookup first before falling back to linear scan. |
+| **Narrower Barriers** | `ALL_COMMANDS_BIT` replaced with precise stage flags. Coherent memory flush elided on Apple Silicon. Barriers in PVIDEO upload, surface upload/download, depth-stencil pack/unpack, and texture copy paths scoped to exact byte ranges instead of `VK_WHOLE_SIZE`. Reduces MoltenVK Metal fence overhead. |
+| **O(1) Surface Lookup** | `GHashTable` keyed on `vram_addr` for exact match. Sorted range array with binary search for `surface_get_within` and `download_surfaces_in_range_if_dirty` — O(log n) instead of O(n) scan. |
+| **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore flight slots with full resource partitioning: staging buffers (index, vertex, uniform, texture) divided into per-slot ranges with `buffer_limit`; per-slot `uploaded_bitmap` for vertex RAM dirty tracking with cross-slot conflict detection; per-slot descriptor set index ranges. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
-| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. IOProc uses `os_unfair_lock_trylock` — outputs silence on contention rather than blocking the real-time audio thread. |
+| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. IOProc uses `os_unfair_lock_trylock` — outputs silence on contention rather than blocking the real-time audio thread. Default buffer reduced to 4096 samples (~85ms at 48kHz) for lower latency. |
 
 ### Low Impact / Quality of Life
 
 | Optimization | Description |
 |---|---|
-| **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. `os_unfair_lock` guards MetalFX state; released before `waitUntilCompleted` so GPU wait doesn't block other threads. |
+| **MetalFX Direct IOSurface** | Upscaler/interpolator write directly to IOSurface on unified memory. Single shared `MTLDevice` + `MTLCommandQueue` across spatial, temporal, and interpolation (refcounted). `os_unfair_lock` guards MetalFX state; released before `waitUntilCompleted` so GPU wait doesn't block other threads. Feature-support queries cached in static vars. |
 | **MoltenVK Tuning** | Argument buffers, prefilled command buffers, async queue submits, fast-math, resume-lost-device. |
 | **Pool Sizing** | Descriptor sets 8192, pipeline cache 4096, texture cache 8192, invalid surface pool 128. Sized for high-memory Apple Silicon systems. |
 | **Scratch Image Skip** | At scale=1 on macOS, upload copies directly to main image (AMD workaround skipped). |
-| **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). |
+| **Counter/Debug Gating** | Profile counters and debug groups stripped as no-ops in release. Critical array bounds checks use `__builtin_unreachable()` for zero-cost optimization hints in perf builds (full diagnostic + `abort()` in debug). MetalFX/IOSurface `fprintf(stderr)` messages gated behind `METALFX_DPRINTF`/`DISPLAY_DPRINTF` macros (no-ops in release). |
 | **O(1) Render Pass Lookup** | `GHashTable` with packed key replaces linear scan (~5 entries). |
 | **VMA Budget Trimming** | Texture cache LRU eviction when allocation > 2 GiB and > 95% budget. Thresholds tuned for high-memory unified memory systems (e.g. 192 GB M2 Ultra). |
 | **Build** | `-mcpu=native`, thin LTO, `-O3`. STBI_NEON, fpng CRC32. |
-| **Flight Slot Infrastructure** | CB/fence/semaphore per-slot (N=1). Ready for N>1 pipelining. |
 
 ### MoltenVK Compatibility Layer
 
@@ -94,6 +94,9 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **MetalFX Interpolation Stale Depth** | `metalfx_interpolation_generate` cached depth IOSurface textures but never cleared them when depth inputs transitioned to NULL. Interpolator bound stale depth from a previous frame. Added `else if (!depthB/A)` branches to nil cached textures. |
 | **MetalFX Spatial Init Leak** | If `create_iosurface_bgra` or `texture_from_iosurface` failed after the `MTLFXSpatialScaler` and Metal device/queue were created, the early return leaked those objects. `metalfx_destroy_locked` only ran when `initialized == true`, which was never set. All failure paths now call `metalfx_destroy_locked`. |
 | **DecodeTaskBatch Mixed Sync Model** | `remaining` field declared `volatile int` but updated via `qatomic_dec_fetch` and initialized with plain store. Removed `volatile`; initialization uses `qatomic_set`. |
+| **MetalFX `is_supported()` Device Leak** | `metalfx_is_supported()`, `metalfx_temporal_is_supported()`, and `metalfx_interpolation_is_supported()` each called `MTLCreateSystemDefaultDevice()` (retained) on every call without releasing. Called from the display path, causing a slow leak. Cached result in static var. |
+| **MetalFX Interpolation Init Leak** | If `MTLFXFrameInterpolator` creation failed after `MTLDevice` and `MTLCommandQueue` were allocated, the failure path returned without cleanup. Added `metalfx_interpolation_destroy_locked()` on failure, matching the spatial init pattern. |
+| **MetalFX Temporal Init Leak** | If `newTemporalScalerWithDevice:` returned nil after `shared_metal_acquire`, the failure path leaked the shared device refcount and left `g_temporal.device` set. Added `metalfx_temporal_destroy_locked()` on failure. |
 
 ---
 
@@ -109,7 +112,6 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Separate compute queue** | No effect | MoltenVK only exposes `queueCount=1`. Infrastructure in place but inactive. |
 | **Voice register cache** | Black screen | `__thread` cache served stale data; Xbox HW modifies registers via DMA/MMIO outside cached paths. |
 | **Surface upload bump allocator** | Corruption | Staging shared between texture (main CB) and surface (aux CB) uploads; offsets conflicted. |
-| **Flight slots N>1** | Corruption | 7 shared resources (uniform/index/vertex staging+device buffers, uploaded_bitmap) remain unpartitioned. ~20+ call sites need changes; minimal benefit on Apple Silicon. |
 | **Async MetalFX (`dispatch_semaphore`)** | Tearing | IOSurface consumed by GL before Metal finished writing. Writer must complete before reader binds. |
 | **Render pass hash table (mid-struct)** | Segfault | Inserting `GHashTable*` field mid-struct shifted member offsets; stale `.o` files read wrong memory. Fixed by adding field at end of struct instead. |
 | **Dirty-range VRAM flush** | Segfault (then reverted) | `bitmap_clear` before `flush_memory_buffer` zeroed bitmap before read. Minimal benefit on Apple Silicon coherent memory anyway. |
