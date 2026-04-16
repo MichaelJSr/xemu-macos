@@ -153,8 +153,8 @@ static void pgraph_gl_pre_savevm_trigger(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
-    qatomic_set(&r->download_dirty_surfaces_pending, true);
     qemu_event_reset(&r->dirty_surfaces_download_complete);
+    qatomic_set(&r->download_dirty_surfaces_pending, true);
 }
 
 static void pgraph_gl_pre_savevm_wait(NV2AState *d)

@@ -75,8 +75,8 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     };
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
-    VK_CHECK(vkWaitForFences(r->device, 1, &r->aux_fence,
-                             VK_TRUE, UINT64_MAX));
+    VK_CHECK(vkWaitForFences(r->device, 1, &r->aux_fence, VK_TRUE,
+                             UINT64_MAX));
 
     r->in_aux_command_buffer = false;
 }

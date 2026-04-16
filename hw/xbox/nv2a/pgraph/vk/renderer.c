@@ -180,8 +180,8 @@ static void pgraph_vk_flip_stall(NV2AState *d)
 
 static void pgraph_vk_pre_savevm_trigger(NV2AState *d)
 {
-    qatomic_set(&d->pgraph.vk_renderer_state->download_dirty_surfaces_pending, true);
     qemu_event_reset(&d->pgraph.vk_renderer_state->dirty_surfaces_download_complete);
+    qatomic_set(&d->pgraph.vk_renderer_state->download_dirty_surfaces_pending, true);
 }
 
 static void pgraph_vk_pre_savevm_wait(NV2AState *d)

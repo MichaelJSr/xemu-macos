@@ -1744,6 +1744,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         if (check_budget) {
             pgraph_vk_check_memory_budget(pg);
         }
+
     }
 
     NV2AState *d = container_of(pg, NV2AState, pgraph);

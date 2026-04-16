@@ -144,7 +144,8 @@ static bool pfifo_stall_for_flip(NV2AState *d)
 
 static bool pfifo_puller_should_stall(NV2AState *d)
 {
-    return pfifo_stall_for_flip(d) || qatomic_read(&d->pgraph.waiting_for_nop) ||
+    return pfifo_stall_for_flip(d) ||
+           qatomic_read(&d->pgraph.waiting_for_nop) ||
            qatomic_read(&d->pgraph.waiting_for_context_switch) ||
            !can_fifo_access(d);
 }
@@ -187,11 +188,9 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         SET_MASK(*engine_reg, 3 << (4*subchannel), entry.engine);
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, entry.engine);
 
-        // TODO: this is fucked
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_mutex_lock(&d->pgraph.lock);
 
-        // Switch contexts if necessary
         if (can_fifo_access(d)) {
             pgraph_context_switch(d, entry.channel_id);
             if (!qatomic_read(&d->pgraph.waiting_for_context_switch)) {
@@ -222,7 +221,6 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         assert(engine == ENGINE_GRAPHICS);
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, engine);
 
-        // TODO: this is fucked
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_mutex_lock(&d->pgraph.lock);
 
@@ -478,8 +476,6 @@ void *pfifo_thread(void *arg)
 
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
-
-            // Both the pusher and puller are waiting for some action
             qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
         }
 

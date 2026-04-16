@@ -516,6 +516,14 @@ G_NORETURN void helper_hlt(CPUX86State *env)
     CPUState *cs = env_cpu(env);
 
     do_end_instruction(env);
+
+#ifdef XBOX
+    if (!(env->eflags & IF_MASK) &&
+        (cs->interrupt_request & CPU_INTERRUPT_HARD)) {
+        env->eflags |= IF_MASK;
+    }
+#endif
+
     cs->halted = 1;
     cs->exception_index = EXCP_HLT;
     cpu_loop_exit(cs);

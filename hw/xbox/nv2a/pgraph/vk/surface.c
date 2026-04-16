@@ -182,19 +182,12 @@ void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
     PGRAPHVkState *r = pg->vk_renderer_state;
     hwaddr range_end = start + size;
 
-    int lo = 0, hi = r->surface_range_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (r->surface_ranges[mid].end <= start) {
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-
-    for (int i = lo; i < r->surface_range_count; i++) {
+    for (int i = 0; i < r->surface_range_count; i++) {
         if (r->surface_ranges[i].start >= range_end) {
             break;
+        }
+        if (r->surface_ranges[i].end <= start) {
+            continue;
         }
         pgraph_vk_surface_download_if_dirty(
             container_of(pg, NV2AState, pgraph),
@@ -514,7 +507,6 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_1);
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
-
     if (!r->storage_buffers[BUFFER_STAGING_DST].is_coherent) {
         vmaInvalidateAllocation(r->allocator,
                                 r->storage_buffers[BUFFER_STAGING_DST].allocation,
@@ -602,25 +594,24 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
                                     hwaddr len, bool write)
 {
     NV2AState *d = (NV2AState *)opaque;
+
+    bool had_bql = bql_locked();
+    if (had_bql) {
+        bql_unlock();
+    }
+
     qemu_mutex_lock(&d->pgraph.lock);
 
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     bool wait_for_downloads = false;
     hwaddr range_end = addr + len;
 
-    int lo = 0, hi = r->surface_range_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (r->surface_ranges[mid].end <= addr) {
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-
-    for (int i = lo; i < r->surface_range_count; i++) {
+    for (int i = 0; i < r->surface_range_count; i++) {
         if (r->surface_ranges[i].start >= range_end) {
             break;
+        }
+        if (r->surface_ranges[i].end <= addr) {
+            continue;
         }
         SurfaceBinding *surface = r->surface_ranges[i].surface;
         hwaddr offset = addr - surface->vram_addr;
@@ -650,6 +641,10 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
         pfifo_kick(d);
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_event_wait(&r->downloads_complete);
+    }
+
+    if (had_bql) {
+        bql_lock();
     }
 }
 
@@ -750,20 +745,17 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
     hwaddr start = surface->vram_addr;
     hwaddr range_end = surface->vram_addr + surface->size;
 
-    int lo = 0, hi = r->surface_range_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (r->surface_ranges[mid].end <= start) {
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-
     int count = 0;
-    for (int i = lo; i < r->surface_range_count; i++) {
+    int first = -1;
+    for (int i = 0; i < r->surface_range_count; i++) {
         if (r->surface_ranges[i].start >= range_end) {
             break;
+        }
+        if (r->surface_ranges[i].end <= start) {
+            continue;
+        }
+        if (first < 0) {
+            first = i;
         }
         count++;
     }
@@ -772,11 +764,16 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
         return;
     }
 
-    // Collect first: invalidate_surface calls surface_ranges_remove,
-    // which mutates the array we searched.
     SurfaceBinding **to_invalidate = g_newa(SurfaceBinding *, count);
-    for (int i = 0; i < count; i++) {
-        to_invalidate[i] = r->surface_ranges[lo + i].surface;
+    int j = 0;
+    for (int i = first; i < r->surface_range_count && j < count; i++) {
+        if (r->surface_ranges[i].start >= range_end) {
+            break;
+        }
+        if (r->surface_ranges[i].end <= start) {
+            continue;
+        }
+        to_invalidate[j++] = r->surface_ranges[i].surface;
     }
 
     for (int i = 0; i < count; i++) {

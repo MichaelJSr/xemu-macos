@@ -425,6 +425,12 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
                                     hwaddr len, bool write)
 {
     NV2AState *d = (NV2AState *)opaque;
+
+    bool had_bql = bql_locked();
+    if (had_bql) {
+        bql_unlock();
+    }
+
     qemu_mutex_lock(&d->pgraph.lock);
 
     PGRAPHGLState *r = d->pgraph.gl_renderer_state;
@@ -463,6 +469,10 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
         pfifo_kick(d);
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_event_wait(&r->downloads_complete);
+    }
+
+    if (had_bql) {
+        bql_lock();
     }
 }
 
