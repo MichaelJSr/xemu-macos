@@ -1557,8 +1557,7 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
     }
     VkDeviceSize size = end - offset;
 
-    bool is_coherent = vram->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    if (!is_coherent) {
+    if (!vram->is_coherent) {
         VK_CHECK(vmaFlushAllocation(r->allocator, vram->allocation,
                                     offset, size));
     }
@@ -2306,7 +2305,7 @@ void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta)
 
 static bool ensure_buffer_space(PGRAPHState *pg, int index, VkDeviceSize size)
 {
-    if (!pgraph_vk_buffer_has_space_for(pg, index, size, 1)) {
+    if (!pgraph_vk_buffer_has_space_for(pg, index, size, 1, 1)) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
         return true;
     }
@@ -2435,7 +2434,7 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
     }
 
     nv2a_vk_assert(pgraph_vk_buffer_has_space_for(pg, BUFFER_VERTEX_INLINE_STAGING,
-                                          remap.buffer_space_required, 256));
+                                          remap.buffer_space_required, 1, 256));
 
     // FIXME: Caching
     // FIXME: Account for only what is drawn

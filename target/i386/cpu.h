@@ -1889,6 +1889,7 @@ typedef struct CPUArchState {
     unsigned int fpstt; /* top of stack index */
     uint16_t fpus;
     uint16_t fpuc;
+    uint16_t cached_fpuc_rc; /* last fpuc RC bits written to host FPCR */
     uint8_t fptags[8];   /* 0 = valid, 1 = empty */
     FPReg fpregs[8];
     /* KVM-only so far */

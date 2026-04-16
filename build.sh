@@ -263,7 +263,8 @@ case "$platform" in # Adjust compilation options based on platform
                        -mmacosx-version-min=$macos_min_ver"
         export LDFLAGS="${LDFLAGS} \
                         -arch ${target_arch} \
-                        -isysroot ${sdk}"
+                        -isysroot ${sdk} \
+                        -mmacosx-version-min=$macos_min_ver"
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
         elif [ "$target_arch" == "arm64" ]; then

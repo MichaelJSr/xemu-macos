@@ -142,8 +142,9 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;
 
-    uint8_t *mapped_memory_ptr = r->storage_buffers[BUFFER_STAGING_SRC].mapped;
-    assert(mapped_memory_ptr);
+    uint8_t *mapped_memory_ptr =
+        r->storage_buffers[BUFFER_STAGING_SRC].mapped + staging_base;
+    assert(r->storage_buffers[BUFFER_STAGING_SRC].mapped);
 
     uint8_t *src = d->vram_ptr + state.base + state.offset;
     for (int y = 0; y < state.in_height; y++) {
@@ -152,9 +153,11 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
                state.in_width * 2);
     }
 
-    vmaFlushAllocation(r->allocator,
-                       r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
-                       yuv_size);
+    if (!r->storage_buffers[BUFFER_STAGING_SRC].is_coherent) {
+        vmaFlushAllocation(r->allocator,
+                           r->storage_buffers[BUFFER_STAGING_SRC].allocation,
+                           staging_base, yuv_size);
+    }
 
     size_t rgba_size = (size_t)state.in_width * state.in_height * 4;
 
@@ -165,13 +168,14 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = r->storage_buffers[BUFFER_STAGING_SRC].buffer,
+        .offset = staging_base,
         .size = yuv_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
                          &host_barrier, 0, NULL);
 
-    VkBufferCopy yuv_copy = { .size = yuv_size };
+    VkBufferCopy yuv_copy = { .srcOffset = staging_base, .size = yuv_size };
     vkCmdCopyBuffer(cmd, r->storage_buffers[BUFFER_STAGING_SRC].buffer,
                     r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                     1, &yuv_copy);
@@ -592,6 +596,9 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease((IOSurfaceRef)d->iosurface);
         d->iosurface = NULL;
     }
+    d->last_cgl_surface = NULL;
+    d->last_cgl_width = 0;
+    d->last_cgl_height = 0;
 #endif
 
     vkDestroyImageView(r->device, d->image_view, NULL);
@@ -1355,8 +1362,6 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             mfx_mode = 1;
         } else if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_TEMPORAL) {
             mfx_mode = 2;
-        } else if (g_config.display.metalfx_upscale) {
-            mfx_mode = 1;
         }
 
         /*

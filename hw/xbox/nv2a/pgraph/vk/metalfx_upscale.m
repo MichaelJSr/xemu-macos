@@ -272,11 +272,14 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
 
     @autoreleasepool {
         if (inputSurface != g_spatial.cachedInputSurface) {
-            g_spatial.inputTexture = texture_from_iosurface(
+            id<MTLTexture> tex = texture_from_iosurface(
                 g_spatial.device, inputSurface, MTLPixelFormatBGRA8Unorm,
                 g_spatial.inputWidth, g_spatial.inputHeight,
                 MTLTextureUsageShaderRead);
-            g_spatial.cachedInputSurface = inputSurface;
+            if (tex) {
+                g_spatial.inputTexture = tex;
+                g_spatial.cachedInputSurface = inputSurface;
+            }
         }
         if (!g_spatial.inputTexture) {
             os_unfair_lock_unlock(&g_metalfx_lock);
@@ -565,11 +568,14 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
 
     @autoreleasepool {
         if (colorSurface != g_temporal.cachedColorSurface) {
-            g_temporal.colorTexture = texture_from_iosurface(
+            id<MTLTexture> tex = texture_from_iosurface(
                 g_temporal.device, colorSurface, MTLPixelFormatBGRA8Unorm,
                 g_temporal.inputWidth, g_temporal.inputHeight,
                 MTLTextureUsageShaderRead);
-            g_temporal.cachedColorSurface = colorSurface;
+            if (tex) {
+                g_temporal.colorTexture = tex;
+                g_temporal.cachedColorSurface = colorSurface;
+            }
         }
         if (!g_temporal.colorTexture) {
             os_unfair_lock_unlock(&g_metalfx_lock);
@@ -577,11 +583,14 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         }
 
         if (depthSurface && depthSurface != g_temporal.cachedDepthSurface) {
-            g_temporal.depthTexture = texture_from_iosurface(
+            id<MTLTexture> tex = texture_from_iosurface(
                 g_temporal.device, depthSurface, MTLPixelFormatR32Float,
                 g_temporal.inputWidth, g_temporal.inputHeight,
                 MTLTextureUsageShaderRead);
-            g_temporal.cachedDepthSurface = depthSurface;
+            if (tex) {
+                g_temporal.depthTexture = tex;
+                g_temporal.cachedDepthSurface = depthSurface;
+            }
         }
         if (!depthSurface) {
             g_temporal.depthTexture = nil;
@@ -852,16 +861,22 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
 
             /* colorB = current frame, colorA = previous frame */
             if (colorB != g_interp.lastColorCur) {
-                g_interp.cachedColorCur = texture_from_iosurface(
+                id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, colorB, MTLPixelFormatBGRA8Unorm,
                     g_interp.width, g_interp.height, readUsage);
-                g_interp.lastColorCur = colorB;
+                if (tex) {
+                    g_interp.cachedColorCur = tex;
+                    g_interp.lastColorCur = colorB;
+                }
             }
             if (colorA != g_interp.lastColorPrev) {
-                g_interp.cachedColorPrev = texture_from_iosurface(
+                id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, colorA, MTLPixelFormatBGRA8Unorm,
                     g_interp.width, g_interp.height, readUsage);
-                g_interp.lastColorPrev = colorA;
+                if (tex) {
+                    g_interp.cachedColorPrev = tex;
+                    g_interp.lastColorPrev = colorA;
+                }
             }
             if (!g_interp.cachedColorCur || !g_interp.cachedColorPrev) {
                 os_unfair_lock_unlock(&g_metalfx_lock);
@@ -869,19 +884,25 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             }
 
             if (depthB && depthB != g_interp.lastDepthCur) {
-                g_interp.cachedDepthCur = texture_from_iosurface(
+                id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, depthB, MTLPixelFormatR32Float,
                     g_interp.width, g_interp.height, readUsage);
-                g_interp.lastDepthCur = depthB;
+                if (tex) {
+                    g_interp.cachedDepthCur = tex;
+                    g_interp.lastDepthCur = depthB;
+                }
             } else if (!depthB) {
                 g_interp.cachedDepthCur = nil;
                 g_interp.lastDepthCur = NULL;
             }
             if (depthA && depthA != g_interp.lastDepthPrev) {
-                g_interp.cachedDepthPrev = texture_from_iosurface(
+                id<MTLTexture> tex = texture_from_iosurface(
                     g_interp.device, depthA, MTLPixelFormatR32Float,
                     g_interp.width, g_interp.height, readUsage);
-                g_interp.lastDepthPrev = depthA;
+                if (tex) {
+                    g_interp.cachedDepthPrev = tex;
+                    g_interp.lastDepthPrev = depthA;
+                }
             } else if (!depthA) {
                 g_interp.cachedDepthPrev = nil;
                 g_interp.lastDepthPrev = NULL;

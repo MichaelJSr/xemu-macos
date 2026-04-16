@@ -622,8 +622,10 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     staging->buffer_offset = buffer_offset;
 
-    vmaFlushAllocation(r->allocator, staging->allocation,
-                       base_offset, texture_data_size);
+    if (!staging->is_coherent) {
+        vmaFlushAllocation(r->allocator, staging->allocation,
+                           base_offset, texture_data_size);
+    }
 
     {
         VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
@@ -1062,9 +1064,11 @@ static void create_dummy_texture(PGRAPHState *pg)
 
     memset(mapped_memory_ptr, 0xff, texture_data_size);
 
-    vmaFlushAllocation(r->allocator,
-                       r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
-                       texture_data_size);
+    if (!r->storage_buffers[BUFFER_STAGING_SRC].is_coherent) {
+        vmaFlushAllocation(r->allocator,
+                           r->storage_buffers[BUFFER_STAGING_SRC].allocation, 0,
+                           texture_data_size);
+    }
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);

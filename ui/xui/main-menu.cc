@@ -770,7 +770,7 @@ void MainMenuDisplayView::Draw()
                  "Off\0"
                  "Spatial\0"
                  "Temporal\0",
-                 "MetalFX upscaling mode (Temporal recommended for best quality)");
+                 "MetalFX upscaling mode");
     ChevronCombo("Frame Interpolation", &g_config.display.frame_interpolation,
                  "Off\0"
                  "2x (60fps)\0"
@@ -1289,7 +1289,9 @@ int MainMenuSnapshotsView::OnSearchTextUpdate(ImGuiInputTextCallbackData *data)
         return 0;
     }
 
-    char *buf = g_strdup_printf("(.*)%s(.*)", data->Buf);
+    gchar *escaped = g_regex_escape_string(data->Buf, -1);
+    char *buf = g_strdup_printf("(.*)%s(.*)", escaped);
+    g_free(escaped);
     win->m_search_regex =
         g_regex_new(buf, (GRegexCompileFlags)0, (GRegexMatchFlags)0, &gerr);
     g_free(buf);

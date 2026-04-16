@@ -359,7 +359,8 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_get_framesizerange(core->outputDeviceID,
                                           &frameRange);
     if (status == kAudioHardwareBadObjectError) {
-        return 0;
+        core->outputDeviceID = kAudioDeviceUnknown;
+        return status;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -381,7 +382,8 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_set_framesize(core->outputDeviceID,
                                      &core->audioDevicePropertyBufferFrameSize);
     if (status == kAudioHardwareBadObjectError) {
-        return 0;
+        core->outputDeviceID = kAudioDeviceUnknown;
+        return status;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -394,7 +396,8 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_get_framesize(core->outputDeviceID,
                                      &core->audioDevicePropertyBufferFrameSize);
     if (status == kAudioHardwareBadObjectError) {
-        return 0;
+        core->outputDeviceID = kAudioDeviceUnknown;
+        return status;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -407,7 +410,8 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_set_streamformat(core->outputDeviceID,
                                         &streamBasicDescription);
     if (status == kAudioHardwareBadObjectError) {
-        return 0;
+        core->outputDeviceID = kAudioDeviceUnknown;
+        return status;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -433,7 +437,8 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
                                        &core->hw,
                                        &core->ioprocid);
     if (status == kAudioHardwareBadDeviceError) {
-        return 0;
+        core->outputDeviceID = kAudioDeviceUnknown;
+        return status;
     }
     if (status != kAudioHardwareNoError || core->ioprocid == NULL) {
         coreaudio_playback_logerr (status, "Could not set IOProc\n");
@@ -549,7 +554,7 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
     audio_pcm_init_info (&hw->info, as);
 
     core->frameSizeSetting = audio_buffer_frames(
-        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 4096);
+        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 2048);
 
     core->bufferCount = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
 

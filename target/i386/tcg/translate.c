@@ -1649,17 +1649,28 @@ static void gen_movi_f64(DisasContext *s, TCGv_f64 ret, double arg)
 
 static void gen_flcr(DisasContext *s)
 {
-    /* TODO: Oversynchronized */
     if (s->flcr_set) {
         return;
     }
 
+    TCGv_i32 rc_bits = tcg_temp_new_i32();
+    tcg_gen_ld16u_i32(rc_bits, tcg_env, offsetof(CPUX86State, fpuc));
+    tcg_gen_andi_i32(rc_bits, rc_bits, 0xc00);
+
+    TCGv_i32 cached = tcg_temp_new_i32();
+    tcg_gen_ld16u_i32(cached, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
+
+    TCGLabel *skip = gen_new_label();
+    tcg_gen_brcond_i32(TCG_COND_EQ, rc_bits, cached, skip);
+
+    tcg_gen_st16_i32(rc_bits, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
+
     TCGv_i32 v = tcg_temp_new_i32();
-    tcg_gen_ld16u_i32(v, tcg_env, offsetof(CPUX86State, fpuc));
-    tcg_gen_andi_i32(v, v, 0xc00);
-    tcg_gen_shli_i32(v, v, 3);
+    tcg_gen_shli_i32(v, rc_bits, 3);
     tcg_gen_ori_i32(v, v, 0x1f80);
     tcg_gen_flcr(v);
+
+    gen_set_label(skip);
     s->flcr_set = true;
 }
 

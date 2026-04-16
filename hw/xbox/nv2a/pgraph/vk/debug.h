@@ -56,7 +56,7 @@ extern int nv2a_vk_dgroup_indent;
         VkResult vk_result = (x);                             \
         if (vk_result != VK_SUCCESS) {                        \
             fprintf(stderr, "vk_result = %d\n", vk_result);   \
-            __builtin_unreachable();                           \
+            __builtin_trap();                                  \
         }                                                     \
     } while (0)
 

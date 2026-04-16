@@ -264,36 +264,37 @@ static uint64_t gp_read(void *opaque, hwaddr addr, unsigned int size)
     assert(size == 4);
     assert(addr % 4 == 0);
 
+    qemu_mutex_lock(&d->lock);
+
     uint64_t r = 0;
     switch (addr) {
     case NV_PAPU_GPXMEM ... NV_PAPU_GPXMEM + 0x1000 * 4 - 1: {
         uint32_t xaddr = (addr - NV_PAPU_GPXMEM) / 4;
         r = dsp_read_memory(d->gp.dsp, 'X', xaddr);
-        // fprintf(stderr, "read GP NV_PAPU_GPXMEM [%x] -> %x\n", xaddr, r);
         break;
     }
     case NV_PAPU_GPMIXBUF ... NV_PAPU_GPMIXBUF + 0x400 * 4 - 1: {
         uint32_t xaddr = (addr - NV_PAPU_GPMIXBUF) / 4;
         r = dsp_read_memory(d->gp.dsp, 'X', GP_DSP_MIXBUF_BASE + xaddr);
-        // fprintf(stderr, "read GP NV_PAPU_GPMIXBUF [%x] -> %x\n", xaddr, r);
         break;
     }
     case NV_PAPU_GPYMEM ... NV_PAPU_GPYMEM + 0x800 * 4 - 1: {
         uint32_t yaddr = (addr - NV_PAPU_GPYMEM) / 4;
         r = dsp_read_memory(d->gp.dsp, 'Y', yaddr);
-        // fprintf(stderr, "read GP NV_PAPU_GPYMEM [%x] -> %x\n", yaddr, r);
         break;
     }
     case NV_PAPU_GPPMEM ... NV_PAPU_GPPMEM + 0x1000 * 4 - 1: {
         uint32_t paddr = (addr - NV_PAPU_GPPMEM) / 4;
         r = dsp_read_memory(d->gp.dsp, 'P', paddr);
-        // fprintf(stderr, "read GP NV_PAPU_GPPMEM [%x] -> %x\n", paddr, r);
         break;
     }
     default:
         r = d->gp.regs[addr];
         break;
     }
+
+    qemu_mutex_unlock(&d->lock);
+
     DPRINTF("mcpx apu GP: read [0x%" HWADDR_PRIx "] -> 0x%lx\n", addr, r);
 
     return r;
@@ -360,30 +361,32 @@ static uint64_t ep_read(void *opaque, hwaddr addr, unsigned int size)
     assert(size == 4);
     assert(addr % 4 == 0);
 
+    qemu_mutex_lock(&d->lock);
+
     uint64_t r = 0;
     switch (addr) {
     case NV_PAPU_EPXMEM ... NV_PAPU_EPXMEM + 0xC00 * 4 - 1: {
         uint32_t xaddr = (addr - NV_PAPU_EPXMEM) / 4;
         r = dsp_read_memory(d->ep.dsp, 'X', xaddr);
-        // fprintf(stderr, "read EP  NV_PAPU_EPXMEM [%x] -> %x\n", xaddr, r);
         break;
     }
     case NV_PAPU_EPYMEM ... NV_PAPU_EPYMEM + 0x100 * 4 - 1: {
         uint32_t yaddr = (addr - NV_PAPU_EPYMEM) / 4;
         r = dsp_read_memory(d->ep.dsp, 'Y', yaddr);
-        // fprintf(stderr, "read EP  NV_PAPU_EPYMEM [%x] -> %x\n", yaddr, r);
         break;
     }
     case NV_PAPU_EPPMEM ... NV_PAPU_EPPMEM + 0x1000 * 4 - 1: {
         uint32_t paddr = (addr - NV_PAPU_EPPMEM) / 4;
         r = dsp_read_memory(d->ep.dsp, 'P', paddr);
-        // fprintf(stderr, "read EP  NV_PAPU_EPPMEM [%x] -> %x\n", paddr, r);
         break;
     }
     default:
         r = d->ep.regs[addr];
         break;
     }
+
+    qemu_mutex_unlock(&d->lock);
+
     DPRINTF("mcpx apu EP: read [0x%" HWADDR_PRIx "] -> 0x%lx\n", addr, r);
 
     return r;

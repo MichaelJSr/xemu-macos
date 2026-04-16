@@ -38,6 +38,8 @@ static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(r->physical_device, &mem_props);
     buffer->properties = mem_props.memoryTypes[ai.memoryType].propertyFlags;
+    buffer->is_coherent =
+        (buffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 }
 
 static void destroy_buffer(PGRAPHState *pg, StorageBuffer *buffer)
@@ -189,12 +191,15 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
 }
 
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
-                                    VkDeviceSize size,
+                                    VkDeviceSize size, size_t count,
                                     VkDeviceAddress alignment)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     StorageBuffer *b = &r->storage_buffers[index];
-    return (ROUND_UP(b->buffer_offset, alignment) + size) <= b->buffer_limit;
+    VkDeviceSize worst_case_padding =
+        (count > 1) ? (VkDeviceSize)(count - 1) * (alignment - 1) : 0;
+    return (ROUND_UP(b->buffer_offset, alignment) + size + worst_case_padding)
+           <= b->buffer_limit;
 }
 
 VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
@@ -207,7 +212,8 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
     for (int i = 0; i < count; i++) {
         total_size += sizes[i];
     }
-    assert(pgraph_vk_buffer_has_space_for(pg, index, total_size, alignment));
+    assert(pgraph_vk_buffer_has_space_for(pg, index, total_size, count,
+                                          alignment));
 
     StorageBuffer *b = &r->storage_buffers[index];
     VkDeviceSize starting_offset = ROUND_UP(b->buffer_offset, alignment);

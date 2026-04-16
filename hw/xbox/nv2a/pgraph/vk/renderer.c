@@ -122,14 +122,22 @@ static int64_t last_sync_time_ns;
 static void pgraph_vk_sync(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
 
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t elapsed = now - last_sync_time_ns;
     const int64_t min_sync_interval_ns = 8000000; /* ~8ms = 120Hz cap */
 
-    if (elapsed >= min_sync_interval_ns) {
+    bool has_interp_work = false;
+#if HAVE_IOSURFACE_SHARING
+    has_interp_work = r->display.interp_remaining > 0;
+#endif
+
+    if (elapsed >= min_sync_interval_ns || has_interp_work) {
         pgraph_vk_render_display(pg);
-        last_sync_time_ns = now;
+        if (elapsed >= min_sync_interval_ns) {
+            last_sync_time_ns = now;
+        }
     }
 
     qatomic_set(&d->pgraph.sync_pending, false);

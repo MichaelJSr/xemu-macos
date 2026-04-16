@@ -108,6 +108,7 @@ typedef struct StorageBuffer {
     VmaAllocationCreateInfo alloc_info;
     VmaAllocation allocation;
     VkMemoryPropertyFlags properties;
+    bool is_coherent;
     size_t buffer_offset;
     size_t buffer_size;
     size_t buffer_limit;
@@ -571,7 +572,7 @@ void pgraph_vk_destroy_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info);
 void pgraph_vk_init_buffers(NV2AState *d);
 void pgraph_vk_finalize_buffers(NV2AState *d);
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
-                                    VkDeviceSize size,
+                                    VkDeviceSize size, size_t count,
                                     VkDeviceAddress alignment);
 VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
                                         VkDeviceSize *sizes, size_t count,

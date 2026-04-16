@@ -162,7 +162,7 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
     bool need_ubo_staging_buffer_reset =
         need_uniform_write &&
         !pgraph_vk_buffer_has_space_for(pg, BUFFER_UNIFORM_STAGING,
-                                        ubo_buffer_total_size,
+                                        ubo_buffer_total_size, 1,
                                         r->device_props.limits.minUniformBufferOffsetAlignment);
 
     bool need_descriptor_write_reset =

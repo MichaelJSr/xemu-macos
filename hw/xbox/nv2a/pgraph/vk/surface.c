@@ -511,9 +511,11 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     size_t download_size = (size_t)surface->width *
                            surface->fmt.bytes_per_pixel * surface->height;
-    vmaInvalidateAllocation(r->allocator,
-                            r->storage_buffers[BUFFER_STAGING_DST].allocation,
-                            0, download_size);
+    if (!r->storage_buffers[BUFFER_STAGING_DST].is_coherent) {
+        vmaInvalidateAllocation(r->allocator,
+                                r->storage_buffers[BUFFER_STAGING_DST].allocation,
+                                0, download_size);
+    }
 
     memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
                  surface->pitch,
@@ -1090,8 +1092,10 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                  surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
                  surface->height);
 
-    vmaFlushAllocation(r->allocator, copy_buffer->allocation, 0,
-                       uploaded_image_size);
+    if (!copy_buffer->is_coherent) {
+        vmaFlushAllocation(r->allocator, copy_buffer->allocation, 0,
+                           uploaded_image_size);
+    }
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
