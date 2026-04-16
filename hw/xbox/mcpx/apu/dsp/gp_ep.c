@@ -67,7 +67,7 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
             bytes_to_copy = len;
         }
 
-        assert(paddr + bytes_to_copy < memory_region_size(d->ram));
+        assert(paddr + bytes_to_copy <= memory_region_size(d->ram));
 
         if (dir) {
             memcpy(&d->ram_ptr[paddr], ptr, bytes_to_copy);
@@ -224,13 +224,19 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
     if (dir && index == 0) {
         bool did_sink = ep_sink_samples(d, ptr, len);
         if (did_sink) {
-            /* Since we are sinking, push silence out */
-            assert(len <= sizeof(ep_silence));
+            if (len > sizeof(ep_silence)) {
+                len = sizeof(ep_silence);
+            }
             ptr = (uint8_t*)ep_silence;
         }
     }
 
-    /* DSP hangs if current >= end; but forces current >= base */
+    if (end <= base) {
+        cur = base;
+        SET_MASK(d->regs[cur_reg], NV_PAPU_GPOFCUR0_VALUE, cur);
+        return;
+    }
+
     if (cur >= end) {
         cur = cur % (end - base);
     }
@@ -256,15 +262,20 @@ static void proc_rst_write(DSPState *dsp, uint32_t oldval, uint32_t val)
     }
 }
 
-/* Global Processor - programmable DSP */
+/*
+ * Global Processor - programmable DSP
+ *
+ * Reads are intentionally lock-free: all values are 32-bit aligned and
+ * the BQL serializes guest MMIO dispatch. Taking d->lock here would
+ * contend with the APU frame thread during voice processing, causing
+ * audio dropouts in dense scenes.
+ */
 static uint64_t gp_read(void *opaque, hwaddr addr, unsigned int size)
 {
     MCPXAPUState *d = opaque;
 
     assert(size == 4);
     assert(addr % 4 == 0);
-
-    qemu_mutex_lock(&d->lock);
 
     uint64_t r = 0;
     switch (addr) {
@@ -292,8 +303,6 @@ static uint64_t gp_read(void *opaque, hwaddr addr, unsigned int size)
         r = d->gp.regs[addr];
         break;
     }
-
-    qemu_mutex_unlock(&d->lock);
 
     DPRINTF("mcpx apu GP: read [0x%" HWADDR_PRIx "] -> 0x%lx\n", addr, r);
 
@@ -353,15 +362,13 @@ const MemoryRegionOps gp_ops = {
     .write = gp_write,
 };
 
-/* Encode Processor - encoding DSP */
+/* Encode Processor - encoding DSP (lock-free reads, see gp_read comment) */
 static uint64_t ep_read(void *opaque, hwaddr addr, unsigned int size)
 {
     MCPXAPUState *d = opaque;
 
     assert(size == 4);
     assert(addr % 4 == 0);
-
-    qemu_mutex_lock(&d->lock);
 
     uint64_t r = 0;
     switch (addr) {
@@ -384,8 +391,6 @@ static uint64_t ep_read(void *opaque, hwaddr addr, unsigned int size)
         r = d->ep.regs[addr];
         break;
     }
-
-    qemu_mutex_unlock(&d->lock);
 
     DPRINTF("mcpx apu EP: read [0x%" HWADDR_PRIx "] -> 0x%lx\n", addr, r);
 

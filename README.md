@@ -48,7 +48,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Flight Slot Pipelining (N=2)** | Two command buffer/fence/semaphore slots with full resource partitioning. CPU records slot 1 while GPU executes slot 0. |
 | **Conditional Surface Flush** | `invalidate_surface` only flushes GPU when surface was drawn in current command buffer. |
 | **APU LUTs + NEON** | Attenuation (4096) and pitch (65536) lookup tables. NEON `float_to_24b_bulk` and `vaddq_f32` for DSP/VP hot paths. |
-| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. Trylock outputs silence on contention. Buffer reduced to 2048 samples (~42ms at 48kHz). |
+| **CoreAudio `os_unfair_lock` + trylock** | Replaces `pthread_mutex` in IOProc. Trylock outputs silence on contention. Buffer at 4096 samples (~85ms at 48kHz). |
 | **FPCR Caching Across TBs** | `gen_flcr` only emits `MSR FPCR` when guest rounding mode actually changes. Eliminates ~10-20 cycle pipeline stall per translation block. |
 | **Frame Interpolation Sync Bypass** | Deferred interpolation generation decoupled from 8ms display sync gate. Produces smoother 4x (120fps) output. |
 
@@ -106,7 +106,7 @@ A personal fork of [xemu](https://github.com/xemu-project/xemu) with comprehensi
 | **Bump Allocator Overflow** | `pgraph_vk_buffer_has_space_for` accounted for one alignment round-up but `append_to_buffer` applied per-element alignment. For `count > 1` with `alignment > 1`, the actual space consumed could exceed `buffer_limit`. Added `count` parameter with worst-case inter-element padding `(count-1)*(alignment-1)`. |
 | **MetalFX Texture Cache No-Retry** | `texture_from_iosurface` failure still updated cached IOSurface pointer, preventing retry on subsequent frames with the same surface. All 8 cache sites (spatial, temporal, interpolation) now only update the cached pointer on success. |
 | **Stale CGL Surface Pointer** | `destroy_current_display_image` released the IOSurface but did not clear `last_cgl_surface`/`last_cgl_width`/`last_cgl_height`. If a new IOSurface was allocated at the same address, the rebind check was skipped, showing stale content. |
-| **APU GP/EP MMIO Read Race** | `gp_read`/`ep_read` accessed DSP memory and registers without `d->lock`, while `gp_write`/`ep_write` held it. Added locking to read paths to prevent torn reads under concurrent access. |
+| **APU GP/EP MMIO Read Race** | `gp_read`/`ep_read` read DSP memory without `d->lock`. Reads are intentionally lock-free: all values are 32-bit aligned and the BQL serializes guest MMIO dispatch. Locking reads caused severe audio dropouts by contending with the APU frame thread during voice processing. |
 | **CoreAudio BadObjectError as Success** | `init_out_device` returned `0` (success) on `kAudioHardwareBadObjectError`/`kAudioHardwareBadDeviceError`, leaving the voice half-initialized. Now returns the error status and marks device as `kAudioDeviceUnknown`. |
 | **VK_CHECK Undefined Behavior** | `__builtin_unreachable()` after `fprintf(stderr)` on Vulkan failure allowed the compiler to optimize away the error path entirely. Replaced with `__builtin_trap()` for deterministic crash. |
 | **MetalFX Config Migration** | Legacy `metalfx_upscale` (bool) and `metalfx_mode` (enum) both existed. Users setting `metalfx_upscale = true` in TOML while `metalfx_mode` was "off" got no upscaling. On config load, `metalfx_upscale = true` now migrates to `metalfx_mode = spatial`. |

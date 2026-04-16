@@ -111,6 +111,10 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
                 size_of_results, query_results, sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
         } while (result == VK_NOT_READY);
+        if (result != VK_SUCCESS) {
+            fprintf(stderr, "vkGetQueryPoolResults failed: %d\n", result);
+            memset(query_results, 0, size_of_results);
+        }
     }
 
     // Write out queries

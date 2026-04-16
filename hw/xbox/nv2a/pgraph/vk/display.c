@@ -1087,13 +1087,12 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     pgraph_vk_upload_surface_data(d, surface, !tcg_enabled());
 
+    disp->pvideo.state = get_pvideo_state(pg);
     update_uniforms(pg, surface);
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
         "Display Surface %08"HWADDR_PRIx, surface->vram_addr);
-
-    disp->pvideo.state = get_pvideo_state(pg);
     if (disp->pvideo.state.enabled) {
         if (memcmp(&disp->pvideo.state, &disp->pvideo.last_uploaded_state,
                    sizeof(PvideoState)) != 0) {

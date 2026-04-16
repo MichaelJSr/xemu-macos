@@ -160,7 +160,7 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
                          int src_stride, int height)
 {
     if (dst_stride == src_stride) {
-        memcpy(dst, src, dst_stride * height);
+        memcpy(dst, src, (size_t)dst_stride * height);
         return;
     }
 

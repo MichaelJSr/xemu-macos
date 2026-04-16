@@ -1622,7 +1622,6 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_SURFACE_CREATE] = NV2A_PROF_FINISH_SURFACE_CREATE,
     [VK_FINISH_REASON_SURFACE_DOWN] = NV2A_PROF_FINISH_SURFACE_DOWN,
     [VK_FINISH_REASON_NEED_BUFFER_SPACE] = NV2A_PROF_FINISH_NEED_BUFFER_SPACE,
-    [VK_FINISH_REASON_FRAMEBUFFER_DIRTY] = NV2A_PROF_FINISH_FRAMEBUFFER_DIRTY,
     [VK_FINISH_REASON_PRESENTING] = NV2A_PROF_FINISH_PRESENTING,
     [VK_FINISH_REASON_FLIP_STALL] = NV2A_PROF_FINISH_FLIP_STALL,
     [VK_FINISH_REASON_FLUSH] = NV2A_PROF_FINISH_FLUSH,
@@ -2025,15 +2024,17 @@ void pgraph_vk_draw_end(NV2AState *d)
     pgraph_vk_set_surface_dirty(pg, color_write, depth_test || stencil_test);
 }
 
-static int compare_memory_sync_requirement_by_addr(const void *p1,
-                                                   const void *p2)
+static void insertion_sort_syncs(MemorySyncRequirement *arr, size_t n)
 {
-    const MemorySyncRequirement *l = p1, *r = p2;
-    if (l->addr < r->addr)
-        return -1;
-    if (l->addr > r->addr)
-        return 1;
-    return 0;
+    for (size_t i = 1; i < n; i++) {
+        MemorySyncRequirement key = arr[i];
+        size_t j = i;
+        while (j > 0 && arr[j - 1].addr > key.addr) {
+            arr[j] = arr[j - 1];
+            j--;
+        }
+        arr[j] = key;
+    }
 }
 
 static void sync_vertex_ram_buffer(PGRAPHState *pg)
@@ -2071,10 +2072,8 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
         r->vertex_ram_buffer_syncs[i].size = end_addr - start_addr;
     }
 
-    // Sort the requirements in increasing order of addresses
-    qsort(r->vertex_ram_buffer_syncs, r->num_vertex_ram_buffer_syncs,
-          sizeof(MemorySyncRequirement),
-          compare_memory_sync_requirement_by_addr);
+    insertion_sort_syncs(r->vertex_ram_buffer_syncs,
+                         r->num_vertex_ram_buffer_syncs);
 
     // Merge overlapping/adjacent requests to minimize number of tests
     MemorySyncRequirement merged[16];
@@ -2526,10 +2525,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
         pgraph_vk_bind_vertex_attributes(d, pg->draw_arrays_min_start,
                                          pg->draw_arrays_max_count - 1, false,
                                          0, pg->draw_arrays_max_count - 1);
-        uint32_t min_element = INT_MAX;
         uint32_t max_element = 0;
         for (int i = 0; i < pg->draw_arrays_length; i++) {
-            min_element = MIN(pg->draw_arrays_start[i], min_element);
             max_element = MAX(max_element, pg->draw_arrays_start[i] + pg->draw_arrays_count[i]);
         }
         sync_vertex_ram_buffer(pg);
