@@ -87,6 +87,7 @@ typedef struct MCPXAPUState {
 
     MemoryRegion *ram;
     uint8_t *ram_ptr;
+    size_t ram_size;
     MemoryRegion mmio;
 
     MCPXAPUVPState vp;

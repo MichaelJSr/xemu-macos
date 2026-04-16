@@ -53,6 +53,48 @@ static const struct {
     { NV_PAPU_TVLMP, NV_PAPU_CVLMP, NV_PAPU_NVLMP }, // MP
 };
 
+static inline uint32_t ram_ldl(MCPXAPUState *d, hwaddr addr)
+{
+    if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
+        return ldl_le_p(&d->ram_ptr[addr]);
+    }
+    return ldl_le_phys(&address_space_memory, addr);
+}
+
+static inline uint16_t ram_ldw(MCPXAPUState *d, hwaddr addr)
+{
+    if (__builtin_expect(addr + 2 <= d->ram_size, 1)) {
+        return lduw_le_p(&d->ram_ptr[addr]);
+    }
+    return lduw_le_phys(&address_space_memory, addr);
+}
+
+static inline uint8_t ram_ldb(MCPXAPUState *d, hwaddr addr)
+{
+    if (__builtin_expect(addr + 1 <= d->ram_size, 1)) {
+        return d->ram_ptr[addr];
+    }
+    return ldub_phys(&address_space_memory, addr);
+}
+
+static inline void ram_stl(MCPXAPUState *d, hwaddr addr, uint32_t val)
+{
+    if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
+        stl_le_p(&d->ram_ptr[addr], val);
+    } else {
+        stl_le_phys(&address_space_memory, addr, val);
+    }
+}
+
+static inline void ram_stb(MCPXAPUState *d, hwaddr addr, uint8_t val)
+{
+    if (__builtin_expect(addr + 1 <= d->ram_size, 1)) {
+        d->ram_ptr[addr] = val;
+    } else {
+        stb_phys(&address_space_memory, addr, val);
+    }
+}
+
 static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                               int status)
 {
@@ -63,11 +105,11 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
 
     // FIXME: Check notify enable
     // FIXME: Set NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS when appropriate
-    stb_phys(&address_space_memory, notify_offset, status);
+    ram_stb(d, notify_offset, status);
 
     // FIXME: Refactor this out of here
     // FIXME: Actually provied current envelope state
-    stb_phys(&address_space_memory, notify_offset - 1, 1);
+    ram_stb(d, notify_offset - 1, 1);
 
     qatomic_or(&d->regs[NV_PAPU_ISTS],
               NV_PAPU_ISTS_FEVINTSTS | NV_PAPU_ISTS_FENINTSTS);
@@ -141,8 +183,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
                                hwaddr offset, uint32_t mask)
 {
     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
-    return (ldl_le_phys(&address_space_memory, voice + offset) & mask) >>
-           ctz32(mask);
+    return (ram_ldl(d, voice + offset) & mask) >> ctz32(mask);
 }
 
 static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
@@ -150,9 +191,8 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
 {
     hwaddr voice = d->regs[NV_PAPU_VPVADDR]
                     + voice_handle * NV_PAVS_SIZE;
-    uint32_t v = ldl_le_phys(&address_space_memory, voice + offset) & ~mask;
-    stl_le_phys(&address_space_memory, voice + offset,
-                v | ((val << ctz32(mask)) & mask));
+    uint32_t v = ram_ldl(d, voice + offset) & ~mask;
+    ram_stl(d, voice + offset, v | ((val << ctz32(mask)) & mask));
 }
 
 static void voice_off(MCPXAPUState *d, uint16_t v)
@@ -483,9 +523,9 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         // handle range (or that is also wrong)
         hwaddr sge_address =
             d->regs[NV_PAPU_VPSGEADDR] + d->vp.inbuf_sge_handle * 8;
-        stl_le_phys(&address_space_memory, sge_address,
-                    argument &
-                        NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
+        ram_stl(d, sge_address,
+                argument &
+                    NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
         DPRINTF("Wrote inbuf SGE[0x%X] = 0x%08X\n", d->vp.inbuf_sge_handle,
                 argument & NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
         break;
@@ -519,9 +559,9 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         // But how does it know which outbuf is being written?!
         hwaddr sge_address =
             d->regs[NV_PAPU_VPSGEADDR] + d->vp.outbuf_sge_handle * 8;
-        stl_le_phys(&address_space_memory, sge_address,
-                    argument &
-                        NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
+        ram_stl(d, sge_address,
+                argument &
+                    NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
         DPRINTF("Wrote outbuf SGE[0x%X] = 0x%08X\n", d->vp.outbuf_sge_handle,
                 argument & NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
         break;
@@ -570,7 +610,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
                       + (d->vp.ssl_base_page * 8)
                       + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
-        stl_le_phys(&address_space_memory, addr, argument);
+        ram_stl(d, addr, argument);
         DPRINTF("  ssl_segment[%x + %x].%s = %x\n",
             d->vp.ssl_base_page,
             (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET)/8,
@@ -702,15 +742,12 @@ const MemoryRegionOps vp_ops = {
     .write = vp_write,
 };
 
-static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
+static hwaddr get_data_ptr(MCPXAPUState *d, hwaddr sge_base,
+                           unsigned int max_sge, uint32_t addr)
 {
     unsigned int entry = addr / TARGET_PAGE_SIZE;
     assert(entry <= max_sge);
-    uint32_t prd_address =
-        ldl_le_phys(&address_space_memory, sge_base + entry * 4 * 2);
-    // uint32_t prd_control =
-    //     ldl_le_phys(&address_space_memory, sge_base + entry * 4 * 2 + 4);
-    DPRINTF("Addr: 0x%08X, control: 0x%08X\n", prd_address, prd_control);
+    uint32_t prd_address = ram_ldl(d, sge_base + entry * 4 * 2);
     return prd_address + addr % TARGET_PAGE_SIZE;
 }
 
@@ -993,8 +1030,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         }
 
         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
-        segment_offset = ldl_le_phys(&address_space_memory, addr);
-        segment_length = ldl_le_phys(&address_space_memory, addr + 4);
+        segment_offset = ram_ldl(d, addr);
+        segment_length = ram_ldl(d, addr + 4);
         assert(segment_offset != 0);
         assert(segment_length != 0);
         seg_len = (segment_length >> 0) & 0xffff;
@@ -1064,10 +1101,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     linear_addr += ba;
                     for (unsigned int word_index = 0;
                          word_index < (9 * samples_per_block); word_index++) {
-                        hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
+                        hwaddr addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR],
                                                    0xFFFFFFFF, linear_addr);
-                        adpcm_block[word_index] =
-                            ldl_le_phys(&address_space_memory, addr);
+                        adpcm_block[word_index] = ram_ldl(d, addr);
                         linear_addr += 4;
                     }
                 }
@@ -1090,13 +1126,13 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 addr = segment_offset + cbo * block_size;
             } else {
                 uint32_t linear_addr = ba + cbo * block_size;
-                addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF,
-                                    linear_addr);
+                addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR],
+                                    0xFFFFFFFF, linear_addr);
             }
 
             if (sample_size == NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16 &&
                 stereo) {
-                uint32_t pair = ldl_le_phys(&address_space_memory, addr);
+                uint32_t pair = ram_ldl(d, addr);
                 samples[sample_count][0] = int16_to_float(pair & 0xffff);
                 samples[sample_count][1] = int16_to_float((pair >> 16) & 0xffff);
                 addr += 4;
@@ -1106,19 +1142,19 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     float fval;
                     switch (sample_size) {
                     case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
-                        ival = ldub_phys(&address_space_memory, addr);
+                        ival = ram_ldb(d, addr);
                         fval = uint8_to_float(ival & 0xff);
                         break;
                     case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16:
-                        ival = lduw_le_phys(&address_space_memory, addr);
+                        ival = ram_ldw(d, addr);
                         fval = int16_to_float(ival & 0xffff);
                         break;
                     case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24:
-                        ival = ldl_le_phys(&address_space_memory, addr);
+                        ival = ram_ldl(d, addr);
                         fval = int24_to_float(ival);
                         break;
                     case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S32:
-                        ival = ldl_le_phys(&address_space_memory, addr);
+                        ival = ram_ldl(d, addr);
                         fval = int32_to_float(ival);
                         break;
                     default:
@@ -1210,14 +1246,10 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
         filter->voice = v;
         int err;
 
-        /* Note: Using a sinc based resampler for quality. Unsure about
-         * hardware's actual interpolation method; it could just be linear, in
-         * which case using this resampler is overkill, but quality is good
-         * so use it for now.
-         */
+        /* Xbox MCPX APU uses linear interpolation for pitch shifting. */
         // FIXME: Don't do 2ch resampling if this is a mono voice
         filter->resampler = src_callback_new(&voice_resample_callback,
-                                           SRC_SINC_FASTEST, 2, &err, filter);
+                                           SRC_LINEAR, 2, &err, filter);
         if (filter->resampler == NULL) {
             fprintf(stderr, "src error: %s\n", src_strerror(err));
             assert(0);
