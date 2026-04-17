@@ -343,7 +343,13 @@ typedef struct PGRAPHVkDisplayState {
     int interp_index;             // which intermediate frame to generate next
     int interp_width, interp_height;
 
-    void *last_cgl_surface;
+    /*
+     * IOSurface rebind cache. Keyed on IOSurfaceID (kernel-assigned
+     * identifier that remains stable while the surface exists, unlike
+     * the pointer which can be reused across create/release). Matches
+     * the cache-key pattern used in metalfx_upscale.m.
+     */
+    uint32_t last_cgl_surface_id;
     int last_cgl_width, last_cgl_height;
 #endif
 
@@ -393,6 +399,14 @@ typedef struct PGRAPHVkState {
 #if HAVE_IOSURFACE_SHARING
     bool metal_objects_extension_enabled;
 #endif
+    /*
+     * VK_KHR_dynamic_rendering is enabled at device create when the
+     * physical device advertises it AND the dynamicRendering feature is
+     * supported. Consumed at pipeline/pass build time (Phase 3.1 follow-
+     * up) to skip VkRenderPass / VkFramebuffer allocation.
+     */
+    bool dynamic_rendering_extension_enabled;
+    bool dynamic_rendering_feature_enabled;
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
@@ -431,6 +445,14 @@ typedef struct PGRAPHVkState {
         VkDeviceSize uniform_staging_base;
         VkDeviceSize uniform_staging_limit;
         unsigned long *uploaded_bitmap;
+        /*
+         * Min/max dirty page indices tracked as bits are set. Lets
+         * flush_memory_buffer() and aux_has_work() skip find_first_bit/
+         * find_last_bit scans over the whole VRAM page bitmap. `min` is
+         * ULONG_MAX when no dirty pages.
+         */
+        unsigned long uploaded_first_dirty_bit;
+        unsigned long uploaded_last_dirty_bit;
         bool submitted;
     } flight[NUM_FLIGHT_SLOTS];
     int current_flight;
@@ -512,6 +534,16 @@ typedef struct PGRAPHVkState {
     ShaderModuleInfo *quad_vert_module, *solid_frag_module;
     bool shader_bindings_changed;
     bool use_push_constants_for_uniform_attrs;
+
+    /*
+     * Cached hash of shader_binding->state. Refreshed when
+     * shader_bindings_changed fires; combined (XOR) with the hashes of
+     * the smaller PipelineKey sub-fields to form the full pipeline cache
+     * hash. Avoids re-hashing the ShaderState bytes (by far the largest
+     * part of PipelineKey) on every dirty-pipeline draw call when only
+     * non-shader state (blend/depth/vertex desc) changed.
+     */
+    uint64_t cached_shader_state_hash;
 
     Lru shader_module_cache;
     ShaderModuleCacheEntry *shader_module_cache_entries;

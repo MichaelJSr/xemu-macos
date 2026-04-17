@@ -476,6 +476,16 @@ void *pfifo_thread(void *arg)
 
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
+            /*
+             * 1 ms timedwait safety net. Do NOT convert to an untimed
+             * cond_wait without first fixing pfifo_kick(): that writer
+             * sets fifo_kick and broadcasts without holding
+             * d->pfifo.lock, so if the broadcast lands between our
+             * kick-check and the atomic release-wait we would miss it
+             * and hang forever. The 1 ms bound limits lost-kick
+             * latency; removing it requires acquiring d->pfifo.lock
+             * around the kick write + broadcast first.
+             */
             qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
         }
 

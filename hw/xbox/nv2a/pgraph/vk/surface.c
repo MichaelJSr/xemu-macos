@@ -1090,10 +1090,19 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     g_autofree uint8_t *swizzle_buf = NULL;
     uint8_t *gl_read_buf = NULL;
 
-    bool use_gpu_unswizzle = surface->swizzle &&
-                             (surface->fmt.bytes_per_pixel == 4 ||
-                              surface->fmt.bytes_per_pixel == 2) &&
-                             r->compute.unswizzle_pipeline != VK_NULL_HANDLE;
+    /*
+     * GPU unswizzle (surface-compute.c) accepts any power-of-two
+     * dimensions via CPU-computed mask_x / mask_y push constants
+     * (Phase 3.2). The POT test is defensive: swizzled Xbox surfaces
+     * are always POT by hardware constraint.
+     */
+    bool use_gpu_unswizzle =
+        surface->swizzle &&
+        (surface->fmt.bytes_per_pixel == 4 ||
+         surface->fmt.bytes_per_pixel == 2) &&
+        r->compute.unswizzle_pipeline != VK_NULL_HANDLE &&
+        (surface->width  & (surface->width  - 1)) == 0 &&
+        (surface->height & (surface->height - 1)) == 0;
 
     if (surface->swizzle && !use_gpu_unswizzle) {
         swizzle_buf = (uint8_t*)g_malloc(surface->size);

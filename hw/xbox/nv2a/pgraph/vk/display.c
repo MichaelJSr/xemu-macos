@@ -601,7 +601,7 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease((IOSurfaceRef)d->iosurface);
         d->iosurface = NULL;
     }
-    d->last_cgl_surface = NULL;
+    d->last_cgl_surface_id = 0;
     d->last_cgl_width = 0;
     d->last_cgl_height = 0;
 #endif
@@ -1282,8 +1282,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     NULL, NULL, dt)) {
                 IOSurfaceRef interp =
                     metalfx_interpolation_get_output_surface();
+                uint32_t interp_id = interp ? IOSurfaceGetID(interp) : 0;
                 if (interp &&
-                    ((void *)interp != disp->last_cgl_surface ||
+                    (interp_id != disp->last_cgl_surface_id ||
                      disp->interp_width != disp->last_cgl_width ||
                      disp->interp_height != disp->last_cgl_height)) {
                     CGLContextObj cgl_ctx = CGLGetCurrentContext();
@@ -1296,12 +1297,20 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                             GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                             interp, 0);
                         glBindTexture(GL_TEXTURE_RECTANGLE, 0);
-                        disp->last_cgl_surface = (void *)interp;
+                        disp->last_cgl_surface_id = interp_id;
                         disp->last_cgl_width = disp->interp_width;
                         disp->last_cgl_height = disp->interp_height;
                     }
                 }
                 if (interp) CFRelease(interp);
+                disp->interp_index++;
+                disp->interp_remaining--;
+            } else {
+                /*
+                 * Interpolation generate failed; skip this slot instead
+                 * of busy-retrying every sync. Without this, has_interp_work
+                 * stays true and we bypass the 8 ms throttle repeatedly.
+                 */
                 disp->interp_index++;
                 disp->interp_remaining--;
             }
@@ -1446,11 +1455,17 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             }
         }
 
-        /* Bind to GL texture (skip if same IOSurface already bound) */
+        /*
+         * Bind to GL texture (skip if same IOSurface already bound).
+         * Key on IOSurfaceGetID, not the IOSurfaceRef pointer: the
+         * pointer can be reused after release, producing a false-cache
+         * hit and stale display.
+         */
         if (disp->gl_texture_id) {
             int surf_w = (int)IOSurfaceGetWidth(present_surface);
             int surf_h = (int)IOSurfaceGetHeight(present_surface);
-            if ((void *)present_surface != disp->last_cgl_surface ||
+            uint32_t surf_id = IOSurfaceGetID(present_surface);
+            if (surf_id != disp->last_cgl_surface_id ||
                 surf_w != disp->last_cgl_width ||
                 surf_h != disp->last_cgl_height) {
                 CGLContextObj cgl_ctx = CGLGetCurrentContext();
@@ -1462,7 +1477,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                         present_surface, 0);
                     glBindTexture(GL_TEXTURE_RECTANGLE, 0);
-                    disp->last_cgl_surface = (void *)present_surface;
+                    disp->last_cgl_surface_id = surf_id;
                     disp->last_cgl_width = surf_w;
                     disp->last_cgl_height = surf_h;
                 }

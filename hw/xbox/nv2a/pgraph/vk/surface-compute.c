@@ -36,63 +36,109 @@
 #define COMPUTE_2BUF_WORKGROUP_SIZE 256
 #endif
 
+/*
+ * Compute the Xbox Z-order swizzle masks for a given (width, height).
+ * Mirrors generate_swizzle_masks() in ../swizzle.c (which is static
+ * there). Interleaves the dimension bits to produce mask_x and mask_y
+ * bit-sets that correctly describe non-square power-of-two textures.
+ */
+static void compute_unswizzle_masks(unsigned int width,
+                                    unsigned int height,
+                                    uint32_t *mask_x, uint32_t *mask_y)
+{
+    uint32_t x = 0, y = 0;
+    uint32_t bit = 1;
+    uint32_t out_bit = 1;
+    bool done;
+    do {
+        done = true;
+        if (bit < width)  { x |= out_bit; out_bit <<= 1; done = false; }
+        if (bit < height) { y |= out_bit; out_bit <<= 1; done = false; }
+        bit <<= 1;
+    } while (!done);
+    *mask_x = x;
+    *mask_y = y;
+}
+
 // FIXME: Below pipeline creation assumes identical 3 buffer setup. For
 //        swizzle shader we will need more flexibility.
 
 /*
  * Z-order unswizzle compute shader: transforms Xbox-tiled (Morton/Z-order)
  * surface data to linear layout. Operates on 32-bit elements (4 bpp).
- * Push constants: width, height (in pixels).
- * Binding 0: swizzled input (uint[]), binding 1: linear output (uint[]).
+ *
+ * Push constants: width, height, mask_x, mask_y.
+ *
+ * mask_x / mask_y are the CPU-computed swizzle masks (see
+ * generate_swizzle_masks() in swizzle.c). They are disjoint bit sets
+ * covering the bits of the swizzled index that correspond to linear x
+ * and y coordinates. Using them supports non-square power-of-two
+ * textures (128x64, 512x256, etc.), which the previous Morton shader
+ * — assuming equal bit counts per axis — decoded incorrectly.
+ *
+ * pext(val, mask) extracts the bits of `val` selected by `mask` and
+ * packs them into the low bits of the result: for mask = 0x55555555
+ * (even bits), pext(idx, mask) is the linear x coordinate.
  */
 const char *unswizzle_z_order_glsl =
-    "layout(push_constant) uniform PushConstants { uint width, height; };\n"
+    "layout(push_constant) uniform PushConstants { uint width, height; uint mask_x, mask_y; };\n"
     "layout(set = 0, binding = 0) buffer SwizzledIn { uint swizzled_in[]; };\n"
     "layout(set = 0, binding = 1) buffer LinearOut { uint linear_out[]; };\n"
-    "uint morton_x(uint x) {\n"
-    "    x &= 0x55555555u;\n"
-    "    x = (x | (x >> 1u)) & 0x33333333u;\n"
-    "    x = (x | (x >> 2u)) & 0x0f0f0f0fu;\n"
-    "    x = (x | (x >> 4u)) & 0x00ff00ffu;\n"
-    "    x = (x | (x >> 8u)) & 0x0000ffffu;\n"
-    "    return x;\n"
+    "uint pext(uint val, uint mask) {\n"
+    "    uint result = 0u;\n"
+    "    uint out_bit = 1u;\n"
+    "    while (mask != 0u) {\n"
+    "        uint m = mask & (0u - mask);\n"
+    "        if ((val & m) != 0u) result |= out_bit;\n"
+    "        out_bit <<= 1u;\n"
+    "        mask ^= m;\n"
+    "    }\n"
+    "    return result;\n"
     "}\n"
     "void main() {\n"
-    "    uint idx = gl_GlobalInvocationID.x;\n"
-    "    if (idx >= width * height) return;\n"
-    "    uint mx = morton_x(idx);\n"
-    "    uint my = morton_x(idx >> 1u);\n"
-    "    if (mx < width && my < height) {\n"
-    "        linear_out[my * width + mx] = swizzled_in[idx];\n"
+    "    uint sw_idx = gl_GlobalInvocationID.x;\n"
+    "    if (sw_idx >= width * height) return;\n"
+    "    uint x = pext(sw_idx, mask_x);\n"
+    "    uint y = pext(sw_idx, mask_y);\n"
+    "    if (x < width && y < height) {\n"
+    "        linear_out[y * width + x] = swizzled_in[sw_idx];\n"
     "    }\n"
     "}\n";
 
 /*
- * Z-order unswizzle compute shader for 2 bytes-per-pixel surfaces (R5G6B5,
- * etc.). Iterates over destination 32-bit words so each thread writes both
- * packed 16-bit halves in a single store, avoiding SSBO write races without
- * atomics. Uses Morton encode to map linear (x,y) back to Z-order source index.
- * Push constants: width, height (in pixels).
+ * Z-order unswizzle compute shader for 2 bytes-per-pixel surfaces (R5G6B5
+ * etc.). One thread per destination 32-bit word (= 2 linear pixels) so
+ * writes are 32-bit aligned and race-free without atomics.
+ *
+ * pdep(val, mask) is the inverse of pext: it scatters the low bits of
+ * `val` into the positions set in `mask`. For each linear (x, y) pair
+ * we compute the source swizzled index as
+ *     pdep(x, mask_x) | pdep(y, mask_y)
+ * which is equivalent to the CPU-side generate_swizzle_masks
+ * algorithm and works for any non-square power-of-two dimensions.
  */
 const char *unswizzle_z_order_2bpp_glsl =
-    "layout(push_constant) uniform PushConstants { uint width, height; };\n"
+    "layout(push_constant) uniform PushConstants { uint width, height; uint mask_x, mask_y; };\n"
     "layout(set = 0, binding = 0) buffer SwizzledIn { uint swizzled_in[]; };\n"
     "layout(set = 0, binding = 1) buffer LinearOut  { uint linear_out[]; };\n"
-    "uint morton_encode(uint x, uint y) {\n"
-    "    x = (x | (x << 8u)) & 0x00ff00ffu;\n"
-    "    x = (x | (x << 4u)) & 0x0f0f0f0fu;\n"
-    "    x = (x | (x << 2u)) & 0x33333333u;\n"
-    "    x = (x | (x << 1u)) & 0x55555555u;\n"
-    "    y = (y | (y << 8u)) & 0x00ff00ffu;\n"
-    "    y = (y | (y << 4u)) & 0x0f0f0f0fu;\n"
-    "    y = (y | (y << 2u)) & 0x33333333u;\n"
-    "    y = (y | (y << 1u)) & 0x55555555u;\n"
-    "    return x | (y << 1u);\n"
+    "uint pdep(uint val, uint mask) {\n"
+    "    uint result = 0u;\n"
+    "    uint in_bit = 1u;\n"
+    "    while (mask != 0u) {\n"
+    "        uint m = mask & (0u - mask);\n"
+    "        if ((val & in_bit) != 0u) result |= m;\n"
+    "        in_bit <<= 1u;\n"
+    "        mask ^= m;\n"
+    "    }\n"
+    "    return result;\n"
     "}\n"
     "void main() {\n"
     "    uint word_idx = gl_GlobalInvocationID.x;\n"
     "    uint total_words = (width * height + 1u) / 2u;\n"
     "    if (word_idx >= total_words) return;\n"
+    /* Xbox swizzled textures are always power-of-two, and this shader
+     * is only dispatched from POT-gated call sites. Use shift+mask
+     * instead of div/mod (roughly 30-40x faster on Apple Silicon GPU). */
     "    uint w_mask = width - 1u;\n"
     "    uint w_shift = uint(findMSB(width));\n"
     "    uint dst_px0 = word_idx * 2u;\n"
@@ -103,12 +149,12 @@ const char *unswizzle_z_order_2bpp_glsl =
     "    uint y1 = dst_px1 >> w_shift;\n"
     "    uint lo = 0u, hi = 0u;\n"
     "    if (y0 < height) {\n"
-    "        uint src0 = morton_encode(x0, y0);\n"
+    "        uint src0 = pdep(x0, mask_x) | pdep(y0, mask_y);\n"
     "        uint sw0 = swizzled_in[src0 >> 1u];\n"
     "        lo = (src0 & 1u) == 0u ? (sw0 & 0xffffu) : (sw0 >> 16u);\n"
     "    }\n"
     "    if (dst_px1 < width * height && y1 < height) {\n"
-    "        uint src1 = morton_encode(x1, y1);\n"
+    "        uint src1 = pdep(x1, mask_x) | pdep(y1, mask_y);\n"
     "        uint sw1 = swizzled_in[src1 >> 1u];\n"
     "        hi = (src1 & 1u) == 0u ? (sw1 & 0xffffu) : (sw1 >> 16u);\n"
     "    }\n"
@@ -363,7 +409,13 @@ static void create_compute_pipeline_layout(PGRAPHState *pg)
 
     VkPushConstantRange push_constant_range = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .size = 2 * sizeof(uint32_t),
+        /*
+         * Largest compute push-constant block: unswizzle shaders use
+         * { width, height, mask_x, mask_y } = 4 uints. Other shaders
+         * (YUV conv, depth pack) use 2 uints and just ignore the
+         * remainder.
+         */
+        .size = 4 * sizeof(uint32_t),
     };
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -781,7 +833,9 @@ void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
         &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
         NULL);
 
-    uint32_t push_constants[2] = { width, height };
+    uint32_t mask_x, mask_y;
+    compute_unswizzle_masks(width, height, &mask_x, &mask_y);
+    uint32_t push_constants[4] = { width, height, mask_x, mask_y };
     vkCmdPushConstants(cmd, r->compute.pipeline_layout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);
@@ -817,7 +871,9 @@ void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
         &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
         NULL);
 
-    uint32_t push_constants[2] = { width, height };
+    uint32_t mask_x, mask_y;
+    compute_unswizzle_masks(width, height, &mask_x, &mask_y);
+    uint32_t push_constants[4] = { width, height, mask_x, mask_y };
     vkCmdPushConstants(cmd, r->compute.pipeline_layout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);

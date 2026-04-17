@@ -26,9 +26,27 @@
 #include <arm_neon.h>
 #endif
 
+/*
+ * Accelerate.h transitively pulls in CarbonCore/Debugging.h which
+ * `#define`s `DPRINTF(x)` as a single-argument macro, colliding with
+ * apu_int.h's printf-style variadic `DPRINTF`. Save the APU macro, let
+ * Accelerate clobber it, then restore.
+ */
+#if defined(__APPLE__)
+#pragma push_macro("DPRINTF")
+#include <Accelerate/Accelerate.h>
+#pragma pop_macro("DPRINTF")
+#define XEMU_USE_VDSP 1
+#else
+#define XEMU_USE_VDSP 0
+#endif
+
 static inline void float_accumulate(float *dst, const float *src, int count)
 {
-#if defined(__aarch64__) && defined(__ARM_NEON)
+#if XEMU_USE_VDSP
+    /* vDSP_vadd: dst[i] = src1[i] + src2[i]. Use in-place (src2 == dst). */
+    vDSP_vadd(src, 1, dst, 1, dst, 1, (vDSP_Length)count);
+#elif defined(__aarch64__) && defined(__ARM_NEON)
     int i = 0;
     for (; i + 4 <= count; i += 4) {
         float32x4_t a = vld1q_f32(dst + i);
@@ -1257,6 +1275,36 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     assert(v < MCPX_HW_MAX_VOICES);
     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
 
+    /*
+     * Fast path: when rate == 1.0 (no pitch shift), skip libsamplerate
+     * entirely and read source samples straight into the output buffer.
+     * A large fraction of DirectSound voices play at nominal rate, and
+     * src_callback_read has significant per-call overhead (callback
+     * dispatch, buffer management, phase bookkeeping) even in SRC_LINEAR
+     * mode. Use a small epsilon to catch rates that are numerically
+     * indistinguishable from 1.0 after LUT rounding.
+     */
+    if (fabsf(rate - 1.0f) < 1.0f / 65536.0f) {
+        int got = 0;
+        while (got < requested_num) {
+            int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                        NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
+            if (!active) {
+                break;
+            }
+            int n = voice_get_samples(d, v, &samples[got],
+                                      requested_num - got);
+            if (n <= 0) {
+                break;
+            }
+            got += n;
+        }
+        if (got == 0) {
+            return -1;
+        }
+        return got;
+    }
+
     if (filter->resampler == NULL) {
         filter->voice = v;
         int err;
@@ -1579,9 +1627,20 @@ static void voice_process(MCPXAPUState *d,
             hr = 1 << d->vp.submix_headroom[bin[b]];
         }
         g *= attenuate(vol[b])/hr;
+#if XEMU_USE_VDSP
+        /*
+         * vDSP_vsma: dst[i*ds] = src[i*ss] * scalar + dst[i*ds].
+         * samples is [NUM_SAMPLES_PER_FRAME][2] interleaved stereo, so
+         * stride is 2 to pick out one channel. mixbins is linear, stride 1.
+         */
+        vDSP_vsma(&samples[0][b % channels], 2, &g,
+                  mixbins[bin[b]], 1, mixbins[bin[b]], 1,
+                  NUM_SAMPLES_PER_FRAME);
+#else
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             mixbins[bin[b]][i] += g*samples[i][b % channels];
         }
+#endif
     }
 
     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
@@ -1918,26 +1977,34 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
         current = voice_list_regs[list].current;
         next = voice_list_regs[list].next;
 
-        d->regs[current] = d->regs[top];
-        DPRINTF("list %d current voice %d\n", list, d->regs[current]);
+        /*
+         * Guest MMIO can read these indices concurrently via
+         * mcpx_apu_read (which does qatomic_read). Use paired qatomic_*
+         * here so visibility is well-defined on weak-ordering hosts.
+         */
+        qatomic_set(&d->regs[current], qatomic_read(&d->regs[top]));
+        DPRINTF("list %d current voice %d\n", list,
+                qatomic_read(&d->regs[current]));
 
-        for (int i = 0; d->regs[current] != 0xFFFF; i++) {
+        for (int i = 0; qatomic_read(&d->regs[current]) != 0xFFFF; i++) {
             /* Make sure not to get stuck... */
             if (i >= MCPX_HW_MAX_VOICES) {
                 DPRINTF("Voice list contains invalid entry!\n");
                 break;
             }
 
-            uint16_t v = d->regs[current];
-            d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
-                               NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+            uint16_t v = (uint16_t)qatomic_read(&d->regs[current]);
+            qatomic_set(&d->regs[next],
+                        voice_get_mask(d, v,
+                                       NV_PAVS_VOICE_TAR_PITCH_LINK,
+                                       NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE));
             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
                 fe_method(d, SE2FE_IDLE_VOICE, v);
             } else {
                 voice_work_enqueue(d, v, list);
             }
-            d->regs[current] = d->regs[next];
+            qatomic_set(&d->regs[current], qatomic_read(&d->regs[next]));
         }
     }
     voice_work_dispatch(d, mixbins);

@@ -3230,6 +3230,12 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
          * x86 RC {bit14,bit13} → ARM RMode {bit13,bit14}.
          * RBIT reverses all 32 bits, placing [1:0] at [31:30],
          * then LSR 8 moves [31:30] to [23:22].
+         *
+         * Note: we do NOT set the FPCR DN bit (bit 25). x87 propagates
+         * the source NaN operand, matching AArch64's DN=0 behavior.
+         * Setting DN=1 would force a fixed default NaN and diverge from
+         * x87 semantics on NaN-producing ops. FZ (bit 24) is also left
+         * at zero so denormals follow IEEE rules.
          */
         tcg_out_ubfm(s, TCG_TYPE_I32,
                      TCG_REG_TMP0, a0, 13, 14);
@@ -3237,8 +3243,6 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                      TCG_REG_TMP0, TCG_REG_TMP0);
         tcg_out_ubfm(s, TCG_TYPE_I32,
                      TCG_REG_TMP0, TCG_REG_TMP0, 8, 31);
-        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I32,
-                         TCG_REG_TMP0, TCG_REG_TMP0, 0x02000000);
         tcg_out32(s, INSN_MSR_FPCR | (TCG_REG_TMP0 & 0x1f));
         break;
 
@@ -3284,6 +3288,16 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
         break;
     OP_f32_f64(rint):
+        /*
+         * TODO(armv8.5): When followed by an fcvtzs to int32, the pair
+         * `FRINTI + FCVTZS` can be fused into a single `FRINT32X` which
+         * rounds to int32 using the current FPCR mode. All Apple Silicon
+         * cores support ARMv8.5 FRINT. A TCG peephole would need a new
+         * `rint_cvt_i32_fX` opcode (emitted from ops_fpu.h's
+         * gen_fistl_ST0 / gen_fistll_ST0) and backend detection. Saves
+         * one instruction per FIST/FISTP; deferred pending profiling
+         * data that shows FIST in the hot path.
+         */
         tcg_out_fp_1src(s, dp ? INSN_FRINTI_D : INSN_FRINTI_S, a0, a1);
         break;
 

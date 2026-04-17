@@ -83,8 +83,14 @@ static void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
     case NV_PAPU_FEMEMDATA:
         /* 'magic write'
          * This value is expected to be written to FEMEMADDR on completion of
-         * something to do with notifies. Just do it now :/ */
-        stl_le_phys(&address_space_memory, d->regs[NV_PAPU_FEMEMADDR], val);
+         * something to do with notifies. Just do it now :/
+         *
+         * Atomically load FEMEMADDR: the APU frame thread / VP processing
+         * can also write this register via fe_method, so a non-atomic load
+         * could tear on weakly-ordered hosts.
+         */
+        stl_le_phys(&address_space_memory,
+                    qatomic_read(&d->regs[NV_PAPU_FEMEMADDR]), val);
         qatomic_set(&d->regs[addr], val);
         break;
     default:
@@ -304,7 +310,12 @@ static void *mcpx_apu_frame_thread(void *arg)
 
 static void mcpx_apu_wait_for_idle(MCPXAPUState *d)
 {
-    d->pause_requested = true;
+    /*
+     * Worker threads (voice_work_dispatch) read pause_requested atomically
+     * without d->lock; use qatomic_set here so the store is visible
+     * without relying on a lock-release hazard.
+     */
+    qatomic_set(&d->pause_requested, true);
     qemu_cond_signal(&d->cond);
     while (!d->is_idle) {
         qemu_cond_wait(&d->idle_cond, &d->lock);
@@ -313,7 +324,7 @@ static void mcpx_apu_wait_for_idle(MCPXAPUState *d)
 
 static void mcpx_apu_resume(MCPXAPUState *d)
 {
-    d->pause_requested = false;
+    qatomic_set(&d->pause_requested, false);
     qemu_cond_signal(&d->cond);
 }
 

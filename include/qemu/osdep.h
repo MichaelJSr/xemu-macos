@@ -856,6 +856,14 @@ size_t qemu_get_host_physmem(void);
 /*
  * Toggle write/execute on the pages marked MAP_JIT
  * for the current thread.
+ *
+ * Phase 5 TODO (xemu-macos): pthread_jit_write_protect_np traps into the
+ * kernel and is measurable under heavy TCG translation. macOS 14.4+
+ * exposes pthread_jit_write_with_callback_np(cb, ctx) which batches
+ * the W/X flip and amortizes the cost over multi-TB translations. The
+ * wire-up requires restructuring tb_gen_code to run translation inside
+ * a callback; deferred to a dedicated PR. Measurement first
+ * (ktrace / dtrace `pthread_jit_write_protect_np`) before changing.
  */
 #ifdef __APPLE__
 static inline void qemu_thread_jit_execute(void)

@@ -3191,21 +3191,51 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x1d: /* fldt mem */
+            /*
+             * Inline FPU path caches D-regs in DisasContext::fpregs[]. The
+             * helper writes env->fpregs[] directly; flush dirty cache first
+             * so the post-write view is coherent, and end the TB so the
+             * next TB reloads from memory.
+             */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_fldt_ST0(tcg_env, s->A0);
+            if (g_use_hard_fpu_inline) {
+                gen_update_eip_next(s);
+                gen_eob(s, DISAS_EOB_ONLY);
+            }
             break;
         case 0x1f: /* fstpt mem */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_fstt_ST0(tcg_env, s->A0);
             gen_fpop(s);
             break;
         case 0x2c: /* frstor mem */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_frstor(tcg_env, s->A0,
                               tcg_constant_i32(s->dflag - 1));
             update_fip = update_fdp = false;
+            if (g_use_hard_fpu_inline) {
+                gen_update_eip_next(s);
+                gen_eob(s, DISAS_EOB_ONLY);
+            }
             break;
         case 0x2e: /* fnsave mem */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_fsave(tcg_env, s->A0,
                              tcg_constant_i32(s->dflag - 1));
             update_fip = update_fdp = false;
+            if (g_use_hard_fpu_inline) {
+                gen_update_eip_next(s);
+                gen_eob(s, DISAS_EOB_ONLY);
+            }
             break;
         case 0x2f: /* fnstsw mem */
             if (g_use_hard_fpu_inline) {
@@ -3218,9 +3248,19 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x3c: /* fbld */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_fbld_ST0(tcg_env, s->A0);
+            if (g_use_hard_fpu_inline) {
+                gen_update_eip_next(s);
+                gen_eob(s, DISAS_EOB_ONLY);
+            }
             break;
         case 0x3e: /* fbstp */
+            if (g_use_hard_fpu_inline) {
+                gen_flush_fp(s);
+            }
             gen_helper_fbst_ST0(tcg_env, s->A0);
             gen_fpop(s);
             break;

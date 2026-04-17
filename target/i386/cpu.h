@@ -2823,6 +2823,14 @@ static inline void cpu_set_fpuc(CPUX86State *env, uint16_t fpuc)
      */
     env->hflags &= ~HF_FPU_PC_MASK;
     env->hflags |= ((env->fpuc >> 9) & 1) << HF_FPU_PC_SHIFT;
+
+    /*
+     * Force the inline-FPU rounding-control cache to miss on next gen_flcr.
+     * Otherwise rounding-mode changes made via save/restore or external
+     * register writes could be silently ignored by translated code that
+     * had already synced FPCR for a different mode in this TB chain.
+     */
+    env->cached_fpuc_rc = 0xFFFF;
 }
 
 /* svm_helper.c */

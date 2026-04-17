@@ -206,6 +206,9 @@ bool xemu_settings_load(void)
     if (g_config.display.metalfx_upscale &&
         g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_OFF) {
         g_config.display.metalfx_mode = CONFIG_DISPLAY_METALFX_MODE_SPATIAL;
+        fprintf(stderr,
+                "xemu: migrating legacy 'metalfx_upscale = true' "
+                "to 'metalfx_mode = spatial' in loaded config\n");
     }
     g_config.display.metalfx_upscale = false;
 

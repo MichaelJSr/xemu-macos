@@ -107,7 +107,41 @@ package_macos() {
     plutil -replace CFBundleShortVersionString -string "${xemu_version}" dist/xemu.app/Contents/Info.plist
     plutil -replace CFBundleVersion            -string "${xemu_version}" dist/xemu.app/Contents/Info.plist
 
-    codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "${exe_path}"
+    # Ad-hoc signing for local builds. MAP_JIT / TCG works under ad-hoc
+    # without hardened runtime, so we don't need to apply the
+    # `allow-jit` entitlement here. `--deep` re-signs all bundled
+    # dylibs (SDL3, MoltenVK, etc.) with the same ad-hoc identity as
+    # the main binary so dyld's same-team-ID check is satisfied.
+    # `--preserve-metadata=entitlements,...` is a no-op on a fresh
+    # build and preserves anything upstream may have embedded.
+    #
+    # For notarized/distributable builds, use `scripts/sign-macos-
+    # release.sh`, which enables the hardened runtime and applies
+    # `xemu.entitlements` (allow-jit + allow-unsigned-executable-memory)
+    # consistently across every binary in the bundle.
+    #
+    # Opt-in via XEMU_CODESIGN_ENTITLEMENTS=1 if you specifically need
+    # hardened-runtime behavior locally (rare).
+    if [[ "${XEMU_CODESIGN_ENTITLEMENTS:-0}" == "1" \
+          && -f "${project_source_dir}/xemu.entitlements" ]]; then
+      # Re-sign every bundled dylib with hardened runtime + entitlements
+      # first so they have a matching signing policy to the main exe.
+      # Without this, dyld rejects the main binary with
+      # "mapping process and mapped file have different Team IDs".
+      find dist/xemu.app/Contents/Libraries -name '*.dylib' -print0 | \
+        while IFS= read -r -d '' dyl; do
+          codesign --force --sign - \
+                   --entitlements "${project_source_dir}/xemu.entitlements" \
+                   --options runtime "${dyl}"
+        done
+      codesign --force --deep --sign - \
+               --entitlements "${project_source_dir}/xemu.entitlements" \
+               --options runtime "${exe_path}"
+    else
+      codesign --force --deep \
+               --preserve-metadata=entitlements,requirements,flags,runtime \
+               --sign - "${exe_path}"
+    fi
     python3 ./scripts/gen-license.py --version-file=macos-libs/$target_arch/INSTALLED > dist/LICENSE.txt
 }
 
@@ -268,9 +302,117 @@ case "$platform" in # Adjust compilation options based on platform
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
         elif [ "$target_arch" == "arm64" ]; then
-            sys_cflags='-mcpu=native -ffp-contract=fast'
+            # ARM64 -mcpu selection:
+            #   - XEMU_ARM_CPU overrides everything (e.g. `apple-m4`).
+            #   - Otherwise, auto-detect the host chip via sysctl and pick
+            #     the matching `-mcpu=apple-mN`. This produces a binary
+            #     tuned for the build host, which is almost always what a
+            #     personal build wants.
+            #   - If clang doesn't recognize the newest chip yet
+            #     (e.g. sysctl reports "Apple M6" but the bundled clang
+            #     tops out at apple-m4), walk down the list to the
+            #     nearest known-good CPU rather than dropping all the
+            #     way to apple-m1 — preserves most of the tuning win.
+            #
+            # `-mcpu=native` is avoided because clang's "native" on
+            # Apple Silicon bakes in implementation quirks and isn't
+            # guaranteed stable across toolchain versions.
+
+            # Verify a -mcpu= argument is accepted by the toolchain.
+            probe_mcpu() {
+              echo 'int main(void){return 0;}' | \
+                "${CC:-clang}" -x c - -mcpu="$1" \
+                -o /dev/null -target arm64-apple-macos >/dev/null 2>&1
+            }
+
+            if [ -n "${XEMU_ARM_CPU}" ]; then
+              arm_cpu="${XEMU_ARM_CPU}"
+              if ! probe_mcpu "${arm_cpu}"; then
+                echo "Warning: clang doesn't recognize -mcpu=${arm_cpu} " \
+                     "(from XEMU_ARM_CPU); falling back to apple-m1."
+                arm_cpu='apple-m1'
+              fi
+              echo "ARM64 -mcpu=${arm_cpu} (from XEMU_ARM_CPU)"
+            else
+              brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+              # Extract the M-number; default to 1 on non-Apple-Silicon
+              # hosts (cross-compile, Rosetta etc.).
+              m_num="$(echo "${brand}" | \
+                       sed -n 's/.*Apple M\([0-9][0-9]*\).*/\1/p')"
+              if [ -z "${m_num}" ]; then
+                m_num=1
+              fi
+              # Try apple-mN, then apple-m(N-1), ... down to apple-m1.
+              arm_cpu=''
+              candidate_n="${m_num}"
+              while [ "${candidate_n}" -ge 1 ]; do
+                cand="apple-m${candidate_n}"
+                if probe_mcpu "${cand}"; then
+                  arm_cpu="${cand}"
+                  break
+                fi
+                candidate_n=$((candidate_n - 1))
+              done
+              if [ -z "${arm_cpu}" ]; then
+                # Shouldn't happen — every modern clang knows apple-m1 —
+                # but guard against it anyway.
+                arm_cpu='apple-m1'
+                echo "Warning: clang rejected every apple-mN candidate; " \
+                     "forcing apple-m1."
+              elif [ "${candidate_n}" -lt "${m_num}" ]; then
+                echo "Note: clang tops out below Apple M${m_num}; " \
+                     "using -mcpu=${arm_cpu}."
+              fi
+              echo "ARM64 -mcpu=${arm_cpu} (auto-detected from '${brand}')"
+            fi
+            sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast"
         fi
-        sys_ldflags='-headerpad_max_install_names'
+
+        # Optional PGO build mode (Phase 5). Two-stage flow:
+        #   XEMU_PGO=generate ./build.sh   # build with -fprofile-generate
+        #   # run target games to gather .profraw files into PGO_DIR
+        #   XEMU_PGO=use ./build.sh        # rebuild with -fprofile-use
+        # Profile data directory defaults to ${PWD}/pgo; override with
+        # XEMU_PGO_DIR. Works on clang/ldflags only; LTO stays enabled
+        # so sample-based PGO can cross translation units.
+        if [ -n "${XEMU_PGO}" ]; then
+          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+          mkdir -p "${pgo_dir}"
+          case "${XEMU_PGO}" in
+            generate)
+              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
+              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
+              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
+              ;;
+            use)
+              if ! ls "${pgo_dir}"/*.profraw >/dev/null 2>&1 && \
+                 [ ! -f "${pgo_dir}/default.profdata" ]; then
+                echo "PGO: no profiles found in ${pgo_dir}"
+                exit 1
+              fi
+              if [ ! -f "${pgo_dir}/default.profdata" ]; then
+                xcrun llvm-profdata merge -output="${pgo_dir}/default.profdata" \
+                    "${pgo_dir}"/*.profraw
+              fi
+              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
+              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
+              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
+              ;;
+            *)
+              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
+              exit 1
+              ;;
+          esac
+        fi
+
+        sys_ldflags="${sys_ldflags:-}${sys_ldflags:+ }-headerpad_max_install_names"
+        # Phase 5 note: -Wl,-dead_strip and -fvisibility=hidden were
+        # evaluated but NOT enabled. QEMU relies on constructor-style
+        # module registration (type_init, module_init) via implicit
+        # default visibility; turning on dead_strip or hidden
+        # visibility without auditing every registrar risks pruning
+        # live modules. Safe adoption requires annotating public
+        # symbols with QEMU_USED / visibility("default") first.
         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
         opts="$opts --disable-cocoa --cross-prefix="
         postbuild='package_macos'

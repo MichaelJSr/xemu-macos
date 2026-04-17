@@ -30,6 +30,10 @@ const char *xemu_get_os_info(void);
 #include <cpuid.h>
 #endif
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 static inline const char *xemu_get_cpu_info(void)
 {
     const char *cpu_info = "";
@@ -41,8 +45,22 @@ static inline const char *xemu_get_cpu_info(void)
         __get_cpuid(0x80000004, brand+0x8, brand+0x9, brand+0xa, brand+0xb);
     }
     cpu_info = (const char *)brand;
+#elif defined(__APPLE__)
+    /*
+     * Apple Silicon / ARM macOS: use sysctl to read the marketing brand
+     * ("Apple M2 Ultra" etc.). Matches the chip-detection pattern in
+     * build.sh.
+     */
+    static char brand[128];
+    if (brand[0] == '\0') {
+        size_t len = sizeof(brand);
+        if (sysctlbyname("machdep.cpu.brand_string", brand, &len, NULL, 0)
+            != 0) {
+            brand[0] = '\0';
+        }
+    }
+    cpu_info = brand;
 #endif
-    // FIXME: Support other architectures (e.g. ARM)
     return cpu_info;
 }
 

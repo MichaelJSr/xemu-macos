@@ -340,9 +340,17 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         hwaddr layer_size = s.cubemap ? get_cubemap_layer_size(pg, s) : 0;
         const int num_layers = s.cubemap ? 6 : 1;
 
+        /*
+         * GPU unswizzle now supports any power-of-two dimensions via
+         * CPU-computed swizzle masks (Phase 3.2). Xbox swizzled textures
+         * are always POT by hardware constraint, so this condition is
+         * generally true; checked here defensively.
+         */
         bool use_gpu_unswizzle = !is_compressed &&
             (f.bytes_per_pixel == 2 || f.bytes_per_pixel == 4) &&
-            !texture_format_needs_data_conversion(s.color_format);
+            !texture_format_needs_data_conversion(s.color_format) &&
+            (adjusted_width  & (adjusted_width  - 1)) == 0 &&
+            (adjusted_height & (adjusted_height - 1)) == 0;
 
         if (use_gpu_unswizzle) {
             for (int layer = 0; layer < num_layers; layer++) {

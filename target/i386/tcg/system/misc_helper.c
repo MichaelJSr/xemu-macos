@@ -518,8 +518,36 @@ G_NORETURN void helper_hlt(CPUX86State *env)
     do_end_instruction(env);
 
 #ifdef XBOX
-    if (!(env->eflags & IF_MASK) &&
+    /*
+     * BSOD recovery: the Xbox kernel occasionally bugchecks
+     * (IRQL_NOT_LESS_OR_EQUAL) and executes `CLI; HLT` with an interrupt
+     * already pending, deadlocking the CPU. Force IF=1 so the pending
+     * hardware interrupt can wake the halted CPU and keep the emulator
+     * alive (display/audio pipelines depend on vblank ticks).
+     *
+     * This is a semantic deviation from strict x86: legitimate
+     * `CLI; HLT` patterns with an already-pending IRQ will also have
+     * IF forced on. In practice the Xbox kernel doesn't rely on that
+     * sequence outside of bugchecks. Disable via env var
+     * XEMU_HLT_BSOD_RECOVERY=0 for correctness testing.
+     */
+    static int g_hlt_bsod_recovery = -1;
+    static bool g_warned_once = false;
+    if (g_hlt_bsod_recovery < 0) {
+        const char *s = getenv("XEMU_HLT_BSOD_RECOVERY");
+        g_hlt_bsod_recovery = (s && s[0] == '0') ? 0 : 1;
+    }
+    if (g_hlt_bsod_recovery &&
+        !(env->eflags & IF_MASK) &&
         (cs->interrupt_request & CPU_INTERRUPT_HARD)) {
+        if (!g_warned_once) {
+            g_warned_once = true;
+            fprintf(stderr,
+                    "xemu: forcing IF=1 on CLI+HLT with pending IRQ "
+                    "(BSOD recovery heuristic; eip=0x%08x). "
+                    "Set XEMU_HLT_BSOD_RECOVERY=0 to disable.\n",
+                    (unsigned)env->eip);
+        }
         env->eflags |= IF_MASK;
     }
 #endif

@@ -1289,12 +1289,19 @@ int MainMenuSnapshotsView::OnSearchTextUpdate(ImGuiInputTextCallbackData *data)
         return 0;
     }
 
+    /*
+     * Match anywhere in the string (g_regex_match is unanchored by
+     * default). Previously the pattern was wrapped in `(.*)...(.*)`
+     * which adds two unused capture groups and can blow up via
+     * catastrophic backtracking on long inputs. Drop the wrap and let
+     * PCRE optimize the literal substring search via G_REGEX_OPTIMIZE.
+     */
     gchar *escaped = g_regex_escape_string(data->Buf, -1);
-    char *buf = g_strdup_printf("(.*)%s(.*)", escaped);
-    g_free(escaped);
     win->m_search_regex =
-        g_regex_new(buf, (GRegexCompileFlags)0, (GRegexMatchFlags)0, &gerr);
-    g_free(buf);
+        g_regex_new(escaped,
+                    (GRegexCompileFlags)(G_REGEX_OPTIMIZE | G_REGEX_CASELESS),
+                    (GRegexMatchFlags)0, &gerr);
+    g_free(escaped);
     if (gerr) {
         win->m_search_regex = NULL;
         return 1;

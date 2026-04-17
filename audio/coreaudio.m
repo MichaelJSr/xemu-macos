@@ -553,8 +553,24 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
     as->fmt = AUDIO_FORMAT_F32;
     audio_pcm_init_info (&hw->info, as);
 
+    /*
+     * Buffer size trade-off: 4096 frames (~85 ms @ 48 kHz) is very high
+     * latency for an interactive emulator. 1024 frames (~21 ms @ 48 kHz)
+     * is well within Apple's reliable IOProc budget on Apple Silicon
+     * while cutting latency ~4x. Users can override via the TOML
+     * `[audio.coreaudio.out] buffer_length` / `buffer_count` knobs.
+     *
+     * After Phase 2.1 (rate==1 resampler fast path) and Phase 2.2
+     * (vDSP_vsma mixbin), the VP frame thread is fast enough that
+     * trylock contention with IOProc is rare.
+     */
+    const char *buf_env = getenv("XEMU_COREAUDIO_FRAMES");
+    int default_frames = buf_env ? atoi(buf_env) : 1024;
+    if (default_frames <= 0) {
+        default_frames = 1024;
+    }
     core->frameSizeSetting = audio_buffer_frames(
-        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 4096);
+        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, default_frames);
 
     core->bufferCount = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
 

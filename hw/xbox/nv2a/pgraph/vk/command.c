@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include <limits.h>
 
 static void create_command_pool(PGRAPHState *pg)
 {
@@ -95,6 +96,8 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
     if (r->flight[slot].uploaded_bitmap) {
         bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);
     }
+    r->flight[slot].uploaded_first_dirty_bit = ULONG_MAX;
+    r->flight[slot].uploaded_last_dirty_bit = 0;
 }
 
 void pgraph_vk_init_flight_partitions(PGRAPHState *pg)

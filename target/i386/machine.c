@@ -328,6 +328,13 @@ static int cpu_post_load(void *opaque, int version_id)
         error_report("Unsupported old non-softfloat CPU state");
         return -EINVAL;
     }
+
+    /*
+     * Invalidate the inline-FPU rounding-control cache so the first gen_flcr
+     * in the post-load TB stream re-syncs host FPCR to the restored guest
+     * rounding mode.
+     */
+    env->cached_fpuc_rc = 0xFFFF;
     /*
      * Real mode guest segments register DPL should be zero.
      * Older KVM version were setting it wrongly.

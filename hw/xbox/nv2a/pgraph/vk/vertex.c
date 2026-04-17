@@ -55,8 +55,23 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     size_t nbits = end_bit - start_bit;
 
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
-        if (r->flight[i].uploaded_bitmap &&
-            find_next_bit(r->flight[i].uploaded_bitmap,
+        if (!r->flight[i].uploaded_bitmap) {
+            continue;
+        }
+        /*
+         * Fast reject: if the query range doesn't intersect this slot's
+         * tracked [first..last] dirty-page window, no overlap is
+         * possible and we can skip the find_next_bit scan.
+         */
+        unsigned long slot_first = r->flight[i].uploaded_first_dirty_bit;
+        if (slot_first == ULONG_MAX) {
+            continue;
+        }
+        unsigned long slot_last = r->flight[i].uploaded_last_dirty_bit;
+        if (start_bit > slot_last || end_bit <= slot_first) {
+            continue;
+        }
+        if (find_next_bit(r->flight[i].uploaded_bitmap,
                           start_bit + nbits, start_bit) < end_bit) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
             break;
@@ -67,6 +82,24 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
 
     bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
+
+    /*
+     * Track dirty-page min/max so aux_has_work() and flush_memory_buffer()
+     * can skip scanning the whole VRAM page bitmap when work is small.
+     */
+    if (nbits > 0) {
+        unsigned long last_bit = start_bit + nbits - 1;
+        if (start_bit <
+            r->flight[r->current_flight].uploaded_first_dirty_bit) {
+            r->flight[r->current_flight].uploaded_first_dirty_bit =
+                start_bit;
+        }
+        if (last_bit >
+            r->flight[r->current_flight].uploaded_last_dirty_bit) {
+            r->flight[r->current_flight].uploaded_last_dirty_bit =
+                last_bit;
+        }
+    }
 }
 
 static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)

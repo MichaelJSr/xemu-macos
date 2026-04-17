@@ -34,6 +34,15 @@
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
 #endif
 
+/*
+ * Older Vulkan headers may miss the dynamic rendering extension macro
+ * or its feature struct/sType. MoltenVK advertises it via volk runtime
+ * loading, so we define the names inline for compile-time safety.
+ */
+#ifndef VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME
+#define VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME "VK_KHR_dynamic_rendering"
+#endif
+
 static bool enable_validation = false;
 
 static char const *const validation_layers[] = {
@@ -372,6 +381,18 @@ static void add_optional_device_extension_names(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
 #endif
+
+    /*
+     * VK_KHR_dynamic_rendering removes VkRenderPass/VkFramebuffer object
+     * lifetime from the draw path and maps directly to Metal's native
+     * pass model on MoltenVK. Groundwork for Phase 3.1: we enable the
+     * extension + feature if the device advertises it; a follow-up pass
+     * will flip create_render_pass / begin_render_pass to emit
+     * vkCmdBeginRendering under this flag.
+     */
+    r->dynamic_rendering_extension_enabled = add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -586,6 +607,40 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
             .pNext = next_struct,
         };
         next_struct = &custom_border_features;
+    }
+
+    /*
+     * Phase 3.1: probe and request dynamicRendering feature when the
+     * extension was added to the enabled list above. The renderer's
+     * draw.c doesn't yet use vkCmdBeginRendering; this just lights up
+     * the capability for the follow-up patch.
+     */
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_features;
+    if (r->dynamic_rendering_extension_enabled) {
+        VkPhysicalDeviceDynamicRenderingFeaturesKHR probe = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+        };
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &probe,
+        };
+        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
+        if (probe.dynamicRendering) {
+            dynamic_rendering_features = (
+                VkPhysicalDeviceDynamicRenderingFeaturesKHR){
+                .sType =
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+                .dynamicRendering = VK_TRUE,
+                .pNext = next_struct,
+            };
+            next_struct = &dynamic_rendering_features;
+            r->dynamic_rendering_feature_enabled = true;
+            fprintf(stderr,
+                    "- VK_KHR_dynamic_rendering enabled (Phase 3.1 groundwork)\n");
+        } else {
+            r->dynamic_rendering_extension_enabled = false;
+        }
     }
 
     VkDeviceCreateInfo device_create_info = {

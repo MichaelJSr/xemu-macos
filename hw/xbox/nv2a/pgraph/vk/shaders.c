@@ -524,6 +524,8 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
                                          sizeof(ShaderState))) {
             r->shader_binding = get_shader_binding_for_state(r, &new_state);
             r->shader_bindings_changed = true;
+            /* Invalidate the cached sub-hash so create_pipeline re-seeds. */
+            r->cached_shader_state_hash = 0;
         }
     } else {
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);

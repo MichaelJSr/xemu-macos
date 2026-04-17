@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include <limits.h>
 
 static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
 {
@@ -122,6 +123,8 @@ void pgraph_vk_init_buffers(NV2AState *d)
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         r->flight[i].uploaded_bitmap = bitmap_new(r->bitmap_size);
         bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
+        r->flight[i].uploaded_first_dirty_bit = ULONG_MAX;
+        r->flight[i].uploaded_last_dirty_bit = 0;
     }
 
     r->storage_buffers[BUFFER_VERTEX_INLINE] = (StorageBuffer){

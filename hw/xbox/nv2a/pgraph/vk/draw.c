@@ -1085,7 +1085,33 @@ static void create_pipeline(PGRAPHState *pg)
 
     PipelineKey key;
     init_pipeline_key(pg, &key);
-    uint64_t hash = fast_hash((void *)&key, sizeof(key));
+
+    /*
+     * Compute the pipeline cache hash as XOR of sub-hashes. ShaderState
+     * is by far the largest field (~hundreds of bytes) and only changes
+     * when shader bindings change; caching its hash avoids re-scanning
+     * those bytes on every dirty-pipeline draw call where only blend /
+     * depth / vertex-descriptor state changed. The LRU bucket uses the
+     * hash plus a full memcmp for disambiguation, so XOR is safe.
+     */
+    if (r->cached_shader_state_hash == 0) {
+        r->cached_shader_state_hash =
+            fast_hash((const uint8_t *)&key.shader_state,
+                      sizeof(key.shader_state));
+        /* Guarantee non-zero sentinel; collision with 0 is astronomically
+         * unlikely but still better to avoid re-hashing next frame. */
+        if (r->cached_shader_state_hash == 0) {
+            r->cached_shader_state_hash = 1;
+        }
+    }
+    const size_t head_len =
+        offsetof(PipelineKey, shader_state);
+    const size_t tail_off =
+        offsetof(PipelineKey, shader_state) + sizeof(key.shader_state);
+    const size_t tail_len = sizeof(key) - tail_off;
+    uint64_t hash = r->cached_shader_state_hash ^
+                    fast_hash((const uint8_t *)&key, head_len) ^
+                    fast_hash((const uint8_t *)&key + tail_off, tail_len);
 
     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
@@ -1145,10 +1171,24 @@ static void create_pipeline(PGRAPHState *pg)
         .pVertexAttributeDescriptions = r->vertex_attribute_descriptions,
     };
 
+    /*
+     * NV2A supports an "index restart" marker in indexed draws (matching
+     * Vulkan's 0xFFFF / 0xFFFFFFFF semantics). Enable primitive restart
+     * for strip/fan topologies so titles that rely on the marker render
+     * correctly. Vulkan only permits restart with list topologies when
+     * VK_EXT_primitive_topology_list_restart is enabled; we don't, so
+     * gate to strip/fan only.
+     */
+    VkPrimitiveTopology topology = get_primitive_topology(pg);
+    bool restart_enable =
+        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+        topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = get_primitive_topology(pg),
-        .primitiveRestartEnable = VK_FALSE,
+        .topology = topology,
+        .primitiveRestartEnable = restart_enable ? VK_TRUE : VK_FALSE,
     };
 
     VkPipelineViewportStateCreateInfo viewport_state = {
@@ -1537,13 +1577,19 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     StorageBuffer *vram = &r->storage_buffers[BUFFER_VERTEX_RAM];
-    unsigned long *slot_bitmap = r->flight[r->current_flight].uploaded_bitmap;
 
-    unsigned long first_dirty = find_first_bit(slot_bitmap, r->bitmap_size);
-    if (first_dirty >= r->bitmap_size) {
+    /*
+     * Tracked min/max dirty bits avoid scanning the full per-flight VRAM
+     * page bitmap with find_first_bit/find_last_bit. ULONG_MAX sentinel
+     * means no dirty pages; return early.
+     */
+    unsigned long first_dirty =
+        r->flight[r->current_flight].uploaded_first_dirty_bit;
+    if (first_dirty == ULONG_MAX) {
         return;
     }
-    unsigned long last_dirty = find_last_bit(slot_bitmap, r->bitmap_size);
+    unsigned long last_dirty =
+        r->flight[r->current_flight].uploaded_last_dirty_bit;
 
     VkDeviceSize offset = (VkDeviceSize)first_dirty * TARGET_PAGE_SIZE;
     VkDeviceSize end = (VkDeviceSize)(last_dirty + 1) * TARGET_PAGE_SIZE;
@@ -1659,8 +1705,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
                 get_staging_slot_base(r, BUFFER_VERTEX_INLINE_STAGING) ||
             r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset >
                 get_staging_slot_base(r, BUFFER_UNIFORM_STAGING) ||
-            find_first_bit(r->flight[r->current_flight].uploaded_bitmap,
-                           r->bitmap_size) < r->bitmap_size;
+            r->flight[r->current_flight].uploaded_first_dirty_bit !=
+                ULONG_MAX;
 
         int slot = r->current_flight;
 
