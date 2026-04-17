@@ -26,6 +26,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/compiler.h"
+#include "qemu/timer.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
@@ -1812,10 +1813,30 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         nv2a_vk_assert(r->color_binding->height == r->zeta_binding->height);
     }
 
-    if (d->pgraph.frame_time - r->last_expire_frame_time >= 8) {
+    /*
+     * Throttle the O(n) surface list scans so they don't run on every
+     * draw. We throttle on host wall-clock (not pg->frame_time), because
+     * pg->frame_time only advances in NV097_FLIP_INCREMENT_WRITE — during
+     * a rapid level transition or loading burst the guest can issue
+     * thousands of draws between flips, and a frame_time-only gate would
+     * never fire. That lets r->invalid_surfaces accumulate unbounded;
+     * each invalid SurfaceBinding still holds a live VkImage +
+     * allocation, and eventually either VRAM pressure or get_any_-
+     * compatible_invalid_surface matching the wrong stale candidate
+     * stalls the renderer (reproducible as a black-screen freeze on
+     * rapid double-level-load + die, confirmed via bisect against
+     * v0.8.141 → v0.8.142).
+     *
+     * ~33 ms (~2 frames at 60 Hz) keeps the per-draw amortization that
+     * motivated the throttle while guaranteeing the prune runs during
+     * long non-flip bursts.
+     */
+    int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+    const int64_t surface_expire_interval_ns = 33 * 1000 * 1000;
+    if (now_ns - r->last_expire_ns >= surface_expire_interval_ns) {
         expire_old_surfaces(d);
         prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
-        r->last_expire_frame_time = d->pgraph.frame_time;
+        r->last_expire_ns = now_ns;
     }
 }
 

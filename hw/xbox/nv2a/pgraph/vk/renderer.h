@@ -602,7 +602,7 @@ typedef struct PGRAPHVkState {
     int surface_range_count;
     int surface_range_capacity;
 
-    int last_expire_frame_time;
+    int64_t last_expire_ns;
 } PGRAPHVkState;
 
 // renderer.c

@@ -123,8 +123,19 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   `memcpy` with a per-layout dirty flag. Pipeline key re-hashes only
   when `check_pipeline_dirty` fires, and then hashes only the non-
   shader-state slice (ShaderState sub-hash is cached). Vertex layout
-  fingerprinted via `fast_hash`. Per-draw surface expiry runs every 8
-  frame ticks instead of every draw.
+  fingerprinted via `fast_hash`. Per-draw surface expiry
+  (`expire_old_surfaces` + `prune_invalid_surfaces`) is throttled to
+  once every ~33 ms of host wall-clock. It was previously throttled on
+  `pg->frame_time`, which only advances in `NV097_FLIP_INCREMENT_WRITE`
+  — during a rapid level-transition burst the guest can issue
+  thousands of draws between flips, so `frame_time` gating never
+  fired and `r->invalid_surfaces` accumulated unbounded. Each
+  invalid `SurfaceBinding` holds a live `VkImage` + allocation;
+  unbounded growth eventually stalled the renderer (reproducible as
+  a black-screen freeze on rapid double-level-load + die,
+  confirmed via bisect against v0.8.141 → v0.8.142). Wall-clock
+  gating preserves the per-draw amortization while guaranteeing
+  the prune runs during long non-flip bursts.
 - **Incremental texture content hash.** Page-aligned textures
   ≥ 256 KiB keep a per-chunk XXH3 hash array (64 KiB chunks). On
   dirty-bitmap fire only chunks whose backing pages actually changed
@@ -263,6 +274,7 @@ Lessons worth preserving so they aren't re-attempted.
 | `VK_KHR_dynamic_rendering` full lowering (B2) | Replaced `VkRenderPass` + `VkFramebuffer` with `vkCmdBeginRendering` / `vkCmdEndRendering`, but didn't replicate the old render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency that synchronizes color/depth attachment read+write across consecutive passes. Under heavy back-to-back render-pass churn (level transitions, death-reload) Metal's tile renderer stalled, producing frozen/black screens with the CPU spinning in the idle thread's `CLI; HLT` (post-halt BSOD recovery counter climbing ~10 k/2 s). Disabled via forcing `dynamic_rendering_feature_enabled = false`; downstream gates fall back to the render-pass path. Re-enable needs an explicit `vkCmdPipelineBarrier` on the subpass-dep stages/access around every BeginRendering/EndRendering. |
 | APU voice resampler `rate == 1.0` fast path | Skipped libsamplerate entirely by calling `voice_get_samples` in a loop and returning short counts. The libsamplerate path's callback (`voice_resample_callback`) pads with silence on starvation so `src_callback_read` always returns `NUM_SAMPLES_PER_FRAME`; the fast path returned early instead, letting `voice_process`'s outer for-loop retry indefinitely on a voice that was draining during scene transitions. Manifested as "all pfifo pending flags at 0, guest CPU spinning in kernel idle thread CLI+HLT, game waiting on audio completion that never fires" per the heartbeat diagnostic. Reverted; SRC_LINEAR is cheap enough to run unconditionally. |
 | `HLT` BSOD recovery (at-HLT and post-halt IF=1 force) | Forced `IF=1` when the guest executed `HLT` with `IF=0` and a pending HARD IRQ, including the post-halt variant that teaches `x86_cpu_has_work` about the same pattern. Theory: Xbox kernel occasionally enters `CLI; HLT` with an IRQ pending or arriving later, and `x86_cpu_pending_interrupt` gates HARD on `IF=1`, so the CPU would deadlock. The recovery did correctly unblock those deadlocks, but in practice games kept freezing on level transitions even with the recovery firing at ~1500/s (confirmed via the `XEMU_PFIFO_HEARTBEAT` diagnostic: pfifo idle, all pending flags 0, pgraph has nothing queued, game's main thread stuck on something outside pgraph). Removing the recovery didn't actually *prevent* the freeze — the IRQ pattern is a *symptom* of the game's main thread being blocked on some non-pgraph kernel object, not the cause. Reverted to stock upstream semantics; the underlying stuck-thread cause is still open and needs a kernel-level trace to pin down. |
+| Surface-expiry throttle keyed on `pg->frame_time` (v0.8.142) | Original round-7 optimization: throttle `expire_old_surfaces` + `prune_invalid_surfaces` to every 8 frame ticks to avoid per-draw O(n) scans. The bug: `pg->frame_time` only advances in `NV097_FLIP_INCREMENT_WRITE`, so when the guest issued thousands of draws between flips (rapid level transitions, death-reload, shader-cache-cold startup), the gate never fired and `r->invalid_surfaces` grew unbounded. Each entry holds a live `VkImage` + allocation; eventually VRAM pressure / wrong stale match in `get_any_compatible_invalid_surface` stalled the renderer → black-screen freeze (bisected against v0.8.141 → v0.8.142, confirmed by reverting this one change alone). Fixed by switching the throttle to host wall-clock (`qemu_clock_get_ns(QEMU_CLOCK_HOST)`, ~33 ms interval) so it ticks regardless of flip cadence. |
 
 ---
 
