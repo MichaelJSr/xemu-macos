@@ -508,28 +508,30 @@ void *pfifo_thread(void *arg)
                 now - pfifo_last_heartbeat_ns >=
                     2LL * 1000 * 1000 * 1000) {
                 pfifo_last_heartbeat_ns = now;
-                int dl = 0, ddl = 0;
-                if (d->pgraph.vk_renderer_state) {
-                    dl = qatomic_read(
-                        &d->pgraph.vk_renderer_state->downloads_pending);
-                    ddl = qatomic_read(
-                        &d->pgraph.vk_renderer_state
-                             ->download_dirty_surfaces_pending);
-                }
+                /*
+                 * Renderer-specific pending flags (downloads_pending,
+                 * download_dirty_surfaces_pending) live inside
+                 * PGRAPHVkState / PGRAPHGLState which are only
+                 * forward-declared in pgraph.h, so this log sticks
+                 * to the pgraph.h-visible flags. Those are enough to
+                 * categorize the freeze: if flush_pending / sync_pending
+                 * stays stuck at 1 the renderer's vkWaitForFences /
+                 * vkQueueSubmit is hung; if waiting_for_flip stays stuck
+                 * the game is waiting on NV_PGRAPH_INCREMENT READ_3D.
+                 */
                 fprintf(stderr,
                         "xemu: pfifo heartbeat "
                         "iters=%" PRIu64 " halt=%d "
                         "flush=%d sync=%d "
                         "waiting_flip=%d waiting_nop=%d "
-                        "waiting_ctxsw=%d dl=%d ddl=%d\n",
+                        "waiting_ctxsw=%d\n",
                         pfifo_loop_iters,
                         qatomic_read(&d->pfifo.halt),
                         qatomic_read(&d->pgraph.flush_pending),
                         qatomic_read(&d->pgraph.sync_pending),
                         qatomic_read(&d->pgraph.waiting_for_flip),
                         qatomic_read(&d->pgraph.waiting_for_nop),
-                        qatomic_read(&d->pgraph.waiting_for_context_switch),
-                        dl, ddl);
+                        qatomic_read(&d->pgraph.waiting_for_context_switch));
             }
         }
 
