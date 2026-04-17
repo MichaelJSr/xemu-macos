@@ -538,21 +538,22 @@ void *pfifo_thread(void *arg)
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
             /*
-             * 1 ms safety-net timedwait (restored from the earlier
-             * untimed-wait optimization). Even though every pfifo_kick
-             * call site holds d->pfifo.lock across the kick-set +
-             * broadcast pair, level-transition / save-reload freezes
-             * in practice seem to catch some edge case — possibly a
-             * QEMU event-set without a following kick, or a subtle
-             * re-ordering inside pgraph_process_pending's lock-drop
-             * window. The ~1 kHz wake-up cost is negligible on Apple
-             * Silicon and lets the loop re-check all pending flags
-             * (downloads_pending, sync_pending, flush_pending, halt,
-             * etc.) periodically regardless of kick delivery. Restore
-             * the proven upstream behavior until the specific race is
-             * pinned down.
+             * Untimed wait. Every pfifo_kick call site in the tree
+             * holds d->pfifo.lock across the kick-set + broadcast
+             * pair (pfifo_write, pgraph.c:pgraph_write and
+             * do_wait_for_renderer_switch, user.c:user_write,
+             * nv2a.c:nv2a_unlock_fifo, the pgraph/{gl,vk}/{surface,
+             * display,renderer}.c sync entry points), so a
+             * concurrent kick cannot slip between our kick-check and
+             * qemu_cond_wait's atomic release. Removes the earlier
+             * 1 ms safety-net wake-up (~1 kHz) that was restored
+             * while diagnosing a pre-existing level-transition
+             * freeze; that freeze is unrelated to this wait path
+             * (confirmed via XEMU_PFIFO_HEARTBEAT: during the freeze
+             * the loop iters counter keeps climbing at the same
+             * rate regardless of timed vs untimed wait).
              */
-            qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
+            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
         }
 
         if (d->exiting) {

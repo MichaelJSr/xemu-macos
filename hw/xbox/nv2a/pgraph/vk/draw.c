@@ -1531,25 +1531,50 @@ static void bind_descriptor_sets(PGRAPHState *pg)
     nv2a_vk_assert(r->ubo_descriptor_set_index >= 1);
 
     /*
-     * Defensive: always re-bind both sets on every draw (reverts the
-     * earlier "skip when last-bound matches" optimization). The
-     * optimization was correct per Vulkan's pipeline-layout
-     * compatibility rules in isolation, but it correlated with
-     * level-transition / death-reload freezes where PGRAPH churns
-     * through a mix of draw and clear pipelines (the latter use a
-     * zero-descriptor-set layout). Re-binding unconditionally costs
-     * one extra vkCmdBindDescriptorSets per draw but is cheap on
-     * MoltenVK and removes any descriptor-set-state-leak class of
-     * bug as a candidate. TODO: reintroduce the skip once the
-     * freeze cause is pinned down.
+     * Two sets are bound independently: set 0 (UBOs) only when the UBO
+     * index advances, set 1 (textures) only when the texture index
+     * advances. Each "last-bound" tracker avoids redundant bind calls
+     * when the corresponding set hasn't been rewritten.
+     *
+     * Vulkan pipeline-layout compatibility rules guarantee that the
+     * last-bound sets remain valid across pipeline swaps as long as
+     * the two pipelines' descriptor set layouts for each set index
+     * match. All draw pipelines use the same (ubo_layout, tex_layout)
+     * pair, so sets bound for pipeline A remain valid for pipeline B.
+     * Clear pipelines use a zero-descriptor-set layout (nothing to
+     * bind) and don't disturb the currently-bound sets for the next
+     * draw pipeline.
+     *
+     * The skip was briefly reverted to an unconditional rebind while
+     * diagnosing a pre-existing level-transition freeze; the
+     * XEMU_PFIFO_HEARTBEAT diagnostic confirmed the freeze is not
+     * pgraph-side, so the skip is restored.
      */
-    VkDescriptorSet sets[2] = {
-        r->ubo_descriptor_sets[r->ubo_descriptor_set_index - 1],
-        r->descriptor_sets[r->descriptor_set_index - 1],
-    };
-    vkCmdBindDescriptorSets(r->command_buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            r->pipeline_binding->layout, 0, 2, sets, 0, NULL);
+    bool need_bind_ubo =
+        r->ubo_descriptor_set_index != r->last_bound_ubo_descriptor_set_index;
+    bool need_bind_tex =
+        r->descriptor_set_index != r->last_bound_descriptor_set_index;
+
+    if (need_bind_ubo && need_bind_tex) {
+        VkDescriptorSet sets[2] = {
+            r->ubo_descriptor_sets[r->ubo_descriptor_set_index - 1],
+            r->descriptor_sets[r->descriptor_set_index - 1],
+        };
+        vkCmdBindDescriptorSets(r->command_buffer,
+                                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                r->pipeline_binding->layout, 0, 2, sets, 0,
+                                NULL);
+    } else if (need_bind_ubo) {
+        vkCmdBindDescriptorSets(
+            r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            r->pipeline_binding->layout, 0, 1,
+            &r->ubo_descriptor_sets[r->ubo_descriptor_set_index - 1], 0, NULL);
+    } else if (need_bind_tex) {
+        vkCmdBindDescriptorSets(
+            r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            r->pipeline_binding->layout, 1, 1,
+            &r->descriptor_sets[r->descriptor_set_index - 1], 0, NULL);
+    }
 
     r->last_bound_ubo_descriptor_set_index = r->ubo_descriptor_set_index;
     r->last_bound_descriptor_set_index = r->descriptor_set_index;

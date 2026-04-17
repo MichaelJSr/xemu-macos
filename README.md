@@ -214,14 +214,15 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **`pgraph.lock` / BQL discipline.** `surface_access_callback`
   conditionally drops BQL before blocking so the vblank thread can
   still fire interrupts.
-- **PFIFO wait.** 1 ms safety-net `qemu_cond_timedwait` (matches the
-  proven upstream behavior). An earlier "untimed `qemu_cond_wait`"
-  optimization was reverted after it appeared to correlate with
-  level-transition / death-reload freezes; the ~1 kHz idle wake-up
-  cost is negligible on Apple Silicon, and the periodic re-check of
-  pending flags (`downloads_pending`, `sync_pending`, `flush_pending`,
-  `halt`, …) serves as a safety net against any subtle missed-kick or
-  `qemu_event_set`-without-kick edge case.
+- **PFIFO wait.** Untimed `qemu_cond_wait`. All `pfifo_kick` call
+  sites hold `d->pfifo.lock` across the kick-set + broadcast, so the
+  reader's kick-check + atomic release-wait can't miss a concurrent
+  kick. Removes the ~1 kHz idle wake-up that came from the 1 ms
+  safety-net `timedwait`. (The optimization was briefly reverted
+  while diagnosing a pre-existing level-transition freeze; the
+  `XEMU_PFIFO_HEARTBEAT` diagnostic proved the freeze is unrelated
+  to this wait path — loop iters climb at the same rate either way
+  — so the untimed form is restored.)
 
 ### Build + packaging
 
@@ -275,7 +276,6 @@ Lessons worth preserving so they aren't re-attempted.
 | BQL event batching (x2) | BQL around the SDL event loop breaks QEMU cooperative scheduling |
 | Incremental texture hash on misaligned textures | Host pages at chunk boundaries can contain bytes from two adjacent chunks; `test_and_clear_dirty` by the earlier chunk stole the later chunk's dirty signal → stale cached hash. Gated to page-aligned textures only. |
 | Direct-VRAM compute unswizzle (via `VK_EXT_external_memory_host`) | Compute shader read from `BUFFER_VERTEX_RAM` at `level->vram_addr` to skip the `raw_copy` memcpy + staging-buffer step. Under external-memory-host that buffer IS live guest VRAM, and `HOST_WRITE → SHADER_READ` barriers only enforce *visibility* up to the barrier's submission point — they do not block the CPU from continuing to write after submission or during GPU execution (HOST_COHERENT memory on Apple Silicon). Fast-updated textures (particles, translucent HUD) tore between two consecutive guest writes → intermittent flicker. Kept the staging-copy path; α2 (host-imported vertex RAM) stays because `flush_memory_buffer` snapshots vertex data before draw. |
-| Untimed `qemu_cond_wait` in pfifo idle loop | Correlated with occasional level-transition / death-reload freezes in practice even though all `pfifo_kick` sites hold the lock. Reverted to 1 ms `timedwait` safety net; ~1 kHz idle wake-up is negligible on Apple Silicon. |
 | Host-imported `BUFFER_VERTEX_RAM` (α2, `VK_EXT_external_memory_host`) | Same class of torn-read as α3 but for vertex data: the GPU reads vertex bytes straight from live guest VRAM, and dynamic meshes (particles, translucent effects, skinned characters, LOD streaming) are continuously rewritten by the guest CPU, so individual GPU fetches can see bytes from two different CPU frames mid-primitive. Restore the memcpy-into-VMA-allocated-buffer path. Would need a snapshot scheme (per-flight COW, or an `MTLSharedEvent` keyed on a VRAM-snapshot boundary) to re-enable. |
 | `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Correlated with rare freezes during heavy TB invalidation (level transitions, death-reload). The new API forcibly drops W permission on callback return regardless of whether nested JIT-writer paths on the same thread still needed it; nested use is hard to rule out across all QEMU TB invalidation flows. Restored the manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()` pair (upstream behavior). |
 | `VK_KHR_dynamic_rendering` full lowering (B2) | Replaced `VkRenderPass` + `VkFramebuffer` with `vkCmdBeginRendering` / `vkCmdEndRendering`, but didn't replicate the old render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency that synchronizes color/depth attachment read+write across consecutive passes. Under heavy back-to-back render-pass churn (level transitions, death-reload) Metal's tile renderer stalled, producing frozen/black screens with the CPU spinning in the idle thread's `CLI; HLT` (post-halt BSOD recovery counter climbing ~10 k/2 s). Disabled via forcing `dynamic_rendering_feature_enabled = false`; downstream gates fall back to the render-pass path. Re-enable needs an explicit `vkCmdPipelineBarrier` on the subpass-dep stages/access around every BeginRendering/EndRendering. |
