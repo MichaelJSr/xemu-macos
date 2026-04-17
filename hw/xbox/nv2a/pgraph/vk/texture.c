@@ -372,19 +372,65 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             (adjusted_width  & (adjusted_width  - 1)) == 0 &&
             (adjusted_height & (adjusted_height - 1)) == 0;
 
+        /*
+         * Direct-VRAM compute unswizzle: when VK_EXT_external_memory_host
+         * is live, BUFFER_VERTEX_RAM's backing memory IS the guest VRAM,
+         * so the compute shader can read the swizzled source at
+         * level->vram_addr instead of having us g_malloc a raw_copy and
+         * shuffle it through the staging -> COMPUTE_DST pipeline. We
+         * additionally require each mip level's VRAM offset to be a
+         * multiple of minStorageBufferOffsetAlignment (the storage
+         * buffer descriptor's offset constraint). Very small mip tails
+         * (e.g. 4-byte tail at an offset that's 4-aligned but not
+         * 16-aligned) disable the direct path for the whole texture and
+         * fall back to the staging path.
+         */
+        bool use_direct_vram_compute = r->external_memory_host_enabled &&
+            use_gpu_unswizzle;
+        if (use_direct_vram_compute) {
+            VkDeviceSize align =
+                r->device_props.limits.minStorageBufferOffsetAlignment;
+            if (align < 1) {
+                align = 1;
+            }
+            hwaddr off = texture_vram_offset;
+            unsigned int w = adjusted_width, h = adjusted_height;
+            for (int level = 0; level < s.levels; level++) {
+                w = MAX(w, 1);
+                h = MAX(h, 1);
+                if ((off & (align - 1)) != 0) {
+                    use_direct_vram_compute = false;
+                    break;
+                }
+                off += (hwaddr)w * h * f.bytes_per_pixel;
+                w /= 2;
+                h /= 2;
+            }
+        }
+
         if (use_gpu_unswizzle) {
             for (int layer = 0; layer < num_layers; layer++) {
                 unsigned int width = adjusted_width, height = adjusted_height;
-                void *layer_ptr = (char *)d->vram_ptr + texture_vram_offset +
-                                  layer * layer_size;
+                hwaddr layer_addr = texture_vram_offset + layer * layer_size;
+                void *layer_ptr = (char *)d->vram_ptr + layer_addr;
 
                 for (int level = 0; level < s.levels; level++) {
                     width = MAX(width, 1);
                     height = MAX(height, 1);
 
                     size_t sz = width * height * f.bytes_per_pixel;
-                    void *raw_copy = g_malloc(sz);
-                    memcpy(raw_copy, layer_ptr, sz);
+
+                    /*
+                     * Direct-VRAM path skips the raw_copy allocation.
+                     * decoded_data == NULL signals the upload loop to
+                     * (a) skip the staging memcpy and (b) dispatch
+                     * compute from BUFFER_VERTEX_RAM at vram_addr.
+                     */
+                    void *raw_copy = NULL;
+                    if (!use_direct_vram_compute) {
+                        raw_copy = g_malloc(sz);
+                        memcpy(raw_copy, layer_ptr, sz);
+                    }
 
                     unsigned int tex_w = width, tex_h = height;
                     if (s.cubemap && adjusted_width != s.width) {
@@ -396,6 +442,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                         .width = tex_w,
                         .height = tex_h,
                         .depth = 1,
+                        .vram_addr = layer_addr,
                         .decoded_size = sz,
                         .decoded_data = raw_copy,
                         .gpu_unswizzle = true,
@@ -404,6 +451,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                     };
 
                     layer_ptr = (char *)layer_ptr + sz;
+                    layer_addr += sz;
                     width /= 2;
                     height /= 2;
                 }
@@ -700,8 +748,21 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
             NV2A_VK_DPRINTF(" - Level %d, w=%d h=%d d=%d @ %08" HWADDR_PRIx,
                             level_idx, level->width, level->height,
                             level->depth, buffer_offset);
-            memcpy(mapped_memory_ptr + buffer_offset, level->decoded_data,
-                   level->decoded_size);
+            /*
+             * decoded_data == NULL is the direct-VRAM compute path
+             * signal from get_texture_layout — the compute shader
+             * will read straight from BUFFER_VERTEX_RAM at
+             * level->vram_addr, so there is nothing to stage. Region
+             * bookkeeping (`*region = ...`, buffer_offset += size) is
+             * still updated because the has_gpu_unswizzle=false
+             * fallback at the bottom of the block expects regions[]
+             * to be populated for vkCmdCopyBufferToImage; the entries
+             * are unused when has_gpu_unswizzle is true.
+             */
+            if (level->decoded_data != NULL) {
+                memcpy(mapped_memory_ptr + buffer_offset, level->decoded_data,
+                       level->decoded_size);
+            }
             *region = (VkBufferImageCopy){
                 .bufferOffset = buffer_offset,
                 .bufferRowLength = 0,
@@ -754,6 +815,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
             BasicColorFormatInfo f_info =
                 kelvin_color_format_info_map[state->color_format];
             VkDeviceSize level_offset = base_offset;
+            VkBuffer vram_buffer =
+                r->storage_buffers[BUFFER_VERTEX_RAM].buffer;
 
             for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
                 for (int level_idx = 0; level_idx < state->levels;
@@ -761,41 +824,79 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                     TextureLevel *level =
                         &layout->layers[layer_idx].levels[level_idx];
 
-                    VkBufferCopy swz_copy = {
-                        .srcOffset = level_offset,
-                        .dstOffset = 0,
-                        .size = level->decoded_size,
-                    };
-                    vkCmdCopyBuffer(
-                        cmd, staging->buffer,
-                        r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 1,
-                        &swz_copy);
+                    /*
+                     * level->decoded_data == NULL signals the direct-
+                     * VRAM compute path (VK_EXT_external_memory_host
+                     * live, texture + all mip offsets aligned to
+                     * minStorageBufferOffsetAlignment). We skip the
+                     * staging copy + COMPUTE_DST barrier and dispatch
+                     * compute from BUFFER_VERTEX_RAM at level->vram_addr.
+                     * A HOST_WRITE -> SHADER_READ barrier on the VRAM
+                     * subrange makes any guest-side writes visible to
+                     * the shader.
+                     */
+                    VkBuffer compute_src_buf;
+                    VkDeviceSize compute_src_off;
 
-                    VkBufferMemoryBarrier pre_compute = {
-                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .buffer =
-                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
-                        .size = level->decoded_size,
-                    };
-                    vkCmdPipelineBarrier(
-                        cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
-                        &pre_compute, 0, NULL);
+                    if (level->decoded_data == NULL) {
+                        VkBufferMemoryBarrier pre_compute_vram = {
+                            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                            .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+                            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                            .buffer = vram_buffer,
+                            .offset = level->vram_addr,
+                            .size = level->decoded_size,
+                        };
+                        vkCmdPipelineBarrier(
+                            cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
+                            1, &pre_compute_vram, 0, NULL);
+
+                        compute_src_buf = vram_buffer;
+                        compute_src_off = level->vram_addr;
+                    } else {
+                        VkBufferCopy swz_copy = {
+                            .srcOffset = level_offset,
+                            .dstOffset = 0,
+                            .size = level->decoded_size,
+                        };
+                        vkCmdCopyBuffer(
+                            cmd, staging->buffer,
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 1,
+                            &swz_copy);
+
+                        VkBufferMemoryBarrier pre_compute = {
+                            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                            .buffer =
+                                r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                            .size = level->decoded_size,
+                        };
+                        vkCmdPipelineBarrier(
+                            cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
+                            1, &pre_compute, 0, NULL);
+
+                        compute_src_buf =
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
+                        compute_src_off = 0;
+                    }
 
                     if (f_info.bytes_per_pixel == 2) {
                         pgraph_vk_dispatch_unswizzle_2bpp(
                             pg, cmd,
-                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                            compute_src_buf, compute_src_off,
                             r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                             level->unswizzle_width, level->unswizzle_height);
                     } else {
                         pgraph_vk_dispatch_unswizzle(
                             pg, cmd,
-                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                            compute_src_buf, compute_src_off,
                             r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                             level->unswizzle_width, level->unswizzle_height);
                     }

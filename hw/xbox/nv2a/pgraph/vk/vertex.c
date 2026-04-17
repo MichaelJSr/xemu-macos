@@ -79,7 +79,19 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
-    memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
+    /*
+     * When BUFFER_VERTEX_RAM is host-imported from d->vram_ptr via
+     * VK_EXT_external_memory_host, the destination IS the guest buffer
+     * — the caller's `data` argument typically points into the same
+     * region (d->vram_ptr + offset), so the memcpy is a self-copy and
+     * we can skip it. Dirty-bitmap tracking below still runs so
+     * pgraph_vk_finish() can force a flush when a prior in-flight
+     * slot's range overlaps a new one.
+     */
+    if (!r->storage_buffers[BUFFER_VERTEX_RAM].host_imported) {
+        memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset,
+               data, size);
+    }
 
     bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
 

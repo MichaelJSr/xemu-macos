@@ -810,15 +810,23 @@ void pgraph_vk_finalize_compute(PGRAPHState *pg)
 }
 
 void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
-                                  VkBuffer src, VkBuffer dst,
+                                  VkBuffer src, VkDeviceSize src_offset,
+                                  VkBuffer dst,
                                   unsigned int width, unsigned int height)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     size_t pixel_count = (size_t)width * height;
     size_t buf_size = pixel_count * 4;
 
+    /*
+     * `src_offset` lets the compute shader read a swizzled texture
+     * level out of a larger buffer (in particular: BUFFER_VERTEX_RAM
+     * when VK_EXT_external_memory_host imports guest VRAM). Must be a
+     * multiple of `minStorageBufferOffsetAlignment`; the caller is
+     * responsible for gating the alignment.
+     */
     VkDescriptorBufferInfo buffers[] = {
-        { .buffer = src, .offset = 0, .range = buf_size },
+        { .buffer = src, .offset = src_offset, .range = buf_size },
         { .buffer = dst, .offset = 0, .range = buf_size },
         { .buffer = dst, .offset = 0, .range = buf_size },
     };
@@ -847,8 +855,9 @@ void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
 }
 
 void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
-                                      VkBuffer src, VkBuffer dst,
-                                      unsigned int width, unsigned int height)
+                                       VkBuffer src, VkDeviceSize src_offset,
+                                       VkBuffer dst,
+                                       unsigned int width, unsigned int height)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     size_t pixel_count = (size_t)width * height;
@@ -856,7 +865,7 @@ void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
     size_t buf_size_aligned = ROUND_UP(buf_size, 4);
 
     VkDescriptorBufferInfo buffers[] = {
-        { .buffer = src, .offset = 0, .range = buf_size_aligned },
+        { .buffer = src, .offset = src_offset, .range = buf_size_aligned },
         { .buffer = dst, .offset = 0, .range = buf_size_aligned },
         { .buffer = dst, .offset = 0, .range = buf_size_aligned },
     };

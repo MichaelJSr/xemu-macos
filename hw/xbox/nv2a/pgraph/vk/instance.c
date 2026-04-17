@@ -43,6 +43,18 @@
 #define VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME "VK_KHR_dynamic_rendering"
 #endif
 
+/*
+ * VK_EXT_external_memory_host lets us import a host pointer (QEMU's
+ * guest VRAM buffer d->vram_ptr) as VkDeviceMemory. With the extension
+ * on, BUFFER_VERTEX_RAM *is* guest VRAM — no memcpy needed from the
+ * guest writer, and the compute unswizzle shader can read texture data
+ * directly at its VRAM offset. Defined here in case the Vulkan headers
+ * are older than the MoltenVK that advertises the extension.
+ */
+#ifndef VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME
+#define VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME "VK_EXT_external_memory_host"
+#endif
+
 static bool enable_validation = false;
 
 static char const *const validation_layers[] = {
@@ -393,6 +405,19 @@ static void add_optional_device_extension_names(
     r->dynamic_rendering_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+
+    /*
+     * VK_EXT_external_memory_host: import QEMU's guest-VRAM pointer as
+     * a VkBuffer so BUFFER_VERTEX_RAM is a live mirror of VRAM instead
+     * of a sparse vertex-data copy. Enables the compute unswizzle
+     * shader to read texture data straight out of VRAM, skipping the
+     * CPU raw_copy + staging memcpy + vkCmdCopyBuffer dance for every
+     * GPU-unswizzled texture upload, and makes
+     * pgraph_vk_update_vertex_ram_buffer's memcpy redundant.
+     */
+    r->external_memory_host_extension_enabled = add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -676,6 +701,33 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         r->compute_queue = r->queue;
         r->has_compute_queue = false;
     }
+
+    /*
+     * Query VkPhysicalDeviceExternalMemoryHostPropertiesEXT so buffer
+     * init can decide whether d->vram_ptr satisfies the import
+     * alignment. MoltenVK reports ~4 KiB on Apple Silicon; QEMU's
+     * mmap-backed RAM regions are host-page aligned so the check
+     * almost always succeeds, but we gate defensively.
+     */
+    r->external_memory_host_min_alignment = 0;
+    if (r->external_memory_host_extension_enabled) {
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
+        };
+        VkPhysicalDeviceProperties2 props2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &host_props,
+        };
+        vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
+        r->external_memory_host_min_alignment =
+            host_props.minImportedHostPointerAlignment;
+        fprintf(stderr,
+                "- VK_EXT_external_memory_host advertised; "
+                "minImportedHostPointerAlignment = %llu\n",
+                (unsigned long long)r->external_memory_host_min_alignment);
+    }
+
     return true;
 }
 
