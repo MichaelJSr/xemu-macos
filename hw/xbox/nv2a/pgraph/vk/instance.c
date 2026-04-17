@@ -635,38 +635,27 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
 
     /*
-     * Phase 3.1: probe and request dynamicRendering feature when the
-     * extension was added to the enabled list above. The renderer's
-     * draw.c doesn't yet use vkCmdBeginRendering; this just lights up
-     * the capability for the follow-up patch.
+     * Phase 3.1 (B2): VK_KHR_dynamic_rendering was probed/enabled here
+     * and used by draw.c / display.c to replace VkRenderPass +
+     * VkFramebuffer with inline vkCmdBeginRendering / vkCmdEndRendering.
+     * Disabled because the lowering does NOT replicate the render
+     * pass's `VK_SUBPASS_EXTERNAL -> first subpass` dependency that
+     * synchronizes color/depth attachment read+write across
+     * consecutive render passes. With dynamic rendering, that
+     * synchronization needs to be an explicit vkCmdPipelineBarrier
+     * (covering COLOR_ATTACHMENT_OUTPUT + EARLY/LATE_FRAGMENT_TESTS
+     * stages with ATTACHMENT_READ/WRITE access) emitted around every
+     * BeginRendering/EndRendering pair. Without it, draws issued
+     * back-to-back into the same attachment can observe stale writes
+     * or hazard the Metal tile renderer (MoltenVK), manifesting as
+     * a frozen/black screen on level transitions and save reloads
+     * where PGRAPH churns many small render passes. Force the feature
+     * off until the proper explicit-barrier plumbing lands; downstream
+     * draw.c / display.c code is already gated on
+     * dynamic_rendering_feature_enabled and cleanly falls back to
+     * the VkRenderPass path (with the correct subpass dependency).
      */
-    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_features;
-    if (r->dynamic_rendering_extension_enabled) {
-        VkPhysicalDeviceDynamicRenderingFeaturesKHR probe = {
-            .sType =
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
-        };
-        VkPhysicalDeviceFeatures2 features2 = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-            .pNext = &probe,
-        };
-        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
-        if (probe.dynamicRendering) {
-            dynamic_rendering_features = (
-                VkPhysicalDeviceDynamicRenderingFeaturesKHR){
-                .sType =
-                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
-                .dynamicRendering = VK_TRUE,
-                .pNext = next_struct,
-            };
-            next_struct = &dynamic_rendering_features;
-            r->dynamic_rendering_feature_enabled = true;
-            fprintf(stderr,
-                    "- VK_KHR_dynamic_rendering enabled (Phase 3.1 groundwork)\n");
-        } else {
-            r->dynamic_rendering_extension_enabled = false;
-        }
-    }
+    r->dynamic_rendering_feature_enabled = false;
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,

@@ -110,20 +110,23 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 ### Vulkan renderer (pgraph/vk)
 
 - **MoltenVK compatibility.** `VK_KHR_portability_subset`,
-  `VK_EXT_metal_objects` zero-copy IOSurfaces, `VK_KHR_dynamic_rendering`
-  probed at device create. CPU-side primitive emulation for quads, line
-  loops, triangle fans, and provoking vertex. Fragment-shader depth
-  fallback via `gl_FragCoord.z + dFdx/dFdy`.
-- **Dynamic rendering full lowering.** When `VK_KHR_dynamic_rendering`
-  is advertised (MoltenVK does), `create_render_pass` / `get_render_pass` /
-  `create_frame_buffer` short-circuit; `vkCmdBeginRenderPass` →
-  `vkCmdBeginRendering` with inline `VkRenderingAttachmentInfoKHR`
-  image views; pipelines declare formats via
-  `VkPipelineRenderingCreateInfoKHR` with `renderPass = VK_NULL_HANDLE`.
-  Stencil-attachment is gated off for `VK_FORMAT_D16_UNORM` (depth-only).
-  Removes the VkRenderPass + VkFramebuffer object lifetime entirely
-  on the fast path — on MoltenVK this maps straight to Metal's native
-  pass model instead of translating VkRenderPass state.
+  `VK_EXT_metal_objects` zero-copy IOSurfaces. CPU-side primitive
+  emulation for quads, line loops, triangle fans, and provoking
+  vertex. Fragment-shader depth fallback via
+  `gl_FragCoord.z + dFdx/dFdy`.
+  - `VK_KHR_dynamic_rendering` is probed and its feature struct is
+    plumbed through device-create, but the lowering in draw.c /
+    display.c (B2) is currently **disabled** at runtime — it did not
+    replicate the render pass's `VK_SUBPASS_EXTERNAL → first subpass`
+    dependency, so back-to-back render passes on the same color/depth
+    attachment could observe stale writes and stall Metal's tile
+    renderer (MoltenVK). Renderer uses the standard `VkRenderPass` +
+    `VkFramebuffer` path (which carries the correct subpass
+    dependency). Re-enabling requires emitting an explicit
+    `vkCmdPipelineBarrier` around every `BeginRendering` /
+    `EndRendering` covering `COLOR_ATTACHMENT_OUTPUT +
+    EARLY/LATE_FRAGMENT_TESTS` stages with `ATTACHMENT_READ/WRITE`
+    access.
 - **Split descriptor sets.** Set 0 holds UBOs (VSH+PSH uniforms),
   set 1 holds the `NV2A_MAX_TEXTURES` combined image samplers. Each
   set has its own pool/array/index, so a draw that only changes
@@ -285,6 +288,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Untimed `qemu_cond_wait` in pfifo idle loop | Correlated with occasional level-transition / death-reload freezes in practice even though all `pfifo_kick` sites hold the lock. Reverted to 1 ms `timedwait` safety net; ~1 kHz idle wake-up is negligible on Apple Silicon. |
 | Host-imported `BUFFER_VERTEX_RAM` (α2, `VK_EXT_external_memory_host`) | Same class of torn-read as α3 but for vertex data: the GPU reads vertex bytes straight from live guest VRAM, and dynamic meshes (particles, translucent effects, skinned characters, LOD streaming) are continuously rewritten by the guest CPU, so individual GPU fetches can see bytes from two different CPU frames mid-primitive. Restore the memcpy-into-VMA-allocated-buffer path. Would need a snapshot scheme (per-flight COW, or an `MTLSharedEvent` keyed on a VRAM-snapshot boundary) to re-enable. |
 | `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Correlated with rare freezes during heavy TB invalidation (level transitions, death-reload). The new API forcibly drops W permission on callback return regardless of whether nested JIT-writer paths on the same thread still needed it; nested use is hard to rule out across all QEMU TB invalidation flows. Restored the manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()` pair (upstream behavior). |
+| `VK_KHR_dynamic_rendering` full lowering (B2) | Replaced `VkRenderPass` + `VkFramebuffer` with `vkCmdBeginRendering` / `vkCmdEndRendering`, but didn't replicate the old render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency that synchronizes color/depth attachment read+write across consecutive passes. Under heavy back-to-back render-pass churn (level transitions, death-reload) Metal's tile renderer stalled, producing frozen/black screens with the CPU spinning in the idle thread's `CLI; HLT` (post-halt BSOD recovery counter climbing ~10 k/2 s). Disabled via forcing `dynamic_rendering_feature_enabled = false`; downstream gates fall back to the render-pass path. Re-enable needs an explicit `vkCmdPipelineBarrier` on the subpass-dep stages/access around every BeginRendering/EndRendering. |
 
 ---
 
