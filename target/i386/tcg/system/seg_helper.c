@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -157,10 +158,16 @@ bool x86_cpu_exec_halt(CPUState *cpu)
      * in helper_hlt catches "IRQ already pending at HLT time"; this
      * path catches "IRQ arrived after the CPU was already halted".
      * Toggle via XEMU_HLT_BSOD_RECOVERY=0.
+     *
+     * Logging is rate-limited to once per ~2 s with a running count so
+     * a hot CLI+HLT loop (game is deadlocked on something else and the
+     * idle thread keeps re-entering HLT) is visible as a rising count
+     * rather than a single line.
      */
     {
         static int g_hlt_bsod_recovery = -1;
-        static bool g_warned_post_halt_once = false;
+        static uint64_t g_post_halt_count;
+        static int64_t g_post_halt_last_log_ns;
         if (g_hlt_bsod_recovery < 0) {
             const char *s = getenv("XEMU_HLT_BSOD_RECOVERY");
             g_hlt_bsod_recovery = (s && s[0] == '0') ? 0 : 1;
@@ -168,13 +175,18 @@ bool x86_cpu_exec_halt(CPUState *cpu)
         if (g_hlt_bsod_recovery &&
             !(env->eflags & IF_MASK) &&
             (cpu->interrupt_request & CPU_INTERRUPT_HARD)) {
-            if (!g_warned_post_halt_once) {
-                g_warned_post_halt_once = true;
+            g_post_halt_count++;
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            if (g_post_halt_last_log_ns == 0 ||
+                now - g_post_halt_last_log_ns >= 2LL * 1000 * 1000 * 1000) {
+                g_post_halt_last_log_ns = now;
                 fprintf(stderr,
                         "xemu: waking halted CPU with pending IRQ and IF=0 "
-                        "(post-halt BSOD recovery; eip=0x%08x). "
+                        "(post-halt BSOD recovery; eip=0x%08x, "
+                        "total=%" PRIu64 "). "
                         "Set XEMU_HLT_BSOD_RECOVERY=0 to disable.\n",
-                        (unsigned)env->eip);
+                        (unsigned)env->eip,
+                        (uint64_t)g_post_halt_count);
             }
             env->eflags |= IF_MASK;
         }

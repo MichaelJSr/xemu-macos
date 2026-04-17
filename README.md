@@ -89,10 +89,13 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   pair automatically.
 - **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses shift-
   by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16. `flcr`
-  lowering is 5 insns via `RBIT`. `tb_phys_invalidate` wraps its
-  write+execute pair in `pthread_jit_write_with_callback_np` on
-  macOS 14.4+ (falls back to the manual `pthread_jit_write_protect_np`
-  pair on older systems).
+  lowering is 5 insns via `RBIT`. `tb_phys_invalidate` uses the
+  manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()`
+  pair (upstream behavior); an earlier wrap in
+  `pthread_jit_write_with_callback_np` (macOS 14.4+) was reverted
+  because its scoped W-permission semantics didn't compose cleanly
+  with QEMU's nested JIT-write paths and correlated with freezes
+  during heavy TB invalidation.
 - **`HLT` BSOD recovery (two-sided).** On XBOX targets, both the HLT
   entry path (`helper_hlt`) and the halted-wakeup path
   (`x86_cpu_exec_halt`) force `IF=1` when they see `IF=0` with a
@@ -280,6 +283,8 @@ Lessons worth preserving so they aren't re-attempted.
 | Incremental texture hash on misaligned textures | Host pages at chunk boundaries can contain bytes from two adjacent chunks; `test_and_clear_dirty` by the earlier chunk stole the later chunk's dirty signal → stale cached hash. Gated to page-aligned textures only. |
 | Direct-VRAM compute unswizzle (via `VK_EXT_external_memory_host`) | Compute shader read from `BUFFER_VERTEX_RAM` at `level->vram_addr` to skip the `raw_copy` memcpy + staging-buffer step. Under external-memory-host that buffer IS live guest VRAM, and `HOST_WRITE → SHADER_READ` barriers only enforce *visibility* up to the barrier's submission point — they do not block the CPU from continuing to write after submission or during GPU execution (HOST_COHERENT memory on Apple Silicon). Fast-updated textures (particles, translucent HUD) tore between two consecutive guest writes → intermittent flicker. Kept the staging-copy path; α2 (host-imported vertex RAM) stays because `flush_memory_buffer` snapshots vertex data before draw. |
 | Untimed `qemu_cond_wait` in pfifo idle loop | Correlated with occasional level-transition / death-reload freezes in practice even though all `pfifo_kick` sites hold the lock. Reverted to 1 ms `timedwait` safety net; ~1 kHz idle wake-up is negligible on Apple Silicon. |
+| Host-imported `BUFFER_VERTEX_RAM` (α2, `VK_EXT_external_memory_host`) | Same class of torn-read as α3 but for vertex data: the GPU reads vertex bytes straight from live guest VRAM, and dynamic meshes (particles, translucent effects, skinned characters, LOD streaming) are continuously rewritten by the guest CPU, so individual GPU fetches can see bytes from two different CPU frames mid-primitive. Restore the memcpy-into-VMA-allocated-buffer path. Would need a snapshot scheme (per-flight COW, or an `MTLSharedEvent` keyed on a VRAM-snapshot boundary) to re-enable. |
+| `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Correlated with rare freezes during heavy TB invalidation (level transitions, death-reload). The new API forcibly drops W permission on callback return regardless of whether nested JIT-writer paths on the same thread still needed it; nested use is hard to rule out across all QEMU TB invalidation flows. Restored the manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()` pair (upstream behavior). |
 
 ---
 
