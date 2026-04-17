@@ -35,7 +35,7 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 | `XEMU_PGO_DIR` | `./pgo` | Where `.profraw` files land |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Set to `1` to opt into hardened-runtime codesign with `xemu.entitlements` (only needed to exercise notarization-style behavior locally) |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer size (≈21 ms @ 48 kHz) |
-| `XEMU_HLT_BSOD_RECOVERY` | `1` | Force `IF=1` on `CLI; HLT` with pending IRQ (kernel-bugcheck escape) |
+| `XEMU_HLT_BSOD_RECOVERY` | `1` | Force `IF=1` on `CLI; HLT` with pending IRQ (at-HLT and post-halt; kernel-bugcheck / in-game save-reload freeze escape) |
 
 ### Recommended `xemu.toml`
 
@@ -93,11 +93,16 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   write+execute pair in `pthread_jit_write_with_callback_np` on
   macOS 14.4+ (falls back to the manual `pthread_jit_write_protect_np`
   pair on older systems).
-- **`HLT` BSOD recovery.** On XBOX targets only, `HLT` with `IF=0` and
-  a hardware IRQ already pending gets `IF=1` forced so the NV2A vblank
-  ISR can wake the CPU (prevents permanent freezes after kernel
-  `CLI; HLT` bugchecks). One-shot log; disable with
-  `XEMU_HLT_BSOD_RECOVERY=0` for strict-semantics testing.
+- **`HLT` BSOD recovery (two-sided).** On XBOX targets, both the HLT
+  entry path (`helper_hlt`) and the halted-wakeup path
+  (`x86_cpu_exec_halt`) force `IF=1` when they see `IF=0` with a
+  `CPU_INTERRUPT_HARD` pending. The at-HLT variant catches "IRQ was
+  already pending when HLT executed"; the post-halt variant catches
+  "IRQ arrived after the CPU was already halted with IF=0" — the
+  latter is the frozen/black-screen-after-death pattern some games
+  hit because `x86_cpu_pending_interrupt` gates HARD on IF=1 and
+  never wakes the halted thread otherwise. One-shot log per site;
+  disable both with `XEMU_HLT_BSOD_RECOVERY=0` for strict semantics.
 
 ### Vulkan renderer (pgraph/vk)
 
