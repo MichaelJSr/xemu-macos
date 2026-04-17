@@ -1675,33 +1675,31 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (!surface_to_texture) {
         /*
-         * Chunked incremental hashing: re-hash only the 64 KiB chunks
-         * whose backing dirty-bitmap pages actually changed. Uses
-         * memory_region_snapshot_and_clear_dirty to atomically capture
-         * the dirty bitmap then query per chunk via
-         * memory_region_snapshot_get_dirty. The snapshot API avoids
-         * the per-chunk test_and_clear_dirty double-counting that
-         * earlier code hit when a host page straddled two chunk
-         * boundaries (earlier chunk stole the later chunk's dirty
-         * signal → stale cached hash), so the misalignment gate from
-         * the previous iteration is no longer needed.
+         * Chunked path requires that each 64 KiB chunk covers a
+         * distinct, non-overlapping set of dirty-bitmap pages. If
+         * texture_vram_offset isn't page-aligned (or texture_length
+         * isn't a page multiple), a single host page can contain
+         * bytes from two adjacent chunks; test_and_clear_dirty of the
+         * shared page by the earlier chunk would then steal the dirty
+         * signal from the later chunk, leaving its cached hash stale.
          *
-         * The snapshot may clear up to BITS_PER_LONG * TARGET_PAGE_SIZE
-         * (256 KiB on a 64-bit host) past the requested range by
-         * construction (memory.h:2204-2206). Any texture binding that
-         * happens to live in that rounded spillover window would lose
-         * its own dirty signal; propagate by calling
-         * pgraph_vk_mark_textures_possibly_dirty over the rounded
-         * snapshot range whenever any chunk fires — neighbor bindings
-         * then re-hash on their next upload and eventual consistency
-         * is preserved.
+         * TEXTURE_CHUNK_SIZE is a multiple of TARGET_PAGE_SIZE by
+         * construction (64 KiB = 16 pages), so page alignment of the
+         * texture extent is sufficient to guarantee chunk disjointness.
+         * Misaligned textures (rare in practice — Xbox swizzled
+         * textures are normally page-aligned) fall back to the
+         * single-shot full-buffer hash.
          */
-        bool use_chunks = texture_length >= TEXTURE_INCREMENTAL_HASH_MIN;
+        bool use_chunks =
+            texture_length >= TEXTURE_INCREMENTAL_HASH_MIN &&
+            (texture_vram_offset & (TARGET_PAGE_SIZE - 1)) == 0 &&
+            (texture_length & (TARGET_PAGE_SIZE - 1)) == 0 &&
+            (TEXTURE_CHUNK_SIZE % TARGET_PAGE_SIZE) == 0;
         if (!use_chunks) {
             /*
              * Small-texture path: single-shot full-buffer hash. The
              * chunked path's per-call overhead exceeds its savings
-             * below ~256 KiB.
+             * below ~256 KiB, so keep the original behavior here.
              */
             possibly_dirty |= check_texture_possibly_dirty(
                 d, texture_vram_offset, texture_length,
@@ -1714,6 +1712,15 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 }
             }
         } else {
+            /*
+             * Incremental-hash path for large textures. Per-chunk
+             * test_and_clear_dirty reveals exactly which VRAM pages
+             * changed; only those chunks are re-hashed. The aggregate
+             * content hash is the XOR of all chunk hashes, which is a
+             * uniformly-distributed combiner for independent XXH3
+             * outputs (collisions caught by the existing memcmp in
+             * the cache-hit path).
+             */
             uint32_t expected_chunks = (uint32_t)(
                 (texture_length + TEXTURE_CHUNK_SIZE - 1) / TEXTURE_CHUNK_SIZE);
             bool need_alloc = (snode->chunk_hashes == NULL
@@ -1725,14 +1732,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 snode->palette_hash = 0; /* force re-hash below */
             }
 
-            hwaddr snap_start = texture_vram_offset & TARGET_PAGE_MASK;
-            hwaddr snap_end =
-                TARGET_PAGE_ALIGN(texture_vram_offset + texture_length);
-            nv2a_vk_assert(snap_end <= memory_region_size(d->vram));
-            DirtyBitmapSnapshot *snap = memory_region_snapshot_and_clear_dirty(
-                d->vram, snap_start, snap_end - snap_start,
-                DIRTY_MEMORY_NV2A_TEX);
-
             bool any_chunk_dirty = false;
             for (uint32_t i = 0; i < expected_chunks; i++) {
                 hwaddr co = (hwaddr)i * TEXTURE_CHUNK_SIZE;
@@ -1740,8 +1739,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                 (hwaddr)texture_length - co);
                 hwaddr ps = (texture_vram_offset + co) & TARGET_PAGE_MASK;
                 hwaddr pe = TARGET_PAGE_ALIGN(texture_vram_offset + co + cs);
-                bool dirty = memory_region_snapshot_get_dirty(
-                    d->vram, snap, ps, pe - ps);
+                nv2a_vk_assert(pe <= memory_region_size(d->vram));
+                bool dirty = memory_region_test_and_clear_dirty(
+                    d->vram, ps, pe - ps, DIRTY_MEMORY_NV2A_TEX);
                 if (dirty) {
                     any_chunk_dirty = true;
                 }
@@ -1750,8 +1750,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                         (const uint8_t *)texture_data + co, cs);
                 }
             }
-
-            g_free(snap);
 
             bool palette_dirty = false;
             if (texture_palette_data_size
@@ -1762,14 +1760,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
             if (any_chunk_dirty) {
                 possibly_dirty = true;
-                /*
-                 * Snapshot may have cleared dirty bits up to 256 KiB
-                 * beyond the texture's own page range; propagate a
-                 * possibly_dirty flag over the same extended range so
-                 * any neighbor texture binding observes the signal.
-                 */
                 pgraph_vk_mark_textures_possibly_dirty(
-                    d, snap_start, snap_end - snap_start);
+                    d, texture_vram_offset, texture_length);
             }
             if (palette_dirty) {
                 possibly_dirty = true;
