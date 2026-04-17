@@ -1675,31 +1675,34 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (!surface_to_texture) {
         /*
-         * Chunked path requires that each 64 KiB chunk covers a
-         * distinct, non-overlapping set of dirty-bitmap pages. If
-         * texture_vram_offset isn't page-aligned (or texture_length
-         * isn't a page multiple), a single host page can contain
-         * bytes from two adjacent chunks; test_and_clear_dirty of the
-         * shared page by the earlier chunk would then steal the dirty
-         * signal from the later chunk, leaving its cached hash stale.
+         * Chunked path requires that each chunk covers a distinct,
+         * non-overlapping set of dirty-bitmap pages so per-chunk
+         * test_and_clear_dirty can't steal another chunk's signal.
          *
-         * TEXTURE_CHUNK_SIZE is a multiple of TARGET_PAGE_SIZE by
-         * construction (64 KiB = 16 pages), so page alignment of the
-         * texture extent is sufficient to guarantee chunk disjointness.
-         * Misaligned textures (rare in practice — Xbox swizzled
-         * textures are normally page-aligned) fall back to the
-         * single-shot full-buffer hash.
+         * Instead of demanding page-aligned texture extents, we reshape
+         * chunks to be page-aligned at both ends by construction:
+         *
+         *   head fragment (optional): [tex_off, next_page_boundary)
+         *     - up to (TARGET_PAGE_SIZE - 1) bytes
+         *     - owns exactly the one page containing tex_off
+         *     - skipped when tex_off is already page-aligned
+         *
+         *   body chunks: TEXTURE_CHUNK_SIZE-sized (64 KiB) starting
+         *     at the first page boundary. Each covers exactly 16
+         *     contiguous pages that no other chunk touches.
+         *
+         *   last body chunk: clipped to tex_end. Its trailing partial
+         *     page (if any) is owned exclusively by this chunk.
+         *
+         * With head + body disjoint by page, test_and_clear_dirty per
+         * chunk is safe for any alignment of texture_vram_offset.
          */
-        bool use_chunks =
-            texture_length >= TEXTURE_INCREMENTAL_HASH_MIN &&
-            (texture_vram_offset & (TARGET_PAGE_SIZE - 1)) == 0 &&
-            (texture_length & (TARGET_PAGE_SIZE - 1)) == 0 &&
-            (TEXTURE_CHUNK_SIZE % TARGET_PAGE_SIZE) == 0;
+        bool use_chunks = texture_length >= TEXTURE_INCREMENTAL_HASH_MIN;
         if (!use_chunks) {
             /*
              * Small-texture path: single-shot full-buffer hash. The
              * chunked path's per-call overhead exceeds its savings
-             * below ~256 KiB, so keep the original behavior here.
+             * below ~256 KiB.
              */
             possibly_dirty |= check_texture_possibly_dirty(
                 d, texture_vram_offset, texture_length,
@@ -1713,16 +1716,28 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             }
         } else {
             /*
-             * Incremental-hash path for large textures. Per-chunk
-             * test_and_clear_dirty reveals exactly which VRAM pages
-             * changed; only those chunks are re-hashed. The aggregate
-             * content hash is the XOR of all chunk hashes, which is a
-             * uniformly-distributed combiner for independent XXH3
-             * outputs (collisions caught by the existing memcmp in
-             * the cache-hit path).
+             * Incremental-hash path. See the layout comment above for
+             * how head + body chunks divide up both the byte data and
+             * the host-page set without overlap.
              */
-            uint32_t expected_chunks = (uint32_t)(
-                (texture_length + TEXTURE_CHUNK_SIZE - 1) / TEXTURE_CHUNK_SIZE);
+            hwaddr anchor = TARGET_PAGE_ALIGN(texture_vram_offset);
+            size_t head_len = anchor - texture_vram_offset;
+            size_t body_len = (head_len < texture_length)
+                                  ? texture_length - head_len
+                                  : 0;
+            bool has_head = head_len > 0 && head_len < texture_length;
+            uint32_t body_chunks = (uint32_t)(
+                (body_len + TEXTURE_CHUNK_SIZE - 1) / TEXTURE_CHUNK_SIZE);
+            uint32_t expected_chunks =
+                (has_head ? 1 : 0) + body_chunks;
+            /*
+             * use_chunks gate guarantees texture_length >= 256 KiB
+             * which is far larger than a single host page, so the
+             * degenerate "entire texture fits in one partial page"
+             * case can't arise; expected_chunks >= 1 always.
+             */
+            nv2a_vk_assert(expected_chunks >= 1);
+
             bool need_alloc = (snode->chunk_hashes == NULL
                                || snode->num_chunk_hashes != expected_chunks);
             if (need_alloc) {
@@ -1734,20 +1749,47 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
             bool any_chunk_dirty = false;
             for (uint32_t i = 0; i < expected_chunks; i++) {
-                hwaddr co = (hwaddr)i * TEXTURE_CHUNK_SIZE;
-                hwaddr cs = MIN((hwaddr)TEXTURE_CHUNK_SIZE,
-                                (hwaddr)texture_length - co);
-                hwaddr ps = (texture_vram_offset + co) & TARGET_PAGE_MASK;
-                hwaddr pe = TARGET_PAGE_ALIGN(texture_vram_offset + co + cs);
-                nv2a_vk_assert(pe <= memory_region_size(d->vram));
+                hwaddr byte_start; /* relative to texture_data */
+                size_t chunk_size;
+                hwaddr page_start, page_end; /* absolute VRAM */
+
+                if (has_head && i == 0) {
+                    byte_start = 0;
+                    chunk_size = head_len;
+                    page_start = texture_vram_offset & TARGET_PAGE_MASK;
+                    page_end = anchor;
+                } else {
+                    uint32_t body_i = has_head ? (i - 1) : i;
+                    byte_start = head_len +
+                        (hwaddr)body_i * TEXTURE_CHUNK_SIZE;
+                    hwaddr byte_end = MIN(
+                        byte_start + (hwaddr)TEXTURE_CHUNK_SIZE,
+                        (hwaddr)texture_length);
+                    chunk_size = byte_end - byte_start;
+                    page_start = texture_vram_offset + byte_start;
+                    /*
+                     * Non-last body chunks end on a page boundary by
+                     * construction. The last chunk may finish
+                     * mid-page — round that final page up so we own
+                     * it exclusively (no chunk follows).
+                     */
+                    hwaddr vram_end = texture_vram_offset + byte_end;
+                    page_end = (byte_end == texture_length)
+                                   ? TARGET_PAGE_ALIGN(vram_end)
+                                   : vram_end;
+                }
+
+                nv2a_vk_assert(page_end <= memory_region_size(d->vram));
                 bool dirty = memory_region_test_and_clear_dirty(
-                    d->vram, ps, pe - ps, DIRTY_MEMORY_NV2A_TEX);
+                    d->vram, page_start, page_end - page_start,
+                    DIRTY_MEMORY_NV2A_TEX);
                 if (dirty) {
                     any_chunk_dirty = true;
                 }
                 if (need_alloc || dirty) {
                     snode->chunk_hashes[i] = fast_hash(
-                        (const uint8_t *)texture_data + co, cs);
+                        (const uint8_t *)texture_data + byte_start,
+                        chunk_size);
                 }
             }
 
