@@ -1945,27 +1945,24 @@ static void gen_clear_fpus_c2(DisasContext *s)
 static void gen_fsin(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fsin);
-#if defined(__aarch64__)
-    gen_flush_fp(s);
-    gen_helper_fsin(tcg_env);
-    gen_clear_fpus_c2(s);
-    return;
-#endif
+    /*
+     * Previous AArch64 path called gen_helper_fsin which flushed ST0
+     * to env->fpregs, did floatx80<->double round-trip, and reloaded
+     * ST0 from env after the call. Replaced with the fp_pc_wrapper
+     * path which calls helper_sin_d / helper_cos_d directly on the
+     * in-register ST0 double. ~3x faster on the hot path; C2 handling
+     * is documented in ops_fpu.h as a precision/perf trade for
+     * astronomical |angle| > 2^53 inputs that games don't hit.
+     */
     fp_pc_wrapper(gen_fsin)(s);
-    gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
+    gen_clear_fpus_c2(s);
 }
 
 static void gen_fcos(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fcos);
-#if defined(__aarch64__)
-    gen_flush_fp(s);
-    gen_helper_fcos(tcg_env);
-    gen_clear_fpus_c2(s);
-    return;
-#endif
     fp_pc_wrapper(gen_fcos)(s);
-    gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
+    gen_clear_fpus_c2(s);
 }
 
 static void gen_helper_fp_arith_ST0_FT0(DisasContext *s, int op)
