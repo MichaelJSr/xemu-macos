@@ -140,21 +140,25 @@ bool x86_cpu_exec_halt(CPUState *cpu)
         bql_unlock();
     }
 
-    if (!cpu_has_work(cpu)) {
 #ifdef XBOX
-        /*
-         * Post-halt BSOD-recovery variant: the Xbox kernel occasionally
-         * enters `CLI; HLT` with NO pending IRQ, then one arrives after
-         * the CPU is already halted. x86_cpu_pending_interrupt() gates
-         * CPU_INTERRUPT_HARD on IF=1 (see IF_MASK check in cpu.c), so an
-         * IRQ raised while IF=0 leaves the CPU halted indefinitely. The
-         * at-HLT recovery in helper_hlt only catches the "IRQ already
-         * pending at HLT time" case; this path covers "IRQ pending NOW
-         * while halted with IF=0". Symptom without this recovery is a
-         * frozen/black screen while the UI stays responsive (no frames
-         * get submitted because the guest CPU is stuck). Toggle via
-         * XEMU_HLT_BSOD_RECOVERY=0.
-         */
+    /*
+     * Post-halt BSOD recovery (state-mutation leg; pairs with the
+     * "has-work" leg in x86_cpu_has_work). The Xbox kernel occasionally
+     * runs `CLI; HLT` and then relies on a later IRQ to wake it up, but
+     * x86_cpu_pending_interrupt gates CPU_INTERRUPT_HARD on IF=1, so an
+     * IRQ raised while IF=0 never translates into work and the CPU
+     * halts forever. Symptom: frozen/black screen on level transitions
+     * or death+reload while the xemu UI stays responsive (no frames
+     * get submitted because the guest CPU is stuck).
+     *
+     * We run this BEFORE the cpu_has_work check so the forced IF=1
+     * lets cpu_has_work return true via the normal pending-interrupt
+     * path and the IRQ is delivered to the guest. The at-HLT recovery
+     * in helper_hlt catches "IRQ already pending at HLT time"; this
+     * path catches "IRQ arrived after the CPU was already halted".
+     * Toggle via XEMU_HLT_BSOD_RECOVERY=0.
+     */
+    {
         static int g_hlt_bsod_recovery = -1;
         static bool g_warned_post_halt_once = false;
         if (g_hlt_bsod_recovery < 0) {
@@ -173,16 +177,12 @@ bool x86_cpu_exec_halt(CPUState *cpu)
                         (unsigned)env->eip);
             }
             env->eflags |= IF_MASK;
-            if (!cpu_has_work(cpu)) {
-                return false;
-            }
-            /* Fall through: the forced IF=1 made work available. */
-        } else {
-            return false;
         }
-#else
-        return false;
+    }
 #endif
+
+    if (!cpu_has_work(cpu)) {
+        return false;
     }
 
     /* Complete HLT instruction.  */
