@@ -36,6 +36,7 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Set to `1` to opt into hardened-runtime codesign with `xemu.entitlements` (only needed to exercise notarization-style behavior locally) |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer size (≈21 ms @ 48 kHz) |
 | `XEMU_HLT_BSOD_RECOVERY` | `1` | Force `IF=1` on `CLI; HLT` with pending IRQ (at-HLT and post-halt; kernel-bugcheck / in-game save-reload freeze escape) |
+| `XEMU_PFIFO_HEARTBEAT` | `0` | Print a 2-second heartbeat from the pfifo thread with `halt` / `flush_pending` / `sync_pending` / `waiting_for_{flip,nop,context_switch}` / `downloads_pending` state; used to diagnose "frozen but xemu UI responsive" reports — if the heartbeat stops during a freeze, the pfifo thread is stuck; if it continues, the game is waiting on something the pfifo flags show |
 
 ### Recommended `xemu.toml`
 

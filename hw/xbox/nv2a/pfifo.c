@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "qemu/timer.h"
 #if defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -473,6 +474,21 @@ void *pfifo_thread(void *arg)
 
     rcu_register_thread();
 
+    /*
+     * Diagnostic: rate-limited heartbeat + pending-flag snapshot.
+     * Only active when XEMU_PFIFO_HEARTBEAT=1. Prints every ~2 s,
+     * shows per-flag state so a freeze report can be categorized as
+     * "pfifo thread is alive but game is waiting on X" vs "pfifo
+     * thread is stuck" (if the heartbeat stops).
+     */
+    bool pfifo_heartbeat = false;
+    {
+        const char *s = getenv("XEMU_PFIFO_HEARTBEAT");
+        pfifo_heartbeat = (s && s[0] == '1');
+    }
+    int64_t pfifo_last_heartbeat_ns = 0;
+    uint64_t pfifo_loop_iters = 0;
+
     qemu_mutex_lock(&d->pfifo.lock);
     while (true) {
         d->pfifo.fifo_kick = false;
@@ -484,6 +500,38 @@ void *pfifo_thread(void *arg)
         }
 
         pgraph_process_pending_reports(d);
+
+        pfifo_loop_iters++;
+        if (pfifo_heartbeat) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            if (pfifo_last_heartbeat_ns == 0 ||
+                now - pfifo_last_heartbeat_ns >=
+                    2LL * 1000 * 1000 * 1000) {
+                pfifo_last_heartbeat_ns = now;
+                int dl = 0, ddl = 0;
+                if (d->pgraph.vk_renderer_state) {
+                    dl = qatomic_read(
+                        &d->pgraph.vk_renderer_state->downloads_pending);
+                    ddl = qatomic_read(
+                        &d->pgraph.vk_renderer_state
+                             ->download_dirty_surfaces_pending);
+                }
+                fprintf(stderr,
+                        "xemu: pfifo heartbeat "
+                        "iters=%" PRIu64 " halt=%d "
+                        "flush=%d sync=%d "
+                        "waiting_flip=%d waiting_nop=%d "
+                        "waiting_ctxsw=%d dl=%d ddl=%d\n",
+                        pfifo_loop_iters,
+                        qatomic_read(&d->pfifo.halt),
+                        qatomic_read(&d->pgraph.flush_pending),
+                        qatomic_read(&d->pgraph.sync_pending),
+                        qatomic_read(&d->pgraph.waiting_for_flip),
+                        qatomic_read(&d->pgraph.waiting_for_nop),
+                        qatomic_read(&d->pgraph.waiting_for_context_switch),
+                        dl, ddl);
+            }
+        }
 
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
