@@ -227,22 +227,23 @@ void pgraph_vk_init_buffers(NV2AState *d)
 
     // FIXME: Don't assume that we can render with host mapped buffer
     /*
-     * Decide whether we can host-import d->vram_ptr for BUFFER_VERTEX_RAM.
-     * Requires the extension, plus the host pointer and the allocation
-     * size to both be multiples of minImportedHostPointerAlignment. QEMU
-     * MemoryRegions are host-page aligned via mmap, which satisfies
-     * MoltenVK's typical 4 KiB requirement, but we gate defensively in
-     * case the driver reports a larger alignment than the host page size.
+     * Host-imported BUFFER_VERTEX_RAM (α2) is currently disabled.
+     * Reason: with VK_EXT_external_memory_host active, the buffer IS
+     * live guest VRAM (no memcpy snapshot). HOST_WRITE pipeline
+     * barriers only enforce visibility up to the barrier's submission
+     * point; they do not block the guest CPU from continuing to write
+     * vertex data before/during GPU consumption of a draw, so dynamic
+     * geometry (particles, translucent effects, skinned meshes,
+     * LOD-streamed content) intermittently tears at the GPU read.
+     * Symptom was "fast moving / far off / translucent textures
+     * flickering".
+     *
+     * The alignment probe and struct fields are kept in place so this
+     * can be re-enabled once we have a proper snapshot/fence scheme
+     * (e.g. per-flight copy-on-write, or a Metal shared-event that
+     * sequences GPU draw after a fixed VRAM snapshot).
      */
-    {
-        VkDeviceSize align = r->external_memory_host_min_alignment;
-        bool ptr_ok = align > 0 &&
-            ((uintptr_t)d->vram_ptr & (align - 1)) == 0;
-        bool size_ok = align > 0 &&
-            (memory_region_size(d->vram) & (align - 1)) == 0;
-        r->external_memory_host_enabled =
-            r->external_memory_host_extension_enabled && ptr_ok && size_ok;
-    }
+    r->external_memory_host_enabled = false;
 
     /*
      * With VK_EXT_external_memory_host on, BUFFER_VERTEX_RAM is a live
