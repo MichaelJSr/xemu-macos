@@ -260,6 +260,41 @@ void tcg_gen_rint_cvt_i64_f64(TCGv_i64 ret, TCGv_f64 arg)
     }
 }
 
+/*
+ * Mode-specific fused rint+cvt. Fallback forwards to rint_cvt_*, which
+ * assumes FPCR has already been set to the desired mode (via gen_flcr
+ * in the i386 frontend). AArch64 backend overrides with a single
+ * FCVT{N,M,P}S instruction per mode.
+ */
+#define DEFINE_CVT_MODE(mode, iwidth, fwidth)                               \
+    void tcg_gen_cvt_##mode##_i##iwidth##_f##fwidth(                        \
+        TCGv_i##iwidth ret, TCGv_f##fwidth arg)                             \
+    {                                                                       \
+        if (tcg_op_supported(INDEX_op_cvt_##mode##_i##iwidth##_f##fwidth,   \
+                             TCG_TYPE_I##iwidth, 0)) {                      \
+            tcg_gen_op2(INDEX_op_cvt_##mode##_i##iwidth##_f##fwidth,        \
+                        TCG_TYPE_I##iwidth, tcgv_i##iwidth##_arg(ret),      \
+                        tcgv_f##fwidth##_arg(arg));                         \
+        } else {                                                            \
+            tcg_gen_rint_cvt_i##iwidth##_f##fwidth(ret, arg);               \
+        }                                                                   \
+    }
+
+DEFINE_CVT_MODE(rn, 32, 32)
+DEFINE_CVT_MODE(rn, 32, 64)
+DEFINE_CVT_MODE(rn, 64, 32)
+DEFINE_CVT_MODE(rn, 64, 64)
+DEFINE_CVT_MODE(rm, 32, 32)
+DEFINE_CVT_MODE(rm, 32, 64)
+DEFINE_CVT_MODE(rm, 64, 32)
+DEFINE_CVT_MODE(rm, 64, 64)
+DEFINE_CVT_MODE(rp, 32, 32)
+DEFINE_CVT_MODE(rp, 32, 64)
+DEFINE_CVT_MODE(rp, 64, 32)
+DEFINE_CVT_MODE(rp, 64, 64)
+
+#undef DEFINE_CVT_MODE
+
 void tcg_gen_sin_f32(TCGv_f32 ret, TCGv_f32 arg)
 {
     tcg_gen_op2(INDEX_op_sin_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(arg));

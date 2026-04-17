@@ -171,6 +171,7 @@ typedef enum X86Seg {
 #define HF_UMIP_SHIFT       27 /* CR4.UMIP */
 #define HF_AVX_EN_SHIFT     28 /* AVX Enabled (CR4+XCR0) */
 #define HF_FPU_PC_SHIFT     29 /* FPU Precision Control */
+#define HF_FPU_RC_SHIFT     30 /* FPU Rounding Control (2 bits at 30-31)*/
 
 #define HF_CPL_MASK          (3 << HF_CPL_SHIFT)
 #define HF_INHIBIT_IRQ_MASK  (1 << HF_INHIBIT_IRQ_SHIFT)
@@ -199,6 +200,14 @@ typedef enum X86Seg {
 #define HF_UMIP_MASK         (1 << HF_UMIP_SHIFT)
 #define HF_AVX_EN_MASK       (1 << HF_AVX_EN_SHIFT)
 #define HF_FPU_PC_MASK       (1 << HF_FPU_PC_SHIFT)
+/*
+ * FPU Rounding Control: two bits extracted from FPUC[11:10] and
+ * baked into TB flags so the i386 frontend can emit a single
+ * FCVT{N,M,P,Z}S on AArch64 instead of FRINTI + FCVTZS. A guest FLDCW
+ * that changes RC will cause TB lookup to miss the old TB and either
+ * hit a cached TB for the new RC or trigger a fresh translation.
+ */
+#define HF_FPU_RC_MASK       (3u << HF_FPU_RC_SHIFT)
 
 /* hflags2 */
 
@@ -2823,6 +2832,14 @@ static inline void cpu_set_fpuc(CPUX86State *env, uint16_t fpuc)
      */
     env->hflags &= ~HF_FPU_PC_MASK;
     env->hflags |= ((env->fpuc >> 9) & 1) << HF_FPU_PC_SHIFT;
+
+    /*
+     * FPU rounding control (FPUC bits 11:10) baked into hflags so the
+     * translator can pick the matching FCVT*S instruction for FIST /
+     * FISTP at emit time. See HF_FPU_RC_SHIFT definition.
+     */
+    env->hflags = (env->hflags & ~HF_FPU_RC_MASK) |
+                  ((uint32_t)((env->fpuc >> 10) & 3) << HF_FPU_RC_SHIFT);
 
     /*
      * Force the inline-FPU rounding-control cache to miss on next gen_flcr.

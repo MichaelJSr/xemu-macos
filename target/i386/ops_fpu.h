@@ -260,18 +260,52 @@ static void glue(gen_fildll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 static void glue(gen_fistl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     /*
-     * x87 FIST/FISTP uses the current FPU rounding mode (default:
-     * round-to-nearest-even) to round ST0 to a 32-bit signed integer.
-     * Fused TCG op rint_cvt_i32_fN emits FRINTI + FCVTZS in a single
-     * backend dispatch on AArch64; hosts without the fused form fall
-     * back to the separate rint + cvt pair (see tcg_gen_rint_cvt_*).
+     * x87 FIST/FISTP uses the FPU control-word rounding mode to round
+     * ST0 to a signed integer. With HF_FPU_RC propagated via TB flags,
+     * we know the guest RC at translate time and emit a single host
+     * FCVT{N,M,P,Z}S instruction per mode on AArch64 instead of
+     * FRINTI + FCVTZS. When the host lacks the mode-specific fused
+     * op the tcg_gen_cvt_r* wrapper falls back to rint_cvt_* (which
+     * further falls back to rint + cvt); those paths rely on gen_flcr
+     * having already set FPCR to the guest RC via get_st0.
+     *
+     * x87 RC encoding: 0=nearest-even, 1=-inf, 2=+inf, 3=zero (note
+     * this differs from ARM's rmode field where 01=+inf, 10=-inf).
      */
-    glue(tcg_gen_rint_cvt_i32, PREC_SUFFIX)(arg, get_st0(s));
+    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    switch (rc) {
+    case 0:
+        glue(tcg_gen_cvt_rn_i32, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    case 1:
+        glue(tcg_gen_cvt_rm_i32, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    case 2:
+        glue(tcg_gen_cvt_rp_i32, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    default: /* 3 */
+        glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
+        break;
+    }
 }
 
 static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
-    glue(tcg_gen_rint_cvt_i64, PREC_SUFFIX)(arg, get_st0(s));
+    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    switch (rc) {
+    case 0:
+        glue(tcg_gen_cvt_rn_i64, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    case 1:
+        glue(tcg_gen_cvt_rm_i64, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    case 2:
+        glue(tcg_gen_cvt_rp_i64, PREC_SUFFIX)(arg, get_st0(s));
+        break;
+    default: /* 3 */
+        glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, get_st0(s));
+        break;
+    }
 }
 
 static void glue(gen_fsts_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)

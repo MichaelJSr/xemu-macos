@@ -2672,6 +2672,18 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_rint_cvt_i32_f64:
     case INDEX_op_rint_cvt_i64_f32:
     case INDEX_op_rint_cvt_i64_f64:
+    case INDEX_op_cvt_rn_i32_f32:
+    case INDEX_op_cvt_rn_i32_f64:
+    case INDEX_op_cvt_rn_i64_f32:
+    case INDEX_op_cvt_rn_i64_f64:
+    case INDEX_op_cvt_rm_i32_f32:
+    case INDEX_op_cvt_rm_i32_f64:
+    case INDEX_op_cvt_rm_i64_f32:
+    case INDEX_op_cvt_rm_i64_f64:
+    case INDEX_op_cvt_rp_i32_f32:
+    case INDEX_op_cvt_rp_i32_f64:
+    case INDEX_op_cvt_rp_i64_f32:
+    case INDEX_op_cvt_rp_i64_f64:
         return TCG_TARGET_HAS_fpu && TCG_TARGET_HAS_rint_cvt;
 
     default:

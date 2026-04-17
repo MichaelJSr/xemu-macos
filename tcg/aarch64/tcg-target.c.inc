@@ -694,6 +694,25 @@ typedef enum {
     INSN_FCVTZS_WD  = 0x1e780000,
     INSN_FCVTZS_XD  = 0x9e780000,
 
+    /*
+     * FP -> Int conversion in specific rounding modes. Bits [20:19]
+     * select rmode: 00 = N (to nearest, ties to even), 01 = P (toward
+     * +inf), 10 = M (toward -inf). FCVTZS above is rmode 11 (toward
+     * zero). ftype 00 = single, 01 = double, sf 0 = 32-bit, 1 = 64-bit.
+     */
+    INSN_FCVTNS_WS  = 0x1e200000,
+    INSN_FCVTNS_XS  = 0x9e200000,
+    INSN_FCVTNS_WD  = 0x1e600000,
+    INSN_FCVTNS_XD  = 0x9e600000,
+    INSN_FCVTMS_WS  = 0x1e300000,
+    INSN_FCVTMS_XS  = 0x9e300000,
+    INSN_FCVTMS_WD  = 0x1e700000,
+    INSN_FCVTMS_XD  = 0x9e700000,
+    INSN_FCVTPS_WS  = 0x1e280000,
+    INSN_FCVTPS_XS  = 0x9e280000,
+    INSN_FCVTPS_WD  = 0x1e680000,
+    INSN_FCVTPS_XD  = 0x9e680000,
+
     /* FP round to integer using FPCR rounding mode. */
     INSN_FRINTI_S   = 0x1e27c000,
     INSN_FRINTI_D   = 0x1e67c000,
@@ -3327,6 +3346,62 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                   | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
         break;
 
+    /*
+     * Mode-specific fused rint+cvt: a single FCVT{N,M,P}S instruction
+     * does FP-to-signed-int in the requested rounding mode. No
+     * intermediate FP temp needed, no FPCR reprogramming. Emitted when
+     * the i386 frontend knows the guest x87 RC at translate time from
+     * HF_FPU_RC in tb->flags.
+     */
+    case INDEX_op_cvt_rn_i32_f32:
+        tcg_out32(s, INSN_FCVTNS_WS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rn_i32_f64:
+        tcg_out32(s, INSN_FCVTNS_WD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rn_i64_f32:
+        tcg_out32(s, INSN_FCVTNS_XS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rn_i64_f64:
+        tcg_out32(s, INSN_FCVTNS_XD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rm_i32_f32:
+        tcg_out32(s, INSN_FCVTMS_WS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rm_i32_f64:
+        tcg_out32(s, INSN_FCVTMS_WD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rm_i64_f32:
+        tcg_out32(s, INSN_FCVTMS_XS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rm_i64_f64:
+        tcg_out32(s, INSN_FCVTMS_XD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rp_i32_f32:
+        tcg_out32(s, INSN_FCVTPS_WS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rp_i32_f64:
+        tcg_out32(s, INSN_FCVTPS_WD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rp_i64_f32:
+        tcg_out32(s, INSN_FCVTPS_XS
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_cvt_rp_i64_f64:
+        tcg_out32(s, INSN_FCVTPS_XD
+                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+        break;
+
     case INDEX_op_mov_f64:
         dp = true; /* FALLTHRU */
     case INDEX_op_mov_f32:
@@ -3959,6 +4034,18 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_rint_cvt_i32_f64:
     case INDEX_op_rint_cvt_i64_f32:
     case INDEX_op_rint_cvt_i64_f64:
+    case INDEX_op_cvt_rn_i32_f32:
+    case INDEX_op_cvt_rn_i32_f64:
+    case INDEX_op_cvt_rn_i64_f32:
+    case INDEX_op_cvt_rn_i64_f64:
+    case INDEX_op_cvt_rm_i32_f32:
+    case INDEX_op_cvt_rm_i32_f64:
+    case INDEX_op_cvt_rm_i64_f32:
+    case INDEX_op_cvt_rm_i64_f64:
+    case INDEX_op_cvt_rp_i32_f32:
+    case INDEX_op_cvt_rp_i32_f64:
+    case INDEX_op_cvt_rp_i64_f32:
+    case INDEX_op_cvt_rp_i64_f64:
         return C_O1_I1(r, w);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
