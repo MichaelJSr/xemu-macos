@@ -30,12 +30,11 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `XEMU_ARM_CPU` | auto-detect | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string`, walks down to the nearest older chip clang recognizes |
-| `XEMU_PGO` | unset | `generate` then `use` for profile-guided optimization |
-| `XEMU_PGO_DIR` | `./pgo` | Where `.profraw` files land |
-| `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Set to `1` to opt into hardened-runtime codesign with `xemu.entitlements` (only needed to exercise notarization-style behavior locally) |
+| `XEMU_ARM_CPU` | auto | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string` with progressive fallback to older chips clang recognizes |
+| `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for profile-guided optimization |
+| `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Opt into hardened-runtime codesign with `xemu.entitlements` (only for local notarization-style testing) |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer size (≈21 ms @ 48 kHz) |
-| `XEMU_PFIFO_HEARTBEAT` | `0` | Print a 2-second heartbeat from the pfifo thread with `halt` / `flush_pending` / `sync_pending` / `waiting_for_{flip,nop,context_switch}` state; used to diagnose "frozen but xemu UI responsive" reports — if the heartbeat stops during a freeze, the pfifo thread is stuck; if it continues, the game is waiting on something the pfifo flags show |
+| `XEMU_PFIFO_HEARTBEAT` | `0` | 2-second pfifo-thread diagnostic snapshot (`halt` / `flush_pending` / `sync_pending` / `waiting_for_*`); used to categorize "frozen but UI responsive" reports |
 
 ### Recommended `xemu.toml`
 
@@ -75,85 +74,63 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **Inline hard FPU.** x87 ops emit native AArch64 FP instructions
   (`FADD`/`FMUL`/`FDIV`/`FSQRT` etc.). `floatx80`↔`double` conversion is
   inlined (~15 host insns vs ~40 in the helper). Values stay in D-regs
-  across translation blocks. `fucomi`/`fnstsw`/`frndint`/FPU constant loads
-  and the `fdecstp`/`fincstp` stack pointer updates are also inline.
-  ~30% faster than the helper-call path, 4–8× faster than softfloat.
-- **FPCR caching across TBs.** `MSR FPCR` only re-emitted when guest RC
-  bits change (invalidated automatically on save/load and `cpu_set_fpuc`).
-  FPCR `DN=0` so NaN propagation matches x87.
-- **Rounding-mode-correct FIST.** `FIST`/`FISTP` use `FRINTI` + `FCVTZS`,
-  honoring the current control word (regression from bare `FCVTZS`
-  broke Azurik's D-pad — see failed-opts below). Emitted as a single
-  fused TCG op `rint_cvt_i{32,64}_f{32,64}` on AArch64 (one IR node,
-  same two host instructions); other hosts fall back to the `rint`+`cvt`
-  pair automatically.
-- **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses shift-
-  by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16. `flcr`
-  lowering is 5 insns via `RBIT`. `tb_phys_invalidate` uses the
-  manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()`
-  pair (upstream behavior).
+  across translation blocks. `fucomi`/`fnstsw`/`frndint`/FPU constant
+  loads and `fdecstp`/`fincstp` are also inline. ~30% faster than the
+  helper-call path, 4–8× faster than softfloat.
+- **FPCR caching.** `MSR FPCR` only re-emitted when guest RC bits change
+  (invalidated on save/load and `cpu_set_fpuc`). FPCR `DN=0` so NaN
+  propagation matches x87.
+- **Rounding-mode-correct FIST.** `FIST`/`FISTP` honor the current
+  control word via mode-specific fused TCG ops
+  (`cvt_{rn,rm,rp}_i{32,64}_f{32,64}`) that lower to a single host
+  `FCVT{N,M,P,Z}S` on AArch64.
+- **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses
+  shift-by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16.
+  `flcr` lowering is 5 insns via `RBIT`.
 
 ### Vulkan renderer (pgraph/vk)
 
 - **MoltenVK compatibility.** `VK_KHR_portability_subset`,
   `VK_EXT_metal_objects` zero-copy IOSurfaces. CPU-side primitive
-  emulation for quads, line loops, triangle fans, and provoking
-  vertex. Fragment-shader depth fallback via
-  `gl_FragCoord.z + dFdx/dFdy`.
-- **Split descriptor sets.** Set 0 holds UBOs (VSH+PSH uniforms),
-  set 1 holds the `NV2A_MAX_TEXTURES` combined image samplers. Each
-  set has its own pool/array/index, so a draw that only changes
-  textures doesn't rewrite UBOs and vice versa. GLSL generators emit
-  `layout(set=N, binding=M)` qualifiers; `vkCmdBindDescriptorSets`
-  binds only the dirty set with per-set last-bound tracking. Roughly
-  halves `vkUpdateDescriptorSets` work in steady state.
+  emulation for quads, line loops, triangle fans, provoking vertex.
+  Fragment-shader depth fallback via `gl_FragCoord.z + dFdx/dFdy`.
+- **Split descriptor sets.** Set 0 UBOs, set 1 the `NV2A_MAX_TEXTURES`
+  combined image samplers. Per-set pool/array/index with last-bound
+  tracking — a draw that only changes textures doesn't rewrite UBOs
+  and vice versa. Roughly halves `vkUpdateDescriptorSets` work.
 - **Single-submit fast path + N=2 flight slots.** CPU records slot 1
-  while GPU executes slot 0. Aux command buffer skipped when all
-  staging is empty and no VRAM page is dirty.
+  while GPU executes slot 0. Aux command buffer skipped when staging
+  is empty and no VRAM page is dirty.
 - **Texture upload batching + bump allocator** on `BUFFER_STAGING_SRC`.
   Multiple textures share one main-CB submission.
 - **Parallel + GPU texture decode.** `GThreadPool` capped at
-  `MIN(num_processors, 4)` for S3TC/unswizzle/conversion (mips ≤ 16×16
-  decoded inline to skip dispatch overhead). Non-compressed 2bpp/4bpp
-  textures bypass the CPU pool: raw data copies to a staging buffer and
-  is unswizzled by a compute shader that accepts CPU-computed
-  `mask_x`/`mask_y` push constants (matches
-  `generate_swizzle_masks()` so any power-of-two dimensions work).
-- **Dirty tracking everywhere.** UBO `uniform_copy` does `memcmp` before
-  `memcpy` with a per-layout dirty flag. Pipeline key re-hashes only
-  when `check_pipeline_dirty` fires, and then hashes only the non-
-  shader-state slice (ShaderState sub-hash is cached). Vertex layout
-  fingerprinted via `fast_hash`. Per-draw surface expiry
-  (`expire_old_surfaces` + `prune_invalid_surfaces`) is throttled to
-  once every ~33 ms of host wall-clock. It was previously throttled on
-  `pg->frame_time`, which only advances in `NV097_FLIP_INCREMENT_WRITE`
-  — during a rapid level-transition burst the guest can issue
-  thousands of draws between flips, so `frame_time` gating never
-  fired and `r->invalid_surfaces` accumulated unbounded. Each
-  invalid `SurfaceBinding` holds a live `VkImage` + allocation;
-  unbounded growth eventually stalled the renderer (reproducible as
-  a black-screen freeze on rapid double-level-load + die,
-  confirmed via bisect against v0.8.141 → v0.8.142). Wall-clock
-  gating preserves the per-draw amortization while guaranteeing
-  the prune runs during long non-flip bursts.
+  `MIN(num_processors, 4)` for S3TC / unswizzle / conversion (mips
+  ≤ 16×16 inline). Non-compressed 2bpp/4bpp textures bypass the CPU
+  pool — the raw swizzled data stages to a buffer and a compute
+  shader unswizzles it with CPU-computed `mask_x`/`mask_y` push
+  constants for any power-of-two dimensions.
+- **Dirty tracking.** UBO `uniform_copy` does `memcmp` before
+  `memcpy` with per-layout dirty flag. Pipeline key re-hashes only
+  when `check_pipeline_dirty` fires, hashing only the non-shader
+  slice (`ShaderState` sub-hash cached). Vertex layout fingerprinted
+  via `fast_hash`. Surface expiry throttled to ~33 ms host wall-clock
+  (not guest `frame_time` — see failed experiments).
 - **Incremental texture content hash.** Page-aligned textures
-  ≥ 256 KiB keep a per-chunk XXH3 hash array (64 KiB chunks). On
-  dirty-bitmap fire only chunks whose backing pages actually changed
-  are re-hashed; aggregate is the XOR of all chunks plus a cached
-  palette hash. Saves ~30–60% of hash CPU for large atlases with
-  sparse updates. Non-aligned / small textures fall back to the
+  ≥ 256 KiB keep a per-chunk XXH3 array (64 KiB chunks). Only chunks
+  whose backing pages changed get re-hashed; aggregate is the XOR
+  plus cached palette hash. Saves ~30–60% hash CPU for large atlases
+  with sparse updates. Small / non-aligned textures fall back to the
   single-shot full-buffer hash.
 - **Tight barriers.** `ALL_COMMANDS_BIT` replaced with precise stage
-  flags. `VK_WHOLE_SIZE` replaced with exact byte ranges.
-  `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory
-  (per-buffer `is_coherent` flag). Vertex-RAM flush is scoped to the
-  tracked `[first, last]` dirty-page range.
-- **Primitive restart.** `primitiveRestartEnable` is now `VK_TRUE` for
+  flags; `VK_WHOLE_SIZE` with exact byte ranges.
+  `vmaFlush`/`vmaInvalidate` skipped on coherent memory (Apple
+  Silicon unified memory; per-buffer `is_coherent` flag). Vertex-RAM
+  flush scoped to the tracked `[first, last]` dirty-page range.
+- **Primitive restart.** `primitiveRestartEnable = VK_TRUE` for
   strip / fan topologies so NV2A restart-index draws render correctly.
-- **Display path.** PVIDEO + display merged into one GPU submit. GL
-  rebind cache keyed on `IOSurfaceGetID`, not the (reusable) pointer.
-  Pending reports / compute descriptor reset consolidated in
-  `pgraph_vk_finish`.
+- **Display path.** PVIDEO + display merged into one GPU submit.
+  GL rebind cache keyed on `IOSurfaceGetID`. Pending reports /
+  compute descriptor reset consolidated in `pgraph_vk_finish`.
 - **Dynamic blend / depth bias.** `BLENDCOLOR` / `ZOFFSETBIAS` /
   `ZOFFSETFACTOR` removed from the pipeline key and set as Vulkan
   dynamic state per draw (skipped on clear pipelines).
@@ -161,74 +138,64 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 ### MetalFX + presentation
 
 - **Spatial / temporal upscaling** via `MTLFXSpatialScaler` /
-  `MTLFXTemporalScaler`. Temporal uses an 8-frame Halton(2,3) jitter
+  `MTLFXTemporalScaler`. Temporal uses 8-frame Halton(2,3) jitter
   and optional compute-kernel synthetic depth. Shared `MTLDevice` +
-  `MTLCommandQueue` refcounted across spatial/temporal/interpolation.
-  File compiles without ARC; every `new*` / `alloc+init` has an
-  explicit `release` in the destroy path or before rebinding cached
-  textures.
+  `MTLCommandQueue` refcounted. MRC lifetime: every `new*` /
+  `alloc+init` has an explicit `release`.
 - **Frame interpolation** via `MTLFXFrameInterpolator` (macOS 26+).
-  2×=60fps, 4×=120fps from 30fps source, with deferred generation on
-  idle display syncs. On-failure slot is skipped (no busy retry).
+  2× = 60 fps, 4× = 120 fps from a 30 fps source, with deferred
+  generation on idle display syncs. On-failure slot is skipped.
 - **Teardown safety.** Every encode path attaches a completion handler
-  that decrements a per-subsystem in-flight counter. Destroy/reinit
-  paths drain the counter before releasing scalers/textures, closing
-  the race where `waitUntilCompleted` runs after the lock was released.
+  that decrements a per-subsystem in-flight counter; destroy/reinit
+  drains the counter before releasing scalers/textures.
 - **IOSurface lifetime.** `IOSurfaceGetID` is the cache key everywhere
-  (Metal caches and GL rebind), with `CFRetain`/`CFRelease` balanced.
-  Output width capped at 1920 to work around a macOS 26 BGRA
-  `bytesPerRow` bug.
+  (Metal + GL), `CFRetain`/`CFRelease` balanced. Output width capped
+  at 1920 to work around a macOS 26 BGRA `bytesPerRow` bug.
 
 ### MCPX APU
 
-- **VP voice processing.** Voice struct (128 B) `memcpy`'d to a stack
-  buffer at the top of `voice_process`; all `voice_get/set_mask` calls
-  hit the local copy. Attenuation (4096) and pitch (65536) LUTs replace
-  transcendentals on the hot path; envelope decay uses `expf` with a
-  precomputed log base.
-- **Resampler.** `SRC_LINEAR` replaces `SRC_SINC_FASTEST` (matches Xbox
-  hardware).
+- **VP voice processing.** Voice struct (128 B) memcpy'd to stack at
+  the top of `voice_process`; all `voice_get/set_mask` calls hit the
+  local copy. Attenuation (4096) and pitch (65536) LUTs replace
+  transcendentals on the hot path; envelope decay uses `expf` with
+  a precomputed log base.
+- **Resampler.** `SRC_LINEAR` replaces `SRC_SINC_FASTEST` (matches
+  Xbox hardware).
 - **Accelerate / vDSP.** `vDSP_vsma` for 8-bin × 32-sample mix
-  accumulation; `vDSP_vadd` for `float_accumulate`. `float_to_24b` uses
-  `vcvtnq_s32_f32` in bulk on ARM64.
+  accumulation; `vDSP_vadd` for `float_accumulate`; `float_to_24b`
+  uses `vcvtnq_s32_f32` in bulk on ARM64.
 - **Atomic consistency.** `d->regs`, `pause_requested`, and the
   `NV_PAPU_FEMEMADDR` load in `fe_method` all go through
-  `qatomic_read`/`qatomic_set` so the VP frame thread, worker threads,
-  and guest MMIO dispatcher agree under weak memory ordering.
-- **CoreAudio.** `os_unfair_lock` with trylock; buffer defaults to
-  1024 frames (~21 ms @ 48 kHz, override via `XEMU_COREAUDIO_FRAMES`).
-  Silence on contention; underrun returns `BadDevice`/`Unknown` errors
+  `qatomic_read`/`qatomic_set` so the VP frame thread, workers, and
+  guest MMIO dispatcher agree under weak ordering.
+- **CoreAudio.** `os_unfair_lock` with trylock; default buffer 1024
+  frames (~21 ms @ 48 kHz, override via `XEMU_COREAUDIO_FRAMES`).
+  Silence on contention; underrun returns `BadDevice` / `Unknown`
   correctly instead of mis-reporting success.
 
 ### Threads + runtime
 
-- **P-core QoS.** Both the PFIFO and vblank-timer threads request
+- **P-core QoS.** PFIFO and vblank-timer threads request
   `QOS_CLASS_USER_INTERACTIVE` on Apple Silicon.
-- **`pgraph.lock` / BQL discipline.** `surface_access_callback`
-  conditionally drops BQL before blocking so the vblank thread can
-  still fire interrupts.
-- **PFIFO wait.** Untimed `qemu_cond_wait`. All `pfifo_kick` call
-  sites hold `d->pfifo.lock` across the kick-set + broadcast, so the
+- **BQL discipline.** `surface_access_callback` conditionally drops
+  BQL before blocking so the vblank thread can still fire interrupts.
+- **PFIFO wait.** Untimed `qemu_cond_wait`. All `pfifo_kick` sites
+  hold `d->pfifo.lock` across the kick-set + broadcast, so the
   reader's kick-check + atomic release-wait can't miss a concurrent
-  kick. Removes the ~1 kHz idle wake-up that came from the 1 ms
-  safety-net `timedwait`. (The optimization was briefly reverted
-  while diagnosing a pre-existing level-transition freeze; the
-  `XEMU_PFIFO_HEARTBEAT` diagnostic proved the freeze is unrelated
-  to this wait path — loop iters climb at the same rate either way
-  — so the untimed form is restored.)
+  kick. Removes the ~1 kHz idle wake-up of the previous 1 ms
+  `timedwait`.
 
 ### Build + packaging
 
-- `-O3`, thin LTO with caching, `-ffp-contract=fast`.
-  `-mcpu` auto-detected from the host chip (M1 → M4+), with a
-  progressive fallback to the nearest older chip clang recognizes.
+- `-O3`, thin LTO with caching, `-ffp-contract=fast`. `-mcpu`
+  auto-detected with progressive fallback.
 - macOS 26 build fixes: `download-macos-libs.py` uses `os.path.abspath`
   and repairs stale `prefix=` lines in vendored `.pc` files;
   `build.sh` strips all `LC_RPATH` before `dylibbundler` runs and
   adds the single correct one. Local codesign stays ad-hoc without
   hardened runtime (MAP_JIT works); set `XEMU_CODESIGN_ENTITLEMENTS=1`
-  to opt into hardened runtime + `xemu.entitlements` (rarely needed;
-  use `scripts/sign-macos-release.sh` for notarized distribution).
+  to opt into hardened runtime + `xemu.entitlements` (for notarized
+  distribution use `scripts/sign-macos-release.sh`).
 - Optional `XEMU_PGO=generate` then `XEMU_PGO=use` build loop using
   `llvm-profdata` merge.
 - STBI_NEON + fpng CRC32 for ARM64.
@@ -253,28 +220,22 @@ Lessons worth preserving so they aren't re-attempted.
 |---|---|
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
-| Async MetalFX (double-buffered IOSurface, sem-primed) | Ghosting/jitter: `SDL_GL_SwapWindow`+vsync flush GL to the driver but don't fence GL's IOSurface sampling to GPU completion, so subsequent Metal encodes race the previous frame's GL read on the same slot. Would need `MTLSharedEvent` + `glWaitSync` interop or triple-buffering. |
-| Async MetalFX `dispatch_semaphore` (earlier attempt) | IOSurface consumed by GL before Metal finished writing |
-| Async MetalFX (double-buffered IOSurface, no sem) | First-frame segfault; keep synchronous until the display path is Metal-native |
+| Async MetalFX (all variants: sem-primed / double-buffered IOSurface / `dispatch_semaphore`) | GL ↔ Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone; needs `MTLSharedEvent` + `glWaitSync` or triple-buffering. Sync MetalFX is the baseline until the display path goes Metal-native |
 | Separate compute queue | MoltenVK only exposes `queueCount=1` |
-| Depth export via CPU readback | Added 2 ms/frame and ~18 MiB of copies; quality barely improved |
-| Depth export via `vkExportMetalObjectsEXT` | Deadlock with MoltenVK's internal device mutex |
-| Compute unswizzle reads guest VRAM directly via `BUFFER_VERTEX_RAM` | The buffer isn't a live VRAM mirror — it's only `memcpy`'d on vertex-attribute upload, so texture offsets read zeros (black textures). Would need `VK_EXT_external_memory_host` or per-write mirroring. |
-| Dirty-range VRAM flush | Bitmap was cleared before `flush_memory_buffer` read it — reverted before the fix-in-place landed; tracked per-flight range does the safe equivalent now |
-| Surface-range binary search on `end` | `end` isn't monotonic in a `start`-sorted array → skipped valid overlaps; linear scan is O(n) and n is small |
-| Two-level quick texture hash | 192-byte sampling missed content changes (YUV / FMV) |
-| Hash skip for textures > 64 KiB | Dirty-bitmap false positives caused massive GPU re-upload churn |
-| HRTF hand NEON | Gather-then-FMA on a circular buffer defeated OoO overlap; scalar + `-O3 -mcpu=native` autovectorizes better |
-| Always-on bounds checks in perf builds | ~5–10% GPU-pipeline regression vs. `__builtin_unreachable()` |
-| BQL event batching (x2) | BQL around the SDL event loop breaks QEMU cooperative scheduling |
-| Incremental texture hash on misaligned textures | Host pages at chunk boundaries can contain bytes from two adjacent chunks; `test_and_clear_dirty` by the earlier chunk stole the later chunk's dirty signal → stale cached hash. Gated to page-aligned textures only. |
-| Direct-VRAM compute unswizzle (via `VK_EXT_external_memory_host`) | Compute shader read from `BUFFER_VERTEX_RAM` at `level->vram_addr` to skip the `raw_copy` memcpy + staging-buffer step. Under external-memory-host that buffer IS live guest VRAM, and `HOST_WRITE → SHADER_READ` barriers only enforce *visibility* up to the barrier's submission point — they do not block the CPU from continuing to write after submission or during GPU execution (HOST_COHERENT memory on Apple Silicon). Fast-updated textures (particles, translucent HUD) tore between two consecutive guest writes → intermittent flicker. Kept the staging-copy path; α2 (host-imported vertex RAM) stays because `flush_memory_buffer` snapshots vertex data before draw. |
-| Host-imported `BUFFER_VERTEX_RAM` (α2, `VK_EXT_external_memory_host`) | Same class of torn-read as α3 but for vertex data: the GPU reads vertex bytes straight from live guest VRAM, and dynamic meshes (particles, translucent effects, skinned characters, LOD streaming) are continuously rewritten by the guest CPU, so individual GPU fetches can see bytes from two different CPU frames mid-primitive. Restore the memcpy-into-VMA-allocated-buffer path. Would need a snapshot scheme (per-flight COW, or an `MTLSharedEvent` keyed on a VRAM-snapshot boundary) to re-enable. |
-| `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Correlated with rare freezes during heavy TB invalidation (level transitions, death-reload). The new API forcibly drops W permission on callback return regardless of whether nested JIT-writer paths on the same thread still needed it; nested use is hard to rule out across all QEMU TB invalidation flows. Restored the manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()` pair (upstream behavior). |
-| `VK_KHR_dynamic_rendering` full lowering (B2) | Replaced `VkRenderPass` + `VkFramebuffer` with `vkCmdBeginRendering` / `vkCmdEndRendering`, but didn't replicate the old render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency that synchronizes color/depth attachment read+write across consecutive passes. Under heavy back-to-back render-pass churn (level transitions, death-reload) Metal's tile renderer stalled, producing frozen/black screens with the CPU spinning in the idle thread's `CLI; HLT` (post-halt BSOD recovery counter climbing ~10 k/2 s). Disabled via forcing `dynamic_rendering_feature_enabled = false`; downstream gates fall back to the render-pass path. Re-enable needs an explicit `vkCmdPipelineBarrier` on the subpass-dep stages/access around every BeginRendering/EndRendering. |
-| APU voice resampler `rate == 1.0` fast path | Skipped libsamplerate entirely by calling `voice_get_samples` in a loop and returning short counts. The libsamplerate path's callback (`voice_resample_callback`) pads with silence on starvation so `src_callback_read` always returns `NUM_SAMPLES_PER_FRAME`; the fast path returned early instead, letting `voice_process`'s outer for-loop retry indefinitely on a voice that was draining during scene transitions. Manifested as "all pfifo pending flags at 0, guest CPU spinning in kernel idle thread CLI+HLT, game waiting on audio completion that never fires" per the heartbeat diagnostic. Reverted; SRC_LINEAR is cheap enough to run unconditionally. |
-| `HLT` BSOD recovery (at-HLT and post-halt IF=1 force) | Forced `IF=1` when the guest executed `HLT` with `IF=0` and a pending HARD IRQ, including the post-halt variant that teaches `x86_cpu_has_work` about the same pattern. Theory: Xbox kernel occasionally enters `CLI; HLT` with an IRQ pending or arriving later, and `x86_cpu_pending_interrupt` gates HARD on `IF=1`, so the CPU would deadlock. The recovery did correctly unblock those deadlocks, but in practice games kept freezing on level transitions even with the recovery firing at ~1500/s (confirmed via the `XEMU_PFIFO_HEARTBEAT` diagnostic: pfifo idle, all pending flags 0, pgraph has nothing queued, game's main thread stuck on something outside pgraph). Removing the recovery didn't actually *prevent* the freeze — the IRQ pattern is a *symptom* of the game's main thread being blocked on some non-pgraph kernel object, not the cause. Reverted to stock upstream semantics; the underlying stuck-thread cause is still open and needs a kernel-level trace to pin down. |
-| Surface-expiry throttle keyed on `pg->frame_time` (v0.8.142) | Original round-7 optimization: throttle `expire_old_surfaces` + `prune_invalid_surfaces` to every 8 frame ticks to avoid per-draw O(n) scans. The bug: `pg->frame_time` only advances in `NV097_FLIP_INCREMENT_WRITE`, so when the guest issued thousands of draws between flips (rapid level transitions, death-reload, shader-cache-cold startup), the gate never fired and `r->invalid_surfaces` grew unbounded. Each entry holds a live `VkImage` + allocation; eventually VRAM pressure / wrong stale match in `get_any_compatible_invalid_surface` stalled the renderer → black-screen freeze (bisected against v0.8.141 → v0.8.142, confirmed by reverting this one change alone). Fixed by switching the throttle to host wall-clock (`qemu_clock_get_ns(QEMU_CLOCK_HOST)`, ~33 ms interval) so it ticks regardless of flip cadence. |
+| Depth export (CPU readback or `vkExportMetalObjectsEXT`) | CPU: 2 ms/frame + 18 MiB of copies for minimal quality. Metal export: deadlocks MoltenVK's internal device mutex |
+| Direct-VRAM compute unswizzle via `VK_EXT_external_memory_host` | `HOST_WRITE → SHADER_READ` barriers enforce visibility up to *submission*, not GPU execution; on HOST_COHERENT memory the CPU can tear the read mid-frame → particle/HUD flicker. Staging-copy path is kept |
+| Host-imported `BUFFER_VERTEX_RAM` (α2) | Same torn-read class for vertex data: GPU fetches can see two different CPU frames mid-primitive on dynamic meshes. Needs snapshot-COW or `MTLSharedEvent` to re-enable |
+| `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Scoped-W semantics force-drop W on callback return, incompatible with QEMU's nested JIT-write paths. Restored the manual `qemu_thread_jit_write` / `execute` pair |
+| `VK_KHR_dynamic_rendering` full lowering (B2) | Missing the render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency; back-to-back passes stalled Metal's tile renderer. Re-enable needs explicit `vkCmdPipelineBarrier` around every Begin/End |
+| APU voice resampler `rate == 1.0` fast path | Skipped libsamplerate but didn't replicate its silence-padding on voice drain → `voice_process`'s outer loop spun on draining voices during scene transitions |
+| `HLT` BSOD recovery (IF=1 force at-HLT and post-halt) | Unblocks Xbox-kernel `CLI; HLT` deadlocks, but the IRQ-loop pattern is a *symptom* of a stuck thread elsewhere, not the cause. Removed |
+| Surface-expiry throttle keyed on `pg->frame_time` | `frame_time` only advances in `NV097_FLIP_INCREMENT_WRITE`, so rapid level-load bursts with no flips starved the prune and `r->invalid_surfaces` grew unbounded → black-screen freeze on rapid double-level-load + die. Switched to host wall-clock (~33 ms) |
+| Surface-range binary search on `end` | `end` isn't monotonic in a start-sorted array → skipped valid overlaps |
+| Two-level quick texture hash / hash-skip for > 64 KiB | 192-byte sampling missed content changes (YUV / FMV); dirty-bitmap false positives caused massive GPU re-upload churn |
+| Dirty-range VRAM flush (early) | Bitmap cleared before `flush_memory_buffer` read it. Tracked per-flight `[first, last]` range does the safe equivalent |
+| Incremental texture hash on misaligned textures | Host-page boundaries straddle chunks → `test_and_clear_dirty` by one chunk steals another's dirty signal. Gated to page-aligned textures only |
+| HRTF hand-NEON / always-on bounds checks | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Always-on bounds: ~5–10% GPU-pipeline regression |
+| BQL event batching | BQL around the SDL event loop breaks QEMU cooperative scheduling |
 
 ---
 
@@ -289,22 +250,20 @@ Older builds only. Rebuild from scratch; `build.sh` now strips rpaths.
 **MetalFX not activating.**
 
 - Needs `renderer = 'VULKAN'` and `metalfx_mode = 'spatial'` or `'temporal'`.
-- `surface_scale = 4` produces a 2560×1920 input which exceeds the
-  1920px BGRA-IOSurface safe cap, so MetalFX is skipped.
+- `surface_scale = 4` produces 2560×1920 input which exceeds the 1920 px
+  BGRA-IOSurface safe cap, so MetalFX is skipped.
 - Look for `MetalFX: Spatial upscaler initialized …` in the log.
 
 **Frame interpolation not working.**
-
-- Requires macOS 26.0+ and MetalFX upscaling active (width ≤ 1920).
+Requires macOS 26.0+ and MetalFX upscaling active (width ≤ 1920).
 
 **FPU precision bug in a game.**
 Disable the inline path: `[perf] hard_fpu = false`. The inline FPU
-uses IEEE double (52-bit mantissa) vs x87 extended precision
-(64-bit); extremely rare in practice.
+uses IEEE double (52-bit mantissa) vs x87 extended precision (64-bit);
+extremely rare in practice.
 
 **Audio glitches / too much latency.**
-`XEMU_COREAUDIO_FRAMES=2048 ./build.sh` for a larger buffer. Or file
-an issue — default is 1024 frames.
+`XEMU_COREAUDIO_FRAMES=2048 ./build.sh` for a larger buffer.
 
 ---
 
