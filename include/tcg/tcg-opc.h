@@ -166,6 +166,17 @@ DEF(mul_f32, 1, 2, 0, TCG_OPF_FP)
 DEF(mul_f64, 1, 2, 0, TCG_OPF_FP)
 DEF(rint_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(rint_f64, 1, 1, 0, TCG_OPF_FP)
+/*
+ * Fused round-to-integer + convert-to-signed-integer. Equivalent to
+ * rint_fN followed by cvtNf_iM; lets AArch64 emit FRINTI + FCVTZS as a
+ * single TCG op without allocating an intermediate FP temp. On hosts
+ * that don't implement the fused form, TCG expanders fall back to the
+ * separate rint + cvt pair (see tcg-op-fp.c).
+ */
+DEF(rint_cvt_i32_f32, 1, 1, 0, TCG_OPF_FP)
+DEF(rint_cvt_i32_f64, 1, 1, 0, TCG_OPF_FP)
+DEF(rint_cvt_i64_f32, 1, 1, 0, TCG_OPF_FP)
+DEF(rint_cvt_i64_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sqrt_f32, 1, 1, 0, TCG_OPF_FP)

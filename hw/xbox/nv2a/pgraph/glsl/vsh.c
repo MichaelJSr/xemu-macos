@@ -459,7 +459,7 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
         }
         mstring_append_fmt(
             output,
-            "layout(binding = %d, std140) uniform VshUniforms {\n"
+            "layout(set = 0, binding = %d, std140) uniform VshUniforms {\n"
             "%s"
             "};\n\n",
             opts.ubo_binding, mstring_get_str(uniforms));

@@ -83,10 +83,16 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   FPCR `DN=0` so NaN propagation matches x87.
 - **Rounding-mode-correct FIST.** `FIST`/`FISTP` use `FRINTI` + `FCVTZS`,
   honoring the current control word (regression from bare `FCVTZS`
-  broke Azurik's D-pad — see failed-opts below).
+  broke Azurik's D-pad — see failed-opts below). Emitted as a single
+  fused TCG op `rint_cvt_i{32,64}_f{32,64}` on AArch64 (one IR node,
+  same two host instructions); other hosts fall back to the `rint`+`cvt`
+  pair automatically.
 - **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses shift-
   by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16. `flcr`
-  lowering is 5 insns via `RBIT`.
+  lowering is 5 insns via `RBIT`. `tb_phys_invalidate` wraps its
+  write+execute pair in `pthread_jit_write_with_callback_np` on
+  macOS 14.4+ (falls back to the manual `pthread_jit_write_protect_np`
+  pair on older systems).
 - **`HLT` BSOD recovery.** On XBOX targets only, `HLT` with `IF=0` and
   a hardware IRQ already pending gets `IF=1` forced so the NV2A vblank
   ISR can wake the CPU (prevents permanent freezes after kernel
@@ -100,6 +106,23 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   probed at device create. CPU-side primitive emulation for quads, line
   loops, triangle fans, and provoking vertex. Fragment-shader depth
   fallback via `gl_FragCoord.z + dFdx/dFdy`.
+- **Dynamic rendering full lowering.** When `VK_KHR_dynamic_rendering`
+  is advertised (MoltenVK does), `create_render_pass` / `get_render_pass` /
+  `create_frame_buffer` short-circuit; `vkCmdBeginRenderPass` →
+  `vkCmdBeginRendering` with inline `VkRenderingAttachmentInfoKHR`
+  image views; pipelines declare formats via
+  `VkPipelineRenderingCreateInfoKHR` with `renderPass = VK_NULL_HANDLE`.
+  Stencil-attachment is gated off for `VK_FORMAT_D16_UNORM` (depth-only).
+  Removes the VkRenderPass + VkFramebuffer object lifetime entirely
+  on the fast path — on MoltenVK this maps straight to Metal's native
+  pass model instead of translating VkRenderPass state.
+- **Split descriptor sets.** Set 0 holds UBOs (VSH+PSH uniforms),
+  set 1 holds the `NV2A_MAX_TEXTURES` combined image samplers. Each
+  set has its own pool/array/index, so a draw that only changes
+  textures doesn't rewrite UBOs and vice versa. GLSL generators emit
+  `layout(set=N, binding=M)` qualifiers; `vkCmdBindDescriptorSets`
+  binds only the dirty set with per-set last-bound tracking. Roughly
+  halves `vkUpdateDescriptorSets` work in steady state.
 - **Single-submit fast path + N=2 flight slots.** CPU records slot 1
   while GPU executes slot 0. Aux command buffer skipped when all
   staging is empty and no VRAM page is dirty.
@@ -118,6 +141,13 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   shader-state slice (ShaderState sub-hash is cached). Vertex layout
   fingerprinted via `fast_hash`. Per-draw surface expiry runs every 8
   frame ticks instead of every draw.
+- **Incremental texture content hash.** Page-aligned textures
+  ≥ 256 KiB keep a per-chunk XXH3 hash array (64 KiB chunks). On
+  dirty-bitmap fire only chunks whose backing pages actually changed
+  are re-hashed; aggregate is the XOR of all chunks plus a cached
+  palette hash. Saves ~30–60% of hash CPU for large atlases with
+  sparse updates. Non-aligned / small textures fall back to the
+  single-shot full-buffer hash.
 - **Tight barriers.** `ALL_COMMANDS_BIT` replaced with precise stage
   flags. `VK_WHOLE_SIZE` replaced with exact byte ranges.
   `vmaFlush`/`vmaInvalidate` skipped on Apple Silicon coherent memory
@@ -183,8 +213,11 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **`pgraph.lock` / BQL discipline.** `surface_access_callback`
   conditionally drops BQL before blocking so the vblank thread can
   still fire interrupts.
-- **PFIFO wait.** `qemu_cond_timedwait(1 ms)` bounds worst-case
-  wake latency from the (unsynchronized) `pfifo_kick` writer.
+- **PFIFO wait.** Untimed `qemu_cond_wait`. All `pfifo_kick` call
+  sites hold `d->pfifo.lock` across the kick-set + broadcast, so the
+  reader's kick-check + atomic release-wait can't miss a concurrent
+  kick. Removes a ~1 kHz idle wake-up vs. the previous 1 ms
+  safety-net `timedwait`.
 
 ### Build + packaging
 
@@ -222,11 +255,13 @@ Lessons worth preserving so they aren't re-attempted.
 |---|---|
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
-| Async MetalFX (double-buffered IOSurface) | First-frame segfault; keep synchronous until the display path is Metal-native |
-| Async MetalFX `dispatch_semaphore` | IOSurface consumed by GL before Metal finished writing |
+| Async MetalFX (double-buffered IOSurface, sem-primed) | Ghosting/jitter: `SDL_GL_SwapWindow`+vsync flush GL to the driver but don't fence GL's IOSurface sampling to GPU completion, so subsequent Metal encodes race the previous frame's GL read on the same slot. Would need `MTLSharedEvent` + `glWaitSync` interop or triple-buffering. |
+| Async MetalFX `dispatch_semaphore` (earlier attempt) | IOSurface consumed by GL before Metal finished writing |
+| Async MetalFX (double-buffered IOSurface, no sem) | First-frame segfault; keep synchronous until the display path is Metal-native |
 | Separate compute queue | MoltenVK only exposes `queueCount=1` |
 | Depth export via CPU readback | Added 2 ms/frame and ~18 MiB of copies; quality barely improved |
 | Depth export via `vkExportMetalObjectsEXT` | Deadlock with MoltenVK's internal device mutex |
+| Compute unswizzle reads guest VRAM directly via `BUFFER_VERTEX_RAM` | The buffer isn't a live VRAM mirror — it's only `memcpy`'d on vertex-attribute upload, so texture offsets read zeros (black textures). Would need `VK_EXT_external_memory_host` or per-write mirroring. |
 | Dirty-range VRAM flush | Bitmap was cleared before `flush_memory_buffer` read it — reverted before the fix-in-place landed; tracked per-flight range does the safe equivalent now |
 | Surface-range binary search on `end` | `end` isn't monotonic in a `start`-sorted array → skipped valid overlaps; linear scan is O(n) and n is small |
 | Two-level quick texture hash | 192-byte sampling missed content changes (YUV / FMV) |
@@ -234,7 +269,7 @@ Lessons worth preserving so they aren't re-attempted.
 | HRTF hand NEON | Gather-then-FMA on a circular buffer defeated OoO overlap; scalar + `-O3 -mcpu=native` autovectorizes better |
 | Always-on bounds checks in perf builds | ~5–10% GPU-pipeline regression vs. `__builtin_unreachable()` |
 | BQL event batching (x2) | BQL around the SDL event loop breaks QEMU cooperative scheduling |
-| Partial descriptor set writes | Each draw consumes a fresh descriptor set — would require `VK_EXT_descriptor_indexing` refactor |
+| Incremental texture hash on misaligned textures | Host pages at chunk boundaries can contain bytes from two adjacent chunks; `test_and_clear_dirty` by the earlier chunk stole the later chunk's dirty signal → stale cached hash. Gated to page-aligned textures only. |
 
 ---
 

@@ -94,6 +94,17 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
 void pfifo_kick(NV2AState *d)
 {
+    /*
+     * Callers must hold d->pfifo.lock across the kick-set + broadcast
+     * pair. All 15 call sites in the tree satisfy this: pfifo_write,
+     * the pgraph/{gl,vk}/{surface,display,renderer}.c paths,
+     * nv2a.c:nv2a_unlock_fifo, pgraph.c:pgraph_write /
+     * do_wait_for_renderer_switch, and user.c:user_write. With the
+     * invariant held we can use an untimed qemu_cond_wait in the
+     * pfifo_thread idle path (below) because the writer's broadcast
+     * can no longer slip between the reader's kick-check and its
+     * atomic release-wait.
+     */
     d->pfifo.fifo_kick = true;
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
 }
@@ -477,16 +488,15 @@ void *pfifo_thread(void *arg)
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
             /*
-             * 1 ms timedwait safety net. Do NOT convert to an untimed
-             * cond_wait without first fixing pfifo_kick(): that writer
-             * sets fifo_kick and broadcasts without holding
-             * d->pfifo.lock, so if the broadcast lands between our
-             * kick-check and the atomic release-wait we would miss it
-             * and hang forever. The 1 ms bound limits lost-kick
-             * latency; removing it requires acquiring d->pfifo.lock
-             * around the kick write + broadcast first.
+             * Untimed wait. Every pfifo_kick call site holds
+             * d->pfifo.lock across the kick-set + broadcast, so a
+             * concurrent kick cannot slip between our kick-check and
+             * qemu_cond_wait's atomic release. Previously this was a
+             * 1 ms timedwait safety net; eliminating it removes a
+             * ~1 kHz idle wake-up (power + scheduler win) without any
+             * correctness impact.
              */
-            qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
+            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
         }
 
         if (d->exiting) {

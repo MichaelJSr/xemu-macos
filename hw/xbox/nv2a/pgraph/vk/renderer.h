@@ -224,6 +224,18 @@ typedef struct TextureBinding {
     VmaAllocation allocation;
     bool possibly_dirty;
     uint64_t hash;
+    /*
+     * Incremental content-hash cache. When non-NULL, `chunk_hashes` is an
+     * array of `num_chunk_hashes` 64-bit XXH3 hashes, one per
+     * TEXTURE_CHUNK_SIZE bytes of texture content. On dirty-bitmap fire
+     * we re-hash only chunks whose backing pages are dirty; the aggregate
+     * (`hash`) is the XOR of all chunk hashes plus `palette_hash`. Only
+     * allocated for page-aligned textures >= TEXTURE_INCREMENTAL_HASH_MIN;
+     * freed on eviction.
+     */
+    uint64_t *chunk_hashes;
+    uint32_t num_chunk_hashes;
+    uint64_t palette_hash;
     unsigned int draw_time;
     uint32_t submit_time;
 } TextureBinding;
@@ -434,6 +446,8 @@ typedef struct PGRAPHVkState {
         int framebuffer_index;
         int descriptor_set_base;
         int descriptor_set_limit;
+        int ubo_descriptor_set_base;
+        int ubo_descriptor_set_limit;
         int compute_descriptor_set_base;
         int compute_descriptor_set_limit;
         VkDeviceSize staging_buffer_base;
@@ -485,9 +499,22 @@ typedef struct PGRAPHVkState {
     bool pipeline_binding_changed;
 
     VkDescriptorPool descriptor_pool;
+    /*
+     * Split descriptor sets: set 0 holds UBOs (VSH + PSH uniforms),
+     * set 1 holds textures (NV2A_MAX_TEXTURES combined image samplers).
+     * Each set has its own pool/array/index so a draw that only changes
+     * textures doesn't force re-writing UBOs, and vice versa. The
+     * unprefixed `descriptor_*` fields refer to the texture set (set 1);
+     * `ubo_descriptor_*` are the UBO set (set 0) counterparts. UBOs
+     * advance less often so their pool is smaller.
+     */
+    VkDescriptorSetLayout ubo_descriptor_set_layout;
     VkDescriptorSetLayout descriptor_set_layout;
+    VkDescriptorSet ubo_descriptor_sets[2048];
     VkDescriptorSet descriptor_sets[8192];
+    int ubo_descriptor_set_index;
     int descriptor_set_index;
+    int last_bound_ubo_descriptor_set_index;
     int last_bound_descriptor_set_index;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];

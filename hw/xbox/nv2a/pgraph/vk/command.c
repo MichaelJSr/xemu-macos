@@ -105,6 +105,7 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     int ds_per_slot = ARRAY_SIZE(r->descriptor_sets) / NUM_FLIGHT_SLOTS;
+    int uds_per_slot = ARRAY_SIZE(r->ubo_descriptor_sets) / NUM_FLIGHT_SLOTS;
     int cds_per_slot = ARRAY_SIZE(r->compute.descriptor_sets) / NUM_FLIGHT_SLOTS;
     VkDeviceSize staging_size = r->storage_buffers[BUFFER_STAGING_SRC].buffer_size;
     VkDeviceSize staging_per_slot = staging_size / NUM_FLIGHT_SLOTS;
@@ -119,6 +120,8 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         r->flight[i].descriptor_set_base = i * ds_per_slot;
         r->flight[i].descriptor_set_limit = (i + 1) * ds_per_slot;
+        r->flight[i].ubo_descriptor_set_base = i * uds_per_slot;
+        r->flight[i].ubo_descriptor_set_limit = (i + 1) * uds_per_slot;
         r->flight[i].compute_descriptor_set_base = i * cds_per_slot;
         r->flight[i].compute_descriptor_set_limit = (i + 1) * cds_per_slot;
         r->flight[i].staging_buffer_base = i * staging_per_slot;
@@ -149,6 +152,7 @@ void pgraph_vk_init_flight_partitions(PGRAPHState *pg)
     r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_limit =
         r->flight[s].uniform_staging_limit;
     r->descriptor_set_index = r->flight[s].descriptor_set_base;
+    r->ubo_descriptor_set_index = r->flight[s].ubo_descriptor_set_base;
     r->compute.descriptor_set_index = r->flight[s].compute_descriptor_set_base;
 }
 

@@ -356,6 +356,12 @@ static void create_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /* Dynamic rendering: no VkRenderPass object needed. */
+    if (r->dynamic_rendering_feature_enabled) {
+        r->display.render_pass = VK_NULL_HANDLE;
+        return;
+    }
+
     VkAttachmentDescription attachment;
 
     VkAttachmentReference color_reference;
@@ -404,6 +410,7 @@ static void create_render_pass(PGRAPHState *pg)
 
 static void destroy_render_pass(PGRAPHState *pg)
 {
+    /* vkDestroyRenderPass(VK_NULL_HANDLE) is a spec-safe no-op. */
     PGRAPHVkState *r = pg->vk_renderer_state;
     vkDestroyRenderPass(r->device, r->display.render_pass, NULL);
     r->display.render_pass = VK_NULL_HANDLE;
@@ -510,8 +517,17 @@ static void create_display_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &r->display.pipeline_layout));
 
+    VkPipelineRenderingCreateInfoKHR rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &r->display.format,
+        .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = r->dynamic_rendering_feature_enabled ? &rendering_info : NULL,
         .stageCount = ARRAY_SIZE(shader_stages),
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -549,6 +565,12 @@ static void destroy_display_pipeline(PGRAPHState *pg)
 static void create_frame_buffer(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    /* Dynamic rendering uses the image view directly in BeginRendering. */
+    if (r->dynamic_rendering_feature_enabled) {
+        r->display.framebuffer = VK_NULL_HANDLE;
+        return;
+    }
 
     VkFramebufferCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
@@ -1111,15 +1133,34 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
         pg, cmd, disp->image, disp->format,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    VkRenderPassBeginInfo render_pass_begin_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = disp->render_pass,
-        .framebuffer = disp->framebuffer,
-        .renderArea.extent.width = disp->width,
-        .renderArea.extent.height = disp->height,
-    };
-    vkCmdBeginRenderPass(cmd, &render_pass_begin_info,
-                         VK_SUBPASS_CONTENTS_INLINE);
+    if (r->dynamic_rendering_feature_enabled) {
+        VkRenderingAttachmentInfoKHR color_attachment = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
+            .imageView = disp->image_view,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        VkRenderingInfoKHR rendering_info = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,
+            .renderArea.extent.width = disp->width,
+            .renderArea.extent.height = disp->height,
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &color_attachment,
+        };
+        vkCmdBeginRendering(cmd, &rendering_info);
+    } else {
+        VkRenderPassBeginInfo render_pass_begin_info = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = disp->render_pass,
+            .framebuffer = disp->framebuffer,
+            .renderArea.extent.width = disp->width,
+            .renderArea.extent.height = disp->height,
+        };
+        vkCmdBeginRenderPass(cmd, &render_pass_begin_info,
+                             VK_SUBPASS_CONTENTS_INLINE);
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       disp->pipeline);
 
@@ -1147,7 +1188,11 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    vkCmdEndRenderPass(cmd);
+    if (r->dynamic_rendering_feature_enabled) {
+        vkCmdEndRendering(cmd);
+    } else {
+        vkCmdEndRenderPass(cmd);
+    }
 
     pgraph_vk_transition_image_layout(pg, cmd, surface->image,
                                       surface->host_fmt.vk_format,

@@ -3288,17 +3288,43 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
         break;
     OP_f32_f64(rint):
-        /*
-         * TODO(armv8.5): When followed by an fcvtzs to int32, the pair
-         * `FRINTI + FCVTZS` can be fused into a single `FRINT32X` which
-         * rounds to int32 using the current FPCR mode. All Apple Silicon
-         * cores support ARMv8.5 FRINT. A TCG peephole would need a new
-         * `rint_cvt_i32_fX` opcode (emitted from ops_fpu.h's
-         * gen_fistl_ST0 / gen_fistll_ST0) and backend detection. Saves
-         * one instruction per FIST/FISTP; deferred pending profiling
-         * data that shows FIST in the hot path.
-         */
         tcg_out_fp_1src(s, dp ? INSN_FRINTI_D : INSN_FRINTI_S, a0, a1);
+        break;
+
+    /*
+     * Fused rint + cvt-to-int. Emits FRINTI (round using FPCR) into
+     * a scratch FP reg, then FCVTZS (truncate toward zero) into the
+     * destination GPR. Uses TCG_VEC_TMP0 (reserved by this backend)
+     * as the intermediate so no extra register pressure is visible
+     * to TCG register allocation. The two-instruction sequence is
+     * the same host cost as the unfused pair; the win is at IR
+     * level (one fewer TCG op, one fewer FP temp) and code clarity.
+     *
+     * A future ARMv8.5 refinement could emit FRINT32X before FCVTZS
+     * (which would clamp out-of-range inputs to int32 in the float
+     * domain before conversion), but semantics would still require a
+     * separate FCVTZS to land the value in a GPR, so no instruction
+     * is saved in the common path.
+     */
+    case INDEX_op_rint_cvt_i32_f32:
+        tcg_out_fp_1src(s, INSN_FRINTI_S, TCG_VEC_TMP0, a1);
+        tcg_out32(s, INSN_FCVTZS_WS
+                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_rint_cvt_i32_f64:
+        tcg_out_fp_1src(s, INSN_FRINTI_D, TCG_VEC_TMP0, a1);
+        tcg_out32(s, INSN_FCVTZS_WD
+                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_rint_cvt_i64_f32:
+        tcg_out_fp_1src(s, INSN_FRINTI_S, TCG_VEC_TMP0, a1);
+        tcg_out32(s, INSN_FCVTZS_XS
+                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
+        break;
+    case INDEX_op_rint_cvt_i64_f64:
+        tcg_out_fp_1src(s, INSN_FRINTI_D, TCG_VEC_TMP0, a1);
+        tcg_out32(s, INSN_FCVTZS_XD
+                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
         break;
 
     case INDEX_op_mov_f64:
@@ -3929,6 +3955,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_cvt64f_i64:
     case INDEX_op_mov32f_i32:
     case INDEX_op_mov64f_i64:
+    case INDEX_op_rint_cvt_i32_f32:
+    case INDEX_op_rint_cvt_i32_f64:
+    case INDEX_op_rint_cvt_i64_f32:
+    case INDEX_op_rint_cvt_i64_f64:
         return C_O1_I1(r, w);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:

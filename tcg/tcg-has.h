@@ -55,4 +55,14 @@
 #define TCG_TARGET_HAS_fpu              0
 #endif
 
+/*
+ * Optional fused round-to-integer + cvt-to-int ops. When 0, the
+ * tcg_gen_rint_cvt_iM_fN wrappers expand to the unfused rint + cvt
+ * pair. Backends that set this to 1 must implement the fused
+ * INDEX_op_rint_cvt_i{32,64}_f{32,64} in their switch.
+ */
+#ifndef TCG_TARGET_HAS_rint_cvt
+#define TCG_TARGET_HAS_rint_cvt         0
+#endif
+
 #endif

@@ -970,11 +970,22 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
                 tb_ctx.tb_phys_invalidate_count + 1);
 }
 
+static int tb_phys_invalidate__locked_cb(void *ctx)
+{
+    do_tb_phys_invalidate((TranslationBlock *)ctx, true);
+    return 0;
+}
+
 static void tb_phys_invalidate__locked(TranslationBlock *tb)
 {
-    qemu_thread_jit_write();
-    do_tb_phys_invalidate(tb, true);
-    qemu_thread_jit_execute();
+    /*
+     * Local write-then-execute scope: use qemu_thread_jit_write_with_callback
+     * which, on macOS 14.4+, uses pthread_jit_write_with_callback_np and
+     * can avoid a round-trip permission flip on capable hardware. Older
+     * systems fall back to the manual pair (identical to the previous
+     * qemu_thread_jit_write() / qemu_thread_jit_execute() bookends).
+     */
+    qemu_thread_jit_write_with_callback(tb_phys_invalidate__locked_cb, tb);
 }
 
 /*

@@ -808,7 +808,7 @@ static MString* psh_convert(struct PixelShader *ps)
         mstring_append_fmt(
             preflight,
             "layout(location = 0) out vec4 fragColor;\n"
-            "layout(binding = %d, std140) uniform PshUniforms {\n",
+            "layout(set = 0, binding = %d, std140) uniform PshUniforms {\n",
             ps->opts.ubo_binding);
     } else {
         mstring_append_fmt(preflight,
@@ -1369,7 +1369,15 @@ static MString* psh_convert(struct PixelShader *ps)
 
         if (sampler_type != NULL) {
             if (ps->opts.vulkan) {
-                mstring_append_fmt(preflight, "layout(binding = %d) ", ps->opts.tex_binding + i);
+                /*
+                 * Texture bindings live in descriptor set 1. We pass the
+                 * numeric binding index unchanged; the legacy
+                 * PSH_TEX_BINDING offset is subtracted so bindings start
+                 * at 0 within the set (matching the new layout bound by
+                 * shaders.c).
+                 */
+                mstring_append_fmt(preflight,
+                                   "layout(set = 1, binding = %d) ", i);
             }
             mstring_append_fmt(preflight, "uniform %s texSamp%d;\n", sampler_type, i);
 

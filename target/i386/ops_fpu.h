@@ -259,16 +259,19 @@ static void glue(gen_fildll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 
 static void glue(gen_fistl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
-    PREC_TYPE rounded = tcg_temp_new_fp();
-    glue(tcg_gen_rint, PREC_SUFFIX)(rounded, get_st0(s));
-    glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, rounded);
+    /*
+     * x87 FIST/FISTP uses the current FPU rounding mode (default:
+     * round-to-nearest-even) to round ST0 to a 32-bit signed integer.
+     * Fused TCG op rint_cvt_i32_fN emits FRINTI + FCVTZS in a single
+     * backend dispatch on AArch64; hosts without the fused form fall
+     * back to the separate rint + cvt pair (see tcg_gen_rint_cvt_*).
+     */
+    glue(tcg_gen_rint_cvt_i32, PREC_SUFFIX)(arg, get_st0(s));
 }
 
 static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
-    PREC_TYPE rounded = tcg_temp_new_fp();
-    glue(tcg_gen_rint, PREC_SUFFIX)(rounded, get_st0(s));
-    glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, rounded);
+    glue(tcg_gen_rint_cvt_i64, PREC_SUFFIX)(arg, get_st0(s));
 }
 
 static void glue(gen_fsts_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)

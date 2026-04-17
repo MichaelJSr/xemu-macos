@@ -30,6 +30,26 @@
 #include "qemu/lru.h"
 #include "renderer.h"
 
+/*
+ * Incremental texture content hashing.
+ *
+ * TEXTURE_CHUNK_SIZE is the granularity at which fast_hash results are
+ * cached per TextureBinding. When the VRAM dirty bitmap fires, only
+ * chunks whose backing pages are actually dirty get re-hashed; stale
+ * chunks reuse the cached hash. Combined via XOR into the texture's
+ * aggregate content hash.
+ *
+ * 64 KiB keeps per-texture metadata small (a 4 MiB texture = 64 entries =
+ * 512 B) while still making the common "one small update to a large
+ * atlas" pattern cheap.
+ *
+ * TEXTURE_INCREMENTAL_HASH_MIN is the texture size below which we stay
+ * on the single-shot full-buffer hash; for small textures the setup
+ * cost of the chunked path exceeds the savings.
+ */
+#define TEXTURE_CHUNK_SIZE          (64 * 1024)
+#define TEXTURE_INCREMENTAL_HASH_MIN (256 * 1024)
+
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
 static void sampler_cache_release_node_resources(PGRAPHVkState *r, SamplerCacheEntry *snode);
 
@@ -1547,20 +1567,120 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         possibly_dirty = true;
     }
 
-    if (!surface_to_texture) {
-        possibly_dirty |= check_texture_possibly_dirty(
-            d, texture_vram_offset, texture_length, texture_palette_vram_offset,
-            texture_palette_data_size);
-    }
-
     void *texture_data = (char*)d->vram_ptr + texture_vram_offset;
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
     uint64_t content_hash = 0;
-    if (!surface_to_texture && possibly_dirty) {
-        content_hash = fast_hash(texture_data, texture_length);
-        if (is_indexed) {
-            content_hash ^= fast_hash(palette_data, texture_palette_data_size);
+
+    if (!surface_to_texture) {
+        /*
+         * Chunked path requires that each 64 KiB chunk covers a
+         * distinct, non-overlapping set of dirty-bitmap pages. If
+         * texture_vram_offset isn't page-aligned (or texture_length
+         * isn't a page multiple), a single host page can contain
+         * bytes from two adjacent chunks; test_and_clear_dirty of the
+         * shared page by the earlier chunk would then steal the dirty
+         * signal from the later chunk, leaving its cached hash stale.
+         *
+         * TEXTURE_CHUNK_SIZE is a multiple of TARGET_PAGE_SIZE by
+         * construction (64 KiB = 16 pages), so page alignment of the
+         * texture extent is sufficient to guarantee chunk disjointness.
+         * Misaligned textures (rare in practice — Xbox swizzled
+         * textures are normally page-aligned) fall back to the
+         * single-shot full-buffer hash.
+         */
+        bool use_chunks =
+            texture_length >= TEXTURE_INCREMENTAL_HASH_MIN &&
+            (texture_vram_offset & (TARGET_PAGE_SIZE - 1)) == 0 &&
+            (texture_length & (TARGET_PAGE_SIZE - 1)) == 0 &&
+            (TEXTURE_CHUNK_SIZE % TARGET_PAGE_SIZE) == 0;
+        if (!use_chunks) {
+            /*
+             * Small-texture path: single-shot full-buffer hash. The
+             * chunked path's per-call overhead exceeds its savings
+             * below ~256 KiB, so keep the original behavior here.
+             */
+            possibly_dirty |= check_texture_possibly_dirty(
+                d, texture_vram_offset, texture_length,
+                texture_palette_vram_offset, texture_palette_data_size);
+            if (possibly_dirty) {
+                content_hash = fast_hash(texture_data, texture_length);
+                if (is_indexed) {
+                    content_hash ^= fast_hash(palette_data,
+                                              texture_palette_data_size);
+                }
+            }
+        } else {
+            /*
+             * Incremental-hash path for large textures. Per-chunk
+             * test_and_clear_dirty reveals exactly which VRAM pages
+             * changed; only those chunks are re-hashed. The aggregate
+             * content hash is the XOR of all chunk hashes, which is a
+             * uniformly-distributed combiner for independent XXH3
+             * outputs (collisions caught by the existing memcmp in
+             * the cache-hit path).
+             */
+            uint32_t expected_chunks = (uint32_t)(
+                (texture_length + TEXTURE_CHUNK_SIZE - 1) / TEXTURE_CHUNK_SIZE);
+            bool need_alloc = (snode->chunk_hashes == NULL
+                               || snode->num_chunk_hashes != expected_chunks);
+            if (need_alloc) {
+                g_free(snode->chunk_hashes);
+                snode->chunk_hashes = g_new(uint64_t, expected_chunks);
+                snode->num_chunk_hashes = expected_chunks;
+                snode->palette_hash = 0; /* force re-hash below */
+            }
+
+            bool any_chunk_dirty = false;
+            for (uint32_t i = 0; i < expected_chunks; i++) {
+                hwaddr co = (hwaddr)i * TEXTURE_CHUNK_SIZE;
+                hwaddr cs = MIN((hwaddr)TEXTURE_CHUNK_SIZE,
+                                (hwaddr)texture_length - co);
+                hwaddr ps = (texture_vram_offset + co) & TARGET_PAGE_MASK;
+                hwaddr pe = TARGET_PAGE_ALIGN(texture_vram_offset + co + cs);
+                nv2a_vk_assert(pe <= memory_region_size(d->vram));
+                bool dirty = memory_region_test_and_clear_dirty(
+                    d->vram, ps, pe - ps, DIRTY_MEMORY_NV2A_TEX);
+                if (dirty) {
+                    any_chunk_dirty = true;
+                }
+                if (need_alloc || dirty) {
+                    snode->chunk_hashes[i] = fast_hash(
+                        (const uint8_t *)texture_data + co, cs);
+                }
+            }
+
+            bool palette_dirty = false;
+            if (texture_palette_data_size
+                && check_texture_dirty(d, texture_palette_vram_offset,
+                                       texture_palette_data_size)) {
+                palette_dirty = true;
+            }
+
+            if (any_chunk_dirty) {
+                possibly_dirty = true;
+                pgraph_vk_mark_textures_possibly_dirty(
+                    d, texture_vram_offset, texture_length);
+            }
+            if (palette_dirty) {
+                possibly_dirty = true;
+                pgraph_vk_mark_textures_possibly_dirty(
+                    d, texture_palette_vram_offset,
+                    texture_palette_data_size);
+            }
+
+            if (possibly_dirty) {
+                for (uint32_t i = 0; i < expected_chunks; i++) {
+                    content_hash ^= snode->chunk_hashes[i];
+                }
+                if (is_indexed) {
+                    if (palette_dirty || snode->palette_hash == 0) {
+                        snode->palette_hash = fast_hash(
+                            palette_data, texture_palette_data_size);
+                    }
+                    content_hash ^= snode->palette_hash;
+                }
+            }
         }
     }
 
@@ -1717,6 +1837,9 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->image = VK_NULL_HANDLE;
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
+    snode->chunk_hashes = NULL;
+    snode->num_chunk_hashes = 0;
+    snode->palette_hash = 0;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)
@@ -1727,6 +1850,10 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
     vmaDestroyImage(r->allocator, snode->image, snode->allocation);
     snode->image = VK_NULL_HANDLE;
     snode->allocation = VK_NULL_HANDLE;
+
+    g_free(snode->chunk_hashes);
+    snode->chunk_hashes = NULL;
+    snode->num_chunk_hashes = 0;
 }
 
 static void sampler_cache_release_node_resources(PGRAPHVkState *r, SamplerCacheEntry *snode)

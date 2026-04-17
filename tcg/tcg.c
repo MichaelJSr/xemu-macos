@@ -2668,6 +2668,12 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_sub_f64:
         return TCG_TARGET_HAS_fpu;
 
+    case INDEX_op_rint_cvt_i32_f32:
+    case INDEX_op_rint_cvt_i32_f64:
+    case INDEX_op_rint_cvt_i64_f32:
+    case INDEX_op_rint_cvt_i64_f64:
+        return TCG_TARGET_HAS_fpu && TCG_TARGET_HAS_rint_cvt;
+
     default:
         if (op < INDEX_op_last_generic) {
             const TCGOutOp *outop;

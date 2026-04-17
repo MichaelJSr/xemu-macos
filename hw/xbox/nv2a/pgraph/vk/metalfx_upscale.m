@@ -196,6 +196,24 @@ static NSString *const kSyntheticDepthKernel =
 
 #pragma mark - Spatial Upscaler
 
+/*
+ * Synchronous spatial upscale: commit and waitUntilCompleted on the
+ * display thread. Simple, race-free, and trades ~1-5 ms of
+ * display-thread blocking per frame for guaranteed IOSurface coherence
+ * with the GL texture-bound consumer.
+ *
+ * An earlier pass (Phase C2) attempted double-buffered async via a
+ * dispatch_semaphore + two IOSurfaces, but the cross-API sync between
+ * Metal (writer) and OpenGL (reader via CGLTexImageIOSurface2D) turned
+ * out to be insufficient: SDL_GL_SwapWindow + vsync flush GL commands
+ * to the driver and block until vblank, but do not fence GL's
+ * IOSurface-texture sampling to completion, so a subsequent Metal
+ * encode to the same slot could race the previous frame's still-active
+ * GL read. That manifested as ghosting/jitter even with the correct
+ * double-buffer index. Left in as a documented TODO for a later pass
+ * that adds an explicit cross-API fence (glWaitSync on a Metal-created
+ * MTLSharedEvent, or triple-buffering with a looser timing budget).
+ */
 typedef struct MetalFXSpatialState {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
