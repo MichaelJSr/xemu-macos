@@ -488,15 +488,21 @@ void *pfifo_thread(void *arg)
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
             /*
-             * Untimed wait. Every pfifo_kick call site holds
-             * d->pfifo.lock across the kick-set + broadcast, so a
-             * concurrent kick cannot slip between our kick-check and
-             * qemu_cond_wait's atomic release. Previously this was a
-             * 1 ms timedwait safety net; eliminating it removes a
-             * ~1 kHz idle wake-up (power + scheduler win) without any
-             * correctness impact.
+             * 1 ms safety-net timedwait (restored from the earlier
+             * untimed-wait optimization). Even though every pfifo_kick
+             * call site holds d->pfifo.lock across the kick-set +
+             * broadcast pair, level-transition / save-reload freezes
+             * in practice seem to catch some edge case — possibly a
+             * QEMU event-set without a following kick, or a subtle
+             * re-ordering inside pgraph_process_pending's lock-drop
+             * window. The ~1 kHz wake-up cost is negligible on Apple
+             * Silicon and lets the loop re-check all pending flags
+             * (downloads_pending, sync_pending, flush_pending, halt,
+             * etc.) periodically regardless of kick delivery. Restore
+             * the proven upstream behavior until the specific race is
+             * pinned down.
              */
-            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
         }
 
         if (d->exiting) {

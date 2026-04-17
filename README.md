@@ -218,11 +218,14 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **`pgraph.lock` / BQL discipline.** `surface_access_callback`
   conditionally drops BQL before blocking so the vblank thread can
   still fire interrupts.
-- **PFIFO wait.** Untimed `qemu_cond_wait`. All `pfifo_kick` call
-  sites hold `d->pfifo.lock` across the kick-set + broadcast, so the
-  reader's kick-check + atomic release-wait can't miss a concurrent
-  kick. Removes a ~1 kHz idle wake-up vs. the previous 1 ms
-  safety-net `timedwait`.
+- **PFIFO wait.** 1 ms safety-net `qemu_cond_timedwait` (matches the
+  proven upstream behavior). An earlier "untimed `qemu_cond_wait`"
+  optimization was reverted after it appeared to correlate with
+  level-transition / death-reload freezes; the ~1 kHz idle wake-up
+  cost is negligible on Apple Silicon, and the periodic re-check of
+  pending flags (`downloads_pending`, `sync_pending`, `flush_pending`,
+  `halt`, …) serves as a safety net against any subtle missed-kick or
+  `qemu_event_set`-without-kick edge case.
 
 ### Build + packaging
 
@@ -275,6 +278,8 @@ Lessons worth preserving so they aren't re-attempted.
 | Always-on bounds checks in perf builds | ~5–10% GPU-pipeline regression vs. `__builtin_unreachable()` |
 | BQL event batching (x2) | BQL around the SDL event loop breaks QEMU cooperative scheduling |
 | Incremental texture hash on misaligned textures | Host pages at chunk boundaries can contain bytes from two adjacent chunks; `test_and_clear_dirty` by the earlier chunk stole the later chunk's dirty signal → stale cached hash. Gated to page-aligned textures only. |
+| Direct-VRAM compute unswizzle (via `VK_EXT_external_memory_host`) | Compute shader read from `BUFFER_VERTEX_RAM` at `level->vram_addr` to skip the `raw_copy` memcpy + staging-buffer step. Under external-memory-host that buffer IS live guest VRAM, and `HOST_WRITE → SHADER_READ` barriers only enforce *visibility* up to the barrier's submission point — they do not block the CPU from continuing to write after submission or during GPU execution (HOST_COHERENT memory on Apple Silicon). Fast-updated textures (particles, translucent HUD) tore between two consecutive guest writes → intermittent flicker. Kept the staging-copy path; α2 (host-imported vertex RAM) stays because `flush_memory_buffer` snapshots vertex data before draw. |
+| Untimed `qemu_cond_wait` in pfifo idle loop | Correlated with occasional level-transition / death-reload freezes in practice even though all `pfifo_kick` sites hold the lock. Reverted to 1 ms `timedwait` safety net; ~1 kHz idle wake-up is negligible on Apple Silicon. |
 
 ---
 
