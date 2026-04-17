@@ -21,7 +21,6 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
-#include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -140,58 +139,6 @@ bool x86_cpu_exec_halt(CPUState *cpu)
         cpu_reset_interrupt(cpu, CPU_INTERRUPT_POLL);
         bql_unlock();
     }
-
-#ifdef XBOX
-    /*
-     * Post-halt BSOD recovery (state-mutation leg; pairs with the
-     * "has-work" leg in x86_cpu_has_work). The Xbox kernel occasionally
-     * runs `CLI; HLT` and then relies on a later IRQ to wake it up, but
-     * x86_cpu_pending_interrupt gates CPU_INTERRUPT_HARD on IF=1, so an
-     * IRQ raised while IF=0 never translates into work and the CPU
-     * halts forever. Symptom: frozen/black screen on level transitions
-     * or death+reload while the xemu UI stays responsive (no frames
-     * get submitted because the guest CPU is stuck).
-     *
-     * We run this BEFORE the cpu_has_work check so the forced IF=1
-     * lets cpu_has_work return true via the normal pending-interrupt
-     * path and the IRQ is delivered to the guest. The at-HLT recovery
-     * in helper_hlt catches "IRQ already pending at HLT time"; this
-     * path catches "IRQ arrived after the CPU was already halted".
-     * Toggle via XEMU_HLT_BSOD_RECOVERY=0.
-     *
-     * Logging is rate-limited to once per ~2 s with a running count so
-     * a hot CLI+HLT loop (game is deadlocked on something else and the
-     * idle thread keeps re-entering HLT) is visible as a rising count
-     * rather than a single line.
-     */
-    {
-        static int g_hlt_bsod_recovery = -1;
-        static uint64_t g_post_halt_count;
-        static int64_t g_post_halt_last_log_ns;
-        if (g_hlt_bsod_recovery < 0) {
-            const char *s = getenv("XEMU_HLT_BSOD_RECOVERY");
-            g_hlt_bsod_recovery = (s && s[0] == '0') ? 0 : 1;
-        }
-        if (g_hlt_bsod_recovery &&
-            !(env->eflags & IF_MASK) &&
-            (cpu->interrupt_request & CPU_INTERRUPT_HARD)) {
-            g_post_halt_count++;
-            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-            if (g_post_halt_last_log_ns == 0 ||
-                now - g_post_halt_last_log_ns >= 2LL * 1000 * 1000 * 1000) {
-                g_post_halt_last_log_ns = now;
-                fprintf(stderr,
-                        "xemu: waking halted CPU with pending IRQ and IF=0 "
-                        "(post-halt BSOD recovery; eip=0x%08x, "
-                        "total=%" PRIu64 "). "
-                        "Set XEMU_HLT_BSOD_RECOVERY=0 to disable.\n",
-                        (unsigned)env->eip,
-                        (uint64_t)g_post_halt_count);
-            }
-            env->eflags |= IF_MASK;
-        }
-    }
-#endif
 
     if (!cpu_has_work(cpu)) {
         return false;

@@ -19,7 +19,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
-#include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -517,47 +516,6 @@ G_NORETURN void helper_hlt(CPUX86State *env)
     CPUState *cs = env_cpu(env);
 
     do_end_instruction(env);
-
-#ifdef XBOX
-    /*
-     * BSOD recovery: the Xbox kernel occasionally bugchecks
-     * (IRQL_NOT_LESS_OR_EQUAL) and executes `CLI; HLT` with an interrupt
-     * already pending, deadlocking the CPU. Force IF=1 so the pending
-     * hardware interrupt can wake the halted CPU and keep the emulator
-     * alive (display/audio pipelines depend on vblank ticks).
-     *
-     * This is a semantic deviation from strict x86: legitimate
-     * `CLI; HLT` patterns with an already-pending IRQ will also have
-     * IF forced on. In practice the Xbox kernel doesn't rely on that
-     * sequence outside of bugchecks. Disable via env var
-     * XEMU_HLT_BSOD_RECOVERY=0 for correctness testing.
-     */
-    static int g_hlt_bsod_recovery = -1;
-    static uint64_t g_at_hlt_count;
-    static int64_t g_at_hlt_last_log_ns;
-    if (g_hlt_bsod_recovery < 0) {
-        const char *s = getenv("XEMU_HLT_BSOD_RECOVERY");
-        g_hlt_bsod_recovery = (s && s[0] == '0') ? 0 : 1;
-    }
-    if (g_hlt_bsod_recovery &&
-        !(env->eflags & IF_MASK) &&
-        (cs->interrupt_request & CPU_INTERRUPT_HARD)) {
-        g_at_hlt_count++;
-        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-        if (g_at_hlt_last_log_ns == 0 ||
-            now - g_at_hlt_last_log_ns >= 2LL * 1000 * 1000 * 1000) {
-            g_at_hlt_last_log_ns = now;
-            fprintf(stderr,
-                    "xemu: forcing IF=1 on CLI+HLT with pending IRQ "
-                    "(at-HLT BSOD recovery; eip=0x%08x, "
-                    "total=%" PRIu64 "). "
-                    "Set XEMU_HLT_BSOD_RECOVERY=0 to disable.\n",
-                    (unsigned)env->eip,
-                    (uint64_t)g_at_hlt_count);
-        }
-        env->eflags |= IF_MASK;
-    }
-#endif
 
     cs->halted = 1;
     cs->exception_index = EXCP_HLT;

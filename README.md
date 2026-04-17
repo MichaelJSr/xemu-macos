@@ -35,7 +35,6 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 | `XEMU_PGO_DIR` | `./pgo` | Where `.profraw` files land |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Set to `1` to opt into hardened-runtime codesign with `xemu.entitlements` (only needed to exercise notarization-style behavior locally) |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer size (≈21 ms @ 48 kHz) |
-| `XEMU_HLT_BSOD_RECOVERY` | `1` | Force `IF=1` on `CLI; HLT` with pending IRQ (at-HLT and post-halt; kernel-bugcheck / in-game save-reload freeze escape) |
 | `XEMU_PFIFO_HEARTBEAT` | `0` | Print a 2-second heartbeat from the pfifo thread with `halt` / `flush_pending` / `sync_pending` / `waiting_for_{flip,nop,context_switch}` state; used to diagnose "frozen but xemu UI responsive" reports — if the heartbeat stops during a freeze, the pfifo thread is stuck; if it continues, the game is waiting on something the pfifo flags show |
 
 ### Recommended `xemu.toml`
@@ -97,16 +96,6 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   because its scoped W-permission semantics didn't compose cleanly
   with QEMU's nested JIT-write paths and correlated with freezes
   during heavy TB invalidation.
-- **`HLT` BSOD recovery (two-sided).** On XBOX targets, both the HLT
-  entry path (`helper_hlt`) and the halted-wakeup path
-  (`x86_cpu_exec_halt`) force `IF=1` when they see `IF=0` with a
-  `CPU_INTERRUPT_HARD` pending. The at-HLT variant catches "IRQ was
-  already pending when HLT executed"; the post-halt variant catches
-  "IRQ arrived after the CPU was already halted with IF=0" — the
-  latter is the frozen/black-screen-after-death pattern some games
-  hit because `x86_cpu_pending_interrupt` gates HARD on IF=1 and
-  never wakes the halted thread otherwise. One-shot log per site;
-  disable both with `XEMU_HLT_BSOD_RECOVERY=0` for strict semantics.
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -291,6 +280,7 @@ Lessons worth preserving so they aren't re-attempted.
 | `pthread_jit_write_with_callback_np` for `tb_phys_invalidate` (A3) | Correlated with rare freezes during heavy TB invalidation (level transitions, death-reload). The new API forcibly drops W permission on callback return regardless of whether nested JIT-writer paths on the same thread still needed it; nested use is hard to rule out across all QEMU TB invalidation flows. Restored the manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()` pair (upstream behavior). |
 | `VK_KHR_dynamic_rendering` full lowering (B2) | Replaced `VkRenderPass` + `VkFramebuffer` with `vkCmdBeginRendering` / `vkCmdEndRendering`, but didn't replicate the old render pass's `VK_SUBPASS_EXTERNAL → first subpass` dependency that synchronizes color/depth attachment read+write across consecutive passes. Under heavy back-to-back render-pass churn (level transitions, death-reload) Metal's tile renderer stalled, producing frozen/black screens with the CPU spinning in the idle thread's `CLI; HLT` (post-halt BSOD recovery counter climbing ~10 k/2 s). Disabled via forcing `dynamic_rendering_feature_enabled = false`; downstream gates fall back to the render-pass path. Re-enable needs an explicit `vkCmdPipelineBarrier` on the subpass-dep stages/access around every BeginRendering/EndRendering. |
 | APU voice resampler `rate == 1.0` fast path | Skipped libsamplerate entirely by calling `voice_get_samples` in a loop and returning short counts. The libsamplerate path's callback (`voice_resample_callback`) pads with silence on starvation so `src_callback_read` always returns `NUM_SAMPLES_PER_FRAME`; the fast path returned early instead, letting `voice_process`'s outer for-loop retry indefinitely on a voice that was draining during scene transitions. Manifested as "all pfifo pending flags at 0, guest CPU spinning in kernel idle thread CLI+HLT, game waiting on audio completion that never fires" per the heartbeat diagnostic. Reverted; SRC_LINEAR is cheap enough to run unconditionally. |
+| `HLT` BSOD recovery (at-HLT and post-halt IF=1 force) | Forced `IF=1` when the guest executed `HLT` with `IF=0` and a pending HARD IRQ, including the post-halt variant that teaches `x86_cpu_has_work` about the same pattern. Theory: Xbox kernel occasionally enters `CLI; HLT` with an IRQ pending or arriving later, and `x86_cpu_pending_interrupt` gates HARD on `IF=1`, so the CPU would deadlock. The recovery did correctly unblock those deadlocks, but in practice games kept freezing on level transitions even with the recovery firing at ~1500/s (confirmed via the `XEMU_PFIFO_HEARTBEAT` diagnostic: pfifo idle, all pending flags 0, pgraph has nothing queued, game's main thread stuck on something outside pgraph). Removing the recovery didn't actually *prevent* the freeze — the IRQ pattern is a *symptom* of the game's main thread being blocked on some non-pgraph kernel object, not the cause. Reverted to stock upstream semantics; the underlying stuck-thread cause is still open and needs a kernel-level trace to pin down. |
 
 ---
 

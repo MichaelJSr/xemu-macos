@@ -9893,40 +9893,7 @@ int x86_cpu_pending_interrupt(CPUState *cs, int interrupt_request)
 
 static bool x86_cpu_has_work(CPUState *cs)
 {
-    if (x86_cpu_pending_interrupt(cs, cs->interrupt_request) != 0) {
-        return true;
-    }
-
-#ifdef XBOX
-    /*
-     * Xbox post-halt BSOD recovery (wake-up leg): a halted CPU with
-     * IF=0 and a pending hardware IRQ is the stuck `CLI; HLT` pattern
-     * the Xbox kernel occasionally falls into (bugchecks, some game
-     * level-load / death-reload paths). x86_cpu_pending_interrupt
-     * gates CPU_INTERRUPT_HARD on IF=1, so without this, cpu_has_work
-     * returns false, cpu_thread_is_idle returns true, and the TCG
-     * thread parks on halt_cond forever even after qemu_cpu_kick is
-     * broadcast by the IRQ raiser.
-     *
-     * Report "has work" so cpu_thread_is_idle returns false and the
-     * TCG thread runs cpu_exec. x86_cpu_exec_halt then forces IF=1
-     * (with a one-shot log), after which this function returns true
-     * via the normal pending-interrupt path and the IRQ is delivered.
-     * No state mutation here -- x86_cpu_exec_halt does the actual
-     * recovery on the CPU thread. Disable with XEMU_HLT_BSOD_RECOVERY=0.
-     */
-    {
-        X86CPU *cpu = X86_CPU(cs);
-        CPUX86State *env = &cpu->env;
-        if (cs->halted &&
-            (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
-            !(env->eflags & IF_MASK)) {
-            return true;
-        }
-    }
-#endif
-
-    return false;
+    return x86_cpu_pending_interrupt(cs, cs->interrupt_request) != 0;
 }
 #endif /* !CONFIG_USER_ONLY */
 
