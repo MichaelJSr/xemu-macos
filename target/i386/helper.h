@@ -196,18 +196,6 @@ HS_DEF_HELPER_1(frndint, void, env)
 HS_DEF_HELPER_1(fscale, void, env)
 HS_DEF_HELPER_1(fsin, void, env)
 HS_DEF_HELPER_1(fcos, void, env)
-/*
- * Lightweight pure sin/cos helpers for the inline hard-FPU path. The
- * existing fsin/fcos helpers read ST0 from env->fpregs[], convert
- * floatx80 -> double, call libm sin/cos, convert back, store to env.
- * That's 2 floatx80<->double conversions + memory round-trip per call.
- * These helpers skip all of that: they receive ST0 as an f64 argument
- * (already in a host FP register by virtue of hard-FPU inline) and
- * return the result as f64. No env access means TCG_CALL_NO_RWG_SE,
- * which also lets TCG CSE and move the call freely.
- */
-DEF_HELPER_FLAGS_1(sin_d, TCG_CALL_NO_RWG_SE, f64, f64)
-DEF_HELPER_FLAGS_1(cos_d, TCG_CALL_NO_RWG_SE, f64, f64)
 HS_DEF_HELPER_3(fstenv, void, env, tl, int)
 HS_DEF_HELPER_3(fldenv, void, env, tl, int)
 HS_DEF_HELPER_3(fsave, void, env, tl, int)

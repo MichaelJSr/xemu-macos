@@ -2819,39 +2819,6 @@ void helper_fcos(CPUX86State *env)
     }
 }
 
-/*
- * Lightweight pure sin/cos helpers used by the inline hard-FPU path.
- * These are soft/hard-invariant (they just wrap libm), so define them
- * exactly once during the "soft" compilation of fpu_helper.c. The
- * MAP_HELPER_SOFT_HARD macro that renames helper_* functions doesn't
- * apply to these — they're called as plain helper_sin_d / helper_cos_d
- * from translate.c regardless of hard-FPU status.
- *
- * Out-of-domain C2 bit handling stays with helper_fsin / helper_fcos;
- * gen_fsin / gen_fcos in translate.c clear C2 after every successful
- * call and the out-of-range path falls back to the original helper.
- */
-#ifndef USE_HARD_FPU
-/*
- * TCG's dh_ctype_f64 is float64 (uint64_t bits). Round-trip via a
- * union so the libm calls see a native double without strict-aliasing
- * pitfalls.
- */
-float64 helper_sin_d(float64 x)
-{
-    union { float64 bits; double d; } u = { .bits = x };
-    u.d = sin(u.d);
-    return u.bits;
-}
-
-float64 helper_cos_d(float64 x)
-{
-    union { float64 bits; double d; } u = { .bits = x };
-    u.d = cos(u.d);
-    return u.bits;
-}
-#endif
-
 void helper_fxam_ST0(CPUX86State *env)
 {
     CPU_LDoubleU temp;

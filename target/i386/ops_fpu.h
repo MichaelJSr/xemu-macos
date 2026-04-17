@@ -336,47 +336,16 @@ static void glue(gen_fsqrt, PREC_SUFFIX)(DisasContext *s)
     glue(tcg_gen_sqrt, PREC_SUFFIX)(st0, st0);
 }
 
-/*
- * Hard-FPU inline FSIN / FCOS: call helper_sin_d / helper_cos_d which
- * are small pure wrappers around libm sin / cos. ST0 stays in a host
- * FP register the entire time — no env->fpregs round-trip, no
- * floatx80<->double conversions. On AArch64 this is a single BL
- * instruction plus the libm call body (~40 cycles for sin on Apple
- * Silicon); on x86_64 it's a CALL to sin/cos. Either way roughly
- * 3x faster than the full helper_fsin / helper_fcos path that the
- * x87 C2-setting semantics demand.
- *
- * Precision: libm sin / cos are accurate to ~1 ULP on any double. x87
- * FSIN additionally sets C2 = 1 and leaves ST0 unchanged when
- * |ST0| >= 2^63 (out-of-range reduction); we unconditionally compute
- * sin / cos here, losing that C2 status bit for astronomical inputs.
- * Games practically never feed |angle| > 2^53, so this is a
- * conscious trade-off for the ~3x hot-path win.
- */
 static void glue(gen_fsin, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
-#if PREC == 64
-    gen_helper_sin_d(st0, st0);
-#else
-    TCGv_f64 tmp = tcg_temp_new_f64();
-    tcg_gen_cvt32f_f64(tmp, st0);
-    gen_helper_sin_d(tmp, tmp);
-    tcg_gen_cvt64f_f32(st0, tmp);
-#endif
+    glue(tcg_gen_sin, PREC_SUFFIX)(st0, st0);
 }
 
 static void glue(gen_fcos, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
-#if PREC == 64
-    gen_helper_cos_d(st0, st0);
-#else
-    TCGv_f64 tmp = tcg_temp_new_f64();
-    tcg_gen_cvt32f_f64(tmp, st0);
-    gen_helper_cos_d(tmp, tmp);
-    tcg_gen_cvt64f_f32(st0, tmp);
-#endif
+    glue(tcg_gen_cos, PREC_SUFFIX)(st0, st0);
 }
 
 static void glue(gen_frndint, PREC_SUFFIX)(DisasContext *s)
