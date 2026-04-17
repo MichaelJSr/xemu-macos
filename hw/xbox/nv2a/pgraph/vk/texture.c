@@ -1747,6 +1747,25 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 snode->palette_hash = 0; /* force re-hash below */
             }
 
+            /*
+             * `externally_marked` captures the case where another
+             * texture's upload called pgraph_vk_mark_textures_possibly_dirty
+             * on a VRAM range that overlaps ours. That neighbor's
+             * test_and_clear_dirty already cleared the shared host
+             * pages' dirty bits, so OUR local dirty-detection below
+             * will return false even if the guest did modify our
+             * data in those pages. In that state the cached
+             * chunk_hashes can't be trusted: we must re-hash all
+             * chunks to catch updates that we can't see as local
+             * dirty events. This matches the pre-chunked single-shot
+             * full-hash behavior, which always recomputed the whole
+             * texture hash whenever possibly_dirty was set from any
+             * source. Without this, shared-page textures (frequently
+             * the case for HUD / translucent / LOD-streamed content)
+             * show stale frames intermittently.
+             */
+            bool externally_marked = binding_found && snode->possibly_dirty;
+
             bool any_chunk_dirty = false;
             for (uint32_t i = 0; i < expected_chunks; i++) {
                 hwaddr byte_start; /* relative to texture_data */
@@ -1786,7 +1805,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 if (dirty) {
                     any_chunk_dirty = true;
                 }
-                if (need_alloc || dirty) {
+                if (need_alloc || dirty || externally_marked) {
                     snode->chunk_hashes[i] = fast_hash(
                         (const uint8_t *)texture_data + byte_start,
                         chunk_size);
@@ -1817,7 +1836,14 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     content_hash ^= snode->chunk_hashes[i];
                 }
                 if (is_indexed) {
-                    if (palette_dirty || snode->palette_hash == 0) {
+                    /*
+                     * Force palette re-hash on externally_marked for
+                     * the same reason as the chunk loop above: a
+                     * neighbor texture's test_and_clear may have
+                     * consumed our palette page's dirty bit.
+                     */
+                    if (palette_dirty || snode->palette_hash == 0
+                        || externally_marked) {
                         snode->palette_hash = fast_hash(
                             palette_data, texture_palette_data_size);
                     }
