@@ -758,17 +758,6 @@ static VkRenderPass add_new_render_pass(PGRAPHVkState *r, RenderPassState *state
 
 static VkRenderPass get_render_pass(PGRAPHVkState *r, RenderPassState *state)
 {
-    /*
-     * Dynamic-rendering path: no VkRenderPass objects are used.
-     * vkCmdBeginRendering takes attachment views + formats directly and
-     * pipelines declare formats via VkPipelineRenderingCreateInfoKHR in
-     * pNext (renderPass = VK_NULL_HANDLE is explicitly permitted by the
-     * spec in that case).
-     */
-    if (r->dynamic_rendering_feature_enabled) {
-        return VK_NULL_HANDLE;
-    }
-
     gpointer key = render_pass_state_to_key(state);
     gpointer val;
     if (g_hash_table_lookup_extended(r->render_pass_lookup, key, NULL, &val)) {
@@ -784,23 +773,6 @@ static void create_frame_buffer(PGRAPHState *pg)
     NV2A_VK_DPRINTF("Creating framebuffer");
 
     nv2a_vk_assert(r->color_binding || r->zeta_binding);
-
-    /*
-     * Dynamic-rendering path: no framebuffer objects are allocated.
-     * We still bump framebuffer_index so begin_render_pass's existing
-     * assertion (index > 0) holds and the per-slot slot accounting
-     * remains consistent with the non-dynamic path. The destroy path
-     * tolerates VK_NULL_HANDLE framebuffers (vkDestroyFramebuffer on
-     * NULL is a no-op per spec).
-     */
-    if (r->dynamic_rendering_feature_enabled) {
-        if (r->framebuffer_index >= ARRAY_SIZE(r->flight[0].framebuffers)) {
-            pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        }
-        int slot = r->current_flight;
-        r->flight[slot].framebuffers[r->framebuffer_index++] = VK_NULL_HANDLE;
-        return;
-    }
 
     if (r->framebuffer_index >= ARRAY_SIZE(r->flight[0].framebuffers)) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
@@ -990,34 +962,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &layout));
 
-    /*
-     * Dynamic rendering: pipelines declare attachment formats via
-     * VkPipelineRenderingCreateInfoKHR in pNext, with renderPass set
-     * to VK_NULL_HANDLE. Falls through to the classic render-pass
-     * path when the feature isn't enabled.
-     */
-    VkFormat color_fmt = key.render_pass_state.color_format;
-    VkFormat zeta_fmt = key.render_pass_state.zeta_format;
-    /*
-     * D16_UNORM has no stencil component; the pipeline rendering info
-     * must report stencilAttachmentFormat = VK_FORMAT_UNDEFINED for
-     * depth-only formats to avoid a validation error at pipeline
-     * create time.
-     */
-    VkFormat stencil_fmt = (zeta_fmt == VK_FORMAT_D16_UNORM)
-                               ? VK_FORMAT_UNDEFINED : zeta_fmt;
-    VkPipelineRenderingCreateInfoKHR rendering_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
-        .colorAttachmentCount = color_fmt != VK_FORMAT_UNDEFINED ? 1 : 0,
-        .pColorAttachmentFormats = color_fmt != VK_FORMAT_UNDEFINED
-                                       ? &color_fmt : NULL,
-        .depthAttachmentFormat = zeta_fmt,
-        .stencilAttachmentFormat = stencil_fmt,
-    };
-
     VkGraphicsPipelineCreateInfo pipeline_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = r->dynamic_rendering_feature_enabled ? &rendering_info : NULL,
         .stageCount = num_active_shader_stages,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -1453,23 +1399,8 @@ static void create_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &layout));
 
-    VkFormat color_fmt_main = key.render_pass_state.color_format;
-    VkFormat zeta_fmt_main = key.render_pass_state.zeta_format;
-    VkFormat stencil_fmt_main = (zeta_fmt_main == VK_FORMAT_D16_UNORM)
-                                    ? VK_FORMAT_UNDEFINED : zeta_fmt_main;
-    VkPipelineRenderingCreateInfoKHR rendering_info_main = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
-        .colorAttachmentCount = color_fmt_main != VK_FORMAT_UNDEFINED ? 1 : 0,
-        .pColorAttachmentFormats = color_fmt_main != VK_FORMAT_UNDEFINED
-                                       ? &color_fmt_main : NULL,
-        .depthAttachmentFormat = zeta_fmt_main,
-        .stencilAttachmentFormat = stencil_fmt_main,
-    };
-
     VkGraphicsPipelineCreateInfo pipeline_create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = r->dynamic_rendering_feature_enabled
-                     ? &rendering_info_main : NULL,
         .stageCount = num_active_shader_stages,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -1747,65 +1678,6 @@ static void begin_render_pass(PGRAPHState *pg)
 
     nv2a_vk_assert(r->framebuffer_index > 0);
 
-    if (r->dynamic_rendering_feature_enabled) {
-        /*
-         * Dynamic rendering: bind attachments inline via image views.
-         * Use LOAD/STORE to match the old VkAttachmentDescription
-         * (loadOp=LOAD, storeOp=STORE) so existing semantics are
-         * preserved — primitives draw on top of whatever's already in
-         * the surface. Initial / final layouts stay at
-         * COLOR_ATTACHMENT_OPTIMAL / DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-         * just like the old subpass bookkeeping.
-         */
-        VkRenderingAttachmentInfoKHR color_attachment = {
-            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
-            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        };
-        VkRenderingAttachmentInfoKHR depth_attachment = {
-            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        };
-        VkRenderingAttachmentInfoKHR stencil_attachment = depth_attachment;
-
-        bool has_color = r->color_binding != NULL;
-        bool has_zeta = r->zeta_binding != NULL;
-        /*
-         * D16_UNORM is the only Xbox depth format without a stencil
-         * aspect. Passing pStencilAttachment with an image view that
-         * lacks VK_IMAGE_ASPECT_STENCIL_BIT violates Vulkan validation
-         * (VUID-VkRenderingInfo-pStencilAttachment-06547), so gate the
-         * stencil attachment on format. D24_UNORM_S8_UINT and
-         * D32_SFLOAT_S8_UINT both have stencil.
-         */
-        bool has_stencil = has_zeta &&
-            r->zeta_binding->host_fmt.vk_format != VK_FORMAT_D16_UNORM;
-        if (has_color) {
-            color_attachment.imageView = r->color_binding->image_view;
-        }
-        if (has_zeta) {
-            depth_attachment.imageView = r->zeta_binding->image_view;
-            stencil_attachment.imageView = r->zeta_binding->image_view;
-        }
-
-        VkRenderingInfoKHR rendering_info = {
-            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,
-            .renderArea.extent.width = vp_width,
-            .renderArea.extent.height = vp_height,
-            .layerCount = 1,
-            .colorAttachmentCount = has_color ? 1 : 0,
-            .pColorAttachments = has_color ? &color_attachment : NULL,
-            .pDepthAttachment = has_zeta ? &depth_attachment : NULL,
-            .pStencilAttachment = has_stencil ? &stencil_attachment : NULL,
-        };
-        vkCmdBeginRendering(r->command_buffer, &rendering_info);
-        r->in_render_pass = true;
-        return;
-    }
-
     VkRenderPassBeginInfo render_pass_begin_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = r->render_pass,
@@ -1818,17 +1690,12 @@ static void begin_render_pass(PGRAPHState *pg)
     vkCmdBeginRenderPass(r->command_buffer, &render_pass_begin_info,
                          VK_SUBPASS_CONTENTS_INLINE);
     r->in_render_pass = true;
-
 }
 
 static void end_render_pass(PGRAPHVkState *r)
 {
     if (r->in_render_pass) {
-        if (r->dynamic_rendering_feature_enabled) {
-            vkCmdEndRendering(r->command_buffer);
-        } else {
-            vkCmdEndRenderPass(r->command_buffer);
-        }
+        vkCmdEndRenderPass(r->command_buffer);
         r->in_render_pass = false;
     }
 }

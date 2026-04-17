@@ -372,27 +372,6 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             (adjusted_width  & (adjusted_width  - 1)) == 0 &&
             (adjusted_height & (adjusted_height - 1)) == 0;
 
-        /*
-         * NOTE: An earlier "direct-VRAM compute unswizzle" optimization
-         * (α3) had the compute shader read straight from BUFFER_VERTEX_RAM
-         * at level->vram_addr when VK_EXT_external_memory_host was live,
-         * skipping the raw_copy memcpy + staging -> COMPUTE_DST path.
-         * That was reverted because BUFFER_VERTEX_RAM IS the live guest
-         * VRAM under external-memory-host, so the compute shader and the
-         * guest CPU share the same bytes with no snapshot between them.
-         * Host pipeline barriers only guarantee *visibility* of host
-         * writes up to the barrier's submission point — they do NOT
-         * block the CPU from continuing to write AFTER submission but
-         * BEFORE GPU execution (or even DURING, on Apple Silicon's
-         * coherent HOST_VISIBLE memory). Rapidly-updated textures
-         * (particles, translucent HUD, billboards) would therefore
-         * tear between two consecutive guest writes, producing the
-         * intermittent flicker. Keep the staging-copy path for all
-         * textures and leave α2 (host-imported vertex RAM) intact —
-         * vertex data is snapshot/flushed via flush_memory_buffer
-         * before any draw consumes it, so that path is not affected.
-         */
-
         if (use_gpu_unswizzle) {
             for (int layer = 0; layer < num_layers; layer++) {
                 unsigned int width = adjusted_width, height = adjusted_height;
@@ -813,13 +792,13 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                     if (f_info.bytes_per_pixel == 2) {
                         pgraph_vk_dispatch_unswizzle_2bpp(
                             pg, cmd,
-                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 0,
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                             r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                             level->unswizzle_width, level->unswizzle_height);
                     } else {
                         pgraph_vk_dispatch_unswizzle(
                             pg, cmd,
-                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 0,
+                            r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                             r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                             level->unswizzle_width, level->unswizzle_height);
                     }

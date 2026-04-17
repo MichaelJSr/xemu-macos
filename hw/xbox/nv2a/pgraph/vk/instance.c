@@ -34,27 +34,6 @@
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
 #endif
 
-/*
- * Older Vulkan headers may miss the dynamic rendering extension macro
- * or its feature struct/sType. MoltenVK advertises it via volk runtime
- * loading, so we define the names inline for compile-time safety.
- */
-#ifndef VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME
-#define VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME "VK_KHR_dynamic_rendering"
-#endif
-
-/*
- * VK_EXT_external_memory_host lets us import a host pointer (QEMU's
- * guest VRAM buffer d->vram_ptr) as VkDeviceMemory. With the extension
- * on, BUFFER_VERTEX_RAM *is* guest VRAM — no memcpy needed from the
- * guest writer, and the compute unswizzle shader can read texture data
- * directly at its VRAM offset. Defined here in case the Vulkan headers
- * are older than the MoltenVK that advertises the extension.
- */
-#ifndef VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME
-#define VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME "VK_EXT_external_memory_host"
-#endif
-
 static bool enable_validation = false;
 
 static char const *const validation_layers[] = {
@@ -393,31 +372,6 @@ static void add_optional_device_extension_names(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
 #endif
-
-    /*
-     * VK_KHR_dynamic_rendering removes VkRenderPass/VkFramebuffer object
-     * lifetime from the draw path and maps directly to Metal's native
-     * pass model on MoltenVK. Groundwork for Phase 3.1: we enable the
-     * extension + feature if the device advertises it; a follow-up pass
-     * will flip create_render_pass / begin_render_pass to emit
-     * vkCmdBeginRendering under this flag.
-     */
-    r->dynamic_rendering_extension_enabled = add_extension_if_available(
-        available_extensions, enabled_extension_names,
-        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-
-    /*
-     * VK_EXT_external_memory_host: import QEMU's guest-VRAM pointer as
-     * a VkBuffer so BUFFER_VERTEX_RAM is a live mirror of VRAM instead
-     * of a sparse vertex-data copy. Enables the compute unswizzle
-     * shader to read texture data straight out of VRAM, skipping the
-     * CPU raw_copy + staging memcpy + vkCmdCopyBuffer dance for every
-     * GPU-unswizzled texture upload, and makes
-     * pgraph_vk_update_vertex_ram_buffer's memcpy redundant.
-     */
-    r->external_memory_host_extension_enabled = add_extension_if_available(
-        available_extensions, enabled_extension_names,
-        VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -634,29 +588,6 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         next_struct = &custom_border_features;
     }
 
-    /*
-     * Phase 3.1 (B2): VK_KHR_dynamic_rendering was probed/enabled here
-     * and used by draw.c / display.c to replace VkRenderPass +
-     * VkFramebuffer with inline vkCmdBeginRendering / vkCmdEndRendering.
-     * Disabled because the lowering does NOT replicate the render
-     * pass's `VK_SUBPASS_EXTERNAL -> first subpass` dependency that
-     * synchronizes color/depth attachment read+write across
-     * consecutive render passes. With dynamic rendering, that
-     * synchronization needs to be an explicit vkCmdPipelineBarrier
-     * (covering COLOR_ATTACHMENT_OUTPUT + EARLY/LATE_FRAGMENT_TESTS
-     * stages with ATTACHMENT_READ/WRITE access) emitted around every
-     * BeginRendering/EndRendering pair. Without it, draws issued
-     * back-to-back into the same attachment can observe stale writes
-     * or hazard the Metal tile renderer (MoltenVK), manifesting as
-     * a frozen/black screen on level transitions and save reloads
-     * where PGRAPH churns many small render passes. Force the feature
-     * off until the proper explicit-barrier plumbing lands; downstream
-     * draw.c / display.c code is already gated on
-     * dynamic_rendering_feature_enabled and cleanly falls back to
-     * the VkRenderPass path (with the correct subpass dependency).
-     */
-    r->dynamic_rendering_feature_enabled = false;
-
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
@@ -689,32 +620,6 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     } else {
         r->compute_queue = r->queue;
         r->has_compute_queue = false;
-    }
-
-    /*
-     * Query VkPhysicalDeviceExternalMemoryHostPropertiesEXT so buffer
-     * init can decide whether d->vram_ptr satisfies the import
-     * alignment. MoltenVK reports ~4 KiB on Apple Silicon; QEMU's
-     * mmap-backed RAM regions are host-page aligned so the check
-     * almost always succeeds, but we gate defensively.
-     */
-    r->external_memory_host_min_alignment = 0;
-    if (r->external_memory_host_extension_enabled) {
-        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props = {
-            .sType =
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
-        };
-        VkPhysicalDeviceProperties2 props2 = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &host_props,
-        };
-        vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
-        r->external_memory_host_min_alignment =
-            host_props.minImportedHostPointerAlignment;
-        fprintf(stderr,
-                "- VK_EXT_external_memory_host advertised; "
-                "minImportedHostPointerAlignment = %llu\n",
-                (unsigned long long)r->external_memory_host_min_alignment);
     }
 
     return true;

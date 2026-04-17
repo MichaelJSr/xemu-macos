@@ -853,24 +853,6 @@ int qemu_msync(void *addr, size_t length, int fd);
  */
 size_t qemu_get_host_physmem(void);
 
-/*
- * Toggle write/execute on the pages marked MAP_JIT for the current
- * thread.
- *
- * The pair qemu_thread_jit_write() / qemu_thread_jit_execute() each
- * trap into the kernel. For a tightly-scoped write phase followed by
- * an execute flip, qemu_thread_jit_write_with_callback() prefers the
- * macOS 14.4+ pthread_jit_write_with_callback_np API which keeps the
- * W permission scoped to the callback and, on capable hardware, can
- * amortize the flip cost. On older macOS / non-Darwin the wrapper
- * falls back to the manual pair.
- *
- * Use the pair directly when the write and execute phases are in
- * different functions (tb_gen_code vs cpu_tb_exec); use the callback
- * wrapper for local, bounded write regions (tb_phys_invalidate,
- * small patching helpers). tb_gen_code stays on the manual pair
- * because its body is large and contains multiple control-flow paths.
- */
 #ifdef __APPLE__
 static inline void qemu_thread_jit_execute(void)
 {
@@ -881,43 +863,9 @@ static inline void qemu_thread_jit_write(void)
 {
     pthread_jit_write_protect_np(false);
 }
-
-typedef int (*QemuJitWriteCallback)(void *ctx);
-
-/*
- * Declare pthread_jit_write_with_callback_np ourselves with weak_import
- * so the link step succeeds on macOS SDKs older than 14.4 that don't
- * expose it in <pthread.h>. At runtime the __builtin_available gate
- * ensures we don't call a null symbol on pre-14.4 systems.
- */
-extern int pthread_jit_write_with_callback_np(
-    int (*callback)(void *), void *ctx)
-    __attribute__((weak_import));
-
-static inline void qemu_thread_jit_write_with_callback(
-    QemuJitWriteCallback cb, void *ctx)
-{
-    if (__builtin_available(macOS 14.4, *)) {
-        if (pthread_jit_write_with_callback_np) {
-            pthread_jit_write_with_callback_np(cb, ctx);
-            return;
-        }
-    }
-    pthread_jit_write_protect_np(false);
-    (void)cb(ctx);
-    pthread_jit_write_protect_np(true);
-}
 #else
 static inline void qemu_thread_jit_write(void) {}
 static inline void qemu_thread_jit_execute(void) {}
-
-typedef int (*QemuJitWriteCallback)(void *ctx);
-
-static inline void qemu_thread_jit_write_with_callback(
-    QemuJitWriteCallback cb, void *ctx)
-{
-    (void)cb(ctx);
-}
 #endif
 
 /**

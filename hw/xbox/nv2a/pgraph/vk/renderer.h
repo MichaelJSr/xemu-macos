@@ -110,15 +110,6 @@ typedef struct StorageBuffer {
     VmaAllocation allocation;
     VkMemoryPropertyFlags properties;
     bool is_coherent;
-    /*
-     * Set when the buffer's backing memory was imported via
-     * VK_EXT_external_memory_host from a caller-owned host pointer
-     * (QEMU's d->vram_ptr). VMA doesn't own the memory in that case,
-     * so destroy uses vkDestroyBuffer + vkFreeMemory directly and the
-     * mapped pointer is the original host pointer (no vmaMapMemory).
-     */
-    bool host_imported;
-    VkDeviceMemory host_imported_memory;
     size_t buffer_offset;
     size_t buffer_size;
     size_t buffer_limit;
@@ -420,25 +411,6 @@ typedef struct PGRAPHVkState {
 #if HAVE_IOSURFACE_SHARING
     bool metal_objects_extension_enabled;
 #endif
-    /*
-     * VK_KHR_dynamic_rendering is enabled at device create when the
-     * physical device advertises it AND the dynamicRendering feature is
-     * supported. Consumed at pipeline/pass build time (Phase 3.1 follow-
-     * up) to skip VkRenderPass / VkFramebuffer allocation.
-     */
-    bool dynamic_rendering_extension_enabled;
-    bool dynamic_rendering_feature_enabled;
-
-    /*
-     * VK_EXT_external_memory_host state. When `external_memory_host_enabled`
-     * is true, BUFFER_VERTEX_RAM's VkDeviceMemory is a host-pointer import
-     * of QEMU's d->vram_ptr, so Vulkan reads of that buffer see guest-side
-     * writes without a memcpy. `min_alignment` is the device-reported
-     * minImportedHostPointerAlignment (typically 4 KiB on MoltenVK).
-     */
-    bool external_memory_host_extension_enabled;
-    bool external_memory_host_enabled;
-    VkDeviceSize external_memory_host_min_alignment;
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
@@ -743,12 +715,10 @@ void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
                                     VkCommandBuffer cmd, VkBuffer src,
                                     VkBuffer dst);
 void pgraph_vk_dispatch_unswizzle(PGRAPHState *pg, VkCommandBuffer cmd,
-                                  VkBuffer src, VkDeviceSize src_offset,
-                                  VkBuffer dst,
+                                  VkBuffer src, VkBuffer dst,
                                   unsigned int width, unsigned int height);
 void pgraph_vk_dispatch_unswizzle_2bpp(PGRAPHState *pg, VkCommandBuffer cmd,
-                                       VkBuffer src, VkDeviceSize src_offset,
-                                       VkBuffer dst,
+                                       VkBuffer src, VkBuffer dst,
                                        unsigned int width,
                                        unsigned int height);
 void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,

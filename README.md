@@ -91,11 +91,7 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16. `flcr`
   lowering is 5 insns via `RBIT`. `tb_phys_invalidate` uses the
   manual `qemu_thread_jit_write()` / `qemu_thread_jit_execute()`
-  pair (upstream behavior); an earlier wrap in
-  `pthread_jit_write_with_callback_np` (macOS 14.4+) was reverted
-  because its scoped W-permission semantics didn't compose cleanly
-  with QEMU's nested JIT-write paths and correlated with freezes
-  during heavy TB invalidation.
+  pair (upstream behavior).
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -104,19 +100,6 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   emulation for quads, line loops, triangle fans, and provoking
   vertex. Fragment-shader depth fallback via
   `gl_FragCoord.z + dFdx/dFdy`.
-  - `VK_KHR_dynamic_rendering` is probed and its feature struct is
-    plumbed through device-create, but the lowering in draw.c /
-    display.c (B2) is currently **disabled** at runtime — it did not
-    replicate the render pass's `VK_SUBPASS_EXTERNAL → first subpass`
-    dependency, so back-to-back render passes on the same color/depth
-    attachment could observe stale writes and stall Metal's tile
-    renderer (MoltenVK). Renderer uses the standard `VkRenderPass` +
-    `VkFramebuffer` path (which carries the correct subpass
-    dependency). Re-enabling requires emitting an explicit
-    `vkCmdPipelineBarrier` around every `BeginRendering` /
-    `EndRendering` covering `COLOR_ATTACHMENT_OUTPUT +
-    EARLY/LATE_FRAGMENT_TESTS` stages with `ATTACHMENT_READ/WRITE`
-    access.
 - **Split descriptor sets.** Set 0 holds UBOs (VSH+PSH uniforms),
   set 1 holds the `NV2A_MAX_TEXTURES` combined image samplers. Each
   set has its own pool/array/index, so a draw that only changes
@@ -193,8 +176,7 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   transcendentals on the hot path; envelope decay uses `expf` with a
   precomputed log base.
 - **Resampler.** `SRC_LINEAR` replaces `SRC_SINC_FASTEST` (matches Xbox
-  hardware). Voices at rate == 1.0 bypass libsamplerate entirely,
-  reading straight into the output buffer.
+  hardware).
 - **Accelerate / vDSP.** `vDSP_vsma` for 8-bin × 32-sample mix
   accumulation; `vDSP_vadd` for `float_accumulate`. `float_to_24b` uses
   `vcvtnq_s32_f32` in bulk on ARM64.

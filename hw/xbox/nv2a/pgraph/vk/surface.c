@@ -1181,13 +1181,13 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         if (surface->fmt.bytes_per_pixel == 2) {
             pgraph_vk_dispatch_unswizzle_2bpp(
                 pg, cmd,
-                r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 0,
+                r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                 r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                 surface->width, surface->height);
         } else {
             pgraph_vk_dispatch_unswizzle(
                 pg, cmd,
-                r->storage_buffers[BUFFER_COMPUTE_DST].buffer, 0,
+                r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                 r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
                 surface->width, surface->height);
         }
