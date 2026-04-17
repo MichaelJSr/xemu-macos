@@ -1276,34 +1276,16 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
 
     /*
-     * Fast path: when rate == 1.0 (no pitch shift), skip libsamplerate
-     * entirely and read source samples straight into the output buffer.
-     * A large fraction of DirectSound voices play at nominal rate, and
-     * src_callback_read has significant per-call overhead (callback
-     * dispatch, buffer management, phase bookkeeping) even in SRC_LINEAR
-     * mode. Use a small epsilon to catch rates that are numerically
-     * indistinguishable from 1.0 after LUT rounding.
+     * NOTE: An earlier "rate == 1.0 fast path" that skipped libsamplerate
+     * entirely was reverted. It produced audible artifacts / hangs on
+     * voice drain (voice_resample_callback pads with silence on
+     * starvation so libsamplerate always returns NUM_SAMPLES_PER_FRAME;
+     * the fast path returned early instead, and voice_process's outer
+     * loop can deadlock retrying on a voice that's draining to completion
+     * during scene transitions). Keep the full libsamplerate path even
+     * for rate ≈ 1.0; SRC_LINEAR mode passes through unchanged samples
+     * cheaply, and the callback overhead is negligible at 48 kHz.
      */
-    if (fabsf(rate - 1.0f) < 1.0f / 65536.0f) {
-        int got = 0;
-        while (got < requested_num) {
-            int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
-                                        NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
-            if (!active) {
-                break;
-            }
-            int n = voice_get_samples(d, v, &samples[got],
-                                      requested_num - got);
-            if (n <= 0) {
-                break;
-            }
-            got += n;
-        }
-        if (got == 0) {
-            return -1;
-        }
-        return got;
-    }
 
     if (filter->resampler == NULL) {
         filter->voice = v;
