@@ -3208,8 +3208,24 @@ void pgraph_process_pending(NV2AState *d)
              */
             qatomic_set(&pg->flush_pending, true);
 
-            qemu_mutex_lock(&d->pfifo.lock);
+            /*
+             * Drop pgraph.lock BEFORE acquiring pfifo.lock. The rest of
+             * the codebase follows a strict pfifo.lock -> pgraph.lock
+             * order (see pfifo.c:145,204,237 and null/renderer.c:43-44).
+             * Acquiring pfifo.lock while still holding pgraph.lock here
+             * gives a classic AB-BA deadlock window against any vCPU
+             * thread in pgraph_write (which enters as
+             * pfifo.lock -> pgraph.lock).
+             *
+             * Between the unlock and re-lock, no other pgraph state
+             * we depend on for the renderer-switch handoff can change:
+             * - renderer_switch_phase can't advance (we hold
+             *   renderer_lock, which gates that transition),
+             * - flush_pending was stored via qatomic above,
+             * - pg->renderer can only be swapped under renderer_lock.
+             */
             qemu_mutex_unlock(&d->pgraph.lock);
+            qemu_mutex_lock(&d->pfifo.lock);
 
             pg->renderer->ops.process_pending(d);
 
