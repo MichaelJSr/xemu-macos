@@ -280,7 +280,6 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
     /* ---- Set 1: Textures ---- */
     if (need_tex_advance) {
         VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
-        VkWriteDescriptorSet tex_writes[NV2A_MAX_TEXTURES];
         for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
             TextureBinding *tex_binding = r->texture_bindings[i];
             if (!tex_binding) {
@@ -296,18 +295,27 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
                 .imageView = tex_binding->image_view,
                 .sampler = sampler,
             };
-            tex_writes[i] = (VkWriteDescriptorSet){
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = r->descriptor_sets[r->descriptor_set_index],
-                .dstBinding = i,
-                .dstArrayElement = 0,
-                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptorCount = 1,
-                .pImageInfo = &image_infos[i],
-            };
         }
-        vkUpdateDescriptorSets(r->device, ARRAY_SIZE(tex_writes),
-                               tex_writes, 0, NULL);
+        /*
+         * Texture bindings 0..NV2A_MAX_TEXTURES-1 are consecutive
+         * same-type (COMBINED_IMAGE_SAMPLER). Per Vulkan spec §14.2.3,
+         * a single VkWriteDescriptorSet with descriptorCount=N and
+         * dstArrayElement=0 overflows into the next binding when the
+         * current binding's array size is exhausted. Collapsing the
+         * four separate writes into one saves three struct
+         * initializations and three internal driver dispatches per
+         * advancing draw.
+         */
+        VkWriteDescriptorSet tex_write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = r->descriptor_sets[r->descriptor_set_index],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = NV2A_MAX_TEXTURES,
+            .pImageInfo = image_infos,
+        };
+        vkUpdateDescriptorSets(r->device, 1, &tex_write, 0, NULL);
         r->descriptor_set_index++;
     }
 }
