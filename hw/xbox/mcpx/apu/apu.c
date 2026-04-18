@@ -185,9 +185,10 @@ static void throttle(MCPXAPUState *d)
         if (queued_bytes >= 0) {
             throttle_record_queue(d, queued_bytes);
         }
-        while (!d->pause_requested && queued_bytes >= d->monitor.queued_bytes_high) {
+        while (!qatomic_read(&d->pause_requested) &&
+               queued_bytes >= d->monitor.queued_bytes_high) {
             qemu_cond_timedwait(&d->cond, &d->lock, EP_FRAME_US / 1000);
-            if (d->pause_requested) {
+            if (qatomic_read(&d->pause_requested)) {
                 break;
             }
             queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
@@ -200,7 +201,7 @@ static void throttle(MCPXAPUState *d)
             now_us - d->next_frame_time_us > EP_FRAME_US) {
             d->next_frame_time_us = now_us;
         }
-        while (!d->pause_requested) {
+        while (!qatomic_read(&d->pause_requested)) {
             now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
             int64_t remaining_ms = (d->next_frame_time_us - now_us) / 1000;
             if (remaining_ms > 0) {
@@ -265,7 +266,7 @@ static void *mcpx_apu_frame_thread(void *arg)
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
-        if (d->pause_requested) {
+        if (qatomic_read(&d->pause_requested)) {
             d->is_idle = true;
             qemu_cond_signal(&d->idle_cond);
             qemu_cond_wait(&d->cond, &d->lock);
@@ -410,7 +411,7 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     d->set_irq = false;
     d->exiting = false;
     d->is_idle = false;
-    d->pause_requested = true;
+    qatomic_set(&d->pause_requested, true);
     qemu_mutex_init(&d->lock);
     qemu_mutex_lock(&d->lock);
     qemu_cond_init(&d->cond);
