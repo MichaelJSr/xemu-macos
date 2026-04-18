@@ -723,9 +723,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
             *to_call_helper_2 = insn;
         }
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1,
-                       (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
-        emit_blr(e, /*rn=*/1);
+        emit_blr(e, /*rn=*/20);    /* x20 = cached helper address */
 
         /* after: */
         uint32_t *after_label = e->buf;
@@ -759,9 +757,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
 
         /* call_helper: */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1,
-                       (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
-        emit_blr(e, /*rn=*/1);
+        emit_blr(e, /*rn=*/21);    /* x21 = cached helper address */
 
         /* after: */
         uint32_t *after_label = e->buf;
@@ -817,21 +813,41 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
 }
 
 /*
- * Emit the shared exit label + epilogue and return a pointer to
- * where the label sits (used to patch pending exit branches).
+ * Emit the shared exit label + epilogue. Restores the two pairs of
+ * callee-saved registers pushed by the prologue (x30/x19 and x20/x21)
+ * and returns.
  */
 static uint32_t *emit_epilogue(ArmEmit *e)
 {
     uint32_t *label = e->buf;
+    /* Restore in reverse of prologue's push order. */
+    emit_ldp_post(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/30, /*rt2=*/19, /*rn=*/31 /*SP*/, 16);
     emit_ret(e);
     return label;
 }
 
+/*
+ * Block prologue. Saves LR + callee-saved regs x19/x20/x21 and
+ * initializes:
+ *   x19 = dsp (context pointer, pinned for block lifetime)
+ *   x20 = &dsp_jit_helper_postexecute_update_pc   (cached helper)
+ *   x21 = &dsp_jit_helper_postexecute_interrupts  (cached helper)
+ * Caching the helper addresses in callee-saved regs saves the
+ * MOVZ+MOVK*3 chain (4 insns) per helper call in each stub.
+ */
 static void emit_prologue(ArmEmit *e)
 {
+    /* SP must stay 16-byte-aligned; STP with #-16 and #-16 does that. */
     emit_stp_pre(e, /*rt1=*/30, /*rt2=*/19, /*rn=*/31 /*SP*/, -16);
+    emit_stp_pre(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, -16);
+
     emit_mov_x_reg(e, /*rd=*/19, /*rn=*/0);   /* x19 = dsp */
+
+    emit_mov_imm64(e, /*rd=*/20,
+        (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
+    emit_mov_imm64(e, /*rd=*/21,
+        (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
