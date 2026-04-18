@@ -168,6 +168,13 @@ static float clampf(float v, float min, float max)
 
 static float g_attenuation_lut[4096];
 static float g_pitch_lut[65536];
+/*
+ * LPF cutoff LUT. Indexed by the raw uint16 bits of the guest fc
+ * field (signed interpretation). Collapses the per-voice-per-channel
+ * double-precision pow(2, fc/4096) + clamp in voice_process to a
+ * single 256 KiB load.
+ */
+static float g_lpf_fc_lut[65536];
 static float g_decay_base_log; // logf(0.99988799f), precomputed for expf-based envelope decay
 static bool g_apu_luts_initialized = false;
 
@@ -180,6 +187,10 @@ static void apu_init_luts(void)
     for (int i = 0; i < 65536; i++) {
         int16_t signed_val = (int16_t)i;
         g_pitch_lut[i] = 1.0f / powf(2.0f, signed_val / 4096.0f);
+        float lpf = powf(2.0f, signed_val / 4096.0f);
+        if (lpf < 0.003906f) lpf = 0.003906f;
+        else if (lpf > 1.0f) lpf = 1.0f;
+        g_lpf_fc_lut[i] = lpf;
     }
     g_decay_base_log = logf(0.99988799f);
     g_apu_luts_initialized = true;
@@ -1595,7 +1606,13 @@ static void voice_process(MCPXAPUState *d,
             int16_t fc = voice_get_mask(
                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
                 NV_PAVS_VOICE_TAR_FCA_FC0);
-            float fc_f = clampf(pow(2, fc / 4096.0), 0.003906f, 1.0f);
+            /*
+             * Cutoff was: clampf(pow(2, fc/4096.0), 0.003906f, 1.0f).
+             * Precomputed into g_lpf_fc_lut[65536] by apu_init_luts.
+             * Load replaces a double-precision pow + clamp per voice
+             * per channel per LPF-active frame.
+             */
+            float fc_f = g_lpf_fc_lut[(uint16_t)fc];
             uint16_t q = voice_get_mask(
                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
                 NV_PAVS_VOICE_TAR_FCA_FC1);
