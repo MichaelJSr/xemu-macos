@@ -400,6 +400,110 @@ static inline void emit_orr_w_reg(ArmEmit *e, int rd, int rn, int rm)
     emit_u32(e, 0x2a000000u | ((rm & 0x1f) << 16) | ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
+/* MOV Wd, Wn (alias of ORR Wd, WZR, Wn) */
+static inline void emit_mov_w_reg(ArmEmit *e, int rd, int rn)
+{
+    emit_u32(e, 0x2a0003e0u | ((rn & 0x1f) << 16) | (rd & 0x1f));
+}
+
+/*
+ * Shift / bitfield instructions — all lowered via UBFM / SBFM.
+ *
+ * LSL Wd, Wn, #s   => UBFM Wd, Wn, #((32-s)%32), #(31-s)
+ * LSR Wd, Wn, #s   => UBFM Wd, Wn, #s, #31
+ * UBFX Wd, Wn, #lsb, #width => UBFM Wd, Wn, #lsb, #(lsb+width-1)
+ * ASR Wd, Wn, #s   => SBFM Wd, Wn, #s, #31
+ *
+ * UBFM 32-bit encoding: 0x53000000 | (immr << 16) | (imms << 10) | (Rn << 5) | Rd
+ * SBFM 32-bit encoding: 0x13000000 | (immr << 16) | (imms << 10) | (Rn << 5) | Rd
+ */
+static inline void emit_lsl_w_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 32);
+    uint32_t immr = (uint32_t)((32 - shift) & 31);
+    uint32_t imms = (uint32_t)(31 - shift);
+    emit_u32(e, 0x53000000u | (immr << 16) | (imms << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+G_GNUC_UNUSED static inline void emit_lsr_w_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 32);
+    emit_u32(e, 0x53000000u | ((uint32_t)shift << 16) | (31u << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+G_GNUC_UNUSED static inline void emit_asr_w_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 32);
+    emit_u32(e, 0x13000000u | ((uint32_t)shift << 16) | (31u << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+static inline void emit_ubfx_w(ArmEmit *e, int rd, int rn, int lsb, int width)
+{
+    assert(lsb >= 0 && width > 0 && (lsb + width) <= 32);
+    emit_u32(e, 0x53000000u | ((uint32_t)lsb << 16) |
+                ((uint32_t)(lsb + width - 1) << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* ADD Wd, Wn, #imm (imm12, no shift) */
+static inline void emit_add_w_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
+{
+    assert(imm <= 0xfff);
+    emit_u32(e, 0x11000000u | (imm << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SUB Wd, Wn, #imm (imm12, no shift) */
+static inline void emit_sub_w_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
+{
+    assert(imm <= 0xfff);
+    emit_u32(e, 0x51000000u | (imm << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* CMP Wn, #imm12 (SUBS WZR, Wn, #imm) */
+G_GNUC_UNUSED static inline void emit_cmp_w_imm(ArmEmit *e, int rn, unsigned int imm)
+{
+    assert(imm <= 0xfff);
+    emit_u32(e, 0x7100001fu | (imm << 10) | ((rn & 0x1f) << 5));
+}
+
+/* SUB Wd, Wn, Wm (shifted-register, shift #0) */
+G_GNUC_UNUSED static inline void emit_sub_w_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x4b000000u | ((rm & 0x1f) << 16) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* NEG Wd, Wm (alias of SUB Wd, WZR, Wm) */
+G_GNUC_UNUSED static inline void emit_neg_w(ArmEmit *e, int rd, int rm)
+{
+    emit_u32(e, 0x4b0003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
+}
+
+/* ADD Xd, Xn, Xm (shifted-register, LSL #0) */
+static inline void emit_add_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x8b000000u | ((rm & 0x1f) << 16) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* CSEL Wd, Wn, Wm, cond — if cond true, Wd = Wn else Wd = Wm. */
+G_GNUC_UNUSED static inline void emit_csel_w(ArmEmit *e, int rd, int rn, int rm, int cond)
+{
+    emit_u32(e, 0x1a800000u | ((rm & 0x1f) << 16) | ((cond & 0xf) << 12) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* TBZ Wt, #bit, #imm14 */
+G_GNUC_UNUSED static inline void emit_tbz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
+{
+    int32_t imm14 = off_bytes >> 2;
+    assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
+    assert(bit >= 0 && bit < 32);
+    emit_u32(e, 0x36000000u | ((uint32_t)(bit & 0x1f) << 19) |
+                (((uint32_t)imm14 & 0x3fff) << 5) | (rt & 0x1f));
+}
+
 /*
  * Patch an unconditional B to a new byte delta (imm26).
  */

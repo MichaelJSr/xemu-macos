@@ -1505,4 +1505,30 @@ bool dsp_jit_helper_is_terminator(void *fn)
            f == emu_reset;
 }
 
+/*
+ * Phase 4 shims for JIT parmove inlining.
+ *
+ * emu_pm_read_accu24, emu_calc_ea, emu_update_rn are all file-static
+ * in dsp_emu.c.inc. Expose trivial wrappers so the JIT's emitted
+ * ARM64 code can BLR them directly on slow paths (non-linear Mn,
+ * modes 5-7 with cycle penalties, limit-bit computation).
+ *
+ * dsp56k_read_memory and dsp56k_write_memory are already non-static
+ * and are called directly from JIT code — no shim needed.
+ */
+int dsp_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest)
+{
+    return emu_pm_read_accu24(dsp, numreg, dest);
+}
+
+int dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr)
+{
+    return emu_calc_ea(dsp, ea_mode, dst_addr);
+}
+
+void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier)
+{
+    emu_update_rn(dsp, numreg, modifier);
+}
+
 #endif  /* DSP_JIT_SUPPORTED */

@@ -69,6 +69,11 @@ dsp_emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst);
 uint32_t dsp_jit_helper_inst_length(uint32_t inst);
 bool dsp_jit_helper_is_terminator(void *fn);
 
+/* Phase 4 shims (parmove inlining). See dsp_cpu.c for definitions. */
+int  dsp_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest);
+int  dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr);
+void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier);
+
 #else  /* !DSP_JIT_SUPPORTED */
 
 static inline void dsp_jit_init(dsp_core_t *dsp) { (void)dsp; }
