@@ -170,17 +170,17 @@ Each phase is one session (Phases 4 and 8 may span two). Every phase
 lands behind `XEMU_DSP_JIT=1` gating; interpreter remains the default
 until Phase 7 completes.
 
-| Phase | Scope | Target DSP-CPU delta vs interpreter |
-|---|---|---|
-| 0 | Infrastructure (allocator, block cache, emitter, dispatcher, invalidation hook, `XEMU_DSP_JIT` flag) | 0 — no translation yet |
-| 1 | Skeleton: MOVE inline; every other op as helper call to the existing `emu_*`. Diff mode validates infra | 0-5% (helper-call overhead offsets small inline wins, but block chaining cuts per-instruction dispatcher overhead) |
-| 2 | Inline arithmetic core (~40 handlers): ADD/SUB/ASR/ASL/LSR/LSL/AND/OR/EOR/NOT/NEG/ABS/CMP/TST. Eager SR | 20-30% |
-| 3 | Memory + linear addressing (xram/yram/pram direct; periph via helper) | +10-15% |
-| 4 | Parallel moves (16 forms) — biggest remaining win since parmoves ride on most instructions | +30-40% |
-| 5 | Control flow (JMP/JSR/RTS/RTI/JCC/BCC/BSR/JSCLR/JSSET) + block chaining on known targets | +10% |
-| 6 | REP + DO hardware loops (3-level nesting) | variable — large on filter-kernel loops |
-| 7 | Interrupt handling at block boundaries (pipeline state still handled by interpreter) | neutral (correctness) |
-| 8 | Lazy flag evaluation (cc_op shadow), dead-flag-store elimination, ARM64 register pinning for A/B/X0/X1/Y0/Y1, parmove+ALU fusion | +15-25% |
+| Phase | Status | Scope | Target DSP-CPU delta vs interpreter |
+|---|---|---|---|
+| 0 | **landed** | Infrastructure (allocator, block cache, emitter, dispatcher, invalidation hook, `XEMU_DSP_JIT` flag) | 0 — no translation yet |
+| 1 | **landed** | Skeleton: MOVE inline; every other op as helper call to the existing `emu_*`. Diff mode validates infra | 0-5% (helper-call overhead offsets small inline wins, but block chaining cuts per-instruction dispatcher overhead) |
+| 2 | pending | Inline arithmetic core (~40 handlers): ADD/SUB/ASR/ASL/LSR/LSL/AND/OR/EOR/NOT/NEG/ABS/CMP/TST. Eager SR | 20-30% |
+| 3 | **landed (partial — via Phase 4)** | Memory + linear addressing (xram/yram direct up to 0xc00; mixbuffer / peripheral via C helper). Inlined via `emit_mem_read_xy` / `emit_mem_write_xy`. | +10-15% |
+| 4 | **landed** | Parallel moves (all 16 select values: pm_0 / pm_1 / pm_2 / pm_3 / pm_4 / pm_5 / pm_8). Inline fetch → BLR opcodes_alu → inline writeback. `emu_move` special-cased (no ALU BLR). Non-linear Mn and calc_ea modes 5-7 bail to C helper. pm_4x (long-accu l:ea) goes through a single C helper BLR rather than inline. | +30-40% |
+| 5 | pending | Control flow (JMP/JSR/RTS/RTI/JCC/BCC/BSR/JSCLR/JSSET) + block chaining on known targets | +10% |
+| 6 | pending | REP + DO hardware loops (3-level nesting) | variable — large on filter-kernel loops |
+| 7 | **landed** | Interrupt handling at block boundaries (inline fast-path skip when interrupt_state / counter / pipeline_count all zero) | neutral (correctness) |
+| 8 | pending | Lazy flag evaluation (cc_op shadow), dead-flag-store elimination, ARM64 register pinning for A/B/X0/X1/Y0/Y1, parmove+ALU fusion | +15-25% |
 
 **Aggregate target after Phase 8**: 2-4× DSP throughput, dropping
 DSP from ~10% of total CPU budget to ~3-5% on a DSP-heavy title

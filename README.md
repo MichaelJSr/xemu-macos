@@ -222,13 +222,27 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   REP entry, is-idle, PC mismatch). Invalidation on P-space writes
   keeps the block cache coherent with self-modifying DSP code; the
   cache is flushed entirely on `dsp_reset` and `dsp_bootstrap`.
+  Phase 4 adds native translation for all 16 parallel-move select
+  values (pm_0 / pm_1 / pm_2 / pm_3 / pm_4 / pm_5 / pm_8) —
+  previously the `inst >= 0x100000` parmove-bearing instructions
+  fell back entirely to the interpreter, costing a per-op C round
+  trip on ~55% of dynamic instructions in audio kernels. Inline
+  calc_ea handles the 5 linear Rn addressing modes; inline
+  xram/yram linear memory access bypasses the mixbuffer /
+  peripheral / reverse-carry helpers for `addr < 0xc00`. The
+  `opcodes_alu[]` ALU kernel is still BLR'd as a helper (Phase 2
+  inlines those next) but skipped entirely for `emu_move`
+  (`inst & 0xFF == 0`). After Phase 4, `XEMU_DSP_JIT_STATS=1`
+  reports zero fallbacks on the built-in `/basic` DSP test.
   Correctness harness: `XEMU_DSP_JIT_DIFF=1` runs the interpreter
   and JIT back-to-back on snapshot state after every block and
   bit-exact-compares the result (excluding the `pram_opcache`
-  cache slab); aborts with a diff dump on divergence. See
+  cache slab); aborts with a diff dump on divergence. Passed
+  over 300 stress-runs of the built-in test across interp / JIT /
+  JIT+DIFF modes. See
   [docs/dsp-jit-design.md](docs/dsp-jit-design.md) for the
   9-phase roadmap and register-map plans for later inline phases
-  (arithmetic, parmoves, control-flow chaining, lazy flags).
+  (arithmetic, control-flow chaining, lazy flags).
 - **Atomic consistency.** All `d->regs[]` writers in `fe_method`
   (including a single `qatomic_set` FECTL mask+set under
   `d->lock`), `voice_locked[]` via `qatomic_or`/`qatomic_and`,
@@ -321,23 +335,25 @@ Explored but not yet attempted, or punted on risk. Each entry either
 cites the reverted-experiment entry it would need to sidestep, or
 describes the blocking infrastructure work.
 
-- **MCPX APU DSP JIT inlining (Phases 2-8).** Phase 0 + 1 and
-  Phase 7 of the JIT described in
-  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) have landed
-  (infrastructure, call-threaded translator, block-scope helper
-  cache, inline fast-paths for `postexecute_update_pc` and
-  `postexecute_interrupts`, XEMU_DSP_JIT_DIFF bit-exact validation
-  harness). Remaining phases inline the individual `emu_*` handler
-  bodies directly in ARM64: Phase 2 — arithmetic / logical core
-  (~40 handlers: ADD/SUB/ASR/ASL/LSL/LSR/AND/OR/EOR/NOT/NEG/ABS/
-  CMP/TST, eager SR update), Phase 3 — direct xram/yram/pram
-  linear addressing, Phase 4 — 16 parallel-move forms (largest
-  remaining win since parmoves ride on most instructions),
-  Phase 5 — control-flow block chaining on statically known
-  targets, Phase 6 — REP and DO hardware-loop native lowering,
-  Phase 8 — lazy flag evaluation (cc_op shadow), ARM64 register
-  pinning for A/B/X0/X1/Y0/Y1, parmove+ALU fusion. Target
-  aggregate: 2-4× DSP throughput vs the current call-threaded
+- **MCPX APU DSP JIT inlining (remaining Phases 2, 5, 6, 8).**
+  Phases 0, 1, 3 (partial, via 4), 4, and 7 of the roadmap in
+  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) have landed:
+  infrastructure, call-threaded translator, all 16 parallel-move
+  variants, inline calc_ea (linear Rn modes 0-4), inline
+  xram/yram linear memory, inline post-op fast paths for
+  `postexecute_update_pc` and `postexecute_interrupts`, block-
+  scope cached helper addresses, XEMU_DSP_JIT_DIFF bit-exact
+  validation. After Phase 4 the fallback rate on the built-in
+  `/basic` test is 0% (every translated op stays in JIT code).
+  Remaining phases inline more of the heavy lifting: Phase 2 —
+  arithmetic / logical kernels from `opcodes_alu[256]` (~40 hot
+  entries: ADD/SUB/ASR/ASL/LSL/LSR/AND/OR/EOR/NOT/NEG/ABS/CMP/
+  TST, eager SR update) eliminates the per-op ALU BLR; Phase 5 —
+  control-flow block chaining on statically known targets;
+  Phase 6 — REP and DO hardware-loop native lowering; Phase 8 —
+  lazy flag evaluation (cc_op shadow), ARM64 register pinning
+  for A/B/X0/X1/Y0/Y1, parmove+ALU fusion. Target aggregate:
+  2-4× DSP throughput vs the baseline Phase 1 call-threaded
   translator.
 - **Metal-native presentation.** Replace SDL3 + OpenGL +
   `CGLTexImageIOSurface2D` with `CAMetalLayer` direct drawable
