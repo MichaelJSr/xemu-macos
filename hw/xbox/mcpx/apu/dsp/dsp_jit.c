@@ -68,21 +68,53 @@ static bool g_jit_diff;
 static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
 static bool g_jit_stats;
 
+/*
+ * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
+ * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
+ * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
+ * binary statically links libdsp.a alone and doesn't pull in
+ * g_config, so reading config directly from here would fail to
+ * link those tests. The XEMU_DSP_JIT env var still overrides if
+ * set.
+ */
+static bool g_jit_config_enabled_override;
+static bool g_jit_config_set;
+
+void dsp_jit_set_enabled_from_config(bool enabled)
+{
+    g_jit_config_enabled_override = enabled;
+    g_jit_config_set = true;
+}
+
 static void parse_flags_once(void)
 {
     if (g_jit_parsed) {
         return;
     }
     g_jit_parsed = true;
+
+    /*
+     * Primary source of truth: dsp_jit_set_enabled_from_config()
+     * populates this from g_config.audio.dsp_jit.enabled (the
+     * menu toggle) during APU init. XEMU_DSP_JIT env var is kept
+     * as a developer override so CI / bisect scripts can force
+     * JIT on/off without rewriting the TOML.
+     */
+    g_jit_enabled = g_jit_config_set && g_jit_config_enabled_override;
+
     const char *e;
     e = getenv("XEMU_DSP_JIT");
-    g_jit_enabled = (e && e[0] == '1');
+    if (e && e[0]) {
+        g_jit_enabled = (e[0] == '1');
+    }
 
-    /* XEMU_DSP_JIT_DIFF accepts:
-     *   "0"      — diff mode off (default)
-     *   "1"      — diff-check every block (2-10x slowdown)
-     *   "N" (N>=2) — diff-check every Nth block (stochastic sampling)
-     * N is capped at 1e6 to keep the modulo cheap. */
+    /* XEMU_DSP_JIT_DIFF (dev tool): bit-exact validate JIT output
+     * against interpreter. No config-spec entry — it's only useful
+     * during JIT bring-up / regression tracking.
+     *   "0"        — diff mode off (default)
+     *   "1"        — diff-check every block (2-10x slowdown)
+     *   "N" (N>=2) — diff-check every Nth block (sampling)
+     * Capped at 1e6 to keep the modulo cheap. */
     e = getenv("XEMU_DSP_JIT_DIFF");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);

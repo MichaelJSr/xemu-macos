@@ -58,6 +58,14 @@ bool dsp_jit_enabled(void);
 bool dsp_jit_diff_enabled(void);
 
 /*
+ * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
+ * Keeps the JIT source decoupled from ui/xemu-settings.h so the
+ * standalone DSP test binary (which links libdsp.a without the
+ * xemu settings library) continues to link.
+ */
+void dsp_jit_set_enabled_from_config(bool enabled);
+
+/*
  * Internal shims implemented in dsp_cpu.c and called from translated
  * code in dsp_jit.c. Declared here only so both TUs agree on types.
  * Not part of the public API — do not call from outside the JIT.
@@ -90,6 +98,7 @@ static inline void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr) {
 static inline void dsp_jit_invalidate_all(dsp_core_t *dsp) { (void)dsp; }
 static inline bool dsp_jit_enabled(void) { return false; }
 static inline bool dsp_jit_diff_enabled(void) { return false; }
+static inline void dsp_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
 
 #endif  /* DSP_JIT_SUPPORTED */
 

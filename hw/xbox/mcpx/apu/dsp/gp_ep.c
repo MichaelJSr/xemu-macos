@@ -21,6 +21,7 @@
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "dsp_state.h"
+#include "dsp_jit.h"
 
 static const int16_t ep_silence[256][2] = { 0 };
 
@@ -500,6 +501,12 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
 
 void mcpx_apu_dsp_init(MCPXAPUState *d)
 {
+    /* Propagate the `audio.dsp_jit.enabled` menu toggle into the
+     * DSP JIT's config BEFORE the first dsp_init, since dsp_init
+     * consults it when deciding whether to allocate the JIT code
+     * buffer for each core. See dsp_jit.c: dsp_jit_set_enabled_from_config. */
+    dsp_jit_set_enabled_from_config(g_config.audio.dsp_jit.enabled);
+
     d->gp.dsp = dsp_init(d, gp_scratch_rw, gp_fifo_rw);
     for (int i = 0; i < DSP_PRAM_SIZE; i++) {
         d->gp.dsp->core.pram[i] = 0xCACACACA;

@@ -325,6 +325,10 @@ audio:
       type: integer
       default: 0  # 0 = auto
   use_dsp: bool
+  dsp_jit:
+    enabled:
+      type: bool
+      default: false
   hrtf:
     type: bool
     default: true
