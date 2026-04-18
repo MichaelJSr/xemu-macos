@@ -66,6 +66,7 @@ static bool g_jit_parsed;
 static bool g_jit_enabled;
 static bool g_jit_diff;
 static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
+static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks */
 static bool g_jit_stats;
 
 /*
@@ -121,6 +122,18 @@ static void parse_flags_once(void)
         if (n >= 1 && n <= 1000000) {
             g_jit_diff = true;
             g_jit_diff_sample = (uint32_t)n;
+        }
+    }
+
+    /* Optional hard cap on total diff checks across the process
+     * lifetime. After this many checks, diff mode auto-disables
+     * itself (g_jit_diff = false). Use this to verify the first
+     * N blocks bit-exact during startup, then run normally. */
+    e = getenv("XEMU_DSP_JIT_DIFF_MAX");
+    if (e && e[0]) {
+        long long n = strtoll(e, NULL, 0);
+        if (n > 0) {
+            g_jit_diff_max = (uint64_t)n;
         }
     }
 
@@ -2565,6 +2578,20 @@ unsigned int dsp_jit_execute_block(dsp_core_t *dsp)
     }
 
     if (g_jit_diff) {
+        /* Hard cap: once the JIT has successfully validated
+         * g_jit_diff_max blocks against the interpreter, turn off
+         * diff mode for the rest of the session. */
+        if (g_jit_diff_max != 0 &&
+            s->diff_ops_checked >= g_jit_diff_max) {
+            if (s->diff_ops_checked == g_jit_diff_max) {
+                fprintf(stderr,
+                        "xemu: DSP JIT diff cap reached (%" PRIu64
+                        " checks), disabling diff mode\n",
+                        g_jit_diff_max);
+                s->diff_ops_checked++; /* only print once */
+            }
+            goto normal_path;
+        }
         /* Sampling: if N > 1, only diff-check roughly 1 of every N
          * blocks. Uses a simple counter modulo N — deterministic,
          * no RNG cost. Non-sampled blocks go through the normal
