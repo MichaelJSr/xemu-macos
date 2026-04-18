@@ -330,11 +330,14 @@ static int cpu_post_load(void *opaque, int version_id)
     }
 
     /*
-     * Invalidate the inline-FPU rounding-control cache so the first gen_flcr
-     * in the post-load TB stream re-syncs host FPCR to the restored guest
-     * rounding mode.
+     * Resync hflags (HF_FPU_RC / HF_FPU_PC) and the inline-FPU rounding-
+     * control cache so the first gen_flcr in the post-load TB stream
+     * re-syncs host FPCR to the restored guest rounding mode. vmstate only
+     * restores env->fpuc's raw bits; without routing through cpu_set_fpuc
+     * the fused FIST cvt_{rn,rm,rp} TCG ops keyed on tb->flags' HF_FPU_RC
+     * would round with the pre-load mode.
      */
-    env->cached_fpuc_rc = 0xFFFF;
+    cpu_set_fpuc(env, env->fpuc);
     /*
      * Real mode guest segments register DPL should be zero.
      * Older KVM version were setting it wrongly.

@@ -164,7 +164,14 @@ void x86_cpu_xrstor_all_areas(X86CPU *cpu, const void *buf, uint32_t buflen)
     env->fpop = legacy->fpop;
     env->fpstt = (swd >> 11) & 7;
     env->fpus = swd;
-    env->fpuc = cwd;
+    /*
+     * Route through cpu_set_fpuc so that the HF_FPU_RC / HF_FPU_PC bits in
+     * hflags and the cached_fpuc_rc miss-sentinel both track the restored
+     * rounding/precision mode. A plain env->fpuc = cwd leaves tb->flags'
+     * HF_FPU_RC stale, which would let the fused FIST cvt_{rn,rm,rp} TCG
+     * ops in translated code round with the pre-restore mode.
+     */
+    cpu_set_fpuc(env, cwd);
     for (i = 0; i < 8; ++i) {
         env->fptags[i] = !((twd >> i) & 1);
     }
