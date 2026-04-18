@@ -988,6 +988,272 @@ static void emit_mem_write_xy(ArmEmit *e, int memspace,
                                (uint8_t *)to_done));
 }
 
+/* --------------------------------------------------------------- *
+ * Parmove support: helpers for emitting DSP-register writes.
+ * --------------------------------------------------------------- */
+
+/*
+ * Width of each DSP register for the final mask on write.
+ * Mirrors `registers_mask[64]` in dsp_cpu.c (kept in-sync by hand
+ * — both must stay == the hardware register widths in the DSP56300
+ * PRM). 0 entries correspond to unused indices that a valid
+ * instruction encoding should never target.
+ */
+static const uint8_t dsp_jit_reg_bits[64] = {
+    [DSP_REG_X0]  = 24, [DSP_REG_X1]  = 24,
+    [DSP_REG_Y0]  = 24, [DSP_REG_Y1]  = 24,
+    [DSP_REG_A0]  = 24, [DSP_REG_B0]  = 24,
+    [DSP_REG_A2]  =  8, [DSP_REG_B2]  =  8,
+    [DSP_REG_A1]  = 24, [DSP_REG_B1]  = 24,
+    /* A and B are accumulator 'halves' that go through the
+     * accu-write path; not directly maskable via UBFX. */
+    [DSP_REG_A]   = 24, [DSP_REG_B]   = 24,
+    [DSP_REG_R0]  = 16, [DSP_REG_R1]  = 16, [DSP_REG_R2]  = 16, [DSP_REG_R3] = 16,
+    [DSP_REG_R4]  = 16, [DSP_REG_R5]  = 16, [DSP_REG_R6]  = 16, [DSP_REG_R7] = 16,
+    [DSP_REG_N0]  = 16, [DSP_REG_N1]  = 16, [DSP_REG_N2]  = 16, [DSP_REG_N3] = 16,
+    [DSP_REG_N4]  = 16, [DSP_REG_N5]  = 16, [DSP_REG_N6]  = 16, [DSP_REG_N7] = 16,
+    [DSP_REG_M0]  = 16, [DSP_REG_M1]  = 16, [DSP_REG_M2]  = 16, [DSP_REG_M3] = 16,
+    [DSP_REG_M4]  = 16, [DSP_REG_M5]  = 16, [DSP_REG_M6]  = 16, [DSP_REG_M7] = 16,
+    [DSP_REG_OMR] =  8, [DSP_REG_SP]  =  6,
+    [DSP_REG_SSH] = 16, [DSP_REG_SSL] = 16,
+    [DSP_REG_LA]  = 16, [DSP_REG_LC]  = 16,
+    [DSP_REG_SR]  = 16,
+};
+
+/*
+ * Emit code writing the 24-bit value in `value_reg` (Wd) to the
+ * given DSP register.
+ *
+ *   - DSP_REG_A / DSP_REG_B: do the three-way accu store
+ *     (A0=0, A1=value, A2 = sign(bit23))
+ *   - everything else: mask to register's native width and
+ *     store the single word.
+ *
+ * If dstreg is a 24-bit "wide" register, the caller must have
+ * already performed any "shift by 16" expansion that some parmove
+ * variants require. Most callers pass a value that's already in
+ * its destination-register layout.
+ *
+ * Clobbers: w0, w1, x3 (SCRATCH).
+ * Preserves value_reg.
+ */
+static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg)
+{
+    assert(value_reg != 0 && value_reg != 1 && value_reg != 3);
+
+    if (dstreg == DSP_REG_A || dstreg == DSP_REG_B) {
+        int off_x0 = (dstreg == DSP_REG_A) ? OFF_REG(DSP_REG_A0) : OFF_REG(DSP_REG_B0);
+        int off_x1 = (dstreg == DSP_REG_A) ? OFF_REG(DSP_REG_A1) : OFF_REG(DSP_REG_B1);
+        int off_x2 = (dstreg == DSP_REG_A) ? OFF_REG(DSP_REG_A2) : OFF_REG(DSP_REG_B2);
+
+        /* A0 / B0 = 0 */
+        emit_str_w_any(e, /*rs=*/31 /* WZR */, /*rn=*/19, SCRATCH, off_x0);
+        /* A1 / B1 = value */
+        emit_str_w_any(e, /*rs=*/value_reg,    /*rn=*/19, SCRATCH, off_x1);
+        /* A2 / B2 = (value >> 23) ? 0xff : 0
+         *   = -(value >> 23) & 0xff   (when bit 23 is 1, -1 = 0xFF...)
+         *
+         * Compute via: w0 = value >> 23; w0 &= 1; neg w0, w0; mask. */
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/value_reg, /*lsb=*/23, /*width=*/1);
+        emit_neg_w(e, /*rd=*/0, /*rm=*/0);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 8);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, off_x2);
+        return;
+    }
+
+    int bits = dsp_jit_reg_bits[dstreg & 63];
+    assert(bits > 0 && bits <= 24);
+
+    if (bits == 24) {
+        /* No masking: store full 24 bits (the DSP side of the
+         * register uses only low 24 bits anyway). */
+        emit_str_w_any(e, /*rs=*/value_reg, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
+    } else {
+        emit_ubfx_w(e, /*rd=*/1, /*rn=*/value_reg, 0, bits);
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
+    }
+}
+
+/*
+ * Emit code that reads the current value of DSP register `srcreg`
+ * into `value_reg` (W). For accumulators A / B the read goes
+ * through dsp_jit_helper_pm_read_accu24, which applies scaling
+ * and limiting per SR.S0/S1 and maintains SR.L — this is the
+ * slow path but matches the interpreter bit-exactly.
+ *
+ * Clobbers: w0, w1, x3. Preserves x19-x25 except value_reg.
+ * Must NOT be called with value_reg in {0, 1, 2, 3}.
+ */
+static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
+{
+    assert(value_reg != 0 && value_reg != 1 &&
+           value_reg != 2 && value_reg != 3);
+
+    if (srcreg == DSP_REG_A || srcreg == DSP_REG_B) {
+        /* BLR pm_read_accu24(dsp, numreg, &SP[scratch0]) */
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm32(e, /*rd=*/1, (uint32_t)srcreg);
+        emit_add_x_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH0);
+        emit_mov_imm64(e, /*rd=*/3,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_pm_read_accu24);
+        emit_blr(e, /*rn=*/3);
+        emit_ldr_w_imm(e, /*rd=*/value_reg, /*rn=*/31, OFF_SP_SCRATCH0);
+        return;
+    }
+
+    /* Simple register load. */
+    emit_ldr_w_any(e, /*rd=*/value_reg, /*rn=*/19, SCRATCH, OFF_REG(srcreg));
+}
+
+/* --------------------------------------------------------------- *
+ * Parmove translators
+ * --------------------------------------------------------------- */
+
+/*
+ * emu_pm_3  — 001d_dddd iiii_iiii #xx,R (literal into register).
+ *
+ * dstreg and the 8-bit literal are compile-time constants.
+ * For 24-bit "wide" regs (X0/X1/Y0/Y1/A/B), the literal is
+ * placed in bits 23:16 (shift left 16); for others the register's
+ * natural width mask applies.
+ *
+ * The ALU (opcodes_alu[inst & 0xff]) runs BEFORE the register
+ * write (interpreter order). For emu_move (opcode 0x00, no-op ALU)
+ * the caller is expected to pass a NULL alu and we skip the BLR.
+ */
+static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    uint32_t dstreg   = (inst >> 16) & 0x1f;
+    uint32_t srcvalue = (inst >> 8)  & 0xff;
+
+    /* Interpreter shifts srcvalue left 16 for wide destinations. */
+    bool shift_left_16 =
+        dstreg == DSP_REG_X0 || dstreg == DSP_REG_X1 ||
+        dstreg == DSP_REG_Y0 || dstreg == DSP_REG_Y1 ||
+        dstreg == DSP_REG_A  || dstreg == DSP_REG_B;
+    uint32_t final_value = shift_left_16 ? (srcvalue << 16) : srcvalue;
+
+    /* ALU first. */
+    if (alu != NULL) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+        emit_blr(e, /*rn=*/1);
+    }
+
+    /* Load the final value into a scratch and write to destination. */
+    emit_mov_imm32(e, /*rd=*/4, final_value);
+    emit_pm_write_reg(e, dstreg, /*value_reg=*/4);
+}
+
+/*
+ * emu_pm_5 — single x:/y: memory + register move.
+ *
+ * Bit 15 of inst selects direction:
+ *   bit15 = 1 → read memory into register (D)
+ *   bit15 = 0 → read register, write to memory (S)
+ *
+ * Bit 14 selects addressing form:
+ *   bit14 = 1 → ea via MMMRRR (calc_ea)
+ *   bit14 = 0 → short absolute address in inst[13:8]
+ *
+ * memspace = (inst>>19) & 1 (0=X, 1=Y).
+ * numreg   = ((inst>>16) & 7) | (((inst>>17) & 3) << 3) — 5-bit dest reg.
+ *
+ * Register allocation across the ALU BLR:
+ *   x22 = xy_addr (needed for mem write path; for read-from-mem
+ *                  path, addr is used immediately before ALU)
+ *   x23 = value (source register value / loaded memory value)
+ */
+static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    uint32_t value6   = (inst >> 8) & 0x3f;
+    uint32_t memspace = (inst >> 19) & 1;
+    /* Mirrors emu_pm_5: numreg low 3 bits from inst[18:16], high
+     * 2 bits from inst[21:20] positioned at numreg[4:3]. */
+    uint32_t numreg   = ((inst >> 16) & 7) | (((inst >> 20) & 3) << 3);
+    bool     write_d  = (inst & (1u << 15)) != 0;   /* dir */
+    bool     ea_form  = (inst & (1u << 14)) != 0;
+
+    /*
+     * Compute the address first. For ea_form=false the address is
+     * just value6 (short absolute); we load as a constant. For
+     * ea_form=true we go through emit_calc_ea_inline. We also need
+     * retour for the "#xxxxxx,D" mode-6 path: in that case the
+     * returned "addr" is actually an immediate 24-bit literal.
+     *
+     * For Phase 4a, we keep it simple: if ea_form and we might hit
+     * mode 6 with immediate-literal semantics, we ask
+     * emit_calc_ea_inline for retour and branch on it.
+     */
+
+    if (!ea_form) {
+        /* Short absolute: xy_addr = value6, retour = 0 */
+        emit_mov_imm32(e, /*rd=*/22, value6);
+    } else {
+        emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22,
+                            /*want_retour=*/true);
+    }
+
+    if (write_d) {
+        /*
+         * Memory -> register. Fetch value first (possibly
+         * immediate-literal via retour), then ALU, then write to
+         * register.
+         */
+
+        if (ea_form) {
+            /* Check retour; if set, value = xy_addr (immediate). */
+            emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+            uint32_t *to_mem = e->buf;
+            emit_cbz_w(e, /*rn=*/0, 0);      /* patched to "mem-read" */
+
+            /* Immediate case: value = xy_addr */
+            emit_mov_w_reg(e, /*rd=*/23, /*rn=*/22);
+            uint32_t *to_after = e->buf;
+            emit_b(e, 0);
+
+            uint32_t *mem_label = e->buf;
+            patch_branch(to_mem, (int32_t)((uint8_t *)mem_label -
+                                           (uint8_t *)to_mem));
+            emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22,
+                             /*value_reg=*/23);
+
+            uint32_t *after_label = e->buf;
+            patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                        (uint8_t *)to_after));
+        } else {
+            /* Short-absolute: retour always 0 */
+            emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22,
+                             /*value_reg=*/23);
+        }
+
+        /* ALU */
+        if (alu != NULL) {
+            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+            emit_blr(e, /*rn=*/1);
+        }
+
+        /* Write register */
+        emit_pm_write_reg(e, (int)numreg, /*value_reg=*/23);
+    } else {
+        /*
+         * Register -> memory. Fetch value (accu-path for A/B),
+         * then ALU, then write to memory.
+         */
+        emit_pm_read_reg(e, (int)numreg, /*value_reg=*/23);
+
+        if (alu != NULL) {
+            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+            emit_blr(e, /*rn=*/1);
+        }
+
+        emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22,
+                          /*value_reg=*/23);
+    }
+}
+
 /*
  * Shared per-op epilogue emitter. Called by both the non-parmove
  * stub (emit_instruction) and the parmove stubs (emit_parmove_pmN).
@@ -1121,6 +1387,57 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
     }
 }
 
+
+/*
+ * Emit a parmove stub: inst has inst >= 0x100000 (parallel-move form).
+ *
+ * Returns true if the parmove select is supported in this phase.
+ * Returns false if the parmove should fall back to the interpreter
+ * (translate_block's caller handles the bail).
+ *
+ * On success, emits:
+ *   - set cur_inst / cur_inst_len=1 / instr_cycle=2
+ *   - call the per-variant translator (emit_parmove_pmN)
+ *   - call emit_post_instruction_epilogue
+ */
+static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
+                              uint32_t inst, emu_func_t alu,
+                              uint32_t expected_next_pc)
+{
+    uint32_t select = (inst >> 20) & 0xf;
+
+    /* Set cur_inst, cur_inst_len=1, instr_cycle=2. */
+    emit_mov_imm32(e, /*rd=*/0, inst);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    emit_movz_w(e, /*rd=*/0, 1, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+
+    /* Skip the ALU BLR when opcodes_alu[0] (emu_move) is the
+     * selected ALU — it's a no-op, and most pure-MOVE parmoves in
+     * Xbox audio take that slot. */
+    emu_func_t effective_alu = dsp_jit_helper_alu_is_move(alu) ? NULL : alu;
+
+    switch (select) {
+    case 3:
+        /* 001d_dddd iiii_iiii #xx,R */
+        emit_parmove_pm3(e, inst, effective_alu);
+        break;
+    case 5:
+    case 6:
+    case 7:
+        /* 01dd_Xddd w_mm_mrrr — single x:/y: move (pm_5 family) */
+        emit_parmove_pm5(e, inst, effective_alu);
+        break;
+    default:
+        /* select 0/1/2/4/8-15 not yet implemented. */
+        return false;
+    }
+
+    emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    return true;
+}
 
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
@@ -1282,43 +1599,61 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
     while (num_ops < DSP_JIT_MAX_OPS_PER_BLOCK && pc < DSP_PRAM_SIZE) {
         uint32_t inst = dsp->pram[pc] & 0xffffff;
+        bool keep_going;
 
-        /* Phase 1 only translates non-parallel-move opcodes that map
-         * to a real emu_* handler. Parallel-move-only instructions
-         * (inst >= 0x100000) and unresolved opcodes fall back to the
-         * interpreter via dispatcher re-entry. */
         if (inst >= 0x100000) {
-            if (num_ops == 0) {
-                qemu_thread_jit_execute();
-                return NULL;
+            /* Parallel-move-bearing instruction (Phase 4). */
+            emu_func_t alu = dsp_jit_helper_lookup_alu(inst);
+            if (!alu) {
+                /* ALU entry is emu_undefined — bail. */
+                if (num_ops == 0) {
+                    qemu_thread_jit_execute();
+                    return NULL;
+                }
+                break;
             }
-            break;
-        }
 
-        emu_func_t emu = dsp_jit_helper_lookup_emu(inst);
-        if (!emu) {
-            if (num_ops == 0) {
-                qemu_thread_jit_execute();
-                return NULL;
+            uint32_t expected_next_pc = pc + 1;
+            if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc)) {
+                /* Variant not yet implemented: fall through to the
+                 * interpreter for this op. */
+                if (num_ops == 0) {
+                    qemu_thread_jit_execute();
+                    return NULL;
+                }
+                break;
             }
-            break;
+
+            s->pc_to_block[pc] = &s->blocks[pc_start];
+            pc_end = pc + 1;
+            pc = pc_end;
+            num_ops++;
+            keep_going = true;
+        } else {
+            emu_func_t emu = dsp_jit_helper_lookup_emu(inst);
+            if (!emu) {
+                if (num_ops == 0) {
+                    qemu_thread_jit_execute();
+                    return NULL;
+                }
+                break;
+            }
+
+            uint32_t inst_len = dsp_jit_helper_inst_length(inst);
+            bool is_term = dsp_jit_helper_is_terminator((void *)emu);
+            uint32_t expected_next_pc = pc + inst_len;
+
+            keep_going = emit_instruction(&e, &exits, pc, inst, inst_len,
+                                          emu, expected_next_pc, is_term);
+
+            for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
+                s->pc_to_block[p] = &s->blocks[pc_start];
+            }
+
+            pc_end = pc + inst_len;
+            pc = pc_end;
+            num_ops++;
         }
-
-        uint32_t inst_len = dsp_jit_helper_inst_length(inst);
-        bool is_term = dsp_jit_helper_is_terminator((void *)emu);
-
-        uint32_t expected_next_pc = pc + inst_len;
-
-        bool keep_going = emit_instruction(&e, &exits, pc, inst, inst_len,
-                                           emu, expected_next_pc, is_term);
-
-        for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
-            s->pc_to_block[p] = &s->blocks[pc_start];
-        }
-
-        pc_end = pc + inst_len;
-        pc = pc_end;
-        num_ops++;
 
         if (!keep_going) {
             break;

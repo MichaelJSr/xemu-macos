@@ -1521,6 +1521,26 @@ int dsp_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest)
     return emu_pm_read_accu24(dsp, numreg, dest);
 }
 
+emu_func_t dsp_jit_helper_lookup_alu(uint32_t inst)
+{
+    /* Returns opcodes_alu[inst & 0xff] — the ALU kernel selected
+     * by a parmove-bearing instruction. Returns NULL for the
+     * emu_undefined entries so the JIT can bail on those. */
+    emu_func_t f = opcodes_alu[inst & 0xff];
+    if (f == emu_undefined) {
+        return NULL;
+    }
+    return f;
+}
+
+/* Identifies the 'pure move' ALU entry (opcodes_alu[0] == emu_move),
+ * which is a no-op on the A/B accumulator — the parmove JIT can
+ * skip the BLR in this case to save a call. */
+bool dsp_jit_helper_alu_is_move(emu_func_t fn)
+{
+    return fn == emu_move;
+}
+
 int dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr)
 {
     return emu_calc_ea(dsp, ea_mode, dst_addr);
