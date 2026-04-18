@@ -20,6 +20,38 @@
 #include "renderer.h"
 #include <limits.h>
 
+/*
+ * 5 s timeout on fence waits. Normal CPU-side waits should be sub-ms
+ * even on MoltenVK; anything past the seconds range is a real hang
+ * (driver mutex deadlock, queue starvation, GPU hang). Previously
+ * UINT64_MAX masked these as silent freezes with no user-visible
+ * diagnostic, matching the failure mode of the reverted depth-export
+ * experiment that deadlocked MoltenVK's internal mutex.
+ */
+#define NV2A_VK_FENCE_WAIT_NS (5ull * 1000ull * 1000ull * 1000ull)
+
+static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
+                                     const char *where)
+{
+    VkResult res =
+        vkWaitForFences(device, 1, &fence, VK_TRUE, NV2A_VK_FENCE_WAIT_NS);
+    if (res == VK_SUCCESS) {
+        return;
+    }
+    if (res == VK_TIMEOUT) {
+        fprintf(stderr,
+                "xemu: vkWaitForFences timeout in %s (>5s). GPU or driver "
+                "appears hung; aborting so the user sees the failure "
+                "rather than a frozen window.\n",
+                where);
+    } else {
+        fprintf(stderr,
+                "xemu: vkWaitForFences failed in %s: VkResult=%d\n",
+                where, (int)res);
+    }
+    abort();
+}
+
 static void create_command_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -76,8 +108,8 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     };
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
-    VK_CHECK(vkWaitForFences(r->device, 1, &r->aux_fence, VK_TRUE,
-                             UINT64_MAX));
+    vk_wait_for_fence_or_die(r->device, r->aux_fence,
+                             "pgraph_vk_end_single_time_commands");
 
     r->in_aux_command_buffer = false;
 }
@@ -88,8 +120,8 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
     int slot = r->current_flight;
 
     if (r->flight[slot].submitted) {
-        VK_CHECK(vkWaitForFences(r->device, 1, &r->flight[slot].fence,
-                                 VK_TRUE, UINT64_MAX));
+        vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
+                                 "pgraph_vk_wait_for_previous_flight");
         r->flight[slot].submitted = false;
     }
 
