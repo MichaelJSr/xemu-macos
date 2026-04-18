@@ -221,12 +221,18 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         /* methods that take objects.
          * TODO: Check this range is correct for the nv2a */
         if (method >= 0x180 && method < 0x200) {
-            //bql_lock();
+            /*
+             * ramht_lookup reads pfifo.regs[NV_PFIFO_RAMHT] and pfifo-
+             * adjacent channel state; all of this is already guarded
+             * by d->pfifo.lock (held here). BQL is not required and
+             * was intentionally removed when the BQL-event-batching
+             * experiment was reverted (see README "Failed / reverted
+             * experiments").
+             */
             RAMHTEntry entry = ramht_lookup(d, parameter);
             assert(entry.valid);
             // assert(entry.channel_id == state->channel_id);
             parameter = entry.instance;
-            //bql_unlock();
         }
 
         enum FIFOEngine engine = GET_MASK(*engine_reg, 3 << (4*subchannel));
@@ -545,20 +551,12 @@ void *pfifo_thread(void *arg)
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
             /*
-             * Untimed wait. Every pfifo_kick call site in the tree
-             * holds d->pfifo.lock across the kick-set + broadcast
-             * pair (pfifo_write, pgraph.c:pgraph_write and
-             * do_wait_for_renderer_switch, user.c:user_write,
-             * nv2a.c:nv2a_unlock_fifo, the pgraph/{gl,vk}/{surface,
-             * display,renderer}.c sync entry points), so a
-             * concurrent kick cannot slip between our kick-check and
-             * qemu_cond_wait's atomic release. Removes the earlier
-             * 1 ms safety-net wake-up (~1 kHz) that was restored
-             * while diagnosing a pre-existing level-transition
-             * freeze; that freeze is unrelated to this wait path
-             * (confirmed via XEMU_PFIFO_HEARTBEAT: during the freeze
-             * the loop iters counter keeps climbing at the same
-             * rate regardless of timed vs untimed wait).
+             * Untimed wait. Invariant: every pfifo_kick call site
+             * holds d->pfifo.lock across the fifo_kick-set +
+             * cond_broadcast pair (see comment on pfifo_kick above),
+             * so the reader's kick-check + qemu_cond_wait atomic
+             * release is race-free. Eliminates the earlier ~1 kHz
+             * safety-net wake-up.
              */
             qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
         }
