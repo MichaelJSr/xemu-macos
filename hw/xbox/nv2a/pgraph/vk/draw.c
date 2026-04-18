@@ -1014,9 +1014,18 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
         return true;
     }
 
+    /*
+     * NV_PGRAPH_CONTROL_3 is intentionally omitted: its bits
+     * (SHADEMODE, FOG_MODE, FOGENABLE, POINTPARAMSENABLE) already
+     * route through ShaderState (glsl/shaders.c:49 tracks CONTROL_3
+     * dirty and bumps shader_bindings_changed), and PROVOKING_VERTEX
+     * is consumed CPU-side (draw.c:145,293,398). Dropping it from
+     * the fast-dirty check avoids spurious pipeline rehash +
+     * cache lookups on every fog/shade-mode toggle.
+     */
     const unsigned int regs[] = {
         NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
-        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,   NV_PGRAPH_SETUPRASTER,
+        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_SETUPRASTER,
     };
 
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {
@@ -1050,9 +1059,10 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
 
     // FIXME: Register masking
     // FIXME: Use more dynamic state updates
+    /* CONTROL_3 intentionally omitted — see PipelineKey in renderer.h. */
     const int regs[] = {
         NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
-        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,   NV_PGRAPH_SETUPRASTER,
+        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_SETUPRASTER,
     };
     nv2a_vk_assert(ARRAY_SIZE(regs) == ARRAY_SIZE(key->regs));
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {

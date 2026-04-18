@@ -72,7 +72,16 @@ typedef struct PipelineKey {
     bool clear;
     RenderPassState render_pass_state;
     ShaderState shader_state;
-    uint32_t regs[6];
+    /*
+     * 5 pipeline-affecting regs (CONTROL_0/1/2, BLEND, SETUPRASTER).
+     * NV_PGRAPH_CONTROL_3 was previously included but its bits
+     * (SHADEMODE, FOG_MODE, FOGENABLE, POINTPARAMSENABLE,
+     * PROVOKING_VERTEX) are already captured by ShaderState or
+     * consumed CPU-side — see init_pipeline_key / check_pipeline_dirty
+     * in draw.c and pgraph_glsl_check_shader_state_dirty in
+     * glsl/shaders.c.
+     */
+    uint32_t regs[5];
     VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
 } PipelineKey;
