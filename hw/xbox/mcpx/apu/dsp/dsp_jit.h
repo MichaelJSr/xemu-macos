@@ -100,6 +100,48 @@ void dsp_jit_helper_ccr_e_u_n_z(dsp_core_t *dsp, uint32_t reg0,
  */
 uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed);
 
+/*
+ * Phase 5 shims — expose the static emu_calc_cc + dsp_stack_push /
+ * dsp_stack_pop helpers from dsp_cpu.c so the JIT's inline control-
+ * flow emitters can BLR them for the conditional / subroutine ops.
+ *
+ * dsp_jit_helper_stack_push wraps dsp_stack_push(dsp, pc, sr, 0) —
+ * the "sshOnly = 0" form that every control-flow handler uses.
+ */
+int  dsp_jit_helper_calc_cc(dsp_core_t *dsp, uint32_t cc_code);
+void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
+                               uint32_t newsr);
+void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
+                              uint32_t *newsr);
+
+/*
+ * Phase 5 shim — classifies an emu_func_t control-flow handler so
+ * the JIT can pick an inline emitter without direct access to the
+ * file-static emu_* symbols. Returns one of the DSP_JIT_CF_* tags
+ * below, or DSP_JIT_CF_NONE for handlers not covered by the inline
+ * control-flow path (fallback to BLR).
+ */
+enum {
+    DSP_JIT_CF_NONE = 0,
+    DSP_JIT_CF_JMP_IMM,
+    DSP_JIT_CF_JSR_IMM,
+    DSP_JIT_CF_RTS,
+    DSP_JIT_CF_RTI,
+    DSP_JIT_CF_BRA_IMM,
+    DSP_JIT_CF_BRA_LONG,
+    DSP_JIT_CF_BSR_IMM,
+    DSP_JIT_CF_BSR_LONG,
+    DSP_JIT_CF_JCC_IMM,
+    DSP_JIT_CF_JSCC_IMM,
+    DSP_JIT_CF_BCC_IMM,
+    DSP_JIT_CF_BCC_LONG,
+    DSP_JIT_CF_REP_IMM,
+    DSP_JIT_CF_DO_IMM,
+    DSP_JIT_CF_DOR_IMM,
+    DSP_JIT_CF_ENDDO,
+};
+int dsp_jit_helper_classify_cf(void *fn);
+
 #else  /* !DSP_JIT_SUPPORTED */
 
 static inline void dsp_jit_init(dsp_core_t *dsp) { (void)dsp; }

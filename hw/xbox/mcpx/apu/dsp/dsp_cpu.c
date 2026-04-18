@@ -1603,4 +1603,57 @@ uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
     return (uint64_t)(((int64_t)(r << 8)) >> 8);
 }
 
+/* ============================================================== *
+ * Phase 5 shims — control-flow helpers + CF classifier.
+ *
+ * emu_calc_cc / dsp_stack_push / dsp_stack_pop are file-static, so
+ * expose them via trivial wrappers that the JIT's inline CF
+ * emitters BLR for the conditional + subroutine ops.
+ *
+ * dsp_jit_helper_classify_cf maps an emu_func_t handler pointer
+ * to a DSP_JIT_CF_* tag so the JIT can decide which inline emitter
+ * to use without direct access to the static emu_* symbols. Any
+ * handler not covered returns DSP_JIT_CF_NONE and the JIT falls
+ * back to the plain BLR path — zero regression.
+ * ============================================================== */
+
+int dsp_jit_helper_calc_cc(dsp_core_t *dsp, uint32_t cc_code)
+{
+    return emu_calc_cc(dsp, cc_code);
+}
+
+void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
+                               uint32_t newsr)
+{
+    dsp_stack_push(dsp, newpc, newsr, 0);
+}
+
+void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
+                              uint32_t *newsr)
+{
+    dsp_stack_pop(dsp, newpc, newsr);
+}
+
+int dsp_jit_helper_classify_cf(void *fn)
+{
+    emu_func_t f = (emu_func_t)fn;
+    if (f == emu_jmp_imm)  return DSP_JIT_CF_JMP_IMM;
+    if (f == emu_jsr_imm)  return DSP_JIT_CF_JSR_IMM;
+    if (f == emu_rts)      return DSP_JIT_CF_RTS;
+    if (f == emu_rti)      return DSP_JIT_CF_RTI;
+    if (f == emu_bra_imm)  return DSP_JIT_CF_BRA_IMM;
+    if (f == emu_bra_long) return DSP_JIT_CF_BRA_LONG;
+    if (f == emu_bsr_imm)  return DSP_JIT_CF_BSR_IMM;
+    if (f == emu_bsr_long) return DSP_JIT_CF_BSR_LONG;
+    if (f == emu_jcc_imm)  return DSP_JIT_CF_JCC_IMM;
+    if (f == emu_jscc_imm) return DSP_JIT_CF_JSCC_IMM;
+    if (f == emu_bcc_imm)  return DSP_JIT_CF_BCC_IMM;
+    if (f == emu_bcc_long) return DSP_JIT_CF_BCC_LONG;
+    if (f == emu_rep_imm)  return DSP_JIT_CF_REP_IMM;
+    if (f == emu_do_imm)   return DSP_JIT_CF_DO_IMM;
+    if (f == emu_dor_imm)  return DSP_JIT_CF_DOR_IMM;
+    if (f == emu_enddo)    return DSP_JIT_CF_ENDDO;
+    return DSP_JIT_CF_NONE;
+}
+
 #endif  /* DSP_JIT_SUPPORTED */

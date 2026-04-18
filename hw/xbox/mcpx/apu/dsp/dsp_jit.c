@@ -1049,6 +1049,7 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_INSTR_CYCLE              ((uint32_t)offsetof(dsp_core_t, instr_cycle))
 #define OFF_NUM_INST                 ((uint32_t)offsetof(dsp_core_t, num_inst))
 #define OFF_LOOP_REP                 ((uint32_t)offsetof(dsp_core_t, loop_rep))
+#define OFF_PC_ON_REP                ((uint32_t)offsetof(dsp_core_t, pc_on_rep))
 #define OFF_IS_IDLE                  ((uint32_t)offsetof(dsp_core_t, is_idle))
 #define OFF_INTERRUPT_COUNTER        ((uint32_t)offsetof(dsp_core_t, interrupt_counter))
 #define OFF_INTERRUPT_STATE          ((uint32_t)offsetof(dsp_core_t, interrupt_state))
@@ -3344,14 +3345,579 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     return true;
 }
 
+/* ============================================================== *
+ * Phase 5a — inline control-flow handlers (JMP / JSR / BRA / BSR /
+ * RTS / RTI / JCC / JSCC / BCC).
+ *
+ * Replaces the per-op `BLR emu_<cf>` round-trip for the common
+ * static-target branches with inline ARM64 that mirrors the
+ * interpreter's handler bit-exactly. Handlers not covered (jclr /
+ * jset / jsclr / jsset / brclr / brset + the `_ea` / `_reg`
+ * variants of the inlined ops) fall through to ALU_FALLBACK-style
+ * BLR — zero behavioural change for those opcodes.
+ *
+ * Invariants used by every CF emitter:
+ *   - At entry, emit_instruction has already set cur_inst = inst,
+ *     cur_inst_len = 1, instr_cycle = 2. The CF emitter overrides
+ *     these as the interp handler would.
+ *   - dsp->pc is UNCHANGED at handler entry. The post-exec update
+ *     adds cur_inst_len to pc; handlers that take a branch write
+ *     pc = target AND cur_inst_len = 0 so the post-exec update is
+ *     a no-op; the block exits via the PC-mismatch check in
+ *     emit_post_instruction_epilogue.
+ *   - All inlined CF ops are classified as terminators by
+ *     dsp_jit_helper_is_terminator, so translate_block ends the
+ *     block after emitting them (no block-internal fall-through
+ *     worries).
+ * ============================================================== */
+
+static uint64_t g_cf_inlined_count;
+static uint64_t g_cf_fallback_count;
+
+/* Helper: pc = newpc, cur_inst_len = 0. Clobbers w0. */
+static void emit_cf_set_pc_branch(ArmEmit *e, uint32_t newpc)
+{
+    emit_mov_imm32(e, /*rd=*/0, newpc);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_PC);
+    emit_str_w_any(e, /*rs=*/31 /*WZR*/, /*rn=*/19, SCRATCH,
+                   OFF_CUR_INST_LEN);
+}
+
+/* Helper: instr_cycle = `cycles`. Overrides rather than adds — the
+ * total cycle count for a CF op is fixed at translate time (no
+ * variant depends on dsp state). Clobbers w0. */
+static void emit_cf_set_cycles(ArmEmit *e, unsigned cycles)
+{
+    emit_movz_w(e, /*rd=*/0, (uint16_t)cycles, 0);
+    emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+}
+
+/* Emit: BLR dsp_jit_helper_stack_push(dsp, return_pc, SR). Clobbers
+ * x0, w1, w2, x4, x30. */
+static void emit_cf_stack_push(ArmEmit *e, uint32_t return_pc)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);                /* x0 = dsp */
+    emit_mov_imm32(e, /*rd=*/1, return_pc);                /* w1 = retpc */
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_SR); /* w2 = SR */
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+}
+
+/* Emit: BLR dsp_jit_helper_stack_pop(dsp, &SP_SCRATCH0, &SP_SCRATCH1).
+ * On return, *SP_SCRATCH0 = popped pc, *SP_SCRATCH1 = popped sr.
+ * Clobbers x0, x1, x2, x4, x30. */
+static void emit_cf_stack_pop(ArmEmit *e)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_add_x_imm(e, /*rd=*/1, /*rn=*/31 /*SP*/, OFF_SP_SCRATCH0);
+    emit_add_x_imm(e, /*rd=*/2, /*rn=*/31 /*SP*/, OFF_SP_SCRATCH1);
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_pop);
+    emit_blr(e, /*rn=*/4);
+}
+
+/*
+ * Emit the JSR/BSR-style conditional stack push:
+ *   if (interrupt_state != LONG) stack_push(dsp, return_pc, SR);
+ *   else                         interrupt_state = DISABLED;
+ *
+ * Pattern is identical for emu_jsr_imm / emu_bsr_imm / emu_bsr_long
+ * (see dsp_emu.c.inc:7244-7261, 6340-6355, 6322-6337). emu_jscc /
+ * emu_bcc don't take this path — they push unconditionally on the
+ * "taken" branch and skip the push otherwise.
+ *
+ * Clobbers x0, w1, w2, x4, x30.
+ */
+static void emit_cf_cond_stack_push_jsr(ArmEmit *e, uint32_t return_pc)
+{
+    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
+    emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, DSP_INTERRUPT_LONG);
+
+    /* If interrupt_state == LONG (w0 == 0) after the sub, branch to
+     * the "disable" leg. Else fall-through into the push. */
+    uint32_t *to_disable = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    emit_cf_stack_push(e, return_pc);
+
+    uint32_t *to_after = e->buf;
+    emit_b(e, 0);
+
+    /* LONG leg: interrupt_state = DSP_INTERRUPT_DISABLED */
+    uint32_t *disable_label = e->buf;
+    patch_branch(to_disable,
+                 (int32_t)((uint8_t *)disable_label -
+                           (uint8_t *)to_disable));
+    emit_movz_w(e, /*rd=*/0, DSP_INTERRUPT_DISABLED, 0);
+    emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
+
+    uint32_t *after_label = e->buf;
+    /* Use patch_b (imm26 field) for the unconditional B above;
+     * patch_branch is for the imm19-field CBZ / B.cond form and
+     * would silently leave the low 5 bits of imm26 as zero. */
+    patch_b(to_after,
+            (int32_t)((uint8_t *)after_label -
+                      (uint8_t *)to_after));
+}
+
+/* BLR dsp_jit_helper_calc_cc(dsp, cc_code). Result in w0. Clobbers
+ * x0, w1, x2, x30. */
+static void emit_cf_calc_cc(ArmEmit *e, uint32_t cc_code)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm32(e, /*rd=*/1, cc_code);
+    emit_mov_imm64(e, /*rd=*/2,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_calc_cc);
+    emit_blr(e, /*rn=*/2);
+}
+
+/*
+ * Decode a 9-bit PC-relative immediate from the low bits of an
+ * emu_bra_imm / emu_bsr_imm / emu_bcc_imm instruction word:
+ *   xxx = inst[4:0] | (inst[9:6] << 5)
+ *   signed_xxx = sign-extend(xxx, 9 bits)
+ * Returns a 32-bit signed offset.
+ */
+static int32_t cf_decode_signed_9(uint32_t inst)
+{
+    uint32_t xxx = (inst & 0x1f) + ((inst & (0xf << 6)) >> 1);
+    /* sign-extend from bit 8 (9 bits total) */
+    if (xxx & 0x100) {
+        xxx |= ~0x1ffu;
+    }
+    return (int32_t)xxx;
+}
+
+/* JMP xxx (emu_jmp_imm). Unconditional absolute branch, 12-bit
+ * absolute target from inst[11:0]. */
+static void emit_cf_jmp_imm_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t newpc = inst & 0xfff;
+    emit_cf_set_pc_branch(e, newpc);
+    emit_cf_set_cycles(e, 4);
+}
+
+/* JSR xxx (emu_jsr_imm). Absolute 12-bit target; pushes return addr
+ * unless a LONG interrupt is in progress. */
+static void emit_cf_jsr_imm_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    uint32_t newpc = inst & 0xfff;
+    /* Return address is pc + cur_inst_len. emit_instruction sets
+     * cur_inst_len = 1 pre-handler; for emu_jsr_imm (1-word), the
+     * return address is pc + 1. */
+    emit_cf_cond_stack_push_jsr(e, pc + 1);
+    emit_cf_set_pc_branch(e, newpc);
+    emit_cf_set_cycles(e, 4);
+}
+
+/* RTS (emu_rts). Pops (newpc, newsr), sets pc = newpc,
+ * cur_inst_len = 0. Notably does NOT restore SR (RTI does). */
+static void emit_cf_rts_op(ArmEmit *e)
+{
+    emit_cf_stack_pop(e);
+    /* w1 = popped pc, w2 = popped sr (ignored for RTS) */
+    emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/31, OFF_SP_SCRATCH0);
+    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+    emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_cf_set_cycles(e, 4);
+}
+
+/* RTI (emu_rti). Like RTS + restores SR. */
+static void emit_cf_rti_op(ArmEmit *e)
+{
+    emit_cf_stack_pop(e);
+    emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/31, OFF_SP_SCRATCH0);
+    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+    emit_ldr_w_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH1);
+    emit_str_w_any(e, /*rs=*/2, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_cf_set_cycles(e, 4);
+}
+
+/* BRA xxx (emu_bra_imm). 9-bit signed PC-relative; no cycle adjust. */
+static void emit_cf_bra_imm_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    int32_t off = cf_decode_signed_9(inst);
+    uint32_t newpc = (pc + (uint32_t)off) & 0xffffff;
+    emit_cf_set_pc_branch(e, newpc);
+    /* emu_bra_imm leaves instr_cycle at 2 (preset). */
+}
+
+/* BRA xxxx (emu_bra_long). 2-word; xxxx is the second word. pc +=
+ * xxxx; pc &= 0xffffff. */
+static void emit_cf_bra_long_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                                uint32_t inst)
+{
+    (void)inst;
+    /* Bake the second word from pram. Self-modifying writes to
+     * pram[pc+1] invalidate this block via dsp_jit_invalidate, so
+     * the immediate stays consistent with the pram content the
+     * interpreter would read at runtime. */
+    uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    uint32_t newpc = (pc + xxxx) & 0xffffff;
+    emit_cf_set_pc_branch(e, newpc);
+}
+
+/* BSR xxx (emu_bsr_imm). 9-bit PC-rel, cond push, +2 cycles. */
+static void emit_cf_bsr_imm_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    int32_t off = cf_decode_signed_9(inst);
+    uint32_t newpc = (pc + (uint32_t)off) & 0xffffff;
+    emit_cf_cond_stack_push_jsr(e, pc + 1);
+    emit_cf_set_pc_branch(e, newpc);
+    emit_cf_set_cycles(e, 4);
+}
+
+/* BSR xxxx (emu_bsr_long). 2-word; +4 cycles. */
+static void emit_cf_bsr_long_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                                uint32_t inst)
+{
+    (void)inst;
+    uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    uint32_t newpc = (pc + xxxx) & 0xffffff;
+    /* Interp does cur_inst_len++ before the push, so the return
+     * address is pc + 2 for bsr_long. */
+    emit_cf_cond_stack_push_jsr(e, pc + 2);
+    emit_cf_set_pc_branch(e, newpc);
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
+ * JCC xxx (emu_jcc_imm). Conditional 12-bit absolute branch.
+ * Taken: pc = newpc; cur_inst_len = 0.
+ * Cycles: always +2 (regardless of taken/not-taken).
+ */
+static void emit_cf_jcc_imm_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t newpc = inst & 0xfff;
+    uint32_t cc_code = (inst >> 12) & 0xf;
+    emit_cf_calc_cc(e, cc_code);
+
+    /* w0 = 0 → not taken; skip the branch write. */
+    uint32_t *to_end = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    /* Taken: pc = newpc; cur_inst_len = 0. */
+    emit_cf_set_pc_branch(e, newpc);
+
+    uint32_t *end_label = e->buf;
+    patch_branch(to_end, (int32_t)((uint8_t *)end_label -
+                                   (uint8_t *)to_end));
+    emit_cf_set_cycles(e, 4);
+}
+
+/*
+ * JSCC xxx (emu_jscc_imm). Like JCC but also pushes (pc +
+ * cur_inst_len, SR) when taken. For a 1-word jscc the return
+ * address is pc + 1.
+ */
+static void emit_cf_jscc_imm_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    uint32_t newpc = inst & 0xfff;
+    uint32_t cc_code = (inst >> 12) & 0xf;
+    emit_cf_calc_cc(e, cc_code);
+
+    uint32_t *to_end = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    /* Taken: push, then set pc. */
+    emit_cf_stack_push(e, pc + 1);
+    emit_cf_set_pc_branch(e, newpc);
+
+    uint32_t *end_label = e->buf;
+    patch_branch(to_end, (int32_t)((uint8_t *)end_label -
+                                   (uint8_t *)to_end));
+    emit_cf_set_cycles(e, 4);
+}
+
+/* BCC xxx (emu_bcc_imm). 9-bit signed PC-rel, 1-word, no cycle
+ * adjust. */
+static void emit_cf_bcc_imm_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    int32_t off = cf_decode_signed_9(inst);
+    uint32_t newpc = (pc + (uint32_t)off) & 0xffffff;
+    uint32_t cc_code = (inst >> 12) & 0xf;
+    emit_cf_calc_cc(e, cc_code);
+
+    uint32_t *to_end = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    emit_cf_set_pc_branch(e, newpc);
+
+    uint32_t *end_label = e->buf;
+    patch_branch(to_end, (int32_t)((uint8_t *)end_label -
+                                   (uint8_t *)to_end));
+    /* instr_cycle stays at the 2 preset by emit_instruction. */
+}
+
+/* BCC xxxx (emu_bcc_long). 2-word PC-rel; taken: cur_inst_len = 0,
+ * pc += xxxx. Not-taken: cur_inst_len++ (to 2, handler increments
+ * first). No cycle adjust. The block exits either way (terminator
+ * + PC mismatch via the incremented length). */
+static void emit_cf_bcc_long_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                                uint32_t inst)
+{
+    uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    uint32_t newpc = (pc + xxxx) & 0xffffff;
+    uint32_t cc_code = inst & 0xf;
+    emit_cf_calc_cc(e, cc_code);
+    /* w0 holds the cc result here. Park it in a callee-saved reg
+     * (x22) so we can reuse w0 for the cur_inst_len store below
+     * without losing the compare value. x22 is part of the
+     * parmove save-slot pool; safe to clobber inside a CF op (no
+     * parmove/ALU runs concurrently with a CF terminator). */
+    emit_mov_w_reg(e, /*rd=*/22, /*rn=*/0);
+
+    /* Mirror interp: set cur_inst_len = 2 unconditionally first
+     * (the handler does this before the cc check — see
+     * dsp_emu.c.inc:5974). Then if taken, override to 0. */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    uint32_t *to_end = e->buf;
+    emit_cbz_w(e, /*rn=*/22, 0);
+
+    emit_cf_set_pc_branch(e, newpc);
+
+    uint32_t *end_label = e->buf;
+    patch_branch(to_end, (int32_t)((uint8_t *)end_label -
+                                   (uint8_t *)to_end));
+}
+
+/* ============================================================== *
+ * Phase 6 — inline loop handlers (REP / DO / DOR / ENDDO).
+ *
+ * Same design as Phase 5a's CF emitters: emit the interpreter's
+ * logic inline, relying on emit_post_instruction_epilogue's
+ * loop_rep / PC-mismatch / jit_exit_block_request checks to exit
+ * the block cleanly. The REP/DO/ENDDO handlers themselves are
+ * trivial register + stack updates; the loop-body iteration
+ * arithmetic is entirely handled by the existing
+ * dsp_postexecute_update_pc BLR in the epilogue (which the JIT
+ * invokes for every op, including the loop body's own ops).
+ *
+ * None of these are chain candidates: REP sets loop_rep which
+ * forces an exit to the C dispatcher after the single stub; DO/
+ * DOR set SR.LF which the post-exec PC check reads each subsequent
+ * iteration; ENDDO pops the loop stack — all semantics live in
+ * post-exec, not in the instruction itself.
+ * ============================================================== */
+
+/* Common REP prologue: LCSAVE = LC; pc_on_rep = 1; loop_rep = 1.
+ * Clobbers w0. */
+static void emit_cf_rep_common_start(ArmEmit *e)
+{
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LCSAVE));
+    emit_movz_w(e, /*rd=*/0, 1, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_PC_ON_REP);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+}
+
+/* emu_rep_imm (single-word). LC = inst[15:8] | ((inst[3:0]) << 8). */
+static void emit_cf_rep_imm_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t lc = ((inst >> 8) & 0xff) | ((inst & 0xf) << 8);
+    emit_cf_rep_common_start(e);
+    emit_mov_imm32(e, /*rd=*/0, lc);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_cf_set_cycles(e, 4);
+}
+
+/* Common DO/DOR suffix: push(pc+2, SR); SR |= (1<<LF); LC = imm;
+ * cycles = 6. Clobbers w0..w2, w4, x30.
+ * `new_la_reg` : scratch W reg currently holding the computed LA
+ *                value (not used here; LA is written before this
+ *                helper by the caller).
+ */
+static void emit_cf_do_suffix(ArmEmit *e, uint32_t pc, uint32_t lc_imm)
+{
+    /* cur_inst_len++ — it was 1 after emit_instruction preset,
+     * handler interprets the 2nd word so it bumps to 2. */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    /* stack_push(pc + cur_inst_len = pc + 2, SR) */
+    emit_cf_stack_push(e, pc + 2);
+
+    /* SR |= (1 << DSP_SR_LF) ; DSP_SR_LF = 15 ; bit value = 0x8000 */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* LC = 12-bit imm */
+    emit_mov_imm32(e, /*rd=*/0, lc_imm);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);  /* preset 2 + handler += 4 = 6 */
+}
+
+/*
+ * emu_do_imm (2-word).
+ *   push(LA, LC)
+ *   LA = pram[pc+1] & 0xffff
+ *   cur_inst_len++
+ *   push(pc+cur_inst_len, SR)
+ *   SR |= LF
+ *   LC = 12-bit imm from inst
+ *   cycles += 4
+ */
+static void emit_cf_do_imm_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                              uint32_t inst)
+{
+    uint32_t lc = ((inst >> 8) & 0xff) | ((inst & 0xf) << 8);
+    uint32_t la = (pc + 1 < DSP_PRAM_SIZE) ? (dsp->pram[pc + 1] & 0xffff) : 0;
+
+    /* stack_push(LA, LC). Load values first. w1=LA, w2=LC. */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    /* LA = pram[pc+1] & 0xffff (baked immediate) */
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    emit_cf_do_suffix(e, pc, lc);
+}
+
+/*
+ * emu_dor_imm (2-word). Same as DO except LA = (pc + xxxx) & 0xffff.
+ */
+static void emit_cf_dor_imm_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                               uint32_t inst)
+{
+    uint32_t lc = ((inst >> 8) & 0xff) | ((inst & 0xf) << 8);
+    uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    uint32_t la = (pc + xxxx) & 0xffff;
+
+    /* Note the interp order differs from DO: cur_inst_len++ before
+     * the first push. Mirror that by incrementing here first.
+     * Matters only for any handler that observes cur_inst_len mid-
+     * push (stack_push doesn't). */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    /* push(LA, LC) */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    /* LA = (pc + xxxx) & 0xffff */
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    /* push(pc+cur_inst_len=pc+2, SR) */
+    emit_cf_stack_push(e, pc + 2);
+
+    /* SR |= LF */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* LC = 12-bit imm */
+    emit_mov_imm32(e, /*rd=*/0, lc);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
+ * emu_enddo:
+ *   pop(&saved_pc, &saved_sr)     — saved_pc discarded
+ *   SR = (SR & 0x7f) | (saved_sr & (1<<LF))
+ *   pop(&LA, &LC)
+ *
+ * Cycle: the handler doesn't += anything, so stays at the preset 2.
+ */
+static void emit_cf_enddo_op(ArmEmit *e)
+{
+    /* First pop → [SCRATCH0, SCRATCH1] = (saved_pc, saved_sr). */
+    emit_cf_stack_pop(e);
+
+    /* w2 = saved_sr; w1 = saved_sr & (1<<LF). */
+    emit_ldr_w_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH1);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_and_w_reg(e, /*rd=*/1, /*rn=*/2, /*rm=*/1);
+
+    /* w0 = SR & 0x7f */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/2, 0x7fu);
+    emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+
+    /* SR = w0 | w1 */
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* Second pop: dsp_stack_pop(dsp, &LA_reg, &LC_reg). We can
+     * pass the addresses of the register-file slots directly —
+     * registers[] is at a known offset, each u32, so
+     * x1 = x19 + OFF_REG(LA), x2 = x19 + OFF_REG(LC).
+     *
+     * Both offsets fit under 4095 for emit_add_x_imm (LA=0xFA,
+     * LC=0xFE; BUG checker: OFF_REG(DSP_REG_LA) = 0x4 + 4*62 =
+     * 0xFC so well within 0xfff). */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_add_x_imm(e, /*rd=*/1, /*rn=*/19, OFF_REG(DSP_REG_LA));
+    emit_add_x_imm(e, /*rd=*/2, /*rn=*/19, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_pop);
+    emit_blr(e, /*rn=*/4);
+}
+
+/*
+ * CF dispatcher: classify the handler; if supported, emit the
+ * inline kernel and return true. Otherwise return false so the
+ * caller emits the original BLR fallback.
+ *
+ * `pc` is the translator-time PC of the instruction being emitted
+ * (needed for PC-relative branches and jsr/bsr return-address
+ * encoding). `dsp` is used to peek at pram for 2-word CF ops'
+ * second word.
+ */
+static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                         uint32_t inst, emu_func_t fn)
+{
+    int kind = dsp_jit_helper_classify_cf((void *)fn);
+    switch (kind) {
+    case DSP_JIT_CF_JMP_IMM:   emit_cf_jmp_imm_op(e, inst);         break;
+    case DSP_JIT_CF_JSR_IMM:   emit_cf_jsr_imm_op(e, pc, inst);     break;
+    case DSP_JIT_CF_RTS:       emit_cf_rts_op(e);                    break;
+    case DSP_JIT_CF_RTI:       emit_cf_rti_op(e);                    break;
+    case DSP_JIT_CF_BRA_IMM:   emit_cf_bra_imm_op(e, pc, inst);      break;
+    case DSP_JIT_CF_BRA_LONG:  emit_cf_bra_long_op(e, dsp, pc, inst); break;
+    case DSP_JIT_CF_BSR_IMM:   emit_cf_bsr_imm_op(e, pc, inst);      break;
+    case DSP_JIT_CF_BSR_LONG:  emit_cf_bsr_long_op(e, dsp, pc, inst); break;
+    case DSP_JIT_CF_JCC_IMM:   emit_cf_jcc_imm_op(e, inst);          break;
+    case DSP_JIT_CF_JSCC_IMM:  emit_cf_jscc_imm_op(e, pc, inst);     break;
+    case DSP_JIT_CF_BCC_IMM:   emit_cf_bcc_imm_op(e, pc, inst);      break;
+    case DSP_JIT_CF_BCC_LONG:  emit_cf_bcc_long_op(e, dsp, pc, inst); break;
+    case DSP_JIT_CF_REP_IMM:   emit_cf_rep_imm_op(e, inst);           break;
+    case DSP_JIT_CF_DO_IMM:    emit_cf_do_imm_op(e, dsp, pc, inst);   break;
+    case DSP_JIT_CF_DOR_IMM:   emit_cf_dor_imm_op(e, dsp, pc, inst);  break;
+    case DSP_JIT_CF_ENDDO:     emit_cf_enddo_op(e);                   break;
+    default:
+        return false;
+    }
+    g_cf_inlined_count++;
+    return true;
+}
+
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
+                             dsp_core_t *dsp,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
                              emu_func_t emu_func, uint32_t expected_next_pc,
                              bool is_terminator,
                              uint32_t *out_write_set)
 {
-    (void)pc;
-
     /* 1. dsp->cur_inst = inst */
     emit_mov_imm32(e, /*rd=*/0, inst);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
@@ -3372,10 +3938,14 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
 
-    /* 4. call emu_func(dsp) */
-    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);              /* x0 = dsp */
-    emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
-    emit_blr(e, /*rn=*/1);
+    /* 4. Call the handler — inline for the control-flow ops we
+     * support (Phase 5), otherwise BLR the original C handler. */
+    if (!emit_cf_call(e, dsp, pc, inst, emu_func)) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);              /* x0 = dsp */
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
+        emit_blr(e, /*rn=*/1);
+        g_cf_fallback_count++;
+    }
 
     emit_post_instruction_epilogue(e, exits, expected_next_pc);
 
@@ -3592,9 +4162,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             bool is_term = dsp_jit_helper_is_terminator((void *)emu);
             uint32_t expected_next_pc = pc + inst_len;
 
-            keep_going = emit_instruction(&e, &exits, pc, inst, inst_len,
-                                          emu, expected_next_pc, is_term,
-                                          &write_set);
+            keep_going = emit_instruction(&e, &exits, dsp, pc, inst,
+                                          inst_len, emu, expected_next_pc,
+                                          is_term, &write_set);
 
             for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
                 s->pc_to_block[p] = &s->blocks[pc_start];
@@ -3755,7 +4325,10 @@ void dsp_jit_finalize(dsp_core_t *dsp)
                 "  code_buf_used     = %zu bytes / %zu bytes\n"
                 "  alu_inlined       = %" PRIu64
                 " (%.1f%% of ALU ops)\n"
-                "  alu_fallback      = %" PRIu64 "\n",
+                "  alu_fallback      = %" PRIu64 "\n"
+                "  cf_inlined        = %" PRIu64
+                " (%.1f%% of emitted ops)\n"
+                "  cf_fallback       = %" PRIu64 "\n",
                 dsp->is_gp ? "GP" : "EP",
                 s->blocks_translated, s->blocks_executed,
                 s->cache_flushes, s->fallbacks,
@@ -3765,7 +4338,12 @@ void dsp_jit_finalize(dsp_core_t *dsp)
                 (g_alu_inlined_count + g_alu_fallback_count) == 0 ? 0.0 :
                     100.0 * (double)g_alu_inlined_count /
                     (double)(g_alu_inlined_count + g_alu_fallback_count),
-                g_alu_fallback_count);
+                g_alu_fallback_count,
+                g_cf_inlined_count,
+                (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
+                    100.0 * (double)g_cf_inlined_count /
+                    (double)(g_cf_inlined_count + g_cf_fallback_count),
+                g_cf_fallback_count);
     }
 
     jit_code_free(s->code_buf, s->code_cap);
