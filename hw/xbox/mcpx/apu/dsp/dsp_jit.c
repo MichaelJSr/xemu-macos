@@ -1109,6 +1109,9 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
  * Parmove translators
  * --------------------------------------------------------------- */
 
+/* Forward declarations so pm_2 can fall through to pm_3. */
+static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu);
+
 /*
  * emu_pm_0 — 0000_100d_00mm_mrrr: `S,x:ea  x0,D` or
  *           `S,y:ea  y0,D` (two simultaneous moves per parmove).
@@ -1262,6 +1265,70 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
     /* S2 -> D2: registers[d2_numreg] = save_2 (no mask needed; save_2
      * is already 24-bit and D2 is always X0/X1/Y0/Y1, all 24-bit). */
     emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(d2_numreg));
+}
+
+/*
+ * emu_pm_2 — four sub-cases discriminated by compile-time masks
+ * on cur_inst:
+ *   (inst & 0xFFFF00) == 0x200000  → NOP (just run ALU)
+ *   (inst & 0xFFE000) == 0x204000  → R update only (calc_ea side effect)
+ *   (inst & 0xFC0000) == 0x200000  → emu_pm_2_2 (reg-reg S,D)
+ *   otherwise                       → emu_pm_3 fall-through (#xx,R)
+ *
+ * All four decode entirely at translate time — we pick one inline
+ * expansion per instruction.
+ */
+static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    /* 0010 00ee eeed dddd S,D (reg-reg) */
+    int srcreg = (int)((inst >> 13) & 0x1f);
+    int dstreg = (int)((inst >> 8)  & 0x1f);
+
+    emit_pm_read_reg(e, srcreg, /*value_reg=*/23);
+
+    if (alu != NULL) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+        emit_blr(e, /*rn=*/1);
+    }
+
+    emit_pm_write_reg(e, dstreg, /*value_reg=*/23);
+}
+
+static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    if ((inst & 0xffff00u) == 0x200000u) {
+        /* NOP parmove — ALU only. */
+        if (alu != NULL) {
+            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+            emit_blr(e, /*rn=*/1);
+        }
+        return;
+    }
+
+    if ((inst & 0xffe000u) == 0x204000u) {
+        /* R update — calc_ea with 5-bit ea_mode (mode 0-3 only,
+         * since bit 12 = 0 in the mask). Output address is ignored
+         * (interpreter passes &dummy). */
+        uint32_t ea_mode = (inst >> 8) & 0x1f;
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
+                            /*want_retour=*/false);
+        if (alu != NULL) {
+            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+            emit_blr(e, /*rn=*/1);
+        }
+        return;
+    }
+
+    if ((inst & 0xfc0000u) == 0x200000u) {
+        emit_parmove_pm2_2(e, inst, alu);
+        return;
+    }
+
+    /* Fall-through to pm_3 (literal-to-reg). */
+    emit_parmove_pm3(e, inst, alu);
 }
 
 /*
@@ -1583,6 +1650,10 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         /* 0001_ffdf w1mm_mrrr  — x:ea/y:ea + reg-reg dual move */
         emit_parmove_pm1(e, inst, effective_alu);
         break;
+    case 2:
+        /* 0010_XXXX XXXX_XXXX — pm_2 family (NOP / R-upd / S,D / #xx,R) */
+        emit_parmove_pm2(e, inst, effective_alu);
+        break;
     case 3:
         /* 001d_dddd iiii_iiii #xx,R */
         emit_parmove_pm3(e, inst, effective_alu);
@@ -1594,7 +1665,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         emit_parmove_pm5(e, inst, effective_alu);
         break;
     default:
-        /* select 2/4/8-15 not yet implemented. */
+        /* select 4/8-15 not yet implemented. */
         return false;
     }
 
