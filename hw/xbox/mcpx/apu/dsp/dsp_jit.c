@@ -1301,6 +1301,116 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
 }
 
 /*
+ * emu_pm_8 — 1wmm_eeff_WrrM_MRRR: dual simultaneous X and Y parmoves
+ * with optional register-register halves. THE hot form for FIR
+ * filter kernels (classic DSP56300 `x:(r0)+,x0  y:(r4)+,y0  mac ...`).
+ *
+ * Compile-time decoding:
+ *   ea1:  5 bits at inst[12:8] + top-bit fixup if (ea1>>3)==0
+ *   ea2:  bits 14:13 at ea2[1:0], bits 21:20 at ea2[4:3],
+ *         bit 2 = !(ea1 bit 2), top-bit fixup same as ea1
+ *   numreg1 = bits 19:18 → X0 / X1 / A / B
+ *   numreg2 = bits 17:16 → Y0 / Y1 / A / B
+ *   write_d1 = bit 15 (1 = mem→reg; 0 = reg→mem)
+ *   write_d2 = bit 22 (same semantics, on the Y side)
+ *
+ * Register allocation across the ALU BLR:
+ *   x22 = x_addr
+ *   x23 = y_addr
+ *   x24 = save_reg1
+ *   x25 = save_reg2
+ */
+static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    uint32_t ea1 = (inst >> 8) & 0x1f;
+    if ((ea1 >> 3) == 0) {
+        ea1 |= (1u << 5);
+    }
+    uint32_t ea2 = (inst >> 13) & 0x3;
+    ea2 |= ((inst >> 20) & 0x3) << 3;    /* bits 21:20 → bits 4:3 */
+    if ((ea1 & (1u << 2)) == 0) {
+        ea2 |= 1u << 2;
+    }
+    if ((ea2 >> 3) == 0) {
+        ea2 |= (1u << 5);
+    }
+
+    int numreg1;
+    switch ((inst >> 18) & 0x3) {
+    case 0: numreg1 = DSP_REG_X0; break;
+    case 1: numreg1 = DSP_REG_X1; break;
+    case 2: numreg1 = DSP_REG_A;  break;
+    default: numreg1 = DSP_REG_B; break;
+    }
+
+    int numreg2;
+    switch ((inst >> 16) & 0x3) {
+    case 0: numreg2 = DSP_REG_Y0; break;
+    case 1: numreg2 = DSP_REG_Y1; break;
+    case 2: numreg2 = DSP_REG_A;  break;
+    default: numreg2 = DSP_REG_B; break;
+    }
+
+    bool write_d1 = (inst & (1u << 15)) != 0;
+    bool write_d2 = (inst & (1u << 22)) != 0;
+
+    /* Address computations — pm_8 never uses the retour flag
+     * (both ea1 and ea2 always have their top bit forced on, so
+     * they never select mode-6 absolute-immediate). */
+    emit_calc_ea_inline(e, ea1, /*out_addr_reg=*/22, /*want_retour=*/false);
+    emit_calc_ea_inline(e, ea2, /*out_addr_reg=*/23, /*want_retour=*/false);
+
+    /* Fetch save_reg1. */
+    if (write_d1) {
+        emit_mem_read_xy(e, DSP_SPACE_X, /*addr_reg=*/22, /*value_reg=*/24);
+    } else {
+        emit_pm_read_reg(e, numreg1, /*value_reg=*/24);
+    }
+
+    /* Fetch save_reg2. */
+    if (write_d2) {
+        emit_mem_read_xy(e, DSP_SPACE_Y, /*addr_reg=*/23, /*value_reg=*/25);
+    } else {
+        emit_pm_read_reg(e, numreg2, /*value_reg=*/25);
+    }
+
+    if (alu != NULL) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+        emit_blr(e, /*rn=*/1);
+    }
+
+    /* Write first parmove. */
+    if (write_d1) {
+        /* Register destination (may be A/B accu split). The
+         * interpreter's pm_8 write path does NOT have the
+         * "else{} dsp->registers[numreg1] = save_1" quirk that
+         * pm_1 does — the else branch is guarded correctly here. */
+        if (numreg1 == DSP_REG_A || numreg1 == DSP_REG_B) {
+            emit_pm_write_reg(e, numreg1, /*value_reg=*/24);
+        } else {
+            /* "dsp->registers[numreg1] = save_reg1" — unmasked in
+             * the interpreter; we replicate that (numreg1 is always
+             * X0/X1/Y0/Y1 in this branch, all 24-bit regs). */
+            emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
+        }
+    } else {
+        emit_mem_write_xy(e, DSP_SPACE_X, /*addr_reg=*/22, /*value_reg=*/24);
+    }
+
+    /* Write second parmove. */
+    if (write_d2) {
+        if (numreg2 == DSP_REG_A || numreg2 == DSP_REG_B) {
+            emit_pm_write_reg(e, numreg2, /*value_reg=*/25);
+        } else {
+            emit_str_w_any(e, /*rs=*/25, /*rn=*/19, SCRATCH, OFF_REG(numreg2));
+        }
+    } else {
+        emit_mem_write_xy(e, DSP_SPACE_Y, /*addr_reg=*/23, /*value_reg=*/25);
+    }
+}
+
+/*
  * emu_pm_2 — four sub-cases discriminated by compile-time masks
  * on cur_inst:
  *   (inst & 0xFFFF00) == 0x200000  → NOP (just run ALU)
@@ -1702,8 +1812,14 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         /* 01dd_Xddd w_mm_mrrr — single x:/y: move (pm_5 family) */
         emit_parmove_pm5(e, inst, effective_alu);
         break;
+    case 8:  case 9:  case 10: case 11:
+    case 12: case 13: case 14: case 15:
+        /* 1Xmm_eeff_WrrM_MRRR — dual x:/y: simultaneous move (pm_8).
+         * This is the FIR / IIR filter kernel hot path. */
+        emit_parmove_pm8(e, inst, effective_alu);
+        break;
     default:
-        /* select 8-15 (pm_8) not yet implemented. */
+        /* No unsupported variants remaining after Phase 4e. */
         return false;
     }
 
