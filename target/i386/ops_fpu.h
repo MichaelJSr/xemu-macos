@@ -110,6 +110,11 @@ static void glue(gen_fcom, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg1,
      *
      * fpus =  {0x0100, 0x4000, 0x0000, 0x4500};
      *          <       =       >       UO
+     *
+     * Deposit cannot replace the ld/and(~0x4500)/or sequence because
+     * fpus bits 9 (C1), 11..13 (TOP of stack pointer) live between
+     * the C0/C2/C3 bits we write and MUST be preserved across the
+     * RMW. A contiguous deposit(ofs=8, len=7) would clobber them.
      */
 
     tcg_gen_andi_i64(res, res, 0x45);
