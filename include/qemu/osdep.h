@@ -853,6 +853,10 @@ int qemu_msync(void *addr, size_t length, int fd);
  */
 size_t qemu_get_host_physmem(void);
 
+/*
+ * Toggle write/execute on the pages marked MAP_JIT
+ * for the current thread.
+ */
 #ifdef __APPLE__
 static inline void qemu_thread_jit_execute(void)
 {

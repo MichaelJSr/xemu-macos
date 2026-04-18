@@ -86,7 +86,20 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   `FCVT{N,M,P,Z}S` on AArch64.
 - **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses
   shift-by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16.
-  `flcr` lowering is 5 insns via `RBIT`.
+  `flcr` lowering is 5 insns via `RBIT`. `gen_flcr` materializes its
+  rc-bits from `tb->flags`' `HF_FPU_RC` instead of reloading
+  `env->fpuc` per first-FPU-op. `fnstcw` is inlined to a single
+  `ld16u_i32`.
+- **Snapshot/migration FPU resync.** `xsave_helper.c` and
+  `cpu_post_load` route through `cpu_set_fpuc` so `HF_FPU_RC` in
+  `hflags` is rebuilt; otherwise the fused FIST `cvt_{rn,rm,rp}` TCG
+  ops would round with the pre-restore mode.
+- **FCOMI vs FUCOMI split inline.** New `coms_f32`/`coms_f64` TCG ops
+  lower to `FCMPE` on AArch64 and `COMISS`/`COMISD` on x86; the
+  existing `com_f32`/`com_f64` stays quiet (`FCMP` / `UCOMISS`).
+  Matches x87 semantics (FCOMI raises IE on any NaN; FUCOMI only on
+  SNaN) and hardens the inline-FPU path against a future wiring of
+  FP exceptions into guest FSW.IE.
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -134,6 +147,35 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **Dynamic blend / depth bias.** `BLENDCOLOR` / `ZOFFSETBIAS` /
   `ZOFFSETFACTOR` removed from the pipeline key and set as Vulkan
   dynamic state per draw (skipped on clear pipelines).
+- **CONTROL_3 off the pipeline key.** `NV_PGRAPH_CONTROL_3` dropped
+  from `PipelineKey.regs[]` and from `check_pipeline_dirty`'s
+  fast-dirty list; its bits (`SHADEMODE`, `FOG_MODE`, `FOGENABLE`,
+  `POINTPARAMSENABLE`) are already funnelled through `ShaderState`
+  and `PROVOKING_VERTEX` is CPU-side. Eliminates false-positive
+  pipeline rehashes on fog/shade toggles.
+- **Per-command-buffer dynamic-state cache.** `vkCmdSetViewport`,
+  `Scissor`, `LineWidth`, `DepthBias`, and `BlendConstants` only
+  re-emitted when the value differs from the last committed one;
+  cache invalidated on each `pgraph_vk_begin_command_buffer`.
+- **Consecutive-binding descriptor write.** Texture bindings 0..3 are
+  written with a single `VkWriteDescriptorSet` (descriptorCount=4,
+  dstArrayElement=0) instead of four separate structs.
+- **Renderer-switch hardening.** `pgraph_process_pending` uses
+  `qatomic_set` for `flush_pending` across the switch handoff,
+  acquires `pfifo.lock` only after releasing `pgraph.lock` (fixes
+  `pgraph→pfifo` AB-BA inversion), and releases `pgraph.lock`
+  across the `framebuffer_released` wait (previously stalled every
+  pgraph consumer for up to a display frame on renderer swap).
+- **Fence-wait diagnostics.** `pgraph_vk_end_single_time_commands`
+  and `pgraph_vk_wait_for_previous_flight` use a 5 s timeout
+  `vkWaitForFences` wrapper that aborts with a named call site on
+  timeout instead of hanging silently (catches MoltenVK internal-
+  mutex deadlocks — the documented failure mode of the reverted
+  depth-export and α3 direct-VRAM-compute paths).
+- **Monotonic sync clock.** `pgraph_vk_sync` throttles off
+  `QEMU_CLOCK_HOST` (monotonic) instead of `QEMU_CLOCK_REALTIME`,
+  so NTP slew and suspend/resume don't stall the 8 ms gate. Same
+  clock as surface expiry.
 
 ### MetalFX + presentation
 
@@ -156,18 +198,30 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 
 - **VP voice processing.** Voice struct (128 B) memcpy'd to stack at
   the top of `voice_process`; all `voice_get/set_mask` calls hit the
-  local copy. Attenuation (4096) and pitch (65536) LUTs replace
-  transcendentals on the hot path; envelope decay uses `expf` with
-  a precomputed log base.
+  local copy. Attenuation (4096), pitch (65536), LPF cutoff (65536),
+  and envelope decay/release (1024 each, linear interp) LUTs replace
+  transcendentals on the hot path.
 - **Resampler.** `SRC_LINEAR` replaces `SRC_SINC_FASTEST` (matches
   Xbox hardware).
 - **Accelerate / vDSP.** `vDSP_vsma` for 8-bin × 32-sample mix
   accumulation; `vDSP_vadd` for `float_accumulate`; `float_to_24b`
   uses `vcvtnq_s32_f32` in bulk on ARM64.
-- **Atomic consistency.** `d->regs`, `pause_requested`, and the
+- **Single-precision SVF/LPF.** `setup_svf` uses `sqrtf` + float
+  literals; per-sample clamp uses `fminf`/`fmaxf` + `1.0f`/`-1.0f`
+  to eliminate float→double→float round-trips.
+- **DSP dispatch.** `pram_opcache[pc]` caches the resolved
+  `emu_func_t` directly instead of a `const OpcodeEntry *`, saving a
+  dependent load and a NULL-branch per DSP instruction. `emu_undefined`
+  is cached for opcodes without a dedicated handler. Step toward the
+  Future-vectors DSP dynarec.
+- **Atomic consistency.** `d->regs[]` (all writes in `fe_method`,
+  including the `FECTL` RMW via `qatomic_and`/`qatomic_or`),
+  `voice_locked[]` writer, `pause_requested`, and the
   `NV_PAPU_FEMEMADDR` load in `fe_method` all go through
-  `qatomic_read`/`qatomic_set` so the VP frame thread, workers, and
-  guest MMIO dispatcher agree under weak ordering.
+  `qatomic_*` so the VP frame thread, workers, and guest MMIO
+  dispatcher agree under weak ordering.
+- **`dsp_dma_run` scratch buffer.** Replaced monotonic `malloc`
+  growth (leaked the old pointer) with `g_realloc`.
 - **CoreAudio.** `os_unfair_lock` with trylock; default buffer 1024
   frames (~21 ms @ 48 kHz, override via `XEMU_COREAUDIO_FRAMES`).
   Silence on contention; underrun returns `BadDevice` / `Unknown`
@@ -183,7 +237,8 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   hold `d->pfifo.lock` across the kick-set + broadcast, so the
   reader's kick-check + atomic release-wait can't miss a concurrent
   kick. Removes the ~1 kHz idle wake-up of the previous 1 ms
-  `timedwait`.
+  `timedwait`. `halt` is now read via `qatomic_read` on the main
+  pfifo thread loop to match the writer contract.
 
 ### Build + packaging
 
@@ -236,6 +291,97 @@ Lessons worth preserving so they aren't re-attempted.
 | Incremental texture hash on misaligned textures | Host-page boundaries straddle chunks → `test_and_clear_dirty` by one chunk steals another's dirty signal. Gated to page-aligned textures only |
 | HRTF hand-NEON / always-on bounds checks | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Always-on bounds: ~5–10% GPU-pipeline regression |
 | BQL event batching | BQL around the SDL event loop breaks QEMU cooperative scheduling |
+
+---
+
+## Future vectors
+
+Explored but not yet attempted, or punted on risk. Each entry either
+cites the reverted-experiment entry it would need to sidestep, or
+describes the blocking infrastructure work.
+
+- **MCPX APU DSP dynarec.** The M56001 interpreter's dispatch already
+  caches `emu_func_t` directly in `pram_opcache`. Next step: thread
+  the post-execute bookkeeping (`dsp_postexecute_update_pc`,
+  `dsp_postexecute_interrupts`) into each handler so a `musttail`
+  dispatch can fuse across instructions; promote to ARM64 block
+  translator keyed on DSP PC.
+- **Metal-native presentation.** Replace SDL3 + OpenGL +
+  `CGLTexImageIOSurface2D` with `CAMetalLayer` direct drawable
+  acquisition. Would eliminate the GL↔Metal bridge that currently
+  blocks async MetalFX (see reverted async-MetalFX entry).
+- **Async MetalFX via `MTLSharedEvent` + `glWaitSync`.** Revisit now
+  that the cross-API fence failure mode is understood. Needs either
+  a shared event or a triple-buffered IOSurface ring with explicit
+  CPU-side fences.
+- **`VK_EXT_external_memory_host` with snapshot scheme.** The α2
+  failed-experiment entry explains why live VRAM import tears; a
+  per-flight copy-on-write snapshot or `MTLSharedEvent`-keyed
+  boundary would let the optimization land.
+- **`VK_KHR_dynamic_rendering` with explicit barriers.** The B2
+  failed-experiment entry identifies the missing
+  `VK_SUBPASS_EXTERNAL → first-subpass` equivalent. Re-enable by
+  emitting `vkCmdPipelineBarrier(COLOR_ATTACHMENT_OUTPUT +
+  EARLY/LATE_FRAGMENT_TESTS, COLOR/DEPTH_STENCIL
+  ATTACHMENT_READ|WRITE)` around every `BeginRendering` /
+  `EndRendering`.
+- **`MTLResidencySet` (macOS 15+).** Pin frequently-used Vulkan
+  resources' underlying Metal buffers/textures as resident so the OS
+  doesn't page them out under memory pressure.
+- **Push-constant uniforms for small UBOs.** VSH/PSH uniform blocks
+  under 128 bytes could migrate to push constants, eliminating a
+  descriptor update + bind per draw.
+- **BINK video via VideoToolbox.** The Xbox BINK decoder path is
+  CPU-bound. Pre-decode via VideoToolbox where BINK-to-H.264/HEVC
+  is feasible, or at least offload YUV → RGBA conversion.
+- **Shader specialization constants.** Burn fragment-shader
+  conditionals (alpha test, fog enable) into constants at pipeline-
+  compile time instead of runtime-evaluating them in shader;
+  reduces uniform bandwidth.
+- **GPU-based S3TC decode.** Currently S3TC runs on the CPU thread
+  pool. A compute shader decoder would offload this and parallelize
+  across many blocks.
+- **Aux-submit pipelining.** `pgraph_vk_end_single_time_commands`
+  currently waits fully. Classify callers by whether they need
+  GPU-visible completion vs just ordered commit, and chain the
+  latter via semaphores into the next main submit. Flight-slot
+  reclaim becomes the shared sync point.
+- **Query-pool drain at slot reclaim.** `vkGetQueryPoolResults` with
+  `WAIT_BIT` stalls per-submit; move the drain into the flight
+  slot's fence wait to amortize with the existing sync.
+- **`pgraph_vk_upload_surface_data` flush narrowing.** Currently
+  calls `pgraph_vk_finish` unconditionally. Safe to skip when the
+  target surface isn't bound for the open render pass.
+- **Indexed-draw attr-remap narrowing.**
+  `copy_remapped_attributes_to_inline_buffer` copies `[0..max_element]`
+  — narrowing to `[min_element..max_element]` cuts over-copy cost on
+  indexed draws with large shared VBOs.
+- **LRU eviction fast path.** `lru_try_evict_one` walks the tail
+  linearly when many entries are in-use; an auxiliary evictable
+  queue or per-slot bitmask would collapse this.
+- **`MTLFXFrameInterpolator` `deltaTime` in seconds.** Currently
+  fed a frame-sequence ratio; feeding wall-clock seconds (with
+  matching `motionVectorScale{X,Y}`) should improve temporal IQ.
+- **Voice-register writeback batching.** Defer `ram_stl` writes in
+  `voice_set_mask` to a single `memcpy` at the end of `voice_process`.
+  Behavioral risk: titles that read voice regs mid-frame via MMIO
+  would see one-frame-stale data.
+- **`qemu_cpu_kick` via `dispatch_semaphore_t` on Apple Silicon.**
+  The current `pthread_kill(SIGUSR1)` path has ~50 µs P99 jitter on
+  macOS 26. A dispatch semaphore per vCPU would remove signal
+  delivery from the critical path.
+- **Vblank cadence aligned to host refresh.** `ui/xemu.c` uses a
+  hardcoded 60 Hz `vblank_interval_ns`. On 120 Hz ProMotion panels,
+  aligning to `SDL_GetDisplayMode` refresh avoids micro-judder,
+  especially under MetalFX temporal + frame interpolation.
+- **TCG AArch64 3-MOVK constant materialization.** Three-halfword
+  constants currently fall through to the literal pool. A 3-insn
+  `MOVZ` + `MOVK` + `MOVK` fast path could beat the pool LDR
+  latency on Apple chips.
+- **Cross-TB FPCR elision.** `cached_fpuc_rc` lives in memory and
+  is reloaded once per FPU-using TB. A TCG global register could
+  carry the cached value across chained TBs and turn the gate into
+  a pure register compare.
 
 ---
 
