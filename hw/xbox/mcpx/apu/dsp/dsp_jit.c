@@ -1096,9 +1096,17 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg)
     }
 
     int bits = dsp_jit_reg_bits[dstreg & 63];
-    assert(bits > 0 && bits <= 24);
+    assert(bits >= 0 && bits <= 24);
 
-    if (bits == 24) {
+    if (bits == 0) {
+        /* Matches interpreter: `save & BITMASK(0) == 0` written to
+         * the slot. Happens when a parmove targets a reserved /
+         * NULL register index (DSP_REG_NULL 0-3, DSP_REG_LCSAVE 48,
+         * and the other unused entries with mask 0 in dsp_cpu.c's
+         * registers_mask[]). A zero-store keeps us bit-exact with
+         * the interpreter. */
+        emit_str_w_any(e, /*rs=*/31 /* WZR */, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
+    } else if (bits == 24) {
         /* No masking: store full 24 bits (the DSP side of the
          * register uses only low 24 bits anyway). */
         emit_str_w_any(e, /*rs=*/value_reg, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
@@ -1279,19 +1287,16 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
         if (numreg1 == DSP_REG_A || numreg1 == DSP_REG_B) {
             emit_pm_write_reg(e, numreg1, /*value_reg=*/23);
         }
-        /* Trailing unconditional registers[numreg1] = save_1. Any
-         * masking is also OK (for A/B this re-writes the SAME 24 bits
-         * that were just written to A1/B1; for other regs it's the
-         * masked store per dsp_jit_reg_bits[]). */
-        int bits = dsp_jit_reg_bits[numreg1 & 63];
-        if (bits > 0) {
-            if (bits == 24) {
-                emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
-            } else {
-                emit_ubfx_w(e, /*rd=*/0, /*rn=*/23, 0, bits);
-                emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
-            }
-        }
+        /* Trailing unconditional registers[numreg1] = save_1. The
+         * interpreter does this UNMASKED (`dsp->registers[numreg1]
+         * = save_1;` in emu_pm_1's write-D1 path) regardless of the
+         * destination's mask width, so we mirror that here.
+         * For A/B this overwrites the scratch-slot-layout part of
+         * registers[DSP_REG_A/B] (the 3-way split has already
+         * happened above); for ordinary regs this is the only
+         * write. For NULL / reserved indices we emit a zero-store
+         * to keep bit-exact with the interpreter's `save & 0`. */
+        emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
     } else {
         emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
     }
