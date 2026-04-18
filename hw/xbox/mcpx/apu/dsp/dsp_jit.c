@@ -492,14 +492,19 @@ typedef struct DspJitState {
     DspJitBlock blocks[DSP_PRAM_SIZE];  /* one slot per possible PC */
     DspJitBlock *pc_to_block[DSP_PRAM_SIZE];  /* pc -> owner block (or NULL) */
 
-    /* Fallback / interpreter-step-equivalent shadow for diff mode */
-    dsp_core_t *shadow;
+    /* Differential-mode shadow state (XEMU_DSP_JIT_DIFF=1).
+     * pre_state  = dsp state BEFORE running the JIT block
+     * post_jit   = dsp state AFTER running the JIT block
+     * Only allocated when diff mode is active. */
+    dsp_core_t *pre_state;
+    dsp_core_t *post_jit;
 
     /* Stats */
     uint64_t blocks_translated;
     uint64_t blocks_executed;
     uint64_t cache_flushes;
     uint64_t fallbacks;
+    uint64_t diff_ops_checked;
 } DspJitState;
 
 /* --------------------------------------------------------------- *
@@ -975,8 +980,10 @@ void dsp_jit_init(dsp_core_t *dsp)
     s->code_ptr = s->code_buf;
 
     if (g_jit_diff) {
-        /* Shadow core for differential validation. */
-        s->shadow = g_malloc0(sizeof(dsp_core_t));
+        /* Shadow cores for differential validation.
+         * See dsp_jit_execute_block_diff for how they are used. */
+        s->pre_state = g_malloc0(sizeof(dsp_core_t));
+        s->post_jit  = g_malloc0(sizeof(dsp_core_t));
     }
 
     /* Stash on dsp_core via hidden slot. We use dsp->pram_opcache slot
@@ -991,9 +998,8 @@ void dsp_jit_finalize(dsp_core_t *dsp)
     if (!s) {
         return;
     }
-    if (s->shadow) {
-        g_free(s->shadow);
-    }
+    g_free(s->pre_state);
+    g_free(s->post_jit);
     jit_code_free(s->code_buf, s->code_cap);
     g_free(s);
     dsp->jit_state = NULL;
@@ -1029,11 +1035,116 @@ void dsp_jit_invalidate_all(dsp_core_t *dsp)
     s->cache_flushes++;
 }
 
+/*
+ * Byte-compare two dsp_core_t snapshots over their semantic state.
+ * Returns offsetof of the first differing byte, or (size_t)-1 if
+ * they match. disasm_* fields are excluded — JIT and interpreter
+ * both update them through the shared tracing path.
+ */
+static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b)
+{
+    /* Compare the whole struct minus disasm_* tail and the JIT state
+     * pointer. Using offsetof-range bounds so the comparison stays
+     * robust against future field additions. */
+    size_t start = 0;
+    size_t end   = offsetof(dsp_core_t, str_disasm_memory);
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+    for (size_t i = start; i < end; i++) {
+        if (pa[i] != pb[i]) {
+            return i;
+        }
+    }
+    return (size_t)-1;
+}
+
+/* Forward decl of the actual interpreter step — exposed from
+ * dsp_cpu.c. */
+void dsp56k_execute_instruction(dsp_core_t *dsp);
+
+static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
+                                               DspJitState *s)
+{
+    /* 1. Snapshot pre-state. */
+    memcpy(s->pre_state, dsp, sizeof(*dsp));
+    /* Blank out jit_state in the snapshot so the comparison ignores
+     * our own bookkeeping. */
+    s->pre_state->jit_state = NULL;
+
+    /* 2. Run the JIT block (same path as normal). */
+    DspJitBlock *b = s->pc_to_block[dsp->pc];
+    if (!b || b->entry == NULL || b->pc_start != dsp->pc) {
+        b = translate_block(dsp, s, dsp->pc);
+        if (!b || !b->entry) {
+            s->fallbacks++;
+            return 0;
+        }
+    }
+    uint32_t num_inst_before = dsp->num_inst;
+    b->entry(dsp);
+    uint32_t jit_cycles = dsp->num_inst - num_inst_before;
+    s->blocks_executed++;
+
+    /* 3. Snapshot post-JIT state. */
+    memcpy(s->post_jit, dsp, sizeof(*dsp));
+    s->post_jit->jit_state = NULL;
+
+    /* 4. Replay via interpreter from the pre-state. */
+    memcpy(dsp, s->pre_state, sizeof(*dsp));
+    dsp->jit_state = s;   /* restore our own bookkeeping */
+
+    uint32_t interp_target = num_inst_before + jit_cycles;
+    int guard = 256;  /* step-count sanity upper-bound */
+    while (dsp->num_inst < interp_target && guard-- > 0) {
+        dsp56k_execute_instruction(dsp);
+    }
+    s->diff_ops_checked++;
+
+    /* 5. Compare. */
+    size_t diff_off = dsp_state_diff(dsp, s->post_jit);
+    if (diff_off != (size_t)-1) {
+        fprintf(stderr,
+                "xemu: DSP JIT DIFF FAILURE in block pc_start=0x%04x "
+                "(jit_cycles=%u)\n"
+                "  First differing byte at offsetof dsp_core_t = %zu\n"
+                "  (pc at entry = 0x%04x)\n"
+                "  INTERP pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
+                "B2:B1:B0=%02x:%06x:%06x\n"
+                "  JIT    pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
+                "B2:B1:B0=%02x:%06x:%06x\n"
+                "  loop_rep interp=%u jit=%u  "
+                "interrupt_counter interp=%u jit=%u\n",
+                b ? b->pc_start : 0xffff, jit_cycles, diff_off,
+                s->pre_state->pc,
+                dsp->pc, dsp->registers[DSP_REG_SR],
+                dsp->registers[DSP_REG_A2], dsp->registers[DSP_REG_A1],
+                dsp->registers[DSP_REG_A0],
+                dsp->registers[DSP_REG_B2], dsp->registers[DSP_REG_B1],
+                dsp->registers[DSP_REG_B0],
+                s->post_jit->pc, s->post_jit->registers[DSP_REG_SR],
+                s->post_jit->registers[DSP_REG_A2],
+                s->post_jit->registers[DSP_REG_A1],
+                s->post_jit->registers[DSP_REG_A0],
+                s->post_jit->registers[DSP_REG_B2],
+                s->post_jit->registers[DSP_REG_B1],
+                s->post_jit->registers[DSP_REG_B0],
+                dsp->loop_rep, s->post_jit->loop_rep,
+                dsp->interrupt_counter, s->post_jit->interrupt_counter);
+        abort();
+    }
+
+    return jit_cycles;
+}
+
 unsigned int dsp_jit_execute_block(dsp_core_t *dsp)
 {
     DspJitState *s = (DspJitState *)dsp->jit_state;
     if (!s || dsp->pc >= DSP_PRAM_SIZE) {
         return 0;
+    }
+
+    if (g_jit_diff) {
+        return dsp_jit_execute_block_diff(dsp, s);
     }
 
     DspJitBlock *b = s->pc_to_block[dsp->pc];
