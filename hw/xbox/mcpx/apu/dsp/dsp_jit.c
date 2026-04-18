@@ -239,6 +239,34 @@ static inline void emit_strh_imm(ArmEmit *e, int rs, int rn, unsigned int off)
     emit_u32(e, 0x79000000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rs & 0x1f));
 }
 
+/* STRB Wd, [Xn, #imm]  — 8-bit store, imm in [0, 4095]. */
+static inline void emit_strb_imm(ArmEmit *e, int rs, int rn, unsigned int off)
+{
+    assert(off <= 4095);
+    emit_u32(e, 0x39000000u | (off << 10) | ((rn & 0x1f) << 5) | (rs & 0x1f));
+}
+
+/* STRB Wd, [Xn + Xm], used when the offset exceeds 4095. */
+static void emit_strb_any(ArmEmit *e, int rs, int rn, int scratch,
+                          uint32_t off)
+{
+    if (off <= 4095) {
+        emit_strb_imm(e, rs, rn, off);
+        return;
+    }
+    uint32_t high = off >> 12;
+    uint32_t low  = off & 0xfff;
+    assert(high <= 0xfff);
+    emit_u32(e, 0x91400000u | (high << 10) | ((rn & 0x1f) << 5) | (scratch & 0x1f));
+    emit_strb_imm(e, rs, scratch, low);
+}
+
+/* STRB WZR, [Xn + off] (any offset). */
+static inline void emit_strb_imm_zero(ArmEmit *e, int rn, unsigned int off)
+{
+    emit_strb_any(e, /*rs=*/31 /* WZR */, rn, /*scratch=*/3 /*SCRATCH*/, off);
+}
+
 /* ADD Xd, Xn, #imm (imm must fit in 12 bits, no shift) */
 G_GNUC_UNUSED static inline void emit_add_x_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
 {
@@ -658,6 +686,7 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_INTERRUPT_STATE          ((uint32_t)offsetof(dsp_core_t, interrupt_state))
 #define OFF_INTERRUPT_PIPELINE_COUNT ((uint32_t)offsetof(dsp_core_t, interrupt_pipeline_count))
 #define OFF_SR                       ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_SR))
+#define OFF_JIT_EXIT_BLOCK_REQ       ((uint32_t)offsetof(dsp_core_t, jit_exit_block_request))
 
 /* Stack-relative scratch offsets (see emit_prologue for frame layout). */
 #define OFF_SP_SCRATCH0  0
@@ -1741,6 +1770,17 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         record_exit_patch(exits, site);
     }
 
+    /* Step 10b: exit-check: jit_exit_block_request (self-mod flag).
+     * Set by dsp_jit_invalidate when a handler rewrote pram (possibly
+     * our own); exit the block so the dispatcher re-translates from
+     * the fresh pram. */
+    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_JIT_EXIT_BLOCK_REQ);
+    {
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    }
+
     /* Step 11: exit-check: PC mismatch (branch taken by handler) */
     emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
     emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
@@ -1934,6 +1974,12 @@ static void emit_prologue(ArmEmit *e)
         (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
     emit_mov_imm64(e, /*rd=*/21,
         (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
+
+    /* Clear self-mod exit-request flag at the start of each block.
+     * dsp_jit_invalidate() sets it from inside handlers that write
+     * to P-space; we read it in the per-op exit checks below to
+     * bail out before running any stale instruction stub. */
+    emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_EXIT_BLOCK_REQ);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
@@ -2187,6 +2233,17 @@ void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr)
     if (!s || addr >= DSP_PRAM_SIZE) {
         return;
     }
+    /*
+     * Set the self-mod exit-request flag unconditionally. If we're
+     * running under a JIT block right now (called from inside an
+     * emu handler that wrote P-space), the current block's next
+     * exit check will see this flag and exit early so the block
+     * doesn't continue executing stubs with stale pram. If we're
+     * outside the JIT (called from e.g. dsp_bootstrap), the flag
+     * is harmlessly read + cleared at the start of the next block.
+     */
+    dsp->jit_exit_block_request = 1;
+
     DspJitBlock *b = s->pc_to_block[addr];
     if (!b) {
         return;
@@ -2372,18 +2429,38 @@ static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
                 dsp->loop_rep, s->post_jit->loop_rep,
                 dsp->interrupt_counter, s->post_jit->interrupt_counter);
 
-        /* Dump the DSP instructions in the failing block. */
-        fprintf(stderr, "  pram dump (block):\n");
+        /* Dump DSP instructions in the failing block. Show the
+         * BEFORE-block (pre_state) pram and the AFTER-block
+         * (post_jit) pram side-by-side — a difference here means
+         * the block's handler modified its own pram, which is the
+         * self-modifying-code scenario where the JIT's baked-in
+         * cur_inst values become stale mid-block. */
+        fprintf(stderr, "  pram dump (block + next few words):\n");
         uint32_t pc0 = s->pre_state->pc;
-        uint32_t pc_end = pc0 + 8;   /* up to 8 words */
-        if (pc_end > DSP_PRAM_SIZE) pc_end = DSP_PRAM_SIZE;
-        for (uint32_t p = pc0; p < pc_end; p++) {
-            fprintf(stderr, "    pram[0x%04x] = 0x%08x\n",
-                    p, dsp->pram[p]);
+        uint32_t pc_dump_end = pc0 + 10;
+        if (pc_dump_end > DSP_PRAM_SIZE) pc_dump_end = DSP_PRAM_SIZE;
+        bool self_mod = false;
+        for (uint32_t p = pc0; p < pc_dump_end; p++) {
+            uint32_t pre  = s->pre_state->pram[p];
+            uint32_t post = s->post_jit->pram[p];
+            const char *marker = (pre != post) ? "  <-- SELF-MOD" : "";
+            if (pre != post) self_mod = true;
+            fprintf(stderr, "    pram[0x%04x]  pre=0x%08x post=0x%08x%s\n",
+                    p, pre, post, marker);
+        }
+        if (self_mod) {
+            fprintf(stderr,
+                "  *** self-modifying code detected: the JIT block "
+                "baked in the pre-write instruction words and kept\n"
+                "      running its stale stubs after the handler "
+                "rewrote pram. The interpreter re-reads pram each\n"
+                "      step, so it saw the new words. Both paths are "
+                "individually correct; the JIT needs to exit on\n"
+                "      invalidation.\n");
         }
 
         /* Dump Rn / Nn / Mn (often implicated in addressing divergences). */
-        fprintf(stderr, "  Rn/Nn/Mn (both interp snapshots are identical): \n");
+        fprintf(stderr, "  Rn/Nn/Mn (at failure time):\n");
         for (int i = 0; i < 8; i++) {
             fprintf(stderr, "    R%d=%04x N%d=%04x M%d=%04x\n",
                     i, dsp->registers[DSP_REG_R0 + i] & 0xffff,

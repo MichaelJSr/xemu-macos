@@ -135,6 +135,14 @@ struct dsp_core_s {
 
     /* JIT state (opaque DspJitState * — see hw/xbox/mcpx/apu/dsp/dsp_jit.c) */
     void *jit_state;
+
+    /* Self-modifying-code exit flag. Set by dsp_jit_invalidate()
+     * whenever a block is invalidated (which happens from inside a
+     * handler running under the JIT when it writes to P-space).
+     * Checked in each stub's exit-check epilogue; cleared in the
+     * JIT block prologue. Avoids the JIT continuing to execute stale
+     * instruction stubs that baked in pre-write pram words. */
+    uint8_t jit_exit_block_request;
 };
 
 /* Functions */
