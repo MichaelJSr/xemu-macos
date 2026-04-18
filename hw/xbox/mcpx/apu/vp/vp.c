@@ -716,19 +716,20 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     case SE2FE_IDLE_VOICE:
         if (d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
             /*
-             * Atomic RMW on FECTL so the lock-free MMIO reader never
-             * observes a half-updated bitfield between the two masks/
-             * two sets. Match the contract used for other d->regs[]
-             * writers in this file.
+             * Collapse the FEMETHMODE + FETRAPREASON masks+sets into a
+             * single atomic store. We hold d->lock so no other writer
+             * contends; a plain read-modify-write under lock would be
+             * correct but the lock-free MMIO reader would still see
+             * four intermediate states across 4 separate atomic ops.
+             * One qatomic_set makes the field transition atomic from
+             * the reader's point of view as well.
              */
-            qatomic_and(&d->regs[NV_PAPU_FECTL],
-                        ~NV_PAPU_FECTL_FEMETHMODE);
-            qatomic_or(&d->regs[NV_PAPU_FECTL],
-                       NV_PAPU_FECTL_FEMETHMODE_TRAPPED);
-            qatomic_and(&d->regs[NV_PAPU_FECTL],
-                        ~NV_PAPU_FECTL_FETRAPREASON);
-            qatomic_or(&d->regs[NV_PAPU_FECTL],
-                       NV_PAPU_FECTL_FETRAPREASON_REQUESTED);
+            uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
+            fectl &= ~(NV_PAPU_FECTL_FEMETHMODE |
+                       NV_PAPU_FECTL_FETRAPREASON);
+            fectl |= NV_PAPU_FECTL_FEMETHMODE_TRAPPED |
+                     NV_PAPU_FECTL_FETRAPREASON_REQUESTED;
+            qatomic_set(&d->regs[NV_PAPU_FECTL], fectl);
             DPRINTF("idle voice %d\n", argument);
             d->set_irq = true;
         } else {
