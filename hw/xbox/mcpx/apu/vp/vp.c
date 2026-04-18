@@ -242,10 +242,15 @@ static void voice_lock_locked(MCPXAPUState *d, uint16_t v, bool lock)
     assert(v < MCPX_HW_MAX_VOICES);
 
     uint64_t mask = 1LL << (v % 64);
+    /*
+     * is_voice_locked() reads this word with qatomic_read; match the
+     * contract here so any future lock-free reader sees a coherent
+     * bitset instead of a plain RMW.
+     */
     if (lock) {
-        d->vp.voice_locked[v / 64] |= mask;
+        qatomic_or(&d->vp.voice_locked[v / 64], mask);
     } else {
-        d->vp.voice_locked[v / 64] &= ~mask;
+        qatomic_and(&d->vp.voice_locked[v / 64], ~mask);
     }
 
     qemu_cond_signal(&d->cond);
