@@ -257,6 +257,16 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
         old = ram_ldl(d, voice + offset);
     }
     uint32_t new_val = (old & ~mask) | ((val << ctz32(mask)) & mask);
+    if (new_val == old) {
+        /*
+         * Fast path: no bit changed, so the guest RAM word already
+         * holds the target value. Skip both writes (the stack-buf and
+         * the guest-RAM). voice_step_envelope and several fe_method
+         * paths hit this frequently when tick-count masks land on the
+         * same value they already had.
+         */
+        return;
+    }
     if (buf) {
         stl_le_p(&buf[offset / 4], new_val);
     }
