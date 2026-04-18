@@ -659,6 +659,10 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_INTERRUPT_PIPELINE_COUNT ((uint32_t)offsetof(dsp_core_t, interrupt_pipeline_count))
 #define OFF_SR                       ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_SR))
 
+/* Stack-relative scratch offsets (see emit_prologue for frame layout). */
+#define OFF_SP_SCRATCH0  0
+#define OFF_SP_SCRATCH1  4
+
 /* Bound check: synthesized-address form (ADD imm12<<12 + LDR imm12*scale)
  * accepts offsets up to 16 MiB. dsp_core_t is ~78 KiB so we're safe. */
 QEMU_BUILD_BUG_ON(OFF_PC                > (16u * 1024u * 1024u));
@@ -744,6 +748,246 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
  * the block immediately after this op (classified terminator).
  */
 #define SCRATCH 3   /* X3 synthesizes the address for far-field access */
+
+/* Compile-time offsets for the DSP register file R/N/M/L banks. */
+#define OFF_REGS      ((uint32_t)offsetof(dsp_core_t, registers))
+#define OFF_REG(n)    (OFF_REGS + 4u * (uint32_t)(n))
+#define OFF_R(n)      OFF_REG(DSP_REG_R0 + (n))
+#define OFF_N(n)      OFF_REG(DSP_REG_N0 + (n))
+#define OFF_M(n)      OFF_REG(DSP_REG_M0 + (n))
+#define OFF_XRAM      ((uint32_t)offsetof(dsp_core_t, xram))
+#define OFF_YRAM      ((uint32_t)offsetof(dsp_core_t, yram))
+
+/*
+ * Emit the slow-path BLR to dsp_jit_helper_calc_ea(dsp, ea_mode,
+ * &SP[OFF_SP_SCRATCH0]). On return, the computed address sits at
+ * [SP, #OFF_SP_SCRATCH0] and retour is in w0; we copy them into
+ * `out_addr_reg` and (if `want_retour`) [SP, #OFF_SP_SCRATCH1].
+ *
+ * Clobbers: w0..w3. Preserves: x19-x25.
+ */
+static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
+                                   int out_addr_reg, bool want_retour)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);               /* x0 = dsp */
+    emit_mov_imm32(e, /*rd=*/1, ea_mode);                 /* w1 = ea_mode */
+    emit_add_x_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH0);  /* x2 = &SP[scratch0] */
+    emit_mov_imm64(e, /*rd=*/3,
+        (uint64_t)(uintptr_t)&dsp_jit_helper_calc_ea);
+    emit_blr(e, /*rn=*/3);
+    /* w0 now holds the retour flag; scratch0 holds the address. */
+    emit_ldr_w_imm(e, out_addr_reg, /*rn=*/31, OFF_SP_SCRATCH0);
+    if (want_retour) {
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+    }
+}
+
+/*
+ * Emit calc_ea inline: fast path for modes 0-4 with linear Mn,
+ * slow-path BLR otherwise. Leaves the 16-bit address in
+ * out_addr_reg (which must be a callee-saved W register x22..x25
+ * if the caller needs it preserved across subsequent BLRs).
+ *
+ * When `want_retour` is true, the retour flag (1 == immediate
+ * literal returned in out_addr_reg instead of an address) is written
+ * to [SP, #OFF_SP_SCRATCH1] so the caller can branch on it.
+ *
+ * out_addr_reg MUST NOT be 0, 1, 2, or 3 — those are used as
+ * temporaries inside this emitter.
+ *
+ * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25 (except
+ * out_addr_reg is written).
+ */
+static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
+                                int out_addr_reg, bool want_retour)
+{
+    assert(out_addr_reg != 0 && out_addr_reg != 1 &&
+           out_addr_reg != 2 && out_addr_reg != 3);
+    uint32_t mode   = (ea_mode >> 3) & 7;
+    uint32_t numreg = ea_mode & 7;
+
+    if (mode >= 5) {
+        /* Modes 5 (Rn+Nn), 6 (aa / 24-bit immediate, bumps
+         * cur_inst_len + instr_cycle), and 7 (-(Rn)) always go
+         * through the full helper: they either have cycle/len
+         * side effects or are infrequent enough that inlining is
+         * not worth the code growth. */
+        emit_calc_ea_slow_call(e, ea_mode, out_addr_reg, want_retour);
+        return;
+    }
+
+    uint32_t *to_slow = NULL;
+
+    /* Modes 0-3 mutate Rn and thus require linear Mn == 0xFFFF.
+     * Mode 4 is a pure read — skip the Mn check. */
+    if (mode != 4) {
+        emit_ldr_w_imm(e, /*rd=*/2, /*rn=*/19, OFF_M(numreg));
+        emit_mov_imm32(e, /*rd=*/1, 0xFFFFu);
+        emit_cmp_w_reg(e, /*rn=*/2, /*rm=*/1);
+        to_slow = e->buf;
+        emit_bcond(e, ARM_COND_NE, 0);  /* patched below */
+    }
+
+    /* Fast path: load Rn into out_addr_reg, compute Rn' per mode. */
+    emit_ldr_w_imm(e, out_addr_reg, /*rn=*/19, OFF_R(numreg));
+
+    switch (mode) {
+    case 0: /* (Rn)-Nn */
+        emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/19, OFF_N(numreg));
+        emit_sub_w_reg(e, /*rd=*/0, /*rn=*/out_addr_reg, /*rm=*/1);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 16);
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
+        break;
+    case 1: /* (Rn)+Nn */
+        emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/19, OFF_N(numreg));
+        emit_add_w_reg(e, /*rd=*/0, /*rn=*/out_addr_reg, /*rm=*/1);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 16);
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
+        break;
+    case 2: /* (Rn)- */
+        emit_sub_w_imm(e, /*rd=*/0, /*rn=*/out_addr_reg, 1);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 16);
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
+        break;
+    case 3: /* (Rn)+ */
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/out_addr_reg, 1);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 16);
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
+        break;
+    case 4: /* (Rn) — no update */
+        break;
+    }
+
+    if (want_retour) {
+        /* retour == 0 for all fast-path modes (retour is only set
+         * by mode 6 / absolute-immediate in the slow path). */
+        emit_str_w_imm(e, /*rs=*/31 /* WZR */, /*rn=*/31 /* SP */,
+                       OFF_SP_SCRATCH1);
+    }
+
+    if (to_slow) {
+        /* Jump past the slow-path block to 'done'. */
+        uint32_t *to_done = e->buf;
+        emit_b(e, 0);  /* patched below */
+
+        /* Slow-path entry point */
+        uint32_t *slow_label = e->buf;
+        patch_branch(to_slow, (int32_t)((uint8_t *)slow_label -
+                                        (uint8_t *)to_slow));
+        emit_calc_ea_slow_call(e, ea_mode, out_addr_reg, want_retour);
+
+        /* Done label */
+        uint32_t *done_label = e->buf;
+        patch_b(to_done, (int32_t)((uint8_t *)done_label -
+                                   (uint8_t *)to_done));
+    }
+}
+
+/*
+ * Inline xram/yram linear memory read (fast path for addr < 0xc00
+ * which bypasses the mixbuffer / peripheral / per-space special
+ * cases). On slow-path (addr >= 0xc00) BLRs dsp56k_read_memory.
+ *
+ * memspace: DSP_SPACE_X (=0) or DSP_SPACE_Y (=1). Selected at
+ *           translate time; picks xram[] or yram[] base.
+ * addr_reg: W-register holding the 16-bit address (unchanged on exit).
+ * value_reg: W-register to receive the loaded 24-bit value. Must not
+ *           conflict with addr_reg or scratch registers.
+ *
+ * Clobbers: w0, w1, x2, x3. Preserves: x19-x25 except value_reg.
+ */
+static void emit_mem_read_xy(ArmEmit *e, int memspace,
+                             int addr_reg, int value_reg)
+{
+    assert(memspace == DSP_SPACE_X || memspace == DSP_SPACE_Y);
+    assert(value_reg != addr_reg);
+    assert(value_reg != 0 && value_reg != 1 && value_reg != 2 && value_reg != 3);
+    assert(addr_reg  != 0 && addr_reg  != 1 && addr_reg  != 2 && addr_reg  != 3);
+
+    /* Fast path: if addr < 0xc00, direct array access.
+     *   cmp addr, #0xc00
+     *   b.hs slow
+     *   (shift, add, ldr at OFF_XRAM/OFF_YRAM) */
+    emit_mov_imm32(e, /*rd=*/0, 0xc00u);
+    emit_cmp_w_reg(e, /*rn=*/addr_reg, /*rm=*/0);
+    uint32_t *to_slow = e->buf;
+    emit_bcond(e, 0x2 /* HS = unsigned >= */, 0);   /* patched below */
+
+    /* Fast: w1 = addr << 2 (byte offset); x2 = x19 + x1;
+     * value_reg = [x2, #OFF_XRAM_OR_YRAM]. */
+    emit_lsl_w_imm(e, /*rd=*/1, /*rn=*/addr_reg, 2);
+    emit_add_x_reg(e, /*rd=*/2, /*rn=*/19, /*rm=*/1);
+    uint32_t arr_off = (memspace == DSP_SPACE_X) ? OFF_XRAM : OFF_YRAM;
+    emit_ldr_w_any(e, /*rd=*/value_reg, /*rn=*/2, SCRATCH, arr_off);
+
+    uint32_t *to_done = e->buf;
+    emit_b(e, 0);  /* patched below */
+
+    /* Slow-path: BLR dsp56k_read_memory(dsp, space, addr) */
+    uint32_t *slow_label = e->buf;
+    patch_branch(to_slow, (int32_t)((uint8_t *)slow_label -
+                                    (uint8_t *)to_slow));
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm32(e, /*rd=*/1, (uint32_t)memspace);
+    emit_mov_w_reg(e, /*rd=*/2, /*rn=*/addr_reg);
+    emit_mov_imm64(e, /*rd=*/3,
+                   (uint64_t)(uintptr_t)&dsp56k_read_memory);
+    emit_blr(e, /*rn=*/3);
+    emit_mov_w_reg(e, /*rd=*/value_reg, /*rn=*/0);
+
+    /* Done */
+    uint32_t *done_label = e->buf;
+    patch_b(to_done, (int32_t)((uint8_t *)done_label -
+                               (uint8_t *)to_done));
+}
+
+/*
+ * Inline xram/yram linear memory write. Symmetric to read:
+ * fast-path direct store when addr < 0xc00, else BLR
+ * dsp56k_write_memory.
+ *
+ * addr_reg: W-register with 16-bit address.
+ * value_reg: W-register with 24-bit value.
+ *
+ * Clobbers: w0, w1, x2, x3. Preserves: x19-x25.
+ */
+static void emit_mem_write_xy(ArmEmit *e, int memspace,
+                              int addr_reg, int value_reg)
+{
+    assert(memspace == DSP_SPACE_X || memspace == DSP_SPACE_Y);
+    assert(value_reg != addr_reg);
+    assert(value_reg != 0 && value_reg != 1 && value_reg != 2 && value_reg != 3);
+    assert(addr_reg  != 0 && addr_reg  != 1 && addr_reg  != 2 && addr_reg  != 3);
+
+    emit_mov_imm32(e, /*rd=*/0, 0xc00u);
+    emit_cmp_w_reg(e, /*rn=*/addr_reg, /*rm=*/0);
+    uint32_t *to_slow = e->buf;
+    emit_bcond(e, 0x2 /* HS */, 0);
+
+    emit_lsl_w_imm(e, /*rd=*/1, /*rn=*/addr_reg, 2);
+    emit_add_x_reg(e, /*rd=*/2, /*rn=*/19, /*rm=*/1);
+    uint32_t arr_off = (memspace == DSP_SPACE_X) ? OFF_XRAM : OFF_YRAM;
+    emit_str_w_any(e, /*rs=*/value_reg, /*rn=*/2, SCRATCH, arr_off);
+
+    uint32_t *to_done = e->buf;
+    emit_b(e, 0);
+
+    uint32_t *slow_label = e->buf;
+    patch_branch(to_slow, (int32_t)((uint8_t *)slow_label -
+                                    (uint8_t *)to_slow));
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm32(e, /*rd=*/1, (uint32_t)memspace);
+    emit_mov_w_reg(e, /*rd=*/2, /*rn=*/addr_reg);
+    emit_mov_w_reg(e, /*rd=*/3, /*rn=*/value_reg);
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp56k_write_memory);
+    emit_blr(e, /*rn=*/4);
+
+    uint32_t *done_label = e->buf;
+    patch_b(to_done, (int32_t)((uint8_t *)done_label -
+                               (uint8_t *)to_done));
+}
+
 
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
@@ -917,14 +1161,41 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
 }
 
 /*
- * Emit the shared exit label + epilogue. Restores the two pairs of
- * callee-saved registers pushed by the prologue (x30/x19 and x20/x21)
- * and returns.
+ * Stack frame layout (SP-relative, grows toward 0):
+ *
+ *     [SP+0  .. SP+3]   scratch word #0 (e.g. calc_ea addr out)
+ *     [SP+4  .. SP+7]   scratch word #1
+ *     [SP+8  .. SP+15]  padding (kept so SP stays 16-aligned)
+ *     [SP+16 .. SP+23]  x24, x25
+ *     [SP+24 .. SP+31]  x22, x23
+ *     [SP+32 .. SP+39]  x20, x21 (cached helper addresses)
+ *     [SP+40 .. SP+47]  x30, x19
+ *     (SP at function entry)
+ *
+ * Total frame: 48 bytes. 16-byte aligned at every point.
+ *
+ * Register usage during a translated block:
+ *   x19  — dsp pointer (pinned)
+ *   x20  — cached &dsp_jit_helper_postexecute_update_pc
+ *   x21  — cached &dsp_jit_helper_postexecute_interrupts
+ *   x22-x25 — parmove save slots (source operands / addresses that
+ *             must survive BLRs to helpers and opcodes_alu[])
+ *   x3  — synthesized-address scratch (already used throughout Phase 1)
+ *   x0-x2 — ABI-scratch work registers
+ */
+
+/*
+ * Emit the shared exit label + epilogue. Restores every callee-saved
+ * register pushed by the prologue and returns.
  */
 static uint32_t *emit_epilogue(ArmEmit *e)
 {
     uint32_t *label = e->buf;
+    /* Deallocate 16-byte scratch area. */
+    emit_u32(e, 0x910043ffu);   /* ADD SP, SP, #16 */
     /* Restore in reverse of prologue's push order. */
+    emit_ldp_post(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, 16);
+    emit_ldp_post(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/30, /*rt2=*/19, /*rn=*/31 /*SP*/, 16);
     emit_ret(e);
@@ -932,19 +1203,23 @@ static uint32_t *emit_epilogue(ArmEmit *e)
 }
 
 /*
- * Block prologue. Saves LR + callee-saved regs x19/x20/x21 and
- * initializes:
- *   x19 = dsp (context pointer, pinned for block lifetime)
- *   x20 = &dsp_jit_helper_postexecute_update_pc   (cached helper)
- *   x21 = &dsp_jit_helper_postexecute_interrupts  (cached helper)
- * Caching the helper addresses in callee-saved regs saves the
- * MOVZ+MOVK*3 chain (4 insns) per helper call in each stub.
+ * Block prologue. Saves LR + callee-saved regs x19/x20/x21/x22-x25
+ * and initializes the cached helper pointers + the 16-byte scratch
+ * slot used by parmove stubs' slow-path calc_ea BLR.
  */
 static void emit_prologue(ArmEmit *e)
 {
-    /* SP must stay 16-byte-aligned; STP with #-16 and #-16 does that. */
+    /* SP must stay 16-byte-aligned throughout. Each STP with #-16
+     * moves SP by -16 and stays aligned. */
     emit_stp_pre(e, /*rt1=*/30, /*rt2=*/19, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, -16);
+    emit_stp_pre(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, -16);
+    emit_stp_pre(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, -16);
+
+    /* 16-byte scratch area for parmove slow-path helpers to write
+     * their u32 outputs into. [SP+0..7] = two u32 words; [SP+8..15]
+     * = padding (SP-alignment). */
+    emit_u32(e, 0xd10043ffu);   /* SUB SP, SP, #16 */
 
     emit_mov_x_reg(e, /*rd=*/19, /*rn=*/0);   /* x19 = dsp */
 
