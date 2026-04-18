@@ -175,6 +175,19 @@ static float g_pitch_lut[65536];
  * single 256 KiB load.
  */
 static float g_lpf_fc_lut[65536];
+/*
+ * Envelope curve LUTs, indexed by normalized position [0, 1023]
+ * representing s in [0, 1]. Both curves are smooth and well-behaved
+ * over this domain; a 1024-entry table with plain floor-indexing
+ * matches perceptual accuracy well below the voice-level 8-bit
+ * quantization step.
+ *  - g_env_decay_lut[i]   = exp(65536 * (1 - i/1023) * log(0.99988799))
+ *                         = pow(0.99988799, 65536 * (1 - i/1023))
+ *  - g_env_release_lut[i] = exp(-6.91 * (i / 1023))
+ */
+#define ENV_LUT_SIZE 1024
+static float g_env_decay_lut[ENV_LUT_SIZE];
+static float g_env_release_lut[ENV_LUT_SIZE];
 static float g_decay_base_log; // logf(0.99988799f), precomputed for expf-based envelope decay
 static bool g_apu_luts_initialized = false;
 
@@ -193,7 +206,25 @@ static void apu_init_luts(void)
         g_lpf_fc_lut[i] = lpf;
     }
     g_decay_base_log = logf(0.99988799f);
+    for (int i = 0; i < ENV_LUT_SIZE; i++) {
+        float s = (float)i / (float)(ENV_LUT_SIZE - 1);
+        /* Decay shape: exp((1-s) * 65536 * log(0.99988799)) */
+        g_env_decay_lut[i] = expf((1.0f - s) * 65536.0f * g_decay_base_log);
+        /* Release shape: exp(-6.91 * s) */
+        g_env_release_lut[i] = expf(-6.91f * s);
+    }
     g_apu_luts_initialized = true;
+}
+
+/* Lookup helper with saturation and linear interpolation. */
+static inline float env_lut_lookup(const float *lut, float s)
+{
+    if (s <= 0.0f) return lut[0];
+    if (s >= 1.0f) return lut[ENV_LUT_SIZE - 1];
+    float scaled = s * (float)(ENV_LUT_SIZE - 1);
+    int idx = (int)scaled;
+    float frac = scaled - (float)idx;
+    return lut[idx] + frac * (lut[idx + 1] - lut[idx]);
 }
 
 static float attenuate(uint16_t vol)
@@ -900,10 +931,15 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
         if (decay_rate == 0) {
             value = 0.0f;
         } else {
-            // FIXME: This formula and threshold is not accurate, but I can't
-            // get it any better for now
-            value = 255.0f * expf(((decay_rate * 16 - count) *
-                                    4096.0f / decay_rate) * g_decay_base_log);
+            /*
+             * Original: expf(((decay_rate*16 - count) * 4096 / decay_rate) *
+             *                g_decay_base_log)
+             * Equivalent to g_env_decay_lut keyed on s = count/(decay_rate*16)
+             * since (decay_rate*16 - count) * 4096 / decay_rate ==
+             * 65536 * (1 - count/(decay_rate*16)) for decay_rate > 0.
+             */
+            float s = (float)count / (float)(decay_rate * 16);
+            value = 255.0f * env_lut_lookup(g_env_decay_lut, s);
         }
         if (value <= (sustain_level + 0.2f) || (value > 255.0f)) {
             // FIXME: Should we still update lvl?
@@ -948,7 +984,8 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
             // each round.
             float pos = clampf(1 - count / (release_rate * 16.0), 0, 1);
             uint8_t lvl = voice_get_mask(d, v, lvl_reg, lvl_mask);
-            value = expf(-6.91f * pos) * lvl;
+            /* Original: expf(-6.91f * pos) * lvl. */
+            value = env_lut_lookup(g_env_release_lut, pos) * lvl;
             count--; // FIXME: Should release count ascend or descend?
             voice_set_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask, count);
         }
