@@ -236,22 +236,36 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   ARM64 that collapses the interpreter's 3-word add-with-carry
   dance into a single 64-bit ADD and `dsp_mul56` into one SMULL +
   LSL #1. The rare tail (RND/ROL/ROR/ADDL/SUBL/ADDR/SUBR/ADC/SBC/MAX,
-  plus shifts) stays as BLR fallback. Phase 5a inlines the common
-  control-flow handlers (JMP/JSR/RTS/RTI/BRA/BSR + all `_imm` / `_long`
-  forms of JCC/JSCC/BCC) — the conditional-code check + stack push /
-  pop still go through thin shims (`dsp_jit_helper_calc_cc`,
-  `_stack_push`, `_stack_pop`), but the pc / cur_inst_len / instr_cycle
-  / SR updates emit inline. Phase 6 inlines the `_imm` forms of
+  plus shifts) stays as BLR fallback. Phase 5a (round 2) inlines the
+  full control-flow handler matrix — immediate / `_long` / `_ea` /
+  `_aa` / `_pp` / `_reg` variants of JMP, JSR, RTS, RTI, BRA, BSR,
+  JCC, JSCC, BCC, plus the bit-test families (JCLR, JSET, JSCLR,
+  JSSET × AA/EA/PP/REG and BRCLR, BRSET × PP/REG). The 16-case
+  `emu_calc_cc` switch is fully inlined too: at translate time the
+  cc_code is known, so each condition (CC, GE, NE, PL, NN, EC, LC,
+  GT plus their 8 inverses) emits its own 2–7-insn bitfield extract
+  directly into the stub — no BLR, no shim. Bit-test memory reads
+  route through the existing `emit_mem_read_xy` helper so linear
+  xram/yram addresses stay inline; peripheral / out-of-range paths
+  still BLR `dsp56k_read_memory`. `_ea` variants that go through
+  calc_ea's mode 5/6/7 slow path correctly preserve calc_ea's side
+  effects on `instr_cycle` and `cur_inst_len` via additive (not
+  SET) cycle/len updates. Phase 6 inlines the `_imm` forms of
   REP / DO / DOR / ENDDO — loop-body iteration still routes through
   `dsp_postexecute_update_pc` in the epilogue, which already handles
-  the "stay on this instruction" / "end-of-loop pop" edges.
-  `XEMU_DSP_JIT_STATS=1` prints per-run `alu_inlined / alu_fallback`
-  and `cf_inlined / cf_fallback` counts plus percentages. After
-  Phase 2 + 5a + 6, `XEMU_DSP_JIT_STATS=1` reports zero fallbacks
-  on the built-in `/basic` DSP test for the common CF / loop
-  handlers. Static block chaining (direct `B <target.entry>` patch
-  on known branch targets) is a followup commit — the entry-split
-  prologue refactor it depends on is scoped separately.
+  the "stay on this instruction" / "end-of-loop pop" edges. The
+  differential validator's per-block compare is narrowed for
+  inlined CF ops via a zero write-set (all their effects land in
+  always-compared `dsp_state_diff` ranges), dropping the typical
+  compare from ~40 KB to ~2 KB — matching what parmove stubs
+  already achieve. `XEMU_DSP_JIT_STATS=1` prints per-run
+  `alu_inlined / alu_fallback` and `cf_inlined / cf_fallback`
+  counts plus percentages, printed from an `atexit` hook so the
+  normal xemu quit path (Cmd-Q / SIGTERM — xemu shutdown doesn't
+  call `dsp_destroy`) still dumps them. Static block chaining
+  (direct `B <target.entry>` patch on known branch targets) is a
+  followup commit — the entry-split prologue refactor it depends
+  on is scoped separately.
   Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
   against the interpreter. Because a translated block is fully
   deterministic given its pre-state, a single passing validation
@@ -378,27 +392,31 @@ cites the reverted-experiment entry it would need to sidestep, or
 describes the blocking infrastructure work.
 
 - **MCPX APU DSP JIT static block chaining (Phases 5b/5c) + Phase 8.**
-  Phases 0, 1, 2, 3 (partial, via 4), 4, 5a, 6, and 7 of the
-  roadmap in [docs/dsp-jit-design.md](docs/dsp-jit-design.md) have
-  landed: infrastructure, call-threaded translator, inline ALU +
-  MAC + TFR kernels (~170 of 256 opcodes), all 16 parallel-move
-  variants, inline calc_ea (linear Rn modes 0-4), inline xram/yram
-  linear memory, inline control-flow handlers (JMP/JSR/RTS/RTI/
-  BRA/BSR/JCC/JSCC/BCC `_imm` + `_long`), inline loop handlers
-  (REP/DO/DOR/ENDDO `_imm`), inline post-op fast paths for
-  `postexecute_update_pc` and `postexecute_interrupts`, block-
-  scope cached helper addresses, XEMU_DSP_JIT_DIFF bit-exact
-  validation. After Phase 6 the fallback rate on the built-in
-  `/basic` test is 0% for CF + loop handlers (every translated
-  control-flow op stays in JIT code). Remaining phases: **5b /
-  5c** — static block chaining (direct `B <target.entry>` patch
-  on known branch targets) needs an entry-split prologue refactor
-  so that chained entries skip the frame-save (otherwise chained
-  loops grow the stack unboundedly per iteration); **8** — lazy
-  flag evaluation (cc_op shadow), ARM64 register pinning for
-  A/B/X0/X1/Y0/Y1, parmove+ALU fusion. Target aggregate once 5b+
-  5c+8 land: 2-4× DSP throughput vs the baseline Phase 1 call-
-  threaded translator.
+  Phases 0, 1, 2, 3 (partial, via 4), 4, 5a (round 2 — full
+  variant matrix + inline calc_cc + tight write-sets), 6, and 7
+  of the roadmap in [docs/dsp-jit-design.md](docs/dsp-jit-design.md)
+  have landed: infrastructure, call-threaded translator, inline
+  ALU + MAC + TFR kernels (~170 of 256 opcodes), all 16 parallel-
+  move variants, inline calc_ea (linear Rn modes 0-4), inline
+  xram/yram linear memory, inline control-flow across the full
+  immediate / `_long` / `_ea` / `_aa` / `_pp` / `_reg` matrix
+  (~30 handlers including JCLR/JSET/JSCLR/JSSET/BRCLR/BRSET bit-
+  tests and all conditional variants with fully-inlined calc_cc),
+  inline loop handlers (REP/DO/DOR/ENDDO `_imm`), inline post-op
+  fast paths for `postexecute_update_pc` and
+  `postexecute_interrupts`, block-scope cached helper addresses,
+  XEMU_DSP_JIT_DIFF bit-exact validation. After Phase 5a round 2
+  the only CF fallbacks are the bsr-Rn / bscc / punlock / pflush
+  tail that no interpreter handler ever implemented in the first
+  place (the opcode table entries are NULL). Remaining phases:
+  **5b / 5c** — static block chaining (direct `B <target.entry>`
+  patch on known branch targets) needs an entry-split prologue
+  refactor so that chained entries skip the frame-save (otherwise
+  chained loops grow the stack unboundedly per iteration);
+  **8** — lazy flag evaluation (cc_op shadow), ARM64 register
+  pinning for A/B/X0/X1/Y0/Y1, parmove+ALU fusion. Target
+  aggregate once 5b+5c+8 land: 2-4× DSP throughput vs the
+  baseline Phase 1 call-threaded translator.
 - **Metal-native presentation.** Replace SDL3 + OpenGL +
   `CGLTexImageIOSurface2D` with `CAMetalLayer` direct drawable
   acquisition. Would eliminate the GL↔Metal bridge that currently

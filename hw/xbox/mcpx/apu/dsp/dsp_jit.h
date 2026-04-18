@@ -123,6 +123,7 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
  */
 enum {
     DSP_JIT_CF_NONE = 0,
+    /* Absolute / immediate CF */
     DSP_JIT_CF_JMP_IMM,
     DSP_JIT_CF_JSR_IMM,
     DSP_JIT_CF_RTS,
@@ -135,10 +136,41 @@ enum {
     DSP_JIT_CF_JSCC_IMM,
     DSP_JIT_CF_BCC_IMM,
     DSP_JIT_CF_BCC_LONG,
+    /* Loop ops */
     DSP_JIT_CF_REP_IMM,
     DSP_JIT_CF_DO_IMM,
     DSP_JIT_CF_DOR_IMM,
     DSP_JIT_CF_ENDDO,
+    /* Effective-address (Rn-based) CF */
+    DSP_JIT_CF_JMP_EA,
+    DSP_JIT_CF_JSR_EA,
+    DSP_JIT_CF_JCC_EA,
+    DSP_JIT_CF_JSCC_EA,
+    /* Bit-test CF (jclr / jset / jsclr / jsset) — 4 addressing
+     * variants each: _aa (direct), _ea (calc_ea), _pp
+     * (peripheral), _reg (register). */
+    DSP_JIT_CF_JCLR_AA,
+    DSP_JIT_CF_JCLR_EA,
+    DSP_JIT_CF_JCLR_PP,
+    DSP_JIT_CF_JCLR_REG,
+    DSP_JIT_CF_JSET_AA,
+    DSP_JIT_CF_JSET_EA,
+    DSP_JIT_CF_JSET_PP,
+    DSP_JIT_CF_JSET_REG,
+    DSP_JIT_CF_JSCLR_AA,
+    DSP_JIT_CF_JSCLR_EA,
+    DSP_JIT_CF_JSCLR_PP,
+    DSP_JIT_CF_JSCLR_REG,
+    DSP_JIT_CF_JSSET_AA,
+    DSP_JIT_CF_JSSET_EA,
+    DSP_JIT_CF_JSSET_PP,
+    DSP_JIT_CF_JSSET_REG,
+    /* PC-relative bit-test (brclr / brset) — only _pp and _reg
+     * variants have interpreter handlers in the opcode table. */
+    DSP_JIT_CF_BRCLR_PP,
+    DSP_JIT_CF_BRCLR_REG,
+    DSP_JIT_CF_BRSET_PP,
+    DSP_JIT_CF_BRSET_REG,
 };
 int dsp_jit_helper_classify_cf(void *fn);
 

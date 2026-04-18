@@ -1637,22 +1637,52 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
 int dsp_jit_helper_classify_cf(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
-    if (f == emu_jmp_imm)  return DSP_JIT_CF_JMP_IMM;
-    if (f == emu_jsr_imm)  return DSP_JIT_CF_JSR_IMM;
-    if (f == emu_rts)      return DSP_JIT_CF_RTS;
-    if (f == emu_rti)      return DSP_JIT_CF_RTI;
-    if (f == emu_bra_imm)  return DSP_JIT_CF_BRA_IMM;
-    if (f == emu_bra_long) return DSP_JIT_CF_BRA_LONG;
-    if (f == emu_bsr_imm)  return DSP_JIT_CF_BSR_IMM;
-    if (f == emu_bsr_long) return DSP_JIT_CF_BSR_LONG;
-    if (f == emu_jcc_imm)  return DSP_JIT_CF_JCC_IMM;
-    if (f == emu_jscc_imm) return DSP_JIT_CF_JSCC_IMM;
-    if (f == emu_bcc_imm)  return DSP_JIT_CF_BCC_IMM;
-    if (f == emu_bcc_long) return DSP_JIT_CF_BCC_LONG;
-    if (f == emu_rep_imm)  return DSP_JIT_CF_REP_IMM;
-    if (f == emu_do_imm)   return DSP_JIT_CF_DO_IMM;
-    if (f == emu_dor_imm)  return DSP_JIT_CF_DOR_IMM;
-    if (f == emu_enddo)    return DSP_JIT_CF_ENDDO;
+    /* Immediate / absolute CF */
+    if (f == emu_jmp_imm)    return DSP_JIT_CF_JMP_IMM;
+    if (f == emu_jsr_imm)    return DSP_JIT_CF_JSR_IMM;
+    if (f == emu_rts)        return DSP_JIT_CF_RTS;
+    if (f == emu_rti)        return DSP_JIT_CF_RTI;
+    if (f == emu_bra_imm)    return DSP_JIT_CF_BRA_IMM;
+    if (f == emu_bra_long)   return DSP_JIT_CF_BRA_LONG;
+    if (f == emu_bsr_imm)    return DSP_JIT_CF_BSR_IMM;
+    if (f == emu_bsr_long)   return DSP_JIT_CF_BSR_LONG;
+    if (f == emu_jcc_imm)    return DSP_JIT_CF_JCC_IMM;
+    if (f == emu_jscc_imm)   return DSP_JIT_CF_JSCC_IMM;
+    if (f == emu_bcc_imm)    return DSP_JIT_CF_BCC_IMM;
+    if (f == emu_bcc_long)   return DSP_JIT_CF_BCC_LONG;
+    /* Loop ops */
+    if (f == emu_rep_imm)    return DSP_JIT_CF_REP_IMM;
+    if (f == emu_do_imm)     return DSP_JIT_CF_DO_IMM;
+    if (f == emu_dor_imm)    return DSP_JIT_CF_DOR_IMM;
+    if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
+    /* Effective-address CF (Rn-based target) */
+    if (f == emu_jmp_ea)     return DSP_JIT_CF_JMP_EA;
+    if (f == emu_jsr_ea)     return DSP_JIT_CF_JSR_EA;
+    if (f == emu_jcc_ea)     return DSP_JIT_CF_JCC_EA;
+    if (f == emu_jscc_ea)    return DSP_JIT_CF_JSCC_EA;
+    /* Bit-test absolute (jclr / jset family) */
+    if (f == emu_jclr_aa)    return DSP_JIT_CF_JCLR_AA;
+    if (f == emu_jclr_ea)    return DSP_JIT_CF_JCLR_EA;
+    if (f == emu_jclr_pp)    return DSP_JIT_CF_JCLR_PP;
+    if (f == emu_jclr_reg)   return DSP_JIT_CF_JCLR_REG;
+    if (f == emu_jset_aa)    return DSP_JIT_CF_JSET_AA;
+    if (f == emu_jset_ea)    return DSP_JIT_CF_JSET_EA;
+    if (f == emu_jset_pp)    return DSP_JIT_CF_JSET_PP;
+    if (f == emu_jset_reg)   return DSP_JIT_CF_JSET_REG;
+    if (f == emu_jsclr_aa)   return DSP_JIT_CF_JSCLR_AA;
+    if (f == emu_jsclr_ea)   return DSP_JIT_CF_JSCLR_EA;
+    if (f == emu_jsclr_pp)   return DSP_JIT_CF_JSCLR_PP;
+    if (f == emu_jsclr_reg)  return DSP_JIT_CF_JSCLR_REG;
+    if (f == emu_jsset_aa)   return DSP_JIT_CF_JSSET_AA;
+    if (f == emu_jsset_ea)   return DSP_JIT_CF_JSSET_EA;
+    if (f == emu_jsset_pp)   return DSP_JIT_CF_JSSET_PP;
+    if (f == emu_jsset_reg)  return DSP_JIT_CF_JSSET_REG;
+    /* Bit-test PC-relative (brclr / brset — only _pp and _reg
+     * variants have interpreter handlers in the opcode table) */
+    if (f == emu_brclr_pp)   return DSP_JIT_CF_BRCLR_PP;
+    if (f == emu_brclr_reg)  return DSP_JIT_CF_BRCLR_REG;
+    if (f == emu_brset_pp)   return DSP_JIT_CF_BRSET_PP;
+    if (f == emu_brset_reg)  return DSP_JIT_CF_BRSET_REG;
     return DSP_JIT_CF_NONE;
 }
 
