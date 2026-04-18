@@ -255,25 +255,34 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
         }
 
         VkDescriptorBufferInfo ubo_buffer_infos[2];
-        VkWriteDescriptorSet ubo_writes[2];
         for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
             ubo_buffer_infos[i] = (VkDescriptorBufferInfo){
                 .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
                 .offset = r->uniform_buffer_offsets[i],
                 .range = layouts[i]->total_size,
             };
-            ubo_writes[i] = (VkWriteDescriptorSet){
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = r->ubo_descriptor_sets[r->ubo_descriptor_set_index],
-                .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
-                .dstArrayElement = 0,
-                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .descriptorCount = 1,
-                .pBufferInfo = &ubo_buffer_infos[i],
-            };
         }
-        vkUpdateDescriptorSets(r->device, ARRAY_SIZE(ubo_writes),
-                               ubo_writes, 0, NULL);
+        /*
+         * VSH_UBO_BINDING=0 and PSH_UBO_BINDING=1 are consecutive
+         * same-type (UNIFORM_BUFFER) in the same set. Per Vulkan spec
+         * §14.2.3, a single write with descriptorCount=2 and
+         * dstArrayElement=0 overflows into binding 1 when binding 0's
+         * array is exhausted. Saves one VkWriteDescriptorSet struct
+         * init and one internal driver dispatch per UBO advance. Same
+         * pattern as the texture-descriptor coalescing below.
+         */
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(layouts) != 2);
+        QEMU_BUILD_BUG_ON(VSH_UBO_BINDING != 0 || PSH_UBO_BINDING != 1);
+        VkWriteDescriptorSet ubo_write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = r->ubo_descriptor_sets[r->ubo_descriptor_set_index],
+            .dstBinding = VSH_UBO_BINDING,
+            .dstArrayElement = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = ARRAY_SIZE(ubo_buffer_infos),
+            .pBufferInfo = ubo_buffer_infos,
+        };
+        vkUpdateDescriptorSets(r->device, 1, &ubo_write, 0, NULL);
         r->ubo_descriptor_set_index++;
     }
 
