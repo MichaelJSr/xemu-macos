@@ -202,12 +202,17 @@ static void dsp_dma_run(DSPDMAState *s)
 
         size_t transfer_size = count * item_size;
 
-        // FIXME: Remove this intermediate buffer
+        /*
+         * Intermediate buffer, grown monotonically. Previously leaked on
+         * every growth because malloc replaced the old pointer without
+         * free. g_realloc handles both paths correctly and is a no-op
+         * when the request fits the current capacity.
+         */
         static uint8_t *scratch_buf = NULL;
-        static ssize_t scratch_buf_size = -1;
-        if (count * item_size > scratch_buf_size) {
+        static ssize_t scratch_buf_size = 0;
+        if ((ssize_t)(count * item_size) > scratch_buf_size) {
             scratch_buf_size = count * item_size;
-            scratch_buf = malloc(scratch_buf_size);
+            scratch_buf = g_realloc(scratch_buf, scratch_buf_size);
         }
 
         if (direction) {
