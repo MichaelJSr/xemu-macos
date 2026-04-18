@@ -142,6 +142,13 @@ DEF(chs_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(chs_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(com_f32, 1, 2, 0, TCG_OPF_FP)
 DEF(com_f64, 1, 2, 0, TCG_OPF_FP)
+/*
+ * Signaling variants: match x87 FCOMI semantics (raise IE on any NaN, not
+ * just SNaN). Quiet com_f32/com_f64 above match FUCOMI semantics. Same
+ * result-bit layout — only the host FP-exception side-effect differs.
+ */
+DEF(coms_f32, 1, 2, 0, TCG_OPF_FP)
+DEF(coms_f64, 1, 2, 0, TCG_OPF_FP)
 DEF(cos_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(cos_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(cvt32f_f64, 1, 1, 0, TCG_OPF_FP)

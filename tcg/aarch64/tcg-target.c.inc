@@ -672,9 +672,11 @@ typedef enum {
     INSN_FCVT_SD    = 0x1e624000, /* double -> single */
     INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
 
-    /* Scalar FP compare. */
+    /* Scalar FP compare. FCMPE is the signaling variant; opc2 bit 4 set. */
     INSN_FCMP_S     = 0x1e202000,
     INSN_FCMP_D     = 0x1e602000,
+    INSN_FCMPE_S    = 0x1e202010,
+    INSN_FCMPE_D    = 0x1e602010,
 
     /* FP <-> GPR moves. */
     INSN_FMOV_SW    = 0x1e270000,
@@ -3416,11 +3418,18 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_mov(s, TCG_TYPE_F32, a0, a1);
         break;
 
-    OP_f32_f64(com): {
+    OP_f32_f64(com):
+    OP_f32_f64(coms): {
         /*
-         * FCMP sets NZCV. Map to x86 EFLAGS: CF=N|V, PF=V, ZF=Z|V.
+         * FCMP (quiet) / FCMPE (signaling) both set NZCV identically; the
+         * only difference is FPSR.IOC on QNaN. Map NZCV to x86 EFLAGS:
+         * CF=N|V, PF=V, ZF=Z|V.
          */
-        tcg_out32(s, (dp ? INSN_FCMP_D : INSN_FCMP_S)
+        bool signaling = (opc == INDEX_op_coms_f32 || opc == INDEX_op_coms_f64);
+        uint32_t cmp_insn = signaling
+            ? (dp ? INSN_FCMPE_D : INSN_FCMPE_S)
+            : (dp ? INSN_FCMP_D : INSN_FCMP_S);
+        tcg_out32(s, cmp_insn
                   | (((a2 - 32) & 0x1f) << 16) | (((a1 - 32) & 0x1f) << 5));
         tcg_out32(s, INSN_MRS_NZCV | (TCG_REG_TMP0 & 0x1f));
         /* V (bit 28) */
@@ -4049,6 +4058,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I1(r, w);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
+    case INDEX_op_coms_f32:
+    case INDEX_op_coms_f64:
         return C_O1_I2(r, w, w);
 
     default:

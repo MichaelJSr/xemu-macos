@@ -291,6 +291,8 @@ static bool tcg_target_const_match(int64_t val, int ct,
 #define OPC_CMP_GvEv	(OPC_ARITH_GvEv | (ARITH_CMP << 3))
 #define OPC_COMISD      (0x2f | P_EXT | P_DATA16)
 #define OPC_COMISS      (0x2f | P_EXT)
+#define OPC_UCOMISD     (0x2e | P_EXT | P_DATA16)
+#define OPC_UCOMISS     (0x2e | P_EXT)
 #define OPC_CVTSI2SD    (0x2a | P_EXT | P_SIMDF2)
 #define OPC_CVTSI2SS    (0x2a | P_EXT | P_SIMDF3)
 #define OPC_CVTSS2SD    (0x5a | P_EXT | P_SIMDF3)
@@ -3226,6 +3228,13 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                     dp ? fchs_mask64 : fchs_mask32, 0);
         break;
     OP_f32_f64(com):
+        /* Quiet compare (FUCOMI semantics): IE only on SNaN. */
+        tcg_out_modrm(s, dp ? OPC_UCOMISD : OPC_UCOMISS, a1, a2);
+        tcg_out8(s, OPC_PUSHF);
+        tcg_out_pop(s, a0);
+        break;
+    OP_f32_f64(coms):
+        /* Signaling compare (FCOMI semantics): IE on any NaN. */
         tcg_out_modrm(s, dp ? OPC_COMISD : OPC_COMISS, a1, a2);
         tcg_out8(s, OPC_PUSHF);
         tcg_out_pop(s, a0);
@@ -4491,6 +4500,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I1(x, x);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
+    case INDEX_op_coms_f32:
+    case INDEX_op_coms_f64:
         return C_O1_I2(r, x, x);
     case INDEX_op_cvt32f_i32:
     case INDEX_op_cvt32f_i64:

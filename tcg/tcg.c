@@ -2636,6 +2636,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_chs_f64:
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
+    case INDEX_op_coms_f32:
+    case INDEX_op_coms_f64:
     case INDEX_op_cos_f32:
     case INDEX_op_cos_f64:
     case INDEX_op_cvt32f_f64:

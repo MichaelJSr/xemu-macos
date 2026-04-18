@@ -80,6 +80,18 @@ void tcg_gen_com_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
                 tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
 }
 
+void tcg_gen_coms_f32(TCGv_i64 ret, TCGv_f32 arg1, TCGv_f32 arg2)
+{
+    tcg_gen_op3(INDEX_op_coms_f32, TCG_TYPE_I64,
+                tcgv_i64_arg(ret), tcgv_f32_arg(arg1), tcgv_f32_arg(arg2));
+}
+
+void tcg_gen_coms_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
+{
+    tcg_gen_op3(INDEX_op_coms_f64, TCG_TYPE_I64,
+                tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
+}
+
 void tcg_gen_cos_f32(TCGv_f32 ret, TCGv_f32 arg)
 {
     tcg_gen_op2(INDEX_op_cos_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(arg));

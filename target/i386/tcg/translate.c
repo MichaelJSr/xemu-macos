@@ -2021,6 +2021,20 @@ static void gen_fucomi_ST0_FT0_inline(DisasContext *s)
     tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
 }
 
+static void gen_fcomi_ST0_FT0_inline(DisasContext *s)
+{
+    gen_compute_eflags(s);
+
+    TCGv_i64 cmp_result = tcg_temp_new_i64();
+    fp_pc_wrapper(gen_fcomi_ST0_FT0)(s, cmp_result);
+
+    TCGv_i64 cc = tcg_temp_new_i64();
+    tcg_gen_extu_tl_i64(cc, cpu_cc_src);
+    tcg_gen_andi_i64(cc, cc, ~(uint64_t)0x45);
+    tcg_gen_or_i64(cc, cc, cmp_result);
+    tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
+}
+
 static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
 {
     TCGv_i32 fpus = tcg_temp_new_i32();
@@ -3549,7 +3563,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fucomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s);
             } else {
                 gen_helper_fcomi_ST0_FT0(tcg_env);
             }
@@ -3637,7 +3651,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fucomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s);
             } else {
                 gen_helper_fcomi_ST0_FT0(tcg_env);
             }
