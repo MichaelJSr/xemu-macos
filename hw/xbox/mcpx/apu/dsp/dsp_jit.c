@@ -65,6 +65,7 @@ typedef void (*emu_func_t)(dsp_core_t *dsp);
 static bool g_jit_parsed;
 static bool g_jit_enabled;
 static bool g_jit_diff;
+static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
 static bool g_jit_stats;
 
 static void parse_flags_once(void)
@@ -76,15 +77,36 @@ static void parse_flags_once(void)
     const char *e;
     e = getenv("XEMU_DSP_JIT");
     g_jit_enabled = (e && e[0] == '1');
+
+    /* XEMU_DSP_JIT_DIFF accepts:
+     *   "0"      — diff mode off (default)
+     *   "1"      — diff-check every block (2-10x slowdown)
+     *   "N" (N>=2) — diff-check every Nth block (stochastic sampling)
+     * N is capped at 1e6 to keep the modulo cheap. */
     e = getenv("XEMU_DSP_JIT_DIFF");
-    g_jit_diff = (e && e[0] == '1');
+    if (e && e[0]) {
+        long n = strtol(e, NULL, 0);
+        if (n >= 1 && n <= 1000000) {
+            g_jit_diff = true;
+            g_jit_diff_sample = (uint32_t)n;
+        }
+    }
+
     e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
 
     if (g_jit_enabled) {
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s\n",
-                g_jit_diff ? " (DIFF mode — 2x slowdown, bit-exact validation)" : "",
-                g_jit_stats ? " (stats)" : "");
+        if (g_jit_diff && g_jit_diff_sample == 1) {
+            fprintf(stderr, "xemu: DSP JIT enabled (DIFF mode — 2-10x slowdown, "
+                            "bit-exact validation every block)%s\n",
+                    g_jit_stats ? " (stats)" : "");
+        } else if (g_jit_diff) {
+            fprintf(stderr, "xemu: DSP JIT enabled (DIFF sampling every %u blocks)%s\n",
+                    g_jit_diff_sample, g_jit_stats ? " (stats)" : "");
+        } else {
+            fprintf(stderr, "xemu: DSP JIT enabled%s\n",
+                    g_jit_stats ? " (stats)" : "");
+        }
     }
 }
 
@@ -637,6 +659,11 @@ typedef struct DspJitState {
     uint64_t cache_flushes;
     uint64_t fallbacks;
     uint64_t diff_ops_checked;
+
+    /* Diff-mode sampling counter. Incremented every block when
+     * diff mode is on; only blocks where (counter % sample) == 0
+     * actually go through dsp_jit_execute_block_diff(). */
+    uint64_t diff_sample_counter;
 } DspJitState;
 
 /* --------------------------------------------------------------- *
@@ -2506,8 +2533,19 @@ unsigned int dsp_jit_execute_block(dsp_core_t *dsp)
     }
 
     if (g_jit_diff) {
+        /* Sampling: if N > 1, only diff-check roughly 1 of every N
+         * blocks. Uses a simple counter modulo N — deterministic,
+         * no RNG cost. Non-sampled blocks go through the normal
+         * non-diff JIT path for ~100% of interpreter speed. */
+        if (g_jit_diff_sample > 1) {
+            s->diff_sample_counter++;
+            if ((s->diff_sample_counter % g_jit_diff_sample) != 0) {
+                goto normal_path;
+            }
+        }
         return dsp_jit_execute_block_diff(dsp, s);
     }
+normal_path:;
 
     DspJitBlock *b = s->pc_to_block[dsp->pc];
     if (!b || b->entry == NULL || b->pc_start != dsp->pc) {
