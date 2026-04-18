@@ -752,8 +752,12 @@ QEMU_BUILD_BUG_ON(OFF_INTERRUPT_COUNTER > (16u * 1024u * 1024u));
  * Pending patch sites for the shared exit_label. We collect them as
  * we emit each op and patch them after the epilogue is placed.
  */
+/* Each per-op epilogue records up to 5 exit-check branches
+ * (interrupt_counter / loop_rep / is_idle / jit_exit_block_request
+ * / pc-mismatch). Size the array accordingly, with a small safety
+ * margin. */
 typedef struct {
-    uint32_t *sites[DSP_JIT_MAX_OPS_PER_BLOCK * 4];
+    uint32_t *sites[DSP_JIT_MAX_OPS_PER_BLOCK * 8];
     int count;
 } ExitPatchList;
 
