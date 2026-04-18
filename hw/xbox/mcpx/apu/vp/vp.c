@@ -273,15 +273,21 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     //assert((d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE) == 0);
 
-    d->regs[NV_PAPU_FEDECMETH] = method;
-    d->regs[NV_PAPU_FEDECPARAM] = argument;
+    /*
+     * mcpx_apu_read() reads d->regs[] lock-free via qatomic_read. All
+     * stores here must match the atomic contract so torn reads and
+     * compiler reorderings never expose partial state to the guest
+     * MMIO path.
+     */
+    qatomic_set(&d->regs[NV_PAPU_FEDECMETH], method);
+    qatomic_set(&d->regs[NV_PAPU_FEDECPARAM], argument);
     unsigned int selected_handle, list;
     switch (method) {
     case NV1BA0_PIO_VOICE_LOCK:
         voice_lock_locked(d, d->regs[NV_PAPU_FECV], argument & 1);
         break;
     case NV1BA0_PIO_SET_ANTECEDENT_VOICE:
-        d->regs[NV_PAPU_FEAV] = argument;
+        qatomic_set(&d->regs[NV_PAPU_FEAV], argument);
         break;
     case NV1BA0_PIO_VOICE_ON: {
         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
@@ -299,7 +305,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             voice_set_mask(d, selected_handle, NV_PAVS_VOICE_TAR_PITCH_LINK,
                            NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE,
                            d->regs[top_reg]);
-            d->regs[top_reg] = selected_handle;
+            qatomic_set(&d->regs[top_reg], selected_handle);
         } else {
             unsigned int antecedent_voice =
                 GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_VALUE);
@@ -423,7 +429,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         break;
     }
     case NV1BA0_PIO_SET_CURRENT_VOICE:
-        d->regs[NV_PAPU_FECV] = argument;
+        qatomic_set(&d->regs[NV_PAPU_FECV], argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_VBIN:
         voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_VBIN,
@@ -662,10 +668,20 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         break;
     case SE2FE_IDLE_VOICE:
         if (d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
-            d->regs[NV_PAPU_FECTL] &= ~NV_PAPU_FECTL_FEMETHMODE;
-            d->regs[NV_PAPU_FECTL] |= NV_PAPU_FECTL_FEMETHMODE_TRAPPED;
-            d->regs[NV_PAPU_FECTL] &= ~NV_PAPU_FECTL_FETRAPREASON;
-            d->regs[NV_PAPU_FECTL] |= NV_PAPU_FECTL_FETRAPREASON_REQUESTED;
+            /*
+             * Atomic RMW on FECTL so the lock-free MMIO reader never
+             * observes a half-updated bitfield between the two masks/
+             * two sets. Match the contract used for other d->regs[]
+             * writers in this file.
+             */
+            qatomic_and(&d->regs[NV_PAPU_FECTL],
+                        ~NV_PAPU_FECTL_FEMETHMODE);
+            qatomic_or(&d->regs[NV_PAPU_FECTL],
+                       NV_PAPU_FECTL_FEMETHMODE_TRAPPED);
+            qatomic_and(&d->regs[NV_PAPU_FECTL],
+                        ~NV_PAPU_FECTL_FETRAPREASON);
+            qatomic_or(&d->regs[NV_PAPU_FECTL],
+                       NV_PAPU_FECTL_FETRAPREASON_REQUESTED);
             DPRINTF("idle voice %d\n", argument);
             d->set_irq = true;
         } else {
