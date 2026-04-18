@@ -1653,21 +1653,28 @@ static void gen_flcr(DisasContext *s)
         return;
     }
 
-    TCGv_i32 rc_bits = tcg_temp_new_i32();
-    tcg_gen_ld16u_i32(rc_bits, tcg_env, offsetof(CPUX86State, fpuc));
-    tcg_gen_andi_i32(rc_bits, rc_bits, 0xc00);
+    /*
+     * HF_FPU_RC is baked into tb->flags at translation time
+     * (cpu_set_fpuc, cpu.h:2841). Every TB currently translating thus
+     * pins the guest RC bits to a compile-time-known value; no need
+     * to reload env->fpuc and mask at runtime. Materialize rc_bits
+     * as a constant so the optimizer can collapse the brcond when
+     * cached matches and emit a single MOVI + flcr in the slow path.
+     */
+    uint32_t rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    uint32_t rc_bits_val = rc << 10;
+    TCGv_i32 rc_bits = tcg_constant_i32(rc_bits_val);
 
     TCGv_i32 cached = tcg_temp_new_i32();
     tcg_gen_ld16u_i32(cached, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
 
     TCGLabel *skip = gen_new_label();
-    tcg_gen_brcond_i32(TCG_COND_EQ, rc_bits, cached, skip);
+    tcg_gen_brcondi_i32(TCG_COND_EQ, cached, (int32_t)rc_bits_val, skip);
 
     tcg_gen_st16_i32(rc_bits, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
 
-    TCGv_i32 v = tcg_temp_new_i32();
-    tcg_gen_shli_i32(v, rc_bits, 3);
-    tcg_gen_ori_i32(v, v, 0x1f80);
+    /* Slow path: the full MXCSR-like value is now a compile-time literal. */
+    TCGv_i32 v = tcg_constant_i32((rc_bits_val << 3) | 0x1f80);
     tcg_gen_flcr(v);
 
     gen_set_label(skip);
