@@ -988,6 +988,139 @@ static void emit_mem_write_xy(ArmEmit *e, int memspace,
                                (uint8_t *)to_done));
 }
 
+/*
+ * Shared per-op epilogue emitter. Called by both the non-parmove
+ * stub (emit_instruction) and the parmove stubs (emit_parmove_pmN).
+ *
+ * Invoked AFTER the emu handler / parmove work has finished. Emits:
+ *   5. postexecute_update_pc fast path (inline pc += cur_inst_len
+ *      when no REP / DO loop active; else BLR x20 cached helper)
+ *   6. postexecute_interrupts fast path (skip BLR when all
+ *      interrupt fields are zero; else BLR x21 cached helper)
+ *   7. num_inst += instr_cycle
+ *   8-11. Block-exit checks: pending IRQ / loop_rep set /
+ *      is_idle set / PC mismatch — all branch to the shared
+ *      exit epilogue via the exits patch list.
+ *
+ * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25.
+ */
+static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
+                                           uint32_t expected_next_pc)
+{
+    /*
+     * Step 5: inline postexecute_update_pc fast path. The helper
+     * does (a) REP state machine if loop_rep set; (b) pc +=
+     * cur_inst_len; (c) DO loop end check if SR.LF set. Common
+     * case (no REP, no DO) is just (b). Emit inline for the
+     * common case.
+     */
+    {
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+        uint32_t *to_call_helper_1 = e->buf;
+        emit_cbnz_w(e, 0, 0);       /* patched below */
+
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        uint32_t *to_call_helper_2 = e->buf;
+        emit_tbnz_w(e, /*rt=*/0, DSP_SR_LF, 0);   /* patched below */
+
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+        emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);
+
+        uint32_t *call_helper_label = e->buf;
+        patch_branch(to_call_helper_1,
+                     (int32_t)((uint8_t *)call_helper_label -
+                               (uint8_t *)to_call_helper_1));
+        /* TBNZ uses imm14 at bits 18:5 — custom patch. */
+        {
+            int32_t off = (int32_t)((uint8_t *)call_helper_label -
+                                    (uint8_t *)to_call_helper_2);
+            int32_t imm14 = off >> 2;
+            assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
+            uint32_t insn = *to_call_helper_2 & ~(0x3fffu << 5);
+            insn |= ((uint32_t)imm14 & 0x3fff) << 5;
+            *to_call_helper_2 = insn;
+        }
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_blr(e, /*rn=*/20);    /* x20 = cached helper address */
+
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+    }
+
+    /*
+     * Step 6: inline postexecute_interrupts fast path. Helper is a
+     * no-op when every interrupt-tracking field is zero; skip the
+     * BLR in that common case. SR.T (trace bit) is NOT in the
+     * quick check — xemu doesn't expose a DSP single-step debugger
+     * so no production title sets it.
+     */
+    {
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
+        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH,
+                      OFF_INTERRUPT_PIPELINE_COUNT);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+
+        uint32_t *skip_site = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);
+
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_blr(e, /*rn=*/21);    /* x21 = cached helper address */
+
+        uint32_t *after_label = e->buf;
+        patch_branch(skip_site,
+                     (int32_t)((uint8_t *)after_label -
+                               (uint8_t *)skip_site));
+    }
+
+    /* Step 7: num_inst += instr_cycle */
+    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+    emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
+    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+
+    /* Step 8: exit-check: interrupt_counter (uint16_t) */
+    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
+    {
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    }
+
+    /* Step 9: exit-check: loop_rep (uint32_t) */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+    {
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    }
+
+    /* Step 10: exit-check: is_idle (bool, 1 byte) */
+    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
+    {
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    }
+
+    /* Step 11: exit-check: PC mismatch (branch taken by handler) */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
+    emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
+    emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
+    {
+        uint32_t *site = e->buf;
+        emit_bcond(e, ARM_COND_NE, 0);
+        record_exit_patch(exits, site);
+    }
+}
+
 
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
@@ -1021,138 +1154,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
     emit_blr(e, /*rn=*/1);
 
-    /*
-     * 5. dsp_postexecute_update_pc — inline fast path.
-     *
-     * The helper does 3 things:
-     *   (a) if loop_rep: REP state machine + keep PC on this insn.
-     *   (b) pc += cur_inst_len
-     *   (c) if SR.LF: handle DO-loop end.
-     *
-     * The common case (no loop_rep, no active DO loop) is just (b).
-     * Emit that inline and only BLR the helper when (a) or (c) might
-     * fire.
-     */
-    {
-        /* if (loop_rep != 0) goto call_helper; */
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-        uint32_t *to_call_helper_1 = e->buf;
-        emit_cbnz_w(e, 0, 0);       /* patched below */
-
-        /* if (registers[SR] & (1 << DSP_SR_LF)) goto call_helper; */
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
-        uint32_t *to_call_helper_2 = e->buf;
-        emit_tbnz_w(e, /*rt=*/0, DSP_SR_LF, 0);   /* patched below */
-
-        /* Fast path: pc += cur_inst_len (loaded — handler may have
-         * bumped it to 2 for long-imm, or zeroed for a terminator). */
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
-        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
-        emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
-        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
-
-        /* Jump over the helper call. */
-        uint32_t *to_after = e->buf;
-        emit_b(e, 0);              /* patched below */
-
-        /* call_helper: */
-        uint32_t *call_helper_label = e->buf;
-        patch_branch(to_call_helper_1,
-                     (int32_t)((uint8_t *)call_helper_label -
-                               (uint8_t *)to_call_helper_1));
-        /* Re-patch the TBNZ with the same logic (imm14 at bits 18:5) */
-        {
-            int32_t off = (int32_t)((uint8_t *)call_helper_label -
-                                    (uint8_t *)to_call_helper_2);
-            int32_t imm14 = off >> 2;
-            assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
-            uint32_t insn = *to_call_helper_2 & ~(0x3fffu << 5);
-            insn |= ((uint32_t)imm14 & 0x3fff) << 5;
-            *to_call_helper_2 = insn;
-        }
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_blr(e, /*rn=*/20);    /* x20 = cached helper address */
-
-        /* after: */
-        uint32_t *after_label = e->buf;
-        patch_b(to_after, (int32_t)((uint8_t *)after_label -
-                                    (uint8_t *)to_after));
-    }
-
-    /*
-     * 6. dsp_postexecute_interrupts — inline fast path.
-     *
-     * Helper is a no-op when every interrupt-tracking field is zero.
-     * Skip the BLR in that common case.
-     *
-     * Note: the SR.T (trace) bit is intentionally NOT included in the
-     * quick check. Trace is set only in DSP debugger / single-step
-     * mode; production titles don't set it. If a title ever did, the
-     * first instruction after SR.T becomes set would miss the TRACE
-     * interrupt enqueue here — that is a known limitation and
-     * matches xemu's existing lack of DSP debugger support.
-     */
-    {
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
-        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
-        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
-        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH,
-                      OFF_INTERRUPT_PIPELINE_COUNT);
-        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
-
-        uint32_t *skip_site = e->buf;
-        emit_cbz_w(e, /*rn=*/0, 0);   /* patched below to after */
-
-        /* call_helper: */
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_blr(e, /*rn=*/21);    /* x21 = cached helper address */
-
-        /* after: */
-        uint32_t *after_label = e->buf;
-        patch_branch(skip_site,
-                     (int32_t)((uint8_t *)after_label -
-                               (uint8_t *)skip_site));
-    }
-
-    /* 7. num_inst += instr_cycle */
-    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
-    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
-    emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
-    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
-
-    /* 8. exit-check: interrupt_counter (uint16_t) */
-    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /* 9. exit-check: loop_rep (uint32_t) */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /* 10. exit-check: is_idle (bool, 1 byte) */
-    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /* 11. exit-check: PC mismatch (branch taken by handler) */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
-    emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
-    emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
-    {
-        uint32_t *site = e->buf;
-        emit_bcond(e, ARM_COND_NE, 0);
-        record_exit_patch(exits, site);
-    }
+    emit_post_instruction_epilogue(e, exits, expected_next_pc);
 
     /* Terminator instructions: the full stub ran so the handler and
      * post-update fired; we now return instead of trying to fall
