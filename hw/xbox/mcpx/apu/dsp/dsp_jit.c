@@ -351,7 +351,7 @@ static inline void emit_cmp_w_reg(ArmEmit *e, int rn, int rm)
 }
 
 /* CBZ Wn, #imm19     — pc-relative branch if Wn == 0 */
-G_GNUC_UNUSED static inline void emit_cbz_w(ArmEmit *e, int rn, int32_t off_bytes)
+static inline void emit_cbz_w(ArmEmit *e, int rn, int32_t off_bytes)
 {
     int32_t imm19 = off_bytes >> 2;
     assert(imm19 >= -(1 << 18) && imm19 < (1 << 18));
@@ -374,6 +374,42 @@ static inline void emit_bcond(ArmEmit *e, int cond, int32_t off_bytes)
     int32_t imm19 = off_bytes >> 2;
     assert(imm19 >= -(1 << 18) && imm19 < (1 << 18));
     emit_u32(e, 0x54000000u | (((uint32_t)imm19 & 0x7ffff) << 5) | (cond & 0xf));
+}
+
+/* B #imm26  — unconditional PC-relative branch, ±128 MiB. */
+static inline void emit_b(ArmEmit *e, int32_t off_bytes)
+{
+    int32_t imm26 = off_bytes >> 2;
+    assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
+    emit_u32(e, 0x14000000u | ((uint32_t)imm26 & 0x03ffffff));
+}
+
+/* TBNZ Wt, #bit, #imm14     — pc-relative branch if bit set. */
+static inline void emit_tbnz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
+{
+    int32_t imm14 = off_bytes >> 2;
+    assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
+    assert(bit >= 0 && bit < 32);
+    emit_u32(e, 0x37000000u | ((uint32_t)(bit & 0x1f) << 19) |
+                (((uint32_t)imm14 & 0x3fff) << 5) | (rt & 0x1f));
+}
+
+/* ORR Wd, Wn, Wm  (shifted-register form, shift #0) */
+static inline void emit_orr_w_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x2a000000u | ((rm & 0x1f) << 16) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/*
+ * Patch an unconditional B to a new byte delta (imm26).
+ */
+static void patch_b(uint32_t *insn_addr, int32_t new_off_bytes)
+{
+    int32_t imm26 = new_off_bytes >> 2;
+    assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
+    uint32_t insn = *insn_addr & ~0x03ffffffu;
+    insn |= (uint32_t)imm26 & 0x03ffffff;
+    *insn_addr = insn;
 }
 
 /* BLR Xn */
@@ -502,14 +538,17 @@ static void jit_clear_icache(void *start, void *end)
  * Struct offsets the emitted code relies on
  * --------------------------------------------------------------- */
 
-#define OFF_PC                 ((uint32_t)offsetof(dsp_core_t, pc))
-#define OFF_CUR_INST           ((uint32_t)offsetof(dsp_core_t, cur_inst))
-#define OFF_CUR_INST_LEN       ((uint32_t)offsetof(dsp_core_t, cur_inst_len))
-#define OFF_INSTR_CYCLE        ((uint32_t)offsetof(dsp_core_t, instr_cycle))
-#define OFF_NUM_INST           ((uint32_t)offsetof(dsp_core_t, num_inst))
-#define OFF_LOOP_REP           ((uint32_t)offsetof(dsp_core_t, loop_rep))
-#define OFF_IS_IDLE            ((uint32_t)offsetof(dsp_core_t, is_idle))
-#define OFF_INTERRUPT_COUNTER  ((uint32_t)offsetof(dsp_core_t, interrupt_counter))
+#define OFF_PC                       ((uint32_t)offsetof(dsp_core_t, pc))
+#define OFF_CUR_INST                 ((uint32_t)offsetof(dsp_core_t, cur_inst))
+#define OFF_CUR_INST_LEN             ((uint32_t)offsetof(dsp_core_t, cur_inst_len))
+#define OFF_INSTR_CYCLE              ((uint32_t)offsetof(dsp_core_t, instr_cycle))
+#define OFF_NUM_INST                 ((uint32_t)offsetof(dsp_core_t, num_inst))
+#define OFF_LOOP_REP                 ((uint32_t)offsetof(dsp_core_t, loop_rep))
+#define OFF_IS_IDLE                  ((uint32_t)offsetof(dsp_core_t, is_idle))
+#define OFF_INTERRUPT_COUNTER        ((uint32_t)offsetof(dsp_core_t, interrupt_counter))
+#define OFF_INTERRUPT_STATE          ((uint32_t)offsetof(dsp_core_t, interrupt_state))
+#define OFF_INTERRUPT_PIPELINE_COUNT ((uint32_t)offsetof(dsp_core_t, interrupt_pipeline_count))
+#define OFF_SR                       ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_SR))
 
 /* Bound check: synthesized-address form (ADD imm12<<12 + LDR imm12*scale)
  * accepts offsets up to 16 MiB. dsp_core_t is ~78 KiB so we're safe. */
@@ -608,8 +647,16 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_mov_imm32(e, /*rd=*/0, inst);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
 
-    /* 2. dsp->cur_inst_len = inst_len (1 or 2; handler may reset to 0) */
-    emit_movz_w(e, /*rd=*/0, (uint16_t)inst_len, 0);
+    /* 2. dsp->cur_inst_len = 1. This is the interpreter's initial
+     * value — handlers that read a second word do cur_inst_len++,
+     * reaching 2; handlers that branch set it to 0. Translators
+     * MUST NOT pre-set this to 2 even for known 2-word ops, or the
+     * handler's ++ would leave it at 3. The `inst_len` parameter
+     * is only used to compute the block's expected_next_pc and to
+     * advance the translator's own pc cursor to the next real
+     * instruction (skipping the immediate word of 2-word ops). */
+    (void)inst_len;
+    emit_movz_w(e, /*rd=*/0, 1, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
 
     /* 3. dsp->instr_cycle = 2 (handlers will += more if needed) */
@@ -621,19 +668,102 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
     emit_blr(e, /*rn=*/1);
 
-    /* 5. call dsp_jit_helper_postexecute_update_pc(dsp) */
-    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-    emit_mov_imm64(e, /*rd=*/1,
-                   (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
-    emit_blr(e, /*rn=*/1);
+    /*
+     * 5. dsp_postexecute_update_pc — inline fast path.
+     *
+     * The helper does 3 things:
+     *   (a) if loop_rep: REP state machine + keep PC on this insn.
+     *   (b) pc += cur_inst_len
+     *   (c) if SR.LF: handle DO-loop end.
+     *
+     * The common case (no loop_rep, no active DO loop) is just (b).
+     * Emit that inline and only BLR the helper when (a) or (c) might
+     * fire.
+     */
+    {
+        /* if (loop_rep != 0) goto call_helper; */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+        uint32_t *to_call_helper_1 = e->buf;
+        emit_cbnz_w(e, 0, 0);       /* patched below */
 
-    /* 6. call dsp_jit_helper_postexecute_interrupts(dsp) — preserves
-     *    per-op interrupt-pipeline semantics in Phase 1. Phase 7
-     *    optimizes this by moving to block boundary. */
-    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-    emit_mov_imm64(e, /*rd=*/1,
-                   (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
-    emit_blr(e, /*rn=*/1);
+        /* if (registers[SR] & (1 << DSP_SR_LF)) goto call_helper; */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        uint32_t *to_call_helper_2 = e->buf;
+        emit_tbnz_w(e, /*rt=*/0, DSP_SR_LF, 0);   /* patched below */
+
+        /* Fast path: pc += cur_inst_len (loaded — handler may have
+         * bumped it to 2 for long-imm, or zeroed for a terminator). */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+        emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+
+        /* Jump over the helper call. */
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);              /* patched below */
+
+        /* call_helper: */
+        uint32_t *call_helper_label = e->buf;
+        patch_branch(to_call_helper_1,
+                     (int32_t)((uint8_t *)call_helper_label -
+                               (uint8_t *)to_call_helper_1));
+        /* Re-patch the TBNZ with the same logic (imm14 at bits 18:5) */
+        {
+            int32_t off = (int32_t)((uint8_t *)call_helper_label -
+                                    (uint8_t *)to_call_helper_2);
+            int32_t imm14 = off >> 2;
+            assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
+            uint32_t insn = *to_call_helper_2 & ~(0x3fffu << 5);
+            insn |= ((uint32_t)imm14 & 0x3fff) << 5;
+            *to_call_helper_2 = insn;
+        }
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1,
+                       (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
+        emit_blr(e, /*rn=*/1);
+
+        /* after: */
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+    }
+
+    /*
+     * 6. dsp_postexecute_interrupts — inline fast path.
+     *
+     * Helper is a no-op when every interrupt-tracking field is zero.
+     * Skip the BLR in that common case.
+     *
+     * Note: the SR.T (trace) bit is intentionally NOT included in the
+     * quick check. Trace is set only in DSP debugger / single-step
+     * mode; production titles don't set it. If a title ever did, the
+     * first instruction after SR.T becomes set would miss the TRACE
+     * interrupt enqueue here — that is a known limitation and
+     * matches xemu's existing lack of DSP debugger support.
+     */
+    {
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
+        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH,
+                      OFF_INTERRUPT_PIPELINE_COUNT);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+
+        uint32_t *skip_site = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);   /* patched below to after */
+
+        /* call_helper: */
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1,
+                       (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
+        emit_blr(e, /*rn=*/1);
+
+        /* after: */
+        uint32_t *after_label = e->buf;
+        patch_branch(skip_site,
+                     (int32_t)((uint8_t *)after_label -
+                               (uint8_t *)skip_site));
+    }
 
     /* 7. num_inst += instr_cycle */
     emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
@@ -719,9 +849,12 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
         old->num_ops = 0;
     }
 
-    /* If the code buffer is near-full, flush the cache. */
+    /* If the code buffer is near-full, flush the cache.
+     * Per-stub worst case is ~80 ARM64 instructions (~320 bytes)
+     * once the fast-path branches are included; budget 512 bytes
+     * per stub for safety. */
     size_t space_left = (s->code_buf + s->code_cap) - s->code_ptr;
-    size_t worst_case = 256 + DSP_JIT_MAX_OPS_PER_BLOCK * 256;
+    size_t worst_case = 256 + DSP_JIT_MAX_OPS_PER_BLOCK * 512;
     if (space_left < worst_case) {
         dsp_jit_invalidate_all(dsp);
     }
@@ -790,8 +923,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
         }
 
         /* Defensive overflow check before next iteration (worst-case
-         * per-op emit is ~64 ARM64 instructions = 256 bytes). */
-        if ((e.buf_end - e.buf) < 64 * 2) {
+         * per-op emit is ~80 ARM64 instructions = 320 bytes; leave
+         * 512 bytes as comfortable headroom). */
+        if ((e.buf_end - e.buf) < 128) {
             break;
         }
     }
