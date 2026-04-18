@@ -969,6 +969,32 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     block->num_ops = num_ops;
     s->blocks_translated++;
 
+    /* Optional hex dump of the emitted ARM64 block, for offline
+     * disassembly and verification. Gated to avoid noise; set
+     * XEMU_DSP_JIT_DUMP=1 to enable. */
+    static bool dump_parsed, dump_enabled;
+    if (!dump_parsed) {
+        dump_parsed = true;
+        const char *e = getenv("XEMU_DSP_JIT_DUMP");
+        dump_enabled = (e && e[0] == '1');
+    }
+    if (dump_enabled) {
+        fprintf(stderr,
+                "[dsp-jit] block pc_start=0x%04x pc_end=0x%04x num_ops=%u "
+                "entry=%p size=%zu bytes\n",
+                pc_start, pc_end, num_ops, (void *)entry_ptr,
+                (size_t)(code_end - (uint8_t *)entry_ptr));
+        uint32_t *p = (uint32_t *)entry_ptr;
+        uint32_t *pe = (uint32_t *)code_end;
+        for (uint32_t *pi = p; pi < pe; pi += 4) {
+            fprintf(stderr, "  %p:", (void *)pi);
+            for (int k = 0; k < 4 && pi + k < pe; k++) {
+                fprintf(stderr, " %08x", pi[k]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     return block;
 }
 
