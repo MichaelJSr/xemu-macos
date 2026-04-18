@@ -229,10 +229,16 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   trip on ~55% of dynamic instructions in audio kernels. Inline
   calc_ea handles the 5 linear Rn addressing modes; inline
   xram/yram linear memory access bypasses the mixbuffer /
-  peripheral / reverse-carry helpers for `addr < 0xc00`. The
-  `opcodes_alu[]` ALU kernel is still BLR'd as a helper (Phase 2
-  inlines those next) but skipped entirely for `emu_move`
-  (`inst & 0xFF == 0`). After Phase 4, `XEMU_DSP_JIT_STATS=1`
+  peripheral / reverse-carry helpers for `addr < 0xc00`. Phase 2
+  inlines the ALU kernel itself: ~170 of 256 opcodes — every
+  ADD/SUB/CMP/CMPM/TST/CLR/NEG/ABS/AND/OR/EOR/NOT/TFR variant plus
+  all 128 MPY/MPYR/MAC/MACR multiplier ops — translate to inline
+  ARM64 that collapses the interpreter's 3-word add-with-carry
+  dance into a single 64-bit ADD and `dsp_mul56` into one SMULL +
+  LSL #1. The rare tail (RND/ROL/ROR/ADDL/SUBL/ADDR/SUBR/ADC/SBC/MAX,
+  plus shifts) stays as BLR fallback. `XEMU_DSP_JIT_STATS=1`
+  prints per-run `alu_inlined / alu_fallback` counts and the
+  inlined percentage. After Phase 2, `XEMU_DSP_JIT_STATS=1`
   reports zero fallbacks on the built-in `/basic` DSP test.
   Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
   against the interpreter. Because a translated block is fully

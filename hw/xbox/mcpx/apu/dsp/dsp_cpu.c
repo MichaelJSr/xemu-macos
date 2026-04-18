@@ -1565,4 +1565,42 @@ void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier
     emu_update_rn(dsp, numreg, modifier);
 }
 
+/*
+ * Phase 2 shim — exposes emu_ccr_update_e_u_n_z (static in
+ * dsp_emu.c.inc) to the JIT emitter. Called from the inline ALU
+ * kernels' post-op flag update — 4-arg signature matches the
+ * interpreter's private helper exactly: reg0=A2, reg1=A1, reg2=A0.
+ */
+void dsp_jit_helper_ccr_e_u_n_z(dsp_core_t *dsp, uint32_t reg0,
+                                uint32_t reg1, uint32_t reg2)
+{
+    emu_ccr_update_e_u_n_z(dsp, reg0, reg1, reg2);
+}
+
+/*
+ * Phase 2 shim — wraps dsp_rnd56 for the JIT's MPYR / MACR path.
+ *
+ * The JIT keeps the 56-bit accumulator as a sign-extended 64-bit
+ * value in a single X-register; dsp_rnd56 works on the three-word
+ * split form. We unpack, call dsp_rnd56 (which reads SR.S0/S1 at
+ * runtime to pick the rounding mode), repack, and sign-extend back
+ * to 64 bits.
+ *
+ * dsp_rnd56 internally calls dsp_add56 but discards the returned
+ * SR flag bits, so there's no stray SR mutation from this path.
+ */
+uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
+{
+    uint32_t d[3];
+    d[0] = (packed >> 48) & 0xff;
+    d[1] = (packed >> 24) & 0xffffff;
+    d[2] = packed & 0xffffff;
+    dsp_rnd56(dsp, d);
+    uint64_t r = ((uint64_t)d[0] << 48) |
+                 ((uint64_t)d[1] << 24) |
+                 (uint64_t)d[2];
+    /* Sign-extend from bit 55 to keep the 64-bit convention. */
+    return (uint64_t)(((int64_t)(r << 8)) >> 8);
+}
+
 #endif  /* DSP_JIT_SUPPORTED */

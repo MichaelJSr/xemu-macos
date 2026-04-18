@@ -629,6 +629,161 @@ G_GNUC_UNUSED static inline void emit_tbz_w(ArmEmit *e, int rt, int bit, int32_t
                 (((uint32_t)imm14 & 0x3fff) << 5) | (rt & 0x1f));
 }
 
+/* --------------------------------------------------------------- *
+ * Phase 2 primitives — added for inline arithmetic / MAC kernels.
+ *
+ * These are the operations needed to implement 56-bit accumulator
+ * arithmetic (ADD/SUB/CMP), 24x24 signed multiply, sign-/zero-
+ * extends, and the inline E/U/N/Z flag update. See emit_load_accu56
+ * / emit_store_accu56 / emit_alu_* below for how they compose.
+ * --------------------------------------------------------------- */
+
+/* AND Wd, Wn, Wm  (shifted-register, shift #0) */
+G_GNUC_UNUSED static inline void emit_and_w_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x0a000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* AND Xd, Xn, Xm */
+G_GNUC_UNUSED static inline void emit_and_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x8a000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* EOR Wd, Wn, Wm */
+G_GNUC_UNUSED static inline void emit_eor_w_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x4a000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* EOR Xd, Xn, Xm */
+G_GNUC_UNUSED static inline void emit_eor_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0xca000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* MVN Wd, Wm  (alias of ORN Wd, WZR, Wm) — bitwise NOT */
+G_GNUC_UNUSED static inline void emit_mvn_w(ArmEmit *e, int rd, int rm)
+{
+    emit_u32(e, 0x2a2003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
+}
+
+/* ORR Xd, Xn, Xm */
+G_GNUC_UNUSED static inline void emit_orr_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0xaa000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* ADDS Xd, Xn, Xm  (flag-setting 64-bit add, shifted-register form) */
+G_GNUC_UNUSED static inline void emit_adds_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0xab000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SUB Xd, Xn, Xm  (shifted-register, shift #0) */
+G_GNUC_UNUSED static inline void emit_sub_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0xcb000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SUBS Xd, Xn, Xm (flag-setting) */
+G_GNUC_UNUSED static inline void emit_subs_x_reg(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0xeb000000u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* NEG Xd, Xm  (alias of SUB Xd, XZR, Xm) */
+G_GNUC_UNUSED static inline void emit_neg_x(ArmEmit *e, int rd, int rm)
+{
+    emit_u32(e, 0xcb0003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
+}
+
+/*
+ * 64-bit shifts / bitfield extracts. Same UBFM / SBFM encoding
+ * scheme as the 32-bit variants already in this file, but with the
+ * sf bit (bit 31) set and N bit (bit 22) set for 64-bit bitfield ops.
+ *
+ *   LSL Xd, Xn, #s   => UBFM Xd, Xn, #((64-s)%64), #(63-s)
+ *   LSR Xd, Xn, #s   => UBFM Xd, Xn, #s, #63
+ *   ASR Xd, Xn, #s   => SBFM Xd, Xn, #s, #63
+ */
+G_GNUC_UNUSED static inline void emit_lsl_x_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 64);
+    uint32_t immr = (uint32_t)((64 - shift) & 63);
+    uint32_t imms = (uint32_t)(63 - shift);
+    emit_u32(e, 0xd3400000u | (immr << 16) | (imms << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+G_GNUC_UNUSED static inline void emit_lsr_x_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 64);
+    emit_u32(e, 0xd340fc00u | ((uint32_t)shift << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+G_GNUC_UNUSED static inline void emit_asr_x_imm(ArmEmit *e, int rd, int rn, int shift)
+{
+    assert(shift >= 0 && shift < 64);
+    emit_u32(e, 0x9340fc00u | ((uint32_t)shift << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* UBFX Xd, Xn, #lsb, #width — 64-bit variant of UBFX.
+ * Encoding: 0xd3400000 | (N=1 << 22) | (immr=lsb << 16) | (imms=(lsb+width-1) << 10) | Rn5 | Rd. */
+G_GNUC_UNUSED static inline void emit_ubfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+{
+    assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
+    emit_u32(e, 0xd3400000u | ((uint32_t)lsb << 16) |
+                ((uint32_t)(lsb + width - 1) << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SBFX Xd, Xn, #lsb, #width — signed (arithmetic) bitfield extract, 64-bit. */
+G_GNUC_UNUSED static inline void emit_sbfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+{
+    assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
+    emit_u32(e, 0x93400000u | ((uint32_t)lsb << 16) |
+                ((uint32_t)(lsb + width - 1) << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/*
+ * BFI Xd, Xn, #lsb, #width — bit field insert (alias of BFM).
+ *   BFM Xd, Xn, #((64 - lsb) & 63), #(width - 1)
+ */
+G_GNUC_UNUSED static inline void emit_bfi_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+{
+    assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
+    uint32_t immr = (uint32_t)((64 - lsb) & 63);
+    uint32_t imms = (uint32_t)(width - 1);
+    emit_u32(e, 0xb3400000u | (immr << 16) | (imms << 10) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SXTB Wd, Wn  — sign-extend byte (alias of SBFM Wd, Wn, #0, #7) */
+G_GNUC_UNUSED static inline void emit_sxtb_w(ArmEmit *e, int rd, int rn)
+{
+    emit_u32(e, 0x13001c00u | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
+/* SMULL Xd, Wn, Wm — signed 32x32 -> 64 multiply.
+ * Encoding: 0x9b207c00 | (Rm << 16) | (Rn << 5) | Rd. */
+G_GNUC_UNUSED static inline void emit_smull(ArmEmit *e, int rd, int rn, int rm)
+{
+    emit_u32(e, 0x9b207c00u | ((rm & 0x1f) << 16) |
+                ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
 /*
  * Patch an unconditional B to a new byte delta (imm26).
  */
@@ -1380,6 +1535,1011 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
 }
 
 /* --------------------------------------------------------------- *
+ * Phase 2 — inline ALU kernels (arithmetic + MAC + logical + shift
+ *           + transfer). Replaces the per-parmove `BLR
+ *           opcodes_alu[inst & 0xFF]` round-trip with inline ARM64
+ *           that mirrors the interpreter's handler bit-exactly.
+ *
+ * The 56-bit accumulator is held as a sign-extended 64-bit value in
+ * an X-register for the duration of a single ALU op: bit 55 is the
+ * MSB, bits 63:55 are the sign extension. This collapses the
+ * interpreter's 3-word add-with-carry dance into a single 64-bit
+ * ADD.
+ *
+ * Flag computation is also inline — no BLR to
+ * emu_ccr_update_e_u_n_z. The S0/S1 scaling bits in SR are read at
+ * runtime; the three scaling cases (00, 01, 10) dispatch through a
+ * CMP + Bcc sequence (most common case: scaling=00, so the
+ * fall-through is fastest).
+ *
+ * Handlers outside the inline set (emu_rnd_*, emu_rol/ror,
+ * emu_adc/sbc, emu_addl/subl/addr/subr, emu_max) still go through a
+ * plain BLR to the existing C handler via the ALU_FALLBACK case —
+ * see emit_alu_call / alu_classify_opcode at the bottom of this
+ * section.
+ * --------------------------------------------------------------- */
+
+/* Register offsets used by the accu load / store helpers. */
+#define OFF_A0_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_A0))
+#define OFF_A1_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_A1))
+#define OFF_A2_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_A2))
+#define OFF_B0_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_B0))
+#define OFF_B1_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_B1))
+#define OFF_B2_REG ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_B2))
+
+/* which_ab is 0 for A, 1 for B. */
+static inline uint32_t accu_off(int which_ab, int slot)
+{
+    if (which_ab == 0) {
+        switch (slot) {
+        case 0: return OFF_A0_REG;
+        case 1: return OFF_A1_REG;
+        case 2: return OFF_A2_REG;
+        }
+    } else {
+        switch (slot) {
+        case 0: return OFF_B0_REG;
+        case 1: return OFF_B1_REG;
+        case 2: return OFF_B2_REG;
+        }
+    }
+    assert(!"bad slot");
+    return 0;
+}
+
+/*
+ * Load the 56-bit accumulator A or B into a single 64-bit X-reg,
+ * sign-extended from bit 55 so bits 63:56 carry the sign of bit 55.
+ * This representation makes 64-bit ADD/SUB produce correct carry /
+ * overflow for the 56-bit accumulator (with per-bit-55 flag
+ * extraction — see emit_alu_arith).
+ *
+ * Layout: bits [55:48] = A2 (8-bit), bits [47:24] = A1 (24-bit),
+ *         bits [23:0]  = A0 (24-bit), bits [63:56] = sign-ext(A2[7]).
+ *
+ * Masks A1 and A0 to 24 bits on load so stale upper bits (which the
+ * pm_0/pm_1/pm_8 A/B splits leave unmasked per interp parity) don't
+ * leak into the arithmetic.
+ *
+ * Clobbers: w/x tmp regs (caller passes scratch1 / scratch2).
+ */
+static void emit_load_accu56(ArmEmit *e, int xaccu, int which_ab,
+                             int xtmp)
+{
+    assert(xaccu != xtmp);
+    /* Load A2 (byte) and sign-extend directly into xaccu as a
+     * 64-bit signed value. After SBFX with lsb=0, width=8, xaccu
+     * holds the signed 8-bit interpretation of A2 in bits 63:0
+     * (i.e. all 64 bits carry the sign). */
+    emit_ldrb_any(e, /*rd=*/xaccu, /*rn=*/19, SCRATCH, accu_off(which_ab, 2));
+    emit_sbfx_x(e, /*rd=*/xaccu, /*rn=*/xaccu, 0, 8);
+    emit_lsl_x_imm(e, /*rd=*/xaccu, /*rn=*/xaccu, 48);
+
+    /* A1 -> bits [47:24] (bfi handles masking to 24 bits). */
+    emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 1));
+    emit_bfi_x(e, /*rd=*/xaccu, /*rn=*/xtmp, 24, 24);
+
+    /* A0 -> bits [23:0]. */
+    emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 0));
+    emit_bfi_x(e, /*rd=*/xaccu, /*rn=*/xtmp, 0, 24);
+}
+
+/*
+ * Unpack a 64-bit X-reg back into A2 / A1 / A0 (or B2 / B1 / B0)
+ * with the standard 8 / 24 / 24-bit widths. Uses UBFX so bits
+ * outside the slot width are not stored (matching the interp's
+ * `& BITMASK(24)` / `& BITMASK(8)` masks).
+ */
+G_GNUC_UNUSED static void emit_store_accu56(ArmEmit *e, int xaccu,
+                                            int which_ab, int xtmp)
+{
+    assert(xaccu != xtmp);
+    /* A0 = accu[23:0] */
+    emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 0, 24);
+    emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 0));
+    /* A1 = accu[47:24] */
+    emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 24, 24);
+    emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 1));
+    /* A2 = accu[55:48] (unsigned 8-bit — matches interp's & BITMASK(8)) */
+    emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 48, 8);
+    emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 2));
+}
+
+/*
+ * Source-operand forms for ADD / SUB / CMP / CMPM. Encodes how the
+ * interpreter builds its three-word `source[]` array for each
+ * handler variant; see dsp_emu.c.inc:516..965 for the reference.
+ */
+typedef enum {
+    ALU_SRC_ACCU_A,    /* source = [A2, A1, A0] — for _A_B variants (source = A) */
+    ALU_SRC_ACCU_B,    /* source = [B2, B1, B0] — for _B_A variants (source = B) */
+    ALU_SRC_X,         /* source = [sign(X1[23]), X1, X0] — 48-bit "long X" */
+    ALU_SRC_Y,         /* source = [sign(Y1[23]), Y1, Y0] — 48-bit "long Y" */
+    ALU_SRC_X0_AT_A1,  /* source = [sign(X0[23]), X0, 0] — X0 at bits 47:24 */
+    ALU_SRC_Y0_AT_A1,  /* source = [sign(Y0[23]), Y0, 0] */
+    ALU_SRC_X1_AT_A1,  /* source = [sign(X1[23]), X1, 0] */
+    ALU_SRC_Y1_AT_A1,  /* source = [sign(Y1[23]), Y1, 0] */
+} AluSrcForm;
+
+/*
+ * Load a 56-bit ALU source operand into a single 64-bit X-reg,
+ * sign-extended from bit 55 (same convention as emit_load_accu56).
+ *
+ * Clobbers xtmp. Produces xsrc.
+ */
+G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
+                                            AluSrcForm form, int xtmp)
+{
+    assert(xsrc != xtmp);
+    switch (form) {
+    case ALU_SRC_ACCU_A:
+        emit_load_accu56(e, xsrc, /*which_ab=*/0, xtmp);
+        return;
+    case ALU_SRC_ACCU_B:
+        emit_load_accu56(e, xsrc, /*which_ab=*/1, xtmp);
+        return;
+    case ALU_SRC_X:
+    case ALU_SRC_Y: {
+        /*
+         * "Long" X or Y: sign-extend the high 24-bit register
+         * (X1 or Y1) into bits [63:24] of xsrc, then OR in the
+         * low 24 bits from X0 or Y0.
+         */
+        int off_hi = (form == ALU_SRC_X) ? OFF_REG(DSP_REG_X1)
+                                         : OFF_REG(DSP_REG_Y1);
+        int off_lo = (form == ALU_SRC_X) ? OFF_REG(DSP_REG_X0)
+                                         : OFF_REG(DSP_REG_Y0);
+        emit_ldr_w_any(e, /*rd=*/xsrc, /*rn=*/19, SCRATCH, off_hi);
+        emit_sbfx_x(e, /*rd=*/xsrc, /*rn=*/xsrc, 0, 24);
+        emit_lsl_x_imm(e, /*rd=*/xsrc, /*rn=*/xsrc, 24);
+        emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, off_lo);
+        emit_bfi_x(e, /*rd=*/xsrc, /*rn=*/xtmp, 0, 24);
+        return;
+    }
+    default: {
+        /* Single-register source placed at bits [47:24] with
+         * bits [23:0] = 0, sign-extended from the 24-bit value's
+         * bit 23. */
+        int reg;
+        switch (form) {
+        case ALU_SRC_X0_AT_A1: reg = DSP_REG_X0; break;
+        case ALU_SRC_Y0_AT_A1: reg = DSP_REG_Y0; break;
+        case ALU_SRC_X1_AT_A1: reg = DSP_REG_X1; break;
+        case ALU_SRC_Y1_AT_A1: reg = DSP_REG_Y1; break;
+        default: assert(!"bad form"); return;
+        }
+        emit_ldr_w_any(e, /*rd=*/xsrc, /*rn=*/19, SCRATCH, OFF_REG(reg));
+        emit_sbfx_x(e, /*rd=*/xsrc, /*rn=*/xsrc, 0, 24);
+        emit_lsl_x_imm(e, /*rd=*/xsrc, /*rn=*/xsrc, 24);
+        return;
+    }
+    }
+}
+
+/*
+ * Emit a call to the emu_ccr_update_e_u_n_z helper (shimmed from
+ * dsp_cpu.c as dsp_jit_helper_ccr_e_u_n_z) to update SR's E/U/N/Z
+ * bits based on the new accumulator value.
+ *
+ * The shim takes (dsp, A2, A1, A0) — we extract the three slots
+ * from the 64-bit xaccu via UBFX and pass them in the standard
+ * argument registers w1/w2/w3.
+ *
+ * Inlining this fully would save another ~5-10 cycles per op but
+ * requires a 100+ ARM64-instruction emit with runtime branches on
+ * SR.S0/S1 — deferred until Phase 8's lazy-flag rework (at which
+ * point most blocks never compute these bits at all).
+ *
+ * Clobbers w0..w4 and x30 (via BLR).
+ */
+static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
+{
+    emit_ubfx_x(e, /*rd=*/1, /*rn=*/xaccu, 48, 8);  /* w1 = A2 */
+    emit_ubfx_x(e, /*rd=*/2, /*rn=*/xaccu, 24, 24); /* w2 = A1 */
+    emit_ubfx_x(e, /*rd=*/3, /*rn=*/xaccu, 0, 24);  /* w3 = A0 */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);          /* x0 = dsp */
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_ccr_e_u_n_z);
+    emit_blr(e, /*rn=*/4);
+}
+
+/* --------------------------------------------------------------- *
+ * ALU opcode classification
+ *
+ * Decode the 8-bit ALU opcode byte (inst & 0xff) into an
+ * AluVariant that tells the emitter which inline template to use.
+ * Anything not covered falls through to ALU_FALLBACK which BLRs
+ * the existing opcodes_alu[] handler — zero behavioural change
+ * for unsupported opcodes.
+ *
+ * See dsp_emu.c.inc:5092 for the full opcodes_alu[] table this
+ * classifier mirrors.
+ * --------------------------------------------------------------- */
+
+typedef enum {
+    ALU_KIND_FALLBACK = 0,   /* BLR opcodes_alu[inst&0xff] — unchanged */
+    ALU_KIND_MOVE,           /* emu_move: no-op (already skipped) */
+    ALU_KIND_ADD,
+    ALU_KIND_SUB,
+    ALU_KIND_CMP,
+    ALU_KIND_CMPM,
+    ALU_KIND_TST,
+    ALU_KIND_CLR,
+    ALU_KIND_NEG,
+    ALU_KIND_ABS,
+    ALU_KIND_NOT,
+    ALU_KIND_AND,
+    ALU_KIND_OR,
+    ALU_KIND_EOR,
+    ALU_KIND_ASL,
+    ALU_KIND_ASR,
+    ALU_KIND_LSL,
+    ALU_KIND_LSR,
+    ALU_KIND_TFR,
+    ALU_KIND_MPY,
+    ALU_KIND_MPYR,
+    ALU_KIND_MAC,
+    ALU_KIND_MACR,
+} AluKind;
+
+typedef struct AluVariant {
+    AluKind    kind;
+    uint8_t    dst_ab;       /* 0=A, 1=B */
+    AluSrcForm src_form;     /* for ALU_KIND_ADD / SUB / CMP / CMPM */
+
+    /* Single-register source (AND/OR/EOR/TFR) — DSP_REG_X0 etc. */
+    uint8_t    src_reg;
+
+    /* MAC-family parameters: */
+    uint8_t    mac_src1_reg;
+    uint8_t    mac_src2_reg;
+    uint8_t    mac_sign;      /* 0 = +, 1 = − */
+} AluVariant;
+
+/* (src1, src2) pair for the 8 MAC rows at 0x80 + (pair<<4). */
+static const uint8_t alu_mac_pair_src1[8] = {
+    DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1, DSP_REG_Y1,
+    DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1, DSP_REG_Y1,
+};
+static const uint8_t alu_mac_pair_src2[8] = {
+    DSP_REG_X0, DSP_REG_Y0, DSP_REG_X0, DSP_REG_Y0,
+    DSP_REG_Y1, DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1,
+};
+
+/* Source register for the 0x40-0x7F block, indexed by (op >> 4) - 4. */
+static const uint8_t alu_47_src_reg[4] = {
+    DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1, DSP_REG_Y1,
+};
+static const AluSrcForm alu_47_src_form[4] = {
+    ALU_SRC_X0_AT_A1, ALU_SRC_Y0_AT_A1,
+    ALU_SRC_X1_AT_A1, ALU_SRC_Y1_AT_A1,
+};
+
+/* Classify the 8-bit ALU opcode. Returns the AluVariant in *out; the
+ * `kind` field is ALU_KIND_FALLBACK when no inline template
+ * applies. */
+G_GNUC_UNUSED static void alu_classify_opcode(uint8_t alu_op, AluVariant *out)
+{
+    AluVariant v = { .kind = ALU_KIND_FALLBACK };
+
+    if (alu_op >= 0x80) {
+        /* MAC / MPY family (opcodes_alu[0x80..0xff]).
+         *   alu_op = 1 _ [pair:3] _ [dst_ab:1] _ [sign:1] _ [round|mac:1] _ [ismac:1]
+         * Wait — table row is
+         *   mpy_p, mpyr_p, mac_p, macr_p, mpy_m, mpyr_m, mac_m, macr_m
+         * so sub-op (low 3 bits) is (is_mac, is_round, sign).
+         *   bit 0 : 1 = round variant (mpyr/macr)
+         *   bit 1 : 1 = mac variant (mac/macr accumulate)
+         *   bit 2 : 1 = sign minus
+         * (Verified against the table in dsp_emu.c.inc.)
+         */
+        uint8_t sub     = alu_op & 0x7;
+        uint8_t dst_bit = (alu_op >> 3) & 0x1;
+        uint8_t pair    = (alu_op >> 4) & 0x7;
+        int is_round = sub & 0x1;
+        int is_mac   = (sub & 0x2) != 0;
+        int sign_m   = (sub & 0x4) != 0;
+
+        if (is_mac && is_round)       v.kind = ALU_KIND_MACR;
+        else if (is_mac)              v.kind = ALU_KIND_MAC;
+        else if (is_round)            v.kind = ALU_KIND_MPYR;
+        else                          v.kind = ALU_KIND_MPY;
+
+        v.dst_ab       = dst_bit;
+        v.mac_src1_reg = alu_mac_pair_src1[pair];
+        v.mac_src2_reg = alu_mac_pair_src2[pair];
+        v.mac_sign     = (uint8_t)sign_m;
+        *out = v;
+        return;
+    }
+
+    if (alu_op >= 0x40) {
+        /* 0x40-0x7f: [add, tfr, or, eor, sub, cmp, and, cmpm] × src × dst.
+         *   alu_op = 0100_0000 | (src_idx:2) << 4 | (dst_ab:1) << 3 | sub_op(3)
+         * src_idx: 0 = X0, 1 = Y0, 2 = X1, 3 = Y1
+         */
+        uint8_t sub     = alu_op & 0x7;
+        uint8_t dst_bit = (alu_op >> 3) & 0x1;
+        uint8_t src_idx = (alu_op >> 4) & 0x3;
+        uint8_t src_reg = alu_47_src_reg[src_idx];
+        AluSrcForm form = alu_47_src_form[src_idx];
+        v.dst_ab   = dst_bit;
+        v.src_reg  = src_reg;
+        v.src_form = form;
+        switch (sub) {
+        case 0: v.kind = ALU_KIND_ADD;  break;
+        case 1: v.kind = ALU_KIND_TFR;  break;
+        case 2: v.kind = ALU_KIND_OR;   break;
+        case 3: v.kind = ALU_KIND_EOR;  break;
+        case 4: v.kind = ALU_KIND_SUB;  break;
+        case 5: v.kind = ALU_KIND_CMP;  break;
+        case 6: v.kind = ALU_KIND_AND;  break;
+        case 7: v.kind = ALU_KIND_CMPM; break;
+        }
+        *out = v;
+        return;
+    }
+
+    /* 0x00-0x3f: irregular block. Decode by explicit opcode. */
+    switch (alu_op) {
+    case 0x00: v.kind = ALU_KIND_MOVE; break;
+
+    /* TFR B->A / A->B */
+    case 0x01: v.kind = ALU_KIND_TFR; v.dst_ab = 0;
+               v.src_form = ALU_SRC_ACCU_B; v.src_reg = DSP_REG_B; break;
+    case 0x09: v.kind = ALU_KIND_TFR; v.dst_ab = 1;
+               v.src_form = ALU_SRC_ACCU_A; v.src_reg = DSP_REG_A; break;
+
+    /* TST */
+    case 0x03: v.kind = ALU_KIND_TST; v.dst_ab = 0; break;
+    case 0x0b: v.kind = ALU_KIND_TST; v.dst_ab = 1; break;
+
+    /* CMP / CMPM between A and B */
+    case 0x05: v.kind = ALU_KIND_CMP;  v.dst_ab = 0;
+               v.src_form = ALU_SRC_ACCU_B; break;
+    case 0x07: v.kind = ALU_KIND_CMPM; v.dst_ab = 0;
+               v.src_form = ALU_SRC_ACCU_B; break;
+    case 0x0d: v.kind = ALU_KIND_CMP;  v.dst_ab = 1;
+               v.src_form = ALU_SRC_ACCU_A; break;
+    case 0x0f: v.kind = ALU_KIND_CMPM; v.dst_ab = 1;
+               v.src_form = ALU_SRC_ACCU_A; break;
+
+    /* ADD A<->B, SUB A<->B */
+    case 0x10: v.kind = ALU_KIND_ADD; v.dst_ab = 0;
+               v.src_form = ALU_SRC_ACCU_B; break;
+    case 0x18: v.kind = ALU_KIND_ADD; v.dst_ab = 1;
+               v.src_form = ALU_SRC_ACCU_A; break;
+    case 0x14: v.kind = ALU_KIND_SUB; v.dst_ab = 0;
+               v.src_form = ALU_SRC_ACCU_B; break;
+    case 0x1c: v.kind = ALU_KIND_SUB; v.dst_ab = 1;
+               v.src_form = ALU_SRC_ACCU_A; break;
+
+    /* CLR / NOT */
+    case 0x13: v.kind = ALU_KIND_CLR; v.dst_ab = 0; break;
+    case 0x1b: v.kind = ALU_KIND_CLR; v.dst_ab = 1; break;
+    case 0x17: v.kind = ALU_KIND_NOT; v.dst_ab = 0; break;
+    case 0x1f: v.kind = ALU_KIND_NOT; v.dst_ab = 1; break;
+
+    /* ADD_X / SUB_X (long X) */
+    case 0x20: v.kind = ALU_KIND_ADD; v.dst_ab = 0; v.src_form = ALU_SRC_X; break;
+    case 0x28: v.kind = ALU_KIND_ADD; v.dst_ab = 1; v.src_form = ALU_SRC_X; break;
+    case 0x24: v.kind = ALU_KIND_SUB; v.dst_ab = 0; v.src_form = ALU_SRC_X; break;
+    case 0x2c: v.kind = ALU_KIND_SUB; v.dst_ab = 1; v.src_form = ALU_SRC_X; break;
+
+    /* ADD_Y / SUB_Y */
+    case 0x30: v.kind = ALU_KIND_ADD; v.dst_ab = 0; v.src_form = ALU_SRC_Y; break;
+    case 0x38: v.kind = ALU_KIND_ADD; v.dst_ab = 1; v.src_form = ALU_SRC_Y; break;
+    case 0x34: v.kind = ALU_KIND_SUB; v.dst_ab = 0; v.src_form = ALU_SRC_Y; break;
+    case 0x3c: v.kind = ALU_KIND_SUB; v.dst_ab = 1; v.src_form = ALU_SRC_Y; break;
+
+    /* Shifts on full 56-bit accu */
+    case 0x22: v.kind = ALU_KIND_ASR; v.dst_ab = 0; break;
+    case 0x2a: v.kind = ALU_KIND_ASR; v.dst_ab = 1; break;
+    case 0x32: v.kind = ALU_KIND_ASL; v.dst_ab = 0; break;
+    case 0x3a: v.kind = ALU_KIND_ASL; v.dst_ab = 1; break;
+
+    /* Shifts on A1/B1 alone */
+    case 0x23: v.kind = ALU_KIND_LSR; v.dst_ab = 0; break;
+    case 0x2b: v.kind = ALU_KIND_LSR; v.dst_ab = 1; break;
+    case 0x33: v.kind = ALU_KIND_LSL; v.dst_ab = 0; break;
+    case 0x3b: v.kind = ALU_KIND_LSL; v.dst_ab = 1; break;
+
+    /* NEG / ABS */
+    case 0x26: v.kind = ALU_KIND_ABS; v.dst_ab = 0; break;
+    case 0x2e: v.kind = ALU_KIND_ABS; v.dst_ab = 1; break;
+    case 0x36: v.kind = ALU_KIND_NEG; v.dst_ab = 0; break;
+    case 0x3e: v.kind = ALU_KIND_NEG; v.dst_ab = 1; break;
+
+    /* Everything else (rnd, addr, subr, addl, subl, max, adc, sbc,
+     * ror, rol, undefined) stays at ALU_KIND_FALLBACK. */
+    default: break;
+    }
+    *out = v;
+}
+
+/* --------------------------------------------------------------- *
+ * Phase 2 inline ALU emitters
+ * --------------------------------------------------------------- */
+
+/*
+ * Emit: newsr (w5) = overflow*L | overflow*V | carry*C, given the
+ * three 56-bit sign-extended X-regs:
+ *   xorig = original dest (before op)
+ *   xsrc  = source operand
+ *   xres  = (dest op src) in 64-bit signed form
+ *   is_sub: 0 = add, 1 = sub
+ *
+ * Carry / borrow is the unsigned carry out of bit 55. For both ADD
+ * and SUB, the identity
+ *   bit_56_of(orig ^ src ^ result) = carry_out_of_bit_55
+ * holds: for ADD it's the classic parity identity; for SUB, after
+ * expanding res = a + (~b) + 1, the algebra reduces to the same
+ * form (not the negated form). Specifically:
+ *   `(a^b^res) bit 56 = 1 ^ carry_add_of(a, ~b, 1)`
+ *                     = 1 ^ (NOT borrow_sub(a, b))
+ *                     = borrow_sub(a, b)
+ * so no inversion is needed. (An earlier version of this code
+ * inverted the SUB carry and produced C=1 on `0 - 0` — the 0x45
+ * cmp_x0_a bug that surfaced via DIFF=1.)
+ *
+ * Overflow is the signed-56 overflow bit. From dsp_add56 /
+ * dsp_sub56:
+ *   ADD: overflow = ((sign_s ^ sign_r) & (sign_d ^ sign_r))
+ *   SUB: overflow = ((sign_s ^ sign_d) & (sign_r ^ sign_d))
+ * where sign_s=src[55], sign_d=orig[55], sign_r=result[55]. The
+ * ADD and SUB forms use different "common" term in the XOR
+ * factoring — this emitter handles both.
+ *
+ * Clobbers w5..w8 (passed back as new_sr in w5).
+ */
+static void emit_addsub_flags(ArmEmit *e, int xorig, int xsrc, int xres,
+                              int is_sub)
+{
+    /* Carry: same formula for both ADD and SUB. */
+    emit_eor_x_reg(e, /*rd=*/6, /*rn=*/xorig, /*rm=*/xsrc);
+    emit_eor_x_reg(e, /*rd=*/6, /*rn=*/6,     /*rm=*/xres);
+    emit_ubfx_x(e,   /*rd=*/5, /*rn=*/6, 56, 1);          /* w5 = carry */
+
+    /* Overflow. Pick the (A, B, common) triple so the formula is
+     * always "(A^common) & (B^common)" bit 55.
+     *   ADD: A=orig, B=src,  common=result
+     *   SUB: A=src,  B=res,  common=orig
+     */
+    int xA, xB, xCommon;
+    if (is_sub) {
+        xA = xsrc;  xB = xres;  xCommon = xorig;
+    } else {
+        xA = xorig; xB = xsrc;  xCommon = xres;
+    }
+    emit_eor_x_reg(e, /*rd=*/6, /*rn=*/xA, /*rm=*/xCommon);
+    emit_eor_x_reg(e, /*rd=*/7, /*rn=*/xB, /*rm=*/xCommon);
+    emit_and_x_reg(e, /*rd=*/6, /*rn=*/6,  /*rm=*/7);
+    emit_ubfx_x(e,   /*rd=*/6, /*rn=*/6, 55, 1);          /* w6 = overflow */
+
+    /* Build new_sr = (overflow << L) | (overflow << V) | (carry << C).
+     * L=bit 6, V=bit 1, C=bit 0. w5 already has carry at bit 0. */
+    emit_bfi_x(e, /*rd=*/5, /*rn=*/6, DSP_SR_V, 1);   /* V */
+    emit_bfi_x(e, /*rd=*/5, /*rn=*/6, DSP_SR_L, 1);   /* L */
+}
+
+/*
+ * Apply a computed new_sr (in w5 — see emit_addsub_flags) to SR,
+ * first clearing bits V and C so the OR-in correctly installs the
+ * new ones.
+ *
+ * Clobbers w6.
+ */
+static void emit_sr_clear_vc_or_newsr(ArmEmit *e, int wnewsr)
+{
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7, (uint32_t)~((1u << DSP_SR_V) | (1u << DSP_SR_C))
+                                & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/wnewsr);
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * Emit the inline ADD / SUB / CMP / CMPM kernel for a given
+ * AluVariant.
+ *
+ * Register usage:
+ *   x10 = dest accu (loaded from A/B)
+ *   x11 = source (48/56-bit packed, sign-extended)
+ *   x12 = result after ADD/SUB
+ *   x13 = saved original dest (for overflow calc)
+ *   (internal scratch for emit_addsub_flags: w5, w6, w7, w8)
+ *
+ * Must NOT clobber the parmove stubs' x22..x25 scratch saves.
+ */
+static void emit_alu_arith(ArmEmit *e, const AluVariant *v)
+{
+    int is_sub = (v->kind == ALU_KIND_SUB || v->kind == ALU_KIND_CMP ||
+                  v->kind == ALU_KIND_CMPM);
+    int no_writeback = (v->kind == ALU_KIND_CMP || v->kind == ALU_KIND_CMPM);
+    int is_cmpm = (v->kind == ALU_KIND_CMPM);
+
+    /* Load dest (A or B) into x10. */
+    emit_load_accu56(e, /*xaccu=*/10, /*which_ab=*/v->dst_ab, /*xtmp=*/8);
+
+    /* Load source into x11. */
+    emit_load_alu_src(e, /*xsrc=*/11, /*form=*/v->src_form, /*xtmp=*/8);
+
+    /* CMPM: abs both operands before comparing.  Inline port of
+     * dsp_abs56: if bit 55 set, negate. For our sign-extended
+     * 64-bit reps, "abs" is NEG if negative else identity. */
+    if (is_cmpm) {
+        /* abs(x10) */
+        emit_neg_x(e, /*rd=*/12, /*rm=*/10);
+        emit_ubfx_x(e, /*rd=*/6, /*rn=*/10, 55, 1);
+        emit_cmp_w_imm(e, /*rn=*/6, 0);
+        uint32_t *skip_a = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
+        emit_mov_x_reg(e, /*rd=*/10, /*rn=*/12);
+        /* Re-sign-extend: after negating a 56-bit value, the 64-bit
+         * result's bits 63:56 may not match bit 55. SBFX fixes it. */
+        emit_sbfx_x(e, /*rd=*/10, /*rn=*/10, 0, 56);
+        patch_branch(skip_a, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_a));
+        /* abs(x11) */
+        emit_neg_x(e, /*rd=*/12, /*rm=*/11);
+        emit_ubfx_x(e, /*rd=*/6, /*rn=*/11, 55, 1);
+        emit_cmp_w_imm(e, /*rn=*/6, 0);
+        uint32_t *skip_b = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
+        emit_mov_x_reg(e, /*rd=*/11, /*rn=*/12);
+        emit_sbfx_x(e, /*rd=*/11, /*rn=*/11, 0, 56);
+        patch_branch(skip_b, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_b));
+    }
+
+    /* Save x10 (original dest) into x13 for overflow calc. */
+    emit_mov_x_reg(e, /*rd=*/13, /*rn=*/10);
+
+    /* x12 = dest op src (64-bit signed — low 56 bits are the result). */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    } else {
+        emit_add_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    }
+
+    /* Compute new_sr (carry+V+L bits) from orig/src/res. */
+    emit_addsub_flags(e, /*xorig=*/13, /*xsrc=*/11, /*xres=*/12,
+                      is_sub);
+
+    /* Writeback unless this is CMP/CMPM. */
+    if (!no_writeback) {
+        emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+    }
+
+    /* SR update: clear V|C, OR new_sr, then E/U/N/Z via helper. */
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * TST: no arithmetic, just E/U/N/Z update on current accu and
+ * clear V. Mirrors emu_tst_a / emu_tst_b.
+ */
+static void emit_alu_tst(ArmEmit *e, const AluVariant *v)
+{
+    emit_load_accu56(e, /*xaccu=*/10, v->dst_ab, /*xtmp=*/8);
+
+    /* Clear V only (not C). */
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+
+    emit_ccr_e_u_n_z(e, /*xaccu=*/10);
+}
+
+/*
+ * CLR: zero the accumulator, set SR Z=1 U=1, clear SR E N V.
+ * Mirrors emu_clr_a / emu_clr_b.
+ */
+static void emit_alu_clr(ArmEmit *e, const AluVariant *v)
+{
+    /* STR 0 to A0, A1, A2 (or B0, B1, B2). */
+    emit_str_w_any(e, /*rs=*/31 /*WZR*/, /*rn=*/19, SCRATCH,
+                   accu_off(v->dst_ab, 0));
+    emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 1));
+    emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
+
+    /* SR: clear E|N|V, set U|Z. */
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7,
+                   (uint32_t)~((1u << DSP_SR_E) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_V)) & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    emit_mov_imm32(e, /*rd=*/7, (1u << DSP_SR_U) | (1u << DSP_SR_Z));
+    emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * Helper for NEG/ABS: compute the "overflowed" bit — 1 iff the
+ * 56-bit signed value is 0x80_0000_0000_0000 (minimum negative,
+ * can't be negated within 56 bits). Places result in w_ovf.
+ *
+ * Matches the interp's special-case test:
+ *   overflowed = (A0==0 && A1==0 && A2==0x80).
+ * Equivalent in 64-bit: (accu == 0xFF80_0000_0000_0000 when
+ * sign-extended, == (int64_t)(-(1LL << 55))).
+ */
+static void emit_overflowed_min_neg(ArmEmit *e, int xaccu, int wovf)
+{
+    /* Shift out bits 63:56 (sign-ext) by masking to 56 bits unsigned,
+     * then compare against (1 << 55). */
+    emit_lsl_x_imm(e, /*rd=*/6, /*rn=*/xaccu, 8);
+    emit_lsr_x_imm(e, /*rd=*/6, /*rn=*/6, 8);        /* x6 = accu & ((1<<56)-1) */
+    /* Compare against (1ULL << 55) in a scratch. */
+    emit_mov_imm32(e, /*rd=*/7, 1u);
+    emit_lsl_x_imm(e, /*rd=*/7, /*rn=*/7, 55);       /* x7 = 1 << 55 */
+    /* CMP x6, x7 -> set Z flag. Use SUBS xzr, x6, x7. */
+    emit_u32(e, 0xeb0001ffu | ((7 & 0x1f) << 16) | ((6 & 0x1f) << 5));
+    /* CSET wd, eq — w_ovf = 1 if equal, else 0. Encoded as
+     * CSINC Wd, WZR, WZR, cond=NE (inverted). */
+    emit_u32(e, 0x1a9f17e0u | (uint32_t)(wovf & 0x1f));
+}
+
+/*
+ * SR update for NEG/ABS: clear V, OR (ovf<<L) | (ovf<<V).
+ * C is preserved (unlike ADD/SUB which clear V|C).
+ */
+static void emit_sr_neg_abs(ArmEmit *e, int wovf)
+{
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    /* OR ovf into V (bit 1). */
+    emit_bfi_x(e, /*rd=*/6, /*rn=*/wovf, DSP_SR_V, 1);
+    /* OR ovf into L (bit 6). */
+    emit_bfi_x(e, /*rd=*/6, /*rn=*/wovf, DSP_SR_L, 1);
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * NEG: negate the 56-bit accu. Matches emu_neg_a/b (dsp_emu.c.inc
+ * :4123). Overflow bit set only when orig == 0x80_0000_0000_0000.
+ * C bit is preserved (not touched).
+ */
+static void emit_alu_neg(ArmEmit *e, const AluVariant *v)
+{
+    emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8); /* orig */
+    /* overflowed = (orig == 1<<55). Compute before the negate so
+     * the original value is still in x13. */
+    emit_overflowed_min_neg(e, /*xaccu=*/13, /*wovf=*/5);
+
+    /* Negate. */
+    emit_neg_x(e, /*rd=*/12, /*rm=*/13);
+    /* Sign-extend to 56-bit (in case negation overflowed bit 55). */
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+    emit_sr_neg_abs(e, /*wovf=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * ABS: if accu negative, negate in place. Matches emu_abs_a/b
+ * (dsp_emu.c.inc:344). overflowed bit set only when
+ * orig == 0x80_0000_0000_0000. C bit preserved.
+ */
+static void emit_alu_abs(ArmEmit *e, const AluVariant *v)
+{
+    emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8);
+    /* Compute overflowed bit from the original value. */
+    emit_overflowed_min_neg(e, /*xaccu=*/13, /*wovf=*/5);
+
+    /* Default result = orig. */
+    emit_mov_x_reg(e, /*rd=*/12, /*rn=*/13);
+
+    /* If bit 55 set (negative), negate. */
+    emit_ubfx_x(e, /*rd=*/6, /*rn=*/13, 55, 1);
+    emit_cmp_w_imm(e, /*rn=*/6, 0);
+    uint32_t *skip_neg = e->buf;
+    emit_bcond(e, ARM_COND_EQ, 0);
+    emit_neg_x(e, /*rd=*/12, /*rm=*/13);
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+    patch_branch(skip_neg, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_neg));
+
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+    emit_sr_neg_abs(e, /*wovf=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * Inline MPY / MPYR / MAC / MACR kernel.
+ *
+ * Collapses the interpreter's dsp_mul56 + optional dsp_add56 +
+ * optional dsp_rnd56 chain into a small ARM64 sequence:
+ *
+ *   1. Load src1, src2 as signed 24-bit -> 32-bit W-regs.
+ *   2. SMULL for signed 32x32 -> 64-bit product (actual 48-bit).
+ *   3. LSL #1 to remove the "extra sign bit" (matches dsp_asl56(1)
+ *      inside dsp_mul56).
+ *   4. Optionally NEG for sign=minus.
+ *   5. SBFX #0 #56 to sign-extend back to 64-bit under the JIT's
+ *      "56-bit value sign-extended into X-reg" convention.
+ *   6. MAC/MACR: load accu, ADD, compute V flag.
+ *   7. MPYR/MACR: BLR dsp_jit_helper_rnd56 to apply convergent
+ *      rounding (complex; shared helper).
+ *   8. Store accu back.
+ *   9. SR update:
+ *        MAC/MACR : SR &= ~V; SR |= newsr & 0xfe;
+ *        MPY/MPYR : SR &= ~V;
+ *  10. E/U/N/Z via shared helper.
+ */
+static void emit_alu_mac(ArmEmit *e, const AluVariant *v)
+{
+    int is_mac  = (v->kind == ALU_KIND_MAC  || v->kind == ALU_KIND_MACR);
+    int is_rnd  = (v->kind == ALU_KIND_MPYR || v->kind == ALU_KIND_MACR);
+    int sign_m  = v->mac_sign;
+
+    /* Load src1, src2 as signed 24-bit into W9, W10. (Using wider
+     * allocation than prior ops because we need x11=prod, x12=accu
+     * original, x13=accu result simultaneously.) */
+    emit_ldr_w_any(e, /*rd=*/9,  /*rn=*/19, SCRATCH, OFF_REG(v->mac_src1_reg));
+    emit_sbfx_x(e,  /*rd=*/9,  /*rn=*/9, 0, 24);
+    emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, OFF_REG(v->mac_src2_reg));
+    emit_sbfx_x(e,  /*rd=*/10, /*rn=*/10, 0, 24);
+
+    /* SMULL X11, W9, W10 — signed 32x32 -> 64. */
+    emit_smull(e, /*rd=*/11, /*rn=*/9, /*rm=*/10);
+
+    /* LSL #1 (matches dsp_asl56(dest, 1) inside dsp_mul56). */
+    emit_lsl_x_imm(e, /*rd=*/11, /*rn=*/11, 1);
+
+    /* Negate for sign=minus. */
+    if (sign_m) {
+        emit_neg_x(e, /*rd=*/11, /*rm=*/11);
+    }
+
+    /* Sign-extend to the JIT's 56-bit-in-X-reg convention. */
+    emit_sbfx_x(e, /*rd=*/11, /*rn=*/11, 0, 56);
+
+    int x_final = 11;  /* where the final value lives before store */
+    int wnewsr  = 5;   /* holds new_sr for MAC/MACR, else unset */
+    int mac_mode = is_mac;
+
+    if (is_mac) {
+        /* Load dest, compute ADD, compute overflow flag, mask C bit. */
+        emit_load_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+        emit_mov_x_reg(e, /*rd=*/13, /*rn=*/12);     /* save orig */
+        emit_add_x_reg(e, /*rd=*/14, /*rn=*/12, /*rm=*/11);
+
+        /* Compute flags per dsp_add56 but only use overflow (V & L).
+         * MAC drops the C bit via `& 0xfe` on newsr. */
+        emit_addsub_flags(e, /*xorig=*/13, /*xsrc=*/11, /*xres=*/14,
+                          /*is_sub=*/0);
+        /* emit_addsub_flags put carry at bit 0 of w5. MAC masks it
+         * out (& 0xfe). Clear bit 0 of w5 with a UBFX+LSL pair. */
+        emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 1, 15);
+        emit_lsl_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
+
+        x_final = 14;
+    }
+
+    if (is_rnd) {
+        /* BLR dsp_jit_helper_rnd56(dsp, packed) returns packed. */
+        emit_mov_x_reg(e, /*rd=*/1, /*rn=*/x_final);
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/15,
+                       (uint64_t)(uintptr_t)&dsp_jit_helper_rnd56);
+        emit_blr(e, /*rn=*/15);
+        emit_mov_x_reg(e, /*rd=*/x_final == 14 ? 14 : 11, /*rn=*/0);
+    }
+
+    /* Store result to accu. */
+    emit_store_accu56(e, /*xaccu=*/x_final, v->dst_ab, /*xtmp=*/8);
+
+    /* SR update: clear V; MAC also ORs newsr (with C bit already
+     * cleared above). MPY/MPYR have no newsr, just clear V. */
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    if (mac_mode) {
+        emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/wnewsr);
+    }
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* E/U/N/Z on the final result. */
+    emit_ccr_e_u_n_z(e, /*xaccu=*/x_final);
+}
+
+/*
+ * AND / OR / EOR / NOT on A1 (or B1) only. Interpreter pattern
+ * (dsp_emu.c.inc:966 and friends):
+ *   A1 = A1 OP src;   // src is one of X0/Y0/X1/Y1 (raw register value)
+ *   SR &= ~(N|Z|V);
+ *   SR |= ((A1>>23) & 1) << N;
+ *   SR |= (A1 == 0) << Z;
+ *
+ * For NOT, "src" is irrelevant (A1 = ~A1 with & BITMASK(24) applied).
+ */
+static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
+{
+    int off_a1 = accu_off(v->dst_ab, 1);
+
+    /* Load A1/B1 into w10. */
+    emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, off_a1);
+
+    if (v->kind == ALU_KIND_NOT) {
+        emit_mvn_w(e, /*rd=*/10, /*rm=*/10);
+    } else {
+        emit_ldr_w_any(e, /*rd=*/11, /*rn=*/19, SCRATCH, OFF_REG(v->src_reg));
+        switch (v->kind) {
+        case ALU_KIND_AND: emit_and_w_reg(e, 10, 10, 11); break;
+        case ALU_KIND_OR:  emit_orr_w_reg(e, 10, 10, 11); break;
+        case ALU_KIND_EOR: emit_eor_w_reg(e, 10, 10, 11); break;
+        default: assert(!"bad logical kind"); return;
+        }
+    }
+
+    /* Mask to 24 bits (matches interp's `& BITMASK(24)` and keeps
+     * the invariant A1 has clean upper bits for subsequent ops). */
+    emit_ubfx_w(e, /*rd=*/10, /*rn=*/10, 0, 24);
+
+    /* Store back. */
+    emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, off_a1);
+
+    /* SR: clear N|Z|V, set N = bit 23 of A1, Z = (A1 == 0). */
+    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/7, (uint32_t)~((1u << DSP_SR_N) | (1u << DSP_SR_Z) |
+                                             (1u << DSP_SR_V)) & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+
+    /* Extract N bit: (A1 >> 23) & 1 -> w7, shift into SR.N (bit 3). */
+    emit_ubfx_w(e, /*rd=*/7, /*rn=*/10, 23, 1);
+    emit_bfi_x(e, /*rd=*/6, /*rn=*/7, DSP_SR_N, 1);
+
+    /* Z bit: set bit Z if w10 == 0. CBZ/CSET pattern via conditional
+     * branch around the "set Z" store. */
+    emit_cmp_w_imm(e, /*rn=*/10, 0);
+    uint32_t *skip_z = e->buf;
+    emit_bcond(e, ARM_COND_NE, 0);
+    emit_mov_imm32(e, /*rd=*/7, 1u << DSP_SR_Z);
+    emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
+    patch_branch(skip_z, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_z));
+
+    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * TFR family. Two shapes:
+ *   - tfr_b_a / tfr_a_b (ALU_SRC_ACCU_A/B): 3-word copy, no flags.
+ *   - tfr_X0/X1/Y0/Y1_{a,b}: zero A0/B0, copy X/Y into A1/B1, set
+ *     A2/B2 to 0xff or 0 based on sign bit. No flags.
+ */
+static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
+{
+    if (v->src_form == ALU_SRC_ACCU_A || v->src_form == ALU_SRC_ACCU_B) {
+        int src_ab = (v->src_form == ALU_SRC_ACCU_A) ? 0 : 1;
+        /* 3-word copy. Assumes A and B never alias (always distinct). */
+        emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, accu_off(src_ab, 0));
+        emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 0));
+        emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, accu_off(src_ab, 1));
+        emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 1));
+        emit_ldrb_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, accu_off(src_ab, 2));
+        emit_strb_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
+        return;
+    }
+
+    /* X0/X1/Y0/Y1 -> A/B with sign-extend. */
+    emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, OFF_REG(v->src_reg));
+
+    /* A0 / B0 = 0 */
+    emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 0));
+    /* A1 / B1 = src (keep full 32 bits — interp doesn't mask here). */
+    emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 1));
+
+    /* A2 = (A1 bit 23) ? 0xff : 0. Compute via UBFX bit 23 + NEG
+     * + mask to 8. */
+    emit_ubfx_w(e, /*rd=*/7, /*rn=*/10, 23, 1);
+    emit_neg_w(e, /*rd=*/7, /*rm=*/7);     /* 0 or 0xFFFFFFFF */
+    emit_ubfx_w(e, /*rd=*/7, /*rn=*/7, 0, 8);
+    emit_strb_any(e, /*rs=*/7, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
+}
+
+/* --------------------------------------------------------------- *
+ * ALU stats — total inlined vs BLR-fallback ALU ops. Printed by
+ * XEMU_DSP_JIT_STATS on emulator exit so we can see what fraction
+ * of ALU opcodes Phase 2 covers on the running game.
+ *
+ * Incremented at translate time (not execute time), so counts
+ * "ALU ops emitted" in the code buffer rather than "ALU ops run".
+ * That's enough to confirm inlining coverage on a given workload.
+ * --------------------------------------------------------------- */
+static uint64_t g_alu_inlined_count;
+static uint64_t g_alu_fallback_count;
+
+/*
+ * Dispatch: emit the appropriate inline ALU kernel. Returns true
+ * if it handled the op (caller emits nothing else); false means
+ * "fall back to BLR alu" (caller emits the BLR).
+ */
+static bool emit_alu_inline(ArmEmit *e, const AluVariant *v)
+{
+    switch (v->kind) {
+    case ALU_KIND_ADD:
+    case ALU_KIND_SUB:
+    case ALU_KIND_CMP:
+    case ALU_KIND_CMPM:
+        emit_alu_arith(e, v);
+        return true;
+    case ALU_KIND_TST:
+        emit_alu_tst(e, v);
+        return true;
+    case ALU_KIND_CLR:
+        emit_alu_clr(e, v);
+        return true;
+    case ALU_KIND_NEG:
+        emit_alu_neg(e, v);
+        return true;
+    case ALU_KIND_ABS:
+        emit_alu_abs(e, v);
+        return true;
+    case ALU_KIND_AND:
+    case ALU_KIND_OR:
+    case ALU_KIND_EOR:
+    case ALU_KIND_NOT:
+        emit_alu_logical(e, v);
+        return true;
+    case ALU_KIND_TFR:
+        emit_alu_tfr(e, v);
+        return true;
+    case ALU_KIND_MPY:
+    case ALU_KIND_MPYR:
+    case ALU_KIND_MAC:
+    case ALU_KIND_MACR:
+        emit_alu_mac(e, v);
+        return true;
+    default:
+        /* ASL/ASR/LSL/LSR, plus FALLBACK and MOVE fall through here.
+         * Caller BLRs the handler (or skips entirely for MOVE). */
+        return false;
+    }
+}
+
+/*
+ * Single entry point for all parmove stubs. Replaces the
+ * old "emit_mov_x_reg + emit_mov_imm64 + emit_blr" trio with a
+ * classify+inline-or-BLR dispatch.
+ *
+ * alu_op : the low 8 bits of inst (the opcodes_alu[] index).
+ * alu    : the emu_func_t the parmove stub would have BLR'd. May
+ *          be NULL for emu_move (caller is expected to skip that
+ *          case already via dsp_jit_helper_alu_is_move).
+ *
+ * On ALU_KIND_FALLBACK or any classification we can't inline yet
+ * (shifts), we emit the old BLR sequence — identical behaviour to
+ * pre-Phase-2.
+ */
+static void emit_alu_call(ArmEmit *e, uint8_t alu_op, emu_func_t alu)
+{
+    if (alu == NULL) {
+        /* Caller already filtered emu_move; nothing to emit. */
+        return;
+    }
+
+    AluVariant v;
+    alu_classify_opcode(alu_op, &v);
+
+    if (v.kind != ALU_KIND_FALLBACK && v.kind != ALU_KIND_MOVE) {
+        if (emit_alu_inline(e, &v)) {
+            g_alu_inlined_count++;
+            return;
+        }
+    }
+
+    /* Fallback: BLR the existing C handler — identical to pre-
+     * Phase-2 behaviour. */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+    emit_blr(e, /*rn=*/1);
+    g_alu_fallback_count++;
+}
+
+/* --------------------------------------------------------------- *
  * Parmove translators
  * --------------------------------------------------------------- */
 
@@ -1418,11 +2578,7 @@ static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
     /* save_xy0 = X0 or Y0 (direct register load) */
     emit_ldr_w_any(e, /*rd=*/24, /*rn=*/19, SCRATCH, OFF_REG(xy0_reg));
 
-    if (alu != NULL) {
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-        emit_blr(e, /*rn=*/1);
-    }
+    emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
     /* memory[addr] = save_accu */
     emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
@@ -1508,11 +2664,7 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
     /* save_2 = A/B via pm_read_accu24 */
     emit_pm_read_reg(e, s2_numreg, /*value_reg=*/24);
 
-    if (alu != NULL) {
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-        emit_blr(e, /*rn=*/1);
-    }
+    emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
     /* Write D1 side. */
     if (write_d) {
@@ -1649,11 +2801,7 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
         emit_pm_read_reg(e, numreg2, /*value_reg=*/25);
     }
 
-    if (alu != NULL) {
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-        emit_blr(e, /*rn=*/1);
-    }
+    emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
     /* Write first parmove. */
     if (write_d1) {
@@ -1706,11 +2854,7 @@ static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu)
 
     emit_pm_read_reg(e, srcreg, /*value_reg=*/23);
 
-    if (alu != NULL) {
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-        emit_blr(e, /*rn=*/1);
-    }
+    emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
     /* pm_2_2: interpreter masks with registers_mask[dstreg]
      * (dsp_emu.c.inc line 5398). */
@@ -1721,11 +2865,7 @@ static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
 {
     if ((inst & 0xffff00u) == 0x200000u) {
         /* NOP parmove — ALU only. */
-        if (alu != NULL) {
-            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-            emit_blr(e, /*rn=*/1);
-        }
+        emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
         return;
     }
 
@@ -1736,11 +2876,7 @@ static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
         uint32_t ea_mode = (inst >> 8) & 0x1f;
         emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false);
-        if (alu != NULL) {
-            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-            emit_blr(e, /*rn=*/1);
-        }
+        emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
         return;
     }
 
@@ -1778,11 +2914,7 @@ static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu)
     uint32_t final_value = shift_left_16 ? (srcvalue << 16) : srcvalue;
 
     /* ALU first. */
-    if (alu != NULL) {
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-        emit_blr(e, /*rn=*/1);
-    }
+    emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
     /* Load the final value into a scratch and write to destination.
      * pm_3: interpreter masks with registers_mask[dstreg]
@@ -1874,11 +3006,7 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
         }
 
         /* ALU */
-        if (alu != NULL) {
-            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-            emit_blr(e, /*rn=*/1);
-        }
+        emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
         /* Write register. pm_5 (also reached via pm_4 fall-through)
          * masks with registers_mask[numreg] at dsp_emu.c.inc line
@@ -1894,11 +3022,7 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
          */
         emit_pm_read_reg(e, (int)numreg, /*value_reg=*/23);
 
-        if (alu != NULL) {
-            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-            emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
-            emit_blr(e, /*rn=*/1);
-        }
+        emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
 
         emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22,
                           /*value_reg=*/23);
@@ -2617,6 +3741,10 @@ void dsp_jit_finalize(dsp_core_t *dsp)
     }
 
     if (g_jit_stats) {
+        /* alu_inlined / alu_fallback are process-wide (shared
+         * across the two DSP cores). Print them only on the EP
+         * core's finalize (the second core to be finalized) so
+         * the number isn't split across two printouts. */
         fprintf(stderr,
                 "xemu: DSP JIT stats (%s core):\n"
                 "  blocks_translated = %" PRIu64 "\n"
@@ -2624,12 +3752,20 @@ void dsp_jit_finalize(dsp_core_t *dsp)
                 "  cache_flushes     = %" PRIu64 "\n"
                 "  fallbacks         = %" PRIu64 "\n"
                 "  diff_ops_checked  = %" PRIu64 "\n"
-                "  code_buf_used     = %zu bytes / %zu bytes\n",
+                "  code_buf_used     = %zu bytes / %zu bytes\n"
+                "  alu_inlined       = %" PRIu64
+                " (%.1f%% of ALU ops)\n"
+                "  alu_fallback      = %" PRIu64 "\n",
                 dsp->is_gp ? "GP" : "EP",
                 s->blocks_translated, s->blocks_executed,
                 s->cache_flushes, s->fallbacks,
                 s->diff_ops_checked,
-                (size_t)(s->code_ptr - s->code_buf), s->code_cap);
+                (size_t)(s->code_ptr - s->code_buf), s->code_cap,
+                g_alu_inlined_count,
+                (g_alu_inlined_count + g_alu_fallback_count) == 0 ? 0.0 :
+                    100.0 * (double)g_alu_inlined_count /
+                    (double)(g_alu_inlined_count + g_alu_fallback_count),
+                g_alu_fallback_count);
     }
 
     jit_code_free(s->code_buf, s->code_cap);
