@@ -1,5 +1,5 @@
 /*
- * MCPX APU DSP (DSP56300 / M56001) JIT — Phase 0 + Phase 1
+ * MCPX APU DSP (DSP56300 / M56001) JIT — Apple Silicon (ARM64)
  *
  * Copyright (c) 2026 xemu-macos contributors
  *
@@ -8,39 +8,52 @@
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
  *
- * Design summary (see docs/dsp-jit-design.md for full details):
+ * Design summary (see docs/dsp-jit-design.md for the full write-up):
  *
  *   The JIT translates DSP basic blocks into ARM64 machine code.
  *   Each translated DSP instruction becomes a short "stub" that:
  *     1. Writes the pre-decoded instruction word into dsp->cur_inst,
  *        resets dsp->cur_inst_len to 1 and dsp->instr_cycle to 2.
- *     2. Calls the same emu_func_t C handler the interpreter would.
+ *     2. Either calls the same emu_func_t C handler the interpreter
+ *        would, OR (Phase 4) runs inline ARM64 code for parmove +
+ *        addressing / memory fast paths and only BLRs to the
+ *        opcodes_alu[] ALU kernel.
  *     3. Calls dsp_postexecute_update_pc (PC advance + DO-loop edge).
  *     4. Accumulates dsp->instr_cycle into dsp->num_inst.
  *     5. Runtime-checks for early block exit:
- *          - interrupt_counter > 0    (pending IRQ)
- *          - is_idle                  (stop/wait)
- *          - loop_rep                 (REP entered; block boundary)
- *          - pc != expected_next_pc   (branch taken)
+ *          - interrupt_counter > 0       (pending IRQ)
+ *          - is_idle                     (stop/wait)
+ *          - loop_rep                    (REP entered; block boundary)
+ *          - jit_exit_block_request      (self-modifying-code hit)
+ *          - pc != expected_next_pc      (branch taken)
  *
  *   Block length is bounded (MAX_OPS_PER_BLOCK). On block exit we
  *   return to the C dispatcher, which re-looks-up a block for the
  *   new PC. Block chaining across known fall-through is a Phase 5
- *   optimization and is NOT yet done here.
+ *   optimisation and is NOT yet done here.
  *
- *   The on-disk emu_* handlers are unchanged, so correctness is
- *   equivalent to the interpreter by construction. Real speedup in
- *   this phase is modest (block prologue/epilogue amortized over
- *   many ops; no tracing/disasm check per op; no lookup_opcode);
- *   further phases inline specific emu_* handlers directly in ARM64.
+ *   Correctness is equivalent to the interpreter by construction
+ *   (same emu_* handlers called; Phase 4 parmove inlines decode the
+ *   same bits the interpreter does). Speedup vs the interpreter is
+ *   primarily from amortising dispatch overhead, eliminating the
+ *   pram_opcache load, and avoiding the per-op tracing / disasm
+ *   check. Remaining speedups target the ALU kernel and control
+ *   flow in later phases.
  *
- *   A differential-validation mode (XEMU_DSP_JIT_DIFF=1) runs the
- *   interpreter and JIT on a shadow dsp_core_t in parallel and
- *   asserts bit-exact equivalence on every op. Used only during
- *   bring-up; off by default.
+ *   A differential-validation harness (XEMU_DSP_JIT_DIFF=1) runs
+ *   the interpreter on a private copy of dsp_core_t on a dedicated
+ *   worker thread (`mcpx.dsp_diff`) and byte-compares against the
+ *   JIT's post-block state, aborting on any divergence. APU-thread
+ *   cost is bounded by a per-translation "already validated" flag
+ *   so a deterministic block is only validated once — total work
+ *   ≈ number of unique block translations rather than blocks
+ *   executed per second. See the Differential validator block in
+ *   DspJitState / DiffQueue below.
  */
 
 #include "qemu/osdep.h"
+#include "qemu/thread.h"
+#include "qemu/atomic.h"
 #include "dsp_cpu.h"
 #include "dsp_jit.h"
 
@@ -65,6 +78,7 @@ typedef void (*emu_func_t)(dsp_core_t *dsp);
 static bool g_jit_parsed;
 static bool g_jit_enabled;
 static bool g_jit_diff;
+static bool g_jit_diff_sync;         /* XEMU_DSP_JIT_DIFF_SYNC=1: on-thread compare */
 static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
 static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks */
 static bool g_jit_stats;
@@ -125,10 +139,16 @@ static void parse_flags_once(void)
         }
     }
 
-    /* Optional hard cap on total diff checks across the process
-     * lifetime. After this many checks, diff mode auto-disables
-     * itself (g_jit_diff = false). Use this to verify the first
-     * N blocks bit-exact during startup, then run normally. */
+    /*
+     * Optional total-validation cap. The per-translation gate
+     * (DspJitBlock.diff_checked) already bounds validator work to
+     * ~N_unique_block_translations — typically a few hundred — so
+     * most users never need a cap. Unset by default. Set
+     * XEMU_DSP_JIT_DIFF_MAX=N to stop validating after N enqueues
+     * (useful for CI "validate first N blocks, then run free"
+     * gating). The recommended knob for day-to-day runs is
+     * XEMU_DSP_JIT_DIFF=N sampling.
+     */
     e = getenv("XEMU_DSP_JIT_DIFF_MAX");
     if (e && e[0]) {
         long long n = strtoll(e, NULL, 0);
@@ -137,21 +157,31 @@ static void parse_flags_once(void)
         }
     }
 
+    /* Force synchronous (on-thread) validation. Default is async
+     * via the validator worker thread. Use SYNC for bring-up
+     * debugging where you want the abort to fire immediately on
+     * divergence rather than "eventually when the validator gets
+     * around to this block". Sync mode re-introduces APU-thread
+     * latency and is NOT recommended for extended runs. */
+    e = getenv("XEMU_DSP_JIT_DIFF_SYNC");
+    g_jit_diff_sync = (e && e[0] == '1');
+
     e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
 
     if (g_jit_enabled) {
-        if (g_jit_diff && g_jit_diff_sample == 1) {
-            fprintf(stderr, "xemu: DSP JIT enabled (DIFF mode — 2-10x slowdown, "
-                            "bit-exact validation every block)%s\n",
-                    g_jit_stats ? " (stats)" : "");
+        const char *mode_desc = "";
+        if (g_jit_diff && g_jit_diff_sync && g_jit_diff_sample == 1) {
+            mode_desc = " (DIFF=sync, every unique translation)";
+        } else if (g_jit_diff && g_jit_diff_sync) {
+            mode_desc = " (DIFF=sync, sampled)";
+        } else if (g_jit_diff && g_jit_diff_sample == 1) {
+            mode_desc = " (DIFF=async, every unique translation)";
         } else if (g_jit_diff) {
-            fprintf(stderr, "xemu: DSP JIT enabled (DIFF sampling every %u blocks)%s\n",
-                    g_jit_diff_sample, g_jit_stats ? " (stats)" : "");
-        } else {
-            fprintf(stderr, "xemu: DSP JIT enabled%s\n",
-                    g_jit_stats ? " (stats)" : "");
+            mode_desc = " (DIFF=async, sampled)";
         }
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s\n",
+                mode_desc, g_jit_stats ? " (stats)" : "");
     }
 }
 
@@ -672,14 +702,129 @@ static void patch_branch(uint32_t *insn_addr, int32_t new_off_bytes)
 
 typedef void (*dsp_jit_entry_fn)(dsp_core_t *dsp);
 
+/*
+ * Per-block "write set" — a conservative over-approximation of
+ * which regions of dsp_core_t the block's handlers might write to,
+ * computed at translation time. The differential validator uses it
+ * to skip byte-comparing regions the block demonstrably didn't
+ * touch. Memory arrays account for >75% of dsp_core_t; for the
+ * FIR/IIR hot-path blocks (pure register computation, no memory
+ * writes) this drops the compare from ~40 KB to ~2 KB per block.
+ *
+ * The "always-compared" regions (registers, stack's top-of-stack,
+ * pc / sr / loop_rep / interrupt_*, num_inst / instr_cycle /
+ * cur_inst*) are small and always differ when there's a real
+ * translation bug, so they're never skipped regardless of bits.
+ */
+#define DSP_JIT_WS_XRAM       (1u << 0)
+#define DSP_JIT_WS_YRAM       (1u << 1)
+#define DSP_JIT_WS_PRAM       (1u << 2)
+#define DSP_JIT_WS_MIXBUFFER  (1u << 3)
+#define DSP_JIT_WS_PERIPH     (1u << 4)
+#define DSP_JIT_WS_ALL        0x1fu
+
 typedef struct DspJitBlock {
     uint32_t pc_start;
     uint32_t pc_end;           /* exclusive — last covered PC + cur_inst_len */
     dsp_jit_entry_fn entry;    /* pointer into code buffer */
     uint32_t num_ops;
-    /* pc_to_block lookup: for each covered PC, pc_to_block[pc] = this block. */
-    struct DspJitBlock *next;  /* free list chain when unused */
+    uint32_t write_set;        /* DSP_JIT_WS_* bitmask */
+    /*
+     * Differential-validator gate. A translated block is fully
+     * deterministic given its pre-state (same JIT stubs run, each
+     * calling the same emu_func_t handler); a single enqueue /
+     * successful validation proves correctness for every future
+     * execution of that translation. Once this is set, the diff
+     * path skips the block entirely — back to the fast normal
+     * path with zero memcpy / validation cost.
+     *
+     *   0 : not yet enqueued (diff path will enqueue on next hit)
+     *   1 : enqueued or validated (diff path skips from now on)
+     *
+     * Cleared by translate_block (fresh translation) and
+     * dsp_jit_invalidate (block evicted). Writes are unsynchronised
+     * because a lost update only means at most one extra validation
+     * for a block — harmless.
+     */
+    uint8_t  diff_checked;
+    /* Blocks are slotted 1-per-PC into DspJitState.blocks[]. No
+     * explicit free list — eviction goes through dsp_jit_invalidate
+     * (per-block) or dsp_jit_invalidate_all (cache flush). */
 } DspJitBlock;
+
+/* --------------------------------------------------------------- *
+ * Differential validator (DIFF mode)
+ *
+ * There are two modes, selected by XEMU_DSP_JIT_DIFF_SYNC:
+ *
+ *   async (default): on each block, the APU thread snapshots pre-
+ *   and post-state into a pre-allocated SPSC ring slot and publishes.
+ *   A dedicated validator thread pops slots, runs the interpreter on
+ *   the pre-snapshot to the same num_inst target, and compares
+ *   against the post-snapshot. Validation is fully off the APU
+ *   thread's critical path — d->lock is released before the
+ *   (slow) interpreter replay. On ring full the producer drops
+ *   the new entry (validation becomes a sampler) rather than
+ *   blocking the APU thread.
+ *
+ *   sync (XEMU_DSP_JIT_DIFF_SYNC=1): interpreter replay + compare
+ *   run inline on the APU thread for each block. Matches the old
+ *   behaviour, kept for bring-up debugging where you want the abort
+ *   to fire immediately on divergence rather than eventually when
+ *   the validator catches up.
+ *
+ * In either mode the interpreter replays on a *private copy* of
+ * dsp_core_t — never on the live dsp. The private copy's
+ * read_peripheral / write_peripheral function pointers are replaced
+ * with shims that set a flag to skip the compare (because
+ * container_of(copy, DSPState, core) would otherwise corrupt the
+ * real device state). This, together with core->jit_skip_diff_compare
+ * set on the live dsp for DMA triggers, means blocks with
+ * externally-visible I/O are validated for state transitions that
+ * are *internal* to dsp_core_t, and the visible I/O differences
+ * (which interp replay cannot reproduce) are skipped.
+ */
+#define DSP_JIT_DIFF_SLOTS 16  /* 2 x ~80 KB per slot; ~2.6 MB total */
+
+typedef struct DiffSlot {
+    dsp_core_t pre;            /* state before JIT block ran */
+    dsp_core_t post;           /* state after JIT block ran */
+    uint32_t   pc_start;
+    uint32_t   num_inst_before;
+    uint32_t   jit_cycles;
+    uint32_t   write_set;      /* DSP_JIT_WS_* bitmask */
+    uint8_t    skip_compare;   /* JIT hit DMA_CONTROL: skip validation */
+    /*
+     * Block pointer + its `entry` at enqueue time. The worker marks
+     * the block as validated only if block->entry still matches —
+     * otherwise the translation has been invalidated and re-emitted
+     * (e.g. self-modifying code), and the new code must be
+     * re-validated from scratch.
+     */
+    DspJitBlock *block;
+    dsp_jit_entry_fn block_entry;
+} DiffSlot;
+
+typedef struct DiffQueue {
+    DiffSlot *slots;           /* DSP_JIT_DIFF_SLOTS entries, heap-alloc */
+    uint64_t  head;            /* consumer index, monotonic */
+    uint64_t  tail;            /* producer index, monotonic */
+    uint64_t  dropped;         /* ring-full drops */
+    uint64_t  checked;         /* successful validations */
+    uint64_t  failures;        /* divergences detected */
+    uint64_t  enqueued;        /* total slots accepted into the ring */
+
+    QemuThread worker;
+    QemuMutex  mu;             /* guards cond + exiting; not the ring */
+    QemuCond   cond;           /* worker wakeup */
+    bool       worker_started;
+    bool       exiting;
+
+    /* Back-pointer to the owning core so stats logs can name it
+     * (gp_ep.c sets dsp->core.is_gp AFTER dsp_jit_init, so we can't
+     * cache the bool at queue-creation time — read it fresh). */
+    dsp_core_t *owner;
+} DiffQueue;
 
 typedef struct DspJitState {
     /* Code cache */
@@ -691,12 +836,8 @@ typedef struct DspJitState {
     DspJitBlock blocks[DSP_PRAM_SIZE];  /* one slot per possible PC */
     DspJitBlock *pc_to_block[DSP_PRAM_SIZE];  /* pc -> owner block (or NULL) */
 
-    /* Differential-mode shadow state (XEMU_DSP_JIT_DIFF=1).
-     * pre_state  = dsp state BEFORE running the JIT block
-     * post_jit   = dsp state AFTER running the JIT block
-     * Only allocated when diff mode is active. */
-    dsp_core_t *pre_state;
-    dsp_core_t *post_jit;
+    /* Differential validator (XEMU_DSP_JIT_DIFF=1). NULL if diff off. */
+    DiffQueue *diff_q;
 
     /* Stats */
     uint64_t blocks_translated;
@@ -707,7 +848,7 @@ typedef struct DspJitState {
 
     /* Diff-mode sampling counter. Incremented every block when
      * diff mode is on; only blocks where (counter % sample) == 0
-     * actually go through dsp_jit_execute_block_diff(). */
+     * actually go through the differential path. */
     uint64_t diff_sample_counter;
 } DspJitState;
 
@@ -1143,7 +1284,21 @@ static const uint8_t dsp_jit_reg_bits[64] = {
  * Clobbers: w0, w1, x3 (SCRATCH).
  * Preserves value_reg.
  */
-static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg)
+/*
+ * mask_to_width mirrors the interpreter: some parmove variants
+ * apply `value & BITMASK(registers_mask[numreg])` on the final reg
+ * store (pm_2_2 line 5398, pm_3 line 5438, pm_5 line 5667) while
+ * others don't (pm_0/pm_1/pm_8 store the raw 32-bit `save_reg`
+ * they read from memory). When the source value is a 24-bit
+ * memory word from xram/yram whose slot has never been written
+ * through the normal write path (0xCACACACA init sentinels), this
+ * difference is visible — JIT must match interp exactly.
+ *
+ * For A/B destinations the three-word split (A0/A1/A2) does not
+ * mask A1 regardless of mask_to_width, matching every interp path.
+ */
+static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
+                              bool mask_to_width)
 {
     assert(value_reg != 0 && value_reg != 1 && value_reg != 3);
 
@@ -1154,7 +1309,8 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg)
 
         /* A0 / B0 = 0 */
         emit_str_w_any(e, /*rs=*/31 /* WZR */, /*rn=*/19, SCRATCH, off_x0);
-        /* A1 / B1 = value */
+        /* A1 / B1 = value (unmasked — every interp path writes A1/B1
+         * as the raw save word). */
         emit_str_w_any(e, /*rs=*/value_reg,    /*rn=*/19, SCRATCH, off_x1);
         /* A2 / B2 = (value >> 23) ? 0xff : 0
          *   = -(value >> 23) & 0xff   (when bit 23 is 1, -1 = 0xFF...)
@@ -1178,11 +1334,15 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg)
          * registers_mask[]). A zero-store keeps us bit-exact with
          * the interpreter. */
         emit_str_w_any(e, /*rs=*/31 /* WZR */, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
-    } else if (bits == 24) {
-        /* No masking: store full 24 bits (the DSP side of the
-         * register uses only low 24 bits anyway). */
+    } else if (bits == 24 && !mask_to_width) {
+        /* No masking: store full 32 bits. Matches pm_1 / pm_8 which
+         * store `save_reg` unmasked; if the source was an init
+         * sentinel like 0xCACACACA the top byte is preserved. */
         emit_str_w_any(e, /*rs=*/value_reg, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
     } else {
+        /* bits < 24 always masks (else the top byte would pollute
+         * the 16-/8-/6-bit slots). bits == 24 masks only for
+         * parmove variants whose interp applies `& BITMASK(24)`. */
         emit_ubfx_w(e, /*rd=*/1, /*rn=*/value_reg, 0, bits);
         emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
     }
@@ -1268,7 +1428,9 @@ static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
     emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
 
     /* A/B accu <- save_xy0 (with sign-ext to A2/B2) */
-    emit_pm_write_reg(e, dsp_ab, /*value_reg=*/24);
+    /* pm_0 only targets A or B via this helper; the A/B branch in
+     * emit_pm_write_reg ignores mask_to_width, so it's a don't-care. */
+    emit_pm_write_reg(e, dsp_ab, /*value_reg=*/24, /*mask_to_width=*/false);
 }
 
 /*
@@ -1357,7 +1519,9 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
         /* Matches the interpreter's A/B-split PLUS trailing
          * `dsp->registers[numreg1] = save_1` for bit-exact mirror. */
         if (numreg1 == DSP_REG_A || numreg1 == DSP_REG_B) {
-            emit_pm_write_reg(e, numreg1, /*value_reg=*/23);
+            /* A/B branch does A0/A1/A2 split; mask flag is a don't-care. */
+            emit_pm_write_reg(e, numreg1, /*value_reg=*/23,
+                              /*mask_to_width=*/false);
         }
         /* Trailing unconditional registers[numreg1] = save_1. The
          * interpreter does this UNMASKED (`dsp->registers[numreg1]
@@ -1498,7 +1662,8 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
          * "else{} dsp->registers[numreg1] = save_1" quirk that
          * pm_1 does — the else branch is guarded correctly here. */
         if (numreg1 == DSP_REG_A || numreg1 == DSP_REG_B) {
-            emit_pm_write_reg(e, numreg1, /*value_reg=*/24);
+            emit_pm_write_reg(e, numreg1, /*value_reg=*/24,
+                              /*mask_to_width=*/false);
         } else {
             /* "dsp->registers[numreg1] = save_reg1" — unmasked in
              * the interpreter; we replicate that (numreg1 is always
@@ -1512,7 +1677,8 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
     /* Write second parmove. */
     if (write_d2) {
         if (numreg2 == DSP_REG_A || numreg2 == DSP_REG_B) {
-            emit_pm_write_reg(e, numreg2, /*value_reg=*/25);
+            emit_pm_write_reg(e, numreg2, /*value_reg=*/25,
+                              /*mask_to_width=*/false);
         } else {
             emit_str_w_any(e, /*rs=*/25, /*rn=*/19, SCRATCH, OFF_REG(numreg2));
         }
@@ -1546,7 +1712,9 @@ static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu)
         emit_blr(e, /*rn=*/1);
     }
 
-    emit_pm_write_reg(e, dstreg, /*value_reg=*/23);
+    /* pm_2_2: interpreter masks with registers_mask[dstreg]
+     * (dsp_emu.c.inc line 5398). */
+    emit_pm_write_reg(e, dstreg, /*value_reg=*/23, /*mask_to_width=*/true);
 }
 
 static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
@@ -1616,9 +1784,11 @@ static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu)
         emit_blr(e, /*rn=*/1);
     }
 
-    /* Load the final value into a scratch and write to destination. */
+    /* Load the final value into a scratch and write to destination.
+     * pm_3: interpreter masks with registers_mask[dstreg]
+     * (dsp_emu.c.inc line 5438). */
     emit_mov_imm32(e, /*rd=*/4, final_value);
-    emit_pm_write_reg(e, dstreg, /*value_reg=*/4);
+    emit_pm_write_reg(e, dstreg, /*value_reg=*/4, /*mask_to_width=*/true);
 }
 
 /*
@@ -1710,8 +1880,13 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
             emit_blr(e, /*rn=*/1);
         }
 
-        /* Write register */
-        emit_pm_write_reg(e, (int)numreg, /*value_reg=*/23);
+        /* Write register. pm_5 (also reached via pm_4 fall-through)
+         * masks with registers_mask[numreg] at dsp_emu.c.inc line
+         * 5667 — without this, init-sentinel reads (0xCACACACA in
+         * xram/yram) would leak into the 24-bit Y0 / Y1 / X0 / X1
+         * slots. */
+        emit_pm_write_reg(e, (int)numreg, /*value_reg=*/23,
+                          /*mask_to_width=*/true);
     } else {
         /*
          * Register -> memory. Fetch value (accu-path for A/B),
@@ -1887,9 +2062,102 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
  *   - call the per-variant translator (emit_parmove_pmN)
  *   - call emit_post_instruction_epilogue
  */
+/*
+ * Compute the write-set contribution for a parmove instruction.
+ * Called by emit_parmove_stub at translation time; purely static
+ * decoding (no emitted code). The decoding mirrors the branching
+ * inside each emit_parmove_pmN() exactly so we never under-estimate
+ * what a stub might write to.
+ */
+static uint32_t parmove_write_set(uint32_t inst)
+{
+    uint32_t select = (inst >> 20) & 0xf;
+    uint32_t ws = 0;
+
+    /* Memory-write helpers. For any X-space write (memspace=X) we
+     * conservatively include xram + mixbuffer + periph, because the
+     * runtime address determines which one (addr < 0xC00 -> xram;
+     * 0xC00..0xC1F -> mixbuffer; >= 0xFFFF80 -> peripheral). */
+    const uint32_t X_ANY = DSP_JIT_WS_XRAM | DSP_JIT_WS_MIXBUFFER |
+                           DSP_JIT_WS_PERIPH;
+    const uint32_t Y_ANY = DSP_JIT_WS_YRAM;
+
+    switch (select) {
+    case 0: {
+        /* pm_0: unconditionally writes memory (S = A/B -> mem, mem -> D).
+         * memspace = bit 15. */
+        uint32_t memspace = (inst >> 15) & 1;
+        ws |= memspace ? Y_ANY : X_ANY;
+        break;
+    }
+    case 1: {
+        /* pm_1: writes memory only if W=0 (S1 -> x:ea or y:ea).
+         * memspace = bit 14, W = bit 15. */
+        bool write_mem = ((inst >> 15) & 1) == 0;
+        if (write_mem) {
+            uint32_t memspace = (inst >> 14) & 1;
+            ws |= memspace ? Y_ANY : X_ANY;
+        }
+        break;
+    }
+    case 2:
+    case 3:
+        /* pm_2 family (NOP / R-update / reg-reg) and pm_3 (#xx,R)
+         * are register-only: no memory side effects. */
+        break;
+    case 4: {
+        /* pm_4: pm_4x (dual X+Y long-accu) or fall-through to pm_5.
+         * pm_4x selector: (inst & 0xf40000) == 0x400000.
+         * Both subvariants write memory only if W=0 (bit 15). */
+        bool is_pm_4x = (inst & 0xf40000u) == 0x400000u;
+        bool write_mem = ((inst >> 15) & 1) == 0;
+        if (write_mem) {
+            if (is_pm_4x) {
+                /* l:ea writes BOTH x[addr] and y[addr] on the same
+                 * cycle (dsp_emu.c.inc:5601-5602). */
+                ws |= X_ANY | Y_ANY;
+            } else {
+                uint32_t memspace = (inst >> 19) & 1;
+                ws |= memspace ? Y_ANY : X_ANY;
+            }
+        }
+        break;
+    }
+    case 5:
+    case 6:
+    case 7: {
+        /* pm_5: single x:/y: move. W=bit 15, memspace=bit 19. */
+        bool write_mem = ((inst >> 15) & 1) == 0;
+        if (write_mem) {
+            uint32_t memspace = (inst >> 19) & 1;
+            ws |= memspace ? Y_ANY : X_ANY;
+        }
+        break;
+    }
+    case 8:  case 9:  case 10: case 11:
+    case 12: case 13: case 14: case 15: {
+        /* pm_8: dual independent X+Y moves. Bit 15 = W for X side;
+         * bit 22 = W for Y side. */
+        if (((inst >> 15) & 1) == 0) {
+            ws |= X_ANY;
+        }
+        if (((inst >> 22) & 1) == 0) {
+            ws |= Y_ANY;
+        }
+        break;
+    }
+    default:
+        ws = DSP_JIT_WS_ALL;
+        break;
+    }
+
+    return ws;
+}
+
 static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
                               uint32_t inst, emu_func_t alu,
-                              uint32_t expected_next_pc)
+                              uint32_t expected_next_pc,
+                              uint32_t *out_write_set)
 {
     uint32_t select = (inst >> 20) & 0xf;
 
@@ -1946,13 +2214,17 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     }
 
     emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    if (out_write_set) {
+        *out_write_set |= parmove_write_set(inst);
+    }
     return true;
 }
 
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
                              emu_func_t emu_func, uint32_t expected_next_pc,
-                             bool is_terminator)
+                             bool is_terminator,
+                             uint32_t *out_write_set)
 {
     (void)pc;
 
@@ -1982,6 +2254,15 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_blr(e, /*rn=*/1);
 
     emit_post_instruction_epilogue(e, exits, expected_next_pc);
+
+    /* Generic emu_* handlers can do anything (movep peripherals,
+     * movem to x/y memory, jsr/rts touch the stack, etc.). We don't
+     * currently classify individual handlers, so mark the full
+     * write-set. Parmove stubs (Phase 4) do precise tracking via
+     * parmove_write_set(). */
+    if (out_write_set) {
+        *out_write_set |= DSP_JIT_WS_ALL;
+    }
 
     /* Terminator instructions: the full stub ran so the handler and
      * post-update fired; we now return instead of trying to fall
@@ -2060,14 +2341,21 @@ static void emit_prologue(ArmEmit *e)
     /* Clear self-mod exit-request flag at the start of each block.
      * dsp_jit_invalidate() sets it from inside handlers that write
      * to P-space; we read it in the per-op exit checks below to
-     * bail out before running any stale instruction stub. */
+     * bail out before running any stale instruction stub. Always
+     * emitted — this is a JIT correctness flag, not diff-specific. */
     emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_EXIT_BLOCK_REQ);
 
     /* Clear diff-skip flag at block start. Set by handlers that
      * perform externally-visible side effects (e.g. DMA control
      * writes that scatter-gather Xbox host RAM) which the diff
-     * harness cannot validate by interpreter replay. */
-    emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_SKIP_DIFF);
+     * harness cannot validate by interpreter replay. Only emitted
+     * when diff mode is active so the non-diff (default) hot path
+     * pays zero cost for this flag. Since g_jit_diff is set once
+     * from parse_flags_once() and never changes, a block
+     * translated while diff is off will never need the reset. */
+    if (g_jit_diff) {
+        emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_SKIP_DIFF);
+    }
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
@@ -2118,6 +2406,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     uint32_t pc = pc_start;
     uint32_t pc_end = pc_start;
     int num_ops = 0;
+    uint32_t write_set = 0;
 
     while (num_ops < DSP_JIT_MAX_OPS_PER_BLOCK && pc < DSP_PRAM_SIZE) {
         /*
@@ -2149,7 +2438,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             }
 
             uint32_t expected_next_pc = pc + 1;
-            if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc)) {
+            if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
+                                   &write_set)) {
                 /* Variant not yet implemented: fall through to the
                  * interpreter for this op. */
                 if (num_ops == 0) {
@@ -2179,7 +2469,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             uint32_t expected_next_pc = pc + inst_len;
 
             keep_going = emit_instruction(&e, &exits, pc, inst, inst_len,
-                                          emu, expected_next_pc, is_term);
+                                          emu, expected_next_pc, is_term,
+                                          &write_set);
 
             for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
                 s->pc_to_block[p] = &s->blocks[pc_start];
@@ -2218,6 +2509,10 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     block->pc_end = pc_end;
     block->entry = (dsp_jit_entry_fn)entry_ptr;
     block->num_ops = num_ops;
+    block->write_set = write_set;
+    /* Fresh translation — must go through validation again. Written
+     * atomically because the validator thread may read it. */
+    qatomic_set(&block->diff_checked, 0);
     s->blocks_translated++;
 
     /* Optional hex dump of the emitted ARM64 block, for offline
@@ -2253,6 +2548,12 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
  * Public API
  * --------------------------------------------------------------- */
 
+/* Forward decls — the validator helpers are defined below this
+ * Public API block, but dsp_jit_init / dsp_jit_finalize need to
+ * call them. */
+static DiffQueue *diff_queue_create(dsp_core_t *owner);
+static void       diff_queue_destroy(DiffQueue *q);
+
 void dsp_jit_init(dsp_core_t *dsp)
 {
     parse_flags_once();
@@ -2272,11 +2573,18 @@ void dsp_jit_init(dsp_core_t *dsp)
     s->code_cap = DSP_JIT_CODE_BYTES;
     s->code_ptr = s->code_buf;
 
-    if (g_jit_diff) {
-        /* Shadow cores for differential validation.
-         * See dsp_jit_execute_block_diff for how they are used. */
-        s->pre_state = g_malloc0(sizeof(dsp_core_t));
-        s->post_jit  = g_malloc0(sizeof(dsp_core_t));
+    if (g_jit_diff && !g_jit_diff_sync) {
+        /* Async diff mode: spin up a validator worker thread with
+         * its own ring of pre/post snapshots. See the DiffQueue /
+         * diff_worker_fn commentary for the full design. If queue
+         * creation fails (OOM / thread create refused), fall through
+         * silently — the diff path auto-detects q == NULL and uses
+         * sync mode per-block. */
+        s->diff_q = diff_queue_create(dsp);
+        if (!s->diff_q) {
+            fprintf(stderr, "xemu: DSP JIT: async validator init "
+                            "failed, falling back to sync diff mode\n");
+        }
     }
 
     /* Stash on dsp_core via hidden slot. We use dsp->pram_opcache slot
@@ -2290,6 +2598,22 @@ void dsp_jit_finalize(dsp_core_t *dsp)
     DspJitState *s = (DspJitState *)dsp->jit_state;
     if (!s) {
         return;
+    }
+
+    /* Drain and stop the validator BEFORE freeing the queue: the
+     * worker holds a pointer into s->diff_q->slots. */
+    if (s->diff_q) {
+        if (g_jit_stats) {
+            fprintf(stderr,
+                    "xemu: DSP JIT validator (%s core) final: "
+                    "enqueued=%" PRIu64 " checked=%" PRIu64
+                    " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
+                    dsp->is_gp ? "GP" : "EP",
+                    s->diff_q->enqueued, s->diff_q->checked,
+                    s->diff_q->dropped, s->diff_q->failures);
+        }
+        diff_queue_destroy(s->diff_q);
+        s->diff_q = NULL;
     }
 
     if (g_jit_stats) {
@@ -2308,8 +2632,6 @@ void dsp_jit_finalize(dsp_core_t *dsp)
                 (size_t)(s->code_ptr - s->code_buf), s->code_cap);
     }
 
-    g_free(s->pre_state);
-    g_free(s->post_jit);
     jit_code_free(s->code_buf, s->code_cap);
     g_free(s);
     dsp->jit_state = NULL;
@@ -2342,6 +2664,10 @@ void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr)
     }
     b->entry = NULL;
     b->num_ops = 0;
+    /* Clear diff_checked so any in-flight validator entry for this
+     * translation (same block pointer, different entry) can't race
+     * and stamp the retranslated block as "validated" later. */
+    qatomic_set(&b->diff_checked, 0);
 }
 
 void dsp_jit_invalidate_all(dsp_core_t *dsp)
@@ -2356,33 +2682,106 @@ void dsp_jit_invalidate_all(dsp_core_t *dsp)
     s->cache_flushes++;
 }
 
+/* --------------------------------------------------------------- *
+ * Differential validator — off-APU-thread infrastructure
+ * --------------------------------------------------------------- */
+
+/* Forward decl of the actual interpreter step — exposed from dsp_cpu.c. */
+void dsp56k_execute_instruction(dsp_core_t *dsp);
+
+/*
+ * Peripheral shims for interpreter replay on a private dsp_core_t.
+ *
+ * The live dsp's read_peripheral / write_peripheral use
+ * container_of(core, DSPState, core) to reach hardware state. If we
+ * copy dsp_core_t bit-wise into a slot, those function pointers
+ * still point at the real implementations — but container_of on the
+ * copy would yield a bogus DSPState* and the real call would read
+ * or mutate arbitrary memory. Rather than restoring the live state
+ * after replay (which is what the old sync implementation did), we
+ * swap the callbacks on the private copy to these stubs. If the
+ * interp replay reaches one, it marks the slot as "skip compare" —
+ * peripheral I/O is already flagged by the live-dsp DMA path via
+ * core->jit_skip_diff_compare, so this is a belt-and-braces safety
+ * check rather than the primary mechanism.
+ */
+static uint32_t diff_shim_read_peripheral(dsp_core_t *core, uint32_t address)
+{
+    (void)address;
+    core->jit_skip_diff_compare = 1;
+    return 0;
+}
+
+static void diff_shim_write_peripheral(dsp_core_t *core, uint32_t address,
+                                       uint32_t value)
+{
+    (void)address;
+    (void)value;
+    core->jit_skip_diff_compare = 1;
+}
+
 /*
  * Byte-compare two dsp_core_t snapshots over their semantic state.
  * Returns offsetof of the first differing byte, or (size_t)-1 if
  * they match.
  *
- * Excluded from the comparison:
- *   - disasm_* tail (debug/trace only).
- *   - pram_opcache (cache of resolved emu_func_t; the interpreter
- *     populates it during its dispatch, the JIT doesn't touch it).
+ * `write_set` gates the memory-array ranges: if a block demonstrably
+ * didn't write to xram, we skip comparing the 16 KB xram region
+ * (similarly yram / pram / mixbuffer / periph). This is the
+ * "narrowed compare" optimisation and cuts the typical FIR-kernel
+ * compare from ~40 KB to ~2 KB.
+ *
+ * Always-excluded regions:
+ *   - pram_opcache (interpreter-only cache; JIT doesn't populate it).
+ *   - read_peripheral / write_peripheral function pointers (swapped
+ *     to shims on the private copy; must differ by design).
  *   - jit_state pointer (our own bookkeeping).
+ *   - jit_exit_block_request / jit_skip_diff_compare (flags we
+ *     manipulate during the compare; compare them separately if
+ *     needed).
+ *   - disasm_* tail (debug/trace only).
  */
-static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b)
+static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
+                             uint32_t write_set)
 {
     const uint8_t *pa = (const uint8_t *)a;
     const uint8_t *pb = (const uint8_t *)b;
 
-    struct diff_range { size_t off; size_t end; };
+    struct diff_range { size_t off; size_t end; bool gated; uint32_t bit; };
     const struct diff_range ranges[] = {
-        /* head through end of pram (= up to pram_opcache) */
+        /* [0] Always: head through end of stack (is_gp..stack[1][15]). */
         { 0,
-          offsetof(dsp_core_t, pram_opcache) },
-        /* skip pram_opcache; resume at mixbuffer through disasm_* tail */
+          offsetof(dsp_core_t, xram), false, 0 },
+        /* [1] xram (WS_XRAM-gated) */
+        { offsetof(dsp_core_t, xram),
+          offsetof(dsp_core_t, yram), true, DSP_JIT_WS_XRAM },
+        /* [2] yram (WS_YRAM-gated) */
+        { offsetof(dsp_core_t, yram),
+          offsetof(dsp_core_t, pram), true, DSP_JIT_WS_YRAM },
+        /* [3] pram (WS_PRAM-gated) */
+        { offsetof(dsp_core_t, pram),
+          offsetof(dsp_core_t, pram_opcache), true, DSP_JIT_WS_PRAM },
+        /* skip pram_opcache */
+        /* [4] mixbuffer (WS_MIXBUFFER-gated) */
         { offsetof(dsp_core_t, mixbuffer),
-          offsetof(dsp_core_t, str_disasm_memory) },
+          offsetof(dsp_core_t, periph), true, DSP_JIT_WS_MIXBUFFER },
+        /* [5] periph (WS_PERIPH-gated) */
+        { offsetof(dsp_core_t, periph),
+          offsetof(dsp_core_t, loop_rep), true, DSP_JIT_WS_PERIPH },
+        /* [6] Always: loop_rep through interrupt_is_pending */
+        { offsetof(dsp_core_t, loop_rep),
+          offsetof(dsp_core_t, read_peripheral), false, 0 },
+        /* skip read_peripheral + write_peripheral function pointers */
+        /* [7] Always: num_inst through cur_inst (end of runtime data) */
+        { offsetof(dsp_core_t, num_inst),
+          offsetof(dsp_core_t, str_disasm_memory), false, 0 },
+        /* skip disasm_* tail */
     };
 
     for (size_t r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
+        if (ranges[r].gated && !(write_set & ranges[r].bit)) {
+            continue;
+        }
         for (size_t i = ranges[r].off; i < ranges[r].end; i++) {
             if (pa[i] != pb[i]) {
                 return i;
@@ -2392,179 +2791,481 @@ static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b)
     return (size_t)-1;
 }
 
-/* Forward decl of the actual interpreter step — exposed from
- * dsp_cpu.c. */
-void dsp56k_execute_instruction(dsp_core_t *dsp);
+/*
+ * Diagnostic "window" around the block's starting PC used by the
+ * failure path to show "did the block rewrite its own pram mid-
+ * execution?" (the self-modifying-code diagnostic). Sized to cover
+ * the longest translation we'd generate (DSP_JIT_MAX_OPS_PER_BLOCK
+ * = 32, each up to 2 words). 64 words is plenty; the printed dump
+ * only shows 10.
+ */
+#define DIFF_PRAM_WINDOW 64
+
+/* Print a fully-formed DIFF FAILURE diagnostic given the two
+ * mismatching snapshots plus the pre-block pram window we captured
+ * before the interpreter replay started (so the "did pram change
+ * during this block?" self-mod check is meaningful). Sync and
+ * async paths share the same text. */
+static void diff_report_failure(const uint32_t *pre_pram_window,
+                                uint32_t pc_start,
+                                const dsp_core_t *interp,
+                                const dsp_core_t *jit,
+                                uint32_t jit_cycles,
+                                size_t diff_off)
+{
+    const char *field = "?";
+    uint32_t field_idx = 0;
+    uint32_t interp_word = 0;
+    uint32_t jit_word = 0;
+    if (diff_off >= offsetof(dsp_core_t, registers) &&
+        diff_off <  offsetof(dsp_core_t, registers) + sizeof(((dsp_core_t*)0)->registers)) {
+        field = "registers";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, registers)) / 4);
+        interp_word = interp->registers[field_idx];
+        jit_word    = jit->registers[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, stack) &&
+               diff_off <  offsetof(dsp_core_t, stack) + sizeof(((dsp_core_t*)0)->stack)) {
+        field = "stack";
+        uint32_t off_in = (uint32_t)(diff_off - offsetof(dsp_core_t, stack));
+        field_idx = off_in / 4;
+        interp_word = ((const uint32_t *)interp->stack)[field_idx];
+        jit_word    = ((const uint32_t *)jit->stack)[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, xram) &&
+               diff_off <  offsetof(dsp_core_t, xram) + sizeof(((dsp_core_t*)0)->xram)) {
+        field = "xram";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, xram)) / 4);
+        interp_word = interp->xram[field_idx];
+        jit_word    = jit->xram[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, yram) &&
+               diff_off <  offsetof(dsp_core_t, yram) + sizeof(((dsp_core_t*)0)->yram)) {
+        field = "yram";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, yram)) / 4);
+        interp_word = interp->yram[field_idx];
+        jit_word    = jit->yram[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, pram) &&
+               diff_off <  offsetof(dsp_core_t, pram) + sizeof(((dsp_core_t*)0)->pram)) {
+        field = "pram";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, pram)) / 4);
+        interp_word = interp->pram[field_idx];
+        jit_word    = jit->pram[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, periph) &&
+               diff_off <  offsetof(dsp_core_t, periph) + sizeof(((dsp_core_t*)0)->periph)) {
+        field = "periph";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, periph)) / 4);
+        interp_word = interp->periph[field_idx];
+        jit_word    = jit->periph[field_idx];
+    } else if (diff_off >= offsetof(dsp_core_t, mixbuffer) &&
+               diff_off <  offsetof(dsp_core_t, mixbuffer) + sizeof(((dsp_core_t*)0)->mixbuffer)) {
+        field = "mixbuffer";
+        field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, mixbuffer)) / 4);
+        interp_word = interp->mixbuffer[field_idx];
+        jit_word    = jit->mixbuffer[field_idx];
+    }
+
+    fprintf(stderr,
+            "xemu: DSP JIT DIFF FAILURE in block pc_start=0x%04x "
+            "(jit_cycles=%u)\n"
+            "  First differing byte at offsetof dsp_core_t = %zu "
+            "(%s[%u]: interp=0x%06x jit=0x%06x)\n"
+            "  (pc at entry = 0x%04x)\n"
+            "  INTERP pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
+            "B2:B1:B0=%02x:%06x:%06x\n"
+            "  JIT    pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
+            "B2:B1:B0=%02x:%06x:%06x\n"
+            "  loop_rep interp=%u jit=%u  "
+            "interrupt_counter interp=%u jit=%u\n",
+            pc_start, jit_cycles, diff_off,
+            field, field_idx, interp_word, jit_word,
+            pc_start,
+            interp->pc, interp->registers[DSP_REG_SR],
+            interp->registers[DSP_REG_A2], interp->registers[DSP_REG_A1],
+            interp->registers[DSP_REG_A0],
+            interp->registers[DSP_REG_B2], interp->registers[DSP_REG_B1],
+            interp->registers[DSP_REG_B0],
+            jit->pc, jit->registers[DSP_REG_SR],
+            jit->registers[DSP_REG_A2], jit->registers[DSP_REG_A1],
+            jit->registers[DSP_REG_A0],
+            jit->registers[DSP_REG_B2], jit->registers[DSP_REG_B1],
+            jit->registers[DSP_REG_B0],
+            interp->loop_rep, jit->loop_rep,
+            interp->interrupt_counter, jit->interrupt_counter);
+
+    fprintf(stderr, "  pram dump (block + next few words):\n");
+    uint32_t pc0 = pc_start;
+    uint32_t dump_len = 10;
+    if (pc0 + dump_len > DSP_PRAM_SIZE) dump_len = DSP_PRAM_SIZE - pc0;
+    if (dump_len > DIFF_PRAM_WINDOW) dump_len = DIFF_PRAM_WINDOW;
+    bool self_mod = false;
+    for (uint32_t i = 0; i < dump_len; i++) {
+        uint32_t pre_w  = pre_pram_window[i];
+        uint32_t post_w = jit->pram[pc0 + i];
+        const char *marker = (pre_w != post_w) ? "  <-- SELF-MOD" : "";
+        if (pre_w != post_w) self_mod = true;
+        fprintf(stderr, "    pram[0x%04x]  pre=0x%08x post=0x%08x%s\n",
+                pc0 + i, pre_w, post_w, marker);
+    }
+    if (self_mod) {
+        fprintf(stderr,
+            "  *** self-modifying code detected: the JIT block "
+            "baked in the pre-write instruction words and kept\n"
+            "      running its stale stubs after the handler "
+            "rewrote pram.\n");
+    }
+
+    fprintf(stderr, "  Rn/Nn/Mn (at failure time):\n");
+    for (int i = 0; i < 8; i++) {
+        fprintf(stderr, "    R%d=%04x N%d=%04x M%d=%04x\n",
+                i, interp->registers[DSP_REG_R0 + i] & 0xffff,
+                i, interp->registers[DSP_REG_N0 + i] & 0xffff,
+                i, interp->registers[DSP_REG_M0 + i] & 0xffff);
+    }
+}
+
+/*
+ * Validate one captured slot: run the interpreter on slot->pre up
+ * to the same num_inst target the JIT reached in slot->post, then
+ * compare. May be called inline on the APU thread (sync mode) or
+ * on the validator thread (async mode) — the logic is identical.
+ *
+ * Returns true on success or skipped; false on divergence (caller
+ * aborts the process in either mode).
+ */
+static bool diff_validate_slot(DiffSlot *slot, DiffQueue *q)
+{
+    if (slot->skip_compare) {
+        /* JIT block hit DMA / non-replayable I/O. Validation meaningless. */
+        return true;
+    }
+
+    /* Capture a small window of the pre-JIT pram starting at
+     * pc_start BEFORE interp runs (which may mutate slot->pre.pram
+     * if the block is self-modifying). Only used on divergence, by
+     * the failure diagnostic. */
+    uint32_t pre_pram_window[DIFF_PRAM_WINDOW];
+    {
+        uint32_t pc0 = slot->pc_start;
+        uint32_t n = DIFF_PRAM_WINDOW;
+        if (pc0 + n > DSP_PRAM_SIZE) {
+            n = DSP_PRAM_SIZE - pc0;
+        }
+        memcpy(pre_pram_window, &slot->pre.pram[pc0], n * sizeof(uint32_t));
+    }
+
+    /* Swap the peripheral callbacks to shims so the interp replay
+     * can't reach into a bogus DSPState*. */
+    slot->pre.read_peripheral  = diff_shim_read_peripheral;
+    slot->pre.write_peripheral = diff_shim_write_peripheral;
+    slot->pre.jit_state        = NULL;  /* ignore our own bookkeeping */
+    slot->pre.jit_skip_diff_compare = 0;
+    slot->pre.jit_exit_block_request = 0;
+
+    uint32_t interp_target = slot->num_inst_before + slot->jit_cycles;
+    int guard = 4096;  /* enough for deepest legitimate block */
+    while (slot->pre.num_inst < interp_target && guard-- > 0) {
+        dsp56k_execute_instruction(&slot->pre);
+        if (slot->pre.jit_skip_diff_compare) {
+            /* Interp replay hit a peripheral; abort the compare. */
+            return true;
+        }
+    }
+
+    if (q) {
+        q->checked++;
+    }
+
+    size_t diff_off = dsp_state_diff(&slot->pre, &slot->post,
+                                     slot->write_set);
+    if (diff_off == (size_t)-1) {
+        return true;
+    }
+
+    if (q) {
+        q->failures++;
+    }
+    diff_report_failure(pre_pram_window, slot->pc_start,
+                        &slot->pre /* post-interp */,
+                        &slot->post /* post-JIT */,
+                        slot->jit_cycles, diff_off);
+    return false;
+}
+
+/*
+ * Validator worker thread. Pops published slots off the ring,
+ * validates each one, and logs/aborts on divergence. Wakes on
+ * cond signal; exits when q->exiting is set.
+ */
+static void *diff_worker_fn(void *opaque)
+{
+    DiffQueue *q = (DiffQueue *)opaque;
+
+    for (;;) {
+        qemu_mutex_lock(&q->mu);
+        while (!q->exiting &&
+               qatomic_load_acquire(&q->tail) ==
+                   qatomic_load_acquire(&q->head)) {
+            qemu_cond_wait(&q->cond, &q->mu);
+        }
+        bool exiting = q->exiting;
+        qemu_mutex_unlock(&q->mu);
+
+        /* Drain as many slots as are available, even when exiting,
+         * so CI runs that set a small DIFF_MAX and then quit still
+         * see any divergence the validator would have caught.
+         * Acquire-load on tail pairs with the producer's
+         * release-store in diff_queue_finish_push, ensuring we see
+         * the fully-written slot contents. */
+        while (qatomic_load_acquire(&q->tail) >
+               qatomic_read(&q->head)) {
+            uint64_t head = qatomic_read(&q->head);
+            DiffSlot *slot = &q->slots[head % DSP_JIT_DIFF_SLOTS];
+
+            DspJitBlock     *block       = slot->block;
+            dsp_jit_entry_fn block_entry = slot->block_entry;
+            bool             passed      = diff_validate_slot(slot, q);
+
+            /* Mark the block as checked iff:
+             *   (a) the compare passed (divergence would have
+             *       aborted the process already);
+             *   (b) the block has not been retranslated since
+             *       enqueue (entry pointer still matches) —
+             *       otherwise the new translation is different
+             *       code and needs its own validation pass, which
+             *       the producer's diff_checked=0 will trigger on
+             *       its next call. Plain pointer read is atomic
+             *       enough on ARM64 / macOS for this check. */
+            if (passed && block && block->entry == block_entry) {
+                qatomic_set(&block->diff_checked, 1);
+            }
+
+            /* Consumer-side advance: release-store so the producer
+             * (if racing against a nearly-full ring) sees the slot
+             * as free promptly. */
+            qatomic_store_release(&q->head, head + 1);
+
+            if (!passed) {
+                /* Print final stats to aid post-mortem and abort.
+                 * Flush stderr before abort() — macOS Xcode build
+                 * configs can have unflushed output lost if the
+                 * process terminates abruptly, and the divergence
+                 * diagnostic is the ONE piece of information the
+                 * user needs from a failed validation. */
+                fprintf(stderr,
+                        "xemu: DSP JIT validator (%s core): "
+                        "checked=%" PRIu64 " failures=%" PRIu64
+                        " dropped=%" PRIu64 " enqueued=%" PRIu64 "\n",
+                        (q->owner && q->owner->is_gp) ? "GP" : "EP",
+                        q->checked, q->failures, q->dropped, q->enqueued);
+                fflush(stderr);
+                abort();
+            }
+        }
+
+        if (exiting) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+/* Allocate and start the validator queue + worker. Returns NULL if
+ * allocation or thread creation fails (diff mode then falls back to
+ * sync, matching the XEMU_DSP_JIT_DIFF_SYNC=1 path). */
+static DiffQueue *diff_queue_create(dsp_core_t *owner)
+{
+    DiffQueue *q = g_malloc0(sizeof(*q));
+    q->slots = g_try_malloc0(sizeof(DiffSlot) * DSP_JIT_DIFF_SLOTS);
+    if (!q->slots) {
+        g_free(q);
+        return NULL;
+    }
+    q->owner = owner;
+    qemu_mutex_init(&q->mu);
+    qemu_cond_init(&q->cond);
+    qemu_thread_create(&q->worker, "mcpx.dsp_diff",
+                       diff_worker_fn, q, QEMU_THREAD_JOINABLE);
+    q->worker_started = true;
+    return q;
+}
+
+static void diff_queue_destroy(DiffQueue *q)
+{
+    if (!q) {
+        return;
+    }
+    if (q->worker_started) {
+        qemu_mutex_lock(&q->mu);
+        q->exiting = true;
+        qemu_cond_signal(&q->cond);
+        qemu_mutex_unlock(&q->mu);
+        qemu_thread_join(&q->worker);
+    }
+    qemu_cond_destroy(&q->cond);
+    qemu_mutex_destroy(&q->mu);
+    g_free(q->slots);
+    g_free(q);
+}
+
+/*
+ * Async producer. Claims the next ring slot if space is available,
+ * copies dsp into slot->pre, returns the slot pointer. On ring full
+ * returns NULL and increments q->dropped — caller runs JIT without
+ * enqueueing (the slot is effectively dropped from validation).
+ *
+ * Not thread-safe for multi-producer; fine here since only the APU
+ * thread produces.
+ */
+static DiffSlot *diff_queue_begin_push(DiffQueue *q, const dsp_core_t *dsp)
+{
+    uint64_t tail = qatomic_read(&q->tail);
+    /* Acquire-load on head pairs with the consumer's release-store,
+     * so we see the slot as free as soon as the consumer finished
+     * with it. */
+    uint64_t head = qatomic_load_acquire(&q->head);
+    if ((tail - head) >= DSP_JIT_DIFF_SLOTS) {
+        q->dropped++;
+        return NULL;
+    }
+    DiffSlot *slot = &q->slots[tail % DSP_JIT_DIFF_SLOTS];
+    memcpy(&slot->pre, dsp, sizeof(*dsp));
+    return slot;
+}
+
+static void diff_queue_finish_push(DiffQueue *q, DiffSlot *slot,
+                                   const dsp_core_t *dsp,
+                                   uint32_t pc_start, uint32_t num_inst_before,
+                                   uint32_t jit_cycles, uint32_t write_set,
+                                   bool skip_compare)
+{
+    memcpy(&slot->post, dsp, sizeof(*dsp));
+    slot->pc_start        = pc_start;
+    slot->num_inst_before = num_inst_before;
+    slot->jit_cycles      = jit_cycles;
+    slot->write_set       = write_set;
+    slot->skip_compare    = skip_compare;
+    q->enqueued++;
+
+    /* Publish: release-store the new tail so the consumer sees the
+     * filled slot. */
+    uint64_t tail = qatomic_read(&q->tail);
+    qatomic_store_release(&q->tail, tail + 1);
+
+    /* Wake the worker. We use a signal under the mutex to avoid
+     * missed wakeups, but only when the ring was empty before this
+     * push — otherwise the worker is either running or about to
+     * re-check the tail, so no wake needed. This keeps the common-
+     * case producer path off the mutex entirely. */
+    if (tail == qatomic_read(&q->head)) {
+        qemu_mutex_lock(&q->mu);
+        qemu_cond_signal(&q->cond);
+        qemu_mutex_unlock(&q->mu);
+    }
+}
 
 static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
                                                DspJitState *s)
 {
-    /* 1. Snapshot pre-state. */
-    memcpy(s->pre_state, dsp, sizeof(*dsp));
-    /* Blank out jit_state in the snapshot so the comparison ignores
-     * our own bookkeeping. */
-    s->pre_state->jit_state = NULL;
+    DiffQueue *q = s->diff_q;
+    /*
+     * Three execution modes, picked per-block:
+     *   - async + ring has space: copy pre into ring slot, run JIT,
+     *     copy post into ring slot, publish. Worker thread validates
+     *     later; APU thread pays 2 memcpys only.
+     *   - async + ring full: drop validation for this block
+     *     (increment q->dropped, still run the JIT normally). Keeps
+     *     the APU thread fast under load spikes; validation becomes
+     *     a sampler over the full run.
+     *   - sync (XEMU_DSP_JIT_DIFF_SYNC=1 or no q): snapshot into a
+     *     stack-local slot, run JIT, validate inline on the APU
+     *     thread. Slow, for bring-up debugging only.
+     */
 
-    /* 2. Run the JIT block (same path as normal). */
+    enum { MODE_ASYNC, MODE_DROP, MODE_SYNC } mode;
+    DiffSlot  sync_slot;
+    DiffSlot *slot = NULL;
+
+    if (q && !g_jit_diff_sync) {
+        slot = diff_queue_begin_push(q, dsp);
+        mode = slot ? MODE_ASYNC : MODE_DROP;
+    } else {
+        slot = &sync_slot;
+        memcpy(&slot->pre, dsp, sizeof(*dsp));
+        mode = MODE_SYNC;
+    }
+
+    /* Run the JIT block on the live dsp. */
     DspJitBlock *b = s->pc_to_block[dsp->pc];
     if (!b || b->entry == NULL || b->pc_start != dsp->pc) {
         b = translate_block(dsp, s, dsp->pc);
         if (!b || !b->entry) {
             s->fallbacks++;
+            /* Reserved ring slot (if any) is left un-published —
+             * tail isn't advanced, so the slot is not visible to
+             * the consumer and will be overwritten by the next push. */
             return 0;
         }
     }
-    uint32_t num_inst_before = dsp->num_inst;
+    uint32_t pc_start         = b->pc_start;
+    uint32_t write_set        = b->write_set;
+    uint32_t num_inst_before  = dsp->num_inst;
+    dsp_jit_entry_fn b_entry  = b->entry;   /* captured before run */
     b->entry(dsp);
     uint32_t jit_cycles = dsp->num_inst - num_inst_before;
     s->blocks_executed++;
 
-    /* If any handler inside the block touched external I/O with
-     * non-replayable side effects (e.g. DMA against Xbox host RAM
-     * that's shared with the main CPU thread), skip the post-block
-     * compare: interpreter replay cannot reproduce it bit-exact. */
-    if (dsp->jit_skip_diff_compare) {
-        return jit_cycles;
-    }
+    bool skip_compare = dsp->jit_skip_diff_compare;
 
-    /* 3. Snapshot post-JIT state. */
-    memcpy(s->post_jit, dsp, sizeof(*dsp));
-    s->post_jit->jit_state = NULL;
+    switch (mode) {
+    case MODE_ASYNC:
+        /* Publish and return — worker validates later off the APU
+         * thread. APU thread continues with the next block
+         * immediately. Mark the block as enqueued so any overlapping
+         * re-entries while the worker is draining don't publish a
+         * duplicate snapshot. */
+        slot->block       = b;
+        slot->block_entry = b_entry;
+        diff_queue_finish_push(q, slot, dsp, pc_start, num_inst_before,
+                               jit_cycles, write_set, skip_compare);
+        qatomic_set(&b->diff_checked, 1);
+        s->diff_ops_checked++;
+        break;
 
-    /* 4. Replay via interpreter from the pre-state. */
-    memcpy(dsp, s->pre_state, sizeof(*dsp));
-    dsp->jit_state = s;   /* restore our own bookkeeping */
+    case MODE_DROP:
+        /* Ring full; drop this block's validation. q->dropped was
+         * already incremented by diff_queue_begin_push. Don't mark
+         * the block — a later call can try again once the ring has
+         * drained. */
+        break;
 
-    uint32_t interp_target = num_inst_before + jit_cycles;
-    int guard = 256;  /* step-count sanity upper-bound */
-    while (dsp->num_inst < interp_target && guard-- > 0) {
-        dsp56k_execute_instruction(dsp);
-    }
-    s->diff_ops_checked++;
+    case MODE_SYNC:
+        /* Sync: run the validator inline on the APU thread. No lock
+         * release/re-acquire — the validator operates entirely on
+         * the private copy (slot->pre / slot->post), so d->lock
+         * stays held but nothing outside dsp_core_t is mutated. We
+         * pass q == NULL to diff_validate_slot; it's defined to
+         * skip the per-slot stats increments in that case. On
+         * divergence the diagnostic from diff_report_failure has
+         * already been printed; just abort. */
+        memcpy(&slot->post, dsp, sizeof(*dsp));
+        slot->pc_start        = pc_start;
+        slot->num_inst_before = num_inst_before;
+        slot->jit_cycles      = jit_cycles;
+        slot->write_set       = write_set;
+        slot->skip_compare    = skip_compare;
+        slot->block           = b;
+        slot->block_entry     = b_entry;
+        s->diff_ops_checked++;
 
-    /* 5. Compare. */
-    size_t diff_off = dsp_state_diff(dsp, s->post_jit);
-    if (diff_off != (size_t)-1) {
-        /* Describe the diff offset: which field of dsp_core_t. */
-        const char *field = "?";
-        uint32_t field_idx = 0;
-        uint32_t interp_word = 0;
-        uint32_t jit_word = 0;
-        if (diff_off >= offsetof(dsp_core_t, registers) &&
-            diff_off <  offsetof(dsp_core_t, registers) + sizeof(((dsp_core_t*)0)->registers)) {
-            field = "registers";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, registers)) / 4);
-            interp_word = dsp->registers[field_idx];
-            jit_word    = s->post_jit->registers[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, stack) &&
-                   diff_off <  offsetof(dsp_core_t, stack) + sizeof(((dsp_core_t*)0)->stack)) {
-            field = "stack";
-            uint32_t off_in = (uint32_t)(diff_off - offsetof(dsp_core_t, stack));
-            field_idx = off_in / 4;
-            interp_word = ((uint32_t*)dsp->stack)[field_idx];
-            jit_word    = ((uint32_t*)s->post_jit->stack)[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, xram) &&
-                   diff_off <  offsetof(dsp_core_t, xram) + sizeof(((dsp_core_t*)0)->xram)) {
-            field = "xram";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, xram)) / 4);
-            interp_word = dsp->xram[field_idx];
-            jit_word    = s->post_jit->xram[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, yram) &&
-                   diff_off <  offsetof(dsp_core_t, yram) + sizeof(((dsp_core_t*)0)->yram)) {
-            field = "yram";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, yram)) / 4);
-            interp_word = dsp->yram[field_idx];
-            jit_word    = s->post_jit->yram[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, pram) &&
-                   diff_off <  offsetof(dsp_core_t, pram) + sizeof(((dsp_core_t*)0)->pram)) {
-            field = "pram";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, pram)) / 4);
-            interp_word = dsp->pram[field_idx];
-            jit_word    = s->post_jit->pram[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, periph) &&
-                   diff_off <  offsetof(dsp_core_t, periph) + sizeof(((dsp_core_t*)0)->periph)) {
-            field = "periph";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, periph)) / 4);
-            interp_word = dsp->periph[field_idx];
-            jit_word    = s->post_jit->periph[field_idx];
-        } else if (diff_off >= offsetof(dsp_core_t, mixbuffer) &&
-                   diff_off <  offsetof(dsp_core_t, mixbuffer) + sizeof(((dsp_core_t*)0)->mixbuffer)) {
-            field = "mixbuffer";
-            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, mixbuffer)) / 4);
-            interp_word = dsp->mixbuffer[field_idx];
-            jit_word    = s->post_jit->mixbuffer[field_idx];
+        if (!diff_validate_slot(slot, NULL)) {
+            fflush(stderr);
+            abort();
         }
-
-        fprintf(stderr,
-                "xemu: DSP JIT DIFF FAILURE in block pc_start=0x%04x "
-                "(jit_cycles=%u)\n"
-                "  First differing byte at offsetof dsp_core_t = %zu "
-                "(%s[%u]: interp=0x%06x jit=0x%06x)\n"
-                "  (pc at entry = 0x%04x)\n"
-                "  INTERP pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
-                "B2:B1:B0=%02x:%06x:%06x\n"
-                "  JIT    pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
-                "B2:B1:B0=%02x:%06x:%06x\n"
-                "  loop_rep interp=%u jit=%u  "
-                "interrupt_counter interp=%u jit=%u\n",
-                b ? b->pc_start : 0xffff, jit_cycles, diff_off,
-                field, field_idx, interp_word, jit_word,
-                s->pre_state->pc,
-                dsp->pc, dsp->registers[DSP_REG_SR],
-                dsp->registers[DSP_REG_A2], dsp->registers[DSP_REG_A1],
-                dsp->registers[DSP_REG_A0],
-                dsp->registers[DSP_REG_B2], dsp->registers[DSP_REG_B1],
-                dsp->registers[DSP_REG_B0],
-                s->post_jit->pc, s->post_jit->registers[DSP_REG_SR],
-                s->post_jit->registers[DSP_REG_A2],
-                s->post_jit->registers[DSP_REG_A1],
-                s->post_jit->registers[DSP_REG_A0],
-                s->post_jit->registers[DSP_REG_B2],
-                s->post_jit->registers[DSP_REG_B1],
-                s->post_jit->registers[DSP_REG_B0],
-                dsp->loop_rep, s->post_jit->loop_rep,
-                dsp->interrupt_counter, s->post_jit->interrupt_counter);
-
-        /* Dump DSP instructions in the failing block. Show the
-         * BEFORE-block (pre_state) pram and the AFTER-block
-         * (post_jit) pram side-by-side — a difference here means
-         * the block's handler modified its own pram, which is the
-         * self-modifying-code scenario where the JIT's baked-in
-         * cur_inst values become stale mid-block. */
-        fprintf(stderr, "  pram dump (block + next few words):\n");
-        uint32_t pc0 = s->pre_state->pc;
-        uint32_t pc_dump_end = pc0 + 10;
-        if (pc_dump_end > DSP_PRAM_SIZE) pc_dump_end = DSP_PRAM_SIZE;
-        bool self_mod = false;
-        for (uint32_t p = pc0; p < pc_dump_end; p++) {
-            uint32_t pre  = s->pre_state->pram[p];
-            uint32_t post = s->post_jit->pram[p];
-            const char *marker = (pre != post) ? "  <-- SELF-MOD" : "";
-            if (pre != post) self_mod = true;
-            fprintf(stderr, "    pram[0x%04x]  pre=0x%08x post=0x%08x%s\n",
-                    p, pre, post, marker);
+        /* Sync mode validates inline: on success, the block is
+         * proven correct for all future runs. Mark it so the peek
+         * check takes the fast path next time. */
+        if (b->entry == b_entry) {
+            qatomic_set(&b->diff_checked, 1);
         }
-        if (self_mod) {
-            fprintf(stderr,
-                "  *** self-modifying code detected: the JIT block "
-                "baked in the pre-write instruction words and kept\n"
-                "      running its stale stubs after the handler "
-                "rewrote pram. The interpreter re-reads pram each\n"
-                "      step, so it saw the new words. Both paths are "
-                "individually correct; the JIT needs to exit on\n"
-                "      invalidation.\n");
-        }
-
-        /* Dump Rn / Nn / Mn (often implicated in addressing divergences). */
-        fprintf(stderr, "  Rn/Nn/Mn (at failure time):\n");
-        for (int i = 0; i < 8; i++) {
-            fprintf(stderr, "    R%d=%04x N%d=%04x M%d=%04x\n",
-                    i, dsp->registers[DSP_REG_R0 + i] & 0xffff,
-                    i, dsp->registers[DSP_REG_N0 + i] & 0xffff,
-                    i, dsp->registers[DSP_REG_M0 + i] & 0xffff);
-        }
-
-        abort();
+        break;
     }
 
     return jit_cycles;
@@ -2578,9 +3279,28 @@ unsigned int dsp_jit_execute_block(dsp_core_t *dsp)
     }
 
     if (g_jit_diff) {
-        /* Hard cap: once the JIT has successfully validated
-         * g_jit_diff_max blocks against the interpreter, turn off
-         * diff mode for the rest of the session. */
+        /* Per-translation validation gate: once a specific
+         * translation has been validated (or is already queued for
+         * validation), skip the diff path — same code runs every
+         * time, validating once proves it. This is what keeps the
+         * APU-thread cost bounded: total validations ≈ number of
+         * unique block translations, not blocks-executed-per-sec.
+         * Without this gate, continuous validation of a short
+         * program loop drowns the APU thread in snapshot memcpys
+         * and stalls the emulator's main thread (blocked on
+         * d->lock via MCPX MMIO). */
+        DspJitBlock *b_peek = s->pc_to_block[dsp->pc];
+        if (b_peek && b_peek->entry != NULL &&
+            b_peek->pc_start == dsp->pc &&
+            qatomic_read(&b_peek->diff_checked)) {
+            goto normal_path;
+        }
+
+        /* Hard cap: once the JIT has successfully enqueued
+         * g_jit_diff_max blocks, turn off diff mode for the rest of
+         * the session. Useful for CI that wants "validate first N
+         * then run free"; usually unset because the per-translation
+         * gate above already bounds the work. */
         if (g_jit_diff_max != 0 &&
             s->diff_ops_checked >= g_jit_diff_max) {
             if (s->diff_ops_checked == g_jit_diff_max) {
@@ -2593,9 +3313,11 @@ unsigned int dsp_jit_execute_block(dsp_core_t *dsp)
             goto normal_path;
         }
         /* Sampling: if N > 1, only diff-check roughly 1 of every N
-         * blocks. Uses a simple counter modulo N — deterministic,
-         * no RNG cost. Non-sampled blocks go through the normal
-         * non-diff JIT path for ~100% of interpreter speed. */
+         * not-yet-checked block executions. Recommended for
+         * day-to-day runs (XEMU_DSP_JIT_DIFF=10 is a good default):
+         * combined with the per-translation gate above it spreads
+         * the validation bursts out over wall time, keeping APU-
+         * thread latency well-bounded under any workload. */
         if (g_jit_diff_sample > 1) {
             s->diff_sample_counter++;
             if ((s->diff_sample_counter % g_jit_diff_sample) != 0) {

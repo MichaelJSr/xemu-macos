@@ -234,14 +234,38 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   inlines those next) but skipped entirely for `emu_move`
   (`inst & 0xFF == 0`). After Phase 4, `XEMU_DSP_JIT_STATS=1`
   reports zero fallbacks on the built-in `/basic` DSP test.
-  Correctness harness: `XEMU_DSP_JIT_DIFF=1` runs the interpreter
-  and JIT back-to-back on snapshot state after every block and
-  bit-exact-compares the result (excluding the `pram_opcache`
-  cache slab); aborts with a diff dump on divergence. Passed
-  over 300 stress-runs of the built-in test across interp / JIT /
-  JIT+DIFF modes. See
-  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) for the
-  9-phase roadmap and register-map plans for later inline phases
+  Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
+  against the interpreter. Because a translated block is fully
+  deterministic given its pre-state, a single passing validation
+  proves correctness for every future execution of that
+  translation — each `DspJitBlock` carries a `diff_checked` bit
+  set on first enqueue, so the diff path skips validated blocks
+  entirely. Total validator work bounded to ~(number of unique
+  block translations) — hundreds to a few thousand per session
+  rather than millions-per-second. Recommended day-to-day run is
+  `XEMU_DSP_JIT_DIFF=10` (sample every 10th unchecked block,
+  spreading validation bursts over wall time); `=1` validates
+  every unique translation. The validator itself runs **off the
+  APU thread** on a dedicated worker (`mcpx.dsp_diff`): the APU
+  thread snapshots pre- / post-state into a 16-slot SPSC ring and
+  publishes, and the worker replays the interpreter on a private
+  copy (callbacks swapped to shims so `container_of` can't reach
+  into a bogus `DSPState`) and byte-compares. APU-thread cost per
+  unchecked block is ~2 memcpys (~160 KB); `d->lock` is never
+  held across the interpreter replay, so the main thread is never
+  starved during diff runs. Ring-full producer drops the new
+  entry (validation degrades gracefully to a sampler rather than
+  stalling). The compare is narrowed per-block via a
+  translation-time write-set bitmask — FIR/IIR kernel blocks
+  (register-only computation) byte-compare ~2 KB instead of ~40
+  KB, a 20× speedup on the compare path. `XEMU_DSP_JIT_DIFF_SYNC=1`
+  runs the validator inline on the APU thread for cases where the
+  abort must fire immediately (bring-up debugging); `XEMU_DSP_JIT_DIFF_MAX=N`
+  caps total validations (useful for CI gating). Passed 300+
+  stress-runs of the built-in test across interp / JIT / JIT+DIFF
+  (sync+async, `DIFF=1/10/100`) modes. See
+  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) for the 9-phase
+  roadmap and register-map plans for later inline phases
   (arithmetic, control-flow chaining, lazy flags).
 - **Atomic consistency.** All `d->regs[]` writers in `fe_method`
   (including a single `qatomic_set` FECTL mask+set under

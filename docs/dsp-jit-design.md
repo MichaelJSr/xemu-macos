@@ -153,16 +153,66 @@ JIT flag. The interpreter path is preserved verbatim as fallback.
 ### 2.9 Differential test mode (`XEMU_DSP_JIT_DIFF=1`)
 
 For correctness validation during Phases 1-6 (and permanently
-available for debug), run interpreter + JIT on shadow `dsp_core_t`s
-in parallel. After every JIT-executed instruction, snapshot both
-states and assert `memcmp(registers, xram, yram, pram, pc,
-interrupt_state) == 0`. On divergence:
+available for debug), the validator runs the interpreter on a
+**private copy** of `dsp_core_t` and byte-compares against the
+JIT's post-block state. On divergence:
 
-- Log first divergent register + PC.
-- Disassemble the translated block.
+- Log first divergent register / xram / yram / pram / etc. byte.
+- Disassemble the failing block and dump Rn/Nn/Mn at fault time.
 - `abort()` so the crash carries useful diagnostic.
 
-Cost is ~2x at runtime; only used during bring-up.
+**Per-translation validation gate (crucial)**. A translated block
+is fully deterministic given its pre-state — the emitted ARM64
+stubs run the same `emu_func_t` handlers every time — so a single
+passing validation proves correctness for every future execution of
+that translation. The diff path sets `DspJitBlock.diff_checked`
+on first enqueue, and the per-block fast-path peek in
+`dsp_jit_execute_block` skips the diff path entirely once the bit
+is set. It is cleared on `dsp_jit_invalidate` (self-modifying
+code) and `translate_block` (fresh translation); the validator
+only stamps VALIDATED if the block's entry pointer hasn't changed
+since enqueue (guards against the retranslation race). This
+bounds total validation work to **~(number of unique block
+translations)** across the session — typically a few hundred to a
+few thousand for a game — rather than revalidating every block on
+every execution (millions per second). Without this gate the
+continuous validator load drowned the APU thread's `d->lock` hold
+time, starving the main thread's MCPX MMIO and hanging emulator
+startup with an indefinite dock-icon bounce.
+
+**Async validator (default)**. The APU thread snapshots pre- and
+post-state into a 16-slot SPSC ring and publishes. A dedicated
+validator thread (`mcpx.dsp_diff`) pops slots, runs the interpreter
+replay + compare off the APU thread, and aborts on divergence. APU
+thread cost is **two memcpys per block** (~160 KB); `d->lock` is
+never held across the slow interpreter replay. When the ring fills
+(validator can't keep up) the producer drops newest entries —
+validation becomes a sampler rather than blocking the emulator.
+
+**Sync validator (`XEMU_DSP_JIT_DIFF_SYNC=1`)**. Kept for bring-up
+debugging where the abort must fire **immediately** on divergence
+(rather than "eventually, when the validator catches up"). Runs the
+interpreter replay + compare inline on the APU thread; re-introduces
+the ~2-10x slowdown that async mode eliminates. Both modes use the
+same validator core and produce identical diagnostics.
+
+**Narrowed compare (write-set optimisation)**. Each translated
+block stores a conservative `write_set` bitmask (xram / yram / pram
+/ mixbuffer / periph) computed at translation time. The comparator
+skips byte-comparing memory regions the block demonstrably didn't
+write to. FIR / IIR kernel blocks (pure register computation with
+read-only memory access) compare ~2 KB instead of ~40 KB — a 20×
+compare-path speedup.
+
+**Peripheral shims**. The interpreter replay runs on a private copy
+of `dsp_core_t`. The copy's `read_peripheral` / `write_peripheral`
+function pointers are replaced with stubs that mark the slot as
+"skip compare" — the real callbacks would `container_of` into a
+bogus `DSPState*`. Peripheral I/O is non-replayable anyway (DMA
+against Xbox host RAM shared with the x86 CPU thread is
+non-deterministic); the live JIT flags such blocks via
+`core->jit_skip_diff_compare = 1` set from `write_peripheral` on
+`DMA_CONTROL`.
 
 ## 3. Phased roadmap
 
@@ -237,6 +287,9 @@ DSP from ~10% of total CPU budget to ~3-5% on a DSP-heavy title
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `XEMU_DSP_JIT` | `0` | Enable the JIT. `1` = JIT+interpreter fallback; `0` = pure interpreter |
-| `XEMU_DSP_JIT_DIFF` | `0` | Run interpreter alongside JIT on a shadow state and assert bit-exact equivalence after every instruction |
-| `XEMU_DSP_JIT_STATS` | `0` | Print block translation stats (blocks translated, cache evictions, fallbacks) every N frames |
+| `XEMU_DSP_JIT` | from menu toggle | Enable the JIT. `1` = JIT + interpreter fallback; `0` = pure interpreter. Overrides the `audio.dsp_jit.enabled` menu toggle for CI / bisect |
+| `XEMU_DSP_JIT_DIFF` | `0` | Differential validation. `1` = every block; `N ≥ 2` = sample 1 of every N blocks. Async by default (validator runs off the APU thread on a worker named `mcpx.dsp_diff`; APU cost is ~2 memcpy/block) |
+| `XEMU_DSP_JIT_DIFF_SYNC` | `0` | Force on-thread (synchronous) validation — runs interpreter replay + compare inline on the APU thread before the next block. Slow; for bring-up only |
+| `XEMU_DSP_JIT_DIFF_MAX` | `0` (unlimited) | Optional cap: stop validating after N enqueues. Useful for CI that wants "validate first N, then run full-speed" gating. Day-to-day runs should use `XEMU_DSP_JIT_DIFF=N` sampling instead (the per-translation gate already keeps unbounded DIFF=1 runs cheap in the normal case) |
+| `XEMU_DSP_JIT_DUMP` | `0` | Hex-dump each emitted ARM64 block at translate time for offline disassembly |
+| `XEMU_DSP_JIT_STATS` | `0` | On emulator exit, print per-core stats: `blocks_translated / executed / cache_flushes / fallbacks / diff_ops_checked / code_buf_used` and, when the async validator ran, `enqueued / checked / dropped / failures` |

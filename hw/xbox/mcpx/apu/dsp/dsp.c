@@ -142,8 +142,11 @@ static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value)
          * the data non-replayable. Tell the JIT differential harness
          * to skip the post-block state compare so we don't abort on
          * a benign cross-thread memory race rather than an actual
-         * translation bug. */
-        core->jit_skip_diff_compare = 1;
+         * translation bug. Gated on diff mode being active so the
+         * non-diff hot path is entirely free of diff bookkeeping. */
+        if (dsp_jit_diff_enabled()) {
+            core->jit_skip_diff_compare = 1;
+        }
         dsp_dma_write(&dsp->dma, DMA_CONTROL, value);
         break;
     case 0xFFFFD7:
