@@ -626,17 +626,21 @@ void dsp56k_execute_instruction(dsp_core_t* dsp)
     }
 
     if (dsp->cur_inst < 0x100000) {
-        const OpcodeEntry *op = dsp->pram_opcache[dsp->pc];
-        if (op == NULL) {
-            op = lookup_opcode(dsp->cur_inst);
-            dsp->pram_opcache[dsp->pc] = op;
+        /*
+         * pram_opcache now caches the resolved emu_func_t directly
+         * (previously it cached const OpcodeEntry * and we did the
+         * op->emu_func load + NULL-branch per instruction). For
+         * opcodes without a dedicated handler we cache emu_undefined,
+         * which already logs. Saves one dependent load + one branch
+         * on the DSP dispatch hot loop.
+         */
+        emu_func_t func = (emu_func_t)dsp->pram_opcache[dsp->pc];
+        if (func == NULL) {
+            const OpcodeEntry *op = lookup_opcode(dsp->cur_inst);
+            func = op->emu_func ? op->emu_func : emu_undefined;
+            dsp->pram_opcache[dsp->pc] = (const void *)func;
         }
-        if (op->emu_func) {
-            op->emu_func(dsp);
-        } else {
-            DPRINTF("%x - %s\n", dsp->cur_inst, op->name);
-            emu_undefined(dsp);
-        }
+        func(dsp);
     } else {
         /* Do parallel move read */
         opcodes_parmove[(dsp->cur_inst>>20) & BITMASK(4)](dsp);
