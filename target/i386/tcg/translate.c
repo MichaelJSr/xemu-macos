@@ -3206,7 +3206,14 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x0f: /* fnstcw mem */
-            gen_helper_fnstcw(s->tmp2_i32, tcg_env);
+            /*
+             * Helper body is "return env->fpuc"; inline to a single
+             * host ld16u. Matches the existing gen_fnstsw_inline
+             * pattern and avoids a call-frame setup per uncommon but
+             * not-free FPU control-word read.
+             */
+            tcg_gen_ld16u_i32(s->tmp2_i32, tcg_env,
+                              offsetof(CPUX86State, fpuc));
             tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                 s->mem_index, MO_LEUW);
             update_fip = update_fdp = false;
