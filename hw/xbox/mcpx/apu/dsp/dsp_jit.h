@@ -75,6 +75,7 @@ int  dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_add
 void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier);
 dsp_emu_func_t dsp_jit_helper_lookup_alu(uint32_t inst);
 bool dsp_jit_helper_alu_is_move(dsp_emu_func_t fn);
+void dsp_jit_helper_pm_4x(dsp_core_t *dsp);
 
 #else  /* !DSP_JIT_SUPPORTED */
 

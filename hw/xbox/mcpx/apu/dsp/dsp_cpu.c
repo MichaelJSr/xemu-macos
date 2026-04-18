@@ -1541,6 +1541,20 @@ bool dsp_jit_helper_alu_is_move(emu_func_t fn)
     return fn == emu_move;
 }
 
+/*
+ * emu_pm_4x shim — the long-accu l:ea dual-word memory parmove.
+ * Complex enough (8-case numreg decode for register pair layout,
+ * limit-bit aware accu reads, dual x:/y: reads/writes) that the
+ * Phase 4 JIT calls this as a whole BLR rather than inlining.
+ * The helper runs the full fetch + ALU + write sequence identical
+ * to emu_pm_4x's interpreter path, so cur_inst_len / instr_cycle /
+ * SR.L updates all stay bit-exact.
+ */
+void dsp_jit_helper_pm_4x(dsp_core_t *dsp)
+{
+    emu_pm_4x(dsp);
+}
+
 int dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr)
 {
     return emu_calc_ea(dsp, ea_mode, dst_addr);

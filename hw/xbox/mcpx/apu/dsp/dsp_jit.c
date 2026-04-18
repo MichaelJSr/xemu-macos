@@ -1267,6 +1267,39 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
     emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(d2_numreg));
 }
 
+/* Forward: we call emit_parmove_pm5 from emit_parmove_pm4. */
+static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu);
+
+/*
+ * emu_pm_4 — 0100_l0ll_wXaa_aaaa / 01dd_Xddd_wXmm_mrrr.
+ *
+ * Top-level discriminator: `(inst & 0xf40000) == 0x400000` selects
+ * pm_4x (long-accu l:ea dual-word memory move); else fall through
+ * to pm_5 (single x:/y: move). Check is compile-time.
+ *
+ * pm_4x itself is complex (8-case numreg decode + limit-aware
+ * accu read + dual x:/y: memory I/O). We BLR a C shim for it
+ * rather than inlining — it's infrequent enough that the per-op
+ * BLR overhead is acceptable vs the ~300 extra lines of ARM64
+ * translation that a full inline would need.
+ */
+static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    if ((inst & 0xf40000u) == 0x400000u) {
+        /* pm_4x (long-accu l:ea). Full helper BLR — the helper
+         * runs fetch + ALU + write internally, so we do NOT BLR
+         * the ALU separately here. cur_inst / cur_inst_len /
+         * instr_cycle were already set up by emit_parmove_stub. */
+        (void)alu;  /* ALU call is inside the helper */
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_pm_4x);
+        emit_blr(e, /*rn=*/1);
+        return;
+    }
+    emit_parmove_pm5(e, inst, alu);
+}
+
 /*
  * emu_pm_2 — four sub-cases discriminated by compile-time masks
  * on cur_inst:
@@ -1658,6 +1691,11 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         /* 001d_dddd iiii_iiii #xx,R */
         emit_parmove_pm3(e, inst, effective_alu);
         break;
+    case 4:
+        /* 0100_l0ll / 01dd_0ddd — pm_4 family (long-accu l:ea
+         * or fall-through to pm_5). */
+        emit_parmove_pm4(e, inst, effective_alu);
+        break;
     case 5:
     case 6:
     case 7:
@@ -1665,7 +1703,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         emit_parmove_pm5(e, inst, effective_alu);
         break;
     default:
-        /* select 4/8-15 not yet implemented. */
+        /* select 8-15 (pm_8) not yet implemented. */
         return false;
     }
 
