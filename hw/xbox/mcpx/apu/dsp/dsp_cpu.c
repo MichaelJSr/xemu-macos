@@ -26,6 +26,7 @@
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 #include "dsp_cpu.h"
+#include "dsp_jit.h"
 #include "debug.h"
 #include "trace.h"
 
@@ -996,6 +997,8 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
         assert(address < DSP_PRAM_SIZE);
         stl_le_p(&dsp->pram[address], value);
         dsp->pram_opcache[address] = NULL;
+        /* Any translated JIT block that covers this PC is now stale. */
+        dsp_jit_invalidate(dsp, address);
     } else {
         assert(false);
     }
@@ -1395,3 +1398,111 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
     assert(shift > 0);
     return (uint32_t)(((int32_t)v << shift) >> shift);
 }
+
+/* ============================================================== *
+ * JIT helper shims
+ *
+ * These are called from the JIT's translated code (see dsp_jit.c).
+ * They live here because the static emu_* symbols and the
+ * nonparallel_opcodes[] table are in scope at this file.
+ * ============================================================== */
+
+#include "dsp_jit.h"
+
+#if DSP_JIT_SUPPORTED
+
+void dsp_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
+{
+    dsp_postexecute_update_pc(dsp);
+}
+
+void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
+{
+    dsp_postexecute_interrupts(dsp);
+}
+
+emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst)
+{
+    /* Non-asserting variant of lookup_opcode(): returns the handler
+     * if exactly one non-parallel opcode matches, else NULL. Called
+     * from the JIT translator; we CANNOT assert on miss because the
+     * translator may peek at bytes that are the second word of a
+     * 2-word instruction (i.e. immediate data, not an opcode). */
+    if (inst >= 0x100000) {
+        return NULL;
+    }
+    for (int i = 0; i < (int)ARRAY_SIZE(nonparallel_opcodes); i++) {
+        const OpcodeEntry *t = &nonparallel_opcodes[i];
+        uint32_t mask = nonparallel_matches[i][0];
+        uint32_t match = nonparallel_matches[i][1];
+        if ((inst & mask) != match) {
+            continue;
+        }
+        if (t->match_func && !t->match_func(inst)) {
+            continue;
+        }
+        return t->emu_func;
+    }
+    return NULL;
+}
+
+/*
+ * Best-effort determination of a non-parallel instruction's word
+ * length. Returns 1 for single-word ops (the default), 2 for the
+ * known long-immediate ALU forms whose second word is the 24-bit
+ * immediate. Non-fatal if we under-report — the JIT's runtime PC
+ * mismatch check will catch any surprise and exit the block.
+ */
+uint32_t dsp_jit_helper_inst_length(uint32_t inst)
+{
+    /* Long-immediate ALU: 00000001 01000000 1100dxyz
+     * matches inst == 0x0140C0?? with (inst & 0xFFFFF0) == 0x0140C0. */
+    if ((inst & 0xFFFFF0) == 0x0140C0) {
+        return 2;
+    }
+    /*
+     * Other 2-word forms (brclr/brset long-abs, jclr long, movec
+     * long, movem long, etc.) have the second word read inside their
+     * emu_* handlers; they are block-terminators in the JIT path and
+     * therefore do not need separate length handling here.
+     */
+    return 1;
+}
+
+bool dsp_jit_helper_is_terminator(void *fn)
+{
+    /* Any handler that can change dsp->pc independently of
+     * cur_inst_len (branches, calls, returns) OR can set loop_rep
+     * (REP) OR can install DO-loop state (DO/DOR) OR is the illegal
+     * / wait / stop / reset handler ends the block. */
+    emu_func_t f = (emu_func_t)fn;
+    return f == emu_jmp_imm   || f == emu_jmp_ea   ||
+           f == emu_jsr_imm   || f == emu_jsr_ea   ||
+           f == emu_jcc_imm   || f == emu_jcc_ea   ||
+           f == emu_jscc_imm  || f == emu_jscc_ea  ||
+           f == emu_bra_imm   || f == emu_bra_long ||
+           f == emu_bsr_imm   || f == emu_bsr_long ||
+           f == emu_bcc_imm   || f == emu_bcc_long ||
+           f == emu_brclr_pp  || f == emu_brclr_reg ||
+           f == emu_brset_pp  || f == emu_brset_reg ||
+           f == emu_jclr_ea   || f == emu_jclr_aa   ||
+           f == emu_jclr_pp   || f == emu_jclr_reg  ||
+           f == emu_jset_ea   || f == emu_jset_aa   ||
+           f == emu_jset_pp   || f == emu_jset_reg  ||
+           f == emu_jsclr_ea  || f == emu_jsclr_aa  ||
+           f == emu_jsclr_pp  || f == emu_jsclr_reg ||
+           f == emu_jsset_ea  || f == emu_jsset_aa  ||
+           f == emu_jsset_pp  || f == emu_jsset_reg ||
+           f == emu_rts       || f == emu_rti       ||
+           f == emu_rep_imm   || f == emu_rep_ea    ||
+           f == emu_rep_aa    || f == emu_rep_reg   ||
+           f == emu_do_imm    || f == emu_do_ea     ||
+           f == emu_do_aa     || f == emu_do_reg    ||
+           f == emu_dor_imm   || f == emu_dor_reg   ||
+           f == emu_enddo     ||
+           f == emu_illegal   || f == emu_undefined ||
+           f == emu_stop      || f == emu_wait      ||
+           f == emu_reset;
+}
+
+#endif  /* DSP_JIT_SUPPORTED */

@@ -133,6 +133,8 @@ struct dsp_core_s {
     uint32_t pc_save;
 #endif
 
+    /* JIT state (opaque DspJitState * — see hw/xbox/mcpx/apu/dsp/dsp_jit.c) */
+    void *jit_state;
 };
 
 /* Functions */

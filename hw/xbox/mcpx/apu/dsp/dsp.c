@@ -26,6 +26,7 @@
 #include "qemu/osdep.h"
 #include "dsp_cpu.h"
 #include "dsp_dma.h"
+#include "dsp_jit.h"
 #include "dsp_state.h"
 #include "dsp.h"
 #include "debug.h"
@@ -60,6 +61,7 @@ DSPState *dsp_init(void *rw_opaque,
     dsp->dma.fifo_rw = fifo_rw;
 
     dsp_reset(dsp);
+    dsp_jit_init(&dsp->core);
 
     return dsp;
 }
@@ -68,10 +70,14 @@ void dsp_reset(DSPState* dsp)
 {
     dsp56k_reset_cpu(&dsp->core);
     dsp->save_cycles = 0;
+    /* Reset wipes PRAM and clears pram_opcache; any translated JIT
+     * blocks that referenced the old code are now stale. */
+    dsp_jit_invalidate_all(&dsp->core);
 }
 
 void dsp_destroy(DSPState* dsp)
 {
+    dsp_jit_finalize(&dsp->core);
     free(dsp);
 }
 
@@ -152,11 +158,27 @@ void dsp_run(DSPState* dsp, int cycles)
     if (dsp->save_cycles <= 0) return;
 
     int dma_timer = 0;
+    const bool jit = dsp_jit_enabled();
 
     while (dsp->save_cycles > 0)
     {
-        dsp56k_execute_instruction(&dsp->core);
-        dsp->save_cycles -= dsp->core.instr_cycle;
+        unsigned int consumed = 0;
+
+        if (jit) {
+            /* Try the JIT first: translates and executes a basic block
+             * of DSP instructions in one call. Returns 0 on any
+             * fallback condition (unsupported op at block start,
+             * translator bail-out), in which case we run one
+             * interpreter step and retry. */
+            consumed = dsp_jit_execute_block(&dsp->core);
+        }
+
+        if (consumed == 0) {
+            dsp56k_execute_instruction(&dsp->core);
+            consumed = dsp->core.instr_cycle;
+        }
+
+        dsp->save_cycles -= consumed;
         dsp->core.cycle_count++;
 
         if (dsp->dma.control & DMA_CONTROL_RUNNING) {
@@ -191,6 +213,9 @@ void dsp_bootstrap(DSPState* dsp)
         }
     }
     memset(dsp->core.pram_opcache, 0, sizeof(dsp->core.pram_opcache));
+    /* Fresh code loaded — any previously-translated JIT blocks are
+     * now stale. */
+    dsp_jit_invalidate_all(&dsp->core);
 }
 
 void dsp_start_frame(DSPState* dsp)
