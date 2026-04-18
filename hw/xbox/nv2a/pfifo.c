@@ -495,7 +495,14 @@ void *pfifo_thread(void *arg)
 
         pgraph_process_pending(d);
 
-        if (!d->pfifo.halt) {
+        /*
+         * All writers (nv2a.c, {vk,gl}/surface.c) use qatomic_set on halt;
+         * the heartbeat reader below uses qatomic_read. Match the contract
+         * on this hot-path read even though d->pfifo.lock is held here,
+         * so TSAN is quiet and future refactors that drop the lock don't
+         * silently tear.
+         */
+        if (!qatomic_read(&d->pfifo.halt)) {
             pfifo_run_pusher(d);
         }
 
