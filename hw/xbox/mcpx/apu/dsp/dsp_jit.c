@@ -1040,6 +1040,23 @@ void dsp_jit_finalize(dsp_core_t *dsp)
     if (!s) {
         return;
     }
+
+    if (g_jit_stats) {
+        fprintf(stderr,
+                "xemu: DSP JIT stats (%s core):\n"
+                "  blocks_translated = %" PRIu64 "\n"
+                "  blocks_executed   = %" PRIu64 "\n"
+                "  cache_flushes     = %" PRIu64 "\n"
+                "  fallbacks         = %" PRIu64 "\n"
+                "  diff_ops_checked  = %" PRIu64 "\n"
+                "  code_buf_used     = %zu bytes / %zu bytes\n",
+                dsp->is_gp ? "GP" : "EP",
+                s->blocks_translated, s->blocks_executed,
+                s->cache_flushes, s->fallbacks,
+                s->diff_ops_checked,
+                (size_t)(s->code_ptr - s->code_buf), s->code_cap);
+    }
+
     g_free(s->pre_state);
     g_free(s->post_jit);
     jit_code_free(s->code_buf, s->code_cap);
