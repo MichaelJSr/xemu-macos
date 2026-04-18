@@ -1054,21 +1054,34 @@ void dsp_jit_invalidate_all(dsp_core_t *dsp)
 /*
  * Byte-compare two dsp_core_t snapshots over their semantic state.
  * Returns offsetof of the first differing byte, or (size_t)-1 if
- * they match. disasm_* fields are excluded — JIT and interpreter
- * both update them through the shared tracing path.
+ * they match.
+ *
+ * Excluded from the comparison:
+ *   - disasm_* tail (debug/trace only).
+ *   - pram_opcache (cache of resolved emu_func_t; the interpreter
+ *     populates it during its dispatch, the JIT doesn't touch it).
+ *   - jit_state pointer (our own bookkeeping).
  */
 static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b)
 {
-    /* Compare the whole struct minus disasm_* tail and the JIT state
-     * pointer. Using offsetof-range bounds so the comparison stays
-     * robust against future field additions. */
-    size_t start = 0;
-    size_t end   = offsetof(dsp_core_t, str_disasm_memory);
     const uint8_t *pa = (const uint8_t *)a;
     const uint8_t *pb = (const uint8_t *)b;
-    for (size_t i = start; i < end; i++) {
-        if (pa[i] != pb[i]) {
-            return i;
+
+    struct diff_range { size_t off; size_t end; };
+    const struct diff_range ranges[] = {
+        /* head through end of pram (= up to pram_opcache) */
+        { 0,
+          offsetof(dsp_core_t, pram_opcache) },
+        /* skip pram_opcache; resume at mixbuffer through disasm_* tail */
+        { offsetof(dsp_core_t, mixbuffer),
+          offsetof(dsp_core_t, str_disasm_memory) },
+    };
+
+    for (size_t r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
+        for (size_t i = ranges[r].off; i < ranges[r].end; i++) {
+            if (pa[i] != pb[i]) {
+                return i;
+            }
         }
     }
     return (size_t)-1;
