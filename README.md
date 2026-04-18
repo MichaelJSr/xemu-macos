@@ -205,8 +205,30 @@ hard-FPU knobs; TOML is only needed for fine tuning.
 - **DSP dispatch.** `pram_opcache[pc]` caches the resolved
   `emu_func_t` directly instead of a `const OpcodeEntry *`, saving a
   dependent load and a NULL-branch per DSP instruction. `emu_undefined`
-  is cached for opcodes without a dedicated handler. Step toward the
-  Future-vectors DSP dynarec.
+  is cached for opcodes without a dedicated handler.
+- **DSP JIT (opt-in).** ARM64 basic-block JIT for the MCPX APU
+  DSP56300 cores (both GP and EP). Off by default; enable with
+  `XEMU_DSP_JIT=1`. Each DSP basic block is translated once into a
+  short sequence of ARM64 stubs that inline the per-instruction
+  bookkeeping (`cur_inst`, `cur_inst_len`, `instr_cycle` + cycle
+  accumulation) and BLR the existing C `emu_*()` handlers; the
+  handler bodies are unchanged so correctness is equivalent to the
+  interpreter by construction. Inline fast-paths skip the calls to
+  `dsp_postexecute_update_pc` (when no REP / DO loop active) and
+  `dsp_postexecute_interrupts` (when no interrupt state is active
+  — the steady-state case). Helper addresses are hoisted into
+  block-scope callee-saved x20/x21 so each stub is just BLR Xn.
+  A shared epilogue absorbs the per-op exit checks (pending IRQ,
+  REP entry, is-idle, PC mismatch). Invalidation on P-space writes
+  keeps the block cache coherent with self-modifying DSP code; the
+  cache is flushed entirely on `dsp_reset` and `dsp_bootstrap`.
+  Correctness harness: `XEMU_DSP_JIT_DIFF=1` runs the interpreter
+  and JIT back-to-back on snapshot state after every block and
+  bit-exact-compares the result (excluding the `pram_opcache`
+  cache slab); aborts with a diff dump on divergence. See
+  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) for the
+  9-phase roadmap and register-map plans for later inline phases
+  (arithmetic, parmoves, control-flow chaining, lazy flags).
 - **Atomic consistency.** All `d->regs[]` writers in `fe_method`
   (including a single `qatomic_set` FECTL mask+set under
   `d->lock`), `voice_locked[]` via `qatomic_or`/`qatomic_and`,
@@ -299,12 +321,24 @@ Explored but not yet attempted, or punted on risk. Each entry either
 cites the reverted-experiment entry it would need to sidestep, or
 describes the blocking infrastructure work.
 
-- **MCPX APU DSP dynarec.** The M56001 interpreter's dispatch already
-  caches `emu_func_t` directly in `pram_opcache`. Next step: thread
-  the post-execute bookkeeping (`dsp_postexecute_update_pc`,
-  `dsp_postexecute_interrupts`) into each handler so a `musttail`
-  dispatch can fuse across instructions; promote to ARM64 block
-  translator keyed on DSP PC.
+- **MCPX APU DSP JIT inlining (Phases 2-8).** Phase 0 + 1 and
+  Phase 7 of the JIT described in
+  [docs/dsp-jit-design.md](docs/dsp-jit-design.md) have landed
+  (infrastructure, call-threaded translator, block-scope helper
+  cache, inline fast-paths for `postexecute_update_pc` and
+  `postexecute_interrupts`, XEMU_DSP_JIT_DIFF bit-exact validation
+  harness). Remaining phases inline the individual `emu_*` handler
+  bodies directly in ARM64: Phase 2 — arithmetic / logical core
+  (~40 handlers: ADD/SUB/ASR/ASL/LSL/LSR/AND/OR/EOR/NOT/NEG/ABS/
+  CMP/TST, eager SR update), Phase 3 — direct xram/yram/pram
+  linear addressing, Phase 4 — 16 parallel-move forms (largest
+  remaining win since parmoves ride on most instructions),
+  Phase 5 — control-flow block chaining on statically known
+  targets, Phase 6 — REP and DO hardware-loop native lowering,
+  Phase 8 — lazy flag evaluation (cc_op shadow), ARM64 register
+  pinning for A/B/X0/X1/Y0/Y1, parmove+ALU fusion. Target
+  aggregate: 2-4× DSP throughput vs the current call-threaded
+  translator.
 - **Metal-native presentation.** Replace SDL3 + OpenGL +
   `CGLTexImageIOSurface2D` with `CAMetalLayer` direct drawable
   acquisition. Would eliminate the GL↔Metal bridge that currently
