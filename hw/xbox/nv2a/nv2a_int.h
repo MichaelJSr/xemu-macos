@@ -77,7 +77,6 @@ typedef struct NV2AState {
 
     VGACommonState vga;
     GraphicHwOps hw_ops;
-    QEMUTimer *vblank_timer;
 
     MemoryRegion *vram;
     MemoryRegion vram_pci;
