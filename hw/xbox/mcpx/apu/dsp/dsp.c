@@ -135,6 +135,15 @@ static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value)
         dsp_dma_write(&dsp->dma, DMA_START_BLOCK, value);
         break;
     case 0xFFFFD6:
+        /* Writing DMA_CONTROL with an ACTION code may synchronously
+         * invoke dsp_dma_run() which scatter-gather-reads Xbox host
+         * RAM via scratch_rw. That RAM is shared with (and can be
+         * concurrently modified by) the main x86 CPU thread, making
+         * the data non-replayable. Tell the JIT differential harness
+         * to skip the post-block state compare so we don't abort on
+         * a benign cross-thread memory race rather than an actual
+         * translation bug. */
+        core->jit_skip_diff_compare = 1;
         dsp_dma_write(&dsp->dma, DMA_CONTROL, value);
         break;
     case 0xFFFFD7:

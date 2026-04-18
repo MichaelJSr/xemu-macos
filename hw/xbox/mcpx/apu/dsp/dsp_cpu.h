@@ -143,6 +143,18 @@ struct dsp_core_s {
      * JIT block prologue. Avoids the JIT continuing to execute stale
      * instruction stubs that baked in pre-write pram words. */
     uint8_t jit_exit_block_request;
+
+    /* "This block touched externally-visible I/O with side effects
+     * that aren't captured in dsp_core_t" flag. Set when a handler
+     * writes a peripheral register that triggers DMA against Xbox
+     * host RAM (concurrent with the main x86 CPU thread), or any
+     * other non-replayable side effect. Cleared in the JIT block
+     * prologue; read by the differential harness to skip the
+     * post-block byte-for-byte compare — diff mode's "snapshot →
+     * JIT → restore → interpreter → compare" only works when all
+     * inputs the handler observes are inside dsp_core_t. Has no
+     * effect when diff mode is off. */
+    uint8_t jit_skip_diff_compare;
 };
 
 /* Functions */

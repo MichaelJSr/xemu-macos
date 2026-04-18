@@ -687,6 +687,7 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_INTERRUPT_PIPELINE_COUNT ((uint32_t)offsetof(dsp_core_t, interrupt_pipeline_count))
 #define OFF_SR                       ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_SR))
 #define OFF_JIT_EXIT_BLOCK_REQ       ((uint32_t)offsetof(dsp_core_t, jit_exit_block_request))
+#define OFF_JIT_SKIP_DIFF            ((uint32_t)offsetof(dsp_core_t, jit_skip_diff_compare))
 
 /* Stack-relative scratch offsets (see emit_prologue for frame layout). */
 #define OFF_SP_SCRATCH0  0
@@ -1984,6 +1985,12 @@ static void emit_prologue(ArmEmit *e)
      * to P-space; we read it in the per-op exit checks below to
      * bail out before running any stale instruction stub. */
     emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_EXIT_BLOCK_REQ);
+
+    /* Clear diff-skip flag at block start. Set by handlers that
+     * perform externally-visible side effects (e.g. DMA control
+     * writes that scatter-gather Xbox host RAM) which the diff
+     * harness cannot validate by interpreter replay. */
+    emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_SKIP_DIFF);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
@@ -2334,6 +2341,14 @@ static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
     b->entry(dsp);
     uint32_t jit_cycles = dsp->num_inst - num_inst_before;
     s->blocks_executed++;
+
+    /* If any handler inside the block touched external I/O with
+     * non-replayable side effects (e.g. DMA against Xbox host RAM
+     * that's shared with the main CPU thread), skip the post-block
+     * compare: interpreter replay cannot reproduce it bit-exact. */
+    if (dsp->jit_skip_diff_compare) {
+        return jit_cycles;
+    }
 
     /* 3. Snapshot post-JIT state. */
     memcpy(s->post_jit, dsp, sizeof(*dsp));
