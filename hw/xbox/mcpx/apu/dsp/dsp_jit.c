@@ -1005,6 +1005,12 @@ typedef struct DspJitState {
      * diff mode is on; only blocks where (counter % sample) == 0
      * actually go through the differential path. */
     uint64_t diff_sample_counter;
+
+    /* Set the first time dsp_jit_print_stats runs for this core,
+     * so the atexit handler and dsp_jit_finalize don't both dump
+     * the same stats (happens in the test-dsp binary; not the
+     * normal xemu path, but cheap to guard). */
+    bool stats_printed;
 } DspJitState;
 
 /* --------------------------------------------------------------- *
@@ -4248,6 +4254,15 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 static DiffQueue *diff_queue_create(dsp_core_t *owner);
 static void       diff_queue_destroy(DiffQueue *q);
 
+/* atexit-handler glue — needed because the normal xemu exit path
+ * never calls dsp_destroy / dsp_jit_finalize. Definitions live
+ * right after dsp_jit_finalize below. */
+#define DSP_JIT_MAX_REGISTERED_CORES 2
+static dsp_core_t *g_jit_registered_cores[DSP_JIT_MAX_REGISTERED_CORES];
+static int g_jit_registered_count;
+static bool g_jit_atexit_registered;
+static void dsp_jit_stats_atexit_handler(void);
+
 void dsp_jit_init(dsp_core_t *dsp)
 {
     parse_flags_once();
@@ -4285,6 +4300,112 @@ void dsp_jit_init(dsp_core_t *dsp)
      * 0xFFF0-ish? No — that would collide. Add a dedicated field via
      * the "jit_state" hook we add to dsp_core_t in this same commit. */
     dsp->jit_state = s;
+
+    /*
+     * Register this core with the atexit handler so
+     * XEMU_DSP_JIT_STATS=1 prints on normal xemu quit. The Xbox
+     * machine shutdown path (Cmd-Q / window close / SIGTERM) does
+     * NOT call dsp_destroy — it just exits — so the stats dump
+     * wired into dsp_jit_finalize would never fire otherwise.
+     *
+     * The registry is bounded (GP + EP = 2 cores max) and any
+     * subsequent core going through dsp_jit_finalize cleanly
+     * removes itself, so the atexit handler only sees live cores.
+     */
+    if (g_jit_registered_count < DSP_JIT_MAX_REGISTERED_CORES) {
+        g_jit_registered_cores[g_jit_registered_count++] = dsp;
+    }
+    if (g_jit_stats && !g_jit_atexit_registered) {
+        g_jit_atexit_registered = true;
+        atexit(dsp_jit_stats_atexit_handler);
+    }
+}
+
+/*
+ * Dump the per-core + process-wide JIT counters to stderr. Used
+ * from two call sites:
+ *   1. dsp_jit_finalize — the clean-shutdown path (test-dsp binary).
+ *   2. dsp_jit_stats_atexit_handler — the normal xemu exit path,
+ *      which doesn't call dsp_destroy (Cmd-Q / signal / window
+ *      close go through a plain exit() that never tears down the
+ *      Xbox machine's MCPX APU).
+ *
+ * The per-core `printed` flag guards against double-printing when
+ * both paths fire in the same process (test-dsp runs dsp_destroy
+ * AND its atexit handler).
+ */
+static void dsp_jit_print_stats(dsp_core_t *dsp)
+{
+    DspJitState *s = (DspJitState *)dsp->jit_state;
+    if (!s) {
+        return;
+    }
+    if (s->stats_printed) {
+        return;
+    }
+    s->stats_printed = true;
+
+    if (s->diff_q) {
+        fprintf(stderr,
+                "xemu: DSP JIT validator (%s core) final: "
+                "enqueued=%" PRIu64 " checked=%" PRIu64
+                " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
+                dsp->is_gp ? "GP" : "EP",
+                s->diff_q->enqueued, s->diff_q->checked,
+                s->diff_q->dropped, s->diff_q->failures);
+    }
+
+    fprintf(stderr,
+            "xemu: DSP JIT stats (%s core):\n"
+            "  blocks_translated = %" PRIu64 "\n"
+            "  blocks_executed   = %" PRIu64 "\n"
+            "  cache_flushes     = %" PRIu64 "\n"
+            "  fallbacks         = %" PRIu64 "\n"
+            "  diff_ops_checked  = %" PRIu64 "\n"
+            "  code_buf_used     = %zu bytes / %zu bytes\n"
+            "  alu_inlined       = %" PRIu64
+            " (%.1f%% of ALU ops)\n"
+            "  alu_fallback      = %" PRIu64 "\n"
+            "  cf_inlined        = %" PRIu64
+            " (%.1f%% of emitted ops)\n"
+            "  cf_fallback       = %" PRIu64 "\n",
+            dsp->is_gp ? "GP" : "EP",
+            s->blocks_translated, s->blocks_executed,
+            s->cache_flushes, s->fallbacks,
+            s->diff_ops_checked,
+            (size_t)(s->code_ptr - s->code_buf), s->code_cap,
+            g_alu_inlined_count,
+            (g_alu_inlined_count + g_alu_fallback_count) == 0 ? 0.0 :
+                100.0 * (double)g_alu_inlined_count /
+                (double)(g_alu_inlined_count + g_alu_fallback_count),
+            g_alu_fallback_count,
+            g_cf_inlined_count,
+            (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
+                100.0 * (double)g_cf_inlined_count /
+                (double)(g_cf_inlined_count + g_cf_fallback_count),
+            g_cf_fallback_count);
+    fflush(stderr);
+}
+
+/*
+ * atexit handler: iterate the registered live JIT cores and dump
+ * per-core stats. The normal xemu shutdown path does not call
+ * dsp_destroy, so without this hook the stats print wired into
+ * dsp_jit_finalize never fires. Each core's stats_printed flag
+ * guards against double-printing if dsp_destroy also ran (test
+ * binary).
+ */
+static void dsp_jit_stats_atexit_handler(void)
+{
+    if (!g_jit_stats) {
+        return;
+    }
+    for (int i = 0; i < g_jit_registered_count; i++) {
+        dsp_core_t *d = g_jit_registered_cores[i];
+        if (d && d->jit_state) {
+            dsp_jit_print_stats(d);
+        }
+    }
 }
 
 void dsp_jit_finalize(dsp_core_t *dsp)
@@ -4294,56 +4415,24 @@ void dsp_jit_finalize(dsp_core_t *dsp)
         return;
     }
 
+    if (g_jit_stats) {
+        dsp_jit_print_stats(dsp);
+    }
+
     /* Drain and stop the validator BEFORE freeing the queue: the
      * worker holds a pointer into s->diff_q->slots. */
     if (s->diff_q) {
-        if (g_jit_stats) {
-            fprintf(stderr,
-                    "xemu: DSP JIT validator (%s core) final: "
-                    "enqueued=%" PRIu64 " checked=%" PRIu64
-                    " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
-                    dsp->is_gp ? "GP" : "EP",
-                    s->diff_q->enqueued, s->diff_q->checked,
-                    s->diff_q->dropped, s->diff_q->failures);
-        }
         diff_queue_destroy(s->diff_q);
         s->diff_q = NULL;
     }
 
-    if (g_jit_stats) {
-        /* alu_inlined / alu_fallback are process-wide (shared
-         * across the two DSP cores). Print them only on the EP
-         * core's finalize (the second core to be finalized) so
-         * the number isn't split across two printouts. */
-        fprintf(stderr,
-                "xemu: DSP JIT stats (%s core):\n"
-                "  blocks_translated = %" PRIu64 "\n"
-                "  blocks_executed   = %" PRIu64 "\n"
-                "  cache_flushes     = %" PRIu64 "\n"
-                "  fallbacks         = %" PRIu64 "\n"
-                "  diff_ops_checked  = %" PRIu64 "\n"
-                "  code_buf_used     = %zu bytes / %zu bytes\n"
-                "  alu_inlined       = %" PRIu64
-                " (%.1f%% of ALU ops)\n"
-                "  alu_fallback      = %" PRIu64 "\n"
-                "  cf_inlined        = %" PRIu64
-                " (%.1f%% of emitted ops)\n"
-                "  cf_fallback       = %" PRIu64 "\n",
-                dsp->is_gp ? "GP" : "EP",
-                s->blocks_translated, s->blocks_executed,
-                s->cache_flushes, s->fallbacks,
-                s->diff_ops_checked,
-                (size_t)(s->code_ptr - s->code_buf), s->code_cap,
-                g_alu_inlined_count,
-                (g_alu_inlined_count + g_alu_fallback_count) == 0 ? 0.0 :
-                    100.0 * (double)g_alu_inlined_count /
-                    (double)(g_alu_inlined_count + g_alu_fallback_count),
-                g_alu_fallback_count,
-                g_cf_inlined_count,
-                (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
-                    100.0 * (double)g_cf_inlined_count /
-                    (double)(g_cf_inlined_count + g_cf_fallback_count),
-                g_cf_fallback_count);
+    /* Remove from the atexit registry so the handler (if it fires
+     * after this) doesn't try to print a freed core. */
+    for (int i = 0; i < g_jit_registered_count; i++) {
+        if (g_jit_registered_cores[i] == dsp) {
+            g_jit_registered_cores[i] = NULL;
+            break;
+        }
     }
 
     jit_code_free(s->code_buf, s->code_cap);
