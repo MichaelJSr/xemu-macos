@@ -157,9 +157,10 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   `Scissor`, `LineWidth`, `DepthBias`, and `BlendConstants` only
   re-emitted when the value differs from the last committed one;
   cache invalidated on each `pgraph_vk_begin_command_buffer`.
-- **Consecutive-binding descriptor write.** Texture bindings 0..3 are
-  written with a single `VkWriteDescriptorSet` (descriptorCount=4,
-  dstArrayElement=0) instead of four separate structs.
+- **Consecutive-binding descriptor writes.** Texture bindings 0..3
+  and the VSH/PSH UBO bindings 0..1 are each written with a single
+  `VkWriteDescriptorSet` (descriptorCount=N, dstArrayElement=0)
+  instead of N separate structs. Spec §14.2.3 overflow rule.
 - **Renderer-switch hardening.** `pgraph_process_pending` uses
   `qatomic_set` for `flush_pending` across the switch handoff,
   acquires `pfifo.lock` only after releasing `pgraph.lock` (fixes
@@ -214,12 +215,18 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   dependent load and a NULL-branch per DSP instruction. `emu_undefined`
   is cached for opcodes without a dedicated handler. Step toward the
   Future-vectors DSP dynarec.
-- **Atomic consistency.** `d->regs[]` (all writes in `fe_method`,
-  including the `FECTL` RMW via `qatomic_and`/`qatomic_or`),
-  `voice_locked[]` writer, `pause_requested`, and the
+- **Atomic consistency.** `d->regs[]` (all writes in `fe_method`;
+  the `FECTL` mask+set is committed as one `qatomic_set` under
+  `d->lock` so the lock-free MMIO reader never observes a
+  half-updated bitfield), `voice_locked[]` writer via
+  `qatomic_or`/`qatomic_and`, `pause_requested`, and the
   `NV_PAPU_FEMEMADDR` load in `fe_method` all go through
   `qatomic_*` so the VP frame thread, workers, and guest MMIO
   dispatcher agree under weak ordering.
+- **`voice_set_mask` fast-skip.** Early-out when the computed new
+  value equals the old; skips both the stack-buf and guest-RAM
+  stores. Voice-tick paths commonly write the same value
+  (envelope hold/sustain, paused voices).
 - **`dsp_dma_run` scratch buffer.** Replaced monotonic `malloc`
   growth (leaked the old pointer) with `g_realloc`.
 - **CoreAudio.** `os_unfair_lock` with trylock; default buffer 1024
