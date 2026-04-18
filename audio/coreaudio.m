@@ -558,11 +558,14 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
      * latency for an interactive emulator. 1024 frames (~21 ms @ 48 kHz)
      * is well within Apple's reliable IOProc budget on Apple Silicon
      * while cutting latency ~4x. Users can override via the TOML
-     * `[audio.coreaudio.out] buffer_length` / `buffer_count` knobs.
+     * `[audio.coreaudio.out] buffer_length` / `buffer_count` knobs,
+     * or via XEMU_COREAUDIO_FRAMES at build time.
      *
-     * After Phase 2.1 (rate==1 resampler fast path) and Phase 2.2
-     * (vDSP_vsma mixbin), the VP frame thread is fast enough that
-     * trylock contention with IOProc is rare.
+     * The VP frame thread stays well under its budget (voice-struct
+     * stack memcpy, attenuation/pitch/LPF LUTs, vDSP_vsma mixbin,
+     * env-curve LUTs, bulk vcvtnq_s32_f32 on ARM64), so os_unfair_lock
+     * trylock contention between IOProc and the VP writer is rare
+     * in practice.
      */
     const char *buf_env = getenv("XEMU_COREAUDIO_FRAMES");
     int default_frames = buf_env ? atoi(buf_env) : 1024;
