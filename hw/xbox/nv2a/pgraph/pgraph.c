@@ -3230,11 +3230,19 @@ void pgraph_process_pending(NV2AState *d)
             pg->renderer->ops.process_pending(d);
 
             qemu_mutex_unlock(&d->pfifo.lock);
-            qemu_mutex_lock(&d->pgraph.lock);
+            /*
+             * framebuffer_in_use / framebuffer_released are guarded by
+             * renderer_lock alone (see nv2a_get/release_framebuffer_surface).
+             * Previously pgraph.lock was held across this cond_wait, which
+             * could stall every pgraph engine method (pfifo_run_puller, vCPU
+             * pgraph_write) for up to a display frame on renderer switches.
+             * Hold pgraph.lock only around the subsequent finalize work.
+             */
             while (pg->framebuffer_in_use) {
                 qemu_cond_wait(&d->pgraph.framebuffer_released,
                                &d->pgraph.renderer_lock);
             }
+            qemu_mutex_lock(&d->pgraph.lock);
 
             if (pg->renderer->ops.finalize) {
                 pg->renderer->ops.finalize(d);
