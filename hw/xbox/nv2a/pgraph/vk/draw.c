@@ -1885,6 +1885,12 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
                                   &command_buffer_begin_info));
     r->command_buffer_start_time = pg->draw_time;
     r->in_command_buffer = true;
+
+    /*
+     * Vulkan dynamic state is command-buffer-scoped. Invalidate the
+     * dynstate cache so the first draw re-issues vkCmdSet*.
+     */
+    r->dynstate_cache_valid = false;
 }
 
 // FIXME: Refactor below
@@ -2027,7 +2033,11 @@ static void begin_draw(PGRAPHState *pg)
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
-        vkCmdSetViewport(r->command_buffer, 0, 1, &viewport);
+        if (!r->dynstate_cache_valid ||
+            memcmp(&viewport, &r->cached_viewport, sizeof(viewport)) != 0) {
+            vkCmdSetViewport(r->command_buffer, 0, 1, &viewport);
+            r->cached_viewport = viewport;
+        }
 
         /* Surface clip */
         /* FIXME: Consider moving to PSH w/ window clip */
@@ -2049,14 +2059,21 @@ static void begin_draw(PGRAPHState *pg)
             .extent.width = scissor_width,
             .extent.height = scissor_height,
         };
-        vkCmdSetScissor(r->command_buffer, 0, 1, &scissor);
+        if (!r->dynstate_cache_valid ||
+            memcmp(&scissor, &r->cached_scissor, sizeof(scissor)) != 0) {
+            vkCmdSetScissor(r->command_buffer, 0, 1, &scissor);
+            r->cached_scissor = scissor;
+        }
 
         if (r->pipeline_binding->has_dynamic_line_width) {
             float line_width =
                 clamp_line_width_to_device_limits(pg, pg->surface_scale_factor);
-            vkCmdSetLineWidth(r->command_buffer, line_width);
+            if (!r->dynstate_cache_valid ||
+                line_width != r->cached_line_width) {
+                vkCmdSetLineWidth(r->command_buffer, line_width);
+                r->cached_line_width = line_width;
+            }
         }
-
     }
 
     if (!pg->clearing) {
@@ -2065,8 +2082,14 @@ static void begin_draw(PGRAPHState *pg)
             uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
             float depth_bias_constant = *(float *)&zbias_reg;
             float depth_bias_slope = *(float *)&zfactor_reg;
-            vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
-                              depth_bias_slope);
+            if (!r->dynstate_cache_valid ||
+                depth_bias_constant != r->cached_depth_bias_constant ||
+                depth_bias_slope != r->cached_depth_bias_slope) {
+                vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
+                                  depth_bias_slope);
+                r->cached_depth_bias_constant = depth_bias_constant;
+                r->cached_depth_bias_slope = depth_bias_slope;
+            }
         }
 
         float blend_constants[4] = { 0, 0, 0, 0 };
@@ -2074,11 +2097,26 @@ static void begin_draw(PGRAPHState *pg)
             uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
             pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
         }
-        vkCmdSetBlendConstants(r->command_buffer, blend_constants);
+        if (!r->dynstate_cache_valid ||
+            memcmp(blend_constants, r->cached_blend_constants,
+                   sizeof(blend_constants)) != 0) {
+            vkCmdSetBlendConstants(r->command_buffer, blend_constants);
+            memcpy(r->cached_blend_constants, blend_constants,
+                   sizeof(blend_constants));
+        }
 
         bind_descriptor_sets(pg);
         push_vertex_attr_values(pg);
     }
+
+    /*
+     * Once any branch above has committed state for this CB, the
+     * cache is valid for the rest of the CB regardless of which
+     * dynamic fields were touched — the un-touched fields still hold
+     * their last-cached values because Vulkan preserves dynamic
+     * state across draws within a single command buffer.
+     */
+    r->dynstate_cache_valid = true;
 
     r->in_draw = true;
 }

@@ -499,6 +499,21 @@ typedef struct PGRAPHVkState {
     PipelineBinding *pipeline_binding;
     bool pipeline_binding_changed;
 
+    /*
+     * Per-command-buffer dynamic-state cache. Vulkan dynamic state is
+     * scoped to the command buffer, so these are reset in
+     * pgraph_vk_begin_command_buffer. Skipping a redundant vkCmdSet*
+     * saves a few host instructions per draw; at ~20-50k draws/frame
+     * this aggregates visibly.
+     */
+    bool dynstate_cache_valid;
+    VkViewport cached_viewport;
+    VkRect2D cached_scissor;
+    float cached_blend_constants[4];
+    float cached_depth_bias_constant;
+    float cached_depth_bias_slope;
+    float cached_line_width;
+
     VkDescriptorPool descriptor_pool;
     /*
      * Split descriptor sets: set 0 holds UBOs (VSH + PSH uniforms),
