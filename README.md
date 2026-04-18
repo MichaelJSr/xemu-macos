@@ -84,22 +84,20 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   control word via mode-specific fused TCG ops
   (`cvt_{rn,rm,rp}_i{32,64}_f{32,64}`) that lower to a single host
   `FCVT{N,M,P,Z}S` on AArch64.
-- **JIT tightening.** `ld80f` NOP-copy removed, `gen_stn_ptr` uses
-  shift-by-4, `insertion_sort_syncs` replaces `qsort` for N ≤ 16.
-  `flcr` lowering is 5 insns via `RBIT`. `gen_flcr` materializes its
-  rc-bits from `tb->flags`' `HF_FPU_RC` instead of reloading
-  `env->fpuc` per first-FPU-op. `fnstcw` is inlined to a single
-  `ld16u_i32`.
+- **JIT tightening.** `ld80f` NOP-copy removed; `gen_stn_ptr` uses
+  shift-by-4; `insertion_sort_syncs` replaces `qsort` for N ≤ 16;
+  `flcr` is 5 insns via `RBIT`. `gen_flcr` materializes rc-bits
+  from `tb->flags`' `HF_FPU_RC` instead of re-loading `env->fpuc`;
+  `fnstcw` inlines to a single `ld16u_i32`.
 - **Snapshot/migration FPU resync.** `xsave_helper.c` and
   `cpu_post_load` route through `cpu_set_fpuc` so `HF_FPU_RC` in
-  `hflags` is rebuilt; otherwise the fused FIST `cvt_{rn,rm,rp}` TCG
-  ops would round with the pre-restore mode.
-- **FCOMI vs FUCOMI split inline.** New `coms_f32`/`coms_f64` TCG ops
-  lower to `FCMPE` on AArch64 and `COMISS`/`COMISD` on x86; the
-  existing `com_f32`/`com_f64` stays quiet (`FCMP` / `UCOMISS`).
-  Matches x87 semantics (FCOMI raises IE on any NaN; FUCOMI only on
-  SNaN) and hardens the inline-FPU path against a future wiring of
-  FP exceptions into guest FSW.IE.
+  `hflags` is rebuilt; otherwise the fused FIST `cvt_{rn,rm,rp}` ops
+  would round with the pre-restore mode.
+- **FCOMI vs FUCOMI signaling split.** New `coms_f32`/`coms_f64` TCG
+  ops lower to `FCMPE` on AArch64 and `COMISS`/`COMISD` on x86;
+  existing `com_f32`/`com_f64` stay quiet (`FCMP` / `UCOMISS`).
+  Matches x87 semantics (FCOMI raises IE on any NaN; FUCOMI only
+  on SNaN).
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -148,35 +146,29 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   `ZOFFSETFACTOR` removed from the pipeline key and set as Vulkan
   dynamic state per draw (skipped on clear pipelines).
 - **CONTROL_3 off the pipeline key.** `NV_PGRAPH_CONTROL_3` dropped
-  from `PipelineKey.regs[]` and from `check_pipeline_dirty`'s
-  fast-dirty list; its bits (`SHADEMODE`, `FOG_MODE`, `FOGENABLE`,
-  `POINTPARAMSENABLE`) are already funnelled through `ShaderState`
-  and `PROVOKING_VERTEX` is CPU-side. Eliminates false-positive
-  pipeline rehashes on fog/shade toggles.
-- **Per-command-buffer dynamic-state cache.** `vkCmdSetViewport`,
-  `Scissor`, `LineWidth`, `DepthBias`, and `BlendConstants` only
-  re-emitted when the value differs from the last committed one;
-  cache invalidated on each `pgraph_vk_begin_command_buffer`.
-- **Consecutive-binding descriptor writes.** Texture bindings 0..3
-  and the VSH/PSH UBO bindings 0..1 are each written with a single
-  `VkWriteDescriptorSet` (descriptorCount=N, dstArrayElement=0)
-  instead of N separate structs. Spec §14.2.3 overflow rule.
+  from `PipelineKey.regs[]`; its bits (`SHADEMODE`, `FOG_MODE`,
+  `FOGENABLE`, `POINTPARAMSENABLE`) already route through
+  `ShaderState` and `PROVOKING_VERTEX` is CPU-side. Eliminates
+  false-positive pipeline rehashes on fog/shade toggles.
+- **Dynamic-state cache.** `vkCmdSet{Viewport,Scissor,LineWidth,
+  DepthBias,BlendConstants}` only re-emitted when the value
+  changes; cache invalidated per `pgraph_vk_begin_command_buffer`.
+- **Coalesced descriptor writes.** Texture bindings 0..3 and
+  VSH/PSH UBO bindings 0..1 write as one `VkWriteDescriptorSet`
+  with `descriptorCount=N` (spec §14.2.3 overflow) instead of N
+  separate structs.
 - **Renderer-switch hardening.** `pgraph_process_pending` uses
-  `qatomic_set` for `flush_pending` across the switch handoff,
-  acquires `pfifo.lock` only after releasing `pgraph.lock` (fixes
-  `pgraph→pfifo` AB-BA inversion), and releases `pgraph.lock`
-  across the `framebuffer_released` wait (previously stalled every
-  pgraph consumer for up to a display frame on renderer swap).
+  `qatomic_set` on `flush_pending`, drops `pgraph.lock` before
+  acquiring `pfifo.lock` (fixes AB-BA inversion against
+  `pgraph_write`), and doesn't hold `pgraph.lock` across the
+  `framebuffer_released` cond_wait.
 - **Fence-wait diagnostics.** `pgraph_vk_end_single_time_commands`
-  and `pgraph_vk_wait_for_previous_flight` use a 5 s timeout
-  `vkWaitForFences` wrapper that aborts with a named call site on
-  timeout instead of hanging silently (catches MoltenVK internal-
-  mutex deadlocks — the documented failure mode of the reverted
-  depth-export and α3 direct-VRAM-compute paths).
-- **Monotonic sync clock.** `pgraph_vk_sync` throttles off
-  `QEMU_CLOCK_HOST` (monotonic) instead of `QEMU_CLOCK_REALTIME`,
-  so NTP slew and suspend/resume don't stall the 8 ms gate. Same
-  clock as surface expiry.
+  / `pgraph_vk_wait_for_previous_flight` use a 5 s timeout wrapper
+  that aborts with the named call site instead of hanging silently
+  on MoltenVK internal-mutex deadlocks.
+- **Monotonic sync clock.** `pgraph_vk_sync` uses `QEMU_CLOCK_HOST`
+  instead of `QEMU_CLOCK_REALTIME` so NTP slew / suspend-resume
+  don't stall the 8 ms gate.
 
 ### MetalFX + presentation
 
@@ -215,20 +207,18 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   dependent load and a NULL-branch per DSP instruction. `emu_undefined`
   is cached for opcodes without a dedicated handler. Step toward the
   Future-vectors DSP dynarec.
-- **Atomic consistency.** `d->regs[]` (all writes in `fe_method`;
-  the `FECTL` mask+set is committed as one `qatomic_set` under
-  `d->lock` so the lock-free MMIO reader never observes a
-  half-updated bitfield), `voice_locked[]` writer via
-  `qatomic_or`/`qatomic_and`, `pause_requested`, and the
-  `NV_PAPU_FEMEMADDR` load in `fe_method` all go through
-  `qatomic_*` so the VP frame thread, workers, and guest MMIO
-  dispatcher agree under weak ordering.
-- **`voice_set_mask` fast-skip.** Early-out when the computed new
-  value equals the old; skips both the stack-buf and guest-RAM
-  stores. Voice-tick paths commonly write the same value
-  (envelope hold/sustain, paused voices).
-- **`dsp_dma_run` scratch buffer.** Replaced monotonic `malloc`
-  growth (leaked the old pointer) with `g_realloc`.
+- **Atomic consistency.** All `d->regs[]` writers in `fe_method`
+  (including a single `qatomic_set` FECTL mask+set under
+  `d->lock`), `voice_locked[]` via `qatomic_or`/`qatomic_and`,
+  `pause_requested`, and the `NV_PAPU_FEMEMADDR` load go through
+  `qatomic_*` so the VP frame thread, workers, and lock-free
+  MMIO dispatcher agree under weak ordering.
+- **`voice_set_mask` fast-skip.** Early-out when the new value
+  equals the old; skips the stack-buf and guest-RAM stores that
+  voice-tick paths commonly hit on unchanged envelope/pause
+  fields.
+- **`dsp_dma_run` scratch-buffer leak fix.** `malloc` →
+  `g_realloc`.
 - **CoreAudio.** `os_unfair_lock` with trylock; default buffer 1024
   frames (~21 ms @ 48 kHz, override via `XEMU_COREAUDIO_FRAMES`).
   Silence on contention; underrun returns `BadDevice` / `Unknown`
@@ -298,6 +288,8 @@ Lessons worth preserving so they aren't re-attempted.
 | Incremental texture hash on misaligned textures | Host-page boundaries straddle chunks → `test_and_clear_dirty` by one chunk steals another's dirty signal. Gated to page-aligned textures only |
 | HRTF hand-NEON / always-on bounds checks | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Always-on bounds: ~5–10% GPU-pipeline regression |
 | BQL event batching | BQL around the SDL event loop breaks QEMU cooperative scheduling |
+| TLS-cached `pthread_jit_write_protect_np` | Per-thread enum shadow (`UNINITIALIZED`/`EXECUTE`/`WRITABLE`) to elide no-op syscalls on `cpu_tb_exec`. SIGSEGV/SIGILL after ~1 min of gameplay: the actual per-thread kernel W^X state drifts from our cache (nested `tb_gen_code` → `tb_phys_invalidate` paths or setjmp/longjmp out of codegen), leaving TBs written to execute-only pages or executed from writable pages. The unconditional syscall pattern is defensive against this drift and the perf delta isn't worth the correctness risk |
+| Hoist `can_fifo_access` out of pfifo pusher word loop | Checked `NV_PGRAPH_FIFO_ACCESS` once on entry to `pfifo_run_pusher`, rechecked only `waiting_for_nop` per word. The invariant "pfifo.lock held throughout" is false: `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, which creates a window where state the pusher assumed stable can change. On game boot this surfaced as `ERROR_CALL` (nested CALL) from a `subroutine_state` / pushbuffer mismatch. Reverted to per-iteration full check |
 
 ---
 

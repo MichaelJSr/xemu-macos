@@ -199,11 +199,11 @@ static void apu_init_luts(void)
     }
     for (int i = 0; i < 65536; i++) {
         int16_t signed_val = (int16_t)i;
-        g_pitch_lut[i] = 1.0f / powf(2.0f, signed_val / 4096.0f);
-        float lpf = powf(2.0f, signed_val / 4096.0f);
-        if (lpf < 0.003906f) lpf = 0.003906f;
-        else if (lpf > 1.0f) lpf = 1.0f;
-        g_lpf_fc_lut[i] = lpf;
+        float p = powf(2.0f, signed_val / 4096.0f);
+        g_pitch_lut[i] = 1.0f / p;
+        if (p < 0.003906f) p = 0.003906f;
+        else if (p > 1.0f) p = 1.0f;
+        g_lpf_fc_lut[i] = p;
     }
     g_decay_base_log = logf(0.99988799f);
     for (int i = 0; i < ENV_LUT_SIZE; i++) {
