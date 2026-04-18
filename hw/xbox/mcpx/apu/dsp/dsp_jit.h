@@ -174,6 +174,32 @@ enum {
 };
 int dsp_jit_helper_classify_cf(void *fn);
 
+/*
+ * Long-immediate ALU classifier. The "long" variants of the
+ * non-parallel ALU ops (add/sub/cmp/and/or) are 2-word
+ * instructions where the second word is a 24-bit immediate the
+ * interpreter reads via `read_memory_p(pc+1)` at run time.
+ * Because pram writes invalidate this block via
+ * dsp_jit_invalidate, the translator can safely bake the
+ * immediate at translate time and skip both the run-time
+ * `read_memory_p` and the dispatcher round-trip through the C
+ * handler.
+ *
+ * Returns a DSP_JIT_LI_* tag, or DSP_JIT_LI_NONE for handlers
+ * without a corresponding inline emitter. EOR long is omitted
+ * because there is no interpreter handler for it (the opcode
+ * table entry is NULL).
+ */
+enum {
+    DSP_JIT_LI_NONE = 0,
+    DSP_JIT_LI_ADD,
+    DSP_JIT_LI_SUB,
+    DSP_JIT_LI_CMP,
+    DSP_JIT_LI_AND,
+    DSP_JIT_LI_OR,
+};
+int dsp_jit_helper_classify_long_imm(void *fn);
+
 #else  /* !DSP_JIT_SUPPORTED */
 
 static inline void dsp_jit_init(dsp_core_t *dsp) { (void)dsp; }

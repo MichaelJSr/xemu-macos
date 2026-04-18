@@ -262,10 +262,23 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   `alu_inlined / alu_fallback` and `cf_inlined / cf_fallback`
   counts plus percentages, printed from an `atexit` hook so the
   normal xemu quit path (Cmd-Q / SIGTERM — xemu shutdown doesn't
-  call `dsp_destroy`) still dumps them. Static block chaining
-  (direct `B <target.entry>` patch on known branch targets) is a
-  followup commit — the entry-split prologue refactor it depends
-  on is scoped separately.
+  call `dsp_destroy`) still dumps them. Round 3 extends the
+  inline coverage further: (a) `emu_calc_ea` modes 5 (Rn+Nn) and
+  7 (-(Rn)) are inline under linear Mn (still slow-call for
+  modulo Mn); mode 6 (aa) is deferred pending a pc-threading
+  refactor. (b) The four ALU shift kinds (ASL/ASR/LSL/LSR) are
+  inline — the 56-bit ASL/ASR via packed-accu ops, the A1-only
+  LSL/LSR via direct-register ops, all four matching the
+  interpreter's dsp_asl56 / dsp_asr56 / emu_lsl_a / emu_lsr_a
+  flag semantics bit-for-bit (which includes dsp_asr56's LOGICAL
+  right shift despite the "ASR" mnemonic). (c) The 2-word ALU
+  long-immediate handlers (`add_long`, `sub_long`, `cmp_long`,
+  `and_long`, `or_long`) have their 24-bit immediate baked from
+  `pram[pc+1]` at translate time, eliminating both the BLR and
+  the `read_memory_p` from every long-imm ALU instruction. Static
+  block chaining (direct `B <target.entry>` patch on known branch
+  targets) is a followup commit — the entry-split prologue
+  refactor it depends on is scoped separately.
   Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
   against the interpreter. Because a translated block is fully
   deterministic given its pre-state, a single passing validation

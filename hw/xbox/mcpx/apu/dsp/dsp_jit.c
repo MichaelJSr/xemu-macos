@@ -619,6 +619,20 @@ G_GNUC_UNUSED static inline void emit_csel_w(ArmEmit *e, int rd, int rn, int rm,
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
+/*
+ * CSET Wd, cond — Wd = (cond) ? 1 : 0. Alias for
+ *   CSINC Wd, WZR, WZR, !cond
+ * Encoding (CSINC 32-bit): 0x1a800400 | Rm<<16 | cond<<12 | Rn<<5 | Rd
+ * With Rn=Rm=WZR=31 and cond inverted:
+ *   0x1a800400 | 31<<16 | (cond^1)<<12 | 31<<5 | Rd
+ *   = 0x1a9f07e0 | ((cond^1) & 0xf) << 12 | (Rd & 0x1f)
+ */
+G_GNUC_UNUSED static inline void emit_cset_w(ArmEmit *e, int rd, int cond)
+{
+    uint32_t inv = (uint32_t)((cond ^ 1) & 0xf);
+    emit_u32(e, 0x1a9f07e0u | (inv << 12) | (rd & 0x1f));
+}
+
 /* TBZ Wt, #bit, #imm14 */
 G_GNUC_UNUSED static inline void emit_tbz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
 {
@@ -1219,14 +1233,28 @@ static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
 }
 
 /*
- * Emit calc_ea inline: fast path for modes 0-4 with linear Mn,
- * slow-path BLR otherwise. Leaves the 16-bit address in
- * out_addr_reg (which must be a callee-saved W register x22..x25
- * if the caller needs it preserved across subsequent BLRs).
+ * Emit calc_ea inline: fast path for modes 0-5 and 7 with linear
+ * Mn; slow-path BLR for mode 6 (aa, needs pram[pc+1] read), and
+ * for modulo-Mn modes 0-3/5/7. Mode 4 is a pure read (no Mn
+ * check). Leaves the 16-bit address in out_addr_reg (which must
+ * be a callee-saved W register x22..x25 if the caller needs it
+ * preserved across subsequent BLRs).
+ *
+ * Semantics summary (matches emu_calc_ea in dsp_emu.c.inc:150):
+ *   mode 0  (Rn)-Nn  : addr = Rn; Rn = (Rn - Nn) & 0xFFFF
+ *   mode 1  (Rn)+Nn  : addr = Rn; Rn = (Rn + Nn) & 0xFFFF
+ *   mode 2  (Rn)-    : addr = Rn; Rn = (Rn - 1) & 0xFFFF
+ *   mode 3  (Rn)+    : addr = Rn; Rn = (Rn + 1) & 0xFFFF
+ *   mode 4  (Rn)     : addr = Rn; no update
+ *   mode 5  (Rn+Nn)  : addr = (Rn+Nn)&0xFFFF; Rn unchanged; cyc+=2
+ *   mode 6  aa       : addr = pram[pc+1]; cur_inst_len++; cyc+=2
+ *                      (SLOW PATH ONLY in this emitter)
+ *   mode 7  -(Rn)    : addr = (Rn-1)&0xFFFF; Rn updated; cyc+=2
  *
  * When `want_retour` is true, the retour flag (1 == immediate
- * literal returned in out_addr_reg instead of an address) is written
- * to [SP, #OFF_SP_SCRATCH1] so the caller can branch on it.
+ * literal returned in out_addr_reg instead of an address) is
+ * written to [SP, #OFF_SP_SCRATCH1] so the caller can branch on
+ * it.
  *
  * out_addr_reg MUST NOT be 0, 1, 2, or 3 — those are used as
  * temporaries inside this emitter.
@@ -1242,20 +1270,23 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
     uint32_t mode   = (ea_mode >> 3) & 7;
     uint32_t numreg = ea_mode & 7;
 
-    if (mode >= 5) {
-        /* Modes 5 (Rn+Nn), 6 (aa / 24-bit immediate, bumps
-         * cur_inst_len + instr_cycle), and 7 (-(Rn)) always go
-         * through the full helper: they either have cycle/len
-         * side effects or are infrequent enough that inlining is
-         * not worth the code growth. */
+    if (mode == 6) {
+        /* Mode 6 (aa / 24-bit immediate) still goes through the
+         * slow helper because it must read pram[pc+1] at run time
+         * — the translator does not currently thread pc into this
+         * emitter. Emit_cf_bittest_generic bakes pram[pc+1] at
+         * translate time for its own use but calls this emitter
+         * only in the EA path where mode 6 is rare. If this
+         * becomes a hot spot, a separate emit_calc_ea_inline_pc
+         * variant can bake the immediate. */
         emit_calc_ea_slow_call(e, ea_mode, out_addr_reg, want_retour);
         return;
     }
 
+    /* Mode 4 is a pure read (no Rn update) — skip the Mn check.
+     * Every other mode needs a linear-Mn guard that falls back to
+     * the slow helper on modulo / reverse-carry Mn. */
     uint32_t *to_slow = NULL;
-
-    /* Modes 0-3 mutate Rn and thus require linear Mn == 0xFFFF.
-     * Mode 4 is a pure read — skip the Mn check. */
     if (mode != 4) {
         emit_ldr_w_imm(e, /*rd=*/2, /*rn=*/19, OFF_M(numreg));
         emit_mov_imm32(e, /*rd=*/1, 0xFFFFu);
@@ -1264,8 +1295,11 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
         emit_bcond(e, ARM_COND_NE, 0);  /* patched below */
     }
 
-    /* Fast path: load Rn into out_addr_reg, compute Rn' per mode. */
-    emit_ldr_w_imm(e, out_addr_reg, /*rn=*/19, OFF_R(numreg));
+    /* Fast path: load Rn into out_addr_reg (modes 0-4, 7) or
+     * compute (Rn+Nn) into it (mode 5). */
+    if (mode != 5) {
+        emit_ldr_w_imm(e, out_addr_reg, /*rn=*/19, OFF_R(numreg));
+    }
 
     switch (mode) {
     case 0: /* (Rn)-Nn */
@@ -1291,6 +1325,34 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
         emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
         break;
     case 4: /* (Rn) — no update */
+        break;
+    case 5: /* (Rn+Nn) — address = (Rn+Nn)&0xFFFF, Rn unchanged,
+             * +2 cycles. Interp's emu_calc_ea does an update_rn +
+             * restore dance; in linear mode the net effect on Rn
+             * is zero, so we just compute the masked sum directly. */
+        emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/19, OFF_R(numreg));
+        emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/19, OFF_N(numreg));
+        emit_add_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_ubfx_w(e, /*rd=*/out_addr_reg, /*rn=*/0, 0, 16);
+        /* instr_cycle += 2. */
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, 2);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+        break;
+    case 7: /* -(Rn) — Rn = (Rn-1)&0xFFFF, address = new Rn,
+             * +2 cycles. */
+        emit_sub_w_imm(e, /*rd=*/0, /*rn=*/out_addr_reg, 1);
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 16);
+        emit_str_w_imm(e, /*rs=*/0, /*rn=*/19, OFF_R(numreg));
+        /* out_addr_reg = updated Rn. */
+        emit_mov_w_reg(e, /*rd=*/out_addr_reg, /*rn=*/0);
+        /* instr_cycle += 2. */
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, 2);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+        break;
+    default:
+        /* Unreachable (mode 6 handled above; others are 0-5, 7). */
         break;
     }
 
@@ -2281,6 +2343,368 @@ static void emit_alu_abs(ArmEmit *e, const AluVariant *v)
     emit_ccr_e_u_n_z(e, /*xaccu=*/12);
 }
 
+/* ============================================================== *
+ * ALU shifts (round 3) — inline replacements for
+ *   emu_asl_a / emu_asl_b  (56-bit shift left by 1)
+ *   emu_asr_a / emu_asr_b  (56-bit LOGICAL shift right by 1, despite
+ *                           the "ASR" mnemonic — see dsp_asr56 in
+ *                           dsp_cpu.c which uses a plain uint64_t
+ *                           shift with zero fill, not sign-extend)
+ *   emu_lsl_a / emu_lsl_b  (A1-only shift left by 1, leaves A0/A2)
+ *   emu_lsr_a / emu_lsr_b  (A1-only shift right by 1)
+ *
+ * The 56-bit ASL/ASR variants round-trip through emit_load_accu56
+ * / emit_store_accu56 and match the interpreter's dsp_asl56 /
+ * dsp_asr56 flag behaviour bit-for-bit. The A1-only LSL/LSR ops
+ * are much simpler: just read the 24-bit A1/B1 register, shift,
+ * and write back; they do NOT touch A0 / A2 and they update a
+ * different slice of SR (C, N, Z; clears V; does not invoke the
+ * E/U shim).
+ * ============================================================== */
+
+/*
+ * ASL (shift-left 56-bit by 1). SR updates mirror dsp_asl56(_, 1):
+ *   carry_bit = orig[55]
+ *   L_bit     = orig[55]        (for shift=1, identical to carry)
+ *   V_bit     = orig[55] XOR orig[54]
+ * Then clear C|V in SR and OR in the new C|V|L.
+ */
+static void emit_alu_asl(ArmEmit *e, const AluVariant *v)
+{
+    /* Load original accu (sign-extended into x13). */
+    emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8);
+
+    /* carry = orig[55]. */
+    emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 55, 1);
+
+    /* V = orig[55] XOR orig[54]. */
+    emit_ubfx_x(e, /*rd=*/6, /*rn=*/13, 54, 1);
+    emit_eor_w_reg(e, /*rd=*/6, /*rn=*/5, /*rm=*/6);
+
+    /* Shift left by 1; re-sign-extend from bit 55 to maintain the
+     * "sign-extended 64-bit" convention of subsequent E/U/N/Z
+     * consumers and the emit_store_accu56 unpacker. */
+    emit_lsl_x_imm(e, /*rd=*/12, /*rn=*/13, 1);
+    emit_sbfx_x(e,   /*rd=*/12, /*rn=*/12, 0, 56);
+
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+
+    /* Build newsr = (carry << C) | (V << V) | (L << L). For shift=1
+     * the L bit is identical to the carry, so we can reuse w5. */
+    emit_lsl_w_imm(e, /*rd=*/6, /*rn=*/6, DSP_SR_V);      /* w6 = V << V_bit */
+    emit_lsl_w_imm(e, /*rd=*/7, /*rn=*/5, DSP_SR_L);      /* w7 = L << L_bit */
+    emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);      /* w6 |= w7 */
+    emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/5);      /* w6 |= C (already at bit 0) */
+
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/6);
+
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * ASR (56-bit LOGICAL shift right by 1 — the "ASR" opcode in the
+ * DSP56k ISA as actually implemented by dsp_asr56). SR updates:
+ *   carry_bit = orig[0]
+ *   Clear V, set C. L is NOT touched by dsp_asr56; interp only
+ *   masks C and V before OR'ing newsr, so V stays cleared and L
+ *   stays whatever it was.
+ */
+static void emit_alu_asr(ArmEmit *e, const AluVariant *v)
+{
+    emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8);
+
+    /* carry = orig[0]. Extract BEFORE the shift so we don't care
+     * whether the upper bits are sign-extended or masked. */
+    emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 0, 1);
+
+    /* Mask to 56 bits BEFORE shifting right, otherwise the sign-
+     * extension in bits 63:56 leaks into bit 55 of the result
+     * (interp's dsp_asr56 uses a bare uint64_t shift which zero-
+     * fills from the top — we must match that logical semantics). */
+    emit_ubfx_x(e, /*rd=*/12, /*rn=*/13, 0, 56);
+    emit_lsr_x_imm(e, /*rd=*/12, /*rn=*/12, 1);
+
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+
+    /* newsr = (carry << C). V is cleared; L is untouched by dsp_asr56
+     * (V-clear is handled by emit_sr_clear_vc_or_newsr). Since C is
+     * bit 0, w5 is already at the right position. */
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * LSL (A1-only shift left by 1). Matches emu_lsl_a/b in
+ * dsp_emu.c.inc:1661-1685. Only A1 (or B1) is touched; A0/A2 are
+ * untouched; SR: clears C|N|Z|V, then sets C=orig[23], N=new[23],
+ * Z=(new==0). No E/U shim invocation.
+ */
+static void emit_alu_lsl(ArmEmit *e, const AluVariant *v)
+{
+    unsigned off_a1 = accu_off(v->dst_ab, 1);
+
+    /* w5 = A1 (24 bits; upper 8 bits are don't-care after the
+     * mask below). */
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* carry = orig[23]. */
+    emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 23, 1);
+
+    /* A1 = (A1 << 1) & 0xFFFFFF. */
+    emit_lsl_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* N = new[23]. */
+    emit_ubfx_w(e, /*rd=*/7, /*rn=*/5, 23, 1);
+
+    /* Z = (new == 0). Use CMP + CSET. */
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
+
+    /* SR update: clear C|N|Z|V, set C=w6, N=w7, Z=w8. */
+    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/10,
+                   (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/10);
+
+    /* Splice C/N/Z bits back in via BFI. (C at bit 0, N at bit 3,
+     * Z at bit 2.) */
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/7, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
+
+    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * Long-immediate ALU emitters (round 3 / #3).
+ *
+ * add_long / sub_long / cmp_long: the 2-word ALU forms with a
+ *   24-bit immediate that the interpreter reads from pram[pc+1]
+ *   at run time. The `xxxx` is baked at translate time here so
+ *   the emitted code neither calls `read_memory_p` nor BLRs the
+ *   `emu_<op>_long` handler.
+ *
+ * and_long / or_long: same 2-word form but with A1-only logical
+ *   ops. SR updates: clear N|Z|V, set N = new[23], Z = (new==0).
+ *
+ * All five variants mirror `dsp->cur_inst_len++` (from 1 → 2)
+ * via emit_cf_inc_cur_inst_len so the post-exec PC update
+ * advances past both words of the instruction. Cycle count is
+ * unchanged (the interpreter handlers don't adjust instr_cycle,
+ * so the preset 2 persists).
+ *
+ * dst_ab is decoded from inst[3] (0 = A, 1 = B), same as
+ * emu_add_long / emu_sub_long / emu_cmp_long / emu_and_long /
+ * emu_or_long in dsp_emu.c.inc.
+ */
+
+/* Materialize a sign-extended 56-bit source from a 24-bit immediate
+ * into an X-register, matching how emu_add_x / emu_sub_x / emu_cmp_long
+ * build `source[]`:
+ *   source[0] = (x & (1<<23)) ? 0xff : 0x00   (bits 55:48)
+ *   source[1] = x                              (bits 47:24)
+ *   source[2] = 0                              (bits 23:0)
+ * Equivalent to: ((int64_t)sign_extend(x,24)) << 24. Baked at
+ * translate time; the emitter's MOVZ/MOVK chain materialises the
+ * final 64-bit value. */
+static int64_t li_build_src64(uint32_t imm24)
+{
+    /* Sign-extend the 24-bit immediate to 32 then to 64, then shift. */
+    int32_t signed24 = (int32_t)(imm24 << 8) >> 8;
+    return ((int64_t)signed24) << 24;
+}
+
+/*
+ * ADD / SUB / CMP with a 24-bit baked immediate.
+ *   kind_li = DSP_JIT_LI_ADD / SUB / CMP
+ *   dst_ab  = destination accumulator (0 = A, 1 = B)
+ *   imm24   = baked pram[pc+1] low 24 bits
+ *
+ * Register usage matches emit_alu_arith: x10 = orig accu,
+ * x11 = src, x12 = result, w5..w8 scratch for flags.
+ */
+static void emit_alu_long_imm_arith(ArmEmit *e, int kind_li,
+                                    int dst_ab, uint32_t imm24)
+{
+    bool is_sub = (kind_li == DSP_JIT_LI_SUB || kind_li == DSP_JIT_LI_CMP);
+    bool is_cmp = (kind_li == DSP_JIT_LI_CMP);
+
+    /* Load orig dest accu into x10. */
+    emit_load_accu56(e, /*xaccu=*/10, /*which_ab=*/dst_ab, /*xtmp=*/8);
+
+    /* Materialise baked source into x11 (56-bit sign-extended). */
+    emit_mov_imm64(e, /*rd=*/11, (uint64_t)li_build_src64(imm24));
+
+    /* x12 = x10 op x11. */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    } else {
+        emit_add_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    }
+    /* Re-sign-extend to 56 bits (in case we overflowed into bit 56). */
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    /* Compute C/V/L flags into w5 (packed as newsr). */
+    emit_addsub_flags(e, /*xorig=*/10, /*xsrc=*/11, /*xres=*/12,
+                      /*is_sub=*/is_sub);
+
+    if (!is_cmp) {
+        emit_store_accu56(e, /*xaccu=*/12, /*which_ab=*/dst_ab, /*xtmp=*/8);
+    }
+
+    /* Clear V|C in SR and OR in the new C/V/L. */
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+
+    /* E/U/N/Z update via the shared shim. */
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * AND / OR with a 24-bit baked immediate (A1-only operation).
+ *   kind_li = DSP_JIT_LI_AND / OR
+ *   dst_ab  = destination accumulator (0 = A, 1 = B)
+ *   imm24   = baked pram[pc+1] low 24 bits
+ *
+ * Mirrors emu_and_x / emu_or_long:
+ *   A1 |= imm24  (or &= for AND)
+ *   SR clear N|Z|V; set N = new A1[23]; set Z = (A1 == 0).
+ * Does NOT touch A0 / A2.
+ */
+static void emit_alu_long_imm_logical(ArmEmit *e, int kind_li,
+                                      int dst_ab, uint32_t imm24)
+{
+    unsigned off_a1 = accu_off(dst_ab, 1);
+
+    /* w5 = A1 (24 bits — upper 8 are don't-care because we mask
+     * below). */
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* w6 = imm24 (materialised only once). For AND/OR the upper 8
+     * bits of w6 don't matter because we mask the result. */
+    emit_mov_imm32(e, /*rd=*/6, imm24);
+
+    if (kind_li == DSP_JIT_LI_AND) {
+        emit_and_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
+    } else {
+        /* OR */
+        emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
+    }
+
+    /* Mask to 24 bits and store back. */
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* Flags: N = bit 23 of new A1; Z = (new A1 == 0). */
+    emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 23, 1);           /* w6 = N */
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/7, ARM_COND_EQ);               /* w7 = Z */
+
+    /* Clear N|Z|V; OR in new N/Z. */
+    emit_ldrh_any(e, /*rd=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/9,
+                   (uint32_t)~((1u << DSP_SR_N) | (1u << DSP_SR_Z) |
+                               (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/8, /*rn=*/8, /*rm=*/9);
+    emit_bfi_x(e, /*rd=*/8, /*rn=*/6, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/8, /*rn=*/7, DSP_SR_Z, 1);
+    emit_strh_any(e, /*rs=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * Dispatcher for long-immediate ALU ops. Classifies the handler;
+ * if we have an inline emitter, materialise the baked imm from
+ * pram[pc+1] and emit. Returns true if handled.
+ *
+ * Called from emit_instruction BEFORE falling through to the BLR
+ * path, in parallel with emit_cf_call. See the write-up in
+ * emit_instruction for how this composes.
+ */
+static bool emit_long_imm_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                               uint32_t inst, emu_func_t fn)
+{
+    int kind = dsp_jit_helper_classify_long_imm((void *)fn);
+    if (kind == DSP_JIT_LI_NONE) {
+        return false;
+    }
+
+    int dst_ab = (inst >> 3) & 1;
+    uint32_t imm24 = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+
+    switch (kind) {
+    case DSP_JIT_LI_ADD:
+    case DSP_JIT_LI_SUB:
+    case DSP_JIT_LI_CMP:
+        emit_alu_long_imm_arith(e, kind, dst_ab, imm24);
+        break;
+    case DSP_JIT_LI_AND:
+    case DSP_JIT_LI_OR:
+        emit_alu_long_imm_logical(e, kind, dst_ab, imm24);
+        break;
+    default:
+        return false;
+    }
+
+    /*
+     * All long-imm handlers are 2-word: cur_inst_len goes from 1
+     * (preset by emit_instruction step 2) to 2 (the interp does
+     * `dsp->cur_inst_len++`). Increment inline rather than
+     * reusing emit_cf_inc_cur_inst_len — the CF helper is
+     * defined later in the file and this emitter lives near the
+     * ALU section, so inlining avoids a forward declaration.
+     */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, 1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    return true;
+}
+
+/*
+ * LSR (A1-only shift right by 1). Matches emu_lsr_a/b in
+ * dsp_emu.c.inc:1698-1716. SR: clears C|N|Z|V, sets C=orig[0],
+ * Z=(new==0). N stays cleared (interp does NOT set N). No E/U
+ * shim.
+ */
+static void emit_alu_lsr(ArmEmit *e, const AluVariant *v)
+{
+    unsigned off_a1 = accu_off(v->dst_ab, 1);
+
+    /* w5 = A1. */
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* carry = orig[0]. */
+    emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 0, 1);
+
+    /* A1 = A1 >> 1. Logical — same as >>= 1 in interp since the
+     * value held in dsp->registers[] is a 24-bit value stored in
+     * a uint32_t, no sign bit at 31. */
+    emit_lsr_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* Z = (new == 0). */
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
+
+    /* SR: clear C|N|Z|V, set C and Z (N stays cleared). */
+    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/10,
+                   (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/10);
+
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
+
+    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
 /*
  * Inline MPY / MPYR / MAC / MACR kernel.
  *
@@ -2527,9 +2951,21 @@ static bool emit_alu_inline(ArmEmit *e, const AluVariant *v)
     case ALU_KIND_MACR:
         emit_alu_mac(e, v);
         return true;
+    case ALU_KIND_ASL:
+        emit_alu_asl(e, v);
+        return true;
+    case ALU_KIND_ASR:
+        emit_alu_asr(e, v);
+        return true;
+    case ALU_KIND_LSL:
+        emit_alu_lsl(e, v);
+        return true;
+    case ALU_KIND_LSR:
+        emit_alu_lsr(e, v);
+        return true;
     default:
-        /* ASL/ASR/LSL/LSR, plus FALLBACK and MOVE fall through here.
-         * Caller BLRs the handler (or skips entirely for MOVE). */
+        /* FALLBACK and MOVE fall through here. Caller BLRs the
+         * handler (or skips entirely for MOVE). */
         return false;
     }
 }
@@ -4411,10 +4847,28 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
 
-    /* 4. Call the handler — inline for the control-flow ops we
-     * support (Phase 5), otherwise BLR the original C handler. */
-    bool cf_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
-    if (!cf_inlined) {
+    /*
+     * 4. Call the handler. Two inline paths are tried in order,
+     * each bypassing the BLR to the C handler:
+     *   (a) emit_cf_call: control-flow / loop ops.
+     *   (b) emit_long_imm_call: ALU long-immediate ops
+     *       (add_long / sub_long / cmp_long / and_long / or_long),
+     *       where the 24-bit immediate is baked from pram[pc+1].
+     * If neither path handles the op we fall through to the
+     * generic BLR and bump the CF fallback counter. (Long-imm
+     * fallbacks lump in with CF for the stats — they're both
+     * "non-parmove handler not yet inlined". Splitting into a
+     * separate counter is a cheap follow-up if ever needed.)
+     */
+    bool handler_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
+    if (!handler_inlined) {
+        handler_inlined = emit_long_imm_call(e, dsp, pc, inst, emu_func);
+        if (handler_inlined) {
+            /* Long-imm ops are ALU — credit the inlined count. */
+            g_alu_inlined_count++;
+        }
+    }
+    if (!handler_inlined) {
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);              /* x0 = dsp */
         emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
         emit_blr(e, /*rn=*/1);
@@ -4426,23 +4880,23 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     /*
      * Write-set bookkeeping for the differential validator:
      *
-     *  - Inlined CF / loop ops (Phase 5a / 6) touch only pc /
+     *  - Inlined CF / loop / long-imm ALU ops touch only pc /
      *    cur_inst_len / instr_cycle / SR / LA / LC / LCSAVE /
-     *    pc_on_rep / loop_rep / stack / interrupt_state — every
-     *    one of these is in a dsp_state_diff range that is
-     *    ALWAYS compared regardless of the WS bitmask, so the
-     *    gated bits (xram / yram / pram / mixbuffer / periph)
-     *    can stay zero. This drops the validator's per-block
-     *    byte-compare from ~40 KB to ~2 KB for CF-dominated
-     *    blocks, matching what parmove stubs already achieve
-     *    via parmove_write_set().
+     *    pc_on_rep / loop_rep / stack / interrupt_state / the
+     *    A/B accumulator registers — every one of these is in a
+     *    dsp_state_diff range that is ALWAYS compared regardless
+     *    of the WS bitmask, so the gated bits (xram / yram /
+     *    pram / mixbuffer / periph) can stay zero. This drops
+     *    the validator's per-block byte-compare from ~40 KB to
+     *    ~2 KB for CF-dominated blocks, matching what parmove
+     *    stubs already achieve via parmove_write_set().
      *
      *  - BLR-fallback paths still need WS_ALL because generic
      *    emu_* handlers (movep / movem / mem-write bit-tests
      *    for handlers we haven't inlined yet) can touch any
      *    region of dsp_core_t.
      */
-    if (out_write_set && !cf_inlined) {
+    if (out_write_set && !handler_inlined) {
         *out_write_set |= DSP_JIT_WS_ALL;
     }
 

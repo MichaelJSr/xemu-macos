@@ -1686,4 +1686,15 @@ int dsp_jit_helper_classify_cf(void *fn)
     return DSP_JIT_CF_NONE;
 }
 
+int dsp_jit_helper_classify_long_imm(void *fn)
+{
+    emu_func_t f = (emu_func_t)fn;
+    if (f == emu_add_long) return DSP_JIT_LI_ADD;
+    if (f == emu_sub_long) return DSP_JIT_LI_SUB;
+    if (f == emu_cmp_long) return DSP_JIT_LI_CMP;
+    if (f == emu_and_long) return DSP_JIT_LI_AND;
+    if (f == emu_or_long)  return DSP_JIT_LI_OR;
+    return DSP_JIT_LI_NONE;
+}
+
 #endif  /* DSP_JIT_SUPPORTED */
