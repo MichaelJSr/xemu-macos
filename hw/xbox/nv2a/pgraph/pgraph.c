@@ -3199,7 +3199,14 @@ void pgraph_process_pending(NV2AState *d)
 
         if (pg->renderer) {
             qemu_event_reset(&pg->flush_complete);
-            pg->flush_pending = true;
+            /*
+             * flush_pending is read lock-free by the renderer process_pending
+             * handlers ({vk,gl}/renderer.c). Every other writer uses
+             * qatomic_set; a plain store here is reorderable past the
+             * subsequent process_pending() call on ARM64's weak memory
+             * model. Match the contract.
+             */
+            qatomic_set(&pg->flush_pending, true);
 
             qemu_mutex_lock(&d->pfifo.lock);
             qemu_mutex_unlock(&d->pgraph.lock);
