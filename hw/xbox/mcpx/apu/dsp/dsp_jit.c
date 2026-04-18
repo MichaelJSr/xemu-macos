@@ -1110,6 +1110,161 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
  * --------------------------------------------------------------- */
 
 /*
+ * emu_pm_0 — 0000_100d_00mm_mrrr: `S,x:ea  x0,D` or
+ *           `S,y:ea  y0,D` (two simultaneous moves per parmove).
+ *
+ * memspace = bit 15, numreg = bit 16 (0=A, 1=B).
+ * ea_mode  = bits 13:8.
+ *
+ * Pre-ALU captures: accu (A or B) and X0 or Y0.
+ * Post-ALU writes:  memory[addr] = accu, A/B = x0y0 (with sign-ext).
+ *
+ * Callee-saved register allocation across the ALU BLR:
+ *   x22 = addr (16-bit xy_addr)
+ *   x23 = save_accu (limited 24-bit A/B value)
+ *   x24 = save_xy0  (24-bit X0 or Y0 raw register value)
+ */
+static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    uint32_t memspace = (inst >> 15) & 1;
+    uint32_t numreg   = (inst >> 16) & 1;   /* 0 = A, 1 = B */
+    uint32_t value6   = (inst >> 8) & 0x3f;
+    int dsp_ab = numreg ? DSP_REG_B : DSP_REG_A;
+    int xy0_reg = (memspace == 0) ? DSP_REG_X0 : DSP_REG_Y0;
+
+    /* addr into x22 (retour irrelevant for pm_0; it never uses imm form) */
+    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/false);
+
+    /* save_accu = A/B (limited, through pm_read_accu24) */
+    emit_pm_read_reg(e, dsp_ab, /*value_reg=*/23);
+
+    /* save_xy0 = X0 or Y0 (direct register load) */
+    emit_ldr_w_any(e, /*rd=*/24, /*rn=*/19, SCRATCH, OFF_REG(xy0_reg));
+
+    if (alu != NULL) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+        emit_blr(e, /*rn=*/1);
+    }
+
+    /* memory[addr] = save_accu */
+    emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
+
+    /* A/B accu <- save_xy0 (with sign-ext to A2/B2) */
+    emit_pm_write_reg(e, dsp_ab, /*value_reg=*/24);
+}
+
+/*
+ * emu_pm_1 — 0001_ffdf_w1mm_mrrr: two parmoves per instruction,
+ * x:ea or y:ea on one side plus S2/D2 register-register on the
+ * other. Direction for move 1 given by bit 15; memspace by bit 14.
+ *
+ * numreg1 mapping depends on memspace (compile-time):
+ *   memspace=0 (X:): (inst>>18)&3 → 0/1/2/3 = X0/X1/A/B
+ *   memspace=1 (Y:): (inst>>16)&3 → 0/1/2/3 = Y0/Y1/A/B
+ *
+ * numreg2 (S2 source, always A or B):
+ *   memspace=0: DSP_REG_A + ((inst>>17)&1)
+ *   memspace=1: DSP_REG_A + ((inst>>19)&1)
+ *
+ * numreg2 (D2 dest):
+ *   memspace=0: DSP_REG_Y0 + ((inst>>16)&1)
+ *   memspace=1: DSP_REG_X0 + ((inst>>18)&1)
+ *
+ * Register allocation:
+ *   x22 = xy_addr
+ *   x23 = save_1 (reg or mem content)
+ *   x24 = save_2 (always from A/B via pm_read_accu24)
+ */
+static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
+{
+    uint32_t value6   = (inst >> 8) & 0x3f;
+    uint32_t memspace = (inst >> 14) & 1;
+    bool     write_d  = (inst & (1u << 15)) != 0;
+
+    int numreg1;
+    if (memspace) {
+        switch ((inst >> 16) & 3) {
+        case 0: numreg1 = DSP_REG_Y0; break;
+        case 1: numreg1 = DSP_REG_Y1; break;
+        case 2: numreg1 = DSP_REG_A;  break;
+        default: numreg1 = DSP_REG_B; break;
+        }
+    } else {
+        switch ((inst >> 18) & 3) {
+        case 0: numreg1 = DSP_REG_X0; break;
+        case 1: numreg1 = DSP_REG_X1; break;
+        case 2: numreg1 = DSP_REG_A;  break;
+        default: numreg1 = DSP_REG_B; break;
+        }
+    }
+
+    int s2_numreg = DSP_REG_A + (memspace ? ((inst >> 19) & 1)
+                                          : ((inst >> 17) & 1));
+    int d2_numreg = memspace ? (DSP_REG_X0 + ((inst >> 18) & 1))
+                             : (DSP_REG_Y0 + ((inst >> 16) & 1));
+
+    /* xy_addr into x22 with retour support (for the immediate-in-D1 form). */
+    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/true);
+
+    if (write_d) {
+        /* save_1 = (retour ? xy_addr : memory[xy_addr]) */
+        emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+        uint32_t *to_mem = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);
+        emit_mov_w_reg(e, /*rd=*/23, /*rn=*/22);
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);
+        uint32_t *mem_label = e->buf;
+        patch_branch(to_mem, (int32_t)((uint8_t *)mem_label -
+                                       (uint8_t *)to_mem));
+        emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+    } else {
+        emit_pm_read_reg(e, numreg1, /*value_reg=*/23);
+    }
+
+    /* save_2 = A/B via pm_read_accu24 */
+    emit_pm_read_reg(e, s2_numreg, /*value_reg=*/24);
+
+    if (alu != NULL) {
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
+        emit_blr(e, /*rn=*/1);
+    }
+
+    /* Write D1 side. */
+    if (write_d) {
+        /* Matches the interpreter's A/B-split PLUS trailing
+         * `dsp->registers[numreg1] = save_1` for bit-exact mirror. */
+        if (numreg1 == DSP_REG_A || numreg1 == DSP_REG_B) {
+            emit_pm_write_reg(e, numreg1, /*value_reg=*/23);
+        }
+        /* Trailing unconditional registers[numreg1] = save_1. Any
+         * masking is also OK (for A/B this re-writes the SAME 24 bits
+         * that were just written to A1/B1; for other regs it's the
+         * masked store per dsp_jit_reg_bits[]). */
+        int bits = dsp_jit_reg_bits[numreg1 & 63];
+        if (bits > 0) {
+            if (bits == 24) {
+                emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
+            } else {
+                emit_ubfx_w(e, /*rd=*/0, /*rn=*/23, 0, bits);
+                emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
+            }
+        }
+    } else {
+        emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
+    }
+
+    /* S2 -> D2: registers[d2_numreg] = save_2 (no mask needed; save_2
+     * is already 24-bit and D2 is always X0/X1/Y0/Y1, all 24-bit). */
+    emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(d2_numreg));
+}
+
+/*
  * emu_pm_3  — 001d_dddd iiii_iiii #xx,R (literal into register).
  *
  * dstreg and the 8-bit literal are compile-time constants.
@@ -1420,6 +1575,14 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     emu_func_t effective_alu = dsp_jit_helper_alu_is_move(alu) ? NULL : alu;
 
     switch (select) {
+    case 0:
+        /* 0000_100d 00mm_mrrr  S,x:ea  x0,D / S,y:ea  y0,D */
+        emit_parmove_pm0(e, inst, effective_alu);
+        break;
+    case 1:
+        /* 0001_ffdf w1mm_mrrr  — x:ea/y:ea + reg-reg dual move */
+        emit_parmove_pm1(e, inst, effective_alu);
+        break;
     case 3:
         /* 001d_dddd iiii_iiii #xx,R */
         emit_parmove_pm3(e, inst, effective_alu);
@@ -1431,7 +1594,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         emit_parmove_pm5(e, inst, effective_alu);
         break;
     default:
-        /* select 0/1/2/4/8-15 not yet implemented. */
+        /* select 2/4/8-15 not yet implemented. */
         return false;
     }
 
