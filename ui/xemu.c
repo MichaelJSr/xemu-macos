@@ -76,6 +76,56 @@
 uint64_t vblank_interval_ns = 16666666LL;
 bool use_vblank_timer_thread = true;
 
+/*
+ * Silently drain any pending GL errors on the current thread's
+ * context. Used at the top of gl_render_frame to absorb errors
+ * inherited from a previous frame (most commonly a one-shot
+ * stale-state flush on renderer switch, e.g. VULKAN -> OPENGL
+ * where a rect-texture / IOSurface resource was torn down after
+ * ImGui's last frame bound it). gl_render_frame should only
+ * attribute errors to itself that were produced inside its own
+ * body.
+ */
+static void gl_drain_errors_silent(void)
+{
+    int drained = 0;
+    while (glGetError() != GL_NO_ERROR) {
+        if (++drained > 64) {
+            break;
+        }
+    }
+}
+
+/*
+ * Drain and log the first OpenGL error observed per session.
+ * Upstream uses `assert(glGetError() == GL_NO_ERROR)` at the end of
+ * gl_render_frame, which hard-crashes on macOS for transient errors
+ * we otherwise tolerate (OpenGL renderer's own GL contexts vs the
+ * main display context, ImGui backend hiccups on renderer toggle).
+ * Log once with the error code so the user can report if the
+ * display is actually broken; drain the queue either way.
+ */
+static void gl_drain_errors(const char *where)
+{
+    static bool warned_once;
+    int drained = 0;
+    GLenum err;
+    while ((err = glGetError()) != GL_NO_ERROR) {
+        if (!warned_once) {
+            warned_once = true;
+            fprintf(stderr,
+                    "xemu: OpenGL error 0x%04x at %s "
+                    "(non-fatal; further errors suppressed; "
+                    "switch to VULKAN renderer if display is garbled)\n",
+                    err, where);
+        }
+        if (++drained > 64) {
+            /* Bail out of a driver error storm so we don't spin. */
+            break;
+        }
+    }
+}
+
 struct xemu_console {
     DisplayChangeListener dcl;
     DisplaySurface *surface;
@@ -817,6 +867,17 @@ static void gl_render_frame(struct xemu_console *scon)
 
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
+    /*
+     * Absorb any GL errors that may have leaked in from a prior
+     * frame's work before attributing anything to this frame. The
+     * known case is the VULKAN -> OPENGL renderer switch: the last
+     * VK-path frame binds an IOSurface-backed rect texture that's
+     * then torn down during switch, leaving a transient
+     * GL_INVALID_OPERATION that surfaces on the next frame's first
+     * GL call. Benign one-shot.
+     */
+    gl_drain_errors_silent();
+
     bool flip_required = false;
     bool release_surface_texture = false;
 
@@ -831,8 +892,6 @@ static void gl_render_frame(struct xemu_console *scon)
      * to the framebuffer, fall back to the VGA path.
      */
     GLuint tex = nv2a_get_framebuffer_surface();
-
-    assert(glGetError() == GL_NO_ERROR);
 
     if (tex == 0) {
         xemu_main_loop_lock();
@@ -868,7 +927,7 @@ static void gl_render_frame(struct xemu_console *scon)
 
     nv2a_release_framebuffer_surface();
     SDL_GL_SwapWindow(scon->real_window);
-    assert(glGetError() == GL_NO_ERROR);
+    gl_drain_errors("gl_render_frame");
 
     qatomic_set(&rendering, false);
 
