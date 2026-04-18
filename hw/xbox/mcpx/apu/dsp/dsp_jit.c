@@ -1986,7 +1986,20 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     int num_ops = 0;
 
     while (num_ops < DSP_JIT_MAX_OPS_PER_BLOCK && pc < DSP_PRAM_SIZE) {
-        uint32_t inst = dsp->pram[pc] & 0xffffff;
+        /*
+         * Match the interpreter's read_memory_p behaviour: use the
+         * full 32-bit pram word. Upper 8 bits are normally zero
+         * (bootstrap masks them for the first 0x800 words), but if
+         * a later DMA or write path leaves them non-zero, the
+         * interpreter's dispatch keys on the full value. Masking
+         * down to 24 bits here would make the JIT pick the
+         * non-parmove path when the interpreter picks parmove
+         * (for e.g. inst = 0x01000067: unmasked >= 0x100000 so
+         * interp -> opcodes_parmove[0], masked = 0x000067 < 0x100000
+         * so JIT -> non-parmove emu_*), and the resulting divergent
+         * state would only show up after the first wrong op.
+         */
+        uint32_t inst = dsp->pram[pc];
         bool keep_going;
 
         if (inst >= 0x100000) {
@@ -2279,10 +2292,61 @@ static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
     /* 5. Compare. */
     size_t diff_off = dsp_state_diff(dsp, s->post_jit);
     if (diff_off != (size_t)-1) {
+        /* Describe the diff offset: which field of dsp_core_t. */
+        const char *field = "?";
+        uint32_t field_idx = 0;
+        uint32_t interp_word = 0;
+        uint32_t jit_word = 0;
+        if (diff_off >= offsetof(dsp_core_t, registers) &&
+            diff_off <  offsetof(dsp_core_t, registers) + sizeof(((dsp_core_t*)0)->registers)) {
+            field = "registers";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, registers)) / 4);
+            interp_word = dsp->registers[field_idx];
+            jit_word    = s->post_jit->registers[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, stack) &&
+                   diff_off <  offsetof(dsp_core_t, stack) + sizeof(((dsp_core_t*)0)->stack)) {
+            field = "stack";
+            uint32_t off_in = (uint32_t)(diff_off - offsetof(dsp_core_t, stack));
+            field_idx = off_in / 4;
+            interp_word = ((uint32_t*)dsp->stack)[field_idx];
+            jit_word    = ((uint32_t*)s->post_jit->stack)[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, xram) &&
+                   diff_off <  offsetof(dsp_core_t, xram) + sizeof(((dsp_core_t*)0)->xram)) {
+            field = "xram";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, xram)) / 4);
+            interp_word = dsp->xram[field_idx];
+            jit_word    = s->post_jit->xram[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, yram) &&
+                   diff_off <  offsetof(dsp_core_t, yram) + sizeof(((dsp_core_t*)0)->yram)) {
+            field = "yram";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, yram)) / 4);
+            interp_word = dsp->yram[field_idx];
+            jit_word    = s->post_jit->yram[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, pram) &&
+                   diff_off <  offsetof(dsp_core_t, pram) + sizeof(((dsp_core_t*)0)->pram)) {
+            field = "pram";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, pram)) / 4);
+            interp_word = dsp->pram[field_idx];
+            jit_word    = s->post_jit->pram[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, periph) &&
+                   diff_off <  offsetof(dsp_core_t, periph) + sizeof(((dsp_core_t*)0)->periph)) {
+            field = "periph";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, periph)) / 4);
+            interp_word = dsp->periph[field_idx];
+            jit_word    = s->post_jit->periph[field_idx];
+        } else if (diff_off >= offsetof(dsp_core_t, mixbuffer) &&
+                   diff_off <  offsetof(dsp_core_t, mixbuffer) + sizeof(((dsp_core_t*)0)->mixbuffer)) {
+            field = "mixbuffer";
+            field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, mixbuffer)) / 4);
+            interp_word = dsp->mixbuffer[field_idx];
+            jit_word    = s->post_jit->mixbuffer[field_idx];
+        }
+
         fprintf(stderr,
                 "xemu: DSP JIT DIFF FAILURE in block pc_start=0x%04x "
                 "(jit_cycles=%u)\n"
-                "  First differing byte at offsetof dsp_core_t = %zu\n"
+                "  First differing byte at offsetof dsp_core_t = %zu "
+                "(%s[%u]: interp=0x%06x jit=0x%06x)\n"
                 "  (pc at entry = 0x%04x)\n"
                 "  INTERP pc=0x%04x sr=0x%06x A2:A1:A0=%02x:%06x:%06x "
                 "B2:B1:B0=%02x:%06x:%06x\n"
@@ -2291,6 +2355,7 @@ static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
                 "  loop_rep interp=%u jit=%u  "
                 "interrupt_counter interp=%u jit=%u\n",
                 b ? b->pc_start : 0xffff, jit_cycles, diff_off,
+                field, field_idx, interp_word, jit_word,
                 s->pre_state->pc,
                 dsp->pc, dsp->registers[DSP_REG_SR],
                 dsp->registers[DSP_REG_A2], dsp->registers[DSP_REG_A1],
@@ -2306,6 +2371,26 @@ static unsigned int dsp_jit_execute_block_diff(dsp_core_t *dsp,
                 s->post_jit->registers[DSP_REG_B0],
                 dsp->loop_rep, s->post_jit->loop_rep,
                 dsp->interrupt_counter, s->post_jit->interrupt_counter);
+
+        /* Dump the DSP instructions in the failing block. */
+        fprintf(stderr, "  pram dump (block):\n");
+        uint32_t pc0 = s->pre_state->pc;
+        uint32_t pc_end = pc0 + 8;   /* up to 8 words */
+        if (pc_end > DSP_PRAM_SIZE) pc_end = DSP_PRAM_SIZE;
+        for (uint32_t p = pc0; p < pc_end; p++) {
+            fprintf(stderr, "    pram[0x%04x] = 0x%08x\n",
+                    p, dsp->pram[p]);
+        }
+
+        /* Dump Rn / Nn / Mn (often implicated in addressing divergences). */
+        fprintf(stderr, "  Rn/Nn/Mn (both interp snapshots are identical): \n");
+        for (int i = 0; i < 8; i++) {
+            fprintf(stderr, "    R%d=%04x N%d=%04x M%d=%04x\n",
+                    i, dsp->registers[DSP_REG_R0 + i] & 0xffff,
+                    i, dsp->registers[DSP_REG_N0 + i] & 0xffff,
+                    i, dsp->registers[DSP_REG_M0 + i] & 0xffff);
+        }
+
         abort();
     }
 
