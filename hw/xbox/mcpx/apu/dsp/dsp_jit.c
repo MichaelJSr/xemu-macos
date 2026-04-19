@@ -1914,6 +1914,12 @@ typedef enum {
     ALU_KIND_ASR,
     ALU_KIND_LSL,
     ALU_KIND_LSR,
+    ALU_KIND_ROL,
+    ALU_KIND_ROR,
+    ALU_KIND_ADDL,
+    ALU_KIND_SUBL,
+    ALU_KIND_ADDR,
+    ALU_KIND_SUBR,
     ALU_KIND_TFR,
     ALU_KIND_MPY,
     ALU_KIND_MPYR,
@@ -2089,8 +2095,32 @@ G_GNUC_UNUSED static void alu_classify_opcode(uint8_t alu_op, AluVariant *out)
     case 0x36: v.kind = ALU_KIND_NEG; v.dst_ab = 0; break;
     case 0x3e: v.kind = ALU_KIND_NEG; v.dst_ab = 1; break;
 
-    /* Everything else (rnd, addr, subr, addl, subl, max, adc, sbc,
-     * ror, rol, undefined) stays at ALU_KIND_FALLBACK. */
+    /* ADDR (shift-right dest, add src accu) */
+    case 0x02: v.kind = ALU_KIND_ADDR; v.dst_ab = 0; break;  /* addr_b_a */
+    case 0x0a: v.kind = ALU_KIND_ADDR; v.dst_ab = 1; break;  /* addr_a_b */
+
+    /* SUBR (shift-right dest, sub src accu) */
+    case 0x06: v.kind = ALU_KIND_SUBR; v.dst_ab = 0; break;  /* subr_a */
+    case 0x0e: v.kind = ALU_KIND_SUBR; v.dst_ab = 1; break;  /* subr_b */
+
+    /* ADDL (shift-left dest, add src accu) */
+    case 0x12: v.kind = ALU_KIND_ADDL; v.dst_ab = 0; break;  /* addl_b_a */
+    case 0x1a: v.kind = ALU_KIND_ADDL; v.dst_ab = 1; break;  /* addl_a_b */
+
+    /* SUBL (shift-left dest, sub src accu) */
+    case 0x16: v.kind = ALU_KIND_SUBL; v.dst_ab = 0; break;  /* subl_a */
+    case 0x1e: v.kind = ALU_KIND_SUBL; v.dst_ab = 1; break;  /* subl_b */
+
+    /* ROR / ROL — 1-bit circular rotate on A1 / B1. */
+    case 0x27: v.kind = ALU_KIND_ROR; v.dst_ab = 0; break;
+    case 0x2f: v.kind = ALU_KIND_ROR; v.dst_ab = 1; break;
+    case 0x37: v.kind = ALU_KIND_ROL; v.dst_ab = 0; break;
+    case 0x3f: v.kind = ALU_KIND_ROL; v.dst_ab = 1; break;
+
+    /* Remaining fallbacks: rnd (0x11, 0x19), adc x (0x21, 0x29),
+     * sbc x (0x25, 0x2d), adc y (0x31, 0x39), sbc y (0x35, 0x3d),
+     * max (0x1d). These need extended-precision add/sub with carry
+     * (adc/sbc) or scaling-mode rounding (rnd) — follow-up commits. */
     default: break;
     }
     *out = v;
@@ -2749,6 +2779,200 @@ static void emit_alu_lsr(ArmEmit *e, const AluVariant *v)
 }
 
 /*
+ * ROL (rotate left by 1, circular on A1/B1).
+ *
+ * Despite the name, DSP56k's ROL does NOT rotate through the C
+ * flag — it's a 24-bit circular rotate of A1 (or B1). See
+ * emu_rol_a in dsp_emu.c.inc:4309-4323:
+ *
+ *   newcarry = (A1 >> 23) & 1;
+ *   A1 = ((A1 << 1) | newcarry) & 0xFFFFFF;
+ *   SR &= ~(C|N|Z|V);
+ *   SR |= newcarry;                         // C
+ *   SR |= ((A1 >> 23) & 1) << N;            // N from new top
+ *   SR |= (A1 == 0) << Z;                   // Z from new
+ *
+ * A0/A2 are untouched. No E/U update (no emu_ccr_update_e_u_n_z).
+ */
+static void emit_alu_rol(ArmEmit *e, const AluVariant *v)
+{
+    unsigned off_a1 = accu_off(v->dst_ab, 1);
+
+    /* w5 = A1 (24 bits). */
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* newcarry = (A1 >> 23) & 1 (into w6). */
+    emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 23, 1);
+
+    /* A1 = ((A1 << 1) | newcarry) & 0xFFFFFF. */
+    emit_lsl_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
+    emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* N = new[23]. */
+    emit_ubfx_w(e, /*rd=*/7, /*rn=*/5, 23, 1);
+
+    /* Z = (new == 0). */
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
+
+    /* SR: clear C|N|Z|V, set C/N/Z. */
+    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/10,
+                   (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/10);
+
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/7, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
+
+    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * ROR (rotate right by 1, circular on A1/B1). Mirror of ROL:
+ *
+ *   newcarry = A1 & 1;
+ *   A1 = (A1 >> 1) | (newcarry << 23);
+ *   SR &= ~(C|N|Z|V);
+ *   SR |= newcarry;                         // C
+ *   SR |= newcarry << N;                    // N == C (== new top)
+ *   SR |= (A1 == 0) << Z;
+ *
+ * The interpreter's `N = newcarry` is the same as `N = new[23]`
+ * because `new[23] = newcarry` post-rotate, so either derivation
+ * yields the same bit.
+ */
+static void emit_alu_ror(ArmEmit *e, const AluVariant *v)
+{
+    unsigned off_a1 = accu_off(v->dst_ab, 1);
+
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* newcarry = A1 & 1 (into w6). Also = N. */
+    emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 0, 1);
+
+    /* A1 = (A1 >> 1) | (newcarry << 23). */
+    emit_lsr_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
+    emit_lsl_w_imm(e, /*rd=*/7, /*rn=*/6, 23);
+    emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/7);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* Z = (new == 0). */
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
+
+    /* SR: clear C|N|Z|V, set C=w6, N=w6 (same bit), Z=w8. */
+    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/10,
+                   (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/10);
+
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
+
+    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+/*
+ * Shared emitter for ADDL / SUBL / ADDR / SUBR.
+ *
+ *   ADDL_d : dest = asl56(dest, 1) + other_accu
+ *   SUBL_d : dest = asl56(dest, 1) - other_accu
+ *   ADDR_d : dest = asr56(dest, 1) + other_accu
+ *   SUBR_d : dest = asr56(dest, 1) - other_accu
+ *
+ * The interpreter does:
+ *   newsr  = asl56(dest, 1) OR asr56(dest, 1);
+ *   newsr |= add56(src, dest) OR sub56(src, dest);
+ *   SR &= ~(V|C);
+ *   SR |= newsr;                              // new V / C / L bits
+ *   emu_ccr_update_e_u_n_z(dest)              // new E / U / N / Z
+ *
+ * asl56 contributes: C = orig[55], V = orig[55] ^ orig[54], L = V.
+ * asr56 contributes: C = orig[0], V = 0, L untouched.
+ * add56/sub56 contribute their usual C/V/L via emit_addsub_flags.
+ *
+ * These two flag sources are OR'd together into one newsr word.
+ */
+static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
+{
+    bool is_sub  = (v->kind == ALU_KIND_SUBL || v->kind == ALU_KIND_SUBR);
+    bool is_left = (v->kind == ALU_KIND_ADDL || v->kind == ALU_KIND_SUBL);
+    int  src_ab  = 1 - v->dst_ab;   /* shift-arith takes the OTHER accu */
+
+    /* Load dest into x13 (original, sign-extended). */
+    emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8);
+
+    /* Compute shifted dest into x12; build shift-newsr into w6. */
+    if (is_left) {
+        /* ASL by 1 (see emit_alu_asl). */
+        emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 55, 1);          /* C = orig[55] */
+        emit_ubfx_x(e, /*rd=*/6, /*rn=*/13, 54, 1);
+        emit_eor_w_reg(e, /*rd=*/6, /*rn=*/5, /*rm=*/6);     /* V = orig[55]^[54] */
+
+        emit_lsl_x_imm(e, /*rd=*/12, /*rn=*/13, 1);
+        emit_sbfx_x(e,   /*rd=*/12, /*rn=*/12, 0, 56);
+
+        /* Pack shift-newsr: C at bit 0, V at DSP_SR_V, L == V at DSP_SR_L. */
+        emit_lsl_w_imm(e, /*rd=*/7, /*rn=*/6, DSP_SR_V);
+        emit_lsl_w_imm(e, /*rd=*/8, /*rn=*/6, DSP_SR_L);
+        emit_orr_w_reg(e, /*rd=*/7, /*rn=*/7, /*rm=*/8);
+        emit_orr_w_reg(e, /*rd=*/6, /*rn=*/5, /*rm=*/7);     /* w6 = shift-newsr */
+    } else {
+        /* ASR by 1: C = orig[0]; V cleared; L untouched (which
+         * translates to: the shift contributes ONLY the C bit, since
+         * V is OR-merged below and will be cleared before the OR). */
+        emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 0, 1);
+
+        emit_ubfx_x(e,  /*rd=*/12, /*rn=*/13, 0, 56);
+        emit_lsr_x_imm(e, /*rd=*/12, /*rn=*/12, 1);
+        /* Re-sign-extend the result against bit 55 (unsigned bit 55
+         * after the shift is the new top; for the post-shift value
+         * we need it sign-extended to maintain the 56-bit-in-x-reg
+         * convention). Since LSR by 1 of a 56-bit value always clears
+         * bit 55, the result naturally has bit 55 = 0, so SBFX is a
+         * no-op — but emit it anyway for consistency. */
+        emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+        emit_mov_w_reg(e, /*rd=*/6, /*rn=*/5);               /* w6 = shift-newsr = C only */
+    }
+
+    /* Load src (other accu) into x14 (sign-extended). */
+    emit_load_accu56(e, /*xaccu=*/14, src_ab, /*xtmp=*/8);
+
+    /* x15 = x12 op x14, re-sign-extended. */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/15, /*rn=*/12, /*rm=*/14);
+    } else {
+        emit_add_x_reg(e, /*rd=*/15, /*rn=*/12, /*rm=*/14);
+    }
+    emit_sbfx_x(e, /*rd=*/15, /*rn=*/15, 0, 56);
+
+    /* Compute add/sub flags into w5 (addsub-newsr). */
+    emit_addsub_flags(e, /*xorig=*/12, /*xsrc=*/14, /*xres=*/15,
+                      /*is_sub=*/is_sub ? 1 : 0);
+
+    /* Merge: w5 |= w6 (shift-newsr). */
+    emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
+
+    /* Store final accu. */
+    emit_store_accu56(e, /*xaccu=*/15, v->dst_ab, /*xtmp=*/8);
+
+    /* SR clear V|C, then OR merged newsr. */
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+
+    /* E/U/N/Z via shared shim. */
+    emit_ccr_e_u_n_z(e, /*xaccu=*/15);
+}
+
+/*
  * Inline MPY / MPYR / MAC / MACR kernel.
  *
  * Collapses the interpreter's dsp_mul56 + optional dsp_add56 +
@@ -3005,6 +3229,18 @@ static bool emit_alu_inline(ArmEmit *e, const AluVariant *v)
         return true;
     case ALU_KIND_LSR:
         emit_alu_lsr(e, v);
+        return true;
+    case ALU_KIND_ROL:
+        emit_alu_rol(e, v);
+        return true;
+    case ALU_KIND_ROR:
+        emit_alu_ror(e, v);
+        return true;
+    case ALU_KIND_ADDL:
+    case ALU_KIND_SUBL:
+    case ALU_KIND_ADDR:
+    case ALU_KIND_SUBR:
+        emit_alu_shift_arith(e, v);
         return true;
     default:
         /* FALLBACK and MOVE fall through here. Caller BLRs the
