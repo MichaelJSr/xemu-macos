@@ -1228,6 +1228,20 @@ static void ohci_frame_boundary(void *opaque)
     OHCIState *ohci = opaque;
     struct ohci_hcca hcca;
 
+    /*
+     * A late EOF timer tick can race ohci_bus_stop() / HC reset and reach us
+     * after ctl has left OHCI_USB_OPERATIONAL, or with hcca cleared/misaligned.
+     * Per OHCI 1.0a 4.4.1 the HCCA must be 256-byte aligned. Bail out before
+     * touching guest memory rather than dereferencing stale state.
+     */
+    if ((ohci->ctl & OHCI_CTL_HCFS) != OHCI_USB_OPERATIONAL) {
+        return;
+    }
+    if (ohci->hcca == 0 || !QEMU_IS_ALIGNED(ohci->hcca, 256)) {
+        ohci_die(ohci);
+        return;
+    }
+
     if (ohci_read_hcca(ohci, ohci->hcca, &hcca)) {
         trace_usb_ohci_hcca_read_error(ohci->hcca);
         ohci_die(ohci);
