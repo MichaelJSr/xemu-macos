@@ -58,58 +58,32 @@ bool dsp_jit_enabled(void);
 bool dsp_jit_diff_enabled(void);
 
 /*
- * Sentinel (debug / bisect) harness for the two deferred round-4
- * optimizations. Enabled via the XEMU_DSP_JIT_SENTINEL env var,
- * which accepts a bitmask:
+ * Sentinel (debug / bisect) harness for the deferred round-4
+ * cur_inst skip optimization. XEMU_DSP_JIT_SENTINEL=1 re-applies
+ * the skip but substitutes DSP_JIT_SENTINEL_POISON (0x00adbeef)
+ * for the correct inst. Any inlined-op handler path that reads
+ * dsp->cur_inst at runtime will observe the poison and typically
+ * surface as a visible failure (lookup_opcode_slow assert with
+ * "op = 00adbeef", or a DIFF mismatch on a sub-field decode).
+ * The stack trace / DIFF diff pinpoints the reader.
  *
- *   1 (bit 0, "curinst") — re-applies the round-4 "skip cur_inst
- *       preset for inlinable ops" optimization BUT substitutes a
- *       poison value (DSP_JIT_SENTINEL_POISON) for the correct inst.
- *       Any inlined-op handler path that secretly reads dsp->cur_inst
- *       at runtime will observe the poison, typically producing
- *       a visible failure (lookup_opcode_slow assert with
- *       "op = 00adbeef", or a DIFF mismatch if a sub-field decode
- *       yields a bogus register / immediate). The stack trace at
- *       the failure pinpoints the offending reader.
- *
- *   2 (bit 1, "pcskip")  — keeps the PC-mismatch exit check enabled
- *       but logs EVERY firing via dsp_jit_sentinel_pc_log with
- *       (pc_start, inst, expected_pc, actual_pc). This produces
- *       a histogram of which inst patterns divergent-exit — the
- *       ones classified as "won't change pc" but that actually do
- *       are the bug. Rate-limited per-inst to avoid log spam.
- *
- * Both bits can be combined (XEMU_DSP_JIT_SENTINEL=3). Not intended
- * for production use; impacts performance.
+ * The companion PC-skip sentinel (old bit 1) was removed after
+ * the round-4 EPI_NO_PC optimization was dropped permanently —
+ * see the EPI_NO_PC drop commit for the analysis (mode-6 parmove
+ * lengthening + REP/DO loop rewinds make it unsafe).
  */
 #define DSP_JIT_SENTINEL_CURINST  (1u << 0)
-#define DSP_JIT_SENTINEL_PCSKIP   (1u << 1)
 #define DSP_JIT_SENTINEL_POISON   0x00adbeefu
-
 bool dsp_jit_sentinel_enabled(uint32_t bit);
-void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
-                             uint32_t expected_pc, uint32_t actual_pc);
 
 /*
- * Force-apply the deferred round-4 optimizations literally (no
- * sentinel poison, no logger). Use to test whether the underlying
- * regressions still reproduce after later commits. Bitmask:
- *
- *   1 (bit 0, "curinst")  — actually skip the cur_inst preset for
- *       inlinable ops (CF / long-imm) and for parmove stubs other
- *       than pm_4x. Identical to round-4's emit behaviour.
- *
- *   2 (bit 1, "pcskip")   — actually elide the PC-mismatch exit
- *       check for parmove stubs and inlined long-imm ops.
- *       Identical to round-4's EPI_NO_PC behaviour.
- *
- * If the test passes cleanly with FORCE=3, the round-4 commits
- * can be re-landed (the original failures must have been
- * exorcised by intervening fixes — e.g. the calc_ea mode 6
- * mask fix). Set via XEMU_DSP_JIT_FORCE=N.
+ * Force-apply the deferred round-4 cur_inst skip literally
+ * (no sentinel poison). Use XEMU_DSP_JIT_FORCE=1 to reproduce
+ * the underlying regression on demand while bisecting. If a
+ * future fix makes FORCE=1 run clean, the cur_inst skip can be
+ * re-landed permanently.
  */
 #define DSP_JIT_FORCE_CURINST_SKIP  (1u << 0)
-#define DSP_JIT_FORCE_PCSKIP        (1u << 1)
 bool dsp_jit_force_enabled(uint32_t bit);
 
 /*

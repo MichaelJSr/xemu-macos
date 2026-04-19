@@ -286,40 +286,51 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   fits in ARM64's imm12 (which it almost always does since DSP
   PRAM is 4 KiB), dropping it from 3 to 2 insns. Also cleans up
   the dead `dsp_jit_helper_calc_cc` shim that Round 2 made
-  unreachable.   Two other round-4 experiments (skipping the
-  `dsp->cur_inst` preset for inlined ops, and skipping the
-  PC-mismatch check for inlined long-imm + parmove stubs via
-  `EPI_NO_PC`) regressed with an `op=0x001000` startup assert
-  — at least one inlined path reads `cur_inst` or mutates `pc`
-  in a way the static classifier can't predict; both are
-  deferred pending the runtime-sentinel bisect harness. That
-  harness is available via `XEMU_DSP_JIT_SENTINEL=N`:
-    * bit 0 (1) — re-applies the cur_inst skip with a poison
-      value `0x00adbeef` so any stale-read path surfaces as
-      `lookup_opcode_slow(op = 00adbeef)` with a stack trace
-      identifying the reader;
-    * bit 1 (2) — keeps the PC-mismatch exit in place but also
-      logs every mismatch for parmove-stub + inlined-long-imm
-      ops (the round-4 skip candidates), giving a histogram of
-      the inst patterns whose handlers actually mutate `pc`
-      despite the classifier believing they don't. Logger is
-      rate-limited per-inst and no-ops on the matching path.
-  Both bits can be combined (`=3`). Not for production — the
-  extra BLR to the logger on sentinel-watched ops costs ~5
-  cycles / op. Stats output at exit includes
-  `sentinel_pc_blr` (BLR traffic — confirms the harness ran) and
-  `sentinel_pc_diff` (mismatches — zero means the deferred PC
-  skip is safe on the exercised code path).
+  unreachable. Follow-up rounds extend the inline coverage:
+  calc_ea mode 6 (absolute-address, baked 24-bit `pram[pc+1]`)
+  now inline — the one calc_ea mode that was still BLR'ing the C
+  helper. The ALU "tail" grows by six opcodes: ROL / ROR (1-bit
+  circular rotates on A1/B1) and the shift-arith quartet ADDL /
+  SUBL / ADDR / SUBR (56-bit ASL/ASR-then-add/sub of the other
+  accumulator). And `emu_ccr_update_e_u_n_z` — invoked from
+  ~180 ALU handlers to update the SR.E/U/N/Z bits after any
+  accumulator write — now has an inline fast path for the
+  universal `scaling=0` mode in Xbox audio (~20 ARM64 insns of
+  UBFX / BFI / CBNZ / CMP instead of a helper BLR). Scaling
+  modes 1/2 keep the helper BLR. Remaining BLR-fallback ALU
+  opcodes: RND (scaling-mode-dependent rounding), ADC / SBC
+  (extended-precision add/sub with carry), MAX (known interp
+  quirk). Static block chaining (direct `B <target.entry>`
+  patch on known branch targets) stays deferred — the
+  entry-split prologue refactor it depends on is scoped
+  separately.
 
-  Companion knob `XEMU_DSP_JIT_FORCE=N` literally re-applies the
-  deferred optimizations (no poison, no logger) so the user can
-  test whether the round-4 regressions still reproduce after
-  later commits. Bit 0 = cur_inst skip; bit 1 = PC-check skip;
-  3 = both. A clean run with `FORCE=3` means the round-4 commits
-  can be re-landed as-is. Static block
-  chaining (direct `B <target.entry>` patch on known branch
-  targets) is a followup commit — the entry-split prologue
-  refactor it depends on is scoped separately.
+  Round-4's two over-reaching experiments were DROPPED
+  permanently: (a) skipping the `dsp->cur_inst` preset for
+  inlinable ops regresses on startup with `op=0x001000` — some
+  inlined path reads `cur_inst` at runtime that the static
+  classifier doesn't see. Still under investigation via the
+  sentinel harness below. (b) skipping the PC-mismatch check
+  for parmove stubs + inlined long-imm ops (EPI_NO_PC) was
+  proven unsafe by the pcskip sentinel at a 9.75% mismatch
+  rate (5.77M of 59.2M watched ops in Azurik) — calc_ea mode
+  6 lengthens parmoves to 2 words (cur_inst_len++ shifts pc
+  past the translator's expected_next_pc) and REP / DO loops
+  rewind pc via the postexec helper; both legitimately diverge
+  and need the check. The check costs ~2 insns via the imm12
+  fast path, so we land it permanently as a "no longer
+  recoverable" optimization.
+
+  The `XEMU_DSP_JIT_SENTINEL=1` and `XEMU_DSP_JIT_FORCE=1`
+  diagnostic knobs remain for the cur_inst-skip investigation:
+  `SENTINEL=1` re-applies the skip with a poison value
+  `0x00adbeef` (any stale-read surfaces as
+  `lookup_opcode_slow(op = 00adbeef)` with a stack trace
+  identifying the reader); `FORCE=1` re-applies the skip
+  literally (no poison) to reproduce the regression on demand.
+  Zero emit cost when neither is set. The old pcskip sentinel
+  (bit 1) + FORCE_PCSKIP (bit 1) were removed when EPI_NO_PC
+  was dropped.
   Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
   against the interpreter. Because a translated block is fully
   deterministic given its pre-state, a single passing validation

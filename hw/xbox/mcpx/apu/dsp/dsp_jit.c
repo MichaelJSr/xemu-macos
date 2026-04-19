@@ -84,28 +84,22 @@ static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks 
 static bool g_jit_stats;
 
 /*
- * Sentinel (debug) harness for the two deferred round-4
- * optimizations. See dsp_jit.h for env-var bitmask. Bit 0 re-
- * enables cur_inst skip with a POISON write so readers observe
- * a known garbage value; bit 1 logs every PC-mismatch exit so
- * the user can see which ops divergent-exit.
+ * Sentinel (debug) harness for the deferred round-4 cur_inst
+ * skip optimization. Bit 0 re-enables the skip with a POISON
+ * write so any inlined path that secretly reads dsp->cur_inst
+ * observes a known garbage value and surfaces as an assert /
+ * DIFF mismatch. See dsp_jit.h. Round-4's EPI_NO_PC (PC-check
+ * skip) was dropped permanently after sentinel proved it unsafe
+ * — no PC-watch knob exists anymore.
  */
 static uint32_t g_jit_sentinel;
 
 /*
- * Force-skip mode: re-applies the deferred round-4 optimizations
- * literally (no diagnostics). Used to verify whether the
- * regressions still reproduce after later fixes. See dsp_jit.h.
+ * Force-skip mode: re-applies the deferred round-4 cur_inst skip
+ * literally (no diagnostics). Used to reproduce the regression on
+ * demand while diagnosing. See dsp_jit.h.
  */
 static uint32_t g_jit_force;
-
-/*
- * Sentinel summary counters — cumulative across the run, printed
- * with the JIT stats at exit so the user can verify the harness
- * was actually emitted and observed traffic.
- */
-static uint64_t g_sentinel_pc_watch_blr_count;
-static uint64_t g_sentinel_pc_mismatch_count;
 
 /*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
@@ -193,30 +187,24 @@ static void parse_flags_once(void)
     e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
 
-    /* XEMU_DSP_JIT_SENTINEL: debug harness for round-4 bisect.
-     *   bit 0 (1): curinst poison — re-apply cur_inst skip with
-     *              sentinel 0xADBEEF so any reader misbehaves
-     *              visibly.
-     *   bit 1 (2): pcskip logger — log every PC-mismatch exit
-     *              with (pc_start, inst, expected, actual).
-     *   Combined: 3. See dsp_jit.h for rationale. */
+    /* XEMU_DSP_JIT_SENTINEL: debug harness for the round-4
+     * cur_inst-skip bisect. Bit 0 = curinst poison. The old bit 1
+     * (pcskip logger) was removed when EPI_NO_PC was dropped. */
     e = getenv("XEMU_DSP_JIT_SENTINEL");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
-        if (n > 0 && n <= 3) {
+        if (n > 0 && n <= 1) {
             g_jit_sentinel = (uint32_t)n;
         }
     }
 
     /* XEMU_DSP_JIT_FORCE: literally re-apply the deferred round-4
-     * skips. Bit 0 = cur_inst skip; bit 1 = PC-check skip. No
-     * diagnostics — the test is "does anything still break?".
-     * If the run is clean with FORCE=3, the round-4 commits can
-     * be re-landed. */
+     * cur_inst skip. Bit 0 = cur_inst skip. Bit 1 (old PC-check
+     * skip) was removed when EPI_NO_PC was dropped permanently. */
     e = getenv("XEMU_DSP_JIT_FORCE");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
-        if (n > 0 && n <= 3) {
+        if (n > 0 && n <= 1) {
             g_jit_force = (uint32_t)n;
         }
     }
@@ -232,16 +220,12 @@ static void parse_flags_once(void)
         } else if (g_jit_diff) {
             mode_desc = " (DIFF=async, sampled)";
         }
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s%s%s\n",
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s\n",
                 mode_desc, g_jit_stats ? " (stats)" : "",
                 (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST)
                     ? " (SENTINEL-curinst)" : "",
-                (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)
-                    ? " (SENTINEL-pcskip)" : "",
                 (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP)
-                    ? " (FORCE-curinst-skip)" : "",
-                (g_jit_force & DSP_JIT_FORCE_PCSKIP)
-                    ? " (FORCE-pcskip)" : "");
+                    ? " (FORCE-curinst-skip)" : "");
     }
 }
 
@@ -267,63 +251,6 @@ bool dsp_jit_force_enabled(uint32_t bit)
 {
     parse_flags_once();
     return (g_jit_force & bit) != 0;
-}
-
-/*
- * Sentinel PC-mismatch logger. Called from translated code via
- * BLR when XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled.
- * Fires on every PC-mismatch exit, rate-limited per inst-pattern
- * so a single runaway handler doesn't flood the log.
- */
-#define DSP_JIT_SENTINEL_LOG_TABLE_BITS 7
-#define DSP_JIT_SENTINEL_LOG_TABLE_SIZE (1u << DSP_JIT_SENTINEL_LOG_TABLE_BITS)
-
-static struct {
-    uint32_t inst;
-    uint64_t count;
-} g_sentinel_log_tbl[DSP_JIT_SENTINEL_LOG_TABLE_SIZE];
-
-void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
-                             uint32_t expected_pc, uint32_t actual_pc)
-{
-    /* Always count BLR traffic so the user can verify the harness
-     * is actually emitting + executing. */
-    g_sentinel_pc_watch_blr_count++;
-
-    /* No-op if pc actually matches — called unconditionally from
-     * translated code so the fast path is "return right away". */
-    if (expected_pc == actual_pc) {
-        return;
-    }
-
-    g_sentinel_pc_mismatch_count++;
-
-    /* Hash inst into the table. */
-    uint32_t h = (inst ^ (inst >> 12) ^ (inst >> 20)) &
-                 (DSP_JIT_SENTINEL_LOG_TABLE_SIZE - 1u);
-
-    /* Quadratic-probe collision (table is tiny; linear is fine). */
-    for (uint32_t i = 0; i < 8; i++) {
-        uint32_t slot = (h + i) & (DSP_JIT_SENTINEL_LOG_TABLE_SIZE - 1u);
-        if (g_sentinel_log_tbl[slot].inst == 0 ||
-            g_sentinel_log_tbl[slot].inst == inst) {
-            bool is_first = g_sentinel_log_tbl[slot].inst != inst;
-            g_sentinel_log_tbl[slot].inst = inst;
-            uint64_t n = ++g_sentinel_log_tbl[slot].count;
-            /* Log first occurrence + powers-of-10. */
-            if (is_first || n == 10 || n == 100 || n == 1000 ||
-                n == 10000 || n == 100000) {
-                fprintf(stderr, "xemu: DSP JIT sentinel: PC mismatch "
-                        "at block_start=0x%04x inst=0x%06x "
-                        "expected_pc=0x%04x actual_pc=0x%04x (count=%llu)\n",
-                        pc_start, inst, expected_pc, actual_pc,
-                        (unsigned long long)n);
-            }
-            return;
-        }
-    }
-    /* Table full — silently drop. The common-case patterns are
-     * already logged; anything new hitting this is the long tail. */
 }
 
 /*
@@ -2054,10 +1981,10 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
     emit_ubfx_w(e, /*rd=*/10, /*rn=*/9, DSP_SR_S0, 2);
 
-    /* If scaling != 0, branch to the BLR slow path. */
-    emit_cmp_w_imm(e, /*rn=*/10, 0);
+    /* If scaling != 0, branch to the BLR slow path. CBNZ is one
+     * insn vs the CMP+B.NE pair. */
     uint32_t *to_slow = e->buf;
-    emit_bcond(e, ARM_COND_NE, 0);
+    emit_cbnz_w(e, /*rn=*/10, 0);
 
     /* ========= Fast path: scaling == 0 ========= */
 
@@ -2074,23 +2001,23 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
     emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 9);
 
-    /* E = (value_e != 0) && (value_e != 0x1ff).
-     * Compute as NOT(value_e == 0 OR value_e == 0x1ff). */
+    /* E = (value_e != 0) && (value_e != 0x1ff). Compute as NOT(
+     * value_e == 0 OR value_e == 0x1ff). 0x1ff fits in CMP's
+     * imm12, so no MOV to materialise is needed. */
     emit_cmp_w_imm(e, /*rn=*/11, 0);
     emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_mov_imm32(e, /*rd=*/13, 0x1ff);
-    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+    emit_cmp_w_imm(e, /*rn=*/11, 0x1ff);
     emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
     emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
     emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);         /* w12 = E bit */
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
 
-    /* U: (A1 & 0xc00000) == 0 OR == 0xc00000. */
-    emit_mov_imm32(e, /*rd=*/11, 0xc00000);
-    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/11);
+    /* U: (A1 & 0xc00000) == 0 OR == 0xc00000. Keep 0xc00000 in w13
+     * so we don't materialise the 2-insn MOVZ+MOVK twice. */
+    emit_mov_imm32(e, /*rd=*/13, 0xc00000);
+    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);   /* w11 = A1 & 0xc00000 */
     emit_cmp_w_imm(e, /*rn=*/11, 0);
     emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_mov_imm32(e, /*rd=*/13, 0xc00000);
     emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
     emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
     emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);  /* w12 = U bit */
@@ -2105,12 +2032,10 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
 
     /* N: bit 7 of A2 (interp uses `(A2 >> 4) & 0x8` which puts
-     * bit 7 at bit 3 of SR = DSP_SR_N). Since we zeroed SR.N
-     * in the clear above, we can just OR it in. */
-    emit_lsr_w_imm(e, /*rd=*/11, /*rn=*/1, 4);
-    emit_mov_imm32(e, /*rd=*/12, 0x8);
-    emit_and_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
-    emit_orr_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/11);
+     * bit 7 at bit 3 of SR = DSP_SR_N). UBFX the single bit, BFI
+     * it into place — 2 insns vs the original LSR+MOV+AND+OR. */
+    emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
 
     /* Store back. */
     emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
@@ -3162,7 +3087,13 @@ static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
     /* Load dest into x13 (original, sign-extended). */
     emit_load_accu56(e, /*xaccu=*/13, v->dst_ab, /*xtmp=*/8);
 
-    /* Compute shifted dest into x12; build shift-newsr into w6. */
+    /*
+     * Compute shifted dest into x12 and build the shift contribution
+     * to new_sr in w9. We use w9 (not w6) because emit_addsub_flags
+     * below clobbers w5 / w6 / w7 — an earlier version of this
+     * emitter kept shift-newsr in w6 and silently lost it after
+     * the add/sub flag computation, producing wrong V / L bits.
+     */
     if (is_left) {
         /* ASL by 1 (see emit_alu_asl). */
         emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 55, 1);          /* C = orig[55] */
@@ -3172,16 +3103,17 @@ static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
         emit_lsl_x_imm(e, /*rd=*/12, /*rn=*/13, 1);
         emit_sbfx_x(e,   /*rd=*/12, /*rn=*/12, 0, 56);
 
-        /* Pack shift-newsr: C at bit 0, V at DSP_SR_V, L == V at DSP_SR_L. */
+        /* Pack shift-newsr: C at bit 0, V at DSP_SR_V, L == V at
+         * DSP_SR_L. Final word lives in w9 to survive emit_addsub_flags. */
         emit_lsl_w_imm(e, /*rd=*/7, /*rn=*/6, DSP_SR_V);
         emit_lsl_w_imm(e, /*rd=*/8, /*rn=*/6, DSP_SR_L);
         emit_orr_w_reg(e, /*rd=*/7, /*rn=*/7, /*rm=*/8);
-        emit_orr_w_reg(e, /*rd=*/6, /*rn=*/5, /*rm=*/7);     /* w6 = shift-newsr */
+        emit_orr_w_reg(e, /*rd=*/9, /*rn=*/5, /*rm=*/7);     /* w9 = shift-newsr */
     } else {
         /* ASR by 1: C = orig[0]; V cleared; L untouched (which
          * translates to: the shift contributes ONLY the C bit, since
          * V is OR-merged below and will be cleared before the OR). */
-        emit_ubfx_x(e, /*rd=*/5, /*rn=*/13, 0, 1);
+        emit_ubfx_x(e, /*rd=*/9, /*rn=*/13, 0, 1);           /* w9 = C only */
 
         emit_ubfx_x(e,  /*rd=*/12, /*rn=*/13, 0, 56);
         emit_lsr_x_imm(e, /*rd=*/12, /*rn=*/12, 1);
@@ -3192,8 +3124,6 @@ static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
          * bit 55, the result naturally has bit 55 = 0, so SBFX is a
          * no-op — but emit it anyway for consistency. */
         emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
-
-        emit_mov_w_reg(e, /*rd=*/6, /*rn=*/5);               /* w6 = shift-newsr = C only */
     }
 
     /* Load src (other accu) into x14 (sign-extended). */
@@ -3207,12 +3137,12 @@ static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
     }
     emit_sbfx_x(e, /*rd=*/15, /*rn=*/15, 0, 56);
 
-    /* Compute add/sub flags into w5 (addsub-newsr). */
+    /* Compute add/sub flags into w5 (addsub-newsr). Clobbers w6, w7. */
     emit_addsub_flags(e, /*xorig=*/12, /*xsrc=*/14, /*xres=*/15,
                       /*is_sub=*/is_sub ? 1 : 0);
 
-    /* Merge: w5 |= w6 (shift-newsr). */
-    emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
+    /* Merge: w5 |= w9 (shift-newsr). */
+    emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/9);
 
     /* Store final accu. */
     emit_store_accu56(e, /*xaccu=*/15, v->dst_ab, /*xtmp=*/8);
@@ -4063,40 +3993,21 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu,
  * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25.
  */
 /*
- * Hints the shared post-instruction epilogue can exploit to skip
- * runtime checks that are provably unreachable for the op just
- * emitted. Passed by the caller (emit_instruction /
- * emit_parmove_stub) based on static classification.
- *
- * `may_change_pc`
- *   false : the op we just emitted is known to leave dsp->pc at
- *           pc + cur_inst_len — parmove stubs (no parmove op
- *           branches) and inlined long-imm ALU ops fit this. The
- *           PC-mismatch exit check (step 11) is therefore
- *           unreachable and elided. Saves ~4 ARM64 insns per op.
- *   true  : we don't know what pc will be; emit the check.
+ * Shared per-op epilogue. The PC-mismatch check at the end is
+ * ALWAYS emitted — round-4's EPI_NO_PC optimization (skipping the
+ * check for ops the translator believed couldn't mutate pc) was
+ * dropped after the sentinel harness proved it unsafe: parmove
+ * stubs with calc_ea mode 6 run for two words (cur_inst_len++
+ * shifts pc beyond expected_next_pc), and any op inside a REP /
+ * DO loop has its pc rewound by postexecute_update_pc's BLR
+ * helper. Both legitimately diverge and the PC check is the only
+ * signal that forces the block to exit to the dispatcher in
+ * those cases. See the commit that dropped EPI_NO_PC for the
+ * sentinel_pc_diff data (9.75% mismatch rate across 59M watched
+ * ops in Azurik).
  */
-typedef struct EpilogueHints {
-    bool may_change_pc;
-    /* Sentinel-watch fields: populated for ops whose static
-     * classification says pc shouldn't change (parmove stubs,
-     * inlined long-imm ALU). When XEMU_DSP_JIT_SENTINEL bit 1 is
-     * on, the epilogue emits an extra BLR to dsp_jit_sentinel_pc_log
-     * (the logger is a cheap no-op unless pc actually diverged)
-     * so we can attribute any mismatch to a specific inst / pc.
-     * The fields are write-only until the logger call is emitted;
-     * if sentinel is off they are unused. */
-    bool sentinel_watch;
-    uint32_t sentinel_inst;
-    uint32_t sentinel_pc_start;
-} EpilogueHints;
-
-static const EpilogueHints EPI_UNKNOWN = { .may_change_pc = true  };
-static const EpilogueHints EPI_NO_PC   = { .may_change_pc = false };
-
 static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
-                                           uint32_t expected_next_pc,
-                                           EpilogueHints hints)
+                                           uint32_t expected_next_pc)
 {
     /*
      * Step 5: inline postexecute_update_pc fast path. The helper
@@ -4215,68 +4126,29 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
-     * Sentinel PC-watch: call the logger BEFORE the PC-mismatch
-     * check. Emitted in-line so it runs on BOTH the match and
-     * mismatch paths — on match, the logger is a no-op (single
-     * compare + return); on mismatch, it records the inst
-     * pattern. If we emitted this AFTER the PC check, the exit
-     * branch would bypass the logger entirely and we'd always
-     * see zero divergences — which is precisely the bug that
-     * made SENTINEL=2 report 0 mismatches while FORCE=2
-     * actually crashed.
+     * Step 11: exit-check: PC mismatch. Emission uses SUB + CBNZ
+     * rather than MOV imm + CMP + BCOND — saves one ARM64 insn
+     * because expected_next_pc fits in imm12 (DSP PRAM is 4 KiB,
+     * so pc_start + inst_len <= 0xFFF in all but the rare 2-word
+     * op at pram[0xFFE] edge case). Non-zero SUB result means
+     * mismatch; CBNZ branches to the shared exit patch list.
      */
-    if (hints.sentinel_watch &&
-        (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)) {
-        emit_mov_imm32(e, /*rd=*/0, hints.sentinel_pc_start);
-        emit_mov_imm32(e, /*rd=*/1, hints.sentinel_inst);
-        emit_mov_imm32(e, /*rd=*/2, expected_next_pc);
-        emit_ldr_w_any(e, /*rd=*/3, /*rn=*/19, SCRATCH, OFF_PC);
-        emit_mov_imm64(e, /*rd=*/4,
-                       (uint64_t)(uintptr_t)&dsp_jit_sentinel_pc_log);
-        emit_blr(e, /*rn=*/4);
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
+    if (expected_next_pc <= 0xfff) {
+        emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, expected_next_pc);
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    } else {
+        /* Edge case (expected_next_pc > 0xfff — possible when the
+         * block's last op is 2-word at pc == 0xFFE). Fall back to
+         * MOV imm32 + CMP + B.NE. */
+        emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
+        emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
+        uint32_t *site = e->buf;
+        emit_bcond(e, ARM_COND_NE, 0);
+        record_exit_patch(exits, site);
     }
-
-    /*
-     * Step 11: exit-check: PC mismatch (branch taken by handler).
-     * Skipped when the caller promises the op cannot change pc
-     * (parmove stubs, inlined long-imm ALU, inlined ALU kernels).
-     * Also skipped for terminator ops that exit via other means —
-     * wait, no: terminators are exactly where pc CAN change, so
-     * keep the check for them. The skip is safe only when
-     * may_change_pc is false.
-     *
-     * Emission uses SUB + CBNZ rather than MOV imm + CMP + BCOND
-     * — saves 1 ARM64 insn because expected_next_pc fits in imm12
-     * (DSP PRAM is 4 KB, so pc < 0x1000; but the SUB can safely
-     * take a larger imm12 anyway up to 0xFFF which is the max
-     * valid pc). Non-zero SUB result means mismatch; CBNZ branches
-     * to the exit path.
-     */
-    if (hints.may_change_pc) {
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
-        if (expected_next_pc <= 0xfff) {
-            /* Fast path: expected_next_pc fits in ARM64 SUB's
-             * imm12. `w0 = pc - expected_next_pc; cbnz w0, exit`
-             * in 2 insns (vs the MOV imm32 + CMP + BCOND form
-             * below). DSP PRAM is 4 KiB so pc_start + inst_len
-             * normally stays inside 12 bits; blocks that translate
-             * through the last PRAM word hit the edge case below. */
-            emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, expected_next_pc);
-            uint32_t *site = e->buf;
-            emit_cbnz_w(e, 0, 0);
-            record_exit_patch(exits, site);
-        } else {
-            /* Edge case (expected_next_pc > 0xfff — possible when
-             * the block's last op is 2-word at pc == 0xffe). Fall
-             * back to the full MOV imm32 + CMP + B.cond form. */
-            emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
-            emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
-            uint32_t *site = e->buf;
-            emit_bcond(e, ARM_COND_NE, 0);
-            record_exit_patch(exits, site);
-        }
-    }
-
 }
 
 
@@ -4471,29 +4343,14 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
-     * Parmove stubs: emit the full PC-mismatch exit check. Round-4
-     * tried to skip it (parmove ALU variants shouldn't touch pc),
-     * but in practice at least one parmove sub-class DOES end up
-     * changing dsp->pc via its BLR fallback, and without the check
-     * the block keeps running at the stale pc and eventually jumps
-     * to pram garbage (e.g. 0x001000). Keep the check until we can
-     * identify the offending handler and narrow EPI_NO_PC to the
-     * truly-no-pc subset.
-     *
-     * When XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled, tag
-     * parmove stubs as sentinel-watch so the epilogue logs any
-     * time dsp->pc != expected_next_pc — that pinpoints the
-     * parmove sub-class whose BLR fallback is mutating pc.
+     * Parmove stubs always emit the PC-mismatch check. Round-4
+     * experimented with eliding it (EPI_NO_PC) — the sentinel
+     * harness proved unsafe: calc_ea mode 6 makes parmoves 2-word
+     * ops, and REP/DO loops rewind pc, both of which legitimately
+     * diverge and need the check to exit the block. See the
+     * EPI_NO_PC removal commit for the 9.75% mismatch rate.
      */
-    EpilogueHints p_hints = EPI_UNKNOWN;
-    if (g_jit_force & DSP_JIT_FORCE_PCSKIP) {
-        /* Force mode: literal round-4 EPI_NO_PC for parmove. */
-        p_hints.may_change_pc = false;
-    }
-    p_hints.sentinel_watch    = true;
-    p_hints.sentinel_inst     = inst;
-    p_hints.sentinel_pc_start = pc;
-    emit_post_instruction_epilogue(e, exits, expected_next_pc, p_hints);
+    emit_post_instruction_epilogue(e, exits, expected_next_pc);
     if (out_write_set) {
         *out_write_set |= parmove_write_set(inst);
     }
@@ -5603,13 +5460,10 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * "non-parmove handler not yet inlined". Splitting into a
      * separate counter is a cheap follow-up if ever needed.)
      */
-    bool cf_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
-    bool li_inlined = false;
-    bool handler_inlined = cf_inlined;
+    bool handler_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
     if (!handler_inlined) {
-        li_inlined = emit_long_imm_call(e, dsp, pc, inst, emu_func);
-        handler_inlined = li_inlined;
-        if (li_inlined) {
+        if (emit_long_imm_call(e, dsp, pc, inst, emu_func)) {
+            handler_inlined = true;
             /* Long-imm ops are ALU — credit the inlined count. */
             g_alu_inlined_count++;
         }
@@ -5622,40 +5476,12 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
-     * PC-mismatch check hint:
-     *   - Inlined CF/loop ops are terminators that actively change
-     *     pc (branch taken) — keep the check so we exit on branch.
-     *   - Inlined long-imm ALU ops never touch pc — skip the check.
-     *   - BLR fallback: the handler MIGHT change pc (terminators
-     *     like reset/stop/wait, or any future CF handler we
-     *     haven't inlined yet) — keep the check.
+     * Always emit the PC-mismatch check. Round-4's EPI_NO_PC was
+     * dropped after sentinel proved it unsafe for both parmoves
+     * (mode-6 lengthening) and long-imm (REP/DO loop rewinds).
+     * The SUB+CBNZ imm12 fast path keeps the cost to 2 insns.
      */
-    /*
-     * Always emit the PC-mismatch check. Round-4 tried to skip it
-     * for inlined long-imm (they shouldn't touch dsp->pc), but in
-     * practice some handler path does mutate pc in a way the
-     * translator can't predict, and without the check the block
-     * keeps running at the stale pc and eventually jumps to pram
-     * garbage (e.g. op=0x001000 on startup). Keep the check until
-     * the divergence is tracked down; the cost is minor now that
-     * we use the SUB+CBNZ imm12 fast path.
-     *
-     * When XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled AND
-     * the op is an inlined long-imm (the round-4 skip candidate),
-     * tag the epilogue as sentinel-watch so we log any pc
-     * divergence with the inst + pc that caused it.
-     */
-    EpilogueHints i_hints = EPI_UNKNOWN;
-    if (li_inlined) {
-        if (g_jit_force & DSP_JIT_FORCE_PCSKIP) {
-            /* Force mode: literal round-4 EPI_NO_PC for long-imm. */
-            i_hints.may_change_pc = false;
-        }
-        i_hints.sentinel_watch    = true;
-        i_hints.sentinel_inst     = inst;
-        i_hints.sentinel_pc_start = pc;
-    }
-    emit_post_instruction_epilogue(e, exits, expected_next_pc, i_hints);
+    emit_post_instruction_epilogue(e, exits, expected_next_pc);
 
     /*
      * Write-set bookkeeping for the differential validator:
@@ -6101,23 +5927,17 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
                 (double)(g_cf_inlined_count + g_cf_fallback_count),
             g_cf_fallback_count);
 
-    /* Sentinel summary — confirms the harness was emitted and
-     * actually ran. Useful for "did the sentinel trigger?" checks
-     * when the user reports no observable failure: a zero
-     * mismatch count combined with a non-zero BLR count means
-     * the watched ops never diverged (good signal that the
-     * deferred skip is safe). A zero BLR count means the
-     * harness wasn't running (env var typo / not enabled). */
+    /* Debug-knob summary: echo whether SENTINEL / FORCE were
+     * enabled for this run. Keeps the stats line self-describing
+     * when bisecting a cur_inst regression. */
     if (g_jit_sentinel || g_jit_force) {
         fprintf(stderr,
-                "  sentinel_pc_blr   = %" PRIu64 "\n"
-                "  sentinel_pc_diff  = %" PRIu64 "\n"
-                "  force_mode        = 0x%x  (curinst_skip=%s pcskip=%s)\n",
-                g_sentinel_pc_watch_blr_count,
-                g_sentinel_pc_mismatch_count,
+                "  sentinel_mode     = 0x%x  (curinst_poison=%s)\n"
+                "  force_mode        = 0x%x  (curinst_skip=%s)\n",
+                g_jit_sentinel,
+                (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST) ? "on" : "off",
                 g_jit_force,
-                (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP) ? "on" : "off",
-                (g_jit_force & DSP_JIT_FORCE_PCSKIP) ? "on" : "off");
+                (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP) ? "on" : "off");
     }
     fflush(stderr);
 }
