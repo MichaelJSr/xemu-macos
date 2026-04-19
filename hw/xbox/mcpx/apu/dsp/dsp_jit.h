@@ -206,6 +206,9 @@ enum {
     DSP_JIT_CF_SUB_IMM,
     DSP_JIT_CF_CMP_IMM,
     DSP_JIT_CF_AND_IMM,
+    DSP_JIT_CF_MOVE_X_LONG,
+    DSP_JIT_CF_MOVE_X_IMM,
+    DSP_JIT_CF_MOVE_Y_IMM,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,

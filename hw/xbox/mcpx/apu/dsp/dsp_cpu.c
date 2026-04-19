@@ -1611,6 +1611,15 @@ uint32_t dsp_jit_helper_inst_length(uint32_t inst)
         return 2;
     }
 
+    /* move X:(Rn + xxxx) <-> R ("0000101001110RRR1WDDDDDD"). The
+     * 24-bit offset xxxx is fetched from pram[pc+1]. Fixed bits
+     * are 23-11 (13 bits) + bit 7: mask 0xFFF880, match 0x0A7080
+     * (computed from the opcode bit pattern). No corresponding
+     * Y-long variant exists in the opcode table. */
+    if ((inst & 0xFFF880u) == 0x0A7080u) {
+        return 2;
+    }
+
     return 1;
 }
 
@@ -1923,6 +1932,9 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_sub_imm)    return DSP_JIT_CF_SUB_IMM;
     if (f == emu_cmp_imm)    return DSP_JIT_CF_CMP_IMM;
     if (f == emu_and_imm)    return DSP_JIT_CF_AND_IMM;
+    if (f == emu_move_x_long) return DSP_JIT_CF_MOVE_X_LONG;
+    if (f == emu_move_x_imm)  return DSP_JIT_CF_MOVE_X_IMM;
+    if (f == emu_move_y_imm)  return DSP_JIT_CF_MOVE_Y_IMM;
     /* Misc non-parallel (single-word, no branch). */
     if (f == emu_andi)       return DSP_JIT_CF_ANDI;
     if (f == emu_ori)        return DSP_JIT_CF_ORI;

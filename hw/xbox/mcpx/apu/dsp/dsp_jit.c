@@ -7424,6 +7424,135 @@ static void emit_cf_inc_dec_op(ArmEmit *e, uint32_t inst, bool is_sub)
     emit_ccr_e_u_n_z(e, /*xaccu=*/12);
 }
 
+/*
+ * emu_move_x_long (2-word) — move X:(Rn + xxxx) ↔ R.
+ *
+ *   inst[10:8]   = R register (0..7) for the base address
+ *   inst[5:0]    = numreg (6-bit full-register index)
+ *   inst[6]      = W direction (0 = reg → mem, 1 = mem → reg)
+ *   pram[pc+1]   = 24-bit signed offset xxxx (baked at translate
+ *                  time; Rn + xxxx masked to 24 bits)
+ *   cur_inst_len = 2 on exit
+ *
+ * Interp semantics:
+ *   x_addr = (R[r] + xxxx) & BITMASK(24)
+ *   W=0 (reg→mem): value = (A/B → pm_read_accu24, else reg); write.
+ *   W=1 (mem→reg): value = mem; value &= mask; dsp_write_reg(numreg).
+ *
+ * Register allocation:
+ *   x22  — address (callee-saved across the BLR-heavy reg side).
+ *   w5   — value.
+ *
+ * BAILs: numreg in {SP, SSH, SSL} (dsp_write_reg side effects on
+ * W=1), and numreg == SSH on W=0 (dsp_stack_pop side effect via
+ * emit_dsp_read_reg). The BLR fallback picks up the unhandled case.
+ *
+ * Cycles: emu_move_x_long doesn't += instr_cycle, so preset 2
+ * stays. 2-word length means the block exits via the PC-mismatch
+ * check (cur_inst_len = 2 → actual pc = pc+2, expected = pc+2 as
+ * well now that dsp_jit_helper_inst_length reports 2).
+ */
+static bool emit_cf_move_x_long_op(ArmEmit *e, uint32_t inst,
+                                   dsp_core_t *dsp, uint32_t pc)
+{
+    int W      = (int)((inst >> 6) & 1);
+    int r      = (int)((inst >> 8) & 0x7);
+    int numreg = (int)(inst & 0x3f);
+    uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    xxxx &= 0xFFFFFFu;
+
+    if (W) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+    }
+
+    /* x22 = (R[r] + xxxx) & 0xFFFFFF. */
+    emit_ldr_w_any(e, /*rd=*/22, /*rn=*/19, SCRATCH, OFF_R(r));
+    emit_mov_imm32(e, /*rd=*/5, xxxx);
+    emit_add_w_reg(e, /*rd=*/22, /*rn=*/22, /*rm=*/5);
+    emit_ubfx_w(e, /*rd=*/22, /*rn=*/22, 0, 24);
+
+    if (W) {
+        emit_mem_read_xy(e, DSP_SPACE_X, /*addr_reg=*/22, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mem_write_xy(e, DSP_SPACE_X, /*addr_reg=*/22, /*value_reg=*/5);
+    }
+
+    /* cur_inst_len = 2 (2-word instruction). */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    return true;
+}
+
+/*
+ * emu_move_xy_imm (1-word) — move {X|Y}:(Rn + xxx) ↔ R with a
+ * 7-bit signed offset baked from inst[16:11] (upper 6 bits, at
+ * xxx[6:1]) and inst[6] (xxx[0]).
+ *
+ *   inst[16:11] | inst[6]  → 7-bit signed xxx
+ *   inst[10:8]             → R-register (R0..R7)
+ *   inst[4]                → W direction
+ *   inst[3:0]              → numreg (4-bit: covers DSP_REG_NULL
+ *                            through DSP_REG_B — the low 16 slots
+ *                            of the register file)
+ *   inst[5]                → 0 = X space, 1 = Y space (encoded
+ *                            into the selector parameter here)
+ *   cur_inst_len stays at 1
+ *
+ * The 4-bit numreg never names SP/SSH/SSL (those live at indices
+ * 0x3B/0x3C/0x3D in the full register file, well outside the
+ * 0..15 range), so the SSH/SP BAIL paths in emit_dsp_read_reg /
+ * emit_dsp_write_reg are unreachable here. Still guard defensively.
+ */
+static bool emit_cf_move_xy_imm_op(ArmEmit *e, uint32_t inst, int space)
+{
+    int W      = (int)((inst >> 4) & 1);
+    int r      = (int)((inst >> 8) & 0x7);
+    int numreg = (int)(inst & 0xf);
+    /* Reconstruct the 7-bit offset from its split bits. */
+    uint32_t aaa_hi = (inst >> 11) & 0x3f;
+    uint32_t aaa_lo = (inst >> 6)  & 0x1;
+    uint32_t xxx    = (aaa_hi << 1) | aaa_lo;
+    /* Sign-extend 7-bit to 32-bit signed. */
+    int32_t signed_xxx = (int32_t)(xxx << 25) >> 25;
+
+    if (W) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+    }
+
+    /* x22 = (R[r] + signed_xxx) & 0xFFFFFF. 7-bit signed imm fits
+     * in ADD / SUB imm12 (max 63 / -64). */
+    emit_ldr_w_any(e, /*rd=*/22, /*rn=*/19, SCRATCH, OFF_R(r));
+    if (signed_xxx >= 0) {
+        if (signed_xxx != 0) {
+            emit_add_w_imm(e, /*rd=*/22, /*rn=*/22, (uint32_t)signed_xxx);
+        }
+    } else {
+        emit_sub_w_imm(e, /*rd=*/22, /*rn=*/22, (uint32_t)(-signed_xxx));
+    }
+    emit_ubfx_w(e, /*rd=*/22, /*rn=*/22, 0, 24);
+
+    if (W) {
+        emit_mem_read_xy(e, space, /*addr_reg=*/22, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mem_write_xy(e, space, /*addr_reg=*/22, /*value_reg=*/5);
+    }
+
+    /* Cycles stay at preset 2 (emu_move_xy_imm TODOs cycle count
+     * and the interp doesn't += anything). */
+    return true;
+}
+
 /* ============================================================== *
  * Phase 5a — extended: _ea variants and bit-test families.
  *
@@ -7835,6 +7964,15 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         emit_alu_long_imm_logical(e, DSP_JIT_LI_AND, dst_ab, xx);
         break;
     }
+    case DSP_JIT_CF_MOVE_X_LONG:
+        if (!emit_cf_move_x_long_op(e, inst, dsp, pc)) { return false; }
+        break;
+    case DSP_JIT_CF_MOVE_X_IMM:
+        if (!emit_cf_move_xy_imm_op(e, inst, DSP_SPACE_X)) { return false; }
+        break;
+    case DSP_JIT_CF_MOVE_Y_IMM:
+        if (!emit_cf_move_xy_imm_op(e, inst, DSP_SPACE_Y)) { return false; }
+        break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;
