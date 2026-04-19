@@ -3183,24 +3183,11 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu);
 static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
 {
     if ((inst & 0xf40000u) == 0x400000u) {
-        /*
-         * pm_4x (long-accu l:ea). Full helper BLR — emu_pm_4x
+        /* pm_4x (long-accu l:ea). Full helper BLR — the helper
          * runs fetch + ALU + write internally, so we do NOT BLR
-         * the ALU separately here.
-         *
-         * emu_pm_4x reads dsp->cur_inst multiple times to decode
-         * its own sub-fields (memspace / numreg / ea_mode). The
-         * pm_4x branch is therefore one of the few parmove paths
-         * where the cur_inst preset CANNOT be skipped. Round 4
-         * elided the preset blanket-wide in emit_parmove_stub;
-         * restore it here locally so the pm_4x BLR sees a valid
-         * dsp->cur_inst. All other pm_N emitters decode `inst`
-         * at translate time and never read dsp->cur_inst.
-         */
+         * the ALU separately here. cur_inst / cur_inst_len /
+         * instr_cycle were already set up by emit_parmove_stub. */
         (void)alu;  /* ALU call is inside the helper */
-        emit_mov_imm32(e, /*rd=*/0, inst);
-        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
-
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
         emit_mov_imm64(e, /*rd=*/1,
             (uint64_t)(uintptr_t)&dsp_jit_helper_pm_4x);
