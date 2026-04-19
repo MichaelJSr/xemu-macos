@@ -217,6 +217,11 @@ enum {
     DSP_JIT_CF_ASL_IMM,
     DSP_JIT_CF_ASR_IMM,
     DSP_JIT_CF_LSL_IMM,
+    /* Unsigned 56-bit compare of the destination accu vs either
+     * the other accu (read through pm_read_accu24's saturate/
+     * scale pipeline) or X0/X1/Y0/Y1 (direct 24-bit). Updates
+     * SR.C (borrow), SR.N, SR.Z; clears SR.V. */
+    DSP_JIT_CF_CMPU,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,

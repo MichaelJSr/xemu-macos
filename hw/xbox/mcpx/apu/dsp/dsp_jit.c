@@ -7874,6 +7874,114 @@ static void emit_cf_lsl_imm_op(ArmEmit *e, uint32_t inst)
 }
 
 /*
+ * CMPU — unsigned compare of destination accu (56-bit) against a
+ * 24-bit source value, sign-extended to 56 bits, without writing
+ * the accu. SR update: clear V|C|Z|N; set C = subtract borrow,
+ * N = result[55], Z = (result == 0).
+ *
+ * Bit layout (bit pattern 00001100000111111SgggD0):
+ *   ggg = inst[3:1]  source selector
+ *     0 → other accu (d ? A : B), read via pm_read_accu24
+ *         (applies SR.S0/S1 scaling + saturating-limit at 24 bits)
+ *     4 → X0
+ *     5 → Y0
+ *     6 → X1
+ *     7 → Y1
+ *   d   = inst[0]  destination accu (0 = A, 1 = B)
+ *
+ * For ggg ∉ {0,4,5,6,7} we bail — the interpreter leaves srcreg
+ * as DSP_REG_NULL in that case and reads undefined memory; only
+ * legal encodings ever hit this code in practice, and bailing
+ * hands the odd-case to the interpreter fallback.
+ *
+ * The non-A/B source path (ggg 4-7) is the common case (at the
+ * commit-before-this-landing stats, A/B source vs X/Y source
+ * wasn't distinguished, so we handle both for completeness).
+ * pm_read_accu24 is BLR'd through the existing helper shim; that
+ * BLR may set SR.L on saturation overflow, so the SR pin is
+ * reloaded after. For X/Y sources the path is a single pin UBFX.
+ *
+ * Flag emission mirrors emu_cmpu's:
+ *   newsr = dsp_sub56(source, dest);        (C only consumed)
+ *   SR &= ~(V|C|Z|N); SR |= (newsr & C);    (V stays cleared)
+ *   SR |= Z ? (1<<DSP_SR_Z) : 0;
+ *   SR |= (A2_result >> 4) & 0x8;           (= N at SR_N=3)
+ */
+static void emit_cf_cmpu_op(ArmEmit *e, uint32_t inst)
+{
+    int ggg = (int)((inst >> 1) & 0x7);
+    int d   = (int)(inst & 1);
+
+    int srcreg;
+    switch (ggg) {
+    case 0: srcreg = d ? DSP_REG_A : DSP_REG_B; break;
+    case 4: srcreg = DSP_REG_X0; break;
+    case 5: srcreg = DSP_REG_Y0; break;
+    case 6: srcreg = DSP_REG_X1; break;
+    case 7: srcreg = DSP_REG_Y1; break;
+    default:
+        /* Illegal encoding — interpreter would read uninitialised
+         * srcreg (DSP_REG_NULL). Real hardware / real code never
+         * emits these; leave as "compare with 0" (subtract 0 from
+         * the destination accu) since the alternative is undefined
+         * behaviour. SR.C=0, SR.Z from accu, SR.N from accu[55]. */
+        srcreg = -1;
+        break;
+    }
+
+    /* w5 = 24-bit source value. Clobbers w0..w3 when srcreg is A/B. */
+    if (srcreg >= 0) {
+        emit_pm_read_reg(e, srcreg, /*value_reg=*/5);
+    } else {
+        emit_mov_imm32(e, /*rd=*/5, 0);
+    }
+
+    /* x11 = sign-extended 24-bit source shifted into bits [47:24],
+     * matching emu_cmpu's source[] layout (source[2]=0,
+     * source[1]=value, source[0]=sign(value)*0xff). Equivalent to
+     * `((int64_t)sign_ext_24(value)) << 24`. */
+    emit_sbfx_x(e, /*rd=*/11, /*rn=*/5, 0, 24);
+    emit_lsl_x_imm(e, /*rd=*/11, /*rn=*/11, 24);
+
+    /* x10 = dest accu (sign-ext 64-bit from pin). */
+    emit_load_accu56(e, /*xaccu=*/10, /*which_ab=*/d, /*xtmp=*/8);
+
+    /* x12 = x10 - x11; sign-extend to 56 to match dsp_sub56. */
+    emit_sub_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    /* C/V/L in w5 (we only consume C). */
+    emit_addsub_flags(e, /*xorig=*/10, /*xsrc=*/11, /*xres=*/12,
+                      /*is_sub=*/true);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, DSP_SR_C, 1);   /* w5 = C */
+
+    /* N = result[55]. */
+    emit_ubfx_x(e, /*rd=*/6, /*rn=*/12, 55, 1);
+
+    /* Z: all 56 bits of x12 zero. Same OR-the-three-slots trick
+     * the main ccr helper uses. */
+    emit_ubfx_x(e, /*rd=*/7, /*rn=*/12, 48, 8);
+    emit_ubfx_x(e, /*rd=*/8, /*rn=*/12, 24, 24);
+    emit_orr_w_reg(e, /*rd=*/7, /*rn=*/7, /*rm=*/8);
+    emit_ubfx_x(e, /*rd=*/8, /*rn=*/12, 0, 24);
+    emit_orr_w_reg(e, /*rd=*/7, /*rn=*/7, /*rm=*/8);
+    emit_cmp_w_imm(e, /*rn=*/7, 0);
+    emit_cset_w(e, /*rd=*/7, ARM_COND_EQ);             /* w7 = Z */
+
+    /* SR: clear V|C|Z|N (preserve everything else), BFI new bits. */
+    emit_load_sr(e, /*rd=*/9);
+    emit_mov_imm32(e, /*rd=*/10,
+                   (uint32_t)~((1u << DSP_SR_V) | (1u << DSP_SR_C) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_N))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/10);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/5, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/7, DSP_SR_Z, 1);
+    emit_store_sr_h(e, /*rs=*/9);
+}
+
+/*
  * emu_move_x_long (2-word) — move X:(Rn + xxxx) ↔ R.
  *
  *   inst[10:8]   = R register (0..7) for the base address
@@ -8430,6 +8538,9 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         break;
     case DSP_JIT_CF_LSL_IMM:
         emit_cf_lsl_imm_op(e, inst);
+        break;
+    case DSP_JIT_CF_CMPU:
+        emit_cf_cmpu_op(e, inst);
         break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
