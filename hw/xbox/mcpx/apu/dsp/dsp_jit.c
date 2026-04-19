@@ -93,6 +93,21 @@ static bool g_jit_stats;
 static uint32_t g_jit_sentinel;
 
 /*
+ * Force-skip mode: re-applies the deferred round-4 optimizations
+ * literally (no diagnostics). Used to verify whether the
+ * regressions still reproduce after later fixes. See dsp_jit.h.
+ */
+static uint32_t g_jit_force;
+
+/*
+ * Sentinel summary counters — cumulative across the run, printed
+ * with the JIT stats at exit so the user can verify the harness
+ * was actually emitted and observed traffic.
+ */
+static uint64_t g_sentinel_pc_watch_blr_count;
+static uint64_t g_sentinel_pc_mismatch_count;
+
+/*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
  * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
  * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
@@ -193,6 +208,19 @@ static void parse_flags_once(void)
         }
     }
 
+    /* XEMU_DSP_JIT_FORCE: literally re-apply the deferred round-4
+     * skips. Bit 0 = cur_inst skip; bit 1 = PC-check skip. No
+     * diagnostics — the test is "does anything still break?".
+     * If the run is clean with FORCE=3, the round-4 commits can
+     * be re-landed. */
+    e = getenv("XEMU_DSP_JIT_FORCE");
+    if (e && e[0]) {
+        long n = strtol(e, NULL, 0);
+        if (n > 0 && n <= 3) {
+            g_jit_force = (uint32_t)n;
+        }
+    }
+
     if (g_jit_enabled) {
         const char *mode_desc = "";
         if (g_jit_diff && g_jit_diff_sync && g_jit_diff_sample == 1) {
@@ -204,12 +232,16 @@ static void parse_flags_once(void)
         } else if (g_jit_diff) {
             mode_desc = " (DIFF=async, sampled)";
         }
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s\n",
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s%s%s\n",
                 mode_desc, g_jit_stats ? " (stats)" : "",
                 (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST)
                     ? " (SENTINEL-curinst)" : "",
                 (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)
-                    ? " (SENTINEL-pcskip)" : "");
+                    ? " (SENTINEL-pcskip)" : "",
+                (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP)
+                    ? " (FORCE-curinst-skip)" : "",
+                (g_jit_force & DSP_JIT_FORCE_PCSKIP)
+                    ? " (FORCE-pcskip)" : "");
     }
 }
 
@@ -231,6 +263,12 @@ bool dsp_jit_sentinel_enabled(uint32_t bit)
     return (g_jit_sentinel & bit) != 0;
 }
 
+bool dsp_jit_force_enabled(uint32_t bit)
+{
+    parse_flags_once();
+    return (g_jit_force & bit) != 0;
+}
+
 /*
  * Sentinel PC-mismatch logger. Called from translated code via
  * BLR when XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled.
@@ -248,11 +286,17 @@ static struct {
 void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
                              uint32_t expected_pc, uint32_t actual_pc)
 {
+    /* Always count BLR traffic so the user can verify the harness
+     * is actually emitting + executing. */
+    g_sentinel_pc_watch_blr_count++;
+
     /* No-op if pc actually matches — called unconditionally from
      * translated code so the fast path is "return right away". */
     if (expected_pc == actual_pc) {
         return;
     }
+
+    g_sentinel_pc_mismatch_count++;
 
     /* Hash inst into the table. */
     uint32_t h = (inst ^ (inst >> 12) ^ (inst >> 20)) &
@@ -4367,13 +4411,21 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     {
         bool is_pm4x = (select == 4 &&
                         (inst & 0xf40000u) == 0x400000u);
-        uint32_t cur_inst_preset =
-            (!is_pm4x &&
-             (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
-                ? DSP_JIT_SENTINEL_POISON
-                : inst;
-        emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
-        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+        bool force_skip = !is_pm4x &&
+            (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP);
+        if (force_skip) {
+            /* Force mode: literal round-4 parmove cur_inst skip
+             * (pm_4x always writes the real inst because emu_pm_4x
+             * reads it). */
+        } else {
+            uint32_t cur_inst_preset =
+                (!is_pm4x &&
+                 (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
+                    ? DSP_JIT_SENTINEL_POISON
+                    : inst;
+            emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
+            emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+        }
     }
     emit_movz_w(e, /*rd=*/0, 1, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
@@ -4440,6 +4492,10 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
      * parmove sub-class whose BLR fallback is mutating pc.
      */
     EpilogueHints p_hints = EPI_UNKNOWN;
+    if (g_jit_force & DSP_JIT_FORCE_PCSKIP) {
+        /* Force mode: literal round-4 EPI_NO_PC for parmove. */
+        p_hints.may_change_pc = false;
+    }
     p_hints.sentinel_watch    = true;
     p_hints.sentinel_inst     = inst;
     p_hints.sentinel_pc_start = pc;
@@ -5508,13 +5564,20 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
         bool will_inline_sent =
             (cf_kind_sent != DSP_JIT_CF_NONE) ||
             (li_kind_sent != DSP_JIT_LI_NONE);
-        uint32_t cur_inst_preset =
-            (will_inline_sent &&
-             (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
-                ? DSP_JIT_SENTINEL_POISON
-                : inst;
-        emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
-        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+        bool force_skip = will_inline_sent &&
+            (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP);
+        if (force_skip) {
+            /* Force mode: literal round-4 skip — leave cur_inst
+             * holding whatever the previous op wrote. */
+        } else {
+            uint32_t cur_inst_preset =
+                (will_inline_sent &&
+                 (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
+                    ? DSP_JIT_SENTINEL_POISON
+                    : inst;
+            emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
+            emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+        }
     }
 
     /* 2. dsp->cur_inst_len = 1. This is the interpreter's initial
@@ -5590,6 +5653,10 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      */
     EpilogueHints i_hints = EPI_UNKNOWN;
     if (li_inlined) {
+        if (g_jit_force & DSP_JIT_FORCE_PCSKIP) {
+            /* Force mode: literal round-4 EPI_NO_PC for long-imm. */
+            i_hints.may_change_pc = false;
+        }
         i_hints.sentinel_watch    = true;
         i_hints.sentinel_inst     = inst;
         i_hints.sentinel_pc_start = pc;
@@ -6039,6 +6106,25 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
                 100.0 * (double)g_cf_inlined_count /
                 (double)(g_cf_inlined_count + g_cf_fallback_count),
             g_cf_fallback_count);
+
+    /* Sentinel summary — confirms the harness was emitted and
+     * actually ran. Useful for "did the sentinel trigger?" checks
+     * when the user reports no observable failure: a zero
+     * mismatch count combined with a non-zero BLR count means
+     * the watched ops never diverged (good signal that the
+     * deferred skip is safe). A zero BLR count means the
+     * harness wasn't running (env var typo / not enabled). */
+    if (g_jit_sentinel || g_jit_force) {
+        fprintf(stderr,
+                "  sentinel_pc_blr   = %" PRIu64 "\n"
+                "  sentinel_pc_diff  = %" PRIu64 "\n"
+                "  force_mode        = 0x%x  (curinst_skip=%s pcskip=%s)\n",
+                g_sentinel_pc_watch_blr_count,
+                g_sentinel_pc_mismatch_count,
+                g_jit_force,
+                (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP) ? "on" : "off",
+                (g_jit_force & DSP_JIT_FORCE_PCSKIP) ? "on" : "off");
+    }
     fflush(stderr);
 }
 

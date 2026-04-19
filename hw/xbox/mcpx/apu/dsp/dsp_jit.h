@@ -91,6 +91,28 @@ void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
                              uint32_t expected_pc, uint32_t actual_pc);
 
 /*
+ * Force-apply the deferred round-4 optimizations literally (no
+ * sentinel poison, no logger). Use to test whether the underlying
+ * regressions still reproduce after later commits. Bitmask:
+ *
+ *   1 (bit 0, "curinst")  — actually skip the cur_inst preset for
+ *       inlinable ops (CF / long-imm) and for parmove stubs other
+ *       than pm_4x. Identical to round-4's emit behaviour.
+ *
+ *   2 (bit 1, "pcskip")   — actually elide the PC-mismatch exit
+ *       check for parmove stubs and inlined long-imm ops.
+ *       Identical to round-4's EPI_NO_PC behaviour.
+ *
+ * If the test passes cleanly with FORCE=3, the round-4 commits
+ * can be re-landed (the original failures must have been
+ * exorcised by intervening fixes — e.g. the calc_ea mode 6
+ * mask fix). Set via XEMU_DSP_JIT_FORCE=N.
+ */
+#define DSP_JIT_FORCE_CURINST_SKIP  (1u << 0)
+#define DSP_JIT_FORCE_PCSKIP        (1u << 1)
+bool dsp_jit_force_enabled(uint32_t bit);
+
+/*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
  * Keeps the JIT source decoupled from ui/xemu-settings.h so the
  * standalone DSP test binary (which links libdsp.a without the

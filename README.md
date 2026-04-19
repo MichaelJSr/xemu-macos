@@ -306,7 +306,17 @@ hard-FPU knobs; TOML is only needed for fine tuning.
       rate-limited per-inst and no-ops on the matching path.
   Both bits can be combined (`=3`). Not for production — the
   extra BLR to the logger on sentinel-watched ops costs ~5
-  cycles / op. Static block
+  cycles / op. Stats output at exit includes
+  `sentinel_pc_blr` (BLR traffic — confirms the harness ran) and
+  `sentinel_pc_diff` (mismatches — zero means the deferred PC
+  skip is safe on the exercised code path).
+
+  Companion knob `XEMU_DSP_JIT_FORCE=N` literally re-applies the
+  deferred optimizations (no poison, no logger) so the user can
+  test whether the round-4 regressions still reproduce after
+  later commits. Bit 0 = cur_inst skip; bit 1 = PC-check skip;
+  3 = both. A clean run with `FORCE=3` means the round-4 commits
+  can be re-landed as-is. Static block
   chaining (direct `B <target.entry>` patch on known branch
   targets) is a followup commit — the entry-split prologue
   refactor it depends on is scoped separately.
