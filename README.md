@@ -126,6 +126,14 @@ fine tuning.
 - **Fence-wait diagnostics.** 5 s timeout wrapper on single-time CBs
   that aborts with the named call site instead of hanging silently on
   MoltenVK internal-mutex deadlocks.
+- **Narrowed surface-upload finish.** `pgraph_vk_upload_surface_data`
+  now only forces a full GPU sync when the target is the active
+  color/zeta binding or a command buffer is recording. The common
+  `render_display` path (which already ran a `PRESENTING` finish and
+  uploads an unrelated source surface) and texture-streaming bursts
+  skip the finish; MoltenVK's single queue serializes the aux upload
+  behind any prior-submitted render work, and the aux-CB fence wait
+  preserves host-visible ordering.
 
 ### MetalFX + presentation
 

@@ -1069,7 +1069,34 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_UPLOAD);
 
-    pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
+    /*
+     * The finish here is only required when the upload target is
+     * actively bound as color/zeta or otherwise referenced by the
+     * currently recording command buffer, to preserve the read-after-
+     * write ordering on the guest-visible side. When the target isn't
+     * the active color/zeta binding and no CB is recording, no
+     * unsubmitted GPU work references this surface: MoltenVK's single
+     * queue serializes the aux-CB upload behind any prior submitted
+     * main CB, and pgraph_vk_end_single_time_commands waits on
+     * aux_fence before returning so host-visible ordering still holds.
+     *
+     * Call sites where the gate fails (finish still runs):
+     *   - update_surface_part() passes r->color_binding / r->zeta_binding
+     *   - texture-as-surface from bind_textures (in_command_buffer == true
+     *     mid-frame between draws)
+     * Call sites where the fast path fires:
+     *   - render_display() upload, which already ran a PRESENTING finish
+     *     a few lines earlier, so in_command_buffer == false and the
+     *     source surface is typically not the active color/zeta.
+     */
+    bool target_is_active =
+        (surface == r->color_binding) ||
+        (surface == r->zeta_binding) ||
+        r->in_command_buffer;
+
+    if (target_is_active) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
+    }
 
     trace_nv2a_pgraph_surface_upload(
                  surface->color ? "COLOR" : "ZETA",
