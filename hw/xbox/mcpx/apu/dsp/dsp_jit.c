@@ -1329,16 +1329,6 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
  */
 #define SCRATCH 3   /* X3 synthesizes the address for far-field access */
 
-/* Phase 8 register pinning. x26 and x27 are callee-saved registers
- * the block's prologue loads with packed-56-bit A and B; within
- * the block, emit_load_accu56 / emit_store_accu56 read from / write
- * through to them to eliminate the per-op LDR+SBFX+LSL+LDR+BFI+LDR
- * +BFI load chain (7 insns) / UBFX+STR×3 store chain (6 insns).
- * See the block comment above emit_load_accu56 for the full
- * invariants and reload semantics on BLR fallback. */
-#define DSP_JIT_A_PIN_REG  26
-#define DSP_JIT_B_PIN_REG  27
-
 /* Compile-time offsets for the DSP register file R/N/M/L banks. */
 #define OFF_REGS      ((uint32_t)offsetof(dsp_core_t, registers))
 #define OFF_REG(n)    (OFF_REGS + 4u * (uint32_t)(n))
@@ -1761,22 +1751,6 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
         emit_neg_w(e, /*rd=*/0, /*rm=*/0);
         emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 8);
         emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, off_x2);
-
-        /* Phase 8 pin sync: the parmove just rewrote A/B in memory
-         * via three direct STRs; update the pinned x26 / x27 to
-         * match so subsequent inline ALU ops (which read the pin
-         * via emit_load_accu56) see the new accumulator. The new
-         * packed 56-bit value is:
-         *   bits [55:48] = sign-ext(value[23]) = 0xFF or 0x00
-         *   bits [47:24] = value[23:0]
-         *   bits [23:0]  = 0
-         * SBFX(pin, value, 0, 24) sign-extends bits [23:0] into all
-         * 64 bits of pin; LSL 24 shifts up leaving bits [23:0] zero
-         * and bits [63:48] naturally carrying the sign extension. */
-        int pin = (dstreg == DSP_REG_A) ? DSP_JIT_A_PIN_REG
-                                        : DSP_JIT_B_PIN_REG;
-        emit_sbfx_x(e, /*rd=*/pin, /*rn=*/value_reg, 0, 24);
-        emit_lsl_x_imm(e, /*rd=*/pin, /*rn=*/pin, 24);
         return;
     }
 
@@ -1905,111 +1879,46 @@ static inline uint32_t accu_off(int which_ab, int slot)
  *
  * Clobbers: w/x tmp regs (caller passes scratch1 / scratch2).
  */
-/*
- * Accumulator pinning (Phase 8): within a block, A and B live in
- * the callee-saved registers x26 and x27 in their packed 56-bit
- * sign-extended-to-64 form. The block's prologue loads them from
- * registers[A2/A1/A0] / registers[B2/B1/B0] before any op runs;
- * the epilogue's callee-saved restore undoes the prologue's STP
- * pair so x26/x27 revert to their caller-supplied values. Writes
- * are done write-through — every store updates both the pinned
- * X-reg AND the memory-backed registers[] slots, keeping the
- * register file in sync so BLR fallbacks into the C interpreter
- * (emu_max, emu_pm_4x, postexecute_interrupts for interrupt
- * dispatch) see a consistent accumulator state.
- *
- * Choice of x26 / x27: among the ARM64 callee-saved set (x19-
- * x28), x19-x25 are already pinned to {dsp pointer, two helper
- * pointers, four parmove scratch slots}. x26 / x27 are free and
- * the matching STP pair (x26, x27 at SP offset 0) fits neatly
- * into the prologue without disturbing existing slots.
- *
- * load_accu56 / store_accu56 signatures unchanged; the xtmp
- * parameter is now unused but kept for API stability (callers
- * still pass it harmlessly — an unused MOV doesn't cost anything
- * since nothing depends on xtmp after the pinning shortcuts
- * replace the LDR / STR chains).
- */
 static void emit_load_accu56(ArmEmit *e, int xaccu, int which_ab,
                              int xtmp)
 {
-    (void)xtmp;
-    int pin = which_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-    /* MOV Xd, Xm — 1 insn vs the old LDRB + SBFX + LSL + 2×LDR +
-     * 2×BFI 7-insn sequence. The packed value is kept sign-
-     * extended to 64 bits by store_accu56's SBFX-before-store-to-
-     * pinned step, so no additional sign-extension is needed on
-     * load. */
-    emit_mov_x_reg(e, /*rd=*/xaccu, /*rn=*/pin);
+    assert(xaccu != xtmp);
+    /* Load A2 (byte) and sign-extend directly into xaccu as a
+     * 64-bit signed value. After SBFX with lsb=0, width=8, xaccu
+     * holds the signed 8-bit interpretation of A2 in bits 63:0
+     * (i.e. all 64 bits carry the sign). */
+    emit_ldrb_any(e, /*rd=*/xaccu, /*rn=*/19, SCRATCH, accu_off(which_ab, 2));
+    emit_sbfx_x(e, /*rd=*/xaccu, /*rn=*/xaccu, 0, 8);
+    emit_lsl_x_imm(e, /*rd=*/xaccu, /*rn=*/xaccu, 48);
+
+    /* A1 -> bits [47:24] (bfi handles masking to 24 bits). */
+    emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 1));
+    emit_bfi_x(e, /*rd=*/xaccu, /*rn=*/xtmp, 24, 24);
+
+    /* A0 -> bits [23:0]. */
+    emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 0));
+    emit_bfi_x(e, /*rd=*/xaccu, /*rn=*/xtmp, 0, 24);
 }
 
 /*
- * Write-through store: update BOTH the pinned X-reg and the
- * memory-backed registers[A2/A1/A0] (or B2/B1/B0). Memory writes
- * are the same UBFX + STR pattern as the original store_accu56;
- * the new work is just the MOV into the pinned reg.
- *
- * Sign-extends xsrc into the pinned reg (via SBFX from bit 56)
- * before the MOV, so subsequent loads via emit_load_accu56 see a
- * correctly sign-extended value without needing to re-extend.
+ * Unpack a 64-bit X-reg back into A2 / A1 / A0 (or B2 / B1 / B0)
+ * with the standard 8 / 24 / 24-bit widths. Uses UBFX so bits
+ * outside the slot width are not stored (matching the interp's
+ * `& BITMASK(24)` / `& BITMASK(8)` masks).
  */
 G_GNUC_UNUSED static void emit_store_accu56(ArmEmit *e, int xaccu,
                                             int which_ab, int xtmp)
 {
     assert(xaccu != xtmp);
-    int pin = which_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-
-    /* Re-sign-extend xsrc (56-bit value) and copy to pinned reg.
-     * Callers typically have xaccu already sign-extended from the
-     * ALU operation (emit_addsub_flags et al. produce sign-extended
-     * results), but doing SBFX unconditionally here is 1 insn and
-     * makes the emitter robust. */
-    emit_sbfx_x(e, /*rd=*/pin, /*rn=*/xaccu, 0, 56);
-
-    /* Write-through to registers[] so BLR-fallback handlers see
-     * up-to-date accumulator state. A0 = accu[23:0]. */
+    /* A0 = accu[23:0] */
     emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 0, 24);
     emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 0));
     /* A1 = accu[47:24] */
     emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 24, 24);
     emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 1));
-    /* A2 = accu[55:48] (unsigned 8-bit) */
+    /* A2 = accu[55:48] (unsigned 8-bit — matches interp's & BITMASK(8)) */
     emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/xaccu, 48, 8);
     emit_str_w_any(e, /*rs=*/xtmp, /*rn=*/19, SCRATCH, accu_off(which_ab, 2));
-}
-
-/*
- * Reload x26 / x27 from registers[] after a BLR-fallback that
- * might have mutated A / B via the C interpreter path. Only two
- * places actually do this: emit_alu_call's BLR fallback (invoked
- * for MAX — the single remaining non-inlined ALU), and pm_4x
- * (dsp_jit_helper_pm_4x, which internally writes A/B).
- *
- * Load pattern is the OLD emit_load_accu56 load sequence, just
- * targeting the pinned regs. ~7 insns per reload — cheap because
- * these BLR fallbacks are rare.
- */
-static void emit_reload_ab_pins(ArmEmit *e)
-{
-    /* x26 = packed A (sign-ext from bit 55). */
-    emit_ldrb_any(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/19, SCRATCH,
-                  accu_off(0, 2));
-    emit_sbfx_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/DSP_JIT_A_PIN_REG, 0, 8);
-    emit_lsl_x_imm(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/DSP_JIT_A_PIN_REG, 48);
-    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH, accu_off(0, 1));
-    emit_bfi_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/SCRATCH, 24, 24);
-    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH, accu_off(0, 0));
-    emit_bfi_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/SCRATCH, 0, 24);
-
-    /* x27 = packed B. */
-    emit_ldrb_any(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/19, SCRATCH,
-                  accu_off(1, 2));
-    emit_sbfx_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/DSP_JIT_B_PIN_REG, 0, 8);
-    emit_lsl_x_imm(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/DSP_JIT_B_PIN_REG, 48);
-    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH, accu_off(1, 1));
-    emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/SCRATCH, 24, 24);
-    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH, accu_off(1, 0));
-    emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/SCRATCH, 0, 24);
 }
 
 /*
@@ -2749,13 +2658,6 @@ static void emit_alu_clr(ArmEmit *e, const AluVariant *v)
     emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 1));
     emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
 
-    /* Phase 8 pin sync: the accu is now zero. Write XZR into the
-     * pinned x26/x27 via MOV. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_mov_x_reg(e, /*rd=*/pin, /*rn=*/31 /*XZR*/);
-    }
-
     /* SR: clear E|N|V, set U|Z. */
     emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
     emit_mov_imm32(e, /*rd=*/7,
@@ -2972,14 +2874,6 @@ static void emit_alu_lsl(ArmEmit *e, const AluVariant *v)
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
 
-    /* Phase 8 pin sync: splice the 24-bit new A1 into bits [47:24]
-     * of the pinned x26/x27. A0/A2 are untouched by LSL so the
-     * remaining pin bits stay valid. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
-    }
-
     /* N = new[23]. */
     emit_ubfx_w(e, /*rd=*/7, /*rn=*/5, 23, 1);
 
@@ -3123,12 +3017,6 @@ static void emit_alu_long_imm_logical(ArmEmit *e, int kind_li,
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
 
-    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
-    {
-        int pin = dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
-    }
-
     /* Flags: N = bit 23 of new A1; Z = (new A1 == 0). */
     emit_ubfx_w(e, /*rd=*/6, /*rn=*/5, 23, 1);           /* w6 = N */
     emit_cmp_w_imm(e, /*rn=*/5, 0);
@@ -3217,12 +3105,6 @@ static void emit_alu_lsr(ArmEmit *e, const AluVariant *v)
     emit_lsr_w_imm(e, /*rd=*/5, /*rn=*/5, 1);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
 
-    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
-    }
-
     /* Z = (new == 0). */
     emit_cmp_w_imm(e, /*rn=*/5, 0);
     emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
@@ -3272,12 +3154,6 @@ static void emit_alu_rol(ArmEmit *e, const AluVariant *v)
     emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/6);
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
-
-    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
-    }
 
     /* N = new[23]. */
     emit_ubfx_w(e, /*rd=*/7, /*rn=*/5, 23, 1);
@@ -3329,12 +3205,6 @@ static void emit_alu_ror(ArmEmit *e, const AluVariant *v)
     emit_lsl_w_imm(e, /*rd=*/7, /*rn=*/6, 23);
     emit_orr_w_reg(e, /*rd=*/5, /*rn=*/5, /*rm=*/7);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
-
-    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
-    }
 
     /* Z = (new == 0). */
     emit_cmp_w_imm(e, /*rn=*/5, 0);
@@ -3724,12 +3594,6 @@ static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
     /* Store back. */
     emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, off_a1);
 
-    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
-    {
-        int pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/10, 24, 24);
-    }
-
     /* SR: clear N|Z|V, set N = bit 23 of A1, Z = (A1 == 0). */
     emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~((1u << DSP_SR_N) | (1u << DSP_SR_Z) |
@@ -3760,11 +3624,8 @@ static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
  */
 static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
 {
-    int dst_pin = v->dst_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
-
     if (v->src_form == ALU_SRC_ACCU_A || v->src_form == ALU_SRC_ACCU_B) {
         int src_ab = (v->src_form == ALU_SRC_ACCU_A) ? 0 : 1;
-        int src_pin = src_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
         /* 3-word copy. Assumes A and B never alias (always distinct). */
         emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, accu_off(src_ab, 0));
         emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 0));
@@ -3772,8 +3633,6 @@ static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
         emit_str_w_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 1));
         emit_ldrb_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, accu_off(src_ab, 2));
         emit_strb_any(e, /*rs=*/10, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
-        /* Pin sync: dst pin = src pin. */
-        emit_mov_x_reg(e, /*rd=*/dst_pin, /*rn=*/src_pin);
         return;
     }
 
@@ -3791,12 +3650,6 @@ static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
     emit_neg_w(e, /*rd=*/7, /*rm=*/7);     /* 0 or 0xFFFFFFFF */
     emit_ubfx_w(e, /*rd=*/7, /*rn=*/7, 0, 8);
     emit_strb_any(e, /*rs=*/7, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 2));
-
-    /* Pin sync: same packing as emit_pm_write_reg's A/B branch —
-     * SBFX from bit 23 of src, LSL 24 leaves A0=0 / A1=src / A2=
-     * sign-ext. w10 still holds the raw src here. */
-    emit_sbfx_x(e, /*rd=*/dst_pin, /*rn=*/10, 0, 24);
-    emit_lsl_x_imm(e, /*rd=*/dst_pin, /*rn=*/dst_pin, 24);
 }
 
 /* --------------------------------------------------------------- *
@@ -3998,16 +3851,10 @@ static void emit_alu_call(ArmEmit *e, uint8_t alu_op, emu_func_t alu)
     }
 
     /* Fallback: BLR the existing C handler — identical to pre-
-     * Phase-2 behaviour. The C handler writes registers[A/B]
-     * directly, so after the BLR our pinned x26 / x27 are stale
-     * (they contain the PRE-BLR values). Reload from registers[]
-     * so the next inline ALU op observes the updated accumulator
-     * state. The BLR-fallback path is rare (only MAX after Phase
-     * 7); the reload's ~14-insn cost is well amortised. */
+     * Phase-2 behaviour. */
     emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
     emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
     emit_blr(e, /*rn=*/1);
-    emit_reload_ab_pins(e);
     g_alu_fallback_count++;
 }
 
@@ -4195,16 +4042,12 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu,
         /* pm_4x (long-accu l:ea). Full helper BLR — the helper
          * runs fetch + ALU + write internally, so we do NOT BLR
          * the ALU separately here. cur_inst / cur_inst_len /
-         * instr_cycle were already set up by emit_parmove_stub.
-         * emu_pm_4x writes registers[A/B] via the interp path;
-         * reload the x26 / x27 pins so subsequent ops in the
-         * block see the updated accumulator. */
+         * instr_cycle were already set up by emit_parmove_stub. */
         (void)alu;  /* ALU call is inside the helper */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
         emit_mov_imm64(e, /*rd=*/1,
             (uint64_t)(uintptr_t)&dsp_jit_helper_pm_4x);
         emit_blr(e, /*rn=*/1);
-        emit_reload_ab_pins(e);
         return;
     }
     emit_parmove_pm5(e, inst, alu, dsp, pc);
@@ -6283,17 +6126,9 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
         }
     }
     if (!handler_inlined) {
-        /* Generic BLR fallback for non-parmove, non-CF, non-long-imm
-         * ops (movec / movem / movep / do _aa/_ea/_reg / dor_reg /
-         * tcc / stop / wait / reset / etc). These handlers run in
-         * the C interpreter and may write registers[A/B] as side
-         * effects (e.g., movec writing to DSP_REG_A/B). Reload the
-         * pinned x26 / x27 after the BLR so subsequent inline ALU
-         * ops observe any accu mutations. */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);              /* x0 = dsp */
         emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
         emit_blr(e, /*rn=*/1);
-        emit_reload_ab_pins(e);
         g_cf_fallback_count++;
     }
 
@@ -6562,10 +6397,7 @@ static DspJitBlock *chain_target_for_terminator(DspJitState *s,
 
 /*
  * Emit the shared exit label + epilogue. Restores every callee-saved
- * register pushed by the prologue and returns. Note that because
- * emit_store_accu56 is write-through (updates registers[] in sync
- * with the pinned x26 / x27), no additional spill is needed here —
- * the register file is already consistent.
+ * register pushed by the prologue and returns.
  */
 static uint32_t *emit_epilogue(ArmEmit *e)
 {
@@ -6573,7 +6405,6 @@ static uint32_t *emit_epilogue(ArmEmit *e)
     /* Deallocate 16-byte scratch area. */
     emit_u32(e, 0x910043ffu);   /* ADD SP, SP, #16 */
     /* Restore in reverse of prologue's push order. */
-    emit_ldp_post(e, /*rt1=*/26, /*rt2=*/27, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, 16);
@@ -6590,19 +6421,11 @@ static uint32_t *emit_epilogue(ArmEmit *e)
 static void emit_prologue(ArmEmit *e)
 {
     /* SP must stay 16-byte-aligned throughout. Each STP with #-16
-     * moves SP by -16 and stays aligned. Save order:
-     *   [SP+0]    x30, x19    (LR + dsp pointer)
-     *   [SP+16]   x20, x21    (cached helper pointers)
-     *   [SP+32]   x22, x23    (parmove save slots 0/1)
-     *   [SP+48]   x24, x25    (parmove save slots 2/3)
-     *   [SP+64]   x26, x27    (pinned A / B accumulators — Phase 8)
-     *   [SP+80..95]           (scratch area for parmove helpers)
-     * Frame total: 96 bytes, 16-byte aligned. */
+     * moves SP by -16 and stays aligned. */
     emit_stp_pre(e, /*rt1=*/30, /*rt2=*/19, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/20, /*rt2=*/21, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, -16);
-    emit_stp_pre(e, /*rt1=*/26, /*rt2=*/27, /*rn=*/31 /*SP*/, -16);
 
     /* 16-byte scratch area for parmove slow-path helpers to write
      * their u32 outputs into. [SP+0..7] = two u32 words; [SP+8..15]
@@ -6634,17 +6457,6 @@ static void emit_prologue(ArmEmit *e)
     if (g_jit_diff) {
         emit_strb_imm_zero(e, /*rn=*/19, OFF_JIT_SKIP_DIFF);
     }
-
-    /* Phase 8 accumulator pinning: load registers[A2/A1/A0] into
-     * x26 and registers[B2/B1/B0] into x27 (packed 56-bit sign-
-     * extended to 64 bits, the same format emit_load_accu56 used
-     * to produce on every read). From here until the epilogue's
-     * callee-saved restore, emit_load_accu56 returns these values
-     * with a single MOV (saving ~6 insns / op vs the old LDR/BFI
-     * chain) and emit_store_accu56 is write-through to registers[]
-     * so any BLR-fallback handler reading the register file sees
-     * the current value. */
-    emit_reload_ab_pins(e);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
