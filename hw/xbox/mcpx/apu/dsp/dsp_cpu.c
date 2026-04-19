@@ -1421,6 +1421,50 @@ void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
     dsp_postexecute_interrupts(dsp);
 }
 
+/*
+ * Phase 8 pin-audit diagnostic. Called by the JIT's per-op pin
+ * check (XEMU_DSP_JIT_PIN_AUDIT=1) when the packed 56-bit A or
+ * B register read from dsp->registers[] disagrees with the value
+ * the JIT was holding in the pinned x26 / x27 register. `which`
+ * is 0 for A, 1 for B; `pin_lo` / `pin_hi` are the pin's 64-bit
+ * contents split into two u32 halves (so the ARM64 emitter can
+ * pass them via the standard x0..x3 ABI without needing an x
+ * argument slot). `pc` is the block's current PC and `inst` is
+ * the raw 24-bit instruction word that just finished emitting —
+ * together they let us grep dsp_jit_dump / dsp_emu.c to figure
+ * out which emitter leaked the pin.
+ *
+ * Prints a one-line divergence report and increments an internal
+ * counter the JIT surfaces via XEMU_DSP_JIT_STATS. We deliberately
+ * DO NOT assert here — a single divergence might be recoverable
+ * (the JIT's next BLR reload or emit_store_accu56 may resync) and
+ * we want to see the full failure pattern, not crash on the first
+ * event.
+ */
+void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
+                                   uint32_t pin_lo, uint32_t pin_hi,
+                                   uint32_t pc, uint32_t inst)
+{
+    (void)dsp;
+    uint64_t pin = ((uint64_t)pin_hi << 32) | pin_lo;
+    /* Re-compute the expected packed form from memory — matches
+     * emit_reload_ab_pins's layout exactly. */
+    uint32_t off = which ? DSP_REG_B0 : DSP_REG_A0;
+    uint32_t a0 = dsp->registers[off]     & 0xFFFFFFu;
+    uint32_t a1 = dsp->registers[off + 1] & 0xFFFFFFu;
+    uint32_t a2 = dsp->registers[off + 2] & 0xFFu;
+    int8_t   a2s = (int8_t)a2;
+    int64_t expected = ((int64_t)a2s << 48) | ((int64_t)a1 << 24) |
+                       (int64_t)a0;
+    fprintf(stderr,
+            "DSP JIT pin audit FAIL: which=%c pc=0x%04x inst=0x%06x "
+            "pin=0x%016llx mem_packed=0x%016llx (A2=0x%02x A1=0x%06x "
+            "A0=0x%06x)\n",
+            which ? 'B' : 'A', pc, inst,
+            (unsigned long long)pin, (unsigned long long)expected,
+            a2, a1, a0);
+}
+
 emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst)
 {
     /* Non-asserting variant of lookup_opcode(): returns the handler

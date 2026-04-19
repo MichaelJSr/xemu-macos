@@ -101,6 +101,13 @@ void dsp_jit_set_enabled_from_config(bool enabled);
  */
 void dsp_jit_helper_postexecute_update_pc(dsp_core_t *dsp);
 void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp);
+
+/* Pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). Called by the
+ * JIT's per-op check when x26 (A) or x27 (B) pin diverges from
+ * registers[]. See dsp_cpu.c for arg semantics. */
+void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
+                                   uint32_t pin_lo, uint32_t pin_hi,
+                                   uint32_t pc, uint32_t inst);
 typedef void (*dsp_emu_func_t)(dsp_core_t *dsp);
 dsp_emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst);
 uint32_t dsp_jit_helper_inst_length(uint32_t inst);

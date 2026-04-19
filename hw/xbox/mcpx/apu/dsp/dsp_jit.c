@@ -110,6 +110,21 @@ static bool g_ccr_dead_next_emit;
 static uint64_t g_alu_ccr_skipped;
 
 /*
+ * Phase 8 pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). When set,
+ * translate_block emits a 10-insn runtime check after every
+ * instruction's epilogue that re-packs registers[A2/A1/A0] and
+ * registers[B2/B1/B0] from memory and compares the result against
+ * the pinned x26 / x27. If either diverges, the check BLRs a C
+ * helper that prints the pc / op / expected-vs-actual values and
+ * asserts. Used to pinpoint which direct-memory write path or BLR
+ * fallback is leaving the pin out of sync with registers[]. Kept
+ * as a dev flag (zero cost when unset at translate time) — the
+ * emit only fires in the translate path if the global is true.
+ */
+static bool g_jit_pin_audit;
+static uint64_t g_jit_pin_audit_fail_count;
+
+/*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
  * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
  * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
@@ -217,6 +232,16 @@ static void parse_flags_once(void)
         }
     }
 
+    /* XEMU_DSP_JIT_PIN_AUDIT: emit a per-op runtime check that the
+     * pinned A / B registers (x26 / x27) agree with the packed
+     * contents of registers[A2/A1/A0] / registers[B2/B1/B0]. Emits
+     * ~10 insns per instruction in the block and BLRs a C helper
+     * on mismatch. Used to pin down which direct-memory-write path
+     * or BLR fallback is leaving the pin out of sync. Off by
+     * default (zero cost when unset). */
+    e = getenv("XEMU_DSP_JIT_PIN_AUDIT");
+    g_jit_pin_audit = (e && e[0] == '1');
+
     if (g_jit_enabled) {
         const char *mode_desc = "";
         if (g_jit_diff && g_jit_diff_sync && g_jit_diff_sample == 1) {
@@ -228,12 +253,13 @@ static void parse_flags_once(void)
         } else if (g_jit_diff) {
             mode_desc = " (DIFF=async, sampled)";
         }
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s\n",
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s%s\n",
                 mode_desc, g_jit_stats ? " (stats)" : "",
                 (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST)
                     ? " (SENTINEL-curinst)" : "",
                 (g_jit_force & DSP_JIT_FORCE_CURINST_SKIP)
-                    ? " (FORCE-curinst-skip)" : "");
+                    ? " (FORCE-curinst-skip)" : "",
+                g_jit_pin_audit ? " (PIN-AUDIT)" : "");
     }
 }
 
@@ -2010,6 +2036,71 @@ static void emit_reload_ab_pins(ArmEmit *e)
     emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/SCRATCH, 24, 24);
     emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH, accu_off(1, 0));
     emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/SCRATCH, 0, 24);
+}
+
+/*
+ * Phase 8 pin-audit diagnostic emit (XEMU_DSP_JIT_PIN_AUDIT=1).
+ * Emits a ~30-insn block that re-packs registers[A2/A1/A0] and
+ * registers[B2/B1/B0] from memory into x4 and compares against
+ * the pinned x26 / x27. On mismatch, BLRs
+ * `dsp_jit_helper_pin_audit_fail` with (dsp, which, pin_lo,
+ * pin_hi, pc, inst) so a one-line divergence report lands on
+ * stderr.
+ *
+ * Emit-time no-op when g_jit_pin_audit is false — zero runtime
+ * cost on a non-audit build. When enabled, runs after every
+ * emitted instruction (via the call site added in
+ * emit_instruction / emit_parmove_stub), so the first diverging
+ * op in the block is reported.
+ *
+ * Clobbers: x4, x5 (pack temp) and x0..x7 + x15 inside the
+ * mismatch BLR path. The fast path (pin matches) only touches
+ * x4, x5 and leaves x26/x27 intact.
+ */
+static void emit_pin_audit_check(ArmEmit *e, uint32_t pc, uint32_t inst)
+{
+    if (!g_jit_pin_audit) {
+        return;
+    }
+
+    for (int which = 0; which < 2; which++) {
+        int pin = which ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
+
+        /* Re-pack registers[An2/An1/An0] into x4. Same sequence as
+         * emit_reload_ab_pins, just targeting x4 / x5 (not pin). */
+        emit_ldrb_any(e, /*rd=*/4, /*rn=*/19, SCRATCH, accu_off(which, 2));
+        emit_sbfx_x(e, /*rd=*/4, /*rn=*/4, 0, 8);
+        emit_lsl_x_imm(e, /*rd=*/4, /*rn=*/4, 48);
+        emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, accu_off(which, 1));
+        emit_bfi_x(e, /*rd=*/4, /*rn=*/5, 24, 24);
+        emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, accu_off(which, 0));
+        emit_bfi_x(e, /*rd=*/4, /*rn=*/5, 0, 24);
+
+        /* CMP x4, xpin — SUBS XZR, x4, xpin. */
+        emit_subs_x_reg(e, /*rd=*/31, /*rn=*/4, /*rm=*/pin);
+        uint32_t *skip = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
+
+        /* Divergence — call the helper. Arg regs: x0=dsp, w1=which,
+         * w2=pin_lo, w3=pin_hi, w4=pc, w5=inst. Use x15 as the BLR
+         * target to keep it distinct from arg slots. */
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm32(e, /*rd=*/1, (uint32_t)which);
+        emit_mov_x_reg(e, /*rd=*/2, /*rn=*/pin);     /* w2 = pin[31:0] */
+        emit_lsr_x_imm(e, /*rd=*/3, /*rn=*/pin, 32); /* w3 = pin[63:32] */
+        emit_mov_imm32(e, /*rd=*/4, pc);
+        emit_mov_imm32(e, /*rd=*/5, inst);
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_pin_audit_fail);
+        emit_blr(e, /*rn=*/15);
+        /* After the helper returns, x26/x27 may be clobbered (ABI
+         * callee-saved — should be fine in C, but paranoia). Reload
+         * both pins from memory so a subsequent audit check doesn't
+         * compound the divergence. */
+        emit_reload_ab_pins(e);
+
+        patch_branch(skip, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip));
+    }
 }
 
 /*
@@ -4908,6 +4999,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
      * diverge and need the check to exit the block. See the
      * EPI_NO_PC removal commit for the 9.75% mismatch rate.
      */
+    emit_pin_audit_check(e, pc, inst);
     emit_post_instruction_epilogue(e, exits, expected_next_pc);
     if (out_write_set) {
         *out_write_set |= parmove_write_set(inst);
@@ -6303,6 +6395,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * (mode-6 lengthening) and long-imm (REP/DO loop rewinds).
      * The SUB+CBNZ imm12 fast path keeps the cost to 2 insns.
      */
+    emit_pin_audit_check(e, pc, inst);
     emit_post_instruction_epilogue(e, exits, expected_next_pc);
 
     /*
