@@ -4215,6 +4215,28 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
+     * Sentinel PC-watch: call the logger BEFORE the PC-mismatch
+     * check. Emitted in-line so it runs on BOTH the match and
+     * mismatch paths — on match, the logger is a no-op (single
+     * compare + return); on mismatch, it records the inst
+     * pattern. If we emitted this AFTER the PC check, the exit
+     * branch would bypass the logger entirely and we'd always
+     * see zero divergences — which is precisely the bug that
+     * made SENTINEL=2 report 0 mismatches while FORCE=2
+     * actually crashed.
+     */
+    if (hints.sentinel_watch &&
+        (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)) {
+        emit_mov_imm32(e, /*rd=*/0, hints.sentinel_pc_start);
+        emit_mov_imm32(e, /*rd=*/1, hints.sentinel_inst);
+        emit_mov_imm32(e, /*rd=*/2, expected_next_pc);
+        emit_ldr_w_any(e, /*rd=*/3, /*rn=*/19, SCRATCH, OFF_PC);
+        emit_mov_imm64(e, /*rd=*/4,
+                       (uint64_t)(uintptr_t)&dsp_jit_sentinel_pc_log);
+        emit_blr(e, /*rn=*/4);
+    }
+
+    /*
      * Step 11: exit-check: PC mismatch (branch taken by handler).
      * Skipped when the caller promises the op cannot change pc
      * (parmove stubs, inlined long-imm ALU, inlined ALU kernels).
@@ -4255,34 +4277,6 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         }
     }
 
-    /*
-     * Sentinel PC-watch log call. Emitted after the normal PC
-     * check so the logger runs on the FALL-THROUGH (PC-match)
-     * path — the logger is a no-op when expected == actual, so
-     * it costs ~5 cycles per sentinel-watched op in the common
-     * case. On mismatch we'd already have branched to the exit
-     * above; to capture those we also emit a logger call on the
-     * exit path itself via a second small trampoline. For
-     * simplicity here we only log on the fall-through path and
-     * let the normal PC-mismatch exit handle the divergent case
-     * via its existing counter in dsp_jit_sentinel_pc_log (which
-     * we call unconditionally; see below).
-     *
-     * Implementation: unconditionally BLR the logger with the
-     * four args. The logger's first instruction is `if
-     * (expected == actual) return;`, so the fast path is a
-     * single compare + branch-back inside the logger.
-     */
-    if (hints.sentinel_watch &&
-        (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)) {
-        emit_mov_imm32(e, /*rd=*/0, hints.sentinel_pc_start);
-        emit_mov_imm32(e, /*rd=*/1, hints.sentinel_inst);
-        emit_mov_imm32(e, /*rd=*/2, expected_next_pc);
-        emit_ldr_w_any(e, /*rd=*/3, /*rn=*/19, SCRATCH, OFF_PC);
-        emit_mov_imm64(e, /*rd=*/4,
-                       (uint64_t)(uintptr_t)&dsp_jit_sentinel_pc_log);
-        emit_blr(e, /*rn=*/4);
-    }
 }
 
 
