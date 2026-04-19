@@ -121,7 +121,7 @@ static uint64_t g_alu_ccr_skipped;
  * at 4 steps we already catch the common "ADD A,B  MOVE X:(R0)+
  * MOVE Y:(R0)+  MOVE X:(R0)+  ADD A,B" shape.
  */
-#define DSP_JIT_CCR_LF_MAX_STEPS 4
+#define DSP_JIT_CCR_LF_MAX_STEPS 8
 
 /*
  * Phase 8 pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). When set,
@@ -4298,21 +4298,24 @@ static uint64_t g_alu_fallback_count;
  * SR.Z, making a previous op's ccr output dead?
  *
  *   — Parmoves (inst >= 0x100000): yes, IF the ALU byte (inst[7:0])
- *     picks a ccr-writing ALU kernel. emu_move / emu_tfr_* /
- *     emu_lsl_* / emu_lsr_* / emu_rol_* / emu_ror_* write N/Z or
- *     C only — they do NOT fully overwrite E/U. Treat them as
- *     non-writers. Everything else (add/sub/cmp/cmpm/tst/clr/neg/
- *     abs/and/or/eor/not/asl/asr/addl/subl/addr/subr/adc/sbc/rnd/
- *     mac/mpy variants) is a full writer.
+ *     picks a ccr-writing ALU kernel that overwrites ALL of
+ *     E/U/N/Z. emu_move / emu_tfr_* / emu_lsl_* / emu_lsr_* /
+ *     emu_rol_* / emu_ror_* write N/Z or C only and emu_and/or/
+ *     eor/not write N/Z/V only — none fully overwrite E/U, so
+ *     none is a full writer. Full writers: add/sub/cmp/cmpm/tst/
+ *     clr/neg/abs/asl/asr/addl/subl/addr/subr/adc/sbc/rnd/mac/mpy.
  *
- *   — Long-imm ALU ((inst & 0xFFFFF0) == 0x0140C0): add_long,
- *     sub_long, cmp_long, and_long, or_long all call the inlined
- *     helper. Full writer.
+ *   — Long-imm ALU ((inst & 0xFFFFF0) == 0x0140C0): 5 variants
+ *     distinguished by inst[2:0]. add_long / sub_long / cmp_long
+ *     are full writers; and_long / or_long are partial (A1-only,
+ *     N/Z/V). See the inline comment in the impl for the bit
+ *     decoding.
  *
- *   — Everything else (CF, misc non-parallel ops, movec / movep /
- *     movem, andi / ori / lua / rep / do): conservatively NOT
- *     writers — they don't call emu_ccr_update_e_u_n_z at all or
- *     manipulate SR without rewriting all four bits unconditionally.
+ *   — Non-parmove CF: most aren't full writers, but a handful
+ *     are (RTI/ENDDO pop full SR; asl_imm/asr_imm call
+ *     emu_ccr_update_e_u_n_z; inc/dec/add_imm/sub_imm/cmp_imm
+ *     reuse the full-writer ALU pipeline). Looked up via the
+ *     dsp_jit_helper_classify_cf helper.
  *
  * Conservative returns (false) on unknown cases — we never falsely
  * elide a live ccr call.
@@ -4334,15 +4337,41 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
             /* Fallback (MAX) doesn't call ccr_update — interp's
              * emu_max clears / sets only SR.C. */
             return false;
+        case ALU_KIND_AND:
+        case ALU_KIND_OR:
+        case ALU_KIND_EOR:
+        case ALU_KIND_NOT:
+            /* Logical ALU parmove writes only N|Z|V (A1-only op);
+             * E and U are never touched. An upstream full writer's
+             * E/U emit is NOT redundantly overwritten by this op,
+             * so we cannot treat it as a full writer for lazy-flag
+             * elimination — otherwise the upstream's E/U would be
+             * wrongly elided and a later reader (ALU / conditional
+             * branch) would observe stale bits. Treated as a
+             * passthrough instead (see inst_is_ccr_passthrough),
+             * which still lets a downstream full writer render the
+             * upstream dead via the multi-step walk. */
+            return false;
         default:
             return true;
         }
     }
     if ((inst & 0xFFFFF0u) == 0x0140C0u) {
-        /* Long-imm ALU: add_long / sub_long / cmp_long / and_long /
-         * or_long — all write full ccr. (eor_long is NULL-handler
-         * in opcodes_alu, never executes, irrelevant.) */
-        return true;
+        /* Long-imm ALU: 5 variants distinguished by inst[2:0].
+         *   000 = add_long  → full (add_x + ccr_update_e_u_n_z)
+         *   010 = or_long   → partial (A1-only, only N|Z|V)
+         *   100 = sub_long  → full
+         *   101 = cmp_long  → full
+         *   110 = and_long  → partial (A1-only, only N|Z|V)
+         * The same mask matched all 5 previously and wrongly
+         * classified and_long / or_long as full writers, causing
+         * latent mis-elimination of upstream E/U emits when
+         * and_long / or_long followed a full-writer ALU within
+         * DSP_JIT_CCR_LF_MAX_STEPS. The and/or variants are now
+         * treated as passthroughs (see inst_is_ccr_passthrough).
+         */
+        uint32_t sub = inst & 0x7u;
+        return (sub == 0 || sub == 4 || sub == 5);
     }
     /*
      * Phase 8 extended lazy-flag: RTI and ENDDO pop SR off the
@@ -4389,14 +4418,28 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
  * can still be overwritten by a later full writer before any
  * consumer reads it.
  *
- * Current (safe) set: parmoves whose ALU byte is ALU_KIND_MOVE
- * (the pure parmove — no ALU kernel runs, no SR manipulation
- * beyond the pm_read_accu24 scaling path which reads S0/S1 but
- * never E/U/N/Z). Everything else is conservatively non-
- * passthrough: TFR / LSL / LSR / ROL / ROR write N and/or Z
- * (partial overwrite, not transparent), and most non-parallel
- * ops either read CCR (conditional branches) or have side
- * effects the lookahead can't cheaply reason about.
+ * Current set (extended across commits):
+ *   — Parmove ALU: MOVE / TFR / LSL / LSR / ROL / ROR (no E/U
+ *     read/write; intermediate partial N/Z writes to SR are a
+ *     subset of what a downstream full writer produces, so the
+ *     upstream's E/U/N/Z emit is still provably dead when the
+ *     downstream full write lands). AND / OR / EOR / NOT also
+ *     qualify — A1-only partial writers (N/Z/V), no E/U touch.
+ *
+ *   — Long-imm AND/OR: same semantics as the parmove AND/OR
+ *     above; distinguished from the full-writer add_long /
+ *     sub_long / cmp_long by inst[2:0].
+ *
+ *   — CF non-terminator: NOP (empty), LUA / LUA_REL (EA compute
+ *     only), LSL_IMM (A1-only, no E/U), AND_IMM (A1-only, no
+ *     E/U), REP_* (sets LCSAVE / pc_on_rep / loop_rep — no CCR).
+ *
+ * Deliberately NOT passthrough: ANDI/ORI with reg=CCR (touches
+ * E/U/N/Z), MOVEC / MOVEM / MOVEP / MOVE_X_LONG when dest is SR
+ * (conservative — decoding dest is too much work for small
+ * gain), TCC / JCC / JSCC / BCC / BRCLR / BRSET / JCLR / JSET /
+ * JSCLR / JSSET (all read CCR), RTI / ENDDO (full writers —
+ * see inst_is_full_ccr_writer).
  */
 static bool inst_is_ccr_passthrough(uint32_t inst)
 {
@@ -4434,9 +4477,61 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
         case ALU_KIND_LSR:
         case ALU_KIND_ROL:
         case ALU_KIND_ROR:
+        case ALU_KIND_AND:
+        case ALU_KIND_OR:
+        case ALU_KIND_EOR:
+        case ALU_KIND_NOT:
+            /* AND/OR/EOR/NOT parmove are A1-only partial writers
+             * (N|Z|V only). They do NOT read E/U/N/Z, and their
+             * N/Z overwrite is a subset of what a downstream full
+             * writer produces. Treating them as passthrough lets
+             * the multi-step lookahead bridge "ALU → logical_pm →
+             * ALU" chains (common in audio mix kernels) without
+             * dropping correctness on E/U. */
             return true;
         default:
             return false;
+        }
+    }
+    /* Long-imm AND/OR (A1-only partial writers) — same semantics
+     * as the parmove AND/OR above. See inst_is_full_ccr_writer
+     * for the inst[2:0] decoding. */
+    if ((inst & 0xFFFFF0u) == 0x0140C0u) {
+        uint32_t sub = inst & 0x7u;
+        return (sub == 2 || sub == 6);
+    }
+    /*
+     * Non-parmove CF ops that provably neither read nor
+     * materially write any of SR.E / SR.U / SR.N / SR.Z:
+     *   NOP              — empty handler.
+     *   LUA / LUA_REL    — compute EA into R/N; no SR touch.
+     *   LSL_IMM          — A1-only, writes C|N|Z|V; no E/U read.
+     *   AND_IMM          — A1-only (short-imm), writes N|Z|V.
+     *   REP_*            — sets LCSAVE / pc_on_rep / loop_rep;
+     *                      no CCR read/write. The REP'd body's
+     *                      own ccr handling is independent.
+     * Deliberately NOT included: ANDI/ORI (dest CCR touches
+     * E/U/N/Z when reg=1), MOVEC/MOVEM/MOVEP/MOVE_X_* (dest can
+     * be SR), TCC (reads CCR for the condition), all
+     * conditional branches (read CCR), RTI/ENDDO (full writers,
+     * handled in inst_is_full_ccr_writer).
+     */
+    emu_func_t emu_pt = dsp_jit_helper_lookup_emu(inst);
+    if (emu_pt) {
+        int cf_kind = dsp_jit_helper_classify_cf((void *)emu_pt);
+        switch (cf_kind) {
+        case DSP_JIT_CF_NOP:
+        case DSP_JIT_CF_LUA:
+        case DSP_JIT_CF_LUA_REL:
+        case DSP_JIT_CF_LSL_IMM:
+        case DSP_JIT_CF_AND_IMM:
+        case DSP_JIT_CF_REP_IMM:
+        case DSP_JIT_CF_REP_AA:
+        case DSP_JIT_CF_REP_EA:
+        case DSP_JIT_CF_REP_REG:
+            return true;
+        default:
+            break;
         }
     }
     return false;
