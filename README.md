@@ -395,16 +395,63 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   touches A or B 4-6× — this removes ~30 ARM64 insns per
   block from the ALU hot path.
 
-  Remaining Phase 8 work deferred to future sessions:
-  X0 / X1 / Y0 / Y1 pinning (only x28 left after A/B + the
-  four parmove save slots — requires either packed X0:X1 /
-  Y0:Y1 pairs or reclaiming parmove save slots);
-  parmove+ALU fusion (folding the parmove stub's "load → BLR
-  ALU → store" pattern into a direct register-allocation plan
-  when operands overlap — the FIR-kernel hot path; depends
-  on X0-Y1 pinning); and cc_op shadow tracking (granular
-  per-flag liveness beyond the current all-or-nothing ccr
-  elision).
+  Phase 8 X/Y pinning — X0 / X1 / Y0 / Y1 register pinning.
+  x20 (previously cached `postexecute_update_pc` helper ptr)
+  and x21 (previously cached `postexecute_interrupts` helper
+  ptr) are repurposed as the packed X and Y bank pins:
+  `x20[47:24] = X1, x20[23:0] = X0`, `x21[47:24] = Y1, x21
+  [23:0] = Y0` (48-bit unsigned packing; ALU emitters apply
+  SBFX at the read site when a sign-extended long-X / long-
+  Y source is needed). The two displaced helper pointers are
+  materialised inline via `emit_mov_imm64` at their BLR sites
+  in `emit_post_instruction_epilogue`'s slow path (fires only
+  when REP / DO loop state is active, so the +4-insn
+  materialisation cost doesn't touch the fast path).
+
+  Hot read sites rewritten: `emit_load_alu_src` (`ALU_SRC_X/Y`
+  and all four `*_AT_A1` forms), `emit_alu_mac` (src1 / src2
+  loads — the FIR kernel hot path saves two LDR+SBFX pairs per
+  MAC), `emit_alu_tfr` (Xn/Yn → A/B), `emit_alu_logical`
+  (AND / OR / EOR), and `emit_pm_read_reg` (non-A/B path).
+  Each rewritten site uses `emit_xy_pin_read_w` which emits a
+  single UBFX from the matching pin slot.
+
+  Hot write sites extended with pin-splice: `emit_pm_write_reg`
+  X/Y dispatch arms BFI the new value into x20/x21 alongside
+  the memory STR, and pm_8 / pm_1's direct-STR-to-registers
+  paths (D1 unmasked and D2 unconditional writes) call
+  `emit_xy_pin_write_from_w` after the STR to sync the pin.
+  BLR-fallback reload coverage: `emit_parmove_pm4` for pm_4x
+  and `emit_instruction`'s generic `emu_*` fallback both call
+  `emit_reload_ab_pins + emit_reload_xy_pins` since their
+  handlers can mutate any register slot.
+
+  Phase 8 extended lazy-flag — the one-step CCR-dead lookahead
+  now walks forward up to 4 ops, skipping over CCR-passthrough
+  parmoves (ALU byte = MOVE, no SR.E/U/N/Z touch). Extended
+  `inst_is_full_ccr_writer` to also match RTI / ENDDO via the
+  emu_func classifier (both pop SR off the stack, fully
+  overwriting E/U/N/Z). Catches common "ALU + pure-parmove
+  pre-roll + ALU" shapes that would previously have failed the
+  1-step test.
+
+  XEMU_DSP_JIT_PIN_AUDIT=1 diagnostic stays in-tree as a
+  development aid for future pinning work (strips every op
+  with a 30-insn check that x26/x27 (A/B) and x20/x21 (X/Y)
+  match `registers[]`, BLR-logging the first divergence). Used
+  to pin down the pm_2_2-writing-A1-slot bug at 91343ad754 and
+  the pm_8 / pm_1 direct-STR-to-X/Y leak at 54d1543d50.
+
+  Remaining Phase 8 work deferred to a future session:
+  parmove+ALU fusion (with pinning in place the "save/restore
+  dance" is already a 1-insn UBFX; the remaining fold
+  candidates are narrow — skipping redundant `save_reg` →
+  mem → register round-trips when the parmove's own
+  destination provides the same value); and cc_op shadow
+  tracking at per-flag granularity (requires restructuring
+  `emit_ccr_e_u_n_z` to accept a live-bit mask so TFR / LSL /
+  LSR / ROL / ROR partial overwrites can still kill the N/Z
+  half of a prior full writer without losing the E/U half).
 
   Round-4's two over-reaching experiments were DROPPED
   permanently: (a) skipping the `dsp->cur_inst` preset for
