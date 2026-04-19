@@ -369,15 +369,42 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   both the emit side and at run time. Skip count reported
   as `alu_ccr_skipped` in stats.
 
+  Phase 8 A/B pinning — accumulator register pinning for A
+  and B. The block's prologue loads `registers[A2/A1/A0]`
+  into callee-saved x26 (packed 56-bit sign-extended to 64
+  bits) and `registers[B2/B1/B0]` into x27; within the
+  block `emit_load_accu56` degenerates to a single `MOV`
+  instead of the 7-insn `LDRB + SBFX + LSL + LDR + BFI + LDR
+  + BFI` load chain, and `emit_store_accu56` is write-
+  through — it updates both the pinned reg AND the memory
+  slots so any BLR fallback into the C interpreter (emu_max,
+  emu_pm_4x, postexecute_interrupts) still reads a consistent
+  `registers[A/B]`. After the rare BLR-fallback paths that
+  may mutate A/B via the interp (emu_max in `emit_alu_call`,
+  `dsp_jit_helper_pm_4x` in `emit_parmove_pm4`, and the
+  generic non-inlined emu fallback in `emit_instruction`),
+  a ~14-insn `emit_reload_ab_pins` sequence re-packs the pin
+  from the updated memory. Direct-memory write sites that
+  bypass `emit_store_accu56` — CLR / TFR / LSL / LSR / ROL /
+  ROR / long-imm AND / long-imm OR / AND / OR / EOR / NOT /
+  TFR-from-X0_Y0_X1_Y1 — each got a matching pin-sync step
+  so the pin and registers[] never diverge mid-block. The
+  prologue's pin-load lives before `chain_entry`, so chained-
+  in entries skip the reload and trust the upstream block's
+  pin (valid by the write-through invariant). Typical block
+  touches A or B 4-6× — this removes ~30 ARM64 insns per
+  block from the ALU hot path.
+
   Remaining Phase 8 work deferred to future sessions:
-  ARM64 register pinning for A / B / X0 / X1 / Y0 / Y1
-  (eliminates per-op load/store trip through `dsp->registers[]`
-  — requires rewriting every inline ALU + parmove emitter);
+  X0 / X1 / Y0 / Y1 pinning (only x28 left after A/B + the
+  four parmove save slots — requires either packed X0:X1 /
+  Y0:Y1 pairs or reclaiming parmove save slots);
   parmove+ALU fusion (folding the parmove stub's "load → BLR
   ALU → store" pattern into a direct register-allocation plan
-  when operands overlap — the FIR-kernel hot path); and
-  cc_op shadow tracking (granular per-flag liveness beyond
-  the current all-or-nothing ccr elision).
+  when operands overlap — the FIR-kernel hot path; depends
+  on X0-Y1 pinning); and cc_op shadow tracking (granular
+  per-flag liveness beyond the current all-or-nothing ccr
+  elision).
 
   Round-4's two over-reaching experiments were DROPPED
   permanently: (a) skipping the `dsp->cur_inst` preset for
