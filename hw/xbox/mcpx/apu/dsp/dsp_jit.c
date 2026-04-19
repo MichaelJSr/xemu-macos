@@ -6094,7 +6094,11 @@ static void emit_cf_do_ea_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
     emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
 
-    emit_cf_set_cycles(e, 6);
+    /* cycles: preset 2 + calc_ea's +2 (for modes 5/6/7) + handler
+     * += 4. Use emit_cf_add_cycles(4) to preserve calc_ea's
+     * contribution — emit_cf_set_cycles(6) would silently clobber
+     * the +2 that calc_ea just added. */
+    emit_cf_add_cycles(e, 4);
 }
 
 /*
@@ -7095,7 +7099,12 @@ static bool emit_cf_movem_ea_op(ArmEmit *e, uint32_t inst,
         emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
         emit_mem_write_p_blr(e, /*addr_reg=*/22, /*value_reg=*/5);
     }
-    emit_cf_set_cycles(e, 6);
+    /* cycles: preset 2 + calc_ea's +2 (for modes 5/6/7) + handler
+     * += 4. add_cycles preserves calc_ea's contribution;
+     * set_cycles(6) would silently clobber it and leak 2-cycle
+     * drift per mode-5/6/7 op (caught by DIFF as instr_cycle
+     * divergence at offsetof dsp_core_t = 8). */
+    emit_cf_add_cycles(e, 4);
     return true;
 }
 
