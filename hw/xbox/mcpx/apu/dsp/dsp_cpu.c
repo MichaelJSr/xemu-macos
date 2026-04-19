@@ -1445,24 +1445,42 @@ void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
                                    uint32_t pin_lo, uint32_t pin_hi,
                                    uint32_t pc, uint32_t inst)
 {
-    (void)dsp;
     uint64_t pin = ((uint64_t)pin_hi << 32) | pin_lo;
-    /* Re-compute the expected packed form from memory — matches
-     * emit_reload_ab_pins's layout exactly. */
-    uint32_t off = which ? DSP_REG_B0 : DSP_REG_A0;
-    uint32_t a0 = dsp->registers[off]     & 0xFFFFFFu;
-    uint32_t a1 = dsp->registers[off + 1] & 0xFFFFFFu;
-    uint32_t a2 = dsp->registers[off + 2] & 0xFFu;
-    int8_t   a2s = (int8_t)a2;
-    int64_t expected = ((int64_t)a2s << 48) | ((int64_t)a1 << 24) |
-                       (int64_t)a0;
-    fprintf(stderr,
-            "DSP JIT pin audit FAIL: which=%c pc=0x%04x inst=0x%06x "
-            "pin=0x%016llx mem_packed=0x%016llx (A2=0x%02x A1=0x%06x "
-            "A0=0x%06x)\n",
-            which ? 'B' : 'A', pc, inst,
-            (unsigned long long)pin, (unsigned long long)expected,
-            a2, a1, a0);
+
+    if (which < 2) {
+        /* A (which=0) or B (which=1): packed 56-bit sign-extended */
+        uint32_t off = which ? DSP_REG_B0 : DSP_REG_A0;
+        uint32_t a0 = dsp->registers[off]     & 0xFFFFFFu;
+        uint32_t a1 = dsp->registers[off + 1] & 0xFFFFFFu;
+        uint32_t a2 = dsp->registers[off + 2] & 0xFFu;
+        int8_t   a2s = (int8_t)a2;
+        int64_t expected = ((int64_t)a2s << 48) | ((int64_t)a1 << 24) |
+                           (int64_t)a0;
+        fprintf(stderr,
+                "DSP JIT pin audit FAIL: which=%c pc=0x%04x "
+                "inst=0x%06x pin=0x%016llx mem_packed=0x%016llx "
+                "(A2=0x%02x A1=0x%06x A0=0x%06x)\n",
+                which ? 'B' : 'A', pc, inst,
+                (unsigned long long)pin,
+                (unsigned long long)expected, a2, a1, a0);
+    } else {
+        /* X (which=2) or Y (which=3): packed 48-bit unsigned
+         * (low 24 = X0/Y0, bits 47:24 = X1/Y1). */
+        uint32_t lo_reg = (which == 2) ? DSP_REG_X0 : DSP_REG_Y0;
+        uint32_t hi_reg = (which == 2) ? DSP_REG_X1 : DSP_REG_Y1;
+        uint32_t lo = dsp->registers[lo_reg] & 0xFFFFFFu;
+        uint32_t hi = dsp->registers[hi_reg] & 0xFFFFFFu;
+        uint64_t expected = ((uint64_t)hi << 24) | lo;
+        fprintf(stderr,
+                "DSP JIT pin audit FAIL: which=%c pc=0x%04x "
+                "inst=0x%06x pin=0x%016llx mem_packed=0x%016llx "
+                "(%c1=0x%06x %c0=0x%06x)\n",
+                (which == 2) ? 'X' : 'Y', pc, inst,
+                (unsigned long long)pin,
+                (unsigned long long)expected,
+                (which == 2) ? 'X' : 'Y', hi,
+                (which == 2) ? 'X' : 'Y', lo);
+    }
 }
 
 emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst)

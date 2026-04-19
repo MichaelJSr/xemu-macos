@@ -1361,9 +1361,35 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
  * through to them to eliminate the per-op LDR+SBFX+LSL+LDR+BFI+LDR
  * +BFI load chain (7 insns) / UBFX+STR×3 store chain (6 insns).
  * See the block comment above emit_load_accu56 for the full
- * invariants and reload semantics on BLR fallback. */
+ * invariants and reload semantics on BLR fallback.
+ *
+ * x20 and x21 (previously cached postexecute_update_pc /
+ * postexecute_interrupts helper pointers) are repurposed as the X
+ * and Y bank pins:
+ *   x20[47:24] = X1, x20[23:0] = X0   (packed 48-bit)
+ *   x21[47:24] = Y1, x21[23:0] = Y0
+ * Bits [63:48] of each X/Y pin reg are left zero — X/Y are treated
+ * as unsigned 24-bit values on read; ALU emitters that need a
+ * sign-extended "long-X" or "long-Y" source apply SBFX at the
+ * read site, same as the pre-pinning LDR-based path.
+ *
+ * The two helper-pointer BLR sites in emit_post_instruction_epilogue's
+ * slow path now materialise the helper addresses inline via
+ * emit_mov_imm64 (+4 insns / call). The slow path only fires when
+ * REP / DO loop state is active — a rare path whose extra cost is
+ * dwarfed by the fast-path savings from pinning X/Y. */
 #define DSP_JIT_A_PIN_REG  26
 #define DSP_JIT_B_PIN_REG  27
+#define DSP_JIT_X_PIN_REG  20   /* packed X1:X0 (previously update_pc ptr) */
+#define DSP_JIT_Y_PIN_REG  21   /* packed Y1:Y0 (previously interrupts ptr) */
+
+/* Forward declarations for pin helpers — emit_pm_read_reg and
+ * emit_pm_write_reg need to call these, but the helper bodies live
+ * further down next to emit_reload_xy_pins (beside the A/B equivalents).
+ * ArmEmit is already typedef'd above. */
+static void emit_reload_xy_pins(ArmEmit *e);
+static bool emit_xy_pin_read_w(ArmEmit *e, int xdst, int reg);
+static void emit_xy_pin_write_from_w(ArmEmit *e, int reg, int src_wreg);
 
 /* Compile-time offsets for the DSP register file R/N/M/L banks. */
 #define OFF_REGS      ((uint32_t)offsetof(dsp_core_t, registers))
@@ -1849,29 +1875,17 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
      * than a conditional re-extension: after BFI-ing the new A2
      * byte in, SBFX the pin through bit 55 to regenerate the sign.
      */
-    int pin = -1;
-    int slot;   /* 0 = A0/B0, 1 = A1/B1, 2 = A2/B2 */
-    switch (dstreg) {
-    case DSP_REG_A0: pin = DSP_JIT_A_PIN_REG; slot = 0; break;
-    case DSP_REG_A1: pin = DSP_JIT_A_PIN_REG; slot = 1; break;
-    case DSP_REG_A2: pin = DSP_JIT_A_PIN_REG; slot = 2; break;
-    case DSP_REG_B0: pin = DSP_JIT_B_PIN_REG; slot = 0; break;
-    case DSP_REG_B1: pin = DSP_JIT_B_PIN_REG; slot = 1; break;
-    case DSP_REG_B2: pin = DSP_JIT_B_PIN_REG; slot = 2; break;
-    default: return;   /* not an A/B slot — pin unaffected */
-    }
-
     /* The stored value: for `bits == 0` the slot is zeroed; for
      * `bits == 24 && !mask_to_width` it's the full 32 bits of
      * value_reg (top 8 bits preserved in memory); otherwise it's
      * the low `bits`-bit slice of value_reg. To mirror the memory
-     * layout we BFI the same bits into the pin. Note: bits == 24
-     * for A0/A1/B0/B1 slots and bits == 8 for A2/B2. */
+     * layout we BFI the same bits into the pin. Shared between the
+     * A/B-slot branch and the X/Y-bank branch below. */
     int src_reg;
     int src_width;
     if (bits == 0) {
         src_reg = 31;   /* WZR */
-        src_width = (slot == 2) ? 8 : 24;
+        src_width = 24;    /* dominant non-A2 slot width (A2 re-narrows below) */
     } else if (bits == 24 && !mask_to_width) {
         /* Pin uses 24 bits (matches the pre-pinning emit_load_accu56
          * which BFI'd A1 with width=24). The top 8 bits of memory
@@ -1880,25 +1894,69 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
         src_reg = value_reg;
         src_width = 24;
     } else {
-        /* `bits` <= 24; for A0/A1/B0/B1 this is 24, for A2/B2
-         * this is 8. The masked w1 was stored to memory above —
-         * reuse its value for the pin splice. */
+        /* `bits` <= 24; for A0/A1/B0/B1/X0/X1/Y0/Y1 this is 24,
+         * for A2/B2 this is 8. The masked w1 was stored to memory
+         * above — reuse its value for the pin splice. */
         src_reg = 1;
         src_width = bits;
     }
 
-    if (slot == 0) {
-        /* A0 / B0 at pin[23:0] */
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 0, src_width);
-    } else if (slot == 1) {
-        /* A1 / B1 at pin[47:24] */
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 24, src_width);
-    } else {
-        /* A2 / B2 at pin[55:48], plus re-sign-extend pin[63:56].
-         * Sequence: BFI the new byte, then SBFX pin through bit
-         * 55 to regenerate sign extension in pin[63:56]. */
-        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 48, 8);
-        emit_sbfx_x(e, /*rd=*/pin, /*rn=*/pin, 0, 56);
+    /* A/B slot dispatch (A0/A1/A2/B0/B1/B2). */
+    switch (dstreg) {
+    case DSP_REG_A0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/src_reg,
+                   0, src_width);
+        return;
+    case DSP_REG_A1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/src_reg,
+                   24, src_width);
+        return;
+    case DSP_REG_A2:
+        /* A2 / B2 at pin[55:48], plus re-sign-extend pin[63:56]. */
+        emit_bfi_x(e, /*rd=*/DSP_JIT_A_PIN_REG, /*rn=*/src_reg, 48, 8);
+        emit_sbfx_x(e, /*rd=*/DSP_JIT_A_PIN_REG,
+                    /*rn=*/DSP_JIT_A_PIN_REG, 0, 56);
+        return;
+    case DSP_REG_B0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/src_reg,
+                   0, src_width);
+        return;
+    case DSP_REG_B1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/src_reg,
+                   24, src_width);
+        return;
+    case DSP_REG_B2:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_B_PIN_REG, /*rn=*/src_reg, 48, 8);
+        emit_sbfx_x(e, /*rd=*/DSP_JIT_B_PIN_REG,
+                    /*rn=*/DSP_JIT_B_PIN_REG, 0, 56);
+        return;
+
+    /*
+     * Phase 8 X/Y pinning: parmove writes to X0 / X1 / Y0 / Y1 must
+     * update the pinned x20 / x21 so subsequent ALU reads (which
+     * UBFX from the pin) see the new value. Same BFI-splice pattern
+     * as A/B. The earlier memory store is still authoritative (every
+     * BLR-fallback handler reads registers[] directly).
+     */
+    case DSP_REG_X0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/src_reg,
+                   0, src_width);
+        return;
+    case DSP_REG_X1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/src_reg,
+                   24, src_width);
+        return;
+    case DSP_REG_Y0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/src_reg,
+                   0, src_width);
+        return;
+    case DSP_REG_Y1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/src_reg,
+                   24, src_width);
+        return;
+
+    default:
+        return;   /* not an A/B or X/Y slot — pins unaffected */
     }
 }
 
@@ -1929,7 +1987,13 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
         return;
     }
 
-    /* Simple register load. */
+    /* Phase 8 X/Y pinning: X0/X1/Y0/Y1 come straight from pins
+     * via UBFX (1 insn vs the LDR fallback). */
+    if (emit_xy_pin_read_w(e, /*xdst=*/value_reg, srcreg)) {
+        return;
+    }
+
+    /* Simple register load — Rn / Nn / Mn / Ln / SR / etc. */
     emit_ldr_w_any(e, /*rd=*/value_reg, /*rn=*/19, SCRATCH, OFF_REG(srcreg));
 }
 
@@ -2110,6 +2174,108 @@ static void emit_reload_ab_pins(ArmEmit *e)
 }
 
 /*
+ * Reload x20 / x21 (X/Y pins) from registers[X0/X1/Y0/Y1]. Called
+ * at prologue entry and after any BLR-fallback handler that might
+ * mutate X or Y via the C interpreter path (movec, movem, movep,
+ * etc. — any generic emu_* fallback in emit_instruction).
+ *
+ * Pin layout: bits [47:24] = X1 / Y1, bits [23:0] = X0 / Y0. Both
+ * are 24-bit unsigned slots in registers[] (registers_mask[X0] =
+ * BITMASK(24)). We use two LDR + BFI sequences per pin — 4 insns
+ * each, 8 total across both pins. MOVZ/MOVK + LSL shortcut
+ * (materialise X1 directly) isn't viable because we're loading
+ * runtime state, not constants.
+ *
+ * Clobbers: SCRATCH (x3) as the LDR temp. Preserves every other
+ * JIT-reserved register including x26/x27 (A/B pins).
+ */
+static void emit_reload_xy_pins(ArmEmit *e)
+{
+    /* x20 = X1:X0 (X0 in low 24, X1 in bits 47:24). */
+    emit_ldr_w_any(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/19, SCRATCH,
+                   OFF_REG(DSP_REG_X0));
+    /* X0 loaded into w20 — x20[31:0] = X0, x20[63:32] auto-zeroed
+     * by LDR's zero-extension. Bits [47:24] = 0 at this point. */
+    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH,
+                   OFF_REG(DSP_REG_X1));
+    emit_bfi_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/SCRATCH, 24, 24);
+    /* Mask x20 bits [63:48] to 0 (LDR of X0 already zero-filled
+     * [63:32] but BFI doesn't re-mask above bit 47; UBFX the 48
+     * bits we care about so higher garbage never leaks into a
+     * subsequent shifted-ALU read). */
+    emit_ubfx_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/DSP_JIT_X_PIN_REG,
+                0, 48);
+
+    /* x21 = Y1:Y0 — same pattern. */
+    emit_ldr_w_any(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/19, SCRATCH,
+                   OFF_REG(DSP_REG_Y0));
+    emit_ldr_w_any(e, /*rd=*/SCRATCH, /*rn=*/19, SCRATCH,
+                   OFF_REG(DSP_REG_Y1));
+    emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/SCRATCH, 24, 24);
+    emit_ubfx_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/DSP_JIT_Y_PIN_REG,
+                0, 48);
+}
+
+/*
+ * Emit a 24-bit load of X0 / X1 / Y0 / Y1 from the appropriate
+ * pin into Wd (auto-zero-extended into Xd by the underlying
+ * UBFX-to-W behaviour). The four dispatch cases map to UBFX
+ * against x20 or x21 with lsb 0 or 24. Unknown regs route through
+ * the legacy LDR path — kept as a fallback so callers that pass a
+ * runtime-variable reg number still work, though in practice every
+ * call site is known to be X0/X1/Y0/Y1 at translate time.
+ *
+ * Returns true if the reg was pinned (and the emitted sequence is
+ * a single UBFX); false if the caller should still emit the LDR
+ * itself.
+ */
+static bool emit_xy_pin_read_w(ArmEmit *e, int xdst, int reg)
+{
+    switch (reg) {
+    case DSP_REG_X0:
+        emit_ubfx_x(e, /*rd=*/xdst, /*rn=*/DSP_JIT_X_PIN_REG, 0, 24);
+        return true;
+    case DSP_REG_X1:
+        emit_ubfx_x(e, /*rd=*/xdst, /*rn=*/DSP_JIT_X_PIN_REG, 24, 24);
+        return true;
+    case DSP_REG_Y0:
+        emit_ubfx_x(e, /*rd=*/xdst, /*rn=*/DSP_JIT_Y_PIN_REG, 0, 24);
+        return true;
+    case DSP_REG_Y1:
+        emit_ubfx_x(e, /*rd=*/xdst, /*rn=*/DSP_JIT_Y_PIN_REG, 24, 24);
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Splice a just-written 24-bit X/Y slot value into the pin, matching
+ * the memory store performed by emit_pm_write_reg's non-A/B branch.
+ * Called ONLY for dstreg ∈ {X0, X1, Y0, Y1}; other regs return
+ * without touching pins.
+ */
+static void emit_xy_pin_write_from_w(ArmEmit *e, int reg, int src_wreg)
+{
+    switch (reg) {
+    case DSP_REG_X0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/src_wreg, 0, 24);
+        break;
+    case DSP_REG_X1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_X_PIN_REG, /*rn=*/src_wreg, 24, 24);
+        break;
+    case DSP_REG_Y0:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/src_wreg, 0, 24);
+        break;
+    case DSP_REG_Y1:
+        emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/src_wreg, 24, 24);
+        break;
+    default:
+        break;
+    }
+}
+
+/*
  * Phase 8 pin-audit diagnostic emit (XEMU_DSP_JIT_PIN_AUDIT=1).
  * Emits a ~30-insn block that re-packs registers[A2/A1/A0] and
  * registers[B2/B1/B0] from memory into x4 and compares against
@@ -2134,6 +2300,7 @@ static void emit_pin_audit_check(ArmEmit *e, uint32_t pc, uint32_t inst)
         return;
     }
 
+    /* Check A/B pins (which = 0, 1): packed 56-bit sign-extended. */
     for (int which = 0; which < 2; which++) {
         int pin = which ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
 
@@ -2152,9 +2319,6 @@ static void emit_pin_audit_check(ArmEmit *e, uint32_t pc, uint32_t inst)
         uint32_t *skip = e->buf;
         emit_bcond(e, ARM_COND_EQ, 0);
 
-        /* Divergence — call the helper. Arg regs: x0=dsp, w1=which,
-         * w2=pin_lo, w3=pin_hi, w4=pc, w5=inst. Use x15 as the BLR
-         * target to keep it distinct from arg slots. */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
         emit_mov_imm32(e, /*rd=*/1, (uint32_t)which);
         emit_mov_x_reg(e, /*rd=*/2, /*rn=*/pin);     /* w2 = pin[31:0] */
@@ -2164,11 +2328,42 @@ static void emit_pin_audit_check(ArmEmit *e, uint32_t pc, uint32_t inst)
         emit_mov_imm64(e, /*rd=*/15,
             (uint64_t)(uintptr_t)&dsp_jit_helper_pin_audit_fail);
         emit_blr(e, /*rn=*/15);
-        /* After the helper returns, x26/x27 may be clobbered (ABI
-         * callee-saved — should be fine in C, but paranoia). Reload
-         * both pins from memory so a subsequent audit check doesn't
-         * compound the divergence. */
         emit_reload_ab_pins(e);
+        emit_reload_xy_pins(e);
+
+        patch_branch(skip, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip));
+    }
+
+    /* Check X/Y pins (which = 2, 3): packed 48-bit unsigned
+     * (low 24 = X0/Y0, bits 47:24 = X1/Y1). */
+    for (int xy = 0; xy < 2; xy++) {
+        int pin      = xy ? DSP_JIT_Y_PIN_REG : DSP_JIT_X_PIN_REG;
+        int lo_reg   = xy ? DSP_REG_Y0 : DSP_REG_X0;
+        int hi_reg   = xy ? DSP_REG_Y1 : DSP_REG_X1;
+        int which_id = xy ? 3 : 2;
+
+        /* x4 = packed mem form: mask each 24-bit slot, combine. */
+        emit_ldr_w_any(e, /*rd=*/4, /*rn=*/19, SCRATCH, OFF_REG(lo_reg));
+        emit_ubfx_x(e, /*rd=*/4, /*rn=*/4, 0, 24);
+        emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, OFF_REG(hi_reg));
+        emit_bfi_x(e, /*rd=*/4, /*rn=*/5, 24, 24);
+        emit_ubfx_x(e, /*rd=*/4, /*rn=*/4, 0, 48);
+
+        emit_subs_x_reg(e, /*rd=*/31, /*rn=*/4, /*rm=*/pin);
+        uint32_t *skip = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
+
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm32(e, /*rd=*/1, (uint32_t)which_id);
+        emit_mov_x_reg(e, /*rd=*/2, /*rn=*/pin);
+        emit_lsr_x_imm(e, /*rd=*/3, /*rn=*/pin, 32);
+        emit_mov_imm32(e, /*rd=*/4, pc);
+        emit_mov_imm32(e, /*rd=*/5, inst);
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_pin_audit_fail);
+        emit_blr(e, /*rn=*/15);
+        emit_reload_ab_pins(e);
+        emit_reload_xy_pins(e);
 
         patch_branch(skip, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip));
     }
@@ -2213,22 +2408,29 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
          * "Long" X or Y: sign-extend the high 24-bit register
          * (X1 or Y1) into bits [63:24] of xsrc, then OR in the
          * low 24 bits from X0 or Y0.
+         *
+         * Phase 8 X/Y pinning: replaces the LDR(X1)+SBFX+LSL+
+         * LDR(X0)+BFI 5-insn load chain with UBFX-from-pin +
+         * SBFX + LSL + UBFX-from-pin + BFI (still 5 insns but
+         * no memory traffic).
          */
-        int off_hi = (form == ALU_SRC_X) ? OFF_REG(DSP_REG_X1)
-                                         : OFF_REG(DSP_REG_Y1);
-        int off_lo = (form == ALU_SRC_X) ? OFF_REG(DSP_REG_X0)
-                                         : OFF_REG(DSP_REG_Y0);
-        emit_ldr_w_any(e, /*rd=*/xsrc, /*rn=*/19, SCRATCH, off_hi);
+        int pin = (form == ALU_SRC_X) ? DSP_JIT_X_PIN_REG
+                                      : DSP_JIT_Y_PIN_REG;
+        /* xsrc = X1 (or Y1) — sign-extended 24 bits at bits [63:24]. */
+        emit_ubfx_x(e, /*rd=*/xsrc, /*rn=*/pin, 24, 24);
         emit_sbfx_x(e, /*rd=*/xsrc, /*rn=*/xsrc, 0, 24);
         emit_lsl_x_imm(e, /*rd=*/xsrc, /*rn=*/xsrc, 24);
-        emit_ldr_w_any(e, /*rd=*/xtmp, /*rn=*/19, SCRATCH, off_lo);
+        /* Splice in X0 (or Y0) at bits [23:0]. */
+        emit_ubfx_x(e, /*rd=*/xtmp, /*rn=*/pin, 0, 24);
         emit_bfi_x(e, /*rd=*/xsrc, /*rn=*/xtmp, 0, 24);
         return;
     }
     default: {
         /* Single-register source placed at bits [47:24] with
          * bits [23:0] = 0, sign-extended from the 24-bit value's
-         * bit 23. */
+         * bit 23. Phase 8: UBFX-from-pin replaces LDR-from-memory
+         * (every *_AT_A1 form is X0/X1/Y0/Y1 so the pin read always
+         * hits; the bool return is assert-checked for safety). */
         int reg;
         switch (form) {
         case ALU_SRC_X0_AT_A1: reg = DSP_REG_X0; break;
@@ -2237,7 +2439,9 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
         case ALU_SRC_Y1_AT_A1: reg = DSP_REG_Y1; break;
         default: assert(!"bad form"); return;
         }
-        emit_ldr_w_any(e, /*rd=*/xsrc, /*rn=*/19, SCRATCH, OFF_REG(reg));
+        bool pinned = emit_xy_pin_read_w(e, /*xdst=*/xsrc, reg);
+        assert(pinned);
+        (void)pinned;
         emit_sbfx_x(e, /*rd=*/xsrc, /*rn=*/xsrc, 0, 24);
         emit_lsl_x_imm(e, /*rd=*/xsrc, /*rn=*/xsrc, 24);
         return;
@@ -3781,10 +3985,21 @@ static void emit_alu_mac(ArmEmit *e, const AluVariant *v)
 
     /* Load src1, src2 as signed 24-bit into W9, W10. (Using wider
      * allocation than prior ops because we need x11=prod, x12=accu
-     * original, x13=accu result simultaneously.) */
-    emit_ldr_w_any(e, /*rd=*/9,  /*rn=*/19, SCRATCH, OFF_REG(v->mac_src1_reg));
+     * original, x13=accu result simultaneously.)
+     *
+     * Phase 8 X/Y pinning: mac_src1_reg / mac_src2_reg are always
+     * X0/X1/Y0/Y1 (MAC family always uses the X/Y banks), so
+     * emit_xy_pin_read_w always succeeds. Falls back to LDR for
+     * safety; the fallback path is unreachable on current MACs. */
+    if (!emit_xy_pin_read_w(e, /*xdst=*/9, v->mac_src1_reg)) {
+        emit_ldr_w_any(e, /*rd=*/9, /*rn=*/19, SCRATCH,
+                       OFF_REG(v->mac_src1_reg));
+    }
     emit_sbfx_x(e,  /*rd=*/9,  /*rn=*/9, 0, 24);
-    emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, OFF_REG(v->mac_src2_reg));
+    if (!emit_xy_pin_read_w(e, /*xdst=*/10, v->mac_src2_reg)) {
+        emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH,
+                       OFF_REG(v->mac_src2_reg));
+    }
     emit_sbfx_x(e,  /*rd=*/10, /*rn=*/10, 0, 24);
 
     /* SMULL X11, W9, W10 — signed 32x32 -> 64. */
@@ -3870,7 +4085,12 @@ static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
     if (v->kind == ALU_KIND_NOT) {
         emit_mvn_w(e, /*rd=*/10, /*rm=*/10);
     } else {
-        emit_ldr_w_any(e, /*rd=*/11, /*rn=*/19, SCRATCH, OFF_REG(v->src_reg));
+        /* Phase 8 X/Y pinning: logical src is X0/X1/Y0/Y1 — try
+         * pin first, fall back to LDR for any other reg. */
+        if (!emit_xy_pin_read_w(e, /*xdst=*/11, v->src_reg)) {
+            emit_ldr_w_any(e, /*rd=*/11, /*rn=*/19, SCRATCH,
+                           OFF_REG(v->src_reg));
+        }
         switch (v->kind) {
         case ALU_KIND_AND: emit_and_w_reg(e, 10, 10, 11); break;
         case ALU_KIND_OR:  emit_orr_w_reg(e, 10, 10, 11); break;
@@ -3939,8 +4159,13 @@ static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
         return;
     }
 
-    /* X0/X1/Y0/Y1 -> A/B with sign-extend. */
-    emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH, OFF_REG(v->src_reg));
+    /* X0/X1/Y0/Y1 -> A/B with sign-extend. Phase 8 X/Y pinning:
+     * UBFX-from-pin replaces LDR-from-memory. Every TFR source
+     * in this branch is X0/X1/Y0/Y1 by construction. */
+    if (!emit_xy_pin_read_w(e, /*xdst=*/10, v->src_reg)) {
+        emit_ldr_w_any(e, /*rd=*/10, /*rn=*/19, SCRATCH,
+                       OFF_REG(v->src_reg));
+    }
 
     /* A0 / B0 = 0 */
     emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, accu_off(v->dst_ab, 0));
@@ -4358,15 +4583,19 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu,
          * runs fetch + ALU + write internally, so we do NOT BLR
          * the ALU separately here. cur_inst / cur_inst_len /
          * instr_cycle were already set up by emit_parmove_stub.
-         * emu_pm_4x writes registers[A/B] via the interp path;
-         * reload the x26 / x27 pins so subsequent ops in the
-         * block see the updated accumulator. */
+         * emu_pm_4x can write registers[A/B] (numreg 0/1/4-7),
+         * registers[X0/X1] (numreg 2), OR registers[Y0/Y1]
+         * (numreg 3) depending on the numreg field. Reload ALL
+         * pins since the translator can't cheaply discriminate
+         * without decoding inst[18:16] and that happens rarely
+         * enough that the extra 8 insns per call don't matter. */
         (void)alu;  /* ALU call is inside the helper */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
         emit_mov_imm64(e, /*rd=*/1,
             (uint64_t)(uintptr_t)&dsp_jit_helper_pm_4x);
         emit_blr(e, /*rn=*/1);
         emit_reload_ab_pins(e);
+        emit_reload_xy_pins(e);
         return;
     }
     emit_parmove_pm5(e, inst, alu, dsp, pc);
@@ -4755,7 +4984,17 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
             *to_call_helper_2 = insn;
         }
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_blr(e, /*rn=*/20);    /* x20 = cached helper address */
+        /* Phase 8 X/Y pinning repurposed x20 as the X-bank pin;
+         * materialise the postexecute_update_pc helper address
+         * inline here (slow path, fires only when loop_rep / DO
+         * loop state is active). */
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
+        emit_blr(e, /*rn=*/15);
+        /* The helper reads/writes registers[PC/LA/LC/SR/stack] and
+         * may invoke dsp_stack_push/pop — none of X0/X1/Y0/Y1 are
+         * touched, so no X/Y pin reload is required. A/B likewise
+         * unchanged. */
 
         uint32_t *after_label = e->buf;
         patch_b(to_after, (int32_t)((uint8_t *)after_label -
@@ -4781,7 +5020,14 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         emit_cbz_w(e, /*rn=*/0, 0);
 
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_blr(e, /*rn=*/21);    /* x21 = cached helper address */
+        /* x21 is now the Y-bank pin — materialise the interrupt
+         * helper address inline (slow path, fires only when an
+         * interrupt is pending). */
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
+        emit_blr(e, /*rn=*/15);
+        /* The interrupt helper may invoke dsp_stack_push and tweak
+         * SR / pc, but doesn't touch X/Y/A/B. Pins stay valid. */
 
         uint32_t *after_label = e->buf;
         patch_branch(skip_site,
@@ -6449,14 +6695,16 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
         /* Generic BLR fallback for non-parmove, non-CF, non-long-imm
          * ops (movec / movem / movep / do _aa/_ea/_reg / dor_reg /
          * tcc / stop / wait / reset / etc). These handlers run in
-         * the C interpreter and may write registers[A/B] as side
-         * effects (e.g., movec writing to DSP_REG_A/B). Reload the
-         * pinned x26 / x27 after the BLR so subsequent inline ALU
-         * ops observe any accu mutations. */
+         * the C interpreter and may write ANY register slot —
+         * registers[A/B] (movec / movem with dstreg=A or B) AND
+         * registers[X0/X1/Y0/Y1] (same family, any data reg), plus
+         * Rn/Nn/Mn/Ln/SR. Reload all pins (A/B + X/Y) so subsequent
+         * inline ALU ops observe any mutations. */
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);              /* x0 = dsp */
         emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)emu_func);
         emit_blr(e, /*rn=*/1);
         emit_reload_ab_pins(e);
+        emit_reload_xy_pins(e);
         g_cf_fallback_count++;
     }
 
@@ -6775,10 +7023,12 @@ static void emit_prologue(ArmEmit *e)
 
     emit_mov_x_reg(e, /*rd=*/19, /*rn=*/0);   /* x19 = dsp */
 
-    emit_mov_imm64(e, /*rd=*/20,
-        (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_update_pc);
-    emit_mov_imm64(e, /*rd=*/21,
-        (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
+    /* Phase 8 X/Y pinning repurposes x20 / x21 — the postexecute
+     * helper pointers are now materialised inline at their two BLR
+     * sites in emit_post_instruction_epilogue's slow path (rare).
+     * The fast path (no REP / DO loop) never hits those BLRs, so
+     * the per-block cost of moving the 4-insn materialisation from
+     * prologue to slow path is negligible. */
 
     /* Clear self-mod exit-request flag at the start of each block.
      * dsp_jit_invalidate() sets it from inside handlers that write
@@ -6807,8 +7057,16 @@ static void emit_prologue(ArmEmit *e)
      * with a single MOV (saving ~6 insns / op vs the old LDR/BFI
      * chain) and emit_store_accu56 is write-through to registers[]
      * so any BLR-fallback handler reading the register file sees
-     * the current value. */
+     * the current value.
+     *
+     * emit_reload_xy_pins packs registers[X0/X1/Y0/Y1] into x20 /
+     * x21 (48-bit packed, no sign extension). Hot ALU reads
+     * (emit_load_alu_src / emit_alu_mac / emit_alu_logical) use
+     * UBFX against the pins instead of LDR from memory, saving
+     * a per-op LDR pair on MAC-heavy kernels. Write-through is
+     * maintained in emit_pm_write_reg's X/Y paths. */
     emit_reload_ab_pins(e);
+    emit_reload_xy_pins(e);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
