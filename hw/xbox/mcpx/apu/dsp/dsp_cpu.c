@@ -1777,6 +1777,7 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
 int dsp_jit_helper_classify_fallback(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
+    /* Single-opcode handlers. */
     if (f == emu_movep_1)    return DSP_JIT_FB_MOVEP_1;
     if (f == emu_movep_23)   return DSP_JIT_FB_MOVEP_23;
     if (f == emu_movep_x_qq) return DSP_JIT_FB_MOVEP_X_QQ;
@@ -1788,25 +1789,61 @@ int dsp_jit_helper_classify_fallback(void *fn)
     if (f == emu_nop)        return DSP_JIT_FB_NOP;
     if (f == emu_illegal)    return DSP_JIT_FB_ILLEGAL;
     if (f == emu_undefined)  return DSP_JIT_FB_UNDEFINED;
+
+    /* Bucketed handler groups. */
+    if (f == emu_bchg_ea || f == emu_bchg_aa ||
+        f == emu_bchg_pp || f == emu_bchg_reg ||
+        f == emu_bclr_ea || f == emu_bclr_aa ||
+        f == emu_bclr_pp || f == emu_bclr_reg ||
+        f == emu_bset_ea || f == emu_bset_aa ||
+        f == emu_bset_pp || f == emu_bset_reg ||
+        f == emu_btst_ea || f == emu_btst_aa ||
+        f == emu_btst_pp || f == emu_btst_reg) {
+        return DSP_JIT_FB_BIT_MANIP;
+    }
+    if (f == emu_add_imm || f == emu_sub_imm ||
+        f == emu_cmp_imm || f == emu_and_imm) {
+        return DSP_JIT_FB_SHORT_IMM_ALU;
+    }
+    if (f == emu_asl_imm || f == emu_asr_imm || f == emu_lsl_imm) {
+        return DSP_JIT_FB_SHIFT_IMM;
+    }
+    if (f == emu_inc || f == emu_dec) {
+        return DSP_JIT_FB_INC_DEC;
+    }
+    if (f == emu_cmpu)  return DSP_JIT_FB_CMPU;
+    if (f == emu_mpyi)  return DSP_JIT_FB_MPYI;
+    if (f == emu_move_x_long || f == emu_move_y_long ||
+        f == emu_move_x_imm  || f == emu_move_y_imm) {
+        return DSP_JIT_FB_MOVE_EXTENDED;
+    }
+
     return DSP_JIT_FB_OTHER;
 }
 
 const char *dsp_jit_helper_fallback_name(int kind)
 {
     switch (kind) {
-    case DSP_JIT_FB_OTHER:      return "other";
-    case DSP_JIT_FB_MOVEP_1:    return "movep_1";
-    case DSP_JIT_FB_MOVEP_23:   return "movep_23";
-    case DSP_JIT_FB_MOVEP_X_QQ: return "movep_x_qq";
-    case DSP_JIT_FB_DIV:        return "div";
-    case DSP_JIT_FB_NORM:       return "norm";
-    case DSP_JIT_FB_STOP:       return "stop";
-    case DSP_JIT_FB_WAIT:       return "wait";
-    case DSP_JIT_FB_RESET:      return "reset";
-    case DSP_JIT_FB_NOP:        return "nop";
-    case DSP_JIT_FB_ILLEGAL:    return "illegal";
-    case DSP_JIT_FB_UNDEFINED:  return "undefined";
-    default:                    return "?";
+    case DSP_JIT_FB_OTHER:          return "other";
+    case DSP_JIT_FB_MOVEP_1:        return "movep_1";
+    case DSP_JIT_FB_MOVEP_23:       return "movep_23";
+    case DSP_JIT_FB_MOVEP_X_QQ:     return "movep_x_qq";
+    case DSP_JIT_FB_DIV:            return "div";
+    case DSP_JIT_FB_NORM:           return "norm";
+    case DSP_JIT_FB_STOP:           return "stop";
+    case DSP_JIT_FB_WAIT:           return "wait";
+    case DSP_JIT_FB_RESET:          return "reset";
+    case DSP_JIT_FB_NOP:            return "nop";
+    case DSP_JIT_FB_ILLEGAL:        return "illegal";
+    case DSP_JIT_FB_UNDEFINED:      return "undefined";
+    case DSP_JIT_FB_BIT_MANIP:      return "bit_manip";
+    case DSP_JIT_FB_SHORT_IMM_ALU:  return "short_imm_alu";
+    case DSP_JIT_FB_SHIFT_IMM:      return "shift_imm";
+    case DSP_JIT_FB_INC_DEC:        return "inc_dec";
+    case DSP_JIT_FB_CMPU:           return "cmpu";
+    case DSP_JIT_FB_MPYI:           return "mpyi";
+    case DSP_JIT_FB_MOVE_EXTENDED:  return "move_extended";
+    default:                        return "?";
     }
 }
 
@@ -1879,6 +1916,7 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_movep_x_qq) return DSP_JIT_CF_MOVEP_X_QQ;
     if (f == emu_movem_aa)   return DSP_JIT_CF_MOVEM_AA;
     if (f == emu_movem_ea)   return DSP_JIT_CF_MOVEM_EA;
+    if (f == emu_nop)        return DSP_JIT_CF_NOP;
     /* Misc non-parallel (single-word, no branch). */
     if (f == emu_andi)       return DSP_JIT_CF_ANDI;
     if (f == emu_ori)        return DSP_JIT_CF_ORI;

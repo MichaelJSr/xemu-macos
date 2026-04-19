@@ -7742,6 +7742,17 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         if (!emit_cf_movem_aa_op(e, inst, dsp)) { return false; }   break;
     case DSP_JIT_CF_MOVEM_EA:
         if (!emit_cf_movem_ea_op(e, inst, dsp, pc)) { return false; } break;
+    case DSP_JIT_CF_NOP:
+        /* emu_nop is literally an empty function: no pc change, no
+         * register touch, no cycle adjustment. Preset cur_inst_len
+         * = 1 and instr_cycle = 2 (set by emit_instruction's
+         * dispatcher setup) are already the correct final values.
+         * Emitting zero code here skips the BLR round-trip that
+         * previously burned ~15 cycles per nop. On the baseline
+         * 226edae80a stats nop was 2.3M (26% of cf_fallback) —
+         * this inline converts those into cf_inlined at no emit
+         * cost. */
+        break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;

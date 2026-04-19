@@ -198,6 +198,7 @@ enum {
     DSP_JIT_CF_MOVEP_X_QQ,
     DSP_JIT_CF_MOVEM_AA,
     DSP_JIT_CF_MOVEM_EA,
+    DSP_JIT_CF_NOP,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,
@@ -255,6 +256,16 @@ enum {
     DSP_JIT_FB_NOP,
     DSP_JIT_FB_ILLEGAL,
     DSP_JIT_FB_UNDEFINED,
+    /* Phase 9 tail — grouped buckets to break down what's in the
+     * 74% "other" slice so we know what to inline next. Each
+     * bucket aggregates a family of related opcodes. */
+    DSP_JIT_FB_BIT_MANIP,          /* bchg / bclr / bset / btst × aa/ea/pp/reg */
+    DSP_JIT_FB_SHORT_IMM_ALU,      /* add_imm / sub_imm / cmp_imm / and_imm */
+    DSP_JIT_FB_SHIFT_IMM,          /* asl_imm / asr_imm / lsl_imm */
+    DSP_JIT_FB_INC_DEC,            /* inc / dec */
+    DSP_JIT_FB_CMPU,
+    DSP_JIT_FB_MPYI,
+    DSP_JIT_FB_MOVE_EXTENDED,      /* move_x_long / y_long / x_imm / y_imm */
     DSP_JIT_FB_MAX,
 };
 int dsp_jit_helper_classify_fallback(void *fn);
