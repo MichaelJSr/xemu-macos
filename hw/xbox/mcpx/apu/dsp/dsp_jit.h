@@ -187,6 +187,8 @@ enum {
     DSP_JIT_CF_ORI,
     DSP_JIT_CF_LUA,
     DSP_JIT_CF_LUA_REL,
+    DSP_JIT_CF_TCC,
+    DSP_JIT_CF_MOVEC_IMM,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,
@@ -219,6 +221,17 @@ enum {
     DSP_JIT_CF_BRSET_REG,
 };
 int dsp_jit_helper_classify_cf(void *fn);
+
+/* Pack registers_tcc[field][0] / [1] into a single u32:
+ *   bits [7:0]  = src reg index
+ *   bits [15:8] = dest reg index
+ * Called at translate time to decode tcc instructions without
+ * exposing the static registers_tcc[] table. */
+uint32_t dsp_jit_helper_tcc_regs(uint32_t field);
+
+/* Look up registers_mask[numreg] for the JIT's movec_imm / movec
+ * emitters. Returns bit width (0-24); 0 for NULL / reserved slots. */
+int dsp_jit_helper_reg_mask_bits(int numreg);
 
 /*
  * Long-immediate ALU classifier. The "long" variants of the

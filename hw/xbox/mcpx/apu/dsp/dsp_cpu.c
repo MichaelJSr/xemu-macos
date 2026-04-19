@@ -1766,6 +1766,36 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
     dsp_stack_pop(dsp, newpc, newsr);
 }
 
+/*
+ * Compact accessor for the static registers_tcc[] table. Packs the
+ * (src, dest) reg indices for a given 4-bit tcc inst field into a
+ * single u32: low 8 = src, next 8 = dest. Returns 0xFFFF (both
+ * regs = 0xff) for illegal / NULL entries. Called from the JIT's
+ * translate-time emit_cf_tcc_op with the inst[6:3] field.
+ */
+uint32_t dsp_jit_helper_tcc_regs(uint32_t field)
+{
+    field &= 0xf;
+    int src  = registers_tcc[field][0];
+    int dest = registers_tcc[field][1];
+    return (uint32_t)(src & 0xff) | ((uint32_t)(dest & 0xff) << 8);
+}
+
+/*
+ * Accessor for the static registers_mask[] table. Returns the bit
+ * width of register `numreg` (0 for NULL slots, 24 for data regs,
+ * 16 for R/N/M/L, 8 for A2/B2, 16 for SR/OMR). Used by the JIT's
+ * movec_imm emitter to decide whether the immediate needs masking
+ * before the store.
+ */
+int dsp_jit_helper_reg_mask_bits(int numreg)
+{
+    if (numreg < 0 || numreg >= 64) {
+        return 0;
+    }
+    return registers_mask[numreg];
+}
+
 int dsp_jit_helper_classify_cf(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
@@ -1794,6 +1824,8 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_dor_imm)    return DSP_JIT_CF_DOR_IMM;
     if (f == emu_dor_reg)    return DSP_JIT_CF_DOR_REG;
     if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
+    if (f == emu_tcc)        return DSP_JIT_CF_TCC;
+    if (f == emu_movec_imm)  return DSP_JIT_CF_MOVEC_IMM;
     /* Misc non-parallel (single-word, no branch). */
     if (f == emu_andi)       return DSP_JIT_CF_ANDI;
     if (f == emu_ori)        return DSP_JIT_CF_ORI;

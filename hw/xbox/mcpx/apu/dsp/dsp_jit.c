@@ -6477,6 +6477,201 @@ static void emit_cf_lua_rel_op(ArmEmit *e, uint32_t inst)
     emit_cf_set_cycles(e, 4);   /* preset 2 + handler +2 = 4 */
 }
 
+/*
+ * emu_tcc — conditional register transfer.
+ *
+ *   cc_code  = inst[15:12]                 (4-bit cc)
+ *   field    = inst[6:3]                   (registers_tcc[] index)
+ *   S2,D2    = inst[16] gates the "R_src → R_dest" pair transfer
+ *   R_src    = R0 + inst[10:8]
+ *   R_dest   = R0 + inst[2:0]
+ *
+ * Semantics (interp):
+ *   if calc_cc(cc_code):
+ *     (src, dst) = registers_tcc[field]
+ *     copy src → dst (A/B → A/B: 3-word; X0/X1/Y0/Y1 → A/B: 24-bit
+ *       with sign-extend to A2/B2; both possibilities covered by
+ *       the table — every legal dst is A or B)
+ *     if inst[16]: R_dest ← R_src
+ *
+ * Implementation:
+ *   - Decode (src, dst) at translate time via
+ *     dsp_jit_helper_tcc_regs so we don't depend on the static
+ *     registers_tcc[] table being linker-visible to the JIT.
+ *   - Emit CBZ w0, skip to short-circuit when cc false.
+ *   - src = A/B: 3-word LDR / STR between A0/A1/A2 and B0/B1/B0
+ *     (or vice versa), followed by pin sync for both A and B pins
+ *     since a full-accu copy overwrites the destination pin.
+ *   - src = X0/X1/Y0/Y1: route through emit_pm_read_reg (UBFX from
+ *     x20/x21) and emit_pm_write_reg (A/B branch, which handles
+ *     pin sync + A0/A1/A2 or B0/B1/B2 memory writes).
+ *   - R-pair transfer: LDR w1, R_src; STR w1, R_dest (both 24-bit
+ *     slots via OFF_R, unmasked — matches interp's verbatim copy).
+ *
+ * Returns true always — every legal field is handled inline.
+ * Illegal fields (NULL entries 2-7 in registers_tcc) are treated
+ * as no-ops matching the interp's "src = registers[NULL] = 0"
+ * behaviour (harmless on the cc-false path, degenerate on cc-true).
+ *
+ * Cycles: emu_tcc doesn't += anything so stays at preset 2.
+ */
+static bool emit_cf_tcc_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t cc_code = (inst >> 12) & 0xf;
+    uint32_t field   = (inst >> 3)  & 0xf;
+    bool pair_xfer   = (inst & (1u << 16)) != 0;
+    uint32_t rsrc    = (inst >> 8) & 0x7;
+    uint32_t rdest   = inst & 0x7;
+
+    uint32_t packed = dsp_jit_helper_tcc_regs(field);
+    int src  = (int)(packed & 0xff);
+    int dest = (int)((packed >> 8) & 0xff);
+
+    /* Evaluate cc — result in w0 (0 or 1). emit_cf_calc_cc doesn't
+     * touch w20/x22-x27 so our pinned regs stay valid across the
+     * call. */
+    emit_cf_calc_cc(e, cc_code);
+
+    /* CBZ w0, skip_label — branch over the copy when cc is false. */
+    uint32_t *skip_label = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    /* NULL entries (field 2-7): no-op on the cc-true path. */
+    if (src == DSP_REG_NULL || dest == DSP_REG_NULL) {
+        goto do_pair_xfer;
+    }
+
+    if (src == DSP_REG_A || src == DSP_REG_B) {
+        /* A/B → A/B: 3-word copy via direct LDR / STR, then pin
+         * sync both pins (the source pin is unchanged; the
+         * destination pin gets the source pin's packed value via
+         * MOV — matches emit_alu_tfr's accu-accu path). */
+        int src_ab  = (src == DSP_REG_A)  ? 0 : 1;
+        int dest_ab = (dest == DSP_REG_A) ? 0 : 1;
+
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH,
+                       accu_off(src_ab, 0));
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH,
+                       accu_off(dest_ab, 0));
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH,
+                       accu_off(src_ab, 1));
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH,
+                       accu_off(dest_ab, 1));
+        emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH,
+                      accu_off(src_ab, 2));
+        emit_strb_any(e, /*rs=*/1, /*rn=*/19, SCRATCH,
+                      accu_off(dest_ab, 2));
+
+        /* Pin sync: dst pin = src pin. */
+        int dst_pin = dest_ab ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
+        int src_pin = src_ab  ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
+        emit_mov_x_reg(e, /*rd=*/dst_pin, /*rn=*/src_pin);
+    } else {
+        /* X0/X1/Y0/Y1 → A/B. Read 24-bit src via pin (UBFX),
+         * write via emit_pm_write_reg's A/B branch (handles A0=0,
+         * A1=value unmasked, A2=sign byte, plus pin sync). */
+        bool pinned = emit_xy_pin_read_w(e, /*xdst=*/5, src);
+        if (!pinned) {
+            /* Shouldn't happen — registers_tcc[] only has X/Y
+             * sources beyond A/B — but safety-first LDR in case the
+             * table gets extended. */
+            emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, OFF_REG(src));
+        }
+        emit_pm_write_reg(e, /*dstreg=*/dest, /*value_reg=*/5,
+                          /*mask_to_width=*/false);
+    }
+
+do_pair_xfer:
+    if (pair_xfer) {
+        /* R_dest = R_src (24-bit unmasked copy). */
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH,
+                       OFF_R(rsrc));
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH,
+                       OFF_R(rdest));
+    }
+
+    /* Patch skip target = current position. */
+    patch_branch(skip_label,
+                 (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_label));
+
+    /* emu_tcc doesn't adjust instr_cycle — stays at preset 2. */
+    return true;
+}
+
+/*
+ * emu_movec_imm — write 8-bit immediate to a control register.
+ *
+ *   numreg = inst[5:0]
+ *   value  = inst[15:8]
+ *   registers[numreg] = value & registers_mask[numreg]   (generic path)
+ *     OR   dsp_write_reg(numreg, value)                  (special regs)
+ *
+ * dsp_write_reg has side-effect handling for A/B (3-way split),
+ * OMR (mask 0xc7), SR (mask 0xaf7f), SP (stack bounds check +
+ * dsp_compute_ssh_ssl), and SSH/SSL (stack manipulation). For the
+ * ALU banks (A/B) the split is trivial — emit_pm_write_reg does it
+ * with pin sync. For OMR and SR the mask is the only side effect,
+ * which we can inline. SP/SSH/SSL require stack manipulation
+ * helpers — bail to BLR fallback for those.
+ *
+ * Returns false when the dest is SP/SSH/SSL, signalling the emit
+ * framework to fall through to the generic BLR. Caller must
+ * ensure no code has been emitted yet (we bail BEFORE any emit).
+ */
+static bool emit_cf_movec_imm_op(ArmEmit *e, uint32_t inst)
+{
+    int numreg     = (int)(inst & 0x3f);
+    uint32_t value = (inst >> 8) & 0xff;
+
+    if (numreg == DSP_REG_SP ||
+        numreg == DSP_REG_SSH ||
+        numreg == DSP_REG_SSL) {
+        return false;   /* complex stack manipulation — BLR fallback */
+    }
+
+    int bits = dsp_jit_helper_reg_mask_bits(numreg);
+
+    /* A/B: use emit_pm_write_reg which handles the 3-way split and
+     * pin sync. mask_to_width=false mirrors dsp_write_reg's A/B
+     * branch (which writes A1 = value unmasked). */
+    if (numreg == DSP_REG_A || numreg == DSP_REG_B) {
+        emit_mov_imm32(e, /*rd=*/4, value);
+        emit_pm_write_reg(e, /*dstreg=*/numreg, /*value_reg=*/4,
+                          /*mask_to_width=*/false);
+        return true;
+    }
+
+    /* SR / OMR: mask is wider than 8 bits but value is 8-bit, so
+     * the effective masked value is `value & (special_mask & 0xff)`.
+     * OMR's mask is 0xc7; SR's mask is 0xaf7f (but the low 8 bits
+     * are 0x7f, so value & 0x7f). Bake at translate time. */
+    uint32_t masked;
+    if (numreg == DSP_REG_OMR) {
+        masked = value & 0xc7u;
+    } else if (numreg == DSP_REG_SR) {
+        masked = value & 0x7fu;     /* low byte of SR's 0xaf7f mask */
+    } else {
+        /* Generic: mask to the reg's bit width (value fits in 8
+         * bits; any mask >= 8 leaves it unchanged). */
+        uint32_t width_mask = bits >= 32 ? 0xFFFFFFFFu
+                                         : (bits == 0 ? 0u
+                                                      : ((1u << bits) - 1));
+        masked = value & width_mask;
+    }
+
+    /* Special bits==0 slots (DSP_REG_NULL etc.) still get a zero
+     * store to match the interp. */
+    emit_mov_imm32(e, /*rd=*/0, masked);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(numreg));
+
+    /* X/Y pin sync for the rare case numreg ∈ {X0, X1, Y0, Y1}
+     * (movec_imm permits any 6-bit field — although X/Y is unusual
+     * as a "control reg", it's legal in the encoding). */
+    emit_xy_pin_write_from_w(e, numreg, /*src_wreg=*/0);
+
+    return true;
+}
+
 /* ============================================================== *
  * Phase 5a — extended: _ea variants and bit-test families.
  *
@@ -6815,6 +7010,10 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     case DSP_JIT_CF_ORI:       emit_cf_ori_op(e, inst);               break;
     case DSP_JIT_CF_LUA:       emit_cf_lua_op(e, inst);               break;
     case DSP_JIT_CF_LUA_REL:   emit_cf_lua_rel_op(e, inst);           break;
+    case DSP_JIT_CF_TCC:
+        if (!emit_cf_tcc_op(e, inst)) { return false; }             break;
+    case DSP_JIT_CF_MOVEC_IMM:
+        if (!emit_cf_movec_imm_op(e, inst)) { return false; }       break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;
