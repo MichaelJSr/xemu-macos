@@ -427,13 +427,65 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   handlers can mutate any register slot.
 
   Phase 8 extended lazy-flag — the one-step CCR-dead lookahead
-  now walks forward up to 4 ops, skipping over CCR-passthrough
-  parmoves (ALU byte = MOVE, no SR.E/U/N/Z touch). Extended
-  `inst_is_full_ccr_writer` to also match RTI / ENDDO via the
-  emu_func classifier (both pop SR off the stack, fully
-  overwriting E/U/N/Z). Catches common "ALU + pure-parmove
-  pre-roll + ALU" shapes that would previously have failed the
-  1-step test.
+  now walks forward up to 8 ops (bumped from 4 once the
+  passthrough set was broadened, below), skipping over CCR-
+  passthrough parmoves (ALU byte = MOVE, no SR.E/U/N/Z touch).
+  Extended `inst_is_full_ccr_writer` to also match RTI / ENDDO
+  via the emu_func classifier (both pop SR off the stack, fully
+  overwriting E/U/N/Z), plus CF ALU ops that call
+  `emu_ccr_update_e_u_n_z` at the tail (ASL_IMM / ASR_IMM /
+  INC / DEC / ADD_IMM / SUB_IMM / CMP_IMM). Expanded
+  `inst_is_ccr_passthrough` to cover the partial-N/Z-writer
+  family (AND / OR / EOR / NOT parmove, long-imm and_long /
+  or_long, LSL_IMM / AND_IMM CF) plus non-writer CF misc ops
+  (NOP / LUA / LUA_REL / REP_*). Catches common "ALU + pure-
+  parmove pre-roll + ALU" shapes and longer "ALU + logical_pm
+  + ALU" chains that would previously have failed the 1-step
+  test.
+
+  Correctness fix folded in: AND/OR/EOR/NOT parmove and long-
+  imm and_long / or_long were previously lumped into the
+  catch-all "full writer" default because the mask
+  `(inst & 0xFFFFF0) == 0x0140C0` matched all 5 long-imm
+  variants (add/sub/cmp/and/or) and returned true. They only
+  write N/Z/V (A1-only partial, no E/U), so if one followed a
+  full writer within the 4-step lookahead window the
+  upstream's E/U emit was wrongly elided. DIFF never tripped
+  this in Azurik, but semantically wrong. Fixed by decoding
+  `inst[2:0]` to distinguish the 5 variants and demoting the
+  partial writers to passthrough.
+
+  Post-Phase-8 tail — closing the `cf_fallback` bucket. After
+  A/B/X/Y pinning + extended lazy-flag, the remaining BLR-
+  fallback CF handlers were data-mined via the new
+  `g_cf_fallback_buckets` diagnostic (`XEMU_DSP_JIT_STATS=1`
+  prints per-bucket counts for NOP / INC_DEC / SHORT_IMM_ALU
+  / SHIFT_IMM / BIT_MANIP / MOVE_EXTENDED / CMPU / MPYI / DIV
+  / NORM / MOVEP_1/23/XQQ / STOP / WAIT / RESET / ILLEGAL /
+  UNDEFINED). Iterated on the hottest bucket each round:
+  **NOP** (26% of cf_fallback — empty function, now emits
+  zero code), **INC / DEC** (reuse the long-imm ALU pipeline
+  with src=1), **short-imm ALU** (add_imm / sub_imm / cmp_imm
+  / and_imm with a 6-bit immediate from inst[13:8], zero-
+  extended into the long-imm emitter), **move_extended**
+  (`move_x_long` 2-word + `move_x_imm` / `move_y_imm` 1-word —
+  R[r]-based address + baked offset, BLR-bails on SP / SSH /
+  SSL register side-effects), **shift_imm** (`emu_asl_imm` /
+  `emu_asr_imm` 6-bit + `emu_lsl_imm` 5-bit — `emit_cf_asl_imm_op`
+  builds C/V/L inline from a UBFX-masked 56-bit source,
+  `emit_cf_asr_imm_op` uses a logical right shift on the
+  zero-extended value, `emit_cf_lsl_imm_op` mirrors the A1-
+  only bulk shift with `C = orig[24-ii]` and per-pin BFI),
+  and **cmpu** (unsigned 56-bit compare vs sign-extended 24-
+  bit source, via the existing `pm_read_accu24` helper for
+  A/B sources and direct pin UBFX for X/Y). Result: `cf_fallback`
+  dropped from ~60% of emitted CF ops (pre-NOP) to ~0.02%
+  (post-cmpu). `cf_inlined` reads 100.0% at one-decimal
+  precision; the only remaining BLR traffic is emu_undefined
+  (opcode-decode failures — genuine "should never execute"),
+  the 16-variant bit_manip family (bset/bclr/bchg/btst — 180
+  ops/run, not worth the emit-time cost), and `other`/mpyi
+  tails at single-digit ops/run.
 
   XEMU_DSP_JIT_PIN_AUDIT=1 diagnostic stays in-tree as a
   development aid for future pinning work (strips every op
@@ -442,16 +494,31 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   to pin down the pm_2_2-writing-A1-slot bug at 91343ad754 and
   the pm_8 / pm_1 direct-STR-to-X/Y leak at 54d1543d50.
 
-  Remaining Phase 8 work deferred to a future session:
-  parmove+ALU fusion (with pinning in place the "save/restore
-  dance" is already a 1-insn UBFX; the remaining fold
-  candidates are narrow — skipping redundant `save_reg` →
-  mem → register round-trips when the parmove's own
-  destination provides the same value); and cc_op shadow
-  tracking at per-flag granularity (requires restructuring
-  `emit_ccr_e_u_n_z` to accept a live-bit mask so TFR / LSL /
-  LSR / ROL / ROR partial overwrites can still kill the N/Z
-  half of a prior full writer without losing the E/U half).
+  Phase 8 per-flag cc_op shadow LANDED in two halves (N/Z
+  and E/U). `inst_overwrites_nz` classifier + extended eu-
+  passthrough walk (ccr-passthrough + TCC) let the lookahead
+  kill the N/Z or E/U half of an upstream full writer even
+  when the other half must stay alive. `emit_ccr_e_u_n_z`
+  now takes `skip_nz` / `skip_eu` bits: skip_nz omits the
+  N/Z block (~7 insns saved per fire); skip_eu omits the
+  three scaling-mode-switch branches and the per-mode E/U
+  computation (~25-35 insns per fire). `skip_nz && skip_eu`
+  folds back into the full-dead fast path. Measured
+  `alu_ccr_nz_skipped` and `alu_ccr_eu_skipped` are both
+  zero on Azurik audio — the workload hits full-dead (20%
+  of ALU ops) but never exercises the partial-kill paths
+  (audio kernels are tight enough that full writers come
+  up within 8 steps before any partial-kill opportunity
+  breaks the walk). Infrastructure stays in for future
+  non-audio DSP programs and for correctness symmetry.
+
+  Remaining Phase 8 work deferred: parmove+ALU fusion (with
+  pinning in place the "save/restore dance" is already a
+  1-insn UBFX; the remaining fold candidates are narrow —
+  skipping redundant `save_reg` → mem → register round-trips
+  when the parmove's own destination provides the same value
+  — and need per-pm-N case analysis against a profiled
+  hot-shape list).
 
   Round-4's two over-reaching experiments were DROPPED
   permanently: (a) skipping the `dsp->cur_inst` preset for
