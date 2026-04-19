@@ -6933,16 +6933,49 @@ static bool emit_cf_movec_ea_op(ArmEmit *e, uint32_t inst,
      * reg-side load or store. Running the reg read first would
      * give the pre-post-update Rn value when numreg overlaps with
      * the Rn of ea_mode (e.g. `move R0,x:(R0)+`). Stash addr in
-     * callee-saved x22 so BLRs in the reg-read path preserve it. */
+     * callee-saved x22 so BLRs in the reg-read path preserve it.
+     *
+     * Write-D1 path also honours calc_ea's `retour` flag: for
+     * ea_mode == 6 (`#xxxx, D`) the interp treats the pram[pc+1]
+     * literal AS the value, NOT as a memory address — so we must
+     * bypass the mem_read when retour != 0. Mirrors the pattern
+     * in emit_parmove_pm5's write_d branch. Without this check the
+     * JIT does a bogus dsp56k_read_memory at the literal address,
+     * which for large literals like 0x8080 hits "Out of bounds
+     * read" + divergent register state + eventual bad mem-write
+     * crash. */
     if (write_d1) {
         if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
             numreg == DSP_REG_SSL) return false;
         emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
-                            /*want_retour=*/false, dsp, pc);
+                            /*want_retour=*/true, dsp, pc);
+
+        /* if (retour) value = addr;  else value = mem[addr]. */
+        emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+        uint32_t *to_mem = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);       /* patched to mem-read path */
+
+        /* retour != 0 → value = literal in w22. */
+        emit_mov_w_reg(e, /*rd=*/5, /*rn=*/22);
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);
+
+        uint32_t *mem_label = e->buf;
+        patch_branch(to_mem, (int32_t)((uint8_t *)mem_label -
+                                       (uint8_t *)to_mem));
         emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/22, /*value_reg=*/5);
+
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+
         emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
     } else {
         if (numreg == DSP_REG_SSH) return false;
+        /* Read-S1 doesn't honour retour — matches the interp,
+         * which unconditionally writes memory at addr (even when
+         * ea_mode==6 makes addr a literal; weird encoding but
+         * interp-parity demands we replicate it). */
         emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false, dsp, pc);
         emit_dsp_read_reg_movec(e, numreg, /*value_wreg=*/5);
