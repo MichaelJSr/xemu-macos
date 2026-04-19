@@ -199,6 +199,13 @@ enum {
     DSP_JIT_CF_MOVEM_AA,
     DSP_JIT_CF_MOVEM_EA,
     DSP_JIT_CF_NOP,
+    /* Phase 9 tail (data-driven, see cf_fallback buckets). */
+    DSP_JIT_CF_INC,
+    DSP_JIT_CF_DEC,
+    DSP_JIT_CF_ADD_IMM,
+    DSP_JIT_CF_SUB_IMM,
+    DSP_JIT_CF_CMP_IMM,
+    DSP_JIT_CF_AND_IMM,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,

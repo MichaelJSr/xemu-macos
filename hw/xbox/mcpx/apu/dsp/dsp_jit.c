@@ -7382,6 +7382,48 @@ static bool emit_cf_movem_ea_op(ArmEmit *e, uint32_t inst,
     return true;
 }
 
+/*
+ * emu_inc / emu_dec — 56-bit accumulator ± 1.
+ *
+ *   destreg = DSP_REG_A + inst[0]    (0 = A, 1 = B)
+ *   source  = 56-bit value 1          (bit 0 only)
+ *   inc: dest = dest + source; newsr via dsp_add56
+ *   dec: dest = dest - source; newsr via dsp_sub56
+ *   final: clear SR.V|C, OR newsr, then emu_ccr_update_e_u_n_z.
+ *
+ * Structurally identical to emit_alu_long_imm_arith (ADD/SUB of a
+ * 56-bit source against the accu with full CCR update), except:
+ *   (a) source is baked as the int64_t value 1 (unshifted), not
+ *       li_build_src64(imm24) which places imm at bits [47:24].
+ *   (b) destination register comes from inst[0] (emu_inc/dec
+ *       decode), not inst[3] (ALU _long / _imm form).
+ *
+ * Cycles: neither handler touches instr_cycle, so preset 2 stays.
+ */
+static void emit_cf_inc_dec_op(ArmEmit *e, uint32_t inst, bool is_sub)
+{
+    int dst_ab = (int)(inst & 1);
+
+    /* Load orig accu into x10. */
+    emit_load_accu56(e, /*xaccu=*/10, /*which_ab=*/dst_ab, /*xtmp=*/8);
+    /* Materialise src = 1 (64-bit, positive — sign-ext = 0). */
+    emit_mov_imm32(e, /*rd=*/11, 1);
+    /* x12 = x10 ± x11. */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    } else {
+        emit_add_x_reg(e, /*rd=*/12, /*rn=*/10, /*rm=*/11);
+    }
+    /* Re-sign-extend to 56 bits (handles overflow into bit 56). */
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+    /* C/V/L → w5. */
+    emit_addsub_flags(e, /*xorig=*/10, /*xsrc=*/11, /*xres=*/12,
+                      /*is_sub=*/is_sub);
+    emit_store_accu56(e, /*xaccu=*/12, /*which_ab=*/dst_ab, /*xtmp=*/8);
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
 /* ============================================================== *
  * Phase 5a — extended: _ea variants and bit-test families.
  *
@@ -7753,6 +7795,46 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
          * this inline converts those into cf_inlined at no emit
          * cost. */
         break;
+    case DSP_JIT_CF_INC:
+        emit_cf_inc_dec_op(e, inst, /*is_sub=*/false);
+        break;
+    case DSP_JIT_CF_DEC:
+        emit_cf_inc_dec_op(e, inst, /*is_sub=*/true);
+        break;
+    /*
+     * Short-imm ALU (add_imm / sub_imm / cmp_imm / and_imm): the
+     * 6-bit immediate at inst[13:8] zero-extends to a 24-bit
+     * source (imm < 64 so bit 23 is always 0; interp's sign-
+     * extend-from-bit-23 matches). Reuses the long-imm ALU
+     * emitters: same source-at-bits[47:24] layout, same C/V/L +
+     * E/U/N/Z flag flow. 1-word encoding (no cur_inst_len++),
+     * unlike the long-imm variants which dispatch through
+     * emit_long_imm_call.
+     */
+    case DSP_JIT_CF_ADD_IMM: {
+        int dst_ab  = (int)((inst >> 3) & 1);
+        uint32_t xx = (inst >> 8) & 0x3f;
+        emit_alu_long_imm_arith(e, DSP_JIT_LI_ADD, dst_ab, xx);
+        break;
+    }
+    case DSP_JIT_CF_SUB_IMM: {
+        int dst_ab  = (int)((inst >> 3) & 1);
+        uint32_t xx = (inst >> 8) & 0x3f;
+        emit_alu_long_imm_arith(e, DSP_JIT_LI_SUB, dst_ab, xx);
+        break;
+    }
+    case DSP_JIT_CF_CMP_IMM: {
+        int dst_ab  = (int)((inst >> 3) & 1);
+        uint32_t xx = (inst >> 8) & 0x3f;
+        emit_alu_long_imm_arith(e, DSP_JIT_LI_CMP, dst_ab, xx);
+        break;
+    }
+    case DSP_JIT_CF_AND_IMM: {
+        int dst_ab  = (int)((inst >> 3) & 1);
+        uint32_t xx = (inst >> 8) & 0x3f;
+        emit_alu_long_imm_logical(e, DSP_JIT_LI_AND, dst_ab, xx);
+        break;
+    }
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;
