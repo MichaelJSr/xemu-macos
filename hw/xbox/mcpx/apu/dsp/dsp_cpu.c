@@ -1826,6 +1826,12 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
     if (f == emu_tcc)        return DSP_JIT_CF_TCC;
     if (f == emu_movec_imm)  return DSP_JIT_CF_MOVEC_IMM;
+    if (f == emu_movec_reg)  return DSP_JIT_CF_MOVEC_REG;
+    if (f == emu_movec_aa)   return DSP_JIT_CF_MOVEC_AA;
+    if (f == emu_movec_ea)   return DSP_JIT_CF_MOVEC_EA;
+    if (f == emu_movep_0)    return DSP_JIT_CF_MOVEP_0;
+    if (f == emu_movem_aa)   return DSP_JIT_CF_MOVEM_AA;
+    if (f == emu_movem_ea)   return DSP_JIT_CF_MOVEM_EA;
     /* Misc non-parallel (single-word, no branch). */
     if (f == emu_andi)       return DSP_JIT_CF_ANDI;
     if (f == emu_ori)        return DSP_JIT_CF_ORI;

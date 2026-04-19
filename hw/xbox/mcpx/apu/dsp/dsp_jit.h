@@ -189,6 +189,12 @@ enum {
     DSP_JIT_CF_LUA_REL,
     DSP_JIT_CF_TCC,
     DSP_JIT_CF_MOVEC_IMM,
+    DSP_JIT_CF_MOVEC_REG,
+    DSP_JIT_CF_MOVEC_AA,
+    DSP_JIT_CF_MOVEC_EA,
+    DSP_JIT_CF_MOVEP_0,
+    DSP_JIT_CF_MOVEM_AA,
+    DSP_JIT_CF_MOVEM_EA,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,

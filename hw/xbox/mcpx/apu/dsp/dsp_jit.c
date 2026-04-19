@@ -6673,6 +6673,354 @@ static bool emit_cf_movec_imm_op(ArmEmit *e, uint32_t inst)
 }
 
 /* ============================================================== *
+ * CF fallback reduction: shared helpers for the movec / movep /
+ * movem family, which all go through dsp_write_reg's switch for
+ * their destination register and have common read patterns for
+ * their source.
+ * ============================================================== */
+
+/*
+ * Emit a write matching dsp_write_reg(numreg, value_wreg) when
+ * numreg is a translate-time constant. Handles the A/B 3-way
+ * split (via emit_pm_write_reg + pin sync), the OMR/SR bit-masks
+ * (0xc7 / 0xaf7f), and the generic `registers[n] = value & mask`
+ * fallback. Returns false for SP / SSH / SSL (caller bails to
+ * BLR — those three require stack-manipulation helpers).
+ *
+ * Side effect: value_wreg is CLOBBERED for the A/B path (UBFX to
+ * 24 bits in place, matching dsp_write_reg's callers' "value &=
+ * BITMASK(24)" pre-mask that effectively makes A1 a 24-bit slot
+ * in all movec / movep / movem interp paths).
+ *
+ * Clobbers w0, w1, x3 (SCRATCH). Preserves x19-x27.
+ */
+static bool emit_dsp_write_reg(ArmEmit *e, int numreg, int value_wreg)
+{
+    assert(value_wreg != 0 && value_wreg != 1 && value_wreg != 3);
+
+    switch (numreg) {
+    case DSP_REG_SP:
+    case DSP_REG_SSH:
+    case DSP_REG_SSL:
+        return false;
+
+    case DSP_REG_A:
+    case DSP_REG_B:
+        /* Pre-mask to 24 bits so A1 memory and pin both get the
+         * masked value (matches the interp's Write-D pre-mask). */
+        emit_ubfx_w(e, /*rd=*/value_wreg, /*rn=*/value_wreg, 0, 24);
+        emit_pm_write_reg(e, /*dstreg=*/numreg, /*value_reg=*/value_wreg,
+                          /*mask_to_width=*/false);
+        return true;
+
+    case DSP_REG_OMR:
+        emit_mov_imm32(e, /*rd=*/0, 0xc7);
+        emit_and_w_reg(e, /*rd=*/0, /*rn=*/value_wreg, /*rm=*/0);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH,
+                       OFF_REG(DSP_REG_OMR));
+        return true;
+
+    case DSP_REG_SR:
+        emit_mov_imm32(e, /*rd=*/0, 0xaf7f);
+        emit_and_w_reg(e, /*rd=*/0, /*rn=*/value_wreg, /*rm=*/0);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH,
+                       OFF_REG(DSP_REG_SR));
+        return true;
+
+    default: {
+        int bits = dsp_jit_helper_reg_mask_bits(numreg);
+        int src_reg;
+        if (bits == 0) {
+            /* NULL / reserved slot — zero-store. */
+            src_reg = 31;
+            emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH,
+                           OFF_REG(numreg));
+        } else if (bits >= 32) {
+            src_reg = value_wreg;
+            emit_str_w_any(e, /*rs=*/value_wreg, /*rn=*/19, SCRATCH,
+                           OFF_REG(numreg));
+        } else {
+            emit_ubfx_w(e, /*rd=*/1, /*rn=*/value_wreg, 0, bits);
+            src_reg = 1;
+            emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH,
+                           OFF_REG(numreg));
+        }
+        /* X/Y pin sync (no-op for other regs). */
+        emit_xy_pin_write_from_w(e, numreg, /*src_wreg=*/src_reg);
+        return true;
+    }
+    }
+}
+
+/*
+ * Emit a read matching the movec / movep / movem "read S" path:
+ *   A/B   → pm_read_accu24 (BLR helper, applies scaling + limit)
+ *   X/Y   → UBFX from pin (1 insn)
+ *   SSH   → dsp_stack_pop (BLR helper with side effects) — BAIL
+ *   other → direct LDR from registers[]
+ * Returns false for SSH. Clobbers w0-w3 and the output value_wreg.
+ */
+static bool emit_dsp_read_reg(ArmEmit *e, int numreg, int value_wreg)
+{
+    if (numreg == DSP_REG_SSH) {
+        return false;
+    }
+    emit_pm_read_reg(e, /*srcreg=*/numreg, /*value_reg=*/value_wreg);
+    return true;
+}
+
+/*
+ * Emit a BLR to dsp56k_read_memory / dsp56k_write_memory for the
+ * DSP_SPACE_P space (movem / movep_1 / movep_23 path). Simpler and
+ * more correct than reaching into dsp->pram directly — the helper
+ * handles pram < DSP_PRAM_SIZE inline AND triggers
+ * dsp_jit_invalidate on P-space writes (critical for self-mod
+ * correctness). The ~15-cycle BLR overhead is negligible vs the
+ * ~50-cycle cost of the full emu handler BLR this is replacing.
+ *
+ * Clobbers w0..w4, x3. Preserves value_wreg on read; clobbers on
+ * write.
+ */
+static void emit_mem_read_p_blr(ArmEmit *e, int addr_reg, int value_reg)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm32(e, /*rd=*/1, (uint32_t)DSP_SPACE_P);
+    emit_mov_w_reg(e, /*rd=*/2, /*rn=*/addr_reg);
+    emit_mov_imm64(e, /*rd=*/3, (uint64_t)(uintptr_t)&dsp56k_read_memory);
+    emit_blr(e, /*rn=*/3);
+    emit_mov_w_reg(e, /*rd=*/value_reg, /*rn=*/0);
+}
+
+static void emit_mem_write_p_blr(ArmEmit *e, int addr_reg, int value_reg)
+{
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_mov_imm32(e, /*rd=*/1, (uint32_t)DSP_SPACE_P);
+    emit_mov_w_reg(e, /*rd=*/2, /*rn=*/addr_reg);
+    emit_mov_w_reg(e, /*rd=*/3, /*rn=*/value_reg);
+    emit_mov_imm64(e, /*rd=*/4, (uint64_t)(uintptr_t)&dsp56k_write_memory);
+    emit_blr(e, /*rn=*/4);
+}
+
+/*
+ * emu_movec_reg (S,D2 / S2,D) — register-to-register control move.
+ *
+ *   numreg1  = inst[5:0]
+ *   numreg2  = inst[13:8]
+ *   bit 15 = 1 → Write D1 : numreg1 ← numreg2
+ *   bit 15 = 0 → Read  S1 : numreg2 ← numreg1 (source may be SSH-pop)
+ *
+ * Interp masks the value to numreg1's width in the Write-D1 path
+ * (via `value &= BITMASK(registers_mask[numreg1])`) and dispatches
+ * through dsp_write_reg for the store. For Read-S1 the interp has
+ * its own A/B split (masked A1) instead of using dsp_write_reg;
+ * our emit_dsp_write_reg pre-masks A1 to match.
+ *
+ * Returns false for SP/SSH/SSL destination or SSH source. All
+ * pre-checks run BEFORE any emit so the BLR fallback re-emits
+ * cleanly without partial state.
+ */
+static bool emit_cf_movec_reg_op(ArmEmit *e, uint32_t inst)
+{
+    int numreg2    = (int)((inst >> 8) & 0x3f);
+    int numreg1    = (int)(inst & 0x3f);
+    bool write_d1  = (inst & (1u << 15)) != 0;
+
+    int read_reg   = write_d1 ? numreg2 : numreg1;
+    int write_reg  = write_d1 ? numreg1 : numreg2;
+
+    /* BAIL conditions — bail BEFORE any emit. */
+    if (read_reg == DSP_REG_SSH) return false;
+    if (write_reg == DSP_REG_SP || write_reg == DSP_REG_SSH ||
+        write_reg == DSP_REG_SSL) return false;
+
+    /* Read → w5. */
+    emit_dsp_read_reg(e, read_reg, /*value_wreg=*/5);
+    /* Write dsp_write_reg semantics (pre-masking for A/B handled
+     * internally). */
+    emit_dsp_write_reg(e, write_reg, /*value_wreg=*/5);
+
+    /* emu_movec_reg doesn't += instr_cycle — stays at preset 2. */
+    return true;
+}
+
+/*
+ * emu_movec_aa (x:aa,D1 / S1,x:aa / y:aa,D1 / S1,y:aa) —
+ * control-reg ↔ short-absolute memory.
+ *
+ *   numreg   = inst[5:0]
+ *   addr     = inst[13:8]                (6-bit short absolute)
+ *   memspace = inst[6]                    (0=X, 1=Y)
+ *   bit 15 = 1 → Write D1 : reg ← mem[memspace][addr]
+ *   bit 15 = 0 → Read  S1 : mem[memspace][addr] ← reg
+ *
+ * BAIL cases:
+ *   Write D1 : dest is SP/SSH/SSL → dsp_write_reg special.
+ *   Read  S1 : source is SSH → dsp_stack_pop side-effecting read.
+ */
+static bool emit_cf_movec_aa_op(ArmEmit *e, uint32_t inst)
+{
+    int numreg     = (int)(inst & 0x3f);
+    uint32_t addr  = (inst >> 8) & 0x3f;
+    uint32_t memsp = (inst >> 6) & 1;
+    bool write_d1  = (inst & (1u << 15)) != 0;
+
+    if (write_d1) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+        emit_mov_imm32(e, /*rd=*/4, addr);
+        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mov_imm32(e, /*rd=*/4, addr);
+        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+    }
+    return true;
+}
+
+/*
+ * emu_movec_ea — same as movec_aa but addr comes from calc_ea
+ * instead of a baked short-absolute. 2-word instruction when
+ * ea_mode = 6 (immediate literal).
+ */
+static bool emit_cf_movec_ea_op(ArmEmit *e, uint32_t inst,
+                                dsp_core_t *dsp, uint32_t pc)
+{
+    int numreg       = (int)(inst & 0x3f);
+    uint32_t ea_mode = (inst >> 8) & 0x3f;
+    uint32_t memsp   = (inst >> 6) & 1;
+    bool write_d1    = (inst & (1u << 15)) != 0;
+
+    if (write_d1) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+                            /*want_retour=*/false, dsp, pc);
+        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+                            /*want_retour=*/false, dsp, pc);
+        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+    }
+    return true;
+}
+
+/*
+ * emu_movep_0 (S,x:pp / x:pp,D / S,y:pp / y:pp,D) — register ↔
+ * peripheral (0xFFFFC0 + n6) memory. Only movep variant we inline
+ * for now — the others (movep_1, movep_23, movep_x_qq) involve
+ * p-space ↔ peripheral with two memory accesses per op, deferred.
+ *
+ *   addr     = 0xFFFFC0 | inst[5:0]       (always >= 0xc00 → slow-path)
+ *   memspace = inst[16]
+ *   numreg   = inst[13:8]
+ *   bit 15 = 1 → Write pp : pp ← reg
+ *   bit 15 = 0 → Read  pp : reg ← pp
+ *
+ * Cycles += 2.
+ */
+static bool emit_cf_movep_0_op(ArmEmit *e, uint32_t inst)
+{
+    int numreg     = (int)((inst >> 8) & 0x3f);
+    uint32_t addr  = 0xffffc0u | (inst & 0x3f);
+    uint32_t memsp = (inst >> 16) & 1;
+    bool write_pp  = (inst & (1u << 15)) != 0;
+
+    if (write_pp) {
+        if (numreg == DSP_REG_SSH) return false;   /* stack_pop */
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mov_imm32(e, /*rd=*/4, addr);
+        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+    } else {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+        emit_mov_imm32(e, /*rd=*/4, addr);
+        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    }
+    emit_cf_set_cycles(e, 4);   /* preset 2 + handler +2 = 4 */
+    return true;
+}
+
+/*
+ * emu_movem_aa (p:aa,D / S,p:aa) — control/data register ↔ P-space
+ * short-absolute.
+ *
+ *   numreg   = inst[5:0]
+ *   addr     = inst[13:8]                 (6-bit short absolute, always < DSP_PRAM_SIZE)
+ *   bit 15 = 1 → Write D : reg ← P[addr] (bake as compile-time imm)
+ *   bit 15 = 0 → Read  S : P[addr] ← reg (BLR write_memory to trigger
+ *                 self-mod invalidation)
+ * Cycles += 4.
+ *
+ * The Write-D path bakes dsp->pram[addr] at translate time, so
+ * the emitted sequence is just a MOV-imm + dsp_write_reg. Much
+ * faster than the full BLR through emu_movem_aa.
+ */
+static bool emit_cf_movem_aa_op(ArmEmit *e, uint32_t inst, dsp_core_t *dsp)
+{
+    int numreg    = (int)(inst & 0x3f);
+    uint32_t addr = (inst >> 8) & 0x3f;
+    bool write_d  = (inst & (1u << 15)) != 0;
+
+    if (write_d) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+        /* Bake the p-space word as a 24-bit compile-time immediate.
+         * Matches read_memory_p(dsp, addr) exactly since addr is
+         * always < 0x40 (< DSP_PRAM_SIZE). */
+        uint32_t pval = (addr < DSP_PRAM_SIZE)
+                            ? (dsp->pram[addr] & 0xFFFFFFu) : 0u;
+        emit_mov_imm32(e, /*rd=*/5, pval);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mov_imm32(e, /*rd=*/4, addr);
+        emit_mem_write_p_blr(e, /*addr_reg=*/4, /*value_reg=*/5);
+    }
+    emit_cf_set_cycles(e, 6);   /* preset 2 + handler +4 = 6 */
+    return true;
+}
+
+/*
+ * emu_movem_ea — same as movem_aa but addr from calc_ea. The
+ * Write-D path can't bake pram[] because the address is runtime,
+ * so both directions BLR dsp56k_read_memory / dsp56k_write_memory.
+ * Still a win over the full emu_ handler BLR because we skip the
+ * handler's register / cycle accounting and inline calc_ea's fast
+ * path for linear Rn modes.
+ */
+static bool emit_cf_movem_ea_op(ArmEmit *e, uint32_t inst,
+                                dsp_core_t *dsp, uint32_t pc)
+{
+    int numreg       = (int)(inst & 0x3f);
+    uint32_t ea_mode = (inst >> 8) & 0x3f;
+    bool write_d     = (inst & (1u << 15)) != 0;
+
+    if (write_d) {
+        if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
+            numreg == DSP_REG_SSL) return false;
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+                            /*want_retour=*/false, dsp, pc);
+        emit_mem_read_p_blr(e, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
+    } else {
+        if (numreg == DSP_REG_SSH) return false;
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+                            /*want_retour=*/false, dsp, pc);
+        emit_mem_write_p_blr(e, /*addr_reg=*/4, /*value_reg=*/5);
+    }
+    emit_cf_set_cycles(e, 6);
+    return true;
+}
+
+/* ============================================================== *
  * Phase 5a — extended: _ea variants and bit-test families.
  *
  * These handlers share the same epilogue invariants as the _imm
@@ -7014,6 +7362,18 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         if (!emit_cf_tcc_op(e, inst)) { return false; }             break;
     case DSP_JIT_CF_MOVEC_IMM:
         if (!emit_cf_movec_imm_op(e, inst)) { return false; }       break;
+    case DSP_JIT_CF_MOVEC_REG:
+        if (!emit_cf_movec_reg_op(e, inst)) { return false; }       break;
+    case DSP_JIT_CF_MOVEC_AA:
+        if (!emit_cf_movec_aa_op(e, inst)) { return false; }        break;
+    case DSP_JIT_CF_MOVEC_EA:
+        if (!emit_cf_movec_ea_op(e, inst, dsp, pc)) { return false; } break;
+    case DSP_JIT_CF_MOVEP_0:
+        if (!emit_cf_movep_0_op(e, inst)) { return false; }         break;
+    case DSP_JIT_CF_MOVEM_AA:
+        if (!emit_cf_movem_aa_op(e, inst, dsp)) { return false; }   break;
+    case DSP_JIT_CF_MOVEM_EA:
+        if (!emit_cf_movem_ea_op(e, inst, dsp, pc)) { return false; } break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;
