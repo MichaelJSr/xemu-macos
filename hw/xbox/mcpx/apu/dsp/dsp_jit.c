@@ -3810,9 +3810,17 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
 {
     uint32_t select = (inst >> 20) & 0xf;
 
-    /* Set cur_inst, cur_inst_len=1, instr_cycle=2. */
-    emit_mov_imm32(e, /*rd=*/0, inst);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    /*
+     * Preset cur_inst_len = 1 and instr_cycle = 2. Intentionally
+     * DON'T preset dsp->cur_inst here: neither the inlined pm_N
+     * emitters (which bake `inst` into immediate operands at
+     * translate time) nor any of the opcodes_alu[] fallback
+     * handlers read `dsp->cur_inst` at run time — the opcode
+     * dispatch table picks the function by opcode bits, so the
+     * handler's semantics are already hard-coded for that opcode.
+     * Skipping the 2-insn store pays off on every parmove op and
+     * parmoves are ~50% of dynamic DSP instructions in audio code.
+     */
     emit_movz_w(e, /*rd=*/0, 1, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_movz_w(e, /*rd=*/0, 2, 0);
