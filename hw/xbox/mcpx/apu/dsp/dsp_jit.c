@@ -6753,12 +6753,15 @@ static bool emit_dsp_write_reg(ArmEmit *e, int numreg, int value_wreg)
 }
 
 /*
- * Emit a read matching the movec / movep / movem "read S" path:
+ * Emit a read matching the movem / movep "read S" path:
  *   A/B   → pm_read_accu24 (BLR helper, applies scaling + limit)
  *   X/Y   → UBFX from pin (1 insn)
  *   SSH   → dsp_stack_pop (BLR helper with side effects) — BAIL
  *   other → direct LDR from registers[]
- * Returns false for SSH. Clobbers w0-w3 and the output value_wreg.
+ *
+ * Used by movem_aa / movem_ea / movep_0 — all three interp paths
+ * invoke emu_pm_read_accu24 for A/B sources. Returns false for SSH.
+ * Clobbers w0-w3 and the output value_wreg.
  */
 static bool emit_dsp_read_reg(ArmEmit *e, int numreg, int value_wreg)
 {
@@ -6766,6 +6769,35 @@ static bool emit_dsp_read_reg(ArmEmit *e, int numreg, int value_wreg)
         return false;
     }
     emit_pm_read_reg(e, /*srcreg=*/numreg, /*value_reg=*/value_wreg);
+    return true;
+}
+
+/*
+ * Emit a read matching the movec "read S1" path. Differs from
+ * emit_dsp_read_reg above: A/B reads the raw 32-bit scratch slot
+ * at registers[DSP_REG_A / DSP_REG_B] rather than going through
+ * pm_read_accu24, because emu_movec_reg / emu_movec_aa / emu_movec_
+ * ea all do a direct `value = dsp->registers[numreg]` for A/B (the
+ * pm_1 / pm_2_2 write-d path populates this composite slot
+ * unmasked as a side effect).
+ *
+ * SSH still requires dsp_stack_pop — BAIL. X/Y still hits the pin.
+ */
+static bool emit_dsp_read_reg_movec(ArmEmit *e, int numreg, int value_wreg)
+{
+    if (numreg == DSP_REG_SSH) {
+        return false;
+    }
+    if (numreg == DSP_REG_A || numreg == DSP_REG_B) {
+        /* Direct LDR from the composite A/B scratch slot. */
+        emit_ldr_w_any(e, /*rd=*/value_wreg, /*rn=*/19, SCRATCH,
+                       OFF_REG(numreg));
+        return true;
+    }
+    if (emit_xy_pin_read_w(e, /*xdst=*/value_wreg, numreg)) {
+        return true;
+    }
+    emit_ldr_w_any(e, /*rd=*/value_wreg, /*rn=*/19, SCRATCH, OFF_REG(numreg));
     return true;
 }
 
@@ -6833,8 +6865,11 @@ static bool emit_cf_movec_reg_op(ArmEmit *e, uint32_t inst)
     if (write_reg == DSP_REG_SP || write_reg == DSP_REG_SSH ||
         write_reg == DSP_REG_SSL) return false;
 
-    /* Read → w5. */
-    emit_dsp_read_reg(e, read_reg, /*value_wreg=*/5);
+    /* Read → w5. Use the movec-specific read so A/B hits the
+     * composite-scratch registers[A/B] slot directly (matches
+     * emu_movec_reg's `value = dsp->registers[numreg]`), NOT the
+     * pm_read_accu24 scaling path. */
+    emit_dsp_read_reg_movec(e, read_reg, /*value_wreg=*/5);
     /* Write dsp_write_reg semantics (pre-masking for A/B handled
      * internally). */
     emit_dsp_write_reg(e, write_reg, /*value_wreg=*/5);
@@ -6872,7 +6907,7 @@ static bool emit_cf_movec_aa_op(ArmEmit *e, uint32_t inst)
         emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
     } else {
         if (numreg == DSP_REG_SSH) return false;
-        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_dsp_read_reg_movec(e, numreg, /*value_wreg=*/5);
         emit_mov_imm32(e, /*rd=*/4, addr);
         emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
     }
@@ -6892,19 +6927,26 @@ static bool emit_cf_movec_ea_op(ArmEmit *e, uint32_t inst,
     uint32_t memsp   = (inst >> 6) & 1;
     bool write_d1    = (inst & (1u << 15)) != 0;
 
+    /* IMPORTANT: match emu_movec_ea's ordering — calc_ea runs
+     * FIRST unconditionally (its Rn post-update side-effect is
+     * visible to the subsequent register read/write), BEFORE the
+     * reg-side load or store. Running the reg read first would
+     * give the pre-post-update Rn value when numreg overlaps with
+     * the Rn of ea_mode (e.g. `move R0,x:(R0)+`). Stash addr in
+     * callee-saved x22 so BLRs in the reg-read path preserve it. */
     if (write_d1) {
         if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
             numreg == DSP_REG_SSL) return false;
-        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false, dsp, pc);
-        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/22, /*value_reg=*/5);
         emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
     } else {
         if (numreg == DSP_REG_SSH) return false;
-        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
-        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false, dsp, pc);
-        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_read_reg_movec(e, numreg, /*value_wreg=*/5);
+        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/22, /*value_reg=*/5);
     }
     return true;
 }
@@ -7002,19 +7044,23 @@ static bool emit_cf_movem_ea_op(ArmEmit *e, uint32_t inst,
     uint32_t ea_mode = (inst >> 8) & 0x3f;
     bool write_d     = (inst & (1u << 15)) != 0;
 
+    /* Same ordering constraint as movec_ea: calc_ea FIRST (its
+     * Rn post-update is visible to the subsequent reg read), then
+     * memory / reg work. Addr stashed in x22 across the BLR-heavy
+     * reg-read path. */
     if (write_d) {
         if (numreg == DSP_REG_SP || numreg == DSP_REG_SSH ||
             numreg == DSP_REG_SSL) return false;
-        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false, dsp, pc);
-        emit_mem_read_p_blr(e, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_mem_read_p_blr(e, /*addr_reg=*/22, /*value_reg=*/5);
         emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
     } else {
         if (numreg == DSP_REG_SSH) return false;
-        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
-        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+        emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
                             /*want_retour=*/false, dsp, pc);
-        emit_mem_write_p_blr(e, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_dsp_read_reg(e, numreg, /*value_wreg=*/5);
+        emit_mem_write_p_blr(e, /*addr_reg=*/22, /*value_reg=*/5);
     }
     emit_cf_set_cycles(e, 6);
     return true;
