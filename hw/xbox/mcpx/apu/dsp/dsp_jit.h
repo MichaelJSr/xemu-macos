@@ -193,6 +193,9 @@ enum {
     DSP_JIT_CF_MOVEC_AA,
     DSP_JIT_CF_MOVEC_EA,
     DSP_JIT_CF_MOVEP_0,
+    DSP_JIT_CF_MOVEP_1,
+    DSP_JIT_CF_MOVEP_23,
+    DSP_JIT_CF_MOVEP_X_QQ,
     DSP_JIT_CF_MOVEM_AA,
     DSP_JIT_CF_MOVEM_EA,
     /* Effective-address (Rn-based) CF */
@@ -227,6 +230,35 @@ enum {
     DSP_JIT_CF_BRSET_REG,
 };
 int dsp_jit_helper_classify_cf(void *fn);
+
+/*
+ * Fallback-handler classifier. Returns a small integer identifying
+ * `fn` if it's a non-inlined non-parallel handler the JIT would
+ * BLR-fallback for; 0 (DSP_JIT_FB_OTHER) otherwise. Used by the JIT
+ * to keep per-handler BLR-fallback stats so we can see what's hot
+ * in the cf_fallback bucket and prioritise the next inline work.
+ *
+ * Kept separate from dsp_jit_helper_classify_cf (which classifies
+ * handlers the JIT DOES inline) to avoid inflating that enum with
+ * handlers we don't emit inline code for.
+ */
+enum {
+    DSP_JIT_FB_OTHER = 0,
+    DSP_JIT_FB_MOVEP_1,
+    DSP_JIT_FB_MOVEP_23,
+    DSP_JIT_FB_MOVEP_X_QQ,
+    DSP_JIT_FB_DIV,
+    DSP_JIT_FB_NORM,
+    DSP_JIT_FB_STOP,
+    DSP_JIT_FB_WAIT,
+    DSP_JIT_FB_RESET,
+    DSP_JIT_FB_NOP,
+    DSP_JIT_FB_ILLEGAL,
+    DSP_JIT_FB_UNDEFINED,
+    DSP_JIT_FB_MAX,
+};
+int dsp_jit_helper_classify_fallback(void *fn);
+const char *dsp_jit_helper_fallback_name(int kind);
 
 /* Pack registers_tcc[field][0] / [1] into a single u32:
  *   bits [7:0]  = src reg index

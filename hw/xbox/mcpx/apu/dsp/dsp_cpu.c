@@ -1767,6 +1767,50 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
 }
 
 /*
+ * Fallback-handler classifier. Mirrors dsp_jit_helper_classify_cf
+ * but for the non-inlined tail of nonparallel_opcodes — used by
+ * the JIT's BLR-fallback path to increment a per-handler counter
+ * (printed as part of XEMU_DSP_JIT_STATS) so the "next op to
+ * inline" decision is data-driven. Returns DSP_JIT_FB_OTHER for
+ * handlers the JIT doesn't recognise in its fallback bucket.
+ */
+int dsp_jit_helper_classify_fallback(void *fn)
+{
+    emu_func_t f = (emu_func_t)fn;
+    if (f == emu_movep_1)    return DSP_JIT_FB_MOVEP_1;
+    if (f == emu_movep_23)   return DSP_JIT_FB_MOVEP_23;
+    if (f == emu_movep_x_qq) return DSP_JIT_FB_MOVEP_X_QQ;
+    if (f == emu_div)        return DSP_JIT_FB_DIV;
+    if (f == emu_norm)       return DSP_JIT_FB_NORM;
+    if (f == emu_stop)       return DSP_JIT_FB_STOP;
+    if (f == emu_wait)       return DSP_JIT_FB_WAIT;
+    if (f == emu_reset)      return DSP_JIT_FB_RESET;
+    if (f == emu_nop)        return DSP_JIT_FB_NOP;
+    if (f == emu_illegal)    return DSP_JIT_FB_ILLEGAL;
+    if (f == emu_undefined)  return DSP_JIT_FB_UNDEFINED;
+    return DSP_JIT_FB_OTHER;
+}
+
+const char *dsp_jit_helper_fallback_name(int kind)
+{
+    switch (kind) {
+    case DSP_JIT_FB_OTHER:      return "other";
+    case DSP_JIT_FB_MOVEP_1:    return "movep_1";
+    case DSP_JIT_FB_MOVEP_23:   return "movep_23";
+    case DSP_JIT_FB_MOVEP_X_QQ: return "movep_x_qq";
+    case DSP_JIT_FB_DIV:        return "div";
+    case DSP_JIT_FB_NORM:       return "norm";
+    case DSP_JIT_FB_STOP:       return "stop";
+    case DSP_JIT_FB_WAIT:       return "wait";
+    case DSP_JIT_FB_RESET:      return "reset";
+    case DSP_JIT_FB_NOP:        return "nop";
+    case DSP_JIT_FB_ILLEGAL:    return "illegal";
+    case DSP_JIT_FB_UNDEFINED:  return "undefined";
+    default:                    return "?";
+    }
+}
+
+/*
  * Compact accessor for the static registers_tcc[] table. Packs the
  * (src, dest) reg indices for a given 4-bit tcc inst field into a
  * single u32: low 8 = src, next 8 = dest. Returns 0xFFFF (both
@@ -1830,6 +1874,9 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_movec_aa)   return DSP_JIT_CF_MOVEC_AA;
     if (f == emu_movec_ea)   return DSP_JIT_CF_MOVEC_EA;
     if (f == emu_movep_0)    return DSP_JIT_CF_MOVEP_0;
+    if (f == emu_movep_1)    return DSP_JIT_CF_MOVEP_1;
+    if (f == emu_movep_23)   return DSP_JIT_CF_MOVEP_23;
+    if (f == emu_movep_x_qq) return DSP_JIT_CF_MOVEP_X_QQ;
     if (f == emu_movem_aa)   return DSP_JIT_CF_MOVEM_AA;
     if (f == emu_movem_ea)   return DSP_JIT_CF_MOVEM_EA;
     /* Misc non-parallel (single-word, no branch). */

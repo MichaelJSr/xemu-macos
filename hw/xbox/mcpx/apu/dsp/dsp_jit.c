@@ -1396,6 +1396,7 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
 #define DSP_JIT_B_PIN_REG  27
 #define DSP_JIT_X_PIN_REG  20   /* packed X1:X0 (previously update_pc ptr) */
 #define DSP_JIT_Y_PIN_REG  21   /* packed Y1:Y0 (previously interrupts ptr) */
+#define DSP_JIT_SR_PIN_REG 28   /* SR low 16 bits, zero-extended 32-bit */
 
 /* Forward declarations for pin helpers — emit_pm_read_reg and
  * emit_pm_write_reg need to call these, but the helper bodies live
@@ -1404,6 +1405,30 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
 static void emit_reload_xy_pins(ArmEmit *e);
 static bool emit_xy_pin_read_w(ArmEmit *e, int xdst, int reg);
 static void emit_xy_pin_write_from_w(ArmEmit *e, int reg, int src_wreg);
+
+/*
+ * SR pinning (x28). Forward-declared for use by LDR/STR-wrapper
+ * macros below. Helpers implemented near emit_reload_xy_pins.
+ *
+ * Semantics:
+ *   emit_load_sr(rd)      → MOV Wd, W28   (reads the pinned SR)
+ *   emit_store_sr_h(rs)   → STRH Wrs, [X19, #OFF_SR] ; UBFX W28, Wrs, 0, 16
+ *                           (write-through to memory AND pin)
+ *   emit_store_sr_w(rs)   → STR  Wrs, [X19, #OFF_SR] ; UBFX W28, Wrs, 0, 16
+ *                           (as above but STR_W preserves top-16 semantics)
+ *   emit_reload_sr_pin()  → LDRH W28, [X19, #OFF_SR]
+ *                           (called at prologue and after BLR fallbacks
+ *                            that may have mutated registers[SR]).
+ *
+ * The pin's invariant is "w28 == (registers[SR] & 0xFFFF)". Memory
+ * stays authoritative (write-through); BLR-fallback C handlers
+ * that write dsp->registers[SR] don't see the pin, so we reload
+ * after every BLR that might touch SR.
+ */
+static void emit_reload_sr_pin(ArmEmit *e);
+static void emit_load_sr(ArmEmit *e, int rd);
+static void emit_store_sr_h(ArmEmit *e, int rs);
+static void emit_store_sr_w(ArmEmit *e, int rs);
 
 /* Compile-time offsets for the DSP register file R/N/M/L banks. */
 #define OFF_REGS      ((uint32_t)offsetof(dsp_core_t, registers))
@@ -1998,6 +2023,9 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
             (uint64_t)(uintptr_t)&dsp_jit_helper_pm_read_accu24);
         emit_blr(e, /*rn=*/3);
         emit_ldr_w_imm(e, /*rd=*/value_reg, /*rn=*/31, OFF_SP_SCRATCH0);
+        /* pm_read_accu24 sets SR.L on overflow during limiting —
+         * reload the SR pin so subsequent reads see the new SR.L. */
+        emit_reload_sr_pin(e);
         return;
     }
 
@@ -2228,6 +2256,37 @@ static void emit_reload_xy_pins(ArmEmit *e)
     emit_bfi_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/SCRATCH, 24, 24);
     emit_ubfx_x(e, /*rd=*/DSP_JIT_Y_PIN_REG, /*rn=*/DSP_JIT_Y_PIN_REG,
                 0, 48);
+}
+
+/*
+ * SR pin helpers. Pinning x28 to the low 16 bits of registers[SR]
+ * eliminates the per-op LDRH on SR reads (~54 sites across the
+ * JIT — emit_ccr_e_u_n_z, emit_sr_clear_vc_or_newsr, cf_calc_cc,
+ * individual ALU emitters, etc.). Write-through keeps
+ * registers[SR] authoritative so BLR fallbacks see a consistent
+ * SR; every BLR that may mutate SR gets a trailing
+ * emit_reload_sr_pin call.
+ */
+static void emit_reload_sr_pin(ArmEmit *e)
+{
+    emit_ldrh_any(e, /*rd=*/DSP_JIT_SR_PIN_REG, /*rn=*/19, SCRATCH, OFF_SR);
+}
+
+static void emit_load_sr(ArmEmit *e, int rd)
+{
+    emit_mov_w_reg(e, /*rd=*/rd, /*rn=*/DSP_JIT_SR_PIN_REG);
+}
+
+static void emit_store_sr_h(ArmEmit *e, int rs)
+{
+    emit_strh_any(e, /*rs=*/rs, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_ubfx_w(e, /*rd=*/DSP_JIT_SR_PIN_REG, /*rn=*/rs, 0, 16);
+}
+
+static void emit_store_sr_w(ArmEmit *e, int rs)
+{
+    emit_str_w_any(e, /*rs=*/rs, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_ubfx_w(e, /*rd=*/DSP_JIT_SR_PIN_REG, /*rn=*/rs, 0, 16);
 }
 
 /*
@@ -2542,7 +2601,7 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_ubfx_x(e, /*rd=*/3, /*rn=*/xaccu, 0, 24);   /* w3 = A0 */
 
     /* Load SR and extract the 2-bit scaling mode. */
-    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 9);
     emit_ubfx_w(e, /*rd=*/10, /*rn=*/9, DSP_SR_S0, 2);
 
     /* Clear SR.E|U|N|Z in w9. Done once regardless of scaling
@@ -2674,7 +2733,7 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     uint32_t *skip_nz_label = e->buf;
     patch_branch(to_skip_nz, (int32_t)((uint8_t *)skip_nz_label -
                                        (uint8_t *)to_skip_nz));
-    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 9);
 }
 
 /* --------------------------------------------------------------- *
@@ -3016,12 +3075,12 @@ static void emit_addsub_flags(ArmEmit *e, int xorig, int xsrc, int xres,
  */
 static void emit_sr_clear_vc_or_newsr(ArmEmit *e, int wnewsr)
 {
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~((1u << DSP_SR_V) | (1u << DSP_SR_C))
                                 & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
     emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/wnewsr);
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 }
 
 /*
@@ -3109,10 +3168,10 @@ static void emit_alu_tst(ArmEmit *e, const AluVariant *v)
     emit_load_accu56(e, /*xaccu=*/10, v->dst_ab, /*xtmp=*/8);
 
     /* Clear V only (not C). */
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 
     emit_ccr_e_u_n_z(e, /*xaccu=*/10);
 }
@@ -3137,14 +3196,14 @@ static void emit_alu_clr(ArmEmit *e, const AluVariant *v)
     }
 
     /* SR: clear E|N|V, set U|Z. */
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7,
                    (uint32_t)~((1u << DSP_SR_E) | (1u << DSP_SR_N) |
                                (1u << DSP_SR_V)) & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
     emit_mov_imm32(e, /*rd=*/7, (1u << DSP_SR_U) | (1u << DSP_SR_Z));
     emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 }
 
 /*
@@ -3179,14 +3238,14 @@ static void emit_overflowed_min_neg(ArmEmit *e, int xaccu, int wovf)
  */
 static void emit_sr_neg_abs(ArmEmit *e, int wovf)
 {
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
     /* OR ovf into V (bit 1). */
     emit_bfi_x(e, /*rd=*/6, /*rn=*/wovf, DSP_SR_V, 1);
     /* OR ovf into L (bit 6). */
     emit_bfi_x(e, /*rd=*/6, /*rn=*/wovf, DSP_SR_L, 1);
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 }
 
 /*
@@ -3368,7 +3427,7 @@ static void emit_alu_lsl(ArmEmit *e, const AluVariant *v)
     emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
 
     /* SR update: clear C|N|Z|V, set C=w6, N=w7, Z=w8. */
-    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 9);
     emit_mov_imm32(e, /*rd=*/10,
                    (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
                                (1u << DSP_SR_Z) | (1u << DSP_SR_V))
@@ -3381,7 +3440,7 @@ static void emit_alu_lsl(ArmEmit *e, const AluVariant *v)
     emit_bfi_x(e, /*rd=*/9, /*rn=*/7, DSP_SR_N, 1);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
 
-    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 9);
 }
 
 /*
@@ -3515,7 +3574,7 @@ static void emit_alu_long_imm_logical(ArmEmit *e, int kind_li,
     emit_cset_w(e, /*rd=*/7, ARM_COND_EQ);               /* w7 = Z */
 
     /* Clear N|Z|V; OR in new N/Z. */
-    emit_ldrh_any(e, /*rd=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 8);
     emit_mov_imm32(e, /*rd=*/9,
                    (uint32_t)~((1u << DSP_SR_N) | (1u << DSP_SR_Z) |
                                (1u << DSP_SR_V))
@@ -3523,7 +3582,7 @@ static void emit_alu_long_imm_logical(ArmEmit *e, int kind_li,
     emit_and_w_reg(e, /*rd=*/8, /*rn=*/8, /*rm=*/9);
     emit_bfi_x(e, /*rd=*/8, /*rn=*/6, DSP_SR_N, 1);
     emit_bfi_x(e, /*rd=*/8, /*rn=*/7, DSP_SR_Z, 1);
-    emit_strh_any(e, /*rs=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 8);
 }
 
 /*
@@ -3608,7 +3667,7 @@ static void emit_alu_lsr(ArmEmit *e, const AluVariant *v)
     emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
 
     /* SR: clear C|N|Z|V, set C and Z (N stays cleared). */
-    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 9);
     emit_mov_imm32(e, /*rd=*/10,
                    (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
                                (1u << DSP_SR_Z) | (1u << DSP_SR_V))
@@ -3618,7 +3677,7 @@ static void emit_alu_lsr(ArmEmit *e, const AluVariant *v)
     emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_C, 1);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
 
-    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 9);
 }
 
 /*
@@ -3667,7 +3726,7 @@ static void emit_alu_rol(ArmEmit *e, const AluVariant *v)
     emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
 
     /* SR: clear C|N|Z|V, set C/N/Z. */
-    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 9);
     emit_mov_imm32(e, /*rd=*/10,
                    (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
                                (1u << DSP_SR_Z) | (1u << DSP_SR_V))
@@ -3678,7 +3737,7 @@ static void emit_alu_rol(ArmEmit *e, const AluVariant *v)
     emit_bfi_x(e, /*rd=*/9, /*rn=*/7, DSP_SR_N, 1);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
 
-    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 9);
 }
 
 /*
@@ -3721,7 +3780,7 @@ static void emit_alu_ror(ArmEmit *e, const AluVariant *v)
     emit_cset_w(e, /*rd=*/8, ARM_COND_EQ);
 
     /* SR: clear C|N|Z|V, set C=w6, N=w6 (same bit), Z=w8. */
-    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 9);
     emit_mov_imm32(e, /*rd=*/10,
                    (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
                                (1u << DSP_SR_Z) | (1u << DSP_SR_V))
@@ -3732,7 +3791,7 @@ static void emit_alu_ror(ArmEmit *e, const AluVariant *v)
     emit_bfi_x(e, /*rd=*/9, /*rn=*/6, DSP_SR_N, 1);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/8, DSP_SR_Z, 1);
 
-    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 9);
 }
 
 /*
@@ -3882,7 +3941,7 @@ static void emit_alu_adc_sbc(ArmEmit *e, const AluVariant *v)
     /* Read SR.C into w8 (curcarry). Must happen BEFORE
      * emit_addsub_flags (which clobbers w5/w6/w7 — NOT w8, but we
      * want the value locked in regardless). */
-    emit_ldrh_any(e, /*rd=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 8);
     emit_ubfx_w(e, /*rd=*/8, /*rn=*/8, DSP_SR_C, 1);
 
     /* x13 = orig (saved for first-pass addsub_flags). */
@@ -4067,13 +4126,13 @@ static void emit_alu_mac(ArmEmit *e, const AluVariant *v)
 
     /* SR update: clear V; MAC also ORs newsr (with C bit already
      * cleared above). MPY/MPYR have no newsr, just clear V. */
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~(1u << DSP_SR_V) & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
     if (mac_mode) {
         emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/wnewsr);
     }
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 
     /* E/U/N/Z on the final result. */
     emit_ccr_e_u_n_z(e, /*xaccu=*/x_final);
@@ -4127,7 +4186,7 @@ static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
     }
 
     /* SR: clear N|Z|V, set N = bit 23 of A1, Z = (A1 == 0). */
-    emit_ldrh_any(e, /*rd=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 6);
     emit_mov_imm32(e, /*rd=*/7, (uint32_t)~((1u << DSP_SR_N) | (1u << DSP_SR_Z) |
                                              (1u << DSP_SR_V)) & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
@@ -4145,7 +4204,7 @@ static void emit_alu_logical(ArmEmit *e, const AluVariant *v)
     emit_orr_w_reg(e, /*rd=*/6, /*rn=*/6, /*rm=*/7);
     patch_branch(skip_z, (int32_t)((uint8_t *)e->buf - (uint8_t *)skip_z));
 
-    emit_strh_any(e, /*rs=*/6, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_h(e, 6);
 }
 
 /*
@@ -4329,7 +4388,40 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
         uint8_t alu_op = (uint8_t)(inst & 0xff);
         AluVariant v;
         alu_classify_opcode(alu_op, &v);
-        return v.kind == ALU_KIND_MOVE;
+        /*
+         * Passthrough-for-lazy-flag semantics: the op neither
+         *   (a) reads any of SR.E/U/N/Z (so prior writes to those
+         *       bits are still dead candidates), nor
+         *   (b) requires ANY of prior's E/U/N/Z to stay alive.
+         *
+         * MOVE: no ALU kernel, no SR.CCR touch. Pure passthrough.
+         *
+         * TFR / LSL / LSR / ROL / ROR: these ALU kernels do write
+         * SR bits (LSL/LSR/ROL/ROR clear+rewrite C/N/Z/V; TFR
+         * doesn't touch SR) — but they never READ E/U/N/Z and
+         * they OVERWRITE N/Z (for the shifts) which is a subset
+         * of what a full CCR writer overwrites. Walking through
+         * these still lets a downstream full writer render the
+         * upstream full writer's E/U/N/Z dead, because nothing
+         * in between consumes any of those bits.
+         *
+         * The intermediate op's OWN partial write to N/Z isn't
+         * the question here — we're deciding whether the
+         * UPSTREAM full writer's ccr emit is live. As long as no
+         * consumer reads SR.E/U/N/Z between the upstream emit
+         * and the next full overwrite, the upstream is dead.
+         */
+        switch (v.kind) {
+        case ALU_KIND_MOVE:
+        case ALU_KIND_TFR:
+        case ALU_KIND_LSL:
+        case ALU_KIND_LSR:
+        case ALU_KIND_ROL:
+        case ALU_KIND_ROR:
+            return true;
+        default:
+            return false;
+        }
     }
     return false;
 }
@@ -4455,6 +4547,9 @@ static void emit_alu_call(ArmEmit *e, uint8_t alu_op, emu_func_t alu)
     emit_mov_imm64(e, /*rd=*/1, (uint64_t)(uintptr_t)alu);
     emit_blr(e, /*rn=*/1);
     emit_reload_ab_pins(e);
+    /* emu_max touches SR.C — reload the SR pin so subsequent
+     * inline ALU ops see the updated SR. */
+    emit_reload_sr_pin(e);
     g_alu_fallback_count++;
 }
 
@@ -4661,6 +4756,8 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu,
         emit_blr(e, /*rn=*/1);
         emit_reload_ab_pins(e);
         emit_reload_xy_pins(e);
+        /* pm_4x's pm_read_accu24 path may set SR.L on overflow. */
+        emit_reload_sr_pin(e);
         return;
     }
     emit_parmove_pm5(e, inst, alu, dsp, pc);
@@ -5030,7 +5127,7 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         uint32_t *to_call_helper_1 = e->buf;
         emit_cbnz_w(e, 0, 0);       /* patched below */
 
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_load_sr(e, 0);
         uint32_t *to_call_helper_2 = e->buf;
         emit_tbnz_w(e, /*rt=*/0, DSP_SR_LF, 0);   /* patched below */
 
@@ -5067,7 +5164,9 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         /* The helper reads/writes registers[PC/LA/LC/SR/stack] and
          * may invoke dsp_stack_push/pop — none of X0/X1/Y0/Y1 are
          * touched, so no X/Y pin reload is required. A/B likewise
-         * unchanged. */
+         * unchanged. SR can be mutated (DO loop end clears SR.LF),
+         * so reload the SR pin. */
+        emit_reload_sr_pin(e);
 
         uint32_t *after_label = e->buf;
         patch_b(to_after, (int32_t)((uint8_t *)after_label -
@@ -5100,7 +5199,9 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
             (uint64_t)(uintptr_t)&dsp_jit_helper_postexecute_interrupts);
         emit_blr(e, /*rn=*/15);
         /* The interrupt helper may invoke dsp_stack_push and tweak
-         * SR / pc, but doesn't touch X/Y/A/B. Pins stay valid. */
+         * SR / pc, but doesn't touch X/Y/A/B. A/B pins stay valid;
+         * SR pin reload needed (long-interrupt rewrites SR mask). */
+        emit_reload_sr_pin(e);
 
         uint32_t *after_label = e->buf;
         patch_branch(skip_site,
@@ -5441,6 +5542,15 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
 static uint64_t g_cf_inlined_count;
 static uint64_t g_cf_fallback_count;
 
+/*
+ * Per-handler cf_fallback buckets. Indexed by DSP_JIT_FB_* (see
+ * dsp_jit.h). Incremented at translate time every time
+ * emit_instruction falls through to the generic BLR path. Printed
+ * by XEMU_DSP_JIT_STATS so the "what's still in the fallback bucket"
+ * question becomes data-driven rather than guesswork.
+ */
+static uint64_t g_cf_fallback_buckets[DSP_JIT_FB_MAX];
+
 /* Helper: pc = newpc, cur_inst_len = 0. Clobbers w0. */
 static void emit_cf_set_pc_branch(ArmEmit *e, uint32_t newpc)
 {
@@ -5500,7 +5610,7 @@ static void emit_cf_stack_push(ArmEmit *e, uint32_t return_pc)
 {
     emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);                /* x0 = dsp */
     emit_mov_imm32(e, /*rd=*/1, return_pc);                /* w1 = retpc */
-    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_SR); /* w2 = SR */
+    emit_load_sr(e, 2); /* w2 = SR */
     emit_mov_imm64(e, /*rd=*/4,
                    (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
     emit_blr(e, /*rn=*/4);
@@ -5590,7 +5700,7 @@ static void emit_cf_cond_stack_push_jsr(ArmEmit *e, uint32_t return_pc)
 static void emit_cf_calc_cc(ArmEmit *e, uint32_t cc_code)
 {
     /* Load SR into w0 first; each case extracts the needed bits. */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
 
     bool invert = (cc_code & 8) == 0;
     uint32_t base = cc_code & 7;
@@ -5700,7 +5810,7 @@ static void emit_cf_rti_op(ArmEmit *e)
     emit_ldr_w_imm(e, /*rd=*/1, /*rn=*/31, OFF_SP_SCRATCH0);
     emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
     emit_ldr_w_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH1);
-    emit_str_w_any(e, /*rs=*/2, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 2);
     emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_cf_set_cycles(e, 4);
 }
@@ -5912,10 +6022,10 @@ static void emit_cf_do_suffix(ArmEmit *e, uint32_t pc, uint32_t lc_imm)
     emit_cf_stack_push(e, pc + 2);
 
     /* SR |= (1 << DSP_SR_LF) ; DSP_SR_LF = 15 ; bit value = 0x8000 */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* LC = 12-bit imm */
     emit_mov_imm32(e, /*rd=*/0, lc_imm);
@@ -5988,10 +6098,10 @@ static void emit_cf_dor_imm_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     emit_cf_stack_push(e, pc + 2);
 
     /* SR |= LF */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* LC = 12-bit imm */
     emit_mov_imm32(e, /*rd=*/0, lc);
@@ -6040,10 +6150,10 @@ static void emit_cf_do_aa_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_cf_stack_push(e, pc + 2);
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* LC = memory[memspace][addr] & 0xffff. emit_mem_read_xy needs
      * an address reg; bake the 6-bit addr into w4. */
@@ -6080,10 +6190,10 @@ static void emit_cf_do_ea_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_cf_stack_push(e, pc + 2);
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* addr into x4 via calc_ea, then mem-read → LC. calc_ea handles
      * Rn post-update, non-linear Mn via BLR shim, mode-6 immediate,
@@ -6137,10 +6247,10 @@ static void emit_cf_do_reg_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     emit_pm_read_reg(e, (int)numreg, /*value_reg=*/5);
 
     emit_cf_stack_push(e, pc + 2);
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* LC = w5 & 0xffff */
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
@@ -6178,10 +6288,10 @@ static void emit_cf_dor_reg_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
 
     emit_cf_stack_push(e, pc + 2);
 
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     emit_pm_read_reg(e, (int)numreg, /*value_reg=*/5);
     emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
@@ -6209,13 +6319,13 @@ static void emit_cf_enddo_op(ArmEmit *e)
     emit_and_w_reg(e, /*rd=*/1, /*rn=*/2, /*rm=*/1);
 
     /* w0 = SR & 0x7f */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 0);
     emit_mov_imm32(e, /*rd=*/2, 0x7fu);
     emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
 
     /* SR = w0 | w1 */
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_store_sr_w(e, 0);
 
     /* Second pop: dsp_stack_pop(dsp, &LA_reg, &LC_reg). We can
      * pass the addresses of the register-file slots directly —
@@ -6326,17 +6436,17 @@ static void emit_cf_andi_op(ArmEmit *e, uint32_t inst)
     if (regnum == 0) {
         /* SR &= (value << 8) | 0xff — clears selected bits of SR.MR. */
         uint16_t mask = (uint16_t)((value << 8) | 0xff);
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_load_sr(e, 0);
         emit_mov_imm32(e, /*rd=*/1, mask);
         emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_store_sr_h(e, 0);
     } else if (regnum == 1) {
         /* SR &= (0xff << 8) | value — clears selected bits of SR.CCR. */
         uint16_t mask = (uint16_t)((0xffu << 8) | value);
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_load_sr(e, 0);
         emit_mov_imm32(e, /*rd=*/1, mask);
         emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_store_sr_h(e, 0);
     } else if (regnum == 2) {
         /* OMR &= value. OMR is 8-bit in the interp's register
          * file (stored as a single u32, but masked to 8 bits by
@@ -6362,16 +6472,16 @@ static void emit_cf_ori_op(ArmEmit *e, uint32_t inst)
     if (regnum == 0) {
         /* SR |= (value << 8). */
         uint16_t mask = (uint16_t)(value << 8);
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_load_sr(e, 0);
         emit_mov_imm32(e, /*rd=*/1, mask);
         emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_store_sr_h(e, 0);
     } else if (regnum == 1) {
         /* SR |= value (low 8 bits of SR = CCR). */
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_load_sr(e, 0);
         emit_mov_imm32(e, /*rd=*/1, value);
         emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_store_sr_h(e, 0);
     } else if (regnum == 2) {
         /* OMR |= value. */
         emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_OMR));
@@ -6666,7 +6776,13 @@ static bool emit_cf_movec_imm_op(ArmEmit *e, uint32_t inst)
     /* Special bits==0 slots (DSP_REG_NULL etc.) still get a zero
      * store to match the interp. */
     emit_mov_imm32(e, /*rd=*/0, masked);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(numreg));
+    if (numreg == DSP_REG_SR) {
+        /* SR pin sync via store_sr_w (write-through to both memory
+         * and w28). */
+        emit_store_sr_w(e, /*rs=*/0);
+    } else {
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(numreg));
+    }
 
     /* X/Y pin sync for the rare case numreg ∈ {X0, X1, Y0, Y1}
      * (movec_imm permits any 6-bit field — although X/Y is unusual
@@ -6727,8 +6843,8 @@ static bool emit_dsp_write_reg(ArmEmit *e, int numreg, int value_wreg)
     case DSP_REG_SR:
         emit_mov_imm32(e, /*rd=*/0, 0xaf7f);
         emit_and_w_reg(e, /*rd=*/0, /*rn=*/value_wreg, /*rm=*/0);
-        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH,
-                       OFF_REG(DSP_REG_SR));
+        /* SR pin sync: emit_store_sr_w writes memory AND w28. */
+        emit_store_sr_w(e, /*rs=*/0);
         return true;
 
     default: {
@@ -7026,6 +7142,164 @@ static bool emit_cf_movep_0_op(ArmEmit *e, uint32_t inst)
 }
 
 /*
+ * emu_movep_1 — p:ea ↔ (x|y):pp peripheral short-address.
+ *
+ *   peraddr  = 0xffffc0 | inst[5:0]    (always peripheral range)
+ *   memspace = inst[16]                (0=X, 1=Y for the peripheral side)
+ *   ea_mode  = inst[13:8]              (P-space address via calc_ea)
+ *   bit 15 = 1 → Write pp : (mem)pp ← read_memory_p(paddr)
+ *   bit 15 = 0 → Read  pp : write_memory_p(paddr, mem_read(memsp, xyaddr))
+ *
+ * Interp doesn't check retour — the P-space address is always
+ * treated as an address, even for mode 6 (where read_memory_p
+ * would assert if the literal exceeds DSP_PRAM_SIZE). We match
+ * that behaviour bit-exactly; emit_mem_read_p_blr / emit_mem_write_p_blr
+ * delegate to dsp56k_read_memory / write_memory which assert on
+ * bad addr the same way.
+ *
+ * Cycles += 4. calc_ea may add +2 for modes 5/6/7 — use add_cycles
+ * to preserve it.
+ */
+static bool emit_cf_movep_1_op(ArmEmit *e, uint32_t inst,
+                               dsp_core_t *dsp, uint32_t pc)
+{
+    uint32_t xyaddr  = 0xffffc0u | (inst & 0x3f);
+    uint32_t memsp   = (inst >> 16) & 1;
+    uint32_t ea_mode = (inst >> 8) & 0x3f;
+    bool write_pp    = (inst & (1u << 15)) != 0;
+
+    /* calc_ea → x22 = paddr. */
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
+                        /*want_retour=*/false, dsp, pc);
+
+    if (write_pp) {
+        /* value = read_memory_p(paddr); write_memory_xy(memsp, xyaddr, value). */
+        emit_mem_read_p_blr(e, /*addr_reg=*/22, /*value_reg=*/5);
+        emit_mov_imm32(e, /*rd=*/4, xyaddr);
+        emit_mem_write_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+    } else {
+        /* value = mem_read_xy(memsp, xyaddr); write_memory_p(paddr, value). */
+        emit_mov_imm32(e, /*rd=*/4, xyaddr);
+        emit_mem_read_xy(e, (int)memsp, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_mem_write_p_blr(e, /*addr_reg=*/22, /*value_reg=*/5);
+    }
+    emit_cf_add_cycles(e, 4);
+    return true;
+}
+
+/*
+ * emu_movep_23 — (x|y):ea ↔ (x|y):pp peripheral short-address.
+ *
+ *   peraddr  = 0xffffc0 | inst[5:0]
+ *   perspace = inst[16]    (peripheral side: X or Y)
+ *   ea_mode  = inst[13:8]
+ *   easpace  = inst[6]     (ea side: X or Y)
+ *   bit 15 = 1 → Write pp : pp ← ((retour) ? addr : mem_read(easpace, addr))
+ *   bit 15 = 0 → Read  pp : mem_write(easpace, addr, mem_read(perspace, peraddr))
+ *
+ * Write-pp honours calc_ea's retour flag for mode 6 (`#xxxx, pp` —
+ * immediate literal source). Read-pp does not (matches interp).
+ *
+ * Cycles += 2. calc_ea may add +2 for modes 5/6/7.
+ */
+static bool emit_cf_movep_23_op(ArmEmit *e, uint32_t inst,
+                                dsp_core_t *dsp, uint32_t pc)
+{
+    uint32_t peraddr  = 0xffffc0u | (inst & 0x3f);
+    uint32_t perspace = (inst >> 16) & 1;
+    uint32_t ea_mode  = (inst >> 8) & 0x3f;
+    uint32_t easpace  = (inst >> 6) & 1;
+    bool write_pp     = (inst & (1u << 15)) != 0;
+
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
+                        /*want_retour=*/write_pp, dsp, pc);
+
+    if (write_pp) {
+        /* if (retour) value = addr(x22); else value = mem_read_xy(easpace, x22). */
+        emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+        uint32_t *to_mem = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);
+
+        /* retour != 0: value = w22 (the baked literal). */
+        emit_mov_w_reg(e, /*rd=*/5, /*rn=*/22);
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);
+
+        uint32_t *mem_label = e->buf;
+        patch_branch(to_mem, (int32_t)((uint8_t *)mem_label -
+                                       (uint8_t *)to_mem));
+        emit_mem_read_xy(e, (int)easpace, /*addr_reg=*/22, /*value_reg=*/5);
+
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+
+        emit_mov_imm32(e, /*rd=*/4, peraddr);
+        emit_mem_write_xy(e, (int)perspace, /*addr_reg=*/4, /*value_reg=*/5);
+    } else {
+        /* value = mem_read_xy(perspace, peraddr); mem_write_xy(easpace, addr, value). */
+        emit_mov_imm32(e, /*rd=*/4, peraddr);
+        emit_mem_read_xy(e, (int)perspace, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_mem_write_xy(e, (int)easpace, /*addr_reg=*/22, /*value_reg=*/5);
+    }
+    emit_cf_add_cycles(e, 2);
+    return true;
+}
+
+/*
+ * emu_movep_x_qq — (x|y):ea ↔ X:qq peripheral (qq = 0xffff80 base,
+ * not 0xffffc0 — different from pp).
+ *
+ *   x_addr  = 0xffff80 | inst[5:0]
+ *   ea_mode = inst[13:8]
+ *   easpace = inst[6]
+ *   bit 15 = 1 → Write qq : qq ← ((retour) ? addr : mem_read(easpace, addr))
+ *   bit 15 = 0 → Read  qq : mem_write(easpace, addr, mem_read(X, x_addr))
+ *
+ * Same retour pattern as movep_23. Peripheral side is hardcoded
+ * DSP_SPACE_X. Cycles += 2.
+ */
+static bool emit_cf_movep_x_qq_op(ArmEmit *e, uint32_t inst,
+                                  dsp_core_t *dsp, uint32_t pc)
+{
+    uint32_t x_addr   = 0xffff80u | (inst & 0x3f);
+    uint32_t ea_mode  = (inst >> 8) & 0x3f;
+    uint32_t easpace  = (inst >> 6) & 1;
+    bool write_qq     = (inst & (1u << 15)) != 0;
+
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
+                        /*want_retour=*/write_qq, dsp, pc);
+
+    if (write_qq) {
+        emit_ldr_w_imm(e, /*rd=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+        uint32_t *to_mem = e->buf;
+        emit_cbz_w(e, /*rn=*/0, 0);
+
+        emit_mov_w_reg(e, /*rd=*/5, /*rn=*/22);
+        uint32_t *to_after = e->buf;
+        emit_b(e, 0);
+
+        uint32_t *mem_label = e->buf;
+        patch_branch(to_mem, (int32_t)((uint8_t *)mem_label -
+                                       (uint8_t *)to_mem));
+        emit_mem_read_xy(e, (int)easpace, /*addr_reg=*/22, /*value_reg=*/5);
+
+        uint32_t *after_label = e->buf;
+        patch_b(to_after, (int32_t)((uint8_t *)after_label -
+                                    (uint8_t *)to_after));
+
+        emit_mov_imm32(e, /*rd=*/4, x_addr);
+        emit_mem_write_xy(e, DSP_SPACE_X, /*addr_reg=*/4, /*value_reg=*/5);
+    } else {
+        emit_mov_imm32(e, /*rd=*/4, x_addr);
+        emit_mem_read_xy(e, DSP_SPACE_X, /*addr_reg=*/4, /*value_reg=*/5);
+        emit_mem_write_xy(e, (int)easpace, /*addr_reg=*/22, /*value_reg=*/5);
+    }
+    emit_cf_add_cycles(e, 2);
+    return true;
+}
+
+/*
  * emu_movem_aa (p:aa,D / S,p:aa) — control/data register ↔ P-space
  * short-absolute.
  *
@@ -7176,7 +7450,7 @@ static void emit_cf_jsr_ea_op(ArmEmit *e, uint32_t pc, uint32_t inst,
     emit_cbz_w(e, /*rn=*/0, 0);
 
     /* push(dsp, w1, SR) */
-    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 2);
     emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
     emit_mov_imm64(e, /*rd=*/4,
                    (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
@@ -7252,7 +7526,7 @@ static void emit_cf_jscc_ea_op(ArmEmit *e, uint32_t inst,
     emit_ldrh_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_PC);
     emit_add_w_reg(e, /*rd=*/1, /*rn=*/2, /*rm=*/1);  /* w1 = retpc */
-    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_load_sr(e, 2);
     emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
     emit_mov_imm64(e, /*rd=*/4,
                    (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
@@ -7458,6 +7732,12 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         if (!emit_cf_movec_ea_op(e, inst, dsp, pc)) { return false; } break;
     case DSP_JIT_CF_MOVEP_0:
         if (!emit_cf_movep_0_op(e, inst)) { return false; }         break;
+    case DSP_JIT_CF_MOVEP_1:
+        if (!emit_cf_movep_1_op(e, inst, dsp, pc)) { return false; } break;
+    case DSP_JIT_CF_MOVEP_23:
+        if (!emit_cf_movep_23_op(e, inst, dsp, pc)) { return false; } break;
+    case DSP_JIT_CF_MOVEP_X_QQ:
+        if (!emit_cf_movep_x_qq_op(e, inst, dsp, pc)) { return false; } break;
     case DSP_JIT_CF_MOVEM_AA:
         if (!emit_cf_movem_aa_op(e, inst, dsp)) { return false; }   break;
     case DSP_JIT_CF_MOVEM_EA:
@@ -7615,7 +7895,16 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
         emit_blr(e, /*rn=*/1);
         emit_reload_ab_pins(e);
         emit_reload_xy_pins(e);
+        /* movec / movep / generic emu_* can write registers[SR]
+         * via dsp_write_reg; reload the SR pin. */
+        emit_reload_sr_pin(e);
         g_cf_fallback_count++;
+        /* Per-handler bucketing — data-drives the "what to inline
+         * next" decision. Unknown handlers hit FB_OTHER. */
+        int fb_kind = dsp_jit_helper_classify_fallback((void *)emu_func);
+        if (fb_kind >= 0 && fb_kind < DSP_JIT_FB_MAX) {
+            g_cf_fallback_buckets[fb_kind]++;
+        }
     }
 
     /*
@@ -7895,6 +8184,8 @@ static uint32_t *emit_epilogue(ArmEmit *e)
     /* Deallocate 16-byte scratch area. */
     emit_u32(e, 0x910043ffu);   /* ADD SP, SP, #16 */
     /* Restore in reverse of prologue's push order. */
+    /* Pop in reverse order of push: x28/x29 first (most recent). */
+    emit_ldp_post(e, /*rt1=*/28, /*rt2=*/29, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/26, /*rt2=*/27, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, 16);
     emit_ldp_post(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, 16);
@@ -7925,6 +8216,8 @@ static void emit_prologue(ArmEmit *e)
     emit_stp_pre(e, /*rt1=*/22, /*rt2=*/23, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/24, /*rt2=*/25, /*rn=*/31 /*SP*/, -16);
     emit_stp_pre(e, /*rt1=*/26, /*rt2=*/27, /*rn=*/31 /*SP*/, -16);
+    /* x28 = SR pin (paired with x29/FP for alignment). */
+    emit_stp_pre(e, /*rt1=*/28, /*rt2=*/29, /*rn=*/31 /*SP*/, -16);
 
     /* 16-byte scratch area for parmove slow-path helpers to write
      * their u32 outputs into. [SP+0..7] = two u32 words; [SP+8..15]
@@ -7977,6 +8270,12 @@ static void emit_prologue(ArmEmit *e)
      * maintained in emit_pm_write_reg's X/Y paths. */
     emit_reload_ab_pins(e);
     emit_reload_xy_pins(e);
+    /* SR pinning: load low 16 bits of registers[SR] into x28.
+     * Every subsequent emit_load_sr reads from the pin (1-insn
+     * MOV); every emit_store_sr_h / _w is write-through to both
+     * memory and the pin. Reload is triggered after BLR-fallback
+     * handlers that may mutate registers[SR]. */
+    emit_reload_sr_pin(e);
 }
 
 /* Shims implemented at the bottom of dsp_cpu.c (where the static
@@ -8462,6 +8761,28 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
                 100.0 * (double)g_cf_inlined_count /
                 (double)(g_cf_inlined_count + g_cf_fallback_count),
             g_cf_fallback_count);
+
+    /* Per-handler cf_fallback breakdown (only emitted when at
+     * least one bucket is non-zero — keeps the stats output tidy
+     * on runs that don't hit any fallback). Bucket ordering matches
+     * DSP_JIT_FB_* enum; DSP_JIT_FB_OTHER at index 0 bucket catches
+     * any unlisted handler. */
+    uint64_t fb_total = 0;
+    for (int k = 0; k < DSP_JIT_FB_MAX; k++) {
+        fb_total += g_cf_fallback_buckets[k];
+    }
+    if (fb_total > 0) {
+        fprintf(stderr, "  cf_fallback buckets:\n");
+        for (int k = 0; k < DSP_JIT_FB_MAX; k++) {
+            if (g_cf_fallback_buckets[k] == 0) continue;
+            fprintf(stderr,
+                    "    %-12s = %" PRIu64 " (%.1f%% of cf_fallback)\n",
+                    dsp_jit_helper_fallback_name(k),
+                    g_cf_fallback_buckets[k],
+                    100.0 * (double)g_cf_fallback_buckets[k] /
+                    (double)fb_total);
+        }
+    }
 
     /* Debug-knob summary: echo whether SENTINEL / FORCE were
      * enabled for this run. Keeps the stats line self-describing
