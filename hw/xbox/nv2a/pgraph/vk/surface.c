@@ -44,30 +44,66 @@ static void surface_ranges_insert(PGRAPHVkState *r, SurfaceBinding *s)
             r->surface_range_capacity, sizeof(r->surface_ranges[0]));
     }
 
-    int pos = 0;
-    while (pos < r->surface_range_count &&
-           r->surface_ranges[pos].start < start) {
-        pos++;
+    /*
+     * lower_bound on start — array is kept sorted by start. Overlapping
+     * surfaces at identical starts are rare but not forbidden; the
+     * stable insertion point is the first index whose start >= our
+     * start, matching the original linear probe's semantics.
+     */
+    int lo = 0, hi = r->surface_range_count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (r->surface_ranges[mid].start < start) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
     }
+    int pos = lo;
+
     memmove(&r->surface_ranges[pos + 1], &r->surface_ranges[pos],
             (r->surface_range_count - pos) * sizeof(r->surface_ranges[0]));
     r->surface_ranges[pos].start = start;
     r->surface_ranges[pos].end = end;
     r->surface_ranges[pos].surface = s;
     r->surface_range_count++;
+
+    /*
+     * Fix up surface_range_slot on each shifted entry and on the newly
+     * inserted surface. memmove itself is O(count-pos); the fixup is
+     * the same cost, so no asymptotic regression relative to the old
+     * linear-probe insert.
+     */
+    s->surface_range_slot = pos;
+    for (int j = pos + 1; j < r->surface_range_count; j++) {
+        r->surface_ranges[j].surface->surface_range_slot = j;
+    }
 }
 
 static void surface_ranges_remove(PGRAPHVkState *r, SurfaceBinding *s)
 {
-    for (int i = 0; i < r->surface_range_count; i++) {
-        if (r->surface_ranges[i].surface == s) {
-            memmove(&r->surface_ranges[i], &r->surface_ranges[i + 1],
-                    (r->surface_range_count - i - 1) *
-                    sizeof(r->surface_ranges[0]));
-            r->surface_range_count--;
-            return;
-        }
+    int slot = s->surface_range_slot;
+    if (slot < 0 || slot >= r->surface_range_count ||
+        r->surface_ranges[slot].surface != s) {
+        /*
+         * Should never happen — insert is the only writer of
+         * surface_range_slot and sets it to a valid index. Assert
+         * loudly in debug to catch any missed init site; bail silently
+         * in release so a stale slot can't corrupt the ranges table.
+         */
+        nv2a_vk_assert(false && "surface_range_slot invariant broken");
+        return;
     }
+
+    memmove(&r->surface_ranges[slot], &r->surface_ranges[slot + 1],
+            (r->surface_range_count - slot - 1) *
+            sizeof(r->surface_ranges[0]));
+    r->surface_range_count--;
+
+    for (int j = slot; j < r->surface_range_count; j++) {
+        r->surface_ranges[j].surface->surface_range_slot = j;
+    }
+    s->surface_range_slot = -1;
 }
 
 static SurfaceBinding *surface_ranges_find_containing(PGRAPHVkState *r,
@@ -1606,6 +1642,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
     SurfaceBinding target;
     memset(&target, 0, sizeof(target));
+    target.surface_range_slot = -1;
     populate_surface_binding_target(d, color, &target);
 
     Surface *pg_surface = color ? &pg->surface_color : &pg->surface_zeta;

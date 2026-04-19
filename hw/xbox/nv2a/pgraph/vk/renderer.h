@@ -162,6 +162,13 @@ typedef struct SurfaceBinding {
     VmaAllocation allocation_scratch;
 
     bool initialized;
+
+    /*
+     * Cached index into r->surface_ranges[], -1 when not tracked.
+     * Lets surface_ranges_remove skip the linear scan; kept in sync
+     * by the insert/remove fixup loops.
+     */
+    int surface_range_slot;
 } SurfaceBinding;
 
 typedef struct ShaderModuleInfo {

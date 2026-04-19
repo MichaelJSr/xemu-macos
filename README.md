@@ -144,6 +144,14 @@ fine tuning.
   `min_element * stride` bytes per remapped attribute per draw on
   indexed meshes / glyph / sprite batches where the first referenced
   vertex is well above zero.
+- **Faster `surface_ranges` insert / remove.** Insert uses a
+  `lower_bound` binary search instead of the linear `while` probe;
+  remove consults a cached `surface_range_slot` index stored on
+  `SurfaceBinding` instead of scanning the table for pointer
+  equality. `memmove` cost is unchanged (array stays sorted by
+  `start`); asymptotic find goes from O(n) to O(1) for remove and
+  O(log n) for insert. Defensive assert on the remove path catches
+  any missed `surface_range_slot` init.
 
 ### MetalFX + presentation
 
