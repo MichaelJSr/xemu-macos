@@ -289,21 +289,31 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   unreachable. Follow-up rounds extend the inline coverage:
   calc_ea mode 6 (absolute-address, baked 24-bit `pram[pc+1]`)
   now inline — the one calc_ea mode that was still BLR'ing the C
-  helper. The ALU "tail" grows by six opcodes: ROL / ROR (1-bit
-  circular rotates on A1/B1) and the shift-arith quartet ADDL /
-  SUBL / ADDR / SUBR (56-bit ASL/ASR-then-add/sub of the other
-  accumulator). And `emu_ccr_update_e_u_n_z` — invoked from
-  ~180 ALU handlers to update the SR.E/U/N/Z bits after any
-  accumulator write — now has an inline fast path for the
-  universal `scaling=0` mode in Xbox audio (~20 ARM64 insns of
-  UBFX / BFI / CBNZ / CMP instead of a helper BLR). Scaling
-  modes 1/2 keep the helper BLR. Remaining BLR-fallback ALU
-  opcodes: RND (scaling-mode-dependent rounding), ADC / SBC
-  (extended-precision add/sub with carry), MAX (known interp
-  quirk). Static block chaining (direct `B <target.entry>`
-  patch on known branch targets) stays deferred — the
-  entry-split prologue refactor it depends on is scoped
-  separately.
+  helper. The ALU "tail" grows by eight opcodes: ROL / ROR
+  (1-bit circular rotates on A1/B1), the shift-arith quartet
+  ADDL / SUBL / ADDR / SUBR (56-bit ASL/ASR-then-add/sub of the
+  other accumulator), RND (convergent round via direct BLR to
+  the `dsp_jit_helper_rnd56` shim, skipping `emu_rnd_a`'s
+  register pack/unpack wrapper), and ADC / SBC (extended-
+  precision add/sub with SR.C folded as a second 56-bit
+  {0,0,1} operand — implemented branchlessly with carry as a
+  zero-extended w-reg operand). `emu_ccr_update_e_u_n_z` —
+  invoked from ~180 ALU handlers to update the SR.E/U/N/Z bits
+  after any accumulator write — is now FULLY inline with a
+  branch chain across all three active scaling modes (S0 / S1 /
+  S2) and an early-exit for the illegal S3 mode; the
+  `dsp_jit_helper_ccr_e_u_n_z` shim is removed. Remaining BLR-
+  fallback ALU opcodes: just MAX (0x1d) due to a known B2↔B0
+  swap quirk in the interpreter's `emu_max` that would need
+  bit-exact replication. Mode-6 parmove inst_len fix: the
+  classifier now detects mode-6 EA in parmove classes pm_0 /
+  pm_1 / pm_5 (and pm_4 fall-through) and returns 2, so blocks
+  containing mode-6 parmoves stay intact (previously exited via
+  the PC-mismatch check on every occurrence — 9.75% of all
+  parmove ops per the sentinel data).
+  Static block chaining (direct `B <target.entry>` patch on
+  known branch targets) stays deferred — the entry-split
+  prologue refactor it depends on is scoped separately.
 
   Round-4's two over-reaching experiments were DROPPED
   permanently: (a) skipping the `dsp->cur_inst` preset for

@@ -1919,19 +1919,19 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
 }
 
 /*
- * Emit inline E / U / N / Z update for the standard scaling mode
- * (S0=0, S1=0), with a BLR fallback to the emu_ccr_update_e_u_n_z
- * shim for the two exotic scaling modes.
+ * Emit fully-inlined E / U / N / Z update matching the interpreter's
+ * emu_ccr_update_e_u_n_z (dsp_emu.c.inc:288) for every scaling
+ * mode. No BLR fallback remains — the 4-way dispatch on SR.S0 /
+ * SR.S1 is materialised as a small branch chain.
  *
- * Interpreter reference (dsp_emu.c.inc:288 emu_ccr_update_e_u_n_z):
+ * Interpreter reference:
  *
- *   SR &= ~(E|U|N|Z);                   // clear
+ *   SR &= ~(E|U|N|Z);
  *   scaling = (SR >> S0) & 0x3;
  *   switch (scaling) {
  *       case 0:
- *           value_e = (A2 << 1) + (A1 >> 23);
- *           if (value_e != 0 && value_e != 0x1ff)
- *               SR |= 1 << E;
+ *           value_e = (A2 << 1) + (A1 >> 23);             // 9 bits
+ *           if (value_e != 0 && value_e != 0x1ff) SR |= 1 << E;
  *           if ((A1 & 0xc00000) == 0 || (A1 & 0xc00000) == 0xc00000)
  *               SR |= 1 << U;
  *           break;
@@ -1941,34 +1941,45 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
  *           if (vu == 0 || vu == 3) SR |= 1 << U;
  *           break;
  *       case 2:
- *           value_e = (A2 << 2) + (A1 >> 22);
+ *           value_e = (A2 << 2) + (A1 >> 22);             // 10 bits
  *           if (value_e != 0 && value_e != 0x3ff) SR |= 1 << E;
  *           if ((A1 & 0x600000) == 0 || (A1 & 0x600000) == 0x600000)
  *               SR |= 1 << U;
  *           break;
- *       default: return;                // S0=1 && S1=1 — illegal, no update
+ *       default: return;                // scaling==3 skips N/Z too
  *   }
  *   if (A2 == 0 && A1 == 0 && A0 == 0) SR |= 1 << Z;
- *   SR |= (A2 >> 4) & 0x8;              // N (bit 7 of A2 → bit 3 of SR)
+ *   SR |= (A2 >> 4) & 0x8;              // N = bit 7 of A2, at SR[3]
  *
- * The scaling=0 path is the overwhelmingly common case in Xbox
- * audio (S0/S1 are typically 0), so we inline it as a straight-
- * line sequence. For scaling=1/2/3 we BLR the existing shim —
- * rare enough that the BLR overhead is acceptable, and keeps
- * the inline emit size bounded.
+ * Layout of the emit:
  *
- * Callers already extracted A2/A1/A0 into w1/w2/w3 via the UBFX
- * trio below, so BOTH paths share that prefix. The BLR passes
- * w1/w2/w3 as (reg0, reg1, reg2) to the shim directly — no
- * second extraction needed.
+ *     extract A2/A1/A0 into w1/w2/w3
+ *     load SR into w9, clear E|U|N|Z
+ *     extract scaling into w10
+ *     cmp scaling,3  beq -> skip_nz        // scaling 3: skip E/U and N/Z
+ *     cmp scaling,2  beq -> s2
+ *     cmp scaling,1  beq -> s1
+ *     [S0 E/U]   b -> nz
+ *   s1:
+ *     [S1 E/U]   b -> nz
+ *   s2:
+ *     [S2 E/U]   fall-through -> nz
+ *   nz:
+ *     Z = (A2|A1|A0 == 0)
+ *     N = bit 7 of A2
+ *   skip_nz:
+ *     store SR
  *
- * Clobbers: w0..w4, w8..w13, x30 (via BLR). Preserves x19-x25.
+ * Xbox audio runs with scaling=0 practically always, so the S0
+ * path stays in the fall-through slot (no branch required on the
+ * hot path). The other cases are 1-2 cycles of branch overhead
+ * when taken.
+ *
+ * Clobbers: w1..w3, w9..w13. Preserves x19-x25.
  */
 static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
 {
-    /* Extract A2 / A1 / A0 from the 64-bit xaccu. These are the
-     * arguments to the BLR shim AND the inputs to the inline
-     * fast path; share the extraction. */
+    /* Extract A2 / A1 / A0 from the 64-bit xaccu. */
     emit_ubfx_x(e, /*rd=*/1, /*rn=*/xaccu, 48, 8);   /* w1 = A2 */
     emit_ubfx_x(e, /*rd=*/2, /*rn=*/xaccu, 24, 24);  /* w2 = A1 */
     emit_ubfx_x(e, /*rd=*/3, /*rn=*/xaccu, 0, 24);   /* w3 = A0 */
@@ -1977,82 +1988,136 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
     emit_ubfx_w(e, /*rd=*/10, /*rn=*/9, DSP_SR_S0, 2);
 
-    /* If scaling != 0, branch to the BLR slow path. CBNZ is one
-     * insn vs the CMP+B.NE pair. */
-    uint32_t *to_slow = e->buf;
-    emit_cbnz_w(e, /*rn=*/10, 0);
-
-    /* ========= Fast path: scaling == 0 ========= */
-
-    /* Clear SR.E|U|N|Z into w9. */
+    /* Clear SR.E|U|N|Z in w9. Done once regardless of scaling
+     * because scaling=3's "return" path also leaves them cleared. */
     emit_mov_imm32(e, /*rd=*/11,
                    (uint32_t)~((1u << DSP_SR_E) | (1u << DSP_SR_U) |
                                (1u << DSP_SR_N) | (1u << DSP_SR_Z))
                    & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/11);
 
-    /* value_e = (A2 << 1) + (A1 >> 23), masked to 9 bits. */
+    /* Scaling == 3 → skip E/U and N/Z entirely. */
+    emit_cmp_w_imm(e, /*rn=*/10, 3);
+    uint32_t *to_skip_nz = e->buf;
+    emit_bcond(e, ARM_COND_EQ, 0);
+
+    /* Scaling == 2 → branch. */
+    emit_cmp_w_imm(e, /*rn=*/10, 2);
+    uint32_t *to_s2 = e->buf;
+    emit_bcond(e, ARM_COND_EQ, 0);
+
+    /* Scaling == 1 → branch. */
+    emit_cmp_w_imm(e, /*rn=*/10, 1);
+    uint32_t *to_s1 = e->buf;
+    emit_bcond(e, ARM_COND_EQ, 0);
+
+    /* ==================== Scaling 0 (fall-through hot path) ==================== */
+
+    /* value_e = ((A2 << 1) + (A1 >> 23)) & 0x1ff. */
     emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
     emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
     emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
     emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 9);
-
-    /* E = (value_e != 0) && (value_e != 0x1ff). Compute as NOT(
-     * value_e == 0 OR value_e == 0x1ff). 0x1ff fits in CMP's
-     * imm12, so no MOV to materialise is needed. */
+    /* E = NOT(value_e == 0 || value_e == 0x1ff). */
     emit_cmp_w_imm(e, /*rn=*/11, 0);
     emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
     emit_cmp_w_imm(e, /*rn=*/11, 0x1ff);
     emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
     emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
-    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);         /* w12 = E bit */
+    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
-
-    /* U: (A1 & 0xc00000) == 0 OR == 0xc00000. Keep 0xc00000 in w13
-     * so we don't materialise the 2-insn MOVZ+MOVK twice. */
+    /* U from (A1 & 0xc00000) ∈ {0, 0xc00000}. */
     emit_mov_imm32(e, /*rd=*/13, 0xc00000);
-    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);   /* w11 = A1 & 0xc00000 */
+    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
     emit_cmp_w_imm(e, /*rn=*/11, 0);
     emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
     emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
     emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);  /* w12 = U bit */
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
 
-    /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). OR the three and
-     * test for zero. */
+    uint32_t *s0_to_nz = e->buf;
+    emit_b(e, 0);
+
+    /* ==================== Scaling 1 ==================== */
+    uint32_t *s1_label = e->buf;
+    patch_branch(to_s1, (int32_t)((uint8_t *)s1_label -
+                                  (uint8_t *)to_s1));
+    /* E = NOT(A2 == 0 || A2 == 0xff). */
+    emit_cmp_w_imm(e, /*rn=*/1, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_cmp_w_imm(e, /*rn=*/1, 0xff);
+    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+    /* vu = ((A2 << 1) + (A1 >> 23)) & 0x3; U = (vu == 0 || vu == 3). */
+    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
+    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
+    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 2);
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_cmp_w_imm(e, /*rn=*/11, 3);
+    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+
+    uint32_t *s1_to_nz = e->buf;
+    emit_b(e, 0);
+
+    /* ==================== Scaling 2 ==================== */
+    uint32_t *s2_label = e->buf;
+    patch_branch(to_s2, (int32_t)((uint8_t *)s2_label -
+                                  (uint8_t *)to_s2));
+    /* value_e = ((A2 << 2) + (A1 >> 22)) & 0x3ff. */
+    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 2);
+    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 22);
+    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 10);
+    /* E = NOT(value_e == 0 || value_e == 0x3ff). 0x3ff == 1023
+     * fits in the imm12 CMP. */
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_cmp_w_imm(e, /*rn=*/11, 0x3ff);
+    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+    /* U from (A1 & 0x600000) ∈ {0, 0x600000}. */
+    emit_mov_imm32(e, /*rd=*/13, 0x600000);
+    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+    emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+    /* Fall through to N/Z. */
+
+    /* ==================== N / Z (shared across 0/1/2) ==================== */
+    uint32_t *nz_label = e->buf;
+    patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
+                                (uint8_t *)s0_to_nz));
+    patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
+                                (uint8_t *)s1_to_nz));
+
+    /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
     emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
     emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
     emit_cmp_w_imm(e, /*rn=*/11, 0);
     emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
 
-    /* N: bit 7 of A2 (interp uses `(A2 >> 4) & 0x8` which puts
-     * bit 7 at bit 3 of SR = DSP_SR_N). UBFX the single bit, BFI
-     * it into place — 2 insns vs the original LSR+MOV+AND+OR. */
+    /* N: bit 7 of A2 at SR[3]. */
     emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
 
-    /* Store back. */
+    /* ==================== Store SR (shared target of scaling==3 skip) ==================== */
+    uint32_t *skip_nz_label = e->buf;
+    patch_branch(to_skip_nz, (int32_t)((uint8_t *)skip_nz_label -
+                                       (uint8_t *)to_skip_nz));
     emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
-
-    /* Jump past the slow path. */
-    uint32_t *to_done = e->buf;
-    emit_b(e, 0);
-
-    /* ========= Slow path: BLR shim with w1/w2/w3 still live ========= */
-    uint32_t *slow_label = e->buf;
-    patch_branch(to_slow, (int32_t)((uint8_t *)slow_label -
-                                    (uint8_t *)to_slow));
-    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-    emit_mov_imm64(e, /*rd=*/4,
-                   (uint64_t)(uintptr_t)&dsp_jit_helper_ccr_e_u_n_z);
-    emit_blr(e, /*rn=*/4);
-
-    /* Done label. */
-    uint32_t *done_label = e->buf;
-    patch_b(to_done, (int32_t)((uint8_t *)done_label -
-                               (uint8_t *)to_done));
 }
 
 /* --------------------------------------------------------------- *
@@ -2093,6 +2158,9 @@ typedef enum {
     ALU_KIND_SUBL,
     ALU_KIND_ADDR,
     ALU_KIND_SUBR,
+    ALU_KIND_ADC,
+    ALU_KIND_SBC,
+    ALU_KIND_RND,
     ALU_KIND_TFR,
     ALU_KIND_MPY,
     ALU_KIND_MPYR,
@@ -2290,10 +2358,28 @@ G_GNUC_UNUSED static void alu_classify_opcode(uint8_t alu_op, AluVariant *out)
     case 0x37: v.kind = ALU_KIND_ROL; v.dst_ab = 0; break;
     case 0x3f: v.kind = ALU_KIND_ROL; v.dst_ab = 1; break;
 
-    /* Remaining fallbacks: rnd (0x11, 0x19), adc x (0x21, 0x29),
-     * sbc x (0x25, 0x2d), adc y (0x31, 0x39), sbc y (0x35, 0x3d),
-     * max (0x1d). These need extended-precision add/sub with carry
-     * (adc/sbc) or scaling-mode rounding (rnd) — follow-up commits. */
+    /* RND — scaling-mode-dependent convergent round. */
+    case 0x11: v.kind = ALU_KIND_RND; v.dst_ab = 0; break;
+    case 0x19: v.kind = ALU_KIND_RND; v.dst_ab = 1; break;
+
+    /* ADC / SBC — extended-precision add / sub with the SR.C carry
+     * folded in as a second 56-bit {0,0,1} operand (see emu_adc_*
+     * / emu_sbc_* in dsp_emu.c.inc). Source is a 56-bit
+     * sign-extended X1:X0 or Y1:Y0 word. */
+    case 0x21: v.kind = ALU_KIND_ADC; v.dst_ab = 0; v.src_form = ALU_SRC_X; break;
+    case 0x29: v.kind = ALU_KIND_ADC; v.dst_ab = 1; v.src_form = ALU_SRC_X; break;
+    case 0x25: v.kind = ALU_KIND_SBC; v.dst_ab = 0; v.src_form = ALU_SRC_X; break;
+    case 0x2d: v.kind = ALU_KIND_SBC; v.dst_ab = 1; v.src_form = ALU_SRC_X; break;
+    case 0x31: v.kind = ALU_KIND_ADC; v.dst_ab = 0; v.src_form = ALU_SRC_Y; break;
+    case 0x39: v.kind = ALU_KIND_ADC; v.dst_ab = 1; v.src_form = ALU_SRC_Y; break;
+    case 0x35: v.kind = ALU_KIND_SBC; v.dst_ab = 0; v.src_form = ALU_SRC_Y; break;
+    case 0x3d: v.kind = ALU_KIND_SBC; v.dst_ab = 1; v.src_form = ALU_SRC_Y; break;
+
+    /* Remaining fallback: max (0x1d). Skipped because the
+     * interpreter's emu_max (dsp_emu.c.inc:5065) has a known
+     * B2<->B0 swap on the "A >= B" write-back that we'd need to
+     * replicate bit-for-bit before inlining. Rare in audio code,
+     * so the cost of the BLR is acceptable. */
     default: break;
     }
     *out = v;
@@ -3151,6 +3237,143 @@ static void emit_alu_shift_arith(ArmEmit *e, const AluVariant *v)
 }
 
 /*
+ * ADC / SBC — extended-precision add / sub with the SR.C carry
+ * folded in as a second 56-bit {0,0,1} operand.
+ *
+ * Interpreter reference (emu_adc_x_a and friends; same pattern
+ * for all 8 variants):
+ *
+ *   curcarry = (SR >> C) & 1;
+ *   source = sign_extended_56({X1 or Y1, X0 or Y0});
+ *   newsr  = dsp_add56(source, dest);       // or dsp_sub56
+ *   if (curcarry) {
+ *       source = {0, 0, 1};
+ *       newsr |= dsp_add56(source, dest);   // or dsp_sub56
+ *   }
+ *   store dest
+ *   emu_ccr_update_e_u_n_z(dest)
+ *   SR &= ~(V|C); SR |= newsr
+ *
+ * Branchless translation: perform the second add/sub
+ * unconditionally against the raw `curcarry` W-register (value 0
+ * or 1), treating it as a 56-bit operand. When curcarry=0 the
+ * second op is identity and emit_addsub_flags correctly produces
+ * a zero-filled newsr (C/V/L all 0 because orig == res), so the
+ * OR-merge leaves the first-pass flags untouched. When
+ * curcarry=1 the flags correctly reflect the incremental +1 or
+ * -1 step, matching the interpreter's OR of the two newsr words
+ * exactly.
+ *
+ * Register allocation:
+ *   x10 = first-pass source operand (loaded via emit_load_alu_src)
+ *   x11 = reused later for the "1" second-pass source
+ *   x12 = dest accumulator (running result)
+ *   x13 = previous-step accumulator value (for addsub_flags xorig)
+ *   w5  = addsub_flags output (clobbered by each call)
+ *   w8  = saved curcarry
+ *   w9  = saved first-pass newsr
+ */
+static void emit_alu_adc_sbc(ArmEmit *e, const AluVariant *v)
+{
+    bool is_sub = (v->kind == ALU_KIND_SBC);
+
+    /* Load dest accu (running result) into x12. */
+    emit_load_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+
+    /* Load src (56-bit sign-extended from X1:X0 or Y1:Y0) into x11. */
+    emit_load_alu_src(e, /*xsrc=*/11, v->src_form, /*xtmp=*/8);
+
+    /* Read SR.C into w8 (curcarry). Must happen BEFORE
+     * emit_addsub_flags (which clobbers w5/w6/w7 — NOT w8, but we
+     * want the value locked in regardless). */
+    emit_ldrh_any(e, /*rd=*/8, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_ubfx_w(e, /*rd=*/8, /*rn=*/8, DSP_SR_C, 1);
+
+    /* x13 = orig (saved for first-pass addsub_flags). */
+    emit_mov_x_reg(e, /*rd=*/13, /*rn=*/12);
+
+    /* First pass: x12 = orig OP src. */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+    } else {
+        emit_add_x_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+    }
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    /* First-pass flags → w5; save to w9. */
+    emit_addsub_flags(e, /*xorig=*/13, /*xsrc=*/11, /*xres=*/12,
+                      /*is_sub=*/is_sub ? 1 : 0);
+    emit_mov_w_reg(e, /*rd=*/9, /*rn=*/5);
+
+    /* Second pass: x12 = (first-pass result) OP curcarry. x13
+     * captures the pre-op value, x11 the raw curcarry as a
+     * 56-bit-safe operand (value 0 or 1; zero-extended into
+     * bits 63:32 by the w-write above). */
+    emit_mov_x_reg(e, /*rd=*/13, /*rn=*/12);
+    emit_mov_w_reg(e, /*rd=*/11, /*rn=*/8);        /* x11 = {0,..,0, curcarry} */
+    if (is_sub) {
+        emit_sub_x_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+    } else {
+        emit_add_x_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+    }
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    /* Second-pass flags → w5; OR into w9 (combined newsr). */
+    emit_addsub_flags(e, /*xorig=*/13, /*xsrc=*/11, /*xres=*/12,
+                      /*is_sub=*/is_sub ? 1 : 0);
+    emit_orr_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/5);
+
+    /* Store final result. */
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+
+    /* SR clear V|C, OR merged newsr (still in w9 — move to w5 for
+     * emit_sr_clear_vc_or_newsr's convention). */
+    emit_mov_w_reg(e, /*rd=*/5, /*rn=*/9);
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+
+    /* E/U/N/Z via shared shim. */
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * RND — convergent round of the 56-bit accumulator to 24 bits,
+ * with the round constant depending on SR.S0 / SR.S1 scaling
+ * bits. The three scaling paths have different constants and
+ * masking, so rather than three inlined fast paths we route
+ * through the existing dsp_jit_helper_rnd56 shim which wraps
+ * dsp_rnd56. This matches what MPYR / MACR already do for the
+ * same rounding logic.
+ *
+ * Savings vs BLR-fallback to emu_rnd_a: one BLR hop (the fallback
+ * goes through emu_rnd_a which itself calls dsp_rnd56 + the ccr
+ * helper); we call the rnd helper directly with the packed
+ * accumulator already loaded, and run the inline E/U/N/Z fast
+ * path afterwards — saving the emu_ccr_update_e_u_n_z BLR on the
+ * common scaling=0 SR path.
+ */
+static void emit_alu_rnd(ArmEmit *e, const AluVariant *v)
+{
+    /* Packed accu → x1 (arg 2 to the helper). */
+    emit_load_accu56(e, /*xaccu=*/1, v->dst_ab, /*xtmp=*/8);
+
+    /* x0 = dsp. */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+
+    /* BLR dsp_jit_helper_rnd56. Result (new packed accu) in x0. */
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_rnd56);
+    emit_blr(e, /*rn=*/4);
+
+    /* Move result to x12 and store (standard pattern). */
+    emit_mov_x_reg(e, /*rd=*/12, /*rn=*/0);
+    emit_store_accu56(e, /*xaccu=*/12, v->dst_ab, /*xtmp=*/8);
+
+    /* E/U/N/Z (emu_rnd_a calls this unconditionally; no SR
+     * carry/overflow adjustment). */
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
  * Inline MPY / MPYR / MAC / MACR kernel.
  *
  * Collapses the interpreter's dsp_mul56 + optional dsp_add56 +
@@ -3419,6 +3642,13 @@ static bool emit_alu_inline(ArmEmit *e, const AluVariant *v)
     case ALU_KIND_ADDR:
     case ALU_KIND_SUBR:
         emit_alu_shift_arith(e, v);
+        return true;
+    case ALU_KIND_ADC:
+    case ALU_KIND_SBC:
+        emit_alu_adc_sbc(e, v);
+        return true;
+    case ALU_KIND_RND:
+        emit_alu_rnd(e, v);
         return true;
     default:
         /* FALLBACK and MOVE fall through here. Caller BLRs the

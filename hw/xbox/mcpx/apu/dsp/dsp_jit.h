@@ -115,15 +115,6 @@ bool dsp_jit_helper_alu_is_move(dsp_emu_func_t fn);
 void dsp_jit_helper_pm_4x(dsp_core_t *dsp);
 
 /*
- * Phase 2 shim — exposes the static emu_ccr_update_e_u_n_z helper
- * from dsp_emu.c.inc so inline ALU kernels in the JIT can BLR it
- * for the post-op E/U/N/Z flag update. See dsp_cpu.c for the
- * trivial wrapper.
- */
-void dsp_jit_helper_ccr_e_u_n_z(dsp_core_t *dsp, uint32_t reg0,
-                                uint32_t reg1, uint32_t reg2);
-
-/*
  * Phase 2 shim — dsp_rnd56 wrapper for the JIT's MPYR / MACR
  * round path. Unpacks / repacks the 64-bit accumulator convention.
  */

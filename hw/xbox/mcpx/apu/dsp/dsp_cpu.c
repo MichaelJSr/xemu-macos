@@ -1649,18 +1649,6 @@ void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier
 }
 
 /*
- * Phase 2 shim — exposes emu_ccr_update_e_u_n_z (static in
- * dsp_emu.c.inc) to the JIT emitter. Called from the inline ALU
- * kernels' post-op flag update — 4-arg signature matches the
- * interpreter's private helper exactly: reg0=A2, reg1=A1, reg2=A0.
- */
-void dsp_jit_helper_ccr_e_u_n_z(dsp_core_t *dsp, uint32_t reg0,
-                                uint32_t reg1, uint32_t reg2)
-{
-    emu_ccr_update_e_u_n_z(dsp, reg0, reg1, reg2);
-}
-
-/*
  * Phase 2 shim — wraps dsp_rnd56 for the JIT's MPYR / MACR path.
  *
  * The JIT keeps the 56-bit accumulator as a sign-extended 64-bit
