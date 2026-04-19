@@ -1373,6 +1373,17 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
          * the interp would assert on that input so the value is
          * "don't care".
          *
+         * IMPORTANT: the baked value is the FULL 24-bit pram word,
+         * not masked to 16 bits. When retour=1 (numreg != 0) the
+         * caller uses this value as an IMMEDIATE LITERAL (e.g.
+         * pm_5's "load 24-bit imm into D" form), which needs the
+         * full 24 bits. Earlier versions masked to 16 here and
+         * silently dropped the top 8 bits of immediate loads —
+         * surfaced via the DIFF validator as registers[4] = 0x7b80
+         * (jit) vs 0x17b80 (interp) on block pc=0x050e in Azurik.
+         * Callers that use the value as a 16-bit address mask it
+         * themselves (or read_memory_xy wraps internally).
+         *
          * NOTE: mode-6 EA lengthens the instruction to 2 words.
          * The parmove stub's expected_next_pc is still pc+1, so
          * the post-exec PC-mismatch check will trip and the block
@@ -1383,7 +1394,7 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
          * will match and the block will stay intact. */
         assert(dsp != NULL);
         uint32_t baked = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
-        baked &= 0xFFFFu;   /* 16-bit address */
+        baked &= 0xFFFFFFu;   /* 24-bit value, matches read_memory_p */
 
         /* instr_cycle += 2 */
         emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
