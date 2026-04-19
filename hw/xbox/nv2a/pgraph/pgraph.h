@@ -264,6 +264,16 @@ typedef struct PGRAPHState {
     unsigned int surface_scale_factor;
     uint8_t *scale_buf;
 
+    /*
+     * True when any input to update_shader_uniforms has been written
+     * since the last call. Set by pgraph_reg_w, by direct writers of
+     * ltctxa / ltctxb / ltc1 / vsh_constants, and by writers of each
+     * vertex_attributes[].inline_value. Consumed + cleared by the
+     * vk/gl shader-bind path. Initialized to true so the very first
+     * bind always runs update_shader_uniforms.
+     */
+    bool shader_uniform_inputs_dirty;
+
     const PGRAPHRenderer *renderer;
     union {
         PGRAPHNullState *null_renderer_state;
@@ -306,11 +316,29 @@ static inline uint32_t pgraph_reg_r(PGRAPHState *pg, unsigned int r)
     return pg->regs_[r];
 }
 
+/*
+ * Mark every input that feeds update_shader_uniforms dirty. Called by
+ * pgraph_reg_w (any reg write), by ltctxa/ltctxb/ltc1/vsh_constants
+ * writers, and by inline_value writers. Conservative — over-marking
+ * just forces an extra update_shader_uniforms call, never a wrong
+ * result.
+ */
+static inline void pgraph_mark_uniforms_dirty(PGRAPHState *pg)
+{
+    pg->shader_uniform_inputs_dirty = true;
+}
+
 static inline void pgraph_reg_w(PGRAPHState *pg, unsigned int r, uint32_t v)
 {
     assert(r % 4 == 0);
     if (pg->regs_[r] != v) {
         bitmap_set(pg->regs_dirty, r / sizeof(uint32_t), 1);
+        /*
+         * Any register write is a potential uniform input change
+         * (set_vsh/psh_uniform_values read many regs). Mark the
+         * shader uniforms dirty so the next bind re-runs the pull.
+         */
+        pg->shader_uniform_inputs_dirty = true;
     }
     pg->regs_[r] = v;
 }
@@ -395,7 +423,8 @@ void pgraph_allocate_inline_buffer_vertices(PGRAPHState *pg, unsigned int attr);
 void pgraph_finish_inline_buffer_vertex(PGRAPHState *pg);
 void pgraph_reset_inline_buffers(PGRAPHState *pg);
 void pgraph_reset_draw_arrays(PGRAPHState *pg);
-void pgraph_update_inline_value(VertexAttribute *attr, const uint8_t *data);
+void pgraph_update_inline_value(PGRAPHState *pg, VertexAttribute *attr,
+                                const uint8_t *data);
 void pgraph_get_inline_values(PGRAPHState *pg, uint16_t attrs,
                                float values[NV2A_VERTEXSHADER_ATTRIBUTES][4],
                                int *count);

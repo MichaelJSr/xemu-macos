@@ -813,7 +813,18 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
 update_uniforms:
     assert(r->shader_binding);
     assert(r->shader_binding->initialized);
-    update_shader_uniforms(pg, r->shader_binding);
+    /*
+     * Skip update_shader_uniforms when no input has changed since the
+     * last pull. binding_changed covers the shader rebind path;
+     * pg->shader_uniform_inputs_dirty is set by pgraph_reg_w, by
+     * ltctxa/b/c1/vsh_constants writers, by inline_value writers
+     * (via pgraph_allocate_inline_buffer_vertices), and by texture
+     * rebinds in pgraph_gl_bind_textures.
+     */
+    if (binding_changed || pg->shader_uniform_inputs_dirty) {
+        update_shader_uniforms(pg, r->shader_binding);
+        pg->shader_uniform_inputs_dirty = false;
+    }
 }
 
 GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)

@@ -21,35 +21,44 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 
-void pgraph_update_inline_value(VertexAttribute *attr, const uint8_t *data)
+void pgraph_update_inline_value(PGRAPHState *pg, VertexAttribute *attr,
+                                const uint8_t *data)
 {
     assert(attr->count <= 4);
-    attr->inline_value[0] = 0.0f;
-    attr->inline_value[1] = 0.0f;
-    attr->inline_value[2] = 0.0f;
-    attr->inline_value[3] = 1.0f;
+
+    /*
+     * Compute the new value into a local first. inline_value feeds
+     * set_vsh_uniform_values via pgraph_get_inline_values, so a write
+     * here needs pgraph_mark_uniforms_dirty — but the existing call
+     * sites run on every draw even when the guest hasn't changed the
+     * source data. memcmp-before-write narrows the dirty mark to
+     * actual value changes, preserving the gate's effectiveness on
+     * titles that stream the same vertex data across back-to-back
+     * draws.
+     */
+    float new_value[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     switch (attr->format) {
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_D3D:
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL:
             for (uint32_t i = 0; i < attr->count; ++i) {
-                attr->inline_value[i] = (float)data[i] / 255.0f;
+                new_value[i] = (float)data[i] / 255.0f;
             }
             break;
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_S1: {
             const int16_t *val = (const int16_t *) data;
             for (uint32_t i = 0; i < attr->count; ++i, ++val) {
-                attr->inline_value[i] = MAX(-1.0f, (float) *val / 32767.0f);
+                new_value[i] = MAX(-1.0f, (float) *val / 32767.0f);
             }
             break;
         }
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F:
-            memcpy(attr->inline_value, data, attr->size * attr->count);
+            memcpy(new_value, data, attr->size * attr->count);
             break;
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_S32K: {
             const int16_t *val = (const int16_t *) data;
             for (uint32_t i = 0; i < attr->count; ++i, ++val) {
-                attr->inline_value[i] = (float)*val;
+                new_value[i] = (float)*val;
             }
             break;
         }
@@ -69,9 +78,9 @@ void pgraph_update_inline_value(VertexAttribute *attr, const uint8_t *data)
                 z |= 0xFFFFFC00;
             }
 
-            attr->inline_value[0] = MAX(-1.0f, (float)x / 1023.0f);
-            attr->inline_value[1] = MAX(-1.0f, (float)y / 1023.0f);
-            attr->inline_value[2] = MAX(-1.0f, (float)z / 511.0f);
+            new_value[0] = MAX(-1.0f, (float)x / 1023.0f);
+            new_value[1] = MAX(-1.0f, (float)y / 1023.0f);
+            new_value[2] = MAX(-1.0f, (float)z / 511.0f);
             break;
         }
     default:
@@ -79,6 +88,11 @@ void pgraph_update_inline_value(VertexAttribute *attr, const uint8_t *data)
                 attr->format);
         assert(!"Unsupported attribute type");
         break;
+    }
+
+    if (memcmp(attr->inline_value, new_value, sizeof(new_value)) != 0) {
+        memcpy(attr->inline_value, new_value, sizeof(new_value));
+        pgraph_mark_uniforms_dirty(pg);
     }
 }
 
@@ -104,6 +118,17 @@ void pgraph_get_inline_values(PGRAPHState *pg, uint16_t attrs,
 
 void pgraph_allocate_inline_buffer_vertices(PGRAPHState *pg, unsigned int attr)
 {
+    /*
+     * Every NV097_SET_VERTEX_DATA* / SET_VERTEX*F / SET_NORMAL3F / ...
+     * method handler that writes attr->inline_value calls through
+     * this function first. Marking here (before the early-return)
+     * guarantees every method that subsequently touches inline_value
+     * will also mark shader uniforms dirty — the inline_value is a
+     * potential input to pgraph_glsl_set_vsh_uniform_values'
+     * pgraph_get_inline_values, so the UBO must re-pull on change.
+     */
+    pgraph_mark_uniforms_dirty(pg);
+
     VertexAttribute *attribute = &pg->vertex_attributes[attr];
 
     if (attribute->inline_buffer_populated || pg->inline_buffer_length == 0) {

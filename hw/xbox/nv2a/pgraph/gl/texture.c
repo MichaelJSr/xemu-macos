@@ -479,6 +479,12 @@ void pgraph_gl_bind_textures(NV2AState *d)
         }
         r->texture_binding[i] = binding;
         pg->texture_dirty[i] = false;
+        /*
+         * texScale[i] in PshUniformValues depends on the bound
+         * texture's scale; rebinding to a different TextureBinding
+         * means update_shader_uniforms must re-pull.
+         */
+        pgraph_mark_uniforms_dirty(pg);
     }
     NV2A_GL_DGROUP_END();
 }

@@ -183,6 +183,24 @@ fine tuning.
   (with a re-entrant fallback for the rare >64 overlap case)
   instead of two passes via `g_newa`. Microscopic — ships as code
   hygiene rather than measurable perf.
+- **Shader-uniform pull gated on a dirty flag (both renderers).**
+  `update_shader_uniforms` used to run unconditionally on every
+  shader bind, memcpy'ing ~800 bytes of `ltctxa/ltctxb/ltc1/
+  vsh_constants` into the UBO staging buffer plus reading PGRAPH
+  regs and inline attribute values. Added
+  `pg->shader_uniform_inputs_dirty` — set by `pgraph_reg_w`, every
+  writer of `ltctxa/ltctxb/ltc1/vsh_constants` in `pgraph.c` +
+  `rdi.c`, every `vertex_attributes[].inline_value` write (through
+  `pgraph_allocate_inline_buffer_vertices`, which all inline_value
+  writers call first), every GL texture rebind, and renderer
+  switch. `pgraph_vk_bind_shaders` and `pgraph_gl_bind_shaders`
+  skip `update_shader_uniforms` when the flag plus shader/texture
+  rebind bits are all clean; cleared after the call runs.
+  `pgraph_update_inline_value` now memcmp's against the current
+  value and only marks dirty on actual change, so VRAM-streamed
+  vertex data doesn't defeat the gate for unchanged per-draw
+  attributes. Measurable on draw-heavy titles that don't rewrite
+  every uniform input per draw.
 
 ### MetalFX + presentation
 

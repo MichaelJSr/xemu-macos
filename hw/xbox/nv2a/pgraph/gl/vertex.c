@@ -173,7 +173,7 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         if (!stride) {
             // Stride of 0 indicates that only the first element should be
             // used.
-            pgraph_update_inline_value(attr, last_entry);
+            pgraph_update_inline_value(pg, attr, last_entry);
             glDisableVertexAttribArray(i);
             glVertexAttrib4fv(i, attr->inline_value);
             continue;
@@ -189,7 +189,7 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
 
         glEnableVertexAttribArray(i);
         last_entry += stride * provoking_element_index;
-        pgraph_update_inline_value(attr, last_entry);
+        pgraph_update_inline_value(pg, attr, last_entry);
     }
 
     NV2A_GL_DGROUP_END();

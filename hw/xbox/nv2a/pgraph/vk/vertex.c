@@ -267,7 +267,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
             // Stride of 0 indicates that only the first element should be
             // used.
             pg->uniform_attrs |= 1 << i;
-            pgraph_update_inline_value(attr, last_entry);
+            pgraph_update_inline_value(pg, attr, last_entry);
             NV2A_VK_DPRINTF("inline_value = {%f, %f, %f, %f}",
                             attr->inline_value[0], attr->inline_value[1],
                             attr->inline_value[2], attr->inline_value[3]);
@@ -277,7 +277,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
 
         NV2A_VK_DPRINTF("offset = %08" HWADDR_PRIx, attrib_data_addr);
         last_entry += stride * provoking_element_index;
-        pgraph_update_inline_value(attr, last_entry);
+        pgraph_update_inline_value(pg, attr, last_entry);
 
         r->vertex_attribute_to_description_location[i] =
             r->num_active_vertex_binding_descriptions;

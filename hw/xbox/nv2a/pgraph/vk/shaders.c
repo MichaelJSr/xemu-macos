@@ -620,7 +620,19 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
     }
 
-    update_shader_uniforms(pg);
+    /*
+     * update_shader_uniforms pulls PGRAPH state into VshUniformValues /
+     * PshUniformValues and re-stages the UBO. Skip it when no input
+     * has changed since the last pull: no shader rebind, no texture
+     * rebind (texScale[] depends on current texture bindings), and no
+     * pgraph_mark_uniforms_dirty since last clear (covers reg writes,
+     * ltctxa/b/c1/vsh_constants writes, and inline_value writes).
+     */
+    if (r->shader_bindings_changed || r->texture_bindings_changed ||
+        pg->shader_uniform_inputs_dirty) {
+        update_shader_uniforms(pg);
+        pg->shader_uniform_inputs_dirty = false;
+    }
 
     NV2A_VK_DGROUP_END();
 }
