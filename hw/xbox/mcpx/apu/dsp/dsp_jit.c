@@ -4547,15 +4547,20 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu,
          * registers[DSP_REG_A/B] (the 3-way split has already
          * happened above); for ordinary regs this is the only
          * write. For NULL / reserved indices we emit a zero-store
-         * to keep bit-exact with the interpreter's `save & 0`. */
+         * to keep bit-exact with the interpreter's `save & 0`.
+         * Phase 8 X/Y pinning: if numreg1 is X0/X1/Y0/Y1, splice
+         * into the pin (no-op otherwise). */
         emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
+        emit_xy_pin_write_from_w(e, numreg1, /*src_wreg=*/23);
     } else {
         emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
     }
 
     /* S2 -> D2: registers[d2_numreg] = save_2 (no mask needed; save_2
-     * is already 24-bit and D2 is always X0/X1/Y0/Y1, all 24-bit). */
+     * is already 24-bit and D2 is always X0/X1/Y0/Y1, all 24-bit).
+     * Phase 8 pin sync: d2_numreg is X0/X1/Y0/Y1 by construction. */
     emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(d2_numreg));
+    emit_xy_pin_write_from_w(e, d2_numreg, /*src_wreg=*/24);
 }
 
 /* Forward: we call emit_parmove_pm5 from emit_parmove_pm4. */
@@ -4692,8 +4697,12 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu,
         } else {
             /* "dsp->registers[numreg1] = save_reg1" — unmasked in
              * the interpreter; we replicate that (numreg1 is always
-             * X0/X1/Y0/Y1 in this branch, all 24-bit regs). */
+             * X0/X1/Y0/Y1 in this branch, all 24-bit regs).
+             * Phase 8 X/Y pinning: this direct STR bypasses
+             * emit_pm_write_reg's pin-sync path, so splice the
+             * newly-written value into the x20/x21 pin here. */
             emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, OFF_REG(numreg1));
+            emit_xy_pin_write_from_w(e, numreg1, /*src_wreg=*/24);
         }
     } else {
         emit_mem_write_xy(e, DSP_SPACE_X, /*addr_reg=*/22, /*value_reg=*/24);
@@ -4705,7 +4714,11 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu,
             emit_pm_write_reg(e, numreg2, /*value_reg=*/25,
                               /*mask_to_width=*/false);
         } else {
+            /* Same pin-sync as D1 above (numreg2 is always
+             * X0/X1/Y0/Y1/A/B; the non-A/B path always hits the
+             * X/Y pin update). */
             emit_str_w_any(e, /*rs=*/25, /*rn=*/19, SCRATCH, OFF_REG(numreg2));
+            emit_xy_pin_write_from_w(e, numreg2, /*src_wreg=*/25);
         }
     } else {
         emit_mem_write_xy(e, DSP_SPACE_Y, /*addr_reg=*/23, /*value_reg=*/25);
