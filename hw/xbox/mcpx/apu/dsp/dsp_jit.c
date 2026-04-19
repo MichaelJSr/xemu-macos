@@ -1355,14 +1355,10 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
          * Callers that use the value as a 16-bit address mask it
          * themselves (or read_memory_xy wraps internally).
          *
-         * NOTE: mode-6 EA lengthens the instruction to 2 words.
-         * The parmove stub's expected_next_pc is still pc+1, so
-         * the post-exec PC-mismatch check will trip and the block
-         * will exit — that's the existing behaviour and is
-         * preserved here; the win is dropping the BLR to
-         * emu_calc_ea for the read. Once the translator is taught
-         * to treat mode-6 parmoves as 2-word ops, expected_next_pc
-         * will match and the block will stay intact. */
+         * The translator now correctly classifies mode-6 parmoves
+         * as 2-word via dsp_jit_helper_inst_length, so the
+         * expected_next_pc matches the actual pc after cur_inst_len++
+         * and the block stays intact (no PC-mismatch exit). */
         assert(dsp != NULL);
         uint32_t baked = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
         baked &= 0xFFFFFFu;   /* 24-bit value, matches read_memory_p */
@@ -5679,7 +5675,15 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                 break;
             }
 
-            uint32_t expected_next_pc = pc + 1;
+            /* Parmove inst_len: normally 1, but calc_ea mode 6
+             * lengthens to 2 (the EA is pram[pc+1]). The shared
+             * dsp_jit_helper_inst_length classifier detects this
+             * case; using pc + 1 unconditionally would cause the
+             * PC-check to fire on every mode-6 parmove, costing
+             * a block exit + retranslate each time (sentinel data
+             * showed 9.75% mismatch rate before this was fixed). */
+            uint32_t inst_len = dsp_jit_helper_inst_length(inst);
+            uint32_t expected_next_pc = pc + inst_len;
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
                                    &write_set, dsp, pc)) {
                 /* Variant not yet implemented: fall through to the
@@ -5691,8 +5695,10 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                 break;
             }
 
-            s->pc_to_block[pc] = &s->blocks[pc_start];
-            pc_end = pc + 1;
+            for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
+                s->pc_to_block[p] = &s->blocks[pc_start];
+            }
+            pc_end = pc + inst_len;
             pc = pc_end;
             num_ops++;
             keep_going = true;

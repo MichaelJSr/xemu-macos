@@ -1447,25 +1447,108 @@ emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst)
 }
 
 /*
- * Best-effort determination of a non-parallel instruction's word
- * length. Returns 1 for single-word ops (the default), 2 for the
- * known long-immediate ALU forms whose second word is the 24-bit
- * immediate. Non-fatal if we under-report — the JIT's runtime PC
- * mismatch check will catch any surprise and exit the block.
+ * Best-effort determination of an instruction's word length.
+ * Returns 1 for single-word ops (the default), 2 for the known
+ * 2-word forms whose second word is an immediate baked from
+ * pram[pc+1]. Under-reporting is non-fatal — the JIT's runtime
+ * PC-mismatch check will fire and exit the block — but costs an
+ * extra block exit + retranslate on every occurrence, which for
+ * calc_ea mode 6 parmoves was ~10% of all parmove ops on an
+ * Azurik boot per the sentinel harness.
+ *
+ * 2-word forms covered:
+ *
+ *   (a) Long-immediate ALU: add_long / sub_long / cmp_long /
+ *       and_long / or_long. Matches (inst & 0xFFFFF0) == 0x0140C0.
+ *
+ *   (b) Parmove with calc_ea mode 6 (aa — absolute-address).
+ *       The calc_ea handler does `cur_inst_len++` + reads
+ *       pram[pc+1] for the address. Parmove classes whose EA
+ *       encoding can select mode 6:
+ *
+ *         pm_0 (select=0)               6-bit EA at inst[13:8]
+ *         pm_1 (select=1)               6-bit EA at inst[13:8]
+ *         pm_4 fall-through to pm_5     6-bit EA at inst[13:8],
+ *           (select=4 AND NOT pm_4x)    gated by ea_form bit 14
+ *         pm_5 (select=5/6/7)           6-bit EA at inst[13:8],
+ *                                       gated by ea_form bit 14
+ *
+ *       Classes that cannot select mode 6:
+ *         pm_2 (select=2): "R update" sub-variant uses a 5-bit EA
+ *           (mode bit 2 is always 0 — modes 0-3 only); other
+ *           sub-variants don't use calc_ea at all.
+ *         pm_3 (select=3): literal-to-reg, no EA.
+ *         pm_4x: its own long-accu helper, no calc_ea.
+ *         pm_8 (select=8..15): two EAs but each has the mode bits
+ *           constrained by the ea1/ea2 decoding (see
+ *           emit_parmove_pm8) to values 1-4 only.
+ *
+ *       Mode 6 check: ea_mode = (inst >> 8) & 0x3f; mode = ea[5:3];
+ *       mode == 6 (binary 110) iff the top 3 bits of ea_mode equal
+ *       110, i.e. ((ea_mode >> 3) & 7) == 6.
+ *
+ * Other 2-word forms (brclr / brset long-abs, jclr long, movec
+ * long, movem long, etc.) have the second word read inside their
+ * emu_* handlers; they are block-terminators in the JIT path, and
+ * the PC-mismatch exit check correctly catches the length
+ * mismatch before the translator emits anything past them.
  */
+static bool parmove_has_mode6_ea(uint32_t inst)
+{
+    uint32_t select = (inst >> 20) & 0xfu;
+    bool ea_gated_by_ea_form = false;
+
+    switch (select) {
+    case 0:
+    case 1:
+        /* pm_0 / pm_1 always use calc_ea. */
+        break;
+    case 4:
+        /* pm_4x uses its own helper; only the fall-through to
+         * pm_5 uses calc_ea. pm_4x is distinguished by
+         * (inst & 0xf40000) == 0x400000. */
+        if ((inst & 0xf40000u) == 0x400000u) {
+            return false;
+        }
+        ea_gated_by_ea_form = true;
+        break;
+    case 5:
+    case 6:
+    case 7:
+        /* pm_5: calc_ea only when ea_form (bit 14) is set; when
+         * clear, pm_5 uses inst[13:8] directly as a short-absolute
+         * address (no calc_ea, no second word). */
+        ea_gated_by_ea_form = true;
+        break;
+    default:
+        /* pm_2, pm_3, pm_8: not mode-6-capable per the analysis
+         * in the block-comment above. */
+        return false;
+    }
+
+    if (ea_gated_by_ea_form && (inst & (1u << 14)) == 0) {
+        return false;
+    }
+
+    uint32_t ea_mode = (inst >> 8) & 0x3fu;
+    return ((ea_mode >> 3) & 7u) == 6u;
+}
+
 uint32_t dsp_jit_helper_inst_length(uint32_t inst)
 {
     /* Long-immediate ALU: 00000001 01000000 1100dxyz
      * matches inst == 0x0140C0?? with (inst & 0xFFFFF0) == 0x0140C0. */
-    if ((inst & 0xFFFFF0) == 0x0140C0) {
+    if ((inst & 0xFFFFF0u) == 0x0140C0u) {
         return 2;
     }
-    /*
-     * Other 2-word forms (brclr/brset long-abs, jclr long, movec
-     * long, movem long, etc.) have the second word read inside their
-     * emu_* handlers; they are block-terminators in the JIT path and
-     * therefore do not need separate length handling here.
-     */
+
+    /* Parmove with calc_ea mode 6 — the second word is the
+     * 24-bit absolute address / immediate literal read from
+     * pram[pc+1]. */
+    if (inst >= 0x100000u && parmove_has_mode6_ea(inst)) {
+        return 2;
+    }
+
     return 1;
 }
 
