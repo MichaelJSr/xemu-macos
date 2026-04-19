@@ -298,7 +298,16 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
                 .format = vk_format,
             };
 
-        r->vertex_attribute_offsets[i] = attrib_data_addr;
+        /*
+         * Store the offset of vertex `min_element`, not vertex 0, so that
+         * the binding base lines up with the narrowed attribute copy in
+         * copy_remapped_attributes_to_inline_buffer. Draws rebase via
+         * firstVertex = absolute_index - min_element (or vertexOffset =
+         * -min_element for indexed draws). inline_data callers always pass
+         * min_element == 0, so the shift is a no-op for that path.
+         */
+        r->vertex_attribute_offsets[i] =
+            attrib_data_addr + (hwaddr)min_element * stride;
 
         if (needs_conversion) {
             pg->compressed_attrs |= (1 << i);

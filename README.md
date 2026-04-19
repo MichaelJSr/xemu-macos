@@ -134,6 +134,16 @@ fine tuning.
   skip the finish; MoltenVK's single queue serializes the aux upload
   behind any prior-submitted render work, and the aux-CB fence wait
   preserves host-visible ordering.
+- **Narrowed remapped-attribute staging.** `pgraph_vk_bind_vertex_-
+  attributes` shifts `vertex_attribute_offsets[i]` by
+  `min_element * stride`, so `remap_unaligned_attributes` +
+  `copy_remapped_attributes_to_inline_buffer` only size and copy
+  `[min_element..max_element]` instead of `[0..max]`. Draws rebase
+  via `vkCmdDraw(firstVertex - min_element)` /
+  `vkCmdDrawIndexed(vertexOffset = -min_element)`. Saves
+  `min_element * stride` bytes per remapped attribute per draw on
+  indexed meshes / glyph / sprite batches where the first referenced
+  vertex is well above zero.
 
 ### MetalFX + presentation
 
@@ -303,9 +313,6 @@ entry it would need to sidestep, or describes the blocking work.
 - **`pgraph_vk_upload_surface_data` flush narrowing.** Skip the
   unconditional `pgraph_vk_finish` when the target surface isn't bound
   to the open render pass.
-- **Indexed-draw attr-remap narrowing.** Narrow
-  `copy_remapped_attributes_to_inline_buffer` from `[0..max_element]` to
-  `[min_element..max_element]`.
 - **LRU eviction fast path.** `lru_try_evict_one` walks the tail
   linearly; aux evictable queue or per-slot bitmask.
 - **`MTLFXFrameInterpolator` `deltaTime` in seconds.** Currently fed a

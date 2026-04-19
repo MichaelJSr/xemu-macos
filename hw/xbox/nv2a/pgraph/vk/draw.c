@@ -2591,7 +2591,14 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
                                           remap.buffer_space_required, 1, 256));
 
     // FIXME: Caching
-    // FIXME: Account for only what is drawn
+    /*
+     * start_vertex is retained for API symmetry with the GL renderer, but
+     * the VRAM base in r->vertex_attribute_offsets[attr_id] has already
+     * been shifted by min_element * stride in
+     * pgraph_vk_bind_vertex_attributes, so reads here start at vertex
+     * min_element and copy num_vertices of them. Callers must pass
+     * start_vertex == 0 to avoid double-shifting.
+     */
     nv2a_vk_assert(start_vertex == 0);
     nv2a_vk_assert(buffer->mapped);
 
@@ -2652,8 +2659,18 @@ void pgraph_vk_flush_draw(NV2AState *d)
         for (int i = 0; i < pg->draw_arrays_length; i++) {
             max_element = MAX(max_element, pg->draw_arrays_start[i] + pg->draw_arrays_count[i]);
         }
+        /*
+         * Narrow the remapped-attribute staging allocation + copy to
+         * [min_start..max_element). bind_vertex_attributes has already
+         * shifted r->vertex_attribute_offsets[] by min_start*stride, so
+         * draws rebase via firstVertex = start - min_start
+         * (or vertexOffset = -min_start for the emulated-primitives
+         * indexed path).
+         */
+        uint32_t min_start = pg->draw_arrays_min_start;
+        uint32_t range_vertices = max_element - min_start;
         sync_vertex_ram_buffer(pg);
-        VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element);
+        VertexBufferRemap remap = remap_unaligned_attributes(pg, range_vertices);
 
         // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
         bool emulate_primitives = draw_needs_primitive_emulation(pg);
@@ -2667,7 +2684,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
         }
 
         begin_pre_draw(pg);
-        copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element);
+        copy_remapped_attributes_to_inline_buffer(pg, remap, 0, range_vertices);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Draw Arrays");
         begin_draw(pg);
@@ -2695,14 +2712,15 @@ void pgraph_vk_flush_draw(NV2AState *d)
                 vkCmdBindIndexBuffer(r->command_buffer,
                                      r->storage_buffers[BUFFER_INDEX].buffer,
                                      buffer_offset, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0, 0, 0);
+                vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
+                                 -(int32_t)min_start, 0);
             }
         } else {
             for (int i = 0; i < pg->draw_arrays_length; i++) {
                 uint32_t start = pg->draw_arrays_start[i],
                          count = pg->draw_arrays_count[i];
                 NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
-                vkCmdDraw(r->command_buffer, count, 1, start, 0);
+                vkCmdDraw(r->command_buffer, count, 1, start - min_start, 0);
             }
         }
         end_draw(pg);
@@ -2736,10 +2754,17 @@ void pgraph_vk_flush_draw(NV2AState *d)
             d, min_element, max_element, false, 0,
             pg->inline_elements[pg->inline_elements_length - 1]);
         sync_vertex_ram_buffer(pg);
-        VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element + 1);
+        /*
+         * Narrow remapped-attribute staging to [min_element..max_element].
+         * bind_vertex_attributes shifted r->vertex_attribute_offsets[] by
+         * min_element*stride above, so vkCmdDrawIndexed rebases the
+         * absolute indices via vertexOffset = -min_element.
+         */
+        uint32_t range_vertices = max_element - min_element + 1;
+        VertexBufferRemap remap = remap_unaligned_attributes(pg, range_vertices);
 
         begin_pre_draw(pg);
-        copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element + 1);
+        copy_remapped_attributes_to_inline_buffer(pg, remap, 0, range_vertices);
         const uint32_t *indices = pg->inline_elements;
         uint32_t *emulated_indices = NULL;
         if (emulate_primitives) {
@@ -2759,7 +2784,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
             vkCmdBindIndexBuffer(r->command_buffer,
                                  r->storage_buffers[BUFFER_INDEX].buffer,
                                  buffer_offset, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
+            vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
+                             -(int32_t)min_element, 0);
         }
         end_draw(pg);
         pgraph_vk_end_debug_marker(r, r->command_buffer);
