@@ -155,6 +155,15 @@ fine tuning.
   seconds between the two inputs (clamped to `[1/240, 1/10]` s), per
   Apple's API contract, instead of a unitless `(index+1)/(total+1)`
   ratio. Reduces ghosting / motion-vector lag on fast pans.
+- **Host-refresh-aligned vblank cadence.** `ui/xemu.c`'s vblank timer
+  interval is no longer a 60 Hz hardcode — it's recomputed per tick
+  as `1 / min(SDL_GetCurrentDisplayMode.refresh_rate, 60 * interp_factor)`
+  (floor 30 Hz, cap 240 Hz). On a 120 Hz ProMotion panel with 2x /
+  4x MetalFX frame interpolation, interpolated frames now actually
+  reach the panel, removing the every-other-refresh judder. 60 Hz
+  panels and interp-off keep their existing 16.67 ms interval.
+  Guest-side NV2A vblank IRQs are unaffected (driven by a separate
+  NV2A-model timer).
 
 ### MCPX APU
 
