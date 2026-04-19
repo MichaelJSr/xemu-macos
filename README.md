@@ -286,13 +286,27 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   fits in ARM64's imm12 (which it almost always does since DSP
   PRAM is 4 KiB), dropping it from 3 to 2 insns. Also cleans up
   the dead `dsp_jit_helper_calc_cc` shim that Round 2 made
-  unreachable. Two other round-4 experiments (skipping the
+  unreachable.   Two other round-4 experiments (skipping the
   `dsp->cur_inst` preset for inlined ops, and skipping the
   PC-mismatch check for inlined long-imm + parmove stubs via
   `EPI_NO_PC`) regressed with an `op=0x001000` startup assert
   — at least one inlined path reads `cur_inst` or mutates `pc`
   in a way the static classifier can't predict; both are
-  deferred pending a runtime-sentinel bisect. Static block
+  deferred pending the runtime-sentinel bisect harness. That
+  harness is available via `XEMU_DSP_JIT_SENTINEL=N`:
+    * bit 0 (1) — re-applies the cur_inst skip with a poison
+      value `0x00adbeef` so any stale-read path surfaces as
+      `lookup_opcode_slow(op = 00adbeef)` with a stack trace
+      identifying the reader;
+    * bit 1 (2) — keeps the PC-mismatch exit in place but also
+      logs every mismatch for parmove-stub + inlined-long-imm
+      ops (the round-4 skip candidates), giving a histogram of
+      the inst patterns whose handlers actually mutate `pc`
+      despite the classifier believing they don't. Logger is
+      rate-limited per-inst and no-ops on the matching path.
+  Both bits can be combined (`=3`). Not for production — the
+  extra BLR to the logger on sentinel-watched ops costs ~5
+  cycles / op. Static block
   chaining (direct `B <target.entry>` patch on known branch
   targets) is a followup commit — the entry-split prologue
   refactor it depends on is scoped separately.

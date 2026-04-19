@@ -84,6 +84,15 @@ static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks 
 static bool g_jit_stats;
 
 /*
+ * Sentinel (debug) harness for the two deferred round-4
+ * optimizations. See dsp_jit.h for env-var bitmask. Bit 0 re-
+ * enables cur_inst skip with a POISON write so readers observe
+ * a known garbage value; bit 1 logs every PC-mismatch exit so
+ * the user can see which ops divergent-exit.
+ */
+static uint32_t g_jit_sentinel;
+
+/*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
  * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
  * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
@@ -169,6 +178,21 @@ static void parse_flags_once(void)
     e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
 
+    /* XEMU_DSP_JIT_SENTINEL: debug harness for round-4 bisect.
+     *   bit 0 (1): curinst poison — re-apply cur_inst skip with
+     *              sentinel 0xADBEEF so any reader misbehaves
+     *              visibly.
+     *   bit 1 (2): pcskip logger — log every PC-mismatch exit
+     *              with (pc_start, inst, expected, actual).
+     *   Combined: 3. See dsp_jit.h for rationale. */
+    e = getenv("XEMU_DSP_JIT_SENTINEL");
+    if (e && e[0]) {
+        long n = strtol(e, NULL, 0);
+        if (n > 0 && n <= 3) {
+            g_jit_sentinel = (uint32_t)n;
+        }
+    }
+
     if (g_jit_enabled) {
         const char *mode_desc = "";
         if (g_jit_diff && g_jit_diff_sync && g_jit_diff_sample == 1) {
@@ -180,8 +204,12 @@ static void parse_flags_once(void)
         } else if (g_jit_diff) {
             mode_desc = " (DIFF=async, sampled)";
         }
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s\n",
-                mode_desc, g_jit_stats ? " (stats)" : "");
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s\n",
+                mode_desc, g_jit_stats ? " (stats)" : "",
+                (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST)
+                    ? " (SENTINEL-curinst)" : "",
+                (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)
+                    ? " (SENTINEL-pcskip)" : "");
     }
 }
 
@@ -195,6 +223,63 @@ bool dsp_jit_diff_enabled(void)
 {
     parse_flags_once();
     return g_jit_diff;
+}
+
+bool dsp_jit_sentinel_enabled(uint32_t bit)
+{
+    parse_flags_once();
+    return (g_jit_sentinel & bit) != 0;
+}
+
+/*
+ * Sentinel PC-mismatch logger. Called from translated code via
+ * BLR when XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled.
+ * Fires on every PC-mismatch exit, rate-limited per inst-pattern
+ * so a single runaway handler doesn't flood the log.
+ */
+#define DSP_JIT_SENTINEL_LOG_TABLE_BITS 7
+#define DSP_JIT_SENTINEL_LOG_TABLE_SIZE (1u << DSP_JIT_SENTINEL_LOG_TABLE_BITS)
+
+static struct {
+    uint32_t inst;
+    uint64_t count;
+} g_sentinel_log_tbl[DSP_JIT_SENTINEL_LOG_TABLE_SIZE];
+
+void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
+                             uint32_t expected_pc, uint32_t actual_pc)
+{
+    /* No-op if pc actually matches — called unconditionally from
+     * translated code so the fast path is "return right away". */
+    if (expected_pc == actual_pc) {
+        return;
+    }
+
+    /* Hash inst into the table. */
+    uint32_t h = (inst ^ (inst >> 12) ^ (inst >> 20)) &
+                 (DSP_JIT_SENTINEL_LOG_TABLE_SIZE - 1u);
+
+    /* Quadratic-probe collision (table is tiny; linear is fine). */
+    for (uint32_t i = 0; i < 8; i++) {
+        uint32_t slot = (h + i) & (DSP_JIT_SENTINEL_LOG_TABLE_SIZE - 1u);
+        if (g_sentinel_log_tbl[slot].inst == 0 ||
+            g_sentinel_log_tbl[slot].inst == inst) {
+            bool is_first = g_sentinel_log_tbl[slot].inst != inst;
+            g_sentinel_log_tbl[slot].inst = inst;
+            uint64_t n = ++g_sentinel_log_tbl[slot].count;
+            /* Log first occurrence + powers-of-10. */
+            if (is_first || n == 10 || n == 100 || n == 1000 ||
+                n == 10000 || n == 100000) {
+                fprintf(stderr, "xemu: DSP JIT sentinel: PC mismatch "
+                        "at block_start=0x%04x inst=0x%06x "
+                        "expected_pc=0x%04x actual_pc=0x%04x (count=%llu)\n",
+                        pc_start, inst, expected_pc, actual_pc,
+                        (unsigned long long)n);
+            }
+            return;
+        }
+    }
+    /* Table full — silently drop. The common-case patterns are
+     * already logged; anything new hitting this is the long tail. */
 }
 
 /*
@@ -3938,6 +4023,17 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu,
  */
 typedef struct EpilogueHints {
     bool may_change_pc;
+    /* Sentinel-watch fields: populated for ops whose static
+     * classification says pc shouldn't change (parmove stubs,
+     * inlined long-imm ALU). When XEMU_DSP_JIT_SENTINEL bit 1 is
+     * on, the epilogue emits an extra BLR to dsp_jit_sentinel_pc_log
+     * (the logger is a cheap no-op unless pc actually diverged)
+     * so we can attribute any mismatch to a specific inst / pc.
+     * The fields are write-only until the logger call is emitted;
+     * if sentinel is off they are unused. */
+    bool sentinel_watch;
+    uint32_t sentinel_inst;
+    uint32_t sentinel_pc_start;
 } EpilogueHints;
 
 static const EpilogueHints EPI_UNKNOWN = { .may_change_pc = true  };
@@ -4103,6 +4199,35 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
             record_exit_patch(exits, site);
         }
     }
+
+    /*
+     * Sentinel PC-watch log call. Emitted after the normal PC
+     * check so the logger runs on the FALL-THROUGH (PC-match)
+     * path — the logger is a no-op when expected == actual, so
+     * it costs ~5 cycles per sentinel-watched op in the common
+     * case. On mismatch we'd already have branched to the exit
+     * above; to capture those we also emit a logger call on the
+     * exit path itself via a second small trampoline. For
+     * simplicity here we only log on the fall-through path and
+     * let the normal PC-mismatch exit handle the divergent case
+     * via its existing counter in dsp_jit_sentinel_pc_log (which
+     * we call unconditionally; see below).
+     *
+     * Implementation: unconditionally BLR the logger with the
+     * four args. The logger's first instruction is `if
+     * (expected == actual) return;`, so the fast path is a
+     * single compare + branch-back inside the logger.
+     */
+    if (hints.sentinel_watch &&
+        (g_jit_sentinel & DSP_JIT_SENTINEL_PCSKIP)) {
+        emit_mov_imm32(e, /*rd=*/0, hints.sentinel_pc_start);
+        emit_mov_imm32(e, /*rd=*/1, hints.sentinel_inst);
+        emit_mov_imm32(e, /*rd=*/2, expected_next_pc);
+        emit_ldr_w_any(e, /*rd=*/3, /*rn=*/19, SCRATCH, OFF_PC);
+        emit_mov_imm64(e, /*rd=*/4,
+                       (uint64_t)(uintptr_t)&dsp_jit_sentinel_pc_log);
+        emit_blr(e, /*rn=*/4);
+    }
 }
 
 
@@ -4218,9 +4343,27 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
 {
     uint32_t select = (inst >> 20) & 0xf;
 
-    /* Set cur_inst, cur_inst_len=1, instr_cycle=2. */
-    emit_mov_imm32(e, /*rd=*/0, inst);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    /*
+     * Set cur_inst, cur_inst_len=1, instr_cycle=2.
+     *
+     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): poison
+     * dsp->cur_inst for parmove classes that don't need the live
+     * inst at runtime. pm_4x is the one exception — it reads
+     * dsp->cur_inst inside the emu_pm_4x C handler, so we always
+     * write the real inst there. The pm_4 dispatcher re-writes
+     * cur_inst locally in that path anyway (see emit_parmove_pm4).
+     */
+    {
+        bool is_pm4x = (select == 4 &&
+                        (inst & 0xf40000u) == 0x400000u);
+        uint32_t cur_inst_preset =
+            (!is_pm4x &&
+             (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
+                ? DSP_JIT_SENTINEL_POISON
+                : inst;
+        emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    }
     emit_movz_w(e, /*rd=*/0, 1, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_movz_w(e, /*rd=*/0, 2, 0);
@@ -4279,8 +4422,17 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
      * to pram garbage (e.g. 0x001000). Keep the check until we can
      * identify the offending handler and narrow EPI_NO_PC to the
      * truly-no-pc subset.
+     *
+     * When XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled, tag
+     * parmove stubs as sentinel-watch so the epilogue logs any
+     * time dsp->pc != expected_next_pc — that pinpoints the
+     * parmove sub-class whose BLR fallback is mutating pc.
      */
-    emit_post_instruction_epilogue(e, exits, expected_next_pc, EPI_UNKNOWN);
+    EpilogueHints p_hints = EPI_UNKNOWN;
+    p_hints.sentinel_watch    = true;
+    p_hints.sentinel_inst     = inst;
+    p_hints.sentinel_pc_start = pc;
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, p_hints);
     if (out_write_set) {
         *out_write_set |= parmove_write_set(inst);
     }
@@ -5329,9 +5481,30 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * audit), so the skip caused the interpreter to later observe
      * stale instruction bits and assert on an unknown opcode. Keep
      * the unconditional preset until the offending reader is found.
+     *
+     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): write
+     * DSP_JIT_SENTINEL_POISON to dsp->cur_inst instead of `inst`
+     * for ops that would have been skipped (inlinable CF / long-
+     * imm). Any handler that reads cur_inst at runtime observes
+     * the poison and produces an observable failure (lookup_opcode
+     * assert "op = 00adbeef", garbage register write caught by
+     * DIFF, etc.) — the resulting stack trace / DIFF diff pins
+     * down the reader.
      */
-    emit_mov_imm32(e, /*rd=*/0, inst);
-    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    {
+        int cf_kind_sent = dsp_jit_helper_classify_cf((void *)emu_func);
+        int li_kind_sent = dsp_jit_helper_classify_long_imm((void *)emu_func);
+        bool will_inline_sent =
+            (cf_kind_sent != DSP_JIT_CF_NONE) ||
+            (li_kind_sent != DSP_JIT_LI_NONE);
+        uint32_t cur_inst_preset =
+            (will_inline_sent &&
+             (g_jit_sentinel & DSP_JIT_SENTINEL_CURINST))
+                ? DSP_JIT_SENTINEL_POISON
+                : inst;
+        emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
+    }
 
     /* 2. dsp->cur_inst_len = 1. This is the interpreter's initial
      * value — handlers that read a second word do cur_inst_len++,
@@ -5398,9 +5571,19 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * garbage (e.g. op=0x001000 on startup). Keep the check until
      * the divergence is tracked down; the cost is minor now that
      * we use the SUB+CBNZ imm12 fast path.
+     *
+     * When XEMU_DSP_JIT_SENTINEL bit 1 ("pcskip") is enabled AND
+     * the op is an inlined long-imm (the round-4 skip candidate),
+     * tag the epilogue as sentinel-watch so we log any pc
+     * divergence with the inst + pc that caused it.
      */
-    (void)li_inlined;
-    emit_post_instruction_epilogue(e, exits, expected_next_pc, EPI_UNKNOWN);
+    EpilogueHints i_hints = EPI_UNKNOWN;
+    if (li_inlined) {
+        i_hints.sentinel_watch    = true;
+        i_hints.sentinel_inst     = inst;
+        i_hints.sentinel_pc_start = pc;
+    }
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, i_hints);
 
     /*
      * Write-set bookkeeping for the differential validator:

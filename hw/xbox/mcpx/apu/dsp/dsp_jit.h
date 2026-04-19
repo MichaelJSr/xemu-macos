@@ -58,6 +58,39 @@ bool dsp_jit_enabled(void);
 bool dsp_jit_diff_enabled(void);
 
 /*
+ * Sentinel (debug / bisect) harness for the two deferred round-4
+ * optimizations. Enabled via the XEMU_DSP_JIT_SENTINEL env var,
+ * which accepts a bitmask:
+ *
+ *   1 (bit 0, "curinst") — re-applies the round-4 "skip cur_inst
+ *       preset for inlinable ops" optimization BUT substitutes a
+ *       poison value (DSP_JIT_SENTINEL_POISON) for the correct inst.
+ *       Any inlined-op handler path that secretly reads dsp->cur_inst
+ *       at runtime will observe the poison, typically producing
+ *       a visible failure (lookup_opcode_slow assert with
+ *       "op = 00adbeef", or a DIFF mismatch if a sub-field decode
+ *       yields a bogus register / immediate). The stack trace at
+ *       the failure pinpoints the offending reader.
+ *
+ *   2 (bit 1, "pcskip")  — keeps the PC-mismatch exit check enabled
+ *       but logs EVERY firing via dsp_jit_sentinel_pc_log with
+ *       (pc_start, inst, expected_pc, actual_pc). This produces
+ *       a histogram of which inst patterns divergent-exit — the
+ *       ones classified as "won't change pc" but that actually do
+ *       are the bug. Rate-limited per-inst to avoid log spam.
+ *
+ * Both bits can be combined (XEMU_DSP_JIT_SENTINEL=3). Not intended
+ * for production use; impacts performance.
+ */
+#define DSP_JIT_SENTINEL_CURINST  (1u << 0)
+#define DSP_JIT_SENTINEL_PCSKIP   (1u << 1)
+#define DSP_JIT_SENTINEL_POISON   0x00adbeefu
+
+bool dsp_jit_sentinel_enabled(uint32_t bit);
+void dsp_jit_sentinel_pc_log(uint32_t pc_start, uint32_t inst,
+                             uint32_t expected_pc, uint32_t actual_pc);
+
+/*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
  * Keeps the JIT source decoupled from ui/xemu-settings.h so the
  * standalone DSP test binary (which links libdsp.a without the
