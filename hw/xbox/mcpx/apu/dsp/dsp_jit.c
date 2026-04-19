@@ -1856,30 +1856,142 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
 }
 
 /*
- * Emit a call to the emu_ccr_update_e_u_n_z helper (shimmed from
- * dsp_cpu.c as dsp_jit_helper_ccr_e_u_n_z) to update SR's E/U/N/Z
- * bits based on the new accumulator value.
+ * Emit inline E / U / N / Z update for the standard scaling mode
+ * (S0=0, S1=0), with a BLR fallback to the emu_ccr_update_e_u_n_z
+ * shim for the two exotic scaling modes.
  *
- * The shim takes (dsp, A2, A1, A0) — we extract the three slots
- * from the 64-bit xaccu via UBFX and pass them in the standard
- * argument registers w1/w2/w3.
+ * Interpreter reference (dsp_emu.c.inc:288 emu_ccr_update_e_u_n_z):
  *
- * Inlining this fully would save another ~5-10 cycles per op but
- * requires a 100+ ARM64-instruction emit with runtime branches on
- * SR.S0/S1 — deferred until Phase 8's lazy-flag rework (at which
- * point most blocks never compute these bits at all).
+ *   SR &= ~(E|U|N|Z);                   // clear
+ *   scaling = (SR >> S0) & 0x3;
+ *   switch (scaling) {
+ *       case 0:
+ *           value_e = (A2 << 1) + (A1 >> 23);
+ *           if (value_e != 0 && value_e != 0x1ff)
+ *               SR |= 1 << E;
+ *           if ((A1 & 0xc00000) == 0 || (A1 & 0xc00000) == 0xc00000)
+ *               SR |= 1 << U;
+ *           break;
+ *       case 1:
+ *           if (A2 != 0 && A2 != 0xff) SR |= 1 << E;
+ *           vu = ((A2 << 1) + (A1 >> 23)) & 0x3;
+ *           if (vu == 0 || vu == 3) SR |= 1 << U;
+ *           break;
+ *       case 2:
+ *           value_e = (A2 << 2) + (A1 >> 22);
+ *           if (value_e != 0 && value_e != 0x3ff) SR |= 1 << E;
+ *           if ((A1 & 0x600000) == 0 || (A1 & 0x600000) == 0x600000)
+ *               SR |= 1 << U;
+ *           break;
+ *       default: return;                // S0=1 && S1=1 — illegal, no update
+ *   }
+ *   if (A2 == 0 && A1 == 0 && A0 == 0) SR |= 1 << Z;
+ *   SR |= (A2 >> 4) & 0x8;              // N (bit 7 of A2 → bit 3 of SR)
  *
- * Clobbers w0..w4 and x30 (via BLR).
+ * The scaling=0 path is the overwhelmingly common case in Xbox
+ * audio (S0/S1 are typically 0), so we inline it as a straight-
+ * line sequence. For scaling=1/2/3 we BLR the existing shim —
+ * rare enough that the BLR overhead is acceptable, and keeps
+ * the inline emit size bounded.
+ *
+ * Callers already extracted A2/A1/A0 into w1/w2/w3 via the UBFX
+ * trio below, so BOTH paths share that prefix. The BLR passes
+ * w1/w2/w3 as (reg0, reg1, reg2) to the shim directly — no
+ * second extraction needed.
+ *
+ * Clobbers: w0..w4, w8..w13, x30 (via BLR). Preserves x19-x25.
  */
 static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
 {
-    emit_ubfx_x(e, /*rd=*/1, /*rn=*/xaccu, 48, 8);  /* w1 = A2 */
-    emit_ubfx_x(e, /*rd=*/2, /*rn=*/xaccu, 24, 24); /* w2 = A1 */
-    emit_ubfx_x(e, /*rd=*/3, /*rn=*/xaccu, 0, 24);  /* w3 = A0 */
-    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);          /* x0 = dsp */
+    /* Extract A2 / A1 / A0 from the 64-bit xaccu. These are the
+     * arguments to the BLR shim AND the inputs to the inline
+     * fast path; share the extraction. */
+    emit_ubfx_x(e, /*rd=*/1, /*rn=*/xaccu, 48, 8);   /* w1 = A2 */
+    emit_ubfx_x(e, /*rd=*/2, /*rn=*/xaccu, 24, 24);  /* w2 = A1 */
+    emit_ubfx_x(e, /*rd=*/3, /*rn=*/xaccu, 0, 24);   /* w3 = A0 */
+
+    /* Load SR and extract the 2-bit scaling mode. */
+    emit_ldrh_any(e, /*rd=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_ubfx_w(e, /*rd=*/10, /*rn=*/9, DSP_SR_S0, 2);
+
+    /* If scaling != 0, branch to the BLR slow path. */
+    emit_cmp_w_imm(e, /*rn=*/10, 0);
+    uint32_t *to_slow = e->buf;
+    emit_bcond(e, ARM_COND_NE, 0);
+
+    /* ========= Fast path: scaling == 0 ========= */
+
+    /* Clear SR.E|U|N|Z into w9. */
+    emit_mov_imm32(e, /*rd=*/11,
+                   (uint32_t)~((1u << DSP_SR_E) | (1u << DSP_SR_U) |
+                               (1u << DSP_SR_N) | (1u << DSP_SR_Z))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/11);
+
+    /* value_e = (A2 << 1) + (A1 >> 23), masked to 9 bits. */
+    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
+    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
+    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 9);
+
+    /* E = (value_e != 0) && (value_e != 0x1ff).
+     * Compute as NOT(value_e == 0 OR value_e == 0x1ff). */
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_mov_imm32(e, /*rd=*/13, 0x1ff);
+    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);         /* w12 = E bit */
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+
+    /* U: (A1 & 0xc00000) == 0 OR == 0xc00000. */
+    emit_mov_imm32(e, /*rd=*/11, 0xc00000);
+    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/11);
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_mov_imm32(e, /*rd=*/13, 0xc00000);
+    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+    emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
+    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);  /* w12 = U bit */
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+
+    /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). OR the three and
+     * test for zero. */
+    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
+    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
+
+    /* N: bit 7 of A2 (interp uses `(A2 >> 4) & 0x8` which puts
+     * bit 7 at bit 3 of SR = DSP_SR_N). Since we zeroed SR.N
+     * in the clear above, we can just OR it in. */
+    emit_lsr_w_imm(e, /*rd=*/11, /*rn=*/1, 4);
+    emit_mov_imm32(e, /*rd=*/12, 0x8);
+    emit_and_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+    emit_orr_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/11);
+
+    /* Store back. */
+    emit_strh_any(e, /*rs=*/9, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* Jump past the slow path. */
+    uint32_t *to_done = e->buf;
+    emit_b(e, 0);
+
+    /* ========= Slow path: BLR shim with w1/w2/w3 still live ========= */
+    uint32_t *slow_label = e->buf;
+    patch_branch(to_slow, (int32_t)((uint8_t *)slow_label -
+                                    (uint8_t *)to_slow));
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
     emit_mov_imm64(e, /*rd=*/4,
                    (uint64_t)(uintptr_t)&dsp_jit_helper_ccr_e_u_n_z);
     emit_blr(e, /*rn=*/4);
+
+    /* Done label. */
+    uint32_t *done_label = e->buf;
+    patch_b(to_done, (int32_t)((uint8_t *)done_label -
+                               (uint8_t *)to_done));
 }
 
 /* --------------------------------------------------------------- *
