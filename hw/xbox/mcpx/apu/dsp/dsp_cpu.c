@@ -1604,15 +1604,11 @@ uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
 }
 
 /* ============================================================== *
- * Phase 5 shims — stack helpers + CF / long-imm classifiers.
+ * Phase 5 shims — control-flow helpers + CF classifier.
  *
- * dsp_stack_push / dsp_stack_pop are file-static, so expose them
- * via trivial wrappers that the JIT's inline CF emitters BLR for
- * the subroutine-call / return ops.
- *
- * Round 2 inlined emu_calc_cc directly at translate time (the
- * 16-case cc-code switch maps each case to a 2-7-insn bitfield
- * extract), so there is no longer a dsp_jit_helper_calc_cc shim.
+ * emu_calc_cc / dsp_stack_push / dsp_stack_pop are file-static, so
+ * expose them via trivial wrappers that the JIT's inline CF
+ * emitters BLR for the conditional + subroutine ops.
  *
  * dsp_jit_helper_classify_cf maps an emu_func_t handler pointer
  * to a DSP_JIT_CF_* tag so the JIT can decide which inline emitter
@@ -1620,6 +1616,11 @@ uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
  * handler not covered returns DSP_JIT_CF_NONE and the JIT falls
  * back to the plain BLR path — zero regression.
  * ============================================================== */
+
+int dsp_jit_helper_calc_cc(dsp_core_t *dsp, uint32_t cc_code)
+{
+    return emu_calc_cc(dsp, cc_code);
+}
 
 void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
                                uint32_t newsr)
