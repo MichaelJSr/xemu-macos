@@ -108,8 +108,10 @@ static uint32_t g_jit_force;
  */
 static bool g_ccr_dead_next_emit;
 static bool g_ccr_nz_dead_next_emit;
+static bool g_ccr_eu_dead_next_emit;
 static uint64_t g_alu_ccr_skipped;
 static uint64_t g_alu_ccr_nz_skipped;
+static uint64_t g_alu_ccr_eu_skipped;
 
 /*
  * Phase 8 extended lazy-flag lookahead depth. Each translate
@@ -2601,13 +2603,26 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
      * the per-scaling-mode E/U computation. Consumed unconditionally
      * to avoid leaking state into the next op. */
     bool skip_nz = g_ccr_nz_dead_next_emit;
+    bool skip_eu = g_ccr_eu_dead_next_emit;
     g_ccr_nz_dead_next_emit = false;
+    g_ccr_eu_dead_next_emit = false;
     if (g_ccr_dead_next_emit) {
         g_ccr_dead_next_emit = false;
         g_alu_ccr_skipped++;
         return;
     }
-    if (skip_nz) {
+    /* skip_eu && skip_nz is equivalent to full-dead — the entire
+     * SR.E/U/N/Z quartet is destined to be overwritten before any
+     * reader. The extended lookahead can set both independently
+     * via different walks; fold them here so we don't emit dead
+     * code (even just the clear + store) if both fire. */
+    if (skip_eu && skip_nz) {
+        g_alu_ccr_skipped++;
+        return;
+    }
+    if (skip_eu) {
+        g_alu_ccr_eu_skipped++;
+    } else if (skip_nz) {
         g_alu_ccr_nz_skipped++;
     }
 
@@ -2628,114 +2643,132 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
                    & 0xFFFFu);
     emit_and_w_reg(e, /*rd=*/9, /*rn=*/9, /*rm=*/11);
 
-    /* Scaling == 3 → skip E/U and N/Z entirely. */
+    /* Scaling == 3 → skip E/U and N/Z entirely (interp returns
+     * before touching CCR; our clear step already zeroed them,
+     * which matches the "return" semantic bit-exactly). This
+     * branch fires in every mode — including skip_eu / skip_nz
+     * — since scaling==3 produces the same all-zero result either
+     * way, and the branch is cheaper than skipping the check. */
     emit_cmp_w_imm(e, /*rn=*/10, 3);
     uint32_t *to_skip_nz = e->buf;
     emit_bcond(e, ARM_COND_EQ, 0);
 
-    /* Scaling == 2 → branch. */
-    emit_cmp_w_imm(e, /*rn=*/10, 2);
-    uint32_t *to_s2 = e->buf;
-    emit_bcond(e, ARM_COND_EQ, 0);
+    uint32_t *s0_to_nz = NULL;
+    uint32_t *s1_to_nz = NULL;
+    uint32_t *to_s2 = NULL;
+    uint32_t *to_s1 = NULL;
 
-    /* Scaling == 1 → branch. */
-    emit_cmp_w_imm(e, /*rn=*/10, 1);
-    uint32_t *to_s1 = e->buf;
-    emit_bcond(e, ARM_COND_EQ, 0);
+    if (!skip_eu) {
+        /* Scaling == 2 → branch. */
+        emit_cmp_w_imm(e, /*rn=*/10, 2);
+        to_s2 = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
 
-    /* ==================== Scaling 0 (fall-through hot path) ==================== */
+        /* Scaling == 1 → branch. */
+        emit_cmp_w_imm(e, /*rn=*/10, 1);
+        to_s1 = e->buf;
+        emit_bcond(e, ARM_COND_EQ, 0);
 
-    /* value_e = ((A2 << 1) + (A1 >> 23)) & 0x1ff. */
-    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
-    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
-    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
-    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 9);
-    /* E = NOT(value_e == 0 || value_e == 0x1ff). */
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_imm(e, /*rn=*/11, 0x1ff);
-    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
-    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
-    /* U from (A1 & 0xc00000) ∈ {0, 0xc00000}. */
-    emit_mov_imm32(e, /*rd=*/13, 0xc00000);
-    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
-    emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+        /* ================== Scaling 0 (fall-through hot path) ================== */
 
-    uint32_t *s0_to_nz = e->buf;
-    emit_b(e, 0);
+        /* value_e = ((A2 << 1) + (A1 >> 23)) & 0x1ff. */
+        emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
+        emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
+        emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+        emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 9);
+        /* E = NOT(value_e == 0 || value_e == 0x1ff). */
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_imm(e, /*rn=*/11, 0x1ff);
+        emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+        emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+        /* U from (A1 & 0xc00000) ∈ {0, 0xc00000}. */
+        emit_mov_imm32(e, /*rd=*/13, 0xc00000);
+        emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+        emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
 
-    /* ==================== Scaling 1 ==================== */
-    uint32_t *s1_label = e->buf;
-    patch_branch(to_s1, (int32_t)((uint8_t *)s1_label -
-                                  (uint8_t *)to_s1));
-    /* E = NOT(A2 == 0 || A2 == 0xff). */
-    emit_cmp_w_imm(e, /*rn=*/1, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_imm(e, /*rn=*/1, 0xff);
-    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
-    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
-    /* vu = ((A2 << 1) + (A1 >> 23)) & 0x3; U = (vu == 0 || vu == 3). */
-    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
-    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
-    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
-    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 2);
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_imm(e, /*rn=*/11, 3);
-    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+        s0_to_nz = e->buf;
+        emit_b(e, 0);
 
-    uint32_t *s1_to_nz = e->buf;
-    emit_b(e, 0);
+        /* ================== Scaling 1 ================== */
+        uint32_t *s1_label = e->buf;
+        patch_branch(to_s1, (int32_t)((uint8_t *)s1_label -
+                                      (uint8_t *)to_s1));
+        /* E = NOT(A2 == 0 || A2 == 0xff). */
+        emit_cmp_w_imm(e, /*rn=*/1, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_imm(e, /*rn=*/1, 0xff);
+        emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+        emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+        /* vu = ((A2 << 1) + (A1 >> 23)) & 0x3; U = (vu == 0 || vu == 3). */
+        emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 1);
+        emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 23);
+        emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+        emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 2);
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_imm(e, /*rn=*/11, 3);
+        emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
 
-    /* ==================== Scaling 2 ==================== */
-    uint32_t *s2_label = e->buf;
-    patch_branch(to_s2, (int32_t)((uint8_t *)s2_label -
-                                  (uint8_t *)to_s2));
-    /* value_e = ((A2 << 2) + (A1 >> 22)) & 0x3ff. */
-    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 2);
-    emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 22);
-    emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
-    emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 10);
-    /* E = NOT(value_e == 0 || value_e == 0x3ff). 0x3ff == 1023
-     * fits in the imm12 CMP. */
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_imm(e, /*rn=*/11, 0x3ff);
-    emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
-    emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
-    /* U from (A1 & 0x600000) ∈ {0, 0x600000}. */
-    emit_mov_imm32(e, /*rd=*/13, 0x600000);
-    emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
-    emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
-    emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
-    /* Fall through to N/Z block (or directly to store_sr_h when
-     * skip_nz is set — in that case the N/Z block is elided and
-     * the fall-through target IS skip_nz_label). */
+        s1_to_nz = e->buf;
+        emit_b(e, 0);
+
+        /* ================== Scaling 2 ================== */
+        uint32_t *s2_label = e->buf;
+        patch_branch(to_s2, (int32_t)((uint8_t *)s2_label -
+                                      (uint8_t *)to_s2));
+        /* value_e = ((A2 << 2) + (A1 >> 22)) & 0x3ff. */
+        emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/1, 2);
+        emit_lsr_w_imm(e, /*rd=*/12, /*rn=*/2, 22);
+        emit_add_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/12);
+        emit_ubfx_w(e, /*rd=*/11, /*rn=*/11, 0, 10);
+        /* E = NOT(value_e == 0 || value_e == 0x3ff). */
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_imm(e, /*rn=*/11, 0x3ff);
+        emit_cset_w(e, /*rd=*/13, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/13);
+        emit_eor_w_imm1(e, /*rd=*/12, /*rn=*/12);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_E, 1);
+        /* U from (A1 & 0x600000) ∈ {0, 0x600000}. */
+        emit_mov_imm32(e, /*rd=*/13, 0x600000);
+        emit_and_w_reg(e, /*rd=*/11, /*rn=*/2, /*rm=*/13);
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_cmp_w_reg(e, /*rn=*/11, /*rm=*/13);
+        emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
+        emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
+        /* Fall through to N/Z block (or store_sr_h when skip_nz). */
+    }
+    /*
+     * skip_eu fall-through path: the scaling==3 branch above was
+     * the only branch emitted — for scaling 0/1/2 we want to go
+     * straight to N/Z (or store_sr_h if skip_nz is also set, in
+     * which case both halves are fully elided). The clear step
+     * already wrote 0 to E/U in w9; no E/U BFI happens.
+     */
 
     /* ==================== N / Z (shared across 0/1/2) ==================== */
     uint32_t *nz_label = e->buf;
     if (!skip_nz) {
-        patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
-                                    (uint8_t *)s0_to_nz));
-        patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
-                                    (uint8_t *)s1_to_nz));
+        if (!skip_eu) {
+            patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
+                                        (uint8_t *)s0_to_nz));
+            patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
+                                        (uint8_t *)s1_to_nz));
+        }
 
         /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
         emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
@@ -2755,14 +2788,19 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     uint32_t *skip_nz_label = e->buf;
     patch_branch(to_skip_nz, (int32_t)((uint8_t *)skip_nz_label -
                                        (uint8_t *)to_skip_nz));
-    if (skip_nz) {
-        /* When skip_nz is set, the N/Z block wasn't emitted, so
-         * scaling==2 falls straight through to store_sr_h, and
-         * the S0/S1 `B`'s land on store_sr_h too (nz_label ==
-         * skip_nz_label in this path). Patch the two conditional
-         * fall-through emit_b's to target skip_nz_label directly;
-         * this also saves the redundant 1-insn `B` we'd otherwise
-         * emit after S2 just to skip zero bytes of N/Z code. */
+    if (skip_nz && !skip_eu) {
+        /* When skip_nz is set AND skip_eu is false, the N/Z block
+         * wasn't emitted so scaling==2 falls straight through to
+         * store_sr_h, and the S0/S1 `B`'s land on store_sr_h too
+         * (nz_label == skip_nz_label in this path). Patch the
+         * two conditional fall-through emit_b's to target
+         * skip_nz_label directly; this also saves the redundant
+         * 1-insn `B` we'd otherwise emit after S2 just to skip
+         * zero bytes of N/Z code.
+         *
+         * When skip_eu is true the scaling branches weren't
+         * emitted at all, so s0_to_nz / s1_to_nz are NULL — no
+         * patching needed. */
         patch_b(s0_to_nz, (int32_t)((uint8_t *)skip_nz_label -
                                     (uint8_t *)s0_to_nz));
         patch_b(s1_to_nz, (int32_t)((uint8_t *)skip_nz_label -
@@ -4593,6 +4631,55 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
  *
  * Conservative "false" for unknowns.
  */
+/*
+ * Phase 8 per-flag E/U lazy-flag: is `inst` safely walked-past
+ * for the purpose of killing an upstream full writer's E/U half?
+ *
+ * An op qualifies if it provably:
+ *   (a) does NOT read SR.E or SR.U (so upstream's E/U values
+ *       aren't actually consumed), AND
+ *   (b) does NOT write SR.E or SR.U (either writes nothing to
+ *       E/U, or is a full writer — full writers are handled
+ *       directly by the walk's break-on-full-writer branch, so
+ *       they're implicitly OK as walk boundaries).
+ *
+ * The set is strictly broader than `inst_is_ccr_passthrough`:
+ * CCR-passthroughs all satisfy (a)+(b) automatically (they read
+ * nothing in CCR). On top of that we add CCR READERS that read
+ * only C/V/N/Z, NOT E/U:
+ *
+ *   TCC — conditional register transfer based on the 4-bit cc
+ *         code. The cc evaluation (emu_calc_cc) uses only
+ *         C/V/Z/N/L; E and U are never inputs. Non-terminator.
+ *
+ * Conditional branches (JCC/BCC/JSCC/JSCLR/JSSET/BRCLR/BRSET/
+ * JCLR/JSET variants) ALSO only read C/V/N/Z from CCR (for the
+ * cc-code ones) or test a single bit (for the bit-test ones),
+ * but they're terminators — they end the block and the walk
+ * breaks on them naturally (they're not in any passthrough
+ * set). So we don't need to add them here.
+ *
+ * Conservative "false" for unknowns.
+ */
+static bool inst_is_eu_passthrough(uint32_t inst)
+{
+    /* Every CCR passthrough is also an E/U passthrough (they
+     * read nothing from CCR). */
+    if (inst_is_ccr_passthrough(inst)) {
+        return true;
+    }
+    /* TCC is the only non-terminator CCR-reader that reads only
+     * C/V/N/Z. */
+    emu_func_t emu_eu = dsp_jit_helper_lookup_emu(inst);
+    if (emu_eu) {
+        int cf_kind = dsp_jit_helper_classify_cf((void *)emu_eu);
+        if (cf_kind == DSP_JIT_CF_TCC) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool inst_overwrites_nz(uint32_t inst)
 {
     if (inst >= 0x100000u) {
@@ -9181,9 +9268,17 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
          *   g_ccr_nz_dead_next_emit  — only N/Z half dead (some
          *                              passthrough in the walk
          *                              overwrites N/Z even if no
-         *                              full writer was reached). */
+         *                              full writer was reached).
+         *   g_ccr_eu_dead_next_emit  — only E/U half dead (extended
+         *                              walk reaches a full writer
+         *                              via eu-passthroughs that
+         *                              aren't ccr-passthroughs,
+         *                              i.e. TCC reads only C/V/N/Z
+         *                              but lets E/U through
+         *                              untouched). */
         g_ccr_dead_next_emit = false;
         g_ccr_nz_dead_next_emit = false;
+        g_ccr_eu_dead_next_emit = false;
 
         if (inst >= 0x100000) {
             /* Parallel-move-bearing instruction (Phase 4). */
@@ -9238,6 +9333,33 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                 /* Partial kill: N/Z half of this op's emit is dead
                  * (a walked-over passthrough overwrites N/Z). */
                 g_ccr_nz_dead_next_emit = true;
+            }
+            /*
+             * Extended E/U walk: rerun the forward scan with the
+             * broader eu-passthrough set (CCR-passthrough + TCC),
+             * looking for a full writer. If the main walk already
+             * found one (g_ccr_dead_next_emit), this is redundant
+             * — full-dead subsumes eu-dead.
+             */
+            if (!g_ccr_dead_next_emit) {
+                uint32_t next_pc_eu = pc + inst_len;
+                int eu_step = 0;
+                while (eu_step < DSP_JIT_CCR_LF_MAX_STEPS &&
+                       num_ops + 1 + eu_step <
+                           DSP_JIT_MAX_OPS_PER_BLOCK &&
+                       next_pc_eu < DSP_PRAM_SIZE) {
+                    uint32_t look_inst = dsp->pram[next_pc_eu];
+                    if (inst_is_full_ccr_writer(look_inst)) {
+                        g_ccr_eu_dead_next_emit = true;
+                        break;
+                    }
+                    if (!inst_is_eu_passthrough(look_inst)) {
+                        break;
+                    }
+                    next_pc_eu +=
+                        dsp_jit_helper_inst_length(look_inst);
+                    eu_step++;
+                }
             }
 
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
@@ -9300,6 +9422,27 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             }
             if (!g_ccr_dead_next_emit && saw_nz_ovr2) {
                 g_ccr_nz_dead_next_emit = true;
+            }
+            /* Extended E/U walk — see parmove path comment. */
+            if (!g_ccr_dead_next_emit) {
+                uint32_t next_pc_eu2 = pc + inst_len;
+                int eu_step2 = 0;
+                while (eu_step2 < DSP_JIT_CCR_LF_MAX_STEPS &&
+                       num_ops + 1 + eu_step2 <
+                           DSP_JIT_MAX_OPS_PER_BLOCK &&
+                       next_pc_eu2 < DSP_PRAM_SIZE) {
+                    uint32_t look_inst = dsp->pram[next_pc_eu2];
+                    if (inst_is_full_ccr_writer(look_inst)) {
+                        g_ccr_eu_dead_next_emit = true;
+                        break;
+                    }
+                    if (!inst_is_eu_passthrough(look_inst)) {
+                        break;
+                    }
+                    next_pc_eu2 +=
+                        dsp_jit_helper_inst_length(look_inst);
+                    eu_step2++;
+                }
             }
 
             /*
@@ -9567,6 +9710,8 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
             " (lazy-flag: dead ccr emit elided)\n"
             "  alu_ccr_nz_skipped= %" PRIu64
             " (lazy-flag: N/Z-only half elided)\n"
+            "  alu_ccr_eu_skipped= %" PRIu64
+            " (lazy-flag: E/U-only half elided)\n"
             "  cf_inlined        = %" PRIu64
             " (%.1f%% of emitted ops)\n"
             "  cf_fallback       = %" PRIu64 "\n",
@@ -9582,6 +9727,7 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
             g_alu_fallback_count,
             g_alu_ccr_skipped,
             g_alu_ccr_nz_skipped,
+            g_alu_ccr_eu_skipped,
             g_cf_inlined_count,
             (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
                 100.0 * (double)g_cf_inlined_count /
