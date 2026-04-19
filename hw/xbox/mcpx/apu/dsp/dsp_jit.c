@@ -1829,6 +1829,77 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
         emit_ubfx_w(e, /*rd=*/1, /*rn=*/value_reg, 0, bits);
         emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_REG(dstreg));
     }
+
+    /*
+     * Phase 8 pin sync for individual A/B slot writes. A parmove
+     * can target A0 / A1 / A2 / B0 / B1 / B2 directly (e.g.
+     * pm_2_2 "Y0, A1" — inst 0x220c00 in Azurik's init path).
+     * These writes hit memory directly via the code above but
+     * would otherwise leave the pinned x26 / x27 holding the PRE-
+     * write packed value — the first bug caught by pin-audit.
+     *
+     * BFI semantics: preserve the pin bits OUTSIDE the slot, splice
+     * in the newly-written slot value. A1 / B1 live at pin[47:24]
+     * (24 bits); A0 / B0 at pin[23:0] (24 bits); A2 / B2 at
+     * pin[55:48] (8 bits, with bit 55 driving the sign-extension
+     * in pin[63:56]).
+     *
+     * For A2 / B2 we also need to re-sign-extend bits [63:56]
+     * because changing A2's high bit flips the pin's sign. Easier
+     * than a conditional re-extension: after BFI-ing the new A2
+     * byte in, SBFX the pin through bit 55 to regenerate the sign.
+     */
+    int pin = -1;
+    int slot;   /* 0 = A0/B0, 1 = A1/B1, 2 = A2/B2 */
+    switch (dstreg) {
+    case DSP_REG_A0: pin = DSP_JIT_A_PIN_REG; slot = 0; break;
+    case DSP_REG_A1: pin = DSP_JIT_A_PIN_REG; slot = 1; break;
+    case DSP_REG_A2: pin = DSP_JIT_A_PIN_REG; slot = 2; break;
+    case DSP_REG_B0: pin = DSP_JIT_B_PIN_REG; slot = 0; break;
+    case DSP_REG_B1: pin = DSP_JIT_B_PIN_REG; slot = 1; break;
+    case DSP_REG_B2: pin = DSP_JIT_B_PIN_REG; slot = 2; break;
+    default: return;   /* not an A/B slot — pin unaffected */
+    }
+
+    /* The stored value: for `bits == 0` the slot is zeroed; for
+     * `bits == 24 && !mask_to_width` it's the full 32 bits of
+     * value_reg (top 8 bits preserved in memory); otherwise it's
+     * the low `bits`-bit slice of value_reg. To mirror the memory
+     * layout we BFI the same bits into the pin. Note: bits == 24
+     * for A0/A1/B0/B1 slots and bits == 8 for A2/B2. */
+    int src_reg;
+    int src_width;
+    if (bits == 0) {
+        src_reg = 31;   /* WZR */
+        src_width = (slot == 2) ? 8 : 24;
+    } else if (bits == 24 && !mask_to_width) {
+        /* Pin uses 24 bits (matches the pre-pinning emit_load_accu56
+         * which BFI'd A1 with width=24). The top 8 bits of memory
+         * are preserved but not observable via the pin — same
+         * behaviour as before Phase 8. */
+        src_reg = value_reg;
+        src_width = 24;
+    } else {
+        /* `bits` <= 24; for A0/A1/B0/B1 this is 24, for A2/B2
+         * this is 8. The masked w1 was stored to memory above —
+         * reuse its value for the pin splice. */
+        src_reg = 1;
+        src_width = bits;
+    }
+
+    if (slot == 0) {
+        /* A0 / B0 at pin[23:0] */
+        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 0, src_width);
+    } else if (slot == 1) {
+        /* A1 / B1 at pin[47:24] */
+        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 24, src_width);
+    } else {
+        /* A2 / B2 at pin[55:48], plus re-sign-extend pin[63:56].
+         * Sequence: BFI the new byte, then SBFX pin through bit
+         * 55 to regenerate sign extension in pin[63:56]. */
+        emit_bfi_x(e, /*rd=*/pin, /*rn=*/src_reg, 48, 8);
+        emit_sbfx_x(e, /*rd=*/pin, /*rn=*/pin, 0, 56);
+    }
 }
 
 /*
