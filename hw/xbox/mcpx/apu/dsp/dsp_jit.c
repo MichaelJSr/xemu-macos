@@ -3515,8 +3515,30 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
  *
  * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25.
  */
+/*
+ * Hints the shared post-instruction epilogue can exploit to skip
+ * runtime checks that are provably unreachable for the op just
+ * emitted. Passed by the caller (emit_instruction /
+ * emit_parmove_stub) based on static classification.
+ *
+ * `may_change_pc`
+ *   false : the op we just emitted is known to leave dsp->pc at
+ *           pc + cur_inst_len — parmove stubs (no parmove op
+ *           branches) and inlined long-imm ALU ops fit this. The
+ *           PC-mismatch exit check (step 11) is therefore
+ *           unreachable and elided. Saves ~4 ARM64 insns per op.
+ *   true  : we don't know what pc will be; emit the check.
+ */
+typedef struct EpilogueHints {
+    bool may_change_pc;
+} EpilogueHints;
+
+static const EpilogueHints EPI_UNKNOWN = { .may_change_pc = true  };
+static const EpilogueHints EPI_NO_PC   = { .may_change_pc = false };
+
 static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
-                                           uint32_t expected_next_pc)
+                                           uint32_t expected_next_pc,
+                                           EpilogueHints hints)
 {
     /*
      * Step 5: inline postexecute_update_pc fast path. The helper
@@ -3597,7 +3619,10 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
     emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
     emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
 
-    /* Step 8: exit-check: interrupt_counter (uint16_t) */
+    /* Step 8: exit-check: interrupt_counter (uint16_t). Kept as its
+     * own branch — interrupt_counter is the primary signal for
+     * "there's a pending interrupt, re-enter dispatcher so it can
+     * hand off to the C interpreter for pipeline-accurate delivery". */
     emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
     {
         uint32_t *site = e->buf;
@@ -3605,41 +3630,71 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         record_exit_patch(exits, site);
     }
 
-    /* Step 9: exit-check: loop_rep (uint32_t) */
+    /*
+     * Steps 9 / 10 / 10b fused:
+     *   loop_rep (u32)          — REP entered; block-boundary exit.
+     *   is_idle (u8)            — STOP / WAIT executed.
+     *   jit_exit_block_request  — self-mod: pram write invalidated
+     *                             a block (possibly this one).
+     *
+     * All three are "exit-to-dispatcher" signals with identical
+     * handling. Instead of three separate LDR + CBNZ pairs, OR
+     * them into w0 and branch once. Saves two exit-patch entries
+     * + two CBNZ instructions per op with no change in semantics
+     * (a non-zero OR still triggers the same exit path). The
+     * ordering of bytes in the OR is arbitrary since we're only
+     * testing for non-zero.
+     */
     emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+    emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_JIT_EXIT_BLOCK_REQ);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
     {
         uint32_t *site = e->buf;
         emit_cbnz_w(e, 0, 0);
         record_exit_patch(exits, site);
     }
 
-    /* Step 10: exit-check: is_idle (bool, 1 byte) */
-    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /* Step 10b: exit-check: jit_exit_block_request (self-mod flag).
-     * Set by dsp_jit_invalidate when a handler rewrote pram (possibly
-     * our own); exit the block so the dispatcher re-translates from
-     * the fresh pram. */
-    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_JIT_EXIT_BLOCK_REQ);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /* Step 11: exit-check: PC mismatch (branch taken by handler) */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
-    emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
-    emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
-    {
-        uint32_t *site = e->buf;
-        emit_bcond(e, ARM_COND_NE, 0);
-        record_exit_patch(exits, site);
+    /*
+     * Step 11: exit-check: PC mismatch (branch taken by handler).
+     * Skipped when the caller promises the op cannot change pc
+     * (parmove stubs, inlined long-imm ALU, inlined ALU kernels).
+     * Also skipped for terminator ops that exit via other means —
+     * wait, no: terminators are exactly where pc CAN change, so
+     * keep the check for them. The skip is safe only when
+     * may_change_pc is false.
+     *
+     * Emission uses SUB + CBNZ rather than MOV imm + CMP + BCOND
+     * — saves 1 ARM64 insn because expected_next_pc fits in imm12
+     * (DSP PRAM is 4 KB, so pc < 0x1000; but the SUB can safely
+     * take a larger imm12 anyway up to 0xFFF which is the max
+     * valid pc). Non-zero SUB result means mismatch; CBNZ branches
+     * to the exit path.
+     */
+    if (hints.may_change_pc) {
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
+        if (expected_next_pc <= 0xfff) {
+            /* Fast path: expected_next_pc fits in ARM64 SUB's
+             * imm12. `w0 = pc - expected_next_pc; cbnz w0, exit`
+             * in 2 insns (vs the MOV imm32 + CMP + BCOND form
+             * below). DSP PRAM is 4 KiB so pc_start + inst_len
+             * normally stays inside 12 bits; blocks that translate
+             * through the last PRAM word hit the edge case below. */
+            emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, expected_next_pc);
+            uint32_t *site = e->buf;
+            emit_cbnz_w(e, 0, 0);
+            record_exit_patch(exits, site);
+        } else {
+            /* Edge case (expected_next_pc > 0xfff — possible when
+             * the block's last op is 2-word at pc == 0xffe). Fall
+             * back to the full MOV imm32 + CMP + B.cond form. */
+            emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
+            emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
+            uint32_t *site = e->buf;
+            emit_bcond(e, ARM_COND_NE, 0);
+            record_exit_patch(exits, site);
+        }
     }
 }
 
@@ -3807,7 +3862,17 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
         return false;
     }
 
-    emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    /*
+     * Parmove stubs: emit the full PC-mismatch exit check. Round-4
+     * tried to skip it (parmove ALU variants shouldn't touch pc),
+     * but in practice at least one parmove sub-class DOES end up
+     * changing dsp->pc via its BLR fallback, and without the check
+     * the block keeps running at the stale pc and eventually jumps
+     * to pram garbage (e.g. 0x001000). Keep the check until we can
+     * identify the offending handler and narrow EPI_NO_PC to the
+     * truly-no-pc subset.
+     */
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, EPI_UNKNOWN);
     if (out_write_set) {
         *out_write_set |= parmove_write_set(inst);
     }
@@ -3840,6 +3905,21 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
  *     worries).
  * ============================================================== */
 
+/*
+ * g_cf_inlined_count  : inlined via emit_cf_call (control-flow +
+ *                       loop handlers). Credited from inside that
+ *                       function, not here.
+ *
+ * g_cf_fallback_count : non-parmove handler that went to the BLR
+ *                       fallback. The name is historical — after
+ *                       round 3 it also covers ALU long-imm fall-
+ *                       throughs (EOR_long has no interpreter
+ *                       handler) and miscellaneous non-parallel
+ *                       ops (movec, movem, movep, lua, tcc, andi,
+ *                       ori, rep _ea/_aa/_reg, shifts _imm, ...).
+ *                       Still reported as "cf_fallback" in the
+ *                       stats output for continuity.
+ */
 static uint64_t g_cf_inlined_count;
 static uint64_t g_cf_fallback_count;
 
@@ -4827,7 +4907,16 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              bool is_terminator,
                              uint32_t *out_write_set)
 {
-    /* 1. dsp->cur_inst = inst */
+    /*
+     * Always preset dsp->cur_inst = inst. Round-4 tried skipping
+     * this store for handlers classified as inlinable, on the
+     * theory that inlined emitters bake `inst` at translate time.
+     * Turned out at least one inlined path still reads dsp->cur_inst
+     * at runtime (likely an indirect BLR to a C helper we didn't
+     * audit), so the skip caused the interpreter to later observe
+     * stale instruction bits and assert on an unknown opcode. Keep
+     * the unconditional preset until the offending reader is found.
+     */
     emit_mov_imm32(e, /*rd=*/0, inst);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
 
@@ -4860,10 +4949,13 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * "non-parmove handler not yet inlined". Splitting into a
      * separate counter is a cheap follow-up if ever needed.)
      */
-    bool handler_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
+    bool cf_inlined = emit_cf_call(e, dsp, pc, inst, emu_func);
+    bool li_inlined = false;
+    bool handler_inlined = cf_inlined;
     if (!handler_inlined) {
-        handler_inlined = emit_long_imm_call(e, dsp, pc, inst, emu_func);
-        if (handler_inlined) {
+        li_inlined = emit_long_imm_call(e, dsp, pc, inst, emu_func);
+        handler_inlined = li_inlined;
+        if (li_inlined) {
             /* Long-imm ops are ALU — credit the inlined count. */
             g_alu_inlined_count++;
         }
@@ -4875,7 +4967,27 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
         g_cf_fallback_count++;
     }
 
-    emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    /*
+     * PC-mismatch check hint:
+     *   - Inlined CF/loop ops are terminators that actively change
+     *     pc (branch taken) — keep the check so we exit on branch.
+     *   - Inlined long-imm ALU ops never touch pc — skip the check.
+     *   - BLR fallback: the handler MIGHT change pc (terminators
+     *     like reset/stop/wait, or any future CF handler we
+     *     haven't inlined yet) — keep the check.
+     */
+    /*
+     * Always emit the PC-mismatch check. Round-4 tried to skip it
+     * for inlined long-imm (they shouldn't touch dsp->pc), but in
+     * practice some handler path does mutate pc in a way the
+     * translator can't predict, and without the check the block
+     * keeps running at the stale pc and eventually jumps to pram
+     * garbage (e.g. op=0x001000 on startup). Keep the check until
+     * the divergence is tracked down; the cost is minor now that
+     * we use the SUB+CBNZ imm12 fast path.
+     */
+    (void)li_inlined;
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, EPI_UNKNOWN);
 
     /*
      * Write-set bookkeeping for the differential validator:

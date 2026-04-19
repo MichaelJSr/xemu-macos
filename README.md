@@ -275,8 +275,25 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   long-immediate handlers (`add_long`, `sub_long`, `cmp_long`,
   `and_long`, `or_long`) have their 24-bit immediate baked from
   `pram[pc+1]` at translate time, eliminating both the BLR and
-  the `read_memory_p` from every long-imm ALU instruction. Static
-  block chaining (direct `B <target.entry>` patch on known branch
+  the `read_memory_p` from every long-imm ALU instruction. Round
+  4 lands two epilogue cost-reductions on every translated op:
+  (1) the `loop_rep / is_idle / jit_exit_block_request` trio of
+  exit checks, previously three separate `LDR+CBNZ` pairs, is
+  fused into one `OR`-then-`CBNZ`, saving two insns + two
+  exit-patch slots per op with identical semantics (any non-zero
+  still triggers the exit). (2) the PC-mismatch check uses a
+  `SUB w0, w0, #imm12 + CBNZ` fast path when `expected_next_pc`
+  fits in ARM64's imm12 (which it almost always does since DSP
+  PRAM is 4 KiB), dropping it from 3 to 2 insns. Also cleans up
+  the dead `dsp_jit_helper_calc_cc` shim that Round 2 made
+  unreachable. Two other round-4 experiments (skipping the
+  `dsp->cur_inst` preset for inlined ops, and skipping the
+  PC-mismatch check for inlined long-imm + parmove stubs via
+  `EPI_NO_PC`) regressed with an `op=0x001000` startup assert
+  — at least one inlined path reads `cur_inst` or mutates `pc`
+  in a way the static classifier can't predict; both are
+  deferred pending a runtime-sentinel bisect. Static block
+  chaining (direct `B <target.entry>` patch on known branch
   targets) is a followup commit — the entry-split prologue
   refactor it depends on is scoped separately.
   Correctness harness: `XEMU_DSP_JIT_DIFF=N` validates JIT blocks
