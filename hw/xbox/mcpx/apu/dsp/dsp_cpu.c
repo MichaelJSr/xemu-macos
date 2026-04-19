@@ -1813,7 +1813,7 @@ int dsp_jit_helper_classify_fallback(void *fn)
     }
     if (f == emu_cmpu)  return DSP_JIT_FB_CMPU;
     if (f == emu_mpyi)  return DSP_JIT_FB_MPYI;
-    if (f == emu_move_x_long || f == emu_move_y_long ||
+    if (f == emu_move_x_long ||
         f == emu_move_x_imm  || f == emu_move_y_imm) {
         return DSP_JIT_FB_MOVE_EXTENDED;
     }
