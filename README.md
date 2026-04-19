@@ -173,6 +173,16 @@ fine tuning.
   rebind to a different layout implicitly busts the cache without
   a separate invalidation hook. Big win on fixed-function-transform
   titles that keep inline uniform attrs constant across many draws.
+- **Micro-polish: cached scaled binding-dim + single-pass surface
+  overlap.** `begin_draw` / `begin_render_pass` now pull the scaled
+  `surface_binding_dim.{width,height}` from a small cache in
+  `PGRAPHVkState` instead of recomputing on every pipeline bind;
+  invalidated only at surface-bind + scale-factor changes.
+  `invalidate_overlapping_surfaces` collects overlapping
+  `SurfaceBinding *` into a 64-entry stack array in a single pass
+  (with a re-entrant fallback for the rare >64 overlap case)
+  instead of two passes via `g_newa`. Microscopic — ships as code
+  hygiene rather than measurable perf.
 
 ### MetalFX + presentation
 

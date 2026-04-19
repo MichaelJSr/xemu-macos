@@ -165,6 +165,11 @@ void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg)
 {
     int factor = g_config.display.quality.surface_scale;
     pg->surface_scale_factor = MAX(factor, 1);
+
+    /* Scale changed underneath the cached scaled dims. */
+    if (pg->vk_renderer_state) {
+        pg->vk_renderer_state->cached_scaled_binding_dim_valid = false;
+    }
 }
 
 // FIXME: Move to common
@@ -782,8 +787,19 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
     hwaddr start = surface->vram_addr;
     hwaddr range_end = surface->vram_addr + surface->size;
 
+    /*
+     * Typical overlap is 0-3 surfaces. A stack cap of 64 covers the
+     * vast majority of real cases without touching the allocator; the
+     * rare >64 overlap path falls back to a re-scan. Collect pointers
+     * first, then invalidate — invalidate_surface -> surface_ranges_-
+     * remove memmove's the array, so iteration + invalidation can't
+     * be interleaved without corrupting the walk.
+     */
+    enum { STACK_CAP = 64 };
+    SurfaceBinding *to_invalidate[STACK_CAP];
     int count = 0;
-    int first = -1;
+    bool overflow = false;
+
     for (int i = 0; i < r->surface_range_count; i++) {
         if (r->surface_ranges[i].start >= range_end) {
             break;
@@ -791,26 +807,12 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
         if (r->surface_ranges[i].end <= start) {
             continue;
         }
-        if (first < 0) {
-            first = i;
-        }
-        count++;
-    }
-
-    if (count == 0) {
-        return;
-    }
-
-    SurfaceBinding **to_invalidate = g_newa(SurfaceBinding *, count);
-    int j = 0;
-    for (int i = first; i < r->surface_range_count && j < count; i++) {
-        if (r->surface_ranges[i].start >= range_end) {
+        if (count < STACK_CAP) {
+            to_invalidate[count++] = r->surface_ranges[i].surface;
+        } else {
+            overflow = true;
             break;
         }
-        if (r->surface_ranges[i].end <= start) {
-            continue;
-        }
-        to_invalidate[j++] = r->surface_ranges[i].surface;
     }
 
     for (int i = 0; i < count; i++) {
@@ -819,6 +821,16 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
             to_invalidate[i]->height, to_invalidate[i]->pitch);
         pgraph_vk_surface_download_if_dirty(d, to_invalidate[i]);
         invalidate_surface(d, to_invalidate[i]);
+    }
+
+    /*
+     * Rare fallback: >STACK_CAP overlapping surfaces. Re-enter with
+     * the (now partially-invalidated) array. The overlap window can
+     * only shrink because we never add surfaces here, so this
+     * terminates.
+     */
+    if (overflow) {
+        invalidate_overlapping_surfaces(d, surface);
     }
 }
 
@@ -1728,6 +1740,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 pg->surface_binding_dim.height = surface->height;
                 pg->surface_binding_dim.clip_y = surface->shape.clip_y;
                 pg->surface_binding_dim.clip_height = surface->shape.clip_height;
+                r->cached_scaled_binding_dim_valid = false;
                 surface->upload_pending |= mem_dirty;
                 pg->surface_zeta.buffer_dirty |= color;
                 should_create = false;
@@ -1760,6 +1773,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             pg->surface_binding_dim.height = target.height;
             pg->surface_binding_dim.clip_y = target.shape.clip_y;
             pg->surface_binding_dim.clip_height = target.shape.clip_height;
+            r->cached_scaled_binding_dim_valid = false;
 
             if (color && r->zeta_binding &&
                 (r->zeta_binding->width != target.width ||

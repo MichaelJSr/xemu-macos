@@ -528,6 +528,19 @@ typedef struct PGRAPHVkState {
     float cached_line_width;
 
     /*
+     * Cache of pg->surface_binding_dim.{width,height} scaled by
+     * pg->surface_scale_factor. Used by begin_draw's viewport and
+     * begin_render_pass's render area. Invalidated at each write
+     * of surface_binding_dim (update_surface_part in surface.c) and
+     * at pgraph_vk_reload_surface_scale_factor. Invalid state is
+     * encoded by cached_scaled_binding_dim_valid == false; lazy-
+     * populated on first consumer miss after invalidation.
+     */
+    bool cached_scaled_binding_dim_valid;
+    uint32_t cached_scaled_binding_dim_w;
+    uint32_t cached_scaled_binding_dim_h;
+
+    /*
      * Per-command-buffer cache of the last vkCmdBindVertexBuffers
      * arguments. Reset in pgraph_vk_begin_command_buffer. memcmp'd
      * against the would-be arguments in bind_vertex_buffer; on a

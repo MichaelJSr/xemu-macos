@@ -1710,6 +1710,30 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
                          &barrier, 0, NULL);
 }
 
+/*
+ * Lazy-populate (width, height) = surface_binding_dim.{width,height} *
+ * surface_scale_factor. Cached in PGRAPHVkState and invalidated at each
+ * surface_binding_dim / scale-factor write. Shared by begin_render_pass
+ * (render area) and begin_draw (viewport).
+ */
+static void get_scaled_binding_dim(PGRAPHState *pg,
+                                   unsigned int *width,
+                                   unsigned int *height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!r->cached_scaled_binding_dim_valid) {
+        unsigned int w = pg->surface_binding_dim.width;
+        unsigned int h = pg->surface_binding_dim.height;
+        pgraph_apply_scaling_factor(pg, &w, &h);
+        r->cached_scaled_binding_dim_w = w;
+        r->cached_scaled_binding_dim_h = h;
+        r->cached_scaled_binding_dim_valid = true;
+    }
+    *width = r->cached_scaled_binding_dim_w;
+    *height = r->cached_scaled_binding_dim_h;
+}
+
 static void begin_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1719,9 +1743,8 @@ static void begin_render_pass(PGRAPHState *pg)
 
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_RENDERPASSES);
 
-    unsigned int vp_width = pg->surface_binding_dim.width,
-                 vp_height = pg->surface_binding_dim.height;
-    pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
+    unsigned int vp_width, vp_height;
+    get_scaled_binding_dim(pg, &vp_width, &vp_height);
 
     nv2a_vk_assert(r->framebuffer_index > 0);
 
@@ -2063,9 +2086,8 @@ static void begin_draw(PGRAPHState *pg)
                           r->pipeline_binding->pipeline);
         r->pipeline_binding->draw_time = pg->draw_time;
 
-        unsigned int vp_width = pg->surface_binding_dim.width,
-                     vp_height = pg->surface_binding_dim.height;
-        pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
+        unsigned int vp_width, vp_height;
+        get_scaled_binding_dim(pg, &vp_width, &vp_height);
 
         VkViewport viewport = {
             .width = vp_width,
