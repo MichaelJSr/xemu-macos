@@ -527,6 +527,17 @@ typedef struct PGRAPHVkState {
     float cached_depth_bias_slope;
     float cached_line_width;
 
+    /*
+     * Per-command-buffer cache of the last vkCmdBindVertexBuffers
+     * arguments. Reset in pgraph_vk_begin_command_buffer. memcmp'd
+     * against the would-be arguments in bind_vertex_buffer; on a
+     * match the Vulkan call is skipped.
+     */
+    bool last_vertex_bind_valid;
+    uint32_t last_vertex_bind_count;
+    VkBuffer last_vertex_bind_buffers[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkDeviceSize last_vertex_bind_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
+
     VkDescriptorPool descriptor_pool;
     /*
      * Split descriptor sets: set 0 holds UBOs (VSH + PSH uniforms),

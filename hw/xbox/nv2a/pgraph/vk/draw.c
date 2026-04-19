@@ -1902,8 +1902,10 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     /*
      * Vulkan dynamic state is command-buffer-scoped. Invalidate the
      * dynstate cache so the first draw re-issues vkCmdSet*.
+     * vkCmdBindVertexBuffers state is likewise CB-scoped.
      */
     r->dynstate_cache_valid = false;
+    r->last_vertex_bind_valid = false;
 }
 
 // FIXME: Refactor below
@@ -2426,7 +2428,8 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
     VkBuffer buffers[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkDeviceSize offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
-    for (int i = 0; i < r->num_active_vertex_binding_descriptions; i++) {
+    uint32_t count = r->num_active_vertex_binding_descriptions;
+    for (uint32_t i = 0; i < count; i++) {
         int attr_idx = r->vertex_attribute_descriptions[i].location;
         int buffer_idx = (inline_map & (1 << attr_idx)) ? BUFFER_VERTEX_INLINE :
                                                           BUFFER_VERTEX_RAM;
@@ -2434,9 +2437,28 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
         offsets[i] = offset + r->vertex_attribute_offsets[attr_idx];
     }
 
-    vkCmdBindVertexBuffers(r->command_buffer, 0,
-                           r->num_active_vertex_binding_descriptions, buffers,
-                           offsets);
+    /*
+     * Skip the Vulkan call when the would-be binding is bit-identical
+     * to the last one issued on this command buffer. Common pattern:
+     * back-to-back flushes drawing the same mesh with different
+     * uniforms / materials re-enter this path with unchanged buffers
+     * and offsets. Cache is reset in pgraph_vk_begin_command_buffer.
+     */
+    if (r->last_vertex_bind_valid &&
+        r->last_vertex_bind_count == count &&
+        !memcmp(r->last_vertex_bind_buffers, buffers,
+                count * sizeof(buffers[0])) &&
+        !memcmp(r->last_vertex_bind_offsets, offsets,
+                count * sizeof(offsets[0]))) {
+        return;
+    }
+
+    vkCmdBindVertexBuffers(r->command_buffer, 0, count, buffers, offsets);
+
+    memcpy(r->last_vertex_bind_buffers, buffers, count * sizeof(buffers[0]));
+    memcpy(r->last_vertex_bind_offsets, offsets, count * sizeof(offsets[0]));
+    r->last_vertex_bind_count = count;
+    r->last_vertex_bind_valid = true;
 }
 
 static void bind_inline_vertex_buffer(PGRAPHState *pg, VkDeviceSize offset)

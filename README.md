@@ -160,6 +160,12 @@ fine tuning.
   refreshes independently via `pgraph_vk_update_descriptor_sets`.
   The common texture-change-per-draw case now hits the fast-out,
   avoiding `init_pipeline_key` + sub-hashes + LRU lookup.
+- **`vkCmdBindVertexBuffers` dedup.** `bind_vertex_buffer` memcmp's
+  the would-be `buffers[]` / `offsets[]` against the last issued
+  bind on the same CB; matches skip the Vulkan call. Reset on CB
+  begin alongside `dynstate_cache_valid`. Kills the per-flush
+  vertex-bind call when back-to-back flushes hit the same mesh
+  (common during material swaps / instanced-style draws).
 
 ### MetalFX + presentation
 
