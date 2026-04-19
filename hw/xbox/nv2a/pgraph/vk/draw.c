@@ -1009,8 +1009,21 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /*
+     * texture_bindings_changed is deliberately NOT included here.
+     * PipelineKey (renderer.h) contains no texture identity —
+     * render_pass_state, shader_state, the 5 raster / blend regs,
+     * and the vertex binding / attribute descriptions. Rebinding
+     * a different VkImage / VkSampler only affects descriptor set
+     * 1, which is rewritten independently by
+     * pgraph_vk_update_descriptor_sets (keyed off
+     * texture_bindings_changed). If a texture change were to
+     * require a pipeline rebuild (e.g. shader key depending on
+     * bound sampler format), shader_bindings_changed fires and
+     * that branch catches it.
+     */
     if (!r->pipeline_binding || r->shader_bindings_changed ||
-        r->texture_bindings_changed || check_render_pass_dirty(pg)) {
+        check_render_pass_dirty(pg)) {
         return true;
     }
 

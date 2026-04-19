@@ -152,6 +152,14 @@ fine tuning.
   `start`); asymptotic find goes from O(n) to O(1) for remove and
   O(log n) for insert. Defensive assert on the remove path catches
   any missed `surface_range_slot` init.
+- **Pipeline-rebuild decoupled from texture rebind.**
+  `check_pipeline_dirty` no longer treats `texture_bindings_changed`
+  as pipeline-dirty. `PipelineKey` contains no texture identity
+  (render-pass state, shader state, 5 raster/blend regs, vertex
+  layout); a rebind only affects descriptor set 1, which already
+  refreshes independently via `pgraph_vk_update_descriptor_sets`.
+  The common texture-change-per-draw case now hits the fast-out,
+  avoiding `init_pipeline_key` + sub-hashes + LRU lookup.
 
 ### MetalFX + presentation
 
