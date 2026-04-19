@@ -107,7 +107,9 @@ static uint32_t g_jit_force;
  * lookahead; consumed by emit_ccr_e_u_n_z's fast-return path.
  */
 static bool g_ccr_dead_next_emit;
+static bool g_ccr_nz_dead_next_emit;
 static uint64_t g_alu_ccr_skipped;
+static uint64_t g_alu_ccr_nz_skipped;
 
 /*
  * Phase 8 extended lazy-flag lookahead depth. Each translate
@@ -2588,11 +2590,25 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
      * the flag and emit NOTHING, saving ~25 ARM64 insns per
      * skipped op on the emit side AND the corresponding cycles
      * at run time. Flag is cleared on consume so the next op's
-     * ccr call (if live) executes normally. */
+     * ccr call (if live) executes normally.
+     *
+     * `g_ccr_nz_dead_next_emit` is the partial-kill variant: a
+     * downstream op within the lookahead window overwrites N/Z
+     * (but not necessarily E/U — e.g. AND/OR/EOR/NOT parmove,
+     * LSL/LSR/ROL/ROR, LSL_IMM/AND_IMM CF, long-imm AND/OR),
+     * so upstream's N/Z emit is dead while the E/U emit must
+     * still run. Skips only the N/Z block (~8 insns), preserving
+     * the per-scaling-mode E/U computation. Consumed unconditionally
+     * to avoid leaking state into the next op. */
+    bool skip_nz = g_ccr_nz_dead_next_emit;
+    g_ccr_nz_dead_next_emit = false;
     if (g_ccr_dead_next_emit) {
         g_ccr_dead_next_emit = false;
         g_alu_ccr_skipped++;
         return;
+    }
+    if (skip_nz) {
+        g_alu_ccr_nz_skipped++;
     }
 
     /* Extract A2 / A1 / A0 from the 64-bit xaccu. */
@@ -2709,30 +2725,49 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
     emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
     emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
-    /* Fall through to N/Z. */
+    /* Fall through to N/Z block (or directly to store_sr_h when
+     * skip_nz is set — in that case the N/Z block is elided and
+     * the fall-through target IS skip_nz_label). */
 
     /* ==================== N / Z (shared across 0/1/2) ==================== */
     uint32_t *nz_label = e->buf;
-    patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
-                                (uint8_t *)s0_to_nz));
-    patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
-                                (uint8_t *)s1_to_nz));
+    if (!skip_nz) {
+        patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
+                                    (uint8_t *)s0_to_nz));
+        patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
+                                    (uint8_t *)s1_to_nz));
 
-    /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
-    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
-    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
-    emit_cmp_w_imm(e, /*rn=*/11, 0);
-    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
+        /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
+        emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
+        emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
+        emit_cmp_w_imm(e, /*rn=*/11, 0);
+        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
 
-    /* N: bit 7 of A2 at SR[3]. */
-    emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
-    emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
+        /* N: bit 7 of A2 at SR[3]. */
+        emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
+        emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
+    } else {
+        (void)nz_label;
+    }
 
     /* ==================== Store SR (shared target of scaling==3 skip) ==================== */
     uint32_t *skip_nz_label = e->buf;
     patch_branch(to_skip_nz, (int32_t)((uint8_t *)skip_nz_label -
                                        (uint8_t *)to_skip_nz));
+    if (skip_nz) {
+        /* When skip_nz is set, the N/Z block wasn't emitted, so
+         * scaling==2 falls straight through to store_sr_h, and
+         * the S0/S1 `B`'s land on store_sr_h too (nz_label ==
+         * skip_nz_label in this path). Patch the two conditional
+         * fall-through emit_b's to target skip_nz_label directly;
+         * this also saves the redundant 1-insn `B` we'd otherwise
+         * emit after S2 just to skip zero bytes of N/Z code. */
+        patch_b(s0_to_nz, (int32_t)((uint8_t *)skip_nz_label -
+                                    (uint8_t *)s0_to_nz));
+        patch_b(s1_to_nz, (int32_t)((uint8_t *)skip_nz_label -
+                                    (uint8_t *)s1_to_nz));
+    }
     emit_store_sr_h(e, 9);
 }
 
@@ -4532,6 +4567,76 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
             return true;
         default:
             break;
+        }
+    }
+    return false;
+}
+
+/*
+ * Phase 8 per-flag lazy-flag: does `inst` unconditionally
+ * overwrite SR.N AND SR.Z? Used to kill the N/Z half of an
+ * upstream full-writer's ccr emit when the downstream op
+ * overwrites N/Z but NOT E/U (so E/U must still be emitted).
+ *
+ * This is strictly broader than "full CCR writer" — full
+ * writers also overwrite E/U, but many ops overwrite N/Z
+ * without touching E/U (LSL/LSR/ROL/ROR, AND/OR/EOR/NOT
+ * parmove + long-imm, LSL_IMM / AND_IMM CF). Those ops also
+ * don't READ N/Z, so the upstream N/Z is provably dead: no
+ * reader observes it before it gets clobbered.
+ *
+ * Callable from the lookahead while walking over passthroughs:
+ * the walk terminates on either a full writer (upstream fully
+ * dead) or a non-passthrough op (upstream fully alive). But if
+ * any walked-over passthrough was an N/Z overwriter, the N/Z
+ * half of upstream is still dead even if the E/U half isn't.
+ *
+ * Conservative "false" for unknowns.
+ */
+static bool inst_overwrites_nz(uint32_t inst)
+{
+    if (inst >= 0x100000u) {
+        uint8_t alu_op = (uint8_t)(inst & 0xff);
+        AluVariant v;
+        alu_classify_opcode(alu_op, &v);
+        /* MOVE: no SR touch. TFR: no SR touch. FALLBACK (MAX):
+         * only writes SR.C. Everything else writes N/Z (even
+         * the ones that don't call ccr_update_e_u_n_z still do
+         * a clear-and-set of N in SR — see emit_alu_logical /
+         * emit_alu_lsl / etc.). */
+        switch (v.kind) {
+        case ALU_KIND_MOVE:
+        case ALU_KIND_TFR:
+        case ALU_KIND_FALLBACK:
+            return false;
+        default:
+            return true;
+        }
+    }
+    /* All 5 long-imm variants (add/sub/cmp/and/or) write N/Z
+     * at the tail — add/sub/cmp via ccr_update_e_u_n_z, and/or
+     * via the explicit BFI sequence in emit_alu_long_imm_logical. */
+    if ((inst & 0xFFFFF0u) == 0x0140C0u) {
+        return true;
+    }
+    emu_func_t emu_nz = dsp_jit_helper_lookup_emu(inst);
+    if (emu_nz) {
+        int cf_kind = dsp_jit_helper_classify_cf((void *)emu_nz);
+        switch (cf_kind) {
+        case DSP_JIT_CF_LSL_IMM:
+        case DSP_JIT_CF_AND_IMM:
+        case DSP_JIT_CF_ASL_IMM:
+        case DSP_JIT_CF_ASR_IMM:
+        case DSP_JIT_CF_INC:
+        case DSP_JIT_CF_DEC:
+        case DSP_JIT_CF_ADD_IMM:
+        case DSP_JIT_CF_SUB_IMM:
+        case DSP_JIT_CF_CMP_IMM:
+        case DSP_JIT_CF_RTI:
+        case DSP_JIT_CF_ENDDO:
+            return true;
+        default:
+            return false;
         }
     }
     return false;
@@ -8957,10 +9062,17 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
         uint32_t inst = dsp->pram[pc];
         bool keep_going;
 
-        /* Reset the lazy-flag flag for each iter. It will be set
-         * below if lookahead shows the next op will overwrite the
-         * ccr bits this op is about to compute. */
+        /* Reset the lazy-flag flags for each iter. They are set
+         * below if lookahead shows the next op(s) will overwrite
+         * the ccr bits this op is about to compute.
+         *   g_ccr_dead_next_emit     — all of E/U/N/Z dead (full
+         *                              writer within window).
+         *   g_ccr_nz_dead_next_emit  — only N/Z half dead (some
+         *                              passthrough in the walk
+         *                              overwrites N/Z even if no
+         *                              full writer was reached). */
         g_ccr_dead_next_emit = false;
+        g_ccr_nz_dead_next_emit = false;
 
         if (inst >= 0x100000) {
             /* Parallel-move-bearing instruction (Phase 4). */
@@ -8993,6 +9105,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
              * cleared at the top of each iter. */
             uint32_t next_pc_lf = pc + inst_len;
             int lf_step = 0;
+            bool saw_nz_ovr = false;
             while (lf_step < DSP_JIT_CCR_LF_MAX_STEPS &&
                    num_ops + 1 + lf_step < DSP_JIT_MAX_OPS_PER_BLOCK &&
                    next_pc_lf < DSP_PRAM_SIZE) {
@@ -9001,11 +9114,19 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                     g_ccr_dead_next_emit = true;
                     break;
                 }
+                if (inst_overwrites_nz(look_inst)) {
+                    saw_nz_ovr = true;
+                }
                 if (!inst_is_ccr_passthrough(look_inst)) {
                     break;   /* potential reader / partial writer */
                 }
                 next_pc_lf += dsp_jit_helper_inst_length(look_inst);
                 lf_step++;
+            }
+            if (!g_ccr_dead_next_emit && saw_nz_ovr) {
+                /* Partial kill: N/Z half of this op's emit is dead
+                 * (a walked-over passthrough overwrites N/Z). */
+                g_ccr_nz_dead_next_emit = true;
             }
 
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
@@ -9048,6 +9169,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
              * clears it regardless). */
             uint32_t next_pc_lf2 = pc + inst_len;
             int lf_step2 = 0;
+            bool saw_nz_ovr2 = false;
             while (lf_step2 < DSP_JIT_CCR_LF_MAX_STEPS &&
                    num_ops + 1 + lf_step2 < DSP_JIT_MAX_OPS_PER_BLOCK &&
                    next_pc_lf2 < DSP_PRAM_SIZE) {
@@ -9056,11 +9178,17 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                     g_ccr_dead_next_emit = true;
                     break;
                 }
+                if (inst_overwrites_nz(look_inst)) {
+                    saw_nz_ovr2 = true;
+                }
                 if (!inst_is_ccr_passthrough(look_inst)) {
                     break;
                 }
                 next_pc_lf2 += dsp_jit_helper_inst_length(look_inst);
                 lf_step2++;
+            }
+            if (!g_ccr_dead_next_emit && saw_nz_ovr2) {
+                g_ccr_nz_dead_next_emit = true;
             }
 
             /*
@@ -9326,6 +9454,8 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
             "  alu_fallback      = %" PRIu64 "\n"
             "  alu_ccr_skipped   = %" PRIu64
             " (lazy-flag: dead ccr emit elided)\n"
+            "  alu_ccr_nz_skipped= %" PRIu64
+            " (lazy-flag: N/Z-only half elided)\n"
             "  cf_inlined        = %" PRIu64
             " (%.1f%% of emitted ops)\n"
             "  cf_fallback       = %" PRIu64 "\n",
@@ -9340,6 +9470,7 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
                 (double)(g_alu_inlined_count + g_alu_fallback_count),
             g_alu_fallback_count,
             g_alu_ccr_skipped,
+            g_alu_ccr_nz_skipped,
             g_cf_inlined_count,
             (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
                 100.0 * (double)g_cf_inlined_count /
