@@ -1233,12 +1233,12 @@ static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
 }
 
 /*
- * Emit calc_ea inline: fast path for modes 0-5 and 7 with linear
- * Mn; slow-path BLR for mode 6 (aa, needs pram[pc+1] read), and
- * for modulo-Mn modes 0-3/5/7. Mode 4 is a pure read (no Mn
- * check). Leaves the 16-bit address in out_addr_reg (which must
- * be a callee-saved W register x22..x25 if the caller needs it
- * preserved across subsequent BLRs).
+ * Emit calc_ea inline: fast path for all 8 modes with linear Mn;
+ * slow-path BLR for modulo-Mn modes 0-3/5/7. Mode 4 is a pure
+ * read (no Mn check). Mode 6 (aa, pram[pc+1]) bakes the immediate
+ * at translate time. Leaves the 16-bit address in out_addr_reg
+ * (which must be a callee-saved W register x22..x25 if the caller
+ * needs it preserved across subsequent BLRs).
  *
  * Semantics summary (matches emu_calc_ea in dsp_emu.c.inc:150):
  *   mode 0  (Rn)-Nn  : addr = Rn; Rn = (Rn - Nn) & 0xFFFF
@@ -1247,14 +1247,21 @@ static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
  *   mode 3  (Rn)+    : addr = Rn; Rn = (Rn + 1) & 0xFFFF
  *   mode 4  (Rn)     : addr = Rn; no update
  *   mode 5  (Rn+Nn)  : addr = (Rn+Nn)&0xFFFF; Rn unchanged; cyc+=2
- *   mode 6  aa       : addr = pram[pc+1]; cur_inst_len++; cyc+=2
- *                      (SLOW PATH ONLY in this emitter)
+ *   mode 6  aa       : addr = pram[pc+1]; cur_inst_len++; cyc+=2;
+ *                      retour = 1 iff numreg != 0 (immediate literal,
+ *                      not an address). Immediate baked at translate
+ *                      time from `dsp->pram[pc + 1]`.
  *   mode 7  -(Rn)    : addr = (Rn-1)&0xFFFF; Rn updated; cyc+=2
  *
  * When `want_retour` is true, the retour flag (1 == immediate
  * literal returned in out_addr_reg instead of an address) is
  * written to [SP, #OFF_SP_SCRATCH1] so the caller can branch on
  * it.
+ *
+ * `dsp` and `pc` are only read for the mode-6 immediate bake.
+ * Callers that cannot guarantee mode != 6 must pass valid dsp + pc;
+ * callers that can (mode baked into ea_mode at translate time and
+ * != 6) may pass NULL / 0 respectively.
  *
  * out_addr_reg MUST NOT be 0, 1, 2, or 3 — those are used as
  * temporaries inside this emitter.
@@ -1263,7 +1270,8 @@ static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
  * out_addr_reg is written).
  */
 static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
-                                int out_addr_reg, bool want_retour)
+                                int out_addr_reg, bool want_retour,
+                                dsp_core_t *dsp, uint32_t pc)
 {
     assert(out_addr_reg != 0 && out_addr_reg != 1 &&
            out_addr_reg != 2 && out_addr_reg != 3);
@@ -1271,15 +1279,50 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
     uint32_t numreg = ea_mode & 7;
 
     if (mode == 6) {
-        /* Mode 6 (aa / 24-bit immediate) still goes through the
-         * slow helper because it must read pram[pc+1] at run time
-         * — the translator does not currently thread pc into this
-         * emitter. Emit_cf_bittest_generic bakes pram[pc+1] at
-         * translate time for its own use but calls this emitter
-         * only in the EA path where mode 6 is rare. If this
-         * becomes a hot spot, a separate emit_calc_ea_inline_pc
-         * variant can bake the immediate. */
-        emit_calc_ea_slow_call(e, ea_mode, out_addr_reg, want_retour);
+        /* Mode 6 (aa / absolute-address) baked inline. The interp
+         * does: instr_cycle += 2; *dst = read_memory_p(pc+1);
+         *       cur_inst_len++;
+         *       return (numreg != 0) ? 1 : 0;
+         * We bake read_memory_p(pc+1) at translate time (same as
+         * the long-imm ALU bake). If pc+1 is past pram, bake 0 —
+         * the interp would assert on that input so the value is
+         * "don't care".
+         *
+         * NOTE: mode-6 EA lengthens the instruction to 2 words.
+         * The parmove stub's expected_next_pc is still pc+1, so
+         * the post-exec PC-mismatch check will trip and the block
+         * will exit — that's the existing behaviour and is
+         * preserved here; the win is dropping the BLR to
+         * emu_calc_ea for the read. Once the translator is taught
+         * to treat mode-6 parmoves as 2-word ops, expected_next_pc
+         * will match and the block will stay intact. */
+        assert(dsp != NULL);
+        uint32_t baked = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+        baked &= 0xFFFFu;   /* 16-bit address */
+
+        /* instr_cycle += 2 */
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, 2);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+
+        /* cur_inst_len++ */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, 1);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+        /* out_addr_reg = baked absolute address. */
+        emit_mov_imm32(e, /*rd=*/out_addr_reg, baked);
+
+        if (want_retour) {
+            /* retour = (numreg != 0) ? 1 : 0 — known statically. */
+            if (numreg != 0) {
+                emit_mov_imm32(e, /*rd=*/0, 1);
+                emit_str_w_imm(e, /*rs=*/0, /*rn=*/31, OFF_SP_SCRATCH1);
+            } else {
+                emit_str_w_imm(e, /*rs=*/31 /* WZR */,
+                               /*rn=*/31 /* SP */, OFF_SP_SCRATCH1);
+            }
+        }
         return;
     }
 
@@ -3014,7 +3057,8 @@ static void emit_alu_call(ArmEmit *e, uint8_t alu_op, emu_func_t alu)
  * --------------------------------------------------------------- */
 
 /* Forward declarations so pm_2 can fall through to pm_3. */
-static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu);
+static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc);
 
 /*
  * emu_pm_0 — 0000_100d_00mm_mrrr: `S,x:ea  x0,D` or
@@ -3031,7 +3075,8 @@ static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu);
  *   x23 = save_accu (limited 24-bit A/B value)
  *   x24 = save_xy0  (24-bit X0 or Y0 raw register value)
  */
-static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t memspace = (inst >> 15) & 1;
     uint32_t numreg   = (inst >> 16) & 1;   /* 0 = A, 1 = B */
@@ -3040,7 +3085,8 @@ static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
     int xy0_reg = (memspace == 0) ? DSP_REG_X0 : DSP_REG_Y0;
 
     /* addr into x22 (retour irrelevant for pm_0; it never uses imm form) */
-    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/false);
+    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/false,
+                        dsp, pc);
 
     /* save_accu = A/B (limited, through pm_read_accu24) */
     emit_pm_read_reg(e, dsp_ab, /*value_reg=*/23);
@@ -3081,7 +3127,8 @@ static void emit_parmove_pm0(ArmEmit *e, uint32_t inst, emu_func_t alu)
  *   x23 = save_1 (reg or mem content)
  *   x24 = save_2 (always from A/B via pm_read_accu24)
  */
-static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t value6   = (inst >> 8) & 0x3f;
     uint32_t memspace = (inst >> 14) & 1;
@@ -3110,7 +3157,8 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
                              : (DSP_REG_Y0 + ((inst >> 16) & 1));
 
     /* xy_addr into x22 with retour support (for the immediate-in-D1 form). */
-    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/true);
+    emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22, /*want_retour=*/true,
+                        dsp, pc);
 
     if (write_d) {
         /* save_1 = (retour ? xy_addr : memory[xy_addr]) */
@@ -3165,7 +3213,8 @@ static void emit_parmove_pm1(ArmEmit *e, uint32_t inst, emu_func_t alu)
 }
 
 /* Forward: we call emit_parmove_pm5 from emit_parmove_pm4. */
-static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu);
+static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc);
 
 /*
  * emu_pm_4 — 0100_l0ll_wXaa_aaaa / 01dd_Xddd_wXmm_mrrr.
@@ -3180,7 +3229,8 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu);
  * BLR overhead is acceptable vs the ~300 extra lines of ARM64
  * translation that a full inline would need.
  */
-static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     if ((inst & 0xf40000u) == 0x400000u) {
         /* pm_4x (long-accu l:ea). Full helper BLR — the helper
@@ -3194,7 +3244,7 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
         emit_blr(e, /*rn=*/1);
         return;
     }
-    emit_parmove_pm5(e, inst, alu);
+    emit_parmove_pm5(e, inst, alu, dsp, pc);
 }
 
 /*
@@ -3217,7 +3267,8 @@ static void emit_parmove_pm4(ArmEmit *e, uint32_t inst, emu_func_t alu)
  *   x24 = save_reg1
  *   x25 = save_reg2
  */
-static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t ea1 = (inst >> 8) & 0x1f;
     if ((ea1 >> 3) == 0) {
@@ -3254,8 +3305,10 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
     /* Address computations — pm_8 never uses the retour flag
      * (both ea1 and ea2 always have their top bit forced on, so
      * they never select mode-6 absolute-immediate). */
-    emit_calc_ea_inline(e, ea1, /*out_addr_reg=*/22, /*want_retour=*/false);
-    emit_calc_ea_inline(e, ea2, /*out_addr_reg=*/23, /*want_retour=*/false);
+    emit_calc_ea_inline(e, ea1, /*out_addr_reg=*/22, /*want_retour=*/false,
+                        dsp, pc);
+    emit_calc_ea_inline(e, ea2, /*out_addr_reg=*/23, /*want_retour=*/false,
+                        dsp, pc);
 
     /* Fetch save_reg1. */
     if (write_d1) {
@@ -3316,8 +3369,10 @@ static void emit_parmove_pm8(ArmEmit *e, uint32_t inst, emu_func_t alu)
  * All four decode entirely at translate time — we pick one inline
  * expansion per instruction.
  */
-static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                               dsp_core_t *dsp, uint32_t pc)
 {
+    (void)dsp; (void)pc;  /* no calc_ea in pm_2_2 */
     /* 0010 00ee eeed dddd S,D (reg-reg) */
     int srcreg = (int)((inst >> 13) & 0x1f);
     int dstreg = (int)((inst >> 8)  & 0x1f);
@@ -3331,7 +3386,8 @@ static void emit_parmove_pm2_2(ArmEmit *e, uint32_t inst, emu_func_t alu)
     emit_pm_write_reg(e, dstreg, /*value_reg=*/23, /*mask_to_width=*/true);
 }
 
-static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     if ((inst & 0xffff00u) == 0x200000u) {
         /* NOP parmove — ALU only. */
@@ -3345,18 +3401,18 @@ static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
          * (interpreter passes &dummy). */
         uint32_t ea_mode = (inst >> 8) & 0x1f;
         emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
-                            /*want_retour=*/false);
+                            /*want_retour=*/false, dsp, pc);
         emit_alu_call(e, (uint8_t)(inst & 0xff), alu);
         return;
     }
 
     if ((inst & 0xfc0000u) == 0x200000u) {
-        emit_parmove_pm2_2(e, inst, alu);
+        emit_parmove_pm2_2(e, inst, alu, dsp, pc);
         return;
     }
 
     /* Fall-through to pm_3 (literal-to-reg). */
-    emit_parmove_pm3(e, inst, alu);
+    emit_parmove_pm3(e, inst, alu, dsp, pc);
 }
 
 /*
@@ -3371,8 +3427,10 @@ static void emit_parmove_pm2(ArmEmit *e, uint32_t inst, emu_func_t alu)
  * write (interpreter order). For emu_move (opcode 0x00, no-op ALU)
  * the caller is expected to pass a NULL alu and we skip the BLR.
  */
-static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
+    (void)dsp; (void)pc;  /* no calc_ea in pm_3 */
     uint32_t dstreg   = (inst >> 16) & 0x1f;
     uint32_t srcvalue = (inst >> 8)  & 0xff;
 
@@ -3412,7 +3470,8 @@ static void emit_parmove_pm3(ArmEmit *e, uint32_t inst, emu_func_t alu)
  *                  path, addr is used immediately before ALU)
  *   x23 = value (source register value / loaded memory value)
  */
-static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
+static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu,
+                             dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t value6   = (inst >> 8) & 0x3f;
     uint32_t memspace = (inst >> 19) & 1;
@@ -3439,7 +3498,7 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu)
         emit_mov_imm32(e, /*rd=*/22, value6);
     } else {
         emit_calc_ea_inline(e, value6, /*out_addr_reg=*/22,
-                            /*want_retour=*/true);
+                            /*want_retour=*/true, dsp, pc);
     }
 
     if (write_d) {
@@ -3806,7 +3865,8 @@ static uint32_t parmove_write_set(uint32_t inst)
 static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
                               uint32_t inst, emu_func_t alu,
                               uint32_t expected_next_pc,
-                              uint32_t *out_write_set)
+                              uint32_t *out_write_set,
+                              dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t select = (inst >> 20) & 0xf;
 
@@ -3826,36 +3886,36 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     switch (select) {
     case 0:
         /* 0000_100d 00mm_mrrr  S,x:ea  x0,D / S,y:ea  y0,D */
-        emit_parmove_pm0(e, inst, effective_alu);
+        emit_parmove_pm0(e, inst, effective_alu, dsp, pc);
         break;
     case 1:
         /* 0001_ffdf w1mm_mrrr  — x:ea/y:ea + reg-reg dual move */
-        emit_parmove_pm1(e, inst, effective_alu);
+        emit_parmove_pm1(e, inst, effective_alu, dsp, pc);
         break;
     case 2:
         /* 0010_XXXX XXXX_XXXX — pm_2 family (NOP / R-upd / S,D / #xx,R) */
-        emit_parmove_pm2(e, inst, effective_alu);
+        emit_parmove_pm2(e, inst, effective_alu, dsp, pc);
         break;
     case 3:
         /* 001d_dddd iiii_iiii #xx,R */
-        emit_parmove_pm3(e, inst, effective_alu);
+        emit_parmove_pm3(e, inst, effective_alu, dsp, pc);
         break;
     case 4:
         /* 0100_l0ll / 01dd_0ddd — pm_4 family (long-accu l:ea
          * or fall-through to pm_5). */
-        emit_parmove_pm4(e, inst, effective_alu);
+        emit_parmove_pm4(e, inst, effective_alu, dsp, pc);
         break;
     case 5:
     case 6:
     case 7:
         /* 01dd_Xddd w_mm_mrrr — single x:/y: move (pm_5 family) */
-        emit_parmove_pm5(e, inst, effective_alu);
+        emit_parmove_pm5(e, inst, effective_alu, dsp, pc);
         break;
     case 8:  case 9:  case 10: case 11:
     case 12: case 13: case 14: case 15:
         /* 1Xmm_eeff_WrrM_MRRR — dual x:/y: simultaneous move (pm_8).
          * This is the FIR / IIR filter kernel hot path. */
-        emit_parmove_pm8(e, inst, effective_alu);
+        emit_parmove_pm8(e, inst, effective_alu, dsp, pc);
         break;
     default:
         /* No unsupported variants remaining after Phase 4e. */
@@ -4557,21 +4617,24 @@ static void emit_cf_enddo_op(ArmEmit *e)
  * emit_cf_add_cycles here, not emit_cf_set_cycles — the latter
  * would silently discard calc_ea's side effect. Total cycle cost:
  * 4 for modes 0-4, 6 for modes 5-7. */
-static void emit_cf_jmp_ea_op(ArmEmit *e, uint32_t inst)
+static void emit_cf_jmp_ea_op(ArmEmit *e, uint32_t inst,
+                              dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t ea_mode = (inst >> 8) & 0x3f;
     /* w22 (x22) receives the 16-bit target address. */
-    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, /*want_retour=*/false);
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, /*want_retour=*/false,
+                        dsp, pc);
     emit_str_w_any(e, /*rs=*/22, /*rn=*/19, SCRATCH, OFF_PC);
     emit_str_w_any(e, /*rs=*/31, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_cf_add_cycles(e, 2);  /* +2 on top of the preset 2 */
 }
 
 /* JSR ea (emu_jsr_ea). Like jsr_imm but target from calc_ea. */
-static void emit_cf_jsr_ea_op(ArmEmit *e, uint32_t pc, uint32_t inst)
+static void emit_cf_jsr_ea_op(ArmEmit *e, uint32_t pc, uint32_t inst,
+                              dsp_core_t *dsp)
 {
     uint32_t ea_mode = (inst >> 8) & 0x3f;
-    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false);
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false, dsp, pc);
     /* Return address: pc + cur_inst_len. For jsr_ea, cur_inst_len
      * is 1 at handler entry (emu_calc_ea slow-path for mode 6 may
      * bump it; but in that case the immediate decoding happens
@@ -4618,7 +4681,8 @@ static void emit_cf_jsr_ea_op(ArmEmit *e, uint32_t pc, uint32_t inst)
 
 /* JCC ea (emu_jcc_ea). cc_code = inst[3:0] (differs from jcc_imm
  * which uses inst[15:12]). Target = calc_ea. */
-static void emit_cf_jcc_ea_op(ArmEmit *e, uint32_t inst)
+static void emit_cf_jcc_ea_op(ArmEmit *e, uint32_t inst,
+                              dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t ea_mode = (inst >> 8) & 0x3f;
     uint32_t cc_code = inst & 0xf;
@@ -4626,7 +4690,7 @@ static void emit_cf_jcc_ea_op(ArmEmit *e, uint32_t inst)
     /* Compute newpc first (calc_ea can have cycle/cur_inst_len
      * side effects for mode 6; the interp evaluates calc_ea BEFORE
      * the cc check). */
-    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false);
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false, dsp, pc);
 
     /* Now compute cc_code result → w0. */
     emit_cf_calc_cc(e, cc_code);
@@ -4649,12 +4713,13 @@ static void emit_cf_jcc_ea_op(ArmEmit *e, uint32_t inst)
 
 /* JSCC ea (emu_jscc_ea). Like jcc_ea + push(pc+cur_inst_len, SR)
  * on taken. cc_code = inst[3:0]. */
-static void emit_cf_jscc_ea_op(ArmEmit *e, uint32_t inst)
+static void emit_cf_jscc_ea_op(ArmEmit *e, uint32_t inst,
+                               dsp_core_t *dsp, uint32_t pc)
 {
     uint32_t ea_mode = (inst >> 8) & 0x3f;
     uint32_t cc_code = inst & 0xf;
 
-    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false);
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22, false, dsp, pc);
     emit_cf_calc_cc(e, cc_code);
 
     uint32_t *to_end = e->buf;
@@ -4739,7 +4804,7 @@ static void emit_cf_bittest_generic(
             /* EA: calc_ea. For modes 5-7 this BLRs the C helper,
              * which itself may adjust cur_inst_len / instr_cycle. */
             uint32_t ea_mode = (inst >> 8) & 0x3f;
-            emit_calc_ea_inline(e, ea_mode, addr_reg, false);
+            emit_calc_ea_inline(e, ea_mode, addr_reg, false, dsp, pc);
         } else {
             /* PP: peripheral (0xffffc0 + off). */
             uint32_t pp_off = (inst >> 8) & 0x3f;
@@ -4847,10 +4912,10 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     case DSP_JIT_CF_DOR_IMM:   emit_cf_dor_imm_op(e, dsp, pc, inst);  break;
     case DSP_JIT_CF_ENDDO:     emit_cf_enddo_op(e);                   break;
     /* _ea CF (calc_ea target). */
-    case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst);            break;
-    case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst);        break;
-    case DSP_JIT_CF_JCC_EA:    emit_cf_jcc_ea_op(e, inst);            break;
-    case DSP_JIT_CF_JSCC_EA:   emit_cf_jscc_ea_op(e, inst);           break;
+    case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
+    case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;
+    case DSP_JIT_CF_JCC_EA:    emit_cf_jcc_ea_op(e, inst, dsp, pc);       break;
+    case DSP_JIT_CF_JSCC_EA:   emit_cf_jscc_ea_op(e, inst, dsp, pc);      break;
     /* Bit-test absolute (jclr/jset/jsclr/jsset). */
     case DSP_JIT_CF_JCLR_AA:
         emit_cf_bittest_generic(e, dsp, pc, inst, 0, false, false, false); break;
@@ -5187,7 +5252,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
             uint32_t expected_next_pc = pc + 1;
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
-                                   &write_set)) {
+                                   &write_set, dsp, pc)) {
                 /* Variant not yet implemented: fall through to the
                  * interpreter for this op. */
                 if (num_ops == 0) {
