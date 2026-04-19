@@ -110,6 +110,20 @@ static bool g_ccr_dead_next_emit;
 static uint64_t g_alu_ccr_skipped;
 
 /*
+ * Phase 8 extended lazy-flag lookahead depth. Each translate
+ * iteration walks forward up to this many instructions past the
+ * current one, skipping over CCR-passthrough ops (parmoves with
+ * ALU=MOVE), to find a full CCR writer. A larger bound catches
+ * longer runs of pure-parmove ops between consecutive ALUs; the
+ * cost is purely translate-time (each step: classify-cf +
+ * inst_length + inst_is_full_ccr_writer / inst_is_ccr_passthrough,
+ * ~50 cycles). Bounded at 4 to keep translate time predictable —
+ * at 4 steps we already catch the common "ADD A,B  MOVE X:(R0)+
+ * MOVE Y:(R0)+  MOVE X:(R0)+  ADD A,B" shape.
+ */
+#define DSP_JIT_CCR_LF_MAX_STEPS 4
+
+/*
  * Phase 8 pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). When set,
  * translate_block emits a 10-insn runtime check after every
  * instruction's epilogue that re-packs registers[A2/A1/A0] and
@@ -4271,6 +4285,52 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
          * in opcodes_alu, never executes, irrelevant.) */
         return true;
     }
+    /*
+     * Phase 8 extended lazy-flag: RTI and ENDDO pop SR off the
+     * stack in their entirety, fully overwriting E/U/N/Z (and
+     * every other SR bit). Any prior op's CCR computation that
+     * hasn't been consumed by the time the pop runs is therefore
+     * dead. These are looked up via the emu_func classifier to
+     * avoid maintaining a parallel instruction-pattern table —
+     * the helper is authoritative and classifies every inlined
+     * CF kind the JIT knows about. Unknown CF handlers fall
+     * through to DSP_JIT_CF_NONE and we conservatively return
+     * false (the CCR write is kept).
+     */
+    emu_func_t emu = dsp_jit_helper_lookup_emu(inst);
+    if (emu) {
+        int cf_kind = dsp_jit_helper_classify_cf((void *)emu);
+        if (cf_kind == DSP_JIT_CF_RTI || cf_kind == DSP_JIT_CF_ENDDO) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Phase 8 extended lazy-flag: is `inst` a "CCR passthrough"? I.e.,
+ * running it neither reads nor writes any of SR.E / SR.U / SR.N /
+ * SR.Z, so the *previous* op's CCR value persists unchanged and
+ * can still be overwritten by a later full writer before any
+ * consumer reads it.
+ *
+ * Current (safe) set: parmoves whose ALU byte is ALU_KIND_MOVE
+ * (the pure parmove — no ALU kernel runs, no SR manipulation
+ * beyond the pm_read_accu24 scaling path which reads S0/S1 but
+ * never E/U/N/Z). Everything else is conservatively non-
+ * passthrough: TFR / LSL / LSR / ROL / ROR write N and/or Z
+ * (partial overwrite, not transparent), and most non-parallel
+ * ops either read CCR (conditional branches) or have side
+ * effects the lookahead can't cheaply reason about.
+ */
+static bool inst_is_ccr_passthrough(uint32_t inst)
+{
+    if (inst >= 0x100000u) {
+        uint8_t alu_op = (uint8_t)(inst & 0xff);
+        AluVariant v;
+        alu_classify_opcode(alu_op, &v);
+        return v.kind == ALU_KIND_MOVE;
+    }
     return false;
 }
 
@@ -7204,16 +7264,28 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             uint32_t inst_len = dsp_jit_helper_inst_length(inst);
             uint32_t expected_next_pc = pc + inst_len;
 
-            /* Phase 8 lazy-flag lookahead. If the next op fully
-             * overwrites ccr, this parmove's ccr call is dead.
-             * The flag is one-shot and cleared at the top of each
-             * iter, so a false-positive for a non-ccr-emitting
-             * op is harmless. */
+            /* Phase 8 extended lazy-flag lookahead. Walk forward
+             * up to DSP_JIT_CCR_LF_MAX_STEPS ops, skipping over
+             * passthrough parmoves (ALU=MOVE, neither reads nor
+             * writes E/U/N/Z). If we hit a full CCR writer before
+             * hitting any unknown / reader / block-boundary, this
+             * parmove's ccr call is dead. Flag is one-shot and
+             * cleared at the top of each iter. */
             uint32_t next_pc_lf = pc + inst_len;
-            if (num_ops + 1 < DSP_JIT_MAX_OPS_PER_BLOCK &&
-                next_pc_lf < DSP_PRAM_SIZE &&
-                inst_is_full_ccr_writer(dsp->pram[next_pc_lf])) {
-                g_ccr_dead_next_emit = true;
+            int lf_step = 0;
+            while (lf_step < DSP_JIT_CCR_LF_MAX_STEPS &&
+                   num_ops + 1 + lf_step < DSP_JIT_MAX_OPS_PER_BLOCK &&
+                   next_pc_lf < DSP_PRAM_SIZE) {
+                uint32_t look_inst = dsp->pram[next_pc_lf];
+                if (inst_is_full_ccr_writer(look_inst)) {
+                    g_ccr_dead_next_emit = true;
+                    break;
+                }
+                if (!inst_is_ccr_passthrough(look_inst)) {
+                    break;   /* potential reader / partial writer */
+                }
+                next_pc_lf += dsp_jit_helper_inst_length(look_inst);
+                lf_step++;
             }
 
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
@@ -7248,16 +7320,27 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             bool is_term = dsp_jit_helper_is_terminator((void *)emu);
             uint32_t expected_next_pc = pc + inst_len;
 
-            /* Phase 8 lazy-flag lookahead for non-parmove ops.
-             * The flag is consumed only by emit_ccr_e_u_n_z inside
-             * inline ALU kernels; non-ALU ops (CF / misc) simply
-             * don't consume it and the per-iter reset clears it
-             * before the next op. Safe to set unconditionally. */
+            /* Phase 8 extended lazy-flag lookahead for non-parmove
+             * ops. Same walk-through-passthrough semantics as the
+             * parmove path above; see that comment for invariants.
+             * Flag is consumed by emit_ccr_e_u_n_z only (no-op
+             * consumption for CF / misc ops — per-iter reset
+             * clears it regardless). */
             uint32_t next_pc_lf2 = pc + inst_len;
-            if (num_ops + 1 < DSP_JIT_MAX_OPS_PER_BLOCK &&
-                next_pc_lf2 < DSP_PRAM_SIZE &&
-                inst_is_full_ccr_writer(dsp->pram[next_pc_lf2])) {
-                g_ccr_dead_next_emit = true;
+            int lf_step2 = 0;
+            while (lf_step2 < DSP_JIT_CCR_LF_MAX_STEPS &&
+                   num_ops + 1 + lf_step2 < DSP_JIT_MAX_OPS_PER_BLOCK &&
+                   next_pc_lf2 < DSP_PRAM_SIZE) {
+                uint32_t look_inst = dsp->pram[next_pc_lf2];
+                if (inst_is_full_ccr_writer(look_inst)) {
+                    g_ccr_dead_next_emit = true;
+                    break;
+                }
+                if (!inst_is_ccr_passthrough(look_inst)) {
+                    break;
+                }
+                next_pc_lf2 += dsp_jit_helper_inst_length(look_inst);
+                lf_step2++;
             }
 
             /*
