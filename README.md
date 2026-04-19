@@ -335,9 +335,49 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   cutting the DIFF validator's compare region for every pm_5
   short-absolute write.
 
-  Static block chaining (direct `B <target.entry>` patch on
-  known branch targets) stays deferred — the entry-split
-  prologue refactor it depends on is scoped separately.
+  Phase 5b / 5c — static block chaining — landed. Each
+  translated block exposes a post-prologue `chain_entry` label
+  (the same prologue that's emitted at the block's normal entry,
+  just skipped when jumping directly from another already-
+  running block since its own prologue has already pushed the
+  callee-saved frame). When a source block's last op is a
+  chainable terminator (BRA / JMP imm-or-long, or the taken
+  path of BCC / JCC / JSCC imm-or-long) with a statically-known
+  target that's already translated, the source's epilogue
+  emits a direct `B target->chain_entry` in place of the
+  fall-through to the shared exit (the return-to-dispatcher
+  path). Hot inner loops stay inside JIT code across
+  iterations — no dispatcher round-trip per loop back-edge.
+  Up to `DSP_JIT_MAX_INCOMING_CHAINS = 8` incoming chainers
+  per target block. On invalidation (self-mod P-space write,
+  cache flush), incoming chain sites are re-patched to their
+  source blocks' `shared_exit` so the source exits cleanly
+  instead of jumping into stale code; a `generation` counter
+  per block makes stale chain-site pointers safely skippable
+  across cascading invalidations. Chaining is disabled in
+  `XEMU_DSP_JIT_DIFF` mode since the diff harness relies on
+  one block per dispatcher call for its pre/post snapshots.
+
+  Phase 8 partial — lazy-flag elimination. Each inlined ALU
+  kernel ends with `emit_ccr_e_u_n_z` to compute SR.E /
+  SR.U / SR.N / SR.Z from the new accumulator. The translator
+  now peeks one op ahead in the block: if the next op is a
+  "full ccr writer" (another ALU op that unconditionally
+  overwrites all four bits), the current op's ccr call is
+  dead code and `emit_ccr_e_u_n_z` short-circuits via a
+  one-shot flag — saving ~25 ARM64 insns per skipped op on
+  both the emit side and at run time. Skip count reported
+  as `alu_ccr_skipped` in stats.
+
+  Remaining Phase 8 work deferred to future sessions:
+  ARM64 register pinning for A / B / X0 / X1 / Y0 / Y1
+  (eliminates per-op load/store trip through `dsp->registers[]`
+  — requires rewriting every inline ALU + parmove emitter);
+  parmove+ALU fusion (folding the parmove stub's "load → BLR
+  ALU → store" pattern into a direct register-allocation plan
+  when operands overlap — the FIR-kernel hot path); and
+  cc_op shadow tracking (granular per-flag liveness beyond
+  the current all-or-nothing ccr elision).
 
   Round-4's two over-reaching experiments were DROPPED
   permanently: (a) skipping the `dsp->cur_inst` preset for

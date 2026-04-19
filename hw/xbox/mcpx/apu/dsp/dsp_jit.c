@@ -102,6 +102,14 @@ static uint32_t g_jit_sentinel;
 static uint32_t g_jit_force;
 
 /*
+ * Phase 8 lazy-flag globals. Defined here (before emit_ccr_e_u_n_z)
+ * so the emitter can see them. Set by translate_block's one-step
+ * lookahead; consumed by emit_ccr_e_u_n_z's fast-return path.
+ */
+static bool g_ccr_dead_next_emit;
+static uint64_t g_alu_ccr_skipped;
+
+/*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
  * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
  * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
@@ -975,7 +983,32 @@ typedef void (*dsp_jit_entry_fn)(dsp_core_t *dsp);
 #define DSP_JIT_WS_PERIPH     (1u << 4)
 #define DSP_JIT_WS_ALL        0x1fu
 
-typedef struct DspJitBlock {
+/* Per-block maximum incoming chain sites (other blocks whose final
+ * op is a chainable terminator whose target is this block). 8 is
+ * plenty in practice: most hot loops have 1-2 callers. Blocks at
+ * the limit fall back to unchained exits (return to dispatcher).
+ * Sizing: 8 * 24 bytes = 192 bytes per block * 4096 blocks ≈ 768 KB. */
+#define DSP_JIT_MAX_INCOMING_CHAINS 8
+
+typedef struct DspJitBlock DspJitBlock;
+
+typedef struct DspJitIncomingChain {
+    /* Address of the B instruction inside the source block's code
+     * region. When this block is invalidated, we re-patch the
+     * instruction to branch back to `source->shared_exit` (so the
+     * source block exits cleanly to the dispatcher instead of
+     * falling through into our stale code). */
+    uint32_t *site;
+    /* Source block that owns the B site. */
+    DspJitBlock *source;
+    /* source->generation at chain time. If source has been
+     * invalidated and re-translated since, its code region has
+     * been reused and the site pointer is stale — skip the
+     * unpatch (the new translation doesn't reference us). */
+    uint32_t source_generation;
+} DspJitIncomingChain;
+
+struct DspJitBlock {
     uint32_t pc_start;
     uint32_t pc_end;           /* exclusive — last covered PC + cur_inst_len */
     dsp_jit_entry_fn entry;    /* pointer into code buffer */
@@ -999,10 +1032,51 @@ typedef struct DspJitBlock {
      * for a block — harmless.
      */
     uint8_t  diff_checked;
+
+    /* ---------- Static block chaining (Phase 5b/5c) ----------
+     *
+     * When a block ends with a chainable terminator (unconditional
+     * BRA/JMP with statically-known target, conditional branch's
+     * taken path), and the target block is already translated in
+     * the cache, the source block's last-op epilogue emits a
+     * direct B to target->chain_entry instead of returning to the
+     * dispatcher. This saves one dispatcher round-trip (cache
+     * lookup + call overhead) per chained branch, and — more
+     * importantly — lets tight inner loops stay entirely inside
+     * JIT code across iterations.
+     *
+     * `chain_entry` is the post-prologue entry point: the source
+     * block has already saved callee-saved regs + set x19=dsp +
+     * set x20/x21=helper pointers in its own prologue, so the
+     * target can skip its own prologue and jump straight to its
+     * first op's stub. When the target's own last op runs and
+     * reaches its shared_exit, the saved state popped belongs to
+     * the ORIGINAL source block's prologue push — stack stays
+     * balanced because both blocks push/pop the same 4 STP pairs.
+     *
+     * `shared_exit` is this block's epilogue label — the "return
+     * to dispatcher" target. Used by incoming chainers when they
+     * need to unpatch their B sites (because this block was
+     * invalidated and its code region is about to become stale).
+     *
+     * `generation` increments on every translation / invalidation
+     * so stale chain-site pointers (into dead code regions from
+     * previous incarnations) can be detected and skipped.
+     *
+     * Chaining is disabled entirely in XEMU_DSP_JIT_DIFF mode —
+     * the diff harness assumes one block per dispatcher call for
+     * its pre/post snapshot semantics.
+     */
+    uint32_t *chain_entry;
+    uint32_t *shared_exit;
+    uint32_t  generation;
+    uint32_t  num_incoming_chains;
+    DspJitIncomingChain incoming_chains[DSP_JIT_MAX_INCOMING_CHAINS];
+
     /* Blocks are slotted 1-per-PC into DspJitState.blocks[]. No
      * explicit free list — eviction goes through dsp_jit_invalidate
      * (per-block) or dsp_jit_invalidate_all (cache flush). */
-} DspJitBlock;
+};
 
 /* --------------------------------------------------------------- *
  * Differential validator (DIFF mode)
@@ -1979,6 +2053,18 @@ G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
  */
 static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
 {
+    /* Phase 8 lazy-flag one-shot. translate_block sets this to
+     * true when the NEXT op will be a full ccr writer; we consume
+     * the flag and emit NOTHING, saving ~25 ARM64 insns per
+     * skipped op on the emit side AND the corresponding cycles
+     * at run time. Flag is cleared on consume so the next op's
+     * ccr call (if live) executes normally. */
+    if (g_ccr_dead_next_emit) {
+        g_ccr_dead_next_emit = false;
+        g_alu_ccr_skipped++;
+        return;
+    }
+
     /* Extract A2 / A1 / A0 from the 64-bit xaccu. */
     emit_ubfx_x(e, /*rd=*/1, /*rn=*/xaccu, 48, 8);   /* w1 = A2 */
     emit_ubfx_x(e, /*rd=*/2, /*rn=*/xaccu, 24, 24);  /* w2 = A1 */
@@ -3577,6 +3663,82 @@ static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
  * --------------------------------------------------------------- */
 static uint64_t g_alu_inlined_count;
 static uint64_t g_alu_fallback_count;
+
+/*
+ * Lazy-flag elimination (Phase 8 subset).
+ *
+ * Each inlined ALU kernel ends with `emit_ccr_e_u_n_z(e, xaccu)` to
+ * update SR.E / SR.U / SR.N / SR.Z based on the new accumulator
+ * value. When the NEXT op in the block is itself a "full ccr
+ * writer" (another ALU op that unconditionally overwrites all four
+ * bits), the current op's ccr computation is dead code — its bits
+ * will be overwritten before any consumer (conditional branch /
+ * bit test / tcc) can read them.
+ *
+ * Rather than plumb a `skip_ccr` parameter through the 11 inlined
+ * ALU emitters + classify / dispatch layers, we use a one-shot
+ * flag (g_ccr_dead_next_emit, defined above) checked at the start
+ * of emit_ccr_e_u_n_z. translate_block's per-iter reset +
+ * one-step lookahead populates it; emit_ccr_e_u_n_z consumes it.
+ * See `inst_is_full_ccr_writer` below for the "full writer"
+ * classification that drives the lookahead.
+ */
+
+/*
+ * Is `inst` a "full ccr writer"? I.e., does executing it call
+ * emu_ccr_update_e_u_n_z (or the inline equivalent) and
+ * unconditionally overwrite all four of SR.E / SR.U / SR.N /
+ * SR.Z, making a previous op's ccr output dead?
+ *
+ *   — Parmoves (inst >= 0x100000): yes, IF the ALU byte (inst[7:0])
+ *     picks a ccr-writing ALU kernel. emu_move / emu_tfr_* /
+ *     emu_lsl_* / emu_lsr_* / emu_rol_* / emu_ror_* write N/Z or
+ *     C only — they do NOT fully overwrite E/U. Treat them as
+ *     non-writers. Everything else (add/sub/cmp/cmpm/tst/clr/neg/
+ *     abs/and/or/eor/not/asl/asr/addl/subl/addr/subr/adc/sbc/rnd/
+ *     mac/mpy variants) is a full writer.
+ *
+ *   — Long-imm ALU ((inst & 0xFFFFF0) == 0x0140C0): add_long,
+ *     sub_long, cmp_long, and_long, or_long all call the inlined
+ *     helper. Full writer.
+ *
+ *   — Everything else (CF, misc non-parallel ops, movec / movep /
+ *     movem, andi / ori / lua / rep / do): conservatively NOT
+ *     writers — they don't call emu_ccr_update_e_u_n_z at all or
+ *     manipulate SR without rewriting all four bits unconditionally.
+ *
+ * Conservative returns (false) on unknown cases — we never falsely
+ * elide a live ccr call.
+ */
+static bool inst_is_full_ccr_writer(uint32_t inst)
+{
+    if (inst >= 0x100000u) {
+        uint8_t alu_op = (uint8_t)(inst & 0xff);
+        AluVariant v;
+        alu_classify_opcode(alu_op, &v);
+        switch (v.kind) {
+        case ALU_KIND_MOVE:
+        case ALU_KIND_TFR:
+        case ALU_KIND_LSL:
+        case ALU_KIND_LSR:
+        case ALU_KIND_ROL:
+        case ALU_KIND_ROR:
+        case ALU_KIND_FALLBACK:
+            /* Fallback (MAX) doesn't call ccr_update — interp's
+             * emu_max clears / sets only SR.C. */
+            return false;
+        default:
+            return true;
+        }
+    }
+    if ((inst & 0xFFFFF0u) == 0x0140C0u) {
+        /* Long-imm ALU: add_long / sub_long / cmp_long / and_long /
+         * or_long — all write full ccr. (eor_long is NULL-handler
+         * in opcodes_alu, never executes, irrelevant.) */
+        return true;
+    }
+    return false;
+}
 
 /*
  * Dispatch: emit the appropriate inline ALU kernel. Returns true
@@ -6031,6 +6193,208 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
  *   x0-x2 — ABI-scratch work registers
  */
 
+/* --------------------------------------------------------------- *
+ * Static block chaining (Phase 5b / 5c)
+ *
+ * A "chainable terminator" is a CF op whose target pc is known at
+ * translate time:
+ *
+ *   BRA #xxx        — 9-bit signed PC-rel, target = pc + offset
+ *   BRA xxxx        — 2-word, target = pc + pram[pc+1]
+ *   JMP #xxxxxx     — 12-bit absolute, target = inst[11:0]
+ *
+ * (Phase 5c could add the taken-path of JCC / BCC / JSCC — a
+ * per-block conditional chain dispatch — but that requires
+ * splitting the epilogue's PC-mismatch check which is a bigger
+ * refactor than 5b covers.)
+ *
+ * When the target block for such a terminator is already
+ * translated AND not invalidated AND diff mode is off, we emit a
+ * direct B to target->chain_entry in place of the shared-exit
+ * fall-through at the end of the source block. The chain site
+ * gets registered in target->incoming_chains so we can un-patch
+ * it on target invalidation. The source block's own generation
+ * counter is stamped at registration time; if the source is
+ * itself re-translated before target invalidates, the stamp won't
+ * match and we skip the un-patch (the site pointer is stale).
+ *
+ * The chain B instruction is a single 26-bit-immediate B (±128 MB
+ * range; our code buffer is 8 MB so well within range). No
+ * trampoline needed.
+ * --------------------------------------------------------------- */
+
+/*
+ * Emit a B instruction at *e->buf pointing at `target_code`.
+ * Returns the address of the emitted instruction for later
+ * patching. Caller is responsible for being on a writable JIT
+ * page (qemu_thread_jit_write() has been called).
+ */
+static uint32_t *emit_b_absolute(ArmEmit *e, uint32_t *target_code)
+{
+    uint32_t *site = e->buf;
+    int32_t off_bytes = (int32_t)((uint8_t *)target_code - (uint8_t *)site);
+    emit_b(e, off_bytes);
+    return site;
+}
+
+/*
+ * Register that the B instruction at `site` is a chain branch
+ * whose source is `source_block` and whose target is `target`.
+ * Returns true if registration succeeded; false if target's
+ * incoming-chain list is full (caller should not emit chain;
+ * fall back to the normal epilogue exit).
+ */
+static bool chain_register_incoming(DspJitBlock *target,
+                                    DspJitBlock *source,
+                                    uint32_t *site)
+{
+    if (target->num_incoming_chains >= DSP_JIT_MAX_INCOMING_CHAINS) {
+        return false;
+    }
+    DspJitIncomingChain *slot =
+        &target->incoming_chains[target->num_incoming_chains++];
+    slot->site = site;
+    slot->source = source;
+    slot->source_generation = source->generation;
+    return true;
+}
+
+/*
+ * Re-patch a B instruction at `site` to branch to `new_target_code`.
+ * The B encoding is: 0x14000000 | imm26, where imm26 = (target -
+ * site) >> 2 masked to 26 bits.
+ */
+static void chain_repatch_b(uint32_t *site, uint32_t *new_target_code)
+{
+    int32_t off_bytes = (int32_t)((uint8_t *)new_target_code -
+                                  (uint8_t *)site);
+    int32_t imm26 = off_bytes >> 2;
+    /* 26-bit signed range check. */
+    assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
+    uint32_t insn = 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
+    *site = insn;
+}
+
+/*
+ * Walk `target`'s incoming chain-site list and re-route each still-
+ * live site to its source block's shared_exit. Called from
+ * dsp_jit_invalidate right before target->entry is cleared.
+ *
+ * Generational check: if source has been re-translated since the
+ * chain was registered (source->generation != stamped), the site
+ * pointer is stale (points into code that has been overwritten or
+ * will be) and we MUST NOT write to it — skip.
+ *
+ * The writes go into the JIT code buffer; caller must have
+ * qemu_thread_jit_write() in effect.
+ */
+static void chain_unpatch_incoming(DspJitBlock *target)
+{
+    for (uint32_t i = 0; i < target->num_incoming_chains; i++) {
+        DspJitIncomingChain *c = &target->incoming_chains[i];
+        if (c->source->generation != c->source_generation) {
+            continue;                            /* stale — skip */
+        }
+        if (!c->source->shared_exit) {
+            continue;                            /* defensive */
+        }
+        chain_repatch_b(c->site, c->source->shared_exit);
+    }
+    target->num_incoming_chains = 0;
+}
+
+/*
+ * Decide at translate time whether a chainable terminator op should
+ * emit a direct chain branch to its target. Returns the target block
+ * if chaining is viable, NULL otherwise. Target pc is computed from
+ * inst bits for the three supported chainable handlers, identified
+ * via the CF classifier (so we don't need direct access to the
+ * file-static emu_* symbols in dsp_emu.c.inc).
+ */
+static DspJitBlock *chain_target_for_terminator(DspJitState *s,
+                                                int cf_kind,
+                                                dsp_core_t *dsp,
+                                                uint32_t pc,
+                                                uint32_t inst,
+                                                uint32_t *out_target_pc)
+{
+    if (dsp_jit_diff_enabled()) {
+        /* Diff mode: one block per dispatcher call is required for
+         * the pre/post snapshot semantics. */
+        return NULL;
+    }
+
+    uint32_t target_pc;
+    switch (cf_kind) {
+    /* --- Unconditional branches (Phase 5b) ---
+     * Single-target chains. target_pc is always reached if the
+     * op executes. */
+    case DSP_JIT_CF_BRA_IMM: {
+        /* 9-bit signed PC-rel, same decode as emit_cf_bra_imm_op. */
+        int32_t off = cf_decode_signed_9(inst);
+        target_pc = ((int32_t)pc + off) & 0xffffff;
+        break;
+    }
+    case DSP_JIT_CF_BRA_LONG: {
+        uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+        target_pc = (pc + xxxx) & 0xffffff;
+        break;
+    }
+    case DSP_JIT_CF_JMP_IMM:
+        target_pc = inst & 0xfff;
+        break;
+    /* --- Conditional branches (Phase 5c) ---
+     * Chain only the TAKEN target. By passing target_pc as
+     * expected_next_pc to the epilogue, the PC-mismatch check
+     * passes on the taken branch (pc == target) and the chain B
+     * is reached; on the not-taken branch pc diverges from target
+     * and the check fires, routing to the shared exit. Not-taken
+     * target chaining would require dual-path chain dispatch
+     * (deferred — the common hot case is loop-back-if-cc-true,
+     * which is the taken path). */
+    case DSP_JIT_CF_JCC_IMM:
+    case DSP_JIT_CF_JSCC_IMM:
+        /* 12-bit absolute, cc_code in inst[15:12] (not relevant
+         * for target computation). */
+        target_pc = inst & 0xfff;
+        break;
+    case DSP_JIT_CF_BCC_IMM: {
+        /* 9-bit signed PC-rel (bcc_imm decodes identically to
+         * bra_imm for the offset). */
+        int32_t off = cf_decode_signed_9(inst);
+        target_pc = ((int32_t)pc + off) & 0xffffff;
+        break;
+    }
+    case DSP_JIT_CF_BCC_LONG: {
+        uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+        target_pc = (pc + xxxx) & 0xffffff;
+        break;
+    }
+    default:
+        return NULL;
+    }
+
+    if (target_pc >= DSP_PRAM_SIZE) {
+        return NULL;
+    }
+    DspJitBlock *target = s->pc_to_block[target_pc];
+    if (!target || !target->entry || !target->chain_entry) {
+        /* Not translated yet (or invalidated). We could retro-chain
+         * when target gets translated later, but that needs a
+         * pending-chain pool — out of scope for this pass. */
+        return NULL;
+    }
+    if (target->pc_start != target_pc) {
+        /* Target pc falls inside another block (not at its start).
+         * Chaining to a mid-block point would require a dedicated
+         * entry there — skip. */
+        return NULL;
+    }
+
+    *out_target_pc = target_pc;
+    return target;
+}
+
 /*
  * Emit the shared exit label + epilogue. Restores every callee-saved
  * register pushed by the prologue and returns.
@@ -6105,14 +6469,22 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                                     uint32_t pc_start)
 {
     /* If any existing block covers pc_start, invalidate it first so we
-     * never have two translated blocks with overlapping PC ranges. */
+     * never have two translated blocks with overlapping PC ranges. The
+     * old block may have incoming chain sites from other blocks; route
+     * them back to their respective source blocks' shared_exit paths
+     * before we evict, so the sources don't jump into stale code. */
     if (s->pc_to_block[pc_start]) {
         DspJitBlock *old = s->pc_to_block[pc_start];
+        qemu_thread_jit_write();
+        chain_unpatch_incoming(old);
         for (uint32_t p = old->pc_start; p < old->pc_end && p < DSP_PRAM_SIZE; p++) {
             s->pc_to_block[p] = NULL;
         }
         old->entry = NULL;
+        old->chain_entry = NULL;
+        old->shared_exit = NULL;
         old->num_ops = 0;
+        old->generation++;      /* stale-stamp any still-live incoming */
     }
 
     /* If the code buffer is near-full, flush the cache.
@@ -6138,12 +6510,32 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
     emit_prologue(&e);
 
+    /* Record the post-prologue entry point for incoming chain sites
+     * from other blocks. Chain branches land here (skipping the
+     * prologue) because the caller's own prologue has already set
+     * up x19 = dsp, x20/x21 = helper ptrs, and pushed the frame. */
+    uint32_t *chain_entry_ptr = e.buf;
+
     ExitPatchList exits = { .count = 0 };
 
     uint32_t pc = pc_start;
     uint32_t pc_end = pc_start;
     int num_ops = 0;
     uint32_t write_set = 0;
+
+    /* If the last op is a chainable terminator whose target is
+     * already translated, we'll emit a direct chain branch to that
+     * target's chain_entry in place of the fall-through to the
+     * shared exit. Tracked so we can register the site with the
+     * target after emit_epilogue (when we know this block's
+     * shared_exit for the source->unchain path). */
+    DspJitBlock *pending_chain_target = NULL;
+    uint32_t *pending_chain_site = NULL;
+
+    /* Lazy-flag one-shot is per-op. Always start each translation
+     * with a clear flag so a leftover state from a previous
+     * translate_block call can't affect this one. */
+    g_ccr_dead_next_emit = false;
 
     while (num_ops < DSP_JIT_MAX_OPS_PER_BLOCK && pc < DSP_PRAM_SIZE) {
         /*
@@ -6161,6 +6553,11 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
          */
         uint32_t inst = dsp->pram[pc];
         bool keep_going;
+
+        /* Reset the lazy-flag flag for each iter. It will be set
+         * below if lookahead shows the next op will overwrite the
+         * ccr bits this op is about to compute. */
+        g_ccr_dead_next_emit = false;
 
         if (inst >= 0x100000) {
             /* Parallel-move-bearing instruction (Phase 4). */
@@ -6183,6 +6580,19 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
              * showed 9.75% mismatch rate before this was fixed). */
             uint32_t inst_len = dsp_jit_helper_inst_length(inst);
             uint32_t expected_next_pc = pc + inst_len;
+
+            /* Phase 8 lazy-flag lookahead. If the next op fully
+             * overwrites ccr, this parmove's ccr call is dead.
+             * The flag is one-shot and cleared at the top of each
+             * iter, so a false-positive for a non-ccr-emitting
+             * op is harmless. */
+            uint32_t next_pc_lf = pc + inst_len;
+            if (num_ops + 1 < DSP_JIT_MAX_OPS_PER_BLOCK &&
+                next_pc_lf < DSP_PRAM_SIZE &&
+                inst_is_full_ccr_writer(dsp->pram[next_pc_lf])) {
+                g_ccr_dead_next_emit = true;
+            }
+
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
                                    &write_set, dsp, pc)) {
                 /* Variant not yet implemented: fall through to the
@@ -6215,9 +6625,63 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             bool is_term = dsp_jit_helper_is_terminator((void *)emu);
             uint32_t expected_next_pc = pc + inst_len;
 
+            /* Phase 8 lazy-flag lookahead for non-parmove ops.
+             * The flag is consumed only by emit_ccr_e_u_n_z inside
+             * inline ALU kernels; non-ALU ops (CF / misc) simply
+             * don't consume it and the per-iter reset clears it
+             * before the next op. Safe to set unconditionally. */
+            uint32_t next_pc_lf2 = pc + inst_len;
+            if (num_ops + 1 < DSP_JIT_MAX_OPS_PER_BLOCK &&
+                next_pc_lf2 < DSP_PRAM_SIZE &&
+                inst_is_full_ccr_writer(dsp->pram[next_pc_lf2])) {
+                g_ccr_dead_next_emit = true;
+            }
+
+            /*
+             * Static block chaining (Phase 5b): if this is a
+             * chainable terminator (BRA/JMP imm/long) whose target
+             * is already translated, we'll emit a direct B to the
+             * target's chain_entry after this op's epilogue. The
+             * epilogue is told to use `target_pc` as its expected
+             * next-pc so the PC-mismatch check PASSES on the
+             * taken-branch outcome and we fall through into the
+             * chain B. Other exit paths (interrupts / loop_rep /
+             * exit-request) still reach this block's shared exit.
+             *
+             * Only fires when num_ops < max AND target != pc_start
+             * (a self-chain would infinite-loop inside the JIT
+             * without returning to the dispatcher for interrupt
+             * checks — the per-op interrupt_counter check handles
+             * that, but it's safer to let the dispatcher observe
+             * the tight self-loop).
+             */
+            if (is_term) {
+                int cf_kind = dsp_jit_helper_classify_cf((void *)emu);
+                uint32_t chain_pc = 0;
+                DspJitBlock *tgt = chain_target_for_terminator(
+                    s, cf_kind, dsp, pc, inst, &chain_pc);
+                if (tgt && chain_pc != pc_start) {
+                    /* Swap expected_next_pc so the PC check passes on
+                     * the taken path (pc == chain_pc after the op)
+                     * rather than exiting to the dispatcher. */
+                    expected_next_pc = chain_pc;
+                    pending_chain_target = tgt;
+                    /* pending_chain_site is filled in below after
+                     * we know e.buf's position post-epilogue. */
+                }
+            }
+
             keep_going = emit_instruction(&e, &exits, dsp, pc, inst,
                                           inst_len, emu, expected_next_pc,
                                           is_term, &write_set);
+
+            /* If we set pending_chain_target, emit the chain B now
+             * (immediately after the op's epilogue fall-through
+             * reaches here). */
+            if (pending_chain_target) {
+                pending_chain_site = emit_b_absolute(
+                    &e, pending_chain_target->chain_entry);
+            }
 
             for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
                 s->pc_to_block[p] = &s->blocks[pc_start];
@@ -6257,10 +6721,31 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     block->entry = (dsp_jit_entry_fn)entry_ptr;
     block->num_ops = num_ops;
     block->write_set = write_set;
+    /* Chain entry + shared exit for Phase 5b chaining. Generation
+     * bumps on each fresh translation so stale incoming chain sites
+     * (from pre-invalidation incarnations) won't be patched. */
+    block->chain_entry = chain_entry_ptr;
+    block->shared_exit = exit_label;
+    block->generation++;
+    block->num_incoming_chains = 0;
     /* Fresh translation — must go through validation again. Written
      * atomically because the validator thread may read it. */
     qatomic_set(&block->diff_checked, 0);
     s->blocks_translated++;
+
+    /* If we emitted a pending chain branch, register the site with
+     * the target so it can un-patch us on target invalidation. Must
+     * happen AFTER `block` has its generation / shared_exit set
+     * (the target stamps source generation at registration). */
+    if (pending_chain_target && pending_chain_site) {
+        if (!chain_register_incoming(pending_chain_target, block,
+                                     pending_chain_site)) {
+            /* Target's incoming list is full — re-patch the chain
+             * branch to be a branch to our own shared exit, so the
+             * block exits to the dispatcher as if un-chained. */
+            chain_repatch_b(pending_chain_site, exit_label);
+        }
+    }
 
     /* Optional hex dump of the emitted ARM64 block, for offline
      * disassembly and verification. Gated to avoid noise; set
@@ -6413,6 +6898,8 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
             "  alu_inlined       = %" PRIu64
             " (%.1f%% of ALU ops)\n"
             "  alu_fallback      = %" PRIu64 "\n"
+            "  alu_ccr_skipped   = %" PRIu64
+            " (lazy-flag: dead ccr emit elided)\n"
             "  cf_inlined        = %" PRIu64
             " (%.1f%% of emitted ops)\n"
             "  cf_fallback       = %" PRIu64 "\n",
@@ -6426,6 +6913,7 @@ static void dsp_jit_print_stats(dsp_core_t *dsp)
                 100.0 * (double)g_alu_inlined_count /
                 (double)(g_alu_inlined_count + g_alu_fallback_count),
             g_alu_fallback_count,
+            g_alu_ccr_skipped,
             g_cf_inlined_count,
             (g_cf_inlined_count + g_cf_fallback_count) == 0 ? 0.0 :
                 100.0 * (double)g_cf_inlined_count /
@@ -6521,12 +7009,23 @@ void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr)
     if (!b) {
         return;
     }
+    /* Un-patch any incoming chain sites before clearing entry —
+     * they currently reference code that's about to become stale.
+     * Re-patching writes into the JIT code buffer so we need the
+     * page writable. */
+    qemu_thread_jit_write();
+    chain_unpatch_incoming(b);
+    qemu_thread_jit_execute();
+
     /* Evict all PCs covered by this block. */
     for (uint32_t p = b->pc_start; p < b->pc_end && p < DSP_PRAM_SIZE; p++) {
         s->pc_to_block[p] = NULL;
     }
     b->entry = NULL;
+    b->chain_entry = NULL;
+    b->shared_exit = NULL;
     b->num_ops = 0;
+    b->generation++;          /* stale-stamp outgoing chain sites */
     /* Clear diff_checked so any in-flight validator entry for this
      * translation (same block pointer, different entry) can't race
      * and stamp the retranslated block as "validated" later. */
@@ -6539,8 +7038,21 @@ void dsp_jit_invalidate_all(dsp_core_t *dsp)
     if (!s) {
         return;
     }
+    /*
+     * Full-cache flush. Preserve the per-block `generation`
+     * counter (stale-stamps outgoing chain sites so the re-
+     * translated blocks don't try to un-patch into recycled code)
+     * while zeroing everything else. No need to walk incoming-
+     * chain lists: the entire code buffer is being reused, so all
+     * chain sites will be overwritten.
+     */
     memset(s->pc_to_block, 0, sizeof(s->pc_to_block));
-    memset(s->blocks, 0, sizeof(s->blocks));
+    for (uint32_t i = 0; i < DSP_PRAM_SIZE; i++) {
+        DspJitBlock *b = &s->blocks[i];
+        uint32_t gen = b->generation;
+        memset(b, 0, sizeof(*b));
+        b->generation = gen + 1;
+    }
     s->code_ptr = s->code_buf;
     s->cache_flushes++;
 }
