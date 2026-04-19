@@ -101,14 +101,18 @@ void dsp_jit_helper_ccr_e_u_n_z(dsp_core_t *dsp, uint32_t reg0,
 uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed);
 
 /*
- * Phase 5 shims — expose the static emu_calc_cc + dsp_stack_push /
- * dsp_stack_pop helpers from dsp_cpu.c so the JIT's inline control-
- * flow emitters can BLR them for the conditional / subroutine ops.
+ * Phase 5 shims — expose the static dsp_stack_push / dsp_stack_pop
+ * helpers from dsp_cpu.c so the JIT's inline control-flow emitters
+ * can BLR them for the subroutine-call / return ops.
  *
  * dsp_jit_helper_stack_push wraps dsp_stack_push(dsp, pc, sr, 0) —
  * the "sshOnly = 0" form that every control-flow handler uses.
+ *
+ * Round 2 removed the emu_calc_cc shim: the 16-case cc switch is
+ * now materialised inline at translate time, since cc_code is a
+ * known bitfield of the instruction word. See emit_cf_calc_cc in
+ * dsp_jit.c.
  */
-int  dsp_jit_helper_calc_cc(dsp_core_t *dsp, uint32_t cc_code);
 void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
                                uint32_t newsr);
 void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
