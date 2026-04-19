@@ -791,65 +791,12 @@ static void process_vblank(struct xemu_console *scon)
     graphic_hw_update(scon->dcl.con);
 }
 
-/*
- * Return the vblank timer interval (ns) aligned to the host display's
- * refresh rate, capped at the guest's expected vblank cadence scaled
- * by the MetalFX frame-interpolation factor.
- *
- * Rationale: on a 120 Hz ProMotion panel with the 60 Hz hardcode, the
- * panel refreshes twice between presents so every other refresh shows
- * the same frame — visible micro-judder, especially when MetalFX is
- * producing 2x/4x interpolated frames that we otherwise wouldn't
- * display. Aligning to min(host_refresh, 60 * interp_factor) lets
- * interpolated frames actually reach the panel on 120/240 Hz displays,
- * and is a no-op on 60 Hz displays or when interpolation is off (we
- * still cap at the guest cadence so we don't redundantly resubmit the
- * same frame at 120 Hz).
- *
- * Reads g_config.display.frame_interpolation live, so toggling the
- * setting mid-session retunes on the next iteration. Re-queries
- * SDL_GetDisplayForWindow each call, so dragging the window between
- * monitors with different refresh rates also retunes automatically.
- *
- * This drives only the host-side display-update cadence. Guest-
- * visible NV2A vblank IRQs are driven by a separate timer in the
- * NV2A model and are unaffected.
- */
-static uint64_t compute_vblank_interval_ns(void)
-{
-    float host_hz = 60.0f;
-    if (m_window) {
-        const SDL_DisplayMode *dm =
-            SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(m_window));
-        if (dm && dm->refresh_rate > 0.0f) {
-            host_hz = dm->refresh_rate;
-        }
-    }
-
-    int interp_factor = 1;
-    if (g_config.display.frame_interpolation ==
-            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
-        interp_factor = 2;
-    } else if (g_config.display.frame_interpolation ==
-                   CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
-        interp_factor = 4;
-    }
-    float expected_guest_hz = 60.0f * (float)interp_factor;
-
-    float target_hz = host_hz < expected_guest_hz ? host_hz : expected_guest_hz;
-    if (target_hz < 30.0f)  target_hz = 30.0f;
-    if (target_hz > 240.0f) target_hz = 240.0f;
-
-    return (uint64_t)(1.0e9f / target_hz);
-}
-
 static void vblank_timer_callback(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
 
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     process_vblank(scon);
-    vblank_interval_ns = compute_vblank_interval_ns();
     timer_mod_ns(vblank_timer, now + vblank_interval_ns);
 }
 
@@ -864,9 +811,6 @@ static void *vblank_timer_thread(void *opaque)
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     while (!qatomic_read(&qemu_exiting)) {
-        // Retune to host refresh rate (picks up settings / monitor changes)
-        vblank_interval_ns = compute_vblank_interval_ns();
-
         // Schedule next vblank at fixed interval (absolute deadline)
         next_vblank += vblank_interval_ns;
 

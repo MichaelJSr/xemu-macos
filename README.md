@@ -194,15 +194,6 @@ fine tuning.
   seconds between the two inputs (clamped to `[1/240, 1/10]` s), per
   Apple's API contract, instead of a unitless `(index+1)/(total+1)`
   ratio. Reduces ghosting / motion-vector lag on fast pans.
-- **Host-refresh-aligned vblank cadence.** `ui/xemu.c`'s vblank timer
-  interval is no longer a 60 Hz hardcode — it's recomputed per tick
-  as `1 / min(SDL_GetCurrentDisplayMode.refresh_rate, 60 * interp_factor)`
-  (floor 30 Hz, cap 240 Hz). On a 120 Hz ProMotion panel with 2x /
-  4x MetalFX frame interpolation, interpolated frames now actually
-  reach the panel, removing the every-other-refresh judder. 60 Hz
-  panels and interp-off keep their existing 16.67 ms interval.
-  Guest-side NV2A vblank IRQs are unaffected (driven by a separate
-  NV2A-model timer).
 
 ### MCPX APU
 
@@ -309,6 +300,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Hoist `can_fifo_access` out of pfifo pusher word loop | `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, so the "lock held throughout" invariant is false. `ERROR_CALL` on game boot |
 | DSP JIT round-4 `cur_inst` preset skip | Regresses on startup with `op=0x001000` — some inlined path reads `cur_inst` at runtime that the static classifier doesn't see. Investigation harness (`XEMU_DSP_JIT_SENTINEL` / `_FORCE`) kept in-tree |
 | DSP JIT round-4 EPI_NO_PC (skip PC-mismatch check) | 9.75% mismatch rate per the pcskip sentinel — calc_ea mode 6 lengthens parmoves and REP/DO loops rewind pc; both legitimately diverge and need the check |
+| Vblank cadence aligned to host display refresh | `ui/xemu.c`'s `vblank_interval_ns` drives `process_vblank` → `graphic_hw_update` → `hw_ops->gfx_update`, which `hw/xbox/nv2a/nv2a.c:250` registers as `nv2a_vga_gfx_update` — that handler fires `NV_PCRTC_INTR_0_VBLANK`. Retuning the host-side timer retimes the guest vblank IRQ too, so 120 Hz host = 2× guest sim speed, 240 Hz = 4× (titles gate simulation on vblank count). A correct fix requires decoupling the guest vblank IRQ timer (fixed 60 Hz NTSC / 50 Hz PAL, inside the NV2A model) from the host display-present cadence — substantial NV2A-model rework, not a one-liner |
 
 ---
 
