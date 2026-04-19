@@ -173,7 +173,11 @@ enum {
     DSP_JIT_CF_REP_EA,
     DSP_JIT_CF_REP_REG,
     DSP_JIT_CF_DO_IMM,
+    DSP_JIT_CF_DO_AA,
+    DSP_JIT_CF_DO_EA,
+    DSP_JIT_CF_DO_REG,
     DSP_JIT_CF_DOR_IMM,
+    DSP_JIT_CF_DOR_REG,
     DSP_JIT_CF_ENDDO,
     /* Misc non-parallel ops. ANDI / ORI manipulate SR / OMR
      * bits in-place; LUA / LUA_REL compute Rn + offset into

@@ -1788,7 +1788,11 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_rep_ea)     return DSP_JIT_CF_REP_EA;
     if (f == emu_rep_reg)    return DSP_JIT_CF_REP_REG;
     if (f == emu_do_imm)     return DSP_JIT_CF_DO_IMM;
+    if (f == emu_do_aa)      return DSP_JIT_CF_DO_AA;
+    if (f == emu_do_ea)      return DSP_JIT_CF_DO_EA;
+    if (f == emu_do_reg)     return DSP_JIT_CF_DO_REG;
     if (f == emu_dor_imm)    return DSP_JIT_CF_DOR_IMM;
+    if (f == emu_dor_reg)    return DSP_JIT_CF_DOR_REG;
     if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
     /* Misc non-parallel (single-word, no branch). */
     if (f == emu_andi)       return DSP_JIT_CF_ANDI;

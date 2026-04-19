@@ -6001,6 +6001,192 @@ static void emit_cf_dor_imm_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
 }
 
 /*
+ * emu_do_aa (2-word). DO loop with LC loaded from X/Y memory[aa]
+ * (short-absolute 6-bit address).
+ *
+ *   push(LA, LC)
+ *   LA = pram[pc+1] & 0xffff
+ *   cur_inst_len++
+ *   push(pc+cur_inst_len, SR)
+ *   SR |= LF
+ *   memspace = (inst>>6) & 1; addr = (inst>>8) & 0x3f
+ *   LC = memory[memspace][addr] & 0xffff
+ *   cycles += 4
+ */
+static void emit_cf_do_aa_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                             uint32_t inst)
+{
+    uint32_t memspace = (inst >> 6) & 1;
+    uint32_t addr     = (inst >> 8) & 0x3f;
+    uint32_t la       = (pc + 1 < DSP_PRAM_SIZE)
+                            ? (dsp->pram[pc + 1] & 0xffff) : 0;
+
+    /* push(LA, LC) */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    /* LA = pram[pc+1] & 0xffff (baked) */
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    /* cur_inst_len++; push(pc+2, SR); SR |= LF; LC = <mem read>;
+     * cycles += 4. Shared with DO_IMM for the trailing bits, but
+     * LC source differs — compute LC BEFORE calling the suffix so
+     * we can pass the LC value via a reg instead of an immediate. */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_cf_stack_push(e, pc + 2);
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* LC = memory[memspace][addr] & 0xffff. emit_mem_read_xy needs
+     * an address reg; bake the 6-bit addr into w4. */
+    emit_mov_imm32(e, /*rd=*/4, addr);
+    emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/4, /*value_reg=*/5);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
+ * emu_do_ea (2-word). Like do_aa but the address comes from
+ * calc_ea(ea_mode) instead of a short-absolute.
+ */
+static void emit_cf_do_ea_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                             uint32_t inst)
+{
+    uint32_t memspace = (inst >> 6) & 1;
+    uint32_t ea_mode  = (inst >> 8) & 0x3f;
+    uint32_t la       = (pc + 1 < DSP_PRAM_SIZE)
+                            ? (dsp->pram[pc + 1] & 0xffff) : 0;
+
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+    emit_cf_stack_push(e, pc + 2);
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* addr into x4 via calc_ea, then mem-read → LC. calc_ea handles
+     * Rn post-update, non-linear Mn via BLR shim, mode-6 immediate,
+     * etc. — linear fast path hits inline. */
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/4,
+                        /*want_retour=*/false, dsp, pc);
+    emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/4, /*value_reg=*/5);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
+ * emu_do_reg (2-word). LC source is a 6-bit register index in
+ * inst[13:8]. A/B hit pm_read_accu24 (applies scaling / limiting);
+ * other regs are direct LDR.
+ *
+ * Note the interp's call order differs slightly from DO_IMM:
+ *   push(LA, LC) → LA = pram[pc+1] → cur_inst_len++ →
+ *   READ LC → push(pc+cur_inst_len, SR) → SR |= LF → LC &= 0xffff.
+ * We mirror that order.
+ */
+static void emit_cf_do_reg_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                              uint32_t inst)
+{
+    uint32_t numreg = (inst >> 8) & 0x3f;
+    uint32_t la     = (pc + 1 < DSP_PRAM_SIZE)
+                          ? (dsp->pram[pc + 1] & 0xffff) : 0;
+
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    /* Read LC source into w5 via emit_pm_read_reg — handles A/B
+     * scaling, X/Y pin reads, and generic-reg LDR. The helper
+     * preserves x20-x25 so all our pinned regs stay valid. */
+    emit_pm_read_reg(e, (int)numreg, /*value_reg=*/5);
+
+    emit_cf_stack_push(e, pc + 2);
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    /* LC = w5 & 0xffff */
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
+ * emu_dor_reg (2-word). Like do_reg but LA = (pc + xxxx) & 0xffff
+ * (PC-relative target). LC source same as do_reg.
+ */
+static void emit_cf_dor_reg_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                               uint32_t inst)
+{
+    uint32_t numreg = (inst >> 8) & 0x3f;
+    uint32_t xxxx   = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    uint32_t la     = (pc + xxxx) & 0xffff;
+
+    /* Mirror interp's cur_inst_len++ BEFORE the first push. */
+    emit_movz_w(e, /*rd=*/0, 2, 0);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+
+    /* push(LA, LC) */
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+    emit_mov_imm64(e, /*rd=*/4,
+                   (uint64_t)(uintptr_t)&dsp_jit_helper_stack_push);
+    emit_blr(e, /*rn=*/4);
+
+    /* LA = (pc + xxxx) & 0xffff */
+    emit_mov_imm32(e, /*rd=*/0, la);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+
+    emit_cf_stack_push(e, pc + 2);
+
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_LF);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+
+    emit_pm_read_reg(e, (int)numreg, /*value_reg=*/5);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 16);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 6);
+}
+
+/*
  * emu_enddo:
  *   pop(&saved_pc, &saved_sr)     — saved_pc discarded
  *   SR = (SR & 0x7f) | (saved_sr & (1<<LF))
@@ -6618,7 +6804,11 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     case DSP_JIT_CF_REP_EA:    emit_cf_rep_ea_op(e, inst, dsp, pc);   break;
     case DSP_JIT_CF_REP_REG:   emit_cf_rep_reg_op(e, inst);           break;
     case DSP_JIT_CF_DO_IMM:    emit_cf_do_imm_op(e, dsp, pc, inst);   break;
+    case DSP_JIT_CF_DO_AA:     emit_cf_do_aa_op(e, dsp, pc, inst);    break;
+    case DSP_JIT_CF_DO_EA:     emit_cf_do_ea_op(e, dsp, pc, inst);    break;
+    case DSP_JIT_CF_DO_REG:    emit_cf_do_reg_op(e, dsp, pc, inst);   break;
     case DSP_JIT_CF_DOR_IMM:   emit_cf_dor_imm_op(e, dsp, pc, inst);  break;
+    case DSP_JIT_CF_DOR_REG:   emit_cf_dor_reg_op(e, dsp, pc, inst);  break;
     case DSP_JIT_CF_ENDDO:     emit_cf_enddo_op(e);                   break;
     /* Misc non-parallel (single-word, non-terminator). */
     case DSP_JIT_CF_ANDI:      emit_cf_andi_op(e, inst);              break;
