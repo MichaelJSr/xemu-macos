@@ -1722,9 +1722,17 @@ int dsp_jit_helper_classify_cf(void *fn)
     if (f == emu_bcc_long)   return DSP_JIT_CF_BCC_LONG;
     /* Loop ops */
     if (f == emu_rep_imm)    return DSP_JIT_CF_REP_IMM;
+    if (f == emu_rep_aa)     return DSP_JIT_CF_REP_AA;
+    if (f == emu_rep_ea)     return DSP_JIT_CF_REP_EA;
+    if (f == emu_rep_reg)    return DSP_JIT_CF_REP_REG;
     if (f == emu_do_imm)     return DSP_JIT_CF_DO_IMM;
     if (f == emu_dor_imm)    return DSP_JIT_CF_DOR_IMM;
     if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
+    /* Misc non-parallel (single-word, no branch). */
+    if (f == emu_andi)       return DSP_JIT_CF_ANDI;
+    if (f == emu_ori)        return DSP_JIT_CF_ORI;
+    if (f == emu_lua)        return DSP_JIT_CF_LUA;
+    if (f == emu_lua_rel)    return DSP_JIT_CF_LUA_REL;
     /* Effective-address CF (Rn-based target) */
     if (f == emu_jmp_ea)     return DSP_JIT_CF_JMP_EA;
     if (f == emu_jsr_ea)     return DSP_JIT_CF_JSR_EA;

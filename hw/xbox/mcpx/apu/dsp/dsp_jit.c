@@ -4454,11 +4454,24 @@ static uint32_t parmove_write_set(uint32_t inst)
     case 5:
     case 6:
     case 7: {
-        /* pm_5: single x:/y: move. W=bit 15, memspace=bit 19. */
+        /* pm_5: single x:/y: move. W=bit 15, memspace=bit 19.
+         * ea_form=bit 14: when 0, addr is the 6-bit short
+         * absolute at inst[13:8] ∈ [0, 0x3F] — guaranteed in
+         * xram/yram (both start at 0, mixbuffer begins at 0xC00
+         * and peripherals at 0xFFFF80). Narrow the x-space write
+         * set to XRAM only in that case. Y-space is already
+         * tight (no mixbuffer on Y). */
         bool write_mem = ((inst >> 15) & 1) == 0;
         if (write_mem) {
             uint32_t memspace = (inst >> 19) & 1;
-            ws |= memspace ? Y_ANY : X_ANY;
+            bool ea_form = ((inst >> 14) & 1) != 0;
+            if (memspace) {
+                ws |= Y_ANY;   /* yram */
+            } else if (ea_form) {
+                ws |= X_ANY;   /* calc_ea: address is runtime */
+            } else {
+                ws |= DSP_JIT_WS_XRAM; /* short-absolute < 0xC00 */
+            }
         }
         break;
     }
@@ -5229,6 +5242,254 @@ static void emit_cf_enddo_op(ArmEmit *e)
     emit_blr(e, /*rn=*/4);
 }
 
+/* --------------------------------------------------------------- *
+ * REP _aa / _ea / _reg variants.
+ *
+ * Complete the REP coverage started by emit_cf_rep_imm_op. Each
+ * sets up the same REP state (LCSAVE = LC; pc_on_rep = 1;
+ * loop_rep = 1) — shared via emit_cf_rep_common_start — and
+ * then loads the loop counter from a different source:
+ *
+ *   rep_aa  : LC = read_memory(space, 6-bit absolute address)
+ *   rep_ea  : LC = read_memory(space, calc_ea(6-bit))
+ *   rep_reg : LC = register[6-bit]  (A/B routed through
+ *             pm_read_accu24 to apply the limited-A/B narrowing)
+ *
+ * All three are terminators (block ends after the op; the REP
+ * state drives the next iteration's dispatch through the post-
+ * exec update_pc helper, which is already the existing behaviour).
+ * --------------------------------------------------------------- */
+
+/* emu_rep_aa. space = inst[6]; addr = inst[13:8] (6-bit). */
+static void emit_cf_rep_aa_op(ArmEmit *e, uint32_t inst)
+{
+    emit_cf_rep_common_start(e);
+
+    uint32_t memspace = (inst >> 6) & 1;
+    uint32_t addr = (inst >> 8) & 0x3f;
+    /* x22 = address; x23 receives loaded value. */
+    emit_mov_imm32(e, /*rd=*/22, addr);
+    emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
+    emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 4);
+}
+
+/* emu_rep_ea. space = inst[6]; addr = calc_ea(inst[13:8]). */
+static void emit_cf_rep_ea_op(ArmEmit *e, uint32_t inst,
+                              dsp_core_t *dsp, uint32_t pc)
+{
+    emit_cf_rep_common_start(e);
+
+    uint32_t memspace = (inst >> 6) & 1;
+    uint32_t ea_mode = (inst >> 8) & 0x3f;
+    /* x22 = calc_ea result; x23 receives loaded value. */
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/22,
+                        /*want_retour=*/false, dsp, pc);
+    emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22, /*value_reg=*/23);
+    emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    /* emu_rep_ea: calc_ea's internal +2 (for modes 5/6/7) already
+     * applied via emit_calc_ea_inline's own strh to instr_cycle;
+     * the handler then adds its own +2 on top. Use add_cycles to
+     * accumulate rather than overwriting the calc_ea contribution. */
+    emit_cf_add_cycles(e, 2);
+}
+
+/* emu_rep_reg. numreg = inst[13:8] (6-bit). A/B use the
+ * pm_read_accu24 limited-24-bit read (not a raw register load).
+ * LC is masked to 16 bits at the end — LC is a 16-bit counter. */
+static void emit_cf_rep_reg_op(ArmEmit *e, uint32_t inst)
+{
+    emit_cf_rep_common_start(e);
+
+    uint32_t numreg = (inst >> 8) & 0x3f;
+    /* Route through pm_read_reg which handles A/B scaling. */
+    emit_pm_read_reg(e, (int)numreg, /*value_reg=*/23);
+
+    /* LC = read & 0xFFFF (16-bit counter). */
+    emit_ubfx_w(e, /*rd=*/23, /*rn=*/23, 0, 16);
+    emit_str_w_any(e, /*rs=*/23, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LC));
+
+    emit_cf_set_cycles(e, 4);
+}
+
+/* --------------------------------------------------------------- *
+ * Misc single-word ops: ANDI / ORI / LUA / LUA_REL.
+ *
+ * Not CF by any strict definition — none change pc, none push
+ * the stack, none set loop state. They live in the CF classifier
+ * simply to get access to the non-parmove inline dispatch (since
+ * they aren't ALU or parmove either). The common epilogue handles
+ * pc += 1 as for any 1-word op.
+ * --------------------------------------------------------------- */
+
+/* emu_andi (single-word). Bitmask AND against SR.MR / SR.CCR / OMR
+ * depending on inst[1:0]. value = inst[15:8] (8 bits), regnum =
+ * inst[1:0] (2 bits). */
+static void emit_cf_andi_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t value = (inst >> 8) & 0xff;
+    uint32_t regnum = inst & 0x3;
+
+    if (regnum == 0) {
+        /* SR &= (value << 8) | 0xff — clears selected bits of SR.MR. */
+        uint16_t mask = (uint16_t)((value << 8) | 0xff);
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_mov_imm32(e, /*rd=*/1, mask);
+        emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    } else if (regnum == 1) {
+        /* SR &= (0xff << 8) | value — clears selected bits of SR.CCR. */
+        uint16_t mask = (uint16_t)((0xffu << 8) | value);
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_mov_imm32(e, /*rd=*/1, mask);
+        emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    } else if (regnum == 2) {
+        /* OMR &= value. OMR is 8-bit in the interp's register
+         * file (stored as a single u32, but masked to 8 bits by
+         * the handler). Use a w-sized load/store + AND for
+         * simplicity — the AND with an 8-bit mask leaves only
+         * the low 8 bits, which is identical to the interp's
+         * semantics. */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_OMR));
+        emit_mov_imm32(e, /*rd=*/1, value);
+        emit_and_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_OMR));
+    }
+    /* regnum == 3 is undefined (no interp case); preserve the
+     * interp's behaviour by doing nothing. */
+}
+
+/* emu_ori (single-word). Bitmask OR against SR.MR / SR.CCR / OMR. */
+static void emit_cf_ori_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t value = (inst >> 8) & 0xff;
+    uint32_t regnum = inst & 0x3;
+
+    if (regnum == 0) {
+        /* SR |= (value << 8). */
+        uint16_t mask = (uint16_t)(value << 8);
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_mov_imm32(e, /*rd=*/1, mask);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    } else if (regnum == 1) {
+        /* SR |= value (low 8 bits of SR = CCR). */
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+        emit_mov_imm32(e, /*rd=*/1, value);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_SR);
+    } else if (regnum == 2) {
+        /* OMR |= value. */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_OMR));
+        emit_mov_imm32(e, /*rd=*/1, value);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_OMR));
+    }
+}
+
+/* emu_lua — "load unified address". Loads Rn + offset (computed
+ * via emu_calc_ea) into Rm or Nm.
+ *
+ * Interpreter:
+ *   srcreg = inst[10:8] & 7
+ *   srcsave = R[srcreg]                 // save Rn
+ *   emu_calc_ea(inst[12:8] 5-bit mode);  // side-effect updates R[srcreg]
+ *   srcnew = R[srcreg]                   // post-update value
+ *   R[srcreg] = srcsave                  // restore Rn
+ *   if inst[3]: N[dstreg] = srcnew
+ *   else:       R[dstreg] = srcnew
+ *   instr_cycle += 2
+ *
+ * In other words: compute what R[srcreg] WOULD become after
+ * calc_ea (with the actual Rn update rolled back), then store
+ * that computed value into Nm or Rm.
+ *
+ * Inlined approach: we can't easily "undo" calc_ea's Rn mutation
+ * inline because the mode-specific update paths differ. Cleanest
+ * inline: snapshot Rn, call calc_ea (uses the existing inline
+ * emitter for linear Mn; BLRs the helper for modulo), read the
+ * new Rn, restore the snapshot, write to dst.
+ */
+static void emit_cf_lua_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t srcreg = (inst >> 8) & 0x7;
+    uint32_t ea_mode = (inst >> 8) & 0x1f;   /* 5-bit ea_mode */
+    uint32_t dstreg = inst & 0x7;
+    bool dst_is_n = (inst & (1u << 3)) != 0;
+
+    /* Snapshot R[srcreg] into w22 (preserved across the calc_ea
+     * BLR if it goes slow-path). */
+    emit_ldr_w_any(e, /*rd=*/22, /*rn=*/19, SCRATCH, OFF_R(srcreg));
+
+    /* calc_ea; discard the address via out_addr_reg = 23. The
+     * side effect (R[srcreg] update) is what we want. ea_mode
+     * is 5-bit here so mode is 0-3 only (bit 2 always 0 — no
+     * mode 6 possible; calc_ea's dsp/pc args are ignored). */
+    emit_calc_ea_inline(e, ea_mode, /*out_addr_reg=*/23,
+                        /*want_retour=*/false,
+                        /*dsp=*/NULL, /*pc=*/0);
+
+    /* Read the updated Rn into w24 (= srcnew). */
+    emit_ldr_w_any(e, /*rd=*/24, /*rn=*/19, SCRATCH, OFF_R(srcreg));
+
+    /* Restore R[srcreg] = w22 (snapshot). */
+    emit_str_w_any(e, /*rs=*/22, /*rn=*/19, SCRATCH, OFF_R(srcreg));
+
+    /* Write srcnew (w24) to the destination — N[dstreg] or R[dstreg]. */
+    unsigned dst_off = dst_is_n ? OFF_N(dstreg) : OFF_R(dstreg);
+    emit_str_w_any(e, /*rs=*/24, /*rn=*/19, SCRATCH, dst_off);
+
+    emit_cf_set_cycles(e, 4);   /* preset 2 + handler +2 = 4 */
+}
+
+/* emu_lua_rel — variant that takes a 7-bit signed relative offset
+ * directly from inst (no calc_ea involvement).
+ *
+ * Interpreter:
+ *   aa = (inst[7:4]) | ((inst[13:11]) << 4)   // 7-bit signed
+ *   addrreg = inst[10:8] & 7
+ *   dstreg = inst[2:0] & 7
+ *   v = (R[addrreg] + sign_extend_7(aa)) & 0xFFFFFF
+ *   if inst[3]: N[dstreg] = v
+ *   else:       R[dstreg] = v
+ *   instr_cycle += 2
+ */
+static void emit_cf_lua_rel_op(ArmEmit *e, uint32_t inst)
+{
+    uint32_t aa_lo = (inst >> 4) & 0xf;
+    uint32_t aa_hi = (inst >> 11) & 0x7;
+    uint32_t aa = aa_lo | (aa_hi << 4);    /* 7-bit unsigned */
+    /* Sign-extend 7 bits → 32 bits. */
+    int32_t sext = (int32_t)(aa << 25) >> 25;
+
+    uint32_t addrreg = (inst >> 8) & 0x7;
+    uint32_t dstreg = inst & 0x7;
+    bool dst_is_n = (inst & (1u << 3)) != 0;
+
+    /* w0 = R[addrreg] */
+    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_R(addrreg));
+
+    /* w0 += sext. Since sext can be negative in [-64, 63], use
+     * ADD or SUB with the abs value — both fit in imm12. */
+    if (sext >= 0) {
+        emit_add_w_imm(e, /*rd=*/0, /*rn=*/0, (uint32_t)sext);
+    } else {
+        emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, (uint32_t)(-sext));
+    }
+
+    /* Mask to 24 bits. */
+    emit_ubfx_w(e, /*rd=*/0, /*rn=*/0, 0, 24);
+
+    /* Write to destination. */
+    unsigned dst_off = dst_is_n ? OFF_N(dstreg) : OFF_R(dstreg);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, dst_off);
+
+    emit_cf_set_cycles(e, 4);   /* preset 2 + handler +2 = 4 */
+}
+
 /* ============================================================== *
  * Phase 5a — extended: _ea variants and bit-test families.
  *
@@ -5552,9 +5813,17 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     case DSP_JIT_CF_BCC_LONG:  emit_cf_bcc_long_op(e, dsp, pc, inst); break;
     /* Loop ops. */
     case DSP_JIT_CF_REP_IMM:   emit_cf_rep_imm_op(e, inst);           break;
+    case DSP_JIT_CF_REP_AA:    emit_cf_rep_aa_op(e, inst);            break;
+    case DSP_JIT_CF_REP_EA:    emit_cf_rep_ea_op(e, inst, dsp, pc);   break;
+    case DSP_JIT_CF_REP_REG:   emit_cf_rep_reg_op(e, inst);           break;
     case DSP_JIT_CF_DO_IMM:    emit_cf_do_imm_op(e, dsp, pc, inst);   break;
     case DSP_JIT_CF_DOR_IMM:   emit_cf_dor_imm_op(e, dsp, pc, inst);  break;
     case DSP_JIT_CF_ENDDO:     emit_cf_enddo_op(e);                   break;
+    /* Misc non-parallel (single-word, non-terminator). */
+    case DSP_JIT_CF_ANDI:      emit_cf_andi_op(e, inst);              break;
+    case DSP_JIT_CF_ORI:       emit_cf_ori_op(e, inst);               break;
+    case DSP_JIT_CF_LUA:       emit_cf_lua_op(e, inst);               break;
+    case DSP_JIT_CF_LUA_REL:   emit_cf_lua_rel_op(e, inst);           break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;
     case DSP_JIT_CF_JSR_EA:    emit_cf_jsr_ea_op(e, pc, inst, dsp);       break;

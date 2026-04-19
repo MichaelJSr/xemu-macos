@@ -311,6 +311,30 @@ hard-FPU knobs; TOML is only needed for fine tuning.
   containing mode-6 parmoves stay intact (previously exited via
   the PC-mismatch check on every occurrence — 9.75% of all
   parmove ops per the sentinel data).
+
+  The non-parallel "misc" tail — previously all BLR-fallback
+  and responsible for most of the remaining `cf_fallback` count
+  — shrinks further: ANDI / ORI (8-bit bitmask AND / OR against
+  SR.MR, SR.CCR, or OMR depending on inst[1:0]), LUA (load
+  unified address — snapshot Rn, run calc_ea for its side-
+  effect, restore Rn, write the new-would-be-Rn into the
+  destination Rn or Nn), LUA_REL (7-bit signed relative offset
+  variant, no calc_ea), and REP _aa / _ea / _reg (loop-counter
+  setup from memory short-absolute, calc_ea memory, and direct
+  register — completing REP coverage after Phase 6 inlined
+  `_imm` only). All four are small, commonly-hit ops that
+  appear in DSP setup code and inner kernels.
+
+  Parmove write-set narrowing: for pm_5 with `ea_form=0` (the
+  6-bit short-absolute memory-move form), the runtime address
+  is guaranteed to be in `[0, 0x3F]` and therefore always
+  hits xram / yram — never mixbuffer (`0xC00-0xC1F`) or
+  peripheral (`0xFFFF80+`). The write-set previously
+  over-reported with `X_ANY = XRAM | MIXBUFFER | PERIPH` for
+  those parmoves; now it's narrowed to `DSP_JIT_WS_XRAM` only,
+  cutting the DIFF validator's compare region for every pm_5
+  short-absolute write.
+
   Static block chaining (direct `B <target.entry>` patch on
   known branch targets) stays deferred — the entry-split
   prologue refactor it depends on is scoped separately.

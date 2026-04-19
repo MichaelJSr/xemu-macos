@@ -162,9 +162,20 @@ enum {
     DSP_JIT_CF_BCC_LONG,
     /* Loop ops */
     DSP_JIT_CF_REP_IMM,
+    DSP_JIT_CF_REP_AA,
+    DSP_JIT_CF_REP_EA,
+    DSP_JIT_CF_REP_REG,
     DSP_JIT_CF_DO_IMM,
     DSP_JIT_CF_DOR_IMM,
     DSP_JIT_CF_ENDDO,
+    /* Misc non-parallel ops. ANDI / ORI manipulate SR / OMR
+     * bits in-place; LUA / LUA_REL compute Rn + offset into
+     * Rn / Nn. Single-word, no branch — none of them change
+     * pc on their own (the common epilogue handles pc += 1). */
+    DSP_JIT_CF_ANDI,
+    DSP_JIT_CF_ORI,
+    DSP_JIT_CF_LUA,
+    DSP_JIT_CF_LUA_REL,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,
