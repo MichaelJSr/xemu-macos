@@ -1275,12 +1275,23 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         if (disp->interp_remaining > 0 &&
             disp->interp_prev_surface && disp->interp_cur_surface &&
             metalfx_interpolation_is_supported() && disp->gl_texture_id) {
-            float dt = (float)(disp->interp_index + 1) /
-                       (float)(disp->interp_total + 1);
+            /*
+             * MTLFXFrameInterpolator.deltaTime expects the wall-clock
+             * interval in seconds between the two input frames (used to
+             * scale motion-vector magnitudes). Feed the delta between
+             * the two CFRetain capture timestamps, clamped to a sane
+             * range to guard against pause / unpause jumps and the
+             * first-frame case (prev_ns == 0).
+             */
+            float delta_sec =
+                (float)(disp->interp_cur_surface_ns -
+                        disp->interp_prev_surface_ns) / 1.0e9f;
+            if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
+            if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
             if (metalfx_interpolation_generate(
                     (IOSurfaceRef)disp->interp_prev_surface,
                     (IOSurfaceRef)disp->interp_cur_surface,
-                    NULL, NULL, dt)) {
+                    NULL, NULL, delta_sec)) {
                 IOSurfaceRef interp =
                     metalfx_interpolation_get_output_surface();
                 uint32_t interp_id = interp ? IOSurfaceGetID(interp) : 0;
@@ -1443,7 +1454,10 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     CFRelease((IOSurfaceRef)disp->interp_prev_surface);
                 }
                 disp->interp_prev_surface = disp->interp_cur_surface;
+                disp->interp_prev_surface_ns = disp->interp_cur_surface_ns;
                 disp->interp_cur_surface = (void *)CFRetain(present_surface);
+                disp->interp_cur_surface_ns =
+                    qemu_clock_get_ns(QEMU_CLOCK_HOST);
 
                 if (disp->interp_prev_surface) {
                     int total = (interp_mode == 4) ? 3 : 1;

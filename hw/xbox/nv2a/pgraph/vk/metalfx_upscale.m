@@ -1052,7 +1052,17 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             interp.motionTexture = g_interp.motionTexture;
             interp.motionVectorScaleX = 1.0f;
             interp.motionVectorScaleY = 1.0f;
-            if (delta_time <= 0.0f || delta_time > 1.0f) delta_time = 0.5f;
+            /*
+             * delta_time is wall-clock seconds between the two input
+             * frames. Callers clamp to [1/240, 1/10] s; re-clamp here
+             * defensively for direct/future callers and fall back to
+             * one 60 Hz frame on obviously-bogus values (e.g. first-
+             * frame case where prev capture timestamp was 0 or a
+             * pause/unpause jump that slipped past the caller).
+             */
+            if (delta_time < 0.001f || delta_time > 0.1f) {
+                delta_time = 1.0f / 60.0f;
+            }
             interp.deltaTime = delta_time;
             interp.nearPlane = 0.01f;
             interp.farPlane = 10000.0f;

@@ -364,6 +364,12 @@ typedef struct PGRAPHVkDisplayState {
     int interp_index;             // which intermediate frame to generate next
     int interp_width, interp_height;
 
+    // Host-monotonic capture timestamps of the two input frames, fed to
+    // MTLFXFrameInterpolator.deltaTime (which expects wall-clock seconds
+    // between the two input frames — not a unitless frame-sequence ratio).
+    uint64_t interp_prev_surface_ns;
+    uint64_t interp_cur_surface_ns;
+
     /*
      * IOSurface rebind cache. Keyed on IOSurfaceID (kernel-assigned
      * identifier that remains stable while the surface exists, unlike

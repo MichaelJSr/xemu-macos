@@ -149,6 +149,12 @@ fine tuning.
 - **IOSurface lifetime.** `IOSurfaceGetID` is the cache key; output
   width capped at 1920 to work around a macOS 26 BGRA
   `bytesPerRow` bug.
+- **Correct `deltaTime` units for `MTLFXFrameInterpolator`.** Host-
+  monotonic timestamps (`QEMU_CLOCK_HOST`) are captured at each
+  input-frame `CFRetain`; `interp.deltaTime` now gets the wall-clock
+  seconds between the two inputs (clamped to `[1/240, 1/10]` s), per
+  Apple's API contract, instead of a unitless `(index+1)/(total+1)`
+  ratio. Reduces ghosting / motion-vector lag on fast pans.
 
 ### MCPX APU
 
