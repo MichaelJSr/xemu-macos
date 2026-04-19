@@ -210,7 +210,9 @@ fine tuning.
   `voice_get/set_mask` calls hit the local copy. LUTs replace
   transcendentals on the hot path: attenuation (4096), pitch (65536),
   LPF cutoff (65536), envelope decay/release (1024 each, linear
-  interp).
+  interp). 3D voices skip four dead `voice_get_mask` reads for
+  `V0BIN..V3BIN` (those values are immediately overwritten from
+  `hrtf_submix[]`).
 - **Accelerate / vDSP.** `vDSP_vsma` for 8-bin × 32-sample mix
   accumulation, `vDSP_vadd` for `float_accumulate`; `float_to_24b`
   uses `vcvtnq_s32_f32` in bulk on ARM64. Single-precision SVF/LPF

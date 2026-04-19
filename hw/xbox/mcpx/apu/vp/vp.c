@@ -1572,15 +1572,28 @@ static void voice_process(MCPXAPUState *d,
         goto cleanup;
     }
 
+    /*
+     * 3D voices always overwrite bin[0..3] from the HRTF submix,
+     * so the V0BIN..V3BIN reads on that path are dead work. Split
+     * the two cases to skip four voice_get_mask calls per 3D voice
+     * per frame.
+     */
     int bin[8];
-    bin[0] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V0BIN);
-    bin[1] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V1BIN);
-    bin[2] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V2BIN);
-    bin[3] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V3BIN);
+    if (v < MCPX_HW_MAX_3D_VOICES) {
+        bin[0] = d->vp.hrtf_submix[0];
+        bin[1] = d->vp.hrtf_submix[1];
+        bin[2] = d->vp.hrtf_submix[2];
+        bin[3] = d->vp.hrtf_submix[3];
+    } else {
+        bin[0] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
+                                NV_PAVS_VOICE_CFG_VBIN_V0BIN);
+        bin[1] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
+                                NV_PAVS_VOICE_CFG_VBIN_V1BIN);
+        bin[2] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
+                                NV_PAVS_VOICE_CFG_VBIN_V2BIN);
+        bin[3] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
+                                NV_PAVS_VOICE_CFG_VBIN_V3BIN);
+    }
     bin[4] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
                             NV_PAVS_VOICE_CFG_VBIN_V4BIN);
     bin[5] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
@@ -1589,13 +1602,6 @@ static void voice_process(MCPXAPUState *d,
                             NV_PAVS_VOICE_CFG_FMT_V6BIN);
     bin[7] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                             NV_PAVS_VOICE_CFG_FMT_V7BIN);
-
-    if (v < MCPX_HW_MAX_3D_VOICES) {
-        bin[0] = d->vp.hrtf_submix[0];
-        bin[1] = d->vp.hrtf_submix[1];
-        bin[2] = d->vp.hrtf_submix[2];
-        bin[3] = d->vp.hrtf_submix[3];
-    }
 
     uint16_t vol[8];
     vol[0] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLA,
