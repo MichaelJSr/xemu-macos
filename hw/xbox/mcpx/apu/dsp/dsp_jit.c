@@ -4362,6 +4362,22 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
         if (cf_kind == DSP_JIT_CF_RTI || cf_kind == DSP_JIT_CF_ENDDO) {
             return true;
         }
+        /* ASL_IMM / ASR_IMM / long-imm short forms all run
+         * emu_ccr_update_e_u_n_z at the tail (plus explicit C/V/L
+         * writes) — a full CCR overwrite from the upstream writer's
+         * perspective. LSL_IMM only writes C/N/Z/V (partial, no E/U)
+         * so it is conservatively NOT a full writer: an upstream
+         * full writer's E/U values are still potentially live past
+         * the lsl. */
+        if (cf_kind == DSP_JIT_CF_ASL_IMM ||
+            cf_kind == DSP_JIT_CF_ASR_IMM ||
+            cf_kind == DSP_JIT_CF_INC ||
+            cf_kind == DSP_JIT_CF_DEC ||
+            cf_kind == DSP_JIT_CF_ADD_IMM ||
+            cf_kind == DSP_JIT_CF_SUB_IMM ||
+            cf_kind == DSP_JIT_CF_CMP_IMM) {
+            return true;
+        }
     }
     return false;
 }
@@ -7425,6 +7441,239 @@ static void emit_cf_inc_dec_op(ArmEmit *e, uint32_t inst, bool is_sub)
 }
 
 /*
+ * ASL #ii, S, D — 56-bit arithmetic shift left by a 6-bit immediate.
+ *
+ * Bit pattern: 0000110000011101SiiiiiiD
+ *   S = inst[7]  (source accu 0=A, 1=B)
+ *   ii = inst[6:1]  (6-bit shift count, 0..63)
+ *   D = inst[0]  (dest accu 0=A, 1=B)
+ *
+ * Mirrors emu_asl_imm + dsp_asl56. The interpreter zero-extends the
+ * 56-bit source to 64 bits before shifting; we do the same via UBFX
+ * on the pin (which is sign-extended 64-bit from bit 55 of the accu)
+ * so the upper bits don't leak into the carry / overflow detection.
+ *
+ *   dest_v = orig & ((1<<56)-1)      (zero-extend)
+ *   dest_s = (dest_v << ii) & ((1<<56)-1)
+ *   carry    = (dest_v >> (56-ii)) & 1       for ii >= 1
+ *   overflow = (dest_v >> (56-ii)) != 0      for ii >= 1   (SR.L)
+ *   v        = (dest_v >> 55) ^ (dest_s >> 55)             (SR.V)
+ *
+ *   SR &= ~(V|C); SR |= (C<<C_bit) | (V<<V_bit) | (L<<L_bit)
+ *   emu_ccr_update_e_u_n_z(dest_s)
+ *
+ * ii = 0 is a no-op on data bits; newsr = 0 so V/C are cleared and
+ * L is preserved. Interp happens to land in the same steady state
+ * via dest_v >> 56 being defined-zero on x86 for 64-bit shifts;
+ * we special-case ii == 0 to match exactly without hitting ARM's
+ * undefined LSL/LSR by >=64 behaviour.
+ *
+ * ii > 56 is a degenerate encoding (real code doesn't hit it). We
+ * still emit correct bulk shift via ARM's masked LSL (count & 63),
+ * compute overflow from "any bit of dest_v set", and carry = 0. If
+ * it ever fires we won't diverge from interp's defined semantics.
+ */
+static void emit_cf_asl_imm_op(ArmEmit *e, uint32_t inst)
+{
+    int S  = (int)((inst >> 7) & 1);
+    int ii = (int)((inst >> 1) & 0x3f);
+    int D  = (int)(inst & 1);
+
+    /* Load source accu (sign-ext 64-bit) into x13. */
+    emit_load_accu56(e, /*xaccu=*/13, /*which_ab=*/S, /*xtmp=*/8);
+
+    /* Zero-extend to 56 bits in x10 — matches interp's dest_v
+     * layout (bits [63:56] = 0). Subsequent flag calc depends on
+     * this so the sign-extension bits don't become spurious
+     * overflow. */
+    emit_ubfx_x(e, /*rd=*/10, /*rn=*/13, 0, 56);
+
+    if (ii == 0) {
+        /* No shift: result = orig, newsr = 0. Still must write
+         * back to D accu (S and D can differ) and clear V|C. */
+        emit_mov_x_reg(e, /*rd=*/12, /*rn=*/10);
+        /* Sign-extend back to 64 before storing (UBFX zeroed the
+         * upper bits; store_accu56's leading SBFX handles this
+         * but being explicit costs nothing and matches the ii>0
+         * path's register state). */
+        emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+        emit_store_accu56(e, /*xaccu=*/12, /*which_ab=*/D, /*xtmp=*/8);
+        emit_mov_imm32(e, /*rd=*/5, 0);
+        emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+        emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+        return;
+    }
+
+    /* ii > 0. Compute dest_s = (dest_v << ii) & MASK56. */
+    emit_lsl_x_imm(e, /*rd=*/12, /*rn=*/10, ii);
+    emit_ubfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    /* carry = bit (56-ii) of dest_v for ii in [1, 56].
+     * For ii > 56: all bits shifted out, carry = 0. */
+    if (ii <= 56) {
+        emit_ubfx_x(e, /*rd=*/5, /*rn=*/10, 56 - ii, 1);
+    } else {
+        emit_mov_imm32(e, /*rd=*/5, 0);
+    }
+
+    /* overflow (L) = "any bit of dest_v in [55:56-ii] is set".
+     * For ii <= 56: UBFX dest_v, 56-ii, ii → CSET NE.
+     * For ii > 56: equivalent to "dest_v != 0". */
+    if (ii <= 56) {
+        emit_ubfx_x(e, /*rd=*/7, /*rn=*/10, 56 - ii, ii);
+        emit_cmp_w_imm(e, /*rn=*/7, 0);
+    } else {
+        emit_cmp_w_imm(e, /*rn=*/10, 0);
+    }
+    emit_cset_w(e, /*rd=*/7, ARM_COND_NE);
+
+    /* V = orig[55] ^ result[55]. */
+    emit_ubfx_x(e, /*rd=*/8, /*rn=*/10, 55, 1);
+    emit_ubfx_x(e, /*rd=*/9, /*rn=*/12, 55, 1);
+    emit_eor_w_reg(e, /*rd=*/8, /*rn=*/8, /*rm=*/9);
+
+    /* Pack newsr = C | (V << V_bit) | (L << L_bit). C is already
+     * at bit 0 in w5. */
+    emit_lsl_w_imm(e, /*rd=*/9,  /*rn=*/8, DSP_SR_V);
+    emit_lsl_w_imm(e, /*rd=*/11, /*rn=*/7, DSP_SR_L);
+    emit_orr_w_reg(e, /*rd=*/5,  /*rn=*/5, /*rm=*/9);
+    emit_orr_w_reg(e, /*rd=*/5,  /*rn=*/5, /*rm=*/11);
+
+    /* Re-sign-extend result to 64 bits for the sign-ext pin
+     * convention (store_accu56 does its own SBFX but being
+     * explicit keeps x12 valid for emit_ccr_e_u_n_z). */
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    emit_store_accu56(e, /*xaccu=*/12, /*which_ab=*/D, /*xtmp=*/8);
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * ASR #ii, S, D — 56-bit LOGICAL shift right by a 6-bit immediate
+ * (interp's dsp_asr56 uses a bare uint64_t right shift, which is
+ * logical — the opcode name is historical and does not imply
+ * arithmetic semantics).
+ *
+ * Bit pattern: 0000110000011100SiiiiiiD
+ *   S = inst[7], ii = inst[6:1], D = inst[0]
+ *
+ * Mirrors emu_asr_imm + dsp_asr56:
+ *   dest_v = orig & MASK56           (zero-extend to match interp)
+ *   dest_s = dest_v >> ii             (logical right)
+ *   carry  = (dest_v >> (ii-1)) & 1   for ii >= 1; 0 for ii == 0
+ *
+ *   SR &= ~(V|C); SR |= (C<<C_bit)    (V cleared; L untouched)
+ *   emu_ccr_update_e_u_n_z(dest_s)
+ */
+static void emit_cf_asr_imm_op(ArmEmit *e, uint32_t inst)
+{
+    int S  = (int)((inst >> 7) & 1);
+    int ii = (int)((inst >> 1) & 0x3f);
+    int D  = (int)(inst & 1);
+
+    emit_load_accu56(e, /*xaccu=*/13, /*which_ab=*/S, /*xtmp=*/8);
+
+    /* Mask to 56 bits before the right shift — otherwise the sign-
+     * extended bits [63:56] of the pin leak into bit 55+ of the
+     * result after LSR, diverging from interp's logical shift. */
+    emit_ubfx_x(e, /*rd=*/12, /*rn=*/13, 0, 56);
+
+    if (ii == 0) {
+        /* No shift: carry = 0 (no bit shifted out). Result = orig. */
+        emit_mov_imm32(e, /*rd=*/5, 0);
+    } else {
+        /* carry = bit (ii-1) of dest_v. */
+        emit_ubfx_x(e, /*rd=*/5, /*rn=*/12, ii - 1, 1);
+        emit_lsr_x_imm(e, /*rd=*/12, /*rn=*/12, ii);
+    }
+
+    /* Re-sign-extend result to 64 bits. */
+    emit_sbfx_x(e, /*rd=*/12, /*rn=*/12, 0, 56);
+
+    emit_store_accu56(e, /*xaccu=*/12, /*which_ab=*/D, /*xtmp=*/8);
+
+    /* newsr = C at bit 0; V cleared by mask; L untouched. */
+    emit_sr_clear_vc_or_newsr(e, /*wnewsr=*/5);
+    emit_ccr_e_u_n_z(e, /*xaccu=*/12);
+}
+
+/*
+ * LSL #ii, D — A1-only left shift by a 5-bit immediate.
+ *
+ * Bit pattern: 000011000001111010iiiiiD
+ *   ii = inst[5:1]  (5-bit shift count, 0..31)
+ *   D  = inst[0]   (dest = source, 0=A, 1=B)
+ *
+ * Mirrors emu_lsl_imm, which loops emu_lsl_a/b ii times. The bulk-
+ * shift equivalent is:
+ *   new_A1 = (orig_A1 << ii) & BITMASK(24)
+ *   C      = orig_A1 bit (24-ii)           for ii in [1, 24]; 0 for ii > 24
+ *   N      = new_A1[23]
+ *   Z      = (new_A1 == 0)
+ *   SR &= ~(C|N|Z|V); SR |= above
+ *
+ * ii == 0 is a true no-op: the loop body doesn't execute, so SR is
+ * unchanged. We emit zero code for it (not even a pin re-sync,
+ * since A1 is untouched).
+ *
+ * Does NOT touch A0 / A2 — no ccr shim call; E/U are untouched.
+ */
+static void emit_cf_lsl_imm_op(ArmEmit *e, uint32_t inst)
+{
+    int ii = (int)((inst >> 1) & 0x1f);
+    int D  = (int)(inst & 1);
+    unsigned off_a1 = accu_off(D, 1);
+
+    if (ii == 0) {
+        /* No iterations run → no state change. */
+        return;
+    }
+
+    /* w5 = orig A1. Keep orig in w6 (for carry extraction). */
+    emit_ldr_w_any(e, /*rd=*/5, /*rn=*/19, SCRATCH, off_a1);
+    emit_mov_x_reg(e, /*rd=*/6, /*rn=*/5);   /* w6 = orig */
+
+    /* new A1 = (orig << ii) & BITMASK(24). */
+    emit_lsl_w_imm(e, /*rd=*/5, /*rn=*/5, ii);
+    emit_ubfx_w(e, /*rd=*/5, /*rn=*/5, 0, 24);
+    emit_str_w_any(e, /*rs=*/5, /*rn=*/19, SCRATCH, off_a1);
+
+    /* Phase 8 pin sync: new A1 into bits [47:24] of the pin. */
+    {
+        int pin = D ? DSP_JIT_B_PIN_REG : DSP_JIT_A_PIN_REG;
+        emit_bfi_x(e, /*rd=*/pin, /*rn=*/5, 24, 24);
+    }
+
+    /* C = orig bit (24-ii) for ii in [1, 24]; 0 for ii > 24. */
+    int carry_w;
+    if (ii <= 24) {
+        emit_ubfx_w(e, /*rd=*/7, /*rn=*/6, 24 - ii, 1);
+        carry_w = 7;
+    } else {
+        emit_mov_imm32(e, /*rd=*/7, 0);
+        carry_w = 7;
+    }
+
+    /* N = new[23], Z = (new == 0). */
+    emit_ubfx_w(e, /*rd=*/8, /*rn=*/5, 23, 1);
+    emit_cmp_w_imm(e, /*rn=*/5, 0);
+    emit_cset_w(e, /*rd=*/9, ARM_COND_EQ);
+
+    /* SR: clear C|N|Z|V, then BFI new C/N/Z. V stays cleared. */
+    emit_load_sr(e, /*rd=*/10);
+    emit_mov_imm32(e, /*rd=*/11,
+                   (uint32_t)~((1u << DSP_SR_C) | (1u << DSP_SR_N) |
+                               (1u << DSP_SR_Z) | (1u << DSP_SR_V))
+                   & 0xFFFFu);
+    emit_and_w_reg(e, /*rd=*/10, /*rn=*/10, /*rm=*/11);
+    emit_bfi_x(e, /*rd=*/10, /*rn=*/carry_w, DSP_SR_C, 1);
+    emit_bfi_x(e, /*rd=*/10, /*rn=*/8, DSP_SR_N, 1);
+    emit_bfi_x(e, /*rd=*/10, /*rn=*/9, DSP_SR_Z, 1);
+    emit_store_sr_h(e, /*rs=*/10);
+}
+
+/*
  * emu_move_x_long (2-word) — move X:(Rn + xxxx) ↔ R.
  *
  *   inst[10:8]   = R register (0..7) for the base address
@@ -7972,6 +8221,15 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
         break;
     case DSP_JIT_CF_MOVE_Y_IMM:
         if (!emit_cf_move_xy_imm_op(e, inst, DSP_SPACE_Y)) { return false; }
+        break;
+    case DSP_JIT_CF_ASL_IMM:
+        emit_cf_asl_imm_op(e, inst);
+        break;
+    case DSP_JIT_CF_ASR_IMM:
+        emit_cf_asr_imm_op(e, inst);
+        break;
+    case DSP_JIT_CF_LSL_IMM:
+        emit_cf_lsl_imm_op(e, inst);
         break;
     /* _ea CF (calc_ea target). */
     case DSP_JIT_CF_JMP_EA:    emit_cf_jmp_ea_op(e, inst, dsp, pc);       break;

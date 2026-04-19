@@ -209,6 +209,14 @@ enum {
     DSP_JIT_CF_MOVE_X_LONG,
     DSP_JIT_CF_MOVE_X_IMM,
     DSP_JIT_CF_MOVE_Y_IMM,
+    /* Shift-immediate family (99.7% of remaining cf_fallback at the
+     * time of landing). ASL/ASR operate on the full 56-bit accu and
+     * go through the E/U/N/Z ccr shim; LSL is A1-only and only
+     * updates C/N/Z/V. All three bake the shift count at translate
+     * time from inst bits. */
+    DSP_JIT_CF_ASL_IMM,
+    DSP_JIT_CF_ASR_IMM,
+    DSP_JIT_CF_LSL_IMM,
     /* Effective-address (Rn-based) CF */
     DSP_JIT_CF_JMP_EA,
     DSP_JIT_CF_JSR_EA,
