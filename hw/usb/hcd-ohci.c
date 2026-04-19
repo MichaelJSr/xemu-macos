@@ -1001,7 +1001,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
              * This should be sufficient as long as devices respond in a
              * timely manner.
              */
-            trace_usb_ohci_td_too_many_pending(ep->nr);
+            trace_usb_ohci_td_too_many_pending(ep ? ep->nr : -1);
             return 1;
         }
         usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr, !flag_r,
@@ -1133,6 +1133,15 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
     if (head == 0) {
         return 0;
     }
+    /*
+     * Per OHCI 1.0a 4.2.1 EDs are 16-byte aligned; the low 4 bits of any ED
+     * pointer are reserved and the HC should ignore them. ohci->ctrl_head and
+     * ohci->bulk_head are masked at MMIO-write time, but the periodic list
+     * reaches us via hcca.intr[n] which the guest can populate with arbitrary
+     * values. Mask on entry so a misaligned intr[n] cannot flow into
+     * ohci_read_ed() and trigger a bad dma_memory_read on the host.
+     */
+    head &= OHCI_DPTR_MASK;
     for (cur = head; cur && link_cnt++ < ED_LINK_LIMIT; cur = next_ed) {
         if (ohci_read_ed(ohci, cur, &ed)) {
             trace_usb_ohci_ed_read_error(cur);
@@ -1149,8 +1158,10 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
             if (ohci->async_td && addr == ohci->async_td) {
                 usb_cancel_packet(&ohci->usb_packet);
                 ohci->async_td = 0;
-                usb_device_ep_stopped(ohci->usb_packet.ep->dev,
-                                      ohci->usb_packet.ep);
+                if (ohci->usb_packet.ep && ohci->usb_packet.ep->dev) {
+                    usb_device_ep_stopped(ohci->usb_packet.ep->dev,
+                                          ohci->usb_packet.ep);
+                }
             }
             continue;
         }
@@ -1253,7 +1264,7 @@ static void ohci_frame_boundary(void *opaque)
         int n;
 
         n = ohci->frame_number & 0x1f;
-        ohci_service_ed_list(ohci, le32_to_cpu(hcca.intr[n]));
+        ohci_service_ed_list(ohci, le32_to_cpu(hcca.intr[n]) & OHCI_DPTR_MASK);
     }
 
     /* Cancel all pending packets if either of the lists has been disabled. */
