@@ -538,6 +538,19 @@ typedef struct PGRAPHVkState {
     VkBuffer last_vertex_bind_buffers[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkDeviceSize last_vertex_bind_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
+    /*
+     * Per-command-buffer + per-layout cache of the last
+     * vkCmdPushConstants payload. Push constants are CB-scoped AND
+     * owned by a specific VkPipelineLayout; the layout handle is
+     * part of the skip fingerprint, so a pipeline rebind to a
+     * different layout implicitly busts the cache without needing
+     * a separate invalidation hook.
+     */
+    bool last_push_constants_valid;
+    VkPipelineLayout last_push_constants_layout;
+    int last_push_constants_num_attrs;
+    float last_push_constants_values[NV2A_VERTEXSHADER_ATTRIBUTES][4];
+
     VkDescriptorPool descriptor_pool;
     /*
      * Split descriptor sets: set 0 holds UBOs (VSH + PSH uniforms),

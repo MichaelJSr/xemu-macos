@@ -1471,10 +1471,34 @@ static void push_vertex_attr_values(PGRAPHState *pg)
                              values, &num_uniform_attrs);
 
     if (num_uniform_attrs > 0) {
-        vkCmdPushConstants(r->command_buffer, r->pipeline_binding->layout,
+        size_t bytes = (size_t)num_uniform_attrs * 4 * sizeof(float);
+        VkPipelineLayout layout = r->pipeline_binding->layout;
+
+        /*
+         * Skip the push when the payload is bit-identical to the last
+         * issued one on the same (CB, pipeline_layout) scope. Games
+         * with fixed-function transforms often keep inline uniform
+         * attrs constant across many consecutive draws. CB-scope is
+         * handled by reset in pgraph_vk_begin_command_buffer; layout
+         * scope is handled by including the layout handle in the
+         * skip fingerprint (a pipeline rebind to a different layout
+         * will not match and will force the push).
+         */
+        if (r->last_push_constants_valid &&
+            r->last_push_constants_layout == layout &&
+            r->last_push_constants_num_attrs == num_uniform_attrs &&
+            !memcmp(r->last_push_constants_values, values, bytes)) {
+            return;
+        }
+
+        vkCmdPushConstants(r->command_buffer, layout,
                            VK_SHADER_STAGE_VERTEX_BIT, 0,
-                           num_uniform_attrs * 4 * sizeof(float),
-                           &values);
+                           (uint32_t)bytes, &values);
+
+        memcpy(r->last_push_constants_values, values, bytes);
+        r->last_push_constants_layout = layout;
+        r->last_push_constants_num_attrs = num_uniform_attrs;
+        r->last_push_constants_valid = true;
     }
 }
 
@@ -1902,10 +1926,11 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     /*
      * Vulkan dynamic state is command-buffer-scoped. Invalidate the
      * dynstate cache so the first draw re-issues vkCmdSet*.
-     * vkCmdBindVertexBuffers state is likewise CB-scoped.
+     * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
      */
     r->dynstate_cache_valid = false;
     r->last_vertex_bind_valid = false;
+    r->last_push_constants_valid = false;
 }
 
 // FIXME: Refactor below

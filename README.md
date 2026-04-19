@@ -166,6 +166,13 @@ fine tuning.
   begin alongside `dynstate_cache_valid`. Kills the per-flush
   vertex-bind call when back-to-back flushes hit the same mesh
   (common during material swaps / instanced-style draws).
+- **`vkCmdPushConstants` dedup for inline uniform attrs.**
+  `push_vertex_attr_values` caches the last payload + pipeline
+  layout + attr count on the CB; skips the push when all three
+  match. Layout handle is part of the fingerprint, so a pipeline
+  rebind to a different layout implicitly busts the cache without
+  a separate invalidation hook. Big win on fixed-function-transform
+  titles that keep inline uniform attrs constant across many draws.
 
 ### MetalFX + presentation
 
