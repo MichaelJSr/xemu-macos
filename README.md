@@ -126,81 +126,41 @@ fine tuning.
 - **Fence-wait diagnostics.** 5 s timeout wrapper on single-time CBs
   that aborts with the named call site instead of hanging silently on
   MoltenVK internal-mutex deadlocks.
-- **Narrowed surface-upload finish.** `pgraph_vk_upload_surface_data`
-  now only forces a full GPU sync when the target is the active
-  color/zeta binding or a command buffer is recording. The common
-  `render_display` path (which already ran a `PRESENTING` finish and
-  uploads an unrelated source surface) and texture-streaming bursts
-  skip the finish; MoltenVK's single queue serializes the aux upload
-  behind any prior-submitted render work, and the aux-CB fence wait
-  preserves host-visible ordering.
-- **Narrowed remapped-attribute staging.** `pgraph_vk_bind_vertex_-
-  attributes` shifts `vertex_attribute_offsets[i]` by
-  `min_element * stride`, so `remap_unaligned_attributes` +
-  `copy_remapped_attributes_to_inline_buffer` only size and copy
-  `[min_element..max_element]` instead of `[0..max]`. Draws rebase
-  via `vkCmdDraw(firstVertex - min_element)` /
-  `vkCmdDrawIndexed(vertexOffset = -min_element)`. Saves
-  `min_element * stride` bytes per remapped attribute per draw on
-  indexed meshes / glyph / sprite batches where the first referenced
-  vertex is well above zero.
-- **Faster `surface_ranges` insert / remove.** Insert uses a
-  `lower_bound` binary search instead of the linear `while` probe;
-  remove consults a cached `surface_range_slot` index stored on
-  `SurfaceBinding` instead of scanning the table for pointer
-  equality. `memmove` cost is unchanged (array stays sorted by
-  `start`); asymptotic find goes from O(n) to O(1) for remove and
-  O(log n) for insert. Defensive assert on the remove path catches
-  any missed `surface_range_slot` init.
+- **Narrowed GPU-side synchronization.** `pgraph_vk_upload_surface_-
+  data`'s full GPU sync only fires when the target surface is the
+  active color/zeta binding or a CB is recording; otherwise
+  MoltenVK's single-queue serialization + aux-CB fence wait suffice.
+  `invalidate_overlapping_surfaces` collects into a 64-entry stack
+  array in a single pass instead of two passes via `g_newa`.
+- **Draw-path dedup caches.** `vkCmdBindVertexBuffers`,
+  `vkCmdPushConstants` (inline uniform attrs, keyed on layout),
+  and a scaled `surface_binding_dim` cache all memcmp against the
+  last CB-scoped value and skip on match. Reset alongside
+  `dynstate_cache_valid` on CB begin.
 - **Pipeline-rebuild decoupled from texture rebind.**
   `check_pipeline_dirty` no longer treats `texture_bindings_changed`
-  as pipeline-dirty. `PipelineKey` contains no texture identity
-  (render-pass state, shader state, 5 raster/blend regs, vertex
-  layout); a rebind only affects descriptor set 1, which already
-  refreshes independently via `pgraph_vk_update_descriptor_sets`.
-  The common texture-change-per-draw case now hits the fast-out,
-  avoiding `init_pipeline_key` + sub-hashes + LRU lookup.
-- **`vkCmdBindVertexBuffers` dedup.** `bind_vertex_buffer` memcmp's
-  the would-be `buffers[]` / `offsets[]` against the last issued
-  bind on the same CB; matches skip the Vulkan call. Reset on CB
-  begin alongside `dynstate_cache_valid`. Kills the per-flush
-  vertex-bind call when back-to-back flushes hit the same mesh
-  (common during material swaps / instanced-style draws).
-- **`vkCmdPushConstants` dedup for inline uniform attrs.**
-  `push_vertex_attr_values` caches the last payload + pipeline
-  layout + attr count on the CB; skips the push when all three
-  match. Layout handle is part of the fingerprint, so a pipeline
-  rebind to a different layout implicitly busts the cache without
-  a separate invalidation hook. Big win on fixed-function-transform
-  titles that keep inline uniform attrs constant across many draws.
-- **Micro-polish: cached scaled binding-dim + single-pass surface
-  overlap.** `begin_draw` / `begin_render_pass` now pull the scaled
-  `surface_binding_dim.{width,height}` from a small cache in
-  `PGRAPHVkState` instead of recomputing on every pipeline bind;
-  invalidated only at surface-bind + scale-factor changes.
-  `invalidate_overlapping_surfaces` collects overlapping
-  `SurfaceBinding *` into a 64-entry stack array in a single pass
-  (with a re-entrant fallback for the rare >64 overlap case)
-  instead of two passes via `g_newa`. Microscopic — ships as code
-  hygiene rather than measurable perf.
+  as pipeline-dirty; `PipelineKey` contains no texture identity
+  so set-1 refresh via `pgraph_vk_update_descriptor_sets` is
+  sufficient. Fast-out hits the common texture-change-per-draw case.
+- **Narrowed remapped-attribute staging.** `pgraph_vk_bind_vertex_-
+  attributes` shifts `vertex_attribute_offsets[i]` by
+  `min_element * stride`; `remap_unaligned_attributes` +
+  `copy_remapped_attributes_to_inline_buffer` only size and copy
+  `[min_element..max_element]`. Draws rebase via
+  `firstVertex - min_element` / `vertexOffset = -min_element`.
+- **`surface_ranges` insert / remove.** `lower_bound` insert
+  (O(log n)) and cached `surface_range_slot` remove (O(1)) replace
+  the prior linear scans; `memmove` cost unchanged.
 - **Shader-uniform pull gated on a dirty flag (both renderers).**
-  `update_shader_uniforms` used to run unconditionally on every
-  shader bind, memcpy'ing ~800 bytes of `ltctxa/ltctxb/ltc1/
-  vsh_constants` into the UBO staging buffer plus reading PGRAPH
-  regs and inline attribute values. Added
-  `pg->shader_uniform_inputs_dirty` — set by `pgraph_reg_w`, every
-  writer of `ltctxa/ltctxb/ltc1/vsh_constants` in `pgraph.c` +
-  `rdi.c`, every `vertex_attributes[].inline_value` write (through
-  `pgraph_allocate_inline_buffer_vertices`, which all inline_value
-  writers call first), every GL texture rebind, and renderer
-  switch. `pgraph_vk_bind_shaders` and `pgraph_gl_bind_shaders`
-  skip `update_shader_uniforms` when the flag plus shader/texture
-  rebind bits are all clean; cleared after the call runs.
-  `pgraph_update_inline_value` now memcmp's against the current
-  value and only marks dirty on actual change, so VRAM-streamed
-  vertex data doesn't defeat the gate for unchanged per-draw
-  attributes. Measurable on draw-heavy titles that don't rewrite
-  every uniform input per draw.
+  `pg->shader_uniform_inputs_dirty` is set by `pgraph_reg_w`, every
+  `ltctxa/ltctxb/ltc1/vsh_constants` writer, every
+  `vertex_attributes[].inline_value` writer (via
+  `pgraph_allocate_inline_buffer_vertices`), GL texture rebinds, and
+  renderer switch. `pgraph_vk_bind_shaders` /
+  `pgraph_gl_bind_shaders` skip `update_shader_uniforms` when the
+  flag plus shader/texture rebind bits are clean.
+  `pgraph_update_inline_value` memcmp's before write so identical
+  VRAM data doesn't defeat the gate.
 
 ### MetalFX + presentation
 
@@ -216,12 +176,10 @@ fine tuning.
 - **IOSurface lifetime.** `IOSurfaceGetID` is the cache key; output
   width capped at 1920 to work around a macOS 26 BGRA
   `bytesPerRow` bug.
-- **Correct `deltaTime` units for `MTLFXFrameInterpolator`.** Host-
-  monotonic timestamps (`QEMU_CLOCK_HOST`) are captured at each
-  input-frame `CFRetain`; `interp.deltaTime` now gets the wall-clock
-  seconds between the two inputs (clamped to `[1/240, 1/10]` s), per
-  Apple's API contract, instead of a unitless `(index+1)/(total+1)`
-  ratio. Reduces ghosting / motion-vector lag on fast pans.
+- **Correct `MTLFXFrameInterpolator.deltaTime`.** Wall-clock seconds
+  between the two input-frame `CFRetain`s (`QEMU_CLOCK_HOST`,
+  clamped `[1/240, 1/10]` s) instead of a unitless ratio. Reduces
+  ghosting on fast pans.
 
 ### MCPX APU
 
@@ -360,29 +318,28 @@ entry it would need to sidestep, or describes the blocking work.
   currently waits fully; chain ordered commits via semaphores.
 - **Query-pool drain at slot reclaim.** `vkGetQueryPoolResults` with
   `WAIT_BIT` stalls per-submit; move the drain into the flight-slot
-  fence wait.
-- **`pgraph_vk_upload_surface_data` flush narrowing.** Skip the
-  unconditional `pgraph_vk_finish` when the target surface isn't bound
-  to the open render pass.
+  fence wait (careful: the current `wait_for_previous_flight` waits a
+  different slot than the one carrying the queries).
 - **LRU eviction fast path.** `lru_try_evict_one` walks the tail
   linearly; aux evictable queue or per-slot bitmask.
-- **`MTLFXFrameInterpolator` `deltaTime` in seconds.** Currently fed a
-  frame-sequence ratio; feed wall-clock seconds for better temporal IQ.
+- **Decoupled guest-vblank IRQ timer.** The reverted "vblank cadence
+  to host refresh" experiment died because the host timer also
+  drives the guest `NV_PCRTC_INTR_0_VBLANK` IRQ. A dedicated
+  NV2A-model timer for the guest IRQ (fixed 60 Hz NTSC / 50 Hz
+  PAL) would let the host present path retune for ProMotion
+  smoothness without touching guest simulation speed.
 - **Voice-register writeback batching.** Defer `ram_stl` in
-  `voice_set_mask` to a single `memcpy` at end of `voice_process` (behavior
-  risk: mid-frame MMIO reads see stale data).
+  `voice_set_mask` to a single `memcpy` at end of `voice_process`
+  (behavior risk: mid-frame MMIO reads see stale data).
 - **`qemu_cpu_kick` via `dispatch_semaphore_t`.** `pthread_kill(SIGUSR1)`
   has ~50 µs P99 jitter on macOS 26.
-- **Vblank cadence aligned to host refresh.** `ui/xemu.c` hardcodes 60 Hz;
-  align to `SDL_GetDisplayMode` for 120 Hz ProMotion smoothness.
 - **TCG AArch64 3-MOVK constant materialization.** Beats the literal-pool
   LDR latency on Apple chips.
 - **Cross-TB FPCR elision.** `cached_fpuc_rc` as a TCG global register
   across chained TBs → pure register compare instead of memory reload.
-- **DSP JIT parmove+ALU fusion.** With pinning in place the save/restore
-  dance is already 1-insn UBFX; remaining fold candidates are shape-
-  specific (skip redundant `save_reg` → mem → reg round-trips when the
-  parmove's own destination provides the same value).
+- **DSP JIT parmove+ALU fusion.** Shape-specific redundant
+  `save_reg` → mem → reg round-trips when the parmove's own
+  destination provides the same value.
 
 ---
 
