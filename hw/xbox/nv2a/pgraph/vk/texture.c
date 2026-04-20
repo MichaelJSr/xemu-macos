@@ -922,11 +922,78 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
                 kelvin_color_format_info_map[state->color_format];
             VkDeviceSize level_offset = base_offset;
 
+            /*
+             * BUFFER_COMPUTE_DST / BUFFER_COMPUTE_SRC are single, shared
+             * scratch buffers reused by every compute-path user of this
+             * command buffer (this loop across (layer, level), successive
+             * upload_texture_image calls, and surface.c / display.c
+             * compute ops). The pre_compute / post_compute barriers below
+             * cover the RAW hazards within one iteration, but the WAR
+             * hazards across iterations (and across uploads) aren't
+             * covered anywhere else: the compute dispatch may still be
+             * reading DST when the next vkCmdCopyBuffer begins
+             * overwriting it, and the vkCmdCopyBufferToImage may still
+             * be reading SRC when the next compute dispatch begins
+             * overwriting it. Emit one WAR pair up front to serialise
+             * against any prior compute user in this CB, and another at
+             * the top of each non-first loop iteration.
+             */
+            VkBufferMemoryBarrier war_barriers[2] = {
+                { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                  .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                  .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                  .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                  .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                  .buffer =
+                      r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
+                  .offset = 0,
+                  .size = VK_WHOLE_SIZE },
+                { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                  .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                  .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                  .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                  .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                  .buffer =
+                      r->storage_buffers[BUFFER_COMPUTE_SRC].buffer,
+                  .offset = 0,
+                  .size = VK_WHOLE_SIZE },
+            };
+            vkCmdPipelineBarrier(
+                cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, NULL, ARRAY_SIZE(war_barriers), war_barriers, 0,
+                NULL);
+
+            bool first_unswizzle_iter = true;
+
             for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
                 for (int level_idx = 0; level_idx < state->levels;
                      level_idx++) {
                     TextureLevel *level =
                         &layout->layers[layer_idx].levels[level_idx];
+
+                    if (!first_unswizzle_iter) {
+                        /*
+                         * WAR fence between iterations:
+                         *   DST: prev compute SHADER_READ -> next TRANSFER_WRITE
+                         *   SRC: prev TRANSFER_READ      -> next SHADER_WRITE
+                         * Execution dependency is what matters for WAR;
+                         * the access masks are specified for clarity and
+                         * so validation layers emit useful diagnostics.
+                         */
+                        vkCmdPipelineBarrier(
+                            cmd,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 0, NULL, ARRAY_SIZE(war_barriers),
+                            war_barriers, 0, NULL);
+                    }
+                    first_unswizzle_iter = false;
 
                     VkBufferCopy swz_copy = {
                         .srcOffset = level_offset,
