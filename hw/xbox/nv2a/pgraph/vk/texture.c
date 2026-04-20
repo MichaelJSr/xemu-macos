@@ -81,6 +81,13 @@ typedef struct TextureLevel {
     void *decoded_data;
     size_t decoded_size;
     bool gpu_unswizzle;
+    /*
+     * True when decoded_data is heap-owned (g_malloc) and must be
+     * g_free'd by upload_texture_image. False when decoded_data
+     * aliases the caller-owned VRAM snapshot — used by the
+     * GPU-unswizzle path to skip the per-level intermediate copy.
+     */
+    bool decoded_data_owned;
     unsigned int unswizzle_width, unswizzle_height;
 } TextureLevel;
 
@@ -265,9 +272,16 @@ static bool texture_format_needs_data_conversion(int color_format)
     }
 }
 
-static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
+/*
+ * texture_snapshot / palette_snapshot are caller-owned VRAM snapshots
+ * used in place of live d->vram_ptr reads to avoid torn-read races
+ * against the guest CPU. palette_snapshot may be NULL when the format
+ * is not indexed. See create_texture() for the full protocol.
+ */
+static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
+                                         const void *texture_snapshot,
+                                         const void *palette_snapshot)
 {
-    NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape s = pgraph_get_texture_shape(pg, texture_idx);
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
@@ -297,14 +311,11 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
     }
     nv2a_vk_assert(s.dimensionality > 1);
 
-    const hwaddr texture_vram_offset = pgraph_get_texture_phys_addr(pg, texture_idx);
-    void *texture_data_ptr = (char *)d->vram_ptr + texture_vram_offset;
+    nv2a_vk_assert(texture_snapshot != NULL);
 
-    size_t texture_palette_data_size;
-    const hwaddr texture_palette_vram_offset =
-        pgraph_get_texture_palette_phys_addr_length(pg, texture_idx,
-                                                    &texture_palette_data_size);
-    void *palette_data_ptr = (char *)d->vram_ptr + texture_palette_vram_offset;
+    const hwaddr texture_vram_offset = pgraph_get_texture_phys_addr(pg, texture_idx);
+    void *texture_data_ptr = (void *)texture_snapshot;
+    void *palette_data_ptr = (void *)palette_snapshot;
 
     unsigned int adjusted_width = s.width, adjusted_height = s.height,
                  adjusted_pitch = s.pitch, adjusted_depth = s.depth;
@@ -342,6 +353,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             .depth = 1,
             .decoded_size = converted_size,
             .decoded_data = converted,
+            .decoded_data_owned = true,
         };
 
         NV2A_VK_DGROUP_END();
@@ -376,7 +388,8 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
             for (int layer = 0; layer < num_layers; layer++) {
                 unsigned int width = adjusted_width, height = adjusted_height;
                 hwaddr layer_addr = texture_vram_offset + layer * layer_size;
-                void *layer_ptr = (char *)d->vram_ptr + layer_addr;
+                uint8_t *layer_ptr =
+                    (uint8_t *)texture_snapshot + layer * layer_size;
 
                 for (int level = 0; level < s.levels; level++) {
                     width = MAX(width, 1);
@@ -384,28 +397,33 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
 
                     size_t sz = width * height * f.bytes_per_pixel;
 
-                    void *raw_copy = g_malloc(sz);
-                    memcpy(raw_copy, layer_ptr, sz);
-
                     unsigned int tex_w = width, tex_h = height;
                     if (s.cubemap && adjusted_width != s.width) {
                         tex_w = s.width;
                         tex_h = s.height;
                     }
 
+                    /*
+                     * The compute shader unswizzles raw swizzled
+                     * bytes, so decoded_data points into the
+                     * caller's snapshot directly (no per-level
+                     * memcpy). decoded_data_owned=false skips the
+                     * free at the end of upload_texture_image.
+                     */
                     layout->layers[layer].levels[level] = (TextureLevel){
                         .width = tex_w,
                         .height = tex_h,
                         .depth = 1,
                         .vram_addr = layer_addr,
                         .decoded_size = sz,
-                        .decoded_data = raw_copy,
+                        .decoded_data = layer_ptr,
                         .gpu_unswizzle = true,
+                        .decoded_data_owned = false,
                         .unswizzle_width = width,
                         .unswizzle_height = height,
                     };
 
-                    layer_ptr = (char *)layer_ptr + sz;
+                    layer_ptr += sz;
                     layer_addr += sz;
                     width /= 2;
                     height /= 2;
@@ -420,8 +438,8 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         int task_idx = 0;
         for (int layer = 0; layer < num_layers; layer++) {
             unsigned int width = adjusted_width, height = adjusted_height;
-            void *layer_ptr = (char *)d->vram_ptr + texture_vram_offset +
-                              layer * layer_size;
+            void *layer_ptr =
+                (char *)texture_snapshot + layer * layer_size;
 
             for (int level = 0; level < s.levels; level++) {
                 width = MAX(width, 1);
@@ -486,6 +504,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                     .depth = 1,
                     .decoded_size = t->decoded_size,
                     .decoded_data = t->decoded_data,
+                    .decoded_data_owned = true,
                 };
                 width /= 2;
                 height /= 2;
@@ -555,6 +574,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 .depth = t->depth,
                 .decoded_size = t->decoded_size,
                 .decoded_data = t->decoded_data,
+                .decoded_data_owned = true,
             };
         }
         g_free(tasks);
@@ -794,7 +814,9 @@ static bool check_texture_possibly_dirty(NV2AState *d,
 }
 
 static void upload_texture_image(PGRAPHState *pg, int texture_idx,
-                                 TextureBinding *binding)
+                                 TextureBinding *binding,
+                                 const void *texture_snapshot,
+                                 const void *palette_snapshot)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape *state = &binding->key.state;
@@ -802,7 +824,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
 
-    g_autofree TextureLayout *layout = get_texture_layout(pg, texture_idx);
+    g_autofree TextureLayout *layout =
+        get_texture_layout(pg, texture_idx, texture_snapshot, palette_snapshot);
     const int num_layers = state->cubemap ? 6 : 1;
 
     bool has_gpu_unswizzle = layout->layers[0].levels[0].gpu_unswizzle;
@@ -1087,11 +1110,15 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
         pgraph_vk_end_debug_marker(r, cmd);
     }
 
-    // Release decoded texture data
+    // Release only heap-owned decoded buffers; GPU-unswizzle levels
+    // alias the caller's VRAM snapshot and must not be freed here.
     for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
         TextureLayer *layer = &layout->layers[layer_idx];
         for (int level_idx = 0; level_idx < state->levels; level_idx++) {
-            g_free(layer->levels[level_idx].decoded_data);
+            TextureLevel *lvl = &layer->levels[level_idx];
+            if (lvl->decoded_data_owned) {
+                g_free(lvl->decoded_data);
+            }
         }
     }
 }
@@ -1986,15 +2013,92 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         }
     }
 
+    /*
+     * Snapshot VRAM once when we're about to upload and use the
+     * snapshot for both the re-hash and the upload source. Closes a
+     * CPU-CPU tear race between guest VRAM writes and our
+     * memcpy / decode pass — symptom was single-frame Morton-tiled
+     * magenta flashes on 2/4-bpp POT textures under heavy CPU
+     * contention. The post-snapshot dirty re-check catches guest
+     * writes that landed during the copy and forces a clean
+     * re-upload on the next frame. Snapshot buffers live on
+     * PGRAPHVkState and grow to the high-water mark to avoid
+     * per-upload g_malloc churn under atlas streaming.
+     */
+    uint8_t *texture_snapshot = NULL;
+    uint8_t *palette_snapshot = NULL;
+    bool torn_read = false;
+    uint64_t snapshot_hash = content_hash;
+
+    bool will_upload_data =
+        !surface_to_texture &&
+        (!binding_found || (possibly_dirty && content_hash != snode->hash));
+
+    if (will_upload_data) {
+        if (r->texture_snapshot_buf_capacity < texture_length) {
+            r->texture_snapshot_buf =
+                g_realloc(r->texture_snapshot_buf, texture_length);
+            r->texture_snapshot_buf_capacity = texture_length;
+        }
+        texture_snapshot = r->texture_snapshot_buf;
+        memcpy(texture_snapshot, texture_data, texture_length);
+
+        if (is_indexed) {
+            if (r->palette_snapshot_buf_capacity < texture_palette_data_size) {
+                r->palette_snapshot_buf = g_realloc(
+                    r->palette_snapshot_buf, texture_palette_data_size);
+                r->palette_snapshot_buf_capacity = texture_palette_data_size;
+            }
+            palette_snapshot = r->palette_snapshot_buf;
+            memcpy(palette_snapshot, palette_data,
+                   texture_palette_data_size);
+        }
+
+        /*
+         * Dirty bits on our range were cleared earlier; if any are
+         * set now a guest write landed during the memcpy above.
+         * Record torn_read and mark the binding possibly_dirty so
+         * the next frame re-hashes and re-uploads cleanly.
+         */
+        if (check_texture_dirty(d, texture_vram_offset, texture_length)) {
+            torn_read = true;
+        }
+        if (is_indexed &&
+            check_texture_dirty(d, texture_palette_vram_offset,
+                                texture_palette_data_size)) {
+            torn_read = true;
+        }
+
+        snapshot_hash = fast_hash(texture_snapshot, texture_length);
+        if (is_indexed) {
+            snapshot_hash ^= fast_hash(palette_snapshot,
+                                       texture_palette_data_size);
+        }
+
+        if (torn_read) {
+            pgraph_vk_mark_textures_possibly_dirty(d, texture_vram_offset,
+                                                   texture_length);
+            if (is_indexed) {
+                pgraph_vk_mark_textures_possibly_dirty(
+                    d, texture_palette_vram_offset,
+                    texture_palette_data_size);
+            }
+        }
+    }
+
     if (binding_found) {
         if (surface_to_texture) {
             if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
         } else {
-            if (possibly_dirty && content_hash != snode->hash) {
-                upload_texture_image(pg, texture_idx, snode);
-                snode->hash = content_hash;
+            if (will_upload_data && snapshot_hash != snode->hash) {
+                upload_texture_image(pg, texture_idx, snode,
+                                     texture_snapshot, palette_snapshot);
+                snode->hash = snapshot_hash;
+                if (torn_read) {
+                    snode->possibly_dirty = true;
+                }
             }
         }
 
@@ -2006,8 +2110,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     memcpy(&snode->key, &key, sizeof(key));
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    snode->possibly_dirty = false;
-    snode->hash = content_hash;
+    snode->possibly_dirty = torn_read;
+    snode->hash = snapshot_hash;
 
     /*
      * Register the binding in the VRAM spatial index so subsequent
@@ -2083,7 +2187,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     if (surface_to_texture) {
         copy_surface_to_texture(pg, surface, snode);
     } else {
-        upload_texture_image(pg, texture_idx, snode);
+        upload_texture_image(pg, texture_idx, snode, texture_snapshot,
+                             palette_snapshot);
         snode->draw_time = 0;
     }
 
@@ -2243,6 +2348,13 @@ static void texture_cache_finalize(PGRAPHVkState *r)
     tex_dirty_buckets_finalize(r);
     g_free(r->texture_cache_entries);
     r->texture_cache_entries = NULL;
+
+    g_free(r->texture_snapshot_buf);
+    r->texture_snapshot_buf = NULL;
+    r->texture_snapshot_buf_capacity = 0;
+    g_free(r->palette_snapshot_buf);
+    r->palette_snapshot_buf = NULL;
+    r->palette_snapshot_buf_capacity = 0;
 }
 
 static void sampler_cache_entry_init(Lru *lru, LruNode *node, const void *state)

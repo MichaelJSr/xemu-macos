@@ -171,12 +171,16 @@ In-app Settings covers the main toggles.
   fast-out path don't inherit the overrides. PVIDEO non-coherent
   flush uses `row_bytes * in_height` (exact CPU-written range)
   instead of `yuv_size` (short for odd `in_width`). GPU-unswizzle
-  upload loop emits WAR fences on `BUFFER_COMPUTE_DST` /
-  `BUFFER_COMPUTE_SRC` between iterations and once up-front per
-  upload; without them the per-iteration RAW barriers let
-  consecutive mips / layers (and back-to-back uploads sharing the
-  same scratch buffers) race, showing as single-frame Morton-tiled
-  magenta flashes on 2/4-bpp textures.
+  upload emits WAR fences on `BUFFER_COMPUTE_DST` /
+  `BUFFER_COMPUTE_SRC` between iterations and once up-front.
+  `create_texture` snapshots guest VRAM once into a grow-only
+  scratch on `PGRAPHVkState`, hashes + uploads from the snapshot,
+  and re-checks the dirty bitmap afterwards; closes the CPU-CPU
+  tear race between guest writes and the renderer memcpy that
+  otherwise showed as single-frame Morton-tiled magenta flashes
+  on 2/4-bpp textures under heavy contention. GPU-unswizzle levels
+  point `TextureLevel.decoded_data` directly into the snapshot,
+  dropping the per-level intermediate copy.
 
 ### MetalFX + presentation
 

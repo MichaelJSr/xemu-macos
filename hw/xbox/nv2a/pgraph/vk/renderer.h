@@ -654,6 +654,16 @@ typedef struct PGRAPHVkState {
     GPtrArray **tex_dirty_buckets;
     uint32_t tex_dirty_num_buckets;
 
+    /*
+     * High-water-mark scratch buffers for the per-upload guest-VRAM
+     * snapshot (see create_texture()). Grown via g_realloc and
+     * released in pgraph_vk_finalize_textures.
+     */
+    uint8_t *texture_snapshot_buf;
+    size_t texture_snapshot_buf_capacity;
+    uint8_t *palette_snapshot_buf;
+    size_t palette_snapshot_buf_capacity;
+
     Lru sampler_cache;
     SamplerCacheEntry *sampler_cache_entries;
     SamplerCacheEntry *sampler_bindings[NV2A_MAX_TEXTURES];
