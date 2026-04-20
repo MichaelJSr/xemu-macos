@@ -550,6 +550,18 @@ typedef struct PGRAPHVkState {
     VkDeviceSize last_vertex_bind_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
     /*
+     * Per-command-buffer cache of the last vkCmdBindIndexBuffer call.
+     * Mirror of last_vertex_bind_*: indexed-draw bursts (glyph / sprite
+     * batches, repeated meshes during material swaps) can bind the
+     * same index buffer back-to-back. Reset in
+     * pgraph_vk_begin_command_buffer.
+     */
+    bool last_index_bind_valid;
+    VkBuffer last_index_bind_buffer;
+    VkDeviceSize last_index_bind_offset;
+    VkIndexType last_index_bind_type;
+
+    /*
      * Per-command-buffer + per-layout cache of the last
      * vkCmdPushConstants payload. Push constants are CB-scoped AND
      * owned by a specific VkPipelineLayout; the layout handle is
@@ -594,7 +606,21 @@ typedef struct PGRAPHVkState {
     VkVertexInputBindingDescription vertex_binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     int num_active_vertex_binding_descriptions;
     bool vertex_state_dirty;
-    uint64_t vertex_layout_hash;
+
+    /*
+     * Snapshot of the last-bound vertex layout. Compared with memcmp
+     * to decide whether pg->vertex_state_dirty should flip — replaces
+     * a pair of fast_hash passes (attr + binding) that used to fold
+     * into vertex_layout_hash. memcmp has no multiplier chain and
+     * short-circuits on first mismatch; the stored snapshot is the
+     * ground truth for subsequent compares.
+     */
+    VkVertexInputAttributeDescription prev_vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkVertexInputBindingDescription prev_vertex_binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
+    int prev_num_active_vertex_attribute_descriptions;
+    int prev_num_active_vertex_binding_descriptions;
+    bool vertex_layout_snapshot_valid;
+
     hwaddr vertex_attribute_offsets[NV2A_VERTEXSHADER_ATTRIBUTES];
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
@@ -613,6 +639,20 @@ typedef struct PGRAPHVkState {
     bool texture_bindings_changed;
     VkFormatProperties *texture_format_properties;
     GThreadPool *decode_thread_pool;
+
+    /*
+     * Spatial index over VRAM byte ranges covered by active texture
+     * cache entries. Each bucket holds the TextureBinding pointers
+     * whose key.texture_* or key.palette_* range overlaps the
+     * bucket's byte range. pgraph_vk_mark_textures_possibly_dirty
+     * scans only the buckets the dirty range actually touches instead
+     * of walking every active LRU entry. Lazily initialized on first
+     * call (when we first know vram size); entries maintained via
+     * tex_dirty_buckets_insert / _remove hooks at cache-miss /
+     * eviction sites.
+     */
+    GPtrArray **tex_dirty_buckets;
+    uint32_t tex_dirty_num_buckets;
 
     Lru sampler_cache;
     SamplerCacheEntry *sampler_cache_entries;

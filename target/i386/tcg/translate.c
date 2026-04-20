@@ -1815,6 +1815,29 @@ static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
     fp_pc_wrapper(gen_fmov_STN_ST0)(s, st_index);
 }
 
+static void gen_ffree_STN(DisasContext *s, int st_index)
+{
+    GEN_HELPER_FALLBACK_v_i(ffree_STN, st_index);
+
+    /*
+     * Inline: env->fptags[(env->fpstt + st_index) & 7] = 1.
+     * Same shape as the fdecstp / fincstp inlines (single byte
+     * write into the tag word; no register spill, no env fpus
+     * change — ffree only marks the tag slot empty). Saves a
+     * helper call frame per freep / ffreep.
+     */
+    TCGv_i32 idx = tcg_temp_new_i32();
+    tcg_gen_addi_i32(idx, fpstt, st_index);
+    tcg_gen_andi_i32(idx, idx, 7);
+
+    TCGv_ptr p = tcg_temp_new_ptr();
+    tcg_gen_ext_i32_ptr(p, idx);
+    tcg_gen_add_ptr(p, tcg_env, p);
+
+    tcg_gen_st8_i32(tcg_constant_i32(1), p,
+                    offsetof(CPUX86State, fptags[0]));
+}
+
 static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 {
     GEN_HELPER_FALLBACK_v_i(fxchg_ST0_STN, st_index);
@@ -1915,6 +1938,52 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg);
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
+}
+
+static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
+{
+    GEN_HELPER_FALLBACK_T_v(fist_ST0, arg);
+    fp_pc_wrapper(gen_fist_ST0)(s, arg);
+}
+
+/*
+ * FISTTP must always truncate toward zero regardless of FPCR RC.
+ * The inline path in ops_fpu.h emits tcg_gen_cvt_f{32,64}_i{32,64},
+ * which lowers to FCVTZS (hard truncate) on AArch64 but to
+ * CVTSS2SI / CVTSD2SI on x86_64 — the x86 op respects MXCSR, which
+ * gen_flcr has programmed to the *guest's* general RC (not
+ * necessarily truncate). On non-AArch64 hosts that divergence
+ * would round FISTTP instead of truncating it, so fall back to the
+ * floatx80 helper. AArch64 hosts keep the inline convert.
+ */
+static void gen_fistt_ST0(DisasContext *s, TCGv_i32 arg)
+{
+    GEN_HELPER_FALLBACK_T_v(fistt_ST0, arg);
+#if !defined(__aarch64__)
+    gen_helper_fistt_ST0(arg, tcg_env);
+    return;
+#endif
+    fp_pc_wrapper(gen_fistt_ST0)(s, arg);
+}
+
+static void gen_fisttl_ST0(DisasContext *s, TCGv_i32 arg)
+{
+    GEN_HELPER_FALLBACK_T_v(fisttl_ST0, arg);
+#if !defined(__aarch64__)
+    gen_helper_fisttl_ST0(arg, tcg_env);
+    return;
+#endif
+    fp_pc_wrapper(gen_fisttl_ST0)(s, arg);
+}
+
+static void gen_fisttll_ST0(DisasContext *s, TCGv_i64 arg)
+{
+    GEN_HELPER_FALLBACK_T_v(fisttll_ST0, arg);
+#if !defined(__aarch64__)
+    gen_helper_fisttll_ST0(arg, tcg_env);
+    return;
+#endif
+    fp_pc_wrapper(gen_fisttll_ST0)(s, arg);
 }
 
 static void gen_fchs_ST0(DisasContext *s)
@@ -3137,18 +3206,18 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 /* XXX: the corresponding CPUID bit must be tested ! */
                 switch (op >> 4) {
                 case 1:
-                    gen_helper_fisttl_ST0(s->tmp2_i32, tcg_env);
+                    gen_fisttl_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     break;
                 case 2:
-                    gen_helper_fisttll_ST0(s->tmp1_i64, tcg_env);
+                    gen_fisttll_ST0(s, s->tmp1_i64);
                     tcg_gen_qemu_st_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);
                     break;
                 case 3:
                 default:
-                    gen_helper_fistt_ST0(s->tmp2_i32, tcg_env);
+                    gen_fistt_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUW);
                     break;
@@ -3174,7 +3243,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     break;
                 case 3:
                 default:
-                    gen_helper_fist_ST0(s->tmp2_i32, tcg_env);
+                    gen_fist_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUW);
                     break;
@@ -3584,7 +3653,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x28: /* ffree sti */
-            gen_helper_ffree_STN(tcg_env, tcg_constant_i32(opreg));
+            gen_ffree_STN(s, opreg);
             break;
         case 0x2a: /* fst sti */
             gen_fmov_STN_ST0(s, opreg);
@@ -3626,7 +3695,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x38: /* ffreep sti, undocumented op */
-            gen_helper_ffree_STN(tcg_env, tcg_constant_i32(opreg));
+            gen_ffree_STN(s, opreg);
             gen_fpop(s);
             break;
         case 0x3c: /* df/4 */

@@ -108,7 +108,14 @@ static inline void ram_stb(MCPXAPUState *d, hwaddr addr, uint8_t val)
 static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                               int status)
 {
-    hwaddr notify_offset = d->regs[NV_PAPU_FENADDR];
+    /*
+     * mcpx_apu_read / _write pair these register slots with
+     * qatomic_read / _set; match that contract so guest MMIO and the
+     * VP thread agree on the current notifier base even on weakly
+     * ordered hosts where a guest FENADDR write can otherwise race
+     * against an in-progress voice notify.
+     */
+    hwaddr notify_offset = qatomic_read(&d->regs[NV_PAPU_FENADDR]);
     notify_offset += 16 * (MCPX_HW_NOTIFIER_BASE_OFFSET +
                            v * MCPX_HW_NOTIFIER_COUNT + notifier);
     notify_offset += 15; // Final byte is status, same for all notifiers
@@ -216,15 +223,34 @@ static void apu_init_luts(void)
     g_apu_luts_initialized = true;
 }
 
-/* Lookup helper with saturation and linear interpolation. */
+/*
+ * Lookup helper with saturation and linear interpolation. Most
+ * callers feed `s` already clamped to [0, 1], so the early-out
+ * branches above were reliably taken on boundary samples and
+ * reliably NOT taken in the middle — fine for branch predictors
+ * but still a pair of compares + conditional returns. Clamping
+ * `scaled` with fminf/fmaxf is branchless (single FMIN/FMAX on
+ * AArch64) and produces the same result for in-range inputs while
+ * giving lut[0] / lut[N-1] exactly at the boundaries. NaN inputs
+ * fall through to idx = 0 after the min (IEEE min/max treat NaN
+ * conservatively), matching the "saturate at boundary" spirit of
+ * the previous branching form.
+ */
 static inline float env_lut_lookup(const float *lut, float s)
 {
-    if (s <= 0.0f) return lut[0];
-    if (s >= 1.0f) return lut[ENV_LUT_SIZE - 1];
-    float scaled = s * (float)(ENV_LUT_SIZE - 1);
+    float scaled = fminf(fmaxf(s, 0.0f), 1.0f) *
+                   (float)(ENV_LUT_SIZE - 1);
     int idx = (int)scaled;
+    /*
+     * `idx` is in [0, ENV_LUT_SIZE - 1] because scaled is clamped
+     * to [0, ENV_LUT_SIZE - 1] and truncating a non-negative float
+     * cannot round up. Guard `idx + 1` at the top boundary so the
+     * interpolation falls back to the last entry without reading
+     * out of bounds.
+     */
+    int next = idx + (idx < ENV_LUT_SIZE - 1);
     float frac = scaled - (float)idx;
-    return lut[idx] + frac * (lut[idx + 1] - lut[idx]);
+    return lut[idx] + frac * (lut[next] - lut[idx]);
 }
 
 static float attenuate(uint16_t vol)
@@ -240,15 +266,48 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
     if (buf) {
         return (ldl_le_p(&buf[offset / 4]) & mask) >> ctz32(mask);
     }
-    hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
+    /*
+     * Guest may relocate the voice table via an MMIO write to
+     * NV_PAPU_VPVADDR while the VP thread is running (rare but
+     * observed on title transitions). mcpx_apu_read / _write use
+     * qatomic_* on this slot; match the contract here so the voice
+     * base is consistent across weakly-ordered CPUs.
+     */
+    hwaddr voice = qatomic_read(&d->regs[NV_PAPU_VPVADDR]) +
+                   voice_handle * NV_PAVS_SIZE;
     return (ram_ldl(d, voice + offset) & mask) >> ctz32(mask);
+}
+
+/*
+ * Read an entire 32-bit word out of the voice register block. Call
+ * sites that extract multiple bit-ranges from the same word can use
+ * this once and then bit-extract locally, amortizing the
+ * voice_buf / ram_ldl fallback across all fields instead of paying
+ * it per mask lookup (voice_get_mask above). Mirrors voice_get_mask's
+ * fallback contract including the qatomic_read on VPVADDR.
+ */
+static inline uint32_t voice_get_word(MCPXAPUState *d, uint16_t voice_handle,
+                                      hwaddr offset)
+{
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
+    if (buf) {
+        return ldl_le_p(&buf[offset / 4]);
+    }
+    hwaddr voice = qatomic_read(&d->regs[NV_PAPU_VPVADDR]) +
+                   voice_handle * NV_PAVS_SIZE;
+    return ram_ldl(d, voice + offset);
+}
+
+static inline uint32_t extract_field(uint32_t word, uint32_t mask)
+{
+    return (word & mask) >> ctz32(mask);
 }
 
 static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
                            hwaddr offset, uint32_t mask, uint32_t val)
 {
-    hwaddr voice = d->regs[NV_PAPU_VPVADDR]
-                    + voice_handle * NV_PAVS_SIZE;
+    hwaddr voice = qatomic_read(&d->regs[NV_PAPU_VPVADDR]) +
+                   voice_handle * NV_PAVS_SIZE;
     uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
     uint32_t old;
     if (buf) {
@@ -1345,6 +1404,20 @@ static long voice_resample_callback(void *cb_data, float **data)
         sample_count = NUM_SAMPLES_PER_FRAME;
     }
 
+    if (!filter->resampler_stereo) {
+        /*
+         * voice_get_samples writes 2-channel interleaved even for
+         * mono voices (stereo bit off → the inner loop writes [0],
+         * then the end-of-iteration duplicates [0] into [1]).
+         * Compact in place so libsamplerate operates on 1-channel
+         * frames and skips half the linear-interp arithmetic.
+         * Starting at i == 1 avoids the self-assign for index 0.
+         */
+        for (int i = 1; i < sample_count; i++) {
+            filter->resample_buf[i] = filter->resample_buf[2 * i];
+        }
+    }
+
     *data = filter->resample_buf;
     return sample_count;
 }
@@ -1367,32 +1440,76 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
      * cheaply, and the callback overhead is negligible at 48 kHz.
      */
 
+    bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
+                                 NV_PAVS_VOICE_CFG_FMT_STEREO);
+
+    /*
+     * libsamplerate channel count is fixed at creation; a voice-slot
+     * format change (e.g. guest reconfigures a previously-stereo
+     * slot as mono) requires a fresh SRC_STATE. The common case is
+     * no format change per voice activation cycle, so this only
+     * fires on reuse transitions.
+     */
+    if (filter->resampler != NULL && filter->resampler_stereo != stereo) {
+        src_delete(filter->resampler);
+        filter->resampler = NULL;
+    }
+
     if (filter->resampler == NULL) {
         filter->voice = v;
+        filter->resampler_stereo = stereo;
         int err;
 
         /* Xbox MCPX APU uses linear interpolation for pitch shifting. */
-        // FIXME: Don't do 2ch resampling if this is a mono voice
         filter->resampler = src_callback_new(&voice_resample_callback,
-                                           SRC_LINEAR, 2, &err, filter);
+                                             SRC_LINEAR,
+                                             stereo ? 2 : 1, &err, filter);
         if (filter->resampler == NULL) {
             fprintf(stderr, "src error: %s\n", src_strerror(err));
             assert(0);
         }
     }
 
+    if (stereo) {
+        int count = src_callback_read(filter->resampler, rate, requested_num,
+                                      (float *)samples);
+        if (count == -1) {
+            DPRINTF("resample error\n");
+        }
+        if (count != requested_num) {
+            DPRINTF("resample returned fewer than expected: %d\n", count);
+            if (count == 0) {
+                return -1;
+            }
+        }
+        return count;
+    }
+
+    /*
+     * Mono path: libsamplerate writes 1 float per frame into mono_out.
+     * Broadcast each sample into both columns of samples[][2] so all
+     * downstream stereo-in-2-channel consumers (SVF, HRTF, mixbin
+     * accumulation) see the same interleaved layout as before.
+     * mono_out is sized NUM_SAMPLES_PER_FRAME — the outer
+     * voice_process loop never asks for more per call.
+     */
+    assert(requested_num <= NUM_SAMPLES_PER_FRAME);
+    float mono_out[NUM_SAMPLES_PER_FRAME];
     int count = src_callback_read(filter->resampler, rate, requested_num,
-                                  (float *)samples);
+                                  mono_out);
     if (count == -1) {
         DPRINTF("resample error\n");
     }
     if (count != requested_num) {
         DPRINTF("resample returned fewer than expected: %d\n", count);
-
-        if (count == 0)
+        if (count == 0) {
             return -1;
+        }
     }
-
+    for (int i = 0; i < count; i++) {
+        samples[i][0] = mono_out[i];
+        samples[i][1] = mono_out[i];
+    }
     return count;
 }
 
@@ -1496,13 +1613,21 @@ static void voice_process(MCPXAPUState *d,
 {
     assert(v < MCPX_HW_MAX_VOICES);
 
-    hwaddr voice_addr = d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE;
+    hwaddr voice_addr = qatomic_read(&d->regs[NV_PAPU_VPVADDR]) +
+                        v * NV_PAVS_SIZE;
     uint32_t voice_buf[NV_PAVS_SIZE / 4];
-    if (__builtin_expect(voice_addr + NV_PAVS_SIZE <= d->ram_size, 1)) {
-        memcpy(voice_buf, &d->ram_ptr[voice_addr], NV_PAVS_SIZE);
-        d->vp.filters[v].voice_buf = voice_buf;
-    }
+    bool in_ram = __builtin_expect(voice_addr + NV_PAVS_SIZE <= d->ram_size,
+                                   1);
 
+    /*
+     * Peek PAUSED and STEREO from guest RAM before the 128-byte
+     * memcpy. When the voice is paused, the rest of voice_process
+     * short-circuits to cleanup without ever consuming voice_buf —
+     * the memcpy + filters[v].voice_buf assignment are pure waste.
+     * voice_get_mask falls through to ram_ldl when filters[v].voice_buf
+     * is NULL (guaranteed NULL on entry because the cleanup label
+     * resets it on the previous call).
+     */
     bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                  NV_PAVS_VOICE_CFG_FMT_STEREO);
     unsigned int channels = stereo ? 2 : 1;
@@ -1515,7 +1640,19 @@ static void voice_process(MCPXAPUState *d,
     dbg->paused = paused;
 
     if (paused) {
-        goto cleanup;
+        /*
+         * filters[v].voice_buf was never set, so no cleanup needed.
+         * Mirror what the cleanup label would do out of paranoia — it
+         * is already NULL on entry but re-asserting keeps the
+         * invariant obvious to any future reader.
+         */
+        d->vp.filters[v].voice_buf = NULL;
+        return;
+    }
+
+    if (in_ram) {
+        memcpy(voice_buf, &d->ram_ptr[voice_addr], NV_PAVS_SIZE);
+        d->vp.filters[v].voice_buf = voice_buf;
     }
 
     float ef_value = voice_step_envelope(
@@ -1573,62 +1710,67 @@ static void voice_process(MCPXAPUState *d,
     }
 
     /*
-     * 3D voices always overwrite bin[0..3] from the HRTF submix,
-     * so the V0BIN..V3BIN reads on that path are dead work. Split
-     * the two cases to skip four voice_get_mask calls per 3D voice
-     * per frame.
+     * Fold 14 voice_get_mask calls (4 VBIN + 2 VBIN + 2 FMT + 6 VOL +
+     * 6 fragment reads) into 4 full-word reads (VBIN, FMT, VOLA,
+     * VOLB, VOLC) plus bit extracts. Each extract_field call is
+     * constant-mask so ctz32 folds at compile time; the remaining
+     * runtime cost is a single `and+lsr` per field. The three VOL
+     * words would otherwise be touched 10× between them through
+     * voice_get_mask's voice_buf / ram_ldl fallback chain.
+     *
+     * 3D voices (v < MCPX_HW_MAX_3D_VOICES) still overwrite bin[0..3]
+     * from hrtf_submix; we skip the VBIN read entirely on that path
+     * since V0BIN..V5BIN go unused (V4BIN/V5BIN too — the HRTF
+     * submix defines all 4 bins for that voice class per the
+     * existing comment that motivated the original split).
      */
+    uint32_t fmt_word = voice_get_word(d, v, NV_PAVS_VOICE_CFG_FMT);
+
     int bin[8];
     if (v < MCPX_HW_MAX_3D_VOICES) {
         bin[0] = d->vp.hrtf_submix[0];
         bin[1] = d->vp.hrtf_submix[1];
         bin[2] = d->vp.hrtf_submix[2];
         bin[3] = d->vp.hrtf_submix[3];
+        uint32_t vbin_word = voice_get_word(d, v, NV_PAVS_VOICE_CFG_VBIN);
+        bin[4] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V4BIN);
+        bin[5] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V5BIN);
     } else {
-        bin[0] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V0BIN);
-        bin[1] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V1BIN);
-        bin[2] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V2BIN);
-        bin[3] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V3BIN);
+        uint32_t vbin_word = voice_get_word(d, v, NV_PAVS_VOICE_CFG_VBIN);
+        bin[0] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V0BIN);
+        bin[1] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V1BIN);
+        bin[2] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V2BIN);
+        bin[3] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V3BIN);
+        bin[4] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V4BIN);
+        bin[5] = extract_field(vbin_word, NV_PAVS_VOICE_CFG_VBIN_V5BIN);
     }
-    bin[4] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V4BIN);
-    bin[5] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V5BIN);
-    bin[6] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                            NV_PAVS_VOICE_CFG_FMT_V6BIN);
-    bin[7] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                            NV_PAVS_VOICE_CFG_FMT_V7BIN);
+    bin[6] = extract_field(fmt_word, NV_PAVS_VOICE_CFG_FMT_V6BIN);
+    bin[7] = extract_field(fmt_word, NV_PAVS_VOICE_CFG_FMT_V7BIN);
+
+    uint32_t vola_word = voice_get_word(d, v, NV_PAVS_VOICE_TAR_VOLA);
+    uint32_t volb_word = voice_get_word(d, v, NV_PAVS_VOICE_TAR_VOLB);
+    uint32_t volc_word = voice_get_word(d, v, NV_PAVS_VOICE_TAR_VOLC);
 
     uint16_t vol[8];
-    vol[0] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLA,
-                            NV_PAVS_VOICE_TAR_VOLA_VOLUME0);
-    vol[1] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLA,
-                            NV_PAVS_VOICE_TAR_VOLA_VOLUME1);
-    vol[2] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLB,
-                            NV_PAVS_VOICE_TAR_VOLB_VOLUME2);
-    vol[3] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLB,
-                            NV_PAVS_VOICE_TAR_VOLB_VOLUME3);
-    vol[4] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLC,
-                            NV_PAVS_VOICE_TAR_VOLC_VOLUME4);
-    vol[5] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLC,
-                            NV_PAVS_VOICE_TAR_VOLC_VOLUME5);
+    vol[0] = extract_field(vola_word, NV_PAVS_VOICE_TAR_VOLA_VOLUME0);
+    vol[1] = extract_field(vola_word, NV_PAVS_VOICE_TAR_VOLA_VOLUME1);
+    vol[2] = extract_field(volb_word, NV_PAVS_VOICE_TAR_VOLB_VOLUME2);
+    vol[3] = extract_field(volb_word, NV_PAVS_VOICE_TAR_VOLB_VOLUME3);
+    vol[4] = extract_field(volc_word, NV_PAVS_VOICE_TAR_VOLC_VOLUME4);
+    vol[5] = extract_field(volc_word, NV_PAVS_VOICE_TAR_VOLC_VOLUME5);
 
-    vol[6] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLC,
-                            NV_PAVS_VOICE_TAR_VOLC_VOLUME6_B11_8) << 8;
-    vol[6] |= voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLB,
-                             NV_PAVS_VOICE_TAR_VOLB_VOLUME6_B7_4) << 4;
-    vol[6] |= voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLA,
-                             NV_PAVS_VOICE_TAR_VOLA_VOLUME6_B3_0);
-    vol[7] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLC,
-                            NV_PAVS_VOICE_TAR_VOLC_VOLUME7_B11_8) << 8;
-    vol[7] |= voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLB,
-                             NV_PAVS_VOICE_TAR_VOLB_VOLUME7_B7_4) << 4;
-    vol[7] |= voice_get_mask(d, v, NV_PAVS_VOICE_TAR_VOLA,
-                             NV_PAVS_VOICE_TAR_VOLA_VOLUME7_B3_0);
+    vol[6] = (extract_field(volc_word,
+                            NV_PAVS_VOICE_TAR_VOLC_VOLUME6_B11_8) << 8) |
+             (extract_field(volb_word,
+                            NV_PAVS_VOICE_TAR_VOLB_VOLUME6_B7_4) << 4) |
+              extract_field(vola_word,
+                            NV_PAVS_VOICE_TAR_VOLA_VOLUME6_B3_0);
+    vol[7] = (extract_field(volc_word,
+                            NV_PAVS_VOICE_TAR_VOLC_VOLUME7_B11_8) << 8) |
+             (extract_field(volb_word,
+                            NV_PAVS_VOICE_TAR_VOLB_VOLUME7_B7_4) << 4) |
+              extract_field(vola_word,
+                            NV_PAVS_VOICE_TAR_VOLA_VOLUME7_B3_0);
 
     // FIXME: If phase negations means to flip the signal upside down
     //        we should modify volume of bin6 and bin7 here.

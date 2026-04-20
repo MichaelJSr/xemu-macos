@@ -159,9 +159,19 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
     }
 
     if (!r->storage_buffers[BUFFER_STAGING_SRC].is_coherent) {
+        /*
+         * Flush what we actually wrote: the memcpy loop above touches
+         * row_bytes * in_height bytes. For even in_width this matches
+         * yuv_size, but for odd in_width (rare but possible) yuv_size
+         * under-counts by up to 2 * in_height bytes and the flush
+         * would be short on non-coherent memory. The subsequent
+         * vkCmdCopyBuffer still moves yuv_size bytes; a superset
+         * flush is safe.
+         */
         vmaFlushAllocation(r->allocator,
                            r->storage_buffers[BUFFER_STAGING_SRC].allocation,
-                           staging_base, yuv_size);
+                           staging_base,
+                           row_bytes * (size_t)state.in_height);
     }
 
     size_t rgba_size = (size_t)state.in_width * state.in_height * 4;

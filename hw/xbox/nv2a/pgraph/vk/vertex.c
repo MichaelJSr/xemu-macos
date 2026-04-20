@@ -24,7 +24,48 @@
  */
 
 #include "renderer.h"
-#include "qemu/fast-hash.h"
+
+/*
+ * Compare the currently-populated vertex attribute / binding
+ * descriptions against the last-bound snapshot and update the
+ * snapshot + vertex_state_dirty flag accordingly. Replaces a pair
+ * of fast_hash calls with short-circuit memcmp: no multiplier chain
+ * per check, and a mismatch in the count alone skips the memcmp
+ * entirely. Shared between the indexed / raw attribute path and the
+ * inline-buffer path.
+ */
+static void update_vertex_layout_dirty(PGRAPHVkState *r)
+{
+    size_t attr_bytes = r->num_active_vertex_attribute_descriptions *
+                        sizeof(r->vertex_attribute_descriptions[0]);
+    size_t bind_bytes = r->num_active_vertex_binding_descriptions *
+                        sizeof(r->vertex_binding_descriptions[0]);
+
+    bool changed = !r->vertex_layout_snapshot_valid ||
+                   r->prev_num_active_vertex_attribute_descriptions !=
+                       r->num_active_vertex_attribute_descriptions ||
+                   r->prev_num_active_vertex_binding_descriptions !=
+                       r->num_active_vertex_binding_descriptions ||
+                   memcmp(r->prev_vertex_attribute_descriptions,
+                          r->vertex_attribute_descriptions,
+                          attr_bytes) != 0 ||
+                   memcmp(r->prev_vertex_binding_descriptions,
+                          r->vertex_binding_descriptions,
+                          bind_bytes) != 0;
+
+    if (changed) {
+        memcpy(r->prev_vertex_attribute_descriptions,
+               r->vertex_attribute_descriptions, attr_bytes);
+        memcpy(r->prev_vertex_binding_descriptions,
+               r->vertex_binding_descriptions, bind_bytes);
+        r->prev_num_active_vertex_attribute_descriptions =
+            r->num_active_vertex_attribute_descriptions;
+        r->prev_num_active_vertex_binding_descriptions =
+            r->num_active_vertex_binding_descriptions;
+        r->vertex_layout_snapshot_valid = true;
+    }
+    r->vertex_state_dirty = changed;
+}
 
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size)
@@ -172,8 +213,6 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
     pg->uniform_attrs = 0;
     pg->swizzle_attrs = 0;
 
-    uint64_t prev_hash = r->vertex_layout_hash;
-
     r->num_active_vertex_attribute_descriptions = 0;
     r->num_active_vertex_binding_descriptions = 0;
 
@@ -319,18 +358,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         NV2A_VK_DGROUP_END();
     }
 
-    uint64_t attr_hash = fast_hash(
-        (const uint8_t *)r->vertex_attribute_descriptions,
-        r->num_active_vertex_attribute_descriptions *
-            sizeof(r->vertex_attribute_descriptions[0]));
-    uint64_t bind_hash = fast_hash(
-        (const uint8_t *)r->vertex_binding_descriptions,
-        r->num_active_vertex_binding_descriptions *
-            sizeof(r->vertex_binding_descriptions[0]));
-    r->vertex_layout_hash = attr_hash ^ bind_hash ^
-        (uint64_t)r->num_active_vertex_attribute_descriptions ^
-        ((uint64_t)r->num_active_vertex_binding_descriptions << 32);
-    r->vertex_state_dirty = (r->vertex_layout_hash != prev_hash);
+    update_vertex_layout_dirty(r);
 
     NV2A_VK_DGROUP_END();
 }
@@ -343,8 +371,6 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d)
     pg->compressed_attrs = 0;
     pg->uniform_attrs = 0;
     pg->swizzle_attrs = 0;
-
-    uint64_t prev_hash = r->vertex_layout_hash;
 
     r->num_active_vertex_attribute_descriptions = 0;
     r->num_active_vertex_binding_descriptions = 0;
@@ -379,16 +405,5 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d)
         }
     }
 
-    uint64_t attr_hash = fast_hash(
-        (const uint8_t *)r->vertex_attribute_descriptions,
-        r->num_active_vertex_attribute_descriptions *
-            sizeof(r->vertex_attribute_descriptions[0]));
-    uint64_t bind_hash = fast_hash(
-        (const uint8_t *)r->vertex_binding_descriptions,
-        r->num_active_vertex_binding_descriptions *
-            sizeof(r->vertex_binding_descriptions[0]));
-    r->vertex_layout_hash = attr_hash ^ bind_hash ^
-        (uint64_t)r->num_active_vertex_attribute_descriptions ^
-        ((uint64_t)r->num_active_vertex_binding_descriptions << 32);
-    r->vertex_state_dirty = (r->vertex_layout_hash != prev_hash);
+    update_vertex_layout_dirty(r);
 }

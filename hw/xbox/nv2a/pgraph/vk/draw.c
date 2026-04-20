@@ -1953,6 +1953,7 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
      */
     r->dynstate_cache_valid = false;
     r->last_vertex_bind_valid = false;
+    r->last_index_bind_valid = false;
     r->last_push_constants_valid = false;
 }
 
@@ -2425,6 +2426,23 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
             vkCmdSetScissor(r->command_buffer, 0, 1, &clear_rect.rect);
             vkCmdSetBlendConstants(r->command_buffer, blend_constants);
             vkCmdDraw(r->command_buffer, 3, 1, 0, 0);
+
+            /*
+             * The partial-channel clear bypasses begin_draw's dynstate
+             * path, so scissor / blend constants were pushed directly
+             * to the CB without updating the cached values. Mirror the
+             * GPU state in the cache so any subsequent draw in the
+             * same CB that hits begin_draw's !must_bind_pipeline path
+             * won't skip re-setting these and inherit the clear's
+             * overrides. Cleanest way is to update the cache (so the
+             * next matching draw can still skip) rather than blindly
+             * invalidate.
+             */
+            if (r->dynstate_cache_valid) {
+                r->cached_scissor = clear_rect.rect;
+                memcpy(r->cached_blend_constants, blend_constants,
+                       sizeof(r->cached_blend_constants));
+            }
         }
     }
 
@@ -2511,6 +2529,31 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
 static void bind_inline_vertex_buffer(PGRAPHState *pg, VkDeviceSize offset)
 {
     bind_vertex_buffer(pg, 0xffff, offset);
+}
+
+/*
+ * Skip vkCmdBindIndexBuffer when the would-be bind is identical to the
+ * last one issued on this command buffer. Mirrors bind_vertex_buffer's
+ * dedup. Cache is reset in pgraph_vk_begin_command_buffer.
+ */
+static void bind_index_buffer(PGRAPHState *pg, VkBuffer buffer,
+                              VkDeviceSize offset, VkIndexType type)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->last_index_bind_valid &&
+        r->last_index_bind_buffer == buffer &&
+        r->last_index_bind_offset == offset &&
+        r->last_index_bind_type == type) {
+        return;
+    }
+
+    vkCmdBindIndexBuffer(r->command_buffer, buffer, offset, type);
+
+    r->last_index_bind_buffer = buffer;
+    r->last_index_bind_offset = offset;
+    r->last_index_bind_type = type;
+    r->last_index_bind_valid = true;
 }
 
 void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta)
@@ -2791,9 +2834,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
             if (all_offset > 0) {
                 VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
                     pg, all_indices, all_offset * sizeof(uint32_t));
-                vkCmdBindIndexBuffer(r->command_buffer,
-                                     r->storage_buffers[BUFFER_INDEX].buffer,
-                                     buffer_offset, VK_INDEX_TYPE_UINT32);
+                bind_index_buffer(pg,
+                                  r->storage_buffers[BUFFER_INDEX].buffer,
+                                  buffer_offset, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
                                  -(int32_t)min_start, 0);
             }
@@ -2863,9 +2906,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
         if (index_count > 0) {
             VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
                 pg, (void *)indices, index_count * sizeof(indices[0]));
-            vkCmdBindIndexBuffer(r->command_buffer,
-                                 r->storage_buffers[BUFFER_INDEX].buffer,
-                                 buffer_offset, VK_INDEX_TYPE_UINT32);
+            bind_index_buffer(pg,
+                              r->storage_buffers[BUFFER_INDEX].buffer,
+                              buffer_offset, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
                              -(int32_t)min_element, 0);
         }
@@ -2921,9 +2964,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
             if (index_count > 0) {
                 VkDeviceSize index_offset = pgraph_vk_update_index_buffer(
                     pg, indices, index_count * sizeof(indices[0]));
-                vkCmdBindIndexBuffer(r->command_buffer,
-                                     r->storage_buffers[BUFFER_INDEX].buffer,
-                                     index_offset, VK_INDEX_TYPE_UINT32);
+                bind_index_buffer(pg,
+                                  r->storage_buffers[BUFFER_INDEX].buffer,
+                                  index_offset, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
             }
         } else {
@@ -2988,9 +3031,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
             if (actual_index_count > 0) {
                 VkDeviceSize index_offset = pgraph_vk_update_index_buffer(
                     pg, indices, actual_index_count * sizeof(indices[0]));
-                vkCmdBindIndexBuffer(r->command_buffer,
-                                     r->storage_buffers[BUFFER_INDEX].buffer,
-                                     index_offset, VK_INDEX_TYPE_UINT32);
+                bind_index_buffer(pg,
+                                  r->storage_buffers[BUFFER_INDEX].buffer,
+                                  index_offset, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(r->command_buffer, actual_index_count, 1, 0, 0,
                                  0);
             }

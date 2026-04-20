@@ -90,8 +90,18 @@ static void surface_ranges_remove(PGRAPHVkState *r, SurfaceBinding *s)
          * surface_range_slot and sets it to a valid index. Assert
          * loudly in debug to catch any missed init site; bail silently
          * in release so a stale slot can't corrupt the ranges table.
+         * Emit one warning per process so a release-build bug is at
+         * least observable without log spam.
          */
         nv2a_vk_assert(false && "surface_range_slot invariant broken");
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                    "nv2a/pgraph/vk: surface_range_slot invariant broken "
+                    "(slot=%d, count=%d, s=%p) — range-table entry leaked\n",
+                    slot, r->surface_range_count, (void *)s);
+        }
         return;
     }
 

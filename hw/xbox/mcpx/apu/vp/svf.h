@@ -46,6 +46,37 @@ static inline void setup_svf(sv_filter *sv, float fs, float fc, float q, int t) 
     sv->q = 2.0f * cos(pow(q, 0.1f) * M_PI * 0.5f);
 */
 static inline void setup_svf(sv_filter *sv, float fc, float q, int t) {
+    float *expected_op;
+    switch(t) {
+    case F_LP:
+        expected_op = &(sv->l);
+        break;
+    case F_HP:
+        expected_op = &(sv->h);
+        break;
+    case F_BP:
+        expected_op = &(sv->b);
+        break;
+    case F_BR:
+        expected_op = &(sv->n);
+        break;
+    default:
+        expected_op = &(sv->p);
+    }
+
+    /*
+     * Skip the sqrtf + store dance when fc, q, and filter-type are
+     * unchanged from the prior setup. vp.c calls this per voice per
+     * channel per LPF-active frame; fc / q come from voice TAR
+     * registers that only change on guest writes, so the common case
+     * re-uses the previous coefficients. sv->op is NULL on the first
+     * call (sv_filter is zero-initialized), so the initial seed
+     * always takes the full path.
+     */
+    if (sv->op == expected_op && sv->f == fc && sv->q == q) {
+        return;
+    }
+
     sv->f = fc;
     sv->q = q;
     /*
@@ -54,22 +85,7 @@ static inline void setup_svf(sv_filter *sv, float fc, float q, int t) {
      * that matters at 8-bit voice quantization.
      */
     sv->qnrm = sqrtf(sv->q * 0.5f + 0.01f);
-    switch(t) {
-    case F_LP:
-        sv->op = &(sv->l);
-        break;
-    case F_HP:
-        sv->op = &(sv->h);
-        break;
-    case F_BP:
-        sv->op = &(sv->b);
-        break;
-    case F_BR:
-        sv->op = &(sv->n);
-        break;
-    default:
-        sv->op = &(sv->p);
-    }
+    sv->op = expected_op;
 }
 
 /* Run one sample through the SV filter. Filter is by andy@vellocet */

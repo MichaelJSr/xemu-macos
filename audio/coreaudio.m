@@ -302,9 +302,38 @@ static OSStatus audioDeviceIOProc(
     frameCount = core->audioDevicePropertyBufferFrameSize;
     pending_frames = hw->pending_emul / hw->info.bytes_per_frame;
 
+    /*
+     * Partial underrun: drain what pending_emul holds (mixed with
+     * whatever the ring already produced) and zero only the tail the
+     * producer hasn't caught up on. Previously this path zeroed the
+     * entire IOProc buffer on even a single-frame shortfall, which
+     * made glitches audibly cliff-shaped; partial fill keeps the
+     * leading samples intact so a microsecond-late producer doesn't
+     * punch a hole through real audio.
+     */
     if (pending_frames < frameCount) {
+        size_t pending_bytes = pending_frames * hw->info.bytes_per_frame;
+        size_t total_bytes = outOutputData->mBuffers[0].mDataByteSize;
+        uint8_t *out_bytes = out;
+
+        while (pending_bytes) {
+            size_t start = audio_ring_posb(hw->pos_emul, hw->pending_emul,
+                                           hw->size_emul);
+            assert(start < hw->size_emul);
+            size_t write_len = MIN(MIN(hw->pending_emul, pending_bytes),
+                                   hw->size_emul - start);
+            memcpy(out_bytes, hw->buf_emul + start, write_len);
+            hw->pending_emul -= write_len;
+            pending_bytes -= write_len;
+            out_bytes += write_len;
+        }
+
+        size_t consumed = (size_t)out_bytes - (size_t)out;
+        if (consumed < total_bytes) {
+            memset(out_bytes, 0, total_bytes - consumed);
+        }
+
         os_unfair_lock_unlock(&core->buf_lock);
-        memset(out, 0, outOutputData->mBuffers[0].mDataByteSize);
         return 0;
     }
 

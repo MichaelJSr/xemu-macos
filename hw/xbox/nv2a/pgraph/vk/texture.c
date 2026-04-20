@@ -564,47 +564,203 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
     return layout;
 }
 
-struct pgraph_texture_possibly_dirty_struct {
-    hwaddr addr, end;
-};
+/*
+ * VRAM-byte-range spatial index for the texture cache. Each bucket
+ * covers TEX_DIRTY_BUCKET_SIZE bytes of guest VRAM and holds pointers
+ * to every TextureBinding whose key.texture_* or key.palette_* range
+ * overlaps that bucket. A dirty range of size S touches
+ * ceil(S / TEX_DIRTY_BUCKET_SIZE) buckets, so dirty-scan cost scales
+ * with the dirty range instead of with the cache population.
+ *
+ * 128 KiB buckets strike a balance: small enough that a typical
+ * 64 KiB texture only lands in 1 bucket, large enough that a 2 MiB
+ * font atlas lands in 16 (keeping the per-texture bookkeeping cheap
+ * on insert / evict).
+ */
+#define TEX_DIRTY_BUCKET_SHIFT 17
+#define TEX_DIRTY_BUCKET_SIZE  (1ULL << TEX_DIRTY_BUCKET_SHIFT)
 
-static void mark_textures_possibly_dirty_visitor(Lru *lru, LruNode *node, void *opaque)
+static void tex_dirty_buckets_insert(PGRAPHVkState *r, TextureBinding *snode);
+
+static void tex_dirty_buckets_seed_visitor(Lru *lru, LruNode *node, void *opaque)
 {
-    struct pgraph_texture_possibly_dirty_struct *test = opaque;
-
+    PGRAPHVkState *r = opaque;
     TextureBinding *tnode = container_of(node, TextureBinding, node);
-    if (tnode->possibly_dirty) {
+    if (tnode->image == VK_NULL_HANDLE) {
         return;
     }
+    tex_dirty_buckets_insert(r, tnode);
+}
 
-    uintptr_t k_tex_addr = tnode->key.texture_vram_offset;
-    uintptr_t k_tex_end = k_tex_addr + tnode->key.texture_length - 1;
-    bool overlapping = !(test->addr > k_tex_end || k_tex_addr > test->end);
-
-    if (tnode->key.palette_length > 0) {
-        uintptr_t k_pal_addr = tnode->key.palette_vram_offset;
-        uintptr_t k_pal_end = k_pal_addr + tnode->key.palette_length - 1;
-        overlapping |= !(test->addr > k_pal_end || k_pal_addr > test->end);
+static void tex_dirty_buckets_ensure(PGRAPHVkState *r, hwaddr vram_size)
+{
+    if (r->tex_dirty_buckets != NULL) {
+        return;
     }
+    uint32_t n = (uint32_t)((vram_size + TEX_DIRTY_BUCKET_SIZE - 1) /
+                            TEX_DIRTY_BUCKET_SIZE);
+    r->tex_dirty_buckets = g_new0(GPtrArray *, n);
+    r->tex_dirty_num_buckets = n;
 
-    tnode->possibly_dirty |= overlapping;
+    /*
+     * On first-use init the buckets are empty but the LRU may already
+     * contain cached TextureBindings from frames before any dirty
+     * signal fired (cache-miss inserts no-op when buckets are NULL).
+     * Seed the index by walking the active LRU once; all subsequent
+     * inserts/removes keep the index in sync incrementally.
+     */
+    lru_visit_active(&r->texture_cache, tex_dirty_buckets_seed_visitor, r);
+}
+
+static inline uint32_t tex_dirty_bucket_idx(hwaddr addr)
+{
+    return (uint32_t)(addr >> TEX_DIRTY_BUCKET_SHIFT);
+}
+
+static void tex_dirty_buckets_insert_range(PGRAPHVkState *r,
+                                           TextureBinding *snode,
+                                           hwaddr range_addr,
+                                           hwaddr range_len)
+{
+    if (range_len == 0 || r->tex_dirty_buckets == NULL) {
+        return;
+    }
+    uint32_t first = tex_dirty_bucket_idx(range_addr);
+    uint32_t last = tex_dirty_bucket_idx(range_addr + range_len - 1);
+    if (last >= r->tex_dirty_num_buckets) {
+        last = r->tex_dirty_num_buckets - 1;
+    }
+    for (uint32_t b = first; b <= last; b++) {
+        if (r->tex_dirty_buckets[b] == NULL) {
+            r->tex_dirty_buckets[b] = g_ptr_array_new();
+        }
+        g_ptr_array_add(r->tex_dirty_buckets[b], snode);
+    }
+}
+
+static void tex_dirty_buckets_insert(PGRAPHVkState *r, TextureBinding *snode)
+{
+    tex_dirty_buckets_insert_range(r, snode,
+                                   snode->key.texture_vram_offset,
+                                   snode->key.texture_length);
+    if (snode->key.palette_length > 0) {
+        tex_dirty_buckets_insert_range(r, snode,
+                                       snode->key.palette_vram_offset,
+                                       snode->key.palette_length);
+    }
+}
+
+static void tex_dirty_buckets_remove_range(PGRAPHVkState *r,
+                                           TextureBinding *snode,
+                                           hwaddr range_addr,
+                                           hwaddr range_len)
+{
+    if (range_len == 0 || r->tex_dirty_buckets == NULL) {
+        return;
+    }
+    uint32_t first = tex_dirty_bucket_idx(range_addr);
+    uint32_t last = tex_dirty_bucket_idx(range_addr + range_len - 1);
+    if (last >= r->tex_dirty_num_buckets) {
+        last = r->tex_dirty_num_buckets - 1;
+    }
+    for (uint32_t b = first; b <= last; b++) {
+        GPtrArray *arr = r->tex_dirty_buckets[b];
+        if (arr == NULL) {
+            continue;
+        }
+        /*
+         * Array is small (typically a handful of entries per bucket);
+         * g_ptr_array_remove_fast swaps with the last and pops, so
+         * order doesn't matter and removal is O(k) with k == bucket
+         * occupancy.
+         */
+        g_ptr_array_remove_fast(arr, snode);
+    }
+}
+
+static void tex_dirty_buckets_remove(PGRAPHVkState *r, TextureBinding *snode)
+{
+    tex_dirty_buckets_remove_range(r, snode,
+                                   snode->key.texture_vram_offset,
+                                   snode->key.texture_length);
+    if (snode->key.palette_length > 0) {
+        tex_dirty_buckets_remove_range(r, snode,
+                                       snode->key.palette_vram_offset,
+                                       snode->key.palette_length);
+    }
+}
+
+static void tex_dirty_buckets_finalize(PGRAPHVkState *r)
+{
+    if (r->tex_dirty_buckets == NULL) {
+        return;
+    }
+    for (uint32_t b = 0; b < r->tex_dirty_num_buckets; b++) {
+        if (r->tex_dirty_buckets[b] != NULL) {
+            g_ptr_array_free(r->tex_dirty_buckets[b], TRUE);
+        }
+    }
+    g_free(r->tex_dirty_buckets);
+    r->tex_dirty_buckets = NULL;
+    r->tex_dirty_num_buckets = 0;
 }
 
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
     hwaddr addr, hwaddr size)
 {
+    hwaddr vram_size = memory_region_size(d->vram);
     hwaddr end = TARGET_PAGE_ALIGN(addr + size) - 1;
     addr &= TARGET_PAGE_MASK;
-    nv2a_vk_assert(end <= memory_region_size(d->vram));
+    nv2a_vk_assert(end <= vram_size);
 
-    struct pgraph_texture_possibly_dirty_struct test = {
-        .addr = addr,
-        .end = end,
-    };
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    tex_dirty_buckets_ensure(r, vram_size);
 
-    lru_visit_active(&d->pgraph.vk_renderer_state->texture_cache,
-                     mark_textures_possibly_dirty_visitor,
-                     &test);
+    uint32_t first = tex_dirty_bucket_idx(addr);
+    uint32_t last = tex_dirty_bucket_idx(end);
+    if (last >= r->tex_dirty_num_buckets) {
+        last = r->tex_dirty_num_buckets - 1;
+    }
+
+    /*
+     * Walk every bucket in the dirty range; for each TextureBinding in
+     * those buckets, confirm byte-level overlap (bucketing is
+     * conservative — a bucket can hold a texture that touches the
+     * bucket but not our specific dirty range) and flip
+     * possibly_dirty. Wide dirty ranges (or the flush path which
+     * passes [0, vram_size)) still scale linearly with active-texture
+     * count, but the common small-range case is now proportional to
+     * touched buckets only.
+     */
+    for (uint32_t b = first; b <= last; b++) {
+        GPtrArray *arr = r->tex_dirty_buckets[b];
+        if (arr == NULL) {
+            continue;
+        }
+        for (guint i = 0; i < arr->len; i++) {
+            TextureBinding *tnode = arr->pdata[i];
+            if (tnode->possibly_dirty) {
+                continue;
+            }
+
+            hwaddr k_tex_addr = tnode->key.texture_vram_offset;
+            hwaddr k_tex_end = k_tex_addr + tnode->key.texture_length - 1;
+            bool overlapping =
+                !(addr > k_tex_end || k_tex_addr > end);
+
+            if (!overlapping && tnode->key.palette_length > 0) {
+                hwaddr k_pal_addr = tnode->key.palette_vram_offset;
+                hwaddr k_pal_end =
+                    k_pal_addr + tnode->key.palette_length - 1;
+                overlapping =
+                    !(addr > k_pal_end || k_pal_addr > end);
+            }
+
+            if (overlapping) {
+                tnode->possibly_dirty = true;
+            }
+        }
+    }
 }
 
 static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
@@ -689,8 +845,16 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     uint8_t *mapped_memory_ptr = staging->mapped;
 
     int num_regions = num_layers * state->levels;
-    g_autofree VkBufferImageCopy *regions =
-        g_malloc0_n(num_regions, sizeof(VkBufferImageCopy));
+    /*
+     * num_regions is bounded by TextureLayer.levels[16] ×
+     * TextureLayout.layers[6] = 96 entries. Keep on the stack
+     * (~5 KiB) instead of g_malloc0_n + g_autofree per upload; per-
+     * upload heap churn shows up under texture streaming.
+     */
+    nv2a_vk_assert(num_regions <= (int)(ARRAY_SIZE(layout->layers) *
+                                        ARRAY_SIZE(layout->layers[0].levels)));
+    VkBufferImageCopy regions[ARRAY_SIZE(layout->layers) *
+                              ARRAY_SIZE(layout->layers[0].levels)] = { 0 };
 
     VkBufferImageCopy *region = regions;
     VkDeviceSize buffer_offset = base_offset;
@@ -1778,6 +1942,18 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->possibly_dirty = false;
     snode->hash = content_hash;
 
+    /*
+     * Register the binding in the VRAM spatial index so subsequent
+     * dirty-signals only scan the touched buckets. Safe to call before
+     * tex_dirty_buckets_ensure() if it's never been run: the insert
+     * no-ops when the buckets array is NULL, and the first dirty call
+     * will ensure() + populate from scratch. Current callers call
+     * pgraph_vk_mark_textures_possibly_dirty via update_surfaces /
+     * flush_memory_buffer routinely, so ensure() runs well before any
+     * texture-miss path.
+     */
+    tex_dirty_buckets_insert(r, snode);
+
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
     nv2a_vk_bounds_check(vkf.vk_format != 0);
     nv2a_vk_bounds_check(0 < state.dimensionality);
@@ -1915,6 +2091,15 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)
 {
+    /*
+     * Remove from the VRAM spatial index while snode->key is still
+     * intact. Post-release, a future cache-miss may reuse this slot
+     * with a different key and the old bucket entries would become
+     * stale pointers if not pulled out here. No-op when the index
+     * hasn't been allocated yet.
+     */
+    tex_dirty_buckets_remove(r, snode);
+
     vkDestroyImageView(r->device, snode->image_view, NULL);
     snode->image_view = VK_NULL_HANDLE;
 
@@ -1988,6 +2173,7 @@ static void texture_cache_init(PGRAPHVkState *r)
 static void texture_cache_finalize(PGRAPHVkState *r)
 {
     lru_flush(&r->texture_cache);
+    tex_dirty_buckets_finalize(r);
     g_free(r->texture_cache_entries);
     r->texture_cache_entries = NULL;
 }

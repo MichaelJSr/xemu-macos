@@ -45,6 +45,14 @@ typedef struct MCPXAPUVoiceFilter {
     uint32_t *voice_buf;
     float resample_buf[NUM_SAMPLES_PER_FRAME * 2];
     SRC_STATE *resampler;
+    /*
+     * Channel count the current resampler instance was created with:
+     * true = 2-channel (stereo voice), false = 1-channel (mono voice).
+     * libsamplerate channel count is fixed at creation; a format
+     * change (rare voice-slot reuse) triggers src_delete + recreate
+     * via voice_resample.
+     */
+    bool resampler_stereo;
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;
