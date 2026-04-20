@@ -367,8 +367,6 @@ typedef struct PGRAPHVkDisplayState {
     void *interp_prev_surface;    // IOSurfaceRef - previous frame
     void *interp_cur_surface;     // IOSurfaceRef - current frame
     int interp_remaining;         // frames left to generate this cycle
-    int interp_total;             // total interpolated frames per cycle (1 or 3)
-    int interp_index;             // which intermediate frame to generate next
     int interp_width, interp_height;
 
     // Host-monotonic capture timestamps of the two input frames, fed to

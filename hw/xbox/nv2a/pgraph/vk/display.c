@@ -1315,7 +1315,6 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     }
                 }
                 if (interp) CFRelease(interp);
-                disp->interp_index++;
                 disp->interp_remaining--;
             } else {
                 /*
@@ -1323,7 +1322,6 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                  * of busy-retrying every sync. Without this, has_interp_work
                  * stays true and we bypass the 8 ms throttle repeatedly.
                  */
-                disp->interp_index++;
                 disp->interp_remaining--;
             }
         }
@@ -1460,10 +1458,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     qemu_clock_get_ns(QEMU_CLOCK_HOST);
 
                 if (disp->interp_prev_surface) {
-                    int total = (interp_mode == 4) ? 3 : 1;
-                    disp->interp_total = total;
-                    disp->interp_remaining = total;
-                    disp->interp_index = 0;
+                    disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
                     disp->interp_width = iw;
                     disp->interp_height = ih;
                 }

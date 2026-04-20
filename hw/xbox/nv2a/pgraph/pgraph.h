@@ -158,13 +158,9 @@ typedef struct PGRAPHState {
     SurfaceShape last_surface_shape;
 
     struct {
-        int clip_x;
-        int clip_width;
-        int clip_y;
-        int clip_height;
         int width;
         int height;
-    } surface_binding_dim; // FIXME: Refactor
+    } surface_binding_dim;
 
     hwaddr dma_a, dma_b;
     bool texture_dirty[NV2A_MAX_TEXTURES];
@@ -182,8 +178,6 @@ typedef struct PGRAPHState {
     hwaddr dma_vertex_a, dma_vertex_b;
 
     uint32_t primitive_mode;
-
-    bool enable_vertex_program_write; // FIXME: Not used anywhere???
 
     uint32_t vertex_state_shader_v0[4];
     uint32_t program_data[NV2A_MAX_TRANSFORM_PROGRAM_LENGTH][VSH_TOKEN_SIZE];

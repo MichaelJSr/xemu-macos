@@ -153,7 +153,6 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
             NV2A_DPRINTF("    - CTX_USER = 0x%x\n", context_user);
 
             pgraph_reg_w(pg, NV_PGRAPH_CTX_USER, context_user);
-            // pgraph_set_context_user(d, context_user);
         }
         if (val & NV_PGRAPH_CHANNEL_CTX_TRIGGER_WRITE_OUT) {
             /* do stuff ... */
@@ -3057,7 +3056,13 @@ DEF_METHOD(NV097, SET_TRANSFORM_EXECUTION_MODE)
 
 DEF_METHOD(NV097, SET_TRANSFORM_PROGRAM_CXT_WRITE_EN)
 {
-    pg->enable_vertex_program_write = parameter;
+    /*
+     * No-op: the previous field (enable_vertex_program_write) was
+     * write-only. Kept as an acknowledging stub so the method
+     * dispatcher doesn't report the method as unhandled.
+     */
+    (void)pg;
+    (void)parameter;
 }
 
 DEF_METHOD(NV097, SET_TRANSFORM_PROGRAM_LOAD)

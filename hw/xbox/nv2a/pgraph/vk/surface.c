@@ -1591,7 +1591,6 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     // at the wrong time and get a invalid dma object.
     // Check that it's sane.
     nv2a_vk_bounds_check(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
-    // assert(dma.address + surface->offset != 0);
     nv2a_vk_bounds_check(surface->offset <= dma.limit);
     nv2a_vk_bounds_check(surface->offset + surface->pitch * height <= dma.limit + 1);
     nv2a_vk_bounds_check(surface->pitch % fmt.bytes_per_pixel == 0);
@@ -1668,8 +1667,6 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
     if (!current_binding ||
         (upload && (pg_surface->buffer_dirty || mem_dirty))) {
-        // FIXME: We don't need to be so aggressive flushing the command list
-        // pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
         pgraph_vk_ensure_not_in_render_pass(pg);
 
         unbind_surface(d, color);
@@ -1733,13 +1730,8 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             }
 
             if (is_compatible) {
-                // FIXME: Refactor
                 pg->surface_binding_dim.width = surface->width;
-                pg->surface_binding_dim.clip_x = surface->shape.clip_x;
-                pg->surface_binding_dim.clip_width = surface->shape.clip_width;
                 pg->surface_binding_dim.height = surface->height;
-                pg->surface_binding_dim.clip_y = surface->shape.clip_y;
-                pg->surface_binding_dim.clip_height = surface->shape.clip_height;
                 r->cached_scaled_binding_dim_valid = false;
                 surface->upload_pending |= mem_dirty;
                 pg->surface_zeta.buffer_dirty |= color;
@@ -1766,13 +1758,8 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             set_surface_label(pg, surface);
             surface_put(d, surface);
 
-            // FIXME: Refactor
             pg->surface_binding_dim.width = target.width;
-            pg->surface_binding_dim.clip_x = target.shape.clip_x;
-            pg->surface_binding_dim.clip_width = target.shape.clip_width;
             pg->surface_binding_dim.height = target.height;
-            pg->surface_binding_dim.clip_y = target.shape.clip_y;
-            pg->surface_binding_dim.clip_height = target.shape.clip_height;
             r->cached_scaled_binding_dim_valid = false;
 
             if (color && r->zeta_binding &&

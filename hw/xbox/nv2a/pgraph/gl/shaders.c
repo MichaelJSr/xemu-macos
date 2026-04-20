@@ -739,7 +739,6 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
     assert(glGetError() == GL_NO_ERROR);
 }
 
-// FIXME: Dirty tracking
 // FIXME: Consider UBO to align with VK renderer
 static void update_shader_uniforms(PGRAPHState *pg, ShaderBinding *binding)
 {
