@@ -131,6 +131,34 @@ static void metalfx_submit_wait(id<MTLCommandBuffer> cb)
     }
 }
 
+/*
+ * Input-side ordering against the async compositor submit (the
+ * MoltenVK compositor pass signals an exported MTLSharedEvent).
+ * Encoded at the head of every MetalFX command buffer; waits on
+ * already-signaled values are free.
+ */
+static id<MTLSharedEvent> g_input_wait_event = nil;
+static uint64_t g_input_wait_value = 0;
+
+void metalfx_set_input_wait(void *event, uint64_t value)
+{
+    os_unfair_lock_lock(&g_metalfx_lock);
+    if (g_input_wait_event != (id<MTLSharedEvent>)event) {
+        [g_input_wait_event release];
+        g_input_wait_event = [(id<MTLSharedEvent>)event retain];
+    }
+    g_input_wait_value = value;
+    os_unfair_lock_unlock(&g_metalfx_lock);
+}
+
+/* Caller holds g_metalfx_lock. */
+static void metalfx_encode_input_wait(id<MTLCommandBuffer> cb)
+{
+    if (g_input_wait_event) {
+        [cb encodeWaitForEvent:g_input_wait_event value:g_input_wait_value];
+    }
+}
+
 static bool shared_metal_acquire(id<MTLDevice> *out_device,
                                  id<MTLCommandQueue> *out_queue)
 {
@@ -566,6 +594,7 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
         g_spatial.scaler.outputTexture = output;
 
         id<MTLCommandBuffer> cb = [g_spatial.commandQueue commandBuffer];
+        metalfx_encode_input_wait(cb);
         [g_spatial.scaler encodeToCommandBuffer:cb];
         atomic_fetch_add_explicit(&g_spatial_inflight, 1, memory_order_acq_rel);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _) {
@@ -921,6 +950,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         }
 
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
+        metalfx_encode_input_wait(cb);
 
         if (!g_temporal.depthTexture && g_temporal.syntheticDepthPipeline &&
             g_temporal.syntheticDepthTexture && g_temporal.colorTexture) {
@@ -1471,6 +1501,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             interp_configure_common(interp, delta_time);
 
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            metalfx_encode_input_wait(cb);
             id<MTLTexture> depth = g_interp.cachedDepthCur;
             if (!depth && !g_interp.linked_to_temporal) {
                 depth = interp_encode_synth_depth(cb, g_interp.cachedColorCur);
@@ -1544,6 +1575,7 @@ bool metalfx_interpolation_generate_tex(void *prevTexture,
             interp_configure_common(interp, delta_time);
 
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            metalfx_encode_input_wait(cb);
             id<MTLTexture> depth = nil;
             if (!g_interp.linked_to_temporal) {
                 depth = interp_encode_synth_depth(

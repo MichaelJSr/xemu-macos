@@ -294,7 +294,8 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
 
     frame->iosurface = r->display.present_iosurface;
     frame->mtl_texture = r->display.present_mtl_texture;
-    frame->event = metalfx_present_event();
+    frame->event = r->display.present_event ? r->display.present_event
+                                            : metalfx_present_event();
     frame->event_value = r->display.present_event_value;
     frame->width = r->display.present_width;
     frame->height = r->display.present_height;

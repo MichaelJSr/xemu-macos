@@ -82,6 +82,20 @@ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg)
     assert(!r->in_aux_command_buffer);
     r->in_aux_command_buffer = true;
 
+    /*
+     * Lazy reclaim of an async aux submit (Metal backend compositor):
+     * the previous aux submission skipped its synchronous fence wait;
+     * the aux command buffer cannot be reset/reused until it
+     * completes. In steady state the work finished long ago (the next
+     * aux use is at least one present interval later), so this wait
+     * is effectively free.
+     */
+    if (r->aux_async_pending) {
+        vk_wait_for_fence_or_die(r->device, r->aux_fence,
+                                 "aux async reclaim");
+        r->aux_async_pending = false;
+    }
+
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -111,6 +125,47 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     vk_wait_for_fence_or_die(r->device, r->aux_fence,
                              "pgraph_vk_end_single_time_commands");
 
+    r->in_aux_command_buffer = false;
+}
+
+void pgraph_vk_end_single_time_commands_async(PGRAPHState *pg,
+                                              VkCommandBuffer cmd,
+                                              VkSemaphore timeline,
+                                              uint64_t value)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    assert(r->in_aux_command_buffer);
+    assert(!r->aux_async_pending);
+
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    vkResetFences(r->device, 1, &r->aux_fence);
+
+    VkTimelineSemaphoreSubmitInfo timeline_info = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &value,
+    };
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &timeline_info,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &timeline,
+    };
+    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
+    nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
+
+    /*
+     * No fence wait: consumers (MetalFX, the UI present pass) order
+     * GPU-side against the timeline's exported MTLSharedEvent, and
+     * later main-CB barriers order same-queue surface reuse by
+     * submission order. The fence is reclaimed lazily before the next
+     * aux command buffer use.
+     */
+    r->aux_async_pending = true;
     r->in_aux_command_buffer = false;
 }
 

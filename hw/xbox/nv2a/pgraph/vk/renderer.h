@@ -406,10 +406,14 @@ typedef struct PGRAPHVkDisplayState {
     void *present_mtl_texture; // id<MTLTexture>, retained
     int present_width, present_height;
     /*
-     * MTLSharedEvent value signaled by the MetalFX command buffer
-     * that produced this frame (0 = no GPU wait required). The UI
-     * present pass encodes a wait on this value before sampling.
+     * GPU-side ordering for the published frame: the UI present pass
+     * encodes a wait for `present_event` (id<MTLSharedEvent>,
+     * borrowed) to reach `present_event_value` before sampling.
+     * MetalFX-produced frames use the MetalFX present event; base
+     * compositor frames use the exported compositor timeline event
+     * (async submit). NULL event / value 0 = no wait required.
      */
+    void *present_event;
     uint64_t present_event_value;
 
     /*
@@ -561,6 +565,26 @@ typedef struct PGRAPHVkState {
     VkCommandBuffer aux_command_buffer;
     VkFence aux_fence;
     bool in_aux_command_buffer;
+    /*
+     * Async aux submit (Metal backend): the compositor pass is
+     * submitted without the synchronous fence wait; the fence is
+     * reclaimed lazily by the next pgraph_vk_begin_single_time_commands
+     * (and by device-idle teardown paths).
+     */
+    bool aux_async_pending;
+
+    bool timeline_semaphore_enabled;
+    /*
+     * Async compositor handoff (Metal backend): a timeline VkSemaphore
+     * whose backing MTLSharedEvent is exported via
+     * VK_EXT_metal_objects. Each async compositor submit signals
+     * ++present_timeline_value; MetalFX command buffers and the UI
+     * present pass encode GPU-side waits on the exported event instead
+     * of the PFIFO thread blocking in vkWaitForFences.
+     */
+    VkSemaphore present_timeline;
+    uint64_t present_timeline_value;
+    void *present_timeline_event; /* id<MTLSharedEvent>, retained */
 
     int framebuffer_index;
     bool framebuffer_dirty;
@@ -856,6 +880,16 @@ void pgraph_vk_init_command_buffers(PGRAPHState *pg);
 void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
 VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
 void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
+/*
+ * Submit the aux command buffer without the synchronous fence wait,
+ * signaling `timeline` at `value` (Metal backend async present
+ * chain). The aux fence is reclaimed by the next
+ * pgraph_vk_begin_single_time_commands.
+ */
+void pgraph_vk_end_single_time_commands_async(PGRAPHState *pg,
+                                              VkCommandBuffer cmd,
+                                              VkSemaphore timeline,
+                                              uint64_t value);
 void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg);
 void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot);
 void pgraph_vk_select_flight_slot(PGRAPHState *pg);

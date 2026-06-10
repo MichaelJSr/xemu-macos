@@ -582,6 +582,36 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
 
     void *next_struct = NULL;
 
+    /*
+     * Timeline semaphores (Vulkan 1.2 core) back the async compositor
+     * submit on the Metal presentation backend: MoltenVK implements
+     * them with MTLSharedEvent, which VK_EXT_metal_objects can export
+     * for GPU-side cross-API waits. Optional; probed here and at
+     * export time, with fallback to the synchronous aux fence.
+     */
+    r->timeline_semaphore_enabled = false;
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features = {
+        .sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+    };
+    if (r->vk_api_version >= VK_API_VERSION_1_2) {
+        VkPhysicalDeviceTimelineSemaphoreFeatures query = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        };
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &query,
+        };
+        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
+        if (query.timelineSemaphore == VK_TRUE) {
+            timeline_features.timelineSemaphore = VK_TRUE;
+            timeline_features.pNext = next_struct;
+            next_struct = &timeline_features;
+            r->timeline_semaphore_enabled = true;
+        }
+    }
+
     VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_features;
     if (r->custom_border_color_extension_enabled) {
         custom_border_features = (VkPhysicalDeviceCustomBorderColorFeaturesEXT){

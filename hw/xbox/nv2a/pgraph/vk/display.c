@@ -678,6 +678,7 @@ static void destroy_current_display_image(PGRAPHState *pg)
     d->interp_midpoint_event_value = 0;
     d->present_width = 0;
     d->present_height = 0;
+    d->present_event = NULL;
     d->present_event_value = 0;
     d->last_cgl_surface_id = 0;
     d->last_cgl_width = 0;
@@ -1260,7 +1261,24 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     pgraph_vk_end_debug_marker(r, cmd);
-    pgraph_vk_end_single_time_commands(pg, cmd);
+#if HAVE_IOSURFACE_SHARING
+    if (xemu_present_is_metal() && r->present_timeline_event) {
+        /*
+         * Async submit: signal the exported timeline event instead of
+         * blocking the PFIFO thread in vkWaitForFences. MetalFX / the
+         * UI present pass encode GPU-side waits on this value before
+         * sampling the compositor output.
+         */
+        uint64_t value = r->present_timeline_value + 1;
+        pgraph_vk_end_single_time_commands_async(pg, cmd,
+                                                 r->present_timeline, value);
+        r->present_timeline_value = value;
+        metalfx_set_input_wait(r->present_timeline_event, value);
+    } else
+#endif
+    {
+        pgraph_vk_end_single_time_commands(pg, cmd);
+    }
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
 
     disp->draw_time = surface->draw_time;
@@ -1297,6 +1315,105 @@ static void destroy_surface_sampler(PGRAPHState *pg)
     r->display.sampler = VK_NULL_HANDLE;
 }
 
+#if HAVE_IOSURFACE_SHARING
+/*
+ * Async compositor handoff: create a timeline VkSemaphore and export
+ * its backing MTLSharedEvent (VK_EXT_metal_objects). When this
+ * succeeds, render_display submits the compositor pass without the
+ * synchronous fence wait; MetalFX and the UI present pass order
+ * GPU-side against the exported event instead. One-time probe with
+ * fallback to the synchronous path (the API class that previously
+ * deadlocked MoltenVK was *per-frame* depth-image export; this is a
+ * single semaphore export at init with the device idle).
+ */
+static void create_present_timeline(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    r->present_timeline = VK_NULL_HANDLE;
+    r->present_timeline_event = NULL;
+    r->present_timeline_value = 0;
+
+    if (!xemu_present_is_metal() || !r->timeline_semaphore_enabled ||
+        !r->metal_objects_extension_enabled) {
+        return;
+    }
+
+    PFN_vkExportMetalObjectsEXT export_fn =
+        (PFN_vkExportMetalObjectsEXT)vkGetDeviceProcAddr(
+            r->device, "vkExportMetalObjectsEXT");
+    if (!export_fn) {
+        fprintf(stderr,
+                "nv2a: vkExportMetalObjectsEXT unavailable; compositor "
+                "submit stays synchronous\n");
+        return;
+    }
+
+    VkExportMetalObjectCreateInfoEXT export_create = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+        .exportObjectType =
+            VK_EXPORT_METAL_OBJECT_TYPE_METAL_SHARED_EVENT_BIT_EXT,
+    };
+    VkSemaphoreTypeCreateInfo type_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = &export_create,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0,
+    };
+    VkSemaphoreCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &type_info,
+    };
+    if (vkCreateSemaphore(r->device, &create_info, NULL,
+                          &r->present_timeline) != VK_SUCCESS) {
+        r->present_timeline = VK_NULL_HANDLE;
+        fprintf(stderr,
+                "nv2a: exportable timeline semaphore creation failed; "
+                "compositor submit stays synchronous\n");
+        return;
+    }
+
+    VkExportMetalSharedEventInfoEXT shared_event_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_SHARED_EVENT_INFO_EXT,
+        .semaphore = r->present_timeline,
+    };
+    VkExportMetalObjectsInfoEXT export_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+        .pNext = &shared_event_info,
+    };
+    export_fn(r->device, &export_info);
+
+    if (shared_event_info.mtlSharedEvent) {
+        r->present_timeline_event =
+            (void *)CFRetain(shared_event_info.mtlSharedEvent);
+        fprintf(stderr,
+                "nv2a: async compositor submit enabled "
+                "(timeline MTLSharedEvent exported)\n");
+    } else {
+        vkDestroySemaphore(r->device, r->present_timeline, NULL);
+        r->present_timeline = VK_NULL_HANDLE;
+        fprintf(stderr,
+                "nv2a: MTLSharedEvent export returned nil; compositor "
+                "submit stays synchronous\n");
+    }
+}
+
+static void destroy_present_timeline(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->present_timeline_event) {
+        CFRelease(r->present_timeline_event);
+        r->present_timeline_event = NULL;
+    }
+    if (r->present_timeline != VK_NULL_HANDLE) {
+        vkDestroySemaphore(r->device, r->present_timeline, NULL);
+        r->present_timeline = VK_NULL_HANDLE;
+    }
+    r->present_timeline_value = 0;
+}
+#endif /* HAVE_IOSURFACE_SHARING */
+
 void pgraph_vk_init_display(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1306,6 +1423,7 @@ void pgraph_vk_init_display(PGRAPHState *pg)
     if (r->metal_objects_extension_enabled) {
         r->display.format = VK_FORMAT_B8G8R8A8_UNORM;
     }
+    create_present_timeline(pg);
 #endif
 
     create_descriptor_pool(pg);
@@ -1334,6 +1452,15 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
         r->display.interp_cur_surface = NULL;
     }
     r->display.interp_remaining = 0;
+
+    /* Drain any pending async compositor submit before destroying the
+     * semaphore (the fence is still signaled by async submits). */
+    if (r->aux_async_pending) {
+        vkWaitForFences(r->device, 1, &r->aux_fence, VK_TRUE,
+                        5ull * 1000 * 1000 * 1000);
+        r->aux_async_pending = false;
+    }
+    destroy_present_timeline(pg);
 #endif
 
     destroy_pvideo_image(pg);
@@ -1395,6 +1522,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                      */
                     display_set_present_texture(
                         disp, (void *)CFRetain(disp->interp_midpoint_texture));
+                    disp->present_event = metalfx_present_event();
                     disp->present_event_value =
                         disp->interp_midpoint_event_value;
                     disp->interp_remaining--;
@@ -1404,6 +1532,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     display_set_present_texture(disp,
                                                 disp->pending_real_texture);
                     disp->pending_real_texture = NULL;
+                    disp->present_event = metalfx_present_event();
                     disp->present_event_value =
                         disp->pending_real_event_value;
                     disp->last_present_step_ns = now;
@@ -1764,6 +1893,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                             metalfx_present_event_last_value();
 
                         display_set_present_texture(disp, itex);
+                        disp->present_event = metalfx_present_event();
                         disp->present_event_value =
                             disp->interp_midpoint_event_value;
                         interp_first_presented = true;
@@ -1796,10 +1926,21 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     /* ownership transferred to the display state */
                     display_set_present_texture(disp, present_tex);
                     present_tex = NULL;
+                    disp->present_event = metalfx_present_event();
+                    disp->present_event_value = real_event_value;
                 } else {
                     display_set_present_surface(disp, present_surface);
+                    if (r->present_timeline_event) {
+                        /* Base compositor frame, async submit: wait
+                         * the exported compositor timeline. */
+                        disp->present_event = r->present_timeline_event;
+                        disp->present_event_value =
+                            r->present_timeline_value;
+                    } else {
+                        disp->present_event = metalfx_present_event();
+                        disp->present_event_value = real_event_value;
+                    }
                 }
-                disp->present_event_value = real_event_value;
                 /* No interp step pending before this frame; drop any
                  * stale held frame from a previous cycle. */
                 if (disp->pending_real_texture) {

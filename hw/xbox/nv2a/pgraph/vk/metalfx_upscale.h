@@ -37,6 +37,16 @@ void metalfx_texture_dims(void *texture, int *w, int *h);
  */
 void metalfx_drain_inflight(void);
 
+/*
+ * Input-side GPU ordering: subsequent MetalFX command buffers encode
+ * a wait for `event` (id<MTLSharedEvent>) to reach `value` before
+ * running. Used with the async compositor submit so the upscaler
+ * never samples the compositor image before MoltenVK finished
+ * writing it. Persistent until replaced; already-signaled values are
+ * no-ops.
+ */
+void metalfx_set_input_wait(void *event, uint64_t value);
+
 /* Spatial upscaler */
 bool metalfx_is_supported(void);
 bool metalfx_init(int input_w, int input_h, int output_w, int output_h);
