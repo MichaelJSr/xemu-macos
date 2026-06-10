@@ -26,6 +26,26 @@ open dist/xemu.app
 
 Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 
+### Building for Windows
+
+The upstream Windows build paths are preserved and CI-tested. All
+portable optimizations apply automatically: the Vulkan renderer work
+(flight slots, dirty hashing, spatial index, draw-path dedup, tight
+barriers, query drain at slot reclaim), the APU work (LUTs, batched
+register reads, SVF cache, mono paths, SSE2 mix kernels), the pfifo /
+BQL fixes, and the helper-based hard FPU on x86_64. macOS-only:
+MetalFX, IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT,
+and the AArch64 inline x87 FPU (Windows uses the bit-equivalent
+helper-based hard FPU instead). The MoltenVK CPU primitive-emulation
+paths don't activate on native Vulkan drivers.
+
+- **Native (MSYS2/MINGW):** `./build.sh` from an MSYS2 shell.
+  Release builds default to `-Dx86_version=3`; `XEMU_PGO=generate` /
+  `XEMU_PGO=use` work like on macOS.
+- **Cross (Docker):** `./build.sh -p win64-cross` with the
+  `ubuntu-win64-cross` toolchain image (see
+  `.github/workflows/build-windows.yml`).
+
 ### Build knobs
 
 | Env var | Default | Purpose |
@@ -95,6 +115,11 @@ In-app Settings covers the main toggles.
 - **Misc.** `gen_flcr` materializes rc-bits from `tb->flags`;
   `fnstcw` is one load; `insertion_sort_syncs` replaces `qsort`
   for N ≤ 16; `flcr` is 5 insns via `RBIT`.
+- **3-MOVK constant materialization.** `tcg_out_movi` now emits
+  MOVZ/MOVN + up to 3 MOVK for 3- and 4-chunk constants instead of
+  dumping them into the literal pool (LDR + D-cache pressure).
+  48-bit host pointers — materialized constantly in TB prologues —
+  stay in the instruction stream on Apple cores.
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -124,7 +149,31 @@ In-app Settings covers the main toggles.
   by 128 KiB VRAM ranges; `pgraph_vk_mark_textures_possibly_dirty`
   scans only touched buckets instead of all 65536 LRU bins. Lazy
   init on first dirty signal; seeded from active LRU; maintained
-  via insert/remove on cache miss / eviction.
+  via insert/remove on cache miss / eviction. Whole-VRAM signals
+  (renderer flush) take a one-pass LRU walk instead of visiting
+  every bucket (spanning textures appear once, not per-bucket).
+- **Query-pool drain at slot reclaim.** Occlusion queries are
+  partitioned per flight slot; each submission's queries + pending
+  guest reports are handed to the slot at submit and drained when
+  the slot fence is reaped — `pgraph_vk_finish` no longer blocks on
+  `vkGetQueryPoolResults(WAIT_BIT)` for the work it *just*
+  submitted (which defeated the 2-slot pipeline on every finish in
+  zpass-report titles). Guest-facing paths (`STALLED`,
+  `REPORTS_FULL`, `FLUSH`) still drain synchronously so report
+  polling can't deadlock and savestate/renderer-switch stay
+  consistent.
+- **LRU free-list + true-LRU eviction.** `lru.h` keeps free nodes on
+  a dedicated list (O(1) allocation) and `global` holds only in-use
+  nodes, so eviction starts at the true LRU entry instead of
+  scanning a mixed list from the tail — O(cache size) per eviction
+  before, relevant for the texture cache and the 50k-entry shader
+  module cache.
+- **Texture-upload CPU trims.** Post-snapshot full re-hash skipped
+  when the dirty re-check proves no guest write landed during the
+  snapshot memcpy (the snapshot is then bit-identical to what the
+  incremental chunk hash covered — also keeps the stored hash
+  comparable with the chunked composition); `TextureLayout` (~5 KiB)
+  reuses a single scratch instead of g_malloc0/g_free per upload.
 - **Tight barriers.** Precise stage masks replace
   `ALL_COMMANDS_BIT`; exact byte ranges replace `VK_WHOLE_SIZE`;
   coherent-memory flushes skipped via per-buffer `is_coherent`.
@@ -166,7 +215,13 @@ In-app Settings covers the main toggles.
   rebinds, renderer switch. `bind_shaders` skips
   `update_shader_uniforms` when clean.
   `pgraph_update_inline_value` memcmp's before write.
-- **Correctness.** Partial-channel clear updates cached scissor +
+- **Correctness.** Frame-interpolation state (saved prev/cur
+  IOSurface pair + remaining count) is dropped on display resize so
+  deferred interpolation can't present stale-resolution frames.
+  Screenshots/thumbnails query the framebuffer through
+  `GL_TEXTURE_RECTANGLE` on the IOSurface path (previously
+  `GL_TEXTURE_2D` returned zero dimensions → broken captures).
+  Partial-channel clear updates cached scissor +
   blend constants so subsequent same-CB draws on the pipeline
   fast-out path don't inherit the overrides. PVIDEO non-coherent
   flush uses `row_bytes * in_height` (exact CPU-written range)
@@ -211,6 +266,28 @@ In-app Settings covers the main toggles.
   one word-load per register + constant-mask bit extracts; replaces
   a ~14-call `voice_get_mask` fanout per active voice per frame.
   3D voices skip VBIN V0..V3 (overwritten from `hrtf_submix[]`).
+  Same batching in `voice_get_samples` (runs inside the resampler
+  callback: 9 CFG_FMT fields from one word-load) and
+  `get_voice_bin_src_dst` (10 reads → 2 word-loads per queued
+  voice). The paused-voice peek loads FMT/STATE directly off the
+  precomputed `voice_addr` instead of two `voice_get_mask` round
+  trips.
+- **Mono LPF skip.** Mono voices carry identical data in both
+  channels and both use the FCA register; the DLS2 SVF now filters
+  ch 0 only and mirrors the result, halving SVF cost on the common
+  mono-voice case (ch0==ch1 invariant kept for HRTF / monitor).
+- **HRTF FIR linearization.** `hrtf_filter_process` linearizes the
+  circular history once per frame (two-span memcpy + input append)
+  so the 31-tap convolution runs over contiguous memory with no
+  per-tap modulo — the `% HRTF_BUFLEN` indexing defeated the
+  autovectorizer and dominated 3D-voice CPU time. (Hand-NEON was
+  tried and reverted; removing the modulo lets `-O3` autovectorize
+  profitably instead.)
+- **SSE2 mix kernels (non-Apple x86_64).** The vDSP mixbin
+  accumulate, `float_accumulate`, and `float_to_24b_bulk` now have
+  SSE2 equivalents so Windows / Linux x86_64 builds get the same
+  vectorized audio mix path (float-domain clamp before
+  `cvtps2dq` matches NEON/lrint saturation semantics).
 - **SVF coefficient cache.** `setup_svf` short-circuits when
   `(fc, q, filter-type)` is unchanged — skips `sqrtf` + stores on
   the common voice-per-channel-per-frame path.
@@ -226,18 +303,33 @@ In-app Settings covers the main toggles.
   `pause_requested`, `NV_PAPU_FEMEMADDR` load, and `VPVADDR` /
   `FENADDR` reads in lock-free VP paths all use `qatomic_*` so the
   VP frame thread, workers, and lock-free MMIO dispatcher agree
-  under weak ordering.
+  under weak ordering. `fe_method`'s register reads (FECV / FEAV /
+  list tops / VPSGEADDR / VPSSLADDR / FETFORCE1) follow the same
+  contract.
 - **CoreAudio.** `os_unfair_lock` with trylock. Underruns now
   partial-fill (drain what's pending, zero only the tail) instead
   of zeroing the whole IOProc buffer on any shortfall.
 - **Full DSP JIT (opt-in, default on for new configs).** ARM64
   basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
   via `[perf] audio.dsp_jit.enabled = true` or `XEMU_DSP_JIT=1`.
-  100% ALU inlined, 99.99% CF inlined; only `emu_undefined` +
-  the 16-variant `bit_manip` tail (~180 ops/run) stay on BLR.
+  100% ALU inlined, 99.99% CF inlined; only `emu_undefined` stays
+  on BLR — the 16-variant `bit_manip` tail (bset/bclr/bchg/btst ×
+  aa/ea/pp/reg) is now emitted inline (REG variants targeting
+  side-effect registers SR/OMR/SP/SSH/SSL keep the BLR fallback),
+  and `pm_read_accu24` — the limited A/B read on every accumulator
+  parmove — is inlined for the scaling=0 case universal on Xbox
+  (2-insn fits-in-24-bit check on the sign-extended pin; SR.L
+  semantics preserved; non-zero scaling BLRs the bit-exact helper).
   A/B/X/Y/SR accumulators pinned in callee-saved ARM64 regs.
   Static block chaining for unconditional + conditional-taken
-  terminators keeps hot inner loops inside JIT code. Lazy-flag
+  terminators keeps hot inner loops inside JIT code, with
+  retro-chaining: a terminator whose target isn't translated yet
+  emits a patchable chain site (initially routed to the shared
+  exit) that gets patched to the target's `chain_entry` when it is
+  later translated; incoming-chain cap raised 8 → 16. Chain-site
+  repatching at block install was also moved inside the JIT-write
+  window (previously ran after `qemu_thread_jit_execute()` — a
+  latent W^X fault on the list-full path). Lazy-flag
   elimination (full-dead + per-flag N/Z + E/U halves) elides ~20%
   of SR updates on Azurik. Bit-exact harness:
   `XEMU_DSP_JIT_DIFF=N` validates every Nth unique block against
@@ -269,7 +361,11 @@ In-app Settings covers the main toggles.
   `XEMU_CODESIGN_ENTITLEMENTS=1` opts into hardened runtime +
   `xemu.entitlements`. For notarized distribution use
   `scripts/sign-macos-release.sh`.
-- Optional PGO (`XEMU_PGO=generate` → run → `XEMU_PGO=use`).
+- Optional PGO (`XEMU_PGO=generate` → run → `XEMU_PGO=use`) — now
+  also wired into the native Windows (MSYS2) branch.
+- Native Windows release builds default to `-Dx86_version=3`
+  (AVX2 / BMI2 / FMA — matches CI release config; override by
+  passing your own `-Dx86_version=`).
 
 ### MoltenVK runtime config (`Info.plist` `LSEnvironment`)
 
@@ -314,6 +410,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Vblank cadence aligned to host display refresh | Host `vblank_interval_ns` drives `process_vblank` → `graphic_hw_update` → `nv2a_vga_gfx_update` → `NV_PCRTC_INTR_0_VBLANK`. Retuning retimes the *guest* IRQ (titles gate sim on vblank count). Needs NV2A-internal timer (fixed 60 / 50 Hz) decoupled from host present cadence |
 | AArch64 `fsin` / `fcos` libm-helper inline | Swapping `gen_helper_fsin` / `_fcos` (floatx80 round-trip) for a thin `helper_sin_fast_f{32,64}` / `cos_fast_*` (f-bits → `memcpy` → libm → bits) made audio crackly on at least one title. Plausible causes: (a) `gen_flush_fp` was also the de-facto flush for *other* live x87 temps; (b) `TCG_CALL_NO_RWG_SE` let TCG reorder across boundaries the floatx80 helper implicitly fenced |
 | Voice-list `SE2FE_IDLE_VOICE` re-notify skip | No guest-write hook on `NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE` transitions → can't reliably clear a "notified this activation" flag. Risk of missing an FE-observed idle transition outweighs the per-frame save |
+| Cross-TB FPCR elision via `cached_fpuc_rc` as TCG global | TCG globals are memory-backed and reloaded per TB — a global doesn't eliminate the per-TB `ld16u` in `gen_flcr`, it just renames it. Eliminating the load needs either TB-chain metadata (RC equality across chain edges) or relaxing `gen_flush_fp`'s `flcr_set` reset — the same implicit-fence class that made the fsin/fcos inline regress. No win available at acceptable risk |
 
 ---
 
@@ -331,9 +428,6 @@ Not attempted, or scope/risk too high for a one-shot change.
   synchronously; MetalFX's command queue is distinct from
   MoltenVK's so deferring races. Needs `MTLSharedEvent` cross-queue
   sync.
-- **Query-pool drain at slot reclaim.** Shared pool across flight
-  slots; needs per-slot pool + range tracking before the drain can
-  move off the finish path.
 - **Texture-upload barrier batching.** Current per-mip
   `pre_compute` / `post_compute` pair is load-bearing on reused
   `COMPUTE_DST` / `COMPUTE_SRC`; batching requires disjoint offsets
@@ -353,8 +447,6 @@ Not attempted, or scope/risk too high for a one-shot change.
   bandwidth + fragment branches.
 - **GPU S3TC decode.** Compute-shader decoder offloads the CPU
   thread pool.
-- **LRU eviction fast path.** Aux evictable queue or per-slot
-  bitmask; current tail walk is linear.
 - **Decoupled guest-vblank IRQ timer.** Dedicated NV2A-model 60 /
   50 Hz timer lets the host present path retune for ProMotion
   without changing guest sim speed.
@@ -363,13 +455,10 @@ Not attempted, or scope/risk too high for a one-shot change.
   reads see stale data).
 - **`qemu_cpu_kick` via `dispatch_semaphore_t`.**
   `pthread_kill(SIGUSR1)` has ~50 µs P99 jitter on macOS 26.
-- **TCG AArch64 3-MOVK constant materialization.** Beats literal-pool
-  LDR on Apple chips.
-- **Cross-TB FPCR elision.** `cached_fpuc_rc` as a TCG global
-  across chained TBs → register compare instead of memory reload.
 - **DSP JIT parmove+ALU fusion.** Redundant `save_reg` → mem → reg
   round-trips when the parmove's own destination provides the same
-  value.
+  value. (The other half of that design note — inlining
+  `pm_read_accu24` for scaling=0 — has landed.)
 
 ---
 

@@ -1028,10 +1028,23 @@ bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, in
 {
     int width, height;
 
+    /*
+     * On the macOS Vulkan/IOSurface path the framebuffer is a
+     * GL_TEXTURE_RECTANGLE; querying it through GL_TEXTURE_2D returns
+     * zero dimensions and breaks screenshots/thumbnails. Mirror the
+     * query_target selection used by RenderFramebuffer().
+     */
+    GLenum query_target = GL_TEXTURE_2D;
+#ifdef __APPLE__
+    if (g_framebuffer_is_rect) {
+        query_target = GL_TEXTURE_RECTANGLE;
+    }
+#endif
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    glBindTexture(query_target, tex);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_HEIGHT, &height);
+    glBindTexture(query_target, 0);
 
     width = height * GetDisplayAspectRatio(width, height);
 

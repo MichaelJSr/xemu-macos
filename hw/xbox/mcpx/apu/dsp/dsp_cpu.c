@@ -1783,6 +1783,29 @@ void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
  * inline" decision is data-driven. Returns DSP_JIT_FB_OTHER for
  * handlers the JIT doesn't recognise in its fallback bucket.
  */
+int dsp_jit_helper_classify_bit_manip(void *fn)
+{
+    emu_func_t f = (emu_func_t)fn;
+    /* (op_kind << 2) | source_kind; see dsp_jit.h. */
+    if (f == emu_bset_aa)  return (0 << 2) | 0;
+    if (f == emu_bset_ea)  return (0 << 2) | 1;
+    if (f == emu_bset_pp)  return (0 << 2) | 2;
+    if (f == emu_bset_reg) return (0 << 2) | 3;
+    if (f == emu_bclr_aa)  return (1 << 2) | 0;
+    if (f == emu_bclr_ea)  return (1 << 2) | 1;
+    if (f == emu_bclr_pp)  return (1 << 2) | 2;
+    if (f == emu_bclr_reg) return (1 << 2) | 3;
+    if (f == emu_bchg_aa)  return (2 << 2) | 0;
+    if (f == emu_bchg_ea)  return (2 << 2) | 1;
+    if (f == emu_bchg_pp)  return (2 << 2) | 2;
+    if (f == emu_bchg_reg) return (2 << 2) | 3;
+    if (f == emu_btst_aa)  return (3 << 2) | 0;
+    if (f == emu_btst_ea)  return (3 << 2) | 1;
+    if (f == emu_btst_pp)  return (3 << 2) | 2;
+    if (f == emu_btst_reg) return (3 << 2) | 3;
+    return -1;
+}
+
 int dsp_jit_helper_classify_fallback(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
@@ -1800,14 +1823,7 @@ int dsp_jit_helper_classify_fallback(void *fn)
     if (f == emu_undefined)  return DSP_JIT_FB_UNDEFINED;
 
     /* Bucketed handler groups. */
-    if (f == emu_bchg_ea || f == emu_bchg_aa ||
-        f == emu_bchg_pp || f == emu_bchg_reg ||
-        f == emu_bclr_ea || f == emu_bclr_aa ||
-        f == emu_bclr_pp || f == emu_bclr_reg ||
-        f == emu_bset_ea || f == emu_bset_aa ||
-        f == emu_bset_pp || f == emu_bset_reg ||
-        f == emu_btst_ea || f == emu_btst_aa ||
-        f == emu_btst_pp || f == emu_btst_reg) {
+    if (dsp_jit_helper_classify_bit_manip(fn) >= 0) {
         return DSP_JIT_FB_BIT_MANIP;
     }
     if (f == emu_add_imm || f == emu_sub_imm ||

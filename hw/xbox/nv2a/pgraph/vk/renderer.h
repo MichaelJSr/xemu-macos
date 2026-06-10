@@ -276,12 +276,15 @@ typedef struct SamplerCacheEntry {
     VkSampler sampler;
 } SamplerCacheEntry;
 
-typedef struct QueryReport {
+typedef struct QueryReport QueryReport;
+typedef QSIMPLEQ_HEAD(QueryReportQueue, QueryReport) QueryReportQueue;
+
+struct QueryReport {
     QSIMPLEQ_ENTRY(QueryReport) entry;
     bool clear;
     uint32_t parameter;
     unsigned int query_count;
-} QueryReport;
+};
 
 typedef struct PvideoState {
     bool enabled;
@@ -443,8 +446,6 @@ typedef struct PGRAPHVkState {
     uint32_t allocator_last_submit_index;
 
     VkQueue queue;
-    VkQueue compute_queue;
-    bool has_compute_queue;
 #define NUM_FLIGHT_SLOTS 2
 
     VkCommandPool command_pool;
@@ -480,6 +481,14 @@ typedef struct PGRAPHVkState {
         unsigned long uploaded_first_dirty_bit;
         unsigned long uploaded_last_dirty_bit;
         bool submitted;
+        /*
+         * Occlusion queries recorded into this slot's last submission
+         * plus the guest reports awaiting their results. Drained when
+         * the slot fence is reaped (slot reclaim) instead of stalling
+         * the CPU on the just-submitted command buffer at finish time.
+         */
+        int query_count;
+        QueryReportQueue report_queue;
     } flight[NUM_FLIGHT_SLOTS];
     int current_flight;
 
@@ -664,6 +673,14 @@ typedef struct PGRAPHVkState {
     uint8_t *palette_snapshot_buf;
     size_t palette_snapshot_buf_capacity;
 
+    /*
+     * Reusable TextureLayout scratch (~5 KiB) for get_texture_layout();
+     * exactly one layout is alive at a time so a single buffer
+     * replaces a g_malloc0/g_free pair per texture upload. Type is
+     * private to texture.c, hence void*.
+     */
+    void *texture_layout_scratch;
+
     Lru sampler_cache;
     SamplerCacheEntry *sampler_cache_entries;
     SamplerCacheEntry *sampler_bindings[NV2A_MAX_TEXTURES];
@@ -704,7 +721,7 @@ typedef struct PGRAPHVkState {
     size_t emulated_indices_buf_size;
     bool query_in_flight;
     uint32_t zpass_pixel_count_result;
-    QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
+    QueryReportQueue report_queue; // Reports for the current recording
 
     SurfaceFormatInfo kelvin_surface_zeta_vk_map[3];
 
@@ -781,6 +798,7 @@ void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
 VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
 void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
 void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg);
+void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot);
 void pgraph_vk_select_flight_slot(PGRAPHState *pg);
 void pgraph_vk_init_flight_partitions(PGRAPHState *pg);
 
@@ -872,7 +890,23 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg);
 void pgraph_vk_clear_report_value(NV2AState *d);
 void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
 void pgraph_vk_process_pending_reports(NV2AState *d);
-void pgraph_vk_process_pending_reports_internal(NV2AState *d);
+void pgraph_vk_drain_slot_reports(NV2AState *d, int slot);
+void pgraph_vk_drain_all_pending_reports(NV2AState *d);
+
+/*
+ * The occlusion query pool is partitioned per flight slot so a slot's
+ * queries can stay in flight (and be drained at slot reclaim) without
+ * colliding with the indices used by the next recording.
+ */
+static inline int pgraph_vk_queries_per_slot(PGRAPHVkState *r)
+{
+    return r->max_queries_in_flight / NUM_FLIGHT_SLOTS;
+}
+
+static inline int pgraph_vk_slot_query_base(PGRAPHVkState *r, int slot)
+{
+    return slot * pgraph_vk_queries_per_slot(r);
+}
 
 typedef enum FinishReason {
     VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,

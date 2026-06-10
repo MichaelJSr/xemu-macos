@@ -24,6 +24,8 @@
 #include <stdint.h>
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
+#elif defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
 #endif
 
 static inline float int8_to_float(int8_t x)
@@ -86,6 +88,33 @@ static inline void float_to_24b_bulk(const float *src, uint32_t *dst, int count)
         iv = vmaxq_s32(iv, min_val);
         iv = vandq_s32(iv, mask);
         vst1q_u32(dst + i, vreinterpretq_u32_s32(iv));
+    }
+    for (; i < count; i++) {
+        dst[i] = float_to_24b(src[i]);
+    }
+#elif defined(__x86_64__) || defined(_M_X64)
+    /*
+     * SSE2 path (baseline on x86_64) — parity with the NEON path
+     * above for Windows/Linux builds. The clamp is done in the float
+     * domain BEFORE the convert: _mm_cvtps_epi32 yields the
+     * "integer indefinite" value 0x80000000 for out-of-range inputs
+     * (positive overflow would otherwise clamp to the negative
+     * rail). Both bounds are < 2^24 so they are exactly
+     * representable in f32, and the convert uses MXCSR
+     * round-to-nearest-even, matching lrint / vcvtnq semantics.
+     */
+    const __m128 scale = _mm_set1_ps(8.0f * 0x100000);
+    const __m128 fmax = _mm_set1_ps(8388607.0f);   /*  0x7fffff */
+    const __m128 fmin = _mm_set1_ps(-8388608.0f);  /* -0x800000 */
+    const __m128i mask = _mm_set1_epi32(0xffffff);
+
+    int i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128 v = _mm_mul_ps(_mm_loadu_ps(src + i), scale);
+        v = _mm_min_ps(_mm_max_ps(v, fmin), fmax);
+        __m128i iv = _mm_cvtps_epi32(v);
+        iv = _mm_and_si128(iv, mask);
+        _mm_storeu_si128((__m128i *)(dst + i), iv);
     }
     for (; i < count; i++) {
         dst[i] = float_to_24b(src[i]);

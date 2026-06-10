@@ -114,6 +114,16 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     r->in_aux_command_buffer = false;
 }
 
+void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->flight[slot].submitted) {
+        vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
+                                 "pgraph_vk_wait_slot_fence");
+    }
+}
+
 void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -124,6 +134,14 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
                                  "pgraph_vk_wait_for_previous_flight");
         r->flight[slot].submitted = false;
     }
+
+    /*
+     * The slot's submission has fully completed; harvest its occlusion
+     * query results and deliver any deferred guest reports before the
+     * slot (and its query-pool partition) is reused.
+     */
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    pgraph_vk_drain_slot_reports(d, slot);
 
     if (r->flight[slot].uploaded_bitmap) {
         bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);

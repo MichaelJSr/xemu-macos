@@ -860,11 +860,15 @@ void MainMenuAudioView::Draw()
     SectionTitle("Quality");
     Toggle("Real-time DSP processing", &g_config.audio.use_dsp,
            "Enable improved audio accuracy (experimental)");
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* The DSP JIT only exists on macOS / Apple Silicon; hide the toggle
+     * elsewhere instead of showing a no-op control. */
     Toggle("DSP JIT (Apple Silicon)", &g_config.audio.dsp_jit.enabled,
            "ARM64 basic-block JIT for the MCPX APU DSP56300 cores "
            "(macOS / Apple Silicon only). Gives a noticeable speedup "
            "on DSP-heavy audio paths; bit-exact with the interpreter. "
            "Takes effect on next title launch.");
+#endif
 
 }
 

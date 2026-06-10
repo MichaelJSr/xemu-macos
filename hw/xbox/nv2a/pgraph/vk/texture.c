@@ -327,7 +327,12 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
         adjusted_depth = MAX(16, s.depth * 2);
     }
 
-    TextureLayout *layout = g_malloc0(sizeof(TextureLayout));
+    PGRAPHVkState *r_state = pg->vk_renderer_state;
+    if (r_state->texture_layout_scratch == NULL) {
+        r_state->texture_layout_scratch = g_malloc(sizeof(TextureLayout));
+    }
+    TextureLayout *layout = r_state->texture_layout_scratch;
+    memset(layout, 0, sizeof(*layout));
 
     if (f.linear) {
         nv2a_vk_assert(s.pitch % f.bytes_per_pixel == 0 && "Can't handle strides unaligned to pixels");
@@ -725,6 +730,13 @@ static void tex_dirty_buckets_finalize(PGRAPHVkState *r)
     r->tex_dirty_num_buckets = 0;
 }
 
+static void tex_mark_possibly_dirty_visitor(Lru *lru, LruNode *node,
+                                            void *opaque)
+{
+    TextureBinding *tnode = container_of(node, TextureBinding, node);
+    tnode->possibly_dirty = true;
+}
+
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
     hwaddr addr, hwaddr size)
 {
@@ -734,6 +746,19 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
     nv2a_vk_assert(end <= vram_size);
 
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    /*
+     * Whole-VRAM signal (the flush path passes [0, vram_size)): mark
+     * every active binding with one LRU walk instead of visiting all
+     * buckets — a texture spanning k buckets appears k times there.
+     * Also avoids lazily building the bucket index just for a flush.
+     */
+    if (addr == 0 && end >= vram_size - 1) {
+        lru_visit_active(&r->texture_cache, tex_mark_possibly_dirty_visitor,
+                         NULL);
+        return;
+    }
+
     tex_dirty_buckets_ensure(r, vram_size);
 
     uint32_t first = tex_dirty_bucket_idx(addr);
@@ -824,7 +849,9 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
 
-    g_autofree TextureLayout *layout =
+    /* Points at r->texture_layout_scratch; valid until the next
+     * get_texture_layout() call and must not be freed. */
+    TextureLayout *layout =
         get_texture_layout(pg, texture_idx, texture_snapshot, palette_snapshot);
     const int num_layers = state->cubemap ? 6 : 1;
 
@@ -2069,13 +2096,21 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             torn_read = true;
         }
 
-        snapshot_hash = fast_hash(texture_snapshot, texture_length);
-        if (is_indexed) {
-            snapshot_hash ^= fast_hash(palette_snapshot,
-                                       texture_palette_data_size);
-        }
-
         if (torn_read) {
+            /*
+             * A guest write landed between the content hash and the
+             * snapshot memcpy, so the snapshot may not match
+             * content_hash — rehash the actual bytes we are about to
+             * upload. When no write landed (the common case) the
+             * snapshot is bit-identical to what content_hash covered
+             * and the full re-hash can be skipped entirely.
+             */
+            snapshot_hash = fast_hash(texture_snapshot, texture_length);
+            if (is_indexed) {
+                snapshot_hash ^= fast_hash(palette_snapshot,
+                                           texture_palette_data_size);
+            }
+
             pgraph_vk_mark_textures_possibly_dirty(d, texture_vram_offset,
                                                    texture_length);
             if (is_indexed) {
@@ -2355,6 +2390,8 @@ static void texture_cache_finalize(PGRAPHVkState *r)
     g_free(r->palette_snapshot_buf);
     r->palette_snapshot_buf = NULL;
     r->palette_snapshot_buf_capacity = 0;
+    g_free(r->texture_layout_scratch);
+    r->texture_layout_scratch = NULL;
 }
 
 static void sampler_cache_entry_init(Lru *lru, LruNode *node, const void *state)

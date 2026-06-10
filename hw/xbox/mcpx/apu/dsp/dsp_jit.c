@@ -1028,13 +1028,34 @@ typedef void (*dsp_jit_entry_fn)(dsp_core_t *dsp);
 #define DSP_JIT_WS_ALL        0x1fu
 
 /* Per-block maximum incoming chain sites (other blocks whose final
- * op is a chainable terminator whose target is this block). 8 is
- * plenty in practice: most hot loops have 1-2 callers. Blocks at
- * the limit fall back to unchained exits (return to dispatcher).
- * Sizing: 8 * 24 bytes = 192 bytes per block * 4096 blocks ≈ 768 KB. */
-#define DSP_JIT_MAX_INCOMING_CHAINS 8
+ * op is a chainable terminator whose target is this block). Most
+ * hot loops have 1-2 callers; 16 gives headroom for shared
+ * subroutine heads now that retro-chaining registers sites from
+ * blocks translated before their target too. Blocks at the limit
+ * fall back to unchained exits (return to dispatcher).
+ * Sizing: 16 * 24 bytes = 384 bytes per block * 4096 blocks ≈ 1.5 MB. */
+#define DSP_JIT_MAX_INCOMING_CHAINS 16
+
+/*
+ * Retro-chaining: when a chainable terminator's target block is not
+ * translated yet, the source block still emits a patchable chain B
+ * (initially routed to its own shared exit) and records the site
+ * here. When a block is later installed at target_pc, every pending
+ * site whose source generation still matches is patched to the new
+ * block's chain_entry. Pool overflow simply drops the registration
+ * (the site keeps exiting to the dispatcher — correct, just
+ * unchained).
+ */
+#define DSP_JIT_MAX_PENDING_CHAINS 128
 
 typedef struct DspJitBlock DspJitBlock;
+
+typedef struct DspJitPendingChain {
+    uint32_t target_pc;
+    uint32_t *site;
+    DspJitBlock *source;
+    uint32_t source_generation;
+} DspJitPendingChain;
 
 typedef struct DspJitIncomingChain {
     /* Address of the B instruction inside the source block's code
@@ -1220,6 +1241,10 @@ typedef struct DspJitState {
      * diff mode is on; only blocks where (counter % sample) == 0
      * actually go through the differential path. */
     uint64_t diff_sample_counter;
+
+    /* Retro-chaining pending-site pool (see DspJitPendingChain). */
+    DspJitPendingChain pending_chains[DSP_JIT_MAX_PENDING_CHAINS];
+    uint32_t num_pending_chains;
 
     /* Set the first time dsp_jit_print_stats runs for this core,
      * so the atexit handler and dsp_jit_finalize don't both dump
@@ -2005,12 +2030,15 @@ static void emit_pm_write_reg(ArmEmit *e, int dstreg, int value_reg,
 
 /*
  * Emit code that reads the current value of DSP register `srcreg`
- * into `value_reg` (W). For accumulators A / B the read goes
- * through dsp_jit_helper_pm_read_accu24, which applies scaling
- * and limiting per SR.S0/S1 and maintains SR.L — this is the
- * slow path but matches the interpreter bit-exactly.
+ * into `value_reg` (W). For accumulators A / B the scaling == 0
+ * case (S1:S0 == 0 — the universal case on Xbox audio code) is
+ * inlined: the limited 24-bit read is a1 when the 56-bit accu is a
+ * pure sign extension of a1, else the saturated max negative /
+ * positive constant with SR.L set. Non-zero scaling falls back to
+ * the bit-exact dsp_jit_helper_pm_read_accu24 BLR, which also
+ * applies the S0/S1 shift semantics.
  *
- * Clobbers: w0, w1, x3. Preserves x19-x25 except value_reg.
+ * Clobbers: w0, w1, x2, x3. Preserves x19-x25 except value_reg.
  * Must NOT be called with value_reg in {0, 1, 2, 3}.
  */
 static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
@@ -2019,7 +2047,57 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
            value_reg != 2 && value_reg != 3);
 
     if (srcreg == DSP_REG_A || srcreg == DSP_REG_B) {
-        /* BLR pm_read_accu24(dsp, numreg, &SP[scratch0]) */
+        int pin = (srcreg == DSP_REG_B) ? DSP_JIT_B_PIN_REG
+                                        : DSP_JIT_A_PIN_REG;
+
+        /* w0 = (SR >> S0) & 3; non-zero scaling → helper BLR. */
+        emit_ubfx_w(e, /*rd=*/0, /*rn=*/DSP_JIT_SR_PIN_REG, DSP_SR_S0, 2);
+        uint32_t *to_slow = e->buf;
+        emit_cbnz_w(e, /*rn=*/0, 0);            /* patched below */
+
+        /*
+         * Fast path (scaling == 0). The pin holds the accu as a
+         * sign-extended 56-bit value (a0[0:23] a1[24:47] a2[48:55]).
+         *   x0 = acc >> 24      (signed a2:a1)
+         *   x1 = sext24(a1)
+         * x0 == x1 exactly when a2 is the sign extension of a1
+         * (interpreter conditions a2==0x00 && a1<=0x7fffff or
+         * a2==0xff && a1>=0x800000) — i.e. no limiting needed.
+         */
+        emit_asr_x_imm(e, /*rd=*/0, /*rn=*/pin, 24);
+        emit_sbfx_x(e, /*rd=*/1, /*rn=*/0, 0, 24);
+        emit_subs_x_reg(e, /*rd=*/31, /*rn=*/0, /*rm=*/1); /* cmp x0, x1 */
+        uint32_t *to_limit = e->buf;
+        emit_bcond(e, ARM_COND_NE, 0);          /* patched below */
+
+        /* No limiting: value = a1. */
+        emit_ubfx_w(e, /*rd=*/value_reg, /*rn=*/0, 0, 24);
+        uint32_t *to_done_fast = e->buf;
+        emit_b(e, 0);                            /* patched below */
+
+        /*
+         * Limited: value = (acc < 0) ? 0x800000 : 0x7fffff and
+         * SR.L is set (write-through to pin + memory, matching the
+         * helper which stores registers[SR]). x0 (acc >> 24)
+         * preserves the accu sign for the saturate select.
+         */
+        patch_branch(to_limit,
+                     (int32_t)((uint8_t *)e->buf - (uint8_t *)to_limit));
+        emit_mov_imm32(e, /*rd=*/1, 0x00800000u);
+        emit_mov_imm32(e, /*rd=*/2, 0x007fffffu);
+        emit_subs_x_reg(e, /*rd=*/31, /*rn=*/0, /*rm=*/31); /* cmp x0, #0 */
+        emit_csel_w(e, /*rd=*/value_reg, /*rn=*/1, /*rm=*/2,
+                    0x4 /* MI: accu negative */);
+        emit_load_sr(e, /*rd=*/0);
+        emit_mov_imm32(e, /*rd=*/1, 1u << DSP_SR_L);
+        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+        emit_store_sr_h(e, /*rs=*/0);
+        uint32_t *to_done_limit = e->buf;
+        emit_b(e, 0);                            /* patched below */
+
+        /* Slow path: BLR pm_read_accu24(dsp, numreg, &SP[scratch0]) */
+        patch_branch(to_slow,
+                     (int32_t)((uint8_t *)e->buf - (uint8_t *)to_slow));
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
         emit_mov_imm32(e, /*rd=*/1, (uint32_t)srcreg);
         emit_add_x_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH0);
@@ -2030,6 +2108,11 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
         /* pm_read_accu24 sets SR.L on overflow during limiting —
          * reload the SR pin so subsequent reads see the new SR.L. */
         emit_reload_sr_pin(e);
+
+        patch_b(to_done_fast,
+                (int32_t)((uint8_t *)e->buf - (uint8_t *)to_done_fast));
+        patch_b(to_done_limit,
+                (int32_t)((uint8_t *)e->buf - (uint8_t *)to_done_limit));
         return;
     }
 
@@ -8683,6 +8766,131 @@ static bool emit_cf_call(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
     return true;
 }
 
+/*
+ * Inline emitter for the 16 bset / bclr / bchg / btst handlers
+ * (previously the last BLR-fallback bucket with steady-state
+ * volume). All variants share the same shape (mirrors
+ * emu_b{set,clr,chg,tst}_{aa,ea,pp,reg} in dsp_emu.c.inc):
+ *
+ *   value     = read(source)
+ *   carry     = (value >> numbit) & 1
+ *   value     = op(value, numbit)        (btst: unchanged)
+ *   write-back (non-btst)
+ *   SR.C      = carry
+ *   instr_cycle += 2
+ *
+ * REG-variant write-back goes through dsp_write_reg in the
+ * interpreter; registers with side effects there (OMR / SR mask
+ * quirks, SP stack-error interrupt, SSH stack push, SSL stack
+ * write) return false → generic BLR fallback. A / B use the
+ * standard 3-way accu split + pin sync (emit_pm_write_reg), and the
+ * limited A / B *read* may set SR.L exactly like the interpreter
+ * (handled inside emit_pm_read_reg).
+ *
+ * Returns false when the variant must stay on the BLR fallback.
+ * Clobbers w0-w2, x3, w22-w24.
+ */
+static bool emit_bit_manip_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
+                              uint32_t inst, int bm_kind,
+                              uint32_t *out_write_set)
+{
+    int op_kind = DSP_JIT_BM_OP(bm_kind);         /* 0 set 1 clr 2 chg 3 tst */
+    int source_kind = DSP_JIT_BM_SOURCE(bm_kind); /* 0 aa 1 ea 2 pp 3 reg */
+    uint32_t numbit = inst & 0x1f;
+    uint32_t numreg = (inst >> 8) & 0x3f;
+
+    if (source_kind == 3) {
+        /* dsp_write_reg side-effect registers: BLR fallback (btst
+         * never writes back, so it can always inline). */
+        bool write_is_plain =
+            numreg == DSP_REG_A || numreg == DSP_REG_B ||
+            (numreg != DSP_REG_OMR && numreg != DSP_REG_SR &&
+             numreg != DSP_REG_SP && numreg != DSP_REG_SSH &&
+             numreg != DSP_REG_SSL);
+        if (op_kind != 3 && !write_is_plain) {
+            return false;
+        }
+
+        if (numreg == DSP_REG_A || numreg == DSP_REG_B) {
+            /* Limited 24-bit read; may set SR.L (interp parity). */
+            emit_pm_read_reg(e, (int)numreg, /*value_reg=*/23);
+        } else {
+            /* Raw 32-bit register word, matching the interpreter's
+             * direct registers[numreg] read (NOT the pinned 24-bit
+             * X/Y view — unmasked writes can leave high bits set
+             * that numbit 24-31 would observe). */
+            emit_ldr_w_any(e, /*rd=*/23, /*rn=*/19, SCRATCH,
+                           OFF_REG(numreg));
+        }
+    } else {
+        uint32_t memspace = (inst >> 6) & 1;
+        if (source_kind == 0) {
+            /* AA: 6-bit absolute (always < 64, linear RAM). */
+            emit_mov_imm32(e, /*rd=*/22, numreg);
+        } else if (source_kind == 1) {
+            /* EA: calc_ea (modes 5-7 BLR + add their own +2 cycles,
+             * mode 6 bakes pram[pc+1] + bumps cur_inst_len). */
+            emit_calc_ea_inline(e, numreg, /*out_addr_reg=*/22, false,
+                                dsp, pc);
+        } else {
+            /* PP: peripheral page. */
+            emit_mov_imm32(e, /*rd=*/22, 0xffffc0u + numreg);
+        }
+        emit_mem_read_xy(e, (int)memspace, /*addr_reg=*/22,
+                         /*value_reg=*/23);
+    }
+
+    /* carry = (value >> numbit) & 1, kept in callee-saved w24 so it
+     * survives a potential mem-write BLR below. */
+    emit_ubfx_w(e, /*rd=*/24, /*rn=*/23, (int)numbit, 1);
+
+    if (op_kind != 3) {
+        if (op_kind == 0) {                       /* bset */
+            emit_mov_imm32(e, /*rd=*/0, 1u << numbit);
+            emit_orr_w_reg(e, /*rd=*/23, /*rn=*/23, /*rm=*/0);
+        } else if (op_kind == 1) {                /* bclr */
+            emit_mov_imm32(e, /*rd=*/0, ~(1u << numbit));
+            emit_and_w_reg(e, /*rd=*/23, /*rn=*/23, /*rm=*/0);
+        } else {                                  /* bchg */
+            emit_mov_imm32(e, /*rd=*/0, 1u << numbit);
+            emit_eor_w_reg(e, /*rd=*/23, /*rn=*/23, /*rm=*/0);
+        }
+
+        if (source_kind == 3) {
+            /* Matches dsp_write_reg: A/B 3-way split + pin sync;
+             * plain registers masked to native width. */
+            emit_pm_write_reg(e, (int)numreg, /*value_reg=*/23,
+                              /*mask_to_width=*/true);
+        } else {
+            uint32_t memspace = (inst >> 6) & 1;
+            emit_mem_write_xy(e, (int)memspace, /*addr_reg=*/22,
+                              /*value_reg=*/23);
+            if (out_write_set) {
+                if (source_kind == 0) {
+                    *out_write_set |= (memspace == DSP_SPACE_X)
+                                          ? DSP_JIT_WS_XRAM
+                                          : DSP_JIT_WS_YRAM;
+                } else {
+                    /* EA can land anywhere incl. peripherals (DMA
+                     * triggers); PP is peripherals by definition —
+                     * conservative for the differential validator. */
+                    *out_write_set |= DSP_JIT_WS_ALL;
+                }
+            }
+        }
+    }
+
+    /* SR.C = carry (write-through pin + memory). */
+    emit_load_sr(e, /*rd=*/0);
+    emit_bfi_x(e, /*rd=*/0, /*rn=*/24, DSP_SR_C, 1);
+    emit_store_sr_h(e, /*rs=*/0);
+
+    /* All 16 handlers: instr_cycle += 2 (additive — preserves
+     * calc_ea's +2 for EA modes 5-7). */
+    emit_cf_add_cycles(e, 2);
+    return true;
+}
+
 static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
                              dsp_core_t *dsp,
                              uint32_t pc, uint32_t inst, uint32_t inst_len,
@@ -8766,6 +8974,14 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
             handler_inlined = true;
             /* Long-imm ops are ALU — credit the inlined count. */
             g_alu_inlined_count++;
+        }
+    }
+    if (!handler_inlined) {
+        int bm_kind = dsp_jit_helper_classify_bit_manip((void *)emu_func);
+        if (bm_kind >= 0 &&
+            emit_bit_manip_op(e, dsp, pc, inst, bm_kind, out_write_set)) {
+            handler_inlined = true;
+            g_cf_inlined_count++;
         }
     }
     if (!handler_inlined) {
@@ -8923,6 +9139,25 @@ static bool chain_register_incoming(DspJitBlock *target,
 }
 
 /*
+ * Record a chain site whose target block isn't translated yet. The
+ * site currently branches to the source's shared exit; if/when a
+ * block is installed at target_pc, retro_chain_patch_pending()
+ * routes it to the new chain_entry.
+ */
+static void pending_chain_register(DspJitState *s, uint32_t target_pc,
+                                   DspJitBlock *source, uint32_t *site)
+{
+    if (s->num_pending_chains >= DSP_JIT_MAX_PENDING_CHAINS) {
+        return;     /* pool full — stay unchained, still correct */
+    }
+    DspJitPendingChain *slot = &s->pending_chains[s->num_pending_chains++];
+    slot->target_pc = target_pc;
+    slot->site = site;
+    slot->source = source;
+    slot->source_generation = source->generation;
+}
+
+/*
  * Re-patch a B instruction at `site` to branch to `new_target_code`.
  * The B encoding is: 0x14000000 | imm26, where imm26 = (target -
  * site) >> 2 masked to 26 bits.
@@ -8936,6 +9171,34 @@ static void chain_repatch_b(uint32_t *site, uint32_t *new_target_code)
     assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
     uint32_t insn = 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
     *site = insn;
+}
+
+/*
+ * A block was just installed at block->pc_start: patch every pending
+ * (retro) chain site that targets it. Must run with
+ * qemu_thread_jit_write() in effect; patched sites live in OTHER
+ * blocks' code regions, so each gets its own icache flush. Consumed
+ * (and generation-stale) entries are compacted out of the pool.
+ */
+static void retro_chain_patch_pending(DspJitState *s, DspJitBlock *block)
+{
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < s->num_pending_chains; i++) {
+        DspJitPendingChain *p = &s->pending_chains[i];
+        if (p->source->generation != p->source_generation) {
+            continue;   /* source re-translated — site pointer stale */
+        }
+        if (p->target_pc != block->pc_start) {
+            s->pending_chains[kept++] = *p;
+            continue;
+        }
+        if (chain_register_incoming(block, p->source, p->site)) {
+            chain_repatch_b(p->site, block->chain_entry);
+            jit_clear_icache(p->site, p->site + 1);
+        }
+        /* Consumed (or target's incoming list full) — drop entry. */
+    }
+    s->num_pending_chains = kept;
 }
 
 /*
@@ -8979,8 +9242,11 @@ static DspJitBlock *chain_target_for_terminator(DspJitState *s,
                                                 dsp_core_t *dsp,
                                                 uint32_t pc,
                                                 uint32_t inst,
-                                                uint32_t *out_target_pc)
+                                                uint32_t *out_target_pc,
+                                                bool *out_retro_eligible)
 {
+    *out_retro_eligible = false;
+
     if (dsp_jit_diff_enabled()) {
         /* Diff mode: one block per dispatcher call is required for
          * the pre/post snapshot semantics. */
@@ -9042,15 +9308,20 @@ static DspJitBlock *chain_target_for_terminator(DspJitState *s,
     }
     DspJitBlock *target = s->pc_to_block[target_pc];
     if (!target || !target->entry || !target->chain_entry) {
-        /* Not translated yet (or invalidated). We could retro-chain
-         * when target gets translated later, but that needs a
-         * pending-chain pool — out of scope for this pass. */
+        /* Not translated yet (or invalidated). Retro-chain: report
+         * the decoded target so the caller can register a pending
+         * chain site, patched if/when a block lands at target_pc. */
+        *out_target_pc = target_pc;
+        *out_retro_eligible = true;
         return NULL;
     }
     if (target->pc_start != target_pc) {
         /* Target pc falls inside another block (not at its start).
          * Chaining to a mid-block point would require a dedicated
-         * entry there — skip. */
+         * entry there — but a future translation starting exactly at
+         * target_pc can still be retro-chained. */
+        *out_target_pc = target_pc;
+        *out_retro_eligible = true;
         return NULL;
     }
 
@@ -9237,6 +9508,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
      * shared_exit for the source->unchain path). */
     DspJitBlock *pending_chain_target = NULL;
     uint32_t *pending_chain_site = NULL;
+    /* Retro-chain: terminator target decoded but not translated yet.
+     * UINT32_MAX = none. */
+    uint32_t pending_retro_pc = UINT32_MAX;
 
     /* Lazy-flag one-shot is per-op. Always start each translation
      * with a clear flag so a leftover state from a previous
@@ -9466,8 +9740,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             if (is_term) {
                 int cf_kind = dsp_jit_helper_classify_cf((void *)emu);
                 uint32_t chain_pc = 0;
+                bool retro_eligible = false;
                 DspJitBlock *tgt = chain_target_for_terminator(
-                    s, cf_kind, dsp, pc, inst, &chain_pc);
+                    s, cf_kind, dsp, pc, inst, &chain_pc, &retro_eligible);
                 if (tgt && chain_pc != pc_start) {
                     /* Swap expected_next_pc so the PC check passes on
                      * the taken path (pc == chain_pc after the op)
@@ -9476,6 +9751,13 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                     pending_chain_target = tgt;
                     /* pending_chain_site is filled in below after
                      * we know e.buf's position post-epilogue. */
+                } else if (!tgt && retro_eligible && chain_pc != pc_start) {
+                    /* Retro-chain: emit the chain site anyway (it
+                     * initially routes to our shared exit) and
+                     * register it so a later translation at chain_pc
+                     * can patch it to its chain_entry. */
+                    expected_next_pc = chain_pc;
+                    pending_retro_pc = chain_pc;
                 }
             }
 
@@ -9489,6 +9771,11 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             if (pending_chain_target) {
                 pending_chain_site = emit_b_absolute(
                     &e, pending_chain_target->chain_entry);
+            } else if (pending_retro_pc != UINT32_MAX) {
+                /* Placeholder B-to-self; patched to the shared exit
+                 * after emit_epilogue (and to the target chain_entry
+                 * if/when that block is translated). */
+                pending_chain_site = emit_b_absolute(&e, e.buf);
             }
 
             for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
@@ -9516,13 +9803,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     uint32_t *exit_label = emit_epilogue(&e);
     patch_exits(&exits, exit_label);
 
-    /* Advance bump allocator, flush I-cache, re-protect pages. */
-    uint8_t *code_end = (uint8_t *)e.buf;
-    jit_clear_icache(entry_ptr, code_end);
-    s->code_ptr = code_end;
-    qemu_thread_jit_execute();
-
-    /* Install the block. */
+    /* Install the block (plain data — no JIT-write needed, but we
+     * are still in jit-write mode for the chain patching below). */
     DspJitBlock *block = &s->blocks[pc_start];
     block->pc_start = pc_start;
     block->pc_end = pc_end;
@@ -9544,7 +9826,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     /* If we emitted a pending chain branch, register the site with
      * the target so it can un-patch us on target invalidation. Must
      * happen AFTER `block` has its generation / shared_exit set
-     * (the target stamps source generation at registration). */
+     * (the target stamps source generation at registration), and
+     * BEFORE qemu_thread_jit_execute() — chain_repatch_b writes
+     * into the code buffer. */
     if (pending_chain_target && pending_chain_site) {
         if (!chain_register_incoming(pending_chain_target, block,
                                      pending_chain_site)) {
@@ -9553,7 +9837,24 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
              * block exits to the dispatcher as if un-chained. */
             chain_repatch_b(pending_chain_site, exit_label);
         }
+    } else if (pending_retro_pc != UINT32_MAX && pending_chain_site) {
+        /* Retro-chain source side: route the placeholder to our
+         * shared exit (unchained for now) and register the site so a
+         * future translation at pending_retro_pc can claim it. */
+        chain_repatch_b(pending_chain_site, exit_label);
+        pending_chain_register(s, pending_retro_pc, block,
+                               pending_chain_site);
     }
+
+    /* Retro-chain target side: patch earlier blocks' pending sites
+     * that point at this block's start PC. */
+    retro_chain_patch_pending(s, block);
+
+    /* Advance bump allocator, flush I-cache, re-protect pages. */
+    uint8_t *code_end = (uint8_t *)e.buf;
+    jit_clear_icache(entry_ptr, code_end);
+    s->code_ptr = code_end;
+    qemu_thread_jit_execute();
 
     /* Optional hex dump of the emitted ARM64 block, for offline
      * disassembly and verification. Gated to avoid noise; set
@@ -9889,6 +10190,9 @@ void dsp_jit_invalidate_all(dsp_core_t *dsp)
         memset(b, 0, sizeof(*b));
         b->generation = gen + 1;
     }
+    /* Drop retro-chain registrations: every recorded site pointer
+     * points into the code buffer that is being recycled. */
+    s->num_pending_chains = 0;
     s->code_ptr = s->code_buf;
     s->cache_flushes++;
 }

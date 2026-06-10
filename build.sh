@@ -441,7 +441,47 @@ case "$platform" in # Adjust compilation options based on platform
         echo 'Compiling for Windows...'
         sys_cflags='-Wno-error'
         CFLAGS="${CFLAGS} -lIphlpapi -lCrypt32" # workaround for linking libs on mingw
-        opts="$opts"
+        # Match the CI release configuration: x86-64-v3 (AVX2 / BMI2 /
+        # FMA) on release builds unless the user already passed an
+        # x86_version. meson's default is v1 (baseline x86-64), which
+        # leaves measurable performance on the table on any CPU from
+        # the last decade. Override with: ./build.sh -- -Dx86_version=1
+        if [ -z "$debug" ] && ! echo "$@" | grep -q 'x86_version'; then
+          opts="$opts -Dx86_version=3"
+        fi
+        # Optional PGO build mode — same two-stage flow as the Darwin
+        # branch (see comment there). MSYS2 clang/gcc both accept
+        # -fprofile-generate / -fprofile-use; merge with llvm-profdata
+        # when available.
+        if [ -n "${XEMU_PGO}" ]; then
+          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+          mkdir -p "${pgo_dir}"
+          case "${XEMU_PGO}" in
+            generate)
+              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
+              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
+              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
+              ;;
+            use)
+              if ! ls "${pgo_dir}"/*.profraw >/dev/null 2>&1 && \
+                 [ ! -f "${pgo_dir}/default.profdata" ]; then
+                echo "PGO: no profiles found in ${pgo_dir}"
+                exit 1
+              fi
+              if [ ! -f "${pgo_dir}/default.profdata" ]; then
+                llvm-profdata merge -output="${pgo_dir}/default.profdata" \
+                    "${pgo_dir}"/*.profraw
+              fi
+              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
+              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
+              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
+              ;;
+            *)
+              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
+              exit 1
+              ;;
+          esac
+        fi
         postbuild='package_windows' # set the above function to be called after build
         target="qemu-system-i386w.exe"
         ;;

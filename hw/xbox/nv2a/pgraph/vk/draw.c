@@ -1566,16 +1566,19 @@ static void begin_query(PGRAPHVkState *r)
 
     // FIXME: We should handle this. Make the query buffer bigger, but at least
     // flush current queries.
-    nv2a_vk_assert(r->num_queries_in_flight < r->max_queries_in_flight);
+    nv2a_vk_assert(r->num_queries_in_flight < pgraph_vk_queries_per_slot(r));
+
+    /* Query indices live in the current flight slot's pool partition. */
+    int query_index = pgraph_vk_slot_query_base(r, r->current_flight) +
+                      r->num_queries_in_flight;
 
     nv2a_profile_inc_counter(NV2A_PROF_QUERY);
-    vkCmdResetQueryPool(r->command_buffer, r->query_pool,
-                        r->num_queries_in_flight, 1);
+    vkCmdResetQueryPool(r->command_buffer, r->query_pool, query_index, 1);
     VkQueryControlFlags query_flags = 0;
     if (r->enabled_physical_device_features.occlusionQueryPrecise) {
         query_flags |= VK_QUERY_CONTROL_PRECISE_BIT;
     }
-    vkCmdBeginQuery(r->command_buffer, r->query_pool, r->num_queries_in_flight,
+    vkCmdBeginQuery(r->command_buffer, r->query_pool, query_index,
                     query_flags);
 
     r->query_in_flight = true;
@@ -1590,7 +1593,8 @@ static void end_query(PGRAPHVkState *r)
     nv2a_vk_assert(r->query_in_flight);
 
     vkCmdEndQuery(r->command_buffer, r->query_pool,
-                  r->num_queries_in_flight - 1);
+                  pgraph_vk_slot_query_base(r, r->current_flight) +
+                      r->num_queries_in_flight - 1);
     r->query_in_flight = false;
 }
 
@@ -1878,6 +1882,17 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         r->flight[slot].framebuffer_index = r->framebuffer_index;
         r->submit_count += 1;
 
+        /*
+         * Hand this submission's occlusion queries and pending guest
+         * reports to the flight slot. They are drained when the slot
+         * fence is reaped (pgraph_vk_wait_for_previous_flight) instead
+         * of stalling here on work the GPU just started.
+         */
+        r->flight[slot].query_count = r->num_queries_in_flight;
+        QSIMPLEQ_CONCAT(&r->flight[slot].report_queue, &r->report_queue);
+        r->num_queries_in_flight = 0;
+        r->report_pool_next = 0;
+
         bool check_budget = false;
         const int max_num_submits_before_budget_update = 5;
         if (finish_reason == VK_FINISH_REASON_FLIP_STALL ||
@@ -1908,8 +1923,17 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
     }
 
-    NV2AState *d = container_of(pg, NV2AState, pgraph);
-    pgraph_vk_process_pending_reports_internal(d);
+    /*
+     * Most finish reasons leave report delivery deferred to slot
+     * reclaim. Reasons where the guest (or a renderer transition)
+     * needs the values now drain synchronously.
+     */
+    if (finish_reason == VK_FINISH_REASON_STALLED ||
+        finish_reason == VK_FINISH_REASON_REPORTS_FULL ||
+        finish_reason == VK_FINISH_REASON_FLUSH) {
+        NV2AState *d = container_of(pg, NV2AState, pgraph);
+        pgraph_vk_drain_all_pending_reports(d);
+    }
 
     pgraph_vk_compute_finish_complete(r);
 

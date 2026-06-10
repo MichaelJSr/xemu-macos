@@ -256,6 +256,21 @@ enum {
 int dsp_jit_helper_classify_cf(void *fn);
 
 /*
+ * Bit-manipulation sub-classifier (bset / bclr / bchg / btst across
+ * aa / ea / pp / reg addressing). Returns -1 if `fn` is not one of
+ * the 16 handlers, else (op_kind << 2) | source_kind with:
+ *   op_kind:     0 = bset, 1 = bclr, 2 = bchg, 3 = btst
+ *   source_kind: 0 = aa,   1 = ea,   2 = pp,   3 = reg
+ * Used by the JIT to emit these inline instead of through the
+ * generic BLR fallback (previously the last fallback bucket with
+ * meaningful steady-state volume).
+ */
+int dsp_jit_helper_classify_bit_manip(void *fn);
+
+#define DSP_JIT_BM_OP(kind)     (((kind) >> 2) & 3)
+#define DSP_JIT_BM_SOURCE(kind) ((kind) & 3)
+
+/*
  * Fallback-handler classifier. Returns a small integer identifying
  * `fn` if it's a non-inlined non-parallel handler the JIT would
  * BLR-fallback for; 0 (DSP_JIT_FB_OTHER) otherwise. Used by the JIT

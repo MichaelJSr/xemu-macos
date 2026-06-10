@@ -34,6 +34,11 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
     r->report_pool = g_malloc_n(r->max_queries_in_flight, sizeof(QueryReport));
     r->report_pool_next = 0;
 
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        QSIMPLEQ_INIT(&r->flight[i].report_queue);
+        r->flight[i].query_count = 0;
+    }
+
     VkQueryPoolCreateInfo pool_create_info = (VkQueryPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_OCCLUSION,
@@ -48,6 +53,10 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     QSIMPLEQ_INIT(&r->report_queue);
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        QSIMPLEQ_INIT(&r->flight[i].report_queue);
+        r->flight[i].query_count = 0;
+    }
 
     g_free(r->query_results_buf);
     r->query_results_buf = NULL;
@@ -57,16 +66,36 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
     vkDestroyQueryPool(r->device, r->query_pool, NULL);
 }
 
+/*
+ * The report pool and query pool are partitioned per flight slot. The
+ * current recording allocates from the current slot's partition; at
+ * submit time pgraph_vk_finish() hands the recording's reports +
+ * query count to the slot, and they are drained when the slot fence
+ * is reaped instead of stalling on the just-submitted work.
+ *
+ * One query index is reserved beyond the report cap because a query
+ * may be begun after the last report of a recording.
+ */
+static QueryReport *alloc_report(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->report_pool_next >= pgraph_vk_queries_per_slot(r) - 1) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
+    }
+    /* finish() may have advanced the flight slot; re-read it. */
+    int base = pgraph_vk_slot_query_base(r, r->current_flight);
+    QueryReport *report = &r->report_pool[base + r->report_pool_next];
+    r->report_pool_next++;
+    return report;
+}
+
 void pgraph_vk_clear_report_value(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    if (r->report_pool_next >= r->max_queries_in_flight) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
-    }
-    QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
-    r->report_pool_next++;
+    QueryReport *report = alloc_report(pg);
     report->clear = true;
     report->parameter = 0;
     report->query_count = r->num_queries_in_flight;
@@ -83,11 +112,7 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     uint8_t type = GET_MASK(parameter, NV097_GET_REPORT_TYPE);
     assert(type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT);
 
-    if (r->report_pool_next >= r->max_queries_in_flight) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
-    }
-    QueryReport *report = &r->report_pool[r->report_pool_next % r->max_queries_in_flight];
-    r->report_pool_next++;
+    QueryReport *report = alloc_report(pg);
     report->clear = false;
     report->parameter = parameter;
     report->query_count = r->num_queries_in_flight;
@@ -96,42 +121,26 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     r->new_query_needed = true;
 }
 
-void pgraph_vk_process_pending_reports_internal(NV2AState *d)
+/*
+ * Write out a queue of reports against fetched query results.
+ * query_results holds num_queries results from a single submission;
+ * report->query_count indices are local to that submission.
+ */
+static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
+                                     const uint64_t *query_results,
+                                     int num_queries)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    NV2A_VK_DGROUP_BEGIN("Processing queries");
-
-    assert(!r->in_command_buffer);
-
-    // Fetch all query results
-    uint64_t *query_results = r->query_results_buf;
-
-    if (r->num_queries_in_flight > 0) {
-        size_t size_of_results = r->num_queries_in_flight * sizeof(uint64_t);
-        VkResult result;
-        do {
-            result = vkGetQueryPoolResults(
-                r->device, r->query_pool, 0, r->num_queries_in_flight,
-                size_of_results, query_results, sizeof(uint64_t),
-                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-        } while (result == VK_NOT_READY);
-        if (result != VK_SUCCESS) {
-            fprintf(stderr, "vkGetQueryPoolResults failed: %d\n", result);
-            memset(query_results, 0, size_of_results);
-        }
-    }
-
-    // Write out queries
     int num_results_counted = 0;
     const int result_divisor =
         pg->surface_scale_factor * pg->surface_scale_factor;
 
     QueryReport *report;
-    while ((report = QSIMPLEQ_FIRST(&r->report_queue)) != NULL) {
+    while ((report = QSIMPLEQ_FIRST(queue)) != NULL) {
         assert(report->query_count >= num_results_counted);
-        assert(report->query_count <= r->num_queries_in_flight);
+        assert(report->query_count <= num_queries);
 
         while (num_results_counted < report->query_count) {
             r->zpass_pixel_count_result +=
@@ -147,17 +156,87 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
                 r->zpass_pixel_count_result / result_divisor);
         }
 
-        QSIMPLEQ_REMOVE_HEAD(&r->report_queue, entry);
+        QSIMPLEQ_REMOVE_HEAD(queue, entry);
     }
 
     // Add remaining results
-    while (num_results_counted < r->num_queries_in_flight) {
+    while (num_results_counted < num_queries) {
         r->zpass_pixel_count_result += query_results[num_results_counted++];
     }
+}
 
-    r->num_queries_in_flight = 0;
-    r->report_pool_next = 0;
+/*
+ * Drain a slot's deferred queries and reports. The caller must ensure
+ * the slot's submission has completed on the GPU (fence waited) — the
+ * WAIT_BIT below is then effectively free and only kept as a safety
+ * net.
+ */
+void pgraph_vk_drain_slot_reports(NV2AState *d, int slot)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    int num_queries = r->flight[slot].query_count;
+    if (num_queries == 0 && QSIMPLEQ_EMPTY(&r->flight[slot].report_queue)) {
+        return;
+    }
+
+    NV2A_VK_DGROUP_BEGIN("Processing queries");
+
+    uint64_t *query_results = r->query_results_buf;
+    if (num_queries > 0) {
+        size_t size_of_results = num_queries * sizeof(uint64_t);
+        VkResult result;
+        do {
+            result = vkGetQueryPoolResults(
+                r->device, r->query_pool,
+                pgraph_vk_slot_query_base(r, slot), num_queries,
+                size_of_results, query_results, sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        } while (result == VK_NOT_READY);
+        if (result != VK_SUCCESS) {
+            fprintf(stderr, "vkGetQueryPoolResults failed: %d\n", result);
+            memset(query_results, 0, size_of_results);
+        }
+    }
+
+    write_reports_from_queue(d, &r->flight[slot].report_queue, query_results,
+                             num_queries);
+    r->flight[slot].query_count = 0;
+
     NV2A_VK_DGROUP_END();
+}
+
+/*
+ * Synchronously deliver every outstanding report: submitted slots in
+ * submission order (oldest first — with round-robin slot reuse the
+ * next slot to be reclaimed is the oldest submission), then any
+ * query-less reports still attached to a not-yet-begun recording.
+ */
+void pgraph_vk_drain_all_pending_reports(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        int slot = (r->current_flight + i) % NUM_FLIGHT_SLOTS;
+        if (r->flight[slot].query_count == 0 &&
+            QSIMPLEQ_EMPTY(&r->flight[slot].report_queue)) {
+            continue;
+        }
+        pgraph_vk_wait_slot_fence(pg, slot);
+        pgraph_vk_drain_slot_reports(d, slot);
+    }
+
+    if (!r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
+        /*
+         * Reports queued while no command buffer was recording cannot
+         * reference unfinished queries; write them out directly.
+         */
+        assert(r->num_queries_in_flight == 0);
+        write_reports_from_queue(d, &r->report_queue, NULL, 0);
+        r->report_pool_next = 0;
+    }
 }
 
 void pgraph_vk_process_pending_reports(NV2AState *d)
@@ -168,8 +247,29 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
     uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
 
-    if (*dma_get == *dma_put && r->in_command_buffer &&
-        !QSIMPLEQ_EMPTY(&r->report_queue)) {
+    if (*dma_get != *dma_put) {
+        return;
+    }
+
+    if (r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
+        /* Submits the recording and synchronously drains (STALLED). */
         pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
+        return;
+    }
+
+    /*
+     * The FIFO is idle but a previous submission may still hold
+     * deferred reports the guest is polling on; deliver them now.
+     */
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        if (r->flight[i].query_count > 0 ||
+            !QSIMPLEQ_EMPTY(&r->flight[i].report_queue)) {
+            pgraph_vk_drain_all_pending_reports(d);
+            return;
+        }
+    }
+
+    if (!r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
+        pgraph_vk_drain_all_pending_reports(d);
     }
 }

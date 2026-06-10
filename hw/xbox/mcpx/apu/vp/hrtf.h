@@ -102,15 +102,39 @@ static inline void hrtf_filter_process(HrtfFilter *f,
                                        float in[HRTF_SAMPLES_PER_FRAME][2],
                                        float out[HRTF_SAMPLES_PER_FRAME][2])
 {
+    /*
+     * Linearize the circular history once per frame (two-span copy)
+     * and append the frame's input samples, so the 31-tap convolution
+     * below runs over contiguous memory with no per-tap modulo. The
+     * `% HRTF_BUFLEN` indexing in the previous per-sample form
+     * defeated the autovectorizer and was the dominant cost for
+     * 3D/HRTF voices. (Hand-NEON was tried and reverted — see README
+     * failed experiments — but removing the modulo lets -O3
+     * autovectorize profitably.)
+     *
+     * Layout: lin[ch][0 .. HRTF_BUFLEN-1] is history, oldest first;
+     * lin[ch][HRTF_BUFLEN + n] is input sample n. Prefilling all
+     * inputs up front also makes in == out aliasing (the common call
+     * pattern) explicitly safe.
+     */
+    float lin[2][HRTF_BUFLEN + HRTF_SAMPLES_PER_FRAME];
+
+    for (int ch = 0; ch < 2; ch++) {
+        const float *buf = f->ch[ch].buf;
+        int p = f->buf_pos;
+        size_t tail = HRTF_BUFLEN - p;
+        memcpy(&lin[ch][0], &buf[p], tail * sizeof(float));
+        memcpy(&lin[ch][tail], &buf[0], p * sizeof(float));
+        for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+            lin[ch][HRTF_BUFLEN + n] = in[n][ch];
+        }
+    }
+
     for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
         hrtf_filter_step_parameters(f);
 
         for (int ch = 0; ch < 2; ch++) {
-            float *buf = f->ch[ch].buf;
-            float *coeff = f->ch[ch].hrir_coeff_cur;
-
-            // Push new sample
-            buf[f->buf_pos] = in[n][ch];
+            const float *coeff = f->ch[ch].hrir_coeff_cur;
 
             // Interaural time difference (channel delay)
             float d = f->itd_cur * (ch == 0 ? +1.0f : -1.0f);
@@ -119,25 +143,35 @@ static inline void hrtf_filter_process(HrtfFilter *f,
             }
             int di = d;
             float dfrac = d - di;
+            float one_minus_dfrac = 1.0f - dfrac;
+
+            /*
+             * base points at the newest tap (k == 0). Indices stay in
+             * bounds: HRTF_BUFLEN(73) - di(<=42) - k(<=30) - 1 >= 0.
+             */
+            const float *base = &lin[ch][HRTF_BUFLEN + n - di];
 
             // HRIR Convolution
             float acc = 0.0f;
             for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-                int idx1 = (f->buf_pos - di - k + HRTF_BUFLEN) % HRTF_BUFLEN;
-                float s = buf[idx1];
-
-                if (dfrac > 0.0f) {
-                    int idx2 = (idx1 - 1 + HRTF_BUFLEN) % HRTF_BUFLEN;
-                    s = s * (1 - dfrac) + buf[idx2] * dfrac;
-                }
+                float s = base[-k] * one_minus_dfrac + base[-k - 1] * dfrac;
                 acc += coeff[k] * s;
             }
 
             out[n][ch] = acc;
         }
-
-        f->buf_pos = (f->buf_pos + 1) % HRTF_BUFLEN;
     }
+
+    /*
+     * Store the last HRTF_BUFLEN samples back as canonical history
+     * (oldest at index 0); buf_pos = 0 keeps the circular-buffer
+     * invariant "newest sample at buf_pos - 1".
+     */
+    for (int ch = 0; ch < 2; ch++) {
+        memcpy(f->ch[ch].buf, &lin[ch][HRTF_SAMPLES_PER_FRAME],
+               HRTF_BUFLEN * sizeof(float));
+    }
+    f->buf_pos = 0;
 }
 
 #endif

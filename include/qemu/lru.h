@@ -40,7 +40,18 @@ typedef struct LruNode {
 typedef struct Lru Lru;
 
 struct Lru {
+	/*
+	 * `global` holds only in-use nodes in LRU order (MRU at head);
+	 * free nodes live on the dedicated `free` list. This makes
+	 * free-node allocation O(1) and eviction start at the true LRU
+	 * node instead of scanning a mixed list from the tail — with
+	 * large caches (e.g. the 50k-entry shader module cache) the
+	 * old mixed-list tail walk was O(cache size) per eviction.
+	 * A node is always on exactly one of the two lists, so the
+	 * single next_global link is shared.
+	 */
 	QTAILQ_HEAD(, LruNode) global;
+	QTAILQ_HEAD(, LruNode) free;
 	QTAILQ_HEAD(, LruNode) bins[LRU_NUM_BINS];
 	int num_used;
 	int num_free;
@@ -62,6 +73,7 @@ static inline
 void lru_init(Lru *lru)
 {
 	QTAILQ_INIT(&lru->global);
+	QTAILQ_INIT(&lru->free);
 	for (unsigned int i = 0; i < LRU_NUM_BINS; i++) {
 		QTAILQ_INIT(&lru->bins[i]);
 	}
@@ -77,7 +89,7 @@ static inline
 void lru_add_free(Lru *lru, LruNode *node)
 {
 	node->next_bin.tqe_circ.tql_prev = NULL;
-	QTAILQ_INSERT_TAIL(&lru->global, node, next_global);
+	QTAILQ_INSERT_TAIL(&lru->free, node, next_global);
 	lru->num_free += 1;
 }
 
@@ -112,6 +124,10 @@ void lru_evict_node(Lru *lru, LruNode *node)
 		lru->post_node_evict(lru, node);
 	}
 
+	/* Move from the in-use LRU list to the free list. */
+	QTAILQ_REMOVE(&lru->global, node, next_global);
+	QTAILQ_INSERT_TAIL(&lru->free, node, next_global);
+
 	lru->num_used -= 1;
 	lru->num_free += 1;
 }
@@ -121,9 +137,13 @@ LruNode *lru_try_evict_one(Lru *lru)
 {
 	LruNode *found;
 
+	/*
+	 * `global` contains only in-use nodes; the tail is the true LRU
+	 * node, so this terminates immediately unless pre_node_evict
+	 * keeps refusing (e.g. textures bound to in-flight work).
+	 */
 	QTAILQ_FOREACH_REVERSE(found, &lru->global, next_global) {
-		if (lru_is_node_in_use(lru, found)
-			&& (!lru->pre_node_evict || lru->pre_node_evict(lru, found))) {
+		if (!lru->pre_node_evict || lru->pre_node_evict(lru, found)) {
 			lru_evict_node(lru, found);
 			return found;
 		}
@@ -145,12 +165,10 @@ LruNode *lru_evict_one(Lru *lru)
 static inline
 LruNode *lru_get_one_free(Lru *lru)
 {
-	LruNode *found;
+	LruNode *found = QTAILQ_FIRST(&lru->free);
 
-	QTAILQ_FOREACH_REVERSE(found, &lru->global, next_global) {
-		if (!lru_is_node_in_use(lru, found)) {
-			return found;
-		}
+	if (found != NULL) {
+		return found;
 	}
 
 	return lru_evict_one(lru);
@@ -186,8 +204,10 @@ LruNode *lru_lookup(Lru *lru, uint64_t hash, const void *key)
 
 	if (found) {
 		QTAILQ_REMOVE(&lru->bins[bin], found, next_bin);
+		QTAILQ_REMOVE(&lru->global, found, next_global);
 	} else {
 		found = lru_get_one_free(lru);
+		QTAILQ_REMOVE(&lru->free, found, next_global);
 		found->hash = hash;
 		if (lru->init_node) {
 			lru->init_node(lru, found, key);
@@ -198,7 +218,6 @@ LruNode *lru_lookup(Lru *lru, uint64_t hash, const void *key)
 		lru->num_free -= 1;
 	}
 
-	QTAILQ_REMOVE(&lru->global, found, next_global);
 	QTAILQ_INSERT_HEAD(&lru->global, found, next_global);
 	QTAILQ_INSERT_HEAD(&lru->bins[bin], found, next_bin);
 
@@ -217,9 +236,8 @@ void lru_flush(Lru *lru)
 				can_evict = lru->pre_node_evict(lru, iter);
 			}
 			if (can_evict) {
+				/* lru_evict_node moves the node to the free list. */
 				lru_evict_node(lru, iter);
-				QTAILQ_REMOVE(&lru->global, iter, next_global);
-				QTAILQ_INSERT_TAIL(&lru->global, iter, next_global);
 			}
 		}
 	}

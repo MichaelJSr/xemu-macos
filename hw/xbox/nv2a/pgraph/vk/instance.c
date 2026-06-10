@@ -501,13 +501,18 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
                 g_array_index(enabled_extension_names, char *, i));
     }
 
-    uint32_t num_queues = MIN(indices.queue_count, 2);
-    float queuePriorities[2] = { 1.0f, 1.0f };
+    /*
+     * Single queue. A second compute queue was acquired here at one
+     * point but never submitted to (MoltenVK exposes queueCount=1
+     * anyway; see README "Failed experiments": separate compute
+     * queue).
+     */
+    float queuePriorities[1] = { 1.0f };
 
     VkDeviceQueueCreateInfo queue_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex = indices.queue_family,
-        .queueCount = num_queues,
+        .queueCount = 1,
         .pQueuePriorities = queuePriorities,
     };
 
@@ -612,15 +617,6 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
-    if (num_queues > 1) {
-        vkGetDeviceQueue(r->device, indices.queue_family, 1, &r->compute_queue);
-        r->has_compute_queue = true;
-        fprintf(stderr, "[VK] Using separate compute queue (family %d, %u queues)\n",
-                indices.queue_family, num_queues);
-    } else {
-        r->compute_queue = r->queue;
-        r->has_compute_queue = false;
-    }
 
     return true;
 }

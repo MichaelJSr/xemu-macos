@@ -638,6 +638,25 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         destroy_current_display_image(pg);
     }
 
+#if HAVE_IOSURFACE_SHARING
+    /*
+     * Drop any deferred frame-interpolation work. The saved prev/cur
+     * IOSurface pair was captured at the old display resolution;
+     * generating interpolated frames from it after a resize would
+     * present stale-resolution output (interp_width/height no longer
+     * match the new display image) for up to interp_remaining frames.
+     */
+    if (d->interp_prev_surface) {
+        CFRelease((IOSurfaceRef)d->interp_prev_surface);
+        d->interp_prev_surface = NULL;
+    }
+    if (d->interp_cur_surface) {
+        CFRelease((IOSurfaceRef)d->interp_cur_surface);
+        d->interp_cur_surface = NULL;
+    }
+    d->interp_remaining = 0;
+#endif
+
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY

@@ -41,6 +41,15 @@
 #define XEMU_USE_VDSP 0
 #endif
 
+/* SSE2 mix kernels for Windows/Linux x86_64 builds — parity with the
+ * vDSP (macOS) and NEON paths. SSE2 is baseline on x86_64. */
+#if !XEMU_USE_VDSP && (defined(__x86_64__) || defined(_M_X64))
+#include <emmintrin.h>
+#define XEMU_USE_SSE_MIX 1
+#else
+#define XEMU_USE_SSE_MIX 0
+#endif
+
 static inline void float_accumulate(float *dst, const float *src, int count)
 {
 #if XEMU_USE_VDSP
@@ -52,6 +61,16 @@ static inline void float_accumulate(float *dst, const float *src, int count)
         float32x4_t a = vld1q_f32(dst + i);
         float32x4_t b = vld1q_f32(src + i);
         vst1q_f32(dst + i, vaddq_f32(a, b));
+    }
+    for (; i < count; i++) {
+        dst[i] += src[i];
+    }
+#elif XEMU_USE_SSE_MIX
+    int i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128 a = _mm_loadu_ps(dst + i);
+        __m128 b = _mm_loadu_ps(src + i);
+        _mm_storeu_ps(dst + i, _mm_add_ps(a, b));
     }
     for (; i < count; i++) {
         dst[i] += src[i];
@@ -400,7 +419,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     unsigned int selected_handle, list;
     switch (method) {
     case NV1BA0_PIO_VOICE_LOCK:
-        voice_lock_locked(d, d->regs[NV_PAPU_FECV], argument & 1);
+        voice_lock_locked(d, qatomic_read(&d->regs[NV_PAPU_FECV]), argument & 1);
         break;
     case NV1BA0_PIO_SET_ANTECEDENT_VOICE:
         qatomic_set(&d->regs[NV_PAPU_FEAV], argument);
@@ -414,17 +433,17 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             voice_lock_locked(d, selected_handle, true);
         }
 
-        list = GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_LST);
+        list = GET_MASK(qatomic_read(&d->regs[NV_PAPU_FEAV]), NV_PAPU_FEAV_LST);
         if (list != NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_INHERIT) {
             /* voice is added to the top of the selected list */
             unsigned int top_reg = voice_list_regs[list - 1].top;
             voice_set_mask(d, selected_handle, NV_PAVS_VOICE_TAR_PITCH_LINK,
                            NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE,
-                           d->regs[top_reg]);
+                           qatomic_read(&d->regs[top_reg]));
             qatomic_set(&d->regs[top_reg], selected_handle);
         } else {
             unsigned int antecedent_voice =
-                GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_VALUE);
+                GET_MASK(qatomic_read(&d->regs[NV_PAPU_FEAV]), NV_PAPU_FEAV_VALUE);
             /* voice is added after the antecedent voice */
             assert(antecedent_voice != 0xFFFF);
 
@@ -548,36 +567,36 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         qatomic_set(&d->regs[NV_PAPU_FECV], argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_VBIN:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_VBIN,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_VBIN,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_FMT:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_FMT,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_FMT,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_ENV0:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_ENV0,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_ENV0,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_ENVA:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_ENVA,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_ENVA,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_ENV1:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_ENV1,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_ENV1,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_ENVF:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_ENVF,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_ENVF,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_MISC:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CFG_MISC,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CFG_MISC,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_HRTF: {
         int handle = GET_MASK(argument, NV1BA0_PIO_SET_VOICE_TAR_HRTF_HANDLE);
-        int current_voice = d->regs[NV_PAPU_FECV];
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
         voice_set_mask(d, current_voice, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                        NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE, handle);
         if (current_voice < MCPX_HW_MAX_3D_VOICES &&
@@ -593,48 +612,48 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         break;
     }
     case NV1BA0_PIO_SET_VOICE_TAR_VOLA:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_VOLA,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_VOLA,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_VOLB:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_VOLB,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_VOLB,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_VOLC:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_VOLC,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_VOLC,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_LFO_ENV:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_LFO_ENV,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_LFO_ENV,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_FCA:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_FCA,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_FCA,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_FCB:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_FCB,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_FCB,
                        0xFFFFFFFF, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_PITCH:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_TAR_PITCH_LINK,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_TAR_PITCH_LINK,
                        NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH,
                        (argument & NV1BA0_PIO_SET_VOICE_TAR_PITCH_STEP) >> 16);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_BUF_BASE:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CUR_PSL_START,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CUR_PSL_START,
                        NV_PAVS_VOICE_CUR_PSL_START_BA, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_BUF_LBO:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_CUR_PSH_SAMPLE,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_CUR_PSH_SAMPLE,
                        NV_PAVS_VOICE_CUR_PSH_SAMPLE_LBO, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_BUF_CBO:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_PAR_OFFSET,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_PAR_OFFSET,
                        NV_PAVS_VOICE_PAR_OFFSET_CBO, argument);
         break;
     case NV1BA0_PIO_SET_VOICE_CFG_BUF_EBO:
-        voice_set_mask(d, d->regs[NV_PAPU_FECV], NV_PAVS_VOICE_PAR_NEXT,
+        voice_set_mask(d, qatomic_read(&d->regs[NV_PAPU_FECV]), NV_PAVS_VOICE_PAR_NEXT,
                        NV_PAVS_VOICE_PAR_NEXT_EBO, argument);
         break;
     case NV1BA0_PIO_SET_HRIR ... NV1BA0_PIO_SET_HRIR_X - 1: {
@@ -670,7 +689,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         // FIXME: NV_PAPU_VPSGEADDR is probably bad, as outbuf SGE use the same
         // handle range (or that is also wrong)
         hwaddr sge_address =
-            d->regs[NV_PAPU_VPSGEADDR] + d->vp.inbuf_sge_handle * 8;
+            qatomic_read(&d->regs[NV_PAPU_VPSGEADDR]) + d->vp.inbuf_sge_handle * 8;
         ram_stl(d, sge_address,
                 argument &
                     NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
@@ -706,7 +725,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         // NV_PAPU_GPFADDR   GP outbufs
         // But how does it know which outbuf is being written?!
         hwaddr sge_address =
-            d->regs[NV_PAPU_VPSGEADDR] + d->vp.outbuf_sge_handle * 8;
+            qatomic_read(&d->regs[NV_PAPU_VPSGEADDR]) + d->vp.outbuf_sge_handle * 8;
         ram_stl(d, sge_address,
                 argument &
                     NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
@@ -716,7 +735,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
     case NV1BA0_PIO_SET_VOICE_SSL_A: {
         int ssl = 0;
-        int current_voice = d->regs[NV_PAPU_FECV];
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
         assert(current_voice < MCPX_HW_MAX_VOICES);
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
@@ -731,7 +750,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     // FIXME: Refactor into above
     case NV1BA0_PIO_SET_VOICE_SSL_B: {
         int ssl = 1;
-        int current_voice = d->regs[NV_PAPU_FECV];
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
         assert(current_voice < MCPX_HW_MAX_VOICES);
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
@@ -755,7 +774,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         // FIXME: Entries are 64b, assuming they are stored
         // like this <[offset,length],...>
         assert((method & 0x3) == 0);
-        hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
+        hwaddr addr = qatomic_read(&d->regs[NV_PAPU_VPSSLADDR])
                       + (d->vp.ssl_base_page * 8)
                       + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
         ram_stl(d, addr, argument);
@@ -783,7 +802,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             argument & NV1BA0_PIO_SET_SUBMIX_HEADROOM_AMOUNT;
         break;
     case SE2FE_IDLE_VOICE:
-        if (d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
+        if (qatomic_read(&d->regs[NV_PAPU_FETFORCE1]) &
+            NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
             /*
              * Collapse the FEMETHMODE + FETRAPREASON masks+sets into a
              * single atomic store. We hold d->lock so no other writer
@@ -1079,21 +1099,32 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                        int num_samples_requested)
 {
     assert(v < MCPX_HW_MAX_VOICES);
-    bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                 NV_PAVS_VOICE_CFG_FMT_STEREO);
+    /*
+     * This runs inside the resampler callback for every active voice,
+     * potentially several times per frame. Nine of the fields live in
+     * the single CFG_FMT word — load it once and bit-extract locally
+     * instead of paying the voice_get_mask fanout per field (same
+     * pattern as the batched reads in voice_process).
+     */
+    uint32_t cfg_fmt = voice_get_word(d, v, NV_PAVS_VOICE_CFG_FMT);
+    bool stereo = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_STEREO);
     unsigned int channels = stereo ? 2 : 1;
-    unsigned int sample_size = voice_get_mask(
-        d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE);
+    unsigned int sample_size =
+        extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE);
     unsigned int container_sizes[4] = { 1, 2, 0, 4 }; /* B8, B16, ADPCM, B32 */
-    unsigned int container_size_index = voice_get_mask(
-        d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE);
+    unsigned int container_size_index =
+        extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE);
     unsigned int container_size = container_sizes[container_size_index];
-    bool stream = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                 NV_PAVS_VOICE_CFG_FMT_DATA_TYPE);
+    bool stream = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_DATA_TYPE);
+    bool loop = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_LOOP);
+    unsigned int samples_per_block =
+        1 + extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_SAMPLES_PER_BLOCK);
+    bool persist = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_PERSIST);
+    bool multipass = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_MULTIPASS);
+    bool linked =
+        extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_LINKED); /* FIXME? */
     bool paused = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                  NV_PAVS_VOICE_PAR_STATE_PAUSED);
-    bool loop =
-        voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_LOOP);
     uint32_t ebo = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_NEXT,
                                   NV_PAVS_VOICE_PAR_NEXT_EBO);
     uint32_t cbo = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET,
@@ -1102,15 +1133,6 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                                   NV_PAVS_VOICE_CUR_PSH_SAMPLE_LBO);
     uint32_t ba = voice_get_mask(d, v, NV_PAVS_VOICE_CUR_PSL_START,
                                  NV_PAVS_VOICE_CUR_PSL_START_BA);
-    unsigned int samples_per_block =
-        1 + voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                           NV_PAVS_VOICE_CFG_FMT_SAMPLES_PER_BLOCK);
-    bool persist = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                  NV_PAVS_VOICE_CFG_FMT_PERSIST);
-    bool multipass = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                    NV_PAVS_VOICE_CFG_FMT_MULTIPASS);
-    bool linked = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                 NV_PAVS_VOICE_CFG_FMT_LINKED); /* FIXME? */
 
     assert(!multipass); // Multipass is handled before this
 
@@ -1195,7 +1217,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
             return -1;
         }
 
-        hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
+        hwaddr addr = qatomic_read(&d->regs[NV_PAPU_VPSSLADDR]) + page * 8;
         segment_offset = ram_ldl(d, addr);
         segment_length = ram_ldl(d, addr + 4);
         assert(segment_offset != 0);
@@ -1274,7 +1296,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     linear_addr += ba;
                     for (unsigned int word_index = 0;
                          word_index < (9 * samples_per_block); word_index++) {
-                        hwaddr addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR],
+                        hwaddr addr = get_data_ptr(d, qatomic_read(&d->regs[NV_PAPU_VPSGEADDR]),
                                                    0xFFFFFFFF, linear_addr);
                         adpcm_block[word_index] = ram_ldl(d, addr);
                         linear_addr += 4;
@@ -1299,7 +1321,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 addr = segment_offset + cbo * block_size;
             } else {
                 uint32_t linear_addr = ba + cbo * block_size;
-                addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR],
+                addr = get_data_ptr(d, qatomic_read(&d->regs[NV_PAPU_VPSGEADDR]),
                                     0xFFFFFFFF, linear_addr);
             }
 
@@ -1625,15 +1647,27 @@ static void voice_process(MCPXAPUState *d,
      * memcpy. When the voice is paused, the rest of voice_process
      * short-circuits to cleanup without ever consuming voice_buf —
      * the memcpy + filters[v].voice_buf assignment are pure waste.
-     * voice_get_mask falls through to ram_ldl when filters[v].voice_buf
-     * is NULL (guaranteed NULL on entry because the cleanup label
-     * resets it on the previous call).
+     * In the common in-RAM case load the two words directly off the
+     * already-computed voice_addr instead of paying voice_get_mask's
+     * VPVADDR reload + address recompute twice. The fallback keeps
+     * voice_get_mask semantics (filters[v].voice_buf is guaranteed
+     * NULL on entry because the cleanup label reset it last call).
      */
-    bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                 NV_PAVS_VOICE_CFG_FMT_STEREO);
+    bool stereo, paused;
+    if (in_ram) {
+        uint32_t fmt = ldl_le_p(&d->ram_ptr[voice_addr +
+                                            NV_PAVS_VOICE_CFG_FMT]);
+        uint32_t state = ldl_le_p(&d->ram_ptr[voice_addr +
+                                              NV_PAVS_VOICE_PAR_STATE]);
+        stereo = extract_field(fmt, NV_PAVS_VOICE_CFG_FMT_STEREO);
+        paused = extract_field(state, NV_PAVS_VOICE_PAR_STATE_PAUSED);
+    } else {
+        stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
+                                NV_PAVS_VOICE_CFG_FMT_STEREO);
+        paused = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                NV_PAVS_VOICE_PAR_STATE_PAUSED);
+    }
     unsigned int channels = stereo ? 2 : 1;
-    bool paused = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
-                                 NV_PAVS_VOICE_PAR_STATE_PAUSED);
 
     struct McpxApuDebugVoice *dbg = &g_dbg.vp.v[v];
     dbg->active = true;
@@ -1798,10 +1832,18 @@ static void voice_process(MCPXAPUState *d,
         lpf = stereo ? (fmode == 1) : (fmode & 1);
     }
     if (lpf) {
-        for (int ch = 0; ch < 2; ch++) {
+        /*
+         * Mono voices carry identical data in both channels
+         * (voice_get_samples mirrors ch0 into ch1), and both channels
+         * use the same FC register, so running the SVF twice computes
+         * the same output twice. Filter ch0 only and mirror the
+         * result — halves the SVF cost on the common mono-voice case.
+         */
+        int lpf_channels = stereo ? 2 : 1;
+        for (int ch = 0; ch < lpf_channels; ch++) {
             // FIXME: Cutoff modulation via NV_PAVS_VOICE_CFG_ENV1_EF_FCSCALE
             int16_t fc = voice_get_mask(
-                d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
+                d, v, NV_PAVS_VOICE_TAR_FCA + ch * 4,
                 NV_PAVS_VOICE_TAR_FCA_FC0);
             /*
              * Cutoff was: clampf(pow(2, fc/4096.0), 0.003906f, 1.0f).
@@ -1811,7 +1853,7 @@ static void voice_process(MCPXAPUState *d,
              */
             float fc_f = g_lpf_fc_lut[(uint16_t)fc];
             uint16_t q = voice_get_mask(
-                d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
+                d, v, NV_PAVS_VOICE_TAR_FCA + ch * 4,
                 NV_PAVS_VOICE_TAR_FCA_FC1);
             float q_f = clampf(q / (1.0 * 0x8000), 0.079407f, 1.0f);
             sv_filter *filter = &d->vp.filters[v].svf[ch];
@@ -1819,6 +1861,12 @@ static void voice_process(MCPXAPUState *d,
             for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
                 samples[i][ch] = run_svf(filter, samples[i][ch]);
                 samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
+            }
+        }
+        if (!stereo) {
+            /* Keep the mono ch0 == ch1 invariant for HRTF/monitor. */
+            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+                samples[i][1] = samples[i][0];
             }
         }
     }
@@ -1853,6 +1901,28 @@ static void voice_process(MCPXAPUState *d,
         vDSP_vsma(&samples[0][b % channels], 2, &g,
                   mixbins[bin[b]], 1, mixbins[bin[b]], 1,
                   NUM_SAMPLES_PER_FRAME);
+#elif XEMU_USE_SSE_MIX
+        /*
+         * SSE2 equivalent of the vDSP_vsma call above: de-interleave
+         * one channel out of the stereo sample pairs with SHUFPS,
+         * multiply-accumulate into the mixbin. NUM_SAMPLES_PER_FRAME
+         * (32) is a multiple of 4, so no scalar tail.
+         */
+        {
+            const __m128 vg = _mm_set1_ps(g);
+            const int ch = b % channels;
+            float *dst = mixbins[bin[b]];
+            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i += 4) {
+                __m128 s01 = _mm_loadu_ps(&samples[i][0]);     /* L0 R0 L1 R1 */
+                __m128 s23 = _mm_loadu_ps(&samples[i + 2][0]); /* L2 R2 L3 R3 */
+                __m128 chv = ch == 0
+                    ? _mm_shuffle_ps(s01, s23, _MM_SHUFFLE(2, 0, 2, 0))
+                    : _mm_shuffle_ps(s01, s23, _MM_SHUFFLE(3, 1, 3, 1));
+                __m128 acc = _mm_loadu_ps(dst + i);
+                acc = _mm_add_ps(acc, _mm_mul_ps(chv, vg));
+                _mm_storeu_ps(dst + i, acc);
+            }
+        }
 #else
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             mixbins[bin[b]][i] += g*samples[i][b % channels];
@@ -1911,13 +1981,20 @@ static void get_voice_bin_src_dst(MCPXAPUState *d, int v,
     uint32_t dst_v = 0;
     uint32_t clr_v = 0;
 
-    bool multipass = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                    NV_PAVS_VOICE_CFG_FMT_MULTIPASS);
+    /*
+     * All fields used here live in two voice registers; load each
+     * word once and bit-extract locally instead of up to 10
+     * voice_get_mask round trips per queued voice per frame (same
+     * batched pattern as voice_process).
+     */
+    uint32_t cfg_fmt = voice_get_word(d, v, NV_PAVS_VOICE_CFG_FMT);
+
+    bool multipass = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_MULTIPASS);
     if (multipass) {
-        int mp_bin = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                    NV_PAVS_VOICE_CFG_FMT_MULTIPASS_BIN);
-        bool clear_mix = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                                        NV_PAVS_VOICE_CFG_FMT_CLEAR_MIX);
+        int mp_bin = extract_field(cfg_fmt,
+                                   NV_PAVS_VOICE_CFG_FMT_MULTIPASS_BIN);
+        bool clear_mix = extract_field(cfg_fmt,
+                                       NV_PAVS_VOICE_CFG_FMT_CLEAR_MIX);
         src_v |= (1 << mp_bin);
         if (clear_mix) {
             clr_v |= (1 << mp_bin);
@@ -1925,29 +2002,22 @@ static void get_voice_bin_src_dst(MCPXAPUState *d, int v,
     }
 
     int bin[8];
+    uint32_t cfg_vbin = voice_get_word(d, v, NV_PAVS_VOICE_CFG_VBIN);
     if (v < MCPX_HW_MAX_3D_VOICES) {
         bin[0] = d->vp.hrtf_submix[0];
         bin[1] = d->vp.hrtf_submix[1];
         bin[2] = d->vp.hrtf_submix[2];
         bin[3] = d->vp.hrtf_submix[3];
     } else {
-        bin[0] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V0BIN);
-        bin[1] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V1BIN);
-        bin[2] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V2BIN);
-        bin[3] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                                NV_PAVS_VOICE_CFG_VBIN_V3BIN);
+        bin[0] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V0BIN);
+        bin[1] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V1BIN);
+        bin[2] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V2BIN);
+        bin[3] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V3BIN);
     }
-    bin[4] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V4BIN);
-    bin[5] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN,
-                            NV_PAVS_VOICE_CFG_VBIN_V5BIN);
-    bin[6] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                            NV_PAVS_VOICE_CFG_FMT_V6BIN);
-    bin[7] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
-                            NV_PAVS_VOICE_CFG_FMT_V7BIN);
+    bin[4] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V4BIN);
+    bin[5] = extract_field(cfg_vbin, NV_PAVS_VOICE_CFG_VBIN_V5BIN);
+    bin[6] = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_V6BIN);
+    bin[7] = extract_field(cfg_fmt, NV_PAVS_VOICE_CFG_FMT_V7BIN);
 
     for (int i = 0; i < 8; i++) {
         dst_v |= 1 << bin[i];

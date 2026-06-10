@@ -1251,9 +1251,22 @@ static void tcg_out_movi(TCGContext *s, TCGType type, TCGReg rd,
         return;
     }
 
-    /* For more than 2 insns, dump it into the constant pool.  */
-    new_pool_label(s, value, R_AARCH64_CONDBR19, s->code_ptr, 0);
-    tcg_out_insn(s, 3305, LDR, 0, rd);
+    /*
+     * 3 or 4 chunk constants: materialize inline with MOVZ/MOVN +
+     * 2-3 MOVK instead of a literal-pool LDR. On Apple M-series the
+     * inline sequence stays in the instruction stream (no load-port
+     * use, no D-cache pressure from pool entries interleaved with
+     * code) and benchmarks faster than the pooled load. Chunks where
+     * the base instruction already produced the right bits (0x0000
+     * for MOVZ, 0xffff for MOVN) need no patch; every remaining
+     * non-zero chunk of t0 gets a MOVK with the true value bits.
+     */
+    tcg_out_insn_3405(s, opc, type, rd, t0 >> s0, s0);
+    while (t1 != 0) {
+        int sh = ctz64(t1) & (63 & -16);
+        tcg_out_insn(s, 3405, MOVK, type, rd, value >> sh, sh);
+        t1 &= ~(0xffffull << sh);
+    }
 }
 
 static bool tcg_out_xchg(TCGContext *s, TCGType type, TCGReg r1, TCGReg r2)
