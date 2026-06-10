@@ -124,7 +124,7 @@ static void dsp_dma_run(DSPDMAState *s)
             block_space = DSP_SPACE_P;
             block_addr = addr - 0x2800;
         } else {
-            assert(false);
+            assert(!"Dsp dma space address out of range");
         }
 
         uint32_t next_block = dsp56k_read_memory(s->core, block_space, block_addr);
@@ -175,7 +175,7 @@ static void dsp_dma_run(DSPDMAState *s)
             break;
         default:
             fprintf(stderr, "Unknown dsp dma format: 0x%x\n", format);
-            assert(false);
+            assert(!"Unknown dsp dma format");
             break;
         }
 
@@ -197,7 +197,7 @@ static void dsp_dma_run(DSPDMAState *s)
             mem_address = dsp_offset - 0x2800;
         } else {
             fprintf(stderr, "Attempt to access %08x\n", dsp_offset);
-            assert(false);
+            assert(!"Dsp dma offset out of range");
         }
 
         size_t transfer_size = count * item_size;
@@ -234,7 +234,7 @@ static void dsp_dma_run(DSPDMAState *s)
                             *(uint32_t*)(scratch_buf + i*4*channel_count + ch*4) = v;
                             break;
                         default:
-                            assert(false);
+                            assert(!"Invalid dsp dma item size for interleaved samples");
                             break;
                         }
                     }
@@ -250,7 +250,7 @@ static void dsp_dma_run(DSPDMAState *s)
                         *(uint32_t*)(scratch_buf + i*4) = v;
                         break;
                     default:
-                        assert(false);
+                        assert(!"Invalid dsp dma item size");
                         break;
                     }
                 }
@@ -273,7 +273,7 @@ static void dsp_dma_run(DSPDMAState *s)
                 break;
             default:
                 fprintf(stderr, "Unknown DSP DMA buffer: 0x%x\n", buf_id);
-                assert(false);
+                assert(!"Unknown dsp dma buffer");
                 break;
             }
         } else {
@@ -285,7 +285,7 @@ static void dsp_dma_run(DSPDMAState *s)
                 s->scratch_rw(s->rw_opaque, scratch_buf, scratch_addr, transfer_size, 0);
             } else {
                 fprintf(stderr, "Unhandled DSP DMA buffer: 0x%x\n", buf_id);
-                assert(false);
+                assert(!"Unhandled dsp dma buffer");
             }
 
             for (int i = 0; i < count; i++) {
@@ -299,7 +299,7 @@ static void dsp_dma_run(DSPDMAState *s)
                     break;
                 default:
                     v = 0;
-                    assert(false);
+                    assert(!"Invalid dsp dma item size");
                     break;
                 }
 
@@ -326,7 +326,7 @@ uint32_t dsp_dma_read(DSPDMAState *s, DSPDMARegister reg)
     case DMA_NEXT_BLOCK:
         return s->next_block;
     default:
-        assert(false);
+        assert(!"Invalid register for dsp_dma_read");
     }
     return 0;
 }
@@ -354,7 +354,7 @@ void dsp_dma_write(DSPDMAState *s, DSPDMARegister reg, uint32_t v)
             s->control &= ~DMA_CONTROL_FROZEN;
             break;
         default:
-            assert(false);
+            assert(!"Invalid DMA_CONTROL action");
             break;
         }
         dsp_dma_run(s);
@@ -369,7 +369,7 @@ void dsp_dma_write(DSPDMAState *s, DSPDMARegister reg, uint32_t v)
         s->next_block = v;
         break;
     default:
-        assert(false);
+        assert(!"Invalid dma write register");
     }
 }
 

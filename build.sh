@@ -299,9 +299,7 @@ case "$platform" in # Adjust compilation options based on platform
                         -arch ${target_arch} \
                         -isysroot ${sdk} \
                         -mmacosx-version-min=$macos_min_ver"
-        if [ "$target_arch" == "x86_64" ]; then
-            sys_cflags='-march=ivybridge'
-        elif [ "$target_arch" == "arm64" ]; then
+        if [ "$target_arch" == "arm64" ]; then
             # ARM64 -mcpu selection:
             #   - XEMU_ARM_CPU overrides everything (e.g. `apple-m4`).
             #   - Otherwise, auto-detect the host chip via sysctl and pick

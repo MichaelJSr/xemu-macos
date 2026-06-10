@@ -110,7 +110,7 @@ static enum S3TC_DECOMPRESS_FORMAT kelvin_format_to_s3tc_format(int color_format
     case NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT45_A8R8G8B8:
         return S3TC_DECOMPRESS_FORMAT_DXT5;
     default:
-        nv2a_vk_assert(false);
+        nv2a_vk_assert(!"Invalid texture color format");
         __builtin_unreachable();
     }
 }

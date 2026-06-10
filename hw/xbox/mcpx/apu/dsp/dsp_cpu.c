@@ -423,7 +423,7 @@ static const OpcodeEntry *lookup_opcode_slow(uint32_t op) {
     }
 
     fprintf(stderr, "op = %08x\n", op);
-    assert(false);
+    assert(!"Invalid op code in dsp_cpu");
     return NULL;
 }
 
@@ -899,13 +899,13 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
     /* SSI receive data with exception ? */
     if (dsp->interrupt_instr_fetch == 0xe) {
         // dsp->periph[DSP_SPACE_X][DSP_SSI_SR] &= 0xff-(1<<DSP_SSI_SR_ROE);
-        assert(false);
+        assert(!"SSI receive data failed");
     }
 
     /* SSI transmit data with exception ? */
     else if (dsp->interrupt_instr_fetch == 0x12) {
         // dsp->periph[DSP_SPACE_X][DSP_SSI_SR] &= 0xff-(1<<DSP_SSI_SR_TUE);
-        assert(false);
+        assert(!"SSI transmit data failed");
     }
 
     /* host command ? */
@@ -916,7 +916,7 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
 
         // dsp->interrupt_instr_fetch = dsp->hostport[CPU_HOST_CVR] & BITMASK(5);
         // dsp->interrupt_instr_fetch *= 2;
-        assert(false);
+        assert(!"Host command failure");
     }
 }
 
@@ -959,7 +959,7 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
     } else if (space == DSP_SPACE_P) {
         return read_memory_p(dsp, address);
     } else {
-        assert(false);
+        assert(!"Invalid dsp space in read memory");
         return 0;
     }
 }
@@ -1000,7 +1000,7 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
         /* Any translated JIT block that covers this PC is now stale. */
         dsp_jit_invalidate(dsp, address);
     } else {
-        assert(false);
+        assert(!"Invalid dsp space in write raw memory");
     }
 }
 
@@ -1029,7 +1029,7 @@ static void write_memory_disasm(dsp_core_t* dsp, int space, uint32_t address, ui
             space_c = 'p';
             break;
         default:
-            assert(false);
+            assert(!"Invalid dsp space in write memory disasm");
     }
 
     curvalue = read_memory_disasm(dsp, space, address);
@@ -1068,7 +1068,7 @@ static void dsp_write_reg(dsp_core_t* dsp, uint32_t numreg, uint32_t value)
                 dsp->registers[DSP_REG_SP] = value & (3<<DSP_SP_SE);
                 DPRINTF("Dsp: Stack Overflow or Underflow\n");
                 if (dsp->exception_debugging) {
-                    assert(false);
+                    assert(!"Dsp stack overflow or underflow detected");
                 }
             } else {
                 dsp->registers[DSP_REG_SP] = value & BITMASK(6);
@@ -1111,7 +1111,7 @@ static void dsp_stack_push(dsp_core_t* dsp, uint32_t curpc, uint32_t cursr, uint
         dsp56k_add_interrupt(dsp, DSP_INTER_STACK_ERROR);
         DPRINTF("Dsp: Stack Overflow\n");
         if (dsp->exception_debugging)
-            assert(false);
+            assert(!"dsp stack overflow");
     }
 
     dsp->registers[DSP_REG_SP] = (underflow | stack_error | stack) & BITMASK(6);
@@ -1147,7 +1147,7 @@ static void dsp_stack_pop(dsp_core_t* dsp, uint32_t *newpc, uint32_t *newsr)
         dsp56k_add_interrupt(dsp, DSP_INTER_STACK_ERROR);
         DPRINTF("Dsp: Stack underflow\n");
         if (dsp->exception_debugging)
-            assert(false);
+            assert(!"Dsp stack underflow");
     }
 
     dsp->registers[DSP_REG_SP] = (underflow | stack_error | stack) & BITMASK(6);

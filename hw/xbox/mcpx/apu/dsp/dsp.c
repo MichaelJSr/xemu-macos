@@ -250,7 +250,7 @@ uint32_t dsp_read_memory(DSPState* dsp, char space, uint32_t address)
         space_id = DSP_SPACE_P;
         break;
     default:
-        assert(false);
+        assert(!"Invalid dsp space when reading from memory");
         return 0;
     }
 
@@ -272,7 +272,7 @@ void dsp_write_memory(DSPState* dsp, char space, uint32_t address, uint32_t valu
         space_id = DSP_SPACE_P;
         break;
     default:
-        assert(false);
+        assert(!"Invalid dsp space when writing to memory");
         return;
     }
 
