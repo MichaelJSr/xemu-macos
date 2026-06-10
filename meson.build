@@ -86,6 +86,13 @@ if host_os == 'darwin' and \
   all_languages += ['objc']
   objc = meson.get_compiler('objc')
 endif
+# Objective-C++ is needed for the Metal-native presentation backend
+# (ImGui Metal bridge + UI compositor are .mm translation units).
+if host_os == 'darwin' and \
+   add_languages('objcpp', required: true, native: false)
+  all_languages += ['objcpp']
+  objcpp = meson.get_compiler('objcpp')
+endif
 
 have_rust = add_languages('rust', native: false,
     required: get_option('rust').disable_auto_if(not have_system))
@@ -809,6 +816,10 @@ endif
 if 'objc' in all_languages
   # Note sanitizer flags are not applied to Objective-C sources!
   add_project_arguments(objc.get_supported_arguments(warn_flags), native: false, language: 'objc')
+endif
+if 'objcpp' in all_languages
+  add_project_arguments(qemu_cxxflags, native: false, language: 'objcpp')
+  add_project_arguments(objcpp.get_supported_arguments(warn_flags), native: false, language: 'objcpp')
 endif
 if host_os == 'linux'
   add_project_arguments('-isystem', meson.current_source_dir() / 'linux-headers',
@@ -2481,7 +2492,10 @@ imgui_proj = subproject('imgui', required: true,
                            'dx10=disabled',
                            'dx11=disabled',
                            'dx12=disabled',
-                           'metal=disabled',
+                           # Metal renderer backend for the macOS
+                           # Metal-native presentation path.
+                           host_os == 'darwin' ? 'metal=enabled'
+                                               : 'metal=disabled',
                            'opengl=enabled',
                            'sdl2_renderer=disabled',
                            'sdl3_renderer=disabled',

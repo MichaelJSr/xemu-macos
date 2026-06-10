@@ -33,7 +33,7 @@ VulkanMemoryAllocator
 nv2a_vsh_cpu
 tomlplusplus
 xxHash-*
-imgui
+/imgui
 implot
 genconfig
 curl-*

@@ -24,6 +24,27 @@
 void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
 void nv2a_context_init(void);
 int nv2a_get_framebuffer_surface(void);
+
+/*
+ * Metal-native presentation: pull the current present frame as an
+ * IOSurface instead of a GL texture name. The returned pointer is
+ * borrowed — valid until nv2a_release_framebuffer_surface() (which
+ * must be called after either acquisition function, regardless of
+ * the result).
+ */
+typedef struct NV2APresentFrame {
+    void *iosurface;   /* IOSurfaceRef (base compositor output) */
+    void *mtl_texture; /* id<MTLTexture> (MetalFX ring output);
+                          takes precedence over iosurface */
+    /* GPU-side ordering: wait for `event` (id<MTLSharedEvent>) to
+     * reach `event_value` before sampling. event_value 0 = no wait. */
+    void *event;
+    uint64_t event_value;
+    uint32_t width;
+    uint32_t height;
+} NV2APresentFrame;
+bool nv2a_get_present_frame(NV2APresentFrame *frame);
+
 void nv2a_release_framebuffer_surface(void);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);

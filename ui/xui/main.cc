@@ -54,6 +54,14 @@
 #include "update.hh"
 #endif
 
+#ifdef __APPLE__
+#include "metal-helpers.hh"
+extern "C" {
+#include "ui/xemu-present.h"
+#include "ui/xemu-metal.h"
+}
+#endif
+
 bool g_screenshot_pending;
 const char *g_snapshot_pending_load_name;
 
@@ -62,8 +70,17 @@ float g_main_menu_height;
 static ImGuiStyle g_base_style;
 static float g_last_scale;
 static int g_vsync;
-static GLuint g_tex;
+static uintptr_t g_tex;
 static bool g_flip_req;
+
+static inline bool HudUseMetal()
+{
+#ifdef __APPLE__
+    return xemu_present_is_metal();
+#else
+    return false;
+#endif
+}
 
 
 static void InitializeStyle()
@@ -144,8 +161,16 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
     io.IniFilename = NULL;
 
     // Setup Platform/Renderer bindings
-    ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
-    ImGui_ImplOpenGL3_Init("#version 150");
+#ifdef __APPLE__
+    if (HudUseMetal()) {
+        ImGui_ImplSDL3_InitForMetal(window);
+        MetalImGuiInit();
+    } else
+#endif
+    {
+        ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
+        ImGui_ImplOpenGL3_Init("#version 150");
+    }
     ImPlot::CreateContext();
 
 #if defined(_WIN32)
@@ -161,7 +186,14 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
 
 void xemu_hud_cleanup(void)
 {
-    ImGui_ImplOpenGL3_Shutdown();
+#ifdef __APPLE__
+    if (HudUseMetal()) {
+        MetalImGuiShutdown();
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_Shutdown();
+    }
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 }
@@ -183,7 +215,7 @@ void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse)
     if (mouse) *mouse = io.WantCaptureMouse;
 }
 
-void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip)
+void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip)
 {
     g_tex = tex;
     g_flip_req = flip;
@@ -209,7 +241,14 @@ void xemu_hud_update(void)
         RenderFramebuffer(g_tex, ww, wh, g_flip_req);
     }
 
-    ImGui_ImplOpenGL3_NewFrame();
+#ifdef __APPLE__
+    if (HudUseMetal()) {
+        MetalImGuiNewFrame();
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_NewFrame();
+    }
     io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
     ImGui_ImplSDL3_NewFrame();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
@@ -325,11 +364,25 @@ void xemu_hud_update(void)
 void xemu_hud_render()
 {
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#ifdef __APPLE__
+    if (HudUseMetal()) {
+        MetalImGuiRenderDrawData(ImGui::GetDrawData());
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
 
     if (g_vsync != g_config.display.window.vsync) {
         g_vsync = g_config.display.window.vsync;
-        SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
+#ifdef __APPLE__
+        if (HudUseMetal()) {
+            xemu_metal_set_vsync(g_vsync != 0);
+        } else
+#endif
+        {
+            SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
+        }
     }
 
     if (g_screenshot_pending) {

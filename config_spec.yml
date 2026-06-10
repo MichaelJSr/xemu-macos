@@ -253,6 +253,15 @@ display:
     values: [linear, nearest]
     default: linear
   window:
+    # macOS only: which API presents the final frame + UI. `auto`
+    # selects Metal when the Vulkan renderer is configured, OpenGL
+    # otherwise. Selected once at startup (window type is fixed at
+    # creation); changing it — or switching renderer under the Metal
+    # backend — requires a restart.
+    presentation_backend:
+      type: enum
+      values: [auto, opengl, metal]
+      default: auto
     fullscreen_on_startup: bool
     fullscreen_exclusive: bool
     startup_size:

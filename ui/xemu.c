@@ -60,6 +60,8 @@
 #include <math.h>
 #ifdef __APPLE__
 #include <pthread.h>
+#include "xemu-present.h"
+#include "xemu-metal.h"
 #endif
 #include <SDL3/SDL.h>
 
@@ -75,6 +77,37 @@
 
 uint64_t vblank_interval_ns = 16666666LL;
 bool use_vblank_timer_thread = true;
+
+/*
+ * Presentation backend resolution. Resolved once, before window
+ * creation (the SDL window type is fixed at creation time), and
+ * stable for the process lifetime: a mid-run config change or a
+ * renderer switch under `auto` requires a restart to take effect.
+ */
+bool xemu_present_is_metal(void)
+{
+#ifdef __APPLE__
+    static int resolved = -1;
+    if (resolved < 0) {
+        switch (g_config.display.window.presentation_backend) {
+        case CONFIG_DISPLAY_WINDOW_PRESENTATION_BACKEND_METAL:
+            resolved = 1;
+            break;
+        case CONFIG_DISPLAY_WINDOW_PRESENTATION_BACKEND_OPENGL:
+            resolved = 0;
+            break;
+        case CONFIG_DISPLAY_WINDOW_PRESENTATION_BACKEND_AUTO:
+        default:
+            resolved = (g_config.display.renderer ==
+                        CONFIG_DISPLAY_RENDERER_VULKAN);
+            break;
+        }
+    }
+    return resolved == 1;
+#else
+    return false;
+#endif
+}
 
 /*
  * Silently drain any pending GL errors on the current thread's
@@ -346,8 +379,20 @@ static void set_full_screen(struct xemu_console *scon, bool set)
                 int num_modes = 0;
                 modes = SDL_GetFullscreenDisplayModes(display, &num_modes);
                 if (modes && num_modes > 0) {
-                    // First mode is the highest resolution, typically the native resolution
+                    // First mode is the highest resolution, typically the
+                    // native resolution. Among the modes at that
+                    // resolution, prefer the highest refresh rate (the
+                    // list is not guaranteed to order by refresh; e.g.
+                    // 120Hz ProMotion vs a 60Hz first entry).
                     mode = modes[0];
+                    for (int i = 1; i < num_modes; i++) {
+                        if (modes[i]->w == mode->w &&
+                            modes[i]->h == mode->h &&
+                            modes[i]->pixel_density == mode->pixel_density &&
+                            modes[i]->refresh_rate > mode->refresh_rate) {
+                            mode = modes[i];
+                        }
+                    }
                 }
             }
             if (mode) {
@@ -936,13 +981,109 @@ static void gl_render_frame(struct xemu_console *scon)
 #endif
 }
 
+#ifdef __APPLE__
+/**
+ * Metal-native sibling of gl_render_frame: same structure (pull the
+ * NV2A present frame, run the HUD, release, present), but the game
+ * frame is consumed as an IOSurface wrapped into an MTLTexture and
+ * drawn into the CAMetalLayer drawable instead of through GL.
+ */
+static void metal_render_frame(struct xemu_console *scon)
+{
+    static bool rendering;
+    if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
+        return;
+    }
+
+    /*
+     * Pull the present frame from the renderer first: the frame's
+     * shared-event value must be known before the drawable render
+     * pass is opened (the GPU-side wait is encoded ahead of it).
+     * Returned pointers are borrowed: valid until
+     * nv2a_release_framebuffer_surface(), and the MTLTexture (wrap or
+     * MetalFX ring entry) is retained by the display state / command
+     * buffer for as long as the GPU needs it.
+     */
+    NV2APresentFrame frame = { 0 };
+    nv2a_get_present_frame(&frame);
+
+    bool flip_required = false;
+    uintptr_t tex = 0;
+    if (frame.mtl_texture) {
+        tex = (uintptr_t)frame.mtl_texture;
+    } else if (frame.iosurface) {
+        tex = (uintptr_t)xemu_metal_wrap_iosurface(frame.iosurface);
+    }
+
+    if (!xemu_metal_begin_frame(frame.event,
+                                tex ? frame.event_value : 0)) {
+        /* No drawable available (e.g. window fully occluded). */
+        nv2a_release_framebuffer_surface();
+        qatomic_set(&rendering, false);
+        return;
+    }
+
+    if (!tex) {
+        /* VGA fallback (pixman surface, software rendering). */
+        xemu_main_loop_lock();
+        DisplaySurface *surface = scon->surface;
+        if (surface &&
+            surface_bytes_per_pixel(surface) == 4) {
+            tex = (uintptr_t)xemu_metal_upload_vga_surface(
+                surface_data(surface), surface_width(surface),
+                surface_height(surface), surface_stride(surface));
+            flip_required = true;
+        } else if (surface) {
+            static bool warned_once;
+            if (!warned_once) {
+                warned_once = true;
+                fprintf(stderr,
+                        "xemu-metal: unsupported VGA fallback format "
+                        "(%d bpp); frame skipped\n",
+                        surface_bytes_per_pixel(surface) * 8);
+            }
+        }
+        xemu_main_loop_unlock();
+    }
+
+    xemu_snapshots_set_framebuffer_texture(tex, flip_required);
+    xemu_hud_set_framebuffer_texture(tex, flip_required);
+
+    xemu_main_loop_lock();
+    xemu_hud_update();
+    xemu_main_loop_unlock();
+
+    xemu_hud_render();
+
+    nv2a_release_framebuffer_surface();
+    xemu_metal_end_frame();
+
+    qatomic_set(&rendering, false);
+
+#if DEBUG_XEMU_C
+    report_stats();
+#endif
+}
+#endif /* __APPLE__ */
+
+static void render_frame(struct xemu_console *scon)
+{
+#ifdef __APPLE__
+    if (xemu_present_is_metal()) {
+        metal_render_frame(scon);
+        return;
+    }
+#endif
+    gl_render_frame(scon);
+}
+
 static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
     if (event->type == SDL_EVENT_WINDOW_EXPOSED ||
         event->type == SDL_EVENT_WINDOW_RESIZED) {
-        gl_render_frame(scon);
+        render_frame(scon);
     }
 
     return true; // Ignored
@@ -1031,6 +1172,8 @@ static void display_very_early_init(DisplayOptions *o)
 #endif
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 
+    bool use_metal = xemu_present_is_metal();
+
     // Initialize rendering context
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
@@ -1085,7 +1228,9 @@ static void display_very_early_init(DisplayOptions *o)
         window_height = min_window_height;
     }
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(
+        (use_metal ? SDL_WINDOW_METAL : SDL_WINDOW_OPENGL) |
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
 
     // Create main window
     m_window = SDL_CreateWindow(
@@ -1105,25 +1250,46 @@ static void display_very_early_init(DisplayOptions *o)
         SDL_SetWindowPosition(m_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
 
-    m_context = SDL_GL_CreateContext(m_window);
-
-    if (m_context != NULL && epoxy_gl_version() < 40) {
-        SDL_GL_MakeCurrent(NULL, NULL);
-        SDL_GL_DestroyContext(m_context);
+#ifdef __APPLE__
+    if (use_metal) {
         m_context = NULL;
-    }
+        if (!xemu_metal_init(m_window)) {
+            SDL_ShowSimpleMessageBox(
+                SDL_MESSAGEBOX_ERROR, "Unable to initialize Metal",
+                "Unable to initialize the Metal presentation backend.\r\n"
+                "Set display.window.presentation_backend = 'opengl' in\r\n"
+                "xemu.toml to fall back to OpenGL presentation.\r\n"
+                "\r\n"
+                "xemu cannot continue and will now exit.",
+                m_window);
+            SDL_DestroyWindow(m_window);
+            SDL_Quit();
+            exit(1);
+        }
+        xemu_metal_set_vsync(g_config.display.window.vsync);
+    } else
+#endif
+    {
+        m_context = SDL_GL_CreateContext(m_window);
 
-    if (m_context == NULL) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-            "Unable to create OpenGL context",
-            "Unable to create OpenGL context. This usually means the\r\n"
-            "graphics device on this system does not support OpenGL 4.0.\r\n"
-            "\r\n"
-            "xemu cannot continue and will now exit.",
-            m_window);
-        SDL_DestroyWindow(m_window);
-        SDL_Quit();
-        exit(1);
+        if (m_context != NULL && epoxy_gl_version() < 40) {
+            SDL_GL_MakeCurrent(NULL, NULL);
+            SDL_GL_DestroyContext(m_context);
+            m_context = NULL;
+        }
+
+        if (m_context == NULL) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                "Unable to create OpenGL context",
+                "Unable to create OpenGL context. This usually means the\r\n"
+                "graphics device on this system does not support OpenGL 4.0.\r\n"
+                "\r\n"
+                "xemu cannot continue and will now exit.",
+                m_window);
+            SDL_DestroyWindow(m_window);
+            SDL_Quit();
+            exit(1);
+        }
     }
 
     int width, height, channels = 0;
@@ -1140,12 +1306,26 @@ static void display_very_early_init(DisplayOptions *o)
 
     fprintf(stderr, "CPU: %s\n", xemu_get_cpu_info());
     fprintf(stderr, "OS_Version: %s\n", xemu_get_os_info());
-    fprintf(stderr, "GL_VENDOR: %s\n", glGetString(GL_VENDOR));
-    fprintf(stderr, "GL_RENDERER: %s\n", glGetString(GL_RENDERER));
-    fprintf(stderr, "GL_VERSION: %s\n", glGetString(GL_VERSION));
-    fprintf(stderr, "GL_SHADING_LANGUAGE_VERSION: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+#ifdef __APPLE__
+    if (use_metal) {
+        fprintf(stderr, "MTL_DEVICE: %s\n", xemu_metal_device_name());
+    } else
+#endif
+    {
+        fprintf(stderr, "GL_VENDOR: %s\n", glGetString(GL_VENDOR));
+        fprintf(stderr, "GL_RENDERER: %s\n", glGetString(GL_RENDERER));
+        fprintf(stderr, "GL_VERSION: %s\n", glGetString(GL_VERSION));
+        fprintf(stderr, "GL_SHADING_LANGUAGE_VERSION: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+    }
 
-    // Initialize offscreen rendering context now
+    /*
+     * Initialize offscreen rendering contexts now. Under the Metal
+     * backend there is no main-window GL context to share with: the
+     * first gloffscreen context created becomes the share-group root
+     * for the rest (each glo context is current when the next one is
+     * created), which is all the NV2A GL/Vulkan renderers need — the
+     * UI no longer consumes GL texture names.
+     */
     nv2a_context_init();
     SDL_GL_MakeCurrent(NULL, NULL);
 }
@@ -1155,8 +1335,10 @@ static void display_early_init(DisplayOptions *o)
     assert(o->type == DISPLAY_TYPE_XEMU);
     display_opengl = 1;
 
-    SDL_GL_MakeCurrent(m_window, m_context);
-    SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
+    if (!xemu_present_is_metal()) {
+        SDL_GL_MakeCurrent(m_window, m_context);
+        SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
+    }
     xemu_hud_init(m_window, m_context);
 }
 
@@ -1174,7 +1356,9 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     int i;
 
     assert(o->type == DISPLAY_TYPE_XEMU);
-    SDL_GL_MakeCurrent(m_window, m_context);
+    if (!xemu_present_is_metal()) {
+        SDL_GL_MakeCurrent(m_window, m_context);
+    }
 
     gui_fullscreen = o->has_full_screen && o->full_screen;
     gui_fullscreen |= g_config.display.window.fullscreen_on_startup;
@@ -1230,7 +1414,9 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     }
 
     /* Tell main thread to go ahead and create the app and enter the run loop */
-    SDL_GL_MakeCurrent(NULL, NULL);
+    if (!xemu_present_is_metal()) {
+        SDL_GL_MakeCurrent(NULL, NULL);
+    }
     qemu_sem_post(&display_init_sem);
 }
 
@@ -1244,8 +1430,15 @@ static void display_finalize(void)
     }
 
     SDL_RemoveEventWatch(event_watch_callback, &scon_list[0]);
-    SDL_GL_MakeCurrent(NULL, NULL);
-    SDL_GL_DestroyContext(m_context);
+#ifdef __APPLE__
+    if (xemu_present_is_metal()) {
+        xemu_metal_finalize();
+    } else
+#endif
+    {
+        SDL_GL_MakeCurrent(NULL, NULL);
+        SDL_GL_DestroyContext(m_context);
+    }
     SDL_DestroyWindow(m_window);
     SDL_Quit();
 }
@@ -1434,7 +1627,7 @@ int main(int argc, char **argv)
     struct xemu_console *scon = &scon_list[0];
     while (!qatomic_read(&qemu_exiting)) {
         poll_events(scon);
-        gl_render_frame(scon);
+        render_frame(scon);
     }
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);

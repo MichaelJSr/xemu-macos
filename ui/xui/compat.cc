@@ -18,6 +18,12 @@
 //
 #include <string>
 #include "common.hh"
+#ifdef __APPLE__
+#include "metal-helpers.hh"
+extern "C" {
+#include "ui/xemu-present.h"
+}
+#endif
 #include "compat.hh"
 #include "widgets.hh"
 #include "viewport-manager.hh"
@@ -74,10 +80,21 @@ void CompatibilityReporter::Draw()
     }
 
     if (ImGui::IsWindowAppearing()) {
-        report.gl_vendor = (const char *)glGetString(GL_VENDOR);
-        report.gl_renderer = (const char *)glGetString(GL_RENDERER);
-        report.gl_version = (const char *)glGetString(GL_VERSION);
-        report.gl_shading_language_version = (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+#ifdef __APPLE__
+        if (xemu_present_is_metal()) {
+            report.gl_vendor = "Apple";
+            report.gl_renderer = MetalGetDeviceName();
+            report.gl_version = "Metal";
+            report.gl_shading_language_version = "Metal Shading Language";
+        } else
+#endif
+        {
+            report.gl_vendor = (const char *)glGetString(GL_VENDOR);
+            report.gl_renderer = (const char *)glGetString(GL_RENDERER);
+            report.gl_version = (const char *)glGetString(GL_VERSION);
+            report.gl_shading_language_version =
+                (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+        }
         struct xbe *xbe = xemu_get_xbe_info();
         is_xbe_identified = xbe != NULL;
         if (is_xbe_identified) {

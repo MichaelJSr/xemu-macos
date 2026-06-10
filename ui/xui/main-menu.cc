@@ -27,6 +27,12 @@
 #include "xemu-hud.h"
 #include "misc.hh"
 #include "gl-helpers.hh"
+#ifdef __APPLE__
+#include "metal-helpers.hh"
+extern "C" {
+#include "ui/xemu-present.h"
+}
+#endif
 #include "reporting.hh"
 #include "qapi/error.h"
 #include "actions.hh"
@@ -740,14 +746,29 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
 void MainMenuDisplayView::Draw()
 {
     SectionTitle("Renderer");
-    ChevronCombo("Backend", &g_config.display.renderer,
-                 "Null\0"
-                 "OpenGL\0"
+    if (ChevronCombo("Backend", &g_config.display.renderer,
+                     "Null\0"
+                     "OpenGL\0"
 #ifdef CONFIG_VULKAN
-                 "Vulkan\0"
+                     "Vulkan\0"
 #endif
-                 ,
-                 "Select desired renderer implementation");
+                     ,
+                     "Select desired renderer implementation")) {
+#ifdef __APPLE__
+        /*
+         * The Metal presentation backend consumes frames as
+         * IOSurfaces/MTLTextures from the Vulkan renderer; other
+         * renderers present through the (GL) window path, which is
+         * fixed at startup.
+         */
+        if (xemu_present_is_metal() &&
+            g_config.display.renderer != CONFIG_DISPLAY_RENDERER_VULKAN) {
+            xemu_queue_notification(
+                "Restart xemu to apply: the Metal presentation backend "
+                "requires a restart when leaving the Vulkan renderer.");
+        }
+#endif
+    }
     int rendering_scale = nv2a_get_surface_scale_factor() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"
@@ -1211,14 +1232,9 @@ bool MainMenuSnapshotsView::BigSnapshotButton(QEMUSnapshotInfo *snapshot,
     draw_list->PushClipRect(p0, p1, true);
 
     // Snapshot thumbnail
-    GLuint thumbnail = data->gl_thumbnail ? data->gl_thumbnail : g_icon_tex;
+    uintptr_t thumbnail = data->thumbnail ? data->thumbnail : g_icon_tex;
     int thumbnail_width, thumbnail_height;
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, thumbnail);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,
-                             &thumbnail_width);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT,
-                             &thumbnail_height);
+    GetUiTextureDims(thumbnail, &thumbnail_width, &thumbnail_height);
 
     // Draw black background behind thumbnail
     ImVec2 thumbnail_min(p0.x + thumbnail_pos.x, p0.y + thumbnail_pos.y);
@@ -1647,11 +1663,25 @@ void MainMenuAboutView::Draw()
 
     static const char *sys_info_text = NULL;
     if (sys_info_text == NULL) {
-        const char *gl_shader_version =
-            (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
-        const char *gl_version = (const char *)glGetString(GL_VERSION);
-        const char *gl_renderer = (const char *)glGetString(GL_RENDERER);
-        const char *gl_vendor = (const char *)glGetString(GL_VENDOR);
+        const char *gl_shader_version;
+        const char *gl_version;
+        const char *gl_renderer;
+        const char *gl_vendor;
+#ifdef __APPLE__
+        if (xemu_present_is_metal()) {
+            gl_vendor = "Apple";
+            gl_renderer = MetalGetDeviceName();
+            gl_version = "Metal";
+            gl_shader_version = "Metal Shading Language";
+        } else
+#endif
+        {
+            gl_shader_version =
+                (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+            gl_version = (const char *)glGetString(GL_VERSION);
+            gl_renderer = (const char *)glGetString(GL_RENDERER);
+            gl_vendor = (const char *)glGetString(GL_VENDOR);
+        }
         sys_info_text = g_strdup_printf(
             "CPU:          %s\nOS Platform:  %s\nOS Version:   "
             "%s\nManufacturer: %s\n"

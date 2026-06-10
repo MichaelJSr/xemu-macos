@@ -24,35 +24,45 @@
 #include "xemu-snapshots.h"
 #include "xui/gl-helpers.hh"
 
-static GLuint display_tex = 0;
+#ifdef __APPLE__
+extern "C" {
+#include "xemu-present.h"
+}
+#endif
+
+static uintptr_t display_tex = 0;
 static bool display_flip = false;
 
-void xemu_snapshots_set_framebuffer_texture(GLuint tex, bool flip)
+static inline bool ThumbnailUseMetal()
+{
+#ifdef __APPLE__
+    return xemu_present_is_metal();
+#else
+    return false;
+#endif
+}
+
+void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
 {
     display_tex = tex;
     display_flip = flip;
 }
 
-bool xemu_snapshots_load_png_to_texture(GLuint tex, void *buf, size_t size)
+uintptr_t xemu_snapshots_load_png_thumbnail(const void *buf, size_t size)
 {
     std::vector<uint8_t> pixels;
     unsigned int width, height, channels;
     if (fpng::fpng_decode_memory(buf, size, pixels, width, height, channels,
-                                 3) != fpng::FPNG_DECODE_SUCCESS) {
-        return false;
+                                 4) != fpng::FPNG_DECODE_SUCCESS) {
+        return 0;
     }
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
+    return CreateUiTextureFromRgba(pixels.data(), width, height);
+}
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB,
-                 GL_UNSIGNED_BYTE, pixels.data());
-
-    return true;
+void xemu_snapshots_free_thumbnail(uintptr_t tex)
+{
+    DestroyUiTexture(tex);
 }
 
 void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size)
@@ -64,7 +74,8 @@ void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size)
      * FIXME: Allow for dispatching a thumbnail request to the UI thread to
      * remove this altogether.
      */
-    if (!SDL_GL_GetCurrentContext() || display_tex == 0) {
+    if (display_tex == 0 ||
+        (!ThumbnailUseMetal() && !SDL_GL_GetCurrentContext())) {
         return NULL;
     }
 

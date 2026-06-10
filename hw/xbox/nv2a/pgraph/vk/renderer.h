@@ -382,10 +382,35 @@ typedef struct PGRAPHVkDisplayState {
      * IOSurface rebind cache. Keyed on IOSurfaceID (kernel-assigned
      * identifier that remains stable while the surface exists, unlike
      * the pointer which can be reused across create/release). Matches
-     * the cache-key pattern used in metalfx_upscale.m.
+     * the cache-key pattern used in metalfx_upscale.m. Shared by the
+     * CGL rebind path and the Metal present-handoff path.
      */
     uint32_t last_cgl_surface_id;
     int last_cgl_width, last_cgl_height;
+
+    /*
+     * Metal-native presentation handoff: the surface most recently
+     * presented by render_display (base compositor output, MetalFX
+     * upscale output, or frame-interpolation output). Holds its own
+     * CFRetain; consumed (borrowed) by pgraph_vk_get_present_frame
+     * under the sync handshake.
+     */
+    void *present_iosurface; // IOSurfaceRef, retained
+    /*
+     * When MetalFX produced this frame in Metal-native mode, the
+     * output is a private MTLTexture (ring entry) instead of an
+     * IOSurface; exactly one of present_iosurface /
+     * present_mtl_texture is set. Retained (CFRetain on the ObjC
+     * object).
+     */
+    void *present_mtl_texture; // id<MTLTexture>, retained
+    int present_width, present_height;
+    /*
+     * MTLSharedEvent value signaled by the MetalFX command buffer
+     * that produced this frame (0 = no GPU wait required). The UI
+     * present pass encodes a wait on this value before sampling.
+     */
+    uint64_t present_event_value;
 #endif
 
     SurfaceBinding *last_descriptor_surface;

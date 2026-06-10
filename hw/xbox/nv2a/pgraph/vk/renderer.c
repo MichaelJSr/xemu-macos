@@ -22,6 +22,10 @@
 
 #include "gloffscreen.h"
 
+#if HAVE_IOSURFACE_SHARING
+#include "metalfx_upscale.h"
+#endif
+
 #if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
 static GloContext *g_gl_context;
 #endif
@@ -252,6 +256,53 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
 #endif
 }
 
+/*
+ * Metal-native presentation path: identical sync handshake to
+ * pgraph_vk_get_framebuffer_surface, but hands the UI the present
+ * IOSurface (stored by pgraph_vk_render_display) instead of a CGL
+ * rect-texture name. The pointer is borrowed: the display state keeps
+ * its own retain until the next render_display, and the UI's
+ * MTLTexture wrap retains the surface for GPU lifetime.
+ */
+static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
+{
+#if HAVE_IOSURFACE_SHARING
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    qemu_mutex_lock(&d->pfifo.lock);
+
+    VGADisplayParams vga_display_params;
+    d->vga.get_params(&d->vga, &vga_display_params);
+
+    SurfaceBinding *surface = pgraph_vk_surface_get_within(
+        d, d->pcrtc.start + vga_display_params.line_offset);
+    if (surface == NULL || !surface->color ||
+        !r->metal_objects_extension_enabled) {
+        qemu_mutex_unlock(&d->pfifo.lock);
+        return false;
+    }
+
+    surface->frame_time = pg->frame_time;
+
+    qemu_event_reset(&d->pgraph.sync_complete);
+    qatomic_set(&pg->sync_pending, true);
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_event_wait(&d->pgraph.sync_complete);
+
+    frame->iosurface = r->display.present_iosurface;
+    frame->mtl_texture = r->display.present_mtl_texture;
+    frame->event = metalfx_present_event();
+    frame->event_value = r->display.present_event_value;
+    frame->width = r->display.present_width;
+    frame->height = r->display.present_height;
+    return frame->iosurface != NULL || frame->mtl_texture != NULL;
+#else
+    return false;
+#endif
+}
+
 static PGRAPHRenderer pgraph_vk_renderer = {
     .type = CONFIG_DISPLAY_RENDERER_VULKAN,
     .name = "Vulkan",
@@ -277,6 +328,7 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .set_surface_scale_factor = pgraph_vk_set_surface_scale_factor,
         .get_surface_scale_factor = pgraph_vk_get_surface_scale_factor,
         .get_framebuffer_surface = pgraph_vk_get_framebuffer_surface,
+        .get_present_frame = pgraph_vk_get_present_frame,
         .get_gpu_properties = pgraph_vk_get_gpu_properties,
     }
 };

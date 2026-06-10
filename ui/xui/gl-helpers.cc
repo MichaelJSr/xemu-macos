@@ -31,10 +31,27 @@
 #include <stdio.h>
 #include <vector>
 
+#ifdef __APPLE__
+#include "metal-helpers.hh"
+extern "C" {
+#include "ui/xemu-present.h"
+}
+#endif
+
 #include "ui/shader/xemu-logo-frag.h"
 
 Fbo *controller_fbo, *xmu_fbo, *logo_fbo;
-GLuint g_controller_duke_tex, g_controller_s_tex, g_logo_tex, g_icon_tex, g_xmu_tex;
+uintptr_t g_controller_duke_tex, g_controller_s_tex, g_logo_tex, g_icon_tex,
+    g_xmu_tex;
+
+static inline bool UseMetal()
+{
+#ifdef __APPLE__
+    return xemu_present_is_metal();
+#else
+    return false;
+#endif
+}
 
 enum class ShaderType {
     Blit,
@@ -85,6 +102,15 @@ Fbo::Fbo(int width, int height)
 {
     w = width;
     h = height;
+    fbo = 0;
+    tex = 0;
+#ifdef __APPLE__
+    mfbo = NULL;
+    if (UseMetal()) {
+        mfbo = MetalFboCreate(width, height);
+        return;
+    }
+#endif
 
     // Allocate the texture
     glGenTextures(1, &tex);
@@ -112,12 +138,34 @@ Fbo::Fbo(int width, int height)
 
 Fbo::~Fbo()
 {
+#ifdef __APPLE__
+    if (mfbo) {
+        MetalFboDestroy(mfbo);
+        return;
+    }
+#endif
     glDeleteTextures(1, &tex);
     glDeleteFramebuffers(1, &fbo);
 }
 
+uintptr_t Fbo::Texture()
+{
+#ifdef __APPLE__
+    if (mfbo) {
+        return MetalFboTexture(mfbo);
+    }
+#endif
+    return (uintptr_t)tex;
+}
+
 void Fbo::Target()
 {
+#ifdef __APPLE__
+    if (mfbo) {
+        MetalFboTarget(mfbo);
+        return;
+    }
+#endif
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
 
@@ -134,6 +182,12 @@ void Fbo::Target()
 
 void Fbo::Restore()
 {
+#ifdef __APPLE__
+    if (mfbo) {
+        MetalFboRestore(mfbo);
+        return;
+    }
+#endif
     if (!blend) {
         glDisable(GL_BLEND);
     }
@@ -173,6 +227,57 @@ static GLuint LoadTextureFromMemory(const unsigned char *buf, unsigned int size,
     stbi_image_free(data);
 
     return tex;
+}
+
+uintptr_t LoadUiTextureFromMemory(const unsigned char *buf, unsigned int size,
+                                  bool flip)
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        return MetalLoadTextureFromMemory(buf, size, flip);
+    }
+#endif
+    return (uintptr_t)LoadTextureFromMemory(buf, size, flip);
+}
+
+uintptr_t CreateUiTextureFromRgba(const unsigned char *rgba, int w, int h)
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        return MetalCreateTextureFromRgba(rgba, w, h);
+    }
+#endif
+    return (uintptr_t)InitTexture((unsigned char *)rgba, w, h, 4);
+}
+
+void DestroyUiTexture(uintptr_t tex)
+{
+    if (!tex) {
+        return;
+    }
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDestroyTexture(tex);
+        return;
+    }
+#endif
+    GLuint gltex = (GLuint)tex;
+    glDeleteTextures(1, &gltex);
+}
+
+void GetUiTextureDims(uintptr_t tex, int *w, int *h)
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalTextureDims(tex, w, h);
+        return;
+    }
+#endif
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, w);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, h);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 static GLuint Shader(GLenum type, const char *src)
@@ -377,6 +482,14 @@ static void RenderDecal(DecalShader *s, float x, float y, float w, float h,
                         float tex_x, float tex_y, float tex_w, float tex_h,
                         uint32_t primary, uint32_t secondary, uint32_t fill)
 {
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalRenderDecal(x, y, w, h, tex_x, tex_y, tex_w, tex_h, primary,
+                         secondary, fill);
+        return;
+    }
+#endif
+
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
     float ww = vp[2], wh = vp[3];
@@ -432,6 +545,75 @@ static void RenderDecal(DecalShader *s, float x, float y, float w, float h,
     glDrawElements(GL_TRIANGLE_FAN, 4, GL_UNSIGNED_INT, NULL);
 }
 
+/*
+ * Backend-dispatching decal state helpers. The GL forms replicate the
+ * exact call sequences previously inlined in the Render* functions
+ * below; the Metal forms map onto the decal context in
+ * metal-helpers.mm.
+ */
+static void DecalBegin(DecalShader *s, uintptr_t tex)
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalBegin(s == g_logo_shader ? MetalDecalKind::Logo
+                                           : MetalDecalKind::Mask,
+                        tex);
+        MetalDecalSetTime(s ? s->time : 0);
+        return;
+    }
+#endif
+    glUseProgram(s->prog);
+    glBindVertexArray(g_decal_shader->vao);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
+}
+
+static void DecalBlendNone()
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalBlend(MetalBlendMode::None);
+        return;
+    }
+#endif
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_ONE, GL_ZERO);
+}
+
+static void DecalBlendCutout()
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalBlend(MetalBlendMode::Cutout);
+        return;
+    }
+#endif
+    glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_ONE);
+}
+
+static void DecalBlendAlpha()
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalBlend(MetalBlendMode::Alpha);
+        return;
+    }
+#endif
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+static void DecalEnd()
+{
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalEnd();
+        return;
+    }
+#endif
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
 struct rect {
     int x, y, w, h;
 };
@@ -462,6 +644,31 @@ enum tex_item_names {
 
 void InitCustomRendering(void)
 {
+#ifdef __APPLE__
+    if (UseMetal()) {
+        bool ok = MetalHelpersInit();
+        assert(ok && "Metal UI helpers initialization failed");
+
+        g_controller_duke_tex = MetalLoadTextureFromMemory(
+            controller_mask_data, controller_mask_size, true);
+        g_controller_s_tex = MetalLoadTextureFromMemory(
+            controller_mask_s_data, controller_mask_s_size, true);
+        controller_fbo = new Fbo(512, 512);
+
+        g_xmu_tex = MetalLoadTextureFromMemory(xmu_mask_data, xmu_mask_size,
+                                               true);
+        xmu_fbo = new Fbo(512, 256);
+
+        g_logo_tex =
+            MetalLoadTextureFromMemory(logo_sdf_data, logo_sdf_size, true);
+        logo_fbo = new Fbo(512, 512);
+
+        g_icon_tex = MetalLoadTextureFromMemory(xemu_64x64_data,
+                                                xemu_64x64_size, false);
+        return;
+    }
+#endif
+
     glActiveTexture(GL_TEXTURE0);
     g_controller_duke_tex =
         LoadTextureFromMemory(controller_mask_data, controller_mask_size);
@@ -520,10 +727,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
     uint32_t now = SDL_GetTicks();
     float t;
 
-    glUseProgram(g_decal_shader->prog);
-    glBindVertexArray(g_decal_shader->vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_controller_duke_tex);
+    DecalBegin(g_decal_shader, g_controller_duke_tex);
 
     // Add a 5 pixel space around the controller so we can wiggle the controller
     // around to visualize rumble in action
@@ -536,8 +740,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
     float rumble_l = 0;
     float rumble_r = 0;
 
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(GL_ONE, GL_ZERO);
+    DecalBlendNone();
 
     uint32_t jewel_color = secondary_color;
 
@@ -568,7 +771,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
                 tex_items[obj_controller].w, tex_items[obj_controller].h,
                 primary_color, secondary_color, 0);
 
-    glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_ONE); // Blend with controller cutouts
+    DecalBlendCutout(); // Blend with controller cutouts
     RenderDecal(g_decal_shader, frame_x + jewel.x, frame_y + jewel.y, jewel.w,
                 jewel.h, 0, 0, 1, 1, 0, 0, jewel_color);
 
@@ -582,7 +785,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
         }
     }
 
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Blend with controller
+    DecalBlendAlpha(); // Blend with controller
 
     // Render left thumbstick
     float w = tex_items[obj_lstick].w;
@@ -616,7 +819,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
                                                               secondary_color,
                 0);
 
-    glBlendFunc(GL_ONE, GL_ZERO); // Don't blend, just overwrite values in buffer
+    DecalBlendNone(); // Don't blend, just overwrite values in buffer
 
     // Render trigger bars
     float ltrig = state->axis[CONTROLLER_AXIS_LTRIG] / 32767.0;
@@ -648,8 +851,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
     state->rumble_l = (int)(rumble_l * (float)0xffff);
     state->rumble_r = (int)(rumble_r * (float)0xffff);
 
-    glBindVertexArray(0);
-    glUseProgram(0);
+    DecalEnd();
 }
 
 static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_color,
@@ -679,10 +881,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
     uint32_t now = SDL_GetTicks();
     float t;
 
-    glUseProgram(g_decal_shader->prog);
-    glBindVertexArray(g_decal_shader->vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_controller_s_tex);
+    DecalBegin(g_decal_shader, g_controller_s_tex);
 
     // Add a 5 pixel space around the controller so we can wiggle the controller
     // around to visualize rumble in action
@@ -695,8 +894,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
     float rumble_l = 0;
     float rumble_r = 0;
 
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(GL_ONE, GL_ZERO);
+    DecalBlendNone();
 
     uint32_t jewel_color = secondary_color;
 
@@ -730,8 +928,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
                 tex_items[obj_controller].w, tex_items[obj_controller].h,
                 primary_color, secondary_color, 0);
 
-    glBlendFunc(GL_ONE_MINUS_DST_ALPHA,
-                GL_ONE); // Blend with controller cutouts
+    DecalBlendCutout(); // Blend with controller cutouts
     RenderDecal(g_decal_shader, frame_x + jewel.x, frame_y + jewel.y, jewel.w,
                 jewel.h, 0, 0, 1, 1, 0, 0, jewel_color);
 
@@ -745,7 +942,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
         }
     }
 
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Blend with controller
+    DecalBlendAlpha(); // Blend with controller
 
     // Render left thumbstick
     float w = tex_items[obj_lstick].w;
@@ -781,8 +978,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
                                                          secondary_color,
         0);
 
-    glBlendFunc(GL_ONE,
-                GL_ZERO); // Don't blend, just overwrite values in buffer
+    DecalBlendNone(); // Don't blend, just overwrite values in buffer
 
     // Render trigger bars
     float ltrig = state->axis[CONTROLLER_AXIS_LTRIG] / 32767.0;
@@ -815,8 +1011,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
     state->rumble_l = (int)(rumble_l * (float)0xffff);
     state->rumble_r = (int)(rumble_r * (float)0xffff);
 
-    glBindVertexArray(0);
-    glUseProgram(0);
+    DecalEnd();
 }
 
 void RenderController(float frame_x, float frame_y, uint32_t primary_color,
@@ -833,11 +1028,8 @@ void RenderController(float frame_x, float frame_y, uint32_t primary_color,
 void RenderControllerPort(float frame_x, float frame_y, int i,
                           uint32_t port_color)
 {
-    glUseProgram(g_decal_shader->prog);
-    glBindVertexArray(g_decal_shader->vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_controller_duke_tex);
-    glBlendFunc(GL_ONE, GL_ZERO);
+    DecalBegin(g_decal_shader, g_controller_duke_tex);
+    DecalBlendNone();
 
     // Render port socket
     RenderDecal(g_decal_shader, frame_x, frame_y, tex_items[obj_port_socket].w,
@@ -855,19 +1047,14 @@ void RenderControllerPort(float frame_x, float frame_y, int i,
         tex_items[obj_port_lbl_1 + i].y, tex_items[obj_port_lbl_1 + i].w,
         tex_items[obj_port_lbl_1 + i].h, port_color, port_color, 0);
 
-    glBindVertexArray(0);
-    glUseProgram(0);
+    DecalEnd();
 }
 
 void RenderXmu(float frame_x, float frame_y, uint32_t primary_color,
                uint32_t secondary_color)
 {
-    glUseProgram(g_decal_shader->prog);
-    glBindVertexArray(g_decal_shader->vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_xmu_tex);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(GL_ONE, GL_ZERO);
+    DecalBegin(g_decal_shader, g_xmu_tex);
+    DecalBlendNone();
 
     // Render xmu
     RenderDecal(g_decal_shader, frame_x, frame_y, 256, 256,
@@ -875,20 +1062,31 @@ void RenderXmu(float frame_x, float frame_y, uint32_t primary_color,
                 tex_items[obj_xmu].w, tex_items[obj_xmu].h, primary_color,
                 secondary_color, 0);
 
-    glBindVertexArray(0);
-    glUseProgram(0);
+    DecalEnd();
 }
 
 void RenderLogo(uint32_t time)
 {
     uint32_t color = 0x62ca13ff;
 
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalDecalBegin(MetalDecalKind::Logo, g_logo_tex);
+        MetalDecalSetTime(time);
+        MetalDecalBlend(MetalBlendMode::None);
+        MetalRenderDecal(0, 0, 512, 512, 0, 0, 128, 128, color, color,
+                         0x00000000);
+        MetalDecalEnd();
+        return;
+    }
+#endif
+
     g_logo_shader->time = time;
     glUseProgram(g_logo_shader->prog);
     glBindVertexArray(g_decal_shader->vao);
     glBlendFunc(GL_ONE, GL_ZERO);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_logo_tex);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)g_logo_tex);
     RenderDecal(g_logo_shader, 0, 0, 512, 512, 0, 0, 128, 128, color,
         color, 0x00000000);
     glBindVertexArray(0);
@@ -917,8 +1115,17 @@ extern "C" void xemu_set_framebuffer_texture_is_rect(bool is_rect)
     g_framebuffer_is_rect = is_rect;
 }
 
-void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[2])
+void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float scale[2])
 {
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalRenderFramebuffer(tex, width, height, flip, scale,
+                               g_config.display.filtering ==
+                                   CONFIG_DISPLAY_FILTERING_NEAREST);
+        return;
+    }
+#endif
+
     GLenum tex_target = GL_TEXTURE_2D;
     DecalShader *s = g_framebuffer_shader;
 
@@ -930,7 +1137,7 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[
 #endif
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(tex_target, tex);
+    glBindTexture(tex_target, (GLuint)tex);
 
     GLenum filter_mag = GL_LINEAR, filter_min = GL_LINEAR;
     switch (g_config.display.filtering) {
@@ -982,10 +1189,14 @@ static float GetDisplayAspectRatio(int width, int height)
     }
 }
 
-void RenderFramebuffer(GLint tex, int width, int height, bool flip)
+static void GetFramebufferTexDims(uintptr_t tex, int *w, int *h)
 {
-    int tw, th;
-    float scale[2];
+#ifdef __APPLE__
+    if (UseMetal()) {
+        MetalTextureDims(tex, w, h);
+        return;
+    }
+#endif
 
     GLenum query_target = GL_TEXTURE_2D;
 #ifdef __APPLE__
@@ -994,10 +1205,18 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip)
     }
 #endif
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(query_target, tex);
-    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_WIDTH, &tw);
-    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_HEIGHT, &th);
+    glBindTexture(query_target, (GLuint)tex);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_WIDTH, w);
+    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_HEIGHT, h);
     glBindTexture(query_target, 0);
+}
+
+void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip)
+{
+    int tw, th;
+    float scale[2];
+
+    GetFramebufferTexDims(tex, &tw, &th);
 
     // Calculate scaling factors
     if (g_config.display.ui.fit == CONFIG_DISPLAY_UI_FIT_STRETCH) {
@@ -1024,27 +1243,18 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip)
     RenderFramebuffer(tex, width, height, flip, scale);
 }
 
-bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
+bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
 {
     int width, height;
 
-    /*
-     * On the macOS Vulkan/IOSurface path the framebuffer is a
-     * GL_TEXTURE_RECTANGLE; querying it through GL_TEXTURE_2D returns
-     * zero dimensions and breaks screenshots/thumbnails. Mirror the
-     * query_target selection used by RenderFramebuffer().
-     */
-    GLenum query_target = GL_TEXTURE_2D;
-#ifdef __APPLE__
-    if (g_framebuffer_is_rect) {
-        query_target = GL_TEXTURE_RECTANGLE;
+    if (!tex) {
+        return false;
     }
-#endif
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(query_target, tex);
-    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_WIDTH, &width);
-    glGetTexLevelParameteriv(query_target, 0, GL_TEXTURE_HEIGHT, &height);
-    glBindTexture(query_target, 0);
+
+    GetFramebufferTexDims(tex, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
 
     width = height * GetDisplayAspectRatio(width, height);
 
@@ -1054,6 +1264,17 @@ bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, in
 
     std::vector<uint8_t> pixels;
     pixels.resize(width * height * 3);
+
+#ifdef __APPLE__
+    if (UseMetal()) {
+        if (!MetalRenderFramebufferToRgb(tex, flip, width, height,
+                                         pixels.data())) {
+            return false;
+        }
+        return fpng::fpng_encode_image_to_memory(pixels.data(), width, height,
+                                                 3, png);
+    }
+#endif
 
     Fbo fbo(width, height);
     fbo.Target();
@@ -1071,7 +1292,7 @@ bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, in
     return fpng::fpng_encode_image_to_memory(pixels.data(), width, height, 3, png);
 }
 
-void SaveScreenshot(GLuint tex, bool flip)
+void SaveScreenshot(uintptr_t tex, bool flip)
 {
     Error *err = NULL;
     char fname[128];

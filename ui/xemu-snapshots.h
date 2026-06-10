@@ -40,7 +40,8 @@ extern const char **g_snapshot_shortcut_index_key_map[];
 typedef struct XemuSnapshotData {
     char *disc_path;
     char *xbe_title_name;
-    GLuint gl_thumbnail;
+    /* Backend UI texture handle (GLuint or id<MTLTexture>), 0 = none */
+    uintptr_t thumbnail;
 } XemuSnapshotData;
 
 // Implemented in xemu-snapshots.c
@@ -56,8 +57,9 @@ bool xemu_snapshots_offset_extra_data(QEMUFile *f);
 void xemu_snapshots_mark_dirty(void);
 
 // Implemented in xemu-thumbnail.cc
-void xemu_snapshots_set_framebuffer_texture(GLuint tex, bool flip);
-bool xemu_snapshots_load_png_to_texture(GLuint tex, void *buf, size_t size);
+void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip);
+uintptr_t xemu_snapshots_load_png_thumbnail(const void *buf, size_t size);
+void xemu_snapshots_free_thumbnail(uintptr_t tex);
 void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size);
 
 #ifdef __cplusplus

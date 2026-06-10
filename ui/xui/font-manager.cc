@@ -18,6 +18,12 @@
 //
 #include "font-manager.hh"
 #include "viewport-manager.hh"
+#ifdef __APPLE__
+#include "metal-helpers.hh"
+extern "C" {
+#include "ui/xemu-present.h"
+}
+#endif
 
 #include "data/Roboto-Medium.ttf.h"
 #include "data/RobotoCondensed-Regular.ttf.h"
@@ -99,6 +105,13 @@ void FontManager::Rebuild()
         m_fixed_width_font = io.Fonts->AddFontDefault(&config);
     }
 
+#ifdef __APPLE__
+    if (xemu_present_is_metal()) {
+        MetalImGuiDestroyFontsTexture();
+        MetalImGuiCreateFontsTexture();
+        return;
+    }
+#endif
     ImGui_ImplOpenGL3_DestroyFontsTexture();
     ImGui_ImplOpenGL3_CreateFontsTexture();
 }

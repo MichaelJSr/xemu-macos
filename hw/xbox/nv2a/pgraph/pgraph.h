@@ -38,6 +38,7 @@ typedef struct NV2AState NV2AState;
 typedef struct PGRAPHNullState PGRAPHNullState;
 typedef struct PGRAPHGLState PGRAPHGLState;
 typedef struct PGRAPHVkState PGRAPHVkState;
+struct NV2APresentFrame;
 
 typedef struct VertexAttribute {
     bool dma_select;
@@ -131,6 +132,10 @@ typedef struct PGRAPHRenderer {
         void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
         unsigned int (*get_surface_scale_factor)(NV2AState *d);
         int (*get_framebuffer_surface)(NV2AState *d);
+        /* Metal-native presentation: IOSurface handoff instead of a
+         * GL texture name. Optional; NULL when unsupported. */
+        bool (*get_present_frame)(NV2AState *d,
+                                  struct NV2APresentFrame *frame);
         GPUProperties *(*get_gpu_properties)(void);
     } ops;
 } PGRAPHRenderer;

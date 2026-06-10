@@ -25,6 +25,7 @@
 
 #include <SDL3/SDL.h>
 #include <epoxy/gl.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,7 +47,7 @@ void xemu_hud_update(void);
 void xemu_hud_render(void);
 void xemu_hud_process_sdl_events(SDL_Event *event);
 void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse);
-void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip);
+void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip);
 void xemu_set_framebuffer_texture_is_rect(bool is_rect);
 
 #ifdef __cplusplus

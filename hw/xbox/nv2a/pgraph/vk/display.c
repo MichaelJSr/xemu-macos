@@ -32,6 +32,52 @@
 #include <OpenGL/CGLIOSurface.h>
 #include <OpenGL/CGLCurrent.h>
 #include "metalfx_upscale.h"
+#include "ui/xemu-present.h"
+#include "ui/xemu-metal.h"
+
+/*
+ * Metal-native presentation: publish the frame the UI thread should
+ * present next (consumed via pgraph_vk_get_present_frame under the
+ * sync handshake). Exactly one of {IOSurface, MTLTexture} is current
+ * at a time; setting one clears the other.
+ */
+static void display_set_present_surface(PGRAPHVkDisplayState *disp,
+                                        IOSurfaceRef surf)
+{
+    if (disp->present_mtl_texture) {
+        CFRelease(disp->present_mtl_texture);
+        disp->present_mtl_texture = NULL;
+    }
+    if (disp->present_iosurface != (void *)surf) {
+        if (disp->present_iosurface) {
+            CFRelease((IOSurfaceRef)disp->present_iosurface);
+        }
+        disp->present_iosurface = (void *)CFRetain(surf);
+    }
+    disp->present_width = (int)IOSurfaceGetWidth(surf);
+    disp->present_height = (int)IOSurfaceGetHeight(surf);
+}
+
+/* Takes ownership of the retained texture handle. */
+static void display_set_present_texture(PGRAPHVkDisplayState *disp,
+                                        void *texture)
+{
+    if (disp->present_iosurface) {
+        CFRelease((IOSurfaceRef)disp->present_iosurface);
+        disp->present_iosurface = NULL;
+    }
+    if (disp->present_mtl_texture && disp->present_mtl_texture != texture) {
+        CFRelease(disp->present_mtl_texture);
+    }
+    if (disp->present_mtl_texture == texture) {
+        /* Same object handed back; drop the extra retain. */
+        CFRelease(texture);
+    } else {
+        disp->present_mtl_texture = texture;
+    }
+    metalfx_texture_dims(disp->present_mtl_texture, &disp->present_width,
+                         &disp->present_height);
+}
 #endif
 
 static float pvideo_calculate_scale(unsigned int din_dout,
@@ -612,6 +658,17 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease((IOSurfaceRef)d->iosurface);
         d->iosurface = NULL;
     }
+    if (d->present_iosurface) {
+        CFRelease((IOSurfaceRef)d->present_iosurface);
+        d->present_iosurface = NULL;
+    }
+    if (d->present_mtl_texture) {
+        CFRelease(d->present_mtl_texture);
+        d->present_mtl_texture = NULL;
+    }
+    d->present_width = 0;
+    d->present_height = 0;
+    d->present_event_value = 0;
     d->last_cgl_surface_id = 0;
     d->last_cgl_width = 0;
     d->last_cgl_height = 0;
@@ -853,7 +910,10 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     if (r->metal_objects_extension_enabled && imported_iosurface) {
         d->iosurface = (void *)CFRetain(imported_iosurface);
 
-        CGLContextObj cgl_ctx = CGLGetCurrentContext();
+        /* Under the Metal presentation backend the UI consumes the
+         * IOSurface directly; no CGL rect-texture is created. */
+        CGLContextObj cgl_ctx =
+            xemu_present_is_metal() ? NULL : CGLGetCurrentContext();
         if (cgl_ctx) {
             glGenTextures(1, &d->gl_texture_id);
             glBindTexture(GL_TEXTURE_RECTANGLE, d->gl_texture_id);
@@ -886,7 +946,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                 glDeleteTextures(1, &d->gl_texture_id);
                 d->gl_texture_id = 0;
             }
-        } else {
+        } else if (!xemu_present_is_metal()) {
             DISPLAY_DPRINTF("[IOSurface] No CGL context on PFIFO thread!\n");
         }
         CFRelease(imported_iosurface);
@@ -1303,7 +1363,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
          */
         if (disp->interp_remaining > 0 &&
             disp->interp_prev_surface && disp->interp_cur_surface &&
-            metalfx_interpolation_is_supported() && disp->gl_texture_id) {
+            metalfx_interpolation_is_supported() &&
+            (disp->gl_texture_id || xemu_present_is_metal())) {
             /*
              * MTLFXFrameInterpolator.deltaTime expects the wall-clock
              * interval in seconds between the two input frames (used to
@@ -1317,7 +1378,21 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->interp_prev_surface_ns) / 1.0e9f;
             if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
             if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
-            if (metalfx_interpolation_generate(
+
+            if (xemu_present_is_metal()) {
+                /* interp_prev/cur hold retained id<MTLTexture> */
+                if (metalfx_interpolation_generate_tex(
+                        disp->interp_prev_surface,
+                        disp->interp_cur_surface, delta_sec)) {
+                    void *itex = metalfx_interpolation_get_output_texture();
+                    if (itex) {
+                        display_set_present_texture(disp, itex);
+                        disp->present_event_value =
+                            metalfx_present_event_last_value();
+                    }
+                }
+                disp->interp_remaining--;
+            } else if (metalfx_interpolation_generate(
                     (IOSurfaceRef)disp->interp_prev_surface,
                     (IOSurfaceRef)disp->interp_cur_surface,
                     NULL, NULL, delta_sec)) {
@@ -1401,58 +1476,94 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
         /*
          * macOS 26 IOSurface bug: BGRA8 surfaces wider than ~1920px get
-         * wrong bytesPerRow, breaking Metal texture wrapping. Only run
-         * MetalFX when the display IOSurface is at a safe width.
+         * wrong bytesPerRow, breaking Metal texture wrapping. Under the
+         * GL presentation backend (IOSurface outputs) MetalFX only runs
+         * when the display IOSurface is at a safe width.
          *
          * At 1x (640x480): temporal 640x480 -> 1920x1440, interp at 1920x1440
          * At 2x (1280x960): temporal 1280x960 -> 1920x1440, interp at 1920x1440
          * At 4x (2560x1920): skipped (display too wide), GL scales directly
+         *
+         * Under the Metal presentation backend, MetalFX outputs are
+         * private MTLTextures (no IOSurface) so the 1920px cap is
+         * lifted: the output targets the CAMetalLayer's pixel size
+         * (aspect-fit), e.g. 1280x960 -> 2880x2160 on a 4K panel.
+         * Only the *input* IOSurface (MoltenVK compositor output)
+         * keeps the width constraint; texture_from_iosurface() bails
+         * gracefully on affected surfaces.
          */
         #define METALFX_SAFE_MAX_OUTPUT 1920
 
-        if (mfx_mode > 0 && (int)disp->width <= METALFX_SAFE_MAX_OUTPUT) {
-            int out_w = METALFX_SAFE_MAX_OUTPUT;
-            int out_h = (int)disp->height * out_w / (int)disp->width;
+        bool metal_native = xemu_present_is_metal();
+        void *present_tex = NULL; /* retained id<MTLTexture> */
+
+        int out_w = 0, out_h = 0;
+        if (mfx_mode > 0 && metal_native) {
+            int layer_w = 0, layer_h = 0;
+            xemu_metal_layer_pixel_size(&layer_w, &layer_h);
+            if (layer_w > (int)disp->width && layer_h > (int)disp->height) {
+                double sx = (double)layer_w / (double)disp->width;
+                double sy = (double)layer_h / (double)disp->height;
+                double s = (sx < sy) ? sx : sy;
+                out_w = ((int)((double)disp->width * s)) & ~1;
+                out_h = ((int)((double)disp->height * s)) & ~1;
+            }
+        }
+        if (mfx_mode > 0 && !out_w &&
+            (int)disp->width <= METALFX_SAFE_MAX_OUTPUT) {
+            out_w = METALFX_SAFE_MAX_OUTPUT;
+            out_h = (int)disp->height * out_w / (int)disp->width;
             if (out_h > METALFX_SAFE_MAX_OUTPUT) {
                 out_h = METALFX_SAFE_MAX_OUTPUT;
             }
+        }
 
-            if (out_w > (int)disp->width || out_h > (int)disp->height) {
-                IOSurfaceRef upscaled = NULL;
+        if (out_w > (int)disp->width || out_h > (int)disp->height) {
+            IOSurfaceRef upscaled = NULL;
 
-                if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
-                    if (metalfx_temporal_init(disp->width, disp->height,
-                                             out_w, out_h)) {
-                        /*
-                         * TODO: Provide real depth via IOSurface-backed zeta.
-                         * The correct approach is to create the NV2A zeta
-                         * surface as an IOSurface-backed VkImage from the
-                         * start, then pass it here instead of NULL. This
-                         * avoids the CPU round-trip that killed the readback
-                         * approach (2-5ms/frame) and the MoltenVK mutex
-                         * deadlock from vkExportMetalObjectsEXT.
-                         * Until then, the temporal scaler uses synthetic
-                         * luminance-based depth.
-                         */
-                        IOSurfaceRef depth_surface = NULL;
-                        if (metalfx_temporal_upscale(current_surface,
-                                                     depth_surface)) {
+            if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
+                if (metalfx_temporal_init(disp->width, disp->height,
+                                         out_w, out_h)) {
+                    /*
+                     * TODO: Provide real depth via IOSurface-backed zeta.
+                     * The correct approach is to create the NV2A zeta
+                     * surface as an IOSurface-backed VkImage from the
+                     * start, then pass it here instead of NULL. This
+                     * avoids the CPU round-trip that killed the readback
+                     * approach (2-5ms/frame) and the MoltenVK mutex
+                     * deadlock from vkExportMetalObjectsEXT.
+                     * Until then, the temporal scaler uses synthetic
+                     * luminance-based depth.
+                     */
+                    IOSurfaceRef depth_surface = NULL;
+                    if (metalfx_temporal_upscale(current_surface,
+                                                 depth_surface)) {
+                        if (metal_native) {
+                            present_tex =
+                                metalfx_temporal_get_output_texture();
+                        }
+                        if (!present_tex) {
                             upscaled = metalfx_temporal_get_output_surface();
                         }
                     }
                 }
+            }
 
-                if (!upscaled) {
-                    if (metalfx_init(disp->width, disp->height, out_w, out_h)) {
-                        if (metalfx_upscale(current_surface)) {
+            if (!upscaled && !present_tex) {
+                if (metalfx_init(disp->width, disp->height, out_w, out_h)) {
+                    if (metalfx_upscale(current_surface)) {
+                        if (metal_native) {
+                            present_tex = metalfx_get_output_texture();
+                        }
+                        if (!present_tex) {
                             upscaled = metalfx_get_output_surface();
                         }
                     }
                 }
+            }
 
-                if (upscaled) {
-                    present_surface = upscaled;
-                }
+            if (upscaled) {
+                present_surface = upscaled;
             }
         }
 
@@ -1470,37 +1581,75 @@ void pgraph_vk_render_display(PGRAPHState *pg)
          * Set up deferred frame interpolation for successive sync calls.
          * 2x: 1 interpolated frame at dt=0.5 (30fps -> 60fps)
          * 4x: 3 interpolated frames at dt=0.25, 0.5, 0.75 (30fps -> 120fps)
+         *
+         * Metal-native mode: interp_prev/cur_surface hold retained
+         * id<MTLTexture> handles (MetalFX ring entries, or a wrap of
+         * the base compositor IOSurface). The ring guarantees prev and
+         * cur reference *distinct* frames — under the single shared
+         * IOSurface output they aliased the same content.
          */
         if (interp_mode >= 2 && metalfx_interpolation_is_supported()) {
-            int iw = (int)IOSurfaceGetWidth(present_surface);
-            int ih = (int)IOSurfaceGetHeight(present_surface);
+            int iw, ih;
+            if (present_tex) {
+                metalfx_texture_dims(present_tex, &iw, &ih);
+            } else {
+                iw = (int)IOSurfaceGetWidth(present_surface);
+                ih = (int)IOSurfaceGetHeight(present_surface);
+            }
 
             if (metalfx_interpolation_init(iw, ih)) {
-                /* Release old prev, shift current to prev */
-                if (disp->interp_prev_surface) {
-                    CFRelease((IOSurfaceRef)disp->interp_prev_surface);
+                void *cur = NULL;
+                if (metal_native) {
+                    cur = present_tex ?
+                              (void *)CFRetain(present_tex) :
+                              metalfx_wrap_iosurface_texture(present_surface);
+                } else {
+                    cur = (void *)CFRetain(present_surface);
                 }
-                disp->interp_prev_surface = disp->interp_cur_surface;
-                disp->interp_prev_surface_ns = disp->interp_cur_surface_ns;
-                disp->interp_cur_surface = (void *)CFRetain(present_surface);
-                disp->interp_cur_surface_ns =
-                    qemu_clock_get_ns(QEMU_CLOCK_HOST);
 
-                if (disp->interp_prev_surface) {
-                    disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
-                    disp->interp_width = iw;
-                    disp->interp_height = ih;
+                if (cur) {
+                    /* Release old prev, shift current to prev */
+                    if (disp->interp_prev_surface) {
+                        CFRelease(disp->interp_prev_surface);
+                    }
+                    disp->interp_prev_surface = disp->interp_cur_surface;
+                    disp->interp_prev_surface_ns =
+                        disp->interp_cur_surface_ns;
+                    disp->interp_cur_surface = cur;
+                    disp->interp_cur_surface_ns =
+                        qemu_clock_get_ns(QEMU_CLOCK_HOST);
+
+                    if (disp->interp_prev_surface) {
+                        disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
+                        disp->interp_width = iw;
+                        disp->interp_height = ih;
+                    }
                 }
             }
         }
 
         /*
-         * Bind to GL texture (skip if same IOSurface already bound).
-         * Key on IOSurfaceGetID, not the IOSurfaceRef pointer: the
-         * pointer can be reused after release, producing a false-cache
-         * hit and stale display.
+         * Publish the frame. Metal backend: hand the MetalFX output
+         * texture (or the base IOSurface) to the UI thread, along
+         * with the shared-event value its producer signals. GL
+         * backend: bind to the CGL rect texture (skip if the same
+         * IOSurface is already bound). Key on IOSurfaceGetID, not the
+         * IOSurfaceRef pointer: the pointer can be reused after
+         * release, producing a false-cache hit and stale display.
          */
-        if (disp->gl_texture_id) {
+        if (metal_native) {
+            if (present_tex) {
+                /* ownership transferred to the display state */
+                display_set_present_texture(disp, present_tex);
+                present_tex = NULL;
+            } else {
+                display_set_present_surface(disp, present_surface);
+            }
+            disp->present_event_value = metalfx_present_event_last_value();
+            disp->last_cgl_surface_id = IOSurfaceGetID(present_surface);
+            disp->last_cgl_width = (int)IOSurfaceGetWidth(present_surface);
+            disp->last_cgl_height = (int)IOSurfaceGetHeight(present_surface);
+        } else if (disp->gl_texture_id) {
             int surf_w = (int)IOSurfaceGetWidth(present_surface);
             int surf_h = (int)IOSurfaceGetHeight(present_surface);
             uint32_t surf_id = IOSurfaceGetID(present_surface);

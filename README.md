@@ -70,6 +70,7 @@ frame_interpolation = '4x'      # off | 2x | 4x
 surface_scale = 2               # 1 = 640x480 ... 4 = 2560x1920 (MetalFX skipped)
 
 [display.window]
+presentation_backend = 'auto'   # auto | opengl | metal (auto = Metal w/ Vulkan renderer)
 fullscreen_on_startup = true
 fullscreen_exclusive = true
 startup_size = '1920x1080'
@@ -239,6 +240,35 @@ In-app Settings covers the main toggles.
 
 ### MetalFX + presentation
 
+- **Metal-native presentation backend** (macOS). New
+  `display.window.presentation_backend = auto | opengl | metal`;
+  `auto` selects Metal when the Vulkan renderer is configured. The
+  main window becomes `SDL_WINDOW_METAL` + `CAMetalLayer`
+  (`ui/xemu-metal.m`): the NV2A present frame is handed off as an
+  IOSurface/`MTLTexture` (`nv2a_get_present_frame`, new
+  `get_present_frame` renderer op) and composited with an MSL gamma
+  blit; ImGui renders through `imgui_impl_metal`; the entire
+  GL blit hop + `glFlush` + CGL rebind disappears from the present
+  path. The complete UI (mask decals, SDF logo, render-to-texture
+  panels, thumbnails, screenshots via GPU readback) has a Metal twin
+  in `ui/xui/metal-helpers.mm`; the GL path remains fully
+  selectable (`presentation_backend = 'opengl'`) and is the only
+  path for the OpenGL NV2A renderer (switching renderer away from
+  Vulkan under Metal prompts for a restart).
+- **Async MetalFX via `MTLSharedEvent`** (Metal backend only). The
+  three `waitUntilCompleted` stalls (spatial/temporal/interp,
+  1-5 ms/frame on the PFIFO thread) are replaced by a monotonic
+  shared-event signal; the UI present pass encodes a GPU-side wait
+  on the frame's value before sampling. The GL backend keeps the
+  synchronous waits (GL cannot wait on `MTLSharedEvent`).
+- **1920px output cap lifted** (Metal backend only). MetalFX outputs
+  rotate through rings of 3 private `MTLTexture`s instead of one
+  shared IOSurface — no IOSurface means the macOS 26 BGRA
+  `bytesPerRow` bug doesn't apply, so upscaling targets the
+  CAMetalLayer's pixel size (aspect-fit), e.g. 1280×960 → 2880×2160
+  on a 4K panel instead of 1920×1440. The ring also makes frame
+  interpolation receive genuinely distinct prev/cur frames (the
+  single shared output surface aliased them).
 - **Spatial + temporal upscaling** (`MTLFXSpatialScaler` /
   `MTLFXTemporalScaler`). Temporal uses 8-frame Halton(2,3) jitter
   + optional compute-kernel synthetic depth. Shared `MTLDevice` +
@@ -248,11 +278,15 @@ In-app Settings covers the main toggles.
   idle syncs.
 - **Teardown safety.** Per-subsystem in-flight counter drains before
   releasing. IOSurface cache keyed on `IOSurfaceGetID`; output width
-  capped at 1920 (macOS 26 BGRA `bytesPerRow` bug).
+  capped at 1920 under the GL backend (macOS 26 BGRA `bytesPerRow`
+  bug).
 - **`MTLFXFrameInterpolator.deltaTime` in wall-clock seconds**
   (`QEMU_CLOCK_HOST` between input `CFRetain`s, clamped
   `[1/240, 1/10]` s) instead of a unitless ratio. Reduces ghosting
   on fast pans.
+- **Exclusive fullscreen picks the highest refresh** among the
+  native-resolution modes (120 Hz instead of a 60 Hz first entry);
+  Metal vsync maps to `CAMetalLayer.displaySyncEnabled`.
 
 ### MCPX APU
 
@@ -387,7 +421,7 @@ Lessons worth preserving so they aren't re-attempted.
 |---|---|
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
-| Async MetalFX (all variants) | GL↔Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone; needs `MTLSharedEvent` + `glWaitSync` or triple-buffering |
+| Async MetalFX under *GL presentation* | GL↔Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone. Landed later for the Metal presentation backend, where both sides speak `MTLSharedEvent` |
 | Separate compute queue | MoltenVK only exposes `queueCount=1` |
 | Depth export (CPU readback or `vkExportMetalObjectsEXT`) | CPU: 2 ms/frame + 18 MiB of copies for minimal quality. Metal export deadlocks MoltenVK's internal mutex |
 | Direct-VRAM compute unswizzle via `VK_EXT_external_memory_host` | `HOST_WRITE → SHADER_READ` barriers enforce visibility up to *submission*, not GPU execution; on HOST_COHERENT memory CPU can tear reads mid-frame → particle/HUD flicker |
@@ -418,11 +452,10 @@ Lessons worth preserving so they aren't re-attempted.
 
 Not attempted, or scope/risk too high for a one-shot change.
 
-- **Metal-native presentation.** Replace SDL3 + GL +
-  `CGLTexImageIOSurface2D` with `CAMetalLayer` direct drawable
-  acquisition. Unblocks async MetalFX + dynamic-rendering re-enable.
-- **Async MetalFX via `MTLSharedEvent` + `glWaitSync`.** After
-  Metal-native presentation lands.
+- **GL NV2A renderer under the Metal window.** Currently a
+  renderer switch away from Vulkan under the Metal backend needs a
+  restart; full unification would render the GL display buffer into
+  an IOSurface-backed FBO and feed the same present-frame handoff.
 - **Aux-submit pipelining for `render_display`.**
   `pgraph_vk_end_single_time_commands` waits its fence
   synchronously; MetalFX's command queue is distinct from
@@ -471,12 +504,18 @@ Stale `pkg-config` paths. `rm -rf macos-libs macos-pkgs build && ./build.sh`.
 `build.sh` now strips rpaths.
 
 **MetalFX not activating.** Requires `renderer = 'VULKAN'` and
-`metalfx_mode = 'spatial'` or `'temporal'`. `surface_scale = 4`
-produces 2560×1920 input and is skipped (1920 px BGRA-IOSurface safe
-cap). Check for `MetalFX: Spatial upscaler initialized …` in the log.
+`metalfx_mode = 'spatial'` or `'temporal'`. Under the GL presentation
+backend, `surface_scale = 4` produces 2560×1920 input and is skipped
+(1920 px BGRA-IOSurface safe cap). Check for
+`MetalFX: Spatial upscaler initialized …` in the log.
 
 **Frame interpolation not working.** Requires macOS 26.0+ and MetalFX
-upscaling active (width ≤ 1920).
+upscaling active.
+
+**Black/garbled window or Metal init failure on launch.** Set
+`[display.window] presentation_backend = 'opengl'` in `xemu.toml` to
+fall back to the GL presentation path, and report the issue. The
+`auto` default uses Metal only with the Vulkan renderer.
 
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
@@ -498,11 +537,14 @@ Xbox game (30fps, x87 FPU, MCPX APU)
        │  flight slots · bump-alloc staging · VRAM spatial dirty index
        │  compute unswizzle + YUV · IOSurface zero-copy
        │        │
-       │        └─ MetalFX Spatial / Temporal → 1280×960→1920×1440
-       │             │
+       │        └─ MetalFX Spatial / Temporal (async, MTLSharedEvent)
+       │             │   Metal backend: private-texture ring → panel-fit
+       │             │   (e.g. 1280×960→2880×2160) · GL: 1920 cap
        │             └─ MTLFXFrameInterpolator (30→60 or 30→120)
        │                  │
-       │                  └─ CGLTexImageIOSurface2D → SDL3 window
+       │                  ├─ Metal backend: CAMetalLayer drawable +
+       │                  │  MSL gamma blit + ImGui Metal (default)
+       │                  └─ GL backend: CGLTexImageIOSurface2D → SDL3 GL
        │
        └─ APU: VP (per-voice pitch / vol) + DSP JIT (ARM64)
            linear resampler (1ch mono / 2ch stereo) · vDSP_vsma mixbin

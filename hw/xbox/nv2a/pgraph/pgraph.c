@@ -387,6 +387,25 @@ int nv2a_get_framebuffer_surface(void)
     return s;
 }
 
+bool nv2a_get_present_frame(NV2APresentFrame *frame)
+{
+    NV2AState *d = g_nv2a;
+    PGRAPHState *pg = &d->pgraph;
+    bool ok = false;
+
+    memset(frame, 0, sizeof(*frame));
+
+    qemu_mutex_lock(&pg->renderer_lock);
+    assert(!pg->framebuffer_in_use);
+    pg->framebuffer_in_use = true;
+    if (pg->renderer->ops.get_present_frame) {
+        ok = pg->renderer->ops.get_present_frame(d, frame);
+    }
+    qemu_mutex_unlock(&pg->renderer_lock);
+
+    return ok;
+}
+
 void nv2a_release_framebuffer_surface(void)
 {
     NV2AState *d = g_nv2a;

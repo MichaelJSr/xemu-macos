@@ -43,6 +43,10 @@ subdir('xui')
 if host_os == 'darwin'
   xemu_cocoa = dependency('appleframeworks', modules: 'Cocoa')
   xemu_ss.add(xemu_cocoa)
+  # Metal-native presentation backend
+  xemu_metal_deps = dependency('appleframeworks',
+                               modules: ['Metal', 'QuartzCore', 'IOSurface'])
+  xemu_ss.add([xemu_metal_deps, files('xemu-metal.m')])
 endif
 
 if host_os == 'linux'
