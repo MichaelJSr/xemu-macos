@@ -516,7 +516,8 @@ void *pfifo_thread(void *arg)
 
         pfifo_loop_iters++;
         if (pfifo_heartbeat) {
-            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            /* Monotonic; QEMU_CLOCK_HOST is wall clock (NTP-jumpable) */
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             if (pfifo_last_heartbeat_ns == 0 ||
                 now - pfifo_last_heartbeat_ns >=
                     2LL * 1000 * 1000 * 1000) {

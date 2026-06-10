@@ -1014,10 +1014,20 @@ static void metal_render_frame(struct xemu_console *scon)
      * presentDrawable:afterMinimumDuration: paces against, and the
      * HUD overlays (notifications, menubar fade) animate fine at the
      * step cadence (>= 60 Hz). Menus keep full-rate rendering.
+     *
+     * Staleness cap: if the published frame hasn't changed for a
+     * while (title stopped flipping — loading screen, pause), drop
+     * back to normal full-rate rendering so the HUD stays live and
+     * menu shortcuts (processed inside xemu_hud_update) keep working.
      */
     static uint64_t last_frame_seq;
-    if (frame.frame_seq && frame.frame_seq == last_frame_seq &&
-        frame.display_duration_ns > 0) {
+    static uint64_t last_seq_change_ms;
+    uint64_t now_ms = SDL_GetTicks();
+    if (frame.frame_seq != last_frame_seq) {
+        last_frame_seq = frame.frame_seq;
+        last_seq_change_ms = now_ms;
+    } else if (frame.frame_seq && frame.display_duration_ns > 0 &&
+               now_ms - last_seq_change_ms < 250) {
         int kbd = 0, mouse = 0;
         xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
         if (!kbd && !mouse) {
@@ -1028,7 +1038,6 @@ static void metal_render_frame(struct xemu_console *scon)
             return;
         }
     }
-    last_frame_seq = frame.frame_seq;
 
     bool flip_required = false;
     uintptr_t tex = 0;
