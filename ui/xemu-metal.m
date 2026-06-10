@@ -43,6 +43,18 @@ static id<MTLRenderCommandEncoder> g_encoder;
 static MTLRenderPassDescriptor *g_pass_desc;
 static int g_drawable_w, g_drawable_h;
 
+/*
+ * Frame-spanning autorelease pool. The render loop runs on the main
+ * thread *outside* any Cocoa run-loop pool, so without this every
+ * autoreleased object created during a frame (command buffers,
+ * encoders, pass descriptors, ImGui backend internals) accumulates
+ * for the lifetime of the process — unbounded growth and allocator
+ * churn. Pushed in begin_frame, popped in end_frame.
+ */
+extern void *objc_autoreleasePoolPush(void);
+extern void objc_autoreleasePoolPop(void *pool);
+static void *g_frame_pool;
+
 /* IOSurface wrap cache (single entry; the present surface changes
  * rarely — same keying discipline as the CGL rebind cache). */
 static id<MTLTexture> g_iosurface_tex;
@@ -174,11 +186,15 @@ void xemu_metal_layer_pixel_size(int *w, int *h)
 
 bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
 {
+    g_frame_pool = objc_autoreleasePoolPush();
+
     @autoreleasepool {
         update_drawable_size();
 
         id<CAMetalDrawable> drawable = [g_layer nextDrawable];
         if (!drawable) {
+            objc_autoreleasePoolPop(g_frame_pool);
+            g_frame_pool = NULL;
             return false;
         }
         g_drawable = [drawable retain];
@@ -224,6 +240,11 @@ void xemu_metal_end_frame(void)
     g_pass_desc.colorAttachments[0].texture = nil;
     [g_drawable release];
     g_drawable = nil;
+
+    if (g_frame_pool) {
+        objc_autoreleasePoolPop(g_frame_pool);
+        g_frame_pool = NULL;
+    }
 }
 
 void *xemu_metal_get_device(void)

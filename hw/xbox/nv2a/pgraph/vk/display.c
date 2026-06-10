@@ -1455,6 +1455,20 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         return;
     }
 
+#if HAVE_IOSURFACE_SHARING
+    /*
+     * Async MetalFX (Metal presentation backend): the previous frame's
+     * upscale may still be reading disp->iosurface on the MetalFX
+     * queue. Drain it before the compositor pass below overwrites the
+     * surface, or the upscaler samples a torn mix of two frames.
+     * Near-zero cost in steady state (the work finished during the
+     * preceding >=8 ms sync interval).
+     */
+    if (xemu_present_is_metal()) {
+        metalfx_drain_inflight();
+    }
+#endif
+
     render_display(pg, surface);
 
 #if HAVE_IOSURFACE_SHARING

@@ -27,6 +27,16 @@ uint64_t metalfx_present_event_last_value(void);
 void *metalfx_wrap_iosurface_texture(IOSurfaceRef surface); /* retained */
 void metalfx_texture_dims(void *texture, int *w, int *h);
 
+/*
+ * Wait (CPU-side) for all in-flight MetalFX command buffers to
+ * complete. Called before the MoltenVK compositor re-renders into the
+ * display IOSurface in async mode: a still-running upscale reads that
+ * surface, and overwriting it mid-read produces torn frames. The
+ * previous frame's MetalFX work is almost always long finished by the
+ * next sync (>=8 ms later), so this rarely blocks.
+ */
+void metalfx_drain_inflight(void);
+
 /* Spatial upscaler */
 bool metalfx_is_supported(void);
 bool metalfx_init(int input_w, int input_h, int output_w, int output_h);

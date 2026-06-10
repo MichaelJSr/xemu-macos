@@ -613,6 +613,13 @@ void MetalDestroyTexture(uintptr_t tex)
     }
 }
 
+void MetalRetainTexture(uintptr_t tex)
+{
+    if (tex) {
+        [(id<MTLTexture>)tex retain];
+    }
+}
+
 void MetalTextureDims(uintptr_t tex, int *w, int *h)
 {
     id<MTLTexture> t = (id<MTLTexture>)tex;
@@ -887,6 +894,9 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
         return false;
     }
 
+    /* May run outside the per-frame pool (savestate thumbnail path). */
+    @autoreleasepool {
+
     MTLTextureDescriptor *td = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                      width:width
@@ -955,6 +965,8 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
     }
     free(rgba);
     return true;
+
+    } // @autoreleasepool
 }
 
 #endif // __APPLE__

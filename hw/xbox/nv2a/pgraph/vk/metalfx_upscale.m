@@ -302,6 +302,13 @@ static void *ring_last_retained(MetalFXOutputRing *ring)
     return (void *)CFRetain(ring->tex[ring->last]);
 }
 
+void metalfx_drain_inflight(void)
+{
+    metalfx_wait_inflight(&g_spatial_inflight);
+    metalfx_wait_inflight(&g_temporal_inflight);
+    metalfx_wait_inflight(&g_interp_inflight);
+}
+
 void *metalfx_wrap_iosurface_texture(IOSurfaceRef surface)
 {
     os_unfair_lock_lock(&g_metalfx_lock);

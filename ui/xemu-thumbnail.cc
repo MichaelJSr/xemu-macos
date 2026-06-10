@@ -25,6 +25,7 @@
 #include "xui/gl-helpers.hh"
 
 #ifdef __APPLE__
+#include "xui/metal-helpers.hh"
 extern "C" {
 #include "xemu-present.h"
 }
@@ -44,6 +45,19 @@ static inline bool ThumbnailUseMetal()
 
 void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
 {
+#ifdef __APPLE__
+    /*
+     * Under Metal the handle is an id<MTLTexture> owned by the
+     * renderer (replaced on later frames); keep our own reference so
+     * a savestate thumbnail capture can't read a freed object.
+     */
+    if (ThumbnailUseMetal() && tex != display_tex) {
+        MetalRetainTexture(tex);
+        if (display_tex) {
+            MetalDestroyTexture(display_tex);
+        }
+    }
+#endif
     display_tex = tex;
     display_flip = flip;
 }

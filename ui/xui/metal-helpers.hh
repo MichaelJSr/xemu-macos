@@ -51,6 +51,7 @@ uintptr_t MetalCreateTextureFromRgba(const unsigned char *rgba, int w, int h);
 uintptr_t MetalLoadTextureFromMemory(const unsigned char *buf,
                                      unsigned int size, bool flip);
 void MetalDestroyTexture(uintptr_t tex);
+void MetalRetainTexture(uintptr_t tex);
 void MetalTextureDims(uintptr_t tex, int *w, int *h);
 
 // Offscreen render target (Fbo equivalent). Content row order matches
