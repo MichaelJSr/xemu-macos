@@ -1906,7 +1906,7 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
      * motivated the throttle while guaranteeing the prune runs during
      * long non-flip bursts.
      */
-    int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+    int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     const int64_t surface_expire_interval_ns = 33 * 1000 * 1000;
     if (now_ns - r->last_expire_ns >= surface_expire_interval_ns) {
         expire_old_surfaces(d);

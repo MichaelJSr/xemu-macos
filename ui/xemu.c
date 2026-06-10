@@ -1007,6 +1007,29 @@ static void metal_render_frame(struct xemu_console *scon)
     NV2APresentFrame frame = { 0 };
     nv2a_get_present_frame(&frame);
 
+    /*
+     * Paced presentation: during gameplay (no menu capture) with
+     * frame interpolation active, don't re-present unchanged content.
+     * Presenting duplicates would reset the reference frame that
+     * presentDrawable:afterMinimumDuration: paces against, and the
+     * HUD overlays (notifications, menubar fade) animate fine at the
+     * step cadence (>= 60 Hz). Menus keep full-rate rendering.
+     */
+    static uint64_t last_frame_seq;
+    if (frame.frame_seq && frame.frame_seq == last_frame_seq &&
+        frame.display_duration_ns > 0) {
+        int kbd = 0, mouse = 0;
+        xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
+        if (!kbd && !mouse) {
+            nv2a_release_framebuffer_surface();
+            qatomic_set(&rendering, false);
+            /* Poll for the next step without spinning the handshake */
+            SDL_DelayNS(1000000);
+            return;
+        }
+    }
+    last_frame_seq = frame.frame_seq;
+
     bool flip_required = false;
     uintptr_t tex = 0;
     if (frame.mtl_texture) {
@@ -1038,6 +1061,9 @@ static void metal_render_frame(struct xemu_console *scon)
         qatomic_set(&rendering, false);
         return;
     }
+
+    /* GPU-enforced hold time for paced interpolation steps */
+    xemu_metal_set_present_duration(frame.display_duration_ns);
 
     if (!tex) {
         /* VGA fallback (pixman surface, software rendering). */

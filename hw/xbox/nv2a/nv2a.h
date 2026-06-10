@@ -40,6 +40,17 @@ typedef struct NV2APresentFrame {
      * reach `event_value` before sampling. event_value 0 = no wait. */
     void *event;
     uint64_t event_value;
+    /*
+     * Presentation pacing. frame_seq increments on every published
+     * frame (content change); display_duration_ns is the intended
+     * on-screen hold time for paced interpolation steps (0 = unpaced).
+     * The UI presents new sequence numbers with a GPU-enforced
+     * minimum duration and skips re-presenting duplicates during
+     * gameplay, so step timing is exact instead of quantized to the
+     * UI loop.
+     */
+    uint64_t frame_seq;
+    uint64_t display_duration_ns;
     uint32_t width;
     uint32_t height;
 } NV2APresentFrame;

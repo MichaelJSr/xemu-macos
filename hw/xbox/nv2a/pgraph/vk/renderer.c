@@ -129,14 +129,15 @@ static void pgraph_vk_sync(NV2AState *d)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     /*
-     * QEMU_CLOCK_HOST is monotonic on macOS (CLOCK_MONOTONIC_RAW);
-     * QEMU_CLOCK_REALTIME is calendar time and can jump backwards under
-     * NTP slew or suspend/resume, which would freeze the 8ms sync gate
-     * until wall-clock overtakes last_sync_time_ns again. This is the
-     * same failure class as the reverted frame_time-based surface-expiry
-     * throttle, and matches the clock used at surface.c:1834 for expiry.
+     * QEMU_CLOCK_REALTIME is CLOCK_MONOTONIC (qemu/timer.h get_clock());
+     * QEMU_CLOCK_HOST is gettimeofday and "will reflect system time
+     * changes the host may undergo (e.g. due to NTP)" — a backwards
+     * jump would freeze the 8 ms sync gate until wall-clock overtakes
+     * last_sync_time_ns again. An earlier pass had these two swapped;
+     * all present-path timing (this gate, interpolation timestamps,
+     * step pacing, surface expiry) uses the monotonic clock.
      */
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t elapsed = now - last_sync_time_ns;
     const int64_t min_sync_interval_ns = 8000000; /* ~8ms = 120Hz cap */
 
@@ -297,6 +298,8 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
     frame->event = r->display.present_event ? r->display.present_event
                                             : metalfx_present_event();
     frame->event_value = r->display.present_event_value;
+    frame->frame_seq = r->display.present_frame_seq;
+    frame->display_duration_ns = r->display.present_duration_ns;
     frame->width = r->display.present_width;
     frame->height = r->display.present_height;
     return frame->iosurface != NULL || frame->mtl_texture != NULL;

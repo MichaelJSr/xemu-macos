@@ -56,6 +56,10 @@ static void display_set_present_surface(PGRAPHVkDisplayState *disp,
     }
     disp->present_width = (int)IOSurfaceGetWidth(surf);
     disp->present_height = (int)IOSurfaceGetHeight(surf);
+
+    /* New published content; default unpaced (paced sites override) */
+    disp->present_frame_seq++;
+    disp->present_duration_ns = 0;
 }
 
 /* Takes ownership of the retained texture handle. */
@@ -77,6 +81,10 @@ static void display_set_present_texture(PGRAPHVkDisplayState *disp,
     }
     metalfx_texture_dims(disp->present_mtl_texture, &disp->present_width,
                          &disp->present_height);
+
+    /* New published content; default unpaced (paced sites override) */
+    disp->present_frame_seq++;
+    disp->present_duration_ns = 0;
 }
 #endif
 
@@ -1647,7 +1655,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
          * forward-backward-forward (frames visibly out of order).
          */
         if (xemu_present_is_metal()) {
-            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             uint64_t step = disp->interp_step_ns ? disp->interp_step_ns
                                                  : 8000000ull;
             if (now - disp->last_present_step_ns >= step) {
@@ -1667,6 +1675,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->interp_midpoint_event_value;
                     disp->interp_remaining--;
                     disp->last_present_step_ns = now;
+                    disp->present_duration_ns = disp->interp_step_ns;
                 } else if (disp->pending_real_texture) {
                     /* Final step of the cycle: show the real frame */
                     display_set_present_texture(disp,
@@ -1676,6 +1685,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->present_event_value =
                         disp->pending_real_event_value;
                     disp->last_present_step_ns = now;
+                    disp->present_duration_ns = disp->interp_step_ns;
                 } else {
                     disp->interp_remaining = 0;
                 }
@@ -1949,7 +1959,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 }
 
                 if (cur) {
-                    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
                     /*
                      * Hitch guard (Metal backend): if this frame's
@@ -2067,7 +2077,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                             (uint64_t)(delta_sec * 1.0e9f) /
                             (uint64_t)interp_mode;
                         disp->last_present_step_ns =
-                            qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                            qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                        disp->present_duration_ns = disp->interp_step_ns;
                     }
                 }
                 if (!interp_first_presented) {

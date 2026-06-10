@@ -555,9 +555,16 @@ static void DecalBegin(DecalShader *s, uintptr_t tex)
 {
 #ifdef __APPLE__
     if (UseMetal()) {
-        MetalDecalBegin(s == g_logo_shader ? MetalDecalKind::Logo
-                                           : MetalDecalKind::Mask,
-                        tex);
+        /*
+         * Always the Mask shader: every DecalBegin caller (controller,
+         * ports, XMU) is mask-type; RenderLogo dispatches to Metal
+         * directly. Comparing `s` against the GL shader objects is
+         * meaningless here — they are never created under the Metal
+         * backend, so both are NULL and a NULL==NULL match previously
+         * misrouted all mask decals through the Logo SDF shader
+         * (invisible controller UI in Input settings).
+         */
+        MetalDecalBegin(MetalDecalKind::Mask, tex);
         MetalDecalSetTime(s ? s->time : 0);
         return;
     }

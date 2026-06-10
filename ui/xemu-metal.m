@@ -224,13 +224,32 @@ bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
     return true;
 }
 
+static uint64_t g_present_duration_ns;
+
+void xemu_metal_set_present_duration(uint64_t duration_ns)
+{
+    g_present_duration_ns = duration_ns;
+}
+
 void xemu_metal_end_frame(void)
 {
     if (!g_cmdbuf) {
         return;
     }
     [g_encoder endEncoding];
-    [g_cmdbuf presentDrawable:g_drawable];
+    if (g_present_duration_ns > 0) {
+        /*
+         * Paced interpolation step: the previous frame must stay on
+         * screen at least its intended hold time. Exact GPU-side
+         * pacing — the renderer's CPU-side step gate is quantized to
+         * UI sync arrivals (up to ~8 ms of jitter at 120 Hz).
+         */
+        [g_cmdbuf presentDrawable:g_drawable
+             afterMinimumDuration:(double)g_present_duration_ns / 1e9];
+        g_present_duration_ns = 0;
+    } else {
+        [g_cmdbuf presentDrawable:g_drawable];
+    }
     [g_cmdbuf commit];
 
     [g_encoder release];

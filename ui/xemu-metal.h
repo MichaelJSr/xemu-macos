@@ -59,6 +59,14 @@ bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value);
 void xemu_metal_end_frame(void);
 
 /*
+ * GPU-enforced minimum on-screen duration for the frame presented by
+ * the next end_frame (presentDrawable:afterMinimumDuration:). One
+ * shot; 0 = present normally. Used to pace interpolation steps
+ * exactly instead of quantizing to the UI loop cadence.
+ */
+void xemu_metal_set_present_duration(uint64_t duration_ns);
+
+/*
  * Current CAMetalLayer pixel size (thread-safe snapshot, updated on
  * every presented frame). 0x0 before the first frame.
  */

@@ -417,6 +417,15 @@ typedef struct PGRAPHVkDisplayState {
     uint64_t present_event_value;
 
     /*
+     * Presentation pacing: present_frame_seq increments on every
+     * publish (bumped by the display_set_present_* helpers);
+     * present_duration_ns is the intended on-screen hold for paced
+     * interpolation steps (0 = unpaced). See NV2APresentFrame.
+     */
+    uint64_t present_frame_seq;
+    uint64_t present_duration_ns;
+
+    /*
      * Frame-interpolation presentation queue (Metal backend). An
      * interpolated frame lies temporally BETWEEN prev and cur, so it
      * must be shown BEFORE the new real frame; the real frame is held
