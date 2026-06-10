@@ -30,6 +30,10 @@
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
+#if HAVE_IOSURFACE_SHARING
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 const int num_invalid_surfaces_to_keep = 128;
 const int max_surface_frame_time_delta = 5;
 
@@ -929,6 +933,28 @@ static void set_surface_label(PGRAPHState *pg, SurfaceBinding const *surface)
     }
 }
 
+#if HAVE_IOSURFACE_SHARING
+/*
+ * Opt-in real depth for MetalFX temporal (XEMU_MFX_REAL_DEPTH=1):
+ * zeta images are created exportable and their backing MTLTexture is
+ * handed to the temporal scaler in place of synthetic luminance
+ * depth. Known limitation (documented): by present time the single
+ * guest zeta buffer typically holds the *next* in-progress frame's
+ * depth, so the data is one frame ahead — hence opt-in for A/B.
+ */
+static bool zeta_export_wanted(PGRAPHVkState *r, SurfaceBinding *surface)
+{
+    static int env_cached = -1;
+    if (env_cached < 0) {
+        const char *env = getenv("XEMU_MFX_REAL_DEPTH");
+        env_cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    return env_cached && !surface->color &&
+           r->metal_texture_export_enabled && r->export_metal_objects_fn &&
+           g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_TEMPORAL;
+}
+#endif
+
 static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -962,6 +988,19 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
+#if HAVE_IOSURFACE_SHARING
+    VkExportMetalObjectCreateInfoEXT export_metal_info;
+    bool export_zeta = zeta_export_wanted(r, surface);
+    if (export_zeta) {
+        export_metal_info = (VkExportMetalObjectCreateInfoEXT){
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+            .exportObjectType =
+                VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT,
+        };
+        image_create_info.pNext = &export_metal_info;
+    }
+#endif
+
     VmaAllocationCreateInfo alloc_create_info = {
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
     };
@@ -969,6 +1008,39 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
                             &alloc_create_info, &surface->image,
                             &surface->allocation, NULL));
+
+#if HAVE_IOSURFACE_SHARING
+    if (export_zeta) {
+        VkExportMetalTextureInfoEXT tex_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT,
+            .image = surface->image,
+            .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
+        };
+        VkExportMetalObjectsInfoEXT export_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+            .pNext = &tex_info,
+        };
+        ((PFN_vkExportMetalObjectsEXT)r->export_metal_objects_fn)(
+            r->device, &export_info);
+        if (tex_info.mtlTexture) {
+            surface->mtl_texture = (void *)CFRetain(tex_info.mtlTexture);
+        }
+        static bool logged_once;
+        if (!logged_once) {
+            logged_once = true;
+            fprintf(stderr,
+                    "nv2a: zeta MTLTexture export (real depth): %s "
+                    "(%ux%u, vk_format %u)\n",
+                    tex_info.mtlTexture ? "ok" : "FAILED",
+                    width, height, (unsigned)surface->host_fmt.vk_format);
+        }
+    }
+#endif
+
+#if HAVE_IOSURFACE_SHARING
+    /* The scratch image is internal; don't mark it exportable. */
+    image_create_info.pNext = NULL;
+#endif
 
 #if defined(__APPLE__)
     if (pg->surface_scale_factor > 1) {
@@ -1019,6 +1091,10 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
     dst->image_scratch = src->image_scratch;
     dst->image_scratch_current_layout = src->image_scratch_current_layout;
     dst->allocation_scratch = src->allocation_scratch;
+#if HAVE_IOSURFACE_SHARING
+    dst->mtl_texture = src->mtl_texture;
+    src->mtl_texture = NULL;
+#endif
 
     src->image = VK_NULL_HANDLE;
     src->image_view = VK_NULL_HANDLE;
@@ -1030,6 +1106,13 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
 
 static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
 {
+#if HAVE_IOSURFACE_SHARING
+    if (surface->mtl_texture) {
+        CFRelease(surface->mtl_texture);
+        surface->mtl_texture = NULL;
+    }
+#endif
+
     vkDestroyImageView(r->device, surface->image_view, NULL);
     surface->image_view = VK_NULL_HANDLE;
 

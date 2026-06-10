@@ -683,6 +683,10 @@ typedef struct MetalFXTemporalState {
     int failedOutputW, failedOutputH;
     id<MTLComputePipelineState> syntheticDepthPipeline;
     id<MTLTexture> syntheticDepthTexture;
+    /* Real zeta depth mode (XEMU_MFX_REAL_DEPTH): scaler created for
+     * the exported zeta texture's pixel format, standard-Z. */
+    bool realDepth;
+    MTLPixelFormat depthFormat;
 } MetalFXTemporalState;
 
 static MetalFXTemporalState g_temporal = { 0 };
@@ -727,20 +731,41 @@ static void metalfx_temporal_destroy_locked(void)
     g_temporal.failedInputH = 0;
     g_temporal.failedOutputW = 0;
     g_temporal.failedOutputH = 0;
+    g_temporal.realDepth = false;
+    g_temporal.depthFormat = MTLPixelFormatR32Float;
 }
 
 bool metalfx_temporal_init(int input_w, int input_h,
-                           int output_w, int output_h)
+                           int output_w, int output_h,
+                           void *depth_format_from)
 {
     int req_output_w = output_w;
     int req_output_h = output_h;
+
+    /*
+     * Real-depth mode (XEMU_MFX_REAL_DEPTH): the scaler's depth input
+     * is created with the exported zeta texture's pixel format and
+     * NV2A standard-Z semantics. Only honored when the zeta texture
+     * matches the scaler's input dimensions.
+     */
+    MTLPixelFormat want_depth_format = MTLPixelFormatR32Float;
+    bool want_real_depth = false;
+    if (depth_format_from) {
+        id<MTLTexture> dt = (id<MTLTexture>)depth_format_from;
+        if ((int)dt.width == input_w && (int)dt.height == input_h) {
+            want_depth_format = dt.pixelFormat;
+            want_real_depth = true;
+        }
+    }
 
     os_unfair_lock_lock(&g_metalfx_lock);
     if (g_temporal.initialized) {
         if (g_temporal.inputWidth == input_w &&
             g_temporal.inputHeight == input_h &&
             g_temporal.requestedOutputW == req_output_w &&
-            g_temporal.requestedOutputH == req_output_h) {
+            g_temporal.requestedOutputH == req_output_h &&
+            g_temporal.realDepth == want_real_depth &&
+            g_temporal.depthFormat == want_depth_format) {
             os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
@@ -787,7 +812,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
         MTLFXTemporalScalerDescriptor *desc =
             [[MTLFXTemporalScalerDescriptor alloc] init];
         desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm;
-        desc.depthTextureFormat = MTLPixelFormatR32Float;
+        desc.depthTextureFormat = want_depth_format;
         desc.motionTextureFormat = MTLPixelFormatRG16Float;
         desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
         desc.inputWidth = input_w;
@@ -798,6 +823,19 @@ bool metalfx_temporal_init(int input_w, int input_h,
 
         g_temporal.scaler =
             [desc newTemporalScalerWithDevice:g_temporal.device];
+        if (!g_temporal.scaler && want_real_depth) {
+            /* Depth-stencil/zeta format rejected: retry with the
+             * synthetic R32Float depth path. */
+            METALFX_DPRINTF(
+                    "MetalFX: Temporal scaler rejected depth format %u; "
+                    "falling back to synthetic depth\n",
+                    (unsigned)want_depth_format);
+            want_real_depth = false;
+            want_depth_format = MTLPixelFormatR32Float;
+            desc.depthTextureFormat = want_depth_format;
+            g_temporal.scaler =
+                [desc newTemporalScalerWithDevice:g_temporal.device];
+        }
         [desc release];
         if (!g_temporal.scaler) {
             METALFX_DPRINTF(
@@ -810,6 +848,13 @@ bool metalfx_temporal_init(int input_w, int input_h,
             g_temporal.failedOutputH = req_output_h;
             os_unfair_lock_unlock(&g_metalfx_lock);
             return false;
+        }
+        g_temporal.realDepth = want_real_depth;
+        g_temporal.depthFormat = want_depth_format;
+        if (want_real_depth) {
+            METALFX_DPRINTF(
+                    "MetalFX: Temporal scaler using real zeta depth "
+                    "(format %u)\n", (unsigned)want_depth_format);
         }
 
         if (xemu_present_is_metal() &&
@@ -1063,7 +1108,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
  * compositor MTLTexture (no IOSurface wrap or caching), with the
  * synthetic-depth kernel fed from the same texture.
  */
-bool metalfx_temporal_upscale_tex(void *inputTexture)
+bool metalfx_temporal_upscale_tex(void *inputTexture, void *depthTexture)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     if (!g_temporal.initialized || !inputTexture) {
@@ -1074,10 +1119,22 @@ bool metalfx_temporal_upscale_tex(void *inputTexture)
     @autoreleasepool {
         id<MTLTexture> color = (id<MTLTexture>)inputTexture;
 
+        /* Real zeta depth: only when the scaler was created for this
+         * format and the dims match (resize transients fall back). */
+        id<MTLTexture> real_depth = nil;
+        if (g_temporal.realDepth && depthTexture) {
+            id<MTLTexture> dt = (id<MTLTexture>)depthTexture;
+            if (dt.pixelFormat == g_temporal.depthFormat &&
+                (int)dt.width == g_temporal.inputWidth &&
+                (int)dt.height == g_temporal.inputHeight) {
+                real_depth = dt;
+            }
+        }
+
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
         metalfx_encode_input_wait(cb);
 
-        if (g_temporal.syntheticDepthPipeline &&
+        if (!real_depth && g_temporal.syntheticDepthPipeline &&
             g_temporal.syntheticDepthTexture) {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:g_temporal.syntheticDepthPipeline];
@@ -1102,8 +1159,14 @@ bool metalfx_temporal_upscale_tex(void *inputTexture)
         g_temporal.scaler.colorTexture = color;
         g_temporal.scaler.outputTexture = output;
         g_temporal.scaler.motionTexture = g_temporal.motionTexture;
-        if (g_temporal.syntheticDepthTexture) {
+        if (real_depth) {
+            g_temporal.scaler.depthTexture = real_depth;
+            /* NV2A renders standard Z (0 = near) */
+            g_temporal.scaler.depthReversed = NO;
+        } else if (g_temporal.syntheticDepthTexture) {
             g_temporal.scaler.depthTexture = g_temporal.syntheticDepthTexture;
+            /* Luminance proxy: treat brighter as nearer (reversed) */
+            g_temporal.scaler.depthReversed = YES;
         }
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;

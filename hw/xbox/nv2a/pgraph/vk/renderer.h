@@ -161,6 +161,13 @@ typedef struct SurfaceBinding {
     VkImageLayout image_scratch_current_layout;
     VmaAllocation allocation_scratch;
 
+    /*
+     * Exported MTLTexture of a zeta image (opt-in real depth for
+     * MetalFX temporal, XEMU_MFX_REAL_DEPTH=1; requires
+     * metal_texture_export_enabled). Retained; NULL otherwise.
+     */
+    void *mtl_texture;
+
     bool initialized;
 
     /*

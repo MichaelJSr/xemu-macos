@@ -59,16 +59,27 @@ void metalfx_destroy(void);
 
 /* Temporal upscaler (color + optional depth IOSurface, zero-motion) */
 bool metalfx_temporal_is_supported(void);
+/*
+ * depth_format_from: optional id<MTLTexture> whose pixel format the
+ * scaler's depth input is created for (real-depth mode). NULL keeps
+ * the synthetic R32Float depth. A format change recreates the scaler.
+ */
 bool metalfx_temporal_init(int input_w, int input_h,
-                           int output_w, int output_h);
+                           int output_w, int output_h,
+                           void *depth_format_from);
 IOSurfaceRef metalfx_temporal_get_output_surface(void);
 void *metalfx_temporal_get_output_texture(void); /* retained; Metal-native */
 void metalfx_temporal_reset(void);
 bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
                               IOSurfaceRef depthSurface);
-/* Texture-input variant (exported compositor MTLTexture; no wrap;
- * synthetic depth). */
-bool metalfx_temporal_upscale_tex(void *inputTexture);
+/*
+ * Texture-input variant (exported compositor MTLTexture; no wrap).
+ * depthTexture: optional exported zeta MTLTexture for real depth
+ * (XEMU_MFX_REAL_DEPTH; must match the format/dims the scaler was
+ * initialized with via metalfx_temporal_init's depth_format_from) —
+ * NULL falls back to synthetic luminance depth.
+ */
+bool metalfx_temporal_upscale_tex(void *inputTexture, void *depthTexture);
 void metalfx_temporal_destroy(void);
 
 /* Frame interpolation (macOS 26+) */

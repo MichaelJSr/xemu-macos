@@ -1858,22 +1858,43 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             IOSurfaceRef upscaled = NULL;
 
             if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
+                /*
+                 * Real depth (opt-in XEMU_MFX_REAL_DEPTH): zeta images
+                 * are created exportable in surface.c and the bound
+                 * zeta's MTLTexture feeds the scaler in place of
+                 * synthetic luminance depth. Known limitation: the
+                 * single guest zeta buffer typically holds the next
+                 * in-progress frame's depth by present time (one frame
+                 * ahead), hence opt-in for A/B evaluation.
+                 */
+                /*
+                 * Pick the zeta whose dimensions match the displayed
+                 * color surface, preferring the most recently drawn.
+                 * The *bound* zeta at sync time can be a different
+                 * shape entirely (e.g. a 2560-wide combined buffer
+                 * while the displayed surface is 1280 wide).
+                 */
+                void *zeta_tex = NULL;
+                if (disp->mtl_texture) {
+                    SurfaceBinding *best = NULL, *it;
+                    QTAILQ_FOREACH(it, &r->surfaces, entry) {
+                        if (!it->color && it->mtl_texture &&
+                            it->width == surface->width &&
+                            it->height == surface->height &&
+                            (!best || it->draw_time > best->draw_time)) {
+                            best = it;
+                        }
+                    }
+                    if (best) {
+                        zeta_tex = best->mtl_texture;
+                    }
+                }
                 if (metalfx_temporal_init(disp->width, disp->height,
-                                         out_w, out_h)) {
-                    /*
-                     * TODO: Provide real depth. With MTLTexture export
-                     * now proven (metal_texture_export_enabled), the
-                     * viable path is exporting the zeta surface's
-                     * texture at creation (same chain as the
-                     * compositor image) and feeding its depth plane —
-                     * no IOSurface-backed zeta or CPU round-trip
-                     * needed. Needs zeta-binding selection at sync
-                     * time + projection-range mapping; until then the
-                     * temporal scaler uses synthetic luminance depth.
-                     */
+                                         out_w, out_h, zeta_tex)) {
                     IOSurfaceRef depth_surface = NULL;
                     bool ok = disp->mtl_texture ?
-                        metalfx_temporal_upscale_tex(disp->mtl_texture) :
+                        metalfx_temporal_upscale_tex(disp->mtl_texture,
+                                                     zeta_tex) :
                         metalfx_temporal_upscale(current_surface,
                                                  depth_surface);
                     if (ok) {

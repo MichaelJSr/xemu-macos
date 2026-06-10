@@ -320,6 +320,26 @@ In-app Settings covers the main toggles.
 - **Exclusive fullscreen picks the highest refresh** among the
   native-resolution modes (120 Hz instead of a 60 Hz first entry);
   Metal vsync maps to `CAMetalLayer.displaySyncEnabled`.
+- **GPU-paced interpolation steps.** Published frames carry a
+  sequence number + intended hold duration; the UI presents new
+  content with `presentDrawable:afterMinimumDuration:` and skips
+  re-presenting unchanged frames during gameplay — exact
+  `frame_period / mode` step timing instead of quantizing to the UI
+  loop (±8 ms at 120 Hz). Menus keep full-rate rendering.
+- **Monotonic present-path clocks.** Sync gate, interpolation
+  timestamps, step pacing and surface expiry moved from
+  `QEMU_CLOCK_HOST` (gettimeofday — reflects NTP changes) to
+  `QEMU_CLOCK_REALTIME` (CLOCK_MONOTONIC); an earlier pass had the
+  two semantics inverted. The guest-vblank IRQ timer was already a
+  dedicated fixed-60 Hz monotonic-deadline thread, fully decoupled
+  from the present path.
+- **Opt-in real depth for temporal** (`XEMU_MFX_REAL_DEPTH=1`):
+  zeta images are created exportable and the dims-matched zeta's
+  MTLTexture feeds the temporal scaler (standard-Z) in place of
+  synthetic luminance depth; automatic fallback when the format is
+  rejected or no matching zeta exists. Ships dark for A/B: the
+  single guest zeta typically holds the next in-progress frame's
+  depth by present time, so quality impact is title-dependent.
 
 ### MCPX APU
 
@@ -489,12 +509,11 @@ Not attempted, or scope/risk too high for a one-shot change.
   renderer switch away from Vulkan under the Metal backend needs a
   restart; full unification would render the GL display buffer into
   an IOSurface-backed FBO and feed the same present-frame handoff.
-- **Real depth for MetalFX temporal/interp.** With compositor
-  `MTLTexture` export proven, export the zeta surface's texture the
-  same way (no IOSurface-backed zeta or CPU round-trip needed) and
-  feed its depth plane to the temporal scaler/interpolator. Needs
-  zeta-binding selection at sync time + projection-range mapping;
-  synthetic luminance depth remains until then.
+- **Flip-time zeta snapshot for real depth.** The opt-in real-depth
+  path (`XEMU_MFX_REAL_DEPTH`) feeds the live zeta texture, which by
+  present time holds the next in-progress frame. Capturing a GPU
+  copy of zeta at flip-stall would give temporally-correct depth at
+  the cost of one blit per frame.
 - **Texture-upload barrier batching.** Current per-mip
   `pre_compute` / `post_compute` pair is load-bearing on reused
   `COMPUTE_DST` / `COMPUTE_SRC`; batching requires disjoint offsets
@@ -518,9 +537,10 @@ Not attempted, or scope/risk too high for a one-shot change.
   per-draw branching.
 - **GPU S3TC decode.** Compute-shader decoder offloads the CPU
   thread pool.
-- **Decoupled guest-vblank IRQ timer.** Dedicated NV2A-model 60 /
-  50 Hz timer lets the host present path retune for ProMotion
-  without changing guest sim speed.
+- **PAL 50 Hz guest-vblank cadence.** The dedicated vblank thread is
+  fixed at 60 Hz; deriving 50 Hz from the guest video mode would
+  serve PAL titles. (Host-present decoupling itself is done: the
+  Metal present path never references the vblank timer.)
 - **Voice-register writeback batching.** Defer `ram_stl` in
   `voice_set_mask` to end-of-frame memcpy (risk: mid-frame MMIO
   reads see stale data).
