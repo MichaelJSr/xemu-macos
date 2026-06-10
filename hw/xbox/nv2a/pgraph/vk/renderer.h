@@ -411,6 +411,20 @@ typedef struct PGRAPHVkDisplayState {
      * present pass encodes a wait on this value before sampling.
      */
     uint64_t present_event_value;
+
+    /*
+     * Frame-interpolation presentation queue (Metal backend). An
+     * interpolated frame lies temporally BETWEEN prev and cur, so it
+     * must be shown BEFORE the new real frame; the real frame is held
+     * here until the interpolated step(s) have been presented, paced
+     * at frame_period / interp_mode. Presenting the real frame first
+     * (the old behavior) made motion run forward-backward-forward —
+     * visible as frames arriving out of order.
+     */
+    void *pending_real_texture; // id<MTLTexture>, retained
+    uint64_t pending_real_event_value;
+    uint64_t last_present_step_ns; // host time of last published step
+    uint64_t interp_step_ns;       // pacing interval between steps
 #endif
 
     SurfaceBinding *last_descriptor_surface;

@@ -142,7 +142,8 @@ static void pgraph_vk_sync(NV2AState *d)
 
     bool has_interp_work = false;
 #if HAVE_IOSURFACE_SHARING
-    has_interp_work = r->display.interp_remaining > 0;
+    has_interp_work = r->display.interp_remaining > 0 ||
+                      r->display.pending_real_texture != NULL;
 #endif
 
     if (elapsed >= min_sync_interval_ns || has_interp_work) {

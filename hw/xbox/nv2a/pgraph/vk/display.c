@@ -666,6 +666,11 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease(d->present_mtl_texture);
         d->present_mtl_texture = NULL;
     }
+    if (d->pending_real_texture) {
+        CFRelease(d->pending_real_texture);
+        d->pending_real_texture = NULL;
+    }
+    d->pending_real_event_value = 0;
     d->present_width = 0;
     d->present_height = 0;
     d->present_event_value = 0;
@@ -1358,14 +1363,63 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     if (disp->image && surface->draw_time == disp->draw_time) {
 #if HAVE_IOSURFACE_SHARING
         /*
-         * No new frame: generate and present the next interpolated frame
-         * from the saved prev/cur frame pair (deferred generation).
+         * No new frame.
+         *
+         * Metal backend: step through the interpolation presentation
+         * queue, paced at frame_period / interp_mode. The interpolated
+         * frame(s) were generated and published when the real frame
+         * arrived (they lie temporally BEFORE it); the real frame
+         * itself was held back and is published as the final step of
+         * the cycle. Without this ordering+pacing, the real frame
+         * appeared first and the midpoint frame after it — motion ran
+         * forward-backward-forward (frames visibly out of order).
          */
-        if (disp->interp_remaining > 0 &&
+        if (xemu_present_is_metal()) {
+            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            uint64_t step = disp->interp_step_ns ? disp->interp_step_ns
+                                                 : 8000000ull;
+            if (now - disp->last_present_step_ns >= step) {
+                if (disp->interp_remaining > 0 &&
+                    disp->interp_prev_surface && disp->interp_cur_surface &&
+                    metalfx_interpolation_is_supported()) {
+                    float delta_sec =
+                        (float)(disp->interp_cur_surface_ns -
+                                disp->interp_prev_surface_ns) / 1.0e9f;
+                    if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
+                    if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
+
+                    /* interp_prev/cur hold retained id<MTLTexture> */
+                    if (metalfx_interpolation_generate_tex(
+                            disp->interp_prev_surface,
+                            disp->interp_cur_surface, delta_sec)) {
+                        void *itex =
+                            metalfx_interpolation_get_output_texture();
+                        if (itex) {
+                            display_set_present_texture(disp, itex);
+                            disp->present_event_value =
+                                metalfx_present_event_last_value();
+                        }
+                    }
+                    /* On failure too: skip the slot, don't busy-retry */
+                    disp->interp_remaining--;
+                    disp->last_present_step_ns = now;
+                } else if (disp->pending_real_texture) {
+                    /* Final step of the cycle: show the real frame */
+                    display_set_present_texture(disp,
+                                                disp->pending_real_texture);
+                    disp->pending_real_texture = NULL;
+                    disp->present_event_value =
+                        disp->pending_real_event_value;
+                    disp->last_present_step_ns = now;
+                }
+            }
+        } else if (disp->interp_remaining > 0 &&
             disp->interp_prev_surface && disp->interp_cur_surface &&
             metalfx_interpolation_is_supported() &&
-            (disp->gl_texture_id || xemu_present_is_metal())) {
+            disp->gl_texture_id) {
             /*
+             * GL backend deferred generation.
+             *
              * MTLFXFrameInterpolator.deltaTime expects the wall-clock
              * interval in seconds between the two input frames (used to
              * scale motion-vector magnitudes). Feed the delta between
@@ -1379,20 +1433,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
             if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
 
-            if (xemu_present_is_metal()) {
-                /* interp_prev/cur hold retained id<MTLTexture> */
-                if (metalfx_interpolation_generate_tex(
-                        disp->interp_prev_surface,
-                        disp->interp_cur_surface, delta_sec)) {
-                    void *itex = metalfx_interpolation_get_output_texture();
-                    if (itex) {
-                        display_set_present_texture(disp, itex);
-                        disp->present_event_value =
-                            metalfx_present_event_last_value();
-                    }
-                }
-                disp->interp_remaining--;
-            } else if (metalfx_interpolation_generate(
+            if (metalfx_interpolation_generate(
                     (IOSurfaceRef)disp->interp_prev_surface,
                     (IOSurfaceRef)disp->interp_cur_surface,
                     NULL, NULL, delta_sec)) {
@@ -1652,14 +1693,75 @@ void pgraph_vk_render_display(PGRAPHState *pg)
          * release, producing a false-cache hit and stale display.
          */
         if (metal_native) {
-            if (present_tex) {
-                /* ownership transferred to the display state */
-                display_set_present_texture(disp, present_tex);
-                present_tex = NULL;
-            } else {
-                display_set_present_surface(disp, present_surface);
+            uint64_t real_event_value = metalfx_present_event_last_value();
+            bool interp_first_presented = false;
+
+            /*
+             * Frame interpolation: the interpolated frame lies
+             * temporally BETWEEN prev and cur, so it must be shown
+             * BEFORE the new real frame. Generate it now, publish it
+             * as this sync's frame, and hold the real frame back for
+             * the final paced step of the cycle. Only meaningful on
+             * the MetalFX texture path: the base-IOSurface path's
+             * prev/cur wrap the same reused surface (identical
+             * content), so interpolation degenerates there anyway.
+             */
+            if (disp->interp_remaining > 0 && present_tex &&
+                disp->interp_prev_surface && disp->interp_cur_surface &&
+                metalfx_interpolation_is_supported()) {
+                float delta_sec =
+                    (float)(disp->interp_cur_surface_ns -
+                            disp->interp_prev_surface_ns) / 1.0e9f;
+                if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
+                if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
+
+                if (metalfx_interpolation_generate_tex(
+                        disp->interp_prev_surface,
+                        disp->interp_cur_surface, delta_sec)) {
+                    void *itex = metalfx_interpolation_get_output_texture();
+                    if (itex) {
+                        display_set_present_texture(disp, itex);
+                        disp->present_event_value =
+                            metalfx_present_event_last_value();
+                        interp_first_presented = true;
+
+                        /* Hold the real frame; pace the cycle's steps
+                         * across the captured frame period. */
+                        if (disp->pending_real_texture) {
+                            CFRelease(disp->pending_real_texture);
+                        }
+                        disp->pending_real_texture = present_tex;
+                        disp->pending_real_event_value = real_event_value;
+                        present_tex = NULL;
+                        disp->interp_remaining--;
+                        disp->interp_step_ns =
+                            (uint64_t)(delta_sec * 1.0e9f) /
+                            (uint64_t)interp_mode;
+                        disp->last_present_step_ns =
+                            qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                    }
+                }
+                if (!interp_first_presented) {
+                    disp->interp_remaining--;
+                }
             }
-            disp->present_event_value = metalfx_present_event_last_value();
+
+            if (!interp_first_presented) {
+                if (present_tex) {
+                    /* ownership transferred to the display state */
+                    display_set_present_texture(disp, present_tex);
+                    present_tex = NULL;
+                } else {
+                    display_set_present_surface(disp, present_surface);
+                }
+                disp->present_event_value = real_event_value;
+                /* No interp step pending before this frame; drop any
+                 * stale held frame from a previous cycle. */
+                if (disp->pending_real_texture) {
+                    CFRelease(disp->pending_real_texture);
+                    disp->pending_real_texture = NULL;
+                }
+            }
             disp->last_cgl_surface_id = IOSurfaceGetID(present_surface);
             disp->last_cgl_width = (int)IOSurfaceGetWidth(present_surface);
             disp->last_cgl_height = (int)IOSurfaceGetHeight(present_surface);
