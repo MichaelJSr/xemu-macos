@@ -1851,15 +1851,15 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 if (metalfx_temporal_init(disp->width, disp->height,
                                          out_w, out_h)) {
                     /*
-                     * TODO: Provide real depth via IOSurface-backed zeta.
-                     * The correct approach is to create the NV2A zeta
-                     * surface as an IOSurface-backed VkImage from the
-                     * start, then pass it here instead of NULL. This
-                     * avoids the CPU round-trip that killed the readback
-                     * approach (2-5ms/frame) and the MoltenVK mutex
-                     * deadlock from vkExportMetalObjectsEXT.
-                     * Until then, the temporal scaler uses synthetic
-                     * luminance-based depth.
+                     * TODO: Provide real depth. With MTLTexture export
+                     * now proven (metal_texture_export_enabled), the
+                     * viable path is exporting the zeta surface's
+                     * texture at creation (same chain as the
+                     * compositor image) and feeding its depth plane —
+                     * no IOSurface-backed zeta or CPU round-trip
+                     * needed. Needs zeta-binding selection at sync
+                     * time + projection-range mapping; until then the
+                     * temporal scaler uses synthetic luminance depth.
                      */
                     IOSurfaceRef depth_surface = NULL;
                     bool ok = disp->mtl_texture ?

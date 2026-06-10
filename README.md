@@ -261,6 +261,39 @@ In-app Settings covers the main toggles.
   shared-event signal; the UI present pass encodes a GPU-side wait
   on the frame's value before sampling. The GL backend keeps the
   synchronous waits (GL cannot wait on `MTLSharedEvent`).
+- **Async `render_display`** (Metal backend only). The compositor
+  pass no longer blocks the PFIFO thread in
+  `vkWaitForFences(aux_fence)` — the last synchronous GPU wait on
+  the present path. A timeline `VkSemaphore` (exported as an
+  `MTLSharedEvent` via `VK_EXT_metal_objects`, one-time probe with
+  sync fallback) is signaled per compositor submit; MetalFX command
+  buffers and the UI present pass order GPU-side against it. The aux
+  fence is reclaimed lazily before the next aux command-buffer use.
+- **IOSurface-free present chain** (Metal backend only). When
+  MoltenVK can export the `MTLTexture` backing the compositor
+  `VkImage` (probed at init), no IOSurface is created at all: MetalFX
+  consumes the exported texture directly and the UI receives it
+  through the present-frame handoff. This removes the macOS 26
+  IOSurface constraint from the *input* side too, so **MetalFX
+  engages at `surface_scale = 4`** (2560x1920 input, previously
+  skipped). IOSurface remains the automatic fallback and the GL
+  path.
+- **Frame interpolation quality.** The interpolator is driven
+  properly: presentation queue shows interpolated frames *before*
+  the real frame they lead to, paced at `frame_period / mode`
+  (forward-backward motion fixed); a zero-filled motion texture is
+  no longer bound ("nothing moved" made moving objects ghost-blend —
+  `nil` enables MetalFX internal motion estimation;
+  `XEMU_MFX_INTERP_ZERO_MOTION` restores the old binding);
+  `fieldOfView`/`aspectRatio` are set and synthetic luminance depth
+  is bound at interpolation resolution; in temporal mode the
+  interpolator is **linked to the temporal scaler**
+  (`MTLFXFrameInterpolatableScaler`) and inherits its real
+  motion/depth/history; 4x re-presents the cached midpoint instead
+  of re-encoding the same pair (which violated the interpolator's
+  history contract); a hitch guard skips interpolation and resets
+  history on frame-gap spikes instead of blending across content
+  jumps.
 - **1920px output cap lifted** (Metal backend only). MetalFX outputs
   rotate through rings of 3 private `MTLTexture`s instead of one
   shared IOSurface — no IOSurface means the macOS 26 BGRA
@@ -456,11 +489,12 @@ Not attempted, or scope/risk too high for a one-shot change.
   renderer switch away from Vulkan under the Metal backend needs a
   restart; full unification would render the GL display buffer into
   an IOSurface-backed FBO and feed the same present-frame handoff.
-- **Aux-submit pipelining for `render_display`.**
-  `pgraph_vk_end_single_time_commands` waits its fence
-  synchronously; MetalFX's command queue is distinct from
-  MoltenVK's so deferring races. Needs `MTLSharedEvent` cross-queue
-  sync.
+- **Real depth for MetalFX temporal/interp.** With compositor
+  `MTLTexture` export proven, export the zeta surface's texture the
+  same way (no IOSurface-backed zeta or CPU round-trip needed) and
+  feed its depth plane to the temporal scaler/interpolator. Needs
+  zeta-binding selection at sync time + projection-range mapping;
+  synthetic luminance depth remains until then.
 - **Texture-upload barrier batching.** Current per-mip
   `pre_compute` / `post_compute` pair is load-bearing on reused
   `COMPUTE_DST` / `COMPUTE_SRC`; batching requires disjoint offsets
@@ -475,9 +509,13 @@ Not attempted, or scope/risk too high for a one-shot change.
   buffers/textures as resident.
 - **BINK video via VideoToolbox.** Xbox BINK decoder is CPU-bound;
   offload YUV→RGBA (or full transcode).
-- **Shader specialization constants.** Burn alpha-test / fog-enable
-  into compile-time constants; eliminates per-draw uniform
-  bandwidth + fragment branches.
+- ~~Shader specialization constants~~ — stale: alpha-test and
+  fog-enable are *already* compile-time GLSL variants (baked into the
+  generated shader via `PshState`/`VshState`; the LRU shader cache
+  keys on them). Only value uniforms (alphaRef / fogParam / fogColor)
+  are per-draw, and those must remain uniforms. A useful reframing
+  would target shader-compile stutter (variant count) rather than
+  per-draw branching.
 - **GPU S3TC decode.** Compute-shader decoder offloads the CPU
   thread pool.
 - **Decoupled guest-vblank IRQ timer.** Dedicated NV2A-model 60 /
@@ -506,11 +544,17 @@ Stale `pkg-config` paths. `rm -rf macos-libs macos-pkgs build && ./build.sh`.
 **MetalFX not activating.** Requires `renderer = 'VULKAN'` and
 `metalfx_mode = 'spatial'` or `'temporal'`. Under the GL presentation
 backend, `surface_scale = 4` produces 2560×1920 input and is skipped
-(1920 px BGRA-IOSurface safe cap). Check for
+(1920 px BGRA-IOSurface safe cap); the Metal backend's
+IOSurface-free chain has no such cap. Check for
 `MetalFX: Spatial upscaler initialized …` in the log.
 
 **Frame interpolation not working.** Requires macOS 26.0+ and MetalFX
 upscaling active.
+
+**Interpolation ghosting on moving objects.** Should be fixed (motion
+estimation + paced presentation order); `XEMU_MFX_INTERP_ZERO_MOTION=1`
+restores the old zero-motion binding for A/B comparison. Temporal
+mode gives the interpolator the best data (scaler-linked).
 
 **Black/garbled window or Metal init failure on launch.** Set
 `[display.window] presentation_backend = 'opengl'` in `xemu.toml` to
@@ -535,11 +579,13 @@ Xbox game (30fps, x87 FPU, MCPX APU)
        │
        ├─ GPU: NV2A Vulkan (MoltenVK)
        │  flight slots · bump-alloc staging · VRAM spatial dirty index
-       │  compute unswizzle + YUV · IOSurface zero-copy
+       │  compute unswizzle + YUV · zero-copy display
+       │  (Metal: exported MTLTexture, async timeline submit ·
+       │   GL: IOSurface + CGL)
        │        │
        │        └─ MetalFX Spatial / Temporal (async, MTLSharedEvent)
        │             │   Metal backend: private-texture ring → panel-fit
-       │             │   (e.g. 1280×960→2880×2160) · GL: 1920 cap
+       │             │   (1280×960→2880×2160; works at scale 4) · GL: 1920 cap
        │             └─ MTLFXFrameInterpolator (30→60 or 30→120)
        │                  │
        │                  ├─ Metal backend: CAMetalLayer drawable +
