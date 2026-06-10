@@ -53,6 +53,8 @@ bool metalfx_init(int input_w, int input_h, int output_w, int output_h);
 IOSurfaceRef metalfx_get_output_surface(void);
 void *metalfx_get_output_texture(void); /* retained; Metal-native mode */
 bool metalfx_upscale(IOSurfaceRef inputSurface);
+/* Texture-input variant (exported compositor MTLTexture; no wrap). */
+bool metalfx_upscale_tex(void *inputTexture);
 void metalfx_destroy(void);
 
 /* Temporal upscaler (color + optional depth IOSurface, zero-motion) */
@@ -64,6 +66,9 @@ void *metalfx_temporal_get_output_texture(void); /* retained; Metal-native */
 void metalfx_temporal_reset(void);
 bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
                               IOSurfaceRef depthSurface);
+/* Texture-input variant (exported compositor MTLTexture; no wrap;
+ * synthetic depth). */
+bool metalfx_temporal_upscale_tex(void *inputTexture);
 void metalfx_temporal_destroy(void);
 
 /* Frame interpolation (macOS 26+) */

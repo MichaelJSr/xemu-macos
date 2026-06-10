@@ -609,6 +609,42 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
     }
 }
 
+/*
+ * Texture-input spatial upscale: the input arrives as the exported
+ * compositor MTLTexture (no IOSurface wrap or caching needed).
+ */
+bool metalfx_upscale_tex(void *inputTexture)
+{
+    os_unfair_lock_lock(&g_metalfx_lock);
+    if (!g_spatial.initialized || !inputTexture) {
+        os_unfair_lock_unlock(&g_metalfx_lock);
+        return false;
+    }
+
+    @autoreleasepool {
+        id<MTLTexture> output = ring_advance(&g_spatial.ring);
+        if (!output) {
+            output = g_spatial.outputTexture;
+        }
+        g_spatial.scaler.colorTexture = (id<MTLTexture>)inputTexture;
+        g_spatial.scaler.outputTexture = output;
+
+        id<MTLCommandBuffer> cb = [g_spatial.commandQueue commandBuffer];
+        metalfx_encode_input_wait(cb);
+        [g_spatial.scaler encodeToCommandBuffer:cb];
+        atomic_fetch_add_explicit(&g_spatial_inflight, 1, memory_order_acq_rel);
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _) {
+            (void)_;
+            atomic_fetch_sub_explicit(&g_spatial_inflight, 1,
+                                      memory_order_acq_rel);
+        }];
+        metalfx_submit(cb);
+        os_unfair_lock_unlock(&g_metalfx_lock);
+        metalfx_submit_wait(cb);
+        return true;
+    }
+}
+
 void metalfx_destroy(void)
 {
     /*
@@ -995,6 +1031,96 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         [g_temporal.scaler encodeToCommandBuffer:cb];
 
         if (g_temporal.outputSharedTexture) {
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromTexture:g_temporal.outputTexture
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(g_temporal.outputWidth,
+                                              g_temporal.outputHeight, 1)
+                        toTexture:g_temporal.outputSharedTexture
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [blit endEncoding];
+        }
+
+        atomic_fetch_add_explicit(&g_temporal_inflight, 1, memory_order_acq_rel);
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _) {
+            (void)_;
+            atomic_fetch_sub_explicit(&g_temporal_inflight, 1,
+                                      memory_order_acq_rel);
+        }];
+        metalfx_submit(cb);
+        os_unfair_lock_unlock(&g_metalfx_lock);
+        metalfx_submit_wait(cb);
+        return true;
+    }
+}
+
+/*
+ * Texture-input temporal upscale: the input arrives as the exported
+ * compositor MTLTexture (no IOSurface wrap or caching), with the
+ * synthetic-depth kernel fed from the same texture.
+ */
+bool metalfx_temporal_upscale_tex(void *inputTexture)
+{
+    os_unfair_lock_lock(&g_metalfx_lock);
+    if (!g_temporal.initialized || !inputTexture) {
+        os_unfair_lock_unlock(&g_metalfx_lock);
+        return false;
+    }
+
+    @autoreleasepool {
+        id<MTLTexture> color = (id<MTLTexture>)inputTexture;
+
+        id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
+        metalfx_encode_input_wait(cb);
+
+        if (g_temporal.syntheticDepthPipeline &&
+            g_temporal.syntheticDepthTexture) {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:g_temporal.syntheticDepthPipeline];
+            [enc setTexture:color atIndex:0];
+            [enc setTexture:g_temporal.syntheticDepthTexture atIndex:1];
+            NSUInteger tw =
+                g_temporal.syntheticDepthPipeline.threadExecutionWidth;
+            NSUInteger th =
+                g_temporal.syntheticDepthPipeline.maxTotalThreadsPerThreadgroup /
+                tw;
+            MTLSize tgSize = MTLSizeMake(tw, th, 1);
+            MTLSize gridSize = MTLSizeMake(g_temporal.inputWidth,
+                                           g_temporal.inputHeight, 1);
+            [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+            [enc endEncoding];
+        }
+
+        id<MTLTexture> output = ring_advance(&g_temporal.ring);
+        if (!output) {
+            output = g_temporal.outputTexture;
+        }
+        g_temporal.scaler.colorTexture = color;
+        g_temporal.scaler.outputTexture = output;
+        g_temporal.scaler.motionTexture = g_temporal.motionTexture;
+        if (g_temporal.syntheticDepthTexture) {
+            g_temporal.scaler.depthTexture = g_temporal.syntheticDepthTexture;
+        }
+        g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
+        g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
+
+        static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
+        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.444f };
+        int jidx = g_temporal.frameIndex % 8;
+        g_temporal.scaler.jitterOffsetX = halton_x[jidx];
+        g_temporal.scaler.jitterOffsetY = halton_y[jidx];
+        g_temporal.frameIndex++;
+
+        g_temporal.scaler.reset = g_temporal.needsReset;
+        g_temporal.needsReset = false;
+
+        [g_temporal.scaler encodeToCommandBuffer:cb];
+
+        if (g_temporal.outputSharedTexture && output == g_temporal.outputTexture) {
             id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
             [blit copyFromTexture:g_temporal.outputTexture
                       sourceSlice:0

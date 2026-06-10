@@ -451,6 +451,13 @@ typedef struct PGRAPHVkDisplayState {
     uint64_t interp_avg_gap_ns;
 #endif
 
+    /*
+     * Exported MTLTexture of the compositor VkImage (Metal backend,
+     * texture-export mode — no IOSurface exists). Retained; consumed
+     * directly by MetalFX and the UI present pass.
+     */
+    void *mtl_texture;
+
     SurfaceBinding *last_descriptor_surface;
     bool last_descriptor_pvideo;
 } PGRAPHVkDisplayState;
@@ -585,6 +592,17 @@ typedef struct PGRAPHVkState {
     VkSemaphore present_timeline;
     uint64_t present_timeline_value;
     void *present_timeline_event; /* id<MTLSharedEvent>, retained */
+
+    /*
+     * Direct MTLTexture export of the compositor image (Metal
+     * backend): removes the IOSurface from the present chain entirely
+     * — which also removes the macOS 26 >1920px BGRA IOSurface
+     * constraint from the MetalFX *input* side, so upscaling engages
+     * at surface_scale=4. Probed once at display init.
+     */
+    bool metal_texture_export_enabled;
+    /* PFN_vkExportMetalObjectsEXT, stored untyped for portability */
+    void *export_metal_objects_fn;
 
     int framebuffer_index;
     bool framebuffer_dirty;

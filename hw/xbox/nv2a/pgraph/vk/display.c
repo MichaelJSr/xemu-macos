@@ -658,6 +658,10 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease((IOSurfaceRef)d->iosurface);
         d->iosurface = NULL;
     }
+    if (d->mtl_texture) {
+        CFRelease(d->mtl_texture);
+        d->mtl_texture = NULL;
+    }
     if (d->present_iosurface) {
         CFRelease((IOSurfaceRef)d->present_iosurface);
         d->present_iosurface = NULL;
@@ -784,7 +788,25 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     IOSurfaceRef imported_iosurface = NULL;
     VkImportMetalIOSurfaceInfoEXT import_iosurface_info;
     VkExportMetalObjectCreateInfoEXT export_metal_info;
-    if (r->metal_objects_extension_enabled) {
+    bool export_texture_mode =
+        r->metal_objects_extension_enabled && xemu_present_is_metal() &&
+        r->metal_texture_export_enabled;
+    if (export_texture_mode) {
+        /*
+         * Metal backend, texture-export mode: no IOSurface at all.
+         * The VkImage's backing MTLTexture is exported after creation
+         * and consumed directly by MetalFX / the UI. Without an
+         * IOSurface, the macOS 26 >1920px BGRA bytesPerRow bug cannot
+         * affect the compositor image, so MetalFX engages at
+         * surface_scale=4 (2560-wide input).
+         */
+        export_metal_info = (VkExportMetalObjectCreateInfoEXT){
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+            .exportObjectType =
+                VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT,
+        };
+        image_create_info.pNext = &export_metal_info;
+    } else if (r->metal_objects_extension_enabled) {
         unsigned bpe = 4;
         unsigned long long vals[] = {
             width, height, bpe, width * bpe,
@@ -918,7 +940,33 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     assert(glGetError() == GL_NO_ERROR);
 
 #elif HAVE_IOSURFACE_SHARING
-    if (r->metal_objects_extension_enabled && imported_iosurface) {
+    if (export_texture_mode) {
+        VkExportMetalTextureInfoEXT tex_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT,
+            .image = d->image,
+            .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
+        };
+        VkExportMetalObjectsInfoEXT export_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+            .pNext = &tex_info,
+        };
+        ((PFN_vkExportMetalObjectsEXT)r->export_metal_objects_fn)(
+            r->device, &export_info);
+        if (tex_info.mtlTexture) {
+            d->mtl_texture = (void *)CFRetain(tex_info.mtlTexture);
+            DISPLAY_DPRINTF(
+                    "[Metal] Exported compositor MTLTexture %dx%d\n",
+                    image_create_info.extent.width,
+                    image_create_info.extent.height);
+        } else {
+            fprintf(stderr,
+                    "nv2a: compositor MTLTexture export failed at %ux%u "
+                    "despite successful probe; display will be black "
+                    "until the next mode change\n",
+                    image_create_info.extent.width,
+                    image_create_info.extent.height);
+        }
+    } else if (r->metal_objects_extension_enabled && imported_iosurface) {
         d->iosurface = (void *)CFRetain(imported_iosurface);
 
         /* Under the Metal presentation backend the UI consumes the
@@ -1340,8 +1388,7 @@ static void create_present_timeline(PGRAPHState *pg)
     }
 
     PFN_vkExportMetalObjectsEXT export_fn =
-        (PFN_vkExportMetalObjectsEXT)vkGetDeviceProcAddr(
-            r->device, "vkExportMetalObjectsEXT");
+        (PFN_vkExportMetalObjectsEXT)r->export_metal_objects_fn;
     if (!export_fn) {
         fprintf(stderr,
                 "nv2a: vkExportMetalObjectsEXT unavailable; compositor "
@@ -1412,6 +1459,96 @@ static void destroy_present_timeline(PGRAPHState *pg)
     }
     r->present_timeline_value = 0;
 }
+
+/*
+ * Probe whether MoltenVK can export the MTLTexture backing a VkImage
+ * (VK_EXT_metal_objects). When it can, the compositor image is
+ * created without an IOSurface and handed to MetalFX / the UI as a
+ * texture directly — removing the macOS 26 >1920px BGRA IOSurface
+ * constraint from the present chain (MetalFX then engages at
+ * surface_scale=4). One-time, device idle, tiny throwaway image.
+ */
+static void probe_metal_texture_export(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    r->metal_texture_export_enabled = false;
+
+    if (!xemu_present_is_metal() || !r->metal_objects_extension_enabled ||
+        !r->export_metal_objects_fn) {
+        return;
+    }
+    PFN_vkExportMetalObjectsEXT export_fn =
+        (PFN_vkExportMetalObjectsEXT)r->export_metal_objects_fn;
+
+    VkExportMetalObjectCreateInfoEXT export_create = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+        .exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT,
+    };
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &export_create,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = { 16, 16, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_B8G8R8A8_UNORM,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (vkCreateImage(r->device, &image_info, NULL, &image) != VK_SUCCESS) {
+        goto out;
+    }
+
+    VkMemoryRequirements reqs;
+    vkGetImageMemoryRequirements(r->device, image, &reqs);
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = reqs.size,
+        .memoryTypeIndex = pgraph_vk_get_memory_type(
+            pg, reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
+    if (vkAllocateMemory(r->device, &alloc_info, NULL, &memory) !=
+            VK_SUCCESS ||
+        vkBindImageMemory(r->device, image, memory, 0) != VK_SUCCESS) {
+        goto out;
+    }
+
+    {
+        VkExportMetalTextureInfoEXT tex_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT,
+            .image = image,
+            .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
+        };
+        VkExportMetalObjectsInfoEXT export_info = {
+            .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+            .pNext = &tex_info,
+        };
+        export_fn(r->device, &export_info);
+        r->metal_texture_export_enabled = tex_info.mtlTexture != NULL;
+    }
+
+out:
+    if (image != VK_NULL_HANDLE) {
+        vkDestroyImage(r->device, image, NULL);
+    }
+    if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, memory, NULL);
+    }
+    fprintf(stderr,
+            r->metal_texture_export_enabled ?
+                "nv2a: compositor MTLTexture export enabled "
+                "(IOSurface-free present chain)\n" :
+                "nv2a: MTLTexture export unavailable; present chain "
+                "keeps IOSurface\n");
+}
 #endif /* HAVE_IOSURFACE_SHARING */
 
 void pgraph_vk_init_display(PGRAPHState *pg)
@@ -1423,7 +1560,10 @@ void pgraph_vk_init_display(PGRAPHState *pg)
     if (r->metal_objects_extension_enabled) {
         r->display.format = VK_FORMAT_B8G8R8A8_UNORM;
     }
+    r->export_metal_objects_fn = (void *)vkGetDeviceProcAddr(
+        r->device, "vkExportMetalObjectsEXT");
     create_present_timeline(pg);
+    probe_metal_texture_export(pg);
 #endif
 
     create_descriptor_pool(pg);
@@ -1640,11 +1780,14 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     render_display(pg, surface);
 
 #if HAVE_IOSURFACE_SHARING
-    if (!disp->iosurface || !r->metal_objects_extension_enabled) {
+    if ((!disp->iosurface && !disp->mtl_texture) ||
+        !r->metal_objects_extension_enabled) {
         goto done_metalfx;
     }
 
     {
+        /* Texture-export mode: current_surface is NULL and the
+         * compositor frame is disp->mtl_texture. */
         IOSurfaceRef current_surface = (IOSurfaceRef)disp->iosurface;
         IOSurfaceRef present_surface = current_surface;
 
@@ -1719,8 +1862,11 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                      * luminance-based depth.
                      */
                     IOSurfaceRef depth_surface = NULL;
-                    if (metalfx_temporal_upscale(current_surface,
-                                                 depth_surface)) {
+                    bool ok = disp->mtl_texture ?
+                        metalfx_temporal_upscale_tex(disp->mtl_texture) :
+                        metalfx_temporal_upscale(current_surface,
+                                                 depth_surface);
+                    if (ok) {
                         if (metal_native) {
                             present_tex =
                                 metalfx_temporal_get_output_texture();
@@ -1735,7 +1881,10 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
             if (!upscaled && !present_tex) {
                 if (metalfx_init(disp->width, disp->height, out_w, out_h)) {
-                    if (metalfx_upscale(current_surface)) {
+                    bool ok = disp->mtl_texture ?
+                        metalfx_upscale_tex(disp->mtl_texture) :
+                        metalfx_upscale(current_surface);
+                    if (ok) {
                         if (metal_native) {
                             present_tex = metalfx_get_output_texture();
                         }
@@ -1773,21 +1922,28 @@ void pgraph_vk_render_display(PGRAPHState *pg)
          * IOSurface output they aliased the same content.
          */
         if (interp_mode >= 2 && metalfx_interpolation_is_supported()) {
-            int iw, ih;
+            int iw = 0, ih = 0;
             if (present_tex) {
                 metalfx_texture_dims(present_tex, &iw, &ih);
-            } else {
+            } else if (present_surface) {
                 iw = (int)IOSurfaceGetWidth(present_surface);
                 ih = (int)IOSurfaceGetHeight(present_surface);
+            } else if (disp->mtl_texture) {
+                metalfx_texture_dims(disp->mtl_texture, &iw, &ih);
             }
 
-            if (metalfx_interpolation_init(iw, ih,
+            if (iw > 0 && ih > 0 &&
+                metalfx_interpolation_init(iw, ih,
                                            metal_native && temporal_used)) {
                 void *cur = NULL;
                 if (metal_native) {
-                    cur = present_tex ?
-                              (void *)CFRetain(present_tex) :
-                              metalfx_wrap_iosurface_texture(present_surface);
+                    if (present_tex) {
+                        cur = (void *)CFRetain(present_tex);
+                    } else if (disp->mtl_texture) {
+                        cur = (void *)CFRetain(disp->mtl_texture);
+                    } else {
+                        cur = metalfx_wrap_iosurface_texture(present_surface);
+                    }
                 } else {
                     cur = (void *)CFRetain(present_surface);
                 }
@@ -1929,7 +2085,14 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->present_event = metalfx_present_event();
                     disp->present_event_value = real_event_value;
                 } else {
-                    display_set_present_surface(disp, present_surface);
+                    if (present_surface) {
+                        display_set_present_surface(disp, present_surface);
+                    } else if (disp->mtl_texture) {
+                        /* Texture-export mode: publish the exported
+                         * compositor texture directly. */
+                        display_set_present_texture(
+                            disp, (void *)CFRetain(disp->mtl_texture));
+                    }
                     if (r->present_timeline_event) {
                         /* Base compositor frame, async submit: wait
                          * the exported compositor timeline. */
@@ -1948,9 +2111,13 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->pending_real_texture = NULL;
                 }
             }
-            disp->last_cgl_surface_id = IOSurfaceGetID(present_surface);
-            disp->last_cgl_width = (int)IOSurfaceGetWidth(present_surface);
-            disp->last_cgl_height = (int)IOSurfaceGetHeight(present_surface);
+            if (present_surface) {
+                disp->last_cgl_surface_id = IOSurfaceGetID(present_surface);
+                disp->last_cgl_width =
+                    (int)IOSurfaceGetWidth(present_surface);
+                disp->last_cgl_height =
+                    (int)IOSurfaceGetHeight(present_surface);
+            }
         } else if (disp->gl_texture_id) {
             int surf_w = (int)IOSurfaceGetWidth(present_surface);
             int surf_h = (int)IOSurfaceGetHeight(present_surface);
@@ -1974,7 +2141,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             }
         }
 
-        if (present_surface != current_surface) {
+        if (present_surface && present_surface != current_surface) {
             CFRelease(present_surface);
         }
     }
