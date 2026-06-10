@@ -425,6 +425,26 @@ typedef struct PGRAPHVkDisplayState {
     uint64_t pending_real_event_value;
     uint64_t last_present_step_ns; // host time of last published step
     uint64_t interp_step_ns;       // pacing interval between steps
+
+    /*
+     * Cached midpoint frame for the current interpolation cycle.
+     * MTLFXFrameInterpolator has no phase parameter, so all interp
+     * steps of a 4x cycle show the same midpoint image — and the
+     * interpolator's history contract requires prevColorTexture to
+     * equal the previous encode's colorTexture, which repeated
+     * same-pair encodes violate. Generate once per cycle, re-present
+     * the cached output for the remaining steps.
+     */
+    void *interp_midpoint_texture; // id<MTLTexture>, retained
+    uint64_t interp_midpoint_event_value;
+
+    /*
+     * Hitch guard: EMA of real-frame capture gaps. When a gap spikes
+     * (load hitch / scene cut), interpolation is skipped for that
+     * cycle and the interpolator history is reset, instead of
+     * blending across a content jump.
+     */
+    uint64_t interp_avg_gap_ns;
 #endif
 
     SurfaceBinding *last_descriptor_surface;

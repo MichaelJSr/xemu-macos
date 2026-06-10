@@ -671,6 +671,11 @@ static void destroy_current_display_image(PGRAPHState *pg)
         d->pending_real_texture = NULL;
     }
     d->pending_real_event_value = 0;
+    if (d->interp_midpoint_texture) {
+        CFRelease(d->interp_midpoint_texture);
+        d->interp_midpoint_texture = NULL;
+    }
+    d->interp_midpoint_event_value = 0;
     d->present_width = 0;
     d->present_height = 0;
     d->present_event_value = 0;
@@ -1380,27 +1385,18 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                                                  : 8000000ull;
             if (now - disp->last_present_step_ns >= step) {
                 if (disp->interp_remaining > 0 &&
-                    disp->interp_prev_surface && disp->interp_cur_surface &&
-                    metalfx_interpolation_is_supported()) {
-                    float delta_sec =
-                        (float)(disp->interp_cur_surface_ns -
-                                disp->interp_prev_surface_ns) / 1.0e9f;
-                    if (delta_sec < 1.0f / 240.0f) delta_sec = 1.0f / 240.0f;
-                    if (delta_sec > 1.0f / 10.0f)  delta_sec = 1.0f / 10.0f;
-
-                    /* interp_prev/cur hold retained id<MTLTexture> */
-                    if (metalfx_interpolation_generate_tex(
-                            disp->interp_prev_surface,
-                            disp->interp_cur_surface, delta_sec)) {
-                        void *itex =
-                            metalfx_interpolation_get_output_texture();
-                        if (itex) {
-                            display_set_present_texture(disp, itex);
-                            disp->present_event_value =
-                                metalfx_present_event_last_value();
-                        }
-                    }
-                    /* On failure too: skip the slot, don't busy-retry */
+                    disp->interp_midpoint_texture) {
+                    /*
+                     * Re-present the cycle's cached midpoint (generated
+                     * once when the real frame arrived). The API has no
+                     * phase parameter — regenerating from the same pair
+                     * produced the identical image while violating the
+                     * interpolator's prevColorTexture history contract.
+                     */
+                    display_set_present_texture(
+                        disp, (void *)CFRetain(disp->interp_midpoint_texture));
+                    disp->present_event_value =
+                        disp->interp_midpoint_event_value;
                     disp->interp_remaining--;
                     disp->last_present_step_ns = now;
                 } else if (disp->pending_real_texture) {
@@ -1411,6 +1407,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->present_event_value =
                         disp->pending_real_event_value;
                     disp->last_present_step_ns = now;
+                } else {
+                    disp->interp_remaining = 0;
                 }
             }
         } else if (disp->interp_remaining > 0 &&
@@ -1551,6 +1549,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
         bool metal_native = xemu_present_is_metal();
         void *present_tex = NULL; /* retained id<MTLTexture> */
+        bool temporal_used = false;
 
         int out_w = 0, out_h = 0;
         if (mfx_mode > 0 && metal_native) {
@@ -1600,6 +1599,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         if (!present_tex) {
                             upscaled = metalfx_temporal_get_output_surface();
                         }
+                        temporal_used = present_tex != NULL || upscaled != NULL;
                     }
                 }
             }
@@ -1652,7 +1652,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 ih = (int)IOSurfaceGetHeight(present_surface);
             }
 
-            if (metalfx_interpolation_init(iw, ih)) {
+            if (metalfx_interpolation_init(iw, ih,
+                                           metal_native && temporal_used)) {
                 void *cur = NULL;
                 if (metal_native) {
                     cur = present_tex ?
@@ -1663,6 +1664,31 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 }
 
                 if (cur) {
+                    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+
+                    /*
+                     * Hitch guard (Metal backend): if this frame's
+                     * capture gap spikes versus the recent average
+                     * (load hitch, level transition, scene cut), skip
+                     * interpolation for this cycle and reset history —
+                     * blending across a content jump produces garbage
+                     * ghost frames.
+                     */
+                    bool hitch = false;
+                    if (metal_native && disp->interp_cur_surface_ns) {
+                        uint64_t gap_ns =
+                            now_ns - disp->interp_cur_surface_ns;
+                        uint64_t avg = disp->interp_avg_gap_ns;
+                        hitch = gap_ns > 50000000ull ||
+                                (avg && gap_ns > (avg * 5) / 2);
+                        /* Don't pollute the average with spike samples */
+                        uint64_t sample = hitch ? avg : gap_ns;
+                        if (sample) {
+                            disp->interp_avg_gap_ns =
+                                avg ? (avg * 7 + sample) / 8 : sample;
+                        }
+                    }
+
                     /* Release old prev, shift current to prev */
                     if (disp->interp_prev_surface) {
                         CFRelease(disp->interp_prev_surface);
@@ -1671,10 +1697,12 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     disp->interp_prev_surface_ns =
                         disp->interp_cur_surface_ns;
                     disp->interp_cur_surface = cur;
-                    disp->interp_cur_surface_ns =
-                        qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                    disp->interp_cur_surface_ns = now_ns;
 
-                    if (disp->interp_prev_surface) {
+                    if (hitch) {
+                        disp->interp_remaining = 0;
+                        metalfx_interpolation_reset();
+                    } else if (disp->interp_prev_surface) {
                         disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
                         disp->interp_width = iw;
                         disp->interp_height = ih;
@@ -1720,9 +1748,24 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->interp_cur_surface, delta_sec)) {
                     void *itex = metalfx_interpolation_get_output_texture();
                     if (itex) {
+                        /*
+                         * Cache the midpoint for the remaining steps
+                         * of a 4x cycle (the API has no phase
+                         * parameter; regenerating from the same pair
+                         * would produce the identical image and
+                         * violate the history contract).
+                         */
+                        if (disp->interp_midpoint_texture) {
+                            CFRelease(disp->interp_midpoint_texture);
+                        }
+                        disp->interp_midpoint_texture =
+                            (void *)CFRetain(itex);
+                        disp->interp_midpoint_event_value =
+                            metalfx_present_event_last_value();
+
                         display_set_present_texture(disp, itex);
                         disp->present_event_value =
-                            metalfx_present_event_last_value();
+                            disp->interp_midpoint_event_value;
                         interp_first_presented = true;
 
                         /* Hold the real frame; pace the cycle's steps
@@ -1742,7 +1785,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     }
                 }
                 if (!interp_first_presented) {
-                    disp->interp_remaining--;
+                    /* Generation failed: present the real frame now and
+                     * cancel the cycle (no midpoint to step through). */
+                    disp->interp_remaining = 0;
                 }
             }
 

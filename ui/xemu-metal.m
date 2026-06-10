@@ -282,6 +282,20 @@ int xemu_metal_get_drawable_height(void)
     return g_drawable_h;
 }
 
+void xemu_metal_retain_handle(void *handle)
+{
+    if (handle) {
+        CFRetain(handle);
+    }
+}
+
+void xemu_metal_release_handle(void *handle)
+{
+    if (handle) {
+        CFRelease(handle);
+    }
+}
+
 void *xemu_metal_wrap_iosurface(void *iosurface)
 {
     IOSurfaceRef surf = (IOSurfaceRef)iosurface;

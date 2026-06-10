@@ -1011,14 +1011,30 @@ static void metal_render_frame(struct xemu_console *scon)
     uintptr_t tex = 0;
     if (frame.mtl_texture) {
         tex = (uintptr_t)frame.mtl_texture;
+        /* Keep the texture alive for the rest of the frame
+         * independently of the renderer's reference. */
+        xemu_metal_retain_handle(frame.mtl_texture);
     } else if (frame.iosurface) {
+        /* The wrap cache holds its own texture reference, and the
+         * texture retains the IOSurface. */
         tex = (uintptr_t)xemu_metal_wrap_iosurface(frame.iosurface);
     }
+
+    /*
+     * Done with the renderer's borrowed pointers — release the
+     * framebuffer handshake *before* acquiring a drawable so the
+     * PFIFO thread is never coupled to nextDrawable stalls (vsync /
+     * occlusion). The shared event outlives subsystem teardowns
+     * (sticky), and our retain/wrap covers the texture.
+     */
+    nv2a_release_framebuffer_surface();
 
     if (!xemu_metal_begin_frame(frame.event,
                                 tex ? frame.event_value : 0)) {
         /* No drawable available (e.g. window fully occluded). */
-        nv2a_release_framebuffer_surface();
+        if (frame.mtl_texture) {
+            xemu_metal_release_handle(frame.mtl_texture);
+        }
         qatomic_set(&rendering, false);
         return;
     }
@@ -1055,8 +1071,11 @@ static void metal_render_frame(struct xemu_console *scon)
 
     xemu_hud_render();
 
-    nv2a_release_framebuffer_surface();
     xemu_metal_end_frame();
+
+    if (frame.mtl_texture) {
+        xemu_metal_release_handle(frame.mtl_texture);
+    }
 
     qatomic_set(&rendering, false);
 

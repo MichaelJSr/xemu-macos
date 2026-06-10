@@ -58,7 +58,16 @@ void metalfx_temporal_destroy(void);
 
 /* Frame interpolation (macOS 26+) */
 bool metalfx_interpolation_is_supported(void);
-bool metalfx_interpolation_init(int width, int height);
+/*
+ * link_temporal_scaler: when true and the temporal scaler is active at
+ * matching output dimensions, the interpolator is linked to it
+ * (MTLFXFrameInterpolatableScaler) and inherits its real motion/depth/
+ * history state — the highest-quality interpolation path.
+ */
+bool metalfx_interpolation_init(int width, int height,
+                                bool link_temporal_scaler);
+/* Invalidate interpolator history (scene cut / frame-time hitch). */
+void metalfx_interpolation_reset(void);
 IOSurfaceRef metalfx_interpolation_get_output_surface(void);
 void *metalfx_interpolation_get_output_texture(void); /* retained; Metal-native */
 bool metalfx_interpolation_generate(IOSurfaceRef colorA,

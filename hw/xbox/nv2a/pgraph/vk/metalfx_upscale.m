@@ -19,6 +19,7 @@
 
 #import <os/lock.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #ifndef NDEBUG
@@ -143,7 +144,8 @@ static bool shared_metal_acquire(id<MTLDevice> *out_device,
             g_shared_device = nil;
             return false;
         }
-        if (xemu_present_is_metal()) {
+        /* Sticky: created once per process (see shared_metal_release) */
+        if (xemu_present_is_metal() && !g_present_event) {
             g_present_event = [g_shared_device newSharedEvent];
         }
     }
@@ -162,9 +164,14 @@ static void shared_metal_release(void)
          * not release the previous object. Explicit release is required
          * or we leak both MTLDevice and MTLCommandQueue for the process
          * lifetime.
+         *
+         * g_present_event is deliberately NOT released here: the UI
+         * thread holds borrowed pointers to it across frames (in
+         * NV2APresentFrame and encoded GPU waits), and subsystem
+         * re-initialization can momentarily drop the refcount to zero.
+         * One MTLSharedEvent for the process lifetime is the safe
+         * contract; its monotonic value survives device re-acquisition.
          */
-        [g_present_event release];
-        g_present_event = nil;
         [g_shared_queue release];
         g_shared_queue = nil;
         [g_shared_device release];
@@ -1006,7 +1013,25 @@ typedef struct MetalFXInterpolationState {
     id<MTLTexture> cachedColorCur;
     id<MTLTexture> cachedColorPrev;
     id<MTLTexture> cachedDepthCur;   /* bound if caller provides depth */
+    /*
+     * Legacy zero-filled motion texture, created and bound only when
+     * XEMU_MFX_INTERP_ZERO_MOTION is set. A zeroed motion texture
+     * asserts "no pixel moved between the two frames", which makes
+     * the interpolator ghost-blend moving objects between their two
+     * positions (character flicker/blur against the background). The
+     * motionTexture property is nullable: leaving it nil lets MetalFX
+     * fall back to internal motion estimation, which handles game
+     * content far better.
+     */
     id<MTLTexture> motionTexture;
+    /*
+     * Synthetic depth for the interpolator (luminance proxy, same
+     * kernel as the temporal scaler but at interpolation resolution).
+     * Gives the interpolator object/background separation cues when
+     * no real depth exists and no temporal scaler is linked.
+     */
+    id<MTLComputePipelineState> synthDepthPipeline;
+    id<MTLTexture> synthDepthTexture;
     IOSurfaceID lastColorCurID;
     IOSurfaceID lastColorPrevID;
     IOSurfaceID lastDepthCurID;
@@ -1018,9 +1043,29 @@ typedef struct MetalFXInterpolationState {
     int width, height;
     bool initialized;
     bool firstFrame;
+    /*
+     * When the producer is the MetalFX temporal scaler, the
+     * interpolator is linked to it through the descriptor's `scaler`
+     * property (MTLFXTemporalScaler conforms to
+     * MTLFXFrameInterpolatableScaler) so it inherits the scaler's
+     * real motion/depth/history state — Apple's highest-quality
+     * interpolation path. Tracked so a mode change recreates the
+     * interpolator.
+     */
+    bool linked_to_temporal;
 } MetalFXInterpolationState;
 
 static MetalFXInterpolationState g_interp = { 0 };
+
+static bool interp_zero_motion_requested(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("XEMU_MFX_INTERP_ZERO_MOTION");
+        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    return cached == 1;
+}
 
 bool metalfx_interpolation_is_supported(void)
 {
@@ -1044,12 +1089,15 @@ static void metalfx_interpolation_destroy_locked(void)
     [g_interp.outputSharedTexture release];    g_interp.outputSharedTexture = nil;
     ring_destroy(&g_interp.ring);
     [g_interp.motionTexture release];          g_interp.motionTexture = nil;
+    [g_interp.synthDepthPipeline release];     g_interp.synthDepthPipeline = nil;
+    [g_interp.synthDepthTexture release];      g_interp.synthDepthTexture = nil;
     [g_interp.cachedColorCur release];         g_interp.cachedColorCur = nil;
     [g_interp.cachedColorPrev release];        g_interp.cachedColorPrev = nil;
     [g_interp.cachedDepthCur release];         g_interp.cachedDepthCur = nil;
     g_interp.lastColorCurID = 0;
     g_interp.lastColorPrevID = 0;
     g_interp.lastDepthCurID = 0;
+    g_interp.linked_to_temporal = false;
     if (g_interp.outputSurface) {
         CFRelease(g_interp.outputSurface);
         g_interp.outputSurface = NULL;
@@ -1062,12 +1110,22 @@ static void metalfx_interpolation_destroy_locked(void)
     g_interp.initialized = false;
 }
 
-bool metalfx_interpolation_init(int width, int height)
+bool metalfx_interpolation_init(int width, int height,
+                                bool link_temporal_scaler)
 {
     if (@available(macOS 26.0, *)) {
         os_unfair_lock_lock(&g_metalfx_lock);
+
+        /* Only link when the temporal scaler actually produces frames
+         * at the interpolator's input size. */
+        bool can_link = link_temporal_scaler && g_temporal.initialized &&
+                        g_temporal.scaler != nil &&
+                        g_temporal.outputWidth == width &&
+                        g_temporal.outputHeight == height;
+
         if (g_interp.initialized) {
-            if (g_interp.width == width && g_interp.height == height) {
+            if (g_interp.width == width && g_interp.height == height &&
+                g_interp.linked_to_temporal == can_link) {
                 os_unfair_lock_unlock(&g_metalfx_lock);
                 return true;
             }
@@ -1092,9 +1150,29 @@ bool metalfx_interpolation_init(int width, int height)
             desc.inputHeight = height;
             desc.outputWidth = width;
             desc.outputHeight = height;
+            if (can_link) {
+                /*
+                 * MTLFXTemporalScaler conforms to
+                 * MTLFXFrameInterpolatableScaler: linking hands the
+                 * interpolator the scaler's real motion/depth/history
+                 * state instead of relying on optical-flow estimation.
+                 */
+                desc.scaler =
+                    (id<MTLFXFrameInterpolatableScaler>)g_temporal.scaler;
+            }
 
             id<MTLFXFrameInterpolator> interp =
                 [desc newFrameInterpolatorWithDevice:g_interp.device];
+            if (!interp && can_link) {
+                /* Linked creation unsupported on this OS/device: retry
+                 * standalone. */
+                METALFX_DPRINTF(
+                        "MetalFX: Linked frame interpolator creation "
+                        "failed; retrying standalone\n");
+                can_link = false;
+                desc.scaler = nil;
+                interp = [desc newFrameInterpolatorWithDevice:g_interp.device];
+            }
             [desc release];
             if (!interp) {
                 METALFX_DPRINTF(
@@ -1104,6 +1182,7 @@ bool metalfx_interpolation_init(int width, int height)
                 return false;
             }
             g_interp.interpolator = interp;
+            g_interp.linked_to_temporal = can_link;
 
             if (xemu_present_is_metal() &&
                 ring_init(&g_interp.ring, g_interp.device, width, height,
@@ -1142,23 +1221,67 @@ bool metalfx_interpolation_init(int width, int height)
                 }
             }
 
-            MTLTextureDescriptor *motionDesc = [MTLTextureDescriptor
-                texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
-                                            width:width
-                                           height:height
-                                        mipmapped:NO];
-            motionDesc.usage = MTLTextureUsageShaderRead;
-            motionDesc.storageMode = MTLStorageModeShared;
-            g_interp.motionTexture =
-                [g_interp.device newTextureWithDescriptor:motionDesc];
-            MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-            size_t bpr = width * 4;
-            void *zeros = calloc(height, bpr);
-            [g_interp.motionTexture replaceRegion:region
-                                      mipmapLevel:0
-                                        withBytes:zeros
-                                      bytesPerRow:bpr];
-            free(zeros);
+            /*
+             * Motion texture: only when explicitly requested via
+             * XEMU_MFX_INTERP_ZERO_MOTION (legacy/debug). The default
+             * is nil — internal motion estimation (see state struct
+             * comment).
+             */
+            if (interp_zero_motion_requested()) {
+                MTLTextureDescriptor *motionDesc = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
+                                                width:width
+                                               height:height
+                                            mipmapped:NO];
+                motionDesc.usage = MTLTextureUsageShaderRead;
+                motionDesc.storageMode = MTLStorageModeShared;
+                g_interp.motionTexture =
+                    [g_interp.device newTextureWithDescriptor:motionDesc];
+                MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                size_t bpr = width * 4;
+                void *zeros = calloc(height, bpr);
+                [g_interp.motionTexture replaceRegion:region
+                                          mipmapLevel:0
+                                            withBytes:zeros
+                                          bytesPerRow:bpr];
+                free(zeros);
+            }
+
+            /*
+             * Synthetic luminance depth at interpolation resolution
+             * (standalone interpolator only; a linked temporal scaler
+             * supplies its own internal data).
+             */
+            if (!can_link) {
+                NSError *err = nil;
+                id<MTLLibrary> lib = [g_interp.device
+                    newLibraryWithSource:kSyntheticDepthKernel
+                                 options:nil
+                                   error:&err];
+                if (lib) {
+                    id<MTLFunction> fn =
+                        [lib newFunctionWithName:@"syntheticDepth"];
+                    if (fn) {
+                        g_interp.synthDepthPipeline = [g_interp.device
+                            newComputePipelineStateWithFunction:fn
+                                                          error:&err];
+                        [fn release];
+                    }
+                    [lib release];
+                }
+                if (g_interp.synthDepthPipeline) {
+                    MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor
+                        texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                    width:width
+                                                   height:height
+                                                mipmapped:NO];
+                    depthDesc.usage = MTLTextureUsageShaderRead |
+                                      MTLTextureUsageShaderWrite;
+                    depthDesc.storageMode = MTLStorageModePrivate;
+                    g_interp.synthDepthTexture =
+                        [g_interp.device newTextureWithDescriptor:depthDesc];
+                }
+            }
 
             g_interp.width = width;
             g_interp.height = height;
@@ -1166,14 +1289,23 @@ bool metalfx_interpolation_init(int width, int height)
             g_interp.firstFrame = true;
 
             METALFX_DPRINTF(
-                    "MetalFX: Frame interpolator initialized %dx%d\n",
-                    width, height);
+                    "MetalFX: Frame interpolator initialized %dx%d%s\n",
+                    width, height,
+                    can_link ? " (linked to temporal scaler)" : "");
             os_unfair_lock_unlock(&g_metalfx_lock);
             return true;
         }
     }
-    (void)width; (void)height;
+    (void)width; (void)height; (void)link_temporal_scaler;
     return false;
+}
+
+/* Invalidate interpolator history (scene cut / frame-time hitch). */
+void metalfx_interpolation_reset(void)
+{
+    os_unfair_lock_lock(&g_metalfx_lock);
+    g_interp.firstFrame = true;
+    os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
 /* Caller must CFRelease the returned IOSurfaceRef. */
@@ -1193,6 +1325,69 @@ void *metalfx_interpolation_get_output_texture(void)
     void *t = ring_last_retained(&g_interp.ring);
     os_unfair_lock_unlock(&g_metalfx_lock);
     return t;
+}
+
+/*
+ * Common interpolator configuration (camera parameters, motion mode,
+ * pacing, history). Caller holds g_metalfx_lock.
+ */
+API_AVAILABLE(macos(26.0))
+static void interp_configure_common(id<MTLFXFrameInterpolator> interp,
+                                    float delta_time)
+{
+    /* nil by default: MetalFX internal motion estimation. The zeroed
+     * texture (legacy/debug env) asserts "nothing moved" and ghosts
+     * moving objects. */
+    interp.motionTexture = g_interp.motionTexture;
+    interp.motionVectorScaleX = 1.0f;
+    interp.motionVectorScaleY = 1.0f;
+
+    if (delta_time < 0.001f || delta_time > 0.1f) {
+        delta_time = 1.0f / 60.0f;
+    }
+    interp.deltaTime = delta_time;
+
+    /* Plausible camera parameters for the reprojection math; the
+     * previous code left fieldOfView/aspectRatio at defaults. Xbox
+     * titles overwhelmingly use a perspective projection in this
+     * range, and approximate values beat uninitialized ones. */
+    interp.nearPlane = 0.01f;
+    interp.farPlane = 10000.0f;
+    interp.fieldOfView = 60.0f;
+    interp.aspectRatio = (float)g_interp.width / (float)g_interp.height;
+    /* Synthetic luminance depth: treat brighter as nearer (reversed-Z
+     * semantics, matching the property default — set explicitly). */
+    interp.depthReversed = YES;
+
+    interp.shouldResetHistory = g_interp.firstFrame;
+    g_interp.firstFrame = false;
+}
+
+/*
+ * Encode the synthetic-depth pass (luminance proxy of the current
+ * color frame) ahead of the interpolator in the same command buffer.
+ * Returns the depth texture to bind, or nil. Caller holds the lock.
+ */
+static id<MTLTexture> interp_encode_synth_depth(id<MTLCommandBuffer> cb,
+                                                id<MTLTexture> color)
+{
+    if (!g_interp.synthDepthPipeline || !g_interp.synthDepthTexture ||
+        !color) {
+        return nil;
+    }
+
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:g_interp.synthDepthPipeline];
+    [enc setTexture:color atIndex:0];
+    [enc setTexture:g_interp.synthDepthTexture atIndex:1];
+    NSUInteger tw = g_interp.synthDepthPipeline.threadExecutionWidth;
+    NSUInteger th =
+        g_interp.synthDepthPipeline.maxTotalThreadsPerThreadgroup / tw;
+    MTLSize tgSize = MTLSizeMake(tw, th, 1);
+    MTLSize gridSize = MTLSizeMake(g_interp.width, g_interp.height, 1);
+    [enc dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+    [enc endEncoding];
+    return g_interp.synthDepthTexture;
 }
 
 bool metalfx_interpolation_generate(IOSurfaceRef colorA,
@@ -1273,28 +1468,14 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             interp.colorTexture = g_interp.cachedColorCur;
             interp.prevColorTexture = g_interp.cachedColorPrev;
             interp.outputTexture = output;
-            interp.motionTexture = g_interp.motionTexture;
-            interp.motionVectorScaleX = 1.0f;
-            interp.motionVectorScaleY = 1.0f;
-            /*
-             * delta_time is wall-clock seconds between the two input
-             * frames. Callers clamp to [1/240, 1/10] s; re-clamp here
-             * defensively for direct/future callers and fall back to
-             * one 60 Hz frame on obviously-bogus values (e.g. first-
-             * frame case where prev capture timestamp was 0 or a
-             * pause/unpause jump that slipped past the caller).
-             */
-            if (delta_time < 0.001f || delta_time > 0.1f) {
-                delta_time = 1.0f / 60.0f;
-            }
-            interp.deltaTime = delta_time;
-            interp.nearPlane = 0.01f;
-            interp.farPlane = 10000.0f;
-            interp.depthTexture = g_interp.cachedDepthCur;  /* nil is valid */
-            interp.shouldResetHistory = g_interp.firstFrame;
-            g_interp.firstFrame = false;
+            interp_configure_common(interp, delta_time);
 
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            id<MTLTexture> depth = g_interp.cachedDepthCur;
+            if (!depth && !g_interp.linked_to_temporal) {
+                depth = interp_encode_synth_depth(cb, g_interp.cachedColorCur);
+            }
+            interp.depthTexture = depth; /* nil is valid */
             [interp encodeToCommandBuffer:cb];
 
             if (g_interp.outputSharedTexture) {
@@ -1360,20 +1541,15 @@ bool metalfx_interpolation_generate_tex(void *prevTexture,
             interp.colorTexture = (id<MTLTexture>)curTexture;
             interp.prevColorTexture = (id<MTLTexture>)prevTexture;
             interp.outputTexture = output;
-            interp.motionTexture = g_interp.motionTexture;
-            interp.motionVectorScaleX = 1.0f;
-            interp.motionVectorScaleY = 1.0f;
-            if (delta_time < 0.001f || delta_time > 0.1f) {
-                delta_time = 1.0f / 60.0f;
-            }
-            interp.deltaTime = delta_time;
-            interp.nearPlane = 0.01f;
-            interp.farPlane = 10000.0f;
-            interp.depthTexture = nil;
-            interp.shouldResetHistory = g_interp.firstFrame;
-            g_interp.firstFrame = false;
+            interp_configure_common(interp, delta_time);
 
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            id<MTLTexture> depth = nil;
+            if (!g_interp.linked_to_temporal) {
+                depth = interp_encode_synth_depth(
+                    cb, (id<MTLTexture>)curTexture);
+            }
+            interp.depthTexture = depth; /* nil is valid */
             [interp encodeToCommandBuffer:cb];
 
             atomic_fetch_add_explicit(&g_interp_inflight, 1,

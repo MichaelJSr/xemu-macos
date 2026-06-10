@@ -83,6 +83,10 @@ int xemu_metal_get_drawable_height(void);
  */
 void *xemu_metal_wrap_iosurface(void *iosurface);
 
+/* Retain/release an ObjC handle (CFRetain/CFRelease) from C code. */
+void xemu_metal_retain_handle(void *handle);
+void xemu_metal_release_handle(void *handle);
+
 /*
  * Upload a 32bpp pixman surface (BGRX/BGRA, top-origin rows) for the
  * VGA fallback path. Reuses/resizes one cached texture; the returned
