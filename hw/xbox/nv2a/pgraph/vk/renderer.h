@@ -259,6 +259,13 @@ typedef struct TextureBinding {
     uint64_t *chunk_hashes;
     uint32_t num_chunk_hashes;
     uint64_t palette_hash;
+    /*
+     * Guest frame (pg->frame_time) in which this binding's content was
+     * last verified against (or uploaded from) guest RAM. Re-binds in
+     * the same frame skip the per-bind dirty-bitmap scan + hash unless
+     * possibly_dirty was raised in between. See create_texture().
+     */
+    int verified_frame_time;
     unsigned int draw_time;
     uint32_t submit_time;
 } TextureBinding;
@@ -968,7 +975,8 @@ void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
-void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
+void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start,
+                                                   hwaddr size, int nsprof_ev);
 void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                                    bool force);
 void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,

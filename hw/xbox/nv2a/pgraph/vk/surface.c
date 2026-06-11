@@ -29,6 +29,7 @@
 #include "qemu/timer.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
+#include "hw/xbox/nv2a/nsprof.h"
 
 #if HAVE_IOSURFACE_SHARING
 #include <CoreFoundation/CoreFoundation.h>
@@ -233,7 +234,8 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
 }
 
 void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
-                                                   hwaddr start, hwaddr size)
+                                                   hwaddr start, hwaddr size,
+                                                   int nsprof_ev)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     hwaddr range_end = start + size;
@@ -244,6 +246,9 @@ void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
         }
         if (r->surface_ranges[i].end <= start) {
             continue;
+        }
+        if (r->surface_ranges[i].surface->draw_dirty) {
+            nsprof_event(nsprof_ev);
         }
         pgraph_vk_surface_download_if_dirty(
             container_of(pg, NV2AState, pgraph),
@@ -262,6 +267,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
+    int64_t nsprof_t0 = nsprof_begin();
 
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -581,6 +587,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         nv2a_profile_inc_counter(NV2A_PROF_SURF_SWIZZLE);
         g_free(swizzle_buf);
     }
+    nsprof_end(NSPROF_SURF_DOWNLOAD, nsprof_t0);
 }
 
 static void download_surface(NV2AState *d, SurfaceBinding *surface, bool force)
@@ -679,6 +686,8 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
         }
 
         if (surface->draw_dirty) {
+            nsprof_event(write ? NSPROF_EV_SDOWN_ACCESS_W
+                               : NSPROF_EV_SDOWN_ACCESS_R);
             surface->download_pending = true;
             wait_for_downloads = true;
         }
@@ -757,19 +766,42 @@ static void unbind_surface(NV2AState *d, bool color)
     }
 }
 
-static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
+/*
+ * True while the surface's image may be referenced by the currently
+ * recording (unsubmitted) command buffer. Such an image must not be
+ * migrated to a new binding or destroyed: draws recorded against it
+ * would read the wrong content once submitted. Images referenced only
+ * by *submitted* work are safe to reuse — MoltenVK's single queue
+ * executes later submissions after earlier ones.
+ */
+static bool surface_image_in_recording_cb(PGRAPHVkState *r,
+                                          SurfaceBinding const *surface)
+{
+    return r->in_command_buffer &&
+           surface->draw_time >= r->command_buffer_start_time;
+}
+
+static void invalidate_surface_full(NV2AState *d, SurfaceBinding *surface,
+                                    bool allow_deferred)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 
     trace_nv2a_pgraph_surface_invalidated(surface->vram_addr);
 
-    if (r->in_command_buffer &&
-        surface->draw_time >= r->command_buffer_start_time) {
+    /*
+     * allow_deferred: skip the finish when the caller has discarded
+     * the surface's content (no readback wanted). The image stays
+     * quarantined in the invalid pool — get_any_compatible_invalid_-
+     * surface and prune_invalid_surfaces skip entries still
+     * referenced by the recording command buffer — so no submit +
+     * fence round trip is needed.
+     */
+    if (!allow_deferred && surface_image_in_recording_cb(r, surface)) {
         pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_SURFACE_DOWN);
     }
 
-    nv2a_vk_assert((!r->in_command_buffer ||
-            surface->draw_time < r->command_buffer_start_time) &&
+    nv2a_vk_assert((allow_deferred ||
+            !surface_image_in_recording_cb(r, surface)) &&
            "Surface evicted while in use!");
 
     if (surface == r->color_binding) {
@@ -791,6 +823,11 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
     QTAILQ_REMOVE(&r->surfaces, surface, entry);
     QTAILQ_INSERT_HEAD(&r->invalid_surfaces, surface, entry);
     r->invalid_surface_count++;
+}
+
+static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
+{
+    invalidate_surface_full(d, surface, false);
 }
 
 static void invalidate_overlapping_surfaces(NV2AState *d,
@@ -833,6 +870,9 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
         trace_nv2a_pgraph_surface_evict_overlapping(
             to_invalidate[i]->vram_addr, to_invalidate[i]->width,
             to_invalidate[i]->height, to_invalidate[i]->pitch);
+        if (to_invalidate[i]->draw_dirty) {
+            nsprof_event(NSPROF_EV_SDOWN_EVICT);
+        }
         pgraph_vk_surface_download_if_dirty(d, to_invalidate[i]);
         invalidate_surface(d, to_invalidate[i]);
     }
@@ -1131,6 +1171,12 @@ get_any_compatible_invalid_surface(PGRAPHVkState *r, SurfaceBinding *target)
 {
     SurfaceBinding *surface, *next;
     QTAILQ_FOREACH_SAFE(surface, &r->invalid_surfaces, entry, next) {
+        /* Quarantine: deferred-invalidated image still referenced by
+         * the recording command buffer (see invalidate_surface_full).
+         */
+        if (surface_image_in_recording_cb(r, surface)) {
+            continue;
+        }
         if (surface->host_fmt.vk_format == target->host_fmt.vk_format &&
             surface->width == target->width &&
             surface->height == target->height &&
@@ -1151,6 +1197,9 @@ static void prune_invalid_surfaces(PGRAPHVkState *r, int keep)
         if (r->invalid_surface_count <= keep) {
             break;
         }
+        if (surface_image_in_recording_cb(r, surface)) {
+            continue;
+        }
         QTAILQ_REMOVE(&r->invalid_surfaces, surface, entry);
         r->invalid_surface_count--;
         destroy_surface_image(r, surface);
@@ -1167,10 +1216,23 @@ static void expire_old_surfaces(NV2AState *d)
         int last_used = d->pgraph.frame_time - s->frame_time;
         if (last_used >= max_surface_frame_time_delta) {
             trace_nv2a_pgraph_surface_evict_reason("old", s->vram_addr);
+            if (s->draw_dirty) {
+                nsprof_event(NSPROF_EV_SDOWN_EVICT);
+            }
             pgraph_vk_surface_download_if_dirty(d, s);
             invalidate_surface(d, s);
         }
     }
+}
+
+static bool zeta_shape_readback_forced(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("XEMU_ZETA_SHAPE_READBACK");
+        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    return cached == 1;
 }
 
 static bool check_surface_compatibility(SurfaceBinding const *s1,
@@ -1234,6 +1296,9 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         (surface == r->color_binding) ||
         (surface == r->zeta_binding) ||
         r->in_command_buffer;
+
+    nsprof_event(surface->color ? NSPROF_EV_SUPLOAD_COLOR
+                                : NSPROF_EV_SUPLOAD_ZETA);
 
     if (target_is_active) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
@@ -1785,6 +1850,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             pg->surface_shape.clip_height);
 
         bool should_create = true;
+        bool zeta_shape_discard = false;
 
         if (surface != NULL) {
             bool is_compatible =
@@ -1833,12 +1899,56 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 trace_nv2a_pgraph_surface_evict_reason(
                     "incompatible", surface->vram_addr);
                 compare_surfaces(surface, &target);
-                pgraph_vk_surface_download_if_dirty(d, surface);
-                invalidate_surface(d, surface);
+                /*
+                 * Shape switch at the same VRAM address. For zeta
+                 * surfaces, skip the GPU->CPU readback: its only
+                 * effect is seeding guest RAM with the old shape's
+                 * depth bytes so a hypothetical consumer sees aliased
+                 * content, but titles that re-shape a depth target
+                 * (e.g. Azurik ping-pongs one zeta allocation between
+                 * the 1280x480 scene and a 256x256 swizzled RTT pass
+                 * every frame) clear it before drawing, and the
+                 * genuine RAM consumers (CPU access callbacks,
+                 * texture binds over the range) are zero in measured
+                 * gameplay. The readback costs a finish + fence +
+                 * D24S8 compute conversion + multi-MB memcpy, twice
+                 * per flip on affected titles. An already-requested
+                 * CPU download (download_pending) is still honored.
+                 * XEMU_ZETA_SHAPE_READBACK=1 restores the readback.
+                 */
+                bool skip_readback = !surface->color &&
+                                     !surface->download_pending &&
+                                     !zeta_shape_readback_forced();
+                if (skip_readback) {
+                    zeta_shape_discard = true;
+                    surface->draw_dirty = false;
+                    surface->download_pending = false;
+                    /* Content discarded: defer image reuse to the
+                     * next command buffer instead of finishing. */
+                    invalidate_surface_full(d, surface, true);
+                } else {
+                    if (surface->draw_dirty) {
+                        nsprof_event(NSPROF_EV_SDOWN_INCOMPAT);
+                    }
+                    pgraph_vk_surface_download_if_dirty(d, surface);
+                    invalidate_surface(d, surface);
+                }
             }
         }
 
         if (should_create) {
+            /*
+             * Companion to the readback skip above: the discarded
+             * zeta shape's RAM bytes weren't refreshed, and a zeta
+             * target re-shaped at the same address gets cleared by
+             * the guest before use — seeding it from (stale or
+             * unrelated) RAM costs a 2+ MB compute-converted upload
+             * plus a finish when a command buffer is recording,
+             * twice per flip on ping-pong titles.
+             */
+            if (zeta_shape_discard && !target.color) {
+                target.upload_pending = false;
+            }
             surface = get_any_compatible_invalid_surface(r, &target);
             if (surface) {
                 migrate_surface_image(&target, surface);
@@ -2105,6 +2215,9 @@ void pgraph_vk_surface_flush(NV2AState *d)
     QTAILQ_FOREACH_SAFE(s, &r->surfaces, entry, next) {
         // FIXME: We should download all surfaces to ram, but need to
         //        investigate corruption issue
+        if (s->draw_dirty) {
+            nsprof_event(NSPROF_EV_SDOWN_FLUSH);
+        }
         pgraph_vk_surface_download_if_dirty(d, s);
         invalidate_surface(d, s);
     }

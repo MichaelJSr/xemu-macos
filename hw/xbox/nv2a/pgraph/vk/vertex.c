@@ -24,7 +24,7 @@
  */
 
 #include "renderer.h"
-#include "nsprof.h"
+#include "hw/xbox/nv2a/nsprof.h"
 
 /*
  * Compare the currently-populated vertex attribute / binding
@@ -96,7 +96,8 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    pgraph_vk_download_surfaces_in_range_if_dirty(pg, offset, size);
+    pgraph_vk_download_surfaces_in_range_if_dirty(pg, offset, size,
+                                                  NSPROF_EV_SDOWN_VTXRAM);
 
     size_t start_bit = offset / TARGET_PAGE_SIZE;
     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
@@ -121,8 +122,30 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
         }
         if (find_next_bit(r->flight[i].uploaded_bitmap,
                           start_bit + nbits, start_bit) < end_bit) {
-            pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
-            break;
+            if (i == r->current_flight) {
+                /*
+                 * The currently recording command buffer references
+                 * this range: it must be submitted before the mirror
+                 * is overwritten, and the submit's fence waited.
+                 */
+                pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
+                break;
+            }
+            /*
+             * The conflicting GPU reads were already submitted with
+             * slot i. Waiting that slot's fence is sufficient — the
+             * previous behavior (a full pgraph_vk_finish) also
+             * submitted and rotated the current command buffer,
+             * costing a submit + cross-slot fence wait per conflict.
+             * Measured in-game this fired 3-6x per flip on streamed
+             * vertex data, serializing the 2-slot pipeline. After the
+             * wait, the slot's upload tracking is cleared so further
+             * writes this frame skip the (already signaled) fence.
+             */
+            pgraph_vk_wait_slot_fence(pg, i);
+            bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
+            r->flight[i].uploaded_first_dirty_bit = ULONG_MAX;
+            r->flight[i].uploaded_last_dirty_bit = 0;
         }
     }
 

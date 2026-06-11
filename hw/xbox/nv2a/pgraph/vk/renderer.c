@@ -25,7 +25,8 @@
 #if HAVE_IOSURFACE_SHARING
 #include "metalfx_upscale.h"
 #endif
-#include "nsprof.h"
+#include "hw/xbox/nv2a/nsprof.h"
+#include "ui/xemu-present.h"
 
 #if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
 static GloContext *g_gl_context;
@@ -34,7 +35,15 @@ static GloContext *g_gl_context;
 static void early_context_init(void)
 {
 #if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
-    g_gl_context = glo_context_create();
+    /*
+     * The gloffscreen context only serves the GL presentation paths
+     * (CGL IOSurface display, GL readbacks). Under the Metal backend
+     * the present chain is pure Metal/Vulkan, so skip the hidden GL
+     * window + context.
+     */
+    if (!xemu_present_is_metal()) {
+        g_gl_context = glo_context_create();
+    }
 #endif
 }
 
@@ -45,7 +54,9 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     pg->vk_renderer_state = (PGRAPHVkState *)g_malloc0(sizeof(PGRAPHVkState));
 
 #if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
-    glo_set_current(g_gl_context);
+    if (g_gl_context) {
+        glo_set_current(g_gl_context);
+    }
 #endif
 
     pgraph_vk_debug_init();

@@ -29,7 +29,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/lru.h"
 #include "renderer.h"
-#include "nsprof.h"
+#include "hw/xbox/nv2a/nsprof.h"
 
 /*
  * Incremental texture content hashing.
@@ -807,6 +807,16 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
             }
         }
     }
+}
+
+static bool tex_bind_recheck_forced(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("XEMU_TEX_BIND_RECHECK");
+        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    return cached == 1;
 }
 
 static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
@@ -1708,7 +1718,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
         // Writeback any surfaces which this texture may index
         pgraph_vk_download_surfaces_in_range_if_dirty(
-            pg, texture_vram_offset, texture_length);
+            pg, texture_vram_offset, texture_length,
+            NSPROF_EV_SDOWN_TEXBIND);
     }
 
     if (surface_to_texture && pg->surface_scale_factor > 1) {
@@ -1861,10 +1872,33 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     void *texture_data = (char*)d->vram_ptr + texture_vram_offset;
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
+    /*
+     * Once-per-frame content verification. A binding whose content was
+     * already verified (or uploaded) this guest frame and that hasn't
+     * been marked possibly_dirty since can skip the dirty-bitmap scan
+     * and hashing below: a guest write since the verification leaves
+     * page dirty bits set, which the *next* frame's first bind picks
+     * up. Re-binds are the common case (measured ~1100 texture binds
+     * per flip vs ~50 distinct textures), and the per-bind scan cost
+     * 0.5-1.3 ms/flip on the PFIFO thread. The one behavior delta is
+     * a CPU write landing between two binds of the same texture in
+     * the same frame: it now takes effect one frame later
+     * (render-to-texture content is unaffected — surfaces don't take
+     * this path). XEMU_TEX_BIND_RECHECK=1 restores per-bind checks.
+     */
+    bool content_check_skipped = binding_found && !surface_to_texture &&
+                                 !snode->possibly_dirty &&
+                                 snode->verified_frame_time ==
+                                     pg->frame_time &&
+                                 !tex_bind_recheck_forced();
+    if (content_check_skipped) {
+        nsprof_event(NSPROF_EV_TEXBIND_SKIP);
+    }
+
     uint64_t content_hash = 0;
     int64_t nsprof_hash_t0 = nsprof_begin();
 
-    if (!surface_to_texture) {
+    if (!surface_to_texture && !content_check_skipped) {
         /*
          * Chunked path requires that each chunk covers a distinct,
          * non-overlapping set of dirty-bitmap pages so per-chunk
@@ -2156,6 +2190,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
              * its full contents on every bind forever.
              */
             snode->possibly_dirty = torn_read;
+            if (!torn_read) {
+                snode->verified_frame_time = pg->frame_time;
+            }
         }
 
         NV2A_VK_DGROUP_END();
@@ -2167,6 +2204,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     memcpy(&snode->key, &key, sizeof(key));
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = torn_read;
+    snode->verified_frame_time = torn_read ? -1 : pg->frame_time;
     snode->hash = snapshot_hash;
 
     /*
@@ -2315,6 +2353,7 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->chunk_hashes = NULL;
     snode->num_chunk_hashes = 0;
     snode->palette_hash = 0;
+    snode->verified_frame_time = -1;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)

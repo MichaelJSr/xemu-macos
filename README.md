@@ -166,13 +166,57 @@ In-app Settings covers the main toggles.
   pipelines accumulated; write-then-rename keeps the file
   crash-consistent). Warm-cache worst case measured ≤ 4 ms — a ~40x
   hitch reduction on pipeline-heavy scene transitions.
-- **`XEMU_NV2A_NSPROF=1` wall-time profiler.** `vk/nsprof.[ch]`:
+- **`XEMU_NV2A_NSPROF=1` wall-time profiler.** `nv2a/nsprof.[ch]`:
   release-build-safe ns accumulators around shader gen, pipeline
-  gen, texture hash / snapshot / upload, and geometry buffer
-  copies; per-5 s summaries (total / per-flip / max event) to
-  stderr. The `NV2A_PROF_*` counters are compiled out in release
-  builds and count events, not time; this is what the optimization
-  passes above were measured with.
+  gen, texture hash / snapshot / upload, geometry buffer copies,
+  flight-slot fence waits, aux-CB fence waits, MetalFX drain,
+  surface readbacks, and the FLIP_STALL → vblank idle gap, plus
+  event counters for finish reasons, draws/flip, and surface
+  download/upload trigger sites; per-5 s summaries (total /
+  per-flip / max event) to stderr. The `NV2A_PROF_*` counters are
+  compiled out in release builds and count events, not time; this
+  is what the optimization passes above were measured with.
+- **Zeta shape-switch fast path.** Whole-frame attribution showed
+  the dominant cost in-game was ~9 `pgraph_vk_finish` fence cycles
+  per flip (8-19 ms/flip), driven by a depth buffer ping-ponging
+  between two shapes at one VRAM address every frame (Azurik: a
+  1280x480 linear scene zeta and a 256x256 swizzled RTT zeta) —
+  each switch did a full GPU→CPU readback (finish + fence + D24S8
+  compute conversion + multi-MB memcpy), an eviction finish, and a
+  multi-MB seed re-upload. Re-shaped zeta targets are cleared by
+  the guest before use and the genuine RAM consumers (CPU access
+  callbacks, texture binds over the range) measured zero, so the
+  switch now: skips the readback, skips the RAM seed upload, and
+  defers the eviction without a finish (the old image is
+  quarantined in the invalid pool until the recording command
+  buffer rotates; reuse is safe afterwards by single-queue
+  submission order). Pending CPU-requested downloads are still
+  honored; `XEMU_ZETA_SHAPE_READBACK=1` restores full fidelity.
+- **Targeted vertex-RAM conflict wait.** Guest writes into VRAM
+  pages uploaded by an *in-flight* slot forced a full finish
+  (submit + slot rotate + fence) 3-6x per flip on streamed vertex
+  data. When the conflict is with an already-submitted slot, only
+  that slot's fence is waited (usually already signaled) and its
+  upload tracking cleared; the full finish remains only for
+  conflicts with the currently recording command buffer. Combined
+  with the zeta fast path: medium scenes went 22-26 → 60 flips/s
+  (guest vblank cap), heavy scenes ~22 → ~26-30, and per-flip
+  fence waits fell from 8-19 ms to 1-3.5 ms.
+- **Once-per-frame texture verification.** A binding verified (or
+  uploaded) earlier in the same guest frame skips the per-bind
+  dirty-bitmap scan + hash on re-binds unless re-marked
+  possibly_dirty (~85% of the ~1100 binds/flip take the skip; the
+  residual is genuine animated-content rehashing). A CPU write
+  landing between two binds of the same texture within one frame
+  takes effect one frame later; render-to-texture is unaffected
+  (surfaces don't take this path). `XEMU_TEX_BIND_RECHECK=1`
+  restores per-bind checks.
+- **No hidden GL contexts under the Metal backend.** The 4 startup
+  gloffscreen contexts (1 Vulkan-renderer + 3 GL-renderer) are
+  skipped when presenting via Metal; live renderer switches away
+  from Vulkan are deferred to the next launch (the settings UI
+  already prompts for a restart), matching the window's fixed
+  SDL_WINDOW_METAL type.
 - **Texture VRAM spatial index.** Active `TextureBinding`s bucketed
   by 128 KiB VRAM ranges; `pgraph_vk_mark_textures_possibly_dirty`
   scans only touched buckets instead of all 65536 LRU bins. Lazy
@@ -208,8 +252,9 @@ In-app Settings covers the main toggles.
 - **Renderer-switch hardening.** AB-BA-safe lock ordering on
   GL↔VK toggle; atomic `flush_pending`; `pgraph.lock` dropped across
   `framebuffer_released` wait.
-- **Monotonic sync clock.** `pgraph_vk_sync` uses `QEMU_CLOCK_HOST`
-  (suspend / NTP slew don't stall the 8 ms gate).
+- **Monotonic sync clock.** `pgraph_vk_sync` uses
+  `QEMU_CLOCK_REALTIME` (CLOCK_MONOTONIC — suspend / NTP slew don't
+  stall the 8 ms gate; see "Monotonic present-path clocks" below).
 - **Fence-wait diagnostics.** 5 s timeout wrapper on single-time CBs
   aborts with the named call site instead of hanging silently on
   MoltenVK internal-mutex deadlocks.
@@ -340,8 +385,8 @@ In-app Settings covers the main toggles.
   releasing. IOSurface cache keyed on `IOSurfaceGetID`; output width
   capped at 1920 under the GL backend (macOS 26 BGRA `bytesPerRow`
   bug).
-- **`MTLFXFrameInterpolator.deltaTime` in wall-clock seconds**
-  (`QEMU_CLOCK_HOST` between input `CFRetain`s, clamped
+- **`MTLFXFrameInterpolator.deltaTime` in real seconds**
+  (`QEMU_CLOCK_REALTIME` between input `CFRetain`s, clamped
   `[1/240, 1/10]` s) instead of a unitless ratio. Reduces ghosting
   on fast pans.
 - **Exclusive fullscreen picks the highest refresh** among the
@@ -531,6 +576,28 @@ Lessons worth preserving so they aren't re-attempted.
 ## Future vectors
 
 Not attempted, or scope/risk too high for a one-shot change.
+
+- **Per-flight vertex shadow copies.** After the targeted-wait fix,
+  heavy scenes still spend 13-28 ms/flip in slot-fence waits when
+  the guest streams vertex data into pages an in-flight submission
+  reads (the wait is real GPU time, not slack). Copy-on-conflict
+  into per-slot scratch + draw rebase would remove the wait
+  entirely; complex and torn-read-prone (see the reverted
+  `VK_EXT_external_memory_host` vertex experiment).
+- **Occlusion-report STALLED drains.** Report-heavy intervals show
+  ~5 `STALLED` finishes per flip (FIFO idle with pending zpass
+  reports forces a synchronous drain-all). Candidate: satisfy
+  guest report polls from per-slot drains without finishing.
+- **Push-model present handoff.** `nv2a_get_present_frame` does a
+  PFIFO event-wait round trip per UI frame (the sync handshake is
+  also what publishes frames, so a UI-side "skip when unchanged"
+  pre-check is not possible in the current pull model). Publishing
+  at flip from the PFIFO side would remove the cross-thread
+  round trip and let the UI loop pace purely on the drawable.
+- **Compositor output ring (drop `metalfx_drain_inflight`).**
+  Measured: the drain costs ~0.1 µs/flip steady-state (max ~4 ms on
+  rare hitches) — not worth the ring complexity at current frame
+  rates.
 
 - **GL NV2A renderer under the Metal window.** Currently a
   renderer switch away from Vulkan under the Metal backend needs a

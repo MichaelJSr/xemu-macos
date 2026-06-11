@@ -21,7 +21,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/mstring.h"
 #include "renderer.h"
-#include "nsprof.h"
+#include "hw/xbox/nv2a/nsprof.h"
 
 #define VSH_UBO_BINDING 0
 #define PSH_UBO_BINDING 1

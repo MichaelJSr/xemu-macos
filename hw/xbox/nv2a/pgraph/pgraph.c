@@ -22,7 +22,9 @@
 #include <math.h>
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-notifications.h"
+#include "ui/xemu-present.h"
 #include "ui/xemu-settings.h"
 #include "util.h"
 #include "swizzle.h"
@@ -291,6 +293,16 @@ void nv2a_context_init(void)
     for (int i = 0; i < ARRAY_SIZE(renderers); i++) {
         const PGRAPHRenderer *r = renderers[i];
         if (!r) {
+            continue;
+        }
+        /*
+         * Under the Metal presentation backend, inactive renderers
+         * never run in this process: live switches away from Vulkan
+         * are deferred to the next launch (see pgraph_process_pending
+         * and the restart notification in the settings UI), so their
+         * hidden GL contexts (3 for the GL renderer) are dead weight.
+         */
+        if (xemu_present_is_metal() && r->type != g_config.display.renderer) {
             continue;
         }
         if (r->ops.early_context_init) {
@@ -939,6 +951,7 @@ DEF_METHOD(NV097, FLIP_STALL)
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
+    nsprof_flip_wait_begin();
     qatomic_set(&pg->waiting_for_flip, true);
 }
 
@@ -3243,7 +3256,18 @@ void pgraph_process_pending(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     pg->renderer->ops.process_pending(d);
 
-    if (g_config.display.renderer != pg->renderer->type &&
+    /*
+     * Under the Metal presentation backend a non-Vulkan renderer can't
+     * present (the window has no GL surface) and its GL contexts were
+     * never created (nv2a_context_init). Defer the switch to the next
+     * launch — the settings UI already tells the user to restart.
+     */
+    bool switch_deferred_to_restart =
+        xemu_present_is_metal() &&
+        g_config.display.renderer != CONFIG_DISPLAY_RENDERER_VULKAN;
+
+    if (!switch_deferred_to_restart &&
+        g_config.display.renderer != pg->renderer->type &&
         pg->renderer_switch_phase == PGRAPH_RENDERER_SWITCH_PHASE_IDLE) {
         pg->renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_STARTED;
         qemu_event_reset(&pg->renderer_switch_complete);
