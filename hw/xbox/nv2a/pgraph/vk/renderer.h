@@ -595,13 +595,22 @@ typedef struct PGRAPHVkState {
     VkCommandBuffer aux_command_buffer;
     VkFence aux_fence;
     bool in_aux_command_buffer;
+
     /*
-     * Async aux submit (Metal backend): the compositor pass is
-     * submitted without the synchronous fence wait; the fence is
-     * reclaimed lazily by the next pgraph_vk_begin_single_time_commands
-     * (and by device-idle teardown paths).
+     * Dedicated command-buffer ring for the async compositor pass
+     * (Metal backend). Previously the compositor shared the per-slot
+     * aux CB + single aux_fence, so the next aux use (texture/surface
+     * uploads, staging sync) reclaimed the compositor fence on the
+     * PFIFO thread — measured 1.4-1.9 ms per flip in heavy scenes.
+     * With its own 2-deep ring, an entry is only reclaimed when its
+     * slot comes around again (two sync intervals later, virtually
+     * always signaled) and upload paths never wait on compositor work.
      */
-    bool aux_async_pending;
+#define COMPOSITOR_CB_RING 2
+    VkCommandBuffer compositor_cbs[COMPOSITOR_CB_RING];
+    VkFence compositor_fences[COMPOSITOR_CB_RING];
+    bool compositor_pending[COMPOSITOR_CB_RING];
+    int compositor_cb_index;
 
     bool timeline_semaphore_enabled;
     /*
@@ -931,15 +940,17 @@ void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
 VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
 void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
 /*
- * Submit the aux command buffer without the synchronous fence wait,
- * signaling `timeline` at `value` (Metal backend async present
- * chain). The aux fence is reclaimed by the next
- * pgraph_vk_begin_single_time_commands.
+ * Compositor CB ring (Metal backend async present chain): submit
+ * without a synchronous fence wait, signaling `timeline` at `value`.
+ * The ring entry's fence is reclaimed when the entry is reused, two
+ * sync intervals later.
  */
-void pgraph_vk_end_single_time_commands_async(PGRAPHState *pg,
-                                              VkCommandBuffer cmd,
-                                              VkSemaphore timeline,
-                                              uint64_t value);
+VkCommandBuffer pgraph_vk_begin_compositor_commands(PGRAPHState *pg);
+void pgraph_vk_end_compositor_commands_async(PGRAPHState *pg,
+                                             VkCommandBuffer cmd,
+                                             VkSemaphore timeline,
+                                             uint64_t value);
+void pgraph_vk_drain_compositor_cbs(PGRAPHState *pg);
 void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg);
 void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot);
 void pgraph_vk_select_flight_slot(PGRAPHState *pg);

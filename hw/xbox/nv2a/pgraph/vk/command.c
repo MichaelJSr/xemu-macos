@@ -83,22 +83,6 @@ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg)
     assert(!r->in_aux_command_buffer);
     r->in_aux_command_buffer = true;
 
-    /*
-     * Lazy reclaim of an async aux submit (Metal backend compositor):
-     * the previous aux submission skipped its synchronous fence wait;
-     * the aux command buffer cannot be reset/reused until it
-     * completes. In steady state the work finished long ago (the next
-     * aux use is at least one present interval later), so this wait
-     * is effectively free.
-     */
-    if (r->aux_async_pending) {
-        int64_t nsprof_t0 = nsprof_begin();
-        vk_wait_for_fence_or_die(r->device, r->aux_fence,
-                                 "aux async reclaim");
-        nsprof_end(NSPROF_AUX_FENCE_WAIT, nsprof_t0);
-        r->aux_async_pending = false;
-    }
-
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -133,19 +117,47 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     r->in_aux_command_buffer = false;
 }
 
-void pgraph_vk_end_single_time_commands_async(PGRAPHState *pg,
-                                              VkCommandBuffer cmd,
-                                              VkSemaphore timeline,
-                                              uint64_t value)
+VkCommandBuffer pgraph_vk_begin_compositor_commands(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    int i = r->compositor_cb_index;
 
-    assert(r->in_aux_command_buffer);
-    assert(!r->aux_async_pending);
+    /*
+     * Reclaim this ring entry's previous submission. It was submitted
+     * two sync intervals (>= 16 ms) ago, so the fence is virtually
+     * always signaled by now.
+     */
+    if (r->compositor_pending[i]) {
+        int64_t nsprof_t0 = nsprof_begin();
+        vk_wait_for_fence_or_die(r->device, r->compositor_fences[i],
+                                 "compositor ring reclaim");
+        nsprof_end(NSPROF_AUX_FENCE_WAIT, nsprof_t0);
+        r->compositor_pending[i] = false;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    VK_CHECK(vkBeginCommandBuffer(r->compositor_cbs[i], &begin_info));
+
+    return r->compositor_cbs[i];
+}
+
+void pgraph_vk_end_compositor_commands_async(PGRAPHState *pg,
+                                             VkCommandBuffer cmd,
+                                             VkSemaphore timeline,
+                                             uint64_t value)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int i = r->compositor_cb_index;
+
+    assert(cmd == r->compositor_cbs[i]);
+    assert(!r->compositor_pending[i]);
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
-    vkResetFences(r->device, 1, &r->aux_fence);
+    vkResetFences(r->device, 1, &r->compositor_fences[i]);
 
     VkTimelineSemaphoreSubmitInfo timeline_info = {
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
@@ -160,18 +172,31 @@ void pgraph_vk_end_single_time_commands_async(PGRAPHState *pg,
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &timeline,
     };
-    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
+    VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info,
+                           r->compositor_fences[i]));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
 
     /*
      * No fence wait: consumers (MetalFX, the UI present pass) order
      * GPU-side against the timeline's exported MTLSharedEvent, and
      * later main-CB barriers order same-queue surface reuse by
-     * submission order. The fence is reclaimed lazily before the next
-     * aux command buffer use.
+     * submission order.
      */
-    r->aux_async_pending = true;
-    r->in_aux_command_buffer = false;
+    r->compositor_pending[i] = true;
+    r->compositor_cb_index = (i + 1) % COMPOSITOR_CB_RING;
+}
+
+void pgraph_vk_drain_compositor_cbs(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    for (int i = 0; i < COMPOSITOR_CB_RING; i++) {
+        if (r->compositor_pending[i]) {
+            vk_wait_for_fence_or_die(r->device, r->compositor_fences[i],
+                                     "compositor ring drain");
+            r->compositor_pending[i] = false;
+        }
+    }
 }
 
 void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot)
@@ -320,6 +345,21 @@ void pgraph_vk_init_command_buffers(PGRAPHState *pg)
     pgraph_vk_select_flight_slot(pg);
 
     VK_CHECK(vkCreateFence(r->device, &fence_info, NULL, &r->aux_fence));
+
+    VkCommandBufferAllocateInfo comp_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = r->command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = COMPOSITOR_CB_RING,
+    };
+    VK_CHECK(vkAllocateCommandBuffers(r->device, &comp_alloc_info,
+                                      r->compositor_cbs));
+    for (int i = 0; i < COMPOSITOR_CB_RING; i++) {
+        VK_CHECK(vkCreateFence(r->device, &fence_info, NULL,
+                               &r->compositor_fences[i]));
+        r->compositor_pending[i] = false;
+    }
+    r->compositor_cb_index = 0;
 }
 
 void pgraph_vk_finalize_command_buffers(PGRAPHState *pg)
@@ -333,6 +373,13 @@ void pgraph_vk_finalize_command_buffers(PGRAPHState *pg)
         vkDestroySemaphore(r->device, r->flight[i].semaphore, NULL);
     }
     vkDestroyFence(r->device, r->aux_fence, NULL);
+
+    for (int i = 0; i < COMPOSITOR_CB_RING; i++) {
+        vkDestroyFence(r->device, r->compositor_fences[i], NULL);
+        r->compositor_pending[i] = false;
+    }
+    vkFreeCommandBuffers(r->device, r->command_pool, COMPOSITOR_CB_RING,
+                         r->compositor_cbs);
 
     int total_cbs = NUM_FLIGHT_SLOTS * 2;
     VkCommandBuffer all_cbs[NUM_FLIGHT_SLOTS * 2];

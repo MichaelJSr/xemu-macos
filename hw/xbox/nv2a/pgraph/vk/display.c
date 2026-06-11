@@ -1248,7 +1248,13 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     disp->pvideo.state = get_pvideo_state(pg);
     update_uniforms(pg, surface);
 
-    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
+    bool async_compositor = false;
+#if HAVE_IOSURFACE_SHARING
+    async_compositor = xemu_present_is_metal() && r->present_timeline_event;
+#endif
+    VkCommandBuffer cmd = async_compositor
+                              ? pgraph_vk_begin_compositor_commands(pg)
+                              : pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
         "Display Surface %08"HWADDR_PRIx, surface->vram_addr);
     if (disp->pvideo.state.enabled) {
@@ -1319,7 +1325,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     pgraph_vk_end_debug_marker(r, cmd);
 #if HAVE_IOSURFACE_SHARING
-    if (xemu_present_is_metal() && r->present_timeline_event) {
+    if (async_compositor) {
         /*
          * Async submit: signal the exported timeline event instead of
          * blocking the PFIFO thread in vkWaitForFences. MetalFX / the
@@ -1327,8 +1333,8 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
          * sampling the compositor output.
          */
         uint64_t value = r->present_timeline_value + 1;
-        pgraph_vk_end_single_time_commands_async(pg, cmd,
-                                                 r->present_timeline, value);
+        pgraph_vk_end_compositor_commands_async(pg, cmd,
+                                                r->present_timeline, value);
         r->present_timeline_value = value;
         metalfx_set_input_wait(r->present_timeline_event, value);
     } else
@@ -1602,13 +1608,9 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
     }
     r->display.interp_remaining = 0;
 
-    /* Drain any pending async compositor submit before destroying the
-     * semaphore (the fence is still signaled by async submits). */
-    if (r->aux_async_pending) {
-        vkWaitForFences(r->device, 1, &r->aux_fence, VK_TRUE,
-                        5ull * 1000 * 1000 * 1000);
-        r->aux_async_pending = false;
-    }
+    /* Drain pending async compositor submits before destroying the
+     * timeline semaphore they signal. */
+    pgraph_vk_drain_compositor_cbs(pg);
     destroy_present_timeline(pg);
 #endif
 

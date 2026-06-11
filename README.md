@@ -339,8 +339,15 @@ In-app Settings covers the main toggles.
   the present path. A timeline `VkSemaphore` (exported as an
   `MTLSharedEvent` via `VK_EXT_metal_objects`, one-time probe with
   sync fallback) is signaled per compositor submit; MetalFX command
-  buffers and the UI present pass order GPU-side against it. The aux
-  fence is reclaimed lazily before the next aux command-buffer use.
+  buffers and the UI present pass order GPU-side against it.
+- **Dedicated compositor command-buffer ring.** The async compositor
+  originally shared the per-slot aux CB + single aux fence, so the
+  next aux use (texture/surface uploads, staging sync) reclaimed the
+  compositor's fence on the PFIFO thread — measured 1.4-1.9 ms/flip
+  in heavy scenes. The compositor now submits through its own 2-deep
+  CB ring; an entry is reclaimed only when its slot recurs two sync
+  intervals later (measured: 1.4-1.9 ms/flip → ~0.2 µs/flip), and
+  upload paths never wait on compositor work at all.
 - **IOSurface-free present chain** (Metal backend only). When
   MoltenVK can export the `MTLTexture` backing the compositor
   `VkImage` (probed at init), no IOSurface is created at all: MetalFX
