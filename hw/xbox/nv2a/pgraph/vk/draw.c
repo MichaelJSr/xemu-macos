@@ -22,6 +22,7 @@
 #include "renderer.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-settings.h"
+#include <glib/gstdio.h>
 #include <math.h>
 
 void pgraph_vk_draw_begin(NV2AState *d)
@@ -501,17 +502,19 @@ static void save_pipeline_cache_to_disk(VkDevice device,
     if (result == VK_SUCCESS) {
         char *path = get_pipeline_cache_path();
         /* Write-then-rename so a kill mid-write can't leave a torn
-         * cache file for the next boot to ingest. */
+         * cache file for the next boot to ingest. g_rename replaces
+         * an existing target on Windows too (plain rename() fails
+         * there once the file exists). */
         char *tmp_path = g_strdup_printf("%s.tmp", path);
         FILE *f = qemu_fopen(tmp_path, "wb");
         if (f) {
             bool ok = fwrite(data, 1, size, f) == size;
             ok &= fclose(f) == 0;
-            if (ok && rename(tmp_path, path) == 0) {
+            if (ok && g_rename(tmp_path, path) == 0) {
                 fprintf(stderr, "Saved pipeline cache (%zu bytes) to %s\n",
                         size, path);
             } else {
-                unlink(tmp_path);
+                g_unlink(tmp_path);
             }
         }
         g_free(tmp_path);

@@ -30,21 +30,28 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 
 The upstream Windows build paths are preserved and CI-tested. All
 portable optimizations apply automatically: the Vulkan renderer work
-(flight slots, dirty hashing, spatial index, draw-path dedup, tight
-barriers, query drain at slot reclaim), the APU work (LUTs, batched
-register reads, SVF cache, mono paths, SSE2 mix kernels), the pfifo /
-BQL fixes, and the helper-based hard FPU on x86_64. macOS-only:
-MetalFX, IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT,
-and the AArch64 inline x87 FPU (Windows uses the bit-equivalent
-helper-based hard FPU instead). The MoltenVK CPU primitive-emulation
-paths don't activate on native Vulkan drivers.
+(flight slots, dirty hashing + spatial index + once-per-frame
+verification, the zeta shape-switch fast path, targeted
+vertex-conflict waits, VkPipelineCache persistence, draw-path dedup,
+tight barriers, query drain at slot reclaim), the APU work (LUTs,
+batched register reads, SVF cache, mono paths, SSE2 mix kernels),
+the pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, and the
+helper-based hard FPU on x86_64. macOS-only: MetalFX, the Metal /
+IOSurface presentation backends and their async present chain,
+CoreAudio, vDSP, the ARM64 DSP JIT, and the AArch64 inline x87 FPU
+(Windows uses the bit-equivalent helper-based hard FPU instead). The
+MoltenVK CPU primitive-emulation paths don't activate on native
+Vulkan drivers.
 
 - **Native (MSYS2/MINGW):** `./build.sh` from an MSYS2 shell.
   Release builds default to `-Dx86_version=3`; `XEMU_PGO=generate` /
   `XEMU_PGO=use` work like on macOS.
-- **Cross (Docker):** `./build.sh -p win64-cross` with the
-  `ubuntu-win64-cross` toolchain image (see
-  `.github/workflows/build-windows.yml`).
+- **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
+  container with the `xemu-win64-toolchain` image and
+  `CROSSPREFIX=x86_64-w64-mingw32.static-` set (see
+  `.github/workflows/build-windows.yml` for the exact image tags and
+  env). Works from a macOS host via any Docker runtime
+  (Docker Desktop / colima / podman).
 
 ### Build knobs
 
@@ -54,7 +61,20 @@ paths don't activate on native Vulkan drivers.
 | `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for PGO |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer (≈21 ms @ 48 kHz) |
-| `XEMU_PFIFO_HEARTBEAT` | `0` | 2-second pfifo diagnostic snapshot |
+
+### Runtime debug / escape-hatch knobs
+
+All default off / fast-path; set to `1` to enable.
+
+| Env var | Purpose |
+|---|---|
+| `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr |
+| `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
+| `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
+| `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
+| `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
+| `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
+| `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 
 ### Recommended `xemu.toml`
 
@@ -601,11 +621,11 @@ Not attempted, or scope/risk too high for a one-shot change.
   pre-check is not possible in the current pull model). Publishing
   at flip from the PFIFO side would remove the cross-thread
   round trip and let the UI loop pace purely on the drawable.
-- **Compositor output ring (drop `metalfx_drain_inflight`).**
-  Measured: the drain costs ~0.1 µs/flip steady-state (max ~4 ms on
-  rare hitches) — not worth the ring complexity at current frame
-  rates.
-
+- **MetalFX *input* ring (drop `metalfx_drain_inflight`).** Ring the
+  compositor *output* texture that MetalFX consumes (distinct from
+  the landed compositor *command-buffer* ring). Measured: the drain
+  costs ~0.1 µs/flip steady-state (max ~4 ms on rare hitches) — not
+  worth the complexity at current frame rates.
 - **GL NV2A renderer under the Metal window.** Currently a
   renderer switch away from Vulkan under the Metal backend needs a
   restart; full unification would render the GL display buffer into
@@ -690,6 +710,15 @@ fall back to the GL presentation path, and report the issue. The
 
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
+
+**Depth artifacts after a render-target switch.** Set
+`XEMU_ZETA_SHAPE_READBACK=1` to restore the full GPU→CPU round trip
+on zeta shape switches (costs ~2 finishes + multi-MB copies per
+frame on affected titles) and report the title.
+
+**Stale/late-updating textures.** Set `XEMU_TEX_BIND_RECHECK=1` to
+restore per-bind content checks (a CPU write between two binds of
+the same texture within one frame otherwise lands a frame late).
 
 **Audio glitches.** `XEMU_COREAUDIO_FRAMES=2048` for a larger buffer.
 For DSP-heavy titles, confirm DSP JIT is enabled.
