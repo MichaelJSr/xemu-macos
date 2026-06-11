@@ -45,7 +45,10 @@ Vulkan drivers.
 
 - **Native (MSYS2/MINGW):** `./build.sh` from an MSYS2 shell.
   Release builds default to `-Dx86_version=3`; `XEMU_PGO=generate` /
-  `XEMU_PGO=use` work like on macOS.
+  `XEMU_PGO=use` work like on macOS. This is the preferred route —
+  a Windows VM (e.g. Parallels on Apple Silicon for a Windows/ARM
+  guest, or any x86 Windows box) builds natively and can run-test
+  the result, unlike the cross-compile below.
 - **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
   container with the `xemu-win64-toolchain` image and
   `CROSSPREFIX=x86_64-w64-mingw32.static-` set (see
