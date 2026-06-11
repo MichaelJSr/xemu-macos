@@ -50,8 +50,20 @@ Vulkan drivers.
   container with the `xemu-win64-toolchain` image and
   `CROSSPREFIX=x86_64-w64-mingw32.static-` set (see
   `.github/workflows/build-windows.yml` for the exact image tags and
-  env). Works from a macOS host via any Docker runtime
-  (Docker Desktop / colima / podman).
+  env). Verified from an Apple Silicon Mac via colima
+  (`colima start --vm-type vz --vz-rosetta`, ~12 min for a clean
+  static `xemu.exe`):
+
+  ```bash
+  docker run --rm --platform linux/amd64 -v "$PWD:/xemu" -w /xemu \
+    -e CROSSPREFIX=x86_64-w64-mingw32.static- \
+    -e CROSSAR=x86_64-w64-mingw32.static-gcc-ar \
+    ghcr.io/xemu-project/xemu-win64-toolchain-gcc:sha-2881edd \
+    ./build.sh -p win64-cross -Dx86_version=3
+  ```
+
+  Use a copy of the tree (the cross build reuses `build/`/`dist/`),
+  kept under `$HOME` (colima only shares the home directory).
 
 ### Build knobs
 
@@ -552,6 +564,14 @@ In-app Settings covers the main toggles.
 - Native Windows release builds default to `-Dx86_version=3`
   (AVX2 / BMI2 / FMA — matches CI release config; override by
   passing your own `-Dx86_version=`).
+- Windows cross-compile fixes (found by building win64-cross from
+  this fork): the x86_64 hard-FPU `__hard` set was missing
+  `sqrt` / `round_to_int` / `to_int32[_round_to_zero]` / `to_int64`
+  (implicit-decl compile error in `fpu_helper_hard.c`); the SPIR-V
+  shader cache used 2-arg POSIX `mkdir` (→ `g_mkdir_with_parents`);
+  the pipeline cache used `rename()` onto an existing file, which
+  Windows rejects (→ `g_rename`); the `HAVE_EXTERNAL_MEMORY` display
+  path lost its `gl_internal_format` declaration.
 
 ### MoltenVK runtime config (`Info.plist` `LSEnvironment`)
 

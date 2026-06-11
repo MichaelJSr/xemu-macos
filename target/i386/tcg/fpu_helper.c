@@ -167,6 +167,36 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
     return (floatx80){ .fval = a };
 }
 
+static inline
+floatx80 floatx80_sqrt__hard(floatx80 a, float_status *status)
+{
+    return pack((floatx80){ .fval = sqrtl(a.fval) }, status);
+}
+
+static inline
+floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
+{
+    return (floatx80){ .fval = rintl(a.fval) };
+}
+
+static inline
+int32_t floatx80_to_int32__hard(floatx80 a, float_status *status)
+{
+    return (int32_t)llrintl(a.fval);
+}
+
+static inline
+int32_t floatx80_to_int32_round_to_zero__hard(floatx80 a, float_status *status)
+{
+    return (int32_t)a.fval;
+}
+
+static inline
+int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
+{
+    return (int64_t)llrintl(a.fval);
+}
+
 #elif defined(__aarch64__)
 /*
  * ARM64 hard FPU: fast bit-level conversion between floatx80 and double.

@@ -25,7 +25,7 @@
 #include <glslang/Include/glslang_c_interface.h>
 #include "xemu-version.h"
 #include <stdio.h>
-#include <sys/stat.h>
+#include <glib/gstdio.h>
 
 static char *get_spirv_cache_dir(void)
 {
@@ -33,7 +33,8 @@ static char *get_spirv_cache_dir(void)
     char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d", base,
                                 xemu_version_major, xemu_version_minor,
                                 xemu_version_patch);
-    mkdir(dir, 0755);
+    /* Portable (Windows mkdir takes one argument). */
+    g_mkdir_with_parents(dir, 0755);
     return dir;
 }
 

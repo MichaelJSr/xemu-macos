@@ -741,6 +741,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY
+    const GLint gl_internal_format = GL_RGBA8;
     GLint num_tiling_types;
     glGetInternalformativ(GL_TEXTURE_2D, gl_internal_format,
                           GL_NUM_TILING_TYPES_EXT, 1, &num_tiling_types);
