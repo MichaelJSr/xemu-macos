@@ -29,6 +29,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/lru.h"
 #include "renderer.h"
+#include "nsprof.h"
 
 /*
  * Incremental texture content hashing.
@@ -848,6 +849,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
 
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
+    int64_t nsprof_t0 = nsprof_begin();
 
     /* Points at r->texture_layout_scratch; valid until the next
      * get_texture_layout() call and must not be freed. */
@@ -1148,6 +1150,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
             }
         }
     }
+    nsprof_end(NSPROF_TEX_UPLOAD, nsprof_t0);
 }
 
 static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
@@ -1859,6 +1862,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
     uint64_t content_hash = 0;
+    int64_t nsprof_hash_t0 = nsprof_begin();
 
     if (!surface_to_texture) {
         /*
@@ -2040,6 +2044,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         }
     }
 
+    nsprof_end(NSPROF_TEX_HASH, nsprof_hash_t0);
+
     /*
      * Snapshot VRAM once when we're about to upload and use the
      * snapshot for both the re-hash and the upload source. Closes a
@@ -2062,6 +2068,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         (!binding_found || (possibly_dirty && content_hash != snode->hash));
 
     if (will_upload_data) {
+        int64_t nsprof_snap_t0 = nsprof_begin();
         if (r->texture_snapshot_buf_capacity < texture_length) {
             r->texture_snapshot_buf =
                 g_realloc(r->texture_snapshot_buf, texture_length);
@@ -2119,6 +2126,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     texture_palette_data_size);
             }
         }
+        nsprof_end(NSPROF_TEX_SNAPSHOT, nsprof_snap_t0);
     }
 
     if (binding_found) {
@@ -2131,10 +2139,23 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 upload_texture_image(pg, texture_idx, snode,
                                      texture_snapshot, palette_snapshot);
                 snode->hash = snapshot_hash;
-                if (torn_read) {
-                    snode->possibly_dirty = true;
-                }
             }
+            /*
+             * This bind either verified the cached hash against
+             * current VRAM contents or re-uploaded them, and the
+             * texture's page dirty bits were consumed above — the
+             * binding is in sync with guest memory, so the
+             * possibly_dirty mark can be dropped. Any later guest
+             * write re-sets the page dirty bits, which either our own
+             * next-bind check sees directly or a neighboring texture
+             * consumes and re-marks us via
+             * pgraph_vk_mark_textures_possibly_dirty. A torn snapshot
+             * is the exception: the next bind must re-hash. Without
+             * this clear, an externally-marked binding (e.g. one
+             * sharing a host page with a streamed neighbor) re-hashes
+             * its full contents on every bind forever.
+             */
+            snode->possibly_dirty = torn_read;
         }
 
         NV2A_VK_DGROUP_END();

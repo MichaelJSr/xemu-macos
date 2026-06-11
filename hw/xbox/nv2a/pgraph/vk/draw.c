@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "nsprof.h"
 #include "ui/xemu-settings.h"
 #include <math.h>
 
@@ -499,16 +500,51 @@ static void save_pipeline_cache_to_disk(VkDevice device,
     result = vkGetPipelineCacheData(device, cache, &size, data);
     if (result == VK_SUCCESS) {
         char *path = get_pipeline_cache_path();
-        FILE *f = qemu_fopen(path, "wb");
+        /* Write-then-rename so a kill mid-write can't leave a torn
+         * cache file for the next boot to ingest. */
+        char *tmp_path = g_strdup_printf("%s.tmp", path);
+        FILE *f = qemu_fopen(tmp_path, "wb");
         if (f) {
-            fwrite(data, 1, size, f);
-            fclose(f);
-            fprintf(stderr, "Saved pipeline cache (%zu bytes) to %s\n",
-                    size, path);
+            bool ok = fwrite(data, 1, size, f) == size;
+            ok &= fclose(f) == 0;
+            if (ok && rename(tmp_path, path) == 0) {
+                fprintf(stderr, "Saved pipeline cache (%zu bytes) to %s\n",
+                        size, path);
+            } else {
+                unlink(tmp_path);
+            }
         }
+        g_free(tmp_path);
         g_free(path);
     }
     g_free(data);
+}
+
+/*
+ * Flush the pipeline cache to disk from the PFIFO thread once new
+ * pipelines have accumulated and the save interval has elapsed.
+ * Called at flip boundaries (renderer idle), so the serialize + write
+ * cost lands between frames at most once per interval. All pipeline
+ * creation happens on this thread, so no external synchronization of
+ * the VkPipelineCache is needed.
+ */
+#define PIPELINE_CACHE_SAVE_INTERVAL_NS (30ll * 1000000000ll)
+
+void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->pipeline_cache_unsaved == 0) {
+        return;
+    }
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (now - r->pipeline_cache_last_save_ns <
+        PIPELINE_CACHE_SAVE_INTERVAL_NS) {
+        return;
+    }
+    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    r->pipeline_cache_unsaved = 0;
+    r->pipeline_cache_last_save_ns = now;
 }
 
 static void init_pipeline_cache(PGRAPHState *pg)
@@ -535,6 +571,9 @@ static void init_pipeline_cache(PGRAPHState *pg)
                                    &r->vk_pipeline_cache));
 
     g_free(cache_data);
+
+    r->pipeline_cache_unsaved = 0;
+    r->pipeline_cache_last_save_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     const size_t pipeline_cache_size = 4096;
     lru_init(&r->pipeline_cache);
@@ -832,6 +871,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
 
     NV2A_VK_DPRINTF("Cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
+    int64_t nsprof_t0 = nsprof_begin();
     memcpy(&snode->key, &key, sizeof(key));
 
     bool clear_any_color_channels =
@@ -983,6 +1023,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
     VkPipeline pipeline;
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL, &pipeline));
+    r->pipeline_cache_unsaved++;
+    nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
 
     snode->pipeline = pipeline;
     snode->layout = layout;
@@ -1148,6 +1190,7 @@ static void create_pipeline(PGRAPHState *pg)
 
     NV2A_VK_DPRINTF("Cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
+    int64_t nsprof_t0 = nsprof_begin();
 
     memcpy(&snode->key, &key, sizeof(key));
 
@@ -1442,6 +1485,8 @@ static void create_pipeline(PGRAPHState *pg)
     VkPipeline pipeline;
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_create_info, NULL, &pipeline));
+    r->pipeline_cache_unsaved++;
+    nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
 
     snode->pipeline = pipeline;
     snode->layout = layout;

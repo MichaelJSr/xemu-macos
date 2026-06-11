@@ -11,6 +11,7 @@ vk_sources = files(
 	'gpuprops.c',
 	'image.c',
 	'instance.c',
+	'nsprof.c',
 	'renderer.c',
 	'reports.c',
 	'shaders.c',

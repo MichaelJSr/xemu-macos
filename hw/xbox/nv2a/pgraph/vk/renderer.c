@@ -25,6 +25,7 @@
 #if HAVE_IOSURFACE_SHARING
 #include "metalfx_upscale.h"
 #endif
+#include "nsprof.h"
 
 #if HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_SHARING
 static GloContext *g_gl_context;
@@ -190,6 +191,8 @@ static void pgraph_vk_flip_stall(NV2AState *d)
 {
     pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
     pgraph_vk_debug_frame_terminator();
+    pgraph_vk_maybe_save_pipeline_cache(&d->pgraph);
+    nsprof_flip_tick();
 }
 
 static void pgraph_vk_pre_savevm_trigger(NV2AState *d)

@@ -21,6 +21,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/mstring.h"
 #include "renderer.h"
+#include "nsprof.h"
 
 #define VSH_UBO_BINDING 0
 #define PSH_UBO_BINDING 1
@@ -362,6 +363,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 
     NV2A_VK_DPRINTF("cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
+    int64_t nsprof_t0 = nsprof_begin();
 
     ShaderModuleCacheKey key;
 
@@ -403,6 +405,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
 
     update_shader_uniform_locs(binding);
+    nsprof_end(NSPROF_SHADER_GEN, nsprof_t0);
 }
 
 static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)

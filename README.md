@@ -146,6 +146,33 @@ In-app Settings covers the main toggles.
   ≥ 256 KiB (saves 30-60% hash CPU on sparse atlas updates). UBO
   `memcmp` before `memcpy`. Surface expiry throttled to host
   wall-clock (~33 ms).
+- **`possibly_dirty` cleared after verified bind.** Inherited
+  upstream behavior left a texture binding's `possibly_dirty` mark
+  sticky once set by a neighboring texture sharing a host page —
+  every later bind re-hashed the full contents forever. After a bind
+  verifies the cached hash (or re-uploads), the mark is dropped; any
+  later guest write re-sets page dirty bits and re-marks via the
+  spatial index. Measured with `XEMU_NV2A_NSPROF=1` in-game: total
+  texture dirty-check + hash time fell ~2.1x (~290 ms → ~135 ms per
+  5 s interval; 1.3-3.5 ms/flip → 0.6-1.6 ms/flip on the PFIFO
+  thread). Torn-snapshot binds keep the mark, preserving the
+  next-bind re-hash contract.
+- **VkPipelineCache persisted across runs.** The cache was only
+  saved in `pgraph_destroy()`, which a normal app quit never
+  reaches — `pipeline_cache.bin` was never written, so every launch
+  recompiled all MSL pipelines (measured 164 ms worst single
+  `vkCreateGraphicsPipelines` on a cold cache). The PFIFO thread now
+  flushes the cache at flip boundaries (≥ 30 s apart, only when new
+  pipelines accumulated; write-then-rename keeps the file
+  crash-consistent). Warm-cache worst case measured ≤ 4 ms — a ~40x
+  hitch reduction on pipeline-heavy scene transitions.
+- **`XEMU_NV2A_NSPROF=1` wall-time profiler.** `vk/nsprof.[ch]`:
+  release-build-safe ns accumulators around shader gen, pipeline
+  gen, texture hash / snapshot / upload, and geometry buffer
+  copies; per-5 s summaries (total / per-flip / max event) to
+  stderr. The `NV2A_PROF_*` counters are compiled out in release
+  builds and count events, not time; this is what the optimization
+  passes above were measured with.
 - **Texture VRAM spatial index.** Active `TextureBinding`s bucketed
   by 128 KiB VRAM ranges; `pgraph_vk_mark_textures_possibly_dirty`
   scans only touched buckets instead of all 65536 LRU bins. Lazy
@@ -517,10 +544,14 @@ Not attempted, or scope/risk too high for a one-shot change.
 - **Texture-upload barrier batching.** Current per-mip
   `pre_compute` / `post_compute` pair is load-bearing on reused
   `COMPUTE_DST` / `COMPUTE_SRC`; batching requires disjoint offsets
-  + dispatch-offset args.
+  + dispatch-offset args. Measured (`XEMU_NV2A_NSPROF`): total
+  upload time is ≤ 15 ms per 5 s even during streaming-heavy scene
+  transitions, ~0 in steady state — not worth the risk.
 - **`VK_EXT_external_memory_host` with snapshot scheme.** Per-flight
   COW or `MTLSharedEvent`-keyed boundary to sidestep the
-  host-coherent tear.
+  host-coherent tear. Measured: the snapshot memcpy it would
+  eliminate totals < 0.5 ms per 5 s in-game — far below the
+  ≥ 1 ms/frame bar for attempting this.
 - **`VK_KHR_dynamic_rendering` with explicit barriers.** Emit
   `vkCmdPipelineBarrier` around every `BeginRendering` /
   `EndRendering`.
@@ -536,7 +567,9 @@ Not attempted, or scope/risk too high for a one-shot change.
   would target shader-compile stutter (variant count) rather than
   per-draw branching.
 - **GPU S3TC decode.** Compute-shader decoder offloads the CPU
-  thread pool.
+  thread pool. Measured: total texture-upload CPU (including S3TC
+  decode) is ~0 in steady state and ≤ 15 ms per 5 s during
+  streaming — no longer a meaningful target.
 - **PAL 50 Hz guest-vblank cadence.** The dedicated vblank thread is
   fixed at 60 Hz; deriving 50 Hz from the guest video mode would
   serve PAL titles. (Host-present decoupling itself is done: the

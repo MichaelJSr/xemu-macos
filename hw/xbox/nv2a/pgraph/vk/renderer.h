@@ -637,6 +637,15 @@ typedef struct PGRAPHVkState {
     bool pipeline_binding_changed;
 
     /*
+     * Periodic VkPipelineCache persistence. App quit does not reliably
+     * reach pgraph_destroy()/finalize, so the cache is also flushed to
+     * disk from the PFIFO thread at flip boundaries once new pipelines
+     * have accumulated and a minimum interval has elapsed.
+     */
+    uint32_t pipeline_cache_unsaved;
+    int64_t pipeline_cache_last_save_ns;
+
+    /*
      * Per-command-buffer dynamic-state cache. Vulkan dynamic state is
      * scoped to the command buffer, so these are reset in
      * pgraph_vk_begin_command_buffer. Skipping a redundant vkCmdSet*
@@ -1050,6 +1059,7 @@ typedef enum FinishReason {
 // draw.c
 void pgraph_vk_init_pipelines(PGRAPHState *pg);
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg);
+void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg);
 void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter);
 void pgraph_vk_draw_begin(NV2AState *d);
 void pgraph_vk_draw_end(NV2AState *d);

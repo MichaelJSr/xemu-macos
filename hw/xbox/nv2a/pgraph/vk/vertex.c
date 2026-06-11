@@ -24,6 +24,7 @@
  */
 
 #include "renderer.h"
+#include "nsprof.h"
 
 /*
  * Compare the currently-populated vertex attribute / binding
@@ -71,8 +72,11 @@ VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size)
 {
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_2);
-    return pgraph_vk_append_to_buffer(pg, BUFFER_INDEX_STAGING, &data, &size, 1,
-                                      1);
+    int64_t nsprof_t0 = nsprof_begin();
+    VkDeviceSize res = pgraph_vk_append_to_buffer(pg, BUFFER_INDEX_STAGING,
+                                                  &data, &size, 1, 1);
+    nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
+    return res;
 }
 
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
@@ -80,8 +84,11 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                                    size_t count)
 {
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_3);
-    return pgraph_vk_append_to_buffer(pg, BUFFER_VERTEX_INLINE_STAGING, data,
-                                      sizes, count, 1);
+    int64_t nsprof_t0 = nsprof_begin();
+    VkDeviceSize res = pgraph_vk_append_to_buffer(
+        pg, BUFFER_VERTEX_INLINE_STAGING, data, sizes, count, 1);
+    nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
+    return res;
 }
 
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
@@ -120,7 +127,9 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
+    int64_t nsprof_t0 = nsprof_begin();
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
+    nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
 
     bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
 
