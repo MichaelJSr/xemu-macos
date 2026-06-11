@@ -20,7 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
-#include "nsprof.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-settings.h"
 #include <math.h>
 
@@ -1851,6 +1851,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
     if (r->in_command_buffer) {
         nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
+        nsprof_event(NSPROF_EV_FINISH_BASE + finish_reason);
 
         if (r->in_render_pass) {
             end_render_pass(r);
@@ -2271,6 +2272,8 @@ void pgraph_vk_draw_end(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    nsprof_event(NSPROF_EV_DRAW);
 
     if (r->nop_draw) {
         // FIXME: Check PGRAPH register 0x880.

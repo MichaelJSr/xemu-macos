@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include <limits.h>
 
 /*
@@ -91,8 +92,10 @@ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg)
      * is effectively free.
      */
     if (r->aux_async_pending) {
+        int64_t nsprof_t0 = nsprof_begin();
         vk_wait_for_fence_or_die(r->device, r->aux_fence,
                                  "aux async reclaim");
+        nsprof_end(NSPROF_AUX_FENCE_WAIT, nsprof_t0);
         r->aux_async_pending = false;
     }
 
@@ -122,8 +125,10 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     };
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->aux_fence));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
+    int64_t nsprof_t0 = nsprof_begin();
     vk_wait_for_fence_or_die(r->device, r->aux_fence,
                              "pgraph_vk_end_single_time_commands");
+    nsprof_end(NSPROF_AUX_FENCE_WAIT, nsprof_t0);
 
     r->in_aux_command_buffer = false;
 }
@@ -174,8 +179,10 @@ void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     if (r->flight[slot].submitted) {
+        int64_t nsprof_t0 = nsprof_begin();
         vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
                                  "pgraph_vk_wait_slot_fence");
+        nsprof_end(NSPROF_FENCE_WAIT, nsprof_t0);
     }
 }
 
@@ -185,8 +192,10 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
     int slot = r->current_flight;
 
     if (r->flight[slot].submitted) {
+        int64_t nsprof_t0 = nsprof_begin();
         vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
                                  "pgraph_vk_wait_for_previous_flight");
+        nsprof_end(NSPROF_FENCE_WAIT, nsprof_t0);
         r->flight[slot].submitted = false;
     }
 

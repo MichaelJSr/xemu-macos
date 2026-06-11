@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-settings.h"
 #include <math.h>
 
@@ -1783,7 +1784,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
      * preceding >=8 ms sync interval).
      */
     if (xemu_present_is_metal()) {
+        int64_t nsprof_t0 = nsprof_begin();
         metalfx_drain_inflight();
+        nsprof_end(NSPROF_MFX_DRAIN, nsprof_t0);
     }
 #endif
 

@@ -1,5 +1,5 @@
 /*
- * NV2A Vulkan wall-time profiler (implementation)
+ * NV2A wall-time profiler (implementation)
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -29,6 +29,35 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_TEX_HASH] = "tex_hash",
     [NSPROF_TEX_SNAPSHOT] = "tex_snapshot",
     [NSPROF_GEOM_UPDATE] = "geom_update",
+    [NSPROF_FENCE_WAIT] = "fence_wait",
+    [NSPROF_AUX_FENCE_WAIT] = "aux_fence",
+    [NSPROF_MFX_DRAIN] = "mfx_drain",
+    [NSPROF_SURF_DOWNLOAD] = "surf_down",
+    [NSPROF_FLIP_IDLE] = "flip_idle",
+};
+
+static const char *const event_names[NSPROF_EV__COUNT] = {
+    [NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY] = "finish_vtx_dirty",
+    [NSPROF_EV_FINISH_SURFACE_CREATE] = "finish_surf_create",
+    [NSPROF_EV_FINISH_SURFACE_DOWN] = "finish_surf_down",
+    [NSPROF_EV_FINISH_NEED_BUFFER_SPACE] = "finish_buf_space",
+    [NSPROF_EV_FINISH_PRESENTING] = "finish_present",
+    [NSPROF_EV_FINISH_FLIP_STALL] = "finish_flip_stall",
+    [NSPROF_EV_FINISH_FLUSH] = "finish_flush",
+    [NSPROF_EV_FINISH_STALLED] = "finish_stalled",
+    [NSPROF_EV_FINISH_REPORTS_FULL] = "finish_reports_full",
+    [NSPROF_EV_DRAW] = "draws",
+    [NSPROF_EV_SDOWN_ACCESS_R] = "sdown_access_r",
+    [NSPROF_EV_SDOWN_ACCESS_W] = "sdown_access_w",
+    [NSPROF_EV_SDOWN_VTXRAM] = "sdown_vtxram",
+    [NSPROF_EV_SDOWN_TEXBIND] = "sdown_texbind",
+    [NSPROF_EV_SDOWN_BLIT] = "sdown_blit",
+    [NSPROF_EV_SDOWN_EVICT] = "sdown_evict",
+    [NSPROF_EV_SDOWN_INCOMPAT] = "sdown_incompat",
+    [NSPROF_EV_SDOWN_FLUSH] = "sdown_flush",
+    [NSPROF_EV_SUPLOAD_COLOR] = "supload_color",
+    [NSPROF_EV_SUPLOAD_ZETA] = "supload_zeta",
+    [NSPROF_EV_TEXBIND_SKIP] = "texbind_skip",
 };
 
 static struct {
@@ -37,8 +66,11 @@ static struct {
     uint64_t events;
 } counters[NSPROF__COUNT];
 
+static uint64_t events[NSPROF_EV__COUNT];
+
 static uint64_t flips;
 static int64_t interval_start_ns;
+static int64_t flip_wait_start_ns = -1;
 
 bool nsprof_enabled(void)
 {
@@ -68,6 +100,27 @@ void nsprof_end(enum NsprofCounter c, int64_t t0)
     counters[c].events++;
     if (dt > counters[c].max_ns) {
         counters[c].max_ns = dt;
+    }
+}
+
+void nsprof_event(enum NsprofEvent e)
+{
+    if (!nsprof_enabled()) {
+        return;
+    }
+    events[e]++;
+}
+
+void nsprof_flip_wait_begin(void)
+{
+    flip_wait_start_ns = nsprof_begin();
+}
+
+void nsprof_flip_wait_end(void)
+{
+    if (flip_wait_start_ns >= 0) {
+        nsprof_end(NSPROF_FLIP_IDLE, flip_wait_start_ns);
+        flip_wait_start_ns = -1;
     }
 }
 
@@ -104,6 +157,15 @@ void nsprof_flip_tick(void)
         counters[i].total_ns = 0;
         counters[i].max_ns = 0;
         counters[i].events = 0;
+    }
+    for (int i = 0; i < NSPROF_EV__COUNT; i++) {
+        if (!events[i]) {
+            continue;
+        }
+        fprintf(stderr, "nsprof:   %-19s ev=%-8llu per_flip=%7.1f\n",
+                event_names[i], (unsigned long long)events[i],
+                (double)events[i] / (double)flips);
+        events[i] = 0;
     }
     flips = 0;
     interval_start_ns = now;

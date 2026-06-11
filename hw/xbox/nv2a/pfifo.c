@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "nsprof.h"
 #include "qemu/timer.h"
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -147,6 +148,7 @@ static bool pfifo_stall_for_flip(NV2AState *d)
             should_stall = true;
         } else {
             qatomic_set(&d->pgraph.waiting_for_flip, false);
+            nsprof_flip_wait_end();
         }
         qemu_mutex_unlock(&d->pgraph.lock);
     }

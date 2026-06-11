@@ -24,6 +24,7 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "renderer.h"
 
 static void perform_blit(int operation, uint8_t *source, uint8_t *dest,
@@ -121,6 +122,9 @@ void pgraph_vk_image_blit(NV2AState *d)
 
     SurfaceBinding *surf_src = pgraph_vk_surface_get(d, source_addr);
     if (surf_src) {
+        if (surf_src->draw_dirty) {
+            nsprof_event(NSPROF_EV_SDOWN_BLIT);
+        }
         pgraph_vk_surface_download_if_dirty(d, surf_src);
     }
 
@@ -158,6 +162,9 @@ void pgraph_vk_image_blit(NV2AState *d)
     if (surf_dest) {
         if (adjusted_height < surf_dest->height ||
             row_pixels < surf_dest->width) {
+            if (surf_dest->draw_dirty) {
+                nsprof_event(NSPROF_EV_SDOWN_BLIT);
+            }
             pgraph_vk_surface_download_if_dirty(d, surf_dest);
         } else {
             // The blit will completely replace the surface so any pending
