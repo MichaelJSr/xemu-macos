@@ -25,7 +25,24 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
 
     QSIMPLEQ_INIT(&r->report_queue);
     r->num_queries_in_flight = 0;
-    r->max_queries_in_flight = 1024;
+    /*
+     * Sized for whole-frame command buffers with per-rotation query
+     * indices (deferred reports + in-pass queries): heavy scenes
+     * measure ~200-400 rotations per frame; 2048 per slot leaves
+     * ample headroom before the begin_draw capacity guard forces a
+     * submit. Visibility/result storage is 8 bytes per query.
+     * XEMU_MAX_QUERIES overrides for testing the guard path.
+     */
+    r->max_queries_in_flight = 4096;
+    {
+        const char *e = getenv("XEMU_MAX_QUERIES");
+        if (e && e[0]) {
+            long v = strtol(e, NULL, 0);
+            if (v >= 8 && v <= 65536) {
+                r->max_queries_in_flight = (int)v;
+            }
+        }
+    }
     r->new_query_needed = false;
     r->query_in_flight = false;
     r->zpass_pixel_count_result = 0;

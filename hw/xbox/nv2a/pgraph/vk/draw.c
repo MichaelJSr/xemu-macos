@@ -2150,6 +2150,23 @@ static void begin_draw(PGRAPHState *pg)
     nv2a_vk_assert(r->in_command_buffer);
 
     /*
+     * Query-partition capacity guard. Deferred report delivery means
+     * a command buffer can now span a whole frame, and in-pass query
+     * rotation allocates an index per rotation — a heavy zpass scene
+     * can exhaust the slot's partition mid-recording (previously
+     * only a release-stripped assert; overran the pool and crashed
+     * inside MoltenVK's visibility-buffer encode). Submit and start
+     * a fresh recording before that happens, mirroring
+     * alloc_report()'s REPORTS_FULL guard. in_draw is not yet set
+     * here, so finishing is legal.
+     */
+    if (!pg->clearing && pg->zpass_pixel_count_enable &&
+        r->num_queries_in_flight >= pgraph_vk_queries_per_slot(r) - 1) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
+        pgraph_vk_ensure_command_buffer(pg);
+    }
+
+    /*
      * Visibility testing: rotate / stop occlusion queries inside the
      * render pass. Ending or beginning a query no longer ends the
      * pass (see the bulk vkCmdResetQueryPool at command-buffer
