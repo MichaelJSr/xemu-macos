@@ -290,9 +290,33 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
          * behavior wholesale.
          */
         static int sync_mode = -1;
+        static int64_t budget_ns = -1;
         if (sync_mode < 0) {
             const char *e = getenv("XEMU_REPORTS_SYNC");
             sync_mode = (e && e[0] == '1');
+            /*
+             * Continuous-idle budget before the safety-valve submit,
+             * in microseconds (XEMU_REPORTS_BUDGET_US, clamped to
+             * [0, 100000]). For a guest that consumes a report value
+             * mid-frame, this budget is a direct stall on the guest's
+             * critical path: it spin-waits on the value while the
+             * FIFO idles, so every elapsed budget microsecond is lost
+             * frame time (measured: scenes stall on it 1-2.2x per
+             * flip). A budget that is too small only costs an extra
+             * small submit when the FIFO goes briefly idle mid-frame
+             * with reports pending — bounded by the report count,
+             * nothing like the per-report submit storm the deferred
+             * design replaced (that fired per report, not per idle
+             * episode).
+             */
+            const char *b = getenv("XEMU_REPORTS_BUDGET_US");
+            int64_t us = b ? atoll(b) : 300;
+            if (us < 0) {
+                us = 0;
+            } else if (us > 100000) {
+                us = 100000;
+            }
+            budget_ns = us * 1000ll;
         }
         if (sync_mode) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
@@ -301,7 +325,7 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (r->reports_idle_since_ns == 0) {
             r->reports_idle_since_ns = now;
-        } else if (now - r->reports_idle_since_ns > 5000000ll /* 5 ms */) {
+        } else if (now - r->reports_idle_since_ns > budget_ns) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_SUBMIT);
             r->reports_idle_since_ns = 0;
         }

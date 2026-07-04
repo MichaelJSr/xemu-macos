@@ -117,7 +117,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
-| `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + 5 ms fallback) |
+| `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + idle-budget fallback) |
+| `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.11 value (clamped 0-100000) |
 | `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
@@ -257,6 +258,25 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **Deferred-report idle budget cut 5 ms → 300 µs
+  (`XEMU_REPORTS_BUDGET_US`).** Guests that consume a zpass report
+  value mid-frame spin-wait on it with an idle FIFO; the deferred
+  design's safety-valve submit only fired after 5 ms of continuous
+  idle, so every such poll cost the guest's critical path up to the
+  full budget (the per-scene `finish_reports_submit` rate tracks each
+  scene's fps deficit: 0.18/flip at 60 fps → 2.23/flip at 24 fps).
+  The budget is now 300 µs and tunable: a too-small budget merely
+  costs an extra small submit per mid-frame idle episode (bounded by
+  report count — not the per-report submit storm the deferred design
+  replaced). Measured (interleaved same-binary A/B, 3 pairs, 770
+  draws/flip savestate scene): 24.04 ± 0.43 → 25.36 ± 0.22 fps
+  (+5.5%, all pairs positive; +1.48 mean on the pre-death early
+  window). The original ~10 ms/flip stall hypothesis was killed
+  honestly — measured reclaim is ~2 ms/flip. Artifact soak at the new
+  default: same content-flag signature as legacy, zero
+  corruption-class clusters. `XEMU_REPORTS_BUDGET_US=5000` restores
+  the previous behavior; `XEMU_REPORTS_SYNC=1` remains the full
+  legacy hatch.
 - **Vertex-mirror overwrite waits the just-submitted slot.** Second
   member of the pipelined-finish family: the `VERTEX_BUFFER_DIRTY`
   conflict path submitted the recording CB and immediately memcpy'd
