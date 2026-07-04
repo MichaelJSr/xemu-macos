@@ -36,6 +36,20 @@ XEMU_VERSION_MINOR=$(get_version_dot 2)
 XEMU_VERSION_PATCH=$(get_version_dot 3)
 XEMU_VERSION_COMMIT=$(get_version_field 2)
 
+# The four values above feed version.rc FILEVERSION, whose fields
+# must be numeric — a fork tag like v0.8.153-macos.1 puts "macos.1"
+# in the commit field and windres fails with a syntax error. Keep
+# digits only, defaulting to 0.
+sanitize_numeric() {
+  local v
+  v=$(echo "$1" | tr -dc '0-9')
+  echo "${v:-0}"
+}
+XEMU_VERSION_MAJOR=$(sanitize_numeric "$XEMU_VERSION_MAJOR")
+XEMU_VERSION_MINOR=$(sanitize_numeric "$XEMU_VERSION_MINOR")
+XEMU_VERSION_PATCH=$(sanitize_numeric "$XEMU_VERSION_PATCH")
+XEMU_VERSION_COMMIT=$(sanitize_numeric "$XEMU_VERSION_COMMIT")
+
 cat <<EOF
 #define XEMU_VERSION       "$XEMU_VERSION"
 #define XEMU_VERSION_MAJOR $XEMU_VERSION_MAJOR
