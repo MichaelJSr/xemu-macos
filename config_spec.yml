@@ -334,10 +334,17 @@ audio:
       type: integer
       default: 0  # 0 = auto
   use_dsp: bool
+  # Inline basic-block JIT for the C interpreter engine (Apple
+  # Silicon only). When supported and enabled it takes precedence
+  # over use_dsp_jit below — see dsp_select_engine() in dsp.c.
   dsp_jit:
     enabled:
       type: bool
       default: false
+  # Upstream dsp56300-subproject JIT execution engine.
+  use_dsp_jit:
+    type: bool
+    default: true
   hrtf:
     type: bool
     default: true

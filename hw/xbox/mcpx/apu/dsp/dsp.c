@@ -24,68 +24,29 @@
  */
 
 #include "qemu/osdep.h"
-#include "dsp_cpu.h"
-#include "dsp_dma.h"
-#include "dsp_jit.h"
-#include "dsp_state.h"
-#include "dsp.h"
-#include "debug.h"
+#include "dsp_internal.h"
+#include "interp/dsp_cpu.h"
+#include "interp/dsp56k_jit_arm64.h"
 #include "trace.h"
+#include "ui/xemu-settings.h"
 
 /* Defines */
-#define BITMASK(x)  ((1<<(x))-1)
+#define BITMASK(x) ((1 << (x)) - 1)
 
 #define INTERRUPT_ABORT_FRAME (1 << 0)
 #define INTERRUPT_START_FRAME (1 << 1)
 #define INTERRUPT_DMA_EOL (1 << 7)
 
-static uint32_t read_peripheral(dsp_core_t* core, uint32_t address);
-static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value);
+static int g_gp_frame_count = 0;
 
-DSPState *dsp_init(void *rw_opaque,
-                   dsp_scratch_rw_func scratch_rw,
-                   dsp_fifo_rw_func fifo_rw)
+/*
+ * Shared peripheral I/O helpers, used by both backends via callbacks.
+ */
+
+uint32_t read_peripheral(DSPState *dsp, uint32_t address)
 {
-    DPRINTF("dsp_init\n");
-
-    DSPState* dsp = (DSPState*)malloc(sizeof(DSPState));
-    assert(dsp);
-    memset(dsp, 0, sizeof(*dsp));
-
-    dsp->core.read_peripheral = read_peripheral;
-    dsp->core.write_peripheral = write_peripheral;
-
-    dsp->dma.core = &dsp->core;
-    dsp->dma.rw_opaque = rw_opaque;
-    dsp->dma.scratch_rw = scratch_rw;
-    dsp->dma.fifo_rw = fifo_rw;
-
-    dsp_reset(dsp);
-    dsp_jit_init(&dsp->core);
-
-    return dsp;
-}
-
-void dsp_reset(DSPState* dsp)
-{
-    dsp56k_reset_cpu(&dsp->core);
-    dsp->save_cycles = 0;
-    /* Reset wipes PRAM and clears pram_opcache; any translated JIT
-     * blocks that referenced the old code are now stale. */
-    dsp_jit_invalidate_all(&dsp->core);
-}
-
-void dsp_destroy(DSPState* dsp)
-{
-    dsp_jit_finalize(&dsp->core);
-    free(dsp);
-}
-
-static uint32_t read_peripheral(dsp_core_t* core, uint32_t address) {
-    DSPState* dsp = container_of(core, DSPState, core);
-
     uint32_t v = 0xababa;
-    switch(address) {
+    switch (address) {
     case 0xFFFFB3:
         v = 0; // core->num_inst; // ??
         break;
@@ -113,13 +74,12 @@ static uint32_t read_peripheral(dsp_core_t* core, uint32_t address) {
     return v;
 }
 
-static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value) {
-    DSPState* dsp = container_of(core, DSPState, core);
-
-    switch(address) {
+void write_peripheral(DSPState *dsp, uint32_t address, uint32_t value)
+{
+    switch (address) {
     case 0xFFFFC4:
         if (value & 1) {
-            core->is_idle = true;
+            dsp_set_halt_requested(dsp, true);
         }
         break;
     case 0xFFFFC5:
@@ -135,18 +95,6 @@ static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value)
         dsp_dma_write(&dsp->dma, DMA_START_BLOCK, value);
         break;
     case 0xFFFFD6:
-        /* Writing DMA_CONTROL with an ACTION code may synchronously
-         * invoke dsp_dma_run() which scatter-gather-reads Xbox host
-         * RAM via scratch_rw. That RAM is shared with (and can be
-         * concurrently modified by) the main x86 CPU thread, making
-         * the data non-replayable. Tell the JIT differential harness
-         * to skip the post-block state compare so we don't abort on
-         * a benign cross-thread memory race rather than an actual
-         * translation bug. Gated on diff mode being active so the
-         * non-diff hot path is entirely free of diff bookkeeping. */
-        if (dsp_jit_diff_enabled()) {
-            core->jit_skip_diff_compare = 1;
-        }
         dsp_dma_write(&dsp->dma, DMA_CONTROL, value);
         break;
     case 0xFFFFD7:
@@ -157,124 +105,165 @@ static void write_peripheral(dsp_core_t* core, uint32_t address, uint32_t value)
     trace_dsp_write_peripheral(address, value);
 }
 
-
-void dsp_step(DSPState* dsp)
-{
-    dsp56k_execute_instruction(&dsp->core);
-}
-
-void dsp_run(DSPState* dsp, int cycles)
-{
-    dsp->save_cycles += cycles;
-
-    if (dsp->save_cycles <= 0) return;
-
-    int dma_timer = 0;
-    const bool jit = dsp_jit_enabled();
-
-    while (dsp->save_cycles > 0)
-    {
-        unsigned int consumed = 0;
-
-        if (jit) {
-            /* Try the JIT first: translates and executes a basic block
-             * of DSP instructions in one call. Returns 0 on any
-             * fallback condition (unsupported op at block start,
-             * translator bail-out), in which case we run one
-             * interpreter step and retry. */
-            consumed = dsp_jit_execute_block(&dsp->core);
-        }
-
-        if (consumed == 0) {
-            dsp56k_execute_instruction(&dsp->core);
-            consumed = dsp->core.instr_cycle;
-        }
-
-        dsp->save_cycles -= consumed;
-        dsp->core.cycle_count++;
-
-        if (dsp->dma.control & DMA_CONTROL_RUNNING) {
-            dma_timer++;
-        }
-
-        if (dma_timer > 2) {
-            dma_timer = 0;
-            dsp->dma.control &= ~DMA_CONTROL_RUNNING;
-            dsp->dma.control |= DMA_CONTROL_STOPPED;
-        }
-
-        if (dsp->core.is_idle) break;
-    }
-
-    /* FIXME: DMA timing be done cleaner. Xbox enables running
-     * then polls to make sure its running. But we complete DMA instantaneously,
-     * so when is it supposed to be signaled that it stopped? Maybe just wait at
-     * least one cycle? How long does hardware wait?
-     */
-}
-
-void dsp_bootstrap(DSPState* dsp)
-{
-    // scratch memory is dma'd in to pram by the bootrom
-    dsp->dma.scratch_rw(dsp->dma.rw_opaque,
-        (uint8_t*)dsp->core.pram, 0, 0x800*4, false);
-    for (int i = 0; i < 0x800; i++) {
-        if (dsp->core.pram[i] & 0xff000000) {
-            DPRINTF("Bootstrap %04x: %08x\n", i, dsp->core.pram[i]);
-            dsp->core.pram[i] &= 0x00ffffff;
-        }
-    }
-    memset(dsp->core.pram_opcache, 0, sizeof(dsp->core.pram_opcache));
-    /* Fresh code loaded — any previously-translated JIT blocks are
-     * now stale. */
-    dsp_jit_invalidate_all(&dsp->core);
-}
-
-void dsp_start_frame(DSPState* dsp)
+void dsp_start_frame_impl(DSPState *dsp)
 {
     dsp->interrupts |= INTERRUPT_START_FRAME;
 }
 
-uint32_t dsp_read_memory(DSPState* dsp, char space, uint32_t address)
+/*
+ * Engine selection. The C interpreter engine embeds its own inline
+ * basic-block JIT on Apple Silicon (interp/dsp56k_jit_arm64.c,
+ * audio.dsp_jit.enabled); when that is supported and enabled it is
+ * this fork's preferred engine and takes precedence over the
+ * dsp56300-subproject JIT engine (audio.use_dsp_jit).
+ */
+static bool dsp_want_external_jit_engine(void)
 {
-    int space_id;
-
-    switch (space) {
-    case 'X':
-        space_id = DSP_SPACE_X;
-        break;
-    case 'Y':
-        space_id = DSP_SPACE_Y;
-        break;
-    case 'P':
-        space_id = DSP_SPACE_P;
-        break;
-    default:
-        assert(!"Invalid dsp space when reading from memory");
-        return 0;
+#if DSP56K_JIT_SUPPORTED
+    if (g_config.audio.dsp_jit.enabled) {
+        return false;
     }
-
-    return dsp56k_read_memory(&dsp->core, space_id, address);
+#endif
+    return g_config.audio.use_dsp_jit;
 }
 
-void dsp_write_memory(DSPState* dsp, char space, uint32_t address, uint32_t value)
+DSPState *dsp_init(void *rw_opaque, dsp_scratch_rw_func scratch_rw,
+                   dsp_fifo_rw_func fifo_rw, bool is_gp)
 {
-    int space_id;
+    DSPState *dsp = g_new0(DSPState, 1);
+    dsp->is_gp = is_gp;
+    dsp->core.is_gp = is_gp;
 
-    switch (space) {
-    case 'X':
-        space_id = DSP_SPACE_X;
-        break;
-    case 'Y':
-        space_id = DSP_SPACE_Y;
-        break;
-    case 'P':
-        space_id = DSP_SPACE_P;
-        break;
-    default:
-        assert(!"Invalid dsp space when writing to memory");
+    dsp->dma.rw_opaque = rw_opaque;
+    dsp->dma.scratch_rw = scratch_rw;
+    dsp->dma.fifo_rw = fifo_rw;
+
+    if (dsp_want_external_jit_engine()) {
+        dsp_jit_init(dsp);
+    } else {
+        dsp_c_init(dsp);
+    }
+
+    dsp_reset(dsp);
+
+    return dsp;
+}
+
+void dsp_destroy(DSPState *dsp)
+{
+    dsp->ops->finalize(dsp);
+    g_free(dsp);
+}
+
+void dsp_reset(DSPState *dsp)
+{
+    dsp->ops->reset(dsp);
+}
+
+void dsp_step(DSPState *dsp)
+{
+    dsp->ops->step(dsp);
+}
+
+void dsp_run(DSPState *dsp, int cycles)
+{
+    dsp->ops->run(dsp, cycles);
+}
+
+void dsp_bootstrap(DSPState *dsp)
+{
+    dsp->ops->bootstrap(dsp);
+}
+
+void dsp_start_frame(DSPState *dsp)
+{
+    if (dsp->is_gp) {
+        g_gp_frame_count++;
+    }
+    dsp->ops->start_frame(dsp);
+}
+
+uint32_t dsp_read_memory(DSPState *dsp, char space, uint32_t address)
+{
+    return dsp->ops->read_memory(dsp, space, address);
+}
+
+void dsp_write_memory(DSPState *dsp, char space, uint32_t address,
+                      uint32_t value)
+{
+    dsp->ops->write_memory(dsp, space, address, value);
+}
+
+bool dsp_write_mixbuffer_bulk(DSPState *dsp, const uint32_t *data,
+                              size_t n_words)
+{
+    if (dsp->ops == &c_dsp_ops) {
+        dsp_core_t *core = dsp->backend;
+        assert(n_words <= DSP_MIXBUFFER_SIZE);
+        memcpy(core->mixbuffer, data, n_words * sizeof(uint32_t));
+        return true;
+    }
+    return false;
+}
+
+bool dsp_get_halt_requested(DSPState *dsp)
+{
+    return dsp->ops->get_halt_requested(dsp);
+}
+
+void dsp_set_halt_requested(DSPState *dsp, bool idle)
+{
+    dsp->ops->set_halt_requested(dsp, idle);
+}
+
+uint32_t dsp_get_cycle_count(DSPState *dsp)
+{
+    return dsp->ops->get_cycle_count(dsp);
+}
+
+void dsp_set_cycle_count(DSPState *dsp, uint32_t count)
+{
+    dsp->ops->set_cycle_count(dsp, count);
+}
+
+void dsp_invalidate_opcache(DSPState *dsp)
+{
+    dsp->ops->invalidate_opcache(dsp);
+}
+
+void dsp_sync_to_vm(DSPState *dsp)
+{
+    dsp->ops->sync_to_vm(dsp);
+}
+
+void dsp_sync_from_vm(DSPState *dsp)
+{
+    dsp->ops->sync_from_vm(dsp);
+}
+
+void dsp_set_engine(DSPState *dsp, bool use_jit)
+{
+#if DSP56K_JIT_SUPPORTED
+    /* Inline-JIT interp engine active: the UI toggle for the external
+     * JIT engine is a no-op while audio.dsp_jit.enabled is set. */
+    if (g_config.audio.dsp_jit.enabled) {
+        use_jit = false;
+    }
+#endif
+
+    bool currently_jit = (dsp->ops == &jit_dsp_ops);
+    if (use_jit == currently_jit) {
         return;
     }
 
-    dsp56k_write_memory(&dsp->core, space_id, address, value);
+    dsp_sync_to_vm(dsp);
+    dsp->ops->finalize(dsp);
+
+    if (use_jit) {
+        dsp_jit_init(dsp);
+    } else {
+        dsp_c_init(dsp);
+    }
+
+    dsp_sync_from_vm(dsp);
 }

@@ -26,11 +26,15 @@
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 #include "dsp_cpu.h"
-#include "dsp_jit.h"
+#include "dsp56k_jit_arm64.h"
 #include "debug.h"
 #include "trace.h"
 
 #define BITMASK(x)  ((1<<(x))-1)
+
+#define TRACE_DSP_DISASM 0
+#define TRACE_DSP_DISASM_REG 0
+#define TRACE_DSP_DISASM_MEM 0
 
 // #define DSP_COUNT_IPS     /* Count instruction per seconds */
 
@@ -71,19 +75,12 @@ static void dsp_mul56(uint32_t source1, uint32_t source2, uint32_t *dest, uint8_
 static void dsp_rnd56(dsp_core_t* dsp, uint32_t *dest);
 static uint32_t dsp_signextend(int bits, uint32_t v);
 
-static const dsp_interrupt_t dsp_interrupt[12] = {
+/* Vector addresses per DSP56300FM Table 2-2, indexed by DSP_INTER_* */
+static const dsp_interrupt_t dsp_interrupt[4] = {
     { DSP_INTER_RESET, 0x00, 0, "Reset" },
-    { DSP_INTER_ILLEGAL, 0x3e, 0, "Illegal" },
+    { DSP_INTER_ILLEGAL, 0x04, 0, "Illegal" },
     { DSP_INTER_STACK_ERROR, 0x02, 0, "Stack Error" },
-    { DSP_INTER_TRACE, 0x04, 0, "Trace" },
-    { DSP_INTER_SWI, 0x06, 0, "Swi" },
-    { DSP_INTER_HOST_COMMAND, 0xff, 1, "Host Command" },
-    { DSP_INTER_HOST_RCV_DATA, 0x20, 1, "Host receive" },
-    { DSP_INTER_HOST_TRX_DATA, 0x22, 1, "Host transmit" },
-    { DSP_INTER_SSI_RCV_DATA_E, 0x0e, 2, "SSI receive with exception" },
-    { DSP_INTER_SSI_RCV_DATA, 0x0c, 2, "SSI receive" },
-    { DSP_INTER_SSI_TRX_DATA_E, 0x12, 2, "SSI transmit with exception" },
-    { DSP_INTER_SSI_TRX_DATA, 0x10, 2, "SSI transmit" }
+    { DSP_INTER_TRAP, 0x08, 0, "Trap" },
 };
 
 static const int registers_tcc[16][2] = {
@@ -393,11 +390,8 @@ void dsp56k_reset_cpu(dsp_core_t* dsp)
     dsp->interrupt_save_pc = -1;
     dsp->interrupt_counter = 0;
     dsp->interrupt_pipeline_count = 0;
-    for (i=0;i<5;i++) {
+    for (i=0;i<4;i++) {
         dsp->interrupt_ipl[i] = 3;
-    }
-    for (i=5;i<12;i++) {
-        dsp->interrupt_ipl[i] = -1;
     }
 
     /* Misc */
@@ -788,7 +782,7 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
                 if ( ((instr & 0xfff000) == 0x0d0000) || ((instr & 0xffc0ff) == 0x0bc080) ) {
                     dsp->interrupt_state = DSP_INTERRUPT_LONG;
                     dsp_stack_push(dsp, dsp->interrupt_save_pc, dsp->registers[DSP_REG_SR], 0);
-                    dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_LF)|(1<<DSP_SR_T)  |
+                    dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_LF)|(1<<DSP_SR_FV)  |
                                             (1<<DSP_SR_S1)|(1<<DSP_SR_S0) |
                                             (1<<DSP_SR_I0)|(1<<DSP_SR_I1));
                     dsp->registers[DSP_REG_SR] |= dsp->interrupt_ipl_to_raise<<DSP_SR_I0;
@@ -802,7 +796,7 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
                     if ( ((instr & 0xfff000) == 0x0d0000) || ((instr & 0xffc0ff) == 0x0bc080) ) {
                         dsp->interrupt_state = DSP_INTERRUPT_LONG;
                         dsp_stack_push(dsp, dsp->interrupt_save_pc, dsp->registers[DSP_REG_SR], 0);
-                        dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_LF)|(1<<DSP_SR_T)  |
+                        dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_LF)|(1<<DSP_SR_FV)  |
                                                 (1<<DSP_SR_S1)|(1<<DSP_SR_S0) |
                                                 (1<<DSP_SR_I0)|(1<<DSP_SR_I1));
                         dsp->registers[DSP_REG_SR] |= dsp->interrupt_ipl_to_raise<<DSP_SR_I0;
@@ -834,11 +828,6 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
         }
     }
 
-    /* Trace Interrupt ? */
-    if (dsp->registers[DSP_REG_SR] & (1<<DSP_SR_T)) {
-        dsp56k_add_interrupt(dsp, DSP_INTER_TRACE);
-    }
-
     /* No interrupt to execute */
     if (dsp->interrupt_counter == 0) {
         return;
@@ -850,7 +839,7 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
     ipl_to_raise = -1;
 
     /* Arbitrate between all pending interrupts */
-    for (i=0; i<12; i++) {
+    for (i=0; i<4; i++) {
         if (dsp->interrupt_is_pending[i] == 1) {
 
             /* level 3 interrupt ? */
@@ -895,29 +884,6 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
     dsp->interrupt_ipl_to_raise = ipl_to_raise;
 
     DPRINTF("Dsp interrupt: %s\n", dsp_interrupt[index].name);
-
-    /* SSI receive data with exception ? */
-    if (dsp->interrupt_instr_fetch == 0xe) {
-        // dsp->periph[DSP_SPACE_X][DSP_SSI_SR] &= 0xff-(1<<DSP_SSI_SR_ROE);
-        assert(!"SSI receive data failed");
-    }
-
-    /* SSI transmit data with exception ? */
-    else if (dsp->interrupt_instr_fetch == 0x12) {
-        // dsp->periph[DSP_SPACE_X][DSP_SSI_SR] &= 0xff-(1<<DSP_SSI_SR_TUE);
-        assert(!"SSI transmit data failed");
-    }
-
-    /* host command ? */
-    else if (dsp->interrupt_instr_fetch == 0xff) {
-        /* Clear HC and HCP interrupt */
-        // dsp->periph[DSP_SPACE_X][DSP_HOST_HSR] &= 0xff - (1<<DSP_HOST_HSR_HCP);
-        // dsp->hostport[CPU_HOST_CVR] &= 0xff - (1<<CPU_HOST_CVR_HC);
-
-        // dsp->interrupt_instr_fetch = dsp->hostport[CPU_HOST_CVR] & BITMASK(5);
-        // dsp->interrupt_instr_fetch *= 2;
-        assert(!"Host command failure");
-    }
 }
 
 /**********************************
@@ -998,7 +964,7 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
         stl_le_p(&dsp->pram[address], value);
         dsp->pram_opcache[address] = NULL;
         /* Any translated JIT block that covers this PC is now stale. */
-        dsp_jit_invalidate(dsp, address);
+        dsp56k_jit_invalidate(dsp, address);
     } else {
         assert(!"Invalid dsp space in write raw memory");
     }
@@ -1402,21 +1368,21 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
 /* ============================================================== *
  * JIT helper shims
  *
- * These are called from the JIT's translated code (see dsp_jit.c).
+ * These are called from the JIT's translated code (see dsp56k_jit_arm64.c).
  * They live here because the static emu_* symbols and the
  * nonparallel_opcodes[] table are in scope at this file.
  * ============================================================== */
 
-#include "dsp_jit.h"
+#include "dsp56k_jit_arm64.h"
 
 #if DSP_JIT_SUPPORTED
 
-void dsp_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
+void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
 {
     dsp_postexecute_update_pc(dsp);
 }
 
-void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
+void dsp56k_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
 {
     dsp_postexecute_interrupts(dsp);
 }
@@ -1431,7 +1397,7 @@ void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
  * pass them via the standard x0..x3 ABI without needing an x
  * argument slot). `pc` is the block's current PC and `inst` is
  * the raw 24-bit instruction word that just finished emitting —
- * together they let us grep dsp_jit_dump / dsp_emu.c to figure
+ * together they let us grep dsp56k_jit_dump / dsp_emu.c to figure
  * out which emitter leaked the pin.
  *
  * Prints a one-line divergence report and increments an internal
@@ -1441,7 +1407,7 @@ void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp)
  * we want to see the full failure pattern, not crash on the first
  * event.
  */
-void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
+void dsp56k_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
                                    uint32_t pin_lo, uint32_t pin_hi,
                                    uint32_t pc, uint32_t inst)
 {
@@ -1483,7 +1449,7 @@ void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
     }
 }
 
-emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst)
+emu_func_t dsp56k_jit_helper_lookup_emu(uint32_t inst)
 {
     /* Non-asserting variant of lookup_opcode(): returns the handler
      * if exactly one non-parallel opcode matches, else NULL. Called
@@ -1596,7 +1562,7 @@ static bool parmove_has_mode6_ea(uint32_t inst)
     return ((ea_mode >> 3) & 7u) == 6u;
 }
 
-uint32_t dsp_jit_helper_inst_length(uint32_t inst)
+uint32_t dsp56k_jit_helper_inst_length(uint32_t inst)
 {
     /* Long-immediate ALU: 00000001 01000000 1100dxyz
      * matches inst == 0x0140C0?? with (inst & 0xFFFFF0) == 0x0140C0. */
@@ -1623,7 +1589,7 @@ uint32_t dsp_jit_helper_inst_length(uint32_t inst)
     return 1;
 }
 
-bool dsp_jit_helper_is_terminator(void *fn)
+bool dsp56k_jit_helper_is_terminator(void *fn)
 {
     /* Any handler that can change dsp->pc independently of
      * cur_inst_len (branches, calls, returns) OR can set loop_rep
@@ -1670,12 +1636,12 @@ bool dsp_jit_helper_is_terminator(void *fn)
  * dsp56k_read_memory and dsp56k_write_memory are already non-static
  * and are called directly from JIT code — no shim needed.
  */
-int dsp_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest)
+int dsp56k_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest)
 {
     return emu_pm_read_accu24(dsp, numreg, dest);
 }
 
-emu_func_t dsp_jit_helper_lookup_alu(uint32_t inst)
+emu_func_t dsp56k_jit_helper_lookup_alu(uint32_t inst)
 {
     /* Returns opcodes_alu[inst & 0xff] — the ALU kernel selected
      * by a parmove-bearing instruction. Returns NULL for the
@@ -1690,7 +1656,7 @@ emu_func_t dsp_jit_helper_lookup_alu(uint32_t inst)
 /* Identifies the 'pure move' ALU entry (opcodes_alu[0] == emu_move),
  * which is a no-op on the A/B accumulator — the parmove JIT can
  * skip the BLR in this case to save a call. */
-bool dsp_jit_helper_alu_is_move(emu_func_t fn)
+bool dsp56k_jit_helper_alu_is_move(emu_func_t fn)
 {
     return fn == emu_move;
 }
@@ -1704,17 +1670,17 @@ bool dsp_jit_helper_alu_is_move(emu_func_t fn)
  * to emu_pm_4x's interpreter path, so cur_inst_len / instr_cycle /
  * SR.L updates all stay bit-exact.
  */
-void dsp_jit_helper_pm_4x(dsp_core_t *dsp)
+void dsp56k_jit_helper_pm_4x(dsp_core_t *dsp)
 {
     emu_pm_4x(dsp);
 }
 
-int dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr)
+int dsp56k_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr)
 {
     return emu_calc_ea(dsp, ea_mode, dst_addr);
 }
 
-void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier)
+void dsp56k_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier)
 {
     emu_update_rn(dsp, numreg, modifier);
 }
@@ -1731,7 +1697,7 @@ void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier
  * dsp_rnd56 internally calls dsp_add56 but discards the returned
  * SR flag bits, so there's no stray SR mutation from this path.
  */
-uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
+uint64_t dsp56k_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
 {
     uint32_t d[3];
     d[0] = (packed >> 48) & 0xff;
@@ -1754,39 +1720,39 @@ uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
  *
  * Round 2 inlined emu_calc_cc directly at translate time (the
  * 16-case cc-code switch maps each case to a 2-7-insn bitfield
- * extract), so there is no longer a dsp_jit_helper_calc_cc shim.
+ * extract), so there is no longer a dsp56k_jit_helper_calc_cc shim.
  *
- * dsp_jit_helper_classify_cf maps an emu_func_t handler pointer
+ * dsp56k_jit_helper_classify_cf maps an emu_func_t handler pointer
  * to a DSP_JIT_CF_* tag so the JIT can decide which inline emitter
  * to use without direct access to the static emu_* symbols. Any
  * handler not covered returns DSP_JIT_CF_NONE and the JIT falls
  * back to the plain BLR path — zero regression.
  * ============================================================== */
 
-void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
+void dsp56k_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
                                uint32_t newsr)
 {
     dsp_stack_push(dsp, newpc, newsr, 0);
 }
 
-void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
+void dsp56k_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
                               uint32_t *newsr)
 {
     dsp_stack_pop(dsp, newpc, newsr);
 }
 
 /*
- * Fallback-handler classifier. Mirrors dsp_jit_helper_classify_cf
+ * Fallback-handler classifier. Mirrors dsp56k_jit_helper_classify_cf
  * but for the non-inlined tail of nonparallel_opcodes — used by
  * the JIT's BLR-fallback path to increment a per-handler counter
  * (printed as part of XEMU_DSP_JIT_STATS) so the "next op to
  * inline" decision is data-driven. Returns DSP_JIT_FB_OTHER for
  * handlers the JIT doesn't recognise in its fallback bucket.
  */
-int dsp_jit_helper_classify_bit_manip(void *fn)
+int dsp56k_jit_helper_classify_bit_manip(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
-    /* (op_kind << 2) | source_kind; see dsp_jit.h. */
+    /* (op_kind << 2) | source_kind; see dsp56k_jit_arm64.h. */
     if (f == emu_bset_aa)  return (0 << 2) | 0;
     if (f == emu_bset_ea)  return (0 << 2) | 1;
     if (f == emu_bset_pp)  return (0 << 2) | 2;
@@ -1806,7 +1772,7 @@ int dsp_jit_helper_classify_bit_manip(void *fn)
     return -1;
 }
 
-int dsp_jit_helper_classify_fallback(void *fn)
+int dsp56k_jit_helper_classify_fallback(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
     /* Single-opcode handlers. */
@@ -1823,7 +1789,7 @@ int dsp_jit_helper_classify_fallback(void *fn)
     if (f == emu_undefined)  return DSP_JIT_FB_UNDEFINED;
 
     /* Bucketed handler groups. */
-    if (dsp_jit_helper_classify_bit_manip(fn) >= 0) {
+    if (dsp56k_jit_helper_classify_bit_manip(fn) >= 0) {
         return DSP_JIT_FB_BIT_MANIP;
     }
     if (f == emu_add_imm || f == emu_sub_imm ||
@@ -1846,7 +1812,7 @@ int dsp_jit_helper_classify_fallback(void *fn)
     return DSP_JIT_FB_OTHER;
 }
 
-const char *dsp_jit_helper_fallback_name(int kind)
+const char *dsp56k_jit_helper_fallback_name(int kind)
 {
     switch (kind) {
     case DSP_JIT_FB_OTHER:          return "other";
@@ -1879,7 +1845,7 @@ const char *dsp_jit_helper_fallback_name(int kind)
  * regs = 0xff) for illegal / NULL entries. Called from the JIT's
  * translate-time emit_cf_tcc_op with the inst[6:3] field.
  */
-uint32_t dsp_jit_helper_tcc_regs(uint32_t field)
+uint32_t dsp56k_jit_helper_tcc_regs(uint32_t field)
 {
     field &= 0xf;
     int src  = registers_tcc[field][0];
@@ -1894,7 +1860,7 @@ uint32_t dsp_jit_helper_tcc_regs(uint32_t field)
  * movec_imm emitter to decide whether the immediate needs masking
  * before the store.
  */
-int dsp_jit_helper_reg_mask_bits(int numreg)
+int dsp56k_jit_helper_reg_mask_bits(int numreg)
 {
     if (numreg < 0 || numreg >= 64) {
         return 0;
@@ -1902,7 +1868,7 @@ int dsp_jit_helper_reg_mask_bits(int numreg)
     return registers_mask[numreg];
 }
 
-int dsp_jit_helper_classify_cf(void *fn)
+int dsp56k_jit_helper_classify_cf(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
     /* Immediate / absolute CF */
@@ -1991,7 +1957,7 @@ int dsp_jit_helper_classify_cf(void *fn)
     return DSP_JIT_CF_NONE;
 }
 
-int dsp_jit_helper_classify_long_imm(void *fn)
+int dsp56k_jit_helper_classify_long_imm(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
     if (f == emu_add_long) return DSP_JIT_LI_ADD;

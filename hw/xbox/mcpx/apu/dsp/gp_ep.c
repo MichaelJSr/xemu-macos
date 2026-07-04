@@ -20,30 +20,33 @@
  */
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
-#include "dsp_state.h"
-#include "dsp_jit.h"
+#include "interp/dsp56k_jit_arm64.h"
 
 static const int16_t ep_silence[256][2] = { 0 };
 
 void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
 {
-    static int last_known_preference = -1;
+    static int last_known_dsp_pref = -1;
+    static int last_known_jit_pref = -1;
 
-    if (last_known_preference == (int)g_config.audio.use_dsp) {
-        return;
+    if (last_known_dsp_pref != (int)g_config.audio.use_dsp) {
+        if (g_config.audio.use_dsp) {
+            d->monitor.point = MCPX_APU_DEBUG_MON_GP_OR_EP;
+            d->gp.realtime = true;
+            d->ep.realtime = true;
+        } else {
+            d->monitor.point = MCPX_APU_DEBUG_MON_VP;
+            d->gp.realtime = false;
+            d->ep.realtime = false;
+        }
+        last_known_dsp_pref = g_config.audio.use_dsp;
     }
 
-    if (g_config.audio.use_dsp) {
-        d->monitor.point = MCPX_APU_DEBUG_MON_GP_OR_EP;
-        d->gp.realtime = true;
-        d->ep.realtime = true;
-    } else {
-        d->monitor.point = MCPX_APU_DEBUG_MON_VP;
-        d->gp.realtime = false;
-        d->ep.realtime = false;
+    if (last_known_jit_pref != (int)g_config.audio.use_dsp_jit) {
+        dsp_set_engine(d->gp.dsp, g_config.audio.use_dsp_jit);
+        dsp_set_engine(d->ep.dsp, g_config.audio.use_dsp_jit);
+        last_known_jit_pref = g_config.audio.use_dsp_jit;
     }
-
-    last_known_preference = g_config.audio.use_dsp;
 }
 
 static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
@@ -446,7 +449,9 @@ const MemoryRegionOps ep_ops = {
 
 void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
-    /* Write VP results to the GP DSP MIXBUF (bulk NEON convert + memcpy) */
+    /* Write VP results to the GP DSP MIXBUF (bulk NEON convert; direct
+     * memcpy into the interpreter engine's mixbuffer window, per-sample
+     * engine API otherwise). */
     {
         uint32_t converted[NUM_MIXBINS * NUM_SAMPLES_PER_FRAME];
         for (int i = 0; i < NUM_MIXBINS; i++) {
@@ -454,7 +459,19 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
                               &converted[i * NUM_SAMPLES_PER_FRAME],
                               NUM_SAMPLES_PER_FRAME);
         }
-        memcpy(d->gp.dsp->core.mixbuffer, converted, sizeof(converted));
+        if (!dsp_write_mixbuffer_bulk(d->gp.dsp, converted,
+                                      NUM_MIXBINS * NUM_SAMPLES_PER_FRAME)) {
+            for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
+                uint32_t base =
+                    GP_DSP_MIXBUF_BASE + mixbin * NUM_SAMPLES_PER_FRAME;
+                for (int sample = 0; sample < NUM_SAMPLES_PER_FRAME;
+                     sample++) {
+                    dsp_write_memory(
+                        d->gp.dsp, 'X', base + sample,
+                        converted[mixbin * NUM_SAMPLES_PER_FRAME + sample]);
+                }
+            }
+        }
     }
 
     bool ep_enabled = (d->ep.regs[NV_PAPU_EPRST] & NV_PAPU_GPRST_GPRST) &&
@@ -464,12 +481,12 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
     if ((d->gp.regs[NV_PAPU_GPRST] & NV_PAPU_GPRST_GPRST) &&
         (d->gp.regs[NV_PAPU_GPRST] & NV_PAPU_GPRST_GPDSPRST)) {
         dsp_start_frame(d->gp.dsp);
-        d->gp.dsp->core.is_idle = false;
-        d->gp.dsp->core.cycle_count = 0;
+        dsp_set_halt_requested(d->gp.dsp, false);
+        dsp_set_cycle_count(d->gp.dsp, 0);
         do {
             dsp_run(d->gp.dsp, 1000);
-        } while (!d->gp.dsp->core.is_idle && d->gp.realtime);
-        g_dbg.gp.cycles = d->gp.dsp->core.cycle_count;
+        } while (!dsp_get_halt_requested(d->gp.dsp) && d->gp.realtime);
+        g_dbg.gp.cycles = dsp_get_cycle_count(d->gp.dsp);
 
         if ((d->monitor.point == MCPX_APU_DEBUG_MON_GP) ||
             (d->monitor.point == MCPX_APU_DEBUG_MON_GP_OR_EP && !ep_enabled)) {
@@ -489,51 +506,31 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
         (d->ep.regs[NV_PAPU_EPRST] & NV_PAPU_GPRST_GPDSPRST)) {
         if (d->ep_frame_div % 8 == 0) {
             dsp_start_frame(d->ep.dsp);
-            d->ep.dsp->core.is_idle = false;
-            d->ep.dsp->core.cycle_count = 0;
+            dsp_set_halt_requested(d->ep.dsp, false);
+            dsp_set_cycle_count(d->ep.dsp, 0);
             do {
                 dsp_run(d->ep.dsp, 1000);
-            } while (!d->ep.dsp->core.is_idle && d->ep.realtime);
-            g_dbg.ep.cycles = d->ep.dsp->core.cycle_count;
+            } while (!dsp_get_halt_requested(d->ep.dsp) && d->ep.realtime);
+            g_dbg.ep.cycles = dsp_get_cycle_count(d->ep.dsp);
         }
     }
 }
 
 void mcpx_apu_dsp_init(MCPXAPUState *d)
 {
-    /* Propagate the `audio.dsp_jit.enabled` menu toggle into the
-     * DSP JIT's config BEFORE the first dsp_init, since dsp_init
+    /* Propagate the `audio.dsp_jit.enabled` toggle into the inline
+     * JIT's config BEFORE the first dsp_init: the interpreter engine
      * consults it when deciding whether to allocate the JIT code
-     * buffer for each core. See dsp_jit.c: dsp_jit_set_enabled_from_config. */
-    dsp_jit_set_enabled_from_config(g_config.audio.dsp_jit.enabled);
+     * buffer for each core (see interp/dsp56k_jit_arm64.c). */
+    dsp56k_jit_set_enabled_from_config(g_config.audio.dsp_jit.enabled);
 
-    d->gp.dsp = dsp_init(d, gp_scratch_rw, gp_fifo_rw);
-    for (int i = 0; i < DSP_PRAM_SIZE; i++) {
-        d->gp.dsp->core.pram[i] = 0xCACACACA;
-    }
-    memset(d->gp.dsp->core.pram_opcache, 0,
-           sizeof(d->gp.dsp->core.pram_opcache));
-    d->gp.dsp->is_gp = true;
-    d->gp.dsp->core.is_gp = true;
-    d->gp.dsp->core.is_idle = false;
-    d->gp.dsp->core.cycle_count = 0;
+    d->gp.dsp = dsp_init(d, gp_scratch_rw, gp_fifo_rw, true);
+    dsp_set_halt_requested(d->gp.dsp, false);
+    dsp_set_cycle_count(d->gp.dsp, 0);
 
-    d->ep.dsp = dsp_init(d, ep_scratch_rw, ep_fifo_rw);
-    for (int i = 0; i < DSP_PRAM_SIZE; i++) {
-        d->ep.dsp->core.pram[i] = 0xCACACACA;
-    }
-    memset(d->ep.dsp->core.pram_opcache, 0,
-           sizeof(d->ep.dsp->core.pram_opcache));
-    for (int i = 0; i < DSP_XRAM_SIZE; i++) {
-        d->ep.dsp->core.xram[i] = 0xCACACACA;
-    }
-    for (int i = 0; i < DSP_YRAM_SIZE; i++) {
-        d->ep.dsp->core.yram[i] = 0xCACACACA;
-    }
-    d->ep.dsp->is_gp = false;
-    d->ep.dsp->core.is_gp = false;
-    d->ep.dsp->core.is_idle = false;
-    d->ep.dsp->core.cycle_count = 0;
+    d->ep.dsp = dsp_init(d, ep_scratch_rw, ep_fifo_rw, false);
+    dsp_set_halt_requested(d->ep.dsp, false);
+    dsp_set_cycle_count(d->ep.dsp, 0);
 
     /* Until DSP is more performant, a switch to decide whether or not we should
      * use the full audio pipeline or not.

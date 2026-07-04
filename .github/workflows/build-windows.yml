@@ -32,6 +32,10 @@ jobs:
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4
       with:
         name: src
+    - name: Install curl
+      run: |
+        apt-get update
+        apt-get install -qy curl
     - name: Install zstd
       if: ${{ matrix.arch == 'arm64' }}
       run: apt-get install zstd
@@ -39,7 +43,7 @@ jobs:
       run: tar -xf xemu-${{ inputs.pkg_version }}.tar.zst --strip-components=2
     - name: Initialize compiler cache
       id: cache
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
       with:
         path: |
           ${{ env.CCACHE_DIR }}

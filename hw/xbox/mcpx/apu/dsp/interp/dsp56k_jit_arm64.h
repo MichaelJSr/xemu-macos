@@ -8,8 +8,8 @@
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
  */
-#ifndef HW_XBOX_MCPX_APU_DSP_JIT_H
-#define HW_XBOX_MCPX_APU_DSP_JIT_H
+#ifndef HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H
+#define HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H
 
 #include "dsp_cpu.h"
 
@@ -25,8 +25,8 @@
  * Initialize / finalize per-core JIT state (code buffer, block
  * cache, translation context). Called from dsp_init / dsp_destroy.
  */
-void dsp_jit_init(dsp_core_t *dsp);
-void dsp_jit_finalize(dsp_core_t *dsp);
+void dsp56k_jit_init(dsp_core_t *dsp);
+void dsp56k_jit_finalize(dsp_core_t *dsp);
 
 /*
  * Execute translated code starting at dsp->pc. Returns the number
@@ -36,26 +36,26 @@ void dsp_jit_finalize(dsp_core_t *dsp);
  * return 0 without advancing, and the caller should run one
  * interpreter step.
  */
-unsigned int dsp_jit_execute_block(dsp_core_t *dsp);
+unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp);
 
 /*
  * Invalidate any translated block whose PC range includes addr.
  * Called from dsp56k_write_memory when writing to P-space.
  */
-void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr);
+void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr);
 
 /*
  * Invalidate all translated blocks (e.g., on DSP reset, bootstrap
  * reload of pram, or code-cache full).
  */
-void dsp_jit_invalidate_all(dsp_core_t *dsp);
+void dsp56k_jit_invalidate_all(dsp_core_t *dsp);
 
 /*
  * Runtime flags. Parsed from XEMU_DSP_JIT / XEMU_DSP_JIT_DIFF on
  * first call. Cached thereafter.
  */
-bool dsp_jit_enabled(void);
-bool dsp_jit_diff_enabled(void);
+bool dsp56k_jit_enabled(void);
+bool dsp56k_jit_diff_enabled(void);
 
 /*
  * Sentinel (debug / bisect) harness for the deferred round-4
@@ -74,7 +74,7 @@ bool dsp_jit_diff_enabled(void);
  */
 #define DSP_JIT_SENTINEL_CURINST  (1u << 0)
 #define DSP_JIT_SENTINEL_POISON   0x00adbeefu
-bool dsp_jit_sentinel_enabled(uint32_t bit);
+bool dsp56k_jit_sentinel_enabled(uint32_t bit);
 
 /*
  * Force-apply the deferred round-4 cur_inst skip literally
@@ -84,7 +84,7 @@ bool dsp_jit_sentinel_enabled(uint32_t bit);
  * re-landed permanently.
  */
 #define DSP_JIT_FORCE_CURINST_SKIP  (1u << 0)
-bool dsp_jit_force_enabled(uint32_t bit);
+bool dsp56k_jit_force_enabled(uint32_t bit);
 
 /*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
@@ -92,57 +92,57 @@ bool dsp_jit_force_enabled(uint32_t bit);
  * standalone DSP test binary (which links libdsp.a without the
  * xemu settings library) continues to link.
  */
-void dsp_jit_set_enabled_from_config(bool enabled);
+void dsp56k_jit_set_enabled_from_config(bool enabled);
 
 /*
  * Internal shims implemented in dsp_cpu.c and called from translated
- * code in dsp_jit.c. Declared here only so both TUs agree on types.
+ * code in dsp56k_jit_arm64.c. Declared here only so both TUs agree on types.
  * Not part of the public API — do not call from outside the JIT.
  */
-void dsp_jit_helper_postexecute_update_pc(dsp_core_t *dsp);
-void dsp_jit_helper_postexecute_interrupts(dsp_core_t *dsp);
+void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp);
+void dsp56k_jit_helper_postexecute_interrupts(dsp_core_t *dsp);
 
 /* Pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). Called by the
  * JIT's per-op check when x26 (A) or x27 (B) pin diverges from
  * registers[]. See dsp_cpu.c for arg semantics. */
-void dsp_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
+void dsp56k_jit_helper_pin_audit_fail(dsp_core_t *dsp, uint32_t which,
                                    uint32_t pin_lo, uint32_t pin_hi,
                                    uint32_t pc, uint32_t inst);
 typedef void (*dsp_emu_func_t)(dsp_core_t *dsp);
-dsp_emu_func_t dsp_jit_helper_lookup_emu(uint32_t inst);
-uint32_t dsp_jit_helper_inst_length(uint32_t inst);
-bool dsp_jit_helper_is_terminator(void *fn);
+dsp_emu_func_t dsp56k_jit_helper_lookup_emu(uint32_t inst);
+uint32_t dsp56k_jit_helper_inst_length(uint32_t inst);
+bool dsp56k_jit_helper_is_terminator(void *fn);
 
 /* Phase 4 shims (parmove inlining). See dsp_cpu.c for definitions. */
-int  dsp_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest);
-int  dsp_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr);
-void dsp_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier);
-dsp_emu_func_t dsp_jit_helper_lookup_alu(uint32_t inst);
-bool dsp_jit_helper_alu_is_move(dsp_emu_func_t fn);
-void dsp_jit_helper_pm_4x(dsp_core_t *dsp);
+int  dsp56k_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest);
+int  dsp56k_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr);
+void dsp56k_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier);
+dsp_emu_func_t dsp56k_jit_helper_lookup_alu(uint32_t inst);
+bool dsp56k_jit_helper_alu_is_move(dsp_emu_func_t fn);
+void dsp56k_jit_helper_pm_4x(dsp_core_t *dsp);
 
 /*
  * Phase 2 shim — dsp_rnd56 wrapper for the JIT's MPYR / MACR
  * round path. Unpacks / repacks the 64-bit accumulator convention.
  */
-uint64_t dsp_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed);
+uint64_t dsp56k_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed);
 
 /*
  * Phase 5 shims — expose the static dsp_stack_push / dsp_stack_pop
  * helpers from dsp_cpu.c so the JIT's inline control-flow emitters
  * can BLR them for the subroutine-call / return ops.
  *
- * dsp_jit_helper_stack_push wraps dsp_stack_push(dsp, pc, sr, 0) —
+ * dsp56k_jit_helper_stack_push wraps dsp_stack_push(dsp, pc, sr, 0) —
  * the "sshOnly = 0" form that every control-flow handler uses.
  *
  * Round 2 removed the emu_calc_cc shim: the 16-case cc switch is
  * now materialised inline at translate time, since cc_code is a
  * known bitfield of the instruction word. See emit_cf_calc_cc in
- * dsp_jit.c.
+ * dsp56k_jit_arm64.c.
  */
-void dsp_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
+void dsp56k_jit_helper_stack_push(dsp_core_t *dsp, uint32_t newpc,
                                uint32_t newsr);
-void dsp_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
+void dsp56k_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
                               uint32_t *newsr);
 
 /*
@@ -253,7 +253,7 @@ enum {
     DSP_JIT_CF_BRSET_PP,
     DSP_JIT_CF_BRSET_REG,
 };
-int dsp_jit_helper_classify_cf(void *fn);
+int dsp56k_jit_helper_classify_cf(void *fn);
 
 /*
  * Bit-manipulation sub-classifier (bset / bclr / bchg / btst across
@@ -265,7 +265,7 @@ int dsp_jit_helper_classify_cf(void *fn);
  * generic BLR fallback (previously the last fallback bucket with
  * meaningful steady-state volume).
  */
-int dsp_jit_helper_classify_bit_manip(void *fn);
+int dsp56k_jit_helper_classify_bit_manip(void *fn);
 
 #define DSP_JIT_BM_OP(kind)     (((kind) >> 2) & 3)
 #define DSP_JIT_BM_SOURCE(kind) ((kind) & 3)
@@ -277,7 +277,7 @@ int dsp_jit_helper_classify_bit_manip(void *fn);
  * to keep per-handler BLR-fallback stats so we can see what's hot
  * in the cf_fallback bucket and prioritise the next inline work.
  *
- * Kept separate from dsp_jit_helper_classify_cf (which classifies
+ * Kept separate from dsp56k_jit_helper_classify_cf (which classifies
  * handlers the JIT DOES inline) to avoid inflating that enum with
  * handlers we don't emit inline code for.
  */
@@ -306,19 +306,19 @@ enum {
     DSP_JIT_FB_MOVE_EXTENDED,      /* move_x_long / y_long / x_imm / y_imm */
     DSP_JIT_FB_MAX,
 };
-int dsp_jit_helper_classify_fallback(void *fn);
-const char *dsp_jit_helper_fallback_name(int kind);
+int dsp56k_jit_helper_classify_fallback(void *fn);
+const char *dsp56k_jit_helper_fallback_name(int kind);
 
 /* Pack registers_tcc[field][0] / [1] into a single u32:
  *   bits [7:0]  = src reg index
  *   bits [15:8] = dest reg index
  * Called at translate time to decode tcc instructions without
  * exposing the static registers_tcc[] table. */
-uint32_t dsp_jit_helper_tcc_regs(uint32_t field);
+uint32_t dsp56k_jit_helper_tcc_regs(uint32_t field);
 
 /* Look up registers_mask[numreg] for the JIT's movec_imm / movec
  * emitters. Returns bit width (0-24); 0 for NULL / reserved slots. */
-int dsp_jit_helper_reg_mask_bits(int numreg);
+int dsp56k_jit_helper_reg_mask_bits(int numreg);
 
 /*
  * Long-immediate ALU classifier. The "long" variants of the
@@ -326,7 +326,7 @@ int dsp_jit_helper_reg_mask_bits(int numreg);
  * instructions where the second word is a 24-bit immediate the
  * interpreter reads via `read_memory_p(pc+1)` at run time.
  * Because pram writes invalidate this block via
- * dsp_jit_invalidate, the translator can safely bake the
+ * dsp56k_jit_invalidate, the translator can safely bake the
  * immediate at translate time and skip both the run-time
  * `read_memory_p` and the dispatcher round-trip through the C
  * handler.
@@ -344,23 +344,23 @@ enum {
     DSP_JIT_LI_AND,
     DSP_JIT_LI_OR,
 };
-int dsp_jit_helper_classify_long_imm(void *fn);
+int dsp56k_jit_helper_classify_long_imm(void *fn);
 
 #else  /* !DSP_JIT_SUPPORTED */
 
-static inline void dsp_jit_init(dsp_core_t *dsp) { (void)dsp; }
-static inline void dsp_jit_finalize(dsp_core_t *dsp) { (void)dsp; }
-static inline unsigned int dsp_jit_execute_block(dsp_core_t *dsp) {
+static inline void dsp56k_jit_init(dsp_core_t *dsp) { (void)dsp; }
+static inline void dsp56k_jit_finalize(dsp_core_t *dsp) { (void)dsp; }
+static inline unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp) {
     (void)dsp; return 0;
 }
-static inline void dsp_jit_invalidate(dsp_core_t *dsp, uint32_t addr) {
+static inline void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr) {
     (void)dsp; (void)addr;
 }
-static inline void dsp_jit_invalidate_all(dsp_core_t *dsp) { (void)dsp; }
-static inline bool dsp_jit_enabled(void) { return false; }
-static inline bool dsp_jit_diff_enabled(void) { return false; }
-static inline void dsp_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
+static inline void dsp56k_jit_invalidate_all(dsp_core_t *dsp) { (void)dsp; }
+static inline bool dsp56k_jit_enabled(void) { return false; }
+static inline bool dsp56k_jit_diff_enabled(void) { return false; }
+static inline void dsp56k_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
 
 #endif  /* DSP_JIT_SUPPORTED */
 
-#endif  /* HW_XBOX_MCPX_APU_DSP_JIT_H */
+#endif  /* HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H */

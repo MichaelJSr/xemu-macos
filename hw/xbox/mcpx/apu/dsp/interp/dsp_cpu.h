@@ -81,8 +81,11 @@ struct dsp_core_s {
     uint16_t interrupt_counter;        /* count number of pending interrupts */
     uint16_t interrupt_ipl_to_raise;     /* save the IPL level to save in the SR register */
     uint16_t interrupt_pipeline_count; /* used to prefetch correctly the 2 inter instructions */
-    int16_t interrupt_ipl[12];     /* store the current IPL for each interrupt */
-    uint16_t interrupt_is_pending[12];  /* store if interrupt is pending for each interrupt */
+    int16_t interrupt_ipl[4];
+    uint16_t interrupt_is_pending[4];
+
+    /* Back-pointer to owning DSPState (set by dsp_c.c) */
+    void *opaque;
 
     /* callbacks */
     uint32_t (*read_peripheral)(dsp_core_t* core, uint32_t address);
@@ -133,10 +136,10 @@ struct dsp_core_s {
     uint32_t pc_save;
 #endif
 
-    /* JIT state (opaque DspJitState * — see hw/xbox/mcpx/apu/dsp/dsp_jit.c) */
+    /* JIT state (opaque DspJitState * — see hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c) */
     void *jit_state;
 
-    /* Self-modifying-code exit flag. Set by dsp_jit_invalidate()
+    /* Self-modifying-code exit flag. Set by dsp56k_jit_invalidate()
      * whenever a block is invalidated (which happens from inside a
      * handler running under the JIT when it writes to P-space).
      * Checked in each stub's exit-check epilogue; cleared in the
