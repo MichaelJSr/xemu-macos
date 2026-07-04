@@ -8,18 +8,18 @@
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
  */
-#ifndef HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H
-#define HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H
+#ifndef HW_XBOX_MCPX_APU_DSP56K_JIT_ARM64_H
+#define HW_XBOX_MCPX_APU_DSP56K_JIT_ARM64_H
 
 #include "dsp_cpu.h"
 
 #if defined(__APPLE__) && defined(__aarch64__)
-#define DSP_JIT_SUPPORTED 1
+#define DSP56K_JIT_SUPPORTED 1
 #else
-#define DSP_JIT_SUPPORTED 0
+#define DSP56K_JIT_SUPPORTED 0
 #endif
 
-#if DSP_JIT_SUPPORTED
+#if DSP56K_JIT_SUPPORTED
 
 /*
  * Initialize / finalize per-core JIT state (code buffer, block
@@ -60,7 +60,7 @@ bool dsp56k_jit_diff_enabled(void);
 /*
  * Sentinel (debug / bisect) harness for the deferred round-4
  * cur_inst skip optimization. XEMU_DSP_JIT_SENTINEL=1 re-applies
- * the skip but substitutes DSP_JIT_SENTINEL_POISON (0x00adbeef)
+ * the skip but substitutes DSP56K_JIT_SENTINEL_POISON (0x00adbeef)
  * for the correct inst. Any inlined-op handler path that reads
  * dsp->cur_inst at runtime will observe the poison and typically
  * surface as a visible failure (lookup_opcode_slow assert with
@@ -72,8 +72,8 @@ bool dsp56k_jit_diff_enabled(void);
  * see the EPI_NO_PC drop commit for the analysis (mode-6 parmove
  * lengthening + REP/DO loop rewinds make it unsafe).
  */
-#define DSP_JIT_SENTINEL_CURINST  (1u << 0)
-#define DSP_JIT_SENTINEL_POISON   0x00adbeefu
+#define DSP56K_JIT_SENTINEL_CURINST  (1u << 0)
+#define DSP56K_JIT_SENTINEL_POISON   0x00adbeefu
 bool dsp56k_jit_sentinel_enabled(uint32_t bit);
 
 /*
@@ -83,7 +83,7 @@ bool dsp56k_jit_sentinel_enabled(uint32_t bit);
  * future fix makes FORCE=1 run clean, the cur_inst skip can be
  * re-landed permanently.
  */
-#define DSP_JIT_FORCE_CURINST_SKIP  (1u << 0)
+#define DSP56K_JIT_FORCE_CURINST_SKIP  (1u << 0)
 bool dsp56k_jit_force_enabled(uint32_t bit);
 
 /*
@@ -148,110 +148,110 @@ void dsp56k_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
 /*
  * Phase 5 shim — classifies an emu_func_t control-flow handler so
  * the JIT can pick an inline emitter without direct access to the
- * file-static emu_* symbols. Returns one of the DSP_JIT_CF_* tags
- * below, or DSP_JIT_CF_NONE for handlers not covered by the inline
+ * file-static emu_* symbols. Returns one of the DSP56K_JIT_CF_* tags
+ * below, or DSP56K_JIT_CF_NONE for handlers not covered by the inline
  * control-flow path (fallback to BLR).
  */
 enum {
-    DSP_JIT_CF_NONE = 0,
+    DSP56K_JIT_CF_NONE = 0,
     /* Absolute / immediate CF */
-    DSP_JIT_CF_JMP_IMM,
-    DSP_JIT_CF_JSR_IMM,
-    DSP_JIT_CF_RTS,
-    DSP_JIT_CF_RTI,
-    DSP_JIT_CF_BRA_IMM,
-    DSP_JIT_CF_BRA_LONG,
-    DSP_JIT_CF_BSR_IMM,
-    DSP_JIT_CF_BSR_LONG,
-    DSP_JIT_CF_JCC_IMM,
-    DSP_JIT_CF_JSCC_IMM,
-    DSP_JIT_CF_BCC_IMM,
-    DSP_JIT_CF_BCC_LONG,
+    DSP56K_JIT_CF_JMP_IMM,
+    DSP56K_JIT_CF_JSR_IMM,
+    DSP56K_JIT_CF_RTS,
+    DSP56K_JIT_CF_RTI,
+    DSP56K_JIT_CF_BRA_IMM,
+    DSP56K_JIT_CF_BRA_LONG,
+    DSP56K_JIT_CF_BSR_IMM,
+    DSP56K_JIT_CF_BSR_LONG,
+    DSP56K_JIT_CF_JCC_IMM,
+    DSP56K_JIT_CF_JSCC_IMM,
+    DSP56K_JIT_CF_BCC_IMM,
+    DSP56K_JIT_CF_BCC_LONG,
     /* Loop ops */
-    DSP_JIT_CF_REP_IMM,
-    DSP_JIT_CF_REP_AA,
-    DSP_JIT_CF_REP_EA,
-    DSP_JIT_CF_REP_REG,
-    DSP_JIT_CF_DO_IMM,
-    DSP_JIT_CF_DO_AA,
-    DSP_JIT_CF_DO_EA,
-    DSP_JIT_CF_DO_REG,
-    DSP_JIT_CF_DOR_IMM,
-    DSP_JIT_CF_DOR_REG,
-    DSP_JIT_CF_ENDDO,
+    DSP56K_JIT_CF_REP_IMM,
+    DSP56K_JIT_CF_REP_AA,
+    DSP56K_JIT_CF_REP_EA,
+    DSP56K_JIT_CF_REP_REG,
+    DSP56K_JIT_CF_DO_IMM,
+    DSP56K_JIT_CF_DO_AA,
+    DSP56K_JIT_CF_DO_EA,
+    DSP56K_JIT_CF_DO_REG,
+    DSP56K_JIT_CF_DOR_IMM,
+    DSP56K_JIT_CF_DOR_REG,
+    DSP56K_JIT_CF_ENDDO,
     /* Misc non-parallel ops. ANDI / ORI manipulate SR / OMR
      * bits in-place; LUA / LUA_REL compute Rn + offset into
      * Rn / Nn. Single-word, no branch — none of them change
      * pc on their own (the common epilogue handles pc += 1). */
-    DSP_JIT_CF_ANDI,
-    DSP_JIT_CF_ORI,
-    DSP_JIT_CF_LUA,
-    DSP_JIT_CF_LUA_REL,
-    DSP_JIT_CF_TCC,
-    DSP_JIT_CF_MOVEC_IMM,
-    DSP_JIT_CF_MOVEC_REG,
-    DSP_JIT_CF_MOVEC_AA,
-    DSP_JIT_CF_MOVEC_EA,
-    DSP_JIT_CF_MOVEP_0,
-    DSP_JIT_CF_MOVEP_1,
-    DSP_JIT_CF_MOVEP_23,
-    DSP_JIT_CF_MOVEP_X_QQ,
-    DSP_JIT_CF_MOVEM_AA,
-    DSP_JIT_CF_MOVEM_EA,
-    DSP_JIT_CF_NOP,
+    DSP56K_JIT_CF_ANDI,
+    DSP56K_JIT_CF_ORI,
+    DSP56K_JIT_CF_LUA,
+    DSP56K_JIT_CF_LUA_REL,
+    DSP56K_JIT_CF_TCC,
+    DSP56K_JIT_CF_MOVEC_IMM,
+    DSP56K_JIT_CF_MOVEC_REG,
+    DSP56K_JIT_CF_MOVEC_AA,
+    DSP56K_JIT_CF_MOVEC_EA,
+    DSP56K_JIT_CF_MOVEP_0,
+    DSP56K_JIT_CF_MOVEP_1,
+    DSP56K_JIT_CF_MOVEP_23,
+    DSP56K_JIT_CF_MOVEP_X_QQ,
+    DSP56K_JIT_CF_MOVEM_AA,
+    DSP56K_JIT_CF_MOVEM_EA,
+    DSP56K_JIT_CF_NOP,
     /* Phase 9 tail (data-driven, see cf_fallback buckets). */
-    DSP_JIT_CF_INC,
-    DSP_JIT_CF_DEC,
-    DSP_JIT_CF_ADD_IMM,
-    DSP_JIT_CF_SUB_IMM,
-    DSP_JIT_CF_CMP_IMM,
-    DSP_JIT_CF_AND_IMM,
-    DSP_JIT_CF_MOVE_X_LONG,
-    DSP_JIT_CF_MOVE_X_IMM,
-    DSP_JIT_CF_MOVE_Y_IMM,
+    DSP56K_JIT_CF_INC,
+    DSP56K_JIT_CF_DEC,
+    DSP56K_JIT_CF_ADD_IMM,
+    DSP56K_JIT_CF_SUB_IMM,
+    DSP56K_JIT_CF_CMP_IMM,
+    DSP56K_JIT_CF_AND_IMM,
+    DSP56K_JIT_CF_MOVE_X_LONG,
+    DSP56K_JIT_CF_MOVE_X_IMM,
+    DSP56K_JIT_CF_MOVE_Y_IMM,
     /* Shift-immediate family (99.7% of remaining cf_fallback at the
      * time of landing). ASL/ASR operate on the full 56-bit accu and
      * go through the E/U/N/Z ccr shim; LSL is A1-only and only
      * updates C/N/Z/V. All three bake the shift count at translate
      * time from inst bits. */
-    DSP_JIT_CF_ASL_IMM,
-    DSP_JIT_CF_ASR_IMM,
-    DSP_JIT_CF_LSL_IMM,
+    DSP56K_JIT_CF_ASL_IMM,
+    DSP56K_JIT_CF_ASR_IMM,
+    DSP56K_JIT_CF_LSL_IMM,
     /* Unsigned 56-bit compare of the destination accu vs either
      * the other accu (read through pm_read_accu24's saturate/
      * scale pipeline) or X0/X1/Y0/Y1 (direct 24-bit). Updates
      * SR.C (borrow), SR.N, SR.Z; clears SR.V. */
-    DSP_JIT_CF_CMPU,
+    DSP56K_JIT_CF_CMPU,
     /* Effective-address (Rn-based) CF */
-    DSP_JIT_CF_JMP_EA,
-    DSP_JIT_CF_JSR_EA,
-    DSP_JIT_CF_JCC_EA,
-    DSP_JIT_CF_JSCC_EA,
+    DSP56K_JIT_CF_JMP_EA,
+    DSP56K_JIT_CF_JSR_EA,
+    DSP56K_JIT_CF_JCC_EA,
+    DSP56K_JIT_CF_JSCC_EA,
     /* Bit-test CF (jclr / jset / jsclr / jsset) — 4 addressing
      * variants each: _aa (direct), _ea (calc_ea), _pp
      * (peripheral), _reg (register). */
-    DSP_JIT_CF_JCLR_AA,
-    DSP_JIT_CF_JCLR_EA,
-    DSP_JIT_CF_JCLR_PP,
-    DSP_JIT_CF_JCLR_REG,
-    DSP_JIT_CF_JSET_AA,
-    DSP_JIT_CF_JSET_EA,
-    DSP_JIT_CF_JSET_PP,
-    DSP_JIT_CF_JSET_REG,
-    DSP_JIT_CF_JSCLR_AA,
-    DSP_JIT_CF_JSCLR_EA,
-    DSP_JIT_CF_JSCLR_PP,
-    DSP_JIT_CF_JSCLR_REG,
-    DSP_JIT_CF_JSSET_AA,
-    DSP_JIT_CF_JSSET_EA,
-    DSP_JIT_CF_JSSET_PP,
-    DSP_JIT_CF_JSSET_REG,
+    DSP56K_JIT_CF_JCLR_AA,
+    DSP56K_JIT_CF_JCLR_EA,
+    DSP56K_JIT_CF_JCLR_PP,
+    DSP56K_JIT_CF_JCLR_REG,
+    DSP56K_JIT_CF_JSET_AA,
+    DSP56K_JIT_CF_JSET_EA,
+    DSP56K_JIT_CF_JSET_PP,
+    DSP56K_JIT_CF_JSET_REG,
+    DSP56K_JIT_CF_JSCLR_AA,
+    DSP56K_JIT_CF_JSCLR_EA,
+    DSP56K_JIT_CF_JSCLR_PP,
+    DSP56K_JIT_CF_JSCLR_REG,
+    DSP56K_JIT_CF_JSSET_AA,
+    DSP56K_JIT_CF_JSSET_EA,
+    DSP56K_JIT_CF_JSSET_PP,
+    DSP56K_JIT_CF_JSSET_REG,
     /* PC-relative bit-test (brclr / brset) — only _pp and _reg
      * variants have interpreter handlers in the opcode table. */
-    DSP_JIT_CF_BRCLR_PP,
-    DSP_JIT_CF_BRCLR_REG,
-    DSP_JIT_CF_BRSET_PP,
-    DSP_JIT_CF_BRSET_REG,
+    DSP56K_JIT_CF_BRCLR_PP,
+    DSP56K_JIT_CF_BRCLR_REG,
+    DSP56K_JIT_CF_BRSET_PP,
+    DSP56K_JIT_CF_BRSET_REG,
 };
 int dsp56k_jit_helper_classify_cf(void *fn);
 
@@ -267,13 +267,13 @@ int dsp56k_jit_helper_classify_cf(void *fn);
  */
 int dsp56k_jit_helper_classify_bit_manip(void *fn);
 
-#define DSP_JIT_BM_OP(kind)     (((kind) >> 2) & 3)
-#define DSP_JIT_BM_SOURCE(kind) ((kind) & 3)
+#define DSP56K_JIT_BM_OP(kind)     (((kind) >> 2) & 3)
+#define DSP56K_JIT_BM_SOURCE(kind) ((kind) & 3)
 
 /*
  * Fallback-handler classifier. Returns a small integer identifying
  * `fn` if it's a non-inlined non-parallel handler the JIT would
- * BLR-fallback for; 0 (DSP_JIT_FB_OTHER) otherwise. Used by the JIT
+ * BLR-fallback for; 0 (DSP56K_JIT_FB_OTHER) otherwise. Used by the JIT
  * to keep per-handler BLR-fallback stats so we can see what's hot
  * in the cf_fallback bucket and prioritise the next inline work.
  *
@@ -282,29 +282,29 @@ int dsp56k_jit_helper_classify_bit_manip(void *fn);
  * handlers we don't emit inline code for.
  */
 enum {
-    DSP_JIT_FB_OTHER = 0,
-    DSP_JIT_FB_MOVEP_1,
-    DSP_JIT_FB_MOVEP_23,
-    DSP_JIT_FB_MOVEP_X_QQ,
-    DSP_JIT_FB_DIV,
-    DSP_JIT_FB_NORM,
-    DSP_JIT_FB_STOP,
-    DSP_JIT_FB_WAIT,
-    DSP_JIT_FB_RESET,
-    DSP_JIT_FB_NOP,
-    DSP_JIT_FB_ILLEGAL,
-    DSP_JIT_FB_UNDEFINED,
+    DSP56K_JIT_FB_OTHER = 0,
+    DSP56K_JIT_FB_MOVEP_1,
+    DSP56K_JIT_FB_MOVEP_23,
+    DSP56K_JIT_FB_MOVEP_X_QQ,
+    DSP56K_JIT_FB_DIV,
+    DSP56K_JIT_FB_NORM,
+    DSP56K_JIT_FB_STOP,
+    DSP56K_JIT_FB_WAIT,
+    DSP56K_JIT_FB_RESET,
+    DSP56K_JIT_FB_NOP,
+    DSP56K_JIT_FB_ILLEGAL,
+    DSP56K_JIT_FB_UNDEFINED,
     /* Phase 9 tail — grouped buckets to break down what's in the
      * 74% "other" slice so we know what to inline next. Each
      * bucket aggregates a family of related opcodes. */
-    DSP_JIT_FB_BIT_MANIP,          /* bchg / bclr / bset / btst × aa/ea/pp/reg */
-    DSP_JIT_FB_SHORT_IMM_ALU,      /* add_imm / sub_imm / cmp_imm / and_imm */
-    DSP_JIT_FB_SHIFT_IMM,          /* asl_imm / asr_imm / lsl_imm */
-    DSP_JIT_FB_INC_DEC,            /* inc / dec */
-    DSP_JIT_FB_CMPU,
-    DSP_JIT_FB_MPYI,
-    DSP_JIT_FB_MOVE_EXTENDED,      /* move_x_long / y_long / x_imm / y_imm */
-    DSP_JIT_FB_MAX,
+    DSP56K_JIT_FB_BIT_MANIP,          /* bchg / bclr / bset / btst × aa/ea/pp/reg */
+    DSP56K_JIT_FB_SHORT_IMM_ALU,      /* add_imm / sub_imm / cmp_imm / and_imm */
+    DSP56K_JIT_FB_SHIFT_IMM,          /* asl_imm / asr_imm / lsl_imm */
+    DSP56K_JIT_FB_INC_DEC,            /* inc / dec */
+    DSP56K_JIT_FB_CMPU,
+    DSP56K_JIT_FB_MPYI,
+    DSP56K_JIT_FB_MOVE_EXTENDED,      /* move_x_long / y_long / x_imm / y_imm */
+    DSP56K_JIT_FB_MAX,
 };
 int dsp56k_jit_helper_classify_fallback(void *fn);
 const char *dsp56k_jit_helper_fallback_name(int kind);
@@ -331,22 +331,22 @@ int dsp56k_jit_helper_reg_mask_bits(int numreg);
  * `read_memory_p` and the dispatcher round-trip through the C
  * handler.
  *
- * Returns a DSP_JIT_LI_* tag, or DSP_JIT_LI_NONE for handlers
+ * Returns a DSP56K_JIT_LI_* tag, or DSP56K_JIT_LI_NONE for handlers
  * without a corresponding inline emitter. EOR long is omitted
  * because there is no interpreter handler for it (the opcode
  * table entry is NULL).
  */
 enum {
-    DSP_JIT_LI_NONE = 0,
-    DSP_JIT_LI_ADD,
-    DSP_JIT_LI_SUB,
-    DSP_JIT_LI_CMP,
-    DSP_JIT_LI_AND,
-    DSP_JIT_LI_OR,
+    DSP56K_JIT_LI_NONE = 0,
+    DSP56K_JIT_LI_ADD,
+    DSP56K_JIT_LI_SUB,
+    DSP56K_JIT_LI_CMP,
+    DSP56K_JIT_LI_AND,
+    DSP56K_JIT_LI_OR,
 };
 int dsp56k_jit_helper_classify_long_imm(void *fn);
 
-#else  /* !DSP_JIT_SUPPORTED */
+#else  /* !DSP56K_JIT_SUPPORTED */
 
 static inline void dsp56k_jit_init(dsp_core_t *dsp) { (void)dsp; }
 static inline void dsp56k_jit_finalize(dsp_core_t *dsp) { (void)dsp; }
@@ -361,6 +361,6 @@ static inline bool dsp56k_jit_enabled(void) { return false; }
 static inline bool dsp56k_jit_diff_enabled(void) { return false; }
 static inline void dsp56k_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
 
-#endif  /* DSP_JIT_SUPPORTED */
+#endif  /* DSP56K_JIT_SUPPORTED */
 
-#endif  /* HW_XBOX_MCPX_APU_DSP_JIT_ARM64_H */
+#endif  /* HW_XBOX_MCPX_APU_DSP56K_JIT_ARM64_H */

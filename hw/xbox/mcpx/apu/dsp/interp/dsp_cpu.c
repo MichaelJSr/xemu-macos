@@ -1375,7 +1375,7 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
 
 #include "dsp56k_jit_arm64.h"
 
-#if DSP_JIT_SUPPORTED
+#if DSP56K_JIT_SUPPORTED
 
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
 {
@@ -1723,9 +1723,9 @@ uint64_t dsp56k_jit_helper_rnd56(dsp_core_t *dsp, uint64_t packed)
  * extract), so there is no longer a dsp56k_jit_helper_calc_cc shim.
  *
  * dsp56k_jit_helper_classify_cf maps an emu_func_t handler pointer
- * to a DSP_JIT_CF_* tag so the JIT can decide which inline emitter
+ * to a DSP56K_JIT_CF_* tag so the JIT can decide which inline emitter
  * to use without direct access to the static emu_* symbols. Any
- * handler not covered returns DSP_JIT_CF_NONE and the JIT falls
+ * handler not covered returns DSP56K_JIT_CF_NONE and the JIT falls
  * back to the plain BLR path — zero regression.
  * ============================================================== */
 
@@ -1746,7 +1746,7 @@ void dsp56k_jit_helper_stack_pop(dsp_core_t *dsp, uint32_t *newpc,
  * but for the non-inlined tail of nonparallel_opcodes — used by
  * the JIT's BLR-fallback path to increment a per-handler counter
  * (printed as part of XEMU_DSP_JIT_STATS) so the "next op to
- * inline" decision is data-driven. Returns DSP_JIT_FB_OTHER for
+ * inline" decision is data-driven. Returns DSP56K_JIT_FB_OTHER for
  * handlers the JIT doesn't recognise in its fallback bucket.
  */
 int dsp56k_jit_helper_classify_bit_manip(void *fn)
@@ -1776,64 +1776,64 @@ int dsp56k_jit_helper_classify_fallback(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
     /* Single-opcode handlers. */
-    if (f == emu_movep_1)    return DSP_JIT_FB_MOVEP_1;
-    if (f == emu_movep_23)   return DSP_JIT_FB_MOVEP_23;
-    if (f == emu_movep_x_qq) return DSP_JIT_FB_MOVEP_X_QQ;
-    if (f == emu_div)        return DSP_JIT_FB_DIV;
-    if (f == emu_norm)       return DSP_JIT_FB_NORM;
-    if (f == emu_stop)       return DSP_JIT_FB_STOP;
-    if (f == emu_wait)       return DSP_JIT_FB_WAIT;
-    if (f == emu_reset)      return DSP_JIT_FB_RESET;
-    if (f == emu_nop)        return DSP_JIT_FB_NOP;
-    if (f == emu_illegal)    return DSP_JIT_FB_ILLEGAL;
-    if (f == emu_undefined)  return DSP_JIT_FB_UNDEFINED;
+    if (f == emu_movep_1)    return DSP56K_JIT_FB_MOVEP_1;
+    if (f == emu_movep_23)   return DSP56K_JIT_FB_MOVEP_23;
+    if (f == emu_movep_x_qq) return DSP56K_JIT_FB_MOVEP_X_QQ;
+    if (f == emu_div)        return DSP56K_JIT_FB_DIV;
+    if (f == emu_norm)       return DSP56K_JIT_FB_NORM;
+    if (f == emu_stop)       return DSP56K_JIT_FB_STOP;
+    if (f == emu_wait)       return DSP56K_JIT_FB_WAIT;
+    if (f == emu_reset)      return DSP56K_JIT_FB_RESET;
+    if (f == emu_nop)        return DSP56K_JIT_FB_NOP;
+    if (f == emu_illegal)    return DSP56K_JIT_FB_ILLEGAL;
+    if (f == emu_undefined)  return DSP56K_JIT_FB_UNDEFINED;
 
     /* Bucketed handler groups. */
     if (dsp56k_jit_helper_classify_bit_manip(fn) >= 0) {
-        return DSP_JIT_FB_BIT_MANIP;
+        return DSP56K_JIT_FB_BIT_MANIP;
     }
     if (f == emu_add_imm || f == emu_sub_imm ||
         f == emu_cmp_imm || f == emu_and_imm) {
-        return DSP_JIT_FB_SHORT_IMM_ALU;
+        return DSP56K_JIT_FB_SHORT_IMM_ALU;
     }
     if (f == emu_asl_imm || f == emu_asr_imm || f == emu_lsl_imm) {
-        return DSP_JIT_FB_SHIFT_IMM;
+        return DSP56K_JIT_FB_SHIFT_IMM;
     }
     if (f == emu_inc || f == emu_dec) {
-        return DSP_JIT_FB_INC_DEC;
+        return DSP56K_JIT_FB_INC_DEC;
     }
-    if (f == emu_cmpu)  return DSP_JIT_FB_CMPU;
-    if (f == emu_mpyi)  return DSP_JIT_FB_MPYI;
+    if (f == emu_cmpu)  return DSP56K_JIT_FB_CMPU;
+    if (f == emu_mpyi)  return DSP56K_JIT_FB_MPYI;
     if (f == emu_move_x_long ||
         f == emu_move_x_imm  || f == emu_move_y_imm) {
-        return DSP_JIT_FB_MOVE_EXTENDED;
+        return DSP56K_JIT_FB_MOVE_EXTENDED;
     }
 
-    return DSP_JIT_FB_OTHER;
+    return DSP56K_JIT_FB_OTHER;
 }
 
 const char *dsp56k_jit_helper_fallback_name(int kind)
 {
     switch (kind) {
-    case DSP_JIT_FB_OTHER:          return "other";
-    case DSP_JIT_FB_MOVEP_1:        return "movep_1";
-    case DSP_JIT_FB_MOVEP_23:       return "movep_23";
-    case DSP_JIT_FB_MOVEP_X_QQ:     return "movep_x_qq";
-    case DSP_JIT_FB_DIV:            return "div";
-    case DSP_JIT_FB_NORM:           return "norm";
-    case DSP_JIT_FB_STOP:           return "stop";
-    case DSP_JIT_FB_WAIT:           return "wait";
-    case DSP_JIT_FB_RESET:          return "reset";
-    case DSP_JIT_FB_NOP:            return "nop";
-    case DSP_JIT_FB_ILLEGAL:        return "illegal";
-    case DSP_JIT_FB_UNDEFINED:      return "undefined";
-    case DSP_JIT_FB_BIT_MANIP:      return "bit_manip";
-    case DSP_JIT_FB_SHORT_IMM_ALU:  return "short_imm_alu";
-    case DSP_JIT_FB_SHIFT_IMM:      return "shift_imm";
-    case DSP_JIT_FB_INC_DEC:        return "inc_dec";
-    case DSP_JIT_FB_CMPU:           return "cmpu";
-    case DSP_JIT_FB_MPYI:           return "mpyi";
-    case DSP_JIT_FB_MOVE_EXTENDED:  return "move_extended";
+    case DSP56K_JIT_FB_OTHER:          return "other";
+    case DSP56K_JIT_FB_MOVEP_1:        return "movep_1";
+    case DSP56K_JIT_FB_MOVEP_23:       return "movep_23";
+    case DSP56K_JIT_FB_MOVEP_X_QQ:     return "movep_x_qq";
+    case DSP56K_JIT_FB_DIV:            return "div";
+    case DSP56K_JIT_FB_NORM:           return "norm";
+    case DSP56K_JIT_FB_STOP:           return "stop";
+    case DSP56K_JIT_FB_WAIT:           return "wait";
+    case DSP56K_JIT_FB_RESET:          return "reset";
+    case DSP56K_JIT_FB_NOP:            return "nop";
+    case DSP56K_JIT_FB_ILLEGAL:        return "illegal";
+    case DSP56K_JIT_FB_UNDEFINED:      return "undefined";
+    case DSP56K_JIT_FB_BIT_MANIP:      return "bit_manip";
+    case DSP56K_JIT_FB_SHORT_IMM_ALU:  return "short_imm_alu";
+    case DSP56K_JIT_FB_SHIFT_IMM:      return "shift_imm";
+    case DSP56K_JIT_FB_INC_DEC:        return "inc_dec";
+    case DSP56K_JIT_FB_CMPU:           return "cmpu";
+    case DSP56K_JIT_FB_MPYI:           return "mpyi";
+    case DSP56K_JIT_FB_MOVE_EXTENDED:  return "move_extended";
     default:                        return "?";
     }
 }
@@ -1872,100 +1872,100 @@ int dsp56k_jit_helper_classify_cf(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
     /* Immediate / absolute CF */
-    if (f == emu_jmp_imm)    return DSP_JIT_CF_JMP_IMM;
-    if (f == emu_jsr_imm)    return DSP_JIT_CF_JSR_IMM;
-    if (f == emu_rts)        return DSP_JIT_CF_RTS;
-    if (f == emu_rti)        return DSP_JIT_CF_RTI;
-    if (f == emu_bra_imm)    return DSP_JIT_CF_BRA_IMM;
-    if (f == emu_bra_long)   return DSP_JIT_CF_BRA_LONG;
-    if (f == emu_bsr_imm)    return DSP_JIT_CF_BSR_IMM;
-    if (f == emu_bsr_long)   return DSP_JIT_CF_BSR_LONG;
-    if (f == emu_jcc_imm)    return DSP_JIT_CF_JCC_IMM;
-    if (f == emu_jscc_imm)   return DSP_JIT_CF_JSCC_IMM;
-    if (f == emu_bcc_imm)    return DSP_JIT_CF_BCC_IMM;
-    if (f == emu_bcc_long)   return DSP_JIT_CF_BCC_LONG;
+    if (f == emu_jmp_imm)    return DSP56K_JIT_CF_JMP_IMM;
+    if (f == emu_jsr_imm)    return DSP56K_JIT_CF_JSR_IMM;
+    if (f == emu_rts)        return DSP56K_JIT_CF_RTS;
+    if (f == emu_rti)        return DSP56K_JIT_CF_RTI;
+    if (f == emu_bra_imm)    return DSP56K_JIT_CF_BRA_IMM;
+    if (f == emu_bra_long)   return DSP56K_JIT_CF_BRA_LONG;
+    if (f == emu_bsr_imm)    return DSP56K_JIT_CF_BSR_IMM;
+    if (f == emu_bsr_long)   return DSP56K_JIT_CF_BSR_LONG;
+    if (f == emu_jcc_imm)    return DSP56K_JIT_CF_JCC_IMM;
+    if (f == emu_jscc_imm)   return DSP56K_JIT_CF_JSCC_IMM;
+    if (f == emu_bcc_imm)    return DSP56K_JIT_CF_BCC_IMM;
+    if (f == emu_bcc_long)   return DSP56K_JIT_CF_BCC_LONG;
     /* Loop ops */
-    if (f == emu_rep_imm)    return DSP_JIT_CF_REP_IMM;
-    if (f == emu_rep_aa)     return DSP_JIT_CF_REP_AA;
-    if (f == emu_rep_ea)     return DSP_JIT_CF_REP_EA;
-    if (f == emu_rep_reg)    return DSP_JIT_CF_REP_REG;
-    if (f == emu_do_imm)     return DSP_JIT_CF_DO_IMM;
-    if (f == emu_do_aa)      return DSP_JIT_CF_DO_AA;
-    if (f == emu_do_ea)      return DSP_JIT_CF_DO_EA;
-    if (f == emu_do_reg)     return DSP_JIT_CF_DO_REG;
-    if (f == emu_dor_imm)    return DSP_JIT_CF_DOR_IMM;
-    if (f == emu_dor_reg)    return DSP_JIT_CF_DOR_REG;
-    if (f == emu_enddo)      return DSP_JIT_CF_ENDDO;
-    if (f == emu_tcc)        return DSP_JIT_CF_TCC;
-    if (f == emu_movec_imm)  return DSP_JIT_CF_MOVEC_IMM;
-    if (f == emu_movec_reg)  return DSP_JIT_CF_MOVEC_REG;
-    if (f == emu_movec_aa)   return DSP_JIT_CF_MOVEC_AA;
-    if (f == emu_movec_ea)   return DSP_JIT_CF_MOVEC_EA;
-    if (f == emu_movep_0)    return DSP_JIT_CF_MOVEP_0;
-    if (f == emu_movep_1)    return DSP_JIT_CF_MOVEP_1;
-    if (f == emu_movep_23)   return DSP_JIT_CF_MOVEP_23;
-    if (f == emu_movep_x_qq) return DSP_JIT_CF_MOVEP_X_QQ;
-    if (f == emu_movem_aa)   return DSP_JIT_CF_MOVEM_AA;
-    if (f == emu_movem_ea)   return DSP_JIT_CF_MOVEM_EA;
-    if (f == emu_nop)        return DSP_JIT_CF_NOP;
-    if (f == emu_inc)        return DSP_JIT_CF_INC;
-    if (f == emu_dec)        return DSP_JIT_CF_DEC;
-    if (f == emu_add_imm)    return DSP_JIT_CF_ADD_IMM;
-    if (f == emu_sub_imm)    return DSP_JIT_CF_SUB_IMM;
-    if (f == emu_cmp_imm)    return DSP_JIT_CF_CMP_IMM;
-    if (f == emu_and_imm)    return DSP_JIT_CF_AND_IMM;
-    if (f == emu_move_x_long) return DSP_JIT_CF_MOVE_X_LONG;
-    if (f == emu_move_x_imm)  return DSP_JIT_CF_MOVE_X_IMM;
-    if (f == emu_move_y_imm)  return DSP_JIT_CF_MOVE_Y_IMM;
-    if (f == emu_asl_imm)    return DSP_JIT_CF_ASL_IMM;
-    if (f == emu_asr_imm)    return DSP_JIT_CF_ASR_IMM;
-    if (f == emu_lsl_imm)    return DSP_JIT_CF_LSL_IMM;
-    if (f == emu_cmpu)       return DSP_JIT_CF_CMPU;
+    if (f == emu_rep_imm)    return DSP56K_JIT_CF_REP_IMM;
+    if (f == emu_rep_aa)     return DSP56K_JIT_CF_REP_AA;
+    if (f == emu_rep_ea)     return DSP56K_JIT_CF_REP_EA;
+    if (f == emu_rep_reg)    return DSP56K_JIT_CF_REP_REG;
+    if (f == emu_do_imm)     return DSP56K_JIT_CF_DO_IMM;
+    if (f == emu_do_aa)      return DSP56K_JIT_CF_DO_AA;
+    if (f == emu_do_ea)      return DSP56K_JIT_CF_DO_EA;
+    if (f == emu_do_reg)     return DSP56K_JIT_CF_DO_REG;
+    if (f == emu_dor_imm)    return DSP56K_JIT_CF_DOR_IMM;
+    if (f == emu_dor_reg)    return DSP56K_JIT_CF_DOR_REG;
+    if (f == emu_enddo)      return DSP56K_JIT_CF_ENDDO;
+    if (f == emu_tcc)        return DSP56K_JIT_CF_TCC;
+    if (f == emu_movec_imm)  return DSP56K_JIT_CF_MOVEC_IMM;
+    if (f == emu_movec_reg)  return DSP56K_JIT_CF_MOVEC_REG;
+    if (f == emu_movec_aa)   return DSP56K_JIT_CF_MOVEC_AA;
+    if (f == emu_movec_ea)   return DSP56K_JIT_CF_MOVEC_EA;
+    if (f == emu_movep_0)    return DSP56K_JIT_CF_MOVEP_0;
+    if (f == emu_movep_1)    return DSP56K_JIT_CF_MOVEP_1;
+    if (f == emu_movep_23)   return DSP56K_JIT_CF_MOVEP_23;
+    if (f == emu_movep_x_qq) return DSP56K_JIT_CF_MOVEP_X_QQ;
+    if (f == emu_movem_aa)   return DSP56K_JIT_CF_MOVEM_AA;
+    if (f == emu_movem_ea)   return DSP56K_JIT_CF_MOVEM_EA;
+    if (f == emu_nop)        return DSP56K_JIT_CF_NOP;
+    if (f == emu_inc)        return DSP56K_JIT_CF_INC;
+    if (f == emu_dec)        return DSP56K_JIT_CF_DEC;
+    if (f == emu_add_imm)    return DSP56K_JIT_CF_ADD_IMM;
+    if (f == emu_sub_imm)    return DSP56K_JIT_CF_SUB_IMM;
+    if (f == emu_cmp_imm)    return DSP56K_JIT_CF_CMP_IMM;
+    if (f == emu_and_imm)    return DSP56K_JIT_CF_AND_IMM;
+    if (f == emu_move_x_long) return DSP56K_JIT_CF_MOVE_X_LONG;
+    if (f == emu_move_x_imm)  return DSP56K_JIT_CF_MOVE_X_IMM;
+    if (f == emu_move_y_imm)  return DSP56K_JIT_CF_MOVE_Y_IMM;
+    if (f == emu_asl_imm)    return DSP56K_JIT_CF_ASL_IMM;
+    if (f == emu_asr_imm)    return DSP56K_JIT_CF_ASR_IMM;
+    if (f == emu_lsl_imm)    return DSP56K_JIT_CF_LSL_IMM;
+    if (f == emu_cmpu)       return DSP56K_JIT_CF_CMPU;
     /* Misc non-parallel (single-word, no branch). */
-    if (f == emu_andi)       return DSP_JIT_CF_ANDI;
-    if (f == emu_ori)        return DSP_JIT_CF_ORI;
-    if (f == emu_lua)        return DSP_JIT_CF_LUA;
-    if (f == emu_lua_rel)    return DSP_JIT_CF_LUA_REL;
+    if (f == emu_andi)       return DSP56K_JIT_CF_ANDI;
+    if (f == emu_ori)        return DSP56K_JIT_CF_ORI;
+    if (f == emu_lua)        return DSP56K_JIT_CF_LUA;
+    if (f == emu_lua_rel)    return DSP56K_JIT_CF_LUA_REL;
     /* Effective-address CF (Rn-based target) */
-    if (f == emu_jmp_ea)     return DSP_JIT_CF_JMP_EA;
-    if (f == emu_jsr_ea)     return DSP_JIT_CF_JSR_EA;
-    if (f == emu_jcc_ea)     return DSP_JIT_CF_JCC_EA;
-    if (f == emu_jscc_ea)    return DSP_JIT_CF_JSCC_EA;
+    if (f == emu_jmp_ea)     return DSP56K_JIT_CF_JMP_EA;
+    if (f == emu_jsr_ea)     return DSP56K_JIT_CF_JSR_EA;
+    if (f == emu_jcc_ea)     return DSP56K_JIT_CF_JCC_EA;
+    if (f == emu_jscc_ea)    return DSP56K_JIT_CF_JSCC_EA;
     /* Bit-test absolute (jclr / jset family) */
-    if (f == emu_jclr_aa)    return DSP_JIT_CF_JCLR_AA;
-    if (f == emu_jclr_ea)    return DSP_JIT_CF_JCLR_EA;
-    if (f == emu_jclr_pp)    return DSP_JIT_CF_JCLR_PP;
-    if (f == emu_jclr_reg)   return DSP_JIT_CF_JCLR_REG;
-    if (f == emu_jset_aa)    return DSP_JIT_CF_JSET_AA;
-    if (f == emu_jset_ea)    return DSP_JIT_CF_JSET_EA;
-    if (f == emu_jset_pp)    return DSP_JIT_CF_JSET_PP;
-    if (f == emu_jset_reg)   return DSP_JIT_CF_JSET_REG;
-    if (f == emu_jsclr_aa)   return DSP_JIT_CF_JSCLR_AA;
-    if (f == emu_jsclr_ea)   return DSP_JIT_CF_JSCLR_EA;
-    if (f == emu_jsclr_pp)   return DSP_JIT_CF_JSCLR_PP;
-    if (f == emu_jsclr_reg)  return DSP_JIT_CF_JSCLR_REG;
-    if (f == emu_jsset_aa)   return DSP_JIT_CF_JSSET_AA;
-    if (f == emu_jsset_ea)   return DSP_JIT_CF_JSSET_EA;
-    if (f == emu_jsset_pp)   return DSP_JIT_CF_JSSET_PP;
-    if (f == emu_jsset_reg)  return DSP_JIT_CF_JSSET_REG;
+    if (f == emu_jclr_aa)    return DSP56K_JIT_CF_JCLR_AA;
+    if (f == emu_jclr_ea)    return DSP56K_JIT_CF_JCLR_EA;
+    if (f == emu_jclr_pp)    return DSP56K_JIT_CF_JCLR_PP;
+    if (f == emu_jclr_reg)   return DSP56K_JIT_CF_JCLR_REG;
+    if (f == emu_jset_aa)    return DSP56K_JIT_CF_JSET_AA;
+    if (f == emu_jset_ea)    return DSP56K_JIT_CF_JSET_EA;
+    if (f == emu_jset_pp)    return DSP56K_JIT_CF_JSET_PP;
+    if (f == emu_jset_reg)   return DSP56K_JIT_CF_JSET_REG;
+    if (f == emu_jsclr_aa)   return DSP56K_JIT_CF_JSCLR_AA;
+    if (f == emu_jsclr_ea)   return DSP56K_JIT_CF_JSCLR_EA;
+    if (f == emu_jsclr_pp)   return DSP56K_JIT_CF_JSCLR_PP;
+    if (f == emu_jsclr_reg)  return DSP56K_JIT_CF_JSCLR_REG;
+    if (f == emu_jsset_aa)   return DSP56K_JIT_CF_JSSET_AA;
+    if (f == emu_jsset_ea)   return DSP56K_JIT_CF_JSSET_EA;
+    if (f == emu_jsset_pp)   return DSP56K_JIT_CF_JSSET_PP;
+    if (f == emu_jsset_reg)  return DSP56K_JIT_CF_JSSET_REG;
     /* Bit-test PC-relative (brclr / brset — only _pp and _reg
      * variants have interpreter handlers in the opcode table) */
-    if (f == emu_brclr_pp)   return DSP_JIT_CF_BRCLR_PP;
-    if (f == emu_brclr_reg)  return DSP_JIT_CF_BRCLR_REG;
-    if (f == emu_brset_pp)   return DSP_JIT_CF_BRSET_PP;
-    if (f == emu_brset_reg)  return DSP_JIT_CF_BRSET_REG;
-    return DSP_JIT_CF_NONE;
+    if (f == emu_brclr_pp)   return DSP56K_JIT_CF_BRCLR_PP;
+    if (f == emu_brclr_reg)  return DSP56K_JIT_CF_BRCLR_REG;
+    if (f == emu_brset_pp)   return DSP56K_JIT_CF_BRSET_PP;
+    if (f == emu_brset_reg)  return DSP56K_JIT_CF_BRSET_REG;
+    return DSP56K_JIT_CF_NONE;
 }
 
 int dsp56k_jit_helper_classify_long_imm(void *fn)
 {
     emu_func_t f = (emu_func_t)fn;
-    if (f == emu_add_long) return DSP_JIT_LI_ADD;
-    if (f == emu_sub_long) return DSP_JIT_LI_SUB;
-    if (f == emu_cmp_long) return DSP_JIT_LI_CMP;
-    if (f == emu_and_long) return DSP_JIT_LI_AND;
-    if (f == emu_or_long)  return DSP_JIT_LI_OR;
-    return DSP_JIT_LI_NONE;
+    if (f == emu_add_long) return DSP56K_JIT_LI_ADD;
+    if (f == emu_sub_long) return DSP56K_JIT_LI_SUB;
+    if (f == emu_cmp_long) return DSP56K_JIT_LI_CMP;
+    if (f == emu_and_long) return DSP56K_JIT_LI_AND;
+    if (f == emu_or_long)  return DSP56K_JIT_LI_OR;
+    return DSP56K_JIT_LI_NONE;
 }
 
-#endif  /* DSP_JIT_SUPPORTED */
+#endif  /* DSP56K_JIT_SUPPORTED */

@@ -118,6 +118,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
+| `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
+| `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 
 ### Recommended `xemu.toml`
 
@@ -552,6 +554,16 @@ In-app Settings covers the main toggles.
 - **Full inline DSP JIT (Apple Silicon).** ARM64
   basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
   via `[audio.dsp_jit] enabled = true` or `XEMU_DSP_JIT=1`.
+- **Per-core retranslation auto-throttle.** The EP runs per-pass
+  code overlays (measured ~1 retranslation per 10 block executions
+  on Azurik — 26k retranslations per 262k-execution window), so
+  translating it costs more than interpreting it; a sustained-churn
+  window (>1/16) permanently hands that core back to the
+  interpreter. Measured APU-thread utilization (Azurik attract,
+  `XEMU_APU_PROF`): JIT-both-cores 25%, interpreter 22%, JIT with
+  EP auto-throttled **20%** — statistically tied with upstream's
+  dsp56300 engine (19%) in this DSP-light scene. GP never trips
+  (~1:10000). `XEMU_DSP_JIT_NO_THROTTLE=1` for A/B.
   100% ALU inlined, 99.99% CF inlined; only `emu_undefined` stays
   on BLR — the 16-variant `bit_manip` tail (bset/bclr/bchg/btst ×
   aa/ea/pp/reg) is now emitted inline (REG variants targeting

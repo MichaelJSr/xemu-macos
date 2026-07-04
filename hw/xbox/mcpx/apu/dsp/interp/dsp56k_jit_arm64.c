@@ -40,7 +40,7 @@
  *   check. Remaining speedups target the ALU kernel and control
  *   flow in later phases.
  *
- *   A differential-validation harness (XEMU_DSP56K_JIT_DIFF=1) runs
+ *   A differential-validation harness (XEMU_DSP_JIT_DIFF=1) runs
  *   the interpreter on a private copy of dsp_core_t on a dedicated
  *   worker thread (`mcpx.dsp_diff`) and byte-compares against the
  *   JIT's post-block state, aborting on any divergence. APU-thread
@@ -78,7 +78,7 @@ typedef void (*emu_func_t)(dsp_core_t *dsp);
 static bool g_jit_parsed;
 static bool g_jit_enabled;
 static bool g_jit_diff;
-static bool g_jit_diff_sync;         /* XEMU_DSP56K_JIT_DIFF_SYNC=1: on-thread compare */
+static bool g_jit_diff_sync;         /* XEMU_DSP_JIT_DIFF_SYNC=1: on-thread compare */
 static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
 static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks */
 static bool g_jit_stats;
@@ -128,7 +128,7 @@ static uint64_t g_alu_ccr_eu_skipped;
 #define DSP56K_JIT_CCR_LF_MAX_STEPS 8
 
 /*
- * Phase 8 pin-audit diagnostic (XEMU_DSP56K_JIT_PIN_AUDIT=1). When set,
+ * Phase 8 pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). When set,
  * translate_block emits a 10-insn runtime check after every
  * instruction's epilogue that re-packs registers[A2/A1/A0] and
  * registers[B2/B1/B0] from memory and compares the result against
@@ -140,6 +140,7 @@ static uint64_t g_alu_ccr_eu_skipped;
  * emit only fires in the translate path if the global is true.
  */
 static bool g_jit_pin_audit;
+static bool g_jit_no_throttle;
 
 /*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
@@ -181,14 +182,14 @@ static void parse_flags_once(void)
         g_jit_enabled = (e[0] == '1');
     }
 
-    /* XEMU_DSP56K_JIT_DIFF (dev tool): bit-exact validate JIT output
+    /* XEMU_DSP_JIT_DIFF (dev tool): bit-exact validate JIT output
      * against interpreter. No config-spec entry — it's only useful
      * during JIT bring-up / regression tracking.
      *   "0"        — diff mode off (default)
      *   "1"        — diff-check every block (2-10x slowdown)
      *   "N" (N>=2) — diff-check every Nth block (sampling)
      * Capped at 1e6 to keep the modulo cheap. */
-    e = getenv("XEMU_DSP56K_JIT_DIFF");
+    e = getenv("XEMU_DSP_JIT_DIFF");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
         if (n >= 1 && n <= 1000000) {
@@ -202,12 +203,12 @@ static void parse_flags_once(void)
      * (DspJitBlock.diff_checked) already bounds validator work to
      * ~N_unique_block_translations — typically a few hundred — so
      * most users never need a cap. Unset by default. Set
-     * XEMU_DSP56K_JIT_DIFF_MAX=N to stop validating after N enqueues
+     * XEMU_DSP_JIT_DIFF_MAX=N to stop validating after N enqueues
      * (useful for CI "validate first N blocks, then run free"
      * gating). The recommended knob for day-to-day runs is
-     * XEMU_DSP56K_JIT_DIFF=N sampling.
+     * XEMU_DSP_JIT_DIFF=N sampling.
      */
-    e = getenv("XEMU_DSP56K_JIT_DIFF_MAX");
+    e = getenv("XEMU_DSP_JIT_DIFF_MAX");
     if (e && e[0]) {
         long long n = strtoll(e, NULL, 0);
         if (n > 0) {
@@ -221,16 +222,21 @@ static void parse_flags_once(void)
      * divergence rather than "eventually when the validator gets
      * around to this block". Sync mode re-introduces APU-thread
      * latency and is NOT recommended for extended runs. */
-    e = getenv("XEMU_DSP56K_JIT_DIFF_SYNC");
+    e = getenv("XEMU_DSP_JIT_DIFF_SYNC");
     g_jit_diff_sync = (e && e[0] == '1');
 
-    e = getenv("XEMU_DSP56K_JIT_STATS");
+    e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
 
-    /* XEMU_DSP56K_JIT_SENTINEL: debug harness for the round-4
+    /* XEMU_DSP_JIT_NO_THROTTLE=1: disable the retranslation-churn
+     * auto-throttle (A/B / debugging; see DSP56K_JIT_THROTTLE_*). */
+    e = getenv("XEMU_DSP_JIT_NO_THROTTLE");
+    g_jit_no_throttle = (e && e[0] == '1');
+
+    /* XEMU_DSP_JIT_SENTINEL: debug harness for the round-4
      * cur_inst-skip bisect. Bit 0 = curinst poison. The old bit 1
      * (pcskip logger) was removed when EPI_NO_PC was dropped. */
-    e = getenv("XEMU_DSP56K_JIT_SENTINEL");
+    e = getenv("XEMU_DSP_JIT_SENTINEL");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
         if (n > 0 && n <= 1) {
@@ -238,10 +244,10 @@ static void parse_flags_once(void)
         }
     }
 
-    /* XEMU_DSP56K_JIT_FORCE: literally re-apply the deferred round-4
+    /* XEMU_DSP_JIT_FORCE: literally re-apply the deferred round-4
      * cur_inst skip. Bit 0 = cur_inst skip. Bit 1 (old PC-check
      * skip) was removed when EPI_NO_PC was dropped permanently. */
-    e = getenv("XEMU_DSP56K_JIT_FORCE");
+    e = getenv("XEMU_DSP_JIT_FORCE");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
         if (n > 0 && n <= 1) {
@@ -249,14 +255,14 @@ static void parse_flags_once(void)
         }
     }
 
-    /* XEMU_DSP56K_JIT_PIN_AUDIT: emit a per-op runtime check that the
+    /* XEMU_DSP_JIT_PIN_AUDIT: emit a per-op runtime check that the
      * pinned A / B registers (x26 / x27) agree with the packed
      * contents of registers[A2/A1/A0] / registers[B2/B1/B0]. Emits
      * ~10 insns per instruction in the block and BLRs a C helper
      * on mismatch. Used to pin down which direct-memory-write path
      * or BLR fallback is leaving the pin out of sync. Off by
      * default (zero cost when unset). */
-    e = getenv("XEMU_DSP56K_JIT_PIN_AUDIT");
+    e = getenv("XEMU_DSP_JIT_PIN_AUDIT");
     g_jit_pin_audit = (e && e[0] == '1');
 
     if (g_jit_enabled) {
@@ -1127,7 +1133,7 @@ struct DspJitBlock {
      * so stale chain-site pointers (into dead code regions from
      * previous incarnations) can be detected and skipped.
      *
-     * Chaining is disabled entirely in XEMU_DSP56K_JIT_DIFF mode —
+     * Chaining is disabled entirely in XEMU_DSP_JIT_DIFF mode —
      * the diff harness assumes one block per dispatcher call for
      * its pre/post snapshot semantics.
      */
@@ -1145,7 +1151,7 @@ struct DspJitBlock {
 /* --------------------------------------------------------------- *
  * Differential validator (DIFF mode)
  *
- * There are two modes, selected by XEMU_DSP56K_JIT_DIFF_SYNC:
+ * There are two modes, selected by XEMU_DSP_JIT_DIFF_SYNC:
  *
  *   async (default): on each block, the APU thread snapshots pre-
  *   and post-state into a pre-allocated SPSC ring slot and publishes.
@@ -1157,7 +1163,7 @@ struct DspJitBlock {
  *   the new entry (validation becomes a sampler) rather than
  *   blocking the APU thread.
  *
- *   sync (XEMU_DSP56K_JIT_DIFF_SYNC=1): interpreter replay + compare
+ *   sync (XEMU_DSP_JIT_DIFF_SYNC=1): interpreter replay + compare
  *   run inline on the APU thread for each block. Matches the old
  *   behaviour, kept for bring-up debugging where you want the abort
  *   to fire immediately on divergence rather than eventually when
@@ -1226,7 +1232,7 @@ typedef struct DspJitState {
     DspJitBlock blocks[DSP_PRAM_SIZE];  /* one slot per possible PC */
     DspJitBlock *pc_to_block[DSP_PRAM_SIZE];  /* pc -> owner block (or NULL) */
 
-    /* Differential validator (XEMU_DSP56K_JIT_DIFF=1). NULL if diff off. */
+    /* Differential validator (XEMU_DSP_JIT_DIFF=1). NULL if diff off. */
     DiffQueue *diff_q;
 
     /* Stats */
@@ -1250,7 +1256,26 @@ typedef struct DspJitState {
      * the same stats (happens in the test-dsp binary; not the
      * normal xemu path, but cheap to guard). */
     bool stats_printed;
+
+    /* Auto-throttle: programs that continuously rewrite P-space
+     * (the EP's per-pass code overlays, measured ~1 retranslation
+     * per 10 block executions on Azurik) spend more in the
+     * translator than the interpreter would spend executing. When a
+     * window shows sustained retranslation churn, permanently hand
+     * this core back to the interpreter. The 8 MiB code buffer
+     * stays mapped (freeing here would race the caller's engine
+     * teardown for marginal benefit). */
+    bool auto_throttled;
+    uint32_t throttle_tick;
+    uint64_t win_translated;
 } DspJitState;
+
+/* Evaluate churn every WINDOW block executions; throttle when more
+ * than 1/RATIO of them caused a (re)translation. GP on Azurik
+ * measures ~1:10000 (never trips); the EP overlay pattern measures
+ * ~1:10 (trips on the first window). */
+#define DSP56K_JIT_THROTTLE_WINDOW (256u * 1024u)
+#define DSP56K_JIT_THROTTLE_RATIO  16u
 
 /* --------------------------------------------------------------- *
  * Code-buffer allocation (MAP_JIT on macOS via qemu_thread_jit_* pair)
@@ -2435,7 +2460,7 @@ static void emit_xy_pin_write_from_w(ArmEmit *e, int reg, int src_wreg)
 }
 
 /*
- * Phase 8 pin-audit diagnostic emit (XEMU_DSP56K_JIT_PIN_AUDIT=1).
+ * Phase 8 pin-audit diagnostic emit (XEMU_DSP_JIT_PIN_AUDIT=1).
  * Emits a ~30-insn block that re-packs registers[A2/A1/A0] and
  * registers[B2/B1/B0] from memory into x4 and compares against
  * the pinned x26 / x27. On mismatch, BLRs
@@ -4416,7 +4441,7 @@ static void emit_alu_tfr(ArmEmit *e, const AluVariant *v)
 
 /* --------------------------------------------------------------- *
  * ALU stats — total inlined vs BLR-fallback ALU ops. Printed by
- * XEMU_DSP56K_JIT_STATS on emulator exit so we can see what fraction
+ * XEMU_DSP_JIT_STATS on emulator exit so we can see what fraction
  * of ALU opcodes Phase 2 covers on the running game.
  *
  * Incremented at translate time (not execute time), so counts
@@ -5792,7 +5817,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     /*
      * Set cur_inst, cur_inst_len=1, instr_cycle=2.
      *
-     * Sentinel mode (XEMU_DSP56K_JIT_SENTINEL bit 0): poison
+     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): poison
      * dsp->cur_inst for parmove classes that don't need the live
      * inst at runtime. pm_4x is the one exception — it reads
      * dsp->cur_inst inside the emu_pm_4x C handler, so we always
@@ -5931,7 +5956,7 @@ static uint64_t g_cf_fallback_count;
  * Per-handler cf_fallback buckets. Indexed by DSP56K_JIT_FB_* (see
  * dsp56k_jit_arm64.h). Incremented at translate time every time
  * emit_instruction falls through to the generic BLR path. Printed
- * by XEMU_DSP56K_JIT_STATS so the "what's still in the fallback bucket"
+ * by XEMU_DSP_JIT_STATS so the "what's still in the fallback bucket"
  * question becomes data-driven rather than guesswork.
  */
 static uint64_t g_cf_fallback_buckets[DSP56K_JIT_FB_MAX];
@@ -8907,7 +8932,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * stale instruction bits and assert on an unknown opcode. Keep
      * the unconditional preset until the offending reader is found.
      *
-     * Sentinel mode (XEMU_DSP56K_JIT_SENTINEL bit 0): write
+     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): write
      * DSP56K_JIT_SENTINEL_POISON to dsp->cur_inst instead of `inst`
      * for ops that would have been skipped (inlinable CF / long-
      * imm). Any handler that reads cur_inst at runtime observes
@@ -9857,11 +9882,11 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
     /* Optional hex dump of the emitted ARM64 block, for offline
      * disassembly and verification. Gated to avoid noise; set
-     * XEMU_DSP56K_JIT_DUMP=1 to enable. */
+     * XEMU_DSP_JIT_DUMP=1 to enable. */
     static bool dump_parsed, dump_enabled;
     if (!dump_parsed) {
         dump_parsed = true;
-        const char *e = getenv("XEMU_DSP56K_JIT_DUMP");
+        const char *e = getenv("XEMU_DSP_JIT_DUMP");
         dump_enabled = (e && e[0] == '1');
     }
     if (dump_enabled) {
@@ -9943,7 +9968,7 @@ void dsp56k_jit_init(dsp_core_t *dsp)
 
     /*
      * Register this core with the atexit handler so
-     * XEMU_DSP56K_JIT_STATS=1 prints on normal xemu quit. The Xbox
+     * XEMU_DSP_JIT_STATS=1 prints on normal xemu quit. The Xbox
      * machine shutdown path (Cmd-Q / window close / SIGTERM) does
      * NOT call dsp_destroy — it just exits — so the stats dump
      * wired into dsp56k_jit_finalize would never fire otherwise.
@@ -10583,7 +10608,7 @@ static void *diff_worker_fn(void *opaque)
 
 /* Allocate and start the validator queue + worker. Returns NULL if
  * allocation or thread creation fails (diff mode then falls back to
- * sync, matching the XEMU_DSP56K_JIT_DIFF_SYNC=1 path). */
+ * sync, matching the XEMU_DSP_JIT_DIFF_SYNC=1 path). */
 static DiffQueue *diff_queue_create(dsp_core_t *owner)
 {
     DiffQueue *q = g_malloc0(sizeof(*q));
@@ -10688,7 +10713,7 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
      *     (increment q->dropped, still run the JIT normally). Keeps
      *     the APU thread fast under load spikes; validation becomes
      *     a sampler over the full run.
-     *   - sync (XEMU_DSP56K_JIT_DIFF_SYNC=1 or no q): snapshot into a
+     *   - sync (XEMU_DSP_JIT_DIFF_SYNC=1 or no q): snapshot into a
      *     stack-local slot, run JIT, validate inline on the APU
      *     thread. Slow, for bring-up debugging only.
      */
@@ -10792,6 +10817,28 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
         return 0;
     }
 
+    if (s->auto_throttled) {
+        return 0;
+    }
+    if (++s->throttle_tick >= DSP56K_JIT_THROTTLE_WINDOW) {
+        s->throttle_tick = 0;
+        uint64_t win_xlat = s->blocks_translated - s->win_translated;
+        s->win_translated = s->blocks_translated;
+        if (!g_jit_no_throttle &&
+            win_xlat * DSP56K_JIT_THROTTLE_RATIO >
+                DSP56K_JIT_THROTTLE_WINDOW) {
+            s->auto_throttled = true;
+            fprintf(stderr,
+                    "xemu: DSP JIT auto-throttled on %s core: %" PRIu64
+                    " retranslations in the last %u block executions "
+                    "(self-modifying overlay code); interpreter takes "
+                    "over. XEMU_DSP_JIT_NO_THROTTLE=1 disables this.\n",
+                    dsp->is_gp ? "GP" : "EP", win_xlat,
+                    DSP56K_JIT_THROTTLE_WINDOW);
+            return 0;
+        }
+    }
+
     if (g_jit_diff) {
         /* Per-translation validation gate: once a specific
          * translation has been validated (or is already queued for
@@ -10828,7 +10875,7 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
         }
         /* Sampling: if N > 1, only diff-check roughly 1 of every N
          * not-yet-checked block executions. Recommended for
-         * day-to-day runs (XEMU_DSP56K_JIT_DIFF=10 is a good default):
+         * day-to-day runs (XEMU_DSP_JIT_DIFF=10 is a good default):
          * combined with the per-translation gate above it spreads
          * the validation bursts out over wall time, keeping APU-
          * thread latency well-bounded under any workload. */

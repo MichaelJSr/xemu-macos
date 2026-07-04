@@ -240,6 +240,19 @@ static void se_frame(MCPXAPUState *d)
         g_dbg.frames_processed = (int)(d->frame_count * 1000000.0 / elapsed_us + 0.5);
         throttle_publish_debug(d);
 
+        /* XEMU_APU_PROF=1: per-second APU-thread utilization to
+         * stderr (same numbers as the debug UI). Handy for A/B of
+         * the DSP engines without attaching the UI. */
+        static int apu_prof = -1;
+        if (apu_prof < 0) {
+            const char *v = getenv("XEMU_APU_PROF");
+            apu_prof = (v && v[0] && v[0] != '0') ? 1 : 0;
+        }
+        if (apu_prof) {
+            fprintf(stderr, "apu: utilization %5.1f%% (%d frames/s)\n",
+                    g_dbg.utilization * 100.0, g_dbg.frames_processed);
+        }
+
         d->frame_count_time_us = start_us;
         d->frame_count = 0;
         d->frame_work_acc_us = 0;
