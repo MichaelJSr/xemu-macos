@@ -2044,6 +2044,32 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
                         pgraph_vk_queries_per_slot(r));
 
     /*
+     * Prime MoltenVK's per-command-buffer visibility flag with an
+     * empty occlusion query, begun and ended outside any render
+     * pass (legal, counts zero samples, folded harmlessly into
+     * report sums). MoltenVK attaches the Metal visibility result
+     * buffer to a render encoder only when
+     * MVKCommandBuffer::_needsVisibilityResultMTLBuffer is already
+     * set at pass-begin, and only vkCmdBeginQuery sets it — under
+     * immediate prefill encoding
+     * (MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2) our in-pass
+     * query begins come after the first pass's encoder exists, so
+     * a frame whose FIRST pass contains the first zpass draw got
+     * an encoder with a nil visibility buffer and crashed in AGX
+     * setVisibilityResultMode (user-reported, real gameplay).
+     */
+    {
+        int primer_index =
+            pgraph_vk_slot_query_base(r, r->current_flight) +
+            r->num_queries_in_flight;
+        nv2a_vk_assert(r->num_queries_in_flight <
+                       pgraph_vk_queries_per_slot(r));
+        vkCmdBeginQuery(r->command_buffer, r->query_pool, primer_index, 0);
+        vkCmdEndQuery(r->command_buffer, r->query_pool, primer_index);
+        r->num_queries_in_flight++;
+    }
+
+    /*
      * Vulkan dynamic state is command-buffer-scoped. Invalidate the
      * dynstate cache so the first draw re-issues vkCmdSet*.
      * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
