@@ -252,24 +252,73 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
     }
 
     if (r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
-        /* Submits the recording and synchronously drains (STALLED). */
-        pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
-        return;
+        /*
+         * Deferred report delivery. The old behavior finished +
+         * fully drained here (STALLED) every time the FIFO idled
+         * with a report pending — measured 23+ full GPU syncs per
+         * flip on report-heavy titles, and together with
+         * per-rotation render-pass teardown it held a heavy scene
+         * at ~16 fps. Engines overwhelmingly consume last frame's
+         * occlusion counts, so by default reports simply ride the
+         * next natural submission (flip) and deliver at slot
+         * reclaim: zero extra submits, zero waits (measured 35.6
+         * fps in the same scene, render passes 376 -> 14 per flip).
+         *
+         * Safety valve for a guest that truly spin-waits on the
+         * value with an idle FIFO: if reports stay pending while
+         * the FIFO remains continuously idle past a wall-clock
+         * budget, submit once (no synchronous drain) and let the
+         * fence-status poll below deliver on GPU completion.
+         * XEMU_REPORTS_SYNC=1 restores the legacy synchronous
+         * behavior wholesale.
+         */
+        static int sync_mode = -1;
+        if (sync_mode < 0) {
+            const char *e = getenv("XEMU_REPORTS_SYNC");
+            sync_mode = (e && e[0] == '1');
+        }
+        if (sync_mode) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
+            return;
+        }
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (r->reports_idle_since_ns == 0) {
+            r->reports_idle_since_ns = now;
+        } else if (now - r->reports_idle_since_ns > 5000000ll /* 5 ms */) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_SUBMIT);
+            r->reports_idle_since_ns = 0;
+        }
+    } else {
+        r->reports_idle_since_ns = 0;
     }
 
     /*
-     * The FIFO is idle but a previous submission may still hold
-     * deferred reports the guest is polling on; deliver them now.
+     * Deliver deferred reports for any slot whose submission has
+     * completed. Non-blocking: slots still executing are skipped and
+     * re-checked on the next idle iteration.
      */
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
-        if (r->flight[i].query_count > 0 ||
-            !QSIMPLEQ_EMPTY(&r->flight[i].report_queue)) {
-            pgraph_vk_drain_all_pending_reports(d);
-            return;
+        int slot = (r->current_flight + i) % NUM_FLIGHT_SLOTS;
+        if (r->flight[slot].query_count == 0 &&
+            QSIMPLEQ_EMPTY(&r->flight[slot].report_queue)) {
+            continue;
         }
+        if (r->flight[slot].submitted &&
+            vkGetFenceStatus(r->device, r->flight[slot].fence) !=
+                VK_SUCCESS) {
+            continue;
+        }
+        pgraph_vk_wait_slot_fence(pg, slot); /* signaled: immediate */
+        pgraph_vk_drain_slot_reports(d, slot);
     }
 
     if (!r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
-        pgraph_vk_drain_all_pending_reports(d);
+        /*
+         * Reports queued while no command buffer was recording cannot
+         * reference unfinished queries; write them out directly.
+         */
+        assert(r->num_queries_in_flight == 0);
+        write_reports_from_queue(d, &r->report_queue, NULL, 0);
+        r->report_pool_next = 0;
     }
 }

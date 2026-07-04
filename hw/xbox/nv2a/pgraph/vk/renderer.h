@@ -870,6 +870,10 @@ typedef struct PGRAPHVkState {
     int max_queries_in_flight;
     int num_queries_in_flight;
     bool new_query_needed;
+    /* First wall-clock instant the FIFO was seen idle with reports
+     * pending; 0 when not idle / none pending. Drives the deferred-
+     * report fallback submit (see process_pending_reports). */
+    int64_t reports_idle_since_ns;
     uint64_t *query_results_buf;
     QueryReport *report_pool;
     int report_pool_next;
@@ -1088,6 +1092,12 @@ typedef enum FinishReason {
     VK_FINISH_REASON_FLUSH,
     VK_FINISH_REASON_STALLED,
     VK_FINISH_REASON_REPORTS_FULL,
+    /* Submit so pending occlusion queries can complete, but do NOT
+     * synchronously drain: the pfifo idle loop polls the slot fence
+     * (pgraph_vk_process_pending_reports) and delivers report values
+     * when the GPU signals. Replaces the STALLED full-sync for the
+     * guest poll path. */
+    VK_FINISH_REASON_REPORTS_SUBMIT,
 } FinishReason;
 
 // draw.c

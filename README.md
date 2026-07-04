@@ -116,6 +116,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
+| `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + 5 ms fallback) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -305,6 +306,25 @@ In-app Settings covers the main toggles.
   via insert/remove on cache miss / eviction. Whole-VRAM signals
   (renderer flush) take a one-pass LRU walk instead of visiting
   every bucket (spanning textures appear once, not per-bucket).
+- **In-pass occlusion queries + deferred zpass reports (2.25x in
+  report-heavy scenes).** Two coupled changes, measured together on
+  a heavy in-game savestate (Azurik, 408-485 draws/flip):
+  15.8 → **35.6 fps**, render passes **376 → 14 per flip**, fence
+  waits 31.9 → 2.3 ms/flip. (1) The per-query
+  `vkCmdResetQueryPool` (illegal inside a render pass) forced query
+  rotation to tear the pass down — about one full tile load/store
+  cycle per draw on Apple GPUs. The slot's whole query partition is
+  now bulk-reset once at command-buffer begin, and queries begin/end
+  *inside* the pass (Metal visibility-buffer path; a query begun in
+  a subpass ends in it — `end_render_pass` guarantees this, and
+  report sums already span query ranges). (2) The FIFO-idle STALLED
+  path did a full submit + GPU sync per pending report — 23+ per
+  flip. Engines consume last frame's occlusion counts, so reports
+  now ride the next natural submission (flip) and deliver at slot
+  reclaim; a guest that truly spin-waits with an idle FIFO is
+  caught by a 5 ms continuous-idle fallback that submits once and
+  delivers via non-blocking fence polling. `XEMU_REPORTS_SYNC=1`
+  restores the legacy synchronous drains.
 - **Query-pool drain at slot reclaim.** Occlusion queries are
   partitioned per flight slot; each submission's queries + pending
   guest reports are handed to the slot at submit and drained when

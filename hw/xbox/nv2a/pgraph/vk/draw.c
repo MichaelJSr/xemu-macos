@@ -1609,7 +1609,11 @@ static void bind_descriptor_sets(PGRAPHState *pg)
 static void begin_query(PGRAPHVkState *r)
 {
     nv2a_vk_assert(r->in_command_buffer);
-    nv2a_vk_assert(!r->in_render_pass);
+    /* Queries begin inside the render pass so rotation never tears
+     * it down; a query begun in a subpass must also end in it, which
+     * end_render_pass() guarantees. The pool partition was reset in
+     * bulk at command-buffer begin. */
+    nv2a_vk_assert(r->in_render_pass);
     nv2a_vk_assert(!r->query_in_flight);
 
     // FIXME: We should handle this. Make the query buffer bigger, but at least
@@ -1621,7 +1625,6 @@ static void begin_query(PGRAPHVkState *r)
                       r->num_queries_in_flight;
 
     nv2a_profile_inc_counter(NV2A_PROF_QUERY);
-    vkCmdResetQueryPool(r->command_buffer, r->query_pool, query_index, 1);
     VkQueryControlFlags query_flags = 0;
     if (r->enabled_physical_device_features.occlusionQueryPrecise) {
         query_flags |= VK_QUERY_CONTROL_PRECISE_BIT;
@@ -1637,7 +1640,7 @@ static void begin_query(PGRAPHVkState *r)
 static void end_query(PGRAPHVkState *r)
 {
     nv2a_vk_assert(r->in_command_buffer);
-    nv2a_vk_assert(!r->in_render_pass);
+    nv2a_vk_assert(r->in_render_pass);
     nv2a_vk_assert(r->query_in_flight);
 
     vkCmdEndQuery(r->command_buffer, r->query_pool,
@@ -1809,6 +1812,7 @@ static void begin_render_pass(PGRAPHState *pg)
         .clearValueCount = 0,
         .pClearValues = NULL,
     };
+    nsprof_event(NSPROF_EV_RENDERPASS);
     vkCmdBeginRenderPass(r->command_buffer, &render_pass_begin_info,
                          VK_SUBPASS_CONTENTS_INLINE);
     r->in_render_pass = true;
@@ -1817,6 +1821,11 @@ static void begin_render_pass(PGRAPHState *pg)
 static void end_render_pass(PGRAPHVkState *r)
 {
     if (r->in_render_pass) {
+        /* A query begun in this pass must end inside it. The next
+         * zpass draw begins a fresh one; report sums span queries. */
+        if (r->query_in_flight) {
+            end_query(r);
+        }
         vkCmdEndRenderPass(r->command_buffer);
         r->in_render_pass = false;
     }
@@ -1832,6 +1841,7 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_FLUSH] = NV2A_PROF_FINISH_FLUSH,
     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
     [VK_FINISH_REASON_REPORTS_FULL] = NV2A_PROF_FINISH_REPORTS_FULL,
+    [VK_FINISH_REASON_REPORTS_SUBMIT] = NV2A_PROF_FINISH_REPORTS_SUBMIT,
 };
 
 static void destroy_flight_framebuffers(PGRAPHState *pg, int slot)
@@ -1857,10 +1867,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         nsprof_event(NSPROF_EV_FINISH_BASE + finish_reason);
 
         if (r->in_render_pass) {
-            end_render_pass(r);
-        }
-        if (r->query_in_flight) {
-            end_query(r);
+            end_render_pass(r); /* also ends any in-pass query */
         }
         VK_CHECK(vkEndCommandBuffer(r->command_buffer));
 
@@ -2020,6 +2027,23 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     r->in_command_buffer = true;
 
     /*
+     * Reset this slot's whole occlusion-query partition in one
+     * command, outside any render pass. The per-query
+     * vkCmdResetQueryPool in begin_query() was the reason query
+     * rotation had to tear down the render pass (resets are illegal
+     * inside one) — measured at ~376 render passes per flip (about
+     * one per draw) in zpass-heavy scenes, a full tile load/store
+     * cycle per draw on Apple GPUs. With the partition pre-reset,
+     * queries begin and end inside the pass (native Metal
+     * visibility-buffer path under MoltenVK). Safe: the slot's
+     * previous submission was fence-reaped before reuse, and other
+     * slots own disjoint index ranges.
+     */
+    vkCmdResetQueryPool(r->command_buffer, r->query_pool,
+                        pgraph_vk_slot_query_base(r, r->current_flight),
+                        pgraph_vk_queries_per_slot(r));
+
+    /*
      * Vulkan dynamic state is command-buffer-scoped. Invalidate the
      * dynstate cache so the first draw re-issues vkCmdSet*.
      * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
@@ -2045,10 +2069,7 @@ void pgraph_vk_ensure_not_in_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    end_render_pass(r);
-    if (r->query_in_flight) {
-        end_query(r);
-    }
+    end_render_pass(r); /* also ends any in-pass query */
 }
 
 VkCommandBuffer pgraph_vk_begin_nondraw_commands(PGRAPHState *pg)
@@ -2128,18 +2149,16 @@ static void begin_draw(PGRAPHState *pg)
 
     nv2a_vk_assert(r->in_command_buffer);
 
-    // Visibility testing
-    if (!pg->clearing && pg->zpass_pixel_count_enable) {
-        if (r->new_query_needed && r->query_in_flight) {
-            end_render_pass(r);
-            end_query(r);
-        }
-        if (!r->query_in_flight) {
-            end_render_pass(r);
-            begin_query(r);
-        }
-    } else if (r->query_in_flight) {
-        end_render_pass(r);
+    /*
+     * Visibility testing: rotate / stop occlusion queries inside the
+     * render pass. Ending or beginning a query no longer ends the
+     * pass (see the bulk vkCmdResetQueryPool at command-buffer
+     * begin); the pass now only ends for clears, render-target
+     * changes, non-draw commands and submits.
+     */
+    if (r->query_in_flight &&
+        (pg->clearing || !pg->zpass_pixel_count_enable ||
+         r->new_query_needed)) {
         end_query(r);
     }
 
@@ -2154,8 +2173,14 @@ static void begin_draw(PGRAPHState *pg)
         must_bind_pipeline = true;
     }
 
+    if (!pg->clearing && pg->zpass_pixel_count_enable &&
+        !r->query_in_flight) {
+        begin_query(r);
+    }
+
     if (must_bind_pipeline) {
         nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_BIND);
+        nsprof_event(NSPROF_EV_PIPELINE_BIND);
         vkCmdBindPipeline(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           r->pipeline_binding->pipeline);
         r->pipeline_binding->draw_time = pg->draw_time;

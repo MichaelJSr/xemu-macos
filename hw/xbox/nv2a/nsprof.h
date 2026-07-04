@@ -65,6 +65,7 @@ enum NsprofEvent {
     NSPROF_EV_FINISH_FLUSH,
     NSPROF_EV_FINISH_STALLED,
     NSPROF_EV_FINISH_REPORTS_FULL,
+    NSPROF_EV_FINISH_REPORTS_SUBMIT,
     NSPROF_EV_DRAW, /* draw_end (guest begin/end pairs) */
     /* surface download trigger sites */
     NSPROF_EV_SDOWN_ACCESS_R, /* vCPU read of dirty surface VRAM */
@@ -79,6 +80,8 @@ enum NsprofEvent {
     NSPROF_EV_SUPLOAD_ZETA,   /* RAM -> zeta surface upload */
     NSPROF_EV_TEXBIND_SKIP,   /* once-per-frame verified-bind fast path */
     NSPROF_EV_VTX_EXACT_SKIP, /* byte-identical vertex conflict, finish skipped */
+    NSPROF_EV_RENDERPASS,     /* vkCmdBeginRenderPass on the main CB */
+    NSPROF_EV_PIPELINE_BIND,  /* vkCmdBindPipeline (graphics) */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY
