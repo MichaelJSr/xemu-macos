@@ -495,6 +495,16 @@ for the duration of a benchmark run, writing one `%cpu` value per line to a
 `.cpu` file per run. Cheap, coarse, good for "did this change raise average
 CPU."
 
+**Busy-poll caveat (measured 2026-07-04): the vCPU (mttcg) thread's
+utilization is NEVER evidence of guest-boundness on its own.** Azurik
+busy-polls instead of HLTing — the vCPU thread reads ~95% even in a
+scene pinned at a flat 60 fps vblank cap (F6), identical to a scene
+missing frames (F5). The valid limiter signal is PFIFO *starvation*
+time: PFIFO cond_wait share minus nsprof `flip_idle` = time the guest
+computes while the renderer has nothing to do (≥5.8 ms/flip on the F5
+heavy scene). Cross-check any "the guest is the bottleneck" claim
+against a capped scene before believing thread %CPU.
+
 **One-shot call-stack sampling**: `/usr/bin/sample <pid|partial-name>
 [duration [interval_ms]] -file <path>` (verified usage banner: default
 duration 10 s, default interval 1 ms). Good for "what function is actually

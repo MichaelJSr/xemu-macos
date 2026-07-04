@@ -63,6 +63,8 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.10 | Depth export (CPU readback / vkExportMetalObjectsEXT) | settled-negative |
 | 1.11 | Separate compute queue | settled-negative |
 | 1.12 | Measured "not worth it" set (barriers, S3TC, spec constants, input ring, ext-mem-host bar, async pipeline compile) | settled-negative |
+| 1.13 | Invalid-surface destruction raced pending submissions | shipped-after-fix |
+| 1.14 | GPU frame-cost campaign menu (A1/A2/B/C/D) on 2026-07 fixtures | settled-negative |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -98,6 +100,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 9.3 | Portable-config wipe / harness at `dist/xemu.app` | incident |
 | 9.4 | OS-level input injection false-verify | incident |
 | 9.5 | Running process keeps its old binary | incident |
+| 9.6 | Bare cp+codesign bundle refresh dies at dyld | incident |
 
 ## When NOT to use this skill
 
@@ -119,10 +122,14 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 # 1. Vulkan renderer (hw/xbox/nv2a/pgraph/vk)
 
 Jargon: **PFIFO thread** = the NV2A command-FIFO thread, i.e. the renderer
-thread. **finish** (`pgraph_vk_finish`) = full submit + CPU wait sync point on
-that thread. **flip** = guest frame boundary. **flight slot** = one of the 2
-in-flight command-buffer generations. **TBDR** = tile-based deferred renderer
-(Apple GPUs), where every render pass costs a whole tile load/store.
+thread. **finish** (`pgraph_vk_finish`) = submit-and-rotate sync point on
+that thread — it submits the CURRENT command buffer but then waits only the
+PREVIOUS flight slot's fence, so the just-submitted CB keeps executing
+(pipelined; verified 2026-07-04, see entry 1.13 — "full submit + CPU wait"
+is only true of upstream's pre-flight-slot design). **flip** = guest frame
+boundary. **flight slot** = one of the 2 in-flight command-buffer
+generations. **TBDR** = tile-based deferred renderer (Apple GPUs), where
+every render pass costs a whole tile load/store.
 
 ## 1.1 Occlusion/report rework — the 2.4x win and its two regressed intermediates
 
@@ -418,6 +425,60 @@ effort bar and closed (README Future vectors record all; measurements
 attach interval logs to the proposal.
 
 ---
+
+## 1.13 Invalid-surface destruction raced pending submissions
+
+**Status**: shipped-after-fix (`a045dfc780`, 2026-07-04; found by the
+Windows gating audit, not by a crash report).
+**Symptom**: none observed — latent. `prune_invalid_surfaces` destroyed
+quarantined `VkImage`s once they were outside the *recording* CB, but
+`pgraph_vk_finish` pipelines: it submits the current CB and waits only
+the previous slot's fence, so the just-submitted CB routinely still
+executes while the next records. An image evicted during CB N could be
+`vkDestroyImage`d during CB N+1's recording with CB N pending — invalid
+usage on every driver. MoltenVK's deferred encode (prefill=0 encodes on
+its queue thread after `vkQueueSubmit` returns) makes the window real on
+macOS too; the window opened when flight-slot pipelining replaced
+upstream's synchronous submit-and-wait finish (upstream unaffected).
+**Fix**: evictions stamped with the highest submission index that may
+reference them (`evict_submit_seq`); a retirement watermark
+(`retired_submit_count`, updated at every slot-fence observation) gates
+destruction; `surface_flush` drains all slot fences before its
+free-everything prune. REUSE of quarantined images needs no gate — a
+migrated image keeps its attachment layout and its first GPU touch is
+ordered against all earlier same-queue submissions by the draw render
+pass's explicit `VK_SUBPASS_EXTERNAL` dependency (proof comment at
+`get_any_compatible_invalid_surface`).
+**Evidence**: fps parity on F5 (46.6-47.2 vs 46.83 ± 0.24 pre-fix),
+identical finish mix, zero errors; audit table at
+`docs/windows-gating-audit.md` §C.
+**Lessons**: (a) "not in the recording CB" never proves "not referenced
+by the GPU" in a pipelined renderer — destruction needs a fence-derived
+watermark, reuse can ride spec-guaranteed ordering; (b) a static audit
+with the spec open finds bug classes soak testing structurally cannot
+(nothing crashes until a driver actually reuses the freed allocation).
+**Reopen if**: n/a.
+
+## 1.14 GPU frame-cost campaign menu — killed by measurement on the 2026-07 fixtures
+
+**Status**: settled-negative for mechanisms A1/A2/B/C/D on the current
+savestates (never implemented — Phase 1/2 gates fired first; commits
+`038f596332` instrumentation, `9b625f1126` verdict; campaign skill
+carries the full status header).
+**Evidence**: F5 (471 draws/flip @ 46.6 fps): A1 zero opportunity
+(vk_draw_call == draws exactly); A2 10.6% merge candidates × ~zero
+per-call PFIFO recording cost (prefill=0 defers Metal encoding to
+MoltenVK's queue thread; `vkCmdDraw*` absent from a 10 s PFIFO sample);
+B sites all <1 ms/flip with PFIFO 57.6% idle; C's savings land in
+~14 ms/flip of GPU slack (fence 2.8 ms/flip); D blocked in MoltenVK.
+Frame limiter is CPU-side: guest TCG largest share (≥5.8 ms/flip PFIFO
+starvation; vCPU% itself is confounded — the title busy-polls, ~95%
+vCPU even at F6's flat 60 fps cap).
+**Reopen if**: a genuinely GPU-bound scene re-enters the fixture set —
+re-run campaign Phase 0 and Phase 2 gates first (draws/flip in
+envelope, fence-wait a large fraction of frame time, encoder time ≈
+frame budget). The pass-cause data (clears 5.0/flip) becomes actionable
+again only under that condition.
 
 # 2. MoltenVK / driver level
 
@@ -1068,6 +1129,28 @@ window title carries the git-describe version — read it to confirm what is
 actually running.
 
 ---
+
+## 9.6 Bare cp+codesign bundle refresh dies at dyld
+
+**Status**: incident (2026-07-04; recipe fixed in `8db8f61b4d`).
+**What happened**: refreshing `dist/xemu.app` (and any APFS clone of
+it) by copying `build/qemu-system-i386` over the bundle executable +
+re-codesigning — the then-documented loop — produced a bundle that
+died at launch, twice, two layers deep: (1) the raw link output still
+carries `/opt/local/...` install-name references (dylibbundler
+rewrites them only in the packaged copy) → `Library not loaded:
+libSDL3`; (2) after fixing install names, the linker's own `LC_RPATH`
+entries (`macos-libs/.../opt/local/lib`, `/usr/local/lib`) made
+bundled dylibs' `@rpath/` deps resolve to un-fixed MacPorts copies →
+`libiconv` failing out of macos-libs' glib. The correct refresh
+replays all four `package_macos` executable steps: cp, `xattr -c`,
+`install_name_tool -change` loop, rpath strip-and-re-add-one, then
+codesign, with a trailing `/opt/local` check (recipe:
+`xemu-build-and-env` §5.3).
+**Lesson**: the packaged executable and the build-tree executable are
+different artifacts; any "fast refresh" must replicate the packaging
+fixups or the bundle silently depends on developer-machine paths.
+**Reopen if**: n/a.
 
 # How to add an entry (the recording duty)
 

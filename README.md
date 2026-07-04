@@ -248,6 +248,30 @@ In-app Settings covers the main toggles.
   per-flip / max event) to stderr. The `NV2A_PROF_*` counters are
   compiled out in release builds and count events, not time; this
   is what the optimization passes above were measured with.
+  2026-07-04 additions (GPU frame-cost campaign Phase 1): actual
+  `vkCmdDraw*` call counts vs guest blocks (`vk_draw_call`,
+  `da_multi_subrange`), consecutive-block draw-merge classification
+  (`merge_identical` / `merge_candidate` / `merge_cand_udiff` /
+  `merge_state_changed`), and render-pass-end cause tags
+  (`rpcause_surface` / `_clear` / `_texupload` / `_other`).
+  Observation-only; ~three flag stores per draw when the profiler is
+  off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
+  heavy savestate scene.
+- **Invalid-surface destruction gated on submission retirement.**
+  `pgraph_vk_finish` pipelines (submits the current CB, waits only
+  the previous slot's fence), so a quarantined surface image could be
+  `vkDestroyImage`d while the just-submitted CB still referenced it —
+  invalid usage on every driver, introduced with flight-slot
+  pipelining (upstream's synchronous finish was immune). Evictions
+  are now stamped with the highest submission index that may
+  reference them; a retirement watermark, updated wherever a slot
+  fence is observed signaled, gates destruction, and
+  `pgraph_vk_surface_flush` drains all slots before its
+  free-everything prune. Reuse of quarantined images needs no gate —
+  ordered by the draw render pass's explicit `VK_SUBPASS_EXTERNAL`
+  dependency (proof comment at `get_any_compatible_invalid_surface`).
+  Validated at fps parity (46.6-47.2 vs 46.83 ± 0.24, identical
+  finish mix, zero errors) on the heavy savestate scene.
 - **Zeta shape-switch fast path.** Whole-frame attribution showed
   the dominant cost in-game was ~9 `pgraph_vk_finish` fence cycles
   per flip (8-19 ms/flip), driven by a depth buffer ping-ponging

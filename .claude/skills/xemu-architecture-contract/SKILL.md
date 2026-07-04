@@ -166,9 +166,37 @@ queue"). Two Apple-only fast paths are sound *only* because of this.
    safe to reuse — MoltenVK's single queue executes later submissions
    after earlier ones."
 
-**Why.** Both paths remove a submit+fence stall (one of the largest
-nsprof cost buckets in heavy scenes) by trusting MoltenVK not to reorder
-or run submissions concurrently — trust extended only on `__APPLE__`.
+3. **Invalid-surface DESTRUCTION is gated on submission retirement
+   (2026-07-04, `a045dfc780`) — and this one is deliberately
+   platform-independent.** `pgraph_vk_finish` pipelines: it submits
+   the current CB and waits only the previous slot's fence, so the
+   just-submitted CB routinely still executes while the next records.
+   "Not referenced by the recording CB" therefore never proves the
+   GPU is done with an image. Every eviction stamps
+   `surface->evict_submit_seq` (highest submission index that may
+   reference the image); `r->retired_submit_count` is a watermark
+   updated wherever a slot fence is observed signaled
+   (`pgraph_vk_wait_slot_fence`, `pgraph_vk_wait_for_previous_flight`
+   — the reports fence-poll routes through the former);
+   `prune_invalid_surfaces` destroys only entries at or below the
+   watermark, and `pgraph_vk_surface_flush` drains all slots before
+   its keep=0 prune. REUSE (migrate) needs no watermark: a migrated
+   image keeps its attachment layout and its first GPU touch is
+   ordered against all earlier same-queue submissions by the draw
+   render pass's explicit `VK_SUBPASS_EXTERNAL` dependency — a core
+   Vulkan guarantee, not a MoltenVK one (proof comment at
+   `get_any_compatible_invalid_surface`). **If you add a new
+   destruction path for GPU resources with pipelined lifetimes, it
+   needs the same watermark; if you add a new fence-observation
+   site, it must update the watermark.**
+
+**Why.** Both fast paths remove a submit+fence stall (one of the
+largest nsprof cost buckets in heavy scenes) by trusting MoltenVK not
+to reorder or run submissions concurrently — trust extended only on
+`__APPLE__`. The destruction watermark is the flip side: the one
+lifetime question where single-queue ordering does NOT save you on
+any platform, because `vkDestroyImage` is a CPU-side act with no
+place in the queue's ordering at all.
 
 **What breaks if violated.** A second queue, or any change that submits
 from two threads/queues, turns both into use-after-free-class hazards:
@@ -1028,6 +1056,9 @@ these before trusting a claim above on a later tree:
 ```sh
 # Invariant 1 — single queue
 grep -n "queueCount = 1" hw/xbox/nv2a/pgraph/vk/instance.c
+
+# Invariant 1 (item 3) — destruction watermark still wired
+grep -n "evict_submit_seq\|retired_submit_count" hw/xbox/nv2a/pgraph/vk/surface.c hw/xbox/nv2a/pgraph/vk/command.c hw/xbox/nv2a/pgraph/vk/renderer.h
 
 # Invariant 2 — flight slots, query pool size, perf-build assert stripping
 grep -n "NUM_FLIGHT_SLOTS" hw/xbox/nv2a/pgraph/vk/renderer.h

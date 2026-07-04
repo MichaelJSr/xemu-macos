@@ -5,6 +5,31 @@ description: Executable, decision-gated campaign for cutting GPU work and per-dr
 
 # GPU frame-cost reduction campaign
 
+> **CAMPAIGN STATUS (2026-07-04, executed at `a045dfc780`): the ranked
+> menu below is MEASURED EXHAUSTED on the current fixture set — do not
+> re-run mechanisms A-D without first re-establishing a GPU-bound scene
+> via Phase 0 + Phase 2.** Phase 1 instrumentation landed
+> (`038f596332`); on the new heavy anchor (F5 `vm-20260704032357`,
+> 471 draws/flip @ 46.6 fps — the historical 408-485 @ 38.6 savestate
+> no longer exists) every mechanism was killed by its own gate: A1 zero
+> opportunity (`vk_draw_call/flip == draws/flip`, `da_multi_subrange=0`);
+> A2 10.6% candidates at ~zero per-call PFIFO cost (prefill=0 defers
+> Metal encoding to MoltenVK's queue thread — `vkCmdDraw*` recording is
+> absent from a 10 s PFIFO sample); B all sites <1 ms/flip with PFIFO
+> 57.6% idle; C killed for fps (GPU has ~14 ms/flip slack; the
+> pass-cause data lives on: clears 5.0/flip, surface 1.87, texupload
+> 0.12, other 0.72); D still blocked in MoltenVK. **The premise shifted:
+> this scene is CPU-side-bound** (guest TCG largest; vCPU 99.7% busy but
+> the title busy-polls — F6 shows ~95% vCPU at a flat 60 fps cap, so
+> vCPU% alone is never a limiter signal; ≥5.8 ms/flip of PFIFO
+> starvation is). Receipts: commits `038f596332`/`9b625f1126`, README
+> Future vectors ("GPU frame-cost campaign: … measured exhausted").
+> Successor vectors (README): dirty-clear TLB-walk coalescing
+> (~1.8 ms/flip PFIFO + vCPU echo), guest TCG throughput
+> (`helper_lookup_tb_ptr` 17.9%, TLB machinery ~14%, SSE helpers 3.7%),
+> PGO. The phases below remain the correct METHOD for any future
+> GPU-bound scene; the historical numbers are dated context.
+
 ## Mission and standing conclusion
 
 The occlusion/report rework (commit `6bfbc22863`, 2026-07-03) took the heavy

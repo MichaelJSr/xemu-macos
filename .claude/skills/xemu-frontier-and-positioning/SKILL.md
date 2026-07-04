@@ -26,6 +26,37 @@ checked against the repo on 2026-07-04 (re-check commands in "Provenance
 and maintenance"). Historical fps numbers are dated session measurements,
 cited as recorded history, not re-run for this skill.
 
+> **RANKING ADDENDUM (2026-07-04 evening, campaign session at
+> `a045dfc780` — supersedes the item-1 pointer and re-ranks the top of
+> the list).** The GPU-frame-cost campaign was EXECUTED and its menu is
+> measured exhausted on the current fixtures (see the status header in
+> `xemu-gpu-frame-campaign` and archaeology 1.14): the heavy scene is
+> CPU-side-bound, GPU has ~14 ms/flip slack. Item 8 (STALLED drains) is
+> RESOLVED with its confirming measurement (finish_stalled = 0 in all
+> in-game intervals; README row updated). Item 3 (Windows real-HW
+> validation) advanced: the static gating audit is committed
+> (`docs/windows-gating-audit.md`) with a six-item needs-real-HW list —
+> what remains genuinely needs Windows hardware. New top of the ranked
+> list, by measured mass × feasibility:
+> 1. **Dirty-clear TLB-walk coalescing** — ~1.8 ms/flip on PFIFO
+>    (vertex 537 + texture 245 of 6827 thread samples; tlb_reset_dirty
+>    walks the whole TLB per genuinely-dirty test_and_clear) plus a
+>    vCPU-side echo (notdirty writes ~2.8%, TB-link dirty clears 3.4%).
+>    Design-gated: Invariant 4 + archaeology 1.9.
+> 2. **PGO build experiment** (`XEMU_PGO=generate/use`, already wired) —
+>    cheapest lever against the measured TCG profile; milestone: ≥+1 fps
+>    interleaved on F5 or kill at <+0.5.
+> 3. **Guest TCG throughput** — `helper_lookup_tb_ptr` 17.9% of the
+>    vCPU thread, TLB fill/set ~14%, SSE packed-float helpers 3.7%
+>    (NEON lowering = hard-FPU-class project). Core-QEMU risk; shared
+>    with Windows.
+> 4. Push-model present (unchanged, now relatively higher because the
+>    GPU items fell away).
+> Caveat that must ride every CPU-side claim: this title busy-polls —
+> vCPU utilization is never evidence of guest-boundness on its own
+> (F6 shows ~95% vCPU at a flat 60 fps cap); PFIFO-starvation time is
+> the valid signal (≥5.8 ms/flip on F5).
+
 ## When NOT to use this skill
 
 | Need | Use instead |
