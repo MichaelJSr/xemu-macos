@@ -11,7 +11,9 @@ concurrency:
 jobs:
   release:
     name: Release
-    if: github.repository_owner == 'xemu-project'
+    # Allow this fork's owner in addition to upstream, otherwise tag
+    # pushes on the fork never produce a release.
+    if: contains(fromJSON('["xemu-project", "MichaelJSr"]'), github.repository_owner)
     uses: ./.github/workflows/release.yml
     with:
       ref: ${{ github.ref_name }}
