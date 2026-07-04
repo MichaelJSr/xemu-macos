@@ -197,8 +197,28 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                  * The currently recording command buffer references
                  * this range: it must be submitted before the mirror
                  * is overwritten, and the submit's fence waited.
+                 *
+                 * pgraph_vk_finish alone no longer guarantees the
+                 * second half: with flight-slot pipelining it waits
+                 * only the PREVIOUS slot's fence and leaves the
+                 * just-submitted CB executing (upstream's single-slot
+                 * finish really did drain). Without the explicit wait
+                 * below, the memcpy into the mirror races the
+                 * submitted CB's vertex fetches of the old content —
+                 * torn geometry on any driver, merely masked on macOS
+                 * by MoltenVK's deferred encode delay. Wait the slot
+                 * we just submitted, then clear its upload tracking
+                 * (its reads have retired) so later writes this frame
+                 * skip the already-signaled fence entirely.
                  */
+                int submitted_slot = r->current_flight;
                 pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
+                pgraph_vk_wait_slot_fence(pg, submitted_slot);
+                bitmap_clear(r->flight[submitted_slot].uploaded_bitmap, 0,
+                             r->bitmap_size);
+                r->flight[submitted_slot].uploaded_first_dirty_bit =
+                    ULONG_MAX;
+                r->flight[submitted_slot].uploaded_last_dirty_bit = 0;
                 break;
             }
             /*
