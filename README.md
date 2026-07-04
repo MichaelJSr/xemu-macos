@@ -645,6 +645,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| Per-flight vertex-RAM mirrors (vertex shadow copies) | One 128 MiB host mirror per flight slot; in-flight slots read a frozen mirror (cross-slot conflict waits disappear), `uploaded_bitmap` doubles as the delta log applied at slot reclaim. Measured on Azurik attract: 60 → ~40 flips/s steady with collapse spikes to 20, and 5.4 `finish_vtx_dirty`/flip — the guest streams page-boundary-overlapping vertex ranges, so consecutive writes trip the recording-CB conflict finish in a cascade (each finish rotates, the next write conflicts again), and rotation reclaim waits hit 26 ms mid-frame fences. Bisect (mirrors + old cross-slot waits kept; mirrors + no delta apply) showed the regression persists in all mirror modes — the cost is inherent to alternating 128 MiB vertex buffers per submission under MoltenVK, not the conflict policy. The single-mirror targeted-wait design stays |
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
 | Async MetalFX under *GL presentation* | GL↔Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone. Landed later for the Metal presentation backend, where both sides speak `MTLSharedEvent` |
@@ -678,13 +679,14 @@ Lessons worth preserving so they aren't re-attempted.
 
 Not attempted, or scope/risk too high for a one-shot change.
 
-- **Per-flight vertex shadow copies.** After the targeted-wait fix,
-  heavy scenes still spend 13-28 ms/flip in slot-fence waits when
-  the guest streams vertex data into pages an in-flight submission
-  reads (the wait is real GPU time, not slack). Copy-on-conflict
-  into per-slot scratch + draw rebase would remove the wait
-  entirely; complex and torn-read-prone (see the reverted
-  `VK_EXT_external_memory_host` vertex experiment).
+- **Per-flight vertex scratch + draw rebase (partial-page COW).**
+  The whole-mirror-per-slot variant was attempted and reverted (see
+  Failed experiments — alternating large vertex buffers regressed
+  MoltenVK throughput ~30%+). The surviving idea: keep ONE mirror,
+  and on conflict copy only the conflicting spans into a small
+  per-slot scratch buffer with per-draw offset rebase. Removes the
+  13-28 ms/flip heavy-scene slot-fence waits without swapping the
+  base buffer; requires attribute-offset rebasing at draw time.
 - **Occlusion-report STALLED drains.** Report-heavy intervals show
   ~5 `STALLED` finishes per flip (FIFO idle with pending zpass
   reports forces a synchronous drain-all). Candidate: satisfy
