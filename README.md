@@ -77,6 +77,7 @@ Vulkan drivers.
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer (≈21 ms @ 48 kHz) |
 | `XEMU_MOLTENVK_VERSION` | `1.4.1` | MoltenVK release auto-vendored into `macos-libs` when no system copy exists |
+| `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
 
 ### How Vulkan is provisioned (all platforms)
 
@@ -117,6 +118,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
 | `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + 5 ms fallback) |
+| `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
+| `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -306,6 +309,42 @@ In-app Settings covers the main toggles.
   via insert/remove on cache miss / eviction. Whole-VRAM signals
   (renderer flush) take a one-pass LRU walk instead of visiting
   every bucket (spanning textures appear once, not per-bucket).
+- **MoltenVK configuration is launch-path independent (pink-tile
+  fix).** The `MVK_CONFIG_*` tuning previously lived only in
+  `Info.plist` `LSEnvironment`, which macOS applies to Finder
+  launches exclusively — terminal launches ran library defaults, so
+  automated testing could never see Finder-only bugs. The canonical
+  values are now set in `main()` before MoltenVK loads (explicit
+  env still overrides). Along the way,
+  `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` moved from `2` to `0`:
+  with whole-frame command buffers, immediate prefill encoding
+  corrupted streamed textures (screen-wide magenta blocks, ~5% of
+  frames in streaming-heavy areas), enabled an AGX visibility-buffer
+  crash, and measured *slower* (46.3 vs 48.5 fps — encoding work
+  landed on the PFIFO thread).
+- **Maintained MoltenVK build** (`scripts/build-moltenvk.sh`):
+  pinned upstream commit, `-O3`, per-machine `-mcpu`, arm64-only,
+  installed to `/usr/local/lib` where `build.sh` prefers it and
+  logs the bundled version + UUID (provenance). Validated at fps
+  parity with 65 newer upstream fixes and half the binary size.
+- **Crash fixes in the new query path**: bulk query-pool resets +
+  in-pass rotation could exhaust the per-slot query partition
+  mid-frame (release builds strip the old assert; MoltenVK then
+  wrote through a nil visibility offset) — a capacity guard now
+  submits before exhaustion and the pool grew 1024→4096. A
+  per-command-buffer primer query keeps MoltenVK's visibility
+  buffer attached regardless of which pass sees the frame's first
+  zpass draw.
+- **Texture snapshot copy-until-clean.** Guest writes landing
+  mid-copy previously shipped one torn (Morton-tiled magenta)
+  frame and repaired on the next bind; the copy now retries until
+  no write tears it (bounded, self-consistent rehash).
+- **Snapshot robustness.** Failed snapshot loads (controller USB
+  topology drift — a pad asleep or re-enumerated since the save)
+  no longer leave the VM stopped ("frozen"); the game resumes and
+  the error is surfaced. Emulated pads with no host binding report
+  neutral input instead of aborting, which also enables
+  topology-matched snapshot loading in automation.
 - **In-pass occlusion queries + deferred zpass reports (2.25x in
   report-heavy scenes).** Two coupled changes, measured together on
   a heavy in-game savestate (Azurik, 408-485 draws/flip):
