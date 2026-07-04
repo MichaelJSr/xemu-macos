@@ -125,6 +125,10 @@ void pgraph_vk_init_buffers(NV2AState *d)
         bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
         r->flight[i].uploaded_first_dirty_bit = ULONG_MAX;
         r->flight[i].uploaded_last_dirty_bit = 0;
+        r->flight[i].page_span_min =
+            g_malloc_n(r->bitmap_size, sizeof(uint16_t));
+        r->flight[i].page_span_max =
+            g_malloc_n(r->bitmap_size, sizeof(uint16_t));
     }
 
     r->storage_buffers[BUFFER_VERTEX_INLINE] = (StorageBuffer){
@@ -191,6 +195,10 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         g_free(r->flight[i].uploaded_bitmap);
         r->flight[i].uploaded_bitmap = NULL;
+        g_free(r->flight[i].page_span_min);
+        r->flight[i].page_span_min = NULL;
+        g_free(r->flight[i].page_span_max);
+        r->flight[i].page_span_max = NULL;
     }
 }
 

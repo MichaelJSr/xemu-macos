@@ -91,6 +91,63 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
     return res;
 }
 
+/*
+ * Exact-conflict refinement (XEMU_VTX_EXACT=0 disables): guest dirty
+ * bits are page-granular, so vertex-stream sync writes arrive padded
+ * to page boundaries and consecutive writes false-share their
+ * boundary page — the padded bytes re-copy identical content. A
+ * conflict with the recording command buffer is only real if the
+ * incoming bytes DIFFER from the mirror somewhere inside a span the
+ * recording window actually wrote (recorded draws can only have
+ * consumed those spans from this window's uploads; mirror content
+ * over a recorded span cannot change value within a window — any
+ * differing write triggers the finish, and identical writes are
+ * no-ops). Returns true when a differing byte exists (finish
+ * required), false when every conflicting byte is identical.
+ *
+ * Measured (Azurik attract demo): forced mid-frame finishes drop
+ * from 4-5.6 to ~0.9 per flip.
+ */
+static bool uploaded_span_content_differs(PGRAPHVkState *r, int slot,
+                                          hwaddr offset, VkDeviceSize size,
+                                          const uint8_t *data,
+                                          size_t start_bit, size_t end_bit)
+{
+    static int exact = -1;
+    if (exact < 0) {
+        const char *e = getenv("XEMU_VTX_EXACT");
+        exact = !(e && e[0] == '0');
+    }
+    if (!exact) {
+        return true; /* legacy: every page-granular conflict finishes */
+    }
+
+    const unsigned long *bm = r->flight[slot].uploaded_bitmap;
+    const uint16_t *smin = r->flight[slot].page_span_min;
+    const uint16_t *smax = r->flight[slot].page_span_max;
+    const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
+
+    size_t bit = start_bit;
+    for (;;) {
+        bit = find_next_bit(bm, end_bit, bit);
+        if (bit >= end_bit) {
+            return false;
+        }
+        hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
+        hwaddr in_lo = MAX(offset, page_base);
+        hwaddr in_hi = MIN(offset + size, page_base + TARGET_PAGE_SIZE);
+        hwaddr sp_lo = page_base + smin[bit];
+        hwaddr sp_hi = page_base + smax[bit];
+        hwaddr lo = MAX(in_lo, sp_lo);
+        hwaddr hi = MIN(in_hi, sp_hi);
+        if (lo < hi &&
+            memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
+            return true;
+        }
+        bit++;
+    }
+}
+
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                                         void *data, VkDeviceSize size)
 {
@@ -123,6 +180,19 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
         if (find_next_bit(r->flight[i].uploaded_bitmap,
                           start_bit + nbits, start_bit) < end_bit) {
             if (i == r->current_flight) {
+                if (!uploaded_span_content_differs(r, i, offset, size,
+                                                   (const uint8_t *)data,
+                                                   start_bit, end_bit)) {
+                    /*
+                     * Every conflicting byte is identical to what the
+                     * recording window already uploaded — recorded
+                     * draws observe the same data, so the finish (and
+                     * its rotation + mid-frame reclaim wait) is a
+                     * false positive from page padding.
+                     */
+                    nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
+                    continue;
+                }
                 /*
                  * The currently recording command buffer references
                  * this range: it must be submitted before the mirror
@@ -154,7 +224,32 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
     nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
 
-    bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
+    {
+        unsigned long *bm = r->flight[r->current_flight].uploaded_bitmap;
+        uint16_t *smin = r->flight[r->current_flight].page_span_min;
+        uint16_t *smax = r->flight[r->current_flight].page_span_max;
+        hwaddr write_end = offset + size;
+        for (size_t b = start_bit; b < end_bit; b++) {
+            hwaddr page_base = (hwaddr)b * TARGET_PAGE_SIZE;
+            uint16_t lo = offset > page_base ?
+                              (uint16_t)(offset - page_base) : 0;
+            uint16_t hi = write_end < page_base + TARGET_PAGE_SIZE ?
+                              (uint16_t)(write_end - page_base) :
+                              (uint16_t)TARGET_PAGE_SIZE;
+            if (test_bit(b, bm)) {
+                if (lo < smin[b]) {
+                    smin[b] = lo;
+                }
+                if (hi > smax[b]) {
+                    smax[b] = hi;
+                }
+            } else {
+                set_bit(b, bm);
+                smin[b] = lo;
+                smax[b] = hi;
+            }
+        }
+    }
 
     /*
      * Track dirty-page min/max so aux_has_work() and flush_memory_buffer()

@@ -78,6 +78,7 @@ enum NsprofEvent {
     NSPROF_EV_SUPLOAD_COLOR,  /* RAM -> color surface upload */
     NSPROF_EV_SUPLOAD_ZETA,   /* RAM -> zeta surface upload */
     NSPROF_EV_TEXBIND_SKIP,   /* once-per-frame verified-bind fast path */
+    NSPROF_EV_VTX_EXACT_SKIP, /* byte-identical vertex conflict, finish skipped */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

@@ -115,6 +115,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
+| `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -259,6 +260,19 @@ In-app Settings covers the main toggles.
   buffer rotates; reuse is safe afterwards by single-queue
   submission order). Pending CPU-requested downloads are still
   honored; `XEMU_ZETA_SHAPE_READBACK=1` restores full fidelity.
+- **Byte-exact vertex-conflict refinement.** Guest dirty bits are
+  page-granular, so vertex-stream sync writes arrive page-padded and
+  consecutive writes false-share their boundary page with the
+  recording command buffer — each false conflict forced a finish
+  (submit + rotation + mid-frame fence reclaim). A per-page
+  written-span table + span-restricted memcmp proves most conflicts
+  byte-identical and skips the finish (conservative: any differing
+  byte keeps legacy behavior). Measured via the savestate A/B
+  harness (`scripts/bench-savestate-ab.sh`, 3 interleaved pairs,
+  baseline reproducibility ±0.02 fps) on a heavy in-game scene
+  (408 draws/flip @ ~20 fps): forced finishes 5.65 → 0.37/flip
+  (−93%), fence wait −11%, process CPU −7.6%, **fps +5.4%**.
+  `XEMU_VTX_EXACT=0` restores page-granular conflicts.
 - **Targeted vertex-RAM conflict wait.** Guest writes into VRAM
   pages uploaded by an *in-flight* slot forced a full finish
   (submit + slot rotate + fence) 3-6x per flip on streamed vertex

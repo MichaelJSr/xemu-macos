@@ -58,6 +58,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_SUPLOAD_COLOR] = "supload_color",
     [NSPROF_EV_SUPLOAD_ZETA] = "supload_zeta",
     [NSPROF_EV_TEXBIND_SKIP] = "texbind_skip",
+    [NSPROF_EV_VTX_EXACT_SKIP] = "vtx_exact_skip",
 };
 
 static struct {

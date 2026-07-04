@@ -573,6 +573,21 @@ typedef struct PGRAPHVkState {
          */
         unsigned long uploaded_first_dirty_bit;
         unsigned long uploaded_last_dirty_bit;
+        /*
+         * Page-relative byte span [min,max) written to each uploaded
+         * page during this slot's recording window. Valid only where
+         * the corresponding uploaded_bitmap bit is set (the bit
+         * guards validity, so reset needs no clearing). Used by the
+         * exact-conflict refinement in update_vertex_ram_buffer:
+         * guest dirty bits are page-granular, so vertex-stream sync
+         * writes arrive page-padded and consecutive writes
+         * false-share their boundary page; comparing the incoming
+         * bytes against the mirror over just this span proves most
+         * such conflicts change nothing the recorded draws could
+         * have read.
+         */
+        uint16_t *page_span_min;
+        uint16_t *page_span_max;
         bool submitted;
         /*
          * Occlusion queries recorded into this slot's last submission
