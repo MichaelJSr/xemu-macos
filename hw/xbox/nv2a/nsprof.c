@@ -62,6 +62,16 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_VTX_EXACT_SKIP] = "vtx_exact_skip",
     [NSPROF_EV_RENDERPASS] = "renderpass",
     [NSPROF_EV_PIPELINE_BIND] = "pipeline_bind",
+    [NSPROF_EV_VK_DRAW_CALL] = "vk_draw_call",
+    [NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE] = "da_multi_subrange",
+    [NSPROF_EV_DRAW_MERGE_IDENTICAL] = "merge_identical",
+    [NSPROF_EV_DRAW_MERGE_CANDIDATE] = "merge_candidate",
+    [NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF] = "merge_cand_udiff",
+    [NSPROF_EV_DRAW_STATE_CHANGED] = "merge_state_changed",
+    [NSPROF_EV_RENDERPASS_CAUSE_SURFACE] = "rpcause_surface",
+    [NSPROF_EV_RENDERPASS_CAUSE_CLEAR] = "rpcause_clear",
+    [NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD] = "rpcause_texupload",
+    [NSPROF_EV_RENDERPASS_CAUSE_OTHER] = "rpcause_other",
 };
 
 static struct {

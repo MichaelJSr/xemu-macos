@@ -82,6 +82,34 @@ enum NsprofEvent {
     NSPROF_EV_VTX_EXACT_SKIP, /* byte-identical vertex conflict, finish skipped */
     NSPROF_EV_RENDERPASS,     /* vkCmdBeginRenderPass on the main CB */
     NSPROF_EV_PIPELINE_BIND,  /* vkCmdBindPipeline (graphics) */
+    /*
+     * Draw-merge attribution (GPU frame-cost campaign, Phase 1).
+     * VK_DRAW_CALL counts actual vkCmdDraw/vkCmdDrawIndexed calls in
+     * pgraph_vk_flush_draw (vs NSPROF_EV_DRAW's guest begin/end
+     * blocks); the MERGE_* buckets classify each non-clear guest
+     * block against the previous one: fully deduped already
+     * (IDENTICAL), mergeable into one draw call if only vertex
+     * offsets differ (CANDIDATE, with the CAND_UNIF_DIFF subset
+     * flagging a changed inline-uniform-attr payload — the untracked
+     * state axis a cross-block merge must compare explicitly), or
+     * unmergeable (STATE_CHANGED).
+     */
+    NSPROF_EV_VK_DRAW_CALL,
+    NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE, /* draw_arrays_length > 1, non-emulated */
+    NSPROF_EV_DRAW_MERGE_IDENTICAL,
+    NSPROF_EV_DRAW_MERGE_CANDIDATE,
+    NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF,
+    NSPROF_EV_DRAW_STATE_CHANGED,
+    /*
+     * Render-pass-end cause tags (campaign Mechanism C). Fired at the
+     * sites that end a live render pass mid-frame; the submit path
+     * (pgraph_vk_finish) is deliberately untagged, so
+     * renderpass - sum(causes) ~= submit/flip-boundary passes.
+     */
+    NSPROF_EV_RENDERPASS_CAUSE_SURFACE,   /* render-target rebind */
+    NSPROF_EV_RENDERPASS_CAUSE_CLEAR,     /* NV097_CLEAR_SURFACE boundary */
+    NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD, /* compute-unswizzle interleave */
+    NSPROF_EV_RENDERPASS_CAUSE_OTHER,     /* surface create / RTT nondraw */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

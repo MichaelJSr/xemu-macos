@@ -180,6 +180,10 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 | `vtx_exact_skip` | Byte-identical vertex conflict detected, finish skipped (also a win path; see `XEMU_VTX_EXACT`) |
 | `renderpass` | `vkCmdBeginRenderPass` on the main command buffer — the first-order TBDR cost (see below) |
 | `pipeline_bind` | `vkCmdBindPipeline` (graphics) |
+| `vk_draw_call` | Actual `vkCmdDraw`/`vkCmdDrawIndexed` calls in `flush_draw` — vs `draws`, which counts guest begin/end blocks; the gap is the multi-subrange coalescing opportunity |
+| `da_multi_subrange` | Non-emulated `DRAW_ARRAYS` block issued with >1 start/count subrange (one `vkCmdDraw` per subrange) |
+| `merge_identical` / `merge_candidate` / `merge_cand_udiff` / `merge_state_changed` | Per non-clear block, classification vs the previous block (GPU frame-cost campaign Phase 1): fully deduped already / mergeable — same pipeline+descriptors+buffers, only vertex offsets differ (`_udiff` subset: push-constant payload changed) / unmergeable state change |
+| `rpcause_surface` / `rpcause_clear` / `rpcause_texupload` / `rpcause_other` | Which site ended a *live* render pass: RT rebind, `NV097_CLEAR_SURFACE` boundary, compute-unswizzle interleave, surface-create/RTT nondraw. The submit path (`pgraph_vk_finish`) is untagged, so `renderpass` − Σcauses ≈ submit/flip-boundary passes |
 
 ### Healthy vs. pathological ranges (Azurik, this dev machine, dated)
 

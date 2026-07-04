@@ -1502,11 +1502,61 @@ static void create_pipeline(PGRAPHState *pg)
     NV2A_VK_DGROUP_END();
 }
 
+/*
+ * Draw-merge attribution (XEMU_NV2A_NSPROF; GPU frame-cost campaign
+ * Phase 1). Classifies each non-clear guest begin/end block against
+ * the previous one to count how many consecutive blocks could fuse
+ * into a single draw call: pipeline unchanged + same render pass +
+ * no descriptor advance, split by whether the vertex binding is
+ * bit-identical (already deduped) or same-buffers-new-offsets (the
+ * cross-block merge candidate). Observation only — never changes
+ * control flow; comparison work is gated on nsprof_enabled().
+ */
+static struct {
+    bool prev_valid;
+    void *prev_pipeline;    /* pipeline snode of previous block */
+    uint64_t prev_pass_seq; /* render-pass generation at previous block */
+    uint64_t pass_seq;      /* bumped at every begin_render_pass */
+    bool desc_rebound;      /* a descriptor set advanced this block */
+    bool push_changed;      /* push-constant payload changed this block */
+    int vtx_rel;            /* 0 identical, 1 same-bufs-new-offsets, 2 other */
+} nsprof_merge;
+
+static void nsprof_merge_classify(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!nsprof_enabled() || pg->clearing) {
+        return;
+    }
+    if (nsprof_merge.prev_valid &&
+        r->pipeline_binding == nsprof_merge.prev_pipeline &&
+        nsprof_merge.pass_seq == nsprof_merge.prev_pass_seq &&
+        !nsprof_merge.desc_rebound) {
+        if (nsprof_merge.vtx_rel == 0) {
+            nsprof_event(NSPROF_EV_DRAW_MERGE_IDENTICAL);
+        } else if (nsprof_merge.vtx_rel == 1) {
+            nsprof_event(NSPROF_EV_DRAW_MERGE_CANDIDATE);
+            if (nsprof_merge.push_changed) {
+                nsprof_event(NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF);
+            }
+        } else {
+            nsprof_event(NSPROF_EV_DRAW_STATE_CHANGED);
+        }
+    } else {
+        nsprof_event(NSPROF_EV_DRAW_STATE_CHANGED);
+    }
+    nsprof_merge.prev_valid = true;
+    nsprof_merge.prev_pipeline = r->pipeline_binding;
+    nsprof_merge.prev_pass_seq = nsprof_merge.pass_seq;
+}
+
 static void push_vertex_attr_values(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     if (!r->use_push_constants_for_uniform_attrs) {
+        nsprof_merge.push_changed = false;
         return;
     }
 
@@ -1536,6 +1586,7 @@ static void push_vertex_attr_values(PGRAPHState *pg)
             r->last_push_constants_layout == layout &&
             r->last_push_constants_num_attrs == num_uniform_attrs &&
             !memcmp(r->last_push_constants_values, values, bytes)) {
+            nsprof_merge.push_changed = false;
             return;
         }
 
@@ -1547,6 +1598,9 @@ static void push_vertex_attr_values(PGRAPHState *pg)
         r->last_push_constants_layout = layout;
         r->last_push_constants_num_attrs = num_uniform_attrs;
         r->last_push_constants_valid = true;
+        nsprof_merge.push_changed = true;
+    } else {
+        nsprof_merge.push_changed = false;
     }
 }
 
@@ -1580,6 +1634,8 @@ static void bind_descriptor_sets(PGRAPHState *pg)
         r->ubo_descriptor_set_index != r->last_bound_ubo_descriptor_set_index;
     bool need_bind_tex =
         r->descriptor_set_index != r->last_bound_descriptor_set_index;
+
+    nsprof_merge.desc_rebound = need_bind_ubo || need_bind_tex;
 
     if (need_bind_ubo && need_bind_tex) {
         VkDescriptorSet sets[2] = {
@@ -1813,6 +1869,7 @@ static void begin_render_pass(PGRAPHState *pg)
         .pClearValues = NULL,
     };
     nsprof_event(NSPROF_EV_RENDERPASS);
+    nsprof_merge.pass_seq++;
     vkCmdBeginRenderPass(r->command_buffer, &render_pass_begin_info,
                          VK_SUBPASS_CONTENTS_INLINE);
     r->in_render_pass = true;
@@ -2078,6 +2135,7 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     r->last_vertex_bind_valid = false;
     r->last_index_bind_valid = false;
     r->last_push_constants_valid = false;
+    nsprof_merge.prev_valid = false;
 }
 
 // FIXME: Refactor below
@@ -2135,6 +2193,9 @@ static void begin_pre_draw(PGRAPHState *pg)
     bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
 
     if (r->framebuffer_dirty || render_pass_dirty) {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_SURFACE);
+        }
         pgraph_vk_ensure_not_in_render_pass(pg);
     }
     if (render_pass_dirty) {
@@ -2206,6 +2267,9 @@ static void begin_draw(PGRAPHState *pg)
     }
 
     if (pg->clearing) {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_CLEAR);
+        }
         end_render_pass(r);
     }
 
@@ -2332,7 +2396,12 @@ static void end_draw(PGRAPHState *pg)
     nv2a_vk_assert(r->in_command_buffer);
     nv2a_vk_assert(r->in_render_pass);
 
+    nsprof_merge_classify(pg);
+
     if (pg->clearing) {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_CLEAR);
+        }
         end_render_pass(r);
     }
 
@@ -2630,6 +2699,7 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     if (r->num_active_vertex_binding_descriptions == 0) {
+        nsprof_merge.vtx_rel = 2;
         return;
     }
 
@@ -2643,6 +2713,20 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
                                                           BUFFER_VERTEX_RAM;
         buffers[i] = r->storage_buffers[buffer_idx].buffer;
         offsets[i] = offset + r->vertex_attribute_offsets[attr_idx];
+    }
+
+    if (nsprof_enabled()) {
+        /* Merge attribution only; duplicates the skip compare below so
+         * the default path stays untouched. */
+        if (r->last_vertex_bind_valid && r->last_vertex_bind_count == count &&
+            !memcmp(r->last_vertex_bind_buffers, buffers,
+                    count * sizeof(buffers[0]))) {
+            nsprof_merge.vtx_rel =
+                memcmp(r->last_vertex_bind_offsets, offsets,
+                       count * sizeof(offsets[0])) ? 1 : 0;
+        } else {
+            nsprof_merge.vtx_rel = 2;
+        }
     }
 
     /*
@@ -2980,14 +3064,19 @@ void pgraph_vk_flush_draw(NV2AState *d)
                 bind_index_buffer(pg,
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   buffer_offset, VK_INDEX_TYPE_UINT32);
+                nsprof_event(NSPROF_EV_VK_DRAW_CALL);
                 vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
                                  -(int32_t)min_start, 0);
             }
         } else {
+            if (pg->draw_arrays_length > 1) {
+                nsprof_event(NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE);
+            }
             for (int i = 0; i < pg->draw_arrays_length; i++) {
                 uint32_t start = pg->draw_arrays_start[i],
                          count = pg->draw_arrays_count[i];
                 NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
+                nsprof_event(NSPROF_EV_VK_DRAW_CALL);
                 vkCmdDraw(r->command_buffer, count, 1, start - min_start, 0);
             }
         }
@@ -3052,6 +3141,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
             bind_index_buffer(pg,
                               r->storage_buffers[BUFFER_INDEX].buffer,
                               buffer_offset, VK_INDEX_TYPE_UINT32);
+            nsprof_event(NSPROF_EV_VK_DRAW_CALL);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
                              -(int32_t)min_element, 0);
         }
@@ -3110,9 +3200,11 @@ void pgraph_vk_flush_draw(NV2AState *d)
                 bind_index_buffer(pg,
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
+                nsprof_event(NSPROF_EV_VK_DRAW_CALL);
                 vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
             }
         } else {
+            nsprof_event(NSPROF_EV_VK_DRAW_CALL);
             vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
         }
         end_draw(pg);
@@ -3177,10 +3269,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                 bind_index_buffer(pg,
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
+                nsprof_event(NSPROF_EV_VK_DRAW_CALL);
                 vkCmdDrawIndexed(r->command_buffer, actual_index_count, 1, 0, 0,
                                  0);
             }
         } else {
+            nsprof_event(NSPROF_EV_VK_DRAW_CALL);
             vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
         }
         end_draw(pg);

@@ -1109,6 +1109,9 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
                                &surface->image_view));
 
     {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_OTHER);
+        }
         VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
         pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
@@ -1838,6 +1841,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
     if (!current_binding ||
         (upload && (pg_surface->buffer_dirty || mem_dirty))) {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_SURFACE);
+        }
         pgraph_vk_ensure_not_in_render_pass(pg);
 
         unbind_surface(d, color);

@@ -956,6 +956,9 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     }
 
     {
+        if (r->in_render_pass) {
+            nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD);
+        }
         VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
         pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
@@ -1187,6 +1190,9 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
     trace_nv2a_pgraph_surface_render_to_texture(
         surface->vram_addr, surface->width, surface->height);
 
+    if (r->in_render_pass) {
+        nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_OTHER);
+    }
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
@@ -1392,6 +1398,9 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
     trace_nv2a_pgraph_surface_render_to_texture(
         surface->vram_addr, surface->width, surface->height);
 
+    if (r->in_render_pass) {
+        nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_OTHER);
+    }
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
