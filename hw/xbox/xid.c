@@ -46,7 +46,12 @@ void update_output(USBXIDGamepadState *s)
     }
 
     ControllerState *state = xemu_input_get_bound(s->device_index);
-    assert(state);
+    if (!state) {
+        /* Emulated pad with no host binding (e.g. raw -device for
+         * snapshot-topology matching, or a pad that disconnected):
+         * drop rumble instead of aborting. */
+        return;
+    }
     state->rumble_l = s->out_state.left_actuator_strength;
     state->rumble_r = s->out_state.right_actuator_strength;
     xemu_input_update_rumble(state);
@@ -60,7 +65,11 @@ void update_input(USBXIDGamepadState *s)
     }
 
     ControllerState *state = xemu_input_get_bound(s->device_index);
-    assert(state);
+    if (!state) {
+        /* Unbound pad reports neutral input (in_state stays at its
+         * initialized defaults) instead of asserting. */
+        return;
+    }
     xemu_input_update_controller(state);
 
     const int button_map_analog[6][2] = {

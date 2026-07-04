@@ -2109,58 +2109,42 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             r->texture_snapshot_buf_capacity = texture_length;
         }
         texture_snapshot = r->texture_snapshot_buf;
-        if (is_indexed &&
-            r->palette_snapshot_buf_capacity < texture_palette_data_size) {
-            r->palette_snapshot_buf = g_realloc(
-                r->palette_snapshot_buf, texture_palette_data_size);
-            r->palette_snapshot_buf_capacity = texture_palette_data_size;
-        }
+        memcpy(texture_snapshot, texture_data, texture_length);
+
         if (is_indexed) {
+            if (r->palette_snapshot_buf_capacity < texture_palette_data_size) {
+                r->palette_snapshot_buf = g_realloc(
+                    r->palette_snapshot_buf, texture_palette_data_size);
+                r->palette_snapshot_buf_capacity = texture_palette_data_size;
+            }
             palette_snapshot = r->palette_snapshot_buf;
+            memcpy(palette_snapshot, palette_data,
+                   texture_palette_data_size);
         }
 
         /*
-         * Copy until clean. Dirty bits on our range were cleared
-         * earlier; if any are set after a copy, a guest write landed
-         * mid-copy and the snapshot may be torn (the check consumes
-         * the bits it reads, so each retry starts fresh). The old
-         * behavior uploaded the torn bytes anyway and repaired on the
-         * next bind — a single-frame Morton-tiled magenta flash.
-         * Rare at ~16 fps, but at post-optimization frame rates the
-         * tear window is hit often enough to flash visibly, so retry
-         * the copy instead; the bounded fallback keeps the old
-         * repair-next-frame behavior if the guest is mid-stream.
+         * Dirty bits on our range were cleared earlier; if any are
+         * set now a guest write landed during the memcpy above.
+         * Record torn_read and mark the binding possibly_dirty so
+         * the next frame re-hashes and re-uploads cleanly.
          */
-        bool any_tear = false;
-        for (int tries = 0; ; tries++) {
-            memcpy(texture_snapshot, texture_data, texture_length);
-            if (is_indexed) {
-                memcpy(palette_snapshot, palette_data,
-                       texture_palette_data_size);
-            }
-            torn_read =
-                check_texture_dirty(d, texture_vram_offset, texture_length);
-            if (is_indexed &&
-                check_texture_dirty(d, texture_palette_vram_offset,
-                                    texture_palette_data_size)) {
-                torn_read = true;
-            }
-            if (!torn_read || tries >= 3) {
-                break;
-            }
-            any_tear = true;
+        if (check_texture_dirty(d, texture_vram_offset, texture_length)) {
+            torn_read = true;
         }
-        any_tear |= torn_read;
+        if (is_indexed &&
+            check_texture_dirty(d, texture_palette_vram_offset,
+                                texture_palette_data_size)) {
+            torn_read = true;
+        }
 
-        if (any_tear) {
+        if (torn_read) {
             /*
-             * The final snapshot differs from what content_hash
-             * covered — rehash the actual bytes being uploaded. When
-             * no write ever landed (the common case) the snapshot is
-             * bit-identical to what content_hash covered and the full
-             * re-hash is skipped entirely. The possibly-dirty mark
-             * protects neighboring bindings that share pages whose
-             * dirty bits the checks above consumed.
+             * A guest write landed between the content hash and the
+             * snapshot memcpy, so the snapshot may not match
+             * content_hash — rehash the actual bytes we are about to
+             * upload. When no write landed (the common case) the
+             * snapshot is bit-identical to what content_hash covered
+             * and the full re-hash can be skipped entirely.
              */
             snapshot_hash = fast_hash(texture_snapshot, texture_length);
             if (is_indexed) {

@@ -236,7 +236,20 @@ void xemu_snapshots_load(const char *vm_name, Error **err)
 {
     bool vm_running = runstate_is_running();
     vm_stop(RUN_STATE_RESTORE_VM);
-    if (load_snapshot(vm_name, NULL, false, NULL, err) && vm_running) {
+    if (!load_snapshot(vm_name, NULL, false, NULL, err)) {
+        /*
+         * Failed loads (e.g. USB topology mismatch when a controller
+         * slept or re-enumerated since the save) used to leave the VM
+         * stopped — to the player, a hard freeze with only a
+         * transient error toast. Resume so the session continues
+         * from where it was; the caller surfaces the error.
+         */
+        if (vm_running) {
+            vm_start();
+        }
+        return;
+    }
+    if (vm_running) {
         vm_start();
     }
 }
