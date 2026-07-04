@@ -1994,6 +1994,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         r->flight[slot].submitted = true;
         r->flight[slot].framebuffer_index = r->framebuffer_index;
         r->submit_count += 1;
+        r->flight[slot].submit_index = r->submit_count;
 
         /*
          * Hand this submission's occlusion queries and pending guest

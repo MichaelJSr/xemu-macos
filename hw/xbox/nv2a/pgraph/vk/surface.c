@@ -804,6 +804,18 @@ static void invalidate_surface_full(NV2AState *d, SurfaceBinding *surface,
             !surface_image_in_recording_cb(r, surface)) &&
            "Surface evicted while in use!");
 
+    /*
+     * The newest submission that may still reference this image: every
+     * already-submitted CB, plus the currently recording one (it
+     * becomes submission submit_count+1). prune_invalid_surfaces must
+     * not destroy the image before that submission's fence retires —
+     * with flight-slot pipelining, pgraph_vk_finish leaves the
+     * just-submitted CB executing, so "not in the recording CB" alone
+     * never proves the GPU is done with it.
+     */
+    surface->evict_submit_seq =
+        (uint64_t)r->submit_count + (r->in_command_buffer ? 1 : 0);
+
     if (surface == r->color_binding) {
         nv2a_vk_assert(d->pgraph.surface_color.buffer_dirty);
         unbind_surface(d, true);
@@ -1176,6 +1188,22 @@ get_any_compatible_invalid_surface(PGRAPHVkState *r, SurfaceBinding *target)
     QTAILQ_FOREACH_SAFE(surface, &r->invalid_surfaces, entry, next) {
         /* Quarantine: deferred-invalidated image still referenced by
          * the recording command buffer (see invalidate_surface_full).
+         *
+         * REUSE while an earlier *submitted* CB still executes is safe
+         * on any conformant driver, not just MoltenVK's serialized
+         * queue: a migrated image is not re-transitioned (it keeps its
+         * ATTACHMENT_OPTIMAL layout), so its first GPU touch as a new
+         * binding is either (a) a draw render pass, whose explicit
+         * VK_SUBPASS_EXTERNAL dependency (create_render_pass) covers
+         * COLOR_ATTACHMENT_OUTPUT + EARLY/LATE_FRAGMENT_TESTS with
+         * attachment read|write access — exactly the stages any prior
+         * submission used it with, and external dependencies order
+         * against all earlier same-queue submissions; (b) a transfer
+         * clear/blit via pgraph_vk_transition_image_layout's
+         * ATTACHMENT->TRANSFER_DST branches, whose src masks name the
+         * same attachment stages; or (c) an upload, which on non-Apple
+         * takes the conservative full-finish branch. DESTRUCTION has
+         * no such barrier and is gated separately (evict_submit_seq).
          */
         if (surface_image_in_recording_cb(r, surface)) {
             continue;
@@ -1201,6 +1229,17 @@ static void prune_invalid_surfaces(PGRAPHVkState *r, int keep)
             break;
         }
         if (surface_image_in_recording_cb(r, surface)) {
+            continue;
+        }
+        /*
+         * vkDestroyImage on a resource referenced by a *pending*
+         * command buffer is invalid on every driver. The recording-CB
+         * check above cannot prove completion — pgraph_vk_finish
+         * pipelines: it submits the current CB and only waits the
+         * previous slot's fence. Hold the entry until every
+         * submission that may reference it has retired.
+         */
+        if (surface->evict_submit_seq > r->retired_submit_count) {
             continue;
         }
         QTAILQ_REMOVE(&r->invalid_surfaces, surface, entry);
@@ -2239,6 +2278,15 @@ void pgraph_vk_surface_flush(NV2AState *d)
         }
         pgraph_vk_surface_download_if_dirty(d, s);
         invalidate_surface(d, s);
+    }
+    /*
+     * Flush means "free everything now" (scale change, snapshot,
+     * renderer teardown): drain every in-flight slot so the
+     * evict_submit_seq gate in prune_invalid_surfaces is satisfied
+     * for all entries rather than deferring their destruction.
+     */
+    for (int slot = 0; slot < NUM_FLIGHT_SLOTS; slot++) {
+        pgraph_vk_wait_slot_fence(pg, slot);
     }
     prune_invalid_surfaces(r, 0);
 

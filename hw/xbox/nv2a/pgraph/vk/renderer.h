@@ -149,6 +149,17 @@ typedef struct SurfaceBinding {
     bool download_pending;
     bool upload_pending;
 
+    /*
+     * Highest submission index (r->submit_count numbering) that may
+     * still reference this image, stamped at invalidation. The image
+     * must not be destroyed until r->retired_submit_count reaches it
+     * — destroying a VkImage referenced by a pending command buffer
+     * is invalid on every driver, and with flight-slot pipelining the
+     * previous main CB is routinely still executing. Reuse (migrate)
+     * needs no such gate: see get_any_compatible_invalid_surface.
+     */
+    uint64_t evict_submit_seq;
+
     BasicSurfaceFormatInfo fmt;
     SurfaceFormatInfo host_fmt;
 
@@ -589,6 +600,9 @@ typedef struct PGRAPHVkState {
         uint16_t *page_span_min;
         uint16_t *page_span_max;
         bool submitted;
+        /* r->submit_count value of this slot's last submission; feeds
+         * retired_submit_count when the slot fence is observed. */
+        uint64_t submit_index;
         /*
          * Occlusion queries recorded into this slot's last submission
          * plus the guest reports awaiting their results. Drained when
@@ -606,6 +620,12 @@ typedef struct PGRAPHVkState {
     unsigned int command_buffer_start_time;
     bool in_command_buffer;
     uint32_t submit_count;
+    /*
+     * Highest submit_count whose fence has been observed signaled.
+     * Same-queue fences retire in submission order, so this is a
+     * watermark: every submission <= it has fully completed.
+     */
+    uint64_t retired_submit_count;
 
     VkCommandBuffer aux_command_buffer;
     VkFence aux_fence;

@@ -199,6 +199,15 @@ void pgraph_vk_drain_compositor_cbs(PGRAPHState *pg)
     }
 }
 
+/* A slot fence observed signaled retires that slot's submission (and,
+ * by same-queue fence ordering, every earlier one). */
+static void note_slot_retired(PGRAPHVkState *r, int slot)
+{
+    if (r->flight[slot].submit_index > r->retired_submit_count) {
+        r->retired_submit_count = r->flight[slot].submit_index;
+    }
+}
+
 void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -208,6 +217,7 @@ void pgraph_vk_wait_slot_fence(PGRAPHState *pg, int slot)
         vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
                                  "pgraph_vk_wait_slot_fence");
         nsprof_end(NSPROF_FENCE_WAIT, nsprof_t0);
+        note_slot_retired(r, slot);
     }
 }
 
@@ -221,6 +231,7 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
         vk_wait_for_fence_or_die(r->device, r->flight[slot].fence,
                                  "pgraph_vk_wait_for_previous_flight");
         nsprof_end(NSPROF_FENCE_WAIT, nsprof_t0);
+        note_slot_retired(r, slot);
         r->flight[slot].submitted = false;
     }
 
