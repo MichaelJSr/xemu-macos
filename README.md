@@ -645,7 +645,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
-| Per-flight vertex-RAM mirrors (vertex shadow copies) | One 128 MiB host mirror per flight slot; in-flight slots read a frozen mirror (cross-slot conflict waits disappear), `uploaded_bitmap` doubles as the delta log applied at slot reclaim. Measured on Azurik attract: 60 → ~40 flips/s steady with collapse spikes to 20, and 5.4 `finish_vtx_dirty`/flip — the guest streams page-boundary-overlapping vertex ranges, so consecutive writes trip the recording-CB conflict finish in a cascade (each finish rotates, the next write conflicts again), and rotation reclaim waits hit 26 ms mid-frame fences. Bisect (mirrors + old cross-slot waits kept; mirrors + no delta apply) showed the regression persists in all mirror modes — the cost is inherent to alternating 128 MiB vertex buffers per submission under MoltenVK, not the conflict policy. The single-mirror targeted-wait design stays |
+| Per-flight vertex-RAM mirrors (vertex shadow copies) | One 128 MiB host mirror per flight slot; in-flight slots read a frozen mirror (cross-slot conflict waits disappear), `uploaded_bitmap` doubles as the delta log applied at slot reclaim. Measured ~**neutral** on the Azurik attract reel (interval-by-interval flips within noise of the single-mirror build; an initial "-30%" read traced to an invalid baseline run parked on a 3-draws/flip static screen). Neutral because the dominant cost is elsewhere: the heavy-reel intervals show 440-700 `finish_vtx_dirty` per 5 s *with or without* mirrors — guest vertex streams write page-boundary-overlapping ranges, and the recording-CB conflict check is page-granular, so consecutive writes false-share the boundary page and cascade through finish → rotate → 20+ ms mid-frame reclaim waits. Mirrors can't remove those (the conflict is with the *recording* CB, not in-flight slots). Reverted as not-worth-it: +128 MiB, swap/delta complexity, no measured win. The real target this exposed: byte-granular (or split-at-page) conflict refinement for the current-slot check — see Future vectors |
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
 | Async MetalFX under *GL presentation* | GL↔Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone. Landed later for the Metal presentation backend, where both sides speak `MTLSharedEvent` |
@@ -679,14 +679,23 @@ Lessons worth preserving so they aren't re-attempted.
 
 Not attempted, or scope/risk too high for a one-shot change.
 
-- **Per-flight vertex scratch + draw rebase (partial-page COW).**
-  The whole-mirror-per-slot variant was attempted and reverted (see
-  Failed experiments — alternating large vertex buffers regressed
-  MoltenVK throughput ~30%+). The surviving idea: keep ONE mirror,
-  and on conflict copy only the conflicting spans into a small
-  per-slot scratch buffer with per-draw offset rebase. Removes the
-  13-28 ms/flip heavy-scene slot-fence waits without swapping the
-  base buffer; requires attribute-offset rebasing at draw time.
+- **Streamed-vertex stall reduction: attempted twice, both ~neutral —
+  heavy scenes are GPU-bound.** (a) Byte-exact conflict refinement:
+  per-page written-span tracking + span-restricted memcmp skipped
+  75-85% of the boundary-page `finish_vtx_dirty` cascade (440-700 →
+  ~100 per 5 s interval, page-padded stream writes false-share
+  boundary pages with byte-identical content), but flips/s did not
+  move — the eliminated finishes reappeared as cross-slot targeted
+  waits. (b) Exact refinement + per-flight mirrors (structurally no
+  cross-slot waits): fence-wait *events* ballooned while total wait
+  time stayed ~2.5-3.5 s per 5 s. Conclusion: in the heavy attract
+  reel the ~22-30 ms/flip of waits is the GPU's actual frame time
+  (as the targeted-wait analysis already noted — "real GPU time,
+  not slack"); CPU-side wait elimination just relocates which call
+  site absorbs it. Future work here must reduce GPU work per frame
+  (draw batching, render-pass merging), not CPU synchronization.
+  Both implementations preserved in this repo's history for
+  reference.
 - **Occlusion-report STALLED drains.** Report-heavy intervals show
   ~5 `STALLED` finishes per flip (FIFO idle with pending zpass
   reports forces a synchronous drain-all). Candidate: satisfy
