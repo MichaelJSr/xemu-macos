@@ -1592,6 +1592,28 @@ int main(int argc, char **argv)
 
     setlocale(LC_NUMERIC, "C");
 
+#ifdef __APPLE__
+    /*
+     * MoltenVK configuration must not depend on how the app was
+     * launched: Info.plist LSEnvironment is applied only by
+     * LaunchServices (Finder/`open`), so terminal launches of the
+     * same binary previously ran MoltenVK defaults — that split hid
+     * a texture-corruption bug for weeks (Finder ran prefill=2 and
+     * flashed magenta; every harness run was clean). Set the tested
+     * configuration here, before MoltenVK is dlopen'd, with
+     * overwrite=0 so an explicit user override still wins. Keep in
+     * sync with Info.plist. Prefill MUST stay 0: immediate encoding
+     * corrupts streamed textures now that command buffers span
+     * whole frames, enabled an AGX visibility crash, and measures
+     * slower (encoding lands on the PFIFO thread).
+     */
+    setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0);
+    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
+    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
+    setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
+#endif
+
 #ifdef _WIN32
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         // Launched with a console. If stdout and stderr are not associated with

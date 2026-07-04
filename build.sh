@@ -80,7 +80,14 @@ package_macos() {
     done
     if [ -n "$moltenvk_src" ]; then
       moltenvk_dst="dist/xemu.app/Contents/Libraries/${target_arch}/libMoltenVK.dylib"
-      echo "Bundling MoltenVK from $moltenvk_src"
+      # Provenance: which MoltenVK is being shipped matters — a local
+      # /usr/local install (custom build) can silently shadow the
+      # vendored copy, and driver-version drift between the tested
+      # binary and the released binary is exactly how the prefill
+      # pink-tile class of bug escapes testing. Log version + UUID.
+      moltenvk_bundled_ver=$(strings "$moltenvk_src" | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$' || echo unknown)
+      moltenvk_uuid=$(dwarfdump --uuid "$moltenvk_src" 2>/dev/null | grep -m1 "($target_arch)" | awk '{print $2}')
+      echo "Bundling MoltenVK from $moltenvk_src (version ${moltenvk_bundled_ver}, ${target_arch} UUID ${moltenvk_uuid:-n/a})"
       cp "$moltenvk_src" "$moltenvk_dst"
       install_name_tool -id "@rpath/libMoltenVK.dylib" "$moltenvk_dst"
       codesign -s - -f "$moltenvk_dst"
