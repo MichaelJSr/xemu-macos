@@ -257,6 +257,19 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **Vertex-mirror overwrite waits the just-submitted slot.** Second
+  member of the pipelined-finish family: the `VERTEX_BUFFER_DIRTY`
+  conflict path submitted the recording CB and immediately memcpy'd
+  new guest data over the conflicting `BUFFER_VERTEX_RAM` range —
+  upstream's single-slot finish really did drain first, but the
+  fork's flight-slot finish waits only the previous slot, so the
+  copy raced the submitted frame's vertex fetches (torn-geometry
+  class on any driver; masked on macOS by MoltenVK's deferred
+  encode). The conflict path now waits the submitted slot's fence
+  and clears its upload tracking (later writes that frame skip the
+  signaled fence). Validated: cross-binary interleaved A/B vs v0.9,
+  24.45 ± 0.58 vs 24.48 ± 1.19 fps (parity), 765-794 draws/flip
+  scene identity, zero errors.
 - **Invalid-surface destruction gated on submission retirement.**
   `pgraph_vk_finish` pipelines (submits the current CB, waits only
   the previous slot's fence), so a quarantined surface image could be

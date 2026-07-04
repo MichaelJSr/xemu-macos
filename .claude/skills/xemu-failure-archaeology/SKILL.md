@@ -457,6 +457,20 @@ by the GPU" in a pipelined renderer — destruction needs a fence-derived
 watermark, reuse can ride spec-guaranteed ordering; (b) a static audit
 with the spec open finds bug classes soak testing structurally cannot
 (nothing crashes until a driver actually reuses the freed allocation).
+**Family member 2 (`215f243be7`, 2026-07-04)**: the VERTEX_BUFFER_DIRTY
+conflict path memcpy'd new guest data over the vertex mirror right
+after finish, with a comment claiming "the submit's fence waited" —
+true of upstream's single-slot finish (verified against
+upstream/master: submit + vkWaitForFences on the same fence), silently
+false after flight slots. CPU write racing the just-submitted CB's
+vertex fetches; fixed by waiting the submitted slot's fence (+ clearing
+its upload tracking). Parity receipt: 24.45±0.58 vs 24.48±1.19 fps,
+3 cross-binary pairs. A full sweep of every other finish caller found
+no further members: per-slot staging is safe via the rotation wait,
+GPU-GPU hazards ride the transition barriers' attachment-stage src
+masks, CPU readbacks wait the aux fence, FLUSH/REPORTS_FULL drain via
+per-slot waits. **The general rule: pipelined finish is safe for
+everything except CPU-side actions on shared GPU-visible state.**
 **Reopen if**: n/a.
 
 ## 1.14 GPU frame-cost campaign menu — killed by measurement on the 2026-07 fixtures
