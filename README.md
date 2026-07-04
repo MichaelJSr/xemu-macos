@@ -73,7 +73,7 @@ Vulkan drivers.
 | Env var | Default | Purpose |
 |---|---|---|
 | `XEMU_ARM_CPU` | auto | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string` |
-| `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for PGO |
+| `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for PGO. A trained profile is committed at `pgo/default.profdata` (Azurik savestate corpus, 2026-07-04) and CI applies it to arm64 release builds — measured +9.4% fps on the heavy savestate scene (25.42 ± 0.34 → 27.81 ± 0.62, 3 interleaved cross-binary pairs). Retrain after large code churn: `XEMU_PGO=generate ./build.sh`, play the bench scenes, `XEMU_PGO=use ./build.sh`, commit the regenerated profdata. |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer (≈21 ms @ 48 kHz) |
 | `XEMU_MOLTENVK_VERSION` | `1.4.1` | MoltenVK release auto-vendored into `macos-libs` when no system copy exists |
@@ -750,6 +750,16 @@ In-app Settings covers the main toggles.
 
 - `-O3`, thin LTO with caching, `-ffp-contract=fast`, `-mcpu`
   auto-detected. STBI_NEON + fpng CRC32 for ARM64.
+- **PGO shipped for arm64 release builds.** A trained profile
+  (`pgo/default.profdata`, Azurik savestate corpus: the four bench
+  scenes, ~75 s each) is committed and applied by CI to macOS arm64
+  release legs. Measured on the 770 draws/flip heavy savestate scene
+  (interleaved cross-binary A/B, 3 pairs, identical source both
+  arms): 25.42 ± 0.34 → 27.81 ± 0.62 fps (**+9.4%**, deltas
+  +2.71/+1.85/+2.61, scene identity 740-746 draws/flip). x86_64 legs
+  stay plain (profiles are arch-specific); a stale profile degrades
+  to partial coverage, and `build.sh` fails loudly if the profile
+  file disappears. Retrain per the build-knob table.
 - macOS 26 build fixes: `download-macos-libs.py` uses
   `os.path.abspath` and repairs stale `prefix=` lines in vendored
   `.pc` files; `build.sh` strips all `LC_RPATH` before
