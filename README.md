@@ -76,6 +76,34 @@ Vulkan drivers.
 | `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for PGO |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer (≈21 ms @ 48 kHz) |
+| `XEMU_MOLTENVK_VERSION` | `1.4.1` | MoltenVK release auto-vendored into `macos-libs` when no system copy exists |
+
+### How Vulkan is provisioned (all platforms)
+
+The NV2A Vulkan renderer loads Vulkan at runtime through **volk** —
+nothing links against a Vulkan library at build time.
+
+- **macOS:** volk dlopens `libMoltenVK.dylib`, which `build.sh`
+  bundles into `xemu.app/Contents/Libraries/<arch>/` (the app's
+  `LC_RPATH` points there). At build time the dylib + headers are
+  found in `macos-libs` (vendored), `/usr/local` (Vulkan SDK /
+  manual install), or Homebrew — in that order — and when none
+  exists, `build.sh` downloads the pinned official MoltenVK release
+  into `macos-libs` automatically. A missing dylib at bundle time is
+  a hard build error (the fork's default renderer, Metal
+  presentation path, and MetalFX all require it). End users need
+  nothing installed: the app is self-contained.
+- **Windows:** volk loads the system `vulkan-1.dll` — the Khronos
+  loader every GPU vendor ships with its driver. Nothing is (or
+  should be) bundled; a machine with NVIDIA/AMD/Intel drivers
+  installed works out of the box. If the loader or a Vulkan 1.1+
+  device is missing (typical inside VMs — Parallels/UTM/Hyper-V
+  guests have no Vulkan ICD), xemu falls back to the OpenGL
+  renderer automatically and shows a notification. On Windows
+  ARM64 VMs, Microsoft's "OpenCL, OpenGL, and Vulkan Compatibility
+  Pack" can provide a D3D12-backed Vulkan ICD where the guest has
+  DX12; performance is not representative of real hardware.
+- **Linux:** the distro `libvulkan` loader + the GPU's ICD.
 
 ### Runtime debug / escape-hatch knobs
 
@@ -116,7 +144,9 @@ fit = 'stretch'
 [perf]
 hard_fpu = true                 # ARM64 inline x87
 cache_shaders = true
-audio.dsp_jit.enabled = true    # ARM64 basic-block DSP JIT
+
+[audio.dsp_jit]
+enabled = true                  # ARM64 inline basic-block DSP JIT
 ```
 
 In-app Settings covers the main toggles.
@@ -510,9 +540,18 @@ In-app Settings covers the main toggles.
 - **CoreAudio.** `os_unfair_lock` with trylock. Underruns now
   partial-fill (drain what's pending, zero only the tail) instead
   of zeroing the whole IOProc buffer on any shortfall.
-- **Full DSP JIT (opt-in, default on for new configs).** ARM64
+- **DSP execution engines (post upstream merge).** Upstream added a
+  DSPOps engine abstraction with two engines: the C interpreter
+  (`dsp/interp/`) and a JIT wrapping the external `dsp56300` Rust
+  subproject (`audio.use_dsp_jit`, default on). This fork's inline
+  ARM64 JIT lives *inside* the interpreter engine
+  (`interp/dsp56k_jit_arm64.c`, symbols `dsp56k_jit_*`); when
+  supported and enabled it takes precedence and `use_dsp_jit` is
+  ignored. Non-Apple hosts get upstream's dsp56300 engine by
+  default.
+- **Full inline DSP JIT (Apple Silicon).** ARM64
   basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
-  via `[perf] audio.dsp_jit.enabled = true` or `XEMU_DSP_JIT=1`.
+  via `[audio.dsp_jit] enabled = true` or `XEMU_DSP_JIT=1`.
   100% ALU inlined, 99.99% CF inlined; only `emu_undefined` stays
   on BLR — the 16-variant `bit_manip` tail (bset/bclr/bchg/btst ×
   aa/ea/pp/reg) is now emitted inline (REG variants targeting
@@ -745,6 +784,14 @@ the same texture within one frame otherwise lands a frame late).
 
 **Audio glitches.** `XEMU_COREAUDIO_FRAMES=2048` for a larger buffer.
 For DSP-heavy titles, confirm DSP JIT is enabled.
+
+**Windows: "Failed to initialize Vulkan renderer" / falls back to
+OpenGL.** The Vulkan loader (`vulkan-1.dll`) comes from the GPU
+driver; xemu bundles nothing. Update the vendor driver on real
+hardware. Inside VMs (Parallels, UTM, Hyper-V) there is usually no
+Vulkan ICD at all — the OpenGL fallback is expected; test Vulkan on
+real hardware. `vulkaninfo` (from the Vulkan SDK) shows what the
+loader sees.
 
 ---
 
