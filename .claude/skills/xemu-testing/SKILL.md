@@ -46,8 +46,22 @@ static scenes for small deltas.
 the user's bindings (`ui/xemu-input.c`). Works with xemu fully
 unfocused. OS-level injection cannot work: System Events targets the
 frontmost app; `CGEventPostToPid` delivers but AppKit drops key
-events for inactive apps. User's map: WASD = left stick (26/4/22/7),
-KP1/3 = camera (89/91), Down-arrow = A/jump (81), Space = Y (44).
+events for inactive apps.
+
+The keyboard is a bound Xbox controller on **port2**
+(`[input.bindings] port2 = 'keyboard'`); the authoritative scancode
+map is `[input.keyboard_controller_scancode_map]` in the user's
+`~/Library/Application Support/xemu/xemu/xemu.toml` — **re-read it
+per session** (owner-editable; a scratch config copied from that
+toml carries the bindings along). Map as of 2026-07-04 (SDL
+scancodes): left stick W/A/S/D = 26/4/22/7; right stick (camera)
+KP5/KP1/KP3/KP2 = 93/89/91/90; A = 81 (Down-arrow), B = 79 (Right),
+X = 80 (Left), Y = 44 (Space); dpad up/left/right/down =
+94/37/38/92; start = 42 (Backspace), back = 46; white = 45, black =
+82; ltrigger = 225 (LShift), rtrigger = 229 (RShift);
+lstick_btn/rstick_btn/guide = 30/31/39. Helper:
+`.claude/skills/xemu-diagnostics-and-tooling/scripts/inject_input.sh`
+(`create/down/up/tap/clear`).
 
 ## Visual artifact oracle (window capture + pixel scoring)
 
