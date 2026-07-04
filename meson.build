@@ -2402,40 +2402,31 @@ if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
 elif host_os == 'linux'
   vulkan = dependency('vulkan')
-  # TODO: Remove this once we have a better way to handle vulkan on MacOS.
 elif host_os == 'darwin'
+  # MoltenVK. Search order: vendored copy in macos-libs (auto-downloaded
+  # by build.sh when nothing else is present), then deliberate system
+  # installs (/usr/local: Vulkan SDK / manual; /opt/homebrew: brew
+  # molten-vk). Vulkan headers come from the same candidates — the
+  # vendored MoltenVK release tar ships the full vulkan/ header set, so
+  # a fresh clone builds without Homebrew.
   macos_lib_arch = host_machine.cpu() == 'aarch64' ? 'arm64' : host_machine.cpu()
-  moltenvk = cc.find_library(
-    'MoltenVK',
-    dirs: [meson.project_source_root() / 'macos-libs' / macos_lib_arch / 'opt/local/lib'],
-    required: false)
-  if moltenvk.found()
-    vulkan = declare_dependency(
-      dependencies: [moltenvk],
-      compile_args: ['-I/opt/homebrew/include', '-DVK_USE_PLATFORM_METAL_EXT'])
-  endif
-  if not vulkan.found()
-    moltenvk = cc.find_library(
-      'MoltenVK',
-      dirs: ['/usr/local/lib'],
-      required: false)
-    if moltenvk.found()
-      vulkan = declare_dependency(
-        dependencies: [moltenvk],
-        compile_args: ['-I/opt/homebrew/include', '-DVK_USE_PLATFORM_METAL_EXT'])
+  macos_vendored_prefix = meson.project_source_root() / 'macos-libs' / macos_lib_arch / 'opt/local'
+  moltenvk_compile_args = [
+    '-I' + (macos_vendored_prefix / 'include'),
+    '-I/opt/homebrew/include',
+    '-I/usr/local/include',
+    '-DVK_USE_PLATFORM_METAL_EXT',
+  ]
+  foreach moltenvk_libdir : [macos_vendored_prefix / 'lib', '/usr/local/lib', '/opt/homebrew/lib']
+    if not vulkan.found()
+      moltenvk = cc.find_library('MoltenVK', dirs: [moltenvk_libdir], required: false)
+      if moltenvk.found()
+        vulkan = declare_dependency(
+          dependencies: [moltenvk],
+          compile_args: moltenvk_compile_args)
+      endif
     endif
-  endif
-  if not vulkan.found()
-    moltenvk = cc.find_library(
-      'MoltenVK',
-      dirs: ['/opt/homebrew/lib'],
-      required: false)
-    if moltenvk.found()
-      vulkan = declare_dependency(
-        dependencies: [moltenvk],
-        compile_args: ['-I/opt/homebrew/include', '-DVK_USE_PLATFORM_METAL_EXT'])
-    endif
-  endif
+  endforeach
   if not vulkan.found()
     vulkan = dependency('vulkan', required: false)
   endif

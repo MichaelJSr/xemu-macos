@@ -85,7 +85,14 @@ package_macos() {
       install_name_tool -id "@rpath/libMoltenVK.dylib" "$moltenvk_dst"
       codesign -s - -f "$moltenvk_dst"
     else
-      echo "Warning: libMoltenVK.dylib not found, Vulkan renderer will not be available"
+      # The Vulkan renderer is the default (and the MetalFX / Metal
+      # presentation paths depend on it); an app bundle without
+      # MoltenVK is broken for this fork. The compile step should
+      # have vendored it — treat absence as a build error rather
+      # than shipping a silently degraded bundle.
+      echo "Error: libMoltenVK.dylib not found; cannot bundle Vulkan support." >&2
+      echo "Re-run ./build.sh (it auto-downloads MoltenVK), or install it to /usr/local/lib or via 'brew install molten-vk'." >&2
+      exit 1
     fi
 
     # Copy in runtime resources
@@ -288,6 +295,46 @@ case "$platform" in # Adjust compilation options based on platform
 
         python3 ./scripts/download-macos-libs.py ${target_arch}
         lib_prefix=${PWD}/macos-libs/${target_arch}/opt/local
+
+        # Vulkan (MoltenVK): the renderer defaults to Vulkan, so a
+        # usable libMoltenVK.dylib is required. Prefer deliberate
+        # system installs (Vulkan SDK in /usr/local, brew molten-vk);
+        # when none exists, vendor the pinned official release into
+        # macos-libs so a fresh clone works out of the box. The
+        # release tar also ships the full vulkan/ header set, which
+        # meson picks up from ${lib_prefix}/include (no Homebrew
+        # vulkan-headers needed).
+        moltenvk_ver="${XEMU_MOLTENVK_VERSION:-1.4.1}"
+        if [ ! -f "${lib_prefix}/lib/libMoltenVK.dylib" ] && \
+           [ ! -f /usr/local/lib/libMoltenVK.dylib ] && \
+           [ ! -f /opt/homebrew/lib/libMoltenVK.dylib ]; then
+            echo "MoltenVK not found; downloading v${moltenvk_ver} into macos-libs..."
+            moltenvk_tmp="$(mktemp -d)"
+            curl -fsSL -o "${moltenvk_tmp}/MoltenVK-macos.tar" \
+                "https://github.com/KhronosGroup/MoltenVK/releases/download/v${moltenvk_ver}/MoltenVK-macos.tar"
+            tar -xf "${moltenvk_tmp}/MoltenVK-macos.tar" -C "${moltenvk_tmp}"
+            mkdir -p "${lib_prefix}/lib" "${lib_prefix}/include"
+            cp "${moltenvk_tmp}/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" \
+               "${lib_prefix}/lib/libMoltenVK.dylib"
+            cp -R "${moltenvk_tmp}/MoltenVK/MoltenVK/include/" "${lib_prefix}/include/"
+            rm -rf "${moltenvk_tmp}"
+            echo "MoltenVK v${moltenvk_ver} vendored into ${lib_prefix}"
+        fi
+        # Headers can still be missing when the dylib came from a
+        # system location without development headers (e.g. bare
+        # /usr/local install). Vendor just the headers in that case.
+        if [ ! -f "${lib_prefix}/include/vulkan/vulkan.h" ] && \
+           [ ! -f /opt/homebrew/include/vulkan/vulkan.h ] && \
+           [ ! -f /usr/local/include/vulkan/vulkan.h ]; then
+            echo "Vulkan headers not found; vendoring from MoltenVK v${moltenvk_ver}..."
+            moltenvk_tmp="$(mktemp -d)"
+            curl -fsSL -o "${moltenvk_tmp}/MoltenVK-macos.tar" \
+                "https://github.com/KhronosGroup/MoltenVK/releases/download/v${moltenvk_ver}/MoltenVK-macos.tar"
+            tar -xf "${moltenvk_tmp}/MoltenVK-macos.tar" -C "${moltenvk_tmp}"
+            mkdir -p "${lib_prefix}/include"
+            cp -R "${moltenvk_tmp}/MoltenVK/MoltenVK/include/" "${lib_prefix}/include/"
+            rm -rf "${moltenvk_tmp}"
+        fi
         export CFLAGS="${CFLAGS} \
                        -arch ${target_arch} \
                        -target ${target_arch}-apple-macos${macos_min_ver} \

@@ -345,12 +345,14 @@ static bool attempt_renderer_init(PGRAPHState *pg)
 
 static void init_renderer(PGRAPHState *pg)
 {
+    CONFIG_DISPLAY_RENDERER configured = g_config.display.renderer;
+
     if (attempt_renderer_init(pg)) {
         return;  // Success
     }
 
     CONFIG_DISPLAY_RENDERER default_renderer = get_default_renderer();
-    if (default_renderer != g_config.display.renderer) {
+    if (default_renderer != configured) {
         g_config.display.renderer = default_renderer;
         if (attempt_renderer_init(pg)) {
             g_autofree gchar *msg = g_strdup_printf(
@@ -360,9 +362,48 @@ static void init_renderer(PGRAPHState *pg)
         }
     }
 
-    // FIXME: Try others
+    /*
+     * Last resort: any remaining registered renderer except NULL —
+     * a silently black screen is worse than a clear failure. Covers
+     * e.g. configured == default == VULKAN with a broken/missing
+     * Vulkan loader: fall through to OPENGL instead of exiting.
+     *
+     * Skipped under the Metal presentation backend: the window type
+     * is fixed at creation and the GL renderers' early contexts were
+     * deliberately not created, so a live GL fallback could not
+     * present — persist the change and relaunch instead (below).
+     */
+    if (!xemu_present_is_metal()) {
+        for (int i = 0; i < CONFIG_DISPLAY_RENDERER__COUNT; i++) {
+            if (!renderers[i] || i == CONFIG_DISPLAY_RENDERER_NULL ||
+                i == configured || i == default_renderer) {
+                continue;
+            }
+            g_config.display.renderer = i;
+            if (attempt_renderer_init(pg)) {
+                g_autofree gchar *msg = g_strdup_printf(
+                    "Configured renderer unavailable; switched to: %s",
+                    pg->renderer->name);
+                xemu_queue_notification(msg);
+                return;
+            }
+        }
+    }
 
-    fprintf(stderr, "Fatal error: cannot initialize renderer\n");
+    /*
+     * Nothing initialized. Persist a sane renderer choice for the
+     * next launch before exiting: without this, a machine whose
+     * Vulkan stack is broken would hard-fail on every start with no
+     * recovery path short of hand-editing xemu.toml (most relevant
+     * under the macOS Metal presentation backend, where a renderer
+     * fallback needs a relaunch to take effect anyway).
+     */
+    g_config.display.renderer = CONFIG_DISPLAY_RENDERER_OPENGL;
+    xemu_settings_save();
+
+    fprintf(stderr,
+            "Fatal error: cannot initialize any renderer. "
+            "Renderer preference reset to OPENGL for next launch.\n");
     exit(1);
 }
 

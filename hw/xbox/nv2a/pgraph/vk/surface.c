@@ -1291,11 +1291,24 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
      *   - render_display() upload, which already ran a PRESENTING finish
      *     a few lines earlier, so in_command_buffer == false and the
      *     source surface is typically not the active color/zeta.
+     *
+     * Apple-only: the "prior submitted main CB can't race the aux
+     * upload" half of this argument comes from Metal's automatic
+     * hazard tracking behind MoltenVK's single MTLCommandQueue. Core
+     * Vulkan only orders same-queue submissions at execution *start*;
+     * a native driver may overlap an in-flight slot's reads/writes of
+     * this surface's image with the aux-CB upload (visible under WHPX,
+     * where render_display force-uploads every present). Keep the
+     * upstream full-finish semantics on non-Apple hosts.
      */
+#ifdef __APPLE__
     bool target_is_active =
         (surface == r->color_binding) ||
         (surface == r->zeta_binding) ||
         r->in_command_buffer;
+#else
+    bool target_is_active = true;
+#endif
 
     nsprof_event(surface->color ? NSPROF_EV_SUPLOAD_COLOR
                                 : NSPROF_EV_SUPLOAD_ZETA);
