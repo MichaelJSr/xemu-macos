@@ -436,21 +436,41 @@ This is meson/ninja underneath, and the dependency graph is broader than
 
 If you've only changed source (or `config_spec.yml`) and want to update the
 already-built app bundle without a full `./build.sh` repackage, replicate
-just the parts of `package_macos` that actually need to change:
+the parts of `package_macos` that touch the executable. **A bare
+`cp` + `codesign` is NOT enough and produces a bundle that dies at dyld
+time** (verified empirically 2026-07-04): the raw `build/qemu-system-i386`
+still carries (a) `/opt/local/...` install-name references for the vendored
+MacPorts dylibs — `dylibbundler` rewrote those to `@executable_path` in the
+packaged binary, not in the build output — and (b) the linker's own
+`LC_RPATH` entries pointing at `macos-libs/.../opt/local/lib` and
+`/usr/local/lib`, which make bundled dylibs' `@rpath/` deps resolve to the
+un-fixed MacPorts copies (whose own `/opt/local` iconv/intl refs then fail
+or, worse, silently load non-bundle libraries). Replicate all four steps:
 
 ```bash
 cd build && ninja qemu-system-i386      # or plain `ninja`
 cd ..
-cp build/qemu-system-i386 dist/xemu.app/Contents/MacOS/xemu
+BIN=dist/xemu.app/Contents/MacOS/xemu
+cp build/qemu-system-i386 $BIN
+xattr -c $BIN     # build output may carry xattrs codesign rejects
+# dylibbundler's rewrite, replayed on the fresh binary:
+otool -L $BIN | awk '/\/opt\/local\// {print $1}' | while read dep; do
+  install_name_tool -change "$dep" \
+    "@executable_path/../Libraries/arm64/$(basename $dep)" $BIN
+done
+# package_macos step 5 (rpath dedup — strip all, add exactly one):
+otool -l $BIN | awk '/LC_RPATH/{f=1} f && /path /{print $2; f=0}' | \
+  while read rp; do install_name_tool -delete_rpath "$rp" $BIN 2>/dev/null || true; done
+install_name_tool -add_rpath "@executable_path/../Libraries/arm64/" $BIN
 codesign --force --deep \
-    --preserve-metadata=entitlements,requirements,flags,runtime \
-    --sign - dist/xemu.app/Contents/MacOS/xemu
+    --preserve-metadata=entitlements,requirements,flags,runtime --sign - $BIN
+otool -L $BIN | grep /opt/local/ && echo "BAD: /opt/local refs remain" || true
 ```
 
 This is safe exactly when your dependency set hasn't changed (no new
-dylibs, no rpath changes) — i.e. almost always, for a source-only edit. If
-you've changed dependencies (added a library, bumped MoltenVK), just accept
-the full `./build.sh` repackage. (`qemu-system-i386` is a real ninja target
+dylibs) — i.e. almost always, for a source-only edit. If you've changed
+dependencies (added a library, bumped MoltenVK), just accept the full
+`./build.sh` repackage. (`qemu-system-i386` is a real ninja target
 name, verified in `build/build.ninja`; it's the same target `build.sh`
 passes to `make`.)
 
