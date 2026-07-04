@@ -1221,6 +1221,18 @@ void metalfx_temporal_destroy(void)
 
 #pragma mark - Frame Interpolation (macOS 26+)
 
+/*
+ * MTLFXFrameInterpolator and its descriptor exist only in the
+ * macOS 26 SDK. Runtime @available checks are not enough — the
+ * type names must exist at compile time — so the whole
+ * interpolation implementation is compiled out on older SDKs
+ * (e.g. CI runners) and replaced by inert stubs below. Frame
+ * interpolation then simply reports unsupported at runtime,
+ * matching pre-macOS-26 hosts.
+ */
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && \
+    __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+
 typedef struct MetalFXInterpolationState {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
@@ -1797,5 +1809,62 @@ void metalfx_interpolation_destroy(void)
     metalfx_interpolation_destroy_locked();
     os_unfair_lock_unlock(&g_metalfx_lock);
 }
+
+#else /* __MAC_OS_X_VERSION_MAX_ALLOWED < 260000 */
+
+bool metalfx_interpolation_is_supported(void)
+{
+    return false;
+}
+
+bool metalfx_interpolation_init(int width, int height,
+                                bool link_temporal_scaler)
+{
+    (void)width;
+    (void)height;
+    (void)link_temporal_scaler;
+    return false;
+}
+
+void metalfx_interpolation_reset(void)
+{
+}
+
+IOSurfaceRef metalfx_interpolation_get_output_surface(void)
+{
+    return NULL;
+}
+
+void *metalfx_interpolation_get_output_texture(void)
+{
+    return NULL;
+}
+
+bool metalfx_interpolation_generate(IOSurfaceRef colorA, IOSurfaceRef colorB,
+                                    IOSurfaceRef depthA, IOSurfaceRef depthB,
+                                    float delta_time)
+{
+    (void)colorA;
+    (void)colorB;
+    (void)depthA;
+    (void)depthB;
+    (void)delta_time;
+    return false;
+}
+
+bool metalfx_interpolation_generate_tex(void *prevTexture, void *curTexture,
+                                        float delta_time)
+{
+    (void)prevTexture;
+    (void)curTexture;
+    (void)delta_time;
+    return false;
+}
+
+void metalfx_interpolation_destroy(void)
+{
+}
+
+#endif /* __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000 */
 
 #endif /* __APPLE__ */
