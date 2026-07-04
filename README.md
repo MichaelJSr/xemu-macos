@@ -122,6 +122,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
+| `XEMU_SSE_NEON` | `1` enables the NEON fast path for packed/scalar single-precision SSE arithmetic (dark A/B knob — measured parity on the bench scene post-PGO; bit-exact per the `=2` differential mode, which runs both paths and aborts on divergence) |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |

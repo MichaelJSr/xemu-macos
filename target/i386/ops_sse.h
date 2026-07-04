@@ -463,11 +463,38 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
 /* FPU ops */
 /* XXX: not accurate */
 
+/*
+ * xemu: SHIFT==1 packed/scalar single-precision ops try the NEON fast
+ * path first (defined in fpu_helper.c ahead of these includes;
+ * rationale and exactness argument there). Expands to nothing for the
+ * ymm pass and off-Apple-silicon builds.
+ */
+#if defined(XBOX) && defined(__aarch64__) && SHIFT == 1
+#define XEMU_NEON_PS_TRY(name)                                          \
+    do {                                                                \
+        if (xemu_sse_neon_usable(env)) {                                \
+            xemu_neon_ ## name ## _ps(env, d, v, s);                    \
+            return;                                                     \
+        }                                                               \
+    } while (0)
+#define XEMU_NEON_SS_TRY(name)                                          \
+    do {                                                                \
+        if (xemu_sse_neon_usable(env)) {                                \
+            xemu_neon_ ## name ## _ss(env, d, v, s);                    \
+            return;                                                     \
+        }                                                               \
+    } while (0)
+#else
+#define XEMU_NEON_PS_TRY(name) do { } while (0)
+#define XEMU_NEON_SS_TRY(name) do { } while (0)
+#endif
+
 #define SSE_HELPER_P(name, F)                                           \
     void glue(helper_ ## name ## ps, SUFFIX)(CPUX86State *env,          \
             Reg *d, Reg *v, Reg *s)                                     \
     {                                                                   \
         int i;                                                          \
+        XEMU_NEON_PS_TRY(name);                                         \
         for (i = 0; i < 2 << SHIFT; i++) {                              \
             d->ZMM_S(i) = F(32, v->ZMM_S(i), s->ZMM_S(i));              \
         }                                                               \
@@ -490,6 +517,7 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
     void helper_ ## name ## ss(CPUX86State *env, Reg *d, Reg *v, Reg *s)\
     {                                                                   \
         int i;                                                          \
+        XEMU_NEON_SS_TRY(name);                                         \
         d->ZMM_S(0) = F(32, v->ZMM_S(0), s->ZMM_S(0));                  \
         for (i = 1; i < 2 << SHIFT; i++) {                              \
             d->ZMM_L(i) = v->ZMM_L(i);                                  \
@@ -2664,6 +2692,8 @@ void helper_sha256msg2(Reg *d, Reg *a, Reg *b)
 #endif
 
 #undef SSE_HELPER_S
+#undef XEMU_NEON_PS_TRY
+#undef XEMU_NEON_SS_TRY
 
 #undef LANE_WIDTH
 #undef SHIFT

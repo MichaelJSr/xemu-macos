@@ -3750,6 +3750,197 @@ void helper_emms(CPUX86State *env)
     *(uint32_t *)(env->fptags + 4) = 0x01010101;
 }
 
+#if defined(XBOX) && defined(__aarch64__)
+#include <arm_neon.h>
+#include "ui/xemu-settings.h"
+
+/*
+ * xemu: NEON fast path for the packed/scalar single-precision SSE
+ * arithmetic helpers (hard-fpu family). The generic helpers run one
+ * softfloat call per element; Xbox titles lean on packed SSE for 3D
+ * math, and the helpers measured ~6% of the vCPU thread on the heavy
+ * bench scene. Under round-to-nearest with matching FTZ/DAZ state,
+ * native add/sub/mul/div are IEEE-754 bit-exact with softfloat, and
+ * SSE's min/max rules ((a OP b) ? a : b — NaN, equal and (-0,+0)
+ * resolve to the second source) are reproduced exactly by
+ * compare-and-select. Deltas accepted under the hard-fpu philosophy
+ * (perf.hard_fpu gates this path): MXCSR sticky exception flags are
+ * not accumulated on the fast path, and mixed-operand NaN payload
+ * selection follows ARM's sNaN-priority rule rather than x86's
+ * first-source rule. Guests running a directed rounding mode or
+ * mismatched FTZ/DAZ fall back to softfloat wholesale.
+ *
+ * XEMU_SSE_NEON=0 kills the path; XEMU_SSE_NEON=2 runs BOTH paths and
+ * aborts on any non-NaN-class divergence (differential self-check).
+ */
+
+/*
+ * Ships DARK (opt-in): measured neutral on the heavy bench scene once
+ * PGO landed — the profile-guided softfloat helpers already recovered
+ * most of the margin, and the per-op FPCR bracket (serializing msr
+ * when the guest runs FTZ) eats the rest (interleaved A/B
+ * 2026-07-04: off 31.30 +/- 1.35 vs on 31.72 +/- 0.17, deltas
+ * +2.17/-0.54/-0.39 — parity). Kept for per-title A/B: the
+ * differential harness (=2) proved the path bit-exact over live
+ * gameplay, so flipping it on is risk-free where it wins.
+ */
+static int xemu_sse_neon_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("XEMU_SSE_NEON");
+        if (e && e[0] == '1' && g_config.perf.hard_fpu) {
+            mode = 1;
+        } else if (e && e[0] == '2') {
+            mode = 2;
+        } else {
+            mode = 0;
+        }
+    }
+    return mode;
+}
+
+static inline bool xemu_sse_neon_usable(CPUX86State *env)
+{
+    if (!xemu_sse_neon_mode()) {
+        return false;
+    }
+    if (get_float_rounding_mode(&env->sse_status) !=
+        float_round_nearest_even) {
+        return false;
+    }
+    /* ARM FPCR.FZ flushes inputs and outputs together; a guest with
+     * only one of FTZ/DAZ set keeps the softfloat path. */
+    if (env->sse_status.flush_to_zero != env->sse_status.flush_inputs_to_zero) {
+        return false;
+    }
+    return true;
+}
+
+#define XEMU_FPCR_FZ (1ull << 24)
+
+/* Bracket each op: match host FPCR.FZ to the guest's FTZ/DAZ state and
+ * restore afterwards — the hard-fpu x87 helpers on this thread expect
+ * default (non-flushing) host state. */
+static inline uint64_t xemu_neon_fpcr_enter(CPUX86State *env)
+{
+    uint64_t fpcr, want;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    want = env->sse_status.flush_to_zero ? (fpcr | XEMU_FPCR_FZ)
+                                         : (fpcr & ~XEMU_FPCR_FZ);
+    if (want != fpcr) {
+        __asm__ volatile("msr fpcr, %0" : : "r"(want));
+    }
+    return fpcr;
+}
+
+static inline void xemu_neon_fpcr_leave(uint64_t saved)
+{
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    if (fpcr != saved) {
+        __asm__ volatile("msr fpcr, %0" : : "r"(saved));
+    }
+}
+
+/* SSE min/max exactly: (a < b) ? a : b resp. (a > b) ? a : b — false
+ * compare (NaN involved, equal, or -0 vs +0) selects the second src. */
+static inline float32x4_t xemu_neon_minps4(float32x4_t a, float32x4_t b)
+{
+    return vbslq_f32(vcltq_f32(a, b), a, b);
+}
+static inline float32x4_t xemu_neon_maxps4(float32x4_t a, float32x4_t b)
+{
+    return vbslq_f32(vcgtq_f32(a, b), a, b);
+}
+
+#define XEMU_SOFT_ADD(a, b, st) float32_add(a, b, st)
+#define XEMU_SOFT_SUB(a, b, st) float32_sub(a, b, st)
+#define XEMU_SOFT_MUL(a, b, st) float32_mul(a, b, st)
+#define XEMU_SOFT_DIV(a, b, st) float32_div(a, b, st)
+#define XEMU_SOFT_MIN(a, b, st) (float32_lt(a, b, st) ? (a) : (b))
+#define XEMU_SOFT_MAX(a, b, st) (float32_lt(b, a, st) ? (a) : (b))
+
+#define XEMU_NEON_PS_OP(name, EXPR, SOFT)                                   \
+static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
+                                  ZMMReg *s)                                \
+{                                                                           \
+    float32x4_t a = vld1q_f32((const float *)&v->ZMM_S(0));                 \
+    float32x4_t b = vld1q_f32((const float *)&s->ZMM_S(0));                 \
+    uint64_t saved = xemu_neon_fpcr_enter(env);                             \
+    float32x4_t r = (EXPR);                                                 \
+    xemu_neon_fpcr_leave(saved);                                            \
+    if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
+        ZMMReg sv = *v, ss2 = *s;                                           \
+        uint32_t got[4];                                                    \
+        int i;                                                              \
+        vst1q_f32((float *)got, r);                                         \
+        for (i = 0; i < 4; i++) {                                           \
+            float32 ref = SOFT(sv.ZMM_S(i), ss2.ZMM_S(i),                   \
+                               &env->sse_status);                           \
+            bool both_nan = float32_is_any_nan(ref) &&                      \
+                            float32_is_any_nan(got[i]);                     \
+            if (got[i] != ref && !both_nan) {                               \
+                fprintf(stderr,                                             \
+                        "xemu: SSE-NEON DIFF FAILURE op=" #name             \
+                        " lane=%d a=%08x b=%08x neon=%08x soft=%08x\n",     \
+                        i, sv.ZMM_L(i), ss2.ZMM_L(i), got[i], ref);         \
+                abort();                                                    \
+            }                                                               \
+        }                                                                   \
+    }                                                                       \
+    vst1q_f32((float *)&d->ZMM_S(0), r);                                    \
+}
+
+XEMU_NEON_PS_OP(add, vaddq_f32(a, b), XEMU_SOFT_ADD)
+XEMU_NEON_PS_OP(sub, vsubq_f32(a, b), XEMU_SOFT_SUB)
+XEMU_NEON_PS_OP(mul, vmulq_f32(a, b), XEMU_SOFT_MUL)
+XEMU_NEON_PS_OP(div, vdivq_f32(a, b), XEMU_SOFT_DIV)
+XEMU_NEON_PS_OP(min, xemu_neon_minps4(a, b), XEMU_SOFT_MIN)
+XEMU_NEON_PS_OP(max, xemu_neon_maxps4(a, b), XEMU_SOFT_MAX)
+
+#define XEMU_NEON_SS_OP(name, SEXPR, SOFT)                                  \
+static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
+                                  ZMMReg *s)                                \
+{                                                                           \
+    float fa, fb, fr;                                                       \
+    uint32_t out, l1, l2, l3;                                               \
+    memcpy(&fa, &v->ZMM_L(0), 4);                                           \
+    memcpy(&fb, &s->ZMM_L(0), 4);                                           \
+    uint64_t saved = xemu_neon_fpcr_enter(env);                             \
+    fr = (SEXPR);                                                           \
+    xemu_neon_fpcr_leave(saved);                                            \
+    memcpy(&out, &fr, 4);                                                   \
+    if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
+        float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \
+        bool both_nan = float32_is_any_nan(ref) &&                          \
+                        float32_is_any_nan(out);                            \
+        if (out != ref && !both_nan) {                                      \
+            fprintf(stderr,                                                 \
+                    "xemu: SSE-NEON DIFF FAILURE op=" #name                 \
+                    "ss a=%08x b=%08x neon=%08x soft=%08x\n",               \
+                    v->ZMM_L(0), s->ZMM_L(0), out, ref);                    \
+            abort();                                                        \
+        }                                                                   \
+    }                                                                       \
+    l1 = v->ZMM_L(1);                                                       \
+    l2 = v->ZMM_L(2);                                                       \
+    l3 = v->ZMM_L(3);                                                       \
+    d->ZMM_L(0) = out;                                                      \
+    d->ZMM_L(1) = l1;                                                       \
+    d->ZMM_L(2) = l2;                                                       \
+    d->ZMM_L(3) = l3;                                                       \
+}
+
+XEMU_NEON_SS_OP(add, fa + fb, XEMU_SOFT_ADD)
+XEMU_NEON_SS_OP(sub, fa - fb, XEMU_SOFT_SUB)
+XEMU_NEON_SS_OP(mul, fa * fb, XEMU_SOFT_MUL)
+XEMU_NEON_SS_OP(div, fa / fb, XEMU_SOFT_DIV)
+XEMU_NEON_SS_OP(min, (fa < fb) ? fa : fb, XEMU_SOFT_MIN)
+XEMU_NEON_SS_OP(max, (fa > fb) ? fa : fb, XEMU_SOFT_MAX)
+
+#endif /* XBOX && __aarch64__ */
+
 #define SHIFT 0
 #include "ops_sse.h"
 
