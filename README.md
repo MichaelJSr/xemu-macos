@@ -591,6 +591,21 @@ In-app Settings covers the main toggles.
   `g_cf_fallback_buckets`. See
   [docs/dsp-jit-design.md](docs/dsp-jit-design.md).
 
+### Input
+
+- **In-app rebinding UI polish** (Input tab → Input Mapping; the
+  remap table itself is upstream's). Esc cancels an in-progress
+  capture (previously the only exits were pressing an input or
+  unplugging the controller), right-click on a binding unbinds it
+  (persisted; unbound entries read as never-pressed), capture rows
+  say what they're waiting for, and a hint line documents the
+  gestures. Controller buttons rebind to other controller buttons,
+  stick/trigger axes to other axes, every Xbox control has a
+  keyboard binding, and per-stick axis inversion toggles sit under
+  the table — all per-controller (keyed by SDL GUID) and saved to
+  `input.gamepad_mappings` / `input.keyboard_controller_scancode_map`
+  in xemu.toml.
+
 ### Threads + runtime
 
 - **P-core QoS.** PFIFO and vblank-timer threads request

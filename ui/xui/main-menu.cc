@@ -95,6 +95,21 @@ bool MainMenuInputView::ConsumeRebindEvent(SDL_Event *event)
         return false;
     }
 
+    /*
+     * Esc cancels the capture without changing the binding (this
+     * also makes Escape itself unbindable from the UI, which is the
+     * usual convention). Both key edges are consumed so neither the
+     * menu nor ImGui react to the key.
+     */
+    if ((event->type == SDL_EVENT_KEY_DOWN ||
+         event->type == SDL_EVENT_KEY_UP) &&
+        event->key.scancode == SDL_SCANCODE_ESCAPE) {
+        if (event->type == SDL_EVENT_KEY_UP) {
+            m_rebinding = nullptr;
+        }
+        return true;
+    }
+
     RebindEventResult rebind_result = m_rebinding->ConsumeRebindEvent(event);
     if (rebind_result == RebindEventResult::Complete) {
         m_rebinding = nullptr;
@@ -531,6 +546,9 @@ void MainMenuInputView::Draw()
         ImGui::PushStyleColor(ImGuiCol_Header, tc);
 
         if (ImGui::CollapsingHeader("Input Mapping")) {
+            ImGui::TextDisabled(
+                "Click a binding to remap it. Right-click a binding to "
+                "unbind. Esc cancels a capture.");
             float p = ImGui::GetFrameHeight() * 0.3;
             ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(p, p));
             if (ImGui::BeginTable("input_remap_tbl", 2,
@@ -666,58 +684,79 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
         ImGui::TableSetColumnIndex(1);
 
         if (m_rebinding && m_rebinding->GetTableRow() == i) {
-            ImGui::Text("Press a key to rebind");
+            if (is_keyboard) {
+                ImGui::Text("Press a key... (Esc cancels)");
+            } else if (i < num_face_buttons) {
+                ImGui::Text("Press a controller button... (Esc cancels)");
+            } else {
+                ImGui::Text("Move a stick or trigger... (Esc cancels)");
+            }
             continue;
         }
 
-        const char *remap_button_text = "Invalid";
+        /*
+         * Resolve this row's config slot and its "unbound" sentinel
+         * so the rebind button and the right-click unbind share one
+         * path. Unbound entries are safe at runtime: an UNKNOWN
+         * scancode never reads pressed, and SDL returns
+         * false/0 for INVALID gamepad button/axis enums; the
+         * range validation in xemu-input.c admits the sentinels.
+         */
+        int *binding_slot;
+        int unbound_value;
+        const char *remap_button_text = NULL;
         if (is_keyboard) {
-          // g_keyboard_scancode_map includes both face buttons and axis buttons.
-            int keycode = *(g_keyboard_scancode_map[i]);
-            if (keycode != SDL_SCANCODE_UNKNOWN) {
-                remap_button_text =
-                    SDL_GetScancodeName(static_cast<SDL_Scancode>(keycode));
+            // g_keyboard_scancode_map covers face buttons and axis keys.
+            binding_slot = g_keyboard_scancode_map[i];
+            unbound_value = SDL_SCANCODE_UNKNOWN;
+            if (*binding_slot != SDL_SCANCODE_UNKNOWN) {
+                remap_button_text = SDL_GetScancodeName(
+                    static_cast<SDL_Scancode>(*binding_slot));
             }
         } else if (i < num_face_buttons) {
-                int *button_map[num_face_buttons] = {
-                    &state->controller_map->controller_mapping.a,
-                    &state->controller_map->controller_mapping.b,
-                    &state->controller_map->controller_mapping.x,
-                    &state->controller_map->controller_mapping.y,
-                    &state->controller_map->controller_mapping.back,
-                    &state->controller_map->controller_mapping.guide,
-                    &state->controller_map->controller_mapping.start,
-                    &state->controller_map->controller_mapping.lstick_btn,
-                    &state->controller_map->controller_mapping.rstick_btn,
-                    &state->controller_map->controller_mapping.lshoulder,
-                    &state->controller_map->controller_mapping.rshoulder,
-                    &state->controller_map->controller_mapping.dpad_up,
-                    &state->controller_map->controller_mapping.dpad_down,
-                    &state->controller_map->controller_mapping.dpad_left,
-                    &state->controller_map->controller_mapping.dpad_right,
-                };
-
-                int button = *(button_map[i]);
-                if (button != SDL_GAMEPAD_BUTTON_INVALID) {
-                    remap_button_text = SDL_GetGamepadStringForButton(
-                        static_cast<SDL_GamepadButton>(button));
-                }
+            int *button_map[num_face_buttons] = {
+                &state->controller_map->controller_mapping.a,
+                &state->controller_map->controller_mapping.b,
+                &state->controller_map->controller_mapping.x,
+                &state->controller_map->controller_mapping.y,
+                &state->controller_map->controller_mapping.back,
+                &state->controller_map->controller_mapping.guide,
+                &state->controller_map->controller_mapping.start,
+                &state->controller_map->controller_mapping.lstick_btn,
+                &state->controller_map->controller_mapping.rstick_btn,
+                &state->controller_map->controller_mapping.lshoulder,
+                &state->controller_map->controller_mapping.rshoulder,
+                &state->controller_map->controller_mapping.dpad_up,
+                &state->controller_map->controller_mapping.dpad_down,
+                &state->controller_map->controller_mapping.dpad_left,
+                &state->controller_map->controller_mapping.dpad_right,
+            };
+            binding_slot = button_map[i];
+            unbound_value = SDL_GAMEPAD_BUTTON_INVALID;
+            if (*binding_slot != SDL_GAMEPAD_BUTTON_INVALID) {
+                remap_button_text = SDL_GetGamepadStringForButton(
+                    static_cast<SDL_GamepadButton>(*binding_slot));
+            }
         } else {
-          int *axis_map[6] = {
-            &state->controller_map->controller_mapping.axis_left_x,
-            &state->controller_map->controller_mapping.axis_left_y,
-            &state->controller_map->controller_mapping.axis_right_x,
-            &state->controller_map->controller_mapping.axis_right_y,
-            &state->controller_map->controller_mapping
-              .axis_trigger_left,
-            &state->controller_map->controller_mapping
-              .axis_trigger_right,
-          };
-          int axis = *(axis_map[i - num_face_buttons]);
-          if (axis != SDL_GAMEPAD_AXIS_INVALID) {
-            remap_button_text = SDL_GetGamepadStringForAxis(
-                static_cast<SDL_GamepadAxis>(axis));
-          }
+            int *axis_map[6] = {
+                &state->controller_map->controller_mapping.axis_left_x,
+                &state->controller_map->controller_mapping.axis_left_y,
+                &state->controller_map->controller_mapping.axis_right_x,
+                &state->controller_map->controller_mapping.axis_right_y,
+                &state->controller_map->controller_mapping
+                    .axis_trigger_left,
+                &state->controller_map->controller_mapping
+                    .axis_trigger_right,
+            };
+            binding_slot = axis_map[i - num_face_buttons];
+            unbound_value = SDL_GAMEPAD_AXIS_INVALID;
+            if (*binding_slot != SDL_GAMEPAD_AXIS_INVALID) {
+                remap_button_text = SDL_GetGamepadStringForAxis(
+                    static_cast<SDL_GamepadAxis>(*binding_slot));
+            }
+        }
+        if (remap_button_text == NULL || remap_button_text[0] == '\0') {
+            remap_button_text = "Unbound";
         }
 
         ImGui::PushID(i);
@@ -738,6 +777,9 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
               std::make_unique<ControllerGamepadRebindingMap>(i,
                   state);
           }
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            *binding_slot = unbound_value;
         }
         ImGui::PopID();
     }
