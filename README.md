@@ -820,6 +820,21 @@ Not attempted, or scope/risk too high for a one-shot change.
   and an earlier dirty-range flush variant shipped a
   cleared-before-consumed bug — any attempt needs the full
   predict/validate discipline.
+- **Windows real-hardware Vulkan validation (gating audit committed
+  2026-07-04, `docs/windows-gating-audit.md`).** Every fork divergence
+  touching Windows-compiled code is now statically audited: Apple-only
+  fast paths verified to keep upstream semantics behind their `#else`
+  branches, shared behavior changes classified with written
+  equivalence arguments, and one real cross-platform defect found and
+  fixed (invalid-surface destruction racing pending submissions —
+  `a045dfc780`). What still **needs real Windows hardware** (no
+  Vulkan ICD exists in VMs): (1) occlusion-rework report values under
+  native drivers/WHPX (`XEMU_REPORTS_SYNC=1` is the bisect hatch);
+  (2) primer-query validation-layer cleanliness; (3) a zeta
+  quarantine/reuse soak (equivalence proven on paper); (4) byte-exact
+  vertex refinement under WHPX write timing (`XEMU_VTX_EXACT=0`);
+  (5) the 5 s fence-or-die margin on slow systems; (6) a
+  Windows-native savestate A/B baseline before any perf claim.
 - **Guest TCG throughput (measured bottleneck profile,
   2026-07-04).** On the heavy scene the vCPU thread spends 17.9% in
   `helper_lookup_tb_ptr` (indirect-branch TB lookup), ~14% in TLB
