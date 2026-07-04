@@ -20,6 +20,7 @@
  */
 
 #include "apu_int.h"
+#include "system/runstate.h"
 
 MCPXAPUState *g_state; // Used via debug handlers
 
@@ -360,7 +361,19 @@ static void mcpx_apu_reset_hold(Object *obj, ResetType type)
     qemu_mutex_lock(&d->lock);
     mcpx_apu_wait_for_idle(d);
     mcpx_apu_reset_locked(d);
-    mcpx_apu_resume(d);
+    /*
+     * Only resume the frame thread if the VM is running. Snapshot
+     * load (both -loadvm at boot and the in-app path) resets the
+     * machine while stopped and then restores device state; an
+     * unconditional resume here let the frame thread observe
+     * SECTL/GPRST as vmstate wrote them and execute the DSP on a
+     * half-restored core (assert in read_memory_p: PC outside
+     * PRAM). When stopped, the RUNNING vm-state transition performs
+     * dsp_sync_from_vm and then resumes.
+     */
+    if (runstate_is_running()) {
+        mcpx_apu_resume(d);
+    }
     qemu_mutex_unlock(&d->lock);
     bql_lock();
 }

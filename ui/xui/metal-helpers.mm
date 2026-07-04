@@ -931,13 +931,17 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
         [cb renderCommandEncoderWithDescriptor:rpd];
     const float scale[2] = { 1.0f, 1.0f };
     /*
-     * The GL readback path renders with `!flip` and reads bottom-up
-     * rows via glReadPixels (which returns row 0 = window bottom =
-     * image top with the double inversion). Metal getBytes returns
-     * rows top-down, so render upright (`flip` as-is, plus flip_ndc to
-     * land image-top in row 0) and copy rows directly.
+     * Orientation: the present path (flip_ndc=false, flip as given)
+     * displays correctly, which fixes the texture's row convention
+     * (NV2A compositor output = GL-style, row 0 at the image
+     * bottom). This offscreen pass adds a flip_ndc inversion to
+     * replicate GL FBO row order, so the texture-coordinate
+     * direction must be inverted too — pass `!flip`, exactly like
+     * the GL readback path below. Passing `flip` unmirrored left
+     * savestate thumbnails and screenshots upside down under the
+     * Metal backend.
      */
-    render_framebuffer_to(enc, FMT_RGBA, true, tex, flip, scale, false);
+    render_framebuffer_to(enc, FMT_RGBA, true, tex, !flip, scale, false);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
