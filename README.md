@@ -784,10 +784,59 @@ Not attempted, or scope/risk too high for a one-shot change.
   (draw batching, render-pass merging), not CPU synchronization.
   Both implementations preserved in this repo's history for
   reference.
-- **Occlusion-report STALLED drains.** Report-heavy intervals show
-  ~5 `STALLED` finishes per flip (FIFO idle with pending zpass
-  reports forces a synchronous drain-all). Candidate: satisfy
-  guest report polls from per-slot drains without finishing.
+- **GPU frame-cost campaign: draw/pass-reduction menu measured
+  exhausted on the current fixtures (2026-07-04).** Attribution
+  counters (`vk_draw_call`, `merge_*`, `rpcause_*` — commit
+  `038f596332`) plus a 10 s `sample` profile on the heavy savestate
+  scene (471 draws/flip, 46.6 fps) killed every ranked mechanism by
+  measurement: same-block subrange coalescing has zero opportunity
+  (`vk_draw_call/flip == draws/flip` exactly); cross-block merge
+  candidates are 10.6% of draws AND per-call recording cost on the
+  PFIFO thread is ~0 (with `MVK_CONFIG_PREFILL=0`, Metal encoding
+  happens on MoltenVK's queue thread); every per-draw CPU candidate
+  site measures <1 ms/flip; pass-count cuts save GPU time that is
+  not the constraint (fence waits 2.8 ms/flip, GPU ~14 ms/flip of
+  slack); `VK_EXT_multi_draw` is unimplemented in MoltenVK. The
+  earlier "heavy scenes are GPU-bound" premise does **not** hold on
+  today's savestates: the frame limiter is CPU-side — mean finish
+  time 14.9 ms/flip of which the guest's TCG execution owns the
+  largest share (vCPU thread 99.7% busy; ≥5.8 ms/flip of PFIFO
+  starvation while the guest computes alone; caveat: the title
+  busy-polls, so vCPU utilization alone is not a limiter signal —
+  starvation time is). Re-run the campaign's Phase 0/2 gates before
+  reviving any of the menu on a future GPU-bound scene.
+- **Dirty-clear TLB-walk coalescing (measured, not attempted).**
+  `physical_memory_test_and_clear_dirty` triggers
+  `tlb_reset_dirty()` — a full-TLB walk (all MMU modes + victim
+  TLB, under a spinlock) per *dirty* detection regardless of range
+  size. The per-draw vertex sync and per-bind texture dirty checks
+  pay it constantly: ~1.8 ms/flip on the PFIFO thread (vertex 537 +
+  texture 245 of 6827 thread samples) plus a vCPU-side echo
+  (notdirty slow-path writes ~2.8% + TB-link dirty clears 3.4% of
+  the vCPU thread). Candidate: coalesce the TLB resets for
+  NV2A-client clears (batch the union of ranges once per command
+  buffer instead of per draw). High design risk: page-granular
+  dirty tracking is load-bearing (see byte-exact refinement above)
+  and an earlier dirty-range flush variant shipped a
+  cleared-before-consumed bug — any attempt needs the full
+  predict/validate discipline.
+- **Guest TCG throughput (measured bottleneck profile,
+  2026-07-04).** On the heavy scene the vCPU thread spends 17.9% in
+  `helper_lookup_tb_ptr` (indirect-branch TB lookup), ~14% in TLB
+  fill/set machinery, 6.8% in `helper_ldul_mmu`, and ~3.7% in
+  SSE packed-float helpers (`mulps`/`addps` — candidate for
+  NEON-backed lowering on AArch64 hosts, a hard-FPU-class project).
+  A PGO build (`XEMU_PGO=generate/use`, already wired in build.sh)
+  is the cheapest unexplored experiment against this profile.
+- **Occlusion-report STALLED drains — resolved by the deferred-report
+  rework; measurement confirmed 2026-07-04.** The "~5 STALLED
+  finishes per flip" figure predates the occlusion rework; the
+  default path now delivers reports via non-blocking per-slot
+  drains and `VK_FINISH_REASON_STALLED` is reachable only under
+  `XEMU_REPORTS_SYNC=1`. Confirmed on the heavy savestate scene:
+  `finish_stalled = 0` and `finish_reports_full = 0` across all
+  in-game intervals (`finish_reports_submit` ≈ 0.96/flip carries
+  the load). Nothing left to do here.
 - **Push-model present handoff.** `nv2a_get_present_frame` does a
   PFIFO event-wait round trip per UI frame (the sync handshake is
   also what publishes frames, so a UI-side "skip when unchanged"
