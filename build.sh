@@ -237,9 +237,24 @@ if test ! -z "$debug"; then
     build_cflags='-DXEMU_DEBUG_BUILD=1'
     opts="--enable-debug --enable-trace-backends=log"
 else
-    opts="$opts -Db_lto=true -Db_lto_mode=thin -Db_thinlto_cache=true -Db_thinlto_cache_dir=.lto-cache"
-    opts="$opts -Doptimization=3 -Dqom_cast_debug=false"
-    opts="$opts -Dtrace_backends=nop -Dstack_protector=disabled"
+    case "$platform" in
+    win64*|MINGW*|MSYS*)
+        # Don't force LTO on Windows targets. The CI workflows own
+        # the per-toolchain LTO strategy there: x86_64 uses GCC
+        # (b_lto_mode=thin is a meson setup error on GCC; the
+        # workflow passes -flto-incremental itself) and arm64
+        # llvm-mingw ThinLTO breaks the qemu_build_not_reached_always
+        # elision (see the FIXME in build-windows.yml) — with LTO
+        # forced here, the arm64 release link failed exactly that
+        # way. The LTO-independent knobs are kept.
+        opts="$opts -Dqom_cast_debug=false -Dtrace_backends=nop"
+        ;;
+    *)
+        opts="$opts -Db_lto=true -Db_lto_mode=thin -Db_thinlto_cache=true -Db_thinlto_cache_dir=.lto-cache"
+        opts="$opts -Doptimization=3 -Dqom_cast_debug=false"
+        opts="$opts -Dtrace_backends=nop -Dstack_protector=disabled"
+        ;;
+    esac
 fi
 
 most_recent_macosx_sdk_ver () {
