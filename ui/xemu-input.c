@@ -518,6 +518,14 @@ void xemu_input_update_controllers(void)
  * cost when the variable is unset.
  */
 static uint8_t test_input_override[SDL_SCANCODE_COUNT];
+
+#ifdef _WIN32
+/* POSIX FIFOs (and O_NONBLOCK reads) don't exist on Windows; the
+ * test-input channel is a macOS/Linux automation facility. */
+static void test_input_poll(void)
+{
+}
+#else
 static int test_input_fd = -2; /* -2 unprobed, -1 disabled */
 
 static void test_input_poll(void)
@@ -563,6 +571,7 @@ static void test_input_poll(void)
         }
     }
 }
+#endif /* !_WIN32 */
 
 void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
 {
