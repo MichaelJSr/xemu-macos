@@ -507,15 +507,74 @@ void xemu_input_update_controllers(void)
     }
 }
 
+/*
+ * Test-input channel: when XEMU_INPUT_PIPE names a FIFO, lines of
+ * the form "down <sdl_scancode>", "up <sdl_scancode>" or "clear"
+ * are OR'd into the keyboard-controller state below. Injected keys
+ * flow through the user's normal scancode bindings and work with
+ * the window unfocused — macOS drops synthetic key events for
+ * background apps, which makes OS-level injection (System Events,
+ * CGEventPostToPid) unusable for automated gameplay testing. No
+ * cost when the variable is unset.
+ */
+static uint8_t test_input_override[SDL_SCANCODE_COUNT];
+static int test_input_fd = -2; /* -2 unprobed, -1 disabled */
+
+static void test_input_poll(void)
+{
+    if (test_input_fd == -2) {
+        const char *path = getenv("XEMU_INPUT_PIPE");
+        test_input_fd = -1;
+        if (path && path[0]) {
+            int fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd >= 0) {
+                test_input_fd = fd;
+            } else {
+                fprintf(stderr, "xemu: XEMU_INPUT_PIPE open failed: %s\n",
+                        path);
+            }
+        }
+    }
+    if (test_input_fd < 0) {
+        return;
+    }
+    char buf[512];
+    for (;;) {
+        ssize_t n = read(test_input_fd, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            break;
+        }
+        buf[n] = '\0';
+        char *save = NULL;
+        for (char *line = strtok_r(buf, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            int sc;
+            if (sscanf(line, "down %d", &sc) == 1) {
+                if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+                    test_input_override[sc] = 1;
+                }
+            } else if (sscanf(line, "up %d", &sc) == 1) {
+                if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+                    test_input_override[sc] = 0;
+                }
+            } else if (!strncmp(line, "clear", 5)) {
+                memset(test_input_override, 0, sizeof(test_input_override));
+            }
+        }
+    }
+}
+
 void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
 {
     state->buttons = 0;
     memset(state->axis, 0, sizeof(state->axis));
 
+    test_input_poll();
     const bool *kbd = SDL_GetKeyboardState(NULL);
 
 #define KBD_STATE(btn) \
-    (kbd[g_config.input.keyboard_controller_scancode_map.btn])
+    (kbd[g_config.input.keyboard_controller_scancode_map.btn] || \
+     test_input_override[g_config.input.keyboard_controller_scancode_map.btn])
 
     state->buttons |= KBD_STATE(a) << 0;
     state->buttons |= KBD_STATE(b) << 1;
