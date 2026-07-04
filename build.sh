@@ -342,6 +342,21 @@ case "$platform" in # Adjust compilation options based on platform
                        -I${lib_prefix}/include \
                        -I/opt/homebrew/include \
                        -mmacosx-version-min=$macos_min_ver"
+        # C++ and ObjC need the same target selection. Without
+        # CXXFLAGS, cross-arch builds (x86_64 on an arm64 runner)
+        # compile C++ objects for the host arch but link with
+        # -arch from LDFLAGS — the CMake subprojects' (glslang)
+        # try-compile fails with an architecture mismatch.
+        export CXXFLAGS="${CXXFLAGS} \
+                       -arch ${target_arch} \
+                       -target ${target_arch}-apple-macos${macos_min_ver} \
+                       -isysroot ${sdk} \
+                       -mmacosx-version-min=$macos_min_ver"
+        export OBJCFLAGS="${OBJCFLAGS} \
+                       -arch ${target_arch} \
+                       -target ${target_arch}-apple-macos${macos_min_ver} \
+                       -isysroot ${sdk} \
+                       -mmacosx-version-min=$macos_min_ver"
         export LDFLAGS="${LDFLAGS} \
                         -arch ${target_arch} \
                         -isysroot ${sdk} \

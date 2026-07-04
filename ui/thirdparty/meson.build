@@ -14,6 +14,14 @@ if cpu == 'x86_64'
   libfpng_cpp_args = ['-DFPNG_NO_SSE=0', '-msse4.1', '-mpclmul']
 elif cpu == 'aarch64'
   libfpng_cpp_args = ['-DFPNG_NO_SSE=1', '-DFPNG_USE_ARM_CRC32=1']
+  # Apple -mcpu targets already imply the crc feature; generic
+  # aarch64 baselines (llvm-mingw, linux armv8-a) need it enabled
+  # for the __crc32* intrinsics. fpng.cpp additionally guards on
+  # __ARM_FEATURE_CRC32, so a toolchain that rejects this flag would
+  # only lose the fast path, not the build.
+  if host_os != 'darwin'
+    libfpng_cpp_args += ['-march=armv8-a+crc']
+  endif
 else
   libfpng_cpp_args = ['-DFPNG_NO_SSE=1']
 endif

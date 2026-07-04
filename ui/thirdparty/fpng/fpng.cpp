@@ -33,8 +33,21 @@
 	#define FPNG_X86_OR_X64_CPU (0)
 #endif
 
-#if defined(FPNG_USE_ARM_CRC32) && FPNG_USE_ARM_CRC32
+/*
+ * The ARM CRC32 path additionally requires the compiler target to
+ * actually have the crc feature (__ARM_FEATURE_CRC32): Apple Silicon
+ * -mcpu targets always do, but generic aarch64 baselines (llvm-mingw
+ * Windows/ARM64, default Linux armv8-a) do not, and __crc32d is
+ * always_inline — compiling without the feature is a hard error.
+ * The build adds -march=armv8-a+crc on non-Apple aarch64; this guard
+ * makes the file safe regardless of flags.
+ */
+#if defined(FPNG_USE_ARM_CRC32) && FPNG_USE_ARM_CRC32 && \
+    defined(__ARM_FEATURE_CRC32)
+	#define FPNG_ARM_CRC32_AVAILABLE 1
 	#include <arm_acle.h>
+#else
+	#define FPNG_ARM_CRC32_AVAILABLE 0
 #endif
 
 #if FPNG_X86_OR_X64_CPU && !FPNG_NO_SSE
@@ -401,7 +414,7 @@ namespace fpng
 			return crc32_sse41_simd(static_cast<const uint8_t *>(pData), size, prev_crc32);
 #endif
 
-#if defined(FPNG_USE_ARM_CRC32) && FPNG_USE_ARM_CRC32
+#if FPNG_ARM_CRC32_AVAILABLE
 		{
 			const uint8_t *p = static_cast<const uint8_t *>(pData);
 			uint32_t crc = ~prev_crc32;
