@@ -246,6 +246,43 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  *
  * Returns: an existing translation block or NULL.
  */
+#if defined(XBOX)
+/*
+ * XEMU_TB_PROF=1: jump-cache effectiveness counters for the single Xbox
+ * vCPU (plain increments; the vCPU thread is the only writer).
+ */
+static uint64_t xemu_tbprof_lookups;
+static uint64_t xemu_tbprof_jc_hits;
+static uint64_t xemu_tbprof_ht_found;
+
+static bool xemu_tbprof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_TB_PROF");
+        on = (e && e[0] == '1') ? 1 : 0;
+    }
+    return on;
+}
+
+static void xemu_tbprof_dump(void)
+{
+    uint64_t l = xemu_tbprof_lookups;
+    uint64_t h = xemu_tbprof_jc_hits;
+    uint64_t f = xemu_tbprof_ht_found;
+    if (l == 0) {
+        return;
+    }
+    fprintf(stderr,
+            "xemu: tbprof lookups=%llu jc_hit=%llu (%.2f%%) ht_found=%llu "
+            "(%.2f%%) translate=%llu tb_flush=%u\n",
+            (unsigned long long)l, (unsigned long long)h, 100.0 * h / l,
+            (unsigned long long)f, 100.0 * f / l,
+            (unsigned long long)(l - h - f),
+            qatomic_read(&tb_ctx.tb_flush_count));
+}
+#endif
+
 static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
@@ -258,12 +295,23 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     hash = tb_jmp_cache_hash_func(s.pc);
     jc = cpu->tb_jmp_cache;
 
+#if defined(XBOX)
+    if (unlikely(xemu_tbprof_on())) {
+        xemu_tbprof_lookups++;
+    }
+#endif
+
     tb = qatomic_read(&jc->array[hash].tb);
     if (likely(tb &&
                jc->array[hash].pc == s.pc &&
                tb->cs_base == s.cs_base &&
                tb->flags == s.flags &&
                tb_cflags(tb) == s.cflags)) {
+#if defined(XBOX)
+        if (unlikely(xemu_tbprof_on())) {
+            xemu_tbprof_jc_hits++;
+        }
+#endif
         goto hit;
     }
 
@@ -271,6 +319,11 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     if (tb == NULL) {
         return NULL;
     }
+#if defined(XBOX)
+    if (unlikely(xemu_tbprof_on())) {
+        xemu_tbprof_ht_found++;
+    }
+#endif
 
     jc->array[hash].pc = s.pc;
     qatomic_set(&jc->array[hash].tb, tb);
@@ -1090,6 +1143,11 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     }
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+#if defined(XBOX)
+    if (xemu_tbprof_on()) {
+        atexit(xemu_tbprof_dump);
+    }
+#endif
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
