@@ -3260,3 +3260,23 @@ void tcg_gen_lookup_and_goto_ptr(void)
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
     tcg_temp_free_ptr(ptr);
 }
+
+#if defined(XBOX)
+/* Twin of tcg_gen_lookup_and_goto_ptr for x86 near-return exits: the
+ * helper consults the return-address stack before the jump cache. */
+void tcg_gen_xemu_lookup_ret_and_goto_ptr(void)
+{
+    TCGv_ptr ptr;
+
+    if (tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR) {
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
+    plugin_gen_disable_mem_helpers();
+    ptr = tcg_temp_ebb_new_ptr();
+    gen_helper_xemu_lookup_ret(ptr, tcg_env);
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+}
+#endif

@@ -206,6 +206,9 @@ typedef struct DisasContext {
 #endif
     bool vex_w; /* used by AVX even on 32-bit processors */
     bool jmp_opt; /* use direct block chaining for direct jumps */
+#if defined(XBOX)
+    bool xemu_ret_exit; /* current DISAS_JUMP terminator is a near ret */
+#endif
     bool cc_op_dirty;
 
     CCOp cc_op;  /* current CC operation */
@@ -691,6 +694,15 @@ static TCGv_i32 eip_next_i32(DisasContext *s)
     }
 }
 
+#if defined(XBOX)
+void xemu_i386_ras_flush(CPUState *cpu);
+void xemu_i386_ras_flush(CPUState *cpu)
+{
+    CPUX86State *env = cpu_env(cpu);
+    memset(env->xemu_retc_tb, 0, sizeof(env->xemu_retc_tb));
+}
+#endif
+
 static TCGv eip_next_tl(DisasContext *s)
 {
     assert(s->pc_save != -1);
@@ -704,6 +716,7 @@ static TCGv eip_next_tl(DisasContext *s)
         return tcg_constant_tl((uint32_t)(s->pc - s->cs_base));
     }
 }
+
 
 static TCGv eip_cur_tl(DisasContext *s)
 {
@@ -2964,6 +2977,12 @@ gen_eob(DisasContext *s, int mode)
     } else if (mode == DISAS_JUMP &&
                /* give irqs a chance to happen */
                !inhibit_reset) {
+#if defined(XBOX)
+        if (s->xemu_ret_exit) {
+            s->xemu_ret_exit = false;
+            tcg_gen_xemu_lookup_ret_and_goto_ptr();
+        } else
+#endif
         tcg_gen_lookup_and_goto_ptr();
     } else {
         tcg_gen_exit_tb(NULL, 0);
@@ -4581,6 +4600,9 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_7_0_ecx_features = env->features[FEAT_7_0_ECX];
     dc->cpuid_7_1_eax_features = env->features[FEAT_7_1_EAX];
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
+#if defined(XBOX)
+    dc->xemu_ret_exit = false;
+#endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
 

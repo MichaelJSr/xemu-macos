@@ -2174,6 +2174,25 @@ typedef struct CPUArchState {
 
     /* Bitmap of available CPU topology levels for this CPU. */
     DECLARE_BITMAP(avail_cpu_topo, CPU_TOPOLOGY_LEVEL__MAX);
+
+#if defined(XBOX)
+    /*
+     * Near-return target memo: direct-mapped eip -> TB cache probed
+     * by the ret exit helper (and, in phase 2, inline at ret sites)
+     * ahead of the jump cache. Entries are validated like jump-cache
+     * hits (cs_base/flags/cflags/CF_INVALID against live state; the
+     * eip key substitutes for the pc compare since pc = cs_base+eip).
+     * Prediction-only state: never migrated, tb pointers cleared with
+     * the jump cache on flush (xemu_i386_ras_flush). A per-depth
+     * return-address ring was measured first and discarded — same-
+     * depth call sites thrash it (fills 2.6x hits on the bench scene)
+     * while the eip-keyed memo has no depth coupling.
+     */
+#define XEMU_RETC_BITS 12
+#define XEMU_RETC_SIZE (1 << XEMU_RETC_BITS)
+    uint32_t xemu_retc_eip[XEMU_RETC_SIZE];
+    void *xemu_retc_tb[XEMU_RETC_SIZE];
+#endif
 } CPUX86State;
 
 struct kvm_msrs;
