@@ -66,6 +66,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.13 | Invalid-surface destruction raced pending submissions | shipped-after-fix |
 | 1.14 | GPU frame-cost campaign menu (A1/A2/B/C/D) on 2026-07 fixtures | settled-negative |
 | 1.15 | Eager report submit (front-run the poll stall) | settled-negative |
+| 1.16 | Vertex copy-on-conflict transient remap (XEMU_VTX_TRANSIENT) | settled-negative |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
@@ -517,6 +518,36 @@ submit/CB-restart overhead.
 **Reopen if**: the idle budget ever has to grow again (e.g. a workload
 where 300 µs causes measurable submit storms) — eager-at-record is the
 natural alternative to re-evaluate.
+
+## 1.16 Vertex copy-on-conflict transient remap — the finish was cheaper
+
+**Status**: settled-negative (designed with trap analysis, implemented
+faithfully in a worktree, measured, reverted 2026-07-05).
+**The idea**: on a recording-CB vertex conflict, copy the new bytes to a
+per-flight-slot transient buffer and remap subsequent overlapping draw
+bindings there (newest-first chained entries; retirement-gated apply to
+the mirror; rotation copy-forward to close the mirror-lag window;
+force-differs exclusion in the exact-refinement path; partial-overlap
+and overflow fall back to a drain). Ceiling estimate: ~6
+finish_vtx_dirty/flip x ~0.5 ms = ~3 ms/flip on F8.
+**Evidence** (interleaved 6 pairs, F8): **-2.09 fps, 6/6 pairs
+negative**. Mechanism counters: vtx_remap_hit 226.7/flip (remapped
+ranges intersect a huge share of subsequent binds — the newest-first
+linear table search became a per-draw fixture), vtx_remap_full
+1.47/flip (64-entry / 2 MiB slot budget overflows every frame; each
+overflow is an ALL-slot drain, strictly heavier than the ~6 targeted
+one-slot waits it replaced), vtx_remap_partial 0.61/flip (more drains).
+**Why dead**: Azurik rewrites broad vertex ranges every frame, so (a)
+the table can't hold a frame's worth of conflicts at any sane size, and
+(b) once entries exist, hundreds of binds/flip pay the search. The
+conflict-wait cost is real but its replacement cost more; the legacy
+targeted wait (215f243be7's submitted-slot wait + tracking clear) is
+the better design point for this workload.
+**Reopen if**: a title shows LOW-count, LARGE-range conflicts (few
+entries, little bind intersection — the opposite shape), or with an
+O(log n) interval structure + frame-sized budget + per-slot targeted
+fallback instead of the all-slot drain; re-run the same counters first
+to check the shape before writing any code.
 
 # 2. MoltenVK / driver level
 
