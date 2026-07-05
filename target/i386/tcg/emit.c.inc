@@ -1572,6 +1572,21 @@ static void gen_BZHI(DisasContext *s, X86DecodedInsn *decode)
     prepare_update2_cc(decode, s, CC_OP_BMILGB + ot);
 }
 
+#if defined(XBOX)
+/* Exit-kind tags for XEMU_GUEST_PROF (1=ret 2=ijmp 3=icall; consumed
+ * by tb_gen_code into the tc.ptr side table). */
+extern int xemu_guestprof_pending_kind;
+extern bool xemu_guestprof_on(void);
+#define XEMU_GP_TAG(k) \
+    do { \
+        if (unlikely(xemu_guestprof_on())) { \
+            xemu_guestprof_pending_kind = (k); \
+        } \
+    } while (0)
+#else
+#define XEMU_GP_TAG(k) do { } while (0)
+#endif
+
 static void gen_CALL(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
@@ -1582,6 +1597,7 @@ static void gen_CALL_m(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
     gen_JMP_m(s, decode);
+    XEMU_GP_TAG(3); /* indirect call */
 }
 
 static void gen_CALLF(DisasContext *s, X86DecodedInsn *decode)
@@ -2320,6 +2336,7 @@ static void gen_JMP_m(DisasContext *s, X86DecodedInsn *decode)
     gen_op_jmp_v(s, s->T0);
     gen_bnd_jmp(s);
     s->base.is_jmp = DISAS_JUMP;
+    XEMU_GP_TAG(2); /* indirect jmp */
 }
 
 static void gen_JMPF(DisasContext *s, X86DecodedInsn *decode)
@@ -3601,6 +3618,10 @@ static void gen_RET(DisasContext *s, X86DecodedInsn *decode)
     gen_op_jmp_v(s, s->T0);
     gen_bnd_jmp(s);
     s->base.is_jmp = DISAS_JUMP;
+    XEMU_GP_TAG(1); /* ret */
+#if defined(XBOX)
+    s->xemu_ret_exit = true;
+#endif
 }
 
 static void gen_RETF(DisasContext *s, X86DecodedInsn *decode)

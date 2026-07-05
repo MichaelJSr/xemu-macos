@@ -556,6 +556,19 @@ recycle_tb:
     existing_tb = tb_link_page(tb);
     assert_no_pages_locked();
 
+#if defined(XBOX)
+    {
+        extern bool xemu_guestprof_on(void);
+        extern int xemu_guestprof_pending_kind;
+        extern void xemu_guestprof_note_tb(const void *, uint64_t, int);
+        if (unlikely(xemu_guestprof_on()) && existing_tb == tb) {
+            xemu_guestprof_note_tb(tb->tc.ptr, (uint64_t)s.pc,
+                                   xemu_guestprof_pending_kind);
+        }
+        xemu_guestprof_pending_kind = 0;
+    }
+#endif
+
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
         if (!recycled) {
@@ -672,6 +685,15 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
 void tcg_flush_jmp_cache(CPUState *cpu)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+#if defined(XBOX)
+    /* Single-target fork (i386-softmmu only): drop the return-address
+     * stack's tb pointers with the jump cache — same lifetime rules. */
+    {
+        extern void xemu_i386_ras_flush(CPUState *cpu);
+        xemu_i386_ras_flush(cpu);
+    }
+#endif
 
     /* During early initialization, the cache may not yet be allocated. */
     if (unlikely(jc == NULL)) {

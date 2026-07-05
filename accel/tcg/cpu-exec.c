@@ -248,6 +248,365 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  */
 #if defined(XBOX)
 /*
+ * XEMU_GUEST_PROF=1: one-run guest profiler.
+ *  - SIGPROF sampler: raw host PCs into a ring (async-signal-safe
+ *    store only); resolved at exit via the tc.ptr side table (guest
+ *    TBs) or dladdr (helpers/host).
+ *  - Exit-kind classification: the i386 emitter tags ret / indirect
+ *    jmp / indirect call; tb_gen_code() records {guest pc, kind} per
+ *    tc.ptr (CF_PCREL leaves tb->pc unusable, so tc.ptr is the key);
+ *    helper_lookup_tb_ptr buckets its calls by source-TB kind.
+ * Measurement-run tool: the classification adds a cached source-TB
+ * resolve per lookup and is not benchmark-neutral.
+ */
+#include <dlfcn.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <mach/mach.h>
+#include <pthread.h>
+#define XEMU_GUEST_PROF_SAMPLER 1
+#endif
+
+enum {
+    XEMU_GP_KIND_OTHER = 0,
+    XEMU_GP_KIND_RET = 1,
+    XEMU_GP_KIND_IJMP = 2,
+    XEMU_GP_KIND_ICALL = 3,
+};
+#define XEMU_GP_NKINDS 4
+
+/* Set by the i386 emitter for the TB being translated. */
+int xemu_guestprof_pending_kind;
+
+bool xemu_guestprof_on(void);
+void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc, int kind);
+
+bool xemu_guestprof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_GUEST_PROF");
+        on = (e && e[0] == '1') ? 1 : 0;
+    }
+    return on;
+}
+
+/* tc.ptr -> {guest pc, exit kind}; open-addressed, translation-locked. */
+#define XEMU_GP_TAB_BITS 20
+#define XEMU_GP_TAB_SIZE (1u << XEMU_GP_TAB_BITS)
+typedef struct {
+    const void *tc_ptr;
+    uint64_t guest_pc;
+    uint8_t kind;
+} XemuGpEnt;
+static XemuGpEnt *xemu_gp_tab;
+
+static inline uint32_t xemu_gp_hash(const void *p)
+{
+    uint64_t v = (uint64_t)(uintptr_t)p;
+    v ^= v >> 29;
+    v *= 0xff51afd7ed558ccdull;
+    v ^= v >> 32;
+    return (uint32_t)v & (XEMU_GP_TAB_SIZE - 1);
+}
+
+void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc, int kind)
+{
+    if (!xemu_gp_tab) {
+        xemu_gp_tab = g_malloc0(sizeof(XemuGpEnt) * XEMU_GP_TAB_SIZE);
+    }
+    uint32_t h = xemu_gp_hash(tc_ptr);
+    for (uint32_t i = 0; i < 64; i++, h = (h + 1) & (XEMU_GP_TAB_SIZE - 1)) {
+        if (!xemu_gp_tab[h].tc_ptr || xemu_gp_tab[h].tc_ptr == tc_ptr) {
+            xemu_gp_tab[h].tc_ptr = tc_ptr;
+            xemu_gp_tab[h].guest_pc = guest_pc;
+            xemu_gp_tab[h].kind = (uint8_t)kind;
+            return;
+        }
+    }
+}
+
+static XemuGpEnt *xemu_gp_find(const void *tc_ptr)
+{
+    if (!xemu_gp_tab) {
+        return NULL;
+    }
+    uint32_t h = xemu_gp_hash(tc_ptr);
+    for (uint32_t i = 0; i < 64; i++, h = (h + 1) & (XEMU_GP_TAB_SIZE - 1)) {
+        if (xemu_gp_tab[h].tc_ptr == tc_ptr) {
+            return &xemu_gp_tab[h];
+        }
+        if (!xemu_gp_tab[h].tc_ptr) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/* Per-exit-kind lookup counters (vCPU thread only). */
+static uint64_t xemu_gp_kind_lookups[XEMU_GP_NKINDS];
+static uint64_t xemu_gp_kind_misses[XEMU_GP_NKINDS];
+static int xemu_gp_cur_kind;
+
+/*
+ * Source-TB exit kind for a helper return address; direct-mapped
+ * cache in front of the qht walk (hot source TBs are few).
+ */
+static uintptr_t xemu_gp_ra_key[256];
+static uint8_t xemu_gp_ra_kind[256];
+
+static int xemu_gp_kind_for_ra(uintptr_t ra)
+{
+    uint32_t h = (ra >> 4) & 255;
+    if (xemu_gp_ra_key[h] == ra) {
+        return xemu_gp_ra_kind[h];
+    }
+    TranslationBlock *stb = tcg_tb_lookup(ra);
+    int k = XEMU_GP_KIND_OTHER;
+    if (stb) {
+        XemuGpEnt *e = xemu_gp_find(stb->tc.ptr);
+        if (e) {
+            k = e->kind;
+        }
+    }
+    xemu_gp_ra_key[h] = ra;
+    xemu_gp_ra_kind[h] = (uint8_t)k;
+    return k;
+}
+
+#if defined(XEMU_GUEST_PROF_SAMPLER)
+/*
+ * macOS delivers process-wide SIGPROF to an arbitrary thread (not the
+ * one consuming CPU), so sample the vCPU thread from a dedicated
+ * thread instead: suspend, read ARM_THREAD_STATE64.pc, resume — the
+ * same approach sample(1) uses. The vCPU registers its mach port on
+ * first cpu_exec entry.
+ */
+#define XEMU_GP_RING_BITS 21
+#define XEMU_GP_RING_SIZE (1u << XEMU_GP_RING_BITS)
+static uint64_t *xemu_gp_ring;
+static uint32_t xemu_gp_ring_idx;
+static mach_port_t xemu_gp_vcpu_port;
+static bool xemu_gp_sampler_stop;
+
+void xemu_guestprof_register_vcpu(void);
+void xemu_guestprof_register_vcpu(void)
+{
+    if (xemu_guestprof_on() && !xemu_gp_vcpu_port) {
+        xemu_gp_vcpu_port = pthread_mach_thread_np(pthread_self());
+    }
+}
+
+static void *xemu_gp_sampler(void *arg)
+{
+    while (!qatomic_read(&xemu_gp_sampler_stop)) {
+        mach_port_t port = xemu_gp_vcpu_port;
+        if (port) {
+            arm_thread_state64_t st;
+            mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+            if (thread_suspend(port) == KERN_SUCCESS) {
+                if (thread_get_state(port, ARM_THREAD_STATE64,
+                                     (thread_state_t)&st,
+                                     &cnt) == KERN_SUCCESS) {
+                    uint32_t i = xemu_gp_ring_idx++;
+                    xemu_gp_ring[i & (XEMU_GP_RING_SIZE - 1)] =
+                        arm_thread_state64_get_pc(st);
+                }
+                thread_resume(port);
+            }
+        }
+        g_usleep(1000);
+    }
+    return NULL;
+}
+#endif
+
+static void xemu_guestprof_dump(void)
+{
+#if defined(XEMU_GUEST_PROF_SAMPLER)
+    qatomic_set(&xemu_gp_sampler_stop, true);
+    g_usleep(5000);
+
+    uint32_t n = qatomic_read(&xemu_gp_ring_idx);
+    uint32_t filled = MIN(n, XEMU_GP_RING_SIZE);
+    if (filled == 0) {
+        return;
+    }
+
+    /* Aggregate: guest TBs by tc-side-table hit, else host symbol. */
+    GHashTable *guest = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTable *pages = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTable *host = g_hash_table_new(g_str_hash, g_str_equal);
+    uint64_t guest_total = 0, host_total = 0, unknown = 0;
+
+    for (uint32_t i = 0; i < filled; i++) {
+        uint64_t pc = xemu_gp_ring[i];
+        TranslationBlock *tb = tcg_tb_lookup((uintptr_t)pc);
+        if (tb) {
+            XemuGpEnt *e = xemu_gp_find(tb->tc.ptr);
+            uint64_t gpc = e ? e->guest_pc : 0;
+            guest_total++;
+            g_hash_table_insert(
+                guest, (gpointer)(uintptr_t)gpc,
+                (gpointer)((uintptr_t)g_hash_table_lookup(
+                               guest, (gpointer)(uintptr_t)gpc) + 1));
+            g_hash_table_insert(
+                pages, (gpointer)(uintptr_t)(gpc & ~0xfffull),
+                (gpointer)((uintptr_t)g_hash_table_lookup(
+                               pages,
+                               (gpointer)(uintptr_t)(gpc & ~0xfffull)) + 1));
+        } else {
+            Dl_info di;
+            const char *name = "?";
+            if (dladdr((void *)(uintptr_t)pc, &di) && di.dli_sname) {
+                name = di.dli_sname;
+            } else {
+                unknown++;
+            }
+            host_total++;
+            char *key = g_strdup(name);
+            gpointer old = g_hash_table_lookup(host, key);
+            if (old) {
+                g_free(key);
+                key = NULL;
+            }
+            g_hash_table_insert(host, key ? key : g_strdup(name),
+                                (gpointer)((uintptr_t)old + 1));
+        }
+    }
+
+    fprintf(stderr,
+            "xemu: guestprof %u samples: guest-TCG %llu (%.1f%%), "
+            "host %llu (%.1f%%, %llu unsymbolized)\n",
+            filled, (unsigned long long)guest_total,
+            100.0 * guest_total / filled, (unsigned long long)host_total,
+            100.0 * host_total / filled, (unsigned long long)unknown);
+
+    int rank;
+
+    {
+        GHashTableIter it;
+        gpointer kk, vv;
+        struct { const char *n; uint64_t c; } top[512];
+        int cnt = 0;
+        g_hash_table_iter_init(&it, host);
+        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 512) {
+            top[cnt].n = kk;
+            top[cnt].c = (uintptr_t)vv;
+            cnt++;
+        }
+        for (int a = 0; a < cnt; a++) {
+            for (int b = a + 1; b < cnt; b++) {
+                if (top[b].c > top[a].c) {
+                    typeof(top[0]) t = top[a];
+                    top[a] = top[b];
+                    top[b] = t;
+                }
+            }
+        }
+        fprintf(stderr, "xemu: guestprof top host symbols:\n");
+        for (rank = 0; rank < MIN(cnt, 25); rank++) {
+            fprintf(stderr, "xemu:   %6.2f%%  %s\n",
+                    100.0 * top[rank].c / filled, top[rank].n);
+        }
+    }
+
+    {
+        GHashTableIter it;
+        gpointer kk, vv;
+        struct { uint64_t pc; uint64_t c; } top[4096];
+        int cnt = 0;
+        g_hash_table_iter_init(&it, guest);
+        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 4096) {
+            top[cnt].pc = (uintptr_t)kk;
+            top[cnt].c = (uintptr_t)vv;
+            cnt++;
+        }
+        for (int a = 0; a < cnt; a++) {
+            for (int b = a + 1; b < cnt; b++) {
+                if (top[b].c > top[a].c) {
+                    typeof(top[0]) t = top[a];
+                    top[a] = top[b];
+                    top[b] = t;
+                }
+            }
+        }
+        fprintf(stderr,
+                "xemu: guestprof top guest TBs (%d distinct):\n", cnt);
+        for (rank = 0; rank < MIN(cnt, 30); rank++) {
+            fprintf(stderr, "xemu:   %6.2f%%  tb_pc=0x%08llx\n",
+                    100.0 * top[rank].c / filled,
+                    (unsigned long long)top[rank].pc);
+        }
+    }
+
+    {
+        GHashTableIter it;
+        gpointer kk, vv;
+        struct { uint64_t pg; uint64_t c; } top[4096];
+        int cnt = 0;
+        g_hash_table_iter_init(&it, pages);
+        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 4096) {
+            top[cnt].pg = (uintptr_t)kk;
+            top[cnt].c = (uintptr_t)vv;
+            cnt++;
+        }
+        for (int a = 0; a < cnt; a++) {
+            for (int b = a + 1; b < cnt; b++) {
+                if (top[b].c > top[a].c) {
+                    typeof(top[0]) t = top[a];
+                    top[a] = top[b];
+                    top[b] = t;
+                }
+            }
+        }
+        fprintf(stderr,
+                "xemu: guestprof top guest 4K pages (%d distinct):\n", cnt);
+        for (rank = 0; rank < MIN(cnt, 15); rank++) {
+            fprintf(stderr, "xemu:   %6.2f%%  page=0x%08llx\n",
+                    100.0 * top[rank].c / filled,
+                    (unsigned long long)top[rank].pg);
+        }
+    }
+
+    g_hash_table_destroy(guest);
+    g_hash_table_destroy(pages);
+    g_hash_table_destroy(host);
+#endif
+
+    {
+        static const char *const kn[XEMU_GP_NKINDS] = {
+            "other", "ret", "ijmp", "icall"
+        };
+        uint64_t tot = 0;
+        for (int i = 0; i < XEMU_GP_NKINDS; i++) {
+            tot += xemu_gp_kind_lookups[i];
+        }
+        if (tot) {
+            fprintf(stderr, "xemu: guestprof lookup exit kinds:\n");
+            for (int i = 0; i < XEMU_GP_NKINDS; i++) {
+                uint64_t l = xemu_gp_kind_lookups[i];
+                uint64_t m = xemu_gp_kind_misses[i];
+                fprintf(stderr,
+                        "xemu:   %-5s lookups=%llu (%.1f%%) "
+                        "jc_miss=%llu (%.2f%%)\n",
+                        kn[i], (unsigned long long)l, 100.0 * l / tot,
+                        (unsigned long long)m, l ? 100.0 * m / l : 0.0);
+            }
+        }
+    }
+}
+
+static void xemu_guestprof_start(void)
+{
+#if defined(XEMU_GUEST_PROF_SAMPLER)
+    xemu_gp_ring = g_malloc0(sizeof(uint64_t) * XEMU_GP_RING_SIZE);
+    pthread_t th;
+    pthread_create(&th, NULL, xemu_gp_sampler, NULL);
+#endif
+    atexit(xemu_guestprof_dump);
+}
+
+/*
  * XEMU_TB_PROF=1: jump-cache effectiveness counters for the single Xbox
  * vCPU (plain increments; the vCPU thread is the only writer).
  */
@@ -315,6 +674,11 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
         goto hit;
     }
 
+#if defined(XBOX)
+    if (unlikely(xemu_guestprof_on())) {
+        xemu_gp_kind_misses[xemu_gp_cur_kind]++;
+    }
+#endif
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) {
         return NULL;
@@ -467,7 +831,18 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
         cpu_loop_exit(cpu);
     }
 
+#if defined(XBOX)
+    if (unlikely(xemu_guestprof_on())) {
+        int k = xemu_gp_kind_for_ra(
+            (uintptr_t)__builtin_return_address(0));
+        xemu_gp_kind_lookups[k]++;
+        xemu_gp_cur_kind = k;
+    }
+#endif
     tb = tb_lookup(cpu, s);
+#if defined(XBOX)
+    xemu_gp_cur_kind = XEMU_GP_KIND_OTHER;
+#endif
     if (tb == NULL) {
         return tcg_code_gen_epilogue;
     }
@@ -478,6 +853,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
 
     return tb->tc.ptr;
 }
+
 
 /* Return the current PC from CPU, which may be cached in TB. */
 static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
@@ -1101,6 +1477,10 @@ int cpu_exec(CPUState *cpu)
     /* replay_interrupt may need current_cpu */
     current_cpu = cpu;
 
+#if defined(XBOX) && defined(XEMU_GUEST_PROF_SAMPLER)
+    xemu_guestprof_register_vcpu();
+#endif
+
     if (cpu_handle_halt(cpu)) {
         return EXCP_HALTED;
     }
@@ -1146,6 +1526,9 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
 #if defined(XBOX)
     if (xemu_tbprof_on()) {
         atexit(xemu_tbprof_dump);
+    }
+    if (xemu_guestprof_on()) {
+        xemu_guestprof_start();
     }
 #endif
     tlb_init(cpu);
