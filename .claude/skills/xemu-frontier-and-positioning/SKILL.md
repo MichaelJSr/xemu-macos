@@ -63,6 +63,17 @@ cited as recorded history, not re-run for this skill.
 >    the heavy scene, and it halved finish_vtx_dirty as a side
 >    effect. Report-path latency is now near its structural minimum.
 > 5. Push-model present (unchanged, still open).
+> v0.10.1 EPILOGUE (2026-07-05): the batch shipped and tagged —
+> cross-binary gauntlet vs the v0.10 release binary on F8:
+> 23.88±1.85 → 27.42±1.41 (+14.8%, 5/6 pairs). Additional outcomes:
+> BQL-free MMIO for PFB/USER shipped (fps-parity, jitter win —
+> archaeology 7.5); eager report submit killed (archaeology 1.15);
+> SSE host path extended to x86_64 dark (same-ISA bit-perfect);
+> vertex transient-copy deferred WITH design notes (~3 ms/flip
+> ceiling — the top renderer item next batch); PGO retrained on F8
+> (+ the build.sh merge-trap fixes, archaeology 8.4). The 60 fps
+> wall on the heavy scene remains guest TCG throughput + the
+> deferred vertex redesign.
 > Caveat that must ride every CPU-side claim: this title busy-polls —
 > vCPU utilization is never evidence of guest-boundness on its own
 > (F6 shows ~95% vCPU at a flat 60 fps cap); PFIFO-starvation time is

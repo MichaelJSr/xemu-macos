@@ -65,6 +65,9 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.12 | Measured "not worth it" set (barriers, S3TC, spec constants, input ring, ext-mem-host bar, async pipeline compile) | settled-negative |
 | 1.13 | Invalid-surface destruction raced pending submissions | shipped-after-fix |
 | 1.14 | GPU frame-cost campaign menu (A1/A2/B/C/D) on 2026-07 fixtures | settled-negative |
+| 1.15 | Eager report submit (front-run the poll stall) | settled-negative |
+| 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
+| 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -493,6 +496,27 @@ re-run campaign Phase 0 and Phase 2 gates first (draws/flip in
 envelope, fence-wait a large fraction of frame time, encoder time ≈
 frame budget). The pass-cause data (clears 5.0/flip) becomes actionable
 again only under that condition.
+
+## 1.15 Eager report submit — front-running the poll stall
+
+**Status**: settled-negative (implemented, measured, reverted same day
+2026-07-05; README failed-experiments row).
+**The idea**: submit the recording CB when its Nth zpass report is
+*requested* (`XEMU_REPORTS_EAGER=N` in `pgraph_vk_get_report`), so GPU
+execution overlaps remaining guest frame work instead of starting only
+after the guest stalls into the idle-budget valve.
+**Evidence**: interleaved same-binary A/B, F8 scene, 6 pairs: mean
+−0.08 fps (deltas +0.26/+3.04/+0.09/−0.87/−0.65/−2.38), plus a
+persistent +4% draws/flip composition shift in the eager arm
+(frame-cadence feedback). Two E runs also captured almost no in-game
+intervals (harness noise), further weakening the early positives.
+**Why dead**: with the idle budget already at 300 µs (same-day ship),
+the guest's residual wait is GPU catch-up time — eager submission
+relocates the submit without shrinking that, while paying extra
+submit/CB-restart overhead.
+**Reopen if**: the idle budget ever has to grow again (e.g. a workload
+where 300 µs causes measurable submit storms) — eager-at-record is the
+natural alternative to re-evaluate.
 
 # 2. MoltenVK / driver level
 
@@ -1025,6 +1049,32 @@ lock drop/retake points; the two-lock dance makes "obviously invariant"
 conditions mutable mid-loop.
 **Reopen if**: n/a.
 
+## 7.5 BQL-free MMIO dispatch for PFB/USER (lockless_io on the TCG path)
+
+**Status**: shipped (`ee9100e538`, 2026-07-05) — with an honest
+fps-parity receipt, not a speed claim.
+**Mechanism**: `XEMU_MMIO_PROF` (new, default-off) measured 8.2M guest
+MMIO ops in 70 s on the heavy scene — PFB 4.85M (3.2M loads =
+`NV_PFB_WBC` write-combine-flush polling) + USER 1.58M doorbell
+stores = 78% of all traffic — each paying the unconditional
+`BQL_LOCK_GUARD()` in cputlb's MMIO helpers. Upstream's
+`mr->lockless_io` (added for the address-space path) is now honored on
+the TCG fast path too, and the two audited regions opt in (PFB:
+constants/plain regs, no IRQs; USER: entire handler under
+`pfifo.lock` with the Invariant-10 kick discipline).
+**Evidence**: locked crossings 8.2M → 1.64M (−80%, histogram-verified).
+6-pair A/B: fps parity (mean +0.54 riding one outlier; the +0.3-1.0
+prediction recorded as killed) BUT per-run fps stdev 1.21 → 0.89 with
+5/6 E-runs steadier — the BQL-spike class (max 340 µs/acquire) no
+longer hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
+**Lesson**: average lock cost (~52 ns) was never the story; the tail
+was. When a mean-fps A/B reads parity on a lock-scope change, check
+intra-run variance before calling it valueless.
+**Reopen if**: audits for PGRAPH/PMC/APU-VP regions (the remaining 20%)
+are written — PMC raises IRQs (BQL-bound), PGRAPH races the PFIFO
+thread, APU-VP needs its own review; none are trivially safe like
+PFB/USER.
+
 ---
 
 # 8. Build / CI / release
@@ -1079,6 +1129,25 @@ fresh version every release. `v0.8.153-macos.1` (at `c2860668b7`) remains
 published under the old upstream-suffixed scheme; `v0.9` (at `cf85e96597`)
 begins the fork-versioned scheme.
 **Reopen if**: never. There is no safe tag mutation on a published release.
+
+## 8.4 PGO merge-skip trap + the set -e ls-glob CI red
+
+**Status**: shipped-after-fix (`fcb874d256` + same-day fix, 2026-07-05).
+**Trap 1 (silent)**: build.sh use-mode merged profraw → profdata only
+when `default.profdata` was ABSENT — so the first use-build after a
+retrain silently used the stale committed profile. Detected because the
+"retrained" profdata's mtime never moved; cost one wasted 25-minute
+build. Fixed: re-merge when any .profraw is newer than the profdata.
+**Trap 2 (loud)**: the fix's `newest_raw=$(ls -t ...*.profraw | head -1)`
+aborts build.sh under `set -e` when the glob matches nothing — which is
+exactly CI's use-mode leg (committed profdata, no raw files in the
+source tarball). All-macOS-red on push; fixed with `|| true` inside the
+substitution and BOTH paths simulated under `bash -e` before re-push.
+**Lessons**: (a) build-script edits are code — simulate them under the
+script's own shell options before pushing (the local build had run
+BEFORE the edit, so "it built locally" was vacuously true); (b) an
+`$(assignment)` is not exempt from `set -e`.
+**Reopen if**: n/a.
 
 ---
 
