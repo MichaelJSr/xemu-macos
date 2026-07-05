@@ -3855,6 +3855,7 @@ static inline bool xemu_sse_neon_usable(CPUX86State *env)
 #if defined(__aarch64__)
 
 #define XEMU_FPCR_FZ (1ull << 24)
+#define XEMU_FPCR_RMODE_MASK (3ull << 22)
 
 static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
@@ -3862,6 +3863,13 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
     __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
     want = env->sse_status.flush_to_zero ? (fpcr | XEMU_FPCR_FZ)
                                          : (fpcr & ~XEMU_FPCR_FZ);
+    /* usable() guarantees the guest's SSE rounding is RN, but the live
+     * host register can carry another mode leaked from the x87
+     * hard-FPU brackets (guest x87 RC and SSE RC are independent).
+     * Force RN (RMode 00) so cancellation signs etc. match. Caught by
+     * the =2 differential run on x86_64: host -0.0 vs soft +0.0 on
+     * exact cancellation under a leaked round-down. */
+    want &= ~XEMU_FPCR_RMODE_MASK;
     if (want != fpcr) {
         __asm__ volatile("msr fpcr, %0" : : "r"(want));
     }
@@ -3893,11 +3901,15 @@ typedef float32x4_t xemu_v4f;
 
 #define XEMU_MXCSR_FZ  (1u << 15)
 #define XEMU_MXCSR_DAZ (1u << 6)
+#define XEMU_MXCSR_RC_MASK (3u << 13)
 
 static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
     uint32_t csr = _mm_getcsr(), want;
-    want = csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ);
+    /* Same RN forcing as the aarch64 bracket: usable() verified the
+     * guest wants RN; clear any rounding mode leaked into MXCSR by
+     * the x87 hard-FPU path. */
+    want = csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ | XEMU_MXCSR_RC_MASK);
     if (env->sse_status.flush_to_zero) {
         want |= XEMU_MXCSR_FZ;
     }
