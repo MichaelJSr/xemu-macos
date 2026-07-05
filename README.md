@@ -118,11 +118,13 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
 | `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + idle-budget fallback) |
-| `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.11 value (clamped 0-100000) |
+| `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.10.1 value (clamped 0-100000) |
+| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER) — bisect hatch |
+| `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
-| `XEMU_SSE_NEON` | `1` enables the NEON fast path for packed/scalar single-precision SSE arithmetic (dark A/B knob — measured parity on the bench scene post-PGO; bit-exact per the `=2` differential mode, which runs both paths and aborts on divergence) |
+| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts (same-ISA: bit-perfect incl. NaN payloads). Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -259,6 +261,24 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **BQL-free MMIO dispatch for the hottest guest register blocks.**
+  `XEMU_MMIO_PROF` measured 8.2M guest MMIO ops in 70 s on the heavy
+  savestate scene — PFB alone 4.85M (dominated by `NV_PFB_WBC`
+  write-combine flush polling) and USER doorbells 1.58M, 78% of all
+  traffic — each paying the unconditional BQL in TCG's MMIO helpers
+  (upstream's `lockless_io` flag was only honored on the
+  address-space path; the fork's cputlb now honors it too). Both
+  regions audited: PFB reads return constants or plain `regs[]`
+  (its one cross-thread reader was never BQL-protected); USER holds
+  `pfifo.lock` for its entire handler and kicks under it. Result:
+  locked MMIO crossings drop ~80%. Honest measurement (6 interleaved
+  pairs, F8 scene): **fps parity** (mean +0.54 driven by one outlier
+  pair — not claimed as a speedup), with a consistent intra-run
+  steadiness improvement (per-run fps stdev 1.21 → 0.89, 5/6 pairs
+  steadier — the 340 µs BQL-spike class no longer hits these ops).
+  Shipped for the jitter benefit and for weaker/busier hosts where
+  main-loop BQL pressure is higher; `XEMU_MMIO_BQL=1` restores
+  locked dispatch.
 - **Deferred-report idle budget cut 5 ms → 300 µs
   (`XEMU_REPORTS_BUDGET_US`).** Guests that consume a zpass report
   value mid-frame spin-wait on it with an idle FIFO; the deferred
@@ -801,6 +821,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| Eager report submit (`XEMU_REPORTS_EAGER=N`, 2026-07-04) | Submit the recording CB when its Nth zpass report is *requested*, front-running the guest's poll stall so GPU execution overlaps remaining guest frame work. Measured dead on the F8 scene (interleaved, 6 pairs): mean −0.08 fps (deltas +0.26/+3.04/+0.09/−0.87/−0.65/−2.38 — sign-inconsistent), with a persistent +4% draws/flip composition shift in the eager arm. Mechanism of the neutrality: the 300 µs idle budget (shipped earlier the same day) already sits near the structural minimum — the guest's post-submit wait is GPU catch-up time, which eager submission merely moves without shrinking, while adding submit overhead. Reverted; the idle-budget path remains the shipped design |
 | Per-flight vertex-RAM mirrors (vertex shadow copies) | One 128 MiB host mirror per flight slot; in-flight slots read a frozen mirror (cross-slot conflict waits disappear), `uploaded_bitmap` doubles as the delta log applied at slot reclaim. Measured ~**neutral** on the Azurik attract reel (interval-by-interval flips within noise of the single-mirror build; an initial "-30%" read traced to an invalid baseline run parked on a 3-draws/flip static screen). Neutral because the dominant cost is elsewhere: the heavy-reel intervals show 440-700 `finish_vtx_dirty` per 5 s *with or without* mirrors — guest vertex streams write page-boundary-overlapping ranges, and the recording-CB conflict check is page-granular, so consecutive writes false-share the boundary page and cascade through finish → rotate → 20+ ms mid-frame reclaim waits. Mirrors can't remove those (the conflict is with the *recording* CB, not in-flight slots). Reverted as not-worth-it: +128 MiB, swap/delta complexity, no measured win. The real target this exposed: byte-granular (or split-at-page) conflict refinement for the current-slot check — see Future vectors |
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
