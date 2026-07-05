@@ -275,7 +275,16 @@ In-app Settings covers the main toggles.
   fps-parity at a 95.4% live hit rate; phase 2 inlined the probe at
   ret sites in generated code and measured **+0.77 fps with 6/6
   pairs positive** (helper hits collapse 362M→13k as the inline
-  path absorbs them — the campaign's first realized guest-CPU win). Two honest kills
+  path absorbs them — the campaign's first realized guest-CPU win).
+  The same technique then extended to the other 54% of lookups: an
+  inline probe of the real jump cache at indirect/cross-page exits
+  (emitter in accel/tcg, the only place that may know the cache
+  layout), measured at +0.70 fps family-total with the enabled arm
+  carrying +5.5% more draws/flip (~+8% draw throughput). A third
+  audited MMIO region joined the lockless set: the APU VP doorbell
+  block (constants-only reads; writes under the device lock with IRQ
+  raising already deferred to the APU thread's own BQL bracket) —
+  verified absent from the locked-path histogram afterwards. Two honest kills
   along the way are in the failed-experiments table (JIT write-protect
   caching — a sampling-skid mirage; the per-depth return-address
   ring — wrong key shape).

@@ -603,6 +603,17 @@ inside the registered +0.7-1.8 band, with the enabled arm carrying
 more draws/flip. First realized guest-CPU fps win — the exit-kind
 census aimed it, two mirages died en route (1.16, 1.17), and the
 mechanism landed in-band.
+**Phase 3 (same campaign)**: the inline technique generalized to the
+real jump cache for non-ret indirect/cross-page exits — emitter in
+accel/tcg/xemu-inline-jc.c (sole owner of the CPUJumpCache layout;
+mind the rcu_head ahead of the entry array), i386 passes context
+constants + the env→CPUState field offset. Family A/B (one hatch,
+XEMU_RAS=0): +0.70 fps with +5.5% draws/flip in the enabled arm
+(~+8% draw throughput; scene feedback understates fps deltas —
+compare draw throughput when arms diverge in composition). Helper
+lookups 837M→473M. Also: apu-vp joined the lockless-MMIO set on the
+PFB/USER audit pattern (deferred-IRQ discipline verified at
+vp.c fe_method → apu.c se_frame's own bql bracket).
 **Reopen the ring if**: a workload shows the memo thrashing on
 polymorphic returns (same ret eip, alternating targets — impossible:
 ret target IS the eip; the memo cannot alias that way. The ring has
