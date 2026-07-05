@@ -13,7 +13,15 @@
 
 #include "dsp_cpu.h"
 
-#if defined(__APPLE__) && defined(__aarch64__)
+/*
+ * AArch64 POSIX hosts. Windows/ARM64 is excluded: the code buffer uses
+ * POSIX mmap (PROT_EXEC | MAP_ANONYMOUS), and llvm-mingw has no
+ * equivalent path wired. On Apple the buffer is MAP_JIT +
+ * pthread_jit_write_protect_np; elsewhere it is plain RWX (refused on
+ * hardened kernels — SELinux deny_execmem / PaX — where the engine
+ * falls back to the interpreter at init).
+ */
+#if defined(__aarch64__) && !defined(_WIN32)
 #define DSP56K_JIT_SUPPORTED 1
 #else
 #define DSP56K_JIT_SUPPORTED 0
