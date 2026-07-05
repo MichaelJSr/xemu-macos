@@ -37,25 +37,38 @@ cited as recorded history, not re-run for this skill.
 > validation) advanced: the static gating audit is committed
 > (`docs/windows-gating-audit.md`) with a six-item needs-real-HW list —
 > what remains genuinely needs Windows hardware. New top of the ranked
-> list, by measured mass × feasibility:
-> 1. **Dirty-clear TLB-walk coalescing** — ~1.8 ms/flip on PFIFO
->    (vertex 537 + texture 245 of 6827 thread samples; tlb_reset_dirty
->    walks the whole TLB per genuinely-dirty test_and_clear) plus a
->    vCPU-side echo (notdirty writes ~2.8%, TB-link dirty clears 3.4%).
->    Design-gated: Invariant 4 + archaeology 1.9.
-> 2. **PGO build experiment** (`XEMU_PGO=generate/use`, already wired) —
->    cheapest lever against the measured TCG profile; milestone: ≥+1 fps
->    interleaved on F5 or kill at <+0.5.
-> 3. **Guest TCG throughput** — `helper_lookup_tb_ptr` 17.9% of the
->    vCPU thread, TLB fill/set ~14%, SSE packed-float helpers 3.7%
->    (NEON lowering = hard-FPU-class project). Core-QEMU risk; shared
->    with Windows.
-> 4. Push-model present (unchanged, now relatively higher because the
->    GPU items fell away).
+> list, by measured mass × feasibility — WITH SAME-DAY OUTCOMES from
+> the evening session (receipts in the v0.10..e0c04ce8b3 commit
+> bodies; scene table vs v0.9: snap4-area 24.2→32, F7 ~40→47,
+> F5 46.6→50, F6 60 held):
+> 1. **Dirty-clear TLB-walk coalescing — PARKED same day**: the only
+>    multi-walk caller is cold (ramblock init); the surviving design
+>    (cross-call TLB re-arm deferral) widens an archaeology-1.9-class
+>    race window and needs its own review; ceiling ~1-1.5 fps at the
+>    new ~31 fps floor.
+> 2. **PGO — SHIPPED** (`19fca12174`): +9.4% on the heavy scene
+>    (25.42±0.34 → 27.81±0.62, 3/3 pairs); profile committed at
+>    pgo/default.profdata; CI arm64-release legs build with it.
+> 3. **Guest TCG throughput — NOW THE #1 OPEN LEVER**:
+>    `helper_lookup_tb_ptr` 15.8% of the vCPU thread post-PGO (~75%
+>    of its cost is hit-path — get_tb_cpu_state+hash+probe — so a
+>    jump-cache-size bump has a small ceiling; parked). SSE
+>    packed-float NEON lowering was BUILT and proven bit-exact via
+>    its own differential harness (=2 mode), but measured parity
+>    post-PGO (PGO'd softfloat + serializing FPCR bracket under
+>    guest FTZ) — ships dark as `XEMU_SSE_NEON=1` (`e015705d21`).
+> 4. **Deferred-report idle budget — SHIPPED same day**
+>    (`7a9b116680`, 5 ms → 300 µs, `XEMU_REPORTS_BUDGET_US`): guests
+>    polling same-frame zpass reports stalled on it; +1.3-1.5 fps on
+>    the heavy scene, and it halved finish_vtx_dirty as a side
+>    effect. Report-path latency is now near its structural minimum.
+> 5. Push-model present (unchanged, still open).
 > Caveat that must ride every CPU-side claim: this title busy-polls —
 > vCPU utilization is never evidence of guest-boundness on its own
 > (F6 shows ~95% vCPU at a flat 60 fps cap); PFIFO-starvation time is
-> the valid signal (≥5.8 ms/flip on F5).
+> the valid signal. And RE-BASE PREDICTIONS after every shipped win:
+> the SSE parity was a direct consequence of predicting against a
+> pre-PGO profile (sequential-optimization interaction).
 
 ## When NOT to use this skill
 

@@ -39,6 +39,21 @@ scene identity via draws/flip. **Live-movement runs have ±5 fps route
 variance** — use ≥3 interleaved pairs and compare means, or prefer
 static scenes for small deltas.
 
+**Scene-evolution caveats (learned 2026-07-04):** (1) a "static" save
+can still evolve — combat saves can kill the idle player mid-run and
+respawn into a lighter scene (one 2026-07 save did; the owner fixed
+it, but death still shifts fps slightly) — keep captures ≤60 s,
+check the per-interval fps/draws trajectory for a regime change, and
+when in doubt compare the first 5-8 in-game intervals per run;
+(2) frame-rate feedback — the guest adapts effect load to frame
+time, so the faster arm can legitimately show a few % different
+draws/flip from the first interval on (seen: 786 vs 740 at +1.4 fps);
+interleaved consistent-sign deltas still carry the conclusion;
+(3) cross-experiment floor drift is real (both arms of a later
+experiment ran ~3 fps above an earlier experiment's arms —
+thermal/context) — only within-experiment interleaved deltas are
+citable, never arms from different experiments.
+
 ## Background input injection (no focus, no OS events)
 
 `XEMU_INPUT_PIPE=<fifo>` + lines `down <sdl_scancode>` /
