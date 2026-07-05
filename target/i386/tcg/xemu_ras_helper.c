@@ -85,13 +85,16 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
 
         uint32_t eip = (uint32_t)env->eip;
         uint32_t idx = (eip * 2654435761u) >> (32 - XEMU_RETC_BITS);
-        if (env->xemu_retc_eip[idx] == eip) {
-            TranslationBlock *tb = env->xemu_retc_tb[idx];
+        struct XemuRetcEntry *e = &env->xemu_retc[idx];
+        if (e->eip == eip) {
+            TranslationBlock *tb = e->tb;
             if (tb) {
                 TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
-                if (tb->cs_base == s.cs_base &&
-                    tb->flags == s.flags &&
+                if (e->cs_base == (uint32_t)s.cs_base &&
+                    e->flags == s.flags &&
                     tb_cflags(tb) == cpu->tcg_cflags &&
+                    tb->cs_base == s.cs_base &&
+                    tb->flags == s.flags &&
                     (tb_cflags(tb) & CF_PCREL || tb->pc == s.pc)) {
                     xemu_ras_hits++;
                     cpu->neg.can_do_io = true;
@@ -103,9 +106,12 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
         const void *ptr = helper_lookup_tb_ptr(env);
         if (ptr != tcg_code_gen_epilogue) {
             TranslationBlock *tb = tcg_tb_lookup((uintptr_t)ptr);
-            if (tb) {
-                env->xemu_retc_eip[idx] = eip;
-                env->xemu_retc_tb[idx] = tb;
+            if (tb && tb_cflags(tb) == cpu->tcg_cflags) {
+                e->eip = eip;
+                e->flags = tb->flags;
+                e->cs_base = (uint32_t)tb->cs_base;
+                e->cflags = tb_cflags(tb);
+                e->tb = tb;
                 xemu_ras_fills++;
             }
         }

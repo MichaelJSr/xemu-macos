@@ -3279,4 +3279,12 @@ void tcg_gen_xemu_lookup_ret_and_goto_ptr(void)
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
     tcg_temp_free_ptr(ptr);
 }
+
+/* Raw goto_ptr on a caller-computed code pointer (inline ret-memo hit
+ * path). The caller must have checked CF_NO_GOTO_PTR. */
+void tcg_gen_xemu_goto_ptr(TCGv_ptr ptr)
+{
+    plugin_gen_disable_mem_helpers();
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+}
 #endif

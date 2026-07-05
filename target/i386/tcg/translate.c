@@ -699,7 +699,7 @@ void xemu_i386_ras_flush(CPUState *cpu);
 void xemu_i386_ras_flush(CPUState *cpu)
 {
     CPUX86State *env = cpu_env(cpu);
-    memset(env->xemu_retc_tb, 0, sizeof(env->xemu_retc_tb));
+    memset(env->xemu_retc, 0, sizeof(env->xemu_retc));
 }
 #endif
 
@@ -2950,6 +2950,73 @@ static void gen_bnd_jmp(DisasContext *s)
  * single step traps, resetting the RF flag, and handling the interrupt
  * shadow.
  */
+#if defined(XBOX)
+/*
+ * Inline near-return memo probe (phase 2). Emitted at ret exits ahead
+ * of the helper fallback. Validation against the ret site's
+ * translate-time context constants is exact: nothing between TB entry
+ * and its ret exit changes cs_base/flags/cflags, so the runtime
+ * context at this exit equals this TB's own translation context. The
+ * live tb->cflags load catches CF_INVALID (invalidation); flush
+ * clears entries wholesale, and empty entries fail the tb != NULL
+ * check. Misses fall through to the helper, which also owns every
+ * special case (breakpoints, single-step, logging, epilogue return).
+ */
+static bool xemu_ras_inline_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_RAS");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
+static void xemu_gen_inline_ret_memo(DisasContext *s)
+{
+    TCGLabel *slow = gen_new_label();
+    TCGv_i32 eip = tcg_temp_new_i32();
+    TCGv_i32 idx = tcg_temp_new_i32();
+    TCGv_i32 t32 = tcg_temp_new_i32();
+    TCGv_ptr ep = tcg_temp_new_ptr();
+    TCGv_ptr tbp = tcg_temp_new_ptr();
+    TCGv_ptr tcp = tcg_temp_new_ptr();
+
+    tcg_gen_mov_i32(eip, cpu_eip);
+    tcg_gen_muli_i32(idx, eip, (int32_t)2654435761u);
+    tcg_gen_shri_i32(idx, idx, 32 - XEMU_RETC_BITS);
+    tcg_gen_shli_i32(idx, idx, 5); /* 32-byte entry stride */
+    tcg_gen_ext_i32_ptr(ep, idx);
+    tcg_gen_add_ptr(ep, ep, tcg_env);
+
+    tcg_gen_ld_i32(t32, ep,
+                   offsetof(CPUX86State, xemu_retc) +
+                   offsetof(struct XemuRetcEntry, eip));
+    tcg_gen_brcond_i32(TCG_COND_NE, t32, eip, slow);
+    tcg_gen_ld_i32(t32, ep,
+                   offsetof(CPUX86State, xemu_retc) +
+                   offsetof(struct XemuRetcEntry, flags));
+    tcg_gen_brcondi_i32(TCG_COND_NE, t32, (int32_t)s->base.tb->flags, slow);
+    tcg_gen_ld_i32(t32, ep,
+                   offsetof(CPUX86State, xemu_retc) +
+                   offsetof(struct XemuRetcEntry, cs_base));
+    tcg_gen_brcondi_i32(TCG_COND_NE, t32, (int32_t)s->cs_base, slow);
+    tcg_gen_ld_ptr(tbp, ep,
+                   offsetof(CPUX86State, xemu_retc) +
+                   offsetof(struct XemuRetcEntry, tb));
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, tbp, 0, slow);
+    tcg_gen_ld_i32(t32, tbp, offsetof(TranslationBlock, cflags));
+    tcg_gen_brcondi_i32(TCG_COND_NE, t32,
+                        (int32_t)tb_cflags(s->base.tb), slow);
+
+    tcg_gen_ld_ptr(tcp, tbp, offsetof(TranslationBlock, tc) +
+                             offsetof(struct tb_tc, ptr));
+    tcg_gen_xemu_goto_ptr(tcp);
+
+    gen_set_label(slow);
+}
+#endif
+
 static void
 gen_eob(DisasContext *s, int mode)
 {
@@ -2980,6 +3047,10 @@ gen_eob(DisasContext *s, int mode)
 #if defined(XBOX)
         if (s->xemu_ret_exit) {
             s->xemu_ret_exit = false;
+            if (xemu_ras_inline_on() &&
+                !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+                xemu_gen_inline_ret_memo(s);
+            }
             tcg_gen_xemu_lookup_ret_and_goto_ptr();
         } else
 #endif
