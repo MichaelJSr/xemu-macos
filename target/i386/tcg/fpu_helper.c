@@ -3820,8 +3820,18 @@ static int xemu_sse_neon_mode(void)
             mode = 1;
         } else if (e && e[0] == '2') {
             mode = 2;
-        } else {
+        } else if (e) {
             mode = 0;
+        } else {
+#if defined(__aarch64__)
+            /* Default on where the =2 bit-exactness receipt exists
+             * (60 s zero-divergence) and the sticky bracket measured
+             * +1.9 fps (3/3 pairs). x86_64 stays opt-in pending a
+             * clean =2 run on real silicon. */
+            mode = g_config.perf.hard_fpu ? 1 : 0;
+#else
+            mode = 0;
+#endif
         }
     }
     return mode;
@@ -3929,7 +3939,29 @@ static inline void xemu_hostfp_leave(uint64_t saved)
         _mm_setcsr((uint32_t)saved);
     }
 }
+#endif
 
+/*
+ * Sticky bracket (mode 1): leave the host in guest-SSE mode between
+ * helpers instead of restoring per op — the enter side compare-skips,
+ * so runs of SSE ops pay one serializing mode write total instead of
+ * two per op (measured parity vs softfloat with the strict bracket;
+ * the write cost was the margin). Composition: the x87 hard-FPU
+ * brackets save/restore around their own ops, softfloat and TCG
+ * generated code carry no host FP-mode dependence, and host code on
+ * the vCPU thread already tolerates guest rounding modes leaked by
+ * the x87 path — the incremental exposure is FZ/DAZ on denormals
+ * inside an opt-in knob. Differential mode (=2) keeps the strict
+ * restore so its runs stay state-controlled.
+ */
+static inline void xemu_hostfp_leave_lazy(uint64_t saved)
+{
+    if (unlikely(xemu_sse_neon_mode() == 2)) {
+        xemu_hostfp_leave(saved);
+    }
+}
+
+#if !defined(__aarch64__)
 typedef __m128 xemu_v4f;
 #define xemu_v4f_load(p)     _mm_loadu_ps((const float *)(p))
 #define xemu_v4f_store(p, v) _mm_storeu_ps((float *)(p), (v))
@@ -3958,7 +3990,7 @@ static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     xemu_v4f b = xemu_v4f_load(&s->ZMM_S(0));                               \
     uint64_t saved = xemu_hostfp_enter(env);                                \
     xemu_v4f r = (EXPR);                                                    \
-    xemu_hostfp_leave(saved);                                               \
+    xemu_hostfp_leave_lazy(saved);                                          \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         ZMMReg sv = *v, ss2 = *s;                                           \
         uint32_t got[4];                                                    \
@@ -3998,7 +4030,7 @@ static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     memcpy(&fb, &s->ZMM_L(0), 4);                                           \
     uint64_t saved = xemu_hostfp_enter(env);                                \
     fr = (SEXPR);                                                           \
-    xemu_hostfp_leave(saved);                                            \
+    xemu_hostfp_leave_lazy(saved);                                       \
     memcpy(&out, &fr, 4);                                                   \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \
