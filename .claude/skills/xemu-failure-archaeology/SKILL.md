@@ -587,12 +587,22 @@ adds nothing), direct-mapped 4096-entry eip->TB memo probed in the
 ret helper with full jump-cache-equivalent validation. Result: 95.4%
 hit, zero mispredicts, fills 17M, fps parity (probe cost ≈ jc probe
 cost at helper level, as predicted post-skid-correction).
-**The prize is phase 2**: inline the memo probe at ret sites in
-generated code (hash+eip compare+validation+goto_ptr), bypassing the
-helper round-trip + get_tb_cpu_state for ~44% of all lookups.
-Design notes: validation inline needs stored-at-fill flags/cs_base
-plus an invalidation epoch (bump on tb invalidate/flush) instead of
-per-entry purging; XEMU_RAS=0 must keep disabling both sides.
+**Phase 2 SHIPPED (same session)**: the probe inlined at ret sites.
+Validation ended up cheaper than the planned epoch design: at a ret
+exit the runtime context provably equals the ret-TB's own
+translate-time constants (nothing between TB entry and its ret exit
+changes cs_base/flags/cflags), so the inline path compares the
+entry's fill-time context against immediates, checks tb != NULL
+(flush clears entries), and re-loads live tb->cflags to catch
+CF_INVALID — no epoch needed. ~17 TCG ops on the hit path; the
+helper remains fallback + fill + all special cases (breakpoints,
+single-step, logging — -d exec loses inline-hit lines; XEMU_RAS=0
+when tracing). Receipts: helper hits collapse 362M→12.8k (inline
+absorption signature); 6-pair A/B **+0.77 fps, 6/6 positive**,
+inside the registered +0.7-1.8 band, with the enabled arm carrying
+more draws/flip. First realized guest-CPU fps win — the exit-kind
+census aimed it, two mirages died en route (1.16, 1.17), and the
+mechanism landed in-band.
 **Reopen the ring if**: a workload shows the memo thrashing on
 polymorphic returns (same ret eip, alternating targets — impossible:
 ret target IS the eip; the memo cannot alias that way. The ring has

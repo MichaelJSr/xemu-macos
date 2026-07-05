@@ -125,7 +125,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_GUEST_PROF` | `1` enables the one-run guest profiler: a mach-thread sampler resolves vCPU samples to guest TBs/pages vs host symbols, and the i386 translator classifies every TB-lookup by exit kind (ret / indirect jmp / indirect call). Measurement-run only (not benchmark-neutral) |
-| `XEMU_RAS` | `0` disables the near-return target memo (default on): a 4096-entry eip→TB cache probed by the ret exit helper ahead of the jump cache, validated exactly like a jump-cache hit. Phase 1 measured fps-parity (6 pairs) at a 95.4% live hit rate — shipped as the foundation for inlining the probe at ret sites |
+| `XEMU_RAS` | `0` disables the near-return target memo (default on): a 4096-entry eip→TB cache probed **inline at ret sites in generated code** (validation = fill-time context vs the ret site's translate-time constants + a live `tb->cflags` load for invalidation), helper as fallback/fill. Phase-2 receipt: **+0.77 fps, 6/6 pairs positive** on the heavy scene; helper hits collapse 362M→13k. `-d exec` tracing won't log inline-hit rets — set `XEMU_RAS=0` when tracing |
 | `XEMU_TB_PROF` | `1` prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count). The heavy scene measures 15.8M lookups/s at 93.4% hit — the profile that killed the cache-sizing experiment (see failed-experiments) and aims future TCG work at lookup volume instead |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts. Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence. arm64: 60 s zero-divergence receipt. x86_64: **no bit-exactness claim yet** — the first Rosetta `=2` run caught a real leaked-rounding-mode bug (fixed: both brackets now force RN), and a second unresolved ±0-sign divergence under Rosetta remains; run `=2` clean on real x86_64 silicon before enabling `=1` |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
@@ -271,9 +271,11 @@ In-app Settings covers the main toggles.
   hot-loop fast-path candidates), near-returns are 46% of all 15.8M/s
   TB lookups and 53% of jump-cache misses, and indirect calls barely
   miss (3.2%). First shipped result: the near-return target memo
-  (`XEMU_RAS`, default on) — phase 1 measured fps-parity at a 95.4%
-  live hit rate and exists to be inlined at ret sites next (bypassing
-  the helper round-trip for ~44% of all lookups). Two honest kills
+  (`XEMU_RAS`, default on) — phase 1 (helper-level) measured
+  fps-parity at a 95.4% live hit rate; phase 2 inlined the probe at
+  ret sites in generated code and measured **+0.77 fps with 6/6
+  pairs positive** (helper hits collapse 362M→13k as the inline
+  path absorbs them — the campaign's first realized guest-CPU win). Two honest kills
   along the way are in the failed-experiments table (JIT write-protect
   caching — a sampling-skid mirage; the per-depth return-address
   ring — wrong key shape).
