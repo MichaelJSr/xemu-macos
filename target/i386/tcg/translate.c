@@ -3052,9 +3052,24 @@ gen_eob(DisasContext *s, int mode)
                 xemu_gen_inline_ret_memo(s);
             }
             tcg_gen_xemu_lookup_ret_and_goto_ptr();
-        } else
-#endif
+        } else {
+            if (xemu_ras_inline_on() &&
+                !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+                TCGv_i32 lin = tcg_temp_new_i32();
+                tcg_gen_addi_i32(lin, cpu_eip, (int32_t)s->cs_base);
+                tcg_gen_xemu_jc_probe_and_goto_ptr(
+                    lin,
+                    offsetof(X86CPU, parent_obj.tb_jmp_cache) -
+                        offsetof(X86CPU, env),
+                    (uint64_t)s->cs_base,
+                    (uint32_t)s->base.tb->flags,
+                    tb_cflags(s->base.tb));
+            }
+            tcg_gen_lookup_and_goto_ptr();
+        }
+#else
         tcg_gen_lookup_and_goto_ptr();
+#endif
     } else {
         tcg_gen_exit_tb(NULL, 0);
     }

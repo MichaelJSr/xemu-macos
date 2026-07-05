@@ -81,6 +81,9 @@ void tcg_gen_lookup_and_goto_ptr(void);
 #if defined(XBOX)
 void tcg_gen_xemu_lookup_ret_and_goto_ptr(void);
 void tcg_gen_xemu_goto_ptr(TCGv_ptr ptr);
+void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32, intptr_t jc_env_offset,
+                                        uint64_t cs_base, uint32_t flags,
+                                        uint32_t cflags);
 #endif
 
 void tcg_gen_plugin_cb(unsigned from);

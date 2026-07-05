@@ -7,6 +7,7 @@ tcg_ss = ss.source_set()
 tcg_ss.add(files(
   'cpu-exec.c',
   'cpu-exec-common.c',
+  'xemu-inline-jc.c',
   'tcg-runtime.c',
   'tcg-runtime-gvec.c',
   'tb-maint.c',
