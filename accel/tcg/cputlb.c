@@ -1949,6 +1949,108 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
  * Load @size bytes from @addr, which is memory-mapped i/o.
  * The bytes are concatenated in big-endian order with @ret_be.
  */
+#if defined(XBOX)
+#include "qemu/timer.h"
+/*
+ * xemu: MMIO dispatch profiling (XEMU_MMIO_PROF=1, default off, zero
+ * cost when unset). Every guest MMIO load/store below acquires the
+ * BQL, so on this fork the single vCPU contends with the 60 Hz
+ * main-loop/vblank holders on each NV2A/APU register access. The
+ * histogram (per region x 4 KiB offset page) plus the BQL
+ * acquire-wait totals decide whether a BQL-free dispatch for audited
+ * Xbox device regions is worth building, and for which registers.
+ * Counters are unsynchronized on purpose: the xbox machine runs
+ * exactly one vCPU thread, the only caller of these paths.
+ */
+#define XEMU_MMIO_SLOTS 128
+static struct {
+    MemoryRegion *mr;
+    hwaddr page;
+    uint64_t loads;
+    uint64_t stores;
+} xemu_mmio_hist[XEMU_MMIO_SLOTS];
+static uint64_t xemu_mmio_ops, xemu_mmio_dropped;
+static uint64_t xemu_mmio_bql_wait_ns, xemu_mmio_bql_max_ns;
+
+static bool xemu_mmio_prof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_MMIO_PROF");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
+static int xemu_mmio_slot_cmp(const void *pa, const void *pb)
+{
+    const typeof(xemu_mmio_hist[0]) *a = pa, *b = pb;
+    uint64_t ta = a->loads + a->stores, tb = b->loads + b->stores;
+    return (tb > ta) - (tb < ta);
+}
+
+static void xemu_mmio_prof_dump(void)
+{
+    fprintf(stderr,
+            "xemu: MMIO prof: %" PRIu64 " ops, BQL wait total %.2f ms "
+            "(avg %.0f ns/op, max %.1f us), %" PRIu64 " dropped\n",
+            xemu_mmio_ops, xemu_mmio_bql_wait_ns / 1e6,
+            xemu_mmio_ops ? (double)xemu_mmio_bql_wait_ns / xemu_mmio_ops : 0.0,
+            xemu_mmio_bql_max_ns / 1e3, xemu_mmio_dropped);
+    qsort(xemu_mmio_hist, XEMU_MMIO_SLOTS, sizeof(xemu_mmio_hist[0]),
+          xemu_mmio_slot_cmp);
+    for (int i = 0; i < 24 && xemu_mmio_hist[i].mr; i++) {
+        fprintf(stderr,
+                "xemu:   %-18s +0x%06" HWADDR_PRIx "xxx  loads=%-10" PRIu64
+                " stores=%" PRIu64 "\n",
+                memory_region_name(xemu_mmio_hist[i].mr),
+                xemu_mmio_hist[i].page, xemu_mmio_hist[i].loads,
+                xemu_mmio_hist[i].stores);
+    }
+}
+
+static void xemu_mmio_prof_note(MemoryRegion *mr, hwaddr off, bool store,
+                                int64_t wait_ns)
+{
+    static bool registered;
+
+    if (!registered) {
+        registered = true;
+        atexit(xemu_mmio_prof_dump);
+    }
+    xemu_mmio_ops++;
+    xemu_mmio_bql_wait_ns += wait_ns;
+    if ((uint64_t)wait_ns > xemu_mmio_bql_max_ns) {
+        xemu_mmio_bql_max_ns = wait_ns;
+    }
+
+    hwaddr page = off >> 12;
+    uintptr_t h = ((uintptr_t)mr >> 4) ^ (page * 0x9E3779B97F4A7C15ull);
+    for (int p = 0; p < 8; p++) {
+        int idx = (h + p) % XEMU_MMIO_SLOTS;
+        if (xemu_mmio_hist[idx].mr == mr && xemu_mmio_hist[idx].page == page) {
+            if (store) {
+                xemu_mmio_hist[idx].stores++;
+            } else {
+                xemu_mmio_hist[idx].loads++;
+            }
+            return;
+        }
+        if (!xemu_mmio_hist[idx].mr) {
+            xemu_mmio_hist[idx].mr = mr;
+            xemu_mmio_hist[idx].page = page;
+            if (store) {
+                xemu_mmio_hist[idx].stores = 1;
+            } else {
+                xemu_mmio_hist[idx].loads = 1;
+            }
+            return;
+        }
+    }
+    xemu_mmio_dropped++;
+}
+#endif /* XBOX */
+
 static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
                                 uint64_t ret_be, vaddr addr, int size,
                                 int mmu_idx, MMUAccessType type, uintptr_t ra,
@@ -1998,7 +2100,28 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
 
+    /*
+     * xemu: honor lockless_io on the TCG fast path too. Upstream's
+     * prepare_mmio_access() (address-space/DMA path) already skips the
+     * BQL for regions that opted in via
+     * memory_region_enable_lockless_io(); these cputlb helpers predate
+     * that flag and locked unconditionally. Audited Xbox regions
+     * (PFB, USER doorbells) do their own locking — see nv2a.c.
+     */
+    if (mr->lockless_io) {
+        return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+                               type, ra, mr, mr_offset);
+    }
+
+#if defined(XBOX)
+    int64_t xemu_t0 = xemu_mmio_prof_on() ? get_clock() : -1;
+#endif
     BQL_LOCK_GUARD();
+#if defined(XBOX)
+    if (xemu_t0 >= 0) {
+        xemu_mmio_prof_note(mr, mr_offset, false, get_clock() - xemu_t0);
+    }
+#endif
     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
                            type, ra, mr, mr_offset);
 }
@@ -2018,6 +2141,14 @@ static Int128 do_ld16_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     attrs = full->attrs;
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
+
+    if (mr->lockless_io) {
+        a = int_ld_mmio_beN(cpu, full, ret_be, addr, size - 8, mmu_idx,
+                            MMU_DATA_LOAD, ra, mr, mr_offset);
+        b = int_ld_mmio_beN(cpu, full, ret_be, addr + size - 8, 8, mmu_idx,
+                            MMU_DATA_LOAD, ra, mr, mr_offset + size - 8);
+        return int128_make128(b, a);
+    }
 
     BQL_LOCK_GUARD();
     a = int_ld_mmio_beN(cpu, full, ret_be, addr, size - 8, mmu_idx,
@@ -2539,7 +2670,21 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
 
+    /* xemu: see the lockless_io note in do_ld_mmio_beN. */
+    if (mr->lockless_io) {
+        return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+                               ra, mr, mr_offset);
+    }
+
+#if defined(XBOX)
+    int64_t xemu_t0 = xemu_mmio_prof_on() ? get_clock() : -1;
+#endif
     BQL_LOCK_GUARD();
+#if defined(XBOX)
+    if (xemu_t0 >= 0) {
+        xemu_mmio_prof_note(mr, mr_offset, true, get_clock() - xemu_t0);
+    }
+#endif
     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
                            ra, mr, mr_offset);
 }
@@ -2558,6 +2703,13 @@ static uint64_t do_st16_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     attrs = full->attrs;
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
+
+    if (mr->lockless_io) {
+        int_st_mmio_leN(cpu, full, int128_getlo(val_le), addr, 8,
+                        mmu_idx, ra, mr, mr_offset);
+        return int_st_mmio_leN(cpu, full, int128_gethi(val_le), addr + 8,
+                               size - 8, mmu_idx, ra, mr, mr_offset + 8);
+    }
 
     BQL_LOCK_GUARD();
     int_st_mmio_leN(cpu, full, int128_getlo(val_le), addr, 8,

@@ -349,6 +349,31 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
                                     &d->block_mmio[i]);
     }
 
+    /*
+     * BQL-free MMIO dispatch for the guest's hottest register blocks
+     * (measured with XEMU_MMIO_PROF on the heavy bench scene: PFB
+     * 4.85M ops / 70 s — dominated by NV_PFB_WBC write-combine flush
+     * polling — and USER 1.58M doorbell stores; together 78% of all
+     * MMIO traffic). Audit per handler:
+     *   - pfb.c: reads return a constant (CSTATUS = vram size), 0
+     *     (WBC), or a plain regs[] load; writes are plain regs[]
+     *     stores. No IRQs, no cross-thread state beyond the PFIFO
+     *     thread's tile-config reads, which were never BQL-protected.
+     *   - user.c: both handlers take d->pfifo.lock for their entire
+     *     body and pfifo_kick() under it (the Invariant-10 kick
+     *     discipline). The BQL added nothing.
+     * The TCG fast path honors lockless_io in accel/tcg/cputlb.c
+     * (fork change; upstream only checks it in prepare_mmio_access).
+     * XEMU_MMIO_BQL=1 restores fully locked dispatch for bisection.
+     */
+    {
+        const char *e = getenv("XEMU_MMIO_BQL");
+        if (!(e && e[0] == '1')) {
+            memory_region_enable_lockless_io(&d->block_mmio[NV_PFB]);
+            memory_region_enable_lockless_io(&d->block_mmio[NV_USER]);
+        }
+    }
+
     qemu_mutex_init(&d->pfifo.lock);
     qemu_cond_init(&d->pfifo.fifo_cond);
     qemu_cond_init(&d->pfifo.fifo_idle_cond);
