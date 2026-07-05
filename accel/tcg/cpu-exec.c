@@ -259,8 +259,8 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  * Measurement-run tool: the classification adds a cached source-TB
  * resolve per lookup and is not benchmark-neutral.
  */
-#include <dlfcn.h>
 #if defined(__APPLE__) && defined(__aarch64__)
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread.h>
 #define XEMU_GUEST_PROF_SAMPLER 1
