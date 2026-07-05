@@ -127,7 +127,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_GUEST_PROF` | `1` enables the one-run guest profiler: a mach-thread sampler resolves vCPU samples to guest TBs/pages vs host symbols, and the i386 translator classifies every TB-lookup by exit kind (ret / indirect jmp / indirect call). Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): a 4096-entry eip→TB cache probed **inline at ret sites in generated code** (validation = fill-time context vs the ret site's translate-time constants + a live `tb->cflags` load for invalidation), helper as fallback/fill. Phase-2 receipt: **+0.77 fps, 6/6 pairs positive** on the heavy scene; helper hits collapse 362M→13k. `-d exec` tracing won't log inline-hit rets — set `XEMU_RAS=0` when tracing |
 | `XEMU_TB_PROF` | `1` prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count). The heavy scene measures 15.8M lookups/s at 93.4% hit — the profile that killed the cache-sizing experiment (see failed-experiments) and aims future TCG work at lookup volume instead |
-| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts. Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence. arm64: 60 s zero-divergence receipt. x86_64: **no bit-exactness claim yet** — the first Rosetta `=2` run caught a real leaked-rounding-mode bug (fixed: both brackets now force RN), and a second unresolved ±0-sign divergence under Rosetta remains; run `=2` clean on real x86_64 silicon before enabling `=1` |
+| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | Host-SIMD fast path for packed/scalar single-precision SSE arithmetic. **Default ON for aarch64** (requires `perf.hard_fpu`) since the sticky bracket landed: the strict per-op mode restore was the entire margin (measured parity), and leaving the host in guest-SSE mode between helpers (mode writes compare-skipped, `=2` keeps strict brackets) measured **+1.90 fps, 3/3 pairs** on the heavy scene. `0` disables; `=2` differential mode runs both paths strict-bracketed and aborts on divergence (arm64 receipt re-confirmed on the sticky build: 70 s, zero divergences). x86_64 stays opt-in/dark — one un-root-caused ±0-sign divergence under Rosetta; run `=2` clean on real silicon before `=1` |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -264,6 +264,17 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **Sticky host-FPU bracket: the SSE fast path goes live on Apple
+  Silicon (+1.9 fps).** The NEON SSE path had measured parity — and
+  the final profile explained it: the per-op serializing FPCR restore
+  was worth exactly the SIMD win. The bracket is now sticky in mode 1
+  (host stays in guest-SSE mode between helpers; enters compare-skip;
+  `=2` differential runs keep strict brackets and re-confirmed
+  bit-exactness on the sticky build). Measured **+1.90 fps with 3/3
+  pairs positive** on the heavy scene; default ON for aarch64 with
+  `perf.hard_fpu`, `XEMU_SSE_HOST=0` restores softfloat. Composition
+  note: the x87 hard-FPU brackets save/restore around their own ops,
+  and softfloat/TCG carry no host FP-mode dependence.
 - **Guest profiler + TB-dispatch campaign, first round (2026-07-05).**
   `XEMU_GUEST_PROF` produced the fork's first guest-side profile
   (mach-thread sampler + per-exit-kind lookup classification): the
@@ -863,6 +874,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| L2 victim jump-cache (2026-07-05) | A 64k-entry direct-mapped victim cache behind the jump cache, probed only on L1 miss before the qht walk — the residual miss stream after the inline probes looked capacity-shaped. Instrument-killed without an fps A/B: live hit rate measured **11.2%** (the recurring-miss set is small; residual misses are dominated by one-shot/cold pcs and the NULL-lookup class), bounding the ceiling at ~0.1 fps. Reverted same hour. Companion lesson to the L1-enlargement kill: the miss stream's *shape*, not its volume, decides whether any cache tier can help |
 | JIT write-protect flip caching (2026-07-05) | The guest profiler attributed 9.7% of the vCPU thread to `pthread_jit_write_protect_np` (called on every TB entry), so a thread-local shadow state skipping redundant flips looked like +2-3 fps. Measured **parity** (6 pairs, −0.10 mean, sign-mixed). Autopsy: `thread_suspend`-based sampling parks preferentially on barrier instructions, over-attributing barrier-heavy symbols — most of the 9.7% was sampling skid, not cost. Reverted; the lesson (discount barrier-heavy symbols in suspend-based profiles) is the artifact |
 | Per-depth return-address ring (2026-07-05, superseded same-day) | The classic call-site-push/ret-pop shadow stack: eip prediction paired at 99.6%, but the per-slot TB memo thrashed — same-depth call sites share slots, so fills ran 2.6× hits (196.9M fills/70 s) and a 512-deep ring changed nothing. Restructured to the eip-keyed ret-target memo (`XEMU_RAS` row above): 95.4% hit, zero mispredicts, fills 17M. The ring insight: on x86-under-TCG the ret target is already in `env->eip` at dispatch time, so depth-shaped prediction state adds nothing a target-keyed cache doesn't |
 | Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the mid-frame conflict finish (submit + wait the just-submitted slot, ~6/flip on the heavy scene) with per-slot transient copies + remapped draw bindings (chained newest-first entries, retirement-gated mirror apply, rotation copy-forward, exact-refinement exclusion). Faithfully implemented with all three design traps closed — and measured **−2.09 fps, 6/6 pairs negative**. Counters: `vtx_remap_hit` 226.7/flip (the remap search became a per-draw fixture), `vtx_remap_full` 1.47/flip (64-entry/2 MiB budget overflows every frame; the all-slot drain fallback is heavier than the targeted waits it replaced). The title rewrites broad vertex ranges every frame — the wrong conflict shape for remapping. Reverted whole; the targeted submitted-slot wait remains the shipped design. Full record: archaeology 1.16 |
@@ -901,6 +913,68 @@ Lessons worth preserving so they aren't re-attempted.
 ## Future vectors
 
 Not attempted, or scope/risk too high for a one-shot change.
+
+### The remaining performance roadmap (2026-07-05, post-dispatch-campaign)
+
+State when this was written: F8 heavy anchor 31.4 fps @ 819 draws/flip
+(v0.10 shipped it at 23.9), F6 at the 60 cap, guest-TCG execution is
+53.7% of the vCPU thread, softfloat is out of the profile top, and the
+cheap-lever list is measured empty — everything below is ranked by
+expected value against real effort/risk, with the receipts that aimed
+it. Instruments to re-run before starting any of these:
+`XEMU_GUEST_PROF=1` (sampler + exit-kind census) and `XEMU_TB_PROF=1`.
+
+1. **SMC / TB-invalidation churn** (days; instrument-first).
+   NEW finding from the final profile: `do_tb_phys_invalidate` in the
+   top-25, ~70k/s lookups returning NULL (the "translate" residual —
+   6.8M per 95 s run at tb_flush=1, which cannot all be fresh code),
+   and TLB/dirty-tracking costs (`tlb_set_page_with_attrs` 2.3%,
+   `physical_memory_test_and_clear_dirty` 2.0%) consistent with
+   write-churn on code pages. The tree already carries an
+   invalidated-TB recycling mechanism (`tb->ihash` /
+   `inv_tb_htable_lookup`) — first step is counting its hit rate and
+   classifying the invalidation sources (true SMC vs data writes
+   false-sharing code pages; the latter has a known cure class:
+   sub-page invalidate granularity). Ceiling unknown until counted;
+   the symptoms bound it at several % of the thread.
+2. **Cross-page direct chaining, Xbox-relaxed** (a week; risky).
+   The "other" 43% of the exit census is dominated by cross-page
+   direct jumps that pay the ~20-op inline probe today. Upstream
+   forbids cross-page `goto_tb` because mappings can change; the
+   Xbox's effectively static flat mapping makes a fork-specific
+   relaxation plausible (chain + invalidation hooks for the SMC edge
+   cases). Worth +1-2 fps. Archaeology-1.x-grade design required —
+   the failure mode is a rare wrong-code hang, the worst class.
+3. **PGRAPH MMIO lockless audit** (days; jitter-class expectation).
+   Remaining vCPU lock waits ~5.6%. Unlike PFB/USER/vp, PGRAPH
+   handlers genuinely interleave with the PFIFO thread — the audit is
+   the work; expect steadier pacing more than fps.
+4. **Ret-memo fill path** (hours, but sub-noise-bar). The memo's cold
+   fills pay `tcg_tb_lookup` g_tree walks (~3% sample share at 6.4%
+   fill rate). Candidates: export `tb_lookup` to the ret helper
+   (skip the tc.ptr→tb reversal), or grow `XEMU_RETC_BITS` 12→13/14
+   (compile-time; predicted +0.3-0.5 — AT the honest measurement
+   floor on this scene, hence parked rather than shipped blind).
+5. **Trace / superblock formation in TCG** (weeks; transformative or
+   bust). With dispatch spent and the guest profile diffuse (top TB
+   2.5%), the remaining wall IS generated-code quality. Multi-TB
+   traces with cross-block optimization are the only identified lever
+   plausibly worth +15-30% — and the only realistic path to real-60
+   on F7/F8. Upstream-divergent compiler work; run it as a time-boxed
+   research campaign with falsifiable early milestones, not as a
+   task.
+6. **Real-hardware validation debt** (not fps; the largest open
+   correctness item). Windows/Linux runtime proof for the shipped
+   cross-platform wins: the gating-audit needs-real-HW list, the DSP
+   JIT `XEMU_DSP_JIT_DIFF` run on non-Apple aarch64, `XEMU_SSE_HOST=2`
+   on real x86_64 silicon (one un-root-caused ±0-sign divergence
+   under Rosetta keeps the x86_64 arm dark), and per-platform
+   savestate baselines before any perf claim there.
+
+Presentation note: `display.frame_interpolation` (MetalFX) already
+delivers displayed-60 from a solid real-30 today; it does not change
+simulation rate or input latency and benches must keep reading real
+flips.
 
 - **Streamed-vertex stall reduction: attempted twice, both ~neutral —
   heavy scenes are GPU-bound.** (a) Byte-exact conflict refinement:

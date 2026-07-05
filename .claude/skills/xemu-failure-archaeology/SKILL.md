@@ -69,6 +69,8 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.16 | Vertex copy-on-conflict transient remap (XEMU_VTX_TRANSIENT) | settled-negative |
 | 1.17 | JIT write-protect flip caching (barrier-skid mirage) | settled-negative |
 | 1.18 | Per-depth return-address ring -> eip-keyed ret memo | superseded-shipped |
+| 1.19 | Sticky host-FPU bracket: SSE parity -> +1.9 | shipped |
+| 1.20 | L2 victim jump-cache | settled-negative (instrument-killed) |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -618,6 +620,49 @@ vp.c fe_method → apu.c se_frame's own bql bracket).
 polymorphic returns (same ret eip, alternating targets — impossible:
 ret target IS the eip; the memo cannot alias that way. The ring has
 no reopen case; this row exists to prevent re-walking it).
+
+## 1.19 Sticky host-FPU bracket — the restore write was the whole margin
+
+**Status**: shipped (+1.90, 3/3 pairs; default ON for aarch64 with
+hard_fpu; 2026-07-05).
+**History**: the NEON SSE path measured PARITY vs PGO'd softfloat with
+strict per-op brackets (enter: set FZ/RN if needed; leave: restore).
+The mechanism of parity was identified, not guessed: enter already
+compare-skips, but ambient FPCR (x87-leaked modes or IEEE default)
+almost always differs from guest-SSE mode, so steady state paid TWO
+serializing mode writes per op — worth exactly the SIMD win.
+**Fix**: mode-1 leave is now a no-op (host stays in guest-SSE mode
+between helpers); =2 differential keeps strict brackets and
+re-confirmed zero divergences on the sticky build (70 s). Composition
+argument: x87 hard-FPU brackets save/restore around their own ops
+(they restore to our sticky state — self-consistent); softfloat and
+TCG generated code have no host FP-mode dependence; host code on the
+vCPU thread already tolerated x87-leaked rounding modes, so the
+incremental exposure is FZ/DAZ on denormals inside the opt-in.
+**Receipt**: +2.25/+1.70/+1.75 on F8 (largest single win of the
+dispatch campaign era). x86_64 remains dark (unresolved Rosetta ±0
+class, no silicon receipt).
+**Lesson**: when a fast path measures parity, price its BRACKET
+before killing the idea — serializing register writes cost as much as
+the work they guard.
+
+## 1.20 L2 victim jump-cache — killed by hit-rate, not by fps
+
+**Status**: settled-negative (instrument-killed same hour, no fps A/B
+spent; 2026-07-05).
+**The idea**: post-inline residual lookups are miss-rich (12%) and
+capacity-shaped (410k TBs vs 4096 L1 entries), so a 64k-entry victim
+tier on the miss path — where an extra probe amortizes against the
+~100 ns qht walk — looked sound.
+**Evidence**: live hit rate 11.2% (normal mode; 11.6% under =2), the
+recurring-miss set is tiny — residual misses are one-shot/cold pcs
+plus the NULL-lookup class. Ceiling ~0.1 fps ⇒ reverted on the spot.
+**Lesson (pairs with the L1-enlargement kill)**: measure the miss
+stream's SHAPE (recurrence) before building any cache tier; volume
+alone justifies nothing.
+**Open observation parked with it**: ~70k/s lookups return NULL at
+tb_flush=1 with do_tb_phys_invalidate in the profile top — the
+SMC/invalidation-churn vector in README Future vectors item 1.
 
 # 2. MoltenVK / driver level
 
