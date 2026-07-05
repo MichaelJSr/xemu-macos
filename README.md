@@ -887,7 +887,15 @@ Not attempted, or scope/risk too high for a one-shot change.
   dirty tracking is load-bearing (see byte-exact refinement above)
   and an earlier dirty-range flush variant shipped a
   cleared-before-consumed bug — any attempt needs the full
-  predict/validate discipline.
+  predict/validate discipline. **Re-scoped 2026-07-04 (second
+  pass):** the only multi-walk caller
+  (`physical_memory_clear_dirty_range`, 5 walks per range) is cold
+  (ramblock init); the hot paths already pay exactly one walk per
+  dirty detection, so the remaining design is cross-call deferral of
+  the TLB re-arm — which widens the existing bitmap-cleared/TLB-armed
+  race window (the archaeology-1.9 class) and needs a dedicated
+  correctness review. Ceiling at the post-PGO ~31 fps floor is
+  ~1-1.5 fps; parked until it ranks again.
 - **Windows real-hardware Vulkan validation (gating audit committed
   2026-07-04, `docs/windows-gating-audit.md`).** Every fork divergence
   touching Windows-compiled code is now statically audited: Apple-only
