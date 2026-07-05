@@ -165,7 +165,15 @@ This skill sets the bar for calling a run "clean":
    Rule of thumb: soak long enough that the old failure rate predicts at
    least a few hundred flagged frames; state the arithmetic in the
    result.
-3. **For occlusion/zpass changes, add a zpass-consumer eyeball pass.** The
+3. **Known benign screen-rect source (owner-confirmed 2026-07-05):**
+   Azurik's death/heavy-damage flash is a single-frame full-screen
+   magenta wash (white death-burst visible, HUD unaffected, next
+   capture clean). A soak whose walker dies will flag it as
+   `screen-rect` — verify the transient shape (isolated frame,
+   death-burst present) before treating screen-rects as the
+   compositor/driver class. Persistent or HUD-tinting washes remain
+   stop-the-line.
+4. **For occlusion/zpass changes, add a zpass-consumer eyeball pass.** The
    magenta oracle only catches gross corruption; wrong-but-plausible
    occlusion results show up as missing or wrongly-bright lens flares and
    glow effects. Visit a scene that uses them and compare against the
