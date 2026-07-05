@@ -69,6 +69,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.16 | Vertex copy-on-conflict transient remap (XEMU_VTX_TRANSIENT) | settled-negative |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
+| 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -1179,6 +1180,47 @@ script's own shell options before pushing (the local build had run
 BEFORE the edit, so "it built locally" was vacuously true); (b) an
 `$(assignment)` is not exempt from `set -e`.
 **Reopen if**: n/a.
+
+## 8.5 The -a x86_64 failure chain: three defects, one symptom each
+
+**Status**: shipped-after-fix (e5134cc906 arch-clean, ae94399cd3
+MoltenVK tiers + CONFIG_VULKAN guard, 2026-07-05).
+**Chain** (each layer hid the next):
+1. **Stale build/ reuse**: configure wipes build/ only inside its
+   marker window, so '-a x86_64' over an arm64-configured build/ kept
+   the old config-meson.cross -arch and "succeeded" with a pure arm64
+   binary. Fix: build.sh wipes build/ when config-meson.cross
+   disagrees with the requested arch.
+2. **Arch-blind MoltenVK tiers**: with (1) fixed, the tier-2 check hit
+   the custom arm64-only /usr/local dylib (existence test, no arch
+   test) → skipped vendoring → meson found no Vulkan → the ENTIRE vk
+   renderer silently dropped (vk/meson.build is wrapped in
+   `if vulkan.found()`). Fix: a dylib satisfies a tier only if
+   `lipo -archs` shows the target arch; the official release tar is
+   universal so the vendored copy serves any arch.
+3. **Unguarded cross-subsystem symbol**: with the vk renderer absent,
+   the link died on metal-helpers.mm's unconditional references to
+   the MetalFX present-event provider (which lives in the vk dir).
+   Fix: include config-host.h + CONFIG_VULKAN guard. Trap within the
+   trap: a bare #ifdef WITHOUT the include compiles everywhere and
+   silently disables the present-ordering wait on every build —
+   metal-helpers.mm's TU does not see config-host.h transitively
+   (verified by include-walk before choosing the form).
+**Bonus catch**: the restored x86_64 leg let the SSE =2 differential
+run execute for the first time — it immediately caught a real leaked
+rounding-mode bug in the host-FP brackets (see the XEMU_SSE_HOST
+README row and e7c2e9cfb8): usable() verified the GUEST's SSE RC=RN
+but the live host MXCSR carried x87-hard-FPU-leaked round-down →
+host -0.0 vs softfloat +0.0 on exact cancellation. Both brackets now
+force RN. A second ±0-sign class under Rosetta remains un-root-caused
+→ x86_64 path stays dark with no bit-exactness claim.
+**Lessons**: (a) "the build succeeded" proves nothing about WHICH
+build you got — check `file` on the artifact after any cross build;
+(b) meson's `if dep.found()` wrapping a whole subsystem turns a
+missing dependency into a silent feature drop — the failure surfaces
+arbitrarily far away (here: a UI link error); (c) pipe a long build
+through `head` and SIGPIPE kills it mid-flight — grep the log file
+afterwards instead.
 
 ---
 

@@ -125,7 +125,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
 | `XEMU_TB_PROF` | `1` prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count). The heavy scene measures 15.8M lookups/s at 93.4% hit — the profile that killed the cache-sizing experiment (see failed-experiments) and aims future TCG work at lookup volume instead |
-| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts (same-ISA: bit-perfect incl. NaN payloads). Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence |
+| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts. Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence. arm64: 60 s zero-divergence receipt. x86_64: **no bit-exactness claim yet** — the first Rosetta `=2` run caught a real leaked-rounding-mode bug (fixed: both brackets now force RN), and a second unresolved ±0-sign divergence under Rosetta remains; run `=2` clean on real x86_64 silicon before enabling `=1` |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -262,6 +262,21 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **Cross-platform parity batch (2026-07-05).** The DSP56K JIT gate
+  widened to all POSIX aarch64 hosts (`__aarch64__ && !_WIN32`) — the
+  fork's biggest CPU win now compiles for Linux arm64 (CI-covered by
+  the ubuntu-22.04-arm leg; runtime acceptance there still gated on a
+  clean `XEMU_DSP_JIT_DIFF` run, see docs/windows-gating-audit.md).
+  build.sh: clang PGO wiring for the Linux branch (mechanism only);
+  arch-clean guard (a stale `build/` configured for another arch was
+  silently reused — an `-a x86_64` run could "succeed" with an arm64
+  binary); MoltenVK resolution is now arch-aware at both configure and
+  bundle time (a single-arch system dylib — e.g. the custom arm64
+  /usr/local build — silently disabled the entire Vulkan renderer for
+  cross builds and broke the link; the UI's MetalFX references are
+  also CONFIG_VULKAN-guarded now). Windows PGO is recorded as
+  needs-real-HW (win64-cross x86_64 is GCC — incompatible profile
+  format; arm64 llvm-mingw lacks a Windows-trained profile).
 - **BQL-free MMIO dispatch for the hottest guest register blocks.**
   `XEMU_MMIO_PROF` measured 8.2M guest MMIO ops in 70 s on the heavy
   savestate scene — PFB alone 4.85M (dominated by `NV_PFB_WBC`
