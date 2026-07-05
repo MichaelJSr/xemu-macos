@@ -80,6 +80,22 @@ None of this can be exercised on this machine (VMs expose no Vulkan ICD):
 5. Fence-or-die 5 s timeout margin on slow/loaded Windows systems (B7).
 6. Performance: no macOS number transfers; Windows needs its own savestate
    A/B baseline before any perf claim.
+7. Windows PGO (2026-07-05 parity audit): CI's Windows legs are
+   win64-cross — x86_64 uses GCC (LLVM `.profdata` is incompatible in
+   both format and flag wiring) and arm64 uses llvm-mingw (format-
+   compatible but no committed Windows profile, and the win64-cross
+   branch has no PGO plumbing). An honest Windows PGO story requires a
+   training run of the bench corpus on real Windows hardware. The
+   Linux build.sh branch has the clang PGO wiring (same two-stage flow
+   as Darwin) for when a Linux training run exists.
+8. DSP56K JIT runtime proof on non-Apple aarch64: the gate now admits
+   POSIX aarch64 hosts (Apple keeps MAP_JIT + write-protect pairing;
+   others take the plain-RWX mmap path with graceful interpreter
+   fallback when refused). Compile is CI-covered by the
+   ubuntu-22.04-arm leg; a `XEMU_DSP_JIT_DIFF=1` + `_STATS=1` run
+   (`checked>0, failures=0`) in a linux/arm64 VM or on real hardware
+   is the acceptance gate before claiming it works there
+   (`audio.dsp_jit.enabled = true` selects the engine).
 
 ## E. Re-verification
 

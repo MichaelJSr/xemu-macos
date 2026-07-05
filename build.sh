@@ -296,10 +296,55 @@ case "$platform" in # Adjust compilation options based on platform
         echo 'Compiling for Linux...'
         sys_cflags='-Wno-error=redundant-decls'
         opts="$opts --disable-werror"
+        if [ -n "${XEMU_PGO}" ]; then
+          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+          mkdir -p "${pgo_dir}"
+          case "${XEMU_PGO}" in
+            generate)
+              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
+              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
+              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
+              ;;
+            use)
+              # clang/LLVM profdata only (same wiring as the Darwin
+              # branch, llvm-profdata without the xcrun prefix). GCC
+              # PGO is a different mechanism and is not wired.
+              newest_raw=$(ls -t "${pgo_dir}"/*.profraw 2>/dev/null | head -1 || true)
+              if [ -n "${newest_raw}" ] && \
+                 { [ ! -f "${pgo_dir}/default.profdata" ] || \
+                   [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
+                llvm-profdata merge -output="${pgo_dir}/default.profdata" \
+                    "${pgo_dir}"/*.profraw
+              fi
+              if [ ! -f "${pgo_dir}/default.profdata" ]; then
+                echo "PGO: no profiles found in ${pgo_dir}"
+                exit 1
+              fi
+              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
+              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
+              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
+              ;;
+            *)
+              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
+              exit 1
+              ;;
+          esac
+        fi
         postbuild='package_linux'
         ;;
     Darwin)
         echo "Compiling for MacOS for $target_arch..."
+        # A pre-existing build/ configured for a different arch is
+        # silently reused by configure (no wipe outside its marker
+        # window), and its stale config-meson.cross -arch wins over
+        # the exported flags — an '-a x86_64' run then "succeeds"
+        # with a pure arm64 binary (hit 2026-07-05). Force a clean
+        # configure on arch change.
+        if [ -f build/config-meson.cross ] && \
+           ! grep -q "'${target_arch}'" build/config-meson.cross; then
+            echo "build/ was configured for a different arch; cleaning for ${target_arch}"
+            rm -rf build
+        fi
         if [ "$target_arch" == "arm64" ]; then
             macos_min_ver=14.0
         elif [ "$target_arch" == "x86_64" ]; then
