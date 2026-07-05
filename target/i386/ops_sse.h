@@ -467,9 +467,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
  * xemu: SHIFT==1 packed/scalar single-precision ops try the NEON fast
  * path first (defined in fpu_helper.c ahead of these includes;
  * rationale and exactness argument there). Expands to nothing for the
- * ymm pass and off-Apple-silicon builds.
+ * ymm pass and hosts without a same-width fast path.
  */
-#if defined(XBOX) && defined(__aarch64__) && SHIFT == 1
+#if defined(XEMU_SSE_HOSTFP) && SHIFT == 1
 #define XEMU_NEON_PS_TRY(name)                                          \
     do {                                                                \
         if (xemu_sse_neon_usable(env)) {                                \

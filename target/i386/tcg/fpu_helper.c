@@ -3750,8 +3750,17 @@ void helper_emms(CPUX86State *env)
     *(uint32_t *)(env->fptags + 4) = 0x01010101;
 }
 
-#if defined(XBOX) && defined(__aarch64__)
+#if defined(XBOX) && (defined(__aarch64__) || \
+                      (defined(__x86_64__) && defined(__SSE2__)))
+#define XEMU_SSE_HOSTFP 1
+#endif
+
+#if defined(XEMU_SSE_HOSTFP)
+#if defined(__aarch64__)
 #include <arm_neon.h>
+#else
+#include <immintrin.h>
+#endif
 #include "ui/xemu-settings.h"
 
 /*
@@ -3775,20 +3784,38 @@ void helper_emms(CPUX86State *env)
  */
 
 /*
- * Ships DARK (opt-in): measured neutral on the heavy bench scene once
- * PGO landed — the profile-guided softfloat helpers already recovered
- * most of the margin, and the per-op FPCR bracket (serializing msr
- * when the guest runs FTZ) eats the rest (interleaved A/B
- * 2026-07-04: off 31.30 +/- 1.35 vs on 31.72 +/- 0.17, deltas
- * +2.17/-0.54/-0.39 — parity). Kept for per-title A/B: the
- * differential harness (=2) proved the path bit-exact over live
- * gameplay, so flipping it on is risk-free where it wins.
+ * Ships DARK on Apple Silicon (opt-in): measured neutral on the heavy
+ * bench scene once PGO landed — the profile-guided softfloat helpers
+ * already recovered most of the margin, and the per-op FPCR bracket
+ * (serializing msr when the guest runs FTZ) eats the rest
+ * (interleaved A/B 2026-07-04: off 31.30 +/- 1.35 vs on
+ * 31.72 +/- 0.17, deltas +2.17/-0.54/-0.39 — parity). Kept for
+ * per-title A/B: the differential harness (=2) proved the path
+ * bit-exact over live gameplay, so flipping it on is risk-free where
+ * it wins.
+ *
+ * On x86_64 hosts the fast path is stronger than on ARM: host and
+ * guest share the ISA, so _mm_{add,sub,mul,div,min,max}_{ps,ss} ARE
+ * the guest instructions — bit-perfect for every operand class
+ * including NaN payload selection and (-0,+0) ordering — and the
+ * MXCSR bracket can match FTZ and DAZ independently (no mixed-mode
+ * fallback). Sticky-flag accumulation is still skipped (same
+ * hard-fpu-family acceptance). Untested for perf on real x86_64
+ * hardware — ships dark there too; XEMU_SSE_HOST=2 is the
+ * correctness harness to run first (works under Rosetta).
+ *
+ * Knob: XEMU_SSE_HOST (preferred; XEMU_SSE_NEON accepted as a legacy
+ * alias). 0/unset = off, 1 = on (requires perf.hard_fpu), 2 =
+ * differential self-check (both paths, abort on divergence).
  */
 static int xemu_sse_neon_mode(void)
 {
     static int mode = -1;
     if (mode < 0) {
-        const char *e = getenv("XEMU_SSE_NEON");
+        const char *e = getenv("XEMU_SSE_HOST");
+        if (!e) {
+            e = getenv("XEMU_SSE_NEON");
+        }
         if (e && e[0] == '1' && g_config.perf.hard_fpu) {
             mode = 1;
         } else if (e && e[0] == '2') {
@@ -3809,20 +3836,27 @@ static inline bool xemu_sse_neon_usable(CPUX86State *env)
         float_round_nearest_even) {
         return false;
     }
+#if defined(__aarch64__)
     /* ARM FPCR.FZ flushes inputs and outputs together; a guest with
-     * only one of FTZ/DAZ set keeps the softfloat path. */
+     * only one of FTZ/DAZ set keeps the softfloat path. x86 hosts
+     * match FTZ and DAZ independently in the MXCSR bracket. */
     if (env->sse_status.flush_to_zero != env->sse_status.flush_inputs_to_zero) {
         return false;
     }
+#endif
     return true;
 }
 
+/*
+ * Bracket each op: match the host's flush-denormal state to the
+ * guest's FTZ/DAZ and restore afterwards — the hard-fpu x87 helpers
+ * on this thread expect default (non-flushing) host state.
+ */
+#if defined(__aarch64__)
+
 #define XEMU_FPCR_FZ (1ull << 24)
 
-/* Bracket each op: match host FPCR.FZ to the guest's FTZ/DAZ state and
- * restore afterwards — the hard-fpu x87 helpers on this thread expect
- * default (non-flushing) host state. */
-static inline uint64_t xemu_neon_fpcr_enter(CPUX86State *env)
+static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
     uint64_t fpcr, want;
     __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
@@ -3834,7 +3868,7 @@ static inline uint64_t xemu_neon_fpcr_enter(CPUX86State *env)
     return fpcr;
 }
 
-static inline void xemu_neon_fpcr_leave(uint64_t saved)
+static inline void xemu_hostfp_leave(uint64_t saved)
 {
     uint64_t fpcr;
     __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
@@ -3843,16 +3877,59 @@ static inline void xemu_neon_fpcr_leave(uint64_t saved)
     }
 }
 
+typedef float32x4_t xemu_v4f;
+#define xemu_v4f_load(p)     vld1q_f32((const float *)(p))
+#define xemu_v4f_store(p, v) vst1q_f32((float *)(p), (v))
+#define XEMU_V4F_ADD(a, b)   vaddq_f32(a, b)
+#define XEMU_V4F_SUB(a, b)   vsubq_f32(a, b)
+#define XEMU_V4F_MUL(a, b)   vmulq_f32(a, b)
+#define XEMU_V4F_DIV(a, b)   vdivq_f32(a, b)
 /* SSE min/max exactly: (a < b) ? a : b resp. (a > b) ? a : b — false
  * compare (NaN involved, equal, or -0 vs +0) selects the second src. */
-static inline float32x4_t xemu_neon_minps4(float32x4_t a, float32x4_t b)
+#define XEMU_V4F_MIN(a, b)   vbslq_f32(vcltq_f32(a, b), a, b)
+#define XEMU_V4F_MAX(a, b)   vbslq_f32(vcgtq_f32(a, b), a, b)
+
+#else /* __x86_64__ */
+
+#define XEMU_MXCSR_FZ  (1u << 15)
+#define XEMU_MXCSR_DAZ (1u << 6)
+
+static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
-    return vbslq_f32(vcltq_f32(a, b), a, b);
+    uint32_t csr = _mm_getcsr(), want;
+    want = csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ);
+    if (env->sse_status.flush_to_zero) {
+        want |= XEMU_MXCSR_FZ;
+    }
+    if (env->sse_status.flush_inputs_to_zero) {
+        want |= XEMU_MXCSR_DAZ;
+    }
+    if (want != csr) {
+        _mm_setcsr(want);
+    }
+    return csr;
 }
-static inline float32x4_t xemu_neon_maxps4(float32x4_t a, float32x4_t b)
+
+static inline void xemu_hostfp_leave(uint64_t saved)
 {
-    return vbslq_f32(vcgtq_f32(a, b), a, b);
+    uint32_t csr = _mm_getcsr();
+    if (csr != (uint32_t)saved) {
+        _mm_setcsr((uint32_t)saved);
+    }
 }
+
+typedef __m128 xemu_v4f;
+#define xemu_v4f_load(p)     _mm_loadu_ps((const float *)(p))
+#define xemu_v4f_store(p, v) _mm_storeu_ps((float *)(p), (v))
+#define XEMU_V4F_ADD(a, b)   _mm_add_ps(a, b)
+#define XEMU_V4F_SUB(a, b)   _mm_sub_ps(a, b)
+#define XEMU_V4F_MUL(a, b)   _mm_mul_ps(a, b)
+#define XEMU_V4F_DIV(a, b)   _mm_div_ps(a, b)
+/* Same-ISA host: these ARE the guest instructions. */
+#define XEMU_V4F_MIN(a, b)   _mm_min_ps(a, b)
+#define XEMU_V4F_MAX(a, b)   _mm_max_ps(a, b)
+
+#endif
 
 #define XEMU_SOFT_ADD(a, b, st) float32_add(a, b, st)
 #define XEMU_SOFT_SUB(a, b, st) float32_sub(a, b, st)
@@ -3865,16 +3942,16 @@ static inline float32x4_t xemu_neon_maxps4(float32x4_t a, float32x4_t b)
 static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
                                   ZMMReg *s)                                \
 {                                                                           \
-    float32x4_t a = vld1q_f32((const float *)&v->ZMM_S(0));                 \
-    float32x4_t b = vld1q_f32((const float *)&s->ZMM_S(0));                 \
-    uint64_t saved = xemu_neon_fpcr_enter(env);                             \
-    float32x4_t r = (EXPR);                                                 \
-    xemu_neon_fpcr_leave(saved);                                            \
+    xemu_v4f a = xemu_v4f_load(&v->ZMM_S(0));                               \
+    xemu_v4f b = xemu_v4f_load(&s->ZMM_S(0));                               \
+    uint64_t saved = xemu_hostfp_enter(env);                                \
+    xemu_v4f r = (EXPR);                                                    \
+    xemu_hostfp_leave(saved);                                               \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         ZMMReg sv = *v, ss2 = *s;                                           \
         uint32_t got[4];                                                    \
         int i;                                                              \
-        vst1q_f32((float *)got, r);                                         \
+        xemu_v4f_store(got, r);                                         \
         for (i = 0; i < 4; i++) {                                           \
             float32 ref = SOFT(sv.ZMM_S(i), ss2.ZMM_S(i),                   \
                                &env->sse_status);                           \
@@ -3889,15 +3966,15 @@ static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
             }                                                               \
         }                                                                   \
     }                                                                       \
-    vst1q_f32((float *)&d->ZMM_S(0), r);                                    \
+    xemu_v4f_store(&d->ZMM_S(0), r);                                    \
 }
 
-XEMU_NEON_PS_OP(add, vaddq_f32(a, b), XEMU_SOFT_ADD)
-XEMU_NEON_PS_OP(sub, vsubq_f32(a, b), XEMU_SOFT_SUB)
-XEMU_NEON_PS_OP(mul, vmulq_f32(a, b), XEMU_SOFT_MUL)
-XEMU_NEON_PS_OP(div, vdivq_f32(a, b), XEMU_SOFT_DIV)
-XEMU_NEON_PS_OP(min, xemu_neon_minps4(a, b), XEMU_SOFT_MIN)
-XEMU_NEON_PS_OP(max, xemu_neon_maxps4(a, b), XEMU_SOFT_MAX)
+XEMU_NEON_PS_OP(add, XEMU_V4F_ADD(a, b), XEMU_SOFT_ADD)
+XEMU_NEON_PS_OP(sub, XEMU_V4F_SUB(a, b), XEMU_SOFT_SUB)
+XEMU_NEON_PS_OP(mul, XEMU_V4F_MUL(a, b), XEMU_SOFT_MUL)
+XEMU_NEON_PS_OP(div, XEMU_V4F_DIV(a, b), XEMU_SOFT_DIV)
+XEMU_NEON_PS_OP(min, XEMU_V4F_MIN(a, b), XEMU_SOFT_MIN)
+XEMU_NEON_PS_OP(max, XEMU_V4F_MAX(a, b), XEMU_SOFT_MAX)
 
 #define XEMU_NEON_SS_OP(name, SEXPR, SOFT)                                  \
 static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
@@ -3907,9 +3984,9 @@ static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     uint32_t out, l1, l2, l3;                                               \
     memcpy(&fa, &v->ZMM_L(0), 4);                                           \
     memcpy(&fb, &s->ZMM_L(0), 4);                                           \
-    uint64_t saved = xemu_neon_fpcr_enter(env);                             \
+    uint64_t saved = xemu_hostfp_enter(env);                                \
     fr = (SEXPR);                                                           \
-    xemu_neon_fpcr_leave(saved);                                            \
+    xemu_hostfp_leave(saved);                                            \
     memcpy(&out, &fr, 4);                                                   \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \
@@ -3939,7 +4016,7 @@ XEMU_NEON_SS_OP(div, fa / fb, XEMU_SOFT_DIV)
 XEMU_NEON_SS_OP(min, (fa < fb) ? fa : fb, XEMU_SOFT_MIN)
 XEMU_NEON_SS_OP(max, (fa > fb) ? fa : fb, XEMU_SOFT_MAX)
 
-#endif /* XBOX && __aarch64__ */
+#endif /* XEMU_SSE_HOSTFP */
 
 #define SHIFT 0
 #include "ops_sse.h"
