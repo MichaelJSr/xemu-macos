@@ -472,7 +472,16 @@ case "$platform" in # Adjust compilation options based on platform
                 echo "PGO: no profiles found in ${pgo_dir}"
                 exit 1
               fi
-              if [ ! -f "${pgo_dir}/default.profdata" ]; then
+              # Re-merge when any .profraw is newer than the existing
+              # profdata — otherwise a retrain silently loses to a
+              # stale committed default.profdata (bit us 2026-07-04:
+              # the first use-build after retraining ran on the old
+              # profile because this only merged when profdata was
+              # absent).
+              newest_raw=$(ls -t "${pgo_dir}"/*.profraw 2>/dev/null | head -1)
+              if [ -n "${newest_raw}" ] && \
+                 { [ ! -f "${pgo_dir}/default.profdata" ] || \
+                   [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
                 xcrun llvm-profdata merge -output="${pgo_dir}/default.profdata" \
                     "${pgo_dir}"/*.profraw
               fi
