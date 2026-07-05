@@ -67,6 +67,8 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.14 | GPU frame-cost campaign menu (A1/A2/B/C/D) on 2026-07 fixtures | settled-negative |
 | 1.15 | Eager report submit (front-run the poll stall) | settled-negative |
 | 1.16 | Vertex copy-on-conflict transient remap (XEMU_VTX_TRANSIENT) | settled-negative |
+| 1.17 | JIT write-protect flip caching (barrier-skid mirage) | settled-negative |
+| 1.18 | Per-depth return-address ring -> eip-keyed ret memo | superseded-shipped |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -549,6 +551,52 @@ entries, little bind intersection — the opposite shape), or with an
 O(log n) interval structure + frame-sized budget + per-slot targeted
 fallback instead of the all-slot drain; re-run the same counters first
 to check the shape before writing any code.
+
+## 1.17 JIT write-protect caching — the profiler lied at barriers
+
+**Status**: settled-negative (2026-07-05, same-session revert).
+**The idea**: the new guest profiler attributed 9.7% of the vCPU
+thread to pthread_jit_write_protect_np (called on every TB entry via
+qemu_thread_jit_execute); a thread-local shadow state skipping
+redundant flips predicted +1.5-3 fps.
+**Evidence**: 6-pair A/B measured parity (-0.10 mean, sign-mixed).
+**Root cause of the bad prediction**: thread_suspend-based sampling
+(the mach sampler) parks the suspended thread's PC preferentially at
+barrier instructions — pthread_jit_write_protect_np is barrier-heavy,
+so most of its 9.7% was skid from neighboring code, not real cost.
+**Lesson**: in suspend-based profiles, discount symbols whose bodies
+are dominated by barriers/serializing instructions (jit-wp, mutex
+fast paths); corroborate with a counter-based estimate (call rate x
+plausible per-call cost) before predicting from sample share alone.
+**Reopen if**: never for fps; possibly as a power/efficiency change
+with energy instrumentation.
+
+## 1.18 Return-address ring → eip-keyed ret-target memo
+
+**Status**: superseded-shipped (the memo shipped default-on at
+fps-parity; the ring shape was measured and discarded the same day).
+**Journey**: guest profiling showed rets = 46% of 15.8M lookups/s and
+53% of jump-cache misses → classic shadow stack implemented
+(call-site push, ret-pop, lazy TB fill). Smoke: eip prediction paired
+at 99.6% BUT fills ran 2.6x hits (196.9M/70 s) — per-depth slots are
+shared by every same-depth call site, so the TB memo thrashed; a
+512-deep ring changed nothing (not a depth problem, a KEY problem).
+Restructured: drop the ring and the per-call push entirely (env->eip
+already holds the ret target at dispatch — depth-shaped prediction
+adds nothing), direct-mapped 4096-entry eip->TB memo probed in the
+ret helper with full jump-cache-equivalent validation. Result: 95.4%
+hit, zero mispredicts, fills 17M, fps parity (probe cost ≈ jc probe
+cost at helper level, as predicted post-skid-correction).
+**The prize is phase 2**: inline the memo probe at ret sites in
+generated code (hash+eip compare+validation+goto_ptr), bypassing the
+helper round-trip + get_tb_cpu_state for ~44% of all lookups.
+Design notes: validation inline needs stored-at-fill flags/cs_base
+plus an invalidation epoch (bump on tb invalidate/flush) instead of
+per-entry purging; XEMU_RAS=0 must keep disabling both sides.
+**Reopen the ring if**: a workload shows the memo thrashing on
+polymorphic returns (same ret eip, alternating targets — impossible:
+ret target IS the eip; the memo cannot alias that way. The ring has
+no reopen case; this row exists to prevent re-walking it).
 
 # 2. MoltenVK / driver level
 

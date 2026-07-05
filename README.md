@@ -124,6 +124,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
+| `XEMU_GUEST_PROF` | `1` enables the one-run guest profiler: a mach-thread sampler resolves vCPU samples to guest TBs/pages vs host symbols, and the i386 translator classifies every TB-lookup by exit kind (ret / indirect jmp / indirect call). Measurement-run only (not benchmark-neutral) |
+| `XEMU_RAS` | `0` disables the near-return target memo (default on): a 4096-entry eip→TB cache probed by the ret exit helper ahead of the jump cache, validated exactly like a jump-cache hit. Phase 1 measured fps-parity (6 pairs) at a 95.4% live hit rate — shipped as the foundation for inlining the probe at ret sites |
 | `XEMU_TB_PROF` | `1` prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count). The heavy scene measures 15.8M lookups/s at 93.4% hit — the profile that killed the cache-sizing experiment (see failed-experiments) and aims future TCG work at lookup volume instead |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | `1` enables the host-SIMD fast path for packed/scalar single-precision SSE arithmetic — NEON on Apple Silicon, host SSE on x86_64 hosts. Dark A/B knob — parity on the arm64 bench scene post-PGO; `=2` differential mode runs both paths and aborts on divergence. arm64: 60 s zero-divergence receipt. x86_64: **no bit-exactness claim yet** — the first Rosetta `=2` run caught a real leaked-rounding-mode bug (fixed: both brackets now force RN), and a second unresolved ±0-sign divergence under Rosetta remains; run `=2` clean on real x86_64 silicon before enabling `=1` |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
@@ -262,6 +264,19 @@ In-app Settings covers the main toggles.
   Observation-only; ~three flag stores per draw when the profiler is
   off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
   heavy savestate scene.
+- **Guest profiler + TB-dispatch campaign, first round (2026-07-05).**
+  `XEMU_GUEST_PROF` produced the fork's first guest-side profile
+  (mach-thread sampler + per-exit-kind lookup classification): the
+  heavy scene's guest time is diffuse (top TB 1.8%, top-30 ≈ 13% — no
+  hot-loop fast-path candidates), near-returns are 46% of all 15.8M/s
+  TB lookups and 53% of jump-cache misses, and indirect calls barely
+  miss (3.2%). First shipped result: the near-return target memo
+  (`XEMU_RAS`, default on) — phase 1 measured fps-parity at a 95.4%
+  live hit rate and exists to be inlined at ret sites next (bypassing
+  the helper round-trip for ~44% of all lookups). Two honest kills
+  along the way are in the failed-experiments table (JIT write-protect
+  caching — a sampling-skid mirage; the per-depth return-address
+  ring — wrong key shape).
 - **Cross-platform parity batch (2026-07-05).** The DSP56K JIT gate
   widened to all POSIX aarch64 hosts (`__aarch64__ && !_WIN32`) — the
   fork's biggest CPU win now compiles for Linux arm64 (CI-covered by
@@ -837,6 +852,8 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| JIT write-protect flip caching (2026-07-05) | The guest profiler attributed 9.7% of the vCPU thread to `pthread_jit_write_protect_np` (called on every TB entry), so a thread-local shadow state skipping redundant flips looked like +2-3 fps. Measured **parity** (6 pairs, −0.10 mean, sign-mixed). Autopsy: `thread_suspend`-based sampling parks preferentially on barrier instructions, over-attributing barrier-heavy symbols — most of the 9.7% was sampling skid, not cost. Reverted; the lesson (discount barrier-heavy symbols in suspend-based profiles) is the artifact |
+| Per-depth return-address ring (2026-07-05, superseded same-day) | The classic call-site-push/ret-pop shadow stack: eip prediction paired at 99.6%, but the per-slot TB memo thrashed — same-depth call sites share slots, so fills ran 2.6× hits (196.9M fills/70 s) and a 512-deep ring changed nothing. Restructured to the eip-keyed ret-target memo (`XEMU_RAS` row above): 95.4% hit, zero mispredicts, fills 17M. The ring insight: on x86-under-TCG the ret target is already in `env->eip` at dispatch time, so depth-shaped prediction state adds nothing a target-keyed cache doesn't |
 | Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the mid-frame conflict finish (submit + wait the just-submitted slot, ~6/flip on the heavy scene) with per-slot transient copies + remapped draw bindings (chained newest-first entries, retirement-gated mirror apply, rotation copy-forward, exact-refinement exclusion). Faithfully implemented with all three design traps closed — and measured **−2.09 fps, 6/6 pairs negative**. Counters: `vtx_remap_hit` 226.7/flip (the remap search became a per-draw fixture), `vtx_remap_full` 1.47/flip (64-entry/2 MiB budget overflows every frame; the all-slot drain fallback is heavier than the targeted waits it replaced). The title rewrites broad vertex ranges every frame — the wrong conflict shape for remapping. Reverted whole; the targeted submitted-slot wait remains the shipped design. Full record: archaeology 1.16 |
 | TB jump-cache enlargement (12→16 bits, 2026-07-05) | `XEMU_TB_PROF` measured 15.8M `tb_lookup` calls/s on the heavy scene at 93.44% jump-cache hit — ~1M TB-htable walks/s and 410k translated TBs, so capacity misses looked like free money (a 16-bit probe halved the walks). Interleaved A/B (6 pairs, runtime-sized cache, 12 vs 16 bits): **−1.10 fps, 4/6 pairs negative** — the 4096-entry (64 KiB) cache is L1-resident; a 1 MiB cache pays a few ns extra on each of 14.8M *hits*/s, which outweighs the ~500k avoided walks. Upstream's geometry is already near-optimal on M2; the profitable target is lookup *volume* (indirect-branch/ret chaining), not cache size. Sizing mechanism reverted; the profiler (`XEMU_TB_PROF`) ships |
 | Eager report submit (`XEMU_REPORTS_EAGER=N`, 2026-07-04) | Submit the recording CB when its Nth zpass report is *requested*, front-running the guest's poll stall so GPU execution overlaps remaining guest frame work. Measured dead on the F8 scene (interleaved, 6 pairs): mean −0.08 fps (deltas +0.26/+3.04/+0.09/−0.87/−0.65/−2.38 — sign-inconsistent), with a persistent +4% draws/flip composition shift in the eager arm. Mechanism of the neutrality: the 300 µs idle budget (shipped earlier the same day) already sits near the structural minimum — the guest's post-submit wait is GPU catch-up time, which eager submission merely moves without shrinking, while adding submit overhead. Reverted; the idle-budget path remains the shipped design |
