@@ -73,7 +73,10 @@ package_macos() {
         "${PWD}/macos-libs/${target_arch}/opt/local/lib/libMoltenVK.dylib" \
         "/usr/local/lib/libMoltenVK.dylib" \
         "/opt/homebrew/lib/libMoltenVK.dylib"; do
-      if [ -f "$candidate" ]; then
+      # Same arch rule as configure-time resolution: a dylib without
+      # the target arch slice must not win the bundle either.
+      if [ -f "$candidate" ] && \
+         lipo -archs "$candidate" 2>/dev/null | grep -qw "${target_arch}"; then
         moltenvk_src="$candidate"
         break
       fi
@@ -372,9 +375,19 @@ case "$platform" in # Adjust compilation options based on platform
         # meson picks up from ${lib_prefix}/include (no Homebrew
         # vulkan-headers needed).
         moltenvk_ver="${XEMU_MOLTENVK_VERSION:-1.4.1}"
-        if [ ! -f "${lib_prefix}/lib/libMoltenVK.dylib" ] && \
-           [ ! -f /usr/local/lib/libMoltenVK.dylib ] && \
-           [ ! -f /opt/homebrew/lib/libMoltenVK.dylib ]; then
+        # A dylib only counts if it contains the target arch: a
+        # single-arch system install (e.g. the custom arm64-only
+        # /usr/local build) must not short-circuit vendoring for a
+        # cross build — that silently disabled the whole Vulkan
+        # renderer for '-a x86_64' and broke the link via the UI's
+        # MetalFX references (hit 2026-07-05). The official release
+        # tar is universal, so the vendored copy satisfies any arch.
+        dylib_has_target_arch() {
+            [ -f "$1" ] && lipo -archs "$1" 2>/dev/null | grep -qw "${target_arch}"
+        }
+        if ! dylib_has_target_arch "${lib_prefix}/lib/libMoltenVK.dylib" && \
+           ! dylib_has_target_arch /usr/local/lib/libMoltenVK.dylib && \
+           ! dylib_has_target_arch /opt/homebrew/lib/libMoltenVK.dylib; then
             echo "MoltenVK not found; downloading v${moltenvk_ver} into macos-libs..."
             moltenvk_tmp="$(mktemp -d)"
             curl -fsSL -o "${moltenvk_tmp}/MoltenVK-macos.tar" \

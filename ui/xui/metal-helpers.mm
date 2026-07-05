@@ -820,12 +820,19 @@ void MetalRenderDecal(float x, float y, float w, float h, float tex_x,
 // Game-frame gamma blit
 // ---------------------------------------------------------------------------
 
+#include "config-host.h"
+
 extern "C" {
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
-/* Async MetalFX ordering (hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m) */
+#ifdef CONFIG_VULKAN
+/* Async MetalFX ordering (hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m).
+ * The provider lives in the Vulkan renderer; a darwin build without
+ * Vulkan (no usable MoltenVK at configure time) has no MetalFX ring
+ * producer, so there is nothing to order against. */
 void *metalfx_present_event(void);
 uint64_t metalfx_present_event_last_value(void);
+#endif
 }
 
 static void render_framebuffer_to(id<MTLRenderCommandEncoder> enc,
@@ -915,10 +922,12 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
 
     /* The source may be an in-flight MetalFX ring texture (produced on
      * a different queue with async signaling); order against it. */
+#ifdef CONFIG_VULKAN
     id<MTLSharedEvent> ev = (id<MTLSharedEvent>)metalfx_present_event();
     if (ev) {
         [cb encodeWaitForEvent:ev value:metalfx_present_event_last_value()];
     }
+#endif
 
     MTLRenderPassDescriptor *rpd =
         [MTLRenderPassDescriptor renderPassDescriptor];
