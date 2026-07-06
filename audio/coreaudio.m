@@ -586,9 +586,8 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
      * Buffer size trade-off: 4096 frames (~85 ms @ 48 kHz) is very high
      * latency for an interactive emulator. 1024 frames (~21 ms @ 48 kHz)
      * is well within Apple's reliable IOProc budget on Apple Silicon
-     * while cutting latency ~4x. Users can override via the TOML
-     * `[audio.coreaudio.out] buffer_length` / `buffer_count` knobs,
-     * or via XEMU_COREAUDIO_FRAMES at build time.
+     * while cutting latency ~4x. Override at runtime with
+     * XEMU_COREAUDIO_FRAMES (or QEMU -audiodev buffer options).
      *
      * The VP frame thread stays well under its budget (voice-struct
      * stack memcpy, attenuation/pitch/LPF LUTs, vDSP_vsma mixbin,

@@ -417,17 +417,6 @@ typedef struct MetalFXSpatialState {
 
 static MetalFXSpatialState g_spatial = { 0 };
 
-bool metalfx_is_supported(void)
-{
-    static int cached = -1;
-    if (cached >= 0) return cached;
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    if (!device) { cached = 0; return false; }
-    cached = [MTLFXSpatialScalerDescriptor supportsDevice:device] ? 1 : 0;
-    [device release];
-    return cached;
-}
-
 static void metalfx_destroy_locked(void)
 {
     [g_spatial.scaler release];           g_spatial.scaler = nil;

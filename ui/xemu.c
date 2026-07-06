@@ -825,14 +825,6 @@ static void process_vblank(struct xemu_console *scon)
 
     update_fps();
 
-#if 0
-    static uint64_t last_ns = 0;
-    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    uint64_t delta_ns = last_ns ? now_ns - last_ns : 0;
-    fprintf(stderr, "%s delta_ns=%"PRId64"\n", __func__, delta_ns);
-    last_ns = now_ns;
-#endif
-
     graphic_hw_update(scon->dcl.con);
 }
 

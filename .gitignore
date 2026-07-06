@@ -29,3 +29,4 @@ build.log
 .DS_Store
 .cursorignore
 xemu-output.log
+/pgo/*.profraw

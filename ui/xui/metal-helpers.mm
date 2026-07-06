@@ -500,31 +500,6 @@ bool MetalHelpersInit()
     return true;
 }
 
-void MetalHelpersShutdown()
-{
-    for (int k = 0; k < FRAG_KIND_COUNT; k++) {
-        for (int b = 0; b < 3; b++) {
-            for (int f = 0; f < FMT_COUNT; f++) {
-                [g_pipelines[k][b][f] release];
-                g_pipelines[k][b][f] = nil;
-            }
-        }
-        [g_frag_fns[k] release];
-        g_frag_fns[k] = nil;
-    }
-    [g_vert_fn release];
-    g_vert_fn = nil;
-    [g_sampler_decal release];
-    g_sampler_decal = nil;
-    [g_sampler_linear release];
-    g_sampler_linear = nil;
-    [g_sampler_nearest release];
-    g_sampler_nearest = nil;
-    [g_library release];
-    g_library = nil;
-    g_dev = nil;
-}
-
 const char *MetalGetDeviceName()
 {
     return xemu_metal_device_name();

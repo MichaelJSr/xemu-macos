@@ -34,9 +34,10 @@
 
 struct ImDrawData;
 
-// Lifecycle (requires xemu_metal_init() to have succeeded)
+// Lifecycle (requires xemu_metal_init() to have succeeded).
+// Init-only: the presentation backend is fixed for the process
+// lifetime, so these singletons are reclaimed at exit, not torn down.
 bool MetalHelpersInit();
-void MetalHelpersShutdown();
 
 // ImGui Metal bridge
 bool MetalImGuiInit();

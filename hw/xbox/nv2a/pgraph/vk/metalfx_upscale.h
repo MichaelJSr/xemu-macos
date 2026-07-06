@@ -48,7 +48,6 @@ void metalfx_drain_inflight(void);
 void metalfx_set_input_wait(void *event, uint64_t value);
 
 /* Spatial upscaler */
-bool metalfx_is_supported(void);
 bool metalfx_init(int input_w, int input_h, int output_w, int output_h);
 IOSurfaceRef metalfx_get_output_surface(void);
 void *metalfx_get_output_texture(void); /* retained; Metal-native mode */
