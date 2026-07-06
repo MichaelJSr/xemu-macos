@@ -22,6 +22,108 @@ package_wincross() {
     python3 ./scripts/gen-license.py --platform windows > dist/LICENSE.txt
 }
 
+# --- MoltenVK helpers (macOS) ---
+# The Vulkan renderer is the default; volk dlopens libMoltenVK.dylib at
+# runtime, so the build must (a) see Vulkan headers at configure time
+# and (b) bundle a dylib at package time. ONE resolution rule serves
+# both steps, in tier order: vendored macos-libs, /usr/local (Vulkan
+# SDK / scripts/build-moltenvk.sh custom build), Homebrew.
+#
+# A dylib only counts if it contains the target arch: a single-arch
+# system install (e.g. the custom arm64-only /usr/local build) must
+# not short-circuit vendoring for a cross build — that silently
+# disabled the whole Vulkan renderer for '-a x86_64' and broke the
+# link via the UI's MetalFX references (hit 2026-07-05). The official
+# release tar is universal, so the vendored copy satisfies any arch.
+resolve_moltenvk() {
+    local candidate
+    for candidate in \
+        "${PWD}/macos-libs/${target_arch}/opt/local/lib/libMoltenVK.dylib" \
+        "/usr/local/lib/libMoltenVK.dylib" \
+        "/opt/homebrew/lib/libMoltenVK.dylib"; do
+        if [ -f "$candidate" ] && \
+           lipo -archs "$candidate" 2>/dev/null | grep -qw "${target_arch}"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Download the pinned official MoltenVK release and vendor it into
+# macos-libs. Always installs the headers (the release tar ships the
+# full vulkan/ set, so no Homebrew vulkan-headers dependency); pass
+# "dylib" to also install the dylib, or "headers" when a dylib exists
+# in a headerless system location.
+vendor_moltenvk() {
+    local what="$1"
+    local ver="${XEMU_MOLTENVK_VERSION:-1.4.1}"
+    local tmp
+    tmp="$(mktemp -d)"
+    echo "Vendoring MoltenVK v${ver} (${what}) into ${lib_prefix}..."
+    curl -fsSL -o "${tmp}/MoltenVK-macos.tar" \
+        "https://github.com/KhronosGroup/MoltenVK/releases/download/v${ver}/MoltenVK-macos.tar"
+    tar -xf "${tmp}/MoltenVK-macos.tar" -C "${tmp}"
+    mkdir -p "${lib_prefix}/include"
+    cp -R "${tmp}/MoltenVK/MoltenVK/include/" "${lib_prefix}/include/"
+    if [ "${what}" = "dylib" ]; then
+        mkdir -p "${lib_prefix}/lib"
+        cp "${tmp}/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" \
+           "${lib_prefix}/lib/libMoltenVK.dylib"
+    fi
+    rm -rf "${tmp}"
+}
+
+# --- PGO (all clang platforms) ---
+# Optional two-stage flow:
+#   XEMU_PGO=generate ./build.sh   # build with -fprofile-generate
+#   # run target games so .profraw files accumulate in the profile dir
+#   XEMU_PGO=use ./build.sh        # rebuild with -fprofile-use
+# Profile dir defaults to ${PWD}/pgo; override with XEMU_PGO_DIR.
+# clang/LLVM only (merge via llvm-profdata; ${profdata_prefix} is
+# "xcrun " on Darwin, empty elsewhere — expanded unquoted so the
+# prefix word-splits). GCC PGO is a different mechanism and is not
+# wired. LTO stays enabled so profile guidance crosses translation
+# units.
+setup_pgo() {
+    [ -n "${XEMU_PGO}" ] || return 0
+    local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+    mkdir -p "${pgo_dir}"
+    case "${XEMU_PGO}" in
+    generate)
+        sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
+        sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
+        echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
+        ;;
+    use)
+        # Re-merge when any .profraw is newer than the existing
+        # profdata — otherwise a retrain silently loses to a stale
+        # committed default.profdata (bit us 2026-07-04: the first
+        # use-build after retraining ran on the old profile because
+        # this only merged when profdata was absent).
+        local newest_raw
+        newest_raw=$(ls -t "${pgo_dir}"/*.profraw 2>/dev/null | head -1 || true)
+        if [ -n "${newest_raw}" ] && \
+           { [ ! -f "${pgo_dir}/default.profdata" ] || \
+             [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
+            ${profdata_prefix}llvm-profdata merge \
+                -output="${pgo_dir}/default.profdata" "${pgo_dir}"/*.profraw
+        fi
+        if [ ! -f "${pgo_dir}/default.profdata" ]; then
+            echo "PGO: no profiles found in ${pgo_dir}"
+            exit 1
+        fi
+        sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
+        sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
+        echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
+        ;;
+    *)
+        echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
+        exit 1
+        ;;
+    esac
+}
+
 package_macos() {
     rm -rf dist
 
@@ -48,13 +150,15 @@ package_macos() {
       install_name_tool -change "$dep" "$new_path" "$exe_path"
     done
 
-    for lib_path in ${lib_path}/*.dylib; do
-      for dep in $(otool -L "$lib_path" | grep -e '/opt/local/' | cut -d' ' -f1); do
+    # (loop variable deliberately distinct from lib_path — shadowing it
+    # left the variable pointing at the last dylib after the loop)
+    for dylib in "${lib_path}"/*.dylib; do
+      for dep in $(otool -L "$dylib" | grep -e '/opt/local/' | cut -d' ' -f1); do
         dep_basename="$(basename $dep)"
         new_path="@rpath/${dep_basename}"
-        echo "Fixing $lib_path dependency $dep_basename -> $new_path"
-        install_name_tool -change "$dep" "$new_path" "$lib_path"
-        codesign -s - -f "${lib_path}"
+        echo "Fixing $dylib dependency $dep_basename -> $new_path"
+        install_name_tool -change "$dep" "$new_path" "$dylib"
+        codesign -s - -f "${dylib}"
       done
     done
 
@@ -67,28 +171,23 @@ package_macos() {
 
     # Bundle MoltenVK for Vulkan support (loaded at runtime by Volk via dlopen).
     # The binary's LC_RPATH already points to the Libraries directory, so
-    # dlopen("libMoltenVK.dylib") will find it there.
-    moltenvk_src=""
-    for candidate in \
-        "${PWD}/macos-libs/${target_arch}/opt/local/lib/libMoltenVK.dylib" \
-        "/usr/local/lib/libMoltenVK.dylib" \
-        "/opt/homebrew/lib/libMoltenVK.dylib"; do
-      # Same arch rule as configure-time resolution: a dylib without
-      # the target arch slice must not win the bundle either.
-      if [ -f "$candidate" ] && \
-         lipo -archs "$candidate" 2>/dev/null | grep -qw "${target_arch}"; then
-        moltenvk_src="$candidate"
-        break
-      fi
-    done
+    # dlopen("libMoltenVK.dylib") will find it there. Same tier walk +
+    # arch rule as the configure-time resolution (resolve_moltenvk),
+    # re-run here because the two can drift between configure and
+    # package on a changed system.
+    moltenvk_src="$(resolve_moltenvk || true)"
     if [ -n "$moltenvk_src" ]; then
-      moltenvk_dst="dist/xemu.app/Contents/Libraries/${target_arch}/libMoltenVK.dylib"
+      moltenvk_dst="${lib_path}/libMoltenVK.dylib"
       # Provenance: which MoltenVK is being shipped matters — a local
       # /usr/local install (custom build) can silently shadow the
       # vendored copy, and driver-version drift between the tested
       # binary and the released binary is exactly how the prefill
       # pink-tile class of bug escapes testing. Log version + UUID.
-      moltenvk_bundled_ver=$(strings "$moltenvk_src" | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$' || echo unknown)
+      # awk reads all input (no early pipe close): grep -m1 here made
+      # strings exit on SIGPIPE, which pipefail turned into a failed
+      # pipeline, so the old `|| echo unknown` fired even on a match.
+      moltenvk_bundled_ver=$(strings "$moltenvk_src" | \
+          awk '/^[0-9]+\.[0-9]+\.[0-9]+$/ && !v {v=$0} END {print (v ? v : "unknown")}')
       moltenvk_uuid=$(dwarfdump --uuid "$moltenvk_src" 2>/dev/null | grep -m1 "($target_arch)" | awk '{print $2}')
       echo "Bundling MoltenVK from $moltenvk_src (version ${moltenvk_bundled_ver}, ${target_arch} UUID ${moltenvk_uuid:-n/a})"
       cp "$moltenvk_src" "$moltenvk_dst"
@@ -299,40 +398,8 @@ case "$platform" in # Adjust compilation options based on platform
         echo 'Compiling for Linux...'
         sys_cflags='-Wno-error=redundant-decls'
         opts="$opts --disable-werror"
-        if [ -n "${XEMU_PGO}" ]; then
-          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
-          mkdir -p "${pgo_dir}"
-          case "${XEMU_PGO}" in
-            generate)
-              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
-              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
-              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
-              ;;
-            use)
-              # clang/LLVM profdata only (same wiring as the Darwin
-              # branch, llvm-profdata without the xcrun prefix). GCC
-              # PGO is a different mechanism and is not wired.
-              newest_raw=$(ls -t "${pgo_dir}"/*.profraw 2>/dev/null | head -1 || true)
-              if [ -n "${newest_raw}" ] && \
-                 { [ ! -f "${pgo_dir}/default.profdata" ] || \
-                   [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
-                llvm-profdata merge -output="${pgo_dir}/default.profdata" \
-                    "${pgo_dir}"/*.profraw
-              fi
-              if [ ! -f "${pgo_dir}/default.profdata" ]; then
-                echo "PGO: no profiles found in ${pgo_dir}"
-                exit 1
-              fi
-              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
-              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
-              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
-              ;;
-            *)
-              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
-              exit 1
-              ;;
-          esac
-        fi
+        profdata_prefix=""
+        setup_pgo
         postbuild='package_linux'
         ;;
     Darwin)
@@ -368,37 +435,12 @@ case "$platform" in # Adjust compilation options based on platform
 
         # Vulkan (MoltenVK): the renderer defaults to Vulkan, so a
         # usable libMoltenVK.dylib is required. Prefer deliberate
-        # system installs (Vulkan SDK in /usr/local, brew molten-vk);
-        # when none exists, vendor the pinned official release into
-        # macos-libs so a fresh clone works out of the box. The
-        # release tar also ships the full vulkan/ header set, which
-        # meson picks up from ${lib_prefix}/include (no Homebrew
-        # vulkan-headers needed).
-        moltenvk_ver="${XEMU_MOLTENVK_VERSION:-1.4.1}"
-        # A dylib only counts if it contains the target arch: a
-        # single-arch system install (e.g. the custom arm64-only
-        # /usr/local build) must not short-circuit vendoring for a
-        # cross build — that silently disabled the whole Vulkan
-        # renderer for '-a x86_64' and broke the link via the UI's
-        # MetalFX references (hit 2026-07-05). The official release
-        # tar is universal, so the vendored copy satisfies any arch.
-        dylib_has_target_arch() {
-            [ -f "$1" ] && lipo -archs "$1" 2>/dev/null | grep -qw "${target_arch}"
-        }
-        if ! dylib_has_target_arch "${lib_prefix}/lib/libMoltenVK.dylib" && \
-           ! dylib_has_target_arch /usr/local/lib/libMoltenVK.dylib && \
-           ! dylib_has_target_arch /opt/homebrew/lib/libMoltenVK.dylib; then
-            echo "MoltenVK not found; downloading v${moltenvk_ver} into macos-libs..."
-            moltenvk_tmp="$(mktemp -d)"
-            curl -fsSL -o "${moltenvk_tmp}/MoltenVK-macos.tar" \
-                "https://github.com/KhronosGroup/MoltenVK/releases/download/v${moltenvk_ver}/MoltenVK-macos.tar"
-            tar -xf "${moltenvk_tmp}/MoltenVK-macos.tar" -C "${moltenvk_tmp}"
-            mkdir -p "${lib_prefix}/lib" "${lib_prefix}/include"
-            cp "${moltenvk_tmp}/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" \
-               "${lib_prefix}/lib/libMoltenVK.dylib"
-            cp -R "${moltenvk_tmp}/MoltenVK/MoltenVK/include/" "${lib_prefix}/include/"
-            rm -rf "${moltenvk_tmp}"
-            echo "MoltenVK v${moltenvk_ver} vendored into ${lib_prefix}"
+        # system installs (tier walk + arch rule in resolve_moltenvk
+        # at the top of this script); when none exists, vendor the
+        # pinned official release into macos-libs so a fresh clone
+        # works out of the box.
+        if ! resolve_moltenvk >/dev/null; then
+            vendor_moltenvk dylib
         fi
         # Headers can still be missing when the dylib came from a
         # system location without development headers (e.g. bare
@@ -406,14 +448,7 @@ case "$platform" in # Adjust compilation options based on platform
         if [ ! -f "${lib_prefix}/include/vulkan/vulkan.h" ] && \
            [ ! -f /opt/homebrew/include/vulkan/vulkan.h ] && \
            [ ! -f /usr/local/include/vulkan/vulkan.h ]; then
-            echo "Vulkan headers not found; vendoring from MoltenVK v${moltenvk_ver}..."
-            moltenvk_tmp="$(mktemp -d)"
-            curl -fsSL -o "${moltenvk_tmp}/MoltenVK-macos.tar" \
-                "https://github.com/KhronosGroup/MoltenVK/releases/download/v${moltenvk_ver}/MoltenVK-macos.tar"
-            tar -xf "${moltenvk_tmp}/MoltenVK-macos.tar" -C "${moltenvk_tmp}"
-            mkdir -p "${lib_prefix}/include"
-            cp -R "${moltenvk_tmp}/MoltenVK/MoltenVK/include/" "${lib_prefix}/include/"
-            rm -rf "${moltenvk_tmp}"
+            vendor_moltenvk headers
         fi
         export CFLAGS="${CFLAGS} \
                        -arch ${target_arch} \
@@ -508,51 +543,8 @@ case "$platform" in # Adjust compilation options based on platform
             sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast"
         fi
 
-        # Optional PGO build mode (Phase 5). Two-stage flow:
-        #   XEMU_PGO=generate ./build.sh   # build with -fprofile-generate
-        #   # run target games to gather .profraw files into PGO_DIR
-        #   XEMU_PGO=use ./build.sh        # rebuild with -fprofile-use
-        # Profile data directory defaults to ${PWD}/pgo; override with
-        # XEMU_PGO_DIR. Works on clang/ldflags only; LTO stays enabled
-        # so sample-based PGO can cross translation units.
-        if [ -n "${XEMU_PGO}" ]; then
-          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
-          mkdir -p "${pgo_dir}"
-          case "${XEMU_PGO}" in
-            generate)
-              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
-              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
-              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
-              ;;
-            use)
-              if ! ls "${pgo_dir}"/*.profraw >/dev/null 2>&1 && \
-                 [ ! -f "${pgo_dir}/default.profdata" ]; then
-                echo "PGO: no profiles found in ${pgo_dir}"
-                exit 1
-              fi
-              # Re-merge when any .profraw is newer than the existing
-              # profdata — otherwise a retrain silently loses to a
-              # stale committed default.profdata (bit us 2026-07-04:
-              # the first use-build after retraining ran on the old
-              # profile because this only merged when profdata was
-              # absent).
-              newest_raw=$(ls -t "${pgo_dir}"/*.profraw 2>/dev/null | head -1 || true)
-              if [ -n "${newest_raw}" ] && \
-                 { [ ! -f "${pgo_dir}/default.profdata" ] || \
-                   [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
-                xcrun llvm-profdata merge -output="${pgo_dir}/default.profdata" \
-                    "${pgo_dir}"/*.profraw
-              fi
-              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
-              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
-              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
-              ;;
-            *)
-              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
-              exit 1
-              ;;
-          esac
-        fi
+        profdata_prefix="xcrun "
+        setup_pgo
 
         sys_ldflags="${sys_ldflags:-}${sys_ldflags:+ }-headerpad_max_install_names"
 
@@ -600,39 +592,12 @@ case "$platform" in # Adjust compilation options based on platform
         if [ -z "$debug" ] && ! echo "$@" | grep -q 'x86_version'; then
           opts="$opts -Dx86_version=3"
         fi
-        # Optional PGO build mode — same two-stage flow as the Darwin
-        # branch (see comment there). MSYS2 clang/gcc both accept
-        # -fprofile-generate / -fprofile-use; merge with llvm-profdata
-        # when available.
-        if [ -n "${XEMU_PGO}" ]; then
-          pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
-          mkdir -p "${pgo_dir}"
-          case "${XEMU_PGO}" in
-            generate)
-              sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
-              sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
-              echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
-              ;;
-            use)
-              if ! ls "${pgo_dir}"/*.profraw >/dev/null 2>&1 && \
-                 [ ! -f "${pgo_dir}/default.profdata" ]; then
-                echo "PGO: no profiles found in ${pgo_dir}"
-                exit 1
-              fi
-              if [ ! -f "${pgo_dir}/default.profdata" ]; then
-                llvm-profdata merge -output="${pgo_dir}/default.profdata" \
-                    "${pgo_dir}"/*.profraw
-              fi
-              sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
-              sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
-              echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
-              ;;
-            *)
-              echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
-              exit 1
-              ;;
-          esac
-        fi
+        # PGO: same two-stage flow as Darwin/Linux (MSYS2 clang accepts
+        # the same flags; llvm-profdata without the xcrun prefix). The
+        # shared setup_pgo also fixes this branch's former stale-merge
+        # behavior (it only re-merged when profdata was absent).
+        profdata_prefix=""
+        setup_pgo
         postbuild='package_windows' # set the above function to be called after build
         target="qemu-system-i386w.exe"
         ;;
