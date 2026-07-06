@@ -74,6 +74,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
+| 8.6 | grep -m1 under pipefail poisoned the MoltenVK provenance version | shipped-after-fix |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -698,10 +699,6 @@ one configuration (`166999fc60`; build.sh also logs the bundled MoltenVK
 version+UUID to catch tested-vs-shipped driver drift). Validated on the
 user's own pink-spot savestate with the full launch environment: 0 artifact
 frames in 388 captures at 48.5 fps (prefill=0) vs 22 at 46.3 (prefill=2).
-
-**Known stale doc**: README's "MoltenVK runtime config" table (~line 720)
-still says PREFILL=2 — code and plist say 0; the README *Changes* text is
-correct. Trust `grep -n PREFILL Info.plist ui/xemu.c`.
 
 **Also fixed en route** (same commit): failed snapshot loads (USB topology
 drift) left the VM stopped — a silent "freeze" behind a transient toast; the
@@ -1336,6 +1333,26 @@ arbitrarily far away (here: a UI link error); (c) pipe a long build
 through `head` and SIGPIPE kills it mid-flight — grep the log file
 afterwards instead.
 
+## 8.6 grep -m1 under pipefail poisoned the MoltenVK provenance version
+
+**Status**: shipped-after-fix (2026-07-05, found while validating the
+build.sh consolidation).
+**Symptom**: `package_macos`'s provenance line printed
+`version 1.4.2 unknown` — the matched version AND the fallback.
+**Root cause**: `strings | grep -m1 <pat> || echo unknown` under
+`set -o pipefail`: `grep -m1` exits after the first match and closes
+the pipe, `strings` dies with SIGPIPE, pipefail marks the whole
+pipeline failed — so the `||` fallback fires despite a successful
+match, appending "unknown" after the version.
+**Fix**: an awk that reads ALL input and carries the fallback inside
+(`/pat/ && !v {v=$0} END {print (v ? v : "unknown")}`) — no early
+pipe close, no `||` on the pipeline.
+**Lesson** (sibling of 8.5 lesson (c) and 8.4's `set -e` traps):
+under pipefail, any early-exit reader (`grep -m1`, `head`) makes the
+pipeline's exit status lie about success — never hang an `||`
+fallback off such a pipeline.
+**Reopen if**: n/a.
+
 ---
 
 # 9. Benchmarking / method incidents
@@ -1467,9 +1484,8 @@ them). Re-verification one-liners for drift-prone facts:
   `git show --no-patch --format='%h %ad %s' --date=short <hash>`
 - Revert pairs in fork history:
   `git log --first-parent --oneline upstream/master..HEAD | grep -iE 'revert|reapply|disable|remove'`
-- Prefill still 0 in both places (entry 2.1): `grep -n PREFILL Info.plist ui/xemu.c`
-- README MVK table still stale at PREFILL=2 (drop the 2.1 note once fixed):
-  `sed -n '718,727p' README.md`
+- Prefill still 0 in all three homes (entry 2.1; README fixed
+  2026-07-05): `grep -n PREFILL README.md Info.plist ui/xemu.c`
 - Escape hatches cited (REPORTS_SYNC, VTX_EXACT, MAX_QUERIES, ZETA/TEX
   knobs) still documented: `sed -n '109,125p' README.md`
 - DSP JIT round history + knobs: `grep -n 'EPI_NO_PC\|SENTINEL' docs/dsp-jit-design.md`

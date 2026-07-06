@@ -29,19 +29,12 @@ Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 ### Building for Windows
 
 The upstream Windows build paths are preserved and CI-tested. All
-portable optimizations apply automatically: the Vulkan renderer work
-(flight slots, dirty hashing + spatial index + once-per-frame
-verification, the zeta shape-switch fast path, targeted
-vertex-conflict waits, VkPipelineCache persistence, draw-path dedup,
-tight barriers, query drain at slot reclaim), the APU work (LUTs,
-batched register reads, SVF cache, mono paths, SSE2 mix kernels),
-the pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, and the
-helper-based hard FPU on x86_64. macOS-only: MetalFX, the Metal /
-IOSurface presentation backends and their async present chain,
-CoreAudio, vDSP, the ARM64 DSP JIT, and the AArch64 inline x87 FPU
-(Windows uses the bit-equivalent helper-based hard FPU instead). The
-MoltenVK CPU primitive-emulation paths don't activate on native
-Vulkan drivers.
+portable optimizations (the Vulkan renderer and APU work, the
+pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, the helper-based
+hard FPU on x86_64) apply automatically. macOS-only pieces (MetalFX,
+Metal / IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT,
+the AArch64 inline x87 FPU) compile out, and the MoltenVK CPU
+primitive-emulation paths don't activate on native Vulkan drivers.
 
 - **Native (MSYS2/MINGW):** `./build.sh` from an MSYS2 shell.
   Release builds default to `-Dx86_version=3`; `XEMU_PGO=generate` /
@@ -73,11 +66,12 @@ Vulkan drivers.
 | Env var | Default | Purpose |
 |---|---|---|
 | `XEMU_ARM_CPU` | auto | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string` |
-| `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use` for PGO. A trained profile is committed at `pgo/default.profdata` (Azurik savestate corpus, 2026-07-04) and CI applies it to arm64 release builds — measured +9.4% fps on the heavy savestate scene (25.42 ± 0.34 → 27.81 ± 0.62, 3 interleaved cross-binary pairs). Retrain after large code churn: `XEMU_PGO=generate ./build.sh`, play the bench scenes, `XEMU_PGO=use ./build.sh`, commit the regenerated profdata. |
+| `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use`. A trained profile is committed at `pgo/default.profdata` and applied by CI to arm64 release builds (+9.4% fps — see Build + packaging). Retrain after large code churn: `generate` build → play the bench scenes → `use` build → commit the regenerated profdata. |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
-| `XEMU_COREAUDIO_FRAMES` | `1024` | CoreAudio buffer (≈21 ms @ 48 kHz) |
-| `XEMU_MOLTENVK_VERSION` | `1.4.1` | MoltenVK release auto-vendored into `macos-libs` when no system copy exists |
+| `XEMU_MOLTENVK_VERSION` | `1.4.1` | MoltenVK release auto-vendored into `macos-libs` when no usable system copy exists |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
+| `XEMU_VIS` | `0` | `-fvisibility=hidden` (≈1.5 MiB smaller arm64 binary, cleaner LTO) |
+| `XEMU_STRIP` | `0` | `-Wl,-dead_strip` (≈4 MiB smaller combined with `XEMU_VIS=1`; validate `type_init` constructors survive before shipping) |
 
 ### How Vulkan is provisioned (all platforms)
 
@@ -86,14 +80,19 @@ nothing links against a Vulkan library at build time.
 
 - **macOS:** volk dlopens `libMoltenVK.dylib`, which `build.sh`
   bundles into `xemu.app/Contents/Libraries/<arch>/` (the app's
-  `LC_RPATH` points there). At build time the dylib + headers are
-  found in `macos-libs` (vendored), `/usr/local` (Vulkan SDK /
-  manual install), or Homebrew — in that order — and when none
-  exists, `build.sh` downloads the pinned official MoltenVK release
-  into `macos-libs` automatically. A missing dylib at bundle time is
-  a hard build error (the fork's default renderer, Metal
-  presentation path, and MetalFX all require it). End users need
-  nothing installed: the app is self-contained.
+  `LC_RPATH` points there). One resolution rule (`resolve_moltenvk`
+  in `build.sh`) serves configure and packaging: `macos-libs`
+  (vendored), then `/usr/local` (Vulkan SDK / manual install /
+  `scripts/build-moltenvk.sh`), then Homebrew — a dylib counts only
+  if it has the target arch slice. When none exists, `build.sh`
+  vendors the pinned official release (`XEMU_MOLTENVK_VERSION`)
+  automatically, so releases built by CI always ship that pin, while
+  a dev machine's `/usr/local` custom build takes precedence locally
+  — `build.sh` logs the bundled version + UUID so tested-vs-shipped
+  driver drift is visible. A missing dylib at bundle time is a hard
+  build error (the fork's default renderer, Metal presentation path,
+  and MetalFX all require it). End users need nothing installed: the
+  app is self-contained.
 - **Windows:** volk loads the system `vulkan-1.dll` — the Khronos
   loader every GPU vendor ships with its driver. Nothing is (or
   should be) bundled; a machine with NVIDIA/AMD/Intel drivers
@@ -119,18 +118,21 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
 | `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + idle-budget fallback) |
 | `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.10.1 value (clamped 0-100000) |
-| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER) — bisect hatch |
+| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP) — bisect hatch |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
-| `XEMU_MAX_QUERIES` | `4096` | Occlusion-query pool size (begin_draw guard submits before exhaustion) |
-| `XEMU_INPUT_PIPE` | unset | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
+| `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
+| `XEMU_INPUT_PIPE` | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
+| `XEMU_COREAUDIO_FRAMES` | CoreAudio buffer frames, default `1024` (≈21 ms @ 48 kHz) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
-| `XEMU_GUEST_PROF` | `1` enables the one-run guest profiler: a mach-thread sampler resolves vCPU samples to guest TBs/pages vs host symbols, and the i386 translator classifies every TB-lookup by exit kind (ret / indirect jmp / indirect call). Measurement-run only (not benchmark-neutral) |
-| `XEMU_RAS` | `0` disables the near-return target memo (default on): a 4096-entry eip→TB cache probed **inline at ret sites in generated code** (validation = fill-time context vs the ret site's translate-time constants + a live `tb->cflags` load for invalidation), helper as fallback/fill. Phase-2 receipt: **+0.77 fps, 6/6 pairs positive** on the heavy scene; helper hits collapse 362M→13k. `-d exec` tracing won't log inline-hit rets — set `XEMU_RAS=0` when tracing |
-| `XEMU_TB_PROF` | `1` prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count). The heavy scene measures 15.8M lookups/s at 93.4% hit — the profile that killed the cache-sizing experiment (see failed-experiments) and aims future TCG work at lookup volume instead |
-| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | Host-SIMD fast path for packed/scalar single-precision SSE arithmetic. **Default ON for aarch64** (requires `perf.hard_fpu`) since the sticky bracket landed: the strict per-op mode restore was the entire margin (measured parity), and leaving the host in guest-SSE mode between helpers (mode writes compare-skipped, `=2` keeps strict brackets) measured **+1.90 fps, 3/3 pairs** on the heavy scene. `0` disables; `=2` differential mode runs both paths strict-bracketed and aborts on divergence (arm64 receipt re-confirmed on the sticky build: 70 s, zero divergences). x86_64 stays opt-in/dark — one un-root-caused ±0-sign divergence under Rosetta; run `=2` clean on real silicon before `=1` |
+| `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
+| `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
+| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
+| `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
+| `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
+| `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_DUMP` / `_PIN_AUDIT` / `_SENTINEL` / `_FORCE` | JIT bring-up harnesses (see `docs/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 
 ### Recommended `xemu.toml`
@@ -200,6 +202,29 @@ In-app Settings covers the main toggles.
   dumping them into the literal pool (LDR + D-cache pressure).
   48-bit host pointers — materialized constantly in TB prologues —
   stay in the instruction stream on Apple cores.
+- **Sticky host-FPU bracket: the SSE fast path goes live on Apple
+  Silicon (+1.9 fps).** The NEON SSE path had measured parity — the
+  per-op serializing FPCR restore was worth exactly the SIMD win.
+  The bracket is now sticky (host stays in guest-SSE mode between
+  helpers; `=2` differential keeps strict brackets and re-confirmed
+  bit-exactness). Measured **+1.90 fps, 3/3 pairs positive**;
+  default on for aarch64 with `perf.hard_fpu`, `XEMU_SSE_HOST=0`
+  restores softfloat. (x87 hard-FPU brackets save/restore around
+  their own ops; softfloat/TCG carry no host FP-mode dependence.)
+- **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
+  first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
+  per-exit-kind TB-lookup census) showed diffuse guest time (top TB
+  1.8% — no hot-loop candidates) but near-returns at 46% of 15.8M/s
+  TB lookups. Two shipped mechanisms: the near-return target memo — a
+  4096-entry eip→TB cache probed inline at ret sites (`XEMU_RAS`,
+  default on; **+0.77 fps, 6/6 pairs**; helper hits collapse
+  362M→13k) — and the same inline-probe technique applied to the
+  real jump cache at indirect/cross-page exits (emitter in
+  `accel/tcg/xemu-inline-jc.c`, the sole owner of the cache layout;
+  +0.70 fps with the enabled arm carrying ~+8% draw throughput). The
+  APU VP doorbell block also joined the audited lockless-MMIO set.
+  Two honest kills en route are in the failed-experiments table
+  (JIT write-protect caching; the per-depth return-address ring).
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -225,17 +250,13 @@ In-app Settings covers the main toggles.
   ≥ 256 KiB (saves 30-60% hash CPU on sparse atlas updates). UBO
   `memcmp` before `memcpy`. Surface expiry throttled to host
   wall-clock (~33 ms).
-- **`possibly_dirty` cleared after verified bind.** Inherited
-  upstream behavior left a texture binding's `possibly_dirty` mark
-  sticky once set by a neighboring texture sharing a host page —
-  every later bind re-hashed the full contents forever. After a bind
-  verifies the cached hash (or re-uploads), the mark is dropped; any
-  later guest write re-sets page dirty bits and re-marks via the
-  spatial index. Measured with `XEMU_NV2A_NSPROF=1` in-game: total
-  texture dirty-check + hash time fell ~2.1x (~290 ms → ~135 ms per
-  5 s interval; 1.3-3.5 ms/flip → 0.6-1.6 ms/flip on the PFIFO
-  thread). Torn-snapshot binds keep the mark, preserving the
-  next-bind re-hash contract.
+- **`possibly_dirty` cleared after verified bind.** Upstream leaves
+  the mark sticky once a page-sharing neighbor sets it, so every
+  later bind re-hashed the full contents forever. A bind that
+  verifies the cached hash (or re-uploads) now drops the mark;
+  guest writes re-mark via the spatial index, and torn-snapshot
+  binds keep it. Texture dirty-check + hash time fell ~2.1x
+  (1.3-3.5 → 0.6-1.6 ms/flip in-game).
 - **VkPipelineCache persisted across runs.** The cache was only
   saved in `pgraph_destroy()`, which a normal app quit never
   reaches — `pipeline_cache.bin` was never written, so every launch
@@ -246,154 +267,54 @@ In-app Settings covers the main toggles.
   crash-consistent). Warm-cache worst case measured ≤ 4 ms — a ~40x
   hitch reduction on pipeline-heavy scene transitions.
 - **`XEMU_NV2A_NSPROF=1` wall-time profiler.** `nv2a/nsprof.[ch]`:
-  release-build-safe ns accumulators around shader gen, pipeline
-  gen, texture hash / snapshot / upload, geometry buffer copies,
-  flight-slot fence waits, aux-CB fence waits, MetalFX drain,
-  surface readbacks, and the FLIP_STALL → vblank idle gap, plus
-  event counters for finish reasons, draws/flip, and surface
-  download/upload trigger sites; per-5 s summaries (total /
-  per-flip / max event) to stderr. The `NV2A_PROF_*` counters are
-  compiled out in release builds and count events, not time; this
-  is what the optimization passes above were measured with.
-  2026-07-04 additions (GPU frame-cost campaign Phase 1): actual
-  `vkCmdDraw*` call counts vs guest blocks (`vk_draw_call`,
-  `da_multi_subrange`), consecutive-block draw-merge classification
-  (`merge_identical` / `merge_candidate` / `merge_cand_udiff` /
-  `merge_state_changed`), and render-pass-end cause tags
-  (`rpcause_surface` / `_clear` / `_texupload` / `_other`).
-  Observation-only; ~three flag stores per draw when the profiler is
-  off. Validated at fps parity (46.83 ± 0.24 vs 46.59 ± 0.50) on the
-  heavy savestate scene.
-- **Sticky host-FPU bracket: the SSE fast path goes live on Apple
-  Silicon (+1.9 fps).** The NEON SSE path had measured parity — and
-  the final profile explained it: the per-op serializing FPCR restore
-  was worth exactly the SIMD win. The bracket is now sticky in mode 1
-  (host stays in guest-SSE mode between helpers; enters compare-skip;
-  `=2` differential runs keep strict brackets and re-confirmed
-  bit-exactness on the sticky build). Measured **+1.90 fps with 3/3
-  pairs positive** on the heavy scene; default ON for aarch64 with
-  `perf.hard_fpu`, `XEMU_SSE_HOST=0` restores softfloat. Composition
-  note: the x87 hard-FPU brackets save/restore around their own ops,
-  and softfloat/TCG carry no host FP-mode dependence.
-- **Guest profiler + TB-dispatch campaign, first round (2026-07-05).**
-  `XEMU_GUEST_PROF` produced the fork's first guest-side profile
-  (mach-thread sampler + per-exit-kind lookup classification): the
-  heavy scene's guest time is diffuse (top TB 1.8%, top-30 ≈ 13% — no
-  hot-loop fast-path candidates), near-returns are 46% of all 15.8M/s
-  TB lookups and 53% of jump-cache misses, and indirect calls barely
-  miss (3.2%). First shipped result: the near-return target memo
-  (`XEMU_RAS`, default on) — phase 1 (helper-level) measured
-  fps-parity at a 95.4% live hit rate; phase 2 inlined the probe at
-  ret sites in generated code and measured **+0.77 fps with 6/6
-  pairs positive** (helper hits collapse 362M→13k as the inline
-  path absorbs them — the campaign's first realized guest-CPU win).
-  The same technique then extended to the other 54% of lookups: an
-  inline probe of the real jump cache at indirect/cross-page exits
-  (emitter in accel/tcg, the only place that may know the cache
-  layout), measured at +0.70 fps family-total with the enabled arm
-  carrying +5.5% more draws/flip (~+8% draw throughput). A third
-  audited MMIO region joined the lockless set: the APU VP doorbell
-  block (constants-only reads; writes under the device lock with IRQ
-  raising already deferred to the APU thread's own BQL bracket) —
-  verified absent from the locked-path histogram afterwards. Two honest kills
-  along the way are in the failed-experiments table (JIT write-protect
-  caching — a sampling-skid mirage; the per-depth return-address
-  ring — wrong key shape).
-- **Cross-platform parity batch (2026-07-05).** The DSP56K JIT gate
-  widened to all POSIX aarch64 hosts (`__aarch64__ && !_WIN32`) — the
-  fork's biggest CPU win now compiles for Linux arm64 (CI-covered by
-  the ubuntu-22.04-arm leg; runtime acceptance there still gated on a
-  clean `XEMU_DSP_JIT_DIFF` run, see docs/windows-gating-audit.md).
-  build.sh: clang PGO wiring for the Linux branch (mechanism only);
-  arch-clean guard (a stale `build/` configured for another arch was
-  silently reused — an `-a x86_64` run could "succeed" with an arm64
-  binary); MoltenVK resolution is now arch-aware at both configure and
-  bundle time (a single-arch system dylib — e.g. the custom arm64
-  /usr/local build — silently disabled the entire Vulkan renderer for
-  cross builds and broke the link; the UI's MetalFX references are
-  also CONFIG_VULKAN-guarded now). Windows PGO is recorded as
-  needs-real-HW (win64-cross x86_64 is GCC — incompatible profile
-  format; arm64 llvm-mingw lacks a Windows-trained profile).
-- **BQL-free MMIO dispatch for the hottest guest register blocks.**
-  `XEMU_MMIO_PROF` measured 8.2M guest MMIO ops in 70 s on the heavy
-  savestate scene — PFB alone 4.85M (dominated by `NV_PFB_WBC`
-  write-combine flush polling) and USER doorbells 1.58M, 78% of all
-  traffic — each paying the unconditional BQL in TCG's MMIO helpers
-  (upstream's `lockless_io` flag was only honored on the
-  address-space path; the fork's cputlb now honors it too). Both
-  regions audited: PFB reads return constants or plain `regs[]`
-  (its one cross-thread reader was never BQL-protected); USER holds
-  `pfifo.lock` for its entire handler and kicks under it. Result:
-  locked MMIO crossings drop ~80%. Honest measurement (6 interleaved
-  pairs, F8 scene): **fps parity** (mean +0.54 driven by one outlier
-  pair — not claimed as a speedup), with a consistent intra-run
-  steadiness improvement (per-run fps stdev 1.21 → 0.89, 5/6 pairs
-  steadier — the 340 µs BQL-spike class no longer hits these ops).
-  Shipped for the jitter benefit and for weaker/busier hosts where
-  main-loop BQL pressure is higher; `XEMU_MMIO_BQL=1` restores
-  locked dispatch.
+  release-build-safe ns accumulators around every PFIFO-thread cost
+  center (shader/pipeline gen, texture hash/snapshot/upload, fence
+  waits, MetalFX drain, surface readbacks, the FLIP_STALL → vblank
+  idle gap) plus event counters for finish reasons, draws/flip,
+  draw-merge classification (`merge_*`), `vkCmdDraw*` call counts,
+  and render-pass-end causes (`rpcause_*`); per-5 s summaries to
+  stderr. This is what every optimization above was measured with.
+  Observation-only (~3 flag stores per draw when off; fps parity
+  46.83 ± 0.24 vs 46.59 ± 0.50).
 - **Deferred-report idle budget cut 5 ms → 300 µs
   (`XEMU_REPORTS_BUDGET_US`).** Guests that consume a zpass report
-  value mid-frame spin-wait on it with an idle FIFO; the deferred
-  design's safety-valve submit only fired after 5 ms of continuous
-  idle, so every such poll cost the guest's critical path up to the
-  full budget (the per-scene `finish_reports_submit` rate tracks each
-  scene's fps deficit: 0.18/flip at 60 fps → 2.23/flip at 24 fps).
-  The budget is now 300 µs and tunable: a too-small budget merely
-  costs an extra small submit per mid-frame idle episode (bounded by
-  report count — not the per-report submit storm the deferred design
-  replaced). Measured (interleaved same-binary A/B, 3 pairs, 770
-  draws/flip savestate scene): 24.04 ± 0.43 → 25.36 ± 0.22 fps
-  (+5.5%, all pairs positive; +1.48 mean on the pre-death early
-  window). The original ~10 ms/flip stall hypothesis was killed
-  honestly — measured reclaim is ~2 ms/flip. Artifact soak at the new
-  default: same content-flag signature as legacy, zero
-  corruption-class clusters. `XEMU_REPORTS_BUDGET_US=5000` restores
-  the previous behavior; `XEMU_REPORTS_SYNC=1` remains the full
-  legacy hatch.
-- **Vertex-mirror overwrite waits the just-submitted slot.** Second
-  member of the pipelined-finish family: the `VERTEX_BUFFER_DIRTY`
-  conflict path submitted the recording CB and immediately memcpy'd
-  new guest data over the conflicting `BUFFER_VERTEX_RAM` range —
-  upstream's single-slot finish really did drain first, but the
-  fork's flight-slot finish waits only the previous slot, so the
-  copy raced the submitted frame's vertex fetches (torn-geometry
-  class on any driver; masked on macOS by MoltenVK's deferred
-  encode). The conflict path now waits the submitted slot's fence
-  and clears its upload tracking (later writes that frame skip the
-  signaled fence). Validated: cross-binary interleaved A/B vs v0.9,
-  24.45 ± 0.58 vs 24.48 ± 1.19 fps (parity), 765-794 draws/flip
-  scene identity, zero errors.
+  mid-frame spin-wait on it with an idle FIFO, and the safety-valve
+  submit only fired after 5 ms of continuous idle — every such poll
+  cost the guest's critical path up to the full budget. A too-small
+  budget merely costs an extra small submit per idle episode
+  (bounded by report count), so 300 µs is safe. Measured on a 770
+  draws/flip scene: 24.04 ± 0.43 → 25.36 ± 0.22 fps (**+5.5%**, all
+  pairs positive); artifact soak clean. `=5000` restores the old
+  budget; `XEMU_REPORTS_SYNC=1` remains the full legacy hatch.
+- **Vertex-mirror overwrite waits the just-submitted slot.** The
+  `VERTEX_BUFFER_DIRTY` conflict path memcpy'd new guest data over
+  the mirror right after finish — safe under upstream's synchronous
+  finish, a CPU-vs-GPU race after flight-slot pipelining (the fork's
+  finish waits only the *previous* slot). The conflict path now
+  waits the submitted slot's fence and clears its upload tracking.
+  Validated at fps parity vs v0.9 (24.45 ± 0.58 vs 24.48 ± 1.19),
+  zero errors.
 - **Invalid-surface destruction gated on submission retirement.**
-  `pgraph_vk_finish` pipelines (submits the current CB, waits only
-  the previous slot's fence), so a quarantined surface image could be
-  `vkDestroyImage`d while the just-submitted CB still referenced it —
-  invalid usage on every driver, introduced with flight-slot
-  pipelining (upstream's synchronous finish was immune). Evictions
-  are now stamped with the highest submission index that may
-  reference them; a retirement watermark, updated wherever a slot
-  fence is observed signaled, gates destruction, and
-  `pgraph_vk_surface_flush` drains all slots before its
-  free-everything prune. Reuse of quarantined images needs no gate —
-  ordered by the draw render pass's explicit `VK_SUBPASS_EXTERNAL`
-  dependency (proof comment at `get_any_compatible_invalid_surface`).
-  Validated at fps parity (46.6-47.2 vs 46.83 ± 0.24, identical
-  finish mix, zero errors) on the heavy savestate scene.
-- **Zeta shape-switch fast path.** Whole-frame attribution showed
-  the dominant cost in-game was ~9 `pgraph_vk_finish` fence cycles
-  per flip (8-19 ms/flip), driven by a depth buffer ping-ponging
-  between two shapes at one VRAM address every frame (Azurik: a
-  1280x480 linear scene zeta and a 256x256 swizzled RTT zeta) —
-  each switch did a full GPU→CPU readback (finish + fence + D24S8
-  compute conversion + multi-MB memcpy), an eviction finish, and a
-  multi-MB seed re-upload. Re-shaped zeta targets are cleared by
-  the guest before use and the genuine RAM consumers (CPU access
-  callbacks, texture binds over the range) measured zero, so the
-  switch now: skips the readback, skips the RAM seed upload, and
-  defers the eviction without a finish (the old image is
-  quarantined in the invalid pool until the recording command
-  buffer rotates; reuse is safe afterwards by single-queue
-  submission order). Pending CPU-requested downloads are still
+  With pipelined finish, a quarantined surface image could be
+  `vkDestroyImage`d while the just-submitted CB still referenced it
+  (invalid usage on every driver; upstream's synchronous finish was
+  immune). Evictions now carry the highest submission index that may
+  reference them; a fence-derived retirement watermark gates
+  destruction, and `pgraph_vk_surface_flush` drains all slots before
+  its free-everything prune. Reuse of quarantined images needs no
+  gate (ordered by the render pass's `VK_SUBPASS_EXTERNAL`
+  dependency — proof comment at
+  `get_any_compatible_invalid_surface`). Validated at fps parity
+  (46.6-47.2 vs 46.83 ± 0.24), zero errors.
+- **Zeta shape-switch fast path.** A depth buffer ping-ponging
+  between two shapes at one VRAM address every frame cost ~9
+  `pgraph_vk_finish` fence cycles per flip (8-19 ms/flip): each
+  switch did a full GPU→CPU readback, an eviction finish, and a
+  multi-MB seed re-upload. Re-shaped zeta targets are cleared by the
+  guest before use and the genuine RAM consumers measured zero, so
+  the switch now skips the readback and seed upload and defers the
+  eviction without a finish (old image quarantined until the
+  recording CB rotates). Pending CPU-requested downloads are still
   honored; `XEMU_ZETA_SHAPE_READBACK=1` restores full fidelity.
 - **Byte-exact vertex-conflict refinement.** Guest dirty bits are
   page-granular, so vertex-stream sync writes arrive page-padded and
@@ -478,23 +399,18 @@ In-app Settings covers the main toggles.
   topology-matched snapshot loading in automation.
 - **In-pass occlusion queries + deferred zpass reports (2.25x in
   report-heavy scenes).** Two coupled changes, measured together on
-  a heavy in-game savestate (Azurik, 408-485 draws/flip):
-  15.8 → **35.6 fps**, render passes **376 → 14 per flip**, fence
-  waits 31.9 → 2.3 ms/flip. (1) The per-query
-  `vkCmdResetQueryPool` (illegal inside a render pass) forced query
-  rotation to tear the pass down — about one full tile load/store
-  cycle per draw on Apple GPUs. The slot's whole query partition is
-  now bulk-reset once at command-buffer begin, and queries begin/end
-  *inside* the pass (Metal visibility-buffer path; a query begun in
-  a subpass ends in it — `end_render_pass` guarantees this, and
-  report sums already span query ranges). (2) The FIFO-idle STALLED
-  path did a full submit + GPU sync per pending report — 23+ per
-  flip. Engines consume last frame's occlusion counts, so reports
-  now ride the next natural submission (flip) and deliver at slot
-  reclaim; a guest that truly spin-waits with an idle FIFO is
-  caught by a 5 ms continuous-idle fallback that submits once and
-  delivers via non-blocking fence polling. `XEMU_REPORTS_SYNC=1`
-  restores the legacy synchronous drains.
+  a heavy in-game savestate: 15.8 → **35.6 fps**, render passes
+  **376 → 14 per flip**, fence waits 31.9 → 2.3 ms/flip. (1)
+  Per-query `vkCmdResetQueryPool` (illegal inside a render pass)
+  tore the pass down on every query rotation — ~one full tile
+  load/store per draw on Apple GPUs; the slot's query partition is
+  now bulk-reset at CB begin and queries begin/end *inside* the
+  pass. (2) The FIFO-idle STALLED path did a full submit + GPU sync
+  per pending report (23+/flip); engines consume last frame's
+  counts, so reports now ride the next natural submission and
+  deliver at slot reclaim, with a continuous-idle fallback submit
+  for guests that truly spin-wait (see the idle-budget bullet).
+  `XEMU_REPORTS_SYNC=1` restores legacy synchronous drains.
 - **Query-pool drain at slot reclaim.** Occlusion queries are
   partitioned per flight slot; each submission's queries + pending
   guest reports are handed to the slot at submit and drained when
@@ -757,42 +673,27 @@ In-app Settings covers the main toggles.
   default.
 - **Full inline DSP JIT (Apple Silicon).** ARM64
   basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
-  via `[audio.dsp_jit] enabled = true` or `XEMU_DSP_JIT=1`.
-- **Per-core retranslation auto-throttle.** The EP runs per-pass
-  code overlays (measured ~1 retranslation per 10 block executions
-  on Azurik — 26k retranslations per 262k-execution window), so
+  via `[audio.dsp_jit] enabled = true` (engine selection is
+  config-only; `XEMU_DSP_JIT=0` is a runtime kill-switch within the
+  selected engine).
+- **Per-core retranslation auto-throttle.** The EP core overlays its
+  P-space every pass (~1 retranslation per 10 block executions), so
   translating it costs more than interpreting it; a sustained-churn
   window (>1/16) permanently hands that core back to the
-  interpreter. Measured APU-thread utilization (Azurik attract,
-  `XEMU_APU_PROF`): JIT-both-cores 25%, interpreter 22%, JIT with
-  EP auto-throttled **20%** — statistically tied with upstream's
-  dsp56300 engine (19%) in this DSP-light scene. GP never trips
-  (~1:10000). `XEMU_DSP_JIT_NO_THROTTLE=1` for A/B.
-  100% ALU inlined, 99.99% CF inlined; only `emu_undefined` stays
-  on BLR — the 16-variant `bit_manip` tail (bset/bclr/bchg/btst ×
-  aa/ea/pp/reg) is now emitted inline (REG variants targeting
-  side-effect registers SR/OMR/SP/SSH/SSL keep the BLR fallback),
-  and `pm_read_accu24` — the limited A/B read on every accumulator
-  parmove — is inlined for the scaling=0 case universal on Xbox
-  (2-insn fits-in-24-bit check on the sign-extended pin; SR.L
-  semantics preserved; non-zero scaling BLRs the bit-exact helper).
-  A/B/X/Y/SR accumulators pinned in callee-saved ARM64 regs.
-  Static block chaining for unconditional + conditional-taken
-  terminators keeps hot inner loops inside JIT code, with
-  retro-chaining: a terminator whose target isn't translated yet
-  emits a patchable chain site (initially routed to the shared
-  exit) that gets patched to the target's `chain_entry` when it is
-  later translated; incoming-chain cap raised 8 → 16. Chain-site
-  repatching at block install was also moved inside the JIT-write
-  window (previously ran after `qemu_thread_jit_execute()` — a
-  latent W^X fault on the list-full path). Lazy-flag
-  elimination (full-dead + per-flag N/Z + E/U halves) elides ~20%
-  of SR updates on Azurik. Bit-exact harness:
-  `XEMU_DSP_JIT_DIFF=N` validates every Nth unique block against
-  the interpreter on an off-thread worker (bounded via
-  `diff_checked`). `XEMU_DSP_JIT_STATS=1` dumps per-run
-  inline/fallback counters, lazy-flag skips, and
-  `g_cf_fallback_buckets`. See
+  interpreter. APU-thread utilization: JIT-both-cores 25%,
+  interpreter 22%, JIT with EP throttled **20%** (upstream dsp56300
+  engine 19%). GP never trips. `XEMU_DSP_JIT_NO_THROTTLE=1` for A/B.
+- **JIT coverage + mechanics.** 100% ALU and 99.99% CF inlined
+  (only `emu_undefined` and a few side-effect-register `bit_manip`
+  variants stay on BLR); `pm_read_accu24` inlined for the scaling=0
+  case universal on Xbox. A/B/X/Y/SR pinned in callee-saved ARM64
+  regs. Static block chaining (with retro-chaining: untranslated
+  targets get a patchable chain site, patched when the target is
+  later translated) keeps hot loops inside JIT code; all chain
+  repatching sits inside the JIT-write window (W^X). Lazy-flag
+  elimination elides ~20% of SR updates. Harnesses:
+  `XEMU_DSP_JIT_DIFF=N` (off-thread bit-exact validation, bounded
+  per unique translation), `XEMU_DSP_JIT_STATS=1` (counters). See
   [docs/dsp-jit-design.md](docs/dsp-jit-design.md).
 
 ### Input
@@ -819,6 +720,16 @@ In-app Settings covers the main toggles.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +
   release-wait under `d->pfifo.lock` guarantees no missed wake-up.
   `halt` via `qatomic_read` matches the writer contract.
+- **BQL-free MMIO dispatch for the hottest guest register blocks.**
+  `XEMU_MMIO_PROF` measured 78% of 8.2M guest MMIO ops/70 s hitting
+  just PFB (`NV_PFB_WBC` polling) and USER doorbells, each paying
+  the unconditional BQL in TCG's MMIO helpers — upstream's
+  `lockless_io` flag is now honored on the TCG path too, and the
+  audited PFB / USER / APU-VP regions opt in. Locked crossings drop
+  ~80%. Measured honestly at **fps parity** (not claimed as a
+  speedup) with a consistent steadiness win: per-run fps stdev
+  1.21 → 0.89, 5/6 pairs — the 340 µs BQL-spike class no longer
+  hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
 
 ### Build + packaging
 
@@ -842,8 +753,24 @@ In-app Settings covers the main toggles.
   `XEMU_CODESIGN_ENTITLEMENTS=1` opts into hardened runtime +
   `xemu.entitlements`. For notarized distribution use
   `scripts/sign-macos-release.sh`.
-- Optional PGO (`XEMU_PGO=generate` → run → `XEMU_PGO=use`) — now
-  also wired into the native Windows (MSYS2) branch.
+- Optional PGO (`XEMU_PGO=generate` → run → `XEMU_PGO=use`), wired
+  into the macOS, Linux, and native Windows (MSYS2) branches via one
+  shared `setup_pgo` — the consolidation also fixed the MSYS2
+  branch's stale-profile trap (it only re-merged `.profraw` files
+  when `default.profdata` was absent, so a retrain silently lost to
+  the committed profile).
+- **Cross-platform parity batch (2026-07-05).** The DSP56K JIT gate
+  widened to all POSIX aarch64 hosts, so Linux arm64 compiles the
+  fork's biggest CPU win (runtime acceptance still needs a clean
+  `XEMU_DSP_JIT_DIFF` run there — `docs/windows-gating-audit.md`).
+  build.sh grew Linux PGO wiring, an arch-clean guard (a stale
+  `build/` for another arch was silently reused, so `-a x86_64`
+  could "succeed" with an arm64 binary), and arch-aware MoltenVK
+  resolution (a single-arch system dylib silently disabled the whole
+  Vulkan renderer for cross builds; the UI's MetalFX references are
+  CONFIG_VULKAN-guarded now). MoltenVK resolution + vendoring now
+  live in single functions (`resolve_moltenvk` / `vendor_moltenvk`)
+  shared by configure and package time.
 - Native Windows release builds default to `-Dx86_version=3`
   (AVX2 / BMI2 / FMA — matches CI release config; override by
   passing your own `-Dx86_version=`).
@@ -856,12 +783,16 @@ In-app Settings covers the main toggles.
   Windows rejects (→ `g_rename`); the `HAVE_EXTERNAL_MEMORY` display
   path lost its `gl_internal_format` declaration.
 
-### MoltenVK runtime config (`Info.plist` `LSEnvironment`)
+### MoltenVK runtime config
+
+Set in `main()` before MoltenVK loads (launch-path independent;
+explicit env overrides win) and mirrored in `Info.plist`
+`LSEnvironment`. The two homes must stay in sync.
 
 | Key | Value | Purpose |
 |---|---|---|
 | `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` | `1` | Reduce descriptor binding overhead |
-| `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | `2` | Prefill at CB end |
+| `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | `0` | Deferred encoding. Must stay 0: with whole-frame CBs, prefill corrupted streamed textures, enabled the AGX visibility-buffer crash, and measured slower (46.3 vs 48.5 fps) |
 | `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` | `0` | Async submits |
 | `MVK_CONFIG_FAST_MATH_ENABLED` | `1` | Metal shader fast-math |
 | `MVK_CONFIG_RESUME_LOST_DEVICE` | `1` | Ignore transient GPU errors |
@@ -874,13 +805,14 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
-| L2 victim jump-cache (2026-07-05) | A 64k-entry direct-mapped victim cache behind the jump cache, probed only on L1 miss before the qht walk — the residual miss stream after the inline probes looked capacity-shaped. Instrument-killed without an fps A/B: live hit rate measured **11.2%** (the recurring-miss set is small; residual misses are dominated by one-shot/cold pcs and the NULL-lookup class), bounding the ceiling at ~0.1 fps. Reverted same hour. Companion lesson to the L1-enlargement kill: the miss stream's *shape*, not its volume, decides whether any cache tier can help |
-| JIT write-protect flip caching (2026-07-05) | The guest profiler attributed 9.7% of the vCPU thread to `pthread_jit_write_protect_np` (called on every TB entry), so a thread-local shadow state skipping redundant flips looked like +2-3 fps. Measured **parity** (6 pairs, −0.10 mean, sign-mixed). Autopsy: `thread_suspend`-based sampling parks preferentially on barrier instructions, over-attributing barrier-heavy symbols — most of the 9.7% was sampling skid, not cost. Reverted; the lesson (discount barrier-heavy symbols in suspend-based profiles) is the artifact |
-| Per-depth return-address ring (2026-07-05, superseded same-day) | The classic call-site-push/ret-pop shadow stack: eip prediction paired at 99.6%, but the per-slot TB memo thrashed — same-depth call sites share slots, so fills ran 2.6× hits (196.9M fills/70 s) and a 512-deep ring changed nothing. Restructured to the eip-keyed ret-target memo (`XEMU_RAS` row above): 95.4% hit, zero mispredicts, fills 17M. The ring insight: on x86-under-TCG the ret target is already in `env->eip` at dispatch time, so depth-shaped prediction state adds nothing a target-keyed cache doesn't |
-| Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the mid-frame conflict finish (submit + wait the just-submitted slot, ~6/flip on the heavy scene) with per-slot transient copies + remapped draw bindings (chained newest-first entries, retirement-gated mirror apply, rotation copy-forward, exact-refinement exclusion). Faithfully implemented with all three design traps closed — and measured **−2.09 fps, 6/6 pairs negative**. Counters: `vtx_remap_hit` 226.7/flip (the remap search became a per-draw fixture), `vtx_remap_full` 1.47/flip (64-entry/2 MiB budget overflows every frame; the all-slot drain fallback is heavier than the targeted waits it replaced). The title rewrites broad vertex ranges every frame — the wrong conflict shape for remapping. Reverted whole; the targeted submitted-slot wait remains the shipped design. Full record: archaeology 1.16 |
-| TB jump-cache enlargement (12→16 bits, 2026-07-05) | `XEMU_TB_PROF` measured 15.8M `tb_lookup` calls/s on the heavy scene at 93.44% jump-cache hit — ~1M TB-htable walks/s and 410k translated TBs, so capacity misses looked like free money (a 16-bit probe halved the walks). Interleaved A/B (6 pairs, runtime-sized cache, 12 vs 16 bits): **−1.10 fps, 4/6 pairs negative** — the 4096-entry (64 KiB) cache is L1-resident; a 1 MiB cache pays a few ns extra on each of 14.8M *hits*/s, which outweighs the ~500k avoided walks. Upstream's geometry is already near-optimal on M2; the profitable target is lookup *volume* (indirect-branch/ret chaining), not cache size. Sizing mechanism reverted; the profiler (`XEMU_TB_PROF`) ships |
-| Eager report submit (`XEMU_REPORTS_EAGER=N`, 2026-07-04) | Submit the recording CB when its Nth zpass report is *requested*, front-running the guest's poll stall so GPU execution overlaps remaining guest frame work. Measured dead on the F8 scene (interleaved, 6 pairs): mean −0.08 fps (deltas +0.26/+3.04/+0.09/−0.87/−0.65/−2.38 — sign-inconsistent), with a persistent +4% draws/flip composition shift in the eager arm. Mechanism of the neutrality: the 300 µs idle budget (shipped earlier the same day) already sits near the structural minimum — the guest's post-submit wait is GPU catch-up time, which eager submission merely moves without shrinking, while adding submit overhead. Reverted; the idle-budget path remains the shipped design |
-| Per-flight vertex-RAM mirrors (vertex shadow copies) | One 128 MiB host mirror per flight slot; in-flight slots read a frozen mirror (cross-slot conflict waits disappear), `uploaded_bitmap` doubles as the delta log applied at slot reclaim. Measured ~**neutral** on the Azurik attract reel (interval-by-interval flips within noise of the single-mirror build; an initial "-30%" read traced to an invalid baseline run parked on a 3-draws/flip static screen). Neutral because the dominant cost is elsewhere: the heavy-reel intervals show 440-700 `finish_vtx_dirty` per 5 s *with or without* mirrors — guest vertex streams write page-boundary-overlapping ranges, and the recording-CB conflict check is page-granular, so consecutive writes false-share the boundary page and cascade through finish → rotate → 20+ ms mid-frame reclaim waits. Mirrors can't remove those (the conflict is with the *recording* CB, not in-flight slots). Reverted as not-worth-it: +128 MiB, swap/delta complexity, no measured win. The real target this exposed: byte-granular (or split-at-page) conflict refinement for the current-slot check — see Future vectors |
+| L2 victim jump-cache (2026-07-05) | 64k-entry victim tier probed on L1 miss looked capacity-shaped (410k TBs vs 4096 entries) — but live hit rate measured **11.2%**: residual misses are one-shot/cold pcs, not a recurring set. Ceiling ~0.1 fps; instrument-killed without an fps A/B. Measure the miss stream's *shape* (recurrence), not its volume, before building any cache tier |
+| JIT write-protect flip caching (2026-07-05) | Sampling attributed 9.7% of the vCPU thread to per-TB-entry `pthread_jit_write_protect_np`; a thread-local skip of redundant flips measured **parity** (6 pairs, −0.10 mean). The 9.7% was `thread_suspend`-sampling skid onto barrier instructions — discount barrier-heavy symbols in suspend-based profiles |
+| Per-depth return-address ring (2026-07-05) | Classic shadow stack: eip prediction paired at 99.6%, but per-depth slots are shared by every same-depth call site, so TB fills ran 2.6× hits; a 512-deep ring changed nothing (a key problem, not a depth problem). Superseded same day by the eip-keyed ret-target memo (`XEMU_RAS`): the ret target is already in `env->eip` at dispatch, so depth-shaped state adds nothing a target-keyed cache doesn't |
+| Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the ~6/flip conflict finishes with per-slot transient copies + remapped draw bindings. Faithfully implemented; **−2.09 fps, 6/6 pairs negative**: the title rewrites broad vertex ranges every frame, so the 64-entry/2 MiB table overflowed every frame (each overflow an all-slot drain, heavier than the waits it replaced) while the remap search ran 227 times/flip. The targeted submitted-slot wait remains the shipped design |
+| TB jump-cache enlargement (12→16 bits, 2026-07-05) | 93.4% hit at 15.8M lookups/s made capacity misses look like free money; measured **−1.10 fps, 4/6 pairs negative** — the 4096-entry (64 KiB) cache is L1-resident, and a 1 MiB cache pays a few ns on each of 14.8M *hits*/s to avoid ~500k walks. Target lookup *volume*, not cache geometry |
+| Eager report submit (`XEMU_REPORTS_EAGER=N`, 2026-07-04) | Submit the recording CB when its Nth zpass report is *requested*, front-running the guest's poll stall. Mean −0.08 fps (6 pairs, sign-inconsistent) with a +4% draws/flip composition shift. With the 300 µs idle budget the residual wait is GPU catch-up time — eager submission moves the submit without shrinking the wait |
+| Occlusion-rework intermediates: in-pass queries with synchronous drains; submit-on-idle per pending report | Both **regressed** vs the 15.8 fps baseline the rework started from (6.9 fps; ~11.2 fps at ~144 tiny submissions/flip). Query placement × report delivery is a policy *pair* — never evaluate piecewise (the shipped pair: 2.25x) |
+| Per-flight vertex-RAM mirrors | One 128 MiB host mirror per flight slot so in-flight slots read frozen data (cross-slot conflict waits structurally impossible). Measured ~**neutral** (an initial "-30%" read traced to an invalid baseline parked on a menu): the dominant cost was the *recording-CB* boundary-page conflict cascade, which mirrors can't address. Reverted — +128 MiB and delta complexity for no win. The salvage, byte-exact conflict refinement, shipped separately (+5.4% fps) |
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |
 | Async MetalFX under *GL presentation* | GL↔Metal cross-API sync can't be expressed with `SDL_GL_SwapWindow` + vsync alone. Landed later for the Metal presentation backend, where both sides speak `MTLSharedEvent` |
@@ -977,66 +909,41 @@ simulation rate or input latency and benches must keep reading real
 flips.
 
 - **Streamed-vertex stall reduction: attempted twice, both ~neutral —
-  heavy scenes are GPU-bound.** (a) Byte-exact conflict refinement:
-  per-page written-span tracking + span-restricted memcmp skipped
-  75-85% of the boundary-page `finish_vtx_dirty` cascade (440-700 →
-  ~100 per 5 s interval, page-padded stream writes false-share
-  boundary pages with byte-identical content), but flips/s did not
-  move — the eliminated finishes reappeared as cross-slot targeted
-  waits. (b) Exact refinement + per-flight mirrors (structurally no
-  cross-slot waits): fence-wait *events* ballooned while total wait
-  time stayed ~2.5-3.5 s per 5 s. Conclusion: in the heavy attract
-  reel the ~22-30 ms/flip of waits is the GPU's actual frame time
-  (as the targeted-wait analysis already noted — "real GPU time,
-  not slack"); CPU-side wait elimination just relocates which call
-  site absorbs it. Future work here must reduce GPU work per frame
-  (draw batching, render-pass merging), not CPU synchronization.
-  Both implementations preserved in this repo's history for
-  reference.
+  those scenes were GPU-bound.** (a) Byte-exact conflict refinement
+  eliminated 75-85% of the boundary-page `finish_vtx_dirty` cascade;
+  flips/s did not move — the finishes reappeared as cross-slot
+  waits. (b) Adding per-flight mirrors (cross-slot waits
+  structurally impossible): wait *events* ballooned while total wait
+  stayed ~2.5-3.5 s per 5 s. The ~22-30 ms/flip of waits was the
+  GPU's actual frame time; CPU-side wait elimination only relocates
+  which call site absorbs it. (True of the 2026-07 attract-reel
+  fixtures; the 2026-07-04 savestate scenes measure CPU-bound — see
+  the campaign entry below.) Both implementations preserved in
+  history.
 - **GPU frame-cost campaign: draw/pass-reduction menu measured
   exhausted on the current fixtures (2026-07-04).** Attribution
-  counters (`vk_draw_call`, `merge_*`, `rpcause_*` — commit
-  `038f596332`) plus a 10 s `sample` profile on the heavy savestate
-  scene (471 draws/flip, 46.6 fps) killed every ranked mechanism by
-  measurement: same-block subrange coalescing has zero opportunity
-  (`vk_draw_call/flip == draws/flip` exactly); cross-block merge
-  candidates are 10.6% of draws AND per-call recording cost on the
-  PFIFO thread is ~0 (with `MVK_CONFIG_PREFILL=0`, Metal encoding
-  happens on MoltenVK's queue thread); every per-draw CPU candidate
-  site measures <1 ms/flip; pass-count cuts save GPU time that is
-  not the constraint (fence waits 2.8 ms/flip, GPU ~14 ms/flip of
-  slack); `VK_EXT_multi_draw` is unimplemented in MoltenVK. The
-  earlier "heavy scenes are GPU-bound" premise does **not** hold on
-  today's savestates: the frame limiter is CPU-side — mean finish
-  time 14.9 ms/flip of which the guest's TCG execution owns the
-  largest share (vCPU thread 99.7% busy; ≥5.8 ms/flip of PFIFO
-  starvation while the guest computes alone; caveat: the title
-  busy-polls, so vCPU utilization alone is not a limiter signal —
-  starvation time is). Re-run the campaign's Phase 0/2 gates before
-  reviving any of the menu on a future GPU-bound scene.
-- **Dirty-clear TLB-walk coalescing (measured, not attempted).**
-  `physical_memory_test_and_clear_dirty` triggers
-  `tlb_reset_dirty()` — a full-TLB walk (all MMU modes + victim
-  TLB, under a spinlock) per *dirty* detection regardless of range
-  size. The per-draw vertex sync and per-bind texture dirty checks
-  pay it constantly: ~1.8 ms/flip on the PFIFO thread (vertex 537 +
-  texture 245 of 6827 thread samples) plus a vCPU-side echo
-  (notdirty slow-path writes ~2.8% + TB-link dirty clears 3.4% of
-  the vCPU thread). Candidate: coalesce the TLB resets for
-  NV2A-client clears (batch the union of ranges once per command
-  buffer instead of per draw). High design risk: page-granular
-  dirty tracking is load-bearing (see byte-exact refinement above)
-  and an earlier dirty-range flush variant shipped a
-  cleared-before-consumed bug — any attempt needs the full
-  predict/validate discipline. **Re-scoped 2026-07-04 (second
-  pass):** the only multi-walk caller
-  (`physical_memory_clear_dirty_range`, 5 walks per range) is cold
-  (ramblock init); the hot paths already pay exactly one walk per
-  dirty detection, so the remaining design is cross-call deferral of
-  the TLB re-arm — which widens the existing bitmap-cleared/TLB-armed
-  race window (the archaeology-1.9 class) and needs a dedicated
-  correctness review. Ceiling at the post-PGO ~31 fps floor is
-  ~1-1.5 fps; parked until it ranks again.
+  counters (`vk_draw_call`, `merge_*`, `rpcause_*`) + a 10 s
+  `sample` profile on the heavy savestate scene killed every ranked
+  mechanism: subrange coalescing has zero opportunity, cross-block
+  merge candidates are 10.6% of draws with ~0 per-call PFIFO
+  recording cost (prefill=0 defers Metal encoding to MoltenVK's
+  queue thread), per-draw CPU sites all <1 ms/flip, pass-count cuts
+  save GPU time that isn't the constraint (~14 ms/flip of GPU
+  slack), and `VK_EXT_multi_draw` is unimplemented in MoltenVK. The
+  frame limiter on these fixtures is CPU-side (guest TCG owns the
+  largest share; ≥5.8 ms/flip of PFIFO starvation). Re-run the
+  campaign's Phase 0/2 gates before reviving the menu on a future
+  GPU-bound scene.
+- **Dirty-clear TLB-walk coalescing (measured, parked).**
+  `physical_memory_test_and_clear_dirty` triggers a full-TLB walk
+  per dirty detection; the per-draw vertex sync and per-bind texture
+  checks pay ~1.8 ms/flip on the PFIFO thread plus a vCPU-side echo
+  (~6%). The hot paths already pay exactly one walk per detection,
+  so the remaining design is cross-call deferral of the TLB re-arm —
+  which widens the bitmap-cleared/TLB-armed race window (the class
+  that already shipped one cleared-before-consumed bug) and needs a
+  dedicated correctness review. Ceiling ~1-1.5 fps at the ~31 fps
+  floor; parked until it ranks again.
 - **Windows real-hardware Vulkan validation (gating audit committed
   2026-07-04, `docs/windows-gating-audit.md`).** Every fork divergence
   touching Windows-compiled code is now statically audited: Apple-only
@@ -1052,23 +959,6 @@ flips.
   vertex refinement under WHPX write timing (`XEMU_VTX_EXACT=0`);
   (5) the 5 s fence-or-die margin on slow systems; (6) a
   Windows-native savestate A/B baseline before any perf claim.
-- **Guest TCG throughput (measured bottleneck profile,
-  2026-07-04).** On the heavy scene the vCPU thread spends 17.9% in
-  `helper_lookup_tb_ptr` (indirect-branch TB lookup), ~14% in TLB
-  fill/set machinery, 6.8% in `helper_ldul_mmu`, and ~3.7% in
-  SSE packed-float helpers (`mulps`/`addps` — candidate for
-  NEON-backed lowering on AArch64 hosts, a hard-FPU-class project).
-  A PGO build (`XEMU_PGO=generate/use`, already wired in build.sh)
-  is the cheapest unexplored experiment against this profile.
-- **Occlusion-report STALLED drains — resolved by the deferred-report
-  rework; measurement confirmed 2026-07-04.** The "~5 STALLED
-  finishes per flip" figure predates the occlusion rework; the
-  default path now delivers reports via non-blocking per-slot
-  drains and `VK_FINISH_REASON_STALLED` is reachable only under
-  `XEMU_REPORTS_SYNC=1`. Confirmed on the heavy savestate scene:
-  `finish_stalled = 0` and `finish_reports_full = 0` across all
-  in-game intervals (`finish_reports_submit` ≈ 0.96/flip carries
-  the load). Nothing left to do here.
 - **Push-model present handoff.** `nv2a_get_present_frame` does a
   PFIFO event-wait round trip per UI frame (the sync handshake is
   also what publishes frames, so a UI-side "skip when unchanged"

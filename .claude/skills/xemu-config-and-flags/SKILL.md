@@ -383,33 +383,21 @@ explicit `x86_version` argument is present. Every build configures with
 
 ---
 
-## Known README-vs-code drift — flag items (as of 2026-07-04)
+## Known README-vs-code drift — flag items (as of 2026-07-05)
 
 State ground truth from this catalog; cite the stale doc when relevant.
-The full dated drift list (the superset — including the README PREFILL
-table row, the MVK-table-header note, and the RELEASING-macos items) is
-owned by **xemu-docs-and-writing §4**. The four flag-specific items
-below were discovered by this skill's audit and are mirrored there
-(docs-and-writing §4 items 6-9) — keep the two sections in sync:
+The full dated drift list is owned by **xemu-docs-and-writing §4** —
+keep the two sections in sync.
 
-1. `XEMU_COREAUDIO_FRAMES` misfiled as a build knob in README's "Build
-   knobs" table (~78); it is read at **runtime** (`audio/coreaudio.m:599`).
-   The `coreaudio.m` comment ("at build time", ~591) is wrong too, and
-   references TOML `[audio.coreaudio.out]` knobs that do not exist in
-   `config_spec.yml`. (docs-and-writing §4 item 6)
-2. README "Build knobs" table omits `XEMU_VIS` and `XEMU_STRIP`
-   (documented only in `build.sh` comments, lines 495-519).
-   (docs-and-writing §4 item 7)
-3. README runtime-knob table omits: `XEMU_DSP_JIT` (prose-only at
-   ~629), `XEMU_DSP_JIT_DIFF_SYNC`, `XEMU_DSP_JIT_DIFF_MAX`,
-   `XEMU_DSP_JIT_DUMP`, `XEMU_DSP_JIT_PIN_AUDIT`,
-   `XEMU_DSP_JIT_SENTINEL`/`_FORCE` (failed-experiments row ~757
-   only). Dev-tools, so table absence may be intentional — but they
-   are undocumented as knobs. (docs-and-writing §4 item 8)
-4. README ~629 implies `XEMU_DSP_JIT=1` alone enables the fork JIT;
-   under default `audio.use_dsp_jit=true` it does not (engine
-   selection reads `g_config` only — `dsp.c:113-128`).
-   (docs-and-writing §4 item 9)
+The four flag items this skill's 2026-07-04 audit found (misfiled
+`XEMU_COREAUDIO_FRAMES`, missing `XEMU_VIS`/`XEMU_STRIP` rows, missing
+`XEMU_DSP_JIT` + dev-subflag rows, and the "`XEMU_DSP_JIT=1` enables
+the JIT" overclaim) were **all fixed in the 2026-07-05 doc-cleanup
+pass**: the README knob tables now match this catalog, the
+`coreaudio.m` comment says runtime, and the README states engine
+selection is config-only with `XEMU_DSP_JIT=0` as the in-engine
+kill-switch. No open flag-drift items; re-audit after the next big
+README edit.
 
 ---
 

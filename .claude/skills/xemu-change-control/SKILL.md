@@ -72,11 +72,11 @@ build; fix commit `cf85e96597`). When in doubt, the gates stack.
 Verify every command, path, and number you write against the repo before
 committing (wrong runbooks are worse than none). Where a doc is known
 stale, state ground truth and cite the stale doc rather than silently
-matching it — two examples relevant to this skill: the README
-MoltenVK-table prefill row is stale vs code (drift item 1 in
-`xemu-docs-and-writing` §4; the Changes entry at README.md:319 is
-correct), and `docs/RELEASING-macos.md` describes the pre-CI manual
-release flow. House style and templates: `xemu-docs-and-writing` skill.
+matching it. (The two long-standing examples — the README
+MoltenVK-table prefill row and `docs/RELEASING-macos.md`'s manual
+flow — were fixed in the 2026-07-05 doc-cleanup pass; the open-drift
+ledger stays in `xemu-docs-and-writing` §4.) House style and
+templates: `xemu-docs-and-writing` skill.
 
 ### Class 2 — additive, default-off tooling and diagnostics
 
@@ -277,14 +277,10 @@ published 2026-07-04). The previous scheme was upstream-suffixed
 (`v0.8.153-macos.1`, still published). One release per tag; every fix
 gets a fresh version.
 
-**Stale doc:** `docs/RELEASING-macos.md` documents the older MANUAL flow
-— direct `gh release create` (line 147), "Do not pass `--draft`"
-(line 218), the upstream-suffixed version scheme (lines 19-27), the
-retired `Made-with: Cursor` footer (lines 40-41, referencing a README
-"Committing" section that no longer exists). Do not follow those parts.
-Its packaging sections ("Packaging `xemu.app`", "Creating the release
-zip", signing notes, the Do-not-do list) remain the valid packaging
-reference and manual fallback.
+**Doc of record:** `docs/RELEASING-macos.md` was rewritten 2026-07-05
+around this CI flow (fork-versioned annotated tags, draft-then-publish,
+MoltenVK release-parity note) and keeps the manual packaging recipe as
+the explicit fallback — it is current again; follow it.
 
 ## Non-negotiables — and the incidents that made them
 
@@ -319,9 +315,9 @@ stay 0" — treat any diff moving it as a regression. Incident record
 (prefill=2 corrupted streamed textures, enabled the AGX crash, and
 measured slower; fixed `531122e8aa`): `xemu-failure-archaeology` 2.1.
 The five canonical MVK_CONFIG_* values with file:line homes:
-`xemu-config-and-flags` Axis 3 (the value owner); the stale README
-MoltenVK-table prefill row is drift item 1 in `xemu-docs-and-writing`
-§4.
+`xemu-config-and-flags` Axis 3 (the value owner); the README
+MoltenVK table agrees since 2026-07-05 (`grep -n PREFILL README.md
+Info.plist ui/xemu.c` must show `0` in all three).
 
 ### 3. Never point a harness at `dist/xemu.app`
 
@@ -448,6 +444,6 @@ All facts verified 2026-07-04 against `macos-optimizations` at
 - DSP engine precedence + namespaces: `grep -n "dsp_want_external_jit_engine\|dsp_set_engine" hw/xbox/mcpx/apu/dsp/dsp.c` and `ls hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
 - DSP config defaults: `grep -n -A3 "dsp_jit:\|use_dsp_jit:" config_spec.yml`
 - Escape hatches present: `grep -rn "XEMU_VTX_EXACT\|XEMU_REPORTS_SYNC" hw/xbox/nv2a/pgraph/vk/{vertex,reports}.c`
-- Failed-experiments row count: `awk '/^## Failed/,/^## Future/' README.md | grep '^| ' | grep -vc '^| Attempt\|^|---'` (27 as of 2026-07-04)
+- Failed-experiments row count: `awk '/^## Failed/,/^## Future/' README.md | grep '^| ' | grep -vc '^| Attempt\|^|---'` (34 as of 2026-07-05)
 - Current commit footer: `git log -3 --format=%B | grep Co-Authored-By`
-- Stale RELEASING doc markers: `grep -n "Cursor\|--draft" docs/RELEASING-macos.md`
+- RELEASING doc staleness (expect no hits post-rewrite): `grep -n "Cursor\|Made-with\|track upstream" docs/RELEASING-macos.md`

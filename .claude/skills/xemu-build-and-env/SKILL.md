@@ -201,14 +201,18 @@ in order:
    fork's `scripts/build-moltenvk.sh` — see §4)
 3. `/opt/homebrew/lib/libMoltenVK.dylib` (`brew install molten-vk`)
 
-If **none** exist, `build.sh` downloads the pinned official release
-(`XEMU_MOLTENVK_VERSION`, default `1.4.1`) as a tarball from
-`github.com/KhronosGroup/MoltenVK/releases`, and extracts the dylib plus the
-full `vulkan/` header set into `macos-libs/<arch>/opt/local/{lib,include}` —
-this also supplies Vulkan headers without needing Homebrew's
-`vulkan-headers`. If a dylib is found but headers aren't (e.g. a bare
-`/usr/local` install with no dev headers), it vendors just the headers the
-same way. `PKG_CONFIG_LIBDIR` is then pinned to
+Since 2026-07-05 this tier walk is one function, `resolve_moltenvk()`
+(top of `build.sh`), used verbatim at BOTH configure time and package
+time — a candidate dylib counts only if `lipo -archs` shows the
+target arch. If **none** resolve, `vendor_moltenvk dylib` downloads
+the pinned official release (`XEMU_MOLTENVK_VERSION`, default
+`1.4.1`) from `github.com/KhronosGroup/MoltenVK/releases` and
+extracts the dylib plus the full `vulkan/` header set into
+`macos-libs/<arch>/opt/local/{lib,include}` — this also supplies
+Vulkan headers without needing Homebrew's `vulkan-headers`. If a
+dylib is found but headers aren't (e.g. a bare `/usr/local` install
+with no dev headers), `vendor_moltenvk headers` vendors just the
+headers from the same tarball. `PKG_CONFIG_LIBDIR` is then pinned to
 `${lib_prefix}/lib/pkgconfig` (the per-arch `macos-libs` tree only) so
 `pkg-config` can't cross-contaminate between architectures.
 
@@ -244,11 +248,14 @@ XEMU_PGO=use ./build.sh           # merges .profraw -> default.profdata (via `xc
 
 Both stages apply to `sys_cflags`/`sys_ldflags` only (clang/LLVM), and LTO
 stays enabled throughout so cross-translation-unit inlining still happens
-under profile guidance. `XEMU_PGO=use` hard-fails early if `$XEMU_PGO_DIR`
-has neither `.profraw` files nor an already-merged `default.profdata`. The
-same two-stage flow is wired into the Windows/MSYS2 branch too (MSYS2
-clang/gcc both accept the same flags; merge uses `llvm-profdata` without the
-`xcrun` prefix there).
+under profile guidance. `XEMU_PGO=use` hard-fails if `$XEMU_PGO_DIR` has
+neither `.profraw` files nor an already-merged `default.profdata`, and
+re-merges whenever any `.profraw` is newer than the profdata (the
+retrain trap). Since 2026-07-05 all three platform branches (Darwin,
+Linux, MSYS2) share one `setup_pgo()` — Darwin sets
+`profdata_prefix="xcrun "` — which also fixed the MSYS2 branch's
+divergent stale-merge behavior (it previously re-merged only when
+profdata was absent).
 
 ### 3.7 `XEMU_VIS` / `XEMU_STRIP` (binary size, opt-in, off by default)
 
@@ -322,7 +329,7 @@ Runs after `make` succeeds. In order:
 3. **`dylibbundler`**: `dylibbundler -cd -of -b -x dist/xemu.app/Contents/MacOS/xemu -d Contents/Libraries/<arch>/ -p "@executable_path/../Libraries/<arch>/" -s macos-libs/<arch>/opt/local/lib/ -s /usr/local/lib/ -s /opt/homebrew/lib/` — walks the binary's dependency dylibs, copies each into `Contents/Libraries/<arch>/`, and rewrites their load paths to `@executable_path`-relative. `-s` lists the same three search tiers as §3.4, in the same order.
 4. **Fixup pass for paths dylibbundler misses**: any remaining `/opt/local/` reference in the executable is patched with `install_name_tool -change`; each bundled dylib's own remaining `/opt/local/` references are patched to `@rpath/`-relative and the dylib is re-signed ad-hoc (`codesign -s -`) immediately after, since `install_name_tool` invalidates any existing signature.
 5. **rpath dedup**: every existing `LC_RPATH` entry on the executable is deleted (`install_name_tool -delete_rpath`, errors ignored — some may already be gone), then exactly one is added back: `@executable_path/../Libraries/<arch>/`. The comment: *"macOS 26+ dyld rejects binaries with duplicate LC_RPATH entries."* This is why re-running `dylibbundler` (which appends rather than dedupes) used to be able to brick a binary on macOS 26 before this strip-then-add step existed.
-6. **MoltenVK bundling**: re-resolves the same 3-tier search from §3.4 (a build-time resolution can differ from what actually got vendored, so this is resolved independently at package time), copies the winner to `Contents/Libraries/<arch>/libMoltenVK.dylib`, sets its install name to `@rpath/libMoltenVK.dylib`, ad-hoc codesigns it, and **logs provenance**: `Bundling MoltenVK from <path> (version <X.Y.Z>, <arch> UUID <uuid>)`. If no candidate exists at all, this is a **hard error** (`exit 1`) — the comment explains why: "an app bundle without MoltenVK is broken for this fork" (Vulkan is the default renderer; Metal presentation and MetalFX both depend on it being present). The provenance line matters because a stray `/usr/local` custom build can silently shadow the vendored copy — driver-version drift between what you tested and what you shipped is exactly the mechanism behind the pink-tile-class bug (see `xemu-failure-archaeology`).
+6. **MoltenVK bundling**: re-runs the same `resolve_moltenvk()` from §3.4 (resolution can change between configure and package on a changed system, so it is re-run at package time), copies the winner to `Contents/Libraries/<arch>/libMoltenVK.dylib`, sets its install name to `@rpath/libMoltenVK.dylib`, ad-hoc codesigns it, and **logs provenance**: `Bundling MoltenVK from <path> (version <X.Y.Z>, <arch> UUID <uuid>)`. If no candidate exists at all, this is a **hard error** (`exit 1`) — the comment explains why: "an app bundle without MoltenVK is broken for this fork" (Vulkan is the default renderer; Metal presentation and MetalFX both depend on it being present). The provenance line matters because a stray `/usr/local` custom build can silently shadow the vendored copy — driver-version drift between what you tested and what you shipped is exactly the mechanism behind the pink-tile-class bug (see `xemu-failure-archaeology`).
 7. **Resources**: creates `Contents/Resources/`, builds `xemu.icns` from the five PNG sizes in `ui/icons/` via `iconutil`, copies `Info.plist` in.
 8. **Version stamp**: if a file named `XEMU_VERSION` exists at repo root, its content (up to the first `-`) is written into `Info.plist`'s `CFBundleShortVersionString`/`CFBundleVersion` via `plutil -replace`; otherwise both are set to `"0.0.0"`. **This file does not exist in a normal git checkout** — it's created only by CI's source-package step (`.github/workflows/build.yml`, `echo -n <version> > XEMU_VERSION`). Verified on this machine: a local build's `Info.plist` reports `CFBundleShortVersionString = "0.0.0"` even at tag `v0.9`. This is a *separate* mechanism from the in-app window title / `git describe` version (`scripts/xemu-version.sh`, which runs live `git describe --tags` whenever `.git` exists and feeds `xemu-version-macro.h` — that one **does** show `v0.9`-ish on a local build). Don't be surprised that `Get Info` on a locally built bundle says 0.0.0 while the app's own title bar shows the real version.
 9. **Codesign**: ad-hoc by default — `codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - dist/xemu.app/Contents/MacOS/xemu`. `--deep` re-signs every bundled dylib (SDL3, MoltenVK, …) under the same identity so dyld's same-team-ID check passes. Ad-hoc signing is sufficient for `MAP_JIT`/TCG to work locally — no entitlements file needed. Set `XEMU_CODESIGN_ENTITLEMENTS=1` to instead sign every dylib *and* the executable with `xemu.entitlements` (`com.apple.security.cs.allow-jit`, `com.apple.security.cs.allow-unsigned-executable-memory`) under the hardened runtime — rarely needed locally; real distribution signing/notarization is `scripts/sign-macos-release.sh` (separate script, not part of `build.sh`).
@@ -653,7 +660,7 @@ bump is trusted for release.
 Re-run these after any pull to catch drift in this document:
 
 - Build script structure/flags: `grep -n "opts=\"\$opts" build.sh` and diff against §3.1-§3.7.
-- MoltenVK 3-tier + auto-vendor version: `grep -n "XEMU_MOLTENVK_VERSION\|moltenvk_ver=" build.sh`.
+- MoltenVK 3-tier + auto-vendor version: `grep -n "resolve_moltenvk\|vendor_moltenvk\|XEMU_MOLTENVK_VERSION" build.sh`.
 - Custom MoltenVK pin + flags: `grep -n "MVK_PIN\|MCPU=\|GCC_OPTIMIZATION_LEVEL\|-flto" scripts/build-moltenvk.sh`.
 - Installed custom MoltenVK version on this machine: `strings /usr/local/lib/libMoltenVK.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'`.
 - MoltenVK checkout present: `ls -d "$(dirname scripts/build-moltenvk.sh)/../../MoltenVK/.git"` (run from repo root).

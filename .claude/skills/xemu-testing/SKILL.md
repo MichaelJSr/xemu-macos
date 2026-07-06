@@ -99,9 +99,11 @@ and their instance holds the qcow2 write lock, so clone the disk with
 
 ## Snapshots with controllers (topology matching)
 
-Snapshots embed per-pad USB trees: `usb-hub,port=1.N,ports=3` +
-`usb-xbox-gamepad,port=1.N.1,index=N-1` per bound xbox port N. A
-machine missing them fails `loadvm` ("Unknown section ...usb-hub").
+Snapshots embed per-pad USB trees: `usb-hub,port=1.P,ports=3` +
+`usb-xbox-gamepad,port=1.P.1,index=N-1` per bound xbox player slot
+N, where P maps through `port_map = {3,4,1,2}`
+(`ui/xemu-input.c:261`) — player 1 → hub port 1.3, gamepad index 0.
+A machine missing them fails `loadvm` ("Unknown section ...usb-hub").
 Headless: replicate with raw `-device` args (unbound pads read
 neutral input — guarded in `hw/xbox/xid.c`). List snapshots by
 parsing the qcow2 header (offset 60: nb u32, table offset u64; entry:

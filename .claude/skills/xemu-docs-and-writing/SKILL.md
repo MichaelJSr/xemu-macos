@@ -211,12 +211,11 @@ never write a vector as if it were planned work.
 
 ### 2.4 Release notes (the format of record)
 
-The FORMAT lives in `docs/RELEASING-macos.md` and is still canon
-even though the release FLOW around it changed (see §4 item 2;
-current flow: CI builds a draft on tag push, `release.yml` seeds the
-body from `.github/scripts/gen-changelog.py`, and the owner rewrites
-the notes into this format before publishing — execution details in
-`xemu-run-and-operate`).
+The FORMAT lives in `docs/RELEASING-macos.md`, which was rewritten
+2026-07-05 around the current flow (CI builds a draft on tag push,
+`release.yml` seeds the body from `.github/scripts/gen-changelog.py`,
+the owner rewrites the notes into this format and publishes —
+execution details in `xemu-run-and-operate`).
 
 - **Title**: `vX.Y.Z — <headline>` with an em-dash (`—`, not
   hyphen), headline ≤ ~70 chars. Shipped examples from the doc:
@@ -406,7 +405,7 @@ work produces. Predicted-numbers-before-run discipline is covered in
 
 ---
 
-## 4. Known documentation drift (as of 2026-07-04)
+## 4. Known documentation drift (as of 2026-07-05)
 
 This section records the debt; it does not fix it. Fixing README or
 RELEASING is a normal doc change through change control
@@ -415,52 +414,23 @@ ground-truth grep quoted in the commit body, nothing more. When you
 fix ANY item below, also run the §4.1 drift sweep and update this
 section (and its date) in the same change.
 
-1. **README MoltenVK table says PREFILL=2; code says 0.** The
-   `### MoltenVK runtime config` table row (README line ~723) reads
-   `| MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS | 2 | Prefill at CB
-   end |`. Ground truth: `Info.plist` `LSEnvironment` sets it to
-   `0` (with an in-plist comment explaining why prefill=2 is
-   forbidden), and `ui/xemu.c:1610`
-   `setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0)`
-   mirrors it for non-Finder launches. The Changes-section prose
-   (README ~line 312, "MoltenVK configuration is launch-path
-   independent (pink-tile fix)") is already correct — only the table
-   row is stale. Fix the value AND its Purpose cell (prefill must
-   stay 0: corruption + AGX crash + measured slower; the saga lives
-   in `xemu-failure-archaeology`).
-2. **`docs/RELEASING-macos.md` needs a rewrite pass** — four
-   superseded claims, verified in the file today:
-   - *Version numbering* section prescribes upstream-tracking
-     `vMAJOR.MINOR.PATCH` ("first two components track upstream").
-     Current practice: fork-versioned tags since `v0.9` (the last
-     upstream-suffixed tag, `v0.8.153-macos.1`, remains published).
-   - *Preflight* step 1 says: see "`README.md` 'Committing'
-     conventions — short title + `Made-with: Cursor` footer".
-     Doubly stale: README has no "Committing" section
-     (`grep -in committing README.md` → no match), and the current
-     footer is `Co-Authored-By: Claude Fable 5
-     <noreply@anthropic.com>` (§2.5).
-   - The manual `gh release create` flow and its "Do **not** pass
-     `--draft`" rule are superseded: current flow is push tag `v*` →
-     `.github/workflows/release-on-tag.yml` (owner guard admits
-     `MichaelJSr`) → `release.yml` → `softprops/action-gh-release`
-     with `draft: true` for tag releases, body seeded from
-     `.github/scripts/gen-changelog.py`; the owner rewrites the
-     notes per §2.4 and publishes the draft. The doc's *packaging*
-     steps (`package_macos` mirror, zip naming
-     `xemu-vX.Y.Z-macos-arm64.zip`, LICENSE generation,
-     verification) remain valid as the packaging reference and
-     manual fallback — keep them in the rewrite.
-   - The doc prescribes annotated tags (`git tag -a vX.Y.Z -m ...`);
-     the actual fork tags `v0.9` and `v0.8.153-macos.1` are
-     lightweight (`git cat-file -t v0.9` → `commit`). The rewrite
-     should pick one convention and state it.
-   Still-correct parts to preserve verbatim: the notes format (§2.4),
-   tag immutability ("Do **not** delete and re-push a tag"), and the
-   Do-not-do list's force-push prohibition — those match the
-   incident record (`xemu-failure-archaeology`, tag-deletion
-   incident).
-3. **README recommends `audio.dsp_jit.enabled = true`; the config
+**2026-07-05 doc-cleanup pass resolved the previous list**: the
+README PREFILL table row (now `0` with the why), the 3-cell rows in
+the 2-column runtime-knob table, `XEMU_COREAUDIO_FRAMES` re-filed as
+a runtime knob (and the `coreaudio.m` comment corrected),
+`XEMU_VIS`/`XEMU_STRIP`/`XEMU_DSP_JIT`/dev-subflag rows added, the
+"`XEMU_DSP_JIT=1` enables the JIT" overclaim corrected to
+config-only + kill-switch, `docs/RELEASING-macos.md` rewritten
+around the CI draft flow (annotated fork-versioned tags, current
+commit footer, manual packaging kept as fallback, MoltenVK
+release-parity note added), and the frozen `xemu-testing` topology
+formula fixed to include `port_map = {3,4,1,2}`. The same pass also
+re-filed the four misplaced CPU/threading/build Changes bullets out
+of the Vulkan section and re-derived §1.1's line anchors stale.
+
+Open items:
+
+1. **README recommends `audio.dsp_jit.enabled = true`; the config
    default is `false`.** Not a contradiction — a recommendation is
    not a default — but any edit near either spot must keep both
    facts explicit: `config_spec.yml` has `audio.dsp_jit.enabled`
@@ -471,50 +441,13 @@ section (and its date) in the same change.
    `hw/xbox/mcpx/apu/dsp/dsp.c:120`).
    Full engine-mediation rules: `xemu-change-control`; knob catalog:
    `xemu-config-and-flags`.
-4. **RELEASING's dangling cross-reference** — the "README
-   'Committing' section" pointer (covered in item 2) is also a
-   standing example of why cross-references need re-verification
-   greps: the referenced section was removed and nothing noticed.
-5. **Minor, found 2026-07-04**: the README
-   `### Runtime debug / escape-hatch knobs` table is declared
-   2-column (`| Env var | Purpose |`) but the `XEMU_MAX_QUERIES` and
-   `XEMU_INPUT_PIPE` rows carry 3 cells (a stray `Default`-style
-   middle cell) — lines ~121-122. Normalize when next editing the
-   table.
-6. **`XEMU_COREAUDIO_FRAMES` misfiled as a build knob** in README's
-   "Build knobs" table (~line 78); it is read at **runtime**
-   (`audio/coreaudio.m:599`). The `coreaudio.m` comment ("at build
-   time", ~591) is wrong too, and references TOML
-   `[audio.coreaudio.out]` knobs that do not exist in
-   `config_spec.yml`. (Found by `xemu-config-and-flags`, 2026-07-04.)
-7. **README "Build knobs" table omits `XEMU_VIS` and `XEMU_STRIP`**
-   (documented only in `build.sh` comments, lines ~495-519). (Found
-   by `xemu-config-and-flags`, 2026-07-04.)
-8. **README runtime-knob table omits `XEMU_DSP_JIT`** (prose-only at
-   ~629) **and the dev sub-flags**
-   `XEMU_DSP_JIT_DIFF_SYNC`/`_DIFF_MAX`/`_DUMP`/`_PIN_AUDIT`/
-   `_SENTINEL`/`_FORCE` (failed-experiments row ~757 only). Dev
-   tools, so table absence may be intentional — but they are
-   undocumented as knobs. (Found by `xemu-config-and-flags`,
-   2026-07-04.)
-9. **README ~629 implies `XEMU_DSP_JIT=1` alone enables the fork
-   JIT**; under default `audio.use_dsp_jit=true` it does not —
-   engine selection reads `g_config` only
-   (`hw/xbox/mcpx/apu/dsp/dsp.c:113-128`). (Found by
-   `xemu-config-and-flags`, 2026-07-04.)
-10. **The frozen `xemu-testing` SKILL.md topology formula lacks
-    `port_map`** — it states `usb-hub,port=1.N` /
-    `usb-xbox-gamepad,port=1.N.1,index=N-1`, but the code maps the
-    player slot through `port_map = {3,4,1,2}`
-    (`ui/xemu-input.c:261,783-807`; player 1 → hub port 1.3,
-    gamepad index 0). The corrected mapping lives in
-    `xemu-run-and-operate` §5 and `xemu-debugging-playbook`'s
-    snapshot table — fix the frozen skill via normal change control.
+2. **§1.1's README line anchors predate the 2026-07-05 restructure**
+   (README went 1217 → ~1106 lines; section names unchanged).
+   Re-derive with `grep -n '^#' README.md` before citing.
 
-Flag-specific items 6-9 were discovered by the `xemu-config-and-flags`
-audit and are mirrored there as a short pointer-annotated list (its
-"Known README-vs-code drift — flag items" section); keep the two
-sections in sync when fixing any of them.
+The flag-item mirror in `xemu-config-and-flags` ("Known
+README-vs-code drift — flag items") was updated to resolved in the
+same pass; keep the two sections in sync.
 
 ### 4.1 Drift sweep — run after ANY doc fix
 
@@ -526,8 +459,9 @@ cd /Users/michaelsrouji/Documents/Xemu/tools/xemu-macos
 # 1. MVK config: the three homes must agree
 grep -n 'PREFILL\|ARGUMENT_BUFFERS\|FAST_MATH\|SYNCHRONOUS_QUEUE\|RESUME_LOST' \
   README.md Info.plist ui/xemu.c
-# 2. RELEASING staleness markers
-grep -n 'Committing\|Cursor\|--draft\|track upstream\|tag -a' docs/RELEASING-macos.md
+# 2. RELEASING staleness markers (post-2026-07-05 rewrite these must
+#    NOT reappear; 'tag -a' and '--draft=false' are now deliberate)
+grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md
 # 3. Live release reality to compare against
 grep -n 'draft:' .github/workflows/release.yml
 git tag -l | tail -3 && git cat-file -t "$(git tag -l | tail -1)"
@@ -599,8 +533,8 @@ Facts here were verified against the repo on 2026-07-04. Re-verify
 before trusting the volatile ones:
 
 - README section anatomy + line anchors: `grep -n '^#' README.md`
-- PREFILL drift (item 4.1): `grep -n PREFILL README.md Info.plist ui/xemu.c`
-- RELEASING staleness set: `grep -n 'Committing\|Cursor\|--draft\|track upstream' docs/RELEASING-macos.md`
+- PREFILL agreement across the three homes: `grep -n PREFILL README.md Info.plist ui/xemu.c`
+- RELEASING staleness set (expect no hits): `grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md`
 - Release-notes format rules: read `docs/RELEASING-macos.md` "Notes body format" + "Style rules"
 - CI draft flow: `grep -n 'draft:\|gen-changelog' .github/workflows/release.yml` and the owner guard in `.github/workflows/release-on-tag.yml`
 - Commit conventions + footer: `git log -8 --format=full`
