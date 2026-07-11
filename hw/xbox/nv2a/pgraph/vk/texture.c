@@ -1648,6 +1648,26 @@ static bool is_linear_filter_supported_for_format(PGRAPHVkState *r,
            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 }
 
+/*
+ * The texture/sampler eviction guards refuse nodes referenced by
+ * unretired submissions. If a cache ever fills with only-pinned nodes,
+ * lru_lookup's eviction would find no victim (release builds strip
+ * lru_evict_one's assert and would then crash) — retire in-flight work
+ * first so the LRU tail becomes evictable again. The pools (8192
+ * textures / 256 samplers) dwarf any single frame's working set, so
+ * this fires approximately never; it exists to make exhaustion
+ * impossible rather than merely unlikely.
+ */
+static void ensure_cache_headroom(PGRAPHState *pg, Lru *lru)
+{
+    if (lru->num_free > 0) {
+        return;
+    }
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        pgraph_vk_wait_slot_fence(pg, i);
+    }
+}
+
 static void create_texture(PGRAPHState *pg, int texture_idx)
 {
     NV2A_VK_DGROUP_BEGIN("Creating texture %d", texture_idx);
@@ -1737,6 +1757,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     // --- Sampler cache lookup ---
     uint64_t sampler_hash = fast_hash((void *)&sampler_key, sizeof(sampler_key));
+    ensure_cache_headroom(pg, &r->sampler_cache);
     LruNode *sampler_node = lru_lookup(&r->sampler_cache, sampler_hash, &sampler_key);
     SamplerCacheEntry *sampler_entry = container_of(sampler_node, SamplerCacheEntry, node);
     bool sampler_found = sampler_entry->sampler != VK_NULL_HANDLE;
@@ -1866,6 +1887,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     // --- Texture image cache lookup ---
     uint64_t key_hash = fast_hash((void*)&key, sizeof(key));
+    ensure_cache_headroom(pg, &r->texture_cache);
     LruNode *node = lru_lookup(&r->texture_cache, key_hash, &key);
     TextureBinding *snode = container_of(node, TextureBinding, node);
     bool binding_found = snode->image != VK_NULL_HANDLE;
@@ -2308,6 +2330,9 @@ static bool check_textures_dirty_and_update_timestamps(PGRAPHState *pg)
             dirty = true;
         } else {
             r->texture_bindings[i]->submit_time = r->submit_count;
+            if (r->sampler_bindings[i]) {
+                r->sampler_bindings[i]->submit_time = r->submit_count;
+            }
         }
     }
     return dirty;
@@ -2348,6 +2373,9 @@ void pgraph_vk_bind_textures(NV2AState *d)
         if (r->texture_bindings[i]) {
             r->texture_bindings[i]->submit_time = r->submit_count;
         }
+        if (r->sampler_bindings[i]) {
+            r->sampler_bindings[i]->submit_time = r->submit_count;
+        }
     }
     NV2A_VK_DGROUP_END();
 }
@@ -2363,6 +2391,7 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->num_chunk_hashes = 0;
     snode->palette_hash = 0;
     snode->verified_frame_time = -1;
+    snode->submit_time = 0;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)
@@ -2399,9 +2428,6 @@ static bool texture_cache_entry_pre_evict(Lru *lru, LruNode *node)
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, texture_cache);
     TextureBinding *snode = container_of(node, TextureBinding, node);
 
-    // FIXME: Simplify. We don't really need to check bindings
-
-
     // Currently bound
     for (int i = 0; i < ARRAY_SIZE(r->texture_bindings); i++) {
         if (r->texture_bindings[i] == snode) {
@@ -2409,8 +2435,17 @@ static bool texture_cache_entry_pre_evict(Lru *lru, LruNode *node)
         }
     }
 
-    // Used in command buffer
-    if (r->in_command_buffer && snode->submit_time == r->submit_count) {
+    /*
+     * Referenced by a submission that has not retired: submit_time is
+     * stamped with r->submit_count while the binding's draws are
+     * recorded into the CB that becomes submission submit_count+1, so
+     * the image may still be sampled by the GPU until
+     * retired_submit_count reaches submit_time+1. pgraph_vk_finish
+     * pipelines (it waits only the previous slot's fence), so "not in
+     * the recording CB" never proves the GPU is done with it — same
+     * argument as surface eviction's evict_submit_seq gate.
+     */
+    if (snode->submit_time >= r->retired_submit_count) {
         return false;
     }
 
@@ -2467,6 +2502,7 @@ static void sampler_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 {
     SamplerCacheEntry *snode = container_of(node, SamplerCacheEntry, node);
     snode->sampler = VK_NULL_HANDLE;
+    snode->submit_time = 0;
 }
 
 static bool sampler_cache_entry_pre_evict(Lru *lru, LruNode *node)
@@ -2478,6 +2514,12 @@ static bool sampler_cache_entry_pre_evict(Lru *lru, LruNode *node)
         if (r->sampler_bindings[i] == snode) {
             return false;
         }
+    }
+
+    /* In-flight descriptor sets may reference this sampler — same
+     * retirement gate as texture_cache_entry_pre_evict. */
+    if (snode->submit_time >= r->retired_submit_count) {
+        return false;
     }
 
     return true;
@@ -2560,6 +2602,17 @@ void pgraph_vk_finalize_textures(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     nv2a_vk_assert(!r->in_command_buffer);
+
+    /*
+     * Advance the retirement watermark past everything submitted so the
+     * eviction guards can't refuse nodes during the cache flushes below
+     * — a refused node would leak its VkImage/VkSampler on a live
+     * renderer switch. The flush path has already drained these fences;
+     * waiting an observed-signaled fence is free.
+     */
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        pgraph_vk_wait_slot_fence(pg, i);
+    }
 
     if (r->decode_thread_pool) {
         g_thread_pool_free(r->decode_thread_pool, FALSE, TRUE);

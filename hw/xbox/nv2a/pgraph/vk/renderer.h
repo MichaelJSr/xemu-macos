@@ -299,6 +299,9 @@ typedef struct SamplerCacheEntry {
     LruNode node;
     SamplerKey key;
     VkSampler sampler;
+    /* Same retirement gate as TextureBinding.submit_time: the sampler
+     * may be referenced by descriptor sets of in-flight submissions. */
+    uint32_t submit_time;
 } SamplerCacheEntry;
 
 typedef struct QueryReport QueryReport;
