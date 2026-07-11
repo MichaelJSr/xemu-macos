@@ -894,15 +894,22 @@ it. Instruments to re-run before starting any of these:
    nukes every TB on a written code page, which then recycle unchanged.
    Cure implemented behind `XEMU_TB_RANGE_INV=1` (default off): re-apply
    upstream's exact per-TB byte-range overlap filter (correctness-safe —
-   invalidates a correct subset, never misses). The one tradeoff the
-   counters flag: the filter keeps the page write-protected (baseline
-   `unprotect/trap ≈ 1.0` — the whole-page nuke currently unprotects on
-   nearly every trap, so writes go fast until code re-runs), so the
-   net turns on the notdirty-trap-frequency change — the interleaved A/B
-   (`scripts/bench-savestate-ab.sh <snap> XEMU_TB_RANGE_INV`) decides.
-   A higher-ceiling / lower-margin alternative (sub-page dirty tracking,
-   which stops the non-code write from trapping at all) is sketched but
-   parked pending a correctness review (shared dirty-bitmap race class).
+   invalidates a correct subset, never misses). But the counter A/B
+   (`XEMU_INV_PROF` with the filter on vs off, F8) shows why it is likely
+   the WRONG cure: the filter cuts invalidations 500× (338k→675) and kills
+   the recycle round-trip, but keeps the written page write-protected, so
+   notdirty traps **explode 25×** (198k→4.98M — each a
+   `physical_memory_test_and_clear_dirty` TLB walk) and the per-page scan
+   grows unbounded (TBs never leave the page). This recovers *why*
+   base-xemu removed the check (`6ea11938b2e`): whole-page invalidation's
+   `tlb_unprotect_code` side effect makes the ~25 subsequent data
+   writes/epoch free — it was removed FOR performance on the Xbox
+   data-shares-a-code-page pattern. So `XEMU_TB_RANGE_INV` is a
+   correctness-verified dark A/B knob predicted **neutral-to-negative**;
+   the real lever is **sub-page dirty tracking** (stop the non-code write
+   from trapping at all), sketched but parked pending a correctness review
+   (shared dirty-bitmap race class). Interleaved A/B to confirm the kill:
+   `scripts/bench-savestate-ab.sh <snap> XEMU_TB_RANGE_INV`.
 2. **Cross-page direct chaining, Xbox-relaxed** (a week; risky).
    The "other" 43% of the exit census is dominated by cross-page
    direct jumps that pay the ~20-op inline probe today. Upstream
