@@ -188,7 +188,11 @@ package_macos() {
       # pipeline, so the old `|| echo unknown` fired even on a match.
       moltenvk_bundled_ver=$(strings "$moltenvk_src" | \
           awk '/^[0-9]+\.[0-9]+\.[0-9]+$/ && !v {v=$0} END {print (v ? v : "unknown")}')
-      moltenvk_uuid=$(dwarfdump --uuid "$moltenvk_src" 2>/dev/null | grep -m1 "($target_arch)" | awk '{print $2}')
+      # Same no-early-exit rule as the version line above: grep -m1
+      # closes the pipe early, dwarfdump dies with SIGPIPE, and pipefail
+      # fails the substitution under set -e.
+      moltenvk_uuid=$(dwarfdump --uuid "$moltenvk_src" 2>/dev/null | \
+          awk -v arch="($target_arch)" 'index($0, arch) && !u {u=$2} END {print u}')
       echo "Bundling MoltenVK from $moltenvk_src (version ${moltenvk_bundled_ver}, ${target_arch} UUID ${moltenvk_uuid:-n/a})"
       cp "$moltenvk_src" "$moltenvk_dst"
       install_name_tool -id "@rpath/libMoltenVK.dylib" "$moltenvk_dst"
