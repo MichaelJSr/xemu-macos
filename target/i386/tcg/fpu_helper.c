@@ -3882,6 +3882,14 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
     want &= ~XEMU_FPCR_RMODE_MASK;
     if (want != fpcr) {
         __asm__ volatile("msr fpcr, %0" : : "r"(want));
+        /*
+         * FPCR no longer holds what the inline-x87 path last wrote, and
+         * the sticky mode-1 leave keeps this SSE state across helpers.
+         * Invalidate the x87 rounding cache so gen_flcr's next
+         * cached_fpuc_rc compare misses and x87 code re-establishes its
+         * own FPCR instead of silently running under SSE FZ/RMode.
+         */
+        env->cached_fpuc_rc = 0xFFFF;
     }
     return fpcr;
 }
