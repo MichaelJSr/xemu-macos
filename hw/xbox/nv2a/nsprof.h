@@ -9,8 +9,14 @@
  * waits, surface readbacks, and the guest flip -> vblank idle gap.
  *
  * Enable with XEMU_NV2A_NSPROF=1; a summary (total / avg-per-flip /
- * max single event) prints to stderr every ~5 s. All instrumented
- * paths run on the PFIFO thread, so accumulation is unsynchronized.
+ * max single event) prints to stderr every ~5 s. Almost all
+ * instrumented paths run on the PFIFO thread, so accumulation is
+ * unsynchronized. The one exception is NSPROF_PRESENT_WAIT, which is
+ * accumulated on the UI present thread (it times the present-handoff
+ * round trip); its += races the PFIFO-thread reset in nsprof_flip_tick,
+ * but on every host here 64-bit aligned loads/stores are atomic, so the
+ * only effect is losing at most one interval's samples right at a reset
+ * boundary — acceptable for a profiling counter.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -47,6 +53,10 @@ enum NsprofCounter {
     NSPROF_MFX_DRAIN,     /* metalfx_drain_inflight CPU spin (PFIFO) */
     NSPROF_SURF_DOWNLOAD, /* GPU->CPU surface readback */
     NSPROF_FLIP_IDLE,     /* FLIP_STALL -> guest vblank release */
+    NSPROF_PRESENT_WAIT,  /* UI-thread block on the present-handoff round
+                             trip (pull-model qemu_event_wait). ~0 under
+                             XEMU_PUSH_PRESENT. Accumulated off-thread —
+                             see the header comment above. */
     NSPROF__COUNT,
 };
 

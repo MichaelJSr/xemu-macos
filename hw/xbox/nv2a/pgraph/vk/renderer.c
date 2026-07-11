@@ -259,7 +259,9 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
         qatomic_set(&pg->sync_pending, true);
         pfifo_kick(d);
         qemu_mutex_unlock(&d->pfifo.lock);
+        int64_t present_wait_t0 = nsprof_begin();
         qemu_event_wait(&d->pgraph.sync_complete);
+        nsprof_end(NSPROF_PRESENT_WAIT, present_wait_t0);
         return r->display.gl_texture_id;
     }
     qemu_mutex_unlock(&d->pfifo.lock);
@@ -305,7 +307,9 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
+    int64_t present_wait_t0 = nsprof_begin();
     qemu_event_wait(&d->pgraph.sync_complete);
+    nsprof_end(NSPROF_PRESENT_WAIT, present_wait_t0);
 
     frame->iosurface = r->display.present_iosurface;
     frame->mtl_texture = r->display.present_mtl_texture;
