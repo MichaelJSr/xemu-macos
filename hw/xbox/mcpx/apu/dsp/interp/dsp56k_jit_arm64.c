@@ -2168,11 +2168,11 @@ static void emit_pm_read_reg(ArmEmit *e, int srcreg, int value_reg)
  * CMP + Bcc sequence (most common case: scaling=00, so the
  * fall-through is fastest).
  *
- * Handlers outside the inline set (emu_rnd_*, emu_rol/ror,
- * emu_adc/sbc, emu_addl/subl/addr/subr, emu_max) still go through a
- * plain BLR to the existing C handler via the ALU_FALLBACK case —
- * see emit_alu_call / alu_classify_opcode at the bottom of this
- * section.
+ * The only handler still outside the inline set is emu_max (rounds
+ * 5/7 inlined rnd, rol/ror, adc/sbc, and addl/subl/addr/subr); it
+ * goes through a plain BLR to the existing C handler via the
+ * ALU_FALLBACK case — see emit_alu_call / alu_classify_opcode at
+ * the bottom of this section.
  * --------------------------------------------------------------- */
 
 /* Register offsets used by the accu load / store helpers. */
@@ -9249,6 +9249,12 @@ static void chain_unpatch_incoming(DspJitBlock *target)
             continue;                            /* defensive */
         }
         chain_repatch_b(c->site, c->source->shared_exit);
+        /* The repatched site lives in another block's already-executed
+         * code: without an explicit line flush the core can keep
+         * running the stale branch from I-cache (the W^X window only
+         * covers write permission, not coherency) — same per-site
+         * flush as retro_chain_patch_pending. */
+        jit_clear_icache(c->site, c->site + 1);
     }
     target->num_incoming_chains = 0;
 }
