@@ -67,7 +67,7 @@ MoltenVK library defaults while every Finder-launched user session ran the
 tuned config (full story: xemu-failure-archaeology's pink-tile saga).
 
 The fix is launch-path parity in code, not policy. `main()`
-(`ui/xemu.c:1610-1614`, inside `#ifdef __APPLE__`) calls `setenv(..., 0)`
+(`ui/xemu.c:1602-1606`, inside `#ifdef __APPLE__`) calls `setenv(..., 0)`
 (no-overwrite) for the same 5 keys immediately on entry, before MoltenVK
 is ever `dlopen`'d — expect the five canonical `MVK_CONFIG_*` values in
 both sources (prefill=0 is the load-bearing one); the value table's home
@@ -97,8 +97,8 @@ bar, not the mtime of `dist/xemu.app`.
 A sharper corollary: an incremental `cd build && ninja` (see
 xemu-build-and-env) updates `build/qemu-system-i386` but does **not** touch
 `dist/xemu.app` at all. `package_macos()`'s `cp build/qemu-system-i386
-dist/xemu.app/Contents/MacOS/xemu` (`build.sh:33`) runs only as the
-`postbuild` step of a full `./build.sh` (`build.sh:598-600`). So a
+dist/xemu.app/Contents/MacOS/xemu` (`build.sh:135`) runs only as the
+`postbuild` step of a full `./build.sh` (`build.sh:581,630-632`). So a
 ninja-only rebuild leaves the *launchable* bundle stale — same old title,
 same old behavior — until you either rerun `./build.sh` (full reconfigure +
 repackage, which also wipes `Contents/Resources`, see §2) or manually
@@ -106,14 +106,14 @@ re-copy the fresh binary into the bundle.
 
 ## 2. Bundle anatomy
 
-`dist/xemu.app/` is produced by `package_macos()` (`build.sh:25-160`):
+`dist/xemu.app/` is produced by `package_macos()` (`build.sh:127-262`):
 
 ```
 Contents/
-  Info.plist              # LSEnvironment MVK block; CFBundleShortVersionString/CFBundleVersion set from XEMU_VERSION (build.sh:121-122)
-  MacOS/xemu               # the Mach-O (copied from build/qemu-system-i386, build.sh:33)
+  Info.plist              # LSEnvironment MVK block; CFBundleShortVersionString/CFBundleVersion set from XEMU_VERSION (build.sh:223-224)
+  MacOS/xemu               # the Mach-O (copied from build/qemu-system-i386, build.sh:135)
   Libraries/<arch>/        # bundled dylibs incl. libMoltenVK.dylib
-  Resources/xemu.icns      # generated from ui/icons/xemu_{16,32,128,256,512}x*.png (build.sh:109-111); also SDL3's "base path" — see below
+  Resources/xemu.icns      # generated from ui/icons/xemu_{16,32,128,256,512}x*.png (build.sh:210-213); also SDL3's "base path" — see below
   _CodeSignature/          # ad-hoc signing artifact
 ```
 
@@ -122,13 +122,13 @@ single-arch `dist/xemu.app` builds together — build mechanics live in
 xemu-build-and-env). Verify on this machine: `ls dist/xemu.app/Contents/Libraries/`.
 
 - The executable's `LC_RPATH` is `@executable_path/../Libraries/<arch>/`
-  (`install_name_tool -add_rpath`, `build.sh:66`, after stripping any
+  (`install_name_tool -add_rpath`, `build.sh:170`, after stripping any
   duplicate `LC_RPATH` entries dylibbundler left behind — macOS 26+ dyld
-  rejects duplicates, `build.sh:61-65`). Every bundled `.dylib`, including
+  rejects duplicates, `build.sh:165-169`). Every bundled `.dylib`, including
   `libMoltenVK.dylib`, is re-pathed to `@rpath/<name>` and individually
-  re-codesigned (`build.sh:46-58,92-93`). `libMoltenVK.dylib` itself is
+  re-codesigned (`build.sh:138-163`). `libMoltenVK.dylib` itself is
   never linked — it's `dlopen`'d at runtime through Volk, and dyld resolves
-  it through the same rpath (`build.sh:68-70`).
+  it through the same rpath (`build.sh:172-205`).
   Verify: `otool -l dist/xemu.app/Contents/MacOS/xemu | grep -A2 LC_RPATH`.
 - **`Contents/Resources` doubles as SDL3's application "base path" on
   macOS**, and that has a sharp edge. Portable-mode detection
@@ -137,7 +137,7 @@ xemu-build-and-env). Verify on this machine: `ls dist/xemu.app/Contents/Librarie
   to `Contents/Resources/`, *not* `Contents/MacOS/` where the binary
   actually lives. A portable config planted there works right up until the
   next full `./build.sh`: `package_macos()` opens with `rm -rf dist`
-  (`build.sh:26`) — the entire previous bundle, `Resources` included, is
+  (`build.sh:128`) — the entire previous bundle, `Resources` included, is
   gone before the new one is assembled. Do not rely on a portable config
   surviving a rebuild.
 
@@ -369,7 +369,7 @@ second instance at the user's live `hdd_path`.
   numbers is xemu-diagnostics-and-tooling's job; this skill only
   establishes that they share one stream with everything else above.
 - `build.log` is a *build*-time artifact (`time make ... | tee build.log`,
-  `build.sh:598`), not a runtime log — see xemu-build-and-env.
+  `build.sh:630`), not a runtime log — see xemu-build-and-env.
 - Screenshots: directory is `general.screenshot_dir`, empty defaults to
   `.` (the process's current working directory at the time,
   `ui/xui/gl-helpers.cc:1317-1322`); filename is
@@ -406,8 +406,9 @@ push tag "v*"
   universal signed+unsigned zips, Windows x86_64/arm64 zips + PDBs, three
   Linux AppImage variants × {release, debug}, a source tarball, and two
   legacy-named Windows aliases (`release.yml:53-58`). Re-verify the count
-  before citing it again: `gh release view v0.9 --repo MichaelJSr/xemu-macos
-  --json assets --jq '.assets | length'`.
+  against the latest release (latest tag `v0.10.2` as of 2026-07-11)
+  before citing it again: `gh release view v0.10.2 --repo
+  MichaelJSr/xemu-macos --json assets --jq '.assets | length'`.
 - The draft is **not visible to normal users** until the owner clicks
   publish on GitHub — a deliberate human gate before anything ships.
 
@@ -515,6 +516,9 @@ territory; this skill only states the hands-off rule and the clone recipe.
 
 ## Provenance and maintenance
 
+All `build.sh` line anchors above were re-derived 2026-07-11 against
+HEAD `7e2e6e7256` (the `a45882eb83` consolidation shifted every
+`package_macos` offset); the `ui/xemu.c` setenv anchor is `1602-1606`.
 Re-verify each volatile fact before trusting it on a future date:
 
 - MVK setenv/plist parity: `grep -n "MVK_CONFIG" Info.plist ui/xemu.c`
@@ -529,5 +533,5 @@ Re-verify each volatile fact before trusting it on a future date:
 - USB pad topology construction: `grep -n "port_map\|usb-hub" ui/xemu-input.c`
 - Snapshot save/load call sites + failure-resume behavior: `grep -n "xemu_snapshots_load\|xemu_snapshots_save" ui/xemu-snapshots.c`
 - Release trigger chain + owner guard: `grep -n "tags:\|repository_owner\|draft:" .github/workflows/release-on-tag.yml .github/workflows/release.yml`
-- Current release asset count/names (dated): `gh release view v0.9 --repo MichaelJSr/xemu-macos --json assets --jq '.assets[].name'`
+- Current release asset count/names (dated; latest tag v0.10.2 as of 2026-07-11): `gh release view v0.10.2 --repo MichaelJSr/xemu-macos --json assets --jq '.assets[].name'`
 - qcow2 lock error text: `grep -n "another process using the image" block/file-posix.c`

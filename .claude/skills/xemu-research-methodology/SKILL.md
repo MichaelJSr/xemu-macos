@@ -59,7 +59,7 @@ theory explained observation (a) and nothing else:
 
 `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` explained all four
 observations at once; the texture-path theory explained one. That is
-what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1610`,
+what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1602-1606`,
 `setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0)` before
 MoltenVK loads, with `overwrite=0` so an explicit user override still
 wins) was validated on the user's own environment: 0 artifact frames in
@@ -542,6 +542,7 @@ commit hash (commits and their messages don't drift). Re-verify with:
 - The single-queue MoltenVK constraint hasn't changed:
   `grep -n 'queueCount' hw/xbox/nv2a/pgraph/vk/instance.c`
 - The failed/future-vectors rows cited here still read as summarized:
-  `sed -n '730,855p' README.md`
+  `sed -n '803,1026p' README.md` (Failed at 803, Future vectors at 846,
+  as of 2026-07-11)
 - DSP JIT throttle constants (the 1-in-16 ratio, 256Ki window) are still:
   `grep -n 'DSP56K_JIT_THROTTLE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`

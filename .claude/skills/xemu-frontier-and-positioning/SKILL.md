@@ -23,8 +23,11 @@ Two jobs: (1) where this fork can advance the state of the art, with
 concrete next steps and a numeric definition of "done"; (2) how to talk
 about any of it in public without overselling. Every fact below was
 checked against the repo on 2026-07-04 (re-check commands in "Provenance
-and maintenance"). Historical fps numbers are dated session measurements,
-cited as recorded history, not re-run for this skill.
+and maintenance"). Repo-state pins (commit count, HEAD, latest tag), the
+§2.8/§3.5 resolutions, and the epilogue's vertex-transient status were
+refreshed 2026-07-11 at `7e2e6e7256`. Historical fps numbers are dated
+session measurements, cited as recorded history, not re-run for this
+skill.
 
 > **RANKING ADDENDUM (2026-07-04 evening, campaign session at
 > `a045dfc780` — supersedes the item-1 pointer and re-ranks the top of
@@ -69,11 +72,12 @@ cited as recorded history, not re-run for this skill.
 > BQL-free MMIO for PFB/USER shipped (fps-parity, jitter win —
 > archaeology 7.5); eager report submit killed (archaeology 1.15);
 > SSE host path extended to x86_64 dark (same-ISA bit-perfect);
-> vertex transient-copy deferred WITH design notes (~3 ms/flip
-> ceiling — the top renderer item next batch); PGO retrained on F8
-> (+ the build.sh merge-trap fixes, archaeology 8.4). The 60 fps
-> wall on the heavy scene remains guest TCG throughput + the
-> deferred vertex redesign.
+> vertex transient-copy subsequently implemented and KILLED
+> 2026-07-05 (`XEMU_VTX_TRANSIENT`: −2.09 fps, 6/6 pairs negative —
+> archaeology 1.16, README Failed row, `64a8a6b543`); PGO retrained
+> on F8 (+ the build.sh merge-trap fixes, archaeology 8.4). The
+> 60 fps wall on the heavy scene remains guest TCG throughput (the
+> deferred vertex redesign died as 1.16).
 > Caveat that must ride every CPU-side claim: this title busy-polls —
 > vCPU utilization is never evidence of guest-boundness on its own
 > (F6 shows ~95% vCPU at a flat 60 fps cap); PFIFO-starvation time is
@@ -157,11 +161,11 @@ Status vocabulary:
 | 5 | DSP parmove+ALU fusion | needs-theory | Audio headroom; explicitly deferred pending a workload that hits it |
 | 6 | BINK video via VideoToolbox | needs-theory | No in-repo hook yet; CPU-bound premise itself unmeasured |
 | 7 | PAL 50 Hz guest vblank | open | Compat breadth, not a fluidity lever for NTSC fixture titles |
-| 8 | Occlusion-report STALLED drains | resolved-verify | Code shows the described mechanism dead under shipped defaults |
+| 8 | Occlusion-report STALLED drains | resolved | Confirmed dead under shipped defaults (`finish_stalled = 0`); stale README bullet pruned |
 | 9 | MTLResidencySet | blocked | Evaluated and rejected in-repo on both fronts it could apply to |
 
-Source: `README.md` "Future vectors" (~line 766, every entry below
-re-checked still present 2026-07-04) plus direct code reading. Entries not
+Source: `README.md` "Future vectors" (~line 846 as of 2026-07-11; every
+entry below re-checked still present 2026-07-04) plus direct code reading. Entries not
 reproduced here (streamed-vertex stall, MetalFX input ring, GL-under-Metal
 switch, texture-upload barrier batching, `VK_EXT_external_memory_host`,
 `VK_KHR_dynamic_rendering` barriers, shader specialization, GPU S3TC
@@ -319,10 +323,11 @@ the **SR pin** (`DSP56K_JIT_SR_PIN_REG 28`,
 `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1452`; prologue comment at
 :9401 "x28 = SR pin"). No free callee-saved GPR remains — a fusion emitter
 must either share the existing pins or add spill/reload discipline, and
-one that clobbers x28 silently corrupts SR semantics. Note
-`docs/dsp-jit-design.md`'s "x28 remains free for future fusion work" /
-"last free callee-saved register" lines are stale pre-SR-pinning prose
-(fix the doc via normal change control, not by trusting it).
+one that clobbers x28 silently corrupts SR semantics.
+`docs/dsp-jit-design.md`'s former "x28 remains free for future fusion
+work" / "last free callee-saved register" lines were stale
+pre-SR-pinning prose — corrected 2026-07-11 to state the SR pin and the
+no-free-GPR constraint.
 `XEMU_DSP_JIT_STATS`/`XEMU_DSP_JIT_DIFF=N` still provide bit-exact
 validation scaffolding at zero new tooling cost.
 
@@ -411,41 +416,28 @@ fixture set — check first) runs at native 50 Hz with zero regression to
 the already-decoupled present path, validated by the same A/B discipline
 on an NTSC title to confirm zero behavior change there.
 
-### 2.8 Occlusion-report STALLED drains — rank 8, resolved-verify
+### 2.8 Occlusion-report STALLED drains — rank 8, resolved
 
-A finding, not a task — **verify before implementing anything**.
+**Closed 2026-07-04; body updated 2026-07-11.** The README bullet this
+item existed to check ("Report-heavy intervals show ~5 `STALLED` finishes
+per flip ... Candidate: satisfy guest report polls from per-slot drains
+without finishing") described the pre-rework mechanism. `6bfbc22863`
+superseded it — its interleaved bench records **"0 stalled finishes"** in
+the default config — the confirming `finish_stalled = 0` nsprof
+measurement was taken 2026-07-04 (see the ranking addendum at the top of
+this file), and the stale bullet has since been pruned from the README
+(verified absent at `7e2e6e7256`).
 
-README currently says: "Report-heavy intervals show ~5 `STALLED` finishes
-per flip (FIFO idle with pending zpass reports forces a synchronous
-drain-all). Candidate: satisfy guest report polls from per-slot drains
-without finishing" (~line 787-790).
+What remains true and worth keeping: `VK_FINISH_REASON_STALLED` has
+exactly **one** caller repo-wide (`hw/xbox/nv2a/pgraph/vk/reports.c:322`),
+gated behind `sync_mode` — true only when `XEMU_REPORTS_SYNC=1`, the
+legacy escape hatch, off by default. The default path does non-blocking
+per-slot fence polling
+(`pgraph_vk_process_pending_reports`/`pgraph_vk_drain_slot_reports`).
 
-Tracing the code: `VK_FINISH_REASON_STALLED` has exactly **one** call site
-repo-wide (`hw/xbox/nv2a/pgraph/vk/reports.c:298`), gated behind
-`sync_mode`, true only when `XEMU_REPORTS_SYNC=1` — the legacy path, off
-by default. Under shipped defaults that line is unreachable; the default
-path does non-blocking per-slot fence polling
-(`pgraph_vk_process_pending_reports`/`pgraph_vk_drain_slot_reports`,
-`reports.c:191-330`) — structurally what the README bullet's own
-"candidate" describes. History confirms the order: the bullet's text was
-introduced by `fc58c637c4`, and the mechanism it describes was superseded
-by the later `6bfbc22863` (`fc58c637c4` is a git ancestor of
-`6bfbc22863`), whose landing commit records **"0 stalled finishes"** in its
-interleaved bench of the default config. This reads as stale documentation
-never pruned after the fix landed, not a live open item.
-
-**Steps (verify, don't implement).** (1) Run a report-heavy scene with
-`XEMU_NV2A_NSPROF=1` and read the `finish_stalled` count
-(`nsprof.c:47`) under default settings. (2) If ~0: hand to
-`xemu-docs-and-writing` to prune/rewrite the bullet, citing `6bfbc22863`.
-(3) If not ~0: that's the notable finding — grep for any
-`VK_FINISH_REASON_STALLED` call site added since `6bfbc22863` (none exists
-as of this writing).
-
-**Milestone.** The moment step 1's `nsprof` run reports a `finish_stalled`
-count for one 5 s report-heavy interval — confirms 0 (close the doc item)
-or reopens this with fresh numbers superseding both this analysis and the
-current README text.
+**Reopen only if** a new `VK_FINISH_REASON_STALLED` caller appears, or
+`finish_stalled` goes nonzero under shipped defaults in an
+`XEMU_NV2A_NSPROF=1` run — fresh numbers would supersede this record.
 
 ### 2.9 MTLResidencySet — rank 9, blocked
 
@@ -574,15 +566,16 @@ that specific legality constraint — a narrow interaction a native-Vulkan
 (non-Apple-GPU) developer might never trip over.
 
 **A worked lesson found while writing this skill.** The README prose for
-this same change (~line 351, same commit `6bfbc22863`) states **35.6 fps**
-and **"2.25x"** — different from the commit message's own **38.57 +/- 0.80
+this same change (same commit `6bfbc22863`) stated **35.6 fps** and
+**"2.25x"** — different from the commit message's own **38.57 +/- 0.80
 fps** and **"+144%"** (≈2.44x). Both were written in the same commit and
-never reconciled. The commit-message number carries the full receipt (3
+sat unreconciled until 2026-07-11, when the README (both the Changes
+bullet and the failed-experiments row) was corrected to the receipt
+numbers. The commit-message number carries the full receipt (3
 interleaved pairs, mean ± stdev, explicit legacy-vs-deferred split); the
-README figure has none attached. **Cite the commit-message number**
-(`38.6 fps`, `+144%`, `git show 6bfbc22863`) until reconciled; treat
-README's `35.6`/`2.25x` as imprecise pending a `xemu-docs-and-writing`
-fix — don't average them or pick whichever sounds better. This is the
+README figure had none attached. **Cite the commit-message number**
+(`38.6 fps`, `+144%`, `git show 6bfbc22863`) — never average two figures
+or pick whichever sounds better. This is the
 concrete case for why §4 exists: even this fork's own flagship number
 needed a primary-source check before it was safe to quote.
 
@@ -651,9 +644,10 @@ less impressive stated plainly. Say the number and its receipt, or say
 
 **Merge cadence.** Last merge from `xemu-project/xemu`: `fd467e02b9`,
 "Merge upstream/master: DSP engine abstraction + dsp56300 JIT engine"
-(2026-07-03). This fork carries 239 commits ahead of that merge base
-(`git log --first-parent --oneline upstream/master..HEAD | wc -l`; current
-`HEAD` = `cf85e96597`, tag `v0.9`).
+(2026-07-03). This fork carries 284 commits ahead of that merge base
+(`git log --first-parent --oneline upstream/master..HEAD | wc -l`,
+re-derived 2026-07-11; current `HEAD` = `7e2e6e7256`, latest tag
+`v0.10.2`).
 
 **Plausibly upstreamable** (`README.md` "Building for Windows" ~line
 31-44 — these already run, proven, on upstream's own Windows CI paths in
@@ -695,10 +689,10 @@ Re-run before trusting a number or status label here after the tree moves:
 
 - Merge cadence/fork size: `git log -1 --format='%h %ad %s' --date=short fd467e02b9` and `git log --first-parent --oneline upstream/master..HEAD | wc -l`
 - Future Vectors entries still listed as-is: `grep -n "^## Future vectors" -A 90 README.md`
-- STALLED resolved-verify status: `grep -n "VK_FINISH_REASON_STALLED" hw/xbox/nv2a/pgraph/vk/reports.c` (expect one call site, gated by `sync_mode`/`XEMU_REPORTS_SYNC`)
-- README/commit fps figure reconciliation: `grep -n "35.6 fps\|38.57" README.md; git show --format='%B' -s 6bfbc22863 | grep -i "fps\|144%"`
+- STALLED resolved status: `grep -n "VK_FINISH_REASON_STALLED" hw/xbox/nv2a/pgraph/vk/reports.c` (expect exactly one caller — `reports.c:322` as of 2026-07-11 — gated by `sync_mode`/`XEMU_REPORTS_SYNC`)
+- README/commit fps figures agree (reconciled 2026-07-11): `grep -n "38.57" README.md; git show --format='%B' -s 6bfbc22863 | grep -i "fps\|144%"` (a reappearing `35.6`/`2.25x` in README is new drift)
 - MTLResidencySet still blocked: `grep -n -A6 "Phase 5 note" hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m`
-- DSP JIT fusion still deferred: `grep -n "8 (remaining)" docs/dsp-jit-design.md`; x28's real owner is the SR pin (the design doc's "x28 remains free" rows are stale): `grep -n "DSP56K_JIT_SR_PIN_REG" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- DSP JIT fusion still deferred: `grep -n "8 (remaining)" docs/dsp-jit-design.md`; x28's real owner is the SR pin (design-doc "x28 remains free" rows corrected 2026-07-11): `grep -n "DSP56K_JIT_SR_PIN_REG" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - Provoking-vertex gating still capability-based: `grep -n "supports_geometry_shaders =" hw/xbox/nv2a/pgraph/vk/instance.c`
 - BINK still has no in-repo hook: `grep -rliE '\bbink\b' --include='*.c' --include='*.h' .` (expect 0 hits; a loose `grep -rli bink` additionally hits `include/libdecnumber/` substring noise)
 - Upstream still lacks fork-only config keys: `git show upstream/master:config_spec.yml | grep -n "dsp_jit:\|metalfx_mode:\|frame_interpolation:"` (expect no matches)

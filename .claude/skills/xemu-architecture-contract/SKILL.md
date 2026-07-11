@@ -771,7 +771,13 @@ the PFIFO kick/wake handshake requires every kick site to hold
   this... With the invariant held we can use an untimed
   `qemu_cond_wait` in the `pfifo_thread` idle path... because the
   writer's broadcast can no longer slip between the reader's kick-check
-  and its atomic release-wait." The PFIFO thread's idle wait
+  and its atomic release-wait." (Count drift, re-derived 2026-07-11 at
+  `7e2e6e7256`: there are now **20** `pfifo_kick(d)` call sites — 15
+  core/VK + 5 GL, `grep -rn 'pfifo_kick(d)' hw/ | wc -l`. The comment's
+  "15" enumeration is stale in the code — a code-pass item. The VK-side
+  sites were re-checked to hold `d->pfifo.lock` across the kick; the
+  precondition, not the count, is the load-bearing invariant — re-audit
+  any new site against it.) The PFIFO thread's idle wait
   (`pfifo.c:554-565`) relies on exactly this: it checks `fifo_kick` and
   calls `qemu_cond_wait` while still holding `d->pfifo.lock`.
 - Halt-flag access follows a matching atomics contract, stated at
@@ -842,11 +848,11 @@ thread)."
 verified equal to the `main()` block as of 2026-07-04. Re-verify the two
 lists agree: `grep -n "MVK_CONFIG" Info.plist ui/xemu.c`.
 
-**Note the README is stale here**: its "MoltenVK runtime config" table's
-prefill row still lists the pre-fix value — that row is wrong; ground
-truth is `0` in both `Info.plist` and `ui/xemu.c` (the README's prose
-elsewhere is correct). Tracked as drift item 1 in `xemu-docs-and-writing`
-§4, the stale-doc list home.
+**Parity holds in all three homes** (re-verified 2026-07-11 at
+`7e2e6e7256`): the README "MoltenVK runtime config" table, `Info.plist`,
+and `ui/xemu.c:1602-1606` all read prefill `0` — the README row was
+fixed 2026-07-05. If any of the three ever disagrees again, that is
+drift; record it in `xemu-docs-and-writing` §4, the stale-doc list home.
 
 **Why this design.** The pink-tile saga (`xemu-failure-archaeology`) is
 the origin story: for weeks, every test harness (shell-launched) ran
@@ -968,16 +974,20 @@ one of these should know it's stepping onto contested ground.
 - **STALLED report drains are still finish-heavy when they fire — the
   default path just avoids firing them.** `VK_FINISH_REASON_STALLED`
   (full submit + fence wait + drain-every-pending-report,
-  `hw/xbox/nv2a/pgraph/vk/draw.c:1987-1990`) is reachable from exactly
-  one call site as of 2026-07-04: the *legacy*
-  `XEMU_REPORTS_SYNC=1` branch (`reports.c:292-299`). The default path
-  instead waits up to a 5 ms budget and, if still pending, does a plain
+  `hw/xbox/nv2a/pgraph/vk/draw.c:2045-2050`) is reachable from exactly
+  one caller as of 2026-07-11: the *legacy*
+  `XEMU_REPORTS_SYNC=1` branch (`reports.c:321-323`). The default path
+  instead waits up to a 300 µs budget (`XEMU_REPORTS_BUDGET_US`,
+  default 300 — `reports.c:313`; was 5 ms until 2026-07-04) and, if
+  still pending, does a plain
   submit (`REPORTS_SUBMIT`, not `STALLED`) that does *not* trigger the
   full drain-all. The expensive path still exists and is still exactly
   as expensive when it runs — it's a legacy fallback now, not
   steady-state behavior. Re-verify with `grep -rn
-  VK_FINISH_REASON_STALLED hw/xbox/nv2a/pgraph/vk/*.c` (should be
-  exactly one call site) before relying on this description.
+  VK_FINISH_REASON_STALLED hw/xbox/nv2a/pgraph/vk/*.c` (expect 3
+  matches: the profile-map entry and the finish-reason comparison in
+  `draw.c`, plus exactly one *caller* — `reports.c:322`,
+  `sync_mode`-gated) before relying on this description.
 - **Pull-model present round trip** (Invariant 8) is a known,
   unresolved cost: the PFIFO-side handshake is what *publishes* a
   frame, so a UI-side "don't re-present unchanged content" pre-check
@@ -1050,7 +1060,11 @@ behavior stays reachable during the transition.
 ## Provenance and maintenance
 
 Every fact above was verified against the repository on 2026-07-04 at
-commit `cf85e96597` (tag `v0.9`), branch `macos-optimizations`. Re-run
+commit `cf85e96597` (tag `v0.9`), branch `macos-optimizations`. On
+2026-07-11 at `7e2e6e7256` (latest tag `v0.10.2`) the following were
+re-verified: MVK three-home prefill parity (all `0`), the STALLED
+reachability facts (one caller, `reports.c:322`; 300 µs default budget),
+and the `pfifo_kick(d)` call-site count (20). Re-run
 these before trusting a claim above on a later tree:
 
 ```sh
@@ -1095,10 +1109,11 @@ grep -n "PREFILL_METAL_COMMAND_BUFFERS" Info.plist ui/xemu.c
 # Invariant 12 — QoS bumps
 grep -rn "QOS_CLASS_USER_INTERACTIVE" hw/ ui/
 
-# Known-drift check: README's MVK table (should read 0, currently stale at 2)
+# README's MVK table (should read 0 — fixed 2026-07-05; disagreement = new drift)
 grep -n "PREFILL_METAL_COMMAND_BUFFERS" README.md
 
-# Known weak point: STALLED reachability (should still be exactly 1 call site)
+# Known weak point: STALLED reachability (expect 3 matches: draw.c profile-map
+# entry + draw.c finish-reason compare + exactly one caller, reports.c:322)
 grep -rn "VK_FINISH_REASON_STALLED" hw/xbox/nv2a/pgraph/vk/*.c
 ```
 

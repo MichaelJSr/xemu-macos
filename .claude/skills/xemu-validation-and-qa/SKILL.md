@@ -209,9 +209,9 @@ knobs verified in `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
      counts prove JIT blocks actually ran (the STATS atexit dump is
      registered only inside `dsp56k_jit_init`, so its presence also
      discriminates the engine).
-   Note: the `config_spec.yml:339` comment names an engine-selector
-   function that no longer exists; the logic lives in
-   `dsp_want_external_jit_engine()`.
+   Note: the `config_spec.yml:339` comment now correctly names
+   `dsp_want_external_jit_engine()` (its earlier stale-selector wording
+   was fixed; re-verified 2026-07-11).
 2. **DIFF clean run through the affected workload.**
    `XEMU_DSP_JIT_DIFF=1` bit-exact-validates every *unique block
    translation* once against the interpreter (a per-translation gate
@@ -270,7 +270,7 @@ historical number in this library was measured here. Re-verify:
 
 | Fixture | Value (2026-07-04) | Re-verify |
 |---|---|---|
-| Repo | `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`, branch `macos-optimizations`, tag v0.9 @ `cf85e96597` | `git describe --tags --match 'v*'` |
+| Repo | `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`, branch `macos-optimizations`; as of 2026-07-11: HEAD `7e2e6e7256`, latest tag `v0.10.2` (v0.9 era when this table was built) | `git describe --tags --match 'v*'` |
 | Game HDD | `/Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2` (826 MB); savestates live inside it | `ls -lh /Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2` |
 | Snapshot shortcuts | As of 2026-07-04 evening: F5=`vm-20260704032357` (471 draws/f), F6=`vm-20260704034933` (settles 192 draws/f @60), F7=`vm-20260704145901` (417 draws/f, live scene — fps drifts), F8=`vm-20260704173701` (**primary heavy anchor**, ~770 draws/f area, death-issue fixed by owner — though dying still shifts fps slightly). The earlier heavy anchor `vm-20260704150046` was REPLACED by F8 — receipts citing it name a snapshot that no longer exists; re-baseline on F8 before any new A/B | `grep -n 'f5 = \|f8 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` — or list ALL snapshots in the image with the qcow2 snapshot lister (xemu-diagnostics-and-tooling) |
 | Title corpus | `/Users/michaelsrouji/Documents/Xemu/games/`: Azurik (retail + `Azurik_dev.iso`), Battlefield 2 MC, Conker L&R, KOTOR, Vexx, NevolutionX (homebrew) | `ls /Users/michaelsrouji/Documents/Xemu/games/` |
@@ -333,7 +333,8 @@ before it ships. Run methods per xemu-testing; accept per §1–§2.
    `release-on-tag.yml` (owner-guarded) → `release.yml` → a DRAFT release
    (`draft: ${{ !inputs.pre-release }}`; the tag job is owner-guarded via
    `github.repository_owner`). Compare the asset count against the
-   previous release — v0.9 shipped **17 assets** (verified live
+   previous release — latest tag is `v0.10.2` as of 2026-07-11; v0.9
+   shipped **17 assets** (verified live
    2026-07-04; one-line count command in Provenance below).
 
 Tag/release invariants (immutable published tags, one release per tag)
@@ -487,7 +488,7 @@ the repo root unless absolute):
 - DIFF semantics + sampling + per-translation gate: `grep -n -A8 'XEMU_DSP_JIT_DIFF' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - DIFF failure signature: `grep -n 'DIFF FAILURE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - Validator final line + STATS buckets: `grep -n 'validator\|cf_fallback buckets' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-- Engine precedence (and the stale engine-selector comment at `config_spec.yml:339`): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; sed -n '336,342p' config_spec.yml`
+- Engine precedence (the `config_spec.yml:339` comment must name `dsp_want_external_jit_engine()` — correct as of 2026-07-11): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; sed -n '336,342p' config_spec.yml`
 - DSP config defaults: `grep -n -A4 'dsp_jit:\|use_dsp_jit' config_spec.yml`
 - CI runs no tests: `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
 - Pin-bump gauntlet requirement + pin value: `grep -n 'MVK_PIN\|validation gauntlet' scripts/build-moltenvk.sh`
@@ -495,7 +496,7 @@ the repo root unless absolute):
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
 - Snapshot shortcuts: `grep -n 'f5 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
 - Fixtures on disk: `ls -lh /Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2 /usr/local/lib/libMoltenVK.dylib; ls /Users/michaelsrouji/Documents/Xemu/games/`
-- v0.9 asset count: `gh release view v0.9 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
+- Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag now v0.10.2): `gh release view v0.10.2 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
 - Owner guard on the tag flow: `grep -n 'repository_owner' .github/workflows/release-on-tag.yml`
 - `nv2a_vk_assert` unconditionally compiled out (hardcoded `NV2A_VK_PERF_BUILD 1`, every build incl. `--debug`): `grep -n -B3 'nv2a_vk_assert' hw/xbox/nv2a/pgraph/vk/debug.h`
 - Installed custom MoltenVK version: `strings /usr/local/lib/libMoltenVK.dylib | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$'`
@@ -504,4 +505,6 @@ the repo root unless absolute):
 
 All fixture values, thresholds, and release facts in this file were
 verified on 2026-07-04 on the dev machine; historical measurements are
-dated session records from the 2026-07 campaigns.
+dated session records from the 2026-07 campaigns. Repo pins (HEAD
+`7e2e6e7256`, latest tag `v0.10.2`) and the `config_spec.yml:339`
+comment status were refreshed 2026-07-11.

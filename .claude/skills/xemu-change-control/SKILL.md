@@ -38,7 +38,7 @@ Two facts frame everything:
    (macOS x86_64/arm64, Windows x86_64/arm64 cross, Linux, debug+release).
 2. **README.md is the doc of record.** Shipped behavior changes get a
    `## Changes` entry; reverted attempts get a `## Failed / reverted
-   experiments` row (27 rows as of 2026-07-04). A change that is not
+   experiments` row (34 rows as of 2026-07-11). A change that is not
    documented is not done.
 
 ## The shipping model (verified 2026-07-04)
@@ -232,9 +232,11 @@ that merge when both sides had independently added a `dsp_jit.c`:
    `audio.use_dsp_jit` select upstream's external JIT engine
    (`dsp_want_external_jit_engine()` / `dsp_set_engine()`,
    `hw/xbox/mcpx/apu/dsp/dsp.c`). Both config knobs stay through any
-   merge. Full truth table, config defaults, env-var non-interaction, and
-   the stale selector-function comment at `config_spec.yml:339`:
-   `xemu-config-and-flags` (the precedence owner).
+   merge. Full truth table, config defaults, and env-var non-interaction:
+   `xemu-config-and-flags` (the precedence owner). (The
+   `config_spec.yml:339` comment now correctly names
+   `dsp_want_external_jit_engine()` — its earlier stale-selector wording
+   was fixed; re-check after any merge that touches the spec.)
 3. **Preserve fork behavior through structural churn.** The same merge
    re-homed the mixbuffer handoff as engine-aware
    `dsp_write_mixbuffer_bulk()` (`hw/xbox/mcpx/apu/dsp/gp_ep.c`) instead
@@ -332,8 +334,8 @@ wipes `Contents/Resources`, so anything planted there silently vanishes
 
 ### 4. Every reverted attempt gets a README failed-experiments row
 
-README `## Failed / reverted experiments` (README.md:730, 27 rows as of
-2026-07-04) exists so lessons "aren't re-attempted" — several rows
+README `## Failed / reverted experiments` (README.md:803, 34 rows as of
+2026-07-11) exists so lessons "aren't re-attempted" — several rows
 document multi-day investigations (per-flight mirrors, depth export,
 host-imported vertex RAM) that would otherwise be re-run from scratch by
 the next session. The revert and the row land in the same push. Row
@@ -366,9 +368,9 @@ binding until the owner says otherwise.
   commit body is the durable home of the evidence bundle this skill
   requires; README rows summarize, commits prove.
 - **Footer** (current): `Co-Authored-By: Claude Fable 5
-  <noreply@anthropic.com>` — on every recent commit (24 of the fork's
-  239 commits carry it as of 2026-07-04). The bulk of older fork
-  history (192 commits) carries the predecessor footer
+  <noreply@anthropic.com>` — on every recent commit (69 of the fork's
+  284 commits carry it as of 2026-07-11). The bulk of older fork
+  history (189 commits) carries the predecessor footer
   `Made-with: Cursor`, which
   `docs/RELEASING-macos.md:40-41` still prescribes — that doc is stale;
   use the Co-Authored-By footer.
@@ -429,7 +431,10 @@ binding until the owner says otherwise.
 ## Provenance and maintenance
 
 All facts verified 2026-07-04 against `macos-optimizations` at
-`cf85e96597` (= tag v0.9). Re-verify drift-prone claims:
+`cf85e96597` (= tag v0.9). Repo-state pins refreshed 2026-07-11 at
+`7e2e6e7256` (latest tag `v0.10.2`; 284 first-parent commits ahead of
+upstream; failed-row count 34; footer counts 69/189; README Failed
+anchor 803). Re-verify drift-prone claims:
 
 - Direct-push/no-PR model: `git log --first-parent --oneline upstream/master..HEAD | grep -ci "merge pull request"` (expect 0)
 - CI triggers + no tests: `sed -n 1,15p .github/workflows/ci.yml` and `grep -rn "ctest\|make check\|pytest" .github/workflows/` (expect nothing)

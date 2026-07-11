@@ -11,7 +11,9 @@ style each artifact follows (derived from the shipped artifacts, with
 real quotes), copy-paste templates, and the currently-known drift
 between docs and code. All file references are relative to the repo
 root `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos` (branch
-`macos-optimizations`). Facts verified 2026-07-04 unless noted.
+`macos-optimizations`). Facts verified 2026-07-04 unless noted;
+README anchors, row counts, and repo pins refreshed 2026-07-11 at
+`7e2e6e7256`.
 
 ## When NOT to use this skill
 
@@ -38,7 +40,7 @@ points at it. Four homes, one rule each:
 
 | Home | Owns | Audience |
 |---|---|---|
-| `README.md` (~935 lines as of 2026-07-04) | THE manifest of the fork: what changed vs upstream, what failed and why, what's next, how to build/run/troubleshoot. Every landed change, reverted attempt, and settled not-worth-it ends up here. | Users + future contributors |
+| `README.md` (~1107 lines as of 2026-07-11) | THE manifest of the fork: what changed vs upstream, what failed and why, what's next, how to build/run/troubleshoot. Every landed change, reverted attempt, and settled not-worth-it ends up here. | Users + future contributors |
 | `docs/dsp-jit-design.md` | The design-doc exemplar: one subsystem's architecture + phased roadmap, updated as phases land (status column). New multi-session designs get a sibling file in `docs/` shaped like it. | Whoever implements the next phase |
 | `docs/RELEASING-macos.md` | The release runbook. Its notes FORMAT section is still canon; its FLOW sections are stale (see §4). | Release operator (human or agent) |
 | `.claude/skills/` | Operational knowledge: proven methods, playbooks, this library. Skills cross-reference each other by name and never duplicate a fact that has a home above — they point at it. | Agents working on the repo |
@@ -50,29 +52,30 @@ fork-authored files there are `dsp-jit-design.md` and
 
 ### 1.1 README section anatomy
 
-As of 2026-07-04 (re-derive anchors with `grep -n '^#' README.md`):
+As of 2026-07-11 (re-derive anchors with `grep -n '^#' README.md`):
 
 | Section (line) | Contains |
 |---|---|
 | `## Quick start` (13) | Prereqs, clone/build/run commands, clean-rebuild line |
 | `### Building for Windows` (29) | Which optimizations are portable vs macOS-only; native MSYS2 + docker cross recipes |
-| `### Build knobs` (71) | Table `Env var / Default / Purpose` of build-time `XEMU_*` vars |
-| `### How Vulkan is provisioned (all platforms)` (82) | volk + MoltenVK/vulkan-1.dll/libvulkan per platform |
-| `### Runtime debug / escape-hatch knobs` (109) | Table `Env var / Purpose` of runtime `XEMU_*` vars ("escape hatch" = env var restoring pre-change behavior for bisects) |
-| `### Recommended xemu.toml` (129) | The recommended user config block, with inline comments |
-| `## Changes` (163) | The landed-change manifest, one `###` per subsystem |
-| — `### CPU / JIT (ARM64)` (165) | x87/TCG work |
-| — `### Vulkan renderer (pgraph/vk)` (197) | NV2A Vulkan renderer work |
-| — `### MetalFX + presentation` (453) | Present chain, MetalFX, window backends |
-| — `### MCPX APU` (563) | Voice processor + DSP JIT summary |
-| — `### Input` (667) | Pads, remap UI, input pipe |
-| — `### Threads + runtime` (682) | BQL/threading/timer changes |
-| — `### Build + packaging` (692) | build.sh, bundling, CI |
-| — `### MoltenVK runtime config (Info.plist LSEnvironment)` (718) | The `MVK_CONFIG_*` table — mirrors `Info.plist` + `ui/xemu.c` `setenv` calls (currently drifted, §4) |
-| `## Failed / reverted experiments` (730) | Two-column table `Attempt / Reason`; intro: "Lessons worth preserving so they aren't re-attempted." |
-| `## Future vectors` (766) | Candidate work; intro: "Not attempted, or scope/risk too high for a one-shot change." |
-| `## Troubleshooting` (856) | `**Symptom.**` + remedy entries |
-| `## Architecture at a glance` (909) | ASCII dataflow diagram |
+| `### Build knobs` (64) | Table `Env var / Default / Purpose` of build-time `XEMU_*` vars |
+| `### How Vulkan is provisioned (all platforms)` (76) | volk + MoltenVK/vulkan-1.dll/libvulkan per platform |
+| `### Runtime debug / escape-hatch knobs` (108) | Table `Env var / Purpose` of runtime `XEMU_*` vars ("escape hatch" = env var restoring pre-change behavior for bisects) |
+| `### Recommended xemu.toml` (138) | The recommended user config block, with inline comments |
+| `## Changes` (172) | The landed-change manifest, one `###` per subsystem |
+| — `### CPU / JIT (ARM64)` (174) | x87/TCG work |
+| — `### Vulkan renderer (pgraph/vk)` (229) | NV2A Vulkan renderer work |
+| — `### MetalFX + presentation` (501) | Present chain, MetalFX, window backends |
+| — `### MCPX APU` (611) | Voice processor + DSP JIT summary |
+| — `### Input` (700) | Pads, remap UI, input pipe |
+| — `### Threads + runtime` (715) | BQL/threading/timer changes |
+| — `### Build + packaging` (735) | build.sh, bundling, CI |
+| — `### MoltenVK runtime config` (787) | The `MVK_CONFIG_*` table — mirrors `Info.plist` + `ui/xemu.c:1602-1606` `setenv` calls (all three homes agree since 2026-07-05) |
+| `## Failed / reverted experiments` (803) | Two-column table `Attempt / Reason`; intro: "Lessons worth preserving so they aren't re-attempted." 34 rows as of 2026-07-11 |
+| `## Future vectors` (846) | Candidate work; intro: "Not attempted, or scope/risk too high for a one-shot change." |
+| — `### The remaining performance roadmap (2026-07-05, post-dispatch-campaign)` (850) | Ranked next-lever list under Future vectors |
+| `## Troubleshooting` (1028) | `**Symptom.**` + remedy entries |
+| `## Architecture at a glance` (1081) | ASCII dataflow diagram |
 
 ### 1.2 Which section a given change updates
 
@@ -85,7 +88,7 @@ As of 2026-07-04 (re-derive anchors with `grep -n '^#' README.md`):
 | Input / pads / remap UI | `### Input` bullet |
 | Threading / BQL / timers | `### Threads + runtime` bullet |
 | `build.sh` / CI / packaging / MoltenVK provisioning | `### Build + packaging` bullet; provisioning-model changes also touch `### How Vulkan is provisioned` |
-| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (~line 1610), and the README MoltenVK table. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
+| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (`1602-1606`), and the README MoltenVK table. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
 | New build-time `XEMU_*` var | `### Build knobs` table row |
 | New runtime `XEMU_*` escape hatch | `### Runtime debug / escape-hatch knobs` table row (2 columns — keep it 2 cells per row, see §4 item 5) |
 | Changed user-facing recommendation | `### Recommended xemu.toml` block |
@@ -104,7 +107,7 @@ this debt):
    subsection (template §3.1).
 2. **Every reverted attempt gets a Failed / reverted experiments
    row** with enough mechanism to prevent a re-attempt (template
-   §3.2). ~27 rows exist as of 2026-07-04.
+   §3.2). 34 rows exist as of 2026-07-11.
 3. **Every settled "not worth it" gets a Future-vectors update or
    removal** — a vector that was investigated and measured below the
    bar does not silently disappear; it is converted into a recorded
@@ -405,7 +408,7 @@ work produces. Predicted-numbers-before-run discipline is covered in
 
 ---
 
-## 4. Known documentation drift (as of 2026-07-05)
+## 4. Known documentation drift (as of 2026-07-11)
 
 This section records the debt; it does not fix it. Fixing README or
 RELEASING is a normal doc change through change control
@@ -428,6 +431,19 @@ formula fixed to include `port_map = {3,4,1,2}`. The same pass also
 re-filed the four misplaced CPU/threading/build Changes bullets out
 of the Vulkan section and re-derived §1.1's line anchors stale.
 
+**2026-07-11 drift-fix pass** (at `7e2e6e7256`): reconciled the README
+occlusion figures at both sites (Changes bullet ~line 400 and the
+failed-experiments row) to commit `6bfbc22863`'s own receipt —
+38.57 ± 0.80 fps / +144% (2.4x) / 2.2 ms/flip, replacing the
+unreceipted 35.6 / 2.25x / 31.9→2.3 written into the README by the
+same commit; corrected `docs/dsp-jit-design.md`'s "x28 remains free"
+rows (x28 = SR pin, `DSP56K_JIT_SR_PIN_REG`, no free callee-saved GPR
+remains for fusion); re-derived §1.1's anchors (README 1107 lines);
+and refreshed the skill library's v0.9-era pins (284 commits, HEAD
+`7e2e6e7256`, latest tag `v0.10.2`, 34 failed rows, 30 `XEMU_*`
+getenv variables, `ui/xemu.c:1602-1606` setenv anchor, retired the
+resolved PREFILL/`config_spec.yml:339` stale-doc notes).
+
 Open items:
 
 1. **README recommends `audio.dsp_jit.enabled = true`; the config
@@ -441,9 +457,6 @@ Open items:
    `hw/xbox/mcpx/apu/dsp/dsp.c:120`).
    Full engine-mediation rules: `xemu-change-control`; knob catalog:
    `xemu-config-and-flags`.
-2. **§1.1's README line anchors predate the 2026-07-05 restructure**
-   (README went 1217 → ~1106 lines; section names unchanged).
-   Re-derive with `grep -n '^#' README.md` before citing.
 
 The flag-item mirror in `xemu-config-and-flags` ("Known
 README-vs-code drift — flag items") was updated to resolved in the
@@ -462,9 +475,10 @@ grep -n 'PREFILL\|ARGUMENT_BUFFERS\|FAST_MATH\|SYNCHRONOUS_QUEUE\|RESUME_LOST' \
 # 2. RELEASING staleness markers (post-2026-07-05 rewrite these must
 #    NOT reappear; 'tag -a' and '--draft=false' are now deliberate)
 grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md
-# 3. Live release reality to compare against
+# 3. Live release reality to compare against (version-sort — lexical
+#    tail lands on v0.9, not the real latest tag)
 grep -n 'draft:' .github/workflows/release.yml
-git tag -l | tail -3 && git cat-file -t "$(git tag -l | tail -1)"
+git tag -l | sort -V | tail -3 && git cat-file -t "$(git tag -l | sort -V | tail -1)"
 # 4. Current commit footer convention
 git log -3 --format='%(trailers)'
 # 5. Knob tables vs code: every README-documented env var must exist
@@ -538,7 +552,7 @@ before trusting the volatile ones:
 - Release-notes format rules: read `docs/RELEASING-macos.md` "Notes body format" + "Style rules"
 - CI draft flow: `grep -n 'draft:\|gen-changelog' .github/workflows/release.yml` and the owner guard in `.github/workflows/release-on-tag.yml`
 - Commit conventions + footer: `git log -8 --format=full`
-- Tag scheme + annotated-vs-lightweight: `git tag -l | tail -3; git cat-file -t v0.9`
+- Tag scheme + annotated-vs-lightweight: `git tag -l | sort -V | tail -3; git cat-file -t v0.10.2` (expect `tag` — v0.10.x are annotated; v0.9 itself is lightweight, `commit`)
 - Design-doc exemplar structure: `grep -n '^#' docs/dsp-jit-design.md`; roadmap header: `grep -n '| Phase | Status |' docs/dsp-jit-design.md`
 - dsp_jit defaults vs recommendation: `grep -n -A3 'dsp_jit:' config_spec.yml` and README `### Recommended xemu.toml`
 - Fork-authored docs inventory: `ls docs/dsp-jit-design.md docs/RELEASING-macos.md`

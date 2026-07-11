@@ -23,8 +23,8 @@ description: >-
 The fork's institutional memory of what did NOT work, what was reverted, what
 is fenced off, and what was proven not worth doing — so nobody re-fights a
 settled battle or silently re-attempts a fenced-off design. Every entry is
-grounded in the repo: `README.md` "Failed / reverted experiments" (~line 730
-as of 2026-07-04), commit messages, and dated measurements.
+grounded in the repo: `README.md` "Failed / reverted experiments" (~line 803
+as of 2026-07-11), commit messages, and dated measurements.
 
 Repo: `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`, branch
 `macos-optimizations`. Commit messages in this fork are unusually rich — for
@@ -693,7 +693,7 @@ crash (entry 2.2), and it measured SLOWER — 46.33 vs 48.50 fps — because
 encoding lands on the hot PFIFO thread.
 
 **Fix**: prefill = **0** in both `Info.plist` (~line 45, with explanatory
-comment) and `ui/xemu.c:1610` `setenv(..., 0)` — the no-overwrite main()
+comment) and `ui/xemu.c:1602-1606` `setenv(..., 0)` — the no-overwrite main()
 setenv gives launch-path parity so Finder, terminal, and harness launches run
 one configuration (`166999fc60`; build.sh also logs the bundled MoltenVK
 version+UUID to catch tested-vs-shipped driver drift). Validated on the
@@ -999,7 +999,8 @@ sub-flags did not — a user-facing interface changed by a refactor that
 **Lesson**: after any bulk rename, grep the diff for `getenv(`, config keys,
 and CLI strings — user-facing names are not symbols. (Merge-mediation rules
 themselves — naming, engine precedence via `dsp_want_external_jit_engine()`
-(the `config_spec.yml:339` comment still names a stale selector function) —
+(the `config_spec.yml:339` comment now names that selector correctly; its
+earlier stale wording was fixed — verified 2026-07-11) —
 live in `xemu-change-control`; the merge commit message documents them.)
 **Reopen if**: n/a.
 
@@ -1476,9 +1477,10 @@ Template:
 
 All facts verified against the repo on 2026-07-04 unless carrying an earlier
 date (those are recorded historical measurements — do not re-measure to cite
-them). Re-verification one-liners for drift-prone facts:
+them). README anchors and row counts below refreshed 2026-07-11 at
+`7e2e6e7256`. Re-verification one-liners for drift-prone facts:
 
-- README failed-experiments table (~line 730, ~27 rows):
+- README failed-experiments table (~line 803, 34 rows):
   `grep -n '^## Failed / reverted experiments' README.md`
 - Any hash here resolves:
   `git show --no-patch --format='%h %ad %s' --date=short <hash>`
@@ -1493,4 +1495,4 @@ them). Re-verification one-liners for drift-prone facts:
   `grep -rn 'XEMU_DSP_JIT_SENTINEL\|PIN_AUDIT' hw/xbox/mcpx/apu/dsp/`
 - Tags cited exist: `git tag -l v0.9 v0.8.153-macos.1`
 - Tag-immutability rule still documented: `grep -n 'delete' docs/RELEASING-macos.md`
-- Settled-negative Future vectors unchanged: `sed -n '766,853p' README.md`
+- Settled-negative Future vectors unchanged: `sed -n '846,1026p' README.md`

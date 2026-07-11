@@ -699,7 +699,12 @@ Notes: <anything that didn't fit the expected envelope, even if not blocking>
 ## Provenance and maintenance
 
 Every fact above was verified against `cf85e96597` (v0.9, 2026-07-04, tag
-`v0.9`). Re-verify before trusting this skill on a later commit:
+`v0.9`). Repo-state note, 2026-07-11 at `7e2e6e7256` (latest tag
+`v0.10.2`): the scene numbers here are v0.9-era history — the
+dispatch campaign has since moved the heavy anchor (F8 23.9 at v0.10 →
+31.4 fps @ 819 draws/flip, README roadmap ~line 852); re-run Phase 0
+before citing any figure as current. Re-verify before trusting this skill on a
+later commit:
 
 - draws/flip, passes/flip, fps, fence_wait envelope → re-run Phase 0; do
   not trust the numbers in this file past a few weeks of further

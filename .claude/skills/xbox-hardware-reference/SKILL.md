@@ -612,7 +612,7 @@ where this repo depends on each one.
   something that speeds up the first compile itself.
 - **Metal argument buffers.** `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`
   is one of the five MVK_CONFIG variables this fork pins at process start
-  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1610-1614`'s
+  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1602-1606`'s
   `setenv(..., 0)`) — it tells MoltenVK to bind Vulkan descriptor sets
   via Metal's argument-buffer feature (one indirectable buffer of
   resource references) instead of per-resource binding, changing how
@@ -694,7 +694,9 @@ them in.
 
 Facts in this skill were verified against the repo at commit `cf85e96597`
 (2026-07-04, tag v0.9) unless stated as historical measurements (dated
-separately, e.g. the 376→14 pass-count figures). Re-verify drift-prone
+separately, e.g. the 376→14 pass-count figures). The `ui/xemu.c` MVK
+setenv anchor (now `1602-1606`) was re-verified 2026-07-11 at
+`7e2e6e7256`. Re-verify drift-prone
 claims with:
 
 - CPU/RAM/machine class: `grep -n 'default_cpu_type\|max_cpus\|mem_limit' hw/xbox/xbox.c system/vl.c config_spec.yml`

@@ -191,15 +191,15 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 |---|---|---|---|
 | draws/flip | scene-dependent: menu ~3, attract-reel 350-390, heavy in-game 408-485 | — (this is identity, not pass/fail — see §0) | README "Changes"; historical session records |
 | passes/flip (`renderpass` per_flip) | ~14 | 376 | Apple GPUs are TBDR — every render pass is a full tile load/store, so pass count is a first-order cost. The 2026-07 in-pass-occlusion-queries + deferred-zpass-reports change (zpass = the guest's "how many pixels passed depth" report — see xbox-hardware-reference) cut per-query `vkCmdResetQueryPool` (illegal mid-pass, forcing pass teardown every query rotation) from 376→14 passes/flip on the savestate bench scene. |
-| `fence_wait` ms/flip | ~1-3.5 | 8 and up (measured as high as ~32 pre-fix) | Same change: fence wait fell 31.9→2.3 ms/flip. High fence-wait with low draws/flip usually means a sync-policy bug, not GPU load. |
+| `fence_wait` ms/flip | ~1-3.5 | 8 and up (measured as high as ~32 pre-fix) | Same change: fence wait fell to 2.2 ms/flip (`6bfbc22863` receipt) from a pre-fix worst of ~32. High fence-wait with low draws/flip usually means a sync-policy bug, not GPU load. |
 | `pipeline_gen` events | ≈0 once warm (async pipeline creation isn't worth building — this is rare enough already) | Nonzero bursts mid-session = compiling now = visible stutter | `pipeline_gen`'s `max=` field shows the worst single `vkCreateGraphicsPipelines` call: 164 ms measured cold (empty `pipeline_cache.bin`), ≤4 ms once `pipeline_cache.bin` is warm and persisted. |
 | First interval after a `loadvm` | — | Always transient — shader/pipeline gen and texture uploads spike right after a snapshot loads because everything looks "new" to the caches | Drop the first interval in any comparison; `nsprof_summarize.py` does this by default (`--drop-first 1`). |
 
 The 2026-07 occlusion/report rework's flagship figure: cite
 **38.57 ± 0.80 fps (+144%)** vs the 15.78 fps legacy baseline, per commit
-`6bfbc22863`'s protocol receipt (README prose rounds this change to
-35.6 fps / 2.25x — added in the same commit, never reconciled; the
-stale-doc item is owned by `xemu-docs-and-writing`). Which figure to cite
+`6bfbc22863`'s protocol receipt (the README originally said 35.6 fps /
+2.25x — written in the same commit; reconciled to the receipt numbers
+2026-07-11). Which figure to cite
 is `xemu-frontier-and-positioning` §3.5's claiming rule: the
 commit-message number carries the receipt — don't average the two or pick
 whichever sounds better.
@@ -692,9 +692,9 @@ any refactor touching the named files:
   `grep -n 'DSP56K_JIT_FB_' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h`
 - DSP JIT engine identity (fork ARM64 JIT vs. upstream Rust JIT):
   `head -5 hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
-- occlusion/report rework fps figures (README prose; the receipt-backed
-  38.57±0.80 primary figure is in the commit message):
-  `grep -n '35.6\|376\|31.9' README.md; git show -s --format='%B' 6bfbc22863 | grep -i 'fps\|144'`
+- occlusion/report rework fps figures (README and commit agree since
+  2026-07-11; both must show 38.57 ± 0.80 / +144%):
+  `grep -n '38.57\|376' README.md; git show -s --format='%B' 6bfbc22863 | grep -i 'fps\|144'`
 - byte-exact vertex refinement figures: `grep -n '5.4%\|93%\|7.6%' README.md`
 - pipeline-cache cold/warm figures: `grep -n '164 ms\|≤ 4 ms' README.md`
 - SDL scancode values: `grep -n 'SDL_SCANCODE_\(W\|A\|S\|D\|UP\|DOWN\|LEFT\|RIGHT\|SPACE\|KP_[1235]\|[LR]SHIFT\) =' macos-libs/arm64/opt/local/include/SDL3/SDL_scancode.h`

@@ -397,10 +397,11 @@ In-app Settings covers the main toggles.
   the error is surfaced. Emulated pads with no host binding report
   neutral input instead of aborting, which also enables
   topology-matched snapshot loading in automation.
-- **In-pass occlusion queries + deferred zpass reports (2.25x in
+- **In-pass occlusion queries + deferred zpass reports (2.4x in
   report-heavy scenes).** Two coupled changes, measured together on
-  a heavy in-game savestate: 15.8 → **35.6 fps**, render passes
-  **376 → 14 per flip**, fence waits 31.9 → 2.3 ms/flip. (1)
+  a heavy in-game savestate (3 interleaved pairs): 15.78 →
+  **38.57 ± 0.80 fps** (+144%), render passes **376 → 14 per
+  flip**, fence waits 2.2 ms/flip, 0 stalled finishes. (1)
   Per-query `vkCmdResetQueryPool` (illegal inside a render pass)
   tore the pass down on every query rotation — ~one full tile
   load/store per draw on Apple GPUs; the slot's query partition is
@@ -811,7 +812,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the ~6/flip conflict finishes with per-slot transient copies + remapped draw bindings. Faithfully implemented; **−2.09 fps, 6/6 pairs negative**: the title rewrites broad vertex ranges every frame, so the 64-entry/2 MiB table overflowed every frame (each overflow an all-slot drain, heavier than the waits it replaced) while the remap search ran 227 times/flip. The targeted submitted-slot wait remains the shipped design |
 | TB jump-cache enlargement (12→16 bits, 2026-07-05) | 93.4% hit at 15.8M lookups/s made capacity misses look like free money; measured **−1.10 fps, 4/6 pairs negative** — the 4096-entry (64 KiB) cache is L1-resident, and a 1 MiB cache pays a few ns on each of 14.8M *hits*/s to avoid ~500k walks. Target lookup *volume*, not cache geometry |
 | Eager report submit (`XEMU_REPORTS_EAGER=N`, 2026-07-04) | Submit the recording CB when its Nth zpass report is *requested*, front-running the guest's poll stall. Mean −0.08 fps (6 pairs, sign-inconsistent) with a +4% draws/flip composition shift. With the 300 µs idle budget the residual wait is GPU catch-up time — eager submission moves the submit without shrinking the wait |
-| Occlusion-rework intermediates: in-pass queries with synchronous drains; submit-on-idle per pending report | Both **regressed** vs the 15.8 fps baseline the rework started from (6.9 fps; ~11.2 fps at ~144 tiny submissions/flip). Query placement × report delivery is a policy *pair* — never evaluate piecewise (the shipped pair: 2.25x) |
+| Occlusion-rework intermediates: in-pass queries with synchronous drains; submit-on-idle per pending report | Both **regressed** vs the 15.8 fps baseline the rework started from (6.9 fps; ~11.2 fps at ~144 tiny submissions/flip). Query placement × report delivery is a policy *pair* — never evaluate piecewise (the shipped pair: 2.4x, +144%) |
 | Per-flight vertex-RAM mirrors | One 128 MiB host mirror per flight slot so in-flight slots read frozen data (cross-slot conflict waits structurally impossible). Measured ~**neutral** (an initial "-30%" read traced to an invalid baseline parked on a menu): the dominant cost was the *recording-CB* boundary-page conflict cascade, which mirrors can't address. Reverted — +128 MiB and delta complexity for no win. The salvage, byte-exact conflict refinement, shipped separately (+5.4% fps) |
 | `floatx80` union overlay on ARM64 | Layout incompatible with IEEE 64-bit — segfaults |
 | Voice register `__thread` cache | Stale data; Xbox HW mutates voice regs via DMA |

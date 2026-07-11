@@ -25,7 +25,9 @@ description: >
 
 Every knob in this fork lives on one of four axes. All facts below were
 verified against the tree on **2026-07-04** (branch `macos-optimizations`,
-v0.9 era); the final section gives one-line commands to re-derive each
+v0.9 era); env-var/spec counts, the `ui/xemu.c` setenv anchor, and MVK
+parity were re-verified 2026-07-11 at `7e2e6e7256`. The final section
+gives one-line commands to re-derive each
 table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
@@ -54,7 +56,7 @@ to Finder/`open` launches only.
 
 ### Generation chain (never hand-edit the generated header)
 
-`config_spec.yml` (repo root, 403 lines, the authoritative schema)
+`config_spec.yml` (repo root, 404 lines as of 2026-07-11, the authoritative schema)
 -> meson custom_target at `meson.build:3806-3809` runs
 `subprojects/genconfig/gen_config.py` -> generates `build/xemu-config.h`
 -> runtime access via `g_config.<path>`. The genconfig subproject is
@@ -178,8 +180,10 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of 2026-07-04 there are exactly **22** (grep in the Provenance
-section). **Every one is read once and latched in a static** — set it
+As of 2026-07-11 there are exactly **30 distinct variables** (the raw
+grep in the Provenance section prints 68 matching lines — several
+variables are read at more than one site). **Every one is read once and
+latched in a static** — set it
 before launch; changing the environment mid-run does nothing.
 
 Value-parse conventions: *truthy* = any non-empty value whose first
@@ -236,7 +240,7 @@ Five canonical values, set in **two places that must stay identical**:
 1. `Info.plist` `LSEnvironment` dict (repo root, lines 35-52; copied
    into the bundle by `build.sh:113`) — applied by LaunchServices to
    **Finder/`open` launches only**.
-2. `ui/xemu.c:1610-1614` in `main()`, `setenv(..., ..., 0)` before
+2. `ui/xemu.c:1602-1606` in `main()`, `setenv(..., ..., 0)` before
    MoltenVK is dlopen'd — covers terminal/harness launches.
    `overwrite=0` means an explicitly exported `MVK_CONFIG_*` in your
    shell **still wins** (and for Finder launches the LSEnvironment
@@ -369,7 +373,7 @@ explicit `x86_version` argument is present. Every build configures with
 
 1. Add key+value to `Info.plist` `LSEnvironment` (repo root; bundled
    by `build.sh:113`).
-2. Mirror it in the `ui/xemu.c` `main()` block (~line 1610) as
+2. Mirror it in the `ui/xemu.c` `main()` block (~line 1602) as
    `setenv("MVK_CONFIG_...", "...", 0)` — same value, overwrite=0,
    before any Vulkan/MoltenVK initialization.
 3. Until the mirrored build is the one under test, `export` the var in
@@ -426,7 +430,8 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 22 sites)
+# 1. Authoritative XEMU_* runtime env var list (expect 30 distinct
+#    variables across 68 getenv lines as of 2026-07-11)
 grep -rn 'getenv("XEMU_' --include='*.c' --include='*.cc' \
   --include='*.m' --include='*.mm' --include='*.inc' --include='*.h' . \
   | grep -v '^\./build/' | grep -v '^\./dist/'
@@ -435,7 +440,8 @@ grep -rn 'getenv("XEMU_' --include='*.c' --include='*.cc' \
 grep -n 'XEMU_ARM_CPU\|XEMU_PGO\|XEMU_CODESIGN\|XEMU_MOLTENVK_VERSION\|XEMU_VIS\|XEMU_STRIP\|x86_version' build.sh
 grep -n 'XEMU_MVK_MCPU\|MVK_PIN' scripts/build-moltenvk.sh
 
-# 3. MVK parity (all three must agree; README is the drift suspect)
+# 3. MVK parity (all three must agree; README fixed 2026-07-05 — any
+#    disagreement is new drift)
 grep -n 'MVK_CONFIG' ui/xemu.c Info.plist README.md
 
 # 4. Config generation chain + implicit defaults
@@ -451,12 +457,12 @@ grep -n -A 10 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c
 grep -n 'XEMU_DSP_JIT' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c
 
 # 7. Spot-check volatile single facts
-grep -n 'PREFILL' Info.plist ui/xemu.c README.md       # 0 in code, README may lag
+grep -n 'PREFILL' Info.plist ui/xemu.c README.md       # 0 in all three (README fixed 2026-07-05)
 grep -n 'max_queries_in_flight = ' hw/xbox/nv2a/pgraph/vk/reports.c   # 4096
 grep -n 'default_frames' audio/coreaudio.m             # 1024
 grep -n 'metalfx' ui/xemu-settings.cc                  # legacy-bool migration
 grep -n 'cache_shaders' -r hw/ ui/                     # GL-only gate
-wc -l config_spec.yml                                  # 403 as of 2026-07-04
+wc -l config_spec.yml                                  # 404 as of 2026-07-11
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong: the

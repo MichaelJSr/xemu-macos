@@ -223,9 +223,10 @@ from the user's launch path in environment.
    ```
    Expect the five canonical MVK_CONFIG_* values in both sources — the
    value table's home is `xemu-config-and-flags` Axis 3 (prefill=0 is the
-   load-bearing one). The README "MoltenVK runtime config" table's prefill
-   row is known-stale — drift item 1 in `xemu-docs-and-writing` §4; the
-   code and Info.plist are ground truth.
+   load-bearing one). The README "MoltenVK runtime config" table now
+   agrees (prefill `0`, fixed 2026-07-05; parity across all three homes
+   re-verified 2026-07-11) — the code and Info.plist remain ground truth
+   if they ever diverge again.
 3. When testing from a shell, check what your shell adds/overrides:
    ```sh
    env | grep -E 'MVK_CONFIG|XEMU_'
@@ -262,7 +263,8 @@ enabled the AGX visibility crash, and measured slower (46.33 vs 48.50 fps,
 
 ## Provenance and maintenance
 
-All claims verified 2026-07-04 at v0.9 (`cf85e96597`). Re-verify before
+All claims verified 2026-07-04 at v0.9 (`cf85e96597`); MVK three-home
+prefill parity re-verified 2026-07-11 at `7e2e6e7256`. Re-verify before
 trusting a row after major merges:
 
 - Env-flag inventory: `grep -rn 'getenv("XEMU_' --include='*.c' --include='*.m' hw/ ui/ audio/`
@@ -281,4 +283,4 @@ trusting a row after major merges:
 - README Troubleshooting rows (GLIB_SIZEOF, LC_RPATH, audio, Windows Vulkan): `sed -n '856,906p' README.md`
 - LC_RPATH strip in build: `grep -n -B2 -A3 'delete_rpath' build.sh`
 - Window-title version source: `grep -n 'xemu | v' ui/xemu.c && grep -n 'git describe' scripts/xemu-version.sh`
-- README MVK-table staleness (PREFILL=2 at ~line 720): `grep -n 'PREFILL' README.md` — if the README now says 0, delete the stale-doc note above.
+- README MVK-table parity (all three homes must read prefill 0): `grep -n 'PREFILL' README.md Info.plist ui/xemu.c` — agreed as of 2026-07-11; a reappearing `2` is new drift.
