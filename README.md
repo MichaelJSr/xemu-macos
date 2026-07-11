@@ -131,6 +131,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
+| `XEMU_PUSH_PRESENT` | *(DRAFT)* Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
+| `XEMU_PUSH_PRESENT_REFUTE` | *(DRAFT)* Debug: cross-check each pushed read against an immediate pull fetch (same `frame_seq` ⇒ identical texture/event/dims); prints `compared`/`mismatches` every ~5 s |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -538,6 +540,30 @@ In-app Settings covers the main toggles.
   selectable (`presentation_backend = 'opengl'`) and is the only
   path for the OpenGL NV2A renderer (switching renderer away from
   Vulkan under Metal prompts for a restart).
+- **Push-model present handoff** *(DRAFT — behind `XEMU_PUSH_PRESENT=1`,
+  default off; Metal backend, frame interpolation off; numbers
+  self-measured, pending the orchestrator's quiet-window verification)*.
+  The pull-model handoff above (`nv2a_get_present_frame`) costs a
+  guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
+  thread and blocks on `qemu_event_wait` until it answers, and that
+  handshake is also what *publishes* the frame — so the UI cannot skip an
+  unchanged frame without first paying for the round trip. Under the flag
+  the PFIFO thread composites and publishes the complete present tuple
+  (texture/IOSurface + retain, shared event + value, `frame_seq`, dims)
+  into a mutex-guarded slot at flip (`pgraph_vk_flip_stall`); the UI reads
+  it with **no kick and no wait** and skips re-compositing when `frame_seq`
+  is unchanged (the dedup the pull model structurally couldn't do). This
+  is a latency/jitter change, **not** an fps change — guest flip/vblank
+  timing is untouched. Self-measured on F5 (M2 Ultra, interleaved 3-pair
+  A/B, other agents' builds sharing the machine): the new `present_wait`
+  nsprof counter drops from **82 ms/interval across 601 UI-thread blocks
+  (single waits up to 79 ms) to 0** in steady state (a one-time ~25-wait
+  startup burst before the first publish, then the pull fallback never
+  fires); **flips/s identical** (48.0 vs 48.8, within the scene's own
+  38-60 range). The refuter (`XEMU_PUSH_PRESENT_REFUTE=1`) cross-checked
+  47,151 equal-`frame_seq` pushed-vs-pull reads over 65 s with **0
+  mismatches**. Startup / post-resize / GL / interpolation-on fall back to
+  the pull path unchanged.
 - **Async MetalFX via `MTLSharedEvent`** (Metal backend only). The
   three `waitUntilCompleted` stalls (spatial/temporal/interp,
   1-5 ms/frame on the PFIFO thread) are replaced by a monotonic
