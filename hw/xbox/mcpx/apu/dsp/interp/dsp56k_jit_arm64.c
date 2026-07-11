@@ -10005,6 +10005,19 @@ void dsp56k_jit_init(dsp_core_t *dsp)
  * both paths fire in the same process (test-dsp runs dsp_destroy
  * AND its atexit handler).
  */
+/*
+ * Test hook: cumulative count of translated-block executions for this
+ * core. The unit-test differential (tests/xbox/dsp) asserts this is
+ * non-zero in its JIT arm — without it, a translator that silently
+ * falls back to the interpreter on every block would false-green the
+ * interp-vs-JIT comparison. Not used on any hot path.
+ */
+uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp)
+{
+    const DspJitState *s = (const DspJitState *)dsp->jit_state;
+    return s ? s->blocks_executed : 0;
+}
+
 static void dsp56k_jit_print_stats(dsp_core_t *dsp)
 {
     DspJitState *s = (DspJitState *)dsp->jit_state;

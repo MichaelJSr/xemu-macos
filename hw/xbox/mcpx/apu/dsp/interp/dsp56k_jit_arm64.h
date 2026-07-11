@@ -66,6 +66,14 @@ bool dsp56k_jit_enabled(void);
 bool dsp56k_jit_diff_enabled(void);
 
 /*
+ * Test hook: cumulative translated-block executions for this core.
+ * Lets the tests/xbox/dsp differential assert its JIT arm actually
+ * engaged the translator (a fallback-everywhere run would otherwise
+ * false-green the comparison). 0 when the JIT never ran.
+ */
+uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp);
+
+/*
  * Sentinel (debug / bisect) harness for the deferred round-4
  * cur_inst skip optimization. XEMU_DSP_JIT_SENTINEL=1 re-applies
  * the skip but substitutes DSP56K_JIT_SENTINEL_POISON (0x00adbeef)
@@ -368,6 +376,9 @@ static inline void dsp56k_jit_invalidate_all(dsp_core_t *dsp) { (void)dsp; }
 static inline bool dsp56k_jit_enabled(void) { return false; }
 static inline bool dsp56k_jit_diff_enabled(void) { return false; }
 static inline void dsp56k_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
+static inline uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp) {
+    (void)dsp; return 0;
+}
 
 #endif  /* DSP56K_JIT_SUPPORTED */
 
