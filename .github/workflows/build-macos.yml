@@ -82,6 +82,28 @@ jobs:
         fi
     - name: Compile
       run: ./build.sh -a ${{ matrix.arch }} ${XEMU_BUILD_OPTIONS}
+    - name: Run xbox test suite
+      # arm64 legs only: macos-15 runners are arm64-native, so only the
+      # arm64 build's test binaries execute natively (the x86_64 leg is a
+      # cross-build), and the DSP JIT differential arms are aarch64-only
+      # anyway (DSP56K_JIT_SUPPORTED). Covers: the restored DSP unit test,
+      # the swizzle round-trip, the interpreter golden corpus, and the
+      # three inline-JIT differential arms (goldens-through-JIT with an
+      # engagement assert, in-engine per-block bit-exact DIFF, and the
+      # cross-process final-state byte compare). Runs in seconds; no game
+      # content. `ninja test-xbox` builds exactly the xbox test
+      # executables; --no-rebuild stops meson from building the rest of
+      # the QEMU test universe.
+      #
+      # The Linux legs could run the same suite (the tests are portable;
+      # the ubuntu-*-arm runner would even exercise the JIT arms), but
+      # that build goes through dpkg-buildpackage with no accessible
+      # meson build directory — wiring it is a separate change.
+      if: matrix.arch == 'arm64'
+      run: |
+        cd build
+        ninja test-xbox
+        ./pyvenv/bin/meson test --suite xbox --print-errorlogs --no-rebuild
     - name: Report ccache stats
       run: ccache -s
     - name: Package

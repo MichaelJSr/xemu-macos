@@ -478,11 +478,21 @@ static void test_corpus_prog(gconstpointer arg)
     /*
      * In the JIT arm, prove the translator actually ran translated
      * blocks — otherwise a translator that bails out of everything
-     * would pass the goldens on pure interpreter fallback.
+     * would pass the goldens on pure interpreter fallback. On
+     * hardened kernels (SELinux deny_execmem / PaX) the RWX code
+     * buffer mmap is refused and dsp56k_jit_init leaves jit_state
+     * NULL — engine policy is interpreter fallback, so skip the
+     * engagement assert rather than false-fail such hosts.
      */
     if (dsp56k_jit_enabled()) {
         dsp_core_t *core = (dsp_core_t *)s->backend;
-        g_assert_cmpuint(dsp56k_jit_blocks_executed(core), >, 0);
+        if (core->jit_state == NULL) {
+            g_test_message("JIT enabled but code buffer unavailable on this "
+                           "host (RWX mmap refused?); engagement assert "
+                           "skipped");
+        } else {
+            g_assert_cmpuint(dsp56k_jit_blocks_executed(core), >, 0);
+        }
     }
 #endif
 
@@ -598,8 +608,10 @@ static GBytes *run_arm(const char *prog_name, const char *jit_value)
                                     NULL, NULL, NULL, NULL, &wstatus, &err);
     g_assert_no_error(err);
     g_assert_true(spawned);
-    g_assert_true(g_spawn_check_wait_status(wstatus, &err));
-    g_assert_no_error(err);
+    /* Clean exit(0) has wait-status 0 on both POSIX and Windows;
+     * avoids g_spawn_check_wait_status (glib >= 2.70, above QEMU's
+     * supported floor). */
+    g_assert_cmpint(wstatus, ==, 0);
     g_strfreev(envp);
 
     gchar *contents = NULL;
@@ -635,21 +647,23 @@ static void test_jit_differential(gconstpointer arg)
                 shown++;
             }
         }
-        g_test_fail_printf(
-            "interpreter and JIT final DspCoreState differ for '%s'",
-            tp->name);
+        g_test_message("interpreter and JIT final DspCoreState differ "
+                       "for '%s'", tp->name);
+        g_test_fail();
     }
 
     g_bytes_unref(interp);
     g_bytes_unref(jit);
 }
-#endif /* DSP56K_JIT_SUPPORTED */
+#else  /* !DSP56K_JIT_SUPPORTED */
 
 static void test_jit_differential_unsupported(gconstpointer arg)
 {
     (void)arg;
     g_test_skip("DSP56K JIT not supported on this host (aarch64 POSIX only)");
 }
+
+#endif /* DSP56K_JIT_SUPPORTED */
 
 int main(int argc, char **argv)
 {
