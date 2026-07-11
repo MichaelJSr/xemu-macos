@@ -1660,8 +1660,32 @@ static void gen_movi_f64(DisasContext *s, TCGv_f64 ret, double arg)
     tcg_gen_mov64i_f64(ret, tcg_constant_i64(*(uint64_t *)&arg));
 }
 
+#if defined(XBOX)
+/*
+ * XEMU_INV_PROF (d): cheap translate-time census counters (defined in
+ * accel/tcg/tb-maint.c). Declared here in the fork's function-local extern
+ * idiom because the private header lives in the accel/tcg source dir, not on
+ * the target/ include path.
+ */
+extern bool xemu_inv_prof_on(void);
+extern uint64_t xemu_inv_flcr_emitted;
+extern uint64_t xemu_inv_flcr_skip;
+extern uint64_t xemu_inv_gototb_emitted;
+extern uint64_t xemu_inv_jcprobe_emitted;
+extern uint64_t xemu_inv_retmemo_emitted;
+#endif
+
 static void gen_flcr(DisasContext *s)
 {
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        if (s->flcr_set) {
+            xemu_inv_flcr_skip++;
+        } else {
+            xemu_inv_flcr_emitted++;
+        }
+    }
+#endif
     if (s->flcr_set) {
         return;
     }
@@ -3045,6 +3069,13 @@ gen_eob(DisasContext *s, int mode)
                /* give irqs a chance to happen */
                !inhibit_reset) {
 #if defined(XBOX)
+        if (unlikely(xemu_inv_prof_on())) {
+            if (s->xemu_ret_exit) {
+                xemu_inv_retmemo_emitted++;
+            } else {
+                xemu_inv_jcprobe_emitted++;
+            }
+        }
         if (s->xemu_ret_exit) {
             s->xemu_ret_exit = false;
             if (xemu_ras_inline_on() &&
@@ -3117,6 +3148,11 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
 
     if (use_goto_tb && translator_use_goto_tb(&s->base, new_pc)) {
         /* jump to same page: we can use a direct jump */
+#if defined(XBOX)
+        if (unlikely(xemu_inv_prof_on())) {
+            xemu_inv_gototb_emitted++;
+        }
+#endif
         tcg_gen_goto_tb(tb_num);
         if (!(tb_cflags(s->base.tb) & CF_PCREL)) {
             tcg_gen_movi_tl(cpu_eip, new_eip);

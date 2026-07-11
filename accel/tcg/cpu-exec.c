@@ -232,6 +232,21 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
     return tb_htable_lookup_common(cpu, s, &tb_ctx.inv_htable, inv_tb_lookup_cmp);
 }
 
+#if defined(XBOX)
+/*
+ * XEMU_INV_PROF (c): classify a recycle miss. inv_tb_htable_lookup failed;
+ * this repeats the lookup WITHOUT the ihash byte comparator. A hit here means
+ * an invalidated TB with identical pc/cs_base/flags/cflags exists but its code
+ * bytes changed -> genuine SMC. A miss means no invalidated peer -> cold/fresh
+ * code. Counting-only; used off the fresh-translation (slow) path.
+ */
+TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(CPUState *cpu,
+                                                      TCGTBCPUState s)
+{
+    return tb_htable_lookup_common(cpu, s, &tb_ctx.inv_htable, tb_lookup_cmp);
+}
+#endif
+
 /**
  * tb_lookup:
  * @cpu: CPU that will execute the returned translation block

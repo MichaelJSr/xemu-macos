@@ -41,6 +41,103 @@
 #include "system/runstate.h"
 #endif
 #include "trace.h"
+#include "xemu-inv-prof.h"
+
+#if defined(XBOX)
+/*
+ * XEMU_INV_PROF=1: SMC / TB-invalidation-churn counters. See
+ * xemu-inv-prof.h for the model (plain uint64, single vCPU writer, exit
+ * dump). Definitions live here because tb-maint.c owns the invalidation
+ * paths; the recycle (c) and census (d) sites reference these externs.
+ */
+int xemu_inv_cur_src;
+
+uint64_t xemu_inv_total;
+uint64_t xemu_inv_by_src[XEMU_INV_SRC_MAX];
+
+uint64_t xemu_inv_range_evals;
+uint64_t xemu_inv_false_share;
+
+uint64_t xemu_inv_recycle_attempts;
+uint64_t xemu_inv_recycle_hits;
+uint64_t xemu_inv_recycle_true_smc;
+uint64_t xemu_inv_recycle_cold;
+
+uint64_t xemu_inv_flcr_emitted;
+uint64_t xemu_inv_flcr_skip;
+uint64_t xemu_inv_gototb_emitted;
+uint64_t xemu_inv_jcprobe_emitted;
+uint64_t xemu_inv_retmemo_emitted;
+
+static void xemu_inv_prof_dump(void)
+{
+    uint64_t t = xemu_inv_total;
+    uint64_t re = xemu_inv_range_evals;
+    uint64_t rec_seen = xemu_inv_recycle_hits + xemu_inv_recycle_true_smc;
+    uint64_t exits = xemu_inv_gototb_emitted + xemu_inv_jcprobe_emitted +
+                     xemu_inv_retmemo_emitted;
+    uint64_t flcr = xemu_inv_flcr_emitted + xemu_inv_flcr_skip;
+
+    fprintf(stderr, "xemu: INV_PROF summary (tb_flush=%u)\n",
+            qatomic_read(&tb_ctx.tb_flush_count));
+
+    fprintf(stderr,
+            "xemu:  (a) invalidations total=%llu  notdirty=%llu (%.1f%%)  "
+            "explicit=%llu (%.1f%%)  single=%llu (%.1f%%)  other=%llu (%.1f%%)\n",
+            (unsigned long long)t,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_NOTDIRTY],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_NOTDIRTY] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_EXPLICIT],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_EXPLICIT] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_SINGLE],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_SINGLE] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_OTHER],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_OTHER] / t : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (b) whole-page range_evals=%llu  false_share=%llu "
+            "(%.1f%% would be skipped by byte-range check)\n",
+            (unsigned long long)re,
+            (unsigned long long)xemu_inv_false_share,
+            re ? 100.0 * xemu_inv_false_share / re : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (c) recycle attempts=%llu  hits=%llu  true_smc=%llu  "
+            "cold=%llu  |  hit-rate-on-invalidated-set=%.1f%%\n",
+            (unsigned long long)xemu_inv_recycle_attempts,
+            (unsigned long long)xemu_inv_recycle_hits,
+            (unsigned long long)xemu_inv_recycle_true_smc,
+            (unsigned long long)xemu_inv_recycle_cold,
+            rec_seen ? 100.0 * xemu_inv_recycle_hits / rec_seen : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (d) flcr emitted=%llu skip=%llu (%.1f%% compile-skipped)  "
+            "exits: goto_tb=%llu (%.1f%%) jc_probe=%llu (%.1f%%) "
+            "ret_memo=%llu (%.1f%%)\n",
+            (unsigned long long)xemu_inv_flcr_emitted,
+            (unsigned long long)xemu_inv_flcr_skip,
+            flcr ? 100.0 * xemu_inv_flcr_skip / flcr : 0.0,
+            (unsigned long long)xemu_inv_gototb_emitted,
+            exits ? 100.0 * xemu_inv_gototb_emitted / exits : 0.0,
+            (unsigned long long)xemu_inv_jcprobe_emitted,
+            exits ? 100.0 * xemu_inv_jcprobe_emitted / exits : 0.0,
+            (unsigned long long)xemu_inv_retmemo_emitted,
+            exits ? 100.0 * xemu_inv_retmemo_emitted / exits : 0.0);
+}
+
+bool xemu_inv_prof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_INV_PROF");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on) {
+            atexit(xemu_inv_prof_dump);
+        }
+    }
+    return on;
+}
+#endif /* XBOX */
 
 /* List iterators for lists of tagged pointers in TranslationBlock. */
 #define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
@@ -968,6 +1065,13 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
 
     qatomic_set(&tb_ctx.tb_phys_invalidate_count,
                 tb_ctx.tb_phys_invalidate_count + 1);
+
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_total++;
+        xemu_inv_by_src[xemu_inv_cur_src]++;
+    }
+#endif
 }
 
 static void tb_phys_invalidate__locked(TranslationBlock *tb)
@@ -996,6 +1100,11 @@ static void tb_phys_invalidate__locked(TranslationBlock *tb)
  */
 void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
 {
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_SINGLE;
+    }
+#endif
     if (page_addr == -1 && tb_page_addr0(tb) != -1) {
         tb_lock_pages(tb);
         do_tb_phys_invalidate(tb, true);
@@ -1172,6 +1281,25 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
         if (!(tb_last < start || tb_start > last)) {
 #else
         {
+            /*
+             * (b) Would the upstream byte-range overlap check have skipped
+             * this TB? Recompute it in counting mode only — the XBOX path
+             * still invalidates unconditionally, so this is behavior-neutral.
+             */
+            if (unlikely(xemu_inv_prof_on())) {
+                tb_page_addr_t chk_start = tb_page_addr0(tb);
+                tb_page_addr_t chk_last = chk_start + tb->size - 1;
+                if (n == 0) {
+                    chk_last = MIN(chk_last, chk_start | ~TARGET_PAGE_MASK);
+                } else {
+                    chk_start = tb_page_addr1(tb);
+                    chk_last = chk_start + (chk_last & ~TARGET_PAGE_MASK);
+                }
+                xemu_inv_range_evals++;
+                if (chk_last < start || chk_start > last) {
+                    xemu_inv_false_share++;
+                }
+            }
 #endif
             if (unlikely(current_tb == tb) &&
                 (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
@@ -1215,6 +1343,12 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
     struct page_collection *pages;
     tb_page_addr_t index, index_last;
 
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_EXPLICIT;
+    }
+#endif
+
     pages = page_collection_lock(start, last);
 
     index_last = last >> TARGET_PAGE_BITS;
@@ -1244,6 +1378,12 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
                                    unsigned len, uintptr_t ra)
 {
     PageDesc *p = page_find(start >> TARGET_PAGE_BITS);
+
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_NOTDIRTY;
+    }
+#endif
 
     if (p) {
         ram_addr_t last = start + len - 1;

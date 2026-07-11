@@ -36,6 +36,7 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
+#include "xemu-inv-prof.h"
 #include "tcg/perf.h"
 #include "tcg/insn-start-words.h"
 
@@ -291,6 +292,20 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
 
     tb = inv_tb_htable_lookup(cpu, s);
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        extern TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(
+            CPUState *cpu, TCGTBCPUState s);
+        xemu_inv_recycle_attempts++;
+        if (tb) {
+            xemu_inv_recycle_hits++;
+        } else if (xemu_inv_htable_lookup_ignore_bytes(cpu, s)) {
+            xemu_inv_recycle_true_smc++;
+        } else {
+            xemu_inv_recycle_cold++;
+        }
+    }
+#endif
     if (tb) {
         qemu_spin_lock(&tb->jmp_lock);
         qatomic_set(&tb->cflags, tb->cflags & ~CF_INVALID);
