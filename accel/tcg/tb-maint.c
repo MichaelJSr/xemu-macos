@@ -58,6 +58,9 @@ uint64_t xemu_inv_by_src[XEMU_INV_SRC_MAX];
 uint64_t xemu_inv_range_evals;
 uint64_t xemu_inv_false_share;
 
+uint64_t xemu_inv_traps;      /* notdirty writes that reached a code page */
+uint64_t xemu_inv_unprotect;  /* pages emptied of TBs -> tlb_unprotect_code */
+
 uint64_t xemu_inv_recycle_attempts;
 uint64_t xemu_inv_recycle_hits;
 uint64_t xemu_inv_recycle_true_smc;
@@ -102,6 +105,14 @@ static void xemu_inv_prof_dump(void)
             re ? 100.0 * xemu_inv_false_share / re : 0.0);
 
     fprintf(stderr,
+            "xemu:  (b') notdirty traps(code page)=%llu  unprotect(page emptied)"
+            "=%llu  invals/trap=%.2f  |  RANGE_INV=%d\n",
+            (unsigned long long)xemu_inv_traps,
+            (unsigned long long)xemu_inv_unprotect,
+            xemu_inv_traps ? (double)xemu_inv_total / xemu_inv_traps : 0.0,
+            xemu_tb_range_inv_on() ? 1 : 0);
+
+    fprintf(stderr,
             "xemu:  (c) recycle attempts=%llu  hits=%llu  true_smc=%llu  "
             "cold=%llu  |  hit-rate-on-invalidated-set=%.1f%%\n",
             (unsigned long long)xemu_inv_recycle_attempts,
@@ -134,6 +145,16 @@ bool xemu_inv_prof_on(void)
         if (on) {
             atexit(xemu_inv_prof_dump);
         }
+    }
+    return on;
+}
+
+bool xemu_tb_range_inv_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_TB_RANGE_INV");
+        on = (e && e[0] == '1') ? 1 : 0;
     }
     return on;
 }
@@ -1280,45 +1301,64 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
         }
         if (!(tb_last < start || tb_start > last)) {
 #else
+        /*
+         * XBOX default (6ea11938b2e) invalidates every TB on the page with
+         * no byte-range overlap check. XEMU_INV_PROF measures the false
+         * (non-overlapping) share; XEMU_TB_RANGE_INV=1 re-applies the exact
+         * upstream overlap filter at runtime for A/B. A TB whose bytes were
+         * not written cannot have been modified, so filtering invalidates a
+         * correct subset and never misses a needed invalidation.
+         */
         {
-            /*
-             * (b) Would the upstream byte-range overlap check have skipped
-             * this TB? Recompute it in counting mode only — the XBOX path
-             * still invalidates unconditionally, so this is behavior-neutral.
-             */
-            if (unlikely(xemu_inv_prof_on())) {
+            bool xemu_skip_inval = false;
+            if (unlikely(xemu_inv_prof_on()) || xemu_tb_range_inv_on()) {
                 tb_page_addr_t chk_start = tb_page_addr0(tb);
                 tb_page_addr_t chk_last = chk_start + tb->size - 1;
+                bool xemu_overlap;
                 if (n == 0) {
                     chk_last = MIN(chk_last, chk_start | ~TARGET_PAGE_MASK);
                 } else {
                     chk_start = tb_page_addr1(tb);
                     chk_last = chk_start + (chk_last & ~TARGET_PAGE_MASK);
                 }
-                xemu_inv_range_evals++;
-                if (chk_last < start || chk_start > last) {
-                    xemu_inv_false_share++;
+                xemu_overlap = !(chk_last < start || chk_start > last);
+                if (unlikely(xemu_inv_prof_on())) {
+                    xemu_inv_range_evals++;
+                    if (!xemu_overlap) {
+                        xemu_inv_false_share++;
+                    }
+                }
+                if (xemu_tb_range_inv_on() && !xemu_overlap) {
+                    xemu_skip_inval = true;
                 }
             }
+            if (!xemu_skip_inval)
 #endif
-            if (unlikely(current_tb == tb) &&
-                (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
-                /*
-                 * If we are modifying the current TB, we must stop
-                 * its execution. We could be more precise by checking
-                 * that the modification is after the current PC, but it
-                 * would require a specialized function to partially
-                 * restore the CPU state.
-                 */
-                current_tb_modified = true;
-                cpu_restore_state_from_tb(cpu, current_tb, retaddr);
+            {
+                if (unlikely(current_tb == tb) &&
+                    (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
+                    /*
+                     * If we are modifying the current TB, we must stop
+                     * its execution. We could be more precise by checking
+                     * that the modification is after the current PC, but it
+                     * would require a specialized function to partially
+                     * restore the CPU state.
+                     */
+                    current_tb_modified = true;
+                    cpu_restore_state_from_tb(cpu, current_tb, retaddr);
+                }
+                tb_phys_invalidate__locked(tb);
             }
-            tb_phys_invalidate__locked(tb);
         }
     }
 
     /* if no code remaining, no need to continue to use slow writes */
     if (!p->first_tb) {
+#if defined(XBOX)
+        if (unlikely(xemu_inv_prof_on())) {
+            xemu_inv_unprotect++;
+        }
+#endif
         tlb_unprotect_code(start);
     }
 
@@ -1382,6 +1422,10 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
 #if defined(XBOX)
     if (unlikely(xemu_inv_prof_on())) {
         xemu_inv_cur_src = XEMU_INV_SRC_NOTDIRTY;
+        if (p) {
+            /* A notdirty write that reached a code-bearing page = one trap. */
+            xemu_inv_traps++;
+        }
     }
 #endif
 

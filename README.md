@@ -127,6 +127,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
+| `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time FPU/exit census |
+| `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
@@ -881,19 +883,26 @@ expected value against real effort/risk, with the receipts that aimed
 it. Instruments to re-run before starting any of these:
 `XEMU_GUEST_PROF=1` (sampler + exit-kind census) and `XEMU_TB_PROF=1`.
 
-1. **SMC / TB-invalidation churn** (days; instrument-first).
-   NEW finding from the final profile: `do_tb_phys_invalidate` in the
-   top-25, ~70k/s lookups returning NULL (the "translate" residual —
-   6.8M per 95 s run at tb_flush=1, which cannot all be fresh code),
-   and TLB/dirty-tracking costs (`tlb_set_page_with_attrs` 2.3%,
-   `physical_memory_test_and_clear_dirty` 2.0%) consistent with
-   write-churn on code pages. The tree already carries an
-   invalidated-TB recycling mechanism (`tb->ihash` /
-   `inv_tb_htable_lookup`) — first step is counting its hit rate and
-   classifying the invalidation sources (true SMC vs data writes
-   false-sharing code pages; the latter has a known cure class:
-   sub-page invalidate granularity). Ceiling unknown until counted;
-   the symptoms bound it at several % of the thread.
+1. **SMC / TB-invalidation churn** (INSTRUMENTED 2026-07-11; cure dark
+   pending A/B). `XEMU_INV_PROF` (default-off exit counters) settled the
+   classification: on both F8 and F5 savestate scenes **100% of TB
+   invalidations are guest data writes to code pages (notdirty),
+   100% hit TBs whose bytes do not overlap the write, and 0 are genuine
+   SMC** — inv-htable recycle hit-rate is 100% (true_smc=0). So the
+   `do_tb_phys_invalidate` churn (top-25) is pure false-sharing: the
+   Xbox whole-page invalidation (`6ea11938b2e`, no byte-range check)
+   nukes every TB on a written code page, which then recycle unchanged.
+   Cure implemented behind `XEMU_TB_RANGE_INV=1` (default off): re-apply
+   upstream's exact per-TB byte-range overlap filter (correctness-safe —
+   invalidates a correct subset, never misses). The one tradeoff the
+   counters flag: the filter keeps the page write-protected (baseline
+   `unprotect/trap ≈ 1.0` — the whole-page nuke currently unprotects on
+   nearly every trap, so writes go fast until code re-runs), so the
+   net turns on the notdirty-trap-frequency change — the interleaved A/B
+   (`scripts/bench-savestate-ab.sh <snap> XEMU_TB_RANGE_INV`) decides.
+   A higher-ceiling / lower-margin alternative (sub-page dirty tracking,
+   which stops the non-code write from trapping at all) is sketched but
+   parked pending a correctness review (shared dirty-bitmap race class).
 2. **Cross-page direct chaining, Xbox-relaxed** (a week; risky).
    The "other" 43% of the exit census is dominated by cross-page
    direct jumps that pay the ~20-op inline probe today. Upstream

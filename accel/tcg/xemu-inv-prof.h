@@ -35,6 +35,15 @@ enum {
 /* Latched enable check; also arms the atexit dump on first true. */
 bool xemu_inv_prof_on(void);
 
+/*
+ * XEMU_TB_RANGE_INV=1 (default off): re-apply the exact upstream byte-range
+ * overlap filter inside the XBOX whole-page invalidation, so only TBs whose
+ * bytes actually overlap the written range are invalidated. Correctness-safe
+ * (a TB whose bytes were not written cannot have been modified); runtime-gated
+ * so it can be A/B'd against the default whole-page behavior on one binary.
+ */
+bool xemu_tb_range_inv_on(void);
+
 /* Current invalidation source, set by the entry points, read in
  * do_tb_phys_invalidate. Single vCPU thread, so a plain global is safe. */
 extern int xemu_inv_cur_src;
@@ -46,6 +55,10 @@ extern uint64_t xemu_inv_by_src[XEMU_INV_SRC_MAX];
 /* (b) range-check-would-have-saved-it */
 extern uint64_t xemu_inv_range_evals;   /* overlap tests evaluated (cost proxy) */
 extern uint64_t xemu_inv_false_share;    /* invalidations that did NOT overlap */
+
+/* (b') trap-frequency (the tlb_unprotect_code tradeoff of the range filter) */
+extern uint64_t xemu_inv_traps;          /* notdirty writes reaching a code page */
+extern uint64_t xemu_inv_unprotect;      /* pages emptied of TBs -> unprotected */
 
 /* (c) recycling */
 extern uint64_t xemu_inv_recycle_attempts;  /* inv_tb_htable_lookup calls */
