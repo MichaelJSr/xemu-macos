@@ -497,6 +497,37 @@ typedef struct PGRAPHVkDisplayState {
 
     SurfaceBinding *last_descriptor_surface;
     bool last_descriptor_pvideo;
+
+#if HAVE_IOSURFACE_SHARING
+    /*
+     * Push-model present handoff (XEMU_PUSH_PRESENT). The PFIFO thread
+     * mirrors the freshly-published present_* tuple into this slot at
+     * flip (pgraph_vk_present_slot_write); the UI present thread reads
+     * it (pgraph_vk_present_slot_read) with no cross-thread sync round
+     * trip.
+     *
+     * present_slot_lock is a plain mutex, deliberately NOT a seqlock:
+     * the handles are reference counted, and a lock-free reader cannot
+     * CFRetain a pointer the writer may be concurrently CFReleasing
+     * (retain-after-free). The lock bounds the writer's release and the
+     * reader's retain into mutually-exclusive O(1) critical sections (a
+     * few CFRetain/CFRelease + field copies, no GPU work, no nested
+     * blocking wait), so it removes the round trip without reintroducing
+     * one. The slot owns its own CFRetain on the current handle (valid
+     * until the next publish overwrites it — the same discipline the
+     * pull handoff uses); the reader CFRetains under the lock so the
+     * handle provably survives past the next publish.
+     */
+    QemuMutex present_slot_lock;
+    bool present_slot_valid;
+    void *slot_iosurface;   // IOSurfaceRef, retained by the slot
+    void *slot_mtl_texture; // id<MTLTexture>, retained by the slot
+    void *slot_event;       // id<MTLSharedEvent>, borrowed (sticky)
+    uint64_t slot_event_value;
+    uint64_t slot_frame_seq;
+    uint64_t slot_duration_ns;
+    int slot_width, slot_height;
+#endif
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {
@@ -1066,6 +1097,13 @@ void pgraph_vk_dispatch_yuv_to_rgba(PGRAPHState *pg, VkCommandBuffer cmd,
 void pgraph_vk_init_display(PGRAPHState *pg);
 void pgraph_vk_finalize_display(PGRAPHState *pg);
 void pgraph_vk_render_display(PGRAPHState *pg);
+#if HAVE_IOSURFACE_SHARING
+/* Push-model present (XEMU_PUSH_PRESENT); Metal backend only. */
+bool pgraph_vk_push_present_enabled(NV2AState *d);
+void pgraph_vk_present_slot_write(PGRAPHState *pg);
+bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame);
+void pgraph_vk_present_slot_invalidate(PGRAPHState *pg);
+#endif
 
 // texture.c
 void pgraph_vk_init_textures(PGRAPHState *pg);

@@ -87,6 +87,128 @@ static void display_set_present_texture(PGRAPHVkDisplayState *disp,
     disp->present_frame_seq++;
     disp->present_duration_ns = 0;
 }
+
+/*
+ * Push-model present handoff (XEMU_PUSH_PRESENT). See the slot comment
+ * in renderer.h (PGRAPHVkDisplayState) for the lifetime contract.
+ */
+bool pgraph_vk_push_present_enabled(NV2AState *d)
+{
+    static int cached_env = -1;
+    if (cached_env < 0) {
+        const char *e = getenv("XEMU_PUSH_PRESENT");
+        cached_env = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (!cached_env) {
+        return false;
+    }
+    if (!xemu_present_is_metal()) {
+        return false;
+    }
+    /*
+     * Frame interpolation paces sub-flip present steps that only the
+     * pull cadence drives; publishing once per flip would silently
+     * disable it. Fall back to pull whenever interpolation is on. (Test
+     * against the two "on" values so we don't depend on the generated
+     * name of the "off" enumerator.)
+     */
+    if (g_config.display.frame_interpolation ==
+            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X ||
+        g_config.display.frame_interpolation ==
+            CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
+        return false;
+    }
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    return r && r->metal_objects_extension_enabled;
+}
+
+/* Writer (PFIFO thread): mirror the just-published present_* tuple into
+ * the slot, taking the slot's own CFRetain on the current handle and
+ * dropping the previous one. */
+void pgraph_vk_present_slot_write(PGRAPHState *pg)
+{
+    PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
+
+    qemu_mutex_lock(&disp->present_slot_lock);
+    if (disp->slot_mtl_texture) {
+        CFRelease(disp->slot_mtl_texture);
+        disp->slot_mtl_texture = NULL;
+    }
+    if (disp->slot_iosurface) {
+        CFRelease((IOSurfaceRef)disp->slot_iosurface);
+        disp->slot_iosurface = NULL;
+    }
+    if (disp->present_mtl_texture) {
+        disp->slot_mtl_texture = (void *)CFRetain(disp->present_mtl_texture);
+    } else if (disp->present_iosurface) {
+        disp->slot_iosurface =
+            (void *)CFRetain((IOSurfaceRef)disp->present_iosurface);
+    }
+    disp->slot_event = disp->present_event; /* borrowed / sticky */
+    disp->slot_event_value = disp->present_event_value;
+    disp->slot_frame_seq = disp->present_frame_seq;
+    disp->slot_duration_ns = disp->present_duration_ns;
+    disp->slot_width = disp->present_width;
+    disp->slot_height = disp->present_height;
+    disp->present_slot_valid =
+        disp->slot_mtl_texture != NULL || disp->slot_iosurface != NULL;
+    qemu_mutex_unlock(&disp->present_slot_lock);
+}
+
+/* Reader (UI present thread): copy the slot into `frame`, taking a fresh
+ * CFRetain on the handle so it outlives the next publish. Returns false
+ * (UI falls back to pull) when nothing valid is published yet. */
+bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame)
+{
+    PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
+    bool ok = false;
+
+    qemu_mutex_lock(&disp->present_slot_lock);
+    if (disp->present_slot_valid) {
+        if (disp->slot_mtl_texture) {
+            frame->mtl_texture = (void *)CFRetain(disp->slot_mtl_texture);
+        } else if (disp->slot_iosurface) {
+            frame->iosurface =
+                (void *)CFRetain((IOSurfaceRef)disp->slot_iosurface);
+        }
+        frame->event = disp->slot_event;
+        frame->event_value = disp->slot_event_value;
+        frame->frame_seq = disp->slot_frame_seq;
+        frame->display_duration_ns = disp->slot_duration_ns;
+        frame->width = disp->slot_width;
+        frame->height = disp->slot_height;
+        ok = frame->mtl_texture != NULL || frame->iosurface != NULL;
+    }
+    qemu_mutex_unlock(&disp->present_slot_lock);
+    return ok;
+}
+
+/* Drop the published frame: called wherever interpolation state is
+ * dropped (resize via destroy_current_display_image, renderer teardown
+ * via finalize). frame_seq resets to 0 so the UI falls back to pull
+ * until the next flip republishes. */
+void pgraph_vk_present_slot_invalidate(PGRAPHState *pg)
+{
+    PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
+
+    qemu_mutex_lock(&disp->present_slot_lock);
+    if (disp->slot_mtl_texture) {
+        CFRelease(disp->slot_mtl_texture);
+        disp->slot_mtl_texture = NULL;
+    }
+    if (disp->slot_iosurface) {
+        CFRelease((IOSurfaceRef)disp->slot_iosurface);
+        disp->slot_iosurface = NULL;
+    }
+    disp->slot_event = NULL;
+    disp->slot_event_value = 0;
+    disp->slot_frame_seq = 0;
+    disp->slot_duration_ns = 0;
+    disp->slot_width = 0;
+    disp->slot_height = 0;
+    disp->present_slot_valid = false;
+    qemu_mutex_unlock(&disp->present_slot_lock);
+}
 #endif
 
 static float pvideo_calculate_scale(unsigned int din_dout,
@@ -696,6 +818,11 @@ static void destroy_current_display_image(PGRAPHState *pg)
     d->last_cgl_surface_id = 0;
     d->last_cgl_width = 0;
     d->last_cgl_height = 0;
+
+    /* The pushed present slot mirrors present_* (possibly at the old
+     * resolution); drop it here so a resize or teardown can't hand the
+     * UI a stale-resolution frame. */
+    pgraph_vk_present_slot_invalidate(pg);
 #endif
 
     vkDestroyImageView(r->device, d->image_view, NULL);
@@ -1578,6 +1705,7 @@ void pgraph_vk_init_display(PGRAPHState *pg)
     }
     r->export_metal_objects_fn = (void *)vkGetDeviceProcAddr(
         r->device, "vkExportMetalObjectsEXT");
+    qemu_mutex_init(&r->display.present_slot_lock);
     create_present_timeline(pg);
     probe_metal_texture_export(pg);
 #endif
@@ -1626,6 +1754,13 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
     destroy_render_pass(pg);
     destroy_descriptor_set_layout(pg);
     destroy_descriptor_pool(pg);
+
+#if HAVE_IOSURFACE_SHARING
+    /* Every display-image destroy above invalidated the push slot;
+     * release any residual slot retains and drop the lock last. */
+    pgraph_vk_present_slot_invalidate(pg);
+    qemu_mutex_destroy(&r->display.present_slot_lock);
+#endif
 }
 
 void pgraph_vk_render_display(PGRAPHState *pg)

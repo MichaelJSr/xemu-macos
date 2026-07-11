@@ -997,7 +997,17 @@ static void metal_render_frame(struct xemu_console *scon)
      * buffer for as long as the GPU needs it.
      */
     NV2APresentFrame frame = { 0 };
-    nv2a_get_present_frame(&frame);
+    /*
+     * Push model (XEMU_PUSH_PRESENT): read the frame the PFIFO thread
+     * published at the last flip with no cross-thread round trip. Falls
+     * back to the pull handshake when push is inactive, on the GL
+     * backend, or before the first publish (startup / post-resize) —
+     * `pushed` stays false and the pull path runs exactly as before.
+     */
+    bool pushed = nv2a_get_present_frame_pushed(&frame);
+    if (!pushed) {
+        nv2a_get_present_frame(&frame);
+    }
 
     /*
      * Paced presentation: during gameplay (no menu capture) with
@@ -1018,11 +1028,24 @@ static void metal_render_frame(struct xemu_console *scon)
     if (frame.frame_seq != last_frame_seq) {
         last_frame_seq = frame.frame_seq;
         last_seq_change_ms = now_ms;
-    } else if (frame.frame_seq && frame.display_duration_ns > 0 &&
+    } else if (frame.frame_seq &&
+               (frame.display_duration_ns > 0 || pushed) &&
                now_ms - last_seq_change_ms < 250) {
+        /*
+         * Same content as last present: skip re-compositing. Under push
+         * this is the frame_seq dedup the pull model structurally could
+         * not do (it had to pay the round trip to learn frame_seq). The
+         * 250 ms staleness cap + capture check keep the HUD and menus
+         * live when the title stops flipping (loading / pause).
+         */
         int kbd = 0, mouse = 0;
         xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
         if (!kbd && !mouse) {
+            if (pushed && frame.mtl_texture) {
+                xemu_metal_release_handle(frame.mtl_texture);
+            } else if (pushed && frame.iosurface) {
+                xemu_metal_release_handle(frame.iosurface);
+            }
             nv2a_release_framebuffer_surface();
             qatomic_set(&rendering, false);
             /* Poll for the next step without spinning the handshake */
@@ -1035,13 +1058,21 @@ static void metal_render_frame(struct xemu_console *scon)
     uintptr_t tex = 0;
     if (frame.mtl_texture) {
         tex = (uintptr_t)frame.mtl_texture;
-        /* Keep the texture alive for the rest of the frame
-         * independently of the renderer's reference. */
-        xemu_metal_retain_handle(frame.mtl_texture);
+        if (!pushed) {
+            /* Pull: borrowed (renderer-owned) pointer; take our own
+             * retain for the rest of the frame. Push already holds a
+             * slot-read retain in `frame` that serves the same role and
+             * is dropped by the release_handle at end-of-frame. */
+            xemu_metal_retain_handle(frame.mtl_texture);
+        }
     } else if (frame.iosurface) {
         /* The wrap cache holds its own texture reference, and the
          * texture retains the IOSurface. */
         tex = (uintptr_t)xemu_metal_wrap_iosurface(frame.iosurface);
+        if (pushed) {
+            /* Drop the slot-read retain now the wrap holds its own. */
+            xemu_metal_release_handle(frame.iosurface);
+        }
     }
 
     /*

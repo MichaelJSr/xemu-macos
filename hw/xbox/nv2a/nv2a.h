@@ -56,6 +56,17 @@ typedef struct NV2APresentFrame {
 } NV2APresentFrame;
 bool nv2a_get_present_frame(NV2APresentFrame *frame);
 
+/*
+ * Push-model present (XEMU_PUSH_PRESENT, Metal backend): read the frame
+ * the renderer published at the last flip with NO cross-thread sync
+ * round trip. Returns true and (like nv2a_get_present_frame) takes the
+ * framebuffer_in_use handshake — pair with nv2a_release_framebuffer_-
+ * surface(). Returns false without taking the handshake when push is
+ * inactive or nothing is published yet; the caller then falls back to
+ * nv2a_get_present_frame().
+ */
+bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame);
+
 void nv2a_release_framebuffer_surface(void);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);

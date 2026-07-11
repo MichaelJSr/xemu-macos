@@ -203,6 +203,33 @@ static void pgraph_vk_flip_stall(NV2AState *d)
     pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
     pgraph_vk_debug_frame_terminator();
     pgraph_vk_maybe_save_pipeline_cache(&d->pgraph);
+#if HAVE_IOSURFACE_SHARING
+    if (pgraph_vk_push_present_enabled(d)) {
+        /*
+         * Push-model present: composite and publish this flip's frame
+         * now, on the PFIFO thread, so the UI can present it with no
+         * cross-thread sync round trip. render_display runs in its
+         * normal lock context (FLIP_STALL executes under pgraph.lock,
+         * exactly as the pull-model sync path does) and is gated to a
+         * ~120 Hz ceiling so it never composites more often than the
+         * pull path would. This does not touch guest vblank/flip timing
+         * — waiting_for_flip and the vblank release are untouched below.
+         *
+         * The gate uses its OWN timestamp, not the pull path's
+         * last_sync_time_ns: during the startup fallback the UI still
+         * pulls (advancing last_sync_time_ns every ~8 ms), which would
+         * otherwise keep this gate closed forever and the slot would
+         * never publish — starving push out of ever engaging.
+         */
+        static int64_t last_push_publish_ns;
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (now - last_push_publish_ns >= 8000000) {
+            pgraph_vk_render_display(&d->pgraph);
+            pgraph_vk_present_slot_write(&d->pgraph);
+            last_push_publish_ns = now;
+        }
+    }
+#endif
     nsprof_flip_tick();
 }
 
@@ -326,6 +353,25 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
 #endif
 }
 
+/*
+ * Push-model present read: hand the UI the frame the PFIFO thread
+ * published at the last flip, with no sync handshake. Returns false
+ * (UI falls back to pgraph_vk_get_present_frame) when push is inactive
+ * or nothing is published yet (startup, post-resize).
+ */
+static bool pgraph_vk_get_present_frame_pushed(NV2AState *d,
+                                               NV2APresentFrame *frame)
+{
+#if HAVE_IOSURFACE_SHARING
+    if (!pgraph_vk_push_present_enabled(d)) {
+        return false;
+    }
+    return pgraph_vk_present_slot_read(&d->pgraph, frame);
+#else
+    return false;
+#endif
+}
+
 static PGRAPHRenderer pgraph_vk_renderer = {
     .type = CONFIG_DISPLAY_RENDERER_VULKAN,
     .name = "Vulkan",
@@ -352,6 +398,7 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .get_surface_scale_factor = pgraph_vk_get_surface_scale_factor,
         .get_framebuffer_surface = pgraph_vk_get_framebuffer_surface,
         .get_present_frame = pgraph_vk_get_present_frame,
+        .get_present_frame_pushed = pgraph_vk_get_present_frame_pushed,
         .get_gpu_properties = pgraph_vk_get_gpu_properties,
     }
 };

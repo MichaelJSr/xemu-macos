@@ -459,6 +459,32 @@ bool nv2a_get_present_frame(NV2APresentFrame *frame)
     return ok;
 }
 
+bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame)
+{
+    NV2AState *d = g_nv2a;
+    PGRAPHState *pg = &d->pgraph;
+    bool ok = false;
+
+    memset(frame, 0, sizeof(*frame));
+
+    if (!pg->renderer->ops.get_present_frame_pushed) {
+        return false;
+    }
+
+    qemu_mutex_lock(&pg->renderer_lock);
+    assert(!pg->framebuffer_in_use);
+    pg->framebuffer_in_use = true;
+    ok = pg->renderer->ops.get_present_frame_pushed(d, frame);
+    if (!ok) {
+        /* Nothing consumed — release the handshake so the caller can
+         * fall back to the pull path (which takes it again). */
+        pg->framebuffer_in_use = false;
+    }
+    qemu_mutex_unlock(&pg->renderer_lock);
+
+    return ok;
+}
+
 void nv2a_release_framebuffer_surface(void)
 {
     NV2AState *d = g_nv2a;

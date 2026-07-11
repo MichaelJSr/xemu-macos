@@ -136,6 +136,13 @@ typedef struct PGRAPHRenderer {
          * GL texture name. Optional; NULL when unsupported. */
         bool (*get_present_frame)(NV2AState *d,
                                   struct NV2APresentFrame *frame);
+        /* Push-model present (XEMU_PUSH_PRESENT): read the last frame
+         * the PFIFO thread published at flip, with no sync round trip.
+         * Returns false (UI falls back to get_present_frame) when push
+         * is inactive or nothing has been published yet. Optional; NULL
+         * on renderers without a push slot (GL/null). */
+        bool (*get_present_frame_pushed)(NV2AState *d,
+                                         struct NV2APresentFrame *frame);
         GPUProperties *(*get_gpu_properties)(void);
     } ops;
 } PGRAPHRenderer;
