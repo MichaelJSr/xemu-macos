@@ -974,6 +974,73 @@ static void gl_render_frame(struct xemu_console *scon)
 }
 
 #ifdef __APPLE__
+/*
+ * Push-present refuter (XEMU_PUSH_PRESENT_REFUTE=1, debug). Every frame,
+ * read the pushed slot and immediately pull-fetch the same instant. When
+ * both report the same frame_seq they MUST describe identical content
+ * (same texture/iosurface pointer, shared event + value, dims) — proving
+ * the push fast path publishes exactly what the pull path would, before
+ * anyone trusts it. Prints a running compared/mismatch tally every ~5 s.
+ * A new flip landing between the two reads simply advances one seq and is
+ * skipped (only equal-seq pairs are asserted). No-op when push is off.
+ */
+static bool push_present_refute_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("XEMU_PUSH_PRESENT_REFUTE");
+        cached = (e && e[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static void push_present_refute_step(void)
+{
+    NV2APresentFrame pf = { 0 };
+    if (!nv2a_get_present_frame_pushed(&pf)) {
+        return; /* push inactive / nothing published — nothing to refute */
+    }
+    void *p_tex = pf.mtl_texture, *p_ios = pf.iosurface, *p_ev = pf.event;
+    uint64_t p_evv = pf.event_value, p_seq = pf.frame_seq;
+    int p_w = pf.width, p_h = pf.height;
+    if (pf.mtl_texture) {
+        xemu_metal_release_handle(pf.mtl_texture);
+    } else if (pf.iosurface) {
+        xemu_metal_release_handle(pf.iosurface);
+    }
+    nv2a_release_framebuffer_surface();
+
+    NV2APresentFrame lf = { 0 };
+    nv2a_get_present_frame(&lf);
+    void *l_tex = lf.mtl_texture, *l_ios = lf.iosurface, *l_ev = lf.event;
+    uint64_t l_evv = lf.event_value, l_seq = lf.frame_seq;
+    int l_w = lf.width, l_h = lf.height;
+    nv2a_release_framebuffer_surface();
+
+    static uint64_t compared, mismatches, last_report_ms;
+    if (p_seq && p_seq == l_seq) {
+        compared++;
+        if (p_tex != l_tex || p_ios != l_ios || p_ev != l_ev ||
+            p_evv != l_evv || p_w != l_w || p_h != l_h) {
+            mismatches++;
+            if (mismatches <= 8) {
+                fprintf(stderr,
+                        "push_refute MISMATCH seq=%llu tex %p/%p ios %p/%p "
+                        "ev %p/%p val %llu/%llu dim %dx%d/%dx%d\n",
+                        (unsigned long long)p_seq, p_tex, l_tex, p_ios, l_ios,
+                        p_ev, l_ev, (unsigned long long)p_evv,
+                        (unsigned long long)l_evv, p_w, p_h, l_w, l_h);
+            }
+        }
+    }
+    uint64_t now_ms = SDL_GetTicks();
+    if (now_ms - last_report_ms >= 5000) {
+        last_report_ms = now_ms;
+        fprintf(stderr, "push_refute: compared=%llu mismatches=%llu\n",
+                (unsigned long long)compared, (unsigned long long)mismatches);
+    }
+}
+
 /**
  * Metal-native sibling of gl_render_frame: same structure (pull the
  * NV2A present frame, run the HUD, release, present), but the game
@@ -985,6 +1052,10 @@ static void metal_render_frame(struct xemu_console *scon)
     static bool rendering;
     if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
         return;
+    }
+
+    if (push_present_refute_enabled()) {
+        push_present_refute_step();
     }
 
     /*
