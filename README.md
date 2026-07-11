@@ -209,8 +209,15 @@ In-app Settings covers the main toggles.
   helpers; `=2` differential keeps strict brackets and re-confirmed
   bit-exactness). Measured **+1.90 fps, 3/3 pairs positive**;
   default on for aarch64 with `perf.hard_fpu`, `XEMU_SSE_HOST=0`
-  restores softfloat. (x87 hard-FPU brackets save/restore around
+  restores softfloat. (x87 hard-FPU helpers save/restore around
   their own ops; softfloat/TCG carry no host FP-mode dependence.)
+  Follow-up fix: the *inline* x87 path skips its `MSR FPCR` whenever
+  the `cached_fpuc_rc` cache matches the TB's rounding bits, so the
+  bracket now invalidates that cache when it rewrites FPCR —
+  previously inline x87 could silently run under the sticky SSE
+  FZ/RMode state (denormal flushing in x87 doubles). Zero cost in
+  steady state (fires only on actual mode transitions); validated by
+  a clean 90 s `XEMU_SSE_HOST=2` differential and fps parity.
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census) showed diffuse guest time (top TB
@@ -306,6 +313,20 @@ In-app Settings covers the main toggles.
   dependency — proof comment at
   `get_any_compatible_invalid_surface`). Validated at fps parity
   (46.6-47.2 vs 46.83 ± 0.24), zero errors.
+- **Texture/sampler eviction gated on submission retirement.** Third
+  member of the same pipelined-finish race family (audit find, no
+  observed crash): the LRU pre-evict guard only protected entries
+  referenced by the *currently-recording* CB, but the just-submitted
+  CB routinely still executes, and the memory-budget trim runs right
+  after submit with that clause disabled — an evicted texture or
+  sampler could be destroyed while the GPU still referenced it. Both
+  caches now refuse eviction until `retired_submit_count` covers the
+  entry's last-referencing submission (samplers gained the stamp
+  field), with a slot-fence drain if a pool ever fills with pinned
+  nodes and a drain in texture finalize so a live renderer switch
+  can't leak refused nodes. Validated at fps parity (F5 +0.19 ± 0.14,
+  3 interleaved pairs; F8 quiet-machine +0.12 ± 1.46, sign-mixed)
+  with a 291-capture artifact soak clean.
 - **Zeta shape-switch fast path.** A depth buffer ping-ponging
   between two shapes at one VRAM address every frame cost ~9
   `pgraph_vk_finish` fence cycles per flip (8-19 ms/flip): each
@@ -691,8 +712,11 @@ In-app Settings covers the main toggles.
   regs. Static block chaining (with retro-chaining: untranslated
   targets get a patchable chain site, patched when the target is
   later translated) keeps hot loops inside JIT code; all chain
-  repatching sits inside the JIT-write window (W^X). Lazy-flag
-  elimination elides ~20% of SR updates. Harnesses:
+  repatching sits inside the JIT-write window (W^X), and
+  invalidation-time chain *unpatching* now also flushes each
+  repatched site's icache line (the write window covers permission,
+  not coherency — the stale branch could otherwise keep executing
+  from I-cache). Lazy-flag elimination elides ~20% of SR updates. Harnesses:
   `XEMU_DSP_JIT_DIFF=N` (off-thread bit-exact validation, bounded
   per unique translation), `XEMU_DSP_JIT_STATS=1` (counters). See
   [docs/dsp-jit-design.md](docs/dsp-jit-design.md).

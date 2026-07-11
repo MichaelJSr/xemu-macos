@@ -98,7 +98,8 @@ void pfifo_kick(NV2AState *d)
 {
     /*
      * Callers must hold d->pfifo.lock across the kick-set + broadcast
-     * pair. All 15 call sites in the tree satisfy this: pfifo_write,
+     * pair. All call sites in the tree satisfy this (20 as of
+     * 2026-07-11 — re-verify the full set when adding one): pfifo_write,
      * the pgraph/{gl,vk}/{surface,display,renderer}.c paths,
      * nv2a.c:nv2a_unlock_fifo, pgraph.c:pgraph_write /
      * do_wait_for_renderer_switch, and user.c:user_write. With the
