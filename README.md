@@ -131,8 +131,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
-| `XEMU_PUSH_PRESENT` | *(DRAFT)* Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
-| `XEMU_PUSH_PRESENT_REFUTE` | *(DRAFT)* Debug: cross-check each pushed read against an immediate pull fetch (same `frame_seq` ⇒ identical texture/event/dims); prints `compared`/`mismatches` every ~5 s |
+| `XEMU_PUSH_PRESENT` | Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
+| `XEMU_PUSH_PRESENT_REFUTE` | Debug: cross-check each pushed read against an immediate pull fetch (same `frame_seq` ⇒ identical texture/event/dims); prints `compared`/`mismatches` every ~5 s |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -540,9 +540,9 @@ In-app Settings covers the main toggles.
   selectable (`presentation_backend = 'opengl'`) and is the only
   path for the OpenGL NV2A renderer (switching renderer away from
   Vulkan under Metal prompts for a restart).
-- **Push-model present handoff** *(DRAFT — behind `XEMU_PUSH_PRESENT=1`,
-  default off; Metal backend, frame interpolation off; numbers
-  self-measured, pending the orchestrator's quiet-window verification)*.
+- **Push-model present handoff** (behind `XEMU_PUSH_PRESENT=1`,
+  default off; Metal backend, frame interpolation off — interpolation's
+  sub-flip pacing needs the pull cadence, so interp-on falls back).
   The pull-model handoff above (`nv2a_get_present_frame`) costs a
   guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
   thread and blocks on `qemu_event_wait` until it answers, and that
@@ -554,16 +554,17 @@ In-app Settings covers the main toggles.
   it with **no kick and no wait** and skips re-compositing when `frame_seq`
   is unchanged (the dedup the pull model structurally couldn't do). This
   is a latency/jitter change, **not** an fps change — guest flip/vblank
-  timing is untouched. Self-measured on F5 (M2 Ultra, interleaved 3-pair
-  A/B, other agents' builds sharing the machine): the new `present_wait`
-  nsprof counter drops from **82 ms/interval across 601 UI-thread blocks
-  (single waits up to 79 ms) to 0** in steady state (a one-time ~25-wait
+  timing is untouched. Measured on F5, quiet machine, interleaved 3-pair
+  A/B (35 intervals/arm): the new `present_wait` nsprof counter drops
+  from **81.2 ms/interval (sd 40, max 157 ms) across ~599 UI-thread
+  blocks per interval to 0.000 across every push interval** (a one-time
   startup burst before the first publish, then the pull fallback never
-  fires); **flips/s identical** (48.0 vs 48.8, within the scene's own
-  38-60 range). The refuter (`XEMU_PUSH_PRESENT_REFUTE=1`) cross-checked
-  47,151 equal-`frame_seq` pushed-vs-pull reads over 65 s with **0
-  mismatches**. Startup / post-resize / GL / interpolation-on fall back to
-  the pull path unchanged.
+  fires); **flips/s identical** (50.0 ± 6.6 vs 51.4 ± 5.6, the scene's
+  own 38-60 bimodal range). The refuter (`XEMU_PUSH_PRESENT_REFUTE=1`)
+  cross-checked **48,151** equal-`frame_seq` pushed-vs-pull reads over
+  65 s with **0 mismatches** (plus 47,151/0 in the loaded-machine run).
+  Startup / post-resize / GL / interpolation-on fall back to the pull
+  path unchanged.
 - **Async MetalFX via `MTLSharedEvent`** (Metal backend only). The
   three `waitUntilCompleted` stalls (spatial/temporal/interp,
   1-5 ms/frame on the PFIFO thread) are replaced by a monotonic
@@ -858,6 +859,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| TB byte-range invalidation filter (`XEMU_TB_RANGE_INV`, 2026-07-11) | `XEMU_INV_PROF` measured 100% of TB invalidations as data-write false sharing (0 true SMC, 100% recycle-hit) — so re-applying upstream's overlap filter looked free. Counter A/B: invalidations 338k → 675 (works) but notdirty traps **25.2×** (198k → 4.98M) + 46M range scans — whole-page invalidation is what empties the page and fires `tlb_unprotect_code`, making subsequent data writes free; base-xemu removed the check (`6ea11938b2e`) deliberately. Instrument-killed pre-fps-A/B; knob ships dark. Real lever: sub-page dirty tracking (design parked pending correctness review) |
 | L2 victim jump-cache (2026-07-05) | 64k-entry victim tier probed on L1 miss looked capacity-shaped (410k TBs vs 4096 entries) — but live hit rate measured **11.2%**: residual misses are one-shot/cold pcs, not a recurring set. Ceiling ~0.1 fps; instrument-killed without an fps A/B. Measure the miss stream's *shape* (recurrence), not its volume, before building any cache tier |
 | JIT write-protect flip caching (2026-07-05) | Sampling attributed 9.7% of the vCPU thread to per-TB-entry `pthread_jit_write_protect_np`; a thread-local skip of redundant flips measured **parity** (6 pairs, −0.10 mean). The 9.7% was `thread_suspend`-sampling skid onto barrier instructions — discount barrier-heavy symbols in suspend-based profiles |
 | Per-depth return-address ring (2026-07-05) | Classic shadow stack: eip prediction paired at 99.6%, but per-depth slots are shared by every same-depth call site, so TB fills ran 2.6× hits; a 512-deep ring changed nothing (a key problem, not a depth problem). Superseded same day by the eip-keyed ret-target memo (`XEMU_RAS`): the ret target is already in `env->eip` at dispatch, so depth-shaped state adds nothing a target-keyed cache doesn't |

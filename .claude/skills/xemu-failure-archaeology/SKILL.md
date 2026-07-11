@@ -72,6 +72,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.19 | Sticky host-FPU bracket: SSE parity -> +1.9 | shipped |
 | 1.20 | L2 victim jump-cache | settled-negative (instrument-killed) |
 | 1.21 | Texture/sampler LRU eviction raced pending submissions | shipped-after-fix |
+| 1.22 | TB range-check re-add (XEMU_TB_RANGE_INV) | settled-negative (instrument-killed) |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -696,6 +697,39 @@ not "finish callers"; (b) an assert-guarded exhaustion path is a
 release-build crash — pair stricter refusal guards with a forward-
 progress fallback.
 **Reopen if**: n/a (correctness fix, no tradeoff).
+
+## 1.22 TB byte-range invalidation filter — instrument-killed, and it answered why upstream removed it
+
+**Status**: settled-negative (2026-07-11; counters killed it before an
+fps A/B was spent — the 1.20 pattern). The knob ships dark
+(`XEMU_TB_RANGE_INV=1`) as documentation + A/B hatch; `XEMU_INV_PROF=1`
+is the counter set that decided it.
+**The idea**: XBOX builds invalidate every TB on a written code page
+(`#ifndef XBOX` skips upstream's byte-range overlap check,
+tb-maint.c). INV_PROF measured the false-invalidation share at **100%**
+on F5 and F8 (notdirty-sourced 100%, true SMC **0**, recycle-hit 100%)
+— so re-applying the exact upstream filter looked like removing ~350-650k
+pointless invalidate/recycle round-trips per 95 s.
+**Evidence that killed it** (counter A/B, F8): invalidations 338k → 675
+(0.002x — the filter works) BUT notdirty traps 197k → **4.98M (25.2x)**
+and range-scan evaluations 46M — because whole-page invalidation is
+what empties the page and fires `tlb_unprotect_code`; keep the TBs
+alive and every subsequent data write to that page traps forever, each
+trap paying the `physical_memory_test_and_clear_dirty` TLB walk (the
+profile's 2.0%) plus a scan of the now-unbounded per-page TB list.
+Pre-registered kill threshold ">5x traps = negative"; measured 25x.
+**The recovered answer to audit-F3's open question**: base-xemu's
+removal of the check (`6ea11938b2e`, no rationale recorded) was
+deliberate performance work — on the Xbox's data-shares-a-code-page
+pattern, whole-page invalidation makes the next ~25 writes/epoch free.
+**The real lever this points at**: sub-page dirty tracking — stop the
+non-code write from *trapping* instead of filtering what it
+invalidates; design sketch with the archaeology-1.9-class race
+analysis parked in the campaign records (wrong-code-hang failure class;
+needs refuter-first treatment before any implementation).
+**Reopen if**: a workload appears with true SMC or partial-overlap
+writes (INV_PROF false-share well below 100%) — the filter's tradeoff
+flips only when invalidations stop being pure false sharing.
 
 # 2. MoltenVK / driver level
 

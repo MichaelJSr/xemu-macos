@@ -616,11 +616,19 @@ incident.
 
 ## Invariant 8 — Present handoff is pull-model, off the PFIFO thread
 
-**Statement.** The UI does not get frames pushed to it. Every UI frame,
-`nv2a_get_present_frame()` performs one synchronous round trip to the
-PFIFO thread (NV2A's command-processing thread — see the glossary note
-in the architecture diagram) to ask "what should I present right now,"
-and blocks until PFIFO answers.
+**Statement.** Pull is the default and the universal fallback: every UI
+frame, `nv2a_get_present_frame()` performs one synchronous round trip to
+the PFIFO thread (NV2A's command-processing thread — see the glossary
+note in the architecture diagram) and blocks until PFIFO answers. Since
+2026-07-11 there is a default-OFF push-model alternative
+(`XEMU_PUSH_PRESENT=1`, Metal backend only, frame interpolation off):
+PFIFO publishes the complete present tuple {texture/IOSurface, shared
+event + value, frame_seq, dims} into a leaf-mutex-guarded slot at flip,
+and the UI reads the latest slot with no kick and no wait, deduping on
+`frame_seq`. Startup-before-first-publish, the GL backend, and
+interpolation-on all fall back to pull. The GPU-side ordering contract
+is unchanged in both models: the UI encodes its wait on the frame's
+`MTLSharedEvent` value before sampling.
 
 **Evidence.** `nv2a_get_present_frame()`
 (`hw/xbox/nv2a/pgraph/pgraph.c:443-460`) takes `pg->renderer_lock`,
@@ -647,13 +655,17 @@ iteration regardless of how long the previous iteration took, and calls
 `SDL_DelayPrecise` to the deadline. It runs at
 `QOS_CLASS_USER_INTERACTIVE` (Invariant 12).
 
-**Why this design.** The pull-model round trip is what *publishes* a new
-present frame in the first place (the PFIFO-side sync handshake is
-shared machinery, not present-specific) — so today's design can't do a
-UI-side "skip presenting if nothing changed" pre-check without first
-doing the round trip that would tell it that. This is a known
-architectural tradeoff, not an oversight — see "Known weak points"
-below.
+**Why this design.** In the pull model the round trip is also what
+*publishes* a new present frame (the PFIFO-side sync handshake is shared
+machinery, not present-specific), so pull cannot do a UI-side
+"skip presenting if nothing changed" pre-check without first paying the
+round trip. The push slot exists precisely to break that coupling —
+publish at flip, read without blocking — and its equivalence to pull is
+refuter-proven (`XEMU_PUSH_PRESENT_REFUTE=1`: equal-`frame_seq` pushed
+and pulled reads must describe identical content; 47k+ comparisons, 0
+mismatches on record). Push deliberately uses a leaf mutex, not a
+seqlock: the slot hands out reference-counted handles, and a lock-free
+reader could CFRetain a pointer the writer concurrently CFReleases.
 
 Vblank cadence is intentionally NOT tied to host display refresh: an
 earlier attempt to align `vblank_interval_ns` to the host's actual
@@ -676,8 +688,10 @@ inside the PFIFO-side handshake (e.g. adding synchronous work to the
 `sync_pending` handler) directly adds latency to every UI frame, since
 the UI thread is synchronously waiting on it.
 
-**Escape hatch.** None for the pull-model shape itself (see "Known weak
-points" — a push-model redesign is an open future vector, not a flag).
+**Escape hatch.** The pull model IS the default and the hatch:
+`XEMU_PUSH_PRESENT=1` opts into the push slot (Metal, interpolation
+off), and unsetting it — or any fallback condition — restores pull
+wholesale. `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence checker.
 `vblank_interval_ns` and `use_vblank_timer_thread` are file-scope
 globals in `ui/xemu.c` (not currently exposed as config/env), used for
 PAL-mode consideration — see Known weak points.
@@ -992,8 +1006,12 @@ one of these should know it's stepping onto contested ground.
   unresolved cost: the PFIFO-side handshake is what *publishes* a
   frame, so a UI-side "don't re-present unchanged content" pre-check
   can't run before paying for the round trip that would tell it the
-  content is unchanged. A push-model redesign (publish from PFIFO at
-  flip time) is an unattempted README future vector, not a landed fix.
+  content is unchanged. RESOLVED 2026-07-11 for the Metal backend: the
+  push-model redesign landed dark behind `XEMU_PUSH_PRESENT=1` (see the
+  Statement above — measured: 601 present-handoff blocks/interval with
+  up-to-79 ms single-wait tails under pull → 0 under push, flips/s
+  identical). The pull weak point still fully applies to the default
+  config (flag off) and always under frame interpolation / GL.
 - **PAL titles run a 60 Hz vblank.** `vblank_interval_ns` is a single
   fixed value (`16666666LL`, 60 Hz — `ui/xemu.c:78`) with no PAL
   (50 Hz) variant anywhere in the tree (verified by grep). Whether/how

@@ -155,7 +155,7 @@ Status vocabulary:
 | Rank | Entry | Status | Why ranked here |
 |---|---|---|---|
 | 1 | GPU-frame-cost reduction / draw merging | open (campaign) | Flagship, biggest plausible fps lever; owner-selected |
-| 2 | Push-model present handoff | open | Removes a guaranteed per-UI-frame stall; matters more as target Hz rises |
+| 2 | Push-model present handoff | landed-dark (2026-07-11) | Shipped behind `XEMU_PUSH_PRESENT=1` (Metal, interp off): present-handoff blocks 601/interval → 0, flips/s identical, 47k-comparison refuter clean. Dark pending default-on case (interp-off users only) |
 | 3 | Windows real-hardware Vulkan validation + provoking-vertex closure | open | Gates any same-hardware-class comparison and an unvalidated code path |
 | 4 | Frame-interpolation real depth (flip-time zeta snapshot) | candidate | Direct quality lever on the exact feature the bar names |
 | 5 | DSP parmove+ALU fusion | needs-theory | Audio headroom; explicitly deferred pending a workload that hits it |
@@ -201,7 +201,19 @@ measured fps delta attributable to fewer draw calls or fewer
 pipeline/descriptor binds per flip — not fewer render passes (that lever
 is spent at 14/flip). Detail and expected numbers: `xemu-gpu-frame-campaign`.
 
-### 2.2 Push-model present handoff — rank 2, open
+### 2.2 Push-model present handoff — rank 2, LANDED-DARK 2026-07-11
+
+> **STATUS ADDENDUM**: implemented behind `XEMU_PUSH_PRESENT=1` (Metal
+> backend, frame interpolation off — interpolation's sub-flip pacing
+> needs the pull cadence, so interp-on falls back to pull). Measured:
+> present-handoff wait 601 blocks/interval (up-to-79 ms tails) → 0;
+> flips/s identical; `XEMU_PUSH_PRESENT_REFUTE` equivalence checker
+> clean over 47k+ comparisons. Leaf mutex instead of seqlock by design
+> (refcounted handles can't ride a lock-free reader). Remaining open
+> question for default-on: none of the fork's bench configs run
+> interp-off, so the beneficiary set is real-30-fps-no-interp users;
+> promote only with a jitter receipt on such a config. The original
+> analysis below is preserved as written.
 
 **Why it falls short.** `nv2a_get_present_frame` (`hw/xbox/nv2a/nv2a.h:57`
 -> `hw/xbox/nv2a/pgraph/pgraph.c:443` -> Vulkan renderer's
