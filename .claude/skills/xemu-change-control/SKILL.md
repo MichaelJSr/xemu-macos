@@ -31,7 +31,11 @@ incidents that made each gate non-negotiable.
 
 Two facts frame everything:
 
-1. **CI compiles and packages; it does not test.** `.github/workflows/`
+1. **CI compiles, packages, and (since 2026-07-11) runs the xbox unit
+   suite on the macOS arm64 legs** — `build-macos.yml` runs
+   `meson test --suite xbox` (restored DSP unit test, swizzle
+   round-trip, and the three inline-JIT differential arms; seconds, no
+   game content). Everything else below stands: `.github/workflows/`
    contains no test-suite step in any job. Correctness and performance
    evidence is produced locally, before the push, and recorded in the
    commit message. CI's job is proving the change builds everywhere

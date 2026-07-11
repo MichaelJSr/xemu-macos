@@ -71,6 +71,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.18 | Per-depth return-address ring -> eip-keyed ret memo | superseded-shipped |
 | 1.19 | Sticky host-FPU bracket: SSE parity -> +1.9 | shipped |
 | 1.20 | L2 victim jump-cache | settled-negative (instrument-killed) |
+| 1.21 | Texture/sampler LRU eviction raced pending submissions | shipped-after-fix |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -664,6 +665,37 @@ alone justifies nothing.
 **Open observation parked with it**: ~70k/s lookups return NULL at
 tb_flush=1 with do_tb_phys_invalidate in the profile top — the
 SMC/invalidation-churn vector in README Future vectors item 1.
+
+## 1.21 Texture/sampler LRU eviction raced pending submissions
+
+**Status**: shipped-after-fix (`d9c90165d1`, 2026-07-11; found by the
+six-agent audit wave, not by a crash — same discovery mode as 1.13).
+**Symptom**: none observed — latent. Third member of the 1.13 family,
+which its sweep structurally missed: LRU eviction is not a `finish`
+caller, so enumerating finish callers never visited it.
+**Root cause**: `texture_cache_entry_pre_evict` protected an entry
+only while currently bound or `in_command_buffer && submit_time ==
+submit_count` — the *currently-recording* CB. Under pipelined finish
+the just-submitted CB still executes with its textures stamped
+`submit_count-1` (evictable), and `pgraph_vk_trim_texture_cache` runs
+from finish via `check_memory_budget` after `in_command_buffer=false`
+(clause disabled entirely), with `post_evict` destroying immediately.
+The sampler cache had the same shape with no stamp at all.
+**Fix**: surface-watermark mirror — refuse eviction while
+`submit_time >= retired_submit_count`; samplers gained the stamp;
+`ensure_cache_headroom()` retires slot fences if a pool ever fills
+with pinned nodes (release builds strip `lru_evict_one`'s assert, so
+exhaustion must be impossible, not unlikely); finalize drains fences
+before its cache flushes so a live renderer switch can't leak.
+**Evidence**: F5 +0.19 ± 0.14 (3 pairs), F8 quiet +0.12 ± 1.46
+(sign-mixed) — parity; 291-capture F8 artifact soak zero flagged.
+**Lessons**: (a) when a race family is fixed by enumerating one call
+pattern, audit every OTHER site that destroys GPU-visible resources —
+the family boundary is "CPU-side action on shared GPU-visible state,"
+not "finish callers"; (b) an assert-guarded exhaustion path is a
+release-build crash — pair stricter refusal guards with a forward-
+progress fallback.
+**Reopen if**: n/a (correctness fix, no tradeoff).
 
 # 2. MoltenVK / driver level
 

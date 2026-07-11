@@ -7,8 +7,10 @@ description: >-
   failure rate), the golden fixture inventory on the dev Mac (hdd qcow2 +
   snapshot F-keys, title corpus, firmware, custom MoltenVK), the validation
   gauntlets (pre-release, MoltenVK pin bump, upstream merge, renderer
-  behavior change), the honest state of automated testing (CI runs zero
-  tests), and how to add regression nets the project's way. Load BEFORE
+  behavior change), the honest state of automated testing (since
+  2026-07-11 CI runs the xbox unit suite — DSP interpreter/JIT
+  differential + swizzle — on the macOS arm64 legs; no in-game testing
+  is automated), and how to add regression nets the project's way. Load BEFORE
   accepting or publishing any performance number, shipping a fix, tagging a
   release, bumping the MoltenVK pin, or merging upstream; when asked "is
   this proven / validated / tested", "what evidence do we need", "what
@@ -490,7 +492,7 @@ the repo root unless absolute):
 - Validator final line + STATS buckets: `grep -n 'validator\|cf_fallback buckets' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - Engine precedence (the `config_spec.yml:339` comment must name `dsp_want_external_jit_engine()` — correct as of 2026-07-11): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; sed -n '336,342p' config_spec.yml`
 - DSP config defaults: `grep -n -A4 'dsp_jit:\|use_dsp_jit' config_spec.yml`
-- CI runs no tests: `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
+- CI test step (xbox suite on macOS arm64 legs since 2026-07-11; expect the build-macos.yml hit): `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
 - Pin-bump gauntlet requirement + pin value: `grep -n 'MVK_PIN\|validation gauntlet' scripts/build-moltenvk.sh`
 - Bench protocol header (thresholds + usage): `sed -n '1,17p' scripts/bench-savestate-ab.sh`
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
