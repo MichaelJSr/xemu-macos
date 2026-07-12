@@ -54,6 +54,34 @@ experiment ran ~3 fps above an earlier experiment's arms —
 thermal/context) — only within-experiment interleaved deltas are
 citable, never arms from different experiments.
 
+## Bench mechanics learned 2026-07-11 (fix-batch validation session)
+
+- **Monitor unix-socket paths are capped at 104 bytes on macOS.** The
+  session scratchpad path alone blows the limit and xemu exits with
+  "UNIX socket path is too long" before the socket exists. Put the
+  socket (and only the socket) in `/tmp` (e.g. `/tmp/xemu-mon.$$.sock`);
+  everything else stays in the scratch dir.
+- **Cross-binary A/B: never use a CI/release binary as the base arm.**
+  Release legs carry PGO (+9.4% class) and the pinned MoltenVK, while a
+  local build has neither — the comparison confounds three variables.
+  Build the base locally from the same tree with the candidate change
+  stashed (`git stash push -- <files>` keeps concurrent doc edits
+  intact), same toolchain, same MoltenVK, PGO off in both arms.
+- **Quiet-machine enforcement is not optional for CPU-bound scenes.**
+  A first F8 parity attempt ran while a worktree build was compiling:
+  the base arm alone swung 26.3→30.1 fps between its own pairs and the
+  deltas were sign-mixed garbage. The quiet re-run of the identical
+  comparison read +0.12 ± 1.46 (clean parity). F5-class GPU-slack
+  scenes tolerate load far better than F8-class CPU-bound ones; check
+  `pgrep -fl "ninja|clang"` before any timed run, and treat a base arm
+  disagreeing with itself by >1 fps as an environment failure, not a
+  result.
+- The hardened `scripts/bench-savestate-ab.sh` (2026-07-11) forces
+  fullscreen OFF in its scratch config — within-experiment deltas are
+  unaffected, but its absolute numbers are not comparable to the
+  historical fullscreen anchors (F5 46.8, F8 ~29.5-31.5 on the
+  2026-07-11 local no-PGO build, user config, fullscreen).
+
 ## Background input injection (no focus, no OS events)
 
 `XEMU_INPUT_PIPE=<fifo>` + lines `down <sdl_scancode>` /

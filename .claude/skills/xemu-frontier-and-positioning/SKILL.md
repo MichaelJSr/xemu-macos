@@ -209,10 +209,16 @@ is spent at 14/flip). Detail and expected numbers: `xemu-gpu-frame-campaign`.
 > present-handoff wait 601 blocks/interval (up-to-79 ms tails) → 0;
 > flips/s identical; `XEMU_PUSH_PRESENT_REFUTE` equivalence checker
 > clean over 47k+ comparisons. Leaf mutex instead of seqlock by design
-> (refcounted handles can't ride a lock-free reader). Remaining open
-> question for default-on: none of the fork's bench configs run
-> interp-off, so the beneficiary set is real-30-fps-no-interp users;
-> promote only with a jitter receipt on such a config. The original
+> (refcounted handles can't ride a lock-free reader).
+> **2026-07-11 evening update — the promotion story inverted**: under
+> the default 2x-interpolation config (where push currently falls back
+> to pull), `present_wait` measured **280-400 ms per 5 s interval,
+> ~660 UI-thread blocks/s, single waits to 8.8 ms** — tails at the
+> ±8 ms step-deadline scale of 120 Hz pacing. So the big beneficiary
+> is interp-ON, via the schedule-publish generalization (publish a
+> {handle, event, seq, hold} ring at flip instead of one slot — README
+> Future vectors has the full design + hard parts). That campaign, not
+> an interp-off receipt, is the path to default-on. The original
 > analysis below is preserved as written.
 
 **Why it falls short.** `nv2a_get_present_frame` (`hw/xbox/nv2a/nv2a.h:57`

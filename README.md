@@ -963,7 +963,12 @@ it. Instruments to re-run before starting any of these:
    plausibly worth +15-30% — and the only realistic path to real-60
    on F7/F8. Upstream-divergent compiler work; run it as a time-boxed
    research campaign with falsifiable early milestones, not as a
-   task.
+   task. (2026-07-11 census, `XEMU_INV_PROF`: exit mix is 72%
+   direct-chain goto_tb / 16% inline-jc / 12% ret-memo and flcr
+   already compile-skips 92-94% — the *dispatch* half of the
+   superblock motivation is weak; the case rests on cross-block
+   codegen quality, e.g. cc_op elimination, which the still-unrun
+   cc_op-dead census must size first.)
 6. **Real-hardware validation debt** (not fps; the largest open
    correctness item). Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list, the DSP
@@ -1028,12 +1033,23 @@ flips.
   vertex refinement under WHPX write timing (`XEMU_VTX_EXACT=0`);
   (5) the 5 s fence-or-die margin on slow systems; (6) a
   Windows-native savestate A/B baseline before any perf claim.
-- **Push-model present handoff.** `nv2a_get_present_frame` does a
-  PFIFO event-wait round trip per UI frame (the sync handshake is
-  also what publishes frames, so a UI-side "skip when unchanged"
-  pre-check is not possible in the current pull model). Publishing
-  at flip from the PFIFO side would remove the cross-thread
-  round trip and let the UI loop pace purely on the drawable.
+- **Push-model present × frame interpolation (schedule publish).**
+  The landed push handoff (`XEMU_PUSH_PRESENT`, Changes above) is
+  gated off under frame interpolation because it publishes one frame
+  per flip while interpolation needs a paced sub-flip sequence — and
+  measured 2026-07-11 under the default 2x config, the pull path it
+  falls back to blocks the UI thread **280-400 ms per 5 s interval
+  (~660 waits/s, single waits up to 8.8 ms)** — tails at the exact
+  ±8 ms step-deadline scale of 120 Hz pacing. Design: generalize the
+  published slot to a small ring of {handle, event value, seq, hold}
+  entries written at flip (the GPU-paced-steps machinery already
+  presents by seq + hold via `afterMinimumDuration`; the shared-event
+  contract already gates not-yet-finished interpolated outputs).
+  Hard parts: multi-entry retain lifetime (compositor-CB-ring
+  precedent), schedule invalidation on hitch-guard reset / resize /
+  teardown (generation counter), interpolator history contract
+  across skipped entries. Extend `XEMU_PUSH_PRESENT_REFUTE` to
+  schedule-vs-pull equivalence before trusting it.
 - **MetalFX *input* ring (drop `metalfx_drain_inflight`).** Ring the
   compositor *output* texture that MetalFX consumes (distinct from
   the landed compositor *command-buffer* ring). Measured: the drain
