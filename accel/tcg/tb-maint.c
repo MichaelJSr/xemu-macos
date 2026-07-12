@@ -61,6 +61,11 @@ uint64_t xemu_inv_false_share;
 uint64_t xemu_inv_traps;      /* notdirty writes that reached a code page */
 uint64_t xemu_inv_unprotect;  /* pages emptied of TBs -> tlb_unprotect_code */
 
+uint64_t xemu_nd_calls;
+uint64_t xemu_nd_calls_inval;
+uint64_t xemu_nd_ticks_total;
+uint64_t xemu_nd_ticks_inval;
+
 uint64_t xemu_inv_recycle_attempts;
 uint64_t xemu_inv_recycle_hits;
 uint64_t xemu_inv_recycle_true_smc;
@@ -112,6 +117,43 @@ static void xemu_inv_prof_dump(void)
             xemu_inv_traps ? (double)xemu_inv_total / xemu_inv_traps : 0.0,
             xemu_tb_range_inv_on() ? 1 : 0);
 
+    if (xemu_inv_timing_on() || xemu_nd_calls) {
+        double ns = xemu_inv_tick_ns();
+        uint64_t rest = xemu_nd_ticks_total - xemu_nd_ticks_inval;
+        double tot_ns = xemu_nd_ticks_total * ns;
+        double inv_ns = xemu_nd_ticks_inval * ns;
+        double rest_ns = (double)rest * ns;
+        /* Calibrate the bracketing read cost: two back-to-back reads, floored
+         * over many iters. The body is bracketed by 2 reads (total) with 2
+         * more inside (inval) => ~2 read-pairs of overhead per call sits inside
+         * the measured segments; report it so the split can be de-biased. */
+        uint64_t cal = ~0ULL;
+        for (int i = 0; i < 4096; i++) {
+            uint64_t a = xemu_inv_ticks();
+            uint64_t b = xemu_inv_ticks();
+            if (b - a < cal) {
+                cal = b - a;
+            }
+        }
+        fprintf(stderr,
+                "xemu:  (b'') notdirty_write body timing: calls=%llu "
+                "(inval=%llu, no-inval=%llu)  tick=%.2fns read-pair-floor=%llut\n"
+                "xemu:       total=%.3fms (%.1fns/call)  inval=%.3fms "
+                "(%.1fns/call-inval, %.1f%% of body)  rest=%.3fms (%.1fns/call)\n",
+                (unsigned long long)xemu_nd_calls,
+                (unsigned long long)xemu_nd_calls_inval,
+                (unsigned long long)(xemu_nd_calls - xemu_nd_calls_inval),
+                ns, (unsigned long long)cal,
+                tot_ns / 1.0e6,
+                xemu_nd_calls ? tot_ns / xemu_nd_calls : 0.0,
+                inv_ns / 1.0e6,
+                xemu_nd_calls_inval ? inv_ns / xemu_nd_calls_inval : 0.0,
+                xemu_nd_ticks_total ?
+                    100.0 * xemu_nd_ticks_inval / xemu_nd_ticks_total : 0.0,
+                rest_ns / 1.0e6,
+                xemu_nd_calls ? rest_ns / xemu_nd_calls : 0.0);
+    }
+
     fprintf(stderr,
             "xemu:  (c) recycle attempts=%llu  hits=%llu  true_smc=%llu  "
             "cold=%llu  |  hit-rate-on-invalidated-set=%.1f%%\n",
@@ -136,13 +178,30 @@ static void xemu_inv_prof_dump(void)
             exits ? 100.0 * xemu_inv_retmemo_emitted / exits : 0.0);
 }
 
+static bool xemu_inv_dump_armed;
+
 bool xemu_inv_prof_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("XEMU_INV_PROF");
         on = (e && e[0] == '1') ? 1 : 0;
-        if (on) {
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
+            atexit(xemu_inv_prof_dump);
+        }
+    }
+    return on;
+}
+
+bool xemu_inv_timing_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_INV_TIMING");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
             atexit(xemu_inv_prof_dump);
         }
     }

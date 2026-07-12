@@ -43,6 +43,7 @@
 #include "qemu/atomic128.h"
 #include "tb-internal.h"
 #include "trace.h"
+#include "xemu-inv-prof.h"
 #include "tb-hash.h"
 #include "tb-internal.h"
 #include "tlb-bounds.h"
@@ -1341,10 +1342,24 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
+#if defined(XBOX)
+    bool xemu_time = unlikely(xemu_inv_timing_on());
+    uint64_t xemu_t0 = xemu_time ? xemu_inv_ticks() : 0;
+    uint64_t xemu_ti = 0;
+    bool xemu_did_inval = false;
+#endif
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
+#if defined(XBOX)
+        if (xemu_time) {
+            uint64_t a = xemu_inv_ticks();
+            tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
+            xemu_ti = xemu_inv_ticks() - a;
+            xemu_did_inval = true;
+        } else
+#endif
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
     }
 
@@ -1359,6 +1374,17 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
         trace_memory_notdirty_set_dirty(mem_vaddr);
         tlb_set_dirty(cpu, mem_vaddr);
     }
+
+#if defined(XBOX)
+    if (xemu_time) {
+        xemu_nd_ticks_total += xemu_inv_ticks() - xemu_t0;
+        xemu_nd_ticks_inval += xemu_ti;
+        xemu_nd_calls++;
+        if (xemu_did_inval) {
+            xemu_nd_calls_inval++;
+        }
+    }
+#endif
 }
 
 static int probe_access_internal(CPUState *cpu, vaddr addr,

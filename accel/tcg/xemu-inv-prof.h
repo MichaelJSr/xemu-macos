@@ -36,6 +36,50 @@ enum {
 bool xemu_inv_prof_on(void);
 
 /*
+ * XEMU_INV_TIMING=1 (default off): cycle-level timing of notdirty_write, split
+ * into {body-total, invalidation+scan+recycle}. Gated separately from
+ * XEMU_INV_PROF so a pure-count run is never perturbed by the timer reads.
+ * Sizes the sub-page dirty-tracking arms (GATE0-PREDICTION.md): the ratio of
+ * the invalidation segment to the rest of the trap body decides whether a
+ * scheme that multiplies the trap count (helper-top consult) can ever net
+ * positive against the whole-page-invalidation epoch. Counts are load-immune;
+ * these timings are order-of-magnitude (other agents compile concurrently).
+ */
+bool xemu_inv_timing_on(void);
+
+/*
+ * Monotonic tick source for the timing split. On Apple Silicon the virtual
+ * counter (cntvct_el0, 24 MHz => ~41.6 ns/tick) is a couple ns to read; the
+ * isb keeps the read from being reordered around the measured work. Per-call
+ * quantization averages out over the ~10^5..10^6 traps per window. Elsewhere
+ * fall back to the RAW uptime clock (ns units). Convert with xemu_inv_tick_ns().
+ */
+static inline uint64_t xemu_inv_ticks(void)
+{
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#elif defined(__APPLE__)
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#else
+    return 0;
+#endif
+}
+
+/* ns per tick of xemu_inv_ticks() (1.0 when the source already counts ns). */
+static inline double xemu_inv_tick_ns(void)
+{
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f ? 1.0e9 / (double)f : 0.0;
+#else
+    return 1.0;
+#endif
+}
+
+/*
  * XEMU_TB_RANGE_INV=1 (default off): re-apply the exact upstream byte-range
  * overlap filter inside the XBOX whole-page invalidation, so only TBs whose
  * bytes actually overlap the written range are invalidated. Correctness-safe
@@ -59,6 +103,19 @@ extern uint64_t xemu_inv_false_share;    /* invalidations that did NOT overlap *
 /* (b') trap-frequency (the tlb_unprotect_code tradeoff of the range filter) */
 extern uint64_t xemu_inv_traps;          /* notdirty writes reaching a code page */
 extern uint64_t xemu_inv_unprotect;      /* pages emptied of TBs -> unprotected */
+
+/*
+ * (b'') notdirty_write body timing (XEMU_INV_TIMING). Raw ticks accumulated
+ * over every trap; convert with xemu_inv_tick_ns(). nd_calls is every
+ * notdirty_write; nd_calls_inval is the subset that ran the invalidation
+ * (page's DIRTY_MEMORY_CODE was clear). ticks_total brackets the whole body;
+ * ticks_inval brackets tb_invalidate_phys_range_fast; (total - inval) is the
+ * preamble+tail the helper-top consult would still pay per trap.
+ */
+extern uint64_t xemu_nd_calls;
+extern uint64_t xemu_nd_calls_inval;
+extern uint64_t xemu_nd_ticks_total;
+extern uint64_t xemu_nd_ticks_inval;
 
 /* (c) recycling */
 extern uint64_t xemu_inv_recycle_attempts;  /* inv_tb_htable_lookup calls */
