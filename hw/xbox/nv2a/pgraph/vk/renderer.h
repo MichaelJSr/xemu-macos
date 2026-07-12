@@ -361,11 +361,15 @@ typedef struct PushPresentEntry {
     bool is_real;        // final step of its flip's schedule (not a midpoint)
 } PushPresentEntry;
 
-/* Ring depth: two full 4x interpolation flips (max 4 steps each). Wide
- * enough that a single flip's schedule never self-overwrites and a brief
- * UI stall keeps a flip of slack; a deeper stall drops the oldest entries
- * (bounded latency), matching the pull path's drop-stale-when-behind. */
-#define PUSH_PRESENT_RING_CAP 8
+/* Ring depth: sized so the consumer's bounded-debt catch-up (see
+ * push_present_max_debt: worst allowed leftover = 4x mode + 2 = 6) plus
+ * one full atomically-published 4x schedule (4 steps) fits without
+ * touching an unread slot — 6 + 4 = 10, +2 slack. At 8 (the original
+ * "two 4x flips" sizing) a 4x burst arriving on a full-debt ring forced
+ * one unread drop per burst at extreme step rates. A deeper UI stall
+ * still drops oldest entries (bounded latency), matching the pull
+ * path's drop-stale-when-behind. */
+#define PUSH_PRESENT_RING_CAP 12
 #endif
 
 typedef struct PGRAPHVkDisplayState {
