@@ -137,8 +137,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
-| `XEMU_PUSH_PRESENT` | Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
-| `XEMU_PUSH_PRESENT_REFUTE` | Debug: cross-check each pushed read against an immediate pull fetch (same `frame_seq` ⇒ identical texture/event/dims); prints `compared`/`mismatches` every ~5 s |
+| `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend |
+| `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
@@ -547,8 +547,10 @@ In-app Settings covers the main toggles.
   path for the OpenGL NV2A renderer (switching renderer away from
   Vulkan under Metal prompts for a restart).
 - **Push-model present handoff** (behind `XEMU_PUSH_PRESENT=1`,
-  default off; Metal backend, frame interpolation off — interpolation's
-  sub-flip pacing needs the pull cadence, so interp-on falls back).
+  default off; Metal backend). The published slot is now a ring that
+  also carries frame interpolation's paced sub-flip steps (see the
+  schedule-publish entry under Future vectors); the numbers below are
+  the original interpolation-off landing.
   The pull-model handoff above (`nv2a_get_present_frame`) costs a
   guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
   thread and blocks on `qemu_event_wait` until it answers, and that
@@ -556,7 +558,7 @@ In-app Settings covers the main toggles.
   unchanged frame without first paying for the round trip. Under the flag
   the PFIFO thread composites and publishes the complete present tuple
   (texture/IOSurface + retain, shared event + value, `frame_seq`, dims)
-  into a mutex-guarded slot at flip (`pgraph_vk_flip_stall`); the UI reads
+  into a mutex-guarded ring at flip (`pgraph_vk_flip_stall`); the UI reads
   it with **no kick and no wait** and skips re-compositing when `frame_seq`
   is unchanged (the dedup the pull model structurally couldn't do). This
   is a latency/jitter change, **not** an fps change — guest flip/vblank
@@ -569,8 +571,7 @@ In-app Settings covers the main toggles.
   own 38-60 bimodal range). The refuter (`XEMU_PUSH_PRESENT_REFUTE=1`)
   cross-checked **48,151** equal-`frame_seq` pushed-vs-pull reads over
   65 s with **0 mismatches** (plus 47,151/0 in the loaded-machine run).
-  Startup / post-resize / GL / interpolation-on fall back to the pull
-  path unchanged.
+  Startup / post-resize / GL fall back to the pull path unchanged.
 - **Async MetalFX via `MTLSharedEvent`** (Metal backend only). The
   three `waitUntilCompleted` stalls (spatial/temporal/interp,
   1-5 ms/frame on the PFIFO thread) are replaced by a monotonic
@@ -1093,23 +1094,33 @@ flips.
   vertex refinement under WHPX write timing (`XEMU_VTX_EXACT=0`);
   (5) the 5 s fence-or-die margin on slow systems; (6) a
   Windows-native savestate A/B baseline before any perf claim.
-- **Push-model present × frame interpolation (schedule publish).**
-  The landed push handoff (`XEMU_PUSH_PRESENT`, Changes above) is
-  gated off under frame interpolation because it publishes one frame
-  per flip while interpolation needs a paced sub-flip sequence — and
-  measured 2026-07-11 under the default 2x config, the pull path it
-  falls back to blocks the UI thread **280-400 ms per 5 s interval
-  (~660 waits/s, single waits up to 8.8 ms)** — tails at the exact
-  ±8 ms step-deadline scale of 120 Hz pacing. Design: generalize the
-  published slot to a small ring of {handle, event value, seq, hold}
-  entries written at flip (the GPU-paced-steps machinery already
-  presents by seq + hold via `afterMinimumDuration`; the shared-event
-  contract already gates not-yet-finished interpolated outputs).
-  Hard parts: multi-entry retain lifetime (compositor-CB-ring
-  precedent), schedule invalidation on hitch-guard reset / resize /
-  teardown (generation counter), interpolator history contract
-  across skipped entries. Extend `XEMU_PUSH_PRESENT_REFUTE` to
-  schedule-vs-pull equivalence before trusting it.
+- ~~**Push-model present × frame interpolation (schedule publish).**~~
+  *Implemented 2026-07-11 (correctness-validated; perf bench pending).*
+  The push handoff no longer gates off under frame interpolation: the
+  single published slot is generalized to a small leaf-mutex-guarded
+  **ring** of `{handle, event value, seq, hold, generation}` entries.
+  At flip PFIFO publishes this flip's whole present schedule — one
+  entry interp-off, or the paced sub-flip steps (interpolated
+  midpoint step(s) then the real frame) interp-on — and the UI
+  consumes one step per frame in `seq` order with no round trip,
+  pacing GPU-side via `presentDrawable:afterMinimumDuration:`; the
+  shared-event contract gates not-yet-finished interpolated outputs.
+  Hard parts as handled: each ring entry owns a CFRetain dropped on
+  overwrite/invalidate (compositor-CB-ring-style lifetime); a
+  generation counter + ring-clear on hitch-guard reset / resize /
+  teardown fences off a stale schedule; the consume cursor is
+  monotonic so a step is never resurrected, and the ring drops its
+  oldest entries when the UI falls behind — the same content the pull
+  path drops when a new flip lands before the UI reads. The
+  interpolator's input history is untouched by ring overwrites (it
+  advances in `render_display` regardless of what the UI consumed).
+  `XEMU_PUSH_PRESENT_REFUTE=1` was extended to schedule-vs-pull
+  equivalence (monotonic `seq` stream, no skipped-then-resurrected
+  step, content equality where comparable): **0 mismatches / 0
+  resurrections** over a 5 min 2x-interp run. Motivation it removes:
+  measured 2026-07-11, the pull path interp fell back to blocked the
+  UI thread **280-400 ms per 5 s interval** — the orchestrator
+  re-benches the ring on a quiet machine.
 - **MetalFX *input* ring (drop `metalfx_drain_inflight`).** Ring the
   compositor *output* texture that MetalFX consumes (distinct from
   the landed compositor *command-buffer* ring). Measured: the drain

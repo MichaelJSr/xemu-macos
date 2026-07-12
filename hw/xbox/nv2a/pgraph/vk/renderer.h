@@ -340,6 +340,33 @@ typedef struct PvideoState {
     uint32_t color_key;
 } PvideoState;
 
+#if HAVE_IOSURFACE_SHARING
+/*
+ * One published present step in the push-model ring (XEMU_PUSH_PRESENT).
+ * A flip publishes 1 entry with interpolation off, or `mode` entries with
+ * interpolation on (the interp midpoint step(s) then the real frame), each
+ * carrying its intended on-screen hold. Exactly one of mtl_texture /
+ * iosurface is set; the entry owns a CFRetain on it until the ring slot is
+ * overwritten or invalidated.
+ */
+typedef struct PushPresentEntry {
+    void *mtl_texture;   // id<MTLTexture>, retained by the entry (or NULL)
+    void *iosurface;     // IOSurfaceRef, retained by the entry (or NULL)
+    void *event;         // id<MTLSharedEvent>, borrowed (sticky)
+    uint64_t event_value;
+    uint64_t frame_seq;
+    uint64_t duration_ns;
+    uint64_t generation; // schedule generation this entry belongs to
+    int width, height;
+} PushPresentEntry;
+
+/* Ring depth: two full 4x interpolation flips (max 4 steps each). Wide
+ * enough that a single flip's schedule never self-overwrites and a brief
+ * UI stall keeps a flip of slack; a deeper stall drops the oldest entries
+ * (bounded latency), matching the pull path's drop-stale-when-behind. */
+#define PUSH_PRESENT_RING_CAP 8
+#endif
+
 typedef struct PGRAPHVkDisplayState {
     ShaderModuleInfo *display_frag;
 
@@ -500,33 +527,42 @@ typedef struct PGRAPHVkDisplayState {
 
 #if HAVE_IOSURFACE_SHARING
     /*
-     * Push-model present handoff (XEMU_PUSH_PRESENT). The PFIFO thread
-     * mirrors the freshly-published present_* tuple into this slot at
-     * flip (pgraph_vk_present_slot_write); the UI present thread reads
-     * it (pgraph_vk_present_slot_read) with no cross-thread sync round
-     * trip.
+     * Push-model present handoff (XEMU_PUSH_PRESENT). At flip the PFIFO
+     * thread publishes this flip's present schedule — 1 step (interp off)
+     * or `mode` steps (interp on) — into present_ring
+     * (pgraph_vk_present_schedule_publish); the UI present thread consumes
+     * one step per frame (pgraph_vk_present_slot_read) with no cross-thread
+     * sync round trip, and paces the steps GPU-side via
+     * presentDrawable:afterMinimumDuration:.
      *
-     * present_slot_lock is a plain mutex, deliberately NOT a seqlock:
-     * the handles are reference counted, and a lock-free reader cannot
-     * CFRetain a pointer the writer may be concurrently CFReleasing
-     * (retain-after-free). The lock bounds the writer's release and the
-     * reader's retain into mutually-exclusive O(1) critical sections (a
-     * few CFRetain/CFRelease + field copies, no GPU work, no nested
+     * present_slot_lock is a plain mutex, deliberately NOT a seqlock: the
+     * handles are reference counted, and a lock-free reader cannot CFRetain
+     * a pointer the writer may be concurrently CFReleasing
+     * (retain-after-free). The lock bounds the writer's ring push and the
+     * reader's consume into mutually-exclusive O(mode<=4) critical sections
+     * (a few CFRetain/CFRelease + field copies, no GPU work, no nested
      * blocking wait), so it removes the round trip without reintroducing
-     * one. The slot owns its own CFRetain on the current handle (valid
-     * until the next publish overwrites it — the same discipline the
-     * pull handoff uses); the reader CFRetains under the lock so the
-     * handle provably survives past the next publish.
+     * one, and keeps the lock a leaf. Each ring entry owns its own CFRetain
+     * on its handle (dropped when the slot is overwritten or invalidated);
+     * the reader CFRetains under the lock so its handle provably survives
+     * past the next publish.
+     *
+     * The reader hands out steps in frame_seq order, consuming the oldest
+     * entry with seq > present_ring_consumed (a monotonic cursor, so a
+     * consumed step is never resurrected). When the ring overflows the
+     * oldest entry is dropped, so the reader can skip stale steps when it
+     * falls behind — the same content the pull path drops when a new flip
+     * lands before the UI reads. present_ring_generation is bumped by
+     * invalidate (resize / teardown / hitch-guard reset) to fence off a
+     * stale schedule.
      */
     QemuMutex present_slot_lock;
-    bool present_slot_valid;
-    void *slot_iosurface;   // IOSurfaceRef, retained by the slot
-    void *slot_mtl_texture; // id<MTLTexture>, retained by the slot
-    void *slot_event;       // id<MTLSharedEvent>, borrowed (sticky)
-    uint64_t slot_event_value;
-    uint64_t slot_frame_seq;
-    uint64_t slot_duration_ns;
-    int slot_width, slot_height;
+    PushPresentEntry present_ring[PUSH_PRESENT_RING_CAP];
+    uint32_t present_ring_head;       // next write index (mod CAP)
+    uint32_t present_ring_count;      // valid entries, <= CAP
+    uint64_t present_ring_consumed;   // highest frame_seq handed to reader
+    uint64_t present_ring_pub_seq;    // highest frame_seq pushed (dedup)
+    uint64_t present_ring_generation; // bumped on invalidate
 #endif
 } PGRAPHVkDisplayState;
 
@@ -1100,8 +1136,9 @@ void pgraph_vk_render_display(PGRAPHState *pg);
 #if HAVE_IOSURFACE_SHARING
 /* Push-model present (XEMU_PUSH_PRESENT); Metal backend only. */
 bool pgraph_vk_push_present_enabled(NV2AState *d);
-void pgraph_vk_present_slot_write(PGRAPHState *pg);
+void pgraph_vk_present_schedule_publish(PGRAPHState *pg);
 bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame);
+bool pgraph_vk_present_slot_peek(PGRAPHState *pg, struct NV2APresentFrame *frame);
 void pgraph_vk_present_slot_invalidate(PGRAPHState *pg);
 #endif
 

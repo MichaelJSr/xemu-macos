@@ -143,6 +143,11 @@ typedef struct PGRAPHRenderer {
          * on renderers without a push slot (GL/null). */
         bool (*get_present_frame_pushed)(NV2AState *d,
                                          struct NV2APresentFrame *frame);
+        /* Non-consuming counterpart to get_present_frame_pushed: reads the
+         * step the next _pushed read would consume without advancing the
+         * cursor. Debug-only (the push-present refuter). Optional. */
+        bool (*get_present_frame_peek)(NV2AState *d,
+                                       struct NV2APresentFrame *frame);
         GPUProperties *(*get_gpu_properties)(void);
     } ops;
 } PGRAPHRenderer;

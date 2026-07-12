@@ -606,6 +606,30 @@ bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame)
     return ok;
 }
 
+bool nv2a_get_present_frame_peek(NV2APresentFrame *frame)
+{
+    NV2AState *d = g_nv2a;
+    PGRAPHState *pg = &d->pgraph;
+    bool ok = false;
+
+    memset(frame, 0, sizeof(*frame));
+
+    if (!pg->renderer->ops.get_present_frame_peek) {
+        return false;
+    }
+
+    qemu_mutex_lock(&pg->renderer_lock);
+    assert(!pg->framebuffer_in_use);
+    pg->framebuffer_in_use = true;
+    ok = pg->renderer->ops.get_present_frame_peek(d, frame);
+    if (!ok) {
+        pg->framebuffer_in_use = false;
+    }
+    qemu_mutex_unlock(&pg->renderer_lock);
+
+    return ok;
+}
+
 void nv2a_release_framebuffer_surface(void)
 {
     NV2AState *d = g_nv2a;

@@ -225,7 +225,7 @@ static void pgraph_vk_flip_stall(NV2AState *d)
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now - last_push_publish_ns >= 8000000) {
             pgraph_vk_render_display(&d->pgraph);
-            pgraph_vk_present_slot_write(&d->pgraph);
+            pgraph_vk_present_schedule_publish(&d->pgraph);
             last_push_publish_ns = now;
         }
     }
@@ -372,6 +372,24 @@ static bool pgraph_vk_get_present_frame_pushed(NV2AState *d,
 #endif
 }
 
+/*
+ * Push-model peek: like _pushed but leaves the consume cursor untouched,
+ * so the refuter can inspect the step the UI's next read will consume
+ * without stealing it. Debug-only (XEMU_PUSH_PRESENT_REFUTE).
+ */
+static bool pgraph_vk_get_present_frame_peek(NV2AState *d,
+                                             NV2APresentFrame *frame)
+{
+#if HAVE_IOSURFACE_SHARING
+    if (!pgraph_vk_push_present_enabled(d)) {
+        return false;
+    }
+    return pgraph_vk_present_slot_peek(&d->pgraph, frame);
+#else
+    return false;
+#endif
+}
+
 static PGRAPHRenderer pgraph_vk_renderer = {
     .type = CONFIG_DISPLAY_RENDERER_VULKAN,
     .name = "Vulkan",
@@ -399,6 +417,7 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .get_framebuffer_surface = pgraph_vk_get_framebuffer_surface,
         .get_present_frame = pgraph_vk_get_present_frame,
         .get_present_frame_pushed = pgraph_vk_get_present_frame_pushed,
+        .get_present_frame_peek = pgraph_vk_get_present_frame_peek,
         .get_gpu_properties = pgraph_vk_get_gpu_properties,
     }
 };

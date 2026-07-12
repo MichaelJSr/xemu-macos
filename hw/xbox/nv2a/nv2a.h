@@ -67,6 +67,15 @@ bool nv2a_get_present_frame(NV2APresentFrame *frame);
  */
 bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame);
 
+/*
+ * Non-consuming peek of the push ring: returns the frame the next
+ * nv2a_get_present_frame_pushed() call will consume, WITHOUT advancing the
+ * consume cursor. Takes/needs the same framebuffer_in_use handshake — pair
+ * with nv2a_release_framebuffer_surface(). Debug-only (the push-present
+ * refuter); returns false without taking the handshake when unavailable.
+ */
+bool nv2a_get_present_frame_peek(NV2APresentFrame *frame);
+
 void nv2a_release_framebuffer_surface(void);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);

@@ -621,14 +621,21 @@ frame, `nv2a_get_present_frame()` performs one synchronous round trip to
 the PFIFO thread (NV2A's command-processing thread — see the glossary
 note in the architecture diagram) and blocks until PFIFO answers. Since
 2026-07-11 there is a default-OFF push-model alternative
-(`XEMU_PUSH_PRESENT=1`, Metal backend only, frame interpolation off):
-PFIFO publishes the complete present tuple {texture/IOSurface, shared
-event + value, frame_seq, dims} into a leaf-mutex-guarded slot at flip,
-and the UI reads the latest slot with no kick and no wait, deduping on
-`frame_seq`. Startup-before-first-publish, the GL backend, and
-interpolation-on all fall back to pull. The GPU-side ordering contract
-is unchanged in both models: the UI encodes its wait on the frame's
-`MTLSharedEvent` value before sampling.
+(`XEMU_PUSH_PRESENT=1`, Metal backend only): at flip PFIFO publishes this
+flip's present *schedule* into a leaf-mutex-guarded **ring** of
+`{texture/IOSurface, shared event + value, frame_seq, hold, generation}`
+entries — one entry with interpolation off, or the paced sub-flip steps
+(the interpolated midpoint step(s) then the real frame) with
+interpolation on — and the UI consumes one step per frame with no kick
+and no wait, in `frame_seq` order, pacing the steps GPU-side via
+`presentDrawable:afterMinimumDuration:`. Consumption is a monotonic
+cursor (a consumed step is never resurrected; when the UI falls behind
+the ring drops its oldest entries, the same content the pull path drops
+when a new flip lands before the UI reads). Startup-before-first-publish
+and the GL backend fall back to pull. The GPU-side ordering contract is
+unchanged in every model: the UI encodes its wait on the frame's
+`MTLSharedEvent` value before sampling, and interpolated outputs the GPU
+hasn't finished are gated by that same shared-event value.
 
 **Evidence.** `nv2a_get_present_frame()`
 (`hw/xbox/nv2a/pgraph/pgraph.c:443-460`) takes `pg->renderer_lock`,
@@ -659,13 +666,22 @@ iteration regardless of how long the previous iteration took, and calls
 *publishes* a new present frame (the PFIFO-side sync handshake is shared
 machinery, not present-specific), so pull cannot do a UI-side
 "skip presenting if nothing changed" pre-check without first paying the
-round trip. The push slot exists precisely to break that coupling —
+round trip. The push ring exists precisely to break that coupling —
 publish at flip, read without blocking — and its equivalence to pull is
-refuter-proven (`XEMU_PUSH_PRESENT_REFUTE=1`: equal-`frame_seq` pushed
-and pulled reads must describe identical content; 47k+ comparisons, 0
-mismatches on record). Push deliberately uses a leaf mutex, not a
-seqlock: the slot hands out reference-counted handles, and a lock-free
-reader could CFRetain a pointer the writer concurrently CFReleases.
+refuter-proven (`XEMU_PUSH_PRESENT_REFUTE=1`: the consumed `frame_seq`
+stream must be monotonic with no skipped-then-resurrected step, and
+equal-`frame_seq` pushed-vs-pull reads must describe identical content;
+47k+ comparisons interp-off, 0 mismatches on record; interp-on adds the
+schedule-stream check). Push deliberately uses a leaf mutex, not a
+seqlock: the ring hands out reference-counted handles, and a lock-free
+reader could CFRetain a pointer the writer concurrently CFReleases; each
+entry owns a CFRetain until it is overwritten or invalidated, and a
+generation counter (bumped on resize / teardown / hitch-guard reset)
+fences off a stale schedule. Because the ring owns each flip's whole
+schedule, `pgraph_vk_present_schedule_publish` leaves `present_*` /
+`present_frame_seq` mirroring the final published step and clears the
+interp stepping state, so the pull path stays self-consistent (and
+non-perturbing) even while push is active.
 
 Vblank cadence is intentionally NOT tied to host display refresh: an
 earlier attempt to align `vblank_interval_ns` to the host's actual
@@ -689,9 +705,9 @@ inside the PFIFO-side handshake (e.g. adding synchronous work to the
 the UI thread is synchronously waiting on it.
 
 **Escape hatch.** The pull model IS the default and the hatch:
-`XEMU_PUSH_PRESENT=1` opts into the push slot (Metal, interpolation
-off), and unsetting it — or any fallback condition — restores pull
-wholesale. `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence checker.
+`XEMU_PUSH_PRESENT=1` opts into the push ring (Metal, both interpolation
+on and off), and unsetting it — or any fallback condition — restores
+pull wholesale. `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence checker.
 `vblank_interval_ns` and `use_vblank_timer_thread` are file-scope
 globals in `ui/xemu.c` (not currently exposed as config/env), used for
 PAL-mode consideration — see Known weak points.

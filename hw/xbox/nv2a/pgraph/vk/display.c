@@ -106,107 +106,238 @@ bool pgraph_vk_push_present_enabled(NV2AState *d)
         return false;
     }
     /*
-     * Frame interpolation paces sub-flip present steps that only the
-     * pull cadence drives; publishing once per flip would silently
-     * disable it. Fall back to pull whenever interpolation is on. (Test
-     * against the two "on" values so we don't depend on the generated
-     * name of the "off" enumerator.)
+     * Frame interpolation is handled too: the flip publishes this flip's
+     * whole sub-flip step schedule into the ring (midpoint step(s) then the
+     * real frame), and the UI consumes one step per frame and paces them
+     * GPU-side. See pgraph_vk_present_schedule_publish.
      */
-    if (g_config.display.frame_interpolation ==
-            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X ||
-        g_config.display.frame_interpolation ==
-            CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
-        return false;
-    }
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     return r && r->metal_objects_extension_enabled;
 }
 
-/* Writer (PFIFO thread): mirror the just-published present_* tuple into
- * the slot, taking the slot's own CFRetain on the current handle and
- * dropping the previous one. */
-void pgraph_vk_present_slot_write(PGRAPHState *pg)
+/* Push one already-built step into the ring under the slot lock (caller
+ * holds it). Drops the oldest entry's retain when the ring is full. */
+static void present_ring_push(PGRAPHVkDisplayState *disp,
+                              const PushPresentEntry *entry)
+{
+    if (disp->present_ring_count == PUSH_PRESENT_RING_CAP) {
+        PushPresentEntry *old = &disp->present_ring[disp->present_ring_head];
+        if (old->mtl_texture) {
+            CFRelease(old->mtl_texture);
+        } else if (old->iosurface) {
+            CFRelease((IOSurfaceRef)old->iosurface);
+        }
+    } else {
+        disp->present_ring_count++;
+    }
+    disp->present_ring[disp->present_ring_head] = *entry;
+    disp->present_ring_head =
+        (disp->present_ring_head + 1) % PUSH_PRESENT_RING_CAP;
+    if (entry->frame_seq > disp->present_ring_pub_seq) {
+        disp->present_ring_pub_seq = entry->frame_seq;
+    }
+}
+
+/* Writer (PFIFO thread, at flip): build this flip's present schedule from
+ * the just-rendered display state and push it into the ring. Interp off:
+ * one entry (the real frame, unpaced). Interp on: (mode-1) copies of the
+ * interpolated midpoint step then the held real frame, each held
+ * interp_step_ns and numbered with the next present_frame_seq exactly as
+ * the pull path steps them. No-op when render_display published nothing
+ * newer than the ring already holds (the flip gate opened with no new
+ * frame), so duplicate-seq entries can't accumulate. */
+void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
 {
     PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
 
     qemu_mutex_lock(&disp->present_slot_lock);
-    if (disp->slot_mtl_texture) {
-        CFRelease(disp->slot_mtl_texture);
-        disp->slot_mtl_texture = NULL;
+
+    if (disp->present_frame_seq <= disp->present_ring_pub_seq) {
+        qemu_mutex_unlock(&disp->present_slot_lock);
+        return;
     }
-    if (disp->slot_iosurface) {
-        CFRelease((IOSurfaceRef)disp->slot_iosurface);
-        disp->slot_iosurface = NULL;
+
+    int mode = 0;
+    if (g_config.display.frame_interpolation ==
+            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
+        mode = 2;
+    } else if (g_config.display.frame_interpolation ==
+                   CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
+        mode = 4;
     }
-    if (disp->present_mtl_texture) {
-        disp->slot_mtl_texture = (void *)CFRetain(disp->present_mtl_texture);
-    } else if (disp->present_iosurface) {
-        disp->slot_iosurface =
-            (void *)CFRetain((IOSurfaceRef)disp->present_iosurface);
+
+    uint64_t gen = disp->present_ring_generation;
+
+    if (mode >= 2 && disp->pending_real_texture &&
+        disp->interp_midpoint_texture) {
+        uint64_t seq = disp->present_frame_seq;
+        for (int i = 0; i < mode - 1; i++) {
+            PushPresentEntry e = {
+                .mtl_texture =
+                    (void *)CFRetain(disp->interp_midpoint_texture),
+                .event = disp->present_event,
+                .event_value = disp->interp_midpoint_event_value,
+                .frame_seq = seq,
+                .duration_ns = disp->interp_step_ns,
+                .generation = gen,
+                .width = disp->present_width,
+                .height = disp->present_height,
+            };
+            present_ring_push(disp, &e);
+            seq = ++disp->present_frame_seq;
+        }
+        PushPresentEntry real = {
+            .mtl_texture = (void *)CFRetain(disp->pending_real_texture),
+            .event = disp->present_event,
+            .event_value = disp->pending_real_event_value,
+            .frame_seq = seq,
+            .duration_ns = disp->interp_step_ns,
+            .generation = gen,
+            .width = disp->present_width,
+            .height = disp->present_height,
+        };
+        present_ring_push(disp, &real);
+
+        /*
+         * The ring now owns this flip's whole schedule. Leave present_* /
+         * present_frame_seq mirroring the FINAL step (the real frame) —
+         * present_frame_seq already equals its seq — so the pull path
+         * (startup fallback, and the refuter's cross-check) returns a
+         * self-consistent (seq, texture) pair instead of a seq the loop
+         * advanced past a stale midpoint. Hand the interp stepping state to
+         * the ring (interp_remaining = 0, pending_real cleared) so a pull
+         * neither re-steps this schedule nor perturbs it. render_display
+         * repopulates both on the next flip.
+         */
+        if (disp->present_mtl_texture) {
+            CFRelease(disp->present_mtl_texture);
+        }
+        disp->present_mtl_texture = disp->pending_real_texture; /* retain xfer */
+        disp->pending_real_texture = NULL;
+        disp->present_event_value = disp->pending_real_event_value;
+        disp->present_duration_ns = disp->interp_step_ns;
+        disp->interp_remaining = 0;
+    } else {
+        PushPresentEntry e = {
+            .event = disp->present_event, /* borrowed / sticky */
+            .event_value = disp->present_event_value,
+            .frame_seq = disp->present_frame_seq,
+            .duration_ns = disp->present_duration_ns,
+            .generation = gen,
+            .width = disp->present_width,
+            .height = disp->present_height,
+        };
+        if (disp->present_mtl_texture) {
+            e.mtl_texture = (void *)CFRetain(disp->present_mtl_texture);
+        } else if (disp->present_iosurface) {
+            e.iosurface =
+                (void *)CFRetain((IOSurfaceRef)disp->present_iosurface);
+        }
+        if (e.mtl_texture || e.iosurface) {
+            present_ring_push(disp, &e);
+        }
     }
-    disp->slot_event = disp->present_event; /* borrowed / sticky */
-    disp->slot_event_value = disp->present_event_value;
-    disp->slot_frame_seq = disp->present_frame_seq;
-    disp->slot_duration_ns = disp->present_duration_ns;
-    disp->slot_width = disp->present_width;
-    disp->slot_height = disp->present_height;
-    disp->present_slot_valid =
-        disp->slot_mtl_texture != NULL || disp->slot_iosurface != NULL;
     qemu_mutex_unlock(&disp->present_slot_lock);
 }
 
-/* Reader (UI present thread): copy the slot into `frame`, taking a fresh
- * CFRetain on the handle so it outlives the next publish. Returns false
- * (UI falls back to pull) when nothing valid is published yet. */
-bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame)
+/* Pick the entry to hand the reader: the oldest step past the consume
+ * cursor (the next unconsumed step), or the newest entry when all are
+ * consumed (the reader re-reads the last frame and dedups on frame_seq).
+ * NULL only when the ring is empty. Caller holds the lock. */
+static PushPresentEntry *present_ring_next(PGRAPHVkDisplayState *disp)
 {
-    PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
-    bool ok = false;
-
-    qemu_mutex_lock(&disp->present_slot_lock);
-    if (disp->present_slot_valid) {
-        if (disp->slot_mtl_texture) {
-            frame->mtl_texture = (void *)CFRetain(disp->slot_mtl_texture);
-        } else if (disp->slot_iosurface) {
-            frame->iosurface =
-                (void *)CFRetain((IOSurfaceRef)disp->slot_iosurface);
+    PushPresentEntry *oldest_unconsumed = NULL, *newest = NULL;
+    for (uint32_t i = 0; i < disp->present_ring_count; i++) {
+        uint32_t idx = (disp->present_ring_head + PUSH_PRESENT_RING_CAP - 1 -
+                        i) % PUSH_PRESENT_RING_CAP;
+        PushPresentEntry *e = &disp->present_ring[idx];
+        /* Only the current schedule is consumable. invalidate() clears the
+         * ring and bumps the generation together, so this never skips a
+         * live entry; it fences off any entry a future partial-invalidate
+         * might leave behind. */
+        if (e->generation != disp->present_ring_generation) {
+            continue;
         }
-        frame->event = disp->slot_event;
-        frame->event_value = disp->slot_event_value;
-        frame->frame_seq = disp->slot_frame_seq;
-        frame->display_duration_ns = disp->slot_duration_ns;
-        frame->width = disp->slot_width;
-        frame->height = disp->slot_height;
+        if (!newest || e->frame_seq > newest->frame_seq) {
+            newest = e;
+        }
+        if (e->frame_seq > disp->present_ring_consumed &&
+            (!oldest_unconsumed ||
+             e->frame_seq < oldest_unconsumed->frame_seq)) {
+            oldest_unconsumed = e;
+        }
+    }
+    return oldest_unconsumed ? oldest_unconsumed : newest;
+}
+
+/* Copy the chosen ring entry into `frame`, CFRetaining its handle so it
+ * outlives the next publish. When `consume`, advance the (monotonic)
+ * consume cursor so the next read returns the following step; peek leaves
+ * it untouched (the refuter reads the same entry the UI will consume). */
+static bool present_ring_take(PGRAPHVkDisplayState *disp,
+                              struct NV2APresentFrame *frame, bool consume)
+{
+    bool ok = false;
+    qemu_mutex_lock(&disp->present_slot_lock);
+    PushPresentEntry *e = present_ring_next(disp);
+    if (e) {
+        if (e->mtl_texture) {
+            frame->mtl_texture = (void *)CFRetain(e->mtl_texture);
+        } else if (e->iosurface) {
+            frame->iosurface = (void *)CFRetain((IOSurfaceRef)e->iosurface);
+        }
+        frame->event = e->event;
+        frame->event_value = e->event_value;
+        frame->frame_seq = e->frame_seq;
+        frame->display_duration_ns = e->duration_ns;
+        frame->width = e->width;
+        frame->height = e->height;
+        if (consume && e->frame_seq > disp->present_ring_consumed) {
+            disp->present_ring_consumed = e->frame_seq;
+        }
         ok = frame->mtl_texture != NULL || frame->iosurface != NULL;
     }
     qemu_mutex_unlock(&disp->present_slot_lock);
     return ok;
 }
 
-/* Drop the published frame: called wherever interpolation state is
- * dropped (resize via destroy_current_display_image, renderer teardown
- * via finalize). frame_seq resets to 0 so the UI falls back to pull
- * until the next flip republishes. */
+/* Reader (UI present thread): consume the next unconsumed step. */
+bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame)
+{
+    return present_ring_take(&pg->vk_renderer_state->display, frame, true);
+}
+
+/* Non-consuming read of the step the next read would consume (refuter). */
+bool pgraph_vk_present_slot_peek(PGRAPHState *pg, struct NV2APresentFrame *frame)
+{
+    return present_ring_take(&pg->vk_renderer_state->display, frame, false);
+}
+
+/* Fence off the current schedule: called wherever interpolation state is
+ * dropped (resize via destroy_current_display_image, renderer teardown via
+ * finalize, hitch-guard reset in render_display). Releases every entry's
+ * retain and bumps the generation. The consume cursor is a monotonic
+ * high-water mark and is deliberately NOT reset, so a consumed step is
+ * never resurrected; the next flip republishes with a higher frame_seq. */
 void pgraph_vk_present_slot_invalidate(PGRAPHState *pg)
 {
     PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
 
     qemu_mutex_lock(&disp->present_slot_lock);
-    if (disp->slot_mtl_texture) {
-        CFRelease(disp->slot_mtl_texture);
-        disp->slot_mtl_texture = NULL;
+    for (uint32_t i = 0; i < disp->present_ring_count; i++) {
+        uint32_t idx = (disp->present_ring_head + PUSH_PRESENT_RING_CAP - 1 -
+                        i) % PUSH_PRESENT_RING_CAP;
+        PushPresentEntry *e = &disp->present_ring[idx];
+        if (e->mtl_texture) {
+            CFRelease(e->mtl_texture);
+        } else if (e->iosurface) {
+            CFRelease((IOSurfaceRef)e->iosurface);
+        }
+        memset(e, 0, sizeof(*e));
     }
-    if (disp->slot_iosurface) {
-        CFRelease((IOSurfaceRef)disp->slot_iosurface);
-        disp->slot_iosurface = NULL;
-    }
-    disp->slot_event = NULL;
-    disp->slot_event_value = 0;
-    disp->slot_frame_seq = 0;
-    disp->slot_duration_ns = 0;
-    disp->slot_width = 0;
-    disp->slot_height = 0;
-    disp->present_slot_valid = false;
+    disp->present_ring_head = 0;
+    disp->present_ring_count = 0;
+    disp->present_ring_generation++;
     qemu_mutex_unlock(&disp->present_slot_lock);
 }
 #endif
@@ -2159,6 +2290,12 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                     if (hitch) {
                         disp->interp_remaining = 0;
                         metalfx_interpolation_reset();
+                        /* Fence off any un-consumed pre-hitch steps in the
+                         * push ring so the UI jumps to this real frame
+                         * instead of draining stale interpolated steps
+                         * across the content jump (the pull path drops
+                         * them the same way). */
+                        pgraph_vk_present_slot_invalidate(pg);
                     } else if (disp->interp_prev_surface) {
                         disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
                         disp->interp_width = iw;

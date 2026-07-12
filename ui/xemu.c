@@ -976,13 +976,23 @@ static void gl_render_frame(struct xemu_console *scon)
 #ifdef __APPLE__
 /*
  * Push-present refuter (XEMU_PUSH_PRESENT_REFUTE=1, debug). Every frame,
- * read the pushed slot and immediately pull-fetch the same instant. When
- * both report the same frame_seq they MUST describe identical content
- * (same texture/iosurface pointer, shared event + value, dims) — proving
- * the push fast path publishes exactly what the pull path would, before
- * anyone trusts it. Prints a running compared/mismatch tally every ~5 s.
- * A new flip landing between the two reads simply advances one seq and is
- * skipped (only equal-seq pairs are asserted). No-op when push is off.
+ * PEEK the push ring (the step the UI's next read will consume, cursor
+ * untouched) and validate the schedule-vs-pull equivalence the ring must
+ * uphold:
+ *   - seq monotonicity / no skipped-then-resurrected frames: the peeked
+ *     (soon-consumed) seq never regresses below one already handed out.
+ *   - handle/eventvalue equality where comparable: when the pull path
+ *     would return this exact seq, both MUST describe identical content.
+ *     For an unpaced single-compositor frame (interp off / hitch) that is
+ *     the full texture+value+dims check. For a paced interpolation step it
+ *     is only the shared event object + dims: push and pull each run their
+ *     own MetalFX submit for the step, handing pixel-equivalent outputs in
+ *     different allocations (the texture/value pointers legitimately
+ *     differ; that content is instead equal by construction — both copy the
+ *     same render_display interp output). The monotonicity check still
+ *     covers every consumed step. Prints a running tally every ~5 s. No-op
+ *     when push is off. Enabling this re-introduces the pull round trip for
+ *     cross-checking — measure perf with it OFF.
  */
 static bool push_present_refute_enabled(void)
 {
@@ -996,12 +1006,14 @@ static bool push_present_refute_enabled(void)
 
 static void push_present_refute_step(void)
 {
+    /* Peek the step the UI's next read will consume (cursor untouched). */
     NV2APresentFrame pf = { 0 };
-    if (!nv2a_get_present_frame_pushed(&pf)) {
+    if (!nv2a_get_present_frame_peek(&pf)) {
         return; /* push inactive / nothing published — nothing to refute */
     }
     void *p_tex = pf.mtl_texture, *p_ios = pf.iosurface, *p_ev = pf.event;
     uint64_t p_evv = pf.event_value, p_seq = pf.frame_seq;
+    uint64_t p_dur = pf.display_duration_ns;
     int p_w = pf.width, p_h = pf.height;
     if (pf.mtl_texture) {
         xemu_metal_release_handle(pf.mtl_texture);
@@ -1010,6 +1022,26 @@ static void push_present_refute_step(void)
     }
     nv2a_release_framebuffer_surface();
 
+    static uint64_t compared, mismatches, resurrections, peeked, last_seq;
+    static bool have_last;
+
+    peeked++;
+    if (have_last && p_seq < last_seq) {
+        resurrections++;
+        if (resurrections <= 8) {
+            fprintf(stderr,
+                    "push_refute RESURRECTION seq=%llu < last handed %llu\n",
+                    (unsigned long long)p_seq, (unsigned long long)last_seq);
+        }
+    }
+    if (!have_last || p_seq > last_seq) {
+        last_seq = p_seq;
+        have_last = true;
+    }
+
+    /* Content equivalence where comparable: the pull path's frame, when it
+     * lands on this exact seq, must be identical. (Enabling the refuter
+     * pays the pull round trip purely for this cross-check.) */
     NV2APresentFrame lf = { 0 };
     nv2a_get_present_frame(&lf);
     void *l_tex = lf.mtl_texture, *l_ios = lf.iosurface, *l_ev = lf.event;
@@ -1017,27 +1049,46 @@ static void push_present_refute_step(void)
     int l_w = lf.width, l_h = lf.height;
     nv2a_release_framebuffer_surface();
 
-    static uint64_t compared, mismatches, last_report_ms;
     if (p_seq && p_seq == l_seq) {
         compared++;
-        if (p_tex != l_tex || p_ios != l_ios || p_ev != l_ev ||
-            p_evv != l_evv || p_w != l_w || p_h != l_h) {
+        /*
+         * A paced entry (p_dur > 0) is an interpolation step. Push and pull
+         * are independent steppers there: each runs its OWN MetalFX submit
+         * for the step, so the two hand pixel-equivalent outputs in
+         * DIFFERENT texture allocations with per-submit event values — the
+         * texture/value pointers legitimately differ (observed: value off by
+         * exactly 1). Only the shared event object, dims, and seq order are
+         * comparable. The full texture/value identity check applies to
+         * unpaced single-compositor-output frames (interp off, hitch), where
+         * both paths hand the same underlying frame.
+         */
+        bool bad = p_ev != l_ev || p_w != l_w || p_h != l_h;
+        if (p_dur == 0) {
+            bad = bad || p_tex != l_tex || p_ios != l_ios || p_evv != l_evv;
+        }
+        if (bad) {
             mismatches++;
             if (mismatches <= 8) {
                 fprintf(stderr,
-                        "push_refute MISMATCH seq=%llu tex %p/%p ios %p/%p "
-                        "ev %p/%p val %llu/%llu dim %dx%d/%dx%d\n",
-                        (unsigned long long)p_seq, p_tex, l_tex, p_ios, l_ios,
-                        p_ev, l_ev, (unsigned long long)p_evv,
-                        (unsigned long long)l_evv, p_w, p_h, l_w, l_h);
+                        "push_refute MISMATCH seq=%llu dur=%llu tex %p/%p "
+                        "ios %p/%p ev %p/%p val %llu/%llu dim %dx%d/%dx%d\n",
+                        (unsigned long long)p_seq, (unsigned long long)p_dur,
+                        p_tex, l_tex, p_ios, l_ios, p_ev, l_ev,
+                        (unsigned long long)p_evv, (unsigned long long)l_evv,
+                        p_w, p_h, l_w, l_h);
             }
         }
     }
     uint64_t now_ms = SDL_GetTicks();
+    static uint64_t last_report_ms;
     if (now_ms - last_report_ms >= 5000) {
         last_report_ms = now_ms;
-        fprintf(stderr, "push_refute: compared=%llu mismatches=%llu\n",
-                (unsigned long long)compared, (unsigned long long)mismatches);
+        fprintf(stderr,
+                "push_refute: peeked=%llu compared=%llu mismatches=%llu "
+                "resurrections=%llu\n",
+                (unsigned long long)peeked, (unsigned long long)compared,
+                (unsigned long long)mismatches,
+                (unsigned long long)resurrections);
     }
 }
 
