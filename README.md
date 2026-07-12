@@ -965,10 +965,25 @@ it. Instruments to re-run before starting any of these:
    writes/epoch free — it was removed FOR performance on the Xbox
    data-shares-a-code-page pattern. So `XEMU_TB_RANGE_INV` is a
    correctness-verified dark A/B knob predicted **neutral-to-negative**;
-   the real lever is **sub-page dirty tracking** (stop the non-code write
-   from trapping at all), sketched but parked pending a correctness review
-   (shared dirty-bitmap race class). Interleaved A/B to confirm the kill:
-   `scripts/bench-savestate-ab.sh <snap> XEMU_TB_RANGE_INV`.
+   the real lever is **sub-page dirty tracking**. That is now implemented
+   dark behind `XEMU_SUBPAGE_DIRTY=1` (2026-07-11): a per-`PageDesc` 64-block
+   bitmap fast-skips whole-page invalidation for a data store that misses
+   every code sub-block, using an **O(1) bitmap test in place of RANGE_INV's
+   O(N) scan** — which is why the "25× traps ⇒ negative" proxy that killed
+   RANGE_INV does not apply here (each extra trap is O(1), not an O(N)
+   scan). `XEMU_INV_TIMING` body-timing predicts a net vCPU win for any
+   store-dispatch under ~750 ns (`GATE0-PREDICTION.md`); on F8 it collapsed
+   real invalidations 290,595 → 11,180 (25.9×) with the guest correct, and
+   `XEMU_SUBPAGE_REFUTE=1` found 0 violations over ~4M filter-skips. Ships
+   dark pending the interleaved fps A/B (`scripts/bench-savestate-ab.sh
+   <snap> XEMU_SUBPAGE_DIRTY`; kill line = any fps regression). The
+   higher-ceiling form that removes the trap itself (a sub-block probe in
+   the host-`tcg/aarch64` `qemu_st` fast path, predicted ~+2.5% vCPU) is a
+   separate Class-5 codegen effort — scope in `GATE0-PREDICTION.md` §2,
+   gated on an explicit decision to accept shared/Windows-arm64 codegen
+   risk. `XEMU_SUBPAGE_DIRTY`'s A/B doubles as its go/no-go: if the O(1)
+   arm's vCPU saving does not convert to fps on this busy-poll CPU-bound
+   limiter, the larger-but-riskier codegen form won't either.
 2. **Cross-page direct chaining, Xbox-relaxed** (a week; risky).
    The "other" 43% of the exit census is dominated by cross-page
    direct jumps that pay the ~20-op inline probe today. Upstream
