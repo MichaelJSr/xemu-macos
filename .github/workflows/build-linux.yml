@@ -168,3 +168,99 @@ jobs:
         name: ${{ env.ARTIFACT_NAME }}
         path: dist
         compression-level: 0
+
+  test:
+    # xbox unit suite on Linux. The macOS legs already run this suite
+    # (build-macos.yml), but they can reuse that job's meson build dir;
+    # the Linux `build` job above goes through dpkg-buildpackage with no
+    # accessible meson build directory, so tests get their own job with
+    # a plain build.sh build tree. This is additive — it does not touch
+    # the packaging `build` job.
+    #
+    # The ubuntu-*-arm leg is the point: it exercises the fork's inline
+    # DSP56300 ARM64 JIT (DSP56K_JIT_SUPPORTED = __aarch64__ && !_WIN32,
+    # hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h) on non-Apple
+    # aarch64 for the first time. Off Apple the JIT code buffer is a
+    # plain RWX mmap and the W^X toggles (qemu_thread_jit_write/execute)
+    # are no-ops, so nothing here is Apple-specific; if a hardened kernel
+    # refuses the RWX mapping the engine falls back to the interpreter
+    # and the corpus arm's engagement assert is skipped (see
+    # test-dsp-jit-diff.c). The x86_64 leg builds DSP56K_JIT_SUPPORTED=0
+    # and runs the interpreter-only arms.
+    name: Test xbox suite (${{ matrix.arch }})
+    runs-on: ubuntu-22.04${{ matrix.arch == 'aarch64' && '-arm' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      CCACHE_DIR: /tmp/xemu-ccache-test
+      CCACHE_MAXSIZE: 512M
+    steps:
+    - name: Download source package
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4
+      with:
+        name: src
+    - name: Extract source package
+      run: |
+        mkdir src
+        tar -xf xemu-${{ inputs.pkg_version }}.tar.zst -C src --strip-components=2
+    - name: Initialize compiler cache
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: cache-test-${{ runner.os }}-${{ matrix.arch }}-${{ github.sha }}
+        restore-keys: cache-test-${{ runner.os }}-${{ matrix.arch }}-
+    - name: Create debian changelog
+      run: |
+        pushd src
+        echo -e "\
+        xemu (1:0.0.0-0) unstable; urgency=medium\n\
+          Built from ${{ inputs.pkg_version }})\n\
+         -- Matt Borgerson <contact@mborgerson.com>  $(date -R)" > debian/changelog
+        popd
+    - name: Install dependencies
+      # build-dep reads the local debian/control (no deb-src needed) and
+      # pulls the same C library / toolchain set the packaging build uses,
+      # minus the release job's clang-21 LLVM apt dance — the suite build
+      # below uses stock gcc.
+      run: |
+        sudo apt-get -qy update
+        sudo apt-get -qy install ccache
+        pushd src
+        sudo apt-get -qy build-dep .
+        popd
+    - name: Setup ccache
+      run: |
+        echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+        mkdir -p ${CCACHE_DIR}
+        ccache -z
+    - name: Compile
+      # Debug build with stock gcc, on purpose:
+      #   * build.sh's release path forces -Db_lto_mode=thin, which is a
+      #     meson setup error under gcc (its own comment says so); using
+      #     release would mean pulling in clang/lld only to satisfy an LTO
+      #     mode the suite does not need.
+      #   * the DSP interpreter/JIT differential and swizzle round-trip
+      #     are bit-exact and optimization-independent, so debug validates
+      #     exactly what release would — and links far faster.
+      # A full build.sh (not tests-only) also compiles the whole fork on
+      # Linux x86_64 and aarch64, so the DSP JIT TU is exercised in the
+      # real binary too, then `ninja test-xbox` reuses this build dir.
+      run: |
+        cd src
+        ./build.sh --debug
+    - name: Run xbox test suite
+      # Mirrors build-macos.yml: `ninja test-xbox` builds exactly the
+      # xbox test executables; --no-rebuild stops meson from building the
+      # rest of the QEMU test universe. Covers the restored DSP unit
+      # test, the swizzle round-trip, the interpreter golden corpus, and
+      # (aarch64 only) the three inline-JIT differential arms. Seconds; no
+      # game content.
+      run: |
+        cd src/build
+        ninja test-xbox
+        ./pyvenv/bin/meson test --suite xbox --print-errorlogs --no-rebuild
+    - name: Report ccache stats
+      run: ccache -s
