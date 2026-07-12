@@ -349,6 +349,13 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tb->cs_base = s.cs_base;
     tb->flags = s.flags;
     tb->cflags = s.cflags;
+    /*
+     * xemu: pre-translate init — the translator sets the "emitted a relaxed
+     * cross-page goto_tb slot" bit (XEMU_XPAGE_TB_CROSS_EMITTER) during
+     * gen_jmp_rel, so this must be cleared BEFORE translation, not in
+     * translator_loop's post-loop block.
+     */
+    tb->xemu_xpage_reg = 0;
     tb_set_page_addr0(tb, phys_pc);
     tb_set_page_addr1(tb, -1);
     if (phys_pc != -1) {

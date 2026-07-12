@@ -137,10 +137,11 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining — **default ON (broad)** since 2026-07-12 (`0` restores upstream same-page-only chaining; `1` = kernel-identity window only). Sound by construction: INVLPG (per-page) + CR3 helper backstops plus a generic `tlb_flush_by_mmuidx` backstop covering every remaining full-flush class (count-deduped queued tb_flush; fired 799× across an 8-reload soak, 0 refuter violations in 1.71B checks). A/B: +1.30±0.29 fps F8 pre-subpage (7/7 pairs); +0.77±0.55 on top of sub-page tracking (3/3) |
+| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining — **default ON (broad)** since 2026-07-12 (`0` restores upstream same-page-only chaining; `1` = kernel-identity window only). Sound by construction: INVLPG (per-page) backstop plus CR3 + generic `tlb_flush_by_mmuidx` backstops covering every full-flush class (0 refuter violations in 1.71B checks across the promotion soak). A/B: +1.30±0.29 fps F8 pre-subpage (7/7 pairs); +0.77±0.55 on top of sub-page tracking (3/3) |
+| `XEMU_XPAGE_UNLINK` | **Default ON (v0.11.1)**: the full-flush backstop severs only the registered cross-page chains (synchronous `tb_jmp_unlink` walk; translations survive, chains relink lazily). `=0` restores the v0.11 queued whole-`tb_flush` backstop — which caused the new-area/death-reload lag (139 tb_flushes in 20 s of first-visit walking on F8, fps trough 14.6 vs 38.6 baseline; 0 flushes and no trough with the unlink). Registry overflow falls back to the full flush automatically |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
-| `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Opt-in pending a daily-driving soak |
+| `XEMU_PUSH_PRESENT` | **Default ON since 2026-07-12** (Metal backend): publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Set `=0` to restore the legacy pull handshake wholesale |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -204,15 +205,31 @@ In-app Settings covers the main toggles.
   jump-cache probe (the "other" 43% of the exit census). Upstream
   forbids this because mappings can change under a chain; the fork
   makes it sound by construction with three backstops — INVLPG
-  invalidates the flushed code page, CR3 writes and every remaining
-  full-TLB-flush class (generic `tlb_flush_by_mmuidx` hook) sever all
-  chains via a count-deduped queued tb_flush. Refuter
-  (`XEMU_XPAGE_REFUTE`: page-table-walk, closing the stale-chain
-  fetch-bypass hole): 0 violations over 3.15B+1.71B checks across 20
-  reload cycles, with the full-flush backstop observed firing 799×.
+  invalidates the flushed code page; CR3 writes and every remaining
+  full-TLB-flush class (generic `tlb_flush_by_mmuidx` hook) sever the
+  registered cross-page chains. Refuter (`XEMU_XPAGE_REFUTE`:
+  page-table-walk, closing the stale-chain fetch-bypass hole): 0
+  violations over 3.15B+1.71B checks across 20 reload cycles.
   Interleaved A/B: **+1.30±0.29 fps F8 (7/7 pairs) pre-subpage;
   +0.77±0.55 (3/3) on top of sub-page tracking**. `XEMU_XPAGE_CHAIN=0`
   restores upstream same-page-only chaining.
+  **Backstop v2 (v0.11.1, the "new-area lag" fix).** v0.11's full-flush
+  backstop severed chains with a queued **whole translation-cache
+  flush**; guest level streaming turned out to fire full-TLB-flush
+  classes continuously (CR3 reloads included, contrary to the
+  single-address-space assumption), so first visits to new areas paid
+  a retranslation storm — measured **139 tb_flushes in 20 s** of
+  first-visit walking on F8 with an fps trough to **14.6 vs a 38.6
+  settled baseline**, exactly the reported map-transition/death/fast-
+  travel lag (revisits: 0 flushes, no lag). Now every cross-page link
+  registers its destination TB at link time — emission-driven: the
+  translator flags TBs that emit relaxed cross-page slots, and every
+  dest they link registers (a phys-only test would miss virtual-alias
+  targets sharing the source's phys page), with a phys-mismatch
+  fallback as belt-and-braces — and the backstop synchronously unlinks
+  exactly those chains (`tb_jmp_unlink`), keeping every translation;
+  chains relink lazily. Registry overflow (128k dests) or
+  `XEMU_XPAGE_UNLINK=0` falls back to the v0.11 queued full flush.
 - **Inline hard FPU.** x87 ops emit native AArch64 FP
   (`FADD`/`FMUL`/`FDIV`/`FSQRT`); `floatx80`↔`double` inlined
   (~15 vs ~40 host insns); values stay in D-regs across TBs.
@@ -576,18 +593,18 @@ In-app Settings covers the main toggles.
   selectable (`presentation_backend = 'opengl'`) and is the only
   path for the OpenGL NV2A renderer (switching renderer away from
   Vulkan under Metal prompts for a restart).
-- **Push-model present handoff** (behind `XEMU_PUSH_PRESENT=1`,
-  default off; Metal backend). The published slot is now a ring that
-  also carries frame interpolation's paced sub-flip steps (see the
-  schedule-publish entry under Future vectors). Measured quiet
+- **Push-model present handoff** (**default ON since 2026-07-12**,
+  owner promotion; `XEMU_PUSH_PRESENT=0` restores the legacy pull
+  handshake wholesale; Metal backend). The published slot is a ring
+  that also carries frame interpolation's paced sub-flip steps (see
+  the schedule-publish entry under Future vectors). Measured quiet
   2026-07-11 under 2x interpolation (F8, 90 s arms): the pull path
   blocks the UI thread **499-607 ms per 5 s interval** (1.4-1.6k
   `present_wait` events, 3.3-3.9 ms/flip, 5 ms tails) — with the ring
   the counter never fires (**0 ms**), flips identical (29.8-31.3 vs
   29.4-31.1/s). Ring refuter: 149,846 steps peeked / 60,104 compared /
-  0 mismatches / 0 resurrections (5.5 min at 2x; 4x also clean). Stays
-  opt-in pending a daily-driving soak. The numbers below are the
-  original interpolation-off landing.
+  0 mismatches / 0 resurrections (5.5 min at 2x; 4x also clean). The
+  numbers below are the original interpolation-off landing.
   The pull-model handoff above (`nv2a_get_present_frame`) costs a
   guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
   thread and blocks on `qemu_event_wait` until it answers, and that
@@ -1045,9 +1062,14 @@ it. Instruments to re-run before starting any of these:
    `tlb_flush_by_mmuidx` backstop; promotion soak: 1.71B page-table-walk
    refuter checks / 0 violations with the backstop firing 799× across 8
    reload cycles. Receipts: +1.30±0.29 fps F8 pre-subpage (7/7),
-   +0.77±0.55 on top of sub-page tracking (3/3). Remaining scoped-out
-   coverage gap (not a hazard): page-spanning targets still decline to
-   chain. Design + hazard analysis: `docs/xpage-design.md`.
+   +0.77±0.55 on top of sub-page tracking (3/3). **v0.11.1 replaced the
+   backstop's whole-`tb_flush` with a registered-chain unlink** after
+   the flush classes proved continuous under level streaming, not rare
+   — the shipped v0.11 "new-area lag" (see Changes; worst first-visit
+   interval 15-24 → 37-38 fps, forward-phase flushes 139 → 0,
+   `XEMU_XPAGE_UNLINK=0` restores the v0.11 backstop). Remaining
+   scoped-out coverage gap (not a hazard): page-spanning targets still
+   decline to chain. Design + hazard analysis: `docs/xpage-design.md`.
 3. **PGRAPH MMIO lockless audit** — DONE 2026-07-11 (see Changes /
    `docs/pgraph-lockless-audit.md`): whole PGRAPH block joined
    lockless_io, INTR pair made atomic, no UNSAFE ranges; jitter A/B

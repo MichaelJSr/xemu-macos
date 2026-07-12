@@ -99,6 +99,22 @@ struct TranslationBlock {
      * bits 2-3: head (0 no flag event, 1 kill, 2 use)
      */
     uint8_t xemu_ccop;
+    /*
+     * xemu (XBOX) xpage link-registry bits (tb-maint.c registry;
+     * docs/xpage-design.md §3 backstop v2). Shares the pre-ihash hole.
+     *   XEMU_XPAGE_TB_REGISTERED    — this TB is currently registered as a
+     *       cross-page jump DESTINATION (dedup; cleared when the backstop
+     *       severs, or wholesale by generation reset on tb_flush).
+     *   XEMU_XPAGE_TB_CROSS_EMITTER — the translator emitted a relaxed
+     *       cross-page goto_tb slot in this TB (set in gen_jmp_rel BEFORE
+     *       translation finishes — init lives in tb_gen_code, pre-translate);
+     *       every dest this TB links is registered, independent of the
+     *       phys-page heuristic (covers virtual-alias targets whose phys
+     *       coincides with the source's).
+     */
+    uint8_t xemu_xpage_reg;
+#define XEMU_XPAGE_TB_REGISTERED    0x1
+#define XEMU_XPAGE_TB_CROSS_EMITTER 0x2
     uint64_t ihash;
 
     struct tb_tc tc;

@@ -40,6 +40,7 @@
  * path. See docs/xpage-design.md §3.
  */
 extern int xemu_xpage_chain_level(void);
+extern void xemu_xpage_note_full_flush(CPUState *cpu);
 #endif
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
@@ -113,15 +114,14 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
         cpu_x86_update_cr3(env, t0);
 #if defined(XBOX)
         /*
-         * A CR3 reload can change any mapping, so drop every cross-page chain.
-         * Effectively never taken by a running Xbox title (single address
-         * space); this is a rare correctness backstop, not a hot path. CR3
-         * write ends the TB (DISAS_EOB_NEXT), and tb_flush defers to a safe
-         * point, so no freed code is re-entered.
+         * A CR3 reload can change any mapping, so sever every cross-page
+         * chain. Routed through the shared backstop: default is the
+         * link-registry unlink (cheap, keeps translations — CR3 writes
+         * turned out NOT to be rare during level streaming, contrary to
+         * the original single-address-space assumption); XEMU_XPAGE_UNLINK=0
+         * or registry overflow falls back to the v0.11 queued tb_flush.
          */
-        if (xemu_xpage_chain_level() >= 2) {
-            queue_tb_flush(env_cpu(env));
-        }
+        xemu_xpage_note_full_flush(env_cpu(env));
 #endif
         break;
     case 4:

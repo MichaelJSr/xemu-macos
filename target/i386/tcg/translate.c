@@ -3243,6 +3243,16 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
     if (use_goto_tb && translator_use_goto_tb(&s->base, new_pc)) {
         /* jump to same page: we can use a direct jump */
 #if defined(XBOX)
+        if (xpage_cpd) {
+            /*
+             * Relaxed cross-page slot emitted: mark the source so
+             * tb_add_jump registers every dest it links in the backstop
+             * registry (tb-maint.c), regardless of the phys-page
+             * comparison — a virtual-alias target can share the source's
+             * phys page and would evade a phys-only test.
+             */
+            s->base.tb->xemu_xpage_reg |= XEMU_XPAGE_TB_CROSS_EMITTER;
+        }
         if (unlikely(xemu_inv_prof_on())) {
             xemu_inv_gototb_emitted++;
         }

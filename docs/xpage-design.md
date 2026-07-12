@@ -184,6 +184,41 @@ the refuter must confirm empirically, not code constants.
   sites. Sound for arbitrary titles; cost = code-page-flush frequency, which
   the refuter/counter measure. Recommended only after a clean refuter soak.
 
+  **Backstop v2 (v0.11.1) — link-registry unlink replaces the full flush.**
+  The queued-`tb_flush` form above (plus the generic `tlb_flush_by_mmuidx`
+  hook added at promotion) was correct but priced wrong: full-TLB-flush
+  classes are NOT rare — Azurik's level streaming reloads CR3 / fires
+  generic flushes continuously while entering new areas, and every one cost
+  a whole-translation-cache flush (measured 139 tb_flushes in 20 s of
+  first-visit walking on F8; fps trough 14.6 vs 38.6 settled; 0 flushes
+  walking back through explored space — the shipped v0.11 "new-area lag").
+  v2 records every cross-page link **destination** at `tb_add_jump` time in
+  a 128k-entry registry in `tb-maint.c` (generation-checked against
+  `tb_flush_count` so entries never dangle across a real flush). Two bits
+  in `tb->xemu_xpage_reg` (a spare byte in the pre-`ihash` hole) drive it:
+  `CROSS_EMITTER`, set by `gen_jmp_rel` on any TB that emits a relaxed
+  cross-page `goto_tb` slot — every dest such a TB links is registered
+  (this is the authoritative trigger: under CF_PCREL, and with the Xbox's
+  multiple virtual aliases of RAM, a cross-virtual target can share the
+  source's phys page, so a phys-only comparison is NOT sufficient) — and
+  `REGISTERED`, the dest-side dedup bit. A phys-page mismatch with no
+  emitter flag also registers (conservative belt-and-braces; counted as
+  `reg-phys-only` in the dump because its observed size — thousands per
+  soak even in refute mode, i.e. with zero relaxed slots emitted — was not
+  predicted; severing a valid link is always safe, so this class is
+  over-approximation, not hazard). The backstop severs the registered
+  destinations' incoming chains with `tb_jmp_unlink()` — synchronously,
+  closing the old queue-to-safe-point window, under the same manual
+  `qemu_thread_jit_write()/execute()` bracket `tb_phys_invalidate` uses
+  (the first build without it wedged the vCPU in a fault loop at the first
+  boot backstop) — and translations survive; chains relink lazily. Lock
+  order: registry spinlock → `jmp_lock` (registration happens after
+  `tb_add_jump` drops `jmp_lock`, so the order never cycles). Overflow or
+  `XEMU_XPAGE_UNLINK=0` falls back to the v0.11 queued full flush, so
+  correctness never depends on registry capacity. Armed at every chain
+  level ≥ 1 (level-1 kernel chains get severed too — strictly safer than
+  the level-2-only v0.11 gate, and free when nothing is registered).
+
 Rationale for R1-as-default over broad-as-default: R1 needs no hot-path hook
 and no argument beyond "the kernel identity window is invariant," so it cannot
 introduce the wrong-code-hang class even in an untested title. Broad is gated

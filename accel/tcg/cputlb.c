@@ -415,10 +415,13 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
     assert_cpu_is_self(cpu);
 
 #if defined(XBOX)
-    /* Cross-page chaining broad tier: full TLB flushes can retire
-     * virtual->phys bindings that baked-in cross-page chains rely on;
-     * sever them all (count-deduped queued tb_flush; rare event). The
-     * per-page INVLPG path stays on its finer helper backstop. */
+    /* Cross-page chaining: full TLB flushes can retire virtual->phys
+     * bindings that baked-in cross-page chains rely on; sever the
+     * registered chains (tb-maint.c link-registry unlink — NOT rare:
+     * level streaming fires this continuously, so the v0.11 queued
+     * tb_flush here caused the new-area lag). Always the vCPU's own
+     * thread (assert above). The per-page INVLPG path stays on its
+     * finer helper backstop. */
     xemu_xpage_note_full_flush(cpu);
 #endif
 

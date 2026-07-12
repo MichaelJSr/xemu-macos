@@ -72,21 +72,46 @@ int xemu_xpage_chain_level(void)
 }
 
 /*
- * Broad-tier generic-flush backstop: any full TLB flush class beyond the
- * INVLPG/CR3 helpers (CR4.PGE toggles, mode switches, loadvm restore)
- * may retire a virtual->phys binding some cross-page chain baked in.
- * Sever every chain via the same queued flush the CR3 backstop uses —
- * queue_tb_flush is count-deduped safe work, so re-queueing from a path
- * a tb_flush itself reaches cannot loop, and full TLB flushes are rare,
- * already-catastrophic events. Closes docs/xpage-design.md §3's residual.
+ * Full-flush backstop: any full TLB flush class beyond the INVLPG helper
+ * (CR3 reloads, CR4.PGE toggles, mode switches, loadvm restore) may retire
+ * a virtual->phys binding some cross-page chain baked in.
+ *
+ * v0.11 shipped this as a wholesale queued tb_flush — correct, but a
+ * retranslation storm: level streaming flushes the TLB continuously, and
+ * the movement probe measured 139 tb_flushes in 20 s of first-visit
+ * walking (F8, 2026-07-12) with an fps trough to 14.6 vs a 38.6 settled
+ * baseline — the reported "new-area lag". The default is now the
+ * tb-maint.c link-registry unlink: sever exactly the registered
+ * cross-page chains, synchronously (which also closes the old
+ * queue-to-safe-point window), keeping every translation. Chains relink
+ * lazily on the next execution. XEMU_XPAGE_UNLINK=0 restores the v0.11
+ * queued-flush behavior wholesale; registry overflow falls back to it
+ * automatically, so correctness never depends on registry capacity.
+ * Armed at every chain level that can create cross-page links (>=1; the
+ * unlink is a no-op when nothing is registered).
  */
 uint64_t xemu_xpage_full_flush_backstops;
 
+bool xemu_xpage_unlink_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_XPAGE_UNLINK");
+        on = (e && e[0] == '0') ? 0 : 1;
+        if (e) {
+            xpage_arm();
+        }
+    }
+    return on;
+}
+
 void xemu_xpage_note_full_flush(CPUState *cpu)
 {
-    if (xemu_xpage_chain_level() >= 2) {
+    if (xemu_xpage_chain_level() >= 1) {
         xemu_xpage_full_flush_backstops++;
-        queue_tb_flush(cpu);
+        if (!xemu_xpage_unlink_on() || !xemu_xpage_unlink_registered(cpu)) {
+            queue_tb_flush(cpu);
+        }
     }
 }
 
@@ -262,6 +287,15 @@ static void xemu_xpage_dump(void)
             (unsigned long long)xemu_xpage_taken_low,
             (unsigned long long)xemu_xpage_emitted,
             (unsigned long long)xemu_xpage_full_flush_backstops);
+    fprintf(stderr,
+            "xemu:      backstop unlink=%d: events=%llu dests-severed=%llu "
+            "reg-overflows=%llu reg-phys-only=%llu (overflow/unlink-off "
+            "fall back to queued tb_flush)\n",
+            xemu_xpage_unlink_on() ? 1 : 0,
+            (unsigned long long)xemu_xpage_unlink_events,
+            (unsigned long long)xemu_xpage_unlink_dests,
+            (unsigned long long)xemu_xpage_reg_overflows,
+            (unsigned long long)xemu_xpage_reg_phys_only);
     fprintf(stderr,
             "xemu:      approx per-5s: total=%.0f kernel=%.0f "
             "(kill threshold X=10,000,000/5s; contended runs undercount)\n",

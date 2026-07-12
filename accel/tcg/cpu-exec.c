@@ -49,6 +49,7 @@
 #include "internal-common.h"
 #if defined(XBOX)
 #include "xemu-inv-prof.h"
+#include "xemu-xpage.h"
 #endif
 
 /* -icount align implementation. */
@@ -1110,6 +1111,27 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     tb_next->jmp_list_head = (uintptr_t)tb | n;
 
     qemu_spin_unlock(&tb_next->jmp_lock);
+
+#if defined(XBOX)
+    /*
+     * Cross-page direct link (permitted at translate time by
+     * xemu_xpage_allow): register the destination so the full-TLB-flush
+     * backstop can sever exactly these chains instead of flushing the
+     * whole translation cache (tb-maint.c xpage link registry). Under
+     * upstream same-page-only chaining the condition is never true.
+     * Registered strictly after dropping jmp_lock (registry lock order).
+     */
+    {
+        tb_page_addr_t d0 = tb_page_addr0(tb_next);
+        bool phys_cross = d0 != tb_page_addr0(tb) &&
+            (tb_page_addr1(tb) == (tb_page_addr_t)-1 ||
+             d0 != tb_page_addr1(tb));
+        bool emitter = tb->xemu_xpage_reg & XEMU_XPAGE_TB_CROSS_EMITTER;
+        if (emitter || phys_cross) {
+            xemu_xpage_link_note_cross(tb_next, phys_cross && !emitter);
+        }
+    }
+#endif
 
     qemu_log_mask(CPU_LOG_EXEC, "Linking TBs %p index %d -> %p\n",
                   tb->tc.ptr, n, tb_next->tc.ptr);

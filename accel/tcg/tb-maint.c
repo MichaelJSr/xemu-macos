@@ -42,6 +42,7 @@
 #endif
 #include "trace.h"
 #include "xemu-inv-prof.h"
+#include "xemu-xpage.h"
 
 #if defined(XBOX)
 /*
@@ -1344,6 +1345,114 @@ static inline void tb_jmp_unlink(TranslationBlock *dest)
 
     qemu_spin_unlock(&dest->jmp_lock);
 }
+
+#if defined(XBOX)
+/*
+ * Cross-page direct-chain link registry (docs/xpage-design.md §3).
+ *
+ * Every cross-page direct jump created by tb_add_jump registers its
+ * DESTINATION TB here (deduped by tb->xemu_xpage_reg). When a full-TLB-flush
+ * class fires (generic tlb_flush_by_mmuidx, CR3 reload), the backstop severs
+ * exactly these incoming chains via tb_jmp_unlink() instead of dropping the
+ * whole translation cache: a queued tb_flush costs a retranslation storm on
+ * every guest mapping burst — measured 139 tb_flushes in 20 s of first-visit
+ * area streaming (2026-07-12, the "new-area lag" report) — while severing
+ * keeps every translation and chains relink on the next execution.
+ *
+ * Same-page links into a registered dest are severed too (they relink
+ * lazily; harmless). TB pointers stay valid between tb_flushes (region
+ * memory is only recycled by a flush), and the generation check drops the
+ * registry wholesale once a real flush retires that generation's TBs. On
+ * overflow the backstop falls back to the old queued full flush —
+ * correctness never depends on registry capacity. Lock order: xpage_reg_lock
+ * -> dest->jmp_lock; tb_add_jump registers only after releasing jmp_lock.
+ */
+#define XEMU_XPAGE_REG_CAP  (128 * 1024)
+static TranslationBlock *xpage_reg[XEMU_XPAGE_REG_CAP];
+static unsigned xpage_reg_count;
+static unsigned xpage_reg_gen;
+static bool xpage_reg_overflowed;
+static QemuSpin xpage_reg_lock = { .value = 0 };
+
+uint64_t xemu_xpage_unlink_events;
+uint64_t xemu_xpage_unlink_dests;
+uint64_t xemu_xpage_reg_overflows;
+uint64_t xemu_xpage_reg_phys_only;
+
+static void xpage_reg_reset_locked(unsigned gen)
+{
+    xpage_reg_gen = gen;
+    xpage_reg_count = 0;
+    xpage_reg_overflowed = false;
+}
+
+void xemu_xpage_link_note_cross(TranslationBlock *dest, bool phys_only)
+{
+    unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
+
+    qemu_spin_lock(&xpage_reg_lock);
+    if (xpage_reg_gen != gen) {
+        xpage_reg_reset_locked(gen);
+    }
+    if (!(dest->xemu_xpage_reg & XEMU_XPAGE_TB_REGISTERED)) {
+        if (xpage_reg_count < XEMU_XPAGE_REG_CAP) {
+            dest->xemu_xpage_reg |= XEMU_XPAGE_TB_REGISTERED;
+            xpage_reg[xpage_reg_count++] = dest;
+            if (phys_only) {
+                /* Registered by the phys-page comparison alone (source has
+                 * no cross-emitter flag) — the conservative over-approx
+                 * class; tracked because its size was not predicted. */
+                xemu_xpage_reg_phys_only++;
+            }
+        } else if (!xpage_reg_overflowed) {
+            xpage_reg_overflowed = true;
+            xemu_xpage_reg_overflows++;
+        }
+    }
+    qemu_spin_unlock(&xpage_reg_lock);
+}
+
+bool xemu_xpage_unlink_registered(CPUState *cs)
+{
+    unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
+    unsigned n = 0;
+    bool complete;
+
+    qemu_spin_lock(&xpage_reg_lock);
+    if (xpage_reg_gen != gen) {
+        xpage_reg_reset_locked(gen);
+    }
+    complete = !xpage_reg_overflowed;
+    /*
+     * tb_jmp_unlink patches host code (tb_reset_jump); on Apple Silicon
+     * hardened runtime this thread is in execute mode when the backstop
+     * fires from a TLB-flush helper, so bracket with the same manual
+     * write/execute pair tb_phys_invalidate uses (see the
+     * pthread_jit_write_with_callback_np war story at that site). The
+     * missing bracket wedged the vCPU thread in a fault loop at the
+     * first boot backstop when this landed (no crash report — the
+     * monitor answers once, then nothing; archaeology 1.24).
+     */
+    qemu_thread_jit_write();
+    while (xpage_reg_count) {
+        TranslationBlock *dest = xpage_reg[--xpage_reg_count];
+        /* Only the REGISTERED bit — CROSS_EMITTER is translate-time state
+         * that must survive for the TB's remaining lifetime. */
+        dest->xemu_xpage_reg &= ~XEMU_XPAGE_TB_REGISTERED;
+        tb_jmp_unlink(dest);
+        n++;
+    }
+    qemu_thread_jit_execute();
+    xpage_reg_overflowed = false;
+    qemu_spin_unlock(&xpage_reg_lock);
+
+    if (n) {
+        xemu_xpage_unlink_events++;
+        xemu_xpage_unlink_dests += n;
+    }
+    return complete;
+}
+#endif /* XBOX */
 
 static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
 {
