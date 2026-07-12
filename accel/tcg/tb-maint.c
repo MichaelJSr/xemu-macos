@@ -1378,6 +1378,8 @@ uint64_t xemu_xpage_unlink_events;
 uint64_t xemu_xpage_unlink_dests;
 uint64_t xemu_xpage_reg_overflows;
 uint64_t xemu_xpage_reg_phys_only;
+uint64_t xemu_xpage_unlink_total_us;
+uint64_t xemu_xpage_unlink_max_us;
 
 static void xpage_reg_reset_locked(unsigned gen)
 {
@@ -1433,6 +1435,7 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
      * first boot backstop when this landed (no crash report — the
      * monitor answers once, then nothing; archaeology 1.24).
      */
+    int64_t t0 = g_get_monotonic_time();
     qemu_thread_jit_write();
     while (xpage_reg_count) {
         TranslationBlock *dest = xpage_reg[--xpage_reg_count];
@@ -1447,8 +1450,16 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
     qemu_spin_unlock(&xpage_reg_lock);
 
     if (n) {
+        /* Walk-duration stats: a walk stalls the vCPU mid-frame, so its
+         * tail cost must stay well under a frame period (jitter suspect
+         * instrumentation, 2026-07-12). */
+        uint64_t us = (uint64_t)(g_get_monotonic_time() - t0);
         xemu_xpage_unlink_events++;
         xemu_xpage_unlink_dests += n;
+        xemu_xpage_unlink_total_us += us;
+        if (us > xemu_xpage_unlink_max_us) {
+            xemu_xpage_unlink_max_us = us;
+        }
     }
     return complete;
 }

@@ -297,6 +297,14 @@ static void xemu_xpage_dump(void)
             (unsigned long long)xemu_xpage_reg_overflows,
             (unsigned long long)xemu_xpage_reg_phys_only);
     fprintf(stderr,
+            "xemu:      unlink walk cost: total=%lluus max=%lluus "
+            "mean=%.0fus (vCPU-thread stall per backstop event)\n",
+            (unsigned long long)xemu_xpage_unlink_total_us,
+            (unsigned long long)xemu_xpage_unlink_max_us,
+            xemu_xpage_unlink_events ?
+                (double)xemu_xpage_unlink_total_us /
+                (double)xemu_xpage_unlink_events : 0.0);
+    fprintf(stderr,
             "xemu:      approx per-5s: total=%.0f kernel=%.0f "
             "(kill threshold X=10,000,000/5s; contended runs undercount)\n",
             per5, per5k);

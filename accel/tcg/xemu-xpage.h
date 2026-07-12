@@ -65,6 +65,8 @@ extern uint64_t xemu_xpage_unlink_events;
 extern uint64_t xemu_xpage_unlink_dests;
 extern uint64_t xemu_xpage_reg_overflows;
 extern uint64_t xemu_xpage_reg_phys_only;
+extern uint64_t xemu_xpage_unlink_total_us;
+extern uint64_t xemu_xpage_unlink_max_us;
 
 /* Gate-0 taken counters, inline-incremented from generated code in prof mode,
  * split by target region so the R1(kernel)-vs-broad opportunity is visible. */
