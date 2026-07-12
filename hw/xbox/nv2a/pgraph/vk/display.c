@@ -96,8 +96,13 @@ bool pgraph_vk_push_present_enabled(NV2AState *d)
 {
     static int cached_env = -1;
     if (cached_env < 0) {
+        /* Default ON since 2026-07-12 (owner promotion): the pull handshake
+         * blocked the UI thread 499-607 ms per 5 s under 2x interpolation vs
+         * 0 with the ring, flips identical, ring refuter 60,104 steps
+         * compared / 0 mismatches / 0 resurrections. XEMU_PUSH_PRESENT=0
+         * restores the legacy pull handshake wholesale. */
         const char *e = getenv("XEMU_PUSH_PRESENT");
-        cached_env = (e && e[0] == '1') ? 1 : 0;
+        cached_env = (e && e[0] == '0') ? 0 : 1;
     }
     if (!cached_env) {
         return false;
