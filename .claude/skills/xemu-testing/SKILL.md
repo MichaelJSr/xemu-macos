@@ -81,6 +81,17 @@ citable, never arms from different experiments.
   unaffected, but its absolute numbers are not comparable to the
   historical fullscreen anchors (F5 46.8, F8 ~29.5-31.5 on the
   2026-07-11 local no-PGO build, user config, fullscreen).
+- **Monitor `loadvm` needs the real `vm-*` qcow2 tag, not the F5/F8
+  shortcut name — and it fails SILENTLY.** The `[general.snapshots.
+  shortcuts]` names in xemu.toml are UI keybindings; the QEMU monitor
+  only knows the underlying tags (e.g. `f8 = 'vm-20260704173701'`).
+  `loadvm F8` prints its error to the monitor socket nobody reads and
+  the guest keeps running the BOOT workload — two independent harnesses
+  hit this on 2026-07-11 (a cc_op census published idle-workload numbers
+  as "F5/F8" before the erratum; see README roadmap item 5). Map
+  shortcut→tag from the toml in every runner, and ALWAYS verify scene
+  identity from nsprof (which prints to **stdout**, not stderr — capture
+  both) before believing any run.
 
 ## Background input injection (no focus, no OS events)
 

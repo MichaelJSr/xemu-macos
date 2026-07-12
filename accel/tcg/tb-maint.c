@@ -314,7 +314,7 @@ bool xemu_ccop_census_on(void)
 }
 
 /*
- * Sub-page dirty tracking (GATE0-PREDICTION.md arm (a): the helper-top O(1)
+ * Sub-page dirty tracking (docs/subpage-gate0-prediction.md arm (a): the helper-top O(1)
  * consult). A per-PageDesc bitmap records which sub-blocks of the page a live
  * TB covers; a guest data store that lands entirely outside every code
  * sub-block skips the whole-page invalidation (and its page-collection lock and

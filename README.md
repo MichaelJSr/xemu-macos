@@ -972,7 +972,7 @@ it. Instruments to re-run before starting any of these:
    O(N) scan** — which is why the "25× traps ⇒ negative" proxy that killed
    RANGE_INV does not apply here (each extra trap is O(1), not an O(N)
    scan). `XEMU_INV_TIMING` body-timing predicts a net vCPU win for any
-   store-dispatch under ~750 ns (`GATE0-PREDICTION.md`); on F8 it collapsed
+   store-dispatch under ~750 ns (`docs/subpage-gate0-prediction.md`); on F8 it collapsed
    real invalidations 290,595 → 11,180 (25.9×) with the guest correct, and
    `XEMU_SUBPAGE_REFUTE=1` found 0 violations over 28.6M filter-skips across
    33 loadvm cycles. Ships
@@ -980,7 +980,7 @@ it. Instruments to re-run before starting any of these:
    <snap> XEMU_SUBPAGE_DIRTY`; kill line = any fps regression). The
    higher-ceiling form that removes the trap itself (a sub-block probe in
    the host-`tcg/aarch64` `qemu_st` fast path, predicted ~+2.5% vCPU) is a
-   separate Class-5 codegen effort — scope in `GATE0-PREDICTION.md` §2,
+   separate Class-5 codegen effort — scope in `docs/subpage-gate0-prediction.md` §2,
    gated on an explicit decision to accept shared/Windows-arm64 codegen
    risk. `XEMU_SUBPAGE_DIRTY`'s A/B doubles as its go/no-go: if the O(1)
    arm's vCPU saving does not convert to fps on this busy-poll CPU-bound
@@ -1015,14 +1015,20 @@ it. Instruments to re-run before starting any of these:
    already compile-skips 92-94% — the *dispatch* half of the
    superblock motivation is weak. The `XEMU_CCOP_CENSUS`
    runtime-weighted pair census then sized the codegen half, and it
-   is REAL: 69-83% of TB transitions end with lazy flags pending
-   (F8/F5), and 46-49% of those are dead at the successor — i.e.
-   **~34-38% of all block boundaries carry a flag materialization
-   (cc_op + operand spills) the next block provably kills unread**.
-   The consumed share is also large (30-45%), so naive skip-the-spill
-   tricks are DOA — only genuine cross-block liveness (superblock)
-   collects this. That is the campaign's quantified upside basis,
-   alongside cross-block register allocation.)
+   is REAL — in-game F5/F8 savestate scenes, 1.06B/1.57B pairs:
+   63-67% of TB transitions end with lazy flags pending, and 61-66%
+   of those are dead at the successor — i.e. **~39-44% of all block
+   boundaries carry a flag materialization (cc_op + operand spills)
+   the next block provably kills unread**. The consumed share
+   (11-13%) plus the deferred/pass-through share (23-26%) still
+   rules out naive skip-the-spill tricks — only genuine cross-block
+   liveness (superblock) collects this. That is the campaign's
+   quantified upside basis, alongside cross-block register
+   allocation. Erratum: the numbers first recorded in commit
+   ee1de9f654's message were measured against an idle boot workload
+   — a `loadvm` given the F5/F8 *shortcut* names instead of the
+   `vm-*` qcow2 tags silently loads nothing; these are the corrected
+   in-game figures.)
 6. **Real-hardware validation debt** (not fps; the largest open
    correctness item). Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list, the DSP
