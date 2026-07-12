@@ -2,7 +2,7 @@
  * xemu: cross-page direct-chaining (Xbox-relaxed) — knobs, Gate-0 taken
  * counters, Gate-1 refuter shadow, and the R2 remap observer.
  *
- * See XPAGE-DESIGN.md (worktree root) for the full soundness argument.
+ * See docs/xpage-design.md (worktree root) for the full soundness argument.
  *
  * Default off, zero cost when unset. The xbox machine runs exactly one vCPU
  * thread, which is the only writer of every counter/shadow here; the exit

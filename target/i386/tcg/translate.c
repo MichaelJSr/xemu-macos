@@ -1710,7 +1710,7 @@ extern uint64_t xemu_inv_retmemo_emitted;
 extern bool xemu_ccop_census_on(void);
 extern uint64_t xemu_ccop_tb_tail[3];
 extern uint64_t xemu_ccop_tb_head[3];
-/* Cross-page direct-chaining campaign (XEMU_XPAGE_*; XPAGE-DESIGN.md,
+/* Cross-page direct-chaining campaign (XEMU_XPAGE_*; docs/xpage-design.md,
  * accel/tcg/xemu-xpage.[ch]). Same function-local extern idiom. */
 extern bool xemu_xpage_refute_on(void);
 extern bool xemu_xpage_prof_on(void);
@@ -3200,7 +3200,7 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
              * Cross-page relaxation: the andi above keeps cpu_eip
              * wrap-correct regardless, so only forbid the direct chain when
              * the fork rule disallows it (translator_use_goto_tb agrees
-             * below). Default off; see XPAGE-DESIGN.md.
+             * below). Default off; see docs/xpage-design.md.
              */
             if (!use_goto_tb || !xemu_xpage_allow(new_pc)) {
                 use_goto_tb = false;

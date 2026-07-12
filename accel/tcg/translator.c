@@ -129,7 +129,7 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
      * executable mapping is effectively static; xemu_xpage_allow() gates the
      * relaxation by rule (kernel-identity window by default, broad + guest-
      * flush backstop under =2). Incoming-jump unlink on invalidation reuses
-     * jmp_list unchanged. See XPAGE-DESIGN.md.
+     * jmp_list unchanged. See docs/xpage-design.md.
      */
     if (xemu_xpage_allow(dest)) {
         return true;

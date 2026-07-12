@@ -2,7 +2,7 @@
  * xemu: cross-page direct-chaining (Xbox-relaxed) — knobs, Gate-0 taken
  * counters, Gate-1 refuter shadow, R2 remap observer, atexit dump.
  *
- * See XPAGE-DESIGN.md. Default off, zero cost when unset. Single vCPU writer;
+ * See docs/xpage-design.md. Default off, zero cost when unset. Single vCPU writer;
  * plain unsynchronized uint64 counters; dump from atexit after the thread has
  * stopped (the fork's XEMU_INV_PROF model). Whole body #if defined(XBOX);
  * declarations in xemu-xpage.h are unconditional (harmless), and every caller

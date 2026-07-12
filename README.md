@@ -135,6 +135,9 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_INV_TIMING` | `1` adds a `cntvct_el0`-based split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_DIRTY` | `1` enables sub-page code dirty tracking (ships **dark**, pending interleaved A/B): a per-`PageDesc` 64-block bitmap lets a guest data store that misses every code sub-block skip whole-page invalidation — an O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip, leaving the page write-protected so the store re-traps cheaply. On F8 it collapsed real invalidations 290,595 → 11,180 (25.9×) with the guest running correctly. The higher-ceiling fast-path form that removes the trap itself needs host-`tcg/aarch64` store codegen (Future vectors) |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
+| `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
+| `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
+| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining (dark, default off). `1` = kernel-identity window only (sound, no backstop); `2` = broad (all cross-page targets) + INVLPG/CR3 guest-flush backstop. Refuter: 0 violations / 2.68B checks / 12 reload cycles |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend |
@@ -994,18 +997,25 @@ it. Instruments to re-run before starting any of these:
    risk. `XEMU_SUBPAGE_DIRTY`'s A/B doubles as its go/no-go: if the O(1)
    arm's vCPU saving does not convert to fps on this busy-poll CPU-bound
    limiter, the larger-but-riskier codegen form won't either.
-2. **Cross-page direct chaining, Xbox-relaxed** (a week; risky).
-   The "other" 43% of the exit census is dominated by cross-page
-   direct jumps that pay the ~20-op inline probe today. Upstream
-   forbids cross-page `goto_tb` because mappings can change; the
-   Xbox's effectively static flat mapping makes a fork-specific
-   relaxation plausible (chain + invalidation hooks for the SMC edge
-   cases). Worth +1-2 fps. Archaeology-1.x-grade design required —
-   the failure mode is a rare wrong-code hang, the worst class.
-3. **PGRAPH MMIO lockless audit** (days; jitter-class expectation).
-   Remaining vCPU lock waits ~5.6%. Unlike PFB/USER/vp, PGRAPH
-   handlers genuinely interleave with the PFIFO thread — the audit is
-   the work; expect steadier pacing more than fps.
+2. **Cross-page direct chaining, Xbox-relaxed** (IMPLEMENTED dark
+   2026-07-11; broad tier pending A/B). Shipped dark behind
+   `XEMU_XPAGE_CHAIN` (`1` = kernel-identity window only, sound by
+   construction; `2` = broad, all cross-page targets + INVLPG/CR3
+   guest-flush backstop) with a page-table-walk refuter
+   (`XEMU_XPAGE_REFUTE` — the walk, not the TLB, closes the stale-chain
+   fetch-bypass hole). Gate-0 (F8): ~20M taken cross-page-direct exits
+   per 5 s (>10M/5s pre-registered kill threshold) but 98.7% are
+   low-region title code — kernel-only is sub-noise, so only broad can
+   pay. Refuter: **0 violations over 2.68B checks across 12 loadvm
+   cycles** (F8/F5/F7), with 61k real exec-page remaps observed and
+   none ever on a chain target. Residual: CR4.PGE/whole-TLB flush paths
+   are refuter-backed, not construction-backed — hook generic
+   tlb_flush before any default-on. Predicted +1-2 fps broad; design +
+   hazard analysis: `docs/xpage-design.md`.
+3. **PGRAPH MMIO lockless audit** — DONE 2026-07-11 (see Changes /
+   `docs/pgraph-lockless-audit.md`): whole PGRAPH block joined
+   lockless_io, INTR pair made atomic, no UNSAFE ranges; jitter A/B
+   receipt pending.
 4. **Ret-memo fill path** (hours, but sub-noise-bar). The memo's cold
    fills pay `tcg_tb_lookup` g_tree walks (~3% sample share at 6.4%
    fill rate). Candidates: export `tb_lookup` to the ret helper

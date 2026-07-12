@@ -37,7 +37,7 @@
  * Broad-tier cross-page direct-chaining (XEMU_XPAGE_CHAIN=2) guest-flush
  * backstops live inside the guest's own INVLPG / CR3 helpers below. Function-
  * local extern idiom: accel/tcg/xemu-xpage.h is not on the target include
- * path. See XPAGE-DESIGN.md §3.
+ * path. See docs/xpage-design.md §3.
  */
 extern int xemu_xpage_chain_level(void);
 #endif
