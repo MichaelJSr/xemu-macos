@@ -358,6 +358,7 @@ typedef struct PushPresentEntry {
     uint64_t duration_ns;
     uint64_t generation; // schedule generation this entry belongs to
     int width, height;
+    bool is_real;        // final step of its flip's schedule (not a midpoint)
 } PushPresentEntry;
 
 /* Ring depth: two full 4x interpolation flips (max 4 steps each). Wide

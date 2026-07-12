@@ -125,8 +125,19 @@ bool pgraph_vk_push_present_enabled(NV2AState *d)
 static void present_ring_push(PGRAPHVkDisplayState *disp,
                               const PushPresentEntry *entry)
 {
+    nsprof_event(NSPROF_EV_PUSH_STEP_PUBLISH);
     if (disp->present_ring_count == PUSH_PRESENT_RING_CAP) {
         PushPresentEntry *old = &disp->present_ring[disp->present_ring_head];
+        /* Recycling the oldest slot is normal once the ring has ever
+         * filled (present_ring_count never decreases — consumption is a
+         * cursor, not removal). Only an overwrite of a step the UI never
+         * read is a real starvation drop: the consumer fell a whole ring
+         * behind (the bounded-debt catch-up in present_ring_next should
+         * make that rare). */
+        if (old->generation == disp->present_ring_generation &&
+            old->frame_seq > disp->present_ring_consumed) {
+            nsprof_event(NSPROF_EV_PUSH_RING_DROP);
+        }
         if (old->mtl_texture) {
             CFRelease(old->mtl_texture);
         } else if (old->iosurface) {
@@ -187,6 +198,7 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
                 .generation = gen,
                 .width = disp->present_width,
                 .height = disp->present_height,
+                .is_real = false,
             };
             present_ring_push(disp, &e);
             seq = ++disp->present_frame_seq;
@@ -200,6 +212,7 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
             .generation = gen,
             .width = disp->present_width,
             .height = disp->present_height,
+            .is_real = true,
         };
         present_ring_push(disp, &real);
 
@@ -231,6 +244,7 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
             .generation = gen,
             .width = disp->present_width,
             .height = disp->present_height,
+            .is_real = true,
         };
         if (disp->present_mtl_texture) {
             e.mtl_texture = (void *)CFRetain(disp->present_mtl_texture);
@@ -245,13 +259,65 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
     qemu_mutex_unlock(&disp->present_slot_lock);
 }
 
+/*
+ * Consumer catch-up debt bound (steps). The ring is a queue, but the UI
+ * drains it at most once per display refresh — when the guest's step rate
+ * exceeds the refresh rate (e.g. 38-40 fps under 2x interpolation = 76-80
+ * steps/s against a 60 Hz panel, reachable since the v0.11.1 speedups),
+ * strict FIFO consumption backlogs to ring capacity: ~100 ms of added
+ * latency and continuous producer-side drop-oldest, whose spliced
+ * midpoint->midpoint sequences show as doubled/juddering frames (the
+ * 2026-07-12 owner report). Above this many unconsumed steps the consumer
+ * jumps to the newest unconsumed REAL frame — the pull path's freshest-
+ * frame sampling semantics — and the skipped stale steps are counted
+ * (nsprof push_policy_skip). At step rates the display can keep up with,
+ * the debt never exceeds 1-2 and the policy is inert, preserving the
+ * paced interpolation cadence. XEMU_PUSH_DEBT overrides (0 = strict FIFO,
+ * the pre-fix behavior).
+ */
+static uint32_t push_present_max_debt(void)
+{
+    static int env_debt = -2;
+    if (env_debt == -2) {
+        const char *e = getenv("XEMU_PUSH_DEBT");
+        env_debt = e ? atoi(e) : -1;
+        if (env_debt < -1) {
+            env_debt = -1;
+        }
+    }
+    if (env_debt >= 0) {
+        return (uint32_t)env_debt;   /* 0 = strict FIFO (pre-fix) */
+    }
+    /*
+     * Default: one full flip schedule plus two steps of slack. A flip
+     * publishes its whole schedule atomically under the slot lock
+     * (mode-1 midpoints + the real frame), so unconsumed depth
+     * legitimately jumps by `mode` at every publish — a threshold below
+     * that false-fires on healthy transients and eats midpoints.
+     */
+    int mode = 1;
+    if (g_config.display.frame_interpolation ==
+            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
+        mode = 2;
+    } else if (g_config.display.frame_interpolation ==
+                   CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
+        mode = 4;
+    }
+    return (uint32_t)(mode + 2);
+}
+
 /* Pick the entry to hand the reader: the oldest step past the consume
  * cursor (the next unconsumed step), or the newest entry when all are
  * consumed (the reader re-reads the last frame and dedups on frame_seq).
+ * When the unconsumed backlog exceeds the debt bound, jump to the newest
+ * unconsumed real frame instead (catch-up; see push_present_max_debt).
  * NULL only when the ring is empty. Caller holds the lock. */
 static PushPresentEntry *present_ring_next(PGRAPHVkDisplayState *disp)
 {
     PushPresentEntry *oldest_unconsumed = NULL, *newest = NULL;
+    PushPresentEntry *newest_real_unconsumed = NULL;
+    uint32_t unconsumed = 0;
+
     for (uint32_t i = 0; i < disp->present_ring_count; i++) {
         uint32_t idx = (disp->present_ring_head + PUSH_PRESENT_RING_CAP - 1 -
                         i) % PUSH_PRESENT_RING_CAP;
@@ -266,10 +332,40 @@ static PushPresentEntry *present_ring_next(PGRAPHVkDisplayState *disp)
         if (!newest || e->frame_seq > newest->frame_seq) {
             newest = e;
         }
-        if (e->frame_seq > disp->present_ring_consumed &&
-            (!oldest_unconsumed ||
-             e->frame_seq < oldest_unconsumed->frame_seq)) {
-            oldest_unconsumed = e;
+        if (e->frame_seq > disp->present_ring_consumed) {
+            unconsumed++;
+            if (!oldest_unconsumed ||
+                e->frame_seq < oldest_unconsumed->frame_seq) {
+                oldest_unconsumed = e;
+            }
+            if (e->is_real &&
+                (!newest_real_unconsumed ||
+                 e->frame_seq > newest_real_unconsumed->frame_seq)) {
+                newest_real_unconsumed = e;
+            }
+        }
+    }
+
+    uint32_t max_debt = push_present_max_debt();
+    if (max_debt && unconsumed > max_debt) {
+        /* Behind: land on the newest unconsumed real frame (or the newest
+         * step at all when no real is pending — 4x midpoint bursts). The
+         * monotonic consume cursor then retires everything older. */
+        PushPresentEntry *target =
+            newest_real_unconsumed ? newest_real_unconsumed : newest;
+        if (target && target->frame_seq > oldest_unconsumed->frame_seq) {
+            for (uint32_t i = 0; i < disp->present_ring_count; i++) {
+                uint32_t idx = (disp->present_ring_head +
+                                PUSH_PRESENT_RING_CAP - 1 - i) %
+                               PUSH_PRESENT_RING_CAP;
+                PushPresentEntry *e = &disp->present_ring[idx];
+                if (e->generation == disp->present_ring_generation &&
+                    e->frame_seq > disp->present_ring_consumed &&
+                    e->frame_seq < target->frame_seq) {
+                    nsprof_event(NSPROF_EV_PUSH_POLICY_SKIP);
+                }
+            }
+            return target;
         }
     }
     return oldest_unconsumed ? oldest_unconsumed : newest;

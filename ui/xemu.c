@@ -1105,6 +1105,31 @@ static void metal_render_frame(struct xemu_console *scon)
         return;
     }
 
+    /*
+     * XEMU_UI_FRAME_CAP_NS (test-only, zero cost unset): floor the UI
+     * frame period to simulate a vsynced display from an unfocused
+     * bench window (occluded/background windows present unpaced here,
+     * so push-present ring pacing cannot be reproduced without it —
+     * e.g. 16666666 simulates a 60 Hz consumer).
+     */
+    static int64_t ui_cap_ns = -1;
+    if (unlikely(ui_cap_ns < 0)) {
+        const char *e = getenv("XEMU_UI_FRAME_CAP_NS");
+        ui_cap_ns = e ? atoll(e) : 0;
+        if (ui_cap_ns < 0) {
+            ui_cap_ns = 0;
+        }
+    }
+    if (unlikely(ui_cap_ns > 0)) {
+        static uint64_t last_present_ns;
+        uint64_t now_ns = SDL_GetTicksNS();
+        if (now_ns - last_present_ns < (uint64_t)ui_cap_ns) {
+            qatomic_set(&rendering, false);
+            return;
+        }
+        last_present_ns = now_ns;
+    }
+
     if (push_present_refute_enabled()) {
         push_present_refute_step();
     }

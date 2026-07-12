@@ -142,6 +142,8 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | **Default ON since 2026-07-12** (Metal backend): publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Set `=0` to restore the legacy pull handshake wholesale |
+| `XEMU_PUSH_DEBT` | Consumer catch-up bound for the push-present ring (default: interp mode + 2 steps; `0` = strict FIFO, the pre-fix behavior). When the guest's step rate beats the display (e.g. 40 fps × 2x interp = 80 steps/s on a 60 Hz panel), strict FIFO backlogs and force-drops unread steps — measured ~26 spliced steps/s, the 2026-07-12 "frames double playing" judder; with the bound the consumer jumps to the newest unconsumed real frame instead (60 Hz sim receipt: unread drops 2,253/2,152 per min → **0**, refuter 0 mismatches / 0 resurrections over the policy) |
+| `XEMU_UI_FRAME_CAP_NS` | Test-only: floor the UI present period in ns (`16666666` ≈ a 60 Hz consumer). Unfocused/occluded bench windows present unpaced (~200 Hz observed), so ring-pacing behavior is invisible headless without it. Zero cost unset |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -603,8 +605,19 @@ In-app Settings covers the main toggles.
   `present_wait` events, 3.3-3.9 ms/flip, 5 ms tails) — with the ring
   the counter never fires (**0 ms**), flips identical (29.8-31.3 vs
   29.4-31.1/s). Ring refuter: 149,846 steps peeked / 60,104 compared /
-  0 mismatches / 0 resurrections (5.5 min at 2x; 4x also clean). The
-  numbers below are the original interpolation-off landing.
+  0 mismatches / 0 resurrections (5.5 min at 2x; 4x also clean).
+  **Pacing fix (same day):** the promotion surfaced a strict-FIFO
+  consume flaw once the v0.11.1 speedups pushed step rates past the
+  display rate (40 fps × 2x = 80 steps/s vs 60 Hz): the ring
+  backlogged and force-dropped unread steps (~26/s measured under a
+  60 Hz-simulated consumer), splicing `midpoint→midpoint` sequences —
+  seen as doubled/juddering frames. The consumer now bounds its step
+  debt (interp mode + 2) and catches up to the newest unconsumed
+  real frame: unread drops **2,253/2,152 per minute → 0** (2 pairs),
+  policy inert when the display keeps up, refuter clean over the
+  policy (0 mismatches / 0 resurrections). `XEMU_PUSH_DEBT=0`
+  restores strict FIFO. The numbers below are the original
+  interpolation-off landing.
   The pull-model handoff above (`nv2a_get_present_frame`) costs a
   guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
   thread and blocks on `qemu_event_wait` until it answers, and that

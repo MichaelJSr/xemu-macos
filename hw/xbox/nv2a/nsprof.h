@@ -124,6 +124,10 @@ enum NsprofEvent {
     NSPROF_EV_RENDERPASS_CAUSE_CLEAR,     /* NV097_CLEAR_SURFACE boundary */
     NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD, /* compute-unswizzle interleave */
     NSPROF_EV_RENDERPASS_CAUSE_OTHER,     /* surface create / RTT nondraw */
+    /* push-present ring pacing (XEMU_PUSH_PRESENT; see display.c) */
+    NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
+    NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
+    NSPROF_EV_PUSH_POLICY_SKIP,    /* consumer catch-up skipped a stale step */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY
