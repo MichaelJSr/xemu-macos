@@ -118,8 +118,10 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
 | `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + idle-budget fallback) |
 | `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.10.1 value (clamped 0-100000) |
-| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP) — bisect hatch |
+| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP, PGRAPH) — bisect hatch |
+| `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/pgraph-lockless-audit.md`) |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
+| `XEMU_PGRAPH_MMIO_STATS` | `1` prints an exit histogram of PGRAPH per-register MMIO hit-rate (reads/writes, interrupt-reg + RDI category totals, top offsets) — ranks ranges for the PGRAPH lockless audit |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_COREAUDIO_FRAMES` | CoreAudio buffer frames, default `1024` (≈21 ms @ 48 kHz) |
@@ -785,6 +787,25 @@ In-app Settings covers the main toggles.
   speedup) with a consistent steadiness win: per-run fps stdev
   1.21 → 0.89, 5/6 pairs — the 340 µs BQL-spike class no longer
   hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
+- **PGRAPH joins the BQL-free MMIO set** *(DRAFT — audit shipped, perf
+  deliberately unmeasured pending the orchestrator's interleaved A/B;
+  no fps/jitter claim is made here)*. The PGRAPH block was left out of
+  the original lockless set because its handlers genuinely interleave
+  with the PFIFO thread. The audit (`docs/pgraph-lockless-audit.md`)
+  shows `pg->lock`/`pfifo.lock` — not the BQL — arbitrate every shared
+  access except one: the interrupt pair
+  (`pending_interrupts`/`enabled_interrupts`), which the BQL serialised
+  against the lock-free `nv2a_update_irq` reader and the PFIFO thread's
+  raise. Those two fields are now `qatomic` (fixing a pre-existing
+  unserialised raise-vs-read pair in the process), and PGRAPH dispatch
+  drops the BQL. `XEMU_PGRAPH_MMIO_STATS=1` measured the guest ISR
+  *on* this path: `NV_PGRAPH_INTR` is the hottest PGRAPH register
+  (1.6M reads on the F5 stats run; count ratios — the load-immune
+  figures — put ~11 PGRAPH MMIO ops on every PGRAPH interrupt, 3 INTR
+  reads per ack). Soak: 8 F5⇄F8 loadvm cycles over a 12-min window,
+  zero hangs/asserts/artifacts; xbox suite green. `XEMU_PGRAPH_LOCKLESS=0`
+  restores BQL dispatch for PGRAPH only; `XEMU_MMIO_BQL=1` still
+  restores it for all blocks.
 
 ### Build + packaging
 
