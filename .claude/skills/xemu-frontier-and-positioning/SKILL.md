@@ -85,6 +85,40 @@ skill.
 > the SSE parity was a direct consequence of predicting against a
 > pre-PGO profile (sequential-optimization interaction).
 
+> **RANKING ADDENDUM 2 (2026-07-11 late, six-campaign wave at
+> `a4c8d6f432` — supersedes the queue above).** All ranked items were
+> EXECUTED in one orchestrated wave (receipts in the
+> ee1de9f654..a4c8d6f432 commit bodies; scene-gated quiet A/Bs):
+> 1. **Sub-page dirty tracking — SHIPPED DEFAULT-ON**: F8 +4.33±1.53
+>    (4/4), F5 +11.63±0.52 (3/3) = **+14%/+25%**, the largest single
+>    TCG win since the occlusion rework. Refuter-first (60M+ skips, 0
+>    violations, 45 reload cycles). Archaeology 1.23 carries the two
+>    model lessons (kill-proxy doesn't survive a complexity-class
+>    change; price the whole churn).
+> 2. **Cross-page chaining — LANDED DARK, MEASURED +1.30±0.29 (7/7)**
+>    (`XEMU_XPAGE_CHAIN=2`). Dark solely for the whole-TLB-flush
+>    soundness residual → **the new cheapest promotion: hook generic
+>    tlb_flush (rare, cheap), re-refute, default-on (+1.3 fps
+>    waiting).**
+> 3. **PGRAPH lockless — DONE** (parity −0.65±1.43 sign-mixed n=3;
+>    lockless spread 0.43 vs 1.00 — PFB/USER-class steadiness).
+> 4. **Push-present ring × interp — LANDED opt-in, receipt in hand**
+>    (pull blocks UI 499-607 ms/5s under 2x; ring = 0; flips
+>    identical; refuter 60k compared/0). Promotion = owner
+>    daily-driving soak with `XEMU_PUSH_PRESENT=1`, then default.
+> 5. **Superblock (roadmap 5)** now has its quantified codegen case:
+>    in-game census = **~39-44% of block boundaries carry dead flag
+>    materializations** (consumed only 11-13%) — still weeks-scale,
+>    but no longer speculative.
+> 6. Linux CI runs the xbox suite (first non-Apple aarch64 DSP JIT
+>    run green); zeta flip-snapshot landed dark but is **inert on
+>    Azurik fixtures** (2× scanout AA — mode 1 always was too);
+>    needs a non-AA title or resolve-to-scanout variant to matter.
+> New scene floors (windowed, no-PGO local, this build): F8 base
+> ~30.4 → **34.7 with subpage**; F5 47.3 → **59.0**. Re-base ALL
+> predictions on the post-subpage profile before ranking new work
+> (the 2026-07-04 addendum's re-base rule, doubled).
+
 ## When NOT to use this skill
 
 | Need | Use instead |

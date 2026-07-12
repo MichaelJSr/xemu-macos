@@ -73,6 +73,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.20 | L2 victim jump-cache | settled-negative (instrument-killed) |
 | 1.21 | Texture/sampler LRU eviction raced pending submissions | shipped-after-fix |
 | 1.22 | TB range-check re-add (XEMU_TB_RANGE_INV) | settled-negative (instrument-killed) |
+| 1.23 | Sub-page code dirty tracking (+14-25% fps; model undershot 15×) | shipped |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -730,6 +731,42 @@ needs refuter-first treatment before any implementation).
 **Reopen if**: a workload appears with true SMC or partial-overlap
 writes (INV_PROF false-share well below 100%) — the filter's tradeoff
 flips only when invalidations stop being pure false sharing.
+
+## 1.23 Sub-page code dirty tracking — the 1.22 lever shipped, and the model undershot 15×
+
+**Status**: shipped default-on (2026-07-11, the same day 1.22 was
+killed; `XEMU_SUBPAGE_DIRTY=0` restores whole-page invalidation).
+**The mechanism**: per-`PageDesc` 64×64-B code-block bitmap; a notdirty
+store missing every code block skips the whole-page invalidation via an
+**O(1) bitmap test** — the page stays protected and re-traps cheaply.
+Set-before-`tb_link_page`-publish, cleared only on page-empty/tb_flush
+(over-approximation is the SAFE direction: a stale bit costs a trap, an
+under-set bit would be a wrong-code hang).
+**Refuter-first record** (the design doc demanded it; two soaks):
+0 violations over 60M+ ground-truth-checked skips across 45 reload
+cycles — 28.6M standalone, then 32.0M on the integrated binary with
+cross-page chaining simultaneously active (that combined soak also ran
+the chain refuter: 3.15B checks, 0 violations).
+**Measured** (quiet interleaved A/B, scene-gated intervals): F8
+30.35→34.68 (+4.33±1.53, 4/4 pairs, +14.3%); F5 47.33→58.96
+(+11.63±0.52, 3/3, +24.6%). Largest single TCG win since the occlusion
+rework.
+**Two durable lessons**: (1) 1.22's ">5× traps ⇒ negative" proxy was an
+artifact of the O(N) per-trap scan — re-deriving the cost model for the
+O(1) form (Gate-0, `docs/subpage-gate0-prediction.md`) flipped the
+verdict; never carry a kill-proxy across a complexity-class change.
+(2) The Gate-0 model still undershot ~15× (+0.5-0.9% vCPU predicted,
++14-25% fps measured) because it priced only the trap body — the
+eliminated invalidations also carried recycle round-trips, jump
+unlink/relink, jc/ret-memo invalidation and cache pollution downstream.
+When pricing a churn-removal, price the whole churn, not the visible
+call site. (Also of note: the fps A/B was nearly poisoned by the
+loadvm shortcut-vs-tag trap and a scene-gating parser bug — both
+caught; see xemu-testing bench mechanics.)
+**Reopen if**: n/a (ship). The residual ceiling — removing the ~26k/s
+remaining O(1) traps via a host-`qemu_st` fast-path probe (arm (b),
+Class-5 codegen) — is scoped in the Gate-0 doc but the trap cost it
+would remove is now small; re-rank only with fresh INV_TIMING data.
 
 # 2. MoltenVK / driver level
 
