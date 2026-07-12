@@ -95,11 +95,11 @@ skill.
 >    violations, 45 reload cycles). Archaeology 1.23 carries the two
 >    model lessons (kill-proxy doesn't survive a complexity-class
 >    change; price the whole churn).
-> 2. **Cross-page chaining — LANDED DARK, MEASURED +1.30±0.29 (7/7)**
->    (`XEMU_XPAGE_CHAIN=2`). Dark solely for the whole-TLB-flush
->    soundness residual → **the new cheapest promotion: hook generic
->    tlb_flush (rare, cheap), re-refute, default-on (+1.3 fps
->    waiting).**
+> 2. **Cross-page chaining — PROMOTED DEFAULT-ON 2026-07-12** (the
+>    tlb_flush backstop closed the residual same night; promotion soak
+>    1.71B checks / 0 violations / backstop fired 799×; +0.77±0.55 on
+>    top of sub-page (3/3), +1.30±0.29 standalone). `XEMU_XPAGE_CHAIN=0`
+>    reverts.
 > 3. **PGRAPH lockless — DONE** (parity −0.65±1.43 sign-mixed n=3;
 >    lockless spread 0.43 vs 1.00 — PFB/USER-class steadiness).
 > 4. **Push-present ring × interp — LANDED opt-in, receipt in hand**
@@ -114,8 +114,10 @@ skill.
 >    run green); zeta flip-snapshot landed dark but is **inert on
 >    Azurik fixtures** (2× scanout AA — mode 1 always was too);
 >    needs a non-AA title or resolve-to-scanout variant to matter.
-> New scene floors (windowed, no-PGO local, this build): F8 base
-> ~30.4 → **34.7 with subpage**; F5 47.3 → **59.0**. Re-base ALL
+> New scene floors (windowed, this machine): F8 30.35 →
+> **35.93 no-PGO defaults** → **38.10 with the v0.11 retrained PGO**
+> (+25.5% in one day); F5 47.3 → **59.0 no-PGO**. v0.11 tagged and
+> PUBLISHED 2026-07-12 (17 assets). Re-base ALL
 > predictions on the post-subpage profile before ranking new work
 > (the 2026-07-04 addendum's re-base rule, doubled).
 
