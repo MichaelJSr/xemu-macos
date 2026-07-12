@@ -985,23 +985,42 @@ static void set_surface_label(PGRAPHState *pg, SurfaceBinding const *surface)
     }
 }
 
-#if HAVE_IOSURFACE_SHARING
 /*
- * Opt-in real depth for MetalFX temporal (XEMU_MFX_REAL_DEPTH=1):
- * zeta images are created exportable and their backing MTLTexture is
- * handed to the temporal scaler in place of synthetic luminance
- * depth. Known limitation (documented): by present time the single
- * guest zeta buffer typically holds the *next* in-progress frame's
- * depth, so the data is one frame ahead — hence opt-in for A/B.
+ * Real-depth feed for the MetalFX temporal scaler. The single guest
+ * zeta feeds the scaler one frame too late — by present time the guest
+ * has begun the next frame and overwritten it — so this is opt-in:
+ *   0 (unset) synthetic luminance depth (default)
+ *   1         live zeta read: export every zeta, hand the bound one to
+ *             the scaler at present (documented one-frame-ahead limit)
+ *   2         flip snapshot: copy the bound zeta into a dedicated image
+ *             at FLIP_STALL, when it is temporally correct, and feed
+ *             that (see pgraph_vk_zeta_snapshot_capture)
+ * Defined unconditionally (plain env parse) so it links on every
+ * platform; only consulted under HAVE_IOSURFACE_SHARING.
  */
+int pgraph_vk_mfx_real_depth_mode(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("XEMU_MFX_REAL_DEPTH");
+        if (!env || !env[0] || env[0] == '0') {
+            cached = 0;
+        } else if (env[0] == '2') {
+            cached = 2;
+        } else {
+            cached = 1; /* back-compat: "1"/any other truthy value */
+        }
+    }
+    return cached;
+}
+
+#if HAVE_IOSURFACE_SHARING
+/* Live-read (mode 1) export gate: only mode 1 makes every zeta image
+ * exportable. Mode 2 leaves live zetas unexported and blits into a
+ * dedicated snapshot instead, so it pays no per-surface export cost. */
 static bool zeta_export_wanted(PGRAPHVkState *r, SurfaceBinding *surface)
 {
-    static int env_cached = -1;
-    if (env_cached < 0) {
-        const char *env = getenv("XEMU_MFX_REAL_DEPTH");
-        env_cached = (env && env[0] && env[0] != '0') ? 1 : 0;
-    }
-    return env_cached && !surface->color &&
+    return pgraph_vk_mfx_real_depth_mode() == 1 && !surface->color &&
            r->metal_texture_export_enabled && r->export_metal_objects_fn &&
            g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_TEMPORAL;
 }
@@ -1179,6 +1198,221 @@ static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
                     surface->allocation_scratch);
     surface->image_scratch = VK_NULL_HANDLE;
     surface->allocation_scratch = VK_NULL_HANDLE;
+}
+
+#if HAVE_IOSURFACE_SHARING
+/*
+ * Flip-time zeta snapshot (XEMU_MFX_REAL_DEPTH=2). See the mode note at
+ * pgraph_vk_mfx_real_depth_mode(). The snapshot mirrors the bound zeta's
+ * scaled dimensions and format and is created exportable, so its backing
+ * MTLTexture feeds the temporal scaler exactly as a live zeta's does —
+ * only temporally correct, because the copy is recorded into the frame's
+ * command buffer at FLIP_STALL before that frame is submitted.
+ */
+static void zeta_snapshot_release(PGRAPHVkState *r)
+{
+    if (r->zeta_snapshot_mtl_texture) {
+        CFRelease(r->zeta_snapshot_mtl_texture);
+        r->zeta_snapshot_mtl_texture = NULL;
+    }
+    if (r->zeta_snapshot_image != VK_NULL_HANDLE) {
+        vmaDestroyImage(r->allocator, r->zeta_snapshot_image,
+                        r->zeta_snapshot_allocation);
+        r->zeta_snapshot_image = VK_NULL_HANDLE;
+        r->zeta_snapshot_allocation = VK_NULL_HANDLE;
+    }
+    r->zeta_snapshot_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    r->zeta_snapshot_width = 0;
+    r->zeta_snapshot_height = 0;
+    r->zeta_snapshot_format = VK_FORMAT_UNDEFINED;
+    r->zeta_snapshot_valid = false;
+}
+
+static bool zeta_snapshot_ensure_image(PGRAPHState *pg, SurfaceBinding *zeta,
+                                       unsigned scaled_w, unsigned scaled_h)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->zeta_snapshot_image != VK_NULL_HANDLE &&
+        r->zeta_snapshot_width == (int)scaled_w &&
+        r->zeta_snapshot_height == (int)scaled_h &&
+        r->zeta_snapshot_format == zeta->host_fmt.vk_format) {
+        return r->zeta_snapshot_mtl_texture != NULL;
+    }
+
+    zeta_snapshot_release(r);
+
+    VkImageCreateInfo image_create_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = { scaled_w, scaled_h, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = zeta->host_fmt.vk_format,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        /* Same usage as the live zeta so the exported MTLTexture is
+         * shaped identically for MetalFX; TRANSFER_DST for the blit. */
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | zeta->host_fmt.usage,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkExportMetalObjectCreateInfoEXT export_metal_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT,
+        .exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT,
+    };
+    image_create_info.pNext = &export_metal_info;
+
+    VmaAllocationCreateInfo alloc_create_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+    if (vmaCreateImage(r->allocator, &image_create_info, &alloc_create_info,
+                       &r->zeta_snapshot_image, &r->zeta_snapshot_allocation,
+                       NULL) != VK_SUCCESS) {
+        r->zeta_snapshot_image = VK_NULL_HANDLE;
+        r->zeta_snapshot_allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkExportMetalTextureInfoEXT tex_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT,
+        .image = r->zeta_snapshot_image,
+        .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
+    };
+    VkExportMetalObjectsInfoEXT export_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+        .pNext = &tex_info,
+    };
+    ((PFN_vkExportMetalObjectsEXT)r->export_metal_objects_fn)(r->device,
+                                                              &export_info);
+    if (tex_info.mtlTexture) {
+        r->zeta_snapshot_mtl_texture = (void *)CFRetain(tex_info.mtlTexture);
+    }
+    r->zeta_snapshot_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    r->zeta_snapshot_width = (int)scaled_w;
+    r->zeta_snapshot_height = (int)scaled_h;
+    r->zeta_snapshot_format = zeta->host_fmt.vk_format;
+
+    static bool logged_once;
+    if (!logged_once) {
+        logged_once = true;
+        fprintf(stderr,
+                "nv2a: zeta snapshot MTLTexture export (flip real depth): "
+                "%s (%ux%u, vk_format %u)\n",
+                r->zeta_snapshot_mtl_texture ? "ok" : "FAILED", scaled_w,
+                scaled_h, (unsigned)zeta->host_fmt.vk_format);
+    }
+    return r->zeta_snapshot_mtl_texture != NULL;
+}
+#endif /* HAVE_IOSURFACE_SHARING */
+
+void pgraph_vk_zeta_snapshot_capture(PGRAPHState *pg)
+{
+#if HAVE_IOSURFACE_SHARING
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    /* Stale until proven fresh for this flip. */
+    r->zeta_snapshot_valid = false;
+
+    if (pgraph_vk_mfx_real_depth_mode() != 2 ||
+        !r->metal_texture_export_enabled || !r->export_metal_objects_fn ||
+        g_config.display.metalfx_mode != CONFIG_DISPLAY_METALFX_MODE_TEMPORAL) {
+        return;
+    }
+
+    /*
+     * Snapshot the zeta whose dimensions match the bound color target
+     * (what gets presented), mirroring the live-read consumer's
+     * selection in render_display. The *bound* zeta can be a wider
+     * combined / AA-squished buffer that never matches the display, so
+     * snapshotting it blindly would only ever be rejected downstream by
+     * the scaler's dims check. Prefer the most recently drawn match; no
+     * match -> leave the snapshot invalid and fall back to synthetic,
+     * exactly as the live path does.
+     */
+    SurfaceBinding *color = r->color_binding;
+    if (!color || !color->width || !color->height) {
+        return;
+    }
+    SurfaceBinding *zeta = NULL, *it;
+    QTAILQ_FOREACH (it, &r->surfaces, entry) {
+        if (!it->color && it->initialized && it->image != VK_NULL_HANDLE &&
+            it->width == color->width && it->height == color->height &&
+            (!zeta || it->draw_time > zeta->draw_time)) {
+            zeta = it;
+        }
+    }
+    if (!zeta) {
+        return; /* no display-matching zeta: consumer falls back to synthetic */
+    }
+
+    unsigned scaled_w = zeta->width, scaled_h = zeta->height;
+    pgraph_apply_scaling_factor(pg, &scaled_w, &scaled_h);
+
+    if (!zeta_snapshot_ensure_image(pg, zeta, scaled_w, scaled_h)) {
+        return; /* alloc/export failed: consumer falls back to synthetic */
+    }
+
+    int64_t nsprof_t0 = nsprof_begin();
+
+    /* Ride the frame's command buffer: recorded here, submitted by the
+     * FLIP_STALL finish immediately after, so the copy executes after
+     * this frame's draws and before the next frame overwrites the zeta.
+     * begin_nondraw_commands ends any open render pass first. */
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
+
+    pgraph_vk_transition_image_layout(
+        pg, cmd, zeta->image, zeta->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    pgraph_vk_transition_image_layout(
+        pg, cmd, r->zeta_snapshot_image, r->zeta_snapshot_format,
+        r->zeta_snapshot_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkImageCopy copy_region = {
+        .srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .layerCount = 1 },
+        .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .layerCount = 1 },
+        .extent = { scaled_w, scaled_h, 1 },
+    };
+    vkCmdCopyImage(cmd, zeta->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   r->zeta_snapshot_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+
+    /* Restore the zeta for the next frame's draws. */
+    pgraph_vk_transition_image_layout(
+        pg, cmd, zeta->image, zeta->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    /* Leave the snapshot in a sampled layout for the Metal-side read. */
+    pgraph_vk_transition_image_layout(
+        pg, cmd, r->zeta_snapshot_image, r->zeta_snapshot_format,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    r->zeta_snapshot_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    r->zeta_snapshot_valid = r->zeta_snapshot_mtl_texture != NULL;
+    nsprof_end(NSPROF_ZETA_SNAPSHOT, nsprof_t0);
+#else
+    (void)pg;
+#endif
+}
+
+void pgraph_vk_zeta_snapshot_destroy(PGRAPHState *pg)
+{
+#if HAVE_IOSURFACE_SHARING
+    zeta_snapshot_release(pg->vk_renderer_state);
+#else
+    (void)pg;
+#endif
 }
 
 static SurfaceBinding *
@@ -2247,6 +2481,9 @@ void pgraph_vk_finalize_surfaces(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     pgraph_vk_surface_flush(container_of(pg, NV2AState, pgraph));
+    /* surface_flush drained every slot, so no in-flight work references
+     * the snapshot image; safe to release it now. */
+    pgraph_vk_zeta_snapshot_destroy(pg);
     if (r->surface_lookup) {
         g_hash_table_destroy(r->surface_lookup);
         r->surface_lookup = NULL;

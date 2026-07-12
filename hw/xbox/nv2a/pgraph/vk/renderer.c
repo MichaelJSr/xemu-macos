@@ -200,6 +200,14 @@ static void pgraph_vk_process_pending(NV2AState *d)
 
 static void pgraph_vk_flip_stall(NV2AState *d)
 {
+    /*
+     * Flip-time zeta snapshot (XEMU_MFX_REAL_DEPTH=2): record the depth
+     * blit into this frame's command buffer BEFORE the finish so the
+     * copy rides this submission — capturing depth that matches the
+     * frame about to be presented, before the next frame overwrites the
+     * single guest zeta. No-op unless the knob is 2. See surface.c.
+     */
+    pgraph_vk_zeta_snapshot_capture(&d->pgraph);
     pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
     pgraph_vk_debug_frame_terminator();
     pgraph_vk_maybe_save_pipeline_cache(&d->pgraph);

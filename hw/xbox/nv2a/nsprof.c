@@ -35,6 +35,7 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_SURF_DOWNLOAD] = "surf_down",
     [NSPROF_FLIP_IDLE] = "flip_idle",
     [NSPROF_PRESENT_WAIT] = "present_wait",
+    [NSPROF_ZETA_SNAPSHOT] = "zeta_snap",
 };
 
 static const char *const event_names[NSPROF_EV__COUNT] = {

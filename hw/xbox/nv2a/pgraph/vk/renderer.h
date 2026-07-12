@@ -741,6 +741,24 @@ typedef struct PGRAPHVkState {
     /* PFN_vkExportMetalObjectsEXT, stored untyped for portability */
     void *export_metal_objects_fn;
 
+    /*
+     * Flip-time zeta snapshot (XEMU_MFX_REAL_DEPTH=2): a dedicated,
+     * exportable image blitted from the bound zeta at FLIP_STALL, so
+     * the MetalFX temporal scaler samples depth that matches the
+     * *presented* frame rather than the next in-progress one the single
+     * live guest zeta already holds by present time. Recreated on zeta
+     * dims/format change; mtl_texture retained. Fields are declared
+     * unconditionally (harmless pointers/handles) but only ever touched
+     * under HAVE_IOSURFACE_SHARING.
+     */
+    VkImage zeta_snapshot_image;
+    VmaAllocation zeta_snapshot_allocation;
+    void *zeta_snapshot_mtl_texture; /* retained id<MTLTexture>, or NULL */
+    VkImageLayout zeta_snapshot_layout;
+    VkFormat zeta_snapshot_format;
+    int zeta_snapshot_width, zeta_snapshot_height;
+    bool zeta_snapshot_valid; /* captured content is current for this flip */
+
     int framebuffer_index;
     bool framebuffer_dirty;
     bool render_pass_state_dirty;
@@ -1089,6 +1107,15 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 // surface.c
 void pgraph_vk_init_surfaces(PGRAPHState *pg);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
+/* XEMU_MFX_REAL_DEPTH: 0 = synthetic (default), 1 = live zeta read,
+ * 2 = flip-time zeta snapshot. Cached env parse; safe on all platforms. */
+int pgraph_vk_mfx_real_depth_mode(void);
+/* Flip-time zeta snapshot producer/teardown (XEMU_MFX_REAL_DEPTH=2).
+ * Capture records a depth blit into the frame's command buffer and must
+ * run before the FLIP_STALL finish so it rides that submission. Both are
+ * no-ops off Apple / when the knob isn't 2. */
+void pgraph_vk_zeta_snapshot_capture(PGRAPHState *pg);
+void pgraph_vk_zeta_snapshot_destroy(PGRAPHState *pg);
 void pgraph_vk_surface_flush(NV2AState *d);
 void pgraph_vk_process_pending_downloads(NV2AState *d);
 void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);

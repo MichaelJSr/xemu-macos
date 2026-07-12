@@ -57,6 +57,10 @@ enum NsprofCounter {
                              trip (pull-model qemu_event_wait). ~0 under
                              XEMU_PUSH_PRESENT. Accumulated off-thread —
                              see the header comment above. */
+    NSPROF_ZETA_SNAPSHOT, /* PFIFO-thread cost to record the flip-time
+                             zeta->snapshot depth blit (XEMU_MFX_REAL_DEPTH=2).
+                             CPU record time only; the copy's GPU cost lands
+                             indirectly in the FLIP_STALL finish. */
     NSPROF__COUNT,
 };
 

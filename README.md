@@ -125,7 +125,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
 | `XEMU_INPUT_PIPE` | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_COREAUDIO_FRAMES` | CoreAudio buffer frames, default `1024` (≈21 ms @ 48 kHz) |
-| `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B) |
+| `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `1` = live read (one frame late), `2` = flip-time snapshot (temporally correct); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
@@ -657,13 +657,21 @@ In-app Settings covers the main toggles.
   two semantics inverted. The guest-vblank IRQ timer was already a
   dedicated fixed-60 Hz monotonic-deadline thread, fully decoupled
   from the present path.
-- **Opt-in real depth for temporal** (`XEMU_MFX_REAL_DEPTH=1`):
-  zeta images are created exportable and the dims-matched zeta's
-  MTLTexture feeds the temporal scaler (standard-Z) in place of
-  synthetic luminance depth; automatic fallback when the format is
-  rejected or no matching zeta exists. Ships dark for A/B: the
-  single guest zeta typically holds the next in-progress frame's
-  depth by present time, so quality impact is title-dependent.
+- **Opt-in real depth for temporal** (`XEMU_MFX_REAL_DEPTH`):
+  feeds the temporal scaler the NV2A zeta (standard-Z) in place of
+  synthetic luminance depth, with automatic fallback when the format
+  is rejected or no zeta matches the scaler's input dims. `1` exports
+  every zeta and hands the dims-matched one to the scaler live — but
+  by present time the single guest zeta already holds the *next*
+  in-progress frame's depth (one frame ahead). `2` instead blits the
+  display-matching zeta into a dedicated exportable snapshot at
+  FLIP_STALL, recorded into that frame's command buffer so it rides
+  the same submission (one depth copy per flip, ~2 µs PFIFO record
+  time), giving depth that is temporally correct for the presented
+  frame. Both ship dark for A/B. Engagement is title-dependent: a
+  guest that renders 3D at 2× the scanout width (AA super-width, e.g.
+  Azurik) exposes no zeta matching the scaler input, so both modes
+  fall back to synthetic there.
 
 ### MCPX APU
 
@@ -1130,11 +1138,16 @@ flips.
   renderer switch away from Vulkan under the Metal backend needs a
   restart; full unification would render the GL display buffer into
   an IOSurface-backed FBO and feed the same present-frame handoff.
-- **Flip-time zeta snapshot for real depth.** The opt-in real-depth
-  path (`XEMU_MFX_REAL_DEPTH`) feeds the live zeta texture, which by
-  present time holds the next in-progress frame. Capturing a GPU
-  copy of zeta at flip-stall would give temporally-correct depth at
-  the cost of one blit per frame.
+- **Real-depth engagement on AA / super-width titles.** The flip-time
+  snapshot (`XEMU_MFX_REAL_DEPTH=2`) now gives temporally-correct
+  depth (one depth copy per flip at FLIP_STALL), but titles that
+  render 3D at 2× the scanout width (AA super-width, e.g. Azurik)
+  expose no zeta matching the scaler's input dims, so real depth
+  falls back to synthetic. A resolve-blit of the bound zeta down to
+  scanout dims at flip would engage it (proven to render cleanly with
+  no validation errors); the open question is whether resolved AA
+  depth improves temporal quality enough to justify replacing the
+  exact-match fallback.
 - **Texture-upload barrier batching.** Current per-mip
   `pre_compute` / `post_compute` pair is load-bearing on reused
   `COMPUTE_DST` / `COMPUTE_SRC`; batching requires disjoint offsets

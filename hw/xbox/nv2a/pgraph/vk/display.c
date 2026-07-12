@@ -2131,23 +2131,32 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
             if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
                 /*
-                 * Real depth (opt-in XEMU_MFX_REAL_DEPTH): zeta images
-                 * are created exportable in surface.c and the bound
-                 * zeta's MTLTexture feeds the scaler in place of
-                 * synthetic luminance depth. Known limitation: the
-                 * single guest zeta buffer typically holds the next
-                 * in-progress frame's depth by present time (one frame
-                 * ahead), hence opt-in for A/B evaluation.
-                 */
-                /*
-                 * Pick the zeta whose dimensions match the displayed
-                 * color surface, preferring the most recently drawn.
-                 * The *bound* zeta at sync time can be a different
-                 * shape entirely (e.g. a 2560-wide combined buffer
-                 * while the displayed surface is 1280 wide).
+                 * Real depth (opt-in XEMU_MFX_REAL_DEPTH) feeds the
+                 * scaler NV2A zeta in place of synthetic luminance depth.
+                 *   1 = live read of the bound zeta's exported MTLTexture
+                 *       — one frame ahead by present time (documented).
+                 *   2 = the flip-time snapshot captured in surface.c,
+                 *       which is temporally correct for this frame.
+                 * metalfx_temporal_init / _upscale_tex validate the
+                 * texture's dims+format and fall back to synthetic on any
+                 * mismatch, so a stale/mismatched handle is always safe.
                  */
                 void *zeta_tex = NULL;
-                if (disp->mtl_texture) {
+                int rd_mode = pgraph_vk_mfx_real_depth_mode();
+                if (rd_mode == 2) {
+                    /* Snapshot mirrors the bound zeta at flip; its dims
+                     * are validated by metalfx_temporal_init below. */
+                    if (r->zeta_snapshot_valid) {
+                        zeta_tex = r->zeta_snapshot_mtl_texture;
+                    }
+                } else if (rd_mode == 1 && disp->mtl_texture) {
+                    /*
+                     * Pick the zeta whose dimensions match the displayed
+                     * color surface, preferring the most recently drawn.
+                     * The *bound* zeta at sync time can be a different
+                     * shape entirely (e.g. a 2560-wide combined buffer
+                     * while the displayed surface is 1280 wide).
+                     */
                     SurfaceBinding *best = NULL, *it;
                     QTAILQ_FOREACH(it, &r->surfaces, entry) {
                         if (!it->color && it->mtl_texture &&
