@@ -84,6 +84,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
 | 3.1 | Async MetalFX under GL presentation | reverted, landed elsewhere |
 | 3.2 | Vblank cadence aligned to host refresh | reverted |
+| 3.3 | Push-present strict-FIFO consume ("frames double playing" judder; bounded-debt catch-up fix) | shipped-after-fix |
 | 4.1 | DSP JIT round-4 EPI_NO_PC | settled-negative |
 | 4.2 | DSP JIT round-4 cur_inst preset skip | fenced-off |
 | 4.3 | A/B accumulator pinning (revert → audit → reapply) | shipped-after-fix |
@@ -984,6 +985,43 @@ panels is mostly neutered for 60 fps sources (30→60 smoothing still works).
 timer decoupled from host present cadence (substantial NV2A-model rework; the
 PAL-50 Hz README Future vector shares this precondition). Any shortcut that
 touches `vblank_interval_ns` alone re-breaks guest timing.
+
+## 3.3 Push-present ring strict-FIFO consume — the "frames double playing" judder
+
+**Status**: shipped-after-fix (same-day as the default-on promotion,
+2026-07-12; `XEMU_PUSH_DEBT=0` restores strict FIFO).
+**Symptom** (owner, hours after v0.11.1 + the ring promotion): "jittering,
+or it looks like sometimes frames are double playing" — 2x interp,
+exclusive fullscreen, 60 Hz-class 5K panel.
+**Root cause**: the ring consumer took steps strictly FIFO, one per UI
+frame. The v0.11.1 speedups pushed the step rate past the display rate
+(38-40 fps × 2x = 76-80 steps/s vs 60 Hz) — the queue backlogs to ring
+capacity (~100 ms latency) and the producer force-drops UNREAD steps
+(~26/s measured under a 60 Hz-simulated consumer), splicing
+midpoint→midpoint with the real frame missing. The old pull path was a
+wall-time SAMPLER (no backlog possible); the ring turned present into a
+QUEUE, and queues at mismatched rates = latency + splices.
+**Fix**: bounded consumer debt (interp mode + 2 steps) with catch-up to
+the newest unconsumed REAL frame (needs the publisher's is_real byte on
+each entry) — freshest-frame sampling semantics when behind, untouched
+paced cadence when the display keeps up. Receipt: unread drops
+2,253/2,152 per min → **0** (2 interleaved pairs, 60 Hz sim), skips land
+on real frames, refuter 0 mismatches / 0 resurrections over the policy.
+**Three instrumentation traps burned during diagnosis** (the receipt was
+nearly unmeasurable): (1) `present_ring_count` never decreases —
+consumption is a CURSOR, not removal — so "count==CAP ⇒ drop-oldest"
+fires on every push after warmup; a drop counter must check
+`old->frame_seq > consumed` or it reads ~100% drops in perfectly healthy
+runs (the first probe did). (2) Unfocused/occluded bench windows present
+UNPACED (~200 Hz observed) — no vsync throttle — so ring pacing bugs are
+INVISIBLE headless; `XEMU_UI_FRAME_CAP_NS` (test knob) simulates a real
+consumer. (3) A too-tight debt bound false-fires on healthy transients:
+a flip publishes its whole schedule atomically, so unconsumed depth
+legitimately jumps by `mode` per publish — the bound must exceed one
+full schedule.
+**Reopen if**: n/a (fix is sampling-correct). If a future display path
+consumes at exactly the step rate (e.g. 120 Hz panel, 60 fps × 2x), the
+policy is inert by construction — no action needed.
 
 ---
 

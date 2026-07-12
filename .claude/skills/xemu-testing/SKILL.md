@@ -150,6 +150,19 @@ class — static scenes never stream. Method (reference: scratchpad
   (e.g. W^X fault loop) looks like "monitor answered once then
   empty responses + zero nsprof" — it is NOT a crash, no
   DiagnosticReports entry appears.
+
+## Present-pacing benches (push ring, interp cadence)
+
+Unfocused/occluded bench windows present UNPACED (~200 Hz observed
+2026-07-12, no vsync throttle) — display-pacing bugs are structurally
+invisible from a background harness. `XEMU_UI_FRAME_CAP_NS=16666666`
+(test knob, zero cost unset) floors the UI present period to simulate
+a 60 Hz consumer; the push-ring nsprof events (`push_step_publish`,
+`push_ring_drop` = UNREAD-entry overwrites only, `push_policy_skip`)
+are the oracle. The ring's `present_ring_count` never decreases
+(consumption is a cursor) — any "ring full" heuristic must compare
+against the consume cursor or it counts healthy recycling as drops
+(archaeology 3.3 burned all three of these).
 - Soak variant (`bench2/soak_lag.sh`): boot once, N cycles of
   alternating loadvm tags + 8 s forward walk — exercises
   flush-backstop machinery under repeated streaming.
