@@ -48,6 +48,7 @@
 #include "tb-internal.h"
 #include "tlb-bounds.h"
 #include "internal-common.h"
+#include "xemu-xpage.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin-memory.h"
 #endif
@@ -1047,6 +1048,21 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     paddr_page = full->phys_addr & TARGET_PAGE_MASK;
 
     prot = full->prot;
+
+#if defined(XBOX)
+    /*
+     * R2 secondary observer (XPAGE-DESIGN §5): log when an executable vaddr's
+     * guest-physical binding changes at TLB refill. Corroborating signal only
+     * — it has the fetch-bypass hole the per-exit refuter closes, so it never
+     * replaces the refuter. Near-zero when the campaign is off (latched
+     * checks short-circuit).
+     */
+    if ((prot & PAGE_EXEC) &&
+        (xemu_xpage_chain_level() > 0 || xemu_xpage_refute_on())) {
+        xemu_xpage_observe_mapping(addr_page, paddr_page, true);
+    }
+#endif
+
     asidx = cpu_asidx_from_attrs(cpu, full->attrs);
     section = address_space_translate_for_iotlb(cpu, asidx, paddr_page,
                                                 &xlat, &sz, full->attrs, &prot);

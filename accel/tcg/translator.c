@@ -21,6 +21,7 @@
 #include "internal-common.h"
 #include "disas/disas.h"
 #include "tb-internal.h"
+#include "xemu-xpage.h"
 
 static void set_can_do_io(DisasContextBase *db, bool val)
 {
@@ -117,7 +118,24 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
     }
 
     /* Check for the dest on the same page as the start of the TB.  */
-    return translator_is_same_page(db, dest);
+    if (translator_is_same_page(db, dest)) {
+        return true;
+    }
+#if defined(XBOX)
+    /*
+     * Fork cross-page relaxation (default off; XEMU_XPAGE_CHAIN). Upstream
+     * forbids cross-page goto_tb because "address mapping changes in system
+     * emulation" could leave a stale chain (cpu-exec.c). On the Xbox the
+     * executable mapping is effectively static; xemu_xpage_allow() gates the
+     * relaxation by rule (kernel-identity window by default, broad + guest-
+     * flush backstop under =2). Incoming-jump unlink on invalidation reuses
+     * jmp_list unchanged. See XPAGE-DESIGN.md.
+     */
+    if (xemu_xpage_allow(dest)) {
+        return true;
+    }
+#endif
+    return false;
 }
 
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,

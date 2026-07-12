@@ -1710,6 +1710,14 @@ extern uint64_t xemu_inv_retmemo_emitted;
 extern bool xemu_ccop_census_on(void);
 extern uint64_t xemu_ccop_tb_tail[3];
 extern uint64_t xemu_ccop_tb_head[3];
+/* Cross-page direct-chaining campaign (XEMU_XPAGE_*; XPAGE-DESIGN.md,
+ * accel/tcg/xemu-xpage.[ch]). Same function-local extern idiom. */
+extern bool xemu_xpage_refute_on(void);
+extern bool xemu_xpage_prof_on(void);
+extern bool xemu_xpage_allow(uint64_t dest);
+extern uint64_t xemu_xpage_taken_kernel;
+extern uint64_t xemu_xpage_taken_low;
+extern uint64_t xemu_xpage_emitted;
 #endif
 
 static void gen_flcr(DisasContext *s)
@@ -3168,6 +3176,16 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
     }
     new_eip &= mask;
 
+#if defined(XBOX)
+    /*
+     * A cross-page DIRECT jump: gen_jmp_rel only ever emits direct relative
+     * jumps, so any goto_tb candidate whose target is off the source page is
+     * exactly the "other" exit-census slice this campaign targets. Captured
+     * before the CF_PCREL block below can clear use_goto_tb.
+     */
+    bool xpage_cpd = use_goto_tb && !translator_is_same_page(&s->base, new_pc);
+#endif
+
     if (tb_cflags(s->base.tb) & CF_PCREL) {
         tcg_gen_addi_tl(cpu_eip, cpu_eip, new_pc - s->pc_save);
         /*
@@ -3177,11 +3195,50 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
          */
         if (!use_goto_tb || !translator_is_same_page(&s->base, new_pc)) {
             tcg_gen_andi_tl(cpu_eip, cpu_eip, mask);
+#if defined(XBOX)
+            /*
+             * Cross-page relaxation: the andi above keeps cpu_eip
+             * wrap-correct regardless, so only forbid the direct chain when
+             * the fork rule disallows it (translator_use_goto_tb agrees
+             * below). Default off; see XPAGE-DESIGN.md.
+             */
+            if (!use_goto_tb || !xemu_xpage_allow(new_pc)) {
+                use_goto_tb = false;
+            }
+#else
             use_goto_tb = false;
+#endif
         }
     } else if (!CODE64(s)) {
         new_pc = (uint32_t)(new_eip + s->cs_base);
     }
+
+#if defined(XBOX)
+    /*
+     * Gate-0 taken counter + Gate-1 refuter, emitted into the source TB body
+     * so they run on every taken cross-page-direct exit whether or not it is
+     * chained. Under CF_PCREL cpu_eip already holds the target here (addi +
+     * wrap andi), so the refuter helper can read env->eip.
+     */
+    if (xpage_cpd) {
+        if (unlikely(xemu_xpage_prof_on())) {
+            /* Masked 32-bit linear target, matching xemu_xpage_allow()'s
+             * kernel-window test (wrap-safe classification). */
+            uint64_t *cntp = (((uint64_t)new_pc & 0xffffffffULL) >= 0x80000000ULL)
+                ? &xemu_xpage_taken_kernel : &xemu_xpage_taken_low;
+            TCGv_ptr cnt = tcg_constant_ptr(cntp);
+            TCGv_i64 tcnt = tcg_temp_new_i64();
+            xemu_xpage_emitted++;
+            tcg_gen_ld_i64(tcnt, cnt, 0);
+            tcg_gen_addi_i64(tcnt, tcnt, 1);
+            tcg_gen_st_i64(tcnt, cnt, 0);
+        }
+        if (unlikely(xemu_xpage_refute_on()) &&
+            (tb_cflags(s->base.tb) & CF_PCREL)) {
+            gen_helper_xemu_xpage_refute(tcg_env, tcg_constant_i64(s->cs_base));
+        }
+    }
+#endif
 
     if (use_goto_tb && translator_use_goto_tb(&s->base, new_pc)) {
         /* jump to same page: we can use a direct jump */

@@ -27,6 +27,9 @@ DEF_HELPER_FLAGS_1(ctpop_i64, TCG_CALL_NO_RWG_SE, i64, i64)
 DEF_HELPER_FLAGS_1(lookup_tb_ptr, TCG_CALL_NO_WG_SE, cptr, env)
 #if defined(XBOX)
 DEF_HELPER_FLAGS_1(xemu_lookup_ret, TCG_CALL_NO_WG_SE, cptr, env)
+/* Gate-1 cross-page-chaining refuter (XEMU_XPAGE_REFUTE=1); side-effecting
+ * (counts/logs), reads env->eip — NO_WG only. */
+DEF_HELPER_FLAGS_2(xemu_xpage_refute, TCG_CALL_NO_WG, void, env, i64)
 #endif
 
 DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)

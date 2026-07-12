@@ -28,6 +28,20 @@
 #include "tcg/helper-tcg.h"
 #include "hw/i386/apic.h"
 
+#if defined(XBOX)
+#include "exec/tb-flush.h"          /* queue_tb_flush */
+#include "exec/translation-block.h" /* tb_invalidate_phys_range */
+#include "exec/target_page.h"       /* TARGET_PAGE_MASK / TARGET_PAGE_SIZE */
+#include "hw/core/cpu.h"            /* cpu_get_phys_page_debug */
+/*
+ * Broad-tier cross-page direct-chaining (XEMU_XPAGE_CHAIN=2) guest-flush
+ * backstops live inside the guest's own INVLPG / CR3 helpers below. Function-
+ * local extern idiom: accel/tcg/xemu-xpage.h is not on the target include
+ * path. See XPAGE-DESIGN.md §3.
+ */
+extern int xemu_xpage_chain_level(void);
+#endif
+
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
 {
     address_space_stb(&address_space_io, port, data,
@@ -97,6 +111,18 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
             t0 &= 0xffffffffUL;
         }
         cpu_x86_update_cr3(env, t0);
+#if defined(XBOX)
+        /*
+         * A CR3 reload can change any mapping, so drop every cross-page chain.
+         * Effectively never taken by a running Xbox title (single address
+         * space); this is a rare correctness backstop, not a hot path. CR3
+         * write ends the TB (DISAS_EOB_NEXT), and tb_flush defers to a safe
+         * point, so no freed code is re-entered.
+         */
+        if (xemu_xpage_chain_level() >= 2) {
+            queue_tb_flush(env_cpu(env));
+        }
+#endif
         break;
     case 4:
         if (t0 & cr4_reserved_bits(env)) {
@@ -508,6 +534,23 @@ void helper_rdmsr(CPUX86State *env)
 
 void helper_flush_page(CPUX86State *env, target_ulong addr)
 {
+#if defined(XBOX)
+    /*
+     * INVLPG is the guest's per-page remap signal. Under broad-tier cross-page
+     * chaining, sever any stale cross-page chains into addr's CURRENT physical
+     * page before the remapped mapping can be used. Individual TB code is
+     * never freed until a tb_flush, and INVLPG ends the TB (DISAS_EOB_NEXT),
+     * so invalidating the current TB here is safe. See XPAGE-DESIGN §3.
+     */
+    if (xemu_xpage_chain_level() >= 2) {
+        hwaddr phys = cpu_get_phys_page_debug(env_cpu(env),
+                                              addr & TARGET_PAGE_MASK);
+        if (phys != (hwaddr)-1) {
+            tb_invalidate_phys_range(env_cpu(env), phys,
+                                     phys + TARGET_PAGE_SIZE - 1);
+        }
+    }
+#endif
     tlb_flush_page(env_cpu(env), addr);
 }
 
