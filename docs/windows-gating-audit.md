@@ -107,3 +107,90 @@ grep -n "host_os == 'darwin'" hw/xbox/nv2a/pgraph/vk/meson.build ui/meson.build
 grep -n "evict_submit_seq\|retired_submit_count" hw/xbox/nv2a/pgraph/vk/*.c hw/xbox/nv2a/pgraph/vk/renderer.h
 git diff upstream/master...HEAD -- util/cutils.c util/miniz include/qemu/osdep.h | grep -c "__APPLE__"  # expect 0
 ```
+
+---
+
+# Windows gating audit — addendum 2026-07-11 (`ed2568277b`)
+
+Extends the audit through two batches since `7e2e6e7256` (four
+correctness fixes, the xbox unit suite + first CI test step, harness
+hardening, `XEMU_INV_PROF`/`XEMU_TB_RANGE_INV` counters, push-model
+present, PGO retrain). Same verdict vocabulary. Three CI matrices are
+green today (macOS x86_64/arm64 + Windows x86_64/arm64 cross + Linux
+x86_64/aarch64, debug+release) — compile/package proof; the below is the
+semantic layer. **No divergence in this batch fails the bar; two of the
+four correctness fixes are cross-platform *benefits*.**
+
+## F. New shared behavior divergences (active on Windows/Linux by design)
+
+| # | Divergence | Verdict + reasoning |
+|---|---|---|
+| F1 | **Texture/sampler LRU eviction gated on submission retirement** (`hw/xbox/nv2a/pgraph/vk/texture.c`; sampler `submit_time` at `renderer.h:299-302`) | **Equivalence-argued + cross-platform BENEFIT.** `texture.c` is in the core vk meson list (`meson.build:19`, above the `host_os=='darwin'` fence) so it builds on every platform; `grep -c '__APPLE__\|IOSurface\|Metal' texture.c` = 0. The old pre-evict guard protected an entry only while referenced by the *currently-recording* CB, but `pgraph_vk_finish` pipelines (waits only slot N−1), so the just-submitted CB still executes with stale stamps and `post_evict` destroys immediately — a **use-after-free / VUID violation on every driver** (MoltenVK's deferred encode only widens the window). New guard `submit_time >= retired_submit_count` (`texture.c:2435`, sampler `:2519`) mirrors the §B8/§C surface watermark. Two forward-progress valves (`ensure_cache_headroom()` slot-fence drain, `texture.c:1660`; finalize drain, `:2603`) exist because release strips `lru_evict_one`'s assert. Windows/Linux native-driver users get a real correctness fix. **needs-real-HW** for native-driver soak (D9). GL untouched. |
+| F2 | **x87 FPCR-cache invalidation when the sticky-SSE bracket rewrites FPCR** (`target/i386/tcg/fpu_helper.c:3892`) | **Regression-risk none; cross-platform BENEFIT on aarch64 hosts.** Compiles on all aarch64 (`XEMU_SSE_HOSTFP && __aarch64__`, `:3758/:3865`) incl. Windows ARM64; x86_64 branch (`:3918`, MXCSR) untouched and stays dark (`mode=0` default off-aarch64, `:3833`). The store `cached_fpuc_rc = 0xFFFF` is harmless everywhere (forces a clean `gen_flcr` re-fire; unread where inline x87 is off). Correctly aarch64-scoped: aarch64 shares ONE FPCR between NEON and the `double`-based x87 `__hard` helpers (`:293-318`), so a leaked FZ/RC corrupts x87 doubles; x86_64 writes MXCSR — a *separate* register from the x87 control word — so no leak is possible there. Beneficiaries are all aarch64 hosts running the default-on sticky path (`hard_fpu` default true, `config_spec.yml:400`): **macOS arm64 AND Linux arm64**. **needs-real-HW** (D10) only to confirm inline x87 is the live path on Windows ARM64 (see §G note). |
+| F3 | **DSP JIT chain-unpatch icache flush** (`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`) | **Equivalence-argued; BENEFIT on Linux arm64.** `DSP56K_JIT_SUPPORTED = __aarch64__ && !_WIN32` (`dsp56k_jit_arm64.h:24`) — POSIX aarch64 only. `chain_unpatch_incoming` rewrites branch sites in *other* blocks' live code but omitted the `jit_clear_icache` its sibling `retro_chain_patch_pending` (~`:9221`) already does — stale I-cache could execute a chained branch into a block being invalidated (audio-glitch class). Linux arm64 gets the fix (JIT gate widened at `2f6c6d691c`). **needs-real-HW** (D11 ≡ #8): the DIFF harness disables chaining so cannot cover this path; Linux-arm64 acceptance still owes a `XEMU_DSP_JIT_DIFF=1`+`_STATS=1` run. |
+| F4 | **`XEMU_INV_PROF` SMC/invalidation-churn counters + `XEMU_TB_RANGE_INV` cure** (`accel/tcg/tb-maint.c`, `cpu-exec.c`, `translate-all.c`, `target/i386/tcg/translate.c`, `accel/tcg/xemu-inv-prof.h`) | **Regression-risk none; all-platform dev-tooling.** Header: declarations unconditional, definitions/sites `#if defined(XBOX)` (universal). Only plain `uint64` globals + latched `getenv` + `atexit` — nothing POSIX-only; single vCPU writer. Both default OFF, `unlikely()`-gated; default is byte-identical whole-page invalidation with zero added cost. `XEMU_TB_RANGE_INV=1` re-applies upstream's exact per-TB byte-range overlap filter (a correct subset, cannot miss a needed invalidation) but is measured neutral-to-negative (25× notdirty-trap explosion) — a dark A/B knob, not a shipped opt. Benefits Windows/Linux identically. |
+| F5 | **Push-model present + refuter + `present_wait` counter** (`nv2a.h`, `pgraph.c`, `vk/{display,renderer}.c`, `ui/xemu.c`, `nsprof.[ch]`) | **Regression-risk none off-Apple; macOS-only benefit.** Shared surface `nv2a_get_present_frame_pushed()` (`pgraph.c:461`) returns false when the renderer op is unset; the vk op (`renderer.c:362`) + slot/publish machinery (`display.c:31-212`) are `HAVE_IOSURFACE_SHARING`-gated (the existing Apple-only present gate) and fall through to `return false` off-Apple, so the `renderer.c:401` registration compiles everywhere. Default OFF (`XEMU_PUSH_PRESENT`, Metal + interp-off). **GL presentation entirely untouched (no push op registered).** Apple correctness proven by the `XEMU_PUSH_PRESENT_REFUTE` byte-identical checker (0 mismatches over soaks). |
+
+## G. Windows ARM64 sticky-SSE / inline-x87 note (F2 depth)
+
+`XEMU_SSE_HOSTFP` is defined on Windows ARM64 (aarch64), so the sticky
+bracket compiles and default-activates (`hard_fpu` default true).
+`g_use_hard_fpu_inline = hard_fpu` is set with **no `_WIN32` gate**
+(`translate.c:4678`). `TCG_TARGET_HAS_fpu=0` under `_WIN32`
+(`tcg-target-has.h:66`, §A11) is a *link-time* workaround for llvm-mingw's
+inability to constant-fold the generic-middle-end `qemu_build_not_reached`
+FP branches (`tcg.c:2626-2671` gate `tcg_op_supported` for the FP ops); it
+is **not** a runtime disable of the fork's inline emission. The aarch64
+backend's `tcg_out_op` FP cases (`tcg-target.c.inc:3260`, `4008-4025`) are
+present unconditionally and the `tcg_gen_*` FP emitters
+(`tcg-op-fp.c:14-58`) emit without a support check, so inline x87 —
+including `cached_fpuc_rc` — most likely runs on Windows ARM64 and F2
+covers the leak there identically. The residual (whether
+`tcg_op_supported=0` reroutes anything at runtime) is unresolvable
+statically with no Windows-ARM64 host → **needs-real-HW D10**. The *fix*
+regresses nothing either way; the pre-existing sticky-SSE feature
+(`d76ddd7b20`) owns the receipt.
+
+## H. Tests + CI portability (this batch)
+
+- **Portable arms, all platforms:** `xbox-mcpx-dsp`,
+  `xbox-mcpx-dsp-corpus-interp` (`tests/xbox/dsp/meson.build:48`),
+  `xbox-nv2a-swizzle` (`swizzle/meson.build`; macOS `objcopy
+  --redefine-sym` non-portability replaced by `-D` token-paste renames).
+- **JIT arms, aarch64 POSIX only:** `corpus-jit` / `jit-diff-sync` /
+  `jit-differential` gated `if host_machine.cpu_family() == 'aarch64' and
+  host_os != 'windows'` (`tests/xbox/dsp/meson.build:57`) — `DSP56K_JIT_
+  SUPPORTED` parity.
+- **CI executes tests only on the macOS arm64 legs** (`build-macos.yml`,
+  `if: matrix.arch == 'arm64'`, debug+release). `build-linux.yml` uses
+  `dpkg-buildpackage` (`:140`) with no accessible meson build dir;
+  `build-windows.yml` is win64-cross — **neither runs tests.** The
+  `ubuntu-22.04-arm` runner (`build-linux.yml:14`) *would* exercise the
+  aarch64 JIT arms if a meson-configure+`meson test --suite xbox` job were
+  added — the cheapest path to Linux-arm64 JIT runtime coverage (folds
+  needs-real-HW #8/D11 into CI). Owed: **CI push** (no local cross-build:
+  no docker/colima).
+
+## I. needs-real-HW list — additions (mirror README Future vectors)
+
+9. **Texture/sampler eviction retirement gate** — report-value/soak on
+   native AMD/NVIDIA/Intel Vulkan (equivalence proven; soak confirms) (F1).
+10. **FPCR-cache fix on Windows ARM64** — `XEMU_SSE_HOST=2` differential on
+    real Windows-ARM64 hardware to confirm inline x87 is the live path so
+    F2 covers the leak; no regression either way (F2/§G).
+11. **DSP JIT chain-unpatch icache fix on Linux arm64** —
+    `XEMU_DSP_JIT_DIFF=1`+`_STATS=1` run (`checked>0, failures=0`); folds
+    into #8. Cheapest via the CI arm runner (§H).
+
+## J. Re-verification (addendum)
+
+```sh
+grep -c "__APPLE__\|IOSurface\|Metal" hw/xbox/nv2a/pgraph/vk/texture.c   # F1: expect 0
+grep -n "cached_fpuc_rc = 0xFFFF" target/i386/tcg/fpu_helper.c            # F2: aarch64 branch only
+grep -n "hard_fpu" config_spec.yml                                       # default: true
+grep -n "DSP56K_JIT_SUPPORTED" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h  # aarch64 && !_WIN32
+grep -n "defined(XBOX)" accel/tcg/xemu-inv-prof.h                        # F4: sites XBOX-gated
+grep -n "HAVE_IOSURFACE_SHARING\|get_present_frame_pushed" hw/xbox/nv2a/pgraph/vk/renderer.c  # F5
+grep -n "matrix.arch == 'arm64'\|meson test --suite xbox" .github/workflows/build-macos.yml
+grep -n "dpkg-buildpackage\|ubuntu-22.04" .github/workflows/build-linux.yml  # H: no test, arm runner
+```
