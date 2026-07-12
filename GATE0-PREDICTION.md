@@ -221,3 +221,26 @@ Honest caveat: the win is modest and the F-scenes are CPU-bound busy-poll
 (≈95% vCPU); whether ~0.8% vCPU headroom converts to measurable fps is the
 orchestrator's A/B to decide (±0.02 fps baseline can resolve it). `H` is
 reasoned, not directly measured — the A/B is the ground truth.
+
+## 5. BUILT + VALIDATED (Gates 1-3, arm (a) only)
+
+Arm (a) shipped dark behind `XEMU_SUBPAGE_DIRTY=1` with the refuter
+`XEMU_SUBPAGE_REFUTE=1` (commit `79e2f8b204`). Correctness receipts:
+
+- **Refuter soak (Gate 3):** F8/F7/F5 cycled over 33 loadvm reloads, ~12 min,
+  `XEMU_SUBPAGE_DIRTY=1 XEMU_SUBPAGE_REFUTE=1`: **28,598,565 filter-skips
+  examined against ground-truth live-TB overlap, VIOLATIONS = 0**; true_smc = 0
+  over 28.6M traps. The guest ran correctly through every level-transition-class
+  reload (archaeology-1.4 class).
+- **Arm (a) mechanism confirmed (counts, load-immune):** `XEMU_SUBPAGE_DIRTY=1`
+  on F8 collapsed real whole-page invalidations **290,595 → 11,180 (25.9×)**
+  with 3.55M fast-skips, guest correct at ~30 flips/s (809 draws/flip).
+- **Tests:** `meson test --suite xbox` 6/6 OK (DSP interp/JIT-diff + swizzle).
+- **Dirty-consumer safety:** the sub-block bitmap is a new `PageDesc` field,
+  never `ram_list.dirty_memory[*]`; `notdirty_write`'s `DIRTY_CLIENTS_NOCODE`
+  set (NV2A/NV2A_TEX/VGA/MIGRATION) is unchanged, and no NV2A/display code reads
+  `DIRTY_MEMORY_CODE` — so PFIFO vertex/texture dirty semantics are bit-identical
+  (race clause 2/3).
+
+Left to the orchestrator: the interleaved fps A/B (`XEMU_SUBPAGE_DIRTY` toggle,
+same binary) and the ship/kill decision. Arm (b) not built.

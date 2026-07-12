@@ -134,7 +134,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_CCOP_CENSUS` | `1` prints a runtime-weighted census of cc-flag liveness across TB boundaries at exit (predecessor tail class × successor head class). Forces every TB transition through the exec loop (no goto_tb / jump-cache / ret-memo) so pairs are exact — much slower, same executed instruction stream; sizing tool for the superblock roadmap item, never a perf mode |
 | `XEMU_INV_TIMING` | `1` adds a `cntvct_el0`-based split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_DIRTY` | `1` enables sub-page code dirty tracking (ships **dark**, pending interleaved A/B): a per-`PageDesc` 64-block bitmap lets a guest data store that misses every code sub-block skip whole-page invalidation — an O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip, leaving the page write-protected so the store re-traps cheaply. On F8 it collapsed real invalidations 290,595 → 11,180 (25.9×) with the guest running correctly. The higher-ceiling fast-path form that removes the trap itself needs host-`tcg/aarch64` store codegen (Future vectors) |
-| `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: 0 violations over millions of filter-skips |
+| `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
@@ -974,7 +974,8 @@ it. Instruments to re-run before starting any of these:
    scan). `XEMU_INV_TIMING` body-timing predicts a net vCPU win for any
    store-dispatch under ~750 ns (`GATE0-PREDICTION.md`); on F8 it collapsed
    real invalidations 290,595 → 11,180 (25.9×) with the guest correct, and
-   `XEMU_SUBPAGE_REFUTE=1` found 0 violations over ~4M filter-skips. Ships
+   `XEMU_SUBPAGE_REFUTE=1` found 0 violations over 28.6M filter-skips across
+   33 loadvm cycles. Ships
    dark pending the interleaved fps A/B (`scripts/bench-savestate-ab.sh
    <snap> XEMU_SUBPAGE_DIRTY`; kill line = any fps regression). The
    higher-ceiling form that removes the trap itself (a sub-block probe in
