@@ -293,3 +293,61 @@ the sibling's `cc_op`/`tb_stop` hunks.
 - **Sub-page dirty-tracking sibling / cc-op census WIP.** Diff scoped to
   rebase cleanly; the orchestrator lands subpage first and re-runs this
   refuter on the combination.
+
+---
+
+## 8. Results (Gates 1-3, F8/F5/F7, 2026-07-11)
+
+Measured on the dev M2 Ultra under multi-instance contention (counts stay
+valid; per-5s rates UNDERCOUNT the true steady rate). Build green; xbox unit
+suite 6/6 (`ninja test-xbox` + `meson test --suite xbox`).
+
+**Gate-0 denominator (F8, prof-only).** 183.8M taken cross-page-direct exits
+in 44.5 s ≈ **20.7M/5s — above the pre-registered kill threshold X=10M/5s.**
+But the region split is decisive: **kernel = 2.4M (1.3%), low = 181.4M
+(98.7%)**; kernel-only ≈ 0.27M/5s (sub-noise). INV_PROF exit census confirmed
+scene identity (goto_tb 71.9% / jc 16.0% / ret 12.1%, matching the campaign's
+72/16/12).
+
+**Consequence for the chosen rule.** R1-kernel (=1) is sound by construction
+but captures <1.5% of cross-page directs → its fps ceiling is ~0.01 fps
+(dead). **The perf lever is the BROAD tier (=2)**, contingent on the refuter.
+
+**Gate-1 refuter (F8, 90 s, one loadvm).** 394,502,397 page-table-walked
+checks, **0 VIOLATIONS.** No cross-page-direct target's physical page ever
+changed. The over-approximate `tlb_set_page` observer *did* see 3468 exec-page
+remaps (vaddr 0xbe000 ↔ two phys pages) — so exec-page remaps DO occur on
+Xbox, but never on a chain target (else the precise refuter flags it). The
+precise/over-approximate split behaves exactly as designed, and the backstop
+is a **real, not dormant, safety net.**
+
+**Gate-3 soak (F8→F5→F7, 12 in-process loadvm cycles, 705.9 s ≈ 11.8 min,
+`XEMU_XPAGE_CHAIN=2 XEMU_XPAGE_REFUTE=1`).**
+**2,684,961,145 checks, 0 VIOLATIONS, 0 aborts/crashes/hangs, 12/12 cycles.**
+The observer logged **61,375 exec-page remaps across 5 distinct vpages** —
+level transitions churn executable mappings heavily — and **still zero chain
+targets remapped.** tb_flush=137 (loadvm + backstop CR3 drains). Both raw
+chaining tiers (=1 and =2) separately ran clean on F8 (503.9M cross-page
+exits under broad, no fault).
+
+**Verdict.** Hazard (b) is empirically ABSENT for the tested corpus: chain
+targets are phys-stable across billions of transfers and a dozen level
+transitions, even though the guest remaps *other* exec pages tens of thousands
+of times. Broad cross-page chaining is safe on F8/F5/F7 and worth benching for
+the predicted +1-2 fps.
+
+**Residual risk (must be stated).** The refuter proves stability only for the
+targets exercised on F8/F5/F7. The broad backstop covers the two remap vectors
+a running title actually uses — per-page `INVLPG` (the steady-state vector,
+which is what the 61k observed remaps go through) and `CR3` — but NOT a
+`CR4.PGE` toggle or other whole-TLB flush that isn't `INVLPG`/`CR3` (boot-era /
+rare). For those, broad rests on the empirical refuter, not on construction.
+Before any default-on: (a) run the refuter across the full title corpus, and
+(b) consider extending the backstop to the generic `tlb_flush` path (cheap —
+full flushes are rare) to make broad sound by construction. Until then broad
+ships DARK and the orchestrator A/Bs `XEMU_XPAGE_CHAIN=2`.
+
+Repro:
+`XEMU_XPAGE_PROF=1` (denominator), `XEMU_XPAGE_REFUTE=1` (falsify),
+`XEMU_XPAGE_CHAIN=2 XEMU_XPAGE_REFUTE=1` (soak) — via the bench savestate
+harness, one loadvm per boot, multiple cycles for transition churn.
