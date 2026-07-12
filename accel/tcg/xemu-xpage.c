@@ -15,6 +15,7 @@
 #if defined(XBOX)
 #include "qemu/atomic.h"
 #include "exec/target_page.h"
+#include "exec/tb-flush.h"
 #include "tb-context.h"
 
 /* ---------------- Gate-0 counters (extern, inline-incremented) ------------ */
@@ -49,13 +50,44 @@ int xemu_xpage_chain_level(void)
 {
     static int lvl = -1;
     if (lvl < 0) {
+        /*
+         * Default BROAD (2) since 2026-07-12: the generic tlb_flush
+         * backstop (xemu_xpage_note_full_flush) closed the last
+         * soundness residual (CR4.PGE / whole-TLB flush classes), so
+         * broad is sound by construction, and the quiet A/B measured
+         * +1.30±0.29 fps on F8 (7/7 pairs). XEMU_XPAGE_CHAIN=0
+         * restores upstream same-page-only chaining; =1 keeps the
+         * kernel-identity-window tier. The atexit dump is only armed
+         * when the env is set explicitly (default path stays silent).
+         */
         const char *e = getenv("XEMU_XPAGE_CHAIN");
-        lvl = (e && e[0] >= '1' && e[0] <= '9') ? (e[0] - '0') : 0;
-        if (lvl) {
+        if (e) {
+            lvl = (e[0] >= '1' && e[0] <= '9') ? (e[0] - '0') : 0;
             xpage_arm();
+        } else {
+            lvl = 2;
         }
     }
     return lvl;
+}
+
+/*
+ * Broad-tier generic-flush backstop: any full TLB flush class beyond the
+ * INVLPG/CR3 helpers (CR4.PGE toggles, mode switches, loadvm restore)
+ * may retire a virtual->phys binding some cross-page chain baked in.
+ * Sever every chain via the same queued flush the CR3 backstop uses —
+ * queue_tb_flush is count-deduped safe work, so re-queueing from a path
+ * a tb_flush itself reaches cannot loop, and full TLB flushes are rare,
+ * already-catastrophic events. Closes docs/xpage-design.md §3's residual.
+ */
+uint64_t xemu_xpage_full_flush_backstops;
+
+void xemu_xpage_note_full_flush(CPUState *cpu)
+{
+    if (xemu_xpage_chain_level() >= 2) {
+        xemu_xpage_full_flush_backstops++;
+        queue_tb_flush(cpu);
+    }
 }
 
 bool xemu_xpage_refute_on(void)
@@ -223,11 +255,13 @@ static void xemu_xpage_dump(void)
             qatomic_read(&tb_ctx.tb_flush_count));
     fprintf(stderr,
             "xemu:  (0) taken cross-page-direct exits=%llu "
-            "(kernel=%llu low=%llu) sites-emitted=%llu\n",
+            "(kernel=%llu low=%llu) sites-emitted=%llu "
+            "full-flush-backstops=%llu\n",
             (unsigned long long)taken,
             (unsigned long long)xemu_xpage_taken_kernel,
             (unsigned long long)xemu_xpage_taken_low,
-            (unsigned long long)xemu_xpage_emitted);
+            (unsigned long long)xemu_xpage_emitted,
+            (unsigned long long)xemu_xpage_full_flush_backstops);
     fprintf(stderr,
             "xemu:      approx per-5s: total=%.0f kernel=%.0f "
             "(kill threshold X=10,000,000/5s; contended runs undercount)\n",

@@ -414,6 +414,14 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 
     assert_cpu_is_self(cpu);
 
+#if defined(XBOX)
+    /* Cross-page chaining broad tier: full TLB flushes can retire
+     * virtual->phys bindings that baked-in cross-page chains rely on;
+     * sever them all (count-deduped queued tb_flush; rare event). The
+     * per-page INVLPG path stays on its finer helper backstop. */
+    xemu_xpage_note_full_flush(cpu);
+#endif
+
     tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(idxmap));
 }
 

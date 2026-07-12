@@ -41,6 +41,13 @@ bool xemu_xpage_prof_on(void);       /* XEMU_XPAGE_PROF=1 or XEMU_INV_PROF=1 */
  */
 bool xemu_xpage_allow(uint64_t dest);
 
+/* Broad-tier generic-flush backstop (called from tlb_flush_by_mmuidx):
+ * queue a count-deduped tb_flush so full-TLB-flush classes the
+ * INVLPG/CR3 helpers don't see (CR4.PGE etc.) sever cross-page chains.
+ * No-op below chain level 2. */
+void xemu_xpage_note_full_flush(CPUState *cpu);
+extern uint64_t xemu_xpage_full_flush_backstops;
+
 /* Gate-0 taken counters, inline-incremented from generated code in prof mode,
  * split by target region so the R1(kernel)-vs-broad opportunity is visible. */
 extern uint64_t xemu_xpage_taken_kernel;

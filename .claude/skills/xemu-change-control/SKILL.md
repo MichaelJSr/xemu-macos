@@ -32,13 +32,18 @@ incidents that made each gate non-negotiable.
 Two facts frame everything:
 
 1. **CI compiles, packages, and (since 2026-07-11) runs the xbox unit
-   suite on the macOS arm64 legs** — `build-macos.yml` runs
-   `meson test --suite xbox` (restored DSP unit test, swizzle
-   round-trip, and the three inline-JIT differential arms; seconds, no
-   game content). Everything else below stands: `.github/workflows/`
-   contains no test-suite step in any job. Correctness and performance
-   evidence is produced locally, before the push, and recorded in the
-   commit message. CI's job is proving the change builds everywhere
+   suite on the macOS arm64 legs AND both Linux legs** —
+   `build-macos.yml` runs `meson test --suite xbox` (restored DSP unit
+   test, swizzle round-trip, and the three inline-JIT differential
+   arms; seconds, no game content), and `build-linux.yml` has an
+   additive `test` job (x86_64 + aarch64; plain `build.sh --debug`
+   tree because the packaging job's dpkg-buildpackage exposes no meson
+   dir). The ubuntu-arm leg is the fork's only automated non-Apple
+   aarch64 DSP JIT coverage — first green run 2026-07-11. Windows
+   cross legs still run no tests, and no in-game testing is automated
+   anywhere: correctness and performance evidence is still produced
+   locally, before the push, and recorded in the commit message. CI's
+   job beyond the suite is proving the change builds everywhere
    (macOS x86_64/arm64, Windows x86_64/arm64 cross, Linux, debug+release).
 2. **README.md is the doc of record.** Shipped behavior changes get a
    `## Changes` entry; reverted attempts get a `## Failed / reverted

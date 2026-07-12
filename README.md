@@ -137,7 +137,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining (dark, default off). `1` = kernel-identity window only (sound, no backstop); `2` = broad (all cross-page targets) + INVLPG/CR3 guest-flush backstop. Refuter: 0 violations / 3.15B checks / 12+12 reload cycles (incl. combined with sub-page tracking). A/B: +1.30±0.29 fps F8 (7/7 pairs); dark only for the whole-TLB-flush soundness residual |
+| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining — **default ON (broad)** since 2026-07-12 (`0` restores upstream same-page-only chaining; `1` = kernel-identity window only). Sound by construction: INVLPG (per-page) + CR3 helper backstops plus a generic `tlb_flush_by_mmuidx` backstop covering every remaining full-flush class (count-deduped queued tb_flush; fired 799× across an 8-reload soak, 0 refuter violations in 1.71B checks). A/B: +1.30±0.29 fps F8 pre-subpage (7/7 pairs); +0.77±0.55 on top of sub-page tracking (3/3) |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Opt-in pending a daily-driving soak |
@@ -198,6 +198,21 @@ In-app Settings covers the main toggles.
   (+11.63±0.52, 3/3 pairs)** — the largest single TCG win since the
   occlusion rework. `XEMU_SUBPAGE_DIRTY=0` restores whole-page
   invalidation wholesale.
+- **Cross-page direct block chaining, Xbox-relaxed (default on,
+  2026-07-12).** Direct jumps whose target lies on another page now
+  patch a real `goto_tb` chain instead of paying the ~20-op inline
+  jump-cache probe (the "other" 43% of the exit census). Upstream
+  forbids this because mappings can change under a chain; the fork
+  makes it sound by construction with three backstops — INVLPG
+  invalidates the flushed code page, CR3 writes and every remaining
+  full-TLB-flush class (generic `tlb_flush_by_mmuidx` hook) sever all
+  chains via a count-deduped queued tb_flush. Refuter
+  (`XEMU_XPAGE_REFUTE`: page-table-walk, closing the stale-chain
+  fetch-bypass hole): 0 violations over 3.15B+1.71B checks across 20
+  reload cycles, with the full-flush backstop observed firing 799×.
+  Interleaved A/B: **+1.30±0.29 fps F8 (7/7 pairs) pre-subpage;
+  +0.77±0.55 (3/3) on top of sub-page tracking**. `XEMU_XPAGE_CHAIN=0`
+  restores upstream same-page-only chaining.
 - **Inline hard FPU.** x87 ops emit native AArch64 FP
   (`FADD`/`FMUL`/`FDIV`/`FSQRT`); `floatx80`↔`double` inlined
   (~15 vs ~40 host insns); values stay in D-regs across TBs.
@@ -1023,24 +1038,16 @@ it. Instruments to re-run before starting any of these:
    risk. `XEMU_SUBPAGE_DIRTY`'s A/B doubles as its go/no-go: if the O(1)
    arm's vCPU saving does not convert to fps on this busy-poll CPU-bound
    limiter, the larger-but-riskier codegen form won't either.
-2. **Cross-page direct chaining, Xbox-relaxed** (IMPLEMENTED dark
-   2026-07-11; broad tier pending A/B). Shipped dark behind
-   `XEMU_XPAGE_CHAIN` (`1` = kernel-identity window only, sound by
-   construction; `2` = broad, all cross-page targets + INVLPG/CR3
-   guest-flush backstop) with a page-table-walk refuter
-   (`XEMU_XPAGE_REFUTE` — the walk, not the TLB, closes the stale-chain
-   fetch-bypass hole). Gate-0 (F8): ~20M taken cross-page-direct exits
-   per 5 s (>10M/5s pre-registered kill threshold) but 98.7% are
-   low-region title code — kernel-only is sub-noise, so only broad can
-   pay. Refuter: **0 violations over 2.68B checks across 12 loadvm
-   cycles** (F8/F5/F7), with 61k real exec-page remaps observed and
-   none ever on a chain target. Residual: CR4.PGE/whole-TLB flush paths
-   are refuter-backed, not construction-backed — hook generic
-   tlb_flush before any default-on. Measured (quiet interleaved A/B,
-   F8, 7 pairs): **+1.30±0.29 fps (+4.3%), 7/7 pairs positive** — the
-   predicted band, delivered; stays dark only for the flush-path
-   soundness residual above. Design + hazard analysis:
-   `docs/xpage-design.md`.
+2. **Cross-page direct chaining, Xbox-relaxed — SHIPPED DEFAULT-ON
+   2026-07-12** (broad tier; see Changes and the `XEMU_XPAGE_CHAIN`
+   knob row). The soundness residual that briefly kept it dark
+   (CR4.PGE/whole-TLB flush classes) was closed by a generic
+   `tlb_flush_by_mmuidx` backstop; promotion soak: 1.71B page-table-walk
+   refuter checks / 0 violations with the backstop firing 799× across 8
+   reload cycles. Receipts: +1.30±0.29 fps F8 pre-subpage (7/7),
+   +0.77±0.55 on top of sub-page tracking (3/3). Remaining scoped-out
+   coverage gap (not a hazard): page-spanning targets still decline to
+   chain. Design + hazard analysis: `docs/xpage-design.md`.
 3. **PGRAPH MMIO lockless audit** — DONE 2026-07-11 (see Changes /
    `docs/pgraph-lockless-audit.md`): whole PGRAPH block joined
    lockless_io, INTR pair made atomic, no UNSAFE ranges; jitter A/B

@@ -9,8 +9,10 @@ description: >-
   gauntlets (pre-release, MoltenVK pin bump, upstream merge, renderer
   behavior change), the honest state of automated testing (since
   2026-07-11 CI runs the xbox unit suite — DSP interpreter/JIT
-  differential + swizzle — on the macOS arm64 legs; no in-game testing
-  is automated), and how to add regression nets the project's way. Load BEFORE
+  differential + swizzle — on the macOS arm64 legs and both Linux
+  legs, the ubuntu-arm one being the only non-Apple aarch64 JIT
+  coverage; no in-game testing is automated), and how to add
+  regression nets the project's way. Load BEFORE
   accepting or publishing any performance number, shipping a fix, tagging a
   release, bumping the MoltenVK pin, or merging upstream; when asked "is
   this proven / validated / tested", "what evidence do we need", "what
@@ -394,10 +396,13 @@ fps A/B + artifact hunt) before releasing with it."
 
 ### 5.1 What exists (and what does not)
 
-- **CI compiles and packages; it runs NOTHING.** `ci.yml` → `build.yml` →
-  `build-{macos,windows,linux}.yml`; the macOS job builds a
-  {x86_64,arm64}×{debug,release} matrix and lipo-merges. No workflow
-  contains a test step. Verified 2026-07-04:
+- **CI runs the xbox unit suite on macOS arm64 (both configs) and on
+  Linux x86_64 + aarch64 (since 2026-07-11)** — `build-macos.yml` test
+  step + `build-linux.yml` additive `test` job (own `build.sh --debug`
+  tree; dpkg packaging job has no meson dir). The ubuntu-arm leg is
+  the only automated non-Apple aarch64 DSP JIT coverage. Windows cross
+  legs run no tests; no in-game testing is automated. Original
+  2026-07-04 state for the record (superseded):
   `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
   → zero hits. "CI green" therefore means *it builds everywhere*, nothing
   more.
@@ -492,7 +497,7 @@ the repo root unless absolute):
 - Validator final line + STATS buckets: `grep -n 'validator\|cf_fallback buckets' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - Engine precedence (the `config_spec.yml:339` comment must name `dsp_want_external_jit_engine()` — correct as of 2026-07-11): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; sed -n '336,342p' config_spec.yml`
 - DSP config defaults: `grep -n -A4 'dsp_jit:\|use_dsp_jit' config_spec.yml`
-- CI test step (xbox suite on macOS arm64 legs since 2026-07-11; expect the build-macos.yml hit): `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
+- CI test step (xbox suite on macOS arm64 + both Linux legs since 2026-07-11; expect build-macos.yml AND build-linux.yml hits): `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
 - Pin-bump gauntlet requirement + pin value: `grep -n 'MVK_PIN\|validation gauntlet' scripts/build-moltenvk.sh`
 - Bench protocol header (thresholds + usage): `sed -n '1,17p' scripts/bench-savestate-ab.sh`
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
