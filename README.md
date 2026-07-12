@@ -129,6 +129,7 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time FPU/exit census |
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
+| `XEMU_CCOP_CENSUS` | `1` prints a runtime-weighted census of cc-flag liveness across TB boundaries at exit (predecessor tail class × successor head class). Forces every TB transition through the exec loop (no goto_tb / jump-cache / ret-memo) so pairs are exact — much slower, same executed instruction stream; sizing tool for the superblock roadmap item, never a perf mode |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | Metal backend only: publish the present frame at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Requires frame interpolation off; ignored on the GL backend |
@@ -963,12 +964,19 @@ it. Instruments to re-run before starting any of these:
    plausibly worth +15-30% — and the only realistic path to real-60
    on F7/F8. Upstream-divergent compiler work; run it as a time-boxed
    research campaign with falsifiable early milestones, not as a
-   task. (2026-07-11 census, `XEMU_INV_PROF`: exit mix is 72%
+   task. (2026-07-11 censuses: `XEMU_INV_PROF` exit mix is 72%
    direct-chain goto_tb / 16% inline-jc / 12% ret-memo and flcr
    already compile-skips 92-94% — the *dispatch* half of the
-   superblock motivation is weak; the case rests on cross-block
-   codegen quality, e.g. cc_op elimination, which the still-unrun
-   cc_op-dead census must size first.)
+   superblock motivation is weak. The `XEMU_CCOP_CENSUS`
+   runtime-weighted pair census then sized the codegen half, and it
+   is REAL: 69-83% of TB transitions end with lazy flags pending
+   (F8/F5), and 46-49% of those are dead at the successor — i.e.
+   **~34-38% of all block boundaries carry a flag materialization
+   (cc_op + operand spills) the next block provably kills unread**.
+   The consumed share is also large (30-45%), so naive skip-the-spill
+   tricks are DOA — only genuine cross-block liveness (superblock)
+   collects this. That is the campaign's quantified upside basis,
+   alongside cross-block register allocation.)
 6. **Real-hardware validation debt** (not fps; the largest open
    correctness item). Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list, the DSP

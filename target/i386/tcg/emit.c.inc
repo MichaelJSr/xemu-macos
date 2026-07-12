@@ -1132,6 +1132,7 @@ VSIB_AVX(VPGATHERQ, vpgatherq)
 
 static void gen_AAA(DisasContext *s, X86DecodedInsn *decode)
 {
+    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_aaa(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1155,6 +1156,7 @@ static void gen_AAM(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_AAS(DisasContext *s, X86DecodedInsn *decode)
 {
+    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_aas(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1967,6 +1969,7 @@ static void gen_CWD(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_DAA(DisasContext *s, X86DecodedInsn *decode)
 {
+    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_daa(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1974,6 +1977,7 @@ static void gen_DAA(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_DAS(DisasContext *s, X86DecodedInsn *decode)
 {
+    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_das(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -3813,6 +3817,9 @@ static void gen_shift_dynamic_flags(DisasContext *s, X86DecodedInsn *decode, TCG
 {
     TCGv_i32 count32 = tcg_temp_new_i32();
     TCGv_i32 old_cc_op;
+
+    /* count==0 keeps the inherited flags: a conditional consumption. */
+    xemu_ccop_mark_use(s);
 
     decode->cc_op = CC_OP_DYNAMIC;
     decode->cc_op_dynamic = tcg_temp_new_i32();

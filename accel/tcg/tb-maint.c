@@ -158,6 +158,82 @@ bool xemu_tb_range_inv_on(void)
     }
     return on;
 }
+
+uint64_t xemu_ccop_tb_tail[3];
+uint64_t xemu_ccop_tb_head[3];
+uint64_t xemu_ccop_pairs[3][3];
+uint64_t xemu_ccop_pairs_nolast;
+
+static void xemu_ccop_census_dump(void)
+{
+    static const char *const tails[3] = { "dyn", "eflags", "lazy" };
+    uint64_t total = xemu_ccop_pairs_nolast;
+    uint64_t lazy_row = 0;
+    int t, h;
+
+    for (t = 0; t < 3; t++) {
+        for (h = 0; h < 3; h++) {
+            total += xemu_ccop_pairs[t][h];
+        }
+    }
+    for (h = 0; h < 3; h++) {
+        lazy_row += xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][h];
+    }
+
+    fprintf(stderr, "xemu: CCOP_CENSUS pairs=%llu (nolast=%llu)\n",
+            (unsigned long long)total,
+            (unsigned long long)xemu_ccop_pairs_nolast);
+    for (t = 0; t < 3; t++) {
+        uint64_t row = xemu_ccop_pairs[t][0] + xemu_ccop_pairs[t][1] +
+                       xemu_ccop_pairs[t][2];
+        fprintf(stderr,
+                "xemu:  tail=%-6s row=%llu (%.1f%%)  ->head none=%llu (%.1f%%) "
+                "kill=%llu (%.1f%%) use=%llu (%.1f%%)\n",
+                tails[t], (unsigned long long)row,
+                total ? 100.0 * row / total : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_NONE],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_NONE] / row : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_KILL],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_KILL] / row : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_USE],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_USE] / row : 0.0);
+    }
+    /*
+     * The headline pair for the superblock decision: lazy->kill is the
+     * materialization a cross-block optimizer provably elides; lazy->use is
+     * the state it must keep. lazy->none defers the verdict one TB (the
+     * successor is flag-transparent), so kill is a lower bound.
+     */
+    fprintf(stderr,
+            "xemu:  verdict: lazy-tail=%.1f%% of pairs; of those "
+            "dead-at-successor=%.1f%% consumed=%.1f%% deferred=%.1f%%\n",
+            total ? 100.0 * lazy_row / total : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_KILL] / lazy_row : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_USE] / lazy_row : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_NONE] / lazy_row : 0.0);
+    fprintf(stderr,
+            "xemu:  static TB mix: tail dyn/eflags/lazy=%llu/%llu/%llu  "
+            "head none/kill/use=%llu/%llu/%llu\n",
+            (unsigned long long)xemu_ccop_tb_tail[0],
+            (unsigned long long)xemu_ccop_tb_tail[1],
+            (unsigned long long)xemu_ccop_tb_tail[2],
+            (unsigned long long)xemu_ccop_tb_head[0],
+            (unsigned long long)xemu_ccop_tb_head[1],
+            (unsigned long long)xemu_ccop_tb_head[2]);
+}
+
+bool xemu_ccop_census_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_CCOP_CENSUS");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on) {
+            atexit(xemu_ccop_census_dump);
+        }
+    }
+    return on;
+}
 #endif /* XBOX */
 
 /* List iterators for lists of tagged pointers in TranslationBlock. */

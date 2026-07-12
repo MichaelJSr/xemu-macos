@@ -73,4 +73,33 @@ extern uint64_t xemu_inv_gototb_emitted;    /* same-page direct goto_tb chain ex
 extern uint64_t xemu_inv_jcprobe_emitted;   /* inline jump-cache probe (indirect/xpage) */
 extern uint64_t xemu_inv_retmemo_emitted;   /* inline ret-memo exits */
 
+/*
+ * XEMU_CCOP_CENSUS=1 (default off, separate latch): runtime-weighted census
+ * of cc-flag liveness across TB boundaries, sizing the cross-block
+ * cc_op-elimination half of the superblock roadmap item. When on,
+ * curr_cflags() forces CF_NO_GOTO_TB | CF_NO_GOTO_PTR so every TB
+ * transition returns to the exec loop (goto_tb chains, the inline jump
+ * cache, and the ret-memo all honor those bits), where
+ * (predecessor tail class, successor head class) pairs are counted.
+ * This distorts speed, never the executed instruction stream — the pair
+ * distribution is the one a chained run would produce. Same counter
+ * discipline as above: single vCPU writer, atexit dump.
+ */
+bool xemu_ccop_census_on(void);
+
+/* Classes stored in tb->xemu_ccop at translate time (i386 tb_stop). */
+#define XEMU_CCOP_TAIL_MASK   0x3
+#define XEMU_CCOP_HEAD_SHIFT  2
+#define XEMU_CCOP_TAIL_DYN    0   /* pass-through: TB never produced flags */
+#define XEMU_CCOP_TAIL_EFLAGS 1   /* flags concrete in cc_src (no lazy compute) */
+#define XEMU_CCOP_TAIL_LAZY   2   /* lazy op pending: cc_op+operands spilled */
+#define XEMU_CCOP_HEAD_NONE   0   /* TB never touches flags */
+#define XEMU_CCOP_HEAD_KILL   1   /* first flag event overwrites without reading */
+#define XEMU_CCOP_HEAD_USE    2   /* first flag event consumes inherited state */
+
+extern uint64_t xemu_ccop_tb_tail[3];   /* translate-time static mix */
+extern uint64_t xemu_ccop_tb_head[3];
+extern uint64_t xemu_ccop_pairs[3][3];  /* [pred tail][succ head], runtime */
+extern uint64_t xemu_ccop_pairs_nolast; /* transition after interrupt/exception */
+
 #endif /* XEMU_INV_PROF_H */

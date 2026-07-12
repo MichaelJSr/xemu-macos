@@ -22,6 +22,9 @@
 #include "system/tcg.h"
 #include "qemu/plugin.h"
 #include "internal-common.h"
+#if defined(XBOX)
+#include "xemu-inv-prof.h"
+#endif
 
 bool tcg_allowed;
 
@@ -53,6 +56,19 @@ uint32_t curr_cflags(CPUState *cpu)
     } else if (qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN)) {
         cflags |= CF_NO_GOTO_TB;
     }
+
+#if defined(XBOX)
+    /*
+     * XEMU_CCOP_CENSUS: force every TB transition back through the exec
+     * loop (goto_tb, the inline jump cache, and the ret-memo all honor
+     * these bits) so cpu_loop_exec_tb can count predecessor/successor
+     * flag-liveness pairs. Slower, but the pair stream is the same one a
+     * chained run would execute.
+     */
+    if (unlikely(xemu_ccop_census_on())) {
+        cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+    }
+#endif
 
     return cflags;
 }

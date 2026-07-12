@@ -208,6 +208,7 @@ typedef struct DisasContext {
     bool jmp_opt; /* use direct block chaining for direct jumps */
 #if defined(XBOX)
     bool xemu_ret_exit; /* current DISAS_JUMP terminator is a near ret */
+    uint8_t xemu_cc_head; /* census: TB's first flag event (none/kill/use) */
 #endif
     bool cc_op_dirty;
 
@@ -452,6 +453,15 @@ static void set_cc_op_1(DisasContext *s, CCOp op, bool dirty)
     if (dirty && s->cc_op == CC_OP_DYNAMIC) {
         tcg_gen_discard_i32(cpu_cc_op);
     }
+#if defined(XBOX)
+    /* Census (XEMU_CCOP_CENSUS): every cc_op transition funnels through
+     * here, so an op that fully defines flags before any consumption marks
+     * the TB head as KILL. Consumption sites mark USE first; first event
+     * wins. Unconditional byte write — not worth a latch. */
+    if (op != CC_OP_DYNAMIC && s->xemu_cc_head == 0) {
+        s->xemu_cc_head = 1; /* XEMU_CCOP_HEAD_KILL */
+    }
+#endif
     s->cc_op_dirty = dirty;
     s->cc_op = op;
 }
@@ -477,6 +487,21 @@ static void gen_update_cc_op(DisasContext *s)
         s->cc_op_dirty = false;
     }
 }
+
+#if defined(XBOX)
+/* Census (XEMU_CCOP_CENSUS): the TB's first flag event is a consumption of
+ * inherited state. Called at the top of every flag-reading funnel
+ * (gen_prepare_* and gen_compute_eflags*) and at the helper-consuming
+ * sites in emit.c.inc (daa family, dynamic shift count). */
+static inline void xemu_ccop_mark_use(DisasContext *s)
+{
+    if (s->xemu_cc_head == 0) {
+        s->xemu_cc_head = 2; /* XEMU_CCOP_HEAD_USE */
+    }
+}
+#else
+static inline void xemu_ccop_mark_use(DisasContext *s) { }
+#endif
 
 #ifdef TARGET_X86_64
 
@@ -994,6 +1019,7 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
 /* compute all eflags to cc_src */
 static void gen_compute_eflags(DisasContext *s)
 {
+    xemu_ccop_mark_use(s);
     gen_mov_eflags(s, cpu_cc_src);
     set_cc_op(s, CC_OP_EFLAGS);
 }
@@ -1033,6 +1059,8 @@ static CCPrepare gen_prepare_val_nz(TCGv src, MemOp size, bool eqz)
 static CCPrepare gen_prepare_eflags_c(DisasContext *s, TCGv reg)
 {
     MemOp size;
+
+    xemu_ccop_mark_use(s);
 
     switch (s->cc_op) {
     case CC_OP_SUBB ... CC_OP_SUBQ:
@@ -1113,6 +1141,7 @@ static CCPrepare gen_prepare_eflags_p(DisasContext *s, TCGv reg)
 /* compute eflags.S, trying to store it in reg if not NULL */
 static CCPrepare gen_prepare_eflags_s(DisasContext *s, TCGv reg)
 {
+    xemu_ccop_mark_use(s);
     switch (s->cc_op) {
     case CC_OP_DYNAMIC:
         gen_compute_eflags(s);
@@ -1133,6 +1162,7 @@ static CCPrepare gen_prepare_eflags_s(DisasContext *s, TCGv reg)
 /* compute eflags.O, trying to store it in reg if not NULL */
 static CCPrepare gen_prepare_eflags_o(DisasContext *s, TCGv reg)
 {
+    xemu_ccop_mark_use(s);
     switch (s->cc_op) {
     case CC_OP_ADOX:
     case CC_OP_ADCOX:
@@ -1153,6 +1183,7 @@ static CCPrepare gen_prepare_eflags_o(DisasContext *s, TCGv reg)
 /* compute eflags.Z, trying to store it in reg if not NULL */
 static CCPrepare gen_prepare_eflags_z(DisasContext *s, TCGv reg)
 {
+    xemu_ccop_mark_use(s);
     switch (s->cc_op) {
     case CC_OP_EFLAGS:
     case CC_OP_ADCX:
@@ -1184,6 +1215,8 @@ static CCPrepare gen_prepare_cc(DisasContext *s, int b, TCGv reg)
 {
     int inv, jcc_op, cond;
     MemOp size;
+
+    xemu_ccop_mark_use(s);
     CCPrepare cc;
 
     inv = b & 1;
@@ -1673,6 +1706,10 @@ extern uint64_t xemu_inv_flcr_skip;
 extern uint64_t xemu_inv_gototb_emitted;
 extern uint64_t xemu_inv_jcprobe_emitted;
 extern uint64_t xemu_inv_retmemo_emitted;
+/* cc-liveness census (XEMU_CCOP_CENSUS; see accel/tcg/xemu-inv-prof.h) */
+extern bool xemu_ccop_census_on(void);
+extern uint64_t xemu_ccop_tb_tail[3];
+extern uint64_t xemu_ccop_tb_head[3];
 #endif
 
 static void gen_flcr(DisasContext *s)
@@ -4724,6 +4761,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
 #if defined(XBOX)
     dc->xemu_ret_exit = false;
+    dc->xemu_cc_head = 0;
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
@@ -4859,6 +4897,20 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     default:
         g_assert_not_reached();
     }
+
+#if defined(XBOX)
+    /* Census: record this TB's flag-liveness classes. gen_update_cc_op
+     * only spills; dc->cc_op still names the semantic tail state here. */
+    {
+        uint8_t tail = (dc->cc_op == CC_OP_DYNAMIC) ? 0
+                     : (dc->cc_op == CC_OP_EFLAGS)  ? 1 : 2;
+        dc->base.tb->xemu_ccop = tail | (dc->xemu_cc_head << 2);
+        if (unlikely(xemu_ccop_census_on())) {
+            xemu_ccop_tb_tail[tail]++;
+            xemu_ccop_tb_head[dc->xemu_cc_head]++;
+        }
+    }
+#endif
 }
 
 static const TranslatorOps i386_tr_ops = {
