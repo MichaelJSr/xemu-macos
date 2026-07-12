@@ -117,6 +117,43 @@ lstick_btn/rstick_btn/guide = 30/31/39. Helper:
 `.claude/skills/xemu-diagnostics-and-tooling/scripts/inject_input.sh`
 (`create/down/up/tap/clear`).
 
+## Movement-phase transition probe (first-visit lag class)
+
+Built 2026-07-12 to pin the v0.11 "new-area lag" (heavy stutter on
+map transitions / death reloads / fast movement into unexplored
+space, smooth on revisits). The savestate A/B above cannot see this
+class — static scenes never stream. Method (reference: scratchpad
+`bench2/lag_run.sh` of session bb62a13a; recreate from this spec):
+
+- One run = boot → `loadvm` real `vm-*` tag → settle 15 s → **hold
+  forward (lstick_up) 20 s into unexplored space** → rest 5 s →
+  **hold backward 20 s through the just-explored route** → quit.
+  Forward = first-visit streaming; backward = the built-in control
+  (same terrain, assets now resident).
+- Instrument: `XEMU_NV2A_NSPROF=1` (stdout), monitor `info jit`
+  sampled between phases — **"TB flush count" deltas per phase are
+  the mechanism signal** (139 in 20 s of forward = the v0.11 bug;
+  0 = healthy). Atexit dumps (`XEMU_XPAGE_CHAIN=2` explicit arms the
+  XPAGE dump with identical semantics to default; `XEMU_INV_PROF=1`
+  arms SUBPAGE counters).
+- Phase→interval attribution: nsprof headers self-report interval
+  duration; anchor t=0 at the first interval with draws/flip > 100
+  after a < 100 boot regime, then map interval midpoints onto the
+  epoch-stamped phase marks (`lag_phase.py`). Headline metric:
+  **worst forward-phase interval fps vs settle mean** (the felt lag),
+  plus per-phase flush deltas.
+- Window shots at phase ends verify the route actually moved (and
+  catch death mid-run — combat damage shifts routes; interleave
+  arms and compare means, ±5 fps live-movement variance applies).
+- Traps: a dead xemu makes every fifo write BLOCK forever — guard
+  each injection with `kill -0` liveness checks; a vCPU-thread wedge
+  (e.g. W^X fault loop) looks like "monitor answered once then
+  empty responses + zero nsprof" — it is NOT a crash, no
+  DiagnosticReports entry appears.
+- Soak variant (`bench2/soak_lag.sh`): boot once, N cycles of
+  alternating loadvm tags + 8 s forward walk — exercises
+  flush-backstop machinery under repeated streaming.
+
 ## Visual artifact oracle (window capture + pixel scoring)
 
 QEMU `screendump` does not work (custom Metal present path). Use

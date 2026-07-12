@@ -120,6 +120,25 @@ skill.
 > PUBLISHED 2026-07-12 (17 assets). Re-base ALL
 > predictions on the post-subpage profile before ranking new work
 > (the 2026-07-04 addendum's re-base rule, doubled).
+>
+> **v0.11.1 EPILOGUE (2026-07-12, same day as v0.11).** The owner
+> daily-drove v0.11 and reported the fastest regression report in
+> fork history: heavy first-visit lag (map transitions, death
+> reloads, fast movement), smooth revisits. Root cause = item 2's
+> full-flush backstop (archaeology 1.24): full-TLB flushes are NOT
+> rare — streaming fires them continuously (139 tb_flushes/20 s
+> forward walk on F8, worst interval 14.6 vs 38.6 settled; boot
+> alone 132). Fixed same day: link-registry unlink backstop
+> (`XEMU_XPAGE_UNLINK=0` reverts) — forward flushes 139→0, worst
+> interval back at the settle floor, settle parity, steady-state
+> receipts unchanged. Push-present ring ALSO promoted default-on by
+> owner decision (item 4 closed; `XEMU_PUSH_PRESENT=0` reverts).
+> Two standing rules out of it: (a) correctness backstops are perf
+> features — price their firing rate on streaming/boot workloads
+> before shipping; (b) the movement-phase probe (xemu-testing) is
+> now a REQUIRED validation class for any change touching TB
+> lifetime/invalidation — static savestate A/Bs structurally cannot
+> see first-visit costs, which is exactly how v0.11 shipped the lag.
 
 ## When NOT to use this skill
 

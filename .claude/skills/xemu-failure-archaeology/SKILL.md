@@ -74,6 +74,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.21 | Texture/sampler LRU eviction raced pending submissions | shipped-after-fix |
 | 1.22 | TB range-check re-add (XEMU_TB_RANGE_INV) | settled-negative (instrument-killed) |
 | 1.23 | Sub-page code dirty tracking (+14-25% fps; model undershot 15×) | shipped |
+| 1.24 | xpage full-flush backstop = the v0.11 "new-area lag" (139 tb_flushes/20 s; unlink registry fix) | shipped-after-fix |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
@@ -767,6 +768,71 @@ caught; see xemu-testing bench mechanics.)
 remaining O(1) traps via a host-`qemu_st` fast-path probe (arm (b),
 Class-5 codegen) — is scoped in the Gate-0 doc but the trap cost it
 would remove is now small; re-rank only with fresh INV_TIMING data.
+
+## 1.24 The xpage full-flush backstop WAS the v0.11 "new-area lag" — a correctness backstop priced on a wrong rarity assumption
+
+**Status**: shipped-after-fix (v0.11.1, 2026-07-12; `XEMU_XPAGE_UNLINK=0`
+restores the v0.11 backstop).
+**Symptom** (owner report, day after v0.11): heavy multi-second lag on
+first entry to new areas — map transitions, death reloads, fast movement
+into unexplored space — then fast; revisited areas smooth. Desktop-app
+(default-flag) launches.
+**Root cause**: the cross-page-chaining promotion's full-flush backstops
+(generic `tlb_flush_by_mmuidx` hook + CR3 helper) severed chains with a
+**queued whole-`tb_flush`** on the assumption that full-TLB-flush classes
+are rare. They are not: level streaming reloads CR3 / fires generic
+flushes continuously. Movement probe (F8, 20 s holding forward into
+unexplored space): **139 tb_flushes**, worst interval **14.6-15.4 fps vs
+38.6-39.6 settled**; same route walked back: **0 flushes, no trough**
+(assets resident — exactly the reported asymmetry). Boot alone: 132.
+Attribution: `XEMU_XPAGE_CHAIN=0` arm = 1 flush the whole session (the
+loadvm). Bonus finding: the CR3 helper's "effectively never taken by a
+running Xbox title" comment was **wrong**, and its fires were invisible
+to the backstop counter (only the generic hook counted) — 817 backstop
+events with CR3 routed through vs 582 counted before.
+**Fix (backstop v2)**: register every cross-page link DESTINATION at
+`tb_add_jump` (two bits in `tb->xemu_xpage_reg`, pre-`ihash` hole:
+CROSS_EMITTER set by gen_jmp_rel on TBs that emit a relaxed slot — the
+authoritative trigger, because under CF_PCREL + the Xbox's multiple RAM
+aliases a cross-virtual target can share the source's phys page and
+evade any phys-only test — plus REGISTERED as dest dedup; 128k registry
+in tb-maint.c, generation-checked against `tb_flush_count`); backstop
+severs exactly those chains via `tb_jmp_unlink()` synchronously (also
+closes the old queue-to-safe-point window). Phys-mismatch-without-flag
+links register too (belt-and-braces, `reg-phys-only` counter — an
+UNPREDICTED class, thousands per soak even in refute mode with zero
+relaxed slots; mechanism unidentified, but severing valid links is
+always safe, so it is over-approximation, not hazard — chase it only if
+the counter ever explodes). Overflow → old queued flush (correctness
+never depends on capacity). Receipt: same-binary interleaved movement
+A/B (`XEMU_XPAGE_UNLINK` toggle) — forward-phase flushes 139→0, worst
+interval back at the settle floor, settle parity; ~270 unlink walks
+severing ~450k dests per session ≈ tens of ms total vs seconds of
+retranslation. Init placement trap: the flag byte must be cleared in
+`tb_gen_code` PRE-translate — a first draft zeroed it in
+translator_loop's post-loop block, which would have wiped the
+translator's emitter bits.
+**The W^X recurrence** (4.4-class, re-learned): the first fix build
+called `tb_jmp_unlink` (host-code patching) from helper context WITHOUT
+the manual `qemu_thread_jit_write()/execute()` pair → vCPU thread wedged
+in a fault loop at the FIRST boot backstop. Signature for next time:
+monitor answers once then returns empty, zero nsprof (no flips), no
+crash report — a wedge, not a crash. Every new host-code-patching call
+site on Apple Silicon needs the bracket; `tb_phys_invalidate` is the
+canonical idiom (and its comment carries the
+`pthread_jit_write_with_callback_np` revert story).
+**Durable lessons**: (1) a correctness backstop is a PERF feature too —
+price its firing rate on real workloads (streaming, boot), not on an
+architectural rarity argument; (2) "rare event" claims about guest
+behavior need a counter watched during the class of gameplay that would
+refute them (here: 100+/20 s during streaming vs "rare"); (3) movement
+into unexplored space is a distinct benchmark class the static savestate
+A/B structurally cannot see — the fastest-regression-shipping session
+(subpage+xpage, +25% day) validated only on static scenes and reload
+soaks, and the lag shipped anyway.
+**Reopen if**: n/a (fix is strictly better). If a future title overflows
+the 128k registry (dump line `reg-overflows`), it degrades to v0.11
+behavior on that title — size the registry then, don't redesign.
 
 # 2. MoltenVK / driver level
 
