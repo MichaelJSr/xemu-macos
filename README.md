@@ -133,14 +133,14 @@ All default off / fast-path; set to `1` to enable.
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
 | `XEMU_CCOP_CENSUS` | `1` prints a runtime-weighted census of cc-flag liveness across TB boundaries at exit (predecessor tail class × successor head class). Forces every TB transition through the exec loop (no goto_tb / jump-cache / ret-memo) so pairs are exact — much slower, same executed instruction stream; sizing tool for the superblock roadmap item, never a perf mode |
 | `XEMU_INV_TIMING` | `1` adds a `cntvct_el0`-based split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. Timings are order-of-magnitude; counts are load-immune |
-| `XEMU_SUBPAGE_DIRTY` | `1` enables sub-page code dirty tracking (ships **dark**, pending interleaved A/B): a per-`PageDesc` 64-block bitmap lets a guest data store that misses every code sub-block skip whole-page invalidation — an O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip, leaving the page write-protected so the store re-traps cheaply. On F8 it collapsed real invalidations 290,595 → 11,180 (25.9×) with the guest running correctly. The higher-ceiling fast-path form that removes the trap itself needs host-`tcg/aarch64` store codegen (Future vectors) |
+| `XEMU_SUBPAGE_DIRTY` | Sub-page code dirty tracking — **default ON** since the 2026-07-11 A/B (`0` restores whole-page invalidation wholesale): a per-`PageDesc` 64-block bitmap lets a guest data store that misses every code sub-block skip whole-page invalidation — an O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip, leaving the page write-protected so the store re-traps cheaply. Interleaved A/B: **+4.33±1.53 fps F8 (+14.3%, 4/4 pairs), +11.63±0.52 fps F5 (+24.6%, 3/3)**; invalidations 290,595 → 11,180 (25.9×). The higher-ceiling fast-path form that removes the trap itself needs host-`tcg/aarch64` store codegen (Future vectors) |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0); changes no behavior unless `XEMU_SUBPAGE_DIRTY` is also set. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining (dark, default off). `1` = kernel-identity window only (sound, no backstop); `2` = broad (all cross-page targets) + INVLPG/CR3 guest-flush backstop. Refuter: 0 violations / 2.68B checks / 12 reload cycles |
+| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining (dark, default off). `1` = kernel-identity window only (sound, no backstop); `2` = broad (all cross-page targets) + INVLPG/CR3 guest-flush backstop. Refuter: 0 violations / 3.15B checks / 12+12 reload cycles (incl. combined with sub-page tracking). A/B: +1.30±0.29 fps F8 (7/7 pairs); dark only for the whole-TLB-flush soundness residual |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
-| `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend |
+| `XEMU_PUSH_PRESENT` | Metal backend only: publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Opt-in pending a daily-driving soak |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -186,6 +186,18 @@ In-app Settings covers the main toggles.
 
 ### CPU / JIT (ARM64)
 
+- **Sub-page code dirty tracking (default on, 2026-07-11).** A
+  per-`PageDesc` 64-block bitmap lets a guest data store that misses
+  every code sub-block skip the Xbox whole-page TB invalidation — an
+  O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip
+  (INV_PROF: 100% of invalidations were data-write false sharing, 0
+  true SMC; invalidations collapse 290,595 → 11,180/s on F8).
+  Refuter-first landing: 0 violations over 60M+ ground-truth-checked
+  skips across 45 reload cycles. Interleaved A/B (quiet, scene-gated):
+  **F8 30.35 → 34.68 fps (+4.33±1.53, 4/4 pairs), F5 47.33 → 58.96
+  (+11.63±0.52, 3/3 pairs)** — the largest single TCG win since the
+  occlusion rework. `XEMU_SUBPAGE_DIRTY=0` restores whole-page
+  invalidation wholesale.
 - **Inline hard FPU.** x87 ops emit native AArch64 FP
   (`FADD`/`FMUL`/`FDIV`/`FSQRT`); `floatx80`↔`double` inlined
   (~15 vs ~40 host insns); values stay in D-regs across TBs.
@@ -552,8 +564,15 @@ In-app Settings covers the main toggles.
 - **Push-model present handoff** (behind `XEMU_PUSH_PRESENT=1`,
   default off; Metal backend). The published slot is now a ring that
   also carries frame interpolation's paced sub-flip steps (see the
-  schedule-publish entry under Future vectors); the numbers below are
-  the original interpolation-off landing.
+  schedule-publish entry under Future vectors). Measured quiet
+  2026-07-11 under 2x interpolation (F8, 90 s arms): the pull path
+  blocks the UI thread **499-607 ms per 5 s interval** (1.4-1.6k
+  `present_wait` events, 3.3-3.9 ms/flip, 5 ms tails) — with the ring
+  the counter never fires (**0 ms**), flips identical (29.8-31.3 vs
+  29.4-31.1/s). Ring refuter: 149,846 steps peeked / 60,104 compared /
+  0 mismatches / 0 resurrections (5.5 min at 2x; 4x also clean). Stays
+  opt-in pending a daily-driving soak. The numbers below are the
+  original interpolation-off landing.
   The pull-model handoff above (`nv2a_get_present_frame`) costs a
   guaranteed cross-thread round trip per UI frame: the UI kicks the PFIFO
   thread and blocks on `qemu_event_wait` until it answers, and that
@@ -802,9 +821,12 @@ In-app Settings covers the main toggles.
   speedup) with a consistent steadiness win: per-run fps stdev
   1.21 → 0.89, 5/6 pairs — the 340 µs BQL-spike class no longer
   hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
-- **PGRAPH joins the BQL-free MMIO set** *(DRAFT — audit shipped, perf
-  deliberately unmeasured pending the orchestrator's interleaved A/B;
-  no fps/jitter claim is made here)*. The PGRAPH block was left out of
+- **PGRAPH joins the BQL-free MMIO set.** Interleaved A/B (F8, 3
+  pairs, quiet): fps parity as expected for this class (legacy-BQL
+  minus lockless = -0.65±1.43, sign-mixed), with the lockless arm's
+  run-to-run spread tighter (0.43 vs 1.00 fps) — directionally the
+  same steadiness win the PFB/USER set measured, not formally powered
+  at n=3. The PGRAPH block was left out of
   the original lockless set because its handlers genuinely interleave
   with the PFIFO thread. The audit (`docs/pgraph-lockless-audit.md`)
   shows `pg->lock`/`pfifo.lock` — not the BQL — arbitrate every shared
@@ -977,19 +999,23 @@ it. Instruments to re-run before starting any of these:
    writes/epoch free — it was removed FOR performance on the Xbox
    data-shares-a-code-page pattern. So `XEMU_TB_RANGE_INV` is a
    correctness-verified dark A/B knob predicted **neutral-to-negative**;
-   the real lever is **sub-page dirty tracking**. That is now implemented
-   dark behind `XEMU_SUBPAGE_DIRTY=1` (2026-07-11): a per-`PageDesc` 64-block
+   the real lever is **sub-page dirty tracking — SHIPPED DEFAULT-ON
+   2026-07-11**: a per-`PageDesc` 64-block
    bitmap fast-skips whole-page invalidation for a data store that misses
    every code sub-block, using an **O(1) bitmap test in place of RANGE_INV's
    O(N) scan** — which is why the "25× traps ⇒ negative" proxy that killed
    RANGE_INV does not apply here (each extra trap is O(1), not an O(N)
-   scan). `XEMU_INV_TIMING` body-timing predicts a net vCPU win for any
-   store-dispatch under ~750 ns (`docs/subpage-gate0-prediction.md`); on F8 it collapsed
-   real invalidations 290,595 → 11,180 (25.9×) with the guest correct, and
-   `XEMU_SUBPAGE_REFUTE=1` found 0 violations over 28.6M filter-skips across
-   33 loadvm cycles. Ships
-   dark pending the interleaved fps A/B (`scripts/bench-savestate-ab.sh
-   <snap> XEMU_SUBPAGE_DIRTY`; kill line = any fps regression). The
+   scan). Refuter record: 0 violations over 60M+ filter-skips across 45
+   reload cycles (28.6M standalone + 32.0M on the integrated binary with
+   cross-page chaining active); invalidations collapse 290,595 → 11,180
+   (25.9×). Interleaved A/B (quiet, 60 s runs, scene-gated intervals):
+   **F8 +4.33±1.53 fps (+14.3%, 4/4 pairs), F5 +11.63±0.52 fps (+24.6%,
+   3/3 pairs)** — the largest single TCG win since the occlusion rework.
+   Honest model note: Gate-0 predicted only +0.5-0.9% vCPU because it
+   priced the trap body alone; the measured win includes the downstream
+   invalidate→recycle→relink churn the model ignored
+   (`docs/subpage-gate0-prediction.md`). `XEMU_SUBPAGE_DIRTY=0` restores
+   whole-page invalidation wholesale. The
    higher-ceiling form that removes the trap itself (a sub-block probe in
    the host-`tcg/aarch64` `qemu_st` fast path, predicted ~+2.5% vCPU) is a
    separate Class-5 codegen effort — scope in `docs/subpage-gate0-prediction.md` §2,
@@ -1010,8 +1036,11 @@ it. Instruments to re-run before starting any of these:
    cycles** (F8/F5/F7), with 61k real exec-page remaps observed and
    none ever on a chain target. Residual: CR4.PGE/whole-TLB flush paths
    are refuter-backed, not construction-backed — hook generic
-   tlb_flush before any default-on. Predicted +1-2 fps broad; design +
-   hazard analysis: `docs/xpage-design.md`.
+   tlb_flush before any default-on. Measured (quiet interleaved A/B,
+   F8, 7 pairs): **+1.30±0.29 fps (+4.3%), 7/7 pairs positive** — the
+   predicted band, delivered; stays dark only for the flush-path
+   soundness residual above. Design + hazard analysis:
+   `docs/xpage-design.md`.
 3. **PGRAPH MMIO lockless audit** — DONE 2026-07-11 (see Changes /
    `docs/pgraph-lockless-audit.md`): whole PGRAPH block joined
    lockless_io, INTR pair made atomic, no UNSAFE ranges; jitter A/B

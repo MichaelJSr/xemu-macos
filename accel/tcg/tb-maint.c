@@ -345,12 +345,14 @@ bool xemu_subpage_dirty_on(void)
 {
     static int on = -1;
     if (on < 0) {
+        /* Default ON since the 2026-07-11 interleaved A/B: +4.33±1.53 fps
+         * F8 (4/4 pairs), +11.63±0.52 fps F5 (3/3), refuter 60M+ skips
+         * over 45 reload cycles with 0 violations. XEMU_SUBPAGE_DIRTY=0
+         * restores whole-page invalidation wholesale. The default path
+         * does NOT arm the INV_PROF exit dump; request it explicitly via
+         * XEMU_INV_PROF / XEMU_SUBPAGE_REFUTE. */
         const char *e = getenv("XEMU_SUBPAGE_DIRTY");
-        on = (e && e[0] == '1') ? 1 : 0;
-        if (on && !xemu_inv_dump_armed) {
-            xemu_inv_dump_armed = true;
-            atexit(xemu_inv_prof_dump);
-        }
+        on = (e && e[0] == '0') ? 0 : 1;
     }
     return on;
 }
