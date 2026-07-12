@@ -816,8 +816,14 @@ In-app Settings covers the main toggles.
   the committed profile).
 - **Cross-platform parity batch (2026-07-05).** The DSP56K JIT gate
   widened to all POSIX aarch64 hosts, so Linux arm64 compiles the
-  fork's biggest CPU win (runtime acceptance still needs a clean
-  `XEMU_DSP_JIT_DIFF` run there — `docs/windows-gating-audit.md`).
+  fork's biggest CPU win — and since 2026-07-11 CI runs the `xbox`
+  suite (interpreter/JIT differential + swizzle) on the
+  `ubuntu-22.04-arm` leg: the first automated runtime coverage of
+  the DSP JIT on non-Apple aarch64, all three differential arms
+  green with the engagement assert (blocks actually JIT-executed).
+  (The chain-unpatch-under-SMC icache path is corpus-invisible, so
+  an in-game `XEMU_DSP_JIT_DIFF` run there is still owed —
+  `docs/windows-gating-audit.md`.)
   build.sh grew Linux PGO wiring, an arch-clean guard (a stale
   `build/` for another arch was silently reused, so `-a x86_64`
   could "succeed" with an arm64 binary), and arch-aware MoltenVK

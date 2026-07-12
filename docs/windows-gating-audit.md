@@ -161,15 +161,16 @@ regresses nothing either way; the pre-existing sticky-SSE feature
   `jit-differential` gated `if host_machine.cpu_family() == 'aarch64' and
   host_os != 'windows'` (`tests/xbox/dsp/meson.build:57`) — `DSP56K_JIT_
   SUPPORTED` parity.
-- **CI executes tests only on the macOS arm64 legs** (`build-macos.yml`,
-  `if: matrix.arch == 'arm64'`, debug+release). `build-linux.yml` uses
-  `dpkg-buildpackage` (`:140`) with no accessible meson build dir;
-  `build-windows.yml` is win64-cross — **neither runs tests.** The
-  `ubuntu-22.04-arm` runner (`build-linux.yml:14`) *would* exercise the
-  aarch64 JIT arms if a meson-configure+`meson test --suite xbox` job were
-  added — the cheapest path to Linux-arm64 JIT runtime coverage (folds
-  needs-real-HW #8/D11 into CI). Owed: **CI push** (no local cross-build:
-  no docker/colima).
+- **CI executes tests on the macOS arm64 legs AND (since 2026-07-11) on
+  Linux** (`build-macos.yml` `if: matrix.arch == 'arm64'` debug+release;
+  `build-linux.yml` additive `test` job, x86_64 + aarch64, plain
+  `build.sh --debug` tree + `meson test --suite xbox`). The packaging
+  `build` job still goes through `dpkg-buildpackage` with no accessible
+  meson dir — tests own a separate build tree. `build-windows.yml`
+  (win64-cross) still runs no tests. First green run: CI 29177917607
+  (2026-07-11) — the `ubuntu-22.04-arm` leg ran all three aarch64 JIT
+  arms OK including the engagement assert, retiring the runtime half of
+  needs-real-HW #8/D11 via CI (chain-unpatch caveat: see #11).
 
 ## I. needs-real-HW list — additions (mirror README Future vectors)
 
@@ -179,8 +180,12 @@ regresses nothing either way; the pre-existing sticky-SSE feature
     real Windows-ARM64 hardware to confirm inline x87 is the live path so
     F2 covers the leak; no regression either way (F2/§G).
 11. **DSP JIT chain-unpatch icache fix on Linux arm64** —
-    `XEMU_DSP_JIT_DIFF=1`+`_STATS=1` run (`checked>0, failures=0`); folds
-    into #8. Cheapest via the CI arm runner (§H).
+    The DSP JIT corpus arms now run green in CI on the arm runner
+    (§H, first green 2026-07-11), which covers translation/execution/
+    bit-exactness there. Still open: the chain-UNPATCH icache path needs
+    P-space self-modification of an already-chained block, which the
+    game-content-free corpus never triggers — an in-game
+    `XEMU_DSP_JIT_DIFF=1`+`_STATS=1` run on Linux arm64 remains owed.
 
 ## J. Re-verification (addendum)
 
@@ -192,5 +197,5 @@ grep -n "DSP56K_JIT_SUPPORTED" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h  #
 grep -n "defined(XBOX)" accel/tcg/xemu-inv-prof.h                        # F4: sites XBOX-gated
 grep -n "HAVE_IOSURFACE_SHARING\|get_present_frame_pushed" hw/xbox/nv2a/pgraph/vk/renderer.c  # F5
 grep -n "matrix.arch == 'arm64'\|meson test --suite xbox" .github/workflows/build-macos.yml
-grep -n "dpkg-buildpackage\|ubuntu-22.04" .github/workflows/build-linux.yml  # H: no test, arm runner
+grep -n "dpkg-buildpackage\|Test xbox suite" .github/workflows/build-linux.yml  # H: test job present
 ```
