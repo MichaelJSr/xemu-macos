@@ -38,8 +38,12 @@ void nv2a_update_irq(NV2AState *d)
         d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PCRTC;
     }
 
-    /* PGRAPH */
-    if (d->pgraph.pending_interrupts & d->pgraph.enabled_interrupts) {
+    /* PGRAPH: read the interrupt pair atomically. This runs under the BQL
+     * but NOT pg->lock, while PGRAPH's now-BQL-free MMIO handlers and the
+     * PFIFO thread mutate these fields with qatomic ops. See
+     * docs/pgraph-lockless-audit.md §C. */
+    if (qatomic_read(&d->pgraph.pending_interrupts) &
+        qatomic_read(&d->pgraph.enabled_interrupts)) {
         d->pmc.pending_interrupts |= NV_PMC_INTR_0_PGRAPH;
     } else {
         d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PGRAPH;
@@ -362,15 +366,30 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
      *   - user.c: both handlers take d->pfifo.lock for their entire
      *     body and pfifo_kick() under it (the Invariant-10 kick
      *     discipline). The BQL added nothing.
+     *   - pgraph.c: handlers hold pg->lock (read) or pfifo.lock+pg->lock
+     *     (write); the PFIFO thread arbitrates regs_[] via pg->lock, not
+     *     the BQL. The BQL's only real job was serialising the interrupt
+     *     pair (pending/enabled_interrupts) against the lock-free
+     *     nv2a_update_irq reader and the PFIFO thread's raise; those
+     *     fields are now qatomic, so the whole block is BQL-safe. Full
+     *     argument + per-range verdicts: docs/pgraph-lockless-audit.md.
      * The TCG fast path honors lockless_io in accel/tcg/cputlb.c
      * (fork change; upstream only checks it in prepare_mmio_access).
-     * XEMU_MMIO_BQL=1 restores fully locked dispatch for bisection.
+     * XEMU_MMIO_BQL=1 restores fully locked dispatch for all three blocks;
+     * XEMU_PGRAPH_LOCKLESS=0 restores BQL dispatch for PGRAPH only (this
+     * campaign's bisection hatch), leaving PFB/USER lockless.
      */
     {
         const char *e = getenv("XEMU_MMIO_BQL");
-        if (!(e && e[0] == '1')) {
+        bool mmio_bql = e && e[0] == '1';
+        if (!mmio_bql) {
             memory_region_enable_lockless_io(&d->block_mmio[NV_PFB]);
             memory_region_enable_lockless_io(&d->block_mmio[NV_USER]);
+
+            const char *ep = getenv("XEMU_PGRAPH_LOCKLESS");
+            if (!(ep && ep[0] == '0')) {
+                memory_region_enable_lockless_io(&d->block_mmio[NV_PGRAPH]);
+            }
         }
     }
 

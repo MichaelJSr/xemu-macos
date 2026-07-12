@@ -102,8 +102,12 @@ void pfifo_kick(NV2AState *d)
      * 2026-07-11 — re-verify the full set when adding one): pfifo_write,
      * the pgraph/{gl,vk}/{surface,display,renderer}.c paths,
      * nv2a.c:nv2a_unlock_fifo, pgraph.c:pgraph_write /
-     * do_wait_for_renderer_switch, and user.c:user_write. With the
-     * invariant held we can use an untimed qemu_cond_wait in the
+     * do_wait_for_renderer_switch, and user.c:user_write. The
+     * PGRAPH-lockless audit (docs/pgraph-lockless-audit.md) re-verified
+     * this set unchanged: pgraph_write's three kicks (NV_PGRAPH_INTR /
+     * INCREMENT / FIFO) now run under BQL-free MMIO dispatch but still
+     * hold d->pfifo.lock across the kick, so the discipline is intact.
+     * With the invariant held we can use an untimed qemu_cond_wait in the
      * pfifo_thread idle path (below) because the writer's broadcast
      * can no longer slip between the reader's kick-check and its
      * atomic release-wait.
