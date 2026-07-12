@@ -125,6 +125,17 @@ draws/flip; the first attempt loaded nothing because the monitor needs the real
 `vm-*` tag, not the `f8` shortcut — a benchmark bug caught per methodology §6).
 Counts normalized per in-game second (nsprof 5 s intervals).
 
+**Evidence discipline (orchestrator note):** up to ~5 xemu instances run
+concurrently, so **the verdict rests on the COUNTS, which are load-immune**; the
+ns timings below are order-of-magnitude only and may be contention-inflated —
+they are corroboration, never the load-bearing claim. The structural argument is
+count-based: arm (a) eliminates a fixed, counted set of heavy operations
+(whole-page TB invalidations: qht remove + inv_htable insert + jmp-unlink per TB;
+and per-vaddr `tlb_set_dirty` TLB walks) and replaces each trap's variable work
+with one single-word bitmap test. The only open question is whether the extra
+traps (a counted 1.89× ratio) outweigh that removed work — the orchestrator's
+fps A/B is the ground truth.
+
 | Quantity | Baseline (85 s) | RANGE_INV (75 s) |
 |---|---|---|
 | notdirty_write calls (traps) | 1,192,280 → **14,026/s** | 1,984,635 → **26,461/s** |

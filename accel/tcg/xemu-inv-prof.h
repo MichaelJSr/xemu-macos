@@ -88,6 +88,18 @@ static inline double xemu_inv_tick_ns(void)
  */
 bool xemu_tb_range_inv_on(void);
 
+/*
+ * Sub-page dirty tracking (GATE0-PREDICTION.md arm (a)). XEMU_SUBPAGE_DIRTY=1
+ * fast-skips whole-page invalidation for a data store that misses every code
+ * sub-block; XEMU_SUBPAGE_REFUTE=1 runs that skip decision against a
+ * ground-truth TB-overlap scan and counts violations (design falsified if > 0).
+ * Both default off, zero cost when unset. Implemented entirely inside
+ * tb-maint.c's XBOX paths; declared here so the shared INV_PROF dump can print
+ * their counters.
+ */
+bool xemu_subpage_dirty_on(void);
+bool xemu_subpage_refute_on(void);
+
 /* Current invalidation source, set by the entry points, read in
  * do_tb_phys_invalidate. Single vCPU thread, so a plain global is safe. */
 extern int xemu_inv_cur_src;
