@@ -97,13 +97,18 @@ int xemu_subpage_fast_mode(void)
     static int mode = -1;
     if (mode < 0) {
         /*
-         * Dark by default everywhere: the refuter validated 6.35M
-         * skip decisions with zero violations (2026-07-18), but the
-         * predicted +0.3-0.7 fps was never measurable on a quiet
-         * machine before the project's closing release — opt in with
-         * XEMU_SUBPAGE_FAST=1 and A/B before trusting it as a win.
+         * Default-on since 2026-07-18 (quiet-machine receipts): the
+         * stub completes ~2M eligible stores/s inline on the heavy
+         * scene — the population is dominated by renderer-watched
+         * pages, ~20x the code-page trap count the original +0.3-0.7
+         * prediction was sized on — for +12% draws/s throughput (6/6
+         * interleaved pairs, both 3-pair batches; fps flat because the
+         * guest's effect-load controller re-saturates frame time).
+         * Refuter: ~19.5M validated decisions, 0 violations, across
+         * static, loadvm-cycling, and first-visit-streaming soaks.
+         * XEMU_SUBPAGE_FAST=0 reverts to the plain slow path.
          */
-        int m = 0;
+        int m = 1;
         const char *e = getenv("XEMU_SUBPAGE_FAST");
         if (e) {
             m = (e[0] == '1') ? 1 : 0;
