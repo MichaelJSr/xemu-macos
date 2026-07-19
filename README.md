@@ -137,16 +137,19 @@ Headline arc on the heavy in-game bench scene (Azurik savestate,
 ~740 draws/flip, M2 Ultra, real fps — no interpolation): **15.8 →
 ~37.5 fps** across the fork's campaigns — the occlusion/report rework
 (+144%), PGO (+9.4%), sub-page code dirty tracking (+14%), cross-page
-TB chaining, inline dispatch probes, the sticky SSE/NEON bracket, and
-the async Metal present chain. Lighter scenes hold the 60 fps vblank
-cap. MetalFX frame interpolation presents 60/120 Hz from real-30+
-without changing simulation rate.
+TB chaining, inline dispatch probes, the sticky SSE/NEON bracket, the
+async Metal present chain, and the inline NOTDIRTY store-skip (+12%
+heavy-scene rendering throughput at equal fps). Lighter scenes hold
+the 60 fps vblank cap. MetalFX frame interpolation presents 60/120 Hz
+from real-30+ without changing simulation rate.
 
 The remaining wall is guest-TCG throughput. The fork's final
 optimization campaign (superblock/region formation against the
 measured ~40% dead-flag mass at block boundaries) closed 2026-07-18
 with five policies measured negative and the enabling TCG machinery
-preserved dark — the full record and the honest verdict live in
+preserved dark; its one surviving win, the sub-page store-skip, was
+promoted default-on the same night with quiet-machine receipts — the
+full record and the honest verdict live in
 [docs/roadmap.md](docs/roadmap.md) and the
 [ledger](docs/optimizations.md).
 

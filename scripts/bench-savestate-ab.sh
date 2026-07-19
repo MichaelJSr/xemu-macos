@@ -210,7 +210,11 @@ typeset -a RUN_JSONS INTERLEAVE
 run_one() {
   local label=$1 val=$2 secs=$3 warmupflag=$4
   local log=$OUT/ab_$label.log cpul=$OUT/ab_$label.cpu
-  local sock=$WORK/mon-$label.sock
+  # Socket lives in /tmp, NOT $WORK: unix socket paths are capped at
+  # 104 bytes on macOS, and a deep outdir (session scratchpads) makes
+  # xemu exit before the socket exists — every run reads as DEAD
+  # "launch failed". Same trap class as the movement probe's sockets.
+  local sock=/tmp/xemu-bench.$$.$label.sock
   local runjson=$OUT/run_$label.json
   RUN_JSONS+=($runjson)
   INTERLEAVE+=($label)
@@ -280,6 +284,7 @@ EOF
   kill $pid 2>/dev/null || true
   sleep 2
   kill -9 $pid 2>/dev/null || true
+  rm -f $sock
 
   # Scene-identity gate (incidents 9.1/9.2). A failed gate marks the
   # run invalid in its JSON; the receipt carries the verdict.

@@ -68,28 +68,36 @@ gates it). Re-profile (`XEMU_GUEST_PROF`, `XEMU_INV_PROF`,
    (merge gates, stub emission, tail-kind census) is its foundation;
    before any default-on promotion the movement-phase probe and a
    loadvm soak are REQUIRED (TB-lifetime change class).
-2. **Ret-memo remainder (sub-noise, optional).** The fill path's
-   g_tree reversal was removed 2026-07-18 (ledger, Testing & tooling);
-   what remains is the `XEMU_RETC_BITS` 12→13 experiment — one
-   `#define`, predicted +0.3-0.5 fps *at the measurement floor* with a
-   real 128→256 KiB cache-footprint downside. Cheap experiment, not a
-   known win; kill unless 13-bit ≥ 12-bit across 4 unanimous pairs.
-3. **Sub-page arm (b) — IMPLEMENTED DARK 2026-07-18** (owner accepted
-   the risk exploration; ledger has the full entry). Correctness is
-   refuter-proven (6.35M decisions, 0 violations, ideal demote
-   histogram); the +0.3-0.7 fps prediction never got its quiet-machine
-   A/B. **Promotion recipe:** on a quiet machine, run
-   `scripts/bench-savestate-ab.sh vm-<f8> XEMU_SUBPAGE_FAST 3 75 out`
-   — promote the default only on ≥3 consistent-sign positive pairs
-   plus a loadvm soak, per the house bar.
-4. **Cross-page chaining, page-spanning-dest coverage gap.** The
-   dispatch loop refuses to direct-chain into a TB that itself spans
-   two pages (`cpu-exec.c` tb_page_addr1 guard). Sizing counter landed
-   2026-07-18 (`xemu_inv_span_nochain`, INV_PROF dump (d')): read it
-   in-game before considering the registry extension — closing the gap
-   means keying the xpage backstop on *both* dest pages, an
-   archaeology-1.24-class hazard for what is expected to be a
-   sub-noise share. Bar: counter ≥ ~1M/s in-game.
+2. **Ret-memo remainder — CLOSED 2026-07-18.** The 12→13-bit
+   experiment ran as a one-binary A/B (the index width is now a
+   runtime-latched knob, `XEMU_RETC_BITS`, default 12): **13-bit
+   measured −0.23 fps, 4/4 pairs negative, scene identity clean** —
+   the 128→256 KiB footprint cost is real and the 12-bit hash already
+   captures the recurring ret set (same shape as the jump-cache
+   12→16-bit kill). 12 bits stands; the knob stays for re-tests on
+   other titles. Ledger has the Failed row.
+3. **Sub-page arm (b) — PROMOTED DEFAULT-ON 2026-07-18** (the recipe
+   below was executed same-day on a quiet machine and passed every
+   gate). Result: **+12% draws/s throughput on F8, 6/6 interleaved
+   pairs across two independent 3-pair batches** (raw fps ~flat —
+   Azurik's effect-load feedback re-saturates frame time at ~815 vs
+   ~727 draws/flip; batch 2 alone was +0.43 fps 3/3); mechanism
+   quantified at ~2M inline store completions/s, a population ~20x
+   the code-page trap count the original prediction was sized on.
+   Refuter total ~19.5M decisions / 0 violations including
+   loadvm-cycling and movement-probe streaming soaks (`tb_flush`
+   flat). `XEMU_SUBPAGE_FAST=0` reverts. Full entry: ledger.
+4. **Cross-page chaining, page-spanning-dest coverage gap — MEASURED
+   BELOW BAR 2026-07-18, parked.** The dispatch loop refuses to
+   direct-chain into a TB that itself spans two pages (`cpu-exec.c`
+   tb_page_addr1 guard). The sizing counter (`xemu_inv_span_nochain`,
+   INV_PROF dump (d')) read **0.26-0.54M declines/s in-game on F8**
+   (45.9M per ~85 s baseline run; roughly half that with arm (b) on)
+   against the pre-registered ≥ ~1M/s bar — and each decline costs
+   only a jump-cache-class lookup, so the ceiling is well under 2% of
+   the vCPU thread. Closing the gap means keying the xpage backstop on
+   *both* dest pages, an archaeology-1.24-class hazard — not worth it
+   at this rate. Reopen only if a title shows the counter ≥ 1M/s.
 5. **Real-hardware validation debt (not fps; the largest open
    correctness item).** Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list

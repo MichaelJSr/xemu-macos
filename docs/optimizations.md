@@ -36,6 +36,7 @@ Changes manifest below — the pairing is the fork's bisect discipline.
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `1` = live read (one frame late), `2` = flip-time snapshot (temporally correct); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
+| `XEMU_RETC_BITS` | Ret-memo index width, 8..13 (default 12), latched at process start; every hit is fully validated so any width is correctness-safe. 13 measured −0.23 fps 4/4 on F8 (Failed table) — a diagnostic/cache-footprint A/B knob, not a tuning lever |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time FPU/exit census |
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
@@ -50,7 +51,7 @@ Changes manifest below — the pairing is the fork's bisect discipline.
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_SUPERBLOCK` | `=N` follows up to N branch seams per TB at translate time (superblock formation: unconditional same-page forward jmps + forward-conditional fallthroughs with out-of-line taken stubs). **Default 0 (off/dark)** — see the superblock entry in CPU / JIT changes and docs/roadmap.md for the measured policy verdicts |
 | `XEMU_SUPERBLOCK_SIZE` | `1` arms the runtime taken-exit tail-kind census (uncond/call/jcc-taken/jcc-fall/rep/toomany + the M1-capturable subset), atexit dump; sizes superblock policies with merge off. Measurement-only |
-| `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set) — skips the ~300 ns `notdirty_write` round trip on the trap population. **Dark everywhere** (`=1` opts in; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): the refuter validated 6.35M skip decisions with **0 violations** (2026-07-18) but the predicted +0.3-0.7 fps was never measurable on a quiet machine before the closing release — A/B before trusting it as a win. Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram |
+| `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **DEFAULT-ON since 2026-07-18** (`=0` reverts; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram |
 | `XEMU_REGION` | `=N` region/diamond former (forward jcc ≤16 B arms; taken edge becomes an intra-TB label bound at the join, backed by the recorded-label liveness elision in tcg.c). **Default 0 — the campaign closed 2026-07-18 with both windows measured negative** (see the Failed table); the machinery + `XEMU_REGION_CHECK` double-pass conformance harness stay as the record |
 | `XEMU_REGION_CHECK` | `1` runs `liveness_pass_1` twice per TB (conservative then relaxed, pointer-keyed diff) and aborts on any non-conforming difference — with zero `region_join` labels the runs are bit-identical (the Class-5 containment proof, held over full boot+game runs) |
 | `XEMU_SUBPAGE_FAST_REFUTE` | `1` routes every would-skip decision to a C validator (independent `probe_access` re-derivation, live-TB overlap scan, NOCODE dirty ground truth) that counts violations and performs the real store — falsification mode, not perf |
@@ -843,25 +844,32 @@ explicit env overrides win) and mirrored in `Info.plist`
 | `MVK_CONFIG_RESUME_LOST_DEVICE` | `1` | Ignore transient GPU errors |
 
 
-- **Sub-page arm (b): inline NOTDIRTY store-skip (dark, 2026-07-18).**
-  The aarch64 store slow-path stub gains a pre-filter that completes a
-  guest store inline when the slow path is a PROVABLE no-op: the TLB
-  mismatch is exactly `TLB_NOTDIRTY` (a 2-insn XOR discriminator —
-  every hard flag implies `TLB_FORCE_SLOW` in the comparator), the
-  store's 64 B sub-block carries no translated code (a flat per-RAM-page
-  mirror of the arm-(a) bitmap, single-vCPU so plain loads suffice),
-  and every NOCODE dirty client is already set (so `set_dirty_range`
-  would change nothing — the renderer's vertex/texture dirty views stay
-  bit-identical). Anything else demotes to the real helper. Cold-stub
-  only: the tag-match fast path emits byte-for-byte as before, and
-  non-Apple builds compile the code but default dark.
-  `XEMU_SUBPAGE_FAST_REFUTE` re-derives every would-skip decision from
-  ground truth (independent `probe_access`, live-TB overlap scan,
-  NOCODE dirty check) — **6.35M decisions, 0 violations**, with the
-  demote histogram showing the trap population ideally shaped (100% of
-  pure-NOTDIRTY entries passed both conditions). Ships dark: the
-  predicted +0.3-0.7 fps never got a quiet-machine A/B before the
-  closing release.
+- **Sub-page arm (b): inline NOTDIRTY store-skip (default-on
+  2026-07-18, +12% heavy-scene throughput).** The aarch64 store
+  slow-path stub gains a pre-filter that completes a guest store inline
+  when the slow path is a PROVABLE no-op: the TLB mismatch is exactly
+  `TLB_NOTDIRTY` (a 2-insn XOR discriminator — every hard flag implies
+  `TLB_FORCE_SLOW` in the comparator), the store's 64 B sub-block
+  carries no translated code (a flat per-RAM-page mirror of the arm-(a)
+  bitmap, single-vCPU so plain loads suffice), and every NOCODE dirty
+  client is already set (so `set_dirty_range` would change nothing —
+  the renderer's vertex/texture dirty views stay bit-identical).
+  Anything else demotes to the real helper. Cold-stub only: the
+  tag-match fast path emits byte-for-byte as before.
+  Promotion receipts (quiet machine, F8): the stub completes **~2M
+  eligible stores/s inline** — the population is dominated by
+  renderer-watched pages and is ~20x the code-page trap count the
+  original +0.3-0.7 fps prediction was sized on — yielding **+11.8% and
+  +12.0% draws/s throughput in two independent 3-pair interleaved
+  batches (6/6 positive)**; raw fps stays ~flat (batch 2: +0.43 fps,
+  3/3) because the guest's effect-load feedback converts the headroom
+  into ~815 vs ~727 draws/flip at identical visuals (screenshots
+  clean). `XEMU_SUBPAGE_FAST_REFUTE` re-derives every would-skip
+  decision from ground truth (independent `probe_access`, live-TB
+  overlap scan, NOCODE dirty check) — **~19.5M decisions, 0
+  violations** across static, loadvm-cycling, and
+  first-visit-streaming (movement probe: `tb_flush` flat, forward
+  screenshot clean) soaks. `XEMU_SUBPAGE_FAST=0` reverts.
 - **Region/diamond formation + recorded-label liveness elision (dark,
   2026-07-18).** The final campaign against the censused 39-44%
   dead-flag mass: `TCGLabel.region_join` labels get their live-in
@@ -924,6 +932,12 @@ explicit env overrides win) and mirrored in `Info.plist`
   mid-forward screenshot) — the REQUIRED validation class for TB
   lifetime/invalidation changes, previously only a session-scratch
   script.
+- **Bench harness monitor socket moved to `/tmp`.** The A/B harness
+  derived its socket path from the per-invocation work dir; any deep
+  outdir (session scratchpads) pushed it past macOS's 104-byte AF_UNIX
+  cap and every run died as `DEAD (no monitor socket)` before launch.
+  Sockets are now `/tmp/xemu-bench.$$.<label>.sock`, removed per run —
+  the same rule the movement probe already applied (archaeology 9.9).
 - **Ret-memo fill path exports the lookup.** The miss/fill path called
   `helper_lookup_tb_ptr` (which resolves the TB then returns only
   `tc.ptr`) and then paid `tcg_tb_lookup`'s g_tree walk to reverse the
@@ -950,6 +964,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| Ret-memo 13-bit index (`XEMU_RETC_BITS=13`, 2026-07-18) | Doubling the eip→TB memo (4096→8192 entries, 128→256 KiB) predicted +0.3-0.5 fps from fewer hash collisions; measured **−0.23 fps, 4/4 pairs negative** (scene identity clean, arm (b)-on shipping context). Same mechanism as the jump-cache 12→16-bit kill: the recurring ret set already fits at 12 bits, so the larger table pays cache footprint on every probe to avoid collisions that were mostly one-shot. The width stayed runtime-latched (`XEMU_RETC_BITS`, default 12, validated-hit design makes any width safe) so the experiment reruns as a one-binary A/B on other titles |
 | TB byte-range invalidation filter (`XEMU_TB_RANGE_INV`, 2026-07-11) | `XEMU_INV_PROF` measured 100% of TB invalidations as data-write false sharing (0 true SMC, 100% recycle-hit) — so re-applying upstream's overlap filter looked free. Counter A/B: invalidations 338k → 675 (works) but notdirty traps **25.2×** (198k → 4.98M) + 46M range scans — whole-page invalidation is what empties the page and fires `tlb_unprotect_code`, making subsequent data writes free; base-xemu removed the check (`6ea11938b2e`) deliberately. Instrument-killed pre-fps-A/B; knob ships dark. Real lever: sub-page dirty tracking (design parked pending correctness review) |
 | L2 victim jump-cache (2026-07-05) | 64k-entry victim tier probed on L1 miss looked capacity-shaped (410k TBs vs 4096 entries) — but live hit rate measured **11.2%**: residual misses are one-shot/cold pcs, not a recurring set. Ceiling ~0.1 fps; instrument-killed without an fps A/B. Measure the miss stream's *shape* (recurrence), not its volume, before building any cache tier |
 | JIT write-protect flip caching (2026-07-05) | Sampling attributed 9.7% of the vCPU thread to per-TB-entry `pthread_jit_write_protect_np`; a thread-local skip of redundant flips measured **parity** (6 pairs, −0.10 mean). The 9.7% was `thread_suspend`-sampling skid onto barrier instructions — discount barrier-heavy symbols in suspend-based profiles |

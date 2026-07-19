@@ -105,6 +105,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 6.6 | HLT BSOD recovery | reverted |
 | 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (mechanism fenced-off dark) |
 | 6.8 | Region/diamond formation + recorded-label liveness elision (census gate passed 21.4%; both windows −4.5%/−0.69 3/3; drain-demotes 72%/64% — THE closing campaign) | settled-negative (full stack fenced-off dark) |
+| 6.9 | Arm (b) promotion: prediction sized on a 20x-undercounting proxy; fps masked a +12% throughput win via effect-load feedback | shipped-after-proof |
 | 7.1 | PFIFO untimed wait (A1): revert → proof-backed re-add | shipped-after-fix |
 | 7.2 | Descriptor bind-skip (C1): same arc | shipped-after-fix |
 | 7.3 | BQL event batching | settled-negative |
@@ -120,6 +121,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 9.6 | Bare cp+codesign bundle refresh dies at dyld | incident |
 | 9.7 | Bench gate counted boot-menu intervals (cold-vs-warm boot asymmetry) | shipped-after-fix |
 | 9.8 | Helper appends to a live process's stdout log get overwritten (non-append fd) | incident |
+| 9.9 | Bench harness socket under a deep outdir blows the 104-byte AF_UNIX cap — all runs DEAD "no monitor socket" | shipped-after-fix |
 
 ## When NOT to use this skill
 
@@ -1447,6 +1449,46 @@ correct and reusable by any future design that can flag its joins.
 
 # 7. PFIFO / threading
 
+## 6.9 Arm (b) promotion — the proxy that undercounted 20x, and the fps that hid a +12% win
+
+**Status**: shipped-after-proof (default-on 2026-07-18, same night as the
+campaign close; receipts in the promotion commit and the ledger entry).
+**What happened**: arm (b)'s +0.3-0.7 fps prediction was sized on the
+INV_PROF code-page notdirty trap counter (~90 k/s ≈ 2% of the vCPU
+thread). The first quiet-machine A/B read **−0.24 fps (1/3 pairs)** —
+a kill on the pre-registered fps bar — but the scene-identity check
+flagged an 11% composition shift: every E run rendered ~815 draws/flip
+against every B run's ~727, zero overlap, across six pairs in two
+independent batches. The protocol's standing composition-shift rule
+(the 1.18 correction) says compare draws/s: **+11.8% and +12.0%,
+6/6 pairs positive** (batch 2 was also +0.43 fps 3/3 raw).
+**Root cause of the misprediction**: the proxy. The stub's own counters
+showed **166M eligible slow-path entries per ~85 s in-scene (~2M/s,
+100% skipped)** — the population is dominated by stores into
+renderer-watched pages (NV2A/NV2A_TEX dirty clients, bits already set),
+which the code-page trap counter never counted: a ~20x undercount. At
+~2M/s, ~60 ns saved per inline completion ≈ the observed +12%
+equilibrium shift. The fps flatness is Azurik's effect-load feedback:
+the guest converts freed CPU into more effect draws until frame time
+re-saturates (visuals identical, screenshots clean).
+**Evidence**: two 3-pair interleaved batches (throughput 6/6 positive;
+receipts in `armb-ab`/`armb-ab2` session dirs and the promotion
+commit); counter probes FAST=0 vs FAST=1 (5.45M code-page traps vs
+166M stub entries); refuter total **~19.5M decisions / 0 violations**
+across static, loadvm-cycling (6 reloads), and movement-probe
+streaming (tb_flush flat at 1) soaks.
+**Lessons**: (1) price a fast path on the population the emitted code
+will actually SEE (instrument the gate itself), not on a helper-side
+proxy counter — proxies count what reaches the helper, not what the
+stub intercepts; (2) on composition-shifting scenes an fps A/B can
+bury a real throughput win exactly as it buried the M2 losses —
+draws/s is the symmetric metric, and it must be applied for promotion
+as readily as for kills; (3) a pre-registered kill bar stated in fps
+should say what happens when the scene-identity gate fires — the
+correction path was already protocol, which is what kept this from
+being a judgment call.
+**Reopen if**: n/a (shipped; `XEMU_SUBPAGE_FAST=0` reverts).
+
 ## 7.1 PFIFO untimed wait (A1): reverted on suspicion, re-added with proof
 
 **Status**: shipped-after-fix (`ea23058e1e` land → `59b85d1e86` defensive
@@ -1772,6 +1814,26 @@ landed, and were overwritten byte-for-byte.
 live process's redirect target.
 **Lesson**: two writers on one log require both fds in append mode;
 a harness helper must assume the main process's redirect is not.
+**Reopen if**: n/a.
+
+## 9.9 Harness monitor socket under a deep outdir — every run DEAD at launch
+
+**Status**: shipped-after-fix (2026-07-18, `bench-savestate-ab.sh`).
+**What happened**: the hardened A/B harness derived its monitor socket
+path from the per-invocation work dir (`$WORK/mon-$label.sock`), which
+lives under the caller's outdir. Invoked with a session-scratchpad
+outdir (~130 chars), every run died as `DEAD (launch failed (no
+monitor socket))` — xemu exits before creating a socket whose AF_UNIX
+path exceeds macOS's 104-byte cap. The movement probe had already
+learned this (its sockets live in `/tmp`); the bench harness re-tripped
+the same trap in a different home.
+**Fix**: `local sock=/tmp/xemu-bench.$$.$label.sock`, removed after
+each run. Only the socket moves to `/tmp`; logs and clones stay in the
+outdir.
+**Lesson**: the DEAD-run robustness worked exactly as designed (batch
+completed, receipt said DEAD-RUNS instead of garbage) — but path-length
+constraints are per-artifact, not per-harness: every AF_UNIX socket a
+tool creates needs the short-path rule applied at ITS creation site.
 **Reopen if**: n/a.
 
 # How to add an entry (the recording duty)
