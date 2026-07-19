@@ -30,3 +30,4 @@ build.log
 .cursorignore
 xemu-output.log
 /pgo/*.profraw
+bench-out*/

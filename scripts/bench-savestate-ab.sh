@@ -36,6 +36,13 @@
 #   robustness     a failed launch/loadvm is recorded as a DEAD run;
 #                  the batch continues. Unique work dir + monitor
 #                  socket per invocation.
+#   visual check   one window screenshot is captured partway through
+#                  each run and scored for white-screen / stuck-frame /
+#                  magenta-tile artifacts (scripts/bench-screenshot.py);
+#                  verdicts land in the run logs and the batch summary,
+#                  and any ARTIFACT sets exit code 3. Skipped gracefully
+#                  where no window is capturable (--no-screenshot to
+#                  disable).
 #
 # --dry-run validates all gate/receipt plumbing against synthetic
 # nsprof fixtures WITHOUT launching xemu and without reading the
@@ -51,6 +58,8 @@
 #   --hdd PATH           qcow2 to CLONE (default: hdd_path from config-src)
 #   --boot-wait N        seconds from launch to loadvm (default 25)
 #   --keep-work          keep the work dir (app/hdd clones) afterwards
+#   --no-screenshot      skip the mid-run visual artifact check
+#   --e-value V          value of ENV_VAR in the E arm (default 1; B stays 0)
 #
 # Analysis note: baseline reproducibility of this protocol measured at
 # +/-0.02 fps on static scenes. Default 3 pairs is a smoke bar; a
@@ -60,6 +69,7 @@ set -e
 
 ROOT=${0:a:h:h}
 RECEIPT_PY=$ROOT/scripts/bench-receipt.py
+SHOT_PY=$ROOT/scripts/bench-screenshot.py
 SUMMARIZER=$ROOT/.claude/skills/xemu-diagnostics-and-tooling/scripts/nsprof_summarize.py
 
 # ---- argument parsing (positionals unchanged; flags additive) -------------
@@ -72,6 +82,8 @@ CONFIG_SRC=""
 HDD_SRC=""
 BOOT_WAIT=25
 KEEP_WORK=0
+SCREENSHOT=1
+E_VALUE=1
 while (( $# > 0 )); do
   case "$1" in
     --dry-run)     DRY_RUN=1 ;;
@@ -82,6 +94,8 @@ while (( $# > 0 )); do
     --hdd)         HDD_SRC=$2; shift ;;
     --boot-wait)   BOOT_WAIT=$2; shift ;;
     --keep-work)   KEEP_WORK=1 ;;
+    --no-screenshot) SCREENSHOT=0 ;;
+    --e-value)     E_VALUE=$2; shift ;;
     -h|--help)     sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --*)           echo "unknown flag: $1" >&2; exit 2 ;;
     *)             pos+=("$1") ;;
@@ -254,6 +268,14 @@ EOF
   for j in $(seq 1 $n); do
     sleep 5
     ps -o %cpu= -p $pid >> $cpul 2>/dev/null || break
+    # Mid-run visual artifact check (white screen / stuck frame /
+    # magenta tiles). Soft: SKIPs when uncapturable, never aborts.
+    if (( SCREENSHOT )) && [[ $j -eq $(( (n + 1) / 2 )) ]]; then
+      # Verdict goes to its own file: xemu's non-append stdout redirect
+      # overwrites bytes appended to the shared log.
+      python3 $SHOT_PY $pid $OUT/shot_$label.png \
+          > $OUT/shot_$label.verdict 2>&1 || true
+    fi
   done
   kill $pid 2>/dev/null || true
   sleep 2
@@ -264,13 +286,16 @@ EOF
   python3 $RECEIPT_PY gate --label $label --log $log --out $runjson \
       --summarizer $SUMMARIZER --band $DRAWS_BAND --cv-max $CV_MAX \
       ${warmupflag:+--warmup} --var-value $val || true
-  echo "$label done ($VAR=$val, asserts=$(grep -c Assertion $log || true))"
+  local shotline=""
+  (( SCREENSHOT )) && \
+    shotline=$(grep '^screenshot:' $OUT/shot_$label.verdict 2>/dev/null | tail -1)
+  echo "$label done ($VAR=$val, asserts=$(grep -c Assertion $log || true))${shotline:+ [$shotline]}"
 }
 
-run_one warmup 1 40 warmup
-for k in $(seq 1 $PAIRS); do
+run_one warmup $E_VALUE 40 warmup
+for (( k = 1; k <= PAIRS; k++ )); do
   run_one B$k 0 $SECS ""
-  run_one E$k 1 $SECS ""
+  run_one E$k $E_VALUE $SECS ""
 done
 
 # ---- receipt ---------------------------------------------------------------
@@ -304,4 +329,14 @@ EOF
 RC=0
 python3 $RECEIPT_PY receipt --meta $META --out $OUT/receipt.json || RC=$?
 echo "bench: receipt at $OUT/receipt.json"
+
+# ---- visual-check summary --------------------------------------------------
+if (( SCREENSHOT )); then
+  echo "bench: visual checks:"
+  grep -h '^screenshot:' $OUT/shot_*.verdict 2>/dev/null | sed 's/^/  /' || true
+  if grep -hq '^screenshot: ARTIFACT' $OUT/shot_*.verdict 2>/dev/null; then
+    echo "bench: VISUAL ARTIFACT flagged — review the shot_*.png above" >&2
+    (( RC == 0 )) && RC=3
+  fi
+fi
 exit $RC

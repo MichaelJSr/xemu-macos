@@ -78,19 +78,39 @@ def mean_sd(vals):
 
 def cmd_gate(args):
     band_lo, band_hi = args.band
-    summary = run_summarizer(args.summarizer, args.log, args.drop_first)
+    summary = run_summarizer(args.summarizer, args.log, 0)
 
-    intervals = summary["intervals"]
+    all_iv = summary["intervals"]
+
+    # Anchor at the scene: warm launches print boot-menu nsprof intervals
+    # before loadvm (a cold first launch boots flip-silent, so its log
+    # starts in-game — the asymmetry that motivated this). Keep only the
+    # TRAILING contiguous run of in-band intervals, then drop that run's
+    # first interval as the post-load transient. A run that never enters
+    # (or falls out of) the scene keeps nothing and gates INVALID —
+    # incidents 9.1/9.2 still fire.
+    def in_band(iv):
+        return band_lo <= iv["draws_pf"] <= band_hi
+    start = len(all_iv)
+    while start > 0 and in_band(all_iv[start - 1]):
+        start -= 1
+    boot_excluded = start
+    intervals = all_iv[start:]
+    transient_dropped = 0
+    if intervals:
+        intervals = intervals[1:]
+        transient_dropped = 1
+
     draws = [iv["draws_pf"] for iv in intervals]
     fpss = [iv["fps"] for iv in intervals]
 
-    out_of_band = [i for i, d in enumerate(draws)
-                   if d < band_lo or d > band_hi]
     d_mean, d_sd = mean_sd(draws)
     cv = (d_sd / d_mean) if d_mean > 0 else 0.0
     bimodal = cv > args.cv_max
 
-    band_ok = not out_of_band
+    band_ok = len(intervals) >= 2
+    out_of_band = [] if band_ok else [
+        i for i, iv in enumerate(all_iv) if not in_band(iv)]
     valid = band_ok and not bimodal
 
     fps_mean, fps_sd = mean_sd(fpss)
@@ -101,7 +121,8 @@ def cmd_gate(args):
         "dead": False,
         "var_value": args.var_value,
         "n_intervals": len(intervals),
-        "dropped_intervals": summary.get("dropped_intervals", 0),
+        "dropped_intervals": boot_excluded + transient_dropped,
+        "boot_excluded_intervals": boot_excluded,
         "fps_mean": fps_mean,
         "fps_sd": fps_sd,
         "draws_pf_mean": d_mean,
@@ -121,14 +142,16 @@ def cmd_gate(args):
 
     tag = "OK" if valid else "INVALID"
     detail = []
-    if out_of_band:
-        detail.append(f"intervals {out_of_band} outside draws/flip band "
-                      f"[{band_lo:g},{band_hi:g}] (incident-9.1 class)")
+    if not band_ok:
+        detail.append(f"no usable in-band tail (intervals {out_of_band} "
+                      f"outside draws/flip band [{band_lo:g},{band_hi:g}]; "
+                      f"incident-9.1 class)")
     if bimodal:
         detail.append(f"bimodal: draws/flip CV {cv:.3f} > {args.cv_max:g} "
                       f"(incident-9.2 class)")
+    anchored = (f" pre-scene={boot_excluded}" if boot_excluded else "")
     print(f"gate[{args.label}]: {tag}  fps={fps_mean:.2f}±{fps_sd:.2f} "
-          f"draws/flip={d_mean:.1f}±{d_sd:.1f} n={len(intervals)}"
+          f"draws/flip={d_mean:.1f}±{d_sd:.1f} n={len(intervals)}{anchored}"
           + ("  -- " + "; ".join(detail) if detail else ""))
     return 0 if valid else GATE_EXIT_INVALID
 
