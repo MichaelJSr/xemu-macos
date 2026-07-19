@@ -359,7 +359,10 @@ explicit `x86_version` argument is present. Every build configures with
    The Windows build must never regress for a macOS convenience
    (established practice inferred from the record — provenance in
    xemu-change-control "Rule provenance").
-4. Add a row to the README "Runtime debug / escape-hatch knobs" table
+4. Add a row to the runtime escape-hatch knobs table — since the
+   2026-07-18 docs split this table lives in `docs/optimizations.md`
+   ("Runtime escape-hatch / diagnostic knobs"), not the README; README
+   line references elsewhere in this skill predate the split
    (~README line 112).
 5. Change-control pairing rule: if the var exists because you changed
    default behavior, the var IS the escape hatch — the behavior change

@@ -140,6 +140,30 @@ skill.
 > lifetime/invalidation — static savestate A/Bs structurally cannot
 > see first-visit costs, which is exactly how v0.11 shipped the lag.
 
+> **RANKING ADDENDUM 3 (2026-07-18, superblock campaign session at
+> `bc387d6dad`).** Two structural updates supersede pointers below:
+> (1) **Docs split (owner-directed)**: the README's Changes manifest,
+> knob tables, Failed table, and Future vectors moved — the ledger of
+> landed/attempted/settled work is now `docs/optimizations.md` and the
+> open candidates are `docs/roadmap.md`. Every "README Future vectors
+> (~line N)" reference below should be read as `docs/roadmap.md`;
+> re-derive with `grep -n '^#' docs/roadmap.md docs/optimizations.md`.
+> (2) **Superblock re-scoped to region formation** (roadmap #1): the
+> seam-following mechanism was built, measured, and killed with
+> receipts — M1 capture 3.7% of taken exits (census: jcc_taken 50.4 /
+> jcc_fall 27.3 / call 12.2 / uncond 5.2); M2 stub policies −1.6% and
+> −2.3% draw throughput, each 3/3 pairs. Corrected theory: TCG spills
+> cc/eip globals before any branch whose taken edge exits, so only
+> designs keeping BOTH successor edges inline (diamond/region
+> formation) harvest the censused 39-44% dead-flag mass. Machinery +
+> tail-kind census remain in-tree dark (`XEMU_SUPERBLOCK*`) as that
+> campaign's foundation — archaeology 6.7 owns the full story.
+> Secondary items settled the same day with receipts (ledger Settled
+> table): DSP fusion closed for this corpus, kick-semaphore closed
+> (wrong premise), dirty-clear coalescing gate failed (<1% echo),
+> sub-page arm (b) held (~2% ceiling vs Class-5 risk). F8 floor at the
+> session close: 37.2-38.2 real fps @ ~740 draws/flip.
+
 ## When NOT to use this skill
 
 | Need | Use instead |
