@@ -142,8 +142,13 @@ the async Metal present chain. Lighter scenes hold the 60 fps vblank
 cap. MetalFX frame interpolation presents 60/120 Hz from real-30+
 without changing simulation rate.
 
-The remaining wall is guest-TCG throughput; the active campaign and
-its candidate levers are in [docs/roadmap.md](docs/roadmap.md).
+The remaining wall is guest-TCG throughput. The fork's final
+optimization campaign (superblock/region formation against the
+measured ~40% dead-flag mass at block boundaries) closed 2026-07-18
+with five policies measured negative and the enabling TCG machinery
+preserved dark — the full record and the honest verdict live in
+[docs/roadmap.md](docs/roadmap.md) and the
+[ledger](docs/optimizations.md).
 
 ---
 

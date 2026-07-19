@@ -50,6 +50,10 @@ Changes manifest below — the pairing is the fork's bisect discipline.
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_SUPERBLOCK` | `=N` follows up to N branch seams per TB at translate time (superblock formation: unconditional same-page forward jmps + forward-conditional fallthroughs with out-of-line taken stubs). **Default 0 (off/dark)** — see the superblock entry in CPU / JIT changes and docs/roadmap.md for the measured policy verdicts |
 | `XEMU_SUPERBLOCK_SIZE` | `1` arms the runtime taken-exit tail-kind census (uncond/call/jcc-taken/jcc-fall/rep/toomany + the M1-capturable subset), atexit dump; sizes superblock policies with merge off. Measurement-only |
+| `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set) — skips the ~300 ns `notdirty_write` round trip on the trap population. **Dark everywhere** (`=1` opts in; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): the refuter validated 6.35M skip decisions with **0 violations** (2026-07-18) but the predicted +0.3-0.7 fps was never measurable on a quiet machine before the closing release — A/B before trusting it as a win. Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram |
+| `XEMU_REGION` | `=N` region/diamond former (forward jcc ≤16 B arms; taken edge becomes an intra-TB label bound at the join, backed by the recorded-label liveness elision in tcg.c). **Default 0 — the campaign closed 2026-07-18 with both windows measured negative** (see the Failed table); the machinery + `XEMU_REGION_CHECK` double-pass conformance harness stay as the record |
+| `XEMU_REGION_CHECK` | `1` runs `liveness_pass_1` twice per TB (conservative then relaxed, pointer-keyed diff) and aborts on any non-conforming difference — with zero `region_join` labels the runs are bit-identical (the Class-5 containment proof, held over full boot+game runs) |
+| `XEMU_SUBPAGE_FAST_REFUTE` | `1` routes every would-skip decision to a C validator (independent `probe_access` re-derivation, live-TB overlap scan, NOCODE dirty ground truth) that counts violations and performs the real store — falsification mode, not perf |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | Old zero-motion interpolator binding (A/B) |
 | `XEMU_PUSH_PRESENT` | **Default ON since 2026-07-12** (Metal backend): publish each flip's present schedule into a ring at flip so the UI reads it with no cross-thread round trip (removes the pull-model handshake wait; adds a `frame_seq` skip-when-unchanged dedup). Carries frame interpolation's paced sub-flip steps too (interp on and off); ignored on the GL backend. Measured quiet 2026-07-11 under 2x interp (F8): pull blocks the UI thread 499-607 ms per 5 s (1.4-1.6k waits, 5 ms tails) → **0 with the ring**, flips identical. Set `=0` to restore the legacy pull handshake wholesale |
 | `XEMU_PUSH_DEBT` | Consumer catch-up bound for the push-present ring (default: interp mode + 2 steps; `0` = strict FIFO, the pre-fix behavior). When the guest's step rate beats the display (e.g. 40 fps × 2x interp = 80 steps/s on a 60 Hz panel), strict FIFO backlogs and force-drops unread steps — measured ~26 spliced steps/s, the 2026-07-12 "frames double playing" judder; with the bound the consumer jumps to the newest unconsumed real frame instead (60 Hz sim receipt: unread drops 2,253/2,152 per min → **0**, refuter 0 mismatches / 0 resurrections over the policy) |
@@ -839,6 +843,43 @@ explicit env overrides win) and mirrored in `Info.plist`
 | `MVK_CONFIG_RESUME_LOST_DEVICE` | `1` | Ignore transient GPU errors |
 
 
+- **Sub-page arm (b): inline NOTDIRTY store-skip (dark, 2026-07-18).**
+  The aarch64 store slow-path stub gains a pre-filter that completes a
+  guest store inline when the slow path is a PROVABLE no-op: the TLB
+  mismatch is exactly `TLB_NOTDIRTY` (a 2-insn XOR discriminator —
+  every hard flag implies `TLB_FORCE_SLOW` in the comparator), the
+  store's 64 B sub-block carries no translated code (a flat per-RAM-page
+  mirror of the arm-(a) bitmap, single-vCPU so plain loads suffice),
+  and every NOCODE dirty client is already set (so `set_dirty_range`
+  would change nothing — the renderer's vertex/texture dirty views stay
+  bit-identical). Anything else demotes to the real helper. Cold-stub
+  only: the tag-match fast path emits byte-for-byte as before, and
+  non-Apple builds compile the code but default dark.
+  `XEMU_SUBPAGE_FAST_REFUTE` re-derives every would-skip decision from
+  ground truth (independent `probe_access`, live-TB overlap scan,
+  NOCODE dirty check) — **6.35M decisions, 0 violations**, with the
+  demote histogram showing the trap population ideally shaped (100% of
+  pure-NOTDIRTY entries passed both conditions). Ships dark: the
+  predicted +0.3-0.7 fps never got a quiet-machine A/B before the
+  closing release.
+- **Region/diamond formation + recorded-label liveness elision (dark,
+  2026-07-18).** The final campaign against the censused 39-44%
+  dead-flag mass: `TCGLabel.region_join` labels get their live-in
+  recorded during the backward liveness walk (forward branches see the
+  label first), and globals provably dead into the join — EXACTLY
+  `TS_DEAD`, since `TS_DEAD|TS_MEM` at an exit-bound tail still owes
+  its store — keep `TS_DEAD` without the `TS_MEM` forcing at both the
+  `brcond` and the join; the writing op then takes the `DEAD_ARG` path
+  and the dead store never emits. Liveness-only (no allocator edits;
+  `liveness_pass_2` is inert for i386), bit-identical with zero flagged
+  labels (proven over full boot+game runs by the `XEMU_REGION_CHECK`
+  double-pass harness). The i386 former internalizes forward jcc arms:
+  the taken label binds at the join with cc reconciled via the
+  `do_gen_rep` label-merge idiom and `pc_save` via the −1 sentinel;
+  unreached joins demote to exit stubs with checkpointed state.
+  **Both measured windows lost** (Failed table: −4.5% then −0.69 fps,
+  drain-demotes dominating) — everything stays dark as the campaign's
+  reproducible record.
 - **Superblock seam-following machinery (dark, 2026-07-18).**
   Translate-time TB merging behind `XEMU_SUPERBLOCK=N` (default 0):
   unconditional same-page forward jmps concatenate (M1 — emit nothing,
@@ -955,6 +996,8 @@ full story in `docs/roadmap.md` item 1):
 | Superblock M1 alone: concatenate through unconditional same-page forward jmps (`XEMU_SUPERBLOCK`) | Instrument-killed pre-A/B: the runtime tail-kind census measured the capturable subset at **3.7% of taken goto_tb exits** (~1.26M/s) against a pre-registered ≥10% build bar |
 | Superblock M2, all-conditionals policy (cap 4) | Unanimous 3/3 regression: draw throughput **−1.6%**, feedback-amplified to −8.4% fps (the guest scales per-frame effect load with frame time, so the slower arm also reads ~7% heavier frames — compare throughput, not raw fps). Suspected loop back-edge demotion (hot taken edges → lookup stub) |
 | Superblock M2, forward-conditionals-only policy | Refuted the loop-protection hypothesis: still **−2.3% throughput, 3/3 negative** with ~29k seams/run merged (4,922 jmp + 24,064 fallthrough). Root cause understood: TCG must spill dirty cc/eip globals before ANY branch whose taken edge exits the TB, so conditional seams structurally cannot elide the flag materialization the census counted — only designs where BOTH successors stay inline (region/diamond formation) can harvest the censused 39-44% |
+| Region/diamond formation, 64 B window (`XEMU_REGION=4`) | The both-edges-inline design, enabled by a recorded-label liveness elision in tcg.c (drop `TS_MEM` for globals provably dead into a forward join; no allocator edits; bit-identical when unflagged — proven over full runs by the `XEMU_REGION_CHECK` double-pass harness after its own index-misalignment bug was fixed). Candidate census passed its ≥15% gate at **21.4%**; the A/B still lost: **−1.34 fps (−4.5%), 3/3**, B arms ±0.30. Mechanism: **72% of opened regions drain-demoted** into the known-negative stub shape (arms hit block-enders before the join) — 11,240 demotes vs 4,290 internalized |
+| Region/diamond formation, 16 B window (the single pre-registered mechanism iteration) | Predicted the demote ratio would crater below 25%; measured **64%** (4,918 vs 2,794) and the A/B still **−0.69 fps, 3/3 negative**. Campaign STOPPED permanently per pre-registration. Final verdict on the census's 39-44% dead-flag mass: **not harvestable by any translate-time policy tried** (five policies, all negative, each mechanism identified); the liveness elision itself is sound and stays landed dark with its checker as the record |
 
 ---
 

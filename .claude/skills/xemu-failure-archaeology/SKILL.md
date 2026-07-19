@@ -104,6 +104,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 6.5 | Cross-TB FPCR elision | settled-negative |
 | 6.6 | HLT BSOD recovery | reverted |
 | 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (mechanism fenced-off dark) |
+| 6.8 | Region/diamond formation + recorded-label liveness elision (census gate passed 21.4%; both windows −4.5%/−0.69 3/3; drain-demotes 72%/64% — THE closing campaign) | settled-negative (full stack fenced-off dark) |
 | 7.1 | PFIFO untimed wait (A1): revert → proof-backed re-add | shipped-after-fix |
 | 7.2 | Descriptor bind-skip (C1): same arc | shipped-after-fix |
 | 7.3 | BQL event batching | settled-negative |
@@ -1396,6 +1397,49 @@ formation's textbook prey is thin here.
 with the movement-phase probe + loadvm soak as REQUIRED gates before
 any default-on (TB-lifetime class). Do not re-bench stub-layout
 variants of seam-following; two policies died with receipts.
+
+## 6.8 Region/diamond formation — the closing campaign, five receipts deep
+
+**Status**: settled-negative (2026-07-18, same day as 6.7); the whole
+stack — TCG recorded-label liveness elision, the `XEMU_REGION_CHECK`
+double-pass conformance harness, and the i386 diamond former — stays
+in-tree DARK as the reproducible record.
+**The design** (the exact reopening 6.7 named): forward jcc arms
+internalize — the taken edge branches to an intra-TB label bound at
+the join, so NEITHER edge exits — and a liveness-only TCG change lets
+globals provably dead into a flagged forward join keep `TS_DEAD`
+without the `TS_MEM` forcing at both the brcond and the label, so the
+dead flag stores never emit. Verified sound: no allocator edits needed
+(`DEAD_ARG` frees dead globals to `TEMP_VAL_MEM` before every seam
+assert), `liveness_pass_2` inert for i386, bit-identical arg_life with
+zero flagged labels (held over full boot+game runs).
+**Traps burned building the harness** (each a lesson): (1) the
+double-pass compared op lists BY INDEX, but `liveness_pass_1` also
+REMOVES dead ops — misaligned comparisons produced phantom violations
+until the diff was keyed by op pointer; (2) the recorded predicate
+must be EXACTLY `TS_DEAD` — at an exit-bound tail `la_func_end` marks
+everything `TS_DEAD|TS_MEM`, where "dead" only means the TB ends and
+the store is still owed; (3) legitimate diffs include added AND
+removed deaths (values consumed by the branch live longer in
+registers) — the only always-illegal direction is an ADDED sync.
+**Receipts**: candidate census PASSED its ≥15% pre-registered gate at
+21.4% of executed boundaries (fwd-jcc ≤64 B × head-KILL). A/B window
+64 B: **−1.34 fps (−4.5%), 3/3, B arms ±0.30** — mechanism: 72% of
+opened regions drain-demoted into 6.7's known-negative stub shape
+(11,240 vs 4,290 internalized). The single pre-registered mechanism
+iteration (window 16 B, predicted demote ratio <25%): measured **64%**
+and **−0.69 fps, 3/3**. STOP fired permanently.
+**Durable lessons**: (a) a passed candidate census sizes the POOL, not
+the NET — the demote path's cost model must be priced into the gate;
+(b) the no-rollback demote fallback means every failed open ships the
+prior campaign's negative shape — open-rate policies inherit the dead
+design's cost; (c) when a validation harness aborts, suspect the
+harness's own comparison model before the mechanism (three "violations"
+here were harness bugs; zero were real).
+**Reopen if**: only with a fundamentally different attack (persistent
+profile-guided region selection; cross-TB IR caching) — never another
+window/policy variant of this former. The liveness elision itself is
+correct and reusable by any future design that can flag its joins.
 
 
 

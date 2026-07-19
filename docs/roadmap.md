@@ -20,8 +20,27 @@ gates it). Re-profile (`XEMU_GUEST_PROF`, `XEMU_INV_PROF`,
 
 ## The ranked performance roadmap
 
-1. **Trace/superblock formation in TCG — re-scoped 2026-07-18 after
-   the seam-following campaign measured negative.** The quantified
+1. **Trace/superblock/region formation in TCG — CAMPAIGN CLOSED
+   2026-07-18.** Five translate-time policies were designed, built,
+   and measured in one arc — M1 uncond concatenation
+   (instrument-killed at 3.7% capture), M2 all-conditionals (−1.6%
+   throughput 3/3), M2 forward-only (−2.3% 3/3), region/diamond
+   formation at 64 B (−4.5% 3/3, 72% drain-demotes) and at 16 B (the
+   single pre-registered mechanism iteration: −0.69 fps 3/3, demotes
+   still 64%). The enabling TCG work — recorded-label liveness elision
+   with a bit-identical-when-unflagged proof harness — is sound and
+   stays landed dark (`XEMU_REGION*`), alongside the seam machinery
+   and censuses, as a complete reproducible record. **Final verdict:
+   the censused 39-44% dead-flag mass is not harvestable by
+   translate-time policy on this workload; real-60 on F8 was not
+   reached (floor ~37.5-38.5), and the honest displayed-60/120 path
+   remains MetalFX interpolation.** Reopen only with a fundamentally
+   different attack (e.g. persistent profile-guided region selection,
+   or hot-path IR caching across TBs) — not another window/policy
+   variant. (Original re-scope notes below for history.)
+
+   *(historical)* Re-scoped 2026-07-18 after
+   the seam-following campaign measured negative. The quantified
    basis stands: `XEMU_CCOP_CENSUS` puts ~39-44% of block boundaries
    carrying a dead flag materialization, and the 2026-07-18 tail-kind
    census (`XEMU_SUPERBLOCK_SIZE=1`, runtime-weighted, F8) splits the
@@ -55,14 +74,14 @@ gates it). Re-profile (`XEMU_GUEST_PROF`, `XEMU_INV_PROF`,
    `#define`, predicted +0.3-0.5 fps *at the measurement floor* with a
    real 128→256 KiB cache-footprint downside. Cheap experiment, not a
    known win; kill unless 13-bit ≥ 12-bit across 4 unanimous pairs.
-3. **Sub-page arm (b): host-`qemu_st` fast-path dirty probe — HELD.**
-   Fresh receipt 2026-07-18 (`XEMU_INV_TIMING`): 6.8M notdirty traps
-   per 75 s run (~90 k/s) at ~300 ns/call body ≈ **~2% of the vCPU
-   thread** — the whole ceiling arm (b) could recover (~+0.5-0.7 fps).
-   Class-5 shared/Windows-arm64 codegen risk for a sub-noise-band win;
-   revisit only if the endgame gap to a target makes +0.5 decisive AND
-   the Windows-risk sign-off is explicit (scope:
-   `docs/subpage-gate0-prediction.md` §2).
+3. **Sub-page arm (b) — IMPLEMENTED DARK 2026-07-18** (owner accepted
+   the risk exploration; ledger has the full entry). Correctness is
+   refuter-proven (6.35M decisions, 0 violations, ideal demote
+   histogram); the +0.3-0.7 fps prediction never got its quiet-machine
+   A/B. **Promotion recipe:** on a quiet machine, run
+   `scripts/bench-savestate-ab.sh vm-<f8> XEMU_SUBPAGE_FAST 3 75 out`
+   — promote the default only on ≥3 consistent-sign positive pairs
+   plus a loadvm soak, per the house bar.
 4. **Cross-page chaining, page-spanning-dest coverage gap.** The
    dispatch loop refuses to direct-chain into a TB that itself spans
    two pages (`cpu-exec.c` tb_page_addr1 guard). Sizing counter landed
