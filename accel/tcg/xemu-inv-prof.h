@@ -176,4 +176,17 @@ extern uint64_t xemu_ccop_tb_head[3];
 extern uint64_t xemu_ccop_pairs[3][3];  /* [pred tail][succ head], runtime */
 extern uint64_t xemu_ccop_pairs_nolast; /* transition after interrupt/exception */
 
+/*
+ * Region-formation candidate census (2026-07-18): bit 4 of tb->xemu_ccop
+ * marks a TB whose final exit is a FORWARD conditional with target within
+ * XEMU_CCOP_REGION_WINDOW bytes — the diamond-former's candidate shape.
+ * Runtime pairs split by the executed successor's head class; the
+ * campaign's pre-registered kill gate reads cand[KILL]/total (proxy for
+ * "flags dead across the join" — the executed edge's head stands in for
+ * join liveness; see docs/roadmap.md item 1).
+ */
+#define XEMU_CCOP_REGION_CAND  (1 << 4)
+#define XEMU_CCOP_REGION_WINDOW 64
+extern uint64_t xemu_region_cand_pairs[3];  /* [succ head], runtime */
+
 #endif /* XEMU_INV_PROF_H */

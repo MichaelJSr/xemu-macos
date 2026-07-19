@@ -1745,6 +1745,171 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     return true;
 }
 
+#if defined(XBOX)
+/*
+ * Sub-page arm (b) "subpage-fast": a pre-filter at the head of the
+ * store slow-path stub that completes the store inline when the slow
+ * path would be a provable no-op. Cold path only — the tag-match fast
+ * path is byte-identical to upstream. Design + safety argument:
+ * include/exec/xemu-subpage-fast.h; ground truth + refuter:
+ * accel/tcg/xemu-subpage-fast.c and tb-maint.c.
+ */
+#include "exec/tlb-flags.h"
+#include "exec/xemu-subpage-fast.h"
+
+/* Defined later in this file. */
+static void tgen_shr(TCGContext *s, TCGType type,
+                     TCGReg a0, TCGReg a1, TCGReg a2);
+static void tgen_shri(TCGContext *s, TCGType type,
+                      TCGReg a0, TCGReg a1, tcg_target_long a2);
+static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
+                                   TCGReg data_r, HostAddress h);
+
+/* Emit "*c += 1" using two dead scratch regs (cold path). */
+static void sf_out_counter_inc(TCGContext *s, TCGReg t0, TCGReg t1,
+                               uint64_t *c)
+{
+    tcg_out_movi(s, TCG_TYPE_I64, t0, (intptr_t)c);
+    tcg_out_ld(s, TCG_TYPE_I64, t1, t0, 0);
+    tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, t1, t1, 1);
+    tcg_out_st(s, TCG_TYPE_I64, t1, t0, 0);
+}
+
+/*
+ * The pre-filter. Register state at stub entry is exactly the state at
+ * the fast path's B_C: TMP0 = tlb comparator (addr_write), TMP1 = TLB
+ * addend, TMP2 = flag-free masked address, plus the op's addr/data
+ * regs. qemu_st is TCG_OPF_CALL_CLOBBER, so every call-clobbered
+ * register except the op's own inputs is dead here — scratch is picked
+ * from {x4..x7} avoiding addr/data.
+ */
+static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
+                                   MemOp opc, int mode)
+{
+    static const TCGReg pool[4] = {
+        TCG_REG_X4, TCG_REG_X5, TCG_REG_X6, TCG_REG_X7
+    };
+    TCGType at = s->addr_type;
+    TCGReg raddr = lb->addr_reg, rdata = lb->datalo_reg;
+    TCGReg rp = 0, rw = 0;
+    tcg_insn_unit *br_r1, *br_r4, *br_r2, *br_r3[XEMU_SF_NCLIENTS];
+    int npicked = 0;
+
+    for (int i = 0; i < 4 && npicked < 2; i++) {
+        if (pool[i] != raddr && pool[i] != rdata) {
+            if (npicked++ == 0) {
+                rp = pool[i];
+            } else {
+                rw = pool[i];
+            }
+        }
+    }
+
+    /* (1) mismatch is EXACTLY TLB_NOTDIRTY? (tag match, aligned, no
+     * INVALID/FORCE_SLOW => no MMIO/watchpoint/bswap/discard). */
+    tcg_out_insn(s, 3510, EOR, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2);
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_NE,
+                TCG_REG_TMP0, TLB_NOTDIRTY, true);
+    br_r1 = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+
+    sf_out_counter_inc(s, TCG_REG_TMP0, rw, &xemu_sf_seen);
+
+    /* (2) ram page = (addend + zext(vaddr) - ram_host) >> PAGE_BITS,
+     * bounds-checked against xbox.ram. */
+    if (at == TCG_TYPE_I32) {
+        tcg_out_ext32u(s, TCG_REG_TMP2, raddr);
+    } else {
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP2, raddr);
+    }
+    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1);
+    tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0, xemu_sf_ram_host);
+    tcg_out_insn(s, 3502, SUB, 1, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0);
+    tgen_shri(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP2, TARGET_PAGE_BITS);
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_GEU,
+                TCG_REG_TMP2, xemu_sf_ram_pages, true);
+    br_r4 = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_GEU, 0);
+
+    /* (2b) code-block word for the page; (2c) this store's sub-block
+     * bit = (vaddr >> 6) & 63 — set means translated code: demote. */
+    tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0, (intptr_t)xemu_sf_block_map);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2, 3);
+    tcg_out_ld(s, TCG_TYPE_I64, rw, TCG_REG_TMP0, 0);
+    tgen_shri(s, TCG_TYPE_I32, rp, raddr, 6);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I32, rp, rp, 63);
+    tgen_shr(s, TCG_TYPE_I64, rw, rw, rp);
+    br_r2 = s->code_ptr;
+    tcg_out_insn(s, 3205, TBNZ, rw, 0, 0);
+
+    /* (3) every NOCODE dirty client already dirty for the page, so
+     * set_dirty_range would be a no-op. rp = word idx, TMP2 = bit. */
+    tgen_shri(s, TCG_TYPE_I64, rp, TCG_REG_TMP2, 6);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, TCG_REG_TMP2,
+                     TCG_REG_TMP2, 63);
+    for (int c = 0; c < XEMU_SF_NCLIENTS; c++) {
+        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
+                     (intptr_t)xemu_sf_dirty0[c]);
+        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, rp, 3);
+        tcg_out_ld(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 0);
+        tgen_shr(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2);
+        br_r3[c] = s->code_ptr;
+        tcg_out_insn(s, 3205, TBZ, TCG_REG_TMP0, 0, 0);
+    }
+
+    sf_out_counter_inc(s, TCG_REG_TMP0, rp, &xemu_sf_skips);
+
+    if (mode == 1) {
+        /* Complete the store inline: same HostAddress shape as the
+         * fast path (addend + vaddr carries no flag bits). */
+        HostAddress h = {
+            .base = TCG_REG_TMP1, .index = raddr, .index_ext = at
+        };
+        tcg_out_qemu_st_direct(s, opc, rdata, h);
+        tcg_out_goto(s, lb->raddr);
+    } else {
+        /* Refute mode: decision cross-checked in C, store via the real
+         * helper inside. */
+        static void * const sf_refute[MO_SIZE + 1] = {
+            [MO_8]  = xemu_sf_refute_stb,
+            [MO_16] = xemu_sf_refute_stw,
+            [MO_32] = xemu_sf_refute_stl,
+            [MO_64] = xemu_sf_refute_stq,
+        };
+        tcg_out_st_helper_args(s, lb, &ldst_helper_param);
+        tcg_out_call_int(s, sf_refute[opc & MO_SIZE]);
+        tcg_out_goto(s, lb->raddr);
+    }
+
+    /* Demote landing pads: bump the reason counter, fall to the
+     * helper path that follows this function. */
+    reloc_pc19(br_r1, tcg_splitwx_to_rx(s->code_ptr));
+    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[0]);
+    br_r1 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+    reloc_pc19(br_r4, tcg_splitwx_to_rx(s->code_ptr));
+    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[3]);
+    br_r4 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+    reloc_pc14(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[1]);
+    br_r2 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+    for (int c = 0; c < XEMU_SF_NCLIENTS; c++) {
+        reloc_pc14(br_r3[c], tcg_splitwx_to_rx(s->code_ptr));
+    }
+    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[2]);
+
+    /* Helper path continues here: bind the three pad exits. */
+    reloc_pc26(br_r1, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc26(br_r4, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc26(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+}
+#endif /* XBOX */
+
 static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
@@ -1752,6 +1917,16 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
         return false;
     }
+
+#if defined(XBOX)
+    {
+        int sf_mode = xemu_subpage_fast_mode();
+        if (sf_mode && !lb->is_ld
+            && (opc & MO_SIZE) <= MO_64 && (opc & MO_BSWAP) == 0) {
+            sf_out_store_prefilter(s, lb, opc, sf_mode);
+        }
+    }
+#endif
 
     tcg_out_st_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_st_helpers[opc & MO_SIZE]);

@@ -8,6 +8,7 @@ tcg_ss.add(files(
   'cpu-exec.c',
   'cpu-exec-common.c',
   'xemu-inline-jc.c',
+  'xemu-subpage-fast.c',
   'xemu-xpage.c',
   'tcg-runtime.c',
   'tcg-runtime-gvec.c',

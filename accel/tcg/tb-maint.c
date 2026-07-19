@@ -43,6 +43,7 @@
 #include "trace.h"
 #include "xemu-inv-prof.h"
 #include "xemu-xpage.h"
+#include "exec/xemu-subpage-fast.h"
 
 #if defined(XBOX)
 /*
@@ -250,6 +251,7 @@ uint64_t xemu_ccop_tb_tail[3];
 uint64_t xemu_ccop_tb_head[3];
 uint64_t xemu_ccop_pairs[3][3];
 uint64_t xemu_ccop_pairs_nolast;
+uint64_t xemu_region_cand_pairs[3];
 
 static void xemu_ccop_census_dump(void)
 {
@@ -298,6 +300,21 @@ static void xemu_ccop_census_dump(void)
             lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_KILL] / lazy_row : 0.0,
             lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_USE] / lazy_row : 0.0,
             lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_NONE] / lazy_row : 0.0);
+    {
+        uint64_t cand = xemu_region_cand_pairs[0] + xemu_region_cand_pairs[1]
+                      + xemu_region_cand_pairs[2];
+        fprintf(stderr,
+                "xemu:  region-cand (fwd-jcc<=%u B tail): pairs=%llu "
+                "(%.1f%% of total)  ->head kill=%llu (%.1f%% of total) "
+                "use=%llu none=%llu\n",
+                XEMU_CCOP_REGION_WINDOW, (unsigned long long)cand,
+                total ? 100.0 * cand / total : 0.0,
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_KILL],
+                total ? 100.0 * xemu_region_cand_pairs[XEMU_CCOP_HEAD_KILL]
+                        / total : 0.0,
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_USE],
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_NONE]);
+    }
     fprintf(stderr,
             "xemu:  static TB mix: tail dyn/eflags/lazy=%llu/%llu/%llu  "
             "head none/kill/use=%llu/%llu/%llu\n",
@@ -1065,6 +1082,9 @@ static void tb_remove_all(void)
     for (i = 0; i < l1_sz; i++) {
         tb_remove_all_1(v_l2_levels, l1_map + i);
     }
+#if defined(XBOX)
+    xemu_sf_clear_all();
+#endif
 }
 
 #if defined(XBOX)
@@ -1097,6 +1117,10 @@ static void xemu_subpage_set_code(PageDesc *p, const TranslationBlock *tb,
     tb_page_addr_t s, l;
     xemu_subpage_tb_range(tb, n, &s, &l);
     qatomic_or(&p->code_blocks, xemu_subpage_range_mask(s, l));
+    /* Mirror for the subpage-fast generated-code probe (same thread;
+     * set-before-executable ordering is program order here). */
+    xemu_sf_sync_page(tb->page_addr[n] & TARGET_PAGE_MASK,
+                      qatomic_read(&p->code_blocks));
 }
 
 /* True if [start, start+len) overlaps any code sub-block on @p. */
@@ -1144,6 +1168,43 @@ static void xemu_subpage_refute_check(PageDesc *p, ram_addr_t start,
             return;
         }
     }
+}
+
+/*
+ * Subpage-fast refuter ground truth: does [paddr, paddr+len) overlap
+ * translated code, per BOTH the bitmap and a live TB byte scan? Runs on
+ * the vCPU thread from the refute store helper (page lock taken here).
+ * Stores are <= 8 bytes and the stub's discriminator rejects
+ * page-crossing accesses, so the range never spans pages.
+ */
+bool xemu_sf_ground_truth(hwaddr paddr, unsigned len,
+                          bool *bitmap_says, bool *live_says)
+{
+    PageDesc *p = page_find(paddr >> TARGET_PAGE_BITS);
+    tb_page_addr_t start = paddr & ~TARGET_PAGE_MASK;
+    tb_page_addr_t last = start + len - 1;
+    TranslationBlock *tb;
+    PageForEachNext n;
+    bool overlap = false;
+
+    if (!p) {
+        *bitmap_says = *live_says = true;
+        return true;
+    }
+    *bitmap_says = !xemu_subpage_code_overlaps(p, start, last - start + 1);
+
+    page_lock(p);
+    PAGE_FOR_EACH_TB(start, last, p, tb, n) {
+        tb_page_addr_t ts, tl;
+        xemu_subpage_tb_range(tb, n, &ts, &tl);
+        if (!(tl < start || ts > last)) {
+            overlap = true;
+            break;
+        }
+    }
+    page_unlock(p);
+    *live_says = !overlap;
+    return *bitmap_says && *live_says;
 }
 #endif /* XBOX */
 
@@ -1823,6 +1884,7 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
          * tb_page_add before the code is executable.
          */
         p->code_blocks = 0;
+        xemu_sf_sync_page(start, 0);
 #endif
         tlb_unprotect_code(start);
     }

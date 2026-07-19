@@ -1430,8 +1430,12 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
             census_prev_tb = NULL;
         }
         if (census_prev_tb) {
+            unsigned head = (tb->xemu_ccop >> XEMU_CCOP_HEAD_SHIFT) & 0x3;
             xemu_ccop_pairs[census_prev_tb->xemu_ccop & XEMU_CCOP_TAIL_MASK]
-                           [(tb->xemu_ccop >> XEMU_CCOP_HEAD_SHIFT) & 0x3]++;
+                           [head]++;
+            if (census_prev_tb->xemu_ccop & XEMU_CCOP_REGION_CAND) {
+                xemu_region_cand_pairs[head]++;
+            }
         } else {
             xemu_ccop_pairs_nolast++;
         }
