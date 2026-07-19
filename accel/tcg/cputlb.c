@@ -1062,11 +1062,12 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
 #if defined(XBOX)
     /*
-     * R2 secondary observer (XPAGE-DESIGN §5): log when an executable vaddr's
-     * guest-physical binding changes at TLB refill. Corroborating signal only
-     * — it has the fetch-bypass hole the per-exit refuter closes, so it never
-     * replaces the refuter. Near-zero when the campaign is off (latched
-     * checks short-circuit).
+     * R2 secondary observer (XPAGE-DESIGN §5): track when an executable
+     * vaddr's guest-physical binding changes at TLB refill. Corroborating
+     * signal only — it has the fetch-bypass hole the per-exit refuter
+     * closes, so it never replaces the refuter. Runs on the default path
+     * (chaining is default-on since v0.11.1): counters always, prints
+     * only when XEMU_XPAGE_CHAIN/refute diagnostics are explicitly set.
      */
     if ((prot & PAGE_EXEC) &&
         (xemu_xpage_chain_level() > 0 || xemu_xpage_refute_on())) {

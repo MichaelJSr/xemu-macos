@@ -35,11 +35,19 @@ static uint64_t xpage_obs_remaps;      /* observer: exec-fetch binding changed *
 static int64_t xpage_arm_us;
 static void xemu_xpage_dump(void);
 
+/*
+ * True only when diagnostics were explicitly requested (env set) — the
+ * default path stays silent: counters still count, but nothing prints
+ * and no atexit dump is registered.
+ */
+static bool xpage_diag_armed;
+
 static void xpage_arm(void)
 {
     static bool done;
     if (!done) {
         done = true;
+        xpage_diag_armed = true;
         xpage_arm_us = g_get_monotonic_time();
         atexit(xemu_xpage_dump);
     }
@@ -249,12 +257,20 @@ void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage, bool exec_fetch)
     if (e->valid && e->vpage == vp) {
         if (e->ppage != pp) {
             xpage_obs_remaps++;
-            fprintf(stderr,
-                    "xemu: XPAGE observe: exec-page remap vaddr=0x%016llx "
-                    "0x%016llx -> 0x%016llx\n",
-                    (unsigned long long)vp,
-                    (unsigned long long)e->ppage,
-                    (unsigned long long)pp);
+            /*
+             * Print only under explicit diagnostics: chaining is
+             * default-on since v0.11.1, so this path runs in normal
+             * gameplay, and overlay-heavy titles remap exec pages
+             * continuously — unbounded stderr noise otherwise.
+             */
+            if (xpage_diag_armed) {
+                fprintf(stderr,
+                        "xemu: XPAGE observe: exec-page remap "
+                        "vaddr=0x%016llx 0x%016llx -> 0x%016llx\n",
+                        (unsigned long long)vp,
+                        (unsigned long long)e->ppage,
+                        (unsigned long long)pp);
+            }
             e->ppage = pp;
         }
     } else {
