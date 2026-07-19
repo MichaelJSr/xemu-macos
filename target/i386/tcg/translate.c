@@ -3255,6 +3255,26 @@ static void xemu_sb_dump(void)
             (unsigned long long)xemu_sb_merged_fallthroughs);
 }
 
+static void xemu_sb_arm_dump(void)
+{
+    static bool armed;
+    if (!armed) {
+        atexit(xemu_sb_dump);
+        armed = true;
+    }
+}
+
+/* Emit "*counter += 1" as TCG ops (translate-time census bump) — the
+ * load/add/store the xpage and superblock census sites share. */
+static void xemu_gen_counter_inc(uint64_t *counter)
+{
+    TCGv_ptr p = tcg_constant_ptr(counter);
+    TCGv_i64 t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, p, 0);
+    tcg_gen_addi_i64(t, t, 1);
+    tcg_gen_st_i64(t, p, 0);
+}
+
 static int xemu_superblock_max(void)
 {
     static int cap = -1;
@@ -3263,7 +3283,7 @@ static int xemu_superblock_max(void)
         cap = e ? atoi(e) : 0;
         cap = MAX(0, MIN(cap, 64));
         if (cap > 0) {
-            atexit(xemu_sb_dump);
+            xemu_sb_arm_dump();
         }
     }
     return cap;
@@ -3276,7 +3296,7 @@ static bool xemu_sb_size_on(void)
         const char *e = getenv("XEMU_SUPERBLOCK_SIZE");
         on = (e && e[0] == '1') ? 1 : 0;
         if (on) {
-            atexit(xemu_sb_dump);
+            xemu_sb_arm_dump();
         }
     }
     return on;
@@ -3494,19 +3514,10 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
              * executes before goto_tb even when the exit is chained).
              * The capturable bucket applies the exact M1 merge gates.
              */
-            uint64_t *cntp = &xemu_sb_tail_taken[s->xemu_sb_tail_kind];
-            TCGv_ptr cnt = tcg_constant_ptr(cntp);
-            TCGv_i64 tcnt = tcg_temp_new_i64();
-            tcg_gen_ld_i64(tcnt, cnt, 0);
-            tcg_gen_addi_i64(tcnt, tcnt, 1);
-            tcg_gen_st_i64(tcnt, cnt, 0);
+            xemu_gen_counter_inc(&xemu_sb_tail_taken[s->xemu_sb_tail_kind]);
             if (s->xemu_sb_tail_kind == XEMU_SB_TAIL_UNCOND &&
                 xemu_sb_m1_eligible(s, ot, new_pc)) {
-                TCGv_ptr cap = tcg_constant_ptr(&xemu_sb_m1_capturable);
-                TCGv_i64 tcap = tcg_temp_new_i64();
-                tcg_gen_ld_i64(tcap, cap, 0);
-                tcg_gen_addi_i64(tcap, tcap, 1);
-                tcg_gen_st_i64(tcap, cap, 0);
+                xemu_gen_counter_inc(&xemu_sb_m1_capturable);
             }
         }
 #endif
@@ -5228,6 +5239,11 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     /* Census: record this TB's flag-liveness classes. gen_update_cc_op
      * only spills; dc->cc_op still names the semantic tail state here. */
     {
+        /* Literals, not the XEMU_CCOP_TAIL / HEAD_SHIFT macros: those
+         * live in accel/tcg/xemu-inv-prof.h, which is private to the
+         * accel/tcg source dir (this file uses the function-local
+         * extern idiom instead of including it). Encoding documented
+         * there: tail 0=DYN 1=EFLAGS 2=LAZY, head at shift 2. */
         uint8_t tail = (dc->cc_op == CC_OP_DYNAMIC) ? 0
                      : (dc->cc_op == CC_OP_EFLAGS)  ? 1 : 2;
         dc->base.tb->xemu_ccop = tail | (dc->xemu_cc_head << 2);

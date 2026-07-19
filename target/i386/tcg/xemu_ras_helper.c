@@ -48,18 +48,17 @@ static bool xemu_ras_on(void)
     return on;
 }
 
-static uint64_t xemu_ras_hits, xemu_ras_fills, xemu_ras_mispredicts;
+static uint64_t xemu_ras_hits, xemu_ras_fills;
 
 static void xemu_ras_dump(void)
 {
-    uint64_t tot = xemu_ras_hits + xemu_ras_fills + xemu_ras_mispredicts;
+    uint64_t tot = xemu_ras_hits + xemu_ras_fills;
     if (tot) {
         fprintf(stderr,
-                "xemu: ras hits=%llu (%.1f%%) fills=%llu mispredicts=%llu\n",
+                "xemu: ras hits=%llu (%.1f%%) fills=%llu\n",
                 (unsigned long long)xemu_ras_hits,
                 100.0 * xemu_ras_hits / tot,
-                (unsigned long long)xemu_ras_fills,
-                (unsigned long long)xemu_ras_mispredicts);
+                (unsigned long long)xemu_ras_fills);
     }
 }
 
@@ -121,7 +120,6 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
             e->eip = eip;
             e->flags = tb->flags;
             e->cs_base = (uint32_t)tb->cs_base;
-            e->cflags = tb_cflags(tb);
             e->tb = tb;
             xemu_ras_fills++;
         }

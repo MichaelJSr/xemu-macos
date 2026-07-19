@@ -135,17 +135,17 @@ extern uint64_t xemu_inv_recycle_hits;      /* recycled (identical bytes) */
 extern uint64_t xemu_inv_recycle_true_smc;  /* same pc/flags in inv_htable, bytes differ */
 extern uint64_t xemu_inv_recycle_cold;      /* no inv_htable entry (fresh/cold pc) */
 
-/* (d') runtime count of direct-chain refusals because the DEST TB spans
- * two guest pages (cpu-exec.c tb_page_addr1 guard) — sizes the xpage
- * "page-spanning targets decline to chain" coverage gap. */
-extern uint64_t xemu_inv_span_nochain;
-
 /* (d) census — translate-time emission counts */
 extern uint64_t xemu_inv_flcr_emitted;      /* gen_flcr emitted a runtime FPCR check */
 extern uint64_t xemu_inv_flcr_skip;         /* gen_flcr compile-skipped (flcr_set true) */
 extern uint64_t xemu_inv_gototb_emitted;    /* same-page direct goto_tb chain exits */
 extern uint64_t xemu_inv_jcprobe_emitted;   /* inline jump-cache probe (indirect/xpage) */
 extern uint64_t xemu_inv_retmemo_emitted;   /* inline ret-memo exits */
+
+/* (d') runtime count of direct-chain refusals because the DEST TB spans
+ * two guest pages (cpu-exec.c tb_page_addr1 guard) — sizes the xpage
+ * "page-spanning targets decline to chain" coverage gap. */
+extern uint64_t xemu_inv_span_nochain;
 
 /*
  * XEMU_CCOP_CENSUS=1 (default off, separate latch): runtime-weighted census

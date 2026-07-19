@@ -2192,8 +2192,9 @@ typedef struct CPUArchState {
 #define XEMU_RETC_SIZE (1 << XEMU_RETC_BITS)
     /*
      * 32-byte stride so the inline probe addresses entries with a
-     * single shift. flags/cs_base/cflags are captured at fill time:
-     * the inline hit path compares them against the ret site's
+     * single shift (tb's 8-byte alignment plus the explicit pad keep
+     * the stride). flags/cs_base are captured at fill time: the
+     * inline hit path compares them against the ret site's
      * translate-time constants (valid because nothing between TB
      * entry and its ret exit changes them), and re-loads the live
      * tb->cflags to catch CF_INVALID. tb == NULL means empty (flush
@@ -2203,7 +2204,6 @@ typedef struct CPUArchState {
         uint32_t eip;
         uint32_t flags;
         uint32_t cs_base;
-        uint32_t cflags;
         void *tb;
         void *pad;
     } xemu_retc[XEMU_RETC_SIZE];

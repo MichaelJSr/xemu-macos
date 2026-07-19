@@ -309,7 +309,8 @@ def print_receipt_block(r):
     print(f"                config {b.get('config_path', '?')}")
     print(f"                hdd clone {b.get('hdd_clone', '?')}")
     print(f"scene gate    : draws/flip band {c.get('draws_band', '?')}, "
-          f"CV max {c.get('cv_max', '?')}, first interval dropped")
+          f"CV max {c.get('cv_max', '?')}, scene-anchored tail, "
+          f"first in-scene interval dropped")
     for arm in ("B", "E"):
         s = r["arms"][arm]
         if s:
@@ -373,7 +374,7 @@ def gate_fixture(outdir, summarizer, label, log, band, cv_max,
                  var_value, warmup=False):
     ns = _NS(label=label, log=log, out=os.path.join(outdir, f"run_{label}.json"),
              summarizer=summarizer, band=band, cv_max=cv_max,
-             drop_first=1, warmup=warmup, var_value=var_value)
+             warmup=warmup, var_value=var_value)
     return cmd_gate(ns), ns.out
 
 
@@ -461,7 +462,6 @@ def cmd_selftest(args):
 
     # 5. receipt must REFUSE an fps delta when the arms are different
     #    scenes (cross-arm draws/flip > 15%)
-    scene_jsons = list(run_jsons)
     mism_log = os.path.join(outdir, "ab_E9.log")
     write_fixture(mism_log, [(55.0, 220.0)] * 5)  # in-band, different scene
     _, mism_json = gate_fixture(outdir, args.summarizer, "E9", mism_log,
@@ -515,7 +515,6 @@ def main():
     g.add_argument("--band", type=parse_band, default=(100.0, 1e9),
                    metavar="LO[:HI]")
     g.add_argument("--cv-max", type=float, default=0.10)
-    g.add_argument("--drop-first", type=int, default=1)
     g.add_argument("--warmup", action="store_true")
     g.add_argument("--var-value", default="")
 
