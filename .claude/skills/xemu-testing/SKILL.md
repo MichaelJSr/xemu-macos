@@ -31,11 +31,19 @@ distilled from the 2026-07 optimization and pink-tile campaigns.
 ## Reproducible perf A/B (±0.02 fps on static scenes)
 
 One binary, env-var toggle, interleaved B/E pairs (`scripts/
-bench-savestate-ab.sh <snapshot> <ENV_VAR> [pairs] [secs] [outdir]`).
-Boot ~25 s, then `loadvm` via monitor socket (CLI `-loadvm` breaks on
-USB topology). Metrics: `XEMU_NV2A_NSPROF=1` 5 s intervals; use only
-intervals with draws/flip > 100, drop the first post-load one; verify
-scene identity via draws/flip. **Live-movement runs have ±5 fps route
+bench-savestate-ab.sh <snapshot> <ENV_VAR> [pairs] [secs] [outdir]`;
+`--e-value V` for N-valued knobs — B stays 0). Boot ~25 s, then
+`loadvm` via monitor socket (CLI `-loadvm` breaks on USB topology).
+Metrics: `XEMU_NV2A_NSPROF=1` 5 s intervals; the receipt gate anchors
+each run at the TRAILING contiguous in-band (draws/flip > 100)
+interval run and drops one post-load transient — position-based
+dropping is wrong because warm launches print boot-menu intervals
+before loadvm while a cold first launch boots flip-silent (archaeology
+9.7). Every run also captures one mid-run screenshot scored for
+white-screen / stuck-frame / magenta classes
+(`scripts/bench-screenshot.py`; verdicts in `shot_<label>.verdict`
+sidecars — never append to the live log, archaeology 9.8; ARTIFACT
+sets batch exit code 3). **Live-movement runs have ±5 fps route
 variance** — use ≥3 interleaved pairs and compare means, or prefer
 static scenes for small deltas.
 
@@ -122,8 +130,11 @@ lstick_btn/rstick_btn/guide = 30/31/39. Helper:
 Built 2026-07-12 to pin the v0.11 "new-area lag" (heavy stutter on
 map transitions / death reloads / fast movement into unexplored
 space, smooth on revisits). The savestate A/B above cannot see this
-class — static scenes never stream. Method (reference: scratchpad
-`bench2/lag_run.sh` of session bb62a13a; recreate from this spec):
+class — static scenes never stream. **Committed implementation:
+`scripts/movement-probe.sh <outdir> [VAR=V ...]`** (2026-07-18 —
+isolation-cloned bundle/hdd, /tmp sockets, liveness-guarded FIFO
+injection, per-phase `info jit` flush deltas, mid-forward screenshot).
+The method spec it implements:
 
 - One run = boot → `loadvm` real `vm-*` tag → settle 15 s → **hold
   forward (lstick_up) 20 s into unexplored space** → rest 5 s →

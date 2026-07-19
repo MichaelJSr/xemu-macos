@@ -103,6 +103,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 6.4 | TLS-cached pthread_jit_write_protect_np | settled-negative |
 | 6.5 | Cross-TB FPCR elision | settled-negative |
 | 6.6 | HLT BSOD recovery | reverted |
+| 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (mechanism fenced-off dark) |
 | 7.1 | PFIFO untimed wait (A1): revert → proof-backed re-add | shipped-after-fix |
 | 7.2 | Descriptor bind-skip (C1): same arc | shipped-after-fix |
 | 7.3 | BQL event batching | settled-negative |
@@ -116,6 +117,8 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 9.4 | OS-level input injection false-verify | incident |
 | 9.5 | Running process keeps its old binary | incident |
 | 9.6 | Bare cp+codesign bundle refresh dies at dyld | incident |
+| 9.7 | Bench gate counted boot-menu intervals (cold-vs-warm boot asymmetry) | shipped-after-fix |
+| 9.8 | Helper appends to a live process's stdout log get overwritten (non-append fd) | incident |
 
 ## When NOT to use this skill
 
@@ -1354,6 +1357,48 @@ deadlock's signature is worse than the deadlock.
 appears with `XEMU_PFIFO_HEARTBEAT` clean, root-cause the blocked waiter
 (see `xemu-debugging-playbook`).
 
+## 6.7 Superblock seam-following — three receipts and a corrected theory
+
+**Status**: settled-negative for seam-following policies (2026-07-18);
+mechanism fenced-off DARK in-tree (`XEMU_SUPERBLOCK=N`, default 0) as
+the foundation for the region-formation redesign (roadmap item 1).
+**The idea**: harvest the `XEMU_CCOP_CENSUS` finding (~39-44% of block
+boundaries carry a dead flag materialization) by not ending TBs at
+branch seams: M1 concatenates through unconditional same-page forward
+jmps (hook in `gen_JMP` before `gen_update_cc_op`; forward-only
+protects `tb->size` contiguity, P0-page gate protects `translator_ld`
+and CF_PCREL unwind); M2 continues through conditional fallthroughs
+with the taken edge in an out-of-line stub on the lookup path (no
+goto_tb slot burn, no xpage registry entries).
+**Evidence (all F8, interleaved, scene-gated)**:
+(1) M1-alone instrument-killed pre-A/B — the runtime tail-kind census
+(`XEMU_SUPERBLOCK_SIZE=1`, 2.397B taken exits) measured jcc_taken
+50.4% / jcc_fall 27.3% / call 12.2% / uncond 5.2%, with the
+M1-capturable subset **3.7%** vs a pre-registered ≥10% build bar.
+(2) M2 all-conditionals, cap 4: **−1.6% draw throughput, 3/3 pairs**
+(fps −8.4% after the title's effect-load feedback also thickened the
+slower arm's frames ~7% — always compare draws/s on composition
+shifts). (3) M2 forward-conditionals-only: **−2.3% throughput, 3/3**,
+with ~29k seams/run merged (4,922 jmp + 24,064 fallthrough) — the
+loop-back-edge-protection hypothesis refuted.
+**The corrected theory (the durable lesson)**: TCG spills dirty
+cc/eip globals before ANY branch whose taken edge leaves the TB,
+because the exit's successor re-derives state from env. So a
+conditional seam can NEVER elide the flag materialization the census
+counted, no matter where the stub lives — the census's dead-flag mass
+is harvestable only where BOTH successor edges stay inline. That is
+region/diamond formation (translate both sides of short forward
+conditionals to their join), a different and larger design. Bonus
+finding: uncond-jmp seams (where pure concatenation genuinely works,
+M1) are only 3.7% of executed transitions on this workload — trace
+formation's textbook prey is thin here.
+**Reopen if**: only as region formation (both edges inline to a join),
+with the movement-phase probe + loadvm soak as REQUIRED gates before
+any default-on (TB-lifetime class). Do not re-bench stub-layout
+variants of seam-following; two policies died with receipts.
+
+
+
 ---
 
 # 7. PFIFO / threading
@@ -1645,6 +1690,44 @@ codesign, with a trailing `/opt/local` check (recipe:
 **Lesson**: the packaged executable and the build-tree executable are
 different artifacts; any "fast refresh" must replicate the packaging
 fixups or the bundle silently depends on developer-machine paths.
+**Reopen if**: n/a.
+
+## 9.7 The bench gate counted boot-menu intervals — cold-vs-warm boot asymmetry
+
+**Status**: shipped-after-fix (2026-07-18, `scripts/bench-receipt.py`).
+**Symptom**: every timed run of a healthy F8 baseline gated INVALID
+("intervals [0..3] outside band; bimodal CV 0.51") while the warmup run
+gated OK at the true floor.
+**Root cause**: interval selection was position-based (`--drop-first 1`
+from the log head). A COLD first launch boots flip-silent — nsprof
+prints on flips, so no boot intervals appear and the log starts
+in-game; WARM launches reach the flipping boot menu in seconds and
+print 4-5 menu intervals before `loadvm`. Position-based dropping was
+calibrated on the cold shape and misclassified every warm run (or,
+worse, would have averaged 60 fps menu intervals into fps means).
+**Fix**: anchor on scene identity — keep the TRAILING contiguous
+in-band run of intervals, then drop that run's first interval as the
+post-load transient; runs that never enter (or fall out of) the scene
+keep nothing and still gate INVALID. Incident-9.1/9.2 selftest
+fixtures still fire.
+**Lesson**: select measurement windows by CONTENT (draws/flip regime),
+never by log position — process warm-up state changes what precedes
+the workload.
+**Reopen if**: n/a.
+
+## 9.8 Helper appends to a live process's stdout log get silently overwritten
+
+**Status**: incident (2026-07-18, screenshot-verdict integration).
+**What happened**: the mid-run screenshot checker appended its verdict
+line to the xemu run log; the PNG existed but the verdict line never
+did. xemu's stdout was opened by the shell with `>` (no `O_APPEND`),
+so its file offset advances only with its own writes — the helper's
+appended bytes at EOF sat exactly where xemu's next buffered flush
+landed, and were overwritten byte-for-byte.
+**Fix**: sidecar files (`shot_<label>.verdict`), never appends to a
+live process's redirect target.
+**Lesson**: two writers on one log require both fds in append mode;
+a harness helper must assume the main process's redirect is not.
 **Reopen if**: n/a.
 
 # How to add an entry (the recording duty)

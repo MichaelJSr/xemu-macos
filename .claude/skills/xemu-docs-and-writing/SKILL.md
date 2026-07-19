@@ -38,9 +38,26 @@ README anchors, row counts, and repo pins refreshed 2026-07-11 at
 "Doc of record" means: the one place a fact lives; everything else
 points at it. Four homes, one rule each:
 
+> **2026-07-18 RESTRUCTURE (owner-directed).** The README was split:
+> it now carries only the concise user manifest (what the fork is,
+> quick start, build knobs, recommended config, a Performance summary,
+> troubleshooting, architecture). The full landed-change manifest, the
+> runtime escape-hatch/diagnostic knob catalog, the Failed/reverted
+> table, AND the settled-vectors table moved to
+> **`docs/optimizations.md`** (the optimization ledger); the open
+> candidates moved to **`docs/roadmap.md`**. Everywhere this skill
+> says "README Changes bullet / Failed row / Future-vectors entry",
+> read "the corresponding `docs/optimizations.md` /
+> `docs/roadmap.md` section" — templates and style are unchanged.
+> §1.1's line-anchor table below describes the PRE-split README and is
+> retained for history; re-derive anchors in the new files with
+> `grep -n '^#' docs/optimizations.md docs/roadmap.md README.md`.
+
 | Home | Owns | Audience |
 |---|---|---|
-| `README.md` (~1107 lines as of 2026-07-11) | THE manifest of the fork: what changed vs upstream, what failed and why, what's next, how to build/run/troubleshoot. Every landed change, reverted attempt, and settled not-worth-it ends up here. | Users + future contributors |
+| `README.md` (~230 lines post-split) | Concise user manifest: quick start, build knobs, Vulkan provisioning, recommended config, performance summary with pointers, troubleshooting, architecture diagram | Users |
+| `docs/optimizations.md` | The optimization ledger: every landed change with receipts (per-subsystem Changes manifest), the runtime `XEMU_*` escape-hatch/diagnostic knob catalog, Failed/reverted experiments, settled vectors | Future contributors + agents |
+| `docs/roadmap.md` | Open candidates: ranked performance roadmap + feature/quality vectors with decision inputs and bars | Future contributors + agents |
 | `docs/dsp-jit-design.md` | The design-doc exemplar: one subsystem's architecture + phased roadmap, updated as phases land (status column). New multi-session designs get a sibling file in `docs/` shaped like it. | Whoever implements the next phase |
 | `docs/RELEASING-macos.md` | The release runbook. Its notes FORMAT section is still canon; its FLOW sections are stale (see §4). | Release operator (human or agent) |
 | `.claude/skills/` | Operational knowledge: proven methods, playbooks, this library. Skills cross-reference each other by name and never duplicate a fact that has a home above — they point at it. | Agents working on the repo |
