@@ -109,6 +109,19 @@ typedef struct TCGLabel TCGLabel;
 struct TCGLabel {
     bool present;
     bool has_value;
+#if defined(XBOX)
+    /*
+     * Region-formation join label (xemu): the frontend guarantees every
+     * branch to this label is FORWARD and the label is set exactly once.
+     * liveness_pass_1 then records the label's live-in state and may
+     * drop the TS_MEM forcing for globals provably dead on ALL edges
+     * into it — eliding dead flag/eip stores at internal diamond seams.
+     * live_in is (re)recorded per pass (tcg_malloc; one byte per
+     * global: 1 = dead into the join). Inert unless region_join is set.
+     */
+    bool region_join;
+    uint8_t *live_in;
+#endif
     uint16_t id;
     union {
         uintptr_t value;

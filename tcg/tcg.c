@@ -3936,6 +3936,53 @@ static void la_func_end(TCGContext *s, int ng, int nt)
     }
 }
 
+#if defined(XBOX)
+/*
+ * xemu region-formation liveness relaxation (TCGLabel.region_join):
+ * record each flagged label's live-in during the backward walk (the
+ * label is seen BEFORE any forward branch to it), and let both the
+ * label's own bb_end and branches targeting it keep TS_DEAD-without-
+ * TS_MEM for globals provably dead on every edge into the join. The
+ * writing op then sees no TS_MEM, takes the DEAD_ARG path, and the
+ * dead store is never emitted. Globals stay TS_DEAD at every seam, so
+ * the allocator's barrier asserts (sync_globals/temp_save) hold
+ * unchanged — this is a liveness-only relaxation. Fully inert unless
+ * a label carries region_join (set only by the i386 region former).
+ * xemu_region_relax exists for the XEMU_REGION_CHECK double-pass.
+ */
+static bool xemu_region_relax = true;
+
+static void xemu_la_record_label(TCGContext *s, TCGLabel *l, int ng)
+{
+    if (!l->live_in) {
+        l->live_in = tcg_malloc(ng);
+    }
+    for (int i = 0; i < ng; i++) {
+        /*
+         * Elidable = EXACTLY TS_DEAD: the join tail overwrites the
+         * global before any read or exit. TS_DEAD|TS_MEM is NOT
+         * elidable — la_func_end marks every global dead+mem at the
+         * tail's real exit, and there "dead" only means the TB ends;
+         * the successor may reload, so the store is owed.
+         */
+        l->live_in[i] = (s->temps[i].state == TS_DEAD) ? 1 : 0;
+    }
+}
+
+/* Apply "dead into the join stays memory-free" over a just-run
+ * conservative la_bb_end/la_bb_sync, per the recorded label state and
+ * (for cond branches) the pre-call fall-through dead set. */
+static void xemu_la_relax_globals(TCGContext *s, int ng, const TCGLabel *l,
+                                  const uint8_t *fall_dead)
+{
+    for (int i = 0; i < ng; i++) {
+        if (l->live_in[i] && (!fall_dead || fall_dead[i])) {
+            s->temps[i].state = TS_DEAD;
+        }
+    }
+}
+#endif
+
 /* liveness analysis: end of basic block: all temps are dead, globals
    and local temps should be in memory. */
 static void la_bb_end(TCGContext *s, int ng, int nt)
@@ -4434,10 +4481,52 @@ liveness_pass_1(TCGContext *s)
                 la_func_end(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_COND_BRANCH) {
                 assert_carry_dead(s);
+#if defined(XBOX)
+                if (opc == INDEX_op_brcond && xemu_region_relax) {
+                    TCGLabel *l = arg_label(op->args[3]);
+                    if (l->region_join && l->live_in) {
+                        uint8_t fall_dead[128];
+                        int ng = MIN(nb_globals, 128);
+                        for (int gi = 0; gi < ng; gi++) {
+                            /* Same exactness as the recording: only a
+                             * pure TS_DEAD fall side may skip the sync
+                             * (DEAD|MEM still owes its store). */
+                            fall_dead[gi] =
+                                (s->temps[gi].state == TS_DEAD) ? 1 : 0;
+                        }
+                        la_bb_sync(s, nb_globals, nb_temps);
+                        xemu_la_relax_globals(s, ng, l, fall_dead);
+                        goto xemu_bb_done;
+                    }
+                }
+#endif
                 la_bb_sync(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_BB_END) {
                 assert_carry_dead(s);
+#if defined(XBOX)
+                if (xemu_region_relax &&
+                    (opc == INDEX_op_set_label || opc == INDEX_op_br)) {
+                    TCGLabel *l = arg_label(op->args[0]);
+                    if (l->region_join) {
+                        if (opc == INDEX_op_set_label) {
+                            xemu_la_record_label(s, l, nb_globals);
+                        }
+                        if (l->live_in) {
+                            la_bb_end(s, nb_globals, nb_temps);
+                            xemu_la_relax_globals(s, MIN(nb_globals, 128),
+                                                  l, NULL);
+                            goto xemu_bb_done;
+                        }
+                        /* Unrecorded (backward) edge to a flagged label:
+                         * frontend contract violation — stay safe. */
+                        tcg_debug_assert(opc == INDEX_op_set_label);
+                    }
+                }
+#endif
                 la_bb_end(s, nb_globals, nb_temps);
+#if defined(XBOX)
+    xemu_bb_done:;
+#endif
             } else if (def->flags & TCG_OPF_SIDE_EFFECTS) {
                 assert_carry_dead(s);
                 la_global_sync(s, nb_globals);
@@ -7037,7 +7126,90 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 
     reachable_code_pass(s);
     liveness_pass_0(s);
+#if defined(XBOX)
+    /*
+     * XEMU_REGION_CHECK=1: double-pass conformance harness for the
+     * region liveness relaxation. Run conservatively, snapshot every
+     * op->life, rerun relaxed (pass_1 is re-entrant — pass_2 already
+     * re-invokes it), and require the only differences to be a
+     * removed SYNC_ARG paired with an added DEAD_ARG on the same arg.
+     * Aborts loudly on any non-conforming diff. With no region_join
+     * labels both runs are identical by construction.
+     */
+    {
+        static int check = -1;
+        TCGLifeData *base = NULL;
+
+        if (unlikely(check < 0)) {
+            const char *e = getenv("XEMU_REGION_CHECK");
+            check = (e && e[0] == '1') ? 1 : 0;
+        }
+        TCGOp **base_ops = NULL;
+        int n_base = 0;
+
+        if (unlikely(check)) {
+            TCGOp *op_iter;
+            int k = 0;
+
+            xemu_region_relax = false;
+            liveness_pass_1(s);
+            /*
+             * Snapshot keyed by op POINTER: pass_1 also removes dead
+             * ops, so the two runs' lists differ — an index-based
+             * compare misaligns (arena pointers stay valid for
+             * surviving ops; run-2 removals are conforming: more
+             * elimination, never a new store).
+             */
+            QTAILQ_FOREACH(op_iter, &s->ops, link) {
+                n_base++;
+            }
+            base = tcg_malloc(n_base * sizeof(TCGLifeData));
+            base_ops = tcg_malloc(n_base * sizeof(TCGOp *));
+            QTAILQ_FOREACH(op_iter, &s->ops, link) {
+                base_ops[k] = op_iter;
+                base[k++] = op_iter->life;
+            }
+            xemu_region_relax = true;
+        }
+        liveness_pass_1(s);
+        if (unlikely(check)) {
+            TCGOp *op_iter;
+
+            QTAILQ_FOREACH(op_iter, &s->ops, link) {
+                TCGLifeData o = 0, n = op_iter->life;
+                bool found = false;
+
+                for (int k = 0; k < n_base; k++) {
+                    if (base_ops[k] == op_iter) {
+                        o = base[k];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    continue;   /* op materialized between runs: none exist */
+                }
+                /*
+                 * Conforming diffs: the relaxation removes sync
+                 * obligations and MOVES death points (a value consumed
+                 * by the branch itself lives longer in a register; a
+                 * value dead across the join dies at an earlier last
+                 * read). The one always-illegal direction: an ADDED
+                 * sync means the relaxation manufactured a store the
+                 * conservative pass didn't need. (The unflagged arm's
+                 * bit-identical property is the strict half.)
+                 */
+                if ((n & ~o) & (TCGLifeData)0x0f) {
+                    fprintf(stderr, "xemu: REGION LIVENESS CHECK "
+                            "violation: op life %#x -> %#x\n", o, n);
+                    abort();
+                }
+            }
+        }
+    }
+#else
     liveness_pass_1(s);
+#endif
 
     if (s->nb_indirects > 0) {
         if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP_IND)

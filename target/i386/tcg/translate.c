@@ -228,6 +228,18 @@ typedef struct DisasContext {
     uint8_t xemu_sb_follows;   /* superblock: seams merged in this TB */
     uint8_t xemu_sb_tail_kind; /* sizing census: kind of the exit being emitted */
     bool xemu_sb_stub;         /* emitting an out-of-line taken-edge exit stub */
+    bool xemu_region_cand;     /* census: tail is a forward in-window jcc */
+    /* Region former (XEMU_REGION): pending intra-TB taken-edge labels,
+     * sorted ascending by target; bound at the join insn start. */
+#define XEMU_REGION_MAXPEND 8
+    struct {
+        target_ulong target;    /* linear pc where the label binds */
+        TCGLabel *label;        /* the (region_join) taken label */
+        int cc_op;              /* checkpoint at the brcond */
+        bool cc_op_dirty;
+        target_ulong pc_save;
+    } xemu_region_pend[XEMU_REGION_MAXPEND];
+    uint8_t xemu_region_npend;
 #endif
     bool cc_op_dirty;
 
@@ -380,6 +392,8 @@ static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num);
 #if defined(XBOX)
 static bool xemu_superblock_try_merge_fallthrough(DisasContext *s,
         target_long diff, TCGLabel *not_taken, TCGLabel *taken);
+static bool xemu_region_try_open(DisasContext *s, target_long diff,
+                                 TCGLabel *taken);
 #endif
 static void gen_exception_gpf(DisasContext *s);
 
@@ -2757,6 +2771,18 @@ static void gen_conditional_jump_labels(DisasContext *s, target_long diff,
                                         TCGLabel *not_taken, TCGLabel *taken)
 {
 #if defined(XBOX)
+    /* Region-former candidate census (bit packed at tb_stop; window
+     * must match XEMU_CCOP_REGION_WINDOW in accel/tcg/xemu-inv-prof.h,
+     * which this file cannot include — function-local extern idiom). */
+    s->xemu_region_cand = (diff > 0 && diff <= 64);
+    if (xemu_region_try_open(s, diff, taken)) {
+        /* Both edges stay inline: the fallthrough continues here and
+         * the taken label binds at the join. */
+        if (not_taken) {
+            gen_set_label(not_taken);
+        }
+        return;
+    }
     if (xemu_superblock_try_merge_fallthrough(s, diff, not_taken, taken)) {
         return;
     }
@@ -3226,6 +3252,9 @@ static uint64_t xemu_sb_tail_taken[XEMU_SB_TAIL_NKINDS];
 static uint64_t xemu_sb_m1_capturable;
 static uint64_t xemu_sb_merged_seams;
 static uint64_t xemu_sb_merged_fallthroughs;
+static uint64_t xemu_region_internalized;
+static uint64_t xemu_region_demoted_misalign;
+static uint64_t xemu_region_demoted_drain;
 
 static void xemu_sb_dump(void)
 {
@@ -3236,7 +3265,8 @@ static void xemu_sb_dump(void)
     for (int i = 0; i < XEMU_SB_TAIL_NKINDS; i++) {
         tot += xemu_sb_tail_taken[i];
     }
-    if (!tot && !xemu_sb_merged_seams) {
+    if (!tot && !xemu_sb_merged_seams && !xemu_region_internalized &&
+        !xemu_region_demoted_misalign && !xemu_region_demoted_drain) {
         return;
     }
     fprintf(stderr, "xemu: superblock taken goto_tb exits=%llu:",
@@ -3253,6 +3283,11 @@ static void xemu_sb_dump(void)
             tot ? 100.0 * xemu_sb_m1_capturable / tot : 0.0,
             (unsigned long long)xemu_sb_merged_seams,
             (unsigned long long)xemu_sb_merged_fallthroughs);
+    fprintf(stderr, "xemu: region internalized=%llu demoted: "
+            "misalign=%llu drain=%llu (translate-time)\n",
+            (unsigned long long)xemu_region_internalized,
+            (unsigned long long)xemu_region_demoted_misalign,
+            (unsigned long long)xemu_region_demoted_drain);
 }
 
 static void xemu_sb_arm_dump(void)
@@ -3354,6 +3389,165 @@ static bool xemu_superblock_try_merge(DisasContext *s, MemOp ot, int diff)
  * no special handling: gen_jmp_rel's !cc_op_dirty invariant means flags
  * were already synced before the condition, on both runtime paths.
  */
+/*
+ * Region/diamond former (XEMU_REGION=N, default 0 = off): for a FORWARD
+ * in-window conditional, do not exit on either edge — leave the already-
+ * emitted brcond targeting `taken` as a pending intra-TB label, keep
+ * translating the fallthrough arm, and bind the label when linear decode
+ * reaches the target (the join). Neither edge exits, so the recorded-
+ * label liveness relaxation (tcg.c, TCGLabel.region_join) can elide the
+ * dead flag materializations the CCOP census sized. gen_jcc already
+ * materialized cc_op before the brcond, so both edges carry the
+ * checkpoint state; at the join, a changed arm reconciles via the
+ * do_gen_rep label-merge idiom (materialize + CC_OP_DYNAMIC), and a
+ * pc_save mismatch uses the translator's -1 resync sentinel. Arms that
+ * end the block (is_jmp), overrun the budget, or misalign with the
+ * decode stream DEMOTE: the pending label becomes an out-of-line exit
+ * stub (the M2 shape) with the checkpointed state restored around it.
+ */
+static int xemu_region_max(void)
+{
+    static int cap = -1;
+    if (cap < 0) {
+        const char *e = getenv("XEMU_REGION");
+        cap = e ? atoi(e) : 0;
+        cap = MAX(0, MIN(cap, XEMU_REGION_MAXPEND));
+        if (cap > 0) {
+            xemu_sb_arm_dump();
+        }
+    }
+    return cap;
+}
+
+static bool xemu_region_try_open(DisasContext *s, target_long diff,
+                                 TCGLabel *taken)
+{
+    target_ulong new_pc = s->pc + diff;
+
+    if (likely(xemu_region_max() == 0) ||
+        s->xemu_region_npend >= xemu_region_max()) {
+        return false;
+    }
+    if (!s->jmp_opt || (tb_cflags(s->base.tb) & CF_USE_ICOUNT)) {
+        return false;
+    }
+    if (!CODE64(s) && s->dflag == MO_16) {
+        return false;
+    }
+    /* Forward, in-window, same page as pc_first (translator_ld and
+     * CF_PCREL unwind both require staying on P0). Window 16 bytes:
+     * the first A/B at 64 B measured 72% of opens drain-demoting into
+     * the known-negative stub shape (arms long enough to contain
+     * block-enders) at −1.34 fps 3/3; a 2-5 insn arm rarely does.
+     * Pre-registered: this is the single mechanism-driven iteration —
+     * if Gate A still fails, the campaign stops. */
+    if (diff <= 0 || diff > 16 ||
+        !translator_is_same_page(&s->base, new_pc)) {
+        return false;
+    }
+
+    taken->region_join = true;
+    {
+        int i = s->xemu_region_npend++;
+        while (i > 0 && s->xemu_region_pend[i - 1].target > new_pc) {
+            s->xemu_region_pend[i] = s->xemu_region_pend[i - 1];
+            i--;
+        }
+        s->xemu_region_pend[i] = (typeof(s->xemu_region_pend[0])){
+            .target = new_pc, .label = taken,
+            .cc_op = s->cc_op, .cc_op_dirty = s->cc_op_dirty,
+            .pc_save = s->pc_save,
+        };
+    }
+    /* Translation continues at the fallthrough; is_jmp stays NEXT. */
+    return true;
+}
+
+static void xemu_region_pop_front(DisasContext *s)
+{
+    for (int i = 1; i < s->xemu_region_npend; i++) {
+        s->xemu_region_pend[i - 1] = s->xemu_region_pend[i];
+    }
+    s->xemu_region_npend--;
+}
+
+/* Demote the front pending label to an out-of-line exit stub (the M2
+ * shape) with the checkpointed translator state restored around it. */
+static void xemu_region_demote_front(DisasContext *s, bool misalign)
+{
+    typeof(s->xemu_region_pend[0]) *p = &s->xemu_region_pend[0];
+    TCGLabel *cont = gen_new_label();
+    int save_op = s->cc_op;
+    bool save_dirty = s->cc_op_dirty;
+    target_ulong save_ps = s->pc_save;
+    DisasJumpType save_jmp = s->base.is_jmp;
+
+    tcg_gen_br(cont);
+    gen_set_label(p->label);
+    s->cc_op = p->cc_op;
+    s->cc_op_dirty = p->cc_op_dirty;
+    s->pc_save = p->pc_save;
+    s->xemu_sb_stub = true;
+    s->xemu_sb_tail_kind = XEMU_SB_TAIL_JCC_TAKEN;
+    gen_update_cc_op(s);
+    gen_jmp_rel(s, s->dflag, p->target - s->pc, 0);
+    s->xemu_sb_stub = false;
+    s->cc_op = save_op;
+    s->cc_op_dirty = save_dirty;
+    s->pc_save = save_ps;
+    s->base.is_jmp = save_jmp;
+    gen_set_label(cont);
+
+    if (misalign) {
+        xemu_region_demoted_misalign++;
+    } else {
+        xemu_region_demoted_drain++;
+    }
+    xemu_region_pop_front(s);
+}
+
+/* Bind every pending label whose target is the insn about to decode;
+ * demote any stepped-over target. Called from i386_tr_insn_start. */
+static void xemu_region_insn_start(DisasContext *s)
+{
+    while (s->xemu_region_npend &&
+           s->xemu_region_pend[0].target < s->base.pc_next) {
+        xemu_region_demote_front(s, true);
+    }
+    while (s->xemu_region_npend &&
+           s->xemu_region_pend[0].target == s->base.pc_next) {
+        typeof(s->xemu_region_pend[0]) *p = &s->xemu_region_pend[0];
+        bool cc_differs = (s->cc_op != p->cc_op ||
+                           s->cc_op_dirty != p->cc_op_dirty);
+
+        if (cc_differs) {
+            /* Fall-edge materialization (pruned by liveness when the
+             * join proves it dead); taken edge carries the checkpoint
+             * gen_jcc already materialized. */
+            gen_update_cc_op(s);
+        }
+        gen_set_label(p->label);
+        if (cc_differs) {
+            /* Label-merge idiom (do_gen_rep): flags now live in env. */
+            set_cc_op(s, CC_OP_DYNAMIC);
+        }
+        if (s->pc_save != p->pc_save) {
+            s->pc_save = -1;
+        }
+        xemu_region_internalized++;
+        xemu_region_pop_front(s);
+    }
+}
+
+/* Drain (demote) every still-pending label; called before any
+ * TB-terminating emission. */
+static void xemu_region_drain(DisasContext *s)
+{
+    while (s->xemu_region_npend) {
+        xemu_region_demote_front(s, false);
+    }
+}
+
 static bool xemu_superblock_try_merge_fallthrough(DisasContext *s,
         target_long diff, TCGLabel *not_taken, TCGLabel *taken)
 {
@@ -5096,6 +5290,8 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->xemu_sb_follows = 0;
     dc->xemu_sb_tail_kind = XEMU_SB_TAIL_OTHER;
     dc->xemu_sb_stub = false;
+    dc->xemu_region_cand = false;
+    dc->xemu_region_npend = 0;
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
@@ -5127,6 +5323,14 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
     dc->prev_insn_start = dc->base.insn_start;
     dc->prev_insn_end = tcg_last_op();
+#if defined(XBOX)
+    /* Bind/demote pending region joins BEFORE this insn's insn_start
+     * marker (label + reconcile code belongs to the seam, not the
+     * joined instruction). */
+    if (unlikely(dc->xemu_region_npend)) {
+        xemu_region_insn_start(dc);
+    }
+#endif
     if (tb_cflags(dcbase->tb) & CF_PCREL) {
         pc_arg &= ~TARGET_PAGE_MASK;
     }
@@ -5198,6 +5402,14 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
+#if defined(XBOX)
+    /* Any region join the decode stream never reached (arm ended the
+     * block, budget, page end) demotes to an exit stub before the TB's
+     * terminal emission. */
+    if (unlikely(dc->xemu_region_npend)) {
+        xemu_region_drain(dc);
+    }
+#endif
     gen_flush_fp(dc);
 
     switch (dc->base.is_jmp) {
@@ -5246,7 +5458,8 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
          * there: tail 0=DYN 1=EFLAGS 2=LAZY, head at shift 2. */
         uint8_t tail = (dc->cc_op == CC_OP_DYNAMIC) ? 0
                      : (dc->cc_op == CC_OP_EFLAGS)  ? 1 : 2;
-        dc->base.tb->xemu_ccop = tail | (dc->xemu_cc_head << 2);
+        dc->base.tb->xemu_ccop = tail | (dc->xemu_cc_head << 2)
+                               | (dc->xemu_region_cand ? 0x10 : 0);
         if (unlikely(xemu_ccop_census_on())) {
             xemu_ccop_tb_tail[tail]++;
             xemu_ccop_tb_head[dc->xemu_cc_head]++;
