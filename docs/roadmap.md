@@ -7,16 +7,20 @@ must clear. Landed and settled work lives in the
 [optimization ledger](optimizations.md); nothing here is planned work
 until it graduates into a design doc or a landing.
 
-State when last re-ranked (2026-07-18, v0.11.2+PGO shape): F8 heavy
-anchor 37.2-37.6 fps @ ~740 draws/flip windowed (M2 Ultra), F5 ~59, F6
-at the 60 vblank cap. The scene is CPU-bound on the guest vCPU thread:
-guest-TCG generated code is 55.3% of vCPU samples (top TB 3.2% — no hot
-loops), notdirty traps ~90 k/s ≈ 2% of the thread, locks architectural,
-tb cache unpressured (`tb_flush` = 1/run). The 60 fps goal on F8 needs
-~+60%; there is no quantization wall below the cap (fps rises
-continuously with vCPU throughput until the fixed 60 Hz vblank IRQ
-gates it). Re-profile (`XEMU_GUEST_PROF`, `XEMU_INV_PROF`,
-`XEMU_TB_PROF`) before re-ranking after any landing.
+State when last re-ranked (2026-07-19, arm-(b)-on shape): F8 heavy
+anchor ~36-39 fps @ ~831 draws/flip windowed (M2 Ultra, local no-PGO
+build) — the sub-page store-skip promotion moved the scene equilibrium
+from ~740 draws/flip, so compare draws/s throughput (~30-31.6k, up
+from ~28.3k) across that boundary, not raw fps. F5 ~59, F6 at the 60
+vblank cap. The scene is CPU-bound on the guest vCPU thread: guest-TCG
+generated code ~55% of vCPU samples (top TB 3.2% — no hot loops),
+locks architectural, tb cache unpressured (`tb_flush` = 1/run). The
+old "notdirty traps ~90 k/s ≈ 2%" line was a ~20x-undercounting proxy
+(archaeology 6.9): the store slow path saw ~2M eligible stores/s,
+now completed inline by default. The 60 fps goal on F8 needs ~+60%;
+there is no quantization wall below the cap. Re-profile
+(`XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF`) before re-ranking
+after any landing.
 
 ## The ranked performance roadmap
 
