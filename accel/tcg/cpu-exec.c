@@ -873,6 +873,37 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
     return tb->tc.ptr;
 }
 
+#if defined(XBOX)
+/*
+ * The ret-memo fill path needs the TranslationBlock itself, not just
+ * tc.ptr: exporting the lookup lets it memoize directly instead of
+ * paying the tcg_tb_lookup() tc.ptr->tb g_tree reversal per fill.
+ * Logging is the caller's concern (the ret helper falls back to
+ * helper_lookup_tb_ptr whenever exec logging is on).
+ */
+TranslationBlock *xemu_lookup_tb(CPUState *cpu)
+{
+    cpu->neg.can_do_io = true;
+
+    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+    s.cflags = curr_cflags(cpu);
+
+    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
+        cpu_loop_exit(cpu);
+    }
+
+    if (unlikely(xemu_guestprof_on())) {
+        int k = xemu_gp_kind_for_ra(
+            (uintptr_t)__builtin_return_address(0));
+        xemu_gp_kind_lookups[k]++;
+        xemu_gp_cur_kind = k;
+    }
+    TranslationBlock *tb = tb_lookup(cpu, s);
+    xemu_gp_cur_kind = XEMU_GP_KIND_OTHER;
+    return tb;
+}
+#endif
+
 
 /* Return the current PC from CPU, which may be cached in TB. */
 static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
@@ -1510,6 +1541,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              * for the second page can change.
              */
             if (tb_page_addr1(tb) != -1) {
+#if defined(XBOX)
+                if (unlikely(xemu_inv_prof_on())) {
+                    xemu_inv_span_nochain++;
+                }
+#endif
                 last_tb = NULL;
             }
 #endif

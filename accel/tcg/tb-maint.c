@@ -79,6 +79,8 @@ uint64_t xemu_inv_recycle_hits;
 uint64_t xemu_inv_recycle_true_smc;
 uint64_t xemu_inv_recycle_cold;
 
+uint64_t xemu_inv_span_nochain;
+
 uint64_t xemu_inv_flcr_emitted;
 uint64_t xemu_inv_flcr_skip;
 uint64_t xemu_inv_gototb_emitted;
@@ -184,6 +186,12 @@ static void xemu_inv_prof_dump(void)
             exits ? 100.0 * xemu_inv_jcprobe_emitted / exits : 0.0,
             (unsigned long long)xemu_inv_retmemo_emitted,
             exits ? 100.0 * xemu_inv_retmemo_emitted / exits : 0.0);
+
+    /* Sizes the "page-spanning targets decline to chain" xpage coverage
+     * gap: runtime count of chain refusals at the spanning-dest guard. */
+    fprintf(stderr,
+            "xemu:  (d') spanning-dest chain declines=%llu\n",
+            (unsigned long long)xemu_inv_span_nochain);
 
     if (xemu_subpage_dirty_on() || xemu_subpage_refute_on()) {
         fprintf(stderr,
@@ -1891,7 +1899,9 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
         struct page_collection *pages;
 
 #if defined(XBOX)
-        if (unlikely(xemu_subpage_track_on())) {
+        /* Default-on since 2026-07-11 — no unlikely() hint (a stale one
+         * statically mispredicted this ~26k/s trap path). */
+        if (xemu_subpage_track_on()) {
             bool filter_noncode = !xemu_subpage_code_overlaps(p, start, len);
 
             if (unlikely(xemu_subpage_refute_on())) {

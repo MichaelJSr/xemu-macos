@@ -34,6 +34,10 @@
  * breakpoint semantics exact.
  */
 
+/* Exported by accel/tcg/cpu-exec.c (function-local extern idiom: the
+ * defining header is private to the accel/tcg source dir). */
+extern TranslationBlock *xemu_lookup_tb(CPUState *cpu);
+
 static bool xemu_ras_on(void)
 {
     static int on = -1;
@@ -102,20 +106,26 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
                 }
             }
         }
-        /* Miss, stale, or cold: full lookup, then memoize. */
-        const void *ptr = helper_lookup_tb_ptr(env);
-        if (ptr != tcg_code_gen_epilogue) {
-            TranslationBlock *tb = tcg_tb_lookup((uintptr_t)ptr);
-            if (tb && tb_cflags(tb) == cpu->tcg_cflags) {
-                e->eip = eip;
-                e->flags = tb->flags;
-                e->cs_base = (uint32_t)tb->cs_base;
-                e->cflags = tb_cflags(tb);
-                e->tb = tb;
-                xemu_ras_fills++;
-            }
+        /*
+         * Miss, stale, or cold: one full lookup via the exported
+         * xemu_lookup_tb, which returns the TB itself — the fill no
+         * longer pays the tcg_tb_lookup() tc.ptr->tb g_tree reversal.
+         * Exec logging is off inside this gate (outer likely() checks),
+         * so helper_lookup_tb_ptr's log_cpu_exec is not owed here.
+         */
+        TranslationBlock *tb = xemu_lookup_tb(cpu);
+        if (tb == NULL) {
+            return tcg_code_gen_epilogue;
         }
-        return ptr;
+        if (tb_cflags(tb) == cpu->tcg_cflags) {
+            e->eip = eip;
+            e->flags = tb->flags;
+            e->cs_base = (uint32_t)tb->cs_base;
+            e->cflags = tb_cflags(tb);
+            e->tb = tb;
+            xemu_ras_fills++;
+        }
+        return tb->tc.ptr;
     }
 
     return helper_lookup_tb_ptr(env);

@@ -1592,7 +1592,18 @@ extern bool xemu_guestprof_on(void);
 static void gen_CALL(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
+#if defined(XBOX)
+    /*
+     * Direct calls bypass the superblock merge (following a call body
+     * is inlining — different duplication/RAS tradeoffs, out of M1's
+     * scope), so this no longer routes through gen_JMP.
+     */
+    s->xemu_sb_tail_kind = XEMU_SB_TAIL_CALL;
+    gen_update_cc_op(s);
+    gen_jmp_rel(s, s->dflag, decode->immediate, 0);
+#else
     gen_JMP(s, decode);
+#endif
 }
 
 static void gen_CALL_m(DisasContext *s, X86DecodedInsn *decode)
@@ -2331,6 +2342,13 @@ static void gen_JCXZ(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_JMP(DisasContext *s, X86DecodedInsn *decode)
 {
+#if defined(XBOX)
+    if (xemu_superblock_try_merge(s, s->dflag, decode->immediate)) {
+        /* Merged: nothing emitted; translation continues at the target. */
+        return;
+    }
+    s->xemu_sb_tail_kind = XEMU_SB_TAIL_UNCOND;
+#endif
     gen_update_cc_op(s);
     gen_jmp_rel(s, s->dflag, decode->immediate, 0);
 }
