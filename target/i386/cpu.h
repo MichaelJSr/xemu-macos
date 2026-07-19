@@ -2188,8 +2188,17 @@ typedef struct CPUArchState {
      * depth call sites thrash it (fills 2.6x hits on the bench scene)
      * while the eip-keyed memo has no depth coupling.
      */
-#define XEMU_RETC_BITS 12
-#define XEMU_RETC_SIZE (1 << XEMU_RETC_BITS)
+#define XEMU_RETC_BITS 12      /* default index width */
+#define XEMU_RETC_BITS_MAX 13
+    /*
+     * The table is sized for the widest supported index so the env
+     * layout never depends on the runtime width; XEMU_RETC_BITS=N
+     * (8..MAX, latched at process start into xemu_retc_shift before
+     * any translation) selects how much of it the hash actually
+     * addresses. Entries are validated on every hit, so any width is
+     * correctness-neutral — the knob exists for cache-footprint A/Bs.
+     */
+#define XEMU_RETC_SIZE (1 << XEMU_RETC_BITS_MAX)
     /*
      * 32-byte stride so the inline probe addresses entries with a
      * single shift (tb's 8-byte alignment plus the explicit pad keep
@@ -2209,6 +2218,11 @@ typedef struct CPUArchState {
     } xemu_retc[XEMU_RETC_SIZE];
 #endif
 } CPUX86State;
+
+#if defined(XBOX)
+/* 32 - runtime xemu_retc index width; latched in xemu_ras_helper.c. */
+extern int xemu_retc_shift;
+#endif
 
 struct kvm_msrs;
 

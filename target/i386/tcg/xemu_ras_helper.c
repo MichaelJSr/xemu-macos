@@ -48,6 +48,25 @@ static bool xemu_ras_on(void)
     return on;
 }
 
+/*
+ * Index width, latched before main() so the inline probe (which bakes
+ * the shift into generated code at translate time) and this helper can
+ * never disagree within a process. Width changes are prediction-only
+ * (every hit is re-validated), so this is safe to vary per run.
+ */
+int xemu_retc_shift = 32 - XEMU_RETC_BITS;
+
+static void __attribute__((constructor)) xemu_retc_latch(void)
+{
+    const char *e = getenv("XEMU_RETC_BITS");
+    if (e && e[0]) {
+        int b = atoi(e);
+        if (b >= 8 && b <= XEMU_RETC_BITS_MAX) {
+            xemu_retc_shift = 32 - b;
+        }
+    }
+}
+
 static uint64_t xemu_ras_hits, xemu_ras_fills;
 
 static void xemu_ras_dump(void)
@@ -87,7 +106,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
         xemu_ras_maybe_register_dump();
 
         uint32_t eip = (uint32_t)env->eip;
-        uint32_t idx = (eip * 2654435761u) >> (32 - XEMU_RETC_BITS);
+        uint32_t idx = (eip * 2654435761u) >> xemu_retc_shift;
         struct XemuRetcEntry *e = &env->xemu_retc[idx];
         if (e->eip == eip) {
             TranslationBlock *tb = e->tb;

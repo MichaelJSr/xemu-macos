@@ -3119,7 +3119,7 @@ static void xemu_gen_inline_ret_memo(DisasContext *s)
 
     tcg_gen_mov_i32(eip, cpu_eip);
     tcg_gen_muli_i32(idx, eip, (int32_t)2654435761u);
-    tcg_gen_shri_i32(idx, idx, 32 - XEMU_RETC_BITS);
+    tcg_gen_shri_i32(idx, idx, xemu_retc_shift);
     tcg_gen_shli_i32(idx, idx, 5); /* 32-byte entry stride */
     tcg_gen_ext_i32_ptr(ep, idx);
     tcg_gen_add_ptr(ep, ep, tcg_env);
