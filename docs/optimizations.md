@@ -840,8 +840,19 @@ explicit env overrides win) and mirrored in `Info.plist`
 | `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` | `1` | Reduce descriptor binding overhead |
 | `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | `0` | Deferred encoding. Must stay 0: with whole-frame CBs, prefill corrupted streamed textures, enabled the AGX visibility-buffer crash, and measured slower (46.3 vs 48.5 fps) |
 | `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` | `0` | Async submits |
-| `MVK_CONFIG_FAST_MATH_ENABLED` | `1` | Metal shader fast-math |
+| `MVK_CONFIG_FAST_MATH_ENABLED` | `1` | Metal shader fast-math (ALWAYS; driver default is ON_DEMAND) |
 | `MVK_CONFIG_RESUME_LOST_DEVICE` | `1` | Ignore transient GPU errors |
+| `MVK_CONFIG_LOG_LEVEL` | `1` | Errors only; driver default is INFO |
+
+(`MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` was tried and
+reverted — measured inert on macOS 26 / M2 Ultra; see the experiments
+doc below.)
+
+Two MoltenVK optimizations that need code changes + validation before
+they could land — building the driver with `MVK_USE_METAL_PRIVATE_API`
+(unlocks `wideLines`/`logicOp`/`VK_EXT_provoking_vertex`, empirically
+confirmed) and async/prewarm pipeline creation — are recorded in
+[moltenvk-optimization-experiments.md](moltenvk-optimization-experiments.md).
 
 
 - **Sub-page arm (b): inline NOTDIRTY store-skip (default-on

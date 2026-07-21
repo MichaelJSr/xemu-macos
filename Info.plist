@@ -50,6 +50,9 @@
     <string>1</string>
     <key>MVK_CONFIG_RESUME_LOST_DEVICE</key>
     <string>1</string>
+    <!-- Errors only (driver default is INFO). -->
+    <key>MVK_CONFIG_LOG_LEVEL</key>
+    <string>1</string>
   </dict>
 </dict>
 </plist>

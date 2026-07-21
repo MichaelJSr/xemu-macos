@@ -19,7 +19,7 @@
 # packaging step, and measured no fps benefit over -O3 alone.
 set -euo pipefail
 
-MVK_PIN=096714a2954fc8e9db9daae97c426d7dd7f8a838   # main, 2026-07 (reports 1.4.2)
+MVK_PIN=98f35743467488e380317feec591f4d33d652f5f   # v1.4.2-rc1, 2026-07-19 (reports 1.4.2)
 MVK_DIR="${1:-$(dirname "$0")/../../MoltenVK}"
 MCPU="${XEMU_MVK_MCPU:-apple-m2}"
 

@@ -1782,6 +1782,16 @@ int main(int argc, char **argv)
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
     setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
+    /* Errors only; trims the driver's default INFO logging off the hot path. */
+    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+    /*
+     * NB: MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION was tried and
+     * reverted — measured inert on macOS 26 / M2 Ultra (the compile-task
+     * ceiling is already 24 by default and pipeline creation is serial, so
+     * nothing issues concurrent compiles). Reintroduce it only alongside a
+     * concurrent-compile producer (prewarm). See
+     * docs/moltenvk-optimization-experiments.md.
+     */
 #endif
 
 #ifdef _WIN32
