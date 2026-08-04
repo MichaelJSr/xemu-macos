@@ -48,7 +48,11 @@ static void x86_cpu_exec_exit(CPUState *cs)
     env->eflags = cpu_compute_eflags(env);
 }
 
+#if defined(XBOX)
+TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs)
+#else
 static TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs)
+#endif
 {
     CPUX86State *env = cpu_env(cs);
     uint32_t flags, cs_base;
@@ -189,6 +193,17 @@ const TCGCPUOps x86_tcg_ops = {
     .need_replay_interrupt = x86_need_replay_interrupt,
 #endif /* !CONFIG_USER_ONLY */
 };
+
+#if defined(XBOX)
+/*
+ * The hot TB-lookup sites call x86_get_tb_cpu_state() directly instead of
+ * through this slot (single-target fork). Keep the slot's type wired to the
+ * function here; tcg_exec_realizefn() asserts the slot still points at it.
+ */
+QEMU_BUILD_BUG_ON(!__builtin_types_compatible_p(
+                      __typeof__(x86_tcg_ops.get_tb_cpu_state),
+                      __typeof__(&x86_get_tb_cpu_state)));
+#endif
 
 static void x86_tcg_cpu_xsave_init(void)
 {

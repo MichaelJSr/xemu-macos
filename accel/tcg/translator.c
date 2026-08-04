@@ -22,6 +22,48 @@
 #include "disas/disas.h"
 #include "tb-internal.h"
 #include "xemu-xpage.h"
+#if defined(XBOX)
+#include "exec/icount.h"
+#ifndef CONFIG_USER_ONLY
+#include "exec/replay-core.h"
+#endif
+
+/*
+ * XEMU_ELIDE_CANDOIO (default 1): do not emit the per-TB can_do_io
+ * bookkeeping stores. The flag is only ever read by icount
+ * (tcg-accel-ops-icount.c, icount-common.c), by replay debugging
+ * (watchpoint.c), and by io_prepare()'s cpu_io_recompile() trigger,
+ * which exists to re-run a mid-TB MMIO access under CF_MEMI_ONLY for
+ * icount/replay determinism. With icount and replay both off nothing
+ * observes it, the flag stays true, and the guest's device-register
+ * traffic stops paying the recompile round trip.
+ *
+ * Latched on the first translation, which is before the first TB runs;
+ * icount and replay are both fixed at machine init, so a cached TB can
+ * never outlive the answer. XEMU_ELIDE_CANDOIO=0 restores the stores.
+ */
+static bool xemu_elide_can_do_io(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        int m = 1;
+        const char *e = getenv("XEMU_ELIDE_CANDOIO");
+        if (e) {
+            m = (e[0] == '1') ? 1 : 0;
+        }
+        if (icount_enabled()) {
+            m = 0;
+        }
+#ifndef CONFIG_USER_ONLY
+        if (replay_mode != REPLAY_MODE_NONE) {
+            m = 0;
+        }
+#endif
+        on = m;
+    }
+    return on;
+}
+#endif
 
 static void set_can_do_io(DisasContextBase *db, bool val)
 {
@@ -232,11 +274,21 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
         tcg_debug_assert(first_insn_start == db->insn_start);
     } else {
         tcg_debug_assert(first_insn_start != db->insn_start);
-        tcg_ctx->emit_before_op = first_insn_start;
-        set_can_do_io(db, false);
+#if defined(XBOX)
+        if (!xemu_elide_can_do_io())
+#endif
+        {
+            tcg_ctx->emit_before_op = first_insn_start;
+            set_can_do_io(db, false);
+        }
     }
-    tcg_ctx->emit_before_op = db->insn_start;
-    set_can_do_io(db, true);
+#if defined(XBOX)
+    if (!xemu_elide_can_do_io())
+#endif
+    {
+        tcg_ctx->emit_before_op = db->insn_start;
+        set_can_do_io(db, true);
+    }
     tcg_ctx->emit_before_op = NULL;
 
     /* May be used by disas_log or plugin callbacks. */

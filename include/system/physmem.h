@@ -18,6 +18,19 @@ bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client);
 
 bool physical_memory_is_clean(ram_addr_t addr);
 
+#if defined(XBOX)
+/*
+ * XEMU_DIRTY_FAST (default 1): read a page's dirty bits once, under a single
+ * RCU guard, instead of once per client. XEMU_DIRTY_FAST=0 restores the
+ * per-client scans in physical_memory_is_clean() and the bitmap re-read in
+ * notdirty_write()'s tail.
+ */
+bool xemu_dirty_fast_on(void);
+
+/* Dirty bits of the page holding @addr, as a DIRTY_CLIENTS_ALL-shaped mask. */
+uint8_t physical_memory_page_dirty_bits(ram_addr_t addr);
+#endif
+
 uint8_t physical_memory_range_includes_clean(ram_addr_t start,
                                              ram_addr_t length,
                                              uint8_t mask);

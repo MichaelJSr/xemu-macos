@@ -3025,6 +3025,17 @@ static inline bool ctl_has_irq(CPUX86State *env)
 # define TARGET_VSYSCALL_PAGE  (UINT64_C(-10) << 20)
 #endif
 
+#if defined(XBOX) && defined(CONFIG_TCG)
+#include "accel/tcg/tb-cpu-state.h"
+
+/*
+ * Single-target fork: the hot TB-lookup sites call this directly instead of
+ * paying the TCGCPUOps vtable indirection (target/i386/tcg/tcg-cpu.c defines
+ * it and still installs it in the ops table).
+ */
+TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs);
+#endif
+
 /* majority(NOT a, b, c) = (a ^ b) ? b : c */
 #define MAJ_INV1(a, b, c)  ((((a) ^ (b)) & ((b) ^ (c))) ^ (c))
 

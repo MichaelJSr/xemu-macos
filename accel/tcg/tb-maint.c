@@ -82,6 +82,17 @@ uint64_t xemu_inv_recycle_cold;
 
 uint64_t xemu_inv_span_nochain;
 
+/*
+ * (f) MMIO recompile census, counted in cputlb.c's io_prepare. Sizes the
+ * XEMU_ELIDE_CANDOIO gate: the recompiles are exactly what the elision
+ * removes, so the rate has to be read from a XEMU_ELIDE_CANDOIO=0 run.
+ */
+uint64_t xemu_io_prepare_calls;
+uint64_t xemu_io_recompiles;
+
+/* Wall clock at the moment the dump was armed, for per-second rates. */
+static int64_t xemu_inv_prof_t0_us;
+
 uint64_t xemu_inv_flcr_emitted;
 uint64_t xemu_inv_flcr_skip;
 uint64_t xemu_inv_gototb_emitted;
@@ -194,6 +205,19 @@ static void xemu_inv_prof_dump(void)
             "xemu:  (d') spanning-dest chain declines=%llu\n",
             (unsigned long long)xemu_inv_span_nochain);
 
+    {
+        double secs = xemu_inv_prof_t0_us ?
+            (g_get_monotonic_time() - xemu_inv_prof_t0_us) / 1.0e6 : 0.0;
+        fprintf(stderr,
+                "xemu:  (f) io_prepare=%llu  cpu_io_recompile=%llu (%.1f%% of "
+                "io_prepare)  window=%.1fs => %.1fk recompiles/s\n",
+                (unsigned long long)xemu_io_prepare_calls,
+                (unsigned long long)xemu_io_recompiles,
+                xemu_io_prepare_calls ?
+                    100.0 * xemu_io_recompiles / xemu_io_prepare_calls : 0.0,
+                secs, secs > 0.0 ? xemu_io_recompiles / secs / 1000.0 : 0.0);
+    }
+
     if (xemu_subpage_dirty_on() || xemu_subpage_refute_on()) {
         fprintf(stderr,
                 "xemu:  (e) SUBPAGE dirty=%d refute=%d  fast-skips=%llu"
@@ -217,6 +241,7 @@ bool xemu_inv_prof_on(void)
         on = (e && e[0] == '1') ? 1 : 0;
         if (on && !xemu_inv_dump_armed) {
             xemu_inv_dump_armed = true;
+            xemu_inv_prof_t0_us = g_get_monotonic_time();
             atexit(xemu_inv_prof_dump);
         }
     }
@@ -231,6 +256,7 @@ bool xemu_inv_timing_on(void)
         on = (e && e[0] == '1') ? 1 : 0;
         if (on && !xemu_inv_dump_armed) {
             xemu_inv_dump_armed = true;
+            xemu_inv_prof_t0_us = g_get_monotonic_time();
             atexit(xemu_inv_prof_dump);
         }
     }
@@ -1780,7 +1806,16 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
  * (@cpu, @retaddr) may be (NULL, 0) outside of a cpu context,
  * in which case precise_smc need not be detected.
  */
+#if defined(XBOX)
+/*
+ * Returns whether the page still holds code afterwards: false means it was
+ * emptied and tlb_unprotect_code() ran, i.e. DIRTY_MEMORY_CODE is now set.
+ * notdirty_write's tail consumes that instead of re-reading the bitmap.
+ */
+static bool
+#else
 static void
+#endif
 tb_invalidate_phys_page_range__locked(CPUState *cpu,
                                       struct page_collection *pages,
                                       PageDesc *p, tb_page_addr_t start,
@@ -1791,6 +1826,9 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     PageForEachNext n;
     bool current_tb_modified = false;
     TranslationBlock *current_tb = NULL;
+#if defined(XBOX)
+    bool still_code = true;
+#endif
 
     /* Range may not cross a page. */
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
@@ -1885,6 +1923,7 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
          */
         p->code_blocks = 0;
         xemu_sf_sync_page(start, 0);
+        still_code = false;
 #endif
         tlb_unprotect_code(start);
     }
@@ -1895,6 +1934,9 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
         cpu->cflags_next_tb = 1 | CF_NOIRQ | curr_cflags(cpu);
         cpu_loop_exit_noexc(cpu);
     }
+#if defined(XBOX)
+    return still_code;
+#endif
 }
 
 /*
@@ -1941,8 +1983,24 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
  * Called via softmmu_template.h when code areas are written to with
  * iothread mutex not held.
  */
+#if defined(XBOX)
+/*
+ * XBOX shape: same work, but reports whether the page still holds code
+ * (i.e. tlb_unprotect_code() did not run and DIRTY_MEMORY_CODE stayed
+ * clear), which is exactly what notdirty_write's tail would otherwise
+ * re-read from the dirty bitmap. cputlb.c picks this up with the
+ * function-local extern idiom; the upstream void entry point below keeps
+ * tb-internal.h's contract.
+ */
+bool xemu_tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                        unsigned len, uintptr_t ra);
+
+bool xemu_tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                        unsigned len, uintptr_t ra)
+#else
 void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
                                    unsigned len, uintptr_t ra)
+#endif
 {
     PageDesc *p = page_find(start >> TARGET_PAGE_BITS);
 
@@ -1978,12 +2036,13 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
                 if (xemu_subpage_dirty_on() && filter_noncode) {
                     xemu_subpage_skips++;
                     page_collection_unlock(pages);
-                    return;
+                    return true;
                 }
-                tb_invalidate_phys_page_range__locked(cpu, pages, p,
-                                                      start, last, ra);
+                bool still_code =
+                    tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                                          start, last, ra);
                 page_collection_unlock(pages);
-                return;
+                return still_code;
             }
 
             if (filter_noncode) {
@@ -1996,16 +2055,39 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
                  * next store re-traps into this O(1) check.
                  */
                 xemu_subpage_skips++;
-                return;
+                return true;
             }
         }
 #endif
 
         pages = page_collection_lock(start, last);
+#if defined(XBOX)
+        {
+            bool still_code =
+                tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                                      start, last, ra);
+            page_collection_unlock(pages);
+            return still_code;
+        }
+#else
         tb_invalidate_phys_page_range__locked(cpu, pages, p,
                                               start, last, ra);
         page_collection_unlock(pages);
+#endif
     }
+#if defined(XBOX)
+    /* No PageDesc: nothing to invalidate, so the page's CODE bit is
+     * untouched and the caller's tail must not clear TLB_NOTDIRTY. */
+    return true;
+#endif
 }
+
+#if defined(XBOX)
+void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                   unsigned len, uintptr_t ra)
+{
+    xemu_tb_invalidate_phys_range_fast(cpu, start, len, ra);
+}
+#endif
 
 #endif /* CONFIG_USER_ONLY */

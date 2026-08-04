@@ -55,6 +55,19 @@
 #include "tcg/tcg-ldst.h"
 #include "backend-ldst.h"
 
+#if defined(XBOX)
+/*
+ * Defined in accel/tcg/tb-maint.c (function-local extern idiom, as for
+ * xemu_lookup_tb): xemu_io_prepare_calls / xemu_io_recompiles are the
+ * XEMU_INV_PROF census that sizes XEMU_ELIDE_CANDOIO, and
+ * xemu_tb_invalidate_phys_range_fast is tb_invalidate_phys_range_fast plus
+ * a "page still holds code" answer.
+ */
+extern uint64_t xemu_io_prepare_calls;
+extern uint64_t xemu_io_recompiles;
+bool xemu_tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                        unsigned len, uintptr_t ra);
+#endif
 
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
 /* #define DEBUG_TLB */
@@ -1312,7 +1325,17 @@ io_prepare(hwaddr *out_offset, CPUState *cpu, hwaddr xlat,
     section = iotlb_to_section(cpu, xlat, attrs);
     mr_offset = (xlat & TARGET_PAGE_MASK) + addr;
     cpu->mem_io_pc = retaddr;
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_io_prepare_calls++;
+    }
+#endif
     if (!cpu->neg.can_do_io) {
+#if defined(XBOX)
+        if (unlikely(xemu_inv_prof_on())) {
+            xemu_io_recompiles++;
+        }
+#endif
         cpu_io_recompile(cpu, retaddr);
     }
 
@@ -1375,19 +1398,54 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     uint64_t xemu_t0 = xemu_time ? xemu_inv_ticks() : 0;
     uint64_t xemu_ti = 0;
     bool xemu_did_inval = false;
+    bool xemu_fast = xemu_dirty_fast_on();
+    bool code_dirty;
 #endif
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
-    if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
 #if defined(XBOX)
+    /*
+     * DIRTY_MEMORY_CODE clear means "this page holds code". The invalidation
+     * reports whether it still does afterwards, so the CODE answer is known
+     * locally on every call: the NOCODE set_dirty_range below sets the other
+     * four clients by construction, which makes physical_memory_is_clean()
+     * exactly !code_dirty.
+     */
+    code_dirty = xemu_fast
+        ? (physical_memory_page_dirty_bits(ram_addr) &
+           (1 << DIRTY_MEMORY_CODE)) != 0
+        : physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE);
+
+    if (!code_dirty) {
+        bool still_code;
+
         if (xemu_time) {
             uint64_t a = xemu_inv_ticks();
-            tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
+            still_code = xemu_tb_invalidate_phys_range_fast(cpu, ram_addr,
+                                                            size, retaddr);
             xemu_ti = xemu_inv_ticks() - a;
             xemu_did_inval = true;
-        } else
-#endif
+        } else {
+            still_code = xemu_tb_invalidate_phys_range_fast(cpu, ram_addr,
+                                                            size, retaddr);
+        }
+        code_dirty = !still_code;
+    }
+
+    /*
+     * Set both VGA and migration bits for simplicity and to remove
+     * the notdirty callback faster.
+     */
+    physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
+
+    /* We remove the notdirty callback only if the code has been flushed. */
+    if (xemu_fast ? code_dirty : !physical_memory_is_clean(ram_addr)) {
+        trace_memory_notdirty_set_dirty(mem_vaddr);
+        tlb_set_dirty(cpu, mem_vaddr);
+    }
+#else
+    if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
     }
 
@@ -1402,6 +1460,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
         trace_memory_notdirty_set_dirty(mem_vaddr);
         tlb_set_dirty(cpu, mem_vaddr);
     }
+#endif
 
 #if defined(XBOX)
     if (xemu_time) {

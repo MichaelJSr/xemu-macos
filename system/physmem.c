@@ -1055,8 +1055,61 @@ bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client)
     return physical_memory_get_dirty(addr, 1, client);
 }
 
+#if defined(XBOX)
+bool xemu_dirty_fast_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        int m = 1;
+        const char *e = getenv("XEMU_DIRTY_FAST");
+        if (e) {
+            m = (e[0] == '1') ? 1 : 0;
+        }
+        on = m;
+    }
+    return on;
+}
+
+/*
+ * All five clients' bits for the single page holding @addr, under one RCU
+ * read guard and one page/idx/offset computation — the shape the five
+ * physical_memory_get_dirty_flag() calls of physical_memory_is_clean()
+ * would otherwise pay five times over, each with its own guard and its own
+ * find_next_bit() loop over a one-bit range.
+ *
+ * A single page never straddles two dirty blocks, so the per-client walk of
+ * physical_memory_get_dirty() collapses to a test_bit(). Reads are plain, as
+ * they are in the loop this replaces; writers use set_bit_atomic().
+ */
+uint8_t physical_memory_page_dirty_bits(ram_addr_t addr)
+{
+    unsigned long page = addr >> TARGET_PAGE_BITS;
+    unsigned long idx = page / DIRTY_MEMORY_BLOCK_SIZE;
+    unsigned long offset = page % DIRTY_MEMORY_BLOCK_SIZE;
+    uint8_t bits = 0;
+    int i;
+
+    RCU_READ_LOCK_GUARD();
+
+    for (i = 0; i < DIRTY_MEMORY_NUM; i++) {
+        DirtyMemoryBlocks *blocks = qatomic_rcu_read(&ram_list.dirty_memory[i]);
+
+        if (test_bit(offset, blocks->blocks[idx])) {
+            bits |= 1 << i;
+        }
+    }
+
+    return bits;
+}
+#endif
+
 bool physical_memory_is_clean(ram_addr_t addr)
 {
+#if defined(XBOX)
+    if (xemu_dirty_fast_on()) {
+        return physical_memory_page_dirty_bits(addr) != DIRTY_CLIENTS_ALL;
+    }
+#endif
     bool nv2a = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_NV2A);
     bool nv2a_tex = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_NV2A_TEX);
     bool vga = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_VGA);

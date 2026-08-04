@@ -52,6 +52,20 @@
 #include "xemu-xpage.h"
 #endif
 
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+/*
+ * Defined in target/i386/tcg/tcg-cpu.c (function-local extern idiom: this
+ * file is built target-agnostic, so target/i386/cpu.h is out of reach). The
+ * fork builds exactly one system target, so the hot TB-lookup sites below
+ * call the state extractor directly instead of through TCGCPUOps; the
+ * identity of the vtable slot is asserted in tcg_exec_realizefn().
+ */
+TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs);
+#define xemu_get_tb_cpu_state(cpu) x86_get_tb_cpu_state(cpu)
+#else
+#define xemu_get_tb_cpu_state(cpu) ((cpu)->cc->tcg_ops->get_tb_cpu_state(cpu))
+#endif
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -843,7 +857,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
      */
     cpu->neg.can_do_io = true;
 
-    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+    TCGTBCPUState s = xemu_get_tb_cpu_state(cpu);
     s.cflags = curr_cflags(cpu);
 
     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
@@ -885,7 +899,7 @@ TranslationBlock *xemu_lookup_tb(CPUState *cpu)
 {
     cpu->neg.can_do_io = true;
 
-    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+    TCGTBCPUState s = xemu_get_tb_cpu_state(cpu);
     s.cflags = curr_cflags(cpu);
 
     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
@@ -1498,7 +1512,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
         while (!cpu_handle_interrupt(cpu, &last_tb)) {
             TranslationBlock *tb;
-            TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+            TCGTBCPUState s = xemu_get_tb_cpu_state(cpu);
             s.cflags = cpu->cflags_next_tb;
 
             /*
@@ -1625,7 +1639,12 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
         assert(tcg_ops->pointer_wrap);
 #endif /* !CONFIG_USER_ONLY */
         assert(tcg_ops->translate_code);
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+        /* The hot lookup sites bypass the slot; they must agree with it. */
+        assert(tcg_ops->get_tb_cpu_state == x86_get_tb_cpu_state);
+#else
         assert(tcg_ops->get_tb_cpu_state);
+#endif
         assert(tcg_ops->mmu_index);
         tcg_ops->initialize();
         tcg_target_initialized = true;

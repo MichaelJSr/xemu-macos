@@ -111,7 +111,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
         if (e->eip == eip) {
             TranslationBlock *tb = e->tb;
             if (tb) {
-                TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+                TCGTBCPUState s = x86_get_tb_cpu_state(cpu);
                 if (e->cs_base == (uint32_t)s.cs_base &&
                     e->flags == s.flags &&
                     tb_cflags(tb) == cpu->tcg_cflags &&
