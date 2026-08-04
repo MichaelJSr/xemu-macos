@@ -40,6 +40,11 @@ static const unsigned sf_clients[XEMU_SF_NCLIENTS] = {
 
 static void xemu_sf_dump(void)
 {
+    if (!xemu_sf_prof_on()) {
+        fprintf(stderr, "xemu: subpage-fast counters disabled "
+                        "(set XEMU_SUBPAGE_FAST_STATS=1)\n");
+        return;
+    }
     if (!xemu_sf_seen && !xemu_sf_skips && !xemu_sf_refute_total) {
         return;
     }
@@ -133,6 +138,36 @@ int xemu_subpage_fast_mode(void)
         mode = m;
     }
     return mode;
+}
+
+int xemu_sf_prof_on(void)
+{
+    static int prof = -1;
+    if (prof < 0) {
+        /*
+         * Off by default: the six counter read-modify-writes are pure
+         * diagnostics but live in a stub that completes ~2M stores/s,
+         * so production emits none of them. Latched at the same
+         * translate-time point as the mode gate above (the emitter
+         * asks before writing the first stub), so every TB is emitted
+         * against one answer.
+         */
+        int p = 0;
+        const char *e = getenv("XEMU_SUBPAGE_FAST_STATS");
+        if (e) {
+            p = (e[0] == '1') ? 1 : 0;
+        }
+        /*
+         * Refute soaks always count: the per-decision C round trip
+         * dwarfs the counters, and the seen/skip/demote histogram is
+         * how a soak reports its population.
+         */
+        if (xemu_subpage_fast_mode() == 2) {
+            p = 1;
+        }
+        prof = p;
+    }
+    return prof;
 }
 
 void xemu_sf_sync_page(hwaddr page_addr, uint64_t code_blocks)

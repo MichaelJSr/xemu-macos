@@ -1794,6 +1794,7 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
     TCGReg rp = 0, rw = 0;
     tcg_insn_unit *br_r1, *br_r4, *br_r2, *br_r3[XEMU_SF_NCLIENTS];
     int npicked = 0;
+    int prof = xemu_sf_prof_on();
 
     for (int i = 0; i < 4 && npicked < 2; i++) {
         if (pool[i] != raddr && pool[i] != rdata) {
@@ -1814,7 +1815,9 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
     br_r1 = s->code_ptr;
     tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
 
-    sf_out_counter_inc(s, TCG_REG_TMP0, rw, &xemu_sf_seen);
+    if (prof) {
+        sf_out_counter_inc(s, TCG_REG_TMP0, rw, &xemu_sf_seen);
+    }
 
     /* (2) ram page = (addend + zext(vaddr) - ram_host) >> PAGE_BITS,
      * bounds-checked against xbox.ram. */
@@ -1860,7 +1863,9 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
         tcg_out_insn(s, 3205, TBZ, TCG_REG_TMP0, 0, 0);
     }
 
-    sf_out_counter_inc(s, TCG_REG_TMP0, rp, &xemu_sf_skips);
+    if (prof) {
+        sf_out_counter_inc(s, TCG_REG_TMP0, rp, &xemu_sf_skips);
+    }
 
     if (mode == 1) {
         /* Complete the store inline: same HostAddress shape as the
@@ -1884,29 +1889,42 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
         tcg_out_goto(s, lb->raddr);
     }
 
-    /* Demote landing pads: bump the reason counter, fall to the
-     * helper path that follows this function. */
-    reloc_pc19(br_r1, tcg_splitwx_to_rx(s->code_ptr));
-    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[0]);
-    br_r1 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-    reloc_pc19(br_r4, tcg_splitwx_to_rx(s->code_ptr));
-    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[3]);
-    br_r4 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-    reloc_pc14(br_r2, tcg_splitwx_to_rx(s->code_ptr));
-    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[1]);
-    br_r2 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-    for (int c = 0; c < XEMU_SF_NCLIENTS; c++) {
-        reloc_pc14(br_r3[c], tcg_splitwx_to_rx(s->code_ptr));
-    }
-    sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[2]);
+    if (prof) {
+        /* Demote landing pads: bump the reason counter, fall to the
+         * helper path that follows this function. */
+        reloc_pc19(br_r1, tcg_splitwx_to_rx(s->code_ptr));
+        sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[0]);
+        br_r1 = s->code_ptr;
+        tcg_out_insn(s, 3206, B, 0);
+        reloc_pc19(br_r4, tcg_splitwx_to_rx(s->code_ptr));
+        sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[3]);
+        br_r4 = s->code_ptr;
+        tcg_out_insn(s, 3206, B, 0);
+        reloc_pc14(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+        sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[1]);
+        br_r2 = s->code_ptr;
+        tcg_out_insn(s, 3206, B, 0);
+        for (int c = 0; c < XEMU_SF_NCLIENTS; c++) {
+            reloc_pc14(br_r3[c], tcg_splitwx_to_rx(s->code_ptr));
+        }
+        sf_out_counter_inc(s, TCG_REG_TMP0, TCG_REG_TMP2, &xemu_sf_demote[2]);
 
-    /* Helper path continues here: bind the three pad exits. */
-    reloc_pc26(br_r1, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc26(br_r4, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc26(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+        /* Helper path continues here: bind the three pad exits. */
+        reloc_pc26(br_r1, tcg_splitwx_to_rx(s->code_ptr));
+        reloc_pc26(br_r4, tcg_splitwx_to_rx(s->code_ptr));
+        reloc_pc26(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+    } else {
+        /* No counters, so no pads: every demote branch retargets
+         * straight at the helper path that follows this function.
+         * Both displacement classes stay well inside range — the
+         * whole prefilter is under 200 bytes. */
+        reloc_pc19(br_r1, tcg_splitwx_to_rx(s->code_ptr));
+        reloc_pc19(br_r4, tcg_splitwx_to_rx(s->code_ptr));
+        reloc_pc14(br_r2, tcg_splitwx_to_rx(s->code_ptr));
+        for (int c = 0; c < XEMU_SF_NCLIENTS; c++) {
+            reloc_pc14(br_r3[c], tcg_splitwx_to_rx(s->code_ptr));
+        }
+    }
 }
 #endif /* XBOX */
 

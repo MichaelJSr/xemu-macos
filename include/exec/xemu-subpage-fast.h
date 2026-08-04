@@ -36,6 +36,16 @@
 int xemu_subpage_fast_mode(void);
 
 /*
+ * Counter profiling gate, latched on first ask like the mode above.
+ * 0 = the emitter writes no counter code at all (production default);
+ * XEMU_SUBPAGE_FAST_STATS=1 turns the six counter sites back on, and
+ * mode 2 forces it. Must be answered before the first stub is emitted:
+ * the counters are baked into generated code, so a mid-run change of
+ * mind would leave TBs disagreeing.
+ */
+int xemu_sf_prof_on(void);
+
+/*
  * State read by generated code (addresses baked as literals at
  * translate time; single-vCPU — the translating thread is the storing
  * thread, so plain loads are ordered by program order).
@@ -47,7 +57,8 @@ extern uint64_t xemu_sf_ram_pages;      /* xbox.ram size in target pages */
 #define XEMU_SF_NCLIENTS 4
 extern unsigned long *xemu_sf_dirty0[XEMU_SF_NCLIENTS];
 
-/* Counters (bumped from generated code / the refute helper). */
+/* Counters (bumped from generated code only when xemu_sf_prof_on(),
+ * except the refute pair which the C validator maintains). */
 extern uint64_t xemu_sf_seen;           /* pure-NOTDIRTY stub entries */
 extern uint64_t xemu_sf_skips;          /* stores completed inline */
 #define XEMU_SF_DEMOTE_NREASONS 4
