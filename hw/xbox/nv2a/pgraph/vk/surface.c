@@ -713,13 +713,281 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
     }
 }
 
+/*
+ * xemu: CPU-access-callback churn census + optional registration reuse
+ * pool.
+ *
+ * Each register/unregister below is an async_safe_run_on_cpu *plus* an
+ * unconditional tlb_flush_all_cpus_synced (system/physmem.c), i.e. two
+ * exclusive-execution vCPU stops and a full all-mmuidx TLB flush with a
+ * jump-cache wipe per surface create/destroy. The event *rate* is the
+ * open question, so the census is the first deliverable:
+ *
+ *   XEMU_SURFACE_CB_STATS=1  count events, split by whether they came
+ *                            from update_surface_part's invalidate-then-
+ *                            create path (the zeta ping-pong) or from
+ *                            anywhere else; atexit dump. =2 also aborts
+ *                            on a coverage violation instead of only
+ *                            logging it (nv2a_vk_assert is compiled out
+ *                            in perf builds, so this check carries its
+ *                            own escalation).
+ *   XEMU_SURFACE_CB_REUSE=1  (default off) park the live handle on
+ *                            unregister and re-attach it when a surface
+ *                            with the identical (vram_addr, size)
+ *                            registers again — a ping-pong then costs
+ *                            zero flushes.
+ *
+ * Parking leaves a registration live for a range with no surface behind
+ * it. That is semantically inert: surface_access_callback re-derives its
+ * hits from r->surface_ranges and ignores the registered range, so the
+ * registered set is always a *superset* of the live surface set, never a
+ * subset (a subset would silently drop CPU-write invalidations). The
+ * pool never changes when invalidate_surface_full runs, only whether the
+ * physmem call happens. Real removes still run on overflow and at every
+ * global surface teardown — a parked entry must not outlive the
+ * PGRAPHVkState its callback dereferences.
+ *
+ * The price of a parked entry is that guest accesses to its (page-
+ * granular) range keep taking the slow path and calling back in to do
+ * nothing — which is why the pool is small, keyed exactly, and evicts
+ * oldest-first rather than growing.
+ */
+
+#define SURFACE_CB_POOL_SIZE 4
+
+static struct {
+    MemAccessCallback *cb;
+    hwaddr addr;
+    size_t len;
+    uint64_t seq;
+} surface_cb_pool[SURFACE_CB_POOL_SIZE];
+static int surface_cb_pool_count;
+static uint64_t surface_cb_pool_seq;
+
+static struct {
+    uint64_t reg;
+    uint64_t reg_part;
+    uint64_t unreg;
+    uint64_t unreg_part;
+    uint64_t part_invalidate_then_create;
+    uint64_t reuse_hit;
+    uint64_t reuse_park;
+    uint64_t reuse_evict;
+    uint64_t reuse_flush;
+    uint64_t audit_runs;
+    uint64_t audit_violations;
+} surface_cb_stats;
+
+/* PFIFO thread only, non-reentrant: update_surface_part attribution tag. */
+static int surface_cb_in_update_part;
+static int surface_cb_part_regs;
+static int surface_cb_part_unregs;
+
+static int surface_cb_stats_level(void)
+{
+    static int level = -1;
+    if (level < 0) {
+        const char *env = getenv("XEMU_SURFACE_CB_STATS");
+        level = (env && env[0] >= '1' && env[0] <= '9') ? env[0] - '0' : 0;
+    }
+    return level;
+}
+
+static bool surface_cb_stats_on(void)
+{
+    return surface_cb_stats_level() > 0;
+}
+
+static bool surface_cb_reuse_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *env = getenv("XEMU_SURFACE_CB_REUSE");
+        on = (env && env[0] == '1') ? 1 : 0;
+    }
+    return on == 1;
+}
+
+static void surface_cb_stats_dump(void)
+{
+    fprintf(stderr,
+            "xemu: surface cpu-access-callback stats\n"
+            "xemu:   register        = %" PRIu64 " (update_surface_part %"
+            PRIu64 ")\n"
+            "xemu:   unregister      = %" PRIu64 " (update_surface_part %"
+            PRIu64 ")\n"
+            "xemu:   usp invalidate-then-create = %" PRIu64 "\n"
+            "xemu:   reuse hit=%" PRIu64 " park=%" PRIu64 " evict=%" PRIu64
+            " flush=%" PRIu64 "\n"
+            "xemu:   coverage audit runs=%" PRIu64 " violations=%" PRIu64 "\n",
+            surface_cb_stats.reg, surface_cb_stats.reg_part,
+            surface_cb_stats.unreg, surface_cb_stats.unreg_part,
+            surface_cb_stats.part_invalidate_then_create,
+            surface_cb_stats.reuse_hit, surface_cb_stats.reuse_park,
+            surface_cb_stats.reuse_evict, surface_cb_stats.reuse_flush,
+            surface_cb_stats.audit_runs, surface_cb_stats.audit_violations);
+}
+
+static void surface_cb_stats_arm_dump(void)
+{
+    static bool registered;
+    if (!registered) {
+        registered = true;
+        atexit(surface_cb_stats_dump);
+    }
+}
+
+static void surface_cb_stats_note_register(bool reused)
+{
+    surface_cb_stats_arm_dump();
+    surface_cb_stats.reg++;
+    if (reused) {
+        surface_cb_stats.reuse_hit++;
+    }
+    if (surface_cb_in_update_part) {
+        surface_cb_stats.reg_part++;
+        surface_cb_part_regs++;
+    }
+}
+
+static void surface_cb_stats_note_unregister(void)
+{
+    surface_cb_stats_arm_dump();
+    surface_cb_stats.unreg++;
+    if (surface_cb_in_update_part) {
+        surface_cb_stats.unreg_part++;
+        surface_cb_part_unregs++;
+    }
+}
+
+static MemAccessCallback *surface_cb_pool_take(hwaddr addr, size_t len)
+{
+    for (int i = 0; i < surface_cb_pool_count; i++) {
+        if (surface_cb_pool[i].addr == addr && surface_cb_pool[i].len == len) {
+            MemAccessCallback *cb = surface_cb_pool[i].cb;
+            surface_cb_pool[i] = surface_cb_pool[--surface_cb_pool_count];
+            return cb;
+        }
+    }
+
+    return NULL;
+}
+
+static void surface_cb_pool_park(MemAccessCallback *cb, hwaddr addr,
+                                 size_t len)
+{
+    if (surface_cb_pool_count == SURFACE_CB_POOL_SIZE) {
+        int oldest = 0;
+        for (int i = 1; i < surface_cb_pool_count; i++) {
+            if (surface_cb_pool[i].seq < surface_cb_pool[oldest].seq) {
+                oldest = i;
+            }
+        }
+        mem_access_callback_remove_by_ref(qemu_get_cpu(0),
+                                          surface_cb_pool[oldest].cb);
+        surface_cb_pool[oldest] = surface_cb_pool[--surface_cb_pool_count];
+        surface_cb_stats.reuse_evict++;
+    }
+
+    surface_cb_pool[surface_cb_pool_count].cb = cb;
+    surface_cb_pool[surface_cb_pool_count].addr = addr;
+    surface_cb_pool[surface_cb_pool_count].len = len;
+    surface_cb_pool[surface_cb_pool_count].seq = ++surface_cb_pool_seq;
+    surface_cb_pool_count++;
+    surface_cb_stats.reuse_park++;
+}
+
+/*
+ * Real removes for every parked entry. Must run wherever the surface set
+ * is globally torn down, so a parked registration can never survive the
+ * renderer state its callback reads.
+ */
+static void surface_cb_pool_flush(void)
+{
+    while (surface_cb_pool_count > 0) {
+        surface_cb_pool_count--;
+        mem_access_callback_remove_by_ref(
+            qemu_get_cpu(0), surface_cb_pool[surface_cb_pool_count].cb);
+        surface_cb_stats.reuse_flush++;
+    }
+}
+
+/*
+ * Superset invariant checker: every live surface must own a live
+ * registration, and no live surface may be using a handle that is also
+ * parked. Runs on the surface_update throttle tick under the stats knob.
+ */
+static void surface_cb_audit(NV2AState *d)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    SurfaceBinding *surface;
+    int violations = 0;
+
+    surface_cb_stats_arm_dump();
+    surface_cb_stats.audit_runs++;
+
+    QTAILQ_FOREACH (surface, &r->surfaces, entry) {
+        if (!surface->width || !surface->height) {
+            continue;
+        }
+        if (!surface->access_cb) {
+            fprintf(stderr,
+                    "xemu: surface-cb audit: live surface %" HWADDR_PRIx
+                    " (%zu bytes) has no registration\n",
+                    surface->vram_addr, surface->size);
+            violations++;
+            continue;
+        }
+        for (int i = 0; i < surface_cb_pool_count; i++) {
+            if (surface_cb_pool[i].cb == surface->access_cb) {
+                fprintf(stderr,
+                        "xemu: surface-cb audit: live surface %" HWADDR_PRIx
+                        " uses a parked registration\n",
+                        surface->vram_addr);
+                violations++;
+            }
+        }
+    }
+
+    for (int i = 0; i < surface_cb_pool_count; i++) {
+        for (int j = i + 1; j < surface_cb_pool_count; j++) {
+            if (surface_cb_pool[i].cb == surface_cb_pool[j].cb) {
+                fprintf(stderr,
+                        "xemu: surface-cb audit: duplicate parked handle for %"
+                        HWADDR_PRIx "\n", surface_cb_pool[i].addr);
+                violations++;
+            }
+        }
+    }
+
+    surface_cb_stats.audit_violations += violations;
+    if (violations && surface_cb_stats_level() >= 2) {
+        abort();
+    }
+}
+
 static void register_cpu_access_callback(NV2AState *d, SurfaceBinding *surface)
 {
     if (tcg_enabled()) {
         if (surface->width && surface->height) {
-            surface->access_cb = mem_access_callback_insert(
-                qemu_get_cpu(0), d->vram, surface->vram_addr, surface->size,
-                &surface_access_callback, d);
+            MemAccessCallback *reused = NULL;
+
+            if (surface_cb_reuse_on()) {
+                reused = surface_cb_pool_take(surface->vram_addr,
+                                              surface->size);
+            }
+
+            if (reused) {
+                surface->access_cb = reused;
+            } else {
+                surface->access_cb = mem_access_callback_insert(
+                    qemu_get_cpu(0), d->vram, surface->vram_addr,
+                    surface->size, &surface_access_callback, d);
+            }
+
+            if (unlikely(surface_cb_stats_on())) {
+                surface_cb_stats_note_register(reused != NULL);
+            }
         } else {
             surface->access_cb = NULL;
         }
@@ -730,7 +998,19 @@ static void unregister_cpu_access_callback(NV2AState *d,
                                            SurfaceBinding const *surface)
 {
     if (tcg_enabled()) {
-        mem_access_callback_remove_by_ref(qemu_get_cpu(0), surface->access_cb);
+        bool had_cb = surface->access_cb != NULL;
+
+        if (had_cb && surface_cb_reuse_on()) {
+            surface_cb_pool_park(surface->access_cb, surface->vram_addr,
+                                 surface->size);
+        } else {
+            mem_access_callback_remove_by_ref(qemu_get_cpu(0),
+                                              surface->access_cb);
+        }
+
+        if (unlikely(surface_cb_stats_on()) && had_cb) {
+            surface_cb_stats_note_unregister();
+        }
     }
 }
 
@@ -2119,6 +2399,12 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         }
         pgraph_vk_ensure_not_in_render_pass(pg);
 
+        if (unlikely(surface_cb_stats_on())) {
+            surface_cb_part_regs = 0;
+            surface_cb_part_unregs = 0;
+            surface_cb_in_update_part = 1;
+        }
+
         unbind_surface(d, color);
 
         SurfaceBinding *surface = pgraph_vk_surface_get(d, target.vram_addr);
@@ -2279,6 +2565,13 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
         bind_surface(r, surface);
         pg_surface->buffer_dirty = false;
+
+        if (unlikely(surface_cb_stats_on())) {
+            surface_cb_in_update_part = 0;
+            if (surface_cb_part_regs && surface_cb_part_unregs) {
+                surface_cb_stats.part_invalidate_then_create++;
+            }
+        }
     }
 
     if (!upload && pg_surface->draw_dirty) {
@@ -2397,6 +2690,10 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         expire_old_surfaces(d);
         prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
         r->last_expire_ns = now_ns;
+
+        if (unlikely(surface_cb_stats_on()) && tcg_enabled()) {
+            surface_cb_audit(d);
+        }
     }
 }
 
@@ -2481,6 +2778,10 @@ void pgraph_vk_finalize_surfaces(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     pgraph_vk_surface_flush(container_of(pg, NV2AState, pgraph));
+    /* Belt and braces: surface_flush already drained the pool, but no
+     * parked registration may outlive this state — its callback
+     * dereferences pg->vk_renderer_state, freed right after finalize. */
+    surface_cb_pool_flush();
     /* surface_flush drained every slot, so no in-flight work references
      * the snapshot image; safe to release it now. */
     pgraph_vk_zeta_snapshot_destroy(pg);
@@ -2526,6 +2827,13 @@ void pgraph_vk_surface_flush(NV2AState *d)
         pgraph_vk_wait_slot_fence(pg, slot);
     }
     prune_invalid_surfaces(r, 0);
+
+    /*
+     * After the invalidate loop, so entries parked by it are drained
+     * too: post-flush the registered set must be exactly empty, matching
+     * the empty live surface set.
+     */
+    surface_cb_pool_flush();
 
     pgraph_vk_reload_surface_scale_factor(pg);
 }

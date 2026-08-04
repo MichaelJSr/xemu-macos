@@ -143,6 +143,122 @@ static inline void pgraph_mmio_stats_note(hwaddr addr, bool store)
     }
 }
 
+/*
+ * xemu: pgraph_write pfifo_kick census (XEMU_PFIFO_KICK_STATS=1, default
+ * off, zero cost when unset). Audit 2026-08 §1.5 asks how many of these
+ * broadcasts can ever unblock the PFIFO thread. This is a COUNTER ONLY:
+ * suppression is deliberately not implemented, because a wrongly-skipped
+ * kick is a permanent PFIFO hang (failure-archaeology 7.1 — the untimed
+ * wait in pfifo_thread is only as safe as the complete enumeration of
+ * its wakers), and the verifier re-derived the mean-fps gain at ~0.48%,
+ * below the kill line. Buckets:
+ *
+ *   site        which kick in pgraph_write issued it
+ *   trans       a PFIFO wait condition actually changed at this write:
+ *               INTR      waiting_for_nop / waiting_for_context_switch
+ *                         went true -> false here
+ *               INCREMENT waiting_for_flip was set when the kick fired
+ *               FIFO_*    the NV_PGRAPH_FIFO_ACCESS bit changed value
+ *   acc         NV_PGRAPH_FIFO_ACCESS set after the write (a puller
+ *               that wakes can only make progress when this is 1)
+ *   dup         d->pfifo.fifo_kick was already set, so the PFIFO thread
+ *               is guaranteed to re-loop without this broadcast
+ *
+ * trans=0 is the population a suppression filter could ever target;
+ * dup=1 is the subset that is provably redundant even for a parked
+ * waiter. Counters are unsynchronised on purpose: every writer is the
+ * single vCPU thread holding d->pfifo.lock, the same discipline as the
+ * XEMU_PGRAPH_MMIO_STATS counters above.
+ */
+enum {
+    PFIFO_KICK_SITE_INTR,
+    PFIFO_KICK_SITE_INCREMENT,
+    PFIFO_KICK_SITE_FIFO_ON,
+    PFIFO_KICK_SITE_FIFO_OFF,
+    PFIFO_KICK_SITE_COUNT,
+};
+
+static const char *const pfifo_kick_site_names[PFIFO_KICK_SITE_COUNT] = {
+    "INTR", "INCREMENT", "FIFO_ACCESS_ON", "FIFO_ACCESS_OFF",
+};
+
+/* [site][transitioned][can_fifo_access][already_pending] */
+static uint64_t pfifo_kick_stats[PFIFO_KICK_SITE_COUNT][2][2][2];
+
+static bool pfifo_kick_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_PFIFO_KICK_STATS");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
+static void pfifo_kick_stats_dump(void)
+{
+    uint64_t total = 0, no_trans = 0, dup = 0, no_trans_no_dup = 0;
+
+    for (int s = 0; s < PFIFO_KICK_SITE_COUNT; s++) {
+        for (int t = 0; t < 2; t++) {
+            for (int a = 0; a < 2; a++) {
+                for (int p = 0; p < 2; p++) {
+                    uint64_t n = pfifo_kick_stats[s][t][a][p];
+                    total += n;
+                    if (!t) {
+                        no_trans += n;
+                        if (!p) {
+                            no_trans_no_dup += n;
+                        }
+                    }
+                    if (p) {
+                        dup += n;
+                    }
+                }
+            }
+        }
+    }
+
+    fprintf(stderr,
+            "xemu: pgraph_write pfifo_kick census: kicks=%" PRIu64
+            " no-transition=%" PRIu64 " already-pending=%" PRIu64
+            " suppressible-population=%" PRIu64 "\n",
+            total, no_trans, dup, no_trans_no_dup);
+
+    for (int s = 0; s < PFIFO_KICK_SITE_COUNT; s++) {
+        for (int t = 0; t < 2; t++) {
+            for (int a = 0; a < 2; a++) {
+                for (int p = 0; p < 2; p++) {
+                    uint64_t n = pfifo_kick_stats[s][t][a][p];
+                    if (!n) {
+                        continue;
+                    }
+                    fprintf(stderr,
+                            "xemu:   %-16s trans=%d acc=%d dup=%d  %" PRIu64
+                            "\n",
+                            pfifo_kick_site_names[s], t, a, p, n);
+                }
+            }
+        }
+    }
+}
+
+static void pfifo_kick_stats_note(NV2AState *d, int site, bool transitioned)
+{
+    static bool registered;
+    if (!registered) {
+        registered = true;
+        atexit(pfifo_kick_stats_dump);
+    }
+
+    /* Both reads are safe here: callers hold d->pfifo.lock and pg->lock. */
+    bool can_access =
+        (pgraph_reg_r(&d->pgraph, NV_PGRAPH_FIFO) & NV_PGRAPH_FIFO_ACCESS) != 0;
+    bool already_pending = d->pfifo.fifo_kick;
+
+    pfifo_kick_stats[site][transitioned][can_access][already_pending]++;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
@@ -204,6 +320,10 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
     qemu_mutex_lock(&pg->lock);
 
+    bool kick_stats = unlikely(pfifo_kick_stats_on());
+    uint32_t kick_stats_fifo_before =
+        kick_stats ? pgraph_reg_r(pg, NV_PGRAPH_FIFO) : 0;
+
     switch (addr) {
     case NV_PGRAPH_INTR: {
         /* Atomic RMW: the PFIFO thread raises these bits without pg->lock
@@ -211,6 +331,9 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
          * pg->lock) and nv2a_update_irq reads them lock-free. Under BQL-free
          * dispatch qatomic_and_fetch keeps this clear from losing a
          * concurrent raise. See docs/pgraph-lockless-audit.md §C. */
+        bool was_waiting =
+            kick_stats && (qatomic_read(&pg->waiting_for_nop) ||
+                           qatomic_read(&pg->waiting_for_context_switch));
         uint32_t pending = qatomic_and_fetch(&pg->pending_interrupts, ~val);
 
         if (!(pending & NV_PGRAPH_INTR_ERROR)) {
@@ -218,6 +341,13 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         }
         if (!(pending & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
             qatomic_set(&pg->waiting_for_context_switch, false);
+        }
+        if (kick_stats) {
+            bool still_waiting =
+                qatomic_read(&pg->waiting_for_nop) ||
+                qatomic_read(&pg->waiting_for_context_switch);
+            pfifo_kick_stats_note(d, PFIFO_KICK_SITE_INTR,
+                                  was_waiting && !still_waiting);
         }
         pfifo_kick(d);
         break;
@@ -234,6 +364,10 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                         % PG_GET_MASK(NV_PGRAPH_SURFACE,
                                    NV_PGRAPH_SURFACE_MODULO_3D) );
             nv2a_profile_increment();
+            if (kick_stats) {
+                pfifo_kick_stats_note(d, PFIFO_KICK_SITE_INCREMENT,
+                                      qatomic_read(&pg->waiting_for_flip));
+            }
             pfifo_kick(d);
         }
         break;
@@ -288,6 +422,16 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     // events
     switch (addr) {
     case NV_PGRAPH_FIFO:
+        if (kick_stats) {
+            bool access_on = (val & NV_PGRAPH_FIFO_ACCESS) != 0;
+            bool access_changed =
+                ((kick_stats_fifo_before ^ (uint32_t)val) &
+                 NV_PGRAPH_FIFO_ACCESS) != 0;
+            pfifo_kick_stats_note(d,
+                                  access_on ? PFIFO_KICK_SITE_FIFO_ON
+                                            : PFIFO_KICK_SITE_FIFO_OFF,
+                                  access_changed);
+        }
         pfifo_kick(d);
         break;
     }

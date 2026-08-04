@@ -27,12 +27,43 @@
 #include <stdio.h>
 #include <glib/gstdio.h>
 
+/*
+ * The cached blobs are one specific shader compiler's output, so that
+ * compiler's identity belongs in the cache key: without it, changing
+ * glslang serves the previous compiler's SPIR-V out of a warm cache,
+ * and any A/B of the change measures nothing. glslang's generated
+ * build_info.h carries the version; where it is not reachable the key
+ * degrades to a fixed string, which is still stable (same compiler ->
+ * same key -> warm cache preserved). Residual gap: a glslang revision
+ * bump that keeps the same version number is not distinguished.
+ */
+#if defined(__has_include)
+#if __has_include(<glslang/build_info.h>)
+#include <glslang/build_info.h>
+#endif
+#endif
+
+#define SPIRV_STRINGIFY_(x) #x
+#define SPIRV_STRINGIFY(x) SPIRV_STRINGIFY_(x)
+
+#if defined(GLSLANG_VERSION_MAJOR)
+#ifndef GLSLANG_VERSION_FLAVOR
+#define GLSLANG_VERSION_FLAVOR ""
+#endif
+#define SPIRV_COMPILER_ID                                \
+    "glslang" SPIRV_STRINGIFY(GLSLANG_VERSION_MAJOR) "." \
+    SPIRV_STRINGIFY(GLSLANG_VERSION_MINOR) "."           \
+    SPIRV_STRINGIFY(GLSLANG_VERSION_PATCH) GLSLANG_VERSION_FLAVOR
+#else
+#define SPIRV_COMPILER_ID "glslang-unknown"
+#endif
+
 static char *get_spirv_cache_dir(void)
 {
     const char *base = xemu_settings_get_base_path();
-    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d", base,
+    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s", base,
                                 xemu_version_major, xemu_version_minor,
-                                xemu_version_patch);
+                                xemu_version_patch, SPIRV_COMPILER_ID);
     /* Portable (Windows mkdir takes one argument). */
     g_mkdir_with_parents(dir, 0755);
     return dir;
