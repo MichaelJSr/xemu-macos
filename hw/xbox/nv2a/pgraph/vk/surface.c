@@ -363,7 +363,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        surface->image_scratch,
                        surface->image_scratch_current_layout, 1, &blit_region,
-                       surface->color ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+                       VK_FILTER_NEAREST);
 
         pgraph_vk_transition_image_layout(pg, cmd, surface->image_scratch,
                                           surface->host_fmt.vk_format,
@@ -2210,9 +2210,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                            surface->image_scratch_current_layout,
                            surface->image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                           &blitRegion,
-                           surface->color ? VK_FILTER_LINEAR
-                                          : VK_FILTER_NEAREST);
+                           &blitRegion, VK_FILTER_NEAREST);
         } else {
             for (int i = 0; i < num_regions; i++) {
                 VkImageAspectFlags aspect =
