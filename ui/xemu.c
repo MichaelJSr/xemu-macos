@@ -73,12 +73,6 @@ bool xemu_metal_acquire_drawable(void);
 #define DEBUG_XEMU_C 0
 #endif
 
-#if DEBUG_XEMU_C
-#define DPRINTF(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define DPRINTF(...)
-#endif
-
 /*
  * The lock-occupancy stat is runtime-enableable on macOS (where it is
  * measured) and stays compile-time-only elsewhere, so the Windows/Linux
@@ -125,26 +119,6 @@ bool xemu_present_is_metal(void)
 }
 
 /*
- * Silently drain any pending GL errors on the current thread's
- * context. Used at the top of gl_render_frame to absorb errors
- * inherited from a previous frame (most commonly a one-shot
- * stale-state flush on renderer switch, e.g. VULKAN -> OPENGL
- * where a rect-texture / IOSurface resource was torn down after
- * ImGui's last frame bound it). gl_render_frame should only
- * attribute errors to itself that were produced inside its own
- * body.
- */
-static void gl_drain_errors_silent(void)
-{
-    int drained = 0;
-    while (glGetError() != GL_NO_ERROR) {
-        if (++drained > 64) {
-            break;
-        }
-    }
-}
-
-/*
  * Drain and log the first OpenGL error observed per session.
  * Upstream uses `assert(glGetError() == GL_NO_ERROR)` at the end of
  * gl_render_frame, which hard-crashes on macOS for transient errors
@@ -152,6 +126,13 @@ static void gl_drain_errors_silent(void)
  * main display context, ImGui backend hiccups on renderer toggle).
  * Log once with the error code so the user can report if the
  * display is actually broken; drain the queue either way.
+ *
+ * where == NULL drains silently: used at the top of gl_render_frame
+ * to absorb errors inherited from a previous frame (most commonly a
+ * one-shot stale-state flush on renderer switch, e.g. VULKAN ->
+ * OPENGL where a rect-texture / IOSurface resource was torn down
+ * after ImGui's last frame bound it), so gl_render_frame only
+ * attributes errors produced inside its own body.
  */
 static void gl_drain_errors(const char *where)
 {
@@ -159,7 +140,7 @@ static void gl_drain_errors(const char *where)
     int drained = 0;
     GLenum err;
     while ((err = glGetError()) != GL_NO_ERROR) {
-        if (!warned_once) {
+        if (!warned_once && where) {
             warned_once = true;
             fprintf(stderr,
                     "xemu: OpenGL error 0x%04x at %s "
@@ -957,7 +938,7 @@ static void gl_render_frame(struct xemu_console *scon)
      * GL_INVALID_OPERATION that surfaces on the next frame's first
      * GL call. Benign one-shot.
      */
-    gl_drain_errors_silent();
+    gl_drain_errors(NULL);
 
     bool flip_required = false;
     bool release_surface_texture = false;

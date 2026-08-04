@@ -71,9 +71,6 @@ bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png,
 void SaveScreenshot(uintptr_t tex, bool flip);
 void ScaleDimensions(int src_width, int src_height, int max_width, int max_height, int *out_width, int *out_height);
 
-// Load an image (PNG/JPG via stb) into a backend texture handle.
-uintptr_t LoadUiTextureFromMemory(const unsigned char *buf, unsigned int size,
-                                  bool flip = true);
 uintptr_t CreateUiTextureFromRgba(const unsigned char *rgba, int w, int h);
 void DestroyUiTexture(uintptr_t tex);
 void GetUiTextureDims(uintptr_t tex, int *w, int *h);

@@ -23,12 +23,10 @@
 #ifdef __APPLE__
 
 #import <Metal/Metal.h>
-#import <IOSurface/IOSurfaceRef.h>
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "metal-helpers.hh"
 #include "stb_image.h"
@@ -776,7 +774,6 @@ void MetalRenderDecal(float x, float y, float w, float h, float tex_x,
     fu.color_fill[2] = COL(fill, 1);
     fu.color_fill[3] = COL(fill, 0);
     fu.time = g_decal_time_ms / 1000.0f;
-    fu.scale = 1.4f;
 #undef COL
 
     enum FragKind kind =

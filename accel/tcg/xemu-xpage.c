@@ -241,14 +241,11 @@ void xemu_xpage_refute_note(uint64_t target, uint64_t phys)
     }
 }
 
-void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage, bool exec_fetch)
+void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage)
 {
     uint64_t vp, pp;
     struct xpage_ent *e;
 
-    if (!exec_fetch) {
-        return;
-    }
     xpage_maybe_reset();
     vp = vpage & TARGET_PAGE_MASK;
     pp = ppage & TARGET_PAGE_MASK;

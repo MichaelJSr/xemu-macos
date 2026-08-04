@@ -86,6 +86,6 @@ void xemu_xpage_refute_note(uint64_t target, uint64_t phys);
  * logs remaps seen at refill; has the documented bypass hole, so it only
  * corroborates the per-exit refuter, never replaces it).
  */
-void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage, bool exec_fetch);
+void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage);
 
 #endif /* XEMU_XPAGE_H */

@@ -220,7 +220,7 @@ check_pgo_staleness() {
     fi
     [ -n "${retrain_desc}" ] || retrain_desc="unknown"
 
-    echo "PGO staleness: retrained at ${retrain_desc:-unknown}, ${commits:-n/a} commits since on hot paths (accel/tcg tcg target/i386 hw/xbox); ${mism} CFG-hash mismatches (${hotmism} hot), ${unpro} unprofiled functions (${hotunpro} hot)"
+    echo "PGO staleness: retrained at ${retrain_desc}, ${commits} commits since on hot paths (accel/tcg tcg target/i386 hw/xbox); ${mism} CFG-hash mismatches (${hotmism} hot), ${unpro} unprofiled functions (${hotunpro} hot)"
     if [ "${hotmism:-0}" -gt 0 ]; then
         echo "*** PGO WARNING: hot-path functions lost their profile to a CFG-hash mismatch:${hotnames}"
         echo "*** Retrain before shipping: XEMU_PGO=generate ./build.sh, run the corpus, XEMU_PGO=use ./build.sh"
@@ -419,7 +419,6 @@ package_linux() {
 }
 
 postbuild=''
-debug_opts=''
 build_cflags=''
 default_job_count='12'
 sys_ldflags=''

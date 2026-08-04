@@ -51,7 +51,6 @@
 
 typedef struct QueueFamilyIndices {
     int queue_family;
-    uint32_t queue_count;
 } QueueFamilyIndices;
 
 typedef struct MemorySyncRequirement {

@@ -439,8 +439,6 @@ floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
 #define helper_fstt_ST0       MAP_HELPER_SOFT_HARD(fstt_ST0)
 #define helper_fpush          MAP_HELPER_SOFT_HARD(fpush)
 #define helper_fpop           MAP_HELPER_SOFT_HARD(fpop)
-#define helper_fdecstp        MAP_HELPER_SOFT_HARD(fdecstp)
-#define helper_fincstp        MAP_HELPER_SOFT_HARD(fincstp)
 #define helper_ffree_STN      MAP_HELPER_SOFT_HARD(ffree_STN)
 #define helper_fmov_ST0_FT0   MAP_HELPER_SOFT_HARD(fmov_ST0_FT0)
 #define helper_fmov_FT0_STN   MAP_HELPER_SOFT_HARD(fmov_FT0_STN)
@@ -475,7 +473,6 @@ floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
 #define helper_fldz_ST0       MAP_HELPER_SOFT_HARD(fldz_ST0)
 #define helper_fldz_FT0       MAP_HELPER_SOFT_HARD(fldz_FT0)
 #define helper_fnstsw         MAP_HELPER_SOFT_HARD(fnstsw)
-#define helper_fnstcw         MAP_HELPER_SOFT_HARD(fnstcw)
 #define helper_fldcw          MAP_HELPER_SOFT_HARD(fldcw)
 #define helper_fclex          MAP_HELPER_SOFT_HARD(fclex)
 #define helper_fwait          MAP_HELPER_SOFT_HARD(fwait)
@@ -907,18 +904,6 @@ void helper_fpop(CPUX86State *env)
     fpop(env);
 }
 
-void helper_fdecstp(CPUX86State *env)
-{
-    env->fpstt = (env->fpstt - 1) & 7;
-    env->fpus &= ~0x4700;
-}
-
-void helper_fincstp(CPUX86State *env)
-{
-    env->fpstt = (env->fpstt + 1) & 7;
-    env->fpus &= ~0x4700;
-}
-
 /* FPU move */
 
 void helper_ffree_STN(CPUX86State *env, int st_index)
@@ -1184,11 +1169,6 @@ void helper_fldz_FT0(CPUX86State *env)
 uint32_t helper_fnstsw(CPUX86State *env)
 {
     return (env->fpus & ~0x3800) | (env->fpstt & 0x7) << 11;
-}
-
-uint32_t helper_fnstcw(CPUX86State *env)
-{
-    return env->fpuc;
 }
 
 #ifndef USE_HARD_FPU

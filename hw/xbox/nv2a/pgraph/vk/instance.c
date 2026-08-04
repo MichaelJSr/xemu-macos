@@ -312,7 +312,6 @@ QueueFamilyIndices pgraph_vk_find_queue_families(VkPhysicalDevice device)
         int required_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
         if ((queueFamily.queueFlags & required_flags) == required_flags) {
             indices.queue_family = i;
-            indices.queue_count = queueFamily.queueCount;
         }
         if (is_queue_family_indicies_complete(indices)) {
             break;
@@ -507,13 +506,13 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
      * anyway; see README "Failed experiments": separate compute
      * queue).
      */
-    float queuePriorities[1] = { 1.0f };
+    float queuePriority = 1.0f;
 
     VkDeviceQueueCreateInfo queue_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex = indices.queue_family,
         .queueCount = 1,
-        .pQueuePriorities = queuePriorities,
+        .pQueuePriorities = &queuePriority,
     };
 
     // Check device features

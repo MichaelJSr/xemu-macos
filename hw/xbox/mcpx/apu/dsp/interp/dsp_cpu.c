@@ -1373,8 +1373,6 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
  * nonparallel_opcodes[] table are in scope at this file.
  * ============================================================== */
 
-#include "dsp56k_jit_arm64.h"
-
 #if DSP56K_JIT_SUPPORTED
 
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp)

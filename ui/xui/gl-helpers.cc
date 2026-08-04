@@ -54,7 +54,6 @@ static inline bool UseMetal()
 }
 
 enum class ShaderType {
-    Blit,
     BlitGamma,
     BlitGammaRect,
     Mask,
@@ -229,17 +228,6 @@ static GLuint LoadTextureFromMemory(const unsigned char *buf, unsigned int size,
     return tex;
 }
 
-uintptr_t LoadUiTextureFromMemory(const unsigned char *buf, unsigned int size,
-                                  bool flip)
-{
-#ifdef __APPLE__
-    if (UseMetal()) {
-        return MetalLoadTextureFromMemory(buf, size, flip);
-    }
-#endif
-    return (uintptr_t)LoadTextureFromMemory(buf, size, flip);
-}
-
 uintptr_t CreateUiTextureFromRgba(const unsigned char *rgba, int w, int h)
 {
 #ifdef __APPLE__
@@ -330,16 +318,6 @@ void main() {
 )";
     GLuint vert = Shader(GL_VERTEX_SHADER, vert_src);
     assert(vert != 0);
-
-    //     const char *image_frag_src = R"(
-    // #version 150 core
-    // uniform sampler2D tex;
-    // in  vec2 Texcoord;
-    // out vec4 out_Color;
-    // void main() {
-    //     out_Color.rgba = texture(tex, Texcoord);
-    // }
-    // )";
 
     const char *image_gamma_frag_src = R"(
 #version 400 core

@@ -1867,15 +1867,9 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
         {
             bool xemu_skip_inval = false;
             if (unlikely(xemu_inv_prof_on()) || xemu_tb_range_inv_on()) {
-                tb_page_addr_t chk_start = tb_page_addr0(tb);
-                tb_page_addr_t chk_last = chk_start + tb->size - 1;
+                tb_page_addr_t chk_start, chk_last;
                 bool xemu_overlap;
-                if (n == 0) {
-                    chk_last = MIN(chk_last, chk_start | ~TARGET_PAGE_MASK);
-                } else {
-                    chk_start = tb_page_addr1(tb);
-                    chk_last = chk_start + (chk_last & ~TARGET_PAGE_MASK);
-                }
+                xemu_subpage_tb_range(tb, n, &chk_start, &chk_last);
                 xemu_overlap = !(chk_last < start || chk_start > last);
                 if (unlikely(xemu_inv_prof_on())) {
                     xemu_inv_range_evals++;

@@ -20,7 +20,6 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
-#include "exec/helper-proto-common.h"
 #include "exec/target_page.h"
 #include "hw/core/cpu.h"
 

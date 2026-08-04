@@ -1007,7 +1007,6 @@ static void patch_branch(uint32_t *insn_addr, int32_t new_off_bytes)
 
 #define DSP56K_JIT_CODE_BYTES (8u * 1024u * 1024u)   /* 8 MiB code buffer per core */
 #define DSP56K_JIT_MAX_OPS_PER_BLOCK 32
-#define DSP56K_JIT_HASH_SIZE 4096  /* power of two, >= DSP_PRAM_SIZE */
 
 typedef void (*dsp56k_jit_entry_fn)(dsp_core_t *dsp);
 
@@ -9493,12 +9492,6 @@ static void emit_prologue(ArmEmit *e)
     emit_reload_sr_pin(e);
 }
 
-/* Shims implemented at the bottom of dsp_cpu.c (where the static
- * emu_* symbols and the opcodes[] table are in scope). */
-emu_func_t dsp56k_jit_helper_lookup_emu(uint32_t inst);
-uint32_t dsp56k_jit_helper_inst_length(uint32_t inst);
-bool dsp56k_jit_helper_is_terminator(void *fn);
-
 static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                                     uint32_t pc_start)
 {
@@ -10270,9 +10263,6 @@ void dsp56k_jit_invalidate_all(dsp_core_t *dsp)
 /* --------------------------------------------------------------- *
  * Differential validator — off-APU-thread infrastructure
  * --------------------------------------------------------------- */
-
-/* Forward decl of the actual interpreter step — exposed from dsp_cpu.c. */
-void dsp56k_execute_instruction(dsp_core_t *dsp);
 
 /*
  * Peripheral shims for interpreter replay on a private dsp_core_t.

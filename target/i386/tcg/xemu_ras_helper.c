@@ -16,7 +16,6 @@
 #include "exec/translation-block.h"
 #include "tcg/tcg.h"
 #include "hw/core/cpu.h"
-#include "accel/tcg/cpu-ops.h"
 
 /*
  * Near-return exit: consult the return-address stack before the

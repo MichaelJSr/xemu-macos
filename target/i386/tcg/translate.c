@@ -61,8 +61,6 @@ static int g_use_hard_fpu_inline;
 #define gen_helper_fstt_ST0       MAP_GEN_HELPER_SOFT_HARD(fstt_ST0)
 #define gen_helper_fpush          MAP_GEN_HELPER_SOFT_HARD(fpush)
 #define gen_helper_fpop           MAP_GEN_HELPER_SOFT_HARD(fpop)
-#define gen_helper_fdecstp        MAP_GEN_HELPER_SOFT_HARD(fdecstp)
-#define gen_helper_fincstp        MAP_GEN_HELPER_SOFT_HARD(fincstp)
 #define gen_helper_ffree_STN      MAP_GEN_HELPER_SOFT_HARD(ffree_STN)
 #define gen_helper_fmov_ST0_FT0   MAP_GEN_HELPER_SOFT_HARD(fmov_ST0_FT0)
 #define gen_helper_fmov_FT0_STN   MAP_GEN_HELPER_SOFT_HARD(fmov_FT0_STN)
@@ -97,7 +95,6 @@ static int g_use_hard_fpu_inline;
 #define gen_helper_fldz_ST0       MAP_GEN_HELPER_SOFT_HARD(fldz_ST0)
 #define gen_helper_fldz_FT0       MAP_GEN_HELPER_SOFT_HARD(fldz_FT0)
 #define gen_helper_fnstsw         MAP_GEN_HELPER_SOFT_HARD(fnstsw)
-#define gen_helper_fnstcw         MAP_GEN_HELPER_SOFT_HARD(fnstcw)
 #define gen_helper_fldcw          MAP_GEN_HELPER_SOFT_HARD(fldcw)
 #define gen_helper_fclex          MAP_GEN_HELPER_SOFT_HARD(fclex)
 #define gen_helper_fwait          MAP_GEN_HELPER_SOFT_HARD(fwait)
@@ -788,7 +785,6 @@ static TCGv eip_next_tl(DisasContext *s)
         return tcg_constant_tl((uint32_t)(s->pc - s->cs_base));
     }
 }
-
 
 static TCGv eip_cur_tl(DisasContext *s)
 {
@@ -2099,10 +2095,19 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
 }
 
+/*
+ * 16-bit FIST: same RC-aware convert as the 32-bit path. The caller
+ * issues a MO_LEUW store which truncates the int32 result to 16 bits,
+ * matching the value-bits the helper would return in the non-
+ * exception common case. The soft helper additionally clamps
+ * out-of-int16-range values to -32768 and sets float_flag_invalid;
+ * that exception tracking is an intentional inline tradeoff already
+ * accepted for the 32-bit FIST/FISTL paths.
+ */
 static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fist_ST0, arg);
-    fp_pc_wrapper(gen_fist_ST0)(s, arg);
+    fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
 /*
@@ -2242,26 +2247,16 @@ static void gen_fcom_ST0_FT0(DisasContext *s)
     gen_helper_fp_arith_ST0_FT0(s, 2);
 }
 
-static void gen_fucomi_ST0_FT0_inline(DisasContext *s)
+static void gen_fcomi_ST0_FT0_inline(DisasContext *s, bool unordered)
 {
     gen_compute_eflags(s);
 
     TCGv_i64 cmp_result = tcg_temp_new_i64();
-    fp_pc_wrapper(gen_fucomi_ST0_FT0)(s, cmp_result);
-
-    TCGv_i64 cc = tcg_temp_new_i64();
-    tcg_gen_extu_tl_i64(cc, cpu_cc_src);
-    tcg_gen_andi_i64(cc, cc, ~(uint64_t)0x45);
-    tcg_gen_or_i64(cc, cc, cmp_result);
-    tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
-}
-
-static void gen_fcomi_ST0_FT0_inline(DisasContext *s)
-{
-    gen_compute_eflags(s);
-
-    TCGv_i64 cmp_result = tcg_temp_new_i64();
-    fp_pc_wrapper(gen_fcomi_ST0_FT0)(s, cmp_result);
+    if (unordered) {
+        fp_pc_wrapper(gen_fucomi_ST0_FT0)(s, cmp_result);
+    } else {
+        fp_pc_wrapper(gen_fcomi_ST0_FT0)(s, cmp_result);
+    }
 
     TCGv_i64 cc = tcg_temp_new_i64();
     tcg_gen_extu_tl_i64(cc, cpu_cc_src);
@@ -3345,11 +3340,7 @@ static void xemu_sb_arm_dump(void)
  * load/add/store the xpage and superblock census sites share. */
 static void xemu_gen_counter_inc(uint64_t *counter)
 {
-    TCGv_ptr p = tcg_constant_ptr(counter);
-    TCGv_i64 t = tcg_temp_new_i64();
-    tcg_gen_ld_i64(t, p, 0);
-    tcg_gen_addi_i64(t, t, 1);
-    tcg_gen_st_i64(t, p, 0);
+    xemu_x87_gen_counter_add(counter, 1);
 }
 
 static int xemu_superblock_max(void)
@@ -4397,7 +4388,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fucomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s, true);
             } else {
                 gen_helper_fucomi_ST0_FT0(tcg_env);
             }
@@ -4410,7 +4401,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s, false);
             } else {
                 gen_helper_fcomi_ST0_FT0(tcg_env);
             }
@@ -4484,7 +4475,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fucomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s, true);
             } else {
                 gen_helper_fucomi_ST0_FT0(tcg_env);
             }
@@ -4498,7 +4489,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
             if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s);
+                gen_fcomi_ST0_FT0_inline(s, false);
             } else {
                 gen_helper_fcomi_ST0_FT0(tcg_env);
             }

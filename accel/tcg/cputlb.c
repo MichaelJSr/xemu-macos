@@ -1084,7 +1084,7 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
      */
     if ((prot & PAGE_EXEC) &&
         (xemu_xpage_chain_level() > 0 || xemu_xpage_refute_on())) {
-        xemu_xpage_observe_mapping(addr_page, paddr_page, true);
+        xemu_xpage_observe_mapping(addr_page, paddr_page);
     }
 #endif
 
@@ -1419,17 +1419,14 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 
     if (!code_dirty) {
         bool still_code;
+        uint64_t a = xemu_time ? xemu_inv_ticks() : 0;
 
+        still_code = xemu_tb_invalidate_phys_range_fast(cpu, ram_addr,
+                                                        size, retaddr);
         if (xemu_time) {
-            uint64_t a = xemu_inv_ticks();
-            still_code = xemu_tb_invalidate_phys_range_fast(cpu, ram_addr,
-                                                            size, retaddr);
             xemu_ti = xemu_inv_ticks() - a;
-            xemu_did_inval = true;
-        } else {
-            still_code = xemu_tb_invalidate_phys_range_fast(cpu, ram_addr,
-                                                            size, retaddr);
         }
+        xemu_did_inval = true;
         code_dirty = !still_code;
     }
 

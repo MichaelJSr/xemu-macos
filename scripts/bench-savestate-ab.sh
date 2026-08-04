@@ -159,28 +159,24 @@ APPBIN=$APP/Contents/MacOS/xemu
 
 # Source paths are read from the user's config, then cloned; the live
 # files are never opened by xemu here.
-if [[ -z $HDD_SRC ]]; then
-  HDD_SRC=$(python3 - "$CONFIG_SRC" <<'EOF'
+read_toml_path() {
+  python3 - "$CONFIG_SRC" "$1" <<'EOF'
 import re, sys
 for line in open(sys.argv[1], errors="replace"):
-    m = re.match(r"""\s*hdd_path\s*=\s*['"](.*)['"]\s*$""", line)
+    m = re.match(r"""\s*%s\s*=\s*['"](.*)['"]\s*$""" % re.escape(sys.argv[2]), line)
     if m:
         print(m.group(1)); break
 EOF
-)
+}
+
+if [[ -z $HDD_SRC ]]; then
+  HDD_SRC=$(read_toml_path hdd_path)
 fi
 [[ -n $HDD_SRC && -f $HDD_SRC ]] || { echo "cannot resolve hdd qcow2 (config had '$HDD_SRC'); pass --hdd" >&2; exit 1; }
 HDD=$WORK/hdd.qcow2
 cp -c $HDD_SRC $HDD 2>/dev/null || { echo "note: cp -c clone failed (non-APFS?); plain copy" >&2; cp $HDD_SRC $HDD; }
 
-EEPROM_SRC=$(python3 - "$CONFIG_SRC" <<'EOF'
-import re, sys
-for line in open(sys.argv[1], errors="replace"):
-    m = re.match(r"""\s*eeprom_path\s*=\s*['"](.*)['"]\s*$""", line)
-    if m:
-        print(m.group(1)); break
-EOF
-)
+EEPROM_SRC=$(read_toml_path eeprom_path)
 EEPROM=""
 if [[ -n $EEPROM_SRC && -f $EEPROM_SRC ]]; then
   EEPROM=$WORK/eeprom.bin

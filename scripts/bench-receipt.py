@@ -48,10 +48,12 @@ SELFTEST_EXIT_FAIL = 5
 # helpers
 # ---------------------------------------------------------------------------
 
-def run_summarizer(summarizer, log_path, drop_first):
+def run_summarizer(summarizer, log_path):
     """Run nsprof_summarize.py --json on one log; return its per-log dict."""
+    # --drop-first 0 is load-bearing: the summarizer's default is 1, but the
+    # gate does its own scene-anchored transient dropping.
     cmd = [sys.executable, summarizer, log_path, "--json",
-           "--drop-first", str(drop_first)]
+           "--drop-first", "0"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -78,7 +80,7 @@ def mean_sd(vals):
 
 def cmd_gate(args):
     band_lo, band_hi = args.band
-    summary = run_summarizer(args.summarizer, args.log, 0)
+    summary = run_summarizer(args.summarizer, args.log)
 
     all_iv = summary["intervals"]
 
@@ -366,13 +368,10 @@ def write_fixture(path, interval_specs):
                     f"per_flip=  14.0\n")
 
 
-class _NS(argparse.Namespace):
-    pass
-
-
 def gate_fixture(outdir, summarizer, label, log, band, cv_max,
                  var_value, warmup=False):
-    ns = _NS(label=label, log=log, out=os.path.join(outdir, f"run_{label}.json"),
+    ns = argparse.Namespace(
+             label=label, log=log, out=os.path.join(outdir, f"run_{label}.json"),
              summarizer=summarizer, band=band, cv_max=cv_max,
              warmup=warmup, var_value=var_value)
     return cmd_gate(ns), ns.out
@@ -448,7 +447,8 @@ def cmd_selftest(args):
     meta_path = os.path.join(outdir, "meta.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-    ns = _NS(meta=meta_path, out=os.path.join(outdir, "receipt.json"))
+    ns = argparse.Namespace(meta=meta_path,
+                            out=os.path.join(outdir, "receipt.json"))
     rc = cmd_receipt(ns)
     with open(ns.out) as f:
         receipt = json.load(f)
@@ -475,8 +475,8 @@ def cmd_selftest(args):
     meta2_path = os.path.join(outdir, "meta-mismatch.json")
     with open(meta2_path, "w") as f:
         json.dump(meta2, f, indent=2)
-    ns2 = _NS(meta=meta2_path,
-              out=os.path.join(outdir, "receipt-mismatch.json"))
+    ns2 = argparse.Namespace(meta=meta2_path,
+                             out=os.path.join(outdir, "receipt-mismatch.json"))
     rc2 = cmd_receipt(ns2)
     with open(ns2.out) as f:
         receipt2 = json.load(f)

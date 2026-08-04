@@ -25,7 +25,6 @@
 
 #define VSH_UBO_BINDING 0
 #define PSH_UBO_BINDING 1
-#define PSH_TEX_BINDING 2
 
 const size_t MAX_UNIFORM_ATTR_VALUES_SIZE = NV2A_VERTEXSHADER_ATTRIBUTES * 4 * sizeof(float);
 
@@ -401,7 +400,6 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     key.psh.state.use_hw_depth = !need_geometry_shader;
     key.psh.glsl_opts.vulkan = true;
     key.psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
-    key.psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
     binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
 
     update_shader_uniform_locs(binding);

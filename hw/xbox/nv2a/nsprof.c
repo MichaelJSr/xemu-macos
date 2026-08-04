@@ -17,8 +17,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include <stdio.h>
-#include <stdlib.h>
 
 #include "nsprof.h"
 

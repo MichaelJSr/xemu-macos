@@ -411,33 +411,19 @@ static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 }
 
 /*
- * 16-bit FIST: same RC-aware convert as the 32-bit path. The caller
- * issues a MO_LEUW store which truncates the int32 result to 16 bits,
- * matching the value-bits the helper would return in the non-
- * exception common case. The soft helper additionally clamps
- * out-of-int16-range values to -32768 and sets float_flag_invalid;
- * that exception tracking is an intentional inline tradeoff already
- * accepted for the 32-bit FIST/FISTL paths.
- */
-static void glue(gen_fist_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
-{
-    glue(gen_fistl_ST0, PREC_SUFFIX)(s, arg);
-}
-
-/*
  * FISTTP variants: always truncate toward zero regardless of FPCR
  * RC. This is the rc == 3 branch of the FIST path, so we can emit
  * the unconditional truncating convert and skip the RC switch
  * entirely.
  */
-static void glue(gen_fistt_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
+static void glue(gen_fisttl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
 }
 
-static void glue(gen_fisttl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
+static void glue(gen_fistt_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
-    glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
+    glue(gen_fisttl_ST0, PREC_SUFFIX)(s, arg);
 }
 
 static void glue(gen_fisttll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)

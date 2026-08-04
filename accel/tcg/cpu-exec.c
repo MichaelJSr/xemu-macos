@@ -451,6 +451,47 @@ static void *xemu_gp_sampler(void *arg)
     }
     return NULL;
 }
+
+/*
+ * Shared top-N report block: iterate a count table into a fixed array,
+ * selection-sort by count, print ranked rows.  key_is_str selects the %s vs
+ * 0x%08llx row argument; header_fmt may consume the distinct count as %d.
+ */
+static void xemu_gp_report_top(GHashTable *table, uint32_t filled, int cap,
+                               int max_rows, bool key_is_str,
+                               const char *header_fmt, const char *row_fmt)
+{
+    GHashTableIter it;
+    gpointer kk, vv;
+    struct { gpointer k; uint64_t c; } top[4096];
+    int cnt = 0;
+
+    g_hash_table_iter_init(&it, table);
+    while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < cap) {
+        top[cnt].k = kk;
+        top[cnt].c = (uintptr_t)vv;
+        cnt++;
+    }
+    for (int a = 0; a < cnt; a++) {
+        for (int b = a + 1; b < cnt; b++) {
+            if (top[b].c > top[a].c) {
+                typeof(top[0]) t = top[a];
+                top[a] = top[b];
+                top[b] = t;
+            }
+        }
+    }
+    fprintf(stderr, header_fmt, cnt);
+    for (int rank = 0; rank < MIN(cnt, max_rows); rank++) {
+        if (key_is_str) {
+            fprintf(stderr, row_fmt, 100.0 * top[rank].c / filled,
+                    (const char *)top[rank].k);
+        } else {
+            fprintf(stderr, row_fmt, 100.0 * top[rank].c / filled,
+                    (unsigned long long)(uintptr_t)top[rank].k);
+        }
+    }
+}
 #endif
 
 static void xemu_guestprof_dump(void)
@@ -514,92 +555,15 @@ static void xemu_guestprof_dump(void)
             100.0 * guest_total / filled, (unsigned long long)host_total,
             100.0 * host_total / filled, (unsigned long long)unknown);
 
-    int rank;
-
-    {
-        GHashTableIter it;
-        gpointer kk, vv;
-        struct { const char *n; uint64_t c; } top[512];
-        int cnt = 0;
-        g_hash_table_iter_init(&it, host);
-        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 512) {
-            top[cnt].n = kk;
-            top[cnt].c = (uintptr_t)vv;
-            cnt++;
-        }
-        for (int a = 0; a < cnt; a++) {
-            for (int b = a + 1; b < cnt; b++) {
-                if (top[b].c > top[a].c) {
-                    typeof(top[0]) t = top[a];
-                    top[a] = top[b];
-                    top[b] = t;
-                }
-            }
-        }
-        fprintf(stderr, "xemu: guestprof top host symbols:\n");
-        for (rank = 0; rank < MIN(cnt, 25); rank++) {
-            fprintf(stderr, "xemu:   %6.2f%%  %s\n",
-                    100.0 * top[rank].c / filled, top[rank].n);
-        }
-    }
-
-    {
-        GHashTableIter it;
-        gpointer kk, vv;
-        struct { uint64_t pc; uint64_t c; } top[4096];
-        int cnt = 0;
-        g_hash_table_iter_init(&it, guest);
-        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 4096) {
-            top[cnt].pc = (uintptr_t)kk;
-            top[cnt].c = (uintptr_t)vv;
-            cnt++;
-        }
-        for (int a = 0; a < cnt; a++) {
-            for (int b = a + 1; b < cnt; b++) {
-                if (top[b].c > top[a].c) {
-                    typeof(top[0]) t = top[a];
-                    top[a] = top[b];
-                    top[b] = t;
-                }
-            }
-        }
-        fprintf(stderr,
-                "xemu: guestprof top guest TBs (%d distinct):\n", cnt);
-        for (rank = 0; rank < MIN(cnt, 30); rank++) {
-            fprintf(stderr, "xemu:   %6.2f%%  tb_pc=0x%08llx\n",
-                    100.0 * top[rank].c / filled,
-                    (unsigned long long)top[rank].pc);
-        }
-    }
-
-    {
-        GHashTableIter it;
-        gpointer kk, vv;
-        struct { uint64_t pg; uint64_t c; } top[4096];
-        int cnt = 0;
-        g_hash_table_iter_init(&it, pages);
-        while (g_hash_table_iter_next(&it, &kk, &vv) && cnt < 4096) {
-            top[cnt].pg = (uintptr_t)kk;
-            top[cnt].c = (uintptr_t)vv;
-            cnt++;
-        }
-        for (int a = 0; a < cnt; a++) {
-            for (int b = a + 1; b < cnt; b++) {
-                if (top[b].c > top[a].c) {
-                    typeof(top[0]) t = top[a];
-                    top[a] = top[b];
-                    top[b] = t;
-                }
-            }
-        }
-        fprintf(stderr,
-                "xemu: guestprof top guest 4K pages (%d distinct):\n", cnt);
-        for (rank = 0; rank < MIN(cnt, 15); rank++) {
-            fprintf(stderr, "xemu:   %6.2f%%  page=0x%08llx\n",
-                    100.0 * top[rank].c / filled,
-                    (unsigned long long)top[rank].pg);
-        }
-    }
+    xemu_gp_report_top(host, filled, 512, 25, true,
+                       "xemu: guestprof top host symbols:\n",
+                       "xemu:   %6.2f%%  %s\n");
+    xemu_gp_report_top(guest, filled, 4096, 30, false,
+                       "xemu: guestprof top guest TBs (%d distinct):\n",
+                       "xemu:   %6.2f%%  tb_pc=0x%08llx\n");
+    xemu_gp_report_top(pages, filled, 4096, 15, false,
+                       "xemu: guestprof top guest 4K pages (%d distinct):\n",
+                       "xemu:   %6.2f%%  page=0x%08llx\n");
 
     g_hash_table_destroy(guest);
     g_hash_table_destroy(pages);

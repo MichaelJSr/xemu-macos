@@ -214,7 +214,6 @@ static float g_lpf_fc_lut[65536];
 #define ENV_LUT_SIZE 1024
 static float g_env_decay_lut[ENV_LUT_SIZE];
 static float g_env_release_lut[ENV_LUT_SIZE];
-static float g_decay_base_log; // logf(0.99988799f), precomputed for expf-based envelope decay
 static bool g_apu_luts_initialized = false;
 
 static void apu_init_luts(void)
@@ -231,7 +230,7 @@ static void apu_init_luts(void)
         else if (p > 1.0f) p = 1.0f;
         g_lpf_fc_lut[i] = p;
     }
-    g_decay_base_log = logf(0.99988799f);
+    const float g_decay_base_log = logf(0.99988799f);
     for (int i = 0; i < ENV_LUT_SIZE; i++) {
         float s = (float)i / (float)(ENV_LUT_SIZE - 1);
         /* Decay shape: exp((1-s) * 65536 * log(0.99988799)) */
