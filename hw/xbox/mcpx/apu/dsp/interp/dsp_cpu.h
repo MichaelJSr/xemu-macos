@@ -60,15 +60,16 @@ struct dsp_core_s {
     /* stack[0=ssh], stack[1=ssl] */
     uint32_t stack[2][16];
 
-    uint32_t xram[DSP_XRAM_SIZE];
-    uint32_t yram[DSP_YRAM_SIZE];
-    uint32_t pram[DSP_PRAM_SIZE];
-    const void *pram_opcache[DSP_PRAM_SIZE];
-
-    uint32_t mixbuffer[DSP_MIXBUFFER_SIZE];
-
-    /* peripheral space, x:0xffff80-0xffffff */
-    uint32_t periph[DSP_PERIPH_SIZE];
+    /*
+     * JIT-hot scalars. These MUST stay ahead of the memory arrays:
+     * the ARM64 JIT addresses them as [x19, #offsetof] and the
+     * unscaled-immediate window is 4095 bytes for LDRB/STRB, 8190
+     * for LDRH/STRH and 16380 for LDR/STR (word). Past those the
+     * emitters synthesize a two-instruction ADD+access sequence for
+     * every reference. dsp56k_jit_arm64.c asserts the bounds at
+     * build time; dsp_state_diff()'s range table is cut from the
+     * adjacency below and must be re-cut with any reordering here.
+     */
 
     /* Misc */
     uint32_t loop_rep;      /* executing rep ? */
@@ -84,6 +85,48 @@ struct dsp_core_s {
     int16_t interrupt_ipl[4];
     uint16_t interrupt_is_pending[4];
 
+    /* Instructions per second */
+    uint32_t num_inst;
+
+    /* Length of current instruction */
+    uint32_t cur_inst_len; /* =0:jump, >0:increment */
+    /* Current instruction */
+    uint32_t cur_inst;
+
+    /* Self-modifying-code exit flag. Set by dsp56k_jit_invalidate()
+     * whenever a block is invalidated (which happens from inside a
+     * handler running under the JIT when it writes to P-space).
+     * Checked in each stub's exit-check epilogue; cleared in the
+     * JIT block prologue. Avoids the JIT continuing to execute stale
+     * instruction stubs that baked in pre-write pram words. */
+    uint8_t jit_exit_block_request;
+
+    /* "This block touched externally-visible I/O with side effects
+     * that aren't captured in dsp_core_t" flag. Set when a handler
+     * writes a peripheral register that triggers DMA against Xbox
+     * host RAM (concurrent with the main x86 CPU thread), or any
+     * other non-replayable side effect. Cleared in the JIT block
+     * prologue; read by the differential harness to skip the
+     * post-block byte-for-byte compare — diff mode's "snapshot →
+     * JIT → restore → interpreter → compare" only works when all
+     * inputs the handler observes are inside dsp_core_t. Has no
+     * effect when diff mode is off. */
+    uint8_t jit_skip_diff_compare;
+
+    /* End of the JIT-hot block. dsp_state_diff() compares
+     * [0, offsetof(jit_exit_block_request)) unconditionally and
+     * skips the two flag bytes above; keep them last here. */
+
+    uint32_t xram[DSP_XRAM_SIZE];
+    uint32_t yram[DSP_YRAM_SIZE];
+    uint32_t pram[DSP_PRAM_SIZE];
+    const void *pram_opcache[DSP_PRAM_SIZE];
+
+    uint32_t mixbuffer[DSP_MIXBUFFER_SIZE];
+
+    /* peripheral space, x:0xffff80-0xffffff */
+    uint32_t periph[DSP_PERIPH_SIZE];
+
     /* Back-pointer to owning DSPState (set by dsp_c.c) */
     void *opaque;
 
@@ -93,16 +136,9 @@ struct dsp_core_s {
 
     /* runtime data */
 
-    /* Instructions per second */
 #ifdef DSP_COUNT_IPS
     uint32_t start_time;
 #endif
-    uint32_t num_inst;
-
-    /* Length of current instruction */
-    uint32_t cur_inst_len; /* =0:jump, >0:increment */
-    /* Current instruction */
-    uint32_t cur_inst;
 
     char str_disasm_memory[2][50];     /* Buffer for memory change text in disasm mode */
     uint32_t disasm_memory_ptr;        /* Pointer for memory change in disasm mode */
@@ -138,26 +174,6 @@ struct dsp_core_s {
 
     /* JIT state (opaque DspJitState * — see hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c) */
     void *jit_state;
-
-    /* Self-modifying-code exit flag. Set by dsp56k_jit_invalidate()
-     * whenever a block is invalidated (which happens from inside a
-     * handler running under the JIT when it writes to P-space).
-     * Checked in each stub's exit-check epilogue; cleared in the
-     * JIT block prologue. Avoids the JIT continuing to execute stale
-     * instruction stubs that baked in pre-write pram words. */
-    uint8_t jit_exit_block_request;
-
-    /* "This block touched externally-visible I/O with side effects
-     * that aren't captured in dsp_core_t" flag. Set when a handler
-     * writes a peripheral register that triggers DMA against Xbox
-     * host RAM (concurrent with the main x86 CPU thread), or any
-     * other non-replayable side effect. Cleared in the JIT block
-     * prologue; read by the differential harness to skip the
-     * post-block byte-for-byte compare — diff mode's "snapshot →
-     * JIT → restore → interpreter → compare" only works when all
-     * inputs the handler observes are inside dsp_core_t. Has no
-     * effect when diff mode is off. */
-    uint8_t jit_skip_diff_compare;
 };
 
 /* Functions */

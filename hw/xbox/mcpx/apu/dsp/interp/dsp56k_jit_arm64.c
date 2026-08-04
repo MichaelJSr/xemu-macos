@@ -1332,16 +1332,37 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_SP_SCRATCH0  0
 #define OFF_SP_SCRATCH1  4
 
-/* Bound check: synthesized-address form (ADD imm12<<12 + LDR imm12*scale)
- * accepts offsets up to 16 MiB. dsp_core_t is ~78 KiB so we're safe. */
-QEMU_BUILD_BUG_ON(OFF_PC                > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_CUR_INST          > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_CUR_INST_LEN      > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_INSTR_CYCLE       > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_NUM_INST          > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_LOOP_REP          > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_IS_IDLE           > (16u * 1024u * 1024u));
-QEMU_BUILD_BUG_ON(OFF_INTERRUPT_COUNTER > (16u * 1024u * 1024u));
+/*
+ * Bound check. Correctness only needs the synthesized-address form
+ * (ADD imm12<<12 + access imm12*scale), good to 16 MiB. But every
+ * offset that escapes the *single-instruction* window costs an extra
+ * ADD at each of its emit sites, so dsp_cpu.h keeps the JIT-hot
+ * scalars ahead of the memory arrays and these assert that ordering
+ * holds. The windows are the unscaled byte limits of the widest
+ * access each field is emitted with: 4095 for LDRB/STRB, 8190 for
+ * LDRH/STRH, 16380 for LDR/STR word.
+ *
+ * OFF_YRAM is deliberately absent: yram sits past xram and does use
+ * the two-instruction form.
+ */
+#define OFF_WINDOW_B  4095u
+#define OFF_WINDOW_H  8190u
+#define OFF_WINDOW_W  16380u
+
+QEMU_BUILD_BUG_ON(OFF_IS_IDLE                  > OFF_WINDOW_B);
+QEMU_BUILD_BUG_ON(OFF_JIT_EXIT_BLOCK_REQ       > OFF_WINDOW_B);
+QEMU_BUILD_BUG_ON(OFF_JIT_SKIP_DIFF            > OFF_WINDOW_B);
+QEMU_BUILD_BUG_ON(OFF_INSTR_CYCLE              > OFF_WINDOW_H);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_COUNTER        > OFF_WINDOW_H);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_STATE          > OFF_WINDOW_H);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_PIPELINE_COUNT > OFF_WINDOW_H);
+QEMU_BUILD_BUG_ON(OFF_SR                       > OFF_WINDOW_H);
+QEMU_BUILD_BUG_ON(OFF_PC                       > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_CUR_INST                 > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_CUR_INST_LEN             > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_NUM_INST                 > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_LOOP_REP                 > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_PC_ON_REP                > OFF_WINDOW_W);
 
 /* --------------------------------------------------------------- *
  * Block translation
@@ -1491,6 +1512,12 @@ static void emit_store_sr_w(ArmEmit *e, int rs);
 #define OFF_M(n)      OFF_REG(DSP_REG_M0 + (n))
 #define OFF_XRAM      ((uint32_t)offsetof(dsp_core_t, xram))
 #define OFF_YRAM      ((uint32_t)offsetof(dsp_core_t, yram))
+
+/* The register file and the xram base are emitted as LDR/STR word and
+ * must stay in the single-instruction window (yram cannot — see the
+ * bound check above). */
+QEMU_BUILD_BUG_ON(OFF_REG(DSP_REG_MAX - 1) > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_XRAM > OFF_WINDOW_W);
 
 /*
  * Emit the slow-path BLR to dsp56k_jit_helper_calc_ea(dsp, ea_mode,
@@ -10307,9 +10334,12 @@ static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
 
     struct diff_range { size_t off; size_t end; bool gated; uint32_t bit; };
     const struct diff_range ranges[] = {
-        /* [0] Always: head through end of stack (is_gp..stack[1][15]). */
+        /* [0] Always: head through the JIT-hot scalar block
+         * (is_gp..cur_inst — pc, registers, stack, loop_rep,
+         * interrupt_*, num_inst, cur_inst_len, cur_inst). */
         { 0,
-          offsetof(dsp_core_t, xram), false, 0 },
+          offsetof(dsp_core_t, jit_exit_block_request), false, 0 },
+        /* skip jit_exit_block_request + jit_skip_diff_compare */
         /* [1] xram (WS_XRAM-gated) */
         { offsetof(dsp_core_t, xram),
           offsetof(dsp_core_t, yram), true, DSP56K_JIT_WS_XRAM },
@@ -10325,15 +10355,12 @@ static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
           offsetof(dsp_core_t, periph), true, DSP56K_JIT_WS_MIXBUFFER },
         /* [5] periph (WS_PERIPH-gated) */
         { offsetof(dsp_core_t, periph),
-          offsetof(dsp_core_t, loop_rep), true, DSP56K_JIT_WS_PERIPH },
-        /* [6] Always: loop_rep through interrupt_is_pending */
-        { offsetof(dsp_core_t, loop_rep),
+          offsetof(dsp_core_t, opaque), true, DSP56K_JIT_WS_PERIPH },
+        /* [6] Always: opaque back-pointer */
+        { offsetof(dsp_core_t, opaque),
           offsetof(dsp_core_t, read_peripheral), false, 0 },
-        /* skip read_peripheral + write_peripheral function pointers */
-        /* [7] Always: num_inst through cur_inst (end of runtime data) */
-        { offsetof(dsp_core_t, num_inst),
-          offsetof(dsp_core_t, str_disasm_memory), false, 0 },
-        /* skip disasm_* tail */
+        /* skip read_peripheral + write_peripheral function pointers,
+         * the disasm_* tail, and the jit_state pointer that follows it */
     };
 
     for (size_t r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
@@ -10418,6 +10445,52 @@ static void diff_report_failure(const uint32_t *pre_pram_window,
         field_idx = (uint32_t)((diff_off - offsetof(dsp_core_t, mixbuffer)) / 4);
         interp_word = interp->mixbuffer[field_idx];
         jit_word    = jit->mixbuffer[field_idx];
+    } else {
+        /* Scalars. These sit in the always-compared head range and
+         * used to report as "?" — name them so a divergence in the
+         * JIT-hot block is readable without an offsetof table.
+         * field_idx is the byte index inside the field; the printed
+         * words are the field's first 4 bytes (or fewer). */
+        static const struct {
+            size_t off;
+            size_t size;
+            const char *name;
+        } scalars[] = {
+#define DIFF_SCALAR(f) \
+    { offsetof(dsp_core_t, f), sizeof(((dsp_core_t*)0)->f), #f }
+            DIFF_SCALAR(is_gp),
+            DIFF_SCALAR(is_idle),
+            DIFF_SCALAR(cycle_count),
+            DIFF_SCALAR(instr_cycle),
+            DIFF_SCALAR(pc),
+            DIFF_SCALAR(loop_rep),
+            DIFF_SCALAR(pc_on_rep),
+            DIFF_SCALAR(interrupt_state),
+            DIFF_SCALAR(interrupt_instr_fetch),
+            DIFF_SCALAR(interrupt_save_pc),
+            DIFF_SCALAR(interrupt_counter),
+            DIFF_SCALAR(interrupt_ipl_to_raise),
+            DIFF_SCALAR(interrupt_pipeline_count),
+            DIFF_SCALAR(interrupt_ipl),
+            DIFF_SCALAR(interrupt_is_pending),
+            DIFF_SCALAR(num_inst),
+            DIFF_SCALAR(cur_inst_len),
+            DIFF_SCALAR(cur_inst),
+            DIFF_SCALAR(opaque),
+#undef DIFF_SCALAR
+        };
+        for (size_t i = 0; i < sizeof(scalars) / sizeof(scalars[0]); i++) {
+            if (diff_off <  scalars[i].off ||
+                diff_off >= scalars[i].off + scalars[i].size) {
+                continue;
+            }
+            size_t n = scalars[i].size > 4 ? 4 : scalars[i].size;
+            field = scalars[i].name;
+            field_idx = (uint32_t)(diff_off - scalars[i].off);
+            memcpy(&interp_word, (const uint8_t *)interp + scalars[i].off, n);
+            memcpy(&jit_word, (const uint8_t *)jit + scalars[i].off, n);
+            break;
+        }
     }
 
     fprintf(stderr,
