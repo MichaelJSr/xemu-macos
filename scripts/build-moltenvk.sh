@@ -19,7 +19,12 @@
 # packaging step, and measured no fps benefit over -O3 alone.
 set -euo pipefail
 
-MVK_PIN=98f35743467488e380317feec591f4d33d652f5f   # v1.4.2-rc1, 2026-07-19 (reports 1.4.2)
+# v1.4.2 final. Was v1.4.2-rc1 (98f3574346) from 2026-07-19 until the
+# final tag shipped: every local soak/A/B ran the rc while releases
+# vendored stock 1.4.1, so nothing validated the driver users load.
+# Both ends now name 1.4.2 (build.sh's XEMU_MOLTENVK_VERSION default is
+# the vendored side, and macOS CI asserts the bundled version matches).
+MVK_PIN=db66022459ffb663aa2b50f6b018bc2e124f5edf   # v1.4.2, 2026-08-04 (reports 1.4.2)
 MVK_DIR="${1:-$(dirname "$0")/../../MoltenVK}"
 MCPU="${XEMU_MVK_MCPU:-apple-m2}"
 

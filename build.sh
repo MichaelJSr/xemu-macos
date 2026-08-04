@@ -55,9 +55,15 @@ resolve_moltenvk() {
 # full vulkan/ set, so no Homebrew vulkan-headers dependency); pass
 # "dylib" to also install the dylib, or "headers" when a dylib exists
 # in a headerless system location.
+#
+# The default below is the single home for the expected MoltenVK
+# version: the macOS CI workflow reads it out of this file and asserts
+# the packaged bundle's provenance line reports the same version, so a
+# system dylib that shadows the vendored copy fails the job instead of
+# shipping an untested driver.
 vendor_moltenvk() {
     local what="$1"
-    local ver="${XEMU_MOLTENVK_VERSION:-1.4.1}"
+    local ver="${XEMU_MOLTENVK_VERSION:-1.4.2}"
     local tmp
     tmp="$(mktemp -d)"
     echo "Vendoring MoltenVK v${ver} (${what}) into ${lib_prefix}..."
@@ -122,6 +128,142 @@ setup_pgo() {
         exit 1
         ;;
     esac
+}
+
+# Post-build profile-staleness report (XEMU_PGO=use only). A profile
+# that no longer matches the source degrades silently: clang drops
+# guidance per function and the build stays green. A bare "any hash
+# mismatch" grep is not a detector — straight-line edits leave the
+# IR-PGO CFG hash unchanged, so small-but-real drift reads as zero —
+# so weight the diagnostics against the hot-function set and pair them
+# with a commits-since-retrain age on the hot paths. Warning only;
+# XEMU_PGO_STALE_FATAL=1 promotes a hot-path mismatch to a build
+# failure once the signal is known quiet.
+#
+# awk reads build.log directly and carries every counter to END: no
+# pipe and no early-exit reader, so pipefail has nothing to misreport
+# (the trap that reddened CI twice — see the archaeology 8.4/8.6
+# entries).
+check_pgo_staleness() {
+    [ "${XEMU_PGO:-}" = "use" ] || return 0
+    [ -f build.log ] || return 0
+
+    local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+    local summary mism hotmism unpro hotunpro hotnames
+    summary=$(awk '
+        {
+            name = ""; kind = ""
+            i = index($0, "(hash mismatch) ")
+            if (i > 0) {
+                split(substr($0, i + 16), a, " "); name = a[1]; kind = "mismatch"
+            } else {
+                i = index($0, "no profile data available for function ")
+                if (i > 0) {
+                    split(substr($0, i + 39), a, " ")
+                    name = a[1]; kind = "unprofiled"
+                }
+            }
+            if (name == "") { next }
+            gsub(/[^A-Za-z0-9_].*$/, "", name)
+            if (name == "") { next }
+            if (seen[kind "|" name]++) { next }
+            hot = (name ~ /^(cpu_exec|helper_|tlb_|tcg_|pgraph_)/)
+            if (kind == "mismatch") {
+                mism++
+                if (hot) {
+                    hotmism++
+                    if (length(hotlist) < 300) { hotlist = hotlist " " name }
+                }
+            } else {
+                unpro++
+                if (hot) { hotunpro++ }
+            }
+        }
+        END { printf "%d %d %d %d%s\n", mism+0, hotmism+0, unpro+0, hotunpro+0, hotlist }
+    ' build.log)
+    read -r mism hotmism unpro hotunpro hotnames <<<"${summary}"
+
+    # Retrain point, in preference order: explicit override, the commit
+    # that last touched the committed profile, else the commit that was
+    # HEAD when the newest profile artifact was written.
+    local retrain_ref="" retrain_desc="unknown" commits="n/a" newest ts
+    if [ -n "${XEMU_PGO_RETRAIN_REF:-}" ]; then
+        retrain_ref="${XEMU_PGO_RETRAIN_REF}"
+    elif git -C "${project_source_dir}" rev-parse --git-dir >/dev/null 2>&1; then
+        retrain_ref=$(git -C "${project_source_dir}" log -1 --format=%H \
+                      -- pgo 2>/dev/null || true)
+        if [ -z "${retrain_ref}" ]; then
+            newest=$(ls -t "${pgo_dir}"/*.profdata "${pgo_dir}"/*.profraw \
+                     2>/dev/null | head -1 || true)
+            if [ -n "${newest}" ]; then
+                ts=$(stat -f %m "${newest}" 2>/dev/null || \
+                     stat -c %Y "${newest}" 2>/dev/null || true)
+                if [ -n "${ts}" ]; then
+                    retrain_ref=$(git -C "${project_source_dir}" log -1 \
+                                  --until="@${ts}" --format=%H 2>/dev/null || true)
+                fi
+            fi
+        fi
+    fi
+    if [ -n "${retrain_ref}" ]; then
+        retrain_desc=$(git -C "${project_source_dir}" log -1 \
+                       --format='%h %ad' --date=short "${retrain_ref}" \
+                       2>/dev/null || true)
+        # Only claim a count when the ref actually resolved: `git log |
+        # wc -l` prints 0 even when git errored out, which would read as
+        # "freshly retrained" on a tree git can't inspect.
+        if [ -n "${retrain_desc}" ]; then
+            commits=$(git -C "${project_source_dir}" log --oneline \
+                      "${retrain_ref}..HEAD" -- accel/tcg tcg target/i386 \
+                      hw/xbox 2>/dev/null | wc -l | tr -d ' ' || true)
+        fi
+    fi
+    [ -n "${retrain_desc}" ] || retrain_desc="unknown"
+
+    echo "PGO staleness: retrained at ${retrain_desc:-unknown}, ${commits:-n/a} commits since on hot paths (accel/tcg tcg target/i386 hw/xbox); ${mism} CFG-hash mismatches (${hotmism} hot), ${unpro} unprofiled functions (${hotunpro} hot)"
+    if [ "${hotmism:-0}" -gt 0 ]; then
+        echo "*** PGO WARNING: hot-path functions lost their profile to a CFG-hash mismatch:${hotnames}"
+        echo "*** Retrain before shipping: XEMU_PGO=generate ./build.sh, run the corpus, XEMU_PGO=use ./build.sh"
+        if [ "${XEMU_PGO_STALE_FATAL:-0}" = "1" ]; then
+            echo "*** XEMU_PGO_STALE_FATAL=1 -> failing the build." >&2
+            exit 1
+        fi
+    fi
+}
+
+# Post-build flag-order sanity for the -fzero-call-used-regs override.
+# clang is last-flag-wins, so the fork's '=skip' only takes effect where
+# it lands after meson's global '=used-gpr' on the command line. Read
+# the compile database meson generated instead of trusting the order in
+# which this script assembles flags.
+check_zero_call_regs_order() {
+    [ "${zero_call_regs_override:-0}" = "1" ] || return 0
+    [ -f build/compile_commands.json ] || return 0
+    python3 - build/compile_commands.json <<'PYEOF' || true
+import json, sys
+
+ok = bad = 0
+first = None
+for entry in json.load(open(sys.argv[1])):
+    last = None
+    for tok in entry.get("command", "").split():
+        if tok.startswith("-fzero-call-used-regs="):
+            last = tok
+    if last is None:
+        continue
+    if last == "-fzero-call-used-regs=skip":
+        ok += 1
+    else:
+        bad += 1
+        if first is None:
+            first = (entry.get("file", "?"), last)
+if bad:
+    print("*** Warning: -fzero-call-used-regs=skip does not win in %d of %d "
+          "compile lines (first: %s keeps %s); register zeroing is still "
+          "active there." % (bad, ok + bad, first[0], first[1]))
+else:
+    print("Flag check: -fzero-call-used-regs=skip wins in %d compile lines." % ok)
+PYEOF
 }
 
 package_macos() {
@@ -281,6 +423,7 @@ debug_opts=''
 build_cflags=''
 default_job_count='12'
 sys_ldflags=''
+zero_call_regs_override=0
 
 get_job_count () {
 	if command -v 'nproc' >/dev/null
@@ -543,8 +686,42 @@ case "$platform" in # Adjust compilation options based on platform
                      "using -mcpu=${arm_cpu}."
               fi
               echo "ARM64 -mcpu=${arm_cpu} (auto-detected from '${brand}')"
+              if [ "${arm_cpu}" != "apple-m1" ]; then
+                # Auto-detect follows the build host, so a newer machine
+                # silently raises the shipped ISA baseline above the M1
+                # floor the README advertises — SIGILL-on-launch with no
+                # CI signal. Fine for a personal build; the release legs
+                # pin XEMU_ARM_CPU=apple-m1 so they can never drift.
+                echo "*** Warning: -mcpu=${arm_cpu} raises the ISA baseline above" \
+                     "the advertised apple-m1 floor."
+                echo "*** Set XEMU_ARM_CPU=apple-m1 for anything you redistribute."
+              fi
             fi
             sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast"
+        fi
+
+        # Upstream's hardening block (meson.build) applies
+        # -fzero-call-used-regs=used-gpr globally with no opt-out, so
+        # every function return re-zeroes its used GPRs: 3.4-3.8% of
+        # this fork's dynamic compiled-instruction stream, and it also
+        # defeats tail-call optimization (bl+ret where a b would do).
+        # xemu runs a W^X JIT and is not a sandbox boundary, so the
+        # ROP-gadget hardening is not worth the interpreter cost.
+        # clang is last-flag-wins and extra-cflags land after meson's
+        # global flags, so appending '=skip' here disables it;
+        # check_zero_call_regs_order verifies that against the compile
+        # database after the build. -ftrivial-auto-var-init=zero is
+        # deliberately left alone. Default keeps upstream's register
+        # zeroing: the 2026-08-04 5-pair A/B read mean +0.52 fps for
+        # skip but sign-mixed 3+/2- — below the pre-registered evidence
+        # bar (see the optimizations.md Failed row). XEMU_HARDENING=0
+        # opts into the skip arm for retests.
+        if [ "${XEMU_HARDENING:-1}" = "0" ]; then
+            sys_cflags="${sys_cflags:-}${sys_cflags:+ }-fzero-call-used-regs=skip"
+            zero_call_regs_override=1
+            echo "Hardening: -fzero-call-used-regs disabled (XEMU_HARDENING=0 experimental arm)"
+        else
+            echo "Hardening: upstream -fzero-call-used-regs=used-gpr kept (default)"
         fi
 
         profdata_prefix="xcrun "
@@ -632,5 +809,8 @@ set -x # Print commands from now on
     "$@"
 
 time make -j"${job_count}" ${target} 2>&1 | tee build.log
+
+check_pgo_staleness
+check_zero_call_regs_order
 
 "${postbuild}" # call post build functions

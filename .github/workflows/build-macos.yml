@@ -71,6 +71,29 @@ jobs:
           mkdir -p ${LTO_CACHE_DIR}
         fi
         echo "XEMU_BUILD_OPTIONS=${opts[*]}" >> "$GITHUB_ENV"
+        # Distribution ISA floor. build.sh's -mcpu auto-detect follows
+        # the build host, so a GitHub runner-silicon refresh would
+        # silently raise the baseline above the apple-m1 floor the
+        # README advertises — SIGILL on launch for M1 users, with no CI
+        # signal. Pin it here; build.sh ignores it on the x86_64 leg.
+        # (apple-m1 vs apple-m2 codegen was measured nil on this tree,
+        # so this costs nothing today; it is a guard, not a tuning.)
+        echo "XEMU_ARM_CPU=apple-m1" >> "$GITHUB_ENV"
+        echo "ISA floor: XEMU_ARM_CPU=apple-m1"
+        # Single home for the expected MoltenVK version: build.sh's own
+        # vendoring default. The packaged bundle's provenance line is
+        # asserted against it after the build, so a system/Homebrew
+        # dylib shadowing the vendored release fails the job instead of
+        # shipping a driver nothing was validated against.
+        mvk_expected=$(awk -F'XEMU_MOLTENVK_VERSION:-' \
+          '/XEMU_MOLTENVK_VERSION:-/ { split($2, a, "}"); print a[1]; exit }' \
+          build.sh)
+        if [[ -z "$mvk_expected" ]]; then
+          echo "::error::could not derive the XEMU_MOLTENVK_VERSION default from build.sh"
+          exit 1
+        fi
+        echo "MVK_EXPECTED=${mvk_expected}" >> "$GITHUB_ENV"
+        echo "MoltenVK expected version: ${mvk_expected}"
         # arm64 release builds use the committed PGO profile
         # (pgo/default.profdata, trained on the Azurik savestate corpus;
         # measured +9.4% fps on the heavy scene). Profiles are
@@ -81,7 +104,31 @@ jobs:
           echo "XEMU_PGO=use" >> "$GITHUB_ENV"
         fi
     - name: Compile
-      run: ./build.sh -a ${{ matrix.arch }} ${XEMU_BUILD_OPTIONS}
+      # Teed to a file so the packaging-time MoltenVK provenance line
+      # (printed by package_macos, after make's own build.log tee ends)
+      # survives for the assertion below. `set -o pipefail` is
+      # mandatory here: without it the tee's exit status would mask a
+      # failed build.
+      run: |
+        set -o pipefail
+        ./build.sh -a ${{ matrix.arch }} ${XEMU_BUILD_OPTIONS} 2>&1 | tee compile.log
+    - name: Assert bundled MoltenVK version
+      # build.sh's tier walk (vendored -> /usr/local -> Homebrew) means
+      # a stray system install can shadow the vendored release, and
+      # driver drift between the tested binary and the released binary
+      # is exactly the channel the pink-tile class escaped through.
+      # awk reads the whole log — no early-exit reader to trip pipefail.
+      run: |
+        got=$(awk '/^Bundling MoltenVK from /{ if (match($0, /\(version [^,]+,/)) v = substr($0, RSTART + 9, RLENGTH - 10) } END { print v }' compile.log)
+        echo "bundled MoltenVK: '${got}' (expected '${MVK_EXPECTED}')"
+        if [[ -z "$got" ]]; then
+          echo "::error::no 'Bundling MoltenVK' provenance line in the build log"
+          exit 1
+        fi
+        if [[ "$got" != "$MVK_EXPECTED" ]]; then
+          echo "::error::bundled MoltenVK ${got} does not match the expected ${MVK_EXPECTED}"
+          exit 1
+        fi
     - name: Run xbox test suite
       # arm64 legs only: macos-15 runners are arm64-native, so only the
       # arm64 build's test binaries execute natively (the x86_64 leg is a

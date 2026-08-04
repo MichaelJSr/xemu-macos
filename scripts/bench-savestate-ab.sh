@@ -60,6 +60,20 @@
 #   --keep-work          keep the work dir (app/hdd clones) afterwards
 #   --no-screenshot      skip the mid-run visual artifact check
 #   --e-value V          value of ENV_VAR in the E arm (default 1; B stays 0)
+#   --isolate-caches     give the run its own shader/pipeline cache
+#                        (env: XEMU_BENCH_ISOLATE_CACHES=1)
+#
+# Cache isolation. -config_path moves the CONFIG file only; xemu's data
+# base path (spirv_cache_v*/, pipeline_cache.bin) is still
+# SDL_GetPrefPath, so by default both arms share the user's warm
+# caches. That stays the DEFAULT — it is what a player has, and it
+# keeps existing baselines comparable. Pass --isolate-caches when the
+# thing under test is the shader compiler or pipeline creation itself:
+# the scratch config is planted as a portable-mode marker inside the
+# CLONED bundle's Contents/Resources, so the base path becomes the
+# clone. Caches then start cold at batch start, warm during the warmup
+# run, and are shared identically by both arms. Costs one cold shader
+# compile pass in the warmup (~671 shaders, lazy, 2-10 ms each).
 #
 # Analysis note: baseline reproducibility of this protocol measured at
 # +/-0.02 fps on static scenes. Default 3 pairs is a smoke bar; a
@@ -84,9 +98,11 @@ BOOT_WAIT=25
 KEEP_WORK=0
 SCREENSHOT=1
 E_VALUE=1
+ISOLATE_CACHES=${XEMU_BENCH_ISOLATE_CACHES:-0}
 while (( $# > 0 )); do
   case "$1" in
     --dry-run)     DRY_RUN=1 ;;
+    --isolate-caches) ISOLATE_CACHES=1 ;;
     --draws-band)  DRAWS_BAND=$2; shift ;;
     --cv-max)      CV_MAX=$2; shift ;;
     --app)         APP_SRC=$2; shift ;;
@@ -96,7 +112,7 @@ while (( $# > 0 )); do
     --keep-work)   KEEP_WORK=1 ;;
     --no-screenshot) SCREENSHOT=0 ;;
     --e-value)     E_VALUE=$2; shift ;;
-    -h|--help)     sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     --*)           echo "unknown flag: $1" >&2; exit 2 ;;
     *)             pos+=("$1") ;;
   esac
@@ -186,6 +202,22 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+
+# ---- optional shader/pipeline cache isolation -----------------------------
+# Default OFF: both arms share the user's warm spirv_cache_v*/ and
+# pipeline_cache.bin, which is what today's baselines were taken
+# against. ON plants the scratch config where portable-mode detection
+# looks (SDL_GetBasePath() == the CLONED bundle's Contents/Resources,
+# ui/xemu-settings.cc), which moves the whole data base path into the
+# work dir — never dist/xemu.app, so the hands-off rule still holds.
+if (( ISOLATE_CACHES )); then
+  mkdir -p $APP/Contents/Resources
+  cp $CONFIG $APP/Contents/Resources/xemu.toml
+  CONFIG=$APP/Contents/Resources/xemu.toml
+  echo "bench: cache isolation ON (base path $APP/Contents/Resources; cold at batch start, warmed by the warmup run)"
+else
+  echo "bench: cache isolation OFF (shader/pipeline caches shared with the user's base path)"
+fi
 
 # ---- launch-path parity: canonical MVK_CONFIG_* (mirrors main()) ----------
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0
@@ -312,6 +344,7 @@ meta = {
     "snapshot": "$SNAP", "env_var": "$VAR", "pairs": int("$PAIRS"),
     "secs": int("$SECS"), "draws_band": "$DRAWS_BAND",
     "cv_max": float("$CV_MAX"), "boot_wait": int("$BOOT_WAIT"),
+    "cache_isolation": "on" if "$ISOLATE_CACHES" == "1" else "off",
     "interleave": "${(j:,:)INTERLEAVE}".split(","),
   },
   "binary": {
