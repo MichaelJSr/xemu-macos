@@ -25,9 +25,10 @@ about any of it in public without overselling. Every fact below was
 checked against the repo on 2026-07-04 (re-check commands in "Provenance
 and maintenance"). Repo-state pins (commit count, HEAD, latest tag), the
 §2.8/§3.5 resolutions, and the epilogue's vertex-transient status were
-refreshed 2026-07-11 at `7e2e6e7256`. Historical fps numbers are dated
-session measurements, cited as recorded history, not re-run for this
-skill.
+refreshed 2026-07-11 at `7e2e6e7256`. §2.5's closure, its DSP-JIT line
+anchors, and the `settled` status row were added 2026-08-04 at
+`f4bb867d3c`. Historical fps numbers are dated session measurements,
+cited as recorded history, not re-run for this skill.
 
 > **RANKING ADDENDUM (2026-07-04 evening, campaign session at
 > `a045dfc780` — supersedes the item-1 pointer and re-ranks the top of
@@ -164,6 +165,29 @@ skill.
 > sub-page arm (b) held (~2% ceiling vs Class-5 risk). F8 floor at the
 > session close: 37.2-38.2 real fps @ ~740 draws/flip.
 
+> **RANKING ADDENDUM 4 (2026-08-04, fork-wide optimization audit at
+> `f4bb867d3c` — `docs/fork-optimization-audit-2026-08.md`).** 49
+> agents, 40 findings, each adversarially verified: 8 confirmed, 17
+> plausible, 15 refuted. Effect on this list:
+> (1) **Item 5 (DSP parmove+ALU fusion) is SETTLED** — instruction-neutral
+> by construction; the static count is in §2.5 and the ledger row now
+> forbids the eligibility counter it used to propose.
+> (2) **The rest of the ranked list is CURRENT.** A re-rank one of the
+> audit's own agents proposed (close items 2 and 8, demote 1 and 4,
+> promote 3) was **refuted** in verification: every status change it
+> wanted is already recorded here, in `docs/roadmap.md`, or in the
+> ledger — "the drift it saw was its own misreading of *landed-dark ≠
+> closed*" (audit §4/§5). Do not re-open that argument without new
+> receipts.
+> (3) **A sibling closure page exists**:
+> `docs/lockless-mmio-verdict.md` closes archaeology 7.5's reopen
+> condition on arithmetic (residual < 0.07% of a core) rather than by
+> building PMC/PCRTC/PTIMER lockless.
+> (4) The audit's own candidates are **not** frontier entries — they are
+> constant-factor work gated on `docs/roadmap.md`'s bars. Nothing in it
+> moves the §1 bar's "measured leadership in real titles" clause, which
+> still has no published number.
+
 ## When NOT to use this skill
 
 | Need | Use instead |
@@ -229,6 +253,7 @@ Status vocabulary:
 | **candidate** | A mechanism is already sketched in-repo — implement and measure |
 | **needs-theory** | Premise unvalidated (no evidence the cost is real, or no hook exists) — investigate before implementing |
 | **resolved-verify** | Code suggests this was already fixed by a later change than the one documenting it — needs one confirming measurement, not new design |
+| **settled** | Closed with arithmetic or a measurement that bounds the win at ~0 — the entry stays as the recorded negative, and only its stated reopen condition revives it |
 | **blocked** | Foreclosed by a third-party constraint — track, don't attempt |
 
 | Rank | Entry | Status | Why ranked here |
@@ -237,7 +262,7 @@ Status vocabulary:
 | 2 | Push-model present handoff | landed-dark (2026-07-11) | Shipped behind `XEMU_PUSH_PRESENT=1` (Metal, interp off): present-handoff blocks 601/interval → 0, flips/s identical, 47k-comparison refuter clean. Dark pending default-on case (interp-off users only) |
 | 3 | Windows real-hardware Vulkan validation + provoking-vertex closure | open | Gates any same-hardware-class comparison and an unvalidated code path |
 | 4 | Frame-interpolation real depth (flip-time zeta snapshot) | candidate | Direct quality lever on the exact feature the bar names |
-| 5 | DSP parmove+ALU fusion | needs-theory | Audio headroom; explicitly deferred pending a workload that hits it |
+| 5 | DSP parmove+ALU fusion | **settled (2026-08-04)** | Instruction-neutral by construction — the fold saves 0 insns in every source class (§2.5). Kept as the recorded negative, not as work |
 | 6 | BINK video via VideoToolbox | needs-theory | No in-repo hook yet; CPU-bound premise itself unmeasured |
 | 7 | PAL 50 Hz guest vblank | open | Compat breadth, not a fluidity lever for NTSC fixture titles |
 | 8 | Occlusion-report STALLED drains | resolved | Confirmed dead under shipped defaults (`finish_stalled = 0`); stale README bullet pruned |
@@ -405,20 +430,56 @@ flip-snapshotted real depth, and the added blit's cost is measured in
 ms/flip — both on record before proposing the snapshot variant replace the
 live-read opt-in as default.
 
-### 2.5 DSP parmove+ALU fusion — rank 5, needs-theory
+### 2.5 DSP parmove+ALU fusion — rank 5, SETTLED 2026-08-04
 
-**Why it falls short.** `docs/dsp-jit-design.md`'s "8 (remaining)" row
-defers this explicitly: with A/B/X/Y/SR pinning already landed, "the
-remaining fold candidates are narrow," and the closest existing trigger
-counters (`alu_ccr_nz_skipped`, `alu_ccr_eu_skipped`) are **zero** on the
-Azurik audio workload — the workload this fork's fixtures actually
-exercise doesn't hit the shape this would fix.
+**Closed as instruction-neutral by construction.** Two independent
+closures now stack. The first (2026-07-18, ledger Settled table) killed
+the *container*: `alu_ccr_nz_skipped` / `alu_ccr_eu_skipped` read **0**
+on both F8 and the Azurik audio mix, and the APU thread runs ~18%
+utilized off every critical path, so the fold's fps ceiling is ~0
+whatever it saves locally. The second (2026-08-04 fork-wide audit,
+`docs/fork-optimization-audit-2026-08.md` §4) kills the *mechanism*: it
+saves nothing locally either.
 
-**Asset — with a register-budget constraint.** The pin infrastructure and
+**The static count.** The fold `docs/dsp-jit-design.md`'s "8
+(remaining)" row proposes is: when the parmove's `save_reg_N` holds a
+value also written to memory and the ALU doesn't touch the source
+register, stream source → destination directly instead of staging it
+across the ALU. Price it against the emitter that would have to change,
+`emit_pm_read_reg` in
+`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (~line 2095 and its
+next ~80 lines as of 2026-08-04 — that file is under active JIT work,
+so re-derive with
+`grep -n -A85 "static void emit_pm_read_reg"` rather than trusting the
+number). Its three source classes are exhaustive:
+
+| Parmove source (branch of `emit_pm_read_reg`) | Emitted read today | Emitted read if folded | Saved |
+|---|---|---|---|
+| X0/X1/Y0/Y1 — pinned (`emit_xy_pin_read_w`) | 1 `UBFX` from the x20/x21 pin | 1 `UBFX` from the same pin, at the write site | **0** |
+| A / B (the `DSP_REG_A`/`DSP_REG_B` branch) | the limited-24-bit block: SR.S0 test, sign-extension compare, saturate select with SR.L write-through, `pm_read_accu24` BLR on non-zero scaling | the identical block, relocated | **0** |
+| everything else (`emit_ldr_w_any` fallback) | 1 `LDR` | 1 `LDR` | **0** |
+
+There is no staging instruction to delete: `emit_pm_read_reg` writes its
+callee-saved destination (x23/x24/x25) directly, and those registers
+survive the ALU call for free. So even a **100%-eligibility reading
+would authorize a 0-instruction win** — which is exactly why the
+eligibility counter the ledger row used to propose must *not* be built.
+(The A/B class additionally cannot legally move: its limited read has an
+SR.L side effect ordered before the ALU.)
+
+**Narrowed reopen condition.** A non-audio DSP program whose parmove
+sources are neither pinned nor A/B — and even then, re-derive a
+*nonzero* static delta from the table above before writing a counter or
+an emitter. All three of today's classes are 0; a reopen has to break
+that arithmetic first, not merely find a hot shape.
+
+**What remains true — the register-budget constraint.** The pin infrastructure and
 validation scaffolding already exist, but `x28` is NOT free: it now holds
 the **SR pin** (`DSP56K_JIT_SR_PIN_REG 28`,
-`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1452`; prologue comment at
-:9401 "x28 = SR pin"). No free callee-saved GPR remains — a fusion emitter
+`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1473` as of 2026-08-04,
+previously quoted as :1452; the prologue comment "x28 = SR pin" moves
+with the file — `grep -n "x28 = SR pin"`). No free callee-saved GPR
+remains — a fusion emitter
 must either share the existing pins or add spill/reload discipline, and
 one that clobbers x28 silently corrupts SR semantics.
 `docs/dsp-jit-design.md`'s former "x28 remains free for future fusion
@@ -428,24 +489,21 @@ no-free-GPR constraint.
 `XEMU_DSP_JIT_STATS`/`XEMU_DSP_JIT_DIFF=N` still provide bit-exact
 validation scaffolding at zero new tooling cost.
 
-**Steps.** (1) Read the design doc's "8 (remaining)" row for the
-already-scoped narrow case (pm_N families where the parmove's `save_reg_N`
-holds the value also written to memory). (2) Run `XEMU_DSP_JIT_STATS=1`
-against a DSP-heavy scene that isn't Azurik's audio mix and check whether
-a fusion-eligible shape is ever nonzero — the design doc is explicit this
-is deferred "until profiling shows a specific shape hot," and that
-evidence doesn't exist yet. (3) Only if step 2 finds a hot shape: implement
-the narrow fold for that `pm_N` family with an explicit register strategy
-decided up front — `x28` is unavailable (it pins SR; see the Asset note),
-so the fold must share existing pins or spill/reload — validated with
-`XEMU_DSP_JIT_DIFF=1` over a multi-minute run.
+**Steps: none — this is a recorded negative, not work.** The old step
+list ("run `XEMU_DSP_JIT_STATS` on a non-Azurik DSP workload, then
+implement the narrow fold for the hot `pm_N` family") is superseded: a
+hot shape is no longer sufficient, because the fold that shape would
+enable emits the same instruction count. If the reopen condition above
+ever fires, step 1 is the static-delta re-derivation against
+`emit_pm_read_reg`, and only a nonzero delta earns a counter. Any
+emitter that eventually follows still owes the unchanged register
+strategy (share the pins or spill — `x28` is the SR pin) and
+`XEMU_DSP_JIT_DIFF=1` clean over a multi-minute run.
 
-**Milestone.** `XEMU_DSP_JIT_STATS` on a real workload shows a nonzero
-fusion-eligible count, the fused implementation passes
-`XEMU_DSP_JIT_DIFF=1` with zero mismatches over a multi-minute run, and
-`XEMU_APU_PROF` shows a measured utilization-% drop. **Stays needs-theory
-until step 2 produces a nonzero count** — don't implement speculatively
-against a workload that doesn't exercise it.
+**Milestone.** None by design — settled. The reopen milestone is an
+arithmetic one, not a benchmark: a source class whose read cost differs
+between the pre-ALU and post-ALU emission sites, written down with its
+instruction counts, before any code is touched.
 
 ### 2.6 BINK video via VideoToolbox — rank 6, needs-theory
 
@@ -789,7 +847,8 @@ Re-run before trusting a number or status label here after the tree moves:
 - STALLED resolved status: `grep -n "VK_FINISH_REASON_STALLED" hw/xbox/nv2a/pgraph/vk/reports.c` (expect exactly one caller — `reports.c:322` as of 2026-07-11 — gated by `sync_mode`/`XEMU_REPORTS_SYNC`)
 - README/commit fps figures agree (reconciled 2026-07-11): `grep -n "38.57" README.md; git show --format='%B' -s 6bfbc22863 | grep -i "fps\|144%"` (a reappearing `35.6`/`2.25x` in README is new drift)
 - MTLResidencySet still blocked: `grep -n -A6 "Phase 5 note" hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m`
-- DSP JIT fusion still deferred: `grep -n "8 (remaining)" docs/dsp-jit-design.md`; x28's real owner is the SR pin (design-doc "x28 remains free" rows corrected 2026-07-11): `grep -n "DSP56K_JIT_SR_PIN_REG" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- DSP JIT fusion settled (§2.5, 2026-08-04): the three-class read table re-derives from `grep -n -A85 "static void emit_pm_read_reg" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (expect an A/B branch, an `emit_xy_pin_read_w` 1-UBFX branch, and an `emit_ldr_w_any` fallback — nothing staged); design-doc row still reads deferred: `grep -n "8 (remaining)" docs/dsp-jit-design.md`; x28's real owner is the SR pin: `grep -n "DSP56K_JIT_SR_PIN_REG 28" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- Lockless-MMIO closure still matches the code it argues from: `grep -n "memory_region_enable_lockless_io" hw/xbox/nv2a/nv2a.c hw/xbox/mcpx/apu/apu.c` (4 blocks) and `grep -n "nv2a_update_irq" hw/xbox/nv2a/pmc.c hw/xbox/nv2a/pcrtc.c hw/xbox/nv2a/ptimer.c` (inline IRQ drive = the wall; `docs/lockless-mmio-verdict.md`)
 - Provoking-vertex gating still capability-based: `grep -n "supports_geometry_shaders =" hw/xbox/nv2a/pgraph/vk/instance.c`
 - BINK still has no in-repo hook: `grep -rliE '\bbink\b' --include='*.c' --include='*.h' .` (expect 0 hits; a loose `grep -rli bink` additionally hits `include/libdecnumber/` substring noise)
 - Upstream still lacks fork-only config keys: `git show upstream/master:config_spec.yml | grep -n "dsp_jit:\|metalfx_mode:\|frame_interpolation:"` (expect no matches)

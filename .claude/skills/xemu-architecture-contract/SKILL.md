@@ -16,7 +16,8 @@ description: >-
   NUM_FLIGHT_SLOTS, deferred eviction, visibility buffer, prefill,
   PREFILL_METAL_COMMAND_BUFFERS, page-granular dirty tracking, XEMU_VTX_EXACT,
   dsp_want_external_jit_engine, DSPOps, register pinning, PIN_AUDIT, W^X,
-  pull-model present, nv2a_get_present_frame, BQL, pfifo_kick.
+  push-present ring, XEMU_PUSH_PRESENT, pull-model present,
+  nv2a_get_present_frame, BQL, pfifo_kick.
 ---
 
 # xemu-macos architecture contract
@@ -110,7 +111,7 @@ processing unit (voice processor + two DSP56300 cores).
 | 5 | DSP engine mediation: two JITs, one precedence rule |
 | 6 | JIT W^X contract on Apple Silicon |
 | 7 | Register-pinning write-through invariant (DSP JIT) |
-| 8 | Present handoff is pull-model, off the PFIFO thread |
+| 8 | Present handoff off the PFIFO thread: push ring by default, pull as fallback |
 | 9 | Clock policy: `QEMU_CLOCK_REALTIME` is monotonic; `QEMU_CLOCK_HOST` is wall-clock — naming trap |
 | 10 | BQL discipline: never block while holding it |
 | 11 | Launch-path parity: `Info.plist` and `main()` must agree |
@@ -614,50 +615,87 @@ incident.
 
 ---
 
-## Invariant 8 — Present handoff is pull-model, off the PFIFO thread
+## Invariant 8 — Present handoff runs off the PFIFO thread: push ring by default, pull as the fallback
 
-**Statement.** Pull is the default and the universal fallback: every UI
-frame, `nv2a_get_present_frame()` performs one synchronous round trip to
+> Corrected 2026-08-04: this invariant said pull was the default. Push
+> has been default-ON since 2026-07-12 (owner promotion). Statement,
+> evidence anchors and escape hatch below are re-derived against the
+> current tree; the earlier text described the pre-promotion shape.
+
+**Statement.** The **push ring is the default** on the Metal
+presentation backend, and pull is the universal fallback. Push: at flip
 the PFIFO thread (NV2A's command-processing thread — see the glossary
-note in the architecture diagram) and blocks until PFIFO answers. Since
-2026-07-11 there is a default-OFF push-model alternative
-(`XEMU_PUSH_PRESENT=1`, Metal backend only): at flip PFIFO publishes this
-flip's present *schedule* into a leaf-mutex-guarded **ring** of
-`{texture/IOSurface, shared event + value, frame_seq, hold, generation}`
-entries — one entry with interpolation off, or the paced sub-flip steps
-(the interpolated midpoint step(s) then the real frame) with
-interpolation on — and the UI consumes one step per frame with no kick
-and no wait, in `frame_seq` order, pacing the steps GPU-side via
-`presentDrawable:afterMinimumDuration:`. Consumption is a monotonic
-cursor (a consumed step is never resurrected; when the UI falls behind
-the ring drops its oldest entries, the same content the pull path drops
-when a new flip lands before the UI reads). Startup-before-first-publish
-and the GL backend fall back to pull. The GPU-side ordering contract is
-unchanged in every model: the UI encodes its wait on the frame's
-`MTLSharedEvent` value before sampling, and interpolated outputs the GPU
-hasn't finished are gated by that same shared-event value.
+note in the architecture diagram) publishes this flip's present
+*schedule* into a leaf-mutex-guarded **ring** of `{texture/IOSurface,
+shared event + value, frame_seq, hold, generation}` entries — one entry
+with interpolation off, or the paced sub-flip steps (the interpolated
+midpoint step(s) then the real frame) with interpolation on — and the UI
+consumes one step per frame with no kick and no wait, pacing the steps
+GPU-side via `presentDrawable:afterMinimumDuration:`. Consumption is a
+monotonic cursor (a consumed step is never resurrected; when the UI
+falls behind the ring drops its oldest entries, the same content the
+pull path drops when a new flip lands before the UI reads). Consumption
+is FIFO up to a **bounded catch-up debt**: above `push_present_max_debt()`
+unconsumed steps the consumer jumps to the newest unconsumed *real*
+frame — the pull path's freshest-frame semantics — and counts the
+skipped steps. Pull: `nv2a_get_present_frame()` performs one synchronous
+round trip to the PFIFO thread and blocks until PFIFO answers; it runs
+whenever push is off (`XEMU_PUSH_PRESENT=0`), on the GL backend, without
+the Metal-objects extension, and before the first publish (startup /
+post-resize). The GPU-side ordering contract is unchanged in every
+model: the UI encodes its wait on the frame's `MTLSharedEvent` value on
+the command buffer **before** the drawable render pass is opened, and
+interpolated outputs the GPU hasn't finished are gated by that same
+shared-event value.
 
-**Evidence.** `nv2a_get_present_frame()`
-(`hw/xbox/nv2a/pgraph/pgraph.c:443-460`) takes `pg->renderer_lock`,
+**Evidence.** The default gate is `pgraph_vk_push_present_enabled()`
+(`hw/xbox/nv2a/pgraph/vk/display.c:95-121`): `XEMU_PUSH_PRESENT` is read
+once and only `"0"` turns push off — "Default ON since 2026-07-12 (owner
+promotion)" — then Metal backend and `metal_objects_extension_enabled`
+are required. The producer is
+`pgraph_vk_present_schedule_publish()` (`display.c:165`), called at flip
+from `pgraph_vk_process_pending()` (`renderer.c:173`, publish block
+:232-238); the ring is
+`present_ring[PUSH_PRESENT_RING_CAP]` (cap 12,
+`hw/xbox/nv2a/pgraph/vk/renderer.h:372,565`) under
+`present_slot_lock`. The consumer is
+`nv2a_get_present_frame_pushed()` (`hw/xbox/nv2a/pgraph/pgraph.c:727`) →
+`pgraph_vk_present_slot_read()` (`display.c:406`), with the catch-up
+policy in `push_present_max_debt()` (`display.c:262-307`,
+`XEMU_PUSH_DEBT` override).
+
+The fallback path: `nv2a_get_present_frame()`
+(`hw/xbox/nv2a/pgraph/pgraph.c:708-725`) takes `pg->renderer_lock`,
 asserts no other framebuffer consumer is active
 (`pg->framebuffer_in_use`), and dispatches to the renderer's
 `ops.get_present_frame`. The Vulkan implementation,
-`pgraph_vk_get_present_frame()` (`hw/xbox/nv2a/pgraph/vk/renderer.c:283-323`),
+`pgraph_vk_get_present_frame()` (`hw/xbox/nv2a/pgraph/vk/renderer.c:320-362`),
 does the actual round trip under `d->pfifo.lock`:
 `qemu_event_reset` the completion event, `qatomic_set(&pg->sync_pending,
 true)`, `pfifo_kick(d)`, unlock, then `qemu_event_wait(&d->pgraph.sync_complete)`
 — blocking until the PFIFO thread services the request and fills in
-`frame->iosurface`/`mtl_texture`/`event`. The caller,
-`metal_render_frame()` (`ui/xemu.c:991-1008`), documents why the pull
-happens first: "the frame's shared-event value must be known before the
-drawable render pass is opened (the GPU-side wait is encoded ahead of
-it)."
+`frame->iosurface`/`mtl_texture`/`event` (that block is timed as
+`NSPROF_PRESENT_WAIT`, ~0 under push).
 
-The producer side is the **vblank thread**, a fixed-cadence,
-monotonic-deadline-scheduled thread wholly decoupled from host present
-timing: `vblank_timer_thread()` (`ui/xemu.c:848-880`) computes an
-absolute `next_vblank` deadline, advances it by a fixed
-`vblank_interval_ns` (`= 16666666LL`, i.e. 60 Hz — `ui/xemu.c:78`) each
+The UI-side caller is `metal_render_frame()` (`ui/xemu.c:1145`): it
+tries the pushed read first and falls back to the pull
+(`ui/xemu.c:1217-1220`), and documents the ordering requirement at
+`ui/xemu.c:1201-1207` — "the frame's shared-event value must be known
+before the drawable render pass is opened (the GPU-side wait is encoded
+ahead of it)". That ordering lives in `xemu_metal_begin_frame()`
+(`ui/xemu-metal.m:219-244`): command buffer → `encodeWaitForEvent` →
+`renderCommandEncoderWithDescriptor`. `XEMU_PRESENT_DRAWABLE_FIRST=1`
+(opt-in, default off) moves *only* the `nextDrawable` acquire ahead of
+the ring read (`xemu_metal_acquire_drawable()`, `ui/xemu-metal.m:192`);
+the wait-then-pass sequence is untouched, and a frame the dedup drops
+after acquiring hands its drawable back through `xemu_metal_end_frame()`
+without presenting.
+
+What drives the UI frame loop is the **vblank thread**, a
+fixed-cadence, monotonic-deadline-scheduled thread wholly decoupled from
+host present timing: `vblank_timer_thread()` (`ui/xemu.c:880-911`)
+computes an absolute `next_vblank` deadline, advances it by a fixed
+`vblank_interval_ns` (`= 16666666LL`, i.e. 60 Hz — `ui/xemu.c:93`) each
 iteration regardless of how long the previous iteration took, and calls
 `SDL_DelayPrecise` to the deadline. It runs at
 `QOS_CLASS_USER_INTERACTIVE` (Invariant 12).
@@ -667,7 +705,11 @@ iteration regardless of how long the previous iteration took, and calls
 machinery, not present-specific), so pull cannot do a UI-side
 "skip presenting if nothing changed" pre-check without first paying the
 round trip. The push ring exists precisely to break that coupling —
-publish at flip, read without blocking — and its equivalence to pull is
+publish at flip, read without blocking — which is why it was promoted to
+default on 2026-07-12 (pull blocked the UI thread 499-607 ms per 5 s
+under 2x interpolation vs 0 with the ring, flips identical); the
+`frame_seq` dedup in `metal_render_frame` is the pre-check pull
+structurally could not do. Its equivalence to pull is
 refuter-proven (`XEMU_PUSH_PRESENT_REFUTE=1`: the consumed `frame_seq`
 stream must be monotonic with no skipped-then-resurrected step, and
 equal-`frame_seq` pushed-vs-pull reads must describe identical content;
@@ -689,7 +731,7 @@ refresh rate is in the README's Failed/reverted-experiments table
 ("Vblank cadence aligned to host display refresh") because
 `vblank_timer_callback`/`vblank_timer_thread` → `process_vblank` →
 `graphic_hw_update` → `nv2a_vga_gfx_update` → sets
-`NV_PCRTC_INTR_0_VBLANK` (`hw/xbox/nv2a/nv2a.c:196-206`) — a *guest*
+`NV_PCRTC_INTR_0_VBLANK` (`hw/xbox/nv2a/nv2a.c:200-209`) — a *guest*
 interrupt. Titles gate their own simulation on vblank count; retuning
 the host-side timer retimes the guest's clock, not just presentation
 smoothness.
@@ -701,13 +743,21 @@ do-not-retry experiment (see `xemu-failure-archaeology`). Removing the
 `nv2a_get_present_frame` from two threads concurrently, reopens the
 exact hazard the assert exists to catch. Blocking longer than expected
 inside the PFIFO-side handshake (e.g. adding synchronous work to the
-`sync_pending` handler) directly adds latency to every UI frame, since
-the UI thread is synchronously waiting on it.
+`sync_pending` handler) directly adds latency to every UI frame whenever
+the fallback is live, since the UI thread is synchronously waiting on
+it. On the push side: opening the drawable render pass before the step's
+shared-event value is known, or dropping a consumed step back into the
+ring, breaks the GPU-side ordering and the monotonic-cursor guarantees
+the refuter checks.
 
-**Escape hatch.** The pull model IS the default and the hatch:
-`XEMU_PUSH_PRESENT=1` opts into the push ring (Metal, both interpolation
-on and off), and unsetting it — or any fallback condition — restores
-pull wholesale. `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence checker.
+**Escape hatch.** `XEMU_PUSH_PRESENT=0` restores the legacy pull
+handshake wholesale (any fallback condition — GL backend, no
+Metal-objects extension, pre-first-publish — does the same
+automatically). `XEMU_PUSH_DEBT=0` restores strict-FIFO consumption
+(pre-catch-up behavior). `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence
+checker and re-introduces the pull round trip for cross-checking —
+measure perf with it off. `XEMU_PRESENT_DRAWABLE_FIRST` is off by
+default; unsetting it restores acquire-after-ring-read.
 `vblank_interval_ns` and `use_vblank_timer_thread` are file-scope
 globals in `ui/xemu.c` (not currently exposed as config/env), used for
 PAL-mode consideration — see Known weak points.
@@ -1018,18 +1068,19 @@ one of these should know it's stepping onto contested ground.
   matches: the profile-map entry and the finish-reason comparison in
   `draw.c`, plus exactly one *caller* — `reports.c:322`,
   `sync_mode`-gated) before relying on this description.
-- **Pull-model present round trip** (Invariant 8) is a known,
-  unresolved cost: the PFIFO-side handshake is what *publishes* a
-  frame, so a UI-side "don't re-present unchanged content" pre-check
-  can't run before paying for the round trip that would tell it the
-  content is unchanged. RESOLVED 2026-07-11 for the Metal backend: the
-  push-model redesign landed dark behind `XEMU_PUSH_PRESENT=1` (see the
-  Statement above — measured: 601 present-handoff blocks/interval with
-  up-to-79 ms single-wait tails under pull → 0 under push, flips/s
-  identical). The pull weak point still fully applies to the default
-  config (flag off) and always under frame interpolation / GL.
+- **Pull-model present round trip** (Invariant 8) was a known cost:
+  the PFIFO-side handshake is what *publishes* a frame, so a UI-side
+  "don't re-present unchanged content" pre-check can't run before paying
+  for the round trip that would tell it the content is unchanged.
+  RESOLVED for the Metal backend: the push-model redesign landed dark
+  behind `XEMU_PUSH_PRESENT=1` on 2026-07-11 (measured: 601
+  present-handoff blocks/interval with up-to-79 ms single-wait tails
+  under pull → 0 under push, flips/s identical) and was promoted to
+  **default ON** on 2026-07-12. The weak point now applies only where
+  the fallback is live — GL backend, no Metal-objects extension,
+  pre-first-publish, or `XEMU_PUSH_PRESENT=0`.
 - **PAL titles run a 60 Hz vblank.** `vblank_interval_ns` is a single
-  fixed value (`16666666LL`, 60 Hz — `ui/xemu.c:78`) with no PAL
+  fixed value (`16666666LL`, 60 Hz — `ui/xemu.c:93`) with no PAL
   (50 Hz) variant anywhere in the tree (verified by grep). Whether/how
   this affects a PAL-region title expecting 50 Hz has not been
   characterized in this repo's history as of 2026-07-04 — treat as an
@@ -1051,7 +1102,7 @@ for a "does it touch" match and apply the rule:
 | 5 | touch DSP engine selection, add a `DSPOps` field, or touch `dsp->core` vs `dsp->backend`? | Preserve the `dsp56k_jit_*` (fork) / `dsp_jit_*` (upstream) naming split and "fork JIT wins when supported+enabled" precedence; update both engines' vtables if you add an op. |
 | 6 | write to the DSP JIT code buffer, or patch/repatch an emitted branch? | Every write inside a `qemu_thread_jit_write()`/`_execute()` window; cross-block repatches before the window closes. No TLS-cached W^X state, no scoped-callback API — both failed before. |
 | 7 | add/move a pinned-register access in the DSP JIT? | Preserve write-through; reload after any new BLR fallback that can mutate a pinned register. Run `XEMU_DSP_JIT_PIN_AUDIT=1` before calling it done. |
-| 8 | touch present timing, vblank cadence, or `nv2a_get_present_frame`? | Never couple vblank interval to host display refresh (settled, do-not-retry). Remember this is pull-model before assuming a "skip if unchanged" check is easy. |
+| 8 | touch present timing, vblank cadence, the push ring, or `nv2a_get_present_frame`? | Never couple vblank interval to host display refresh (settled, do-not-retry). Push is the default and pull is the fallback — both paths must stay correct, and the shared-event wait must stay encoded ahead of the drawable render pass. |
 | 9 | add a new timing/throttle gate? | Use `QEMU_CLOCK_REALTIME`, never `QEMU_CLOCK_HOST` — REALTIME is the monotonic one here despite the name. |
 | 10 | add a `pfifo_kick` call site, or run code with BQL held? | New kick sites must hold `d->pfifo.lock` across the kick-set + broadcast pair. Never block while BQL is held — drop it first, as `surface_access_callback` does. |
 | 11 | add a new `MVK_CONFIG_*` var, or anything else in `Info.plist` `LSEnvironment`? | Mirror it in `main()` with `setenv(..., 0)`, same `#ifdef __APPLE__` block, before MoltenVK loads. |
@@ -1098,8 +1149,12 @@ commit `cf85e96597` (tag `v0.9`), branch `macos-optimizations`. On
 2026-07-11 at `7e2e6e7256` (latest tag `v0.10.2`) the following were
 re-verified: MVK three-home prefill parity (all `0`), the STALLED
 reachability facts (one caller, `reports.c:322`; 300 µs default budget),
-and the `pfifo_kick(d)` call-site count (20). Re-run
-these before trusting a claim above on a later tree:
+and the `pfifo_kick(d)` call-site count (20). On 2026-08-04 at
+`f4bb867d3c` Invariant 8 was corrected for doc drift — push-present has
+been the default since 2026-07-12, not an opt-in — and its line anchors
+(and the vblank-thread / `vblank_interval_ns` anchors it shares) were
+re-derived against that tree. Re-run these before trusting a claim above
+on a later tree:
 
 ```sh
 # Invariant 1 — single queue
@@ -1128,7 +1183,8 @@ grep -n "qemu_thread_jit_write\|qemu_thread_jit_execute" hw/xbox/mcpx/apu/dsp/in
 # Invariant 7 — pin audit still wired
 grep -n "XEMU_DSP_JIT_PIN_AUDIT" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c
 
-# Invariant 8 — pull-model present, fixed vblank interval
+# Invariant 8 — push-present default, pull fallback, fixed vblank interval
+grep -n "XEMU_PUSH_PRESENT\"" hw/xbox/nv2a/pgraph/vk/display.c
 grep -n "vblank_interval_ns = " ui/xemu.c
 
 # Invariant 9 — clock mapping

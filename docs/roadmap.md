@@ -7,7 +7,33 @@ must clear. Landed and settled work lives in the
 [optimization ledger](optimizations.md); nothing here is planned work
 until it graduates into a design doc or a landing.
 
-State when last re-ranked (2026-07-19, arm-(b)-on shape): F8 heavy
+**State as of 2026-08-04 (post-wave): the F8 heavy anchor now reads
+~48.1 fps.** The fork-wide optimization wave landed and measured
+**38.12 ± 0.59 → ~48.1 fps (+10.0 mean, +26% fps, +20.4% draws/s), 5
+clean interleaved cross-binary pairs, unanimous**; the biggest single
+contributors were the `can_do_io` elision (+6.53, 3/3) and the x87
+exception-pointer deferral (+7.46, 3/3), sub-additive in combination.
+Two attribution notes that matter for anything ranked below:
+
+- **The prewave anchor was 38.1, not 46-48.** It lands inside the 36-39
+  band the 2026-07-19 header and the audit were written against, so the
+  fixture did not drift — the wave moved the anchor. Every fps figure in
+  the items below that predates 2026-08-04 was sized against ~38 fps and
+  is now a smaller *share* of the frame.
+- **Re-profile before re-ranking.** The wave removed the top-25 vCPU
+  symbol (`cpu_io_recompile` and its `tcg_tb_lookup` cluster) and a
+  large slice of x87 store traffic, so the shape of the remaining vCPU
+  time is unknown at the new equilibrium. Re-run `XEMU_GUEST_PROF`,
+  `XEMU_INV_PROF` and `XEMU_TB_PROF` at ~48 fps before trusting any
+  ranking here — including this page's own.
+
+Landed receipts and every honest kill from the wave are in the
+[ledger](optimizations.md); the candidate list it worked from is
+[`fork-optimization-audit-2026-08.md`](fork-optimization-audit-2026-08.md).
+
+*Historical state header, superseded by the block above — kept because
+the items below were ranked against it.* State when last re-ranked
+(2026-07-19, arm-(b)-on shape): F8 heavy
 anchor ~36-39 fps @ ~831 draws/flip windowed (M2 Ultra, local no-PGO
 build) — the sub-page store-skip promotion moved the scene equilibrium
 from ~740 draws/flip, so compare draws/s throughput (~30-31.6k, up
@@ -17,12 +43,159 @@ generated code ~55% of vCPU samples (top TB 3.2% — no hot loops),
 locks architectural, tb cache unpressured (`tb_flush` = 1/run). The
 old "notdirty traps ~90 k/s ≈ 2%" line was a ~20x-undercounting proxy
 (archaeology 6.9): the store slow path saw ~2M eligible stores/s,
-now completed inline by default. The 60 fps goal on F8 needs ~+60%;
-there is no quantization wall below the cap. Re-profile
+now completed inline by default. The 60 fps goal on F8 needed ~+60% at
+that anchor — from the post-wave ~48.1 it is ~+25%; there is no
+quantization wall below the cap. Re-profile
 (`XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF`) before re-ranking
 after any landing.
 
+**2026-08-04 audit note — written pre-campaign; the closeout it defers
+to is the "Top open candidates" section below.** A fork-wide optimization
+audit ran at this equilibrium and is committed as
+[`fork-optimization-audit-2026-08.md`](fork-optimization-audit-2026-08.md)
+(49 agents; 40 findings, each carrying `file:line` evidence and a
+pre-registered prediction + kill threshold, then an adversarial
+verifier per finding — 8 confirmed, 17 plausible, 15 refuted, with the
+verifiers' corrections folded into the published numbers). Nothing in
+it is planned work, and the ranking below is deliberately **unchanged**:
+its items are candidates gated on their own measurements, and
+re-ranking waits on the campaign's numbers (closeout pass). What it
+feeds: item 1 gets the vCPU-thread constant-factor candidates (§1.1
+`can_do_io` elision, §1.2 `notdirty_write` dirty-check fast path, §1.4
+the x87/SSE translator pack, §1.6/§1.8 the micro-gates) — none of them
+a region-formation reopen, so item 1's "fundamentally different attack"
+bar stands untouched. Item 4 is adjacent to §1.3's
+surface-callback TLB-flush rate question (same TB-lifetime /
+invalidation class, same required movement probe). Item 5 gets §3.2
+(converge the shipped MoltenVK with the tested one) and §3.3 (pin the
+CI `-mcpu` distribution floor). The feature/quality vectors below get
+§2.1-§2.3 (MetalFX output-size quantization, drawable-acquire
+ordering, UI-thread timing instrumentation) and §2.4 (the
+movement-probe gate that closes or reopens arch 1.12). Its §5 records
+15 verified negatives so the next sweep doesn't re-derive them, and its
+§4 record-hygiene closures have already landed: DSP parmove+ALU fusion
+and lockless MMIO for the remaining BQL blocks are both settled in the
+ledger, the latter with its own verdict page
+([`lockless-mmio-verdict.md`](lockless-mmio-verdict.md), whose owed
+measurement is now filled in at §A.1).
+
+**Closeout of that note (2026-08-04, same day).** The campaign ran and
+the numbers exist. Disposition of everything the note routed: §1.1,
+§1.4a/b, §1.6 and §1.8 shipped default-on with receipts (ledger); §1.2's
+code shipped but its **fps claim was killed** (benefit base collapsed
+34-57x under the arm-(b) promotion); §1.4c COMISS, §1.5 kick
+suppression and §1.9 the ImGui lock rework were all **closed by their
+own censuses** and are in Settled vectors; §1.3 measured *for* the
+per-flip theory and is candidate 1 above; §1.7 cleared its gate and is
+deferred as candidate 4; §2.1/§2.3 shipped, §2.2 stays opt-in with its
+characterization, §2.4 **reopened arch 1.12** as candidate 2, §2.5
+shipped; §3.1's hardening skip was **killed at the evidence bar** (a
+Failed row), §3.2-§3.5 shipped. Item 1's "fundamentally different
+attack" bar still stands untouched — nothing in the wave was a
+region-formation reopen.
+
+## Top open candidates (2026-08-04 wave closeout)
+
+These are the live candidates the wave produced or reopened, ranked by
+expected value at the ~48.1 fps equilibrium. Each already has its
+measurement; none is planned work. The older ranked list below is kept
+intact — items 1-4 there are closed or parked records, item 5 is the
+standing correctness debt.
+
+1. **Surface CPU-access-callback churn is the guest's TLB-flush source
+   — the reuse pool exists and is dark.** Measured 2026-08-04
+   (`XEMU_SURFACE_CB_STATS=1`, F8 steady scene): **199.8 callback
+   events/s = 4.16 per flip**, against **~190 full-mmuidx TLB flush
+   calls/s** measured independently — a **0.95:1 ratio**, i.e. NV2A
+   surface register/unregister is essentially *the* in-scene source of
+   guest TLB flushes, and each event is an `async_safe_run_on_cpu`
+   exclusive-execution vCPU stop plus a full flush plus an
+   unconditional jump-cache wipe. This settles the audit's §1.3 dispute
+   (two auditors, two orders of magnitude apart) in favor of the
+   per-flip theory, which puts the audit's expected benefit band at
+   **+0.35 to +1.5 fps on F8** rather than at the transition-hitch-only
+   outcome. Two shapes exist:
+   (a) `XEMU_SURFACE_CB_REUSE=1` — already implemented and dark, a
+   4-entry pool keyed on `(vram_addr, size)` that parks and re-attaches
+   the registration for the zeta ping-pong. **It has zero in-game
+   exposure so far**; the campaign that would have enabled it ended
+   before it got a run, so it carries no fps claim of any kind.
+   (b) the `// FIXME: flush only applicable pages` ranged invalidation
+   in `system/physmem.c` / `accel/tcg/cputlb.c` (template:
+   `tlb_reset_dirty_range_locked`) — strictly better, since it also
+   spares the jump cache, but it lives outside `surface.c` and needs a
+   deferred/queued flush API.
+   First steps: an interleaved A/B of (a) with `XEMU_SURFACE_CB_STATS=2`
+   armed (the coverage audit escalates to abort, since `nv2a_vk_assert`
+   is stripped in perf builds), the artifact scorer on every soak, and
+   the **movement probe as a required class** — this is a TB-lifetime /
+   invalidation change. Risk to hunt: stale-framebuffer artifacts if
+   registered coverage ever *under*-runs the live surface set. Bar: the
+   audit's +0.35 fps low end, on 3+ pairs with clean artifact scoring.
+   Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
+   **`TLB full flushes` line is structurally unreachable on this guest**
+   (it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
+   has `NB_MMU_MODES=22` vs plain i386's 8) — use the partial + elided
+   counters.
+2. **Async/prewarm pipeline creation — arch 1.12 REOPENED 2026-08-04.**
+   The original kill measured steady state only. The audit's zero-code
+   gate (movement probe, forward first-visit phase vs the backward
+   control, gating on `max=` and event count rather than a per-flip
+   average) **fired**: forward-phase `pipeline_gen` runs **468.7
+   µs/flip with a single worst compile of 45.09 ms** — about two dropped
+   frames at the current anchor, inside the first-visit streaming
+   workload class the steady-state kill never sampled. That graduates
+   Experiment B option (a), prewarm, from
+   [`moltenvk-optimization-experiments.md`](moltenvk-optimization-experiments.md)
+   into a ranked item **with a baseline number attached**. First steps:
+   re-run the probe with cold and warm `pipeline_cache.bin` to separate
+   "compile" from "cache miss", then price prewarm against that 45 ms
+   tail. Bar to attempt: the hitch must survive a warm-cache run — a
+   warm-cache-only hitch is a cache-coverage problem, not a
+   pipeline-creation one.
+3. **x87 clean-ST(i) write-back elision (`XEMU_X87_ELIDE_CLEAN`) —
+   implemented, dark, awaiting an fps + artifact A/B.** The refuter
+   result came back **stronger than predicted: 3.49e9 checks, 0
+   violations, and the truncation signal ABSENT** — nothing in the
+   measured workload observed the difference. It stays dark anyway,
+   because absence of an observation is not the same as the invariant
+   holding: this is not a pure elision. The register cache holds the
+   double-precision projection of an 80-bit `env->fpregs` entry, so the
+   unconditional write-back also *truncates* that entry; eliding it
+   leaves the original `floatx80` in place — a behavior change (in the
+   more-accurate direction) that FSTPT/FSAVE/FXSAVE and the softfloat
+   transcendental helpers can observe, and that lands in game physics.
+   Promotion needs what the wave did not spend: an fps A/B worth the
+   risk **plus** an artifact/behavior A/B on a title that exercises the
+   x87 transcendentals, not just a zero-violation soak. Sized by the
+   census: `XEMU_X87_CENSUS=1`'s clean-ST(i) class against the ≥ 8M/s
+   promotion gate.
+4. **Reports idle-budget scan below 300 µs — DEFERRED from this
+   release, not closed.** The audit's kill bar was < 0.3 report
+   expiries/flip; the re-measurement at the current 300 µs default reads
+   **5.1-6.5 expiries/flip, 17-22x above the close bar**, so the
+   candidate survives its gate. It was deferred purely on campaign
+   budget. Honest expectation stays modest (**~+0.1-0.2 fps** at 50 µs,
+   recalibrated by the verifier against the knob's own 5 ms → 300 µs
+   receipt, where realized/naive conversion was 20.7%) — likely near the
+   noise line, which is exactly why it needs a clean protocol rather
+   than a quick run. **Method note, and the reason it was not just run:**
+   this is a *pinned-value* A/B (300 vs 50/150), and
+   `scripts/bench-savestate-ab.sh` hardcodes its B arm to `0` — it can
+   only express "knob off vs knob on", so it cannot express this
+   comparison at all. The wave used a session-scratch generalization
+   (`abx.sh`) that gives each arm an arbitrary env *set* and its own app
+   bundle while reusing `bench-receipt.py` and `nsprof_summarize.py`
+   verbatim; that pinned-env form is what this experiment needs, and
+   promoting it into `scripts/` is the cheap enabling step. Guard when
+   it runs: passes/flip must not rise above 2 (submit-storm cliff,
+   archaeology 1.1).
+
 ## The ranked performance roadmap
+
+Historical ranking (2026-07-19). Items 1-4 are closed or parked
+records; item 5 is the standing correctness debt and is still open. The
+live candidates are in the section above.
 
 1. **Trace/superblock/region formation in TCG — CAMPAIGN CLOSED
    2026-07-18.** Five translate-time policies were designed, built,
@@ -110,7 +283,15 @@ after any landing.
    silicon (one un-root-caused ±0-sign divergence under Rosetta keeps
    that arm dark), and per-platform savestate baselines before any
    perf claim there. Excluded from the 2026-07-18 session scope by
-   owner decision.
+   owner decision. The shipped BQL-free MMIO dispatch belongs on this
+   list too: Windows/Linux take the identical lockless path for
+   PFB/USER/APU-VP/PGRAPH and no non-VM soak exists
+   (`docs/pgraph-lockless-audit.md` §I.3). Converting the *remaining*
+   blocks is closed by written verdict —
+   [`lockless-mmio-verdict.md`](lockless-mmio-verdict.md) (2026-08-04):
+   residual under 0.07% of a core (≈ +0.01-0.06 fps, at or below the
+   ±0.02 fps baseline resolution), and BQL-free dispatch there would
+   drive the PCI IRQ line with no BQL held at all.
 
 Presentation note: `display.frame_interpolation` (MetalFX) already
 delivers displayed-60/120 from a solid real-30+ today; it does not
@@ -158,5 +339,11 @@ real flips.
 Re-rank inputs: `XEMU_GUEST_PROF=1` sampler + exit census,
 `XEMU_INV_PROF=1` (+`XEMU_INV_TIMING=1`) invalidation/trap counters,
 `XEMU_SUPERBLOCK_SIZE=1` tail-kind census, `XEMU_NV2A_NSPROF=1` frame
-attribution. Method: `.claude/skills/xemu-testing`; thresholds:
-`.claude/skills/xemu-validation-and-qa`.
+attribution. Added 2026-08-04 for the candidates above:
+`XEMU_SURFACE_CB_STATS=1` (surface-callback / TLB-flush rate),
+`XEMU_X87_CENSUS=1` + `XEMU_X87_REFUTE=1` (x87 elidability and its
+adversarial checker), `XEMU_PFIFO_KICK_STATS=1`, `XEMU_UI_LOCK_STATS=1`,
+`XEMU_MMIO_PROF=1`, and `scripts/movement-probe.sh` for the first-visit
+streaming phase. Method: `.claude/skills/xemu-testing`; thresholds:
+`.claude/skills/xemu-validation-and-qa`. Anchors and defaults on this
+page are dated — re-verify before citing.

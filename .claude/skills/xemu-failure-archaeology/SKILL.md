@@ -7,15 +7,17 @@ description: >-
   BEFORE attempting or proposing any optimization or design change (it may be
   a known dead end: dynamic rendering, VK_EXT_external_memory_host, MoltenVK
   prefill, vblank retiming, EPI_NO_PC, cur_inst skip, HLT recovery, rate==1.0
-  resampler, BQL batching, spec constants, GPU S3TC, barrier batching...);
+  resampler, BQL batching, spec constants, GPU S3TC, barrier batching,
+  -fzero-call-used-regs hardening removal, notdirty_write dirty-check
+  pricing...);
   before reverting or retrying anything; when investigating the history of a
   regression, crash, freeze, or pink/magenta artifact; when asking "has this
   been tried?", "why was X reverted?", "why is this flag/guard here?"; when a
   git log revert pair needs its story; or when adding a new failed-experiment
   record. Contains full sagas: pink-tile, visibility-buffer crash (two acts),
   streamed-vertex campaign, occlusion rework, level-transition freeze, DSP JIT
-  pin/PC battles, release-CI hardening, tag-deletion incident, and
-  benchmarking traps.
+  pin/PC battles, release-CI hardening, tag-deletion incident, refuter-stacking
+  boot wedge, and benchmarking traps.
 ---
 
 # xemu failure archaeology — the settled battles
@@ -79,6 +81,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
 | 8.6 | grep -m1 under pipefail poisoned the MoltenVK provenance version | shipped-after-fix |
+| 8.7 | `-fzero-call-used-regs=skip` hardening removal (−411 kB `__text`, fps sign-mixed) | settled-negative (fenced-off dark) |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -106,6 +109,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (mechanism fenced-off dark) |
 | 6.8 | Region/diamond formation + recorded-label liveness elision (census gate passed 21.4%; both windows −4.5%/−0.69 3/3; drain-demotes 72%/64% — THE closing campaign) | settled-negative (full stack fenced-off dark) |
 | 6.9 | Arm (b) promotion: prediction sized on a 20x-undercounting proxy; fps masked a +12% throughput win via effect-load feedback | shipped-after-proof |
+| 6.10 | Audit §1.2's benefit base had already collapsed 34-57x (proxy collapse, mirror of 6.9) | settled-negative (claim killed, code kept) |
 | 7.1 | PFIFO untimed wait (A1): revert → proof-backed re-add | shipped-after-fix |
 | 7.2 | Descriptor bind-skip (C1): same arc | shipped-after-fix |
 | 7.3 | BQL event batching | settled-negative |
@@ -122,6 +126,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 9.7 | Bench gate counted boot-menu intervals (cold-vs-warm boot asymmetry) | shipped-after-fix |
 | 9.8 | Helper appends to a live process's stdout log get overwritten (non-append fd) | incident |
 | 9.9 | Bench harness socket under a deep outdir blows the 104-byte AF_UNIX cap — all runs DEAD "no monitor socket" | shipped-after-fix |
+| 9.10 | Three refuters in one session wedge the guest at boot (shadow-instrumentation cost on `d->lock`) | incident |
 
 ## When NOT to use this skill
 
@@ -1443,7 +1448,54 @@ profile-guided region selection; cross-TB IR caching) — never another
 window/policy variant of this former. The liveness elision itself is
 correct and reusable by any future design that can flag its joins.
 
+## 6.10 Audit §1.2's benefit base had already collapsed 34-57x — the proxy-collapse class, second sighting
 
+**Status**: settled-negative for the fps CLAIM (2026-08-04 wave); the code
+ships as a no-claim simplification, default-on with its hatch
+(`XEMU_DIRTY_FAST=0` restores both legacy shapes; latch at
+`system/physmem.c:1059`). Entry 6.9 is its mirror image — read them
+together.
+**The candidate**: `docs/fork-optimization-audit-2026-08.md` §1.2 priced
+the `notdirty_write` store-slow-path tail at **1.9-2.0% of vCPU wall**
+and predicted **+0.2 to +0.35 fps** for (a) deleting the
+`physical_memory_is_clean()` re-read whose answer the invalidation
+already knew and (b) fusing the five RCU-guarded `find_next_bit` walks
+into one guard + one idx/offset + `test_bit`. The price came from the
+audit's own committed profile receipt
+(`bench-out-profile-f8/ab_E1.log:1218-1220`: **6,726,497** calls with
+**5,050,536** code-page traps = **75.1%**, i.e. ~89.7k calls/s over the
+75 s window).
+**What the Gate-0 census measured on today's binary**: in-scene
+`notdirty_write` runs at **~1.6-2.6k calls/s** (60 s differential
+1,560/s; two-phase solve 2,622/s) and the code-page trap share is
+**2.2%** (5,512 of 247,600). At 2,622 calls/s × 235 ns/call the entire
+tail is **~0.06% of one core** — a **34-57x smaller** base than the
+audit assumed. Nothing regressed: this tree's own shipped work (6.9's
+arm-(b) store prefilter, on top of 1.23/1.24) had already inhaled the
+population, completing inline the stores that used to trap.
+**Second finding, same session**: §1.2's own `XEMU_INV_TIMING` gate is
+**unreadable** at that call rate — two LEGACY-mode runs read
+`rest=`235.4 and 179.1 ns/call, a **56.3 ns** self-disagreement larger
+than the 56.0 ns effect the gate existed to resolve. An instrument
+whose control arm disagrees with itself by more than the effect cannot
+adjudicate anything; do not "average the two runs".
+**Disposition**: no individual A/B was spent. The change is
+behavior-equivalent, soak-validated, hatched, and covered by the wave's
+headline cross-binary A/B — so it stays in the tree as a
+simplification with **no fps attribution in any document**.
+**The durable lesson (pair it with 6.9)**: 6.9 died of a proxy that
+UNDERcounted the population 20x; this is the same failure inverted — a
+benefit base quoted from a *committed profile* silently OVERcounts once
+a shipped optimization eats the population that profile counted. One
+rule covers both: re-measure the population **at the gate the emitted
+code will actually see, on today's binary**, before pricing any
+candidate. A profile is dated evidence, never a standing fact — and an
+audit that cites `file:line` of a log is citing a date.
+**Reopen if**: `XEMU_INV_PROF=1` on a real scene shows in-scene
+`notdirty_write` back above ~50k calls/s (i.e. a workload whose stores
+escape the arm-(b) prefilter), AND `XEMU_INV_TIMING`'s legacy arm
+reproduces itself within the claimed effect. Both conditions; the
+second is what makes the first measurable.
 
 ---
 
@@ -1552,10 +1604,13 @@ longer hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
 **Lesson**: average lock cost (~52 ns) was never the story; the tail
 was. When a mean-fps A/B reads parity on a lock-scope change, check
 intra-run variance before calling it valueless.
-**Reopen if**: audits for PGRAPH/PMC/APU-VP regions (the remaining 20%)
-are written — PMC raises IRQs (BQL-bound), PGRAPH races the PFIFO
-thread, APU-VP needs its own review; none are trivially safe like
-PFB/USER.
+**Reopen if**: closed 2026-08-04 — PGRAPH shipped
+(`docs/pgraph-lockless-audit.md`), APU-VP shipped, and the remaining
+blocks (PMC/PCRTC/PTIMER, APU main/gp/ep) closed by written verdict
+(`docs/lockless-mmio-verdict.md`): residual < 0.07% of a core and
+BQL-free dispatch there would drive `pci_irq_assert` unlocked. Reopen
+only on `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s (the wave's
+2026-08-04 reading was 75.6 ms per 75 s, 6.6x under the bar).
 
 ---
 
@@ -1691,6 +1746,48 @@ under pipefail, any early-exit reader (`grep -m1`, `head`) makes the
 pipeline's exit status lie about success — never hang an `||`
 fallback off such a pipeline.
 **Reopen if**: n/a.
+
+## 8.7 `-fzero-call-used-regs=skip` — a real code-size win the fps A/B refused to confirm
+
+**Status**: settled-negative under the pre-registered bar (2026-08-04
+wave); the mechanism stays in-tree DARK as the experimental arm
+`XEMU_HARDENING=0` (`build.sh:719-725`). The default **keeps upstream's
+register zeroing**, so the fork takes no security trade.
+**The idea** (audit §3.1, the flagship build finding): upstream's
+hardening block applies `-fzero-call-used-regs=used-gpr` globally with
+no opt-out, so every return re-zeroes its used GPRs — measured at
+**3.4-3.8% of this fork's dynamic compiled-instruction stream**, and
+the flag also defeats tail-call optimization (`bl`+`ret` where a `b`
+would do). clang is last-flag-wins and the fork's extra-cflags land
+after meson's globals, so one appended `-fzero-call-used-regs=skip`
+disables it. Pre-registered expectation: **+0.11 to +0.83 fps, central
+~+0.34**, with the audit itself flagging that the band's lower half sits
+inside the noise-suspect zone and demanding **5-6 interleaved pairs**.
+**Evidence that killed it**: cross-binary interleaved **5-pair** A/B on
+the F8 heavy anchor read **mean +0.52 fps but signs 3+/2−**. The
+pre-registered bar kills on sign-mixed — and this shape is *worse* than
+the sign-mixed-by-one results that have killed candidates before, so
+the verdict was applied as written rather than re-argued from the
+positive mean. Receipts: wave scratchpad `b4/h2`.
+**The static receipt that did NOT override the bar**: the mechanism
+provably did what it claimed — `__text` **8,741,512 B** hardened vs
+**8,330,592 B** skipped, **−410,920 B**. Recorded in the ledger's
+Failed row precisely because a confirmed code-size win is not evidence
+of an fps win, and a kill bar that can be talked out of by a
+*different* metric is not a bar.
+**Lessons**: (a) when a candidate's predicted band overlaps the noise
+floor, the sign test is the whole experiment — pre-register it and then
+honour it, because a positive mean carried by 3 of 5 pairs is exactly
+what noise looks like; (b) keep the losing arm as a knob: the
+mechanism is one flag, so `XEMU_HARDENING=0` costs nothing and makes
+the retest a one-line change instead of an archaeology dig.
+**Reopen if**: a quiet-machine batch of **≥ 8 interleaved pairs** on the
+current binary comes back **unanimous-sign** positive, or draws/s (the
+composition-symmetric metric of 6.9) separates the arms where fps
+cannot. Use `XEMU_HARDENING=0` as the E arm; `build.sh`'s
+`check_zero_call_regs_order` (`build.sh:234-265`) already asserts the
+appended flag actually wins in the generated compile database, so a
+null result cannot be a silently-unapplied flag.
 
 ---
 
@@ -1836,6 +1933,58 @@ constraints are per-artifact, not per-harness: every AF_UNIX socket a
 tool creates needs the short-path rule applied at ITS creation site.
 **Reopen if**: n/a.
 
+## 9.10 Three refuters in one session wedge the guest at boot — cumulative shadow-instrumentation cost, not a wave defect
+
+**Status**: incident (2026-08-04 wave, campaign C3). Bisected to a
+harness rule; no code changed, no shipped default affected. Same family
+as 4.5 (a validator starving the thing it validates), rediscovered
+across *three* independent validators instead of one.
+**Symptom**: a soak launched with the wave's full refuter set —
+`XEMU_X87_REFUTE=1` (+`XEMU_X87_CENSUS=1` +`XEMU_X87_ELIDE_CLEAN=1`)
+AND `XEMU_SUBPAGE_FAST_REFUTE=1` AND `XEMU_DSP_JIT_DIFF=1` — never
+reaches a single flip. **Zero nsprof intervals, `XEMU_PFIFO_HEARTBEAT`
+frozen at `iters=1`, monitor unresponsive.** Reproduced **2/2** (a
+12-minute soak run and a 90-second boot probe). This is the *wedge*
+signature (1.24, xemu-testing), not a crash: no DiagnosticReports entry
+is written, so a harness that only watches for crashes reports nothing.
+**Root cause**: three-way wait on the APU `d->lock`, per `/usr/bin/sample`
+(receipt `c3/run1-wedge.sample.txt`): `mcpx_apu_frame_thread` sits inside
+`mcpx_apu_dsp_frame` → `dsp56k_jit_execute_block` for **4173 of 4175
+samples** while holding `d->lock` across `se_frame()`; the vCPU thread is
+blocked in `cpu_tb_exec` → `do_st_mmio_leN` → `vp_write` →
+`qemu_mutex_lock_impl` on that same lock (a voice-processor register
+write); the main loop is parked in `hmp_loadvm` → `vm_stop` →
+`pause_all_vcpus`. The coupling lock lives in `hw/xbox/mcpx/apu/apu.c`,
+which **this wave does not touch** — the input that changed is the
+aggregate cost of three simultaneous shadow checkers, not any one
+mechanism.
+**Evidence (the bisect that makes it a rule, not a suspicion)**: every
+knob boots clean **alone** (DIFF; the x87 trio; subpage-fast refute) and
+**all three pairs** boot clean (x87+subpage, x87+DIFF, subpage+DIFF — 17
+nsprof intervals each). Only the triple wedges (0 intervals). The triple
+with **sampled** `XEMU_DSP_JIT_DIFF=10` boots clean (17 intervals at
+60 fps). Receipts: `c3/bp0..bp8/run.log`, the sample above, and the
+campaign record's `anomalies` section.
+**The standing rule** (owned by `xemu-testing`, "Refuter combination
+limit"): **never arm all three refuters in one session — two is the
+maximum.** If a soak genuinely needs all three, downgrade the DSP
+validator to sampling (`XEMU_DSP_JIT_DIFF=10`), which is the
+demonstrated-clean form; splitting the soak into two sessions is the
+other accepted answer and is what this campaign did (DIFF=1 was
+preserved, not weakened).
+**Lessons**: (a) refuters compose *additively in cost* and
+*multiplicatively in risk* — each is individually budgeted against the
+thread it instruments, and nobody budgets the sum; (b) 4.5's rule
+("a validator must be architecturally incapable of blocking what it
+validates") holds per-validator and still fails in aggregate when two
+validators land on threads that share a lock; (c) a boot wedge under
+instrumentation is a *test-infra* result and must be recorded as one —
+the alternative is a wave spending hours suspecting its own mechanisms.
+**Reopen if**: n/a as a bug. If a future campaign must run the triple
+un-sampled, the prerequisite is a measurement of DSP-validator hold time
+against `d->lock` (not a retry) — the bp8 receipt already shows sampling
+buys the headroom.
+
 # How to add an entry (the recording duty)
 
 When an experiment fails or a change is reverted, the record is part of the
@@ -1874,7 +2023,24 @@ Template:
 All facts verified against the repo on 2026-07-04 unless carrying an earlier
 date (those are recorded historical measurements — do not re-measure to cite
 them). README anchors and row counts below refreshed 2026-07-11 at
-`7e2e6e7256`. Re-verification one-liners for drift-prone facts:
+`7e2e6e7256`. Entries 6.10, 8.7, 9.10 and 7.5's closure were added
+**2026-08-04** from the fork-wide optimization wave that implements
+`docs/fork-optimization-audit-2026-08.md`; their measurements are that
+day's, not current readings. Re-verification one-liners for drift-prone
+facts:
+
+- 6.10 hatch still present and still default-on:
+  `grep -n 'XEMU_DIRTY_FAST' system/physmem.c include/system/physmem.h`
+- 6.10's audit-side numbers (the base that collapsed):
+  `sed -n '67,97p' docs/fork-optimization-audit-2026-08.md`
+- 8.7 dark arm still one flag, default still hardened:
+  `grep -n 'XEMU_HARDENING\|zero-call-used-regs' build.sh`
+- 8.7 flag-order checker still runs after every build:
+  `grep -n 'check_zero_call_regs_order' build.sh`
+- 9.10's three refuter knobs still exist (the rule is only meaningful while
+  they do): `grep -rn 'XEMU_X87_REFUTE\|XEMU_SUBPAGE_FAST_REFUTE' accel/tcg target/i386/tcg`
+- 7.5's closure page and its reopen number:
+  `grep -n 'BQL wait total' docs/lockless-mmio-verdict.md`
 
 - README failed-experiments table (~line 803, 34 rows):
   `grep -n '^## Failed / reverted experiments' README.md`

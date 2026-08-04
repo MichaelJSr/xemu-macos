@@ -5,7 +5,11 @@ description: >-
   Interpretation guide for every diagnostic channel (XEMU_NV2A_NSPROF
   PFIFO-thread profiler, XEMU_APU_PROF audio-thread utilization,
   XEMU_PFIFO_HEARTBEAT hang triage, the DSP56300 ARM64 JIT's
-  STATS/DIFF/DUMP/PIN_AUDIT/SENTINEL knobs, plus host tooling: ps %cpu,
+  STATS/DIFF/DUMP/PIN_AUDIT/SENTINEL knobs, the 2026-08-04 census channels
+  (XEMU_INV_PROF's MMIO-recompile line, XEMU_X87_CENSUS/REFUTE,
+  XEMU_SURFACE_CB_STATS, XEMU_PFIFO_KICK_STATS, XEMU_UI_LOCK_STATS) and why
+  `info jit`'s TLB full-flush counter reads 0 on this guest, plus host
+  tooling: ps %cpu,
   /usr/bin/sample, Instruments/xctrace) with exact output formats and
   healthy-vs-pathological number ranges. Also ships four smoke-tested
   scripts under the skill's own scripts/ directory: nsprof_summarize.py
@@ -31,7 +35,10 @@ actually read.
 
 All facts below were verified against the repo on 2026-07-04 by reading the
 implementing source directly (file:line references throughout so you can
-re-verify after the tree moves).
+re-verify after the tree moves). **§7 and the UI-thread nsprof buckets were
+added and verified 2026-08-04** with the fork-wide optimization wave
+(`docs/fork-optimization-audit-2026-08.md`); numbers quoted from that wave
+carry its date and are recorded readings, not current ones.
 
 ## Route finder — which channel answers which question
 
@@ -44,6 +51,12 @@ re-verify after the tree moves).
 | Is the DSP JIT covering this game's instruction mix, or falling back a lot? | `XEMU_DSP_JIT_STATS=1` | §4 |
 | Did a JIT change break DSP correctness? | `XEMU_DSP_JIT_DIFF=N` | §4 |
 | Where is wall-clock time actually going on the host CPU? | `ps -o %cpu=`, `sample`, Instruments | §5 |
+| Is the guest paying `cpu_io_recompile` round trips on device-register traffic? | `XEMU_INV_PROF=1`, the `(f)` line — read it from an `XEMU_ELIDE_CANDOIO=0` run | §7.1 |
+| How much x87 write-back / exception-pointer work is elidable, and has an elision ever been observable? | `XEMU_X87_CENSUS=1`, `XEMU_X87_REFUTE=1` | §7.2 |
+| How often do NV2A surface callbacks flush the whole guest TLB? | `XEMU_SURFACE_CB_STATS=1` + HMP `info jit` | §7.3 |
+| Are `pgraph_write`'s PFIFO kick broadcasts waking anyone? | `XEMU_PFIFO_KICK_STATS=1` | §7.4 |
+| What share of wall time does the UI thread hold the BQL? | `XEMU_UI_LOCK_STATS=1` | §7.5 |
+| Where does UI-thread present time go (drawable acquire, HUD lock, present interval)? | `XEMU_NV2A_NSPROF=1`, the UI buckets | §1 |
 | Are captured frames showing pink/magenta corruption? | `score_frames.py` | §6 |
 | What savestates exist in this qcow2? | `list_snapshots.py` | §6 |
 | I need to send key events without focusing the window | `inject_input.sh` | §6 |
@@ -132,6 +145,19 @@ independent, not a running total.
 | `mfx_drain` | `metalfx_drain_inflight` CPU spin | MetalFX upscale/interpolation pipeline drain, still on PFIFO |
 | `surf_down` | GPU→CPU surface readback | vCPU/blit needs surface contents back in guest RAM |
 | `flip_idle` | `FLIP_STALL` → guest vblank release | See below — the display-pacing idle gap |
+| `drawable_acq` | **UI thread** (2026-08-04): block inside `[CAMetalLayer nextDrawable]` | How long the presenting thread waits for a drawable — the cost `XEMU_PRESENT_DRAWABLE_FIRST` reorders around |
+| `ui_hud_lock` | **UI thread** (2026-08-04): main-loop-mutex + BQL acquire *and hold* across the ImGui HUD build | The audit §1.9 quantity, without a bespoke `DEBUG_XEMU_C` build |
+| `ui_frame_dt` | **UI thread** (2026-08-04): interval between consecutive completed presents (`end_frame` → `end_frame`) | Present cadence as the UI thread sees it — not the same as guest flips/s |
+
+**The three UI-thread buckets are normalized per *flip*, not per
+present** (`nsprof.h:16-23`), because the summary's denominator is the
+PFIFO thread's flip count. For presents/s, divide the interval's
+`ui_present` event count by the interval seconds in the header line —
+and remember an unfocused/occluded window presents unpaced (xemu-testing),
+so `ui_frame_dt` from a background bench is not a display-pacing
+measurement. Their `+=` races the PFIFO thread's interval reset; the
+documented worst case is losing one interval's samples at a reset
+boundary.
 
 `flip_idle` is special: it is NOT wasted CPU time in the usual sense. It
 starts when the guest issues `NV097_FLIP_STALL` (`pgraph.c:989-996`) and
@@ -184,6 +210,8 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 | `da_multi_subrange` | Non-emulated `DRAW_ARRAYS` block issued with >1 start/count subrange (one `vkCmdDraw` per subrange) |
 | `merge_identical` / `merge_candidate` / `merge_cand_udiff` / `merge_state_changed` | Per non-clear block, classification vs the previous block (GPU frame-cost campaign Phase 1): fully deduped already / mergeable — same pipeline+descriptors+buffers, only vertex offsets differ (`_udiff` subset: push-constant payload changed) / unmergeable state change |
 | `rpcause_surface` / `rpcause_clear` / `rpcause_texupload` / `rpcause_other` | Which site ended a *live* render pass: RT rebind, `NV097_CLEAR_SURFACE` boundary, compute-unswizzle interleave, surface-create/RTT nondraw. The submit path (`pgraph_vk_finish`) is untagged, so `renderpass` − Σcauses ≈ submit/flip-boundary passes |
+| `ui_present` | **UI thread** (2026-08-04): completed presents. The denominator for `drawable_acq`/`ui_hud_lock`/`ui_frame_dt` if you want per-present rather than per-flip numbers |
+| `mfx_scaler_rebuild` | **2026-08-04**: MetalFX scaler + 3-texture-ring rebuilds. Each is preceded by a MetalFX drain that stalls the PFIFO thread, so a nonzero count outside a window resize or a guest mode change is a finding. This is the counter that scored `XEMU_MFX_RESIZE_QUANTIZE` (scripted drag: **90 → 7** rebuilds, 2026-08-04) |
 
 ### Healthy vs. pathological ranges (Azurik, this dev machine, dated)
 
@@ -432,6 +460,13 @@ xemu: DSP JIT DIFF FAILURE in block pc_start=0x0142 (jit_cycles=12)
 per-translation gate already bounds the work; prefer sampling with plain
 `XEMU_DSP_JIT_DIFF=N` for everyday use.
 
+**Stacking caveat (2026-08-04)**: `DIFF=1` together with *both*
+`XEMU_X87_REFUTE=1` and `XEMU_SUBPAGE_FAST_REFUTE=1` wedges the guest at
+boot — this validator's work runs under the APU `d->lock` that the vCPU
+needs for `vp_write`. Two validators per session is the limit; `DIFF=10`
+is the demonstrated-clean form alongside the other two. Rule and receipts:
+`xemu-testing`, archaeology 9.10.
+
 ### `XEMU_DSP_JIT_DUMP=1` — block disassembly dump
 
 Every translated block prints its address range and a raw 32-bit-word hex
@@ -654,6 +689,175 @@ opened the fifo for reading (i.e. start xemu with `XEMU_INPUT_PIPE` set
 OS-level key injection can't reach an unfocused window) is owned by
 `xemu-testing`; this script is the mechanical helper.
 
+## §7 Census channels added 2026-08-04 (optimization wave)
+
+Five census channels shipped with the wave implementing
+`docs/fork-optimization-audit-2026-08.md`. All are default-off, all
+print to **stderr** (atexit, except §7.5's per-second line), and each
+answers exactly one gate question. Line references verified against the
+tree 2026-08-04.
+
+### §7.1 `XEMU_INV_PROF=1` — the `(f)` MMIO-recompile line
+
+The existing INV_PROF atexit dump gained an `(f)` block
+(`accel/tcg/tb-maint.c:207-221`):
+
+```
+xemu:  (f) io_prepare=N  cpu_io_recompile=N (P% of io_prepare)  window=S.Ss => R.Rk recompiles/s
+```
+
+`io_prepare` = every mid-TB access that reached the MMIO helper's
+bookkeeping; `cpu_io_recompile` = those that actually paid the round
+trip (g_tree `tcg_tb_lookup` + state restore + siglongjmp +
+`CF_MEMI_ONLY` re-translate + re-execute). The **rate**, not the ratio,
+is the gate.
+
+**Read it from an `XEMU_ELIDE_CANDOIO=0` run.** The default-on elision
+drives the counter to zero *by construction* — a zero here on a default
+build means the mechanism is working, not that the population is
+absent. The comment at `tb-maint.c:86-89` says so in the source for the
+same reason.
+
+Dated reading (F8 heavy scene, 2026-08-04): **242k recompiles/s**
+against the pre-registered ≥ 40k/s gate — 5.2-6.1x over the bar, which
+is what authorized building the elision. Known bias recorded the same
+day: legacy `io_prepare` counts are inflated roughly **2x** because a
+recompiled TB re-executes the access, so the same guest access is
+counted twice. The recompile count is the honest one.
+
+### §7.2 `XEMU_X87_CENSUS=1` / `XEMU_X87_REFUTE=1` — x87/SSE census and shadow checker
+
+Five atexit lines (`target/i386/tcg/xemu-x87.h:65-97`); `REFUTE`
+implies the census:
+
+```
+xemu: x87 write-backs: ST(i) clean=N dirty=N (P% elidable) FT0 dead=N keep=N (P% elidable)
+xemu: x87 exc-ptrs: fip=N fdp=N per-insn, deferred updates=N
+xemu: x87 runs=N insns=N mean=M.MM insn/run
+xemu: sse scalar compares: ss=N sd=N
+xemu: x87 refuter: ft0 violations=N; exc-ptr checks=N violations=N; clean-wb checks=N violations=N
+```
+
+Reading each line:
+
+- **write-backs** — the Gate-0 population. `FT0 dead` is what
+  `XEMU_X87_ELIDE_FT0` removes; `ST(i) clean` is what the dark
+  `XEMU_X87_ELIDE_CLEAN` would remove. Divide by run wall time: the
+  wave's F8 reading was 13.97 M/s dead-FT0 + 7.04 M/s clean-ST =
+  21.01 M/s combined against an ≥ 8 M/s bar.
+- **exc-ptrs** — `(fip+fdp)/deferred` is the cut ratio
+  `XEMU_X87_DEFER_FIP` buys (wave reading: 8.81x against a 1.5x bar).
+- **runs / mean insn/run** — how clustered x87 work is; the deferral's
+  win scales with run length (wave: 3.64 insn/run).
+- **sse scalar compares** — `sd` should read **0**: the guest is a
+  Pentium III with no SSE2, so COMISD is unreachable. A nonzero `sd`
+  falsifies that assumption and is a finding in its own right. In-scene
+  `ss` read 0/s on the wave's fixture, which closed the COMISS-lowering
+  candidate permanently.
+- **refuter** — the only acceptable value in every violations field is
+  **0**. `checks=` is how much evidence you have: a zero-violation line
+  with a small `checks=` proves nothing. (Wave receipts: exc-ptr
+  2.06e10 checks / 0 violations; clean-wb 3.49e9 / 0.)
+
+Cost: the census emits counter read-modify-writes into generated code,
+and the refuter keeps every legacy store *and* computes the shadow
+decision. **Never leave either on for an fps run** — and never stack
+this refuter with the other two (xemu-testing; archaeology 9.10).
+
+### §7.3 `XEMU_SURFACE_CB_STATS=1` — surface callback churn (and why `info jit` lies here)
+
+Atexit dump (`pgraph/vk/surface.c:811-830`):
+
+```
+xemu: surface cpu-access-callback stats
+xemu:   register        = N (update_surface_part N)
+xemu:   unregister      = N (update_surface_part N)
+xemu:   usp invalidate-then-create = N
+xemu:   reuse hit=N park=N evict=N flush=N
+xemu:   coverage audit runs=N violations=N
+```
+
+Each register/unregister is an `async_safe_run_on_cpu` **plus** a full
+all-mmuidx TLB flush **plus** an unconditional `tcg_flush_jmp_cache` —
+so this counter is a guest-side cost, not a renderer-side one. The
+`update_surface_part` split attributes the zeta ping-pong; `reuse *`
+counts the dark `XEMU_SURFACE_CB_REUSE` pool; `coverage audit
+violations` must be 0 (`=2` promotes a violation to an abort, because
+`nv2a_vk_assert` is compiled out in perf builds).
+
+> **`info jit`'s "TLB full flushes" counter is structurally dead on
+> this guest — use partial+elided instead (verified 2026-08-04).**
+> `tlb_flush_by_mmuidx_async_work` increments `full_flush_count` only
+> when `to_clean == ALL_MMUIDX_BITS` (`accel/tcg/cputlb.c:410`), and
+> `ALL_MMUIDX_BITS` is `(1 << NB_MMU_MODES) - 1` with **`NB_MMU_MODES`
+> = 22** (`include/hw/core/cpu.h:204`, fixed across all targets for
+> the widest one). i386 only ever fills mmu indices **0-7**
+> (`target/i386/cpu.h:2711-2722`), and `to_clean = asked & tlb.c.dirty`
+> where `dirty` gains a bit only at fill (`cputlb.c:1167`) — so indices
+> 8-21 are never dirty, `to_clean` can never equal `0x3FFFFF`, and the
+> **full-flush counter reads 0 for the life of the process regardless
+> of flush traffic**.
+>
+> A real full-mask flush lands in the other two counters instead:
+> `part_flush_count += ctpop16(to_clean)` and `elide_flush_count +=
+> ctpop16(asked & ~to_clean)`, and since `ctpop16` sees only the low 16
+> bits, **partial + elided = 16 per full-mask flush call**. Therefore:
+>
+> ```
+> flush calls in the window = (Δ"TLB partial flushes" + Δ"TLB elided flushes") / 16
+> ```
+>
+> Sample `info jit` twice over the monitor socket N seconds apart and
+> divide. On the wave's F8 scene this read ~190-195 flush calls/s
+> against 199.8 surface-callback events/s — i.e. surface callbacks are
+> essentially *the* TLB-flush source in that scene. A gate written
+> against "TLB full flushes" would have read 0 and killed the candidate
+> on an instrument that cannot move.
+
+### §7.4 `XEMU_PFIFO_KICK_STATS=1` — kick broadcasts and the park denominator
+
+Two atexit dumps. From `pgraph.c:198-244`, a census of
+`pgraph_write`'s kicks bucketed by call site × whether a PFIFO wait
+condition actually transitioned × post-write `FIFO_ACCESS` × whether a
+kick was already pending:
+
+```
+xemu: pgraph_write pfifo_kick census: kicks=N no-transition=N already-pending=N suppressible-population=N
+xemu:   INTR             trans=0 acc=1 dup=0  N
+```
+
+and from `pfifo.c:490-496`, the wakeup denominator:
+
+```
+xemu: pfifo idle-park census: loop-iters=N parks=N
+```
+
+`suppressible-population` (no transition **and** no kick already
+pending) is the only bucket a suppression optimization could ever
+remove — it read **0 in-scene** on the wave's fixture (7 lifetime, all
+pre-`loadvm`), which closed that candidate. `already-pending` counts
+provably redundant broadcasts, a *different* and unproposed class.
+
+**This is a counter, never a filter**: no kick is suppressed at any
+setting. A wrongly-skipped kick is a permanent PFIFO hang
+(archaeology 7.1).
+
+### §7.5 `XEMU_UI_LOCK_STATS=1` — UI-thread lock occupancy without a debug build
+
+Once-per-second line from `ui/xemu.c:915-935`, previously reachable
+only in a `DEBUG_XEMU_C=1` build (which still forces it on):
+
+```
+[[ vblank @59.940060Hz avg - bql 41234ns/iter, 0.39% time avg ]]
+```
+
+`ns/iter` is mean main-loop-mutex + BQL hold per UI frame; the
+percentage is the share of wall time the UI thread holds both. Read the
+**percentage** for any "is the HUD blocking the guest" question — the
+audit §1.9 kill bar was < 0.5% occupancy and the measured mean was
+0.386% (median 0.373%), which closed it. One predictable branch per
+lock when off.
+
 ## When NOT to use this skill
 
 - **Designing or running the actual A/B benchmark protocol** (interleaved
@@ -680,6 +884,25 @@ any refactor touching the named files:
 
 - nsprof counters/events/format: `sed -n '38,86p' hw/xbox/nv2a/nsprof.h`
   and `sed -n '25,177p' hw/xbox/nv2a/nsprof.c`
+- UI-thread buckets + their per-flip normalization (added 2026-08-04):
+  `grep -n 'drawable_acq\|ui_hud_lock\|ui_frame_dt\|ui_present\|mfx_scaler_rebuild' hw/xbox/nv2a/nsprof.c`
+  and `sed -n '14,24p' hw/xbox/nv2a/nsprof.h`
+- INV_PROF `(f)` MMIO-recompile line and its read-from-`=0` caveat:
+  `sed -n '84,92p;205,222p' accel/tcg/tb-maint.c`
+- x87 census / refuter dump fields:
+  `sed -n '44,97p' target/i386/tcg/xemu-x87.h`
+- surface-callback census + reuse pool:
+  `grep -n 'surface_cb_stats_dump\|XEMU_SURFACE_CB' hw/xbox/nv2a/pgraph/vk/surface.c`
+- `info jit` full-flush counter is still structurally dead (the whole §7.3
+  box collapses if any of these three change): `grep -n 'NB_MMU_MODES' include/hw/core/cpu.h`
+  (expect 22), `grep -n 'ALL_MMUIDX_BITS\|full_flush_count\|part_flush_count' accel/tcg/cputlb.c`,
+  `grep -n 'MMU_.*_IDX ' target/i386/cpu.h` (expect indices 0-7 only),
+  and `grep -n 'TLB full flushes' accel/tcg/tcg-stats.c`
+- PFIFO kick census + park denominator:
+  `grep -n 'pfifo_kick_stats_dump' hw/xbox/nv2a/pgraph/pgraph.c` and
+  `grep -n 'pfifo_park_stats_dump' hw/xbox/nv2a/pfifo.c`
+- UI lock-occupancy line and its runtime gate:
+  `grep -n 'XEMU_UI_LOCK_STATS\|vblank @' ui/xemu.c`
 - nsprof is per-guest-flip, not per-displayed-frame:
   `grep -n nsprof_flip_tick hw/xbox/nv2a/pgraph/vk/renderer.c`
 - APU utilization formula and frame period:
