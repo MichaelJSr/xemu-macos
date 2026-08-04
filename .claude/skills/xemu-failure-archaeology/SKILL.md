@@ -896,6 +896,27 @@ prefill winning fps with the artifact oracle clean. Both failed in 1.4.1.
 **Status**: shipped-after-fix. Act 1 `bfcf38843f` (2026-07-03), Act 2
 `bb33ccaa2e` (2026-07-04). Both defenses remain in-tree deliberately.
 
+**MoltenVK v1.4.2 re-verification (2026-08-04)**: the primer's target
+mechanism is verbatim unchanged at the v1.4.2 pin (`db660224`) —
+`_needsVisibilityResultMTLBuffer` still resets at every
+`vkBeginCommandBuffer` (MVKCommandBuffer.mm:244), is still set only by
+`vkCmdBeginQuery`, and the encoder still attaches the buffer only if
+the flag is pre-set (:781). The 1.4.2 changelog's visibility fixes
+(`c8a9b178`, wrap detection / stale baseline) are a different crash in
+the same family, not this one. **Keep the primer**: it is the only
+defense correct-by-construction on every launch path (the 2.1
+Finder-vs-shell env split is why prefill=0 alone is not sufficient
+protection), the crash only ever reproduced in user gameplay, and the
+cost is two command calls + one query index per CB. Related triage
+lead from the same review: v1.4.2's advertised "channel corruption on
+Apple Silicon color RTs used as transfer sources" fix (#2220,
+`allowGPUOptimizedContents` copying compressed tile layout on blit
+readback) was **reverted before the tag** (`4840a3f2`) — the shipped
+driver still has the bug. Zero observed instances in this fork's
+artifact-scored campaigns, but if pixel-exact readback corruption ever
+surfaces in a title, that is the first suspect, and the custom-build
+pipeline can carry the 3-line MVKImage.mm patch surgically.
+
 **Symptom**: user-reported SIGSEGV inside the AGX driver at
 `setVisibilityResultMode:offset:` during real gameplay — never reproduced in
 bench soaks.

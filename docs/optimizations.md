@@ -32,7 +32,7 @@ Changes manifest below — the pairing is the fork's bisect discipline.
 | `XEMU_PGRAPH_MMIO_STATS` | `1` prints an exit histogram of PGRAPH per-register MMIO hit-rate (reads/writes, interrupt-reg + RDI category totals, top offsets) — ranks ranges for the PGRAPH lockless audit |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` **plus** a full `tlb_flush_all_cpus_synced` **plus** an unconditional jump-cache wipe — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else, plus reuse-pool hit/park/evict counters and a live-coverage audit run on the 33 ms surface throttle tick; `2` also aborts on a coverage violation (`nv2a_vk_assert` is stripped in perf builds, so the check carries its own escalation). No behavior change |
-| `XEMU_SURFACE_CB_REUSE` | `1` (**default off, dark**) parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, so a shape ping-pong stops paying two full guest TLB flushes per swap. Sound because the registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges` and ignores the registered range); the pool evicts oldest with a real remove and drains fully at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. Unset = byte-identical legacy path. Has no in-game exposure yet — see the roadmap's top candidate |
+| `XEMU_SURFACE_CB_REUSE` | `1` (**default off, dark**) parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, so a shape ping-pong stops paying two full guest TLB flushes per swap. Sound because the registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges` and ignores the registered range); the pool evicts oldest with a real remove and drains fully at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. Unset = byte-identical legacy path. Measured 2026-08-04 and killed (−0.66 fps 3/3; Failed table) — stays dark as the record |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
 | `XEMU_INPUT_PIPE` | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
 | `XEMU_COREAUDIO_FRAMES` | CoreAudio buffer frames, default `1024` (≈21 ms @ 48 kHz) |
@@ -635,13 +635,11 @@ table carries the user-facing subset.
   wiping the jump cache. A dark reuse pool ships alongside the census
   (`XEMU_SURFACE_CB_REUSE=1`, 4 entries keyed on `(vram_addr, size)`):
   it parks the live registration on unregister and re-attaches it when
-  an identical-key surface reappears, eliminating both the remove and
-  the insert for a ping-pong. It is default-off and carries **no fps
-  claim** — it had zero in-game exposure this wave — and it is the
-  surface.c-local approximation of the better fix (the
-  `// FIXME: flush only applicable pages` ranged invalidation in
-  `system/physmem.c` / `cputlb.c`, which would also spare the jump
-  cache). Both are the roadmap's top candidate now. Measurement gotcha
+  an identical-key surface reappears. **Measured 2026-08-04 (same day,
+  idle-gated A/B) and killed: −0.66 fps 3/3 negative** — see the
+  Failed table; it stays in-tree dark as the record. The live shape is
+  the `// FIXME: flush only applicable pages` ranged invalidation in
+  `system/physmem.c` / `cputlb.c` (roadmap, needs-theory). Measurement gotcha
   recorded with them: HMP `info jit`'s **`TLB full flushes` counter is
   structurally unreachable on this guest** — it only increments when
   `to_clean == ALL_MMUIDX_BITS`, and the Xbox target has
@@ -1199,6 +1197,13 @@ Set in `main()` before MoltenVK loads (launch-path independent;
 explicit env overrides win) and mirrored in `Info.plist`
 `LSEnvironment`. The two homes must stay in sync.
 
+Driver-source review at the v1.4.2 pin (2026-08-04): the per-CB
+visibility primer stays (its target mechanism is verbatim in 1.4.2 —
+archaeology 2.2 addendum has the line refs), and the changelog's
+"channel corruption on color RTs used as transfer sources" fix was
+reverted upstream before the tag — the shipped 1.4.2 behaves like
+rc1 there (triage lead recorded in archaeology 2.2).
+
 | Key | Value | Purpose |
 |---|---|---|
 | `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` | `1` | Reduce descriptor binding overhead |
@@ -1339,6 +1344,9 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| Surface-callback reuse pool default-on (`XEMU_SURFACE_CB_REUSE`, 2026-08-04) | The mechanism receipt was real — the zeta ping-pong's ~200 register/unregister events/s are 0.95:1 with ALL in-scene guest TLB flushes, each with a jump-cache wipe — and the pool survived every correctness gate (loadvm cycles clean, coverage audit 23,003/0, movement probe `tb_flush` flat). The fps A/B then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%** (idle-gated pairs, bar was ≥ +0.25): post-candoio-elision the vCPU's flush/refill cost was already off the critical path — the audit's +0.35..+1.5 band was priced against the PRE-wave profile — while the pool's park/reattach bookkeeping bills the render thread on every shape swap. Kept dark in-tree as the record. The live shape is the ranged-flush FIXME in `physmem.c`/`cputlb.c` (roadmap, needs-theory with a post-wave predicted number) |
+| x87 clean-ST(i) write-back elision default-on (`XEMU_X87_ELIDE_CLEAN`, 2026-08-04) | Refuter said safe (3.49e9 checks, 0 violations, truncation signal absent); the idle-gated A/B said worthless: **−0.23 fps, 3/3 negative** vs the ≥ +0.20 bar. After the FT0 + FIP/FDP harvests the elidable flush population is too thin to pay for the per-slot dirty tracking. Stays dark; reopen bar = clean-ST census ≥ 8M/s on some other title |
+| Reports idle-budget 300 → 50 µs (`XEMU_REPORTS_BUDGET_US`, 2026-08-04) | The deferred pinned-value scan ran: **−12.1 fps unanimous, draws/s −21.4%** — 50 µs qualifies far more idle episodes for early submits and lands on the arch-1.1 submit-storm side of the cliff, exactly as the scan's guard predicted. 300 µs validated as correctly above the cliff; scan closed permanently, knob stays for triage |
 | Ret-memo 13-bit index (`XEMU_RETC_BITS=13`, 2026-07-18) | Doubling the eip→TB memo (4096→8192 entries, 128→256 KiB) predicted +0.3-0.5 fps from fewer hash collisions; measured **−0.23 fps, 4/4 pairs negative** (scene identity clean, arm (b)-on shipping context). Same mechanism as the jump-cache 12→16-bit kill: the recurring ret set already fits at 12 bits, so the larger table pays cache footprint on every probe to avoid collisions that were mostly one-shot. The width stayed runtime-latched (`XEMU_RETC_BITS`, default 12, validated-hit design makes any width safe) so the experiment reruns as a one-binary A/B on other titles |
 | TB byte-range invalidation filter (`XEMU_TB_RANGE_INV`, 2026-07-11) | `XEMU_INV_PROF` measured 100% of TB invalidations as data-write false sharing (0 true SMC, 100% recycle-hit) — so re-applying upstream's overlap filter looked free. Counter A/B: invalidations 338k → 675 (works) but notdirty traps **25.2×** (198k → 4.98M) + 46M range scans — whole-page invalidation is what empties the page and fires `tlb_unprotect_code`, making subsequent data writes free; base-xemu removed the check (`6ea11938b2e`) deliberately. Instrument-killed pre-fps-A/B; knob ships dark. Real lever: sub-page dirty tracking (design parked pending correctness review) |
 | L2 victim jump-cache (2026-07-05) | 64k-entry victim tier probed on L1 miss looked capacity-shaped (410k TBs vs 4096 entries) — but live hit rate measured **11.2%**: residual misses are one-shot/cold pcs, not a recurring set. Ceiling ~0.1 fps; instrument-killed without an fps A/B. Measure the miss stream's *shape* (recurrence), not its volume, before building any cache tier |
@@ -1395,7 +1403,7 @@ mechanisms that survived are in the Changes manifest above):
 
 | Attempt | Reason |
 |---|---|
-| Drop upstream's `-fzero-call-used-regs=used-gpr` on macOS builds (`XEMU_HARDENING`, 2026-08-04) | The ROP-gadget register zeroing costs real work — the zeroing movs measured **3.4-3.8% of this fork's dynamic compiled-instruction stream**, and the flag also defeats tail-call optimization (`bl`+`ret` where a `b` would do) — in a process that runs a W^X JIT and is not a sandbox boundary. Pre-registered **+0.11 to +0.83 fps (central ~+0.34)**. Measured over 5 interleaved cross-binary pairs: mean **+0.52 fps but signs 3+/2−**, which is worse than sign-mixed-by-one and therefore below the pre-registered evidence bar — killed as pre-registered, not renegotiated. The binary-size receipt (`__text` **8,741,512 B hardened vs 8,330,592 B skip = −411 KB**) is real and was explicitly ruled insufficient to override an fps bar the change did not clear. Default reverted to upstream's `used-gpr` in `build.sh`; the skip arm stays reachable as `XEMU_HARDENING=0` so a retest on another title or a quieter machine costs one env var, not a patch. Note the resulting knob inversion when reading `build.sh` |
+| Drop upstream's `-fzero-call-used-regs=used-gpr` on macOS builds (`XEMU_HARDENING`, 2026-08-04) | The ROP-gadget register zeroing costs real work — the zeroing movs measured **3.4-3.8% of this fork's dynamic compiled-instruction stream**, and the flag also defeats tail-call optimization (`bl`+`ret` where a `b` would do) — in a process that runs a W^X JIT and is not a sandbox boundary. Pre-registered **+0.11 to +0.83 fps (central ~+0.34)**. Measured over 5 interleaved cross-binary pairs: mean **+0.52 fps but signs 3+/2−**, which is worse than sign-mixed-by-one and therefore below the pre-registered evidence bar — killed as pre-registered, not renegotiated. The binary-size receipt (`__text` **8,741,512 B hardened vs 8,330,592 B skip = −411 KB**) is real and was explicitly ruled insufficient to override an fps bar the change did not clear. Default reverted to upstream's `used-gpr` in `build.sh`; the skip arm stays reachable as `XEMU_HARDENING=0`. **Retest ran same day and CLOSED IT PERMANENTLY**: the promised quieter-machine rerun (8 idle-gated pairs, post-upstream-merge tree) read **mean −0.39 fps, signs 3+/5−** — the earlier +0.52 was noise, there is no real fps effect from removing register zeroing on this workload post-PGO. Upstream's hardening stands; the −411 KB `__text` saving buys nothing measurable. Note the knob inversion when reading `build.sh` |
 | Running the x87, sub-page-fast and DSP-JIT refuters in one process (`XEMU_X87_REFUTE` + `XEMU_SUBPAGE_FAST_REFUTE` + `XEMU_DSP_JIT_DIFF` together) | Deadlocks the guest during **BOOT, 2/2 attempts** — a test-infrastructure interaction, not a product bug: the arch-4.5 diff-validator-starvation family, three shadow validators contending for the same execution. **Singles and pairs are clean** and remain the supported way to soak. This also retroactively attributes the campaign's run-1 `vp_write` wedge, which had no other explanation. Practical rule: cap refuter soaks at two validators per process |
 
 ---

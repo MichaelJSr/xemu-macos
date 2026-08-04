@@ -31,6 +31,19 @@ Landed receipts and every honest kill from the wave are in the
 [ledger](optimizations.md); the candidate list it worked from is
 [`fork-optimization-audit-2026-08.md`](fork-optimization-audit-2026-08.md).
 
+**Same-day follow-up (2026-08-04, post-upstream-merge): the audit's
+remaining candidates are now all measured-dead.** Four idle-gated
+campaigns closed the queue — surface-CB reuse pool **−0.66 fps 3/3**,
+`XEMU_X87_ELIDE_CLEAN` **−0.23 3/3**, hardening-skip retest **−0.39
+over 8 pairs** (the earlier +0.52 was noise; upstream's register
+zeroing stands permanently), reports-budget 50 µs **−12.1 3/3**
+(submit-storm cliff; 300 µs validated). Items 1/3/4 below carry the
+full receipts. The honest state: at the ~48 fps equilibrium this page
+has **no live fps candidate** — the next lever must come from a fresh
+profile at the new shape, the ranged-flush FIXME with a post-wave
+number, or the prewarm/hitch class (item 2), which is
+latency-not-throughput.
+
 *Historical state header, superseded by the block above — kept because
 the items below were ranked against it.* State when last re-ranked
 (2026-07-19, arm-(b)-on shape): F8 heavy
@@ -102,36 +115,30 @@ measurement; none is planned work. The older ranked list below is kept
 intact — items 1-4 there are closed or parked records, item 5 is the
 standing correctness debt.
 
-1. **Surface CPU-access-callback churn is the guest's TLB-flush source
-   — the reuse pool exists and is dark.** Measured 2026-08-04
-   (`XEMU_SURFACE_CB_STATS=1`, F8 steady scene): **199.8 callback
-   events/s = 4.16 per flip**, against **~190 full-mmuidx TLB flush
-   calls/s** measured independently — a **0.95:1 ratio**, i.e. NV2A
-   surface register/unregister is essentially *the* in-scene source of
-   guest TLB flushes, and each event is an `async_safe_run_on_cpu`
-   exclusive-execution vCPU stop plus a full flush plus an
-   unconditional jump-cache wipe. This settles the audit's §1.3 dispute
-   (two auditors, two orders of magnitude apart) in favor of the
-   per-flip theory, which puts the audit's expected benefit band at
-   **+0.35 to +1.5 fps on F8** rather than at the transition-hitch-only
-   outcome. Two shapes exist:
-   (a) `XEMU_SURFACE_CB_REUSE=1` — already implemented and dark, a
-   4-entry pool keyed on `(vram_addr, size)` that parks and re-attaches
-   the registration for the zeta ping-pong. **It has zero in-game
-   exposure so far**; the campaign that would have enabled it ended
-   before it got a run, so it carries no fps claim of any kind.
+1. **Surface CPU-access-callback churn — pool shape MEASURED AND
+   KILLED 2026-08-04 (same day); ranged flush is the only live shape,
+   needs-theory.** The mechanism receipt stands: **199.8 callback
+   events/s = 4.16 per flip** against **~190 full-mmuidx TLB flush
+   calls/s** (0.95:1) — NV2A surface register/unregister is essentially
+   *the* in-scene source of guest TLB flushes, each an
+   `async_safe_run_on_cpu` vCPU stop + full flush + unconditional
+   jump-cache wipe. But the fps half died on measurement: the
+   `XEMU_SURFACE_CB_REUSE=1` pool ran the full gauntlet (loadvm cycles
+   clean, coverage audit 23,003/0, movement probe `tb_flush` flat 1)
+   and then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%**
+   on idle-gated pairs against the pre-registered ≥ +0.25 bar. The
+   likely mechanism for the miss: post-candoio-elision the vCPU's
+   flush/refill cost was already off the critical path (the audit
+   priced §1.3 against the PRE-wave profile), while the pool's
+   park/reattach bookkeeping runs on the render thread every shape
+   swap. The pool stays in-tree dark as the reproducible record
+   (Failed row in the ledger). The only live shape is
    (b) the `// FIXME: flush only applicable pages` ranged invalidation
    in `system/physmem.c` / `accel/tcg/cputlb.c` (template:
-   `tlb_reset_dirty_range_locked`) — strictly better, since it also
-   spares the jump cache, but it lives outside `surface.c` and needs a
-   deferred/queued flush API.
-   First steps: an interleaved A/B of (a) with `XEMU_SURFACE_CB_STATS=2`
-   armed (the coverage audit escalates to abort, since `nv2a_vk_assert`
-   is stripped in perf builds), the artifact scorer on every soak, and
-   the **movement probe as a required class** — this is a TB-lifetime /
-   invalidation change. Risk to hunt: stale-framebuffer artifacts if
-   registered coverage ever *under*-runs the live surface set. Bar: the
-   audit's +0.35 fps low end, on 3+ pairs with clean artifact scoring.
+   `tlb_reset_dirty_range_locked`) — it spares the jump cache and
+   costs no per-swap bookkeeping, but needs a deferred/queued flush
+   API. Status: needs-theory; reopen only with a predicted number
+   derived from a POST-wave profile, not the audit's.
    Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
    **`TLB full flushes` line is structurally unreachable on this guest**
    (it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
@@ -154,42 +161,29 @@ standing correctness debt.
    warm-cache-only hitch is a cache-coverage problem, not a
    pipeline-creation one.
 3. **x87 clean-ST(i) write-back elision (`XEMU_X87_ELIDE_CLEAN`) —
-   implemented, dark, awaiting an fps + artifact A/B.** The refuter
-   result came back **stronger than predicted: 3.49e9 checks, 0
-   violations, and the truncation signal ABSENT** — nothing in the
-   measured workload observed the difference. It stays dark anyway,
-   because absence of an observation is not the same as the invariant
-   holding: this is not a pure elision. The register cache holds the
-   double-precision projection of an 80-bit `env->fpregs` entry, so the
-   unconditional write-back also *truncates* that entry; eliding it
-   leaves the original `floatx80` in place — a behavior change (in the
-   more-accurate direction) that FSTPT/FSAVE/FXSAVE and the softfloat
-   transcendental helpers can observe, and that lands in game physics.
-   Promotion needs what the wave did not spend: an fps A/B worth the
-   risk **plus** an artifact/behavior A/B on a title that exercises the
-   x87 transcendentals, not just a zero-violation soak. Sized by the
-   census: `XEMU_X87_CENSUS=1`'s clean-ST(i) class against the ≥ 8M/s
-   promotion gate.
-4. **Reports idle-budget scan below 300 µs — DEFERRED from this
-   release, not closed.** The audit's kill bar was < 0.3 report
-   expiries/flip; the re-measurement at the current 300 µs default reads
-   **5.1-6.5 expiries/flip, 17-22x above the close bar**, so the
-   candidate survives its gate. It was deferred purely on campaign
-   budget. Honest expectation stays modest (**~+0.1-0.2 fps** at 50 µs,
-   recalibrated by the verifier against the knob's own 5 ms → 300 µs
-   receipt, where realized/naive conversion was 20.7%) — likely near the
-   noise line, which is exactly why it needs a clean protocol rather
-   than a quick run. **Method note, and the reason it was not just run:**
-   this is a *pinned-value* A/B (300 vs 50/150), and
-   `scripts/bench-savestate-ab.sh` hardcodes its B arm to `0` — it can
-   only express "knob off vs knob on", so it cannot express this
-   comparison at all. The wave used a session-scratch generalization
-   (`abx.sh`) that gives each arm an arbitrary env *set* and its own app
-   bundle while reusing `bench-receipt.py` and `nsprof_summarize.py`
-   verbatim; that pinned-env form is what this experiment needs, and
-   promoting it into `scripts/` is the cheap enabling step. Guard when
-   it runs: passes/flip must not rise above 2 (submit-storm cliff,
-   archaeology 1.1).
+   MEASURED AND CLOSED 2026-08-04.** The fps A/B it was awaiting ran on
+   idle-gated pairs: **−0.23 fps, 3/3 negative** against the ≥ +0.20
+   promotion bar. The refuter had already come back stronger than
+   predicted (3.49e9 checks, 0 violations, truncation signal absent),
+   but safe-and-worthless is still worthless: the elidable flush
+   population is too thin after the FT0 + FIP/FDP harvests to pay for
+   the dirty tracking. Stays dark permanently as the record; do not
+   reopen without a census showing the clean-ST class regrew past
+   8M/s on some other title.
+4. **Reports idle-budget scan below 300 µs — RAN AND CLOSED
+   2026-08-04.** The deferred pinned-value A/B ran with the `abx.sh`
+   pinned-env form (300 vs 50 µs, 3 idle-gated pairs): **50 µs costs
+   −12.1 fps, unanimous, draws/s −21.4%** — the lower threshold makes
+   *more* idle episodes qualify for an early submit and lands squarely
+   on the arch-1.1 submit-storm side of the cliff, exactly the failure
+   mode the scan's guard predicted. The modest +0.1-0.2 hope from the
+   20.7%-conversion calibration was swamped by the pass-count blowup.
+   **300 µs is validated as sitting correctly above the cliff; the
+   scan is closed permanently.** The knob stays for triage. Residual
+   method note: `bench-savestate-ab.sh` still cannot express
+   pinned-value A/Bs (B arm hardcoded to 0); promoting `abx.sh` into
+   `scripts/` remains the cheap enabler for any future pinned-env
+   experiment.
 
 ## The ranked performance roadmap
 
