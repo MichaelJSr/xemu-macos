@@ -4319,6 +4319,12 @@ static void gen_VCMP(DisasContext *s, X86DecodedInsn *decode)
 static void gen_VCOMI(DisasContext *s, X86DecodedInsn *decode)
 {
     SSEFunc_0_epp fn;
+#if defined(XBOX)
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(s->prefix & PREFIX_DATA ? &xemu_sse_comi_sd
+                                                     : &xemu_sse_comi_ss);
+    }
+#endif
     fn = s->prefix & PREFIX_DATA ? gen_helper_comisd : gen_helper_comiss;
     fn(tcg_env, OP_PTR1, OP_PTR2);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -4714,6 +4720,12 @@ static void gen_VSHUF(DisasContext *s, X86DecodedInsn *decode)
 static void gen_VUCOMI(DisasContext *s, X86DecodedInsn *decode)
 {
     SSEFunc_0_epp fn;
+#if defined(XBOX)
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(s->prefix & PREFIX_DATA ? &xemu_sse_comi_sd
+                                                     : &xemu_sse_comi_ss);
+    }
+#endif
     fn = s->prefix & PREFIX_DATA ? gen_helper_ucomisd : gen_helper_ucomiss;
     fn(tcg_env, OP_PTR1, OP_PTR2);
     assume_cc_op(s, CC_OP_EFLAGS);

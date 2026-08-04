@@ -35,6 +35,9 @@ static PREC_TYPE get_ft0(DisasContext *s)
     PREC_TYPE *v = (PREC_TYPE *)&s->ft0;
 
     if (*v == NULL) {
+#if defined(XBOX)
+        s->xemu_ft0_reloaded = true;
+#endif
         *v = tcg_temp_new_fp();
         TCGv_ptr p = gen_ft0_ptr();
         tcg_gen_ld80f_fp(*v, p);
@@ -51,6 +54,10 @@ static PREC_TYPE get_stn(DisasContext *s, int opreg)
     PREC_TYPE *t = (PREC_TYPE *)&s->fpregs[(s->fpstt_delta + opreg) & 7];
 
     if (*t == NULL) {
+#if defined(XBOX)
+        /* Freshly loaded: the cache matches memory until someone writes it. */
+        xemu_x87_clear_dirty(s, (s->fpstt_delta + opreg) & 7);
+#endif
         *t = tcg_temp_new_fp();
         TCGv_ptr p = gen_stn_ptr(opreg);
         tcg_gen_ld80f_fp(*t, p);
@@ -69,15 +76,68 @@ static void glue(flush_fp_regs, PREC_SUFFIX)(DisasContext *s)
     for (int i = 0; i < 8; i++) {
         PREC_TYPE *t = (PREC_TYPE *)&s->fpregs[(s->fpstt_delta + i) & 7];
         if (*t) {
-            TCGv_ptr ptr = gen_stn_ptr(i);
-            tcg_gen_st80f_fp(*t, ptr);
+            bool store = true;
+#if defined(XBOX)
+            bool dirty = (s->xemu_fp_dirty >> ((s->fpstt_delta + i) & 7)) & 1;
+
+            if (unlikely(xemu_x87_census_on())) {
+                xemu_gen_counter_inc(dirty ? &xemu_x87_wb_st_dirty
+                                           : &xemu_x87_wb_st_clean);
+            }
+            if (!dirty) {
+                int m = xemu_x87_clean_mode();
+                if (m == 2) {
+                    /*
+                     * Refuter: the elision is only safe while the memory a
+                     * clean slot was loaded from has not moved underneath the
+                     * cache. Re-read it and count every divergence.
+                     */
+                    PREC_TYPE now = tcg_temp_new_fp();
+                    TCGv_i64 a = tcg_temp_new_i64();
+                    TCGv_i64 b = tcg_temp_new_i64();
+                    tcg_gen_ld80f_fp(now, gen_stn_ptr(i));
+                    glue(glue(gen_mov, PRECf), _i64)(a, *t);
+                    glue(glue(gen_mov, PRECf), _i64)(b, now);
+                    xemu_x87_gen_ne_count_i64(&xemu_x87_clean_viol, a, b);
+                    xemu_gen_counter_inc(&xemu_x87_clean_checks);
+                } else if (m == 1) {
+                    store = false;
+                }
+            }
+#endif
+            if (store) {
+                TCGv_ptr ptr = gen_stn_ptr(i);
+                tcg_gen_st80f_fp(*t, ptr);
+            }
             *t = NULL;
         }
    }
 
     if (s->ft0) {
-        TCGv_ptr ptr = gen_ft0_ptr();
-        tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
+        bool store = true;
+#if defined(XBOX)
+        bool keep = s->xemu_ft0_pending;
+        int m = xemu_x87_ft0_mode();
+
+        if (unlikely(xemu_x87_census_on())) {
+            xemu_gen_counter_inc(keep ? &xemu_x87_wb_ft0_keep
+                                      : &xemu_x87_wb_ft0_dead);
+        }
+        if (m == 2) {
+            /*
+             * Refuter: keep the store, but record whether the elision would
+             * have left env->ft0 stale here. get_ft0() on the reader side
+             * turns that into a violation if the stale value is ever read.
+             */
+            xemu_x87_gen_store_u64(&xemu_x87_ft0_stale, keep ? 0 : 1);
+        } else if (m == 1 && !keep) {
+            store = false;
+        }
+#endif
+        if (store) {
+            TCGv_ptr ptr = gen_ft0_ptr();
+            tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
+        }
         s->ft0 = NULL;
     }
 }
@@ -87,6 +147,9 @@ static void glue(gen_fpop, PREC_SUFFIX)(DisasContext *s)
     PREC_TYPE *t = (PREC_TYPE *)&s->fpregs[s->fpstt_delta & 7];
     if (*t) {
         *t = NULL;
+#if defined(XBOX)
+        xemu_x87_clear_dirty(s, s->fpstt_delta & 7);
+#endif
     }
 }
 
@@ -142,6 +205,7 @@ static void glue(gen_fucomi_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
     PREC_TYPE st0 = get_st0(s);
     PREC_TYPE ft0 = get_ft0(s);
 
+    XEMU_FT0_CONSUME(s);
     glue(tcg_gen_com, PREC_SUFFIX)(result, st0, ft0);
     tcg_gen_andi_i64(result, result, 0x45); /* ZF|PF|CF */
 }
@@ -157,6 +221,7 @@ static void glue(gen_fcomi_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
     PREC_TYPE st0 = get_st0(s);
     PREC_TYPE ft0 = get_ft0(s);
 
+    XEMU_FT0_CONSUME(s);
     glue(tcg_gen_coms, PREC_SUFFIX)(result, st0, ft0);
     tcg_gen_andi_i64(result, result, 0x45); /* ZF|PF|CF */
 }
@@ -169,6 +234,11 @@ static void glue(gen_helper_fp_arith_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
     PREC_TYPE st0 = get_st0(s);
     PREC_TYPE ft0 = get_ft0(s);
 
+    XEMU_FT0_CONSUME(s);
+    if (op != 2 && op != 3) {
+        /* fcom/fcomp (op 2,3) only read ST0. */
+        XEMU_ST_DIRTY(s, 0);
+    }
     switch (op) {
     case 0:
         glue(tcg_gen_add, PREC_SUFFIX)(st0, st0, ft0);
@@ -204,6 +274,7 @@ static void glue(gen_helper_fp_arith_STN_ST0, PREC_SUFFIX)(DisasContext *s,
     PREC_TYPE stn = get_stn(s, opreg);
     PREC_TYPE st0 = get_st0(s);
 
+    XEMU_ST_DIRTY(s, opreg);
     switch (op) {
     case 0:
         glue(tcg_gen_add, PREC_SUFFIX)(stn, stn, st0);
@@ -231,51 +302,61 @@ static void glue(gen_helper_fp_arith_STN_ST0, PREC_SUFFIX)(DisasContext *s,
 static void glue(gen_fmov_FT0_STN, PREC_SUFFIX)(DisasContext *s, int st_index)
 {
     glue(tcg_gen_mov, PREC_SUFFIX)(get_ft0(s), get_stn(s, st_index));
+    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fmov_ST0_STN, PREC_SUFFIX)(DisasContext *s, int st_index)
 {
     glue(tcg_gen_mov, PREC_SUFFIX)(get_st0(s), get_stn(s, st_index));
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fmov_STN_ST0, PREC_SUFFIX)(DisasContext *s, int st_index)
 {
     glue(tcg_gen_mov, PREC_SUFFIX)(get_stn(s, st_index), get_st0(s));
+    XEMU_ST_DIRTY(s, st_index);
 }
 
 static void glue(gen_flds_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(gen_mov32i, PREC_SUFFIX)(get_ft0(s), arg);
+    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_flds_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(gen_mov32i, PREC_SUFFIX)(get_st0(s), arg);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldl_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
     glue(gen_mov64i, PREC_SUFFIX)(get_ft0(s), arg);
+    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fldl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
     glue(gen_mov64i, PREC_SUFFIX)(get_st0(s), arg);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fildl_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(tcg_gen_cvt32i, PREC_SUFFIX)(get_ft0(s), arg);
+    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fildl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(tcg_gen_cvt32i, PREC_SUFFIX)(get_st0(s), arg);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fildll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
     glue(tcg_gen_cvt64i, PREC_SUFFIX)(get_st0(s), arg);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fistl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
@@ -378,74 +459,88 @@ static void glue(gen_fchs_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_chs, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fabs_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_abs, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fsqrt, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_sqrt, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fsin, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_sin, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fcos, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_cos, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_frndint, PREC_SUFFIX)(DisasContext *s)
 {
     PREC_TYPE st0 = get_st0(s);
     glue(tcg_gen_rint, PREC_SUFFIX)(st0, st0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fld1_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldz_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.0);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldl2t_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.32192809488736234787);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldl2e_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.44269504088896340736);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldpi_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.14159265358979323846);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldlg2_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.30102999566398119521);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldln2_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.69314718055994530942);
+    XEMU_ST_DIRTY(s, 0);
 }
 
 static void glue(gen_fldz_FT0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_ft0(s), 0.0);
+    XEMU_FT0_PRODUCE(s);
 }

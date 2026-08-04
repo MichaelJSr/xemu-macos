@@ -240,6 +240,16 @@ typedef struct DisasContext {
         target_ulong pc_save;
     } xemu_region_pend[XEMU_REGION_MAXPEND];
     uint8_t xemu_region_npend;
+    /* x87 census / elision (target/i386/tcg/xemu-x87.h) */
+    uint8_t xemu_fp_dirty;      /* fpregs[] slots written since load */
+    uint8_t xemu_x87_run;       /* x87 insns since the last cache flush */
+    bool xemu_ft0_pending;      /* FT0 written, reader not reached yet */
+    bool xemu_ft0_reloaded;     /* last get_ft0 came from env->ft0 */
+    bool xemu_fip_pend;         /* deferred FIP/FCS update outstanding */
+    bool xemu_fdp_pend;         /* deferred FDP/FDS update outstanding */
+    TCGv xemu_fip_val;
+    TCGv xemu_fdp_val;
+    TCGv_i32 xemu_fdp_sel;
 #endif
     bool cc_op_dirty;
 
@@ -1763,6 +1773,8 @@ extern uint64_t xemu_xpage_taken_low;
 extern uint64_t xemu_xpage_emitted;
 #endif
 
+#include "xemu-x87.h"
+
 static void gen_flcr(DisasContext *s)
 {
 #if defined(XBOX)
@@ -1868,6 +1880,17 @@ static void gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg)
 static void gen_flush_fp(DisasContext *s)
 {
     fp_pc_wrapper(flush_fp_regs)(s);
+#if defined(XBOX)
+    /*
+     * Reached from gen_bb_epilogue() (every BB_END op and the top of every
+     * tcg_gen_callN) and from i386_tr_tb_stop(), so this is also the point
+     * where a deferred exception-pointer update must land: no consumer of
+     * env->fpip/fpcs/fpdp/fpds can run without passing through here first.
+     */
+    xemu_x87_flush_ptrs(s);
+    xemu_x87_close_run(s);
+    s->xemu_fp_dirty = 0;
+#endif
     s->fpstt_delta = 0;
     s->flcr_set = false;
 }
@@ -1979,6 +2002,17 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
     s->fpregs[(s->fpstt_delta + 0) & 7] =
         s->fpregs[(s->fpstt_delta + st_index) & 7];
     s->fpregs[(s->fpstt_delta + st_index) & 7] = i;
+#if defined(XBOX)
+    if (st_index != 0) {
+        /*
+         * Only the cache pointers move; env->fpregs[] is untouched. Both
+         * slots therefore now hold a value that differs from the memory
+         * behind them, whatever their previous dirty state was.
+         */
+        xemu_x87_mark_dirty(s, 0);
+        xemu_x87_mark_dirty(s, st_index);
+    }
+#endif
 }
 
 static void gen_enter_mmx(DisasContext *s)
@@ -2816,6 +2850,14 @@ static void gen_cmovcc(DisasContext *s, int b, TCGv dest, TCGv src)
 static void gen_op_movl_seg_real(DisasContext *s, X86Seg seg_reg, TCGv seg)
 {
     TCGv selector = tcg_temp_new();
+#if defined(XBOX)
+    /*
+     * The real-mode segment load writes segs[].selector inline, with no
+     * helper call to flush behind. A deferred FDP/FCS update reads the
+     * selector at its flush point, so land it before the value moves.
+     */
+    xemu_x87_flush_ptrs(s);
+#endif
     tcg_gen_ext16u_tl(selector, seg);
     tcg_gen_st32_tl(selector, tcg_env,
                     offsetof(CPUX86State,segs[seg_reg].selector));
@@ -3821,6 +3863,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         gen_exception(s, EXCP07_PREX);
         return;
     }
+#if defined(XBOX)
+    if (s->xemu_x87_run < UINT8_MAX) {
+        s->xemu_x87_run++;
+    }
+#endif
     mod = (modrm >> 6) & 3;
     rm = modrm & 7;
     op = ((b & 7) << 3) | ((modrm >> 3) & 7);
@@ -4081,14 +4128,28 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
         if (update_fdp) {
             int last_seg = s->override >= 0 ? s->override : decode->mem.def_seg;
+            bool emit_now = true;
 
-            tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
-                           offsetof(CPUX86State,
-                                    segs[last_seg].selector));
-            tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
-                             offsetof(CPUX86State, fpds));
-            tcg_gen_st_tl(last_addr, tcg_env,
-                          offsetof(CPUX86State, fpdp));
+#if defined(XBOX)
+            int ptr_mode = xemu_x87_ptr_mode();
+
+            if (unlikely(xemu_x87_census_on())) {
+                xemu_gen_counter_inc(&xemu_x87_fdp_legacy);
+            }
+            if (ptr_mode) {
+                xemu_x87_record_fdp(s, last_seg, last_addr);
+                emit_now = ptr_mode == 2;
+            }
+#endif
+            if (emit_now) {
+                tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
+                               offsetof(CPUX86State,
+                                        segs[last_seg].selector));
+                tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
+                                 offsetof(CPUX86State, fpds));
+                tcg_gen_st_tl(last_addr, tcg_env,
+                              offsetof(CPUX86State, fpdp));
+            }
         }
     } else {
         /* register float ops */
@@ -4491,12 +4552,27 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
     }
 
     if (update_fip) {
-        tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
-                       offsetof(CPUX86State, segs[R_CS].selector));
-        tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
-                         offsetof(CPUX86State, fpcs));
-        tcg_gen_st_tl(eip_cur_tl(s),
-                      tcg_env, offsetof(CPUX86State, fpip));
+        bool emit_now = true;
+
+#if defined(XBOX)
+        int ptr_mode = xemu_x87_ptr_mode();
+
+        if (unlikely(xemu_x87_census_on())) {
+            xemu_gen_counter_inc(&xemu_x87_fip_legacy);
+        }
+        if (ptr_mode) {
+            xemu_x87_record_fip(s, eip_cur_tl(s));
+            emit_now = ptr_mode == 2;
+        }
+#endif
+        if (emit_now) {
+            tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
+                           offsetof(CPUX86State, segs[R_CS].selector));
+            tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
+                             offsetof(CPUX86State, fpcs));
+            tcg_gen_st_tl(eip_cur_tl(s),
+                          tcg_env, offsetof(CPUX86State, fpip));
+        }
     }
     return;
 
@@ -5292,6 +5368,12 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->xemu_sb_stub = false;
     dc->xemu_region_cand = false;
     dc->xemu_region_npend = 0;
+    dc->xemu_fp_dirty = 0;
+    dc->xemu_x87_run = 0;
+    dc->xemu_ft0_pending = false;
+    dc->xemu_ft0_reloaded = false;
+    dc->xemu_fip_pend = false;
+    dc->xemu_fdp_pend = false;
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
