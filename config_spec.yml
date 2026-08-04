@@ -233,6 +233,9 @@ display:
     debug_shaders: bool
     assert_on_validation_msg: bool
     preferred_physical_device: string
+  # Legacy key, superseded by metalfx_mode. Kept only so an old config
+  # still migrates: ui/xemu-settings.cc maps `true` onto `spatial` at
+  # load and then forces it back to false. Nothing else reads it.
   metalfx_upscale:
     type: bool
     default: false

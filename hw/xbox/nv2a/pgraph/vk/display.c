@@ -1924,6 +1924,81 @@ out:
                 "nv2a: MTLTexture export unavailable; present chain "
                 "keeps IOSurface\n");
 }
+
+/*
+ * MetalFX output-size stabilizer (XEMU_MFX_RESIZE_QUANTIZE=0 restores the
+ * continuous per-event size).
+ *
+ * The Metal-backend output size tracks the live CAMetalLayer, so a window
+ * drag walks it at the event rate; every distinct size destroys and rebuilds
+ * the scaler and its 3-texture ring behind a metalfx_drain_inflight() that
+ * blocks this (PFIFO) thread. Snapping the width to a 64-px ladder and
+ * holding a new size for MFX_RESIZE_SETTLE_NS before adopting it collapses a
+ * drag to a handful of rebuilds; the present blit aspect-fits the residual
+ * mismatch. A guest mode change (new input size) bypasses the cooldown.
+ */
+#define MFX_OUT_QUANTUM 64
+#define MFX_RESIZE_SETTLE_NS 200000000LL
+
+static bool mfx_resize_quantize_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("XEMU_MFX_RESIZE_QUANTIZE");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached == 1;
+}
+
+static void mfx_stabilize_output_size(int in_w, int in_h, int *out_w,
+                                      int *out_h)
+{
+    static int applied_in_w, applied_in_h, applied_w, applied_h;
+    static int pending_w, pending_h;
+    static int64_t pending_since_ns;
+
+    if (!mfx_resize_quantize_enabled() || in_w <= 0 || in_h <= 0) {
+        return;
+    }
+
+    int want_w = *out_w & ~(MFX_OUT_QUANTUM - 1);
+    if (want_w <= in_w) {
+        /* Landing at or below the input width silently disables upscaling
+         * (the out_w > disp->width gate); take the next rung up instead. */
+        want_w = (in_w / MFX_OUT_QUANTUM + 1) * MFX_OUT_QUANTUM;
+    }
+    int want_h = (int)(((int64_t)in_h * want_w) / in_w) & ~1;
+    if (want_h <= in_h) {
+        want_h = (in_h + 2) & ~1;
+    }
+
+    if (in_w != applied_in_w || in_h != applied_in_h || !applied_w) {
+        applied_in_w = in_w;
+        applied_in_h = in_h;
+        applied_w = want_w;
+        applied_h = want_h;
+        pending_w = 0;
+        pending_h = 0;
+    } else if (want_w != applied_w || want_h != applied_h) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (want_w != pending_w || want_h != pending_h) {
+            pending_w = want_w;
+            pending_h = want_h;
+            pending_since_ns = now;
+        } else if (now - pending_since_ns >= MFX_RESIZE_SETTLE_NS) {
+            applied_w = want_w;
+            applied_h = want_h;
+            pending_w = 0;
+            pending_h = 0;
+        }
+    } else {
+        pending_w = 0;
+        pending_h = 0;
+    }
+
+    *out_w = applied_w;
+    *out_h = applied_h;
+}
 #endif /* HAVE_IOSURFACE_SHARING */
 
 void pgraph_vk_init_display(PGRAPHState *pg)
@@ -2216,6 +2291,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 double s = (sx < sy) ? sx : sy;
                 out_w = ((int)((double)disp->width * s)) & ~1;
                 out_h = ((int)((double)disp->height * s)) & ~1;
+                mfx_stabilize_output_size((int)disp->width, (int)disp->height,
+                                          &out_w, &out_h);
             }
         }
         if (mfx_mode > 0 && !out_w &&
@@ -2229,6 +2306,19 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
         if (out_w > (int)disp->width || out_h > (int)disp->height) {
             IOSurfaceRef upscaled = NULL;
+
+            /* Shape tuple metalfx_init / metalfx_temporal_init key on: a
+             * change here is a scaler + texture-ring rebuild. */
+            static int last_in_w, last_in_h, last_out_w, last_out_h;
+            if (out_w != last_out_w || out_h != last_out_h ||
+                (int)disp->width != last_in_w ||
+                (int)disp->height != last_in_h) {
+                last_in_w = (int)disp->width;
+                last_in_h = (int)disp->height;
+                last_out_w = out_w;
+                last_out_h = out_h;
+                nsprof_event(NSPROF_EV_MFX_SCALER_REBUILD);
+            }
 
             if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
                 /*

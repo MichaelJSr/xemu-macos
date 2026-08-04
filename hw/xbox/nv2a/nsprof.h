@@ -11,12 +11,16 @@
  * Enable with XEMU_NV2A_NSPROF=1; a summary (total / avg-per-flip /
  * max single event) prints to stderr every ~5 s. Almost all
  * instrumented paths run on the PFIFO thread, so accumulation is
- * unsynchronized. The one exception is NSPROF_PRESENT_WAIT, which is
- * accumulated on the UI present thread (it times the present-handoff
- * round trip); its += races the PFIFO-thread reset in nsprof_flip_tick,
- * but on every host here 64-bit aligned loads/stores are atomic, so the
- * only effect is losing at most one interval's samples right at a reset
- * boundary — acceptable for a profiling counter.
+ * unsynchronized. The exceptions are the UI-thread buckets —
+ * NSPROF_PRESENT_WAIT (pull-model handoff round trip),
+ * NSPROF_DRAWABLE_ACQUIRE, NSPROF_UI_HUD_LOCK, NSPROF_UI_PRESENT_PERIOD
+ * and the NSPROF_EV_UI_PRESENT event — whose += races the PFIFO-thread
+ * reset in nsprof_flip_tick, but on every host here 64-bit aligned
+ * loads/stores are atomic, so the only effect is losing at most one
+ * interval's samples right at a reset boundary — acceptable for a
+ * profiling counter. UI-thread buckets are also normalized per *flip*
+ * in the summary, not per present; for presents/s divide the interval's
+ * ui_present event count by the interval seconds in the header line.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -61,6 +65,14 @@ enum NsprofCounter {
                              zeta->snapshot depth blit (XEMU_MFX_REAL_DEPTH=2).
                              CPU record time only; the copy's GPU cost lands
                              indirectly in the FLIP_STALL finish. */
+    NSPROF_DRAWABLE_ACQUIRE, /* UI-thread block in [CAMetalLayer nextDrawable]
+                                (Metal presentation backend). Accumulated
+                                off-thread — see the header comment above. */
+    NSPROF_UI_HUD_LOCK,   /* UI-thread main-loop-mutex + BQL acquire and hold
+                             across the ImGui HUD build. Off-thread. */
+    NSPROF_UI_PRESENT_PERIOD, /* UI-thread interval between consecutive
+                                 completed presents (end_frame -> end_frame).
+                                 Off-thread. */
     NSPROF__COUNT,
 };
 
@@ -128,6 +140,10 @@ enum NsprofEvent {
     NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
     NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
     NSPROF_EV_PUSH_POLICY_SKIP,    /* consumer catch-up skipped a stale step */
+    NSPROF_EV_UI_PRESENT,          /* completed UI present (end_frame) */
+    /* MetalFX output-shape change: the (in_w,in_h,out_w,out_h) tuple the
+     * scaler + its texture ring are rebuilt for (display.c). */
+    NSPROF_EV_MFX_SCALER_REBUILD,
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

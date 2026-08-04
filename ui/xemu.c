@@ -62,6 +62,10 @@
 #include <pthread.h>
 #include "xemu-present.h"
 #include "xemu-metal.h"
+#include "hw/xbox/nv2a/nsprof.h"
+/* ui/xemu-metal.m: acquire the drawable without opening the render pass
+ * (XEMU_PRESENT_DRAWABLE_FIRST). */
+bool xemu_metal_acquire_drawable(void);
 #endif
 #include <SDL3/SDL.h>
 
@@ -73,6 +77,17 @@
 #define DPRINTF(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define DPRINTF(...)
+#endif
+
+/*
+ * The lock-occupancy stat is runtime-enableable on macOS (where it is
+ * measured) and stays compile-time-only elsewhere, so the Windows/Linux
+ * release paths are unchanged.
+ */
+#if DEBUG_XEMU_C || defined(__APPLE__)
+#define XEMU_LOCK_STATS 1
+#else
+#define XEMU_LOCK_STATS 0
 #endif
 
 uint64_t vblank_interval_ns = 16666666LL;
@@ -207,24 +222,49 @@ static int exit_status;
 
 void tcg_register_init_ctx(void); // tcg.c
 
-#if DEBUG_XEMU_C
+#if XEMU_LOCK_STATS
 static uint64_t lock_held_acc;
 static uint64_t lock_start;
+
+/*
+ * Main-loop-mutex + BQL occupancy accounting. DEBUG_XEMU_C keeps it
+ * unconditional as before; otherwise XEMU_UI_LOCK_STATS=1 turns it on in a
+ * normal build. Latched on first use; the racing writers all store the same
+ * value. lock_start is only touched between lock and unlock, i.e. under the
+ * locks it measures.
+ */
+static bool lock_stats_enabled(void)
+{
+    static int cached = -1;
+    if (unlikely(cached < 0)) {
+#if DEBUG_XEMU_C
+        cached = 1;
+#else
+        const char *e = getenv("XEMU_UI_LOCK_STATS");
+        cached = (e && e[0] && e[0] != '0') ? 1 : 0;
+#endif
+    }
+    return cached == 1;
+}
 #endif
 
 void xemu_main_loop_lock(void)
 {
     qemu_mutex_lock_main_loop();
     bql_lock();
-#if DEBUG_XEMU_C
-    lock_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+#if XEMU_LOCK_STATS
+    if (unlikely(lock_stats_enabled())) {
+        lock_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
 #endif
 }
 
 void xemu_main_loop_unlock(void)
 {
-#if DEBUG_XEMU_C
-    lock_held_acc += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lock_start;
+#if XEMU_LOCK_STATS
+    if (unlikely(lock_stats_enabled())) {
+        lock_held_acc += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lock_start;
+    }
 #endif
     bql_unlock();
     qemu_mutex_unlock_main_loop();
@@ -871,19 +911,23 @@ static void *vblank_timer_thread(void *opaque)
     return NULL;
 }
 
-#if DEBUG_XEMU_C
+#if XEMU_LOCK_STATS
 static void report_stats(void)
 {
+    if (!lock_stats_enabled()) {
+        return;
+    }
+
     uint64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     static uint64_t last_reported = 0;
     static int num_frames = 0;
     uint64_t delta_ms = now - last_reported;
     num_frames += 1;
     if (delta_ms >= 1000) {
-        DPRINTF("[[ ");
-        DPRINTF("vblank @%fHz avg", fps);
-        DPRINTF(" - bql %"PRId64"ns/iter, %g%% time avg", lock_held_acc/num_frames, (double)lock_held_acc/(double)(delta_ms * 10000.0));
-        DPRINTF(" ]]\n");
+        fprintf(stderr,
+                "[[ vblank @%fHz avg - bql %"PRIu64"ns/iter, %g%% time avg ]]\n",
+                fps, lock_held_acc / num_frames,
+                (double)lock_held_acc / (double)(delta_ms * 10000.0));
         lock_held_acc = 0;
         last_reported = now;
         num_frames = 0;
@@ -968,7 +1012,7 @@ static void gl_render_frame(struct xemu_console *scon)
 
     qatomic_set(&rendering, false);
 
-#if DEBUG_XEMU_C
+#if XEMU_LOCK_STATS
     report_stats();
 #endif
 }
@@ -1135,6 +1179,25 @@ static void metal_render_frame(struct xemu_console *scon)
     }
 
     /*
+     * XEMU_PRESENT_DRAWABLE_FIRST=1 (opt-in): take the drawable before
+     * reading the ring, so the step this frame presents is chosen after
+     * the nextDrawable block instead of before it. Only the acquire
+     * moves — the command buffer, the shared-event wait and the render
+     * pass are still opened together, in that order, once the step's
+     * event value is known.
+     */
+    static int drawable_first = -1;
+    if (unlikely(drawable_first < 0)) {
+        const char *e = getenv("XEMU_PRESENT_DRAWABLE_FIRST");
+        drawable_first = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    if (unlikely(drawable_first) && !xemu_metal_acquire_drawable()) {
+        /* No drawable (occluded); leave the ring cursor untouched. */
+        qatomic_set(&rendering, false);
+        return;
+    }
+
+    /*
      * Pull the present frame from the renderer first: the frame's
      * shared-event value must be known before the drawable render
      * pass is opened (the GPU-side wait is encoded ahead of it).
@@ -1194,6 +1257,11 @@ static void metal_render_frame(struct xemu_console *scon)
                 xemu_metal_release_handle(frame.iosurface);
             }
             nv2a_release_framebuffer_surface();
+            if (unlikely(drawable_first)) {
+                /* Hand the already-acquired drawable back unpresented
+                 * (end_frame releases it when no pass was opened). */
+                xemu_metal_end_frame();
+            }
             qatomic_set(&rendering, false);
             /* Poll for the next step without spinning the handshake */
             SDL_DelayNS(1000000);
@@ -1270,13 +1338,23 @@ static void metal_render_frame(struct xemu_console *scon)
     xemu_snapshots_set_framebuffer_texture(tex, flip_required);
     xemu_hud_set_framebuffer_texture(tex, flip_required);
 
+    int64_t nsprof_lock_t0 = nsprof_begin();
     xemu_main_loop_lock();
     xemu_hud_update();
     xemu_main_loop_unlock();
+    nsprof_end(NSPROF_UI_HUD_LOCK, nsprof_lock_t0);
 
     xemu_hud_render();
 
     xemu_metal_end_frame();
+
+    /* Presented-frame cadence: end_frame -> end_frame. */
+    static int64_t nsprof_last_present_t0 = -1;
+    if (nsprof_last_present_t0 >= 0) {
+        nsprof_end(NSPROF_UI_PRESENT_PERIOD, nsprof_last_present_t0);
+    }
+    nsprof_last_present_t0 = nsprof_begin();
+    nsprof_event(NSPROF_EV_UI_PRESENT);
 
     if (frame.mtl_texture) {
         xemu_metal_release_handle(frame.mtl_texture);
@@ -1284,7 +1362,7 @@ static void metal_render_frame(struct xemu_console *scon)
 
     qatomic_set(&rendering, false);
 
-#if DEBUG_XEMU_C
+#if XEMU_LOCK_STATS
     report_stats();
 #endif
 }

@@ -36,6 +36,9 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_FLIP_IDLE] = "flip_idle",
     [NSPROF_PRESENT_WAIT] = "present_wait",
     [NSPROF_ZETA_SNAPSHOT] = "zeta_snap",
+    [NSPROF_DRAWABLE_ACQUIRE] = "drawable_acq",
+    [NSPROF_UI_HUD_LOCK] = "ui_hud_lock",
+    [NSPROF_UI_PRESENT_PERIOD] = "ui_frame_dt",
 };
 
 static const char *const event_names[NSPROF_EV__COUNT] = {
@@ -77,6 +80,8 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_PUSH_STEP_PUBLISH] = "push_step_publish",
     [NSPROF_EV_PUSH_RING_DROP] = "push_ring_drop",
     [NSPROF_EV_PUSH_POLICY_SKIP] = "push_policy_skip",
+    [NSPROF_EV_UI_PRESENT] = "ui_present",
+    [NSPROF_EV_MFX_SCALER_REBUILD] = "mfx_scaler_rebuild",
 };
 
 static struct {
