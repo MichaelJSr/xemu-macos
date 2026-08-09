@@ -263,26 +263,44 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
             };
         }
         /*
-         * VSH_UBO_BINDING=0 and PSH_UBO_BINDING=1 are consecutive
-         * same-type (UNIFORM_BUFFER) in the same set. Per Vulkan spec
-         * §14.2.3, a single write with descriptorCount=2 and
-         * dstArrayElement=0 overflows into binding 1 when binding 0's
-         * array is exhausted. Saves one VkWriteDescriptorSet struct
-         * init and one internal driver dispatch per UBO advance. Same
-         * pattern as the texture-descriptor coalescing below.
+         * VSH_UBO_BINDING=0 and PSH_UBO_BINDING=1 must be written as two
+         * separate descriptorCount=1 writes, NOT coalesced into one
+         * descriptorCount=2 write. The "consecutive binding overflow"
+         * shortcut (Vulkan spec §14.2.3) is only legal when every binding
+         * the write spans has identical descriptorType AND stageFlags
+         * (VUID-VkWriteDescriptorSet-dstArrayElement-00321). These two
+         * bindings differ in stageFlags (VERTEX vs FRAGMENT), so a
+         * coalesced write is invalid: MoltenVK tolerates it, but a native
+         * Vulkan driver may leave PSH's binding unwritten, so the fragment
+         * shader reads a stale/zero uniform buffer and every fragment
+         * resolves to black (Windows/Linux black-screen regression). The
+         * texture coalescing below stays valid — all its bindings share
+         * FRAGMENT stage and COMBINED_IMAGE_SAMPLER.
          */
         QEMU_BUILD_BUG_ON(ARRAY_SIZE(layouts) != 2);
         QEMU_BUILD_BUG_ON(VSH_UBO_BINDING != 0 || PSH_UBO_BINDING != 1);
-        VkWriteDescriptorSet ubo_write = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = r->ubo_descriptor_sets[r->ubo_descriptor_set_index],
-            .dstBinding = VSH_UBO_BINDING,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = ARRAY_SIZE(ubo_buffer_infos),
-            .pBufferInfo = ubo_buffer_infos,
+        VkWriteDescriptorSet ubo_writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = r->ubo_descriptor_sets[r->ubo_descriptor_set_index],
+                .dstBinding = VSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &ubo_buffer_infos[0],
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = r->ubo_descriptor_sets[r->ubo_descriptor_set_index],
+                .dstBinding = PSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &ubo_buffer_infos[1],
+            },
         };
-        vkUpdateDescriptorSets(r->device, 1, &ubo_write, 0, NULL);
+        vkUpdateDescriptorSets(r->device, ARRAY_SIZE(ubo_writes), ubo_writes, 0,
+                               NULL);
         r->ubo_descriptor_set_index++;
     }
 
