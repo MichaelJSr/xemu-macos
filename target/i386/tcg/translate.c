@@ -2083,15 +2083,40 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
     fp_pc_wrapper(gen_fstl_ST0)(s, arg);
 }
 
+/*
+ * FIST/FISTP with a directed rounding mode (RC = 1 toward -inf, 2 toward
+ * +inf) is wrong on non-AArch64 hosts: gen_flcr programs the guest RC into
+ * MXCSR but never the host x87 control word, and the i386 backend lacks the
+ * fused mode-specific converts (TCG_TARGET_HAS_rint_cvt=0), so the inline
+ * path degrades to FRNDINT — which reads the x87 CW (stuck at
+ * round-to-nearest) — and rounds to nearest instead of the directed mode.
+ * Fall back to the softfloat helper (honours the guest RC) for RC 1/2 on
+ * such hosts. RC 0 (nearest) and RC 3 (truncate, direct MXCSR convert) stay
+ * inline and are correct; AArch64 is fully correct inline (FCVTMS/FCVTPS).
+ */
 static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fistl_ST0, arg);
+#if !defined(__aarch64__)
+    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    if (rc == 1 || rc == 2) {
+        gen_helper_fistl_ST0(arg, tcg_env);
+        return;
+    }
+#endif
     fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
 static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg);
+#if !defined(__aarch64__)
+    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    if (rc == 1 || rc == 2) {
+        gen_helper_fistll_ST0(arg, tcg_env);
+        return;
+    }
+#endif
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
 }
 
@@ -2107,6 +2132,14 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fist_ST0, arg);
+#if !defined(__aarch64__)
+    /* See gen_fistl_ST0: directed rounding (RC 1/2) is wrong inline here. */
+    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
+    if (rc == 1 || rc == 2) {
+        gen_helper_fist_ST0(arg, tcg_env);
+        return;
+    }
+#endif
     fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
@@ -2171,6 +2204,20 @@ static void gen_fsqrt(DisasContext *s)
 static void gen_frndint(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(frndint);
+#if !defined(__aarch64__)
+    /*
+     * FRNDINT rounds ST0 to an integer using the FPU control word's RC.
+     * The inline path lowers to host FRNDINT, which reads the host x87 CW
+     * — but gen_flcr only programs MXCSR on i386, so the host CW is stuck
+     * at round-to-nearest. Only RC 0 (nearest) is correct inline; for any
+     * other RC (toward -inf/+inf/zero) fall back to the softfloat helper,
+     * which honours the guest RC. AArch64 (FRINTI + FPCR RMode) is correct.
+     */
+    if (((s->flags >> HF_FPU_RC_SHIFT) & 3) != 0) {
+        gen_helper_frndint(tcg_env);
+        return;
+    }
+#endif
     fp_pc_wrapper(gen_frndint)(s);
 }
 
@@ -5305,7 +5352,19 @@ void tcg_x86_init(void)
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_hard_fpu = g_config.perf.hard_fpu;
+#if TCG_TARGET_HAS_fpu
     g_use_hard_fpu_inline = g_use_hard_fpu;
+#else
+    /*
+     * The host TCG backend advertises no inline FP ops (Windows ARM64:
+     * TCG_TARGET_HAS_fpu is forced to 0 there to dodge an llvm-mingw
+     * qemu_build_not_reached link failure). Emitting inline FP TCG ops
+     * anyway makes tcg_op_supported() return 0 and trips the codegen
+     * assert (debug) / __builtin_unreachable (release). Keep the
+     * helper-based hard FPU on such hosts by leaving the inline path off.
+     */
+    g_use_hard_fpu_inline = 0;
+#endif
 #endif
 }
 
