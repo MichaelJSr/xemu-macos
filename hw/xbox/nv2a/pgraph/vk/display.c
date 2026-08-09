@@ -1394,12 +1394,24 @@ static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
     PGRAPHVkDisplayState *disp = &r->display;
 
     bool pvideo_on = disp->pvideo.state.enabled;
+#ifdef __APPLE__
+    /*
+     * Skip-if-unchanged cache. The key is a raw SurfaceBinding* that is
+     * never cleared when a surface is evicted, so after a surface is freed
+     * and its heap address reused for a new binding, this compares equal
+     * and skips the rewrite — leaving the descriptor pointed at the freed
+     * VkImageView. MoltenVK tolerates sampling a stale view (its backing
+     * MTLTexture is ARC-retained), but a native Vulkan driver samples a
+     * destroyed view as black. Keep the fast path only on Apple; native
+     * drivers rewrite the descriptor every present (two writes, cheap).
+     */
     if (surface == disp->last_descriptor_surface &&
         pvideo_on == disp->last_descriptor_pvideo) {
         return;
     }
     disp->last_descriptor_surface = surface;
     disp->last_descriptor_pvideo = pvideo_on;
+#endif
 
     VkDescriptorImageInfo image_infos[2];
     VkWriteDescriptorSet descriptor_writes[2];
