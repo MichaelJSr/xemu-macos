@@ -553,7 +553,15 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         F(occlusionQueryPrecise, true),
         F(samplerAnisotropy, false),
         F(shaderClipDistance, true),
-        F(shaderTessellationAndGeometryPointSize, true),
+        /*
+         * Optional: only governs writing gl_PointSize from geometry/tess
+         * shaders. Enabled when the driver has it (no fidelity change on
+         * capable GPUs), but not required — some Windows Vulkan ICDs
+         * (paravirtual GPUs in VMs, weak iGPUs, D3D12-backed layers) lack
+         * it and would otherwise hard-abort device init. Apple already
+         * runs with this off.
+         */
+        F(shaderTessellationAndGeometryPointSize, false),
         F(wideLines, false),
 #endif
         #undef F
