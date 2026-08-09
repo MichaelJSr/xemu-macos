@@ -114,7 +114,18 @@ int xemu_subpage_fast_mode(void)
          * static, loadvm-cycling, and first-visit-streaming soaks.
          * XEMU_SUBPAGE_FAST=0 reverts to the plain slow path.
          */
+        /*
+         * Default matches the documented contract (header): on Apple
+         * (validated dev/CI target) default-on; elsewhere default-off.
+         * The aarch64 backend emits the stub on non-Apple aarch64 too
+         * (Linux/Windows ARM), where this path is unvalidated — don't
+         * ship it default-on there. XEMU_SUBPAGE_FAST=1 opts in.
+         */
+#ifdef __APPLE__
         int m = 1;
+#else
+        int m = 0;
+#endif
         const char *e = getenv("XEMU_SUBPAGE_FAST");
         if (e) {
             m = (e[0] == '1') ? 1 : 0;
