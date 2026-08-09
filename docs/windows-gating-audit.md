@@ -199,3 +199,171 @@ grep -n "HAVE_IOSURFACE_SHARING\|get_present_frame_pushed" hw/xbox/nv2a/pgraph/v
 grep -n "matrix.arch == 'arm64'\|meson test --suite xbox" .github/workflows/build-macos.yml
 grep -n "dpkg-buildpackage\|Test xbox suite" .github/workflows/build-linux.yml  # H: test job present
 ```
+
+---
+
+# Windows real-hardware report — 2026-08-09 (v0.13.1, first field run + local repro)
+
+The needs-real-HW list finally got its first data point. A user on real
+Windows hardware (AMD Ryzen 5 5500, Zen 3, x86_64) reported the released
+`v0.13.1` Windows x86_64 build boots to a **black screen with working
+boot audio** — the guest runs, nothing renders. This section records what
+the report plus a local reproduction attempt established. **Honest scope:
+the reporter's exact failure (Vulkan on a real desktop GPU) could NOT be
+reproduced on the dev Mac — no real Windows GPU is available here; the only
+Windows target is a Parallels VM whose paravirtual GPU can't initialize
+this renderer at all. Findings below are: two code-confirmed Windows
+defects, one strongly-localized hypothesis for the reporter, and the wall
+that blocks closing it locally.**
+
+## K. The default renderer on Windows is VULKAN (not OpenGL)
+
+`config_spec.yml` sets `display.renderer` **default: VULKAN** on every
+platform. `nv2a_context_init` (`pgraph.c:546`) only calls
+`get_default_renderer()` (the OpenGL-first-on-non-Apple fallback) when the
+*configured* renderer is unavailable. So a fresh Windows install with no
+`xemu.toml` runs the **Vulkan** renderer, not OpenGL. The
+`get_default_renderer` OpenGL-first ordering (§A5) is a fallback, not the
+default — it fires only if Vulkan fails to register entirely. **The
+reporter is on the Vulkan path.**
+
+## L. CONFIRMED defect: Vulkan requires strict device features on non-Apple
+
+`instance.c:524-560` — the `#else` (non-Apple) branch marks
+`geometryShader`, `occlusionQueryPrecise`,
+`shaderTessellationAndGeometryPointSize`, `fillModeNonSolid`, `depthClamp`,
+`shaderClipDistance` all **required: true**. If the selected physical
+device lacks any one, `pgraph_vk_init_device` prints
+`Error: Device does not support required feature <name>` and xemu exits.
+This is the **upstream-inherited** requirement (the fork only *added* the
+relaxed `#ifdef __APPLE__` branch at `50ccd17cfd`); the audit called it
+A3. **First runtime confirmation (2026-08-09):** the Parallels Win11 VM
+(paravirtual D3D12→Vulkan device, `Parallels Display Adapter (WDDM)`,
+driver 26.1.99) aborts here on `shaderTessellationAndGeometryPointSize`.
+Real desktop AMD/NVIDIA/Intel GPUs support all six, so the reporter's
+machine passes this check — this abort is a **VM-GPU artifact, not the
+reporter's bug** — but it is a real landmine for anyone on a
+feature-poor Windows Vulkan ICD (VMs, Dozen/vkd3d layers, some iGPUs), and
+the exit is total (no automatic OpenGL fallback on a *feature* rejection,
+only on a missing-renderer registration).
+
+## M. CONFIRMED defect: OpenGL renderer crashes after PFIFO start (VM)
+
+Forcing `renderer = 'OPENGL'` on the VM gets past renderer init — the
+PFIFO thread starts (`pfifo heartbeat iters=1`) — then the process
+**crashes deterministically**: WER `Application Error`, `xemu.exe`,
+exception `0xc00000ff`, identical fault offset across every run, dispatched
+through `ntdll.dll` (debug build; the frame is almost certainly a
+compiled-in assert/abort, WER LocalDumps did not capture a usable dump
+under the scheduled-task session). **Caveat:** the VM's OpenGL is
+`Parallels using Apple M2 Ultra (Compat)` — GL 4.1 over Metal over an
+Apple GPU, driven through Prism x86→ARM translation. A real AMD OpenGL
+driver is an entirely different stack, so this crash may not reproduce on
+the reporter's machine and is likely **not** their bug either (they run
+Vulkan). Recorded because it is a genuine crash in the fork's Windows GL
+path and the only stack-adjacent signal obtained.
+
+## N. Strongly-localized HYPOTHESIS for the reporter (unconfirmed on real HW)
+
+Symptom = audio + black + process stays alive. That means the renderer
+initialized (guest CPU + APU running), so on the reporter's real GPU the
+§L feature check **passed** and Vulkan is live. The black screen is
+therefore in the **present path**, not init. The non-Apple Vulkan present
+(`display.c`) renders into an external-memory `VkImage` and shares it into
+a GL texture via `VK_KHR_external_memory_win32` →
+`glImportMemoryWin32HandleEXT` (the GL window samples that texture). If
+that VK↔GL interop yields a black/garbage texture on their driver combo,
+the game area is black while Vulkan and audio run normally; in a **release
+build the guarding `assert(glGetError()==GL_NO_ERROR)` is compiled out**,
+so the failure is silent. The auto-hiding ImGui menu bar would leave the
+whole window looking black. This flow reads as structurally intact and is
+largely upstream, so the break — if it is a fork regression vs. stock
+xemu-on-Windows — most likely lives in the 1737-line `display.c` rework,
+but **no specific defect was pinned, and it was not reproduced on real
+hardware.** Do not present this as proven.
+
+## O. The wall (why this can't be closed on the dev Mac)
+
+Reproducing the reporter's case needs a Vulkan device that (a) supports the
+§L strict feature set AND (b) runs the real Windows VK↔GL interop present
+path. The dev Mac has neither: no real Windows GPU, and the only Windows
+environment (Parallels) exposes a paravirtual GPU that fails §L before the
+present path is ever reached. Options to actually close it, in order of
+signal: (1) get the reporter's `xemu.log` (shows selected renderer +
+whether init completed + where output stops — zero effort for them); (2)
+have the reporter set `renderer = 'OPENGL'` in `xemu.toml` and report —
+renders ⇒ Vulkan present path confirmed as culprit + gives them a working
+config; black/crash ⇒ deeper; (3) reporter runs stock upstream xemu — works
+⇒ fork regression, isolates to fork-changed Windows code; (4) build a
+patched Windows xemu that relaxes §L to exercise the present path on the
+VM's Vulkan (heavy; the paravirtual GPU may still not render Xbox geometry
+correctly). Reporter-facing triage doc: `scratchpad/windows-triage-for-reporter.md`.
+
+## P. Reproduction assets (2026-08-09, dev Mac)
+
+- Fixtures + released dbg Windows build staged at `~/Documents/Xemu/win-triage/`
+  and inside the guest at `C:\xemu-triage\` (bootrom/BIOS/eeprom, cloned
+  `hdd-triage.qcow2`, `xemu-dbg/xemu.exe` = `xemu-0.13.1-dbg-windows-x86_64.zip`).
+- Guest launch is via interactive-token scheduled tasks (`xemudesk`/`xemugl`)
+  so xemu gets a real GPU window station (session-0 `prlctl exec` wedges at
+  window/GL-context creation — an artifact, not the bug).
+- macOS-side receipts (renderer axis exoneration): `scratchpad/gltest/`
+  (fork GL renderer boots Azurik on macOS; official x86_64 slice under
+  Rosetta 2 boots — TCG/x87/ISA axis clear).
+
+## Q. ROOT CAUSE + FIX (2026-08-09, resolved)
+
+The reporter confirmed **stock upstream xemu renders on their Windows Vulkan
+GPU while this fork is black** — a clean differential proving a fork
+regression in fork-changed VK code that MoltenVK tolerates but a native ICD
+enforces. Three parallel fork-vs-`upstream/master` diffs of the non-Apple VK
+path found it.
+
+**Primary bug — illegal coalesced cross-stage UBO descriptor write.**
+`pgraph_vk_update_descriptor_sets` (`hw/xbox/nv2a/pgraph/vk/shaders.c`) wrote
+the two set-0 uniform buffers — binding 0 (`VSH_UBO_BINDING`, **VERTEX**
+stage) and binding 1 (`PSH_UBO_BINDING`, **FRAGMENT** stage) — as a single
+`descriptorCount=2` `VkWriteDescriptorSet` at `dstBinding=0`, relying on the
+Vulkan §14.2.3 consecutive-binding overflow. That overflow is only legal
+when every spanned binding has identical `stageFlags`; these differ, so the
+write violates **VUID-VkWriteDescriptorSet-descriptorCount-10776** and
+**VUID-VkWriteDescriptorSet-dstArrayElement-00321**. MoltenVK tolerates it
+(each element lands in its Metal argument-buffer slot → macOS renders); a
+native driver may leave binding 1 (`PshUniforms`) unwritten, so the fragment
+shader reads a stale/zero uniform buffer and **every fragment resolves to
+black** while guest + audio run — the exact field symptom, on every draw
+(persistent). Upstream wrote the two UBOs as two separate `descriptorCount=1`
+writes.
+
+**Runtime-confirmed, driver-independently.** A standalone Vulkan program
+(`scratchpad/vkrepro/repro.c`) issuing the exact write under the Khronos
+validation layer fires both VUIDs for the coalesced form and is clean for the
+two-write form — confirming the violation is real and the fix removes it,
+independent of any driver's tolerance.
+
+**Secondary bug — display descriptor use-after-free.** `update_descriptor_set`
+(`display.c`) cached "skip if unchanged" on a raw `SurfaceBinding*` never
+cleared on eviction; after `g_free`/`g_malloc` address reuse, a destroyed
+`VkImageView` stays bound → black on native, tolerated by MoltenVK
+(ARC-retained `MTLTexture`). (Agent-B sync/barrier divergences — pipelined
+`pgraph_vk_finish`, narrowed aux→main `wait_stage` — are real but
+`wait_stage=VERTEX_INPUT` still gates the shader stages; not fixed, revisit
+only if the two above prove insufficient.)
+
+**Fix — branch `fix-windows-vulkan-black`** (CI green on macOS/Linux/Windows):
+(1) split the UBO write into two per-stage writes (primary; universal);
+(2) gate the display descriptor skip-cache to Apple only (native rewrites
+every present); (3) relax `shaderTessellationAndGeometryPointSize` to
+optional on non-Apple — still enabled when available (no fidelity change on
+capable GPUs), but its absence no longer hard-aborts init on weak/paravirtual
+Windows Vulkan ICDs.
+
+**Validation state.** Primary fix is validation-layer-proven locally. The
+end-to-end render was NOT reproduced on real Windows GPU hardware here: the
+only local Windows target is the Parallels VM, whose Vulkan is Microsoft
+Dozen (`vulkan_dzn.dll`, Vulkan→D3D12→Metal on Windows-on-ARM) — it crashes
+inside the driver during resource setup (0xc0000005), before rendering, even
+with the feature relaxed. The reporter's real AMD driver is far more
+conformant (reaches rendering → black, not crash), so the definitive
+confirmation is the reporter testing the patched build; commits 1+2 are what
+fix their screen (their GPU has the relaxed feature).
