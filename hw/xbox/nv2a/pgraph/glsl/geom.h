@@ -38,6 +38,14 @@ typedef struct {
 
 typedef struct GenGeomGlslOptions {
     bool vulkan;
+    /*
+     * Suppress the gl_PointSize passthrough in the GS. Default 0 = emit it
+     * (GL always supports it; Vulkan drivers advertising
+     * shaderTessellationAndGeometryPointSize support it). Set only on Vulkan
+     * devices lacking that feature, so the GeometryPointSize SPIR-V
+     * capability isn't declared and GS pipeline creation doesn't fail.
+     */
+    bool omit_point_size;
 } GenGeomGlslOptions;
 
 void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *geom);

@@ -615,6 +615,7 @@ typedef struct PGRAPHVkState {
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
+    bool supports_geom_point_size;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;

@@ -586,6 +586,16 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
     r->supports_geometry_shaders =
         r->enabled_physical_device_features.geometryShader == VK_TRUE;
+    /*
+     * Whether a geometry shader may write gl_PointSize. Emitting that write
+     * makes glslang declare the GeometryPointSize SPIR-V capability, which
+     * requires this feature; if it's unavailable the GS pipeline would fail
+     * capability validation. Thread this into GS generation so the write is
+     * omitted when unsupported (see pgraph_glsl_gen_geom).
+     */
+    r->supports_geom_point_size =
+        r->enabled_physical_device_features.shaderTessellationAndGeometryPointSize ==
+        VK_TRUE;
 
     void *next_struct = NULL;
 
