@@ -367,3 +367,49 @@ with the feature relaxed. The reporter's real AMD driver is far more
 conformant (reaches rendering → black, not crash), so the definitive
 confirmation is the reporter testing the patched build; commits 1+2 are what
 fix their screen (their GPU has the relaxed feature).
+
+## R. Deep cross-platform audit (2026-08-09) — additional fixes
+
+A follow-up sweep (VK renderer / Windows / Linux-POSIX / TCG host-arch, four
+parallel diffs vs `upstream/master`) found more of the same
+MoltenVK-tolerated-or-arm64-only class. Confirmed and fixed for v0.13.2:
+
+- **Dynamic-state reuse across command buffers** (`vk/draw.c`) — line width
+  / depth bias / blend constants could be skipped against a value cached in
+  a prior CB (undefined CB-scoped state, VUID-vkCmdDraw-None-07833/34/35).
+  All native GPUs incl. the reporter's; MoltenVK retains state across CBs.
+  Fixed by poisoning the conditional caches at CB begin.
+- **Texture `bufferOffset` misalignment** (`vk/texture.c`) — the staging
+  bump allocator left `VkBufferImageCopy.bufferOffset` unaligned to the
+  texel block size (VUID-...-bufferOffset-00193) → texture corruption on
+  native. Fixed by rounding up to 16.
+- **GS `gl_PointSize` capability** (`vk/{instance,shaders}.c`, `glsl/geom.*`)
+  — §L's feature relaxation was incomplete: the GS still declared the
+  `GeometryPointSize` capability, moving a clean early failure to a late
+  pipeline-creation failure on drivers with `geometryShader` but not the
+  point-size feature. Fixed by omitting the `gl_PointSize` write (and thus
+  the capability) when the device lacks the feature.
+- **Inline x87 FPU, Windows ARM64** (`target/i386/tcg/translate.c`) —
+  inline FP ops were emitted despite `TCG_TARGET_HAS_fpu=0`, tripping the
+  codegen assert (debug) / UB (release). This **corrects §A11/§G**, which
+  wrongly claimed Windows ARM64 fell back to the helper FPU — it did not
+  until this fix (`g_use_hard_fpu_inline` now gated on `TCG_TARGET_HAS_fpu`).
+- **Inline x87 directed rounding, x86_64 hosts** (`translate.c`) — `FIST`
+  under RC ±∞ and `FRNDINT` under any non-nearest mode silently rounded to
+  nearest (the x87 CW is never programmed on i386; only MXCSR is). Fixed by
+  a softfloat-helper fallback for those cases on non-aarch64 hosts. Affects
+  Windows/Linux x86_64 (the reporter's platform) for directed-rounding FP.
+- **Sub-page dirty-tracking default** (`accel/tcg/xemu-subpage-fast.c`) —
+  default-on contradicted its documented "Apple 1, elsewhere 0" and ran
+  unvalidated on non-Apple aarch64. Gated the default to `__APPLE__`.
+
+Audited clean (important negatives, verified in-tree): the two-descriptor-set
+split, texture descriptor coalescing, descriptor bind-skip across clears, the
+pipelined `pgraph_vk_finish` and narrowed aux→main `wait_stage` (per-slot
+partitioned; wait gates all later stages), deferred eviction / LRU retirement
+watermark, the Linux OPAQUE_FD external-memory path (no leak/double-close),
+the DSP56300 arm64 JIT non-Apple W^X/icache path, audio/APU portable
+`#else`/SSE2/scalar paths, xpage chaining / can_do_io elision / lockless MMIO
+(all host-arch-independent). Remaining suspected-latent items (not fixed,
+don't fire on desktop): compute workgroup size 256 unclamped, `BUFFER_COMPUTE`
+256 MiB cap, surface-upload compute-descriptor partition guard.

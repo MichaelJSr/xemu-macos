@@ -154,7 +154,45 @@ table carries the user-facing subset.
   geometry/tessellation shaders (Apple already runs without it). It is
   still enabled when the driver reports it available — no fidelity
   change on capable GPUs — but its absence no longer hard-aborts device
-  init on weak or paravirtual Windows Vulkan ICDs.
+  init on weak or paravirtual Windows Vulkan ICDs. The geometry shader now
+  omits the `gl_PointSize` passthrough (and thus the `GeometryPointSize`
+  SPIR-V capability) when the device lacks the feature, so GS pipeline
+  creation doesn't fail its capability check afterward. GL and
+  feature-capable Vulkan devices are unchanged.
+
+- **Dynamic-state reuse across command buffers fixed on native drivers
+  (2026-08-09).** `begin_draw`'s dedup of line width / depth bias / blend
+  constants could skip `vkCmdSet*` against a value cached in a *previous*
+  command buffer, leaving that CB-scoped dynamic state undefined
+  (VUID-vkCmdDraw-None-07833/07834/07835) — z-fighting / wrong blend on
+  native drivers; MoltenVK retains dynamic state across CBs and hid it.
+  The conditional caches are now poisoned at command-buffer begin.
+
+- **Texture-upload `bufferOffset` aligned to texel block size
+  (2026-08-09).** The staging bump allocator advanced by unpadded decoded
+  sizes, leaving `VkBufferImageCopy.bufferOffset` misaligned
+  (VUID-VkBufferImageCopy-bufferOffset-00193) → texture corruption on
+  native drivers (MoltenVK accepts any byte offset). Offsets are rounded
+  up to 16.
+
+### CPU / numerics (host-architecture correctness)
+
+- **Inline x87 FPU host-correctness fixes (2026-08-09).** The default-on
+  inline hard FPU, validated only on aarch64 hosts, had two non-aarch64
+  defects. (1) Windows ARM64 emitted inline FP ops despite its backend
+  advertising `TCG_TARGET_HAS_fpu=0`, tripping the codegen assert (debug)
+  / UB (release); `g_use_hard_fpu_inline` is now gated on that macro so
+  such hosts use the helper-based hard FPU. (2) On x86_64 hosts,
+  `gen_flcr` programs MXCSR but not the x87 control word, so `FIST`/`FISTP`
+  under round-toward-±∞ and `FRNDINT` under any non-nearest mode silently
+  rounded to nearest; those cases now fall back to the softfloat helper
+  (nearest/truncate stay inline; aarch64 unchanged).
+
+- **Sub-page dirty-tracking default gated to Apple (2026-08-09).** Its
+  default was on unconditionally, contradicting the feature's own
+  documented "Apple 1, elsewhere 0" and running unvalidated default-on on
+  non-Apple aarch64. Gated to `__APPLE__`; `XEMU_SUBPAGE_FAST=1` opts in
+  elsewhere. (x86_64 unaffected — the i386 backend emits no stub.)
 
 ### CPU / JIT (ARM64)
 
