@@ -2133,6 +2133,25 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
      * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
      */
     r->dynstate_cache_valid = false;
+    /*
+     * Viewport/scissor are re-issued on the first draw of every CB via the
+     * dynstate_cache_valid=false gate above. Line width, depth bias and
+     * blend constants are conditional (line width only on pipelines with
+     * that dynamic state; depth bias/blend only on non-clear draws), so the
+     * shared valid flag can be set true by a draw that didn't emit them,
+     * letting a later draw skip vkCmdSet* against a value cached in a
+     * PREVIOUS command buffer — reusing undefined CB-scoped dynamic state
+     * (black/z-fighting/wrong blend on native drivers; MoltenVK retains
+     * state across CBs and hides it). Poison the conditional caches so the
+     * first draw that actually evaluates each one is forced to re-issue.
+     */
+    r->cached_line_width = NAN;
+    r->cached_depth_bias_constant = NAN;
+    r->cached_depth_bias_slope = NAN;
+    r->cached_blend_constants[0] = NAN;
+    r->cached_blend_constants[1] = NAN;
+    r->cached_blend_constants[2] = NAN;
+    r->cached_blend_constants[3] = NAN;
     r->last_vertex_bind_valid = false;
     r->last_index_bind_valid = false;
     r->last_push_constants_valid = false;
