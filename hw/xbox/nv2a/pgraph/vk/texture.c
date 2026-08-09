@@ -892,12 +892,25 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
      * and their copies are batched on the main command buffer. If the
      * staging buffer is too full, flush first to reclaim space.
      */
+    /*
+     * VkBufferImageCopy.bufferOffset must be a multiple of the texel block
+     * size (VUID-VkBufferImageCopy-bufferOffset-00193; 4 bytes for the
+     * RGBA8 all uploads decode to). The bump allocator advances by unpadded
+     * decoded sizes, so without re-alignment a mip chain whose total size
+     * isn't a multiple of 4 leaves the next texture's offset misaligned —
+     * MoltenVK accepts arbitrary byte offsets, but a native driver drops
+     * the low offset bits and corrupts the copy. Round up to 16 (LCM of
+     * all texel-block sizes; also satisfies optimalBufferCopyOffsetAlignment
+     * on desktop) at both the accumulate and reset points.
+     */
+    staging->buffer_offset = ROUND_UP(staging->buffer_offset, 16);
     VkDeviceSize slot_limit = r->flight[r->current_flight].staging_buffer_limit;
     if (staging->buffer_offset + texture_data_size > slot_limit) {
         if (r->in_command_buffer) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
         }
-        staging->buffer_offset = r->flight[r->current_flight].staging_buffer_base;
+        staging->buffer_offset =
+            ROUND_UP(r->flight[r->current_flight].staging_buffer_base, 16);
     }
 
     nv2a_vk_assert(staging->buffer_offset + texture_data_size <= slot_limit);
