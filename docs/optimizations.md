@@ -123,6 +123,39 @@ table carries the user-facing subset.
 > the crash is not attributed to any wave mechanism; it is recorded so a
 > future reader recognizes the signature rather than re-debugging it.
 
+### Rendering (correctness fixes)
+
+- **Windows / native-Vulkan black screen fixed (2026-08-09).** On a
+  native Vulkan driver (Windows/Linux ICD), the renderer booted to a
+  black screen with working audio while stock upstream rendered — a
+  fork regression that MoltenVK's leniency hid. Root cause: the set-0
+  uniform-buffer descriptors were written as one coalesced
+  `descriptorCount=2` `VkWriteDescriptorSet` spanning binding 0
+  (`VSH_UBO`, VERTEX stage) and binding 1 (`PSH_UBO`, FRAGMENT stage),
+  which violates the Vulkan consecutive-binding rule that spanned
+  bindings share `stageFlags`
+  (`VUID-VkWriteDescriptorSet-descriptorCount-10776` /
+  `-dstArrayElement-00321`). MoltenVK tolerates it; a native driver may
+  leave the fragment UBO unwritten, so every fragment resolves to black
+  on every draw. Fixed by writing the two UBOs as two
+  `descriptorCount=1` writes (upstream's form; result-identical on
+  MoltenVK). Runtime-confirmed with the Khronos validation layer (the
+  coalesced write trips both VUIDs, the split write is clean). Secondary
+  fix: the display descriptor "skip if unchanged" cache keyed on a raw
+  `SurfaceBinding*` never cleared on eviction, so after heap-address
+  reuse a destroyed `VkImageView` stayed bound (black on native,
+  ARC-retained/tolerated on MoltenVK) — the skip is now gated to Apple
+  only. No escape hatch: these remove spec violations rather than add an
+  optimization, and macOS behavior is unchanged. There is no
+  interleaved A/B because this is a correctness fix, not a perf change.
+
+- **`shaderTessellationAndGeometryPointSize` no longer required on
+  non-Apple (2026-08-09).** It only governs writing `gl_PointSize` from
+  geometry/tessellation shaders (Apple already runs without it). It is
+  still enabled when the driver reports it available — no fidelity
+  change on capable GPUs — but its absence no longer hard-aborts device
+  init on weak or paravirtual Windows Vulkan ICDs.
+
 ### CPU / JIT (ARM64)
 
 - **Sub-page code dirty tracking (default on, 2026-07-11).** A

@@ -212,6 +212,12 @@ xemu bundles nothing. Update the vendor driver on real hardware. Inside
 VMs there is usually no Vulkan ICD at all — the OpenGL fallback is
 expected. `vulkaninfo` shows what the loader sees.
 
+**Windows: black screen with working audio on Vulkan.** Fixed in
+v0.13.2 — an invalid cross-stage uniform-buffer descriptor write that
+native Vulkan drivers rendered as black (MoltenVK tolerated it). Update
+to v0.13.2 or newer. As a fallback on older builds, set
+`renderer = 'OPENGL'` in `xemu.toml`.
+
 More escape hatches (every optimization ships one) are listed with
 their owning changes in [docs/optimizations.md](docs/optimizations.md).
 
