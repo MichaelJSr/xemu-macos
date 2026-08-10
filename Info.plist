@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>xemu</string>
+  <key>CFBundleIconFile</key>
+  <string>xemu.icns</string>
+  <key>CFBundleIdentifier</key>
+  <string>app.xemu.xemu</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>xemu</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1</string>
+  <key>CFBundleSignature</key>
+  <string>xemu</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.games</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Microphone used for peripheral emulation, e.g. Xbox Live Communicator.</string>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS</key>
+    <string>1</string>
+    <!-- Immediate prefill encoding (2) corrupted textures (giant
+         magenta blocks, ~5% of frames in streaming-heavy scenes) and
+         enabled an AGX visibility-buffer crash once command buffers
+         began spanning whole frames; it also measured SLOWER than
+         submit-time encoding (46.3 vs 48.5 fps, same scene) because
+         encoding now lands on the hot PFIFO thread. Keep it off. -->
+    <key>MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS</key>
+    <string>0</string>
+    <key>MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS</key>
+    <string>0</string>
+    <key>MVK_CONFIG_FAST_MATH_ENABLED</key>
+    <string>1</string>
+    <key>MVK_CONFIG_RESUME_LOST_DEVICE</key>
+    <string>1</string>
+    <!-- Errors only (driver default is INFO). -->
+    <key>MVK_CONFIG_LOG_LEVEL</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

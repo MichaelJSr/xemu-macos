@@ -1,0 +1,2087 @@
+/*
+ * Translation Block Maintenance
+ *
+ *  Copyright (c) 2003 Fabrice Bellard
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "qemu/osdep.h"
+#include "qemu/interval-tree.h"
+#include "qemu/qtree.h"
+#include "exec/cputlb.h"
+#include "exec/log.h"
+#include "exec/page-protection.h"
+#include "exec/mmap-lock.h"
+#include "exec/tb-flush.h"
+#include "exec/target_page.h"
+#include "accel/tcg/cpu-ops.h"
+#include "tb-internal.h"
+#include "system/tcg.h"
+#include "tcg/tcg.h"
+#include "tb-hash.h"
+#include "tb-context.h"
+#include "tb-internal.h"
+#include "internal-common.h"
+#ifdef CONFIG_USER_ONLY
+#include "user/page-protection.h"
+#define runstate_is_running()  true
+#else
+#include "system/runstate.h"
+#endif
+#include "trace.h"
+#include "xemu-inv-prof.h"
+#include "xemu-xpage.h"
+#include "exec/xemu-subpage-fast.h"
+
+#if defined(XBOX)
+/*
+ * XEMU_INV_PROF=1: SMC / TB-invalidation-churn counters. See
+ * xemu-inv-prof.h for the model (plain uint64, single vCPU writer, exit
+ * dump). Definitions live here because tb-maint.c owns the invalidation
+ * paths; the recycle (c) and census (d) sites reference these externs.
+ */
+int xemu_inv_cur_src;
+
+uint64_t xemu_inv_total;
+uint64_t xemu_inv_by_src[XEMU_INV_SRC_MAX];
+
+uint64_t xemu_inv_range_evals;
+uint64_t xemu_inv_false_share;
+
+uint64_t xemu_inv_traps;      /* notdirty writes that reached a code page */
+uint64_t xemu_inv_unprotect;  /* pages emptied of TBs -> tlb_unprotect_code */
+
+uint64_t xemu_nd_calls;
+uint64_t xemu_nd_calls_inval;
+uint64_t xemu_nd_ticks_total;
+uint64_t xemu_nd_ticks_inval;
+
+/* Sub-page dirty tracking (arm (a) + refuter); defined here so the dump sees
+ * them. Latches/helpers live after xemu_tb_range_inv_on(). */
+uint64_t xemu_subpage_skips;
+uint64_t xemu_subpage_refute_total;
+uint64_t xemu_subpage_refute_hits;
+uint64_t xemu_subpage_refute_violations;
+
+uint64_t xemu_inv_recycle_attempts;
+uint64_t xemu_inv_recycle_hits;
+uint64_t xemu_inv_recycle_true_smc;
+uint64_t xemu_inv_recycle_cold;
+
+uint64_t xemu_inv_span_nochain;
+
+/*
+ * (f) MMIO recompile census, counted in cputlb.c's io_prepare. Sizes the
+ * XEMU_ELIDE_CANDOIO gate: the recompiles are exactly what the elision
+ * removes, so the rate has to be read from a XEMU_ELIDE_CANDOIO=0 run.
+ */
+uint64_t xemu_io_prepare_calls;
+uint64_t xemu_io_recompiles;
+
+/* Wall clock at the moment the dump was armed, for per-second rates. */
+static int64_t xemu_inv_prof_t0_us;
+
+uint64_t xemu_inv_flcr_emitted;
+uint64_t xemu_inv_flcr_skip;
+uint64_t xemu_inv_gototb_emitted;
+uint64_t xemu_inv_jcprobe_emitted;
+uint64_t xemu_inv_retmemo_emitted;
+
+static void xemu_inv_prof_dump(void)
+{
+    uint64_t t = xemu_inv_total;
+    uint64_t re = xemu_inv_range_evals;
+    uint64_t rec_seen = xemu_inv_recycle_hits + xemu_inv_recycle_true_smc;
+    uint64_t exits = xemu_inv_gototb_emitted + xemu_inv_jcprobe_emitted +
+                     xemu_inv_retmemo_emitted;
+    uint64_t flcr = xemu_inv_flcr_emitted + xemu_inv_flcr_skip;
+
+    fprintf(stderr, "xemu: INV_PROF summary (tb_flush=%u)\n",
+            qatomic_read(&tb_ctx.tb_flush_count));
+
+    fprintf(stderr,
+            "xemu:  (a) invalidations total=%llu  notdirty=%llu (%.1f%%)  "
+            "explicit=%llu (%.1f%%)  single=%llu (%.1f%%)  other=%llu (%.1f%%)\n",
+            (unsigned long long)t,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_NOTDIRTY],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_NOTDIRTY] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_EXPLICIT],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_EXPLICIT] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_SINGLE],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_SINGLE] / t : 0.0,
+            (unsigned long long)xemu_inv_by_src[XEMU_INV_SRC_OTHER],
+            t ? 100.0 * xemu_inv_by_src[XEMU_INV_SRC_OTHER] / t : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (b) whole-page range_evals=%llu  false_share=%llu "
+            "(%.1f%% would be skipped by byte-range check)\n",
+            (unsigned long long)re,
+            (unsigned long long)xemu_inv_false_share,
+            re ? 100.0 * xemu_inv_false_share / re : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (b') notdirty traps(code page)=%llu  unprotect(page emptied)"
+            "=%llu  invals/trap=%.2f  |  RANGE_INV=%d\n",
+            (unsigned long long)xemu_inv_traps,
+            (unsigned long long)xemu_inv_unprotect,
+            xemu_inv_traps ? (double)xemu_inv_total / xemu_inv_traps : 0.0,
+            xemu_tb_range_inv_on() ? 1 : 0);
+
+    if (xemu_inv_timing_on() || xemu_nd_calls) {
+        double ns = xemu_inv_tick_ns();
+        uint64_t rest = xemu_nd_ticks_total - xemu_nd_ticks_inval;
+        double tot_ns = xemu_nd_ticks_total * ns;
+        double inv_ns = xemu_nd_ticks_inval * ns;
+        double rest_ns = (double)rest * ns;
+        /* Calibrate the bracketing read cost: two back-to-back reads, floored
+         * over many iters. The body is bracketed by 2 reads (total) with 2
+         * more inside (inval) => ~2 read-pairs of overhead per call sits inside
+         * the measured segments; report it so the split can be de-biased. */
+        uint64_t cal = ~0ULL;
+        for (int i = 0; i < 4096; i++) {
+            uint64_t a = xemu_inv_ticks();
+            uint64_t b = xemu_inv_ticks();
+            if (b - a < cal) {
+                cal = b - a;
+            }
+        }
+        fprintf(stderr,
+                "xemu:  (b'') notdirty_write body timing: calls=%llu "
+                "(inval=%llu, no-inval=%llu)  tick=%.2fns read-pair-floor=%llut\n"
+                "xemu:       total=%.3fms (%.1fns/call)  inval=%.3fms "
+                "(%.1fns/call-inval, %.1f%% of body)  rest=%.3fms (%.1fns/call)\n",
+                (unsigned long long)xemu_nd_calls,
+                (unsigned long long)xemu_nd_calls_inval,
+                (unsigned long long)(xemu_nd_calls - xemu_nd_calls_inval),
+                ns, (unsigned long long)cal,
+                tot_ns / 1.0e6,
+                xemu_nd_calls ? tot_ns / xemu_nd_calls : 0.0,
+                inv_ns / 1.0e6,
+                xemu_nd_calls_inval ? inv_ns / xemu_nd_calls_inval : 0.0,
+                xemu_nd_ticks_total ?
+                    100.0 * xemu_nd_ticks_inval / xemu_nd_ticks_total : 0.0,
+                rest_ns / 1.0e6,
+                xemu_nd_calls ? rest_ns / xemu_nd_calls : 0.0);
+    }
+
+    fprintf(stderr,
+            "xemu:  (c) recycle attempts=%llu  hits=%llu  true_smc=%llu  "
+            "cold=%llu  |  hit-rate-on-invalidated-set=%.1f%%\n",
+            (unsigned long long)xemu_inv_recycle_attempts,
+            (unsigned long long)xemu_inv_recycle_hits,
+            (unsigned long long)xemu_inv_recycle_true_smc,
+            (unsigned long long)xemu_inv_recycle_cold,
+            rec_seen ? 100.0 * xemu_inv_recycle_hits / rec_seen : 0.0);
+
+    fprintf(stderr,
+            "xemu:  (d) flcr emitted=%llu skip=%llu (%.1f%% compile-skipped)  "
+            "exits: goto_tb=%llu (%.1f%%) jc_probe=%llu (%.1f%%) "
+            "ret_memo=%llu (%.1f%%)\n",
+            (unsigned long long)xemu_inv_flcr_emitted,
+            (unsigned long long)xemu_inv_flcr_skip,
+            flcr ? 100.0 * xemu_inv_flcr_skip / flcr : 0.0,
+            (unsigned long long)xemu_inv_gototb_emitted,
+            exits ? 100.0 * xemu_inv_gototb_emitted / exits : 0.0,
+            (unsigned long long)xemu_inv_jcprobe_emitted,
+            exits ? 100.0 * xemu_inv_jcprobe_emitted / exits : 0.0,
+            (unsigned long long)xemu_inv_retmemo_emitted,
+            exits ? 100.0 * xemu_inv_retmemo_emitted / exits : 0.0);
+
+    /* Sizes the "page-spanning targets decline to chain" xpage coverage
+     * gap: runtime count of chain refusals at the spanning-dest guard. */
+    fprintf(stderr,
+            "xemu:  (d') spanning-dest chain declines=%llu\n",
+            (unsigned long long)xemu_inv_span_nochain);
+
+    {
+        double secs = xemu_inv_prof_t0_us ?
+            (g_get_monotonic_time() - xemu_inv_prof_t0_us) / 1.0e6 : 0.0;
+        fprintf(stderr,
+                "xemu:  (f) io_prepare=%llu  cpu_io_recompile=%llu (%.1f%% of "
+                "io_prepare)  window=%.1fs => %.1fk recompiles/s\n",
+                (unsigned long long)xemu_io_prepare_calls,
+                (unsigned long long)xemu_io_recompiles,
+                xemu_io_prepare_calls ?
+                    100.0 * xemu_io_recompiles / xemu_io_prepare_calls : 0.0,
+                secs, secs > 0.0 ? xemu_io_recompiles / secs / 1000.0 : 0.0);
+    }
+
+    if (xemu_subpage_dirty_on() || xemu_subpage_refute_on()) {
+        fprintf(stderr,
+                "xemu:  (e) SUBPAGE dirty=%d refute=%d  fast-skips=%llu"
+                "  |  refute: examined=%llu would-skip=%llu VIOLATIONS=%llu\n",
+                xemu_subpage_dirty_on() ? 1 : 0,
+                xemu_subpage_refute_on() ? 1 : 0,
+                (unsigned long long)xemu_subpage_skips,
+                (unsigned long long)xemu_subpage_refute_total,
+                (unsigned long long)xemu_subpage_refute_hits,
+                (unsigned long long)xemu_subpage_refute_violations);
+    }
+}
+
+static bool xemu_inv_dump_armed;
+
+bool xemu_inv_prof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_INV_PROF");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
+            xemu_inv_prof_t0_us = g_get_monotonic_time();
+            atexit(xemu_inv_prof_dump);
+        }
+    }
+    return on;
+}
+
+bool xemu_inv_timing_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_INV_TIMING");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
+            xemu_inv_prof_t0_us = g_get_monotonic_time();
+            atexit(xemu_inv_prof_dump);
+        }
+    }
+    return on;
+}
+
+bool xemu_tb_range_inv_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_TB_RANGE_INV");
+        on = (e && e[0] == '1') ? 1 : 0;
+    }
+    return on;
+}
+
+uint64_t xemu_ccop_tb_tail[3];
+uint64_t xemu_ccop_tb_head[3];
+uint64_t xemu_ccop_pairs[3][3];
+uint64_t xemu_ccop_pairs_nolast;
+uint64_t xemu_region_cand_pairs[3];
+
+static void xemu_ccop_census_dump(void)
+{
+    static const char *const tails[3] = { "dyn", "eflags", "lazy" };
+    uint64_t total = xemu_ccop_pairs_nolast;
+    uint64_t lazy_row = 0;
+    int t, h;
+
+    for (t = 0; t < 3; t++) {
+        for (h = 0; h < 3; h++) {
+            total += xemu_ccop_pairs[t][h];
+        }
+    }
+    for (h = 0; h < 3; h++) {
+        lazy_row += xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][h];
+    }
+
+    fprintf(stderr, "xemu: CCOP_CENSUS pairs=%llu (nolast=%llu)\n",
+            (unsigned long long)total,
+            (unsigned long long)xemu_ccop_pairs_nolast);
+    for (t = 0; t < 3; t++) {
+        uint64_t row = xemu_ccop_pairs[t][0] + xemu_ccop_pairs[t][1] +
+                       xemu_ccop_pairs[t][2];
+        fprintf(stderr,
+                "xemu:  tail=%-6s row=%llu (%.1f%%)  ->head none=%llu (%.1f%%) "
+                "kill=%llu (%.1f%%) use=%llu (%.1f%%)\n",
+                tails[t], (unsigned long long)row,
+                total ? 100.0 * row / total : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_NONE],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_NONE] / row : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_KILL],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_KILL] / row : 0.0,
+                (unsigned long long)xemu_ccop_pairs[t][XEMU_CCOP_HEAD_USE],
+                row ? 100.0 * xemu_ccop_pairs[t][XEMU_CCOP_HEAD_USE] / row : 0.0);
+    }
+    /*
+     * The headline pair for the superblock decision: lazy->kill is the
+     * materialization a cross-block optimizer provably elides; lazy->use is
+     * the state it must keep. lazy->none defers the verdict one TB (the
+     * successor is flag-transparent), so kill is a lower bound.
+     */
+    fprintf(stderr,
+            "xemu:  verdict: lazy-tail=%.1f%% of pairs; of those "
+            "dead-at-successor=%.1f%% consumed=%.1f%% deferred=%.1f%%\n",
+            total ? 100.0 * lazy_row / total : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_KILL] / lazy_row : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_USE] / lazy_row : 0.0,
+            lazy_row ? 100.0 * xemu_ccop_pairs[XEMU_CCOP_TAIL_LAZY][XEMU_CCOP_HEAD_NONE] / lazy_row : 0.0);
+    {
+        uint64_t cand = xemu_region_cand_pairs[0] + xemu_region_cand_pairs[1]
+                      + xemu_region_cand_pairs[2];
+        fprintf(stderr,
+                "xemu:  region-cand (fwd-jcc<=%u B tail): pairs=%llu "
+                "(%.1f%% of total)  ->head kill=%llu (%.1f%% of total) "
+                "use=%llu none=%llu\n",
+                XEMU_CCOP_REGION_WINDOW, (unsigned long long)cand,
+                total ? 100.0 * cand / total : 0.0,
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_KILL],
+                total ? 100.0 * xemu_region_cand_pairs[XEMU_CCOP_HEAD_KILL]
+                        / total : 0.0,
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_USE],
+                (unsigned long long)xemu_region_cand_pairs[XEMU_CCOP_HEAD_NONE]);
+    }
+    fprintf(stderr,
+            "xemu:  static TB mix: tail dyn/eflags/lazy=%llu/%llu/%llu  "
+            "head none/kill/use=%llu/%llu/%llu\n",
+            (unsigned long long)xemu_ccop_tb_tail[0],
+            (unsigned long long)xemu_ccop_tb_tail[1],
+            (unsigned long long)xemu_ccop_tb_tail[2],
+            (unsigned long long)xemu_ccop_tb_head[0],
+            (unsigned long long)xemu_ccop_tb_head[1],
+            (unsigned long long)xemu_ccop_tb_head[2]);
+}
+
+bool xemu_ccop_census_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_CCOP_CENSUS");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on) {
+            atexit(xemu_ccop_census_dump);
+        }
+    }
+    return on;
+}
+
+/*
+ * Sub-page dirty tracking (docs/subpage-gate0-prediction.md arm (a): the helper-top O(1)
+ * consult). A per-PageDesc bitmap records which sub-blocks of the page a live
+ * TB covers; a guest data store that lands entirely outside every code
+ * sub-block skips the whole-page invalidation (and its page-collection lock and
+ * TB scan) — it never empties the page, so the page stays write-protected and
+ * the store re-traps next time, but each such trap is ~O(1) instead of the
+ * ~4.5 us whole-page invalidation. INV_PROF measured 100% false-share / 0 true
+ * SMC, so almost every trap is skippable.
+ *
+ * The bitmap is a NEW per-PageDesc field — it never aliases or touches the
+ * ram_list.dirty_memory[DIRTY_MEMORY_*] bitmaps the PFIFO-thread vertex/texture
+ * consumers read (design race clause 2). 64 sub-blocks/page (64 B on the 4 KiB
+ * Xbox page), one uint64_t.
+ *
+ * Safety asymmetry: an OVER-set bit (stale code bit after a TB left) only costs
+ * a needless trap (benign); an UNDER-set bit (a live TB with no code bit) would
+ * let a code store skip invalidation -> wrong-code hang. So bits are SET
+ * completely on every tb_page_add (before tb_link_page publishes the TB, clause
+ * 1) and cleared only when the page empties of TBs (clause 3), never lazily on
+ * single-TB removal. XEMU_SUBPAGE_REFUTE=1 runs the skip decision against a
+ * ground-truth TB-overlap scan and counts any under-set (violation) loudly.
+ */
+#define XEMU_SUBPAGE_BLOCK_BITS  (TARGET_PAGE_BITS - 6)   /* 64 blocks/page */
+
+/* Counters defined in the top counter block: xemu_subpage_skips,
+ * xemu_subpage_refute_{total,hits,violations}. */
+
+bool xemu_subpage_dirty_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        /* Default ON since the 2026-07-11 interleaved A/B: +4.33±1.53 fps
+         * F8 (4/4 pairs), +11.63±0.52 fps F5 (3/3), refuter 60M+ skips
+         * over 45 reload cycles with 0 violations. XEMU_SUBPAGE_DIRTY=0
+         * restores whole-page invalidation wholesale. The default path
+         * does NOT arm the INV_PROF exit dump; request it explicitly via
+         * XEMU_INV_PROF / XEMU_SUBPAGE_REFUTE. */
+        const char *e = getenv("XEMU_SUBPAGE_DIRTY");
+        on = (e && e[0] == '0') ? 0 : 1;
+    }
+    return on;
+}
+
+bool xemu_subpage_refute_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_SUBPAGE_REFUTE");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
+            atexit(xemu_inv_prof_dump);
+        }
+    }
+    return on;
+}
+
+/* Bitmap maintenance runs whenever either sub-page mode is armed. */
+static inline bool xemu_subpage_track_on(void)
+{
+    return xemu_subpage_dirty_on() || xemu_subpage_refute_on();
+}
+
+/* Block mask for the in-page byte range [start, last] (same page). */
+static inline uint64_t xemu_subpage_range_mask(tb_page_addr_t start,
+                                               tb_page_addr_t last)
+{
+    unsigned lo = (start & ~TARGET_PAGE_MASK) >> XEMU_SUBPAGE_BLOCK_BITS;
+    unsigned hi = (last  & ~TARGET_PAGE_MASK) >> XEMU_SUBPAGE_BLOCK_BITS;
+    uint64_t lo_mask = ~0ULL << lo;
+    uint64_t hi_mask = (hi >= 63) ? ~0ULL : ((1ULL << (hi + 1)) - 1);
+    return lo_mask & hi_mask;
+}
+#endif /* XBOX */
+
+/* List iterators for lists of tagged pointers in TranslationBlock. */
+#define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
+    for (n = (head) & 1, tb = (TranslationBlock *)((head) & ~1);        \
+         tb; tb = (TranslationBlock *)tb->field[n], n = (uintptr_t)tb & 1, \
+             tb = (TranslationBlock *)((uintptr_t)tb & ~1))
+
+#define TB_FOR_EACH_JMP(head_tb, tb, n)                                 \
+    TB_FOR_EACH_TAGGED((head_tb)->jmp_list_head, tb, n, jmp_list_next)
+
+static bool tb_cmp(const void *ap, const void *bp)
+{
+    const TranslationBlock *a = ap;
+    const TranslationBlock *b = bp;
+
+    return ((tb_cflags(a) & CF_PCREL || a->pc == b->pc) &&
+            a->cs_base == b->cs_base &&
+            a->flags == b->flags &&
+            (tb_cflags(a) & ~CF_INVALID) == (tb_cflags(b) & ~CF_INVALID) &&
+            tb_page_addr0(a) == tb_page_addr0(b) &&
+            tb_page_addr1(a) == tb_page_addr1(b));
+}
+
+static bool inv_tb_cmp(const void *ap, const void *bp)
+{
+    const TranslationBlock *a = ap, *b = bp;
+    return tb_cmp(ap, bp) && a->ihash == b->ihash;
+}
+
+void tb_htable_init(void)
+{
+    unsigned int mode = QHT_MODE_AUTO_RESIZE;
+
+    qht_init(&tb_ctx.htable, tb_cmp, CODE_GEN_HTABLE_SIZE, mode);
+    qht_init(&tb_ctx.inv_htable, inv_tb_cmp, CODE_GEN_HTABLE_SIZE, mode);
+}
+
+typedef struct PageDesc PageDesc;
+
+#ifdef CONFIG_USER_ONLY
+
+/*
+ * In user-mode page locks aren't used; mmap_lock is enough.
+ */
+#define assert_page_locked(pd) tcg_debug_assert(have_mmap_lock())
+
+static inline void tb_lock_pages(const TranslationBlock *tb) { }
+
+/*
+ * For user-only, since we are protecting all of memory with a single lock,
+ * and because the two pages of a TranslationBlock are always contiguous,
+ * use a single data structure to record all TranslationBlocks.
+ */
+static IntervalTreeRoot tb_root;
+
+static void tb_remove_all(void)
+{
+    /*
+     * Only called from tb_flush__exclusive_or_serial, where we have already
+     * asserted that we're in an exclusive state.
+     */
+    memset(&tb_root, 0, sizeof(tb_root));
+}
+
+/* Call with mmap_lock held. */
+static void tb_record(TranslationBlock *tb)
+{
+    vaddr addr;
+    int flags;
+
+    assert_memory_lock();
+    tb->itree.last = tb->itree.start + tb->size - 1;
+
+    /* translator_loop() must have made all TB pages non-writable */
+    addr = tb_page_addr0(tb);
+    flags = page_get_flags(addr);
+    assert(!(flags & PAGE_WRITE));
+
+    addr = tb_page_addr1(tb);
+    if (addr != -1) {
+        flags = page_get_flags(addr);
+        assert(!(flags & PAGE_WRITE));
+    }
+
+    interval_tree_insert(&tb->itree, &tb_root);
+}
+
+/* Call with mmap_lock held. */
+static void tb_remove(TranslationBlock *tb)
+{
+    assert_memory_lock();
+    interval_tree_remove(&tb->itree, &tb_root);
+}
+
+/* TODO: For now, still shared with translate-all.c for system mode. */
+#define PAGE_FOR_EACH_TB(start, last, pagedesc, T, N)   \
+    for (T = foreach_tb_first(start, last),             \
+         N = foreach_tb_next(T, start, last);           \
+         T != NULL;                                     \
+         T = N, N = foreach_tb_next(N, start, last))
+
+typedef TranslationBlock *PageForEachNext;
+
+static PageForEachNext foreach_tb_first(tb_page_addr_t start,
+                                        tb_page_addr_t last)
+{
+    IntervalTreeNode *n = interval_tree_iter_first(&tb_root, start, last);
+    return n ? container_of(n, TranslationBlock, itree) : NULL;
+}
+
+static PageForEachNext foreach_tb_next(PageForEachNext tb,
+                                       tb_page_addr_t start,
+                                       tb_page_addr_t last)
+{
+    IntervalTreeNode *n;
+
+    if (tb) {
+        n = interval_tree_iter_next(&tb->itree, start, last);
+        if (n) {
+            return container_of(n, TranslationBlock, itree);
+        }
+    }
+    return NULL;
+}
+
+#else
+/*
+ * In system mode we want L1_MAP to be based on ram offsets.
+ */
+#define L1_MAP_ADDR_SPACE_BITS  HOST_LONG_BITS
+
+/* Size of the L2 (and L3, etc) page tables.  */
+#define V_L2_BITS 10
+#define V_L2_SIZE (1 << V_L2_BITS)
+
+/*
+ * L1 Mapping properties
+ */
+static int v_l1_size;
+static int v_l1_shift;
+static int v_l2_levels;
+
+/*
+ * The bottom level has pointers to PageDesc, and is indexed by
+ * anything from 4 to (V_L2_BITS + 3) bits, depending on target page size.
+ */
+#define V_L1_MIN_BITS 4
+#define V_L1_MAX_BITS (V_L2_BITS + 3)
+#define V_L1_MAX_SIZE (1 << V_L1_MAX_BITS)
+
+static void *l1_map[V_L1_MAX_SIZE];
+
+struct PageDesc {
+    QemuSpin lock;
+    /* list of TBs intersecting this ram page */
+    uintptr_t first_tb;
+#if defined(XBOX)
+    /*
+     * Sub-page dirty tracking: bit b set => some live TB on this page covers
+     * sub-block b (64 B). Maintained only when a sub-page mode is armed;
+     * separate from ram_list.dirty_memory[*] (never aliases the DIRTY_MEMORY_*
+     * bitmaps the PFIFO consumers read). See the block comment near
+     * xemu_subpage_dirty_on().
+     */
+    uint64_t code_blocks;
+#endif
+};
+
+void page_table_config_init(void)
+{
+    uint32_t v_l1_bits;
+
+    assert(TARGET_PAGE_BITS);
+    /* The bits remaining after N lower levels of page tables.  */
+    v_l1_bits = (L1_MAP_ADDR_SPACE_BITS - TARGET_PAGE_BITS) % V_L2_BITS;
+    if (v_l1_bits < V_L1_MIN_BITS) {
+        v_l1_bits += V_L2_BITS;
+    }
+
+    v_l1_size = 1 << v_l1_bits;
+    v_l1_shift = L1_MAP_ADDR_SPACE_BITS - TARGET_PAGE_BITS - v_l1_bits;
+    v_l2_levels = v_l1_shift / V_L2_BITS - 1;
+
+    assert(v_l1_bits <= V_L1_MAX_BITS);
+    assert(v_l1_shift % V_L2_BITS == 0);
+    assert(v_l2_levels >= 0);
+}
+
+static PageDesc *page_find_alloc(tb_page_addr_t index, bool alloc)
+{
+    PageDesc *pd;
+    void **lp;
+
+    /* Level 1.  Always allocated.  */
+    lp = l1_map + ((index >> v_l1_shift) & (v_l1_size - 1));
+
+    /* Level 2..N-1.  */
+    for (int i = v_l2_levels; i > 0; i--) {
+        void **p = qatomic_rcu_read(lp);
+
+        if (p == NULL) {
+            void *existing;
+
+            if (!alloc) {
+                return NULL;
+            }
+            p = g_new0(void *, V_L2_SIZE);
+            existing = qatomic_cmpxchg(lp, NULL, p);
+            if (unlikely(existing)) {
+                g_free(p);
+                p = existing;
+            }
+        }
+
+        lp = p + ((index >> (i * V_L2_BITS)) & (V_L2_SIZE - 1));
+    }
+
+    pd = qatomic_rcu_read(lp);
+    if (pd == NULL) {
+        void *existing;
+
+        if (!alloc) {
+            return NULL;
+        }
+
+        pd = g_new0(PageDesc, V_L2_SIZE);
+        for (int i = 0; i < V_L2_SIZE; i++) {
+            qemu_spin_init(&pd[i].lock);
+        }
+
+        existing = qatomic_cmpxchg(lp, NULL, pd);
+        if (unlikely(existing)) {
+            for (int i = 0; i < V_L2_SIZE; i++) {
+                qemu_spin_destroy(&pd[i].lock);
+            }
+            g_free(pd);
+            pd = existing;
+        }
+    }
+
+    return pd + (index & (V_L2_SIZE - 1));
+}
+
+static inline PageDesc *page_find(tb_page_addr_t index)
+{
+    return page_find_alloc(index, false);
+}
+
+/**
+ * struct page_entry - page descriptor entry
+ * @pd:     pointer to the &struct PageDesc of the page this entry represents
+ * @index:  page index of the page
+ * @locked: whether the page is locked
+ *
+ * This struct helps us keep track of the locked state of a page, without
+ * bloating &struct PageDesc.
+ *
+ * A page lock protects accesses to all fields of &struct PageDesc.
+ *
+ * See also: &struct page_collection.
+ */
+struct page_entry {
+    PageDesc *pd;
+    tb_page_addr_t index;
+    bool locked;
+};
+
+/**
+ * struct page_collection - tracks a set of pages (i.e. &struct page_entry's)
+ * @tree:   Binary search tree (BST) of the pages, with key == page index
+ * @max:    Pointer to the page in @tree with the highest page index
+ *
+ * To avoid deadlock we lock pages in ascending order of page index.
+ * When operating on a set of pages, we need to keep track of them so that
+ * we can lock them in order and also unlock them later. For this we collect
+ * pages (i.e. &struct page_entry's) in a binary search @tree. Given that the
+ * @tree implementation we use does not provide an O(1) operation to obtain the
+ * highest-ranked element, we use @max to keep track of the inserted page
+ * with the highest index. This is valuable because if a page is not in
+ * the tree and its index is higher than @max's, then we can lock it
+ * without breaking the locking order rule.
+ *
+ * Note on naming: 'struct page_set' would be shorter, but we already have a few
+ * page_set_*() helpers, so page_collection is used instead to avoid confusion.
+ *
+ * See also: page_collection_lock().
+ */
+struct page_collection {
+    QTree *tree;
+    struct page_entry *max;
+};
+
+typedef int PageForEachNext;
+#define PAGE_FOR_EACH_TB(start, last, pagedesc, tb, n) \
+    TB_FOR_EACH_TAGGED((pagedesc)->first_tb, tb, n, page_next)
+
+#ifdef CONFIG_DEBUG_TCG
+
+static __thread GHashTable *ht_pages_locked_debug;
+
+static void ht_pages_locked_debug_init(void)
+{
+    if (ht_pages_locked_debug) {
+        return;
+    }
+    ht_pages_locked_debug = g_hash_table_new(NULL, NULL);
+}
+
+static bool page_is_locked(const PageDesc *pd)
+{
+    PageDesc *found;
+
+    ht_pages_locked_debug_init();
+    found = g_hash_table_lookup(ht_pages_locked_debug, pd);
+    return !!found;
+}
+
+static void page_lock__debug(PageDesc *pd)
+{
+    ht_pages_locked_debug_init();
+    g_assert(!page_is_locked(pd));
+    g_hash_table_insert(ht_pages_locked_debug, pd, pd);
+}
+
+static void page_unlock__debug(const PageDesc *pd)
+{
+    bool removed;
+
+    ht_pages_locked_debug_init();
+    g_assert(page_is_locked(pd));
+    removed = g_hash_table_remove(ht_pages_locked_debug, pd);
+    g_assert(removed);
+}
+
+static void do_assert_page_locked(const PageDesc *pd,
+                                  const char *file, int line)
+{
+    if (unlikely(!page_is_locked(pd))) {
+        error_report("assert_page_lock: PageDesc %p not locked @ %s:%d",
+                     pd, file, line);
+        abort();
+    }
+}
+#define assert_page_locked(pd) do_assert_page_locked(pd, __FILE__, __LINE__)
+
+void assert_no_pages_locked(void)
+{
+    ht_pages_locked_debug_init();
+    g_assert(g_hash_table_size(ht_pages_locked_debug) == 0);
+}
+
+#else /* !CONFIG_DEBUG_TCG */
+
+static inline void page_lock__debug(const PageDesc *pd) { }
+static inline void page_unlock__debug(const PageDesc *pd) { }
+static inline void assert_page_locked(const PageDesc *pd) { }
+
+#endif /* CONFIG_DEBUG_TCG */
+
+static void page_lock(PageDesc *pd)
+{
+    page_lock__debug(pd);
+    qemu_spin_lock(&pd->lock);
+}
+
+/* Like qemu_spin_trylock, returns false on success */
+static bool page_trylock(PageDesc *pd)
+{
+    bool busy = qemu_spin_trylock(&pd->lock);
+    if (!busy) {
+        page_lock__debug(pd);
+    }
+    return busy;
+}
+
+static void page_unlock(PageDesc *pd)
+{
+    qemu_spin_unlock(&pd->lock);
+    page_unlock__debug(pd);
+}
+
+void tb_lock_page0(tb_page_addr_t paddr)
+{
+    page_lock(page_find_alloc(paddr >> TARGET_PAGE_BITS, true));
+}
+
+void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+{
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+    PageDesc *pd0, *pd1;
+
+    if (pindex0 == pindex1) {
+        /* Identical pages, and the first page is already locked. */
+        return;
+    }
+
+    pd1 = page_find_alloc(pindex1, true);
+    if (pindex0 < pindex1) {
+        /* Correct locking order, we may block. */
+        page_lock(pd1);
+        return;
+    }
+
+    /* Incorrect locking order, we cannot block lest we deadlock. */
+    if (!page_trylock(pd1)) {
+        return;
+    }
+
+    /*
+     * Drop the lock on page0 and get both page locks in the right order.
+     * Restart translation via longjmp.
+     */
+    pd0 = page_find_alloc(pindex0, false);
+    page_unlock(pd0);
+    page_lock(pd1);
+    page_lock(pd0);
+    siglongjmp(tcg_ctx->jmp_trans, -3);
+}
+
+void tb_unlock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+{
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+
+    if (pindex0 != pindex1) {
+        page_unlock(page_find_alloc(pindex1, false));
+    }
+}
+
+static void tb_lock_pages(TranslationBlock *tb)
+{
+    tb_page_addr_t paddr0 = tb_page_addr0(tb);
+    tb_page_addr_t paddr1 = tb_page_addr1(tb);
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+
+    if (unlikely(paddr0 == -1)) {
+        return;
+    }
+    if (unlikely(paddr1 != -1) && pindex0 != pindex1) {
+        if (pindex0 < pindex1) {
+            page_lock(page_find_alloc(pindex0, true));
+            page_lock(page_find_alloc(pindex1, true));
+            return;
+        }
+        page_lock(page_find_alloc(pindex1, true));
+    }
+    page_lock(page_find_alloc(pindex0, true));
+}
+
+void tb_unlock_pages(TranslationBlock *tb)
+{
+    tb_page_addr_t paddr0 = tb_page_addr0(tb);
+    tb_page_addr_t paddr1 = tb_page_addr1(tb);
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+
+    if (unlikely(paddr0 == -1)) {
+        return;
+    }
+    if (unlikely(paddr1 != -1) && pindex0 != pindex1) {
+        page_unlock(page_find_alloc(pindex1, false));
+    }
+    page_unlock(page_find_alloc(pindex0, false));
+}
+
+static inline struct page_entry *
+page_entry_new(PageDesc *pd, tb_page_addr_t index)
+{
+    struct page_entry *pe = g_malloc(sizeof(*pe));
+
+    pe->index = index;
+    pe->pd = pd;
+    pe->locked = false;
+    return pe;
+}
+
+static void page_entry_destroy(gpointer p)
+{
+    struct page_entry *pe = p;
+
+    g_assert(pe->locked);
+    page_unlock(pe->pd);
+    g_free(pe);
+}
+
+/* returns false on success */
+static bool page_entry_trylock(struct page_entry *pe)
+{
+    bool busy = page_trylock(pe->pd);
+    if (!busy) {
+        g_assert(!pe->locked);
+        pe->locked = true;
+    }
+    return busy;
+}
+
+static void do_page_entry_lock(struct page_entry *pe)
+{
+    page_lock(pe->pd);
+    g_assert(!pe->locked);
+    pe->locked = true;
+}
+
+static gboolean page_entry_lock(gpointer key, gpointer value, gpointer data)
+{
+    struct page_entry *pe = value;
+
+    do_page_entry_lock(pe);
+    return FALSE;
+}
+
+static gboolean page_entry_unlock(gpointer key, gpointer value, gpointer data)
+{
+    struct page_entry *pe = value;
+
+    if (pe->locked) {
+        pe->locked = false;
+        page_unlock(pe->pd);
+    }
+    return FALSE;
+}
+
+/*
+ * Trylock a page, and if successful, add the page to a collection.
+ * Returns true ("busy") if the page could not be locked; false otherwise.
+ */
+static bool page_trylock_add(struct page_collection *set, tb_page_addr_t addr)
+{
+    tb_page_addr_t index = addr >> TARGET_PAGE_BITS;
+    struct page_entry *pe;
+    PageDesc *pd;
+
+    pe = q_tree_lookup(set->tree, &index);
+    if (pe) {
+        return false;
+    }
+
+    pd = page_find(index);
+    if (pd == NULL) {
+        return false;
+    }
+
+    pe = page_entry_new(pd, index);
+    q_tree_insert(set->tree, &pe->index, pe);
+
+    /*
+     * If this is either (1) the first insertion or (2) a page whose index
+     * is higher than any other so far, just lock the page and move on.
+     */
+    if (set->max == NULL || pe->index > set->max->index) {
+        set->max = pe;
+        do_page_entry_lock(pe);
+        return false;
+    }
+    /*
+     * Try to acquire out-of-order lock; if busy, return busy so that we acquire
+     * locks in order.
+     */
+    return page_entry_trylock(pe);
+}
+
+static gint tb_page_addr_cmp(gconstpointer ap, gconstpointer bp, gpointer udata)
+{
+    tb_page_addr_t a = *(const tb_page_addr_t *)ap;
+    tb_page_addr_t b = *(const tb_page_addr_t *)bp;
+
+    if (a == b) {
+        return 0;
+    } else if (a < b) {
+        return -1;
+    }
+    return 1;
+}
+
+/*
+ * Lock a range of pages ([@start,@last]) as well as the pages of all
+ * intersecting TBs.
+ * Locking order: acquire locks in ascending order of page index.
+ */
+static struct page_collection *page_collection_lock(tb_page_addr_t start,
+                                                    tb_page_addr_t last)
+{
+    struct page_collection *set = g_malloc(sizeof(*set));
+    tb_page_addr_t index;
+    PageDesc *pd;
+
+    start >>= TARGET_PAGE_BITS;
+    last >>= TARGET_PAGE_BITS;
+    g_assert(start <= last);
+
+    set->tree = q_tree_new_full(tb_page_addr_cmp, NULL, NULL,
+                                page_entry_destroy);
+    set->max = NULL;
+    assert_no_pages_locked();
+
+ retry:
+    q_tree_foreach(set->tree, page_entry_lock, NULL);
+
+    for (index = start; index <= last; index++) {
+        TranslationBlock *tb;
+        PageForEachNext n;
+
+        pd = page_find(index);
+        if (pd == NULL) {
+            continue;
+        }
+        if (page_trylock_add(set, index << TARGET_PAGE_BITS)) {
+            q_tree_foreach(set->tree, page_entry_unlock, NULL);
+            goto retry;
+        }
+        assert_page_locked(pd);
+        PAGE_FOR_EACH_TB(unused, unused, pd, tb, n) {
+            if (page_trylock_add(set, tb_page_addr0(tb)) ||
+                (tb_page_addr1(tb) != -1 &&
+                 page_trylock_add(set, tb_page_addr1(tb)))) {
+                /* drop all locks, and reacquire in order */
+                q_tree_foreach(set->tree, page_entry_unlock, NULL);
+                goto retry;
+            }
+        }
+    }
+    return set;
+}
+
+static void page_collection_unlock(struct page_collection *set)
+{
+    /* entries are unlocked and freed via page_entry_destroy */
+    q_tree_destroy(set->tree);
+    g_free(set);
+}
+
+/* Set to NULL all the 'first_tb' fields in all PageDescs. */
+static void tb_remove_all_1(int level, void **lp)
+{
+    int i;
+
+    if (*lp == NULL) {
+        return;
+    }
+    if (level == 0) {
+        PageDesc *pd = *lp;
+
+        for (i = 0; i < V_L2_SIZE; ++i) {
+            page_lock(&pd[i]);
+            pd[i].first_tb = (uintptr_t)NULL;
+#if defined(XBOX)
+            pd[i].code_blocks = 0;
+#endif
+            page_unlock(&pd[i]);
+        }
+    } else {
+        void **pp = *lp;
+
+        for (i = 0; i < V_L2_SIZE; ++i) {
+            tb_remove_all_1(level - 1, pp + i);
+        }
+    }
+}
+
+static void tb_remove_all(void)
+{
+    int i, l1_sz = v_l1_size;
+
+    for (i = 0; i < l1_sz; i++) {
+        tb_remove_all_1(v_l2_levels, l1_map + i);
+    }
+#if defined(XBOX)
+    xemu_sf_clear_all();
+#endif
+}
+
+#if defined(XBOX)
+/* In-page byte range [*s, *l] that TB @tb occupies on its page index @n. */
+static inline void xemu_subpage_tb_range(const TranslationBlock *tb,
+                                         unsigned int n,
+                                         tb_page_addr_t *s, tb_page_addr_t *l)
+{
+    tb_page_addr_t start = tb_page_addr0(tb);
+    tb_page_addr_t last = start + tb->size - 1;
+    if (n == 0) {
+        last = MIN(last, start | ~TARGET_PAGE_MASK);
+    } else {
+        start = tb_page_addr1(tb);
+        last = start + (last & ~TARGET_PAGE_MASK);
+    }
+    *s = start;
+    *l = last;
+}
+
+/*
+ * SET the code sub-block bits @tb covers on page @n. Called from tb_page_add
+ * with the page lock held, before tb_link_page publishes the TB (design clause
+ * 1: the bit is visible before the TB is executable). qatomic_or gives the
+ * release the consult's qatomic_read pairs with.
+ */
+static void xemu_subpage_set_code(PageDesc *p, const TranslationBlock *tb,
+                                  unsigned int n)
+{
+    tb_page_addr_t s, l;
+    xemu_subpage_tb_range(tb, n, &s, &l);
+    qatomic_or(&p->code_blocks, xemu_subpage_range_mask(s, l));
+    /* Mirror for the subpage-fast generated-code probe (same thread;
+     * set-before-executable ordering is program order here). */
+    xemu_sf_sync_page(tb->page_addr[n] & TARGET_PAGE_MASK,
+                      qatomic_read(&p->code_blocks));
+}
+
+/* True if [start, start+len) overlaps any code sub-block on @p. */
+static inline bool xemu_subpage_code_overlaps(PageDesc *p, ram_addr_t start,
+                                              unsigned len)
+{
+    uint64_t bits = qatomic_read(&p->code_blocks);
+    if (!bits) {
+        return false;
+    }
+    return (bits & xemu_subpage_range_mask(start, start + len - 1)) != 0;
+}
+
+/*
+ * REFUTE: the store [start, last] is one the sub-block filter would fast-path
+ * (@filter_noncode). Prove it truly overlaps no live TB's bytes on this page
+ * (nor a spanning TB's second page). A single overlap = the bitmap under-set a
+ * code block = the design's wrong-code-hang risk. Called with the page locked.
+ */
+static void xemu_subpage_refute_check(PageDesc *p, ram_addr_t start,
+                                      ram_addr_t last, bool filter_noncode)
+{
+    TranslationBlock *tb;
+    PageForEachNext n;
+
+    xemu_subpage_refute_total++;
+    if (!filter_noncode) {
+        return;   /* filter keeps the invalidation -> no skip -> no risk */
+    }
+    xemu_subpage_refute_hits++;
+
+    PAGE_FOR_EACH_TB(start, last, p, tb, n) {
+        tb_page_addr_t ts, tl;
+        xemu_subpage_tb_range(tb, n, &ts, &tl);
+        if (!(tl < start || ts > last)) {
+            xemu_subpage_refute_violations++;
+            fprintf(stderr,
+                    "xemu: *** SUBPAGE REFUTE VIOLATION *** store "
+                    "[0x%" PRIxPTR "..0x%" PRIxPTR "] the filter would "
+                    "fast-path OVERLAPS live TB bytes [0x%" PRIxPTR
+                    "..0x%" PRIxPTR "] (pc=0x%" PRIxPTR ", n=%d) — sub-page "
+                    "filter is UNSAFE (wrong-code-hang), design FALSIFIED\n",
+                    (uintptr_t)start, (uintptr_t)last,
+                    (uintptr_t)ts, (uintptr_t)tl, (uintptr_t)tb->pc, n);
+            return;
+        }
+    }
+}
+
+/*
+ * Subpage-fast refuter ground truth: does [paddr, paddr+len) overlap
+ * translated code, per BOTH the bitmap and a live TB byte scan? Runs on
+ * the vCPU thread from the refute store helper (page lock taken here).
+ * Stores are <= 8 bytes and the stub's discriminator rejects
+ * page-crossing accesses, so the range never spans pages.
+ */
+bool xemu_sf_ground_truth(hwaddr paddr, unsigned len,
+                          bool *bitmap_says, bool *live_says)
+{
+    PageDesc *p = page_find(paddr >> TARGET_PAGE_BITS);
+    tb_page_addr_t start = paddr & ~TARGET_PAGE_MASK;
+    tb_page_addr_t last = start + len - 1;
+    TranslationBlock *tb;
+    PageForEachNext n;
+    bool overlap = false;
+
+    if (!p) {
+        *bitmap_says = *live_says = true;
+        return true;
+    }
+    *bitmap_says = !xemu_subpage_code_overlaps(p, start, last - start + 1);
+
+    page_lock(p);
+    PAGE_FOR_EACH_TB(start, last, p, tb, n) {
+        tb_page_addr_t ts, tl;
+        xemu_subpage_tb_range(tb, n, &ts, &tl);
+        if (!(tl < start || ts > last)) {
+            overlap = true;
+            break;
+        }
+    }
+    page_unlock(p);
+    *live_says = !overlap;
+    return *bitmap_says && *live_says;
+}
+#endif /* XBOX */
+
+/*
+ * Add the tb in the target page and protect it if necessary.
+ * Called with @p->lock held.
+ */
+static void tb_page_add(PageDesc *p, TranslationBlock *tb, unsigned int n)
+{
+    bool page_already_protected;
+
+    assert_page_locked(p);
+
+    tb->page_next[n] = p->first_tb;
+    page_already_protected = p->first_tb != 0;
+    p->first_tb = (uintptr_t)tb | n;
+
+#if defined(XBOX)
+    if (unlikely(xemu_subpage_track_on())) {
+        xemu_subpage_set_code(p, tb, n);
+    }
+#endif
+
+    /*
+     * If some code is already present, then the pages are already
+     * protected. So we handle the case where only the first TB is
+     * allocated in a physical page.
+     */
+    if (!page_already_protected) {
+        tlb_protect_code(tb->page_addr[n] & TARGET_PAGE_MASK);
+    }
+}
+
+static void tb_record(TranslationBlock *tb)
+{
+    tb_page_addr_t paddr0 = tb_page_addr0(tb);
+    tb_page_addr_t paddr1 = tb_page_addr1(tb);
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+
+    assert(paddr0 != -1);
+    if (unlikely(paddr1 != -1) && pindex0 != pindex1) {
+        tb_page_add(page_find_alloc(pindex1, false), tb, 1);
+    }
+    tb_page_add(page_find_alloc(pindex0, false), tb, 0);
+}
+
+static void tb_page_remove(PageDesc *pd, TranslationBlock *tb)
+{
+    TranslationBlock *tb1;
+    uintptr_t *pprev;
+    PageForEachNext n1;
+
+    assert_page_locked(pd);
+    pprev = &pd->first_tb;
+    PAGE_FOR_EACH_TB(unused, unused, pd, tb1, n1) {
+        if (tb1 == tb) {
+            *pprev = tb1->page_next[n1];
+            return;
+        }
+        pprev = &tb1->page_next[n1];
+    }
+    g_assert_not_reached();
+}
+
+static void tb_remove(TranslationBlock *tb)
+{
+    tb_page_addr_t paddr0 = tb_page_addr0(tb);
+    tb_page_addr_t paddr1 = tb_page_addr1(tb);
+    tb_page_addr_t pindex0 = paddr0 >> TARGET_PAGE_BITS;
+    tb_page_addr_t pindex1 = paddr1 >> TARGET_PAGE_BITS;
+
+    assert(paddr0 != -1);
+    if (unlikely(paddr1 != -1) && pindex0 != pindex1) {
+        tb_page_remove(page_find_alloc(pindex1, false), tb);
+    }
+    tb_page_remove(page_find_alloc(pindex0, false), tb);
+}
+#endif /* CONFIG_USER_ONLY */
+
+/*
+ * Flush all the translation blocks.
+ * Must be called from a context in which no cpus are running,
+ * e.g. start_exclusive() or vm_stop().
+ */
+void tb_flush__exclusive_or_serial(void)
+{
+    CPUState *cpu;
+
+    trace_tb_flush();
+    assert(tcg_enabled());
+    /* Note that cpu_in_serial_context checks cpu_in_exclusive_context. */
+    assert(!runstate_is_running() ||
+           (current_cpu && cpu_in_serial_context(current_cpu)));
+
+    CPU_FOREACH(cpu) {
+        tcg_flush_jmp_cache(cpu);
+    }
+
+    qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+    qht_reset_size(&tb_ctx.inv_htable, CODE_GEN_HTABLE_SIZE);
+    tb_remove_all();
+
+    tcg_region_reset_all();
+    /* XXX: flush processor icache at this point if cache flush is expensive */
+    qatomic_inc(&tb_ctx.tb_flush_count);
+    qemu_plugin_flush_cb();
+}
+
+static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
+{
+    /* If it is already been done on request of another CPU, just retry. */
+    if (tb_ctx.tb_flush_count == tb_flush_count.host_int) {
+        tb_flush__exclusive_or_serial();
+    }
+}
+
+void queue_tb_flush(CPUState *cs)
+{
+    if (tcg_enabled()) {
+        unsigned tb_flush_count = qatomic_read(&tb_ctx.tb_flush_count);
+        async_safe_run_on_cpu(cs, do_tb_flush,
+                              RUN_ON_CPU_HOST_INT(tb_flush_count));
+    }
+}
+
+/* remove @orig from its @n_orig-th jump list */
+static inline void tb_remove_from_jmp_list(TranslationBlock *orig, int n_orig)
+{
+    uintptr_t ptr, ptr_locked;
+    TranslationBlock *dest;
+    TranslationBlock *tb;
+    uintptr_t *pprev;
+    int n;
+
+    /* mark the LSB of jmp_dest[] so that no further jumps can be inserted */
+    ptr = qatomic_or_fetch(&orig->jmp_dest[n_orig], 1);
+    dest = (TranslationBlock *)(ptr & ~1);
+    if (dest == NULL) {
+        return;
+    }
+
+    qemu_spin_lock(&dest->jmp_lock);
+    /*
+     * While acquiring the lock, the jump might have been removed if the
+     * destination TB was invalidated; check again.
+     */
+    ptr_locked = qatomic_read(&orig->jmp_dest[n_orig]);
+    if (ptr_locked != ptr) {
+        qemu_spin_unlock(&dest->jmp_lock);
+        /*
+         * The only possibility is that the jump was unlinked via
+         * tb_jump_unlink(dest). Seeing here another destination would be a bug,
+         * because we set the LSB above.
+         */
+        g_assert(ptr_locked == 1 && dest->cflags & CF_INVALID);
+        return;
+    }
+    /*
+     * We first acquired the lock, and since the destination pointer matches,
+     * we know for sure that @orig is in the jmp list.
+     */
+    if (dest == orig) {
+        /*
+         * In the case of a TB that links to itself, removing the entry
+         * from the list means that it won't be present later during
+         * tb_jmp_unlink -- unlink now.
+         */
+        tb_reset_jump(orig, n_orig);
+    }
+    pprev = &dest->jmp_list_head;
+    TB_FOR_EACH_JMP(dest, tb, n) {
+        if (tb == orig && n == n_orig) {
+            *pprev = tb->jmp_list_next[n];
+            /* no need to set orig->jmp_dest[n]; setting the LSB was enough */
+            qemu_spin_unlock(&dest->jmp_lock);
+            return;
+        }
+        pprev = &tb->jmp_list_next[n];
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * Reset the jump entry 'n' of a TB so that it is not chained to another TB.
+ */
+void tb_reset_jump(TranslationBlock *tb, int n)
+{
+    uintptr_t addr = (uintptr_t)(tb->tc.ptr + tb->jmp_reset_offset[n]);
+    tb_set_jmp_target(tb, n, addr);
+}
+
+/* remove any jumps to the TB */
+static inline void tb_jmp_unlink(TranslationBlock *dest)
+{
+    TranslationBlock *tb;
+    int n;
+
+    qemu_spin_lock(&dest->jmp_lock);
+
+    TB_FOR_EACH_JMP(dest, tb, n) {
+        tb_reset_jump(tb, n);
+        qatomic_and(&tb->jmp_dest[n], (uintptr_t)NULL | 1);
+        /* No need to clear the list entry; setting the dest ptr is enough */
+    }
+    dest->jmp_list_head = (uintptr_t)NULL;
+
+    qemu_spin_unlock(&dest->jmp_lock);
+}
+
+#if defined(XBOX)
+/*
+ * Cross-page direct-chain link registry (docs/xpage-design.md §3).
+ *
+ * Every cross-page direct jump created by tb_add_jump registers its
+ * DESTINATION TB here (deduped by tb->xemu_xpage_reg). When a full-TLB-flush
+ * class fires (generic tlb_flush_by_mmuidx, CR3 reload), the backstop severs
+ * exactly these incoming chains via tb_jmp_unlink() instead of dropping the
+ * whole translation cache: a queued tb_flush costs a retranslation storm on
+ * every guest mapping burst — measured 139 tb_flushes in 20 s of first-visit
+ * area streaming (2026-07-12, the "new-area lag" report) — while severing
+ * keeps every translation and chains relink on the next execution.
+ *
+ * Same-page links into a registered dest are severed too (they relink
+ * lazily; harmless). TB pointers stay valid between tb_flushes (region
+ * memory is only recycled by a flush), and the generation check drops the
+ * registry wholesale once a real flush retires that generation's TBs. On
+ * overflow the backstop falls back to the old queued full flush —
+ * correctness never depends on registry capacity. Lock order: xpage_reg_lock
+ * -> dest->jmp_lock; tb_add_jump registers only after releasing jmp_lock.
+ */
+#define XEMU_XPAGE_REG_CAP  (128 * 1024)
+static TranslationBlock *xpage_reg[XEMU_XPAGE_REG_CAP];
+static unsigned xpage_reg_count;
+static unsigned xpage_reg_gen;
+static bool xpage_reg_overflowed;
+static QemuSpin xpage_reg_lock = { .value = 0 };
+
+uint64_t xemu_xpage_unlink_events;
+uint64_t xemu_xpage_unlink_dests;
+uint64_t xemu_xpage_reg_overflows;
+uint64_t xemu_xpage_reg_phys_only;
+uint64_t xemu_xpage_unlink_total_us;
+uint64_t xemu_xpage_unlink_max_us;
+
+static void xpage_reg_reset_locked(unsigned gen)
+{
+    xpage_reg_gen = gen;
+    xpage_reg_count = 0;
+    xpage_reg_overflowed = false;
+}
+
+void xemu_xpage_link_note_cross(TranslationBlock *dest, bool phys_only)
+{
+    unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
+
+    qemu_spin_lock(&xpage_reg_lock);
+    if (xpage_reg_gen != gen) {
+        xpage_reg_reset_locked(gen);
+    }
+    if (!(dest->xemu_xpage_reg & XEMU_XPAGE_TB_REGISTERED)) {
+        if (xpage_reg_count < XEMU_XPAGE_REG_CAP) {
+            dest->xemu_xpage_reg |= XEMU_XPAGE_TB_REGISTERED;
+            xpage_reg[xpage_reg_count++] = dest;
+            if (phys_only) {
+                /* Registered by the phys-page comparison alone (source has
+                 * no cross-emitter flag) — the conservative over-approx
+                 * class; tracked because its size was not predicted. */
+                xemu_xpage_reg_phys_only++;
+            }
+        } else if (!xpage_reg_overflowed) {
+            xpage_reg_overflowed = true;
+            xemu_xpage_reg_overflows++;
+        }
+    }
+    qemu_spin_unlock(&xpage_reg_lock);
+}
+
+bool xemu_xpage_unlink_registered(CPUState *cs)
+{
+    unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
+    unsigned n = 0;
+    bool complete;
+
+    qemu_spin_lock(&xpage_reg_lock);
+    if (xpage_reg_gen != gen) {
+        xpage_reg_reset_locked(gen);
+    }
+    complete = !xpage_reg_overflowed;
+    /*
+     * tb_jmp_unlink patches host code (tb_reset_jump); on Apple Silicon
+     * hardened runtime this thread is in execute mode when the backstop
+     * fires from a TLB-flush helper, so bracket with the same manual
+     * write/execute pair tb_phys_invalidate uses (see the
+     * pthread_jit_write_with_callback_np war story at that site). The
+     * missing bracket wedged the vCPU thread in a fault loop at the
+     * first boot backstop when this landed (no crash report — the
+     * monitor answers once, then nothing; archaeology 1.24).
+     */
+    int64_t t0 = g_get_monotonic_time();
+    qemu_thread_jit_write();
+    while (xpage_reg_count) {
+        TranslationBlock *dest = xpage_reg[--xpage_reg_count];
+        /* Only the REGISTERED bit — CROSS_EMITTER is translate-time state
+         * that must survive for the TB's remaining lifetime. */
+        dest->xemu_xpage_reg &= ~XEMU_XPAGE_TB_REGISTERED;
+        tb_jmp_unlink(dest);
+        n++;
+    }
+    qemu_thread_jit_execute();
+    xpage_reg_overflowed = false;
+    qemu_spin_unlock(&xpage_reg_lock);
+
+    if (n) {
+        /* Walk-duration stats: a walk stalls the vCPU mid-frame, so its
+         * tail cost must stay well under a frame period (jitter suspect
+         * instrumentation, 2026-07-12). */
+        uint64_t us = (uint64_t)(g_get_monotonic_time() - t0);
+        xemu_xpage_unlink_events++;
+        xemu_xpage_unlink_dests += n;
+        xemu_xpage_unlink_total_us += us;
+        if (us > xemu_xpage_unlink_max_us) {
+            xemu_xpage_unlink_max_us = us;
+        }
+    }
+    return complete;
+}
+#endif /* XBOX */
+
+static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
+{
+    CPUState *cpu;
+
+    if (tb_cflags(tb) & CF_PCREL) {
+        /* A TB may be at any virtual address */
+        CPU_FOREACH(cpu) {
+            tcg_flush_jmp_cache(cpu);
+        }
+    } else {
+        uint32_t h = tb_jmp_cache_hash_func(tb->pc);
+
+        CPU_FOREACH(cpu) {
+            CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+            if (qatomic_read(&jc->array[h].tb) == tb) {
+                qatomic_set(&jc->array[h].tb, NULL);
+            }
+        }
+    }
+}
+
+/*
+ * In user-mode, call with mmap_lock held.
+ * In !user-mode, if @rm_from_page_list is set, call with the TB's pages'
+ * locks held.
+ */
+static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
+{
+    uint32_t h;
+    tb_page_addr_t phys_pc;
+    uint32_t orig_cflags = tb_cflags(tb);
+    void *existing = NULL;
+
+    assert_memory_lock();
+
+    /* make sure no further incoming jumps will be chained to this TB */
+    qemu_spin_lock(&tb->jmp_lock);
+    qatomic_set(&tb->cflags, tb->cflags | CF_INVALID);
+    qemu_spin_unlock(&tb->jmp_lock);
+
+    /* remove the TB from the hash list */
+    phys_pc = tb_page_addr0(tb);
+    h = tb_hash_func(phys_pc, (orig_cflags & CF_PCREL ? 0 : tb->pc),
+                     tb->flags, tb->cs_base, orig_cflags);
+    if (!qht_remove(&tb_ctx.htable, tb, h)) {
+        return;
+    }
+
+    qht_insert(&tb_ctx.inv_htable, tb, h, &existing);
+    g_assert(existing == NULL);
+
+    /* remove the TB from the page list */
+    if (rm_from_page_list) {
+        tb_remove(tb);
+    }
+
+    /* remove the TB from the hash list */
+    tb_jmp_cache_inval_tb(tb);
+
+    /* suppress this TB from the two jump lists */
+    tb_remove_from_jmp_list(tb, 0);
+    tb_remove_from_jmp_list(tb, 1);
+
+    /* suppress any remaining jumps to this TB */
+    tb_jmp_unlink(tb);
+
+    qatomic_set(&tb_ctx.tb_phys_invalidate_count,
+                tb_ctx.tb_phys_invalidate_count + 1);
+
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_total++;
+        xemu_inv_by_src[xemu_inv_cur_src]++;
+    }
+#endif
+}
+
+static void tb_phys_invalidate__locked(TranslationBlock *tb)
+{
+    /*
+     * Manual write-then-execute pair. An earlier optimization used
+     * pthread_jit_write_with_callback_np (macOS 14.4+) to amortize the
+     * permission flip; it was reverted because it was observed to
+     * correlate with rare freezes during heavy TB invalidation (level
+     * transitions, death-reload). The new API's scoping semantics
+     * differ subtly from the manual pair (it forcibly drops write
+     * permission on callback return, regardless of whether a nested
+     * JIT-writer on the same thread still needs it) and nested-use
+     * paths are hard to rule out across QEMU's TB invalidation flow.
+     * The manual pair is exactly the pre-xemu-macos upstream behavior
+     * and has been battle-tested.
+     */
+    qemu_thread_jit_write();
+    do_tb_phys_invalidate(tb, true);
+    qemu_thread_jit_execute();
+}
+
+/*
+ * Invalidate one TB.
+ * Called with mmap_lock held in user-mode.
+ */
+void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
+{
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_SINGLE;
+    }
+#endif
+    if (page_addr == -1 && tb_page_addr0(tb) != -1) {
+        tb_lock_pages(tb);
+        do_tb_phys_invalidate(tb, true);
+        tb_unlock_pages(tb);
+    } else {
+        do_tb_phys_invalidate(tb, false);
+    }
+}
+
+/*
+ * Add a new TB and link it to the physical page tables.
+ * Called with mmap_lock held for user-mode emulation.
+ *
+ * Returns a pointer @tb, or a pointer to an existing TB that matches @tb.
+ * Note that in !user-mode, another thread might have already added a TB
+ * for the same block of guest code that @tb corresponds to. In that case,
+ * the caller should discard the original @tb, and use instead the returned TB.
+ */
+TranslationBlock *tb_link_page(TranslationBlock *tb)
+{
+    void *existing_tb = NULL;
+    uint32_t h;
+
+    assert_memory_lock();
+    tcg_debug_assert(!(tb->cflags & CF_INVALID));
+
+    tb_record(tb);
+
+    /* add in the hash table */
+    h = tb_hash_func(tb_page_addr0(tb), (tb->cflags & CF_PCREL ? 0 : tb->pc),
+                     tb->flags, tb->cs_base, tb->cflags);
+    qht_insert(&tb_ctx.htable, tb, h, &existing_tb);
+
+    /* remove TB from the page(s) if we couldn't insert it */
+    if (unlikely(existing_tb)) {
+        tb_remove(tb);
+        tb_unlock_pages(tb);
+        return existing_tb;
+    }
+
+    tb_unlock_pages(tb);
+    return tb;
+}
+
+#ifdef CONFIG_USER_ONLY
+/*
+ * Invalidate all TBs which intersect with the target address range.
+ * Called with mmap_lock held for user-mode emulation.
+ * NOTE: this function must not be called while a TB is running.
+ */
+void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
+                              tb_page_addr_t last)
+{
+    TranslationBlock *tb;
+    PageForEachNext n;
+
+    assert_memory_lock();
+
+    PAGE_FOR_EACH_TB(start, last, unused, tb, n) {
+        tb_phys_invalidate__locked(tb);
+    }
+}
+
+/*
+ * Invalidate all TBs which intersect with the target address page @addr.
+ * Called with mmap_lock held for user-mode emulation
+ * NOTE: this function must not be called while a TB is running.
+ */
+static void tb_invalidate_phys_page(tb_page_addr_t addr)
+{
+    tb_page_addr_t start, last;
+
+    start = addr & TARGET_PAGE_MASK;
+    last = addr | ~TARGET_PAGE_MASK;
+    tb_invalidate_phys_range(NULL, start, last);
+}
+
+/*
+ * Called with mmap_lock held. If pc is not 0 then it indicates the
+ * host PC of the faulting store instruction that caused this invalidate.
+ * Returns true if the caller needs to abort execution of the current TB.
+ */
+bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
+                                    uintptr_t pc)
+{
+    TranslationBlock *current_tb;
+    bool current_tb_modified;
+    TranslationBlock *tb;
+    PageForEachNext n;
+    tb_page_addr_t last;
+
+    /*
+     * Without precise smc semantics, or when outside of a TB,
+     * we can skip to invalidate.
+     */
+    if (!pc || !cpu || !cpu->cc->tcg_ops->precise_smc) {
+        tb_invalidate_phys_page(addr);
+        return false;
+    }
+
+    assert_memory_lock();
+    current_tb = tcg_tb_lookup(pc);
+
+    last = addr | ~TARGET_PAGE_MASK;
+    addr &= TARGET_PAGE_MASK;
+    current_tb_modified = false;
+
+    PAGE_FOR_EACH_TB(addr, last, unused, tb, n) {
+        if (current_tb == tb &&
+            (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
+            /*
+             * If we are modifying the current TB, we must stop its
+             * execution. We could be more precise by checking that
+             * the modification is after the current PC, but it would
+             * require a specialized function to partially restore
+             * the CPU state.
+             */
+            current_tb_modified = true;
+            cpu_restore_state_from_tb(cpu, current_tb, pc);
+        }
+        tb_phys_invalidate__locked(tb);
+    }
+
+    if (current_tb_modified) {
+        /* Force execution of one insn next time.  */
+        cpu->cflags_next_tb = 1 | CF_NOIRQ | curr_cflags(cpu);
+        return true;
+    }
+    return false;
+}
+#else
+/*
+ * @p must be non-NULL.
+ * Call with all @pages locked.
+ * (@cpu, @retaddr) may be (NULL, 0) outside of a cpu context,
+ * in which case precise_smc need not be detected.
+ */
+#if defined(XBOX)
+/*
+ * Returns whether the page still holds code afterwards: false means it was
+ * emptied and tlb_unprotect_code() ran, i.e. DIRTY_MEMORY_CODE is now set.
+ * notdirty_write's tail consumes that instead of re-reading the bitmap.
+ */
+static bool
+#else
+static void
+#endif
+tb_invalidate_phys_page_range__locked(CPUState *cpu,
+                                      struct page_collection *pages,
+                                      PageDesc *p, tb_page_addr_t start,
+                                      tb_page_addr_t last,
+                                      uintptr_t retaddr)
+{
+    TranslationBlock *tb;
+    PageForEachNext n;
+    bool current_tb_modified = false;
+    TranslationBlock *current_tb = NULL;
+#if defined(XBOX)
+    bool still_code = true;
+#endif
+
+    /* Range may not cross a page. */
+    tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
+
+    if (retaddr && cpu && cpu->cc->tcg_ops->precise_smc) {
+        current_tb = tcg_tb_lookup(retaddr);
+    }
+
+    /*
+     * We remove all the TBs in the range [start, last].
+     * XXX: see if in some cases it could be faster to invalidate all the code
+     */
+    PAGE_FOR_EACH_TB(start, last, p, tb, n) {
+#ifndef XBOX
+        tb_page_addr_t tb_start, tb_last;
+
+        /* NOTE: this is subtle as a TB may span two physical pages */
+        tb_start = tb_page_addr0(tb);
+        tb_last = tb_start + tb->size - 1;
+        if (n == 0) {
+            tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
+        } else {
+            tb_start = tb_page_addr1(tb);
+            tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
+        }
+        if (!(tb_last < start || tb_start > last)) {
+#else
+        /*
+         * XBOX default (6ea11938b2e) invalidates every TB on the page with
+         * no byte-range overlap check. XEMU_INV_PROF measures the false
+         * (non-overlapping) share; XEMU_TB_RANGE_INV=1 re-applies the exact
+         * upstream overlap filter at runtime for A/B. A TB whose bytes were
+         * not written cannot have been modified, so filtering invalidates a
+         * correct subset and never misses a needed invalidation.
+         */
+        {
+            bool xemu_skip_inval = false;
+            if (unlikely(xemu_inv_prof_on()) || xemu_tb_range_inv_on()) {
+                tb_page_addr_t chk_start, chk_last;
+                bool xemu_overlap;
+                xemu_subpage_tb_range(tb, n, &chk_start, &chk_last);
+                xemu_overlap = !(chk_last < start || chk_start > last);
+                if (unlikely(xemu_inv_prof_on())) {
+                    xemu_inv_range_evals++;
+                    if (!xemu_overlap) {
+                        xemu_inv_false_share++;
+                    }
+                }
+                if (xemu_tb_range_inv_on() && !xemu_overlap) {
+                    xemu_skip_inval = true;
+                }
+            }
+            if (!xemu_skip_inval)
+#endif
+            {
+                if (unlikely(current_tb == tb) &&
+                    (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
+                    /*
+                     * If we are modifying the current TB, we must stop
+                     * its execution. We could be more precise by checking
+                     * that the modification is after the current PC, but it
+                     * would require a specialized function to partially
+                     * restore the CPU state.
+                     */
+                    current_tb_modified = true;
+                    cpu_restore_state_from_tb(cpu, current_tb, retaddr);
+                }
+                tb_phys_invalidate__locked(tb);
+            }
+        }
+    }
+
+    /* if no code remaining, no need to continue to use slow writes */
+    if (!p->first_tb) {
+#if defined(XBOX)
+        if (unlikely(xemu_inv_prof_on())) {
+            xemu_inv_unprotect++;
+        }
+        /*
+         * Page emptied of TBs: clear the sub-block code bitmap in the same
+         * breath as tlb_unprotect_code (design clause 3). Clearing only on
+         * empty keeps the bitmap a safe over-approximation while any TB
+         * remains (a stale-set bit only forfeits a fast-skip; it never
+         * under-sets a live block). Re-translation re-sets bits via
+         * tb_page_add before the code is executable.
+         */
+        p->code_blocks = 0;
+        xemu_sf_sync_page(start, 0);
+        still_code = false;
+#endif
+        tlb_unprotect_code(start);
+    }
+
+    if (unlikely(current_tb_modified)) {
+        page_collection_unlock(pages);
+        /* Force execution of one insn next time.  */
+        cpu->cflags_next_tb = 1 | CF_NOIRQ | curr_cflags(cpu);
+        cpu_loop_exit_noexc(cpu);
+    }
+#if defined(XBOX)
+    return still_code;
+#endif
+}
+
+/*
+ * Invalidate all TBs which intersect with the target physical address range
+ * [start;last]. NOTE: start and end may refer to *different* physical pages.
+ * 'is_cpu_write_access' should be true if called from a real cpu write
+ * access: the virtual CPU will exit the current TB if code is modified inside
+ * this TB.
+ */
+void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
+                              tb_page_addr_t last)
+{
+    struct page_collection *pages;
+    tb_page_addr_t index, index_last;
+
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_EXPLICIT;
+    }
+#endif
+
+    pages = page_collection_lock(start, last);
+
+    index_last = last >> TARGET_PAGE_BITS;
+    for (index = start >> TARGET_PAGE_BITS; index <= index_last; index++) {
+        PageDesc *pd = page_find(index);
+        tb_page_addr_t page_start, page_last;
+
+        if (pd == NULL) {
+            continue;
+        }
+        assert_page_locked(pd);
+        page_start = index << TARGET_PAGE_BITS;
+        page_last = page_start | ~TARGET_PAGE_MASK;
+        page_last = MIN(page_last, last);
+        tb_invalidate_phys_page_range__locked(cpu, pages, pd,
+                                              page_start, page_last, 0);
+    }
+    page_collection_unlock(pages);
+}
+
+/*
+ * len must be <= 8 and start must be a multiple of len.
+ * Called via softmmu_template.h when code areas are written to with
+ * iothread mutex not held.
+ */
+#if defined(XBOX)
+/*
+ * XBOX shape: same work, but reports whether the page still holds code
+ * (i.e. tlb_unprotect_code() did not run and DIRTY_MEMORY_CODE stayed
+ * clear), which is exactly what notdirty_write's tail would otherwise
+ * re-read from the dirty bitmap. cputlb.c picks this up with the
+ * function-local extern idiom; the upstream void entry point below keeps
+ * tb-internal.h's contract.
+ */
+bool xemu_tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                        unsigned len, uintptr_t ra);
+
+bool xemu_tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                        unsigned len, uintptr_t ra)
+#else
+void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                   unsigned len, uintptr_t ra)
+#endif
+{
+    PageDesc *p = page_find(start >> TARGET_PAGE_BITS);
+
+#if defined(XBOX)
+    if (unlikely(xemu_inv_prof_on())) {
+        xemu_inv_cur_src = XEMU_INV_SRC_NOTDIRTY;
+        if (p) {
+            /* A notdirty write that reached a code-bearing page = one trap. */
+            xemu_inv_traps++;
+        }
+    }
+#endif
+
+    if (p) {
+        ram_addr_t last = start + len - 1;
+        struct page_collection *pages;
+
+#if defined(XBOX)
+        /* Default-on since 2026-07-11 — no unlikely() hint (a stale one
+         * statically mispredicted this ~26k/s trap path). */
+        if (xemu_subpage_track_on()) {
+            bool filter_noncode = !xemu_subpage_code_overlaps(p, start, len);
+
+            if (unlikely(xemu_subpage_refute_on())) {
+                /*
+                 * Validation mode: take the lock and compare the filter
+                 * decision to a ground-truth TB-overlap scan (cost irrelevant
+                 * here). Then honor the arm (a) skip only if XEMU_SUBPAGE_DIRTY
+                 * is also set, so REFUTE alone changes no behavior.
+                 */
+                pages = page_collection_lock(start, last);
+                xemu_subpage_refute_check(p, start, last, filter_noncode);
+                if (xemu_subpage_dirty_on() && filter_noncode) {
+                    xemu_subpage_skips++;
+                    page_collection_unlock(pages);
+                    return true;
+                }
+                bool still_code =
+                    tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                                          start, last, ra);
+                page_collection_unlock(pages);
+                return still_code;
+            }
+
+            if (filter_noncode) {
+                /*
+                 * Arm (a) fast path: the write lands entirely outside every
+                 * code sub-block, so no TB can have been modified. Skip the
+                 * page-collection lock, the TB scan, and the invalidation
+                 * altogether. The page stays write-protected (we did not empty
+                 * it), so notdirty_write's tail leaves TLB_NOTDIRTY set and the
+                 * next store re-traps into this O(1) check.
+                 */
+                xemu_subpage_skips++;
+                return true;
+            }
+        }
+#endif
+
+        pages = page_collection_lock(start, last);
+#if defined(XBOX)
+        {
+            bool still_code =
+                tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                                      start, last, ra);
+            page_collection_unlock(pages);
+            return still_code;
+        }
+#else
+        tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                              start, last, ra);
+        page_collection_unlock(pages);
+#endif
+    }
+#if defined(XBOX)
+    /* No PageDesc: nothing to invalidate, so the page's CODE bit is
+     * untouched and the caller's tail must not clear TLB_NOTDIRTY. */
+    return true;
+#endif
+}
+
+#if defined(XBOX)
+void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                   unsigned len, uintptr_t ra)
+{
+    xemu_tb_invalidate_phys_range_fast(cpu, start, len, ra);
+}
+#endif
+
+#endif /* CONFIG_USER_ONLY */

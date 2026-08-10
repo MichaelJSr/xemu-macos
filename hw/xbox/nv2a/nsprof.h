@@ -1,0 +1,171 @@
+/*
+ * NV2A wall-time profiler (release-build friendly)
+ *
+ * The NV2A_PROF_* counters are stripped in release builds
+ * (NV2A_STRIP_PROFILE_COUNTERS=1) and count events, not time. This is
+ * a minimal nanosecond accumulator for the PFIFO-thread costs that
+ * drive optimization decisions: shader/pipeline creation (compile
+ * stutter), texture hashing/uploads, vertex RAM copies, GPU fence
+ * waits, surface readbacks, and the guest flip -> vblank idle gap.
+ *
+ * Enable with XEMU_NV2A_NSPROF=1; a summary (total / avg-per-flip /
+ * max single event) prints to stderr every ~5 s. Almost all
+ * instrumented paths run on the PFIFO thread, so accumulation is
+ * unsynchronized. The exceptions are the UI-thread buckets —
+ * NSPROF_PRESENT_WAIT (pull-model handoff round trip),
+ * NSPROF_DRAWABLE_ACQUIRE, NSPROF_UI_HUD_LOCK, NSPROF_UI_PRESENT_PERIOD
+ * and the NSPROF_EV_UI_PRESENT event — whose += races the PFIFO-thread
+ * reset in nsprof_flip_tick, but on every host here 64-bit aligned
+ * loads/stores are atomic, so the only effect is losing at most one
+ * interval's samples right at a reset boundary — acceptable for a
+ * profiling counter. UI-thread buckets are also normalized per *flip*
+ * in the summary, not per present; for presents/s divide the interval's
+ * ui_present event count by the interval seconds in the header line.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, see <http://www.gnu.org/licenses/>.
+ */
+#ifndef HW_XBOX_NV2A_NSPROF_H
+#define HW_XBOX_NV2A_NSPROF_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum NsprofCounter {
+    NSPROF_SHADER_GEN,    /* shader cache miss: GLSL gen + SPIR-V compile */
+    NSPROF_PIPELINE_GEN,  /* pipeline cache miss: vkCreateGraphicsPipelines */
+    NSPROF_TEX_UPLOAD,    /* texture upload: layout + copy + unswizzle */
+    NSPROF_TEX_HASH,      /* texture content hashing (dirty checks) */
+    NSPROF_TEX_SNAPSHOT,  /* guest VRAM snapshot memcpy before upload */
+    NSPROF_GEOM_UPDATE,   /* vertex RAM / inline / index buffer copies */
+    NSPROF_FENCE_WAIT,    /* vkWaitForFences reclaiming a flight slot */
+    NSPROF_AUX_FENCE_WAIT,/* aux CB fence: sync end + lazy async reclaim */
+    NSPROF_MFX_DRAIN,     /* metalfx_drain_inflight CPU spin (PFIFO) */
+    NSPROF_SURF_DOWNLOAD, /* GPU->CPU surface readback */
+    NSPROF_FLIP_IDLE,     /* FLIP_STALL -> guest vblank release */
+    NSPROF_PRESENT_WAIT,  /* UI-thread block on the present-handoff round
+                             trip (pull-model qemu_event_wait). ~0 under
+                             XEMU_PUSH_PRESENT. Accumulated off-thread —
+                             see the header comment above. */
+    NSPROF_ZETA_SNAPSHOT, /* PFIFO-thread cost to record the flip-time
+                             zeta->snapshot depth blit (XEMU_MFX_REAL_DEPTH=2).
+                             CPU record time only; the copy's GPU cost lands
+                             indirectly in the FLIP_STALL finish. */
+    NSPROF_DRAWABLE_ACQUIRE, /* UI-thread block in [CAMetalLayer nextDrawable]
+                                (Metal presentation backend). Accumulated
+                                off-thread — see the header comment above. */
+    NSPROF_UI_HUD_LOCK,   /* UI-thread main-loop-mutex + BQL acquire and hold
+                             across the ImGui HUD build. Off-thread. */
+    NSPROF_UI_PRESENT_PERIOD, /* UI-thread interval between consecutive
+                                 completed presents (end_frame -> end_frame).
+                                 Off-thread. */
+    NSPROF__COUNT,
+};
+
+/*
+ * Plain event counts (no timing). The FINISH_* entries mirror
+ * FinishReason in pgraph/vk/renderer.h by value so call sites can
+ * offset from NSPROF_EV_FINISH_BASE.
+ */
+enum NsprofEvent {
+    NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY,
+    NSPROF_EV_FINISH_SURFACE_CREATE,
+    NSPROF_EV_FINISH_SURFACE_DOWN,
+    NSPROF_EV_FINISH_NEED_BUFFER_SPACE,
+    NSPROF_EV_FINISH_PRESENTING,
+    NSPROF_EV_FINISH_FLIP_STALL,
+    NSPROF_EV_FINISH_FLUSH,
+    NSPROF_EV_FINISH_STALLED,
+    NSPROF_EV_FINISH_REPORTS_FULL,
+    NSPROF_EV_FINISH_REPORTS_SUBMIT,
+    NSPROF_EV_DRAW, /* draw_end (guest begin/end pairs) */
+    /* surface download trigger sites */
+    NSPROF_EV_SDOWN_ACCESS_R, /* vCPU read of dirty surface VRAM */
+    NSPROF_EV_SDOWN_ACCESS_W, /* vCPU write of dirty surface VRAM */
+    NSPROF_EV_SDOWN_VTXRAM,   /* vertex RAM sync overlaps surface */
+    NSPROF_EV_SDOWN_TEXBIND,  /* texture bind indexes surface VRAM */
+    NSPROF_EV_SDOWN_BLIT,     /* NV097 image blit src/dst readback */
+    NSPROF_EV_SDOWN_EVICT,    /* surface eviction / invalidation */
+    NSPROF_EV_SDOWN_INCOMPAT, /* surface shape change: evict + readback */
+    NSPROF_EV_SDOWN_FLUSH,    /* renderer flush / savestate readback */
+    NSPROF_EV_SUPLOAD_COLOR,  /* RAM -> color surface upload */
+    NSPROF_EV_SUPLOAD_ZETA,   /* RAM -> zeta surface upload */
+    NSPROF_EV_TEXBIND_SKIP,   /* once-per-frame verified-bind fast path */
+    NSPROF_EV_VTX_EXACT_SKIP, /* byte-identical vertex conflict, finish skipped */
+    NSPROF_EV_RENDERPASS,     /* vkCmdBeginRenderPass on the main CB */
+    NSPROF_EV_PIPELINE_BIND,  /* vkCmdBindPipeline (graphics) */
+    /*
+     * Draw-merge attribution (GPU frame-cost campaign, Phase 1).
+     * VK_DRAW_CALL counts actual vkCmdDraw/vkCmdDrawIndexed calls in
+     * pgraph_vk_flush_draw (vs NSPROF_EV_DRAW's guest begin/end
+     * blocks); the MERGE_* buckets classify each non-clear guest
+     * block against the previous one: fully deduped already
+     * (IDENTICAL), mergeable into one draw call if only vertex
+     * offsets differ (CANDIDATE, with the CAND_UNIF_DIFF subset
+     * flagging a changed inline-uniform-attr payload — the untracked
+     * state axis a cross-block merge must compare explicitly), or
+     * unmergeable (STATE_CHANGED).
+     */
+    NSPROF_EV_VK_DRAW_CALL,
+    NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE, /* draw_arrays_length > 1, non-emulated */
+    NSPROF_EV_DRAW_MERGE_IDENTICAL,
+    NSPROF_EV_DRAW_MERGE_CANDIDATE,
+    NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF,
+    NSPROF_EV_DRAW_STATE_CHANGED,
+    /*
+     * Render-pass-end cause tags (campaign Mechanism C). Fired at the
+     * sites that end a live render pass mid-frame; the submit path
+     * (pgraph_vk_finish) is deliberately untagged, so
+     * renderpass - sum(causes) ~= submit/flip-boundary passes.
+     */
+    NSPROF_EV_RENDERPASS_CAUSE_SURFACE,   /* render-target rebind */
+    NSPROF_EV_RENDERPASS_CAUSE_CLEAR,     /* NV097_CLEAR_SURFACE boundary */
+    NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD, /* compute-unswizzle interleave */
+    NSPROF_EV_RENDERPASS_CAUSE_OTHER,     /* surface create / RTT nondraw */
+    /* push-present ring pacing (XEMU_PUSH_PRESENT; see display.c) */
+    NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
+    NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
+    NSPROF_EV_PUSH_POLICY_SKIP,    /* consumer catch-up skipped a stale step */
+    NSPROF_EV_UI_PRESENT,          /* completed UI present (end_frame) */
+    /* MetalFX output-shape change: the (in_w,in_h,out_w,out_h) tuple the
+     * scaler + its texture ring are rebuilt for (display.c). */
+    NSPROF_EV_MFX_SCALER_REBUILD,
+    NSPROF_EV__COUNT,
+};
+#define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY
+
+bool nsprof_enabled(void);
+
+/* Returns a start timestamp, or -1 when disabled. */
+int64_t nsprof_begin(void);
+void nsprof_end(enum NsprofCounter c, int64_t t0);
+
+void nsprof_event(enum NsprofEvent e);
+
+/* FLIP_STALL -> vblank-release idle gap (both on the PFIFO thread). */
+void nsprof_flip_wait_begin(void);
+void nsprof_flip_wait_end(void);
+
+/* Called once per guest flip (PFIFO thread); prints the periodic
+ * summary when enabled. */
+void nsprof_flip_tick(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
