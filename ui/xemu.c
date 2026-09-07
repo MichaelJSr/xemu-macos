@@ -69,6 +69,10 @@ bool xemu_metal_acquire_drawable(void);
 #endif
 #include <SDL3/SDL.h>
 
+#ifdef _WIN32
+#include "xui/win32-dxgi-present.h"
+#endif
+
 #ifndef DEBUG_XEMU_C
 #define DEBUG_XEMU_C 0
 #endif
@@ -647,8 +651,30 @@ static void handle_windowevent(SDL_Event *ev)
                 g_config.display.window.last_width = ev->window.data1;
                 g_config.display.window.last_height = ev->window.data2;
             }
+
+#ifdef _WIN32
+            if (win32_dxgi_present_is_active()) {
+                int width;
+                int height;
+                if (!SDL_GetWindowSizeInPixels(scon->real_window, &width,
+                                               &height)) {
+                    fprintf(stderr, "SDL_GetWindowSizeInPixels failed "
+                                    "responding to resize event.\n");
+                } else {
+                    win32_dxgi_present_resize(width, height);
+                }
+            }
+#endif
         }
         break;
+#ifdef _WIN32
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        if (win32_dxgi_present_is_active()) {
+            win32_dxgi_present_resize(ev->window.data1, ev->window.data2);
+        }
+        break;
+#endif
+
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_MOUSE_ENTER:
         if (!gui_grab && (qemu_input_is_absolute(scon->dcl.con) || absolute_enabled)) {
@@ -972,6 +998,12 @@ static void gl_render_frame(struct xemu_console *scon)
 #endif
     }
 
+#ifdef _WIN32
+    if (win32_dxgi_present_is_active()) {
+        win32_dxgi_present_begin_frame();
+    }
+#endif
+
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     xemu_snapshots_set_framebuffer_texture(tex, flip_required);
@@ -988,7 +1020,23 @@ static void gl_render_frame(struct xemu_console *scon)
     glFlush();
 
     nv2a_release_framebuffer_surface();
+
+#ifdef _WIN32
+    if (win32_dxgi_present_is_active()) {
+        win32_dxgi_present_end_frame(g_config.display.window.vsync);
+    } else {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr,
+                    "win32_dxgi present failed or unavailable, falling back to "
+                    "SDL_GL_SwapWindow\n");
+            warned = true;
+        }
+        SDL_GL_SwapWindow(scon->real_window);
+    }
+#else
     SDL_GL_SwapWindow(scon->real_window);
+#endif
     gl_drain_errors("gl_render_frame");
 
     qatomic_set(&rendering, false);
@@ -1364,8 +1412,23 @@ static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
-    if (event->type == SDL_EVENT_WINDOW_EXPOSED ||
-        event->type == SDL_EVENT_WINDOW_RESIZED) {
+    if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+#ifdef _WIN32
+        if (win32_dxgi_present_is_active()) {
+            int width;
+            int height;
+            if (!SDL_GetWindowSizeInPixels(scon->real_window, &width,
+                                           &height)) {
+                fprintf(stderr, "SDL_GetWindowSizeInPixels failed "
+                                "responding to resize event.\n");
+            } else {
+                win32_dxgi_present_resize(width, height);
+            }
+        }
+#endif
+        /* render_frame() dispatches to the Metal or GL presenter. */
+        render_frame(scon);
+    } else if (event->type == SDL_EVENT_WINDOW_EXPOSED) {
         render_frame(scon);
     }
 
@@ -1621,6 +1684,13 @@ static void display_early_init(DisplayOptions *o)
     if (!xemu_present_is_metal()) {
         SDL_GL_MakeCurrent(m_window, m_context);
         SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
+#ifdef _WIN32
+        /* Upstream's DXGI swapchain + WGL_NV_DX_interop presenter: GL
+         * swaps go through D3D11 so a vsync wait can't stall the pfifo
+         * thread behind the driver's GL swap lock. Only the GL presenter
+         * reaches here; the Metal presenter is Apple-only. */
+        win32_dxgi_present_init(m_window);
+#endif
     }
     xemu_hud_init(m_window, m_context);
 }
@@ -1719,6 +1789,9 @@ static void display_finalize(void)
     } else
 #endif
     {
+#ifdef _WIN32
+        win32_dxgi_present_cleanup();
+#endif
         SDL_GL_MakeCurrent(NULL, NULL);
         SDL_GL_DestroyContext(m_context);
     }

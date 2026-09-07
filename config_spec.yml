@@ -348,7 +348,7 @@ audio:
   # Upstream dsp56300-subproject JIT execution engine.
   use_dsp_jit:
     type: bool
-    default: true
+    default: false
   hrtf:
     type: bool
     default: true
