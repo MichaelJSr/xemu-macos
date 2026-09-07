@@ -772,6 +772,16 @@ case "$platform" in # Adjust compilation options based on platform
         if [ -z "$debug" ] && ! echo "$@" | grep -q 'x86_version'; then
           opts="$opts -Dx86_version=3"
         fi
+        # Python >= 3.13 changed ntpath.isabs(): a single leading slash
+        # ("/qemu", the configs/meson/windows.txt default) is no longer an
+        # absolute path, so `meson setup` under MSYS2's mingw python fails
+        # with "prefix value '/qemu' must be an absolute path". Pass the
+        # same prefix spelled Windows-absolute (C:/msys64/qemu). Runtime
+        # path relocation (util/cutils.c get_relocated_path) only compares
+        # CONFIG_PREFIX against CONFIG_BINDIR, so behaviour is unchanged.
+        if ! echo "$@" | grep -q -- '--prefix' && command -v cygpath >/dev/null 2>&1; then
+          opts="$opts --prefix=$(cygpath -m /qemu)"
+        fi
         # PGO: same two-stage flow as Darwin/Linux (MSYS2 clang accepts
         # the same flags; llvm-profdata without the xcrun prefix). The
         # shared setup_pgo also fixes this branch's former stale-merge
