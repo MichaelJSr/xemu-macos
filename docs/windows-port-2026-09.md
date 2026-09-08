@@ -149,9 +149,14 @@ the same machine state. Facts that survive: the crash is exit 139 about
 the profiler, with `XEMU_VK_VOLK_DEVICE=0`, and with
 `XEMU_APU_RAM_DIRTY=0`. Single passes were observed once each for
 "all apu/xid files reverted", "only vp.c reverted" and "vp.c minus the
-pitch clamp", so the apu/xid commit (`971292ed48`) remains the leading
-suspect, but every variant must be re-run ≥5 times before believing a
-pass. The pitch clamp stays reverted (harmless either way). gdb did not
+pitch clamp" — single runs at an observed ~5/6 failure rate, i.e. not
+evidence; every variant must be re-run ≥5 times before believing a
+pass. The 2026-09-08 review (`docs/windows-wave1-review-2026-09-08.md`
+§3) puts the leading explanation elsewhere: the branch's native-Windows
+`-O3 -Dstack_protector=disabled` build flags, which every crashing
+binary shared and the passing control lacked; §9 below carries the
+experiment that settles it. The pitch clamp stays out (harmless either
+way). gdb did not
 catch it (run-under and attach both missed).
 
 **Superseded 2026-09-08 by `docs/windows-wave1-review-2026-09-08.md`
