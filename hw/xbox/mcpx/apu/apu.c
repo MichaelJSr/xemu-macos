@@ -276,6 +276,17 @@ static void se_frame(MCPXAPUState *d)
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+
+    /*
+     * This thread enters RCU read-side critical sections indirectly:
+     * scatter_gather_rw() marks guest RAM dirty after its memcpy, the
+     * VP's ram_st* helpers do the same, and the address_space_*
+     * fallbacks take the RCU lock too. Register like the voice worker
+     * threads (vp.c) do so those readers are visible to
+     * synchronize_rcu() instead of being invisible to it.
+     */
+    rcu_register_thread();
+
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
         if (qatomic_read(&d->pause_requested)) {
@@ -318,6 +329,8 @@ static void *mcpx_apu_frame_thread(void *arg)
         se_frame(d);
     }
     qemu_mutex_unlock(&d->lock);
+
+    rcu_unregister_thread();
     return NULL;
 }
 

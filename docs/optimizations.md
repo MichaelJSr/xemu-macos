@@ -87,6 +87,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_DUMP` / `_PIN_AUDIT` / `_SENTINEL` / `_FORCE` | JIT bring-up harnesses (see `docs/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
+| `XEMU_APU_RAM_DIRTY` | **Landed 2026-09-08; the default is per-platform.** The APU's fast voice-register stores write `d->ram_ptr` directly and so skipped `invalidate_and_set_dirty()`; with the knob on they also mark the written range for the `DIRTY_CLIENTS_NOCODE` clients (VGA, MIGRATION, NV2A, NV2A_TEX). **Default off on Apple**, which is the platform whose audio path this fork tuned and whose shipped behaviour is the unmarked store, because the marking's cost here has never been measured (an RCU read lock — two real `smp_mb()`s, since this tree builds without `CONFIG_MEMBARRIER` — plus up to four contended bitmap ORs, per voice-register store, from every voice worker); **default on elsewhere**, where nothing was measured against the skip. `=1` opts in on Apple, `=0` opts out elsewhere; read once in `mcpx_apu_vp_init` |
 
 ### Build-time and harness knobs added 2026-08-04
 
@@ -240,15 +241,27 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   register-only key; the display early-out also honours
   resolution/PVIDEO changes on every host (the commit body calls that
   hunk non-Apple, but `display_skip_strict()` is called unconditionally,
-  macOS included). (4) APU: guest voice handles bounds-checked
-  before indexing host `filters[]` / HRTF / SSL tables (was OOB read then
-  write), pitch LUT index clamped, APU direct RAM stores mark dirty
-  again, engine switch serialised under the BQL, XID unbound-pad guard
-  bounds-checked. The XID half of that commit (`hw/xbox/xid.c`,
-  `hw/xbox/xid-gamepad.c`) **landed on main 2026-09-08** — see Input
-  below; the APU half stays on the branch until the dirty-marking
-  default is settled (the commit body calls it hatch-gated, but
-  `XEMU_APU_RAM_DIRTY` defaults ON, Apple included).
+  macOS included). (4) APU/XID — **both halves landed on main 2026-09-08** (the
+  XID index guard in `hw/xbox/xid.c` / `hw/xbox/xid-gamepad.c` as its
+  own commit — see Input below). Guest voice handles
+  are bounds-checked before indexing host `filters[]` / HRTF / SSL
+  tables (was an OOB read then write); the voice-list walk stops on an
+  out-of-range `NEXT_VOICE_HANDLE` instead of asserting, and reports it
+  once per run on stderr rather than through a release-stripped
+  `DPRINTF`; an out-of-range handle is now dropped outright instead of
+  falling through to the guest-RAM path, because that path's
+  `address_space_*` fallback can take the BQL from the APU/voice-worker
+  threads while `d->lock` is held — the inverse of `gp_write`'s
+  BQL-then-`d->lock` order, i.e. a hang (for an in-range handle with a
+  guest-bogus `VPVADDR` the fallback stays reachable, as it already is
+  on main). APU direct RAM stores mark dirty again behind
+  `XEMU_APU_RAM_DIRTY`, whose default is **off on Apple, on elsewhere**
+  (the per-store cost was never measured). The runtime `use_dsp_jit`
+  engine switch is serialised under the BQL and the APU frame thread
+  registers with RCU. The `int16` pitch-LUT clamp the original commit
+  added was **not** taken: the branch removed it again in `3495cd28c0`,
+  and `40f0a01ad3` retracted the single-run bisect that had blamed it,
+  so nothing is known about it either way — the original wrap stands.
   (5) **Landed on main 2026-09-08** — see the Vulkan
   renderer and CPU / JIT sections below: `nv2a_vk_bounds_check` is a
   real check in every build (was `__builtin_unreachable()` in release)
@@ -308,20 +321,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
 
-These four knobs belong to wave-1 commits that are **not** landed here,
+These three knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
 `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
 which matches nothing at all for any of them. Rows are kept in the knob
 table's shape so each moves back up verbatim as its commit lands —
 `XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
 `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
-`818fe27828` landed, and `XEMU_VK_VOLK_DEVICE` when `736533709e` did.
+`818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did, and
+`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48`.
 
 | Env var | Purpose | Lands with |
 |---|---|---|
 | `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
 | `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
-| `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients | `971292ed48` |
 | `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. On the branch that arm defaults to `-Doptimization=3 -Dstack_protector=disabled` and `=0` restores `-O2` + stack protector. **On main that arm is already `-O2`** — `build.sh`'s `win64*\|MINGW*\|MSYS*` release case sets only `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project default `optimization=2` (`meson.build:3`) stands and the knob has nothing to invert. The 2026-09-08 review recommends re-cutting the hunk with `-O3` **opt-in** (`XEMU_WIN_O3=1`): it is the leading suspect for the wave-1 exit-139 and no CI leg covers `-O3` on Windows | `fb42bce22e` (re-cut) |
 
 ### Rendering (correctness fixes)
@@ -1430,6 +1443,53 @@ table's shape so each moves back up verbatim as its commit lands —
   outside the 16380 word window, costing an extra `ADD` on every emitted
   Y-space access) — shipping it here would have contaminated the
   pre-registered `code_buf_used` band.
+- **Guest voice handles bounds-checked; APU RAM dirty marking behind a
+  per-platform default (2026-09-08).** Cherry-picked from `971292ed48`
+  on `windows-wave1-wip` (APU half; the XID half lands separately).
+  Guest-controlled voice handles reached host arrays unchecked:
+  `voice_get_mask` / `voice_get_word` / `voice_set_mask` indexed
+  `d->vp.filters[]` (256 entries) with a raw handle, and the HRTF / SSL
+  setters read `NV_PAPU_FECV` — any 32-bit value the guest wrote — into
+  a signed `int`, so `>= 0x80000000` passed the `<` bound and indexed
+  negatively. Handles are now range-checked; an out-of-range one is
+  dropped (reads 0, writes discarded) and reported once per run on
+  stderr, deliberately *not* by falling through to the guest-RAM path,
+  whose `address_space_*` fallback would take the BQL from the APU /
+  voice-worker threads under `d->lock` — the inverse of `gp_write`'s
+  BQL-then-`d->lock` order. The voice-list walk stops on an
+  out-of-range `NEXT_VOICE_HANDLE` (once-per-run stderr report) instead
+  of running into the assert in `voice_process`, i.e. a
+  guest-triggerable abort in a release build. Alongside: the APU frame
+  thread calls `rcu_register_thread()` (it enters read-side sections
+  through `scatter_gather_rw` and the `ram_st*` helpers), and the
+  runtime `audio.use_dsp_jit` engine switch takes the BQL across
+  `dsp_set_engine()` so it cannot free a backend under the lock-free
+  `gp_read` / `ep_read`. That switch is reachable: the Settings and
+  debug UIs bind the toggle directly (`ui/xui/main-menu.cc:936`,
+  `ui/xui/debug.cc:210`) and `se_frame` polls it every APU frame. It is
+  inert only when the fork's own inline JIT is on
+  (`audio.dsp_jit.enabled`), which makes `dsp_set_engine()`
+  short-circuit — the dev box's config, which is why the hazard went
+  unnoticed. Restored with it: the fork's direct-`ram_ptr` voice
+  stores mark the written range dirty again instead of silently
+  skipping `invalidate_and_set_dirty()`. That is the one hunk a
+  correctly-behaving guest can observe, so it is gated: default
+  **off on Apple** (unchanged from what ships today; the per-store cost
+  — an RCU read lock, i.e. two real `smp_mb()`s without
+  `CONFIG_MEMBARRIER`, plus up to four contended bitmap ORs, from every
+  voice worker on every voice-register store — has never been measured
+  here) and **on elsewhere**, in the style of the sub-page dirty gate
+  `0aeb1998c3`. `XEMU_APU_RAM_DIRTY=1` opts in on Apple, `=0` opts out
+  elsewhere. **Not taken:** the same commit's `int16` saturation of the
+  modulated pitch-LUT index. The branch removed it again in
+  `3495cd28c0` on a single-run Windows bisect, and `40f0a01ad3`
+  retracted that bisect as non-evidence, so nothing is known about the
+  clamp either way; the original wrapping index stands until there is a
+  real receipt. No fps claim: this batch is a correctness fix. On Apple
+  the store path is unchanged by default and every in-range handle
+  behaves exactly as before; what is new on all platforms is the range
+  test in the three accessors, the frame thread's RCU registration, and
+  the locking around the engine switch.
 
 ### Input
 
