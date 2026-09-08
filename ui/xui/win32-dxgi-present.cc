@@ -285,10 +285,34 @@ bool Win32DxgiPresenter::CreateSharedResources(int width, int height)
         return false;
     }
 
-    if (!create_fbo(m_interop_fbo, m_interop_tex)) {
+    // A WGL_NV_DX_interop object is only usable by GL while it is locked.
+    // Attaching the unlocked interop texture to an FBO and querying
+    // completeness returns GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD) on NVIDIA
+    // (observed: TITAN Xp, 561.09), which silently disabled this presenter.
+    // Lock for the completeness check exactly as EndFrame does for the blit.
+    if (!m_wgl_dx_lock_objects_nv(m_wgl_device, 1, &m_wgl_object)) {
+        fprintf(stderr,
+                "win32_dxgi_present: wglDXLockObjectsNV failed during FBO "
+                "setup (WinError=0x%X)\n",
+                static_cast<unsigned int>(GetLastError()));
+        ReleaseSharedResources();
         return false;
     }
+    glGenFramebuffers(1, &m_interop_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_interop_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           m_interop_tex, 0);
+    GLenum interop_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_wgl_dx_unlock_objects_nv(m_wgl_device, 1, &m_wgl_object);
+    if (interop_status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,
+                "win32_dxgi_present: interop FBO incomplete (status=0x%X, "
+                "GLError=%u, w=%d, h=%d)\n",
+                interop_status, glGetError(), width, height);
+        ReleaseSharedResources();
+        return false;
+    }
 
     m_width = width;
     m_height = height;
@@ -582,7 +606,6 @@ void Win32DxgiPresenter::EndFrame(bool vsync)
         Cleanup();
         return;
     }
-    m_wgl_dx_lock_objects_nv(m_wgl_device, 1, &m_wgl_object);
 
     // Blit from render FBO to interop FBO with vertical flip to convert OpenGL
     // (Y-up) to D3D11 (Y-down)
