@@ -20,7 +20,6 @@
  */
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
-#include "system/physmem.h"
 #include "adpcm.h"
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
@@ -107,42 +106,10 @@ static inline uint8_t ram_ldb(MCPXAPUState *d, hwaddr addr)
     return ldub_phys(&address_space_memory, addr);
 }
 
-/*
- * Storing straight into d->ram_ptr skips the address-space dispatch of
- * stl_le_phys()/stb_phys(), but it also skips their
- * invalidate_and_set_dirty(). xemu adds GPU dirty clients on system RAM
- * (DIRTY_MEMORY_NV2A / _NV2A_TEX, include/exec/ramlist.h) and the Xbox
- * is a UMA machine, so an APU write landing in a page the NV2A has
- * cached as a texture or vertex buffer must still flip those bits.
- * Setting them is a handful of atomic bitmap ORs, so the win of
- * skipping the address-space dispatch is preserved.
- *
- * The mask is DIRTY_CLIENTS_NOCODE, matching invalidate_and_set_dirty():
- * that helper only sets the CODE bit because it has just invalidated
- * the TBs. Setting CODE here without invalidating would tell
- * notdirty_write() (accel/tcg/cputlb.c) that the page no longer needs
- * TB invalidation on the guest's next store to it, so a page holding
- * translated code could go on executing stale TBs. Leaving it clear
- * keeps that path exactly as it behaves today.
- *
- * XEMU_APU_RAM_DIRTY=0 restores the legacy (no dirty update) store.
- */
-static bool g_apu_ram_set_dirty = true;
-
-static inline void ram_mark_dirty(MCPXAPUState *d, hwaddr addr, hwaddr size)
-{
-    if (g_apu_ram_set_dirty) {
-        physical_memory_set_dirty_range(
-            memory_region_get_ram_addr(d->ram) + addr, size,
-            DIRTY_CLIENTS_NOCODE);
-    }
-}
-
 static inline void ram_stl(MCPXAPUState *d, hwaddr addr, uint32_t val)
 {
     if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
         stl_le_p(&d->ram_ptr[addr], val);
-        ram_mark_dirty(d, addr, 4);
     } else {
         stl_le_phys(&address_space_memory, addr, val);
     }
@@ -152,7 +119,6 @@ static inline void ram_stb(MCPXAPUState *d, hwaddr addr, uint8_t val)
 {
     if (__builtin_expect(addr + 1 <= d->ram_size, 1)) {
         d->ram_ptr[addr] = val;
-        ram_mark_dirty(d, addr, 1);
     } else {
         stb_phys(&address_space_memory, addr, val);
     }
@@ -311,25 +277,10 @@ static float attenuate(uint16_t vol)
     return (vol == 0xFFF) ? 0.0f : g_attenuation_lut[vol];
 }
 
-/*
- * The per-voice stack snapshot is indexed by a raw guest handle
- * (NV_PAPU_FECV takes any 32-bit MMIO value, and the voice-list walk
- * feeds back a NEXT_VOICE_HANDLE read straight out of guest RAM), but
- * filters[] only has MCPX_HW_MAX_VOICES entries. Bound the index here:
- * an out-of-range handle returns NULL and falls through to the
- * ram_ldl / ram_stl path below, which is exactly upstream's behaviour
- * (guest-RAM addressing only, itself bounds-checked against ram_size).
- */
-static inline uint32_t *voice_snapshot(MCPXAPUState *d, uint16_t h)
-{
-    return __builtin_expect(h < MCPX_HW_MAX_VOICES, 1) ?
-               d->vp.filters[h].voice_buf : NULL;
-}
-
 static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
                                hwaddr offset, uint32_t mask)
 {
-    uint32_t *buf = voice_snapshot(d, voice_handle);
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
     if (buf) {
         return (ldl_le_p(&buf[offset / 4]) & mask) >> ctz32(mask);
     }
@@ -356,7 +307,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
 static inline uint32_t voice_get_word(MCPXAPUState *d, uint16_t voice_handle,
                                       hwaddr offset)
 {
-    uint32_t *buf = voice_snapshot(d, voice_handle);
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
     if (buf) {
         return ldl_le_p(&buf[offset / 4]);
     }
@@ -375,7 +326,7 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
 {
     hwaddr voice = qatomic_read(&d->regs[NV_PAPU_VPVADDR]) +
                    voice_handle * NV_PAVS_SIZE;
-    uint32_t *buf = voice_snapshot(d, voice_handle);
+    uint32_t *buf = d->vp.filters[voice_handle].voice_buf;
     uint32_t old;
     if (buf) {
         old = ldl_le_p(&buf[offset / 4]);
@@ -644,14 +595,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         break;
     case NV1BA0_PIO_SET_VOICE_TAR_HRTF: {
         int handle = GET_MASK(argument, NV1BA0_PIO_SET_VOICE_TAR_HRTF_HANDLE);
-        /*
-         * FECV holds whatever 32-bit value the guest last wrote via
-         * NV1BA0_PIO_SET_CURRENT_VOICE. Read it unsigned: as an int,
-         * any value >= 0x80000000 is negative and still passes the
-         * `< MCPX_HW_MAX_3D_VOICES` test below, indexing filters[]
-         * with a negative subscript. Identical for in-range handles.
-         */
-        uint32_t current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
         voice_set_mask(d, current_voice, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                        NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE, handle);
         if (current_voice < MCPX_HW_MAX_3D_VOICES &&
@@ -790,17 +734,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
     case NV1BA0_PIO_SET_VOICE_SSL_A: {
         int ssl = 0;
-        /*
-         * Same as the HRTF case: FECV is a raw guest value, so keep it
-         * unsigned and bounds-check it instead of asserting. As a
-         * signed int the assert below passes for any value >=
-         * 0x80000000 and ssl[] is then written at a negative index.
-         */
-        uint32_t current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
-        if (current_voice >= MCPX_HW_MAX_VOICES) {
-            DPRINTF("SSL for out-of-range voice %u ignored\n", current_voice);
-            break;
-        }
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
+        assert(current_voice < MCPX_HW_MAX_VOICES);
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -814,17 +749,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     // FIXME: Refactor into above
     case NV1BA0_PIO_SET_VOICE_SSL_B: {
         int ssl = 1;
-        /*
-         * Same as the HRTF case: FECV is a raw guest value, so keep it
-         * unsigned and bounds-check it instead of asserting. As a
-         * signed int the assert below passes for any value >=
-         * 0x80000000 and ssl[] is then written at a negative index.
-         */
-        uint32_t current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
-        if (current_voice >= MCPX_HW_MAX_VOICES) {
-            DPRINTF("SSL for out-of-range voice %u ignored\n", current_voice);
-            break;
-        }
+        int current_voice = qatomic_read(&d->regs[NV_PAPU_FECV]);
+        assert(current_voice < MCPX_HW_MAX_VOICES);
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -1774,17 +1700,7 @@ static void voice_process(MCPXAPUState *d,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH);
     int8_t ps = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_ENV0,
                                NV_PAVS_VOICE_CFG_ENV0_EF_PITCHSCALE);
-    /*
-     * g_pitch_lut is built by reinterpreting its index as int16, so the
-     * modulated pitch must be saturated to the int16 domain before the
-     * cast: p is int16 and ps * 32 * ef_value adds up to +/-4064, so the
-     * sum can leave the range and wrap to the opposite sign, yielding a
-     * ~2^16 wrong resample rate. fminf/fmaxf are branchless on both
-     * AArch64 and x86 SSE and leave every in-range index bit-identical.
-     */
-    float pitch_f = fminf(fmaxf((float)p + (float)ps * 32.0f * ef_value,
-                                -32768.0f), 32767.0f);
-    int16_t pitch_idx = (int16_t)pitch_f;
+    int pitch_idx = (int)(p + ps * 32 * ef_value);
     float rate = g_pitch_lut[(uint16_t)pitch_idx];
     dbg->rate = rate;
 
@@ -2364,18 +2280,6 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
             }
 
             uint16_t v = (uint16_t)qatomic_read(&d->regs[current]);
-            /*
-             * The handle comes out of guest RAM (NEXT_VOICE_HANDLE) and
-             * is only known to be 16-bit wide; anything >=
-             * MCPX_HW_MAX_VOICES would trip the assert in voice_process
-             * / is_voice_locked, i.e. a guest-triggerable abort. Treat
-             * it as an invalid list entry and stop walking instead.
-             */
-            if (v >= MCPX_HW_MAX_VOICES) {
-                DPRINTF("Voice list contains out-of-range handle %u!\n",
-                        (unsigned)v);
-                break;
-            }
             qatomic_set(&d->regs[next],
                         voice_get_mask(d, v,
                                        NV_PAVS_VOICE_TAR_PITCH_LINK,
@@ -2409,14 +2313,6 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
 
 void mcpx_apu_vp_init(MCPXAPUState *d)
 {
-    /*
-     * Read once here (device realize, main thread, before the APU
-     * thread exists) so ram_stl/ram_stb stay branch-only on the hot
-     * path and no thread ever races on the getenv.
-     */
-    const char *e = getenv("XEMU_APU_RAM_DIRTY");
-    g_apu_ram_set_dirty = !(e && e[0] == '0');
-
     apu_init_luts();
     voice_work_init(d);
 }
