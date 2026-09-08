@@ -282,6 +282,30 @@ owner "xemu" when Finder-launched) — capture-only, zero interference,
 and their instance holds the qcow2 write lock, so clone the disk with
 `cp -c` (instant, snapshots ride along) to run in parallel.
 
+## Multi-title boot smoke (soak gate for state-table / bounds changes)
+
+`scripts/boot-smoke-corpus.sh [--app PATH] [--secs N] [--out DIR] <iso>...`
+(added 2026-09-08) boots every ISO given on an isolated clone of a bundle
+(same isolation as the A/B harness: APFS bundle clone, cloned hdd/eeprom,
+scratch `xemu.toml` with `dvd_path` swapped and fullscreen off, never
+`dist/xemu.app`'s config), taps START and A through the user's own
+keyboard bindings via `XEMU_INPUT_PIPE` so menus advance, captures two
+scored screenshots (`scripts/bench-screenshot.py`), quits via the monitor,
+and reports per title: `alive`/`CRASHED` (exit status if it died early),
+assert/abort/`nv2a_vk_bounds` lines, the last nsprof interval and the
+screenshot verdicts. Exit 0 = all alive and no ARTIFACT; 2 = a title died
+or asserted; 3 = an ARTIFACT verdict.
+
+Use it as the gate for changes that only trip on titles other than
+Azurik — release-mode bounds checks over renderer state tables, PVIDEO
+overlays, new abort paths — by running the same title list on the
+baseline bundle first. Baseline recorded 2026-09-08 on `add066354f` (+
+phase-A fixes): Azurik, Battlefield 2 MC, Conker, KOTOR, Vexx and
+NevolutionX all alive 120 s, 0 asserts, all screenshots PASS. It is a
+boot-to-menu/intro smoke, not gameplay: Azurik reaches ~50 draws/flip,
+Conker ~280, KOTOR sits on a 2-draw loading screen at 120 s. Lengthen
+`--secs` or add a savestate route when a change needs deeper coverage.
+
 ## Snapshots with controllers (topology matching)
 
 Snapshots embed per-pad USB trees: `usb-hub,port=1.P,ports=3` +
