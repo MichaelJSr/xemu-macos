@@ -51,8 +51,11 @@ bool xemu_inv_timing_on(void);
  * Monotonic tick source for the timing split. On Apple Silicon the virtual
  * counter (cntvct_el0, 24 MHz => ~41.6 ns/tick) is a couple ns to read; the
  * isb keeps the read from being reordered around the measured work. Per-call
- * quantization averages out over the ~10^5..10^6 traps per window. Elsewhere
- * fall back to the RAW uptime clock (ns units). Convert with xemu_inv_tick_ns().
+ * quantization averages out over the ~10^5..10^6 traps per window. Apple
+ * non-aarch64 uses the RAW uptime clock (ns units); every other x86 host
+ * (MSYS2/MinGW Windows, x86_64 Linux) uses the TSC, which plays the cntvct
+ * role. Any other host has no source and reports zeros. Convert with
+ * xemu_inv_tick_ns().
  */
 static inline uint64_t xemu_inv_ticks(void)
 {
@@ -62,6 +65,15 @@ static inline uint64_t xemu_inv_ticks(void)
     return v;
 #elif defined(__APPLE__)
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#elif defined(__x86_64__) || defined(__i386__)
+    /*
+     * rdtsc is a gcc/clang builtin on every x86 target (no <x86intrin.h>
+     * needed, so this header stays include-free). Invariant TSC on every
+     * host this fork targets; the lfence keeps the read from being hoisted
+     * across the measured work, mirroring the aarch64 isb above.
+     */
+    __asm__ volatile("lfence" ::: "memory");
+    return __builtin_ia32_rdtsc();
 #else
     return 0;
 #endif
@@ -74,6 +86,27 @@ static inline double xemu_inv_tick_ns(void)
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     return f ? 1.0e9 / (double)f : 0.0;
+#elif !defined(__APPLE__) && (defined(__x86_64__) || defined(__i386__))
+    /*
+     * The TSC has no architectural frequency register, so calibrate ns/tick
+     * once against the monotonic clock (QueryPerformanceCounter-backed on
+     * Windows) with a ~10 ms spin, then cache it. Only ever reached from the
+     * XEMU_INV_TIMING exit dump, so the spin is paid once, off any hot path.
+     */
+    static double ns_per_tick;
+    if (ns_per_tick == 0.0) {
+        int64_t t0_us = g_get_monotonic_time();
+        uint64_t c0 = xemu_inv_ticks();
+        int64_t t1_us = t0_us;
+        uint64_t c1;
+        while (t1_us - t0_us < 10000) {
+            t1_us = g_get_monotonic_time();
+        }
+        c1 = xemu_inv_ticks();
+        ns_per_tick = (c1 > c0) ?
+            ((double)(t1_us - t0_us) * 1000.0) / (double)(c1 - c0) : 0.0;
+    }
+    return ns_per_tick;
 #else
     return 1.0;
 #endif

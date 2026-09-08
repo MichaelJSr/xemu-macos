@@ -147,9 +147,22 @@ int nv2a_profile_get_counter_value(unsigned int cnt);
 void nv2a_profile_increment(void);
 void nv2a_profile_flip_stall(void);
 
-/* Strip profile counters in release builds for both GL and VK hot paths */
+/*
+ * Strip profile counters in release builds for both GL and VK hot paths
+ * (one store per draw/bind/upload). The strip used to be unconditional, so
+ * the ImGui NV2A panel plotted flat zeros in every build -- a debug HUD that
+ * silently lies. Debug builds (build.sh --debug passes -DXEMU_DEBUG_BUILD=1
+ * through --extra-cflags, so it reaches every TU) now keep the counters and
+ * the panel reads real numbers; release codegen is unchanged. Escape hatch:
+ * build with -DNV2A_STRIP_PROFILE_COUNTERS=1 to restore the stripped debug
+ * build, or =0 to keep counters in a release build.
+ */
 #ifndef NV2A_STRIP_PROFILE_COUNTERS
+#ifdef XEMU_DEBUG_BUILD
+#define NV2A_STRIP_PROFILE_COUNTERS 0
+#else
 #define NV2A_STRIP_PROFILE_COUNTERS 1
+#endif
 #endif
 
 #if !NV2A_STRIP_PROFILE_COUNTERS
@@ -158,7 +171,16 @@ static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
     g_nv2a_stats.frame_working.counters[cnt] += 1;
 }
 #else
-#define nv2a_profile_inc_counter(cnt) ((void)0)
+/*
+ * Typed no-op rather than a function-like macro: the argument keeps being
+ * type-checked and evaluated (vk/draw.c passes a table lookup), and at -O1+
+ * both gcc and clang emit nothing for it, so the stripped hot path is
+ * byte-identical to the macro form.
+ */
+static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
+{
+    (void)cnt;
+}
 #endif
 
 #ifdef CONFIG_RENDERDOC

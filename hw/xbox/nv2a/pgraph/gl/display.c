@@ -23,6 +23,7 @@
 #include "hw/display/vga_int.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "renderer.h"
 
 #include <math.h>
@@ -365,11 +366,19 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
 
 static void gl_fence(void)
 {
+    /*
+     * PFIFO-thread block on the GPU (pgraph_gl_sync runs from
+     * pgraph_process_pending). Bucketed as FENCE_WAIT so an nsprof run under
+     * the GL renderer attributes its display-path GPU stalls the same way the
+     * Vulkan path attributes vkWaitForFences.
+     */
+    int64_t t0 = nsprof_begin();
     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     int result = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT,
                                          (GLuint64)(5000000000));
     assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
     glDeleteSync(fence);
+    nsprof_end(NSPROF_FENCE_WAIT, t0);
 }
 
 void pgraph_gl_sync(NV2AState *d)
@@ -434,7 +443,14 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
+    /*
+     * UI thread blocking on the PFIFO thread to compose the display surface:
+     * the GL renderer's equivalent of the pull-model present handoff, so it
+     * shares the PRESENT_WAIT bucket (off-thread accumulation, see nsprof.h).
+     */
+    int64_t t0 = nsprof_begin();
     qemu_event_wait(&d->pgraph.sync_complete);
+    nsprof_end(NSPROF_PRESENT_WAIT, t0);
 
     return r->gl_display_buffer;
 }

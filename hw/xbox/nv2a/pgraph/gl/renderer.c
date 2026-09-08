@@ -21,6 +21,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "debug.h"
 #include "renderer.h"
 
@@ -102,7 +103,25 @@ static void pgraph_gl_finalize(NV2AState *d)
 static void pgraph_gl_flip_stall(NV2AState *d)
 {
     NV2A_GL_DFRAME_TERMINATOR();
+
+    /*
+     * glFinish is this renderer's entire GPU-drain wait, so bucket it: every
+     * other nsprof cost centre is instrumented at a Vulkan-only call site,
+     * and without this the GL summary would carry no PFIFO-thread cost at all.
+     */
+    int64_t t0 = nsprof_begin();
     glFinish();
+    nsprof_end(NSPROF_FENCE_WAIT, t0);
+
+    /*
+     * Drives the periodic XEMU_NV2A_NSPROF summary (print + reset). Mirrors
+     * the call at the tail of pgraph_vk_flip_stall: same PFIFO thread, same
+     * once-per-guest-flip instant, so exactly one renderer ticks it and the
+     * per-flip denominators keep their meaning. Without this the profiler
+     * printed nothing under GL -- the Windows Vulkan-failure fallback and the
+     * user-selectable GL renderer had no wall-time channel at all.
+     */
+    nsprof_flip_tick();
 }
 
 static void pgraph_gl_flush(NV2AState *d)

@@ -582,6 +582,17 @@ void *pfifo_thread(void *arg)
                         qatomic_read(&d->pgraph.waiting_for_flip),
                         qatomic_read(&d->pgraph.waiting_for_nop),
                         qatomic_read(&d->pgraph.waiting_for_context_switch));
+#ifdef _WIN32
+                /*
+                 * ui/xemu.c reopens stderr onto CONOUT$ / xemu.log at startup;
+                 * freopen gives the stream the CRT default buffering for its
+                 * new target, which for the log file is full buffering. This
+                 * diagnostic exists to be read after a freeze is force-killed,
+                 * i.e. exactly when a buffered tail is lost, so flush it. One
+                 * flush per ~2 s, only when XEMU_PFIFO_HEARTBEAT=1.
+                 */
+                fflush(stderr);
+#endif
             }
         }
 
