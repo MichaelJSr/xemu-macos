@@ -29,12 +29,18 @@ if not fs.exists(lib)
     run_command(find_program('curl'), '-fsSL', url, '-o', src_archive, check: true)
   endif
   tar_args = ['xzf', src_archive, '-C', meson.current_build_dir()]
-  if host_os == 'windows'
+  if build_machine.system() == 'windows'
     # MSYS2/GNU tar parses "C:/path" as host:path (remote archive);
-    # --force-local keeps it a file. bsdtar (macOS) lacks the option.
+    # --force-local keeps it a file. This is a property of the tar
+    # meson invokes -- i.e. the BUILD machine, not the target: the
+    # paths above come from meson.current_{source,build}_dir(), which
+    # are only Windows-absolute when meson itself runs on Windows. A
+    # Windows cross build hosted on macOS would otherwise hand
+    # --force-local to bsdtar, which lacks the option, and check: true
+    # turns that into a hard configure error.
     tar_args += ['--force-local']
   endif
-  run_command('tar', tar_args, check: true)
+  run_command(find_program('tar'), tar_args, check: true)
 endif
 
 link_args = []
