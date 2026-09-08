@@ -176,7 +176,9 @@ copy to `dist/`), `run-test.sh <secs> <name>` (launch with
 `-monitor tcp:127.0.0.1:4444,server,nowait`, screenshot via `shot.ps1`,
 quit through the monitor; `CFG=test-validation.toml` enables the Khronos
 layer with `VK_LAYER_PATH=C:\msys64\mingw64\bin`). The in-repo
-`scripts/bench-savestate-ab-win.py` (wave 1) is the durable replacement.
+`scripts/bench-savestate-ab-win.py` + `scripts/win/` (cherry-picked from the
+wave-1 branch onto main as pure tooling; parse-checked and quiet-check
+run, but never driven through a full A/B yet) is the durable replacement.
 Never run against `%APPDATA%\xemu\xemu\xemu.toml` — the fixture uses a
 copied HDD image and `-config_path`.
 
