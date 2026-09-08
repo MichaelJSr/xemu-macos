@@ -172,12 +172,12 @@ every item below unless stated; none of it has been built on macOS yet.
   without the layer.
 - **Wave 1 of the audit plan — on branch `windows-wave1-wip`, NOT landed
   here.** The combined wave-1 binary segfaulted ~10 s into Azurik on
-  Windows; bisected the same day to the `vp.c` hunk of the apu/xid
-  commit (dirty marking, volk dispatch and the APU thread RCU
-  registration all excluded by single-variable runs). The branch head
-  reverts only `vp.c` and runs clean at ~24 flips/s; the vp.c bounds
-  fixes must be re-applied hunk by hunk on the Windows box. Every other
-  batch survived those runs. Knob rows above describe the
+  Windows; bisected the same day to one line: the int16 saturation of
+  the envelope-modulated pitch index in `vp.c` (extreme LUT rates run
+  the voice resampler past its source buffer; the original wrap stays).
+  The branch head keeps every other wave-1 change, including the rest of
+  the vp.c bounds fixes and the APU RAM dirty marking, and runs clean at
+  ~27 flips/s on this box. Knob rows above describe the
   intended defaults. Contents: (1) `XEMU_WIN32_DXGI` hatch +
   the two non-Apple compile warnings in `ui/` (present header included
   unconditionally, `g_framebuffer_rect_shader` gated). (2) SPIR-V disk

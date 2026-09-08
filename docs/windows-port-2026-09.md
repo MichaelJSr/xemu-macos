@@ -118,15 +118,15 @@ inside the harness commit `ec31facd7d`) — SPIR-V cache
 hardening, PVIDEO/display reorder, APU/XID bounds, vk hygiene
 (real bounds checks, volkLoadDevice, LRU filter), Windows/GL
 diagnostics, build.sh GCC PGO + `-O3` parity, and the Windows benchmark
-harness + `XEMU_INPUT_PIPE` named-pipe transport. **Bisected (17:51): the segfault is the `vp.c` hunk of the apu/xid
-commit `971292ed48`; with only `vp.c` reverted (now the branch head) the
-whole wave runs at ~24 flips/s.** Evidence and remaining suspects are in
-that revert commit's body. The DXGI hatch, SPIR-V cache, PVIDEO/display,
+harness + `XEMU_INPUT_PIPE` named-pipe transport. **Bisected to a single line: the int16 pitch-index saturation in
+`vp.c` (commit `971292ed48`). The branch head keeps every other vp.c fix
+(voice bounds, unsigned FECV, list-walk guard, RAM dirty marking) and
+reverts only the clamp; it runs clean at ~27 flips/s.** Evidence and the
+suspected resampler read-ahead mechanism are in the branch head's commit
+body; a proper fix bounds the resampler first. The DXGI hatch, SPIR-V cache, PVIDEO/display,
 bounds checks, volk dispatch, diagnostics and build changes all ran
-clean in the surviving runs. Recipe to finish the vp.c hunt on this box:
-`git checkout windows-wave1-wip`, re-apply one `vp.c` hunk of
-`971292ed48` at a time (`git show 971292ed48 -- hw/xbox/mcpx/apu/vp/vp.c`),
-`rebuild-quick.sh`, then `PORT=4456 EXE=../xemu-macos/dist-w1/xemu.exe
+clean in the surviving runs. Recipe for further Windows bisects on this box:
+`git checkout windows-wave1-wip`, change one thing, `rebuild-quick.sh`, then `PORT=4456 EXE=../xemu-macos/dist-w1/xemu.exe
 run-test.sh 55 <name>` and look for a second nsprof interval. Each batch
 commit body carries its gating and intended validation; the escape-hatch
 rows are already in `docs/optimizations.md`.
