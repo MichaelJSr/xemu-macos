@@ -1664,12 +1664,13 @@ static bool is_linear_filter_supported_for_format(PGRAPHVkState *r,
 /*
  * The texture/sampler eviction guards refuse nodes referenced by
  * unretired submissions. If a cache ever fills with only-pinned nodes,
- * lru_lookup's eviction would find no victim (release builds strip
- * lru_evict_one's assert and would then crash) — retire in-flight work
- * first so the LRU tail becomes evictable again. The pools (8192
- * textures / 256 samplers) dwarf any single frame's working set, so
- * this fires approximately never; it exists to make exhaustion
- * impossible rather than merely unlikely.
+ * lru_lookup's eviction would find no victim and lru_evict_one's
+ * assert(found != NULL) would abort — in release too, since QEMU never
+ * builds with NDEBUG (include/qemu/osdep.h #errors on it) — so retire
+ * in-flight work first and make the LRU tail evictable again. The
+ * pools (8192 textures / 256 samplers) dwarf any single frame's
+ * working set, so this fires approximately never; it exists to make
+ * exhaustion impossible rather than merely unlikely.
  */
 static void ensure_cache_headroom(PGRAPHState *pg, Lru *lru)
 {

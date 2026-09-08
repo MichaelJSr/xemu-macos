@@ -44,7 +44,15 @@ static char const *const required_device_extensions[] = {
 #if HAVE_EXTERNAL_MEMORY
 #ifdef WIN32
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-    VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+    /*
+     * VK_KHR_external_semaphore_win32 is deliberately NOT required: the
+     * Windows GL-interop present path exports only memory
+     * (vkGetMemoryWin32HandleKHR + glImportMemoryWin32HandleEXT) and
+     * synchronises on the Vulkan side with fences; nothing in the tree
+     * imports or exports a semaphore handle, so a device lacking it must
+     * not be rejected. It is still enabled when present, see
+     * add_optional_device_extension_names().
+     */
 #else
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
@@ -371,6 +379,17 @@ static void add_optional_device_extension_names(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
 #endif
+
+#if HAVE_EXTERNAL_MEMORY && defined(WIN32)
+    /*
+     * Unused today (see required_device_extensions), but keep enabling it
+     * where the ICD offers it so device creation is byte-identical to the
+     * old required-list behaviour on every device that has it.
+     */
+    (void)add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+#endif
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -476,6 +495,21 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
 
     return true;
 }
+
+#ifndef __APPLE__
+/* XEMU_VK_VOLK_DEVICE=0 restores legacy instance-level (loader trampoline)
+ * dispatch for device-level Vulkan entry points. Read once; called from the
+ * renderer init path only. */
+static bool volk_device_dispatch_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *v = getenv("XEMU_VK_VOLK_DEVICE");
+        enabled = !(v && v[0] == '0');
+    }
+    return enabled != 0;
+}
+#endif
 
 static bool create_logical_device(PGRAPHState *pg, Error **errp)
 {
@@ -662,6 +696,34 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         error_setg(errp, "Failed to create logical device (%d)", result);
         return false;
     }
+
+#ifndef __APPLE__
+    /*
+     * With volkLoadInstance() alone, every device-level entry point
+     * (vkCmdDraw, vkCmdBindDescriptorSets, ...) is the pointer
+     * vkGetInstanceProcAddr returned, i.e. the Vulkan loader's trampoline,
+     * which re-derives the ICD dispatch table from the handle on every call.
+     * volkLoadDevice() replaces the globals with vkGetDeviceProcAddr()
+     * results that enter the ICD directly. Hygiene, not a measured win.
+     * Safe here because the renderer creates exactly one VkDevice; a second
+     * device would need volkLoadDeviceTable() instead. Entry points of
+     * device extensions not enabled above become NULL rather than
+     * trampolines, which no call site can hit: the only extension entry
+     * points the tree calls through volk are vkGetMemoryWin32HandleKHR /
+     * vkGetMemoryFdKHR, whose extensions are required above; volk keeps
+     * VK_EXT_debug_utils in its instance loader, so the label/object-name
+     * calls retain their volkLoadInstance pointers; vkExportMetalObjectsEXT
+     * is resolved separately via vkGetDeviceProcAddr; and VMA builds its own
+     * table with volkLoadDeviceTable() regardless.
+     *
+     * Skipped on Apple, where MoltenVK is linked as the ICD and there is no
+     * loader trampoline to bypass, so the Apple dispatch stays exactly as
+     * volkLoadInstance() left it.
+     */
+    if (volk_device_dispatch_enabled()) {
+        volkLoadDevice(r->device);
+    }
+#endif
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
 

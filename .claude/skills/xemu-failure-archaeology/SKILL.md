@@ -699,17 +699,21 @@ The sampler cache had the same shape with no stamp at all.
 **Fix**: surface-watermark mirror — refuse eviction while
 `submit_time >= retired_submit_count`; samplers gained the stamp;
 `ensure_cache_headroom()` retires slot fences if a pool ever fills
-with pinned nodes (release builds strip `lru_evict_one`'s assert, so
-exhaustion must be impossible, not unlikely); finalize drains fences
-before its cache flushes so a live renderer switch can't leak.
+with pinned nodes (`lru_evict_one`'s plain `assert(found != NULL)` is
+compiled into release too — QEMU `#error`s on `NDEBUG`,
+`include/qemu/osdep.h:311-312` — so exhaustion aborts loudly instead of
+corrupting, and must be impossible rather than unlikely); finalize
+drains fences before its cache flushes so a live renderer switch can't
+leak.
 **Evidence**: F5 +0.19 ± 0.14 (3 pairs), F8 quiet +0.12 ± 1.46
 (sign-mixed) — parity; 291-capture F8 artifact soak zero flagged.
 **Lessons**: (a) when a race family is fixed by enumerating one call
 pattern, audit every OTHER site that destroys GPU-visible resources —
 the family boundary is "CPU-side action on shared GPU-visible state,"
-not "finish callers"; (b) an assert-guarded exhaustion path is a
-release-build crash — pair stricter refusal guards with a forward-
-progress fallback.
+not "finish callers"; (b) an assert-guarded exhaustion path is
+still a crash in release — a plain `assert` is never stripped in this
+tree — so pair stricter refusal guards with a forward-progress
+fallback.
 **Reopen if**: n/a (correctness fix, no tradeoff).
 
 ## 1.22 TB byte-range invalidation filter — instrument-killed, and it answered why upstream removed it

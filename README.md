@@ -101,6 +101,13 @@ nothing links against a Vulkan library at build time.
   notification; test Vulkan on real hardware.
 - **Linux:** the distro `libvulkan` loader + the GPU's ICD.
 
+On Windows and Linux the renderer additionally calls `volkLoadDevice()`
+after creating its `VkDevice` (since 2026-09-08), so `vkCmd*` and
+friends enter the driver's ICD directly instead of going through the
+loader trampoline; `XEMU_VK_VOLK_DEVICE=0` restores the old
+instance-level dispatch. On macOS nothing changes — MoltenVK is the ICD
+and there is no trampoline to bypass.
+
 ### Recommended `xemu.toml`
 
 `~/Library/Application Support/xemu/xemu/xemu.toml`:
@@ -227,6 +234,15 @@ word-aligned truncations of a warm 394-entry cache: none reached the
 driver and none aborted the launch. Deleting the `spirv_cache_v*/`
 directory in the xemu data dir is still a valid manual reset, and
 `XEMU_SPIRV_CACHE=0` bypasses the cache entirely.
+
+**Abort with `<file>:<line>: bounds check failed: <expr>`.** Since
+2026-09-08 the Vulkan renderer's guest-driven bounds checks are real
+checks in every build on every platform (they previously compiled to
+`__builtin_unreachable()` in release, i.e. the out-of-range value was
+used anyway). The message names the failing expression and its source
+line: please report it with the title and the scene — it is a title
+this fork has not seen, not a host problem. There is no runtime switch
+for it on purpose.
 
 **Windows: "Failed to initialize Vulkan renderer" / falls back to
 OpenGL.** The Vulkan loader (`vulkan-1.dll`) comes from the GPU driver;

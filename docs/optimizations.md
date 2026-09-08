@@ -37,6 +37,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by either hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the legacy in-place `.spv` write. Default writes `<hash>.spv.<pid>.tmp` and `g_rename`s it over the entry (same discipline as the pipeline cache), so a kill mid-write cannot leave a torn entry for the next launch to ingest; `.tmp` files orphaned by a crash are swept once per process when the cache directory is first resolved. Landed on main 2026-09-08 |
+| `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` **plus** a full `tlb_flush_all_cpus_synced` **plus** an unconditional jump-cache wipe — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else, plus reuse-pool hit/park/evict counters and a live-coverage audit run on the 33 ms surface throttle tick; `2` also aborts on a coverage violation (`nv2a_vk_assert` is stripped in perf builds, so the check carries its own escalation). No behavior change |
 | `XEMU_SURFACE_CB_REUSE` | `1` (**default off, dark**) parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, so a shape ping-pong stops paying two full guest TLB flushes per swap. Sound because the registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges` and ignores the registered range); the pool evicts oldest with a real remove and drains fully at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. Unset = byte-identical legacy path. Measured 2026-08-04 and killed (−0.66 fps 3/3; Failed table) — stays dark as the record |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
@@ -248,10 +249,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   below; the APU half stays on the branch until the dirty-marking
   default is settled (the commit body calls it hatch-gated, but
   `XEMU_APU_RAM_DIRTY` defaults ON, Apple included).
-  (5) `nv2a_vk_bounds_check` is a real check in every
-  build (was `__builtin_unreachable()` in release); `volkLoadDevice()` on
-  non-Apple; `VK_KHR_external_semaphore_win32` optional; LRU eviction
-  in-use filter restored; `CPUJumpCache` stride static-asserted. (6)
+  (5) **Landed on main 2026-09-08** — see the Vulkan
+  renderer and CPU / JIT sections below: `nv2a_vk_bounds_check` is a
+  real check in every build (was `__builtin_unreachable()` in release)
+  — an ungated behaviour change on **every** platform, macOS included,
+  and so an exception to this section's "macOS behaviour is unchanged
+  unless stated"; `volkLoadDevice()` on non-Apple;
+  `VK_KHR_external_semaphore_win32` optional; LRU eviction in-use filter
+  restored (it matches upstream's `lru_try_evict_one` exactly, and is a
+  no-op while the fork's split-list invariant holds — the 2026-09-08
+  review exonerated it as the Windows crash cause on that ground);
+  `CPUJumpCache` stride static-asserted. (6)
   Diagnostics on Windows/GL — **landed on main 2026-09-08**
   (`eb971f860d`; full record under Testing & tooling): `nsprof` ticks
   under the OpenGL renderer too, `xemu_inv_ticks()` has an x86 `rdtsc`
@@ -300,21 +308,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
 
-These five knobs belong to wave-1 commits that are **not** landed here,
+These four knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
 `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
 which matches nothing at all for any of them. Rows are kept in the knob
 table's shape so each moves back up verbatim as its commit lands —
 `XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
-and `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
-`818fe27828` landed.
+`XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
+`818fe27828` landed, and `XEMU_VK_VOLK_DEVICE` when `736533709e` did.
 
 | Env var | Purpose | Lands with |
 |---|---|---|
 | `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
 | `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
 | `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients | `971292ed48` |
-| `XEMU_VK_VOLK_DEVICE` | Non-Apple only. `=0` restores instance-level volk dispatch through the `vulkan-1.dll` trampoline; default loads device-level entry points | `736533709e` |
 | `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. On the branch that arm defaults to `-Doptimization=3 -Dstack_protector=disabled` and `=0` restores `-O2` + stack protector. **On main that arm is already `-O2`** — `build.sh`'s `win64*\|MINGW*\|MSYS*` release case sets only `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project default `optimization=2` (`meson.build:3`) stands and the knob has nothing to invert. The 2026-09-08 review recommends re-cutting the hunk with `-O3` **opt-in** (`XEMU_WIN_O3=1`): it is the leading suspect for the wave-1 exit-139 and no CI leg covers `-O3` on Windows | `fb42bce22e` (re-cut) |
 
 ### Rendering (correctness fixes)
@@ -492,6 +499,15 @@ and `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
   APU VP doorbell block also joined the audited lockless-MMIO set.
   Two honest kills en route are in the failed-experiments table
   (JIT write-protect caching; the per-depth return-address ring).
+  **2026-09-08:** that emitter forms the entry address with a hardcoded
+  `shli 4` and compares a 64-bit `pc`, neither derived from
+  `offsetof`/`sizeof`, so both layout facts are now pinned by
+  `QEMU_BUILD_BUG_ON` at the top of the emitter
+  (`accel/tcg/xemu-inline-jc.c:50-51`): a future `CPUJumpCache` field
+  addition or a narrower `vaddr` becomes a compile error instead of a
+  probe that silently reads the neighbouring entry and dispatches to the
+  wrong TB. No codegen change — both assertions hold today on this
+  tree.
 - **`can_do_io` bookkeeping elided when icount and replay are off
   (default on, 2026-08-04).** Upstream emits `set_can_do_io(false)` /
   `(true)` into every multi-insn TB body unconditionally, and
@@ -1007,6 +1023,72 @@ and `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
   one is deleted and recompiled. The orchestrator's landing check is to
   force-truncate a cached `.spv` and confirm the entry is deleted and
   regenerated instead of aborting the launch.
+- **Guest-driven bounds checks are real in release, on every platform
+  (2026-09-08).** `nv2a_vk_bounds_check()` used to compile to
+  `if (!(x)) __builtin_unreachable();` whenever `NV2A_VK_PERF_BUILD` was
+  1 — which it always is (`hw/xbox/nv2a/pgraph/vk/debug.h:67`). That is
+  not a stripped check but a licence for the optimizer to assume the
+  bound, so a guest-controlled violation (a surface size out of
+  `NV_PGRAPH` registers exceeding the staging buffer, a register field
+  wider than the table it indexes) became a silent OOB read or a write
+  into host-visible mapped memory instead of a diagnosable failure. It
+  is now one definition in every build (`debug.h:92-98`): a
+  `G_UNLIKELY` never-taken branch plus an `abort()` whose message names
+  the failing expression *and* its `__FILE__:__LINE__`. 28 call sites
+  are affected — 8 in `texture.c`, 9 in `draw.c`, 11 in `surface.c`
+  (`grep -n nv2a_vk_bounds_check hw/xbox/nv2a/pgraph/vk/*.c`) — none on
+  the per-draw hot path, and the cost is exactly what upstream's plain
+  `assert()` costs at the same sites, because QEMU never builds with
+  `NDEBUG` (`include/qemu/osdep.h:311-312` `#error`s on it). This is an
+  **ungated behaviour change on macOS too**: the 2026-09-08 review
+  counts six table-index sites whose register field is wider than the
+  mapped table, where a title that previously read a neighbouring
+  `.rodata` word now terminates loudly instead. Upstream parity was
+  chosen over clamp-and-warn (owner-visible beats silent), and the
+  landing evidence is the multi-title corpus soak
+  (`scripts/boot-smoke-corpus.sh` over Azurik, BF2MC, Conker, KOTOR,
+  Vexx, NevolutionX). There is deliberately **no env hatch** — a
+  guest-driven OOB must not be switchable at runtime; the restore path
+  is compile-time, by editing that single macro. Note
+  `-DNV2A_VK_PERF_BUILD=0` is *not* it: the macro is defined
+  unconditionally in the header, and `nv2a_vk_bounds_check` no longer
+  reads it (only `nv2a_vk_assert`, which stays debug-only by design,
+  does).
+- **volk device-level dispatch on non-Apple (2026-09-08).** With
+  `volkLoadInstance()` alone every device entry point is the Vulkan
+  loader's trampoline, which re-derives the ICD dispatch table from the
+  handle on each call; `volkLoadDevice()` after device creation
+  (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) replaces those globals
+  with `vkGetDeviceProcAddr()` results that enter the ICD directly.
+  Sound because the renderer creates exactly one `VkDevice` (a second
+  would need `volkLoadDeviceTable()`); the only extension entry points
+  the tree calls through volk are `vkGetMemoryWin32HandleKHR` /
+  `vkGetMemoryFdKHR`, whose extensions are required, `VK_EXT_debug_utils`
+  stays on volk's instance loader, `vkExportMetalObjectsEXT` is resolved
+  separately, and VMA builds its own table with `volkLoadDeviceTable()`
+  regardless. Hygiene, not a measured win; `XEMU_VK_VOLK_DEVICE=0`
+  restores instance-level dispatch. **Apple is untouched** — the whole
+  block is `#ifndef __APPLE__`, MoltenVK is the ICD and there is no
+  trampoline to bypass.
+- **`VK_KHR_external_semaphore_win32` is optional, not required
+  (2026-09-08).** The Windows GL-interop present path exports only
+  memory (`vkGetMemoryWin32HandleKHR` + `glImportMemoryWin32HandleEXT`)
+  and synchronises on the Vulkan side with fences; nothing in the tree
+  imports or exports a semaphore handle, so a device lacking the
+  extension must not be rejected. It moved out of
+  `required_device_extensions[]` and into
+  `add_optional_device_extension_names()` (`instance.c:383-392`), which
+  keeps device creation byte-identical on every ICD that does offer it.
+  Windows only.
+- **LRU eviction skips out-of-use nodes again (2026-09-08).**
+  `lru_try_evict_one()` regained the `lru_is_node_in_use()` predicate
+  (`include/qemu/lru.h:156`), which is now semantically identical to
+  upstream xemu's `include/qemu/lru.h`. Upstream needs it because its
+  single `global` list mixes free and in-use nodes; in this fork's
+  split-list layout `global` holds in-use nodes only, so it is a no-op
+  while that invariant holds — which is why the 2026-09-08 review
+  exonerated it as the Windows exit-139 cause. `lru_lookup()` also
+  asserts the node it takes came off `free` (`lru.h:227`).
 
 ### MetalFX + presentation
 
