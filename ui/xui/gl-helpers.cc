@@ -80,8 +80,13 @@ typedef struct DecalShader_
 
 static DecalShader *g_decal_shader,
                    *g_logo_shader,
-                   *g_framebuffer_shader,
-                   *g_framebuffer_rect_shader;
+                   *g_framebuffer_shader;
+#ifdef __APPLE__
+/* Created and read only on the Apple path (the Vulkan renderer hands the UI
+ * a GL_TEXTURE_RECTANGLE); declaring it unconditionally is an unused static
+ * on the MinGW/Linux legs (-Wunused-variable, part of -Wall). */
+static DecalShader *g_framebuffer_rect_shader;
+#endif
 
 GLint Fbo::vp[4];
 GLint Fbo::original_fbo;
