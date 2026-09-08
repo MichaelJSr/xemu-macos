@@ -293,8 +293,11 @@ and **pre-commit the interpretation before running anything**.
 3. **The experiment.** Full reconfigure on both arms:
    (A) wave-1 head with `XEMU_WIN_O3=0 ./build.sh -j8` (`-O2`, stack
    protector back), ≥6 runs; (B) main with `-Doptimization=3
-   -Dstack_protector=disabled`, ≥6 runs. At the observed ~5/6 failure
-   rate, 6 clean runs give P < 1e-4. Interpretation, committed now:
+   -Dstack_protector=disabled`, ≥6 runs — since the 2026-09-08 re-cut
+   landed on main that arm is just `XEMU_WIN_O3=1 ./build.sh -j8`
+   (main's default is `-O2` with the probed stack protector, so the
+   knob's polarity is inverted from the branch's). At the observed ~5/6
+   failure rate, 6 clean runs give P < 1e-4. Interpretation, committed now:
    **A clean and B crashing convicts the flags** — then keep `-O3`
    opt-in and hunt the latent bug from the dump, because a real bug
    still exists. **A still crashing exonerates the flags** — the

@@ -246,16 +246,22 @@ XEMU_PGO=use ./build.sh           # merges .profraw -> default.profdata (via `xc
                                    # on macOS) if not already merged, then -fprofile-use=...
 ```
 
-Both stages apply to `sys_cflags`/`sys_ldflags` only (clang/LLVM), and LTO
-stays enabled throughout so cross-translation-unit inlining still happens
-under profile guidance. `XEMU_PGO=use` hard-fails if `$XEMU_PGO_DIR` has
-neither `.profraw` files nor an already-merged `default.profdata`, and
-re-merges whenever any `.profraw` is newer than the profdata (the
-retrain trap). Since 2026-07-05 all three platform branches (Darwin,
-Linux, MSYS2) share one `setup_pgo()` — Darwin sets
-`profdata_prefix="xcrun "` — which also fixed the MSYS2 branch's
-divergent stale-merge behavior (it previously re-merged only when
-profdata was absent).
+Both stages apply to `sys_cflags`/`sys_ldflags` only, and on Darwin and
+Linux LTO stays enabled throughout so cross-translation-unit inlining
+still happens under profile guidance (both Windows arms withhold LTO, so
+a Windows PGO build is per-translation-unit). The block quoted above is
+the clang/LLVM mechanism; since 2026-09-08 `setup_pgo()` first calls
+`pgo_compiler_family()` and takes a gcov `.gcda` arm instead when the
+compiler is GCC (§6.1). On the clang arm `XEMU_PGO=use` hard-fails if
+`$XEMU_PGO_DIR` has neither `.profraw` files nor an already-merged
+`default.profdata`, and re-merges whenever any `.profraw` is newer than
+the profdata (the retrain trap); on the GCC arm it hard-fails when the
+directory holds no `.gcda`. Each arm names the other's artifacts when it
+finds them, because neither can read them. Since 2026-07-05 all three
+platform branches (Darwin, Linux, MSYS2) share one `setup_pgo()` —
+Darwin sets `profdata_prefix="xcrun "` — which also fixed the MSYS2
+branch's divergent stale-merge behavior (it previously re-merged only
+when profdata was absent).
 
 ### 3.7 `XEMU_VIS` / `XEMU_STRIP` (binary size, opt-in, off by default)
 
@@ -543,18 +549,25 @@ Two things that differ from the macOS arm, verified 2026-09-08:
   `build.sh` has a `win64*|MINGW*|MSYS*` arm that sets only
   `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project
   default `optimization=2` (`meson.build:3`) stands — LTO *and* `-O3`
-  are both off there, unlike §3.2's Darwin/Linux flags. An `-O3` arm
-  behind `XEMU_WIN_O3` exists on branch `windows-wave1-wip` and is not
-  landed; the 2026-09-08 review wants it re-cut as opt-in, because it is
-  the leading suspect for that branch's Windows exit-139 and no CI leg
-  builds Windows at `-O3`.
-- **`XEMU_PGO` needs clang.** The shared `setup_pgo()` (§3.6) emits
-  `-fprofile-generate=<dir>` / `-fprofile-use=<dir>/default.profdata`
-  and shells out to `llvm-profdata merge` — the clang spelling. MSYS2's
-  default MINGW64 toolchain is GCC, which wants a `.gcda` directory and
-  has no `llvm-profdata`, so a PGO build there needs the clang packages
-  (`mingw-w64-x86_64-clang`, `-compiler-rt`) selected as `CC`/`CXX`. A
-  GCC arm for `setup_pgo` also lives unlanded on `windows-wave1-wip`.
+  are both off there, unlike §3.2's Darwin/Linux flags. Since
+  2026-09-08 `XEMU_WIN_O3=1` opts the *native* arm into
+  `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:697-707`);
+  it is off by default and uncovered by CI because the 2026-09-08
+  review names that flip as the leading suspect for the wave-1 Windows
+  exit-139. `win64-cross` ignores the knob.
+- **`XEMU_PGO` picks its mechanism from the compiler (since
+  2026-09-08).** `setup_pgo()` (§3.6) used to emit only the clang
+  spelling (`-fprofile-use=<dir>/default.profdata` + `llvm-profdata
+  merge`), so on MSYS2's default GCC toolchain `XEMU_PGO=use` consumed
+  nothing and built unprofiled while reporting success.
+  `pgo_compiler_family()` (`build.sh:110`) now probes `cc -dM -E -` for
+  `__clang__` and the GCC arm uses `-fprofile-generate`
+  `-fprofile-update=atomic` / `-fprofile-use=<dir>` with a `.gcda`
+  presence check. The native-Windows arm also normalises the profile
+  dir with `cygpath -m` first, or libgcov writes the `.gcda` under
+  `<drive>:\c\...` and discovery never finds them. Untested on Windows
+  so far; the committed `pgo/default.profdata` is a clang profile that
+  the GCC arm refuses by name.
 
 ### 6.2 Cross-compile (Docker)
 

@@ -89,7 +89,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 | `XEMU_APU_RAM_DIRTY` | **Landed 2026-09-08; the default is per-platform.** The APU's fast voice-register stores write `d->ram_ptr` directly and so skipped `invalidate_and_set_dirty()`; with the knob on they also mark the written range for the `DIRTY_CLIENTS_NOCODE` clients (VGA, MIGRATION, NV2A, NV2A_TEX). **Default off on Apple**, which is the platform whose audio path this fork tuned and whose shipped behaviour is the unmarked store, because the marking's cost here has never been measured (an RCU read lock — two real `smp_mb()`s, since this tree builds without `CONFIG_MEMBARRIER` — plus up to four contended bitmap ORs, per voice-register store, from every voice worker); **default on elsewhere**, where nothing was measured against the skip. `=1` opts in on Apple, `=0` opts out elsewhere; read once in `mcpx_apu_vp_init` |
 
-### Build-time and harness knobs added 2026-08-04
+### Build-time and harness knobs
 
 Not runtime env vars — these are read by `build.sh` at configure time or
 by the bench harness, and are catalogued here because each is the escape
@@ -99,7 +99,8 @@ table carries the user-facing subset.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_HARDENING` | **Default `1` = upstream's `-fzero-call-used-regs=used-gpr` register zeroing is KEPT.** `XEMU_HARDENING=0` appends `-fzero-call-used-regs=skip` to the macOS `sys_cflags` (clang is last-flag-wins over meson's global), which is the experimental skip arm. **Note the inversion**: the knob was built expecting skip to become the default, and the 2026-08-04 A/B killed that promotion (Failed table), so `0` is now the opt-in experiment rather than the shipped shape. macOS only (`build.sh:703-725`, as of 2026-08-04 — that file grew ~175 lines this wave, so re-grep rather than trusting the anchor); either choice is echoed at configure time; `-ftrivial-auto-var-init=zero` is untouched in both cases and Windows/Linux flag assembly is bit-identical. Security note: this is ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary |
+| `XEMU_HARDENING` | **Default `1` = upstream's `-fzero-call-used-regs=used-gpr` register zeroing is KEPT.** `XEMU_HARDENING=0` appends `-fzero-call-used-regs=skip` to whatever `sys_cflags` the platform arm left behind (both clang and GCC take the last `-fzero-call-used-regs=` on the line, and extra-cflags land after meson's global flags), which is the experimental skip arm. **Note the inversion**: the knob was built expecting skip to become the default, and the 2026-08-04 A/B killed that promotion (Failed table), so `0` is now the opt-in experiment rather than the shipped shape. **Every arm since 2026-09-08** (`build.sh:1028-1034`; it used to sit inside the Darwin arm and was macOS-only, so an x86-64 retest could not be run — the block moved verbatim to just after the platform `case`, which is also why it now appends *after* the arm set `sys_cflags`; anchors move, re-grep rather than trusting them). Default `1` is byte-identical on every platform — the block only echoes — so the only new behaviour is that `XEMU_HARDENING=0` now reaches Linux and both Windows arms. Either choice is echoed at configure time; `-ftrivial-auto-var-init=zero` is untouched in both cases. Security note: this is ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary |
+| `XEMU_WIN_O3` | **Added 2026-09-08. Default off.** `=1` opts the *native* MSYS2/MinGW release into `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:697-707`), the pair the Darwin/Linux arm already uses. Unset, both Windows arms keep meson's project default `optimization=2` (`meson.build:3`) and the probed `-fstack-protector-strong` — exactly what every CI Windows leg and every previous native build shipped. **The polarity is deliberate**: the 2026-09-08 review names this flip as the differential behind the wave-1 exit-139 on the Windows box (it reaches every translation unit of both renderers with every runtime hatch unset), and no CI leg builds it. `-Dstack_protector=disabled` is not cosmetic on mingw: `meson.build:512-536` probes by compiling *and linking* a test program with `-fstack-protector-strong`, which a stock MSYS2 MINGW64 toolchain passes, so the option really does strip the canary from the whole tree. Ignored (with a message) on `win64-cross`, which builds the release artifacts |
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only). With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*` / `helper_*` / `tlb_*` / `tcg_*` / `pgraph_*`) into a build failure instead of a loud warning (`build.sh:227-230`). Deliberately NOT enabled in CI: flip it on once the gate is proven quiet on a freshly-retrained tree |
 | `XEMU_PGO_RETRAIN_REF` | Unset = auto-derived. The commit the PGO staleness *age* is measured from; auto-derivation order is the last commit touching `pgo/`, else the commit that was HEAD at the newest `.profdata`/`.profraw` mtime (`build.sh:190-191`). Degrades to `unknown`/`n/a` with no error on a source tarball with no `.git` |
 | `XEMU_BENCH_ISOLATE_CACHES` | `0` (warm-shared, the pre-2026-08-04 behavior). `1` — equivalently `--isolate-caches` — plants the scratch config as a portable-mode marker inside the cloned bundle's `Contents/Resources`, moving xemu's data base path (`spirv_cache_v*/`, `pipeline_cache.bin`) into the disposable work dir, so caches start cold at batch start, warm during the warmup run, and are shared identically by both arms (`scripts/bench-savestate-ab.sh:101,213`). Recorded as `cache_isolation` in `meta.json` / `receipt.json`. Default unchanged so existing baselines stay comparable |
@@ -198,8 +199,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   later failed 5/5 (both renderers, profiler on/off) while the
   main-branch binary passed as a control. The 2026-09-08 review's
   verdict is that the differential is the **build flags**, not a
-  source hunk: `fb42bce22e` flips the native MSYS2 release arm from
-  `-O2` to `-O3 -Dstack_protector=disabled`, every crashing binary was
+  source hunk: `fb42bce22e` flipped the native MSYS2 release arm from
+  `-O2` to `-O3 -Dstack_protector=disabled` (the re-cut that landed on
+  main 2026-09-08 keeps that flip **opt-in** behind `XEMU_WIN_O3=1`, so
+  main's native default is still `-O2` with the probed stack
+  protector), every crashing binary was
   produced by an incremental `ninja` rebuild that keeps those
   configure-time flags, and the only passing binary (the control) was
   configured by main's `build.sh` at `-O2`; the runtime hatches that
@@ -279,11 +283,16 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   arm, `stderr` is flushed after heartbeat/nsprof prints on Windows,
   `NV2A_STRIP_PROFILE_COUNTERS` tracks the debug build, and
   `XEMU_SUBPAGE_FAST=1` warns once on a host with no emitter. The
-  macOS arm64 release path is unchanged. (7) build.sh:
-  GCC PGO arm (`-fprofile-generate/-use`, gcda discovery), `-O3` parity
-  on the native Windows release arm, `XEMU_HARDENING` reachable on all
-  arms, tar `--force-local` keyed on the build machine (that last hunk
-  landed on main 2026-09-08 — see Build + packaging). (8) Windows
+  macOS arm64 release path is unchanged. (7) build.sh — **landed on main
+  2026-09-08, re-cut** (see Build + packaging): GCC PGO arm
+  (`-fprofile-generate`/`-fprofile-use`, `.gcda` discovery) with the
+  `cygpath -m` profile-dir fix the branch version lacked, and
+  `XEMU_HARDENING` reachable on all arms. The `-O3` hunk was **inverted**
+  before landing — the branch made `-Doptimization=3
+  -Dstack_protector=disabled` the native-Windows default, main makes it
+  opt-in behind `XEMU_WIN_O3=1`, because that flip is the review's
+  crash differential. The tar `--force-local` rekey landed separately in
+  `eeb992dcd2`. (8) Windows
   benchmark harness `scripts/bench-savestate-ab-win.py` + `scripts/win/`
   (TCP monitor, PowerShell capture, receipts) — **landed on main
   `add066354f`** as tooling-only, and main has since moved ahead of the
@@ -321,21 +330,22 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
 
-These three knobs belong to wave-1 commits that are **not** landed here,
+These two knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
 `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
-which matches nothing at all for any of them. Rows are kept in the knob
+which matches nothing at all for either. Rows are kept in the knob
 table's shape so each moves back up verbatim as its commit lands —
 `XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
 `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
-`818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did, and
-`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48`.
+`818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did,
+`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48`, and
+`XEMU_WIN_O3` (to the build-knob table, with inverted polarity) when
+`fb42bce22e` was re-cut and landed.
 
 | Env var | Purpose | Lands with |
 |---|---|---|
 | `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
 | `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
-| `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. On the branch that arm defaults to `-Doptimization=3 -Dstack_protector=disabled` and `=0` restores `-O2` + stack protector. **On main that arm is already `-O2`** — `build.sh`'s `win64*\|MINGW*\|MSYS*` release case sets only `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project default `optimization=2` (`meson.build:3`) stands and the knob has nothing to invert. The 2026-09-08 review recommends re-cutting the hunk with `-O3` **opt-in** (`XEMU_WIN_O3=1`): it is the leading suspect for the wave-1 exit-139 and no CI leg covers `-O3` on Windows | `fb42bce22e` (re-cut) |
 
 ### Rendering (correctness fixes)
 
@@ -1755,6 +1765,48 @@ table's shape so each moves back up verbatim as its commit lands —
   unchanged (the two predicates agree there). Matches the wave-1 hunk
   in `fb42bce22e`; that commit's second hunk (`run_command(tar, ...)` →
   `find_program('tar')`) was deliberately left on the branch.
+- **GCC PGO works on native Windows; the `-O3` flip is opt-in
+  (2026-09-08).** Re-cut of the wave-1 build commit `fb42bce22e`. The
+  MSYS2 arm inherited a clang/`llvm-profdata`-only `setup_pgo` but never
+  selects clang, so on a stock MINGW64 install (`cc` = GCC)
+  `XEMU_PGO=use` handed GCC the committed *clang* `pgo/default.profdata`,
+  found no `.gcda`, and built with no profile at all while announcing
+  success. `pgo_compiler_family()` now asks the compiler itself
+  (`cc -dM -E -`, testing `__clang__` — not piped into `grep -q`, which
+  under `set -o pipefail` can SIGPIPE the compiler and misclassify a
+  clang toolchain), and the GCC arm uses `-fprofile-generate` +
+  `-fprofile-update=atomic` (xemu's counters are incremented from the
+  vCPU, PFIFO, audio and vblank threads; GCC's default non-atomic update
+  loses them) / `-fprofile-use` + `-fprofile-correction`
+  `-fprofile-partial-training` `-Wno-missing-profile`
+  `-Wno-coverage-mismatch`, with a `.gcda` presence check that names the
+  wrong-family profile instead of silently building unprofiled. Both
+  families' "wrong artifacts in the profile dir" cases now say so, and
+  the clang-worded staleness parser reports "not implemented" on GCC
+  rather than a 0/0 that reads as clean. Native-Windows-specific fix the
+  branch version did not have: `cc`/`gcc` there are native Windows
+  binaries, so a POSIX `${PWD}` profile dir (`/c/Users/...`) is baked
+  into libgcov verbatim and the training run writes its `.gcda` under
+  `<drive>:\c\Users\...` while discovery searches the real directory —
+  the arm now normalises with `cygpath -m` before `setup_pgo`, the same
+  way `--prefix` already did. `XEMU_HARDENING` moved out of the Darwin
+  arm to just after the platform `case`, so the register-zeroing A/B is
+  finally runnable on Linux and both Windows arms; the block moved
+  verbatim and at the default (`1`) it only echoes, so no arm's flags
+  change. **The branch's `-O2` → `-O3 -Dstack_protector=disabled` flip
+  of the native Windows release was inverted to opt-in
+  (`XEMU_WIN_O3=1`)**: the 2026-09-08 review names it as the differential
+  behind the wave-1 exit-139, no CI leg builds it, and the branch comment
+  claiming `-Dstack_protector=disabled` is a mingw no-op was wrong —
+  `meson.build:512-536` probes by compiling *and* linking with
+  `-fstack-protector-strong`, which stock MSYS2 MINGW64 passes, so the
+  option really strips the canary tree-wide. Simulated across
+  {Darwin, Linux, win64-cross, MINGW, MSYS, CYGWIN} × {unset, 0, 1}: the
+  only configuration whose `opts` differ from main is native Windows
+  with `XEMU_WIN_O3=1`; `win64-cross` ignores the knob by construction
+  (with a message) so the release-artifact legs cannot pick it up. Not
+  yet built on Windows — the GCC PGO arm and the `cygpath` fix are
+  unexercised until the next session on the box.
 
 ### MoltenVK runtime config
 

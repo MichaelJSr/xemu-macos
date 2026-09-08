@@ -80,28 +80,102 @@ vendor_moltenvk() {
     rm -rf "${tmp}"
 }
 
-# --- PGO (all clang platforms) ---
+# --- PGO (clang and GCC) ---
 # Optional two-stage flow:
 #   XEMU_PGO=generate ./build.sh   # build with -fprofile-generate
-#   # run target games so .profraw files accumulate in the profile dir
+#   # run target games so profiles accumulate in the profile dir
 #   XEMU_PGO=use ./build.sh        # rebuild with -fprofile-use
 # Profile dir defaults to ${PWD}/pgo; override with XEMU_PGO_DIR.
-# clang/LLVM only (merge via llvm-profdata; ${profdata_prefix} is
-# "xcrun " on Darwin, empty elsewhere — expanded unquoted so the
-# prefix word-splits). GCC PGO is a different mechanism and is not
-# wired. LTO stays enabled so profile guidance crosses translation
-# units.
+#
+# Two mechanisms, selected by the family of the compiler this build
+# will actually use. They must never be mixed: each silently ignores
+# the other's artifacts.
+#   clang/LLVM: writes *.profraw, merged into default.profdata with
+#     llvm-profdata (${profdata_prefix} is "xcrun " on Darwin, empty
+#     elsewhere — expanded unquoted so the prefix word-splits).
+#   GCC (stock MSYS2 MINGW64, distro Linux): writes *.gcda that
+#     -fprofile-use reads straight out of the directory — no merge
+#     step, no llvm-profdata. GCC mangles the .gcda name from the
+#     object's absolute path, so the generate and use stages must
+#     build in the same build/ dir (this script always does).
+# The Windows arm never sets CC, so "cc" there is GCC on a stock
+# MSYS2 install; before this probe existed, XEMU_PGO=use handed the
+# committed macOS default.profdata to GCC, which found no matching
+# .gcda and built with no profile at all while announcing success.
+# LTO stays enabled wherever the platform arm enables it (Darwin
+# and Linux), so profile guidance crosses translation units
+# there; both Windows arms withhold LTO for the reasons in the
+# release-flags case below, so a Windows PGO build is
+# per-translation-unit only.
+pgo_compiler_family() {
+    # Ask the compiler itself. __clang__ is predefined only by clang,
+    # while clang also predefines __GNUC__ — so a __GNUC__ test would
+    # misclassify it. ${CC:-cc} is unquoted so a CC with flags (e.g.
+    # "cc -m64") still works. Deliberately NOT piped into grep: under
+    # 'set -o pipefail' a grep -q that exits on the first match can
+    # SIGPIPE the compiler mid-output and turn a clang toolchain into
+    # a "gcc" verdict (same class of trap as the archaeology 8.4/8.6
+    # CI reddenings).
+    local defs
+    defs=$(${CC:-cc} -dM -E - </dev/null 2>/dev/null || true)
+    case "${defs}" in
+    *__clang__*) echo clang ;;
+    *)           echo gcc ;;
+    esac
+}
+
 setup_pgo() {
     [ -n "${XEMU_PGO}" ] || return 0
     local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
+    local family
+    family="$(pgo_compiler_family)"
     mkdir -p "${pgo_dir}"
     case "${XEMU_PGO}" in
     generate)
-        sys_cflags="${sys_cflags} -fprofile-generate=${pgo_dir}"
-        sys_ldflags="${sys_ldflags:-} -fprofile-generate=${pgo_dir}"
-        echo "PGO: profile-generate build; profiles will land in ${pgo_dir}"
+        local gen_flags="-fprofile-generate=${pgo_dir}"
+        if [ "${family}" = "gcc" ]; then
+            # xemu is heavily multithreaded (vCPU, PFIFO, audio,
+            # vblank threads), and GCC's default counter update is
+            # non-atomic: concurrent increments are lost and the
+            # profile degrades into noise. clang's IR-PGO counters
+            # need no such flag.
+            gen_flags="${gen_flags} -fprofile-update=atomic"
+        fi
+        sys_cflags="${sys_cflags} ${gen_flags}"
+        sys_ldflags="${sys_ldflags:-} ${gen_flags}"
+        echo "PGO: profile-generate build (${family}); profiles will land in ${pgo_dir}"
         ;;
     use)
+        if [ "${family}" = "gcc" ]; then
+            local have_gcda
+            have_gcda=$(find "${pgo_dir}" -name '*.gcda' \
+                        -print -quit 2>/dev/null || true)
+            if [ -z "${have_gcda}" ]; then
+                echo "PGO: no GCC profiles (*.gcda) in ${pgo_dir}; run XEMU_PGO=generate with this toolchain first."
+                if [ -f "${pgo_dir}/default.profdata" ]; then
+                    # The committed profile is a clang IR profile from
+                    # the macOS training run. GCC cannot read it, so
+                    # say so rather than building unprofiled and
+                    # calling it a PGO build.
+                    echo "PGO: ignoring ${pgo_dir}/default.profdata — that is a clang/LLVM profile and GCC cannot read it."
+                fi
+                exit 1
+            fi
+            # -fprofile-correction tolerates the counter races that
+            # survive a threaded run; -fprofile-partial-training keeps
+            # never-executed functions optimized for speed instead of
+            # size (a game-run profile only covers part of the tree);
+            # the two -Wno- flags make sources that moved since the
+            # training run degrade to unprofiled the way clang does
+            # (coverage-mismatch is an error by default in GCC).
+            local use_flags="-fprofile-use=${pgo_dir} -fprofile-correction"
+            use_flags="${use_flags} -fprofile-partial-training"
+            use_flags="${use_flags} -Wno-missing-profile -Wno-coverage-mismatch"
+            sys_cflags="${sys_cflags} ${use_flags}"
+            sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}"
+            echo "PGO: profile-use build (gcc) reading *.gcda from ${pgo_dir}"
+            return 0
+        fi
         # Re-merge when any .profraw is newer than the existing
         # profdata — otherwise a retrain silently loses to a stale
         # committed default.profdata (bit us 2026-07-04: the first
@@ -116,7 +190,15 @@ setup_pgo() {
                 -output="${pgo_dir}/default.profdata" "${pgo_dir}"/*.profraw
         fi
         if [ ! -f "${pgo_dir}/default.profdata" ]; then
-            echo "PGO: no profiles found in ${pgo_dir}"
+            echo "PGO: no clang profiles found in ${pgo_dir}"
+            local gcda
+            gcda=$(find "${pgo_dir}" -name '*.gcda' \
+                   -print -quit 2>/dev/null || true)
+            if [ -n "${gcda}" ]; then
+                # Wrong family, not an empty dir: the profile in there
+                # was produced by a GCC build and clang cannot read it.
+                echo "PGO: ${pgo_dir} holds GCC *.gcda profiles; re-run XEMU_PGO=generate with this clang toolchain."
+            fi
             exit 1
         fi
         sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
@@ -147,6 +229,17 @@ setup_pgo() {
 check_pgo_staleness() {
     [ "${XEMU_PGO:-}" = "use" ] || return 0
     [ -f build.log ] || return 0
+
+    # The diagnostics matched below are clang's wording. GCC reports
+    # drift as "profile count data file not found" / "the control flow
+    # of function ... does not match its profile data", so this parser
+    # would score a GCC build 0/0 and that zero would read as a clean
+    # profile. Say what it is instead of reporting a number that is
+    # not measured.
+    if [ "$(pgo_compiler_family)" = "gcc" ]; then
+        echo "PGO staleness: GCC profile — report not implemented (clang diagnostics only); check the build log for -Wcoverage-mismatch / -Wmissing-profile."
+        return 0
+    fi
 
     local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
     local summary mism hotmism unpro hotunpro hotnames
@@ -247,6 +340,10 @@ first = None
 for entry in json.load(open(sys.argv[1])):
     last = None
     for tok in entry.get("command", "").split():
+        # meson writes every argument quoted on Windows ("\"cc\" \"-m64\" ..."),
+        # so strip the literal quotes before matching or the scan finds
+        # nothing there and the 0/0 below reads as a pass.
+        tok = tok.strip('"')
         if tok.startswith("-fzero-call-used-regs="):
             last = tok
     if last is None:
@@ -261,6 +358,12 @@ if bad:
     print("*** Warning: -fzero-call-used-regs=skip does not win in %d of %d "
           "compile lines (first: %s keeps %s); register zeroing is still "
           "active there." % (bad, ok + bad, first[0], first[1]))
+elif ok == 0:
+    # No compile line mentions the flag at all: the override did not
+    # reach the compiler (or the database is not the one just built).
+    # That is a failed check, not a clean one.
+    print("*** Warning: no compile line carries -fzero-call-used-regs at all; "
+          "the XEMU_HARDENING=0 override did not take.")
 else:
     print("Flag check: -fzero-call-used-regs=skip wins in %d compile lines." % ok)
 PYEOF
@@ -561,6 +664,47 @@ else
         # forced here, the arm64 release link failed exactly that
         # way. The LTO-independent knobs are kept.
         opts="$opts -Dqom_cast_debug=false -Dtrace_backends=nop"
+        # Experiment, opt-in only (XEMU_WIN_O3=1): raise the NATIVE
+        # MSYS2/MinGW release to the same -O3 + disabled stack
+        # protector pair the Darwin/Linux arm uses. Both Windows arms
+        # otherwise stay at meson's project default (-O2) with the
+        # probed stack protector, which is what every CI Windows leg
+        # and every previous native build shipped.
+        #
+        # This stays opt-in because the 2026-09-08 wave-1 review names
+        # exactly this flip as the differential behind the
+        # intermittent exit-139 on the Windows box: it is the only
+        # change that reaches every translation unit of both renderers
+        # with every runtime hatch unset, and no CI leg builds this
+        # configuration. Settle it on the box with a full reconfigure
+        # (not rebuild-quick.sh, which keeps the old configure flags)
+        # and >=6 runs per arm before considering a default change.
+        #
+        # -Dstack_protector=disabled is NOT cosmetic here, contrary to
+        # what this comment said when the flip was first written:
+        # meson.build's probe is a real compile+link of a test program
+        # with -fstack-protector-strong, and mingw-w64 supplies the SSP
+        # runtime, so a stock MSYS2 MINGW64 toolchain passes it and
+        # gets -fstack-protector-strong on every object. Disabling the
+        # option therefore strips the canary from the whole tree,
+        # removing the guard that turns a stack overrun into a
+        # controlled abort. (Confirm per-toolchain with
+        # `grep -c fstack-protector build/compile_commands.json`.)
+        #
+        # The cross arm is excluded deliberately: it builds the
+        # release artifacts and the elision noted above is
+        # optimization-sensitive.
+        if [ "${XEMU_WIN_O3:-0}" = "1" ]; then
+            case "$platform" in
+            win64-cross)
+                echo "Windows: XEMU_WIN_O3 ignored on the win64-cross arm (release-artifact leg stays at the default optimization)"
+                ;;
+            *)
+                opts="$opts -Doptimization=3 -Dstack_protector=disabled"
+                echo "Windows: experimental -O3 build with the stack protector disabled (XEMU_WIN_O3=1; not covered by CI)"
+                ;;
+            esac
+        fi
         ;;
     *)
         opts="$opts -Db_lto=true -Db_lto_mode=thin -Db_thinlto_cache=true -Db_thinlto_cache_dir=.lto-cache"
@@ -757,30 +901,6 @@ case "$platform" in # Adjust compilation options based on platform
             sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast"
         fi
 
-        # Upstream's hardening block (meson.build) applies
-        # -fzero-call-used-regs=used-gpr globally with no opt-out, so
-        # every function return re-zeroes its used GPRs: 3.4-3.8% of
-        # this fork's dynamic compiled-instruction stream, and it also
-        # defeats tail-call optimization (bl+ret where a b would do).
-        # xemu runs a W^X JIT and is not a sandbox boundary, so the
-        # ROP-gadget hardening is not worth the interpreter cost.
-        # clang is last-flag-wins and extra-cflags land after meson's
-        # global flags, so appending '=skip' here disables it;
-        # check_zero_call_regs_order verifies that against the compile
-        # database after the build. -ftrivial-auto-var-init=zero is
-        # deliberately left alone. Default keeps upstream's register
-        # zeroing: the 2026-08-04 5-pair A/B read mean +0.52 fps for
-        # skip but sign-mixed 3+/2- — below the pre-registered evidence
-        # bar (see the optimizations.md Failed row). XEMU_HARDENING=0
-        # opts into the skip arm for retests.
-        if [ "${XEMU_HARDENING:-1}" = "0" ]; then
-            sys_cflags="${sys_cflags:-}${sys_cflags:+ }-fzero-call-used-regs=skip"
-            zero_call_regs_override=1
-            echo "Hardening: -fzero-call-used-regs disabled (XEMU_HARDENING=0 experimental arm)"
-        else
-            echo "Hardening: upstream -fzero-call-used-regs=used-gpr kept (default)"
-        fi
-
         profdata_prefix="xcrun "
         setup_pgo
 
@@ -840,10 +960,28 @@ case "$platform" in # Adjust compilation options based on platform
         if ! echo "$@" | grep -q -- '--prefix' && command -v cygpath >/dev/null 2>&1; then
           opts="$opts --prefix=$(cygpath -m /qemu)"
         fi
-        # PGO: same two-stage flow as Darwin/Linux (MSYS2 clang accepts
-        # the same flags; llvm-profdata without the xcrun prefix). The
-        # shared setup_pgo also fixes this branch's former stale-merge
-        # behavior (it only re-merged when profdata was absent).
+        # PGO: same two-stage flow as Darwin/Linux. This arm does not
+        # set CC, so the family is whatever "cc" resolves to in the
+        # MSYS2 shell — GCC on a stock MINGW64 install, clang if the
+        # user put one first on PATH. setup_pgo probes that and picks
+        # the matching mechanism (.gcda vs llvm-profdata-merged
+        # .profraw); profdata_prefix is only consulted on the clang
+        # arm, and needs no xcrun here.
+        #
+        # The profile directory has to be spelled Windows-absolute for
+        # the same reason --prefix does above: cc/gcc here are native
+        # Windows binaries, so -fprofile-generate=/c/Users/... is baked
+        # into libgcov verbatim and the running xemu.exe writes its
+        # *.gcda under <current drive>:\c\Users\..., while setup_pgo's
+        # discovery (and -fprofile-use) look in the real directory and
+        # find nothing — so an XEMU_PGO=use build dies on setup_pgo's
+        # "no profiles" check even though the training run really did
+        # write them. cygpath -m is purely textual, so it works before
+        # the directory exists, and the clang arm (whose *.profraw
+        # land the same way) accepts the same spelling.
+        if command -v cygpath >/dev/null 2>&1; then
+            XEMU_PGO_DIR="$(cygpath -m "${XEMU_PGO_DIR:-${PWD}/pgo}")"
+        fi
         profdata_prefix=""
         setup_pgo
         postbuild='package_windows' # set the above function to be called after build
@@ -862,6 +1000,38 @@ case "$platform" in # Adjust compilation options based on platform
         exit 1
         ;;
 esac
+
+# Upstream's hardening block (meson.build) applies
+# -fzero-call-used-regs=used-gpr globally with no opt-out, so every
+# function return re-zeroes its used GPRs: 3.4-3.8% of this fork's
+# dynamic compiled-instruction stream on clang/arm64, where it also
+# defeats tail-call optimization (bl+ret where a b would do; GCC
+# x86-64 does keep its sibcalls under =used-gpr, so expect a
+# different cost profile there). xemu runs a W^X JIT and is not a
+# sandbox boundary, so the ROP-gadget hardening is not worth the
+# interpreter cost. Both clang and GCC take the last
+# -fzero-call-used-regs= on the command line and extra-cflags land
+# after meson's global flags, so appending '=skip' here disables it;
+# check_zero_call_regs_order verifies that against the compile
+# database after the build. -ftrivial-auto-var-init=zero is
+# deliberately left alone. Default keeps upstream's register zeroing:
+# the 2026-08-04 5-pair macOS A/B read mean +0.52 fps for skip but
+# sign-mixed 3+/2- — below the pre-registered evidence bar (see the
+# optimizations.md Failed row). XEMU_HARDENING=0 opts into the skip
+# arm for retests.
+#
+# This sits after the platform case (it used to live inside the
+# Darwin arm) so the knob is reachable on Linux and both Windows
+# arms too — an x86-64 retest was previously impossible to run. It
+# appends to whichever sys_cflags the platform arm left behind; the
+# ${sys_cflags:+ } spelling handles the unset case.
+if [ "${XEMU_HARDENING:-1}" = "0" ]; then
+    sys_cflags="${sys_cflags:-}${sys_cflags:+ }-fzero-call-used-regs=skip"
+    zero_call_regs_override=1
+    echo "Hardening: -fzero-call-used-regs disabled (XEMU_HARDENING=0 experimental arm)"
+else
+    echo "Hardening: upstream -fzero-call-used-regs=used-gpr kept (default)"
+fi
 
 # Warn (never fail) if a subproject checkout has drifted from its wrap.
 check_wrap_drift || true

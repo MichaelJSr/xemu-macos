@@ -348,11 +348,12 @@ build.sh edit).
 | Knob | Default | Effect | Where |
 |---|---|---|---|
 | `XEMU_ARM_CPU` | auto | Override `-mcpu=`; otherwise auto-detect `apple-mN` from `sysctl machdep.cpu.brand_string` with a clang-acceptance walk-down, fallback `apple-m1`. Since 2026-08-04 a detected `-mcpu` **above** `apple-m1` prints a loud redistribution warning, and macOS CI pins `apple-m1` so a runner-silicon refresh cannot silently raise the shipped ISA floor | `build.sh:626-700` |
-| `XEMU_PGO` | unset | `generate` -> `-fprofile-generate`; run games; `use` -> merge `.profraw` via `llvm-profdata` and rebuild `-fprofile-use`. Errors out if `use` finds no profiles. Works on macOS **and** native Windows/MSYS2 | `setup_pgo` `build.sh:94-131`, called at `:549`, `:728`, `:781` |
-| `XEMU_PGO_DIR` | `${PWD}/pgo` | Profile directory for both stages | `build.sh:96`, `:151` |
+| `XEMU_PGO` | unset | `generate` -> `-fprofile-generate`; run games; `use` -> rebuild `-fprofile-use`. Errors out if `use` finds no profiles. **Since 2026-09-08 the mechanism follows the compiler**: `pgo_compiler_family()` probes `cc -dM -E -` for `__clang__`; clang merges `.profraw` via `llvm-profdata`, GCC (stock MSYS2 MINGW64, distro Linux) reads `.gcda` straight out of the dir and adds `-fprofile-update=atomic` on generate. Each arm reports the other's artifacts by name instead of building unprofiled. Works on macOS, Linux **and** native Windows/MSYS2 (the Windows arm normalises the profile dir with `cygpath -m` first — untested on Windows so far) | `pgo_compiler_family` `build.sh:110-125`, `setup_pgo` `:127-213`, called at `:750`, `:905`, `:986` |
+| `XEMU_PGO_DIR` | `${PWD}/pgo` | Profile directory for both stages. On the native Windows arm it is rewritten to its `cygpath -m` (Windows-absolute) form before `setup_pgo` runs, or a native `gcc.exe`/`clang.exe` bakes the POSIX spelling into the instrumented binary and the profiles land somewhere discovery never looks | `build.sh:129`, `:244`, `:983` |
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only) | **2026-08-04.** With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*`/`helper_*`/`tlb_*`/`tcg_*`/`pgraph_*`) into a build failure instead of a loud warning. Deliberately not enabled in CI yet — flip it once the gate is proven quiet on a freshly retrained tree | `build.sh:227-230` (report: `check_pgo_staleness`, `:147`, called `:813`) |
 | `XEMU_PGO_RETRAIN_REF` | auto | **2026-08-04.** Commit the staleness *age* is measured from. Auto-derivation: last commit touching `pgo/`, else the commit that was HEAD at the newest profile artifact's mtime; degrades to "unknown"/"n/a" with no error in a source tarball with no `.git`. **Known blind spot**: the age half cannot see an uncommitted tree, so a dirty working tree reads as freshly retrained — the CFG-mismatch half is what catches that case | `build.sh:190-191` |
-| `XEMU_HARDENING` | `1` (upstream register zeroing **kept**) | **2026-08-04, macOS only.** `0` appends `-fzero-call-used-regs=skip` to the macOS sys_cflags, which last-flag-wins over meson's global `-fzero-call-used-regs=used-gpr`. Default keeps upstream's zeroing: the 5-pair A/B read mean +0.52 fps but sign-mixed 3+/2−, below the pre-registered bar (archaeology 8.7), so `0` is an **experimental retest arm**, not a recommendation. Either choice is echoed at configure time; `-ftrivial-auto-var-init=zero` is untouched in both; Windows/Linux flag assembly is bit-identical. Security posture: ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary | `build.sh:719-725`; order check `check_zero_call_regs_order` `:234-265` |
+| `XEMU_HARDENING` | `1` (upstream register zeroing **kept**) | **2026-08-04; every platform arm since 2026-09-08** (the block moved verbatim out of the Darwin arm to just after the platform `case`, so the x86-64 retest is finally runnable). `0` appends `-fzero-call-used-regs=skip` to whatever `sys_cflags` the arm left behind, which last-flag-wins over meson's global `-fzero-call-used-regs=used-gpr` on both clang and GCC. Default keeps upstream's zeroing: the 5-pair macOS A/B read mean +0.52 fps but sign-mixed 3+/2−, below the pre-registered bar (archaeology 8.7), so `0` is an **experimental retest arm**, not a recommendation. At the default every arm's flags are byte-identical to before (the block only echoes); `-ftrivial-auto-var-init=zero` is untouched in both. Security posture: ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary | `build.sh:1028-1034`; order check `check_zero_call_regs_order` `:332-370` |
+| `XEMU_WIN_O3` | `0` (off) | **2026-09-08, native MSYS2/MinGW only.** `1` adds `-Doptimization=3 -Dstack_protector=disabled` to the native Windows release; unset, both Windows arms keep meson's project default `optimization=2` and the probed `-fstack-protector-strong` (which stock MSYS2 MINGW64 does get — `meson.build:512-536` probes by compiling *and* linking). Experimental: no CI leg builds it and the 2026-09-08 wave-1 review names the flip as the differential behind the native-Windows exit-139. `win64-cross` ignores it, with a message, so release artifacts cannot pick it up | `build.sh:697-707` |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | `1` = local hardened-runtime codesign with `xemu.entitlements` (allow-jit + allow-unsigned-executable-memory), re-signing every bundled dylib to match. Default is ad-hoc sign preserving metadata. Distributable signing lives in `scripts/sign-macos-release.sh` | `build.sh:385-405` |
 | `XEMU_MOLTENVK_VERSION` | **`1.4.2`** (was `1.4.1` until 2026-08-04) | Official MoltenVK release auto-vendored into `macos-libs/<arch>` **only when no dylib exists** in: vendored dir, `/usr/local/lib`, `/opt/homebrew/lib` (same order used at bundle time; missing dylib at packaging = hard error with provenance version+UUID logging). **This default is the single home for the expected version** — macOS CI awk-parses it out of build.sh and fails the job if the packaged bundle's provenance line disagrees | `build.sh:66`, `package_macos` provenance echo |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for the maintained optimized MoltenVK build | `scripts/build-moltenvk.sh:29` |
@@ -393,15 +394,17 @@ xemu-validation-and-qa).
 - Any other argument stops option parsing and is passed through to
   `configure` (e.g. `./build.sh -Dx86_version=1`).
 
-Baked-in release options (non-Windows, non-debug, `build.sh:509-511`):
+Baked-in release options (non-Windows, non-debug, `build.sh:709-712`):
 thin LTO + `.lto-cache`, `-Doptimization=3`, `-Dqom_cast_debug=false`,
 `-Dtrace_backends=nop`, `-Dstack_protector=disabled`, plus
 `-mcpu=<apple-mN> -ffp-contract=fast` on arm64 — and, when
 `XEMU_HARDENING=0`, the appended `-fzero-call-used-regs=skip` (default
-build does **not** append it). Windows release
-(`build.sh:497-506`, `:765-782`): **no forced LTO** (CI owns per-toolchain
-LTO strategy) and defaults **`-Dx86_version=3`** unless `--debug` or an
-explicit `x86_version` argument is present. Every build configures with
+build does **not** append it, on any platform since 2026-09-08).
+Windows release (`build.sh:657-707`, `:941-997`): **no forced LTO** (CI
+owns per-toolchain LTO strategy), no `-Doptimization=3` and no
+`-Dstack_protector=disabled` unless the native arm is opted in with
+`XEMU_WIN_O3=1`, and defaults **`-Dx86_version=3`** unless `--debug` or
+an explicit `x86_version` argument is present. Every build configures with
 `--extra-cflags=-DXBOX=1 --target-list=i386-softmmu`
 (`build.sh:804-810`).
 

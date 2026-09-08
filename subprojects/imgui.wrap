@@ -3,5 +3,17 @@ url=https://github.com/xemu-project/imgui
 revision=b911105fca3ca1b025706dd168e5798070f143a1
 depth=1
 # Overlay: enables Objective-C++ on darwin so imgui_impl_metal.mm can
-# build when the parent project requests metal=enabled.
+# build when the parent project requests metal=enabled (the parent's
+# own add_languages('objcpp') does not reach into the subproject).
+#
+# subprojects/packagefiles/imgui/ holds a FULL frozen copy of the
+# pinned revision's meson.build and meson_options.txt, plus a patched
+# backends/imgui_impl_metal.mm (the fork's MRC retain/release leak
+# fixes). meson applies patch_directory by overwriting files after
+# checkout, so these copies win over whatever `revision=` points at:
+# bumping the revision= line above WITHOUT refreshing packagefiles/imgui/
+# silently keeps the old build description (missing new sources or
+# options) and quietly drops upstream's .mm changes. Diff the new
+# revision's meson.build / meson_options.txt / imgui_impl_metal.mm
+# against the overlay whenever this line changes.
 patch_directory=imgui

@@ -47,16 +47,21 @@ AArch64 inline x87 FPU) compile out.
 
 - **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
   builds default to `-Dx86_version=3` (AVX2/BMI2/FMA) at meson's project
-  default `optimization=2`, i.e. `-O2` — the `-O3` arm and the GCC PGO
-  arm live on `windows-wave1-wip` and are not landed, and `XEMU_PGO` on
-  native Windows currently needs clang + `llvm-profdata` (the shared
-  `setup_pgo` merges and consumes clang-format `.profdata` files, which
-  GCC's gcov-based PGO does not read). Preferred
-  route — first done for real on 2026-09-07 (Windows 10, NVIDIA TITAN Xp,
-  Vulkan renderer renders correctly). The exact `pacman` package list,
-  the traps a fresh MSYS2 hits (CRLF checkout, Python ≥ 3.13 prefix,
-  MSYS tar, `USERPROFILE`), the validation-layer recipe and the open
-  work list are in [docs/windows-port-2026-09.md](docs/windows-port-2026-09.md);
+  default `optimization=2`, i.e. `-O2`; `XEMU_WIN_O3=1` opts into `-O3`
+  with the stack protector disabled, which is experimental — no CI leg
+  builds that configuration and the 2026-09-08 review names exactly that
+  flip as the prime suspect for an intermittent crash on the Windows box.
+  `XEMU_PGO` works on the stock MSYS2 GCC toolchain since 2026-09-08:
+  `build.sh` probes the compiler family and drives gcov `.gcda` profiles
+  (`-fprofile-generate` / `-fprofile-use`) instead of `llvm-profdata`,
+  which cannot read them — but that arm has not been exercised on
+  Windows yet, and the committed `pgo/default.profdata` is a clang
+  profile, so a Windows `use` build needs its own `generate` run.
+  Preferred route — first done for real on 2026-09-07 (Windows 10,
+  NVIDIA TITAN Xp, Vulkan renderer renders correctly). The exact
+  `pacman` package list, the traps a fresh MSYS2 hits (CRLF checkout,
+  Python ≥ 3.13 prefix, MSYS tar, `USERPROFILE`), the validation-layer
+  recipe and the open work list are in [docs/windows-port-2026-09.md](docs/windows-port-2026-09.md);
   the ranked real-hardware audit is
   [docs/windows-audit-2026-09-summary.md](docs/windows-audit-2026-09-summary.md).
 - **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
@@ -73,6 +78,7 @@ AArch64 inline x87 FPU) compile out.
 |---|---|---|
 | `XEMU_ARM_CPU` | auto | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string` |
 | `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use`. A trained profile is committed at `pgo/default.profdata` and applied by CI to arm64 release builds (+9.4% fps). Retrain after large code churn: `generate` build → play the bench scenes → `use` build → commit the regenerated profdata. A `use` build prints a staleness summary (hot-path CFG-hash mismatches + commits since retrain) and warns when the profile has drifted — see the ledger |
+| `XEMU_WIN_O3` | `0` | Native MSYS2/MinGW only: `1` builds the release at `-Doptimization=3 -Dstack_protector=disabled` instead of meson's `-O2` + probed `-fstack-protector-strong`. Experimental, uncovered by CI, and the leading suspect for the 2026-09-07 native-Windows crash — see the ledger before using it. Ignored on `win64-cross` |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_MOLTENVK_VERSION` | `1.4.2` | MoltenVK release auto-vendored into `macos-libs` when no usable system copy exists. This default is the single home for the expected version — macOS CI asserts the packaged bundle's provenance line matches it |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
