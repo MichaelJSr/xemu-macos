@@ -31,39 +31,41 @@
  * The cached blobs are one specific shader compiler's output, so that
  * compiler's identity belongs in the cache key: without it, changing
  * glslang serves the previous compiler's SPIR-V out of a warm cache,
- * and any A/B of the change measures nothing. glslang's generated
- * build_info.h carries the version; where it is not reachable the key
- * degrades to a fixed string, which is still stable (same compiler ->
- * same key -> warm cache preserved). Residual gap: a glslang revision
- * bump that keeps the same version number is not distinguished.
+ * and any A/B of the change measures nothing. The version is asked of
+ * the linked library at runtime rather than read from glslang's
+ * generated <glslang/build_info.h>: the header that wins on the include
+ * path is not necessarily the one the linked glslang was built from (a
+ * system/Homebrew glslang ahead of the subproject's include dir keyed
+ * the cache on a version this binary never compiled with). Residual
+ * gap: a glslang revision bump that keeps the same version number is
+ * not distinguished.
+ *
+ * Format is "glslang<major>.<minor>.<patch><flavor>" -- unchanged from
+ * the old build_info.h spelling, so warm caches survive this change.
  */
-#if defined(__has_include)
-#if __has_include(<glslang/build_info.h>)
-#include <glslang/build_info.h>
-#endif
-#endif
+static const char *get_spirv_compiler_id(void)
+{
+    static char id[64];
+    static gsize id_init;
 
-#define SPIRV_STRINGIFY_(x) #x
-#define SPIRV_STRINGIFY(x) SPIRV_STRINGIFY_(x)
+    if (g_once_init_enter(&id_init)) {
+        glslang_version_t version = { 0 };
+        glslang_get_version(&version);
+        snprintf(id, sizeof(id), "glslang%d.%d.%d%s", version.major,
+                 version.minor, version.patch,
+                 version.flavor ? version.flavor : "");
+        g_once_init_leave(&id_init, 1);
+    }
 
-#if defined(GLSLANG_VERSION_MAJOR)
-#ifndef GLSLANG_VERSION_FLAVOR
-#define GLSLANG_VERSION_FLAVOR ""
-#endif
-#define SPIRV_COMPILER_ID                                \
-    "glslang" SPIRV_STRINGIFY(GLSLANG_VERSION_MAJOR) "." \
-    SPIRV_STRINGIFY(GLSLANG_VERSION_MINOR) "."           \
-    SPIRV_STRINGIFY(GLSLANG_VERSION_PATCH) GLSLANG_VERSION_FLAVOR
-#else
-#define SPIRV_COMPILER_ID "glslang-unknown"
-#endif
+    return id;
+}
 
 static char *get_spirv_cache_dir(void)
 {
     const char *base = xemu_settings_get_base_path();
     char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s", base,
                                 xemu_version_major, xemu_version_minor,
-                                xemu_version_patch, SPIRV_COMPILER_ID);
+                                xemu_version_patch, get_spirv_compiler_id());
     /* Portable (Windows mkdir takes one argument). */
     g_mkdir_with_parents(dir, 0755);
     return dir;
