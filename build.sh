@@ -266,6 +266,64 @@ else:
 PYEOF
 }
 
+# Read one key out of a wrap file's [wrap-git] section (section-aware so
+# a [provide]/[update] key of the same name cannot win; tolerates CRLF).
+wrap_field() {
+    awk -v key="${2}" '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*\[/ { in_git = ($0 ~ /^[[:space:]]*\[wrap-git\][[:space:]]*$/); next }
+        in_git && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            sub(/[[:space:]]+$/, "")
+            print
+            exit
+        }
+    ' "${1}"
+}
+
+# Configure-time wrap-drift check. A bumped .wrap does not re-checkout
+# an existing subprojects/<name>: meson keeps building whatever is on
+# disk, so a local build silently stops being the one CI ships (hit
+# 2026-09 with glslang — the wrap said 16.5.0, the checkout was still
+# 16.2.0, and the SPIR-V cache key went with the checkout). Read-only,
+# a warning only, and never fatal.
+check_wrap_drift() {
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "${project_source_dir}/subprojects" ] || return 0
+
+    for wrap in "${project_source_dir}"/subprojects/*.wrap; do
+        [ -f "${wrap}" ] || continue
+        grep -q '^[[:space:]]*\[wrap-git\]' "${wrap}" || continue
+
+        wrap_name="$(basename "${wrap}" .wrap)"
+        wrap_rev="$(wrap_field "${wrap}" revision)"
+        wrap_dir="$(wrap_field "${wrap}" directory)"
+        [ -n "${wrap_rev}" ] || continue
+        [ "${wrap_rev}" != "head" ] || continue
+        [ -n "${wrap_dir}" ] || wrap_dir="${wrap_name}"
+
+        # Only an actual checkout can drift; a missing or non-git
+        # directory means the subproject was never cloned.
+        wrap_path="${project_source_dir}/subprojects/${wrap_dir}"
+        [ -e "${wrap_path}/.git" ] || continue
+
+        head_sha="$(git -C "${wrap_path}" rev-parse HEAD 2>/dev/null || true)"
+        [ -n "${head_sha}" ] || continue
+
+        # The wrap revision is a full sha, a short sha or a tag.
+        case "${head_sha}" in
+            "${wrap_rev}"*) continue ;;
+        esac
+        want_sha="$(git -C "${wrap_path}" rev-parse --verify --quiet "${wrap_rev}^{commit}" 2>/dev/null || true)"
+        if [ "${want_sha}" = "${head_sha}" ]; then
+            continue
+        fi
+
+        echo "*** Warning: subproject '${wrap_name}' checkout is ${head_sha}, ${wrap_name}.wrap pins ${wrap_rev}; run: build/pyvenv/bin/meson subprojects update --reset ${wrap_name}" >&2
+    done
+    return 0
+}
+
 package_macos() {
     rm -rf dist
 
@@ -804,6 +862,9 @@ case "$platform" in # Adjust compilation options based on platform
         exit 1
         ;;
 esac
+
+# Warn (never fail) if a subproject checkout has drifted from its wrap.
+check_wrap_drift || true
 
 # find absolute path (and resolve symlinks) to build out of tree
 configure="${project_source_dir}/configure"
