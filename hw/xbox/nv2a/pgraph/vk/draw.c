@@ -1918,6 +1918,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
     nv2a_vk_assert(!r->in_draw);
     nv2a_vk_assert(r->debug_depth == 0);
+    /*
+     * A finish must never be nested inside an aux-command-buffer region:
+     * the aux_has_work path below re-enters
+     * pgraph_vk_begin_single_time_commands, whose first statement is
+     * assert(!r->in_aux_command_buffer). Every aux region in the tree
+     * (surface.c, texture.c, display.c) is finish-free by construction.
+     */
+    nv2a_vk_assert(!r->in_aux_command_buffer);
 
     if (r->in_command_buffer) {
         nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
@@ -1976,11 +1984,12 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
             VK_CHECK(vkQueueSubmit(r->queue, ARRAY_SIZE(submit_infos),
                                    submit_infos, r->command_buffer_fence));
         } else {
-            if (r->in_aux_command_buffer) {
-                VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
-                r->in_aux_command_buffer = false;
-            }
-
+            /*
+             * No `if (r->in_aux_command_buffer) vkEndCommandBuffer(...)`
+             * here: that branch silently ended (and dropped) a command
+             * buffer its caller was still recording into, which only ever
+             * masked a nested finish. See the assert at the top.
+             */
             VkSubmitInfo submit_info = {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1,

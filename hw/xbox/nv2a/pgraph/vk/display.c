@@ -471,6 +471,10 @@ static void destroy_pvideo_image(PGRAPHState *pg)
         d->pvideo.image = VK_NULL_HANDLE;
         d->pvideo.allocation = VK_NULL_HANDLE;
     }
+
+    d->pvideo.width = 0;
+    d->pvideo.height = 0;
+    d->pvideo.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 static void create_pvideo_image(PGRAPHState *pg, int width, int height)
@@ -478,10 +482,20 @@ static void create_pvideo_image(PGRAPHState *pg, int width, int height)
     PGRAPHVkState *r = pg->vk_renderer_state;
     PGRAPHVkDisplayState *d = &r->display;
 
-    if (d->pvideo.image == VK_NULL_HANDLE || d->pvideo.width != width ||
-        d->pvideo.height != height) {
-        destroy_pvideo_image(pg);
+    /*
+     * Reuse the overlay image while the size is unchanged. pvideo.width/
+     * height were never assigned before, so this guard always failed and
+     * every upload paid a vmaDestroyImage/vmaCreateImage + view + sampler
+     * rebuild -- and destroyed an image a still-executing display command
+     * buffer could be sampling. Note the creation below is unconditional,
+     * so the reuse case must return here rather than fall through (that
+     * would leak an image, view, sampler and VmaAllocation per call).
+     */
+    if (d->pvideo.image != VK_NULL_HANDLE && d->pvideo.width == width &&
+        d->pvideo.height == height) {
+        return;
     }
+    destroy_pvideo_image(pg);
 
     VkImageCreateInfo image_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -532,6 +546,10 @@ static void create_pvideo_image(PGRAPHState *pg, int width, int height)
     };
     VK_CHECK(vkCreateSampler(r->device, &sampler_create_info, NULL,
                              &d->pvideo.sampler));
+
+    d->pvideo.width = width;
+    d->pvideo.height = height;
+    d->pvideo.layout = image_create_info.initialLayout;
 }
 
 static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
@@ -543,11 +561,20 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     create_pvideo_image(pg, state.in_width, state.in_height);
 
+    /*
+     * The staging/compute reclaim that used to live here (a nested
+     * pgraph_vk_finish) has moved to render_display, before the display
+     * command buffer is opened: pgraph_vk_finish() must never run while
+     * `cmd` is the aux command buffer. It either re-enters
+     * pgraph_vk_begin_single_time_commands (assert(!in_aux_command_buffer))
+     * or silently ends the half-recorded CB we are still writing into, and
+     * it rotates the flight slot underneath the staging base read here.
+     * render_display's pre-command-buffer reclaim guarantees the invariant
+     * asserted below: the YUV frame is written at the slot's staging base.
+     */
     VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
-    if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > staging_base) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = staging_base;
-    }
+    nv2a_vk_assert(r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset ==
+                   staging_base);
 
     size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;
 
@@ -635,9 +662,15 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
                          &post_compute, 0, NULL);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, disp->pvideo.image, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    /* From the tracked layout, not UNDEFINED: on a reused image the old
+     * layout is SHADER_READ_ONLY_OPTIMAL and the barrier must carry the
+     * FRAGMENT_SHADER -> TRANSFER write-after-read dependency against the
+     * previous display pass (whose reads may still be in flight on the
+     * async-compositor path). Contents are fully overwritten either way. */
+    pgraph_vk_transition_image_layout(pg, cmd, disp->pvideo.image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      disp->pvideo.layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkBufferImageCopy region = {
         .bufferOffset = 0,
@@ -658,6 +691,7 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
                                       VK_FORMAT_R8G8B8A8_UNORM,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    disp->pvideo.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 static const char *display_frag_glsl =
@@ -1600,6 +1634,40 @@ static void update_uniforms(PGRAPHState *pg, SurfaceBinding *surface)
     }
 }
 
+/*
+ * PVIDEO overlay upload policy (XEMU_PVIDEO_UPLOAD_ALWAYS).
+ *
+ * Default 1: upload the YUV source every composite while the overlay is
+ * enabled, which is what upstream and this fork's GL renderer do. The
+ * fork previously keyed a skip on a memcmp of PvideoState, which holds
+ * only PVIDEO register values -- NV_PVIDEO_OFFSET is a single fixed
+ * register, so a title decoding successive frames into the same VRAM
+ * buffer produced a byte-identical key every frame and the overlay froze
+ * on its first frame. XEMU_PVIDEO_UPLOAD_ALWAYS=0 restores the legacy
+ * register-keyed skip.
+ */
+static bool pvideo_upload_always(void)
+{
+    static int cached_env = -1;
+    if (cached_env < 0) {
+        const char *e = getenv("XEMU_PVIDEO_UPLOAD_ALWAYS");
+        cached_env = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached_env != 0;
+}
+
+static bool pvideo_upload_needed(PGRAPHVkDisplayState *disp)
+{
+    if (!disp->pvideo.state.enabled) {
+        return false;
+    }
+    if (pvideo_upload_always()) {
+        return true;
+    }
+    return memcmp(&disp->pvideo.state, &disp->pvideo.last_uploaded_state,
+                  sizeof(PvideoState)) != 0;
+}
+
 static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -1620,6 +1688,33 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     disp->pvideo.state = get_pvideo_state(pg);
     update_uniforms(pg, surface);
 
+    bool need_pvideo_upload = pvideo_upload_needed(disp);
+
+    /*
+     * Reclaim what upload_pvideo_to_cmd is about to consume BEFORE the
+     * display command buffer is opened. Both reclaims submit the open
+     * main command buffer, and pgraph_vk_finish() must not run with an
+     * aux command buffer recording (it re-enters
+     * pgraph_vk_begin_single_time_commands, whose first statement is
+     * assert(!in_aux_command_buffer), or silently ends the CB the caller
+     * is still recording into) -- and it rotates the flight slot, so any
+     * staging base read before it names the wrong slot.
+     *
+     *  - BUFFER_STAGING_SRC is a per-flight-slot bump allocator; the YUV
+     *    frame is written at the slot base, so the open CB's pending
+     *    copies out of [base, offset) must be submitted first.
+     *  - pgraph_vk_dispatch_yuv_to_rgba consumes one entry of the
+     *    per-slot compute descriptor-set partition; every other consumer
+     *    checks this (surface.c, texture.c) and the partition can legally
+     *    already be exhausted on entry.
+     */
+    if (need_pvideo_upload &&
+        (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset >
+             r->flight[r->current_flight].staging_buffer_base ||
+         pgraph_vk_compute_needs_finish(r))) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+    }
+
     bool async_compositor = false;
 #if HAVE_IOSURFACE_SHARING
     async_compositor = xemu_present_is_metal() && r->present_timeline_event;
@@ -1629,12 +1724,9 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                               : pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
         "Display Surface %08"HWADDR_PRIx, surface->vram_addr);
-    if (disp->pvideo.state.enabled) {
-        if (memcmp(&disp->pvideo.state, &disp->pvideo.last_uploaded_state,
-                   sizeof(PvideoState)) != 0) {
-            upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
-            disp->pvideo.last_uploaded_state = disp->pvideo.state;
-        }
+    if (need_pvideo_upload) {
+        upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
+        disp->pvideo.last_uploaded_state = disp->pvideo.state;
     }
 
     update_descriptor_set(pg, surface);
@@ -2082,6 +2174,24 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
 #endif
 }
 
+/*
+ * Display composite skip strictness (XEMU_DISPLAY_SKIP_STRICT).
+ *
+ * Default 1: the pgraph_vk_render_display early-out additionally requires
+ * the display size and the PVIDEO state to be unchanged (and the overlay
+ * to be off). XEMU_DISPLAY_SKIP_STRICT=0 restores the legacy
+ * draw_time-only early-out, which drops register-only display changes.
+ */
+static bool display_skip_strict(void)
+{
+    static int cached_env = -1;
+    if (cached_env < 0) {
+        const char *e = getenv("XEMU_DISPLAY_SKIP_STRICT");
+        cached_env = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached_env != 0;
+}
+
 void pgraph_vk_render_display(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -2098,7 +2208,59 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     PGRAPHVkDisplayState *disp = &r->display;
-    if (disp->image && surface->draw_time == disp->draw_time) {
+
+    unsigned int width = 0, height = 0;
+    d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
+
+    /* Adjust viewport height for interlaced mode, used only in 1080i */
+    if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED) {
+        height *= 2;
+    }
+
+    pgraph_apply_scaling_factor(pg, &width, &height);
+
+    /*
+     * Skip the composite pass only when every input it reads is unchanged.
+     * surface->draw_time alone misses everything that changes the composited
+     * output without redrawing the NV2A colour surface: a guest mode change
+     * (width/height, previously only picked up on the first sync after a new
+     * draw) and the whole PVIDEO overlay (enable/disable, position, scale,
+     * colour key, and new frames decoded into the source buffer). A title
+     * that parks a static 3D layer under an FMV or DVD overlay otherwise
+     * presents a frozen composite forever. Upstream re-ran the composite on
+     * every sync; while an overlay is enabled we do the same, since the
+     * overlay's pixel data is not keyed by any register.
+     *
+     * get_pvideo_state() is side-effect-free and memset-zeroes the struct,
+     * so the whole-struct memcmp is padding-safe; disp->pvideo.state is
+     * assigned only from it.
+     */
+    bool draw_time_unchanged =
+        disp->image && surface->draw_time == disp->draw_time;
+    bool display_unchanged = draw_time_unchanged;
+    if (draw_time_unchanged && display_skip_strict()) {
+        PvideoState new_pvideo = get_pvideo_state(pg);
+        display_unchanged = disp->width == width && disp->height == height &&
+                            !new_pvideo.enabled &&
+                            memcmp(&new_pvideo, &disp->pvideo.state,
+                                   sizeof(new_pvideo)) == 0;
+    }
+
+#if HAVE_IOSURFACE_SHARING
+    /*
+     * An in-flight interpolation cycle must keep stepping regardless of a
+     * register-only change: falling into render_display for the same
+     * surface would rotate interp_prev/cur to identical frames and clobber
+     * pending_real_texture. While interp work is pending the skip therefore
+     * keeps its legacy draw_time-only condition.
+     */
+    bool has_interp_work =
+        disp->interp_remaining > 0 || disp->pending_real_texture != NULL;
+#else
+    const bool has_interp_work = false;
+#endif
+
+    if (draw_time_unchanged && (display_unchanged || has_interp_work)) {
 #if HAVE_IOSURFACE_SHARING
         /*
          * No new frame.
@@ -2208,16 +2370,6 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 #endif
         return;
     }
-
-    unsigned int width = 0, height = 0;
-    d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
-
-    /* Adjust viewport height for interlaced mode, used only in 1080i */
-    if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED) {
-        height *= 2;
-    }
-
-    pgraph_apply_scaling_factor(pg, &width, &height);
 
     if (!disp->image || disp->width != width || disp->height != height) {
         create_display_image(pg, width, height);

@@ -403,11 +403,19 @@ typedef struct PGRAPHVkDisplayState {
     struct {
         PvideoState state;
         PvideoState last_uploaded_state;
+        /* Dimensions the image/view/sampler below were created for.
+         * Written by create_pvideo_image, zeroed by destroy_pvideo_image;
+         * the image is reused (not rebuilt) while these still match. */
         int width, height;
         VkImage image;
         VkImageView image_view;
         VmaAllocation allocation;
         VkSampler sampler;
+        /* Current layout of `image`. Tracked so a reused image is
+         * transitioned from SHADER_READ_ONLY (a real write-after-read
+         * barrier, whose src scope also covers earlier submissions on
+         * this queue) instead of from UNDEFINED (src scope empty). */
+        VkImageLayout layout;
     } pvideo;
 
     int width, height;
