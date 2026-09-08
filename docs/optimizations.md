@@ -38,9 +38,10 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` **plus** a full `tlb_flush_all_cpus_synced` **plus** an unconditional jump-cache wipe — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else, plus reuse-pool hit/park/evict counters and a live-coverage audit run on the 33 ms surface throttle tick; `2` also aborts on a coverage violation (`nv2a_vk_assert` is stripped in perf builds, so the check carries its own escalation). No behavior change |
 | `XEMU_SURFACE_CB_REUSE` | `1` (**default off, dark**) parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, so a shape ping-pong stops paying two full guest TLB flushes per swap. Sound because the registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges` and ignores the registered range); the pool evicts oldest with a real remove and drains fully at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. Unset = byte-identical legacy path. Measured 2026-08-04 and killed (−0.66 fps 3/3; Failed table) — stays dark as the record |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
-| `XEMU_INPUT_PIPE` | FIFO path; lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` inject input through normal bindings (works unfocused; test automation) |
+| `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: the `inject_input.sh` in the diagnostics skill) |
 | `XEMU_COREAUDIO_FRAMES` | CoreAudio buffer frames, default `1024` (≈21 ms @ 48 kHz) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `1` = live read (one frame late), `2` = flip-time snapshot (temporally correct); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
+| `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
 | `XEMU_RETC_BITS` | Ret-memo index width, 8..13 (default 12), latched at process start; every hit is fully validated so any width is correctness-safe. 13 measured −0.23 fps 4/4 on F8 (Failed table) — a diagnostic/cache-footprint A/B knob, not a tuning lever |
@@ -207,9 +208,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   session — freeze the control, WER LocalDumps, full-reconfigure `-O2`
   vs `-O3` with ≥5 runs per variant — is in
   `docs/windows-wave1-review-2026-09-08.md` §3 and
-  `docs/windows-port-2026-09.md` §9. Contents: (1) `XEMU_WIN32_DXGI` hatch +
-  the two non-Apple compile warnings in `ui/` (present header included
-  unconditionally, `g_framebuffer_rect_shader` gated). (2) SPIR-V disk
+  `docs/windows-port-2026-09.md` §9. Contents: (1) **landed on main
+  2026-09-08** (with the transport half of (8) — see the bullet below):
+  `XEMU_WIN32_DXGI` hatch + the two non-Apple compile warnings in `ui/`
+  (present header included unconditionally, `g_framebuffer_rect_shader`
+  gated). (2) SPIR-V disk
   cache: `qemu_fopen` (UTF-16 paths on Windows), atomic temp+rename
   writes, blob validation (size, magic, reflect) with regenerate-on-miss
   instead of `VK_CHECK` abort, `-dbg` variant tag when `debug_shaders`
@@ -239,22 +242,51 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   arms, tar `--force-local` keyed on the build machine (that last hunk
   landed on main 2026-09-08 — see Build + packaging). (8) Windows
   benchmark harness `scripts/bench-savestate-ab-win.py` + `scripts/win/`
-  (TCP monitor, PowerShell capture, receipts) and an `XEMU_INPUT_PIPE`
-  Windows transport — see the handoff doc for status.
+  (TCP monitor, PowerShell capture, receipts) — **landed on main
+  `add066354f`** as tooling-only, and main has since moved ahead of the
+  branch there (`c77d8a4b05` hardening, `4d0cec2790` boot smoke) — and the
+  `XEMU_INPUT_PIPE` Windows named-pipe transport in `ui/xemu-input.c`,
+  **landed on main 2026-09-08** with (1). The harness itself has still
+  never driven a full run on the Windows box.
+
+- **Windows test-input transport, plus a DXGI present hatch
+  (2026-09-08).** `XEMU_INPUT_PIPE` was a compiled-out stub on `_WIN32`
+  (POSIX FIFOs and `O_NONBLOCK` reads do not exist there), so no harness
+  that drives the guest — movement probe, boot smoke, live-route
+  benchmark — had a Windows transport, even though its client
+  `scripts/win/inject_input.py` already shipped. The same line protocol
+  now rides a Win32 named pipe polled from the same call site
+  (`xemu_input_update_sdl_kbd_controller_state()`): a value starting `\\`
+  names the pipe verbatim, any other value contributes only its last path
+  component (so one `/tmp/xemu.fifo` value works on both hosts), and `\r`
+  is a delimiter too so CRLF writers parse. The single `PIPE_NOWAIT`
+  instance is re-armed with `ConnectNamedPipe` in the *same* poll as its
+  `DisconnectNamedPipe`, because a disconnected instance is not listening
+  and a one-shot writer that arrives before the next poll would otherwise
+  be turned away with `ERROR_PIPE_BUSY`. Unset = nothing is created and
+  nothing is polled.
+  Landed alongside it: `XEMU_WIN32_DXGI=0` restores `SDL_GL_SwapWindow`
+  presentation so a DXGI-specific regression stays bisectable (and the
+  "present failed or unavailable" warning no longer fires when the
+  presenter was disabled on purpose), and the two non-Apple compile
+  warnings are gone — `ui/xemu-present.h` is included unconditionally in
+  `ui/xemu.c`, and the Apple-only `g_framebuffer_rect_shader` is now
+  declared inside `#ifdef __APPLE__` like its two uses. Windows-only
+  behaviour change: the POSIX branch of `test_input_poll()` is
+  byte-identical, the hatch lives inside `#ifdef _WIN32`, and both
+  warning fixes are declaration placement only.
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
 
-These eight knobs belong to wave-1 commits that are **not** on
-`add066354f`, so setting one on a main build does nothing: verified
-2026-09-08 with `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh
-*.yml *.py`, which matches nothing at all for seven of them and, for
-`XEMU_WIN32_DXGI`, only the `XEMU_WIN32_DXGI_PRESENT_H` include guard in
-`ui/xui/win32-dxgi-present.h`. Rows are kept in the knob table's shape so
-each moves back up verbatim as its commit lands.
+These seven knobs belong to wave-1 commits that are **not** landed here,
+so setting one on a main build does nothing: verified 2026-09-08 with
+`git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
+which matches nothing at all for any of them. Rows are kept in the knob
+table's shape so each moves back up verbatim as its commit lands —
+`XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks.
 
 | Env var | Purpose | Lands with |
 |---|---|---|
-| `XEMU_WIN32_DXGI` | Windows only. `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model | `ec31facd7d` |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache (no loads/stores) — cold-compile A/B without deleting the cache dir | `818fe27828` |
 | `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the in-place `.spv` write; default writes `<path>.<pid>.tmp` + `g_rename` and validates blobs on load | `818fe27828` |
 | `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |

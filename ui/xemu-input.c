@@ -533,8 +533,9 @@ void xemu_input_update_controllers(void)
 }
 
 /*
- * Test-input channel: when XEMU_INPUT_PIPE names a FIFO, lines of
- * the form "down <sdl_scancode>", "up <sdl_scancode>" or "clear"
+ * Test-input channel: when XEMU_INPUT_PIPE names a FIFO (POSIX) or a
+ * named pipe (Windows, see below), lines of the form
+ * "down <sdl_scancode>", "up <sdl_scancode>" or "clear"
  * are OR'd into the keyboard-controller state below. Injected keys
  * flow through the user's normal scancode bindings and work with
  * the window unfocused — macOS drops synthetic key events for
@@ -545,10 +546,166 @@ void xemu_input_update_controllers(void)
 static uint8_t test_input_override[SDL_SCANCODE_COUNT];
 
 #ifdef _WIN32
-/* POSIX FIFOs (and O_NONBLOCK reads) don't exist on Windows; the
- * test-input channel is a macOS/Linux automation facility. */
+/* Windows has no FIFOs, so the same line protocol rides a Win32 named
+ * pipe: XEMU_INPUT_PIPE either names the pipe in full ("\\.\pipe\foo")
+ * or gives a path whose LAST component becomes the pipe name (so a
+ * single "/tmp/xemu.fifo" env value works unchanged on both hosts).
+ * The instance is created PIPE_NOWAIT so every poll is a bounded,
+ * non-blocking peek from the UI thread, matching the POSIX
+ * O_NONBLOCK read()<=0 -> break shape. Unlike a FIFO, a named pipe
+ * does not tolerate writer churn implicitly: each one-shot writer
+ * (inject_input.py opens, writes, closes) must be accepted and then
+ * recycled with DisconnectNamedPipe, which is what the state machine
+ * below does. No cost when the variable is unset. */
+static HANDLE test_input_pipe;      /* NULL = unprobed or disabled */
+static bool test_input_probed;
+static bool test_input_connected;
+
+static void test_input_parse(char *buf)
+{
+    char *save = NULL;
+    /* '\r' is a delimiter too: Windows writers (PowerShell Add-Content,
+     * cmd echo) emit CRLF, and "down 26\r" would not match "down %d". */
+    for (char *line = strtok_r(buf, "\r\n", &save); line;
+         line = strtok_r(NULL, "\r\n", &save)) {
+        int sc;
+        if (sscanf(line, "down %d", &sc) == 1) {
+            if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+                test_input_override[sc] = 1;
+            }
+        } else if (sscanf(line, "up %d", &sc) == 1) {
+            if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+                test_input_override[sc] = 0;
+            }
+        } else if (!strncmp(line, "clear", 5)) {
+            memset(test_input_override, 0, sizeof(test_input_override));
+        }
+    }
+}
+
+static void test_input_open(void)
+{
+    const char *path = getenv("XEMU_INPUT_PIPE");
+    char name[MAX_PATH];
+
+    test_input_probed = true;
+    if (!path || !path[0]) {
+        return;
+    }
+
+    if (path[0] == '\\' && path[1] == '\\') {
+        snprintf(name, sizeof(name), "%s", path);
+    } else {
+        const char *base = path;
+        for (const char *p = path; *p; p++) {
+            if (*p == '/' || *p == '\\' || *p == ':') {
+                base = p + 1;
+            }
+        }
+        if (!base[0]) {
+            fprintf(stderr, "xemu: XEMU_INPUT_PIPE has no pipe name: %s\n",
+                    path);
+            return;
+        }
+        snprintf(name, sizeof(name), "\\\\.\\pipe\\%s", base);
+    }
+
+    HANDLE h = CreateNamedPipeA(name, PIPE_ACCESS_INBOUND,
+                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE |
+                                    PIPE_NOWAIT,
+                                1, 0, 4096, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "xemu: XEMU_INPUT_PIPE create failed (%s): %lu\n",
+                name, (unsigned long)GetLastError());
+        return;
+    }
+    test_input_pipe = h;
+    fprintf(stderr, "xemu: test-input pipe listening on %s\n", name);
+}
+
+static void test_input_recycle(void)
+{
+    /* Client gone: drop the instance back to listening so the NEXT
+     * one-shot writer can connect. DisconnectNamedPipe discards whatever
+     * is still queued, so this is only ever reached after a peek/read has
+     * already failed (i.e. there is nothing left to drain).
+     *
+     * Re-arm in the SAME poll. A disconnected instance is not listening,
+     * and this is the only instance (nMaxInstances=1), so any writer that
+     * calls CreateFile between the disconnect and the next poll's
+     * ConnectNamedPipe gets ERROR_PIPE_BUSY and gives up. This is polled
+     * once per UI event-pump iteration (~16 ms at 60 Hz) and the writers
+     * are one-shot (scripts/win/inject_input.py opens, writes, closes), so
+     * that window swallows keystrokes. On a PIPE_NOWAIT
+     * instance ConnectNamedPipe never blocks: TRUE means "listening again,
+     * no client yet" (the common case, and what leaves test_input_connected
+     * false for the next poll to notice), while ERROR_PIPE_CONNECTED /
+     * ERROR_NO_DATA mean a writer attached — and possibly already wrote and
+     * closed — inside this call, so mark it connected and let the next poll
+     * drain it instead of dropping it. ERROR_PIPE_LISTENING cannot come back
+     * here (only from a second Connect on an already-listening instance), and
+     * any other error leaves the state machine where it was: disconnected,
+     * retried next poll. */
+    DisconnectNamedPipe(test_input_pipe);
+    test_input_connected = false;
+    if (!ConnectNamedPipe(test_input_pipe, NULL)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_PIPE_CONNECTED || err == ERROR_NO_DATA) {
+            test_input_connected = true;
+        }
+    }
+}
+
 static void test_input_poll(void)
 {
+    if (!test_input_probed) {
+        test_input_open();
+    }
+    if (!test_input_pipe) {
+        return;
+    }
+
+    if (!test_input_connected) {
+        /* On a non-blocking instance ConnectNamedPipe returns TRUE only to
+         * say "the instance is now listening again" (no client yet) — which
+         * test_input_recycle() has already consumed, so what normally lands
+         * here is ERROR_PIPE_LISTENING = idle, nothing to do. An attached
+         * client is reported as failure + ERROR_PIPE_CONNECTED, and
+         * ERROR_NO_DATA means a writer already connected, wrote and closed
+         * between two polls. NO_DATA still has its bytes queued, so it falls
+         * through to the drain rather than disconnecting (which would
+         * discard them). */
+        if (ConnectNamedPipe(test_input_pipe, NULL)) {
+            return;
+        }
+        DWORD err = GetLastError();
+        if (err != ERROR_PIPE_CONNECTED && err != ERROR_NO_DATA) {
+            return;
+        }
+        test_input_connected = true;
+    }
+
+    char buf[512];
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(test_input_pipe, NULL, 0, NULL, &avail, NULL)) {
+            test_input_recycle();
+            return;
+        }
+        if (avail == 0) {
+            break;
+        }
+        DWORD n = 0;
+        if (!ReadFile(test_input_pipe, buf, sizeof(buf) - 1, &n, NULL)) {
+            test_input_recycle();
+            return;
+        }
+        if (n == 0) {
+            break;
+        }
+        buf[n] = '\0';
+        test_input_parse(buf);
+    }
 }
 #else
 static int test_input_fd = -2; /* -2 unprobed, -1 disabled */
