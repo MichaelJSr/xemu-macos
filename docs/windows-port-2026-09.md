@@ -106,11 +106,27 @@ implementers). Headline confirmed items:
 - **Harness**: the whole benchmark/testing protocol is macOS-only (zsh,
   AF_UNIX monitor, screencapture, APFS clones, `dist/xemu.app`).
 
-## 5. What landed in this session (wave 1)
+## 5. What landed in this session
 
-See `git log 2e0aad3e18..` — each commit body carries the why, the gating
-and the validation performed on this box. Summary is kept current in
-§7 below.
+On `macos-optimizations` (all validated on this box, none on macOS yet):
+the upstream merge `2e0aad3e18`, the MSYS2 configure fixes `ac28e5a5bd`,
+the DXGI presenter lock fix `2182baec46`, and these docs.
+
+On branch **`windows-wave1-wip`** (NOT merged): wave 1 of the audit plan
+as one commit per batch (the present-hatch + ui-warning batch rode along
+inside the harness commit `ec31facd7d`) — SPIR-V cache
+hardening, PVIDEO/display reorder, APU/XID bounds, vk hygiene
+(real bounds checks, volkLoadDevice, LRU filter), Windows/GL
+diagnostics, build.sh GCC PGO + `-O3` parity, and the Windows benchmark
+harness + `XEMU_INPUT_PIPE` named-pipe transport. **The combined binary
+compiles but segfaults ~10 s into Azurik (after 32 flips, exit 139);
+`XEMU_VK_VOLK_DEVICE=0` does not help.** Bisect recipe on this box:
+`git checkout windows-wave1-wip`, revert one batch commit at a time
+(start with `apu/xid:` then `vk: never finish inside the display aux
+CB`), `rebuild-quick.sh`, then `PORT=4456 EXE=../xemu-macos/dist-w1/xemu.exe
+run-test.sh 55 <name>` and look for a second nsprof interval. Each batch
+commit body carries its gating and intended validation; the escape-hatch
+rows are already in `docs/optimizations.md`.
 
 ## 6. Remaining plan (batches not yet implemented)
 
@@ -151,6 +167,10 @@ copied HDD image and `-config_path`.
 
 ## 8. Owed on macOS before any of this counts as landed
 
+(For `macos-optimizations` head: the merge, the build fixes and the DXGI
+fix. The wave-1 branch additionally needs the Windows bisect above
+before it is even a candidate.)
+
 1. Build `./build.sh` on the Mac at the pushed head; fix any Apple-side
    compile fallout (most likely spots: `ui/xemu.c` include reorder,
    `gl-helpers.cc` gating, `nsprof` GL flip hook, `glsl.c` cache rewrite).
@@ -162,3 +182,45 @@ copied HDD image and `-config_path`.
 4. Confirm `git describe`/CI: the push fires the full matrix including
    win64-cross; the fork's Windows CI does not run natively, so this box
    remains the only native-Windows validation.
+
+## 9. Continuation prompt for the Mac (paste into a Claude Code session in the repo)
+
+```
+Context: on 2026-09-07 the macos-optimizations branch was merged with
+upstream xemu master (2e0aad3e18), built and run natively on Windows for the
+first time, statically audited, and a first wave of Windows-first fixes was
+landed — all from a Windows box, with zero macOS builds. Read
+docs/windows-port-2026-09.md (§5 "what landed", §8 "owed on macOS") and
+`git log --stat ea9633798d..HEAD` first. Load the xemu-change-control,
+xemu-validation-and-qa and xemu-testing skills.
+
+Do, in order, and stop on the first failure:
+1. `./build.sh` (arm64, release). Fix any Apple-side compile fallout in the
+   wave-1 files (ui/xemu.c include reorder + XEMU_WIN32_DXGI helper,
+   ui/xui/gl-helpers.cc gating, hw/xbox/nv2a/pgraph/vk/glsl.c cache rewrite,
+   hw/xbox/nv2a/pgraph/vk/display.c PVIDEO reorder, nsprof GL flip hook,
+   accel/tcg/xemu-inv-prof.h rdtsc arm, APU bounds in hw/xbox/mcpx/apu/vp/vp.c).
+   Every fix must keep the Windows path identical — do not undo the gating.
+2. Launch dist/xemu.app from a scratch APFS clone (never the real bundle),
+   boot Azurik, load the F5 savestate, confirm: no crash, no pink tiles,
+   MetalFX/interpolation still engage, `XEMU_NV2A_NSPROF=1` prints.
+3. Interleaved savestate A/B (scripts/bench-savestate-ab.sh, ≥6 pairs) of
+   HEAD vs ea9633798d on the heavy Azurik scene. Acceptance: within noise
+   (±0.02 fps static / sub-0.5% suspect). The platform-neutral changes that
+   could move the needle: PVIDEO staging reclaim reorder (display.c),
+   SPIR-V cache validation (first launch only), REPORTS/display early-out
+   widening (XEMU_DISPLAY_SKIP_STRICT=0 is the legacy hatch), volk device
+   dispatch if landed. If a regression shows, bisect with the hatches listed
+   in docs/optimizations.md "Windows native port (2026-09-07)" before
+   touching code.
+4. Artifact-oracle soak: ≥300 window captures on the F5 scene scored for
+   magenta clusters — must be zero.
+5. Run the xbox unit suite (`meson test -C build --suite xbox`).
+6. If all green: append the A/B receipt to the ledger entry in
+   docs/optimizations.md and push. If CI (incl. win64-cross) is red on the
+   Windows-first push, fix forward the same day.
+Then continue with the remaining audit batches in docs/windows-port-2026-09.md
+§6, starting with batch 3 (draw.c REPORTS_FULL guard move) which the
+architecture contract's Invariant 2 must be re-validated against on both
+platforms with XEMU_MAX_QUERIES=64.
+```

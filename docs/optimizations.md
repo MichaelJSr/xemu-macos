@@ -21,6 +21,14 @@ Changes manifest below — the pairing is the fork's bisect discipline.
 |---|---|
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
+| `XEMU_WIN32_DXGI` | Windows only. `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model (2026-09-07) |
+| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache (no loads/stores) — cold-compile A/B without deleting the cache dir (2026-09-07) |
+| `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the in-place `.spv` write; default writes `<path>.<pid>.tmp` + `g_rename` and validates blobs on load (2026-09-07) |
+| `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled (2026-09-07) |
+| `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (non-Apple); default also re-composites on resolution / PVIDEO register changes (2026-09-07) |
+| `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients (2026-09-07) |
+| `XEMU_VK_VOLK_DEVICE` | Non-Apple only. `=0` restores instance-level volk dispatch through the `vulkan-1.dll` trampoline; default loads device-level entry points (2026-09-07) |
+| `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. `=0` restores `-O2` + stack protector; default `-Doptimization=3 -Dstack_protector=disabled` like Darwin/Linux (2026-09-07) |
 | `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
@@ -162,6 +170,41 @@ every item below unless stated; none of it has been built on macOS yet.
   enabled) — both open, see the handoff doc. Under the layer xemu hung at
   exit once (process stuck terminating in the driver); not reproduced
   without the layer.
+- **Wave 1 of the audit plan — on branch `windows-wave1-wip`, NOT landed
+  here.** The combined wave-1 binary segfaults ~10 s into Azurik on
+  Windows (32 flips, then exit 139; reproduced with
+  `XEMU_VK_VOLK_DEVICE=0`, so not the volk change). It is committed as
+  one commit per batch on that branch so it can be bisected by batch;
+  suspects first: the APU voice_snapshot NULL paths (audio starts at
+  the intro) and the display.c reorder. Knob rows above describe the
+  intended defaults. Contents: (1) `XEMU_WIN32_DXGI` hatch +
+  the two non-Apple compile warnings in `ui/` (present header included
+  unconditionally, `g_framebuffer_rect_shader` gated). (2) SPIR-V disk
+  cache: `qemu_fopen` (UTF-16 paths on Windows), atomic temp+rename
+  writes, blob validation (size, magic, reflect) with regenerate-on-miss
+  instead of `VK_CHECK` abort, `-dbg` variant tag when `debug_shaders`
+  is on. (3) PVIDEO/display: the staging reclaim that could call
+  `pgraph_vk_finish()` while the display aux command buffer was open is
+  hoisted ahead of the aux CB begin; overlay uploads no longer skip on a
+  register-only key; the non-Apple display early-out also honours
+  resolution/PVIDEO changes. (4) APU: guest voice handles bounds-checked
+  before indexing host `filters[]` / HRTF / SSL tables (was OOB read then
+  write), pitch LUT index clamped, APU direct RAM stores mark dirty
+  again, engine switch serialised under the BQL, XID unbound-pad guard
+  bounds-checked. (5) `nv2a_vk_bounds_check` is a real check in every
+  build (was `__builtin_unreachable()` in release); `volkLoadDevice()` on
+  non-Apple; `VK_KHR_external_semaphore_win32` optional; LRU eviction
+  in-use filter restored; `CPUJumpCache` stride static-asserted. (6)
+  Diagnostics on Windows/GL: `nsprof` ticks under the OpenGL renderer
+  with three GL buckets, `xemu_inv_ticks()` has an x86 `rdtsc` arm,
+  `stderr` is flushed after heartbeat/nsprof prints on Windows,
+  `NV2A_STRIP_PROFILE_COUNTERS` tracks the debug build. (7) build.sh:
+  GCC PGO arm (`-fprofile-generate/-use`, gcda discovery), `-O3` parity
+  on the native Windows release arm, `XEMU_HARDENING` reachable on all
+  arms, tar `--force-local` keyed on the build machine. (8) Windows
+  benchmark harness `scripts/bench-savestate-ab-win.py` + `scripts/win/`
+  (TCP monitor, PowerShell capture, receipts) and an `XEMU_INPUT_PIPE`
+  Windows transport — see the handoff doc for status.
 
 ### Rendering (correctness fixes)
 
