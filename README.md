@@ -46,8 +46,12 @@ Metal/IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT, the
 AArch64 inline x87 FPU) compile out.
 
 - **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
-  builds default to `-Dx86_version=3` and `-Doptimization=3`;
-  `XEMU_PGO=generate/use` work like on macOS (gcc or clang). Preferred
+  builds default to `-Dx86_version=3` (AVX2/BMI2/FMA) at meson's project
+  default `optimization=2`, i.e. `-O2` — the `-O3` arm and the GCC PGO
+  arm live on `windows-wave1-wip` and are not landed, and `XEMU_PGO` on
+  native Windows currently needs clang + `llvm-profdata` (the shared
+  `setup_pgo` merges and consumes clang-format `.profdata` files, which
+  GCC's gcov-based PGO does not read). Preferred
   route — first done for real on 2026-09-07 (Windows 10, NVIDIA TITAN Xp,
   Vulkan renderer renders correctly). The exact `pacman` package list,
   the traps a fresh MSYS2 hits (CRLF checkout, Python ≥ 3.13 prefix,

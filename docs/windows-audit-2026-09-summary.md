@@ -1,4 +1,23 @@
 
+# Windows real-hardware audit — ranked findings (2026-09-07 snapshot)
+
+Generated from `docs/windows-audit-2026-09.json`; it records the audit
+as it stood on 2026-09-07 and is not rewritten as findings are fixed.
+Known supersessions:
+
+- **Finding 37 ("Docs still claim audio.use_dsp_jit defaults on / non-Apple
+  hosts get the dsp56300 JIT by default") is void as of 2026-09-08.** The fork restored its own
+  `use_dsp_jit: default: true` in `config_spec.yml` rather than adopting
+  upstream's `fc13b78060` flip, so "default on" is correct again and the
+  docs were corrected the other way. Do not "fix" them back to `false`.
+  Rationale: `docs/windows-wave1-review-2026-09-08.md` §1 item 1, §5
+  decision (a); consequences: `docs/windows-port-2026-09.md` §2.
+- The wave-1 Windows exit-139 is **not** pinned to any source hunk. The
+  same-day single-run bisect that blamed the vp.c pitch clamp was
+  retracted in `40f0a01ad3`; the 2026-09-08 review's verdict is the
+  `-O2` → `-O3` build-flag flip on the native MSYS2 arm, unconfirmed on
+  the box. Protocol: `docs/windows-port-2026-09.md` §9.
+
 ## CONFIRMED (60)
 
 | # | sev | cat | file:line | title |

@@ -1810,6 +1810,36 @@ cannot. Use `XEMU_HARDENING=0` as the E arm; `build.sh`'s
 appended flag actually wins in the generated compile database, so a
 null result cannot be a silently-unapplied flag.
 
+## 8.8 An upstream merge silently changed the DSP engine default everywhere
+
+**Status**: incident, corrected (`config_spec.yml`, 2026-09-08). The
+mediation rule it produced lives in `xemu-change-control` §"upstream-merge
+mediation"; the knob catalog is `xemu-config-and-flags`.
+**Symptom**: none visible on the dev box. After the 2026-09-07 upstream merge
+`2e0aad3e18`, a **stock** config ran the plain DSP56300 C interpreter on every
+platform, macOS included, where before it ran a JIT.
+**Root cause**: the merge accepted upstream `fc13b78060`, which flipped
+`audio.use_dsp_jit` from `true` to `false` "for first release". The fork's own
+`audio.dsp_jit.enabled` also defaults `false`, so with both off
+`dsp_want_external_jit_engine()` selected no JIT at all. Two things hid it:
+the merge body and three docs described the change as affecting "non-Apple
+hosts only" (false — the Apple path needs `dsp_jit.enabled = true`, which is
+not the default), and the owner's `xemu.toml` sets `[audio.dsp_jit] enabled =
+true`, so every local run and every in-game smoke still took the fork JIT.
+**Evidence**: `config_spec.yml` at `add066354f` (`use_dsp_jit: default:
+false`); `hw/xbox/mcpx/apu/dsp/dsp.c:120-128` (precedence, unchanged);
+`docs/windows-wave1-review-2026-09-08.md` §1 item 1, §5 decision (a).
+**Lessons**: (a) a *default* is a fork asset — git merges it cleanly precisely
+because it is one line nobody flags, so diff `config_spec.yml` explicitly
+after every merge; (b) a config the dev box overrides is a config the dev box
+cannot regression-test — when a default changes, reason about the stock
+config, do not test only your own; (c) "affects only platform X" claims about
+a two-knob precedence rule need the truth table written out, not asserted.
+**Reopen if**: an upstream merge touches the audio block of
+`config_spec.yml`, or someone proposes an Apple-conditional default for
+`audio.dsp_jit.enabled` (review option (b), still open, wants an
+`XEMU_APU_PROF` receipt).
+
 ---
 
 # 9. Benchmarking / method incidents

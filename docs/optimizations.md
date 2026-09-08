@@ -15,20 +15,16 @@ failed / reverted / settled-negative experiment tables.
 
 All default off / fast-path; set to `1` to enable. Every knob here is
 the escape hatch or measurement channel for a specific entry in the
-Changes manifest below — the pairing is the fork's bisect discipline.
+Changes manifest below — the pairing is the fork's bisect discipline,
+and every one of them has a `getenv` on this branch. Knobs that exist
+only on `windows-wave1-wip` are listed apart, under "Escape hatches on
+branch `windows-wave1-wip`" inside the Windows native port section, so
+a reader of main is never told to set a knob that does nothing.
 
 | Env var | Purpose |
 |---|---|
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
-| `XEMU_WIN32_DXGI` | Windows only. `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model (2026-09-07) |
-| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache (no loads/stores) — cold-compile A/B without deleting the cache dir (2026-09-07) |
-| `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the in-place `.spv` write; default writes `<path>.<pid>.tmp` + `g_rename` and validates blobs on load (2026-09-07) |
-| `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled (2026-09-07) |
-| `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (non-Apple); default also re-composites on resolution / PVIDEO register changes (2026-09-07) |
-| `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients (2026-09-07) |
-| `XEMU_VK_VOLK_DEVICE` | Non-Apple only. `=0` restores instance-level volk dispatch through the `vulkan-1.dll` trampoline; default loads device-level entry points (2026-09-07) |
-| `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. `=0` restores `-O2` + stack protector; default `-Doptimization=3 -Dstack_protector=disabled` like Darwin/Linux (2026-09-07) |
 | `XEMU_ZETA_SHAPE_READBACK` | Restore GPU→CPU readback on zeta shape switches |
 | `XEMU_TEX_BIND_RECHECK` | Restore per-bind texture dirty checks (vs once per frame) |
 | `XEMU_VTX_EXACT` | `0` restores page-granular vertex-conflict finishes (vs byte-exact skip) |
@@ -138,16 +134,34 @@ NVIDIA TITAN Xp 561.09, MSYS2 MINGW64 gcc 16). Full recipe, traps,
 results and the open work list: `docs/windows-port-2026-09.md`; the
 ranked static audit (60 confirmed / 19 plausible / 10 refuted findings,
 22-batch plan): `docs/windows-audit-2026-09-summary.md` +
-`docs/windows-audit-2026-09.json`. macOS behaviour is unchanged by
-every item below unless stated; none of it has been built on macOS yet.
+`docs/windows-audit-2026-09.json`; the review that corrected this
+section: `docs/windows-wave1-review-2026-09-08.md`. macOS behaviour is
+unchanged by every item below unless stated — written before any of it
+had been built on macOS, and confirmed on 2026-09-08 (arm64 release
+build clean, `meson test --suite xbox` 6/6, CI 21/21 incl. both
+win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
+`docs/windows-port-2026-09.md` §8).
 
 - **Upstream merge `2e0aad3e18`** (xemu master `429c9972eb`): DXGI /
   WGL_NV_DX_interop presenter, PTIMER alarm IRQs (nv2a vmstate v4),
   controllerdb from config path, glslang 16.5.0, and upstream flipping
-  `audio.use_dsp_jit` to **false** — accepted, so non-Apple hosts now
-  default to the DSP interpreter (fork precedence unchanged:
-  `audio.dsp_jit.enabled` wins where supported). Only `ui/xemu.c`
-  conflicted; DXGI hooks sit inside the fork's non-Metal GL branch.
+  `audio.use_dsp_jit` to **false** (`fc13b78060`, "for first release").
+  Only `ui/xemu.c` conflicted; DXGI hooks sit inside the fork's
+  non-Metal GL branch.
+- **DSP engine default restored to the fork's (2026-09-08).** Taking
+  upstream's `use_dsp_jit` flip moved *every* platform's stock config
+  onto the plain C interpreter, macOS included — the merge body and
+  three docs claimed "non-Apple hosts only", which was false: with
+  `audio.dsp_jit.enabled` also defaulting `false`, nothing selected a
+  JIT engine anywhere. The fork owns its defaults, so
+  `config_spec.yml` is back to `use_dsp_jit: default: true` and
+  pre-merge behaviour holds on every host: a stock config runs
+  upstream's dsp56300 engine, and `[audio.dsp_jit] enabled = true`
+  selects the fork's inline ARM64 JIT instead. Precedence in
+  `dsp_want_external_jit_engine()` (`hw/xbox/mcpx/apu/dsp/dsp.c:120`)
+  is unchanged. Owner decision (a) of the 2026-09-08 review; the dev
+  box never showed the regression because its `xemu.toml` sets
+  `[audio.dsp_jit] enabled = true`.
 - **Native MSYS2 configure fixes (`ac28e5a5bd`).** Python ≥ 3.13's
   `ntpath.isabs` rejects QEMU's `/qemu` prefix → `build.sh` passes
   `--prefix=$(cygpath -m /qemu)`; MSYS tar reads `C:/x` as host:path →
@@ -175,10 +189,23 @@ every item below unless stated; none of it has been built on macOS yet.
   Windows; the crash is INTERMITTENT and NOT isolated: a same-day
   single-run bisect wrongly blamed the vp.c pitch clamp; the same binary
   later failed 5/5 (both renderers, profiler on/off) while the
-  main-branch binary passed as a control. The apu/xid commit is the
-  leading suspect only. See docs/windows-port-2026-09.md §5 for the
-  surviving facts and the re-test discipline (≥5 runs per variant). Knob rows above describe the
-  intended defaults. Contents: (1) `XEMU_WIN32_DXGI` hatch +
+  main-branch binary passed as a control. The 2026-09-08 review's
+  verdict is that the differential is the **build flags**, not a
+  source hunk: `fb42bce22e` flips the native MSYS2 release arm from
+  `-O2` to `-O3 -Dstack_protector=disabled`, every crashing binary was
+  produced by an incremental `ninja` rebuild that keeps those
+  configure-time flags, and the only passing binary (the control) was
+  configured by main's `build.sh` at `-O2`; the runtime hatches that
+  were toggled change no codegen. Five of six independent crash
+  hunters converged on it and none was refuted — but this is *verified
+  by review 2026-09-08, not yet confirmed on the box*, and it names a
+  class (latent UB exposed by the vectoriser), not a line. The
+  apu/xid commit is **not** the leading suspect: it was exonerated on
+  four independent grounds. The full protocol for the next Windows
+  session — freeze the control, WER LocalDumps, full-reconfigure `-O2`
+  vs `-O3` with ≥5 runs per variant — is in
+  `docs/windows-wave1-review-2026-09-08.md` §3 and
+  `docs/windows-port-2026-09.md` §9. Contents: (1) `XEMU_WIN32_DXGI` hatch +
   the two non-Apple compile warnings in `ui/` (present header included
   unconditionally, `g_framebuffer_rect_shader` gated). (2) SPIR-V disk
   cache: `qemu_fopen` (UTF-16 paths on Windows), atomic temp+rename
@@ -187,8 +214,10 @@ every item below unless stated; none of it has been built on macOS yet.
   is on. (3) PVIDEO/display: the staging reclaim that could call
   `pgraph_vk_finish()` while the display aux command buffer was open is
   hoisted ahead of the aux CB begin; overlay uploads no longer skip on a
-  register-only key; the non-Apple display early-out also honours
-  resolution/PVIDEO changes. (4) APU: guest voice handles bounds-checked
+  register-only key; the display early-out also honours
+  resolution/PVIDEO changes on every host (the commit body calls that
+  hunk non-Apple, but `display_skip_strict()` is called unconditionally,
+  macOS included). (4) APU: guest voice handles bounds-checked
   before indexing host `filters[]` / HRTF / SSL tables (was OOB read then
   write), pitch LUT index clamped, APU direct RAM stores mark dirty
   again, engine switch serialised under the BQL, XID unbound-pad guard
@@ -202,10 +231,32 @@ every item below unless stated; none of it has been built on macOS yet.
   `NV2A_STRIP_PROFILE_COUNTERS` tracks the debug build. (7) build.sh:
   GCC PGO arm (`-fprofile-generate/-use`, gcda discovery), `-O3` parity
   on the native Windows release arm, `XEMU_HARDENING` reachable on all
-  arms, tar `--force-local` keyed on the build machine. (8) Windows
+  arms, tar `--force-local` keyed on the build machine (that last hunk
+  landed on main 2026-09-08 — see Build + packaging). (8) Windows
   benchmark harness `scripts/bench-savestate-ab-win.py` + `scripts/win/`
   (TCP monitor, PowerShell capture, receipts) and an `XEMU_INPUT_PIPE`
   Windows transport — see the handoff doc for status.
+
+#### Escape hatches on branch `windows-wave1-wip` (not on main)
+
+These eight knobs belong to wave-1 commits that are **not** on
+`add066354f`, so setting one on a main build does nothing: verified
+2026-09-08 with `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh
+*.yml *.py`, which matches nothing at all for seven of them and, for
+`XEMU_WIN32_DXGI`, only the `XEMU_WIN32_DXGI_PRESENT_H` include guard in
+`ui/xui/win32-dxgi-present.h`. Rows are kept in the knob table's shape so
+each moves back up verbatim as its commit lands.
+
+| Env var | Purpose | Lands with |
+|---|---|---|
+| `XEMU_WIN32_DXGI` | Windows only. `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model | `ec31facd7d` |
+| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache (no loads/stores) — cold-compile A/B without deleting the cache dir | `818fe27828` |
+| `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the in-place `.spv` write; default writes `<path>.<pid>.tmp` + `g_rename` and validates blobs on load | `818fe27828` |
+| `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
+| `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
+| `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients | `971292ed48` |
+| `XEMU_VK_VOLK_DEVICE` | Non-Apple only. `=0` restores instance-level volk dispatch through the `vulkan-1.dll` trampoline; default loads device-level entry points | `736533709e` |
+| `XEMU_WIN_O3` | build.sh, native MSYS2 release arm. On the branch that arm defaults to `-Doptimization=3 -Dstack_protector=disabled` and `=0` restores `-O2` + stack protector. **On main that arm is already `-O2`** — `build.sh`'s `win64*\|MINGW*\|MSYS*` release case sets only `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project default `optimization=2` (`meson.build:3`) stands and the knob has nothing to invert. The 2026-09-08 review recommends re-cutting the hunk with `-O3` **opt-in** (`XEMU_WIN_O3=1`): it is the leading suspect for the wave-1 exit-139 and no CI leg covers `-O3` on Windows | `fb42bce22e` (re-cut) |
 
 ### Rendering (correctness fixes)
 
@@ -817,6 +868,27 @@ every item below unless stated; none of it has been built on macOS yet.
   the wrap revision needs a build-system define, and Linux distro
   packaging goes through `dpkg-buildpackage` with no `build.sh`, so the
   same tree would key two ways on two platforms.
+- **That key now asks the linked glslang, not a header (2026-09-08).**
+  Reading the version from `<glslang/build_info.h>` keys the cache on
+  whichever header wins the include path, which is not necessarily the
+  one the linked library was built from: `build/compile_commands.json`
+  puts `-I/opt/homebrew/include` ahead of the subproject's
+  `__CMake_build/include`, so a Homebrew glslang names the directory
+  while the binary links the subproject's. Observed on the dev Mac as a
+  `spirv_cache_v0.13.2-glslang16.5.0` directory produced by a build
+  whose glslang checkout was still 16.2.0 — i.e. the exact stale-blob
+  failure the key exists to prevent, wearing the right name. The key
+  now comes from `glslang_get_version()` on the linked library
+  (`glslang_c_interface.h:249`, backed by `glslang::GetVersion()`),
+  formatted `glslang<major>.<minor>.<patch><flavor>` — byte-identical
+  to the old macro expansion for the same numbers, so every warm cache
+  survives. Hosts where no `build_info.h` was reachable used to key on
+  `glslang-unknown` and pay one cold regeneration now. CI/release
+  builds have no Homebrew glslang and were never affected; the
+  same-version-different-revision gap above is unchanged. Related:
+  `build.sh` now warns when a subproject checkout has drifted from its
+  `.wrap` (Build + packaging), which is how the 16.2.0-vs-16.5.0 skew
+  went unnoticed.
 
 ### MetalFX + presentation
 
@@ -1085,12 +1157,15 @@ every item below unless stated; none of it has been built on macOS yet.
 - **DSP execution engines (post upstream merge).** Upstream added a
   DSPOps engine abstraction with two engines: the C interpreter
   (`dsp/interp/`) and a JIT wrapping the external `dsp56300` Rust
-  subproject (`audio.use_dsp_jit`, default on). This fork's inline
-  ARM64 JIT lives *inside* the interpreter engine
+  subproject (`audio.use_dsp_jit`, **default on** — fork-owned;
+  upstream flipped it off in `fc13b78060` and the fork restored it
+  2026-09-08, see the Windows native port section). This fork's
+  inline ARM64 JIT lives *inside* the interpreter engine
   (`interp/dsp56k_jit_arm64.c`, symbols `dsp56k_jit_*`); when
   supported and enabled it takes precedence and `use_dsp_jit` is
-  ignored. Non-Apple hosts get upstream's dsp56300 engine by
-  default.
+  ignored. So a stock config runs upstream's dsp56300 engine on
+  **every** host, Apple included, and the fork JIT is opt-in via
+  `[audio.dsp_jit] enabled = true`.
 - **Full inline DSP JIT (Apple Silicon).** ARM64
   basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
   via `[audio.dsp_jit] enabled = true` (engine selection is
@@ -1228,6 +1303,34 @@ every item below unless stated; none of it has been built on macOS yet.
   already pending = provably redundant; the pfifo-side park census =
   parks per kick); the exact per-kick "a waiter existed" bit would need
   a field in `nv2a_int.h`'s anonymous pfifo struct.
+- **PTIMER zero-divisor guard (2026-09-08).** The upstream merge gave
+  `NV_PTIMER_ALARM_0` a write handler that schedules a QEMU timer
+  (`d73326b621`), and every conversion on that path divides by
+  `ptimer.numerator`, `ptimer.denominator` and
+  `pramdac.core_clock_freq` — all three of which are zero for part of
+  every boot: the two PTIMER registers are never reset and start at
+  device zero-init, and `core_clock_freq` is re-zeroed by any NVPLL
+  coefficient write with `MDIV == 0` (`pramdac.c:97`). A guest that
+  writes `ALARM_0` before programming the clock therefore reached
+  `muldiv64`'s divide by zero: a trap where integer division by zero
+  traps, and on AArch64 — where the lowered divide yields 0 instead —
+  an immediate-fire timer loop, because `diff_ns` came out 0 and
+  `timer_mod(now + 0)` re-armed at the current instant forever. One
+  predicate (`ptimer_clock_configured()`) now guards all three sites:
+  the two conversions return 0, which is exactly what the old code
+  already produced in every non-trapping zero case, and
+  `schedule_qemu_timer()` deletes the timer rather than arming it —
+  correct, because an unconfigured clock leaves `get_reg_time()` frozen
+  at `time_offset`, so no alarm can ever legitimately be reached. The
+  configured path is byte-identical (three early exits, 32 insertions
+  and 0 deletions); no vmstate or struct change, so old snapshots are
+  unaffected. Recorded behaviour delta: an `ALARM_0` write issued while
+  the clock is unprogrammed is now dropped rather than deferred — no
+  worse than pre-merge, where `alarm_time` was stored and nothing
+  consumed it, and re-arming on the unconfigured→configured transition
+  would arm at `alarm_time == 0` for guests that never wrote `ALARM_0`.
+  Reasoned from the code and syntax-checked against the real compile
+  command; the fault itself was not reproduced.
 
 ### Build + packaging
 
@@ -1345,6 +1448,36 @@ every item below unless stated; none of it has been built on macOS yet.
   identically by both arms. Default is unchanged (warm-shared) so
   existing baselines stay comparable, and the choice is recorded as
   `cache_isolation` in the protocol receipt.
+- **build.sh warns when a subproject checkout has drifted from its wrap
+  (2026-09-08).** Bumping a `.wrap` does not re-checkout an existing
+  `subprojects/<name>`: meson keeps building whatever is on disk, so a
+  local build silently stops being the one CI ships. That bit this tree
+  in 2026-09 — `glslang.wrap` said 16.5.0, the checkout was still
+  16.2.0, and the SPIR-V cache key went with the checkout (see the
+  Vulkan renderer entry). Configure now reads each `[wrap-git]` wrap's
+  `revision`/`directory` (section-aware, CRLF-tolerant) and compares it
+  against the checkout's `HEAD`, printing the exact
+  `meson subprojects update --reset <name>` to run. Warning only and
+  never fatal: it returns 0 on every path, is invoked as
+  `check_wrap_drift || true`, skips missing/non-git subprojects and
+  `revision = head`, and short-circuits when `git` is absent (so the
+  win64-cross Docker leg and source-archive builds simply skip it).
+  Costs ~0.4 s. On this tree it flags `SPIRV-Reflect`, `volk` and
+  `VulkanMemoryAllocator`; `imgui`'s meson warning turned out to be the
+  `patch_directory` overlay, not a HEAD drift. Verified under bash 3.2,
+  `/bin/sh` and `dash` plus a fixture tree covering tag/short-sha/CRLF/
+  `directory=` cases; not executed on MSYS2 or Linux.
+- **dsp56300 `tar --force-local` keyed on the build machine
+  (2026-09-08).** The flag exists because MSYS2/GNU tar parses the
+  `C:/...` path meson hands it as `host:path`, but it was gated on
+  `host_machine`, so the Linux-hosted win64-cross legs got it too
+  (harmless with GNU tar) while a Windows-cross build hosted on macOS
+  would have handed it to bsdtar under `check: true` — a hard configure
+  error. It is a property of the tar meson invokes, so it is now keyed
+  on `build_machine.system()`. Native MSYS2 and Darwin builds are
+  unchanged (the two predicates agree there). Matches the wave-1 hunk
+  in `fb42bce22e`; that commit's second hunk (`run_command(tar, ...)` →
+  `find_program('tar')`) was deliberately left on the branch.
 
 ### MoltenVK runtime config
 
@@ -1492,6 +1625,33 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   direct-chain into a TB spanning two guest pages — sizing the xpage
   "page-spanning targets decline to chain" coverage gap before anyone
   builds the risky registry extension for it.
+- **Windows A/B harness survives the failure it exists to measure
+  (2026-09-08).** `scripts/bench-savestate-ab-win.py` sent its `loadvm`
+  monitor command unguarded, so an xemu that dies 6-10 s after launch —
+  precisely the wave-1 exit-139 being chased — killed the whole batch
+  with a traceback instead of recording one DEAD run. It now polls
+  `proc.poll()` after the boot wait and catches `OSError`/`socket.timeout`
+  around `loadvm`, recording whether the process was still running (hung)
+  or already gone with its exit code, sampled before the harness's own
+  kill can mask it. Three more sharp edges from the same review: the
+  renderer is read from the template, refused unless `VULKAN` (or
+  `--allow-renderer`), pinned into every scratch config and recorded in
+  the receipt — `nsprof_flip_tick()` is called only from
+  `pgraph/vk/renderer.c:241`, so an OpenGL run gates DEAD with no
+  explanation; every DEAD run now names the likely cause (empty captured
+  log ⇒ look at `xemu.log` in the exe dir, since `ui/xemu.c:1940-1947`
+  freopens the streams there when `AttachConsole` fails; a non-empty log
+  with zero `nsprof:` headers ⇒ named with the renderer); and
+  `parse_env_set` uses `shlex` with `escape=""` so Windows backslash
+  paths survive *and* quoted values with spaces still parse. The
+  non-Windows refusal now says which Python is wanted and why an MSYS2
+  `/usr/bin/python` cannot work (no `ctypes.WinDLL` sampler, MSYS path
+  translation). `scripts/win/capture_screen.ps1` calls
+  `SetProcessDPIAware` before its first screen query and prefers
+  `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` over
+  `GetWindowRect`, with a try/catch fallback to the old path, so crops on
+  a scaled display are no longer offset. `--dry-run` covers the new
+  paths (21 checks); no Windows execution yet.
 
 ## Failed / reverted experiments
 

@@ -1,4 +1,4 @@
-# Native Windows port — status and handoff (2026-09-07)
+# Native Windows port — status and handoff (2026-09-07, revised 2026-09-08)
 
 First session of this fork on real Windows hardware. Everything below was
 done on a Windows 10 Pro 22H2 box: Intel i7-4770K (Haswell, 4C/8T, AVX2),
@@ -7,8 +7,10 @@ enumerated), 32 GB RAM, MSYS2 MINGW64 (gcc 16.2, meson 1.9.0 from
 `python/wheels`, mingw python 3.14.7, cmake 4.4.3). macOS remains the
 first-priority platform; every change here is Windows-gated or a
 platform-neutral bug fix whose Apple path is argued unchanged in its
-commit body — **none of it has been built or run on macOS yet** (see
-"Owed on macOS").
+commit body. Written before any of it had been built on macOS; the
+macOS build, unit suite, CI matrix and in-game smoke were all run on
+2026-09-08 and are recorded in §8, and §2/§5/§9 carry that session's
+corrections.
 
 ## 1. Environment recipe (MSYS2 MINGW64)
 
@@ -49,10 +51,22 @@ in `nv2a_regs.h` users, `-Wnested-externs`/`-Wmissing-prototypes` in
 `2e0aad3e18` merges xemu-project/xemu master `429c9972eb` (12 commits):
 DXGI/WGL_NV_DX_interop presenter, PTIMER alarm IRQs (vmstate v4),
 controllerdb from config path, joystick logging, glslang 16.5.0, and
-`audio.use_dsp_jit` default → **false**. Only `ui/xemu.c` conflicted; the
-DXGI hooks live inside the fork's non-Metal GL branch. Mediation is in the
-merge body. Non-Apple hosts now default to the DSP **interpreter** (fork
-precedence unchanged: `audio.dsp_jit.enabled` wins where supported).
+`audio.use_dsp_jit` default → **false** (upstream `fc13b78060`). Only
+`ui/xemu.c` conflicted; the DXGI hooks live inside the fork's non-Metal
+GL branch. Mediation is in the merge body.
+
+**Correction (2026-09-08).** This doc, the merge body and the ledger all
+said the `use_dsp_jit` flip only affected non-Apple hosts. That was
+wrong: `audio.dsp_jit.enabled` also defaults `false`, so with
+`use_dsp_jit` off *no* platform's stock config selected a JIT engine —
+macOS included — and every host quietly moved to the plain C
+interpreter. The fork owns its defaults, so `config_spec.yml` is back to
+`use_dsp_jit: default: true`; a stock config runs upstream's dsp56300
+engine everywhere and `[audio.dsp_jit] enabled = true` selects the
+fork's inline ARM64 JIT instead. Precedence in
+`dsp_want_external_jit_engine()` (`hw/xbox/mcpx/apu/dsp/dsp.c:120`) is
+unchanged. See `docs/windows-wave1-review-2026-09-08.md` §1 item 1 and
+§5 decision (a).
 
 ## 3. First real-hardware results (Azurik, Vulkan renderer, TITAN Xp)
 
@@ -108,9 +122,14 @@ implementers). Headline confirmed items:
 
 ## 5. What landed in this session
 
-On `macos-optimizations` (all validated on this box, none on macOS yet):
-the upstream merge `2e0aad3e18`, the MSYS2 configure fixes `ac28e5a5bd`,
-the DXGI presenter lock fix `2182baec46`, and these docs.
+On `macos-optimizations`: the upstream merge `2e0aad3e18`, the MSYS2
+configure fixes `ac28e5a5bd`, the DXGI presenter lock fix `2182baec46`,
+these docs, and — as of `add066354f` — the Windows benchmark harness
+(`scripts/bench-savestate-ab-win.py`, `scripts/win/quiet_check.py`,
+`scripts/win/capture_screen.ps1`, `scripts/win/score_shot_win.py`,
+`scripts/win/inject_input.py`), which
+is pure tooling compiled into nothing. All of it was validated on the
+Windows box on 2026-09-07 and on the Mac on 2026-09-08 (§8).
 
 On branch **`windows-wave1-wip`** (NOT merged): wave 1 of the audit plan
 as one commit per batch (the present-hatch + ui-warning batch rode along
@@ -133,21 +152,41 @@ the profiler, with `XEMU_VK_VOLK_DEVICE=0`, and with
 pitch clamp", so the apu/xid commit (`971292ed48`) remains the leading
 suspect, but every variant must be re-run ≥5 times before believing a
 pass. The pitch clamp stays reverted (harmless either way). gdb did not
-catch it (run-under and attach both missed); next step on a Windows box
-is a crash dump (`procdump -e -ma` or WER LocalDumps) opened in gdb, or
-a `--debug` build with `-fsanitize=address` if MinGW allows. The DXGI hatch, SPIR-V cache, PVIDEO/display,
+catch it (run-under and attach both missed).
+
+**Superseded 2026-09-08 by `docs/windows-wave1-review-2026-09-08.md`
+§3.** The apu/xid commit is *not* the leading suspect — the review
+exonerated it on four independent grounds. Five of six crash hunters,
+each starting from a different lens and none refuted, converged instead
+on the **build flags**: `fb42bce22e` moves the native MSYS2 release arm
+from `-O2` to `-O3 -Dstack_protector=disabled`, and that is the only
+change reaching every translation unit in both renderers with every
+hatch unset. Every crashing binary — including every single-run "bisect"
+variant — came out of `rebuild-quick.sh`/ninja, which keeps the
+configure-time flags; the one passing binary (the control) was
+configured by main's `build.sh` at `-O2`. The runtime hatches that were
+toggled change no codegen, and a timing/ASLR-dependent latent bug
+explains both 1-pass-then-5-fails and gdb missing it. This is a review
+verdict, **not yet confirmed on the box**, and it names a class (latent
+UB exposed by the `-O3` vectoriser), not a line — if it holds, a real
+bug still exists and must be hunted from a dump. The protocol that
+settles it is §9 below. Do not resume single-run bisects.
+
+The DXGI hatch, SPIR-V cache, PVIDEO/display,
 bounds checks, volk dispatch, diagnostics and build changes all ran
-clean in the surviving runs. Recipe for further Windows bisects on this box:
-`git checkout windows-wave1-wip`, change one thing, `rebuild-quick.sh`, then `PORT=4456 EXE=../xemu-macos/dist-w1/xemu.exe
-run-test.sh 55 <name>` and look for a second nsprof interval. Each batch
+clean in the surviving runs. Each batch
 commit body carries its gating and intended validation; the escape-hatch
-rows are already in `docs/optimizations.md`.
+rows now live in `docs/optimizations.md` under "Escape hatches on branch
+`windows-wave1-wip` (not on main)" — none of them has a `getenv` on
+main, so they do nothing on a main build.
 
 ## 6. Remaining plan (batches not yet implemented)
 
 From the planner (`docs/windows-audit-2026-09.json` → `plan.batches`),
 in recommended order. Batches marked *savestate* need the Azurik in-game
-savestate benchmark (not yet created on this box — see §8).
+savestate benchmark (not yet created on this box; the protocol is
+`scripts/bench-savestate-ab-win.py`, and the Mac's fixtures are listed
+in the `xemu-validation-and-qa` skill).
 
 | # | Batch | Needs |
 |---|---|---|
@@ -160,7 +199,7 @@ savestate benchmark (not yet created on this box — see §8).
 | 17 | perf: Windows thread scheduling (pfifo/vblank/APU `SetThreadPriority`/MMCSS), UI frame cap on the GL/DXGI path | savestate |
 | 18–20 | perf: renderer micro-costs, 1 GiB persistently-mapped staging, GL texture thread pool, async VK→GL handoff via external semaphores (measure `aux_fence` first; kill if < 0.3 ms/present) | savestate |
 | 21 | measure DSP engine choice on Windows (interpreter vs upstream JIT) | savestate + audio soak |
-| 22 | docs reconciliation (architecture-contract Invariant 2 text vs the REPORTS_FULL finding, windows-gating-audit rows, `use_dsp_jit` default claims in docs/optimizations.md) | none |
+| 22 | docs reconciliation (architecture-contract Invariant 2 text vs the REPORTS_FULL finding, windows-gating-audit rows) | none — the `use_dsp_jit` default claims were corrected 2026-09-08 (§2) |
 
 Open policy questions for the maintainer: keep `renderer = VULKAN` as the
 first-run default on Windows/Linux (works on this NVIDIA box; upstream
@@ -182,62 +221,96 @@ run, but never driven through a full A/B yet) is the durable replacement.
 Never run against `%APPDATA%\xemu\xemu\xemu.toml` — the fixture uses a
 copied HDD image and `-config_path`.
 
-## 8. Owed on macOS before any of this counts as landed
+## 8. State of main, and what was verified on the Mac (2026-09-08)
 
-(For `macos-optimizations` head: the merge, the build fixes and the DXGI
-fix. The wave-1 branch additionally needs the Windows bisect above
-before it is even a candidate.)
+Main (`macos-optimizations`) moved `ea9633798d` → `add066354f`: the
+upstream merge `2e0aad3e18` (which also carried upstream's
+`use_dsp_jit` default flip, restored by the fork on 2026-09-08 — §2),
+the MSYS2 configure fixes `ac28e5a5bd`, the DXGI presenter lock fix
+`2182baec46`, the docs commits including the pitch-clamp retraction
+`40f0a01ad3`, and the Windows benchmark harness `add066354f`.
+**Wave 1 is NOT on main** — it is still only on `windows-wave1-wip`,
+and none of its escape hatches has a `getenv` on main.
 
-1. Build `./build.sh` on the Mac at the pushed head; fix any Apple-side
-   compile fallout (most likely spots: `ui/xemu.c` include reorder,
-   `gl-helpers.cc` gating, `nsprof` GL flip hook, `glsl.c` cache rewrite).
-2. Boot to the Azurik F5 savestate and run the interleaved A/B
-   (`scripts/bench-savestate-ab.sh`) at fps parity vs `ea9633798d` — the
-   platform-neutral fixes must be within ±0.02 fps static / noise.
-3. Artifact-oracle soak (window captures scored for magenta) — the SPIR-V
-   cache rewrite and PVIDEO changes are the ones that could alter pixels.
-4. Confirm `git describe`/CI: the push fires the full matrix including
-   win64-cross; the fork's Windows CI does not run natively, so this box
-   remains the only native-Windows validation.
+Verified on this Mac on 2026-09-08 (evidence table:
+`docs/windows-wave1-review-2026-09-08.md` §1):
 
-## 9. Continuation prompt for the Mac (paste into a Claude Code session in the repo)
+| Check | Result |
+|---|---|
+| `./build.sh` arm64 release at `add066354f`, glslang **16.5.0** (only after `meson subprojects update --reset glslang` — the local checkout was still 16.2.0, which `build.sh` now warns about) | clean — no Apple-side compile fallout |
+| `meson test --suite xbox` | 6/6 |
+| CI run 34178988918 | 21/21 legs green, both win64-cross included |
+| In-game smoke on the F5 savestate `vm-20260704032357` (July, pre-vmstate-v4), 2 harness invocations = 6 runs | loads, renders, 0 magenta / white / stuck frames, 0 asserts, fork DSP JIT banner present |
+| The wave-1 head, built and smoked on macOS the same way (2 invocations, 6 runs, isolated caches so the new SPIR-V writer ran cold and warm) | clean — 0 artifacts, 0 asserts |
 
-```
-Context: on 2026-09-07 the macos-optimizations branch was merged with
-upstream xemu master (2e0aad3e18), built and run natively on Windows for the
-first time, statically audited, and a first wave of Windows-first fixes was
-landed — all from a Windows box, with zero macOS builds. Read
-docs/windows-port-2026-09.md (§5 "what landed", §8 "owed on macOS") and
-`git log --stat ea9633798d..HEAD` first. Load the xemu-change-control,
-xemu-validation-and-qa and xemu-testing skills.
+So the Windows-first work does not break macOS, and the July savestate
+still loads across the nv2a vmstate 3→4 bump (`minimum_version_id`
+stayed 1). Two caveats worth carrying:
 
-Do, in order, and stop on the first failure:
-1. `./build.sh` (arm64, release). Fix any Apple-side compile fallout in the
-   wave-1 files (ui/xemu.c include reorder + XEMU_WIN32_DXGI helper,
-   ui/xui/gl-helpers.cc gating, hw/xbox/nv2a/pgraph/vk/glsl.c cache rewrite,
-   hw/xbox/nv2a/pgraph/vk/display.c PVIDEO reorder, nsprof GL flip hook,
-   accel/tcg/xemu-inv-prof.h rdtsc arm, APU bounds in hw/xbox/mcpx/apu/vp/vp.c).
-   Every fix must keep the Windows path identical — do not undo the gating.
-2. Launch dist/xemu.app from a scratch APFS clone (never the real bundle),
-   boot Azurik, load the F5 savestate, confirm: no crash, no pink tiles,
-   MetalFX/interpolation still engage, `XEMU_NV2A_NSPROF=1` prints.
-3. Interleaved savestate A/B (scripts/bench-savestate-ab.sh, ≥6 pairs) of
-   HEAD vs ea9633798d on the heavy Azurik scene. Acceptance: within noise
-   (±0.02 fps static / sub-0.5% suspect). The platform-neutral changes that
-   could move the needle: PVIDEO staging reclaim reorder (display.c),
-   SPIR-V cache validation (first launch only), REPORTS/display early-out
-   widening (XEMU_DISPLAY_SKIP_STRICT=0 is the legacy hatch), volk device
-   dispatch if landed. If a regression shows, bisect with the hatches listed
-   in docs/optimizations.md "Windows native port (2026-09-07)" before
-   touching code.
-4. Artifact-oracle soak: ≥300 window captures on the F5 scene scored for
-   magenta clusters — must be zero.
-5. Run the xbox unit suite (`meson test -C build --suite xbox`).
-6. If all green: append the A/B receipt to the ledger entry in
-   docs/optimizations.md and push. If CI (incl. win64-cross) is red on the
-   Windows-first push, fix forward the same day.
-Then continue with the remaining audit batches in docs/windows-port-2026-09.md
-§6, starting with batch 3 (draw.c REPORTS_FULL guard move) which the
-architecture contract's Invariant 2 must be re-validated against on both
-platforms with XEMU_MAX_QUERIES=64.
-```
+- The smoke ran under the owner's `xemu.toml`, which sets
+  `[audio.dsp_jit] enabled = true`. The restored `use_dsp_jit` default
+  puts a **stock** config on upstream's dsp56300 engine on every host;
+  that path has not been re-smoked since the restoration.
+- One run per binary showed a late-run fps collapse. Both coincided
+  with other sessions saturating the host (load avg 18-25), neither
+  recurred, and the same-binary A/B design makes them non-signals — but
+  a quiet machine is still a precondition for any number from this
+  fixture (`scripts/win/quiet_check.py` is the Windows equivalent).
+
+Still owed before a tag, per the review: a cross-binary interleaved fps
+A/B against `v0.13.2` on the heavy savestate (the merge added a new
+guest interrupt source, so parity is not free), and release notes that
+name the forward-incompatible vmstate v4, the DSP default, and the
+glslang 16.5.0 SPIR-V cache-key roll.
+
+## 9. Next Windows session: the exit-139 protocol
+
+Replaces the wave-1 hatch-bisect recipe that used to sit here. That
+recipe assumed the crash was a source hunk isolable by toggling
+runtime knobs; the 2026-09-08 review concluded the differential is the
+`-O2` → `-O3 -Dstack_protector=disabled` flip on the native MSYS2
+release arm (`fb42bce22e`), which no runtime knob can reach. Full
+reasoning and the eliminations:
+`docs/windows-wave1-review-2026-09-08.md` §3. Run the steps in order,
+and **pre-commit the interpretation before running anything**.
+
+1. **Freeze the control.** The control is main built by main's
+   `build.sh` (a full configure — never `rebuild-quick.sh`, which keeps
+   the previous configure's flags). Copy that `dist/xemu.exe` plus its
+   DLLs to `dist-control/` and record: `sha256sum`, `grep -c -- ' -O3 '
+   build/compile_commands.json` and `grep -c fstack-protector
+   build/compile_commands.json` for **both** trees, and `env | grep
+   XEMU_` from the shell `run-test.sh` runs in (a stray value would
+   re-open the named-pipe lens). Record `git rev-parse HEAD` next to the
+   binary's sha256: main moves with every landing (the 2026-09-08 docs commit
+   already moves it past `add066354f`), so "the control" is only meaningful with its commit
+   written down, and it must be re-frozen after each wave-1 batch lands.
+2. **Get a dump.** Enable WER LocalDumps (`DumpType=2`) or run
+   `procdump -e -ma -w xemu.exe`, run the existing wave-1 binary until
+   it faults, open the `.dmp` in gdb and read the faulting instruction
+   and stack. A `vmovaps`/`vmovdqa` on an unaligned operand is the
+   `-O3` vectoriser class and confirms the hypothesis directly.
+3. **The experiment.** Full reconfigure on both arms:
+   (A) wave-1 head with `XEMU_WIN_O3=0 ./build.sh -j8` (`-O2`, stack
+   protector back), ≥6 runs; (B) main with `-Doptimization=3
+   -Dstack_protector=disabled`, ≥6 runs. At the observed ~5/6 failure
+   rate, 6 clean runs give P < 1e-4. Interpretation, committed now:
+   **A clean and B crashing convicts the flags** — then keep `-O3`
+   opt-in and hunt the latent bug from the dump, because a real bug
+   still exists. **A still crashing exonerates the flags** — the
+   culprit is a source hunk, and it is found by reverting whole
+   batches with ≥5 runs each, never single runs.
+4. **Contested side question while there:** does MSYS2 GCC 16.2
+   actually apply `-fstack-protector-strong` by default? Settle it with
+   `grep -c fstack-protector build/compile_commands.json` rather than
+   argument.
+5. **Cheap side variable.** The DSP engine is no longer one: main
+   defaults to `use_dsp_jit = true` again, so the stock config runs the
+   dsp56300 engine as it did pre-merge. To test the interpreter path
+   deliberately, set `[audio] use_dsp_jit = false`.
+
+Use `scripts/bench-savestate-ab-win.py` (on main since `add066354f`)
+for anything that produces a number; `run-test.sh` is fine for
+crash/no-crash runs. The remaining audit batches are §6, and the
+landing order for wave 1 — one push each, CI green between — is
+`docs/windows-wave1-review-2026-09-08.md` §4.

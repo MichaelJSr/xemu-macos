@@ -241,11 +241,19 @@ that merge when both sides had independently added a `dsp_jit.c`:
    `audio.use_dsp_jit` select upstream's external JIT engine
    (`dsp_want_external_jit_engine()` / `dsp_set_engine()`,
    `hw/xbox/mcpx/apu/dsp/dsp.c`). Both config knobs stay through any
-   merge. Full truth table, config defaults, and env-var non-interaction:
-   `xemu-config-and-flags` (the precedence owner). (The
-   `config_spec.yml:339` comment now correctly names
-   `dsp_want_external_jit_engine()` — its earlier stale-selector wording
-   was fixed; re-check after any merge that touches the spec.)
+   merge, **and so do the fork's defaults for them**. The 2026-09-07
+   merge accepted upstream's `fc13b78060` flip of `use_dsp_jit` to
+   `false`; because `dsp_jit.enabled` also defaults `false`, that left a
+   stock config selecting *no* JIT engine on any platform, macOS
+   included — a silent behaviour change nobody's own `xemu.toml`
+   revealed. It was restored to `true` on 2026-09-08. Treat a default
+   change in `config_spec.yml` as a merge conflict even when git does
+   not: diff the audio block after every merge. Full truth table,
+   config defaults, and env-var non-interaction: `xemu-config-and-flags`
+   (the precedence owner). (The `config_spec.yml` comment above
+   `dsp_jit:` correctly names `dsp_want_external_jit_engine()` — its
+   earlier stale-selector wording was fixed; re-check after any merge
+   that touches the spec.)
 3. **Preserve fork behavior through structural churn.** The same merge
    re-homed the mixbuffer handoff as engine-aware
    `dsp_write_mixbuffer_bulk()` (`hw/xbox/mcpx/apu/dsp/gp_ep.c`) instead
@@ -456,7 +464,7 @@ anchor 803). Re-verify drift-prone claims:
 - Input-pipe POSIX guard: `grep -n "_WIN32\|XEMU_INPUT_PIPE" ui/xemu-input.c`
 - TCG FPU Windows gate: `grep -n "TCG_TARGET_HAS_fpu" tcg/aarch64/tcg-target-has.h`
 - DSP engine precedence + namespaces: `grep -n "dsp_want_external_jit_engine\|dsp_set_engine" hw/xbox/mcpx/apu/dsp/dsp.c` and `ls hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
-- DSP config defaults: `grep -n -A3 "dsp_jit:\|use_dsp_jit:" config_spec.yml`
+- DSP config defaults (expect `dsp_jit.enabled: false`, `use_dsp_jit: true` — the second is fork-owned, upstream ships `false`): `grep -n -A3 "dsp_jit:\|use_dsp_jit:" config_spec.yml`
 - Escape hatches present: `grep -rn "XEMU_VTX_EXACT\|XEMU_REPORTS_SYNC" hw/xbox/nv2a/pgraph/vk/{vertex,reports}.c`
 - Failed-experiments row count: `awk '/^## Failed/,/^## Future/' README.md | grep '^| ' | grep -vc '^| Attempt\|^|---'` (34 as of 2026-07-05)
 - Current commit footer: `git log -3 --format=%B | grep Co-Authored-By`

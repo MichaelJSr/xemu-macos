@@ -425,7 +425,7 @@ work produces. Predicted-numbers-before-run discipline is covered in
 
 ---
 
-## 4. Known documentation drift (as of 2026-07-11)
+## 4. Known documentation drift (as of 2026-09-08)
 
 This section records the debt; it does not fix it. Fixing README or
 RELEASING is a normal doc change through change control
@@ -475,6 +475,26 @@ Open items:
    Full engine-mediation rules: `xemu-change-control`; knob catalog:
    `xemu-config-and-flags`.
 
+**2026-09-08 drift-fix pass** (at `add066354f`): the whole Windows
+docs set was reconciled with what is actually on main.
+`audio.use_dsp_jit`'s default is **fork-owned** and back to `true`
+after the 2026-09-07 upstream merge briefly carried upstream's
+`fc13b78060` flip — with `dsp_jit.enabled` also `false`, that flip put
+*every* platform's stock config on the plain C interpreter, and three
+docs plus the merge body described it as "non-Apple hosts only". Also
+in that pass: eight escape-hatch rows that have no `getenv` on main
+moved out of the `docs/optimizations.md` live knob table into a
+clearly-labelled "Escape hatches on branch `windows-wave1-wip` (not on
+main)" table inside the Windows native-port section (they move back as
+their commits land); the README's native-MSYS2 paragraph corrected to
+`-O2` + clang-only `XEMU_PGO`; `docs/windows-port-2026-09.md` §8/§9
+rewritten around main's real delta and the Windows exit-139 protocol;
+and a supersession note added to the head of
+`docs/windows-audit-2026-09-summary.md`. The general lesson, worth
+keeping: **a doc that describes a branch is drift the moment it sits in
+main's tree** — say which ref a claim is true of, and prefer a table a
+reader can move over prose they must rewrite.
+
 The flag-item mirror in `xemu-config-and-flags` ("Known
 README-vs-code drift — flag items") was updated to resolved in the
 same pass; keep the two sections in sync.
@@ -503,8 +523,17 @@ for v in $(grep -o 'XEMU_[A-Z_]*' README.md | sort -u); do
   git grep -lq "$v" -- '*.c' '*.h' '*.m' '*.mm' '*.cc' '*.sh' '*.yml' '*.py' \
     || echo "README documents $v but code doesn't reference it"
 done
-# 6. Config recommendations vs defaults
+# 6. Config recommendations vs defaults (expect dsp_jit.enabled false,
+#    use_dsp_jit true — the latter is fork-owned, upstream ships false)
 grep -n -A3 'dsp_jit:' config_spec.yml
+# 7. Documented knobs that only exist on a branch: every XEMU_* named in
+#    a live knob table must have a getenv on THIS ref (only the live
+#    table is scanned: rows under "Escape hatches on branch
+#    windows-wave1-wip" are expected to have none until they land)
+for v in $(sed -n '/^| Env var/,$p' docs/optimizations.md | awk '/^## /{exit} {print}' | grep -o 'XEMU_[A-Z0-9_]*' | sort -u); do
+  git grep -q "$v" HEAD -- '*.c' '*.h' '*.m' '*.mm' '*.cc' '*.sh' '*.yml' '*.py' \
+    || echo "docs name $v but HEAD has no reference"
+done
 ```
 
 Anything the sweep surfaces that you don't fix in the same change

@@ -535,8 +535,26 @@ Preferred because it can actually run and be tested, unlike the cross
 build. Release builds default to `-Dx86_version=3` (AVX2/BMI2/FMA) unless
 you already passed your own `-Dx86_version=`
 (`build.sh`'s Windows-native branch checks `echo "$@" | grep -q
-'x86_version'` before adding it). `XEMU_PGO=generate`/`use` work the same
-two-stage way as macOS (§3.6).
+'x86_version'` before adding it).
+
+Two things that differ from the macOS arm, verified 2026-09-08:
+
+- **The optimization level is `-O2`, not `-O3`.** The release `case` in
+  `build.sh` has a `win64*|MINGW*|MSYS*` arm that sets only
+  `-Dqom_cast_debug=false -Dtrace_backends=nop`, so meson's project
+  default `optimization=2` (`meson.build:3`) stands — LTO *and* `-O3`
+  are both off there, unlike §3.2's Darwin/Linux flags. An `-O3` arm
+  behind `XEMU_WIN_O3` exists on branch `windows-wave1-wip` and is not
+  landed; the 2026-09-08 review wants it re-cut as opt-in, because it is
+  the leading suspect for that branch's Windows exit-139 and no CI leg
+  builds Windows at `-O3`.
+- **`XEMU_PGO` needs clang.** The shared `setup_pgo()` (§3.6) emits
+  `-fprofile-generate=<dir>` / `-fprofile-use=<dir>/default.profdata`
+  and shells out to `llvm-profdata merge` — the clang spelling. MSYS2's
+  default MINGW64 toolchain is GCC, which wants a `.gcda` directory and
+  has no `llvm-profdata`, so a PGO build there needs the clang packages
+  (`mingw-w64-x86_64-clang`, `-compiler-rt`) selected as `CC`/`CXX`. A
+  GCC arm for `setup_pgo` also lives unlanded on `windows-wave1-wip`.
 
 ### 6.2 Cross-compile (Docker)
 

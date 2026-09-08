@@ -430,9 +430,11 @@ a third engine.** `hw/xbox/mcpx/apu/dsp/dsp_c.c:94-105` calls
 function when `dsp56k_jit_enabled()`. Its translation unit is
 `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`; symbols are namespaced
 `dsp56k_jit_*` (not `dsp_jit_*` — the *other*, upstream-inherited engine
-below). It compiles in only on Apple Silicon:
-`#define DSP56K_JIT_SUPPORTED (defined(__APPLE__) && defined(__aarch64__))`
-(`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h:16-20`).
+below). It compiles in on AArch64 POSIX hosts only:
+`#if defined(__aarch64__) && !defined(_WIN32)` -> `DSP56K_JIT_SUPPORTED 1`
+(`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h:24-28`, re-verified
+2026-09-08 — so Linux arm64 is in, Windows/ARM64 is out because the code
+buffer uses POSIX `mmap`).
 
 **The precedence rule** — `dsp_want_external_jit_engine()`,
 `hw/xbox/mcpx/apu/dsp/dsp.c:113-128`:
@@ -492,7 +494,11 @@ harder case is reusing the `dsp_jit_*` (upstream) or `dsp56k_jit_*`
 **Escape hatch.** `audio.dsp_jit.enabled` (config, default **false** —
 this fork's JIT) and `audio.use_dsp_jit` (config, default **true** —
 upstream engine, but only consulted when the fork JIT isn't
-active/supported) are both persistent config keys, not env vars;
+active/supported) are both persistent config keys, not env vars. The
+`use_dsp_jit` default is **fork-owned**: upstream set it `false` in
+`fc13b78060` and the 2026-09-07 merge took the flip, which left a stock
+config selecting no JIT engine at all on any platform; the fork restored
+`true` on 2026-09-08. Re-assert it after every upstream merge.
 `XEMU_DSP_JIT` also exists as a runtime override — see
 `xemu-config-and-flags` for the full precedence table including the
 diagnostic knobs (`XEMU_DSP_JIT_STATS`, `_DIFF`, `_PIN_AUDIT`, etc).

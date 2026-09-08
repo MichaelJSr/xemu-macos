@@ -130,8 +130,8 @@ recommended non-default on Apple Silicon; **debug** = development aid;
 | `display.window.fullscreen_on_startup` | bool | `false` | prod | With `fullscreen_exclusive` (bool, `false`). |
 | `display.window.startup_size` | enum | `1280x960` | prod | Plus `last_width`/`last_height` (640/480) when `last_used`. |
 | `display.vulkan.validation_layers` | bool | `false` | debug | Enables VK validation if the layer is installed (`pgraph/vk/instance.c:163`). Siblings: `debug_shaders`, `assert_on_validation_msg`, `preferred_physical_device`. |
-| `audio.dsp_jit.enabled` | bool | **`false`** | rec | Fork's ARM64 inline basic-block DSP JIT (Apple Silicon only). README recommends `true` on Apple Silicon; the shipped default is still false — both statements are correct, state them together. UI: `main-menu.cc:929`. |
-| `audio.use_dsp_jit` | bool | **`true`** | prod | Upstream dsp56300-subproject JIT engine. **Ignored while the fork JIT is supported+enabled** — see precedence box below. UI: `main-menu.cc:936`. |
+| `audio.dsp_jit.enabled` | bool | **`false`** | rec | Fork's ARM64 inline basic-block DSP JIT (AArch64 POSIX hosts — Apple Silicon and Linux arm64; see the precedence box). README recommends `true` on Apple Silicon; the shipped default is still false — both statements are correct, state them together. UI: `main-menu.cc:929`. |
+| `audio.use_dsp_jit` | bool | **`true`** | prod | Upstream dsp56300-subproject JIT engine. **Ignored while the fork JIT is supported+enabled** — see precedence box below. UI: `main-menu.cc:936`. **Fork-owned default** (2026-09-08): upstream flipped it to `false` in `fc13b78060` and the 2026-09-07 merge took the flip; the fork restored `true` because with `dsp_jit.enabled` also false a stock config selected *no* JIT engine on any platform. Re-check after every upstream merge. |
 | `audio.vp.num_workers` | integer | `0` (= auto) | prod | Voice-processor worker threads; 0 -> `SDL_GetNumLogicalCPUCores()`, clamped to `[1, MAX_VOICE_WORKERS]` (`hw/xbox/mcpx/apu/vp/vp.c:2218-2219`). |
 | `audio.use_dsp` | bool | `false` (implicit) | prod | Bare-`bool` spec entry -> implicit false. |
 | `perf.hard_fpu` | bool | `true` | prod | ARM64 inline x87 FPU (native AArch64 FP instead of softfloat). UI: `main-menu.cc:70`. |
@@ -156,7 +156,7 @@ Two independent toggles select among three engines
 ```c
 static bool dsp_want_external_jit_engine(void)
 {
-#if DSP56K_JIT_SUPPORTED                 /* __APPLE__ && __aarch64__ */
+#if DSP56K_JIT_SUPPORTED                 /* __aarch64__ && !_WIN32 */
     if (g_config.audio.dsp_jit.enabled) {
         return false;                    /* fork inline JIT wins */
     }
@@ -165,16 +165,23 @@ static bool dsp_want_external_jit_engine(void)
 }
 ```
 
-- `audio.dsp_jit.enabled = true` (Apple Silicon): C interpreter engine
+- `audio.dsp_jit.enabled = true` (AArch64 POSIX): C interpreter engine
   with the fork's inline ARM64 JIT. `audio.use_dsp_jit` becomes a
   no-op (`dsp_set_engine` early-outs, `dsp.c:245-252`).
 - `audio.dsp_jit.enabled = false` (default) + `audio.use_dsp_jit =
-  true` (default): upstream dsp56300 JIT engine.
-- Both false: plain C interpreter.
+  true` (default): upstream dsp56300 JIT engine. **This is what a
+  stock config gets on every platform, macOS included** — the fork
+  JIT is opt-in.
+- Both false: plain C interpreter. Between the 2026-09-07 upstream
+  merge and the 2026-09-08 restoration of the fork's `use_dsp_jit`
+  default, this was the stock configuration everywhere; if you are
+  reading a measurement from that window, check which engine it used.
 
-`DSP56K_JIT_SUPPORTED` is `defined(__APPLE__) && defined(__aarch64__)`
-(`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h:15-19`); the JIT
-source compiles to nothing elsewhere
+`DSP56K_JIT_SUPPORTED` is `defined(__aarch64__) && !defined(_WIN32)`
+(`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h:24-28`, verified
+2026-09-08) — AArch64 POSIX hosts, so Linux arm64 too, not Apple only;
+Windows/ARM64 is excluded because the code buffer uses POSIX `mmap`.
+The JIT source compiles to nothing elsewhere
 (`hw/xbox/mcpx/apu/dsp/interp/meson.build`).
 
 **`XEMU_DSP_JIT` does NOT switch engines.** It only overrides the
@@ -276,7 +283,7 @@ xemu-testing).
 Notes:
 
 - All `XEMU_DSP_JIT_*` vars are inert unless `DSP56K_JIT_SUPPORTED`
-  (Apple Silicon) and the interpreter engine is running.
+  (AArch64 POSIX) and the interpreter engine is running.
 - The README table header "All default off / fast-path; set to `1` to
   enable" (README ~line 110) is a simplification: `XEMU_VTX_EXACT` is
   default-on/inverted, `XEMU_MAX_QUERIES` and `XEMU_COREAUDIO_FRAMES`
@@ -571,5 +578,8 @@ as of 2026-08-04): the env-var count (**68**), the MVK **six**-tuple,
 (**db66022459…**, v1.4.2 final), `XEMU_HARDENING`'s default (**1** —
 upstream register zeroing kept; `0` is the killed experimental arm, not
 the shipping choice), the default-ON knob list, every `build.sh` line
-anchor (the file passed 800 lines in this wave), and
-`audio.dsp_jit.enabled`'s default (false).
+anchor (the file passed 800 lines in this wave),
+`audio.dsp_jit.enabled`'s default (false), and `audio.use_dsp_jit`'s
+default (**true**, fork-owned since 2026-09-08 — upstream ships
+`false`, so re-run `grep -n -A3 'use_dsp_jit:' config_spec.yml` after
+any merge).

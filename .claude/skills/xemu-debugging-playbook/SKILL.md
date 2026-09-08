@@ -123,7 +123,10 @@ config-driven — see `dsp_want_external_jit_engine()` in
 `hw/xbox/mcpx/apu/dsp/dsp.c`):
 
 1. `[audio.dsp_jit] enabled = false` (fork JIT off; `audio.use_dsp_jit`
-   default true takes over → upstream dsp56300 JIT engine). Glitch persists
+   default true takes over → upstream dsp56300 JIT engine; that default
+   is fork-owned and was briefly `false` between the 2026-09-07 merge
+   and the 2026-09-08 restore, so confirm it in the run's config rather
+   than assuming). Glitch persists
    ⇒ not the fork JIT — suspect VP/CoreAudio (also try step 1b:
    `use_dsp_jit = false` too → C interpreter engine with no JIT of either
    kind, the most conservative configuration).

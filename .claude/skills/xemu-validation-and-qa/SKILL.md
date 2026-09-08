@@ -194,8 +194,10 @@ knobs verified in `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
    (`dsp_want_external_jit_engine()`, `hw/xbox/mcpx/apu/dsp/dsp.c`): the
    fork JIT runs when supported and `audio.dsp_jit.enabled = true`
    (config default is **false**); otherwise the upstream dsp56300 engine
-   runs iff `audio.use_dsp_jit` (default true). So a default config does
-   NOT exercise the fork JIT — and `XEMU_DSP_JIT` cannot fix that:
+   runs iff `audio.use_dsp_jit` (default **true** — fork-owned; upstream
+   ships `false` and the 2026-09-07 merge briefly took that flip, so any
+   measurement from 2026-09-07/08 must state which engine it ran). So a
+   default config does NOT exercise the fork JIT — and `XEMU_DSP_JIT` cannot fix that:
    engine selection reads g_config only, and the env var merely toggles
    the inline JIT *within* the interpreter engine (full truth table:
    xemu-config-and-flags, the precedence owner). Select the engine by
@@ -495,7 +497,7 @@ the repo root unless absolute):
 - DIFF semantics + sampling + per-translation gate: `grep -n -A8 'XEMU_DSP_JIT_DIFF' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - DIFF failure signature: `grep -n 'DIFF FAILURE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - Validator final line + STATS buckets: `grep -n 'validator\|cf_fallback buckets' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-- Engine precedence (the `config_spec.yml:339` comment must name `dsp_want_external_jit_engine()` — correct as of 2026-07-11): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; sed -n '336,342p' config_spec.yml`
+- Engine precedence (the `config_spec.yml` comment above `dsp_jit:` must name `dsp_want_external_jit_engine()` — correct as of 2026-09-08; the file's line numbers move, so grep rather than `sed -n`): `grep -n -B6 -A8 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c; grep -n -B6 -A4 'dsp_jit:' config_spec.yml`
 - DSP config defaults: `grep -n -A4 'dsp_jit:\|use_dsp_jit' config_spec.yml`
 - CI test step (xbox suite on macOS arm64 + both Linux legs since 2026-07-11; expect build-macos.yml AND build-linux.yml hits): `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
 - Pin-bump gauntlet requirement + pin value: `grep -n 'MVK_PIN\|validation gauntlet' scripts/build-moltenvk.sh`
