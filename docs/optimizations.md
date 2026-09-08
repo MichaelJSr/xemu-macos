@@ -226,7 +226,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   before indexing host `filters[]` / HRTF / SSL tables (was OOB read then
   write), pitch LUT index clamped, APU direct RAM stores mark dirty
   again, engine switch serialised under the BQL, XID unbound-pad guard
-  bounds-checked. (5) `nv2a_vk_bounds_check` is a real check in every
+  bounds-checked. The XID half of that commit (`hw/xbox/xid.c`,
+  `hw/xbox/xid-gamepad.c`) **landed on main 2026-09-08** — see Input
+  below; the APU half stays on the branch until the dirty-marking
+  default is settled (the commit body calls it hatch-gated, but
+  `XEMU_APU_RAM_DIRTY` defaults ON, Apple included).
+  (5) `nv2a_vk_bounds_check` is a real check in every
   build (was `__builtin_unreachable()` in release); `volkLoadDevice()` on
   non-Apple; `VK_KHR_external_semaphore_win32` optional; LRU eviction
   in-use filter restored; `CPUJumpCache` stride static-asserted. (6)
@@ -1269,6 +1274,23 @@ table's shape so each moves back up verbatim as its commit lands —
   pre-registered `code_buf_used` band.
 
 ### Input
+
+- **XID pad `index` is bounded before it reaches `bound_controllers[]`
+  (2026-09-08).** The `index` qdev property is a `uint8`
+  (`hw/xbox/xid-gamepad.c:249`) but selects a slot in the 4-element
+  `bound_controllers[]` (`ui/xemu-input.h:118`), and
+  `xemu_input_get_bound()` (`ui/xemu-input.c:742`) does not range-check
+  it — so a hand-written `-device usb-xbox-gamepad,index=4` read past
+  that array, and the fork's `if (!state)` guard cannot be relied on to
+  reject what comes back before `update_output()` writes through it.
+  `update_input()`/`update_output()` now go through
+  `xid_get_bound_controller()` (`hw/xbox/xid.c:53`), which returns NULL
+  for an out-of-range index, and both realize hooks reject one up front
+  via `error_setg` (`hw/xbox/xid-gamepad.c:177`) so a mistyped `-device`
+  line fails loudly instead of producing a silently dead pad. Neither
+  path is reachable from the app: `index` is only ever set by
+  `xemu_input_bind()` (`ui/xemu-input.c:830`), whose callers all pass
+  0..3, and for 0..3 behaviour is unchanged on every platform.
 
 - **In-app rebinding UI polish** (Input tab → Input Mapping; the
   remap table itself is upstream's). Esc cancels an in-progress

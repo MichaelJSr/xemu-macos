@@ -167,9 +167,34 @@ static void usb_xid_gamepad_class_init(ObjectClass *klass, const void *data)
     uc->handle_attach = usb_desc_attach;
 }
 
+/*
+ * `index` is a plain uint8 property, but it selects a slot in the
+ * 4-element bound_controllers[] array (ui/xemu-input.h). Reject an
+ * out-of-range value at construction so a mistyped `-device
+ * usb-xbox-gamepad,...,index=N` fails loudly instead of silently
+ * producing a pad that is bound to nothing.
+ */
+static bool xid_check_device_index(USBDevice *dev, uint8_t device_index,
+                                   Error **errp)
+{
+    if ((size_t)device_index >= ARRAY_SIZE(bound_controllers)) {
+        error_setg(errp, "%s: index must be 0..%u (got %u)",
+                   object_get_typename(OBJECT(dev)),
+                   (unsigned)ARRAY_SIZE(bound_controllers) - 1u,
+                   (unsigned)device_index);
+        return false;
+    }
+    return true;
+}
+
 static void usb_xbox_gamepad_realize(USBDevice *dev, Error **errp)
 {
     USBXIDGamepadState *s = USB_XID(dev);
+
+    if (!xid_check_device_index(dev, s->device_index, errp)) {
+        return;
+    }
+
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, 2);
@@ -194,6 +219,11 @@ static void usb_xbox_gamepad_realize(USBDevice *dev, Error **errp)
 static void usb_xbox_gamepad_s_realize(USBDevice *dev, Error **errp)
 {
     USBXIDGamepadState *s = USB_XID_S(dev);
+
+    if (!xid_check_device_index(dev, s->device_index, errp)) {
+        return;
+    }
+
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, 2);

@@ -38,6 +38,26 @@ const USBDescStrings desc_strings = {
     [STR_SERIALNUMBER] = "1",
 };
 
+/*
+ * The `index` qdev property is a uint8 that accepts 0..255 with no
+ * validation, while xemu_input_get_bound() indexes a 4-element array
+ * (bound_controllers, ui/xemu-input.h) without a range check. A
+ * hand-written `-device usb-xbox-gamepad,index=4` therefore reads past
+ * that array, and whatever it returns cannot be relied on to be NULL,
+ * so the `if (!state)` guards below may let update_output() write
+ * through it. Bound the index here; the realize hooks in
+ * xid-gamepad.c already reject it up front and `index` is not carried
+ * in the XID vmstate, so on the current tree this is defence in depth
+ * for any future path that sets it after construction.
+ */
+static ControllerState *xid_get_bound_controller(USBXIDGamepadState *s)
+{
+    if ((size_t)s->device_index >= ARRAY_SIZE(bound_controllers)) {
+        return NULL;
+    }
+    return xemu_input_get_bound(s->device_index);
+}
+
 void update_output(USBXIDGamepadState *s)
 {
     if (xemu_input_get_test_mode()) {
@@ -45,7 +65,7 @@ void update_output(USBXIDGamepadState *s)
         return;
     }
 
-    ControllerState *state = xemu_input_get_bound(s->device_index);
+    ControllerState *state = xid_get_bound_controller(s);
     if (!state) {
         /* Emulated pad with no host binding (e.g. raw -device for
          * snapshot-topology matching, or a pad that disconnected):
@@ -64,7 +84,7 @@ void update_input(USBXIDGamepadState *s)
         return;
     }
 
-    ControllerState *state = xemu_input_get_bound(s->device_index);
+    ControllerState *state = xid_get_bound_controller(s);
     if (!state) {
         /* Unbound pad reports neutral input (in_state stays at its
          * initialized defaults) instead of asserting. */
