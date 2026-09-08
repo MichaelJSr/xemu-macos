@@ -228,6 +228,10 @@ copied HDD image and `-config_path`.
 
 ## 8. State of main, and what was verified on the Mac (2026-09-08)
 
+*Landing status of the wave-1 batches and the one unexplained boot stall
+seen during their macOS smokes are recorded in
+`docs/windows-wave1-review-2026-09-08.md` §7.*
+
 Main (`macos-optimizations`) moved `ea9633798d` → `add066354f`: the
 upstream merge `2e0aad3e18` (which also carried upstream's
 `use_dsp_jit` default flip, restored by the fork on 2026-09-08 — §2),

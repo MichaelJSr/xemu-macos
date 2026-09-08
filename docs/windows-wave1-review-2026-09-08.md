@@ -201,3 +201,46 @@ v4, the DSP default, and the glslang 16.5.0 cache-key roll.
   `/tmp/xemu-smoke-main165` (glslang 16.5 build, sha256 `c79d5fda…`),
   `/tmp/xemu-smoke-w1`, `/tmp/xemu-smoke-w1b`; build logs
   `/tmp/xemu-build-*.log`. The wave-1 worktree at `/tmp/xemu-w1` was removed.
+
+## 7. Landing status (2026-09-08, later the same day)
+
+Phase A (main-side fixes) landed as seven commits ending in `4d899b928d`
+(PTIMER guard `3446eccb47`, SPIR-V cache runtime key `ca8cbbc281`,
+wrap-drift warning + tar rekey `eeb992dcd2`, harness fixes `c77d8a4b05`,
+corpus boot smoke `4d0cec2790`, `use_dsp_jit` default `dc8064d112`, docs
+`4d899b928d`); CI 21/21 green. Wave 1 was re-cut one reviewed commit per
+batch on top of it, each with its fold-ins from §2: diagnostics
+`326bfd7865`, `ui/` hunks `164fd4c876`, XID bounds `f655d3b09f`, SPIR-V
+cache hardening `43869f5a0b` (first push, this group), bounds checks /
+volk / LRU `51d9dc98da`, APU half with dirty marking off on Apple
+`7969bf1982`, build.sh re-cut with `-O3` opt-in `5dfde3356d`, docs
+`959cbfc61e`. `285779ce83` (display/PVIDEO) stays on the branch. Every
+landed commit: arm64 release build clean, `meson test --suite xbox` 6/6.
+The forced-truncation test for the SPIR-V cache passed (a word-aligned
+half-length `.spv` was rejected with the new "ignoring corrupt" line,
+recompiled byte-identical, and a planted stray `.tmp` was swept).
+
+**One unexplained boot stall, recorded so it is not lost.** On the
+first-group build (`43869f5a0b`), run E1 of its savestate smoke: the
+first nsprof interval was normal (6.5 s, 34 flips, boot animation), then
+one 34.7 s interval with 7 flips — `flip_idle` max 34.3 s, i.e. the
+guest issued no flip for the whole window, while the UI thread presented
+4067 frames in it (~120 Hz) — and the owner heard the boot audio looping.
+The harness's `loadvm` at t≈40 s ended the stall; the game then ran at
+~41 fps / ~490 draws per flip, but the window stayed white (luma 248,
+`ARTIFACT(WHITE_SCREEN)`), so the present chain did not re-attach after
+the renderer reset during the stall. No assert, no log line. It did not
+reproduce: 5 same-conditions boots on that build, then 6 alternating
+boots against 6 on the phase-A build with `XEMU_PFIFO_HEARTBEAT=1`, all
+clean, heartbeat alive throughout; tally 1/17 boots on this build, 0/33
+on every other build today, another GPU game and two CPU-bound jobs
+running on the host the whole time. The PTIMER-guard theory (the new
+`timer_del` path dropping the alarm inside a transient unconfigured
+window) was tested with instrumented boots and refuted: the kernel writes
+NVPLL once with MDIV=1, programs NUMERATOR/DENOMINATOR before
+`ALARM_0=0xffffffff`, and never re-enters the window. Classification:
+rare, unattributed, not a landing blocker on the evidence. If it recurs:
+run with `XEMU_PFIFO_HEARTBEAT=1 XEMU_NV2A_NSPROF=1` (expect
+`waiting_flip=1` with `iters` advancing = guest-side stall), take
+`sample <pid>` during the stall, and note whether the white present
+persists after recovery — that second half is its own defect.
