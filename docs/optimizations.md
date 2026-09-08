@@ -35,6 +35,8 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_PGRAPH_MMIO_STATS` | `1` prints an exit histogram of PGRAPH per-register MMIO hit-rate (reads/writes, interrupt-reg + RDI category totals, top offsets) — ranks ranges for the PGRAPH lockless audit |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
+| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by either hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
+| `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the legacy in-place `.spv` write. Default writes `<hash>.spv.<pid>.tmp` and `g_rename`s it over the entry (same discipline as the pipeline cache), so a kill mid-write cannot leave a torn entry for the next launch to ingest; `.tmp` files orphaned by a crash are swept once per process when the cache directory is first resolved. Landed on main 2026-09-08 |
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` **plus** a full `tlb_flush_all_cpus_synced` **plus** an unconditional jump-cache wipe — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else, plus reuse-pool hit/park/evict counters and a live-coverage audit run on the 33 ms surface throttle tick; `2` also aborts on a coverage violation (`nv2a_vk_assert` is stripped in perf builds, so the check carries its own escalation). No behavior change |
 | `XEMU_SURFACE_CB_REUSE` | `1` (**default off, dark**) parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, so a shape ping-pong stops paying two full guest TLB flushes per swap. Sound because the registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges` and ignores the registered range); the pool evicts oldest with a real remove and drains fully at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. Unset = byte-identical legacy path. Measured 2026-08-04 and killed (−0.66 fps 3/3; Failed table) — stays dark as the record |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
@@ -213,10 +215,25 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `XEMU_WIN32_DXGI` hatch + the two non-Apple compile warnings in `ui/`
   (present header included unconditionally, `g_framebuffer_rect_shader`
   gated). (2) SPIR-V disk
-  cache: `qemu_fopen` (UTF-16 paths on Windows), atomic temp+rename
-  writes, blob validation (size, magic, reflect) with regenerate-on-miss
-  instead of `VK_CHECK` abort, `-dbg` variant tag when `debug_shaders`
-  is on. (3) PVIDEO/display: the staging reclaim that could call
+  cache — **landed on main 2026-09-08** (`818fe27828` plus the review's
+  fixes): `qemu_fopen` (UTF-16 paths on Windows), atomic temp+rename
+  writes, a `-dbg` variant tag when `debug_shaders` is on, and blob
+  validation with regenerate-on-miss instead of an abort. The branch did
+  not actually deliver that last property — it leaned on SPIRV-Reflect
+  to reject a truncated blob, but the parser's bounds check is
+  `assert(InRange(...))` in `ReadU32()`/`ReadStr()` and the subproject
+  compiles with asserts live, so a word-aligned truncated `.spv` could
+  abort every launch and was never deleted. What landed makes
+  `spirv_blob_is_valid()` self-sufficient before the parser sees the
+  blob: it walks the instruction stream *and* requires the last
+  instruction to be `OpFunctionEnd`. The walk alone was not enough
+  either — measured, about a fifth of word-aligned truncations land on
+  an instruction boundary and walk clean, and SPIRV-Reflect then crashed
+  on some of them and accepted others straight through to the driver;
+  the trailer rule cuts that residue to function-boundary cuts, for
+  which the parser reliably returns an error. It also sweeps `.tmp`
+  files orphaned by a crash at cache open.
+  (3) PVIDEO/display: the staging reclaim that could call
   `pgraph_vk_finish()` while the display aux command buffer was open is
   hoisted ahead of the aux CB begin; overlay uploads no longer skip on a
   register-only key; the display early-out also honours
@@ -283,17 +300,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
 
-These seven knobs belong to wave-1 commits that are **not** landed here,
+These five knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
 `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
 which matches nothing at all for any of them. Rows are kept in the knob
 table's shape so each moves back up verbatim as its commit lands —
-`XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks.
+`XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
+and `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
+`818fe27828` landed.
 
 | Env var | Purpose | Lands with |
 |---|---|---|
-| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache (no loads/stores) — cold-compile A/B without deleting the cache dir | `818fe27828` |
-| `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the in-place `.spv` write; default writes `<path>.<pid>.tmp` + `g_rename` and validates blobs on load | `818fe27828` |
 | `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
 | `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
 | `XEMU_APU_RAM_DIRTY` | `=0` restores APU direct guest-RAM stores that skip dirty marking; default marks the written range for the NV2A/TEX dirty clients | `971292ed48` |
@@ -931,6 +948,65 @@ table's shape so each moves back up verbatim as its commit lands —
   `build.sh` now warns when a subproject checkout has drifted from its
   `.wrap` (Build + packaging), which is how the 16.2.0-vs-16.5.0 skew
   went unnoticed.
+- **The SPIR-V cache stopped trusting what it reads (2026-09-08).**
+  Cherry-picked from `818fe27828` on `windows-wave1-wip`, written for a
+  native-Windows profile path, with the 2026-09-08 review's fixes folded
+  in; it changes behaviour on every platform. Four parts. (a) The cache
+  opens its files with `qemu_fopen()` — `_wfopen()` on a UTF-16 path on
+  Windows, an inline `fopen()` everywhere else — so a non-ASCII
+  `%APPDATA%` stops silently missing the cache forever (the path comes
+  from `SDL_GetPrefPath` as UTF-8 and Windows `fopen()` reads it in the
+  process ANSI code page). (b) Stores go to `<hash>.spv.<pid>.tmp` and
+  are `g_rename`d over the entry (the pipeline cache's discipline), so a
+  kill mid-write or two instances compiling the same shader cannot leave
+  a torn `.spv` behind; `.tmp` files orphaned by a crash are swept once
+  per process, when the cache directory is first resolved. (c) Every
+  blob read from disk is validated — size ≥ 5 words and a multiple of 4
+  (`VUID-VkShaderModuleCreateInfo-codeSize-08735`), the SPIR-V magic,
+  an instruction-stream walk over `<word-count:16><opcode:16>` headers
+  that rejects a zero count or one that runs past the last word, and a
+  last instruction of `OpFunctionEnd` — and only a blob that survives
+  that is handed to SPIRV-Reflect and then to `vkCreateShaderModule`;
+  any rejection deletes the file and recompiles instead of aborting the
+  process. (d) `debug_shaders` adds a `-dbg` suffix to the cache
+  directory, so a debug run stops poisoning later normal runs with
+  unoptimized SPIR-V and toggling the option stops no-oping against a
+  warm cache. Parts of (c) are the review's fix, in two rounds. The
+  branch's claim that reflect-parsing a cached blob turns a torn file
+  into a regeneration was false, because SPIRV-Reflect's bounds check is
+  `assert(InRange(...))` in `ReadU32()`/`ReadStr()`
+  (`subprojects/SPIRV-Reflect/spirv_reflect.c:367`, `:416`) and it is
+  compiled with asserts live — nothing in `build.sh` or `meson.build`
+  sets meson's `b_ndebug`, and the only `-DNDEBUG` among the 3017
+  entries of `build/compile_commands.json` is tomlplusplus's — so a
+  truncated `.spv` could abort inside the parser on every launch and was
+  never deleted. The first round added the walk; measuring the walk then
+  refuted *it* as a complete answer, because a truncation landing on an
+  instruction boundary walks clean: over 34,774 word-aligned truncations
+  of five warm entries, 20.8% survived the walk, and SPIRV-Reflect
+  crashed on 15% of those and returned SUCCESS (i.e. handed a torn
+  module to the driver) on 23%. Hence the trailer rule, which costs
+  nothing and is sound from the spec: SPIR-V's logical layout (§2.4)
+  puts function definitions last and any module with an entry point has
+  at least one function, so a complete module always ends in
+  `OpFunctionEnd`. The reflect parse stays, as the second gate for a
+  blob that is structurally well-formed but wrong. Hatches:
+  `XEMU_SPIRV_CACHE=0` (bypass), `XEMU_SPIRV_CACHE_ATOMIC=0` (legacy
+  in-place write); validation is unconditional by design — a cache the
+  process cannot trust is worse than no cache. No base-tag bump, so
+  existing valid entries stay warm on every platform; only a `-dbg` run
+  starts cold. Not a perf change: the added work is one linear pass over
+  a blob that is read once per shader per process. Measured 2026-09-08:
+  zero false rejects on 448 real modules (the dev Mac's 394 warm
+  `v0.13.2-glslang16.5.0` entries, 46 older `v0.13.1` ones, and
+  `glslangValidator -g`/`-gV`/`-gVS` output for the `debug_shaders`
+  option set), all of which end in `OpFunctionEnd`; and of all 2,416,107
+  word-aligned truncations of those 394 entries the two rules reject
+  99.85%, with SPIRV-Reflect returning an error — never SUCCESS, never
+  an abort — for all 3,719 function-boundary cuts that survive, so every
+  one is deleted and recompiled. The orchestrator's landing check is to
+  force-truncate a cached `.spv` and confirm the entry is deleted and
+  regenerated instead of aborting the launch.
 
 ### MetalFX + presentation
 

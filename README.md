@@ -216,6 +216,18 @@ same texture within one frame otherwise lands a frame late).
 **Audio glitches.** `XEMU_COREAUDIO_FRAMES=2048` for a larger buffer.
 For DSP-heavy titles, confirm DSP JIT is enabled.
 
+**Vulkan renderer aborts at launch after an unclean exit.** A `.spv`
+file in the on-disk shader cache torn by a kill or a power loss used to
+abort every subsequent launch. Since 2026-09-08 the cache writes each
+entry to a temp file and renames it into place, and validates every blob
+it reads back — header, an instruction-stream walk, an `OpFunctionEnd`
+trailer, then a SPIRV-Reflect parse — before the driver can see it,
+deleting and recompiling anything that fails. Measured over all 2.4M
+word-aligned truncations of a warm 394-entry cache: none reached the
+driver and none aborted the launch. Deleting the `spirv_cache_v*/`
+directory in the xemu data dir is still a valid manual reset, and
+`XEMU_SPIRV_CACHE=0` bypasses the cache entirely.
+
 **Windows: "Failed to initialize Vulkan renderer" / falls back to
 OpenGL.** The Vulkan loader (`vulkan-1.dll`) comes from the GPU driver;
 xemu bundles nothing. Update the vendor driver on real hardware. Inside
