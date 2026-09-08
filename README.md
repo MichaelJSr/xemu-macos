@@ -45,10 +45,16 @@ hard FPU on x86_64) apply automatically; macOS-only pieces (MetalFX,
 Metal/IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT, the
 AArch64 inline x87 FPU) compile out.
 
-- **Native (MSYS2/MINGW):** `./build.sh` from an MSYS2 shell. Release
-  builds default to `-Dx86_version=3`; `XEMU_PGO=generate/use` work
-  like on macOS. Preferred route — a Windows VM or x86 box can also
-  run-test the result.
+- **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
+  builds default to `-Dx86_version=3` and `-Doptimization=3`;
+  `XEMU_PGO=generate/use` work like on macOS (gcc or clang). Preferred
+  route — first done for real on 2026-09-07 (Windows 10, NVIDIA TITAN Xp,
+  Vulkan renderer renders correctly). The exact `pacman` package list,
+  the traps a fresh MSYS2 hits (CRLF checkout, Python ≥ 3.13 prefix,
+  MSYS tar, `USERPROFILE`), the validation-layer recipe and the open
+  work list are in [docs/windows-port-2026-09.md](docs/windows-port-2026-09.md);
+  the ranked real-hardware audit is
+  [docs/windows-audit-2026-09-summary.md](docs/windows-audit-2026-09-summary.md).
 - **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
   container with the `xemu-win64-toolchain` image and
   `CROSSPREFIX=x86_64-w64-mingw32.static-` set — see

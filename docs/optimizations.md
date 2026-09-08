@@ -123,6 +123,46 @@ table carries the user-facing subset.
 > the crash is not attributed to any wave mechanism; it is recorded so a
 > future reader recognizes the signature rather than re-debugging it.
 
+### Windows native port (2026-09-07)
+
+First run of the fork on real Windows hardware (Windows 10, i7-4770K,
+NVIDIA TITAN Xp 561.09, MSYS2 MINGW64 gcc 16). Full recipe, traps,
+results and the open work list: `docs/windows-port-2026-09.md`; the
+ranked static audit (60 confirmed / 19 plausible / 10 refuted findings,
+22-batch plan): `docs/windows-audit-2026-09-summary.md` +
+`docs/windows-audit-2026-09.json`. macOS behaviour is unchanged by
+every item below unless stated; none of it has been built on macOS yet.
+
+- **Upstream merge `2e0aad3e18`** (xemu master `429c9972eb`): DXGI /
+  WGL_NV_DX_interop presenter, PTIMER alarm IRQs (nv2a vmstate v4),
+  controllerdb from config path, glslang 16.5.0, and upstream flipping
+  `audio.use_dsp_jit` to **false** — accepted, so non-Apple hosts now
+  default to the DSP interpreter (fork precedence unchanged:
+  `audio.dsp_jit.enabled` wins where supported). Only `ui/xemu.c`
+  conflicted; DXGI hooks sit inside the fork's non-Metal GL branch.
+- **Native MSYS2 configure fixes (`ac28e5a5bd`).** Python ≥ 3.13's
+  `ntpath.isabs` rejects QEMU's `/qemu` prefix → `build.sh` passes
+  `--prefix=$(cygpath -m /qemu)`; MSYS tar reads `C:/x` as host:path →
+  `--force-local` for the dsp56300 prebuilt on Windows. Both
+  Windows-branch only.
+- **DXGI presenter actually activates on NVIDIA (`2182baec46`).** The
+  interop FBO was completeness-checked before the WGL_NV_DX_interop
+  object was locked → `GL_FRAMEBUFFER_UNSUPPORTED`, silent fallback to
+  `SDL_GL_SwapWindow`. Lock around the check, 1:1 lock/unlock per frame.
+  Now "mode=flip, tearing=supported"; output verified upright. Windows
+  file only; candidate for upstream.
+- **First real-ICD result:** the Vulkan renderer renders Azurik
+  correctly on native NVIDIA (the 2026-08-09 native-driver fixes hold);
+  intro ≈ 30 flips/s, title area 21–25 flips/s (below the 30 fps cap →
+  host headroom to chase). Khronos validation layer on the menu scene
+  reports only two VUIDs: `VUID-VkDeviceCreateInfo-enabledLayerCount-12384`
+  (device-level layer list, legacy) and
+  `VUID-VkShaderModuleCreateInfo-pCode-08740` (SPIR-V declares
+  `DemoteToHelperInvocation` without `shaderDemoteToHelperInvocation`
+  enabled) — both open, see the handoff doc. Under the layer xemu hung at
+  exit once (process stuck terminating in the driver); not reproduced
+  without the layer.
+
 ### Rendering (correctness fixes)
 
 - **Windows / native-Vulkan black screen fixed (2026-08-09).** On a
