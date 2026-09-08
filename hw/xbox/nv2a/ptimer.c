@@ -62,8 +62,26 @@ void ptimer_init(NV2AState *d)
     ptimer_reset(d);
 }
 
+/*
+ * The guest programs PTIMER's NUMERATOR/DENOMINATOR and the PRAMDAC core
+ * clock PLL some time after reset, so all three divisors used below are zero
+ * for part of the boot (and core_clock_freq is zeroed again by any NVPLL
+ * coefficient write with MDIV == 0). Treat that as "the clock is not running
+ * yet": the conversions return 0 and no alarm is scheduled, instead of
+ * trapping in muldiv64's divide.
+ */
+static inline bool ptimer_clock_configured(NV2AState *d)
+{
+    return d->ptimer.numerator && d->ptimer.denominator &&
+           d->pramdac.core_clock_freq;
+}
+
 static uint64_t ptimer_get_absolute_clock(NV2AState *d)
 {
+    if (!ptimer_clock_configured(d)) {
+        return 0;
+    }
+
     return muldiv64(muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
                              d->pramdac.core_clock_freq,
                              NANOSECONDS_PER_SECOND),
@@ -84,6 +102,10 @@ static inline uint64_t get_reg_time(NV2AState *d)
 
 static uint64_t ptimer_ticks_to_ns(NV2AState *d, uint64_t internal_ticks)
 {
+    if (!ptimer_clock_configured(d)) {
+        return 0;
+    }
+
     uint64_t gpu_ticks =
         muldiv64(internal_ticks, d->ptimer.numerator, d->ptimer.denominator);
     return muldiv64(gpu_ticks, NANOSECONDS_PER_SECOND,
@@ -112,6 +134,16 @@ static inline uint64_t advance_alarm_epoch(uint64_t reg_time)
 
 static void schedule_qemu_timer(NV2AState *d)
 {
+    if (!ptimer_clock_configured(d)) {
+        /*
+         * Without a clock the guest's time never advances, so an alarm can
+         * never be reached; arming the timer here would just re-fire it at
+         * the current instant forever.
+         */
+        timer_del(&d->ptimer.timer);
+        return;
+    }
+
     uint64_t reg_now = get_reg_time(d);
     uint64_t diff_reg_time =
         ptimer_alarm_distance(reg_now, d->ptimer.alarm_time);
