@@ -43,8 +43,36 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
     }
 
     if (last_known_jit_pref != (int)g_config.audio.use_dsp_jit) {
-        dsp_set_engine(d->gp.dsp, g_config.audio.use_dsp_jit);
-        dsp_set_engine(d->ep.dsp, g_config.audio.use_dsp_jit);
+        /*
+         * dsp_set_engine() frees the old backend (dsp_c_finalize does
+         * g_free(dsp->backend)) before installing the new one, but
+         * gp_read/ep_read dereference that backend lock-free from a
+         * vCPU thread. The GP/EP MMIO regions are ordinary (BQL-held)
+         * dispatch, so taking the BQL across the swap excludes any
+         * vCPU that is inside them and closes the use-after-free.
+         * d->lock must be dropped first: the lock order everywhere
+         * else is BQL -> d->lock (gp_write takes d->lock with the BQL
+         * held), and this mirrors the update_irq hand-off in
+         * mcpx_apu_frame_thread. Every mcpx_apu_wait_for_idle() caller
+         * drops the BQL before waiting, so blocking here on bql_lock()
+         * cannot deadlock against a quiesce.
+         *
+         * The first call comes from mcpx_apu_dsp_init() on the main
+         * thread, which already holds both the BQL and d->lock;
+         * dsp_init() has just selected the engine from this same
+         * setting, so only prime the cache there (dsp_set_engine would
+         * be a no-op anyway, and bql_lock() would recurse).
+         */
+        if (last_known_jit_pref >= 0) {
+            qemu_mutex_unlock(&d->lock);
+            bql_lock();
+            qemu_mutex_lock(&d->lock);
+            dsp_set_engine(d->gp.dsp, g_config.audio.use_dsp_jit);
+            dsp_set_engine(d->ep.dsp, g_config.audio.use_dsp_jit);
+            qemu_mutex_unlock(&d->lock);
+            bql_unlock();
+            qemu_mutex_lock(&d->lock);
+        }
         last_known_jit_pref = g_config.audio.use_dsp_jit;
     }
 }
@@ -267,10 +295,16 @@ static void proc_rst_write(DSPState *dsp, uint32_t oldval, uint32_t val)
 /*
  * Global Processor - programmable DSP
  *
- * Reads are intentionally lock-free: all values are 32-bit aligned and
- * the BQL serializes guest MMIO dispatch. Taking d->lock here would
- * contend with the APU frame thread during voice processing, causing
- * audio dropouts in dense scenes.
+ * Reads are intentionally lock-free: taking d->lock here would contend
+ * with the APU frame thread during voice processing, causing audio
+ * dropouts in dense scenes. Note what that does and does not buy: the
+ * BQL held during this dispatch orders us against other vCPU MMIO, but
+ * NOT against the APU frame thread, which runs the DSP under d->lock
+ * only. A read may therefore observe DSP X/Y/P memory mid-frame
+ * (stale, and torn across words) - accepted, because the guest polls
+ * these for progress and tolerates it. What is not tolerable is the
+ * backend pointer being freed underneath us, so the engine swap in
+ * mcpx_apu_update_dsp_preference() takes the BQL.
  */
 static uint64_t gp_read(void *opaque, hwaddr addr, unsigned int size)
 {
