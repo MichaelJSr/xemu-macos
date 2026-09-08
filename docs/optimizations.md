@@ -171,12 +171,13 @@ every item below unless stated; none of it has been built on macOS yet.
   exit once (process stuck terminating in the driver); not reproduced
   without the layer.
 - **Wave 1 of the audit plan — on branch `windows-wave1-wip`, NOT landed
-  here.** The combined wave-1 binary segfaults ~10 s into Azurik on
-  Windows (32 flips, then exit 139; reproduced with
-  `XEMU_VK_VOLK_DEVICE=0`, so not the volk change). It is committed as
-  one commit per batch on that branch so it can be bisected by batch;
-  suspects first: the APU voice_snapshot NULL paths (audio starts at
-  the intro) and the display.c reorder. Knob rows above describe the
+  here.** The combined wave-1 binary segfaulted ~10 s into Azurik on
+  Windows; bisected the same day to the `vp.c` hunk of the apu/xid
+  commit (dirty marking, volk dispatch and the APU thread RCU
+  registration all excluded by single-variable runs). The branch head
+  reverts only `vp.c` and runs clean at ~24 flips/s; the vp.c bounds
+  fixes must be re-applied hunk by hunk on the Windows box. Every other
+  batch survived those runs. Knob rows above describe the
   intended defaults. Contents: (1) `XEMU_WIN32_DXGI` hatch +
   the two non-Apple compile warnings in `ui/` (present header included
   unconditionally, `g_framebuffer_rect_shader` gated). (2) SPIR-V disk
