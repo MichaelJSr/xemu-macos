@@ -118,12 +118,24 @@ inside the harness commit `ec31facd7d`) — SPIR-V cache
 hardening, PVIDEO/display reorder, APU/XID bounds, vk hygiene
 (real bounds checks, volkLoadDevice, LRU filter), Windows/GL
 diagnostics, build.sh GCC PGO + `-O3` parity, and the Windows benchmark
-harness + `XEMU_INPUT_PIPE` named-pipe transport. **Bisected to a single line: the int16 pitch-index saturation in
-`vp.c` (commit `971292ed48`). The branch head keeps every other vp.c fix
-(voice bounds, unsigned FECV, list-walk guard, RAM dirty marking) and
-reverts only the clamp; it runs clean at ~27 flips/s.** Evidence and the
-suspected resampler read-ahead mechanism are in the branch head's commit
-body; a proper fix bounds the resampler first. The DXGI hatch, SPIR-V cache, PVIDEO/display,
+harness + `XEMU_INPUT_PIPE` named-pipe transport. **STATUS (end of session, 19:03): the wave-1 head crashes on Windows
+INTERMITTENTLY, and the crash is not yet isolated.** The two commits on
+the branch that claim a bisect result (`58b385c9aa`, `3495cd28c0`) were
+based on single runs; a later sweep of the very same binary (wave 1
+minus the pitch clamp) failed 5 of 5 (Vulkan+DXGI, Vulkan without DXGI,
+OpenGL renderer, and twice with `XEMU_NV2A_NSPROF` unset), while a
+control run of the main-branch binary (`2182baec46` state) passed in
+the same machine state. Facts that survive: the crash is exit 139 about
+6–10 s after launch (intro start), in BOTH renderers, with or without
+the profiler, with `XEMU_VK_VOLK_DEVICE=0`, and with
+`XEMU_APU_RAM_DIRTY=0`. Single passes were observed once each for
+"all apu/xid files reverted", "only vp.c reverted" and "vp.c minus the
+pitch clamp", so the apu/xid commit (`971292ed48`) remains the leading
+suspect, but every variant must be re-run ≥5 times before believing a
+pass. The pitch clamp stays reverted (harmless either way). gdb did not
+catch it (run-under and attach both missed); next step on a Windows box
+is a crash dump (`procdump -e -ma` or WER LocalDumps) opened in gdb, or
+a `--debug` build with `-fsanitize=address` if MinGW allows. The DXGI hatch, SPIR-V cache, PVIDEO/display,
 bounds checks, volk dispatch, diagnostics and build changes all ran
 clean in the surviving runs. Recipe for further Windows bisects on this box:
 `git checkout windows-wave1-wip`, change one thing, `rebuild-quick.sh`, then `PORT=4456 EXE=../xemu-macos/dist-w1/xemu.exe
