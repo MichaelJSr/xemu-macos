@@ -244,3 +244,39 @@ run with `XEMU_PFIFO_HEARTBEAT=1 XEMU_NV2A_NSPROF=1` (expect
 `waiting_flip=1` with `iters` advancing = guest-side stall), take
 `sample <pid>` during the stall, and note whether the white present
 persists after recovery — that second half is its own defect.
+
+## 8. Next session: release candidate for v0.13.3
+
+Main is at `bd3d56ee8d` (all of §7 landed, CI green on every leg, tree
+clean, `windows-wave1-wip` untouched at `67a5d56133` with only
+`285779ce83` left on it). The owner asked on 2026-09-08 whether to tag;
+the answer was "after a short RC pass", because nothing measured today is
+citable (the host ran another GPU game and two CPU-bound jobs throughout)
+and nothing has run in the owner's real configuration. In order:
+
+1. **Quiet-machine fps A/B, main vs a v0.13.2 build**, F8 heavy savestate
+   (`vm-20260704173701`), interleaved, ≥3 pairs
+   (`scripts/bench-savestate-ab.sh --app` for the cross-binary shape per
+   the `xemu-testing` skill). Motivation: glslang 16.2→16.5 changed every
+   shader's SPIR-V, and the bounds checks are now real branches at 28
+   per-draw sites. Accept parity within the ±0.02 fps static noise; a
+   regression is bisected with `XEMU_SPIRV_CACHE=0` / the 16.2 wrap pin /
+   `-DNV2A_VK_PERF_BUILD` before anything else.
+2. **Artifact-oracle soak** on the same run (≥300 captures scored, zero
+   magenta/white).
+3. **Owner session from Finder** in the real config (fullscreen exclusive,
+   MetalFX, 2x interpolation), 20–30 min of play, watching for the §7 boot
+   stall; if it recurs, capture with the §7 recipe before anything else.
+4. **Release notes** (README + draft body): savestates saved on the new
+   build do not load on v0.13.2 (nv2a vmstate v4); DSP engine default back
+   to the fork's (`use_dsp_jit = true`); shader cache re-keys on the
+   glslang version, first launch is cold; Windows: DXGI presenter now
+   activates on NVIDIA, wave-1 hardening on by default, `-O3` opt-in via
+   `XEMU_WIN_O3=1`, wave-1 hunks not yet run natively at the shipped `-O2`
+   flags; the `285779ce83` display/PVIDEO fix is still branch-only.
+5. Tag `v0.13.3` → `release-on-tag.yml` draft → owner publishes (never
+   re-tag; see xemu-change-control).
+
+Independently, on the Windows box (unchanged from §3): freeze the control
+binary, enable WER LocalDumps, full-reconfigure `-O2` experiment on the
+wave-1 head vs main at `-O3`, ≥6 runs per variant.
