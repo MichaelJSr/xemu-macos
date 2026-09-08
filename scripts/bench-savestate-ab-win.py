@@ -34,6 +34,12 @@ What it enforces (the Windows equivalents of the macOS disciplines):
                  LINE (the leftover-harness-LOOP class owns no xemu process
                  between cycles), CPU load and nvidia-smi GPU utilization.
                  --no-quiet-check to override, recorded in the receipt.
+  renderer pin   display.renderer is read from the template, recorded in
+                 meta/receipt and pinned into every scratch config. The batch
+                 REFUSES to start on anything but VULKAN (--allow-renderer
+                 overrides): nsprof_flip_tick() is called only from the
+                 Vulkan renderer, so an OPENGL run produces a log with zero
+                 nsprof intervals and every run dies at the gate.
   scene gate     every run's nsprof log is gated by scripts/bench-receipt.py:
                  draws/flip inside --draws-band, draws/flip CV <= --cv-max,
                  scene-anchored trailing tail, one post-load transient
@@ -141,9 +147,26 @@ def free_port():
 
 
 def parse_env_set(text):
-    """'A=1 B=2' -> {'A': '1', 'B': '2'}"""
+    """'A=1 B=2' -> {'A': '1', 'B': '2'}
+
+    Windows-appropriate splitting. shlex's POSIX default treats a backslash
+    as an escape and silently eats it (--e-env "XEMU_X=C:\\tools\\x" would set
+    "C:toolsx" and the receipt would record an env delta that was never
+    applied), while posix=False keeps backslashes but stops honouring quotes
+    once a token has started ('X="C:\\Program Files\\x"' splits in two). So:
+    POSIX quote handling with escapes disabled - backslashes survive
+    verbatim, and quoting a value that contains spaces still works.
+    """
+    lex = shlex.shlex(text or "", posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ""        # '#' is a legal character inside a value
+    lex.escape = ""            # a backslash is a path separator, not an escape
+    try:
+        toks = list(lex)
+    except ValueError as exc:  # unbalanced quote: a message, never a traceback
+        die("cannot parse env set %r: %s" % (text, exc))
     out = {}
-    for tok in shlex.split(text or ""):
+    for tok in toks:
         if "=" not in tok:
             die("bad env assignment %r (want NAME=VALUE)" % tok)
         k, _, v = tok.partition("=")
@@ -362,6 +385,32 @@ class Bench:
             self.template_text = f.read()
         tmpl = TomlEdit(self.template_text)
 
+        # Renderer. xemu drops default-valued keys when it rewrites its
+        # config, so an ABSENT display.renderer means the spec default
+        # (VULKAN, config_spec.yml). It matters because the measurement
+        # channel is renderer-specific: nsprof_flip_tick() is called only
+        # from hw/xbox/nv2a/pgraph/vk/renderer.c, so under OPENGL the log
+        # carries zero nsprof intervals and every run dies at the gate with
+        # no visible explanation. Recorded in meta and pinned per run.
+        self.renderer = (tmpl.get("display", "renderer") or "VULKAN").upper()
+        if self.renderer not in ("VULKAN", "OPENGL", "NULL"):
+            die("config template %s has display.renderer = %r, which is not "
+                "one of NULL/OPENGL/VULKAN (config_spec.yml)"
+                % (self.config_source, self.renderer))
+        if self.renderer != "VULKAN":
+            if not a.allow_renderer:
+                die("config template %s selects display.renderer = %s, but "
+                    "nsprof (the only measurement channel this harness reads) "
+                    "ticks solely on the Vulkan renderer: every run would "
+                    "produce a log with no nsprof intervals and be recorded "
+                    "DEAD. Set renderer = 'VULKAN' in the template, or pass "
+                    "--allow-renderer to run anyway (plumbing only - there "
+                    "will be no fps numbers)."
+                    % (self.config_source, self.renderer))
+            log("warning: renderer %s with --allow-renderer - nsprof never "
+                "ticks outside VULKAN, expect DEAD runs" % self.renderer)
+        log("renderer %s (pinned into every scratch config)" % self.renderer)
+
         # snapshot tag: the monitor only knows the qcow2 vm-* tag; the
         # [general.snapshots.shortcuts] names are UI keybindings and
         # `loadvm f8` fails silently into a socket nobody reads.
@@ -473,6 +522,9 @@ class Bench:
         if self.a.dvd:
             t.set("sys.files", "dvd_path",
                   toml_path_literal(os.path.abspath(self.a.dvd)))
+        # Pin the renderer: it is a default-valued key xemu drops on
+        # rewrite, and the whole measurement channel depends on it.
+        t.set("display", "renderer", "'%s'" % self.renderer)
         # fullscreen skews present pacing; the welcome/update dialogs steal
         # the window and the network on a first launch of a scratch config.
         t.set("display.window", "fullscreen_on_startup", "false")
@@ -534,8 +586,35 @@ class Bench:
 
             time.sleep(a.boot_wait)
 
+            # A xemu that exits during boot (the 6-10 s Windows failure this
+            # harness exists to chase) must become a recorded DEAD run, not
+            # monitor traffic into a socket nobody holds any more.
+            if proc.poll() is not None:
+                logf.close()
+                self.record_dead(label, logpath, runjson,
+                                 "xemu exited during boot, before loadvm "
+                                 "(exit %s)" % proc.returncode, arm, warmup)
+                return
+
             if self.snapshot:
-                resp = monitor_cmd(port, "loadvm %s" % self.snapshot)
+                try:
+                    resp = monitor_cmd(port, "loadvm %s" % self.snapshot)
+                except (OSError, socket.timeout) as exc:
+                    # socket errors and timeouts are all OSError subclasses;
+                    # unguarded, a xemu that died or wedged between the
+                    # monitor opening and the end of --boot-wait killed the
+                    # whole batch with a traceback instead of costing one run.
+                    rc = proc.poll()
+                    self.kill(proc)
+                    logf.close()
+                    self.record_dead(
+                        label, logpath, runjson,
+                        "monitor loadvm failed (%s: %s); xemu was %s"
+                        % (type(exc).__name__, exc,
+                           "still running" if rc is None
+                           else "already gone (exit %s)" % rc),
+                        arm, warmup)
+                    return
                 # Sidecar, NEVER the run log: xemu holds that file open with
                 # its own offset, and a parent write at offset 0 would
                 # overwrite the nsprof header lines (archaeology 9.8).
@@ -577,7 +656,7 @@ class Bench:
                 logf.close()
                 self.record_dead(label, logpath, runjson,
                                  "xemu exited during the dwell (exit %s)"
-                                 % died, arm, warmup)
+                                 % died, arm, warmup, check_nsprof=True)
                 return
 
             try:
@@ -676,7 +755,50 @@ class Bench:
                   encoding="utf-8") as f:
             f.write(line + "\n")
 
-    def record_dead(self, label, logpath, runjson, reason, arm, warmup):
+    def dead_reason(self, base, logpath, arm, check_nsprof):
+        """Name the two Windows failure shapes a bare exit code hides.
+
+        empty capture   xemu only inherits this harness's stdout when
+                        AttachConsole(ATTACH_PARENT_PROCESS) succeeds; with no
+                        console attached it freopens BOTH streams to xemu.log
+                        in its cwd (ui/xemu.c), leaving the redirected file
+                        here at 0 bytes with the real output in the sidecar.
+        no nsprof       a log with no interval headers at all is the renderer
+                        signature (nsprof only ticks on VULKAN), not a
+                        mysterious gate failure.
+        """
+        notes = []
+        try:
+            size = os.path.getsize(logpath)
+        except OSError:
+            size = -1
+        if size == 0:
+            exe = self.exe.get(arm)
+            alt = (os.path.join(os.path.dirname(exe), "xemu.log")
+                   if exe else "xemu.log next to the exe")
+            notes.append("captured log is EMPTY - with no console attached "
+                         "xemu redirects stdout/stderr to xemu.log in its "
+                         "cwd; look at %s%s"
+                         % (alt, "" if os.path.isfile(alt)
+                            else " (not present)"))
+        elif size > 0 and check_nsprof:
+            heads = -1
+            try:
+                with open(logpath, encoding="utf-8", errors="replace") as f:
+                    heads = sum(1 for l in f
+                                if l.startswith("nsprof: ")
+                                and " interval," in l)
+            except OSError:
+                pass
+            if heads == 0:
+                notes.append("log has 0 nsprof interval headers (renderer=%s; "
+                             "nsprof_flip_tick only runs on VULKAN)"
+                             % getattr(self, "renderer", "?"))
+        return base + ("; " + "; ".join(notes) if notes else "")
+
+    def record_dead(self, label, logpath, runjson, reason, arm, warmup,
+                    check_nsprof=False):
+        reason = self.dead_reason(reason, logpath, arm, check_nsprof)
         cmd = [sys.executable, RECEIPT_PY, "dead", "--label", label,
                "--log", logpath, "--out", runjson, "--reason", reason,
                "--var-value", self.var_value[arm]]
@@ -701,7 +823,8 @@ class Bench:
             self.record_dead(label, logpath, runjson,
                              "gate failed: %s" %
                              ((p.stderr or "").strip().splitlines() or
-                              ["unknown"])[-1][:160], arm, warmup)
+                              ["unknown"])[-1][:160], arm, warmup,
+                             check_nsprof=True)
 
     # -- batch ------------------------------------------------------------
     def quiet_check(self):
@@ -769,6 +892,7 @@ class Bench:
                 "draws_band": a.draws_band, "cv_max": a.cv_max,
                 "boot_wait": a.boot_wait,
                 "cache_isolation": "on" if a.isolate_caches else "off",
+                "renderer": self.renderer,
                 "interleave": self.interleave,
                 "mode": "menu" if a.menu else "savestate",
                 "arm_env": {k: v for k, v in self.arm_env.items()},
@@ -856,7 +980,25 @@ def dry_run(outdir):
           t.get("sys.files", "hdd_path") == "C:\\new.qcow2")
     print(("  ok    " if ok else "  FAIL  ") +
           "patch by [section]+key, insert missing section")
-    return rc or rc2 or (0 if ok else 1)
+
+    print("\n== renderer read (xemu drops the key when it is the default) ==")
+    r_absent = TomlEdit("[general]\nshow_welcome = false\n").get(
+        "display", "renderer")
+    r_gl = TomlEdit("[display]\nrenderer = 'OPENGL'\n").get(
+        "display", "renderer")
+    ok_r = r_absent is None and r_gl == "OPENGL"
+    print(("  ok    " if ok_r else "  FAIL  ") +
+          "absent -> %r (harness reads VULKAN), explicit -> %r"
+          % (r_absent, r_gl))
+
+    print("\n== env-set split (Windows backslashes survive) ==")
+    got = parse_env_set(
+        'XEMU_A=C:\\tools\\x XEMU_B="C:\\Program Files\\y" XEMU_C=1')
+    ok_e = got == {"XEMU_A": "C:\\tools\\x",
+                   "XEMU_B": "C:\\Program Files\\y", "XEMU_C": "1"}
+    print(("  ok    " if ok_e else "  FAIL  ") + "--b-env/--e-env -> %r" % got)
+
+    return rc or rc2 or (0 if ok and ok_r and ok_e else 1)
 
 
 def main():
@@ -897,6 +1039,9 @@ def main():
     ap.add_argument("--no-screenshot", dest="screenshot", action="store_false",
                     default=True)
     ap.add_argument("--no-quiet-check", action="store_true")
+    ap.add_argument("--allow-renderer", action="store_true",
+                    help="run even if display.renderer is not VULKAN "
+                         "(nsprof never ticks there: DEAD runs, no numbers)")
     ap.add_argument("--cpu-max", type=float, default=15.0)
     ap.add_argument("--gpu-max", type=float, default=15.0)
     args = ap.parse_args()
@@ -905,8 +1050,19 @@ def main():
         return dry_run(args.snapshot or "./bench-out-dryrun")
 
     if os.name != "nt":
-        die("this is the Windows harness; on macOS use "
-            "scripts/bench-savestate-ab.sh")
+        # MSYS2's /usr/bin/python is a POSIX build (os.name == 'posix') even
+        # though it runs on Windows: it has no ctypes.WinDLL for the
+        # GetProcessTimes sampler and it hands xemu MSYS-style paths.
+        hint = ("on macOS/Linux use scripts/bench-savestate-ab.sh instead"
+                if not (os.environ.get("MSYSTEM") or
+                        sys.platform.startswith(("msys", "cygwin")))
+                else "you are running MSYS2's POSIX python (MSYSTEM=%s); "
+                     "install the native one (`pacman -S "
+                     "mingw-w64-x86_64-python`) and invoke "
+                     "/mingw64/bin/python, or use python.org's Windows python"
+                     % os.environ.get("MSYSTEM", "?"))
+        die("this harness needs a native Windows python (os.name == 'nt'); "
+            "this interpreter reports os.name == %r - %s." % (os.name, hint))
     if not args.snapshot:
         die("usage: bench-savestate-ab-win.py <snapshot> <ENV_VAR> "
             "[pairs] [secs] [outdir]   (or --menu - <ENV_VAR>, or --dry-run)")

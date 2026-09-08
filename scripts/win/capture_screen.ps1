@@ -21,6 +21,11 @@ Usage:
             (score_shot_win.py) decodes that instead of a 1080p PNG, which
             keeps post-run scoring off the benchmark's CPU budget.
 
+The process declares itself DPI-aware before any screen query (otherwise a
+scaled display hands back a stretched, mis-cropped capture) and prefers DWM's
+extended frame bounds over GetWindowRect, whose rect includes the invisible
+resize border. Both still cover the whole window frame, title bar included.
+
 Prints one line: capture: <w>x<h> mode=<window|screen> -> <path>
 #>
 param(
@@ -41,8 +46,23 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 public class WinRect {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr,
+                                                   out RECT value, int size);
 }
 "@
+
+# DPI awareness, before the first screen or window query. Without it Windows
+# virtualizes this process into a 96-DPI coordinate space: on a scaled display
+# GetWindowRect reports logical pixels while CopyFromScreen returns a
+# stretched, resampled copy of the desktop - the crop lands in the wrong place
+# and the artifact scorer reads interpolated pixels. System-DPI awareness is
+# enough for a primary-screen capture; a window on a differently-scaled second
+# monitor is still approximate (that would need per-monitor-v2 awareness,
+# which cannot be set after the process starts loading UI assemblies).
+try { [void][WinRect]::SetProcessDPIAware() } catch { }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $mode = "screen"
@@ -53,7 +73,23 @@ if ($ProcessId -gt 0) {
     $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
         $r = New-Object RECT
-        if ([WinRect]::GetWindowRect($p.MainWindowHandle, [ref]$r)) {
+        # DWMWA_EXTENDED_FRAME_BOUNDS (9) is the rect the compositor actually
+        # draws. GetWindowRect adds the invisible resize border (~7 px a side
+        # on Win10+), so cropping to it samples the desktop BEHIND the window
+        # along every edge - background pixels the scorer then judges. Fall
+        # back to GetWindowRect when DWM declines (composition off, or a
+        # window DWM does not track). Either rect is the whole frame: the
+        # title bar is still inside the capture, as it always was.
+        $got = $false
+        try {
+            $hr = [WinRect]::DwmGetWindowAttribute($p.MainWindowHandle, 9,
+                      [ref]$r, [Runtime.InteropServices.Marshal]::SizeOf([RECT]))
+            $got = ($hr -eq 0)
+        } catch { $got = $false }
+        if (-not $got) {
+            $got = [WinRect]::GetWindowRect($p.MainWindowHandle, [ref]$r)
+        }
+        if ($got) {
             $w = $r.Right - $r.Left
             $h = $r.Bottom - $r.Top
             if ($w -gt 64 -and $h -gt 64) {
