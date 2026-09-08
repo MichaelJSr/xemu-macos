@@ -9,9 +9,16 @@
  * waits, surface readbacks, and the guest flip -> vblank idle gap.
  *
  * Enable with XEMU_NV2A_NSPROF=1; a summary (total / avg-per-flip /
- * max single event) prints to stderr every ~5 s. Almost all
- * instrumented paths run on the PFIFO thread, so accumulation is
- * unsynchronized. The exceptions are the UI-thread buckets —
+ * max single event) prints to stderr every ~5 s. Both renderers drive
+ * the interval (pgraph_vk_flip_stall / pgraph_gl_flip_stall each tick
+ * once per guest flip), but most cost centres are instrumented only at
+ * Vulkan call sites: under the OpenGL renderer expect just the flips
+ * header plus flip_idle, fence_wait (glFinish + the display fences) and
+ * present_wait. An otherwise-empty GL summary means "not instrumented",
+ * not "no cost".
+ *
+ * Almost all instrumented paths run on the PFIFO thread, so accumulation
+ * is unsynchronized. The exceptions are the UI-thread buckets —
  * NSPROF_PRESENT_WAIT (pull-model handoff round trip),
  * NSPROF_DRAWABLE_ACQUIRE, NSPROF_UI_HUD_LOCK, NSPROF_UI_PRESENT_PERIOD
  * and the NSPROF_EV_UI_PRESENT event — whose += races the PFIFO-thread
@@ -52,15 +59,19 @@ enum NsprofCounter {
     NSPROF_TEX_HASH,      /* texture content hashing (dirty checks) */
     NSPROF_TEX_SNAPSHOT,  /* guest VRAM snapshot memcpy before upload */
     NSPROF_GEOM_UPDATE,   /* vertex RAM / inline / index buffer copies */
-    NSPROF_FENCE_WAIT,    /* vkWaitForFences reclaiming a flight slot */
+    NSPROF_FENCE_WAIT,    /* vkWaitForFences reclaiming a flight slot; under
+                             the GL renderer, the flip glFinish and the
+                             display-path glClientWaitSync */
     NSPROF_AUX_FENCE_WAIT,/* aux CB fence: sync end + lazy async reclaim */
     NSPROF_MFX_DRAIN,     /* metalfx_drain_inflight CPU spin (PFIFO) */
     NSPROF_SURF_DOWNLOAD, /* GPU->CPU surface readback */
     NSPROF_FLIP_IDLE,     /* FLIP_STALL -> guest vblank release */
     NSPROF_PRESENT_WAIT,  /* UI-thread block on the present-handoff round
                              trip (pull-model qemu_event_wait). ~0 under
-                             XEMU_PUSH_PRESENT. Accumulated off-thread —
-                             see the header comment above. */
+                             XEMU_PUSH_PRESENT. Under the GL renderer, the
+                             wait for the PFIFO thread to compose the display
+                             surface. Accumulated off-thread — see the header
+                             comment above. */
     NSPROF_ZETA_SNAPSHOT, /* PFIFO-thread cost to record the flip-time
                              zeta->snapshot depth blit (XEMU_MFX_REAL_DEPTH=2).
                              CPU record time only; the copy's GPU cost lands

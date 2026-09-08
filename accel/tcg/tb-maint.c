@@ -405,6 +405,26 @@ bool xemu_subpage_dirty_on(void)
          * XEMU_INV_PROF / XEMU_SUBPAGE_REFUTE. */
         const char *e = getenv("XEMU_SUBPAGE_DIRTY");
         on = (e && e[0] == '0') ? 0 : 1;
+#if !defined(__aarch64__)
+        /*
+         * Arm (b) -- "subpage-fast", the inline NOTDIRTY store pre-filter --
+         * is emitted only by the aarch64 TCG backend, whose emitter is the only
+         * consumer of xemu_subpage_fast_mode(), so on any other host
+         * XEMU_SUBPAGE_FAST=1 was silently inert. Say so once from
+         * this arm-(a) latch, which every host does reach. Apple Silicon is
+         * aarch64 and never compiles this branch.
+         */
+        {
+            const char *f = getenv("XEMU_SUBPAGE_FAST");
+            const char *r = getenv("XEMU_SUBPAGE_FAST_REFUTE");
+            if ((f && f[0] == '1') || (r && r[0] == '1')) {
+                fprintf(stderr,
+                        "xemu: XEMU_SUBPAGE_FAST: no inline store-prefilter "
+                        "emitter for this TCG host backend (aarch64 only); "
+                        "ignored\n");
+            }
+        }
+#endif
     }
     return on;
 }

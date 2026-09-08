@@ -48,7 +48,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time FPU/exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which is the gate counter for `XEMU_ELIDE_CANDOIO` (read it from a `XEMU_ELIDE_CANDOIO=0` run, since the elision drives the counter to zero by construction; the legacy `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_TB_RANGE_INV` | `1` re-applies upstream's per-TB byte-range overlap filter inside the Xbox whole-page code-write invalidation (default off = invalidate every TB on a written code page). Correctness-safe (invalidates a correct subset — a TB whose bytes weren't written can't have changed); A/B knob for the SMC-false-sharing cure (`XEMU_INV_PROF` measured 100% false-invalidation, 0 true SMC) |
 | `XEMU_CCOP_CENSUS` | `1` prints a runtime-weighted census of cc-flag liveness across TB boundaries at exit (predecessor tail class × successor head class). Forces every TB transition through the exec loop (no goto_tb / jump-cache / ret-memo) so pairs are exact — much slower, same executed instruction stream; sizing tool for the superblock roadmap item, never a perf mode |
-| `XEMU_INV_TIMING` | `1` adds a `cntvct_el0`-based split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. Timings are order-of-magnitude; counts are load-immune |
+| `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_ELIDE_CANDOIO` | **Default on (elide) since 2026-08-04**; `0` restores the per-TB `can_do_io` bookkeeping stores. With icount and replay off nothing observes the flag, so the two stores are dropped and the guest's mid-TB MMIO accesses stop paying `io_prepare`'s `cpu_io_recompile` round trip (`tcg_tb_lookup` g_tree walk + state restore + siglongjmp + `CF_MEMI_ONLY` re-translate + re-execute). Auto-forced to `0` under icount or `replay_mode != REPLAY_MODE_NONE` — the only observers — and latched at first translation, before the first TB. Gate counter: the `XEMU_INV_PROF` `(f)` line |
 | `XEMU_DIRTY_FAST` | **Default on since 2026-08-04**; `0` restores the legacy dirty-bitmap shapes in the store slow path on the same binary — the `physical_memory_is_clean()` re-read at the tail of `notdirty_write` (now answered locally by the invalidation's "page still holds code" return) and the five separate RCU-guarded `find_next_bit` scans behind `physical_memory_is_clean()` (now one guard, one idx/offset computation, five `test_bit`s via `physical_memory_page_dirty_bits()` — which also serves the TLB-refill dirty check at `cputlb.c:1128`). Behavior-equivalent both ways; carries no individual fps claim (see the CPU / JIT bullet) |
 | `XEMU_SUBPAGE_DIRTY` | Sub-page code dirty tracking — **default ON** since the 2026-07-11 A/B (`0` restores whole-page invalidation wholesale): a per-`PageDesc` 64-block bitmap lets a guest data store that misses every code sub-block skip whole-page invalidation — an O(1) bitmap test replaces the qht/jmp-unlink/recycle round-trip, leaving the page write-protected so the store re-traps cheaply. Interleaved A/B: **+4.33±1.53 fps F8 (+14.3%, 4/4 pairs), +11.63±0.52 fps F5 (+24.6%, 3/3)**; invalidations 290,595 → 11,180 (25.9×). The higher-ceiling fast-path form that removes the trap itself needs host-`tcg/aarch64` store codegen (held — see [roadmap.md](roadmap.md)) |
@@ -65,7 +65,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the three x87 mechanisms above: keeps every legacy store, computes the elision/deferral decision anyway, and counts every runtime point where the elided state could have been observed (stale `env->ft0` fed to a reader; deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary; a clean slot whose memory moved under the cache). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUPERBLOCK` | `=N` follows up to N branch seams per TB at translate time (superblock formation: unconditional same-page forward jmps + forward-conditional fallthroughs with out-of-line taken stubs). **Default 0 (off/dark)** — see the superblock entry in CPU / JIT changes and docs/roadmap.md for the measured policy verdicts |
 | `XEMU_SUPERBLOCK_SIZE` | `1` arms the runtime taken-exit tail-kind census (uncond/call/jcc-taken/jcc-fall/rep/toomany + the M1-capturable subset), atexit dump; sizes superblock policies with merge off. Measurement-only |
-| `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **DEFAULT-ON since 2026-07-18** (`=0` reverts; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04) |
+| `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **DEFAULT-ON since 2026-07-18** (`=0` reverts; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04). The prefilter is emitted only by the aarch64 TCG backend, so on any other host (x86_64 Windows/Linux) this knob and its refuter are inert — since 2026-09-08 an explicit `=1` says so once on stderr from the arm-(a) latch in `accel/tcg/tb-maint.c` |
 | `XEMU_REGION` | `=N` region/diamond former (forward jcc ≤16 B arms; taken edge becomes an intra-TB label bound at the join, backed by the recorded-label liveness elision in tcg.c). **Default 0 — the campaign closed 2026-07-18 with both windows measured negative** (see the Failed table); the machinery + `XEMU_REGION_CHECK` double-pass conformance harness stay as the record |
 | `XEMU_REGION_CHECK` | `1` runs `liveness_pass_1` twice per TB (conservative then relaxed, pointer-keyed diff) and aborts on any non-conforming difference — with zero `region_join` labels the runs are bit-identical (the Class-5 containment proof, held over full boot+game runs) |
 | `XEMU_SUBPAGE_FAST_REFUTE` | `1` routes every would-skip decision to a C validator (independent `probe_access` re-derivation, live-TB overlap scan, NOCODE dirty ground truth) that counts violations and performs the real store — falsification mode, not perf. Forces `XEMU_SUBPAGE_FAST_STATS=1` so soaks keep their population histogram |
@@ -184,8 +184,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   enabled) — both open, see the handoff doc. Under the layer xemu hung at
   exit once (process stuck terminating in the driver); not reproduced
   without the layer.
-- **Wave 1 of the audit plan — on branch `windows-wave1-wip`, NOT landed
-  here.** The combined wave-1 binary segfaulted ~10 s into Azurik on
+- **Wave 1 of the audit plan — on branch `windows-wave1-wip`, landing
+  on main one batch at a time from 2026-09-08.** A contents item below
+  is on main only where it says so; the rest is still branch-only.
+  The combined wave-1 binary segfaulted ~10 s into Azurik on
   Windows; the crash is INTERMITTENT and NOT isolated: a same-day
   single-run bisect wrongly blamed the vp.c pitch clamp; the same binary
   later failed 5/5 (both renderers, profiler on/off) while the
@@ -225,10 +227,13 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   build (was `__builtin_unreachable()` in release); `volkLoadDevice()` on
   non-Apple; `VK_KHR_external_semaphore_win32` optional; LRU eviction
   in-use filter restored; `CPUJumpCache` stride static-asserted. (6)
-  Diagnostics on Windows/GL: `nsprof` ticks under the OpenGL renderer
-  with three GL buckets, `xemu_inv_ticks()` has an x86 `rdtsc` arm,
-  `stderr` is flushed after heartbeat/nsprof prints on Windows,
-  `NV2A_STRIP_PROFILE_COUNTERS` tracks the debug build. (7) build.sh:
+  Diagnostics on Windows/GL — **landed on main 2026-09-08**
+  (`eb971f860d`; full record under Testing & tooling): `nsprof` ticks
+  under the OpenGL renderer too, `xemu_inv_ticks()` has an x86 `rdtsc`
+  arm, `stderr` is flushed after heartbeat/nsprof prints on Windows,
+  `NV2A_STRIP_PROFILE_COUNTERS` tracks the debug build, and
+  `XEMU_SUBPAGE_FAST=1` warns once on a host with no emitter. The
+  macOS arm64 release path is unchanged. (7) build.sh:
   GCC PGO arm (`-fprofile-generate/-use`, gcda discovery), `-O3` parity
   on the native Windows release arm, `XEMU_HARDENING` reachable on all
   arms, tar `--force-local` keyed on the build machine (that last hunk
@@ -1625,6 +1630,47 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   direct-chain into a TB spanning two guest pages — sizing the xpage
   "page-spanning targets decline to chain" coverage gap before anyone
   builds the risky registry extension for it.
+- **The measurement channels report on Windows and under OpenGL
+  (2026-09-08).** Three of the four channels the fork's methodology
+  depends on were dead or lying outside the macOS Vulkan path.
+  `nsprof_flip_tick()` had a single call site, in
+  `pgraph_vk_flip_stall()`, so `XEMU_NV2A_NSPROF=1` printed nothing
+  under the OpenGL renderer — the Windows Vulkan-init fallback and the
+  user-selectable GL renderer had no wall-time channel at all.
+  `pgraph_gl_flip_stall()` now ticks it too (`gl/renderer.c:124`), and
+  that is one tick per guest flip, not two: exactly one renderer's ops
+  table is installed at a time (`pg->renderer`, set in
+  `attempt_renderer_init`) and `DEF_METHOD(NV097, FLIP_STALL)`
+  dispatches a single `ops.flip_stall(d)` through it. The Vulkan call
+  site is deliberately untouched, so macOS per-flip denominators are
+  literally unchanged rather than merely equivalent. Three GL sites
+  feed two existing buckets — `fence_wait` (the flip `glFinish` and the
+  display `glClientWaitSync`) and `present_wait` (the UI thread waiting
+  for the PFIFO thread to compose the display surface) — on top of the
+  renderer-neutral `flip_idle`; every other PFIFO-thread bucket is
+  instrumented at Vulkan-only call sites, and the UI-thread buckets
+  live in `ui/xemu.c` / `ui/xemu-metal.m` (Apple presentation only),
+  so a sparse GL summary means "not instrumented", not "no cost". `xemu_inv_ticks()` returned a constant
+  0 on x86_64, so `XEMU_INV_TIMING` printed an all-zero
+  `notdirty_write` split; it has an `rdtsc` arm with a one-time ns/tick
+  calibration (knob table above). `NV2A_STRIP_PROFILE_COUNTERS` was
+  unconditional, so the ImGui NV2A panel plotted zeros even in
+  `--debug` builds; it now tracks `XEMU_DEBUG_BUILD`, and the stripped
+  no-op is a typed `static inline` instead of a function-like macro so
+  its argument stays type-checked — compiling `vk/draw.c`,
+  `vk/surface.c` and `vk/texture.c` with the tree's own release flags
+  (`-O3 -flto=thin -mcpu=apple-m2`, `-g0`) gives byte-identical objects
+  before and after, which is an optimizer property, not a guarantee.
+  On Windows `stderr` is a fully buffered file after `ui/xemu.c`'s
+  `freopen`, so the heartbeat and nsprof lines were lost on exactly the
+  force-kill they exist to explain: both now flush after each print,
+  inside their existing gates. And `XEMU_SUBPAGE_FAST=1` /
+  `XEMU_SUBPAGE_FAST_REFUTE=1` say once that a non-aarch64 TCG backend
+  has no inline store-prefilter emitter instead of being silently
+  inert. Every new hook is gated on `nsprof_enabled()` or a `getenv`
+  first and `NV2A_STRIP_PROFILE_COUNTERS` stays 1 in release, so the
+  macOS arm64 release path is unchanged. Cherry-picked from
+  `eb971f860d` on `windows-wave1-wip`.
 - **Windows A/B harness survives the failure it exists to measure
   (2026-09-08).** `scripts/bench-savestate-ab-win.py` sent its `loadvm`
   monitor command unguarded, so an xemu that dies 6-10 s after launch —
@@ -1636,10 +1682,14 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   kill can mask it. Three more sharp edges from the same review: the
   renderer is read from the template, refused unless `VULKAN` (or
   `--allow-renderer`), pinned into every scratch config and recorded in
-  the receipt — `nsprof_flip_tick()` is called only from
-  `pgraph/vk/renderer.c:241`, so an OpenGL run gates DEAD with no
-  explanation; every DEAD run now names the likely cause (empty captured
-  log ⇒ look at `xemu.log` in the exe dir, since `ui/xemu.c:1940-1947`
+  the receipt — when that was written `nsprof_flip_tick()` had a single
+  call site, `pgraph/vk/renderer.c:241`, so an OpenGL run gated DEAD
+  with no explanation. The GL renderer ticks it too since 2026-09-08,
+  so a GL run does print intervals; the harness still pins `VULKAN` by
+  default because only the Vulkan call sites populate the per-draw /
+  upload / shader buckets, so a GL receipt is comparable only against
+  another GL receipt. Every DEAD run now names the likely cause
+  (empty captured log ⇒ look at `xemu.log` in the exe dir, since `ui/xemu.c:1940-1947`
   freopens the streams there when `AttachConsole` fails; a non-empty log
   with zero `nsprof:` headers ⇒ named with the renderer); and
   `parse_env_set` uses `shlex` with `escape=""` so Windows backslash

@@ -103,8 +103,11 @@ don't read these fields from another thread.
 ### Output format
 
 A summary prints to stderr roughly every 5 seconds of guest flips
-(`nsprof_flip_tick()`, called once per `NV097_FLIP_STALL` completion in
-`pgraph/vk/renderer.c:206` — i.e. once per **guest** frame, not once per
+(`nsprof_flip_tick()`, called once per `NV097_FLIP_STALL` completion from
+whichever renderer is installed — `pgraph_vk_flip_stall()` in
+`pgraph/vk/renderer.c`, or since 2026-09-08 `pgraph_gl_flip_stall()` in
+`pgraph/gl/renderer.c`; only one ops table is live at a time, so a flip
+still ticks once — i.e. once per **guest** frame, not once per
 *displayed* frame; with `display.frame_interpolation` = 2x/4x the on-screen
 fps can exceed nsprof's flips/s, because MetalFX interpolation happens
 downstream of PGRAPH). Verified exact format (`nsprof.c:148-171`):
@@ -903,8 +906,9 @@ any refactor touching the named files:
   `grep -n 'pfifo_park_stats_dump' hw/xbox/nv2a/pfifo.c`
 - UI lock-occupancy line and its runtime gate:
   `grep -n 'XEMU_UI_LOCK_STATS\|vblank @' ui/xemu.c`
-- nsprof is per-guest-flip, not per-displayed-frame:
-  `grep -n nsprof_flip_tick hw/xbox/nv2a/pgraph/vk/renderer.c`
+- nsprof is per-guest-flip, not per-displayed-frame, and both renderers
+  tick it (one ops table live at a time, so still one tick per flip):
+  `grep -rn nsprof_flip_tick hw/xbox/nv2a/pgraph/`
 - APU utilization formula and frame period:
   `grep -n 'g_dbg.utilization\|EP_FRAME_US' hw/xbox/mcpx/apu/apu.c hw/xbox/mcpx/apu/apu_regs.h`
 - PFIFO heartbeat fields: `sed -n '485,552p' hw/xbox/nv2a/pfifo.c`

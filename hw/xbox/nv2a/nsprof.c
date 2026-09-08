@@ -189,6 +189,17 @@ void nsprof_flip_tick(void)
                 (double)events[i] / (double)flips);
         events[i] = 0;
     }
+#ifdef _WIN32
+    /*
+     * ui/xemu.c reopens stderr onto CONOUT$ or xemu.log at startup; freopen
+     * gives the stream the CRT default buffering for its new target, which for
+     * the log file is full buffering. A run that ends in a hang + force-kill
+     * (the exact case this profiler is used to triage) would otherwise lose
+     * the last partial 4 KiB block. One flush per ~5 s interval, and only when
+     * the profiler is enabled at all.
+     */
+    fflush(stderr);
+#endif
     flips = 0;
     interval_start_ns = now;
 }

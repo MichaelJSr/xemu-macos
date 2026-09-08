@@ -37,9 +37,9 @@ What it enforces (the Windows equivalents of the macOS disciplines):
   renderer pin   display.renderer is read from the template, recorded in
                  meta/receipt and pinned into every scratch config. The batch
                  REFUSES to start on anything but VULKAN (--allow-renderer
-                 overrides): nsprof_flip_tick() is called only from the
-                 Vulkan renderer, so an OPENGL run produces a log with zero
-                 nsprof intervals and every run dies at the gate.
+                 overrides): both renderers tick nsprof_flip_tick() since
+                 2026-09-08, but outside VULKAN only a few buckets are
+                 populated, so receipts are not comparable across renderers.
   scene gate     every run's nsprof log is gated by scripts/bench-receipt.py:
                  draws/flip inside --draws-band, draws/flip CV <= --cv-max,
                  scene-anchored trailing tail, one post-load transient
@@ -388,10 +388,11 @@ class Bench:
         # Renderer. xemu drops default-valued keys when it rewrites its
         # config, so an ABSENT display.renderer means the spec default
         # (VULKAN, config_spec.yml). It matters because the measurement
-        # channel is renderer-specific: nsprof_flip_tick() is called only
-        # from hw/xbox/nv2a/pgraph/vk/renderer.c, so under OPENGL the log
-        # carries zero nsprof intervals and every run dies at the gate with
-        # no visible explanation. Recorded in meta and pinned per run.
+        # channel is renderer-specific: since 2026-09-08 both renderers
+        # tick nsprof_flip_tick(), so an OPENGL log does carry intervals,
+        # but every bucket except flip_idle/fence_wait/present_wait is
+        # instrumented at Vulkan-only call sites, so GL and Vulkan
+        # receipts are not comparable. Recorded in meta and pinned per run.
         self.renderer = (tmpl.get("display", "renderer") or "VULKAN").upper()
         if self.renderer not in ("VULKAN", "OPENGL", "NULL"):
             die("config template %s has display.renderer = %r, which is not "
@@ -399,16 +400,19 @@ class Bench:
                 % (self.config_source, self.renderer))
         if self.renderer != "VULKAN":
             if not a.allow_renderer:
-                die("config template %s selects display.renderer = %s, but "
-                    "nsprof (the only measurement channel this harness reads) "
-                    "ticks solely on the Vulkan renderer: every run would "
-                    "produce a log with no nsprof intervals and be recorded "
-                    "DEAD. Set renderer = 'VULKAN' in the template, or pass "
-                    "--allow-renderer to run anyway (plumbing only - there "
-                    "will be no fps numbers)."
+                die("config template %s selects display.renderer = %s. This "
+                    "harness pins VULKAN so every A/B is comparable: both "
+                    "renderers tick nsprof since 2026-09-08, but outside "
+                    "VULKAN only flips/flip_idle/fence_wait/present_wait are "
+                    "populated, so a GL receipt can only be compared against "
+                    "another GL receipt. Set renderer = 'VULKAN' in the "
+                    "template, or pass --allow-renderer to measure this "
+                    "renderer against itself."
                     % (self.config_source, self.renderer))
-            log("warning: renderer %s with --allow-renderer - nsprof never "
-                "ticks outside VULKAN, expect DEAD runs" % self.renderer)
+            log("warning: renderer %s with --allow-renderer - outside VULKAN "
+                "only the flips/flip_idle/fence_wait/present_wait buckets "
+                "are populated; compare against this renderer only"
+                % self.renderer)
         log("renderer %s (pinned into every scratch config)" % self.renderer)
 
         # snapshot tag: the monitor only knows the qcow2 vm-* tag; the
@@ -763,9 +767,10 @@ class Bench:
                         console attached it freopens BOTH streams to xemu.log
                         in its cwd (ui/xemu.c), leaving the redirected file
                         here at 0 bytes with the real output in the sidecar.
-        no nsprof       a log with no interval headers at all is the renderer
-                        signature (nsprof only ticks on VULKAN), not a
-                        mysterious gate failure.
+        no nsprof       a log with zero interval headers means the run never
+                        reached a 5 s summary (both renderers tick nsprof
+                        since 2026-09-08); look at xemu.log and the run
+                        itself, not at the renderer gate.
         """
         notes = []
         try:
@@ -792,7 +797,8 @@ class Bench:
                 pass
             if heads == 0:
                 notes.append("log has 0 nsprof interval headers (renderer=%s; "
-                             "nsprof_flip_tick only runs on VULKAN)"
+                             "both renderers tick nsprof, so the run never "
+                             "reached a 5 s summary)"
                              % getattr(self, "renderer", "?"))
         return base + ("; " + "; ".join(notes) if notes else "")
 
