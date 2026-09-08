@@ -58,12 +58,54 @@
 #define SPIRV_COMPILER_ID "glslang-unknown"
 #endif
 
+/*
+ * Escape hatches, read once (class-4 legacy restores; default = the
+ * behaviour described below):
+ *   XEMU_SPIRV_CACHE=0        - bypass the on-disk cache entirely (no
+ *                               loads, no stores), for cold-compile A/B
+ *                               measurement or if the cache directory is
+ *                               unusable on some host.
+ *   XEMU_SPIRV_CACHE_ATOMIC=0 - restore the legacy in-place write instead
+ *                               of the temp-file + g_rename replace.
+ */
+static bool spirv_cache_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_SPIRV_CACHE");
+        on = !(e && e[0] == '0');
+    }
+    return on == 1;
+}
+
+static bool spirv_cache_atomic_write(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_SPIRV_CACHE_ATOMIC");
+        on = !(e && e[0] == '0');
+    }
+    return on == 1;
+}
+
 static char *get_spirv_cache_dir(void)
 {
     const char *base = xemu_settings_get_base_path();
-    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s", base,
+    /*
+     * The compile options are part of the blob's identity too:
+     * debug_shaders disables the optimizer and embeds debug info
+     * (see pgraph_vk_compile_glsl_to_spv). Without it in the key, a
+     * debug run poisons every later normal run with unoptimized
+     * SPIR-V and toggling the option no-ops against a warm cache.
+     * A directory suffix (rather than mixing a bit into the hash)
+     * keeps the two variants from evicting each other and leaves
+     * existing default-config caches warm on both platforms.
+     */
+    const char *variant = g_config.display.vulkan.debug_shaders ? "-dbg" : "";
+    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s%s", base,
                                 xemu_version_major, xemu_version_minor,
-                                xemu_version_patch, SPIRV_COMPILER_ID);
+                                xemu_version_patch, SPIRV_COMPILER_ID,
+                                variant);
     /* Portable (Windows mkdir takes one argument). */
     g_mkdir_with_parents(dir, 0755);
     return dir;
@@ -78,12 +120,50 @@ static char *get_spirv_cache_path(uint64_t hash)
     return path;
 }
 
-static GByteArray *load_spirv_from_cache(uint64_t hash)
+static void delete_spirv_cache_entry(uint64_t hash)
 {
     char *path = get_spirv_cache_path(hash);
-    FILE *f = fopen(path, "rb");
+    g_unlink(path);
     g_free(path);
+}
+
+/* SPIR-V module header: magic + 4 words (version, generator, bound, 0). */
+#define SPIRV_MAGIC 0x07230203u
+#define SPIRV_HEADER_SIZE (5 * sizeof(uint32_t))
+
+/*
+ * A cached blob goes straight to vkCreateShaderModule and SPIRV-Reflect,
+ * and VK_CHECK aborts on failure, so a file torn by a kill mid-write (or
+ * by two instances racing) would otherwise be a permanent hard crash with
+ * no self-heal. Reject anything that is not a plausible SPIR-V module -
+ * codeSize must be a multiple of 4 (VUID-VkShaderModuleCreateInfo-codeSize-08735)
+ * and the first word must be the magic - and delete the entry so the next
+ * compile repopulates it.
+ */
+static bool spirv_blob_is_valid(const guint8 *data, size_t size)
+{
+    uint32_t magic;
+
+    if (size < SPIRV_HEADER_SIZE || (size % sizeof(uint32_t)) != 0) {
+        return false;
+    }
+    memcpy(&magic, data, sizeof(magic));
+    return magic == SPIRV_MAGIC;
+}
+
+static GByteArray *load_spirv_from_cache(uint64_t hash)
+{
+    if (!spirv_cache_enabled()) {
+        return NULL;
+    }
+
+    char *path = get_spirv_cache_path(hash);
+    /* qemu_fopen, not fopen: the path comes from SDL_GetPrefPath and is
+     * UTF-8, but Windows fopen() reads it in the process ANSI code page,
+     * so a non-ASCII profile path silently never hits the cache. */
+    FILE *f = qemu_fopen(path, "rb");
     if (!f) {
+        g_free(path);
         return NULL;
     }
 
@@ -93,27 +173,69 @@ static GByteArray *load_spirv_from_cache(uint64_t hash)
 
     if (size <= 0) {
         fclose(f);
+        if (size == 0) {
+            /* A zero-length entry is a torn write: drop it so the next
+             * compile writes a real one. */
+            g_unlink(path);
+        }
+        g_free(path);
         return NULL;
     }
 
     guint8 *data = g_malloc(size);
-    if (fread(data, 1, size, f) != size) {
-        g_free(data);
+    if (fread(data, 1, size, f) != (size_t)size ||
+        !spirv_blob_is_valid(data, (size_t)size)) {
         fclose(f);
+        fprintf(stderr,
+                "xemu: ignoring corrupt SPIR-V cache entry %s (%ld bytes); "
+                "recompiling\n",
+                path, size);
+        g_unlink(path);
+        g_free(data);
+        g_free(path);
         return NULL;
     }
     fclose(f);
+    g_free(path);
     return g_byte_array_new_take(data, size);
 }
 
 static void save_spirv_to_cache(uint64_t hash, GByteArray *spv)
 {
-    char *path = get_spirv_cache_path(hash);
-    FILE *f = fopen(path, "wb");
-    if (f) {
-        fwrite(spv->data, 1, spv->len, f);
-        fclose(f);
+    if (!spirv_cache_enabled() || !spv || spv->len == 0) {
+        return;
     }
+
+    char *path = get_spirv_cache_path(hash);
+
+    if (!spirv_cache_atomic_write()) {
+        /* Legacy (XEMU_SPIRV_CACHE_ATOMIC=0): write in place. */
+        FILE *f = qemu_fopen(path, "wb");
+        if (f) {
+            fwrite(spv->data, 1, spv->len, f);
+            fclose(f);
+        }
+        g_free(path);
+        return;
+    }
+
+    /* Write-then-rename, same discipline as the pipeline cache in draw.c:
+     * a kill mid-write must not leave a torn .spv for the next boot to
+     * ingest. The temp name carries the pid so two instances compiling the
+     * same shader cannot truncate each other's partial file, and g_rename
+     * replaces an existing target on Windows too (plain rename() fails
+     * there once the file exists). */
+    char *tmp_path =
+        g_strdup_printf("%s.%u.tmp", path, (unsigned)getpid());
+    FILE *f = qemu_fopen(tmp_path, "wb");
+    if (f) {
+        bool ok = fwrite(spv->data, 1, spv->len, f) == spv->len;
+        ok &= fclose(f) == 0;
+        if (!ok || g_rename(tmp_path, path) != 0) {
+            g_unlink(tmp_path);
+        }
+    }
+    g_free(tmp_path);
     g_free(path);
 }
 
@@ -394,12 +516,22 @@ static void block_to_uniforms(const SpvReflectBlockVariable *block, ShaderUnifor
     // fprintf(stderr, "--\n");
 }
 
-static void init_layout_from_spv(ShaderModuleInfo *info)
+/*
+ * Returns false if the blob does not reflect. The header check in
+ * load_spirv_from_cache cannot catch a file truncated on a word
+ * boundary, so this is the point where a torn cache entry is caught:
+ * SPIRV-Reflect parses with bounds checks and reports EOF instead of
+ * walking off the end, and it self-destroys the module on failure. The
+ * caller then recompiles rather than handing the blob to
+ * vkCreateShaderModule, whose VK_CHECK would abort the process.
+ */
+static bool init_layout_from_spv(ShaderModuleInfo *info)
 {
     SpvReflectResult result = spvReflectCreateShaderModule(
         info->spirv->len, info->spirv->data, &info->reflect_module);
-    assert(result == SPV_REFLECT_RESULT_SUCCESS &&
-           "Failed to create SPIR-V shader module");
+    if (result != SPV_REFLECT_RESULT_SUCCESS) {
+        return false;
+    }
 
     uint32_t descriptor_set_count = 0;
     result = spvReflectEnumerateDescriptorSets(&info->reflect_module,
@@ -440,6 +572,8 @@ static void init_layout_from_spv(ShaderModuleInfo *info)
         block_to_uniforms(&info->reflect_module.push_constant_blocks[0],
                           &info->push_constants);
     }
+
+    return true;
 }
 
 static glslang_stage_t vk_shader_stage_to_glslang_stage(VkShaderStageFlagBits stage)
@@ -469,15 +603,31 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
 
     info->spirv = load_spirv_from_cache(glsl_hash);
     if (info->spirv) {
-        nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
-    } else {
+        /* Reflect the cached blob before it can reach the driver: a bad
+         * entry must be a miss that regenerates itself, not an abort. */
+        if (init_layout_from_spv(info)) {
+            nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
+        } else {
+            fprintf(stderr,
+                    "xemu: SPIR-V cache entry %016llx failed to reflect; "
+                    "recompiling\n",
+                    (unsigned long long)glsl_hash);
+            g_byte_array_unref(info->spirv);
+            info->spirv = NULL;
+            delete_spirv_cache_entry(glsl_hash);
+        }
+    }
+
+    if (!info->spirv) {
         info->spirv = pgraph_vk_compile_glsl_to_spv(
             vk_shader_stage_to_glslang_stage(stage), glsl);
         save_spirv_to_cache(glsl_hash, info->spirv);
+        bool reflected = init_layout_from_spv(info);
+        assert(reflected && "Failed to create SPIR-V shader module");
+        (void)reflected;
     }
 
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
-    init_layout_from_spv(info);
 
     free(info->glsl);
     info->glsl = NULL;
