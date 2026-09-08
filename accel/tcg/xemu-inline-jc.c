@@ -37,6 +37,19 @@ void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32,
                                         uint64_t cs_base, uint32_t flags,
                                         uint32_t cflags)
 {
+    /*
+     * This file is the sole owner of the CPUJumpCache layout, and the entry
+     * address below is formed with a hardcoded shift rather than an
+     * offsetof()-derived one. Pin both layout facts at compile time so a
+     * future field addition or a narrower vaddr cannot silently make the
+     * probe read a neighbouring entry (wrong pc/flags -> dispatch to the
+     * wrong TB): the entry stride must stay {TranslationBlock *, vaddr} = 16
+     * bytes for the `shli 4`, and the pc field must stay 64-bit for the
+     * ld_i64/brcond_i64 compare against the zero-extended guest pc.
+     */
+    QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache *)0)->array[0]) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache *)0)->array[0].pc) != 8);
+
     TCGLabel *slow = gen_new_label();
     TCGv_i32 tmp = tcg_temp_new_i32();
     TCGv_i32 h = tcg_temp_new_i32();

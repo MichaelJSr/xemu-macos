@@ -61,7 +61,8 @@ extern int nv2a_vk_dgroup_indent;
     } while (0)
 
 /* Performance build: strip internal invariant asserts from VK hot paths.
- * Guest-boundary checks (VRAM/DMA bounds) should use regular assert().
+ * Guest-boundary checks (VRAM/DMA bounds) must use assert() or
+ * nv2a_vk_bounds_check(), both of which stay live in perf builds.
  * Profile counter stripping is in the shared hw/xbox/nv2a/debug.h. */
 #define NV2A_VK_PERF_BUILD 1
 
@@ -72,28 +73,30 @@ extern int nv2a_vk_dgroup_indent;
 #endif
 
 /*
- * Bounds check for array indexing that would cause OOB access.
- * In perf builds: provides UB-free optimization hint without branching.
- * In debug builds: prints diagnostic and aborts.
+ * Bounds check for indexing/sizing driven by guest-controlled values.
+ *
+ * This is a real check in EVERY build, including NV2A_VK_PERF_BUILD: an
+ * unlikely (statically predicted not-taken) branch plus a loud abort naming
+ * the failing expression. It must never compile to __builtin_unreachable():
+ * that form is not a no-op but a licence for the optimizer to assume the
+ * bound, which turns a guest-driven violation (e.g. a surface size from
+ * NV_PGRAPH registers exceeding the staging buffer) into a silent
+ * out-of-bounds write into host-visible mapped memory instead of a
+ * diagnosable failure. QEMU never defines NDEBUG, so this costs exactly what
+ * the upstream plain assert() at these sites costs, and none of the sites is
+ * on the per-draw hot path.
+ *
+ * nv2a_vk_assert() remains debug-only by design: it guards internal renderer
+ * invariants that no guest input can violate.
  */
-#if NV2A_VK_PERF_BUILD
-#define nv2a_vk_bounds_check(x)               \
-    do {                                       \
-        if (!(x)) {                            \
-            __builtin_unreachable();           \
-        }                                      \
+#define nv2a_vk_bounds_check(x)                                 \
+    do {                                                        \
+        if (G_UNLIKELY(!(x))) {                                 \
+            fprintf(stderr, "%s:%d: bounds check failed: %s\n", \
+                    __FILE__, __LINE__, #x);                    \
+            abort();                                            \
+        }                                                       \
     } while (0)
-#else
-#define nv2a_vk_bounds_check(x)               \
-    do {                                       \
-        if (G_UNLIKELY(!(x))) {                \
-            fprintf(stderr,                    \
-                    "%s:%d: bounds check failed: %s\n", \
-                    __FILE__, __LINE__, #x);   \
-            abort();                           \
-        }                                      \
-    } while (0)
-#endif
 
 void pgraph_vk_debug_frame_terminator(void);
 

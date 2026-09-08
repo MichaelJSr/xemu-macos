@@ -65,7 +65,12 @@ struct Lru {
 	/* Optional. Called before eviction. Return `false` to prevent eviction. */
 	bool (*pre_node_evict)(Lru *lru, LruNode *node);
 
-	/* Optional. Called after eviction. Reclaim any associated resources. */
+	/*
+	 * Optional. Called after eviction. Reclaim any associated resources.
+	 * Must not re-enter this same Lru: it runs while the node is off its
+	 * bin but still on `global`, so a nested lookup/eviction would see a
+	 * node that violates the "`global` is in-use only" invariant.
+	 */
 	void (*post_node_evict)(Lru *lru, LruNode *node);
 };
 
@@ -143,7 +148,18 @@ LruNode *lru_try_evict_one(Lru *lru)
 	 * keeps refusing (e.g. textures bound to in-flight work).
 	 */
 	QTAILQ_FOREACH_REVERSE(found, &lru->global, next_global) {
-		if (!lru->pre_node_evict || lru->pre_node_evict(lru, found)) {
+		/*
+		 * The in-use test is redundant while the split-list invariant
+		 * holds, but it is one predicate on a walk that normally stops
+		 * on its first iteration, and without it a stale node on
+		 * `global` would be returned as "evicted" and then
+		 * QTAILQ_REMOVE'd from `free` by lru_lookup(), splicing it out
+		 * of `global` with the wrong list head and driving num_free
+		 * negative. Cheap insurance against a silent double-list
+		 * corruption.
+		 */
+		if (lru_is_node_in_use(lru, found) &&
+		    (!lru->pre_node_evict || lru->pre_node_evict(lru, found))) {
 			lru_evict_node(lru, found);
 			return found;
 		}
@@ -162,6 +178,11 @@ LruNode *lru_evict_one(Lru *lru)
 	return found;
 }
 
+/*
+ * Returns a node that is still linked on `free`: the caller must
+ * QTAILQ_REMOVE(&lru->free, ...) it and decrement num_free itself
+ * (lru_lookup() is the only caller and does both).
+ */
 static inline
 LruNode *lru_get_one_free(Lru *lru)
 {
@@ -207,6 +228,8 @@ LruNode *lru_lookup(Lru *lru, uint64_t hash, const void *key)
 		QTAILQ_REMOVE(&lru->global, found, next_global);
 	} else {
 		found = lru_get_one_free(lru);
+		/* Must have come off `free`, never off the in-use `global` list. */
+		assert(!lru_is_node_in_use(lru, found));
 		QTAILQ_REMOVE(&lru->free, found, next_global);
 		found->hash = hash;
 		if (lru->init_node) {
