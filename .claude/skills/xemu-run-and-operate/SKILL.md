@@ -77,6 +77,16 @@ No-overwrite semantics mean an explicit `export MVK_CONFIG_X=...` (or
 prefixing the invocation) before launch still wins — this is the supported
 way to override one of these for an experiment.
 
+The two launch paths also differ in privacy prompts (TCC). A direct exec
+inherits the invoking terminal's folder permissions. A LaunchServices
+launch makes xemu its own responsible process. A freshly unzipped or
+rebuilt bundle (new ad-hoc signature) whose config points at ROMs or
+disc images under `~/Documents` blocks in
+`qemu_init → get_image_size → open()` until the "access files in your
+Documents folder" prompt is answered. It shows no window, uses 0% CPU and
+creates no monitor socket (seen 2026-10-10). Harnesses using `open`
+should clone those files out of protected folders.
+
 **If you add a new `LSEnvironment` entry to `Info.plist`, mirror it in this
 `setenv` block, or you reintroduce the exact split above** — this is
 xemu-testing's cardinal rule #1, restated here because it's a launch-path

@@ -126,18 +126,22 @@ citable, never arms from different experiments.
   shape: point it at a knob whose default is non-zero and it silently
   benches "off vs candidate" instead of "default vs candidate", with a
   perfectly clean receipt.
-- **Use the `abx.sh` pattern for those three cases.** Same protocol and
-  same gates — it reuses `scripts/bench-receipt.py` and this library's
-  `nsprof_summarize.py` verbatim — and the same isolation (bundle APFS
-  clone, hdd + eeprom clones, scratch `xemu.toml` via `-config_path`
-  with fullscreen forced off, monitor socket in `/tmp` per incident
-  9.9). The difference is that each arm carries an env **set**
-  (`--b-env "A=1 B=2"` / `--e-env ...`) and its own bundle
-  (`--b-app` / `--e-app`), plus `--warmup-arm`. The 2026-08-04 copy
-  lives in that session's scratchpad at `c2/abx.sh`; **a repo-ified
-  copy belongs in `scripts/` and does not exist yet** — until it does,
-  re-derive it from this description rather than bending the stock
-  harness into a shape it cannot hold.
+- **Use `scripts/bench-abx.sh` for those three cases** (committed
+  2026-10-10; before that it lived only in session scratchpads as
+  "the abx.sh pattern"). It uses the same protocol and gates, reusing
+  `scripts/bench-receipt.py` and this library's `nsprof_summarize.py`
+  verbatim. It also uses the same isolation: bundle APFS clone,
+  hdd + eeprom clones, scratch `xemu.toml` via `-config_path`, monitor
+  socket in `/tmp` per incident 9.9. The difference is that each arm
+  carries its own bundle (`--b-app` / `--e-app`) and an env **set**
+  (`--b-env "A=1 B=2"` / `--e-env ...`). For one-binary multi-variable
+  or pinned-baseline runs, point both apps at the same bundle. Each arm
+  gets its own warmup, pair order alternates (B,E)/(E,B), and
+  `--isolate-caches` is per arm. Use it whenever the arms differ in
+  glslang or MoltenVK, because a shared `pipeline_cache.bin` would be
+  rejected and rewritten on every switch. `--dry-run` resolves both
+  arms' identity without launching. Never bend the stock harness into
+  a shape it cannot hold.
 - **Quiet-machine enforcement must kill leftover harness LOOPS, not
   just xemu processes.** A stale background soak (the
   `scripts/soak-cycles.sh` class: boot once, then cycle
@@ -147,7 +151,7 @@ citable, never arms from different experiments.
   `pgrep -fl xemu` alone does **not** catch this: between cycles the
   soak owns no xemu process at all, so the quiet check passes and the
   loop relaunches seconds later. Check the loops themselves —
-  `pgrep -fl 'soak|probe-run|movement-probe|bench-savestate|abx'` —
+  `pgrep -fl 'soak|probe-run|movement-probe|bench-savestate|bench-abx'` —
   and kill the loop before the process it will otherwise respawn. Same
   logic as the 2026-07-11 compile-load rule: an arm that disagrees
   with itself is an environment failure, not a result.
@@ -158,6 +162,59 @@ citable, never arms from different experiments.
   the citation reads "5 clean interleaved pairs" rather than six with a
   silent hole. Never re-run just the failed arm into an existing
   batch — arms are only comparable inside their own interleaved pair.
+
+## Bench mechanics learned 2026-10-10 (v0.13.3 release candidate)
+
+- **A VALID receipt does not prove a stable environment.** The receipt
+  never checks whether an arm agrees with itself. A windowed
+  cross-binary run on a box loaded by another session's batch jobs
+  printed VALID while the base arm alone spanned 14.0–21.5 fps. Check
+  each arm's spread by hand; more than 1 fps is an environment failure
+  (the 2026-07-11 rule).
+- **Game Mode is the only priority lever without root.** Negative nice
+  needs sudo. Batch jobs at nice 20 / utility QoS already sit below
+  xemu. With `bench-abx.sh --fullscreen`, gamepolicyd logs "Full screen
+  gaming session is now active" and then "Game mode status is now on"
+  about 2 s after a harness-launched clone starts. Any focus change
+  pauses it, including an `osascript` frontmost-app query. The three
+  paused runs in that batch were the lowest in their arms. The script
+  logs every run and reports the Game-Mode-clean pairs. On the loaded
+  box, Game Mode tightened the base arm to about 1.5 fps of spread but
+  left F8 near 21 fps against quiet-box anchors near 30. Thirty-plus
+  batch jobs cost memory bandwidth and thermal headroom, and priority
+  does not get that back.
+- **Fullscreen window captures come back black** (luma 0) while the
+  fullscreen Space is active, even though nsprof shows the scene
+  rendering. Score artifacts in windowed runs.
+- **Use `/usr/bin/log`, not `log`, in zsh.** The bare name is a shell
+  builtin and fails with "too many arguments".
+- **Build the cross-binary base arm with today's toolchain.** A bundle
+  from a month earlier was built with SDK 26.5 / ld 1267; the candidate
+  had SDK 27.0 / ld 27037 (`otool -l <bin> | grep -A4 LC_BUILD_VERSION`).
+  The recipe that worked:
+  1. Add a git worktree at the old tag.
+  2. Copy in the current `macos-libs/` and the fixed
+     `scripts/download-macos-libs.py` (the old script dies on
+     Python 3.14's tar filter).
+  3. Run `./build.sh`.
+  4. Swap `Contents/Libraries/<arch>/` for an era-correct bundle's
+     dylibs, then `codesign --force --deep -s -`.
+
+  Dylib swaps also make SDL and MoltenVK bisects rebuild-free.
+  glslang is static, so it needs a rebuild.
+- **Smoke the shipped zip through LaunchServices before publishing.**
+  It is the only test of the shipped combination: stock MoltenVK, PGO,
+  and `LSEnvironment`.
+  - Launch with `open -n -a <app> --env XEMU_NV2A_NSPROF=1 --stdout F
+    --stderr G --args -config_path … -monitor unix:/tmp/…`. nsprof
+    lands in the `--stderr` file. Use portable mode so the user's
+    caches stay untouched.
+  - A LaunchServices launch makes xemu its own TCC responsible process.
+    With the boot ROM, flash or disc image under `~/Documents`,
+    `qemu_init → get_image_size → open()` blocks on a folder-consent
+    prompt. You see no window, 0% CPU and no monitor socket. Clone
+    those files out of protected folders first (`cp -c` is free on
+    APFS). Never click "Don't Allow" on such a prompt.
 
 ## Refuter / validator stacking (hard limit, 2026-08-04)
 
@@ -351,5 +408,6 @@ drift-prone mechanics before trusting them:
   `ls scripts/movement-probe.sh scripts/soak-cycles.sh scripts/probe-run.sh`
 - Keyboard scancode map (owner-editable, re-read per session):
   `grep -n -A 30 'keyboard_controller_scancode_map' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
-- Whether `abx.sh` has been repo-ified yet: `ls scripts/abx.sh`
-  (absent as of 2026-08-04 — the pattern is documented above instead)
+- Cross-binary harness flags and Game Mode logging:
+  `scripts/bench-abx.sh --help` and
+  `grep -n 'gamepolicyd\|FULLSCREEN' scripts/bench-abx.sh`

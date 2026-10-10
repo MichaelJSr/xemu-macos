@@ -408,18 +408,34 @@ fps A/B + artifact hunt) before releasing with it."
   `grep -riE 'make check|meson test|ctest|pytest' .github/workflows/`
   → zero hits. "CI green" therefore means *it builds everywhere*, nothing
   more.
-- **The upstream QEMU `tests/` tree is present but unused by the fork**
-  (`tests/qtest`, `tests/functional`, `tests/qemu-iotests`, `tests/fp`, …).
-  It is not wired into any fork workflow and has no recorded fork use; it
-  targets generic QEMU devices, not the xbox machine or the fork's
-  renderer/JIT code. Treat it as inherited furniture, not a safety net.
+- **Upstream's `Unit tests` job runs QEMU's `tests/unit` suite, but
+  not in xemu's shipped configuration** (since the 2026-10-10 merge;
+  `build-tests.yml`, Linux, 94 ok). It builds with plain `./configure`.
+  Every real xemu build goes through `build.sh`, which adds `-DXBOX=1`.
+  So the job never compiles xemu's `#ifdef XBOX` main-loop and chardev
+  changes (the dedicated `qemu_main_context` and `qemu_main_loop_lock`).
+  A local macOS run (`meson test -C build --suite unit`, runnable
+  without extra environment since `92e91f0310`) gives 91 ok, 4 skip and
+  two known XBOX-mode failures:
+  - test-aio: the `/aio-gsource/*` cases iterate glib's global context.
+  - test-char: 27 cases unlock an uninitialized `qemu_main_loop_lock`,
+    and mux/hub trip the GCONTEXT assert.
+
+  Those are upstream xemu design conflicts, not fork regressions.
+  Treat any other unit failure as real.
+- **The rest of the upstream QEMU `tests/` tree is present but unused
+  by the fork** (`tests/qtest`, `tests/functional`, `tests/qemu-iotests`,
+  `tests/fp`, …). It is not wired into any fork workflow and has no
+  recorded fork use. It targets generic QEMU devices, not the xbox
+  machine or the fork's renderer/JIT code. Treat it as inherited
+  furniture, not a safety net.
 
 ### 5.2 The fork's real regression nets
 
 | Net | What it catches | Where |
 |---|---|---|
 | DSP JIT DIFF validator | Any bit-level JIT/interpreter divergence, per unique translation | in-binary, `XEMU_DSP_JIT_DIFF` (§1.4) |
-| Savestate A/B harness | Perf regressions, anchored to nsprof intervals | `scripts/bench-savestate-ab.sh` + xemu-testing protocol |
+| Savestate A/B harness | Perf regressions, anchored to nsprof intervals | `scripts/bench-savestate-ab.sh` (one bundle, env toggle) and `scripts/bench-abx.sh` (cross-binary / multi-variable) + xemu-testing protocol |
 | Artifact oracle | Gross visual corruption over long soaks | capture method in xemu-testing; scoring half ships as `score_frames.py` in `.claude/skills/xemu-diagnostics-and-tooling/scripts/` (capture loop recreated from the description) |
 | Forced-failure knobs | Prove guards/harnesses actually fire | `XEMU_MAX_QUERIES` (capacity guard), `XEMU_DSP_JIT_SENTINEL` / `_FORCE` (cur_inst discipline), `XEMU_DSP_JIT_PIN_AUDIT` (pinned-register integrity) |
 
