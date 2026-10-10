@@ -16,6 +16,10 @@ permissions:
 jobs:
   bump_wraps:
     name: "Bump Meson subprojects"
+    # Upstream's robot: it branches from origin/master, opens PRs against
+    # master and authenticates with XEMU_ROBOT_TOKEN, none of which exist
+    # on forks. Forks pick up wrap bumps through upstream merges.
+    if: ${{ github.repository_owner == 'xemu-project' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
