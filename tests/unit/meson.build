@@ -166,6 +166,16 @@ endif
 test_env = environment()
 test_env.set('G_TEST_SRCDIR', meson.current_source_dir())
 test_env.set('G_TEST_BUILDDIR', meson.current_build_dir())
+# Fork: the vendored MacPorts dylibs keep absolute /opt/local install
+# names, which only the app bundle has rewritten. Point dyld's fallback
+# search at them so the suite runs from a local macOS build tree (same
+# fix as tests/xbox/dsp and tests/xbox/ptimer).
+if host_os == 'darwin'
+  test_env.prepend('DYLD_FALLBACK_LIBRARY_PATH',
+                   meson.project_source_root() / 'macos-libs'
+                   / (host_machine.cpu() == 'aarch64' ? 'arm64' : host_machine.cpu())
+                   / 'opt' / 'local' / 'lib')
+endif
 
 slow_tests = {
   'test-aio-multithread' : 120,
