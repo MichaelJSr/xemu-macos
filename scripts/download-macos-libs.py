@@ -52,9 +52,10 @@ class LibInstaller:
 		# The mirror lists files alphabetically, so the last match is the
 		# lexicographically greatest, not the newest: SDL3-3.4.8 sorted after
 		# SDL3-3.4.18 and the 3.4.8 build was vendored for months. Rank by the
-		# numeric version, then the port revision; on ties prefer the build
-		# with the fewest +variants (glib2's +dbus+x11 drags in the dbus
-		# daemon, +x11 alone is what xemu needs).
+		# numeric version, then the port revision; only when both tie does the
+		# build with the fewest +variants win, so a newer revision is never
+		# skipped for its variant set (glib2 2.88.3_2 exists only as
+		# +dbus+x11; its dbus dependency is extracted but nothing links it).
 		pkg_filename = max(set(pkgs), key=lambda f: self.pkg_sort_key(pkg_name, f))
 		return pkg_filename, f'{pkg_base_url}/{pkg_filename}'
 

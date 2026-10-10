@@ -29,7 +29,7 @@ set -euo pipefail
 # (build.sh XEMU_MOLTENVK_VERSION default; macOS CI asserts the bundled
 # version matches THAT), so local soaks run a newer driver than users
 # load. Previous pin: db66022459 (v1.4.2, 2026-08-04).
-MVK_PIN=67b2682699d7903606b97a0392061d85d27d49e6   # main 2026-10-10, 54 commits past v1.4.2 (reports 1.4.3-dev)
+MVK_PIN=67b2682699d7903606b97a0392061d85d27d49e6   # main 2026-10-10, 54 commits past v1.4.2, untagged (reports 1.4.3)
 MVK_DIR="${1:-$(dirname "$0")/../../MoltenVK}"
 MCPU="${XEMU_MVK_MCPU:-apple-m2}"
 

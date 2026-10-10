@@ -71,12 +71,12 @@ void ptimer_init(NV2AState *d)
 }
 
 /*
- * The guest programs PTIMER's NUMERATOR/DENOMINATOR and the PRAMDAC core
- * clock PLL some time after reset, so all three divisors used below are zero
- * for part of the boot (and core_clock_freq is zeroed again by any NVPLL
- * coefficient write with MDIV == 0). Treat that as "the clock is not running
- * yet": the conversions return 0 and no alarm is scheduled, instead of
- * trapping in muldiv64's divide.
+ * Three divisors feed the conversions below. core_clock_freq is zero from
+ * reset until the guest programs the PRAMDAC PLL, and is zeroed again by any
+ * NVPLL coefficient write with MDIV == 0; NUMERATOR/DENOMINATOR start at 1
+ * (ptimer_reset) but are guest-writable registers and a guest can store 0.
+ * Treat any zero as "the clock is not running": the conversions return 0 and
+ * no alarm is scheduled, instead of trapping in muldiv64's divide.
  */
 static inline bool ptimer_clock_configured(NV2AState *d)
 {

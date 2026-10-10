@@ -669,7 +669,7 @@ scope here.
 | Axis | This machine (local) | CI |
 |---|---|---|
 | macOS SDK | Xcode CLT with SDK 26.5 available (probe picks the newest ≥ min) | `macos-15` runner — SDK 15. This is why MetalFX/frame-interpolation code is guarded by `#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000` in `hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m` — CI's SDK doesn't even declare the macOS-26 MetalFX interpolator APIs, so the guard is a compile-time necessity, not just a runtime `@available` check. |
-| MoltenVK source | `/usr/local/lib/libMoltenVK.dylib`, **1.4.3-dev** (main `67b26826`), from this fork's custom pipeline (§4) | Vendors the **official 1.4.2** release into `macos-libs` (§3.4 tier 3) — CI has no `/usr/local` custom build and no MoltenVK checkout. |
+| MoltenVK source | `/usr/local/lib/libMoltenVK.dylib`, reports **1.4.3** (untagged main `67b26826`), from this fork's custom pipeline (§4) | Vendors the **official 1.4.2** release into `macos-libs` (§3.4 tier 3) — CI has no `/usr/local` custom build and no MoltenVK checkout. |
 | dylibbundler / ccache | Present via Homebrew already | Installed fresh every run (`brew install ccache coreutils dylibbundler`) |
 | Compiler cache | None configured locally by default | ccache + `.lto-cache`, both restored from `actions/cache` keyed by arch/configuration/sha |
 | Bundle version stamp | `Info.plist` shows `0.0.0` (no `XEMU_VERSION` file — §3.10 step 8) | Real version (`git describe`-derived) baked in via the source-package step |
@@ -679,7 +679,7 @@ scope here.
 1.4.2 MoltenVK, while this development machine runs a custom build of
 MoltenVK main 54 commits past that tag (self-reports 1.4.3).**
 Any perf/artifact conclusion reached only on this machine should be
-understood as "true for the 1.4.3-dev pipeline," not automatically true for
+understood as "true for the untagged-1.4.3 pipeline," not automatically true for
 what ships. The MoltenVK pin-bump validation gauntlet
 (`xemu-validation-and-qa`) exists partly to close this gap before a version
 bump is trusted for release.

@@ -294,7 +294,7 @@ Build clean, `meson test --suite xbox` 7/7 incl. the new ptimer test.
 Not pushed; CI (now with upstream's `Unit tests` job) not yet run.
 
 Consequences for §8: step 1's A/B now compares across glslang 16.2→16.6,
-SDL3 3.4.8→3.4.18 and (locally only) MoltenVK 1.4.2→1.4.3-dev, so a
+SDL3 3.4.8→3.4.18 and (locally only) MoltenVK 1.4.2→untagged 1.4.3, so a
 regression bisects in that order after `XEMU_SPIRV_CACHE=0`; the
 artifact soak in step 2 doubles as the MoltenVK pin-bump gauntlet;
 step 4's draft body exists at `docs/release-notes-v0.13.3.md` with the

@@ -39,5 +39,9 @@ genconfig
 curl-*
 nlohmann_json
 sdl3
+# Stale checkouts from before the 2026-10-10 wrap rename (json.wrap ->
+# nlohmann_json.wrap, SDL3 tarball -> sdl3 git wrap); harmless, keep ignored.
+json-*
+SDL3-*
 /dsp56300/*
 !/dsp56300/meson.build
