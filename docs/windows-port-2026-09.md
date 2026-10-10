@@ -131,6 +131,11 @@ these docs, and — as of `add066354f` — the Windows benchmark harness
 is pure tooling compiled into nothing. All of it was validated on the
 Windows box on 2026-09-07 and on the Mac on 2026-09-08 (§8).
 
+**Status 2026-10-10:** wave 1 has since landed on main except the
+PVIDEO fix `285779ce83`. The branch was retired and its tip is tag
+`archive/windows-wave1-wip`. The rest of this section is the 2026-09-08
+snapshot.
+
 On branch **`windows-wave1-wip`** (NOT merged): wave 1 of the audit plan
 as one commit per batch (the present-hatch + ui-warning batch rode along
 inside the harness commit `ec31facd7d`) — SPIR-V cache
@@ -239,7 +244,8 @@ the MSYS2 configure fixes `ac28e5a5bd`, the DXGI presenter lock fix
 `2182baec46`, the docs commits including the pitch-clamp retraction
 `40f0a01ad3`, and the Windows benchmark harness `add066354f`.
 **Wave 1 is NOT on main** — it is still only on `windows-wave1-wip`,
-and none of its escape hatches has a `getenv` on main.
+and none of its escape hatches has a `getenv` on main. (2026-09-08; all
+of it except `285779ce83` landed later, see the status note above.)
 
 Verified on this Mac on 2026-09-08 (evidence table:
 `docs/windows-wave1-review-2026-09-08.md` §1):

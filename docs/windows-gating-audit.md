@@ -350,7 +350,8 @@ cleared on eviction; after `g_free`/`g_malloc` address reuse, a destroyed
 `wait_stage=VERTEX_INPUT` still gates the shader stages; not fixed, revisit
 only if the two above prove insufficient.)
 
-**Fix — branch `fix-windows-vulkan-black`** (CI green on macOS/Linux/Windows):
+**Fix — branch `fix-windows-vulkan-black`** (CI green on macOS/Linux/Windows;
+merged for v0.13.2, branch deleted 2026-10-10):
 (1) split the UBO write into two per-stage writes (primary; universal);
 (2) gate the display descriptor skip-cache to Apple only (native rewrites
 every present); (3) relax `shaderTessellationAndGeometryPointSize` to

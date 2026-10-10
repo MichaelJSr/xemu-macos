@@ -225,7 +225,7 @@ reasoned, not directly measured — the A/B is the ground truth.
 ## 5. BUILT + VALIDATED (Gates 1-3, arm (a) only)
 
 Arm (a) shipped dark behind `XEMU_SUBPAGE_DIRTY=1` with the refuter
-`XEMU_SUBPAGE_REFUTE=1` (commit `79e2f8b204`). Correctness receipts:
+`XEMU_SUBPAGE_REFUTE=1` (commit `683b919631`). Correctness receipts:
 
 - **Refuter soak (Gate 3):** F8/F7/F5 cycled over 33 loadvm reloads, ~12 min,
   `XEMU_SUBPAGE_DIRTY=1 XEMU_SUBPAGE_REFUTE=1`: **28,598,565 filter-skips

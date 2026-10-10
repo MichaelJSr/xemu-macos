@@ -190,9 +190,13 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   enabled) — both open, see the handoff doc. Under the layer xemu hung at
   exit once (process stuck terminating in the driver); not reproduced
   without the layer.
-- **Wave 1 of the audit plan — on branch `windows-wave1-wip`, landing
-  on main one batch at a time from 2026-09-08.** A contents item below
-  is on main only where it says so; the rest is still branch-only.
+- **Wave 1 of the audit plan — landed on main one batch at a time from
+  2026-09-08, except item (3).** A contents item below is on main only
+  where it says so. Item (3) is the PVIDEO/display fix `285779ce83`,
+  which the 2026-09-08 review held. The `windows-wave1-wip` branch was
+  retired on 2026-10-10; its tip, including `285779ce83` and every other
+  wave-1 commit cited in these docs, is kept as tag
+  `archive/windows-wave1-wip`.
   The combined wave-1 binary segfaulted ~10 s into Azurik on
   Windows; the crash is INTERMITTENT and NOT isolated: a same-day
   single-run bisect wrongly blamed the vp.c pitch clamp; the same binary
@@ -329,6 +333,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   warning fixes are declaration placement only.
 
 #### Escape hatches on branch `windows-wave1-wip` (not on main)
+
+The branch was retired on 2026-10-10. The commit these rows land with is
+kept as tag `archive/windows-wave1-wip`.
 
 These two knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
