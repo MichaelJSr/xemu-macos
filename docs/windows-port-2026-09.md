@@ -214,7 +214,7 @@ guard upstream?
 
 ## 7. Windows test recipe on this box
 
-Helper scripts (not in the repo) live in `C:\Users\ms\Documents\xemu-win-test\`:
+Helper scripts (not in the repo) live in `%USERPROFILE%\Documents\xemu-win-test\`:
 `build-mingw64.sh` (full build), `rebuild-quick.sh [--install]` (ninja +
 copy to `dist/`), `run-test.sh <secs> <name>` (launch with
 `-monitor tcp:127.0.0.1:4444,server,nowait`, screenshot via `shot.ps1`,

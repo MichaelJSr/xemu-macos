@@ -23,7 +23,7 @@ Symptom → subsystem triage for this fork. Every row gives the fastest checks,
 the ONE experiment that discriminates between candidate causes, and where the
 full history lives. All flags, paths, and function names below were verified
 against the repo at v0.9 (`cf85e96597`, 2026-07-04). Run all commands from the
-repo root: `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`.
+repo root.
 
 Terms used below: **NV2A** = the Xbox GPU, emulated in `hw/xbox/nv2a/`.
 **PFIFO thread** = the dedicated renderer thread feeding NV2A's 3D engine.

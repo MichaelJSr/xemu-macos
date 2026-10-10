@@ -10,7 +10,7 @@ the map of which document owns which kind of knowledge, the house
 style each artifact follows (derived from the shipped artifacts, with
 real quotes), copy-paste templates, and the currently-known drift
 between docs and code. All file references are relative to the repo
-root `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos` (branch
+root (branch
 `macos-optimizations`). Facts verified 2026-07-04 unless noted;
 README anchors, row counts, and repo pins refreshed 2026-07-11 at
 `7e2e6e7256`.
@@ -502,7 +502,7 @@ Fixing one stale line while its siblings rot is how drift survives.
 After fixing an item above (or any doc), re-grep for the rest:
 
 ```bash
-cd /Users/michaelsrouji/Documents/Xemu/tools/xemu-macos
+cd "$(git rev-parse --show-toplevel)"
 # 1. MVK config: the three homes must agree
 grep -n 'PREFILL\|ARGUMENT_BUFFERS\|FAST_MATH\|SYNCHRONOUS_QUEUE\|RESUME_LOST' \
   README.md Info.plist ui/xemu.c

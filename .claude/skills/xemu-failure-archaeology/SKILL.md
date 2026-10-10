@@ -28,7 +28,7 @@ settled battle or silently re-attempts a fenced-off design. Every entry is
 grounded in the repo: `README.md` "Failed / reverted experiments" (~line 803
 as of 2026-07-11), commit messages, and dated measurements.
 
-Repo: `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`, branch
+Repo: this checkout, branch
 `macos-optimizations`. Commit messages in this fork are unusually rich — for
 any entry below, the full story is one command away. Read it before acting:
 

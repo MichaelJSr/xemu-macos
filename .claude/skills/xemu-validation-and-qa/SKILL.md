@@ -276,14 +276,14 @@ historical number in this library was measured here. Re-verify:
 
 | Fixture | Value (2026-07-04) | Re-verify |
 |---|---|---|
-| Repo | `/Users/michaelsrouji/Documents/Xemu/tools/xemu-macos`, branch `macos-optimizations`; as of 2026-07-11: HEAD `7e2e6e7256`, latest tag `v0.10.2` (v0.9 era when this table was built) | `git describe --tags --match 'v*'` |
-| Game HDD | `/Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2` (826 MB); savestates live inside it | `ls -lh /Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2` |
+| Repo | this checkout, branch `macos-optimizations`; as of 2026-07-11: HEAD `7e2e6e7256`, latest tag `v0.10.2` (v0.9 era when this table was built) | `git describe --tags --match 'v*'` |
+| Game HDD | the qcow2 at `hdd_path` in the owner's `xemu.toml` (826 MB); savestates live inside it | `grep -n '^hdd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
 | Snapshot shortcuts | As of 2026-07-04 evening: F5=`vm-20260704032357` (471 draws/f), F6=`vm-20260704034933` (settles 192 draws/f @60), F7=`vm-20260704145901` (417 draws/f, live scene — fps drifts), F8=`vm-20260704173701` (**primary heavy anchor**, ~770 draws/f area, death-issue fixed by owner — though dying still shifts fps slightly). The earlier heavy anchor `vm-20260704150046` was REPLACED by F8 — receipts citing it name a snapshot that no longer exists; re-baseline on F8 before any new A/B | `grep -n 'f5 = \|f8 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` — or list ALL snapshots in the image with the qcow2 snapshot lister (xemu-diagnostics-and-tooling) |
-| Title corpus | `/Users/michaelsrouji/Documents/Xemu/games/`: Azurik (retail + `Azurik_dev.iso`), Battlefield 2 MC, Conker L&R, KOTOR, Vexx, NevolutionX (homebrew) | `ls /Users/michaelsrouji/Documents/Xemu/games/` |
-| Configured DVD | `dvd_path = …/games/Azurik_dev.iso` | `grep -n 'dvd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
-| Firmware | `bootrom_path=…/Boot ROM image/mcpx_1.0.bin`, `flashrom_path=…/BIOS/Complex_4627v1.03.bin`, `eeprom_path=…/xemu/xemu/eeprom.bin` (keys under `[sys.files]`) | `grep -n '_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
+| Title corpus | the owner's local folder of disc images (contents deliberately not recorded in this public repo) | list the folder holding the image at `dvd_path` in `xemu.toml` |
+| Configured DVD | `dvd_path` in `xemu.toml` (an Azurik image) | `grep -n 'dvd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
+| Firmware | `bootrom_path` (MCPX boot ROM), `flashrom_path` (BIOS), `eeprom_path` (keys under `[sys.files]` in `xemu.toml`) | `grep -n '_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
 | Custom MoltenVK | `/usr/local/lib/libMoltenVK.dylib` = the fork's pinned optimized build (pin `67b2682699d7903606b97a0392061d85d27d49e6`, MoltenVK main past v1.4.2, reports 1.4.3; releases vendor the official 1.4.2) — build.sh prefers it over vendored/Homebrew and logs provenance at bundle time: `Bundling MoltenVK from <src> (version <v>, <arch> UUID <uuid>)` | `ls -l /usr/local/lib/libMoltenVK.dylib` + version check below; check the latest build log for the provenance line |
-| MoltenVK checkout | `/Users/michaelsrouji/Documents/Xemu/tools/MoltenVK` (default arg of `scripts/build-moltenvk.sh`) | `ls -d /Users/michaelsrouji/Documents/Xemu/tools/MoltenVK/.git` |
+| MoltenVK checkout | `../MoltenVK` beside the repo (default arg of `scripts/build-moltenvk.sh`) | `ls -d ../MoltenVK/.git` |
 
 ```sh
 # Installed custom MoltenVK version string (expect 1.4.2 as of 2026-07-04):
@@ -520,7 +520,7 @@ the repo root unless absolute):
 - Bench protocol header (thresholds + usage): `sed -n '1,17p' scripts/bench-savestate-ab.sh`
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
 - Snapshot shortcuts: `grep -n 'f5 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
-- Fixtures on disk: `ls -lh /Users/michaelsrouji/Documents/Xemu/xbox_hdd.qcow2 /usr/local/lib/libMoltenVK.dylib; ls /Users/michaelsrouji/Documents/Xemu/games/`
+- Fixtures on disk: `ls -lh /usr/local/lib/libMoltenVK.dylib; grep -nE '^(hdd|dvd)_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
 - Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag now v0.10.2): `gh release view v0.10.2 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
 - Owner guard on the tag flow: `grep -n 'repository_owner' .github/workflows/release-on-tag.yml`
 - `nv2a_vk_assert` unconditionally compiled out (hardcoded `NV2A_VK_PERF_BUILD 1`, every build incl. `--debug`): `grep -n -B3 'nv2a_vk_assert' hw/xbox/nv2a/pgraph/vk/debug.h`

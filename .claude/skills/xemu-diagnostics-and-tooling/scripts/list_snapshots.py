@@ -2,8 +2,8 @@
 """list_snapshots.py — list QEMU savestates (snapshots) inside a qcow2 image
 without qemu-img and without taking the image's write lock.
 
-xemu stores savestates inside the game hdd qcow2 (e.g.
-~/Documents/Xemu/xbox_hdd.qcow2). qemu-img also lists them, but a RUNNING
+xemu stores savestates inside the game hdd qcow2 (the image at
+hdd_path in xemu.toml). qemu-img also lists them, but a RUNNING
 xemu holds the image's write lock and qemu-img then refuses to open it.
 This script only reads bytes, so it is always safe — but on an image that is
 being actively written, clone first (APFS instant copy):

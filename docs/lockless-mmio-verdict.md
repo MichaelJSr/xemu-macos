@@ -215,7 +215,7 @@ Two things this page does **not** close, both tracked elsewhere:
 ## F. Re-verification
 
 ```sh
-cd /Users/michaelsrouji/Documents/Xemu/tools/xemu-macos
+cd "$(git rev-parse --show-toplevel)"
 # the lockless set: PFB / USER / PGRAPH (NV2A) + vp (APU) — and nothing else
 grep -n 'memory_region_enable_lockless_io' hw/xbox/nv2a/nv2a.c hw/xbox/mcpx/apu/apu.c
 # the wall: every un-converted block's write handler calls update_irq inline

@@ -373,9 +373,8 @@ carry. Usage:
 scripts/build-moltenvk.sh [checkout-dir]      # default: ../../MoltenVK relative to scripts/
 ```
 
-Which resolves, from this repo's location, to
-`/Users/michaelsrouji/Documents/Xemu/tools/MoltenVK` — **verified present**
-on this machine as a git checkout (`ls -d .../tools/MoltenVK/.git`). If
+Which resolves to `../MoltenVK`, a sibling of the repo checkout —
+**verified present** on the dev machine as a git checkout (`ls -d ../MoltenVK/.git`). If
 you're setting this up fresh and that directory doesn't exist, the script
 tells you exactly what to run:
 `git clone https://github.com/KhronosGroup/MoltenVK.git <dir>`.

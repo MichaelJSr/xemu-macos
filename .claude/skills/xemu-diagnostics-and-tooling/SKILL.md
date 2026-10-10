@@ -632,7 +632,7 @@ by `extra_data` (if ≥8 bytes, its first u64 supersedes the legacy 32-bit
 `vm_state_size`), then `id_str`, then `name`.
 
 ```
-list_snapshots.py ~/Documents/Xemu/xbox_hdd.qcow2
+list_snapshots.py path/to/xbox_hdd.qcow2   # hdd_path from xemu.toml
 list_snapshots.py image.qcow2 --json
 ```
 

@@ -301,7 +301,7 @@ correctly). Reporter-facing triage doc: `scratchpad/windows-triage-for-reporter.
 
 ## P. Reproduction assets (2026-08-09, dev Mac)
 
-- Fixtures + released dbg Windows build staged at `~/Documents/Xemu/win-triage/`
+- Fixtures + released dbg Windows build staged in a local triage folder on the Mac
   and inside the guest at `C:\xemu-triage\` (bootrom/BIOS/eeprom, cloned
   `hdd-triage.qcow2`, `xemu-dbg/xemu.exe` = `xemu-0.13.1-dbg-windows-x86_64.zip`).
 - Guest launch is via interactive-token scheduled tasks (`xemudesk`/`xemugl`)

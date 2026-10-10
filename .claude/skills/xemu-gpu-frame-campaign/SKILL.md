@@ -131,7 +131,7 @@ Historical numbers in this file are dated; re-establish today's numbers
 on this machine before touching anything. Every later phase compares
 against *this* capture.
 
-**Fixtures** (re-verify before running): hdd `~/Documents/Xemu/xbox_hdd.qcow2`;
+**Fixtures** (re-verify before running): hdd = the qcow2 at `hdd_path` in `xemu.toml`;
 snapshot shortcuts read fresh from
 `~/Library/Application Support/xemu/xemu/xemu.toml` under
 `[general.snapshots.shortcuts]` — date-stamped, owner-volatile names
@@ -718,10 +718,10 @@ later commit:
   `grep -n "define NUM_FLIGHT_SLOTS\|max_queries_in_flight = " hw/xbox/nv2a/pgraph/vk/renderer.h hw/xbox/nv2a/pgraph/vk/reports.c`
 - push-constant budget still ≤ MoltenVK's limit →
   `grep -n MAX_UNIFORM_ATTR_VALUES_SIZE hw/xbox/nv2a/pgraph/vk/shaders.c` and
-  `grep -n maxPushConstantsSize /Users/michaelsrouji/Documents/Xemu/tools/MoltenVK/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm`
+  `grep -n maxPushConstantsSize ../MoltenVK/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm`
   (adjust if your MoltenVK checkout lives elsewhere)
 - `VK_EXT_multi_draw` still unimplemented in MoltenVK →
-  `grep -n MULTI_DRAW /Users/michaelsrouji/Documents/Xemu/tools/MoltenVK/MoltenVK/MoltenVK/Layers/MVKExtensions.def`
+  `grep -n MULTI_DRAW ../MoltenVK/MoltenVK/MoltenVK/Layers/MVKExtensions.def`
   (same checkout note)
 - Apple-path feature relaxations (`geometryShader`/`occlusionQueryPrecise`
   forced off) still in effect →
