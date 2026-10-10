@@ -301,3 +301,13 @@ step 4's draft body exists at `docs/release-notes-v0.13.3.md` with the
 two OWED lines to fill from steps 1–2. Shipped bundles will differ from
 v0.13.2 in SDL3 even before any source change — call that out in the
 notes (it is).
+
+**Outcome (2026-10-10, later):** pushed as `e6252bd72f`, and CI was
+green on all 18 jobs. Upstream's `Unit tests` job passed on its first
+fork run. v0.13.3 was published from that commit; the release body is
+now the canonical notes and the draft file is deleted. Step 1 was run
+fullscreen with Game Mode while unrelated batch jobs loaded the machine:
+parity, 21.35 vs 21.36 fps over four Game Mode-clean pairs of six.
+Step 2 had zero artifacts in 319 captures, and the shipped zip,
+launched via LaunchServices, had zero in 236. The owner's 20–30 minute
+Finder session (step 3) was not run before publishing.
