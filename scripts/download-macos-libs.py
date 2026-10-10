@@ -10,6 +10,7 @@ import re
 import os.path
 from tarfile import TarFile
 import subprocess
+import tarfile
 
 MIRROR = 'https://packages.macports.org'
 
@@ -48,8 +49,27 @@ class LibInstaller:
 			print(f'    [*] [ERROR] Unable to find version of {pkg_name} compatible with {self._darwin_target}.{self._arch}')
 			exit(1)
 
-		pkg_filename = pkgs[-1]
+		# The mirror lists files alphabetically, so the last match is the
+		# lexicographically greatest, not the newest: SDL3-3.4.8 sorted after
+		# SDL3-3.4.18 and the 3.4.8 build was vendored for months. Rank by the
+		# numeric version, then the port revision; on ties prefer the build
+		# with the fewest +variants (glib2's +dbus+x11 drags in the dbus
+		# daemon, +x11 alone is what xemu needs).
+		pkg_filename = max(set(pkgs), key=lambda f: self.pkg_sort_key(pkg_name, f))
 		return pkg_filename, f'{pkg_base_url}/{pkg_filename}'
+
+	@staticmethod
+	def pkg_sort_key(pkg_name, pkg_filename):
+		# name-version[_revision][+variant...].<platform>.<arch>.tbz2
+		m = re.match(re.escape(pkg_name) +
+		             r'-(?P<ver>[^_+]+?)(?:_(?P<rev>\d+))?(?P<var>(?:\+[\w.\-]+)*)'
+		             r'\.(?:any_any|darwin_any|darwin_\d+)\.', pkg_filename)
+		if not m:
+			return ((), 0, 0, pkg_filename)
+		ver = tuple(int(x) for x in re.findall(r'\d+', m.group('ver')))
+		rev = int(m.group('rev') or 0)
+		nvariants = m.group('var').count('+')
+		return (ver, rev, -nvariants, pkg_filename)
 
 	def is_pkg_installed(self, pkg_name):
 		if not os.path.exists(self._installed_path):
@@ -135,7 +155,16 @@ class LibInstaller:
 			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fpath}'
 
 		print(f'    [*] Extracting to {self._extract_path}')
-		tb.extractall(self._extract_path, numeric_owner=True)
+		extract_kwargs = {'numeric_owner': True}
+		if hasattr(tarfile, 'tar_filter'):
+			# Python 3.14 made the 'data' extraction filter the default; it
+			# refuses symlinks to absolute paths, and MacPorts packages carry
+			# them (dbus: ./Library/LaunchDaemons/*.plist -> /opt/local/...).
+			# 'tar' keeps the path-traversal checks (the loop above already
+			# asserts every member stays under the extract root) while
+			# allowing those links, which is what every earlier Python did.
+			extract_kwargs['filter'] = 'tar'
+		tb.extractall(self._extract_path, **extract_kwargs)
 
 		for fpath in tb.getnames():
 			# FIXME: Symlinks
