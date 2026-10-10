@@ -6,6 +6,7 @@
 xbox_test_exes = []
 
 subdir('dsp')
+subdir('ptimer')
 subdir('swizzle')
 
 alias_target('test-xbox', xbox_test_exes)

@@ -16,6 +16,45 @@ We are committed to providing a friendly, safe, and welcoming environment for ev
 
 ---
 
+## Project Scope & Design Philosophy
+
+When considering contributions, please keep the core tenets of the project in mind:
+
+- **Faithful Hardware Emulation**: xemu’s primary goal is the accurate, low level emulation and faithful recreation of
+  the original Microsoft Xbox hardware behavior. Changes should reflect how real hardware behaves rather than tailoring
+  behavior to satisfy individual titles.
+  <br><br>
+  This means that performance or functionality regressions may be acceptable if a change provably improves emulation
+  accuracy. That being said, the emulator is also expected to be usable, so approximations may also be considered
+  acceptable on a case-by-case basis.
+
+- **No Per-Game Hacks**: Emulation bugs should be solved through correct subsystem and hardware modeling. We generally
+  do not accept game-specific hacks, particularly functionality that is based on hardcoded title checks or game-specific
+  heuristics.
+
+- **Thoughtful Enhancements**: Quality-of-life enhancements (such as internal render scaling and snapshots) are
+  evaluated on a case-by-case basis. Any enhancements must remain optional and be configurable through settings so users
+  can disable them to restore pure hardware-accurate behavior.
+
+- **"It Just Works" User Experience**: We intentionally avoid exposing granular, low-level configuration tweaks.
+  <br><br>
+  Providing an overwhelming number of settings degrades the experience for non-"power users" and fragments the support
+  surface, making troubleshooting and bug isolation significantly more difficult. Features and subsystems should work
+  seamlessly without configuration whenever possible, with the exception of enhancement functionality.
+
+- **Developer & Debugging Tooling**: While xemu provides a number of development/debugging specific features (such as
+  the GDB stub, general tracing, and resource monitors), we strongly prefer to utilize established external tooling
+  wherever possible. Contributions that substantially overlap with existing external tools will generally not be
+  accepted.
+
+- **Upstream QEMU Relationship & Subsystem Isolation**: xemu is built on top of QEMU. To ensure long-term
+  maintainability, Xbox-specific logic should ideally be cleanly isolated within `hw/xbox/`. Modifying QEMU core
+  internals should be avoided where possible, minimizing divergence from upstream. Where general QEMU improvements, bug
+  fixes, or enhancements are developed, contributors are very strongly encouraged to submit them upstream to the QEMU
+  project.
+
+---
+
 ## Getting Started & Communicating
 
 ### Reporting Bugs & Requesting Features
@@ -85,9 +124,13 @@ Commit messages are an important part of the project history and documentation. 
 
 ## Code Style & Standards
 
-- **Formatting Newly Added Files**: The use of `clang-format` is **required** for all newly added files.
+- **(Mostly) follow the QEMU guidelines**: Generally xemu code follows [QEMU style](docs/devel/style.rst) with the following notable exceptions.
+    - Variable declarations are NOT required to be at the top of the block. Allowing declarations at point of use makes it easier to understand types when dealing with longer functions.
+    - C++ style comments (`//`) are allowed where it aids readability (and conforms to the comment use convention below).
+- **Auto Format Newly Added Files**: The use of `clang-format` is **required** for all newly added files.
 - **Modifying Existing Files**: When modifying existing files, changes should match the local style of the file.
 - **No Unrelated Style Changes in Functional PRs**: Stylistic changes (reformatting, renaming, whitespace adjustments) that are unrelated to functionality changes **must be made in a separate PR**, unless discussed and agreed upon on the xemu Discord ahead of time. Mixing style changes with bug fixes or features complicates code reviews, obscures git history, and increases merge conflicts.
+- **Comment Tricky Code Only**: Comments should be reserved for code that is not self-explanatory. Remember that comments add maintenance burden; if someone changes the code and forgets to update the comment it becomes difficult to determine the actual intent.
 
 ---
 
