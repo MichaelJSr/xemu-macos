@@ -18,7 +18,10 @@ jobs:
 
   update_ppa_snapshot:
     name: Update PPA snapshot
-    if: ${{ !github.event.release.prerelease }}
+    # Upstream's Launchpad PPA feed. On a fork it only recreates a stray
+    # ppa-snapshot branch, and fails whenever the release title is not
+    # the bare tag (it looks the release up by name).
+    if: ${{ github.repository_owner == 'xemu-project' && !github.event.release.prerelease }}
     uses: ./.github/workflows/update-ppa.yml
     with:
       release: ${{ github.event.release.name }}
