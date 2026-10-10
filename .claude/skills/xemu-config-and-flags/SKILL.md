@@ -372,9 +372,11 @@ behaviour so existing baselines stay comparable; the choice is recorded
 as `cache_isolation` in the run's `meta.json`/`receipt.json`.
 
 `scripts/build-moltenvk.sh` specifics: pins MoltenVK commit
-`db66022459ffb663aa2b50f6b018bc2e124f5edf` (`MVK_PIN`,
-`build-moltenvk.sh:27` — the **v1.4.2 final tag**, moved there
-2026-08-04 from the 2026-07 `096714a295…` rc1 commit), builds
+`67b2682699d7903606b97a0392061d85d27d49e6` (`MVK_PIN`,
+`build-moltenvk.sh` — **MoltenVK main, 54 commits past the v1.4.2 tag,
+self-reports 1.4.3**; moved there 2026-10-10 from the v1.4.2 tag
+`db66022459` of 2026-08-04, itself moved from the 2026-07 `096714a295…`
+rc1 commit), builds
 arm64-only at `-O3` + `-mcpu=$XEMU_MVK_MCPU`,
 **deliberately no LTO** (thin-LTO bitcode breaks the ShaderConverter
 xcframework packaging; measured no fps benefit), installs to
@@ -548,7 +550,7 @@ grep -rn 'getenv("XEMU_' --include='*.c' --include='*.cc' \
 
 # 2. Build knobs + args
 grep -n 'XEMU_ARM_CPU\|XEMU_PGO\|XEMU_CODESIGN\|XEMU_MOLTENVK_VERSION\|XEMU_VIS\|XEMU_STRIP\|XEMU_HARDENING\|x86_version' build.sh
-grep -n 'XEMU_MVK_MCPU\|MVK_PIN' scripts/build-moltenvk.sh   # pin = db66022459… (v1.4.2)
+grep -n 'XEMU_MVK_MCPU\|MVK_PIN' scripts/build-moltenvk.sh   # pin = 67b2682699… (main past v1.4.2, reports 1.4.3)
 
 # 3. MVK parity (all three homes must agree: plist, main(), the ledger
 #    table — six keys since 2026-08-04)
@@ -578,7 +580,8 @@ wc -l config_spec.yml                                  # 404 as of 2026-07-11
 Drift-prone facts to re-check first when this skill feels wrong (values
 as of 2026-08-04): the env-var count (**68**), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
-(**db66022459…**, v1.4.2 final), `XEMU_HARDENING`'s default (**1** —
+(**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
+1.4.2), `XEMU_HARDENING`'s default (**1** —
 upstream register zeroing kept; `0` is the killed experimental arm, not
 the shipping choice), the default-ON knob list, every `build.sh` line
 anchor (the file passed 800 lines in this wave),

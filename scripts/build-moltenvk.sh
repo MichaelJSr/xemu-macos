@@ -19,12 +19,17 @@
 # packaging step, and measured no fps benefit over -O3 alone.
 set -euo pipefail
 
-# v1.4.2 final. Was v1.4.2-rc1 (98f3574346) from 2026-07-19 until the
-# final tag shipped: every local soak/A/B ran the rc while releases
-# vendored stock 1.4.1, so nothing validated the driver users load.
-# Both ends now name 1.4.2 (build.sh's XEMU_MOLTENVK_VERSION default is
-# the vendored side, and macOS CI asserts the bundled version matches).
-MVK_PIN=db66022459ffb663aa2b50f6b018bc2e124f5edf   # v1.4.2, 2026-08-04 (reports 1.4.2)
+# main past v1.4.2 (the tree already self-reports 1.4.3, no tag yet).
+# Carries the fixes the fork cares about since the v1.4.2 tag:
+# query-pool callback lifetime (#2839), occlusion queries under immediate
+# prefill (#2846), deferred prefill of secondary CBs (#2845), encoder
+# execution dependencies (#2819), external-subpass fence ordering
+# (#2823), shader-cache dynamic offsets (#2861), areQueriesDeviceAvailable
+# (#2794). Until a 1.4.3 tag ships, releases still vendor stock 1.4.2
+# (build.sh XEMU_MOLTENVK_VERSION default; macOS CI asserts the bundled
+# version matches THAT), so local soaks run a newer driver than users
+# load. Previous pin: db66022459 (v1.4.2, 2026-08-04).
+MVK_PIN=67b2682699d7903606b97a0392061d85d27d49e6   # main 2026-10-10, 54 commits past v1.4.2 (reports 1.4.3-dev)
 MVK_DIR="${1:-$(dirname "$0")/../../MoltenVK}"
 MCPU="${XEMU_MVK_MCPU:-apple-m2}"
 

@@ -282,7 +282,7 @@ historical number in this library was measured here. Re-verify:
 | Title corpus | `/Users/michaelsrouji/Documents/Xemu/games/`: Azurik (retail + `Azurik_dev.iso`), Battlefield 2 MC, Conker L&R, KOTOR, Vexx, NevolutionX (homebrew) | `ls /Users/michaelsrouji/Documents/Xemu/games/` |
 | Configured DVD | `dvd_path = …/games/Azurik_dev.iso` | `grep -n 'dvd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
 | Firmware | `bootrom_path=…/Boot ROM image/mcpx_1.0.bin`, `flashrom_path=…/BIOS/Complex_4627v1.03.bin`, `eeprom_path=…/xemu/xemu/eeprom.bin` (keys under `[sys.files]`) | `grep -n '_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
-| Custom MoltenVK | `/usr/local/lib/libMoltenVK.dylib` = the fork's pinned optimized build (pin `096714a2954fc8e9db9daae97c426d7dd7f8a838`, reports 1.4.2) — build.sh prefers it over vendored/Homebrew and logs provenance at bundle time: `Bundling MoltenVK from <src> (version <v>, <arch> UUID <uuid>)` | `ls -l /usr/local/lib/libMoltenVK.dylib` + version check below; check the latest build log for the provenance line |
+| Custom MoltenVK | `/usr/local/lib/libMoltenVK.dylib` = the fork's pinned optimized build (pin `67b2682699d7903606b97a0392061d85d27d49e6`, MoltenVK main past v1.4.2, reports 1.4.3; releases vendor the official 1.4.2) — build.sh prefers it over vendored/Homebrew and logs provenance at bundle time: `Bundling MoltenVK from <src> (version <v>, <arch> UUID <uuid>)` | `ls -l /usr/local/lib/libMoltenVK.dylib` + version check below; check the latest build log for the provenance line |
 | MoltenVK checkout | `/Users/michaelsrouji/Documents/Xemu/tools/MoltenVK` (default arg of `scripts/build-moltenvk.sh`) | `ls -d /Users/michaelsrouji/Documents/Xemu/tools/MoltenVK/.git` |
 
 ```sh

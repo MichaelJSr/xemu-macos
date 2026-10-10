@@ -206,7 +206,7 @@ Since 2026-07-05 this tier walk is one function, `resolve_moltenvk()`
 time — a candidate dylib counts only if `lipo -archs` shows the
 target arch. If **none** resolve, `vendor_moltenvk dylib` downloads
 the pinned official release (`XEMU_MOLTENVK_VERSION`, default
-`1.4.1`) from `github.com/KhronosGroup/MoltenVK/releases` and
+`1.4.2`) from `github.com/KhronosGroup/MoltenVK/releases` and
 extracts the dylib plus the full `vulkan/` header set into
 `macos-libs/<arch>/opt/local/{lib,include}` — this also supplies
 Vulkan headers without needing Homebrew's `vulkan-headers`. If a
@@ -217,7 +217,7 @@ headers from the same tarball. `PKG_CONFIG_LIBDIR` is then pinned to
 `pkg-config` can't cross-contaminate between architectures.
 
 On **this machine**, `/usr/local/lib/libMoltenVK.dylib` exists (the custom
-build from §4, MoltenVK 1.4.2), so tier 2 wins and no vendoring happens —
+build from §4, MoltenVK main past v1.4.2, self-reports 1.4.3), so tier 2 wins and no vendoring happens —
 verify with `ls -la /usr/local/lib/libMoltenVK.dylib`.
 
 ### 3.5 `-mcpu` auto-detection (arm64 only)
@@ -307,12 +307,24 @@ this machine `build.log` is ~850 KB after a full build; it's overwritten
 Several dependencies are meson `cmake.subproject()`s, meaning **meson calls
 out to `cmake` as a subprocess** to configure and build them (not meson's
 native build backend): glslang (`glslang.wrap`, pinned commit
-`275822a6261ee689aadb1da5f09a0ec2f058685c`, `ENABLE_OPT=false
-ENABLE_HLSL=false`), volk, and SPIRV-Reflect are **always** built this way —
-none of the three has a MacPorts package in `download-macos-libs.py`'s list
-(§2), so there's no pkg-config path to find them any other way on macOS.
-SDL3 is also wired as a `cmake.subproject()` (`sdl3.wrap`, with a long list
-of `SDL_*` CMake defines disabling unused SDL subsystems) but meson.build
+`e1b562a8bed273a02f30b59b66a5d499793cede5` = 16.6.0 since the 2026-10-10
+upstream merge; `ENABLE_OPT=false ENABLE_HLSL=false`), volk, and
+SPIRV-Reflect are **always** built this way — none of the three has a
+MacPorts package in `download-macos-libs.py`'s list (§2), so there's no
+pkg-config path to find them any other way on macOS. **Changing a wrap's
+`revision=` does not refresh an existing `subprojects/<name>` checkout** —
+meson warns and keeps building the old tree. `build.sh`'s
+`check_wrap_drift()` (since 2026-09, warn-only, never fatal) compares each
+git-wrap checkout's HEAD with its `revision=` before configure and prints
+the fix; after a merge that moves a pin, `rm -rf subprojects/<name>`
+(configure re-clones) or run
+`build/pyvenv/bin/meson subprojects update --reset <name>`. meson's own
+"revision may be out of date; its wrap file has changed" warning fires on
+wrap-file *content* changes (even a comment edit), not only pin moves.
+SDL3 is also wired as a `cmake.subproject()` (`sdl3.wrap` is a git wrap
+with `method = cmake` since upstream `8816832709`, release-3.4.16; the
+long list of `SDL_*` CMake defines disabling unused SDL subsystems lives
+in `meson.build`'s `sdl3_cmake_opts`) but meson.build
 tries `dependency('sdl3', required: false, allow_fallback: false)` (plain
 pkg-config) first; on macOS, `download-macos-libs.py` vendors a matching
 `sdl3.pc` into `macos-libs/<arch>/opt/local/lib/pkgconfig/` (verified
@@ -371,9 +383,11 @@ tells you exactly what to run:
 What it does:
 
 1. `git fetch origin --quiet && git checkout --quiet $MVK_PIN` — pins to a
-   specific commit, currently `096714a2954fc8e9db9daae97c426d7dd7f8a838` on
-   `main` (comment: "2026-07, reports 1.4.2" — i.e. this pre-1.4.2-tag
-   commit self-reports version 1.4.2 via `strings`).
+   specific commit, currently `67b2682699d7903606b97a0392061d85d27d49e6` on
+   `main` (2026-10-10, 54 commits past the v1.4.2 tag; the tree already
+   self-reports version 1.4.3 via `strings` though no 1.4.3 tag exists).
+   Previous pins: `db66022459` (the v1.4.2 tag, 2026-08-04) and
+   `096714a295` (a 2026-07 pre-1.4.2 main commit).
 2. `./fetchDependencies --macos` (MoltenVK's own dependency-vendoring
    script; fast on repeat runs when nothing changed). Failure hint baked
    into the script: "a broken Xcode install manifests here; try:
@@ -390,10 +404,11 @@ What it does:
    '^[0-9]+\.[0-9]+\.[0-9]+$'`) and arm64 UUID (`dwarfdump --uuid`), and
    reminds you: `next: ./build.sh (watch for the 'Bundling MoltenVK' provenance line)`.
 
-**Verified on this machine (2026-07-04):** `/usr/local/lib/libMoltenVK.dylib`
-exists and reports version `1.4.2` — this is the custom pipeline's output,
-and per §3.4 tier 2 it is what `build.sh` bundles by default on this Mac
-(ahead of the official 1.4.1 vendor-fetch in tier 3).
+**Verified on this machine (2026-10-10):** `/usr/local/lib/libMoltenVK.dylib`
+exists and reports version `1.4.3` (UUID `0C9CFBE7-F160-37A1-B1CD-407EA736B5DF`)
+— this is the custom pipeline's output, and per §3.4 tier 2 it is what
+`build.sh` bundles by default on this Mac (ahead of the official 1.4.2
+vendor-fetch in tier 3).
 
 **Bumping the pin.** `MVK_PIN` is a deliberate value at the top of the
 script — bump it only after re-running the full validation gauntlet
@@ -654,16 +669,17 @@ scope here.
 | Axis | This machine (local) | CI |
 |---|---|---|
 | macOS SDK | Xcode CLT with SDK 26.5 available (probe picks the newest ≥ min) | `macos-15` runner — SDK 15. This is why MetalFX/frame-interpolation code is guarded by `#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000` in `hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m` — CI's SDK doesn't even declare the macOS-26 MetalFX interpolator APIs, so the guard is a compile-time necessity, not just a runtime `@available` check. |
-| MoltenVK source | `/usr/local/lib/libMoltenVK.dylib`, **1.4.2**, from this fork's custom pipeline (§4) | Vendors the **official 1.4.1** release into `macos-libs` (§3.4 tier 3) — CI has no `/usr/local` custom build and no MoltenVK checkout. |
+| MoltenVK source | `/usr/local/lib/libMoltenVK.dylib`, **1.4.3-dev** (main `67b26826`), from this fork's custom pipeline (§4) | Vendors the **official 1.4.2** release into `macos-libs` (§3.4 tier 3) — CI has no `/usr/local` custom build and no MoltenVK checkout. |
 | dylibbundler / ccache | Present via Homebrew already | Installed fresh every run (`brew install ccache coreutils dylibbundler`) |
 | Compiler cache | None configured locally by default | ccache + `.lto-cache`, both restored from `actions/cache` keyed by arch/configuration/sha |
 | Bundle version stamp | `Info.plist` shows `0.0.0` (no `XEMU_VERSION` file — §3.10 step 8) | Real version (`git describe`-derived) baked in via the source-package step |
 
 **This MoltenVK-version gap is a known, dated release-parity gap (as of
-2026-07-04): the release artifacts CI builds and ships run the official
-1.4.1 MoltenVK, while this development machine runs the custom 1.4.2 build.**
+2026-10-10): the release artifacts CI builds and ships run the official
+1.4.2 MoltenVK, while this development machine runs a custom build of
+MoltenVK main 54 commits past that tag (self-reports 1.4.3).**
 Any perf/artifact conclusion reached only on this machine should be
-understood as "true for the 1.4.2 pipeline," not automatically true for
+understood as "true for the 1.4.3-dev pipeline," not automatically true for
 what ships. The MoltenVK pin-bump validation gauntlet
 (`xemu-validation-and-qa`) exists partly to close this gap before a version
 bump is trusted for release.

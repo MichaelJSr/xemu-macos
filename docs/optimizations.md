@@ -1807,6 +1807,58 @@ table's shape so each moves back up verbatim as its commit lands —
   (with a message) so the release-artifact legs cannot pick it up. Not
   yet built on Windows — the GCC PGO arm and the `cygpath` fix are
   unexercised until the next session on the box.
+- **Upstream merge `bce8323063` (2026-10-10)** (xemu master
+  `478b4f4961`, 16 commits past the 2026-09-07 merge base): PTIMER alarm
+  scheduling rounds up to whole internal ticks with a 1 ns floor
+  (`muldiv64_round_up`, `get_next_alarm_time`) and gains an on-target
+  unit test (`tests/xbox/ptimer`, 20 subtests, now in the `xbox` suite);
+  glslang 16.5.0 → 16.6.0 (the SPIR-V cache key rolls); SDL3 3.4.16 and
+  nlohmann_json 3.12.0 become git wraps (macOS still takes SDL3 from the
+  vendored MacPorts bottle via pkg-config); a `make check-unit` CI job
+  (`build-tests.yml`, ubuntu-22.04) joins the matrix; AGENTS.md /
+  CONTRIBUTING.md guidance. Two conflicts: `ptimer.c`'s
+  `schedule_qemu_timer()` keeps upstream's interrupt-enable early-out
+  *and* the fork's zero-divisor guard (upstream's reset now seeds
+  NUMERATOR = DENOMINATOR = 1, so the guard mostly covers the PLL
+  MDIV == 0 case from here on); `tests/xbox/meson.build` keeps the
+  fork's `test-xbox` alias and upstream's ptimer test registers with it
+  (its executable is `build_by_default: false`, so the `--no-rebuild`
+  CI run would otherwise find no binary). DSP namespaces and the
+  `config_spec.yml` audio defaults are untouched (re-verified).
+  Validated: arm64 release build clean, `meson test --suite xbox` 7/7,
+  in-game smoke **deferred** — the box ran a load-70+ ffmpeg batch all
+  of 2026-10-10 and the owner held every timed run until it is quiet.
+- **`download-macos-libs.py` vendors the newest MacPorts build and
+  survives Python 3.14 (2026-10-10).** The picker took the
+  lexicographically *last* listing entry, so `SDL3-3.4.8` beat `3.4.18`
+  and every clean build — CI's included — vendored the 3.4.8 bottle for
+  months; packages are now ranked by numeric version, then port
+  revision, then fewest `+variants`. Separately, Python 3.14 made
+  tarfile's `data` extraction filter the default, which refuses the
+  absolute symlink inside `dbus` (a new dependency of MacPorts'
+  `glib2 +dbus+x11`) and aborted the fetch with `AbsoluteLinkError`;
+  extraction now asks for the `tar` filter where the interpreter
+  supports it (path-traversal checks kept, links allowed — the
+  pre-3.14 behaviour). First clean build after: SDL3 3.4.18, glib2
+  2.88.3_2, libusb 1.0.30, pcre2 10.48; dbus is extracted but nothing
+  in the link graph uses it, so the bundle's dylib set is unchanged.
+- **Local MoltenVK pin → main `67b26826` (2026-10-10; self-reports
+  1.4.3).** 54 commits past the v1.4.2 tag with no 1.4.3 tag yet. What
+  it carries that this fork cares about: query-pool callback lifetime
+  (#2839), occlusion queries under immediate prefill (#2846), deferred
+  prefill of secondary CBs (#2845), encoder execution dependencies
+  (#2819), external-subpass fence ordering (#2823), shader-cache
+  dynamic offsets (#2861), `areQueriesDeviceAvailable` (#2794).
+  Releases keep vendoring stock 1.4.2 (`XEMU_MOLTENVK_VERSION`,
+  CI-asserted), so the tested-vs-shipped driver gap the 2026-08-04
+  entry above closed is open again until a 1.4.3 tag ships — converge
+  the same way then. Bundled UUID
+  `0C9CFBE7-F160-37A1-B1CD-407EA736B5DF`. Validated: arm64 release
+  build clean with the provenance line reporting 1.4.3 / `0C9CFBE7…`,
+  `meson test --suite xbox` 7/7; the in-game smoke, the artifact soak
+  and the interleaved fps A/B half of the pin-bump gauntlet are all
+  **deferred** to a quiet box — the host ran a load-70 ffmpeg batch
+  throughout 2026-10-10, so no fps number from that session is citable.
 
 ### MoltenVK runtime config
 
