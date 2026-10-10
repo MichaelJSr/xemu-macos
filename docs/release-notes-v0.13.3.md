@@ -145,13 +145,19 @@ re-keys on the new glslang.
 ## Validation
 
 - **OWED:** quiet-machine interleaved fps A/B, this build vs a v0.13.2
-  build, F8 heavy savestate, ≥3 pairs — accept parity within noise.
-- **OWED:** artifact-oracle soak on the same run (≥300 captures, zero
-  magenta/white) and a 20–30 minute Finder session in the owner's real
+  build, F8 heavy savestate, ≥3 pairs — accept parity within noise. A
+  2026-10-10 attempt on a loaded machine failed the base-arm
+  self-consistency rule and is not citable.
+- **OWED:** a 20–30 minute Finder session in the owner's real
   configuration.
+- Done: artifact-oracle soak on an isolated clone of a local build of this
+  tree (MoltenVK main `67b26826`; the zip ships 1.4.2): 319 window
+  captures across F8 idle, a 40 s walk, and F5 → F8 reloads, zero
+  magenta / white / uniform frames, zero asserts, fork DSP JIT active.
 - Done: arm64 release build from a clean tree; `meson test --suite xbox`
   7/7 (DSP interpreter/JIT differential, swizzle, PTIMER); CI matrix green
-  on every leg including both win64-cross jobs as of `bd3d56ee8d`
-  (the 2026-10-10 commits have not been pushed yet).
+  on every leg including both win64-cross jobs as of `bd3d56ee8d`. Check
+  the CI run for the 2026-10-10 push, which adds upstream's `Unit tests`
+  job, before tagging.
 
 **Full Changelog**: https://github.com/MichaelJSr/xemu-macos/compare/v0.13.2...v0.13.3
