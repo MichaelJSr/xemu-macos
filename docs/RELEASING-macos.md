@@ -105,39 +105,43 @@ before trusting it for release.
 
 ## Release notes body format
 
-The body is Markdown. Keep this shape — deviating makes diffs
-between releases hard to read:
+Keep notes short (owner preference since 2026-10-10). A reader should
+take in the whole body in under a minute. Aim for about 25 lines or
+fewer. Mechanism, root cause and full evidence go in commit bodies and
+`docs/`, not here.
 
 ```md
-macOS (Apple Silicon) release. Attached build is an ad-hoc-signed `xemu.app` for macOS 14+ (macOS 26 Tahoe recommended for MetalFX + frame interpolation).
+macOS (Apple Silicon) release; ad-hoc-signed `xemu.app` for macOS 14+.
 
-## Highlights
+<One sentence: what this release is, e.g. "Two upstream syncs and a
+dependency refresh; no performance change.">
 
-<1–3 sentence summary of what's in this release and what problem it solves. If this is a small patch on top of the previous tag, say so explicitly, e.g. "Single bug-fix commit on top of v0.8.XYZ.">
+**Before upgrading**
+- <Only real upgrade caveats: savestate compatibility, cold shader
+  caches, changed defaults. Omit the section when there are none.>
 
-### Vulkan renderer (pgraph/vk)
+**Changes**
+- <One line per user-visible change, plain English.>
+- <Group minor items: "Windows: 6 hardening fixes from the native-port
+  audit.">
 
-- **<Short bold title of change #1>.** <Plain-English explanation
-  of the root cause / motivation (2–4 sentences), followed by the
-  fix. Reference specific functions, buffers, and access masks by
-  their code names in backticks. For perf changes, give concrete
-  before/after numbers.>
+**Validation:** <One line with the headline evidence, e.g. "F8 fps
+parity with v0.13.2 (21.35 vs 21.36 fps); 319-frame artifact soak
+clean; CI green.">
+
+**Full Changelog**: https://github.com/MichaelJSr/xemu-macos/compare/vA...vB
 ```
 
 Style rules:
 
-- One `###` subsection per subsystem touched. Typical subsystems:
-  `Vulkan renderer (pgraph/vk)`, `APU`, `TCG / JIT`,
-  `MetalFX + presentation`. Skip subsystems with no changes.
-- Each bullet starts with a bold short title followed by a period,
-  then the prose. Don't use a colon after the bold title.
-- Describe the **why** first (symptom / root cause / contended
-  constraint) and the fix second. Historical context on prior
-  related commits belongs inline, in 1–2 sentences.
-- Prefer concrete numbers over adjectives for perf work. Avoid
+- One line per bullet, and roughly ten bullets at most. Merge related
+  items rather than listing each commit.
+- No function names, register names or root-cause narratives. Link a
+  doc if a reader needs the detail.
+- Give concrete numbers for performance claims, and never
   "significantly" / "much faster" / "greatly improved".
-- No emojis. No GitHub-Flavoured-Markdown callouts (`> [!NOTE]`).
-  No screenshots.
+- No emojis, GitHub-Flavoured-Markdown callouts (`> [!NOTE]`) or
+  screenshots.
 
 ## Manual packaging fallback
 

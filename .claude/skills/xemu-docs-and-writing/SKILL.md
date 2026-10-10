@@ -243,20 +243,20 @@ execution details in `xemu-run-and-operate`).
   - `v0.8.151 — VRAM snapshot closes texture-upload tear race; zero-copy GPU unswizzle`
   If one release bundles unrelated changes, separate the two most
   prominent with `;` — don't list all of them.
-- **Body**: opening line stating what the artifact is, a
-  `## Highlights` 1-3 sentence summary, then one `###` subsection
-  per subsystem touched ("Skip subsystems that have no changes"),
-  each with bold-title bullets in the same shape as README Changes
-  bullets. Skeleton in §3.4.
-- Style rules, verbatim from `docs/RELEASING-macos.md`:
-  - "Each bullet starts with a bold short title followed by a
-    period, then the prose. Don't use a colon after the bold title."
-  - "Describe the **why** first (symptom / root cause / contended
-    constraint) and the fix second."
-  - "Prefer concrete numbers over adjectives for perf work. Avoid
-    'significantly' / 'much faster' / 'greatly improved'."
-  - "No emojis. No GitHub-Flavoured-Markdown callouts (`> [!NOTE]`).
-    No screenshots".
+- **Body: short** (owner preference since 2026-10-10). The v0.13.3
+  body ran about 150 lines, with per-subsystem sections, root-cause
+  paragraphs and full A/B receipts, and the owner asked for "much more
+  concise" from then on. The shape: an artifact line, a one-sentence
+  summary, optional **Before upgrading** caveats, **Changes** as
+  one-line plain-English bullets (roughly ten at most, minor items
+  grouped), a one-line **Validation**, and the compare link. Aim for
+  about 25 lines or fewer. Skeleton in §3.4.
+- Mechanism, function names, root cause and full evidence receipts go in
+  the commit bodies and `docs/`, never the release body. Link a doc if a
+  reader needs the detail.
+- Unchanged rules: concrete numbers for performance claims, never
+  "significantly" / "much faster" / "greatly improved"; no emojis,
+  GitHub-Flavoured-Markdown callouts (`> [!NOTE]`) or screenshots.
 
 ### 2.5 Commit messages
 
@@ -341,29 +341,26 @@ without leaving the lesson somewhere (usually a Failed row).
 
 ### 3.4 Release notes skeleton
 
+The canonical copy is `docs/RELEASING-macos.md` "Release notes body
+format":
+
 ```md
-macOS (Apple Silicon) release. Attached build is an ad-hoc-signed `xemu.app` for macOS 14+ (macOS 26 Tahoe recommended for MetalFX + frame interpolation).
+macOS (Apple Silicon) release; ad-hoc-signed `xemu.app` for macOS 14+.
 
-## Highlights
+<One sentence: what this release is.>
 
-<1-3 sentence summary of what's in this release and what problem it
-solves. If this is a small patch on top of the previous tag, say so
-explicitly, e.g. "Single bug-fix commit on top of v0.8.XYZ.">
+**Before upgrading**
+- <Real upgrade caveats only; omit the section when there are none.>
 
-### Vulkan renderer (pgraph/vk)
+**Changes**
+- <One line per user-visible change, plain English.>
 
-- **<Short bold title of change #1>.** <Why first (2-4 sentences:
-  root cause / motivation), then the fix. Code names in backticks.
-  Concrete before/after numbers for perf work.>
+**Validation:** <One line with the headline evidence.>
 
-### <Next subsystem with changes — e.g. APU, TCG / JIT, MetalFX + presentation>
-
-- **<...>.** <...>
+**Full Changelog**: https://github.com/MichaelJSr/xemu-macos/compare/vA...vB
 ```
 
-Title it `vX.Y.Z — <headline>` (em-dash, ≤ ~70 chars). One `###`
-per subsystem touched; skip untouched subsystems; no emojis,
-callouts, or screenshots.
+Title it `vX.Y.Z — <headline>` (em-dash, ≤ ~70 chars).
 
 ### 3.5 Design-doc skeleton (mirrors `docs/dsp-jit-design.md`)
 
@@ -595,7 +592,7 @@ before trusting the volatile ones:
 - README section anatomy + line anchors: `grep -n '^#' README.md`
 - PREFILL agreement across the three homes: `grep -n PREFILL README.md Info.plist ui/xemu.c`
 - RELEASING staleness set (expect no hits): `grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md`
-- Release-notes format rules: read `docs/RELEASING-macos.md` "Notes body format" + "Style rules"
+- Release-notes format rules: read `docs/RELEASING-macos.md` "Release notes body format" (short form since 2026-10-10)
 - CI draft flow: `grep -n 'draft:\|gen-changelog' .github/workflows/release.yml` and the owner guard in `.github/workflows/release-on-tag.yml`
 - Commit conventions + footer: `git log -8 --format=full`
 - Tag scheme + annotated-vs-lightweight: `git tag -l | sort -V | tail -3; git cat-file -t v0.10.2` (expect `tag` — v0.10.x are annotated; v0.9 itself is lightweight, `commit`)
