@@ -193,8 +193,26 @@ honest verdicts, and what is still open live in
 **Build fails with `sizeof(size_t) doesn't match GLIB_SIZEOF_SIZE_T`.**
 Stale `pkg-config` paths. `rm -rf macos-libs macos-pkgs build && ./build.sh`.
 
+**Build fails in `download-macos-libs.py` with `tarfile.AbsoluteLinkError`.**
+Python 3.14 changed tarfile's default extraction filter and MacPorts'
+`dbus` bottle carries an absolute symlink. Fixed on 2026-10-10 (the
+script asks for the `tar` filter); on an older checkout, pull or run the
+build with a Python ≤ 3.13 first on `PATH`.
+
 **Crash on launch with "duplicate LC_RPATH".** Older builds — rebuild;
 `build.sh` now strips rpaths.
+
+**Savestate from this build fails to load on an older xemu-macos.**
+Expected: since the 2026-09-07 upstream merge the NV2A device state is
+vmstate v4 (PTIMER alarm interrupts). Savestates written by older
+builds still load here; the reverse does not work. Keep playing on the
+newer build, or re-create the save there.
+
+**Stutter for the first minutes after upgrading.** The SPIR-V shader
+cache is keyed on the linked glslang's version (16.6.0 since
+2026-10-10), so every shader compiles once into a fresh
+`spirv_cache_v*/` directory on first launch. It settles as the cache
+refills; the old directory can be deleted.
 
 **MetalFX not activating.** Requires `renderer = 'VULKAN'` and
 `metalfx_mode = 'spatial'` or `'temporal'`. Under the GL presentation

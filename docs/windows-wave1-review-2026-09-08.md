@@ -280,3 +280,24 @@ and nothing has run in the owner's real configuration. In order:
 Independently, on the Windows box (unchanged from §3): freeze the control
 binary, enable WER LocalDumps, full-reconfigure `-O2` experiment on the
 wave-1 head vs main at `-O3`, ≥6 runs per variant.
+
+### 8.1 Addendum, 2026-10-10 — the RC variables moved
+
+Done on the Mac, box busy (load 70+ all session, nothing timed):
+upstream merged again (`111ef2dce0`, xemu master `478b4f4961`: PTIMER
+rounding fix + unit test, glslang **16.6.0**, SDL3/nlohmann_json git
+wraps, `make check-unit` CI job); `download-macos-libs.py` fixed so clean
+builds — CI's included — vendor SDL3 **3.4.18** instead of 3.4.8 and
+survive Python 3.14 (`435fe42807`); the local MoltenVK pin moved to main
+`67b26826` (reports 1.4.3; releases still vendor 1.4.2) (`920e645b69`).
+Build clean, `meson test --suite xbox` 7/7 incl. the new ptimer test.
+Not pushed; CI (now with upstream's `Unit tests` job) not yet run.
+
+Consequences for §8: step 1's A/B now compares across glslang 16.2→16.6,
+SDL3 3.4.8→3.4.18 and (locally only) MoltenVK 1.4.2→1.4.3-dev, so a
+regression bisects in that order after `XEMU_SPIRV_CACHE=0`; the
+artifact soak in step 2 doubles as the MoltenVK pin-bump gauntlet;
+step 4's draft body exists at `docs/release-notes-v0.13.3.md` with the
+two OWED lines to fill from steps 1–2. Shipped bundles will differ from
+v0.13.2 in SDL3 even before any source change — call that out in the
+notes (it is).
