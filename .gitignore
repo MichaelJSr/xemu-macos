@@ -31,3 +31,7 @@ build.log
 xemu-output.log
 /pgo/*.profraw
 bench-out*/
+
+# Claude Code per-clone state (worktrees from EnterWorktree, local settings)
+.claude/worktrees/
+.claude/settings.local.json
