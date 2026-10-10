@@ -301,12 +301,21 @@ def print_receipt_block(r):
     c, b = r["config"], r["binary"]
     print("\n================ PROTOCOL RECEIPT (machine copy: receipt.json) ================")
     print(f"protocol      : {r['protocol']}   generated {r['generated_utc']}")
-    print(f"experiment    : {c.get('env_var', '?')}=0 (B) vs =1 (E), "
+    experiment = (c.get('experiment')
+                  or f"{c.get('env_var', '?')}=0 (B) vs =1 (E)")
+    print(f"experiment    : {experiment}, "
           f"snapshot '{c.get('snapshot', '?')}', {c.get('pairs', '?')} pairs x "
           f"{c.get('secs', '?')} s, interleaved {c.get('interleave', [])}")
-    print(f"binary        : {b.get('git_describe', '?')}  "
-          f"sha256 {str(b.get('binary_sha256', '?'))[:16]}...  "
-          f"MoltenVK {b.get('moltenvk_version', '?')}")
+    # bench-abx.sh: one bundle per arm, each with its own identity.
+    for arm, a in sorted(b.get('arms', {}).items()):
+        print(f"binary {arm}      : {a.get('git_describe', '?')}  "
+              f"sha256 {str(a.get('binary_sha256', '?'))[:16]}...  "
+              f"MoltenVK {a.get('moltenvk_version', '?')}  "
+              f"env '{a.get('env', '')}'")
+    if not b.get('arms'):
+        print(f"binary        : {b.get('git_describe', '?')}  "
+              f"sha256 {str(b.get('binary_sha256', '?'))[:16]}...  "
+              f"MoltenVK {b.get('moltenvk_version', '?')}")
     print(f"isolation     : app clone {b.get('app_clone', '?')}")
     print(f"                config {b.get('config_path', '?')}")
     print(f"                hdd clone {b.get('hdd_clone', '?')}")
