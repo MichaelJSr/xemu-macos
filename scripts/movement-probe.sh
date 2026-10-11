@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Movement-phase transition probe — the first-visit streaming lag class.
 #
-#   scripts/movement-probe.sh <outdir> [VAR=V ...]
+#   scripts/movement-probe.sh <outdir> [--app PATH] [--isolate-caches] [VAR=V ...]
 #
 # One run: boot -> monitor loadvm azurik-stream-e2 -> settle 15 s -> hold
 # FORWARD 20 s into unexplored space (first-visit streaming) -> rest 5 s
@@ -20,6 +20,10 @@
 #   - a mid-forward screenshot scored by bench-screenshot.py
 #
 # Extra env (e.g. XEMU_SUBPAGE_FAST=0) is passed through to xemu.
+# --app PATH clones that bundle instead of dist/xemu.app.
+# --isolate-caches gives the run its own cold shader/pipeline cache, the
+# same way bench-savestate-ab.sh does (portable-mode marker in the CLONED
+# bundle); without it the run shares the user's warm caches.
 # Isolation matches bench-savestate-ab.sh: bundle/hdd/eeprom cloned,
 # scratch config via -config_path, fullscreen forced off, source files
 # only ever clone sources. The source config is $XEMU_TEST_CONFIG, else
@@ -33,10 +37,20 @@ SNAP=${MOVEMENT_SNAP:-azurik-stream-e2}
 FWD_SC=${MOVEMENT_FWD_SC:-26}    # W = left-stick up (owner bindings)
 BWD_SC=${MOVEMENT_BWD_SC:-22}    # S = left-stick down
 
-OUT=${1:?usage: movement-probe.sh <outdir> [VAR=V ...]}
+OUT=${1:?usage: movement-probe.sh <outdir> [--app PATH] [--isolate-caches] [VAR=V ...]}
 shift
+APP_SRC=$ROOT/dist/xemu.app
+ISOLATE_CACHES=0
 typeset -a EXTRA_ENV
-EXTRA_ENV=("$@")
+while (( $# )); do
+  case $1 in
+    --app) APP_SRC=${2:?--app needs a bundle path}; shift ;;
+    --isolate-caches) ISOLATE_CACHES=1 ;;
+    *) EXTRA_ENV+=("$1") ;;
+  esac
+  shift
+done
+[[ -x $APP_SRC/Contents/MacOS/xemu ]] || { echo "no xemu bundle at $APP_SRC" >&2; exit 1; }
 
 mkdir -p $OUT
 WORK=$OUT/work.$$
@@ -54,7 +68,6 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- isolation (clone sources, never the live files) ----------------------
-APP_SRC=$ROOT/dist/xemu.app
 CONFIG_SRC=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}
 [[ -f $CONFIG_SRC ]] || { echo "no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
 APP=$WORK/xemu-probe.app
@@ -88,6 +101,15 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+
+if (( ISOLATE_CACHES )); then
+  mkdir -p $APP/Contents/Resources
+  cp $CONFIG $APP/Contents/Resources/xemu.toml
+  CONFIG=$APP/Contents/Resources/xemu.toml
+  echo "probe: cache isolation ON (cold shader/pipeline caches in the cloned bundle)"
+else
+  echo "probe: cache isolation OFF (shader/pipeline caches shared with the user's base path)"
+fi
 
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0
 export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
