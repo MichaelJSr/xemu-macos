@@ -155,7 +155,7 @@ constraint is what makes step 2 above meaningful. README recommends
 
 | Symptom | First checks | Discriminating experiment | Likely subsystem | Full story |
 |---|---|---|---|---|
-| **"fps dropped"** (vs a previous build or session) | FIRST: scene identity. `XEMU_NV2A_NSPROF=1`; compare the header `nsprof: 5.0s interval, N flips (X/s)` and the `draws … per_flip=` event line between runs. Menus ≈ 3 draws/flip, Azurik attract reel 350–390, heavy in-game 408–485 (2026-07). Different draws/flip ⇒ different scene ⇒ the comparison is void (the bimodal-Azurik trap) | Same scene confirmed: diff the `finish_*` event rates and `fence_wait per_flip` between good/bad. Then bisect levers one at a time: `XEMU_REPORTS_SYNC=1` (legacy synchronous zpass-report drains) and `XEMU_VTX_EXACT=0` (legacy vertex finishes). A lever that restores the old fps names the subsystem | VK renderer sync policy (reports, vertex, surfaces) | Historical numbers: 15.78→38.57±0.80 fps (+144%) report rework per commit `6bfbc22863`'s protocol receipt (README prose rounds this change to 35.6 fps / 2.25x); +5.4% byte-exact vertex (2026-07) — xemu-failure-archaeology |
+| **"fps dropped"** (vs a previous build or session) | FIRST: scene identity. `XEMU_NV2A_NSPROF=1`; compare the header `nsprof: 5.0s interval, N flips (X/s)` and the `draws … per_flip=` event line between runs. Menus ≈ 3 draws/flip, Azurik attract reel 350–390, heavy in-game 408–485 (2026-07); the F8 heavy anchor `vm-20260704173701` reads ~877 (2026-10-10, `../fixtures/README.md`). Different draws/flip ⇒ different scene ⇒ the comparison is void (the bimodal-Azurik trap) | Same scene confirmed: diff the `finish_*` event rates and `fence_wait per_flip` between good/bad. Then bisect levers one at a time: `XEMU_REPORTS_SYNC=1` (legacy synchronous zpass-report drains) and `XEMU_VTX_EXACT=0` (legacy vertex finishes). A lever that restores the old fps names the subsystem | VK renderer sync policy (reports, vertex, surfaces) | Historical numbers: 15.78→38.57±0.80 fps (+144%) report rework per commit `6bfbc22863`'s protocol receipt (the `docs/optimizations.md` ledger carries the same 38.57 figure since 2026-07-11); +5.4% byte-exact vertex (2026-07) — xemu-failure-archaeology |
 | fps claim needs to be DEFENSIBLE (before/after a change) | Never eyeball it | Interleaved savestate A/B protocol (±0.02 fps on static scenes) — method in the `xemu-testing` skill; `scripts/bench-savestate-ab.sh` | — | xemu-testing |
 
 Do not start optimization work from this table — that is the
@@ -217,19 +217,21 @@ from the user's launch path in environment.
 
 1. What Finder/LaunchServices launches get:
    ```sh
-   grep -n -A16 LSEnvironment Info.plist       # repo template
+   grep -n -A21 LSEnvironment Info.plist       # repo template
    plutil -p <bundle>/Contents/Info.plist | grep -B1 -A10 LSEnvironment
    ```
 2. What EVERY launch gets (parity floor, `setenv(..., 0)` = no-overwrite):
    ```sh
    grep -n 'setenv("MVK_CONFIG' ui/xemu.c
    ```
-   Expect the five canonical MVK_CONFIG_* values in both sources — the
-   value table's home is `xemu-config-and-flags` Axis 3 (prefill=0 is the
-   load-bearing one). The README "MoltenVK runtime config" table now
-   agrees (prefill `0`, fixed 2026-07-05; parity across all three homes
-   re-verified 2026-07-11) — the code and Info.plist remain ground truth
-   if they ever diverge again.
+   Expect the six canonical MVK_CONFIG_* values (`ui/xemu.c:1939-1945`,
+   `Info.plist:35-56` as of 2026-10-10; `MVK_CONFIG_LOG_LEVEL=1` is the
+   sixth) in both sources — the value table's home is
+   `xemu-config-and-flags` Axis 3 (prefill=0 is the load-bearing one). The
+   `### MoltenVK runtime config` table in `docs/optimizations.md` (moved
+   from README.md 2026-10-10) agrees (prefill `0`, fixed 2026-07-05;
+   parity across all three homes re-verified 2026-10-10) — the code and
+   Info.plist remain ground truth if they ever diverge again.
 3. When testing from a shell, check what your shell adds/overrides:
    ```sh
    env | grep -E 'MVK_CONFIG|XEMU_'
@@ -267,7 +269,7 @@ enabled the AGX visibility crash, and measured slower (46.33 vs 48.50 fps,
 ## Provenance and maintenance
 
 All claims verified 2026-07-04 at v0.9 (`cf85e96597`); MVK three-home
-prefill parity re-verified 2026-07-11 at `7e2e6e7256`. Re-verify before
+prefill parity re-verified 2026-10-10 at `b7e2752589` (v0.13.3). Re-verify before
 trusting a row after major merges:
 
 - Env-flag inventory: `grep -rn 'getenv("XEMU_' --include='*.c' --include='*.m' hw/ ui/ audio/`
@@ -278,12 +280,12 @@ trusting a row after major merges:
 - Heartbeat fields: `grep -n -A12 'pfifo heartbeat' hw/xbox/nv2a/pfifo.c`
 - nsprof line formats: `grep -n 'per_flip\|flips (%' hw/xbox/nv2a/nsprof.c`
 - Engine precedence: `grep -n -B2 -A10 'dsp_want_external_jit_engine' hw/xbox/mcpx/apu/dsp/dsp.c`
-- DSP JIT flag semantics: `sed -n '160,270p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- DSP JIT flag semantics: `sed -n '163,286p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (`parse_flags_once`, as of 2026-10-10)
 - DIFF abort diagnostic: `grep -n 'DIFF FAILURE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
 - CoreAudio buffer env: `grep -n -A4 'XEMU_COREAUDIO_FRAMES' audio/coreaudio.m`
 - Zeta/texture/vertex/reports levers: `grep -n 'XEMU_ZETA_SHAPE_READBACK\|XEMU_TEX_BIND_RECHECK\|XEMU_VTX_EXACT\|XEMU_REPORTS_SYNC' hw/xbox/nv2a/pgraph/vk/*.c`
 - Surface-expiry throttle (black-screen fix): `grep -n -B4 -A6 'surface_expire_interval_ns' hw/xbox/nv2a/pgraph/vk/surface.c`
-- README Troubleshooting rows (GLIB_SIZEOF, LC_RPATH, audio, Windows Vulkan): `sed -n '856,906p' README.md`
+- README Troubleshooting rows (GLIB_SIZEOF, LC_RPATH, audio, Windows Vulkan; README.md:191-296 as of 2026-10-10): `awk '/^## Troubleshooting/,/^## Architecture/' README.md`
 - LC_RPATH strip in build: `grep -n -B2 -A3 'delete_rpath' build.sh`
 - Window-title version source: `grep -n 'xemu | v' ui/xemu.c && grep -n 'git describe' scripts/xemu-version.sh`
-- README MVK-table parity (all three homes must read prefill 0): `grep -n 'PREFILL' README.md Info.plist ui/xemu.c` — agreed as of 2026-07-11; a reappearing `2` is new drift.
+- MVK-table parity (all three homes must read prefill 0; the table moved from README.md to `docs/optimizations.md` `### MoltenVK runtime config` on 2026-10-10): `grep -n 'PREFILL' docs/optimizations.md Info.plist ui/xemu.c` — agreed as of 2026-10-10; a reappearing `2` is new drift.

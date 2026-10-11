@@ -1,6 +1,18 @@
 ---
 name: xemu-docs-and-writing
-description: Documentation maintenance and house style for this fork — use when writing or updating README.md (Changes bullets, Failed/reverted-experiments rows, Future-vectors entries, knob tables, Troubleshooting), docs/dsp-jit-design.md or a new design doc, docs/RELEASING-macos.md, release notes, or commit messages; when deciding WHERE a fact belongs (README vs docs/ vs .claude/skills/); when asked to "document this", "write up", "update the README", "draft release notes", or "fix stale docs"; and when editing any skill in this .claude/skills/ library so its conventions stay consistent. Also holds the dated list of currently-known documentation drift (e.g. the README PREFILL=2 table row).
+description: >-
+  Documentation maintenance and house style for this fork — use when
+  writing or updating README.md, docs/optimizations.md or
+  docs/roadmap.md (Changes bullets, Failed/reverted-experiments rows,
+  roadmap entries, knob tables, Troubleshooting),
+  docs/Finished/dsp-jit-design.md or a new design doc,
+  docs/RELEASING-macos.md, release notes, or commit messages; when
+  deciding WHERE a fact belongs (README vs docs/ vs .claude/skills/);
+  when asked to "document this", "write up", "update the README",
+  "draft release notes", or "fix stale docs"; and when editing any
+  skill in this .claude/skills/ library so its conventions stay
+  consistent. Also holds the dated list of currently-known
+  documentation drift and the drift sweep that finds more.
 ---
 
 # xemu docs of record — where knowledge goes and how to write it
@@ -55,17 +67,29 @@ points at it. Four homes, one rule each:
 
 | Home | Owns | Audience |
 |---|---|---|
-| `README.md` (~230 lines post-split) | Concise user manifest: quick start, build knobs, Vulkan provisioning, recommended config, performance summary with pointers, troubleshooting, architecture diagram | Users |
+| `README.md` (323 lines as of 2026-10-10) | Concise user manifest: quick start, build knobs, Vulkan provisioning, recommended config, performance summary with pointers, troubleshooting, architecture diagram | Users |
 | `docs/optimizations.md` | The optimization ledger: every landed change with receipts (per-subsystem Changes manifest), the runtime `XEMU_*` escape-hatch/diagnostic knob catalog, Failed/reverted experiments, settled vectors | Future contributors + agents |
 | `docs/roadmap.md` | Open candidates: ranked performance roadmap + feature/quality vectors with decision inputs and bars | Future contributors + agents |
-| `docs/dsp-jit-design.md` | The design-doc exemplar: one subsystem's architecture + phased roadmap, updated as phases land (status column). New multi-session designs get a sibling file in `docs/` shaped like it. | Whoever implements the next phase |
-| `docs/RELEASING-macos.md` | The release runbook. Its notes FORMAT section is still canon; its FLOW sections are stale (see §4). | Release operator (human or agent) |
+| `docs/RELEASING-macos.md` | The release runbook: CI draft flow (rewritten 2026-07-05), manual packaging fallback, release-notes format (short since 2026-10-10) | Release operator (human or agent) |
+| `docs/windows-gating-audit.md` | The cross-platform gating register and the needs-real-hardware list | Anyone touching shared or Windows code paths |
+| `docs/README.md` | Index of every fork doc and the folder rules below | Anyone looking for a doc |
+| `docs/Campaigns/` | Multi-session work in progress (designs with open phases, campaign status, backlogs). New multi-session designs start here, shaped like `docs/Finished/dsp-jit-design.md` (the design-doc exemplar, §3.5) | Whoever runs the next phase |
+| `docs/Future/` | Proposals and parked experiments that have a real write-up but nobody working on them (one-paragraph candidates go in `roadmap.md`) | Whoever picks the topic up |
+| `docs/Finished/` | Closed records: landed designs, audits, verdicts, reviews, closed roadmap write-ups. Bodies stay as written under a status line giving outcome, date, landing commit and where follow-ups live | Archaeology |
 | `.claude/skills/` | Operational knowledge: proven methods, playbooks, this library. Skills cross-reference each other by name and never duplicate a fact that has a home above — they point at it. | Agents working on the repo |
 
-Everything else under `docs/` is inherited upstream QEMU
-documentation — do not treat it as fork doc of record. The only two
-fork-authored files there are `dsp-jit-design.md` and
-`RELEASING-macos.md` (verify: `ls docs/*.md`).
+**Folder rule (owner-directed, 2026-10-10).** A fork doc lives at the
+`docs/` root only if it is a maintained doc of record, and
+`docs/README.md` states why for each one. Otherwise it goes by
+lifecycle: `Future/` → `Campaigns/` → `Finished/`. Moving a doc to
+`Finished/` means adding the status line, not rewriting the body. A
+move updates every inbound path in the same change
+(`git grep -n '<basename>'`), including source comments.
+
+Everything else under `docs/` (`*.rst`, `*.txt`, `devel/`, `system/`,
+...) is inherited upstream QEMU documentation — not fork doc of
+record, and never moved. Verify the fork set with
+`ls docs/*.md docs/*/*.md`.
 
 ### 1.1 README section anatomy
 
@@ -101,11 +125,11 @@ As of 2026-07-11 (re-derive anchors with `grep -n '^#' README.md`):
 | TCG / x87 / tcg/aarch64 | `### CPU / JIT (ARM64)` bullet |
 | `hw/xbox/nv2a/pgraph/vk/` | `### Vulkan renderer (pgraph/vk)` bullet |
 | Present path / MetalFX / `ui/xemu-metal.m` | `### MetalFX + presentation` bullet |
-| APU / DSP (`hw/xbox/mcpx/apu/`) | `### MCPX APU` bullet; if it's a JIT phase/round, ALSO a `docs/dsp-jit-design.md` roadmap row (see §1.3) |
+| APU / DSP (`hw/xbox/mcpx/apu/`) | `### MCPX APU` bullet; if it's a JIT phase/round, ALSO a `docs/Finished/dsp-jit-design.md` roadmap row (see §1.3) |
 | Input / pads / remap UI | `### Input` bullet |
 | Threading / BQL / timers | `### Threads + runtime` bullet |
 | `build.sh` / CI / packaging / MoltenVK provisioning | `### Build + packaging` bullet; provisioning-model changes also touch `### How Vulkan is provisioned` |
-| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (`1602-1606`), and the README MoltenVK table. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
+| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (`1939-1945`, six keys, as of 2026-10-10), and the `### MoltenVK runtime config` table in `docs/optimizations.md`. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
 | New build-time `XEMU_*` var | `### Build knobs` table row |
 | New runtime `XEMU_*` escape hatch | `### Runtime debug / escape-hatch knobs` table row (2 columns — keep it 2 cells per row, see §4 item 5) |
 | Changed user-facing recommendation | `### Recommended xemu.toml` block |
@@ -147,7 +171,7 @@ this debt):
      synchronization").
 4. **A design doc supersedes its Future-vectors seed.** When a
    vector graduates into a design doc, say so in the doc
-   (`docs/dsp-jit-design.md`: "It supersedes the 'MCPX APU DSP
+   (`docs/Finished/dsp-jit-design.md`: "It supersedes the 'MCPX APU DSP
    dynarec' entry in the README 'Future vectors' section.") and
    remove/replace the README entry. One home per fact applies inside
    the repo docs too.
@@ -284,10 +308,13 @@ Verified against `git log -8 --format=full` and
   measured numbers ("0 artifact frames in 388 captures at 48.5 fps
   (prefill=0) vs 22 at 46.3 (prefill=2)" — from `531122e8aa`).
   Doc-only commits state what sections now cover (`8597422308`).
-- **Footer (current)**:
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
-  Older commits carry `Made-with: Cursor` — that footer is
-  historical; do not use it for new commits.
+- **Footer (current)**: the `Co-Authored-By:` line the agent
+  harness supplies for the model doing the work — do not pin or
+  copy a model name from an older commit (the last 10 commits carry
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; earlier
+  ones Fable 5 / Fable 5.1, as of 2026-10-10). Older commits carry
+  `Made-with: Cursor` — that footer is historical; do not use it for
+  new commits.
 
 ### 2.6 Troubleshooting entries
 
@@ -362,11 +389,11 @@ macOS (Apple Silicon) release; ad-hoc-signed `xemu.app` for macOS 14+.
 
 Title it `vX.Y.Z — <headline>` (em-dash, ≤ ~70 chars).
 
-### 3.5 Design-doc skeleton (mirrors `docs/dsp-jit-design.md`)
+### 3.5 Design-doc skeleton (mirrors `docs/Finished/dsp-jit-design.md`)
 
 New multi-session designs go in `docs/<topic>-design.md` shaped like
 the exemplar (verify its live structure:
-`grep -n '^#' docs/dsp-jit-design.md`):
+`grep -n '^#' docs/Finished/dsp-jit-design.md`):
 
 ```md
 # <Subsystem> — design and phased roadmap
@@ -450,7 +477,7 @@ occlusion figures at both sites (Changes bullet ~line 400 and the
 failed-experiments row) to commit `6bfbc22863`'s own receipt —
 38.57 ± 0.80 fps / +144% (2.4x) / 2.2 ms/flip, replacing the
 unreceipted 35.6 / 2.25x / 31.9→2.3 written into the README by the
-same commit; corrected `docs/dsp-jit-design.md`'s "x28 remains free"
+same commit; corrected `docs/Finished/dsp-jit-design.md`'s "x28 remains free"
 rows (x28 = SR pin, `DSP56K_JIT_SR_PIN_REG`, no free callee-saved GPR
 remains for fusion); re-derived §1.1's anchors (README 1107 lines);
 and refreshed the skill library's v0.9-era pins (284 commits, HEAD
@@ -482,12 +509,15 @@ docs plus the merge body described it as "non-Apple hosts only". Also
 in that pass: eight escape-hatch rows that have no `getenv` on main
 moved out of the `docs/optimizations.md` live knob table into a
 clearly-labelled "Escape hatches on branch `windows-wave1-wip` (not on
-main)" table inside the Windows native-port section (they move back as
-their commits land); the README's native-MSYS2 paragraph corrected to
-`-O2` + clang-only `XEMU_PGO`; `docs/windows-port-2026-09.md` §8/§9
+main)" table inside the Windows native-port section (they moved back
+as their commits landed; since 2026-10-10 the branch is retired, its
+commits survive only on tag `archive/windows-wave1-wip` and land, if at
+all, by cherry-pick — the two rows left belong to `285779ce83`, which
+the 2026-09-08 review held); the README's native-MSYS2 paragraph corrected to
+`-O2` + clang-only `XEMU_PGO`; `docs/Campaigns/windows-port-2026-09.md` §8/§9
 rewritten around main's real delta and the Windows exit-139 protocol;
 and a supersession note added to the head of
-`docs/windows-audit-2026-09-summary.md`. The general lesson, worth
+`docs/Campaigns/windows-audit-2026-09-summary.md`. The general lesson, worth
 keeping: **a doc that describes a branch is drift the moment it sits in
 main's tree** — say which ref a claim is true of, and prefer a table a
 reader can move over prose they must rewrite.
@@ -503,9 +533,9 @@ After fixing an item above (or any doc), re-grep for the rest:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-# 1. MVK config: the three homes must agree
-grep -n 'PREFILL\|ARGUMENT_BUFFERS\|FAST_MATH\|SYNCHRONOUS_QUEUE\|RESUME_LOST' \
-  README.md Info.plist ui/xemu.c
+# 1. MVK config: the three homes must agree (six keys as of 2026-10-10)
+grep -n 'PREFILL\|ARGUMENT_BUFFERS\|FAST_MATH\|SYNCHRONOUS_QUEUE\|RESUME_LOST\|MVK_CONFIG_LOG_LEVEL' \
+  docs/optimizations.md Info.plist ui/xemu.c
 # 2. RELEASING staleness markers (post-2026-07-05 rewrite these must
 #    NOT reappear; 'tag -a' and '--draft=false' are now deliberate)
 grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md
@@ -526,7 +556,9 @@ grep -n -A3 'dsp_jit:' config_spec.yml
 # 7. Documented knobs that only exist on a branch: every XEMU_* named in
 #    a live knob table must have a getenv on THIS ref (only the live
 #    table is scanned: rows under "Escape hatches on branch
-#    windows-wave1-wip" are expected to have none until they land)
+#    windows-wave1-wip" have none — that branch was retired 2026-10-10,
+#    its commits live on tag archive/windows-wave1-wip and land only by
+#    cherry-pick; the held 285779ce83 owns the rows left there)
 for v in $(sed -n '/^| Env var/,$p' docs/optimizations.md | awk '/^## /{exit} {print}' | grep -o 'XEMU_[A-Z0-9_]*' | sort -u); do
   git grep -q "$v" HEAD -- '*.c' '*.h' '*.m' '*.mm' '*.cc' '*.sh' '*.yml' '*.py' \
     || echo "docs name $v but HEAD has no reference"
@@ -590,13 +622,13 @@ Facts here were verified against the repo on 2026-07-04. Re-verify
 before trusting the volatile ones:
 
 - README section anatomy + line anchors: `grep -n '^#' README.md`
-- PREFILL agreement across the three homes: `grep -n PREFILL README.md Info.plist ui/xemu.c`
+- PREFILL agreement across the three homes: `grep -n PREFILL docs/optimizations.md Info.plist ui/xemu.c`
 - RELEASING staleness set (expect no hits): `grep -n 'Committing\|Cursor\|track upstream\|Made-with' docs/RELEASING-macos.md`
 - Release-notes format rules: read `docs/RELEASING-macos.md` "Release notes body format" (short form since 2026-10-10)
 - CI draft flow: `grep -n 'draft:\|gen-changelog' .github/workflows/release.yml` and the owner guard in `.github/workflows/release-on-tag.yml`
 - Commit conventions + footer: `git log -8 --format=full`
-- Tag scheme + annotated-vs-lightweight: `git tag -l | sort -V | tail -3; git cat-file -t v0.10.2` (expect `tag` — v0.10.x are annotated; v0.9 itself is lightweight, `commit`)
-- Design-doc exemplar structure: `grep -n '^#' docs/dsp-jit-design.md`; roadmap header: `grep -n '| Phase | Status |' docs/dsp-jit-design.md`
-- dsp_jit defaults vs recommendation: `grep -n -A3 'dsp_jit:' config_spec.yml` and README `### Recommended xemu.toml`
-- Fork-authored docs inventory: `ls docs/dsp-jit-design.md docs/RELEASING-macos.md`
-- Strikethrough / negative-result exemplars still present: `grep -n 'Shader specialization\|attempted twice' README.md`
+- Tag scheme + annotated-vs-lightweight: `git tag -l | sort -V | tail -3; git cat-file -t v0.13.3` (expect `tag` — v0.13.3 is the latest as of 2026-10-10 and annotated; v0.9 itself is lightweight, `commit`)
+- Design-doc exemplar structure: `grep -n '^#' docs/Finished/dsp-jit-design.md`; roadmap header: `grep -n '| Phase | Status |' docs/Finished/dsp-jit-design.md`
+- dsp_jit defaults vs recommendation: `grep -n -A3 'dsp_jit:' config_spec.yml` and README ``### Recommended `xemu.toml` ``
+- Fork-authored docs inventory and folder rule: `ls docs/*.md docs/*/*.md` against `docs/README.md`
+- Strikethrough / negative-result exemplars still present: `grep -n -i 'Shader specialization\|attempted twice' docs/optimizations.md`

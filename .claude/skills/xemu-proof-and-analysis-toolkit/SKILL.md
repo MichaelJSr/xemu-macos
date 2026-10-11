@@ -18,10 +18,13 @@ description: >-
 
 # xemu proof-and-analysis toolkit
 
-This project ships without a test suite backstop: grep every workflow
-under `.github/workflows/` for `make check` / `meson test` / `pytest`
-and you get nothing — CI here is compile-and-package only (verified
-2026-07-04). Every performance and correctness claim that ships is
+This project has only a thin test-suite backstop, and none of it plays a
+game. As of 2026-10-10 CI runs two suites: the fork's `meson test --suite
+xbox` (DSP unit test, swizzle round-trip, interpreter golden corpus, and
+on aarch64 the DSP JIT differential arms; `build-macos.yml`'s arm64 leg
+and `build-linux.yml`) and upstream's `make check-unit` (`build-tests.yml`,
+called from `build.yml`). No in-game testing is automated: no scene, no
+fps, no rendering check. Every performance and correctness claim that ships is
 instead the product of someone deliberately proving it, with a method
 that would have caught the claim being wrong. "Prove it, don't just
 install it": build the fix, then build (or reuse) the technique that
@@ -159,8 +162,9 @@ work is worth attempting.
    same flat total, since one experiment could be neutral for an
    unrelated reason (a bug in the change, an atypical scene).
 
-**Worked example.** The streamed-vertex stall investigation (README's
-"Future vectors", numbers dated to the 2026-07 session) ran this test
+**Worked example.** The streamed-vertex stall investigation
+(`docs/optimizations.md` Settled vectors row "Streamed-vertex stall
+reduction", numbers dated to the 2026-07 session) ran this test
 twice on the same heavy attract-reel content. (a) Byte-exact conflict
 refinement (commit `6e8c6cc481`) eliminated 75-85% of the
 page-boundary `finish_vtx_dirty` cascade (440-700 down to ~100 per 5 s
@@ -168,14 +172,14 @@ interval), but flips/s did not move — the eliminated finishes
 reappeared as cross-slot targeted waits elsewhere. (b) Exact
 refinement *plus* a 128 MiB host mirror per flight slot (one of
 `NUM_FLIGHT_SLOTS`=2 in-flight command-buffer generations,
-`hw/xbox/nv2a/pgraph/vk/renderer.h:542`), meant to remove cross-slot
+`hw/xbox/nv2a/pgraph/vk/renderer.h:628` as of 2026-10-10), meant to remove cross-slot
 waits structurally by letting in-flight slots read a frozen mirror
 instead of racing the recording command buffer: fence-wait *events*
 ballooned (more, smaller waits) while total wait time held at
-~2.5-3.5 s per 5 s interval, before and after. README's verdict: "the
-~22-30 ms/flip of waits is the GPU's actual frame time... real GPU
-time, not slack; CPU-side wait elimination just relocates which call
-site absorbs it." The mirror change was reverted as not worth its
+~2.5-3.5 s per 5 s interval, before and after. The ledger's verdict
+(that Settled row): "the waits were GPU frame time" — real GPU time,
+not slack, so CPU-side wait elimination just relocates which call site
+absorbs it. The mirror change was reverted as not worth its
 complexity (+128 MiB, no measured win); both implementations remain in
 git history. Attempt (a) was **not** wasted, though — on a
 *different*, heavier in-game scene (408 draws/flip @ ~20 fps) it
@@ -418,7 +422,7 @@ expensive to leave enabled.
    full slowdown, so don't run it as the default.
 
 **Worked example: `XEMU_DSP_JIT_DIFF`** (design:
-`docs/dsp-jit-design.md` §2.9 "Differential test mode"; mechanisms in
+`docs/Finished/dsp-jit-design.md` §2.9 "Differential test mode"; mechanisms in
 `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`). Determinism
 argument: a translated DSP56300 (the Xbox APU's Motorola-family DSP
 core) basic block runs the same handler functions every time for a
@@ -612,7 +616,8 @@ mirrors experiment initially measured "-30%" and nearly got treated as
 a regression, until the number was traced to an invalid baseline: that
 run had been parked on a 3-draws/flip static screen (effectively a
 menu frame) while the comparison run sampled actual attract-reel
-content (README.md, "Per-flight vertex-RAM mirrors" row) — the two
+content (`docs/optimizations.md` Failed / reverted experiments, "Per-flight
+vertex-RAM mirrors" row) — the two
 runs weren't comparing the same scene at all. Measured properly
 (interleaved, content-matched via draws/flip), the change was
 ~neutral, not -30%. Companion trap (dated 2026-07-04 session record):
@@ -786,14 +791,15 @@ Volatile ones, with a one-line re-check each:
 - Query pool sizing / `XEMU_MAX_QUERIES`: `grep -n "max_queries_in_flight\|XEMU_MAX_QUERIES" hw/xbox/nv2a/pgraph/vk/reports.c`
 - Primer query: `grep -n "primer" hw/xbox/nv2a/pgraph/vk/draw.c`
 - DSP JIT diff/audit/sentinel knobs: `grep -n "XEMU_DSP_JIT_DIFF\|XEMU_DSP_JIT_PIN_AUDIT\|XEMU_DSP_JIT_SENTINEL" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-- Differential-validation design: `sed -n '164,227p' docs/dsp-jit-design.md`
+- Differential-validation design: `sed -n '164,227p' docs/Finished/dsp-jit-design.md`
 - Sentinel poison constant: `grep -n "SENTINEL_POISON" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h`
-- README wait-relocation / GPU-bound verdict: `grep -n "real GPU time, not slack" README.md`
-- README byte-exact vertex refinement numbers: `grep -n "forced finishes 5.65" README.md`
-- README occlusion-rework numbers: `grep -n "render passes" README.md`
+- Wait-relocation / GPU-bound verdict: `grep -n "the waits were GPU frame time" docs/optimizations.md` (Settled vectors row)
+- Byte-exact vertex refinement numbers: `grep -n "forced finishes 5.65" docs/optimizations.md`
+- Occlusion-rework numbers: `grep -n "render passes \*\*376" docs/optimizations.md`
+- Per-flight mirrors row: `grep -n "^| Per-flight vertex-RAM mirrors" docs/optimizations.md`
 - Bench harness interleaving/transient-drop convention: `sed -n '1,20p' scripts/bench-savestate-ab.sh`
 - Visual artifact oracle description: `grep -n "Visual artifact oracle" -A 15 .claude/skills/xemu-testing/SKILL.md`
-- No CI workflow runs a test suite: `grep -rniE "make check|meson test|ninja test|pytest" .github/workflows/*.yml` (expect no output)
+- What CI tests: `grep -rnE "make .*check|meson test|uses: ./.github/workflows/build-tests" .github/workflows/*.yml` (as of 2026-10-10: `build-linux.yml` and `build-macos.yml` `meson test --suite xbox`, `build-tests.yml` `make -j$(nproc) check-unit`, `build.yml` calling `build-tests.yml`; no step launches a game)
 - Any commit hash cited above: `git show --stat <hash>` — every hash in
   this skill was checked this way: `a74efb21fb`, `fc58c637c4`,
   `531122e8aa`, `bfcf38843f`, `bb33ccaa2e`, `6bfbc22863`, `ca7fe51a0b`,

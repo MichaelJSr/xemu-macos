@@ -125,8 +125,8 @@ processing unit (voice processor + two DSP56300 cores).
 fork's GPU renderer runs on, on macOS) exposes exactly one queue
 (`queueCount=1` — `hw/xbox/nv2a/pgraph/vk/instance.c:515`, with a comment
 at lines 504-509 noting a second compute queue was tried and abandoned
-for this reason; also README "Failed experiments" row "Separate compute
-queue"). Two Apple-only fast paths are sound *only* because of this.
+for this reason; also the `docs/optimizations.md` Failed / reverted
+experiments row "Separate compute queue"). Two Apple-only fast paths are sound *only* because of this.
 
 **Evidence — two call sites lean on single-queue ordering:**
 
@@ -235,10 +235,10 @@ asserts in this file are compiled out in every build (see below).
 - The occlusion-query pool is 4096 queries total
   (`hw/xbox/nv2a/pgraph/vk/reports.c:36`, overridable for guard-testing
   via `XEMU_MAX_QUERIES`, `reports.c:38-44`, range 8-65536), split evenly
-  per slot via `pgraph_vk_queries_per_slot()` (`renderer.h:1075-1078`) —
+  per slot via `pgraph_vk_queries_per_slot()` (`renderer.h:1205-1208`) —
   2048/slot by default.
 - **The capacity guard that matters**, `begin_draw()`
-  (`hw/xbox/nv2a/pgraph/vk/draw.c:2178-2193`): when zpass counting is on
+  (`hw/xbox/nv2a/pgraph/vk/draw.c:2259-2274`, as of 2026-10-10): when zpass counting is on
   and `num_queries_in_flight >= pgraph_vk_queries_per_slot(r) - 1`, it
   forces `pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL)` +
   `pgraph_vk_ensure_command_buffer(pg)` — submit-and-continue — rather
@@ -247,7 +247,7 @@ asserts in this file are compiled out in every build (see below).
   assert" that "overran the pool and crashed inside MoltenVK's
   visibility-buffer encode."
 - **Why an assert alone isn't enough**: every `nv2a_vk_assert()` in this
-  renderer compiles to `((void)0)` — `hw/xbox/nv2a/pgraph/vk/debug.h:66-72`
+  renderer compiles to `((void)0)` — `hw/xbox/nv2a/pgraph/vk/debug.h:67-73`
   hardcodes `#define NV2A_VK_PERF_BUILD 1` unconditionally, with no
   `NDEBUG`/`--debug`/meson-option override anywhere in the tree (verified
   by grep). **These asserts are stripped in every build of this renderer,
@@ -260,8 +260,8 @@ now ride the flip and get harvested at slot reclaim instead of being
 drained synchronously — see `reports.c`) let one command buffer span a
 whole frame instead of tearing down per query rotation — the single
 biggest win in this repo's history: 15.78 → 38.57±0.80 fps (+144%) per
-commit `6bfbc22863`'s protocol receipt (README prose rounds this change
-to 35.6 fps / 2.25x), passes 376 → 14/flip, 2026-07-03. But it also
+commit `6bfbc22863`'s protocol receipt (`docs/optimizations.md` headlines
+it as "2.4x in report-heavy scenes"), passes 376 → 14/flip, 2026-07-03. But it also
 means a partition that used to refill once
 per short-lived CB can now be exhausted mid-frame in a report-heavy
 scene; the guard exists to catch exactly that.
@@ -527,8 +527,8 @@ AFTER `block` has its generation/shared_exit set... and BEFORE
 buffer." I.e. any function that patches a previously-emitted branch must
 do so *before* the write-window closes, not after.
 
-**Why this design — two failed alternatives, both in the README's
-Failed/reverted-experiments table:**
+**Why this design — two failed alternatives, both in the
+`docs/optimizations.md` Failed / reverted experiments table:**
 - *`pthread_jit_write_with_callback_np` for `tb_phys_invalidate`*:
   "Scoped-W semantics force-drop W on callback return, incompatible
   with QEMU's nested JIT-write paths." The DSP JIT's write sites are not
@@ -733,7 +733,7 @@ non-perturbing) even while push is active.
 
 Vblank cadence is intentionally NOT tied to host display refresh: an
 earlier attempt to align `vblank_interval_ns` to the host's actual
-refresh rate is in the README's Failed/reverted-experiments table
+refresh rate is in the `docs/optimizations.md` Failed / reverted experiments table
 ("Vblank cadence aligned to host display refresh") because
 `vblank_timer_callback`/`vblank_timer_thread` → `process_vblank` →
 `graphic_hw_update` → `nv2a_vga_gfx_update` → sets
@@ -825,7 +825,7 @@ different trigger — gating on `pg->frame_time` instead of wall-clock at
 all — caused a reproducible black-screen freeze on rapid double-level-
 load, fixed by switching to host wall-clock-*style but monotonic*
 timing; see the "Surface-expiry throttle keyed on `pg->frame_time`" row
-in the README's Failed experiments table). The fix keeps the "throttle
+in the `docs/optimizations.md` Failed experiments table). The fix keeps the "throttle
 regardless of frame_time" property while using the *monotonic* clock,
 not `QEMU_CLOCK_HOST`.
 
@@ -888,7 +888,7 @@ another kick or the removed poll would have masked) — this was a
 real historical bug: hoisting `can_fifo_access` out of the pusher's word
 loop broke the "lock held throughout" assumption because
 `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`
-(README Failed-experiments row, "Hoist can_fifo_access...").
+(`docs/optimizations.md` Failed-experiments row, "Hoist can_fifo_access...").
 
 **What breaks if you violate this.** Blocking while holding BQL freezes
 the whole VM's vCPU/timer progress for the wait's duration — perceived
@@ -917,9 +917,11 @@ same MoltenVK configuration regardless of how the user (or a test
 harness) starts the app. **Any new plist environment variable must be
 mirrored in `main()`, or the split reopens.**
 
-**Evidence** — `ui/xemu.c:1589-1615`, inside `main()`, `#ifdef __APPLE__`,
-before MoltenVK is dlopen'd: five `setenv("MVK_CONFIG_…", …, 0)` calls
-covering the canonical MVK tuple — the five values are cataloged in
+**Evidence** — `ui/xemu.c:1924-1954` (as of 2026-10-10), inside `main()`,
+`#ifdef __APPLE__`, before MoltenVK is dlopen'd: six
+`setenv("MVK_CONFIG_…", …, 0)` calls at `:1939-1945` covering the
+canonical MVK tuple (five tuning keys plus `MVK_CONFIG_LOG_LEVEL=1`) —
+the six values are cataloged in
 `xemu-config-and-flags` Axis 3 (the value owner; prefill=0 is the
 load-bearing one). The `setenv(..., 0)` third argument means "don't
 overwrite" — an explicit env var set by the user or a harness before
@@ -930,15 +932,16 @@ textures now that command buffers span whole frames, enabled an AGX
 visibility crash, and measures slower (encoding lands on the PFIFO
 thread)."
 
-`Info.plist` (repo root, lines 35-52) carries the matching values,
-verified equal to the `main()` block as of 2026-07-04. Re-verify the two
-lists agree: `grep -n "MVK_CONFIG" Info.plist ui/xemu.c`.
+`Info.plist` (repo root, `LSEnvironment` dict at lines 35-56, six keys)
+carries the matching values, verified equal to the `main()` block as of
+2026-10-10. Re-verify the two lists agree:
+`grep -n "MVK_CONFIG" Info.plist ui/xemu.c`.
 
-**Parity holds in all three homes** (re-verified 2026-07-11 at
-`7e2e6e7256`): the README "MoltenVK runtime config" table, `Info.plist`,
-and `ui/xemu.c:1602-1606` all read prefill `0` — the README row was
-fixed 2026-07-05. If any of the three ever disagrees again, that is
-drift; record it in `xemu-docs-and-writing` §4, the stale-doc list home.
+**Parity holds in all three homes** (re-verified 2026-10-10 at
+`b7e2752589`): the `docs/optimizations.md` `### MoltenVK runtime config`
+table, `Info.plist`, and `ui/xemu.c:1939-1945` all read prefill `0` — the
+table row (then in README) was fixed 2026-07-05. If any of the three
+ever disagrees again, that is drift; record it in `xemu-docs-and-writing` §4, the stale-doc list home.
 
 **Why this design.** The pink-tile saga (`xemu-failure-archaeology`) is
 the origin story: for weeks, every test harness (shell-launched) ran
@@ -1027,7 +1030,7 @@ one of these should know it's stepping onto contested ground.
 
 - **MoltenVK internal-mutex deadlocks.** The depth-export experiment
   (`vkExportMetalObjectsEXT`) deadlocked MoltenVK's internal mutex under
-  certain conditions (README Failed-experiments table) — a
+  certain conditions (`docs/optimizations.md` Failed-experiments table) — a
   MoltenVK-internal failure mode this fork's code can't fix directly.
   The mitigation is defensive: `vk_wait_for_fence_or_die()`
   (`hw/xbox/nv2a/pgraph/vk/command.c:34-54`), used by single-time
@@ -1159,8 +1162,12 @@ and the `pfifo_kick(d)` call-site count (20). On 2026-08-04 at
 `f4bb867d3c` Invariant 8 was corrected for doc drift — push-present has
 been the default since 2026-07-12, not an opt-in — and its line anchors
 (and the vblank-thread / `vblank_interval_ns` anchors it shares) were
-re-derived against that tree. Re-run these before trusting a claim above
-on a later tree:
+re-derived against that tree. On 2026-10-10 at `b7e2752589` (latest tag
+`v0.13.3`) the MVK three-home parity (six keys, prefill `0`) and the
+Invariant 2 line anchors (`draw.c` capacity guard, `renderer.h`,
+`debug.h`) were re-verified after the MVK table moved from README to
+`docs/optimizations.md`. Re-run these before trusting a claim above on a
+later tree:
 
 ```sh
 # Invariant 1 — single queue
@@ -1205,8 +1212,8 @@ grep -n "PREFILL_METAL_COMMAND_BUFFERS" Info.plist ui/xemu.c
 # Invariant 12 — QoS bumps
 grep -rn "QOS_CLASS_USER_INTERACTIVE" hw/ ui/
 
-# README's MVK table (should read 0 — fixed 2026-07-05; disagreement = new drift)
-grep -n "PREFILL_METAL_COMMAND_BUFFERS" README.md
+# docs/optimizations.md MVK table (should read 0 — fixed 2026-07-05; disagreement = new drift)
+grep -n "PREFILL_METAL_COMMAND_BUFFERS" docs/optimizations.md
 
 # Known weak point: STALLED reachability (expect 3 matches: draw.c profile-map
 # entry + draw.c finish-reason compare + exactly one caller, reports.c:322)

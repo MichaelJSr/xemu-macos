@@ -25,7 +25,7 @@ description: >-
 # xemu diagnostics and tooling
 
 This fork's optimization work runs on measurement, not impressions — every
-number in README's Changes section came from one of the channels below. This
+number in `docs/optimizations.md`'s Changes section came from one of the channels below. This
 skill is the interpretation guide: what each channel prints, what the fields
 mean mechanically, and what range separates "healthy" from "something is
 wrong." It also ships four working scripts (under this skill's own
@@ -37,7 +37,7 @@ All facts below were verified against the repo on 2026-07-04 by reading the
 implementing source directly (file:line references throughout so you can
 re-verify after the tree moves). **§7 and the UI-thread nsprof buckets were
 added and verified 2026-08-04** with the fork-wide optimization wave
-(`docs/fork-optimization-audit-2026-08.md`); numbers quoted from that wave
+(`docs/Finished/fork-optimization-audit-2026-08.md`); numbers quoted from that wave
 carry its date and are recorded readings, not current ones.
 
 ## Route finder — which channel answers which question
@@ -110,7 +110,7 @@ whichever renderer is installed — `pgraph_vk_flip_stall()` in
 still ticks once — i.e. once per **guest** frame, not once per
 *displayed* frame; with `display.frame_interpolation` = 2x/4x the on-screen
 fps can exceed nsprof's flips/s, because MetalFX interpolation happens
-downstream of PGRAPH). Verified exact format (`nsprof.c:148-171`):
+downstream of PGRAPH). Verified exact format (`nsprof.c:149-205`, `nsprof_flip_tick()`, as of 2026-10-10):
 
 ```
 nsprof: 5.0s interval, 193 flips (38.6/s)
@@ -153,7 +153,7 @@ independent, not a running total.
 | `ui_frame_dt` | **UI thread** (2026-08-04): interval between consecutive completed presents (`end_frame` → `end_frame`) | Present cadence as the UI thread sees it — not the same as guest flips/s |
 
 **The three UI-thread buckets are normalized per *flip*, not per
-present** (`nsprof.h:16-23`), because the summary's denominator is the
+present** (`nsprof.h:28-30`), because the summary's denominator is the
 PFIFO thread's flip count. For presents/s, divide the interval's
 `ui_present` event count by the interval seconds in the header line —
 and remember an unfocused/occluded window presents unpaced (xemu-testing),
@@ -163,9 +163,9 @@ documented worst case is losing one interval's samples at a reset
 boundary.
 
 `flip_idle` is special: it is NOT wasted CPU time in the usual sense. It
-starts when the guest issues `NV097_FLIP_STALL` (`pgraph.c:989-996`) and
+starts when the guest issues `NV097_FLIP_STALL` (`pgraph.c:1305-1313`) and
 ends when `pfifo_stall_for_flip()` sees the flip complete
-(`pfifo.c:141-153`) — i.e. it is the PFIFO thread waiting for vblank
+(`pfifo.c:147-161`) — i.e. it is the PFIFO thread waiting for vblank
 pacing, which is expected and roughly `1000/target_fps` ms per flip at a
 capped frame rate. A `flip_idle` that shrinks to near-zero usually means
 the guest is now GPU/CPU-bound and no longer waiting on vblank pacing (fps
@@ -220,7 +220,7 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 
 | Metric | Healthy | Pathological | Source |
 |---|---|---|---|
-| draws/flip | scene-dependent: menu ~3, attract-reel 350-390, heavy in-game 408-485 | — (this is identity, not pass/fail — see §0) | README "Changes"; historical session records |
+| draws/flip | scene-dependent: menu ~3, attract-reel 350-390, heavy in-game 408-485 (2026-07 records); the F8 heavy anchor `vm-20260704173701` reads ~877 (2026-10-10, `../fixtures/README.md`) | — (this is identity, not pass/fail — see §0) | `docs/optimizations.md` "Changes"; historical session records |
 | passes/flip (`renderpass` per_flip) | ~14 | 376 | Apple GPUs are TBDR — every render pass is a full tile load/store, so pass count is a first-order cost. The 2026-07 in-pass-occlusion-queries + deferred-zpass-reports change (zpass = the guest's "how many pixels passed depth" report — see xbox-hardware-reference) cut per-query `vkCmdResetQueryPool` (illegal mid-pass, forcing pass teardown every query rotation) from 376→14 passes/flip on the savestate bench scene. |
 | `fence_wait` ms/flip | ~1-3.5 | 8 and up (measured as high as ~32 pre-fix) | Same change: fence wait fell to 2.2 ms/flip (`6bfbc22863` receipt) from a pre-fix worst of ~32. High fence-wait with low draws/flip usually means a sync-policy bug, not GPU load. |
 | `pipeline_gen` events | ≈0 once warm (async pipeline creation isn't worth building — this is rare enough already) | Nonzero bursts mid-session = compiling now = visible stutter | `pipeline_gen`'s `max=` field shows the worst single `vkCreateGraphicsPipelines` call: 164 ms measured cold (empty `pipeline_cache.bin`), ≤4 ms once `pipeline_cache.bin` is warm and persisted. |
@@ -288,14 +288,14 @@ second and is easy to `grep`/eyeball or pipe through `awk` for a mean.
 
 ## §3 XEMU_PFIFO_HEARTBEAT=1 — hang/freeze triage
 
-Source: `hw/xbox/nv2a/pfifo.c:485-552`. A rate-limited liveness snapshot of
+Source: `hw/xbox/nv2a/pfifo.c:511-598` (as of 2026-10-10). A rate-limited liveness snapshot of
 the PFIFO thread's main loop, printed every ~2 seconds
 (`QEMU_CLOCK_REALTIME` — which in this codebase is the *monotonic* clock
 despite the name; see xemu-architecture-contract Invariant 9 — it's a
 liveness signal, not a precise interval timer). Only active when
 `XEMU_PFIFO_HEARTBEAT=1`.
 
-Verified exact format (`pfifo.c:538-551`):
+Verified exact format (`pfifo.c:573-585`):
 
 ```
 xemu: pfifo heartbeat iters=48213 halt=0 flush=0 sync=0 waiting_flip=1 waiting_nop=0 waiting_ctxsw=0
@@ -352,7 +352,8 @@ the DSP core has started has no effect within that process.
 Prints once per core (GP and EP separately) via an `atexit` handler
 (registered because the normal quit paths — Cmd-Q, window close, SIGTERM —
 never call the clean-shutdown `dsp_destroy`). Verified fields
-(`dsp56k_jit_arm64.c:10002-10080`, struct `DspJitState`):
+(`dsp56k_jit_print_stats()`, `dsp56k_jit_arm64.c:10041-10136` as of 2026-10-10;
+the counters are `struct DspJitState` fields, `:1224-1270`):
 
 ```
 xemu: DSP JIT stats (GP core):
@@ -407,7 +408,7 @@ names exactly which opcode class to inline next for better coverage.
 executions in the window): if retranslation churn — usually self-modifying
 overlay code — exceeds that ratio, the JIT disables itself for that core
 for the rest of the session and the interpreter takes over silently.
-Verified log line (`dsp56k_jit_arm64.c:10827-10838`):
+Verified log line (`dsp56k_jit_arm64.c:10913-10919`):
 
 ```
 xemu: DSP JIT auto-throttled on EP core: 20734 retranslations in the last 262144 block executions (self-modifying overlay code); interpreter takes over. XEMU_DSP_JIT_NO_THROTTLE=1 disables this.
@@ -424,7 +425,7 @@ measured ~1:10000+ (healthy).
 Bit-exact validates JIT output against the interpreter. Because
 translation is deterministic (same input block always produces the same
 code), **one passing validation per unique translation is sufficient** —
-a per-block `diff_checked` gate (`dsp56k_jit_arm64.c:10842-10858`) skips
+a per-block `diff_checked` gate (`dsp56k_jit_arm64.c:10924-10940`) skips
 re-validating a block once it has passed once, which is what keeps
 validation cost bounded to roughly "number of unique block translations"
 rather than "blocks executed per second." `XEMU_DSP_JIT_DIFF=1` validates
@@ -436,7 +437,7 @@ like `XEMU_DSP_JIT_DIFF=10`, not `=1` (bring-up only).
 
 Two execution modes:
 - **Async (default)**: a 16-slot SPSC ring feeds a dedicated worker thread
-  named `mcpx.dsp_diff` (`dsp56k_jit_arm64.c:10623`). The APU thread only
+  named `mcpx.dsp_diff` (`dsp56k_jit_arm64.c:10705`). The APU thread only
   pays for a snapshot copy into the ring; validation runs off-thread.
 - **Sync** (`XEMU_DSP_JIT_DIFF_SYNC=1`): the APU thread runs the
   interpreter replay and compare inline before continuing — reintroduces
@@ -447,7 +448,7 @@ On any divergence, **both modes abort the process** (`abort()`, after
 `fflush(stderr)` so the diagnostic survives an abrupt Xcode-build
 termination) and print a one-line failure report identifying which state
 field first differs (`diff_report_failure`, `dsp_cpu.c` /
-`dsp56k_jit_arm64.c:10404-10420`):
+`dsp56k_jit_arm64.c:10486-10512`):
 
 ```
 xemu: DSP JIT DIFF FAILURE in block pc_start=0x0142 (jit_cycles=12)
@@ -473,7 +474,7 @@ is the demonstrated-clean form alongside the other two. Rule and receipts:
 ### `XEMU_DSP_JIT_DUMP=1` — block disassembly dump
 
 Every translated block prints its address range and a raw 32-bit-word hex
-dump to stderr (`dsp56k_jit_arm64.c:9883-9907`) for offline disassembly —
+dump to stderr (`dsp56k_jit_arm64.c:9909-9933`) for offline disassembly —
 very high volume, only for inspecting a specific translation by hand
 (pipe through `grep -A20 'pc_start=0x<addr>'`).
 
@@ -535,13 +536,17 @@ CPU."
 
 **Busy-poll caveat (measured 2026-07-04): the vCPU (mttcg) thread's
 utilization is NEVER evidence of guest-boundness on its own.** Azurik
-busy-polls instead of HLTing — the vCPU thread reads ~95% even in a
-scene pinned at a flat 60 fps vblank cap (F6), identical to a scene
-missing frames (F5). The valid limiter signal is PFIFO *starvation*
+busy-polls instead of HLTing — on 2026-07-04 the vCPU thread read ~95%
+both in a scene pinned at a flat 60 fps vblank cap (F6,
+`vm-20260704034933`) and in a scene then missing frames (F5,
+`vm-20260704032357`). The valid limiter signal is PFIFO *starvation*
 time: PFIFO cond_wait share minus nsprof `flip_idle` = time the guest
-computes while the renderer has nothing to do (≥5.8 ms/flip on the F5
-heavy scene). Cross-check any "the guest is the bottleneck" claim
-against a capped scene before believing thread %CPU.
+computes while the renderer has nothing to do (≥5.8 ms/flip on F5 that
+day). Cross-check any "the guest is the bottleneck" claim against a
+capped scene before believing thread %CPU. F6 was retired 2026-10-10, so
+the capped scene is now F5 (~59 fps, near the 60 cap) and the heavy one
+is F8 (`vm-20260704173701`, ~48 fps on a quiet box); tags and roles in
+`../fixtures/README.md`.
 
 **One-shot call-stack sampling**: `/usr/bin/sample <pid|partial-name>
 [duration [interval_ms]] -file <path>` (verified usage banner: default
@@ -637,8 +642,9 @@ list_snapshots.py image.qcow2 --json
 ```
 
 On a live image, clone first so you never contend with a running xemu's
-write lock: `cp -c /path/to/xbox_hdd.qcow2 /tmp/snap-list.qcow2` (APFS
-instant copy-on-write clone, effectively free).
+write lock. From the repo root, the test-fixture HDD (tags and roles in
+`../fixtures/README.md`): `cp -c ../fixtures/xbox_hdd.qcow2 /tmp/snap-list.qcow2`
+(APFS instant copy-on-write clone, effectively free).
 
 ### `score_frames.py`
 
@@ -695,7 +701,7 @@ OS-level key injection can't reach an unfocused window) is owned by
 ## §7 Census channels added 2026-08-04 (optimization wave)
 
 Five census channels shipped with the wave implementing
-`docs/fork-optimization-audit-2026-08.md`. All are default-off, all
+`docs/Finished/fork-optimization-audit-2026-08.md`. All are default-off, all
 print to **stderr** (atexit, except §7.5's per-second line), and each
 answers exactly one gate question. Line references verified against the
 tree 2026-08-04.
@@ -703,7 +709,7 @@ tree 2026-08-04.
 ### §7.1 `XEMU_INV_PROF=1` — the `(f)` MMIO-recompile line
 
 The existing INV_PROF atexit dump gained an `(f)` block
-(`accel/tcg/tb-maint.c:207-221`):
+(`accel/tcg/tb-maint.c:208-219`):
 
 ```
 xemu:  (f) io_prepare=N  cpu_io_recompile=N (P% of io_prepare)  window=S.Ss => R.Rk recompiles/s
@@ -829,7 +835,7 @@ xemu: pgraph_write pfifo_kick census: kicks=N no-transition=N already-pending=N 
 xemu:   INTR             trans=0 acc=1 dup=0  N
 ```
 
-and from `pfifo.c:490-496`, the wakeup denominator:
+and from `pfifo.c:491-497`, the wakeup denominator:
 
 ```
 xemu: pfifo idle-park census: loop-iters=N parks=N
@@ -847,7 +853,7 @@ setting. A wrongly-skipped kick is a permanent PFIFO hang
 
 ### §7.5 `XEMU_UI_LOCK_STATS=1` — UI-thread lock occupancy without a debug build
 
-Once-per-second line from `ui/xemu.c:915-935`, previously reachable
+Once-per-second line from `ui/xemu.c:942-962`, previously reachable
 only in a `DEBUG_XEMU_C=1` build (which still forces it on):
 
 ```
@@ -885,11 +891,11 @@ lock when off.
 Re-verify these before trusting them on a future date, especially after
 any refactor touching the named files:
 
-- nsprof counters/events/format: `sed -n '38,86p' hw/xbox/nv2a/nsprof.h`
-  and `sed -n '25,177p' hw/xbox/nv2a/nsprof.c`
+- nsprof counters/events/format: `sed -n '55,160p' hw/xbox/nv2a/nsprof.h`
+  (the two enums) and `sed -n '22,205p' hw/xbox/nv2a/nsprof.c` (as of 2026-10-10)
 - UI-thread buckets + their per-flip normalization (added 2026-08-04):
   `grep -n 'drawable_acq\|ui_hud_lock\|ui_frame_dt\|ui_present\|mfx_scaler_rebuild' hw/xbox/nv2a/nsprof.c`
-  and `sed -n '14,24p' hw/xbox/nv2a/nsprof.h`
+  and `sed -n '20,30p' hw/xbox/nv2a/nsprof.h`
 - INV_PROF `(f)` MMIO-recompile line and its read-from-`=0` caveat:
   `sed -n '84,92p;205,222p' accel/tcg/tb-maint.c`
 - x87 census / refuter dump fields:
@@ -911,24 +917,26 @@ any refactor touching the named files:
   `grep -rn nsprof_flip_tick hw/xbox/nv2a/pgraph/`
 - APU utilization formula and frame period:
   `grep -n 'g_dbg.utilization\|EP_FRAME_US' hw/xbox/mcpx/apu/apu.c hw/xbox/mcpx/apu/apu_regs.h`
-- PFIFO heartbeat fields: `sed -n '485,552p' hw/xbox/nv2a/pfifo.c`
+- PFIFO heartbeat fields: `sed -n '511,598p' hw/xbox/nv2a/pfifo.c`
 - DSP JIT env vars and stats fields:
   `grep -n 'getenv("XEMU_DSP_JIT' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-  and `sed -n '10002,10080p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+  and `sed -n '10041,10136p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+  (`dsp56k_jit_print_stats`; re-find with `grep -n 'DSP JIT stats (%s core)'`)
 - cf_fallback bucket names:
   `grep -n 'DSP56K_JIT_FB_' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h`
 - DSP JIT engine identity (fork ARM64 JIT vs. upstream Rust JIT):
   `head -5 hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
-- occlusion/report rework fps figures (README and commit agree since
-  2026-07-11; both must show 38.57 ± 0.80 / +144%):
-  `grep -n '38.57\|376' README.md; git show -s --format='%B' 6bfbc22863 | grep -i 'fps\|144'`
-- byte-exact vertex refinement figures: `grep -n '5.4%\|93%\|7.6%' README.md`
-- pipeline-cache cold/warm figures: `grep -n '164 ms\|≤ 4 ms' README.md`
+- occlusion/report rework fps figures (the ledger and commit agree since
+  2026-07-11; both must show 38.57 ± 0.80 / +144%; the ledger moved from
+  README.md to `docs/optimizations.md`, ~:836 as of 2026-10-10):
+  `grep -n '38.57\|376' docs/optimizations.md; git show -s --format='%B' 6bfbc22863 | grep -i 'fps\|144'`
+- byte-exact vertex refinement figures (~:763): `grep -n '5.4%\|93%\|7.6%' docs/optimizations.md`
+- pipeline-cache cold/warm figures (~:682): `grep -n '164 ms\|≤ 4 ms' docs/optimizations.md`
 - SDL scancode values: `grep -n 'SDL_SCANCODE_\(W\|A\|S\|D\|UP\|DOWN\|LEFT\|RIGHT\|SPACE\|KP_[1235]\|[LR]SHIFT\) =' macos-libs/arm64/opt/local/include/SDL3/SDL_scancode.h`
 - qcow2 snapshot table layout: re-run
   `.claude/skills/xemu-diagnostics-and-tooling/scripts/list_snapshots.py`
-  against a fresh `cp -c` clone of the live hdd and confirm the
-  names/dates match the in-app F5-F8 shortcuts
+  against a fresh `cp -c` clone of `../fixtures/xbox_hdd.qcow2` and
+  confirm the tags/dates match the table in `../fixtures/README.md`
 - `nsprof_summarize.py` smoke test: regenerate a synthetic log
   matching `nsprof.c`'s format (see the format strings above) and confirm
   the parser's fps/draws-per-flip/fence-ms columns match what you encoded

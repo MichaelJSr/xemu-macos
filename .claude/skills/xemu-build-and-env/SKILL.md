@@ -56,12 +56,14 @@ installs explicitly in `build-macos.yml` and by what `meson.build`'s
 globs `/Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.[0-9]*.sdk` —
 that pattern requires a two-component version directory name. A bare
 `MacOSX26.sdk` (no minor version) does **not** match and is silently
-skipped; only forms like `MacOSX26.5.sdk` or `MacOSX15.4.sdk` count. Verified
-empirically on this machine: of `MacOSX.sdk`, `MacOSX15.sdk`,
-`MacOSX15.4.sdk`, `MacOSX26.sdk`, `MacOSX26.5.sdk` under
-`/Library/Developer/CommandLineTools/SDKs/`, only `MacOSX15.4.sdk` and
-`MacOSX26.5.sdk` match the glob; the probe picks `26.5` (numeric-sort
-descending, then rejects it only if `newest < min_ver`). If your CLT install
+skipped; only forms like `MacOSX27.0.sdk` or `MacOSX26.5.sdk` count. Verified
+empirically on this machine (as of 2026-10-10): of `MacOSX.sdk`,
+`MacOSX26.sdk`, `MacOSX26.5.sdk`, `MacOSX27.sdk`, `MacOSX27.0.sdk` under
+`/Library/Developer/CommandLineTools/SDKs/`, only `MacOSX26.5.sdk` and
+`MacOSX27.0.sdk` match the glob; the probe picks `27.0` (numeric-sort
+descending, then rejects it only if `newest < min_ver`). The probe reads
+only the CLT directory, never the SDKs inside the Xcode app that
+`xcode-select -p` may point at. If your CLT install
 only has bare-numbered SDK directories, `build.sh` prints `SDK >= 14.0 not
 found. Install Xcode Command Line Tools` even though a working compiler
 exists — the fix is a CLT update/reinstall (`xcode-select --install`, or
@@ -648,14 +650,25 @@ architectures are covered: `x86_64` and `aarch64` (`ubuntu-22.04`/
 
 `ci.yml` (push/PR) calls `build.yml`, which builds one source tarball
 (`scripts/archive-source.sh` output) and fans it out to three
-platform-specific workflows. **No workflow runs any test suite — the whole
-matrix is compile-and-package only.**
+platform-specific workflows plus `build-tests.yml` (`build.yml:62-83`
+as of 2026-10-10). No workflow plays a game; the tests that do run are
+small and content-free:
+
+- `build-macos.yml` (arm64 legs only — the x86_64 leg is a cross-build)
+  and `build-linux.yml` (a separate "Test xbox suite" job per arch that
+  runs `./build.sh --debug` first) run `ninja test-xbox` then `meson test
+  --suite xbox --print-errorlogs --no-rebuild`: the DSP unit test, the swizzle
+  round-trip, the interpreter golden corpus, and on aarch64 the three
+  DSP JIT differential arms.
+- `build-tests.yml` ("Unit tests") configures `i386-softmmu` on
+  `ubuntu-22.04` and runs upstream's `make -j$(nproc) check-unit`.
 
 | Workflow | Runner(s) | Matrix | Notes |
 |---|---|---|---|
 | `build-macos.yml` | `macos-15` | `{x86_64,arm64} × {debug,release}`, then a `build_universal` job lipo-merges the two arches per configuration | Installs `ccache coreutils dylibbundler` via Homebrew + `pip install pyyaml requests`; caches `macos-pkgs` + ccache + thinLTO cache keyed by arch/configuration/sha |
 | `build-windows.yml` | `ubuntu-latest` container (`xemu-win64-toolchain[-gcc]`), PDB step on `windows-latest` | `{x86_64,arm64} × {debug,release}` | Cross-compiles via `win64-cross`; separate job runs `cv2pdb` to extract PDBs from DWARF |
 | `build-linux.yml` | `ubuntu-22.04[-arm]` | `{x86_64,aarch64} × {debug,release}` | Builds `.deb` + AppImage; installs LLVM 21 from the apt.llvm.org pool at a pinned version |
+| `build-tests.yml` | `ubuntu-22.04` | none | Upstream unit tests (`make check-unit`) on the source tarball |
 
 Release (`release-on-tag.yml` on `v*` tag push, gated to
 `xemu-project`/`MichaelJSr` repo owners) reuses the same `build.yml` and
@@ -667,7 +680,7 @@ scope here.
 
 | Axis | This machine (local) | CI |
 |---|---|---|
-| macOS SDK | Xcode CLT with SDK 26.5 available (probe picks the newest ≥ min) | `macos-15` runner — SDK 15. This is why MetalFX/frame-interpolation code is guarded by `#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000` in `hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m` — CI's SDK doesn't even declare the macOS-26 MetalFX interpolator APIs, so the guard is a compile-time necessity, not just a runtime `@available` check. |
+| macOS SDK | Xcode CLT with SDKs 26.5 and 27.0 (probe picks 27.0, the newest ≥ min, as of 2026-10-10) | `macos-15` runner — SDK 15. This is why MetalFX/frame-interpolation code is guarded by `#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000` in `hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m` — CI's SDK doesn't even declare the macOS-26 MetalFX interpolator APIs, so the guard is a compile-time necessity, not just a runtime `@available` check. |
 | MoltenVK source | `/usr/local/lib/libMoltenVK.dylib`, reports **1.4.3** (untagged main `67b26826`), from this fork's custom pipeline (§4) | Vendors the **official 1.4.2** release into `macos-libs` (§3.4 tier 3) — CI has no `/usr/local` custom build and no MoltenVK checkout. |
 | dylibbundler / ccache | Present via Homebrew already | Installed fresh every run (`brew install ccache coreutils dylibbundler`) |
 | Compiler cache | None configured locally by default | ccache + `.lto-cache`, both restored from `actions/cache` keyed by arch/configuration/sha |
@@ -696,7 +709,7 @@ bump is trusted for release.
 | `build.log` growing every run | `build.sh` always does `make ... \| tee build.log` — the file is truncated and rewritten (not appended) each run, so it doesn't accumulate across builds, but a single verbose full build is already ~850 KB | Not actually a trap — just don't expect history across builds; check `build.log` from the *most recent* run only |
 | `.lto-cache` (`build/.lto-cache`) growing unbounded across many rebuilds | The macOS Darwin branch of `build.sh` sets `-Db_thinlto_cache=true -Db_thinlto_cache_dir=.lto-cache` with **no size-cap flag** (unlike CI's Linux leg, which passes `-Wl,--thinlto-cache-policy=cache_size_bytes=...`). Measured 185 MiB after one full build on this machine (2026-07-04). | Periodically `rm -rf build/.lto-cache`, or fold it into the nuclear clean (§5.4) |
 | A rebuilt binary "isn't taking effect" | A **currently running** `xemu` process keeps executing the old binary/dylibs it mapped at launch — rebuilding `dist/xemu.app` on disk doesn't affect an already-running instance | Quit the running instance fully before testing a rebuild; see `xemu-run-and-operate` for how to confirm what's actually running |
-| Hand-placed portable `xemu.toml` (in `dist/xemu.app/Contents/Resources/`) disappears after a rebuild | `package_macos` starts with `rm -rf dist` (§3.10 step 1) — a full `./build.sh` run always wipes and recreates the whole bundle, `Resources/` included | Don't plant a portable config in `dist/xemu.app` in the first place — that's the user-launched bundle (change-control non-negotiable 3; `xemu-testing` cardinal rule 2). Dev loop: use the default config path (`~/Library/Application Support/xemu/xemu/xemu.toml`, survives rebuilds) or `-config_path <scratch>/test.toml`. Portable-mode testing: use a `cp -Rc` clone (`<scratch>/xemu-test.app`), refreshed after each rebuild; the `ninja`+manual-copy path (§5.3) refreshes only the clone's executable |
+| Hand-placed portable `xemu.toml` (in `dist/xemu.app/Contents/Resources/`) disappears after a rebuild | `package_macos` starts with `rm -rf dist` (§3.10 step 1) — a full `./build.sh` run always wipes and recreates the whole bundle, `Resources/` included | Don't plant a portable config in `dist/xemu.app` in the first place — that's the user-launched bundle (change-control non-negotiable 3; `xemu-testing` cardinal rule 2). Dev loop: copy `../fixtures/xemu.toml` (beside the checkout) to a scratch path and pass `-config_path <scratch>/xemu.toml` (survives rebuilds; never point a test run at the personal config). Portable-mode testing: use a `cp -Rc` clone (`<scratch>/xemu-test.app`), refreshed after each rebuild; the `ninja`+manual-copy path (§5.3) refreshes only the clone's executable |
 | `SDK >= 14.0 not found` despite Xcode CLT being installed | The SDK probe's glob requires a two-component version dir (`MacOSXNN.N.sdk`); bare `MacOSXNN.sdk` dirs don't match (§1) | Update/reinstall CLT so a versioned SDK directory with a minor version exists |
 | `-p`/`-a` flag "not working" | Both require a **space-separated** second argument (`-p Darwin`, not `-pDarwin`); `-j` is the opposite — attached only (`-j8`, not `-j 8`) (§3.1) | Match the exact form per flag |
 | Config change "needs a full rebuild" assumption | Both `config_spec.yml` edits and `meson.build` edits are already tracked ninja inputs — plain `ninja` reconfigures and rebuilds automatically (§5.1) | Don't reach for a full `./build.sh` (and its Resources wipe) just because you edited a build-description file; only true configure-*argument* changes (arch, debug flag, LTO toggles, MoltenVK re-resolution) need it |
@@ -712,7 +725,8 @@ Re-run these after any pull to catch drift in this document:
 - MoltenVK checkout present: `ls -d "$(dirname scripts/build-moltenvk.sh)/../../MoltenVK/.git"` (run from repo root).
 - dsp56300 fetch URL/version: `grep -n "ver =\|url =" subprojects/dsp56300/meson.build`.
 - roms/edk2 submodule state: `git submodule status roms/edk2` and `git status --porcelain roms/edk2`.
-- CI matrix shape: `grep -n "runs-on\|matrix:" .github/workflows/build-macos.yml .github/workflows/build-windows.yml .github/workflows/build-linux.yml`.
+- CI matrix shape: `grep -n "runs-on\|matrix:" .github/workflows/build-macos.yml .github/workflows/build-windows.yml .github/workflows/build-linux.yml .github/workflows/build-tests.yml`.
+- CI test steps: `grep -nE "uses: ./|meson test|check-unit" .github/workflows/build.yml .github/workflows/build-macos.yml .github/workflows/build-linux.yml .github/workflows/build-tests.yml`.
 - CI macOS SDK level (vs. this machine's): the `runs-on:` value in `build-macos.yml` (`macos-15` as of this writing) vs. `ls /Library/Developer/CommandLineTools/SDKs/` here.
 - Windows LTO ownership split: `grep -n "FIXME\|Dqom_cast_debug\|flto" .github/workflows/build-windows.yml`.
 - `.lto-cache` size: `du -sh build/.lto-cache`.

@@ -25,7 +25,9 @@ about any of it in public without overselling. Every fact below was
 checked against the repo on 2026-07-04 (re-check commands in "Provenance
 and maintenance"). Repo-state pins (commit count, HEAD, latest tag), the
 §2.8/§3.5 resolutions, and the epilogue's vertex-transient status were
-refreshed 2026-07-11 at `7e2e6e7256`. §2.5's closure, its DSP-JIT line
+refreshed 2026-07-11 at `7e2e6e7256`; the §5 repo-state pins (last
+upstream merge, commit count, HEAD, latest tag) were refreshed again
+2026-10-10 at `b7e2752589`. §2.5's closure, its DSP-JIT line
 anchors, and the `settled` status row were added 2026-08-04 at
 `f4bb867d3c`. Historical fps numbers are dated session measurements,
 cited as recorded history, not re-run for this skill.
@@ -166,7 +168,7 @@ cited as recorded history, not re-run for this skill.
 > session close: 37.2-38.2 real fps @ ~740 draws/flip.
 
 > **RANKING ADDENDUM 4 (2026-08-04, fork-wide optimization audit at
-> `f4bb867d3c` — `docs/fork-optimization-audit-2026-08.md`).** 49
+> `f4bb867d3c` — `docs/Finished/fork-optimization-audit-2026-08.md`).** 49
 > agents, 40 findings, each adversarially verified: 8 confirmed, 17
 > plausible, 15 refuted. Effect on this list:
 > (1) **Item 5 (DSP parmove+ALU fusion) is SETTLED** — instruction-neutral
@@ -180,7 +182,7 @@ cited as recorded history, not re-run for this skill.
 > closed*" (audit §4/§5). Do not re-open that argument without new
 > receipts.
 > (3) **A sibling closure page exists**:
-> `docs/lockless-mmio-verdict.md` closes archaeology 7.5's reopen
+> `docs/Finished/lockless-mmio-verdict.md` closes archaeology 7.5's reopen
 > condition on arithmetic (residual < 0.07% of a core) rather than by
 > building PMC/PCRTC/PTIMER lockless.
 > (4) The audit's own candidates are **not** frontier entries — they are
@@ -218,18 +220,19 @@ Unpack each clause — it gates what counts as progress:
 
 - **MEASURED** — a number with the protocol receipt from §4, not a code
   comment or an architectural argument.
-- **real titles** — this fork's fixture titles (Azurik, Battlefield 2
-  Modern Combat, Conker: Live & Reloaded, KOTOR, Vexx, NevolutionX), scene
+- **real titles** — this fork's fixture title, Azurik (testing has been
+  Azurik-only since 2026-10-10; older results also cite BF2MC, Conker,
+  KOTOR, Vexx and NevolutionX), scene
   identity pinned by draws/flip (Azurik's attract reel alone is bimodal: 3
   draws/flip title screen vs 350-390 draws/flip demo reel — `xemu-testing`
   covers the trap).
 - **4K/120-class fluidity via MetalFX** — the machinery already exists:
   `MTLFXFrameInterpolator` does 2x (30->60) or 4x (30->120)
-  (`README.md` architecture diagram ~line 926;
+  (`README.md` "Architecture at a glance" diagram;
   `hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m`); exclusive fullscreen already
   picks the highest available refresh; the private-texture output ring
   lifts the old 1920px cap (1280x960 -> 2880x2160 on a 4K panel,
-  `README.md` ~line 520-521). **What's missing is a published,
+  `grep -n 2880 README.md docs/optimizations.md`). **What's missing is a published,
   protocol-backed number showing this fork delivers smoother real-title
   motion than upstream or a peer at the same settings on the same Mac** —
   that number does not exist in this repo today.
@@ -268,15 +271,17 @@ Status vocabulary:
 | 8 | Occlusion-report STALLED drains | resolved | Confirmed dead under shipped defaults (`finish_stalled = 0`); stale README bullet pruned |
 | 9 | MTLResidencySet | blocked | Evaluated and rejected in-repo on both fronts it could apply to |
 
-Source: `README.md` "Future vectors" (~line 846 as of 2026-07-11; every
-entry below re-checked still present 2026-07-04) plus direct code reading. Entries not
+Source: the README "Future vectors" section as of 2026-07-04 (every
+entry below re-checked present then; since 2026-07-18 the open ones live
+in `docs/roadmap.md` and the closed ones in `docs/optimizations.md`'s
+Settled vectors table) plus direct code reading. Entries not
 reproduced here (streamed-vertex stall, MetalFX input ring, GL-under-Metal
 switch, texture-upload barrier batching, `VK_EXT_external_memory_host`,
 `VK_KHR_dynamic_rendering` barriers, shader specialization, GPU S3TC
 decode, voice-register writeback batching, `dispatch_semaphore_t` kick) are
-either settled-negative with measured bounds already recorded in README,
-or out of this skill's scope — do not resurrect them; see README directly
-and `xemu-failure-archaeology`.
+either settled-negative with measured bounds already recorded in
+`docs/optimizations.md`, or out of this skill's scope — do not resurrect
+them; see those tables directly and `xemu-failure-archaeology`.
 
 ### 2.1 GPU-frame-cost reduction / draw merging — rank 1, open (campaign)
 
@@ -284,7 +289,8 @@ and `xemu-failure-archaeology`.
 (tile-based deferred renderer — Apple GPUs load/store the whole tile's
 memory every pass, so pass count is first-order) floor for this scene
 shape: 14 passes/flip against 408-485 draws/flip in heavy in-game scenes
-(`README.md` ~line 351). The next ceiling is per-draw CPU cost across those
+(README, 2026-07-04; the F8 anchor `vm-20260704173701` now reads ~877
+draws/flip as of 2026-10-10). The next ceiling is per-draw CPU cost across those
 hundreds of draws — pipeline binds, descriptor updates, vertex-state
 checks — not pass count. Owner-identified target (2026-07-04), not yet
 attempted.
@@ -438,10 +444,10 @@ the *container*: `alu_ccr_nz_skipped` / `alu_ccr_eu_skipped` read **0**
 on both F8 and the Azurik audio mix, and the APU thread runs ~18%
 utilized off every critical path, so the fold's fps ceiling is ~0
 whatever it saves locally. The second (2026-08-04 fork-wide audit,
-`docs/fork-optimization-audit-2026-08.md` §4) kills the *mechanism*: it
+`docs/Finished/fork-optimization-audit-2026-08.md` §4) kills the *mechanism*: it
 saves nothing locally either.
 
-**The static count.** The fold `docs/dsp-jit-design.md`'s "8
+**The static count.** The fold `docs/Finished/dsp-jit-design.md`'s "8
 (remaining)" row proposes is: when the parmove's `save_reg_N` holds a
 value also written to memory and the ALU doesn't touch the source
 register, stream source → destination directly instead of staging it
@@ -482,7 +488,7 @@ with the file — `grep -n "x28 = SR pin"`). No free callee-saved GPR
 remains — a fusion emitter
 must either share the existing pins or add spill/reload discipline, and
 one that clobbers x28 silently corrupts SR semantics.
-`docs/dsp-jit-design.md`'s former "x28 remains free for future fusion
+`docs/Finished/dsp-jit-design.md`'s former "x28 remains free for future fusion
 work" / "last free callee-saved register" lines were stale
 pre-SR-pinning prose — corrected 2026-07-11 to state the SR pin and the
 no-free-GPR constraint.
@@ -656,14 +662,14 @@ emitting native AArch64 for the two DSP56300 cores, embedded in the C
 interpreter (`audio.dsp_jit.enabled`), coexisting with and taking
 precedence over upstream's separately merged `dsp56300`-subproject engine
 (`audio.use_dsp_jit`) via `dsp_want_external_jit_engine()`
-(`hw/xbox/mcpx/apu/dsp/dsp.c:119-127`). Basic-block JITs for DSP-like ISAs
+(`hw/xbox/mcpx/apu/dsp/dsp.c:120-128`). Basic-block JITs for DSP-like ISAs
 are a known technique in general. What's fork-specific and verified absent
 upstream (`git ls-tree -r upstream/master | grep dsp56k_jit` → nothing) is
 this exact application: pinning A/B accumulators, X/Y operands, and SR
 flags into specific callee-saved AArch64 GPRs (x19-x28), multi-step
 lazy-CCR-elimination lookahead, and write-set narrowing for an async
 bit-exact diff validator — documented in numbered landed rounds in
-`docs/dsp-jit-design.md`. The validation methodology itself (deterministic
+`docs/Finished/dsp-jit-design.md`. The validation methodology itself (deterministic
 translation implies one passing validation suffices; async 16-slot SPSC
 ring so validation never stalls audio) is notable engineering in its own
 right. **Evidence today**: extensive (design-doc rounds with measured
@@ -797,15 +803,18 @@ less impressive stated plainly. Say the number and its receipt, or say
 
 ## 5. Upstream relationship
 
-**Merge cadence.** Last merge from `xemu-project/xemu`: `fd467e02b9`,
-"Merge upstream/master: DSP engine abstraction + dsp56300 JIT engine"
-(2026-07-03). This fork carries 284 commits ahead of that merge base
-(`git log --first-parent --oneline upstream/master..HEAD | wc -l`,
-re-derived 2026-07-11; current `HEAD` = `7e2e6e7256`, latest tag
-`v0.10.2`).
+**Merge cadence.** Last merge from `xemu-project/xemu`: `111ef2dce0`,
+"Merge upstream/master: PTIMER alarm rounding + unit test, glslang
+16.6.0, SDL3/nlohmann_json git wraps" (2026-10-10; earlier merges
+`2e0aad3e18` 2026-09-07, `d39ea5f30b` 2026-08-04, `fd467e02b9`
+2026-07-03 — roughly monthly). This fork carries 415 commits ahead of
+that merge base (`478b4f4961`;
+`git log --first-parent --oneline upstream/master..HEAD | wc -l`,
+re-derived 2026-10-10; current `HEAD` = `b7e2752589`, latest tag
+`v0.13.3`).
 
-**Plausibly upstreamable** (`README.md` "Building for Windows" ~line
-31-44 — these already run, proven, on upstream's own Windows CI paths in
+**Plausibly upstreamable** (`README.md` "Building for Windows", ~line
+39-46 as of 2026-10-10 — these already run, proven, on upstream's own Windows CI paths in
 this fork, so they're technically portable *today*): the Vulkan renderer's
 cross-platform work (flight slots, dirty hashing + spatial index, zeta
 shape-switch fast path, targeted vertex-conflict waits, `VkPipelineCache`
@@ -831,7 +840,7 @@ distinct from upstream's own `dsp_jit_*`-prefixed `dsp56300`-subproject
 engine (`hw/xbox/mcpx/apu/dsp/dsp_jit.c`, `subprojects/dsp56300/`) — why
 `fd467e02b9` merged cleanly despite both forks independently building a
 DSP JIT: no symbol collision, and `dsp_want_external_jit_engine()`
-(`dsp.c:119-127`) makes precedence explicit in one place instead of
+(`dsp.c:120-128`) makes precedence explicit in one place instead of
 scattered `#ifdef`s. Full rules for what a change like this owes (naming,
 evidence, README duty) before landing: `xemu-change-control` — this skill
 only explains *why* the convention exists.
@@ -842,15 +851,15 @@ only explains *why* the convention exists.
 
 Re-run before trusting a number or status label here after the tree moves:
 
-- Merge cadence/fork size: `git log -1 --format='%h %ad %s' --date=short fd467e02b9` and `git log --first-parent --oneline upstream/master..HEAD | wc -l`
-- Future Vectors entries still listed as-is: `grep -n "^## Future vectors" -A 90 README.md`
+- Merge cadence/fork size: `git log --merges --first-parent -3 --grep=upstream --format='%h %ad %s' --date=short` (newest upstream merge first) and `git log --first-parent --oneline upstream/master..HEAD | wc -l`
+- Former Future-vectors entries still listed as-is: open ones in `grep -n '^## \|^[0-9]*\. \*\*\|^- \*\*' docs/roadmap.md`, closed-negative ones in `awk '/^## Settled/,0' docs/optimizations.md` (README no longer carries a Future vectors section)
 - STALLED resolved status: `grep -n "VK_FINISH_REASON_STALLED" hw/xbox/nv2a/pgraph/vk/reports.c` (expect exactly one caller — `reports.c:322` as of 2026-07-11 — gated by `sync_mode`/`XEMU_REPORTS_SYNC`)
-- README/commit fps figures agree (reconciled 2026-07-11): `grep -n "38.57" README.md; git show --format='%B' -s 6bfbc22863 | grep -i "fps\|144%"` (a reappearing `35.6`/`2.25x` in README is new drift)
+- Docs/commit fps figures agree (reconciled 2026-07-11; the figure moved with the Changes manifest to `docs/optimizations.md`): `grep -n "38.57" docs/optimizations.md; git show --format='%B' -s 6bfbc22863 | grep -i "fps\|144%"` (a reappearing `35.6`/`2.25x` in README or `docs/optimizations.md` is new drift)
 - MTLResidencySet still blocked: `grep -n -A6 "Phase 5 note" hw/xbox/nv2a/pgraph/vk/metalfx_upscale.m`
-- DSP JIT fusion settled (§2.5, 2026-08-04): the three-class read table re-derives from `grep -n -A85 "static void emit_pm_read_reg" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (expect an A/B branch, an `emit_xy_pin_read_w` 1-UBFX branch, and an `emit_ldr_w_any` fallback — nothing staged); design-doc row still reads deferred: `grep -n "8 (remaining)" docs/dsp-jit-design.md`; x28's real owner is the SR pin: `grep -n "DSP56K_JIT_SR_PIN_REG 28" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-- Lockless-MMIO closure still matches the code it argues from: `grep -n "memory_region_enable_lockless_io" hw/xbox/nv2a/nv2a.c hw/xbox/mcpx/apu/apu.c` (4 blocks) and `grep -n "nv2a_update_irq" hw/xbox/nv2a/pmc.c hw/xbox/nv2a/pcrtc.c hw/xbox/nv2a/ptimer.c` (inline IRQ drive = the wall; `docs/lockless-mmio-verdict.md`)
+- DSP JIT fusion settled (§2.5, 2026-08-04): the three-class read table re-derives from `grep -n -A85 "static void emit_pm_read_reg" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (expect an A/B branch, an `emit_xy_pin_read_w` 1-UBFX branch, and an `emit_ldr_w_any` fallback — nothing staged); design-doc row still reads deferred: `grep -n "8 (remaining)" docs/Finished/dsp-jit-design.md`; x28's real owner is the SR pin: `grep -n "DSP56K_JIT_SR_PIN_REG 28" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- Lockless-MMIO closure still matches the code it argues from: `grep -n "memory_region_enable_lockless_io" hw/xbox/nv2a/nv2a.c hw/xbox/mcpx/apu/apu.c` (4 blocks) and `grep -n "nv2a_update_irq" hw/xbox/nv2a/pmc.c hw/xbox/nv2a/pcrtc.c hw/xbox/nv2a/ptimer.c` (inline IRQ drive = the wall; `docs/Finished/lockless-mmio-verdict.md`)
 - Provoking-vertex gating still capability-based: `grep -n "supports_geometry_shaders =" hw/xbox/nv2a/pgraph/vk/instance.c`
 - BINK still has no in-repo hook: `grep -rliE '\bbink\b' --include='*.c' --include='*.h' .` (expect 0 hits; a loose `grep -rli bink` additionally hits `include/libdecnumber/` substring noise)
-- Upstream still lacks fork-only config keys: `git show upstream/master:config_spec.yml | grep -n "dsp_jit:\|metalfx_mode:\|frame_interpolation:"` (expect no matches)
+- Upstream still lacks fork-only config keys: `git show upstream/master:config_spec.yml | grep -nE '^\s+dsp_jit:|metalfx_mode:|frame_interpolation:'` (expect no matches; the anchored `dsp_jit:` keeps upstream's own `use_dsp_jit:` from matching. The same pattern on the fork's `config_spec.yml` returns 3 lines as of 2026-10-10)
 - Upstream still has no MoltenVK/Apple-aware renderer code: `git show upstream/master:hw/xbox/nv2a/pgraph/vk/renderer.c | grep -ni "moltenvk\|apple"` (expect no matches)
 - CosmicSnow credit line still present: `grep -n "CosmicSnow" README.md`

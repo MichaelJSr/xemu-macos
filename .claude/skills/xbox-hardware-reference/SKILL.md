@@ -17,7 +17,7 @@ description: >-
   — for symptom triage see xemu-debugging-playbook, for the
   incident-by-incident story see xemu-failure-archaeology, for
   fork-specific design decisions see xemu-architecture-contract, for the
-  JIT's own roadmap see docs/dsp-jit-design.md.
+  JIT's own roadmap see docs/Finished/dsp-jit-design.md.
 ---
 
 # Xbox hardware reference
@@ -55,9 +55,9 @@ The guest is a fixed, non-configurable machine: one specific PC clone from
   VRAM; it reads/writes the same physical RAM as the CPU, asserted
   directly in code ("xbox is UMA - vram *is* ram", `hw/xbox/nv2a/nv2a.c`)
   where NV2A's PCI VRAM BAR is a memory-region **alias** over the same RAM
-  (`nv2a_init_memory`, `nv2a.c:203-221`). Size is a boot-time choice:
+  (`nv2a_init_memory`, `nv2a.c:219-248`). Size is a boot-time choice:
   `sys.mem_limit` enum `['64','128']` default `'64'` (MiB,
-  `config_spec.yml:381-384`); `system/vl.c:3056` converts it to `-m`:
+  `config_spec.yml:392-395`); `system/vl.c:3056` converts it to `-m`:
   `mem = (mem_limit + 1) * 64` — `'64'` = retail-accurate, `'128'` = a
   common softmod RAM upgrade some titles support.
 - **Machine model**: `hw/xbox/xbox.c`, class `xbox_machine_options`.
@@ -71,13 +71,13 @@ The guest is a fixed, non-configurable machine: one specific PC clone from
   executes at reset; it decrypts/validates and jumps into the flash
   **BIOS** image (`bios_name = ms->firmware ?: "bios.bin"`, `xbox.c:70`).
   Both paths come from `xemu.toml [sys.files]` —
-  `bootrom_path`/`flashrom_path` (`config_spec.yml:391-392`), consumed as
+  `bootrom_path`/`flashrom_path` (`config_spec.yml:401-402`), consumed as
   `-bios <flashrom_path>` and the `bootrom` machine property
   (`xbox.c:143-146`). Missing/invalid flash blocks autostart with a
   settings error (`ui/xemu.c`); missing bootrom falls back to an
   all-`0xff` blob (`xbox.c:100-102`) rather than hard-failing.
 - **Video output**: `avpack` machine property (`xbox.c:365-383`,
-  `config_spec.yml:385-390`) models which A/V cable is plugged in —
+  `config_spec.yml:396-399`) models which A/V cable is plugged in —
   `scart|hdtv|vga|rfu|svideo|composite|none`, default `hdtv`. This is a
   connector-type value surfaced to guest software via SMBus
   (`hw/xbox/smbus_xbox_smc.c`); it does not affect vblank timing — see
@@ -143,12 +143,12 @@ vblank thread below, so neither can exceed 60 for a game paced on vblank.
 
 xemu drives its own display-refresh cadence independent of any guest
 timer: a dedicated vblank thread (`vblank_timer_thread`,
-`ui/xemu.c:848-877`) fires at a hardcoded `vblank_interval_ns =
-16666666LL` (`ui/xemu.c:78`) — exactly 60 Hz, fixed at compile time, not
+`ui/xemu.c:907-939`) fires at a hardcoded `vblank_interval_ns =
+16666666LL` (`ui/xemu.c:91`) — exactly 60 Hz, fixed at compile time, not
 derived from `avpack`. Each tick calls `process_vblank` →
-`graphic_hw_update` (`ui/xemu.c:822-834`), which raises
+`graphic_hw_update` (`ui/xemu.c:889-896`), which raises
 `NV_PCRTC_INTR_0_VBLANK` on the NV2A side (`nv2a_vga_gfx_update`,
-`hw/xbox/nv2a/nv2a.c:195-203`) — what many Xbox titles use as their
+`hw/xbox/nv2a/nv2a.c:207-217`) — what many Xbox titles use as their
 master timing source (poll or interrupt on vblank count to pace game
 simulation, independent of PGRAPH throughput). **There is no 50 Hz/PAL
 vblank path anywhere in this repo** — grepping `hw/xbox/` and `ui/` for
@@ -176,9 +176,10 @@ cites the Z-order Wikipedia article); the box copy is
 `swizzle_box_internal` (`swizzle.c:72+`). **This is why torn or mid-copy
 texture corruption shows up as small squares in a
 checkerboard/fractal-looking pattern** rather than horizontal tearing
-bands — you're seeing the Morton curve's tiling laid bare. The README's
-pink-tile incident names this signature directly ("Morton-tiled magenta
-[blocks]", `README.md:339,448`) as the texture-corruption fingerprint,
+bands — you're seeing the Morton curve's tiling laid bare. The
+pink-tile incident write-up names this signature directly ("Morton-tiled
+magenta", `docs/optimizations.md` ~:824 and ~:929 as of 2026-10-10;
+`grep -n Morton docs/optimizations.md`) as the texture-corruption fingerprint,
 distinct from large screen-aligned rectangles (a compositor/present/
 driver-level issue instead) — see xemu-debugging-playbook for that
 symptom-to-cause split.
@@ -234,7 +235,7 @@ The MCPX APU's programmable audio cores are Motorola **DSP56300**-family
 (DSP56001/M56001-lineage) 24-bit fixed-point DSPs — two of them, per §4.
 This is the ISA-level background the ARM64 JIT
 (`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`, design doc
-`docs/dsp-jit-design.md`) has to preserve bit-for-bit.
+`docs/Finished/dsp-jit-design.md`) has to preserve bit-for-bit.
 
 - **24-bit words.** Every register and every X/Y/P memory cell is a
   24-bit quantity stored in a 32-bit host word (`dsp_core_t.xram/yram/
@@ -266,10 +267,10 @@ This is the ISA-level background the ARM64 JIT
   op *and* up to two data moves (register↔memory) in the same cycle — the
   architecture's signature throughput trick, enabled by the separate X/Y
   buses. The interpreter's dispatch table is `opcodes_parmove[16]`
-  (`docs/dsp-jit-design.md` §1, backed by
-  `hw/xbox/mcpx/apu/dsp/dsp_emu.c.inc`); the JIT must emit both the ALU op
+  (`docs/Finished/dsp-jit-design.md` §1, backed by
+  `hw/xbox/mcpx/apu/dsp/interp/dsp_emu.c.inc`); the JIT must emit both the ALU op
   and the move(s) from one decoded instruction word — see
-  `docs/dsp-jit-design.md` §2.2 for why that drove hand-written ARM64
+  `docs/Finished/dsp-jit-design.md` §2.2 for why that drove hand-written ARM64
   emission instead of TCG (out of scope here).
 - **REP/DO hardware loops and the postexecute PC rewind.** `REP` repeats
   the *next single instruction* N times with no per-iteration branch
@@ -330,7 +331,7 @@ This is the ISA-level background the ARM64 JIT
   array access" (`dsp56k_jit_arm64.c:1739`).
 
 For the JIT's own architecture (translation-unit boundaries, block
-chaining, the diff-validator, W^X handling) see `docs/dsp-jit-design.md`
+chaining, the diff-validator, W^X handling) see `docs/Finished/dsp-jit-design.md`
 — this section is ISA background, not JIT design.
 
 ## 4. APU voice processor (VP)
@@ -378,7 +379,8 @@ mix.
   `qatomic_read` on `VPVADDR` since the guest can relocate the whole
   voice table live ("rare but observed on title transitions," `vp.c:
   284-291`). **The failure mode this guards against**: an earlier
-  `__thread`-local cache (README "Voice register `__thread` cache" row)
+  `__thread`-local cache (`docs/optimizations.md` Failed-experiments row
+  "Voice register `__thread` cache")
   went stale because it read a voice's fields once and reused them,
   missing writes the guest made directly to RAM out-of-band — since the
   voice block *is* just memory, any cache must either invalidate eagerly
@@ -400,7 +402,7 @@ mix.
   (`apu.c:172-217`), which paces against the host audio queue's fill
   level rather than a plain sleep, to avoid drift. Per-voice work
   (pitch/envelope/filter) is farmed across a worker pool:
-  `audio.vp.num_workers` (`config_spec.yml:332-335`, default 0 = auto)
+  `audio.vp.num_workers` (`config_spec.yml:336-338`, default 0 = auto)
   resolves to `SDL_GetNumLogicalCPUCores()` clamped to
   `MAX_VOICE_WORKERS` (`vp.c:2218-2219`) — this fork's voice-processing
   parallelization knob, separate from the DSP engine selection in §3.
@@ -422,10 +424,10 @@ this repo's hard-float conversion code
   all: it converts every `floatx80` operand to a native IEEE **double**
   (52-bit mantissa), does the arithmetic in host double precision, and
   converts back (`floatx80_add__hard`/`sub`/`mul`/`div__hard`,
-  `target/i386/tcg/fpu_helper.c:284-306`). The code says so outright:
+  `target/i386/tcg/fpu_helper.c:294-319`). The code says so outright:
   *"XXX: Currently emulating double extended precision with double
-  precision when using hard floats"* (`target/i386/cpu.h:2828-2829`,
-  repeated at `fpu_helper.c:82-83`) — a **12-bit mantissa reduction**
+  precision when using hard floats"* (`target/i386/cpu.h:2878-2879`,
+  repeated at `target/i386/tcg/translate.c:1729`) — a **12-bit mantissa reduction**
   (64→52 bits) per operation, a real precision loss that's "almost always
   invisible" because (a) Xbox game code rarely chains enough consecutive
   x87 ops on one value for the rounding error to matter visually or
@@ -455,18 +457,18 @@ this repo's hard-float conversion code
   task/segment restores, `XRSTOR`, SEV launch state — all funnel through
   `cpu_set_fpuc` hits in `cpu.c`, `machine.c`, `sev.c`,
   `xsave_helper.c`, `tcg/fpu_helper.c`). `cpu_set_fpuc`
-  (`target/i386/cpu.h:2821-2845`) is the **single funnel**: besides
+  (`target/i386/cpu.h:2870-2899`) is the **single funnel**: besides
   storing `env->fpuc`, it re-derives `HF_FPU_PC_MASK`/`HF_FPU_RC_MASK` in
-  `env->hflags` (`cpu.h:2833-2842`) because this fork's translator bakes
+  `env->hflags` (`cpu.h:2881-2890`) because this fork's translator bakes
   the guest's rounding mode into `tb->flags` **at translation time**
-  (`gen_flcr`, `target/i386/tcg/translate.c:1650-1679`: "HF_FPU_RC is
+  (`gen_flcr`, `target/i386/tcg/translate.c:1775-1816`: "HF_FPU_RC is
   baked into tb->flags at translation time... every TB currently
   translating thus pins the guest RC bits to a compile-time-known
   value") so it can pick the matching native `FCVT*` rounding instruction
   for `FIST`/`FISTP` at codegen time instead of reading a runtime
   register per conversion. `cpu_set_fpuc` also invalidates a
   translator-side cache (`env->cached_fpuc_rc = 0xFFFF`,
-  `cpu.h:2843-2845`) so a rounding-mode change from **outside the normal
+  `cpu.h:2898`) so a rounding-mode change from **outside the normal
   instruction stream** (savestate restore, `XRSTOR`, SEV) can't be
   silently ignored by already-translated code holding the old mode. The
   rule this generalizes to: any path that sets `env->fpuc` directly
@@ -550,11 +552,11 @@ where this repo depends on each one.
   occlusion-query reset, since `vkCmdResetQueryPool` — next bullet — is
   illegal inside a pass), driving the savestate-bench scene from 15.78 to
   38.57±0.80 fps (+144%) per commit `6bfbc22863`'s protocol receipt
-  (README prose rounds this change to 35.6 fps / 2.25x) and fence-wait
-  per flip from 31.9 ms to 2.3 ms (README figures; the commit records
-  2.2 ms on the new path). "One
+  (`docs/optimizations.md` headlines it as "2.4x in report-heavy
+  scenes") and fence-wait per flip from 31.9 ms to 2.3 ms (the 2026-07
+  README's figures; the commit records 2.2 ms on the new path). "One
   render pass per draw ≈ one full tile load/store per draw" is spelled
-  out in the fix's own comment (`hw/xbox/nv2a/pgraph/vk/draw.c:2029-2035`:
+  out in the fix's own comment (`hw/xbox/nv2a/pgraph/vk/draw.c:2088-2094`:
   "a full tile load/store cycle per draw on Apple GPUs").
 - **MoltenVK exposes a single queue.** `queueCount=1` for the one queue
   family this renderer uses is a MoltenVK/Metal limitation, not a repo
@@ -600,7 +602,8 @@ where this repo depends on each one.
   `hw/xbox/nv2a/pgraph/vk/draw.c:1027,1489`) — MoltenVK translates that
   SPIR-V to Metal Shading Language (MSL) and asks the Metal compiler to
   build a real GPU pipeline object, the expensive step (measured
-  worst-case 164 ms for one pipeline, README.md:235). Since that cost is
+  worst-case 164 ms for one pipeline, `docs/optimizations.md` ~:682 as of
+  2026-10-10, "VkPipelineCache persisted across runs"). Since that cost is
   paid per unique permutation (blend state × shader × vertex layout ×
   render-target format) and titles can have thousands across a session,
   this fork persists the *compiled* pipeline cache to disk
@@ -611,14 +614,14 @@ where this repo depends on each one.
   of the cold 164 ms — a disk cache of already-compiled Metal state, not
   something that speeds up the first compile itself.
 - **Metal argument buffers.** `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`
-  is one of the five MVK_CONFIG variables this fork pins at process start
-  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1602-1606`'s
+  is one of the six MVK_CONFIG variables this fork pins at process start
+  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1939-1945`'s
   `setenv(..., 0)`) — it tells MoltenVK to bind Vulkan descriptor sets
   via Metal's argument-buffer feature (one indirectable buffer of
   resource references) instead of per-resource binding, changing how
   many Metal bind calls happen per draw. Treated as a fixed, tested
   production setting, not a per-title toggle — see the pink-tile saga
-  (xemu-failure-archaeology) for why all five MVK_CONFIG values are
+  (xemu-failure-archaeology) for why all six MVK_CONFIG values are
   pinned regardless of launch path.
 - **`MAP_JIT` / W^X on Apple Silicon.** Apple Silicon enforces
   write-xor-execute on JIT pages: writable or executable, never both at
@@ -683,7 +686,7 @@ them in.
   standing domain fact each incident depended on, not the narrative.
 - **The DSP JIT's own architecture** — translation-unit boundaries,
   block chaining, the async diff-validator, per-phase rollout history —
-  that's `docs/dsp-jit-design.md`. This skill covers the DSP56300 *ISA*
+  that's `docs/Finished/dsp-jit-design.md`. This skill covers the DSP56300 *ISA*
   the JIT has to be correct against, not the JIT's own design.
 - **Config flag catalog / what to set** — `xemu-config-and-flags` is the
   exhaustive list of every `xemu.toml`/`XEMU_*`/`MVK_CONFIG_*` knob with
@@ -694,9 +697,11 @@ them in.
 
 Facts in this skill were verified against the repo at commit `cf85e96597`
 (2026-07-04, tag v0.9) unless stated as historical measurements (dated
-separately, e.g. the 376→14 pass-count figures). The `ui/xemu.c` MVK
-setenv anchor (now `1602-1606`) was re-verified 2026-07-11 at
-`7e2e6e7256`. Re-verify drift-prone
+separately, e.g. the 376→14 pass-count figures). On 2026-10-10 at
+`b7e2752589` the `ui/xemu.c` MVK setenv anchor (now `1939-1945`, six
+keys), the vblank-thread, `config_spec.yml`, `cpu_set_fpuc`/`gen_flcr`
+and `nv2a.c` line anchors, and the README citations (moved to
+`docs/optimizations.md`) were re-verified. Re-verify drift-prone
 claims with:
 
 - CPU/RAM/machine class: `grep -n 'default_cpu_type\|max_cpus\|mem_limit' hw/xbox/xbox.c system/vl.c config_spec.yml`
@@ -708,7 +713,7 @@ claims with:
 - GP/EP frame cadence (1:8 ratio): `grep -n 'ep_frame_div % 8\|Run GP\|Run EP' hw/xbox/mcpx/apu/dsp/gp_ep.c`
 - Voice count / mixbins / voice struct size: `grep -n 'MCPX_HW_MAX_VOICES\|NUM_MIXBINS\|NUM_SAMPLES_PER_FRAME\|NV_PAVS_SIZE' hw/xbox/mcpx/apu/apu_regs.h`
 - DSP engine precedence: `grep -n 'dsp_want_external_jit_engine' -A 10 hw/xbox/mcpx/apu/dsp/dsp.c`
-- hard_fpu double-precision approximation: `grep -n 'emulating double extended precision' target/i386/cpu.h target/i386/tcg/fpu_helper.c`
+- hard_fpu double-precision approximation: `grep -n 'emulating double extended precision' target/i386/cpu.h target/i386/tcg/translate.c`
 - TCG_TARGET_HAS_fpu Windows gating: `grep -n 'TCG_TARGET_HAS_fpu' -B8 tcg/aarch64/tcg-target-has.h`
 - FCOMI/FUCOMI signaling split: `grep -n 'floatx80_compare\b\|floatx80_compare_quiet' target/i386/tcg/fpu_helper.c`
 - USB port/hub topology: `grep -n 'port_map\|usb-hub\|usb_input_bind' ui/xemu-input.c`

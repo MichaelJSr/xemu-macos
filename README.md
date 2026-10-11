@@ -15,8 +15,8 @@ upscaling + frame interpolation, and Accelerate-backed audio.
 | This README | What the fork is, how to build/run/configure it, troubleshooting |
 | [docs/optimizations.md](docs/optimizations.md) | The optimization ledger: every landed change with its receipts, the runtime escape-hatch/diagnostic knob catalog, and every attempted-and-settled experiment |
 | [docs/roadmap.md](docs/roadmap.md) | Open candidates: the ranked performance roadmap and feature/quality vectors, each with its decision inputs |
-| [docs/dsp-jit-design.md](docs/dsp-jit-design.md) | DSP56300 ARM64 JIT design + phased roadmap |
 | [docs/RELEASING-macos.md](docs/RELEASING-macos.md) | Release runbook |
+| [docs/README.md](docs/README.md) | Index of every fork doc: campaigns in progress, future proposals, finished designs and audits (e.g. the [DSP56300 ARM64 JIT design](docs/Finished/dsp-jit-design.md)) |
 
 ---
 
@@ -61,9 +61,9 @@ AArch64 inline x87 FPU) compile out.
   NVIDIA TITAN Xp, Vulkan renderer renders correctly). The exact
   `pacman` package list, the traps a fresh MSYS2 hits (CRLF checkout,
   Python ≥ 3.13 prefix, MSYS tar, `USERPROFILE`), the validation-layer
-  recipe and the open work list are in [docs/windows-port-2026-09.md](docs/windows-port-2026-09.md);
+  recipe and the open work list are in [docs/Campaigns/windows-port-2026-09.md](docs/Campaigns/windows-port-2026-09.md);
   the ranked real-hardware audit is
-  [docs/windows-audit-2026-09-summary.md](docs/windows-audit-2026-09-summary.md).
+  [docs/Campaigns/windows-audit-2026-09-summary.md](docs/Campaigns/windows-audit-2026-09-summary.md).
 - **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
   container with the `xemu-win64-toolchain` image and
   `CROSSPREFIX=x86_64-w64-mingw32.static-` set — see

@@ -215,9 +215,9 @@ knobs verified in `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
      counts prove JIT blocks actually ran (the STATS atexit dump is
      registered only inside `dsp56k_jit_init`, so its presence also
      discriminates the engine).
-   Note: the `config_spec.yml:339` comment now correctly names
-   `dsp_want_external_jit_engine()` (its earlier stale-selector wording
-   was fixed; re-verified 2026-07-11).
+   Note: the `config_spec.yml` comment above `dsp_jit:` (~:340-343 as of
+   2026-10-10) now correctly names `dsp_want_external_jit_engine()` (its
+   earlier stale-selector wording was fixed; re-verified 2026-10-10).
 2. **DIFF clean run through the affected workload.**
    `XEMU_DSP_JIT_DIFF=1` bit-exact-validates every *unique block
    translation* once against the interpreter (a per-translation gate
@@ -276,12 +276,13 @@ historical number in this library was measured here. Re-verify:
 
 | Fixture | Value (2026-07-04) | Re-verify |
 |---|---|---|
-| Repo | this checkout, branch `macos-optimizations`; as of 2026-07-11: HEAD `7e2e6e7256`, latest tag `v0.10.2` (v0.9 era when this table was built) | `git describe --tags --match 'v*'` |
-| Game HDD | the qcow2 at `hdd_path` in the owner's `xemu.toml` (826 MB); savestates live inside it | `grep -n '^hdd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
-| Snapshot shortcuts | As of 2026-07-04 evening: F5=`vm-20260704032357` (471 draws/f), F6=`vm-20260704034933` (settles 192 draws/f @60), F7=`vm-20260704145901` (417 draws/f, live scene — fps drifts), F8=`vm-20260704173701` (**primary heavy anchor**, ~770 draws/f area, death-issue fixed by owner — though dying still shifts fps slightly). The earlier heavy anchor `vm-20260704150046` was REPLACED by F8 — receipts citing it name a snapshot that no longer exists; re-baseline on F8 before any new A/B | `grep -n 'f5 = \|f8 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` — or list ALL snapshots in the image with the qcow2 snapshot lister (xemu-diagnostics-and-tooling) |
-| Title corpus | the owner's local folder of disc images (contents deliberately not recorded in this public repo) | list the folder holding the image at `dvd_path` in `xemu.toml` |
-| Configured DVD | `dvd_path` in `xemu.toml` (an Azurik image) | `grep -n 'dvd_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
-| Firmware | `bootrom_path` (MCPX boot ROM), `flashrom_path` (BIOS), `eeprom_path` (keys under `[sys.files]` in `xemu.toml`) | `grep -n '_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"` |
+| Repo | this checkout, branch `macos-optimizations`; as of 2026-10-10: HEAD `b7e2752589`, latest tag `v0.13.3` (v0.9 era when this table was built) | `git describe --tags --match 'v*'` |
+| Test fixtures | `../fixtures/` beside the checkout: the test config `xemu.toml` plus the HDD, EEPROM, firmware and disc it points at, all APFS clones of the owner's personal files taken 2026-10-10 so personal play can no longer delete test savestates. Every harness reads `../fixtures/xemu.toml` by default (`XEMU_TEST_CONFIG` overrides); the folder's own `README.md` holds the provenance and sha256 manifest | `ls ../fixtures; cat ../fixtures/README.md` |
+| Game HDD | the qcow2 at `hdd_path` in `../fixtures/xemu.toml`; savestates live inside it | `grep -n '^hdd_path' ../fixtures/xemu.toml` |
+| Savestates | Tags in the fixture HDD. Since 2026-10-10 the fixture config binds no F-keys and every harness takes the tag; F8/F5 survive only as the names old receipts use. **Active:** `vm-20260704173701` (F8, **primary heavy anchor**, ~877 draws/flip as of 2026-10-10, ~48 fps on a quiet box since the 2026-08-04 wave — the only scene with headroom for an fps gain) and `vm-20260704032357` (F5, 471 draws/flip, 47 → 59 fps after sub-page tracking landed on 2026-07-11, now pinned near the 60 cap: use it for regression, reload-cycle and PGO coverage, never to show a speedup). **Retired 2026-10-10** (still in the image so old receipts resolve, no longer run): `vm-20260704034933` (F6, 192 draws/flip, flat 60 cap) and `vm-20260704145901` (F7, 417 draws/flip, live scene whose fps drifts). `vm-20260704150046` was replaced by F8 in July and no longer exists | `../fixtures/README.md` (tag → scene table); list every tag with the qcow2 snapshot lister (xemu-diagnostics-and-tooling) on a `cp -c` clone of `../fixtures/xbox_hdd.qcow2` |
+| Title corpus | the owner's local folder of disc images (contents deliberately not recorded in this public repo) | list the folder at `games_dir` in `../fixtures/xemu.toml` |
+| Configured DVD | `dvd_path` in `../fixtures/xemu.toml` (an Azurik image, frozen in the fixtures folder so disc rebuilds cannot shift a baseline) | `grep -n 'dvd_path' ../fixtures/xemu.toml` |
+| Firmware | `bootrom_path` (MCPX boot ROM), `flashrom_path` (BIOS), `eeprom_path` (keys under `[sys.files]` in `../fixtures/xemu.toml`) | `grep -n '_path' ../fixtures/xemu.toml` |
 | Custom MoltenVK | `/usr/local/lib/libMoltenVK.dylib` = the fork's pinned optimized build (pin `67b2682699d7903606b97a0392061d85d27d49e6`, MoltenVK main past v1.4.2, reports 1.4.3; releases vendor the official 1.4.2) — build.sh prefers it over vendored/Homebrew and logs provenance at bundle time: `Bundling MoltenVK from <src> (version <v>, <arch> UUID <uuid>)` | `ls -l /usr/local/lib/libMoltenVK.dylib` + version check below; check the latest build log for the provenance line |
 | MoltenVK checkout | `../MoltenVK` beside the repo (default arg of `scripts/build-moltenvk.sh`) | `ls -d ../MoltenVK/.git` |
 
@@ -292,18 +293,24 @@ strings /usr/local/lib/libMoltenVK.dylib | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$
 
 Fixture rules:
 
+- **Test runs read `../fixtures/`, never the owner's personal config.**
+  The personal `xemu.toml` and HDD are the owner's to change: savestates
+  there get deleted and F-keys re-bound in normal play. A new savestate
+  goes into the fixture HDD (the folder's README has the procedure).
 - **A running xemu holds the qcow2 write lock.** Clone before any parallel
   use: `cp -c` (APFS copy-on-write, instant, snapshots ride along) — see
   xemu-testing for the parallel-observation workflow.
-- **Snapshot names are date-stamped, not scene-descriptive.** Never assume
-  which scene F5/F6 hold: load, read draws/flip from nsprof, and match it
-  against the §2 bands before treating a run as "the heavy scene".
-  Shortcuts are owner-volatile — re-run the grep before every campaign.
-- **Validation history**: Azurik is the primary bench title and, as of
-  2026-07-04, the ONLY title with recorded validation history in the repo
-  docs (every measured result in README names Azurik). The other five are
-  on disk but untested on record — treat them as smoke-test material, not
-  as titles with known-good baselines.
+- **Tags are the identity; F-keys are not.** The original tags are
+  date-stamped; new savestates may get descriptive names (no spaces —
+  the monitor `loadvm` splits on them). Never assume a scene from its
+  name: load, read draws/flip from nsprof, and match it against the §2
+  bands before treating a run as "the heavy scene". Register every new
+  tag in `../fixtures/README.md` and in the Savestates row above.
+- **Validation history**: Azurik is the bench title and, since the owner's
+  2026-10-10 decision, the only title testing requires. BF2MC, Conker and
+  KOTOR are no longer on disk; Vexx and NevolutionX are, but carry no
+  baselines beyond the 2026-09-08 boot smoke. Results that cite the
+  deleted titles are history and cannot be re-run.
 - If a fixture is missing: build/provisioning → xemu-build-and-env; data
   dir, snapshots, running the app → xemu-run-and-operate.
 
@@ -311,10 +318,10 @@ Fixture rules:
 
 Dated records (2026-07, Azurik, this machine): savestate bench scene
 15.78 → 38.57±0.80 fps (+144%) after the occlusion/report rework, per
-commit `6bfbc22863`'s protocol receipt (README prose rounds this change
-to 35.6 fps / 2.25x); render passes 376 → 14 per flip; fence wait
-31.9 → 2.3 ms/flip (README figures; the commit records 2.2 ms on the new
-path); prefill=2 vs 0 measured 46.33 vs 48.50 fps; user-environment
+commit `6bfbc22863`'s protocol receipt (`docs/optimizations.md`
+headlines it as "2.4x in report-heavy scenes"); render passes 376 → 14
+per flip; fence wait 31.9 → 2.3 ms/flip (the 2026-07 README's figures;
+the commit records 2.2 ms on the new path); prefill=2 vs 0 measured 46.33 vs 48.50 fps; user-environment
 sustained 48.5 fps post-pink-tile fix. Use these to sanity-check that a fresh baseline is in a plausible
 range — a fresh baseline MUST still be captured per campaign (§1.1).
 
@@ -332,14 +339,16 @@ before it ships. Run methods per xemu-testing; accept per §1–§2.
    explained and deliberately accepted, not waved through.
 2. **Artifact-oracle soak** (§1.3): flagged-frame-free at the sized bar,
    in the Finder-launch path (the user-representative one).
-3. **Boot/play smoke on ≥2 additional corpus titles** beyond Azurik (pick
-   from BF2MC / Conker / KOTOR / Vexx / NevolutionX): boots to gameplay,
-   several minutes of play, no crash/hang/obvious artifact.
+3. **Azurik play smoke**: the release bundle boots Azurik to gameplay
+   from a cold start, then several minutes of play with no crash, hang or
+   obvious artifact. Testing is Azurik-only by owner decision
+   (2026-10-10); `scripts/boot-smoke-corpus.sh` on other titles is
+   optional extra coverage when they are on disk.
 4. **CI matrix green and the draft release complete.** Tag push `v*` fires
    `release-on-tag.yml` (owner-guarded) → `release.yml` → a DRAFT release
    (`draft: ${{ !inputs.pre-release }}`; the tag job is owner-guarded via
    `github.repository_owner`). Compare the asset count against the
-   previous release — latest tag is `v0.10.2` as of 2026-07-11; v0.9
+   previous release — latest tag is `v0.13.3` as of 2026-10-10; v0.9
    shipped **17 assets** (verified live
    2026-07-04; one-line count command in Provenance below).
 
@@ -459,13 +468,14 @@ When you need a new regression net, follow the house pattern:
 3. **Wrap it in a harness script under `scripts/`** —
    `bench-savestate-ab.sh` is the template: warmup run, interleaved arms,
    per-run logs to an outdir, monitor-socket loadvm.
-4. **Create one golden savestate per scenario**: save in-app, bind an
-   F-key under `[general.snapshots.shortcuts]`, load headless via the
-   monitor (xemu-testing owns the topology-matching details). Record the
-   scene's draws/flip band next to the snapshot name.
+4. **Create one golden savestate per scenario** in the fixture HDD under
+   a descriptive tag (procedure in `../fixtures/README.md`; no F-key
+   binding needed), load headless via the monitor (xemu-testing owns the
+   topology-matching details). Record the scene's draws/flip band next to
+   the tag, in the fixtures README and in §3.
 5. **Document the knob** per the xemu-config-and-flags add-a-flag
-   checklist (README's "Runtime debug / escape-hatch knobs" section is
-   the user-facing catalog).
+   checklist (`docs/optimizations.md`'s "Runtime escape-hatch /
+   diagnostic knobs" section is the user-facing catalog).
 
 ---
 
@@ -519,17 +529,17 @@ the repo root unless absolute):
 - Pin-bump gauntlet requirement + pin value: `grep -n 'MVK_PIN\|validation gauntlet' scripts/build-moltenvk.sh`
 - Bench protocol header (thresholds + usage): `sed -n '1,17p' scripts/bench-savestate-ab.sh`
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
-- Snapshot shortcuts: `grep -n 'f5 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
-- Fixtures on disk: `ls -lh /usr/local/lib/libMoltenVK.dylib; grep -nE '^(hdd|dvd)_path' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
-- Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag now v0.10.2): `gh release view v0.10.2 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
+- Savestate tags: `cp -c ../fixtures/xbox_hdd.qcow2 /tmp/snap-list.qcow2 && python3 -I .claude/skills/xemu-diagnostics-and-tooling/scripts/list_snapshots.py /tmp/snap-list.qcow2`
+- Fixtures on disk: `ls -lh /usr/local/lib/libMoltenVK.dylib; grep -nE '^(hdd|dvd)_path' ../fixtures/xemu.toml`
+- Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag `v0.13.3` as of 2026-10-10, its count not re-checked): `gh release view v0.13.3 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
 - Owner guard on the tag flow: `grep -n 'repository_owner' .github/workflows/release-on-tag.yml`
 - `nv2a_vk_assert` unconditionally compiled out (hardcoded `NV2A_VK_PERF_BUILD 1`, every build incl. `--debug`): `grep -n -B3 'nv2a_vk_assert' hw/xbox/nv2a/pgraph/vk/debug.h`
 - Installed custom MoltenVK version: `strings /usr/local/lib/libMoltenVK.dylib | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$'`
 - Window-title identity: `grep -nF 'xemu | v%s' ui/xemu.c`
-- README validation-title history: `grep -in 'azurik\|conker\|kotor\|battlefield\|vexx\|nevolution' README.md`
+- Validation-title history (most of it moved with the Changes manifest): `grep -in 'azurik\|conker\|kotor\|battlefield\|vexx\|nevolution' README.md docs/optimizations.md`
 
 All fixture values, thresholds, and release facts in this file were
 verified on 2026-07-04 on the dev machine; historical measurements are
 dated session records from the 2026-07 campaigns. Repo pins (HEAD
-`7e2e6e7256`, latest tag `v0.10.2`) and the `config_spec.yml:339`
-comment status were refreshed 2026-07-11.
+`b7e2752589`, latest tag `v0.13.3`) and the `config_spec.yml` `dsp_jit:`
+comment status were refreshed 2026-10-10.

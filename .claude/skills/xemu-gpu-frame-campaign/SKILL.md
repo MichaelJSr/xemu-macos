@@ -1,6 +1,6 @@
 ---
 name: xemu-gpu-frame-campaign
-description: Executable, decision-gated campaign for cutting GPU work and per-draw CPU cost per frame in xemu-macos's NV2A Vulkan renderer, for when the fps plateau in heavy in-game scenes (post-occlusion-rework baseline ~38.6 fps, 408-485 draws/flip, ~14 render passes/flip) needs to move again. Load this when asked to reduce draw count / coalesce draws / batch vkCmdDraw calls, cut render-pass count further, profile the PFIFO thread for per-draw CPU cost, evaluate vkCmdDrawMultiEXT or VK_EXT_multi_draw, pick up the README "Future vectors" item on GPU-bound heavy scenes, or generally push fps in a draws/flip > 100 scene. Every phase is a measurement gate with a named branch on miss — this is not a place to eyeball a frame and guess. Do NOT load this for CPU-side wait/fence-policy tuning in isolation (settled dead end, see Fenced-off wrong paths below) or for a specific crash/artifact/regression symptom (xemu-debugging-playbook).
+description: Executable, decision-gated campaign for cutting GPU work and per-draw CPU cost per frame in xemu-macos's NV2A Vulkan renderer, for when the fps plateau in heavy in-game scenes (2026-07 post-occlusion-rework baseline ~38.6 fps, 408-485 draws/flip, ~14 render passes/flip; the heavy anchor is now F8 at ~877 draws/flip, ~48 fps as of 2026-10-10) needs to move again. Load this when asked to reduce draw count / coalesce draws / batch vkCmdDraw calls, cut render-pass count further, profile the PFIFO thread for per-draw CPU cost, evaluate vkCmdDrawMultiEXT or VK_EXT_multi_draw, revive the "GPU frame-cost campaign menu" row in docs/optimizations.md Settled vectors on a GPU-bound heavy scene, or generally push fps in a draws/flip > 100 scene. Every phase is a measurement gate with a named branch on miss — this is not a place to eyeball a frame and guess. Do NOT load this for CPU-side wait/fence-policy tuning in isolation (settled dead end, see Fenced-off wrong paths below) or for a specific crash/artifact/regression symptom (xemu-debugging-playbook).
 ---
 
 # GPU frame-cost reduction campaign
@@ -18,13 +18,15 @@ description: Executable, decision-gated campaign for cutting GPU work and per-dr
 > absent from a 10 s PFIFO sample); B all sites <1 ms/flip with PFIFO
 > 57.6% idle; C killed for fps (GPU has ~14 ms/flip slack; the
 > pass-cause data lives on: clears 5.0/flip, surface 1.87, texupload
-> 0.12, other 0.72); D still blocked in MoltenVK. **The premise shifted:
+> 0.12, other 0.72); D then blocked in MoltenVK (implemented upstream
+> since, see Mechanism D). **The premise shifted:
 > this scene is CPU-side-bound** (guest TCG largest; vCPU 99.7% busy but
 > the title busy-polls — F6 shows ~95% vCPU at a flat 60 fps cap, so
 > vCPU% alone is never a limiter signal; ≥5.8 ms/flip of PFIFO
-> starvation is). Receipts: commits `038f596332`/`9b625f1126`, README
-> Future vectors ("GPU frame-cost campaign: … measured exhausted").
-> Successor vectors (README): dirty-clear TLB-walk coalescing
+> starvation is). Receipts: commits `038f596332`/`9b625f1126`;
+> `docs/optimizations.md` Settled vectors row "GPU frame-cost campaign
+> menu". Successor vectors (then; dirty-clear coalescing is parked per
+> the same Settled table, the rest live in `docs/roadmap.md`): dirty-clear TLB-walk coalescing
 > (~1.8 ms/flip PFIFO + vCPU echo), guest TCG throughput
 > (`helper_lookup_tb_ptr` 17.9%, TLB machinery ~14%, SSE helpers 3.7%),
 > PGO. The phases below remain the correct METHOD for any future
@@ -35,7 +37,8 @@ description: Executable, decision-gated campaign for cutting GPU work and per-dr
 The occlusion/report rework (commit `6bfbc22863`, 2026-07-03) took the heavy
 Azurik savestate scene from 15.78 to 38.57±0.80 fps (+144%) per that
 commit's protocol receipt (`scripts/bench-savestate-ab.sh`, 3 interleaved
-pairs; README prose rounds this change to 35.6 fps / 2.25x) by fixing two
+pairs; the `docs/optimizations.md` "In-pass occlusion queries" bullet
+quotes the same 38.57 ± 0.80 and heads it "2.4x") by fixing two
 CPU-side serialization bugs: per-query render-pass teardown (376 passes/flip
 → 14) and a full GPU sync per pending occlusion report (23+/flip → 0
 stalled finishes). Two follow-on experiments then asked "is there more
@@ -73,7 +76,7 @@ Campaign map: Ground-truth table → **Phase 0** baseline recapture (gated)
 → **Phase 1** attribution instrumentation → **Phase 2** GPU-side ground
 truth → **Solution menu**: Mechanism A (consecutive-draw coalescing,
 top-ranked) · B (per-draw CPU cost, Phase-2-gated) · C (render-pass-count
-reduction) · D (`vkCmdDrawMultiEXT`, candidate-blocked) → Fenced-off
+reduction) · D (`vkCmdDrawMultiEXT`, ranked last) → Fenced-off
 wrong paths → Validation and promotion protocol → Campaign log template.
 
 ## When NOT to use this skill
@@ -131,20 +134,24 @@ Historical numbers in this file are dated; re-establish today's numbers
 on this machine before touching anything. Every later phase compares
 against *this* capture.
 
-**Fixtures** (re-verify before running): hdd = the qcow2 at `hdd_path` in `xemu.toml`;
-snapshot shortcuts read fresh from
-`~/Library/Application Support/xemu/xemu/xemu.toml` under
-`[general.snapshots.shortcuts]` — date-stamped, owner-volatile names
-(current values live in the golden-fixture inventory,
-`xemu-validation-and-qa` §3; **do not hardcode them across sessions**,
-re-read the file). Never run this against `dist/xemu.app` directly and
-never in parallel with a live user session — same hdd, same (unplanted,
-shared) `xemu.toml`; see `xemu-testing` cardinal rule 2. Make a scratch
-copy first:
+**Fixtures** (re-verify before running): the test config
+`../fixtures/xemu.toml` beside the checkout and the qcow2 at its
+`hdd_path`; savestate tags and their scenes live in the golden-fixture
+inventory (`xemu-validation-and-qa` §3) and `../fixtures/README.md` —
+re-check them there before a campaign. Never run this against `dist/xemu.app` or
+the fixture HDD in place, and never in parallel with a live user session
+(it competes for the GPU); see `xemu-testing` cardinal rule 2. Clone the
+bundle and HDD and pass a scratch config first:
 
 ```bash
+FIX=../fixtures
 SCRATCH=$(mktemp -d)
 cp -Rc dist/xemu.app "$SCRATCH/xemu-campaign.app"   # APFS CoW clone, instant
+cp -c "$FIX/xbox_hdd.qcow2" "$SCRATCH/hdd.qcow2"     # snapshots ride along
+cp -c "$FIX/eeprom.bin" "$SCRATCH/eeprom.bin"
+sed -e "s|^hdd_path = .*|hdd_path = '$SCRATCH/hdd.qcow2'|" \
+    -e "s|^eeprom_path = .*|eeprom_path = '$SCRATCH/eeprom.bin'|" \
+    "$FIX/xemu.toml" > "$SCRATCH/xemu.toml"
 pgrep -fl xemu || echo "no other xemu running — clear to proceed"
 ```
 
@@ -153,11 +160,11 @@ pgrep -fl xemu || echo "no other xemu running — clear to proceed"
 ```bash
 SOCK=/tmp/xemu-campaign-mon.sock
 rm -f "$SOCK"
-# Heavy-scene snapshot: read the F6-bound name fresh from xemu.toml
-SNAP=$(grep -m1 '^f6 = ' "$HOME/Library/Application Support/xemu/xemu/xemu.toml" | cut -d"'" -f2)
+# Heavy-scene snapshot: the F8 anchor (re-check the tag in ../fixtures/README.md)
+SNAP=vm-20260704173701
 echo "using snapshot: $SNAP"   # confirm before proceeding
 XEMU_NV2A_NSPROF=1 "$SCRATCH/xemu-campaign.app/Contents/MacOS/xemu" \
-    -monitor unix:$SOCK,server,nowait \
+    -config_path "$SCRATCH/xemu.toml" -monitor unix:$SOCK,server,nowait \
     > "$SCRATCH/phase0.log" 2>&1 &
 XEMU_PID=$!
 sleep 25   # boot
@@ -189,19 +196,28 @@ counter row (absent entirely if zero events — this is expected).
 log-parsing convenience for this output — check there before hand-parsing
 a long capture.)
 
-**Gate:**
+**Gate:** the snippet loads the F8 anchor (`vm-20260704173701`, the only
+active heavy scene). Only its draws/flip and fps are on record (~877
+draws/flip as of 2026-10-10; ~48 fps on a quiet box since the 2026-08-04
+wave, both per `../fixtures/README.md`). The 2026-07 envelope this gate
+was written against (408-485 draws/flip, ~38.6 fps, ≈14 passes/flip,
+~2.3 ms/flip fence_wait) came from a savestate that no longer exists and
+does not transfer. **Re-establish all five numbers on F8 before gating:**
+take two clean Phase 0 captures on a quiet box, write them into the
+campaign log as the F8 envelope, and only then judge the rows below.
 
-| Metric | Pass envelope | On miss |
+| Metric | Pass envelope (F8) | On miss |
 |---|---|---|
-| draws/flip | 350-500 (historical 408-485; attract-reel demo runs 350-390 and is a legitimate but *different* in-game scene — see xemu-testing scene-identity rule) | ~3 draws/flip → wrong scene (menu/title card); reload via `xemu-testing`'s scene-identity check, not this campaign |
-| render passes/flip | ≈14 (single digits to ~20 is fine) | ≫14 (dozens to hundreds) → a regression reintroduced per-draw pass teardown or a new non-draw-command interleave; **stop, this is `xemu-debugging-playbook` + `xemu-failure-archaeology`'s occlusion-rework saga, not a campaign target** |
-| fps | ~38.6 (headline as of 2026-07-04; commit `6bfbc22863` (2026-07-03) measured 38.57±0.80 on this exact scene) | Materially lower with passes/draws in-range → something regressed CPU-side (fence_wait, a FINISH_* event spike); triage via `xemu-debugging-playbook` before starting this campaign |
-| fence_wait ms/flip | ~2.3 | ≫2.3 with passes≈14 → new stall source; diagnose first (this campaign assumes the settled GPU-bound conclusion, which was proven on *this* fence-wait floor) |
+| draws/flip | ~877 (as of 2026-10-10); re-measure and take your capture as the reference | ~3 draws/flip → wrong scene (menu/title card); far off ~877 → wrong tag or a scene drift; reload via `xemu-testing`'s scene-identity check, not this campaign |
+| render passes/flip | Not yet recorded for F8: establish it. Expect a small, stable number (the 2026-07 scene ran ≈14) | Dozens to hundreds → a regression reintroduced per-draw pass teardown or a new non-draw-command interleave; **stop, this is `xemu-debugging-playbook` + `xemu-failure-archaeology`'s occlusion-rework saga, not a campaign target** |
+| fps | ~48 on a quiet box (since the 2026-08-04 wave) | Materially lower with passes/draws in-range → something regressed CPU-side (fence_wait, a FINISH_* event spike) or the box is not quiet; triage via `xemu-debugging-playbook` before starting this campaign |
+| fence_wait ms/flip | Not yet recorded for F8: establish it (the 2026-07 scene's floor was ~2.3) | Well above your own two-capture floor with passes stable → new stall source; diagnose first |
 | pipeline_gen events | ≈0 | Nonzero and climbing → pipeline cache is thrashing (state churn or a cache-persistence regression); unrelated prerequisite fix needed first |
 
 Record all five numbers in the campaign log (template at the end) before
-proceeding. If everything is in-range, the standing GPU-bound conclusion
-still holds and this campaign is aimed correctly.
+proceeding. In-range numbers only mean the scene and build are sane; they
+do not say the scene is GPU-bound. That is Phase 2's question, and the
+2026-07 campaign found the opposite (see the status banner).
 
 ## Phase 1 — Attribution instrumentation (code change; additive diagnostics)
 
@@ -385,14 +401,14 @@ build the same but insert a restart index between subranges.
 per-subrange loop (polarity matches the existing `XEMU_VTX_EXACT`
 precedent: default is the new merged behavior, `=0` reverts to legacy —
 not the "set to 1 to enable" polarity used by `XEMU_ZETA_SHAPE_READBACK`/
-`XEMU_TEX_BIND_RECHECK`; pick one and say so in the README knob table).
+`XEMU_TEX_BIND_RECHECK`; pick one and say so in the `docs/optimizations.md` knob table).
 
 **Kill criterion**: `extra_calls_from_subrange` is negligible (near zero
 per flip) in Phase 1 → don't implement, note it as a measured non-issue in
 the campaign log (not a "failed experiment" — it was never tried, just
 ruled out by measurement first, which is the point of Phase 1). If
 implemented and any visual diff appears in the validation soak (below),
-revert and add the README failed-experiments row.
+revert and add the `docs/optimizations.md` failed-experiments row.
 
 #### A2 — cross-block draw coalescing (harder; gate on Phase 1's fraction)
 
@@ -456,7 +472,8 @@ one or the other).
 **Kill criterion**: `merge_candidate_fraction` < 10% (Phase 1) → don't
 implement. If implemented: any occlusion/zpass visual diff in the
 zpass-consumer soak (below) → revert immediately, this is exactly the
-class of bug obligation 3 exists to prevent; add the README row.
+class of bug obligation 3 exists to prevent; add the `docs/optimizations.md`
+failed-experiments row.
 
 ### Mechanism B — per-draw CPU cost reduction (Phase-2-gated)
 
@@ -538,7 +555,7 @@ per-flip counter before ranking — see the four
 - **C1 — surface switches**: a color/zeta rebind sets `framebuffer_dirty`/
   `render_pass_dirty` in `begin_pre_draw`, forcing
   `pgraph_vk_ensure_not_in_render_pass` (`draw.c:2137-2146`). The zeta
-  shape-switch fast path (README "Vulkan renderer" changes) removed the
+  shape-switch fast path (`docs/optimizations.md` "Vulkan renderer" changes) removed the
   *readback* cost of a shape ping-pong but a genuinely different surface
   still needs a different framebuffer attachment — Vulkan requires ending
   the pass regardless. This cause has a hard floor; don't expect to
@@ -572,33 +589,38 @@ this scene's content — document that finding in the campaign log and
 stop; don't invent a fix for a cause that measurement shows is already
 minimal.
 
-### Mechanism D — `vkCmdDrawMultiEXT` / `VK_EXT_multi_draw` (candidate-blocked)
+### Mechanism D — `vkCmdDrawMultiEXT` / `VK_EXT_multi_draw` (ranked last)
 
-**Status: verified blocked.** `VK_EXT_multi_draw` is defined in the
-Vulkan headers vendored alongside the sibling MoltenVK checkout
-(`Vulkan-Headers/include/vulkan/vulkan_core.h`) but has **zero** matches
-in MoltenVK's own extension registry
-(`MoltenVK/MoltenVK/Layers/MVKExtensions.def`, pinned commit
-`096714a2954fc8e9db9daae97c426d7dd7f8a838` — the same pin
-`scripts/build-moltenvk.sh` builds). It is not implemented. It is also
-absent from xemu's own `required_device_extensions`/
-`add_optional_device_extension_names` lists in `vk/instance.c` — nobody
-has even asked MoltenVK for it. Re-verify:
-`grep -n MULTI_DRAW <MoltenVK checkout>/MoltenVK/MoltenVK/Layers/MVKExtensions.def`
-(no output = still blocked).
+**Status (as of 2026-10-10): driver side unblocked, xemu does not use
+it.** MoltenVK implemented the extension upstream in `bc0d5bf7`
+("Add support for VK_EXT_multi_draw", 2026-08-09), an ancestor of the
+current pin `67b2682699` (the `MVK_PIN` in `scripts/build-moltenvk.sh`);
+it is registered at `MoltenVK/MoltenVK/Layers/MVKExtensions.def:164`
+(`MVK_EXTENSION(EXT_multi_draw, …)`). When the 2026-07-04 campaign ran,
+the then-pin `096714a295` had no such entry. xemu still does not ask for
+it: it is absent from both `required_device_extensions` and
+`add_optional_device_extension_names` in `vk/instance.c`, so using it is
+an xemu-side change (optional-extension request + feature query + a
+`vkCmdDrawMultiEXT` path in `flush_draw`). Re-verify:
+`grep -n MULTI_DRAW ../MoltenVK/MoltenVK/MoltenVK/Layers/MVKExtensions.def`
+(a hit = implemented in the checkout),
+`git -C ../MoltenVK merge-base --is-ancestor bc0d5bf7 <pin> && echo in-pin`,
+and `grep -n -i multi_draw hw/xbox/nv2a/pgraph/vk/instance.c` (no output
+= xemu still does not request it).
 
-**Why this is ranked last regardless**: even if MoltenVK ships it later,
-Mechanism A's index-buffer-concatenation approach already achieves the
-same CPU-side call-count reduction *today* without the extension — a
-multi-draw entry point would mostly save manual index-buffer bookkeeping,
-not unlock a new capability. Revisit only after A ships and only if A's
-implementation complexity (topology branching, restart-index insertion)
-turns out to be a real maintenance burden.
+**Why this is ranked last regardless**: Mechanism A's
+index-buffer-concatenation approach already achieves the same CPU-side
+call-count reduction without the extension — a multi-draw entry point
+would mostly save manual index-buffer bookkeeping, not unlock a new
+capability. Revisit only after A ships and only if A's implementation
+complexity (topology branching, restart-index insertion) turns out to be
+a real maintenance burden.
 
-**Kill criterion**: trivially met — blocked until MoltenVK implements the
-extension. Re-run the grep above on any future MoltenVK pin bump
+**Kill criterion**: the driver no longer blocks it, so D now stands or
+falls with A: it is only worth wiring if A ships and its bookkeeping
+proves a burden. On any future MoltenVK pin bump, re-run the greps above
 (`xemu-testing`'s MoltenVK maintenance note already says to re-run the
-artifact hunt + fps A/B on a pin bump; add this grep to that checklist).
+artifact hunt + fps A/B on a pin bump; add these to that checklist).
 
 ## Fenced-off wrong paths
 
@@ -614,7 +636,7 @@ job — full stories in `xemu-failure-archaeology`.
   conclusion this whole campaign exists downstream of — do not propose a
   variant of "remove another CPU-side wait" without first re-running
   Phase 2 and finding *new* evidence the frame is no longer GPU-bound.
-- **Per-flight vertex-RAM mirrors** — README failed-experiments row: one
+- **Per-flight vertex-RAM mirrors** — `docs/optimizations.md` failed-experiments row: one
   128 MiB host mirror per flight slot, structurally removes cross-slot
   conflict waits, measured neutral on the attract reel (an earlier "-30%"
   read was traced to an invalid baseline parked on a 3-draws/flip static
@@ -668,14 +690,14 @@ job — full stories in `xemu-failure-archaeology`.
    effects (anything gated on zpass pixel counts) rendering wrong —
    this is the failure mode A2's obligation 3 exists to prevent, and a
    silent wrong-report-value bug will not show up as a crash.
-4. **Cross-title smoke**: at minimum boot + a few minutes of normal play
-   on Battlefield 2 Modern Combat, Conker Live & Reloaded, KOTOR, and Vexx
-   (the corpus in `xemu-validation-and-qa`) — draw-batching changes are
-   exactly the class of change that can be invisible on the one title
-   used for A/B and wrong on another with different primitive-mode/report
-   usage patterns.
+4. **Cross-title risk, stated not tested**: testing is Azurik-only by
+   owner decision (2026-10-10), but draw-batching changes are exactly the
+   class of change that can be invisible on the one title used for A/B
+   and wrong on another with different primitive-mode/report usage
+   patterns. Name that residual risk in the landing commit, and run
+   `scripts/boot-smoke-corpus.sh` on any other title that is on disk.
 5. **Documentation on promotion** (`xemu-change-control`,
-   `xemu-docs-and-writing`): a README "Changes" bullet with the A/B
+   `xemu-docs-and-writing`): a `docs/optimizations.md` "Changes" bullet with the A/B
    numbers, the escape hatch name in the knob table, and — if the
    mechanism is later reverted — a failed-experiments row with the
    reason, per the same discipline every other shipped optimization in
@@ -689,7 +711,7 @@ Copy this per session; append, don't overwrite.
 ### YYYY-MM-DD — Phase N
 
 Command: <exact command run>
-Scene / snapshot: <name, re-verified from xemu.toml>
+Scene / snapshot: <qcow2 tag, re-verified in ../fixtures/README.md>
 Numbers: fps=___  draws/flip=___  passes/flip=___  fence_wait_ms=___  <new counters>=___
 Comparison basis: <previous log entry / Phase 0 capture date>
 Decision: <proceed to X / branch to Y / kill mechanism Z — cite the exact gate/threshold that fired>
@@ -699,10 +721,12 @@ Notes: <anything that didn't fit the expected envelope, even if not blocking>
 ## Provenance and maintenance
 
 Every fact above was verified against `cf85e96597` (v0.9, 2026-07-04, tag
-`v0.9`). Repo-state note, 2026-07-11 at `7e2e6e7256` (latest tag
-`v0.10.2`): the scene numbers here are v0.9-era history — the
-dispatch campaign has since moved the heavy anchor (F8 23.9 at v0.10 →
-31.4 fps @ 819 draws/flip, README roadmap ~line 852); re-run Phase 0
+`v0.9`). Repo-state note, 2026-10-10 at `b7e2752589` (latest tag
+`v0.13.3`): the scene numbers here are v0.9-era history — the heavy
+anchor is now F8 `vm-20260704173701` (~877 draws/flip as of 2026-10-10,
+~48 fps on a quiet box since the 2026-08-04 wave; `../fixtures/README.md`,
+roadmap in `docs/roadmap.md`), and Mechanism D's MoltenVK blocker and
+the Phase 0 gate were rewritten the same day; re-run Phase 0
 before citing any figure as current. Re-verify before trusting this skill on a
 later commit:
 
@@ -720,14 +744,16 @@ later commit:
   `grep -n MAX_UNIFORM_ATTR_VALUES_SIZE hw/xbox/nv2a/pgraph/vk/shaders.c` and
   `grep -n maxPushConstantsSize ../MoltenVK/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm`
   (adjust if your MoltenVK checkout lives elsewhere)
-- `VK_EXT_multi_draw` still unimplemented in MoltenVK →
+- `VK_EXT_multi_draw` implemented in the MoltenVK checkout (line 164 as
+  of 2026-10-10) but not requested by xemu →
   `grep -n MULTI_DRAW ../MoltenVK/MoltenVK/MoltenVK/Layers/MVKExtensions.def`
-  (same checkout note)
+  (same checkout note) and `grep -n -i multi_draw hw/xbox/nv2a/pgraph/vk/instance.c`
+  (expect no output)
 - Apple-path feature relaxations (`geometryShader`/`occlusionQueryPrecise`
   forced off) still in effect →
   `grep -n "F(geometryShader\|F(occlusionQueryPrecise" hw/xbox/nv2a/pgraph/vk/instance.c`
-- snapshot shortcuts (F5/F6 names change over time) →
-  `grep -A2 "\[general.snapshots.shortcuts\]" "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
+- savestate tags (the heavy anchor can be replaced) →
+  `../fixtures/README.md` and the snapshot lister on a clone of the fixture HDD
 - occlusion-rework baseline numbers cited in Fenced-off wrong paths →
   `git show --format='%H %s' -s 6bfbc22863` (immutable history; won't
   drift, but confirm the hash still resolves on this checkout)

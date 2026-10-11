@@ -59,7 +59,7 @@ theory explained observation (a) and nothing else:
 
 `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` explained all four
 observations at once; the texture-path theory explained one. That is
-what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1602-1606`,
+what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1939-1945`,
 `setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0)` before
 MoltenVK loads, with `overwrite=0` so an explicit user override still
 wins) was validated on the user's own environment: 0 artifact frames in
@@ -155,8 +155,8 @@ the high hundreds. It landed at 14. The measured pair from the shipping
 commit's own interleaved A/B (`scripts/bench-savestate-ab.sh`, 3
 interleaved pairs, same binary, `XEMU_REPORTS_SYNC` as the toggle):
 15.78 → 38.57 ± 0.80 fps (+144%), fence-wait 2.2 ms/flip on the new path
-— the protocol receipt (README prose rounds this change to 35.6 fps /
-2.25x).
+— the protocol receipt (`docs/optimizations.md` headlines it as "2.4x
+in report-heavy scenes").
 
 **Per-flight vertex mirrors — the honest kill** (`268daf69ac`). The
 mechanism's whole design intent, stated plainly in the code's own
@@ -188,11 +188,11 @@ has an owning skill for the *mechanics* — this skill only owns the
 
 | Stage | Question to answer | Where the mechanics live |
 |---|---|---|
-| 1. Idea | Has this exact thing been tried, reverted, or already scoped-and-parked? | `xemu-failure-archaeology` (the chronicle) + README's "Future vectors" and "Failed / reverted experiments" sections |
+| 1. Idea | Has this exact thing been tried, reverted, or already scoped-and-parked? | `xemu-failure-archaeology` (the chronicle) + `docs/roadmap.md` (open vectors) and `docs/optimizations.md`'s "Failed / reverted experiments" and "Settled vectors" tables |
 | 2. Cheapest discriminating measurement | What's the smallest experiment that could kill this idea outright? | `xemu-proof-and-analysis-toolkit` (nsprof, `XEMU_APU_PROF`, forced-failure knobs, bisection recipes) |
 | 3. Implementation | Build it behind a default-off flag with a legacy-restore path | `xemu-config-and-flags` (naming convention, `config_spec.yml` vs test-only `getenv`, `MVK_CONFIG_*` plist/`main()` parity checklist) |
 | 4. Interleaved A/B | Run it against itself with the flag as the only variable | `xemu-testing` for the savestate-A/B *method*; `xemu-validation-and-qa` for the acceptance thresholds that decide if the number means anything |
-| 5. Decision | Ship default-on, keep dark for continued A/B, or revert | this section, plus `xemu-docs-and-writing` for the README template each outcome uses |
+| 5. Decision | Ship default-on, keep dark for continued A/B, or revert | this section, plus `xemu-docs-and-writing` for the docs template each outcome uses |
 
 Three real trajectories, one per outcome:
 
@@ -220,7 +220,7 @@ wait −11%, process CPU −7.6%, fps **+5.4%**.
 
 **Escape hatch**: `XEMU_VTX_EXACT=0` restores page-granular conflicts.
 
-**Ship**: a README Changes-section bullet with the numbers, the escape
+**Ship**: a `docs/optimizations.md` Changes-section bullet with the numbers, the escape
 hatch documented alongside it. No config-spec entry was needed — it's a
 pure behavior improvement with an already-documented legacy switch.
 
@@ -237,12 +237,13 @@ exists.
 mechanism is sound, but by present time "the single guest zeta typically
 holds the *next* in-progress frame's depth" — so whether real depth is
 an improvement over synthetic depth is title-dependent, not a clean
-universal win. README says so explicitly: "Ships dark for A/B... quality
-impact is title-dependent." Note also that the *actual* fix for the
+universal win. `docs/optimizations.md` says so explicitly: "Both ship
+dark for A/B. Engagement is title-dependent." The *actual* fix for the
 underlying timing problem — capturing a GPU copy of zeta at flip-stall
-so the depth is temporally correct — is itself still an open Future
-vector ("Flip-time zeta snapshot for real depth"). `XEMU_MFX_REAL_DEPTH`
-is deliberately parked at "useful, opt-in, honestly labeled" rather than
+so the depth is temporally correct — has since landed as mode `2` of the
+same knob (`a93b086f45`, 2026-07-11) and ships dark too, since Azurik's
+AA super-width exposes no zeta matching the scaler input and both modes
+fall back to synthetic there. `XEMU_MFX_REAL_DEPTH` is deliberately parked at "useful, opt-in, honestly labeled" rather than
 forced to either a ship or a revert it doesn't deserve.
 
 ### Trajectory C — retired with a full record: per-flight vertex mirrors (`268daf69ac`)
@@ -275,15 +276,15 @@ targeted mechanism wasn't the bottleneck, not proof the mirror was
 buggy.
 
 **Decision**: revert. +128 MiB and swap/delta complexity for a measured
-zero win isn't worth carrying. Recorded in README's "Failed / reverted
-experiments" table and in "Future vectors" (which redirects to what
-*did* work — Trajectory A's byte-exact refinement — and states the
-honest ceiling: "Both implementations preserved in this repo's history
-for reference." That line is the retirement duty in one sentence: a
-revert deletes the code path from `HEAD`, never from the record. The
+zero win isn't worth carrying. Recorded in the "Failed / reverted
+experiments" table and the "Streamed-vertex stall reduction" Settled row
+(both now in `docs/optimizations.md`; the Settled row redirects to what
+*did* work — Trajectory A's byte-exact refinement, which "shipped
+separately at +5.4% fps"). That is the retirement duty: a revert
+deletes the code path from `HEAD`, never from the record. The
 next person who has this same idea should find the full implementation,
 the measurement, and the reason it didn't help — in git history and in
-README — not just silence.
+the docs of record — not just silence.
 
 ## 4. Adversarial refutation as a habit
 
@@ -295,7 +296,7 @@ enabled" than at "shipped, someone's save is now corrupt."
 
 | Checker | What it hunts | Cost when idle | What it actually caught |
 |---|---|---|---|
-| `XEMU_DSP_JIT_PIN_AUDIT=1` | Per-op divergence between the ARM64-pinned A/B/X/Y registers and the in-memory DSP register file | Zero when unset; ~10 extra instructions per op when on | The `pm_2_2 Y0,A1` direct-A1-slot leak (`91343ad754`) and a separate pm_8 X/Y leak — each caught within 30 seconds of enabling the audit (`docs/dsp-jit-design.md`) |
+| `XEMU_DSP_JIT_PIN_AUDIT=1` | Per-op divergence between the ARM64-pinned A/B/X/Y registers and the in-memory DSP register file | Zero when unset; ~10 extra instructions per op when on | The `pm_2_2 Y0,A1` direct-A1-slot leak (`91343ad754`) and a separate pm_8 X/Y leak — each caught within 30 seconds of enabling the audit (`docs/Finished/dsp-jit-design.md`) |
 | `XEMU_DSP_JIT_SENTINEL=1` | Whether a deferred optimization's precondition actually holds at runtime (poisons `cur_inst` to expose readers that decode it live) | Zero when unset | Confirmed the round-4 `cur_inst`-preset skip regresses on real code (`op=0x001000` at startup) — kept deferred rather than re-applied blind |
 | `XEMU_DSP_JIT_DIFF=N` | Bit-exact divergence between JIT output and the interpreter, per translation, async on a dedicated `mcpx.dsp_diff` worker thread | 0 when unset; 2–10x slowdown at `DIFF=1` (every block); cheap when sampled | Proved `EPI_NO_PC` (a proposed skip of the PC-mismatch exit check) unsafe at a **9.75%** mismatch rate — 5.77M of 59.2M watched ops in Azurik genuinely diverge (calc_ea mode 6 lengthens parmoves to two words; REP/DO loops rewind PC) |
 | Forced-failure knobs, e.g. `XEMU_MAX_QUERIES=64` | Whether a capacity guard fires *before* the resource it protects is exhausted | Test-only; never for normal runs | Guard fired 3312×/5 s interval under deliberate starvation, zero crashes, steady 30 fps — validated the Act-1 query-pool guard in isolation (though, per §1, that guard alone didn't explain the full crash) |
@@ -305,7 +306,7 @@ optimization (skip the PC-mismatch exit check for parmove stubs and
 inlined long-immediates, on the theory that those ops can't diverge)
 went in behind a sentinel specifically built to disprove it. The
 sentinel measured a 9.75% real divergence rate and the optimization was
-dropped **permanently** (`docs/dsp-jit-design.md`, round-4 entry) — not
+dropped **permanently** (`docs/Finished/dsp-jit-design.md`, round-4 entry) — not
 patched, not special-cased, dropped, because the audit had already done
 the work of proving the underlying assumption false. The correct
 mechanism (a mode-6 `inst_len` classifier fix, `ca7fe51a0b`) shipped
@@ -415,16 +416,21 @@ itself and `xemu-validation-and-qa` for how much data is enough to trust.
 
 **2. Never regress a Windows or upstream code path for a macOS-only
 win.** Evidence this is enforced, not just claimed:
-- `hw/xbox/nv2a/pgraph/vk/surface.c:1085,1091,1304` gate the narrowed
-  `upload_surface_data` sync behind `#if defined(__APPLE__)` — the
-  macOS-specific fast path is physically absent from other platforms'
-  builds, not just conditionally worse.
-- `ui/xemu-input.c:522-574`: the entire `XEMU_INPUT_PIPE` automation
-  channel is wrapped `#ifdef _WIN32` / `#endif /* !_WIN32 */` and
-  compiles to nothing on Windows. The guard itself is the fork's most
-  recent commit as of this writing (`cf85e96597`, "fix Windows build")
-  — added after `O_NONBLOCK` and FIFOs turned out not to exist on
-  MinGW, i.e. the rule caught a real regression before it shipped.
+- `hw/xbox/nv2a/pgraph/vk/surface.c:1860` (in
+  `pgraph_vk_upload_surface_data`, as of 2026-10-10) gates the narrowed
+  upload sync behind `#ifdef __APPLE__`, with `target_is_active = true`
+  (upstream's full finish) on every other host; `:1396,1402` keep the
+  scratch-image skip in `create_surface_image` Apple-only the same way —
+  the macOS-specific fast paths are physically absent from other
+  platforms' builds, not just conditionally worse.
+- `ui/xemu-input.c:548-756`: the `XEMU_INPUT_PIPE` automation channel is
+  split `#ifdef _WIN32` (Win32 named pipe) / `#else` (POSIX FIFO) /
+  `#endif /* !_WIN32 */`. The split started as a plain POSIX guard
+  (`cf85e96597`, 2026-07-04, "fix Windows build") added after
+  `O_NONBLOCK` and FIFOs turned out not to exist on MinGW — the rule
+  caught a real regression before it shipped. Since `164fd4c876`
+  (2026-09-08) Windows carries the same line protocol over a named pipe
+  instead of compiling the channel out.
 - `tcg/aarch64/tcg-target-has.h:65-69`: `TCG_TARGET_HAS_fpu` is `0`
   under `#ifdef _WIN32`, `1` otherwise — the inline-x87 win is disabled
   specifically on Windows/ARM64 because llvm-mingw can't constant-fold
@@ -432,12 +438,13 @@ win.** Evidence this is enforced, not just claimed:
   `TCG_TARGET_HAS_fpu=1` makes reachable; Windows/ARM64 falls back to
   the helper-based hard-FPU path "like x86_64 hosts" (comment, same
   file).
-- README states the policy outright (`README.md:31`): "The upstream
-  Windows build paths are preserved and CI-tested."
+- README states the policy outright (`README.md:41` as of 2026-10-10;
+  `grep -n 'Windows build paths' README.md`): "The upstream Windows
+  build paths are preserved and CI-tested."
 
 **3. Every behavior change ships an escape hatch.** The entire
-`XEMU_*` runtime-knob table (README's "Runtime debug / escape-hatch
-knobs" section) exists precisely as a set of legacy-restore switches:
+`XEMU_*` runtime-knob table (`docs/optimizations.md`'s "Runtime
+escape-hatch / diagnostic knobs" section) exists precisely as a set of legacy-restore switches:
 `XEMU_ZETA_SHAPE_READBACK`, `XEMU_TEX_BIND_RECHECK`, `XEMU_VTX_EXACT`,
 `XEMU_REPORTS_SYNC`, `XEMU_MFX_REAL_DEPTH` /
 `XEMU_MFX_INTERP_ZERO_MOTION`, `XEMU_DSP_JIT_NO_THROTTLE`, and the
@@ -466,7 +473,8 @@ Two real illustrations, not a hypothetical:
 ## 7. Starting a new investigation: the one-page checklist
 
 1. **Has this been fought before?** Check `xemu-failure-archaeology` and
-   README's "Future vectors" / "Failed / reverted experiments" sections.
+   `docs/roadmap.md` plus `docs/optimizations.md`'s "Failed / reverted
+   experiments" and "Settled vectors" tables.
    A one-line rejection ("MoltenVK only exposes `queueCount=1`") can
    save a week.
 2. **State the mechanism in one sentence**, and check it against every
@@ -493,11 +501,11 @@ Two real illustrations, not a hypothetical:
    identity, environment parity, binary identity (§6 meta-rule) — before
    you suspect the mechanism, and long before you suspect nothing at
    all and ship it.
-9. **Decide, and document the decision**: ship default-on (README
-   Changes row + keep the escape hatch), keep dark for continued A/B
-   (state plainly why — title-dependent, unproven at scale, etc.), or
-   revert. A revert gets a Failed-experiments row or a Future-vectors
-   entry, not silence — the implementation stays in git history for
+9. **Decide, and document the decision**: ship default-on
+   (`docs/optimizations.md` Changes row + keep the escape hatch), keep
+   dark for continued A/B (state plainly why — title-dependent, unproven
+   at scale, etc.), or revert. A revert gets a Failed-experiments or
+   Settled-vectors row, not silence — the implementation stays in git history for
    whoever has this idea next (§3).
 10. **Never regress a Windows or upstream path for the win, and never
     quietly re-break a documented invariant** (prefill must stay 0,
@@ -520,7 +528,7 @@ Two real illustrations, not a hypothetical:
   freeze) and need first triage steps → `xemu-debugging-playbook`.
 - Need the full blow-by-blow of a specific past incident, beyond the
   worked examples here → `xemu-failure-archaeology`.
-- Need to know *where* a fact belongs in the docs, or the README
+- Need to know *where* a fact belongs in the docs, or the docs
   template for a new row → `xemu-docs-and-writing`.
 - Need domain theory (what a zpass report *is*, why TBDR passes are
   expensive, DSP56300 semantics) rather than research process →
@@ -535,14 +543,18 @@ commit hash (commits and their messages don't drift). Re-verify with:
   `git show -s --format='%h %ad %s' --date=short <hash>`
 - Env knobs cited here still exist and are read where stated:
   `grep -rn 'getenv("XEMU_DSP_JIT_PIN_AUDIT\|getenv("XEMU_DSP_JIT_SENTINEL\|getenv("XEMU_DSP_JIT_DIFF\|getenv("XEMU_MAX_QUERIES' hw/`
-- README section locations (line numbers drift as the file grows):
-  `grep -n '^## \|^### ' README.md`
+- Docs section locations (line numbers drift as the files grow):
+  `grep -n '^## \|^### ' README.md docs/optimizations.md docs/roadmap.md`
 - The Windows-preservation guards still stand:
-  `grep -n '_WIN32' ui/xemu-input.c tcg/aarch64/tcg-target-has.h hw/xbox/nv2a/pgraph/vk/surface.c`
+  `grep -n '_WIN32' ui/xemu-input.c tcg/aarch64/tcg-target-has.h` and
+  `grep -n '__APPLE__' hw/xbox/nv2a/pgraph/vk/surface.c` (surface.c's
+  gates are Apple-positive, not `_WIN32`)
 - The single-queue MoltenVK constraint hasn't changed:
   `grep -n 'queueCount' hw/xbox/nv2a/pgraph/vk/instance.c`
-- The failed/future-vectors rows cited here still read as summarized:
-  `sed -n '803,1026p' README.md` (Failed at 803, Future vectors at 846,
-  as of 2026-07-11)
+- The failed/settled rows cited here still read as summarized (both
+  tables moved from README to `docs/optimizations.md`; open vectors live
+  in `docs/roadmap.md`):
+  `awk '/^## Failed/,0' docs/optimizations.md` (Failed / reverted
+  experiments, then Settled vectors; ~:2091 and ~:2161 as of 2026-10-10)
 - DSP JIT throttle constants (the 1-in-16 ratio, 256Ki window) are still:
   `grep -n 'DSP56K_JIT_THROTTLE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`

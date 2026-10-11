@@ -100,23 +100,30 @@ citable, never arms from different experiments.
   unaffected, but its absolute numbers are not comparable to the
   historical fullscreen anchors (F5 46.8, F8 ~29.5-31.5 on the
   2026-07-11 local no-PGO build, user config, fullscreen).
-- **Monitor `loadvm` needs the real `vm-*` qcow2 tag, not the F5/F8
-  shortcut name — and it fails SILENTLY.** The `[general.snapshots.
-  shortcuts]` names in xemu.toml are UI keybindings; the QEMU monitor
-  only knows the underlying tags (e.g. `f8 = 'vm-20260704173701'`).
-  `loadvm F8` prints its error to the monitor socket nobody reads and
-  the guest keeps running the BOOT workload — two independent harnesses
-  hit this on 2026-07-11 (a cc_op census published idle-workload numbers
-  as "F5/F8" before the erratum; see README roadmap item 5). Map
-  shortcut→tag from the toml in every runner, and ALWAYS verify scene
-  identity from nsprof (which prints to **stdout**, not stderr — capture
-  both) before believing any run.
+- **Monitor `loadvm` needs the real `vm-*` qcow2 tag, not an F-key
+  name — and on a raw monitor socket it fails SILENTLY.** F-key
+  shortcuts are UI keybindings; the QEMU monitor only knows the
+  underlying tags. `loadvm F8` prints its error to the monitor socket
+  nobody reads and the guest keeps running the BOOT workload — two
+  independent harnesses hit this on 2026-07-11 (a cc_op census
+  published idle-workload numbers as "F5/F8" before the erratum; the
+  corrected F8 census is in `docs/Finished/roadmap-closed-items.md`,
+  "Ranked item 1"). Since 2026-10-10 the fixture config binds no
+  F-keys, so there is nothing to map from: pass the tag from the
+  `../fixtures/README.md` table (`vm-20260704173701` = F8,
+  `vm-20260704032357` = F5). As of 2026-10-10 `bench-abx.sh` rejects a
+  bare `F5`-`F8` name up front, and `bench-savestate-ab.sh`,
+  `probe-run.sh`, `soak-cycles.sh` and `movement-probe.sh` grep the
+  monitor reply for `error` and mark the run DEAD or exit 1; a
+  hand-rolled runner gets neither guard. ALWAYS verify scene identity
+  from nsprof (which prints to **stdout**, not stderr — capture both)
+  before believing any run.
 
 ## Bench mechanics learned 2026-08-04 (fork-wide optimization wave)
 
 - **`bench-savestate-ab.sh` hardcodes the B arm to `VAR=0`.** The
   harness takes exactly one `ENV_VAR` and runs `run_one B$k 0` /
-  `run_one E$k $E_VALUE` (`scripts/bench-savestate-ab.sh:334-335`), so
+  `run_one E$k $E_VALUE` (`scripts/bench-savestate-ab.sh` ~:331-332 as of 2026-10-10), so
   `--e-value` moves the E arm only. Three shapes it therefore cannot
   express — all three of which this wave needed: a **pinned non-zero
   baseline** (`XEMU_REPORTS_BUDGET_US` 300 vs 50; `0` is not the
@@ -254,10 +261,10 @@ events for inactive apps.
 
 The keyboard is a bound Xbox controller on **port2**
 (`[input.bindings] port2 = 'keyboard'`); the authoritative scancode
-map is `[input.keyboard_controller_scancode_map]` in the user's
-`~/Library/Application Support/xemu/xemu/xemu.toml` — **re-read it
-per session** (owner-editable; a scratch config copied from that
-toml carries the bindings along). Map as of 2026-07-04 (SDL
+map is `[input.keyboard_controller_scancode_map]` in the harness's
+source config, `../fixtures/xemu.toml` beside the checkout by default
+— **re-read it per session** (owner-editable; a scratch config copied
+from that toml carries the bindings along). Map as of 2026-07-04 (SDL
 scancodes): left stick W/A/S/D = 26/4/22/7; right stick (camera)
 KP5/KP1/KP3/KP2 = 93/89/91/90; A = 81 (Down-arrow), B = 79 (Right),
 X = 80 (Left), Y = 44 (Space); dpad up/left/right/down =
@@ -341,12 +348,15 @@ and their instance holds the qcow2 write lock, so clone the disk with
 
 ## Multi-title boot smoke (soak gate for state-table / bounds changes)
 
-`scripts/boot-smoke-corpus.sh [--app PATH] [--secs N] [--out DIR] <iso>...`
-(added 2026-09-08) boots every ISO given on an isolated clone of a bundle
-(same isolation as the A/B harness: APFS bundle clone, cloned hdd/eeprom,
+`scripts/boot-smoke-corpus.sh [--app PATH] [--secs N] [--out DIR]
+[--config-src PATH] [--no-input] [--keep-work] <iso>...` (added
+2026-09-08) boots every ISO given on an isolated clone of a bundle (same
+isolation as the A/B harness: APFS bundle clone, cloned hdd/eeprom,
 scratch `xemu.toml` with `dvd_path` swapped and fullscreen off, never
-`dist/xemu.app`'s config), taps START and A through the user's own
-keyboard bindings via `XEMU_INPUT_PIPE` so menus advance, captures two
+`dist/xemu.app`'s config; source config `$XEMU_TEST_CONFIG`, else
+`../fixtures/xemu.toml`), taps START and A through the source config's
+keyboard bindings via `XEMU_INPUT_PIPE` so menus advance (`--no-input`
+skips the taps), captures two
 scored screenshots (`scripts/bench-screenshot.py`), quits via the monitor,
 and reports per title: `alive`/`CRASHED` (exit status if it died early),
 assert/abort/`nv2a_vk_bounds` lines, the last nsprof interval and the
@@ -362,6 +372,9 @@ NevolutionX all alive 120 s, 0 asserts, all screenshots PASS. It is a
 boot-to-menu/intro smoke, not gameplay: Azurik reaches ~50 draws/flip,
 Conker ~280, KOTOR sits on a 2-draw loading screen at 120 s. Lengthen
 `--secs` or add a savestate route when a change needs deeper coverage.
+Since 2026-10-10 testing is Azurik-only by owner decision and BF2MC,
+Conker and KOTOR are no longer on disk, so this gate is optional extra
+coverage on whatever titles remain; the baseline above is history.
 
 ## Snapshots with controllers (topology matching)
 
@@ -404,10 +417,13 @@ drift-prone mechanics before trusting them:
 - The three stackable validators still exist under these names:
   `grep -rn 'XEMU_X87_REFUTE\|XEMU_SUBPAGE_FAST_REFUTE' accel/tcg target/i386/tcg`
   and `grep -n 'XEMU_DSP_JIT_DIFF' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+- Snapshot-tag guards (F-key names rejected or loadvm errors caught,
+  as of 2026-10-10): `grep -n 'F-key name' scripts/bench-abx.sh` and
+  `grep -n 'loadvm.*failed' scripts/bench-savestate-ab.sh scripts/probe-run.sh scripts/soak-cycles.sh scripts/movement-probe.sh`
 - Movement probe + soak loops that a quiet check must catch:
   `ls scripts/movement-probe.sh scripts/soak-cycles.sh scripts/probe-run.sh`
 - Keyboard scancode map (owner-editable, re-read per session):
-  `grep -n -A 30 'keyboard_controller_scancode_map' "$HOME/Library/Application Support/xemu/xemu/xemu.toml"`
+  `grep -n -A 30 'keyboard_controller_scancode_map' ../fixtures/xemu.toml`
 - Cross-binary harness flags and Game Mode logging:
   `scripts/bench-abx.sh --help` and
   `grep -n 'gamepolicyd\|FULLSCREEN' scripts/bench-abx.sh`

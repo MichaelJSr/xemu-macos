@@ -25,8 +25,12 @@ description: >-
 The fork's institutional memory of what did NOT work, what was reverted, what
 is fenced off, and what was proven not worth doing — so nobody re-fights a
 settled battle or silently re-attempts a fenced-off design. Every entry is
-grounded in the repo: `README.md` "Failed / reverted experiments" (~line 803
-as of 2026-07-11), commit messages, and dated measurements.
+grounded in the repo: `docs/optimizations.md` "Failed / reverted experiments"
+(~line 2091 as of 2026-10-10), commit messages, and dated measurements. That
+ledger lived in `README.md` until the 2026-10-10 docs reorganization, so
+entries below still say "README row" / "README Future vector(s)": read them
+as the ledger's Failed table / `## Settled vectors`, or `docs/roadmap.md` for
+vectors still open.
 
 Repo: this checkout, branch
 `macos-optimizations`. Commit messages in this fork are unusually rich — for
@@ -184,11 +188,12 @@ Escape hatch: `XEMU_REPORTS_SYNC=1` restores legacy synchronous drains.
 **Evidence** (2026-07-03, `scripts/bench-savestate-ab.sh`, 3 interleaved
 pairs, same binary, env toggle): commit message records 38.57 ± 0.80 fps vs
 15.78 pre-change (+144%), 14 render passes/flip, 0 stalled finishes,
-2.2 ms/flip fence wait — the protocol receipt. README (~line 351) records
-the same change as 15.8 → 35.6 fps / 2.25x, passes 376 → 14, fence waits
-31.9 → 2.3 ms/flip — added in the same commit `6bfbc22863` and carrying no
-receipt; cite 38.57 ± 0.80 (+144%) per `xemu-frontier-and-positioning` §3.5
-until `xemu-docs-and-writing` reconciles the README.
+2.2 ms/flip fence wait — the protocol receipt. The README row added in the
+same commit `6bfbc22863` said 15.8 → 35.6 fps / 2.25x with no receipt; it was
+reconciled to the receipt on 2026-07-11, and the ledger now reads 15.78 →
+38.57 ± 0.80 fps (+144%), passes 376 → 14 (`docs/optimizations.md` ~:836 as
+of 2026-10-10). Cite 38.57 ± 0.80 (+144%) per
+`xemu-frontier-and-positioning` §3.5.
 
 **The two REGRESSED intermediates** (measured 2026-07-03; do not retry):
 in-pass queries *keeping the old synchronous drain policy* — 6.86 ± 0.71 fps,
@@ -444,7 +449,7 @@ effort bar and closed (README Future vectors record all; measurements
 | `VK_EXT_external_memory_host` revival | eliminated memcpy < 0.5 ms per 5 s | ≥ 1 ms/frame bar (entry 1.6) |
 | MetalFX *input* ring (drop `metalfx_drain_inflight`) | drain ~0.1 µs/flip steady, max ~4 ms on rare hitches | complexity for noise |
 | Shader specialization constants | stale premise: alpha-test/fog-enable are already compile-time GLSL variants keyed via PshState/VshState in the LRU shader cache; only value uniforms remain per-draw and must stay uniforms | premise false; useful reframing = variant-count/compile-stutter work |
-| Async pipeline compilation | in-game `pipeline_gen` ≈ 0 after pipeline-cache persistence landed (cold 164 ms worst-case create → ≤ 4 ms warm; README ~line 232) | the stall it would hide no longer exists |
+| Async pipeline compilation | in-game `pipeline_gen` ≈ 0 after pipeline-cache persistence landed (cold 164 ms worst-case create → ≤ 4 ms warm; `docs/optimizations.md` ~:682 as of 2026-10-10) | the stall it would hide no longer exists |
 
 **Reopen any of these if**: `XEMU_NV2A_NSPROF=1` shows the relevant counter
 (TEX_UPLOAD, PIPELINE_GEN, MFX_DRAIN) at ≥ 1 ms/frame in a real title —
@@ -513,7 +518,7 @@ B sites all <1 ms/flip with PFIFO 57.6% idle; C's savings land in
 ~14 ms/flip of GPU slack (fence 2.8 ms/flip); D blocked in MoltenVK.
 Frame limiter is CPU-side: guest TCG largest share (≥5.8 ms/flip PFIFO
 starvation; vCPU% itself is confounded — the title busy-polls, ~95%
-vCPU even at F6's flat 60 fps cap).
+vCPU even at F6's flat 60 fps cap; F6 retired 2026-10-10).
 **Reopen if**: a genuinely GPU-bound scene re-enters the fixture set —
 re-run campaign Phase 0 and Phase 2 gates first (draws/flip in
 envelope, fence-wait a large fraction of frame time, encoder time ≈
@@ -679,7 +684,8 @@ stream's SHAPE (recurrence) before building any cache tier; volume
 alone justifies nothing.
 **Open observation parked with it**: ~70k/s lookups return NULL at
 tb_flush=1 with do_tb_phys_invalidate in the profile top — the
-SMC/invalidation-churn vector in README Future vectors item 1.
+SMC/invalidation-churn vector in README Future vectors item 1 (numbering as
+of 2026-07-05; the open list now lives in `docs/roadmap.md`).
 
 ## 1.21 Texture/sampler LRU eviction raced pending submissions
 
@@ -770,7 +776,7 @@ the chain refuter: 3.15B checks, 0 violations).
 rework.
 **Two durable lessons**: (1) 1.22's ">5× traps ⇒ negative" proxy was an
 artifact of the O(N) per-trap scan — re-deriving the cost model for the
-O(1) form (Gate-0, `docs/subpage-gate0-prediction.md`) flipped the
+O(1) form (Gate-0, `docs/Finished/subpage-gate0-prediction.md`) flipped the
 verdict; never carry a kill-proxy across a complexity-class change.
 (2) The Gate-0 model still undershot ~15× (+0.5-0.9% vCPU predicted,
 +14-25% fps measured) because it priced only the trap body — the
@@ -878,7 +884,7 @@ crash (entry 2.2), and it measured SLOWER — 46.33 vs 48.50 fps — because
 encoding lands on the hot PFIFO thread.
 
 **Fix**: prefill = **0** in both `Info.plist` (~line 45, with explanatory
-comment) and `ui/xemu.c:1602-1606` `setenv(..., 0)` — the no-overwrite main()
+comment) and `ui/xemu.c:1939-1945` (as of 2026-10-10) `setenv(..., 0)` — the no-overwrite main()
 setenv gives launch-path parity so Finder, terminal, and harness launches run
 one configuration (`166999fc60`; build.sh also logs the bundled MoltenVK
 version+UUID to catch tested-vs-shipped driver drift). Validated on the
@@ -1067,7 +1073,7 @@ Jargon: **parmove** = DSP56300 parallel move executing alongside an ALU op in
 one instruction. **GP/EP** = the two DSP cores (Global/Effects Processor).
 **block** = translated basic block. **pin** = a DSP register held in an ARM64
 callee-saved register for a block's duration. Design doc:
-`docs/dsp-jit-design.md` (rounds table records landed/dropped per round).
+`docs/Finished/dsp-jit-design.md` (rounds table records landed/dropped per round).
 
 ## 4.1 Round-4 EPI_NO_PC — the 9.75% that killed a "safe" elision
 
@@ -1480,7 +1486,7 @@ ships as a no-claim simplification, default-on with its hatch
 (`XEMU_DIRTY_FAST=0` restores both legacy shapes; latch at
 `system/physmem.c:1059`). Entry 6.9 is its mirror image — read them
 together.
-**The candidate**: `docs/fork-optimization-audit-2026-08.md` §1.2 priced
+**The candidate**: `docs/Finished/fork-optimization-audit-2026-08.md` §1.2 priced
 the `notdirty_write` store-slow-path tail at **1.9-2.0% of vCPU wall**
 and predicted **+0.2 to +0.35 fps** for (a) deleting the
 `physical_memory_is_clean()` re-read whose answer the invalidation
@@ -1630,9 +1636,9 @@ longer hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
 was. When a mean-fps A/B reads parity on a lock-scope change, check
 intra-run variance before calling it valueless.
 **Reopen if**: closed 2026-08-04 — PGRAPH shipped
-(`docs/pgraph-lockless-audit.md`), APU-VP shipped, and the remaining
+(`docs/Finished/pgraph-lockless-audit.md`), APU-VP shipped, and the remaining
 blocks (PMC/PCRTC/PTIMER, APU main/gp/ep) closed by written verdict
-(`docs/lockless-mmio-verdict.md`): residual < 0.07% of a core and
+(`docs/Finished/lockless-mmio-verdict.md`): residual < 0.07% of a core and
 BQL-free dispatch there would drive `pci_irq_assert` unlocked. Reopen
 only on `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s (the wave's
 2026-08-04 reading was 75.6 ms per 75 s, 6.6x under the bar).
@@ -1832,7 +1838,7 @@ not the default), and the owner's `xemu.toml` sets `[audio.dsp_jit] enabled =
 true`, so every local run and every in-game smoke still took the fork JIT.
 **Evidence**: `config_spec.yml` at `add066354f` (`use_dsp_jit: default:
 false`); `hw/xbox/mcpx/apu/dsp/dsp.c:120-128` (precedence, unchanged);
-`docs/windows-wave1-review-2026-09-08.md` §1 item 1, §5 decision (a).
+`docs/Finished/windows-wave1-review-2026-09-08.md` §1 item 1, §5 decision (a).
 **Lessons**: (a) a *default* is a fork asset — git merges it cleanly precisely
 because it is one line nobody flags, so diff `config_spec.yml` explicitly
 after every merge; (b) a config the dev box overrides is a config the dev box
@@ -2043,12 +2049,12 @@ buys the headroom.
 # How to add an entry (the recording duty)
 
 When an experiment fails or a change is reverted, the record is part of the
-change — per `xemu-change-control`, a README "Failed / reverted experiments"
+change — per `xemu-change-control`, a `docs/optimizations.md` "Failed / reverted experiments"
 row is REQUIRED for every reverted attempt (enforced practice: nearly every
 revert commit above updates the table in the same commit). Then extend this
 chronicle:
 
-1. **README row** (concise): Attempt | Reason — include the mechanism, not
+1. **Ledger row** (concise): Attempt | Reason — include the mechanism, not
    just "was slower". Diagnostic signatures (heartbeat patterns, counter
    values) belong in the row so future hunts pattern-match instead of
    re-bisecting (`68d5afe7fa` is the exemplar).
@@ -2077,17 +2083,18 @@ Template:
 
 All facts verified against the repo on 2026-07-04 unless carrying an earlier
 date (those are recorded historical measurements — do not re-measure to cite
-them). README anchors and row counts below refreshed 2026-07-11 at
-`7e2e6e7256`. Entries 6.10, 8.7, 9.10 and 7.5's closure were added
+them). Ledger anchors and row counts below refreshed 2026-10-10 at
+`b7e2752589`, after the ledger moved from `README.md` to
+`docs/optimizations.md`. Entries 6.10, 8.7, 9.10 and 7.5's closure were added
 **2026-08-04** from the fork-wide optimization wave that implements
-`docs/fork-optimization-audit-2026-08.md`; their measurements are that
+`docs/Finished/fork-optimization-audit-2026-08.md`; their measurements are that
 day's, not current readings. Re-verification one-liners for drift-prone
 facts:
 
 - 6.10 hatch still present and still default-on:
   `grep -n 'XEMU_DIRTY_FAST' system/physmem.c include/system/physmem.h`
 - 6.10's audit-side numbers (the base that collapsed):
-  `sed -n '67,97p' docs/fork-optimization-audit-2026-08.md`
+  `sed -n '67,97p' docs/Finished/fork-optimization-audit-2026-08.md`
 - 8.7 dark arm still one flag, default still hardened:
   `grep -n 'XEMU_HARDENING\|zero-call-used-regs' build.sh`
 - 8.7 flag-order checker still runs after every build:
@@ -2095,21 +2102,26 @@ facts:
 - 9.10's three refuter knobs still exist (the rule is only meaningful while
   they do): `grep -rn 'XEMU_X87_REFUTE\|XEMU_SUBPAGE_FAST_REFUTE' accel/tcg target/i386/tcg`
 - 7.5's closure page and its reopen number:
-  `grep -n 'BQL wait total' docs/lockless-mmio-verdict.md`
+  `grep -n 'BQL wait total' docs/Finished/lockless-mmio-verdict.md`
 
-- README failed-experiments table (~line 803, 34 rows):
-  `grep -n '^## Failed / reverted experiments' README.md`
+- Failed-experiments table (~line 2091, 46 rows as of 2026-10-10):
+  `grep -n '^## Failed / reverted experiments' docs/optimizations.md`; rows:
+  `awk '/^## Failed/,/^## Settled/' docs/optimizations.md | grep '^| ' | grep -vc '^| Attempt |'`
 - Any hash here resolves:
   `git show --no-patch --format='%h %ad %s' --date=short <hash>`
 - Revert pairs in fork history:
   `git log --first-parent --oneline upstream/master..HEAD | grep -iE 'revert|reapply|disable|remove'`
-- Prefill still 0 in all three homes (entry 2.1; README fixed
-  2026-07-05): `grep -n PREFILL README.md Info.plist ui/xemu.c`
+- Prefill still 0 in all three homes (entry 2.1; the ledger's
+  `### MoltenVK runtime config` table, Info.plist, ui/xemu.c):
+  `grep -n PREFILL docs/optimizations.md Info.plist ui/xemu.c`
 - Escape hatches cited (REPORTS_SYNC, VTX_EXACT, MAX_QUERIES, ZETA/TEX
-  knobs) still documented: `sed -n '109,125p' README.md`
-- DSP JIT round history + knobs: `grep -n 'EPI_NO_PC\|SENTINEL' docs/dsp-jit-design.md`
+  knobs) still documented:
+  `awk '/^## Runtime escape-hatch/,/^### Build-time/' docs/optimizations.md | grep -n 'REPORTS_SYNC\|VTX_EXACT\|MAX_QUERIES\|ZETA\|TEX_BIND'`
+- DSP JIT round history + knobs: `grep -n 'EPI_NO_PC\|SENTINEL' docs/Finished/dsp-jit-design.md`
 - Sentinel/audit harnesses still in-tree:
   `grep -rn 'XEMU_DSP_JIT_SENTINEL\|PIN_AUDIT' hw/xbox/mcpx/apu/dsp/`
 - Tags cited exist: `git tag -l v0.9 v0.8.153-macos.1`
 - Tag-immutability rule still documented: `grep -n 'delete' docs/RELEASING-macos.md`
-- Settled-negative Future vectors unchanged: `sed -n '846,1026p' README.md`
+- Settled-negative vectors unchanged (~line 2161 as of 2026-10-10):
+  `awk '/^## Settled vectors/,0' docs/optimizations.md`; still-open vectors
+  live in `docs/roadmap.md`
