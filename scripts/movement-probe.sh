@@ -185,9 +185,12 @@ inject up $BWD_SC
 phase backward-end
 inject clear || true
 
-kill $PID 2>/dev/null || true
-sleep 2
-kill -9 $PID 2>/dev/null || true
+# Quit through the monitor, as probe-run.sh and soak-cycles.sh do, so
+# xemu runs its atexit handlers (counter dumps, a PGO generate build's
+# .profraw); a SIGTERM + 2 s SIGKILL could cut them off.
+mon quit > /dev/null 2>&1 || true
+for i in $(seq 1 15); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+kill -0 $PID 2>/dev/null && { echo "probe: quit hung, killing" >&2; kill -9 $PID; }
 PID=""
 
 echo "probe: phases:"
