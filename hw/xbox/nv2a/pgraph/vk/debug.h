@@ -100,7 +100,7 @@ extern int nv2a_vk_dgroup_indent;
  *
  * nv2a_vk_assert() is for internal renderer invariants and is live only in
  * debug builds (see above). Some existing nv2a_vk_assert sites do check
- * guest-driven values (texture shape, VRAM end, primitive mode); in debug
+ * guest-driven values (texture shape, primitive mode); in debug
  * builds they abort the way upstream's live assert()s at the same sites do.
  */
 #define nv2a_vk_bounds_check(x)                                 \

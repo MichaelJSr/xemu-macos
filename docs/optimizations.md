@@ -1180,6 +1180,22 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   bounds check is against the slot, not the whole buffer. Found by the
   2026-09 Windows audit (batch 4, item 1).
 
+- **Texture VRAM-end checks are live in release (2026-10-10).** Three
+  guest-driven bounds in `vk/texture.c` sat in `nv2a_vk_assert`, which
+  release builds compile out: `check_texture_dirty` and the large-texture
+  chunked dirty check pass a range straight to
+  `memory_region_test_and_clear_dirty`, so a texture reaching past VRAM
+  read and cleared dirty bits belonging to other memory (or past the
+  bitmap), and the upload's staging-slot check is the only thing that
+  stops a decoded texture larger than a 256 MiB slot from writing past
+  it. All three are now `nv2a_vk_bounds_check` (31 sites in all), as
+  upstream keeps them live `assert()`s, and `check_texture_dirty`'s
+  inherited off-by-one is fixed: its end is exclusive, so a texture whose
+  last page is VRAM's last page is legal (`<=`, was `<`). A malformed
+  texture now aborts loudly instead of corrupting state, the same choice
+  as the 2026-09-08 bounds-check change. `pgraph_vk_mark_textures_possibly_dirty`
+  keeps its debug-only assert: it only compares ranges.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

@@ -822,7 +822,8 @@ static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
 {
     hwaddr end = TARGET_PAGE_ALIGN(addr + size);
     addr &= TARGET_PAGE_MASK;
-    nv2a_vk_assert(end < memory_region_size(d->vram));
+    /* Guest-driven range into the global dirty bitmap; end is exclusive. */
+    nv2a_vk_bounds_check(end <= memory_region_size(d->vram));
     return memory_region_test_and_clear_dirty(d->vram, addr, end - addr,
                                               DIRTY_MEMORY_NV2A_TEX);
 }
@@ -914,7 +915,10 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
         slot_limit = r->flight[r->current_flight].staging_buffer_limit;
     }
 
-    nv2a_vk_assert(staging->buffer_offset + texture_data_size <= slot_limit);
+    /* texture_data_size is guest-driven (a large mipmapped cubemap can
+     * exceed a whole slot): never write past the slot. */
+    nv2a_vk_bounds_check(staging->buffer_offset + texture_data_size <=
+                         slot_limit);
 
     VkDeviceSize base_offset = staging->buffer_offset;
 
@@ -2069,7 +2073,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                    : vram_end;
                 }
 
-                nv2a_vk_assert(page_end <= memory_region_size(d->vram));
+                nv2a_vk_bounds_check(page_end <= memory_region_size(d->vram));
                 bool dirty = memory_region_test_and_clear_dirty(
                     d->vram, page_start, page_end - page_start,
                     DIRTY_MEMORY_NV2A_TEX);
