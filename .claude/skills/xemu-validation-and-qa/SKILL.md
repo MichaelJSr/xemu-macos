@@ -147,10 +147,10 @@ now has its own counter; re-run the proof against `finish_queries_full`.) That k
 for testing the guard path").
 
 A guard that has never been observed firing is an *assumption*, not a
-defense. `nv2a_vk_assert` is unconditionally compiled out via the
-hardcoded `NV2A_VK_PERF_BUILD 1` (`pgraph/vk/debug.h:66-69`) — in every
-build, including `./build.sh --debug` — so an assert there is
-documentation, not a guard.
+defense. `nv2a_vk_assert` is compiled out of release builds, the ones
+users run (`NV2A_VK_ASSERTS` in `pgraph/vk/debug.h` turns it on only for
+`./build.sh --debug`), so in release an assert there is documentation,
+not a guard.
 
 ### 1.3 Visual-correctness claims
 
@@ -536,7 +536,7 @@ the repo root unless absolute):
 - Fixtures on disk: `ls -lh /usr/local/lib/libMoltenVK.dylib; grep -nE '^(hdd|dvd)_path' ../fixtures/xemu.toml`
 - Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag `v0.13.3` as of 2026-10-10, its count not re-checked): `gh release view v0.13.3 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
 - Owner guard on the tag flow: `grep -n 'repository_owner' .github/workflows/release-on-tag.yml`
-- `nv2a_vk_assert` unconditionally compiled out (hardcoded `NV2A_VK_PERF_BUILD 1`, every build incl. `--debug`): `grep -n -B3 'nv2a_vk_assert' hw/xbox/nv2a/pgraph/vk/debug.h`
+- `nv2a_vk_assert` live only in `--debug` builds (`NV2A_VK_ASSERTS`, follows `XEMU_DEBUG_BUILD`): `grep -n -B3 -A8 'NV2A_VK_ASSERTS' hw/xbox/nv2a/pgraph/vk/debug.h`
 - Installed custom MoltenVK version: `strings /usr/local/lib/libMoltenVK.dylib | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$'`
 - Window-title identity: `grep -nF 'xemu | v%s' ui/xemu.c`
 - Validation-title history (most of it moved with the Changes manifest): `grep -in 'azurik\|conker\|kotor\|battlefield\|vexx\|nevolution' README.md docs/optimizations.md`

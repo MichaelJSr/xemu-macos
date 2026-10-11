@@ -7,6 +7,8 @@
 > fix `285779ce83`, which has no validation route while testing is
 > Azurik-only. The exit-139 experiment continues in
 > [windows-port-2026-09.md](../Campaigns/windows-port-2026-09.md) §9.
+> The `-DNV2A_VK_PERF_BUILD` bisect hint in §8 is obsolete: since
+> 2026-10-10 the switch is `NV2A_VK_ASSERTS`, live in `--debug` builds.
 
 Scope: everything pushed from the Windows box over the weekend. Main
 (`macos-optimizations`) moved `ea9633798d` → `add066354f` (upstream merge,

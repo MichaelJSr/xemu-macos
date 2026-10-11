@@ -223,7 +223,7 @@ staging buffers, the occlusion-query pool) is statically partitioned N
 ways, one partition per slot. **Any new per-something allocation whose
 cadence can change at runtime needs a capacity guard that degrades
 gracefully (submit-and-continue), not just an assert** — because the
-asserts in this file are compiled out in every build (see below).
+asserts in this file are compiled out of release builds (see below).
 
 **Evidence.**
 
@@ -252,14 +252,13 @@ asserts in this file are compiled out in every build (see below).
   guard was added because the old protection, an assert release builds
   strip, let the pool overrun and crash inside MoltenVK's
   visibility-buffer encode.
-- **Why an assert alone isn't enough**: every `nv2a_vk_assert()` in this
-  renderer compiles to `((void)0)` — `hw/xbox/nv2a/pgraph/vk/debug.h:67-73`
-  hardcodes `#define NV2A_VK_PERF_BUILD 1` unconditionally, with no
-  `NDEBUG`/`--debug`/meson-option override anywhere in the tree (verified
-  by grep). **These asserts are stripped in every build of this renderer,
-  including `--debug` builds** — stricter than "release strips asserts."
-  Only plain `assert()` (guest-boundary/DMA-bounds checks) follows normal
-  NDEBUG rules.
+- **Why an assert alone isn't enough**: `nv2a_vk_assert()` is live only in
+  `./build.sh --debug` builds (`NV2A_VK_ASSERTS` in
+  `hw/xbox/nv2a/pgraph/vk/debug.h` follows `XEMU_DEBUG_BUILD`; before
+  2026-10-10 it was hardcoded off in every build). Release builds, the ones
+  users run, compile it out, so a guard that has to hold in release must be
+  real code, like the capacity guard above. Plain `assert()` and
+  `nv2a_vk_bounds_check()` stay live in every build.
 
 **Why this design.** Deferred zpass-report delivery (occlusion results
 now ride the flip and get harvested at slot reclaim instead of being
@@ -1182,7 +1181,7 @@ grep -n "evict_submit_seq\|retired_submit_count" hw/xbox/nv2a/pgraph/vk/surface.
 # Invariant 2 — flight slots, query pool size, perf-build assert stripping
 grep -n "NUM_FLIGHT_SLOTS" hw/xbox/nv2a/pgraph/vk/renderer.h
 grep -n "max_queries_in_flight = 4096" hw/xbox/nv2a/pgraph/vk/reports.c
-grep -n "NV2A_VK_PERF_BUILD" hw/xbox/nv2a/pgraph/vk/debug.h
+grep -n "NV2A_VK_ASSERTS" hw/xbox/nv2a/pgraph/vk/debug.h
 
 # Invariant 3 — primer query still present, prefill still 0
 grep -n "needsVisibilityResultMTLBuffer\|primer_index" hw/xbox/nv2a/pgraph/vk/draw.c

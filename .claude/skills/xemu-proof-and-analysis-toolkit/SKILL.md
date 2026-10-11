@@ -675,13 +675,12 @@ even if the change doesn't touch the pool's size at all.
    (e.g., one slice per flight slot).
 4. If any guard protecting the pool is implemented as an assert,
    check explicitly whether it survives your build configuration. In
-   this renderer, checks wrapped in `nv2a_vk_assert` compile to
-   `((void)0)` whenever `NV2A_VK_PERF_BUILD` is defined
-   (`hw/xbox/nv2a/pgraph/vk/debug.h`) — and as of 2026-07-04 that
-   macro is unconditionally `1` in this tree, meaning these
-   particular checks are **always** stripped, not just in an
-   optimized/release configuration. An assert that's compiled out is
-   documentation, not a guard.
+   this renderer, checks wrapped in `nv2a_vk_assert` are live only in
+   `--debug` builds (`NV2A_VK_ASSERTS` in
+   `hw/xbox/nv2a/pgraph/vk/debug.h`; until 2026-10-10 they were
+   stripped in every build) and compiled out in the release builds
+   users run. An assert that's compiled out is documentation, not a
+   guard.
 5. Where headroom can't be comfortably proven, add a runtime guard
    that degrades gracefully **before** the pool is exhausted (e.g.,
    force an early flush/submit), rather than only enlarging the pool
@@ -792,7 +791,7 @@ Volatile ones, with a one-line re-check each:
 - `pgraph_vk_finish` definition: `grep -n "^void pgraph_vk_finish" hw/xbox/nv2a/pgraph/vk/draw.c`
 - Flight slot count: `grep -n "NUM_FLIGHT_SLOTS" hw/xbox/nv2a/pgraph/vk/renderer.h`
 - `FinishReason` names: `grep -n "VK_FINISH_REASON_" hw/xbox/nv2a/pgraph/vk/renderer.h`
-- `nv2a_vk_assert` strip status: `grep -n "NV2A_VK_PERF_BUILD\|define nv2a_vk_assert" hw/xbox/nv2a/pgraph/vk/debug.h`
+- `nv2a_vk_assert` strip status: `grep -n "NV2A_VK_ASSERTS\|define nv2a_vk_assert" hw/xbox/nv2a/pgraph/vk/debug.h`
 - Query pool sizing / `XEMU_MAX_QUERIES`: `grep -n "max_queries_in_flight\|XEMU_MAX_QUERIES" hw/xbox/nv2a/pgraph/vk/reports.c`
 - Primer query: `grep -n "primer" hw/xbox/nv2a/pgraph/vk/draw.c`
 - DSP JIT diff/audit/sentinel knobs: `grep -n "XEMU_DSP_JIT_DIFF\|XEMU_DSP_JIT_PIN_AUDIT\|XEMU_DSP_JIT_SENTINEL" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`

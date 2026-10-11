@@ -1053,7 +1053,8 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
 - **Guest-driven bounds checks are real in release, on every platform
   (2026-09-08).** `nv2a_vk_bounds_check()` used to compile to
   `if (!(x)) __builtin_unreachable();` whenever `NV2A_VK_PERF_BUILD` was
-  1 — which it always is (`hw/xbox/nv2a/pgraph/vk/debug.h:67`). That is
+  1 — which it always was (the macro was replaced by `NV2A_VK_ASSERTS` on
+  2026-10-10). That is
   not a stripped check but a licence for the optimizer to assume the
   bound, so a guest-controlled violation (a surface size out of
   `NV_PGRAPH` registers exceeding the staging buffer, a register field
@@ -1076,11 +1077,8 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   (`scripts/boot-smoke-corpus.sh` over Azurik, BF2MC, Conker, KOTOR,
   Vexx, NevolutionX). There is deliberately **no env hatch** — a
   guest-driven OOB must not be switchable at runtime; the restore path
-  is compile-time, by editing that single macro. Note
-  `-DNV2A_VK_PERF_BUILD=0` is *not* it: the macro is defined
-  unconditionally in the header, and `nv2a_vk_bounds_check` no longer
-  reads it (only `nv2a_vk_assert`, which stays debug-only by design,
-  does).
+  is compile-time, by editing that single macro, which reads no build
+  switch (`NV2A_VK_ASSERTS` governs only `nv2a_vk_assert`).
 - **volk device-level dispatch on non-Apple (2026-09-08).** With
   `volkLoadInstance()` alone every device entry point is the Vulkan
   loader's trampoline, which re-derives the ICD dispatch table from the
@@ -1137,6 +1135,27 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   crashed. Found by the 2026-09 Windows audit (confirmed finding 1, plan
   batch 3; the batch's other items are still open). With the default
   4096-query pool the guard did not fire in normal play.
+
+- **`nv2a_vk_assert()` is live in debug builds (2026-10-10).** Since
+  `9834214c58` (2026-04) the header hardcoded `NV2A_VK_PERF_BUILD 1`,
+  which compiled the renderer's ~80 internal invariant checks out of
+  every build, `--debug` included; the choice was never measured, and
+  the comments calling the asserts "debug-only" were false. The macro is
+  now `NV2A_VK_ASSERTS`, which follows `XEMU_DEBUG_BUILD` the way
+  `NV2A_STRIP_PROFILE_COUNTERS` already does: `./build.sh --debug` gets
+  real `assert()`s, release builds compile them out, and
+  `-DNV2A_VK_ASSERTS=1`/`=0` overrides either way. The stripped form is
+  `((void)sizeof(!(x)))`, so a stale assert expression still fails to
+  build. Release machine code is unchanged (the assembly of `draw.c`,
+  `surface.c` and `texture.c` compiled with the release flags is
+  byte-identical before and after). Before enabling them, an audit of
+  every call site fixed the three that would have fired on correct
+  behaviour or were undefined-behaviour hints (`bf002d5fa8`) and the
+  query-capacity guard bug (`a825c1ff07`). About 62 of the sites match
+  live `assert()`s in upstream xemu, including some that check
+  guest-driven values, so a debug build now aborts where upstream's
+  release build does; the published `-dbg` bundles become
+  abort-on-invariant builds.
 
 ### MetalFX + presentation
 

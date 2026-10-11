@@ -60,22 +60,34 @@ extern int nv2a_vk_dgroup_indent;
         }                                                     \
     } while (0)
 
-/* Performance build: strip internal invariant asserts from VK hot paths.
- * Guest-boundary checks (VRAM/DMA bounds) must use assert() or
- * nv2a_vk_bounds_check(), both of which stay live in perf builds.
- * Profile counter stripping is in the shared hw/xbox/nv2a/debug.h. */
-#define NV2A_VK_PERF_BUILD 1
-
-#if NV2A_VK_PERF_BUILD
-#define nv2a_vk_assert(x) ((void)0)
+/*
+ * Internal renderer invariants. nv2a_vk_assert() is a real assert() in debug
+ * builds (./build.sh --debug passes -DXEMU_DEBUG_BUILD=1 to every TU) and
+ * compiles to nothing in release builds, where it only type-checks its
+ * argument so a stale expression still fails to build. Override with
+ * -DNV2A_VK_ASSERTS=1 (asserts in a release build) or =0. A check a guest
+ * value can violate belongs in assert() or nv2a_vk_bounds_check(), which stay
+ * live in every build. Profile counter stripping is in the shared
+ * hw/xbox/nv2a/debug.h and follows the same XEMU_DEBUG_BUILD switch.
+ */
+#ifndef NV2A_VK_ASSERTS
+#ifdef XEMU_DEBUG_BUILD
+#define NV2A_VK_ASSERTS 1
 #else
+#define NV2A_VK_ASSERTS 0
+#endif
+#endif
+
+#if NV2A_VK_ASSERTS
 #define nv2a_vk_assert(x) assert(x)
+#else
+#define nv2a_vk_assert(x) ((void)sizeof(!(x)))
 #endif
 
 /*
  * Bounds check for indexing/sizing driven by guest-controlled values.
  *
- * This is a real check in EVERY build, including NV2A_VK_PERF_BUILD: an
+ * This is a real check in EVERY build, release included: an
  * unlikely (statically predicted not-taken) branch plus a loud abort naming
  * the failing expression. It must never compile to __builtin_unreachable():
  * that form is not a no-op but a licence for the optimizer to assume the
@@ -86,8 +98,10 @@ extern int nv2a_vk_dgroup_indent;
  * the upstream plain assert() at these sites costs, and none of the sites is
  * on the per-draw hot path.
  *
- * nv2a_vk_assert() remains debug-only by design: it guards internal renderer
- * invariants that no guest input can violate.
+ * nv2a_vk_assert() is for internal renderer invariants and is live only in
+ * debug builds (see above). Some existing nv2a_vk_assert sites do check
+ * guest-driven values (texture shape, VRAM end, primitive mode); in debug
+ * builds they abort the way upstream's live assert()s at the same sites do.
  */
 #define nv2a_vk_bounds_check(x)                                 \
     do {                                                        \
