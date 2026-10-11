@@ -264,7 +264,7 @@ Status vocabulary:
 | 1 | GPU-frame-cost reduction / draw merging | open (campaign) | Flagship, biggest plausible fps lever; owner-selected |
 | 2 | Push-model present handoff | landed-dark (2026-07-11) | Shipped behind `XEMU_PUSH_PRESENT=1` (Metal, interp off): present-handoff blocks 601/interval → 0, flips/s identical, 47k-comparison refuter clean. Dark pending default-on case (interp-off users only) |
 | 3 | Windows real-hardware Vulkan validation + provoking-vertex closure | open | Gates any same-hardware-class comparison and an unvalidated code path |
-| 4 | Frame-interpolation real depth (flip-time zeta snapshot) | candidate | Direct quality lever on the exact feature the bar names |
+| 4 | Frame-interpolation real depth (flip-time zeta snapshot) | landed dark 2026-07-11; inert on the Azurik fixtures | Direct quality lever on the exact feature the bar names; next step is a resolve-to-scanout variant |
 | 5 | DSP parmove+ALU fusion | **settled (2026-08-04)** | Instruction-neutral by construction — the fold saves 0 insns in every source class (§2.5). Kept as the recorded negative, not as work |
 | 6 | BINK video via VideoToolbox | needs-theory | No in-repo hook yet; CPU-bound premise itself unmeasured |
 | 7 | PAL 50 Hz guest vblank | open | Compat breadth, not a fluidity lever for NTSC fixture titles |
@@ -404,37 +404,37 @@ history today — and a primitive-emulation-affected scene is confirmed
 visually identical (or a documented divergence is filed) between the two
 code paths.
 
-### 2.4 Frame-interpolation real depth (flip-time zeta snapshot) — rank 4, candidate
+### 2.4 Frame-interpolation real depth (flip-time zeta snapshot) — rank 4, landed dark, inert on our fixtures
 
-**Why it falls short.** `XEMU_MFX_REAL_DEPTH=1` feeds the temporal scaler
-the live zeta (depth/stencil) texture instead of synthetic luminance
-depth, but "by present time the single guest zeta buffer typically holds
-the *next* in-progress frame's depth" (`surface.c:1082-1084`) — a known
-limitation, which is exactly why this ships dark (off by default) for A/B
-(`README.md` ~line 555-561). This caps the quality ceiling of the exact
-feature the bar names (MetalFX temporal upscaling/interpolation).
+**What landed (`a93b086f45`, 2026-07-11).** `XEMU_MFX_REAL_DEPTH=1` feeds
+the MetalFX temporal scaler the live zeta, which by present time already
+holds the next frame's depth. Mode `2` fixes that: at FLIP_STALL
+(`pgraph_vk_zeta_snapshot_capture`, recorded into that frame's command
+buffer so it rides the same submission) the display-matching zeta is
+copied into a dedicated exportable snapshot, and the scaler reads the
+snapshot. Cost is one depth copy per flip (~2 µs of PFIFO record time,
+nsprof bucket `ZETA_SNAPSHOT`). Both modes ship dark; the ledger's
+MetalFX entry is the record.
 
-**Asset.** All the plumbing exists: exportable zeta images and the export
-gate (`zeta_export_wanted`, `surface.c:1114-1119`), the real-depth binding
-into the temporal scaler (`metalfx_upscale.m` ~line 686), and a per-flip
-hook already wired into the renderer ops table (`ops.flip_stall`,
-`hw/xbox/nv2a/pgraph/pgraph.h:120`, called every guest flip). This is "add
-one blit at an existing hook," not new infrastructure.
+**Why it does not engage here.** Both modes hand the scaler a zeta only
+when one matches the scaler's input dimensions. Azurik renders 3D at
+twice the scanout width (super-width AA), so no zeta ever matches and
+both modes fall back to synthetic depth (Ranking Addendum 2, item 6).
+With testing Azurik-only, the feature cannot be judged on any fixture we
+run.
 
-**Steps.** (1) Read `surface.c:1081-1119` and the real-depth binding in
-`metalfx_upscale.m` to find exactly where the *live* zeta texture is
-handed to the temporal scaler today. (2) Add a snapshot path invoked from
-`flip_stall`: blit the current zeta into a dedicated snapshot image before
-the next frame's draws touch it, gated behind a new sub-flag so the
-existing live-read opt-in stays available. (3) A/B the two variants on a
-fast-camera-pan scene by eye (the magenta artifact oracle doesn't catch
-ghosting — see `xemu-testing`), plus `nsprof` for the added blit's ms cost.
+**Next step.** A resolve-to-scanout variant: downsample the 2×-wide zeta
+to the scaler's input width inside the same flip-time copy (a compute or
+blit pass into the snapshot), so super-width titles engage. Read
+`pgraph_vk_zeta_snapshot_capture` and the dims check in
+`metalfx_temporal_init`/`metalfx_upscale_tex` first; the snapshot image
+is already persistent and recreated on size change.
 
-**Milestone.** A fast-motion scene shows a described, screenshot-backed
-reduction in temporal-upscale ghosting between live-read and
-flip-snapshotted real depth, and the added blit's cost is measured in
-ms/flip — both on record before proposing the snapshot variant replace the
-live-read opt-in as default.
+**Milestone.** On F8, mode 2 with the resolve engages (no synthetic
+fallback logged) and a fast camera pan shows a described,
+screenshot-backed reduction in temporal-upscale ghosting against
+synthetic depth, with the resolve's cost in ms/flip on record (nsprof
+`ZETA_SNAPSHOT`), before proposing any default change.
 
 ### 2.5 DSP parmove+ALU fusion — rank 5, SETTLED 2026-08-04
 

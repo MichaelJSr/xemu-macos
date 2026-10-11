@@ -219,67 +219,37 @@ proceeding. In-range numbers only mean the scene and build are sane; they
 do not say the scene is GPU-bound. That is Phase 2's question, and the
 2026-07 campaign found the opposite (see the status banner).
 
-## Phase 1 — Attribution instrumentation (code change; additive diagnostics)
+## Phase 1 — Attribution instrumentation (landed 2026-07-04, `038f596332`)
 
-**Change class**: additive, `XEMU_NV2A_NSPROF`-gated diagnostics only — no
-behavior change. Still goes through normal review; see
-`xemu-change-control` for what evidence an additive-diagnostics change
-needs (much less than a behavior change, but it's still a commit).
+**Status**: built. The counters below exist and are gated by
+`XEMU_NV2A_NSPROF` like every other nsprof event, so Phase 1 is now only
+a capture: rebuild nothing, run 1.2. They were used for the 2026-07-04
+F5 verdict (zero multi-subrange draws, 10.6% merge candidates); F8 has
+never been captured with them.
 
-### 1.1 What question each new counter answers
+### 1.1 What question each counter answers
 
 Phase 0 tells you fps/draws/passes are in the expected envelope. It does
-not tell you *which* mechanism (A/B/C/D below) has room to work. Add five
-new `enum NsprofEvent` values to `hw/xbox/nv2a/nsprof.h` (append before
-`NSPROF_EV__COUNT`, following the existing naming) and register their
-labels in `hw/xbox/nv2a/nsprof.c`'s `event_names[]`, matching the existing
-`nsprof_event(NSPROF_EV_...)` call-site pattern already used for
-`NSPROF_EV_RENDERPASS`/`NSPROF_EV_PIPELINE_BIND`/`NSPROF_EV_DRAW`:
+not tell you *which* mechanism (A/B/C/D below) has room to work. These
+`enum NsprofEvent` values in `hw/xbox/nv2a/nsprof.h` (labels in
+`nsprof.c`'s `event_names[]`) answer that:
 
-| New event | Fires where | Answers |
+| Event | Fires where | Answers |
 |---|---|---|
-| `NSPROF_EV_VK_DRAW_CALL` | Every actual `vkCmdDraw`/`vkCmdDrawIndexed` call site in `pgraph_vk_flush_draw` (7 sites: `draw.c:3101,3113` [inside the per-subrange loop — one call per iteration] `,3178,3237,3241,3306,3311` — re-locate with `grep -n vkCmdDraw hw/xbox/nv2a/pgraph/vk/draw.c`, which matches both the plain and `Indexed` forms; one further match at `draw.c:2673` is the partial-color-clear helper triangle in `pgraph_vk_clear_surface`, a different function outside `flush_draw` that `NSPROF_EV_DRAW` also doesn't count — leave it out of this counter to keep the ratio below clean) | True Vulkan draw-call count per flip, vs. `NSPROF_EV_DRAW`'s guest-block count. The gap between them is exactly mechanism A's opportunity (row 13 above). |
-| `NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE` | Once per `pgraph_vk_flush_draw` call where the non-emulated `draw_arrays` loop runs with `pg->draw_arrays_length > 1` (`draw.c:3104`, the `else` branch guarding the per-subrange `vkCmdDraw` loop) | How often mechanism A1 (same-block subrange coalescing) even applies. |
-| `NSPROF_EV_DRAW_MERGE_IDENTICAL` | At the top of `begin_draw` (`draw.c:2283`, before line 2309): compare this draw's about-to-be-used pipeline pointer + `need_bind_ubo`/`need_bind_tex` outcome + vertex-buffer bind args against a small static "previous draw fingerprint" struct captured at the end of the *previous* `begin_draw` call (after line 2410). Bucket 1: pipeline same, descriptors same, vertex buffer+offset *also* identical. | Draws already fully deduped by existing caches (rows 3/4/6 above) — zero new opportunity here. |
-| `NSPROF_EV_DRAW_MERGE_CANDIDATE` | Same comparison, bucket 2: pipeline same, descriptors same, vertex buffer *handle* same but **offset differs**. | This is the literal "pipeline == previous && descriptors unchanged && only vertex offsets differ" question mechanism A2 needs answered. |
-| `NSPROF_EV_DRAW_STATE_CHANGED` | Same comparison, bucket 3: anything else (different pipeline, different descriptor advance, or a different vertex buffer entirely). | The floor mechanism A2 cannot touch. |
+| `NSPROF_EV_VK_DRAW_CALL` | Every actual `vkCmdDraw`/`vkCmdDrawIndexed` in `pgraph_vk_flush_draw` (re-locate with `grep -n vkCmdDraw hw/xbox/nv2a/pgraph/vk/draw.c`; the partial-color-clear triangle in `pgraph_vk_clear_surface` is deliberately not counted) | True Vulkan draw-call count per flip, vs. `NSPROF_EV_DRAW`'s guest-block count. The gap is mechanism A's opportunity (row 13 above). |
+| `NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE` | Once per `pgraph_vk_flush_draw` call where the non-emulated `draw_arrays` loop runs with `pg->draw_arrays_length > 1` | How often mechanism A1 (same-block subrange coalescing) even applies. |
+| `NSPROF_EV_DRAW_MERGE_IDENTICAL` | `nsprof_merge_classify()` in `draw.c`, called from `end_draw`: same pipeline as the previous block, same render pass, no descriptor-set advance, and identical vertex-buffer binds | Draws already deduped by the existing caches (rows 3/4/6 above): no new opportunity. |
+| `NSPROF_EV_DRAW_MERGE_CANDIDATE` | Same classifier: as above, but the vertex buffers are the same handles at different offsets | The literal "pipeline == previous && descriptors unchanged && only vertex offsets differ" question mechanism A2 needs answered. |
+| `NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF` | Subset of the candidates whose push-constant payload also changed | Candidates that would need per-draw uniform data to merge. |
+| `NSPROF_EV_DRAW_STATE_CHANGED` | Same classifier, everything else (different pipeline or pass, a descriptor advance, different vertex buffers) | The floor mechanism A2 cannot touch. |
 
-Also add four pass-cause tags (reuse the existing `NSPROF_EV_RENDERPASS`
-event's *sites* — tag which caller triggered the pass end that preceded
-each subsequent `NSPROF_EV_RENDERPASS`) at the four `end_render_pass` /
-`pgraph_vk_ensure_not_in_render_pass` call groups: surface rebind
-(`draw.c:2245-2257`), clear begin/end (`draw.c:2302-2307,2434-2439`),
-texture-upload compute-unswizzle interleave (`texture.c:976-1114`), and
-everything else routed through `pgraph_vk_begin_nondraw_commands`
-(surface creation, render-to-texture — `surface.c:1239`,
-`texture.c:1210,1418`). This feeds mechanism C.
+Four pass-cause tags record which caller ended the render pass before
+each new one: `NSPROF_EV_RENDERPASS_CAUSE_SURFACE` (render-target
+rebind), `_CLEAR` (clear boundary), `_TEXUPLOAD` (compute-unswizzle
+interleave during a texture upload) and `_OTHER` (surface creation,
+render-to-texture and other non-draw commands). This feeds mechanism C.
 
-### 1.2 Implementation sketch (small, mechanical)
-
-```c
-/* nsprof.h: append before NSPROF_EV__COUNT */
-NSPROF_EV_VK_DRAW_CALL,
-NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE,
-NSPROF_EV_DRAW_MERGE_IDENTICAL,
-NSPROF_EV_DRAW_MERGE_CANDIDATE,
-NSPROF_EV_DRAW_STATE_CHANGED,
-NSPROF_EV_RENDERPASS_CAUSE_SURFACE,
-NSPROF_EV_RENDERPASS_CAUSE_CLEAR,
-NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD,
-NSPROF_EV_RENDERPASS_CAUSE_OTHER,
-```
-
-Call `nsprof_event(NSPROF_EV_VK_DRAW_CALL)` immediately before/after each
-of the 7 draw-call sites; call
-`nsprof_event(NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE)` once when entering the
-per-subrange loop with length > 1. For the merge-fingerprint comparison,
-add a small file-static struct in `draw.c` next to the other per-CB
-caches (it resets the same way `last_vertex_bind_valid` etc. do, in
-`pgraph_vk_begin_command_buffer`) — this is diagnostics-only, it must not
-change control flow, only observe the values `begin_draw` was already
-going to compute.
-
-### 1.3 Capture and the decision fork
+### 1.2 Capture and the decision fork
 
 Same capture procedure as Phase 0, rebuilt binary. Compute, per flip
 (average over the same ≥10 post-load intervals):
