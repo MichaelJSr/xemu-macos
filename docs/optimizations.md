@@ -1650,8 +1650,10 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   file disappears. Retrain per the build-knob table.
 - macOS 26 build fixes: `download-macos-libs.py` uses
   `os.path.abspath` and repairs stale `prefix=` lines in vendored
-  `.pc` files; `build.sh` strips all `LC_RPATH` before
-  `dylibbundler` and adds the single correct one.
+  `.pc` files (and, since 2026-10-10, the absolute `libintl.h`
+  include in `gi18n.h`, which broke the first build after the checkout
+  moved); `build.sh` strips all `LC_RPATH` before `dylibbundler` and
+  adds the single correct one.
 - Ad-hoc codesign by default (MAP_JIT works);
   `XEMU_CODESIGN_ENTITLEMENTS=1` opts into hardened runtime +
   `xemu.entitlements`. For notarized distribution use

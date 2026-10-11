@@ -219,8 +219,30 @@ class LibInstaller:
 				with open(pc_path, 'w') as f:
 					f.write(''.join(lines))
 
+	def repair_gi18n_include(self):
+		"""Re-point gi18n.h's absolute libintl.h include when the tree has moved.
+
+		install_pkg() bakes the extract path into this include when glib2 is
+		first unpacked, so moving the checkout leaves it pointing at the old
+		location and every C++ file that includes gi18n.h fails to compile.
+		"""
+		gi18n = os.path.join(self._extract_path, 'opt', 'local', 'include',
+		                     'glib-2.0', 'glib', 'gi18n.h')
+		if not os.path.isfile(gi18n):
+			return
+		suffix = '/opt/local/include/libintl.h'
+		with open(gi18n, 'r') as f:
+			text = f.read()
+		fixed = re.sub(r'#include <([^>]*)' + re.escape(suffix) + '>',
+		               '#include <' + self._extract_path + suffix + '>', text)
+		if fixed != text:
+			print('[*] Repairing stale libintl.h include in gi18n.h')
+			with open(gi18n, 'w') as f:
+				f.write(fixed)
+
 	def install_pkgs(self, requested):
 		self.repair_pc_prefixes()
+		self.repair_gi18n_include()
 		self._queue.extend(requested)
 		while len(self._queue) > 0:
 			pkg_name = self._queue.pop(0)
