@@ -78,7 +78,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 1.19 | Sticky host-FPU bracket: SSE parity -> +1.9 | shipped |
 | 1.20 | L2 victim jump-cache | settled-negative (instrument-killed) |
 | 1.21 | Texture/sampler LRU eviction raced pending submissions | shipped-after-fix |
-| 1.22 | TB range-check re-add (XEMU_TB_RANGE_INV) | settled-negative (instrument-killed) |
+| 1.22 | TB range-check re-add (XEMU_TB_RANGE_INV) | superseded-shipped (proxy-killed, never fps-measured; code removed 2026-10-10) |
 | 1.23 | Sub-page code dirty tracking (+14-25% fps; model undershot 15×) | shipped |
 | 1.24 | xpage full-flush backstop = the v0.11 "new-area lag" (139 tb_flushes/20 s; unlink registry fix) | shipped-after-fix |
 | 7.5 | BQL-free MMIO dispatch (PFB/USER lockless_io) | shipped (fps-parity, jitter win) |
@@ -722,12 +722,14 @@ tree — so pair stricter refusal guards with a forward-progress
 fallback.
 **Reopen if**: n/a (correctness fix, no tradeoff).
 
-## 1.22 TB byte-range invalidation filter — instrument-killed, and it answered why upstream removed it
+## 1.22 TB byte-range invalidation filter — proxy-killed, then superseded by sub-page tracking (1.23)
 
-**Status**: settled-negative (2026-07-11; counters killed it before an
-fps A/B was spent — the 1.20 pattern). The knob ships dark
-(`XEMU_TB_RANGE_INV=1`) as documentation + A/B hatch; `XEMU_INV_PROF=1`
-is the counter set that decided it.
+**Status**: superseded-shipped (2026-07-11; counters killed it before an
+fps A/B was spent — the 1.20 pattern — and 1.23 shipped the same day).
+The knob (`XEMU_TB_RANGE_INV=1`) shipped dark and its code was removed
+on 2026-10-10. It was built in `69636c84a7`, which also added the live
+`(b')` counters: never revert it. `XEMU_INV_PROF=1` is the counter set
+that decided it and still prints the `(b)`/`(b')` lines.
 **The idea**: XBOX builds invalidate every TB on a written code page
 (`#ifndef XBOX` skips upstream's byte-range overlap check,
 tb-maint.c). INV_PROF measured the false-invalidation share at **100%**
@@ -742,18 +744,26 @@ alive and every subsequent data write to that page traps forever, each
 trap paying the `physical_memory_test_and_clear_dirty` TLB walk (the
 profile's 2.0%) plus a scan of the now-unbounded per-page TB list.
 Pre-registered kill threshold ">5x traps = negative"; measured 25x.
+**Correction (Gate-0, same day)**: the 25.2x was never reproduced. The
+timed run measured invalidating traps 190k → 1.56M (9.3x per second)
+and total `notdirty_write` calls only 1.89x. The body cost rose +0.7%
+of a vCPU thread, all of it the O(N) scan (816 ns/call); the rest of
+the body got cheaper (285.8 vs 530.9 ns), because a page that stays
+protected skips the `tlb_set_dirty` walk. The ">5x" proxy was an
+artifact (1.23 lesson 1), and the filter was never fps-measured.
 **The recovered answer to audit-F3's open question**: base-xemu's
-removal of the check (`6ea11938b2e`, no rationale recorded) was
-deliberate performance work — on the Xbox's data-shares-a-code-page
-pattern, whole-page invalidation makes the next ~25 writes/epoch free.
-**The real lever this points at**: sub-page dirty tracking — stop the
+removal of the check (`703566ce33`, 2021-10-04, no rationale recorded)
+was most likely performance work — `c1e4e87f5f` added the
+invalidated-TB recycle cache 20 days later, and on the Xbox's
+data-shares-a-code-page pattern whole-page invalidation makes the next
+~25 writes/epoch free.
+**The real lever this pointed at**: sub-page dirty tracking — stop the
 non-code write from *trapping* instead of filtering what it
-invalidates; design sketch with the archaeology-1.9-class race
-analysis parked in the campaign records (wrong-code-hang failure class;
-needs refuter-first treatment before any implementation).
+invalidates. It shipped the same day, refuter first (1.23).
 **Reopen if**: a workload appears with true SMC or partial-overlap
 writes (INV_PROF false-share well below 100%) — the filter's tradeoff
-flips only when invalidations stop being pure false sharing.
+flips only when invalidations stop being pure false sharing. Restore it
+by reverting the 2026-10-10 removal commit.
 
 ## 1.23 Sub-page code dirty tracking — the 1.22 lever shipped, and the model undershot 15×
 

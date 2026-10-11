@@ -116,15 +116,6 @@ static inline double xemu_inv_tick_ns(void)
 }
 
 /*
- * XEMU_TB_RANGE_INV=1 (default off): re-apply the exact upstream byte-range
- * overlap filter inside the XBOX whole-page invalidation, so only TBs whose
- * bytes actually overlap the written range are invalidated. Correctness-safe
- * (a TB whose bytes were not written cannot have been modified); runtime-gated
- * so it can be A/B'd against the default whole-page behavior on one binary.
- */
-bool xemu_tb_range_inv_on(void);
-
-/*
  * Sub-page dirty tracking (docs/Finished/subpage-gate0-prediction.md, arm (a))
  * fast-skips whole-page invalidation for a data store that misses every code
  * sub-block. Default on since 2026-07-11; XEMU_SUBPAGE_DIRTY=0 restores
@@ -149,7 +140,7 @@ extern uint64_t xemu_inv_by_src[XEMU_INV_SRC_MAX];
 extern uint64_t xemu_inv_range_evals;   /* overlap tests evaluated (cost proxy) */
 extern uint64_t xemu_inv_false_share;    /* invalidations that did NOT overlap */
 
-/* (b') trap-frequency (the tlb_unprotect_code tradeoff of the range filter) */
+/* (b') trap-frequency (the tlb_unprotect_code tradeoff of keeping TBs alive) */
 extern uint64_t xemu_inv_traps;          /* notdirty writes reaching a code page */
 extern uint64_t xemu_inv_unprotect;      /* pages emptied of TBs -> unprotected */
 

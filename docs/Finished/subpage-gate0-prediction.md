@@ -13,7 +13,9 @@ pre-registered inequalities above them are frozen and were not edited to fit.
 > pairs); arm (b) shipped default-on 2026-07-18 (`ede35b84f9`). §5's
 > "left to the orchestrator" items were settled by those commits;
 > receipts are in the [ledger](../optimizations.md). The original design
-> sketch is the appendix at the end.
+> sketch is the appendix at the end. The `XEMU_TB_RANGE_INV` knob that
+> §0 and §3 measure was removed from the code on 2026-10-10, and §0's
+> "197k→4.98M traps/5s" are per-run totals, not per-5 s rates.
 
 ## 0. The epoch this competes against (why RANGE_INV died — archaeology 1.22)
 
