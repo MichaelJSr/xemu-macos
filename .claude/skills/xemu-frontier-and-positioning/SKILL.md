@@ -289,8 +289,8 @@ them; see those tables directly and `xemu-failure-archaeology`.
 (tile-based deferred renderer — Apple GPUs load/store the whole tile's
 memory every pass, so pass count is first-order) floor for this scene
 shape: 14 passes/flip against 408-485 draws/flip in heavy in-game scenes
-(README, 2026-07-04; the F8 anchor `vm-20260704173701` now reads ~877
-draws/flip as of 2026-10-10). The next ceiling is per-draw CPU cost across those
+(README, 2026-07-04; the F8 anchor `vm-20260704173701`, retired
+2026-10-11, read ~877 draws/flip on 2026-10-10). The next ceiling is per-draw CPU cost across those
 hundreds of draws — pipeline binds, descriptor updates, vertex-state
 checks — not pass count. Owner-identified target (2026-07-04), not yet
 attempted.

@@ -1,6 +1,6 @@
 ---
 name: xemu-gpu-frame-campaign
-description: Executable, decision-gated campaign for cutting GPU work and per-draw CPU cost per frame in xemu-macos's NV2A Vulkan renderer, for when the fps plateau in heavy in-game scenes (2026-07 post-occlusion-rework baseline ~38.6 fps, 408-485 draws/flip, ~14 render passes/flip; the heavy anchor is now F8 at ~877 draws/flip, ~48 fps as of 2026-10-10) needs to move again. Load this when asked to reduce draw count / coalesce draws / batch vkCmdDraw calls, cut render-pass count further, profile the PFIFO thread for per-draw CPU cost, evaluate vkCmdDrawMultiEXT or VK_EXT_multi_draw, revive the "GPU frame-cost campaign menu" row in docs/optimizations.md Settled vectors on a GPU-bound heavy scene, or generally push fps in a draws/flip > 100 scene. Every phase is a measurement gate with a named branch on miss — this is not a place to eyeball a frame and guess. Do NOT load this for CPU-side wait/fence-policy tuning in isolation (settled dead end, see Fenced-off wrong paths below) or for a specific crash/artifact/regression symptom (xemu-debugging-playbook).
+description: Executable, decision-gated campaign for cutting GPU work and per-draw CPU cost per frame in xemu-macos's NV2A Vulkan renderer, for when the fps plateau in heavy in-game scenes (2026-07 post-occlusion-rework baseline ~38.6 fps, 408-485 draws/flip, ~14 render passes/flip; the heavy anchor is now azurik-heavy-f1, not measured yet; the retired F8 read ~877 draws/flip, ~48 fps as of 2026-10-10) needs to move again. Load this when asked to reduce draw count / coalesce draws / batch vkCmdDraw calls, cut render-pass count further, profile the PFIFO thread for per-draw CPU cost, evaluate vkCmdDrawMultiEXT or VK_EXT_multi_draw, revive the "GPU frame-cost campaign menu" row in docs/optimizations.md Settled vectors on a GPU-bound heavy scene, or generally push fps in a draws/flip > 100 scene. Every phase is a measurement gate with a named branch on miss — this is not a place to eyeball a frame and guess. Do NOT load this for CPU-side wait/fence-policy tuning in isolation (settled dead end, see Fenced-off wrong paths below) or for a specific crash/artifact/regression symptom (xemu-debugging-playbook).
 ---
 
 # GPU frame-cost reduction campaign
@@ -160,8 +160,8 @@ pgrep -fl xemu || echo "no other xemu running — clear to proceed"
 ```bash
 SOCK=/tmp/xemu-campaign-mon.sock
 rm -f "$SOCK"
-# Heavy-scene snapshot: the F8 anchor (re-check the tag in ../fixtures/README.md)
-SNAP=vm-20260704173701
+# Heavy-scene snapshot: the primary heavy anchor (re-check the tag in ../fixtures/README.md)
+SNAP=azurik-heavy-f1
 echo "using snapshot: $SNAP"   # confirm before proceeding
 XEMU_NV2A_NSPROF=1 "$SCRATCH/xemu-campaign.app/Contents/MacOS/xemu" \
     -config_path "$SCRATCH/xemu.toml" -monitor unix:$SOCK,server,nowait \
@@ -196,22 +196,24 @@ counter row (absent entirely if zero events — this is expected).
 log-parsing convenience for this output — check there before hand-parsing
 a long capture.)
 
-**Gate:** the snippet loads the F8 anchor (`vm-20260704173701`, the only
-active heavy scene). Only its draws/flip and fps are on record (~877
-draws/flip as of 2026-10-10; ~48 fps on a quiet box since the 2026-08-04
-wave, both per `../fixtures/README.md`). The 2026-07 envelope this gate
-was written against (408-485 draws/flip, ~38.6 fps, ≈14 passes/flip,
-~2.3 ms/flip fence_wait) came from a savestate that no longer exists and
-does not transfer. **Re-establish all five numbers on F8 before gating:**
+**Gate:** the snippet loads the primary heavy anchor (`azurik-heavy-f1`,
+which replaced F8 `vm-20260704173701` on 2026-10-11). Nothing is on
+record for it yet. F8 read ~877 draws/flip (2026-10-10) and ~48 fps on a
+quiet box (since the 2026-08-04 wave), both per `../fixtures/README.md`;
+those numbers belong to a different scene and do not transfer, and
+neither does the 2026-07 envelope this gate was written against
+(408-485 draws/flip, ~38.6 fps, ≈14 passes/flip, ~2.3 ms/flip
+fence_wait). **Establish all five numbers on the anchor before gating:**
 take two clean Phase 0 captures on a quiet box, write them into the
-campaign log as the F8 envelope, and only then judge the rows below.
+campaign log as the anchor's envelope, and only then judge the rows
+below.
 
-| Metric | Pass envelope (F8) | On miss |
+| Metric | Pass envelope (heavy anchor) | On miss |
 |---|---|---|
-| draws/flip | ~877 (as of 2026-10-10); re-measure and take your capture as the reference | ~3 draws/flip → wrong scene (menu/title card); far off ~877 → wrong tag or a scene drift; reload via `xemu-testing`'s scene-identity check, not this campaign |
-| render passes/flip | Not yet recorded for F8: establish it. Expect a small, stable number (the 2026-07 scene ran ≈14) | Dozens to hundreds → a regression reintroduced per-draw pass teardown or a new non-draw-command interleave; **stop, this is `xemu-debugging-playbook` + `xemu-failure-archaeology`'s occlusion-rework saga, not a campaign target** |
-| fps | ~48 on a quiet box (since the 2026-08-04 wave) | Materially lower with passes/draws in-range → something regressed CPU-side (fence_wait, a FINISH_* event spike) or the box is not quiet; triage via `xemu-debugging-playbook` before starting this campaign |
-| fence_wait ms/flip | Not yet recorded for F8: establish it (the 2026-07 scene's floor was ~2.3) | Well above your own two-capture floor with passes stable → new stall source; diagnose first |
+| draws/flip | Not yet recorded: take your capture as the reference | ~3 draws/flip → wrong scene (menu/title card); far off your reference → wrong tag or a scene drift; reload via `xemu-testing`'s scene-identity check, not this campaign |
+| render passes/flip | Not yet recorded: establish it. Expect a small, stable number (the 2026-07 scene ran ≈14) | Dozens to hundreds → a regression reintroduced per-draw pass teardown or a new non-draw-command interleave; **stop, this is `xemu-debugging-playbook` + `xemu-failure-archaeology`'s occlusion-rework saga, not a campaign target** |
+| fps | Not yet recorded: establish it (F8 ran ~48 on a quiet box) | Materially lower with passes/draws in-range → something regressed CPU-side (fence_wait, a FINISH_* event spike) or the box is not quiet; triage via `xemu-debugging-playbook` before starting this campaign |
+| fence_wait ms/flip | Not yet recorded: establish it (the 2026-07 scene's floor was ~2.3) | Well above your own two-capture floor with passes stable → new stall source; diagnose first |
 | pipeline_gen events | ≈0 | Nonzero and climbing → pipeline cache is thrashing (state churn or a cache-persistence regression); unrelated prerequisite fix needed first |
 
 Record all five numbers in the campaign log (template at the end) before
@@ -593,9 +595,10 @@ extra subrange. Mechanism A1 (concatenate the subranges' indices into
 one `vkCmdDrawIndexed`) is strictly better on MoltenVK by construction:
 one Metal draw instead of N.
 
-**Kill criterion**: met — do not wire D. The one open fact is F8's
-`da_multi_subrange` (measured 0 only on F5); a zero-code
-`XEMU_NV2A_NSPROF=1` capture on F8 closes it, and if it ever reads large
+**Kill criterion**: met — do not wire D. The one open fact is the heavy
+anchor's `da_multi_subrange` (measured 0 only on F5; never read on F8,
+retired 2026-10-11); a zero-code `XEMU_NV2A_NSPROF=1` capture on
+`azurik-heavy-f1` closes it, and if it ever reads large
 the follow-up is A1, never D. On a future MoltenVK pin bump, re-check
 that the loop above still unrolls (a real batching implementation would
 reopen this).
@@ -701,8 +704,9 @@ Notes: <anything that didn't fit the expected envelope, even if not blocking>
 Every fact above was verified against `cf85e96597` (v0.9, 2026-07-04, tag
 `v0.9`). Repo-state note, 2026-10-10 at `b7e2752589` (latest tag
 `v0.13.3`): the scene numbers here are v0.9-era history — the heavy
-anchor is now F8 `vm-20260704173701` (~877 draws/flip as of 2026-10-10,
-~48 fps on a quiet box since the 2026-08-04 wave; `../fixtures/README.md`,
+anchor was F8 `vm-20260704173701` (~877 draws/flip as of 2026-10-10,
+~48 fps on a quiet box since the 2026-08-04 wave) until 2026-10-11 and is
+now `azurik-heavy-f1`, not measured yet (`../fixtures/README.md`,
 roadmap in `docs/roadmap.md`), and Mechanism D's MoltenVK blocker and
 the Phase 0 gate were rewritten the same day; re-run Phase 0
 before citing any figure as current. Re-verify before trusting this skill on a

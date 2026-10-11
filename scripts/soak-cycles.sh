@@ -1,19 +1,20 @@
 #!/bin/zsh
-# Arm (b) promotion cycle-soak: boot once, alternate loadvm f8/f5 with a
+# Arm (b) promotion cycle-soak: boot once, alternate loadvm A/B with a
 # dwell between loads, every would-skip store refute-validated (mode 2).
 # Exercises xemu_sf_clear_all + mirror resync across tb_remove_all — the
 # loadvm reload hazard class. Ends with a clean monitor `quit` so the
 # atexit refute dump (total/VIOLATIONS) lands in run.log (SIGTERM would
 # skip atexit and lose it).
 #   soak-cycles.sh <app> <outdir> [cycles=3] [dwell=10]
-# The two tags default to the F8 heavy anchor and F5; override with
-# SOAK_SNAP_A / SOAK_SNAP_B (qcow2 tags, not F-key names).
+# The two tags default to the heavy anchor azurik-heavy-f1 and F5
+# (vm-20260704032357); override with SOAK_SNAP_A / SOAK_SNAP_B (qcow2
+# tags, not F-key names).
 set -e
 APP_SRC=${1:?app}; OUT=${2:?outdir}; CYC=${3:-3}; DWELL=${4:-10}
 CONFIG_SRC=${XEMU_TEST_CONFIG:-${0:a:h:h:h}/fixtures/xemu.toml}
 [[ -f $CONFIG_SRC ]] || { echo "soak-cycles: no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
-F8=${SOAK_SNAP_A:-vm-20260704173701}
-F5=${SOAK_SNAP_B:-vm-20260704032357}
+SNAP_A=${SOAK_SNAP_A:-azurik-heavy-f1}
+SNAP_B=${SOAK_SNAP_B:-vm-20260704032357}
 mkdir -p $OUT
 WORK=$OUT/work.$$
 mkdir -p $WORK
@@ -60,11 +61,11 @@ EOF
 
 for (( c = 1; c <= CYC; c++ )); do
   kill -0 $PID 2>/dev/null || { echo "soak-cycles: xemu died in cycle $c"; exit 1; }
-  echo "cycle $c: loadvm f8 ($F8)"; mon "loadvm $F8" > $OUT/load_${c}_f8.out 2>&1
-  grep -qi error $OUT/load_${c}_f8.out && { echo "soak-cycles: loadvm f8 failed"; exit 1; }
+  echo "cycle $c: loadvm a ($SNAP_A)"; mon "loadvm $SNAP_A" > $OUT/load_${c}_a.out 2>&1
+  grep -qi error $OUT/load_${c}_a.out && { echo "soak-cycles: loadvm a failed"; exit 1; }
   sleep $DWELL
-  echo "cycle $c: loadvm f5 ($F5)"; mon "loadvm $F5" > $OUT/load_${c}_f5.out 2>&1
-  grep -qi error $OUT/load_${c}_f5.out && { echo "soak-cycles: loadvm f5 failed"; exit 1; }
+  echo "cycle $c: loadvm b ($SNAP_B)"; mon "loadvm $SNAP_B" > $OUT/load_${c}_b.out 2>&1
+  grep -qi error $OUT/load_${c}_b.out && { echo "soak-cycles: loadvm b failed"; exit 1; }
   sleep $DWELL
 done
 

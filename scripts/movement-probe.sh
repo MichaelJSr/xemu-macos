@@ -3,10 +3,11 @@
 #
 #   scripts/movement-probe.sh <outdir> [VAR=V ...]
 #
-# One run: boot -> monitor loadvm F8 -> settle 15 s -> hold FORWARD 20 s
-# into unexplored space (first-visit streaming) -> rest 5 s -> hold
-# BACKWARD 20 s through the just-explored route (assets resident = the
-# built-in control) -> screenshot -> quit.
+# One run: boot -> monitor loadvm azurik-stream-e2 -> settle 15 s -> hold
+# FORWARD 20 s into unexplored space (first-visit streaming) -> rest 5 s
+# -> hold BACKWARD 20 s through the just-explored route (assets resident
+# = the built-in control) -> screenshot -> quit. MOVEMENT_SNAP overrides
+# the tag.
 #
 # Static savestate A/Bs structurally cannot see first-visit costs (the
 # v0.11 new-area-lag shipped exactly that way), so this probe is the
@@ -28,7 +29,7 @@ set -e
 
 ROOT=${0:a:h:h}
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
-SNAP=${MOVEMENT_SNAP:-vm-20260704173701}
+SNAP=${MOVEMENT_SNAP:-azurik-stream-e2}
 FWD_SC=${MOVEMENT_FWD_SC:-26}    # W = left-stick up (owner bindings)
 BWD_SC=${MOVEMENT_BWD_SC:-22}    # S = left-stick down
 

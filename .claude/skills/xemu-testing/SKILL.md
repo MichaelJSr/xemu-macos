@@ -110,8 +110,8 @@ citable, never arms from different experiments.
   corrected F8 census is in `docs/Finished/roadmap-closed-items.md`,
   "Ranked item 1"). Since 2026-10-10 the fixture config binds no
   F-keys, so there is nothing to map from: pass the tag from the
-  `../fixtures/README.md` table (`vm-20260704173701` = F8,
-  `vm-20260704032357` = F5). As of 2026-10-10 `bench-abx.sh` rejects a
+  `../fixtures/README.md` table (`vm-20260704173701` = F8, retired
+  2026-10-11 for `azurik-heavy-f1`; `vm-20260704032357` = F5). As of 2026-10-10 `bench-abx.sh` rejects a
   bare `F5`-`F8` name up front, and `bench-savestate-ab.sh`,
   `probe-run.sh`, `soak-cycles.sh` and `movement-probe.sh` grep the
   monitor reply for `error` and mark the run DEAD or exit 1; a
