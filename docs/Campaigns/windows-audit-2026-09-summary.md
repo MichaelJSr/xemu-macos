@@ -30,6 +30,12 @@ Known supersessions:
   the GL and Vulkan flip hooks are mutually exclusive. `eb971f860d`
   landed the GL hook and deliberately left the Vulkan call site
   alone; details in the bracketed note on batch 10 below.
+- **CONFIRMED finding 9, in batch 3 (the REPORTS_FULL capacity guard in
+  `begin_draw()`, `framebuffers[-1]`) is fixed as of 2026-10-10**
+  (`a825c1ff07`): the guard runs at the top of `begin_pre_draw()` with
+  its own `QUERIES_FULL` reason. Batch 3's other items are still open;
+  its "turn the two dead nv2a_vk_asserts into real asserts" step is
+  covered by debug builds running `nv2a_vk_assert` since `45d4a2d656`.
 - **PLAUSIBLE finding 6 and batch 12's `XEMU_HARDENING` hoist are void
   as of 2026-10-10.** The hoist landed in `5dfde3356d`, then the knob
   was removed from `build.sh`. The skip arm on any platform is now
