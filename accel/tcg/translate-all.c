@@ -294,8 +294,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tb = inv_tb_htable_lookup(cpu, s);
 #if defined(XBOX)
     if (unlikely(xemu_inv_prof_on())) {
-        extern TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(
-            CPUState *cpu, TCGTBCPUState s);
         xemu_inv_recycle_attempts++;
         if (tb) {
             xemu_inv_recycle_hits++;

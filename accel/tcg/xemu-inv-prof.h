@@ -23,6 +23,8 @@
 #ifndef XEMU_INV_PROF_H
 #define XEMU_INV_PROF_H
 
+#include "accel/tcg/tb-cpu-state.h"
+
 /* Invalidation source buckets (index into xemu_inv_by_src). */
 enum {
     XEMU_INV_SRC_OTHER = 0,   /* unattributed / setup */
@@ -181,5 +183,10 @@ extern uint64_t xemu_inv_retmemo_emitted;   /* inline ret-memo exits */
  * two guest pages (cpu-exec.c tb_page_addr1 guard) — sizes the xpage
  * "page-spanning targets decline to chain" coverage gap. */
 extern uint64_t xemu_inv_span_nochain;
+
+/* (c) recycle-miss classifier: the inv_htable lookup without the ihash byte
+ * comparator (defined in cpu-exec.c, called from translate-all.c). */
+TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(CPUState *cpu,
+                                                      TCGTBCPUState s);
 
 #endif /* XEMU_INV_PROF_H */

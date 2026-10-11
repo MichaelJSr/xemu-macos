@@ -33,10 +33,6 @@
  * breakpoint semantics exact.
  */
 
-/* Exported by accel/tcg/cpu-exec.c (function-local extern idiom: the
- * defining header is private to the accel/tcg source dir). */
-extern TranslationBlock *xemu_lookup_tb(CPUState *cpu);
-
 static bool xemu_ras_on(void)
 {
     static int on = -1;

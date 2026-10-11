@@ -229,4 +229,10 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
 void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
                               tb_page_addr_t last);
 
+#if defined(XBOX)
+/* xemu: the exec loop's TB lookup, exported (accel/tcg/cpu-exec.c) so the
+ * i386 ret-memo fill can memoize the TB without a tc.ptr->tb reversal. */
+TranslationBlock *xemu_lookup_tb(CPUState *cpu);
+#endif
+
 #endif /* EXEC_TRANSLATION_BLOCK_H */
