@@ -386,7 +386,25 @@ N, where P maps through `port_map = {3,4,1,2}`
 (`ui/xemu-input.c:261`) — player 1 → hub port 1.3, gamepad index 0.
 A machine missing them fails `loadvm` ("Unknown section ...usb-hub").
 Headless: replicate with raw `-device` args (unbound pads read
-neutral input — guarded in `hw/xbox/xid.c`). List snapshots by
+neutral input — guarded in `hw/xbox/xid.c`).
+
+Since 2026-10-11 every harness finishes its scratch config with
+`scripts/harness-config.py`, which prints the `-device` args to append.
+It mutes the run (`[audio] volume_limit = 0`, owner request: harness
+audio plays on the owner's machine). For players 1 and 2 not bound to
+the keyboard it drops the binding, stubs a hub + gamepad at the same
+USB path, and sets `[input] auto_bind = false`, because a controller
+connecting mid-run would otherwise auto-bind into the stubbed port and
+`xemu_input_bind()` aborts on the occupied port (`qdev_device_add(...,
+&error_abort)`). Why: the `azurik-*` fixture tags were saved with the
+owner's pad on player 1 (hub 1.3) and the keyboard on player 2 (hub
+1.4), so with the pad off every `loadvm` of them failed (a whole
+20-run batch DEAD on 2026-10-11); the 2026-07-04 `vm-*` tags carry only
+player 2 and load fine with the extra stub. Azurik reads the player-2
+keyboard pad in these tags, so injection is unchanged. A hand-rolled
+launch must call the helper too (or set `volume_limit = 0` and stub by
+hand). To see which pads a tag expects, scan its vmstate for
+`pci.0:02.0/1.N/usb-hub` section names. List snapshots by
 parsing the qcow2 header (offset 60: nb u32, table offset u64; entry:
 40-byte fixed struct `>QIHHIIQII` + extra + id + name, 8-aligned).
 
