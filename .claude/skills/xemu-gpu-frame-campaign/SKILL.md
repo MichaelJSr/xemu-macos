@@ -597,11 +597,10 @@ extra subrange. Mechanism A1 (concatenate the subranges' indices into
 one `vkCmdDrawIndexed`) is strictly better on MoltenVK by construction:
 one Metal draw instead of N.
 
-**Kill criterion**: met — do not wire D. The one open fact is the heavy
-anchor's `da_multi_subrange` (measured 0 only on F5; never read on F8,
-retired 2026-10-11); a zero-code `XEMU_NV2A_NSPROF=1` capture on
-`azurik-heavy-f1` closes it, and if it ever reads large
-the follow-up is A1, never D. On a future MoltenVK pin bump, re-check
+**Kill criterion**: met — do not wire D. The last open fact closed on
+2026-10-11: `da_multi_subrange` reads 0 on `azurik-heavy-f1` too (21
+nsprof intervals, `docs/roadmap.md`), as it did on F5. If it ever reads
+large on another scene, the follow-up is A1, never D. On a future MoltenVK pin bump, re-check
 that the loop above still unrolls (a real batching implementation would
 reopen this).
 
