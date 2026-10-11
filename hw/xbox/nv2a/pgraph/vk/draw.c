@@ -2973,7 +2973,7 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
     }
 
     nv2a_vk_assert(pgraph_vk_buffer_has_space_for(pg, BUFFER_VERTEX_INLINE_STAGING,
-                                          remap.buffer_space_required, 1, 256));
+                                          remap.buffer_space_required, 1, 16));
 
     // FIXME: Caching
     /*

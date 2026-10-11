@@ -111,8 +111,7 @@ static enum S3TC_DECOMPRESS_FORMAT kelvin_format_to_s3tc_format(int color_format
     case NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT45_A8R8G8B8:
         return S3TC_DECOMPRESS_FORMAT_DXT5;
     default:
-        nv2a_vk_assert(!"Invalid texture color format");
-        __builtin_unreachable();
+        g_assert_not_reached();
     }
 }
 
@@ -911,6 +910,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
         }
         staging->buffer_offset =
             ROUND_UP(r->flight[r->current_flight].staging_buffer_base, 16);
+        /* The finish moved to the next flight slot: bound by its limit. */
+        slot_limit = r->flight[r->current_flight].staging_buffer_limit;
     }
 
     nv2a_vk_assert(staging->buffer_offset + texture_data_size <= slot_limit);
