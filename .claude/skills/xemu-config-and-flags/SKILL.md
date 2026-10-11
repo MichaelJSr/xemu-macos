@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **72** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **71** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **72 distinct variables** (68 on
+As of **2026-10-10** the grep reports **71 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 72 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 71 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -273,7 +273,7 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 72 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 71 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
@@ -315,7 +315,6 @@ experiments").
 | `XEMU_GUEST_PROF` | off | strict `1` | **Test-only**: one-run guest profiler (mach-thread sampler resolves vCPU samples to guest TBs vs host symbols). Not benchmark-neutral | diag | `accel/tcg/cpu-exec.c:320`, `xemu_ras_helper.c:88` |
 | `XEMU_CCOP_CENSUS` | off | strict `1` | **Test-only**: runtime-weighted cc-flag liveness census across TB boundaries at exit. Forces every TB transition through the exec loop, so much slower; sizing tool for the closed superblock campaign | diag | `accel/tcg/tb-maint.c:359` |
 | `XEMU_MMIO_PROF` | off | strict `1` | **Test-only**: exit histogram of guest MMIO traffic (region × page, loads/stores) plus BQL acquire-wait totals | diag | `accel/tcg/cputlb.c:2089` |
-| `XEMU_PGRAPH_MMIO_STATS` | off | strict `1` | **Test-only**: exit histogram of PGRAPH per-register MMIO hit rate; ranked ranges for the PGRAPH lockless audit | diag | `pgraph/pgraph.c:62` |
 | `XEMU_XPAGE_PROF` | off | strict `1` | **Test-only**: cross-page-direct exit census split by target region; atexit summary | diag | `accel/tcg/xemu-xpage.c:144` |
 | `XEMU_XPAGE_REFUTE` | off | strict `1` | **Test-only**: cross-page-chaining refuter, routes every cross-page-direct exit through the safe lookup plus a phys-unchanged check. Slow; falsification only | test | `accel/tcg/xemu-xpage.c:131` |
 | `XEMU_SUBPAGE_REFUTE` | off | strict `1` | **Test-only**: checks each sub-page skip decision against a live-TB byte-overlap scan and counts violations; no behavior change unless `XEMU_SUBPAGE_DIRTY` is on | test | `accel/tcg/tb-maint.c:437` |
@@ -628,7 +627,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 72 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 71 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -675,7 +674,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**72** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**71** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), `XEMU_HARDENING`'s default (**1** —

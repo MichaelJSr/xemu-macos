@@ -483,7 +483,7 @@ static void pfifo_run_pusher(NV2AState *d)
  * the thread is actually parked in the untimed wait below — otherwise
  * it is a store plus a broadcast on an empty waiter list, ~10 ns. Only
  * the PFIFO thread writes these, so they are unsynchronised, like the
- * XEMU_PGRAPH_MMIO_STATS counters.
+ * XEMU_PFIFO_KICK_STATS counters in pgraph.c.
  */
 static uint64_t pfifo_park_stats_iters;
 static uint64_t pfifo_park_stats_parks;

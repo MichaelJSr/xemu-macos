@@ -42,108 +42,6 @@
 NV2AState *g_nv2a;
 
 /*
- * xemu: per-register PGRAPH MMIO hit counter (XEMU_PGRAPH_MMIO_STATS=1,
- * default off, zero cost when unset). Lets the PGRAPH-lockless audit rank
- * register ranges by guest hit-rate on a savestate run and confirm the hot
- * path is the pg->lock-safe default-reg case, not the interrupt registers.
- * Counters are unsynchronised on purpose: pgraph_read/pgraph_write run
- * only on the single vCPU thread (the only caller of guest MMIO), the same
- * discipline as the XEMU_MMIO_PROF counters in cputlb.c. See
- * docs/Finished/pgraph-lockless-audit.md.
- */
-#define PGRAPH_MMIO_STAT_SLOTS 0x800 /* 0x2000-byte block / 4 */
-static uint64_t pgraph_mmio_reads[PGRAPH_MMIO_STAT_SLOTS];
-static uint64_t pgraph_mmio_writes[PGRAPH_MMIO_STAT_SLOTS];
-
-static bool pgraph_mmio_stats_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_PGRAPH_MMIO_STATS");
-        on = e && e[0] == '1';
-    }
-    return on;
-}
-
-static const char *pgraph_mmio_reg_name(unsigned off)
-{
-    switch (off) {
-    case NV_PGRAPH_INTR:                 return "INTR";
-    case NV_PGRAPH_INTR_EN:              return "INTR_EN";
-    case NV_PGRAPH_CTX_USER:             return "CTX_USER";
-    case NV_PGRAPH_SURFACE:              return "SURFACE";
-    case NV_PGRAPH_INCREMENT:            return "INCREMENT";
-    case NV_PGRAPH_FIFO:                 return "FIFO";
-    case NV_PGRAPH_RDI_INDEX:            return "RDI_INDEX";
-    case NV_PGRAPH_RDI_DATA:             return "RDI_DATA";
-    case NV_PGRAPH_CHANNEL_CTX_TRIGGER:  return "CHANNEL_CTX_TRIGGER";
-    default:                             return NULL;
-    }
-}
-
-static void pgraph_mmio_stats_dump(void)
-{
-    uint64_t tot_r = 0, tot_w = 0;
-    uint64_t intr_r = 0, intr_w = 0, rdi_r = 0, rdi_w = 0;
-    for (unsigned i = 0; i < PGRAPH_MMIO_STAT_SLOTS; i++) {
-        tot_r += pgraph_mmio_reads[i];
-        tot_w += pgraph_mmio_writes[i];
-        unsigned off = i << 2;
-        if (off == NV_PGRAPH_INTR || off == NV_PGRAPH_INTR_EN) {
-            intr_r += pgraph_mmio_reads[i];
-            intr_w += pgraph_mmio_writes[i];
-        } else if (off == NV_PGRAPH_RDI_DATA || off == NV_PGRAPH_RDI_INDEX) {
-            rdi_r += pgraph_mmio_reads[i];
-            rdi_w += pgraph_mmio_writes[i];
-        }
-    }
-    fprintf(stderr,
-            "xemu: PGRAPH MMIO stats: reads=%" PRIu64 " writes=%" PRIu64
-            " | interrupt-regs r=%" PRIu64 " w=%" PRIu64
-            " | rdi r=%" PRIu64 " w=%" PRIu64 "\n",
-            tot_r, tot_w, intr_r, intr_w, rdi_r, rdi_w);
-    /* Top offsets by combined hit-rate. */
-    for (int rank = 0; rank < 24; rank++) {
-        unsigned best = 0;
-        uint64_t best_n = 0;
-        for (unsigned i = 0; i < PGRAPH_MMIO_STAT_SLOTS; i++) {
-            uint64_t n = pgraph_mmio_reads[i] + pgraph_mmio_writes[i];
-            if (n > best_n) {
-                best_n = n;
-                best = i;
-            }
-        }
-        if (best_n == 0) {
-            break;
-        }
-        const char *name = pgraph_mmio_reg_name(best << 2);
-        fprintf(stderr,
-                "xemu:   +0x%04x %-20s reads=%-10" PRIu64 " writes=%" PRIu64
-                "\n",
-                best << 2, name ? name : "-",
-                pgraph_mmio_reads[best], pgraph_mmio_writes[best]);
-        /* consume so the next rank finds the next-hottest */
-        pgraph_mmio_reads[best] = 0;
-        pgraph_mmio_writes[best] = 0;
-    }
-}
-
-static inline void pgraph_mmio_stats_note(hwaddr addr, bool store)
-{
-    static bool registered;
-    if (!registered) {
-        registered = true;
-        atexit(pgraph_mmio_stats_dump);
-    }
-    unsigned i = (addr >> 2) & (PGRAPH_MMIO_STAT_SLOTS - 1);
-    if (store) {
-        pgraph_mmio_writes[i]++;
-    } else {
-        pgraph_mmio_reads[i]++;
-    }
-}
-
-/*
  * xemu: pgraph_write pfifo_kick census (XEMU_PFIFO_KICK_STATS=1, default
  * off, zero cost when unset). Audit 2026-08 §1.5 asks how many of these
  * broadcasts can ever unblock the PFIFO thread. This is a COUNTER ONLY:
@@ -168,7 +66,7 @@ static inline void pgraph_mmio_stats_note(hwaddr addr, bool store)
  * dup=1 is the subset that is provably redundant even for a parked
  * waiter. Counters are unsynchronised on purpose: every writer is the
  * single vCPU thread holding d->pfifo.lock, the same discipline as the
- * XEMU_PGRAPH_MMIO_STATS counters above.
+ * XEMU_MMIO_PROF counters in cputlb.c.
  */
 enum {
     PFIFO_KICK_SITE_INTR,
@@ -264,10 +162,6 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
     NV2AState *d = (NV2AState *)opaque;
     PGRAPHState *pg = &d->pgraph;
 
-    if (unlikely(pgraph_mmio_stats_on())) {
-        pgraph_mmio_stats_note(addr, false);
-    }
-
     qemu_mutex_lock(&pg->lock);
 
     uint64_t r = 0;
@@ -312,10 +206,6 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     PGRAPHState *pg = &d->pgraph;
 
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
-
-    if (unlikely(pgraph_mmio_stats_on())) {
-        pgraph_mmio_stats_note(addr, true);
-    }
 
     qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
     qemu_mutex_lock(&pg->lock);

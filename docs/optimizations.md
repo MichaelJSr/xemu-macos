@@ -35,7 +35,6 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP, PGRAPH) — bisect hatch |
 | `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/Finished/pgraph-lockless-audit.md`) |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
-| `XEMU_PGRAPH_MMIO_STATS` | `1` prints an exit histogram of PGRAPH per-register MMIO hit-rate (reads/writes, interrupt-reg + RDI category totals, top offsets) — ranks ranges for the PGRAPH lockless audit |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by either hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the legacy in-place `.spv` write. Default writes `<hash>.spv.<pid>.tmp` and `g_rename`s it over the entry (same discipline as the pipeline cache), so a kill mid-write cannot leave a torn entry for the next launch to ingest; `.tmp` files orphaned by a crash are swept once per process when the cache directory is first resolved. Landed on main 2026-09-08 |
@@ -1578,8 +1577,9 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   against the lock-free `nv2a_update_irq` reader and the PFIFO thread's
   raise. Those two fields are now `qatomic` (fixing a pre-existing
   unserialised raise-vs-read pair in the process), and PGRAPH dispatch
-  drops the BQL. `XEMU_PGRAPH_MMIO_STATS=1` measured the guest ISR
-  *on* this path: `NV_PGRAPH_INTR` is the hottest PGRAPH register
+  drops the BQL. A per-register hit counter (`XEMU_PGRAPH_MMIO_STATS=1`,
+  removed 2026-10-10) measured the guest ISR *on* this path:
+  `NV_PGRAPH_INTR` is the hottest PGRAPH register
   (1.6M reads on the F5 stats run; count ratios — the load-immune
   figures — put ~11 PGRAPH MMIO ops on every PGRAPH interrupt, 3 INTR
   reads per ack). Soak: 8 F5⇄F8 loadvm cycles over a 12-min window,
@@ -2090,6 +2090,19 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   `GetWindowRect`, with a try/catch fallback to the old path, so crops on
   a scaled display are no longer offset. `--dry-run` covers the new
   paths (21 checks); no Windows execution yet.
+
+### Retired diagnostics and dark experiments (2026-10-10)
+
+Each removal is its own commit; to bring one back for a re-measurement,
+revert that commit. The numbers stay where they were recorded. The
+committed PGO profile predates these commits, so it is retrained before
+the next tag.
+
+- **`XEMU_PGRAPH_MMIO_STATS` removed.** The per-register PGRAPH MMIO hit
+  counter (`a477ad9f91`) served the PGRAPH lockless audit, closed
+  2026-07-11; its results stand in the PGRAPH bullet under Threads +
+  runtime and in `Finished/pgraph-lockless-audit.md` §G. `pgraph_read`
+  and `pgraph_write` lose an `unlikely()` latch check each.
 
 ## Failed / reverted experiments
 
