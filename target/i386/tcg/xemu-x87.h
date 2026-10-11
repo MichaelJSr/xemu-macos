@@ -11,21 +11,18 @@
  * uint64 written only by the single xbox vCPU thread, dumped from atexit()
  * after that thread has stopped.
  *
- * Three mechanisms live here, each with its own latch:
+ * Four mechanisms live here, each with its own latch:
  *
- *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Splits every register-cache
- *       write-back into clean-ST(i) / dead-FT0 / must-keep, counts the
- *       per-instruction FIP/FDP store pairs against the deferred updates
- *       that replace them, measures mean x87 run length, and counts SSE
- *       scalar compares by operand width.
+ *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Splits every FT0 write-back
+ *       into dead / must-keep, counts the per-instruction FIP/FDP store
+ *       pairs against the deferred updates that replace them, measures
+ *       mean x87 run length, and counts SSE scalar compares by operand
+ *       width.
  *   (2) XEMU_X87_ELIDE_FT0  (default on, =0 legacy) drops the write-back of
  *       the FT0 scratch when no reader of that value is still ahead.
  *   (3) XEMU_X87_DEFER_FIP  (default on, =0 legacy) defers FIP/FCS/FDP/FDS
  *       to one update per contiguous x87 run.
- *   (4) XEMU_X87_ELIDE_CLEAN (default OFF) drops the write-back of an ST(i)
- *       slot that was only read. Dark: it is a semantics change, not a pure
- *       elision -- see the comment on xemu_x87_clean_mode().
- *   (5) XEMU_X87_REFUTE=1 puts (2)(3)(4) in shadow mode: the legacy stores
+ *   (4) XEMU_X87_REFUTE=1 puts (2)(3) in shadow mode: the legacy stores
  *       all still happen, the elision decision is computed anyway, and every
  *       point where the elided state could be observed is checked at runtime.
  *       Promotion gate is zero violations over the campaign soak.
@@ -36,8 +33,6 @@
 #if defined(XBOX)
 
 /* (1) census -------------------------------------------------------------- */
-static uint64_t xemu_x87_wb_st_clean;    /* ST(i) write-back, slot only read */
-static uint64_t xemu_x87_wb_st_dirty;    /* ST(i) write-back, slot written */
 static uint64_t xemu_x87_wb_ft0_dead;    /* FT0 write-back, no reader ahead */
 static uint64_t xemu_x87_wb_ft0_keep;    /* FT0 write-back, reader still ahead */
 static uint64_t xemu_x87_fip_legacy;     /* per-insn FIP/FCS store pairs */
@@ -48,24 +43,18 @@ static uint64_t xemu_x87_run_insns;      /* x87 insns inside those runs */
 static uint64_t xemu_sse_comi_ss;        /* (U)COMISS -- 32-bit scalar form */
 static uint64_t xemu_sse_comi_sd;        /* (U)COMISD -- 64-bit scalar form */
 
-/* (5) refuter ------------------------------------------------------------- */
+/* (4) refuter ------------------------------------------------------------- */
 static uint64_t xemu_x87_ft0_stale;      /* 1 while an elided FT0 store stands */
 static uint64_t xemu_x87_ft0_viol;       /* stale env->ft0 fed to a reader */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
 static uint64_t xemu_x87_ptr_viol;       /* deferred value != legacy value */
-static uint64_t xemu_x87_clean_checks;   /* clean write-backs re-read */
-static uint64_t xemu_x87_clean_viol;     /* clean slot's memory moved under us */
 
 static void xemu_x87_dump(void)
 {
-    uint64_t st = xemu_x87_wb_st_clean + xemu_x87_wb_st_dirty;
     uint64_t ft = xemu_x87_wb_ft0_dead + xemu_x87_wb_ft0_keep;
 
-    fprintf(stderr, "xemu: x87 write-backs: ST(i) clean=%llu dirty=%llu "
-            "(%.1f%% elidable) FT0 dead=%llu keep=%llu (%.1f%% elidable)\n",
-            (unsigned long long)xemu_x87_wb_st_clean,
-            (unsigned long long)xemu_x87_wb_st_dirty,
-            st ? 100.0 * xemu_x87_wb_st_clean / st : 0.0,
+    fprintf(stderr, "xemu: x87 write-backs: FT0 dead=%llu keep=%llu "
+            "(%.1f%% elidable)\n",
             (unsigned long long)xemu_x87_wb_ft0_dead,
             (unsigned long long)xemu_x87_wb_ft0_keep,
             ft ? 100.0 * xemu_x87_wb_ft0_dead / ft : 0.0);
@@ -82,12 +71,10 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_sse_comi_ss,
             (unsigned long long)xemu_sse_comi_sd);
     fprintf(stderr, "xemu: x87 refuter: ft0 violations=%llu; exc-ptr "
-            "checks=%llu violations=%llu; clean-wb checks=%llu violations=%llu\n",
+            "checks=%llu violations=%llu\n",
             (unsigned long long)xemu_x87_ft0_viol,
             (unsigned long long)xemu_x87_ptr_checks,
-            (unsigned long long)xemu_x87_ptr_viol,
-            (unsigned long long)xemu_x87_clean_checks,
-            (unsigned long long)xemu_x87_clean_viol);
+            (unsigned long long)xemu_x87_ptr_viol);
 }
 
 static void xemu_x87_arm_dump(void)
@@ -158,31 +145,6 @@ static int xemu_x87_ptr_mode(void)
     return mode;
 }
 
-/*
- * Default OFF, unlike the other two. Dropping the write-back of a slot that
- * was only read is not a pure elision: the cache holds the double-precision
- * projection of an 80-bit env->fpregs[] entry, so today's unconditional
- * write-back also truncates that entry to what a double can hold. Eliding it
- * leaves the original floatx80 in place, which the inline path cannot observe
- * (it re-projects to the same double) but FSTPT / FSAVE / FXSAVE and the
- * softfloat transcendental helpers can. That is a behavior change in the
- * more-accurate direction, not a no-op, so it stays dark until the campaign
- * decides. XEMU_X87_ELIDE_CLEAN=1 enables it.
- */
-static int xemu_x87_clean_mode(void)
-{
-    static int mode = -1;
-    if (mode < 0) {
-        const char *e = getenv("XEMU_X87_ELIDE_CLEAN");
-        int m = (e && e[0] == '1') ? 1 : 0;
-        if (m && xemu_x87_refute_on()) {
-            m = 2;
-        }
-        mode = m;
-    }
-    return mode;
-}
-
 /* Emit "*counter += n". */
 static void xemu_x87_gen_counter_add(uint64_t *counter, uint64_t n)
 {
@@ -235,16 +197,7 @@ static void xemu_x87_gen_acc_i64(uint64_t *counter, TCGv_i64 delta)
     tcg_gen_st_i64(acc, p, 0);
 }
 
-/* Branchless "*counter += (a != b)" in the three widths the checks need. */
-static void xemu_x87_gen_ne_count_i64(uint64_t *counter, TCGv_i64 a,
-                                      TCGv_i64 b)
-{
-    TCGv_i64 d = tcg_temp_new_i64();
-
-    tcg_gen_setcond_i64(TCG_COND_NE, d, a, b);
-    xemu_x87_gen_acc_i64(counter, d);
-}
-
+/* Branchless "*counter += (a != b)" in the two widths the checks need. */
 static void xemu_x87_gen_ne_count_i32(uint64_t *counter, TCGv_i32 a,
                                       TCGv_i32 b)
 {
@@ -264,22 +217,6 @@ static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
     tcg_gen_setcond_tl(TCG_COND_NE, d, a, b);
     tcg_gen_extu_tl_i64(d64, d);
     xemu_x87_gen_acc_i64(counter, d64);
-}
-
-/*
- * (4) dirty tracking. Indexed by fpregs[] slot, which is the physical x87
- * register file index, so an FPUSH/FPOP rotation carries the bit with the
- * value it describes. Invariant maintained everywhere: a set bit implies a
- * live cache entry.
- */
-static void xemu_x87_mark_dirty(DisasContext *s, int opreg)
-{
-    s->xemu_fp_dirty |= 1u << ((s->fpstt_delta + opreg) & 7);
-}
-
-static void xemu_x87_clear_dirty(DisasContext *s, int slot)
-{
-    s->xemu_fp_dirty &= ~(1u << slot);
 }
 
 /*
@@ -422,13 +359,11 @@ static void xemu_x87_close_run(DisasContext *s)
  * annotations to one line each and compile away on a non-xbox target. */
 #define XEMU_FT0_PRODUCE(s)  xemu_x87_ft0_produce(s)
 #define XEMU_FT0_CONSUME(s)  xemu_x87_ft0_consume(s)
-#define XEMU_ST_DIRTY(s, n)  xemu_x87_mark_dirty((s), (n))
 
 #else /* !XBOX */
 
 #define XEMU_FT0_PRODUCE(s)  ((void)0)
 #define XEMU_FT0_CONSUME(s)  ((void)0)
-#define XEMU_ST_DIRTY(s, n)  ((void)0)
 
 #endif /* XBOX */
 

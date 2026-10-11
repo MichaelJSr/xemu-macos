@@ -741,20 +741,21 @@ Five atexit lines (`target/i386/tcg/xemu-x87.h:65-97`); `REFUTE`
 implies the census:
 
 ```
-xemu: x87 write-backs: ST(i) clean=N dirty=N (P% elidable) FT0 dead=N keep=N (P% elidable)
+xemu: x87 write-backs: FT0 dead=N keep=N (P% elidable)
 xemu: x87 exc-ptrs: fip=N fdp=N per-insn, deferred updates=N
 xemu: x87 runs=N insns=N mean=M.MM insn/run
 xemu: sse scalar compares: ss=N sd=N
-xemu: x87 refuter: ft0 violations=N; exc-ptr checks=N violations=N; clean-wb checks=N violations=N
+xemu: x87 refuter: ft0 violations=N; exc-ptr checks=N violations=N
 ```
 
 Reading each line:
 
 - **write-backs** — the Gate-0 population. `FT0 dead` is what
-  `XEMU_X87_ELIDE_FT0` removes; `ST(i) clean` is what the dark
-  `XEMU_X87_ELIDE_CLEAN` would remove. Divide by run wall time: the
-  wave's F8 reading was 13.97 M/s dead-FT0 + 7.04 M/s clean-ST =
-  21.01 M/s combined against an ≥ 8 M/s bar.
+  `XEMU_X87_ELIDE_FT0` removes. Divide by run wall time: the wave's F8
+  reading was 13.97 M/s dead-FT0. Until 2026-10-10 the line also split
+  ST(i) write-backs into clean/dirty to size `XEMU_X87_ELIDE_CLEAN`
+  (7.04 M/s clean-ST, 21.01 M/s combined against an ≥ 8 M/s bar); that
+  elision's code was removed that day and the split went with it.
 - **exc-ptrs** — `(fip+fdp)/deferred` is the cut ratio
   `XEMU_X87_DEFER_FIP` buys (wave reading: 8.81x against a 1.5x bar).
 - **runs / mean insn/run** — how clustered x87 work is; the deferral's
@@ -767,7 +768,8 @@ Reading each line:
 - **refuter** — the only acceptable value in every violations field is
   **0**. `checks=` is how much evidence you have: a zero-violation line
   with a small `checks=` proves nothing. (Wave receipts: exc-ptr
-  2.06e10 checks / 0 violations; clean-wb 3.49e9 / 0.)
+  2.06e10 checks / 0 violations; the `clean-wb` field, removed with
+  `XEMU_X87_ELIDE_CLEAN` on 2026-10-10, read 3.49e9 / 0.)
 
 Cost: the census emits counter read-modify-writes into generated code,
 and the refuter keeps every legacy store *and* computes the shadow

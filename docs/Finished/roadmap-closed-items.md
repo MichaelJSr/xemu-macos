@@ -7,9 +7,10 @@
 > figures are as of the date in each heading, and relative links are
 > re-pointed from this folder. The ranked item 1 machinery, and the two
 > censuses it cites (`XEMU_CCOP_CENSUS`, `XEMU_SUPERBLOCK_SIZE`), were
-> removed from the code on 2026-10-10, as was ranked item 2's
-> `XEMU_RETC_BITS` knob (the width is fixed at 12); the figures stand as
-> recorded.
+> removed from the code on 2026-10-10, as were ranked item 2's
+> `XEMU_RETC_BITS` knob (the width is fixed at 12) and top candidate 3's
+> `XEMU_X87_ELIDE_CLEAN` (the ledger's Failed row corrects its stated
+> mechanism); the figures stand as recorded.
 
 ## Top candidate 3 — x87 clean-ST(i) write-back elision (closed 2026-08-04)
 

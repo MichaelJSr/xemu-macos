@@ -2115,6 +2115,13 @@ the alternative is a wave spending hours suspecting its own mechanisms.
 un-sampled, the prerequisite is a measurement of DSP-validator hold time
 against `d->lock` (not a retry) — the bp8 receipt already shows sampling
 buys the headroom.
+**Receipt configuration retired (2026-10-10)**: `XEMU_X87_ELIDE_CLEAN`
+was removed from the tree, and its `clean-wb` shadow check went with it
+(an `ld80f`, a compare and two counter read-modify-writes per clean
+flush; 3.49e9 checks in the wave soak). The x87 arm of this receipt can
+therefore no longer be reproduced exactly. Today's x87 arm is
+`XEMU_X87_REFUTE=1` + `XEMU_X87_CENSUS=1`, which costs less than the
+arm that wedged. The two-validator cap stays as conservative policy.
 
 # How to add an entry (the recording duty)
 

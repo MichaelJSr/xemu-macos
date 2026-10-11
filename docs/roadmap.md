@@ -164,7 +164,7 @@ correctness debt. Closed entries keep their full write-ups in
    tail. Bar to attempt: the hitch must survive a warm-cache run — a
    warm-cache-only hitch is a cache-coverage problem, not a
    pipeline-creation one.
-3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
+3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments, which corrects the stated mechanism. The code was removed on 2026-10-10.
 4. **Reports idle-budget scan below 300 µs — closed 2026-08-04** (50 µs: −12.1 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
 
 ## The ranked performance roadmap

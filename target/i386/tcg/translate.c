@@ -206,7 +206,6 @@ typedef struct DisasContext {
 #if defined(XBOX)
     bool xemu_ret_exit; /* current DISAS_JUMP terminator is a near ret */
     /* x87 census / elision (target/i386/tcg/xemu-x87.h) */
-    uint8_t xemu_fp_dirty;      /* fpregs[] slots written since load */
     uint8_t xemu_x87_run;       /* x87 insns since the last cache flush */
     bool xemu_ft0_pending;      /* FT0 written, reader not reached yet */
     bool xemu_ft0_reloaded;     /* last get_ft0 came from env->ft0 */
@@ -1806,7 +1805,6 @@ static void gen_flush_fp(DisasContext *s)
      */
     xemu_x87_flush_ptrs(s);
     xemu_x87_close_run(s);
-    s->xemu_fp_dirty = 0;
 #endif
     s->fpstt_delta = 0;
     s->flcr_set = false;
@@ -1919,17 +1917,6 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
     s->fpregs[(s->fpstt_delta + 0) & 7] =
         s->fpregs[(s->fpstt_delta + st_index) & 7];
     s->fpregs[(s->fpstt_delta + st_index) & 7] = i;
-#if defined(XBOX)
-    if (st_index != 0) {
-        /*
-         * Only the cache pointers move; env->fpregs[] is untouched. Both
-         * slots therefore now hold a value that differs from the memory
-         * behind them, whatever their previous dirty state was.
-         */
-        xemu_x87_mark_dirty(s, 0);
-        xemu_x87_mark_dirty(s, st_index);
-    }
-#endif
 }
 
 static void gen_enter_mmx(DisasContext *s)
@@ -4922,7 +4909,6 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
 #if defined(XBOX)
     dc->xemu_ret_exit = false;
-    dc->xemu_fp_dirty = 0;
     dc->xemu_x87_run = 0;
     dc->xemu_ft0_pending = false;
     dc->xemu_ft0_reloaded = false;

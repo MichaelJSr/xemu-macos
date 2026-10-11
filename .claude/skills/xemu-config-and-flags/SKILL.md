@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **63** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **62** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **63 distinct variables** (68 on
+As of **2026-10-10** the grep reports **62 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 63 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 62 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -259,9 +259,8 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 | `XEMU_DIRTY_FAST` | **ON** (fast path) | `0` restores | `notdirty_write` learns the CODE-dirty answer from the invalidation's return instead of re-reading the bitmap via `physical_memory_is_clean()`, and every single-page dirty query (including the TLB-refill check) reads all five clients under **one** RCU guard with one idx/offset + `test_bit` instead of five guards and five `find_next_bit` loops. `0` restores both legacy shapes on the same binary. **Carries no fps claim** — archaeology 6.10 | escape | `system/physmem.c:1064` |
 | `XEMU_X87_ELIDE_FT0` | **ON** | `0` restores | Skips the FT0 scratch write-back at a register-cache flush when no reader of that value is still ahead in the same guest instruction. `0` restores the unconditional store | escape | `target/i386/tcg/xemu-x87.h:143` |
 | `XEMU_X87_DEFER_FIP` | **ON** | `0` restores | Defers the x87 exception-pointer stores (FIP/FCS/FDP/FDS) from one per instruction to one per contiguous x87 run, and hoists the CS-selector load out of the per-instruction path. `0` restores per-instruction stores | escape | `target/i386/tcg/xemu-x87.h:157` |
-| `XEMU_X87_ELIDE_CLEAN` | off (**dark**) | `1` enables | **Closed experiment, kept dark as the record**: the default-on A/B measured −0.23 fps, 3/3 negative (2026-08-04; `docs/optimizations.md` Failed / reverted experiments). Skips the write-back of an ST(i) cache slot that was only read. Deliberately dark: **not a pure elision** — the cache holds the double-precision projection of an 80-bit `env->fpregs` entry, so today's write-back also truncates that entry; eliding it leaves the original `floatx80` in place, which FSTPT/FSAVE/FXSAVE and the softfloat transcendentals can observe (a change in the *more accurate* direction, but a change) | A/B | `target/i386/tcg/xemu-x87.h:182` |
-| `XEMU_X87_CENSUS` | off | `1` | Arms the x87/SSE census + atexit dump (write-back elidability split, exception-pointer store counts, x87 run length, SSE scalar-compare mix). Emits counter RMWs into generated code — **measurement mode only, never for an fps run** | diag | `target/i386/tcg/xemu-x87.h:112` |
-| `XEMU_X87_REFUTE` | off | `1` | Adversarial shadow-checker for the three x87 mechanisms: keeps every legacy store, computes the elision/deferral decision anyway, and counts every point where the elided state could have been observed. Implies the census dump; promotion gate is zero violations. **Stacking limit applies** — see xemu-testing / archaeology 9.10 | test | `target/i386/tcg/xemu-x87.h:125` |
+| `XEMU_X87_CENSUS` | off | `1` | Arms the x87/SSE census + atexit dump (FT0 write-back elidability split, exception-pointer store counts, x87 run length, SSE scalar-compare mix). Emits counter RMWs into generated code — **measurement mode only, never for an fps run** | diag | `target/i386/tcg/xemu-x87.h:112` |
+| `XEMU_X87_REFUTE` | off | `1` | Adversarial shadow-checker for the two shipped x87 mechanisms (the `ELIDE_FT0` elision and the `DEFER_FIP` deferral): keeps every legacy store, computes the elision/deferral decision anyway, and counts every point where the elided state could have been observed. Implies the census dump; promotion gate is zero violations. **Stacking limit applies** — see xemu-testing / archaeology 9.10 | test | `target/i386/tcg/xemu-x87.h:125` |
 | `XEMU_SUBPAGE_FAST_STATS` | off (**default flipped 2026-08-04**) | `1` | Re-enables the six diagnostic counter RMWs the arm-(b) store prefilter emits into every aarch64 store slow-path stub, and restores the atexit seen/skips/demote histogram. Production now emits none of them (~39 fewer insns per stub, 12 on the inline-skip path); with it off the dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` so a zeroed histogram can't read as a dead mechanism. Latched at first stub emission; `XEMU_SUBPAGE_FAST_REFUTE=1` forces it on | diag | `accel/tcg/xemu-subpage-fast.c:167` |
 | `XEMU_SURFACE_CB_STATS` | off | `1` | Censuses NV2A surface CPU-access-callback register/unregister events (each = `async_safe_run_on_cpu` **plus** a full all-mmuidx TLB flush **plus** an unconditional jump-cache wipe), split by `update_surface_part`'s invalidate-then-create path vs elsewhere; atexit dump. Any first digit `1`-`9` arms it. The `=2` abort level, the reuse-pool counters and the coverage audit were deleted with `XEMU_SURFACE_CB_REUSE` on 2026-10-10 | diag | `pgraph/vk/surface.c:752` |
 | `XEMU_PFIFO_KICK_STATS` | off | `1` | Censuses `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a wait condition actually transitioned × post-write `FIFO_ACCESS` × kick-already-pending), plus the PFIFO thread's idle-park count as the wakeup denominator. **Counter only** — no kick is ever suppressed (archaeology 7.1: a wrongly-skipped kick is a permanent PFIFO hang) | diag | `pgraph/pgraph.c:192`, `pfifo.c:528` |
@@ -272,15 +271,14 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 63 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 62 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
 default path or its hatch), **experimental** (opt-in, no promotion
-claim), **test-only** (measurement or falsification, never an fps run),
-**closed experiment, kept dark as the record** (measured neutral or
-negative; row in `docs/optimizations.md` "Failed / reverted
-experiments").
+claim), **test-only** (measurement or falsification, never an fps run).
+Closed experiments are not kept in the code (see "Closed experiments"
+below).
 
 #### Escape hatches and production tuning
 
@@ -320,14 +318,14 @@ experiments").
 | `XEMU_PUSH_PRESENT_REFUTE` | off | strict `1` | **Test-only**: peeks the push-present ring and cross-checks the consumed-step stream against the pull path, printing tallies every ~5 s. Re-adds the pull round trip, so measure perf with it off | test | `ui/xemu.c:1096` |
 | `XEMU_UI_FRAME_CAP_NS` | 0 (no cap) | int ns (atoll) | **Test-only**: floors the UI present period (`16666666` ≈ a 60 Hz consumer) so ring pacing is visible in unfocused bench windows, which present unpaced | test | `ui/xemu.c:1212` |
 
-#### Closed experiments kept dark as the record
+#### Closed experiments
 
-Each has a row in `docs/optimizations.md` "Failed / reverted
-experiments" (`awk '/^## Failed/,/^## Settled/' docs/optimizations.md`).
-The row above for `XEMU_X87_ELIDE_CLEAN` belongs to this class too.
-
-| Env var | Unset behavior | Values | Effect | Cat | Read at |
-|---|---|---|---|---|---|
+None are kept in the code. Since 2026-10-10 a measured neutral or
+negative experiment is removed from HEAD and keeps its row in
+`docs/optimizations.md` "Failed / reverted experiments"
+(`awk '/^## Failed/,/^## Settled/' docs/optimizations.md`); the ones that
+had shipped dark are listed under "Retired diagnostics and dark
+experiments (2026-10-10)". Restore one by reverting its removal commit.
 
 **The default-ON (inverted) set as of 2026-08-04** — for these, `=0` is
 the escape hatch and the *unset* state is the new behavior:
@@ -621,7 +619,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 63 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 62 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -668,7 +666,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**63** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**62** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), the default-ON knob list, every `build.sh` line
