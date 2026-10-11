@@ -1741,26 +1741,27 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
      * BUFFER_STAGING_SRC is partitioned per flight slot, and
      * pgraph_vk_finish() does not wait for the command buffer it submits,
      * so the other slot's partition may still be read by in-flight texture
-     * copies. Stage in the current slot's partition: the finish that
-     * selected this slot already waited out its previous submission, and
-     * this function's aux command buffer is fence-waited before it
-     * returns, so nothing else reads the range while the copy is pending.
-     * If anything is staged for a command buffer that has not been
-     * submitted yet, submit it first rather than overwrite it.
+     * copies. Stage in the current slot's partition, which the finish that
+     * selected it already waited out, and at its top: texture uploads
+     * bump-allocate upward from the slot base and are pending only while a
+     * command buffer records (none does here: the finish above ran, or the
+     * fast path requires no recording), and upload_pvideo_to_cmd stages at
+     * the slot base for a compositor command buffer that is not
+     * fence-waited. This function's own aux command buffer is fence-waited
+     * before it returns, so the range is free again afterwards.
      */
-    VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
+    nv2a_vk_assert(!r->in_command_buffer);
+    VkDeviceSize staging_slot_base =
+        r->flight[r->current_flight].staging_buffer_base;
     VkDeviceSize staging_limit =
         r->flight[r->current_flight].staging_buffer_limit;
-    if (copy_buffer->buffer_offset > staging_base) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        staging_base = r->flight[r->current_flight].staging_buffer_base;
-        staging_limit = r->flight[r->current_flight].staging_buffer_limit;
-        copy_buffer->buffer_offset = staging_base;
-    }
 
     size_t uploaded_image_size = surface->height * surface->width *
                                  surface->fmt.bytes_per_pixel;
-    nv2a_vk_bounds_check(uploaded_image_size <= staging_limit - staging_base);
+    nv2a_vk_bounds_check(uploaded_image_size <=
+                         staging_limit - staging_slot_base);
+    VkDeviceSize staging_base =
+        QEMU_ALIGN_DOWN(staging_limit - uploaded_image_size, 256);
 
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||

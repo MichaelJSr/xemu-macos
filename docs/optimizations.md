@@ -1174,10 +1174,13 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   command buffer it submits, so slot 0's texture copies could still be
   reading that range on the GPU while the CPU `memcpy` overwrote it: a
   host-write race Metal's hazard tracking cannot see (garbled textures,
-  most likely right after a finish). It now stages at the current slot's
-  base, which the finish that selected the slot already waited out;
-  every staging offset (copy regions, barriers, flush) follows, and the
-  bounds check is against the slot, not the whole buffer. Found by the
+  most likely right after a finish). It now stages at the top of the
+  current slot's partition, which the finish that selected the slot
+  already waited out: texture uploads grow upward from the slot base and
+  are never pending here, and PVIDEO stages at the base for a compositor
+  command buffer that is not fence-waited. Every staging offset (copy
+  regions, barriers, flush) follows, and the bounds check is against the
+  slot, not the whole buffer. Found by the
   2026-09 Windows audit (batch 4, item 1).
 
 - **Texture VRAM-end checks are live in release (2026-10-10).** Three
