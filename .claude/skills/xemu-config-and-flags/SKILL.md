@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **65** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **64** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **65 distinct variables** (68 on
+As of **2026-10-10** the grep reports **64 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 65 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 64 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -273,7 +273,7 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 65 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 64 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
@@ -330,7 +330,6 @@ belong to this class too.
 
 | Env var | Unset behavior | Values | Effect | Cat | Read at |
 |---|---|---|---|---|---|
-| `XEMU_RETC_BITS` | 12 | 8..13 (atoi; out of range ignored) | **Closed experiment, kept dark as the record** (2026-07-18): ret-memo index width, latched in a constructor before `main()`. 13 bits measured −0.23 fps, 4/4. Any width is correctness-safe, so it stays as a cache-footprint A/B knob | A/B | `target/i386/tcg/xemu_ras_helper.c:60` |
 
 **The default-ON (inverted) set as of 2026-08-04** — for these, `=0` is
 the escape hatch and the *unset* state is the new behavior:
@@ -624,7 +623,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 65 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 64 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -671,7 +670,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**65** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**64** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), the default-ON knob list, every `build.sh` line

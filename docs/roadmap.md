@@ -173,7 +173,7 @@ item 5 is the standing correctness debt, still open. The live
 candidates are in the section above.
 
 1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The machinery was removed on 2026-10-10.
-2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
+2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The `XEMU_RETC_BITS` knob was removed on 2026-10-10; the width is fixed at 12 bits.
 3. **Sub-page arm (b) — promoted default-on 2026-07-18** (`ede35b84f9`). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: CPU / JIT (ARM64).
 4. **Cross-page chaining, page-spanning-dest coverage gap — MEASURED
    BELOW BAR 2026-07-18, parked.** The dispatch loop refuses to
