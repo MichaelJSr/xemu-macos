@@ -1702,7 +1702,24 @@ access, and the vCPU just past `end_exclusive()` waiting for the BQL;
 the other two show the callback had run and the next pointer came back
 from a reused block. A five-agent adversarial review (2026-10-11) found
 no refutation: four lenses and the judge returned "holds" or "holds with
-caveats" (docs and commit wording), all at high confidence.
+caveats" (docs and commit wording), all at high confidence. A fifth
+pre-fix sighting came the same day in an ordinary bench run (one crash
+in ~22 runs of `bench-savestate-ab.sh`, ~30 s after `loadvm`).
+**Forced-failure proof (2026-10-11)**: plain `loadvm` cycling cannot
+reach the race on demand (a pre-fix 30-cycle `soak-cycles.sh` run under
+`MallocScribble=1` survived), and a walker delay that keeps the BQL
+cannot either, because the vCPU needs the BQL to reach its queued work.
+So a test-only patch (never committed; `XEMU_TEST_CB_WALK_DELAY_US`) made
+1 in 1024 non-vCPU walks drop the BQL and sleep 50 µs on every node, the
+way `surface_access_callback` does. Same patch on both builds,
+`soak-cycles.sh` (heavy-f1 ↔ F5, 8 s dwell) with `MallocScribble=1`:
+pre-fix crashed 3/3, in cycles 10, 9 and 4, each in
+`mem_check_access_callback_ramaddr` under `ohci_frame_boundary`
+(read and write-back paths) at 0xaaaa...b2, a scribbled freed node;
+the fix ran 10, 10, 10 and 30 cycles (120 loadvms) with no crash. At the
+pre-fix rate (3 per 23 cycles) 60 cycles predict ~8 crashes. Any future
+change to this list should be re-proven the same way; the patch is a
+dozen lines in `mem_check_access_callback_ramaddr`.
 **Lesson**: a crash under a device model's DMA is not the device's until
 the faulting load is identified. Disassemble the faulting PC in the
 crashing binary and name the pointer before writing guards.
