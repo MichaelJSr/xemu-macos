@@ -608,19 +608,27 @@ an xemu-side change (optional-extension request + feature query + a
 and `grep -n -i multi_draw hw/xbox/nv2a/pgraph/vk/instance.c` (no output
 = xemu still does not request it).
 
-**Why this is ranked last regardless**: Mechanism A's
-index-buffer-concatenation approach already achieves the same CPU-side
-call-count reduction without the extension — a multi-draw entry point
-would mostly save manual index-buffer bookkeeping, not unlock a new
-capability. Revisit only after A ships and only if A's implementation
-complexity (topology branching, restart-index insertion) turns out to be
-a real maintenance burden.
+**Why it is not worth wiring (settled 2026-10-10 by reading the
+driver)**: MoltenVK implements `vkCmdDrawMultiEXT` and
+`vkCmdDrawMultiIndexedEXT` as a host-side loop that records one
+`MVKCmdDraw` / `MVKCmdDrawIndexed` per sub-draw
+(`MoltenVK/MoltenVK/Vulkan/vulkan.mm:4303-4336` at pin `67b26826`), the
+same command objects N `vkCmdDraw` calls record, so the Metal command
+stream is byte-for-byte what xemu's per-subrange loop already produces.
+On Apple there is no loader trampoline to skip (volk calls straight into
+MoltenVK, `vk/instance.c`'s `#ifndef __APPLE__` volkLoadDevice block),
+so the whole saving is N−1 direct calls of ~10 ns: under 0.05% of a
+20.8 ms frame even if every one of F8's ~877 draws per flip were an
+extra subrange. Mechanism A1 (concatenate the subranges' indices into
+one `vkCmdDrawIndexed`) is strictly better on MoltenVK by construction:
+one Metal draw instead of N.
 
-**Kill criterion**: the driver no longer blocks it, so D now stands or
-falls with A: it is only worth wiring if A ships and its bookkeeping
-proves a burden. On any future MoltenVK pin bump, re-run the greps above
-(`xemu-testing`'s MoltenVK maintenance note already says to re-run the
-artifact hunt + fps A/B on a pin bump; add these to that checklist).
+**Kill criterion**: met — do not wire D. The one open fact is F8's
+`da_multi_subrange` (measured 0 only on F5); a zero-code
+`XEMU_NV2A_NSPROF=1` capture on F8 closes it, and if it ever reads large
+the follow-up is A1, never D. On a future MoltenVK pin bump, re-check
+that the loop above still unrolls (a real batching implementation would
+reopen this).
 
 ## Fenced-off wrong paths
 
