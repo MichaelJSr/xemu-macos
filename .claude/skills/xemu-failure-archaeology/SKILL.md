@@ -85,7 +85,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 8.4 | build.sh PGO merge-skip + set -e ls-glob CI red | shipped-after-fix |
 | 8.5 | -a x86_64 cross-build failure chain (stale build/, arch-blind MoltenVK tiers, unguarded MetalFX refs) | shipped-after-fix |
 | 8.6 | grep -m1 under pipefail poisoned the MoltenVK provenance version | shipped-after-fix |
-| 8.7 | `-fzero-call-used-regs=skip` hardening removal (−411 kB `__text`, fps sign-mixed) | settled-negative (fenced-off dark) |
+| 8.7 | `-fzero-call-used-regs=skip` hardening removal (−411 kB `__text`; fps 3+/2− then 3+/5−) | settled-negative on macOS (knob removed 2026-10-10) |
 | 2.1 | Pink-tile corruption (MoltenVK prefill) | shipped-after-fix |
 | 2.2 | Visibility-buffer crash, two acts | shipped-after-fix |
 | 2.3 | Pink-flash (torn texture snapshot) | shipped-after-fix |
@@ -1803,10 +1803,14 @@ fallback off such a pipeline.
 
 ## 8.7 `-fzero-call-used-regs=skip` — a real code-size win the fps A/B refused to confirm
 
-**Status**: settled-negative under the pre-registered bar (2026-08-04
-wave); the mechanism stays in-tree DARK as the experimental arm
-`XEMU_HARDENING=0` (`build.sh:719-725`). The default **keeps upstream's
-register zeroing**, so the fork takes no security trade.
+**Status**: settled-negative on macOS/Apple Silicon (2026-08-04 wave),
+closed by two failed sign tests (`00a404c774`, `7aa746a952`). The
+experimental arm `XEMU_HARDENING=0` shipped dark in `build.sh` (Darwin
+arm from `00a404c774`, every platform arm from `5dfde3356d`) and was
+removed on 2026-10-10 with its compile-database checker: the arm is one
+flag, and upstream's `CFLAGS` passthrough reaches every arm with it
+(recipe under Reopen if). The default **keeps upstream's register
+zeroing**, so the fork takes no security trade.
 **The idea** (audit §3.1, the flagship build finding): upstream's
 hardening block applies `-fzero-call-used-regs=used-gpr` globally with
 no opt-out, so every return re-zeroes its used GPRs — measured at
@@ -1823,6 +1827,32 @@ pre-registered bar kills on sign-mixed — and this shape is *worse* than
 the sign-mixed-by-one results that have killed candidates before, so
 the verdict was applied as written rather than re-argued from the
 positive mean. Receipts: wave scratchpad `b4/h2`.
+**The retest exercised the old reopen clause and failed it**: that
+clause asked for **≥ 8 interleaved pairs, unanimous-sign positive**, and
+the same day 8 idle-gated pairs on the post-upstream-merge tree read
+**mean −0.39 fps, signs 3+/5−** (`7aa746a952`). Pooled over both runs:
+−0.04 fps across 13 pairs. Every SE here borrows SD ≈ 1.0 fps per
+cross-binary pair from the +10 fps wave batch, not from these arms (the
+per-pair receipts are not in the repo); at that SD the 8-pair interval
+excludes the audit's +0.34 central prediction, barely (2.06 SE).
+**What the verdict does not cover**: neither run is recorded as using a
+PGO profile trained on its own tree (the first came before that
+morning's retrain `6ff4467c27`, while the new staleness gate reported 7
+hot-path mismatches including `cpu_exec_loop`; the merged-tree retrain
+landed in `7aa746a952` after the campaigns ran). A stale or missing
+profile leaves more zeroing exposed, which favours skip, so this does
+not rescue it. draws/s was never recorded, so the old clause's second
+half was never tested. The local toolchain has since been replaced
+(Command Line Tools 27 installed 2026-09-10, Xcode 27, Apple clang 21;
+release CI builds on its own macos-15 image). And the macOS verdict
+does not carry to other hosts: arm (b)'s inline store stub is absent on
+x86_64 and default-off on non-Apple aarch64 since `0aeb1998c3`, so the
+~2M stores/s it completes inline on F8 take the compiled-C slow path
+there; the win64-cross arm64 leg is llvm-mingw clang, so the tail-call
+loss applies; GCC x86-64 keeps its sibcalls under `used-gpr`, so expect
+zeroing without the tail-call loss (unmeasured). A resumed Windows or
+Linux campaign pre-registers its own run instead of inheriting this
+one.
 **The static receipt that did NOT override the bar**: the mechanism
 provably did what it claimed — `__text` **8,741,512 B** hardened vs
 **8,330,592 B** skipped, **−410,920 B**. Recorded in the ledger's
@@ -1832,16 +1862,33 @@ of an fps win, and a kill bar that can be talked out of by a
 **Lessons**: (a) when a candidate's predicted band overlaps the noise
 floor, the sign test is the whole experiment — pre-register it and then
 honour it, because a positive mean carried by 3 of 5 pairs is exactly
-what noise looks like; (b) keep the losing arm as a knob: the
-mechanism is one flag, so `XEMU_HARDENING=0` costs nothing and makes
-the retest a one-line change instead of an archaeology dig.
-**Reopen if**: a quiet-machine batch of **≥ 8 interleaved pairs** on the
-current binary comes back **unanimous-sign** positive, or draws/s (the
-composition-symmetric metric of 6.9) separates the arms where fps
-cannot. Use `XEMU_HARDENING=0` as the E arm; `build.sh`'s
-`check_zero_call_regs_order` (`build.sh:234-265`) already asserts the
-appended flag actually wins in the generated compile database, so a
-null result cannot be a silently-unapplied flag.
+what noise looks like; (b) keep the losing arm reachable so the retest
+is a one-line change instead of an archaeology dig. Here upstream's
+`CFLAGS` passthrough already does that, so the dedicated knob was
+redundant and was removed; a runtime dark mechanism with no such
+upstream path is a different case.
+**Reopen if**: a codegen/cycle census on the current compiler, taken
+after a PGO retrain under that compiler (best alongside the re-profile
+the roadmap already owes), attributes **≥ 1.5% of vCPU cycles** to the
+zeroing movs plus the `bl`+`ret`-for-`b` sites in the hot vCPU symbols.
+Only that unlocks a new A/B: **≥ 8 interleaved pairs, draws/s (the
+composition-symmetric metric of 6.9), unanimous sign**. An x86-64 or
+Windows-arm64 run is pre-registered fresh (above). The E arm is
+`CFLAGS=-fzero-call-used-regs=skip ./build.sh`: `CFLAGS` is the tail of
+`--extra-cflags`, which configure hands to C, C++ and ObjC and meson
+places after its global `used-gpr`. The recipe has never been run,
+and nothing checks it automatically, so before trusting a
+result confirm `=skip` won on every compile line, from the checkout
+root:
+
+```bash
+python3 -c 'import json,sys;P="-fzero-call-used-regs=";w=[t[-1] for t in ([x for x in e.get("command","").replace(chr(34),"").split() if x.startswith(P)] for e in json.load(open("build/compile_commands.json"))) if t];n=w.count(P+"skip");print(n,"of",len(w),"compile lines end on =skip");sys.exit(not w or n<len(w))'
+```
+
+It must print `N of N` with N > 0. It strips meson's Windows argument
+quoting and exits non-zero if any compile line ends on another value or
+no line carries the flag, so a null result cannot be a silently
+unapplied flag. A default build reads `0 of N`.
 
 ## 8.8 An upstream merge silently changed the DSP engine default everywhere
 
@@ -2118,10 +2165,9 @@ facts:
   `grep -n 'XEMU_DIRTY_FAST' system/physmem.c include/system/physmem.h`
 - 6.10's audit-side numbers (the base that collapsed):
   `sed -n '67,97p' docs/Finished/fork-optimization-audit-2026-08.md`
-- 8.7 dark arm still one flag, default still hardened:
-  `grep -n 'XEMU_HARDENING\|zero-call-used-regs' build.sh`
-- 8.7 flag-order checker still runs after every build:
-  `grep -n 'check_zero_call_regs_order' build.sh`
+- 8.7 knob still gone (expect `0`; removed 2026-10-10) and upstream's
+  zeroing still applied: `grep -c 'zero-call-used-regs' build.sh` and
+  `grep -n 'fzero-call-used-regs=used-gpr' meson.build`
 - 9.10's three refuter knobs still exist (the rule is only meaningful while
   they do): `grep -rn 'XEMU_X87_REFUTE\|XEMU_SUBPAGE_FAST_REFUTE' accel/tcg target/i386/tcg`
 - 7.5's closure page and its reopen number:

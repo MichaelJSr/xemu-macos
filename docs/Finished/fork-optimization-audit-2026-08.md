@@ -4,6 +4,9 @@
 > same day; outcomes are in the [roadmap](../roadmap.md)'s 2026-08-04
 > state header and the [ledger](../optimizations.md), closing commit
 > `7aa746a952`. Figures and line anchors below are as of 2026-08-04.
+> §3.1's `XEMU_HARDENING` knob was removed from `build.sh` on
+> 2026-10-10; its skip arm is
+> `CFLAGS=-fzero-call-used-regs=skip ./build.sh` (ledger Failed row).
 
 A deep, adversarially-verified audit of the whole fork for remaining
 optimization and refinement candidates, run at the arm-(b)-on

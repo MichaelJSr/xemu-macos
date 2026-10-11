@@ -36,7 +36,7 @@ remaining candidates are now all measured-dead.** Four idle-gated
 campaigns closed the queue — surface-CB reuse pool **−0.66 fps 3/3**,
 `XEMU_X87_ELIDE_CLEAN` **−0.23 3/3**, hardening-skip retest **−0.39
 over 8 pairs** (the earlier +0.52 was noise; upstream's register
-zeroing stands permanently), reports-budget 50 µs **−12.1 3/3**
+zeroing stands on macOS; the knob was removed 2026-10-10), reports-budget 50 µs **−12.1 3/3**
 (submit-storm cliff; 300 µs validated). Items 1/3/4 below carry the
 full receipts. The honest state: at the ~48 fps equilibrium this page
 has **no live fps candidate** — the next lever must come from a fresh

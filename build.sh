@@ -324,51 +324,6 @@ check_pgo_staleness() {
     fi
 }
 
-# Post-build flag-order sanity for the -fzero-call-used-regs override.
-# clang is last-flag-wins, so the fork's '=skip' only takes effect where
-# it lands after meson's global '=used-gpr' on the command line. Read
-# the compile database meson generated instead of trusting the order in
-# which this script assembles flags.
-check_zero_call_regs_order() {
-    [ "${zero_call_regs_override:-0}" = "1" ] || return 0
-    [ -f build/compile_commands.json ] || return 0
-    python3 - build/compile_commands.json <<'PYEOF' || true
-import json, sys
-
-ok = bad = 0
-first = None
-for entry in json.load(open(sys.argv[1])):
-    last = None
-    for tok in entry.get("command", "").split():
-        # meson writes every argument quoted on Windows ("\"cc\" \"-m64\" ..."),
-        # so strip the literal quotes before matching or the scan finds
-        # nothing there and the 0/0 below reads as a pass.
-        tok = tok.strip('"')
-        if tok.startswith("-fzero-call-used-regs="):
-            last = tok
-    if last is None:
-        continue
-    if last == "-fzero-call-used-regs=skip":
-        ok += 1
-    else:
-        bad += 1
-        if first is None:
-            first = (entry.get("file", "?"), last)
-if bad:
-    print("*** Warning: -fzero-call-used-regs=skip does not win in %d of %d "
-          "compile lines (first: %s keeps %s); register zeroing is still "
-          "active there." % (bad, ok + bad, first[0], first[1]))
-elif ok == 0:
-    # No compile line mentions the flag at all: the override did not
-    # reach the compiler (or the database is not the one just built).
-    # That is a failed check, not a clean one.
-    print("*** Warning: no compile line carries -fzero-call-used-regs at all; "
-          "the XEMU_HARDENING=0 override did not take.")
-else:
-    print("Flag check: -fzero-call-used-regs=skip wins in %d compile lines." % ok)
-PYEOF
-}
-
 # Read one key out of a wrap file's [wrap-git] section (section-aware so
 # a [provide]/[update] key of the same name cannot win; tolerates CRLF).
 wrap_field() {
@@ -583,7 +538,6 @@ postbuild=''
 build_cflags=''
 default_job_count='12'
 sys_ldflags=''
-zero_call_regs_override=0
 
 get_job_count () {
 	if command -v 'nproc' >/dev/null
@@ -1001,38 +955,6 @@ case "$platform" in # Adjust compilation options based on platform
         ;;
 esac
 
-# Upstream's hardening block (meson.build) applies
-# -fzero-call-used-regs=used-gpr globally with no opt-out, so every
-# function return re-zeroes its used GPRs: 3.4-3.8% of this fork's
-# dynamic compiled-instruction stream on clang/arm64, where it also
-# defeats tail-call optimization (bl+ret where a b would do; GCC
-# x86-64 does keep its sibcalls under =used-gpr, so expect a
-# different cost profile there). xemu runs a W^X JIT and is not a
-# sandbox boundary, so the ROP-gadget hardening is not worth the
-# interpreter cost. Both clang and GCC take the last
-# -fzero-call-used-regs= on the command line and extra-cflags land
-# after meson's global flags, so appending '=skip' here disables it;
-# check_zero_call_regs_order verifies that against the compile
-# database after the build. -ftrivial-auto-var-init=zero is
-# deliberately left alone. Default keeps upstream's register zeroing:
-# the 2026-08-04 5-pair macOS A/B read mean +0.52 fps for skip but
-# sign-mixed 3+/2- — below the pre-registered evidence bar (see the
-# optimizations.md Failed row). XEMU_HARDENING=0 opts into the skip
-# arm for retests.
-#
-# This sits after the platform case (it used to live inside the
-# Darwin arm) so the knob is reachable on Linux and both Windows
-# arms too — an x86-64 retest was previously impossible to run. It
-# appends to whichever sys_cflags the platform arm left behind; the
-# ${sys_cflags:+ } spelling handles the unset case.
-if [ "${XEMU_HARDENING:-1}" = "0" ]; then
-    sys_cflags="${sys_cflags:-}${sys_cflags:+ }-fzero-call-used-regs=skip"
-    zero_call_regs_override=1
-    echo "Hardening: -fzero-call-used-regs disabled (XEMU_HARDENING=0 experimental arm)"
-else
-    echo "Hardening: upstream -fzero-call-used-regs=used-gpr kept (default)"
-fi
-
 # Warn (never fail) if a subproject checkout has drifted from its wrap.
 check_wrap_drift || true
 
@@ -1051,6 +973,5 @@ set -x # Print commands from now on
 time make -j"${job_count}" ${target} 2>&1 | tee build.log
 
 check_pgo_staleness
-check_zero_call_regs_order
 
 "${postbuild}" # call post build functions

@@ -8,7 +8,7 @@ description: >
   knobs, POSIX guards), the six canonical MVK_CONFIG_* MoltenVK values
   and the Info.plist/main() launch-path parity rule, and build.sh /
   build-moltenvk.sh build-time knobs (XEMU_ARM_CPU, XEMU_PGO,
-  XEMU_HARDENING, XEMU_VIS, XEMU_STRIP, -j/-p/-a/--debug, x86_version).
+  XEMU_VIS, XEMU_STRIP, -j/-p/-a/--debug, x86_version).
   Load this skill when you
   need to: look up a setting or env var name/default/effect, decide
   production vs experimental vs test-only status, add a new xemu.toml
@@ -421,7 +421,6 @@ build.sh edit).
 | `XEMU_PGO_DIR` | `${PWD}/pgo` | Profile directory for both stages. On the native Windows arm it is rewritten to its `cygpath -m` (Windows-absolute) form before `setup_pgo` runs, or a native `gcc.exe`/`clang.exe` bakes the POSIX spelling into the instrumented binary and the profiles land somewhere discovery never looks | `build.sh` (`grep -n XEMU_PGO_DIR build.sh`; the `cygpath -m` rewrite sits on the `CYGWIN*|MINGW*|MSYS*` arm) |
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only) | **2026-08-04.** With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*`/`helper_*`/`tlb_*`/`tcg_*`/`pgraph_*`) into a build failure instead of a loud warning. Deliberately not enabled in CI yet — flip it once the gate is proven quiet on a freshly retrained tree | `build.sh` `check_pgo_staleness` (`grep -n XEMU_PGO_STALE_FATAL build.sh`) |
 | `XEMU_PGO_RETRAIN_REF` | auto | **2026-08-04.** Commit the staleness *age* is measured from. Auto-derivation: last commit touching `pgo/`, else the commit that was HEAD at the newest profile artifact's mtime; degrades to "unknown"/"n/a" with no error in a source tarball with no `.git`. **Known blind spot**: the age half cannot see an uncommitted tree, so a dirty working tree reads as freshly retrained — the CFG-mismatch half is what catches that case | `build.sh` (`grep -n XEMU_PGO_RETRAIN_REF build.sh`) |
-| `XEMU_HARDENING` | `1` (upstream register zeroing **kept**) | **2026-08-04; every platform arm since 2026-09-08** (the block moved verbatim out of the Darwin arm to just after the platform `case`, so the x86-64 retest is finally runnable). `0` appends `-fzero-call-used-regs=skip` to whatever `sys_cflags` the arm left behind, which last-flag-wins over meson's global `-fzero-call-used-regs=used-gpr` on both clang and GCC. Default keeps upstream's zeroing: the 5-pair macOS A/B read mean +0.52 fps but sign-mixed 3+/2−, below the pre-registered bar (archaeology 8.7), so `0` is an **experimental retest arm**, not a recommendation. At the default every arm's flags are byte-identical to before (the block only echoes); `-ftrivial-auto-var-init=zero` is untouched in both. Security posture: ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary | `build.sh` after the platform `case` (`grep -n "XEMU_HARDENING:-1" build.sh`); order check `check_zero_call_regs_order` |
 | `XEMU_WIN_O3` | `0` (off) | **2026-09-08, native MSYS2/MinGW only.** `1` adds `-Doptimization=3 -Dstack_protector=disabled` to the native Windows release; unset, both Windows arms keep meson's project default `optimization=2` and the probed `-fstack-protector-strong` (which stock MSYS2 MINGW64 does get — `meson.build:512-536` probes by compiling *and* linking). Experimental: no CI leg builds it and the 2026-09-08 wave-1 review names the flip as the differential behind the native-Windows exit-139. `win64-cross` ignores it, with a message, so release artifacts cannot pick it up | `build.sh` native MSYS2 arm (`grep -n "XEMU_WIN_O3:-0" build.sh`) |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | `1` = local hardened-runtime codesign with `xemu.entitlements` (allow-jit + allow-unsigned-executable-memory), re-signing every bundled dylib to match. Default is ad-hoc sign preserving metadata. Distributable signing lives in `scripts/sign-macos-release.sh` | `build.sh` `package_macos` (`grep -n XEMU_CODESIGN_ENTITLEMENTS build.sh`) |
 | `XEMU_MOLTENVK_VERSION` | **`1.4.2`** (was `1.4.1` until 2026-08-04) | Official MoltenVK release auto-vendored into `macos-libs/<arch>` **only when no dylib exists** in: vendored dir, `/usr/local/lib`, `/opt/homebrew/lib` (same order used at bundle time; missing dylib at packaging = hard error with provenance version+UUID logging). **This default is the single home for the expected version** — macOS CI awk-parses it out of build.sh and fails the job if the packaged bundle's provenance line disagrees | `build.sh` MoltenVK helpers (`grep -n XEMU_MOLTENVK_VERSION build.sh`), `package_macos` provenance echo |
@@ -477,9 +476,13 @@ xemu-validation-and-qa).
 Baked-in release options (non-Windows, non-debug, `build.sh:709-712`):
 thin LTO + `.lto-cache`, `-Doptimization=3`, `-Dqom_cast_debug=false`,
 `-Dtrace_backends=nop`, `-Dstack_protector=disabled`, plus
-`-mcpu=<apple-mN> -ffp-contract=fast` on arm64 — and, when
-`XEMU_HARDENING=0`, the appended `-fzero-call-used-regs=skip` (default
-build does **not** append it, on any platform since 2026-09-08).
+`-mcpu=<apple-mN> -ffp-contract=fast` on arm64. Upstream's hardening
+flags (`-fzero-call-used-regs=used-gpr`, `-ftrivial-auto-var-init=zero`)
+stay on every arm whose compiler passes meson's probe. The fork's
+`XEMU_HARDENING=0` skip arm was removed on 2026-10-10 (archaeology
+8.7): a retest is `CFLAGS=-fzero-call-used-regs=skip ./build.sh`,
+checked with the compile-database one-liner in 8.7 before any result
+is trusted.
 Windows release (`build.sh:657-707`, `:941-1001`): **no forced LTO** (CI
 owns per-toolchain LTO strategy), no `-Doptimization=3` and no
 `-Dstack_protector=disabled` unless the native arm is opted in with
@@ -639,7 +642,7 @@ for v in $(grep -rhn 'getenv("XEMU_' --include='*.c' --include='*.cc' \
 done
 
 # 2. Build knobs + args
-grep -n 'XEMU_ARM_CPU\|XEMU_PGO\|XEMU_CODESIGN\|XEMU_MOLTENVK_VERSION\|XEMU_VIS\|XEMU_STRIP\|XEMU_HARDENING\|x86_version' build.sh
+grep -n 'XEMU_ARM_CPU\|XEMU_PGO\|XEMU_CODESIGN\|XEMU_MOLTENVK_VERSION\|XEMU_VIS\|XEMU_STRIP\|x86_version' build.sh
 grep -n 'XEMU_MVK_MCPU\|MVK_PIN' scripts/build-moltenvk.sh   # pin = 67b2682699… (main past v1.4.2, reports 1.4.3)
 
 # 3. MVK parity (all three homes must agree: plist, main(), the ledger
@@ -671,9 +674,7 @@ Drift-prone facts to re-check first when this skill feels wrong (values
 as of 2026-08-04 unless dated): the env-var count (**65** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
-1.4.2), `XEMU_HARDENING`'s default (**1** —
-upstream register zeroing kept; `0` is the killed experimental arm, not
-the shipping choice), the default-ON knob list, every `build.sh` line
+1.4.2), the default-ON knob list, every `build.sh` line
 anchor (the file passed 800 lines in this wave),
 `audio.dsp_jit.enabled`'s default (false), and `audio.use_dsp_jit`'s
 default (**true**, fork-owned since 2026-09-08 — upstream ships

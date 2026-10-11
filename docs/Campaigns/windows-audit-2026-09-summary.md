@@ -30,6 +30,11 @@ Known supersessions:
   the GL and Vulkan flip hooks are mutually exclusive. `eb971f860d`
   landed the GL hook and deliberately left the Vulkan call site
   alone; details in the bracketed note on batch 10 below.
+- **PLAUSIBLE finding 6 and batch 12's `XEMU_HARDENING` hoist are void
+  as of 2026-10-10.** The hoist landed in `5dfde3356d`, then the knob
+  was removed from `build.sh`. The skip arm on any platform is now
+  `CFLAGS=-fzero-call-used-regs=skip ./build.sh`, and the macOS kill
+  does not carry to Windows (the ledger's Failed row says why).
 
 ## CONFIRMED (60)
 

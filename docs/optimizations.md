@@ -94,7 +94,6 @@ table carries the user-facing subset.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_HARDENING` | **Default `1` = upstream's `-fzero-call-used-regs=used-gpr` register zeroing is KEPT.** `XEMU_HARDENING=0` appends `-fzero-call-used-regs=skip` to whatever `sys_cflags` the platform arm left behind (both clang and GCC take the last `-fzero-call-used-regs=` on the line, and extra-cflags land after meson's global flags), which is the experimental skip arm. **Note the inversion**: the knob was built expecting skip to become the default, and the 2026-08-04 A/B killed that promotion (Failed table), so `0` is now the opt-in experiment rather than the shipped shape. **Every arm since 2026-09-08** (`build.sh:1028-1034`; it used to sit inside the Darwin arm and was macOS-only, so an x86-64 retest could not be run — the block moved verbatim to just after the platform `case`, which is also why it now appends *after* the arm set `sys_cflags`; anchors move, re-grep rather than trusting them). Default `1` is byte-identical on every platform — the block only echoes — so the only new behaviour is that `XEMU_HARDENING=0` now reaches Linux and both Windows arms. Either choice is echoed at configure time; `-ftrivial-auto-var-init=zero` is untouched in both cases. Security note: this is ROP-gadget hardening only — xemu runs a W^X JIT and is not a sandbox boundary |
 | `XEMU_WIN_O3` | **Added 2026-09-08. Default off.** `=1` opts the *native* MSYS2/MinGW release into `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:697-707`), the pair the Darwin/Linux arm already uses. Unset, both Windows arms keep meson's project default `optimization=2` (`meson.build:3`) and the probed `-fstack-protector-strong` — exactly what every CI Windows leg and every previous native build shipped. **The polarity is deliberate**: the 2026-09-08 review names this flip as the differential behind the wave-1 exit-139 on the Windows box (it reaches every translation unit of both renderers with every runtime hatch unset), and no CI leg builds it. `-Dstack_protector=disabled` is not cosmetic on mingw: `meson.build:512-536` probes by compiling *and linking* a test program with `-fstack-protector-strong`, which a stock MSYS2 MINGW64 toolchain passes, so the option really does strip the canary from the whole tree. Ignored (with a message) on `win64-cross`, which builds the release artifacts |
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only). With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*` / `helper_*` / `tlb_*` / `tcg_*` / `pgraph_*`) into a build failure instead of a loud warning (`build.sh:227-230`). Deliberately NOT enabled in CI: flip it on once the gate is proven quiet on a freshly-retrained tree |
 | `XEMU_PGO_RETRAIN_REF` | Unset = auto-derived. The commit the PGO staleness *age* is measured from; auto-derivation order is the last commit touching `pgo/`, else the commit that was HEAD at the newest `.profdata`/`.profraw` mtime (`build.sh:190-191`). Degrades to `unknown`/`n/a` with no error on a source tarball with no `.git` |
@@ -287,8 +286,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   2026-09-08, re-cut** (see Build + packaging): GCC PGO arm
   (`-fprofile-generate`/`-fprofile-use`, `.gcda` discovery) with the
   `cygpath -m` profile-dir fix the branch version lacked, and
-  `XEMU_HARDENING` reachable on all arms. The `-O3` hunk was **inverted**
-  before landing — the branch made `-Doptimization=3
+  `XEMU_HARDENING` reachable on all arms (knob removed 2026-10-10).
+  The `-O3` hunk was **inverted** before landing — the branch made
+  `-Doptimization=3
   -Dstack_protector=disabled` the native-Windows default, main makes it
   opt-in behind `XEMU_WIN_O3=1`, because that flip is the review's
   crash differential. The tar `--force-local` rekey landed separately in
@@ -1831,8 +1831,10 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   arm to just after the platform `case`, so the register-zeroing A/B is
   finally runnable on Linux and both Windows arms; the block moved
   verbatim and at the default (`1`) it only echoes, so no arm's flags
-  change. **The branch's `-O2` → `-O3 -Dstack_protector=disabled` flip
-  of the native Windows release was inverted to opt-in
+  change (the knob itself was removed on 2026-10-10; the Failed row has
+  the `CFLAGS` replacement). **The branch's `-O2` →
+  `-O3 -Dstack_protector=disabled` flip of the native Windows release
+  was inverted to opt-in
   (`XEMU_WIN_O3=1`)**: the 2026-09-08 review names it as the differential
   behind the wave-1 exit-139, no CI leg builds it, and the branch comment
   claiming `-Dstack_protector=disabled` is a mingw no-op was wrong —
@@ -2145,6 +2147,17 @@ the next tag.
   field). Default path unchanged: one per-TB latch check and an
   always-false skip are gone. Restore it by reverting the removal
   commit, never `69636c84a7`, which also added the live `(b')` counters.
+- **`XEMU_HARDENING` removed.** `build.sh`'s `=0` arm appended
+  `-fzero-call-used-regs=skip` (`00a404c774`; reachable on every platform
+  since `5dfde3356d`), with a compile-database flag-order checker. The
+  skip arm failed two sign tests on macOS on 2026-08-04 (5 pairs 3+/2−,
+  then 8 pairs 3+/5−). The record is its Failed row and archaeology 8.7,
+  which now say the macOS verdict does not carry to other hosts. The
+  whole mechanism is one compiler flag that upstream's `CFLAGS`
+  passthrough already reaches on every arm, so a retest is
+  `CFLAGS=-fzero-call-used-regs=skip ./build.sh`, checked with the
+  one-liner in the Failed row. Default build flags and the binary are
+  unchanged; build logs lose the `Hardening: ... kept (default)` line.
 
 ## Failed / reverted experiments
 
@@ -2211,7 +2224,7 @@ mechanisms that survived are in the Changes manifest above):
 
 | Attempt | Reason |
 |---|---|
-| Drop upstream's `-fzero-call-used-regs=used-gpr` on macOS builds (`XEMU_HARDENING`, 2026-08-04) | The ROP-gadget register zeroing costs real work — the zeroing movs measured **3.4-3.8% of this fork's dynamic compiled-instruction stream**, and the flag also defeats tail-call optimization (`bl`+`ret` where a `b` would do) — in a process that runs a W^X JIT and is not a sandbox boundary. Pre-registered **+0.11 to +0.83 fps (central ~+0.34)**. Measured over 5 interleaved cross-binary pairs: mean **+0.52 fps but signs 3+/2−**, which is worse than sign-mixed-by-one and therefore below the pre-registered evidence bar — killed as pre-registered, not renegotiated. The binary-size receipt (`__text` **8,741,512 B hardened vs 8,330,592 B skip = −411 KB**) is real and was explicitly ruled insufficient to override an fps bar the change did not clear. Default reverted to upstream's `used-gpr` in `build.sh`; the skip arm stays reachable as `XEMU_HARDENING=0`. **Retest ran same day and CLOSED IT PERMANENTLY**: the promised quieter-machine rerun (8 idle-gated pairs, post-upstream-merge tree) read **mean −0.39 fps, signs 3+/5−** — the earlier +0.52 was noise, there is no real fps effect from removing register zeroing on this workload post-PGO. Upstream's hardening stands; the −411 KB `__text` saving buys nothing measurable. Note the knob inversion when reading `build.sh` |
+| Drop upstream's `-fzero-call-used-regs=used-gpr` on macOS builds (`XEMU_HARDENING`, 2026-08-04; knob removed 2026-10-10) | The ROP-gadget register zeroing costs real work — the zeroing movs measured **3.4-3.8% of this fork's dynamic compiled-instruction stream**, and the flag also defeats tail-call optimization (`bl`+`ret` where a `b` would do) — in a process that runs a W^X JIT and is not a sandbox boundary. Pre-registered **+0.11 to +0.83 fps (central ~+0.34)**. Measured over 5 interleaved cross-binary pairs: mean **+0.52 fps but signs 3+/2−**, which is worse than sign-mixed-by-one and therefore below the pre-registered evidence bar — killed as pre-registered, not renegotiated. The binary-size receipt (`__text` **8,741,512 B hardened vs 8,330,592 B skip = −411 KB**) is real and was explicitly ruled insufficient to override an fps bar the change did not clear. Default reverted to upstream's `used-gpr` in `build.sh` (`00a404c774`). **The same-day retest failed the bar again**: the promised quieter-machine rerun (8 idle-gated pairs, post-upstream-merge tree, `7aa746a952`) read **mean −0.39 fps, signs 3+/5−**; pooled with the first run that is −0.04 fps over 13 pairs. Upstream's hardening stands; the −411 KB `__text` saving buys nothing measurable. **What the verdict covers**: macOS on Apple Silicon, closed by two failed sign tests. Neither run is recorded as using a PGO profile trained on its own tree (the first came before that morning's retrain `6ff4467c27`, while the new staleness gate was reporting 7 hot-path mismatches; the merged-tree retrain landed in the retest's commit, after the campaigns ran), draws/s was never recorded, and the local toolchain has since been replaced (Command Line Tools 27 installed 2026-09-10, Xcode 27, Apple clang 21). It does not carry to other hosts: arm (b)'s inline store stub is absent on x86_64 and default-off on non-Apple aarch64 since `0aeb1998c3`, so more stores take the compiled-C slow path the zeroing taxes; the win64-cross arm64 leg is llvm-mingw clang, so the tail-call loss applies there; GCC x86-64 keeps its sibcalls under `used-gpr`, so expect zeroing without the tail-call loss (unmeasured). **The `XEMU_HARDENING=0` arm was removed from `build.sh` on 2026-10-10**: it was one flag, and upstream's `CFLAGS` passthrough already reaches every arm. The skip arm is `CFLAGS=-fzero-call-used-regs=skip ./build.sh`: `CFLAGS` is the tail of `--extra-cflags`, which configure hands to C, C++ and ObjC and meson places after its global `used-gpr`. The recipe has never been run, so check it took effect before trusting a result: from the checkout root, `python3 -c 'import json,sys;P="-fzero-call-used-regs=";w=[t[-1] for t in ([x for x in e.get("command","").replace(chr(34),"").split() if x.startswith(P)] for e in json.load(open("build/compile_commands.json"))) if t];n=w.count(P+"skip");print(n,"of",len(w),"compile lines end on =skip");sys.exit(not w or n<len(w))'` must print N of N with N > 0 (it strips meson's Windows quoting, and exits non-zero if any compile line ends on another value or none carries the flag) |
 | Running the x87, sub-page-fast and DSP-JIT refuters in one process (`XEMU_X87_REFUTE` + `XEMU_SUBPAGE_FAST_REFUTE` + `XEMU_DSP_JIT_DIFF` together) | Deadlocks the guest during **BOOT, 2/2 attempts** — a test-infrastructure interaction, not a product bug: the arch-4.5 diff-validator-starvation family, three shadow validators contending for the same execution. **Singles and pairs are clean** and remain the supported way to soak. This also retroactively attributes the campaign's run-1 `vp_write` wedge, which had no other explanation. Practical rule: cap refuter soaks at two validators per process |
 
 ---
