@@ -2040,6 +2040,19 @@ confirmed) and async/prewarm pipeline creation — are recorded in
 
 ### Testing & tooling (2026-07-18)
 
+- **Harness runs are muted and carry their own pads (2026-10-11).**
+  `scripts/harness-config.py` finishes every harness's scratch config:
+  `[audio] volume_limit = 0` (owner request; harness audio played on the
+  owner's machine), and for players 1-2 not bound to the keyboard it
+  drops the binding, stubs a hub + gamepad with `-device` args and sets
+  `auto_bind = false`. The 2026-10-11 `azurik-*` fixture tags carry the
+  owner's pad on player 1, so with it switched off every `loadvm` of
+  them failed (a whole 20-run batch DEAD); `auto_bind` off keeps a pad
+  connecting mid-run from aborting xemu on the occupied port. Bench
+  runs whose xemu exits mid-run are now recorded DEAD instead of being
+  gated on a truncated log (one such crashed run had printed a VALID
+  receipt). `movement-probe.sh` takes `--app` and `--isolate-caches`
+  and quits through the monitor so atexit dumps and PGO profiles land.
 - **Mid-run screenshot artifact check in the bench fixtures.** Every
   `scripts/bench-savestate-ab.sh` run now captures one window
   screenshot partway through (`scripts/bench-screenshot.py`: Quartz
