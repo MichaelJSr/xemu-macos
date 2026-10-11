@@ -36,6 +36,10 @@ Known supersessions:
   its own `QUERIES_FULL` reason. Batch 3's other items are still open;
   its "turn the two dead nv2a_vk_asserts into real asserts" step is
   covered by debug builds running `nv2a_vk_assert` since `45d4a2d656`.
+- **Batch 4's item (1), surface uploads staging at offset 0, is fixed as
+  of 2026-10-10**: `pgraph_vk_upload_surface_data` stages in the current
+  flight slot's partition. The swizzled-zeta and compute-set items stay
+  open.
 - **PLAUSIBLE finding 6 and batch 12's `XEMU_HARDENING` hoist are void
   as of 2026-10-10.** The hoist landed in `5dfde3356d`, then the knob
   was removed from `build.sh`. The skip arm on any platform is now

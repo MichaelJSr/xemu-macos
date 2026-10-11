@@ -1737,9 +1737,30 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     StorageBuffer *copy_buffer = &r->storage_buffers[BUFFER_STAGING_SRC];
 
+    /*
+     * BUFFER_STAGING_SRC is partitioned per flight slot, and
+     * pgraph_vk_finish() does not wait for the command buffer it submits,
+     * so the other slot's partition may still be read by in-flight texture
+     * copies. Stage in the current slot's partition: the finish that
+     * selected this slot already waited out its previous submission, and
+     * this function's aux command buffer is fence-waited before it
+     * returns, so nothing else reads the range while the copy is pending.
+     * If anything is staged for a command buffer that has not been
+     * submitted yet, submit it first rather than overwrite it.
+     */
+    VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
+    VkDeviceSize staging_limit =
+        r->flight[r->current_flight].staging_buffer_limit;
+    if (copy_buffer->buffer_offset > staging_base) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        staging_base = r->flight[r->current_flight].staging_buffer_base;
+        staging_limit = r->flight[r->current_flight].staging_buffer_limit;
+        copy_buffer->buffer_offset = staging_base;
+    }
+
     size_t uploaded_image_size = surface->height * surface->width *
                                  surface->fmt.bytes_per_pixel;
-    nv2a_vk_bounds_check(uploaded_image_size <= copy_buffer->buffer_size);
+    nv2a_vk_bounds_check(uploaded_image_size <= staging_limit - staging_base);
 
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -1749,12 +1770,12 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                    surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
                    use_compute_to_convert_depth_stencil_format);
 
-    memcpy_image(copy_buffer->mapped, gl_read_buf,
+    memcpy_image(copy_buffer->mapped + staging_base, gl_read_buf,
                  surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
                  surface->height);
 
     if (!copy_buffer->is_coherent) {
-        vmaFlushAllocation(r->allocator, copy_buffer->allocation, 0,
+        vmaFlushAllocation(r->allocator, copy_buffer->allocation, staging_base,
                            uploaded_image_size);
     }
 
@@ -1768,6 +1789,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .buffer = copy_buffer->buffer,
+        .offset = staging_base,
         .size = uploaded_image_size
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
@@ -1775,10 +1797,14 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                          &host_barrier, 0, NULL);
 
     VkBuffer upload_src_buffer = copy_buffer->buffer;
+    VkDeviceSize upload_src_offset = staging_base;
     VkDeviceSize upload_data_size = uploaded_image_size;
 
     if (use_gpu_unswizzle) {
-        VkBufferCopy swz_copy = { .size = uploaded_image_size };
+        VkBufferCopy swz_copy = {
+            .srcOffset = staging_base,
+            .size = uploaded_image_size,
+        };
         vkCmdCopyBuffer(cmd, copy_buffer->buffer,
                         r->storage_buffers[BUFFER_COMPUTE_DST].buffer,
                         1, &swz_copy);
@@ -1820,6 +1846,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                              1, &post_compute, 0, NULL);
 
         upload_src_buffer = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+        upload_src_offset = 0;
         nv2a_profile_inc_counter(NV2A_PROF_SURF_SWIZZLE);
     }
 
@@ -1856,6 +1883,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
         size_t packed_size = uploaded_image_size;
         VkBufferCopy buffer_copy_region = {
+            .srcOffset = staging_base,
             .size = packed_size,
         };
         vkCmdCopyBuffer(cmd, copy_buffer->buffer,
@@ -1875,6 +1903,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = copy_buffer->buffer,
+            .offset = staging_base,
             .size = packed_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1952,7 +1981,13 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
         copy_buffer = unpack_buffer;
         upload_src_buffer = unpack_buffer->buffer;
+        upload_src_offset = 0;
         upload_data_size = unpacked_size;
+    }
+
+    /* Straight from the staging buffer: the data sits in this slot's part. */
+    for (int i = 0; i < num_regions; i++) {
+        regions[i].bufferOffset += upload_src_offset;
     }
 
     //
@@ -1989,7 +2024,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .buffer = copy_buffer->buffer,
+            .buffer = upload_src_buffer,
+            .offset = upload_src_offset,
             .size = upload_data_size
         };
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,

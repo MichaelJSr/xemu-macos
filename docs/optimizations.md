@@ -1167,6 +1167,19 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   release build does; the published `-dbg` bundles become
   abort-on-invariant builds.
 
+- **Surface uploads stage in the current flight slot (2026-10-10).**
+  `pgraph_vk_upload_surface_data` copied the surface into
+  `BUFFER_STAGING_SRC` at offset 0, which is flight slot 0's partition,
+  whatever slot was current. `pgraph_vk_finish` does not wait for the
+  command buffer it submits, so slot 0's texture copies could still be
+  reading that range on the GPU while the CPU `memcpy` overwrote it: a
+  host-write race Metal's hazard tracking cannot see (garbled textures,
+  most likely right after a finish). It now stages at the current slot's
+  base, which the finish that selected the slot already waited out;
+  every staging offset (copy regions, barriers, flush) follows, and the
+  bounds check is against the slot, not the whole buffer. Found by the
+  2026-09 Windows audit (batch 4, item 1).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New
