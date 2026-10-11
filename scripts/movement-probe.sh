@@ -101,6 +101,9 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+# Pads the savestates expect but this machine may lack (an absent bound
+# controller): see scripts/harness-pads.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-pads.py $CONFIG)"})
 
 if (( ISOLATE_CACHES )); then
   mkdir -p $APP/Contents/Resources
@@ -122,7 +125,7 @@ PHASES=$OUT/phases.log
 : > $PHASES
 
 env "${EXTRA_ENV[@]}" XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$FIFO \
-    $APPBIN -config_path $CONFIG -monitor unix:$SOCK,server,nowait \
+    $APPBIN -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$SOCK,server,nowait \
     > $LOG 2>&1 &
 PID=$!
 

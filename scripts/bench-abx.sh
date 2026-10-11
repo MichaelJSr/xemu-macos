@@ -173,6 +173,9 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+# Pads the savestates expect but this machine may lack (an absent bound
+# controller): see scripts/harness-pads.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-pads.py $BASECONF)"})
 
 typeset -A APPBIN CONF
 for arm in B E; do
@@ -206,7 +209,7 @@ run_one() {
   echo "$(date +%H:%M:%S) $label start (load $(sysctl -n vm.loadavg | awk '{print $2}'))" >> $OUT/timeline.txt
 
   env ${=ENVSET[$arm]} XEMU_NV2A_NSPROF=1 \
-      ${APPBIN[$arm]} -config_path ${CONF[$arm]} -monitor unix:$sock,server,nowait \
+      ${APPBIN[$arm]} -config_path ${CONF[$arm]} "${PAD_ARGS[@]}" -monitor unix:$sock,server,nowait \
       > $log 2>&1 &
   local pid=$! up=0 i
   for i in $(seq 1 30); do

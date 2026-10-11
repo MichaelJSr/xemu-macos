@@ -199,6 +199,9 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+# Pads the savestates expect but this machine may lack (an absent bound
+# controller): see scripts/harness-pads.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-pads.py $CONFIG)"})
 
 # ---- optional shader/pipeline cache isolation -----------------------------
 # Default OFF: both arms share the user's warm spirv_cache_v*/ and
@@ -250,7 +253,7 @@ run_one() {
   rm -f $sock
 
   env $VAR=$val XEMU_NV2A_NSPROF=1 \
-      $APPBIN -config_path $CONFIG -monitor unix:$sock,server,nowait \
+      $APPBIN -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$sock,server,nowait \
       > $log 2>&1 &
   local pid=$!
 
