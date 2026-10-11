@@ -282,9 +282,13 @@ Built 2026-07-12 to pin the v0.11 "new-area lag" (heavy stutter on
 map transitions / death reloads / fast movement into unexplored
 space, smooth on revisits). The savestate A/B above cannot see this
 class — static scenes never stream. **Committed implementation:
-`scripts/movement-probe.sh <outdir> [VAR=V ...]`** (2026-07-18 —
-isolation-cloned bundle/hdd, /tmp sockets, liveness-guarded FIFO
-injection, per-phase `info jit` flush deltas, mid-forward screenshot).
+`scripts/movement-probe.sh <outdir> [--app PATH] [--isolate-caches]
+[VAR=V ...]`** (2026-07-18 — isolation-cloned bundle/hdd, /tmp sockets,
+liveness-guarded FIFO injection, per-phase `info jit` flush deltas,
+mid-forward screenshot; since 2026-10-11 `--app` clones another
+bundle, `--isolate-caches` runs with cold shader/pipeline caches, the
+default tag is `azurik-stream-e2` (`MOVEMENT_SNAP` overrides), and the
+run ends with a monitor `quit` so atexit dumps and PGO profiles land).
 The method spec it implements:
 
 - One run = boot → `loadvm` real `vm-*` tag → settle 15 s → **hold
@@ -307,6 +311,30 @@ The method spec it implements:
 - Window shots at phase ends verify the route actually moved (and
   catch death mid-run — combat damage shifts routes; interleave
   arms and compare means, ±5 fps live-movement variance applies).
+- Baseline, 2026-10-11 (HEAD `0fa5ba8b55`, warm caches, loaded box):
+  `azurik-stream-e2` settles at 60 fps / ~207 draws/flip; holding
+  forward walks out of the cave (luma climbs ~40 → ~190 as the snow
+  area appears) and the worst forward interval is ~19-21 fps at
+  ~585 draws/flip, recovering to 60 within ~10 s; `tb_flush` flat at 1
+  in every phase; worst single compile in the forward phase 0.8 ms
+  pipeline / 2.3 ms shader warm, 4.3 / 6.8 ms cold (`--isolate-caches`),
+  and the ~20 fps dip is the same warm and cold, so it is scene cost,
+  not compilation. `azurik-transition-f1` forward loads the next area
+  (draws ~123 → ~275 with texture and surface uploads).
+- Unexplained (2026-10-11): 2 of 13 warm stream-e2 walks (both on
+  HEAD, 0 of 5 on `v0.13.3-37-gd5ad94f4bf`) returned a uniformly white
+  window (mean 254, no HUD) for 8+ s of the forward phase while nsprof
+  showed the guest rendering the same draws/passes/presents as clean
+  runs. The present path's clear color is black, nothing in the
+  present or composite code differs between those two builds, and
+  surface uploads were idle during the white stretch, so it is not one
+  of that day's changes. Hiding or minimizing the window did not
+  reproduce it. A `WHITE_SCREEN` verdict on a walk is therefore not yet
+  proof of a renderer fault: capture continuously (`screencapture -l`
+  at ~3/s) and check whether the guest's nsprof trace diverged.
+  Reopen with xemu's own presented-frame screenshot (F12 /
+  `SaveScreenshot(g_tex)`), which needs a test hook to trigger from a
+  harness.
 - Traps: a dead xemu makes every fifo write BLOCK forever — guard
   each injection with `kill -0` liveness checks; a vCPU-thread wedge
   (e.g. W^X fault loop) looks like "monitor answered once then
