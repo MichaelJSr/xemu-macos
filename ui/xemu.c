@@ -63,9 +63,6 @@
 #include <pthread.h>
 #include "xemu-metal.h"
 #include "hw/xbox/nv2a/nsprof.h"
-/* ui/xemu-metal.m: acquire the drawable without opening the render pass
- * (XEMU_PRESENT_DRAWABLE_FIRST). */
-bool xemu_metal_acquire_drawable(void);
 #endif
 #include <SDL3/SDL.h>
 
@@ -1230,25 +1227,6 @@ static void metal_render_frame(struct xemu_console *scon)
     }
 
     /*
-     * XEMU_PRESENT_DRAWABLE_FIRST=1 (opt-in): take the drawable before
-     * reading the ring, so the step this frame presents is chosen after
-     * the nextDrawable block instead of before it. Only the acquire
-     * moves — the command buffer, the shared-event wait and the render
-     * pass are still opened together, in that order, once the step's
-     * event value is known.
-     */
-    static int drawable_first = -1;
-    if (unlikely(drawable_first < 0)) {
-        const char *e = getenv("XEMU_PRESENT_DRAWABLE_FIRST");
-        drawable_first = (e && e[0] && e[0] != '0') ? 1 : 0;
-    }
-    if (unlikely(drawable_first) && !xemu_metal_acquire_drawable()) {
-        /* No drawable (occluded); leave the ring cursor untouched. */
-        qatomic_set(&rendering, false);
-        return;
-    }
-
-    /*
      * Pull the present frame from the renderer first: the frame's
      * shared-event value must be known before the drawable render
      * pass is opened (the GPU-side wait is encoded ahead of it).
@@ -1308,11 +1286,6 @@ static void metal_render_frame(struct xemu_console *scon)
                 xemu_metal_release_handle(frame.iosurface);
             }
             nv2a_release_framebuffer_surface();
-            if (unlikely(drawable_first)) {
-                /* Hand the already-acquired drawable back unpresented
-                 * (end_frame releases it when no pass was opened). */
-                xemu_metal_end_frame();
-            }
             qatomic_set(&rendering, false);
             /* Poll for the next step without spinning the handshake */
             SDL_DelayNS(1000000);

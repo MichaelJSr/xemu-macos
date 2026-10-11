@@ -72,7 +72,6 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_UI_FRAME_CAP_NS` | Test-only: floor the UI present period in ns (`16666666` ≈ a 60 Hz consumer). Unfocused/occluded bench windows present unpaced (~200 Hz observed), so ring-pacing behavior is invisible headless without it. Zero cost unset |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_MFX_RESIZE_QUANTIZE` | **Default on since 2026-08-04** (`=0` restores the legacy continuous resize). Snaps the MetalFX output width to a 64-px ladder and holds a new shape for ~200 ms before rebuilding the scaler and its 3-texture ring, so a window drag stops rebuilding at the event rate (each rebuild drains MetalFX in-flight work and blocks the PFIFO thread). Height is re-derived from the quantized width (aspect preserved) and an explicit floor keeps the output strictly above `disp->width`, so quantization can never silently drop out of the upscale path. A guest mode change rebuilds immediately, no cooldown. Diagnostic: the `mfx_scaler_rebuild` counter under `XEMU_NV2A_NSPROF=1` |
-| `XEMU_PRESENT_DRAWABLE_FIRST` | `1` opts in (**default off**). Acquires the `CAMetalLayer` drawable *before* consuming the push-present ring, so the step to present is chosen after the `nextDrawable` block rather than before it. Only the acquire moves — command buffer → shared-event wait → render pass stay together and in order (architecture Invariant 8); a step dropped by the `frame_seq` dedup after acquiring releases its drawable through `end_frame`. Latency-only and 0 fps by construction; measure at the default `XEMU_PUSH_DEBT` or it measures nothing. Metal backend only |
 | `XEMU_UI_LOCK_STATS` | `1` prints the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build; previously it needed a `DEBUG_XEMU_C=1` build (which still forces it on). One predictable branch per lock when off. Compiled in on macOS and in `DEBUG_XEMU_C` builds only — Windows/Linux release paths preprocess away to today's code |
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
@@ -1330,23 +1329,6 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   preprocess away unchanged). Both exist because the ImGui-under-lock
   rework needed a number before anyone built it — it got one, and the
   number closed it (Settled vectors).
-- **Drawable-first present ordering (opt-in, dark, 2026-08-04).**
-  `XEMU_PRESENT_DRAWABLE_FIRST=1` acquires the `CAMetalLayer` drawable
-  *before* consuming the push-present ring, so the step to present is
-  chosen after the `nextDrawable` block rather than before it — the
-  gain, if any, is that a step selected post-acquire is fresher by
-  exactly the acquire's block time. Only the acquire moves: command
-  buffer → shared-event wait → render pass stay together and in order
-  (architecture Invariant 8), and a step dropped by the `frame_seq`
-  dedup after acquiring releases its drawable cleanly through
-  `end_frame` (pool churn accepted). It stays **default-off as
-  designed**, with the characterization that motivated building it:
-  `drawable_acq` blocks **13.8-16.5 ms per acquire**, comfortably past
-  the 4 ms bar that says the mechanism has something to hide behind —
-  but the fps delta measured **+0.50 under the noise line**, so it has
-  no claim and does not get promoted on a mechanism argument alone.
-  Latency-only by construction; A/B it at the default `XEMU_PUSH_DEBT`
-  or it measures nothing.
 
 ### MCPX APU
 
@@ -2193,6 +2175,16 @@ the next tag.
   mechanism. Generated code is unchanged with every knob unset;
   `ELIDE_FT0`, `DEFER_FIP` and the FT0/exception-pointer checks in
   `XEMU_X87_REFUTE` are untouched.
+- **`XEMU_PRESENT_DRAWABLE_FIRST` removed.** The opt-in Metal present
+  reorder (`ui/xemu.c` + `ui/xemu-metal.m`, built in `5b8aef5717`) took
+  the drawable before reading the push-present ring. Its only result
+  was an fps A/B (+0.50 under noise) on a latency-only change that fps
+  cannot show, and its live regime (the bounded-debt catch-up firing, or
+  the pull path) was never measured on presented-frame age. The record,
+  with the reopen bar, is its Failed row (the entry moved there from
+  Changes). `xemu_metal_acquire_drawable()` is folded back into
+  `xemu_metal_begin_frame()`, the `drawable_acq` counter stays, and the
+  default path is unchanged (acquire after the ring read, as before).
 
 ## Failed / reverted experiments
 
@@ -2261,6 +2253,7 @@ mechanisms that survived are in the Changes manifest above):
 |---|---|
 | Drop upstream's `-fzero-call-used-regs=used-gpr` on macOS builds (`XEMU_HARDENING`, 2026-08-04; knob removed 2026-10-10) | The ROP-gadget register zeroing costs real work — the zeroing movs measured **3.4-3.8% of this fork's dynamic compiled-instruction stream**, and the flag also defeats tail-call optimization (`bl`+`ret` where a `b` would do) — in a process that runs a W^X JIT and is not a sandbox boundary. Pre-registered **+0.11 to +0.83 fps (central ~+0.34)**. Measured over 5 interleaved cross-binary pairs: mean **+0.52 fps but signs 3+/2−**, which is worse than sign-mixed-by-one and therefore below the pre-registered evidence bar — killed as pre-registered, not renegotiated. The binary-size receipt (`__text` **8,741,512 B hardened vs 8,330,592 B skip = −411 KB**) is real and was explicitly ruled insufficient to override an fps bar the change did not clear. Default reverted to upstream's `used-gpr` in `build.sh` (`00a404c774`). **The same-day retest failed the bar again**: the promised quieter-machine rerun (8 idle-gated pairs, post-upstream-merge tree, `7aa746a952`) read **mean −0.39 fps, signs 3+/5−**; pooled with the first run that is −0.04 fps over 13 pairs. Upstream's hardening stands; the −411 KB `__text` saving buys nothing measurable. **What the verdict covers**: macOS on Apple Silicon, closed by two failed sign tests. Neither run is recorded as using a PGO profile trained on its own tree (the first came before that morning's retrain `6ff4467c27`, while the new staleness gate was reporting 7 hot-path mismatches; the merged-tree retrain landed in the retest's commit, after the campaigns ran), draws/s was never recorded, and the local toolchain has since been replaced (Command Line Tools 27 installed 2026-09-10, Xcode 27, Apple clang 21). It does not carry to other hosts: arm (b)'s inline store stub is absent on x86_64 and default-off on non-Apple aarch64 since `0aeb1998c3`, so more stores take the compiled-C slow path the zeroing taxes; the win64-cross arm64 leg is llvm-mingw clang, so the tail-call loss applies there; GCC x86-64 keeps its sibcalls under `used-gpr`, so expect zeroing without the tail-call loss (unmeasured). **The `XEMU_HARDENING=0` arm was removed from `build.sh` on 2026-10-10**: it was one flag, and upstream's `CFLAGS` passthrough already reaches every arm. The skip arm is `CFLAGS=-fzero-call-used-regs=skip ./build.sh`: `CFLAGS` is the tail of `--extra-cflags`, which configure hands to C, C++ and ObjC and meson places after its global `used-gpr`. The recipe has never been run, so check it took effect before trusting a result: from the checkout root, `python3 -c 'import json,sys;P="-fzero-call-used-regs=";w=[t[-1] for t in ([x for x in e.get("command","").replace(chr(34),"").split() if x.startswith(P)] for e in json.load(open("build/compile_commands.json"))) if t];n=w.count(P+"skip");print(n,"of",len(w),"compile lines end on =skip");sys.exit(not w or n<len(w))'` must print N of N with N > 0 (it strips meson's Windows quoting, and exits non-zero if any compile line ends on another value or none carries the flag) |
 | Running the x87, sub-page-fast and DSP-JIT refuters in one process (`XEMU_X87_REFUTE` + `XEMU_SUBPAGE_FAST_REFUTE` + `XEMU_DSP_JIT_DIFF` together) | Deadlocks the guest during **BOOT, 2/2 attempts** — a test-infrastructure interaction, not a product bug: the arch-4.5 diff-validator-starvation family, three shadow validators contending for the same execution. **Singles and pairs are clean** and remain the supported way to soak. This also retroactively attributes the campaign's run-1 `vp_write` wedge, which had no other explanation. Practical rule: cap refuter soaks at two validators per process |
+| Drawable-first present ordering (`XEMU_PRESENT_DRAWABLE_FIRST`, opt-in, 2026-08-04; code removed 2026-10-10) | Acquire the `CAMetalLayer` drawable *before* reading the push-present ring, so the step to present is chosen after the `nextDrawable` block (only the acquire moved; command buffer → shared-event wait → render pass stayed together and in order, architecture Invariant 8). Built in `5b8aef5717` from the audit's §2.2 and left default-off: `drawable_acq` read **13.8-16.5 ms**, quoted as per acquire against a 4 ms "worth attempting" bar, but nsprof normalizes UI buckets per *flip* and which column that figure came from is unconfirmed; the only A/B was fps, **+0.50 under the noise line**, a proxy a latency-only reorder cannot move, with no receipt of the run's window or regime. Mechanism limits: under push, FIFO consumption returns the same step either way, so the reorder acts only when the bounded-debt catch-up fires (interpolation on and the step rate above the panel's drain rate, e.g. 2x at ~48 fps on a 60 Hz panel, the case `XEMU_PUSH_DEBT` exists for) or on the pull path (`XEMU_PUSH_PRESENT=0`, or the automatic fallbacks: push inactive, GL backend, before the first publish at startup or after a resize); and because the debt test runs at read time, reading after the block can itself make the catch-up fire. That regime was never measured on presented-frame age (fps cannot move) and the harness cannot reach it: the bench window is unfocused and presents unpaced (no vsync block for the reorder to hide behind), and `XEMU_UI_FRAME_CAP_NS` returns before either ordering. Removed rather than kept dark; restore it by reverting the removal commit, never `5b8aef5717`, which also carries the default-on `XEMU_MFX_RESIZE_QUANTIZE`, the `drawable_acq`/`ui_hud_lock`/`ui_frame_dt` nsprof buckets and `XEMU_UI_LOCK_STATS`. The `drawable_acq` counter stays. Reopen bar: a publish-to-commit `present_age` nsprof bucket showing **≥ 2 ms mean gain** with `push_policy_skip > 0` in a focused vsynced 60 Hz window |
 
 ---
 

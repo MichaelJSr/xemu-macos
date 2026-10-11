@@ -696,12 +696,10 @@ tries the pushed read first and falls back to the pull
 before the drawable render pass is opened (the GPU-side wait is encoded
 ahead of it)". That ordering lives in `xemu_metal_begin_frame()`
 (`ui/xemu-metal.m:219-244`): command buffer → `encodeWaitForEvent` →
-`renderCommandEncoderWithDescriptor`. `XEMU_PRESENT_DRAWABLE_FIRST=1`
-(opt-in, default off) moves *only* the `nextDrawable` acquire ahead of
-the ring read (`xemu_metal_acquire_drawable()`, `ui/xemu-metal.m:192`);
-the wait-then-pass sequence is untouched, and a frame the dedup drops
-after acquiring hands its drawable back through `xemu_metal_end_frame()`
-without presenting.
+`renderCommandEncoderWithDescriptor`. An opt-in reorder that moved only
+the `nextDrawable` acquire ahead of the ring read
+(`XEMU_PRESENT_DRAWABLE_FIRST`) was removed on 2026-10-10; its Failed
+row in `docs/optimizations.md` carries the reopen bar.
 
 What drives the UI frame loop is the **vblank thread**, a
 fixed-cadence, monotonic-deadline-scheduled thread wholly decoupled from
@@ -768,8 +766,7 @@ Metal-objects extension, pre-first-publish — does the same
 automatically). `XEMU_PUSH_DEBT=0` restores strict-FIFO consumption
 (pre-catch-up behavior). `XEMU_PUSH_PRESENT_REFUTE=1` is the equivalence
 checker and re-introduces the pull round trip for cross-checking —
-measure perf with it off. `XEMU_PRESENT_DRAWABLE_FIRST` is off by
-default; unsetting it restores acquire-after-ring-read.
+measure perf with it off.
 `vblank_interval_ns` and `use_vblank_timer_thread` are file-scope
 globals in `ui/xemu.c` (not currently exposed as config/env), used for
 PAL-mode consideration — see Known weak points.

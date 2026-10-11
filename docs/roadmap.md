@@ -100,8 +100,8 @@ code shipped but its **fps claim was killed** (benefit base collapsed
 suppression and §1.9 the ImGui lock rework were all **closed by their
 own censuses** and are in Settled vectors; §1.3 measured *for* the
 per-flip theory and is candidate 1 above; §1.7 cleared its gate and is
-deferred as candidate 4; §2.1/§2.3 shipped, §2.2 stays opt-in with its
-characterization, §2.4 **reopened arch 1.12** as candidate 2, §2.5
+deferred as candidate 4; §2.1/§2.3 shipped, §2.2 stayed opt-in (code
+removed 2026-10-10; Failed row), §2.4 **reopened arch 1.12** as candidate 2, §2.5
 shipped; §3.1's hardening skip was **killed at the evidence bar** (a
 Failed row), §3.2-§3.5 shipped. Item 1's "fundamentally different
 attack" bar still stands untouched — nothing in the wave was a

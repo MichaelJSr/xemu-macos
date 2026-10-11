@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **62** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **61** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **62 distinct variables** (68 on
+As of **2026-10-10** the grep reports **61 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 62 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 61 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -265,13 +265,12 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 | `XEMU_SURFACE_CB_STATS` | off | `1` | Censuses NV2A surface CPU-access-callback register/unregister events (each = `async_safe_run_on_cpu` **plus** a full all-mmuidx TLB flush **plus** an unconditional jump-cache wipe), split by `update_surface_part`'s invalidate-then-create path vs elsewhere; atexit dump. Any first digit `1`-`9` arms it. The `=2` abort level, the reuse-pool counters and the coverage audit were deleted with `XEMU_SURFACE_CB_REUSE` on 2026-10-10 | diag | `pgraph/vk/surface.c:752` |
 | `XEMU_PFIFO_KICK_STATS` | off | `1` | Censuses `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a wait condition actually transitioned × post-write `FIFO_ACCESS` × kick-already-pending), plus the PFIFO thread's idle-park count as the wakeup denominator. **Counter only** — no kick is ever suppressed (archaeology 7.1: a wrongly-skipped kick is a permanent PFIFO hang) | diag | `pgraph/pgraph.c:192`, `pfifo.c:528` |
 | `XEMU_MFX_RESIZE_QUANTIZE` | **ON** | `0` restores | Snaps the MetalFX output width to a 64-px ladder and holds a new shape ~200 ms before rebuilding the scaler + its 3-texture ring, so a window drag stops rebuilding at the event rate (each rebuild drains MetalFX in-flight work and stalls the PFIFO thread). Height re-derived from the quantized width; an explicit floor keeps the output above `disp->width` so quantization can never silently disable upscaling; a guest mode change rebuilds immediately | escape | `pgraph/vk/display.c:1959` |
-| `XEMU_PRESENT_DRAWABLE_FIRST` | off (opt-in) | truthy | **Experimental, opt-in dark**: the fps delta read +0.50, under the noise line, so it has no promotion claim. No Failed-table row: the ledger files it under Changes, "Drawable-first present ordering" (`docs/optimizations.md` MetalFX + presentation). Acquires the CAMetalLayer drawable **before** consuming the push-present ring, so the step to present is chosen after the `nextDrawable` block. Only the acquire moves — command buffer → shared-event wait → render pass stay together and in order (architecture-contract Invariant 8). Metal presentation backend only; latency-only by construction, so A/B it at the default `XEMU_PUSH_DEBT` or it measures nothing | A/B | `ui/xemu.c:1242` |
 | `XEMU_UI_LOCK_STATS` | off (`DEBUG_XEMU_C=1` forces on) | truthy | Enables the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build. Compiled in on macOS and in `DEBUG_XEMU_C` builds; Windows/Linux release paths preprocess away | diag | `ui/xemu.c:248` |
 
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 62 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 61 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
@@ -619,7 +618,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 62 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 61 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -666,7 +665,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**62** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**61** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), the default-ON knob list, every `build.sh` line

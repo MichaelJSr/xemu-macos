@@ -148,7 +148,7 @@ independent, not a running total.
 | `mfx_drain` | `metalfx_drain_inflight` CPU spin | MetalFX upscale/interpolation pipeline drain, still on PFIFO |
 | `surf_down` | GPU→CPU surface readback | vCPU/blit needs surface contents back in guest RAM |
 | `flip_idle` | `FLIP_STALL` → guest vblank release | See below — the display-pacing idle gap |
-| `drawable_acq` | **UI thread** (2026-08-04): block inside `[CAMetalLayer nextDrawable]` | How long the presenting thread waits for a drawable — the cost `XEMU_PRESENT_DRAWABLE_FIRST` reorders around |
+| `drawable_acq` | **UI thread** (2026-08-04): block inside `[CAMetalLayer nextDrawable]` | How long the presenting thread waits for a drawable |
 | `ui_hud_lock` | **UI thread** (2026-08-04): main-loop-mutex + BQL acquire *and hold* across the ImGui HUD build | The audit §1.9 quantity, without a bespoke `DEBUG_XEMU_C` build |
 | `ui_frame_dt` | **UI thread** (2026-08-04): interval between consecutive completed presents (`end_frame` → `end_frame`) | Present cadence as the UI thread sees it — not the same as guest flips/s |
 

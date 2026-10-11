@@ -185,22 +185,8 @@ void xemu_metal_layer_pixel_size(int *w, int *h)
     }
 }
 
-/*
- * Drawable-first present split (XEMU_PRESENT_DRAWABLE_FIRST): acquire the
- * drawable without opening a pass, so the caller can choose what to present
- * after the nextDrawable block. Idempotent within a frame; a frame that is
- * dropped after acquiring gives the drawable back through end_frame. The
- * matching declaration lives in ui/xemu.c — xemu-metal.h stays the
- * begin_frame/end_frame lifecycle.
- */
-bool xemu_metal_acquire_drawable(void);
-
-bool xemu_metal_acquire_drawable(void)
+bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
 {
-    if (g_drawable) {
-        return true;
-    }
-
     g_frame_pool = objc_autoreleasePoolPush();
 
     @autoreleasepool {
@@ -219,14 +205,6 @@ bool xemu_metal_acquire_drawable(void)
 
     g_drawable_w = (int)g_drawable.texture.width;
     g_drawable_h = (int)g_drawable.texture.height;
-    return true;
-}
-
-bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
-{
-    if (!xemu_metal_acquire_drawable()) {
-        return false;
-    }
 
     g_cmdbuf = [[g_queue commandBuffer] retain];
     [g_cmdbuf setLabel:@"xemu present"];
@@ -259,20 +237,6 @@ void xemu_metal_set_present_duration(uint64_t duration_ns)
 void xemu_metal_end_frame(void)
 {
     if (!g_cmdbuf) {
-        /*
-         * Drawable acquired but no pass ever opened — the drawable-first
-         * caller dropped the frame after acquiring (deduped step). Give
-         * the drawable back without presenting; the pool must still pop
-         * on the thread that pushed it.
-         */
-        if (g_drawable) {
-            [g_drawable release];
-            g_drawable = nil;
-        }
-        if (g_frame_pool) {
-            objc_autoreleasePoolPop(g_frame_pool);
-            g_frame_pool = NULL;
-        }
         return;
     }
     [g_encoder endEncoding];
