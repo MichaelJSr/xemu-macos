@@ -776,24 +776,24 @@ this refuter with the other two (xemu-testing; archaeology 9.10).
 
 ### §7.3 `XEMU_SURFACE_CB_STATS=1` — surface callback churn (and why `info jit` lies here)
 
-Atexit dump (`pgraph/vk/surface.c:811-830`):
+Atexit dump (`pgraph/vk/surface.c:758-770`):
 
 ```
 xemu: surface cpu-access-callback stats
 xemu:   register        = N (update_surface_part N)
 xemu:   unregister      = N (update_surface_part N)
 xemu:   usp invalidate-then-create = N
-xemu:   reuse hit=N park=N evict=N flush=N
-xemu:   coverage audit runs=N violations=N
 ```
 
 Each register/unregister is an `async_safe_run_on_cpu` **plus** a full
 all-mmuidx TLB flush **plus** an unconditional `tcg_flush_jmp_cache` —
 so this counter is a guest-side cost, not a renderer-side one. The
-`update_surface_part` split attributes the zeta ping-pong; `reuse *`
-counts the dark `XEMU_SURFACE_CB_REUSE` pool; `coverage audit
-violations` must be 0 (`=2` promotes a violation to an abort, because
-`nv2a_vk_assert` is compiled out in perf builds).
+`update_surface_part` split attributes the zeta ping-pong. Each swap
+there is one unregister plus one register, so 4.16 events/flip is ~2
+shape swaps per flip. The census counts callback events only, not
+finishes or callback invocations. The reuse-pool hit/park/evict/flush
+line, the coverage audit and the `=2` abort level went with the
+`XEMU_SURFACE_CB_REUSE` pool, which was deleted on 2026-10-10.
 
 > **`info jit`'s "TLB full flushes" counter is structurally dead on
 > this guest — use partial+elided instead (verified 2026-08-04).**
@@ -901,7 +901,7 @@ any refactor touching the named files:
   `sed -n '84,92p;205,222p' accel/tcg/tb-maint.c`
 - x87 census / refuter dump fields:
   `sed -n '44,97p' target/i386/tcg/xemu-x87.h`
-- surface-callback census + reuse pool:
+- surface-callback census:
   `grep -n 'surface_cb_stats_dump\|XEMU_SURFACE_CB' hw/xbox/nv2a/pgraph/vk/surface.c`
 - `info jit` full-flush counter is still structurally dead (the whole §7.3
   box collapses if any of these three change): `grep -n 'NB_MMU_MODES' include/hw/core/cpu.h`

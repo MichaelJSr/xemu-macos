@@ -19,8 +19,8 @@ description: >
   tables after the tree changes. Keywords: xemu.toml, g_config,
   config_spec.yml, XEMU_INPUT_PIPE, XEMU_NV2A_NSPROF, XEMU_VTX_EXACT,
   XEMU_REPORTS_SYNC, XEMU_DSP_JIT, XEMU_ELIDE_CANDOIO, XEMU_DIRTY_FAST,
-  XEMU_X87_ELIDE_FT0, XEMU_X87_DEFER_FIP, XEMU_SURFACE_CB_REUSE,
-  XEMU_MFX_RESIZE_QUANTIZE, MVK_CONFIG_PREFILL, MVK_CONFIG_LOG_LEVEL,
+  XEMU_X87_ELIDE_FT0, XEMU_X87_DEFER_FIP, XEMU_MFX_RESIZE_QUANTIZE,
+  MVK_CONFIG_PREFILL, MVK_CONFIG_LOG_LEVEL,
   LSEnvironment, portable mode, escape hatch, default-on knob,
   default value, add a flag.
 ---
@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **64** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **63** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **64 distinct variables** (68 on
+As of **2026-10-10** the grep reports **63 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 64 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 63 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -263,8 +263,7 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 | `XEMU_X87_CENSUS` | off | `1` | Arms the x87/SSE census + atexit dump (write-back elidability split, exception-pointer store counts, x87 run length, SSE scalar-compare mix). Emits counter RMWs into generated code — **measurement mode only, never for an fps run** | diag | `target/i386/tcg/xemu-x87.h:112` |
 | `XEMU_X87_REFUTE` | off | `1` | Adversarial shadow-checker for the three x87 mechanisms: keeps every legacy store, computes the elision/deferral decision anyway, and counts every point where the elided state could have been observed. Implies the census dump; promotion gate is zero violations. **Stacking limit applies** — see xemu-testing / archaeology 9.10 | test | `target/i386/tcg/xemu-x87.h:125` |
 | `XEMU_SUBPAGE_FAST_STATS` | off (**default flipped 2026-08-04**) | `1` | Re-enables the six diagnostic counter RMWs the arm-(b) store prefilter emits into every aarch64 store slow-path stub, and restores the atexit seen/skips/demote histogram. Production now emits none of them (~39 fewer insns per stub, 12 on the inline-skip path); with it off the dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` so a zeroed histogram can't read as a dead mechanism. Latched at first stub emission; `XEMU_SUBPAGE_FAST_REFUTE=1` forces it on | diag | `accel/tcg/xemu-subpage-fast.c:167` |
-| `XEMU_SURFACE_CB_STATS` | off | `1`, `2` | Censuses NV2A surface CPU-access-callback register/unregister events (each = `async_safe_run_on_cpu` **plus** a full all-mmuidx TLB flush **plus** an unconditional jump-cache wipe), split by `update_surface_part`'s invalidate-then-create path vs elsewhere, with reuse-pool hit/park/evict/flush counters and a coverage audit on the 33 ms surface throttle tick. `2` also aborts on a coverage violation (`nv2a_vk_assert` is stripped in perf builds, so the check carries its own escalation) | diag | `pgraph/vk/surface.c:790` |
-| `XEMU_SURFACE_CB_REUSE` | off (**dark**) | `1` | Parks the live `MemAccessCallback` handle on unregister into a 4-entry pool keyed on `(vram_addr, size)` and re-attaches it when an identical-key surface registers again, eliminating both guest TLB flushes for the zeta ping-pong. Registered set stays a *superset* of live surfaces (the callback re-derives hits from `r->surface_ranges`); pool drains with real removes at `pgraph_vk_surface_flush` / `pgraph_vk_finalize_surfaces`. **Closed experiment, kept dark as the record**: the default-on A/B measured −0.66 fps, 3/3 negative (2026-08-04; `docs/optimizations.md` Failed / reverted experiments) | A/B | `pgraph/vk/surface.c:805` |
+| `XEMU_SURFACE_CB_STATS` | off | `1` | Censuses NV2A surface CPU-access-callback register/unregister events (each = `async_safe_run_on_cpu` **plus** a full all-mmuidx TLB flush **plus** an unconditional jump-cache wipe), split by `update_surface_part`'s invalidate-then-create path vs elsewhere; atexit dump. Any first digit `1`-`9` arms it. The `=2` abort level, the reuse-pool counters and the coverage audit were deleted with `XEMU_SURFACE_CB_REUSE` on 2026-10-10 | diag | `pgraph/vk/surface.c:752` |
 | `XEMU_PFIFO_KICK_STATS` | off | `1` | Censuses `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a wait condition actually transitioned × post-write `FIFO_ACCESS` × kick-already-pending), plus the PFIFO thread's idle-park count as the wakeup denominator. **Counter only** — no kick is ever suppressed (archaeology 7.1: a wrongly-skipped kick is a permanent PFIFO hang) | diag | `pgraph/pgraph.c:192`, `pfifo.c:528` |
 | `XEMU_MFX_RESIZE_QUANTIZE` | **ON** | `0` restores | Snaps the MetalFX output width to a 64-px ladder and holds a new shape ~200 ms before rebuilding the scaler + its 3-texture ring, so a window drag stops rebuilding at the event rate (each rebuild drains MetalFX in-flight work and stalls the PFIFO thread). Height re-derived from the quantized width; an explicit floor keeps the output above `disp->width` so quantization can never silently disable upscaling; a guest mode change rebuilds immediately | escape | `pgraph/vk/display.c:1959` |
 | `XEMU_PRESENT_DRAWABLE_FIRST` | off (opt-in) | truthy | **Experimental, opt-in dark**: the fps delta read +0.50, under the noise line, so it has no promotion claim. No Failed-table row: the ledger files it under Changes, "Drawable-first present ordering" (`docs/optimizations.md` MetalFX + presentation). Acquires the CAMetalLayer drawable **before** consuming the push-present ring, so the step to present is chosen after the `nextDrawable` block. Only the acquire moves — command buffer → shared-event wait → render pass stay together and in order (architecture-contract Invariant 8). Metal presentation backend only; latency-only by construction, so A/B it at the default `XEMU_PUSH_DEBT` or it measures nothing | A/B | `ui/xemu.c:1242` |
@@ -273,7 +272,7 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 64 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 63 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
@@ -325,8 +324,7 @@ experiments").
 
 Each has a row in `docs/optimizations.md` "Failed / reverted
 experiments" (`awk '/^## Failed/,/^## Settled/' docs/optimizations.md`).
-The rows above for `XEMU_SURFACE_CB_REUSE` and `XEMU_X87_ELIDE_CLEAN`
-belong to this class too.
+The row above for `XEMU_X87_ELIDE_CLEAN` belongs to this class too.
 
 | Env var | Unset behavior | Values | Effect | Cat | Read at |
 |---|---|---|---|---|---|
@@ -623,7 +621,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 64 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 63 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -670,7 +668,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**64** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**63** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), the default-ON knob list, every `build.sh` line

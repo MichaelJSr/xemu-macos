@@ -133,8 +133,10 @@ correctness debt. Closed entries keep their full write-ups in
    flush/refill cost was already off the critical path (the audit
    priced §1.3 against the PRE-wave profile), while the pool's
    park/reattach bookkeeping runs on the render thread every shape
-   swap. The pool stays in-tree dark as the reproducible record
-   (Failed row in the ledger). The only live shape is
+   swap. The pool stayed in-tree dark as the record until its code was
+   removed on 2026-10-10 (Failed row in the ledger; implementation in
+   `804bc5d87e`; a REUSE=1 arm means reverting the removal commit).
+   The only live shape is
    (b) the `// FIXME: flush only applicable pages` ranged invalidation
    in `system/physmem.c` / `accel/tcg/cputlb.c` (template:
    `tlb_reset_dirty_range_locked`) — it spares the jump cache and
