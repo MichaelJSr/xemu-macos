@@ -116,13 +116,15 @@ table carries the user-facing subset.
 > bullets; note they are sub-additive against +10.0, which is ordinary
 > frame-time composition.
 >
-> **Known issue carried by this wave's release notes:** a rare
-> post-`loadvm` SIGSEGV in the `ohci`/`flatview` path, upstream-class
-> (QEMU GitLab #545 family), 2 sightings across ~40 wave launches
-> against 0 across the prewave stability control (4 launches, 21
-> loadvms, 31.5 min dwell). That is **not** statistically decisive and
-> the crash is not attributed to any wave mechanism; it is recorded so a
-> future reader recognizes the signature rather than re-debugging it.
+> **Known issue carried by this wave's release notes (fixed
+> 2026-10-11):** a rare post-`loadvm` SIGSEGV in the `ohci`/`flatview`
+> path, 2 sightings across ~40 wave launches against 0 across the
+> prewave stability control (4 launches, 21 loadvms, 31.5 min dwell).
+> It was recorded here as upstream-class QEMU and unattributed. It was
+> neither a QEMU bug nor a wave mechanism: it was a use-after-free in
+> xemu's NV2A memory-access callback list, which the main loop walks on
+> every OHCI DMA read. The fix and its evidence are under "Threads +
+> runtime"; the misdiagnosis history is archaeology 7.6.
 
 ### Windows native port (2026-09-07)
 
@@ -1617,6 +1619,23 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
 
 ### Threads + runtime
 
+- **Memory-access callback list is RCU-protected (2026-10-11).** Fixes
+  the recurring SIGSEGV in `flatview_read_continue` under
+  `ohci_frame_boundary` / `ohci_service_ed_list`, most often just after
+  a `loadvm` (four crash reports 2026-10-10/11, plus the 2026-08-04
+  wave's excluded pair). NV2A surfaces register CPU-access callbacks in
+  `cpu->mem_access_callbacks`; every `flatview_read_continue` /
+  `flatview_write_continue` walks that list, so device DMA on the main
+  loop reads it (OHCI once per 1 ms frame, a dword at a time). Since
+  upstream xemu `966115336a` (PR #2320) entries are removed by
+  `async_safe_run_on_cpu` work, which runs with the BQL dropped, and
+  the old `QTAILQ_REMOVE` + `g_free` could free the node a main-loop
+  walker stood on; `surface_access_callback` dropping the BQL to wait
+  for PFIFO mid-walk widened the window to milliseconds. The list now
+  uses the RCU variants and `g_free_rcu` (`13afd5f244`), and xemu's
+  `qemu_main` thread, which runs the main loop but was never an RCU
+  reader, registers itself (`4161ab5f24`). Upstream xemu master has the
+  same code.
 - **P-core QoS.** PFIFO and vblank-timer threads request
   `QOS_CLASS_USER_INTERACTIVE`.
 - **BQL discipline.** `surface_access_callback` drops BQL before

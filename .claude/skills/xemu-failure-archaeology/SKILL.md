@@ -118,6 +118,7 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 7.2 | Descriptor bind-skip (C1): same arc | shipped-after-fix |
 | 7.3 | BQL event batching | settled-negative |
 | 7.4 | `can_fifo_access` hoist out of pusher loop | settled-negative |
+| 7.6 | Post-loadvm `ohci`/`flatview` SIGSEGV: OHCI pointer hardening (2026-04) misdiagnosed it; really a callback-list use-after-free | shipped-after-fix |
 | 8.1 | Release-CI hardening: five pre-existing portability bugs | shipped-after-fix |
 | 8.2 | XEMU_INPUT_PIPE Windows build break | shipped-after-fix |
 | 8.3 | Tag-deletion incident | incident |
@@ -1665,6 +1666,49 @@ blocks (PMC/PCRTC/PTIMER, APU main/gp/ep) closed by written verdict
 BQL-free dispatch there would drive `pci_irq_assert` unlocked. Reopen
 only on `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s (the wave's
 2026-08-04 reading was 75.6 ms per 75 s, 6.6x under the bar).
+
+## 7.6 The post-loadvm `ohci`/`flatview` SIGSEGV — two wrong labels, then the callback list
+
+**Status**: shipped-after-fix (`4161ab5f24` + `13afd5f244`, 2026-10-11).
+**Symptom**: SIGSEGV on the main-loop thread in `flatview_read_continue`
+← `address_space_read_full` ← `ohci_service_ed_list` /
+`ohci_frame_boundary`, at a non-canonical address macOS tags "possible
+pointer authentication failure". Rare (four reports in ~25 h of use on
+2026-10-10/11, across three builds) and clustered just after a `loadvm`;
+one report came 6.9 s after launch.
+**Wrong label 1 (2026-04-18)**: `7fa2b8b9ad` and `6305a6ed59` read the
+fault as OHCI chasing bad guest pointers (a "misaligned ED 0x037d2494")
+and added HCCA / ED null and alignment guards. 0x037d2494 is the second
+dword of an aligned ED that `get_dwords` reads one dword at a time, and
+a guest address cannot produce a non-canonical host pointer. The crash
+continued; the guards are harmless and stay.
+**Wrong label 2 (2026-08-04)**: the wave record called it
+"upstream-class (QEMU GitLab #545 family)" and moved on.
+**Root cause**: the XBOX-only walk of `cpu->mem_access_callbacks`
+inlined into `flatview_read_continue` read a freed `MemAccessCallback`.
+Since upstream xemu `966115336a` (PR #2320, the fix for the vCPU-side
+race of issue #1881) NV2A surfaces insert and remove entries with
+`async_safe_run_on_cpu`, and safe work runs with the BQL dropped, so
+`QTAILQ_REMOVE` + `g_free` ran under a main-loop walker holding the BQL.
+`surface_access_callback` dropping the BQL to wait for PFIFO in the
+middle of a walk widened that to milliseconds. xemu's `qemu_main`
+thread was also never an RCU reader, so an RCU-deferred free alone
+would not have protected it.
+**Evidence**: in the dist build (UUID 82EFFD53) the fault is the walk's
+`ldr x1, [x24]` (cb->mr) then `ldr x9, [x1, #0x38]`; the other reports
+fault at a garbage node + 8 (cb->addr), one holding the ASCII bytes
+"user(loc". Two reports show a freed node with len 0, matching every
+access, and the vCPU just past `end_exclusive()` waiting for the BQL;
+the other two show the callback had run and the next pointer came back
+from a reused block. A five-agent adversarial review (2026-10-11) found
+no refutation: four lenses and the judge returned "holds" or "holds with
+caveats" (docs and commit wording), all at high confidence.
+**Lesson**: a crash under a device model's DMA is not the device's until
+the faulting load is identified. Disassemble the faulting PC in the
+crashing binary and name the pointer before writing guards.
+**Reopen if**: the same stack recurs on a build containing `13afd5f244`;
+then check that the walking thread is RCU-registered (the vblank-timer
+thread is not, as of 2026-10-11, but does not walk this list).
 
 ---
 

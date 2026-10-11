@@ -164,7 +164,9 @@ citable, never arms from different experiments.
   with itself is an environment failure, not a result.
 - **A crashed run is an excluded pair, recorded as such.** In the wave's
   headline batch one pair lost its E run to the known post-`loadvm`
-  ohci/flatview SIGSEGV (an upstream-class crash, not a harness fault);
+  ohci/flatview SIGSEGV (a use-after-free in xemu's surface
+  access-callback list, fixed 2026-10-11 by `13afd5f244` — archaeology
+  7.6; not a harness fault);
   the pair was dropped and the **reason** written into the receipt, so
   the citation reads "5 clean interleaved pairs" rather than six with a
   silent hole. Never re-run just the failed arm into an existing
