@@ -722,7 +722,10 @@ void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr)
     uint64_t mask;
     bool shared = false;
 
-    page_addr &= TARGET_PAGE_MASK;
+    /* The memo's key is the 32-bit linear pc (cs_base + eip, both uint32_t):
+     * truncate first, so the previous-page flush of linear page 0 (passed
+     * as a wrapped 64-bit vaddr) still matches page 0xfffff000. */
+    page_addr = (uint32_t)page_addr & TARGET_PAGE_MASK;
     bit = xemu_retc_page_bit(page_addr);
     mask = 1ull << (bit % 64);
     if (!(env->xemu_retc_pages[bit / 64] & mask)) {
@@ -3100,8 +3103,8 @@ static void gen_bnd_jmp(DisasContext *s)
  * translate-time context constants is exact: nothing between TB entry
  * and its ret exit changes cs_base/flags/cflags, so the runtime
  * context at this exit equals this TB's own translation context. The
- * live tb->cflags load catches CF_INVALID (invalidation); flush
- * clears entries wholesale, and empty entries fail the tb != NULL
+ * live tb->cflags load catches CF_INVALID (invalidation); flushes
+ * clear entries (wholesale or per page), and empty entries fail the tb != NULL
  * check. Misses fall through to the helper, which also owns every
  * special case (breakpoints, single-step, logging, epilogue return).
  */

@@ -2199,8 +2199,8 @@ typedef struct CPUArchState {
      * inline hit path compares them against the ret site's
      * translate-time constants (valid because nothing between TB
      * entry and its ret exit changes them), and re-loads the live
-     * tb->cflags to catch CF_INVALID. tb == NULL means empty (flush
-     * clears the whole block).
+     * tb->cflags to catch CF_INVALID. tb == NULL means empty (a full
+     * flush clears the whole block, a per-page flush that page's entries).
      */
     struct XemuRetcEntry {
         uint32_t eip;
