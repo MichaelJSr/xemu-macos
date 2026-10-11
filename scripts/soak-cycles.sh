@@ -6,12 +6,14 @@
 # atexit refute dump (total/VIOLATIONS) lands in run.log (SIGTERM would
 # skip atexit and lose it).
 #   soak-cycles.sh <app> <outdir> [cycles=3] [dwell=10]
+# The two tags default to the F8 heavy anchor and F5; override with
+# SOAK_SNAP_A / SOAK_SNAP_B (qcow2 tags, not F-key names).
 set -e
 APP_SRC=${1:?app}; OUT=${2:?outdir}; CYC=${3:-3}; DWELL=${4:-10}
-CONFIG_SRC=$HOME/Library/Application\ Support/xemu/xemu/xemu.toml
-F8=$(grep -E "^\s*f8\s*=" $CONFIG_SRC | sed -E "s/.*'(.*)'.*/\1/")
-F5=$(grep -E "^\s*f5\s*=" $CONFIG_SRC | sed -E "s/.*'(.*)'.*/\1/")
-[[ -n $F8 && -n $F5 ]] || { echo "soak-cycles: f5/f8 tags not found in toml"; exit 1; }
+CONFIG_SRC=${XEMU_TEST_CONFIG:-${0:a:h:h:h}/fixtures/xemu.toml}
+[[ -f $CONFIG_SRC ]] || { echo "soak-cycles: no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
+F8=${SOAK_SNAP_A:-vm-20260704173701}
+F5=${SOAK_SNAP_B:-vm-20260704032357}
 mkdir -p $OUT
 WORK=$OUT/work.$$
 mkdir -p $WORK

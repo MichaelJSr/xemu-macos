@@ -19,7 +19,7 @@
 #                  work dir, the qcow2 and eeprom are cloned (cp -c;
 #                  snapshots ride along), and a scratch xemu.toml is
 #                  passed via -config_path (fullscreen forced off —
-#                  fullscreen skews present pacing). User paths are
+#                  fullscreen skews present pacing). Source paths are
 #                  only ever CLONE SOURCES.
 #   launch parity  canonical MVK_CONFIG_* exported explicitly.
 #   scene gate     every run's nsprof log is parsed; each kept
@@ -54,7 +54,8 @@
 #   --draws-band LO[:HI] scene-identity band for draws/flip (def 100:inf)
 #   --cv-max X           bimodality threshold on draws/flip CV (def 0.10)
 #   --app PATH           bundle to CLONE (default $ROOT/dist/xemu.app)
-#   --config-src PATH    config to CLONE (default the user's xemu.toml)
+#   --config-src PATH    config to CLONE (default $XEMU_TEST_CONFIG, else
+#                        ../fixtures/xemu.toml beside the checkout)
 #   --hdd PATH           qcow2 to CLONE (default: hdd_path from config-src)
 #   --boot-wait N        seconds from launch to loadvm (default 25)
 #   --keep-work          keep the work dir (app/hdd clones) afterwards
@@ -133,11 +134,11 @@ SECS=${pos[4]:-75}
 OUT=${pos[5]:-./bench-out}
 
 : ${APP_SRC:=$ROOT/dist/xemu.app}
-: ${CONFIG_SRC:=$HOME/Library/Application Support/xemu/xemu/xemu.toml}
+: ${CONFIG_SRC:=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}}
 
 [[ -f $SUMMARIZER ]] || { echo "missing $SUMMARIZER (scene gate is mandatory)" >&2; exit 1; }
 [[ -d $APP_SRC ]] || { echo "no app bundle at $APP_SRC (build first, or --app)" >&2; exit 1; }
-[[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src)" >&2; exit 1; }
+[[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src or XEMU_TEST_CONFIG)" >&2; exit 1; }
 
 mkdir -p $OUT
 WORK=$OUT/work.$$
@@ -157,7 +158,7 @@ cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
 APPBIN=$APP/Contents/MacOS/xemu
 [[ -x $APPBIN ]] || { echo "clone failed: no executable at $APPBIN" >&2; exit 1; }
 
-# Source paths are read from the user's config, then cloned; the live
+# Source paths are read from the source config, then cloned; the live
 # files are never opened by xemu here.
 read_toml_path() {
   python3 - "$CONFIG_SRC" "$1" <<'EOF'

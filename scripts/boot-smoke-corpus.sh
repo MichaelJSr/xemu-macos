@@ -6,10 +6,10 @@
 #   scripts/boot-smoke-corpus.sh [--app PATH] [--secs N] [--out DIR] \
 #       [--config-src PATH] [--no-input] [--keep-work] <iso>...
 #
-# For each ISO: clone the bundle (APFS), clone the user's hdd/eeprom, write
+# For each ISO: clone the bundle (APFS), clone the test hdd/eeprom, write
 # a scratch xemu.toml with dvd_path=<iso> (fullscreen off), launch with a
 # monitor socket + XEMU_INPUT_PIPE, boot for --secs seconds while tapping
-# START and A through the user's own keyboard bindings (so menus advance),
+# START and A through the source config's keyboard bindings (so menus advance),
 # capture two scored screenshots, then quit via the monitor. Reports per
 # title: alive/CRASHED (exit status if it died early), assert/abort lines,
 # the last nsprof interval (flips, draws/flip) and the screenshot verdicts.
@@ -17,12 +17,14 @@
 # 3 an ARTIFACT verdict; 1 usage/plumbing.
 #
 # Isolation rules are the harness's (scripts/bench-savestate-ab.sh): never
-# points at dist/xemu.app's config, never opens the user's qcow2.
+# points at dist/xemu.app's config, never opens the user's qcow2. The
+# source config defaults to $XEMU_TEST_CONFIG, else ../fixtures/xemu.toml
+# beside the checkout.
 
 set -u
 ROOT=${0:A:h:h}
 APP_SRC=$ROOT/dist/xemu.app
-CONFIG_SRC="$HOME/Library/Application Support/xemu/xemu/xemu.toml"
+CONFIG_SRC=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}
 SECS=120
 OUT=./boot-smoke-out
 INPUT=1

@@ -41,7 +41,8 @@
 #                      Mode did not hold are reported separately. Mid-run
 #                      screenshots are skipped: window captures of an active
 #                      fullscreen Space come back black.
-#   --config-src PATH  config to clone (default: the user's xemu.toml)
+#   --config-src PATH  config to clone (default: $XEMU_TEST_CONFIG, else
+#                      ../fixtures/xemu.toml beside the checkout)
 #   --hdd PATH         qcow2 to clone (default: hdd_path from config-src)
 #   --boot-wait N      seconds from launch to loadvm (default 25)
 #   --draws-band LO[:HI] / --cv-max X   scene gate (defaults 100:inf, 0.10)
@@ -89,14 +90,14 @@ SNAP=${pos[1]:?usage: bench-abx.sh <snapshot> [pairs] [secs] [outdir] --b-app P 
 PAIRS=${pos[2]:-3}
 SECS=${pos[3]:-75}
 OUT=${pos[4]:-./bench-out-abx}
-: ${CONFIG_SRC:=$HOME/Library/Application Support/xemu/xemu/xemu.toml}
+: ${CONFIG_SRC:=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}}
 
 [[ -d $B_APP_SRC && -d $E_APP_SRC ]] || { echo "need --b-app and --e-app bundles" >&2; exit 2; }
-[[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src)" >&2; exit 2; }
+[[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src or XEMU_TEST_CONFIG)" >&2; exit 2; }
 [[ -f $SUMMARIZER ]] || { echo "missing $SUMMARIZER (scene gate is mandatory)" >&2; exit 1; }
 # The monitor only knows qcow2 tags; `loadvm F8` errors on a socket nobody
 # reads and the guest keeps running the boot workload (incident 9.9).
-[[ $SNAP == vm-* ]] || { echo "snapshot must be the real vm-* tag, not an F-key name" >&2; exit 2; }
+[[ $SNAP != [Ff][5-8] ]] || { echo "snapshot must be the qcow2 tag, not an F-key name" >&2; exit 2; }
 (( FULLSCREEN )) && SCREENSHOT=0
 
 read_toml_path() {

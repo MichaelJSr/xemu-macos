@@ -18,11 +18,12 @@
 #   - phase timestamps in <outdir>/phases.log for interval attribution
 #   - a mid-forward screenshot scored by bench-screenshot.py
 #
-# Extra env (e.g. XEMU_SUPERBLOCK=4) is passed through to xemu.
+# Extra env (e.g. XEMU_SUBPAGE_FAST=0) is passed through to xemu.
 # Isolation matches bench-savestate-ab.sh: bundle/hdd/eeprom cloned,
-# scratch config via -config_path, fullscreen forced off, user files
-# only ever clone sources. Monitor socket + input FIFO live in /tmp
-# (104-byte AF_UNIX path cap).
+# scratch config via -config_path, fullscreen forced off, source files
+# only ever clone sources. The source config is $XEMU_TEST_CONFIG, else
+# ../fixtures/xemu.toml beside the checkout. Monitor socket + input
+# FIFO live in /tmp (104-byte AF_UNIX path cap).
 set -e
 
 ROOT=${0:a:h:h}
@@ -53,7 +54,8 @@ trap cleanup EXIT
 
 # ---- isolation (clone sources, never the live files) ----------------------
 APP_SRC=$ROOT/dist/xemu.app
-CONFIG_SRC=$HOME/Library/Application\ Support/xemu/xemu/xemu.toml
+CONFIG_SRC=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}
+[[ -f $CONFIG_SRC ]] || { echo "no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
 APP=$WORK/xemu-probe.app
 cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
 APPBIN=$APP/Contents/MacOS/xemu

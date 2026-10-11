@@ -7,7 +7,8 @@ set -e
 APP_SRC=${1:?app}; OUT=${2:?outdir}; SNAP=${3:?vm-tag}; DWELL=${4:-80}
 shift 4 2>/dev/null || shift 3
 typeset -a EXTRA_ENV; EXTRA_ENV=("$@")
-CONFIG_SRC=$HOME/Library/Application\ Support/xemu/xemu/xemu.toml
+CONFIG_SRC=${XEMU_TEST_CONFIG:-${0:a:h:h:h}/fixtures/xemu.toml}
+[[ -f $CONFIG_SRC ]] || { echo "probe-run: no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
 mkdir -p $OUT
 WORK=$OUT/work.$$
 mkdir -p $WORK
