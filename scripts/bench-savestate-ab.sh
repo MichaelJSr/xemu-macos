@@ -313,10 +313,22 @@ EOF
           > $OUT/shot_$label.verdict 2>&1 || true
     fi
   done
+  # A run whose xemu exited before the harness stops it crashed (or
+  # quit): its truncated log can still pass the scene gate, so record
+  # it DEAD rather than letting a short run into the receipt.
+  local alive=1
+  kill -0 $pid 2>/dev/null || alive=0
   kill $pid 2>/dev/null || true
   sleep 2
   kill -9 $pid 2>/dev/null || true
   rm -f $sock
+  if (( ! alive )); then
+    python3 $RECEIPT_PY dead --label $label --log $log --out $runjson \
+        --reason "xemu exited mid-run (crash? check DiagnosticReports)" \
+        ${warmupflag:+--warmup} --var-value $val || true
+    echo "$label DEAD: xemu exited mid-run"
+    return 0
+  fi
 
   # Scene-identity gate (incidents 9.1/9.2). A failed gate marks the
   # run invalid in its JSON; the receipt carries the verdict.

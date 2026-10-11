@@ -259,12 +259,22 @@ EOF
       python3 $SHOT_PY $pid $OUT/shot_$label.png > $OUT/shot_$label.verdict 2>&1 || true
     fi
   done
-  kill -0 $pid 2>/dev/null || echo "$(date +%H:%M:%S) $label: xemu exited early" >> $OUT/timeline.txt
+  local alive=1
+  kill -0 $pid 2>/dev/null || { alive=0; echo "$(date +%H:%M:%S) $label: xemu exited early" >> $OUT/timeline.txt; }
   t1=$(date '+%Y-%m-%d %H:%M:%S')
   kill $pid 2>/dev/null || true
   sleep 2
   kill -9 $pid 2>/dev/null || true
   rm -f $sock
+  # An early exit is a crash (or a quit): its truncated log can still
+  # pass the scene gate, so the run is DEAD, not gated.
+  if (( ! alive )); then
+    python3 $RECEIPT_PY dead --label $label --log $log --out $runjson \
+        --reason "xemu exited mid-run (crash? check DiagnosticReports)" \
+        ${warmupflag:+--warmup} --var-value $arm || true
+    echo "$label DEAD: xemu exited mid-run"
+    return 0
+  fi
 
   if (( FULLSCREEN )); then
     # /usr/bin/log explicitly: zsh has a `log` builtin.
