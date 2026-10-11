@@ -853,12 +853,18 @@ static inline bool access_callback_address_matches(MemAccessCallback *cb,
     return !(addr > watch_end || cb->addr > access_end);
 }
 
+/*
+ * The callback list is only modified by safe work on the vCPU thread, which
+ * runs without the BQL, while the DMA paths below walk it from whatever thread
+ * is doing the access (the main loop for OHCI, for one). Readers must be in an
+ * RCU critical section; removed entries are freed after a grace period.
+ */
 int mem_access_callback_address_matches(CPUState *cpu, hwaddr addr, hwaddr len)
 {
     int ret = 0;
 
     MemAccessCallback *cb;
-    QTAILQ_FOREACH(cb, &cpu->mem_access_callbacks, entry) {
+    QTAILQ_FOREACH_RCU(cb, &cpu->mem_access_callbacks, entry) {
         if (access_callback_address_matches(cb, addr, len)) {
             ret |= BP_MEM_READ | BP_MEM_WRITE;
         }
@@ -871,7 +877,7 @@ static void do_mem_access_callback_insert(CPUState *cpu, run_on_cpu_data data)
 
 {
     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
-    QTAILQ_INSERT_TAIL(&cpu->mem_access_callbacks, cb, entry);
+    QTAILQ_INSERT_TAIL_RCU(&cpu->mem_access_callbacks, cb, entry);
 }
 
 MemAccessCallback *mem_access_callback_insert(CPUState *cpu, MemoryRegion *mr,
@@ -901,8 +907,8 @@ static void do_mem_access_callback_remove_by_ref(CPUState *cpu,
                                                  run_on_cpu_data data)
 {
     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
-    QTAILQ_REMOVE(&cpu->mem_access_callbacks, cb, entry);
-    g_free(cb);
+    QTAILQ_REMOVE_RCU(&cpu->mem_access_callbacks, cb, entry);
+    g_free_rcu(cb, rcu);
 }
 
 void mem_access_callback_remove_by_ref(CPUState *cpu, MemAccessCallback *cb)
@@ -927,11 +933,12 @@ void mem_check_access_callback_vaddr(CPUState *cpu,
     mem_check_access_callback_ramaddr(cpu, ram_addr, len, flags);
 }
 
+/* Called from RCU critical section */
 void mem_check_access_callback_ramaddr(CPUState *cpu,
                                        hwaddr ram_addr, vaddr len, int flags)
 {
     MemAccessCallback *cb;
-    QTAILQ_FOREACH(cb, &cpu->mem_access_callbacks, entry) {
+    QTAILQ_FOREACH_RCU(cb, &cpu->mem_access_callbacks, entry) {
         if (access_callback_address_matches(cb, ram_addr, len)) {
             ram_addr_t ram_addr_base = memory_region_get_ram_addr(cb->mr);
             assert(ram_addr_base != RAM_ADDR_INVALID);
