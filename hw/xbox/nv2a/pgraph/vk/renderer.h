@@ -1228,6 +1228,10 @@ typedef enum FinishReason {
      * when the GPU signals. Replaces the STALLED full-sync for the
      * guest poll path. */
     VK_FINISH_REASON_REPORTS_SUBMIT,
+    /* The query partition of the recording flight slot is nearly full
+     * (begin_pre_draw's capacity guard). Drains like REPORTS_FULL; kept
+     * separate so a counter shows which of the two guards fired. */
+    VK_FINISH_REASON_QUERIES_FULL,
 } FinishReason;
 
 // draw.c

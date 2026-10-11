@@ -29,7 +29,7 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
      * Sized for whole-frame command buffers with per-rotation query
      * indices (deferred reports + in-pass queries): heavy scenes
      * measure ~200-400 rotations per frame; 2048 per slot leaves
-     * ample headroom before the begin_draw capacity guard forces a
+     * ample headroom before the begin_pre_draw capacity guard forces a
      * submit. Visibility/result storage is 8 bytes per query.
      * XEMU_MAX_QUERIES overrides for testing the guard path.
      */

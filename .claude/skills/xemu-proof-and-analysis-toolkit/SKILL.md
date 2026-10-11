@@ -724,7 +724,12 @@ recording the sizing arithmetic directly ("heavy scenes measure
 ~200-400 rotations per frame; 2048 per slot leaves ample headroom").
 Validated per step 6 with `XEMU_MAX_QUERIES=64`: the guard fired 3312
 times in a 5-second interval with zero crashes at a steady 30 fps,
-versus zero guard trips at 43 fps with the normal pool. This guard was
+versus zero guard trips at 43 fps with the normal pool. (A 2026-10-10
+lesson for step 6: that count could not say WHICH guard fired, because
+`alloc_report()`'s guard used the same finish reason, and the
+`begin_draw()` guard turned out to carry a crash bug, so it most likely
+never fired in that run. Give each guard its own counter before
+counting fires; this one now finishes with `QUERIES_FULL`.) This guard was
 not the whole story — a second, independent crash mechanism triggered
 by the *same* cadence change is recipe 4's worked example; capacity
 analysis and source-level driver analysis were both necessary.

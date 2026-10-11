@@ -138,7 +138,10 @@ Act 2 by reading the driver source. Full saga: xemu-failure-archaeology.
 condition fire on demand and demonstrate zero faults under fire. The
 canonical example (2026-07): the query-pool capacity guard was proven by
 running with `XEMU_MAX_QUERIES=64` — the guard fired **3312 times per 5 s
-interval with zero crashes or asserts**. That knob exists for exactly this
+interval with zero crashes or asserts**. (Caveat found 2026-10-10: two
+guards shared that finish reason, and the draw-side one had a crash bug,
+so the count most likely came from the report-side guard alone. Each guard
+now has its own counter; re-run the proof against `finish_queries_full`.) That knob exists for exactly this
 (`hw/xbox/nv2a/pgraph/vk/reports.c`: default `max_queries_in_flight =
 4096`, env override accepted in range 8–65536, code comment: "overrides
 for testing the guard path").
@@ -261,7 +264,7 @@ Ultra, macOS 26.x, Azurik) — see §3 for the fixture list.
 | Noise-suspect bar, static scenes | delta < ~0.5% | Acceptance policy: below this, add pairs or don't claim (repro is tight but thermal/scene-microstate drift exceeds ±0.02) |
 | Live-movement route variance | ±5 fps | Measured 2026-07 → means of ≥3 pairs, or use static scenes |
 | Smallest shipped perf claim on record | +5.4% fps | Exact-vertex refinement, 2026-07, 408 draws/flip scene |
-| Guard-fire proof (reference) | 3312 fires / 5 s interval, 0 crashes | `XEMU_MAX_QUERIES=64` run, 2026-07 |
+| Guard-fire proof (reference) | 3312 fires / 5 s interval, 0 crashes (both guards together; re-run per guard, see Leg 2) | `XEMU_MAX_QUERIES=64` run, 2026-07 |
 | Visual clean bar (reference) | pre-fix failure rate 18-22 flagged frames per 4-min run; recorded acceptance 0 artifact frames in 388 captures — size soaks so the old rate predicts a few hundred fires (§1.3) | Pink-tile fix record, `531122e8aa`, 2026-07 |
 | Scene-identity bands (Azurik) | menus ~3 · attract reel 350–390 · heavy in-game 408–485 draws/flip | 2026-07 anchors |
 | Cross-binary parity example | 50.9±1.0 vs 51.3±5.4 fps ⇒ parity | Custom-vs-official MoltenVK adoption test, 2026-07 |

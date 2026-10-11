@@ -938,7 +938,12 @@ partition mid-recording. The only protection was an assert that release
 builds strip — the index ran off the pool. Fix: `begin_draw()` submits
 (REPORTS_FULL) before overflow; pool 1024 → 4096; `XEMU_MAX_QUERIES` test
 knob. Validated by forcing `XEMU_MAX_QUERIES=64`: guard fired 3312× per 5 s,
-zero crashes, steady 30 fps; normal config zero trips at 43 fps. **The crash
+zero crashes, steady 30 fps; normal config zero trips at 43 fps. (Correction
+2026-10-10: that count also included `alloc_report()`'s guard, which shared
+the `REPORTS_FULL` reason, and the `begin_draw()` guard had a bug that would
+have handed MoltenVK `framebuffers[-1]` on its first trip, so the run most
+likely never exercised it. The guard now runs at the top of
+`begin_pre_draw()` with its own `QUERIES_FULL` reason.) **The crash
 recurred in user gameplay anyway** — necessary, not sufficient.
 
 **Act 2 — read the driver source**: MoltenVK 1.4.1 source establishes:

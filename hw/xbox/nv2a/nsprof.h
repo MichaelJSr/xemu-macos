@@ -103,6 +103,7 @@ enum NsprofEvent {
     NSPROF_EV_FINISH_STALLED,
     NSPROF_EV_FINISH_REPORTS_FULL,
     NSPROF_EV_FINISH_REPORTS_SUBMIT,
+    NSPROF_EV_FINISH_QUERIES_FULL,
     NSPROF_EV_DRAW, /* draw_end (guest begin/end pairs) */
     /* surface download trigger sites */
     NSPROF_EV_SDOWN_ACCESS_R, /* vCPU read of dirty surface VRAM */

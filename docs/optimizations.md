@@ -35,7 +35,7 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP, PGRAPH) — bisect hatch |
 | `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/Finished/pgraph-lockless-audit.md`) |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
-| `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
+| `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by either hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_SPIRV_CACHE_ATOMIC` | `=0` restores the legacy in-place `.spv` write. Default writes `<hash>.spv.<pid>.tmp` and `g_rename`s it over the entry (same discipline as the pipeline cache), so a kill mid-write cannot leave a torn entry for the next launch to ingest; `.tmp` files orphaned by a crash are swept once per process when the cache directory is first resolved. Landed on main 2026-09-08 |
 | `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
@@ -849,7 +849,8 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   `vkGetQueryPoolResults(WAIT_BIT)` for the work it *just*
   submitted (which defeated the 2-slot pipeline on every finish in
   zpass-report titles). Guest-facing paths (`STALLED`,
-  `REPORTS_FULL`, `FLUSH`) still drain synchronously so report
+  `REPORTS_FULL`, `FLUSH`, and since 2026-10-10 the query-capacity
+  guard's `QUERIES_FULL`) still drain synchronously so report
   polling can't deadlock and savestate/renderer-switch stay
   consistent.
 - **LRU free-list + true-LRU eviction.** `lru.h` keeps free nodes on
@@ -1118,6 +1119,27 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   while that invariant holds — which is why the 2026-09-08 review
   exonerated it as the Windows exit-139 cause. `lru_lookup()` also
   asserts the node it takes came off `free` (`lru.h:227`).
+
+- **Query-capacity guard moved ahead of per-draw setup (2026-10-10).**
+  The guard that submits before a flight slot's occlusion-query
+  partition runs out ran in `begin_draw`, after `begin_pre_draw` had
+  built the draw's framebuffer and descriptor sets. Its finish destroyed
+  the slot's framebuffers and moved to the next slot, so
+  `begin_render_pass` then read `framebuffers[framebuffer_index - 1]`
+  with the index at 0 (the slot's `VkSemaphore` handle, passed to
+  MoltenVK as a `VkFramebuffer`) and `bind_descriptor_sets` bound
+  `descriptor_sets[base - 1]`; an inline draw's vertex and index data
+  had also already gone into the previous slot's staging range. The
+  guard now runs first thing in `begin_pre_draw`, so the code after it
+  builds all of that for the new slot. It finishes with its own reason,
+  `QUERIES_FULL` (counter `NV2A_PROF_FINISH_QUERIES_FULL`, nsprof
+  `finish_queries_full`), which drains like `REPORTS_FULL`, so a
+  forced-capacity run (`XEMU_MAX_QUERIES=64`) shows which of the two
+  guards fired. The 2026-07 validation count covered both and most
+  likely never reached this path, which would almost certainly have
+  crashed. Found by the 2026-09 Windows audit (confirmed finding 1, plan
+  batch 3; the batch's other items are still open). With the default
+  4096-query pool the guard did not fire in normal play.
 
 ### MetalFX + presentation
 

@@ -195,7 +195,7 @@ live in the `xemu-config-and-flags` skill. All are read once at startup.
 | `XEMU_VTX_EXACT` | `0` | Restore legacy page-granular vertex-conflict finishes (default: byte-exact skip) | `pgraph/vk/vertex.c` |
 | `XEMU_ZETA_SHAPE_READBACK` | `1` (non-`0`) | Restore GPU→CPU readback on zeta shape switches | `pgraph/vk/surface.c` |
 | `XEMU_REPORTS_SYNC` | `1` | Restore legacy synchronous zpass-report drains (default: flip-deferred + 5 ms idle fallback) | `pgraph/vk/reports.c` |
-| `XEMU_MAX_QUERIES` | 8–65536 (default 4096) | Occlusion-query pool size; tiny values force-fire the begin_draw capacity guard | `pgraph/vk/reports.c` |
+| `XEMU_MAX_QUERIES` | 8–65536 (default 4096) | Occlusion-query pool size; tiny values force-fire the `begin_pre_draw` query-capacity guard (`finish_queries_full`) and `alloc_report()`'s report guard (`finish_reports_full`) | `pgraph/vk/reports.c` |
 | `XEMU_PFIFO_HEARTBEAT` | `1` | ~2 s PFIFO liveness + pending-flag snapshot to stderr | `hw/xbox/nv2a/pfifo.c` |
 | `XEMU_NV2A_NSPROF` | `1` (non-`0`) | 5 s wall-time renderer profile to stderr (release-safe) | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF` | `1` (non-`0`) | Per-second APU-thread utilization to stderr | `hw/xbox/mcpx/apu/apu.c` |

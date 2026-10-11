@@ -1899,7 +1899,11 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
     [VK_FINISH_REASON_REPORTS_FULL] = NV2A_PROF_FINISH_REPORTS_FULL,
     [VK_FINISH_REASON_REPORTS_SUBMIT] = NV2A_PROF_FINISH_REPORTS_SUBMIT,
+    [VK_FINISH_REASON_QUERIES_FULL] = NV2A_PROF_FINISH_QUERIES_FULL,
 };
+/* pgraph_vk_finish offsets NSPROF_EV_FINISH_BASE by the reason. */
+QEMU_BUILD_BUG_ON(NSPROF_EV_FINISH_QUERIES_FULL - NSPROF_EV_FINISH_BASE !=
+                  VK_FINISH_REASON_QUERIES_FULL);
 
 static void destroy_flight_framebuffers(PGRAPHState *pg, int slot)
 {
@@ -2044,6 +2048,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
      */
     if (finish_reason == VK_FINISH_REASON_STALLED ||
         finish_reason == VK_FINISH_REASON_REPORTS_FULL ||
+        finish_reason == VK_FINISH_REASON_QUERIES_FULL ||
         finish_reason == VK_FINISH_REASON_FLUSH) {
         NV2AState *d = container_of(pg, NV2AState, pgraph);
         pgraph_vk_drain_all_pending_reports(d);
@@ -2204,6 +2209,31 @@ static void begin_pre_draw(PGRAPHState *pg)
     nv2a_vk_assert(!r->color_binding || r->color_binding->initialized);
     nv2a_vk_assert(!r->zeta_binding || r->zeta_binding->initialized);
 
+    /*
+     * Query-partition capacity guard. Deferred report delivery means a
+     * command buffer can span a whole frame, and in-pass query rotation
+     * allocates an index per rotation, so a heavy zpass scene can exhaust
+     * the slot's partition mid-recording (overrunning it crashed inside
+     * MoltenVK's visibility-buffer encode). Submit and start a fresh
+     * recording before begin_draw allocates the next index.
+     *
+     * This must run before anything below builds per-draw state: the
+     * finish destroys the slot's framebuffers, moves to the next flight
+     * slot's descriptor sets and resets the staging offsets, and the code
+     * below then creates all of that for the new slot. (It used to run in
+     * begin_draw, after this function, which left framebuffer_index at 0
+     * and the descriptor index at the new slot's base: begin_render_pass
+     * then read framebuffers[-1], the slot's VkSemaphore, and bound
+     * descriptor_sets[base - 1].) in_draw is false and no debug marker is
+     * open yet, so finishing is legal. The -1 keeps one index for the
+     * primer query the next command buffer begins with.
+     */
+    if (!pg->clearing && pg->zpass_pixel_count_enable &&
+        r->in_command_buffer &&
+        r->num_queries_in_flight >= pgraph_vk_queries_per_slot(r) - 1) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_QUERIES_FULL);
+    }
+
     if (pg->clearing) {
         create_clear_pipeline(pg);
     } else {
@@ -2255,23 +2285,6 @@ static void begin_draw(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     nv2a_vk_assert(r->in_command_buffer);
-
-    /*
-     * Query-partition capacity guard. Deferred report delivery means
-     * a command buffer can now span a whole frame, and in-pass query
-     * rotation allocates an index per rotation — a heavy zpass scene
-     * can exhaust the slot's partition mid-recording (previously
-     * only a release-stripped assert; overran the pool and crashed
-     * inside MoltenVK's visibility-buffer encode). Submit and start
-     * a fresh recording before that happens, mirroring
-     * alloc_report()'s REPORTS_FULL guard. in_draw is not yet set
-     * here, so finishing is legal.
-     */
-    if (!pg->clearing && pg->zpass_pixel_count_enable &&
-        r->num_queries_in_flight >= pgraph_vk_queries_per_slot(r) - 1) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
-        pgraph_vk_ensure_command_buffer(pg);
-    }
 
     /*
      * Visibility testing: rotate / stop occlusion queries inside the

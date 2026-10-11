@@ -50,6 +50,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_FINISH_STALLED] = "finish_stalled",
     [NSPROF_EV_FINISH_REPORTS_FULL] = "finish_reports_full",
     [NSPROF_EV_FINISH_REPORTS_SUBMIT] = "finish_reports_submit",
+    [NSPROF_EV_FINISH_QUERIES_FULL] = "finish_queries_full",
     [NSPROF_EV_DRAW] = "draws",
     [NSPROF_EV_SDOWN_ACCESS_R] = "sdown_access_r",
     [NSPROF_EV_SDOWN_ACCESS_W] = "sdown_access_w",

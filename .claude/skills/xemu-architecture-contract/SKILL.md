@@ -237,15 +237,21 @@ asserts in this file are compiled out in every build (see below).
   via `XEMU_MAX_QUERIES`, `reports.c:38-44`, range 8-65536), split evenly
   per slot via `pgraph_vk_queries_per_slot()` (`renderer.h:1205-1208`) —
   2048/slot by default.
-- **The capacity guard that matters**, `begin_draw()`
-  (`hw/xbox/nv2a/pgraph/vk/draw.c:2259-2274`, as of 2026-10-10): when zpass counting is on
-  and `num_queries_in_flight >= pgraph_vk_queries_per_slot(r) - 1`, it
-  forces `pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL)` +
-  `pgraph_vk_ensure_command_buffer(pg)` — submit-and-continue — rather
-  than let the next query index overrun the slot's partition. The
-  in-code comment states this was "previously only a release-stripped
-  assert" that "overran the pool and crashed inside MoltenVK's
-  visibility-buffer encode."
+- **The capacity guard that matters**, at the top of `begin_pre_draw()`
+  (`hw/xbox/nv2a/pgraph/vk/draw.c`) since 2026-10-10: when zpass counting
+  is on, a command buffer is recording and `num_queries_in_flight >=
+  pgraph_vk_queries_per_slot(r) - 1`, it forces
+  `pgraph_vk_finish(pg, VK_FINISH_REASON_QUERIES_FULL)` —
+  submit-and-continue — rather than let the next query index overrun the
+  slot's partition; the rest of `begin_pre_draw` then builds the
+  framebuffer, descriptor sets and command buffer for the new slot. It
+  must stay ahead of that per-draw setup: from 2026-07-03 to 2026-10-10
+  it sat in `begin_draw()`, after the setup, so a trip left
+  `framebuffer_index` at 0 and the draw's render pass took
+  `framebuffers[-1]` (the slot's `VkSemaphore`) as its framebuffer. The
+  guard was added because the old protection, an assert release builds
+  strip, let the pool overrun and crash inside MoltenVK's
+  visibility-buffer encode.
 - **Why an assert alone isn't enough**: every `nv2a_vk_assert()` in this
   renderer compiles to `((void)0)` — `hw/xbox/nv2a/pgraph/vk/debug.h:67-73`
   hardcodes `#define NV2A_VK_PERF_BUILD 1` unconditionally, with no

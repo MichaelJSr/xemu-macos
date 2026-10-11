@@ -189,7 +189,8 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 | `finish_flip_stall` | Guest issued `FLIP_STALL` (should be ≈1 per flip — if it's not, flips and finishes have decoupled, worth investigating) |
 | `finish_flush` | Explicit renderer flush (e.g. savestate) |
 | `finish_stalled` | FIFO sat idle with a pending report — full GPU sync instead of the fence-poll fallback |
-| `finish_reports_full` | Occlusion-query/report ring is full, must drain |
+| `finish_reports_full` | The report pool (`alloc_report()`) is full, must drain |
+| `finish_queries_full` | The recording slot's occlusion-query partition is nearly full (`begin_pre_draw` guard); drains like `finish_reports_full`. Expect 0 with the default 4096-query pool |
 | `finish_reports_submit` | Report submitted without a full sync (the non-blocking fence-poll path) |
 
 **Everything else:**
