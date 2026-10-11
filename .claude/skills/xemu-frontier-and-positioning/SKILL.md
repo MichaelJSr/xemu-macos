@@ -158,9 +158,9 @@ cited as recorded history, not re-run for this skill.
 > −2.3% draw throughput, each 3/3 pairs. Corrected theory: TCG spills
 > cc/eip globals before any branch whose taken edge exits, so only
 > designs keeping BOTH successor edges inline (diamond/region
-> formation) harvest the censused 39-44% dead-flag mass. Machinery +
-> tail-kind census remain in-tree dark (`XEMU_SUPERBLOCK*`) as that
-> campaign's foundation — archaeology 6.7 owns the full story.
+> formation) harvest the censused 39-44% dead-flag mass. The machinery
+> and censuses were removed on 2026-10-10 after that campaign also
+> closed negative — archaeology 6.7-6.8 own the full story.
 > Secondary items settled the same day with receipts (ledger Settled
 > table): DSP fusion closed for this corpus, kick-semaphore closed
 > (wrong premise), dirty-clear coalescing gate failed (<1% echo),

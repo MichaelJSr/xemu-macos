@@ -5,7 +5,9 @@
 > under the same number so citations still resolve. Each is also
 > recorded in the [ledger](../optimizations.md). Text is moved verbatim;
 > figures are as of the date in each heading, and relative links are
-> re-pointed from this folder.
+> re-pointed from this folder. The ranked item 1 machinery, and the two
+> censuses it cites (`XEMU_CCOP_CENSUS`, `XEMU_SUPERBLOCK_SIZE`), were
+> removed from the code on 2026-10-10; the figures stand as recorded.
 
 ## Top candidate 3 — x87 clean-ST(i) write-back elision (closed 2026-08-04)
 

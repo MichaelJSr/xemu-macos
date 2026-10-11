@@ -110,8 +110,8 @@ re-attempting is legitimate. If you cannot meet the condition, do not reopen.
 | 6.4 | TLS-cached pthread_jit_write_protect_np | settled-negative |
 | 6.5 | Cross-TB FPCR elision | settled-negative |
 | 6.6 | HLT BSOD recovery | reverted |
-| 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (mechanism fenced-off dark) |
-| 6.8 | Region/diamond formation + recorded-label liveness elision (census gate passed 21.4%; both windows −4.5%/−0.69 3/3; drain-demotes 72%/64% — THE closing campaign) | settled-negative (full stack fenced-off dark) |
+| 6.7 | Superblock seam-following (M1 3.7% capture; M2 both policies −1.6/−2.3% throughput; spill-before-exit theory) | settled-negative (code removed 2026-10-10) |
+| 6.8 | Region/diamond formation + recorded-label liveness elision (census gate passed 21.4%; both windows −4.5%/−0.69 3/3; drain-demotes 72%/64% — THE closing campaign) | settled-negative (code removed 2026-10-10) |
 | 6.9 | Arm (b) promotion: prediction sized on a 20x-undercounting proxy; fps masked a +12% throughput win via effect-load feedback | shipped-after-proof |
 | 6.10 | Audit §1.2's benefit base had already collapsed 34-57x (proxy collapse, mirror of 6.9) | settled-negative (claim killed, code kept) |
 | 7.1 | PFIFO untimed wait (A1): revert → proof-backed re-add | shipped-after-fix |
@@ -1398,9 +1398,12 @@ appears with `XEMU_PFIFO_HEARTBEAT` clean, root-cause the blocked waiter
 
 ## 6.7 Superblock seam-following — three receipts and a corrected theory
 
-**Status**: settled-negative for seam-following policies (2026-07-18);
-mechanism fenced-off DARK in-tree (`XEMU_SUPERBLOCK=N`, default 0) as
-the foundation for the region-formation redesign (roadmap item 1).
+**Status**: settled-negative for seam-following policies (2026-07-18).
+The mechanism (`XEMU_SUPERBLOCK=N`) and the two censuses below
+(`XEMU_CCOP_CENSUS`, `XEMU_SUPERBLOCK_SIZE`) shipped dark and were
+removed on 2026-10-10; the code lives in `ee1de9f654`, `ce38bb8204`,
+`5274b3b050` and `bbb802c8c8` (which also carries live code: never
+revert it).
 **The idea**: harvest the `XEMU_CCOP_CENSUS` finding (~39-44% of block
 boundaries carry a dead flag materialization) by not ending TBs at
 branch seams: M1 concatenates through unconditional same-page forward
@@ -1438,10 +1441,15 @@ variants of seam-following; two policies died with receipts.
 
 ## 6.8 Region/diamond formation — the closing campaign, five receipts deep
 
-**Status**: settled-negative (2026-07-18, same day as 6.7); the whole
+**Status**: settled-negative (2026-07-18, same day as 6.7). The whole
 stack — TCG recorded-label liveness elision, the `XEMU_REGION_CHECK`
-double-pass conformance harness, and the i386 diamond former — stays
-in-tree DARK as the reproducible record.
+double-pass conformance harness, and the i386 diamond former — shipped
+dark and was removed on 2026-10-10 (code in `d65fc5f83e`; the
+region-candidate census half sits in `3b17ae08e9`, which also carries
+live code: never revert it). A latent defect found during the removal
+review: the former bound a join label after `prev_insn_end` was
+captured, so a join instruction that straddles a page could roll the
+label back out and leave its branch unresolved.
 **The design** (the exact reopening 6.7 named): forward jcc arms
 internalize — the taken edge branches to an intra-TB label bound at
 the join, so NEITHER edge exits — and a liveness-only TCG change lets

@@ -35,12 +35,6 @@
 
 #if defined(XBOX)
 
-/*
- * Defined further down translate.c; declared here because ops_fpu.h is
- * instantiated well above it and the census sites live inside that template.
- */
-static void xemu_gen_counter_inc(uint64_t *counter);
-
 /* (1) census -------------------------------------------------------------- */
 static uint64_t xemu_x87_wb_st_clean;    /* ST(i) write-back, slot only read */
 static uint64_t xemu_x87_wb_st_dirty;    /* ST(i) write-back, slot written */
@@ -197,6 +191,13 @@ static void xemu_x87_gen_counter_add(uint64_t *counter, uint64_t n)
     tcg_gen_ld_i64(t, p, 0);
     tcg_gen_addi_i64(t, t, n);
     tcg_gen_st_i64(t, p, 0);
+}
+
+/* Emit "*counter += 1": the translate-time census bump the x87 sites here
+ * and in ops_fpu.h, and the SSE COMI sites in emit.c.inc, share. */
+static void xemu_gen_counter_inc(uint64_t *counter)
+{
+    xemu_x87_gen_counter_add(counter, 1);
 }
 
 /* Emit "*slot = v". */

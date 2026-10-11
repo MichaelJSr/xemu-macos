@@ -92,16 +92,8 @@ struct TranslationBlock {
     uint16_t size;
     uint16_t icount;
     /*
-     * xemu (XBOX/i386): cc-flag liveness classes for this TB, written at
-     * translate time; consumed by the XEMU_CCOP_CENSUS pair counter (see
-     * accel/tcg/xemu-inv-prof.h). Fills the alignment hole before ihash.
-     * bits 0-1: tail (0 dynamic/pass-through, 1 EFLAGS, 2 lazy op)
-     * bits 2-3: head (0 no flag event, 1 kill, 2 use)
-     */
-    uint8_t xemu_ccop;
-    /*
      * xemu (XBOX) xpage link-registry bits (tb-maint.c registry;
-     * docs/Finished/xpage-design.md §3 backstop v2). Shares the pre-ihash
+     * docs/Finished/xpage-design.md §3 backstop v2). Sits in the pre-ihash
      * hole.
      *   XEMU_XPAGE_TB_REGISTERED    — this TB is currently registered as a
      *       cross-page jump DESTINATION (dedup; cleared when the backstop

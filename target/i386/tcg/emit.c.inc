@@ -1132,7 +1132,6 @@ VSIB_AVX(VPGATHERQ, vpgatherq)
 
 static void gen_AAA(DisasContext *s, X86DecodedInsn *decode)
 {
-    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_aaa(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1156,7 +1155,6 @@ static void gen_AAM(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_AAS(DisasContext *s, X86DecodedInsn *decode)
 {
-    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_aas(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1592,18 +1590,7 @@ extern bool xemu_guestprof_on(void);
 static void gen_CALL(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
-#if defined(XBOX)
-    /*
-     * Direct calls bypass the superblock merge (following a call body
-     * is inlining — different duplication/RAS tradeoffs, out of M1's
-     * scope), so this no longer routes through gen_JMP.
-     */
-    s->xemu_sb_tail_kind = XEMU_SB_TAIL_CALL;
-    gen_update_cc_op(s);
-    gen_jmp_rel(s, s->dflag, decode->immediate, 0);
-#else
     gen_JMP(s, decode);
-#endif
 }
 
 static void gen_CALL_m(DisasContext *s, X86DecodedInsn *decode)
@@ -1980,7 +1967,6 @@ static void gen_CWD(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_DAA(DisasContext *s, X86DecodedInsn *decode)
 {
-    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_daa(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -1988,7 +1974,6 @@ static void gen_DAA(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_DAS(DisasContext *s, X86DecodedInsn *decode)
 {
-    xemu_ccop_mark_use(s); /* helper reads inherited CF/AF */
     gen_update_cc_op(s);
     gen_helper_das(tcg_env);
     assume_cc_op(s, CC_OP_EFLAGS);
@@ -2342,13 +2327,6 @@ static void gen_JCXZ(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_JMP(DisasContext *s, X86DecodedInsn *decode)
 {
-#if defined(XBOX)
-    if (xemu_superblock_try_merge(s, s->dflag, decode->immediate)) {
-        /* Merged: nothing emitted; translation continues at the target. */
-        return;
-    }
-    s->xemu_sb_tail_kind = XEMU_SB_TAIL_UNCOND;
-#endif
     gen_update_cc_op(s);
     gen_jmp_rel(s, s->dflag, decode->immediate, 0);
 }
@@ -3835,9 +3813,6 @@ static void gen_shift_dynamic_flags(DisasContext *s, X86DecodedInsn *decode, TCG
 {
     TCGv_i32 count32 = tcg_temp_new_i32();
     TCGv_i32 old_cc_op;
-
-    /* count==0 keeps the inherited flags: a conditional consumption. */
-    xemu_ccop_mark_use(s);
 
     decode->cc_op = CC_OP_DYNAMIC;
     decode->cc_op_dynamic = tcg_temp_new_i32();

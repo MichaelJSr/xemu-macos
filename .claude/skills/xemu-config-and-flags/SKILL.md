@@ -40,7 +40,7 @@ table, because flags drift and this catalog must be re-checkable, not
 trusted.
 
 > **Scope note (2026-10-10).** The Axis 2 runtime tables cover every
-> `getenv("XEMU_` site again: `grep` reports **71** distinct `XEMU_*`
+> `getenv("XEMU_` site again: `grep` reports **66** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
 > (subpage/xpage/superblock/region, present ring, MMIO profiling, the
@@ -206,9 +206,9 @@ Consequences, verified in code:
 ## Axis 2: XEMU_* runtime environment variables
 
 Authoritative list = every `getenv("XEMU_` site in fork C/ObjC code.
-As of **2026-10-10** the grep reports **71 distinct variables** (68 on
+As of **2026-10-10** the grep reports **66 distinct variables** (68 on
 2026-08-04, 30 as of 2026-07-11 — the optimization campaigns since then account for the
-rest; all 71 have rows below as of 2026-10-10). **Every one is read once and
+rest; all 66 have rows below as of 2026-10-10). **Every one is read once and
 latched in a static** — set it
 before launch; changing the environment mid-run does nothing. Several
 are latched at *translate* time (the first TB, before any guest code
@@ -273,7 +273,7 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
-cover all 71 names. Facts mirror the `docs/optimizations.md` "Runtime
+cover all 66 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
 where the two disagree, that table and the code win). Anchors read
 2026-10-10 at `b7e2752589`. Status values: **production** (shipped
@@ -313,7 +313,6 @@ experiments").
 | `XEMU_INV_TIMING` | off | strict `1` | **Test-only**: adds a cycle-counter split of the `notdirty_write` body to the `XEMU_INV_PROF` dump; tick source per host (`accel/tcg/xemu-inv-prof.h`) | diag | `accel/tcg/tb-maint.c:255` |
 | `XEMU_TB_PROF` | off | strict `1` | **Test-only**: TB jump-cache totals at exit (lookups, hit%, htable walks, translations, `tb_flush` count) | diag | `accel/tcg/cpu-exec.c:618`, `xemu_ras_helper.c:87` |
 | `XEMU_GUEST_PROF` | off | strict `1` | **Test-only**: one-run guest profiler (mach-thread sampler resolves vCPU samples to guest TBs vs host symbols). Not benchmark-neutral | diag | `accel/tcg/cpu-exec.c:320`, `xemu_ras_helper.c:88` |
-| `XEMU_CCOP_CENSUS` | off | strict `1` | **Test-only**: runtime-weighted cc-flag liveness census across TB boundaries at exit. Forces every TB transition through the exec loop, so much slower; sizing tool for the closed superblock campaign | diag | `accel/tcg/tb-maint.c:359` |
 | `XEMU_MMIO_PROF` | off | strict `1` | **Test-only**: exit histogram of guest MMIO traffic (region × page, loads/stores) plus BQL acquire-wait totals | diag | `accel/tcg/cputlb.c:2089` |
 | `XEMU_XPAGE_PROF` | off | strict `1` | **Test-only**: cross-page-direct exit census split by target region; atexit summary | diag | `accel/tcg/xemu-xpage.c:144` |
 | `XEMU_XPAGE_REFUTE` | off | strict `1` | **Test-only**: cross-page-chaining refuter, routes every cross-page-direct exit through the safe lookup plus a phys-unchanged check. Slow; falsification only | test | `accel/tcg/xemu-xpage.c:131` |
@@ -321,7 +320,6 @@ experiments").
 | `XEMU_SUBPAGE_FAST_REFUTE` | off | strict `1` | **Test-only**: routes every would-skip decision to a C validator that counts violations and performs the real store; forces `XEMU_SUBPAGE_FAST_STATS=1` | test | `accel/tcg/xemu-subpage-fast.c:142` |
 | `XEMU_PUSH_PRESENT_REFUTE` | off | strict `1` | **Test-only**: peeks the push-present ring and cross-checks the consumed-step stream against the pull path, printing tallies every ~5 s. Re-adds the pull round trip, so measure perf with it off | test | `ui/xemu.c:1096` |
 | `XEMU_UI_FRAME_CAP_NS` | 0 (no cap) | int ns (atoll) | **Test-only**: floors the UI present period (`16666666` ≈ a 60 Hz consumer) so ring pacing is visible in unfocused bench windows, which present unpaced | test | `ui/xemu.c:1212` |
-| `XEMU_SUPERBLOCK_SIZE` | off | strict `1` | **Test-only**: runtime taken-exit tail-kind census for sizing superblock policies with merging off; atexit dump. Part of the closed superblock campaign's record | diag | `target/i386/tcg/translate.c:3412` |
 
 #### Closed experiments kept dark as the record
 
@@ -333,9 +331,6 @@ belong to this class too.
 | Env var | Unset behavior | Values | Effect | Cat | Read at |
 |---|---|---|---|---|---|
 | `XEMU_TB_RANGE_INV` | off (whole-page invalidation) | strict `1` | **Closed experiment, kept dark as the record** (2026-07-11): re-applies upstream's per-TB byte-range overlap filter. Invalidations fell 338k → 675 but notdirty traps rose 25.2×; instrument-killed before an fps A/B | A/B | `accel/tcg/tb-maint.c:270` |
-| `XEMU_SUPERBLOCK` | 0 (off) | `N` seams per TB (atoi, 0..64) | **Closed experiment, kept dark as the record** (campaign closed 2026-07-18): follows up to N branch seams per TB at translate time. M1 was instrument-killed and both M2 policies measured negative; the machinery stays as the base for region formation | A/B | `target/i386/tcg/translate.c:3398` |
-| `XEMU_REGION` | 0 (off) | `N` (atoi, clamped 0..8; the Failed rows ran `4`) | **Closed experiment, kept dark as the record** (2026-07-18): region/diamond former; both the 64 B and 16 B windows measured negative and the campaign stopped | A/B | `target/i386/tcg/translate.c:3493` |
-| `XEMU_REGION_CHECK` | off | strict `1` | **Closed experiment's conformance harness, kept as the record**: runs `liveness_pass_1` twice per TB and aborts on any non-conforming difference. No Failed row of its own; it is the harness named in the Region rows | test | `tcg/tcg.c:7144` |
 | `XEMU_RETC_BITS` | 12 | 8..13 (atoi; out of range ignored) | **Closed experiment, kept dark as the record** (2026-07-18): ret-memo index width, latched in a constructor before `main()`. 13 bits measured −0.23 fps, 4/4. Any width is correctness-safe, so it stays as a cache-footprint A/B knob | A/B | `target/i386/tcg/xemu_ras_helper.c:60` |
 
 **The default-ON (inverted) set as of 2026-08-04** — for these, `=0` is
@@ -627,7 +622,7 @@ table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 
 ```bash
-# 1. Authoritative XEMU_* runtime env var list (expect 71 distinct
+# 1. Authoritative XEMU_* runtime env var list (expect 66 distinct
 #    variables as of 2026-10-10; 68 on 2026-08-04). Restrict to the
 #    source dirs so agent checkouts (e.g. a .claude/worktrees/, if
 #    present) can't multiply every hit.
@@ -674,7 +669,7 @@ wc -l config_spec.yml                                  # 413 as of 2026-10-10
 ```
 
 Drift-prone facts to re-check first when this skill feels wrong (values
-as of 2026-08-04 unless dated): the env-var count (**71** as of 2026-10-10), the MVK **six**-tuple,
+as of 2026-08-04 unless dated): the env-var count (**66** as of 2026-10-10), the MVK **six**-tuple,
 `XEMU_MOLTENVK_VERSION` default (**1.4.2**) and the build-moltenvk pin
 (**67b2682699…**, main past v1.4.2, reports 1.4.3; releases still vendor
 1.4.2), `XEMU_HARDENING`'s default (**1** —

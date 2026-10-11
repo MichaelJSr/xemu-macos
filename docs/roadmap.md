@@ -172,7 +172,7 @@ Historical ranking (2026-07-19). Items 1-3 are closed (write-ups in
 item 5 is the standing correctness debt, still open. The live
 candidates are in the section above.
 
-1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments and the dark superblock machinery entry.
+1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The machinery was removed on 2026-10-10.
 2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
 3. **Sub-page arm (b) — promoted default-on 2026-07-18** (`ede35b84f9`). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: CPU / JIT (ARM64).
 4. **Cross-page chaining, page-spanning-dest coverage gap — MEASURED
@@ -249,8 +249,7 @@ real flips.
 
 Re-rank inputs: `XEMU_GUEST_PROF=1` sampler + exit census,
 `XEMU_INV_PROF=1` (+`XEMU_INV_TIMING=1`) invalidation/trap counters,
-`XEMU_SUPERBLOCK_SIZE=1` tail-kind census, `XEMU_NV2A_NSPROF=1` frame
-attribution. Added 2026-08-04 for the candidates above:
+`XEMU_NV2A_NSPROF=1` frame attribution. Added 2026-08-04 for the candidates above:
 `XEMU_SURFACE_CB_STATS=1` (surface-callback / TLB-flush rate),
 `XEMU_X87_CENSUS=1` + `XEMU_X87_REFUTE=1` (x87 elidability and its
 adversarial checker), `XEMU_PFIFO_KICK_STATS=1`, `XEMU_UI_LOCK_STATS=1`,

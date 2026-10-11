@@ -1387,39 +1387,6 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
-#if defined(XBOX)
-    /*
-     * XEMU_CCOP_CENSUS: count (predecessor tail, successor head) flag-
-     * liveness pairs. The loop's own last_tb cannot serve here: under the
-     * census cflags every exit is exit_tb(NULL), so cpu_tb_exec returns
-     * NULL and last_tb never survives a transition. Track the previously
-     * ENTERED TB instead — equivalent while chaining is off, since each
-     * entered TB runs to its own exit. Reset across tb_flush generations
-     * (stale pointers); interrupt/exception boundaries smear a sub-percent
-     * of pairs and are unfusable by a cross-block optimizer anyway.
-     */
-    if (unlikely(xemu_ccop_census_on())) {
-        static TranslationBlock *census_prev_tb;
-        static unsigned census_prev_flush;
-        unsigned fc = qatomic_read(&tb_ctx.tb_flush_count);
-
-        if (fc != census_prev_flush) {
-            census_prev_flush = fc;
-            census_prev_tb = NULL;
-        }
-        if (census_prev_tb) {
-            unsigned head = (tb->xemu_ccop >> XEMU_CCOP_HEAD_SHIFT) & 0x3;
-            xemu_ccop_pairs[census_prev_tb->xemu_ccop & XEMU_CCOP_TAIL_MASK]
-                           [head]++;
-            if (census_prev_tb->xemu_ccop & XEMU_CCOP_REGION_CAND) {
-                xemu_region_cand_pairs[head]++;
-            }
-        } else {
-            xemu_ccop_pairs_nolast++;
-        }
-        census_prev_tb = tb;
-    }
-#endif
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
     if (*tb_exit != TB_EXIT_REQUESTED) {

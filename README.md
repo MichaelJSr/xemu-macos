@@ -180,7 +180,7 @@ hatch in the [ledger](docs/optimizations.md).
 The remaining wall is still guest-TCG throughput. The
 superblock/region-formation campaign against the measured ~40%
 dead-flag mass at block boundaries closed 2026-07-18 with five policies
-measured negative and the enabling TCG machinery preserved dark; the
+measured negative; its TCG machinery was removed on 2026-10-10. The
 constant-factor work above is what moved instead. The full record, the
 honest verdicts, and what is still open live in
 [docs/roadmap.md](docs/roadmap.md) and the
