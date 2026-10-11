@@ -50,7 +50,7 @@ Two facts frame everything:
 2. **`docs/optimizations.md` is the doc of record** (since the
    2026-07-18 README split). Shipped behavior changes get a
    `## Changes` entry; reverted attempts get a `## Failed / reverted
-   experiments` row (46 rows as of 2026-10-10). A change that is not
+   experiments` row (47 rows as of 2026-10-10). A change that is not
    documented is not done.
 
 ## The shipping model (verified 2026-07-04)
@@ -99,7 +99,7 @@ variable is unset. Verified examples of the pattern:
   as of 2026-10-10; commit `38e5e42bbd` states "Zero cost when unset".
 - `XEMU_MAX_QUERIES` — `hw/xbox/nv2a/pgraph/vk/reports.c:38`, a test
   knob for the query-pool capacity guard.
-- `XEMU_NV2A_NSPROF` — `hw/xbox/nv2a/nsprof.c:101`, the wall-time
+- `XEMU_NV2A_NSPROF` — `hw/xbox/nv2a/nsprof.c:102`, the wall-time
   profiler.
 
 Evidence owed:
@@ -194,7 +194,7 @@ iterate before pushing: `xemu-build-and-env` skill.
 The canonical gating patterns — copy these, verified 2026-07-04:
 
 - **`#ifdef __APPLE__` for semantics that are only safe on Metal**:
-  `hw/xbox/nv2a/pgraph/vk/surface.c:1860` (as of 2026-10-10) narrows the
+  `hw/xbox/nv2a/pgraph/vk/surface.c:1673` (as of 2026-10-10) narrows the
   `pgraph_vk_upload_surface_data()` full-GPU-sync to the cases that need
   it on Apple only; the `#else` branch keeps `target_is_active = true`
   (upstream full-finish semantics). The comment explains why: the
@@ -360,8 +360,8 @@ wipes `Contents/Resources`, so anything planted there silently vanishes
 
 ### 4. Every reverted attempt gets a failed-experiments row
 
-`docs/optimizations.md` `## Failed / reverted experiments` (~line 2091,
-46 rows as of 2026-10-10) exists so lessons "aren't re-attempted" — several rows
+`docs/optimizations.md` `## Failed / reverted experiments` (~line 2208,
+47 rows as of 2026-10-10) exists so lessons "aren't re-attempted" — several rows
 document multi-day investigations (per-flight mirrors, depth export,
 host-imported vertex RAM) that would otherwise be re-run from scratch by
 the next session. The revert and the row land in the same push. Row
@@ -480,6 +480,6 @@ Re-verify drift-prone claims:
 - DSP engine precedence + namespaces: `grep -n "dsp_want_external_jit_engine\|dsp_set_engine" hw/xbox/mcpx/apu/dsp/dsp.c` and `ls hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
 - DSP config defaults (expect `dsp_jit.enabled: false`, `use_dsp_jit: true` — the second is fork-owned, upstream ships `false`): `grep -n -A3 "dsp_jit:\|use_dsp_jit:" config_spec.yml`
 - Escape hatches present: `grep -rn "XEMU_VTX_EXACT\|XEMU_REPORTS_SYNC" hw/xbox/nv2a/pgraph/vk/{vertex,reports}.c`
-- Failed-experiments row count: `awk '/^## Failed/,/^## Settled/' docs/optimizations.md | grep '^| ' | grep -vc '^| Attempt\|^|---'` (46 as of 2026-10-10)
+- Failed-experiments row count: `awk '/^## Failed/,/^## Settled/' docs/optimizations.md | grep '^| ' | grep -vc '^| Attempt\|^|---'` (47 as of 2026-10-10)
 - Current commit footer: `git log -3 --format=%B | grep Co-Authored-By`; history totals: `git log --format=%B upstream/master..HEAD | grep -i '^co-authored-by: claude\|^made-with' | sed 's/ <.*//' | sort | uniq -c`
 - RELEASING doc staleness (expect no hits post-rewrite): `grep -n "Cursor\|Made-with\|track upstream" docs/RELEASING-macos.md`

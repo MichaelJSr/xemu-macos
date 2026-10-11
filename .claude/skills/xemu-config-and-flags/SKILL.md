@@ -43,7 +43,7 @@ trusted.
 > `getenv("XEMU_` site again: `grep` reports **61** distinct `XEMU_*`
 > variables in fork code as of 2026-10-10 (68 on 2026-08-04), and the
 > campaign-era knobs that went unfiled from v0.9 to 2026-08-04
-> (subpage/xpage/superblock/region, present ring, MMIO profiling, the
+> (subpage/xpage, present ring, MMIO profiling, the
 > 2026-09-08 Windows-port hatches) were filed on 2026-10-10. The
 > Provenance grep stays the authority; the `docs/optimizations.md`
 > "Runtime escape-hatch / diagnostic knobs" table is the user-facing
@@ -106,12 +106,12 @@ edit (do not edit the generated file).
   **Trap:** `./build.sh` repackaging starts with `rm -rf dist`
   (`build.sh` `package_macos`), so a portable config planted inside
   `dist/xemu.app/Contents/Resources/` vanishes on every rebuild.
-- CLI override: `xemu -config_path <file>` (`ui/xemu.c:1989-1998` ->
+- CLI override: `xemu -config_path <file>` (`ui/xemu.c:1962-1971` ->
   `xemu_settings_set_path`). Harnesses use this to avoid hijacking the
   user's real config.
 - Load failure = fatal: error dialog then `exit(1)`; settings are
   saved back on exit via `atexit(xemu_settings_save)`
-  (`ui/xemu.c:2000-2009`, as of 2026-10-10).
+  (`ui/xemu.c:1973-1982`, as of 2026-10-10).
 
 ### Operational settings table (verified in `config_spec.yml` + consumers)
 
@@ -122,7 +122,7 @@ recommended non-default on Apple Silicon; **debug** = development aid;
 | Setting | Type / values | Default | Status | Effect / notes |
 |---|---|---|---|---|
 | `display.renderer` | `NULL`\|`OPENGL`\|`VULKAN` | `VULKAN` | prod | Renderer choice. The fork's optimizations live in the Vulkan/MoltenVK path. |
-| `display.window.presentation_backend` | `auto`\|`opengl`\|`metal` | `auto` | prod | macOS-only: which API presents the final frame + UI. `auto` -> Metal when renderer is VULKAN. **Resolved once before window creation and fixed for the process lifetime** (`ui/xemu.c:94-123` `xemu_present_is_metal`); changing it, or switching renderer under `auto`, requires a restart. |
+| `display.window.presentation_backend` | `auto`\|`opengl`\|`metal` | `auto` | prod | macOS-only: which API presents the final frame + UI. `auto` -> Metal when renderer is VULKAN. **Resolved once before window creation and fixed for the process lifetime** (`ui/xemu.c:91-120` `xemu_present_is_metal`); changing it, or switching renderer under `auto`, requires a restart. |
 | `display.metalfx_mode` | `off`\|`spatial`\|`temporal` | `spatial` | prod | MetalFX upscale mode (UI: `ui/xui/main-menu.cc:832`). |
 | `display.metalfx_upscale` | bool | `false` | legacy | Old on/off bool. Migrated at load: `true` + `metalfx_mode=off` -> `metalfx_mode=spatial`, then always reset to `false` (`ui/xemu-settings.cc:206-213`). Never write new code against it. |
 | `display.frame_interpolation` | `off`\|`2x`\|`4x` | `off` | prod | MTLFXFrameInterpolator; requires macOS 26 (`@available` check in `metalfx_upscale.m`). UI: `main-menu.cc:837`. |
@@ -225,16 +225,16 @@ comparison knob.
 
 | Env var | Unset behavior | Values | Effect | Cat | Read at |
 |---|---|---|---|---|---|
-| `XEMU_NV2A_NSPROF` | off | truthy | Wall-time NV2A profiler; 5 s counter/event summaries to stderr (PFIFO thread) | diag | `hw/xbox/nv2a/nsprof.c:101` |
+| `XEMU_NV2A_NSPROF` | off | truthy | Wall-time NV2A profiler; 5 s counter/event summaries to stderr (PFIFO thread) | diag | `hw/xbox/nv2a/nsprof.c:102` |
 | `XEMU_PFIFO_HEARTBEAT` | off | strict | ~2 s PFIFO-thread heartbeat + pending-flag snapshot (categorize freezes: thread stuck vs waiting) | diag | `hw/xbox/nv2a/pfifo.c:520` |
 | `XEMU_APU_PROF` | off | truthy | Per-second APU-thread utilization % + frames/s to stderr | diag | `hw/xbox/mcpx/apu/apu.c:249` |
-| `XEMU_ZETA_SHAPE_READBACK` | off (fast path) | truthy | Restore GPU->CPU readback on zeta shape switches (full fidelity, slower) | escape | `pgraph/vk/surface.c:1788` |
-| `XEMU_TEX_BIND_RECHECK` | off (fast path) | truthy | Restore per-bind texture dirty rechecks (vs once per frame) — try for stale/late textures | escape | `pgraph/vk/texture.c:816` |
+| `XEMU_ZETA_SHAPE_READBACK` | off (fast path) | truthy | Restore GPU->CPU readback on zeta shape switches (full fidelity, slower) | escape | `pgraph/vk/surface.c:1601` |
+| `XEMU_TEX_BIND_RECHECK` | off (fast path) | truthy | Restore per-bind texture dirty rechecks (vs once per frame) — try for stale/late textures | escape | `pgraph/vk/texture.c:815` |
 | `XEMU_VTX_EXACT` | **ON** (exact refinement) | `0` disables | `0` restores legacy page-granular vertex-conflict finishes; default is byte-exact conflict refinement (**inverted** — it was the first such knob; see the default-on list below) | escape | `pgraph/vk/vertex.c:118` |
 | `XEMU_REPORTS_SYNC` | off (deferred reports) | strict | `1` restores legacy synchronous zpass-report drains (vs ride-the-flip + the idle-budget fallback, 300 µs by default — `XEMU_REPORTS_BUDGET_US`; 5 ms before v0.10.1) | escape | `pgraph/vk/reports.c:295` |
 | `XEMU_MAX_QUERIES` | 4096 | int 8..65536 (strtol, base auto) | Total occlusion-query pool size (`max_queries_in_flight`, partitioned across the 2 flight slots); small values exercise the begin_draw capacity-guard path | test | `pgraph/vk/reports.c:38` |
 | `XEMU_INPUT_PIPE` | disabled | FIFO path (POSIX) / pipe name or path (Windows) | Input injection: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` OR'd into keyboard state through the user's bindings; works unfocused. **Both host families** since `164fd4c876` (2026-09-08): a POSIX FIFO opened `O_NONBLOCK`, or on Windows a `PIPE_NOWAIT` Win32 named pipe whose name is the full `\\.\pipe\...` value or the path's last component (`#ifdef _WIN32` split at `ui/xemu-input.c:548`) | test | `ui/xemu-input.c:588` (Windows), `:716` (POSIX) |
-| `XEMU_MFX_REAL_DEPTH` | off (synthetic depth) | truthy | Feed real zeta MTLTexture to the MetalFX temporal scaler (known 1-frame-ahead limitation). Compiled only under `HAVE_IOSURFACE_SHARING` (= `__APPLE__`, `pgraph/vk/renderer.h:44-50`) | A/B | `pgraph/vk/surface.c:1285` |
+| `XEMU_MFX_REAL_DEPTH` | off (synthetic depth) | truthy | Feed real zeta MTLTexture to the MetalFX temporal scaler (known 1-frame-ahead limitation). Compiled only under `HAVE_IOSURFACE_SHARING` (= `__APPLE__`, `pgraph/vk/renderer.h:44-50`) | A/B | `pgraph/vk/surface.c:1098` |
 | `XEMU_MFX_INTERP_ZERO_MOTION` | off (linked scaler) | truthy | Restore the old zero-motion frame-interpolator binding | A/B | `pgraph/vk/metalfx_upscale.m:1284` |
 | `XEMU_COREAUDIO_FRAMES` | 1024 | positive int (atoi) | CoreAudio buffer frames (~21 ms @ 48 kHz at default; try 2048 for audio glitches). **Runtime**: filed in the `docs/optimizations.md` runtime-knob table, and the in-code comment says runtime (both fixed in the 2026-07-05 doc pass) | escape | `audio/coreaudio.m:598` |
 | `XEMU_DSP_JIT` | follow `audio.dsp_jit.enabled` | `1` force on; any other non-empty force off | Dev override of the inline DSP JIT **within the interpreter engine only** (see precedence box — it cannot select the engine) | test | `dsp/interp/dsp56k_jit_arm64.c:180` |
@@ -246,7 +246,7 @@ comparison knob.
 | `XEMU_DSP_JIT_SENTINEL` | off | `1` (bit 0) | cur_inst poison harness from the round-4 bisect (kept in-tree deliberately) | test | `dsp56k_jit_arm64.c:239` |
 | `XEMU_DSP_JIT_FORCE` | off | `1` (bit 0) | Re-apply the deferred round-4 cur_inst skip — **known-regressing**, exists only for the bisect harness | test | `dsp56k_jit_arm64.c:250` |
 | `XEMU_DSP_JIT_PIN_AUDIT` | off | strict | Per-op audit that pinned A/B accumulator registers (x26/x27) match memory; ~10 extra insns/op | test | `dsp56k_jit_arm64.c:265` |
-| `XEMU_DSP_JIT_DUMP` | off | strict | Hex-dump every emitted ARM64 block to stderr for offline disassembly | diag | `dsp56k_jit_arm64.c:9915` |
+| `XEMU_DSP_JIT_DUMP` | off | strict | Hex-dump every emitted ARM64 block to stderr for offline disassembly | diag | `dsp56k_jit_arm64.c:9850` |
 
 ### Wave knobs added 2026-08-04
 
@@ -257,23 +257,23 @@ Same columns; every anchor re-derived against the tree on 2026-10-10.
 |---|---|---|---|---|---|
 | `XEMU_ELIDE_CANDOIO` | **ON** (stores elided) | `0` restores | Drops both per-TB `set_can_do_io()` bookkeeping stores from every multi-insn TB body, so `cpu->neg.can_do_io` stays true and `io_prepare` never enters `cpu_io_recompile` (`tcg_tb_lookup` + state restore + siglongjmp + `CF_MEMI_ONLY` re-translate) on guest NV2A/APU register traffic. **Auto-forced to 0** when icount is enabled or `replay_mode != REPLAY_MODE_NONE` — the only observers. Latched at the first translation, before the first TB | escape | `accel/tcg/translator.c:50` |
 | `XEMU_DIRTY_FAST` | **ON** (fast path) | `0` restores | `notdirty_write` learns the CODE-dirty answer from the invalidation's return instead of re-reading the bitmap via `physical_memory_is_clean()`, and every single-page dirty query (including the TLB-refill check) reads all five clients under **one** RCU guard with one idx/offset + `test_bit` instead of five guards and five `find_next_bit` loops. `0` restores both legacy shapes on the same binary. **Carries no fps claim** — archaeology 6.10 | escape | `system/physmem.c:1064` |
-| `XEMU_X87_ELIDE_FT0` | **ON** | `0` restores | Skips the FT0 scratch write-back at a register-cache flush when no reader of that value is still ahead in the same guest instruction. `0` restores the unconditional store | escape | `target/i386/tcg/xemu-x87.h:143` |
-| `XEMU_X87_DEFER_FIP` | **ON** | `0` restores | Defers the x87 exception-pointer stores (FIP/FCS/FDP/FDS) from one per instruction to one per contiguous x87 run, and hoists the CS-selector load out of the per-instruction path. `0` restores per-instruction stores | escape | `target/i386/tcg/xemu-x87.h:157` |
-| `XEMU_X87_CENSUS` | off | `1` | Arms the x87/SSE census + atexit dump (FT0 write-back elidability split, exception-pointer store counts, x87 run length, SSE scalar-compare mix). Emits counter RMWs into generated code — **measurement mode only, never for an fps run** | diag | `target/i386/tcg/xemu-x87.h:112` |
-| `XEMU_X87_REFUTE` | off | `1` | Adversarial shadow-checker for the two shipped x87 mechanisms (the `ELIDE_FT0` elision and the `DEFER_FIP` deferral): keeps every legacy store, computes the elision/deferral decision anyway, and counts every point where the elided state could have been observed. Implies the census dump; promotion gate is zero violations. **Stacking limit applies** — see xemu-testing / archaeology 9.10 | test | `target/i386/tcg/xemu-x87.h:125` |
+| `XEMU_X87_ELIDE_FT0` | **ON** | `0` restores | Skips the FT0 scratch write-back at a register-cache flush when no reader of that value is still ahead in the same guest instruction. `0` restores the unconditional store | escape | `target/i386/tcg/xemu-x87.h:124` |
+| `XEMU_X87_DEFER_FIP` | **ON** | `0` restores | Defers the x87 exception-pointer stores (FIP/FCS/FDP/FDS) from one per instruction to one per contiguous x87 run, and hoists the CS-selector load out of the per-instruction path. `0` restores per-instruction stores | escape | `target/i386/tcg/xemu-x87.h:138` |
+| `XEMU_X87_CENSUS` | off | `1` | Arms the x87/SSE census + atexit dump (FT0 write-back elidability split, exception-pointer store counts, x87 run length, SSE scalar-compare mix). Emits counter RMWs into generated code — **measurement mode only, never for an fps run** | diag | `target/i386/tcg/xemu-x87.h:93` |
+| `XEMU_X87_REFUTE` | off | `1` | Adversarial shadow-checker for the two shipped x87 mechanisms (the `ELIDE_FT0` elision and the `DEFER_FIP` deferral): keeps every legacy store, computes the elision/deferral decision anyway, and counts every point where the elided state could have been observed. Implies the census dump; promotion gate is zero violations. **Stacking limit applies** — see xemu-testing / archaeology 9.10 | test | `target/i386/tcg/xemu-x87.h:106` |
 | `XEMU_SUBPAGE_FAST_STATS` | off (**default flipped 2026-08-04**) | `1` | Re-enables the six diagnostic counter RMWs the arm-(b) store prefilter emits into every aarch64 store slow-path stub, and restores the atexit seen/skips/demote histogram. Production now emits none of them (~39 fewer insns per stub, 12 on the inline-skip path); with it off the dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` so a zeroed histogram can't read as a dead mechanism. Latched at first stub emission; `XEMU_SUBPAGE_FAST_REFUTE=1` forces it on | diag | `accel/tcg/xemu-subpage-fast.c:167` |
 | `XEMU_SURFACE_CB_STATS` | off | `1` | Censuses NV2A surface CPU-access-callback register/unregister events (each = `async_safe_run_on_cpu` **plus** a full all-mmuidx TLB flush **plus** an unconditional jump-cache wipe), split by `update_surface_part`'s invalidate-then-create path vs elsewhere; atexit dump. Any first digit `1`-`9` arms it. The `=2` abort level, the reuse-pool counters and the coverage audit were deleted with `XEMU_SURFACE_CB_REUSE` on 2026-10-10 | diag | `pgraph/vk/surface.c:752` |
-| `XEMU_PFIFO_KICK_STATS` | off | `1` | Censuses `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a wait condition actually transitioned × post-write `FIFO_ACCESS` × kick-already-pending), plus the PFIFO thread's idle-park count as the wakeup denominator. **Counter only** — no kick is ever suppressed (archaeology 7.1: a wrongly-skipped kick is a permanent PFIFO hang) | diag | `pgraph/pgraph.c:192`, `pfifo.c:528` |
+| `XEMU_PFIFO_KICK_STATS` | off | `1` | Censuses `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a wait condition actually transitioned × post-write `FIFO_ACCESS` × kick-already-pending), plus the PFIFO thread's idle-park count as the wakeup denominator. **Counter only** — no kick is ever suppressed (archaeology 7.1: a wrongly-skipped kick is a permanent PFIFO hang) | diag | `pgraph/pgraph.c:90`, `pfifo.c:528` |
 | `XEMU_MFX_RESIZE_QUANTIZE` | **ON** | `0` restores | Snaps the MetalFX output width to a 64-px ladder and holds a new shape ~200 ms before rebuilding the scaler + its 3-texture ring, so a window drag stops rebuilding at the event rate (each rebuild drains MetalFX in-flight work and stalls the PFIFO thread). Height re-derived from the quantized width; an explicit floor keeps the output above `disp->width` so quantization can never silently disable upscaling; a guest mode change rebuilds immediately | escape | `pgraph/vk/display.c:1959` |
-| `XEMU_UI_LOCK_STATS` | off (`DEBUG_XEMU_C=1` forces on) | truthy | Enables the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build. Compiled in on macOS and in `DEBUG_XEMU_C` builds; Windows/Linux release paths preprocess away | diag | `ui/xemu.c:248` |
+| `XEMU_UI_LOCK_STATS` | off (`DEBUG_XEMU_C=1` forces on) | truthy | Enables the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build. Compiled in on macOS and in `DEBUG_XEMU_C` builds; Windows/Linux release paths preprocess away | diag | `ui/xemu.c:245` |
 
 ### Campaign-era and later knobs (filed 2026-10-10)
 
 Rows for every remaining `getenv("XEMU_` site, so the Axis 2 tables now
 cover all 61 names. Facts mirror the `docs/optimizations.md` "Runtime
 escape-hatch / diagnostic knobs" table (the complete user-facing list;
-where the two disagree, that table and the code win). Anchors read
-2026-10-10 at `b7e2752589`. Status values: **production** (shipped
+where the two disagree, that table and the code win). Anchors
+re-derived 2026-10-10 after that day's retirement commits. Status values: **production** (shipped
 default path or its hatch), **experimental** (opt-in, no promotion
 claim), **test-only** (measurement or falsification, never an fps run).
 Closed experiments are not kept in the code (see "Closed experiments"
@@ -286,18 +286,18 @@ below).
 | `XEMU_MMIO_BQL` | off (lockless dispatch) | strict `1` | **Production** hatch: `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, PGRAPH) and the APU VP region | escape | `hw/xbox/nv2a/nv2a.c:392`, `hw/xbox/mcpx/apu/apu.c:457` |
 | `XEMU_PGRAPH_LOCKLESS` | **ON** (PGRAPH lockless) | `0` restores | **Production** per-block hatch: `0` restores BQL dispatch for PGRAPH only, leaving PFB/USER lockless (`docs/Finished/pgraph-lockless-audit.md`). Inert when `XEMU_MMIO_BQL=1` | escape | `hw/xbox/nv2a/nv2a.c:398` |
 | `XEMU_REPORTS_BUDGET_US` | 300 | int µs (atoll), clamped 0..100000 | **Production** tuning: continuous-idle budget before the deferred-report safety-valve submit; `5000` restores the pre-v0.10.1 value. The 50 µs scan is a Failed row (−12.1 fps), so 300 is validated as above the cliff | escape | `pgraph/vk/reports.c:312` |
-| `XEMU_RAS` | **ON** (near-return memo) | `0` disables | **Production**: 4096-entry eip→TB memo probed inline at ret sites (+0.77 fps, 6/6). `-d exec` tracing won't log inline-hit rets, so disable when tracing. Translate-side and helper-side latches read the same var | escape | `target/i386/tcg/translate.c:3189`, `xemu_ras_helper.c:44` |
+| `XEMU_RAS` | **ON** (near-return memo) | `0` disables | **Production**: 4096-entry eip→TB memo probed inline at ret sites (+0.77 fps, 6/6). `-d exec` tracing won't log inline-hit rets, so disable when tracing. Translate-side and helper-side latches read the same var | escape | `target/i386/tcg/translate.c:3073`, `xemu_ras_helper.c:40` |
 | `XEMU_SPIRV_CACHE` | **ON** | `0` bypasses | **Production**: `0` skips the on-disk SPIR-V cache entirely (no loads, no stores), a cold-compile A/B without deleting the cache dir. Blob validation on load is not gated by this knob | escape | `pgraph/vk/glsl.c:77` |
 | `XEMU_SPIRV_CACHE_ATOMIC` | **ON** (tmp + rename) | `0` restores | **Production**: `0` restores the legacy in-place `.spv` write; default writes `<hash>.spv.<pid>.tmp` and `g_rename`s it over the entry | escape | `pgraph/vk/glsl.c:87` |
 | `XEMU_SSE_HOST` | aarch64: **ON** when `perf.hard_fpu`; elsewhere off | `0` off, `1` on (needs `hard_fpu`), `2` both paths + abort on divergence | Host-SIMD fast path for single-precision SSE arithmetic. **Production** on aarch64 (+1.90 fps); **experimental** (opt-in, dark) on x86_64 until `=2` runs clean on real silicon | escape | `target/i386/tcg/fpu_helper.c:3795` |
 | `XEMU_SSE_NEON` | — | as `XEMU_SSE_HOST` | Legacy alias since `bb9f464c62` (2026-07-04), read only when `XEMU_SSE_HOST` is unset | escape | `target/i386/tcg/fpu_helper.c:3797` |
 | `XEMU_APU_RAM_DIRTY` | **off on Apple, ON elsewhere** | strict `1` | **Production** (landed 2026-09-08): with it on, the APU's fast voice-register stores also mark the written range dirty for the `DIRTY_CLIENTS_NOCODE` clients. Off on Apple because the marking's cost there was never measured; `=1` opts in on Apple, `=0` opts out elsewhere. Read once in `mcpx_apu_vp_init` | escape | `hw/xbox/mcpx/apu/vp/vp.c:2492` |
 | `XEMU_VK_VOLK_DEVICE` | **ON** (non-Apple only) | `0` restores | **Production** (2026-09-08): `0` keeps device-level Vulkan calls on the loader trampoline instead of `volkLoadDevice()` direct dispatch. Hygiene, not a measured win. Never read on Apple (`#ifndef __APPLE__`) | escape | `pgraph/vk/instance.c:507` |
-| `XEMU_WIN32_DXGI` | **ON** (DXGI flip-model, Windows only) | `0` restores | **Production** (2026-09-08, `164fd4c876`): `0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow`. Latched in `display_early_init()` | escape | `ui/xemu.c:138` |
+| `XEMU_WIN32_DXGI` | **ON** (DXGI flip-model, Windows only) | `0` restores | **Production** (2026-09-08, `164fd4c876`): `0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow`. Latched in `display_early_init()` | escape | `ui/xemu.c:135` |
 | `XEMU_PUSH_PRESENT` | **ON** (Metal backend) | `0` restores | **Production** since 2026-07-12: each flip's present schedule goes into a ring the UI reads with no cross-thread round trip; `0` restores the legacy pull handshake. Ignored on the GL backend | escape | `pgraph/vk/display.c:104` |
 | `XEMU_PUSH_DEBT` | interp mode + 2 steps | int (atoi); `0` = strict FIFO | **Production** tuning: consumer catch-up bound for the push-present ring. `0` restores the pre-fix strict FIFO that judders when the guest step rate beats the display | escape | `pgraph/vk/display.c:282` |
-| `XEMU_SUBPAGE_DIRTY` | **ON** | `0` restores | **Production** since 2026-07-11: per-page 64-block code bitmap lets a data store that misses every code sub-block skip whole-page invalidation (+14.3% fps F8, +24.6% F5 at promotion). `0` restores whole-page invalidation and also forces `XEMU_SUBPAGE_FAST` off | escape | `accel/tcg/tb-maint.c:407` |
-| `XEMU_SUBPAGE_FAST` | **ON on Apple**, off on other hosts | `0` / `1` | **Production** on Apple since 2026-07-18 (arm (b), `ede35b84f9`): the aarch64 store slow-path stub completes provable no-op stores inline (+12% draws/s). Emitted only by the aarch64 TCG backend: non-Apple aarch64 opts in with `1`; on non-aarch64 hosts an explicit `1` is inert and says so once on stderr (`tb-maint.c:419`) | escape | `accel/tcg/xemu-subpage-fast.c:129` |
+| `XEMU_SUBPAGE_DIRTY` | **ON** | `0` restores | **Production** since 2026-07-11: per-page 64-block code bitmap lets a data store that misses every code sub-block skip whole-page invalidation (+14.3% fps F8, +24.6% F5 at promotion). `0` restores whole-page invalidation and also forces `XEMU_SUBPAGE_FAST` off | escape | `accel/tcg/tb-maint.c:304` |
+| `XEMU_SUBPAGE_FAST` | **ON on Apple**, off on other hosts | `0` / `1` | **Production** on Apple since 2026-07-18 (arm (b), `ede35b84f9`): the aarch64 store slow-path stub completes provable no-op stores inline (+12% draws/s). Emitted only by the aarch64 TCG backend: non-Apple aarch64 opts in with `1`; on non-aarch64 hosts an explicit `1` is inert and says so once on stderr (`tb-maint.c:316`) | escape | `accel/tcg/xemu-subpage-fast.c:129` |
 | `XEMU_XPAGE_CHAIN` | **ON, level 2** (broad) | `0` upstream same-page-only, `1` kernel-identity window only | **Production** since 2026-07-12: cross-page direct chaining, sound by its INVLPG + CR3 + full-flush backstops | escape | `accel/tcg/xemu-xpage.c:72` |
 | `XEMU_XPAGE_UNLINK` | **ON** | `0` restores | **Production** since v0.11.1: the full-flush backstop severs only registered cross-page chains; `0` restores the v0.11 whole-`tb_flush` backstop that caused the new-area lag | escape | `accel/tcg/xemu-xpage.c:108` |
 
@@ -305,17 +305,17 @@ below).
 
 | Env var | Unset behavior | Values | Effect | Cat | Read at |
 |---|---|---|---|---|---|
-| `XEMU_INV_PROF` | off | strict `1` | **Test-only**: exit dump of SMC / TB-invalidation counters plus the `(f)` MMIO line (`io_prepare` / `cpu_io_recompile` rates, the gate counter for `XEMU_ELIDE_CANDOIO`; read it from an `XEMU_ELIDE_CANDOIO=0` run). Also arms `XEMU_XPAGE_PROF` | diag | `accel/tcg/tb-maint.c:240`, `xemu-xpage.c:145` |
-| `XEMU_INV_TIMING` | off | strict `1` | **Test-only**: adds a cycle-counter split of the `notdirty_write` body to the `XEMU_INV_PROF` dump; tick source per host (`accel/tcg/xemu-inv-prof.h`) | diag | `accel/tcg/tb-maint.c:255` |
-| `XEMU_TB_PROF` | off | strict `1` | **Test-only**: TB jump-cache totals at exit (lookups, hit%, htable walks, translations, `tb_flush` count) | diag | `accel/tcg/cpu-exec.c:618`, `xemu_ras_helper.c:87` |
-| `XEMU_GUEST_PROF` | off | strict `1` | **Test-only**: one-run guest profiler (mach-thread sampler resolves vCPU samples to guest TBs vs host symbols). Not benchmark-neutral | diag | `accel/tcg/cpu-exec.c:320`, `xemu_ras_helper.c:88` |
+| `XEMU_INV_PROF` | off | strict `1` | **Test-only**: exit dump of SMC / TB-invalidation counters plus the `(f)` MMIO line (`io_prepare` / `cpu_io_recompile` rates, the gate counter for `XEMU_ELIDE_CANDOIO`; read it from an `XEMU_ELIDE_CANDOIO=0` run). Also arms `XEMU_XPAGE_PROF` | diag | `accel/tcg/tb-maint.c:239`, `xemu-xpage.c:145` |
+| `XEMU_INV_TIMING` | off | strict `1` | **Test-only**: adds a cycle-counter split of the `notdirty_write` body to the `XEMU_INV_PROF` dump; tick source per host (`accel/tcg/xemu-inv-prof.h`) | diag | `accel/tcg/tb-maint.c:254` |
+| `XEMU_TB_PROF` | off | strict `1` | **Test-only**: TB jump-cache totals at exit (lookups, hit%, htable walks, translations, `tb_flush` count) | diag | `accel/tcg/cpu-exec.c:618`, `xemu_ras_helper.c:64` |
+| `XEMU_GUEST_PROF` | off | strict `1` | **Test-only**: one-run guest profiler (mach-thread sampler resolves vCPU samples to guest TBs vs host symbols). Not benchmark-neutral | diag | `accel/tcg/cpu-exec.c:320`, `xemu_ras_helper.c:65` |
 | `XEMU_MMIO_PROF` | off | strict `1` | **Test-only**: exit histogram of guest MMIO traffic (region × page, loads/stores) plus BQL acquire-wait totals | diag | `accel/tcg/cputlb.c:2089` |
 | `XEMU_XPAGE_PROF` | off | strict `1` | **Test-only**: cross-page-direct exit census split by target region; atexit summary | diag | `accel/tcg/xemu-xpage.c:144` |
 | `XEMU_XPAGE_REFUTE` | off | strict `1` | **Test-only**: cross-page-chaining refuter, routes every cross-page-direct exit through the safe lookup plus a phys-unchanged check. Slow; falsification only | test | `accel/tcg/xemu-xpage.c:131` |
-| `XEMU_SUBPAGE_REFUTE` | off | strict `1` | **Test-only**: checks each sub-page skip decision against a live-TB byte-overlap scan and counts violations; no behavior change unless `XEMU_SUBPAGE_DIRTY` is on | test | `accel/tcg/tb-maint.c:437` |
+| `XEMU_SUBPAGE_REFUTE` | off | strict `1` | **Test-only**: checks each sub-page skip decision against a live-TB byte-overlap scan and counts violations; no behavior change unless `XEMU_SUBPAGE_DIRTY` is on | test | `accel/tcg/tb-maint.c:334` |
 | `XEMU_SUBPAGE_FAST_REFUTE` | off | strict `1` | **Test-only**: routes every would-skip decision to a C validator that counts violations and performs the real store; forces `XEMU_SUBPAGE_FAST_STATS=1` | test | `accel/tcg/xemu-subpage-fast.c:142` |
-| `XEMU_PUSH_PRESENT_REFUTE` | off | strict `1` | **Test-only**: peeks the push-present ring and cross-checks the consumed-step stream against the pull path, printing tallies every ~5 s. Re-adds the pull round trip, so measure perf with it off | test | `ui/xemu.c:1096` |
-| `XEMU_UI_FRAME_CAP_NS` | 0 (no cap) | int ns (atoll) | **Test-only**: floors the UI present period (`16666666` ≈ a 60 Hz consumer) so ring pacing is visible in unfocused bench windows, which present unpaced | test | `ui/xemu.c:1212` |
+| `XEMU_PUSH_PRESENT_REFUTE` | off | strict `1` | **Test-only**: peeks the push-present ring and cross-checks the consumed-step stream against the pull path, printing tallies every ~5 s. Re-adds the pull round trip, so measure perf with it off | test | `ui/xemu.c:1093` |
+| `XEMU_UI_FRAME_CAP_NS` | 0 (no cap) | int ns (atoll) | **Test-only**: floors the UI present period (`16666666` ≈ a 60 Hz consumer) so ring pacing is visible in unfocused bench windows, which present unpaced | test | `ui/xemu.c:1209` |
 
 #### Closed experiments
 
@@ -330,7 +330,7 @@ experiments (2026-10-10)". Restore one by reverting its removal commit.
 the escape hatch and the *unset* state is the new behavior:
 `XEMU_VTX_EXACT`, `XEMU_ELIDE_CANDOIO`, `XEMU_DIRTY_FAST`,
 `XEMU_X87_ELIDE_FT0`, `XEMU_X87_DEFER_FIP`, `XEMU_MFX_RESIZE_QUANTIZE`,
-plus the campaign-era `XEMU_SUBPAGE_DIRTY` (`tb-maint.c:407`),
+plus the campaign-era `XEMU_SUBPAGE_DIRTY` (`tb-maint.c:304`),
 `XEMU_SUBPAGE_FAST`, `XEMU_XPAGE_CHAIN`/`XEMU_XPAGE_UNLINK` and
 `XEMU_PUSH_PRESENT` (`display.c:104`). Filed 2026-10-10 with the same
 shape: `XEMU_RAS`, `XEMU_PGRAPH_LOCKLESS`, `XEMU_SPIRV_CACHE`,
@@ -352,7 +352,7 @@ Notes:
   default-on/inverted, `XEMU_MAX_QUERIES` and `XEMU_COREAUDIO_FRAMES`
   are numeric, `XEMU_INPUT_PIPE` takes a path.
 - Build-time only: `XEMU_DEBUG_BUILD` is a **compile define** set by
-  `./build.sh --debug` (`build.sh:653`), not an env var you export at
+  `./build.sh --debug` (`build.sh:607`), not an env var you export at
   runtime.
 
 ---
@@ -366,7 +366,7 @@ identical**:
 1. `Info.plist` `LSEnvironment` dict (repo root, lines 35-56; copied
    into the bundle by `build.sh`'s `package_macos`) — applied by
    LaunchServices to **Finder/`open` launches only**.
-2. `ui/xemu.c:1939-1945` (as of 2026-10-10) in `main()`, `setenv(..., ..., 0)` before
+2. `ui/xemu.c:1912-1918` (as of 2026-10-10) in `main()`, `setenv(..., ..., 0)` before
    MoltenVK is dlopen'd — covers terminal/harness launches.
    `overwrite=0` means an explicitly exported `MVK_CONFIG_*` in your
    shell **still wins** (and for Finder launches the LSEnvironment
@@ -392,7 +392,7 @@ weeks. Therefore:
   what you're testing, every harness must `export` it explicitly.
 - **Resolved 2026-08-04**: the MoltenVK table moved out of the README in
   the 2026-07-18 docs split and now lives in `docs/optimizations.md`
-  (`### MoltenVK runtime config`, ~:1872 as of 2026-10-10), where it agrees with the code on all six values
+  (`### MoltenVK runtime config`, ~:1903 as of 2026-10-10), where it agrees with the code on all six values
   including `PREFILL=0` and `LOG_LEVEL=1`. The old "README lists
   PREFILL=2" drift note that stood here is retired; the README carries
   no MVK table at all.
@@ -404,7 +404,7 @@ weeks. Therefore:
 Consumed by `build.sh` (and `scripts/build-moltenvk.sh`) at build time;
 they change the produced binary, not a running one.
 
-Line anchors re-derived 2026-10-10 (`build.sh` is 1056 lines; it passed
+Line anchors re-derived 2026-10-10 (`build.sh` is 977 lines; it passed
 800 in the 2026-08-04 wave; re-grep rather than trusting these after any
 build.sh edit).
 
@@ -456,7 +456,7 @@ dir = first arg, default `../../MoltenVK` relative to `scripts/`. Bump
 the pin only with the validation gauntlet (see xemu-testing /
 xemu-validation-and-qa).
 
-`build.sh` arguments (`build.sh:626-649`):
+`build.sh` arguments (`build.sh:580-603`):
 
 - `-j<N>` — job count, glued form (`-j16`).
 - `--debug` — `--enable-debug --enable-trace-backends=log` +
@@ -467,7 +467,7 @@ xemu-validation-and-qa).
 - Any other argument stops option parsing and is passed through to
   `configure` (e.g. `./build.sh -Dx86_version=1`).
 
-Baked-in release options (non-Windows, non-debug, `build.sh:709-712`):
+Baked-in release options (non-Windows, non-debug, `build.sh:663-666`):
 thin LTO + `.lto-cache`, `-Doptimization=3`, `-Dqom_cast_debug=false`,
 `-Dtrace_backends=nop`, `-Dstack_protector=disabled`, plus
 `-mcpu=<apple-mN> -ffp-contract=fast` on arm64. Upstream's hardening
@@ -477,13 +477,13 @@ stay on every arm whose compiler passes meson's probe. The fork's
 8.7): a retest is `CFLAGS=-fzero-call-used-regs=skip ./build.sh`,
 checked with the compile-database one-liner in 8.7 before any result
 is trusted.
-Windows release (`build.sh:657-707`, `:941-1001`): **no forced LTO** (CI
+Windows release (`build.sh:611-661`, `:895-955`): **no forced LTO** (CI
 owns per-toolchain LTO strategy), no `-Doptimization=3` and no
 `-Dstack_protector=disabled` unless the native arm is opted in with
 `XEMU_WIN_O3=1`, and defaults **`-Dx86_version=3`** unless `--debug` or
 an explicit `x86_version` argument is present. Every build configures with
 `--extra-cflags=-DXBOX=1 --target-list=i386-softmmu`
-(`build.sh:1044-1049`).
+(`build.sh:966-971`).
 
 ---
 
@@ -515,7 +515,7 @@ an explicit `x86_version` argument is present. Every build configures with
 ### (b) New XEMU_* env var
 
 1. `getenv` at first use, latch in a `static` (every existing site
-   does this — copy one, e.g. `nsprof.c:97-105`). Default must be
+   does this — copy one, e.g. `nsprof.c:98-106`). Default must be
    off/fast-path; if you must invert (default-on like `XEMU_VTX_EXACT`)
    flag it loudly in the knob-table row.
 2. Parse style: strict `== '1'` or truthy like neighbors; numeric via
@@ -556,7 +556,7 @@ an explicit `x86_version` argument is present. Every build configures with
 
 1. Add key+value to `Info.plist` `LSEnvironment` (repo root; bundled by
    `build.sh`'s `package_macos`).
-2. Mirror it in the `ui/xemu.c` `main()` block (~line 1939 as of 2026-10-10) as
+2. Mirror it in the `ui/xemu.c` `main()` block (~line 1912 as of 2026-10-10) as
    `setenv("MVK_CONFIG_...", "...", 0)` — same value, overwrite=0,
    before any Vulkan/MoltenVK initialization.
 3. Until the mirrored build is the one under test, `export` the var in
@@ -612,8 +612,9 @@ Everything above was read from the tree on 2026-07-04; the wave rows,
 build-knob anchors, MVK six-tuple and env-var count were re-derived
 **2026-08-04**; the env-var count, `ui/xemu.c` anchors, input-pipe row
 and `config_spec.yml`/`meson.build` expectations were re-run
-**2026-10-10** at `b7e2752589`, when every `file:line` anchor in this
-skill was re-verified and the missing Axis 2 rows were filed. Regenerate each
+**2026-10-10** (first at `b7e2752589`, again after that day's
+retirement commits), when every `file:line` anchor in this skill was
+re-verified and the missing Axis 2 rows were filed. Regenerate each
 table with these commands (run from the repo root); if output differs
 from this file, the code wins — update this skill.
 

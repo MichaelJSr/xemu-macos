@@ -74,7 +74,9 @@ the gap between "what you've measured" and "how slow it actually is."
    (`hw/xbox/nv2a/nsprof.h`): `SHADER_GEN`, `PIPELINE_GEN`,
    `TEX_UPLOAD`, `TEX_HASH`, `TEX_SNAPSHOT`, `GEOM_UPDATE`,
    `FENCE_WAIT`, `AUX_FENCE_WAIT`, `MFX_DRAIN`, `SURF_DOWNLOAD`,
-   `FLIP_IDLE`, plus tagged events (`FINISH_*` reasons, `DRAW`).
+   `FLIP_IDLE`, `PRESENT_WAIT`, `ZETA_SNAPSHOT`, `DRAWABLE_ACQUIRE`,
+   `UI_HUD_LOCK`, `UI_PRESENT_PERIOD`, plus tagged events (`FINISH_*`
+   reasons, `DRAW`).
 3. Track a denominator alongside the costs — flips (frame/swap
    boundaries) and elapsed interval time — so totals become ms/flip.
    nsprof reports on a rolling 5 s interval.
@@ -97,7 +99,7 @@ trigger sites — specifically to close the gap between previously
 measured paths (~2-4 ms/flip) and actual 22-60 ms frames. The first
 full-coverage soak attributed the frame to roughly 9
 `pgraph_vk_finish` (a full submit-and-wait sync point on the PFIFO
-thread; `hw/xbox/nv2a/pgraph/vk/draw.c:1858`) cycles per flip, 8-19 ms,
+thread; `hw/xbox/nv2a/pgraph/vk/draw.c:1919`) cycles per flip, 8-19 ms,
 and pinpointed a zeta (depth/stencil) surface repeatedly switching
 between two shapes (dimensions/format/layout) at one VRAM address,
 each switch forcing a full GPU→CPU readback, twice per flip. The very
@@ -528,7 +530,7 @@ build would notice if it broke.
   eliding the PC-mismatch exit check (`EPI_NO_PC`) — couldn't land
   cleanly. Instead of guessing which handler secretly depended on the
   elided state, the harness substitutes a poison constant
-  (`DSP56K_JIT_SENTINEL_POISON = 0x00adbeef`, `dsp56k_jit_arm64.h:76`)
+  (`DSP56K_JIT_SENTINEL_POISON = 0x00adbeef`, `dsp56k_jit_arm64.h:92`)
   for the skipped write, so any handler that reads it crashes loudly
   and identifiably. **The harness itself needed a self-check**: an
   early version emitted the divergence logger *after* the

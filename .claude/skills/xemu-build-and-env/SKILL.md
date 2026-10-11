@@ -142,7 +142,7 @@ copy live, same as a local Mac build would.
 
 ## 3. `build.sh` anatomy
 
-`build.sh` (repo root, ~600 lines) is a single script covering all
+`build.sh` (repo root, ~977 lines) is a single script covering all
 platforms: parse args → set platform-specific compiler/linker flags →
 `configure` → `make` → an optional post-build packaging function. Reading
 it top to bottom is the fastest way to understand any build behavior; this
@@ -567,7 +567,7 @@ Two things that differ from the macOS arm, verified 2026-09-08:
   default `optimization=2` (`meson.build:3`) stands — LTO *and* `-O3`
   are both off there, unlike §3.2's Darwin/Linux flags. Since
   2026-09-08 `XEMU_WIN_O3=1` opts the *native* arm into
-  `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:697-707`);
+  `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:651-661`);
   it is off by default and uncovered by CI because the 2026-09-08
   review names that flip as the leading suspect for the wave-1 Windows
   exit-139. `win64-cross` ignores the knob.

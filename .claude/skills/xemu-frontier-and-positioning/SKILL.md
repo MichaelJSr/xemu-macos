@@ -409,19 +409,19 @@ code paths.
 **Why it falls short.** `XEMU_MFX_REAL_DEPTH=1` feeds the temporal scaler
 the live zeta (depth/stencil) texture instead of synthetic luminance
 depth, but "by present time the single guest zeta buffer typically holds
-the *next* in-progress frame's depth" (`surface.c:978-983`) — a known
+the *next* in-progress frame's depth" (`surface.c:1082-1084`) — a known
 limitation, which is exactly why this ships dark (off by default) for A/B
 (`README.md` ~line 555-561). This caps the quality ceiling of the exact
 feature the bar names (MetalFX temporal upscaling/interpolation).
 
 **Asset.** All the plumbing exists: exportable zeta images and the export
-gate (`zeta_export_wanted`, `surface.c:985-995`), the real-depth binding
+gate (`zeta_export_wanted`, `surface.c:1114-1119`), the real-depth binding
 into the temporal scaler (`metalfx_upscale.m` ~line 686), and a per-flip
 hook already wired into the renderer ops table (`ops.flip_stall`,
 `hw/xbox/nv2a/pgraph/pgraph.h:120`, called every guest flip). This is "add
 one blit at an existing hook," not new infrastructure.
 
-**Steps.** (1) Read `surface.c:976-995` and the real-depth binding in
+**Steps.** (1) Read `surface.c:1081-1119` and the real-depth binding in
 `metalfx_upscale.m` to find exactly where the *live* zeta texture is
 handed to the temporal scaler today. (2) Add a snapshot path invoked from
 `flip_stall`: blit the current zeta into a dedicated snapshot image before
@@ -453,8 +453,8 @@ value also written to memory and the ALU doesn't touch the source
 register, stream source → destination directly instead of staging it
 across the ALU. Price it against the emitter that would have to change,
 `emit_pm_read_reg` in
-`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (~line 2095 and its
-next ~80 lines as of 2026-08-04 — that file is under active JIT work,
+`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` (~line 2029 and its
+next ~80 lines as of 2026-10-10 — that file is under active JIT work,
 so re-derive with
 `grep -n -A85 "static void emit_pm_read_reg"` rather than trusting the
 number). Its three source classes are exhaustive:
@@ -482,7 +482,7 @@ that arithmetic first, not merely find a hot shape.
 **What remains true — the register-budget constraint.** The pin infrastructure and
 validation scaffolding already exist, but `x28` is NOT free: it now holds
 the **SR pin** (`DSP56K_JIT_SR_PIN_REG 28`,
-`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1473` as of 2026-08-04,
+`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1407` as of 2026-10-10,
 previously quoted as :1452; the prologue comment "x28 = SR pin" moves
 with the file — `grep -n "x28 = SR pin"`). No free callee-saved GPR
 remains — a fusion emitter

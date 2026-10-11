@@ -128,12 +128,12 @@ entries in that file today).
 A **flip** is the guest's frame-boundary swap: finish rendering into one
 surface, ask the display to present it, start the next. The guest signals
 this with `NV097_FLIP_STALL` (`DEF_METHOD(NV097, FLIP_STALL)`,
-`hw/xbox/nv2a/pgraph/pgraph.c:989-997`), which flushes pending draws,
+`hw/xbox/nv2a/pgraph/pgraph.c:1195-1203`), which flushes pending draws,
 tells the renderer to stall, and sets `pg->waiting_for_flip = true`.
 PFIFO's puller won't dispatch the next method while that flag is set
-(`pfifo_stall_for_flip`, `hw/xbox/nv2a/pfifo.c:141-154`) until
+(`pfifo_stall_for_flip`, `hw/xbox/nv2a/pfifo.c:147-163`) until
 `is_flip_stall_complete` sees the surface's read/write counters equalize
-(`pfifo.c:122-137`, comparing `NV_PGRAPH_SURFACE_READ_3D` vs `WRITE_3D`)
+(`pfifo.c:128-145`, comparing `NV_PGRAPH_SURFACE_READ_3D` vs `WRITE_3D`)
 — i.e. until the display has consumed the previously-written buffer.
 **Consequence**: counting flips per second *is* counting in-game fps —
 one flip is one displayed frame, and the guest is capped at 60 Hz by the
@@ -143,10 +143,10 @@ vblank thread below, so neither can exceed 60 for a game paced on vblank.
 
 xemu drives its own display-refresh cadence independent of any guest
 timer: a dedicated vblank thread (`vblank_timer_thread`,
-`ui/xemu.c:907-939`) fires at a hardcoded `vblank_interval_ns =
-16666666LL` (`ui/xemu.c:91`) — exactly 60 Hz, fixed at compile time, not
+`ui/xemu.c:904-936`) fires at a hardcoded `vblank_interval_ns =
+16666666LL` (`ui/xemu.c:88`) — exactly 60 Hz, fixed at compile time, not
 derived from `avpack`. Each tick calls `process_vblank` →
-`graphic_hw_update` (`ui/xemu.c:889-896`), which raises
+`graphic_hw_update` (`ui/xemu.c:886-893`), which raises
 `NV_PCRTC_INTR_0_VBLANK` on the NV2A side (`nv2a_vga_gfx_update`,
 `hw/xbox/nv2a/nv2a.c:207-217`) — what many Xbox titles use as their
 master timing source (poll or interrupt on vblank count to pace game
@@ -178,7 +178,7 @@ texture corruption shows up as small squares in a
 checkerboard/fractal-looking pattern** rather than horizontal tearing
 bands — you're seeing the Morton curve's tiling laid bare. The
 pink-tile incident write-up names this signature directly ("Morton-tiled
-magenta", `docs/optimizations.md` ~:824 and ~:929 as of 2026-10-10;
+magenta", `docs/optimizations.md` ~:817 and ~:923 as of 2026-10-10;
 `grep -n Morton docs/optimizations.md`) as the texture-corruption fingerprint,
 distinct from large screen-aligned rectangles (a compositor/present/
 driver-level issue instead) — see xemu-debugging-playbook for that
@@ -214,7 +214,7 @@ title's video playback looks wrong.
 
 NV2A supports several ways for the guest to hand PGRAPH vertex data;
 this fork's Vulkan draw path (`hw/xbox/nv2a/pgraph/vk/draw.c`,
-`pgraph_vk_flush_draw` ~line 2900) has one branch per mode:
+`pgraph_vk_flush_draw` ~line 3020) has one branch per mode:
 
 | Guest submission mode | pgraph_t field | Draw path |
 |---|---|---|
@@ -257,12 +257,12 @@ This is the ISA-level background the ARM64 JIT
   the three slots into **one 64-bit ARM64 register**, sign-extended, so
   ALU ops become single native instructions instead of a three-word
   load/mask/combine sequence — contract documented at
-  `dsp56k_jit_arm64.c:759-766` ("Phase 2 primitives... 56-bit accumulator
+  `dsp56k_jit_arm64.c:720-727` ("Phase 2 primitives... 56-bit accumulator
   arithmetic... sign-...extends"). A/B stay resident across a whole
-  translated block in callee-saved x26/x27 (`dsp56k_jit_arm64.c:1425-1442`,
+  translated block in callee-saved x26/x27 (`dsp56k_jit_arm64.c:1380-1406`,
   which also pins X0:X1/Y0:Y1 in x20/x21). Reading an accumulator back as
   a plain 24-bit value has a fast inlined path **only when scaling mode
-  is 0** (`dsp56k_jit_arm64.c:2056-2065` — see the CCR bullet below).
+  is 0** (`dsp56k_jit_arm64.c:2016-2024` — see the CCR bullet below).
 - **Parallel moves (parmove).** A DSP56300 instruction can execute an ALU
   op *and* up to two data moves (register↔memory) in the same cycle — the
   architecture's signature throughput trick, enabled by the separate X/Y
@@ -301,7 +301,7 @@ This is the ISA-level background the ARM64 JIT
   field, `S0`/`S1` at SR bits 10-11 (`dsp_cpu_regs.h:44-45`), controlling
   how the 56-bit accumulator shifts when read back as a 24-bit
   parallel-move value. The JIT is explicit that **scaling mode 0 is the
-  universal case in Xbox audio code** (`dsp56k_jit_arm64.c:2057-2061`:
+  universal case in Xbox audio code** (`dsp56k_jit_arm64.c:2018-2021`:
   "the limited 24-bit read is a1 when the 56-bit accu is a pure sign
   extension of a1... the universal case on Xbox audio") — it inlines only
   that case and falls back to a helper (`dsp56k_jit_helper_pm_read_accu24`)
@@ -328,7 +328,7 @@ This is the ISA-level background the ARM64 JIT
   (`dsp_cpu.h:88-89`) instead of plain array indexing. A JIT fast path
   that inlines memory access must branch to the slow/callback path once
   the address reaches this base — see "Fast path: if addr < 0xc00, direct
-  array access" (`dsp56k_jit_arm64.c:1739`).
+  array access" (`dsp56k_jit_arm64.c:1700`).
 
 For the JIT's own architecture (translation-unit boundaries, block
 chaining, the diff-validator, W^X handling) see `docs/Finished/dsp-jit-design.md`
@@ -426,8 +426,8 @@ this repo's hard-float conversion code
   converts back (`floatx80_add__hard`/`sub`/`mul`/`div__hard`,
   `target/i386/tcg/fpu_helper.c:294-319`). The code says so outright:
   *"XXX: Currently emulating double extended precision with double
-  precision when using hard floats"* (`target/i386/cpu.h:2878-2879`,
-  repeated at `target/i386/tcg/translate.c:1729`) — a **12-bit mantissa reduction**
+  precision when using hard floats"* (`target/i386/cpu.h:2864-2865`,
+  repeated at `target/i386/tcg/translate.c:1652`) — a **12-bit mantissa reduction**
   (64→52 bits) per operation, a real precision loss that's "almost always
   invisible" because (a) Xbox game code rarely chains enough consecutive
   x87 ops on one value for the rounding error to matter visually or
@@ -457,18 +457,18 @@ this repo's hard-float conversion code
   task/segment restores, `XRSTOR`, SEV launch state — all funnel through
   `cpu_set_fpuc` hits in `cpu.c`, `machine.c`, `sev.c`,
   `xsave_helper.c`, `tcg/fpu_helper.c`). `cpu_set_fpuc`
-  (`target/i386/cpu.h:2870-2899`) is the **single funnel**: besides
+  (`target/i386/cpu.h:2856-2885`) is the **single funnel**: besides
   storing `env->fpuc`, it re-derives `HF_FPU_PC_MASK`/`HF_FPU_RC_MASK` in
-  `env->hflags` (`cpu.h:2881-2890`) because this fork's translator bakes
+  `env->hflags` (`cpu.h:2867-2876`) because this fork's translator bakes
   the guest's rounding mode into `tb->flags` **at translation time**
-  (`gen_flcr`, `target/i386/tcg/translate.c:1775-1816`: "HF_FPU_RC is
+  (`gen_flcr`, `target/i386/tcg/translate.c:1694-1735`: "HF_FPU_RC is
   baked into tb->flags at translation time... every TB currently
   translating thus pins the guest RC bits to a compile-time-known
   value") so it can pick the matching native `FCVT*` rounding instruction
   for `FIST`/`FISTP` at codegen time instead of reading a runtime
   register per conversion. `cpu_set_fpuc` also invalidates a
   translator-side cache (`env->cached_fpuc_rc = 0xFFFF`,
-  `cpu.h:2898`) so a rounding-mode change from **outside the normal
+  `cpu.h:2884`) so a rounding-mode change from **outside the normal
   instruction stream** (savestate restore, `XRSTOR`, SEV) can't be
   silently ignored by already-translated code holding the old mode. The
   rule this generalizes to: any path that sets `env->fpuc` directly
@@ -556,18 +556,18 @@ where this repo depends on each one.
   scenes") and fence-wait per flip from 31.9 ms to 2.3 ms (the 2026-07
   README's figures; the commit records 2.2 ms on the new path). "One
   render pass per draw ≈ one full tile load/store per draw" is spelled
-  out in the fix's own comment (`hw/xbox/nv2a/pgraph/vk/draw.c:2088-2094`:
+  out in the fix's own comment (`hw/xbox/nv2a/pgraph/vk/draw.c:2093-2099`:
   "a full tile load/store cycle per draw on Apple GPUs").
 - **MoltenVK exposes a single queue.** `queueCount=1` for the one queue
   family this renderer uses is a MoltenVK/Metal limitation, not a repo
   choice — documented where an earlier attempt to acquire a second
   (compute) queue is explained: "MoltenVK exposes queueCount=1 anyway"
-  (`hw/xbox/nv2a/pgraph/vk/instance.c:503-508`; that second-queue design
+  (`hw/xbox/nv2a/pgraph/vk/instance.c:537-542`; that second-queue design
   is a recorded failed experiment). Everything this renderer submits is
   strictly ordered by submission order on one queue — no true parallel
   GPU submission-stream overlap on this backend, so overlap comes from
   software pipelining (`NUM_FLIGHT_SLOTS = 2`,
-  `hw/xbox/nv2a/pgraph/vk/renderer.h:542`) rather than multiple hardware
+  `hw/xbox/nv2a/pgraph/vk/renderer.h:628`) rather than multiple hardware
   queues.
 - **The visibility-result buffer is bound at encoder creation, not
   lazily.** A MoltenVK/Metal quirk found the hard way:
@@ -582,7 +582,7 @@ where this repo depends on each one.
   `setVisibilityResultMode` the moment a query used it. This fork's fix
   is an **empty "primer" occlusion query**, begun and ended outside any
   render pass immediately after `vkBeginCommandBuffer` and the
-  query-pool reset (`hw/xbox/nv2a/pgraph/vk/draw.c:2046-2069`) — it sets
+  query-pool reset (`hw/xbox/nv2a/pgraph/vk/draw.c:2109-2133`) — it sets
   the needs-visibility-buffer flag before any pass begins, correct by
   construction regardless of when the first in-pass query lands. This is
   the two-act crash in xemu-failure-archaeology: a query-pool-capacity
@@ -602,7 +602,7 @@ where this repo depends on each one.
   `hw/xbox/nv2a/pgraph/vk/draw.c:1027,1489`) — MoltenVK translates that
   SPIR-V to Metal Shading Language (MSL) and asks the Metal compiler to
   build a real GPU pipeline object, the expensive step (measured
-  worst-case 164 ms for one pipeline, `docs/optimizations.md` ~:682 as of
+  worst-case 164 ms for one pipeline, `docs/optimizations.md` ~:672 as of
   2026-10-10, "VkPipelineCache persisted across runs"). Since that cost is
   paid per unique permutation (blend state × shader × vertex layout ×
   render-target format) and titles can have thousands across a session,
@@ -615,7 +615,7 @@ where this repo depends on each one.
   something that speeds up the first compile itself.
 - **Metal argument buffers.** `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`
   is one of the six MVK_CONFIG variables this fork pins at process start
-  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1939-1945`'s
+  (`Info.plist` `LSEnvironment` and `ui/xemu.c:1912-1918`'s
   `setenv(..., 0)`) — it tells MoltenVK to bind Vulkan descriptor sets
   via Metal's argument-buffer feature (one indirectable buffer of
   resource references) instead of per-resource binding, changing how
@@ -629,18 +629,18 @@ where this repo depends on each one.
   here as `qemu_thread_jit_write()`/`qemu_thread_jit_execute()`). Both
   QEMU's TCG code-generation region (`tcg/region.c:717`, `flags |=
   MAP_JIT`) and this fork's DSP56300 ARM64 JIT
-  (`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1288`) allocate code
+  (`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1222`) allocate code
   buffers this way and must bracket every emission region with
   `qemu_thread_jit_write()` and every call into generated code with
   `qemu_thread_jit_execute()` (over a dozen sites in the DSP JIT,
-  `dsp56k_jit_arm64.c:9479-9881`). **The DSP JIT's W^X incident**: an
+  `dsp56k_jit_arm64.c:9440-9842`). **The DSP JIT's W^X incident**: an
   early block-chaining self-patch ("chain-site repatching") wrote a
   branch target into already-emitted code *outside* the write-protect
   window — a latent fault that could appear to work (if the page was
   still write-enabled from a prior op) and then crash unpredictably once
   scheduling changed the timing. Fixed by moving the repatch strictly
   inside the JIT-write window, before the matching
-  `qemu_thread_jit_execute()` (`dsp56k_jit_arm64.c:9850-9881`: "BEFORE
+  `qemu_thread_jit_execute()` (`dsp56k_jit_arm64.c:9811-9842`: "BEFORE
   qemu_thread_jit_execute() — chain_repatch_b writes").
 
 ## Reading register/method names — cheat table
@@ -697,8 +697,9 @@ them in.
 
 Facts in this skill were verified against the repo at commit `cf85e96597`
 (2026-07-04, tag v0.9) unless stated as historical measurements (dated
-separately, e.g. the 376→14 pass-count figures). On 2026-10-10 at
-`b7e2752589` the `ui/xemu.c` MVK setenv anchor (now `1939-1945`, six
+separately, e.g. the 376→14 pass-count figures). On 2026-10-10 (anchors
+re-derived again after that day's retirement commits) the `ui/xemu.c`
+MVK setenv anchor (now `1912-1918`, six
 keys), the vblank-thread, `config_spec.yml`, `cpu_set_fpuc`/`gen_flcr`
 and `nv2a.c` line anchors, and the README citations (moved to
 `docs/optimizations.md`) were re-verified. Re-verify drift-prone

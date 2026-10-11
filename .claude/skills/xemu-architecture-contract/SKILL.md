@@ -131,7 +131,7 @@ experiments row "Separate compute queue"). Two Apple-only fast paths are sound *
 **Evidence — two call sites lean on single-queue ordering:**
 
 1. **Narrowed `pgraph_vk_upload_surface_data` sync**
-   (`hw/xbox/nv2a/pgraph/vk/surface.c:1263-1318`). On Apple, it skips the
+   (`hw/xbox/nv2a/pgraph/vk/surface.c:1632-1687`). On Apple, it skips the
    full `pgraph_vk_finish` (submit + fence wait) when the upload target
    isn't the bound color/zeta `surface` (NV2A render target — color or
    depth/stencil — bound to a VRAM range) and no command buffer is
@@ -144,7 +144,7 @@ experiments row "Separate compute queue"). Two Apple-only fast paths are sound *
        bool target_is_active = true;   /* non-Apple: always finish */
    #endif
    ```
-   The comment at lines 1275-1303 spells out why this is Apple-only:
+   The comment at lines 1644-1672 spells out why this is Apple-only:
    MoltenVK's single queue serializes the aux-CB upload behind any prior
    submitted main CB, but "Core Vulkan only orders same-queue submissions
    at execution *start*; a native driver may overlap an in-flight slot's
@@ -153,17 +153,17 @@ experiments row "Separate compute queue"). Two Apple-only fast paths are sound *
 
 2. **Deferred zeta eviction** (zeta = depth/stencil surface).
    `invalidate_surface_full(d, surface, allow_deferred=true)`
-   (`surface.c:784-826`), used from the zeta shape-switch path
-   (`surface.c:1941`, e.g. Azurik ping-ponging one zeta allocation
+   (`surface.c:869-928`), used from the zeta shape-switch path
+   (`surface.c:2317`, e.g. Azurik ping-ponging one zeta allocation
    between a 1280×480 scene and a 256×256 swizzled RTT pass every
    frame), can quarantine a still-possibly-referenced image into
    `r->invalid_surfaces` without a submit+fence round trip. The helper
-   `surface_image_in_recording_cb()` (`surface.c:769-782`) keeps
+   `surface_image_in_recording_cb()` (`surface.c:854-867`) keeps
    `get_any_compatible_invalid_surface`/`prune_invalid_surfaces`
-   (`surface.c:1169-1207`) from handing back or destroying an image the
+   (`surface.c:1511-1577`) from handing back or destroying an image the
    *recording* (unsubmitted) CB might still touch. Once a CB is
    *submitted*, no further check is needed — comment at
-   `surface.c:774-775`: "Images referenced only by submitted work are
+   `surface.c:858-860`: "Images referenced only by submitted work are
    safe to reuse — MoltenVK's single queue executes later submissions
    after earlier ones."
 
@@ -227,7 +227,7 @@ asserts in this file are compiled out of release builds (see below).
 
 **Evidence.**
 
-- `#define NUM_FLIGHT_SLOTS 2` — `hw/xbox/nv2a/pgraph/vk/renderer.h:542`.
+- `#define NUM_FLIGHT_SLOTS 2` — `hw/xbox/nv2a/pgraph/vk/renderer.h:628`.
 - Partitioning: `pgraph_vk_init_flight_partitions()`
   (`hw/xbox/nv2a/pgraph/vk/command.c:242-296`) divides descriptor sets,
   UBO/compute descriptor sets, and the index/vertex/uniform staging
@@ -276,8 +276,8 @@ per-rotation or per-draw consumption rate of a partitioned resource, or
 (b) adds a new partitioned-by-slot resource, without an equivalent
 runtime guard, will silently work in light scenes and overrun the
 partition — writing into the *next* slot's region, or past the pool
-entirely — in heavy scenes. Because `nv2a_vk_assert` is always compiled
-out here, this manifests as silent corruption or a crash inside the
+entirely — in heavy scenes. Because `nv2a_vk_assert` is compiled out of
+the release builds users run, this manifests as silent corruption or a crash inside the
 driver (this exact failure mode crashed inside MoltenVK's
 visibility-buffer encode before the guard was added — see the
 Visibility-buffer crash saga in `xemu-failure-archaeology`), not as a
@@ -300,7 +300,7 @@ whole-frame command buffer in this renderer begins with an empty
 that flag before the first pass's encoder exists.
 
 **Evidence** — `pgraph_vk_begin_command_buffer()`,
-`hw/xbox/nv2a/pgraph/vk/draw.c:2046-2070`. Its comment states the
+`hw/xbox/nv2a/pgraph/vk/draw.c:2109-2133`. Its comment states the
 mechanism precisely: MoltenVK attaches the Metal visibility-result
 buffer to a render encoder "only when
 `MVKCommandBuffer::_needsVisibilityResultMTLBuffer` is already set at
@@ -372,7 +372,7 @@ full `pgraph_vk_finish`).
 
 **Evidence** — `hw/xbox/nv2a/pgraph/vk/vertex.c`. Per-flight-slot span
 tracking fields `page_span_min`/`page_span_max`
-(`hw/xbox/nv2a/pgraph/vk/renderer.h:589-590`), allocated per slot in
+(`hw/xbox/nv2a/pgraph/vk/renderer.h:675-676`), allocated per slot in
 `hw/xbox/nv2a/pgraph/vk/buffer.c:128-130`. The refinement function,
 `uploaded_span_content_differs()` (`vertex.c:111-149`), is gated by
 `XEMU_VTX_EXACT` (`vertex.c:116-123`, `exact = !(e && e[0] == '0')`) —
@@ -523,9 +523,9 @@ thread-local storage — both were tried and reverted.
 
 **Evidence.** Toggle sites in
 `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`: `qemu_thread_jit_write()`
-before emitting code (e.g. lines 9479, 9510), `qemu_thread_jit_execute()`
-after (e.g. lines 9587, 9668, 9685, 9881, 10179), always paired within
-the same function. The chain-patching comment at lines 9850-9856 makes
+before emitting code (e.g. lines 9440, 9471), `qemu_thread_jit_execute()`
+after (e.g. lines 9548, 9629, 9646, 9842, 10153), always paired within
+the same function. The chain-patching comment at lines 9811-9816 makes
 the ordering requirement explicit: a cross-block repatch "must happen
 AFTER `block` has its generation/shared_exit set... and BEFORE
 `qemu_thread_jit_execute()` — `chain_repatch_b` writes into the code
@@ -572,20 +572,20 @@ flush (`jit_clear_icache`) → write-window close
 registers, and the low 16 bits of the status register (SR) into
 callee-saved ARM64 registers for the duration of a translated block
 (x26/x27 for A/B, x20/x21 for packed X/Y, x28 for SR —
-`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1448-1452`). The backing
+`hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c:1403-1407`). The backing
 memory (`dsp->registers[]`) remains the authoritative copy at all times
 — every pinned write is write-through (updates both the register and
 memory) — and every pin is reloaded from memory immediately after any
 `BLR` fallback call that could have mutated that register's state.
 
 **Evidence** — stated directly in the SR-pinning comment block,
-`dsp56k_jit_arm64.c:1462-1480`: "The pin's invariant is `w28 ==
+`dsp56k_jit_arm64.c:1417-1435`: "The pin's invariant is `w28 ==
 (registers[SR] & 0xFFFF)`. Memory stays authoritative (write-through);
 BLR-fallback C handlers that write `dsp->registers[SR]` don't see the
 pin, so we reload after every BLR that might touch SR." (`emit_store_sr_h`
 writes both `STRH` to memory and `UBFX` into the pin register in the
 same emit; `emit_reload_sr_pin` is the memory→pin reload, called at
-prologue and after BLR fallbacks.) The A/B pin comment at line 2229
+prologue and after BLR fallbacks.) The A/B pin comment at line 2184
 states the identical rule. Reload call sites
 (`emit_reload_ab_pins`/`emit_reload_xy_pins`/`emit_reload_sr_pin`) appear
 after BLR-fallback sites throughout the file — 18 call sites across the
@@ -616,7 +616,7 @@ bug is otherwise invisible.
 
 **Escape hatch / checker.** `XEMU_DSP_JIT_PIN_AUDIT=1`
 (`dsp56k_jit_arm64.c:258-266`) emits a per-op runtime check
-(`emit_pin_audit_check`, lines 2481-2547) that compares the pinned
+(`emit_pin_audit_check`, lines 2442-2515) that compares the pinned
 register's value against memory and calls
 `dsp56k_jit_helper_pin_audit_fail` on mismatch. **Run this after adding
 or moving any pin-touching code.** This exact checker caught a real pin
@@ -668,15 +668,15 @@ are required. The producer is
 from `pgraph_vk_process_pending()` (`renderer.c:173`, publish block
 :232-238); the ring is
 `present_ring[PUSH_PRESENT_RING_CAP]` (cap 12,
-`hw/xbox/nv2a/pgraph/vk/renderer.h:372,565`) under
+`hw/xbox/nv2a/pgraph/vk/renderer.h:371,564`) under
 `present_slot_lock`. The consumer is
-`nv2a_get_present_frame_pushed()` (`hw/xbox/nv2a/pgraph/pgraph.c:727`) →
+`nv2a_get_present_frame_pushed()` (`hw/xbox/nv2a/pgraph/pgraph.c:617`) →
 `pgraph_vk_present_slot_read()` (`display.c:406`), with the catch-up
 policy in `push_present_max_debt()` (`display.c:262-307`,
 `XEMU_PUSH_DEBT` override).
 
 The fallback path: `nv2a_get_present_frame()`
-(`hw/xbox/nv2a/pgraph/pgraph.c:708-725`) takes `pg->renderer_lock`,
+(`hw/xbox/nv2a/pgraph/pgraph.c:598-615`) takes `pg->renderer_lock`,
 asserts no other framebuffer consumer is active
 (`pg->framebuffer_in_use`), and dispatches to the renderer's
 `ops.get_present_frame`. The Vulkan implementation,
@@ -688,13 +688,13 @@ true)`, `pfifo_kick(d)`, unlock, then `qemu_event_wait(&d->pgraph.sync_complete)
 `frame->iosurface`/`mtl_texture`/`event` (that block is timed as
 `NSPROF_PRESENT_WAIT`, ~0 under push).
 
-The UI-side caller is `metal_render_frame()` (`ui/xemu.c:1145`): it
+The UI-side caller is `metal_render_frame()` (`ui/xemu.c:1193`): it
 tries the pushed read first and falls back to the pull
-(`ui/xemu.c:1217-1220`), and documents the ordering requirement at
-`ui/xemu.c:1201-1207` — "the frame's shared-event value must be known
+(`ui/xemu.c:1246-1249`), and documents the ordering requirement at
+`ui/xemu.c:1230-1232` — "the frame's shared-event value must be known
 before the drawable render pass is opened (the GPU-side wait is encoded
 ahead of it)". That ordering lives in `xemu_metal_begin_frame()`
-(`ui/xemu-metal.m:219-244`): command buffer → `encodeWaitForEvent` →
+(`ui/xemu-metal.m:188-228`): command buffer → `encodeWaitForEvent` →
 `renderCommandEncoderWithDescriptor`. An opt-in reorder that moved only
 the `nextDrawable` acquire ahead of the ring read
 (`XEMU_PRESENT_DRAWABLE_FIRST`) was removed on 2026-10-10; its Failed
@@ -702,9 +702,9 @@ row in `docs/optimizations.md` carries the reopen bar.
 
 What drives the UI frame loop is the **vblank thread**, a
 fixed-cadence, monotonic-deadline-scheduled thread wholly decoupled from
-host present timing: `vblank_timer_thread()` (`ui/xemu.c:880-911`)
+host present timing: `vblank_timer_thread()` (`ui/xemu.c:904-936`)
 computes an absolute `next_vblank` deadline, advances it by a fixed
-`vblank_interval_ns` (`= 16666666LL`, i.e. 60 Hz — `ui/xemu.c:93`) each
+`vblank_interval_ns` (`= 16666666LL`, i.e. 60 Hz — `ui/xemu.c:88`) each
 iteration regardless of how long the previous iteration took, and calls
 `SDL_DelayPrecise` to the deadline. It runs at
 `QOS_CLASS_USER_INTERACTIVE` (Invariant 12).
@@ -798,17 +798,18 @@ POSIX host this fork targets (macOS, Linux). So `QEMU_CLOCK_REALTIME` →
 used only by `QEMU_CLOCK_HOST`.
 
 Consumers, all using `QEMU_CLOCK_REALTIME` (i.e. monotonic) deliberately:
-- `update_fps()` / vblank pacing — `ui/xemu.c:811, 843, 856, 863`.
-- Surface-expiry scan throttle — `hw/xbox/nv2a/pgraph/vk/surface.c:2115-2121`
+- `update_fps()` / vblank pacing — `ui/xemu.c:875, 899, 912, 919`.
+- Surface-expiry scan throttle — `hw/xbox/nv2a/pgraph/vk/surface.c:2498-2504`
   (`surface_expire_interval_ns = 33 * 1000 * 1000`, ~33 ms, "~2 frames at
   60 Hz"), explicitly commented as host-wall-clock-*style* throttling
   but implemented on the monotonic clock — see next paragraph for why
   that distinction still matters.
-- PFIFO heartbeat diagnostic — `hw/xbox/nv2a/pfifo.c:521-522`, with an
+- PFIFO heartbeat diagnostic — `hw/xbox/nv2a/pfifo.c:556-557`, with an
   explicit inline comment: `/* Monotonic; QEMU_CLOCK_HOST is wall clock
   (NTP-jumpable) */`.
-- Reports idle-budget timer — `hw/xbox/nv2a/pgraph/vk/reports.c:301-307`
-  (5 ms budget before a deferred-report safety-valve submit).
+- Reports idle-budget timer — `hw/xbox/nv2a/pgraph/vk/reports.c:325-331`
+  (`XEMU_REPORTS_BUDGET_US`, default 300 µs of continuous FIFO idle
+  before a deferred-report safety-valve submit; 5 ms until 2026-07-04).
 
 **Why this design.** A wall-clock (`QEMU_CLOCK_HOST`) source can jump
 backward or forward (NTP sync, manual clock change, DST), which would
@@ -853,23 +854,23 @@ the PFIFO kick/wake handshake requires every kick site to hold
   `d->pgraph.lock`, which can itself block on renderer work; restored
   afterward (read the full function before assuming symmetry holds if
   you edit it).
-- `pfifo_kick()` (`hw/xbox/nv2a/pfifo.c:97-112`) documents its own
+- `pfifo_kick()` (`hw/xbox/nv2a/pfifo.c:97-118`) documents its own
   locking precondition inline: "Callers must hold `d->pfifo.lock` across
-  the kick-set + broadcast pair. All 15 call sites in the tree satisfy
-  this... With the invariant held we can use an untimed
+  the kick-set + broadcast pair. All call sites in the tree satisfy
+  this (20 as of 2026-07-11 — re-verify the full set when adding
+  one)... With the invariant held we can use an untimed
   `qemu_cond_wait` in the `pfifo_thread` idle path... because the
   writer's broadcast can no longer slip between the reader's kick-check
-  and its atomic release-wait." (Count drift, re-derived 2026-07-11 at
-  `7e2e6e7256`: there are now **20** `pfifo_kick(d)` call sites — 15
-  core/VK + 5 GL, `grep -rn 'pfifo_kick(d)' hw/ | wc -l`. The comment's
-  "15" enumeration is stale in the code — a code-pass item. The VK-side
+  and its atomic release-wait." (Counted 2026-07-11 at `7e2e6e7256`:
+  20 `pfifo_kick(d)` call sites — 15 core/VK + 5 GL,
+  `grep -rn 'pfifo_kick(d)' hw/ | wc -l`. The VK-side
   sites were re-checked to hold `d->pfifo.lock` across the kick; the
   precondition, not the count, is the load-bearing invariant — re-audit
   any new site against it.) The PFIFO thread's idle wait
-  (`pfifo.c:554-565`) relies on exactly this: it checks `fifo_kick` and
+  (`pfifo.c:600-615`) relies on exactly this: it checks `fifo_kick` and
   calls `qemu_cond_wait` while still holding `d->pfifo.lock`.
 - Halt-flag access follows a matching atomics contract, stated at
-  `pfifo.c:506-512`: all writers use `qatomic_set`; the heartbeat's
+  `pfifo.c:541-547`: all writers use `qatomic_set`; the heartbeat's
   reader uses `qatomic_read` — kept consistent "so TSAN is quiet and
   future refactors that drop the lock don't silently tear," even though
   the read currently happens under `d->pfifo.lock` too.
@@ -919,9 +920,9 @@ same MoltenVK configuration regardless of how the user (or a test
 harness) starts the app. **Any new plist environment variable must be
 mirrored in `main()`, or the split reopens.**
 
-**Evidence** — `ui/xemu.c:1924-1954` (as of 2026-10-10), inside `main()`,
+**Evidence** — `ui/xemu.c:1897-1927` (as of 2026-10-10), inside `main()`,
 `#ifdef __APPLE__`, before MoltenVK is dlopen'd: six
-`setenv("MVK_CONFIG_…", …, 0)` calls at `:1939-1945` covering the
+`setenv("MVK_CONFIG_…", …, 0)` calls at `:1912-1918` covering the
 canonical MVK tuple (five tuning keys plus `MVK_CONFIG_LOG_LEVEL=1`) —
 the six values are cataloged in
 `xemu-config-and-flags` Axis 3 (the value owner; prefill=0 is the
@@ -941,7 +942,7 @@ carries the matching values, verified equal to the `main()` block as of
 
 **Parity holds in all three homes** (re-verified 2026-10-10 at
 `b7e2752589`): the `docs/optimizations.md` `### MoltenVK runtime config`
-table, `Info.plist`, and `ui/xemu.c:1939-1945` all read prefill `0` — the
+table, `Info.plist`, and `ui/xemu.c:1912-1918` all read prefill `0` — the
 table row (then in README) was fixed 2026-07-05. If any of the three
 ever disagrees again, that is drift; record it in `xemu-docs-and-writing` §4, the stale-doc list home.
 
@@ -977,7 +978,7 @@ thread-scheduling priority/latency hint mechanism) to
 `QOS_CLASS_USER_INTERACTIVE` on macOS.
 
 **Evidence.**
-- PFIFO thread — `hw/xbox/nv2a/pfifo.c:473-479`:
+- PFIFO thread — `hw/xbox/nv2a/pfifo.c:499-507`:
   ```c
   void *pfifo_thread(void *arg)
   {
@@ -988,7 +989,7 @@ thread-scheduling priority/latency hint mechanism) to
       pgraph_init_thread(d);
       ...
   ```
-- Vblank timer thread — `ui/xemu.c:848-854`:
+- Vblank timer thread — `ui/xemu.c:904-910`:
   ```c
   static void *vblank_timer_thread(void *opaque)
   {
@@ -1065,7 +1066,7 @@ one of these should know it's stepping onto contested ground.
 - **STALLED report drains are still finish-heavy when they fire — the
   default path just avoids firing them.** `VK_FINISH_REASON_STALLED`
   (full submit + fence wait + drain-every-pending-report,
-  `hw/xbox/nv2a/pgraph/vk/draw.c:2045-2050`) is reachable from exactly
+  `hw/xbox/nv2a/pgraph/vk/draw.c:2049-2055`) is reachable from exactly
   one caller as of 2026-07-11: the *legacy*
   `XEMU_REPORTS_SYNC=1` branch (`reports.c:321-323`). The default path
   instead waits up to a 300 µs budget (`XEMU_REPORTS_BUDGET_US`,
@@ -1091,7 +1092,7 @@ one of these should know it's stepping onto contested ground.
   the fallback is live — GL backend, no Metal-objects extension,
   pre-first-publish, or `XEMU_PUSH_PRESENT=0`.
 - **PAL titles run a 60 Hz vblank.** `vblank_interval_ns` is a single
-  fixed value (`16666666LL`, 60 Hz — `ui/xemu.c:93`) with no PAL
+  fixed value (`16666666LL`, 60 Hz — `ui/xemu.c:88`) with no PAL
   (50 Hz) variant anywhere in the tree (verified by grep). Whether/how
   this affects a PAL-region title expecting 50 Hz has not been
   characterized in this repo's history as of 2026-07-04 — treat as an
@@ -1107,7 +1108,7 @@ for a "does it touch" match and apply the rule:
 | # | Does your change... | Rule |
 |---|---|---|
 | 1 | touch surface eviction/upload sync, or anything `#ifdef __APPLE__` in `pgraph/vk/surface.c`? | The non-Apple `#else` branch must keep the conservative (full-finish/immediate-evict) behavior unchanged. |
-| 2 | add/change a per-flight-slot resource, or change how often one is consumed per frame? | Add a runtime capacity guard that submits-and-continues. Never rely on `nv2a_vk_assert` — compiled out unconditionally in this file. |
+| 2 | add/change a per-flight-slot resource, or change how often one is consumed per frame? | Add a runtime capacity guard that submits-and-continues. Never rely on `nv2a_vk_assert` — it is live only in `--debug` builds. |
 | 3 | create a new render-pass encoder path, or touch `vkCmdBeginQuery`/`vkCmdResetQueryPool` sequencing? | Must run after the per-CB primer query; never reintroduce per-query pool resets inside a pass. |
 | 4 | change vertex/dirty tracking, or add a guest-write-triggered invalidation? | New refinements must be strictly additive over the page-granular fallback — never skip a conflict the coarse check would catch without independently proving safety. |
 | 5 | touch DSP engine selection, add a `DSPOps` field, or touch `dsp->core` vs `dsp->backend`? | Preserve the `dsp56k_jit_*` (fork) / `dsp_jit_*` (upstream) naming split and "fork JIT wins when supported+enabled" precedence; update both engines' vtables if you add an op. |
@@ -1178,7 +1179,7 @@ grep -n "queueCount = 1" hw/xbox/nv2a/pgraph/vk/instance.c
 # Invariant 1 (item 3) — destruction watermark still wired
 grep -n "evict_submit_seq\|retired_submit_count" hw/xbox/nv2a/pgraph/vk/surface.c hw/xbox/nv2a/pgraph/vk/command.c hw/xbox/nv2a/pgraph/vk/renderer.h
 
-# Invariant 2 — flight slots, query pool size, perf-build assert stripping
+# Invariant 2 — flight slots, query pool size, release-build assert stripping
 grep -n "NUM_FLIGHT_SLOTS" hw/xbox/nv2a/pgraph/vk/renderer.h
 grep -n "max_queries_in_flight = 4096" hw/xbox/nv2a/pgraph/vk/reports.c
 grep -n "NV2A_VK_ASSERTS" hw/xbox/nv2a/pgraph/vk/debug.h

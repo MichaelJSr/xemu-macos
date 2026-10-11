@@ -129,7 +129,7 @@ As of 2026-07-11 (re-derive anchors with `grep -n '^#' README.md`):
 | Input / pads / remap UI | `### Input` bullet |
 | Threading / BQL / timers | `### Threads + runtime` bullet |
 | `build.sh` / CI / packaging / MoltenVK provisioning | `### Build + packaging` bullet; provisioning-model changes also touch `### How Vulkan is provisioned` |
-| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (`1939-1945`, six keys, as of 2026-10-10), and the `### MoltenVK runtime config` table in `docs/optimizations.md`. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
+| An `MVK_CONFIG_*` value | THREE homes must agree: `Info.plist` `LSEnvironment`, `ui/xemu.c` `setenv(...)` (`1912-1918`, six keys, as of 2026-10-10), and the `### MoltenVK runtime config` table in `docs/optimizations.md`. Drift here caused a multi-week bug hunt — see the pink-tile entry in `xemu-failure-archaeology` |
 | New build-time `XEMU_*` var | `### Build knobs` table row |
 | New runtime `XEMU_*` escape hatch | `### Runtime debug / escape-hatch knobs` table row (2 columns — keep it 2 cells per row, see §4 item 5) |
 | Changed user-facing recommendation | `### Recommended xemu.toml` block |

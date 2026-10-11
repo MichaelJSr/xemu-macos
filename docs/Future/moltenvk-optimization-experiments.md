@@ -179,7 +179,7 @@ converts a non-indexed `vkCmdDraw` into a CPU-built index array +
 `vkCmdDrawIndexed` (~`count` uint32 writes + an index-buffer upload per
 affected draw), and it triggers on the register alone — **even for
 Gouraud-shaded** lists where provoking vertex is visually irrelevant.
-Hardware default is provoking=LAST (`pgraph.c:360-361`), so the cost
+Hardware default is provoking=LAST (`pgraph.c:394-395`), so the cost
 appears only while a title has selected FIRST; exact prevalence needs
 profiling. On desktop this is solved in a geometry shader
 (`glsl/geom.c`), which is why the Vulkan extension is not requested on
@@ -250,7 +250,7 @@ they clear on *correctness value*, not fps.
 Pipeline creation is **fully synchronous on the single PFIFO emulation
 thread**, on the hot draw path. Chain:
 `pfifo_thread` → `pgraph_method` → `pgraph_vk_flush_draw/draw_end`
-(`draw.c:2988/2412`) → `begin_pre_draw` → `create_pipeline`
+(`draw.c:3020/2444`) → `begin_pre_draw` → `create_pipeline`
 (`draw.c:1131`) → `vkCreateGraphicsPipelines` (`draw.c:1489`, blocking).
 The invariant is explicit (`draw.c:530-532`: *"All pipeline creation
 happens on this thread, so no external synchronization of the
@@ -258,7 +258,7 @@ VkPipelineCache is needed."*).
 
 Two-tier cache makes steady state compile-free: an in-memory LRU
 (`r->pipeline_cache`, 4096 entries) keyed by `PipelineKey`
-(`renderer.h:71-87`), backed by a driver `VkPipelineCache` persisted to
+(`renderer.h:70-86`), backed by a driver `VkPipelineCache` persisted to
 disk (`pipeline_cache.bin`, load `draw.c:559-574`, flush at flips
 `draw.c:534-551`). On an LRU hit the handle is reused with **zero
 compile** (`draw.c:1186-1192`).

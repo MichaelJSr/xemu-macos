@@ -110,7 +110,7 @@ whichever renderer is installed — `pgraph_vk_flip_stall()` in
 still ticks once — i.e. once per **guest** frame, not once per
 *displayed* frame; with `display.frame_interpolation` = 2x/4x the on-screen
 fps can exceed nsprof's flips/s, because MetalFX interpolation happens
-downstream of PGRAPH). Verified exact format (`nsprof.c:149-205`, `nsprof_flip_tick()`, as of 2026-10-10):
+downstream of PGRAPH). Verified exact format (`nsprof.c:150-206`, `nsprof_flip_tick()`, as of 2026-10-10):
 
 ```
 nsprof: 5.0s interval, 193 flips (38.6/s)
@@ -163,7 +163,7 @@ documented worst case is losing one interval's samples at a reset
 boundary.
 
 `flip_idle` is special: it is NOT wasted CPU time in the usual sense. It
-starts when the guest issues `NV097_FLIP_STALL` (`pgraph.c:1305-1313`) and
+starts when the guest issues `NV097_FLIP_STALL` (`pgraph.c:1195-1203`) and
 ends when `pfifo_stall_for_flip()` sees the flip complete
 (`pfifo.c:147-161`) — i.e. it is the PFIFO thread waiting for vblank
 pacing, which is expected and roughly `1000/target_fps` ms per flip at a
@@ -353,8 +353,8 @@ the DSP core has started has no effect within that process.
 Prints once per core (GP and EP separately) via an `atexit` handler
 (registered because the normal quit paths — Cmd-Q, window close, SIGTERM —
 never call the clean-shutdown `dsp_destroy`). Verified fields
-(`dsp56k_jit_print_stats()`, `dsp56k_jit_arm64.c:10041-10136` as of 2026-10-10;
-the counters are `struct DspJitState` fields, `:1224-1270`):
+(`dsp56k_jit_print_stats()`, `dsp56k_jit_arm64.c:9976-10071` as of 2026-10-10;
+the counters are `struct DspJitState` fields, `:1159-1205`):
 
 ```
 xemu: DSP JIT stats (GP core):
@@ -398,7 +398,7 @@ the N/Z or E/U half).
 
 The `cf_fallback buckets` block (only printed if any bucket is nonzero)
 breaks per-instruction control-flow fallbacks down by opcode class —
-verified bucket names (`dsp56k_jit_arm64.h`, `dsp_cpu.c:1815-1839`):
+verified bucket names (`dsp56k_jit_arm64.h`, `dsp_cpu.c:1810-1834`):
 `other`, `movep_1`, `movep_23`, `movep_x_qq`, `div`, `norm`, `stop`, `wait`,
 `reset`, `nop`, `illegal`, `undefined`, `bit_manip`, `short_imm_alu`,
 `shift_imm`, `inc_dec`, `cmpu`, `mpyi`, `move_extended`. A large bucket
@@ -409,7 +409,7 @@ names exactly which opcode class to inline next for better coverage.
 executions in the window): if retranslation churn — usually self-modifying
 overlay code — exceeds that ratio, the JIT disables itself for that core
 for the rest of the session and the interpreter takes over silently.
-Verified log line (`dsp56k_jit_arm64.c:10913-10919`):
+Verified log line (`dsp56k_jit_arm64.c:10848-10854`):
 
 ```
 xemu: DSP JIT auto-throttled on EP core: 20734 retranslations in the last 262144 block executions (self-modifying overlay code); interpreter takes over. XEMU_DSP_JIT_NO_THROTTLE=1 disables this.
@@ -426,7 +426,7 @@ measured ~1:10000+ (healthy).
 Bit-exact validates JIT output against the interpreter. Because
 translation is deterministic (same input block always produces the same
 code), **one passing validation per unique translation is sufficient** —
-a per-block `diff_checked` gate (`dsp56k_jit_arm64.c:10924-10940`) skips
+a per-block `diff_checked` gate (`dsp56k_jit_arm64.c:10859-10875`) skips
 re-validating a block once it has passed once, which is what keeps
 validation cost bounded to roughly "number of unique block translations"
 rather than "blocks executed per second." `XEMU_DSP_JIT_DIFF=1` validates
@@ -438,7 +438,7 @@ like `XEMU_DSP_JIT_DIFF=10`, not `=1` (bring-up only).
 
 Two execution modes:
 - **Async (default)**: a 16-slot SPSC ring feeds a dedicated worker thread
-  named `mcpx.dsp_diff` (`dsp56k_jit_arm64.c:10705`). The APU thread only
+  named `mcpx.dsp_diff` (`dsp56k_jit_arm64.c:10640`). The APU thread only
   pays for a snapshot copy into the ring; validation runs off-thread.
 - **Sync** (`XEMU_DSP_JIT_DIFF_SYNC=1`): the APU thread runs the
   interpreter replay and compare inline before continuing — reintroduces
@@ -449,7 +449,7 @@ On any divergence, **both modes abort the process** (`abort()`, after
 `fflush(stderr)` so the diagnostic survives an abrupt Xcode-build
 termination) and print a one-line failure report identifying which state
 field first differs (`diff_report_failure`, `dsp_cpu.c` /
-`dsp56k_jit_arm64.c:10486-10512`):
+`dsp56k_jit_arm64.c:10421-10447`):
 
 ```
 xemu: DSP JIT DIFF FAILURE in block pc_start=0x0142 (jit_cycles=12)
@@ -475,7 +475,7 @@ is the demonstrated-clean form alongside the other two. Rule and receipts:
 ### `XEMU_DSP_JIT_DUMP=1` — block disassembly dump
 
 Every translated block prints its address range and a raw 32-bit-word hex
-dump to stderr (`dsp56k_jit_arm64.c:9909-9933`) for offline disassembly —
+dump to stderr (`dsp56k_jit_arm64.c:9844-9868`) for offline disassembly —
 very high volume, only for inspecting a specific translation by hand
 (pipe through `grep -A20 'pc_start=0x<addr>'`).
 
@@ -710,7 +710,7 @@ tree 2026-08-04.
 ### §7.1 `XEMU_INV_PROF=1` — the `(f)` MMIO-recompile line
 
 The existing INV_PROF atexit dump gained an `(f)` block
-(`accel/tcg/tb-maint.c:208-219`):
+(`accel/tcg/tb-maint.c:207-218`):
 
 ```
 xemu:  (f) io_prepare=N  cpu_io_recompile=N (P% of io_prepare)  window=S.Ss => R.Rk recompiles/s
@@ -737,7 +737,7 @@ counted twice. The recompile count is the honest one.
 
 ### §7.2 `XEMU_X87_CENSUS=1` / `XEMU_X87_REFUTE=1` — x87/SSE census and shadow checker
 
-Five atexit lines (`target/i386/tcg/xemu-x87.h:65-97`); `REFUTE`
+Five atexit lines (`target/i386/tcg/xemu-x87.h:52-78`); `REFUTE`
 implies the census:
 
 ```
@@ -804,7 +804,7 @@ line, the coverage audit and the `=2` abort level went with the
 > `ALL_MMUIDX_BITS` is `(1 << NB_MMU_MODES) - 1` with **`NB_MMU_MODES`
 > = 22** (`include/hw/core/cpu.h:204`, fixed across all targets for
 > the widest one). i386 only ever fills mmu indices **0-7**
-> (`target/i386/cpu.h:2711-2722`), and `to_clean = asked & tlb.c.dirty`
+> (`target/i386/cpu.h:2697-2708`), and `to_clean = asked & tlb.c.dirty`
 > where `dirty` gains a bit only at fill (`cputlb.c:1167`) — so indices
 > 8-21 are never dirty, `to_clean` can never equal `0x3FFFFF`, and the
 > **full-flush counter reads 0 for the life of the process regardless
@@ -828,7 +828,7 @@ line, the coverage audit and the `=2` abort level went with the
 
 ### §7.4 `XEMU_PFIFO_KICK_STATS=1` — kick broadcasts and the park denominator
 
-Two atexit dumps. From `pgraph.c:198-244`, a census of
+Two atexit dumps. From `pgraph.c:96-142`, a census of
 `pgraph_write`'s kicks bucketed by call site × whether a PFIFO wait
 condition actually transitioned × post-write `FIFO_ACCESS` × whether a
 kick was already pending:
@@ -856,7 +856,7 @@ setting. A wrongly-skipped kick is a permanent PFIFO hang
 
 ### §7.5 `XEMU_UI_LOCK_STATS=1` — UI-thread lock occupancy without a debug build
 
-Once-per-second line from `ui/xemu.c:942-962`, previously reachable
+Once-per-second line from `ui/xemu.c:939-959`, previously reachable
 only in a `DEBUG_XEMU_C=1` build (which still forces it on):
 
 ```
@@ -895,14 +895,14 @@ Re-verify these before trusting them on a future date, especially after
 any refactor touching the named files:
 
 - nsprof counters/events/format: `sed -n '55,160p' hw/xbox/nv2a/nsprof.h`
-  (the two enums) and `sed -n '22,205p' hw/xbox/nv2a/nsprof.c` (as of 2026-10-10)
+  (the two enums) and `sed -n '22,206p' hw/xbox/nv2a/nsprof.c` (as of 2026-10-10)
 - UI-thread buckets + their per-flip normalization (added 2026-08-04):
   `grep -n 'drawable_acq\|ui_hud_lock\|ui_frame_dt\|ui_present\|mfx_scaler_rebuild' hw/xbox/nv2a/nsprof.c`
   and `sed -n '20,30p' hw/xbox/nv2a/nsprof.h`
 - INV_PROF `(f)` MMIO-recompile line and its read-from-`=0` caveat:
   `sed -n '84,92p;205,222p' accel/tcg/tb-maint.c`
 - x87 census / refuter dump fields:
-  `sed -n '44,97p' target/i386/tcg/xemu-x87.h`
+  `sed -n '35,78p' target/i386/tcg/xemu-x87.h`
 - surface-callback census:
   `grep -n 'surface_cb_stats_dump\|XEMU_SURFACE_CB' hw/xbox/nv2a/pgraph/vk/surface.c`
 - `info jit` full-flush counter is still structurally dead (the whole §7.3
@@ -923,7 +923,7 @@ any refactor touching the named files:
 - PFIFO heartbeat fields: `sed -n '511,598p' hw/xbox/nv2a/pfifo.c`
 - DSP JIT env vars and stats fields:
   `grep -n 'getenv("XEMU_DSP_JIT' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
-  and `sed -n '10041,10136p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
+  and `sed -n '9976,10071p' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`
   (`dsp56k_jit_print_stats`; re-find with `grep -n 'DSP JIT stats (%s core)'`)
 - cf_fallback bucket names:
   `grep -n 'DSP56K_JIT_FB_' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h`
@@ -931,10 +931,10 @@ any refactor touching the named files:
   `head -5 hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c hw/xbox/mcpx/apu/dsp/dsp_jit.c`
 - occlusion/report rework fps figures (the ledger and commit agree since
   2026-07-11; both must show 38.57 ± 0.80 / +144%; the ledger moved from
-  README.md to `docs/optimizations.md`, ~:836 as of 2026-10-10):
+  README.md to `docs/optimizations.md`, ~:826 as of 2026-10-10):
   `grep -n '38.57\|376' docs/optimizations.md; git show -s --format='%B' 6bfbc22863 | grep -i 'fps\|144'`
-- byte-exact vertex refinement figures (~:763): `grep -n '5.4%\|93%\|7.6%' docs/optimizations.md`
-- pipeline-cache cold/warm figures (~:682): `grep -n '164 ms\|≤ 4 ms' docs/optimizations.md`
+- byte-exact vertex refinement figures (~:753): `grep -n '5.4%\|93%\|7.6%' docs/optimizations.md`
+- pipeline-cache cold/warm figures (~:672): `grep -n '164 ms\|≤ 4 ms' docs/optimizations.md`
 - SDL scancode values: `grep -n 'SDL_SCANCODE_\(W\|A\|S\|D\|UP\|DOWN\|LEFT\|RIGHT\|SPACE\|KP_[1235]\|[LR]SHIFT\) =' macos-libs/arm64/opt/local/include/SDL3/SDL_scancode.h`
 - qcow2 snapshot table layout: re-run
   `.claude/skills/xemu-diagnostics-and-tooling/scripts/list_snapshots.py`

@@ -59,7 +59,7 @@ theory explained observation (a) and nothing else:
 
 `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` explained all four
 observations at once; the texture-path theory explained one. That is
-what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1939-1945`,
+what "clears the evidence bar" looks like. The fix (`ui/xemu.c:1912-1918`,
 `setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0)` before
 MoltenVK loads, with `overwrite=0` so an explicit user override still
 wins) was validated on the user's own environment: 0 artifact frames in
@@ -416,10 +416,10 @@ itself and `xemu-validation-and-qa` for how much data is enough to trust.
 
 **2. Never regress a Windows or upstream code path for a macOS-only
 win.** Evidence this is enforced, not just claimed:
-- `hw/xbox/nv2a/pgraph/vk/surface.c:1860` (in
+- `hw/xbox/nv2a/pgraph/vk/surface.c:1673` (in
   `pgraph_vk_upload_surface_data`, as of 2026-10-10) gates the narrowed
   upload sync behind `#ifdef __APPLE__`, with `target_is_active = true`
-  (upstream's full finish) on every other host; `:1396,1402` keep the
+  (upstream's full finish) on every other host; `:1209,1215` keep the
   scratch-image skip in `create_surface_image` Apple-only the same way —
   the macOS-specific fast paths are physically absent from other
   platforms' builds, not just conditionally worse.
@@ -555,6 +555,6 @@ commit hash (commits and their messages don't drift). Re-verify with:
   tables moved from README to `docs/optimizations.md`; open vectors live
   in `docs/roadmap.md`):
   `awk '/^## Failed/,0' docs/optimizations.md` (Failed / reverted
-  experiments, then Settled vectors; ~:2091 and ~:2161 as of 2026-10-10)
+  experiments, then Settled vectors; ~:2208 and ~:2279 as of 2026-10-10)
 - DSP JIT throttle constants (the 1-in-16 ratio, 256Ki window) are still:
   `grep -n 'DSP56K_JIT_THROTTLE' hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.c`

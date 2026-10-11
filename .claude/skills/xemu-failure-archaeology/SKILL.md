@@ -26,7 +26,7 @@ The fork's institutional memory of what did NOT work, what was reverted, what
 is fenced off, and what was proven not worth doing — so nobody re-fights a
 settled battle or silently re-attempts a fenced-off design. Every entry is
 grounded in the repo: `docs/optimizations.md` "Failed / reverted experiments"
-(~line 2091 as of 2026-10-10), commit messages, and dated measurements. That
+(~line 2208 as of 2026-10-10), commit messages, and dated measurements. That
 ledger lived in `README.md` until the 2026-10-10 docs reorganization, so
 entries below still say "README row" / "README Future vector(s)": read them
 as the ledger's Failed table / `## Settled vectors`, or `docs/roadmap.md` for
@@ -191,7 +191,7 @@ pairs, same binary, env toggle): commit message records 38.57 ± 0.80 fps vs
 2.2 ms/flip fence wait — the protocol receipt. The README row added in the
 same commit `6bfbc22863` said 15.8 → 35.6 fps / 2.25x with no receipt; it was
 reconciled to the receipt on 2026-07-11, and the ledger now reads 15.78 →
-38.57 ± 0.80 fps (+144%), passes 376 → 14 (`docs/optimizations.md` ~:836 as
+38.57 ± 0.80 fps (+144%), passes 376 → 14 (`docs/optimizations.md` ~:826 as
 of 2026-10-10). Cite 38.57 ± 0.80 (+144%) per
 `xemu-frontier-and-positioning` §3.5.
 
@@ -212,7 +212,7 @@ polls from per-slot drains without a finish) is recorded as a README Future
 vector, but `xemu-frontier-and-positioning` §2.8 (the status owner) marks it
 **resolved-verify**: the default path already does non-blocking per-slot
 drains, and `VK_FINISH_REASON_STALLED` is unreachable under shipped defaults
-(`reports.c:298`, sole call site, `XEMU_REPORTS_SYNC=1` only). Run
+(`reports.c:322`, sole call site, `XEMU_REPORTS_SYNC=1` only). Run
 frontier's one confirming nsprof measurement before treating it as open;
 otherwise it's a doc-prune for `xemu-docs-and-writing` — and in no case a
 reopening of the regressed designs.
@@ -310,7 +310,7 @@ die.
 **Fix**: host-time throttle (~33 ms) so pruning ticks regardless of flip
 cadence (`f156b009a1`). The original commit keyed it on `QEMU_CLOCK_HOST`;
 the throttle has since migrated to the monotonic clock —
-`qemu_clock_get_ns(QEMU_CLOCK_REALTIME)`, `surface.c:2115` (REALTIME is
+`qemu_clock_get_ns(QEMU_CLOCK_REALTIME)`, `surface.c:2498` (REALTIME is
 CLOCK_MONOTONIC here despite the name; xemu-architecture-contract
 Invariant 9).
 
@@ -381,7 +381,7 @@ keyed on it silently stops during draw bursts without flips. Evidence:
 `f156b009a1` vs `942368e86c`; README row.
 **Reopen if**: n/a. Key any pgraph cache/prune throttle on the monotonic
 clock — `QEMU_CLOCK_REALTIME` (which despite the name is CLOCK_MONOTONIC
-here; current code at `surface.c:2115`) — never on `pg->frame_time` and
+here; current code at `surface.c:2498`) — never on `pg->frame_time` and
 never on `QEMU_CLOCK_HOST` (the NTP-jumpable wall clock); see
 xemu-architecture-contract Invariant 9, the fact owner.
 
@@ -449,7 +449,7 @@ effort bar and closed (README Future vectors record all; measurements
 | `VK_EXT_external_memory_host` revival | eliminated memcpy < 0.5 ms per 5 s | ≥ 1 ms/frame bar (entry 1.6) |
 | MetalFX *input* ring (drop `metalfx_drain_inflight`) | drain ~0.1 µs/flip steady, max ~4 ms on rare hitches | complexity for noise |
 | Shader specialization constants | stale premise: alpha-test/fog-enable are already compile-time GLSL variants keyed via PshState/VshState in the LRU shader cache; only value uniforms remain per-draw and must stay uniforms | premise false; useful reframing = variant-count/compile-stutter work |
-| Async pipeline compilation | in-game `pipeline_gen` ≈ 0 after pipeline-cache persistence landed (cold 164 ms worst-case create → ≤ 4 ms warm; `docs/optimizations.md` ~:682 as of 2026-10-10) | the stall it would hide no longer exists |
+| Async pipeline compilation | in-game `pipeline_gen` ≈ 0 after pipeline-cache persistence landed (cold 164 ms worst-case create → ≤ 4 ms warm; `docs/optimizations.md` ~:672 as of 2026-10-10) | the stall it would hide no longer exists |
 
 **Reopen any of these if**: `XEMU_NV2A_NSPROF=1` shows the relevant counter
 (TEX_UPLOAD, PIPELINE_GEN, MFX_DRAIN) at ≥ 1 ms/frame in a real title —
@@ -894,7 +894,7 @@ crash (entry 2.2), and it measured SLOWER — 46.33 vs 48.50 fps — because
 encoding lands on the hot PFIFO thread.
 
 **Fix**: prefill = **0** in both `Info.plist` (~line 45, with explanatory
-comment) and `ui/xemu.c:1939-1945` (as of 2026-10-10) `setenv(..., 0)` — the no-overwrite main()
+comment) and `ui/xemu.c:1912-1918` (as of 2026-10-10) `setenv(..., 0)` — the no-overwrite main()
 setenv gives launch-path parity so Finder, terminal, and harness launches run
 one configuration (`166999fc60`; build.sh also logs the bundled MoltenVK
 version+UUID to catch tested-vs-shipped driver drift). Validated on the
@@ -2180,7 +2180,7 @@ facts:
 - 7.5's closure page and its reopen number:
   `grep -n 'BQL wait total' docs/Finished/lockless-mmio-verdict.md`
 
-- Failed-experiments table (~line 2091, 46 rows as of 2026-10-10):
+- Failed-experiments table (~line 2208, 47 rows as of 2026-10-10):
   `grep -n '^## Failed / reverted experiments' docs/optimizations.md`; rows:
   `awk '/^## Failed/,/^## Settled/' docs/optimizations.md | grep '^| ' | grep -vc '^| Attempt |'`
 - Any hash here resolves:
@@ -2198,6 +2198,6 @@ facts:
   `grep -rn 'XEMU_DSP_JIT_SENTINEL\|PIN_AUDIT' hw/xbox/mcpx/apu/dsp/`
 - Tags cited exist: `git tag -l v0.9 v0.8.153-macos.1`
 - Tag-immutability rule still documented: `grep -n 'delete' docs/RELEASING-macos.md`
-- Settled-negative vectors unchanged (~line 2161 as of 2026-10-10):
+- Settled-negative vectors unchanged (~line 2279 as of 2026-10-10):
   `awk '/^## Settled vectors/,0' docs/optimizations.md`; still-open vectors
   live in `docs/roadmap.md`

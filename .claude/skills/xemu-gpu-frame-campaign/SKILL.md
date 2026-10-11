@@ -108,19 +108,19 @@ block; see the last row for why that is *not* the same as one
 
 | # | State component | Current dedup / cost shape | Where (file:function) |
 |---|---|---|---|
-| 1 | **Pipeline object** (shader stages + raster/blend/depth-stencil + vertex-input layout + render-pass compatibility) | LRU cache, hash+memcmp on `PipelineKey`. `check_pipeline_dirty` fast-rejects the expensive hash/lookup unless shader bindings, render-pass state, one of 5 registers (`BLEND`, `CONTROL_0/1/2`, `SETUPRASTER`), or vertex layout changed. | `draw.c:1053` `check_pipeline_dirty`, `draw.c:1131` `create_pipeline`, `renderer.h:71` `PipelineKey` |
-| 2 | **Shader state** (`VshState`/`GeomState`/`PshState`) | LRU cache keyed on `ShaderState` hash+memcmp — but the *dirty check itself* runs **unconditionally every draw**: up to 16 register-dirty tests, a per-active-combiner-stage loop (4 checks × stage count), 6 field compares, a 4×3 texture-state loop. Only a `true` result triggers the cache lookup. | `glsl/shaders.c:39` `pgraph_glsl_check_shader_state_dirty`, `vk/shaders.c:604` `pgraph_vk_bind_shaders` (called unconditionally at the top of `create_pipeline`, *before* `check_pipeline_dirty` even runs) |
-| 3 | **Descriptor set 0 (UBOs)** | Advance-index skip: rewritten only when `uniforms_changed \|\| shader_bindings_changed \|\|` the uniform staging buffer just wrapped; the `vkCmdBindDescriptorSets` call is separately skipped via a `last_bound_ubo_descriptor_set_index` compare. | `vk/shaders.c:187-288` `pgraph_vk_update_descriptor_sets`, `vk/draw.c:1553-1607` `bind_descriptor_sets` |
+| 1 | **Pipeline object** (shader stages + raster/blend/depth-stencil + vertex-input layout + render-pass compatibility) | LRU cache, hash+memcmp on `PipelineKey`. `check_pipeline_dirty` fast-rejects the expensive hash/lookup unless shader bindings, render-pass state, one of 5 registers (`BLEND`, `CONTROL_0/1/2`, `SETUPRASTER`), or vertex layout changed. | `draw.c:1053` `check_pipeline_dirty`, `draw.c:1131` `create_pipeline`, `renderer.h:70` `PipelineKey` |
+| 2 | **Shader state** (`VshState`/`GeomState`/`PshState`) | LRU cache keyed on `ShaderState` hash+memcmp — but the *dirty check itself* runs **unconditionally every draw**: up to 16 register-dirty tests, a per-active-combiner-stage loop (4 checks × stage count), 6 field compares, a 4×3 texture-state loop. Only a `true` result triggers the cache lookup. | `glsl/shaders.c:39` `pgraph_glsl_check_shader_state_dirty`, `vk/shaders.c:621` `pgraph_vk_bind_shaders` (called unconditionally at the top of `create_pipeline`, *before* `check_pipeline_dirty` even runs) |
+| 3 | **Descriptor set 0 (UBOs)** | Advance-index skip: rewritten only when `uniforms_changed \|\| shader_bindings_changed \|\|` the uniform staging buffer just wrapped; the `vkCmdBindDescriptorSets` call is separately skipped via a `last_bound_ubo_descriptor_set_index` compare. | `vk/shaders.c:187-288` `pgraph_vk_update_descriptor_sets`, `vk/draw.c:1607-1663` `bind_descriptor_sets` |
 | 4 | **Descriptor set 1 (textures)** | Same advance-index pattern, keyed on `shader_bindings_changed \|\| texture_bindings_changed`; bind skipped via `last_bound_descriptor_set_index`. Both sets' multi-binding writes are coalesced into one `VkWriteDescriptorSet` each (spec §14.2.3 array overflow trick). | same functions, `vk/shaders.c:277-287,319-327` |
 | 5 | **Vertex attribute layout** (binding/attribute descriptions) | A memcmp snapshot (`update_vertex_layout_dirty`) sets `vertex_state_dirty`, which feeds `check_pipeline_dirty` (row 1) — a real layout change forces a *new pipeline*, not just a rebind. But the O(16)-attribute-slot rebuild that *produces* the thing being compared (`pgraph_vk_bind_vertex_attributes`) runs unconditionally every guest block regardless of whether anything changed. | `vk/vertex.c:38` `update_vertex_layout_dirty`, `vk/vertex.c:321` `pgraph_vk_bind_vertex_attributes`, `vk/vertex.c:493` `_inline` variant |
-| 6 | **Vertex buffer bindings** (`vkCmdBindVertexBuffers` args) | Exact memcmp of the would-be `buffers[]`/`offsets[]` against the last-issued args on this command buffer (CB); call skipped on a match. | `vk/draw.c:2627-2670` `bind_vertex_buffer` |
-| 7 | **Index buffer binding** (`vkCmdBindIndexBuffer`) | Exact compare (buffer + offset + type); call skipped on a match. | `vk/draw.c:2682-2700` `bind_index_buffer` |
-| 8 | **Push constants** — *only* the vertex shader's "uniform attrs" (attributes with stride 0, i.e. constant-valued streams; ≤16 attrs × 4 floats = 256 B, MoltenVK's `maxPushConstantsSize` is 4096 B so this path is always available on this device) | Memcmp of freshly-pulled values against the last-issued `(CB, pipeline layout)` payload — but `pgraph_get_inline_values` itself *always runs*; only the `vkCmdPushConstants` call is skipped on a match. General VSH/PSH uniforms (transforms, lighting, combiner constants, fog, `texScale`) are a **separate channel** — they go through UBOs (row 3), not push constants. | `vk/draw.c:1505-1551` `push_vertex_attr_values`; budget check `vk/shaders.c:653-655` |
-| 9 | **Viewport / scissor / line width** (dynamic state) | Memcmp cache — but only computed/checked at all when `must_bind_pipeline` is true (an actual pipeline rebind or a fresh render pass). **Not evaluated on every draw.** | `vk/draw.c:2224-2281` (inside `begin_draw`, gated by `if (must_bind_pipeline)`) |
-| 10 | **Blend constants / depth bias** (dynamic state) | Memcmp cache, but unlike row 9 these run on **every non-clearing draw** regardless of `must_bind_pipeline`. | `vk/draw.c:2283-2310` |
-| 11 | **Occlusion query span** | A query rotates only when a report was requested since the last draw (`new_query_needed`) or `zpass_pixel_count_enable`/clearing toggled — otherwise the *same* query silently continues spanning multiple draws. Queries begin/end **inside** the render pass now (bulk pool reset moved to CB-begin; this is why passes no longer tear down per query rotation). | `vk/draw.c:2202-2222` (rotation logic in `begin_draw`); `vk/reports.c:96-139` (`alloc_report`/`clear_report_value` set `new_query_needed`) |
-| 12 | **Render pass / framebuffer** | Stays open across draws until a surface rebind, a clear, or a non-draw command (texture upload needing the compute-unswizzle path, surface creation, render-to-texture) forces `pgraph_vk_ensure_not_in_render_pass`. | `vk/draw.c:2094-2098,2137-2146,2208-2210,2335-2337`; `vk/texture.c:959,1190,1395`; `vk/surface.c:1112,1841` |
-| 13 | **Actual `vkCmdDraw*` call count vs. guest begin/end block count** | **Not 1:1 today.** The `NV097_DRAW_ARRAYS`-without-CPU-emulation path issues **one `vkCmdDraw` per accumulated non-contiguous start/count subrange within a single guest block** (`pg->draw_arrays_length` can exceed 1 — see `pgraph_expand_draw_arrays`/the "connect contiguous primitives" logic in `pgraph.c:2852-2862`). The CPU-emulated-primitive path (`LINE_LOOP`/`QUADS`/`QUAD_STRIP`/first-vertex `TRIANGLES`/line-mode `POLYGON`) *already* concatenates every subrange into one combined index buffer + one `vkCmdDrawIndexed`. The three inline paths (`inline_elements`/`inline_buffer`/`inline_array`) always issue exactly one draw call. | `vk/draw.c:2903-3193` `pgraph_vk_flush_draw`, specifically the emulated-merge loop at `2960-2985` vs. the per-subrange loop at `2987-2993` |
+| 6 | **Vertex buffer bindings** (`vkCmdBindVertexBuffers` args) | Exact memcmp of the would-be `buffers[]`/`offsets[]` against the last-issued args on this command buffer (CB); call skipped on a match. | `vk/draw.c:2729-2787` `bind_vertex_buffer` |
+| 7 | **Index buffer binding** (`vkCmdBindIndexBuffer`) | Exact compare (buffer + offset + type); call skipped on a match. | `vk/draw.c:2799-2817` `bind_index_buffer` |
+| 8 | **Push constants** — *only* the vertex shader's "uniform attrs" (attributes with stride 0, i.e. constant-valued streams; ≤16 attrs × 4 floats = 256 B, MoltenVK's `maxPushConstantsSize` is 4096 B so this path is always available on this device) | Memcmp of freshly-pulled values against the last-issued `(CB, pipeline layout)` payload — but `pgraph_get_inline_values` itself *always runs*; only the `vkCmdPushConstants` call is skipped on a match. General VSH/PSH uniforms (transforms, lighting, combiner constants, fog, `texScale`) are a **separate channel** — they go through UBOs (row 3), not push constants. | `vk/draw.c:1554-1605` `push_vertex_attr_values`; budget check `vk/shaders.c:653-655` |
+| 9 | **Viewport / scissor / line width** (dynamic state) | Memcmp cache — but only computed/checked at all when `must_bind_pipeline` is true (an actual pipeline rebind or a fresh render pass). **Not evaluated on every draw.** | `vk/draw.c:2321-2378` (inside `begin_draw`, gated by `if (must_bind_pipeline)`) |
+| 10 | **Blend constants / depth bias** (dynamic state) | Memcmp cache, but unlike row 9 these run on **every non-clearing draw** regardless of `must_bind_pipeline`. | `vk/draw.c:2380-2407` |
+| 11 | **Occlusion query span** | A query rotates only when a report was requested since the last draw (`new_query_needed`) or `zpass_pixel_count_enable`/clearing toggled — otherwise the *same* query silently continues spanning multiple draws. Queries begin/end **inside** the render pass now (bulk pool reset moved to CB-begin; this is why passes no longer tear down per query rotation). | `vk/draw.c:2296-2319` (rotation logic in `begin_draw`); `vk/reports.c:96-139` (`alloc_report`/`clear_report_value` set `new_query_needed`) |
+| 12 | **Render pass / framebuffer** | Stays open across draws until a surface rebind, a clear, or a non-draw command (texture upload needing the compute-unswizzle path, surface creation, render-to-texture) forces `pgraph_vk_ensure_not_in_render_pass`. | `vk/draw.c:2177-2181,2245-2257,2302-2307,2434-2439`; `vk/texture.c:976,1210,1418`; `vk/surface.c:1239,2211` |
+| 13 | **Actual `vkCmdDraw*` call count vs. guest begin/end block count** | **Not 1:1 today.** The `NV097_DRAW_ARRAYS`-without-CPU-emulation path issues **one `vkCmdDraw` per accumulated non-contiguous start/count subrange within a single guest block** (`pg->draw_arrays_length` can exceed 1 — see `pgraph_expand_draw_arrays`/the "connect contiguous primitives" logic in `pgraph.c:3058-3068`). The CPU-emulated-primitive path (`LINE_LOOP`/`QUADS`/`QUAD_STRIP`/first-vertex `TRIANGLES`/line-mode `POLYGON`) *already* concatenates every subrange into one combined index buffer + one `vkCmdDrawIndexed`. The three inline paths (`inline_elements`/`inline_buffer`/`inline_array`) always issue exactly one draw call. | `vk/draw.c:3020-3320` `pgraph_vk_flush_draw`, specifically the emulated-merge loop at `3077-3103` vs. the per-subrange loop at `3108-3114` |
 
 Row 13 is the campaign's single most concrete finding: xemu already knows
 how to fuse N guest draws into one Vulkan draw call — it does it today for
@@ -238,9 +238,9 @@ labels in `hw/xbox/nv2a/nsprof.c`'s `event_names[]`, matching the existing
 
 | New event | Fires where | Answers |
 |---|---|---|
-| `NSPROF_EV_VK_DRAW_CALL` | Every actual `vkCmdDraw`/`vkCmdDrawIndexed` call site in `pgraph_vk_flush_draw` (7 sites: `draw.c:2983,2991` [inside the per-subrange loop — one call per iteration] `,3055,3113,3116,3180,3184` — re-locate with `grep -n vkCmdDraw hw/xbox/nv2a/pgraph/vk/draw.c`, which matches both the plain and `Indexed` forms; one further match at `draw.c:2571` is the partial-color-clear helper triangle in `pgraph_vk_clear_surface`, a different function outside `flush_draw` that `NSPROF_EV_DRAW` also doesn't count — leave it out of this counter to keep the ratio below clean) | True Vulkan draw-call count per flip, vs. `NSPROF_EV_DRAW`'s guest-block count. The gap between them is exactly mechanism A's opportunity (row 13 above). |
-| `NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE` | Once per `pgraph_vk_flush_draw` call where the non-emulated `draw_arrays` loop runs with `pg->draw_arrays_length > 1` (`draw.c:2987`, the `else` branch guarding the per-subrange `vkCmdDraw` loop) | How often mechanism A1 (same-block subrange coalescing) even applies. |
-| `NSPROF_EV_DRAW_MERGE_IDENTICAL` | At the top of `begin_draw` (`draw.c:2172`, before line 2212): compare this draw's about-to-be-used pipeline pointer + `need_bind_ubo`/`need_bind_tex` outcome + vertex-buffer bind args against a small static "previous draw fingerprint" struct captured at the end of the *previous* `begin_draw` call (after line 2313). Bucket 1: pipeline same, descriptors same, vertex buffer+offset *also* identical. | Draws already fully deduped by existing caches (rows 3/4/6 above) — zero new opportunity here. |
+| `NSPROF_EV_VK_DRAW_CALL` | Every actual `vkCmdDraw`/`vkCmdDrawIndexed` call site in `pgraph_vk_flush_draw` (7 sites: `draw.c:3101,3113` [inside the per-subrange loop — one call per iteration] `,3178,3237,3241,3306,3311` — re-locate with `grep -n vkCmdDraw hw/xbox/nv2a/pgraph/vk/draw.c`, which matches both the plain and `Indexed` forms; one further match at `draw.c:2673` is the partial-color-clear helper triangle in `pgraph_vk_clear_surface`, a different function outside `flush_draw` that `NSPROF_EV_DRAW` also doesn't count — leave it out of this counter to keep the ratio below clean) | True Vulkan draw-call count per flip, vs. `NSPROF_EV_DRAW`'s guest-block count. The gap between them is exactly mechanism A's opportunity (row 13 above). |
+| `NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE` | Once per `pgraph_vk_flush_draw` call where the non-emulated `draw_arrays` loop runs with `pg->draw_arrays_length > 1` (`draw.c:3104`, the `else` branch guarding the per-subrange `vkCmdDraw` loop) | How often mechanism A1 (same-block subrange coalescing) even applies. |
+| `NSPROF_EV_DRAW_MERGE_IDENTICAL` | At the top of `begin_draw` (`draw.c:2283`, before line 2309): compare this draw's about-to-be-used pipeline pointer + `need_bind_ubo`/`need_bind_tex` outcome + vertex-buffer bind args against a small static "previous draw fingerprint" struct captured at the end of the *previous* `begin_draw` call (after line 2410). Bucket 1: pipeline same, descriptors same, vertex buffer+offset *also* identical. | Draws already fully deduped by existing caches (rows 3/4/6 above) — zero new opportunity here. |
 | `NSPROF_EV_DRAW_MERGE_CANDIDATE` | Same comparison, bucket 2: pipeline same, descriptors same, vertex buffer *handle* same but **offset differs**. | This is the literal "pipeline == previous && descriptors unchanged && only vertex offsets differ" question mechanism A2 needs answered. |
 | `NSPROF_EV_DRAW_STATE_CHANGED` | Same comparison, bucket 3: anything else (different pipeline, different descriptor advance, or a different vertex buffer entirely). | The floor mechanism A2 cannot touch. |
 
@@ -248,11 +248,11 @@ Also add four pass-cause tags (reuse the existing `NSPROF_EV_RENDERPASS`
 event's *sites* — tag which caller triggered the pass end that preceded
 each subsequent `NSPROF_EV_RENDERPASS`) at the four `end_render_pass` /
 `pgraph_vk_ensure_not_in_render_pass` call groups: surface rebind
-(`draw.c:2137-2146`), clear begin/end (`draw.c:2208-2210,2335-2337`),
-texture-upload compute-unswizzle interleave (`texture.c:959-1097`), and
+(`draw.c:2245-2257`), clear begin/end (`draw.c:2302-2307,2434-2439`),
+texture-upload compute-unswizzle interleave (`texture.c:976-1114`), and
 everything else routed through `pgraph_vk_begin_nondraw_commands`
-(surface creation, render-to-texture — `surface.c:1112`,
-`texture.c:1190,1395`). This feeds mechanism C.
+(surface creation, render-to-texture — `surface.c:1239`,
+`texture.c:1210,1418`). This feeds mechanism C.
 
 ### 1.2 Implementation sketch (small, mechanical)
 
@@ -354,7 +354,7 @@ cover.
 #### A1 — same-block multi-subrange (do this first: cheapest, lowest risk)
 
 **Scope**: the non-emulated `draw_arrays` branch's per-subrange
-`vkCmdDraw` loop (`vk/draw.c:2987-2993`), active whenever
+`vkCmdDraw` loop (`vk/draw.c:3108-3114`), active whenever
 `pg->draw_arrays_length > 1` and `draw_needs_primitive_emulation()`
 (`draw.c:122`) is false — i.e. `POINTS`/`LINES`/`LINE_STRIP`/
 `TRIANGLE_STRIP`/`TRIANGLE_FAN`, or `TRIANGLES` with provoking-vertex =
@@ -390,11 +390,11 @@ axis is **topology-aware index construction**:
   here — it is unconditionally CPU-emulated (`draw_needs_primitive_emulation`
   returns `true` for it), never reaches this branch.
 
-**Implementation sketch**: in the `else` branch at `draw.c:2987`, branch on
+**Implementation sketch**: in the `else` branch at `draw.c:3104`, branch on
 `get_primitive_topology(pg)` (`draw.c:55`): for list topologies, build one
 combined identity-index buffer and one `vkCmdDrawIndexed` (mirroring
 `build_emulated_indices_from_array`'s loop-and-concatenate shape at
-`draw.c:2960-2985`, minus the emulation math); for strip/fan topologies,
+`draw.c:3077-3103`, minus the emulation math); for strip/fan topologies,
 build the same but insert a restart index between subranges.
 
 **Escape hatch**: `XEMU_DRAW_MERGE=0` disables A1 and restores the
@@ -448,7 +448,7 @@ A1 despite potentially larger scope):
 3. **A candidate pair must not straddle an occlusion-report or
    zpass-enable boundary.** `alloc_report`/`clear_report_value`
    (`reports.c:96,110`) set `new_query_needed`, which `begin_draw`'s query
-   rotation logic (`draw.c:2202-2222`) consumes **once per `begin_draw`
+   rotation logic (`draw.c:2296-2319`) consumes **once per `begin_draw`
    call** to decide whether to end the current occlusion query and start a
    new one. If the guest issued `NV097_GET_REPORT` between block 1 and
    block 2, the unmerged code correctly rotates the query between them, so
@@ -489,7 +489,7 @@ none independently profiled — rank by Phase 2's measured self-time):
 - **B1**: `pgraph_glsl_check_shader_state_dirty` (`glsl/shaders.c:39`) —
   up to 16 register-dirty checks + a per-combiner-stage loop + 6 field
   compares + a 4×3 texture-state loop, every non-clear draw, called from
-  `pgraph_vk_bind_shaders` (`vk/shaders.c:613`) unconditionally at the top
+  `pgraph_vk_bind_shaders` (`vk/shaders.c:630`) unconditionally at the top
   of `create_pipeline` — before the cheap `check_pipeline_dirty` fast-path
   (row 1) even runs. The single most expensive-*looking* always-on check
   in the draw path.
@@ -497,14 +497,14 @@ none independently profiled — rank by Phase 2's measured self-time):
   `_inline` variant at `493`) — unconditional O(16) loop over every
   vertex-shader attribute slot every guest block, regardless of how many
   attributes actually changed.
-- **B3**: `begin_draw`'s always-run block (`vk/draw.c:2283-2313`) — blend-
+- **B3**: `begin_draw`'s always-run block (`vk/draw.c:2380-2410`) — blend-
   constants recompute (register read + ARGB-unpack + 16-byte memcmp),
   depth-bias flag check, `bind_descriptor_sets`, `push_vertex_attr_values`
   — all run every non-clearing draw. (Viewport/scissor/line-width, row 9,
   are *not* in this bucket — they're gated behind `must_bind_pipeline` and
   do not run on every draw; don't conflate the two.)
 - **B4**: `push_vertex_attr_values`'s unconditional `pgraph_get_inline_values`
-  call (`vk/draw.c:1518`) before its own memcmp-skip decision.
+  call (`vk/draw.c:1568`) before its own memcmp-skip decision.
 - **B5**: `pgraph_vk_bind_textures` (`vk/texture.c`) — called unconditionally
   every non-clear draw from `create_pipeline`, **not read in this pass —
   cost unverified**, candidate pending both a code read and Instruments
@@ -554,7 +554,7 @@ per-flip counter before ranking — see the four
 
 - **C1 — surface switches**: a color/zeta rebind sets `framebuffer_dirty`/
   `render_pass_dirty` in `begin_pre_draw`, forcing
-  `pgraph_vk_ensure_not_in_render_pass` (`draw.c:2137-2146`). The zeta
+  `pgraph_vk_ensure_not_in_render_pass` (`draw.c:2245-2257`). The zeta
   shape-switch fast path (`docs/optimizations.md` "Vulkan renderer" changes) removed the
   *readback* cost of a shape ping-pong but a genuinely different surface
   still needs a different framebuffer attachment — Vulkan requires ending
@@ -562,17 +562,17 @@ per-flip counter before ranking — see the four
   remove it, only to confirm it isn't firing *more* than the scene's
   actual surface count requires.
 - **C2 — clears**: `pg->clearing` unconditionally calls `end_render_pass`
-  on **both** sides of a clear operation (`draw.c:2208-2210` and
-  `2335-2337`) — every `NV097_CLEAR_SURFACE` costs a pass boundary.
+  on **both** sides of a clear operation (`draw.c:2302-2307` and
+  `2434-2439`) — every `NV097_CLEAR_SURFACE` costs a pass boundary.
 - **C3 — compute-unswizzle interleave**: texture uploads needing the
   compute-shader unswizzle path call `pgraph_vk_begin_nondraw_commands`
-  (which ends the current pass) mid-stream (`texture.c:959-1097`,
-  confirmed: the dispatch calls at lines 1086/1092 execute inside the
-  same `cmd` opened by the `begin_nondraw_commands` call at line 959).
+  (which ends the current pass) mid-stream (`texture.c:976-1114`,
+  confirmed: the dispatch calls at lines 1103/1109 execute inside the
+  same `cmd` opened by the `begin_nondraw_commands` call at line 976).
   Streaming-heavy scene transitions will show this spike; steady-state
   in-game should show it near zero.
 - **C4 — other non-draw commands**: surface creation
-  (`surface.c:1112`) and render-to-texture (`texture.c:1190,1395`), both
+  (`surface.c:1239`) and render-to-texture (`texture.c:1210,1418`), both
   routed through the same `pgraph_vk_begin_nondraw_commands` helper.
 
 **Win derivation**: `(removable pass count) × (per-pass tile load/store
