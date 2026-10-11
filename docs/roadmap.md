@@ -117,6 +117,41 @@ closed stubs, item 4 is parked below its bar, item 5 is the standing
 correctness debt. Closed entries keep their full write-ups in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md) (moved 2026-10-10).
 
+**Profile at the new primary anchor (2026-10-11).** One `probe-run.sh`
+session on `azurik-heavy-f1` (80 s, release bundle `91D280C7`, retrained
+PGO) with `XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF` and
+`XEMU_NV2A_NSPROF`, plus a 20 s `/usr/bin/sample` of a second session,
+on a box loaded by other jobs:
+- **Where vCPU time goes.** 32.3% in translated guest code, 67.7% in
+  host code. x87 hard-float helpers ≈ 24% together (`fmul` 5.1, `flds`
+  3.7 + 2.6, `fcom` 2.5, `fsts` 2.4, `fadd` 1.8 + 1.7, `fpop` 1.5,
+  `fucomi` 1.0, `fsub` 0.9 + 0.4); `pthread_jit_write_protect_np` 10.9%
+  (the barrier-skid attribution of archaeology 1.17, not real W^X cost);
+  mutex waits 8.3%; `cpu_exec_loop` 2.3, `helper_enter_mmx` 2.2,
+  `helper_cc_compute_all` 1.1. `sample` shows where the mutex waits
+  come from: `helper_stl_mmu` is 12.8% of vCPU samples inclusive, and
+  three quarters of that is `user_write` (the PFIFO doorbell) blocked in
+  `qemu_mutex_lock_impl` on `pfifo.lock` while the PFIFO thread holds it
+  (~9.6% of vCPU samples); `vp_write` is another ~2%. That doorbell
+  wait is the largest single non-x87 item on the vCPU and is not on any
+  list yet: needs-theory (what the PFIFO thread holds the lock for, and
+  whether the put-pointer store can be published without it).
+- **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
+  `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
+  `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
+  load helpers add at most ~0.3%. Item 1 stays parked.
+- **x87 store traffic:** `helper_fsts_ST0__hard` 2.4% (plus
+  `helper_fmov_FT0_STN__hard` 0.4%).
+- **Ret-memo:** `xemu: ras hits=45901 (0.5%) fills=10089110` over
+  110 s. The counter only sees the helper path, which runs after the
+  inline probe at the ret site has missed, so it is the hit rate of
+  misses, not of the memo. The v0.13.3 build (before the per-page memo
+  flush) reads 45013 / 9945329 on the same scene: the flush costs
+  nothing measurable.
+- **`da_multi_subrange`: 0** in all 21 intervals (nsprof prints only
+  non-zero events), as on F5. The GPU campaign's open fact is closed:
+  multi-subrange draws do not occur on the heavy anchor either.
+
 1. **Surface CPU-access-callback churn — pool shape MEASURED AND
    KILLED 2026-08-04 (same day); ranged flush is the only live shape,
    needs-theory.** The mechanism receipt stands: **199.8 callback
@@ -143,6 +178,9 @@ correctness debt. Closed entries keep their full write-ups in
    costs no per-swap bookkeeping, but needs a deferred/queued flush
    API. Status: needs-theory; reopen only with a predicted number
    derived from a POST-wave profile, not the audit's.
+   **2026-10-11:** the post-wave profile exists (above): guest TLB
+   flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1`, so the
+   ranged flush has nothing to win; stays parked.
    Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
    **`TLB full flushes` line is structurally unreachable on this guest**
    (it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
@@ -164,6 +202,20 @@ correctness debt. Closed entries keep their full write-ups in
    tail. Bar to attempt: the hitch must survive a warm-cache run — a
    warm-cache-only hitch is a cache-coverage problem, not a
    pipeline-creation one.
+   **2026-10-11: answered — cache coverage, not prewarm.** The
+   `azurik-stream-e2` walk (the first-visit streaming walk-in) never
+   reproduced a 45 ms-class compile: worst single compile in the forward
+   phase 0.8 ms pipeline / 2.3 ms shader with warm caches, 4.3 / 6.8 ms
+   cold (`movement-probe.sh --isolate-caches`), and its ~20 fps dip is
+   the same warm and cold, so it is scene cost. The one hitch of that
+   class came on `azurik-transition-f1`'s walk back into F1: a single
+   **52.7 ms** pipeline compile on the first-ever run of that route,
+   with the shared caches otherwise warm; the rerun, after that run had
+   saved its pipelines, peaked at 0.95 ms for the same 66-pipeline
+   burst. The hitch is a first-visit miss in the persistent pipeline
+   cache, gone once warm, so by this item's own bar it is a
+   cache-coverage problem and prewarm is not the fix. Parked; reopen
+   only on a forward-phase compile ≥ 16 ms that survives a warm rerun.
 3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments, which corrects the stated mechanism. The code was removed on 2026-10-10.
 4. **Reports idle-budget scan below 300 µs — closed 2026-08-04** (50 µs: −12.1 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
 
