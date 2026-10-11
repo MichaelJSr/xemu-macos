@@ -1817,6 +1817,16 @@ char **gArgv;
 
 static void *qemu_main(void *opaque)
 {
+    /*
+     * qemu_init() and the main loop run here, not on the process's first
+     * thread, so rcu_init()'s constructor-time registration does not cover
+     * them. Register so the main loop's RCU readers (address_space_*,
+     * device DMA) are visible to synchronize_rcu() instead of being
+     * invisible to it. Once only: rcu_register_thread() does not detect a
+     * second registration of the same thread.
+     */
+    rcu_register_thread();
+
     qemu_init(gArgc, gArgv);
     exit_status = qemu_main_loop();
     qatomic_set(&qemu_exiting, true);
@@ -1828,6 +1838,7 @@ static void *qemu_main(void *opaque)
     qemu_cleanup(exit_status);
     bql_unlock();
 
+    rcu_unregister_thread();
     return NULL;
 }
 
