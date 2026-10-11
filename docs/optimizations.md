@@ -1185,19 +1185,24 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
 
 - **Texture VRAM-end checks are live in release (2026-10-10).** Three
   guest-driven bounds in `vk/texture.c` sat in `nv2a_vk_assert`, which
-  release builds compile out: `check_texture_dirty` and the large-texture
-  chunked dirty check pass a range straight to
-  `memory_region_test_and_clear_dirty`, so a texture reaching past VRAM
-  read and cleared dirty bits belonging to other memory (or past the
-  bitmap), and the upload's staging-slot check is the only thing that
-  stops a decoded texture larger than a 256 MiB slot from writing past
-  it. All three are now `nv2a_vk_bounds_check` (31 sites in all), as
-  upstream keeps them live `assert()`s, and `check_texture_dirty`'s
-  inherited off-by-one is fixed: its end is exclusive, so a texture whose
-  last page is VRAM's last page is legal (`<=`, was `<`). A malformed
-  texture now aborts loudly instead of corrupting state, the same choice
-  as the 2026-09-08 bounds-check change. `pgraph_vk_mark_textures_possibly_dirty`
-  keeps its debug-only assert: it only compares ranges.
+  release builds compile out. For the two dirty checks
+  (`check_texture_dirty` and the fork's large-texture chunked check),
+  QEMU's core already caught part of it: `physical_memory_test_and_clear_dirty`
+  asserts the range stays inside its RAM block, live in release because
+  QEMU refuses `NDEBUG`, so a texture straddling VRAM's end already
+  aborted there. What nothing stopped was a texture lying wholly past
+  VRAM, and the out-of-bounds host reads of `vram_ptr + offset` by the
+  texture hash, snapshot copy and decoder that follow these checks. The
+  upload's staging check is the only bound on a decoded texture larger
+  than a 256 MiB slot. All three are now `nv2a_vk_bounds_check` (31 sites
+  in all), live in every build. Upstream keeps `check_texture_dirty`'s
+  bound and a staging-size bound as live `assert()`s; the chunked check
+  is fork-only. `check_texture_dirty`'s off-by-one is also fixed: its end
+  is exclusive, so a texture whose last page is VRAM's last page is
+  legal (`<=`; upstream still has `<`). A malformed texture now aborts
+  loudly instead of reading past VRAM, the same choice as the 2026-09-08
+  bounds-check change. `pgraph_vk_mark_textures_possibly_dirty` keeps
+  its debug-only assert: it only compares ranges.
 
 ### MetalFX + presentation
 
