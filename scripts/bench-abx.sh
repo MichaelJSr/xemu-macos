@@ -173,9 +173,9 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
-# Pads the savestates expect but this machine may lack (an absent bound
-# controller): see scripts/harness-pads.py.
-PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-pads.py $BASECONF)"})
+# Mute the run, and stub the pads the savestates expect but this machine
+# may lack (an absent bound controller): see scripts/harness-config.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $BASECONF)"})
 
 typeset -A APPBIN CONF
 for arm in B E; do

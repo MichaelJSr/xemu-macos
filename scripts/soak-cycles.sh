@@ -40,9 +40,9 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
-# Pads the savestates expect but this machine may lack (an absent bound
-# controller): see scripts/harness-pads.py.
-PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-pads.py $CONFIG)"})
+# Mute the run, and stub the pads the savestates expect but this machine
+# may lack (an absent bound controller): see scripts/harness-config.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
 export MVK_CONFIG_FAST_MATH_ENABLED=1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_RESUME_LOST_DEVICE=1
 

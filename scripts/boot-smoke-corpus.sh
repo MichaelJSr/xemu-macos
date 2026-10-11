@@ -127,6 +127,8 @@ for line in open(src, errors="replace"):
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
+  # Mute the run (scripts/harness-config.py); no loadvm, so no pad stubs.
+  python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs
   env XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$fifo \
       $APPBIN -config_path $cfg -monitor unix:$sock,server,nowait > $log 2>&1 &
   pid=$!

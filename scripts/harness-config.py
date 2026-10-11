@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Make a harness scratch config's pad topology deterministic.
+"""Finish a harness's scratch xemu.toml: mute it and pin the pad topology.
 
-    harness-pads.py <scratch xemu.toml>
+    harness-config.py <scratch xemu.toml> [--no-pad-stubs]
 
 Edits the scratch config in place and prints the extra xemu arguments,
-one per line, for the caller to append to its command line.
+one per line, for the caller to append to its command line. Only ever
+point it at a per-run copy, never at ../fixtures/xemu.toml or the user's
+config.
 
-A savestate stores the USB pad tree that was attached when it was saved
+Audio: sets [audio] volume_limit = 0. Harness runs play on the owner's
+machine while they work (owner request, 2026-10-11); the guest's APU
+and DSP still run in full, only the host output is silenced.
+
+Pads (skipped with --no-pad-stubs, for harnesses that never loadvm):
+a savestate stores the USB pad tree that was attached when it was saved
 (a hub at 1.P plus a gamepad at 1.P.1 for each bound player, P from
 ui/xemu-input.c's port_map {3,4,1,2}), and loadvm fails with
 "Unknown section or instance 'pci.0:02.0/1.3/usb-hub'" when the running
@@ -30,47 +37,65 @@ import sys
 PORT_MAP = {1: 3, 2: 4, 3: 1, 4: 2}  # player -> hub port, ui/xemu-input.c
 
 path = sys.argv[1]
+pad_stubs = "--no-pad-stubs" not in sys.argv[2:]
 lines = open(path, errors="replace").readlines()
 
-section = None
+
+def header(line):
+    m = re.match(r"\s*\[([^\]]+)\]", line)
+    return m.group(1).strip() if m else None
+
+
 bindings = {}
 drivers = {}
+section = None
 for line in lines:
-    m = re.match(r"\s*\[([^\]]+)\]", line)
-    if m:
-        section = m.group(1).strip()
-        continue
-    if section != "input.bindings":
+    if header(line):
+        section = header(line)
         continue
     m = re.match(r"\s*port([1-4])(_driver)?\s*=\s*'([^']*)'", line)
-    if m:
+    if section == "input.bindings" and m:
         (drivers if m.group(2) else bindings)[int(m.group(1))] = m.group(3)
 
-stub = [p for p in (1, 2) if bindings.get(p) != "keyboard"]
+stub = [p for p in (1, 2) if pad_stubs and bindings.get(p) != "keyboard"]
+
+# (table, key) -> value to force; each lands in its table, which is
+# created at the end of the file if the config has none.
+force = {("audio", "volume_limit"): "0"}
+if pad_stubs:
+    force[("input", "auto_bind")] = "false"
+done = set()
+
+
+def flush(table, out):
+    for (t, k), v in force.items():
+        if t == table and (t, k) not in done:
+            out.append("%s = %s\n" % (k, v))
+            done.add((t, k))
+
 
 out = []
 section = None
-saw_auto_bind = False
 for line in lines:
-    m = re.match(r"\s*\[([^\]]+)\]", line)
-    if m:
-        if section == "input" and not saw_auto_bind:
-            out.append("auto_bind = false\n")
-            saw_auto_bind = True
-        section = m.group(1).strip()
+    if header(line):
+        flush(section, out)
+        section = header(line)
         out.append(line)
         continue
-    if section == "input" and re.match(r"\s*auto_bind\s*=", line):
-        out.append("auto_bind = false\n")
-        saw_auto_bind = True
+    m = re.match(r"\s*([A-Za-z0-9_]+)\s*=", line)
+    if m and (section, m.group(1)) in force:
+        if (section, m.group(1)) not in done:
+            out.append("%s = %s\n" % (m.group(1), force[(section, m.group(1))]))
+            done.add((section, m.group(1)))
         continue
     m = re.match(r"\s*port([1-4])\s*=", line)
     if section == "input.bindings" and m and int(m.group(1)) in stub:
         continue
     out.append(line)
-if not saw_auto_bind:
-    out.append("\n[input]\nauto_bind = false\n" if section != "input"
-               else "auto_bind = false\n")
+flush(section, out)
+for table in sorted({t for (t, k) in force if (t, k) not in done}):
+    out.append("\n[%s]\n" % table)
+    flush(table, out)
 open(path, "w").writelines(out)
 
 for p in stub:
