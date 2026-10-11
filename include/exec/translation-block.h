@@ -101,7 +101,8 @@ struct TranslationBlock {
     uint8_t xemu_ccop;
     /*
      * xemu (XBOX) xpage link-registry bits (tb-maint.c registry;
-     * docs/xpage-design.md §3 backstop v2). Shares the pre-ihash hole.
+     * docs/Finished/xpage-design.md §3 backstop v2). Shares the pre-ihash
+     * hole.
      *   XEMU_XPAGE_TB_REGISTERED    — this TB is currently registered as a
      *       cross-page jump DESTINATION (dedup; cleared when the backstop
      *       severs, or wholesale by generation reset on tb_flush).

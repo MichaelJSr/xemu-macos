@@ -13,13 +13,15 @@ failed / reverted / settled-negative experiment tables.
 
 ## Runtime escape-hatch / diagnostic knobs
 
-All default off / fast-path; set to `1` to enable. Every knob here is
+Default-off knobs turn on with `1`; for a change that shipped default-on,
+the row names `0` as its escape hatch. Every knob here is
 the escape hatch or measurement channel for a specific entry in the
 Changes manifest below — the pairing is the fork's bisect discipline,
 and every one of them has a `getenv` on this branch. Knobs that exist
-only on `windows-wave1-wip` are listed apart, under "Escape hatches on
-branch `windows-wave1-wip`" inside the Windows native port section, so
-a reader of main is never told to set a knob that does nothing.
+only in the retired wave-1 work (tag `archive/windows-wave1-wip` since
+2026-10-10) are listed apart, under "Escape hatches on branch
+`windows-wave1-wip`" inside the Windows native port section, so a
+reader of main is never told to set a knob that does nothing.
 
 | Env var | Purpose |
 |---|---|
@@ -31,7 +33,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_REPORTS_SYNC` | `1` restores synchronous zpass-report drains (vs flip-deferred + idle-budget fallback) |
 | `XEMU_REPORTS_BUDGET_US` | Continuous-idle budget (µs) before the deferred-report safety-valve submit; default `300`, `5000` restores the pre-v0.10.1 value (clamped 0-100000) |
 | `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP, PGRAPH) — bisect hatch |
-| `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/pgraph-lockless-audit.md`) |
+| `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/Finished/pgraph-lockless-audit.md`) |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_PGRAPH_MMIO_STATS` | `1` prints an exit histogram of PGRAPH per-register MMIO hit-rate (reads/writes, interrupt-reg + RDI category totals, top offsets) — ranks ranges for the PGRAPH lockless audit |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_draw` guard submits before exhaustion) |
@@ -64,7 +66,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
 | `XEMU_X87_ELIDE_FT0` | **Default on since 2026-08-04**; `0` restores the unconditional store. Skips the write-back of the FT0 scratch at an inline-FPU register-cache flush when no reader of that value is still ahead in the same guest instruction (producer sets pending, consumer clears it). A/B: **+1.56 fps, 3/3 pairs positive** on F8 |
 | `XEMU_X87_DEFER_FIP` | **Default on since 2026-08-04**; `0` restores per-instruction stores. Defers the x87 exception-pointer stores (FIP/FCS/FDP/FDS) from one per instruction to one per contiguous x87 run, landing them at the flush points that already precede every consumer (`do_fstenv` via FNSTENV/FNSAVE, every helper call, `tb_stop`), and hoists the CS-selector load out of the per-instruction path (CS cannot change mid-TB). Measured cut ratio 8.81x against a 1.5x bar, mean run length 3.64. A/B: **+7.46 fps, 3/3 pairs positive** |
-| `XEMU_X87_ELIDE_CLEAN` | `0` (**dark**). `1` skips the write-back of an ST(i) cache slot that was only read. Default-off on purpose: it is not a pure elision — the cache holds the double-precision projection of an 80-bit `env->fpregs` entry, so today's unconditional write-back also *truncates* that entry, and eliding it leaves the original `floatx80` in place. Invisible to the inline path, observable through FSTPT/FSAVE/FXSAVE and the softfloat transcendental helpers. Refuter reads 3.49e9 checks / 0 violations with the truncation signal absent; promotion still needs an fps + artifact A/B (roadmap) |
+| `XEMU_X87_ELIDE_CLEAN` | `0` (**dark**). `1` skips the write-back of an ST(i) cache slot that was only read. Default-off on purpose: it is not a pure elision — the cache holds the double-precision projection of an 80-bit `env->fpregs` entry, so today's unconditional write-back also *truncates* that entry, and eliding it leaves the original `floatx80` in place. Invisible to the inline path, observable through FSTPT/FSAVE/FXSAVE and the softfloat transcendental helpers. Refuter reads 3.49e9 checks / 0 violations with the truncation signal absent; measured and closed 2026-08-04 (−0.23 fps, 3/3 negative; Failed / reverted experiments), stays dark as the record |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: register-cache write-backs split clean-ST(i)/dirty-ST(i)/dead-FT0/live-FT0, per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the three x87 mechanisms above: keeps every legacy store, computes the elision/deferral decision anyway, and counts every runtime point where the elided state could have been observed (stale `env->ft0` fed to a reader; deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary; a clean slot whose memory moved under the cache). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUPERBLOCK` | `=N` follows up to N branch seams per TB at translate time (superblock formation: unconditional same-page forward jmps + forward-conditional fallthroughs with out-of-line taken stubs). **Default 0 (off/dark)** — see the superblock entry in CPU / JIT changes and docs/roadmap.md for the measured policy verdicts |
@@ -85,7 +87,7 @@ a reader of main is never told to set a knob that does nothing.
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
-| `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_DUMP` / `_PIN_AUDIT` / `_SENTINEL` / `_FORCE` | JIT bring-up harnesses (see `docs/dsp-jit-design.md`) |
+| `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_DUMP` / `_PIN_AUDIT` / `_SENTINEL` / `_FORCE` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 | `XEMU_APU_RAM_DIRTY` | **Landed 2026-09-08; the default is per-platform.** The APU's fast voice-register stores write `d->ram_ptr` directly and so skipped `invalidate_and_set_dirty()`; with the knob on they also mark the written range for the `DIRTY_CLIENTS_NOCODE` clients (VGA, MIGRATION, NV2A, NV2A_TEX). **Default off on Apple**, which is the platform whose audio path this fork tuned and whose shipped behaviour is the unmarked store, because the marking's cost here has never been measured (an RCU read lock — two real `smp_mb()`s, since this tree builds without `CONFIG_MEMBARRIER` — plus up to four contended bitmap ORs, per voice-register store, from every voice worker); **default on elsewhere**, where nothing was measured against the skip. `=1` opts in on Apple, `=0` opts out elsewhere; read once in `mcpx_apu_vp_init` |
 
@@ -104,12 +106,13 @@ table carries the user-facing subset.
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only). With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*` / `helper_*` / `tlb_*` / `tcg_*` / `pgraph_*`) into a build failure instead of a loud warning (`build.sh:227-230`). Deliberately NOT enabled in CI: flip it on once the gate is proven quiet on a freshly-retrained tree |
 | `XEMU_PGO_RETRAIN_REF` | Unset = auto-derived. The commit the PGO staleness *age* is measured from; auto-derivation order is the last commit touching `pgo/`, else the commit that was HEAD at the newest `.profdata`/`.profraw` mtime (`build.sh:190-191`). Degrades to `unknown`/`n/a` with no error on a source tarball with no `.git` |
 | `XEMU_BENCH_ISOLATE_CACHES` | `0` (warm-shared, the pre-2026-08-04 behavior). `1` — equivalently `--isolate-caches` — plants the scratch config as a portable-mode marker inside the cloned bundle's `Contents/Resources`, moving xemu's data base path (`spirv_cache_v*/`, `pipeline_cache.bin`) into the disposable work dir, so caches start cold at batch start, warm during the warmup run, and are shared identically by both arms (`scripts/bench-savestate-ab.sh:101,213`). Recorded as `cache_isolation` in `meta.json` / `receipt.json`. Default unchanged so existing baselines stay comparable |
+| `XEMU_TEST_CONFIG` | Unset = `../fixtures/xemu.toml` beside the checkout. The source config every macOS harness clones its HDD, EEPROM and scratch config from (`bench-savestate-ab.sh`, `bench-abx.sh`, `boot-smoke-corpus.sh`, `probe-run.sh`, `soak-cycles.sh`, `movement-probe.sh`); `--config-src` still wins where a script takes it. There is no fallback to the personal `xemu.toml`, so personal play cannot delete a test savestate. Added 2026-10-10 |
 
 
 ## Changes
 
 > **2026-08-04 optimization wave.** The bullets dated 2026-08-04 below
-> implement [`fork-optimization-audit-2026-08.md`](fork-optimization-audit-2026-08.md)
+> implement [`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md)
 > (that page holds each candidate's evidence, prediction and kill
 > threshold; this one holds what happened). Headline receipt for the
 > wave as a whole, interleaved cross-binary A/B on the F8 heavy anchor:
@@ -137,16 +140,16 @@ table carries the user-facing subset.
 
 First run of the fork on real Windows hardware (Windows 10, i7-4770K,
 NVIDIA TITAN Xp 561.09, MSYS2 MINGW64 gcc 16). Full recipe, traps,
-results and the open work list: `docs/windows-port-2026-09.md`; the
+results and the open work list: `docs/Campaigns/windows-port-2026-09.md`; the
 ranked static audit (60 confirmed / 19 plausible / 10 refuted findings,
-22-batch plan): `docs/windows-audit-2026-09-summary.md` +
-`docs/windows-audit-2026-09.json`; the review that corrected this
-section: `docs/windows-wave1-review-2026-09-08.md`. macOS behaviour is
+22-batch plan): `docs/Campaigns/windows-audit-2026-09-summary.md` +
+`docs/Campaigns/windows-audit-2026-09.json`; the review that corrected this
+section: `docs/Finished/windows-wave1-review-2026-09-08.md`. macOS behaviour is
 unchanged by every item below unless stated — written before any of it
 had been built on macOS, and confirmed on 2026-09-08 (arm64 release
 build clean, `meson test --suite xbox` 6/6, CI 21/21 incl. both
 win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
-`docs/windows-port-2026-09.md` §8).
+`docs/Campaigns/windows-port-2026-09.md` §8).
 
 - **Upstream merge `2e0aad3e18`** (xemu master `429c9972eb`): DXGI /
   WGL_NV_DX_interop presenter, PTIMER alarm IRQs (nv2a vmstate v4),
@@ -219,8 +222,8 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   four independent grounds. The full protocol for the next Windows
   session — freeze the control, WER LocalDumps, full-reconfigure `-O2`
   vs `-O3` with ≥5 runs per variant — is in
-  `docs/windows-wave1-review-2026-09-08.md` §3 and
-  `docs/windows-port-2026-09.md` §9. Contents: (1) **landed on main
+  `docs/Finished/windows-wave1-review-2026-09-08.md` §3 and
+  `docs/Campaigns/windows-port-2026-09.md` §9. Contents: (1) **landed on main
   2026-09-08** (with the transport half of (8) — see the bullet below):
   `XEMU_WIN32_DXGI` hatch + the two non-Apple compile warnings in `ui/`
   (present header included unconditionally, `g_framebuffer_rect_shader`
@@ -341,7 +344,8 @@ These two knobs belong to wave-1 commits that are **not** landed here,
 so setting one on a main build does nothing: verified 2026-09-08 with
 `git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
 which matches nothing at all for either. Rows are kept in the knob
-table's shape so each moves back up verbatim as its commit lands —
+table's shape so each can move back up verbatim if its commit is ever
+cherry-picked from the tag. Earlier rows moved up as their commits landed:
 `XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
 `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
 `818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did,
@@ -612,7 +616,8 @@ table's shape so each moves back up verbatim as its commit lands —
   contradiction. `XEMU_X87_ELIDE_FT0=0` / `XEMU_X87_DEFER_FIP=0` are the
   hatches; the third mechanism, clean-ST(i) write-back elision, ships
   dark (`XEMU_X87_ELIDE_CLEAN`) because it is a numeric behavior change,
-  not a pure elision — see the roadmap.
+  not a pure elision; its A/B then measured −0.23 fps and closed it
+  (Failed / reverted experiments, 2026-08-04).
 - **arm-(b) prefilter counters off the hot path (default off,
   2026-08-04).** The aarch64 store slow-path stub emitted six diagnostic
   counter read-modify-writes unconditionally into generated code, and
@@ -1422,7 +1427,7 @@ table's shape so each moves back up verbatim as its commit lands —
   from I-cache). Lazy-flag elimination elides ~20% of SR updates. Harnesses:
   `XEMU_DSP_JIT_DIFF=N` (off-thread bit-exact validation, bounded
   per unique translation), `XEMU_DSP_JIT_STATS=1` (counters). See
-  [docs/dsp-jit-design.md](docs/dsp-jit-design.md).
+  [docs/Finished/dsp-jit-design.md](Finished/dsp-jit-design.md).
 - **`dsp_core_t` reordered into the ARM64 imm12 window (2026-08-04).**
   The JIT-hot scalars — `loop_rep`, `pc_on_rep`, the `interrupt_*`
   block, `num_inst`, `cur_inst_len`, `cur_inst`, and the two JIT flags —
@@ -1566,7 +1571,7 @@ table's shape so each moves back up verbatim as its commit lands —
   same steadiness win the PFB/USER set measured, not formally powered
   at n=3. The PGRAPH block was left out of
   the original lockless set because its handlers genuinely interleave
-  with the PFIFO thread. The audit (`docs/pgraph-lockless-audit.md`)
+  with the PFIFO thread. The audit (`docs/Finished/pgraph-lockless-audit.md`)
   shows `pg->lock`/`pfifo.lock` — not the BQL — arbitrate every shared
   access except one: the interrupt pair
   (`pending_interrupts`/`enabled_interrupts`), which the BQL serialised
@@ -1897,7 +1902,7 @@ Two MoltenVK optimizations that need code changes + validation before
 they could land — building the driver with `MVK_USE_METAL_PRIVATE_API`
 (unlocks `wideLines`/`logicOp`/`VK_EXT_provoking_vertex`, empirically
 confirmed) and async/prewarm pipeline creation — are recorded in
-[moltenvk-optimization-experiments.md](moltenvk-optimization-experiments.md).
+[moltenvk-optimization-experiments.md](Future/moltenvk-optimization-experiments.md).
 
 
 - **Sub-page arm (b): inline NOTDIRTY store-skip (default-on
@@ -1957,7 +1962,7 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   regressed on F8 (see the Failed table) and the corrected theory says
   the censused dead-flag win needs region/diamond formation — the
   machinery and census are that campaign's foundation
-  (`docs/roadmap.md` item 1).
+  (`docs/Finished/roadmap-closed-items.md`, ranked item 1).
 
 ### Testing & tooling (2026-07-18)
 
@@ -2135,7 +2140,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 Session 2026-07-18 additions — the superblock seam-following campaign
 (mechanism kept in-tree, dark, as the foundation for region formation;
-full story in `docs/roadmap.md` item 1):
+full story in `docs/Finished/roadmap-closed-items.md`, ranked item 1):
 
 | Attempt | Reason |
 |---|---|
@@ -2146,7 +2151,7 @@ full story in `docs/roadmap.md` item 1):
 | Region/diamond formation, 16 B window (the single pre-registered mechanism iteration) | Predicted the demote ratio would crater below 25%; measured **64%** (4,918 vs 2,794) and the A/B still **−0.69 fps, 3/3 negative**. Campaign STOPPED permanently per pre-registration. Final verdict on the census's 39-44% dead-flag mass: **not harvestable by any translate-time policy tried** (five policies, all negative, each mechanism identified); the liveness elision itself is sound and stays landed dark with its checker as the record |
 
 Session 2026-08-04 additions — the fork-wide optimization wave
-(candidates from `docs/fork-optimization-audit-2026-08.md`; the
+(candidates from `docs/Finished/fork-optimization-audit-2026-08.md`; the
 mechanisms that survived are in the Changes manifest above):
 
 | Attempt | Reason |
@@ -2172,7 +2177,7 @@ counter).
 | ~~Shader specialization constants~~ | Stale premise: alpha-test / fog-enable are *already* compile-time GLSL variants (`PshState`/`VshState` key the LRU shader cache); only value uniforms are per-draw and must stay uniforms. Useful reframing = variant-count / compile-stutter work |
 | `MTLResidencySet` (macOS 15+) | Blocked, twice over: each MetalFX subsystem owns only 2-4 long-lived resources (below the technique's payoff), and the NV2A renderer runs through MoltenVK, which exposes no Metal residency sets to a Vulkan client (`metalfx_upscale.m` Phase-5 note). Re-check only on a MoltenVK capability change |
 | Streamed-vertex stall reduction (CPU-side sync) | Attempted twice, both ~neutral on the then-GPU-bound attract fixtures: byte-exact refinement killed 75-85% of `finish_vtx_dirty` yet flips/s never moved; per-flight mirrors made cross-slot waits structurally impossible and totals stayed ~2.5-3.5 s per 5 s — the waits were GPU frame time. The salvage (byte-exact skip) shipped separately at +5.4% fps. 2026-07-18 re-check: current savestate fixtures are CPU-bound with ~14 ms/flip GPU slack, so the *renderer-thread* waits these touched are further off the critical path than ever |
-| GPU frame-cost campaign menu (draw merging, pass cuts, `VK_EXT_multi_draw`) | Killed by measurement on the 2026-07 savestate fixtures: zero subrange-coalesce opportunity, 10.6% merge candidates at ~0 per-call PFIFO cost (prefill=0 defers Metal encoding), per-draw CPU sites < 1 ms/flip, ~14 ms/flip GPU slack, multi_draw unimplemented in MoltenVK. Re-run campaign Phase 0/2 gates before reviving on a future GPU-bound scene |
+| GPU frame-cost campaign menu (draw merging, pass cuts, `VK_EXT_multi_draw`) | Killed by measurement on the 2026-07 savestate fixtures: zero subrange-coalesce opportunity, 10.6% merge candidates at ~0 per-call PFIFO cost (prefill=0 defers Metal encoding), per-draw CPU sites < 1 ms/flip, ~14 ms/flip GPU slack, and `VK_EXT_multi_draw` was then unimplemented in MoltenVK (it landed upstream as `bc0d5bf7` on 2026-08-09 and is in the local pin; xemu does not request it, as of 2026-10-10). Re-run campaign Phase 0/2 gates before reviving on a future GPU-bound scene |
 | Dirty-clear TLB-walk coalescing | Parked 2026-07-05 (~1-1.5 fps ceiling, widens an archaeology-1.9-class race window). 2026-07-18 gate re-check on the post-sub-page profile: renderer-attributable `test_and_clear_dirty` vCPU share is now **< 1%** (`physical_memory_is_clean` 0.47%, the walk itself absent from the top-25 sampler symbols) — the old "~6% echo" premise died with sub-page tracking. Stays parked |
 | Voice-register writeback batching | Closed 2026-07-18: unsafe by construction. Guest audio drivers read voice state (position / `PAR_STATE` / play cursors) directly from RAM with no MMIO interception point (`NV1BA0_PIO_GET_VOICE_POSITION` confirms live queries), so deferring `voice_set_mask`'s `ram_stl` to end-of-frame serves stale state mid-frame — archaeology 5.2's unsoundness, mirrored. The no-op-store elision already shipped |
 | `qemu_cpu_kick` via `dispatch_semaphore_t` | Closed 2026-07-18: wrong premise. Under MTTCG this fork's vCPU kick is `tcg_kick_vcpu_thread` — two atomic flag stores, no signal; `pthread_kill(SIG_IPI)` (the ~50 µs P99 the vector cited) survives only on cold paths (`qemu_cpu_kick_self`, `pause_all_vcpus`). Nothing on the hot path to replace |
@@ -2181,4 +2186,4 @@ counter).
 | `pfifo_kick` broadcast suppression (audit §1.5) | Closed 2026-08-04: the suppressible population is **empty**. `XEMU_PFIFO_KICK_STATS=1` counted **0 of 412,074 in-scene kicks** with no PFIFO wait-condition transition (7 such kicks exist for the whole process lifetime, all pre-`loadvm`), so a filter that skipped provably-useless broadcasts would skip nothing. That is the good outcome: archaeology 7.1 says a wrongly-skipped kick is a permanent PFIFO hang, and the census bought the answer at zero risk. Counter stays; suppression is not implemented and should not be. Separately noted, not proposed: 62.9% of broadcasts land with a kick already pending — provably redundant, but a *different* class from the one the audit proposed, and it needs its own sizing before anyone touches it |
 | ImGui frame build under BQL + main-loop mutex (audit §1.9) | Closed 2026-08-04 exactly as the audit predicted it would be. The HUD build holds both locks, which looked like a vCPU-blocking hazard; the measurement (`XEMU_UI_LOCK_STATS=1`, which shipped precisely to answer this without a bespoke build) puts combined occupancy at **mean 0.386% / median 0.373%**, under the pre-registered 0.5% kill bar. No rework. The knob stays as the standing re-check — this is a "measure first, expect a kill" candidate that got its kill |
 | `notdirty_write` dirty-check **fps claim** (audit §1.2) — the claim, not the code | Killed 2026-08-04 while the code shipped. The audit sized the candidate on a profile where `notdirty_write` carried a 75.1% trap share; the 2026-07-18 arm-(b) store-prefilter promotion then inhaled that population, and the in-scene re-measurement reads **~2.6k calls/s at a 2.2% trap share — a 34-57x collapse of the benefit base**, ceiling ≤ 0.06% of the vCPU thread, i.e. under the ±0.02 fps protocol resolution. `XEMU_DIRTY_FAST=1` stays default-on as a behavior-equivalent simplification with **no individual fps claim and no individual A/B** (Changes manifest). The transferable lesson is the proxy-collapse one: a candidate sized against a *profile* rather than a *mechanism* silently expires when an earlier landing changes the population, so re-measure the benefit base at build time, not at audit time |
-| Lockless MMIO for the remaining BQL blocks (NV2A `PMC`/`PCRTC`/`PTIMER`, APU `main`/`gp`/`ep`) | Closed by written verdict 2026-08-04 — **[`docs/lockless-mmio-verdict.md`](lockless-mmio-verdict.md)**, which satisfies archaeology 7.5's reopen condition ("audits for the remaining regions are written") without building anything. Fixture-independent ceiling: the *entire* pre-campaign BQL-MMIO prize was 117k ops/s × ~52 ns = **0.61% of one core**, and PFB/USER (78%) + APU-VP (~11%) + PGRAPH already harvested it — residual **< 0.07% of a core ≈ +0.01-0.06 fps**, at or below the ±0.02 fps static-baseline resolution. Correctness wall on top: these handlers call `nv2a_update_irq` inline, so BQL-free dispatch would drive `pci_irq_assert` with no BQL at all and race the iothread's vblank raise — the `pgraph-lockless-audit.md` §C race one level up, hang class, unfixable by atomics alone. Reopen bar: `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s — **measured 2026-08-04 at 75.6 ms per 75 s (2,178,310 BQL-taking ops, avg 47 ns, max 82.0 µs), 6.6x under the bar**, so the verdict now rests on a measurement and not only on the arithmetic (verdict page §A.1) |
+| Lockless MMIO for the remaining BQL blocks (NV2A `PMC`/`PCRTC`/`PTIMER`, APU `main`/`gp`/`ep`) | Closed by written verdict 2026-08-04 — **[`docs/Finished/lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md)**, which satisfies archaeology 7.5's reopen condition ("audits for the remaining regions are written") without building anything. Fixture-independent ceiling: the *entire* pre-campaign BQL-MMIO prize was 117k ops/s × ~52 ns = **0.61% of one core**, and PFB/USER (78%) + APU-VP (~11%) + PGRAPH already harvested it — residual **< 0.07% of a core ≈ +0.01-0.06 fps**, at or below the ±0.02 fps static-baseline resolution. Correctness wall on top: these handlers call `nv2a_update_irq` inline, so BQL-free dispatch would drive `pci_irq_assert` with no BQL at all and race the iothread's vblank raise — the `pgraph-lockless-audit.md` §C race one level up, hang class, unfixable by atomics alone. Reopen bar: `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s — **measured 2026-08-04 at 75.6 ms per 75 s (2,178,310 BQL-taking ops, avg 47 ns, max 82.0 µs), 6.6x under the bar**, so the verdict now rests on a measurement and not only on the arithmetic (verdict page §A.1) |

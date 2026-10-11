@@ -1,7 +1,14 @@
 
 # Windows real-hardware audit — ranked findings (2026-09-07 snapshot)
 
-Generated from `docs/windows-audit-2026-09.json`; it records the audit
+> **Campaign backlog** for
+> [windows-port-2026-09.md](windows-port-2026-09.md); the port doc's §6
+> tracks which batches are still unbuilt. Since 2026-10-10 the test
+> fixture binds no F-keys, so "F7/F8-save" below means saving a
+> named savestate into the fixture HDD (`../fixtures/README.md` beside
+> the checkout).
+
+Generated from `docs/Campaigns/windows-audit-2026-09.json`; it records the audit
 as it stood on 2026-09-07 and is not rewritten as findings are fixed.
 Known supersessions:
 
@@ -10,13 +17,13 @@ Known supersessions:
   `use_dsp_jit: default: true` in `config_spec.yml` rather than adopting
   upstream's `fc13b78060` flip, so "default on" is correct again and the
   docs were corrected the other way. Do not "fix" them back to `false`.
-  Rationale: `docs/windows-wave1-review-2026-09-08.md` §1 item 1, §5
-  decision (a); consequences: `docs/windows-port-2026-09.md` §2.
+  Rationale: `docs/Finished/windows-wave1-review-2026-09-08.md` §1 item 1, §5
+  decision (a); consequences: `docs/Campaigns/windows-port-2026-09.md` §2.
 - The wave-1 Windows exit-139 is **not** pinned to any source hunk. The
   same-day single-run bisect that blamed the vp.c pitch clamp was
   retracted in `40f0a01ad3`; the 2026-09-08 review's verdict is the
   `-O2` → `-O3` build-flag flip on the native MSYS2 arm, unconfirmed on
-  the box. Protocol: `docs/windows-port-2026-09.md` §9.
+  the box. Protocol: `docs/Campaigns/windows-port-2026-09.md` §9.
 - **Batch 10's approach item (1) is superseded as of 2026-09-08.**
   Its "do NOT add a second call in gl/renderer.c (double counting)"
   is wrong: only one renderer ops table is installed at a time, so

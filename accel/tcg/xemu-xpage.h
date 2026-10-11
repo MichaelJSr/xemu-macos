@@ -2,11 +2,12 @@
  * xemu: cross-page direct-chaining (Xbox-relaxed) — knobs, Gate-0 taken
  * counters, Gate-1 refuter shadow, and the R2 remap observer.
  *
- * See docs/xpage-design.md (worktree root) for the full soundness argument.
+ * See docs/Finished/xpage-design.md for the full soundness argument.
  *
- * Default off, zero cost when unset. The xbox machine runs exactly one vCPU
- * thread, which is the only writer of every counter/shadow here; the exit
- * dump runs from atexit() after that thread has stopped. Counters are plain
+ * Chaining is default on (broad) since 2026-07-12; the counters and shadow cost
+ * nothing unless their env vars are set. The xbox machine runs exactly one vCPU
+ * thread, which is the only writer of every counter/shadow here; the exit dump
+ * runs from atexit() after that thread has stopped. Counters are plain
  * unsynchronized uint64 (the fork's XEMU_INV_PROF model). Declarations are
  * unconditional (harmless on any target); the definitions and all touching
  * sites are #if defined(XBOX).

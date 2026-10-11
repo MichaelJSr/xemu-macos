@@ -1,5 +1,11 @@
 # PGRAPH MMIO lockless audit — 2026-07-11
 
+> **Finished 2026-07-11.** Shipped as BQL-free PGRAPH MMIO dispatch in
+> `a477ad9f91`. Residual risk §I.2 is carried by
+> [lockless-mmio-verdict.md](lockless-mmio-verdict.md) §E and §I.3 by
+> [roadmap](../roadmap.md) ranked item 5. "README roadmap item 3" below
+> predates the 2026-07-18 README split.
+
 Static + concurrency audit of the NV2A **PGRAPH** register block
 (`0x400000`, size `0x2000`) to decide whether its guest MMIO dispatch can
 drop the BQL the way PFB/USER already did (`ee9100e538`, archaeology 7.5).

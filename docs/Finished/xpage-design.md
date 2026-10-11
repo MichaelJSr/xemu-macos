@@ -1,5 +1,12 @@
 # Cross-page direct-chaining, Xbox-relaxed — soundness analysis (Gate 0)
 
+> **Finished.** Cross-page direct chaining shipped default-on 2026-07-11
+> (`ee7ccad37d`, with the generic `tlb_flush` backstop), and backstop v2
+> followed 2026-07-12 (`f7d9cc2ff1`). That promotion superseded §8's
+> "ships dark" plan. The page-spanning-destination gap is
+> [roadmap](../roadmap.md) ranked item 4 (measured below its bar,
+> parked). "README roadmap item 2" below predates the README split.
+
 Campaign: README roadmap item 2. Branch: `macos-optimizations`, isolated
 worktree. Guest: i386 Pentium III, single vCPU, CF_PCREL always set
 (`target/i386/cpu.c:9326`, `tcg_cflags_set(cs, CF_PCREL)`).

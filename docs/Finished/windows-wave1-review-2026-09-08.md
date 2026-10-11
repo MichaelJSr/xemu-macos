@@ -1,5 +1,13 @@
 # Review of the 2026-09-07 Windows-side work (main + windows-wave1-wip) — 2026-09-08
 
+> **Finished 2026-10-10.** Main carries every wave-1 item per §7's
+> verdicts, and v0.13.3 was published from `e6252bd72f`. The
+> `windows-wave1-wip` branch was retired that day (`b7e2752589`); tag
+> `archive/windows-wave1-wip` keeps its commits, including the held PVIDEO
+> fix `285779ce83`, which has no validation route while testing is
+> Azurik-only. The exit-139 experiment continues in
+> [windows-port-2026-09.md](../Campaigns/windows-port-2026-09.md) §9.
+
 Scope: everything pushed from the Windows box over the weekend. Main
 (`macos-optimizations`) moved `ea9633798d` → `add066354f` (upstream merge,
 MSYS2 configure fixes, DXGI lock fix, docs, harness scripts). Branch
@@ -51,7 +59,7 @@ Verified defects on main:
    `XEMU_DISPLAY_SKIP_STRICT`, `XEMU_APU_RAM_DIRTY`, `XEMU_VK_VOLK_DEVICE`,
    `XEMU_WIN_O3`) with no `getenv` on main; `README.md:48-50` claims native
    MSYS2 builds are `-O3` with GCC PGO (wave-1 only); `docs/optimizations.md:1088`
-   still says `use_dsp_jit` default on; `docs/windows-port-2026-09.md` §9 tells
+   still says `use_dsp_jit` default on; `docs/Campaigns/windows-port-2026-09.md` §9 tells
    the next Mac session wave 1 "was landed" and to bisect with hatches that do
    not exist on main.
 3. **SPIR-V cache key reads Homebrew's glslang header, not the compiled
@@ -149,7 +157,7 @@ Mac, next session (nothing here needs the Windows verdict):
 
 1. Docs-correction commit on main (class 1): items 1-2 of §1, plus the
    config-and-flags skill's `use_dsp_jit default true` row, plus a rewritten
-   §8/§9 in `docs/windows-port-2026-09.md` that describes main's real delta and
+   §8/§9 in `docs/Campaigns/windows-port-2026-09.md` that describes main's real delta and
    carries the ≥5-runs rule and the frozen-control SHA.
 2. Decide the DSP default (§5) and implement it in the same push.
 3. Small main-side fixes: PTIMER divisor guard; dsp56300 `build_machine`

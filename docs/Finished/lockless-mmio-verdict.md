@@ -1,5 +1,8 @@
 # Lockless MMIO — closure verdict for the remaining BQL blocks — 2026-08-04
 
+> **Finished 2026-08-04 (`8b7d7f84de`).** Verdict: closed, do not build.
+> The reopen bar in §E still stands.
+
 The decision **not** to convert the last BQL-holding guest register
 blocks (NV2A `PMC` / `PCRTC` / `PTIMER`, APU `main` / `gp` / `ep`) to
 BQL-free dispatch, taken on fixture-independent arithmetic instead of a
@@ -231,4 +234,4 @@ Line anchors verified 2026-08-04 at `f4bb867d3c`; they drift — re-grep
 before citing. Method and thresholds: `.claude/skills/xemu-testing`,
 `.claude/skills/xemu-validation-and-qa`. History:
 `.claude/skills/xemu-failure-archaeology` 7.5. Candidate provenance:
-`docs/fork-optimization-audit-2026-08.md` §4.
+`docs/Finished/fork-optimization-audit-2026-08.md` §4.

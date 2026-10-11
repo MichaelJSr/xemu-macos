@@ -1,11 +1,17 @@
 # MoltenVK optimization experiments (M2 Ultra audit — Tier 3 research)
 
+> **Future.** Experiment A (`MVK_USE_METAL_PRIVATE_API`) was never built.
+> Experiment B's option (d) shipped (`ui/xemu.c`), and option (a),
+> pipeline prewarm, is [roadmap](../roadmap.md) top candidate 2. Driver
+> versions below are as of 2026-07-21: releases now bundle MoltenVK 1.4.2
+> and local builds use the pin in `scripts/build-moltenvk.sh`.
+
 Research record for two MoltenVK optimizations that came out of the
 2026-07-21 deep audit of the fork's bundled MoltenVK on Apple Silicon
 (M2 Ultra, macOS 26 Tahoe). Both are **deferred as research, not
 landed** — each is parked behind an explicit bar below. Shipped MoltenVK
 config and the audit's low-risk wins live in the
-[optimization ledger](optimizations.md#moltenvk-runtime-config); this
+[optimization ledger](../optimizations.md#moltenvk-runtime-config); this
 document is the deep record for the two items that need code changes and
 validation before they could graduate.
 

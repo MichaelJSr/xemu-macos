@@ -8,7 +8,7 @@
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
  *
- * Design summary (see docs/dsp-jit-design.md for the full write-up):
+ * Design summary (see docs/Finished/dsp-jit-design.md for the full write-up):
  *
  *   The JIT translates DSP basic blocks into ARM64 machine code.
  *   Each translated DSP instruction becomes a short "stub" that:

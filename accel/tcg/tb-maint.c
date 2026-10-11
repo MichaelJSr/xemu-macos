@@ -366,7 +366,8 @@ bool xemu_ccop_census_on(void)
 }
 
 /*
- * Sub-page dirty tracking (docs/subpage-gate0-prediction.md arm (a): the helper-top O(1)
+ * Sub-page dirty tracking (docs/Finished/subpage-gate0-prediction.md
+ * arm (a): the helper-top O(1)
  * consult). A per-PageDesc bitmap records which sub-blocks of the page a live
  * TB covers; a guest data store that lands entirely outside every code
  * sub-block skips the whole-page invalidation (and its page-collection lock and
@@ -1463,7 +1464,7 @@ static inline void tb_jmp_unlink(TranslationBlock *dest)
 
 #if defined(XBOX)
 /*
- * Cross-page direct-chain link registry (docs/xpage-design.md §3).
+ * Cross-page direct-chain link registry (docs/Finished/xpage-design.md §3).
  *
  * Every cross-page direct jump created by tb_add_jump registers its
  * DESTINATION TB here (deduped by tb->xemu_xpage_reg). When a full-TLB-flush

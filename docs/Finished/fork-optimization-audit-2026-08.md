@@ -1,5 +1,10 @@
 # Fork-wide optimization audit — 2026-08-04
 
+> **Finished 2026-08-04.** Every candidate was landed or measured dead the
+> same day; outcomes are in the [roadmap](../roadmap.md)'s 2026-08-04
+> state header and the [ledger](../optimizations.md), closing commit
+> `7aa746a952`. Figures and line anchors below are as of 2026-08-04.
+
 A deep, adversarially-verified audit of the whole fork for remaining
 optimization and refinement candidates, run at the arm-(b)-on
 equilibrium (F8 heavy anchor ~36-39 fps @ ~831 draws/flip, vCPU-bound,
@@ -302,7 +307,7 @@ averages to 0.86 ms/flip over a 5 s interval, so a per-flip-average
 threshold is broken by construction — gate on `max=` and event count
 per interval (any single compile ≥ 8 ms in forward phase = the hitch
 is real), warm and cold `pipeline_cache.bin` runs. Fires ⇒ Experiment
-B option (a) (prewarm, `docs/moltenvk-optimization-experiments.md`)
+B option (a) (prewarm, `docs/Future/moltenvk-optimization-experiments.md`)
 graduates with a baseline number; doesn't ⇒ close arch 1.12
 permanently for this fixture set.
 

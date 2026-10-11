@@ -48,9 +48,10 @@ manual packaging recipe is kept at the end as the fallback.
    ```
 
    Commits follow the fork conventions (imperative title with an
-   area prefix, why-first body, measured numbers;
-   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` footer
-   for agent-authored commits).
+   area prefix, why-first body, measured numbers; agent-authored
+   commits end with the `Co-Authored-By:` line the agent's harness
+   supplies, e.g. `Co-Authored-By: Claude Opus 5.5
+   <noreply@anthropic.com>` as of 2026-10-10).
 
 2. **Tag and push.**
 

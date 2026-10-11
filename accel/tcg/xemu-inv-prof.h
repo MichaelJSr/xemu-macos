@@ -39,7 +39,8 @@ bool xemu_inv_prof_on(void);
  * XEMU_INV_TIMING=1 (default off): cycle-level timing of notdirty_write, split
  * into {body-total, invalidation+scan+recycle}. Gated separately from
  * XEMU_INV_PROF so a pure-count run is never perturbed by the timer reads.
- * Sizes the sub-page dirty-tracking arms (docs/subpage-gate0-prediction.md): the ratio of
+ * Sizes the sub-page dirty-tracking arms
+ * (docs/Finished/subpage-gate0-prediction.md): the ratio of
  * the invalidation segment to the rest of the trap body decides whether a
  * scheme that multiplies the trap count (helper-top consult) can ever net
  * positive against the whole-page-invalidation epoch. Counts are load-immune;
@@ -122,13 +123,14 @@ static inline double xemu_inv_tick_ns(void)
 bool xemu_tb_range_inv_on(void);
 
 /*
- * Sub-page dirty tracking (docs/subpage-gate0-prediction.md arm (a)). XEMU_SUBPAGE_DIRTY=1
+ * Sub-page dirty tracking (docs/Finished/subpage-gate0-prediction.md, arm (a))
  * fast-skips whole-page invalidation for a data store that misses every code
- * sub-block; XEMU_SUBPAGE_REFUTE=1 runs that skip decision against a
- * ground-truth TB-overlap scan and counts violations (design falsified if > 0).
- * Both default off, zero cost when unset. Implemented entirely inside
- * tb-maint.c's XBOX paths; declared here so the shared INV_PROF dump can print
- * their counters.
+ * sub-block. Default on since 2026-07-11; XEMU_SUBPAGE_DIRTY=0 restores
+ * whole-page invalidation. XEMU_SUBPAGE_REFUTE=1 runs that skip decision
+ * against a ground-truth TB-overlap scan and counts violations (design
+ * falsified if > 0); default off, zero cost when unset. Implemented entirely
+ * inside tb-maint.c's XBOX paths; declared here so the shared INV_PROF dump can
+ * print their counters.
  */
 bool xemu_subpage_dirty_on(void);
 bool xemu_subpage_refute_on(void);

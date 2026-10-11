@@ -103,7 +103,8 @@ void pfifo_kick(NV2AState *d)
      * the pgraph/{gl,vk}/{surface,display,renderer}.c paths,
      * nv2a.c:nv2a_unlock_fifo, pgraph.c:pgraph_write /
      * do_wait_for_renderer_switch, and user.c:user_write. The
-     * PGRAPH-lockless audit (docs/pgraph-lockless-audit.md) re-verified
+     * PGRAPH-lockless audit (docs/Finished/pgraph-lockless-audit.md)
+     * re-verified
      * this set unchanged: pgraph_write's three kicks (NV_PGRAPH_INTR /
      * INCREMENT / FIFO) now run under BQL-free MMIO dispatch but still
      * hold d->pfifo.lock across the kick, so the discipline is intact.

@@ -49,7 +49,7 @@ NV2AState *g_nv2a;
  * Counters are unsynchronised on purpose: pgraph_read/pgraph_write run
  * only on the single vCPU thread (the only caller of guest MMIO), the same
  * discipline as the XEMU_MMIO_PROF counters in cputlb.c. See
- * docs/pgraph-lockless-audit.md.
+ * docs/Finished/pgraph-lockless-audit.md.
  */
 #define PGRAPH_MMIO_STAT_SLOTS 0x800 /* 0x2000-byte block / 4 */
 static uint64_t pgraph_mmio_reads[PGRAPH_MMIO_STAT_SLOTS];
@@ -274,7 +274,7 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
     switch (addr) {
     case NV_PGRAPH_INTR:
         /* Atomic: nv2a_update_irq reads this field lock-free (BQL, not
-         * pg->lock). See docs/pgraph-lockless-audit.md §C. */
+         * pg->lock). See docs/Finished/pgraph-lockless-audit.md §C. */
         r = qatomic_read(&pg->pending_interrupts);
         break;
     case NV_PGRAPH_INTR_EN:
@@ -330,7 +330,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
          * (|= CONTEXT_SWITCH at :204 runs under the BQL after dropping
          * pg->lock) and nv2a_update_irq reads them lock-free. Under BQL-free
          * dispatch qatomic_and_fetch keeps this clear from losing a
-         * concurrent raise. See docs/pgraph-lockless-audit.md §C. */
+         * concurrent raise. See docs/Finished/pgraph-lockless-audit.md §C. */
         bool was_waiting =
             kick_stats && (qatomic_read(&pg->waiting_for_nop) ||
                            qatomic_read(&pg->waiting_for_context_switch));
@@ -465,7 +465,7 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
         bql_lock();
         /* Atomic RMW: pg->lock is dropped here, so this raise races the
          * vCPU's lock-free interrupt-clear once PGRAPH dispatch is BQL-free
-         * (docs/pgraph-lockless-audit.md §C). */
+         * (docs/Finished/pgraph-lockless-audit.md §C). */
         qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_CONTEXT_SWITCH);
         nv2a_update_irq(d);
         bql_unlock();

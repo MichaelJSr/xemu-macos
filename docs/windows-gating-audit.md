@@ -11,8 +11,9 @@ Vulkan ICD — this machine cannot host one; VMs expose no ICD).
 
 Honest scope: this audit delivers *compile-correct + CI-green +
 statically-audited*. It is not a substitute for running on real Windows
-hardware; the needs-real-HW list at the end is mirrored in README "Future
-vectors".
+hardware; the needs-real-HW list at the end is mirrored in
+[`roadmap.md`](roadmap.md) ranked item 5 (the README "Future vectors"
+section moved there in the 2026-07-18 README split).
 
 ## A. Compile-time platform gates (non-Apple keeps upstream semantics)
 
@@ -27,7 +28,7 @@ vectors".
 | A7 | `ui/xemu.c` MVK_CONFIG `setenv` block (~1595) | `#ifdef __APPLE__` | absent — MoltenVK config vars are meaningless off macOS |
 | A8 | Metal present / MetalFX / IOSurface (`ui/xemu-metal.m`, `vk/metalfx_upscale.m`, `ui/xui/metal-helpers.mm`) | Objective-C sources added only under `host_os == 'darwin'` in meson | not compiled at all; GL presentation path as upstream |
 | A9 | `hw/xbox/mcpx/apu/vp/vp.c` | vDSP (Accelerate) FIR path | `#else` portable C path (autovectorized) |
-| A10 | `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h` | `DSP56K_JIT_SUPPORTED = __APPLE__ && __aarch64__` | fork inline JIT absent; interpreter or upstream external JIT engine per `dsp_want_external_jit_engine()` — precedence key (`audio.dsp_jit.enabled`) is inert when unsupported |
+| A10 | `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h` | `DSP56K_JIT_SUPPORTED = __aarch64__ && !_WIN32` (was `__APPLE__ && __aarch64__` when audited; Linux arm64 since) | fork inline JIT absent; interpreter or upstream external JIT engine per `dsp_want_external_jit_engine()` — precedence key (`audio.dsp_jit.enabled`) is inert when unsupported |
 | A11 | `tcg/aarch64/tcg-target-has.h:65` | `TCG_TARGET_HAS_fpu 0` under `_WIN32` | helper-based hard FPU (bit-equivalent), avoiding the llvm-mingw `qemu_build_not_reached` link failure |
 | A12 | `ui/xemu-input.c:522` | `XEMU_INPUT_PIPE` FIFO harness | `#ifdef _WIN32` stub — facility absent by design |
 | A13 | `ui/thirdparty/fpng/fpng.cpp` | ARM CRC32 intrinsics | gated on `__ARM_FEATURE_CRC32` |
@@ -65,7 +66,7 @@ observation) gates destruction; `surface_flush` drains all slots first.
 Validated at fps parity on the F5 savestate scene (46.6–47.2 vs
 46.83 ± 0.24, identical finish mix, zero errors).
 
-## D. Needs-real-HW validation list (mirrored in README Future vectors)
+## D. Needs-real-HW validation list (mirrored in roadmap.md ranked item 5)
 
 None of this can be exercised on this machine (VMs expose no Vulkan ICD):
 
@@ -172,7 +173,7 @@ regresses nothing either way; the pre-existing sticky-SSE feature
   arms OK including the engagement assert, retiring the runtime half of
   needs-real-HW #8/D11 via CI (chain-unpatch caveat: see #11).
 
-## I. needs-real-HW list — additions (mirror README Future vectors)
+## I. needs-real-HW list — additions (mirror roadmap.md ranked item 5)
 
 9. **Texture/sampler eviction retirement gate** — report-value/soak on
    native AMD/NVIDIA/Intel Vulkan (equivalence proven; soak confirms) (F1).

@@ -1,5 +1,11 @@
 # Native Windows port — status and handoff (2026-09-07, revised 2026-09-08)
 
+> **Campaign, paused since 2026-09-08** (last Windows-side commit
+> `5dfde3356d`). Open work: the §6 batch table, the §9 exit-139 protocol
+> and the policy questions. Since this was written, v0.13.3 shipped (so
+> §8's pre-tag list is history) and the wave-1 branch §9 arm (A) builds
+> from survives only as tag `archive/windows-wave1-wip`.
+
 First session of this fork on real Windows hardware. Everything below was
 done on a Windows 10 Pro 22H2 box: Intel i7-4770K (Haswell, 4C/8T, AVX2),
 NVIDIA TITAN Xp (driver 561.09, Vulkan 1.3.280, two TITAN Xp devices
@@ -65,7 +71,7 @@ interpreter. The fork owns its defaults, so `config_spec.yml` is back to
 engine everywhere and `[audio.dsp_jit] enabled = true` selects the
 fork's inline ARM64 JIT instead. Precedence in
 `dsp_want_external_jit_engine()` (`hw/xbox/mcpx/apu/dsp/dsp.c:120`) is
-unchanged. See `docs/windows-wave1-review-2026-09-08.md` §1 item 1 and
+unchanged. See `docs/Finished/windows-wave1-review-2026-09-08.md` §1 item 1 and
 §5 decision (a).
 
 ## 3. First real-hardware results (Azurik, Vulkan renderer, TITAN Xp)
@@ -91,9 +97,9 @@ unchanged. See `docs/windows-wave1-review-2026-09-08.md` §1 item 1 and
 ## 4. Static audit (13 finders → 2-lens adversarial verification → planner)
 
 Workflow result, 2026-09-07: 114 raw → 89 deduped → **60 confirmed, 19
-plausible, 10 refuted**. Ranked table: `docs/windows-audit-2026-09-summary.md`.
+plausible, 10 refuted**. Ranked table: `docs/Campaigns/windows-audit-2026-09-summary.md`.
 Full JSON with evidence, verifier notes and the 22-batch plan:
-`docs/windows-audit-2026-09.json` (per-batch splits were used to drive the
+`docs/Campaigns/windows-audit-2026-09.json` (per-batch splits were used to drive the
 implementers). Headline confirmed items:
 
 - **Platform-neutral renderer defects** (affect macOS too, hidden by
@@ -156,7 +162,7 @@ the profiler, with `XEMU_VK_VOLK_DEVICE=0`, and with
 "all apu/xid files reverted", "only vp.c reverted" and "vp.c minus the
 pitch clamp" — single runs at an observed ~5/6 failure rate, i.e. not
 evidence; every variant must be re-run ≥5 times before believing a
-pass. The 2026-09-08 review (`docs/windows-wave1-review-2026-09-08.md`
+pass. The 2026-09-08 review (`docs/Finished/windows-wave1-review-2026-09-08.md`
 §3) puts the leading explanation elsewhere: the branch's native-Windows
 `-O3 -Dstack_protector=disabled` build flags, which every crashing
 binary shared and the passing control lacked; §9 below carries the
@@ -164,7 +170,7 @@ experiment that settles it. The pitch clamp stays out (harmless either
 way). gdb did not
 catch it (run-under and attach both missed).
 
-**Superseded 2026-09-08 by `docs/windows-wave1-review-2026-09-08.md`
+**Superseded 2026-09-08 by `docs/Finished/windows-wave1-review-2026-09-08.md`
 §3.** The apu/xid commit is *not* the leading suspect — the review
 exonerated it on four independent grounds. Five of six crash hunters,
 each starting from a different lens and none refuted, converged instead
@@ -192,7 +198,7 @@ main, so they do nothing on a main build.
 
 ## 6. Remaining plan (batches not yet implemented)
 
-From the planner (`docs/windows-audit-2026-09.json` → `plan.batches`),
+From the planner (`docs/Campaigns/windows-audit-2026-09.json` → `plan.batches`),
 in recommended order. Batches marked *savestate* need the Azurik in-game
 savestate benchmark (not yet created on this box; the protocol is
 `scripts/bench-savestate-ab-win.py`, and the Mac's fixtures are listed
@@ -235,7 +241,7 @@ copied HDD image and `-config_path`.
 
 *Landing status of the wave-1 batches and the one unexplained boot stall
 seen during their macOS smokes are recorded in
-`docs/windows-wave1-review-2026-09-08.md` §7.*
+`docs/Finished/windows-wave1-review-2026-09-08.md` §7.*
 
 Main (`macos-optimizations`) moved `ea9633798d` → `add066354f`: the
 upstream merge `2e0aad3e18` (which also carried upstream's
@@ -248,7 +254,7 @@ and none of its escape hatches has a `getenv` on main. (2026-09-08; all
 of it except `285779ce83` landed later, see the status note above.)
 
 Verified on this Mac on 2026-09-08 (evidence table:
-`docs/windows-wave1-review-2026-09-08.md` §1):
+`docs/Finished/windows-wave1-review-2026-09-08.md` §1):
 
 | Check | Result |
 |---|---|
@@ -286,7 +292,7 @@ runtime knobs; the 2026-09-08 review concluded the differential is the
 `-O2` → `-O3 -Dstack_protector=disabled` flip on the native MSYS2
 release arm (`fb42bce22e`), which no runtime knob can reach. Full
 reasoning and the eliminations:
-`docs/windows-wave1-review-2026-09-08.md` §3. Run the steps in order,
+`docs/Finished/windows-wave1-review-2026-09-08.md` §3. Run the steps in order,
 and **pre-commit the interpretation before running anything**.
 
 1. **Freeze the control.** The control is main built by main's
@@ -331,4 +337,4 @@ Use `scripts/bench-savestate-ab-win.py` (on main since `add066354f`)
 for anything that produces a number; `run-test.sh` is fine for
 crash/no-crash runs. The remaining audit batches are §6, and the
 landing order for wave 1 — one push each, CI green between — is
-`docs/windows-wave1-review-2026-09-08.md` §4.
+`docs/Finished/windows-wave1-review-2026-09-08.md` §4.

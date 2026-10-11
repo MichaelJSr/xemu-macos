@@ -41,7 +41,7 @@ void nv2a_update_irq(NV2AState *d)
     /* PGRAPH: read the interrupt pair atomically. This runs under the BQL
      * but NOT pg->lock, while PGRAPH's now-BQL-free MMIO handlers and the
      * PFIFO thread mutate these fields with qatomic ops. See
-     * docs/pgraph-lockless-audit.md §C. */
+     * docs/Finished/pgraph-lockless-audit.md §C. */
     if (qatomic_read(&d->pgraph.pending_interrupts) &
         qatomic_read(&d->pgraph.enabled_interrupts)) {
         d->pmc.pending_interrupts |= NV_PMC_INTR_0_PGRAPH;
@@ -380,7 +380,8 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
      *     pair (pending/enabled_interrupts) against the lock-free
      *     nv2a_update_irq reader and the PFIFO thread's raise; those
      *     fields are now qatomic, so the whole block is BQL-safe. Full
-     *     argument + per-range verdicts: docs/pgraph-lockless-audit.md.
+     *     argument + per-range verdicts:
+     *     docs/Finished/pgraph-lockless-audit.md.
      * The TCG fast path honors lockless_io in accel/tcg/cputlb.c
      * (fork change; upstream only checks it in prepare_mmio_access).
      * XEMU_MMIO_BQL=1 restores fully locked dispatch for all three blocks;
