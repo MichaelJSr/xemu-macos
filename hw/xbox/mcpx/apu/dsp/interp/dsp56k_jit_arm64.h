@@ -90,7 +90,6 @@ uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp);
  */
 #define DSP56K_JIT_SENTINEL_CURINST  (1u << 0)
 #define DSP56K_JIT_SENTINEL_POISON   0x00adbeefu
-bool dsp56k_jit_sentinel_enabled(uint32_t bit);
 
 /*
  * Force-apply the deferred round-4 cur_inst skip literally
@@ -100,7 +99,6 @@ bool dsp56k_jit_sentinel_enabled(uint32_t bit);
  * re-landed permanently.
  */
 #define DSP56K_JIT_FORCE_CURINST_SKIP  (1u << 0)
-bool dsp56k_jit_force_enabled(uint32_t bit);
 
 /*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
@@ -132,7 +130,6 @@ bool dsp56k_jit_helper_is_terminator(void *fn);
 /* Phase 4 shims (parmove inlining). See dsp_cpu.c for definitions. */
 int  dsp56k_jit_helper_pm_read_accu24(dsp_core_t *dsp, int numreg, uint32_t *dest);
 int  dsp56k_jit_helper_calc_ea(dsp_core_t *dsp, uint32_t ea_mode, uint32_t *dst_addr);
-void dsp56k_jit_helper_update_rn(dsp_core_t *dsp, uint32_t numreg, int16_t modifier);
 dsp_emu_func_t dsp56k_jit_helper_lookup_alu(uint32_t inst);
 bool dsp56k_jit_helper_alu_is_move(dsp_emu_func_t fn);
 void dsp56k_jit_helper_pm_4x(dsp_core_t *dsp);

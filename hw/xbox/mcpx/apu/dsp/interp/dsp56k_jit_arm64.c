@@ -298,18 +298,6 @@ bool dsp56k_jit_diff_enabled(void)
     return g_jit_diff;
 }
 
-bool dsp56k_jit_sentinel_enabled(uint32_t bit)
-{
-    parse_flags_once();
-    return (g_jit_sentinel & bit) != 0;
-}
-
-bool dsp56k_jit_force_enabled(uint32_t bit)
-{
-    parse_flags_once();
-    return (g_jit_force & bit) != 0;
-}
-
 /*
  * emu_* symbols are file-static in dsp_emu.c.inc. Classification,
  * opcode lookup, and length detection are provided via shims at the
@@ -327,7 +315,7 @@ bool dsp56k_jit_force_enabled(uint32_t bit)
  *   CMP immediate / CMP register
  *   CBZ / CBNZ
  *   B.cond (pc-relative, patched after label resolution)
- *   BLR / BR / RET
+ *   BLR / RET
  *   STP / LDP pre/post-indexed (for FP/LR save)
  *
  * All encodings verified against ARMv8-A reference manual, using
@@ -407,14 +395,6 @@ static inline void emit_ldr_w_imm(ArmEmit *e, int rd, int rn, unsigned int off)
     assert((off & 3) == 0 && off <= 16380);
     uint32_t imm12 = off / 4;
     emit_u32(e, 0xb9400000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
-}
-
-/* LDR Xd, [Xn, #imm]   — 64-bit load, offset multiple of 8. */
-G_GNUC_UNUSED static inline void emit_ldr_x_imm(ArmEmit *e, int rd, int rn, unsigned int off)
-{
-    assert((off & 7) == 0 && off <= 32760);
-    uint32_t imm12 = off / 8;
-    emit_u32(e, 0xf9400000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* LDRH Wd, [Xn, #imm]  — 16-bit zero-extending load, offset mul. of 2. */
@@ -650,10 +630,8 @@ static inline void emit_mov_w_reg(ArmEmit *e, int rd, int rn)
  * LSL Wd, Wn, #s   => UBFM Wd, Wn, #((32-s)%32), #(31-s)
  * LSR Wd, Wn, #s   => UBFM Wd, Wn, #s, #31
  * UBFX Wd, Wn, #lsb, #width => UBFM Wd, Wn, #lsb, #(lsb+width-1)
- * ASR Wd, Wn, #s   => SBFM Wd, Wn, #s, #31
  *
  * UBFM 32-bit encoding: 0x53000000 | (immr << 16) | (imms << 10) | (Rn << 5) | Rd
- * SBFM 32-bit encoding: 0x13000000 | (immr << 16) | (imms << 10) | (Rn << 5) | Rd
  */
 static inline void emit_lsl_w_imm(ArmEmit *e, int rd, int rn, int shift)
 {
@@ -668,13 +646,6 @@ G_GNUC_UNUSED static inline void emit_lsr_w_imm(ArmEmit *e, int rd, int rn, int 
 {
     assert(shift >= 0 && shift < 32);
     emit_u32(e, 0x53000000u | ((uint32_t)shift << 16) | (31u << 10) |
-                ((rn & 0x1f) << 5) | (rd & 0x1f));
-}
-
-G_GNUC_UNUSED static inline void emit_asr_w_imm(ArmEmit *e, int rd, int rn, int shift)
-{
-    assert(shift >= 0 && shift < 32);
-    emit_u32(e, 0x13000000u | ((uint32_t)shift << 16) | (31u << 10) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
@@ -746,16 +717,6 @@ G_GNUC_UNUSED static inline void emit_cset_w(ArmEmit *e, int rd, int cond)
     emit_u32(e, 0x1a9f07e0u | (inv << 12) | (rd & 0x1f));
 }
 
-/* TBZ Wt, #bit, #imm14 */
-G_GNUC_UNUSED static inline void emit_tbz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
-{
-    int32_t imm14 = off_bytes >> 2;
-    assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
-    assert(bit >= 0 && bit < 32);
-    emit_u32(e, 0x36000000u | ((uint32_t)(bit & 0x1f) << 19) |
-                (((uint32_t)imm14 & 0x3fff) << 5) | (rt & 0x1f));
-}
-
 /* --------------------------------------------------------------- *
  * Phase 2 primitives — added for inline arithmetic / MAC kernels.
  *
@@ -824,20 +785,6 @@ G_GNUC_UNUSED static inline void emit_eor_x_reg(ArmEmit *e, int rd, int rn, int 
 G_GNUC_UNUSED static inline void emit_mvn_w(ArmEmit *e, int rd, int rm)
 {
     emit_u32(e, 0x2a2003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
-}
-
-/* ORR Xd, Xn, Xm */
-G_GNUC_UNUSED static inline void emit_orr_x_reg(ArmEmit *e, int rd, int rn, int rm)
-{
-    emit_u32(e, 0xaa000000u | ((rm & 0x1f) << 16) |
-                ((rn & 0x1f) << 5) | (rd & 0x1f));
-}
-
-/* ADDS Xd, Xn, Xm  (flag-setting 64-bit add, shifted-register form) */
-G_GNUC_UNUSED static inline void emit_adds_x_reg(ArmEmit *e, int rd, int rn, int rm)
-{
-    emit_u32(e, 0xab000000u | ((rm & 0x1f) << 16) |
-                ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* SUB Xd, Xn, Xm  (shifted-register, shift #0) */
@@ -924,12 +871,6 @@ G_GNUC_UNUSED static inline void emit_bfi_x(ArmEmit *e, int rd, int rn, int lsb,
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
-/* SXTB Wd, Wn  — sign-extend byte (alias of SBFM Wd, Wn, #0, #7) */
-G_GNUC_UNUSED static inline void emit_sxtb_w(ArmEmit *e, int rd, int rn)
-{
-    emit_u32(e, 0x13001c00u | ((rn & 0x1f) << 5) | (rd & 0x1f));
-}
-
 /* SMULL Xd, Wn, Wm — signed 32x32 -> 64 multiply.
  * Encoding: 0x9b207c00 | (Rm << 16) | (Rn << 5) | Rd. */
 G_GNUC_UNUSED static inline void emit_smull(ArmEmit *e, int rd, int rn, int rm)
@@ -954,12 +895,6 @@ static void patch_b(uint32_t *insn_addr, int32_t new_off_bytes)
 static inline void emit_blr(ArmEmit *e, int rn)
 {
     emit_u32(e, 0xd63f0000u | ((rn & 0x1f) << 5));
-}
-
-/* BR Xn */
-G_GNUC_UNUSED static inline void emit_br(ArmEmit *e, int rn)
-{
-    emit_u32(e, 0xd61f0000u | ((rn & 0x1f) << 5));
 }
 
 /* RET (Xn) — defaults to X30 */

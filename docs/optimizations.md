@@ -1511,6 +1511,14 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   behaves exactly as before; what is new on all platforms is the range
   test in the three accessors, the frame thread's RCU registration, and
   the locking around the engine switch.
+- **DSP JIT dead code removed (2026-10-10).** Ten functions that never
+  had a caller: seven ARM64 emitter primitives (`emit_ldr_x_imm`,
+  `emit_asr_w_imm`, `emit_tbz_w`, `emit_orr_x_reg`, `emit_adds_x_reg`,
+  `emit_sxtb_w`, `emit_br`; added unused in `1288fae90f`, `4dfbae90d7`,
+  `5e40a982ef`), the `dsp56k_jit_sentinel_enabled`/`_force_enabled`
+  accessors (the knobs are read through their statics, so
+  `XEMU_DSP_JIT_SENTINEL`/`XEMU_DSP_JIT_FORCE` work unchanged) and the
+  `dsp56k_jit_helper_update_rn` shim. No generated-code change.
 
 ### Input
 
