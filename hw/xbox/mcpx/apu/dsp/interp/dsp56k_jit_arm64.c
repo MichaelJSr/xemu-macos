@@ -458,7 +458,7 @@ static inline void emit_strb_imm_zero(ArmEmit *e, int rn, unsigned int off)
 }
 
 /* ADD Xd, Xn, #imm (imm must fit in 12 bits, no shift) */
-G_GNUC_UNUSED static inline void emit_add_x_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
+static inline void emit_add_x_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
 {
     assert(imm <= 0xfff);
     emit_u32(e, 0x91000000u | (imm << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
@@ -642,7 +642,7 @@ static inline void emit_lsl_w_imm(ArmEmit *e, int rd, int rn, int shift)
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
-G_GNUC_UNUSED static inline void emit_lsr_w_imm(ArmEmit *e, int rd, int rn, int shift)
+static inline void emit_lsr_w_imm(ArmEmit *e, int rd, int rn, int shift)
 {
     assert(shift >= 0 && shift < 32);
     emit_u32(e, 0x53000000u | ((uint32_t)shift << 16) | (31u << 10) |
@@ -672,20 +672,20 @@ static inline void emit_sub_w_imm(ArmEmit *e, int rd, int rn, unsigned int imm)
 }
 
 /* CMP Wn, #imm12 (SUBS WZR, Wn, #imm) */
-G_GNUC_UNUSED static inline void emit_cmp_w_imm(ArmEmit *e, int rn, unsigned int imm)
+static inline void emit_cmp_w_imm(ArmEmit *e, int rn, unsigned int imm)
 {
     assert(imm <= 0xfff);
     emit_u32(e, 0x7100001fu | (imm << 10) | ((rn & 0x1f) << 5));
 }
 
 /* SUB Wd, Wn, Wm (shifted-register, shift #0) */
-G_GNUC_UNUSED static inline void emit_sub_w_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_sub_w_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0x4b000000u | ((rm & 0x1f) << 16) | ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* NEG Wd, Wm (alias of SUB Wd, WZR, Wm) */
-G_GNUC_UNUSED static inline void emit_neg_w(ArmEmit *e, int rd, int rm)
+static inline void emit_neg_w(ArmEmit *e, int rd, int rm)
 {
     emit_u32(e, 0x4b0003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
 }
@@ -697,7 +697,7 @@ static inline void emit_add_x_reg(ArmEmit *e, int rd, int rn, int rm)
 }
 
 /* CSEL Wd, Wn, Wm, cond — if cond true, Wd = Wn else Wd = Wm. */
-G_GNUC_UNUSED static inline void emit_csel_w(ArmEmit *e, int rd, int rn, int rm, int cond)
+static inline void emit_csel_w(ArmEmit *e, int rd, int rn, int rm, int cond)
 {
     emit_u32(e, 0x1a800000u | ((rm & 0x1f) << 16) | ((cond & 0xf) << 12) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
@@ -711,7 +711,7 @@ G_GNUC_UNUSED static inline void emit_csel_w(ArmEmit *e, int rd, int rn, int rm,
  *   0x1a800400 | 31<<16 | (cond^1)<<12 | 31<<5 | Rd
  *   = 0x1a9f07e0 | ((cond^1) & 0xf) << 12 | (Rd & 0x1f)
  */
-G_GNUC_UNUSED static inline void emit_cset_w(ArmEmit *e, int rd, int cond)
+static inline void emit_cset_w(ArmEmit *e, int rd, int cond)
 {
     uint32_t inv = (uint32_t)((cond ^ 1) & 0xf);
     emit_u32(e, 0x1a9f07e0u | (inv << 12) | (rd & 0x1f));
@@ -738,7 +738,7 @@ G_GNUC_UNUSED static inline void emit_cset_w(ArmEmit *e, int rd, int cond)
  * 7, 0xF, 0xFF, 0xFF00, 0x7FFF, ...) can feed this if we ever need
  * a broader subset.
  */
-G_GNUC_UNUSED static inline void emit_eor_w_imm_bitmask(
+static inline void emit_eor_w_imm_bitmask(
     ArmEmit *e, int rd, int rn, uint32_t N_immr_imms)
 {
     emit_u32(e, 0x52000000u | ((N_immr_imms & 0x1fff) << 10) |
@@ -754,55 +754,55 @@ static inline void emit_eor_w_imm1(ArmEmit *e, int rd, int rn)
 }
 
 /* AND Wd, Wn, Wm  (shifted-register, shift #0) */
-G_GNUC_UNUSED static inline void emit_and_w_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_and_w_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0x0a000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* AND Xd, Xn, Xm */
-G_GNUC_UNUSED static inline void emit_and_x_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_and_x_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0x8a000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* EOR Wd, Wn, Wm */
-G_GNUC_UNUSED static inline void emit_eor_w_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_eor_w_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0x4a000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* EOR Xd, Xn, Xm */
-G_GNUC_UNUSED static inline void emit_eor_x_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_eor_x_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0xca000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* MVN Wd, Wm  (alias of ORN Wd, WZR, Wm) — bitwise NOT */
-G_GNUC_UNUSED static inline void emit_mvn_w(ArmEmit *e, int rd, int rm)
+static inline void emit_mvn_w(ArmEmit *e, int rd, int rm)
 {
     emit_u32(e, 0x2a2003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
 }
 
 /* SUB Xd, Xn, Xm  (shifted-register, shift #0) */
-G_GNUC_UNUSED static inline void emit_sub_x_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_sub_x_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0xcb000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* SUBS Xd, Xn, Xm (flag-setting) */
-G_GNUC_UNUSED static inline void emit_subs_x_reg(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_subs_x_reg(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0xeb000000u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
 /* NEG Xd, Xm  (alias of SUB Xd, XZR, Xm) */
-G_GNUC_UNUSED static inline void emit_neg_x(ArmEmit *e, int rd, int rm)
+static inline void emit_neg_x(ArmEmit *e, int rd, int rm)
 {
     emit_u32(e, 0xcb0003e0u | ((rm & 0x1f) << 16) | (rd & 0x1f));
 }
@@ -816,7 +816,7 @@ G_GNUC_UNUSED static inline void emit_neg_x(ArmEmit *e, int rd, int rm)
  *   LSR Xd, Xn, #s   => UBFM Xd, Xn, #s, #63
  *   ASR Xd, Xn, #s   => SBFM Xd, Xn, #s, #63
  */
-G_GNUC_UNUSED static inline void emit_lsl_x_imm(ArmEmit *e, int rd, int rn, int shift)
+static inline void emit_lsl_x_imm(ArmEmit *e, int rd, int rn, int shift)
 {
     assert(shift >= 0 && shift < 64);
     uint32_t immr = (uint32_t)((64 - shift) & 63);
@@ -825,14 +825,14 @@ G_GNUC_UNUSED static inline void emit_lsl_x_imm(ArmEmit *e, int rd, int rn, int 
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
-G_GNUC_UNUSED static inline void emit_lsr_x_imm(ArmEmit *e, int rd, int rn, int shift)
+static inline void emit_lsr_x_imm(ArmEmit *e, int rd, int rn, int shift)
 {
     assert(shift >= 0 && shift < 64);
     emit_u32(e, 0xd340fc00u | ((uint32_t)shift << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
-G_GNUC_UNUSED static inline void emit_asr_x_imm(ArmEmit *e, int rd, int rn, int shift)
+static inline void emit_asr_x_imm(ArmEmit *e, int rd, int rn, int shift)
 {
     assert(shift >= 0 && shift < 64);
     emit_u32(e, 0x9340fc00u | ((uint32_t)shift << 16) |
@@ -841,7 +841,7 @@ G_GNUC_UNUSED static inline void emit_asr_x_imm(ArmEmit *e, int rd, int rn, int 
 
 /* UBFX Xd, Xn, #lsb, #width — 64-bit variant of UBFX.
  * Encoding: 0xd3400000 | (N=1 << 22) | (immr=lsb << 16) | (imms=(lsb+width-1) << 10) | Rn5 | Rd. */
-G_GNUC_UNUSED static inline void emit_ubfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+static inline void emit_ubfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
 {
     assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
     emit_u32(e, 0xd3400000u | ((uint32_t)lsb << 16) |
@@ -850,7 +850,7 @@ G_GNUC_UNUSED static inline void emit_ubfx_x(ArmEmit *e, int rd, int rn, int lsb
 }
 
 /* SBFX Xd, Xn, #lsb, #width — signed (arithmetic) bitfield extract, 64-bit. */
-G_GNUC_UNUSED static inline void emit_sbfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+static inline void emit_sbfx_x(ArmEmit *e, int rd, int rn, int lsb, int width)
 {
     assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
     emit_u32(e, 0x93400000u | ((uint32_t)lsb << 16) |
@@ -862,7 +862,7 @@ G_GNUC_UNUSED static inline void emit_sbfx_x(ArmEmit *e, int rd, int rn, int lsb
  * BFI Xd, Xn, #lsb, #width — bit field insert (alias of BFM).
  *   BFM Xd, Xn, #((64 - lsb) & 63), #(width - 1)
  */
-G_GNUC_UNUSED static inline void emit_bfi_x(ArmEmit *e, int rd, int rn, int lsb, int width)
+static inline void emit_bfi_x(ArmEmit *e, int rd, int rn, int lsb, int width)
 {
     assert(lsb >= 0 && width > 0 && (lsb + width) <= 64);
     uint32_t immr = (uint32_t)((64 - lsb) & 63);
@@ -873,7 +873,7 @@ G_GNUC_UNUSED static inline void emit_bfi_x(ArmEmit *e, int rd, int rn, int lsb,
 
 /* SMULL Xd, Wn, Wm — signed 32x32 -> 64 multiply.
  * Encoding: 0x9b207c00 | (Rm << 16) | (Rn << 5) | Rd. */
-G_GNUC_UNUSED static inline void emit_smull(ArmEmit *e, int rd, int rn, int rm)
+static inline void emit_smull(ArmEmit *e, int rd, int rn, int rm)
 {
     emit_u32(e, 0x9b207c00u | ((rm & 0x1f) << 16) |
                 ((rn & 0x1f) << 5) | (rd & 0x1f));
@@ -2228,7 +2228,7 @@ static void emit_load_accu56(ArmEmit *e, int xaccu, int which_ab,
  * before the MOV, so subsequent loads via emit_load_accu56 see a
  * correctly sign-extended value without needing to re-extend.
  */
-G_GNUC_UNUSED static void emit_store_accu56(ArmEmit *e, int xaccu,
+static void emit_store_accu56(ArmEmit *e, int xaccu,
                                             int which_ab, int xtmp)
 {
     assert(xaccu != xtmp);
@@ -2536,7 +2536,7 @@ typedef enum {
  *
  * Clobbers xtmp. Produces xsrc.
  */
-G_GNUC_UNUSED static void emit_load_alu_src(ArmEmit *e, int xsrc,
+static void emit_load_alu_src(ArmEmit *e, int xsrc,
                                             AluSrcForm form, int xtmp)
 {
     assert(xsrc != xtmp);
@@ -2961,7 +2961,7 @@ static const AluSrcForm alu_47_src_form[4] = {
 /* Classify the 8-bit ALU opcode. Returns the AluVariant in *out; the
  * `kind` field is ALU_KIND_FALLBACK when no inline template
  * applies. */
-G_GNUC_UNUSED static void alu_classify_opcode(uint8_t alu_op, AluVariant *out)
+static void alu_classify_opcode(uint8_t alu_op, AluVariant *out)
 {
     AluVariant v = { .kind = ALU_KIND_FALLBACK };
 
