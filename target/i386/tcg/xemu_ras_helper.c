@@ -25,7 +25,8 @@
  * the fill-time eip pairing guards coincidental slot reuse.
  * Prediction state only: mispredicts fall back to
  * helper_lookup_tb_ptr, tb pointers are cleared with the jump cache
- * on flush (xemu_i386_ras_flush), XEMU_RAS=0 disables both sides.
+ * (xemu_i386_ras_flush, and per page xemu_i386_ras_flush_page),
+ * XEMU_RAS=0 disables both sides.
  *
  * Anything that makes curr_cflags() differ from cpu->tcg_cflags —
  * gdb single-step, breakpoints, exec/nochain logging — delegates to
@@ -116,6 +117,9 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
             e->flags = tb->flags;
             e->cs_base = (uint32_t)tb->cs_base;
             e->tb = tb;
+            /* Same page key as xemu_i386_ras_flush_page(). */
+            unsigned pbit = xemu_retc_page_bit((uint32_t)(e->cs_base + eip));
+            env->xemu_retc_pages[pbit / 64] |= 1ull << (pbit % 64);
             xemu_ras_fills++;
         }
         return tb->tc.ptr;

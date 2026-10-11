@@ -2183,7 +2183,9 @@ typedef struct CPUArchState {
      * hits (cs_base/flags/cflags/CF_INVALID against live state; the
      * eip key substitutes for the pc compare since pc = cs_base+eip).
      * Prediction-only state: never migrated, tb pointers cleared with
-     * the jump cache on flush (xemu_i386_ras_flush). A per-depth
+     * the jump cache, on a full flush (xemu_i386_ras_flush) and per page
+     * (xemu_i386_ras_flush_page) when INVLPG or a ranged flush drops one
+     * page of the jump cache. A per-depth
      * return-address ring was measured first and discarded — same-
      * depth call sites thrash it (fills 2.6x hits on the bench scene)
      * while the eip-keyed memo has no depth coupling.
@@ -2207,8 +2209,23 @@ typedef struct CPUArchState {
         void *tb;
         void *pad;
     } xemu_retc[XEMU_RETC_SIZE];
+    /*
+     * One bit per virtual code page (page number modulo the map size) that
+     * may hold a memo entry, so a per-page flush skips the memo scan for
+     * pages that never filled one. Set on fill, cleared with the memo; a
+     * bit left set without a live entry only costs one scan.
+     */
+#define XEMU_RETC_PAGEMAP_BITS 4096
+    uint64_t xemu_retc_pages[XEMU_RETC_PAGEMAP_BITS / 64];
 #endif
 } CPUX86State;
+
+#if defined(XBOX)
+static inline unsigned xemu_retc_page_bit(vaddr addr)
+{
+    return (addr >> TARGET_PAGE_BITS) % XEMU_RETC_PAGEMAP_BITS;
+}
+#endif
 
 struct kvm_msrs;
 

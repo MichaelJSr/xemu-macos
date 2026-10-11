@@ -166,6 +166,12 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
     CPUJumpCache *jc = cpu->tb_jmp_cache;
     int i, i0;
 
+#if defined(XBOX)
+    /* The i386 near-return memo is a second virtual-pc cache with no
+     * physical check: it must drop the page whenever the jump cache does. */
+    xemu_i386_ras_flush_page(cpu, page_addr);
+#endif
+
     if (unlikely(!jc)) {
         return;
     }

@@ -701,11 +701,50 @@ static TCGv_i32 eip_next_i32(DisasContext *s)
 }
 
 #if defined(XBOX)
-void xemu_i386_ras_flush(CPUState *cpu);
 void xemu_i386_ras_flush(CPUState *cpu)
 {
     CPUX86State *env = cpu_env(cpu);
     memset(env->xemu_retc, 0, sizeof(env->xemu_retc));
+    memset(env->xemu_retc_pages, 0, sizeof(env->xemu_retc_pages));
+}
+
+/*
+ * Per-page counterpart of the flush above, called wherever the jump cache
+ * drops one page (INVLPG, ranged TLB flushes; both also drop the page before,
+ * for TBs that span into it). The memo is keyed by virtual eip and, like the
+ * jump cache, never checks the physical page, so its entries for a page must
+ * not outlive a remap of that page.
+ */
+void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr)
+{
+    CPUX86State *env = cpu_env(cpu);
+    unsigned bit;
+    uint64_t mask;
+    bool shared = false;
+
+    page_addr &= TARGET_PAGE_MASK;
+    bit = xemu_retc_page_bit(page_addr);
+    mask = 1ull << (bit % 64);
+    if (!(env->xemu_retc_pages[bit / 64] & mask)) {
+        return;
+    }
+    for (int i = 0; i < XEMU_RETC_SIZE; i++) {
+        struct XemuRetcEntry *e = &env->xemu_retc[i];
+        vaddr page;
+
+        if (!e->tb) {
+            continue;
+        }
+        page = (vaddr)(uint32_t)(e->cs_base + e->eip) & TARGET_PAGE_MASK;
+        if (page == page_addr) {
+            e->tb = NULL;
+        } else if (xemu_retc_page_bit(page) == bit) {
+            shared = true;
+        }
+    }
+    if (!shared) {
+        env->xemu_retc_pages[bit / 64] &= ~mask;
+    }
 }
 #endif
 

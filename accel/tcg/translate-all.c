@@ -709,10 +709,7 @@ void tcg_flush_jmp_cache(CPUState *cpu)
 #if defined(XBOX)
     /* Single-target fork (i386-softmmu only): drop the return-address
      * stack's tb pointers with the jump cache — same lifetime rules. */
-    {
-        extern void xemu_i386_ras_flush(CPUState *cpu);
-        xemu_i386_ras_flush(cpu);
-    }
+    xemu_i386_ras_flush(cpu);
 #endif
 
     /* During early initialization, the cache may not yet be allocated. */
