@@ -417,8 +417,8 @@ push tag "v*"
   universal signed+unsigned zips, Windows x86_64/arm64 zips + PDBs, three
   Linux AppImage variants × {release, debug}, a source tarball, and two
   legacy-named Windows aliases (`release.yml:53-58`). Re-verify the count
-  against the latest release (latest tag `v0.13.3` as of 2026-10-10)
-  before citing it again: `gh release view v0.13.3 --repo
+  against the latest release (latest tag `v0.14` as of 2026-10-11, 17
+  assets) before citing it again: `gh release view v0.14 --repo
   MichaelJSr/xemu-macos --json assets --jq '.assets | length'`.
 - The draft is **not visible to normal users** until the owner clicks
   publish on GitHub — a deliberate human gate before anything ships.
@@ -543,5 +543,5 @@ Re-verify each volatile fact before trusting it on a future date:
 - USB pad topology construction: `grep -n "port_map\|usb-hub" ui/xemu-input.c`
 - Snapshot save/load call sites + failure-resume behavior: `grep -n "xemu_snapshots_load\|xemu_snapshots_save" ui/xemu-snapshots.c`
 - Release trigger chain + owner guard: `grep -n "tags:\|repository_owner\|draft:" .github/workflows/release-on-tag.yml .github/workflows/release.yml`
-- Current release asset count/names (dated; latest tag v0.13.3 as of 2026-10-10): `gh release view v0.13.3 --repo MichaelJSr/xemu-macos --json assets --jq '.assets[].name'`
+- Current release asset count/names (dated; latest tag v0.14 as of 2026-10-11): `gh release view v0.14 --repo MichaelJSr/xemu-macos --json assets --jq '.assets[].name'`
 - qcow2 lock error text: `grep -n "another process using the image" block/file-posix.c`

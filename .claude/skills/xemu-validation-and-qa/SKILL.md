@@ -358,9 +358,9 @@ before it ships. Run methods per xemu-testing; accept per §1–§2.
    `release-on-tag.yml` (owner-guarded) → `release.yml` → a DRAFT release
    (`draft: ${{ !inputs.pre-release }}`; the tag job is owner-guarded via
    `github.repository_owner`). Compare the asset count against the
-   previous release — latest tag is `v0.13.3` as of 2026-10-10; v0.9
-   shipped **17 assets** (verified live
-   2026-07-04; one-line count command in Provenance below).
+   previous release — latest tag is `v0.14` as of 2026-10-11, which
+   shipped **17 assets**, as did v0.13.3 and v0.9 (one-line count
+   command in Provenance below).
 
 No manual play smoke between releases: the owner dropped it on
 2026-10-11. Testing is Azurik-only by owner decision (2026-10-10);
@@ -546,7 +546,7 @@ the repo root unless absolute):
 - MoltenVK provenance line in build.sh: `grep -n 'Bundling MoltenVK' build.sh`
 - Savestate tags: `cp -c ../fixtures/xbox_hdd.qcow2 /tmp/snap-list.qcow2 && python3 -I .claude/skills/xemu-diagnostics-and-tooling/scripts/list_snapshots.py /tmp/snap-list.qcow2`
 - Fixtures on disk: `ls -lh /usr/local/lib/libMoltenVK.dylib; grep -nE '^(hdd|dvd)_path' ../fixtures/xemu.toml`
-- Latest-release asset count (17 on v0.9, verified live 2026-07-04; latest tag `v0.13.3` as of 2026-10-10, its count not re-checked): `gh release view v0.13.3 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
+- Latest-release asset count (17 on v0.9, v0.13.3 and v0.14; latest tag `v0.14` as of 2026-10-11): `gh release view v0.14 -R MichaelJSr/xemu-macos --json assets --jq '.assets|length'`
 - Owner guard on the tag flow: `grep -n 'repository_owner' .github/workflows/release-on-tag.yml`
 - `nv2a_vk_assert` live only in `--debug` builds (`NV2A_VK_ASSERTS`, follows `XEMU_DEBUG_BUILD`): `grep -n -B3 -A8 'NV2A_VK_ASSERTS' hw/xbox/nv2a/pgraph/vk/debug.h`
 - Installed custom MoltenVK version: `strings /usr/local/lib/libMoltenVK.dylib | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$'`
