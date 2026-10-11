@@ -342,18 +342,18 @@ before it ships. Run methods per xemu-testing; accept per §1–§2.
    explained and deliberately accepted, not waved through.
 2. **Artifact-oracle soak** (§1.3): flagged-frame-free at the sized bar,
    in the Finder-launch path (the user-representative one).
-3. **Azurik play smoke**: the release bundle boots Azurik to gameplay
-   from a cold start, then several minutes of play with no crash, hang or
-   obvious artifact. Testing is Azurik-only by owner decision
-   (2026-10-10); `scripts/boot-smoke-corpus.sh` on other titles is
-   optional extra coverage when they are on disk.
-4. **CI matrix green and the draft release complete.** Tag push `v*` fires
+3. **CI matrix green and the draft release complete.** Tag push `v*` fires
    `release-on-tag.yml` (owner-guarded) → `release.yml` → a DRAFT release
    (`draft: ${{ !inputs.pre-release }}`; the tag job is owner-guarded via
    `github.repository_owner`). Compare the asset count against the
    previous release — latest tag is `v0.13.3` as of 2026-10-10; v0.9
    shipped **17 assets** (verified live
    2026-07-04; one-line count command in Provenance below).
+
+No manual play smoke between releases: the owner dropped it on
+2026-10-11. Testing is Azurik-only by owner decision (2026-10-10);
+`scripts/boot-smoke-corpus.sh` on other titles is optional extra coverage
+when they are on disk.
 
 Tag/release invariants (immutable published tags, one release per tag)
 are owned by xemu-change-control; release mechanics by xemu-run-and-operate.
