@@ -221,7 +221,7 @@ on the PFIFO thread, `pgraph_vk_finish`; the “why” mirrors `FinishReason` in
 
 | Metric | Healthy | Pathological | Source |
 |---|---|---|---|
-| draws/flip | scene-dependent: menu ~3, attract-reel 350-390, heavy in-game 408-485 (2026-07 records); the retired F8 anchor `vm-20260704173701` read ~877 (2026-10-10); its replacement `azurik-heavy-f1` is not measured yet (`../fixtures/README.md`) | — (this is identity, not pass/fail — see §0) | `docs/optimizations.md` "Changes"; historical session records |
+| draws/flip | scene-dependent: menu ~3, attract-reel 350-390, heavy in-game 408-485 (2026-07 records); the retired F8 anchor `vm-20260704173701` read ~877 (2026-10-10); its replacement `azurik-heavy-f1` reads ~679 (659-690) and the second heavy anchor `azurik-heavy-w2` 323 (2026-10-11, `../fixtures/README.md`) | — (this is identity, not pass/fail — see §0) | `docs/optimizations.md` "Changes"; historical session records |
 | passes/flip (`renderpass` per_flip) | ~14 | 376 | Apple GPUs are TBDR — every render pass is a full tile load/store, so pass count is a first-order cost. The 2026-07 in-pass-occlusion-queries + deferred-zpass-reports change (zpass = the guest's "how many pixels passed depth" report — see xbox-hardware-reference) cut per-query `vkCmdResetQueryPool` (illegal mid-pass, forcing pass teardown every query rotation) from 376→14 passes/flip on the savestate bench scene. |
 | `fence_wait` ms/flip | ~1-3.5 | 8 and up (measured as high as ~32 pre-fix) | Same change: fence wait fell to 2.2 ms/flip (`6bfbc22863` receipt) from a pre-fix worst of ~32. High fence-wait with low draws/flip usually means a sync-policy bug, not GPU load. |
 | `pipeline_gen` events | ≈0 once warm (async pipeline creation isn't worth building — this is rare enough already) | Nonzero bursts mid-session = compiling now = visible stutter | `pipeline_gen`'s `max=` field shows the worst single `vkCreateGraphicsPipelines` call: 164 ms measured cold (empty `pipeline_cache.bin`), ≤4 ms once `pipeline_cache.bin` is warm and persisted. |
@@ -547,8 +547,10 @@ day). Cross-check any "the guest is the bottleneck" claim against a
 capped scene before believing thread %CPU. F6 was retired 2026-10-10, so
 the capped scene is now F5 (~59 fps, near the 60 cap). The heavy one is
 `azurik-heavy-f1`, which replaced F8 (`vm-20260704173701`, ~48 fps on a
-quiet box) on 2026-10-11 and is not measured yet; tags and roles in
-`../fixtures/README.md`.
+quiet box) on 2026-10-11 and read 28.9 fps mean (26.5-31.4 over 8 runs)
+at ~679 draws/flip that day on a box loaded to 7-15 by other jobs; the
+second heavy anchor `azurik-heavy-w2` read 23.3 fps at 323 draws/flip.
+Tags, roles and the full table are in `../fixtures/README.md`.
 
 **One-shot call-stack sampling**: `/usr/bin/sample <pid|partial-name>
 [duration [interval_ms]] -file <path>` (verified usage banner: default
