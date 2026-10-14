@@ -1,0 +1,48 @@
+# -*- Mode: Python -*-
+# vim: filetype=python
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+##
+# ****
+# xemu
+# ****
+#
+# Automation commands specific to xemu.  Frames are counted in guest
+# vblanks: the counter advances once per vblank while the VM runs and
+# stands still while it is paused.
+##
+
+##
+# @XemuFrameInfo:
+#
+# @frame: vblanks delivered while the VM was running, since launch
+#
+# @running: whether the VM is running
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuFrameInfo',
+  'data': { 'frame': 'int', 'running': 'bool' } }
+
+##
+# @query-xemu-frame:
+#
+# Return the current frame counter.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-frame', 'returns': 'XemuFrameInfo' }
+
+##
+# @xemu-frame-advance:
+#
+# Run the VM for @frames vblanks, then pause it.  Returns once it is
+# paused.  With @frames 0 the VM is just paused.
+#
+# @frames: vblanks to run (default 1)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-frame-advance', 'data': { '*frames': 'int' },
+  'returns': 'XemuFrameInfo', 'coroutine': true }

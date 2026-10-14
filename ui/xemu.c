@@ -36,6 +36,7 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
 #include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-commands-xemu.h"
 #include "qemu/coroutine.h"
 #include "qobject/qdict.h"
 #include "ui/console.h"
@@ -913,13 +914,98 @@ static void update_fps(void)
     fps = 1000.0/avg;
 }
 
+/*
+ * Frame counter for automation: vblanks delivered while the VM runs
+ * (QMP query-xemu-frame / xemu-frame-advance, XEMU_INPUT_PIPE "@N").
+ * BQL-protected.
+ */
+static uint64_t frame_count;
+static uint64_t frame_advance_target;
+static Coroutine *frame_advance_co;
+static bool frame_advance_stopping;
+
+/* vm_start/vm_stop must not run in coroutine context: do them in BHs. */
+static void frame_run_bh(void *opaque)
+{
+    if (!runstate_is_running()) {
+        vm_start();
+    }
+}
+
+static void frame_stop_bh(void *opaque)
+{
+    Coroutine *co = frame_advance_co;
+
+    frame_advance_co = NULL;
+    frame_advance_stopping = false;
+    vm_stop(RUN_STATE_PAUSED);
+    aio_co_wake(co);
+}
+
 static void process_vblank(struct xemu_console *scon)
 {
     assert(bql_locked());
 
     update_fps();
 
+    if (runstate_is_running()) {
+        frame_count++;
+        /* Input tagged for this frame lands before the vblank IRQ. */
+        xemu_input_frame_tick(frame_count);
+    }
+
     graphic_hw_update(scon->dcl.con);
+
+    if (frame_advance_co && !frame_advance_stopping &&
+        frame_count >= frame_advance_target) {
+        frame_advance_stopping = true;
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_stop_bh, NULL);
+    }
+}
+
+static XemuFrameInfo *frame_info(void)
+{
+    XemuFrameInfo *info = g_new0(XemuFrameInfo, 1);
+    info->frame = frame_count;
+    info->running = runstate_is_running();
+    return info;
+}
+
+XemuFrameInfo *qmp_query_xemu_frame(Error **errp)
+{
+    return frame_info();
+}
+
+XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
+                                                   int64_t frames,
+                                                   Error **errp)
+{
+    if (!has_frames) {
+        frames = 1;
+    }
+    if (frames < 0) {
+        error_setg(errp, "frames must not be negative");
+        return NULL;
+    }
+    if (frame_advance_co) {
+        error_setg(errp, "a frame advance is already in progress");
+        return NULL;
+    }
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_PAUSED)) {
+        error_setg(errp, "the VM is neither running nor paused");
+        return NULL;
+    }
+
+    frame_advance_co = qemu_coroutine_self();
+    if (frames == 0) {
+        frame_advance_stopping = true;
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_stop_bh, NULL);
+    } else {
+        frame_advance_target = frame_count + frames;
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_run_bh, NULL);
+    }
+    qemu_coroutine_yield();
+    return frame_info();
 }
 
 static void vblank_timer_callback(void *opaque)

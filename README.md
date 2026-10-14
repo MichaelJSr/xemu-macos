@@ -169,6 +169,17 @@ Other automation interfaces (windowed or headless):
 - **gdbstub `m` reads** that run into an unmapped page (the game heap
   has guard pages between allocations) return the readable prefix, as
   the protocol allows, instead of `E14`.
+- **`XEMU_INPUT_PIPE` lines** (keyboard pad, port 2 in the fixtures):
+  `down <scancode>`, `up <scancode>`, `clear`, plus analog
+  `axis lx|ly|rx|ry <-1..1>` and `trigger lt|rt <0..1>` (positive is
+  right/up; `0` hands the axis back to the keys). Prefix any line with
+  `@<frame>` or `+<frames>` to apply it at that frame instead of on
+  arrival.
+- **Frames** count vblanks while the VM runs. QMP `query-xemu-frame`
+  returns `{frame, running}`; `xemu-frame-advance {"frames": N}` runs N
+  frames, pauses, and returns (`0` just pauses). Replays land within a
+  frame or two, not bit-exact: guest work per vblank still depends on
+  host speed.
 
 ---
 

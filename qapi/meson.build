@@ -69,6 +69,7 @@ if have_system
     'misc-i386',
     'tpm',
     'uefi',
+    'xemu',
   ]
 endif
 if have_system or have_tools

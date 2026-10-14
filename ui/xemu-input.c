@@ -31,6 +31,7 @@
 #include "xemu-input.h"
 #include "xemu-notifications.h"
 #include "xemu-settings.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -542,8 +543,101 @@ void xemu_input_update_controllers(void)
  * background apps, which makes OS-level injection (System Events,
  * CGEventPostToPid) unusable for automated gameplay testing. No
  * cost when the variable is unset.
+ *
+ * "axis <lx|ly|rx|ry> <-1..1>" and "trigger <lt|rt> <0..1>" set an
+ * analog value (positive = right/up; 0 hands the axis back to the
+ * keys). Any line may start with "@<frame>" or "+<frames>" to apply it
+ * at that frame (vblanks while running, see xemu_input_frame_tick)
+ * instead of on arrival; "+0" means the next vblank.
  */
 static uint8_t test_input_override[SDL_SCANCODE_COUNT];
+static int16_t test_axis_override[CONTROLLER_AXIS__COUNT];
+
+typedef struct TestInputPending {
+    uint64_t frame;
+    char *line;
+} TestInputPending;
+
+static GQueue test_input_pending = G_QUEUE_INIT;
+static uint64_t test_input_frame;
+static char test_input_partial[256];
+static size_t test_input_partial_len;
+
+static int test_input_axis(const char *name)
+{
+    static const char *const names[CONTROLLER_AXIS__COUNT] = {
+        [CONTROLLER_AXIS_LTRIG] = "lt",   [CONTROLLER_AXIS_RTRIG] = "rt",
+        [CONTROLLER_AXIS_LSTICK_X] = "lx", [CONTROLLER_AXIS_LSTICK_Y] = "ly",
+        [CONTROLLER_AXIS_RSTICK_X] = "rx", [CONTROLLER_AXIS_RSTICK_Y] = "ry",
+    };
+    for (int i = 0; i < CONTROLLER_AXIS__COUNT; i++) {
+        if (!strcmp(name, names[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void test_input_apply(const char *line)
+{
+    int sc;
+    char name[8];
+    double v;
+
+    if (sscanf(line, "down %d", &sc) == 1) {
+        if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+            test_input_override[sc] = 1;
+        }
+    } else if (sscanf(line, "up %d", &sc) == 1) {
+        if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
+            test_input_override[sc] = 0;
+        }
+    } else if (!strncmp(line, "clear", 5)) {
+        memset(test_input_override, 0, sizeof(test_input_override));
+        memset(test_axis_override, 0, sizeof(test_axis_override));
+    } else if (sscanf(line, "axis %7s %lf", name, &v) == 2 ||
+               sscanf(line, "trigger %7s %lf", name, &v) == 2) {
+        int axis = test_input_axis(name);
+        bool trigger = axis == CONTROLLER_AXIS_LTRIG ||
+                       axis == CONTROLLER_AXIS_RTRIG;
+        if (axis >= 0 && (line[0] == 't') == trigger) {
+            v = MAX(trigger ? 0.0 : -1.0, MIN(v, 1.0));
+            test_axis_override[axis] = (int16_t)lround(v * 32767.0);
+        }
+    }
+}
+
+static void test_input_line(char *line)
+{
+    if (line[0] != '@' && line[0] != '+') {
+        test_input_apply(line);
+        return;
+    }
+
+    char *rest;
+    uint64_t n = strtoull(line + 1, &rest, 10);
+    TestInputPending *p = g_new(TestInputPending, 1);
+    p->frame = line[0] == '@' ? n : test_input_frame + n;
+    p->line = g_strdup(g_strchug(rest));
+    g_queue_push_tail(&test_input_pending, p);
+}
+
+/* Split pipe data into lines; a line cut across reads waits for its end. */
+static void test_input_feed(const char *data, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        char c = data[i];
+        if (c == '\n' || c == '\r') {
+            if (test_input_partial_len) {
+                test_input_partial[test_input_partial_len] = '\0';
+                test_input_line(test_input_partial);
+                test_input_partial_len = 0;
+            }
+        } else if (test_input_partial_len < sizeof(test_input_partial) - 1) {
+            test_input_partial[test_input_partial_len++] = c;
+        }
+    }
+}
 
 #ifdef _WIN32
 /* Windows has no FIFOs, so the same line protocol rides a Win32 named
@@ -560,28 +654,6 @@ static uint8_t test_input_override[SDL_SCANCODE_COUNT];
 static HANDLE test_input_pipe;      /* NULL = unprobed or disabled */
 static bool test_input_probed;
 static bool test_input_connected;
-
-static void test_input_parse(char *buf)
-{
-    char *save = NULL;
-    /* '\r' is a delimiter too: Windows writers (PowerShell Add-Content,
-     * cmd echo) emit CRLF, and "down 26\r" would not match "down %d". */
-    for (char *line = strtok_r(buf, "\r\n", &save); line;
-         line = strtok_r(NULL, "\r\n", &save)) {
-        int sc;
-        if (sscanf(line, "down %d", &sc) == 1) {
-            if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-                test_input_override[sc] = 1;
-            }
-        } else if (sscanf(line, "up %d", &sc) == 1) {
-            if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-                test_input_override[sc] = 0;
-            }
-        } else if (!strncmp(line, "clear", 5)) {
-            memset(test_input_override, 0, sizeof(test_input_override));
-        }
-    }
-}
 
 static void test_input_open(void)
 {
@@ -703,8 +775,9 @@ static void test_input_poll(void)
         if (n == 0) {
             break;
         }
-        buf[n] = '\0';
-        test_input_parse(buf);
+        /* Windows writers (PowerShell Add-Content, cmd echo) emit CRLF;
+         * the feeder splits on '\r' as well. */
+        test_input_feed(buf, n);
     }
 }
 #else
@@ -730,30 +803,44 @@ static void test_input_poll(void)
     }
     char buf[512];
     for (;;) {
-        ssize_t n = read(test_input_fd, buf, sizeof(buf) - 1);
+        ssize_t n = read(test_input_fd, buf, sizeof(buf));
         if (n <= 0) {
             break;
         }
-        buf[n] = '\0';
-        char *save = NULL;
-        for (char *line = strtok_r(buf, "\n", &save); line;
-             line = strtok_r(NULL, "\n", &save)) {
-            int sc;
-            if (sscanf(line, "down %d", &sc) == 1) {
-                if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-                    test_input_override[sc] = 1;
-                }
-            } else if (sscanf(line, "up %d", &sc) == 1) {
-                if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-                    test_input_override[sc] = 0;
-                }
-            } else if (!strncmp(line, "clear", 5)) {
-                memset(test_input_override, 0, sizeof(test_input_override));
-            }
-        }
+        test_input_feed(buf, n);
     }
 }
 #endif /* !_WIN32 */
+
+void xemu_input_frame_tick(uint64_t frame)
+{
+    bool applied = false;
+
+    test_input_frame = frame;
+    for (GList *l = test_input_pending.head, *next; l; l = next) {
+        TestInputPending *p = l->data;
+        next = l->next;
+        if (p->frame <= frame) {
+            test_input_apply(p->line);
+            g_free(p->line);
+            g_free(p);
+            g_queue_delete_link(&test_input_pending, l);
+            applied = true;
+        }
+    }
+    if (!applied) {
+        return;
+    }
+
+    /* Publish now, so the change lands on this vblank, not the UI's next poll. */
+    ControllerState *iter;
+    QTAILQ_FOREACH(iter, &available_controllers, entry) {
+        if (iter->type == INPUT_DEVICE_SDL_KEYBOARD) {
+            xemu_input_update_sdl_kbd_controller_state(iter);
+            iter->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        }
+    }
+}
 
 void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
 {
@@ -806,6 +893,12 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
         state->axis[CONTROLLER_AXIS_RTRIG] = 32767;
 
 #undef KBD_STATE
+
+    for (int i = 0; i < CONTROLLER_AXIS__COUNT; i++) {
+        if (test_axis_override[i]) {
+            state->axis[i] = test_axis_override[i];
+        }
+    }
 }
 
 void xemu_input_update_sdl_controller_state(ControllerState *state)
