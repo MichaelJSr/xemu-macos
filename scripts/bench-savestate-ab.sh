@@ -12,8 +12,7 @@
 # (receipt.json + printed block).
 #
 # What this version ENFORCES (previously operator discipline; see the
-# 9.x incident classes in .claude/skills/xemu-failure-archaeology and
-# the testing-audit hardening spec):
+# benchmarking traps in the xemu-history skill):
 #   isolation      never launches dist/xemu.app or touches the user's
 #                  live config/hdd: the bundle is APFS-cloned into a
 #                  work dir, the qcow2 and eeprom are cloned (cp -c;
@@ -85,7 +84,7 @@ set -e
 ROOT=${0:a:h:h}
 RECEIPT_PY=$ROOT/scripts/bench-receipt.py
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
-SUMMARIZER=$ROOT/.claude/skills/xemu-diagnostics-and-tooling/scripts/nsprof_summarize.py
+SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
 
 # ---- argument parsing (positionals unchanged; flags additive) -------------
 typeset -a pos

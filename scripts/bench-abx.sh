@@ -57,7 +57,7 @@ set -e
 ROOT=${0:a:h:h}
 RECEIPT_PY=$ROOT/scripts/bench-receipt.py
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
-SUMMARIZER=$ROOT/.claude/skills/xemu-diagnostics-and-tooling/scripts/nsprof_summarize.py
+SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
 
 typeset -a pos
 B_APP_SRC=""; E_APP_SRC=""; B_ENV=""; E_ENV=""

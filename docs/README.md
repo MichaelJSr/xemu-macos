@@ -6,8 +6,9 @@ upstream merges stay clean. The fork's own documents are the Markdown
 files indexed here; Sphinx builds `.rst` only, so they never reach the
 QEMU manual.
 
-Agent-facing operating knowledge (methods, playbooks, the GPU frame
-campaign) lives in [`.claude/skills/`](../.claude/skills/), not here.
+Agent-facing operating knowledge lives in three lean skills under
+[`.claude/skills/`](../.claude/skills/) (xemu-operate, xemu-internals,
+xemu-history), not here.
 
 ## Where a fork doc goes
 

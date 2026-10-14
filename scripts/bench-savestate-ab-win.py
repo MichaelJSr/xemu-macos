@@ -91,12 +91,8 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RECEIPT_PY = os.path.join(ROOT, "scripts", "bench-receipt.py")
-SUMMARIZER = os.path.join(ROOT, ".claude", "skills",
-                          "xemu-diagnostics-and-tooling", "scripts",
-                          "nsprof_summarize.py")
-LIST_SNAPSHOTS = os.path.join(ROOT, ".claude", "skills",
-                              "xemu-diagnostics-and-tooling", "scripts",
-                              "list_snapshots.py")
+SUMMARIZER = os.path.join(ROOT, "scripts", "nsprof_summarize.py")
+LIST_SNAPSHOTS = os.path.join(ROOT, "scripts", "list_snapshots.py")
 WIN_DIR = os.path.join(ROOT, "scripts", "win")
 CAPTURE_PS1 = os.path.join(WIN_DIR, "capture_screen.ps1")
 SCORER = os.path.join(WIN_DIR, "score_shot_win.py")

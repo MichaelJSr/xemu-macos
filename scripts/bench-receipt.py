@@ -2,8 +2,7 @@
 """bench-receipt.py — gate + receipt engine for scripts/bench-savestate-ab.sh.
 
 Encodes the validity disciplines the interleaved savestate A/B method
-demands (see .claude/skills/xemu-testing and the 9.x benchmarking
-incident classes in xemu-failure-archaeology) so they are ENFORCED by
+demands (see the xemu-operate and xemu-history skills) so they are ENFORCED by
 the harness instead of left to operator discipline:
 
   gate      per-run scene-identity gate: parse one nsprof log (via

@@ -2,7 +2,7 @@
 """inject_input.py - drive xemu's XEMU_INPUT_PIPE test-input channel.
 
 Windows client for the same line protocol the POSIX helper
-(.claude/skills/xemu-diagnostics-and-tooling/scripts/inject_input.sh)
+(scripts/inject_input.sh)
 speaks: "down <sdl_scancode>", "up <sdl_scancode>", "clear".
 
 Transport. On Windows the channel is a Win32 named pipe created by
