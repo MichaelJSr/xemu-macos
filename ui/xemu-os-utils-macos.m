@@ -25,3 +25,19 @@ const char *xemu_get_os_info(void)
 {
 	return [[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String];
 }
+
+void xemu_os_set_background_app(void)
+{
+	[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+
+	/*
+	 * A windowless app is an App Nap candidate: its timers get coalesced,
+	 * the vblank thread oversleeps and the guest crawls. Opt out for the
+	 * life of the process.
+	 */
+	static id activity;
+	activity = [[[NSProcessInfo processInfo]
+		beginActivityWithOptions:NSActivityUserInitiated |
+		                         NSActivityLatencyCritical
+		                  reason:@"xemu headless emulation"] retain];
+}

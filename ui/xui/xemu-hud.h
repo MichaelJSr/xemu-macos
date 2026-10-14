@@ -50,6 +50,14 @@ void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse);
 void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip);
 void xemu_set_framebuffer_texture_is_rect(bool is_rect);
 
+// Implemented in gl-helpers.cc. Write a renderer frame (a texture as
+// passed to xemu_hud_set_framebuffer_texture) or an RGB24 buffer to
+// path as PNG or PPM. UI thread only.
+bool xemu_hud_save_frame(uintptr_t tex, bool flip, const char *path, bool png,
+                         Error **errp);
+bool xemu_hud_save_rgb(const uint8_t *rgb, int width, int height,
+                       const char *path, bool png, Error **errp);
+
 #ifdef __cplusplus
 }
 #endif

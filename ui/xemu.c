@@ -35,6 +35,8 @@
 #include "qemu-version.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
+#include "qapi/qapi-commands-ui.h"
+#include "qemu/coroutine.h"
 #include "qobject/qdict.h"
 #include "ui/console.h"
 #include "ui/input.h"
@@ -117,6 +119,24 @@ bool xemu_present_is_metal(void)
 #else
     return false;
 #endif
+}
+
+XemuHeadlessMode xemu_headless_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("XEMU_HEADLESS");
+        mode = XEMU_HEADLESS_OFF;
+        if (e && !strcmp(e, "1")) {
+            mode = XEMU_HEADLESS_OFFSCREEN;
+        } else if (e && !strcmp(e, "null")) {
+            mode = XEMU_HEADLESS_NULL;
+        } else if (e && e[0] && strcmp(e, "0")) {
+            fprintf(stderr, "xemu: ignoring XEMU_HEADLESS=%s (use 1 or null)\n",
+                    e);
+        }
+    }
+    return mode;
 }
 
 #ifdef _WIN32
@@ -221,6 +241,16 @@ static QEMUTimer *vblank_timer;
 static QemuThread vblank_thread;
 static bool qemu_exiting;
 static int exit_status;
+
+/* A message box would block a headless run that nobody can see. */
+static void show_error_box(const char *title, const char *msg)
+{
+    if (xemu_headless_mode()) {
+        fprintf(stderr, "%s: %s\n", title, msg);
+        return;
+    }
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, msg, m_window);
+}
 
 void tcg_register_init_ctx(void); // tcg.c
 
@@ -1407,6 +1437,10 @@ static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
+    if (xemu_headless_mode()) {
+        return true;
+    }
+
     if (event->type == SDL_EVENT_WINDOW_RESIZED) {
 #ifdef _WIN32
         if (win32_dxgi_present_is_active()) {
@@ -1434,14 +1468,20 @@ static void poll_events(struct xemu_console *scon)
 {
     SDL_Event ev1, *ev = &ev1;
     bool allow_close = true;
+    /* Headless never draws the HUD, so ImGui must not queue input. */
+    bool hud = !xemu_headless_mode();
 
     int kbd = 0, mouse = 0;
-    xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
+    if (hud) {
+        xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
+    }
 
     while (SDL_PollEvent(ev)) {
         xemu_main_loop_lock();
 
-        xemu_hud_process_sdl_events(ev);
+        if (hud) {
+            xemu_hud_process_sdl_events(ev);
+        }
         xemu_input_process_sdl_events(ev);
 
         switch (ev->type) {
@@ -1490,6 +1530,135 @@ static void poll_events(struct xemu_console *scon)
     xemu_main_loop_unlock();
 }
 
+/*
+ * QMP screendump. The renderer's frame can only be read on this (UI)
+ * thread and without the BQL, so the QMP coroutine parks a request here
+ * and yields; the UI loop writes the file, then a main-loop BH wakes the
+ * coroutine. Works windowed and headless. QMP only: HMP waits for
+ * coroutine commands with the BQL held, which the UI thread may need.
+ */
+typedef struct ScreendumpRequest {
+    const char *filename;
+    bool png;
+    Coroutine *co;
+    Error *err;
+} ScreendumpRequest;
+
+static ScreendumpRequest *screendump_pending;
+
+void coroutine_fn qmp_screendump(const char *filename, const char *device,
+                                 bool has_head, int64_t head,
+                                 bool has_format, ImageFormat format,
+                                 Error **errp)
+{
+    if (device || has_head) {
+        error_setg(errp, "xemu has a single display; omit device and head");
+        return;
+    }
+
+    ScreendumpRequest req = {
+        .filename = filename,
+        .png = has_format && format == IMAGE_FORMAT_PNG,
+        .co = qemu_coroutine_self(),
+    };
+    if (qatomic_cmpxchg(&screendump_pending, NULL, &req) != NULL) {
+        error_setg(errp, "a screendump is already in progress");
+        return;
+    }
+    qemu_coroutine_yield();
+    error_propagate(errp, req.err);
+}
+
+static void screendump_done_bh(void *opaque)
+{
+    ScreendumpRequest *req = opaque;
+    aio_co_wake(req->co);
+}
+
+/* Fallback when the renderer has no frame: the guest's VGA scanout. */
+static bool screendump_vga(struct xemu_console *scon, ScreendumpRequest *req)
+{
+    bool ok = false;
+
+    xemu_main_loop_lock();
+    DisplaySurface *surface = scon->surface;
+    if (!surface || surface_bytes_per_pixel(surface) != 4) {
+        error_setg(&req->err, "no displayable frame");
+    } else {
+        int w = surface_width(surface), h = surface_height(surface);
+        int stride = surface_stride(surface);
+        const uint8_t *src = surface_data(surface);
+        uint8_t *rgb = g_malloc((size_t)w * h * 3);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *s = src + (size_t)y * stride;
+            uint8_t *d = rgb + (size_t)y * w * 3;
+            for (int x = 0; x < w; x++) {
+                d[x * 3 + 0] = s[x * 4 + 2];
+                d[x * 3 + 1] = s[x * 4 + 1];
+                d[x * 3 + 2] = s[x * 4 + 0];
+            }
+        }
+        ok = xemu_hud_save_rgb(rgb, w, h, req->filename, req->png, &req->err);
+        g_free(rgb);
+    }
+    xemu_main_loop_unlock();
+    return ok;
+}
+
+static void screendump_service(struct xemu_console *scon)
+{
+    ScreendumpRequest *req = qatomic_read(&screendump_pending);
+    if (!req) {
+        return;
+    }
+
+    bool done = false;
+    if (xemu_headless_mode() != XEMU_HEADLESS_NULL) {
+#ifdef __APPLE__
+        if (xemu_present_is_metal()) {
+            NV2APresentFrame frame = { 0 };
+            uintptr_t tex = 0;
+            nv2a_get_present_frame(&frame);
+            if (frame.mtl_texture) {
+                tex = (uintptr_t)frame.mtl_texture;
+                xemu_metal_retain_handle(frame.mtl_texture);
+            } else if (frame.iosurface) {
+                tex = (uintptr_t)xemu_metal_wrap_iosurface(frame.iosurface);
+            }
+            nv2a_release_framebuffer_surface();
+            if (tex) {
+                xemu_hud_save_frame(tex, false, req->filename, req->png,
+                                    &req->err);
+                done = true;
+            }
+            if (frame.mtl_texture) {
+                xemu_metal_release_handle(frame.mtl_texture);
+            }
+        } else
+#endif
+        {
+            SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+            GLuint tex = nv2a_get_framebuffer_surface();
+            if (tex) {
+#if defined(__APPLE__)
+                xemu_set_framebuffer_texture_is_rect(
+                    g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN);
+#endif
+                xemu_hud_save_frame(tex, false, req->filename, req->png,
+                                    &req->err);
+                done = true;
+            }
+            nv2a_release_framebuffer_surface();
+        }
+    }
+    if (!done) {
+        screendump_vga(scon, req);
+    }
+
+    qatomic_set(&screendump_pending, NULL);
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), screendump_done_bh, req);
+}
+
 static void display_very_early_init(DisplayOptions *o)
 {
 #ifdef __linux__
@@ -1502,16 +1671,37 @@ static void display_very_early_init(DisplayOptions *o)
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
 #endif
 
+    XemuHeadlessMode headless = xemu_headless_mode();
+#ifdef __APPLE__
+    if (headless) {
+        /* Don't activate on launch (no focus steal). */
+        SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+    }
+#endif
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Failed to initialize SDL video subsystem: %s\n",
                 SDL_GetError());
         exit(1);
     }
 
+#ifdef __APPLE__
+    if (headless) {
+        xemu_os_set_background_app(); /* no Dock icon */
+    }
+#endif
+
 #ifdef SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR /* only available since SDL 2.0.8 */
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 #endif
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
+
+    if (headless == XEMU_HEADLESS_NULL) {
+        /* The null renderer draws nothing: no window, presenter or UI. */
+        fprintf(stderr, "CPU: %s\n", xemu_get_cpu_info());
+        fprintf(stderr, "OS_Version: %s\n", xemu_get_os_info());
+        return;
+    }
 
     bool use_metal = xemu_present_is_metal();
 
@@ -1571,7 +1761,8 @@ static void display_very_early_init(DisplayOptions *o)
 
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(
         (use_metal ? SDL_WINDOW_METAL : SDL_WINDOW_OPENGL) |
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+        (headless ? SDL_WINDOW_HIDDEN : 0));
 
     // Create main window
     m_window = SDL_CreateWindow(
@@ -1595,14 +1786,13 @@ static void display_very_early_init(DisplayOptions *o)
     if (use_metal) {
         m_context = NULL;
         if (!xemu_metal_init(m_window)) {
-            SDL_ShowSimpleMessageBox(
-                SDL_MESSAGEBOX_ERROR, "Unable to initialize Metal",
+            show_error_box(
+                "Unable to initialize Metal",
                 "Unable to initialize the Metal presentation backend.\r\n"
                 "Set display.window.presentation_backend = 'opengl' in\r\n"
                 "xemu.toml to fall back to OpenGL presentation.\r\n"
                 "\r\n"
-                "xemu cannot continue and will now exit.",
-                m_window);
+                "xemu cannot continue and will now exit.");
             SDL_DestroyWindow(m_window);
             SDL_Quit();
             exit(1);
@@ -1620,13 +1810,12 @@ static void display_very_early_init(DisplayOptions *o)
         }
 
         if (m_context == NULL) {
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+            show_error_box(
                 "Unable to create OpenGL context",
                 "Unable to create OpenGL context. This usually means the\r\n"
                 "graphics device on this system does not support OpenGL 4.0.\r\n"
                 "\r\n"
-                "xemu cannot continue and will now exit.",
-                m_window);
+                "xemu cannot continue and will now exit.");
             SDL_DestroyWindow(m_window);
             SDL_Quit();
             exit(1);
@@ -1676,6 +1865,10 @@ static void display_early_init(DisplayOptions *o)
     assert(o->type == DISPLAY_TYPE_XEMU);
     display_opengl = 1;
 
+    if (xemu_headless_mode() == XEMU_HEADLESS_NULL) {
+        return; /* no window, so no HUD */
+    }
+
     if (!xemu_present_is_metal()) {
         SDL_GL_MakeCurrent(m_window, m_context);
         SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
@@ -1715,6 +1908,9 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
 
     gui_fullscreen = o->has_full_screen && o->full_screen;
     gui_fullscreen |= g_config.display.window.fullscreen_on_startup;
+    if (xemu_headless_mode()) {
+        gui_fullscreen = 0; /* going fullscreen would show the window */
+    }
 
     num_outputs = 1;
     scon_list = g_new0(struct xemu_console, num_outputs);
@@ -1899,6 +2095,13 @@ static void init_sdl_app_metadata(void)
                                "https://xemu.app");
 }
 
+static int configured_renderer;
+
+static void restore_configured_renderer(void)
+{
+    g_config.display.renderer = configured_renderer;
+}
+
 int main(int argc, char **argv)
 {
     QemuThread thread;
@@ -1965,6 +2168,12 @@ int main(int argc, char **argv)
     fprintf(stderr, "xemu_commit: %s\n", xemu_commit);
     fprintf(stderr, "xemu_date: %s\n", xemu_date);
 
+    XemuHeadlessMode headless = xemu_headless_mode();
+    if (headless) {
+        fprintf(stderr, "xemu: headless mode: %s\n",
+                headless == XEMU_HEADLESS_NULL ? "null" : "offscreen");
+    }
+
     init_sdl_app_metadata();
 
     gArgc = argc;
@@ -1984,13 +2193,21 @@ int main(int argc, char **argv)
     if (!xemu_settings_load()) {
         const char *err_msg = xemu_settings_get_error_message();
         fprintf(stderr, "%s", err_msg);
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-            "Failed to load xemu config file", err_msg,
-            m_window);
+        show_error_box("Failed to load xemu config file", err_msg);
         SDL_Quit();
         exit(1);
     }
     atexit(xemu_settings_save);
+
+    if (headless == XEMU_HEADLESS_NULL) {
+        /*
+         * Null renderer for this run only. atexit handlers run in reverse,
+         * so the configured renderer is back before the exit-time save.
+         */
+        configured_renderer = g_config.display.renderer;
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_NULL;
+        atexit(restore_configured_renderer);
+    }
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {
@@ -2026,7 +2243,13 @@ int main(int argc, char **argv)
     struct xemu_console *scon = &scon_list[0];
     while (!qatomic_read(&qemu_exiting)) {
         poll_events(scon);
-        render_frame(scon);
+        screendump_service(scon);
+        if (headless) {
+            /* Nothing to present; keep input and screendump responsive. */
+            SDL_DelayNS(vblank_interval_ns);
+        } else {
+            render_frame(scon);
+        }
     }
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);

@@ -26,6 +26,11 @@ extern "C" {
 
 const char *xemu_get_os_info(void);
 
+#ifdef __APPLE__
+/* No Dock icon, never takes focus, and no App Nap. */
+void xemu_os_set_background_app(void);
+#endif
+
 #ifdef CONFIG_CPUID_H
 #include <cpuid.h>
 #endif

@@ -25,6 +25,7 @@
 #include "data/xemu_64x64.png.h"
 #include "data/xmu_mask.png.h"
 #include "notifications.hh"
+#include "xemu-hud.h"
 #include "stb_image.h"
 #include <fpng.h>
 #include <math.h>
@@ -1233,10 +1234,10 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip)
     RenderFramebuffer(tex, width, height, flip, scale);
 }
 
-bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
+static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
+                                   std::vector<uint8_t> &pixels, int &width,
+                                   int &height, int max_width, int max_height)
 {
-    int width, height;
-
     if (!tex) {
         return false;
     }
@@ -1252,17 +1253,12 @@ bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png,
     if (!max_height) max_height = height;
     ScaleDimensions(width, height, max_width, max_height, &width, &height);
 
-    std::vector<uint8_t> pixels;
     pixels.resize(width * height * 3);
 
 #ifdef __APPLE__
     if (UseMetal()) {
-        if (!MetalRenderFramebufferToRgb(tex, flip, width, height,
-                                         pixels.data())) {
-            return false;
-        }
-        return fpng::fpng_encode_image_to_memory(pixels.data(), width, height,
-                                                 3, png);
+        return MetalRenderFramebufferToRgb(tex, flip, width, height,
+                                           pixels.data());
     }
 #endif
 
@@ -1279,7 +1275,62 @@ bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png,
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
     fbo.Restore();
 
+    return true;
+}
+
+bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
+{
+    std::vector<uint8_t> pixels;
+    int width, height;
+
+    if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, max_width,
+                                max_height)) {
+        return false;
+    }
     return fpng::fpng_encode_image_to_memory(pixels.data(), width, height, 3, png);
+}
+
+extern "C" bool xemu_hud_save_rgb(const uint8_t *rgb, int width, int height,
+                                  const char *path, bool png, Error **errp)
+{
+    std::vector<uint8_t> data;
+    if (png) {
+        if (!fpng::fpng_encode_image_to_memory(rgb, width, height, 3, data)) {
+            error_setg(errp, "Failed to encode PNG image");
+            return false;
+        }
+    } else {
+        char header[32];
+        int n = snprintf(header, sizeof(header), "P6\n%d %d\n255\n", width,
+                         height);
+        data.assign(header, header + n);
+        data.insert(data.end(), rgb, rgb + (size_t)width * height * 3);
+    }
+
+    FILE *fd = qemu_fopen(path, "wb");
+    if (!fd) {
+        error_setg_errno(errp, errno, "Failed to open %s for writing", path);
+        return false;
+    }
+    bool ok = fwrite(data.data(), data.size(), 1, fd) == 1;
+    ok = (fclose(fd) == 0) && ok;
+    if (!ok) {
+        error_setg(errp, "Failed to write %s", path);
+    }
+    return ok;
+}
+
+extern "C" bool xemu_hud_save_frame(uintptr_t tex, bool flip, const char *path,
+                                    bool png, Error **errp)
+{
+    std::vector<uint8_t> pixels;
+    int width, height;
+
+    if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, 0, 0)) {
+        error_setg(errp, "Failed to read back the frame");
+        return false;
+    }
+    return xemu_hud_save_rgb(pixels.data(), width, height, path, png, errp);
 }
 
 void SaveScreenshot(uintptr_t tex, bool flip)

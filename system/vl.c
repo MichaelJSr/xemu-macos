@@ -147,6 +147,7 @@
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-net.h"
 #include "ui/xemu-input.h"
+#include "ui/xemu-present.h"
 #include "hw/xbox/eeprom_generation.h"
 
 #define MAX_VIRTIO_CONSOLES 1
@@ -3096,6 +3097,12 @@ void qemu_init(int argc, char **argv)
 
     fake_argv[fake_argc++] = strdup("-display");
     fake_argv[fake_argc++] = strdup("xemu");
+
+    if (xemu_headless_mode()) {
+        /* No host audio headless (the APU monitor stream is off too). */
+        fake_argv[fake_argc++] = strdup("-audio");
+        fake_argv[fake_argc++] = strdup("none");
+    }
 
     // Create USB Daughterboard for 1.0 Xbox. This is connected to Port 1 of the Root hub.
     fake_argv[fake_argc++] = strdup("-device");

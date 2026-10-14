@@ -20,6 +20,7 @@
 #include "common.hh"
 
 #include "../xemu-notifications.h"
+#include "../xemu-present.h"
 
 NotificationManager notification_manager;
 
@@ -155,5 +156,8 @@ void xemu_queue_notification(const char *msg)
 
 void xemu_queue_error_message(const char *msg)
 {
+    if (xemu_headless_mode()) {
+        fprintf(stderr, "xemu: %s\n", msg); /* nobody sees the popup */
+    }
     notification_manager.QueueError(msg);
 }

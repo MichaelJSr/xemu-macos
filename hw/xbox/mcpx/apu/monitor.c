@@ -18,6 +18,7 @@
  */
 
 #include "apu_int.h"
+#include "ui/xemu-present.h"
 
 void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
 {
@@ -28,6 +29,11 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
     };
 
     d->monitor.stream = NULL;
+
+    /* No audio device headless; with no stream the APU paces to real time. */
+    if (xemu_headless_mode()) {
+        return;
+    }
 
     if (!SDL_Init(SDL_INIT_AUDIO)) {
         error_setg(errp, "SDL_Init failed: %s", SDL_GetError());

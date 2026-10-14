@@ -146,6 +146,24 @@ enabled = true                  # ARM64 inline basic-block DSP JIT
 
 In-app Settings covers the main toggles.
 
+### Headless mode (automation)
+
+For harnesses that drive xemu only through QMP, the gdbstub and
+`XEMU_INPUT_PIPE`:
+
+| `XEMU_HEADLESS` | Effect |
+|---|---|
+| unset or empty | Normal windowed xemu |
+| `1` | Offscreen: hidden window, no Dock icon, never takes focus, no UI, no host audio. The guest still renders, so `screendump` returns real frames |
+| `null` | As `1`, plus the null renderer: no GPU work. Game logic, vblank timing, input, gdbstub and QMP work as usual; `screendump` returns the VGA scanout (usually blank). The configured renderer is not saved over |
+
+At startup xemu prints `xemu: headless mode: offscreen` (or `null`) to
+stderr. Screenshots come from QMP, windowed or headless:
+`{"execute": "screendump", "arguments": {"filename": "/tmp/f.png", "format": "png"}}`
+(default format `ppm`). The command returns once the file is written.
+It is not available from HMP. Config, portable mode, savestates, the HDD
+and EEPROM and all command-line options behave as windowed.
+
 ---
 
 ## Performance

@@ -107,8 +107,8 @@ bool pgraph_vk_push_present_enabled(NV2AState *d)
     if (!cached_env) {
         return false;
     }
-    if (!xemu_present_is_metal()) {
-        return false;
+    if (!xemu_present_is_metal() || xemu_headless_mode()) {
+        return false; /* headless: nothing consumes the ring */
     }
     /*
      * Frame interpolation is handled too: the flip publishes this flip's

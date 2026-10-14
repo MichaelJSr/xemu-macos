@@ -213,7 +213,8 @@ void qmp_client_migrate_info(const char *protocol, const char *hostname,
     error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "protocol", "'spice'");
 }
 
-#ifdef CONFIG_PIXMAN
+/* xemu serves screendump from ui/xemu.c (the frame lives in the renderer). */
+#if defined(CONFIG_PIXMAN) && !defined(XBOX)
 #ifdef CONFIG_PNG
 /**
  * png_save: Take a screenshot as PNG
@@ -393,4 +394,4 @@ qmp_screendump(const char *filename, const char *device,
         }
     }
 }
-#endif /* CONFIG_PIXMAN */
+#endif /* CONFIG_PIXMAN && !XBOX */

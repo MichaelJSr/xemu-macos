@@ -38,6 +38,21 @@ extern "C" {
  */
 bool xemu_present_is_metal(void);
 
+/*
+ * XEMU_HEADLESS, read once at startup. Unset or empty: windowed, as
+ * always. "1": offscreen -- hidden window, no Dock icon, no UI drawn,
+ * no audio device; the guest still renders, so QMP screendump returns
+ * real frames. "null": offscreen plus the null renderer (no GPU work;
+ * screendump falls back to the VGA surface, usually blank).
+ */
+typedef enum XemuHeadlessMode {
+    XEMU_HEADLESS_OFF,
+    XEMU_HEADLESS_OFFSCREEN,
+    XEMU_HEADLESS_NULL,
+} XemuHeadlessMode;
+
+XemuHeadlessMode xemu_headless_mode(void);
+
 #ifdef __cplusplus
 }
 #endif
