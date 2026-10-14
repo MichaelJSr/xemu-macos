@@ -180,6 +180,18 @@ Other automation interfaces (windowed or headless):
   frames, pauses, and returns (`0` just pauses). Replays land within a
   frame or two, not bit-exact: guest work per vblank still depends on
   host speed.
+- **Readiness lines** on stderr: `xemu: ready` once the machine and pads
+  exist (about 1 s after launch; `loadvm` works from then on, no fixed
+  sleep needed) and `xemu: state loaded` after every `loadvm` or incoming
+  migration.
+- **Park and resume a machine** without touching the HDD's snapshots:
+  QMP `stop`, then `migrate {"uri": "file:/path"}` (poll `query-migrate`
+  for `completed`). Resume in a new xemu started with `-incoming defer`
+  on an unchanged copy of the same HDD: wait for `xemu: ready`, run
+  `migrate-incoming {"uri": "file:/path"}`, wait for `xemu: state
+  loaded`, then `cont`.
+- **Bulk RAM dumps**: QMP `pmemsave` (physical; all 128 MiB in ~0.2 s)
+  and `memsave` (virtual; fails if the range touches an unmapped page).
 
 ---
 

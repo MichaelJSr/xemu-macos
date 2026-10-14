@@ -2325,6 +2325,8 @@ int main(int argc, char **argv)
     xemu_main_loop_lock();
     xemu_input_init();
     xemu_main_loop_unlock();
+    /* Machine and pads exist: a harness may loadvm or migrate-incoming now. */
+    fprintf(stderr, "xemu: ready\n");
 
     struct xemu_console *scon = &scon_list[0];
     while (!qatomic_read(&qemu_exiting)) {
