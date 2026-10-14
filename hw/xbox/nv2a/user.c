@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "qemu/log.h"
 
 /* USER - PFIFO MMIO and DMA submission area */
 uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
@@ -56,12 +57,17 @@ uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
                 break;
             }
         } else {
-            /* ramfc */
-            assert(!"Unsupported: channel_id != cur_channel_id");
+            /*
+             * ramfc: unsupported, read as 0. A gdbstub memory read that
+             * strays onto this MMIO lands here too; it must not abort.
+             */
+            qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER read of inactive "
+                          "channel %u\n", channel_id);
         }
     } else {
-        /* PIO Mode */
-        assert(!"Failed to enter DMA mode - entered PIO mode");
+        /* PIO Mode: unsupported, read as 0 (see above). */
+        qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER read in PIO mode, "
+                      "channel %u\n", channel_id);
     }
 
     qemu_mutex_unlock(&d->pfifo.lock);
