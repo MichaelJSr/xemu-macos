@@ -164,6 +164,12 @@ stderr. Screenshots come from QMP, windowed or headless:
 It is not available from HMP. Config, portable mode, savestates, the HDD
 and EEPROM and all command-line options behave as windowed.
 
+Other automation interfaces (windowed or headless):
+
+- **gdbstub `m` reads** that run into an unmapped page (the game heap
+  has guard pages between allocations) return the readable prefix, as
+  the protocol allows, instead of `E14`.
+
 ---
 
 ## Performance

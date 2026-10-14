@@ -46,6 +46,7 @@
 #include "system/runstate.h"
 #include "exec/replay-core.h"
 #include "exec/hwaddr.h"
+#include "exec/target_page.h"
 
 #include "internals.h"
 
@@ -1298,8 +1299,29 @@ static void handle_read_mem(GArray *params, void *user_ctx)
                                    gdb_get_cmd_param(params, 0)->val_ull,
                                    gdbserver_state.mem_buf->data,
                                    gdbserver_state.mem_buf->len, false)) {
-        gdb_put_packet("E14");
-        return;
+        /*
+         * Reply with the readable prefix, as the protocol allows, so a read
+         * that runs into an unmapped page (a heap guard page past the end
+         * of an object, say) still returns the bytes before it.
+         */
+        hwaddr addr = gdb_get_cmd_param(params, 0)->val_ull;
+        size_t len = gdbserver_state.mem_buf->len, done = 0;
+        size_t page = qemu_target_page_size();
+
+        while (done < len) {
+            size_t chunk = MIN(len - done, page - ((addr + done) & (page - 1)));
+            if (gdb_target_memory_rw_debug(gdbserver_state.g_cpu, addr + done,
+                                           gdbserver_state.mem_buf->data + done,
+                                           chunk, false)) {
+                break;
+            }
+            done += chunk;
+        }
+        if (!done) {
+            gdb_put_packet("E14");
+            return;
+        }
+        g_byte_array_set_size(gdbserver_state.mem_buf, done);
     }
 
     gdb_memtohex(gdbserver_state.str_buf, gdbserver_state.mem_buf->data,
