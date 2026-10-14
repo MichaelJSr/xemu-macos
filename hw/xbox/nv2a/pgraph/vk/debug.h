@@ -51,11 +51,19 @@ extern int nv2a_vk_dgroup_indent;
 #define NV2A_VK_DGROUP_END(...)        ((void)0)
 #endif
 
+/*
+ * Headless runs belong to a harness: on a lost device, exit at once with a
+ * clear line instead of sitting frozen while macOS writes a crash report
+ * (which looks like a hang). Windowed runs keep the trap and the report.
+ */
+void pgraph_vk_exit_if_headless_device_lost(int vk_result);
+
 #define VK_CHECK(x)                                           \
     do {                                                      \
         VkResult vk_result = (x);                             \
         if (vk_result != VK_SUCCESS) {                        \
             fprintf(stderr, "vk_result = %d\n", vk_result);   \
+            pgraph_vk_exit_if_headless_device_lost(vk_result); \
             __builtin_trap();                                  \
         }                                                     \
     } while (0)

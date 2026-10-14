@@ -119,6 +119,9 @@ the null renderer, for logic, RAM and gdbstub work. stderr then shows
 (PNG with `"format":"png"`); it works windowed too, but not from HMP.
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
+README "Headless mode (automation)" lists the harness interfaces:
+analog and frame-tagged pipe input, `xemu-frame-advance`, the `xemu:
+ready` / `xemu: state loaded` lines, park/resume via `migrate file:`.
 
 ## Test
 

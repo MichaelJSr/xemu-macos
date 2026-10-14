@@ -19,6 +19,7 @@
 
 #include "renderer.h"
 #include "hw/xbox/nv2a/nsprof.h"
+#include "ui/xemu-present.h"
 #include <limits.h>
 
 /*
@@ -30,6 +31,14 @@
  * experiment that deadlocked MoltenVK's internal mutex.
  */
 #define NV2A_VK_FENCE_WAIT_NS (5ull * 1000ull * 1000ull * 1000ull)
+
+void pgraph_vk_exit_if_headless_device_lost(int vk_result)
+{
+    if (vk_result == VK_ERROR_DEVICE_LOST && xemu_headless_mode()) {
+        fprintf(stderr, "xemu: Vulkan device lost; exiting\n");
+        _exit(EXIT_FAILURE);
+    }
+}
 
 static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
                                      const char *where)
@@ -49,6 +58,7 @@ static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
         fprintf(stderr,
                 "xemu: vkWaitForFences failed in %s: VkResult=%d\n",
                 where, (int)res);
+        pgraph_vk_exit_if_headless_device_lost(res);
     }
     abort();
 }

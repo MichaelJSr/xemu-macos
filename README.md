@@ -192,6 +192,15 @@ Other automation interfaces (windowed or headless):
   loaded`, then `cont`.
 - **Bulk RAM dumps**: QMP `pmemsave` (physical; all 128 MiB in ~0.2 s)
   and `memsave` (virtual; fails if the range touches an unmapped page).
+- **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
+  fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
+  since it was saved; `-rtc clock=vm` makes loads repeatable, but
+  snapshots saved under the default clock then read as 1970.
+- **Lost GPU device**: when macOS stops accepting the process's GPU work
+  (it does after repeated GPU errors, usually under heavy multi-instance
+  load), a headless xemu prints `xemu: Vulkan device lost; exiting` and
+  exits at once. A windowed one still crashes with a report, which
+  freezes it for as long as the report takes and looks like a hang.
 
 ---
 
