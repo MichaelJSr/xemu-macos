@@ -14,16 +14,52 @@
 ##
 
 ##
+# @XemuTraceRegion:
+#
+# Guest memory that @xemu-frame-advance reads at each traced vblank.
+#
+# @address: physical address, or with @virtual a virtual one (CPU 0's
+#     page tables at that vblank)
+#
+# @size: bytes to read, 1 to 4096
+#
+# @virtual: translate @address through the guest page tables (default
+#     false)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuTraceRegion',
+  'data': { 'address': 'uint64', 'size': 'int', '*virtual': 'bool' } }
+
+##
+# @XemuTraceSample:
+#
+# @frame: the frame counter at the vblank the sample was taken at
+#
+# @data: one lowercase hex string per traced region, in request
+#     order; an empty string when guest RAM does not back the whole
+#     region (an unmapped virtual page)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuTraceSample',
+  'data': { 'frame': 'int', 'data': ['str'] } }
+
+##
 # @XemuFrameInfo:
 #
 # @frame: vblanks delivered while the VM was running, since launch
 #
 # @running: whether the VM is running
 #
+# @trace: the samples @xemu-frame-advance took (only when it was
+#     given @trace)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
-  'data': { 'frame': 'int', 'running': 'bool' } }
+  'data': { 'frame': 'int', 'running': 'bool',
+            '*trace': ['XemuTraceSample'] } }
 
 ##
 # @query-xemu-frame:
@@ -42,9 +78,18 @@
 #
 # @frames: vblanks to run (default 1)
 #
+# @trace: guest memory to read at every @trace-every'th vblank of the
+#     advance, the last one included, before the guest sees that
+#     vblank (at most 256 regions).  Under -icount the samples are
+#     exact; otherwise the vCPU may be mid-update.
+#
+# @trace-every: vblanks between samples (default 1)
+#
 # Since: 10.2
 ##
-{ 'command': 'xemu-frame-advance', 'data': { '*frames': 'int' },
+{ 'command': 'xemu-frame-advance',
+  'data': { '*frames': 'int', '*trace': ['XemuTraceRegion'],
+            '*trace-every': 'int' },
   'returns': 'XemuFrameInfo', 'coroutine': true }
 
 ##

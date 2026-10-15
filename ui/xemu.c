@@ -32,6 +32,7 @@
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
 #include "qemu/rcu.h"
+#include "qemu/cutils.h"
 #include "qemu-version.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
@@ -931,6 +932,43 @@ static uint64_t frame_advance_target;
 static Coroutine *frame_advance_co;
 static bool frame_advance_stopping;
 
+/* xemu-frame-advance "trace": regions read at sampled vblanks. */
+static XemuTraceRegionList *frame_trace_regions;
+static int64_t frame_trace_every;
+static uint64_t frame_trace_start;
+static XemuTraceSampleList *frame_trace_samples, **frame_trace_tail;
+
+static void dump_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
+                         vaddr address, uint64_t size, int64_t *unmapped);
+
+static void frame_trace_sample(void)
+{
+    RAMBlock *rb = qemu_ram_block_by_name("xbox.ram");
+    const uint8_t *ram = qemu_ram_get_host_addr(rb);
+    uint64_t ram_size = qemu_ram_get_used_length(rb);
+    XemuTraceSample *sample = g_new0(XemuTraceSample, 1);
+    strList **tail = &sample->data;
+    uint8_t buf[4096];
+
+    sample->frame = frame_count;
+    for (XemuTraceRegionList *l = frame_trace_regions; l; l = l->next) {
+        XemuTraceRegion *r = l->value;
+        int64_t unmapped = 0;
+
+        if (r->q_virtual) {
+            dump_virtual(buf, ram, ram_size, r->address, r->size, &unmapped);
+        } else if (r->address + r->size <= ram_size) {
+            memcpy(buf, ram + r->address, r->size);
+        } else {
+            unmapped = 1;
+        }
+        QAPI_LIST_APPEND(tail, unmapped ? g_strdup("") :
+                         g_string_free(qemu_hexdump_line(NULL, buf, r->size,
+                                                         0, 0), false));
+    }
+    QAPI_LIST_APPEND(frame_trace_tail, sample);
+}
+
 /*
  * vm_start/vm_stop must not run in coroutine context: do them in BHs, on
  * the iohandler context, which only the main loop polls. In the main
@@ -964,6 +1002,12 @@ static void process_vblank(struct xemu_console *scon)
         frame_count++;
         /* Input tagged for this frame lands before the vblank IRQ. */
         xemu_input_frame_tick(frame_count);
+        if (frame_trace_regions && frame_advance_co &&
+            !frame_advance_stopping && frame_count <= frame_advance_target &&
+            ((frame_count - frame_trace_start) % frame_trace_every == 0 ||
+             frame_count == frame_advance_target)) {
+            frame_trace_sample();
+        }
     }
 
     graphic_hw_update(scon->dcl.con);
@@ -1004,6 +1048,10 @@ XemuFrameInfo *qmp_query_xemu_frame(Error **errp)
 
 XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
                                                    int64_t frames,
+                                                   bool has_trace,
+                                                   XemuTraceRegionList *trace,
+                                                   bool has_trace_every,
+                                                   int64_t trace_every,
                                                    Error **errp)
 {
     if (!has_frames) {
@@ -1017,6 +1065,24 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         error_setg(errp, "a frame advance is already in progress");
         return NULL;
     }
+    if (!has_trace_every) {
+        trace_every = 1;
+    }
+    if (trace_every < 1) {
+        error_setg(errp, "trace-every must be at least 1");
+        return NULL;
+    }
+    int regions = 0;
+    for (XemuTraceRegionList *l = trace; l; l = l->next) {
+        if (l->value->size < 1 || l->value->size > 4096) {
+            error_setg(errp, "a trace region's size must be 1 to 4096");
+            return NULL;
+        }
+        if (++regions > 256) {
+            error_setg(errp, "at most 256 trace regions");
+            return NULL;
+        }
+    }
     /* Prelaunch: started with -S, so that nothing runs before a load. */
     if (!runstate_is_running() && !runstate_check(RUN_STATE_PAUSED) &&
         !runstate_check(RUN_STATE_PRELAUNCH)) {
@@ -1025,6 +1091,11 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     }
 
     frame_advance_co = qemu_coroutine_self();
+    frame_trace_regions = trace;
+    frame_trace_every = trace_every;
+    frame_trace_start = frame_count;
+    frame_trace_samples = NULL;
+    frame_trace_tail = &frame_trace_samples;
     if (frames == 0) {
         frame_advance_stopping = true;
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
@@ -1033,7 +1104,14 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_run_bh, NULL);
     }
     qemu_coroutine_yield();
-    return frame_info();
+    XemuFrameInfo *info = frame_info();
+    if (trace) {
+        info->trace = frame_trace_samples;
+        info->has_trace = true;
+    }
+    frame_trace_regions = NULL;
+    frame_trace_samples = NULL;
+    return info;
 }
 
 /*
