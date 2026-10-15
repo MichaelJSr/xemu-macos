@@ -2735,9 +2735,9 @@ static inline void tcg_out_unstash_xmm(TCGContext *s, TCGArg a0)
     tcg_out_modrm_offset(s, OPC_MOVQ_VqWq, a0, TCG_REG_ESP, -0x10);
 }
 
-static inline void tcg_out_fld(TCGContext *s, TCGArg a0)
+static inline void tcg_out_fld(TCGContext *s, TCGArg a0, intptr_t ofs)
 {
-    tcg_out_modrm_offset(s, OPC_FLD_m80fp, 5, a0, 0);
+    tcg_out_modrm_offset(s, OPC_FLD_m80fp, 5, a0, ofs);
 }
 
 static inline void tcg_out_fld_xmm(TCGContext *s, TCGArg a0, bool dp)
@@ -2747,9 +2747,9 @@ static inline void tcg_out_fld_xmm(TCGContext *s, TCGArg a0, bool dp)
                          -0x10);
 }
 
-static inline void tcg_out_fstp(TCGContext *s, TCGArg a0)
+static inline void tcg_out_fstp(TCGContext *s, TCGArg a0, intptr_t ofs)
 {
-    tcg_out_modrm_offset(s, OPC_FSTP_m80fp, 7, a0, 0);
+    tcg_out_modrm_offset(s, OPC_FSTP_m80fp, 7, a0, ofs);
 }
 
 static inline void tcg_out_fstp_xmm(TCGContext *s, TCGArg a0, bool dp)
@@ -3106,10 +3106,10 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
 
     OP_f32_f64(st80f):
         tcg_out_fld_xmm(s, a0, dp);
-        tcg_out_fstp(s, a1);
+        tcg_out_fstp(s, a1, a2);
         break;
     OP_f32_f64(ld80f):
-        tcg_out_fld(s, a1);
+        tcg_out_fld(s, a1, a2);
         tcg_out_fstp_xmm(s, a0, dp);
         break;
     case INDEX_op_cvt32f_f64:

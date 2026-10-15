@@ -1730,39 +1730,49 @@ static void gen_repz_nz(DisasContext *s, MemOp ot,
     do_gen_string(s, ot, fn, true);
 }
 
-static TCGv_ptr gen_stn_ptr(int opreg)
-{
-    TCGv_i32 offset = tcg_temp_new_i32();
-    tcg_gen_mov_i32(offset, fpstt);
+/*
+ * An x87 register image as a base and a constant offset, which folds into
+ * the loads and stores that use it: ST(i) is one ADD (extended register)
+ * on aarch64, env + ((fpstt + i) & 7) * 16 at offset fpregs[0].
+ */
+typedef struct X87Ptr {
+    TCGv_ptr base;
+    intptr_t ofs;
+} X87Ptr;
 
-    if (opreg != 0) {
-        tcg_gen_addi_i32(offset, offset, opreg);
-        tcg_gen_andi_i32(offset, offset, 7);
+/* (fpstt + opreg) & 7; fpstt itself is always 0..7. */
+static TCGv_i32 gen_st_index(int opreg)
+{
+    TCGv_i32 idx;
+
+    if (opreg == 0) {
+        return fpstt;
     }
-
-    tcg_gen_shli_i32(offset, offset, 4);
-    tcg_gen_addi_i32(offset, offset, offsetof(CPUX86State, fpregs[0].d));
-    TCGv_ptr ptr = tcg_temp_new_ptr();
-    tcg_gen_ext_i32_ptr(ptr, offset);
-    tcg_gen_add_ptr(ptr, ptr, tcg_env);
-
-    return ptr;
+    idx = tcg_temp_new_i32();
+    tcg_gen_addi_i32(idx, fpstt, opreg);
+    tcg_gen_andi_i32(idx, idx, 7);
+    return idx;
 }
 
-static TCGv_ptr gen_ft0_ptr(void)
+static X87Ptr gen_stn_ptr(int opreg)
 {
-    TCGv_ptr ft0 = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(ft0, tcg_env, offsetof(CPUX86State, ft0));
-    return ft0;
+    TCGv_ptr base = tcg_temp_new_ptr();
+    tcg_gen_add_zext_shl_ptr(base, tcg_env, gen_st_index(opreg), 4);
+    return (X87Ptr){ base, offsetof(CPUX86State, fpregs[0].d) };
 }
 
-static void gen_set_fptag(int offs, int value)
+static X87Ptr gen_ft0_ptr(void)
+{
+    return (X87Ptr){ tcg_env, offsetof(CPUX86State, ft0) };
+}
+
+/* env->fptags[(env->fpstt + opreg) & 7] = value */
+static void gen_set_fptag_stn(int opreg, int value)
 {
     TCGv_ptr p = tcg_temp_new_ptr();
-    tcg_gen_ext_i32_ptr(p, fpstt);
-    tcg_gen_add_ptr(p, tcg_env, p);
-    TCGv_i32 tmp = tcg_constant_i32(value);
-    tcg_gen_st8_i32(tmp, p, offsetof(CPUX86State, fptags[0]) + offs);
+    tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_st_index(opreg), 0);
+    tcg_gen_st8_i32(tcg_constant_i32(value), p,
+                    offsetof(CPUX86State, fptags[0]));
 }
 
 #if defined(XBOX)
@@ -1779,34 +1789,34 @@ static bool x87_lean(void)
 }
 
 /* Copy one 16-byte x87 register image (floatx80 and its padding). */
-static void x87_gen_copy(TCGv_ptr dst, TCGv_ptr src)
+static void x87_gen_copy(X87Ptr dst, X87Ptr src)
 {
     TCGv_i64 lo = tcg_temp_new_i64();
     TCGv_i64 hi = tcg_temp_new_i64();
-    tcg_gen_ld_i64(lo, src, 0);
-    tcg_gen_ld_i64(hi, src, 8);
-    tcg_gen_st_i64(lo, dst, 0);
-    tcg_gen_st_i64(hi, dst, 8);
+    tcg_gen_ld_i64(lo, src.base, src.ofs);
+    tcg_gen_ld_i64(hi, src.base, src.ofs + 8);
+    tcg_gen_st_i64(lo, dst.base, dst.ofs);
+    tcg_gen_st_i64(hi, dst.base, dst.ofs + 8);
 }
 
 /* Store a floatx80 constant (helper_fld1/fldz: ST0 = floatx80_one ...). */
-static void x87_gen_const(TCGv_ptr dst, uint16_t high, uint64_t low)
+static void x87_gen_const(X87Ptr dst, uint16_t high, uint64_t low)
 {
-    tcg_gen_st_i64(tcg_constant_i64(low), dst, 0);
-    tcg_gen_st16_i32(tcg_constant_i32(high), dst, 8);
+    tcg_gen_st_i64(tcg_constant_i64(low), dst.base, dst.ofs);
+    tcg_gen_st16_i32(tcg_constant_i32(high), dst.base, dst.ofs + 8);
 }
 
 /* floatx80_chs / floatx80_abs on the sign/exponent halfword. */
-static void x87_gen_sign(TCGv_ptr p, bool chs)
+static void x87_gen_sign(X87Ptr p, bool chs)
 {
     TCGv_i32 hi = tcg_temp_new_i32();
-    tcg_gen_ld16u_i32(hi, p, 8);
+    tcg_gen_ld16u_i32(hi, p.base, p.ofs + 8);
     if (chs) {
         tcg_gen_xori_i32(hi, hi, 0x8000);
     } else {
         tcg_gen_andi_i32(hi, hi, 0x7fff);
     }
-    tcg_gen_st16_i32(hi, p, 8);
+    tcg_gen_st16_i32(hi, p.base, p.ofs + 8);
 }
 #else
 static bool x87_lean(void)
@@ -2024,8 +2034,9 @@ static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
 {
     TCGv_f64 *slot = &s->wt_st[(s->fpstt_delta + i) & 7];
     if (!*slot) {
+        X87Ptr p = gen_stn_ptr(i);
         *slot = tcg_temp_new_f64();
-        tcg_gen_ld80f_f64(*slot, gen_stn_ptr(i));
+        tcg_gen_ld80f_f64(*slot, p.base, p.ofs);
     }
     return *slot;
 }
@@ -2033,8 +2044,9 @@ static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
 static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
 {
     if (!s->wt_ft0) {
+        X87Ptr p = gen_ft0_ptr();
         s->wt_ft0 = tcg_temp_new_f64();
-        tcg_gen_ld80f_f64(s->wt_ft0, gen_ft0_ptr());
+        tcg_gen_ld80f_f64(s->wt_ft0, p.base, p.ofs);
     }
     return s->wt_ft0;
 }
@@ -2046,7 +2058,8 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
  */
 static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
 {
-    tcg_gen_st80f_f64(r, gen_stn_ptr(i));
+    X87Ptr p = gen_stn_ptr(i);
+    tcg_gen_st80f_f64(r, p.base, p.ofs);
     s->wt_st[(s->fpstt_delta + i) & 7] = r;
 }
 
@@ -2151,7 +2164,7 @@ static void gen_fpush(DisasContext *s)
 
     tcg_gen_subi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
-    gen_set_fptag(0, 0); /* validate stack entry */
+    gen_set_fptag_stn(0, 0); /* validate stack entry */
 
     s->fpstt_delta -= 1;
 }
@@ -2162,7 +2175,7 @@ static void gen_fpop(DisasContext *s)
         GEN_HELPER_FALLBACK_v_v(fpop);
     }
 
-    gen_set_fptag(0, 1); /* invalidate stack entry */
+    gen_set_fptag_stn(0, 1); /* invalidate stack entry */
     tcg_gen_addi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
 
@@ -2224,40 +2237,28 @@ static void gen_ffree_STN(DisasContext *s, int st_index)
     }
 
     /*
-     * Inline: env->fptags[(env->fpstt + st_index) & 7] = 1.
-     * Same shape as the fdecstp / fincstp inlines (single byte
-     * write into the tag word; no register spill, no env fpus
-     * change — ffree only marks the tag slot empty). Saves a
-     * helper call frame per freep / ffreep.
+     * Inline: a single byte write into the tag word; no register spill,
+     * no env fpus change (ffree only marks the tag slot empty).
      */
-    TCGv_i32 idx = tcg_temp_new_i32();
-    tcg_gen_addi_i32(idx, fpstt, st_index);
-    tcg_gen_andi_i32(idx, idx, 7);
-
-    TCGv_ptr p = tcg_temp_new_ptr();
-    tcg_gen_ext_i32_ptr(p, idx);
-    tcg_gen_add_ptr(p, tcg_env, p);
-
-    tcg_gen_st8_i32(tcg_constant_i32(1), p,
-                    offsetof(CPUX86State, fptags[0]));
+    gen_set_fptag_stn(st_index, 1);
 }
 
 static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
     if (x87_lean()) {
-        TCGv_ptr p0 = gen_stn_ptr(0);
-        TCGv_ptr pn = gen_stn_ptr(st_index);
+        X87Ptr p0 = gen_stn_ptr(0);
+        X87Ptr pn = gen_stn_ptr(st_index);
         TCGv_i64 lo0 = tcg_temp_new_i64(), hi0 = tcg_temp_new_i64();
         TCGv_i64 lon = tcg_temp_new_i64(), hin = tcg_temp_new_i64();
-        tcg_gen_ld_i64(lo0, p0, 0);
-        tcg_gen_ld_i64(hi0, p0, 8);
-        tcg_gen_ld_i64(lon, pn, 0);
-        tcg_gen_ld_i64(hin, pn, 8);
-        tcg_gen_st_i64(lo0, pn, 0);
-        tcg_gen_st_i64(hi0, pn, 8);
-        tcg_gen_st_i64(lon, p0, 0);
-        tcg_gen_st_i64(hin, p0, 8);
+        tcg_gen_ld_i64(lo0, p0.base, p0.ofs);
+        tcg_gen_ld_i64(hi0, p0.base, p0.ofs + 8);
+        tcg_gen_ld_i64(lon, pn.base, pn.ofs);
+        tcg_gen_ld_i64(hin, pn.base, pn.ofs + 8);
+        tcg_gen_st_i64(lo0, pn.base, pn.ofs);
+        tcg_gen_st_i64(hi0, pn.base, pn.ofs + 8);
+        tcg_gen_st_i64(lon, p0.base, p0.ofs);
+        tcg_gen_st_i64(hin, p0.base, p0.ofs + 8);
         if (x87_wt(s)) {
             TCGv_f64 *a = &s->wt_st[s->fpstt_delta & 7];
             TCGv_f64 *b = &s->wt_st[(s->fpstt_delta + st_index) & 7];

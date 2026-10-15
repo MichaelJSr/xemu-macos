@@ -542,6 +542,9 @@ static inline void tcg_gen_brcondi_ptr(TCGCond cond, TCGv_ptr a,
     glue(tcg_gen_brcondi_,PTR)(cond, (NAT)a, b, label);
 }
 
+void tcg_gen_add_zext_shl_ptr(TCGv_ptr ret, TCGv_ptr base, TCGv_i32 idx,
+                              unsigned sh);
+
 static inline void tcg_gen_ext_i32_ptr(TCGv_ptr r, TCGv_i32 a)
 {
 #if UINTPTR_MAX == UINT32_MAX
@@ -583,10 +586,10 @@ static inline void tcg_gen_trunc_ptr_i32(TCGv_i32 r, TCGv_ptr a)
 
 /* FP */
 void tcg_gen_flcr(TCGv_i32 arg);
-void tcg_gen_st80f_f32(TCGv_f32 arg, TCGv_ptr dst);
-void tcg_gen_st80f_f64(TCGv_f64 arg, TCGv_ptr dst);
-void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr src);
-void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr src);
+void tcg_gen_st80f_f32(TCGv_f32 arg, TCGv_ptr ptr, tcg_target_long ofs);
+void tcg_gen_st80f_f64(TCGv_f64 arg, TCGv_ptr ptr, tcg_target_long ofs);
+void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs);
+void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs);
 void tcg_gen_abs_f32(TCGv_f32 ret, TCGv_f32 src);
 void tcg_gen_abs_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_add_f32(TCGv_f32 ret, TCGv_f32 arg1, TCGv_f32 arg2);

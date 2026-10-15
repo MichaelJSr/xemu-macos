@@ -36,8 +36,8 @@ static PREC_TYPE get_ft0(DisasContext *s)
 
     if (*v == NULL) {
         *v = tcg_temp_new_fp();
-        TCGv_ptr p = gen_ft0_ptr();
-        tcg_gen_ld80f_fp(*v, p);
+        X87Ptr p = gen_ft0_ptr();
+        tcg_gen_ld80f_fp(*v, p.base, p.ofs);
     }
 
     return *v;
@@ -52,8 +52,8 @@ static PREC_TYPE get_stn(DisasContext *s, int opreg)
 
     if (*t == NULL) {
         *t = tcg_temp_new_fp();
-        TCGv_ptr p = gen_stn_ptr(opreg);
-        tcg_gen_ld80f_fp(*t, p);
+        X87Ptr p = gen_stn_ptr(opreg);
+        tcg_gen_ld80f_fp(*t, p.base, p.ofs);
     }
 
     return *t;
@@ -69,15 +69,15 @@ static void glue(flush_fp_regs, PREC_SUFFIX)(DisasContext *s)
     for (int i = 0; i < 8; i++) {
         PREC_TYPE *t = (PREC_TYPE *)&s->fpregs[(s->fpstt_delta + i) & 7];
         if (*t) {
-            TCGv_ptr ptr = gen_stn_ptr(i);
-            tcg_gen_st80f_fp(*t, ptr);
+            X87Ptr p = gen_stn_ptr(i);
+            tcg_gen_st80f_fp(*t, p.base, p.ofs);
             *t = NULL;
         }
    }
 
     if (s->ft0) {
-        TCGv_ptr ptr = gen_ft0_ptr();
-        tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
+        X87Ptr p = gen_ft0_ptr();
+        tcg_gen_st80f_fp((PREC_TYPE)s->ft0, p.base, p.ofs);
         s->ft0 = NULL;
     }
 }

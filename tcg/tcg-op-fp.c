@@ -16,24 +16,50 @@ void tcg_gen_flcr(TCGv_i32 arg)
     tcg_gen_op1_i32(INDEX_op_flcr, arg);
 }
 
-void tcg_gen_st80f_f32(TCGv_f32 arg, TCGv_ptr dst)
+/*
+ * ld80f/st80f access [ptr + ofs]. The backends fold an 8-byte aligned
+ * offset below 4 KiB into their loads and stores (aarch64: the LDR/LDRH
+ * scaled immediates of the low and high words); any other is added here.
+ */
+static TCGv_ptr x80_addr(TCGv_ptr ptr, tcg_target_long *ofs)
 {
-    tcg_gen_op2(INDEX_op_st80f_f32, TCG_TYPE_F32, tcgv_f32_arg(arg), tcgv_ptr_arg(dst));
+    TCGv_ptr t;
+
+    if (*ofs >= 0 && *ofs < 4096 && !(*ofs & 7)) {
+        return ptr;
+    }
+    t = tcg_temp_new_ptr();
+    tcg_gen_addi_ptr(t, ptr, *ofs);
+    *ofs = 0;
+    return t;
 }
 
-void tcg_gen_st80f_f64(TCGv_f64 arg, TCGv_ptr dst)
+void tcg_gen_st80f_f32(TCGv_f32 arg, TCGv_ptr ptr, tcg_target_long ofs)
 {
-    tcg_gen_op2(INDEX_op_st80f_f64, TCG_TYPE_F64, tcgv_f64_arg(arg), tcgv_ptr_arg(dst));
+    ptr = x80_addr(ptr, &ofs);
+    tcg_gen_op3(INDEX_op_st80f_f32, TCG_TYPE_F32, tcgv_f32_arg(arg),
+                tcgv_ptr_arg(ptr), ofs);
 }
 
-void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr src)
+void tcg_gen_st80f_f64(TCGv_f64 arg, TCGv_ptr ptr, tcg_target_long ofs)
 {
-    tcg_gen_op2(INDEX_op_ld80f_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_ptr_arg(src));
+    ptr = x80_addr(ptr, &ofs);
+    tcg_gen_op3(INDEX_op_st80f_f64, TCG_TYPE_F64, tcgv_f64_arg(arg),
+                tcgv_ptr_arg(ptr), ofs);
 }
 
-void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr src)
+void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs)
 {
-    tcg_gen_op2(INDEX_op_ld80f_f64, TCG_TYPE_F64, tcgv_f64_arg(ret), tcgv_ptr_arg(src));
+    ptr = x80_addr(ptr, &ofs);
+    tcg_gen_op3(INDEX_op_ld80f_f32, TCG_TYPE_F32, tcgv_f32_arg(ret),
+                tcgv_ptr_arg(ptr), ofs);
+}
+
+void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs)
+{
+    ptr = x80_addr(ptr, &ofs);
+    tcg_gen_op3(INDEX_op_ld80f_f64, TCG_TYPE_F64, tcgv_f64_arg(ret),
+                tcgv_ptr_arg(ptr), ofs);
 }
 
 void tcg_gen_abs_f32(TCGv_f32 ret, TCGv_f32 src)

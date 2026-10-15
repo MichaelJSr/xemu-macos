@@ -108,6 +108,7 @@ struct TCGLabelQemuLdst {
     tcg_insn_unit *label_ptr[2]; /* label pointers to be updated */
     /* A backend's own out-of-line stub, emitted instead of a slow path */
     bool (*out_stub)(TCGContext *s, TCGLabelQemuLdst *l);
+    intptr_t addr_ofs;      /* out_stub: the access's offset from addr_reg */
     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
 };
 
@@ -2697,6 +2698,9 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_sub_f32:
     case INDEX_op_sub_f64:
         return TCG_TARGET_HAS_fpu;
+
+    case INDEX_op_add_zext_shl:
+        return type == TCG_TYPE_I64 && has_type && TCG_TARGET_HAS_add_zext_shl;
 
     default:
         if (op < INDEX_op_last_generic) {

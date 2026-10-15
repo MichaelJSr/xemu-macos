@@ -54,5 +54,8 @@
 #ifndef TCG_TARGET_HAS_fpu
 #define TCG_TARGET_HAS_fpu              0
 #endif
+#ifndef TCG_TARGET_HAS_add_zext_shl
+#define TCG_TARGET_HAS_add_zext_shl     0
+#endif
 
 #endif

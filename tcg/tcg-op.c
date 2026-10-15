@@ -3096,6 +3096,34 @@ void tcg_gen_extu_i32_i64(TCGv_i64 ret, TCGv_i32 arg)
     }
 }
 
+/*
+ * ret = base + ((uintptr_t)(uint32_t)idx << sh), sh 0..4: an index scaled
+ * into an env array (the x87 stack slots and tags). One ADD (extended
+ * register) where the backend has the op.
+ */
+void tcg_gen_add_zext_shl_ptr(TCGv_ptr ret, TCGv_ptr base, TCGv_i32 idx,
+                              unsigned sh)
+{
+    tcg_debug_assert(sh <= 4);
+#if TCG_TARGET_REG_BITS == 64
+    if (TCG_TARGET_HAS_add_zext_shl) {
+        tcg_gen_op4(INDEX_op_add_zext_shl, TCG_TYPE_I64, tcgv_ptr_arg(ret),
+                    tcgv_ptr_arg(base), tcgv_i32_arg(idx), sh);
+    } else {
+        TCGv_i64 t = tcg_temp_ebb_new_i64();
+        tcg_gen_extu_i32_i64(t, idx);
+        tcg_gen_shli_i64(t, t, sh);
+        tcg_gen_add_i64((TCGv_i64)ret, (TCGv_i64)base, t);
+        tcg_temp_free_i64(t);
+    }
+#else
+    TCGv_i32 t = tcg_temp_ebb_new_i32();
+    tcg_gen_shli_i32(t, idx, sh);
+    tcg_gen_add_i32((TCGv_i32)ret, (TCGv_i32)base, t);
+    tcg_temp_free_i32(t);
+#endif
+}
+
 void tcg_gen_ext_i32_i64(TCGv_i64 ret, TCGv_i32 arg)
 {
     if (TCG_TARGET_REG_BITS == 32) {

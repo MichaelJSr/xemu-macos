@@ -111,6 +111,8 @@ DEF(ext_i32_i64, 1, 1, 0, 0)
 DEF(extu_i32_i64, 1, 1, 0, 0)
 DEF(extrl_i64_i32, 1, 1, 0, 0)
 DEF(extrh_i64_i32, 1, 1, 0, 0)
+/* ret = base + ((uint64_t)(uint32_t)idx << sh), sh a constant 0..4 */
+DEF(add_zext_shl, 1, 2, 1, 0)
 
 #define DATA64_ARGS  (TCG_TARGET_REG_BITS == 64 ? 1 : 2)
 
@@ -130,10 +132,10 @@ DEF(qemu_st2, 0, 3, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT
 
 /* Host floating point support. */
 DEF(flcr, 0, 1, 0, TCG_OPF_FP)
-DEF(ld80f_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(ld80f_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(st80f_f32, 0, 2, 0, TCG_OPF_FP)
-DEF(st80f_f64, 0, 2, 0, TCG_OPF_FP)
+DEF(ld80f_f32, 1, 1, 1, TCG_OPF_FP)
+DEF(ld80f_f64, 1, 1, 1, TCG_OPF_FP)
+DEF(st80f_f32, 0, 2, 1, TCG_OPF_FP)
+DEF(st80f_f64, 0, 2, 1, TCG_OPF_FP)
 DEF(abs_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(abs_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(add_f32, 1, 2, 0, TCG_OPF_FP)
