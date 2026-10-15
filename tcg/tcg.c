@@ -2701,6 +2701,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
 
     case INDEX_op_add_zext_shl:
         return type == TCG_TYPE_I64 && has_type && TCG_TARGET_HAS_add_zext_shl;
+    case INDEX_op_st_f64:
+        return TCG_TARGET_HAS_st_f64;
 
     default:
         if (op < INDEX_op_last_generic) {

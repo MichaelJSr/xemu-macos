@@ -5,6 +5,7 @@
 #include "exec/translation-block.h"
 #include "exec/plugin-gen.h"
 #include "tcg-internal.h"
+#include "tcg-has.h"
 
 static void tcg_gen_op1_i32(TCGOpcode opc, TCGv_i32 a1)
 {
@@ -46,6 +47,19 @@ void tcg_gen_st80f_f64(TCGv_f64 arg, TCGv_ptr ptr, tcg_target_long ofs)
     ptr = x80_addr(ptr, &ofs);
     tcg_gen_op3(INDEX_op_st80f_f64, TCG_TYPE_F64, tcgv_f64_arg(arg),
                 tcgv_ptr_arg(ptr), ofs);
+}
+
+/* The double's 8 bytes at [ptr + ofs]: one STR Dt where the backend has it. */
+void tcg_gen_st_f64(TCGv_f64 arg, TCGv_ptr ptr, tcg_target_long ofs)
+{
+    if (TCG_TARGET_HAS_st_f64) {
+        tcg_gen_op3(INDEX_op_st_f64, TCG_TYPE_F64, tcgv_f64_arg(arg),
+                    tcgv_ptr_arg(ptr), ofs);
+    } else {
+        TCGv_i64 t = tcg_temp_new_i64();
+        tcg_gen_mov64f_i64(t, arg);
+        tcg_gen_st_i64(t, ptr, ofs);
+    }
 }
 
 void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs)

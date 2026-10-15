@@ -59,8 +59,12 @@ static inline target_long lshift(target_long x, int n)
 /* translate.c */
 void tcg_x86_init(void);
 #if defined(XBOX)
-void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
-                          uint64_t back);
+void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
+                      uint64_t word2);
+#endif
+#if defined(XBOX) && defined(__aarch64__)
+/* fpu_helper.c: double_to_floatx80_fast, the C twin of the inline st80f. */
+floatx80 xemu_x87_double_to_floatx80(double d);
 #endif
 void x86_translate_code(CPUState *cs, TranslationBlock *tb,
                         int *max_insns, vaddr pc, void *host_pc);

@@ -430,6 +430,15 @@ floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
     return double_to_floatx80_fast(rint(d));
 }
 
+/*
+ * xemu: a mid-block exit lands the write-through path's deferred stores
+ * with this (translate.c x87_wt_pend, xemu_x87_restore).
+ */
+floatx80 xemu_x87_double_to_floatx80(double d)
+{
+    return double_to_floatx80_fast(d);
+}
+
 #endif /* __x86_64__ / __aarch64__ */
 
 /*

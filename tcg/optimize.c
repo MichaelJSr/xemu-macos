@@ -3033,6 +3033,9 @@ static bool fold_tcg_st(OptContext *ctx, TCGOp *op)
     case INDEX_op_st_vec:
         lm1 = tcg_type_size(ctx->type) - 1;
         break;
+    case INDEX_op_st_f64:
+        lm1 = 7;
+        break;
     default:
         g_assert_not_reached();
     }
@@ -3223,6 +3226,7 @@ void tcg_optimize(TCGContext *s)
         case INDEX_op_st8:
         case INDEX_op_st16:
         case INDEX_op_st32:
+        case INDEX_op_st_f64:
             done = fold_tcg_st(&ctx, op);
             break;
         case INDEX_op_st:

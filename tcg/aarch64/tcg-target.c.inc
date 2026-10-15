@@ -3687,6 +3687,10 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
         break;
 
+    case INDEX_op_st_f64:
+        tcg_out_st(s, TCG_TYPE_F64, a0, a1, a2);
+        break;
+
     case INDEX_op_mov_f64:
         dp = true; /* FALLTHRU */
     case INDEX_op_mov_f32:
@@ -4276,6 +4280,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I1(W, r);
     case INDEX_op_st80f_f32:
     case INDEX_op_st80f_f64:
+    case INDEX_op_st_f64:
         return C_O0_I2(W, r);
     case INDEX_op_add_f32:
     case INDEX_op_add_f64:

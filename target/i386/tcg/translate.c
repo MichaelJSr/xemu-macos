@@ -258,6 +258,18 @@ typedef struct DisasContext {
     /* Write-through x87: canonical register values (x87_wt_*). */
     TCGv_f64 wt_st[8];
     TCGv_f64 wt_ft0;
+    /*
+     * Deferred stores (x87_wt_pend): wt_st slots whose st80f waits for the
+     * next flush, the fpstt_delta that bit 0 of env->xemu_x87_shadow maps
+     * to (wt_base, valid while wt_epoch), the pending set at the start of
+     * this insn as recorded in insn_start word 2 (wt_insn_pend), and
+     * whether a flush inside this insn ended deferral for the rest of it.
+     */
+    uint8_t wt_pend;
+    uint8_t wt_insn_pend;
+    bool wt_epoch;
+    bool wt_nodefer;
+    int wt_base;
 #endif
 } DisasContext;
 
@@ -1943,6 +1955,10 @@ static void gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg)
 #define fp_pc_wrapper(f) \
     (fpu_using_double_precision(s) ? glue(f, _f64) : glue(f, _f32))
 
+#if defined(XBOX)
+static void x87_wt_flush(DisasContext *s);
+#endif
+
 static void gen_flush_fp(DisasContext *s)
 {
     fp_pc_wrapper(flush_fp_regs)(s);
@@ -1956,11 +1972,12 @@ static void gen_flush_fp(DisasContext *s)
     xemu_x87_flush_ptrs(s);
     xemu_x87_close_run(s);
     s->xemu_fds_seg = -1;
+    /* Write-through: land the deferred stores, then drop the copies. */
+    x87_wt_flush(s);
 #endif
     s->fpstt_delta = 0;
     s->flcr_set = false;
 #if defined(XBOX)
-    /* Write-through: env is always current, so dropping the copies is all. */
     for (int i = 0; i < 8; i++) {
         s->wt_st[i] = NULL;
     }
@@ -1976,9 +1993,10 @@ static void gen_flush_fp(DisasContext *s)
  * 80-bit image with floatx80_to_double_fast, compute one double operation
  * under the live FPCR, and write double_to_floatx80_fast of the result.
  * This path does exactly that inline, without the call:
- *  - every result is written to env at once, as the helper writes it, so
- *    env is current after each instruction and any mid-block exit
- *    (cpu_io_recompile under icount, a guest #PF) is safe;
+ *  - every result reaches env by the next helper call or block end, as
+ *    the helper would have written it; a mid-block exit before then
+ *    (cpu_io_recompile under icount, a guest #PF) lands it from the
+ *    shadow double (x87_wt_pend);
  *  - the conversions are the backend's ld80f/st80f, which match the C
  *    conversions bit for bit;
  *  - each register's double, as the next helper would read it back, is
@@ -2053,15 +2071,174 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
 }
 
 /*
+ * Deferred stores. A result's st80f waits for the next flush (gen_flush_fp:
+ * every helper call, BB_END op and the TB end), so a slot written again
+ * before then, which most x87 chains do (fld, fmul, fadd... on one ST0),
+ * converts once. Only an overwrite cancels a store: a popped slot is still
+ * stored, since FSAVE/FXSAVE expose empty registers.
+ *
+ * A mid-block exit (a guest fault, cpu_io_recompile) must still leave env
+ * as the eager stores would. So every deferred value is also stored as a
+ * double in env->xemu_x87_shadow (one STR), insn_start word 2 names the
+ * slots pending at the start of each insn, and x86_restore_state_to_opc
+ * converts those (xemu_x87_restore) with double_to_floatx80_fast, st80f's
+ * C twin. Shadow slot b is physical register (pend_top + b) & 7, pend_top
+ * being the fpstt stored when the first store of a flush interval was
+ * deferred. A flush inside an insn that started with stores pending zeroes
+ * pend_top, so an exit later in that insn (a helper's fault) lands nothing
+ * over what the flush and the helper wrote, and the rest of the insn
+ * stores eagerly.
+ *
+ * Invariants: a pending slot always has its double in wt_st; and env's
+ * image of a pending slot is stale, so TCG code that reads or writes the
+ * raw image (x87_gen_copy, fxch, the sign ops, the constants) goes through
+ * the cached double or x87_wt_sync first. Helpers need nothing: their call
+ * flushes.
+ */
+static uint8_t x87_wt_rel_pend(DisasContext *s)
+{
+    uint8_t rel = 0;
+
+    for (int r = 0; r < 8; r++) {
+        if (s->wt_pend & (1 << r)) {
+            rel |= 1 << ((r - s->wt_base) & 7);
+        }
+    }
+    return rel;
+}
+
+static bool x87_wt_pending(DisasContext *s, int slot)
+{
+    return s->wt_pend & (1 << slot);
+}
+
+/* Store wt_st slot `slot` now, as the eager path did. */
+static void x87_wt_store(DisasContext *s, int slot)
+{
+    X87Ptr p = gen_stn_ptr((slot - s->fpstt_delta) & 7);
+
+    tcg_gen_st80f_f64(s->wt_st[slot], p.base, p.ofs);
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_wt_st80f);
+    }
+}
+
+/* Make env's image of a slot current before TCG code reads it raw. */
+static void x87_wt_sync(DisasContext *s, int slot)
+{
+    if (x87_wt_pending(s, slot)) {
+        x87_wt_store(s, slot);
+        s->wt_pend &= ~(1 << slot);
+    }
+}
+
+/* Defer slot `slot`'s store of r. */
+static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
+{
+    if (!s->wt_epoch) {
+        TCGv_i32 top = tcg_temp_new_i32();
+
+        tcg_gen_ori_i32(top, fpstt, 8);
+        tcg_gen_st8_i32(top, tcg_env,
+                        offsetof(CPUX86State, xemu_x87_pend_top));
+        s->wt_epoch = true;
+        s->wt_base = s->fpstt_delta;
+    }
+    tcg_gen_st_f64(r, tcg_env,
+                   offsetof(CPUX86State,
+                            xemu_x87_shadow[(slot - s->wt_base) & 7]));
+    s->wt_st[slot] = r;
+    s->wt_pend |= 1 << slot;
+    if (unlikely(xemu_x87_refute_on())) {
+        xemu_x87_gen_poison(gen_stn_ptr((slot - s->fpstt_delta) & 7));
+    }
+}
+
+/*
+ * The flush's half: store every pending slot. Called from gen_flush_fp
+ * before it drops wt_st and fpstt_delta.
+ */
+static void x87_wt_flush(DisasContext *s)
+{
+    if (s->wt_pend) {
+        for (int r = 0; r < 8; r++) {
+            if (s->wt_pend & (1 << r)) {
+                tcg_debug_assert(s->wt_st[r]);
+                x87_wt_store(s, r);
+            }
+        }
+        s->wt_pend = 0;
+        if (unlikely(xemu_x87_refute_on())) {
+            xemu_x87_gen_poison_scan(&xemu_x87_wt_flush_viol);
+        }
+    }
+    if (s->wt_insn_pend && !s->wt_nodefer) {
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                        offsetof(CPUX86State, xemu_x87_pend_top));
+    }
+    s->wt_nodefer = s->wt_insn_pend != 0;
+    s->wt_epoch = false;
+}
+
+/*
+ * Refuter, at the top of every insn: exactly the pending slots hold the
+ * poison, their shadows hold their doubles, and pend_top maps the shadow
+ * slots onto them, so a mid-block exit here would land exactly them.
+ */
+static void x87_wt_boundary_check(DisasContext *s)
+{
+    if (!xemu_x87_refute_on() || !x87_wt(s)) {
+        return;
+    }
+    for (int r = 0; r < 8; r++) {
+        bool pend = x87_wt_pending(s, r);
+
+        xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol,
+                                  gen_stn_ptr((r - s->fpstt_delta) & 7), pend);
+        if (pend) {
+            TCGv_i64 want = tcg_temp_new_i64();
+            TCGv_i64 was = tcg_temp_new_i64();
+
+            tcg_gen_mov64f_i64(want, s->wt_st[r]);
+            tcg_gen_ld_i64(was, tcg_env,
+                           offsetof(CPUX86State,
+                                    xemu_x87_shadow[(r - s->wt_base) & 7]));
+            xemu_x87_gen_ne_count_i64(&xemu_x87_wt_bnd_viol, want, was);
+        }
+    }
+    xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol, gen_ft0_ptr(), false);
+    if (s->wt_pend) {
+        TCGv_i32 want = tcg_temp_new_i32();
+        TCGv_i32 was = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(want, fpstt, s->wt_base - s->fpstt_delta);
+        tcg_gen_andi_i32(want, want, 7);
+        tcg_gen_ori_i32(want, want, 8);
+        tcg_gen_ld8u_i32(was, tcg_env,
+                         offsetof(CPUX86State, xemu_x87_pend_top));
+        xemu_x87_gen_ne_count_i32(&xemu_x87_wt_bnd_viol, want, was);
+    }
+    xemu_gen_counter_inc(&xemu_x87_wt_bnd_checks);
+}
+
+/*
  * ST(i) = r, as a helper writes double_to_floatx80_fast(result). r reads
  * back unchanged: it is computed by the host (fadd, fcvt, scvtf...), which
  * never returns a signalling NaN.
  */
 static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
 {
-    X87Ptr p = gen_stn_ptr(i);
-    tcg_gen_st80f_f64(r, p.base, p.ofs);
-    s->wt_st[(s->fpstt_delta + i) & 7] = r;
+    int slot = (s->fpstt_delta + i) & 7;
+
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_wt_writes);
+    }
+    if (s->wt_nodefer) {
+        s->wt_st[slot] = r;
+        x87_wt_store(s, slot);
+        return;
+    }
+    x87_wt_pend(s, slot, r);
 }
 
 /* ST(i) = a qword from memory; st80f stores it quieted as well. */
@@ -2184,13 +2361,18 @@ static void gen_fpop(DisasContext *s)
     s->fpstt_delta += 1;
 }
 
+/* FT0 = ST(i) for a helper (fucom*, fcomi*), which reads env->ft0. */
 static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        int src = (s->fpstt_delta + st_index) & 7;
+        if (x87_wt(s)) {
+            x87_wt_sync(s, src);
+        }
         x87_gen_copy(gen_ft0_ptr(), gen_stn_ptr(st_index));
         if (x87_wt(s)) {
-            s->wt_ft0 = s->wt_st[(s->fpstt_delta + st_index) & 7];
+            s->wt_ft0 = s->wt_st[src];
         }
         return;
     }
@@ -2199,15 +2381,50 @@ static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
     fp_pc_wrapper(gen_fmov_FT0_STN)(s, st_index);
 }
 
+/*
+ * FT0 = ST(i) for gen_helper_fp_arith_ST0_FT0 and gen_fcom_ST0_FT0, which
+ * write-through blocks run inline on the double: env->ft0 is not read, so
+ * it is not written (as for the memory forms).
+ */
+static void gen_fload_FT0_STN(DisasContext *s, int st_index)
+{
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        s->wt_ft0 = x87_wt_get_st(s, st_index);
+        return;
+    }
+#endif
+    gen_fmov_FT0_STN(s, st_index);
+}
+
+#if defined(XBOX)
+/*
+ * ST(d) = ST(s) as raw 16-byte copies. A deferred source has a stale
+ * image, so its double is copied instead, deferred as well: st80f of the
+ * same double gives the bytes the source will get.
+ */
+static void x87_lean_move(DisasContext *s, int d, int src_i)
+{
+    int dst = (s->fpstt_delta + d) & 7;
+    int src = (s->fpstt_delta + src_i) & 7;
+
+    if (x87_wt(s) && x87_wt_pending(s, src)) {
+        x87_wt_pend(s, dst, s->wt_st[src]);
+        return;
+    }
+    x87_gen_copy(gen_stn_ptr(d), gen_stn_ptr(src_i));
+    if (x87_wt(s)) {
+        s->wt_st[dst] = s->wt_st[src];
+        s->wt_pend &= ~(1 << dst);
+    }
+}
+#endif
+
 static void gen_fmov_ST0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
     if (x87_lean()) {
-        x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
-        if (x87_wt(s)) {
-            s->wt_st[s->fpstt_delta & 7] =
-                s->wt_st[(s->fpstt_delta + st_index) & 7];
-        }
+        x87_lean_move(s, 0, st_index);
         return;
     }
 #endif
@@ -2219,11 +2436,7 @@ static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
     if (x87_lean()) {
-        x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
-        if (x87_wt(s)) {
-            s->wt_st[(s->fpstt_delta + st_index) & 7] =
-                s->wt_st[s->fpstt_delta & 7];
-        }
+        x87_lean_move(s, st_index, 0);
         return;
     }
 #endif
@@ -2248,6 +2461,37 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        int a = s->fpstt_delta & 7;
+        int b = (s->fpstt_delta + st_index) & 7;
+        bool pa = x87_wt(s) && x87_wt_pending(s, a);
+        bool pb = x87_wt(s) && x87_wt_pending(s, b);
+
+        if (pa || pb) {
+            /*
+             * A deferred side takes the other's double (deferred again);
+             * a current side's image moves raw, read before the deferred
+             * side is overwritten.
+             */
+            TCGv_f64 va = s->wt_st[a], vb = s->wt_st[b];
+            if (!pb) {
+                x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
+                s->wt_pend &= ~(1 << a);
+                s->wt_st[a] = vb;
+            }
+            if (!pa) {
+                x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
+                s->wt_pend &= ~(1 << b);
+                s->wt_st[b] = va;
+            }
+            if (pb) {
+                x87_wt_pend(s, a, vb);
+            }
+            if (pa) {
+                x87_wt_pend(s, b, va);
+            }
+            return;
+        }
+
         X87Ptr p0 = gen_stn_ptr(0);
         X87Ptr pn = gen_stn_ptr(st_index);
         TCGv_i64 lo0 = tcg_temp_new_i64(), hi0 = tcg_temp_new_i64();
@@ -2261,11 +2505,9 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
         tcg_gen_st_i64(lon, p0.base, p0.ofs);
         tcg_gen_st_i64(hin, p0.base, p0.ofs + 8);
         if (x87_wt(s)) {
-            TCGv_f64 *a = &s->wt_st[s->fpstt_delta & 7];
-            TCGv_f64 *b = &s->wt_st[(s->fpstt_delta + st_index) & 7];
-            TCGv_f64 t = *a;
-            *a = *b;
-            *b = t;
+            TCGv_f64 t = s->wt_st[a];
+            s->wt_st[a] = s->wt_st[b];
+            s->wt_st[b] = t;
         }
         return;
     }
@@ -2446,10 +2688,39 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
 }
 
+#if defined(XBOX)
+/*
+ * fchs/fabs of a deferred ST0: st80f copies the sign through on every path
+ * (double_to_floatx80_fast), so the sign op on the double gives the bytes
+ * the image sign op would. FNEG/FABS only touch the sign bit (FPCR.AH is
+ * never set), and the result reads back unchanged.
+ */
+static bool x87_wt_sign_pending(DisasContext *s, bool chs)
+{
+    int slot = s->fpstt_delta & 7;
+    TCGv_f64 r;
+
+    if (!x87_wt(s) || !x87_wt_pending(s, slot)) {
+        return false;
+    }
+    r = tcg_temp_new_f64();
+    if (chs) {
+        tcg_gen_chs_f64(r, s->wt_st[slot]);
+    } else {
+        tcg_gen_abs_f64(r, s->wt_st[slot]);
+    }
+    x87_wt_pend(s, slot, r);
+    return true;
+}
+#endif
+
 static void gen_fchs_ST0(DisasContext *s)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        if (x87_wt_sign_pending(s, true)) {
+            return;
+        }
         x87_gen_sign(gen_stn_ptr(0), true);
         /*
          * Reload rather than negate the cached double: the conversion does
@@ -2469,6 +2740,9 @@ static void gen_fabs_ST0(DisasContext *s)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        if (x87_wt_sign_pending(s, false)) {
+            return;
+        }
         x87_gen_sign(gen_stn_ptr(0), false);
         s->wt_st[s->fpstt_delta & 7] = NULL;   /* as in gen_fchs_ST0 */
         return;
@@ -2621,6 +2895,7 @@ static void gen_fld1_ST0(DisasContext *s)
         if (x87_wt(s)) {
             s->wt_st[s->fpstt_delta & 7] =
                 x87_wt_from_bits(tcg_constant_i64(0x3FF0000000000000ull));
+            s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
         }
         return;
     }
@@ -2637,6 +2912,7 @@ static void gen_fldz_ST0(DisasContext *s)
         if (x87_wt(s)) {
             s->wt_st[s->fpstt_delta & 7] =
                 x87_wt_from_bits(tcg_constant_i64(0));
+            s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
         }
         return;
     }
@@ -4298,20 +4574,20 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         gen_fpop(s);
                     }
                 } else {
-                    gen_fmov_FT0_STN(s, opreg);
+                    gen_fload_FT0_STN(s, opreg);
                     gen_helper_fp_arith_ST0_FT0(s, op1);
                 }
             }
             break;
         case 0x02: /* fcom */
         case 0x22: /* fcom2, undocumented op */
-            gen_fmov_FT0_STN(s, opreg);
+            gen_fload_FT0_STN(s, opreg);
             gen_fcom_ST0_FT0(s);
             break;
         case 0x03: /* fcomp */
         case 0x23: /* fcomp3, undocumented op */
         case 0x32: /* fcomp5, undocumented op */
-            gen_fmov_FT0_STN(s, opreg);
+            gen_fload_FT0_STN(s, opreg);
             gen_fcom_ST0_FT0(s);
             gen_fpop(s);
             break;
@@ -4392,7 +4668,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x33: /* de/3 */
             switch (rm) {
             case 1: /* fcompp */
-                gen_fmov_FT0_STN(s, 1);
+                gen_fload_FT0_STN(s, 1);
                 gen_fcom_ST0_FT0(s);
                 gen_fpop(s);
                 gen_fpop(s);
@@ -5323,6 +5599,11 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
         dc->wt_st[i] = NULL;
     }
     dc->wt_ft0 = NULL;
+    dc->wt_pend = 0;
+    dc->wt_insn_pend = 0;
+    dc->wt_epoch = false;
+    dc->wt_nodefer = false;
+    dc->wt_base = 0;
 #endif
 }
 
@@ -5343,12 +5624,24 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     tcg_gen_insn_start(pc_arg, dc->cc_op);
 #if defined(XBOX)
     /*
-     * Word 2: how far back the insn whose FIP update is still deferred
-     * sits, so a mid-block exit can land it (xemu_x87_restore_fip).
+     * Word 2, what a mid-block exit in this insn must land
+     * (xemu_x87_restore): how far back the insn whose FIP update is still
+     * deferred sits, below 4096 as every insn of a TB starts on its first
+     * page, and the x87 stores still deferred, by shadow slot.
      */
-    if (dc->xemu_fip_pend) {
-        tcg_set_insn_start_param(tcg_last_op(), 2,
-                                 dc->base.pc_next - dc->xemu_fip_pc);
+    {
+        uint64_t w2 = 0;
+
+        if (dc->xemu_fip_pend) {
+            w2 = dc->base.pc_next - dc->xemu_fip_pc;
+            tcg_debug_assert(w2 <= XEMU_X87_W2_FIP_MASK);
+        }
+        dc->wt_insn_pend = x87_wt_rel_pend(dc);
+        dc->wt_nodefer = false;
+        w2 |= (uint64_t)dc->wt_insn_pend << XEMU_X87_W2_PEND_SHIFT;
+        if (w2) {
+            tcg_set_insn_start_param(tcg_last_op(), 2, w2);
+        }
     }
 #endif
 }
@@ -5359,9 +5652,13 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     bool orig_cc_op_dirty = dc->cc_op_dirty;
     CCOp orig_cc_op = dc->cc_op;
     target_ulong orig_pc_save = dc->pc_save;
+#if defined(XBOX)
+    uint8_t orig_wt_pend = dc->wt_pend;
+#endif
 
 #if defined(XBOX)
     xemu_x87_boundary_check(dc);
+    x87_wt_boundary_check(dc);
 #endif
 
 #ifdef TARGET_VSYSCALL_PAGE
@@ -5388,6 +5685,10 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         assert(dc->cc_op_dirty == orig_cc_op_dirty);
         assert(dc->cc_op == orig_cc_op);
         assert(dc->pc_save == orig_pc_save);
+#if defined(XBOX)
+        /* Decoding ends before any op: no deferred x87 store was emitted. */
+        assert(dc->wt_pend == orig_wt_pend);
+#endif
         dc->base.num_insns--;
         tcg_remove_ops_after(dc->prev_insn_end);
         dc->base.insn_start = dc->prev_insn_start;
@@ -5422,6 +5723,10 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
+#if defined(XBOX)
+    /* Past the last insn's exits: its deferred stores need no pend_top reset. */
+    dc->wt_insn_pend = 0;
+#endif
     gen_flush_fp(dc);
 
     switch (dc->base.is_jmp) {

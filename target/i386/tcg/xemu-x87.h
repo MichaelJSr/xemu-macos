@@ -26,11 +26,23 @@
  *       the deferred state could be observed is checked at runtime (every
  *       insn boundary and every mid-block exit).
  *       Promotion gate is zero violations over the campaign soak.
+ *       It also checks the write-through path's deferred stores
+ *       (translate.c x87_wt_pend), which it runs for real: each deferred
+ *       slot's env image is overwritten with a poison value no conversion
+ *       produces, so a raw read of a pending slot, a flush that misses one
+ *       or a restore that lands the wrong set leaves it where the checks
+ *       (insn boundaries, flushes, restores) and the RAM hash see it.
+ *
+ * insn_start word 2 carries both deferrals: bits 0-11 the FIP distance,
+ * bits 12-19 the pending x87 stores by shadow slot.
  */
 #ifndef TARGET_I386_XEMU_X87_H
 #define TARGET_I386_XEMU_X87_H
 
 #if defined(XBOX)
+
+#define XEMU_X87_W2_FIP_MASK    0xfffu
+#define XEMU_X87_W2_PEND_SHIFT  12
 
 /* (1) census -------------------------------------------------------------- */
 static uint64_t xemu_x87_fip_legacy;     /* per-insn FIP/FCS store pairs */
@@ -40,6 +52,9 @@ static uint64_t xemu_x87_runs;           /* x87 runs closed by a flush */
 static uint64_t xemu_x87_run_insns;      /* x87 insns inside those runs */
 static uint64_t xemu_sse_comi_ss;        /* (U)COMISS -- 32-bit scalar form */
 static uint64_t xemu_sse_comi_sd;        /* (U)COMISD -- 64-bit scalar form */
+static uint64_t xemu_x87_wt_writes;      /* write-through results (set_st) */
+static uint64_t xemu_x87_wt_st80f;       /* ... st80f actually executed */
+static uint64_t xemu_x87_wt_landed;      /* deferred stores landed by restores */
 
 /* (3) refuter ------------------------------------------------------------- */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
@@ -50,6 +65,14 @@ static uint64_t xemu_x87_rst_pend;       /* ... of which with word 2 non-zero */
 static uint64_t xemu_x87_bnd_checks;     /* insn boundaries checked */
 static uint64_t xemu_x87_bnd_pend;       /* ... with a deferred FIP pending */
 static uint64_t xemu_x87_rst_viol;       /* restorable FIP/FCS != legacy */
+static uint64_t xemu_x87_wt_bnd_checks;  /* insn boundaries checked (stores) */
+static uint64_t xemu_x87_wt_bnd_viol;    /* poison where none is pending, or
+                                          * none, a stale shadow or pend_top
+                                          * where one is */
+static uint64_t xemu_x87_wt_flush_viol;  /* poison left after a flush */
+static uint64_t xemu_x87_wt_rst_checks;  /* mid-block exits checked (stores) */
+static uint64_t xemu_x87_wt_rst_pend;    /* ... with stores to land */
+static uint64_t xemu_x87_wt_rst_viol;    /* poison left after the restore */
 
 static void xemu_x87_dump(void)
 {
@@ -65,6 +88,11 @@ static void xemu_x87_dump(void)
     fprintf(stderr, "xemu: sse scalar compares: ss=%llu sd=%llu\n",
             (unsigned long long)xemu_sse_comi_ss,
             (unsigned long long)xemu_sse_comi_sd);
+    fprintf(stderr, "xemu: x87 wt stores: writes=%llu st80f=%llu "
+            "landed-by-restore=%llu\n",
+            (unsigned long long)xemu_x87_wt_writes,
+            (unsigned long long)xemu_x87_wt_st80f,
+            (unsigned long long)xemu_x87_wt_landed);
     fprintf(stderr, "xemu: x87 refuter: "
             "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
             "restore-pending=%llu boundaries=%llu boundary-pending=%llu "
@@ -76,6 +104,16 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_bnd_checks,
             (unsigned long long)xemu_x87_bnd_pend,
             (unsigned long long)xemu_x87_rst_viol);
+    fprintf(stderr, "xemu: x87 refuter: wt-boundaries=%llu "
+            "wt-boundary-violations=%llu wt-flush-violations=%llu "
+            "wt-restores=%llu wt-restore-pending=%llu "
+            "wt-restore-violations=%llu\n",
+            (unsigned long long)xemu_x87_wt_bnd_checks,
+            (unsigned long long)xemu_x87_wt_bnd_viol,
+            (unsigned long long)xemu_x87_wt_flush_viol,
+            (unsigned long long)xemu_x87_wt_rst_checks,
+            (unsigned long long)xemu_x87_wt_rst_pend,
+            (unsigned long long)xemu_x87_wt_rst_viol);
 }
 
 static void xemu_x87_arm_dump(void)
@@ -169,6 +207,15 @@ static void xemu_x87_gen_ne_count_i32(uint64_t *counter, TCGv_i32 a,
     xemu_x87_gen_acc_i64(counter, d64);
 }
 
+static void xemu_x87_gen_ne_count_i64(uint64_t *counter, TCGv_i64 a,
+                                      TCGv_i64 b)
+{
+    TCGv_i64 d = tcg_temp_new_i64();
+
+    tcg_gen_setcond_i64(TCG_COND_NE, d, a, b);
+    xemu_x87_gen_acc_i64(counter, d);
+}
+
 static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
 {
     TCGv d = tcg_temp_new();
@@ -177,6 +224,40 @@ static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
     tcg_gen_setcond_tl(TCG_COND_NE, d, a, b);
     tcg_gen_extu_tl_i64(d64, d);
     xemu_x87_gen_acc_i64(counter, d64);
+}
+
+/*
+ * Refuter poison for a deferred x87 store's env image: an unnormal (integer
+ * bit clear) that no conversion or helper produces.
+ */
+#define XEMU_X87_POISON_LO  0x0badcafedeadbeefull
+#define XEMU_X87_POISON_HI  0x5a5a
+
+static void xemu_x87_gen_poison(X87Ptr p)
+{
+    tcg_gen_st_i64(tcg_constant_i64(XEMU_X87_POISON_LO), p.base, p.ofs);
+    tcg_gen_st16_i32(tcg_constant_i32(XEMU_X87_POISON_HI), p.base, p.ofs + 8);
+}
+
+/* Emit "*counter += (image at p is poison) != want". */
+static void xemu_x87_gen_poison_check(uint64_t *counter, X87Ptr p, bool want)
+{
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 d = tcg_temp_new_i64();
+
+    tcg_gen_ld_i64(lo, p.base, p.ofs);
+    tcg_gen_setcondi_i64(want ? TCG_COND_NE : TCG_COND_EQ, d, lo,
+                         XEMU_X87_POISON_LO);
+    xemu_x87_gen_acc_i64(counter, d);
+}
+
+/* Emit a count of poisoned images among all eight registers and FT0. */
+static void xemu_x87_gen_poison_scan(uint64_t *counter)
+{
+    for (int i = 0; i < 8; i++) {
+        xemu_x87_gen_poison_check(counter, gen_stn_ptr(i), false);
+    }
+    xemu_x87_gen_poison_check(counter, gen_ft0_ptr(), false);
 }
 
 /* (2) deferred FIP/FCS/FDP/FDS ------------------------------------------- */
@@ -341,14 +422,13 @@ static void xemu_x87_boundary_check(DisasContext *s)
 }
 
 /*
- * x86_restore_state_to_opc() calls this on every mid-block exit (a guest
- * fault, cpu_io_recompile) with the insn's restored eip and insn_start word
- * 2. Non-zero means an FIP update recorded at that distance back has not
- * landed: land it here, as the per-insn stores would have. FCS is the live
- * CS, which changes only inside a helper, after a call-site flush.
+ * FIP half of xemu_x87_restore. Non-zero `back` means an FIP update
+ * recorded at that distance back has not landed: land it here, as the
+ * per-insn stores would have. FCS is the live CS, which changes only
+ * inside a helper, after a call-site flush.
  */
-void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
-                          uint64_t back)
+static void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
+                                 uint64_t back)
 {
     bool refute = xemu_x87_refute_on();
     target_ulong fip = env->eip - back;
@@ -374,6 +454,55 @@ void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
     }
     env->fpip = deposit64(env->fpip, 0, TARGET_LONG_BITS, fip);
     env->fpcs = fcs;
+}
+
+/*
+ * Store half: land the write-through stores still deferred at the start of
+ * the insn, as the eager st80f would have left them (translate.c
+ * x87_wt_pend). pend_top 0 means a flush inside this insn already stored
+ * them, and a helper may have written the registers since.
+ */
+static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend)
+{
+    bool refute = xemu_x87_refute_on();
+
+    if (refute) {
+        xemu_x87_wt_rst_checks++;
+        xemu_x87_wt_rst_pend += pend != 0;
+    }
+#if defined(__aarch64__)
+    unsigned top = env->xemu_x87_pend_top;
+
+    if (pend && (top & 8)) {
+        for (int b = 0; b < 8; b++) {
+            if (pend & (1u << b)) {
+                env->fpregs[(top + b) & 7].d =
+                    xemu_x87_double_to_floatx80(env->xemu_x87_shadow[b]);
+                xemu_x87_wt_landed++;
+            }
+        }
+    }
+#else
+    /* Only the aarch64 write-through path defers stores. */
+    g_assert(!pend);
+#endif
+    if (refute) {
+        for (int i = 0; i < 8; i++) {
+            xemu_x87_wt_rst_viol += env->fpregs[i].d.low == XEMU_X87_POISON_LO;
+        }
+    }
+}
+
+/*
+ * x86_restore_state_to_opc() calls this on every mid-block exit (a guest
+ * fault, cpu_io_recompile) with the insn's restored eip and insn_start word
+ * 2 (FIP distance and pending x87 stores, see XEMU_X87_W2_*).
+ */
+void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
+                      uint64_t word2)
+{
+    xemu_x87_restore_fip(env, tb, word2 & XEMU_X87_W2_FIP_MASK);
+    xemu_x87_restore_pend(env, word2 >> XEMU_X87_W2_PEND_SHIFT);
 }
 
 /* Run-length proxy: closed by the same flush that closes the register cache. */

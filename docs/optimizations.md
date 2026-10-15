@@ -431,7 +431,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   The exact write-through path (`4d2466d106`, +5.6% det heavy-f1)
   replaced the cache for the hot loads, stores and arithmetic on
   aarch64: `floatx80`↔`double` inline through the backend's
-  `ld80f`/`st80f`, every result written to env at once.
+  `ld80f`/`st80f`. Each result's `st80f` waits for the next flush
+  (helper call, BB end, TB end), so an overwritten slot converts once;
+  a mid-TB exit lands the pending ones from shadow doubles in
+  `restore_state_to_opc` (2026-10-15, −5% det Minsns/frame).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control

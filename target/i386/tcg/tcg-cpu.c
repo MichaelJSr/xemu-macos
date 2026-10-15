@@ -117,7 +117,7 @@ static void x86_restore_state_to_opc(CPUState *cs,
         env->cc_op = cc_op;
     }
 #if defined(XBOX)
-    xemu_x87_restore_fip(env, tb, data[2]);
+    xemu_x87_restore(env, tb, data[2]);
 #endif
 }
 
