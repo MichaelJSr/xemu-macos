@@ -206,10 +206,11 @@ HS_DEF_HELPER_3(frstor, void, env, tl, int)
 #undef HS_DEF_HELPER_3
 
 DEF_HELPER_FLAGS_2(fxsave, TCG_CALL_NO_WG, void, env, tl)
-DEF_HELPER_FLAGS_2(fxrstor, TCG_CALL_NO_WG, void, env, tl)
+/* fxrstor/xrstor write env->fpstt, a TCG global in xemu (translate.c). */
+DEF_HELPER_2(fxrstor, void, env, tl)
 DEF_HELPER_FLAGS_3(xsave, TCG_CALL_NO_WG, void, env, tl, i64)
 DEF_HELPER_FLAGS_3(xsaveopt, TCG_CALL_NO_WG, void, env, tl, i64)
-DEF_HELPER_FLAGS_3(xrstor, TCG_CALL_NO_WG, void, env, tl, i64)
+DEF_HELPER_3(xrstor, void, env, tl, i64)
 DEF_HELPER_FLAGS_2(xgetbv, TCG_CALL_NO_WG, i64, env, i32)
 DEF_HELPER_FLAGS_3(xsetbv, TCG_CALL_NO_WG, void, env, i32, i64)
 DEF_HELPER_FLAGS_2(rdpkru, TCG_CALL_NO_WG, i64, env, i32)
