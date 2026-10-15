@@ -1164,9 +1164,35 @@ static CCPrepare gen_prepare_eflags_c(DisasContext *s, TCGv reg)
 /* compute eflags.P, trying to store it in reg if not NULL */
 static CCPrepare gen_prepare_eflags_p(DisasContext *s, TCGv reg)
 {
-    gen_compute_eflags(s);
-    return (CCPrepare) { .cond = TCG_COND_TSTNE, .reg = cpu_cc_src,
-                         .imm = CC_P };
+    switch (s->cc_op) {
+    case CC_OP_DYNAMIC:
+        gen_compute_eflags(s);
+        /* FALLTHRU */
+    case CC_OP_EFLAGS:
+    case CC_OP_ADCX:
+    case CC_OP_ADOX:
+    case CC_OP_ADCOX:
+        return (CCPrepare) { .cond = TCG_COND_TSTNE, .reg = cpu_cc_src,
+                             .imm = CC_P };
+    case CC_OP_BMILGB ... CC_OP_BMILGQ:
+    case CC_OP_BLSIB ... CC_OP_BLSIQ:
+    case CC_OP_POPCNT:
+        return (CCPrepare) { .cond = TCG_COND_NEVER };
+    default:
+        /*
+         * Even parity of the result's low byte, without the helper: fold
+         * the high nibble into the low one, then pick that bit of 0x9669
+         * (bit n is set iff n has an even number of bits set).
+         */
+        if (!reg || reg == cpu_cc_dst) {
+            reg = tcg_temp_new();
+        }
+        tcg_gen_shri_tl(reg, cpu_cc_dst, 4);
+        tcg_gen_xor_tl(reg, reg, cpu_cc_dst);
+        tcg_gen_andi_tl(reg, reg, 0xf);
+        tcg_gen_shr_tl(reg, tcg_constant_tl(0x9669), reg);
+        return (CCPrepare) { .cond = TCG_COND_TSTNE, .reg = reg, .imm = 1 };
+    }
 }
 
 /* compute eflags.S, trying to store it in reg if not NULL */
