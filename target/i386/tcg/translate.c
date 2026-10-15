@@ -209,10 +209,8 @@ typedef struct DisasContext {
     bool jmp_opt; /* use direct block chaining for direct jumps */
 #if defined(XBOX)
     bool xemu_ret_exit; /* current DISAS_JUMP terminator is a near ret */
-    /* x87 census / elision (target/i386/tcg/xemu-x87.h) */
+    /* x87 census / deferral (target/i386/tcg/xemu-x87.h) */
     uint8_t xemu_x87_run;       /* x87 insns since the last cache flush */
-    bool xemu_ft0_pending;      /* FT0 written, reader not reached yet */
-    bool xemu_ft0_reloaded;     /* last get_ft0 came from env->ft0 */
     CPUX86State *xemu_env;      /* code-byte peeks (xemu_idle_loop_kind) */
     bool xemu_fip_pend;         /* deferred FIP/FCS update outstanding */
     bool xemu_fdp_pend;         /* deferred FDP/FDS update outstanding */
@@ -1840,8 +1838,6 @@ static void gen_movi_f64(DisasContext *s, TCGv_f64 ret, double arg)
  * the target/ include path.
  */
 extern bool xemu_inv_prof_on(void);
-extern uint64_t xemu_inv_flcr_emitted;
-extern uint64_t xemu_inv_flcr_skip;
 extern uint64_t xemu_inv_gototb_emitted;
 extern uint64_t xemu_inv_jcprobe_emitted;
 extern uint64_t xemu_inv_retmemo_emitted;
@@ -1860,44 +1856,17 @@ extern uint64_t xemu_xpage_emitted;
 
 static void gen_flcr(DisasContext *s)
 {
-#if defined(XBOX)
-    if (unlikely(xemu_inv_prof_on())) {
-        if (s->flcr_set) {
-            xemu_inv_flcr_skip++;
-        } else {
-            xemu_inv_flcr_emitted++;
-        }
-    }
-#endif
+    /* TODO: Oversynchronized */
     if (s->flcr_set) {
         return;
     }
 
-    /*
-     * HF_FPU_RC is baked into tb->flags at translation time
-     * (cpu_set_fpuc, cpu.h:2841). Every TB currently translating thus
-     * pins the guest RC bits to a compile-time-known value; no need
-     * to reload env->fpuc and mask at runtime. Materialize rc_bits
-     * as a constant so the optimizer can collapse the brcond when
-     * cached matches and emit a single MOVI + flcr in the slow path.
-     */
-    uint32_t rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    uint32_t rc_bits_val = rc << 10;
-    TCGv_i32 rc_bits = tcg_constant_i32(rc_bits_val);
-
-    TCGv_i32 cached = tcg_temp_new_i32();
-    tcg_gen_ld16u_i32(cached, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
-
-    TCGLabel *skip = gen_new_label();
-    tcg_gen_brcondi_i32(TCG_COND_EQ, cached, (int32_t)rc_bits_val, skip);
-
-    tcg_gen_st16_i32(rc_bits, tcg_env, offsetof(CPUX86State, cached_fpuc_rc));
-
-    /* Slow path: the full MXCSR-like value is now a compile-time literal. */
-    TCGv_i32 v = tcg_constant_i32((rc_bits_val << 3) | 0x1f80);
+    TCGv_i32 v = tcg_temp_new_i32();
+    tcg_gen_ld16u_i32(v, tcg_env, offsetof(CPUX86State, fpuc));
+    tcg_gen_andi_i32(v, v, 0xc00);
+    tcg_gen_shli_i32(v, v, 3);
+    tcg_gen_ori_i32(v, v, 0x1f80);
     tcg_gen_flcr(v);
-
-    gen_set_label(skip);
     s->flcr_set = true;
 }
 
@@ -2461,104 +2430,16 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
     fp_pc_wrapper(gen_fstl_ST0)(s, arg);
 }
 
-/*
- * FIST/FISTP with a directed rounding mode (RC = 1 toward -inf, 2 toward
- * +inf) is wrong on non-AArch64 hosts: gen_flcr programs the guest RC into
- * MXCSR but never the host x87 control word, and the i386 backend lacks the
- * fused mode-specific converts (TCG_TARGET_HAS_rint_cvt=0), so the inline
- * path degrades to FRNDINT — which reads the x87 CW (stuck at
- * round-to-nearest) — and rounds to nearest instead of the directed mode.
- * Fall back to the softfloat helper (honours the guest RC) for RC 1/2 on
- * such hosts. RC 0 (nearest) and RC 3 (truncate, direct MXCSR convert) stay
- * inline and are correct; AArch64 is fully correct inline (FCVTMS/FCVTPS).
- */
 static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fistl_ST0, arg);
-#if !defined(__aarch64__)
-    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    if (rc == 1 || rc == 2) {
-        gen_helper_fistl_ST0(arg, tcg_env);
-        return;
-    }
-#endif
     fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
 static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 {
     GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg);
-#if !defined(__aarch64__)
-    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    if (rc == 1 || rc == 2) {
-        gen_helper_fistll_ST0(arg, tcg_env);
-        return;
-    }
-#endif
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
-}
-
-/*
- * 16-bit FIST: same RC-aware convert as the 32-bit path. The caller
- * issues a MO_LEUW store which truncates the int32 result to 16 bits,
- * matching the value-bits the helper would return in the non-
- * exception common case. The soft helper additionally clamps
- * out-of-int16-range values to -32768 and sets float_flag_invalid;
- * that exception tracking is an intentional inline tradeoff already
- * accepted for the 32-bit FIST/FISTL paths.
- */
-static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
-{
-    GEN_HELPER_FALLBACK_T_v(fist_ST0, arg);
-#if !defined(__aarch64__)
-    /* See gen_fistl_ST0: directed rounding (RC 1/2) is wrong inline here. */
-    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    if (rc == 1 || rc == 2) {
-        gen_helper_fist_ST0(arg, tcg_env);
-        return;
-    }
-#endif
-    fp_pc_wrapper(gen_fistl_ST0)(s, arg);
-}
-
-/*
- * FISTTP must always truncate toward zero regardless of FPCR RC.
- * The inline path in ops_fpu.h emits tcg_gen_cvt_f{32,64}_i{32,64},
- * which lowers to FCVTZS (hard truncate) on AArch64 but to
- * CVTSS2SI / CVTSD2SI on x86_64 — the x86 op respects MXCSR, which
- * gen_flcr has programmed to the *guest's* general RC (not
- * necessarily truncate). On non-AArch64 hosts that divergence
- * would round FISTTP instead of truncating it, so fall back to the
- * floatx80 helper. AArch64 hosts keep the inline convert.
- */
-static void gen_fistt_ST0(DisasContext *s, TCGv_i32 arg)
-{
-    GEN_HELPER_FALLBACK_T_v(fistt_ST0, arg);
-#if !defined(__aarch64__)
-    gen_helper_fistt_ST0(arg, tcg_env);
-    return;
-#endif
-    fp_pc_wrapper(gen_fistt_ST0)(s, arg);
-}
-
-static void gen_fisttl_ST0(DisasContext *s, TCGv_i32 arg)
-{
-    GEN_HELPER_FALLBACK_T_v(fisttl_ST0, arg);
-#if !defined(__aarch64__)
-    gen_helper_fisttl_ST0(arg, tcg_env);
-    return;
-#endif
-    fp_pc_wrapper(gen_fisttl_ST0)(s, arg);
-}
-
-static void gen_fisttll_ST0(DisasContext *s, TCGv_i64 arg)
-{
-    GEN_HELPER_FALLBACK_T_v(fisttll_ST0, arg);
-#if !defined(__aarch64__)
-    gen_helper_fisttll_ST0(arg, tcg_env);
-    return;
-#endif
-    fp_pc_wrapper(gen_fisttll_ST0)(s, arg);
 }
 
 static void gen_fchs_ST0(DisasContext *s)
@@ -2599,26 +2480,6 @@ static void gen_fsqrt(DisasContext *s)
     fp_pc_wrapper(gen_fsqrt)(s);
 }
 
-static void gen_frndint(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(frndint);
-#if !defined(__aarch64__)
-    /*
-     * FRNDINT rounds ST0 to an integer using the FPU control word's RC.
-     * The inline path lowers to host FRNDINT, which reads the host x87 CW
-     * — but gen_flcr only programs MXCSR on i386, so the host CW is stuck
-     * at round-to-nearest. Only RC 0 (nearest) is correct inline; for any
-     * other RC (toward -inf/+inf/zero) fall back to the softfloat helper,
-     * which honours the guest RC. AArch64 (FRINTI + FPCR RMode) is correct.
-     */
-    if (((s->flags >> HF_FPU_RC_SHIFT) & 3) != 0) {
-        gen_helper_frndint(tcg_env);
-        return;
-    }
-#endif
-    fp_pc_wrapper(gen_frndint)(s);
-}
-
 static void gen_clear_fpus_c2(DisasContext *s)
 {
     TCGv_i32 v = tcg_temp_new_i32();
@@ -2630,12 +2491,6 @@ static void gen_clear_fpus_c2(DisasContext *s)
 static void gen_fsin(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fsin);
-#if defined(__aarch64__)
-    gen_flush_fp(s);
-    gen_helper_fsin(tcg_env);
-    gen_clear_fpus_c2(s);
-    return;
-#endif
     fp_pc_wrapper(gen_fsin)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
@@ -2643,12 +2498,6 @@ static void gen_fsin(DisasContext *s)
 static void gen_fcos(DisasContext *s)
 {
     GEN_HELPER_FALLBACK_v_v(fcos);
-#if defined(__aarch64__)
-    gen_flush_fp(s);
-    gen_helper_fcos(tcg_env);
-    gen_clear_fpus_c2(s);
-    return;
-#endif
     fp_pc_wrapper(gen_fcos)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
@@ -2703,24 +2552,6 @@ static void gen_helper_fp_arith_ST0_FT0(DisasContext *s, int op)
 static void gen_fcom_ST0_FT0(DisasContext *s)
 {
     gen_helper_fp_arith_ST0_FT0(s, 2);
-}
-
-static void gen_fcomi_ST0_FT0_inline(DisasContext *s, bool unordered)
-{
-    gen_compute_eflags(s);
-
-    TCGv_i64 cmp_result = tcg_temp_new_i64();
-    if (unordered) {
-        fp_pc_wrapper(gen_fucomi_ST0_FT0)(s, cmp_result);
-    } else {
-        fp_pc_wrapper(gen_fcomi_ST0_FT0)(s, cmp_result);
-    }
-
-    TCGv_i64 cc = tcg_temp_new_i64();
-    tcg_gen_extu_tl_i64(cc, cpu_cc_src);
-    tcg_gen_andi_i64(cc, cc, ~(uint64_t)0x45);
-    tcg_gen_or_i64(cc, cc, cmp_result);
-    tcg_gen_trunc_i64_tl(cpu_cc_src, cc);
 }
 
 static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
@@ -2824,36 +2655,6 @@ static void gen_fldz_FT0(DisasContext *s)
 #endif
     GEN_HELPER_FALLBACK_v_v(fldz_FT0);
     fp_pc_wrapper(gen_fldz_FT0)(s);
-}
-
-static void gen_fldl2t_ST0(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(fldl2t_ST0);
-    fp_pc_wrapper(gen_fldl2t_ST0)(s);
-}
-
-static void gen_fldl2e_ST0(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(fldl2e_ST0);
-    fp_pc_wrapper(gen_fldl2e_ST0)(s);
-}
-
-static void gen_fldpi_ST0(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(fldpi_ST0);
-    fp_pc_wrapper(gen_fldpi_ST0)(s);
-}
-
-static void gen_fldlg2_ST0(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(fldlg2_ST0);
-    fp_pc_wrapper(gen_fldlg2_ST0)(s);
-}
-
-static void gen_fldln2_ST0(DisasContext *s)
-{
-    GEN_HELPER_FALLBACK_v_v(fldln2_ST0);
-    fp_pc_wrapper(gen_fldln2_ST0)(s);
 }
 
 static void gen_exception(DisasContext *s, int trapno)
@@ -4119,18 +3920,18 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 /* XXX: the corresponding CPUID bit must be tested ! */
                 switch (op >> 4) {
                 case 1:
-                    gen_fisttl_ST0(s, s->tmp2_i32);
+                    gen_helper_fisttl_ST0(s->tmp2_i32, tcg_env);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     break;
                 case 2:
-                    gen_fisttll_ST0(s, s->tmp1_i64);
+                    gen_helper_fisttll_ST0(s->tmp1_i64, tcg_env);
                     tcg_gen_qemu_st_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);
                     break;
                 case 3:
                 default:
-                    gen_fistt_ST0(s, s->tmp2_i32);
+                    gen_helper_fistt_ST0(s->tmp2_i32, tcg_env);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUW);
                     break;
@@ -4156,7 +3957,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     break;
                 case 3:
                 default:
-                    gen_fist_ST0(s, s->tmp2_i32);
+                    gen_helper_fist_ST0(s->tmp2_i32, tcg_env);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUW);
                     break;
@@ -4201,32 +4002,13 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x1d: /* fldt mem */
-            /*
-             * Inline FPU path caches D-regs in DisasContext::fpregs[]. The
-             * helper writes env->fpregs[] directly; flush dirty cache first
-             * so the post-write view is coherent, and end the TB so the
-             * next TB reloads from memory.
-             */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_fldt_ST0(tcg_env, s->A0);
-            if (g_use_hard_fpu_inline) {
-                gen_update_eip_next(s);
-                gen_eob(s, DISAS_EOB_ONLY);
-            }
             break;
         case 0x1f: /* fstpt mem */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_fstt_ST0(tcg_env, s->A0);
             gen_fpop(s);
             break;
         case 0x2c: /* frstor mem */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_frstor(tcg_env, s->A0,
                               tcg_constant_i32(s->dflag - 1));
             update_fip = update_fdp = false;
@@ -4234,25 +4016,18 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
              * The restored control word may change precision control,
              * which the write-through x87 path reads from the TB flags.
              */
-            if (g_use_hard_fpu_inline || g_x87_wt) {
+            if (g_x87_wt) {
                 gen_update_eip_next(s);
                 gen_eob(s, DISAS_EOB_ONLY);
             }
             break;
         case 0x2e: /* fnsave mem */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_fsave(tcg_env, s->A0,
                              tcg_constant_i32(s->dflag - 1));
             update_fip = update_fdp = false;
-            if (g_use_hard_fpu_inline) {
-                gen_update_eip_next(s);
-                gen_eob(s, DISAS_EOB_ONLY);
-            }
             break;
         case 0x2f: /* fnstsw mem */
-            if (g_use_hard_fpu_inline || x87_lean()) {
+            if (x87_lean()) {
                 gen_fnstsw_inline(s, s->tmp2_i32);
             } else {
                 gen_helper_fnstsw(s->tmp2_i32, tcg_env);
@@ -4262,19 +4037,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x3c: /* fbld */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_fbld_ST0(tcg_env, s->A0);
-            if (g_use_hard_fpu_inline) {
-                gen_update_eip_next(s);
-                gen_eob(s, DISAS_EOB_ONLY);
-            }
             break;
         case 0x3e: /* fbstp */
-            if (g_use_hard_fpu_inline) {
-                gen_flush_fp(s);
-            }
             gen_helper_fbst_ST0(tcg_env, s->A0);
             gen_fpop(s);
             break;
@@ -4365,7 +4130,6 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 gen_fcom_ST0_FT0(s);
                 break;
             case 5: /* fxam */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fxam_ST0(tcg_env);
                 break;
             default:
@@ -4381,23 +4145,23 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     break;
                 case 1:
                     gen_fpush(s);
-                    gen_fldl2t_ST0(s);
+                    gen_helper_fldl2t_ST0(tcg_env);
                     break;
                 case 2:
                     gen_fpush(s);
-                    gen_fldl2e_ST0(s);
+                    gen_helper_fldl2e_ST0(tcg_env);
                     break;
                 case 3:
                     gen_fpush(s);
-                    gen_fldpi_ST0(s);
+                    gen_helper_fldpi_ST0(tcg_env);
                     break;
                 case 4:
                     gen_fpush(s);
-                    gen_fldlg2_ST0(s);
+                    gen_helper_fldlg2_ST0(tcg_env);
                     break;
                 case 5:
                     gen_fpush(s);
-                    gen_fldln2_ST0(s);
+                    gen_helper_fldln2_ST0(tcg_env);
                     break;
                 case 6:
                     gen_fpush(s);
@@ -4411,27 +4175,21 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x0e: /* grp d9/6 */
             switch (rm) {
             case 0: /* f2xm1 */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_f2xm1(tcg_env);
                 break;
             case 1: /* fyl2x */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fyl2x(tcg_env);
                 break;
             case 2: /* fptan */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fptan(tcg_env);
                 break;
             case 3: /* fpatan */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fpatan(tcg_env);
                 break;
             case 4: /* fxtract */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fxtract(tcg_env);
                 break;
             case 5: /* fprem1 */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fprem1(tcg_env);
                 break;
             case 6: /* fdecstp */
@@ -4462,25 +4220,21 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x0f: /* grp d9/7 */
             switch (rm) {
             case 0: /* fprem */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fprem(tcg_env);
                 break;
             case 1: /* fyl2xp1 */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fyl2xp1(tcg_env);
                 break;
             case 2: /* fsqrt */
                 gen_fsqrt(s);
                 break;
             case 3: /* fsincos */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fsincos(tcg_env);
                 break;
             case 4: /* frndint */
-                gen_frndint(s);
+                gen_helper_frndint(tcg_env);
                 break;
             case 5: /* fscale */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fscale(tcg_env);
                 break;
             case 6: /* fsin */
@@ -4526,11 +4280,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             switch (rm) {
             case 1: /* fucompp */
                 gen_fmov_FT0_STN(s, 1);
-                if (g_use_hard_fpu_inline) {
-                    gen_fcom_ST0_FT0(s);
-                } else {
-                    gen_helper_fucom_ST0_FT0(tcg_env);
-                }
+                gen_helper_fucom_ST0_FT0(tcg_env);
                 gen_fpop(s);
                 gen_fpop(s);
                 break;
@@ -4545,12 +4295,10 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             case 1: /* fdisi (287 only, just do nop here) */
                 break;
             case 2: /* fclex */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fclex(tcg_env);
                 update_fip = false;
                 break;
             case 3: /* fninit */
-                if (g_use_hard_fpu_inline) { gen_flush_fp(s); }
                 gen_helper_fninit(tcg_env);
                 update_fip = false;
                 gen_update_eip_next(s);
@@ -4568,11 +4316,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s, true);
-            } else {
-                gen_helper_fucomi_ST0_FT0(tcg_env);
-            }
+            gen_helper_fucomi_ST0_FT0(tcg_env);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x1e: /* fcomi */
@@ -4581,11 +4325,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s, false);
-            } else {
-                gen_helper_fcomi_ST0_FT0(tcg_env);
-            }
+            gen_helper_fcomi_ST0_FT0(tcg_env);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x28: /* ffree sti */
@@ -4603,19 +4343,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             break;
         case 0x2c: /* fucom st(i) */
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcom_ST0_FT0(s);
-            } else {
-                gen_helper_fucom_ST0_FT0(tcg_env);
-            }
+            gen_helper_fucom_ST0_FT0(tcg_env);
             break;
         case 0x2d: /* fucomp st(i) */
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcom_ST0_FT0(s);
-            } else {
-                gen_helper_fucom_ST0_FT0(tcg_env);
-            }
+            gen_helper_fucom_ST0_FT0(tcg_env);
             gen_fpop(s);
             break;
         case 0x33: /* de/3 */
@@ -4637,7 +4369,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3c: /* df/4 */
             switch (rm) {
             case 0:
-                if (g_use_hard_fpu_inline || x87_lean()) {
+                if (x87_lean()) {
                     gen_fnstsw_inline(s, s->tmp2_i32);
                 } else {
                     gen_helper_fnstsw(s->tmp2_i32, tcg_env);
@@ -4655,11 +4387,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s, true);
-            } else {
-                gen_helper_fucomi_ST0_FT0(tcg_env);
-            }
+            gen_helper_fucomi_ST0_FT0(tcg_env);
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
@@ -4669,11 +4397,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_fmov_FT0_STN(s, opreg);
-            if (g_use_hard_fpu_inline) {
-                gen_fcomi_ST0_FT0_inline(s, false);
-            } else {
-                gen_helper_fcomi_ST0_FT0(tcg_env);
-            }
+            gen_helper_fcomi_ST0_FT0(tcg_env);
             gen_fpop(s);
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
@@ -4691,25 +4415,6 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
                 if (!(s->cpuid_features & CPUID_CMOV)) {
                     goto illegal_op;
-                }
-                if (g_use_hard_fpu_inline) {
-                    /*
-                     * Ensure both operands are loaded before the
-                     * conditional branch. If a prior flush (from
-                     * FUCOMI helper, fclex, transcendentals, etc.)
-                     * cleared the inline FP temps, get_st0/get_stn
-                     * inside the conditional block would emit ld80f
-                     * loads that only execute on the taken path,
-                     * leaving TCG temps undefined on the not-taken
-                     * path and corrupting subsequent FP operations.
-                     */
-                    if (fpu_using_double_precision(s)) {
-                        (void)get_st0_f64(s);
-                        (void)get_stn_f64(s, opreg);
-                    } else {
-                        (void)get_st0_f32(s);
-                        (void)get_stn_f32(s, opreg);
-                    }
                 }
                 op1 = fcmov_cc[op & 3] | (((op >> 3) & 1) ^ 1);
                 l1 = gen_new_label();
@@ -5559,8 +5264,6 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
 #if defined(XBOX)
     dc->xemu_ret_exit = false;
     dc->xemu_x87_run = 0;
-    dc->xemu_ft0_pending = false;
-    dc->xemu_ft0_reloaded = false;
     dc->xemu_fip_pend = false;
     dc->xemu_fdp_pend = false;
     dc->xemu_fds_seg = -1;

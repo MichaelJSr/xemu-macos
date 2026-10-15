@@ -202,10 +202,10 @@ typedef enum X86Seg {
 #define HF_FPU_PC_MASK       (1 << HF_FPU_PC_SHIFT)
 /*
  * FPU Rounding Control: two bits extracted from FPUC[11:10] and
- * baked into TB flags so the i386 frontend can emit a single
- * FCVT{N,M,P,Z}S on AArch64 instead of FRINTI + FCVTZS. A guest FLDCW
- * that changes RC will cause TB lookup to miss the old TB and either
- * hit a cached TB for the new RC or trigger a fresh translation.
+ * baked into TB flags. A guest FLDCW that changes RC will cause TB
+ * lookup to miss the old TB and either hit a cached TB for the new RC
+ * or trigger a fresh translation. No translator path reads it since
+ * the inline x87 cache was removed.
  */
 #define HF_FPU_RC_MASK       (3u << HF_FPU_RC_SHIFT)
 
@@ -1898,7 +1898,6 @@ typedef struct CPUArchState {
     unsigned int fpstt; /* top of stack index */
     uint16_t fpus;
     uint16_t fpuc;
-    uint16_t cached_fpuc_rc; /* last fpuc RC bits written to host FPCR */
     uint8_t fptags[8];   /* 0 = valid, 1 = empty */
     FPReg fpregs[8];
     /* KVM-only so far */
@@ -2884,21 +2883,9 @@ static inline void cpu_set_fpuc(CPUX86State *env, uint16_t fpuc)
     env->hflags &= ~HF_FPU_PC_MASK;
     env->hflags |= ((env->fpuc >> 9) & 1) << HF_FPU_PC_SHIFT;
 
-    /*
-     * FPU rounding control (FPUC bits 11:10) baked into hflags so the
-     * translator can pick the matching FCVT*S instruction for FIST /
-     * FISTP at emit time. See HF_FPU_RC_SHIFT definition.
-     */
+    /* FPU rounding control (FPUC bits 11:10): see HF_FPU_RC_MASK. */
     env->hflags = (env->hflags & ~HF_FPU_RC_MASK) |
                   ((uint32_t)((env->fpuc >> 10) & 3) << HF_FPU_RC_SHIFT);
-
-    /*
-     * Force the inline-FPU rounding-control cache to miss on next gen_flcr.
-     * Otherwise rounding-mode changes made via save/restore or external
-     * register writes could be silently ignored by translated code that
-     * had already synced FPCR for a different mode in this TB chain.
-     */
-    env->cached_fpuc_rc = 0xFFFF;
 }
 
 /* svm_helper.c */

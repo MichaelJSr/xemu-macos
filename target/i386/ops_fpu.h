@@ -35,9 +35,6 @@ static PREC_TYPE get_ft0(DisasContext *s)
     PREC_TYPE *v = (PREC_TYPE *)&s->ft0;
 
     if (*v == NULL) {
-#if defined(XBOX)
-        s->xemu_ft0_reloaded = true;
-#endif
         *v = tcg_temp_new_fp();
         TCGv_ptr p = gen_ft0_ptr();
         tcg_gen_ld80f_fp(*v, p);
@@ -79,30 +76,8 @@ static void glue(flush_fp_regs, PREC_SUFFIX)(DisasContext *s)
    }
 
     if (s->ft0) {
-        bool store = true;
-#if defined(XBOX)
-        bool keep = s->xemu_ft0_pending;
-        int m = xemu_x87_ft0_mode();
-
-        if (unlikely(xemu_x87_census_on())) {
-            xemu_gen_counter_inc(keep ? &xemu_x87_wb_ft0_keep
-                                      : &xemu_x87_wb_ft0_dead);
-        }
-        if (m == 2) {
-            /*
-             * Refuter: keep the store, but record whether the elision would
-             * have left env->ft0 stale here. get_ft0() on the reader side
-             * turns that into a violation if the stale value is ever read.
-             */
-            xemu_x87_gen_store_u64(&xemu_x87_ft0_stale, keep ? 0 : 1);
-        } else if (m == 1 && !keep) {
-            store = false;
-        }
-#endif
-        if (store) {
-            TCGv_ptr ptr = gen_ft0_ptr();
-            tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
-        }
+        TCGv_ptr ptr = gen_ft0_ptr();
+        tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
         s->ft0 = NULL;
     }
 }
@@ -135,11 +110,6 @@ static void glue(gen_fcom, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg1,
      *
      * fpus =  {0x0100, 0x4000, 0x0000, 0x4500};
      *          <       =       >       UO
-     *
-     * Deposit cannot replace the ld/and(~0x4500)/or sequence because
-     * fpus bits 9 (C1), 11..13 (TOP of stack pointer) live between
-     * the C0/C2/C3 bits we write and MUST be preserved across the
-     * RMW. A contiguous deposit(ofs=8, len=7) would clobber them.
      */
 
     tcg_gen_andi_i64(res, res, 0x45);
@@ -155,39 +125,6 @@ static void glue(gen_fcom, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg1,
     /* FIXME: Exceptions */
 }
 
-/*
- * Inline fucomi: quiet compare ST0 vs FT0, return comparison result.
- * x87 FUCOMI raises IE only on SNaN operand. Caller must resolve lazy
- * EFLAGS before using the result. tcg_gen_com returns ZF|PF|CF bits at
- * positions 6,2,0 — same as EFLAGS.
- */
-static void glue(gen_fucomi_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
-                                                   TCGv_i64 result)
-{
-    PREC_TYPE st0 = get_st0(s);
-    PREC_TYPE ft0 = get_ft0(s);
-
-    XEMU_FT0_CONSUME(s);
-    glue(tcg_gen_com, PREC_SUFFIX)(result, st0, ft0);
-    tcg_gen_andi_i64(result, result, 0x45); /* ZF|PF|CF */
-}
-
-/*
- * Inline fcomi: signaling compare ST0 vs FT0. x87 FCOMI raises IE on any
- * NaN operand (QNaN or SNaN). Identical result bits to the quiet variant;
- * the distinction is the host FP exception side-effect only.
- */
-static void glue(gen_fcomi_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
-                                                  TCGv_i64 result)
-{
-    PREC_TYPE st0 = get_st0(s);
-    PREC_TYPE ft0 = get_ft0(s);
-
-    XEMU_FT0_CONSUME(s);
-    glue(tcg_gen_coms, PREC_SUFFIX)(result, st0, ft0);
-    tcg_gen_andi_i64(result, result, 0x45); /* ZF|PF|CF */
-}
-
 /* FIXME: This decode logic should be shared with helper variant */
 
 static void glue(gen_helper_fp_arith_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
@@ -196,7 +133,6 @@ static void glue(gen_helper_fp_arith_ST0_FT0, PREC_SUFFIX)(DisasContext *s,
     PREC_TYPE st0 = get_st0(s);
     PREC_TYPE ft0 = get_ft0(s);
 
-    XEMU_FT0_CONSUME(s);
     switch (op) {
     case 0:
         glue(tcg_gen_add, PREC_SUFFIX)(st0, st0, ft0);
@@ -259,7 +195,6 @@ static void glue(gen_helper_fp_arith_STN_ST0, PREC_SUFFIX)(DisasContext *s,
 static void glue(gen_fmov_FT0_STN, PREC_SUFFIX)(DisasContext *s, int st_index)
 {
     glue(tcg_gen_mov, PREC_SUFFIX)(get_ft0(s), get_stn(s, st_index));
-    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fmov_ST0_STN, PREC_SUFFIX)(DisasContext *s, int st_index)
@@ -275,7 +210,6 @@ static void glue(gen_fmov_STN_ST0, PREC_SUFFIX)(DisasContext *s, int st_index)
 static void glue(gen_flds_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(gen_mov32i, PREC_SUFFIX)(get_ft0(s), arg);
-    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_flds_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
@@ -286,7 +220,6 @@ static void glue(gen_flds_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 static void glue(gen_fldl_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
     glue(gen_mov64i, PREC_SUFFIX)(get_ft0(s), arg);
-    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fldl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
@@ -297,7 +230,6 @@ static void glue(gen_fldl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 static void glue(gen_fildl_FT0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
     glue(tcg_gen_cvt32i, PREC_SUFFIX)(get_ft0(s), arg);
-    XEMU_FT0_PRODUCE(s);
 }
 
 static void glue(gen_fildl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
@@ -312,72 +244,10 @@ static void glue(gen_fildll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 
 static void glue(gen_fistl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
 {
-    /*
-     * x87 FIST/FISTP uses the FPU control-word rounding mode to round
-     * ST0 to a signed integer. With HF_FPU_RC propagated via TB flags,
-     * we know the guest RC at translate time and emit a single host
-     * FCVT{N,M,P,Z}S instruction per mode on AArch64 instead of
-     * FRINTI + FCVTZS. When the host lacks the mode-specific fused
-     * op the tcg_gen_cvt_r* wrapper falls back to rint_cvt_* (which
-     * further falls back to rint + cvt); those paths rely on gen_flcr
-     * having already set FPCR to the guest RC via get_st0.
-     *
-     * x87 RC encoding: 0=nearest-even, 1=-inf, 2=+inf, 3=zero (note
-     * this differs from ARM's rmode field where 01=+inf, 10=-inf).
-     */
-    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    switch (rc) {
-    case 0:
-        glue(tcg_gen_cvt_rn_i32, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    case 1:
-        glue(tcg_gen_cvt_rm_i32, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    case 2:
-        glue(tcg_gen_cvt_rp_i32, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    default: /* 3 */
-        glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
-        break;
-    }
-}
-
-static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
-{
-    unsigned int rc = (s->flags >> HF_FPU_RC_SHIFT) & 3;
-    switch (rc) {
-    case 0:
-        glue(tcg_gen_cvt_rn_i64, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    case 1:
-        glue(tcg_gen_cvt_rm_i64, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    case 2:
-        glue(tcg_gen_cvt_rp_i64, PREC_SUFFIX)(arg, get_st0(s));
-        break;
-    default: /* 3 */
-        glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, get_st0(s));
-        break;
-    }
-}
-
-/*
- * FISTTP variants: always truncate toward zero regardless of FPCR
- * RC. This is the rc == 3 branch of the FIST path, so we can emit
- * the unconditional truncating convert and skip the RC switch
- * entirely.
- */
-static void glue(gen_fisttl_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
-{
     glue(glue(tcg_gen_cvt, PRECf), _i32)(arg, get_st0(s));
 }
 
-static void glue(gen_fistt_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i32 arg)
-{
-    glue(gen_fisttl_ST0, PREC_SUFFIX)(s, arg);
-}
-
-static void glue(gen_fisttll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
+static void glue(gen_fistll_ST0, PREC_SUFFIX)(DisasContext *s, TCGv_i64 arg)
 {
     glue(glue(tcg_gen_cvt, PRECf), _i64)(arg, get_st0(s));
 }
@@ -422,12 +292,6 @@ static void glue(gen_fcos, PREC_SUFFIX)(DisasContext *s)
     glue(tcg_gen_cos, PREC_SUFFIX)(st0, st0);
 }
 
-static void glue(gen_frndint, PREC_SUFFIX)(DisasContext *s)
-{
-    PREC_TYPE st0 = get_st0(s);
-    glue(tcg_gen_rint, PREC_SUFFIX)(st0, st0);
-}
-
 static void glue(gen_fld1_ST0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.0);
@@ -438,33 +302,7 @@ static void glue(gen_fldz_ST0, PREC_SUFFIX)(DisasContext *s)
     glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.0);
 }
 
-static void glue(gen_fldl2t_ST0, PREC_SUFFIX)(DisasContext *s)
-{
-    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.32192809488736234787);
-}
-
-static void glue(gen_fldl2e_ST0, PREC_SUFFIX)(DisasContext *s)
-{
-    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 1.44269504088896340736);
-}
-
-static void glue(gen_fldpi_ST0, PREC_SUFFIX)(DisasContext *s)
-{
-    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 3.14159265358979323846);
-}
-
-static void glue(gen_fldlg2_ST0, PREC_SUFFIX)(DisasContext *s)
-{
-    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.30102999566398119521);
-}
-
-static void glue(gen_fldln2_ST0, PREC_SUFFIX)(DisasContext *s)
-{
-    glue(gen_movi, PREC_SUFFIX)(s, get_st0(s), 0.69314718055994530942);
-}
-
 static void glue(gen_fldz_FT0, PREC_SUFFIX)(DisasContext *s)
 {
     glue(gen_movi, PREC_SUFFIX)(s, get_ft0(s), 0.0);
-    XEMU_FT0_PRODUCE(s);
 }

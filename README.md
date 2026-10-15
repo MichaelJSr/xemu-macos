@@ -463,7 +463,7 @@ their owning changes in [docs/optimizations.md](docs/optimizations.md).
 Xbox game (30fps, x87 FPU, MCPX APU)
        │
        ├─ CPU: ARM64 TCG, inline x87 → AArch64 FP
-       │  floatx80↔double inline · FPCR cache · D-regs across TBs
+       │  floatx80↔double inline
        │
        ├─ GPU: NV2A Vulkan (MoltenVK)
        │  flight slots · bump-alloc staging · VRAM spatial dirty index

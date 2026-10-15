@@ -1,35 +1,31 @@
 /*
- * xemu: x87/SSE translator census, dead-store elision and exception-pointer
- * deferral (fork optimization audit 2026-08-04, section 1.4).
+ * xemu: x87/SSE translator census and exception-pointer deferral (fork
+ * optimization audit 2026-08-04, section 1.4).
  *
- * Header-only and private to target/i386/tcg/translate.c: that file is the
- * only translation unit that instantiates ops_fpu.h (once per precision) and
- * includes emit.c.inc, so file-static counters and latches reach every census
- * site without a new build-system entry.
+ * Header-only and private to target/i386/tcg/translate.c: that file includes
+ * emit.c.inc, so file-static counters and latches reach every census site
+ * without a new build-system entry.
  *
  * Counter discipline follows accel/tcg/xemu-inv-prof.h: plain unsynchronized
  * uint64 written only by the single xbox vCPU thread, dumped from atexit()
  * after that thread has stopped.
  *
- * Four mechanisms live here, each with its own latch:
+ * Three mechanisms live here, each with its own latch:
  *
- *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Splits every FT0 write-back
- *       into dead / must-keep, counts the per-instruction FIP/FDP store
- *       pairs against the deferred updates that replace them, measures
- *       mean x87 run length, and counts SSE scalar compares by operand
- *       width.
- *   (2) XEMU_X87_ELIDE_FT0  (default on, =0 legacy) drops the write-back of
- *       the FT0 scratch when no reader of that value is still ahead.
- *   (3) XEMU_X87_DEFER_FIP  (default on, =0 legacy) defers FIP/FCS/FDP/FDS
+ *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Counts the per-instruction
+ *       FIP/FDP store pairs against the deferred updates that replace them,
+ *       measures mean x87 run length, and counts SSE scalar compares by
+ *       operand width.
+ *   (2) XEMU_X87_DEFER_FIP  (default on, =0 legacy) defers FIP/FCS/FDP/FDS
  *       to one update per contiguous x87 run. A mid-block exit lands a
  *       pending FIP/FCS from insn_start word 2 (xemu_x87_restore_fip). FDP
  *       has no such record, so under icount, where a mid-block MMIO access
  *       is routine, FDP stays per-insn and FDS is stored only when its
  *       segment changes.
- *   (4) XEMU_X87_REFUTE=1 puts (2)(3) in shadow mode: the legacy stores
- *       all still happen, the elision decision is computed anyway, and every
- *       point where the elided state could be observed is checked at runtime
- *       (for (3), every insn boundary and every mid-block exit).
+ *   (3) XEMU_X87_REFUTE=1 puts (2) in shadow mode: the legacy stores all
+ *       still happen, the deferral is computed anyway, and every point where
+ *       the deferred state could be observed is checked at runtime (every
+ *       insn boundary and every mid-block exit).
  *       Promotion gate is zero violations over the campaign soak.
  */
 #ifndef TARGET_I386_XEMU_X87_H
@@ -38,8 +34,6 @@
 #if defined(XBOX)
 
 /* (1) census -------------------------------------------------------------- */
-static uint64_t xemu_x87_wb_ft0_dead;    /* FT0 write-back, no reader ahead */
-static uint64_t xemu_x87_wb_ft0_keep;    /* FT0 write-back, reader still ahead */
 static uint64_t xemu_x87_fip_legacy;     /* per-insn FIP/FCS store pairs */
 static uint64_t xemu_x87_fdp_legacy;     /* per-insn FDP/FDS store pairs */
 static uint64_t xemu_x87_ptr_flushes;    /* deferred exc-pointer updates */
@@ -48,9 +42,7 @@ static uint64_t xemu_x87_run_insns;      /* x87 insns inside those runs */
 static uint64_t xemu_sse_comi_ss;        /* (U)COMISS -- 32-bit scalar form */
 static uint64_t xemu_sse_comi_sd;        /* (U)COMISD -- 64-bit scalar form */
 
-/* (4) refuter ------------------------------------------------------------- */
-static uint64_t xemu_x87_ft0_stale;      /* 1 while an elided FT0 store stands */
-static uint64_t xemu_x87_ft0_viol;       /* stale env->ft0 fed to a reader */
+/* (3) refuter ------------------------------------------------------------- */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
 static uint64_t xemu_x87_ptr_viol;       /* deferred value != legacy value */
 static uint64_t xemu_x87_fip_rt_pend;    /* 1 while a deferred FIP is unlanded */
@@ -62,13 +54,6 @@ static uint64_t xemu_x87_rst_viol;       /* restorable FIP/FCS != legacy */
 
 static void xemu_x87_dump(void)
 {
-    uint64_t ft = xemu_x87_wb_ft0_dead + xemu_x87_wb_ft0_keep;
-
-    fprintf(stderr, "xemu: x87 write-backs: FT0 dead=%llu keep=%llu "
-            "(%.1f%% elidable)\n",
-            (unsigned long long)xemu_x87_wb_ft0_dead,
-            (unsigned long long)xemu_x87_wb_ft0_keep,
-            ft ? 100.0 * xemu_x87_wb_ft0_dead / ft : 0.0);
     fprintf(stderr, "xemu: x87 exc-ptrs: fip=%llu fdp=%llu per-insn, "
             "deferred updates=%llu\n",
             (unsigned long long)xemu_x87_fip_legacy,
@@ -81,11 +66,10 @@ static void xemu_x87_dump(void)
     fprintf(stderr, "xemu: sse scalar compares: ss=%llu sd=%llu\n",
             (unsigned long long)xemu_sse_comi_ss,
             (unsigned long long)xemu_sse_comi_sd);
-    fprintf(stderr, "xemu: x87 refuter: ft0-violations=%llu "
+    fprintf(stderr, "xemu: x87 refuter: "
             "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
             "restore-pending=%llu boundaries=%llu boundary-pending=%llu "
             "boundary-violations=%llu\n",
-            (unsigned long long)xemu_x87_ft0_viol,
             (unsigned long long)xemu_x87_ptr_checks,
             (unsigned long long)xemu_x87_ptr_viol,
             (unsigned long long)xemu_x87_rst_checks,
@@ -135,20 +119,6 @@ static bool xemu_x87_refute_on(void)
  * plus the shadow check). Latched on first use, which is inside the first
  * translated TB, so the value cannot change between TBs.
  */
-static int xemu_x87_ft0_mode(void)
-{
-    static int mode = -1;
-    if (mode < 0) {
-        const char *e = getenv("XEMU_X87_ELIDE_FT0");
-        int m = (e && e[0] == '0') ? 0 : 1;
-        if (m && xemu_x87_refute_on()) {
-            m = 2;
-        }
-        mode = m;
-    }
-    return mode;
-}
-
 static int xemu_x87_ptr_mode(void)
 {
     static int mode = -1;
@@ -163,14 +133,14 @@ static int xemu_x87_ptr_mode(void)
     return mode;
 }
 
-/* FDP per insn, FDS on segment change: see (3) above. */
+/* FDP per insn, FDS on segment change: see (2) above. */
 static bool xemu_x87_fdp_eager(void)
 {
     return icount_enabled();
 }
 
 /*
- * (5) XEMU_X87_LEAN (default on, =0 legacy). With the inline x87 cache off
+ * (4) XEMU_X87_LEAN (default on, =0 legacy). With the inline x87 cache off
  * (the helper path, which both modes run), the ops that only move bits in
  * env -- push/pop, fnstsw, register moves and fxch, fchs/fabs, fld1/fldz --
  * are emitted as TCG code instead of helper calls. They write the same env
@@ -209,24 +179,6 @@ static void xemu_x87_gen_store_u64(uint64_t *slot, uint64_t v)
     tcg_gen_st_i64(tcg_constant_i64(v), tcg_constant_ptr(slot), 0);
 }
 
-/*
- * Emit "*counter += xemu_x87_ft0_stale; xemu_x87_ft0_stale = 0" -- a reader
- * has just reloaded env->ft0, so if an elided write-back was outstanding the
- * elision would have handed it a stale operand.
- */
-static void xemu_x87_gen_ft0_check(void)
-{
-    TCGv_ptr sp = tcg_constant_ptr(&xemu_x87_ft0_stale);
-    TCGv_i64 stale = tcg_temp_new_i64();
-    TCGv_i64 acc = tcg_temp_new_i64();
-
-    tcg_gen_ld_i64(stale, sp, 0);
-    tcg_gen_ld_i64(acc, tcg_constant_ptr(&xemu_x87_ft0_viol), 0);
-    tcg_gen_add_i64(acc, acc, stale);
-    tcg_gen_st_i64(acc, tcg_constant_ptr(&xemu_x87_ft0_viol), 0);
-    tcg_gen_st_i64(tcg_constant_i64(0), sp, 0);
-}
-
 /* Emit "*counter += delta". */
 static void xemu_x87_gen_acc_i64(uint64_t *counter, TCGv_i64 delta)
 {
@@ -260,37 +212,7 @@ static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
     xemu_x87_gen_acc_i64(counter, d64);
 }
 
-/*
- * (2) FT0 liveness. Every FT0 reader in hard-fpu-inline mode is preceded by
- * an FT0 writer inside the same guest instruction, so once the reader has
- * consumed the value nothing can observe env->ft0: no helper reachable in
- * that mode reads it (every FT0-reading helper sits in the
- * !g_use_hard_fpu_inline arm of translate.c) and it is not in the vmstate.
- * The one window where the write-back is live is a helper call emitted
- * between the writer and the reader -- gen_compute_eflags() ahead of the
- * inline FCOMI/FUCOMI -- which the pending flag keeps honest.
- *
- * Only the store is worth eliding. The paired dead ld80f a writer's get_ft0()
- * emits already vanishes in liveness_pass_1 (one output, no side effects);
- * st80f declares no outputs, which tcg.c:4436 reads as "assume side effects",
- * so it survives to the host as real stores.
- */
-static void xemu_x87_ft0_produce(DisasContext *s)
-{
-    s->xemu_ft0_pending = true;
-    s->xemu_ft0_reloaded = false;
-}
-
-static void xemu_x87_ft0_consume(DisasContext *s)
-{
-    if (unlikely(s->xemu_ft0_reloaded) && xemu_x87_ft0_mode() == 2) {
-        xemu_x87_gen_ft0_check();
-    }
-    s->xemu_ft0_reloaded = false;
-    s->xemu_ft0_pending = false;
-}
-
-/* (3) deferred FIP/FCS/FDP/FDS ------------------------------------------- */
+/* (2) deferred FIP/FCS/FDP/FDS ------------------------------------------- */
 
 static void xemu_x87_record_fip(DisasContext *s, TCGv eip)
 {
@@ -499,16 +421,6 @@ static void xemu_x87_close_run(DisasContext *s)
     }
     s->xemu_x87_run = 0;
 }
-
-/* ops_fpu.h is instantiated per precision; these keep its writer/reader
- * annotations to one line each and compile away on a non-xbox target. */
-#define XEMU_FT0_PRODUCE(s)  xemu_x87_ft0_produce(s)
-#define XEMU_FT0_CONSUME(s)  xemu_x87_ft0_consume(s)
-
-#else /* !XBOX */
-
-#define XEMU_FT0_PRODUCE(s)  ((void)0)
-#define XEMU_FT0_CONSUME(s)  ((void)0)
 
 #endif /* XBOX */
 

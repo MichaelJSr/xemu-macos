@@ -134,6 +134,10 @@ four correctness fixes are cross-platform *benefits*.**
 
 ## G. Windows ARM64 sticky-SSE / inline-x87 note (F2 depth)
 
+2026-10-15: inline x87 has run on no host since `3eb1b2de10`, and its
+fork layers and `cached_fpuc_rc` were removed, so F2, this section, I.10
+and the J grep for `cached_fpuc_rc` are historical.
+
 `XEMU_SSE_HOSTFP` is defined on Windows ARM64 (aarch64), so the sticky
 bracket compiles and default-activates (`hard_fpu` default true).
 `g_use_hard_fpu_inline = hard_fpu` is set with **no `_WIN32` gate**

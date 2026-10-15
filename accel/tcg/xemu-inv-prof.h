@@ -16,9 +16,8 @@
  *       counting mode (no behavior change). A TB invalidated whose range
  *       does not overlap the written range is a false (over-)invalidation.
  *   (c) recycling: inv_htable recycle attempts / hits / true-SMC / cold.
- *   (d) census (cheap translate-time emission counters): FPU flcr check
- *       emitted-vs-compile-skipped; goto_tb direct chain vs inline
- *       jump-cache probe vs ret-memo exits.
+ *   (d) census (cheap translate-time emission counters): goto_tb direct
+ *       chain vs inline jump-cache probe vs ret-memo exits.
  */
 #ifndef XEMU_INV_PROF_H
 #define XEMU_INV_PROF_H
@@ -164,8 +163,6 @@ extern uint64_t xemu_inv_recycle_true_smc;  /* same pc/flags in inv_htable, byte
 extern uint64_t xemu_inv_recycle_cold;      /* no inv_htable entry (fresh/cold pc) */
 
 /* (d) census — translate-time emission counts */
-extern uint64_t xemu_inv_flcr_emitted;      /* gen_flcr emitted a runtime FPCR check */
-extern uint64_t xemu_inv_flcr_skip;         /* gen_flcr compile-skipped (flcr_set true) */
 extern uint64_t xemu_inv_gototb_emitted;    /* same-page direct goto_tb chain exits */
 extern uint64_t xemu_inv_jcprobe_emitted;   /* inline jump-cache probe (indirect/xpage) */
 extern uint64_t xemu_inv_retmemo_emitted;   /* inline ret-memo exits */

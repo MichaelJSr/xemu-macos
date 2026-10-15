@@ -93,7 +93,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 
 ## Open frontier (ranked)
 1. **PFIFO doorbell lock wait.** On heavy-f1, `user_write` blocked on `pfifo.lock` is ≈9.6% of vCPU samples. PFIFO holds the lock mostly across the reports safety-valve fence wait (`REPORTS_SUBMIT`); moving that under `pgraph.lock` was −38% (see PFIFO dead ends). Open: deliver without a fence wait on the PFIFO thread at all.
-2. **x87 helpers.** The inline cache was compiled out from 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/); the exact write-through path (`XEMU_X87_WT`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU.
+2. **x87 helpers.** The inline cache never ran after 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/) and its fork layers are removed; the exact write-through path (`XEMU_X87_WT`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU.
 3. **Is W2 GPU-bound?** Fewest draws, slowest anchor. Run Phase 2.
 4. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
 5. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.

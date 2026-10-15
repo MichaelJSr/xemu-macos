@@ -50,7 +50,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - Every `pfifo_kick(d)` caller holds `d->pfifo.lock` across the kick-set and the broadcast (the idle wait is an untimed `qemu_cond_wait`). `pfifo_run_puller` drops `pfifo.lock` to take `pgraph.lock`, so don't hoist checks that assume it's held (except the deterministic null inline run, which holds both throughout: `pfifo.inline_locked`; method code that takes the BQL goes through `pgraph_inline_bql_lock`). Never suppress a kick. → permanent PFIFO hang. `nv2a/pfifo.c`.
 - `cpu->mem_access_callbacks` is an RCU list (entries freed after a grace period). Any thread doing guest DMA walks it and must be `rcu_register_thread()`-ed (qemu_main is, in `ui/xemu.c`). → SIGSEGV in `flatview_read_continue`. `system/physmem.c`.
 - PFIFO, vblank, and any new frame-critical thread run at `QOS_CLASS_USER_INTERACTIVE`. → jitter that looks like a regression.
-- The x87 control word changes only through `cpu_set_fpuc()`, because RC is baked into `tb->flags`. → wrong rounding in translated code.
+- The x87 control word changes only through `cpu_set_fpuc()`, because PC and RC are baked into `tb->flags`. → the write-through x87 path runs at a stale precision.
 
 ## Triage (one escape hatch per fresh launch)
 

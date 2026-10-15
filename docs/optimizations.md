@@ -47,7 +47,7 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_RAS` | `0` disables the near-return target memo (default on): 4096-entry eip→TB cache probed inline at ret sites (+0.77 fps, 6/6 pairs — see CPU / JIT changes). `-d exec` tracing won't log inline-hit rets — disable when tracing |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
-| `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time FPU/exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which is the gate counter for `XEMU_ELIDE_CANDOIO` (read it from a `XEMU_ELIDE_CANDOIO=0` run, since the elision drives the counter to zero by construction; the legacy `io_prepare` count is 2x-inflated by recompile re-execution) |
+| `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which is the gate counter for `XEMU_ELIDE_CANDOIO` (read it from a `XEMU_ELIDE_CANDOIO=0` run, since the elision drives the counter to zero by construction; the legacy `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_ELIDE_CANDOIO` | **Default on (elide) since 2026-08-04**; `0` restores the per-TB `can_do_io` bookkeeping stores. With icount and replay off nothing observes the flag, so the two stores are dropped and the guest's mid-TB MMIO accesses stop paying `io_prepare`'s `cpu_io_recompile` round trip (`tcg_tb_lookup` g_tree walk + state restore + siglongjmp + `CF_MEMI_ONLY` re-translate + re-execute). Auto-forced to `0` under icount or `replay_mode != REPLAY_MODE_NONE` — the only observers — and latched at first translation, before the first TB. Gate counter: the `XEMU_INV_PROF` `(f)` line |
 | `XEMU_DIRTY_FAST` | **Default on since 2026-08-04**; `0` restores the legacy dirty-bitmap shapes in the store slow path on the same binary — the `physical_memory_is_clean()` re-read at the tail of `notdirty_write` (now answered locally by the invalidation's "page still holds code" return) and the five separate RCU-guarded `find_next_bit` scans behind `physical_memory_is_clean()` (now one guard, one idx/offset computation, five `test_bit`s via `physical_memory_page_dirty_bits()` — which also serves the TLB-refill dirty check at `cputlb.c:1128`). Behavior-equivalent both ways; carries no individual fps claim (see the CPU / JIT bullet) |
@@ -58,10 +58,9 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_XPAGE_CHAIN` | Cross-page direct chaining — **default ON (broad)** since 2026-07-12 (`0` restores upstream same-page-only chaining; `1` = kernel-identity window only). Sound by construction: INVLPG (per-page) backstop plus CR3 + generic `tlb_flush_by_mmuidx` backstops covering every full-flush class (0 refuter violations in 1.71B checks across the promotion soak). A/B: +1.30±0.29 fps F8 pre-subpage (7/7 pairs); +0.77±0.55 on top of sub-page tracking (3/3) |
 | `XEMU_XPAGE_UNLINK` | **Default ON (v0.11.1)**: the full-flush backstop severs only the registered cross-page chains (synchronous `tb_jmp_unlink` walk; translations survive, chains relink lazily). `=0` restores the v0.11 queued whole-`tb_flush` backstop — which caused the new-area/death-reload lag (139 tb_flushes in 20 s of first-visit walking on F8, fps trough 14.6 vs 38.6 baseline; 0 flushes and no trough with the unlink). Registry overflow falls back to the full flush automatically |
 | `XEMU_SSE_HOST` (alias `XEMU_SSE_NEON`) | NEON fast path for single-precision SSE arithmetic; default on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). `0` restores softfloat; `=2` runs both paths and aborts on divergence. x86_64 stays opt-in/dark: run `=2` clean on real silicon first |
-| `XEMU_X87_ELIDE_FT0` | **Default on since 2026-08-04**; `0` restores the unconditional store. Skips the write-back of the FT0 scratch at an inline-FPU register-cache flush when no reader of that value is still ahead in the same guest instruction (producer sets pending, consumer clears it). A/B: **+1.56 fps, 3/3 pairs positive** on F8 |
 | `XEMU_X87_DEFER_FIP` | **Default on since 2026-08-04**; `0` restores per-instruction stores. Defers the x87 exception-pointer stores (FIP/FCS/FDP/FDS) from one per instruction to one per contiguous x87 run, landing them at the flush points that already precede every consumer (`do_fstenv` via FNSTENV/FNSAVE, every helper call, `tb_stop`), and hoists the CS-selector load out of the per-instruction path (CS cannot change mid-TB). Measured cut ratio 8.81x against a 1.5x bar, mean run length 3.64. A/B: **+7.46 fps, 3/3 pairs positive**. Since 2026-10-15 also under icount: a pending FIP/FCS lands at mid-TB exits from insn_start word 2, FDP stays per instruction and FDS is stored on segment change (det heavy-f1 +3.5% frames/Gcycle, −4.0% host instructions) |
-| `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: FT0 write-backs split dead/live, per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
-| `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the two x87 mechanisms above: keeps every legacy store, computes the elision/deferral decision anyway, and counts every runtime point where the elided state could have been observed (stale `env->ft0` fed to a reader; deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
+| `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
+| `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the x87 exception-pointer deferral: keeps every legacy store, computes the deferral anyway, and counts every runtime point where the deferred state could have been observed (deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **DEFAULT-ON since 2026-07-18** (`=0` reverts; forced off with `XEMU_SUBPAGE_DIRTY=0`, which stops bitmap maintenance): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04). The prefilter is emitted only by the aarch64 TCG backend, so on any other host (x86_64 Windows/Linux) this knob and its refuter are inert — since 2026-09-08 an explicit `=1` says so once on stderr from the arm-(a) latch in `accel/tcg/tb-maint.c` |
 | `XEMU_SUBPAGE_FAST_REFUTE` | `1` routes every would-skip decision to a C validator (independent `probe_access` re-derivation, live-TB overlap scan, NOCODE dirty ground truth) that counts violations and performs the real store — falsification mode, not perf. Forces `XEMU_SUBPAGE_FAST_STATS=1` so soaks keep their population histogram |
 | `XEMU_SUBPAGE_FAST_STATS` | `1` re-enables the arm-(b) prefilter's six diagnostic counter RMWs (`xemu_sf_seen`, `xemu_sf_skips`, and the four `xemu_sf_demote` reasons) that the aarch64 store slow-path stub emits inline. **Default OFF since 2026-08-04**: the counters are baked into generated code at translate time and the stub completes ~2M stores/s, so production now emits ~39 fewer instructions per store stub (12 of them on the inline-skip path itself, the four demote landing pads collapsing into direct branches) and the atexit dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` in place of the histogram — so a zeroed histogram can't be mistaken for a dead mechanism. Latched once at first stub emission, before the first TB (a mid-run flip would leave TBs disagreeing). Diagnostics only: the decision logic and the refuter oracle are identical either way, which is what makes this knob its own A/B lever. Measured cost of the counters: **−0.32% draws/s / −0.57 fps, 3/3 pairs unanimous** |
@@ -409,7 +408,9 @@ platform choice since 2026-10-15), and
   `gen_flcr` programs MXCSR but not the x87 control word, so `FIST`/`FISTP`
   under round-toward-±∞ and `FRNDINT` under any non-nearest mode silently
   rounded to nearest; those cases now fall back to the softfloat helper
-  (nearest/truncate stay inline; aarch64 unchanged).
+  (nearest/truncate stay inline; aarch64 unchanged). The gate in (1) in
+  fact turned the cache off on every host; its fork layers were removed
+  on 2026-10-15.
 
 - **Sub-page dirty-tracking default gated to Apple (2026-08-09).** Its
   default was on unconditionally, contradicting the feature's own
@@ -462,30 +463,37 @@ platform choice since 2026-10-15), and
   exactly those chains (`tb_jmp_unlink`), keeping every translation;
   chains relink lazily. Registry overflow (128k dests) or
   `XEMU_XPAGE_UNLINK=0` falls back to the v0.11 queued full flush.
-- **Inline hard FPU.** x87 ops emit native AArch64 FP
-  (`FADD`/`FMUL`/`FDIV`/`FSQRT`); `floatx80`↔`double` inlined
-  (~15 vs ~40 host insns); values stay in D-regs across TBs.
-  Inlined: `fucomi`, `fnstsw`, `frndint`, FPU constant loads,
-  `fdecstp`/`fincstp`, `ffree`/`ffreep`, 16-bit `FIST`, and all
-  `FISTTP` widths. (FISTTP inline is AArch64-only: `tcg_gen_cvt_f*_i*`
-  lowers to `FCVTZS` on AArch64 but to MXCSR-rounded `CVTSS2SI` on
-  x86-64, so non-AArch64 hosts fall back to the floatx80 helper.)
-  ~30% faster than the helper-call path, 4–8× faster than softfloat.
-- **FPCR caching + rounding-correct FIST.** `MSR FPCR` re-emitted only
-  when guest RC bits change. `FIST`/`FISTP` honor the control word via
-  fused `cvt_{rn,rm,rp}_i{32,64}_f{32,64}` TCG ops (single host
-  `FCVT{N,M,P,Z}S` on AArch64).
-- **Signaling vs quiet compares.** `coms_f32`/`coms_f64` (FCMPE /
-  COMISS) for FCOMI; `com_f32`/`com_f64` for FUCOMI. Matches x87 NaN
-  semantics.
+- **Inline hard FPU (retired).** The inline x87 cache (native AArch64
+  FP with values held in D-regs across instructions; inline `fucomi`,
+  `frndint`, the FPU constant loads, 16-bit `FIST` and `FISTTP`; "~30%
+  faster than the helper-call path") has not run since `3eb1b2de10`:
+  its `TCG_TARGET_HAS_fpu` gate is private to tcg/. Its fork layers were
+  removed on 2026-10-15; upstream's skeleton stays behind
+  `g_use_hard_fpu_inline = 0`. Still live on the helper path, in both
+  modes: `fnstsw`, the register moves, `fchs`/`fabs`, `fld1`/`fldz` and
+  `ffree`/`ffreep` as TCG code (`613670d8eb`), and `fdecstp`/`fincstp`.
+  The exact write-through path (`4d2466d106`, +5.6% det heavy-f1)
+  replaced the cache for the hot loads, stores and arithmetic on
+  aarch64: `floatx80`↔`double` inline through the backend's
+  `ld80f`/`st80f`, every result written to env at once.
+- **FPCR caching + rounding-correct FIST (retired with the cache,
+  2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
+  changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
+  word via fused `cvt_{rn,rm,rp}_i{32,64}_f{32,64}` TCG ops (single
+  host `FCVT{N,M,P,Z}S` on AArch64).
+- **Signaling vs quiet compares (retired with the cache, 2026-10-15).**
+  `coms_f32`/`coms_f64` (FCMPE / COMISS) for FCOMI; `com_f32`/`com_f64`
+  for FUCOMI.
 - **Control-word resync.** Every path that writes `env->fpuc`
   (`fldcw`, `fldenv`, `frstor`, `fxrstor`, `fninit`, xsave helpers,
   `cpu_post_load`, gdbstub, SEV, reset) routes through
   `cpu_set_fpuc` so `HF_FPU_RC` / `HF_FPU_PC` in `hflags` are
   rebuilt — otherwise fused FIST would round with the stale mode.
-- **Misc.** `gen_flcr` materializes rc-bits from `tb->flags`;
-  `fnstcw` is one load; `insertion_sort_syncs` replaces `qsort`
-  for N ≤ 16; `flcr` is 5 insns via `RBIT`.
+- **Misc.** `fnstcw` is one load; `insertion_sort_syncs` replaces
+  `qsort` for N ≤ 16. (Retired with the cache on 2026-10-15: `gen_flcr`
+  materializing rc-bits from `tb->flags`. The `flcr` op and its 5-insn
+  `RBIT` lowering stay in the aarch64 backend for upstream's `gen_flcr`
+  skeleton; nothing has emitted the op since 3eb1b2de10.)
 - **3-MOVK constant materialization.** `tcg_out_movi` now emits
   MOVZ/MOVN + up to 3 MOVK for 3- and 4-chunk constants instead of
   dumping them into the literal pool (LDR + D-cache pressure).
@@ -500,13 +508,11 @@ platform choice since 2026-10-15), and
   default on for aarch64 with `perf.hard_fpu`, `XEMU_SSE_HOST=0`
   restores softfloat. (x87 hard-FPU helpers save/restore around
   their own ops; softfloat/TCG carry no host FP-mode dependence.)
-  Follow-up fix: the *inline* x87 path skips its `MSR FPCR` whenever
-  the `cached_fpuc_rc` cache matches the TB's rounding bits, so the
-  bracket now invalidates that cache when it rewrites FPCR —
-  previously inline x87 could silently run under the sticky SSE
-  FZ/RMode state (denormal flushing in x87 doubles). Zero cost in
-  steady state (fires only on actual mode transitions); validated by
-  a clean 90 s `XEMU_SSE_HOST=2` differential and fps parity.
+  Follow-up fix (historical: the inline x87 path it protected never
+  ran after `3eb1b2de10`, and `cached_fpuc_rc` was removed on
+  2026-10-15): the *inline* x87 path skipped its `MSR FPCR` whenever
+  the `cached_fpuc_rc` cache matched the TB's rounding bits, so the
+  bracket invalidated that cache when it rewrote FPCR.
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census) showed diffuse guest time (top TB
@@ -611,8 +617,9 @@ platform choice since 2026-10-15), and
   3/3 pairs positive: FT0 **+1.56 fps**, FIP **+7.46 fps** (draws/s
   +8.8%), both together **+7.68 fps** — sub-additive against the sum of
   the singles, which is ordinary frame-time composition, not a
-  contradiction. `XEMU_X87_ELIDE_FT0=0` / `XEMU_X87_DEFER_FIP=0` are the
-  hatches; the third mechanism, clean-ST(i) write-back elision
+  contradiction. The FT0 half lived in the inline cache's flush, so it
+  was dead from v0.13.2 (`3eb1b2de10`) and was removed with the cache
+  on 2026-10-15; the third mechanism, clean-ST(i) write-back elision
   (`XEMU_X87_ELIDE_CLEAN`), was built dark because it is a numeric
   behavior change, not a pure elision; it measured −0.23 fps (3/3) the
   same day and its code was removed on 2026-10-10 — see Failed /

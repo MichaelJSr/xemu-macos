@@ -93,8 +93,6 @@ uint64_t xemu_io_recompiles;
 /* Wall clock at the moment the dump was armed, for per-second rates. */
 static int64_t xemu_inv_prof_t0_us;
 
-uint64_t xemu_inv_flcr_emitted;
-uint64_t xemu_inv_flcr_skip;
 uint64_t xemu_inv_gototb_emitted;
 uint64_t xemu_inv_jcprobe_emitted;
 uint64_t xemu_inv_retmemo_emitted;
@@ -106,7 +104,6 @@ static void xemu_inv_prof_dump(void)
     uint64_t rec_seen = xemu_inv_recycle_hits + xemu_inv_recycle_true_smc;
     uint64_t exits = xemu_inv_gototb_emitted + xemu_inv_jcprobe_emitted +
                      xemu_inv_retmemo_emitted;
-    uint64_t flcr = xemu_inv_flcr_emitted + xemu_inv_flcr_skip;
 
     fprintf(stderr, "xemu: INV_PROF summary (tb_flush=%u)\n",
             qatomic_read(&tb_ctx.tb_flush_count));
@@ -185,12 +182,8 @@ static void xemu_inv_prof_dump(void)
             rec_seen ? 100.0 * xemu_inv_recycle_hits / rec_seen : 0.0);
 
     fprintf(stderr,
-            "xemu:  (d) flcr emitted=%llu skip=%llu (%.1f%% compile-skipped)  "
-            "exits: goto_tb=%llu (%.1f%%) jc_probe=%llu (%.1f%%) "
+            "xemu:  (d) exits: goto_tb=%llu (%.1f%%) jc_probe=%llu (%.1f%%) "
             "ret_memo=%llu (%.1f%%)\n",
-            (unsigned long long)xemu_inv_flcr_emitted,
-            (unsigned long long)xemu_inv_flcr_skip,
-            flcr ? 100.0 * xemu_inv_flcr_skip / flcr : 0.0,
             (unsigned long long)xemu_inv_gototb_emitted,
             exits ? 100.0 * xemu_inv_gototb_emitted / exits : 0.0,
             (unsigned long long)xemu_inv_jcprobe_emitted,
