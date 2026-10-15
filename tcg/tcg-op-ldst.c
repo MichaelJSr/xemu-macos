@@ -35,24 +35,69 @@
 #include "tcg-target-mo.h"
 #if defined(XBOX) && !defined(CONFIG_USER_ONLY)
 #include "exec/icount.h"
+#include "exec/tb-flush.h"
+#include "hw/core/cpu.h"
+#include "tcg/startup.h"
 
 /*
- * xemu, deterministic mode (icount): every device that touches guest RAM
- * runs on the vCPU thread or with it parked (the APU tick, the inline or
- * synced PFIFO pusher, settled IDE DMA, virtual-clock timers), so the
- * barriers that order guest accesses for concurrent I/O threads order
- * nothing (+4% on Azurik's heavy scene). Explicit guest fences (mfence,
- * locked instructions) keep theirs. XEMU_ICOUNT_MO=1 keeps all of them.
+ * xemu: the guest memory-order barriers worth emitting on the single-CPU
+ * Xbox, where only device threads can observe the order of guest accesses.
+ * Explicit guest fences (mfence, locked instructions) always keep theirs.
+ *
+ * Deterministic mode (icount): none (+4% on Azurik's heavy scene). Every
+ * device that touches guest RAM runs on the vCPU thread or with it parked
+ * (the APU tick, the inline or synced PFIFO pusher, settled IDE DMA,
+ * virtual-clock timers).
+ *
+ * Normal mode: all but load-load (+4% deterministic frames per Gcycle,
+ * measured with a temporary toggle). Stores keep theirs: OHCI walks
+ * descriptors the guest links in RAM from the main loop. A load needs the
+ * barrier only when a device thread orders some data before a flag the
+ * guest polls in RAM and the guest reads both with loads alone. Those
+ * writer-ordered publishers are pci_dma_write rings (nvnet RX writes the
+ * packet, then the descriptor clearing NV_RX_AVAIL, each behind
+ * dma_barrier, from the main loop while the vCPU runs) and PFIFO data
+ * that a later semaphore release publishes. Other completions arrive by
+ * interrupt (the vCPU takes the BQL) or an MMIO status read: locked, or
+ * for USER DMA_GET a load-acquire pairing with the pusher's release.
+ *
+ * With no network backend nvnet receives nothing. In the PFIFO case the
+ * guest typically stores between seeing the semaphore and reading the
+ * data, and that store's full barrier orders the two loads; the window
+ * left is a title that spins on a semaphore with loads alone and then
+ * loads PFIFO-written data. A backend (xemu_net_enable) voids this and
+ * the icount premise, so xemu_guest_mo_keep_all restores every barrier in
+ * both modes for the rest of the run. XEMU_GUEST_MO=1 keeps all of them
+ * from the start.
  */
-static bool xemu_elide_mo(void)
-{
-    static int elide = -1;
+static bool xemu_guest_mo_all;
 
-    if (elide < 0) {
-        const char *e = getenv("XEMU_ICOUNT_MO");
-        elide = icount_enabled() && !(e && e[0] == '1');
+static TCGBar xemu_guest_mo(void)
+{
+    static int mo = -1;
+
+    if (mo < 0) {
+        const char *e = getenv("XEMU_GUEST_MO");
+        if (e && e[0] == '1') {
+            mo = TCG_MO_ALL;
+        } else {
+            mo = icount_enabled() ? 0 : TCG_MO_ALL & ~TCG_MO_LD_LD;
+        }
     }
-    return elide;
+    return qatomic_read(&xemu_guest_mo_all) ? TCG_MO_ALL : mo;
+}
+
+/*
+ * Any thread (xemu_net_enable). Existing TBs lack the barriers, so flush
+ * them as vCPU safe work: under the single-threaded rr scheduler
+ * cpu_in_serial_context() holds for every thread, so a direct flush from
+ * the UI thread would race the running vCPU.
+ */
+void xemu_guest_mo_keep_all(void)
+{
+    if (!qatomic_xchg(&xemu_guest_mo_all, true) && first_cpu) {
+        queue_tb_flush(first_cpu);
+    }
 }
 #endif
 
@@ -151,9 +196,7 @@ static void gen_st_i64(TCGv_i64 v, TCGTemp *addr, MemOpIdx oi)
 static void tcg_gen_req_mo(TCGBar type)
 {
 #if defined(XBOX) && !defined(CONFIG_USER_ONLY)
-    if (xemu_elide_mo()) {
-        return;
-    }
+    type &= xemu_guest_mo();
 #endif
     type &= tcg_ctx->guest_mo;
     type &= ~TCG_TARGET_DEFAULT_MO;

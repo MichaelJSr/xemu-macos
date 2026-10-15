@@ -35,6 +35,7 @@
 #include "net/net.h"
 #include "net/hub.h"
 #include "net/slirp.h"
+#include "tcg/startup.h"
 #include <libslirp.h>
 #if defined(_WIN32)
 #include <pcap/pcap.h>
@@ -107,6 +108,14 @@ void xemu_net_enable(void)
         error_report_err(local_err);
         return;
     }
+
+    /*
+     * nvnet has a backend now: the main loop DMAs received packets into
+     * the guest's RX ring while the vCPU runs, which needs the guest
+     * barriers that translated code otherwise drops (xemu_guest_mo).
+     * Disabling the network leaves them on.
+     */
+    xemu_guest_mo_keep_all();
 
     if (g_config.net.backend == CONFIG_NET_BACKEND_NAT) {
         void *s = slirp_get_state_from_netdev(id);

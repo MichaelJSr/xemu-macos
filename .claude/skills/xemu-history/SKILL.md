@@ -67,6 +67,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
 | Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |
+| Normal mode: drop the store barriers too, or weaken them to `dmb ishst` | closed | +1.3% more frames/Gcycle than load-only (det, 5 pairs), and OHCI needs store-store order; `ishst` measured no cheaper than `ish` | `XEMU_GUEST_MO=1` |
 | `-fzero-call-used-regs=skip` | closed | −411 kB `__text`, fps 3+/2− then 3+/5−. Retest via `CFLAGS` | `7aa746a952` |
 | COMISS lowering, dirty-clear coalescing, xpage spanning dests | closed / parked | Census empty; <1% of vCPU; under 1M/s | ledger |
 | Chaining icount step TBs (step→step `goto_tb`, non-PCREL step TBs) | closed | Loop dispatches per cut 22→2.6, but Minsns/frame 123.33→123.30 and Mcycles/frame flat: the loop round trip is ~0.2% of the det vCPU (an earlier "+1%" was wall-fps noise). Trap: a non-`CF_PCREL` TB skips the EIP update on a linked exit, so it must never chain into a `CF_PCREL` TB | not committed |

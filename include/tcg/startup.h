@@ -27,6 +27,12 @@
 
 #ifdef XBOX
 void tcg_register_init_ctx(void);
+/*
+ * A device thread now publishes into guest RAM behind flags the guest
+ * polls: emit every guest memory-order barrier from here on, and flush
+ * the translations made without them.
+ */
+void xemu_guest_mo_keep_all(void);
 #endif
 
 /**
