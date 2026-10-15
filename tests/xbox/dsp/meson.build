@@ -53,12 +53,13 @@ test('xbox-mcpx-dsp-corpus-interp', diff_exe,
 
 # The inline DSP56300 JIT exists on aarch64 POSIX hosts only
 # (DSP56K_JIT_SUPPORTED, hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h);
-# the JIT arms are meaningless elsewhere.
+# the JIT arms are meaningless elsewhere. The corpus cores are EP cores,
+# which start on the interpreter unless XEMU_DSP_JIT_EP=1.
 if host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
   # Arm 2: same goldens through the JIT, plus a translated-blocks-
   # executed assertion so translator bail-out can't false-green it.
   test('xbox-mcpx-dsp-corpus-jit', diff_exe,
-       env: environment(xbox_dsp_env + {'XEMU_DSP_JIT': '1'}),
+       env: environment(xbox_dsp_env + {'XEMU_DSP_JIT': '1', 'XEMU_DSP_JIT_EP': '1'}),
        args: ['--tap', '-k', '-p', '/corpus'],
        protocol: 'tap',
        suite: xbox_dsp_suite)
@@ -69,6 +70,7 @@ if host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
   test('xbox-mcpx-dsp-jit-diff-sync', diff_exe,
        env: environment(xbox_dsp_env + {
          'XEMU_DSP_JIT': '1',
+         'XEMU_DSP_JIT_EP': '1',
          'XEMU_DSP_JIT_DIFF': '1',
          'XEMU_DSP_JIT_DIFF_SYNC': '1',
        }),
