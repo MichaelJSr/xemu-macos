@@ -576,16 +576,14 @@ recycle_tb:
     existing_tb = tb_link_page(tb);
     assert_no_pages_locked();
 
-#if defined(XBOX)
+#if defined(XBOX) && defined(__APPLE__) && defined(__aarch64__)
+    /* XEMU_GUEST_PROF's sampler (cpu-exec.c) is Apple Silicon only. */
     {
         extern bool xemu_guestprof_on(void);
-        extern int xemu_guestprof_pending_kind;
-        extern void xemu_guestprof_note_tb(const void *, uint64_t, int);
+        extern void xemu_guestprof_note_tb(const void *, uint64_t);
         if (unlikely(xemu_guestprof_on()) && existing_tb == tb) {
-            xemu_guestprof_note_tb(tb->tc.ptr, (uint64_t)s.pc,
-                                   xemu_guestprof_pending_kind);
+            xemu_guestprof_note_tb(tb->tc.ptr, (uint64_t)s.pc);
         }
-        xemu_guestprof_pending_kind = 0;
     }
 #endif
 

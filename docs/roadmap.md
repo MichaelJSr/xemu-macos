@@ -148,7 +148,7 @@ real flips.
 
 ## Provenance
 
-Re-rank inputs: `XEMU_GUEST_PROF=1` sampler + exit census,
+Re-rank inputs: `XEMU_GUEST_PROF=1` sampler,
 `XEMU_INV_PROF=1` (+`XEMU_INV_TIMING=1`) invalidation/trap counters,
 `XEMU_NV2A_NSPROF=1` frame attribution. Added 2026-08-04 for the candidates above:
 `XEMU_X87_CENSUS=1` + `XEMU_X87_REFUTE=1` (x87 elidability and its

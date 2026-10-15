@@ -281,16 +281,13 @@ TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(CPUState *cpu,
  */
 #if defined(XBOX)
 /*
- * XEMU_GUEST_PROF=1: one-run guest profiler.
- *  - SIGPROF sampler: raw host PCs into a ring (async-signal-safe
- *    store only); resolved at exit via the tc.ptr side table (guest
- *    TBs) or dladdr (helpers/host).
- *  - Exit-kind classification: the i386 emitter tags ret / indirect
- *    jmp / indirect call; tb_gen_code() records {guest pc, kind} per
- *    tc.ptr (CF_PCREL leaves tb->pc unusable, so tc.ptr is the key);
- *    helper_lookup_tb_ptr buckets its calls by source-TB kind.
- * Measurement-run tool: the classification adds a cached source-TB
- * resolve per lookup and is not benchmark-neutral.
+ * XEMU_GUEST_PROF=1: one-run guest profiler, Apple Silicon only (it
+ * samples the vCPU through mach thread state). A sampler thread
+ * collects raw vCPU host PCs into a ring; at exit they resolve through
+ * the tc.ptr side table (guest TBs; tb_gen_code() records the guest pc
+ * per tc.ptr, since CF_PCREL leaves tb->pc unusable) or dladdr
+ * (helpers/host). Measurement-run only: the sampler suspends the vCPU,
+ * so it is not benchmark-neutral.
  */
 #if defined(__APPLE__) && defined(__aarch64__)
 #include <dlfcn.h>
@@ -299,19 +296,7 @@ TranslationBlock *xemu_inv_htable_lookup_ignore_bytes(CPUState *cpu,
 #define XEMU_GUEST_PROF_SAMPLER 1
 #endif
 
-enum {
-    XEMU_GP_KIND_OTHER = 0,
-    XEMU_GP_KIND_RET = 1,
-    XEMU_GP_KIND_IJMP = 2,
-    XEMU_GP_KIND_ICALL = 3,
-};
-#define XEMU_GP_NKINDS 4
-
-/* Set by the i386 emitter for the TB being translated. */
-int xemu_guestprof_pending_kind;
-
 bool xemu_guestprof_on(void);
-void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc, int kind);
 
 bool xemu_guestprof_on(void)
 {
@@ -319,17 +304,26 @@ bool xemu_guestprof_on(void)
     if (on < 0) {
         const char *e = getenv("XEMU_GUEST_PROF");
         on = (e && e[0] == '1') ? 1 : 0;
+#if !defined(XEMU_GUEST_PROF_SAMPLER)
+        if (on) {
+            fprintf(stderr, "xemu: XEMU_GUEST_PROF: the sampler is Apple "
+                    "Silicon only; ignored\n");
+            on = 0;
+        }
+#endif
     }
     return on;
 }
 
-/* tc.ptr -> {guest pc, exit kind}; open-addressed, translation-locked. */
+#if defined(XEMU_GUEST_PROF_SAMPLER)
+void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc);
+
+/* tc.ptr -> guest pc; open-addressed, translation-locked. */
 #define XEMU_GP_TAB_BITS 20
 #define XEMU_GP_TAB_SIZE (1u << XEMU_GP_TAB_BITS)
 typedef struct {
     const void *tc_ptr;
     uint64_t guest_pc;
-    uint8_t kind;
 } XemuGpEnt;
 static XemuGpEnt *xemu_gp_tab;
 
@@ -342,7 +336,7 @@ static inline uint32_t xemu_gp_hash(const void *p)
     return (uint32_t)v & (XEMU_GP_TAB_SIZE - 1);
 }
 
-void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc, int kind)
+void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc)
 {
     if (!xemu_gp_tab) {
         xemu_gp_tab = g_malloc0(sizeof(XemuGpEnt) * XEMU_GP_TAB_SIZE);
@@ -352,7 +346,6 @@ void xemu_guestprof_note_tb(const void *tc_ptr, uint64_t guest_pc, int kind)
         if (!xemu_gp_tab[h].tc_ptr || xemu_gp_tab[h].tc_ptr == tc_ptr) {
             xemu_gp_tab[h].tc_ptr = tc_ptr;
             xemu_gp_tab[h].guest_pc = guest_pc;
-            xemu_gp_tab[h].kind = (uint8_t)kind;
             return;
         }
     }
@@ -375,38 +368,6 @@ static XemuGpEnt *xemu_gp_find(const void *tc_ptr)
     return NULL;
 }
 
-/* Per-exit-kind lookup counters (vCPU thread only). */
-static uint64_t xemu_gp_kind_lookups[XEMU_GP_NKINDS];
-static uint64_t xemu_gp_kind_misses[XEMU_GP_NKINDS];
-static int xemu_gp_cur_kind;
-
-/*
- * Source-TB exit kind for a helper return address; direct-mapped
- * cache in front of the qht walk (hot source TBs are few).
- */
-static uintptr_t xemu_gp_ra_key[256];
-static uint8_t xemu_gp_ra_kind[256];
-
-static int xemu_gp_kind_for_ra(uintptr_t ra)
-{
-    uint32_t h = (ra >> 4) & 255;
-    if (xemu_gp_ra_key[h] == ra) {
-        return xemu_gp_ra_kind[h];
-    }
-    TranslationBlock *stb = tcg_tb_lookup(ra);
-    int k = XEMU_GP_KIND_OTHER;
-    if (stb) {
-        XemuGpEnt *e = xemu_gp_find(stb->tc.ptr);
-        if (e) {
-            k = e->kind;
-        }
-    }
-    xemu_gp_ra_key[h] = ra;
-    xemu_gp_ra_kind[h] = (uint8_t)k;
-    return k;
-}
-
-#if defined(XEMU_GUEST_PROF_SAMPLER)
 /*
  * macOS delivers process-wide SIGPROF to an arbitrary thread (not the
  * one consuming CPU), so sample the vCPU thread from a dedicated
@@ -492,11 +453,9 @@ static void xemu_gp_report_top(GHashTable *table, uint32_t filled, int cap,
         }
     }
 }
-#endif
 
 static void xemu_guestprof_dump(void)
 {
-#if defined(XEMU_GUEST_PROF_SAMPLER)
     qatomic_set(&xemu_gp_sampler_stop, true);
     g_usleep(5000);
 
@@ -568,40 +527,16 @@ static void xemu_guestprof_dump(void)
     g_hash_table_destroy(guest);
     g_hash_table_destroy(pages);
     g_hash_table_destroy(host);
-#endif
-
-    {
-        static const char *const kn[XEMU_GP_NKINDS] = {
-            "other", "ret", "ijmp", "icall"
-        };
-        uint64_t tot = 0;
-        for (int i = 0; i < XEMU_GP_NKINDS; i++) {
-            tot += xemu_gp_kind_lookups[i];
-        }
-        if (tot) {
-            fprintf(stderr, "xemu: guestprof lookup exit kinds:\n");
-            for (int i = 0; i < XEMU_GP_NKINDS; i++) {
-                uint64_t l = xemu_gp_kind_lookups[i];
-                uint64_t m = xemu_gp_kind_misses[i];
-                fprintf(stderr,
-                        "xemu:   %-5s lookups=%llu (%.1f%%) "
-                        "jc_miss=%llu (%.2f%%)\n",
-                        kn[i], (unsigned long long)l, 100.0 * l / tot,
-                        (unsigned long long)m, l ? 100.0 * m / l : 0.0);
-            }
-        }
-    }
 }
 
 static void xemu_guestprof_start(void)
 {
-#if defined(XEMU_GUEST_PROF_SAMPLER)
     xemu_gp_ring = g_malloc0(sizeof(uint64_t) * XEMU_GP_RING_SIZE);
     pthread_t th;
     pthread_create(&th, NULL, xemu_gp_sampler, NULL);
-#endif
     atexit(xemu_guestprof_dump);
 }
+#endif /* XEMU_GUEST_PROF_SAMPLER */
 
 /*
  * XEMU_TB_PROF=1: jump-cache effectiveness counters for the single Xbox
@@ -724,11 +659,6 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
         goto hit;
     }
 
-#if defined(XBOX)
-    if (unlikely(xemu_guestprof_on())) {
-        xemu_gp_kind_misses[xemu_gp_cur_kind]++;
-    }
-#endif
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) {
         return NULL;
@@ -881,18 +811,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
         cpu_loop_exit(cpu);
     }
 
-#if defined(XBOX)
-    if (unlikely(xemu_guestprof_on())) {
-        int k = xemu_gp_kind_for_ra(
-            (uintptr_t)__builtin_return_address(0));
-        xemu_gp_kind_lookups[k]++;
-        xemu_gp_cur_kind = k;
-    }
-#endif
     tb = tb_lookup(cpu, s);
-#if defined(XBOX)
-    xemu_gp_cur_kind = XEMU_GP_KIND_OTHER;
-#endif
     if (tb == NULL) {
         return tcg_code_gen_epilogue;
     }
@@ -923,15 +842,7 @@ TranslationBlock *xemu_lookup_tb(CPUState *cpu)
         cpu_loop_exit(cpu);
     }
 
-    if (unlikely(xemu_guestprof_on())) {
-        int k = xemu_gp_kind_for_ra(
-            (uintptr_t)__builtin_return_address(0));
-        xemu_gp_kind_lookups[k]++;
-        xemu_gp_cur_kind = k;
-    }
-    TranslationBlock *tb = tb_lookup(cpu, s);
-    xemu_gp_cur_kind = XEMU_GP_KIND_OTHER;
-    return tb;
+    return tb_lookup(cpu, s);
 }
 #endif
 
@@ -1715,8 +1626,11 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     if (xemu_tbprof_on()) {
         atexit(xemu_tbprof_dump);
     }
+    /* Off Apple Silicon this only prints the one-time "ignored" line. */
     if (xemu_guestprof_on()) {
+#if defined(XEMU_GUEST_PROF_SAMPLER)
         xemu_guestprof_start();
+#endif
     }
 #endif
     tlb_init(cpu);
