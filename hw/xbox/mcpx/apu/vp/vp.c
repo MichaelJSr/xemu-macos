@@ -2023,7 +2023,28 @@ static void voice_process(MCPXAPUState *d,
             hr = 1 << d->vp.submix_headroom[bin[b]];
         }
         g *= attenuate(vol[b])/hr;
-#if XEMU_USE_VDSP
+        /*
+         * A silent send (most of them) adds only zeros, and a mixbin,
+         * which starts at +0 and only accumulates, is never -0, so skipping
+         * it leaves the mixbin exactly as adding would.
+         */
+        if (g == 0.0f) {
+            continue;
+        }
+#if XEMU_USE_VDSP && defined(__aarch64__)
+        /*
+         * dst[i] = samples[i][ch] * g + dst[i], fused: what vDSP_vsma
+         * computes on Apple Silicon (checked bit for bit), without a
+         * library call per send.
+         */
+        {
+            float *restrict dst = mixbins[bin[b]];
+            const int ch = b % channels;
+            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+                dst[i] = fmaf(samples[i][ch], g, dst[i]);
+            }
+        }
+#elif XEMU_USE_VDSP
         /*
          * vDSP_vsma: dst[i*ds] = src[i*ss] * scalar + dst[i*ds].
          * samples is [NUM_SAMPLES_PER_FRAME][2] interleaved stereo, so
@@ -2034,7 +2055,7 @@ static void voice_process(MCPXAPUState *d,
                   NUM_SAMPLES_PER_FRAME);
 #elif XEMU_USE_SSE_MIX
         /*
-         * SSE2 equivalent of the vDSP_vsma call above: de-interleave
+         * SSE2 equivalent of the Apple mix above: de-interleave
          * one channel out of the stereo sample pairs with SHUFPS,
          * multiply-accumulate into the mixbin. NUM_SAMPLES_PER_FRAME
          * (32) is a multiple of 4, so no scalar tail.

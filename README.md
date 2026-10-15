@@ -484,6 +484,6 @@ Xbox game (30fps, x87 FPU, MCPX APU)
        │                  └─ GL backend: CGLTexImageIOSurface2D → SDL3 GL
        │
        └─ APU: VP (per-voice pitch / vol) + DSP JIT (ARM64)
-           linear resampler (1ch mono / 2ch stereo) · vDSP_vsma mixbin
+           linear resampler (1ch mono / 2ch stereo) · fused mixbin
            CoreAudio IOProc w/ partial-fill on underrun
 ```

@@ -1439,8 +1439,9 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   voices (was always 2-channel with duplicated output); format
   changes trigger `src_delete` + recreate. Halves the resampler's
   inner loop for the common mono case.
-- **Accelerate / vDSP.** `vDSP_vsma` for 8-bin × 32-sample mix
-  accumulation, `vDSP_vadd` for `float_accumulate`; `float_to_24b`
+- **Accelerate / vDSP.** An inline fused loop (Apple Silicon; `vDSP_vsma`
+  on Intel) for 8-bin × 32-sample mix accumulation, skipping zero-gain
+  sends, `vDSP_vadd` for `float_accumulate`; `float_to_24b`
   uses `vcvtnq_s32_f32` in bulk on ARM64. Single-precision SVF/LPF.
   `SRC_LINEAR` resampler matches Xbox hardware.
 - **Atomic consistency.** `d->regs[]` writers, `voice_locked[]`,
