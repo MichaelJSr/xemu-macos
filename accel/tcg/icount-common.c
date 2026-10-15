@@ -305,6 +305,21 @@ void icount_start_warp_timer(void)
         return;
     }
 
+#ifdef XBOX
+    /*
+     * xemu: with sleep=off only the vCPU thread warps, between slices
+     * (rr_cpu_thread_fn). HLT sets cpu->halted inside the slice, so the CPU
+     * reads as idle before icount_process_data has counted the slice's
+     * instructions, which it does without the BQL. A warp from the main
+     * loop in that window read the clock from before the slice and jumped
+     * past the next deadline by however far the slice had run: guest time
+     * moved by host scheduling, and identical runs rarely diverged.
+     */
+    if (!icount_sleep && first_cpu && !qemu_cpu_is_self(first_cpu)) {
+        return;
+    }
+#endif
+
     if (replay_mode != REPLAY_MODE_PLAY) {
         if (!all_cpu_threads_idle()) {
             return;
@@ -405,6 +420,33 @@ void icount_start_warp_timer(void)
         qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
     }
 }
+
+#ifdef XBOX
+bool icount_vcpu_warps(void)
+{
+    return icount_enabled() && !icount_sleep;
+}
+
+/*
+ * xemu: an idle vCPU that has warped the clock itself must run the timer it
+ * warped to instead of waiting for a wakeup. Mirrors the warp's conditions.
+ */
+bool icount_vcpu_timer_due(void)
+{
+    CPUState *cpu;
+
+    if (!icount_vcpu_warps() || !runstate_is_running()) {
+        return false;
+    }
+    CPU_FOREACH(cpu) {
+        if (cpu->stopped) {
+            return false;
+        }
+    }
+    return qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
+                                      QEMU_TIMER_ATTR_ALL) == 0;
+}
+#endif
 
 void icount_account_warp_timer(void)
 {

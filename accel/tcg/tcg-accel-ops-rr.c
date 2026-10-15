@@ -112,7 +112,11 @@ static void rr_wait_io_event(void)
 {
     CPUState *cpu;
 
-    while (all_cpu_threads_idle()) {
+    while (all_cpu_threads_idle()
+#ifdef XBOX
+           && !icount_vcpu_timer_due()
+#endif
+           ) {
         rr_stop_kick_timer();
         qemu_cond_wait_bql(first_cpu->halt_cond);
     }
@@ -235,11 +239,23 @@ static void *rr_cpu_thread_fn(void *arg)
         }
 
         if (icount_enabled() && all_cpu_threads_idle()) {
+#ifdef XBOX
+            /*
+             * xemu: with sleep=off this thread warps, now that the slice's
+             * instructions are counted (see icount_start_warp_timer).
+             */
+            if (icount_vcpu_warps()) {
+                icount_start_warp_timer();
+            } else {
+                qemu_notify_event();
+            }
+#else
             /*
              * When all cpus are sleeping (e.g in WFI), to avoid a deadlock
              * in the main_loop, wake it up in order to start the warp timer.
              */
             qemu_notify_event();
+#endif
         }
 
         rr_wait_io_event();

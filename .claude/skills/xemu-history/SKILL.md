@@ -52,6 +52,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | W^X shortcuts (`..._with_callback_np`, TLS-cached state) | reverted / closed | Break nested writes; bracket every JIT-code store | `d4f2e3e226` |
 | Cross-TB FPCR elision through a TCG global | closed | Globals reload per TB | `aff8c229e9` |
 | HLT BSOD recovery (force IF=1) | reverted | Masked a blocked thread; cured nothing | `6eea148914` |
+| icount warp from the main loop | fixed | Warped from a clock missing the slice's instructions: a timer fired late by host scheduling, ~3% of `vanilla-exit` replays diverged. cc5d72113f only made it rarer | `icount_vcpu_warps` |
 | Caching JIT write-protect flips | reverted | Parity; the 9.7% was sampler skid | ledger |
 | Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped, `XEMU_RAS=0`); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
 | TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `XEMU_SUBPAGE_DIRTY=0` |
