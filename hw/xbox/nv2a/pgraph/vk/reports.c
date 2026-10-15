@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "exec/icount.h"
 
 void pgraph_vk_init_reports(PGRAPHState *pg)
 {
@@ -260,6 +261,25 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (icount_enabled()) {
+        /*
+         * Deterministic mode delivers as an infinitely fast GPU would:
+         * every report the pusher has issued reaches RAM before this
+         * thread parks, also while the pusher is stalled on a flip, and
+         * pfifo_icount_sync waits for the park. So report RAM changes only
+         * within the pusher run a guest register write started, never on
+         * host or GPU time (no idle budget, no fence-status poll). Report
+         * sums do not depend on where command buffers split: passes always
+         * load/store and the queries are precise.
+         */
+        if (r->in_command_buffer && !QSIMPLEQ_EMPTY(&r->report_queue)) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED); /* drains all */
+        } else {
+            pgraph_vk_drain_all_pending_reports(d);
+        }
+        return;
+    }
 
     uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];

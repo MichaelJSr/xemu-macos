@@ -254,6 +254,8 @@ typedef struct PGRAPHState {
     bool clearing; // FIXME: Internal
     bool waiting_for_nop;
     bool waiting_for_flip;
+    /* deterministic mode: the next flush discards renderer state (load) */
+    bool flush_discard;
     bool waiting_for_context_switch;
 
     bool flush_pending;

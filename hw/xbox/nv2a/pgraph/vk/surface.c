@@ -24,6 +24,7 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "exec/icount.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/compiler.h"
 #include "qemu/timer.h"
@@ -2383,7 +2384,12 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
              * plus a finish when a command buffer is recording,
              * twice per flip on ping-pong titles.
              */
-            if (zeta_shape_discard && !target.color) {
+            /*
+             * Not under icount: the discarded image would keep whatever a
+             * recycled one held, which depends on prune and retirement
+             * timing; uploading from RAM is deterministic.
+             */
+            if (zeta_shape_discard && !target.color && !icount_enabled()) {
                 target.upload_pending = false;
             }
             surface = get_any_compatible_invalid_surface(r, &target);
@@ -2545,10 +2551,24 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
      */
     int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     const int64_t surface_expire_interval_ns = 33 * 1000 * 1000;
-    if (now_ns - r->last_expire_ns >= surface_expire_interval_ns) {
+    bool expire_now;
+    if (icount_enabled()) {
+        /*
+         * Deterministic mode: at fixed guest points instead (expiry writes
+         * surfaces back to RAM): once per flip, and every 4096 updates so
+         * flip-less loading bursts still prune.
+         */
+        expire_now = d->pgraph.frame_time != r->last_expire_frame ||
+                     ++r->expire_updates >= 4096;
+    } else {
+        expire_now = now_ns - r->last_expire_ns >= surface_expire_interval_ns;
+    }
+    if (expire_now) {
         expire_old_surfaces(d);
         prune_invalid_surfaces(r, num_invalid_surfaces_to_keep);
         r->last_expire_ns = now_ns;
+        r->last_expire_frame = d->pgraph.frame_time;
+        r->expire_updates = 0;
     }
 }
 

@@ -1014,6 +1014,8 @@ typedef struct PGRAPHVkState {
     int surface_range_capacity;
 
     int64_t last_expire_ns;
+    int last_expire_frame;      /* deterministic mode: expire per flip */
+    uint32_t expire_updates;
 } PGRAPHVkState;
 
 // renderer.c

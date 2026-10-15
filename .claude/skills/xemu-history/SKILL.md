@@ -64,6 +64,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | `-fzero-call-used-regs=skip` | closed | −411 kB `__text`, fps 3+/2− then 3+/5−. Retest via `CFLAGS` | `7aa746a952` |
 | COMISS lowering, dirty-clear coalescing, xpage spanning dests | closed / parked | Census empty; <1% of vCPU; under 1M/s | ledger |
 | **PFIFO / threading** | | | |
+| Report delivery under `pgraph.lock` instead of `pfifo.lock`, plus doorbell broadcast after unlock | closed | heavy-f1 17.15 -> 10.67 fps (2/2): the fence wait then blocks the vCPU's PGRAPH reads and surface callbacks instead of the doorbell | 2026-10-14, not committed |
 | PFIFO untimed wait, descriptor bind-skip | re-added | Innocent; a new `pfifo_kick` site must hold `pfifo.lock` | `a005bb1560` |
 | Freeze hunt by reverting suspects | lesson | Build the discriminating diagnostic first | `XEMU_PFIFO_HEARTBEAT=1` |
 | BQL event batching; `can_fifo_access` hoist | closed | Starves the vCPU; the lock drops mid-loop → `ERROR_CALL` | ledger |

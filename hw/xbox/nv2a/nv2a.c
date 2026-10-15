@@ -436,9 +436,10 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
 
     if (icount_enabled()) {
         icount_add_sync_hook(nv2a_icount_sync_hook, d);
-        if (g_config.display.renderer != CONFIG_DISPLAY_RENDERER_NULL) {
-            fprintf(stderr, "xemu: icount: only the null renderer "
-                    "(XEMU_HEADLESS=null) is deterministic; GPU reports and "
+        if (g_config.display.renderer != CONFIG_DISPLAY_RENDERER_NULL &&
+            g_config.display.renderer != CONFIG_DISPLAY_RENDERER_VULKAN) {
+            fprintf(stderr, "xemu: icount: only the null and Vulkan "
+                    "renderers are deterministic; OpenGL reports and "
                     "surface writebacks follow host and GPU time\n");
         }
     }
@@ -557,6 +558,8 @@ static int nv2a_post_load(void *opaque, int version_id)
     if (icount_enabled()) {
         /* Not migrated; counts reads since the last vblank. */
         d->pcrtc.raster = 0;
+        /* Drop, not write back, the previous session's GPU state. */
+        qatomic_set(&d->pgraph.flush_discard, true);
     }
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);

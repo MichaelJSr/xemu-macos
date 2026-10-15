@@ -249,10 +249,17 @@ Other automation interfaces (windowed or headless):
   Write tagged input while paused, then advance. `shift` is guest time
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs
   ~1.5x faster (about 90 fps on Azurik's heavy scene on a loaded M2
-  Ultra, about 46 with 0) and suits games that are not CPU-bound. Only
-  the null renderer is deterministic: offscreen rendering runs under
-  icount but GPU reports follow GPU time. Keep the network off and bind
-  no XMU.
+  Ultra, about 46 with 0) and suits games that are not CPU-bound.
+  Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
+  included when taken paused, at about a third of the null renderer's
+  speed: every GPU report reaches RAM before PFIFO rests, so the GPU no
+  longer overlaps guest work. Hash its RAM with `xemu-dump-ram`
+  `"gpu-sync": false` (`gpu-sync` and `pmemsave` write GPU surfaces back,
+  which changes later RAM), and expect matches only on the same Mac,
+  macOS and MoltenVK. A cheap reproducible screenshot of frame F of a
+  null run: savevm there, load it in a short `XEMU_HEADLESS=1` icount
+  run, advance a few frames, screendump. OpenGL is not deterministic.
+  Keep the network off and bind no XMU.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once (a windowed one still crashes with a

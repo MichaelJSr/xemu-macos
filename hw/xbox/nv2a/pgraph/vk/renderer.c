@@ -18,6 +18,7 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "exec/icount.h"
 #include "renderer.h"
 
 #include "gloffscreen.h"
@@ -117,6 +118,26 @@ static void pgraph_vk_finalize(NV2AState *d)
 static void pgraph_vk_flush(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (qatomic_xchg(&pg->flush_discard, false)) {
+        /*
+         * Deterministic mode, after a load: the previous session's GPU
+         * surfaces belong to RAM that was just replaced, so drop them
+         * without writing back (reports were all delivered before the
+         * pause, pgraph_vk_process_pending_reports). Renderer state the
+         * savestate lacks starts as in a fresh process.
+         */
+        SurfaceBinding *s;
+        QTAILQ_FOREACH(s, &r->surfaces, entry) {
+            s->draw_dirty = false;
+            s->download_pending = false;
+        }
+        r->zpass_pixel_count_result = 0;
+        pg->zpass_pixel_count_enable = false;
+        r->last_expire_frame = pg->frame_time;
+        r->expire_updates = 0;
+    }
 
     pgraph_vk_finish(pg, VK_FINISH_REASON_FLUSH);
     pgraph_vk_surface_flush(d);
@@ -159,7 +180,9 @@ static void pgraph_vk_sync(NV2AState *d)
                       r->display.pending_real_texture != NULL;
 #endif
 
-    if (elapsed >= min_sync_interval_ns || has_interp_work) {
+    /* Under icount a screendump (taken paused) shows the current frame. */
+    if (elapsed >= min_sync_interval_ns || has_interp_work ||
+        icount_enabled()) {
         pgraph_vk_render_display(pg);
         if (elapsed >= min_sync_interval_ns) {
             last_sync_time_ns = now;
@@ -279,7 +302,10 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
 
     assert(surface->color);
 
-    surface->frame_time = pg->frame_time;
+    if (!icount_enabled()) {
+        /* Not under icount: it would move surface expiry by host time. */
+        surface->frame_time = pg->frame_time;
+    }
 
 #if HAVE_EXTERNAL_MEMORY
     qemu_event_reset(&d->pgraph.sync_complete);
@@ -336,7 +362,10 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
         return false;
     }
 
-    surface->frame_time = pg->frame_time;
+    if (!icount_enabled()) {
+        /* Not under icount: it would move surface expiry by host time. */
+        surface->frame_time = pg->frame_time;
+    }
 
     qemu_event_reset(&d->pgraph.sync_complete);
     qatomic_set(&pg->sync_pending, true);

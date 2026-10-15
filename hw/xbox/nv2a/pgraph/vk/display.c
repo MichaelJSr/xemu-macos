@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "exec/icount.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-settings.h"
 #include <math.h>
@@ -2101,7 +2102,9 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     PGRAPHVkDisplayState *disp = &r->display;
-    if (disp->image && surface->draw_time == disp->draw_time) {
+    /* Not under icount: PVIDEO may have changed with draw_time the same. */
+    if (disp->image && surface->draw_time == disp->draw_time &&
+        !icount_enabled()) {
 #if HAVE_IOSURFACE_SHARING
         /*
          * No new frame.
