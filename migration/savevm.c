@@ -3507,6 +3507,110 @@ err_drain:
     return false;
 }
 
+#ifdef XBOX
+/*
+ * xemu checkpoints (ui/xemu-checkpoints.c): savevm and loadvm with the VM
+ * state in host memory instead of the qcow2 image. The same stream, run
+ * states, quiesce and reset as save_snapshot/load_snapshot, so a restore
+ * is a loadvm. The disk is the caller's: it reverts the guest's writes.
+ * A buffer channel frees its data on close, so the bytes are taken out
+ * of it after a save and lent to a fresh one for each restore.
+ */
+uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
+                                    Error **errp)
+{
+    RunState saved_state = runstate_get();
+    QIOChannelBuffer *bioc;
+    uint8_t *data = NULL;
+    QEMUFile *f;
+    int ret;
+
+    if (!migrate_can_snapshot(errp) || migration_is_blocked(errp)) {
+        return NULL;
+    }
+    if (!replay_can_snapshot()) {
+        error_setg(errp, "Record/replay does not allow a checkpoint now");
+        return NULL;
+    }
+
+    global_state_store();
+    vm_stop(RUN_STATE_SAVE_VM);
+    void nv2a_save_quiesce_paused(void);
+    nv2a_save_quiesce_paused();
+    bdrv_drain_all_begin();
+
+    bioc = qio_channel_buffer_new(size_hint);
+    qio_channel_set_name(QIO_CHANNEL(bioc), "xemu-checkpoint");
+    f = qemu_file_new_output(QIO_CHANNEL(bioc));
+    ret = qemu_savevm_state(f, errp);
+    if (!ret) {
+        ret = qemu_fflush(f);
+        if (ret) {
+            error_setg_errno(errp, -ret, "Error while writing VM state");
+        }
+    }
+    if (!ret) {
+        data = bioc->data;
+        *size = bioc->usage;
+        bioc->data = NULL;
+        bioc->capacity = bioc->usage = bioc->offset = 0;
+    }
+    qemu_fclose(f);
+
+    bdrv_drain_all_end();
+    void nv2a_save_done(void);
+    nv2a_save_done();
+    vm_resume(saved_state);
+    return data;
+}
+
+bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
+                                void (*revert_disks)(void *), void *opaque,
+                                Error **errp)
+{
+    MigrationIncomingState *mis = migration_incoming_get_current();
+    RunState saved_state = runstate_get();
+    QIOChannelBuffer *bioc;
+    QEMUFile *f;
+    int ret;
+
+    if (!migrate_can_snapshot(errp)) {
+        return false;
+    }
+
+    vm_stop(RUN_STATE_RESTORE_VM);
+    replay_flush_events();
+    /* Stopped and drained, but before drain_begin parks device requests. */
+    revert_disks(opaque);
+    bdrv_drain_all_begin();
+
+    bioc = qio_channel_buffer_new(0);
+    g_free(bioc->data);
+    bioc->data = data;
+    bioc->capacity = bioc->usage = size;
+    f = qemu_file_new_input(QIO_CHANNEL(bioc));
+    qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
+    mis->from_src_file = f;
+
+    if (yank_register_instance(MIGRATION_YANK_INSTANCE, errp)) {
+        ret = qemu_loadvm_state(f, errp);
+    } else {
+        ret = -EINVAL;
+    }
+    /* Hand the bytes back before the close frees them. */
+    bioc->data = NULL;
+    bioc->capacity = bioc->usage = bioc->offset = 0;
+    object_unref(OBJECT(bioc));
+    migration_incoming_state_destroy();
+    bdrv_drain_all_end();
+    if (ret < 0) {
+        return false;
+    }
+    load_snapshot_resume(saved_state);
+    return true;
+}
+#endif
+
 void load_snapshot_resume(RunState state)
 {
     vm_resume(state);

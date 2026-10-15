@@ -200,6 +200,15 @@ Other automation interfaces (windowed or headless):
   on an unchanged copy of the same HDD: wait for `xemu: ready`, run
   `migrate-incoming {"uri": "file:/path"}`, wait for `xemu: state
   loaded`, then `cont`.
+- **Checkpoints in host memory**: QMP `xemu-checkpoint-save {"name":
+  "c"}` keeps the whole machine state (what `savevm` writes) in host
+  memory; `xemu-checkpoint-restore {"name": "c"}` loads it the way
+  `loadvm` does (reset, load, disk sectors the guest wrote since put
+  back, runs on only if it was running), any number of times, with the
+  same determinism. `query-xemu-checkpoints` lists them,
+  `xemu-checkpoint-delete` frees one. About 45 ms to save and 20-25 ms
+  to restore 128 MiB on an M2 Ultra; the qcow2 is never written for the
+  state.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

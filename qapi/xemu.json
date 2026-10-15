@@ -151,3 +151,72 @@
   'data': { 'filename': 'str', '*address': 'uint64', '*size': 'uint64',
             '*virtual': 'bool', '*pause': 'bool', '*gpu-sync': 'bool' },
   'returns': 'XemuRamDump' }
+
+##
+# @XemuCheckpointInfo:
+#
+# @name: the checkpoint's name
+#
+# @size: bytes of host memory its machine state takes
+#
+# @frame: the frame counter (see @query-xemu-frame) when it was saved
+#
+# @disk-sectors: disk sectors the guest has written since, kept as
+#     they were at the checkpoint
+#
+# @elapsed-us: how long the save or restore took, in microseconds
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuCheckpointInfo',
+  'data': { 'name': 'str', 'size': 'uint64', 'frame': 'int',
+            'disk-sectors': 'int', '*elapsed-us': 'int' } }
+
+##
+# @xemu-checkpoint-save:
+#
+# Save the whole machine state to host memory, as savevm would to the
+# disk image (an existing checkpoint of that name is replaced).  The
+# VM keeps its run state.  Sectors the guest writes to its disks from
+# now on are kept, so a restore reverts them as loadvm would.
+#
+# @name: the checkpoint's name
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-checkpoint-save', 'data': { 'name': 'str' },
+  'returns': 'XemuCheckpointInfo' }
+
+##
+# @xemu-checkpoint-restore:
+#
+# Restore a checkpoint, as loadvm restores a snapshot: the machine is
+# reset, loaded, its disks reverted, and it runs again only if it was
+# running.  A checkpoint can be restored any number of times.
+#
+# @name: the checkpoint's name
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-checkpoint-restore', 'data': { 'name': 'str' },
+  'returns': 'XemuCheckpointInfo' }
+
+##
+# @xemu-checkpoint-delete:
+#
+# Free a checkpoint.
+#
+# @name: the checkpoint's name
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-checkpoint-delete', 'data': { 'name': 'str' } }
+
+##
+# @query-xemu-checkpoints:
+#
+# List the checkpoints in host memory.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-checkpoints', 'returns': ['XemuCheckpointInfo'] }

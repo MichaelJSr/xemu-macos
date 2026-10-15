@@ -1050,6 +1050,12 @@ static void process_vblank(struct xemu_console *scon)
     }
 }
 
+int64_t xemu_frame_count(void);
+int64_t xemu_frame_count(void)
+{
+    return frame_count;
+}
+
 static XemuFrameInfo *frame_info(void)
 {
     XemuFrameInfo *info = g_new0(XemuFrameInfo, 1);

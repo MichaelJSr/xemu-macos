@@ -41,6 +41,9 @@
 #include "qemu/cutils.h"
 #include "system/replay.h"
 #include "exec/icount.h"
+#ifdef XBOX
+#include "ui/xemu-checkpoints.h"
+#endif
 #include "system/runstate.h"
 #include "ide-internal.h"
 #include "trace.h"
@@ -507,6 +510,9 @@ static void ide_issue_trim_cb(void *opaque, int ret)
                 block_acct_start(blk_get_stats(s->blk), &s->acct,
                                  count << BDRV_SECTOR_BITS, BLOCK_ACCT_UNMAP);
 
+#ifdef XBOX
+                xemu_checkpoint_disk_prewrite(s->blk, sector, count);
+#endif
                 /* Got an entry! Submit and exit.  */
                 iocb->aiocb = blk_aio_pdiscard(s->blk,
                                                sector << BDRV_SECTOR_BITS,
@@ -973,6 +979,9 @@ static void ide_dma_cb(void *opaque, int ret)
                                           BDRV_SECTOR_SIZE, ide_dma_cb, s);
         break;
     case IDE_DMA_WRITE:
+#ifdef XBOX
+        xemu_checkpoint_disk_prewrite(s->blk, sector_num, n);
+#endif
         s->bus->dma->aiocb = dma_blk_write(s->blk, &s->sg, offset,
                                            BDRV_SECTOR_SIZE, ide_dma_cb, s);
         break;
@@ -1106,6 +1115,9 @@ static void ide_sector_write(IDEState *s)
 
     block_acct_start(blk_get_stats(s->blk), &s->acct,
                      n * BDRV_SECTOR_SIZE, BLOCK_ACCT_WRITE);
+#ifdef XBOX
+    xemu_checkpoint_disk_prewrite(s->blk, sector_num, n);
+#endif
     s->pio_aiocb = blk_aio_pwritev(s->blk, sector_num << BDRV_SECTOR_BITS,
                                    &s->qiov, 0, ide_sector_write_cb, s);
 }

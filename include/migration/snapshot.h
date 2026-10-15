@@ -68,4 +68,13 @@ bool delete_snapshot(const char *name,
  */
 void load_snapshot_resume(RunState state);
 
+#ifdef XBOX
+/* xemu checkpoints: the savevm stream in host memory (migration/savevm.c). */
+uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
+                                    Error **errp);
+bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
+                                void (*revert_disks)(void *), void *opaque,
+                                Error **errp);
+#endif
+
 #endif
