@@ -139,26 +139,19 @@ static inline uint8_t ram_ldb(MCPXAPUState *d, hwaddr addr)
  * (DIRTY_CLIENTS_NOCODE covers VGA, MIGRATION, NV2A, NV2A_TEX), paid
  * by every voice worker thread on every voice-register store.
  *
- * The default is therefore platform-dependent, in the style of the
- * sub-page dirty gate (0aeb1998c3): off on Apple, the platform whose
+ * The marking is therefore a per-platform build choice, in the style of
+ * the sub-page dirty gate (0aeb1998c3): off on Apple, the platform whose
  * audio path this fork tuned and whose shipped behaviour is the
  * unmarked store, and on elsewhere, where nothing was measured against
  * the skip and the upstream-equivalent semantics are the safer default.
- * XEMU_APU_RAM_DIRTY=1 opts in on Apple; =0 opts out elsewhere.
  */
-#ifdef __APPLE__
-static bool g_apu_ram_set_dirty;
-#else
-static bool g_apu_ram_set_dirty = true;
-#endif
-
 static inline void ram_mark_dirty(MCPXAPUState *d, hwaddr addr, hwaddr size)
 {
-    if (g_apu_ram_set_dirty) {
-        physical_memory_set_dirty_range(
-            memory_region_get_ram_addr(d->ram) + addr, size,
-            DIRTY_CLIENTS_NOCODE);
-    }
+#ifndef __APPLE__
+    physical_memory_set_dirty_range(
+        memory_region_get_ram_addr(d->ram) + addr, size,
+        DIRTY_CLIENTS_NOCODE);
+#endif
 }
 
 static inline void ram_stl(MCPXAPUState *d, hwaddr addr, uint32_t val)
@@ -2592,17 +2585,6 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
 
 void mcpx_apu_vp_init(MCPXAPUState *d)
 {
-    /*
-     * Read once here (device realize, main thread, before the APU
-     * thread exists) so ram_stl/ram_stb stay branch-only on the hot
-     * path and no thread ever races on the getenv. The default is set
-     * per platform at the definition above; this only overrides it.
-     */
-    const char *e = getenv("XEMU_APU_RAM_DIRTY");
-    if (e) {
-        g_apu_ram_set_dirty = (e[0] == '1');
-    }
-
     apu_init_luts();
     voice_work_init(d);
 }

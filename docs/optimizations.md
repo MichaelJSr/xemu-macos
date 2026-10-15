@@ -77,7 +77,6 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
-| `XEMU_APU_RAM_DIRTY` | **Landed 2026-09-08; the default is per-platform.** The APU's fast voice-register stores write `d->ram_ptr` directly and so skipped `invalidate_and_set_dirty()`; with the knob on they also mark the written range for the `DIRTY_CLIENTS_NOCODE` clients (VGA, MIGRATION, NV2A, NV2A_TEX). **Default off on Apple**, which is the platform whose audio path this fork tuned and whose shipped behaviour is the unmarked store, because the marking's cost here has never been measured (an RCU read lock — two real `smp_mb()`s, since this tree builds without `CONFIG_MEMBARRIER` — plus up to four contended bitmap ORs, per voice-register store, from every voice worker); **default on elsewhere**, where nothing was measured against the skip. `=1` opts in on Apple, `=0` opts out elsewhere; read once in `mcpx_apu_vp_init` |
 
 ### Build-time and harness knobs
 
@@ -253,14 +252,15 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   threads while `d->lock` is held — the inverse of `gp_write`'s
   BQL-then-`d->lock` order, i.e. a hang (for an in-range handle with a
   guest-bogus `VPVADDR` the fallback stays reachable, as it already is
-  on main). APU direct RAM stores mark dirty again behind
-  `XEMU_APU_RAM_DIRTY`, whose default is **off on Apple, on elsewhere**
-  (the per-store cost was never measured). The runtime `use_dsp_jit`
-  engine switch is serialised under the BQL and the APU frame thread
-  registers with RCU. The `int16` pitch-LUT clamp the original commit
-  added was **not** taken: the branch removed it again in `3495cd28c0`,
-  and `40f0a01ad3` retracted the single-run bisect that had blamed it,
-  so nothing is known about it either way — the original wrap stands.
+  on main). APU direct RAM stores mark dirty again **off Apple**; Apple
+  builds keep the unmarked store (the per-store cost was never
+  measured; a build-time choice since 2026-10-15). The runtime
+  `use_dsp_jit` engine switch is serialised under the BQL and the APU
+  frame thread registers with RCU. The `int16` pitch-LUT clamp the
+  original commit added was **not** taken: the branch removed it again
+  in `3495cd28c0`, and `40f0a01ad3` retracted the single-run bisect
+  that had blamed it, so nothing is known about it either way — the
+  original wrap stands.
   (5) **Landed on main 2026-09-08** — see the Vulkan
   renderer and CPU / JIT sections below: `nv2a_vk_bounds_check` is a
   real check in every build (was `__builtin_unreachable()` in release)
@@ -338,7 +338,8 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
 `XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
 `XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
 `818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did,
-`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48`, and
+`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48` (a build-time
+platform choice since 2026-10-15), and
 `XEMU_WIN_O3` (to the build-knob table, with inverted polarity) when
 `fb42bce22e` was re-cut and landed.
 
@@ -1561,17 +1562,17 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   `CONFIG_MEMBARRIER`, plus up to four contended bitmap ORs, from every
   voice worker on every voice-register store — has never been measured
   here) and **on elsewhere**, in the style of the sub-page dirty gate
-  `0aeb1998c3`. `XEMU_APU_RAM_DIRTY=1` opts in on Apple, `=0` opts out
-  elsewhere. **Not taken:** the same commit's `int16` saturation of the
-  modulated pitch-LUT index. The branch removed it again in
-  `3495cd28c0` on a single-run Windows bisect, and `40f0a01ad3`
-  retracted that bisect as non-evidence, so nothing is known about the
-  clamp either way; the original wrapping index stands until there is a
-  real receipt. No fps claim: this batch is a correctness fix. On Apple
-  the store path is unchanged by default and every in-range handle
-  behaves exactly as before; what is new on all platforms is the range
-  test in the three accessors, the frame thread's RCU registration, and
-  the locking around the engine switch.
+  `0aeb1998c3`; a build-time choice since 2026-10-15. **Not taken:**
+  the same commit's `int16` saturation of the modulated pitch-LUT
+  index. The branch removed it again in `3495cd28c0` on a single-run
+  Windows bisect, and `40f0a01ad3` retracted that bisect as
+  non-evidence, so nothing is known about the clamp either way; the
+  original wrapping index stands until there is a real receipt. No fps
+  claim: this batch is a correctness fix. On Apple the store path is
+  unchanged and every in-range handle behaves exactly as before; what
+  is new on all platforms is the range test in the three accessors, the
+  frame thread's RCU registration, and the locking around the engine
+  switch.
 - **DSP JIT dead code removed (2026-10-10).** Ten functions that never
   had a caller: seven ARM64 emitter primitives (`emit_ldr_x_imm`,
   `emit_asr_w_imm`, `emit_tbz_w`, `emit_orr_x_reg`, `emit_adds_x_reg`,
