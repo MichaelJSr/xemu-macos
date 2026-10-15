@@ -203,7 +203,8 @@ int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
  * ARM64 hard FPU: fast bit-level conversion between floatx80 and double.
  *
  * Branchless normal path (~6 integer ops per conversion). Edge cases
- * (zero, inf, NaN, denormal) handled by a single unlikely branch.
+ * (zero, denormals, exponents beyond double's range, unnormals, inf, NaN)
+ * handled by a single unlikely branch.
  * Provides ~3-6x speedup over softfloat for typical Xbox game math.
  */
 
@@ -221,6 +222,38 @@ int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
 typedef union { uint64_t u; double d; } u64_double;
 typedef union { uint32_t u; float f; } u32_float;
 
+/*
+ * xemu: tcg_x87_ld80_slow (tcg/aarch64/tcg-target.c.inc) converts every
+ * floatx80 the in-range path below does not take, rounding once under the
+ * FPCR mode as softfloat's floatx80_to_float64 does: overflow to inf or
+ * DBL_MAX, underflow to a subnormal or zero, NaN payloads kept and quieted,
+ * the default NaN for unnormals and pseudo-inf/NaN. The inline ld80f calls
+ * the same routine, so C and JIT cannot drift apart.
+ *
+ * Its convention: x16 = significand and x17 = sign:exponent in, x16 = the
+ * double's bits out, x17 and NZCV clobbered, nothing else. The asm keeps
+ * x30 itself and moves sp past the 128-byte red zone first, so a leaf
+ * helper stays frameless. x16/x17 are IP0/IP1, which a linker veneer may
+ * overwrite: the call relies on reaching the hidden symbol in the same
+ * image directly. The window has no CFI, so a debugger stopped inside the
+ * routine under a frameless helper loses the frames above that helper.
+ */
+#define HARDFPU_LD80_SLOW stringify(__USER_LABEL_PREFIX__) "tcg_x87_ld80_slow"
+
+HARDFPU_ALWAYS_INLINE uint64_t hardfpu_ld80_slow(uint64_t m, uint16_t hi)
+{
+    register uint64_t x16 __asm__("x16") = m;
+    register uint64_t x17 __asm__("x17") = hi;
+
+    __asm__ volatile("sub sp, sp, #144\n\t"
+                     "str x30, [sp]\n\t"
+                     "bl " HARDFPU_LD80_SLOW "\n\t"
+                     "ldr x30, [sp]\n\t"
+                     "add sp, sp, #144"
+                     : "+r"(x16), "+r"(x17) : : "cc");
+    return x16;
+}
+
 HARDFPU_ALWAYS_INLINE double floatx80_to_double_fast(floatx80 a)
 {
     uint64_t s = (uint64_t)(a.high >> 15) << 63;
@@ -228,38 +261,19 @@ HARDFPU_ALWAYS_INLINE double floatx80_to_double_fast(floatx80 a)
     uint64_t frac = a.low;
 
     /*
-     * Normal path (branchless): rebias exponent, truncate fraction.
-     * exp80 - 15360 == exp80 - 16383 + 1023 (rebias x87 -> IEEE)
+     * In range (double exponent 1..2046, integer bit set): rebias the
+     * exponent, truncate the fraction. exp80 - 15360 == exp80 - 16383 + 1023
      */
     uint64_t bits = s | ((uint64_t)(exp80 - 15360) << 52) |
                     ((frac >> 11) & 0x000FFFFFFFFFFFFFULL);
 
-    /* Single branch for all edge cases: exp80 in [0, 0x7FFF] or overflow */
-    if (__builtin_expect((unsigned)(exp80 - 1) >= 0x7FFEu, 0)) {
+    /*
+     * Everything else, one branch: zero inline (the common case, fist and
+     * compares of 0.0), the rest through the shared routine above.
+     */
+    if (__builtin_expect(exp80 - 15361 >= 2046u || (int64_t)frac >= 0, 0)) {
         HARDFPU_COLD();
-        if (exp80 == 0) {
-            if (frac == 0) {
-                return (u64_double){ .u = s }.d;
-            }
-            /*
-             * x87 denormal/unnormal: exp80==0, frac!=0.
-             * The true value is +/- 0.frac * 2^(-16382).
-             * IEEE double min subnormal exponent is -1074, so values below
-             * 2^(-1074) flush to zero. The shift needed: 16382 - 1023 + 1 = 15360.
-             * Since 15360 > 64, all x87 denormals underflow to IEEE zero.
-             */
-            return (u64_double){ .u = s }.d;
-        }
-        if (exp80 == 0x7FFF) {
-            uint64_t inf_or_nan = (frac & 0x7FFFFFFFFFFFFFFFULL)
-                ? (s | 0x7FF8000000000000ULL)
-                : (s | 0x7FF0000000000000ULL);
-            return (u64_double){ .u = inf_or_nan }.d;
-        }
-        /* Exponent overflow/underflow after rebias */
-        int32_t exp64 = (int32_t)exp80 - 15360;
-        if (exp64 <= 0) return (u64_double){ .u = s }.d;
-        return (u64_double){ .u = s | 0x7FF0000000000000ULL }.d;
+        bits = (exp80 | frac) ? hardfpu_ld80_slow(frac, a.high) : s;
     }
 
     return (u64_double){ .u = bits }.d;
@@ -279,8 +293,17 @@ HARDFPU_ALWAYS_INLINE floatx80 double_to_floatx80_fast(double d)
     if (__builtin_expect((unsigned)(exp64 - 1) >= 0x7FEu, 0)) {
         HARDFPU_COLD();
         if (exp64 == 0) {
-            return (floatx80){ .low = frac52 << 11,
-                               .high = (uint16_t)(sign << 15) };
+            if (!frac52) {
+                return (floatx80){ .low = 0, .high = (uint16_t)(sign << 15) };
+            }
+            /*
+             * Subnormal: normalised, exact. (As an x87 denormal it read
+             * back 2^-15360 times smaller.)
+             */
+            int lz = clz64(frac52);
+            return (floatx80){ .low = frac52 << lz,
+                               .high = (uint16_t)((sign << 15) |
+                                                  (15372 - lz)) };
         }
         /* Infinity or NaN */
         return (floatx80){

@@ -1942,10 +1942,11 @@ static void gen_flush_fp(DisasContext *s)
  *    (cpu_io_recompile under icount, a guest #PF) is safe;
  *  - the conversions are the backend's ld80f/st80f, which match the C
  *    conversions bit for bit;
- *  - each register's double, as the next helper would read it back (a
- *    denormal becomes signed zero, a NaN the default quiet NaN), is kept
- *    in a temp until the next helper call or block end (gen_flush_fp), so
- *    a chain of x87 instructions does not reconvert;
+ *  - each register's double, as the next helper would read it back, is
+ *    kept in a temp until the next helper call or block end (gen_flush_fp),
+ *    so a chain of x87 instructions does not reconvert. st80f is exact, so
+ *    that is the computed result itself; only a double loaded from memory
+ *    can be a signalling NaN, which reads back quieted (x87_wt_canon);
  *  - the FPCR is never written: the helpers round with whatever it holds.
  * Only blocks with precision control double/extended (HF_FPU_PC) use it:
  * single precision rounds results to float (pack_arm64) and keeps the
@@ -1957,22 +1958,19 @@ static bool x87_wt(DisasContext *s)
     return g_x87_wt && fpu_using_double_precision(s);
 }
 
-/* canon = floatx80_to_double_fast(double_to_floatx80_fast(bits)) */
+/*
+ * canon = floatx80_to_double_fast(double_to_floatx80_fast(bits)): bits
+ * itself, but a NaN comes back with the quiet bit set.
+ */
 static void x87_wt_canon(TCGv_i64 canon, TCGv_i64 bits)
 {
-    TCGv_i64 e = tcg_temp_new_i64();
-    TCGv_i64 f = tcg_temp_new_i64();
-    TCGv_i64 sgn = tcg_temp_new_i64();
-    TCGv_i64 x = tcg_temp_new_i64();
-    TCGv_i64 zero = tcg_constant_i64(0);
+    TCGv_i64 mag = tcg_temp_new_i64();
+    TCGv_i64 q = tcg_temp_new_i64();
 
-    tcg_gen_extract_i64(e, bits, 52, 11);
-    tcg_gen_andi_i64(f, bits, 0x000FFFFFFFFFFFFFull);
-    tcg_gen_andi_i64(sgn, bits, 0x8000000000000000ull);
-    tcg_gen_ori_i64(x, sgn, 0x7FF8000000000000ull);
-    tcg_gen_movcond_i64(TCG_COND_NE, x, f, zero, x, bits);
-    tcg_gen_movcond_i64(TCG_COND_EQ, x, e, tcg_constant_i64(0x7ff), x, bits);
-    tcg_gen_movcond_i64(TCG_COND_EQ, canon, e, zero, sgn, x);
+    tcg_gen_andi_i64(mag, bits, INT64_MAX);
+    tcg_gen_ori_i64(q, bits, 1ull << 51);
+    tcg_gen_movcond_i64(TCG_COND_GTU, canon, mag,
+                        tcg_constant_i64(0x7FF0000000000000ull), q, bits);
 }
 
 static TCGv_f64 x87_wt_from_bits(TCGv_i64 bits)
@@ -1986,6 +1984,13 @@ static TCGv_f64 x87_wt_from_bits(TCGv_i64 bits)
  * ST(i) as the helpers read it. ld80f/st80f are the backend's inline
  * floatx80_to_double_fast/double_to_floatx80_fast (tcg-target.c.inc), which
  * match the C bit for bit.
+ *
+ * The cached double is converted once, under the FPCR at fill time, and a
+ * value beyond double's range rounds by FPCR.RMode. A helper would convert
+ * it under the FPCR at use time. The two agree because FPCR changes only
+ * inside helpers (update_fp_status, the SSE brackets, which restore it on
+ * leave) and every helper call flushes wt_st (tcg_gen_callN ->
+ * gen_bb_epilogue -> gen_flush_fp).
  */
 static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
 {
@@ -2006,29 +2011,26 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
     return s->wt_ft0;
 }
 
-/* ST(i) = r, as a helper writes double_to_floatx80_fast(result). */
-static void x87_wt_set_st_both(DisasContext *s, int i, TCGv_f64 r,
-                               TCGv_i64 bits)
-{
-    TCGv_i64 canon = tcg_temp_new_i64();
-    tcg_gen_st80f_f64(r, gen_stn_ptr(i));
-    x87_wt_canon(canon, bits);
-    s->wt_st[(s->fpstt_delta + i) & 7] = x87_wt_from_bits(canon);
-}
-
+/*
+ * ST(i) = r, as a helper writes double_to_floatx80_fast(result). r reads
+ * back unchanged: it is computed by the host (fadd, fcvt, scvtf...), which
+ * never returns a signalling NaN.
+ */
 static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
 {
-    TCGv_i64 bits = tcg_temp_new_i64();
-    tcg_gen_mov64f_i64(bits, r);
-    x87_wt_set_st_both(s, i, r, bits);
+    tcg_gen_st80f_f64(r, gen_stn_ptr(i));
+    s->wt_st[(s->fpstt_delta + i) & 7] = r;
 }
 
+/* ST(i) = a qword from memory; st80f stores it quieted as well. */
 static void x87_wt_set_st_bits(DisasContext *s, int i, TCGv_i64 bits)
 {
-    x87_wt_set_st_both(s, i, x87_wt_from_bits(bits), bits);
+    TCGv_i64 canon = tcg_temp_new_i64();
+    x87_wt_canon(canon, bits);
+    x87_wt_set_st(s, i, x87_wt_from_bits(canon));
 }
 
-/* FT0 from a memory operand: only the canonical value, no env store. */
+/* FT0 from a qword memory operand: only the canonical value, no env store. */
 static void x87_wt_set_ft0_bits(DisasContext *s, TCGv_i64 bits)
 {
     TCGv_i64 canon = tcg_temp_new_i64();
@@ -2279,13 +2281,6 @@ static TCGv_f64 x87_wt_f32_to_f64(TCGv_i32 arg)
     return d;
 }
 
-static TCGv_i64 x87_wt_bits(TCGv_f64 d)
-{
-    TCGv_i64 bits = tcg_temp_new_i64();
-    tcg_gen_mov64f_i64(bits, d);
-    return bits;
-}
-
 /* (double) of an int32, exact: int32_to_floatx80__hard. */
 static TCGv_f64 x87_wt_i32_to_f64(TCGv_i32 arg)
 {
@@ -2299,7 +2294,7 @@ static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
 {
 #if defined(XBOX)
     if (x87_wt(s)) {
-        x87_wt_set_ft0_bits(s, x87_wt_bits(x87_wt_f32_to_f64(arg)));
+        s->wt_ft0 = x87_wt_f32_to_f64(arg);
         return;
     }
 #endif
@@ -2352,7 +2347,7 @@ static void gen_fildl_FT0(DisasContext *s, TCGv_i32 arg)
 {
 #if defined(XBOX)
     if (x87_wt(s)) {
-        x87_wt_set_ft0_bits(s, x87_wt_bits(x87_wt_i32_to_f64(arg)));
+        s->wt_ft0 = x87_wt_i32_to_f64(arg);
         return;
     }
 #endif
@@ -2515,9 +2510,10 @@ static void gen_fchs_ST0(DisasContext *s)
     if (x87_lean()) {
         x87_gen_sign(gen_stn_ptr(0), true);
         /*
-         * Reload rather than negate the cached double: for an 80-bit value
-         * beyond double range, floatx80_to_double_fast folds an exponent
-         * bit into bit 63, so it does not commute with the sign.
+         * Reload rather than negate the cached double: the conversion does
+         * not commute with the sign for an 80-bit value beyond double range
+         * under RP/RM (inf on one side, DBL_MAX on the other), nor for the
+         * fixed-sign default NaN of an unnormal or pseudo-NaN.
          */
         s->wt_st[s->fpstt_delta & 7] = NULL;
         return;

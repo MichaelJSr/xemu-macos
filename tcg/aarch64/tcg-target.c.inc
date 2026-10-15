@@ -548,6 +548,7 @@ typedef enum {
 
     /* Logical shifted register instructions (with a shift).  */
     I3502S_AND_LSR  = I3510_AND | (1 << 22),
+    I3502S_ORR_LSL  = I3510_ORR,
 
     /* AdvSIMD copy */
     I3605_DUP      = 0x0e000400,
@@ -3227,110 +3228,224 @@ static void tcg_out_fp_2src(TCGContext *s, AArch64Insn insn,
 }
 
 /*
+ * tcg_x87_ld80_slow — floatx80 → IEEE double for everything the inline
+ * ld80f does not convert itself: zero aside, exponents beyond double's
+ * range either way, x87 denormals, unnormals, infinities and NaNs. Rounds
+ * once under FPCR.RMode, as softfloat's floatx80_to_float64 does: overflow
+ * to inf or DBL_MAX, underflow to a subnormal or zero, NaN payload kept
+ * and quieted, the default NaN for unnormals and pseudo-inf/NaN.
+ *
+ * Emitted once, here, and shared: the inline ld80f calls it with BL/BLR
+ * and floatx80_to_double_fast (target/i386/tcg/fpu_helper.c) with an
+ * inline-asm BL, so the C helpers and the JIT cannot drift apart.
+ * In: x16 = significand, x17 = sign:exponent (16 bits, zero-extended).
+ * Out: x16 = the double's bits. Clobbers x17 and NZCV only; x0-x3 are
+ * saved below sp, which moves first (no red zone off Darwin). x16/x17 are
+ * IP0/IP1, which a linker veneer may overwrite, so the symbol is hidden:
+ * callers in the same image reach it directly.
+ */
+#define X87_LD80_SLOW stringify(__USER_LABEL_PREFIX__) "tcg_x87_ld80_slow"
+#if defined(__APPLE__)
+#define X87_LD80_SLOW_VIS   ".private_extern " X87_LD80_SLOW "\n"
+#define X87_LD80_SLOW_SIZE  ""
+#elif defined(__ELF__)
+#define X87_LD80_SLOW_VIS   ".hidden " X87_LD80_SLOW "\n" \
+                            ".type " X87_LD80_SLOW ", %function\n"
+#define X87_LD80_SLOW_SIZE  ".size " X87_LD80_SLOW ", . - " X87_LD80_SLOW "\n"
+#else
+#define X87_LD80_SLOW_VIS   ""
+#define X87_LD80_SLOW_SIZE  ""
+#endif
+#if defined(__APPLE__) || defined(__ELF__)
+#define X87_LD80_CFI(d)     d "\n"
+#else
+#define X87_LD80_CFI(d)     ""
+#endif
+
+void tcg_x87_ld80_slow(void);
+
+__asm__(
+    ".text\n"
+    ".p2align 4\n"
+    ".globl " X87_LD80_SLOW "\n"
+    X87_LD80_SLOW_VIS
+    X87_LD80_SLOW ":\n"
+    X87_LD80_CFI(".cfi_startproc")
+    "    hint    #34\n"                     /* bti c: the JIT may BLR here */
+    "    stp     x0, x1, [sp, #-32]!\n"
+    X87_LD80_CFI(".cfi_def_cfa_offset 32")
+    "    stp     x2, x3, [sp, #16]\n"
+    "    and     w0, w17, #0x7fff\n"        /* e */
+    "    lsr     w17, w17, #15\n"
+    "    lsl     x17, x17, #63\n"           /* s */
+    "    mov     w1, #0x7fff\n"
+    "    cmp     w0, w1\n"
+    "    b.eq    70f\n"                     /* inf, NaN, pseudo-inf/NaN */
+    "    tbnz    x16, #63, 10f\n"           /* integer bit set: valid */
+    "    cbnz    w0, 80f\n"                 /* unnormal: default NaN */
+    "    cbz     x16, 60f\n"                /* zero (e == 0) */
+    "10: cmp     w0, #0\n"
+    "    csinc   w0, w0, wzr, ne\n"         /* denormals use exponent 1 */
+    "    sub     w0, w0, #3, lsl #12\n"
+    "    sub     w0, w0, #3072\n"           /* e64 = e - 15360 */
+    "    mrs     x1, fpcr\n"
+    "    ubfx    x1, x1, #22, #2\n"         /* rm: 0 RN, 1 RP, 2 RM, 3 RZ */
+    "    cmp     w0, #2046\n"
+    "    b.gt    50f\n"                     /* overflow */
+    "    subs    w2, w0, #1\n"
+    "    b.lt    20f\n"
+    "    lsl     x3, x2, #52\n"             /* normal: base = (e64-1) << 52 */
+    "    mov     w2, #11\n"                 /* sh */
+    "    b       30f\n"
+    "20: mov     x3, #0\n"                  /* subnormal or zero: base 0 */
+    "    mov     w2, #12\n"
+    "    sub     w2, w2, w0\n"              /* sh = 12 - e64 (>= 12) */
+    "    cmp     w2, #64\n"
+    "    b.eq    24f\n"
+    "    b.hi    25f\n"
+    "30: sub     w2, w2, #1\n"              /* sh - 1 (10..62) */
+    "    lsr     x0, x16, x2\n"             /* t = m >> (sh-1): q t>>1, g t&1 */
+    "    neg     w2, w2\n"
+    "    lsl     x16, x16, x2\n"            /* m << (65 - sh): sticky */
+    "    b       40f\n"
+    "24: lsr     x0, x16, #63\n"            /* sh == 64: t = integer bit */
+    "    lsl     x16, x16, #1\n"
+    "    b       40f\n"
+    "25: mov     x0, #0\n"                  /* sh > 64: q = g = 0, sticky */
+    "    mov     x16, #1\n"
+    "40: cmp     x16, #0\n"
+    "    cset    w16, ne\n"                 /* st */
+    "    and     w2, w0, #1\n"              /* g */
+    "    lsr     x0, x0, #1\n"              /* q */
+    "    cbz     w1, 45f\n"
+    "    cmp     w1, #3\n"
+    "    b.eq    47f\n"                     /* RZ: no increment */
+    "    orr     w16, w16, w2\n"            /* g | st */
+    "    lsr     x2, x17, #63\n"            /* sign */
+    "    cmp     w1, #2\n"
+    "    cset    w1, eq\n"                  /* 1 for RM */
+    "    eor     w1, w1, w2\n"              /* 1: rounds toward zero here */
+    "    bic     w16, w16, w1\n"
+    "    b       46f\n"
+    "45: orr     w16, w16, w0\n"            /* RN: g & (st | q) */
+    "    and     w16, w16, w2\n"
+    "46: add     x0, x0, x16\n"
+    "47: add     x0, x0, x3\n"              /* a carry into 2047 is inf */
+    "    orr     x16, x0, x17\n"
+    "    b       90f\n"
+    "50: lsr     x2, x17, #63\n"            /* overflow: inf for RN or away */
+    "    add     w2, w2, #1\n"
+    "    mov     x16, #0x7ff0000000000000\n"
+    "    sub     x0, x16, #1\n"             /* DBL_MAX */
+    "    cmp     w1, w2\n"
+    "    b.eq    51f\n"
+    "    cmp     w1, #0\n"
+    "    csel    x16, x16, x0, eq\n"
+    "51: orr     x16, x16, x17\n"
+    "    b       90f\n"
+    "60: mov     x16, x17\n"                /* signed zero */
+    "    b       90f\n"
+    "70: tbz     x16, #63, 80f\n"           /* pseudo-inf / pseudo-NaN */
+    "    lsl     x0, x16, #1\n"
+    "    cbz     x0, 71f\n"
+    "    lsr     x0, x0, #12\n"             /* NaN: payload, quieted */
+    "    orr     x0, x0, #0x7ff8000000000000\n"
+    "    orr     x16, x0, x17\n"
+    "    b       90f\n"
+    "71: mov     x16, #0x7ff0000000000000\n" /* infinity */
+    "    orr     x16, x16, x17\n"
+    "    b       90f\n"
+    "80: mov     x16, #0xfff8000000000000\n" /* default NaN (indefinite) */
+    "90: ldp     x2, x3, [sp, #16]\n"
+    "    ldp     x0, x1, [sp], #32\n"
+    X87_LD80_CFI(".cfi_def_cfa_offset 0")
+    "    ret\n"
+    X87_LD80_CFI(".cfi_endproc")
+    X87_LD80_SLOW_SIZE
+);
+
+/* BL to the shared routine, or BLR through TMP2 when out of BL range. */
+static void tcg_out_x87_ld80_slow(TCGContext *s)
+{
+    const tcg_insn_unit *stub = (const tcg_insn_unit *)tcg_x87_ld80_slow;
+    ptrdiff_t offset = tcg_pcrel_diff(s, stub) >> 2;
+
+    if (offset == sextract64(offset, 0, 26)) {
+        tcg_out_insn(s, 3206, BL, offset);
+    } else {
+        /* TMP0/TMP1 carry the arguments: not tcg_out_call_int. */
+        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP2, (intptr_t)stub);
+        tcg_out_insn(s, 3207, BLR, TCG_REG_TMP2);
+    }
+}
+
+/*
  * tcg_out_ld80f_f64 — inline floatx80→IEEE double conversion.
  * Reads 10-byte floatx80 from [ptr], writes result to D-register rd.
- * Uses TMP0, TMP1, TMP2 as scratch GPRs. ~15 insns normal path.
+ * Uses TMP0, TMP1, TMP2 as scratch GPRs and calls tcg_x87_ld80_slow,
+ * which clobbers only those and NZCV. 15 insns on the in-range path.
  *
  * Matches the C reference: floatx80_to_double_fast() in fpu_helper.c.
  */
 static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
 {
-    /* Load floatx80: 64-bit frac + 16-bit high (sign:1 + exp:15) */
+    tcg_insn_unit *br_range, *br_unnormal, *br_done, *br_done2, *br_stub;
+
+    /* TMP0 = significand m, TMP1 = sign:exponent */
     tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP0, ptr, 0, 3);
     tcg_out_ldst(s, I3312_LDRH, TCG_REG_TMP1, ptr, 8, 1);
 
-    /* TMP0 = frac, TMP1 = high16 */
-
-    /* frac_trunc = (frac >> 11) & 0x000FFFFFFFFFFFFF */
-    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 11, 62);
-    /* UBFM with immr=11,imms=62 extracts bits 62:11 → right-shifted by 11,
-       zero-extending in 64-bit, giving (frac >> 11) & ((1<<52)-1). */
-
-    /* Extract sign from TMP1 and OR into bit 63 of TMP0 */
-    tcg_out_ubfm(s, TCG_TYPE_I32, TCG_REG_TMP2, TCG_REG_TMP1, 15, 15);
-    /* TMP2 = sign bit (0 or 1) */
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2, 63);
-    /* TMP0 = frac_trunc | (sign << 63) */
-
-    /* Extract exp80 from TMP1 */
+    /* In range: exponent - 15361 below 2046 (double exponent 1..2046)... */
     tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I32,
-                     TCG_REG_TMP1, TCG_REG_TMP1, 0x7FFF);
-    /* TMP1 = exp80 */
+                     TCG_REG_TMP2, TCG_REG_TMP1, 0x7FFF);
+    tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, 0x3000);
+    tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, 0xC01);
+    tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
+                 TCG_REG_XZR, TCG_REG_TMP2, 2046);
+    br_range = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_GEU, 0);
+    /* ... and the integer bit set. */
+    br_unnormal = s->code_ptr;
+    tcg_out_insn(s, 3205, TBZ, TCG_REG_TMP0, 63, 0);
 
-    /* Edge case: exp80 == 0 → result is ±0 */
-    tcg_insn_unit *br_zero = s->code_ptr;
-    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP1, 0);
-
-    /* Edge case: exp80 == 0x7FFF → inf or NaN */
-    tcg_out32(s, I3405_MOVZ | (0x7FFF << 5) | TCG_REG_TMP2);
-    /* MOVZ W(TMP2), #0x7FFF */
-    tcg_out_insn(s, 3502, SUBS, TCG_TYPE_I32,
-                 TCG_REG_XZR, TCG_REG_TMP1, TCG_REG_TMP2);
-    tcg_insn_unit *br_infnan = s->code_ptr;
-    tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
-
-    /* === Normal path === */
-    /* exp64 = exp80 - 15360; 15360 = 0x3C00 */
-    tcg_out32(s, I3405_MOVZ | (0x3C00 << 5) | TCG_REG_TMP2);
-    /* MOVZ W(TMP2), #0x3C00 */
-    tcg_out_insn(s, 3502, SUB, TCG_TYPE_I32,
-                 TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP2);
+    /* TMP0 = m >> 11: the fraction in 51..0, the integer bit at 52 */
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 11, 63);
     /*
-     * TMP1 = exp80 - 15360, outside 1..2046 for an 80-bit exponent beyond
-     * double range. As floatx80_to_double_fast: its low 12 bits, shifted
-     * to bit 52, ORed in, so bit 11 lands on the sign bit (that C has no
-     * range check here, and the inline load must match it bit for bit).
+     * (exponent + 0x400) mod 4096 == exponent - 15360 (0x3C00), a double
+     * exponent of 1..2046; in range the add never carries into the sign.
+     * BFI puts it over bits 63..52, replacing the integer bit.
      */
-    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
-                     TCG_REG_TMP1, TCG_REG_TMP1, 0xFFF);
-    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_TMP1, 12, 11);
-    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1);
-    /* TMP0 = sign | (exp64 << 52) | frac_trunc */
+    tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP1, 0x400);
+    tcg_out_bfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP2, 12, 11);
+    /* sign to bit 63 */
+    tcg_out_ubfm(s, TCG_TYPE_I32, TCG_REG_TMP1, TCG_REG_TMP1, 15, 15);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 63);
     tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
               | ((TCG_REG_TMP0 & 0x1f) << 5));
-    /* FMOV Dd, X(TMP0) */
-
-    tcg_insn_unit *br_done = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0); /* B to done (patched below) */
-
-    /* === Cold path: exp80 == 0 → ±0 === */
-    reloc_pc19(br_zero, tcg_splitwx_to_rx(s->code_ptr));
-    /* Result = sign bit only */
-    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
-                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
-    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
-              | ((TCG_REG_TMP0 & 0x1f) << 5));
-    tcg_insn_unit *br_done2 = s->code_ptr;
+    br_done = s->code_ptr;
     tcg_out_insn(s, 3206, B, 0);
 
-    /* === Cold path: exp80 == 0x7FFF → inf or NaN === */
-    reloc_pc19(br_infnan, tcg_splitwx_to_rx(s->code_ptr));
-    /* Reload frac from memory to check for NaN vs inf */
-    tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP1, ptr, 0, 3);
-    /* Test frac & 0x7FFFFFFFFFFFFFFF (clear the integer bit) */
-    tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I64,
-                     TCG_REG_XZR, TCG_REG_TMP1, 0x7FFFFFFFFFFFFFFFULL);
-    /* Build inf pattern: sign | 0x7FF0000000000000 */
-    tcg_out32(s, I3405_MOVZ | TCG_TYPE_I64 << 31
-              | (0x7FF0U << 5) | (3 << 21) | TCG_REG_TMP1);
-    /* MOVZ X(TMP1), #0x7FF0, LSL #48 */
-    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
-                     TCG_REG_TMP2, TCG_REG_TMP0, 0x8000000000000000ULL);
-    /* TMP2 = sign bit from TMP0 */
-    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
-                 TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP2);
-    /* TMP1 = sign | inf */
-    /* If frac was nonzero (NaN), set quiet NaN bit */
-    tcg_out32(s, I3405_MOVZ | TCG_TYPE_I64 << 31
-              | (0x0008U << 5) | (3 << 21) | TCG_REG_TMP2);
-    /* MOVZ X(TMP2), #0x0008, LSL #48 → 0x0008000000000000 */
-    /* CSEL: if NE (frac nonzero from ANDS above), use TMP2, else XZR */
-    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64,
-                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_XZR, TCG_COND_NE);
-    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_TMP1, TCG_REG_TMP2);
+    /* === Cold: ±0 here (exponent bits to 63..49, the sign drops off) === */
+    reloc_pc19(br_range, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc14(br_unnormal, tcg_splitwx_to_rx(s->code_ptr));
+    tcg_out_insn(s, 3502S, ORR_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP2, TCG_REG_TMP0, TCG_REG_TMP1, 49);
+    br_stub = s->code_ptr;
+    tcg_out_insn(s, 3201, CBNZ, TCG_TYPE_I64, TCG_REG_TMP2, 0);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP1, 48);
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+    br_done2 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+
+    /* === Cold: everything else, through the shared routine === */
+    reloc_pc19(br_stub, tcg_splitwx_to_rx(s->code_ptr));
+    tcg_out_x87_ld80_slow(s);
     tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
               | ((TCG_REG_TMP0 & 0x1f) << 5));
 
@@ -3341,7 +3456,8 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
 
 /*
  * tcg_out_st80f_f64 — inline IEEE double→floatx80 conversion.
- * Reads D-register src, writes 10-byte floatx80 to [ptr].
+ * Reads D-register src, writes 10-byte floatx80 to [ptr]. Exact for every
+ * double; a signalling NaN is stored quieted.
  * Uses TMP0, TMP1, TMP2 as scratch GPRs. ~12 insns normal path.
  *
  * Matches the C reference: double_to_floatx80_fast() in fpu_helper.c.
@@ -3396,12 +3512,27 @@ static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
     tcg_insn_unit *br_done = s->code_ptr;
     tcg_out_insn(s, 3206, B, 0);
 
-    /* === Cold path: exp64 == 0 → zero/subnormal === */
+    /* === Cold path: exp64 == 0 → subnormal, normalised (exact) === */
     reloc_pc19(br_zero, tcg_splitwx_to_rx(s->code_ptr));
-    /* low = frac52 << 11 (no integer bit for denormals) */
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
+    tcg_insn_unit *br_szero = s->code_ptr;
+    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I64, TCG_REG_TMP0, 0);
+    /* low = frac52 << clz (12..63), high = (sign << 15) | (15372 - clz) */
+    tcg_out_insn(s, 3507, CLZ, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP0);
+    tcg_out_insn(s, 3508, LSLV, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP2);
     tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+    tcg_out32(s, I3405_MOVZ | (15372 << 5) | TCG_REG_TMP0);
+    tcg_out_insn(s, 3502, SUB, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP0, TCG_REG_TMP2);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
+    tcg_insn_unit *br_done3 = s->code_ptr;
+    tcg_out_insn(s, 3206, B, 0);
+
+    /* === Cold path: ±0 === */
+    reloc_pc19(br_szero, tcg_splitwx_to_rx(s->code_ptr));
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_XZR, ptr, 0, 3);
     /* high = sign << 15 */
     tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
                  TCG_REG_TMP1, TCG_REG_XZR, TCG_REG_TMP1, 15);
@@ -3437,6 +3568,7 @@ static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
     /* === Done === */
     reloc_pc26(br_done, tcg_splitwx_to_rx(s->code_ptr));
     reloc_pc26(br_done2, tcg_splitwx_to_rx(s->code_ptr));
+    reloc_pc26(br_done3, tcg_splitwx_to_rx(s->code_ptr));
 }
 
 static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
