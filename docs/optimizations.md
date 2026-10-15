@@ -35,8 +35,6 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
-| `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` (one vCPU stop) that refills the TLB entries for the surface's pages (`tlb_flush_host_range`; a full all-mmuidx flush plus a jump-cache wipe until 2026-10-15) — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else. No behavior change |
-| `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
@@ -908,16 +906,18 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   on 2/4-bpp textures under heavy contention. GPU-unswizzle levels
   point `TextureLevel.decoded_data` directly into the snapshot,
   dropping the per-level intermediate copy.
-- **Surface CPU-access-callback churn is now measurable — and it is the
+- **Surface CPU-access-callback churn was measured — and it was the
   guest's TLB-flush source (instrumentation + dark mechanism,
-  2026-08-04).** Every NV2A surface create/destroy calls
-  `mem_access_callback_insert`/`remove`, and each of those is an
+  2026-08-04; both since removed).** Every NV2A surface create/destroy calls
+  `mem_access_callback_insert`/`remove`, and each of those was an
   `async_safe_run_on_cpu` (an exclusive-execution vCPU stop) **plus** a
   full all-mmuidx `tlb_flush_all_cpus_synced` **plus** an unconditional
   `tcg_flush_jmp_cache`. Renderer-initiated TLB flushing had never
   appeared in any profile and nobody had read the counters, so two
   auditors disagreed by two orders of magnitude about the rate.
-  `XEMU_SURFACE_CB_STATS=1` settles it: **199.8 callback events/s =
+  The census (`XEMU_SURFACE_CB_STATS=1`, removed 2026-10-15; the ranged
+  refill does not move `info jit`'s flush counters, so revert the
+  removal commit to recount) settled it: **199.8 callback events/s =
   4.16 per flip** in the steady F8 scene, attributed to
   `update_surface_part`'s invalidate-then-create path (the zeta
   ping-pong), against **~190 full-mmuidx flush calls/s** measured
@@ -1644,22 +1644,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   zero hangs/asserts/artifacts; xbox suite green. `XEMU_PGRAPH_LOCKLESS=0`
   restores BQL dispatch for PGRAPH only; `XEMU_MMIO_BQL=1` still
   restores it for all blocks.
-- **PFIFO kick census (counter only, 2026-08-04).**
-  `XEMU_PFIFO_KICK_STATS=1` buckets every `pgraph_write` `pfifo_kick`
-  broadcast by call site (INTR / INCREMENT / FIFO_ACCESS_ON /
-  FIFO_ACCESS_OFF) × whether a PFIFO wait condition actually
-  transitioned × post-write `FIFO_ACCESS` × whether a kick was already
-  pending, and separately counts the PFIFO thread's idle parks — the
-  wakeup denominator that says how many broadcasts could ever have woken
-  a parked waiter. **No kick is ever suppressed, deliberately**: a
-  wrongly-skipped kick is a permanent PFIFO hang (archaeology 7.1), and
-  the file comment records that reasoning so a future reader does not
-  read the omission as an oversight. The census then closed the
-  suppression idea outright — see Settled vectors. Two owned-file
-  proxies bracket the truth about waiters (the `dup` bucket = kick
-  already pending = provably redundant; the pfifo-side park census =
-  parks per kick); the exact per-kick "a waiter existed" bit would need
-  a field in `nv2a_int.h`'s anonymous pfifo struct.
+- **PFIFO kick census (counter only, 2026-08-04; removed 2026-10-15).**
+  `XEMU_PFIFO_KICK_STATS=1` bucketed every `pgraph_write` `pfifo_kick`
+  by call site, wait-condition transition, `FIFO_ACCESS` and
+  already-pending, plus the PFIFO thread's idle parks. It closed kick
+  suppression (0 of 412,074 suppressible; Settled vectors). No kick is
+  ever suppressed: a wrongly-skipped kick is a permanent PFIFO hang.
 - **PTIMER zero-divisor guard (2026-09-08).** The upstream merge gave
   `NV_PTIMER_ALARM_0` a write handler that schedules a QEMU timer
   (`d73326b621`), and every conversion on that path divides by
@@ -2222,12 +2212,12 @@ the next tag.
   killed 2026-08-04 at −0.66 fps 3/3 (draws/s −1.9%) against a ≥ +0.25
   bar. `register/unregister_cpu_access_callback` are back to upstream's
   text, with the census hooks moved to their two call sites.
-  `XEMU_SURFACE_CB_STATS` stays as event counts plus the
+  `XEMU_SURFACE_CB_STATS` stayed as event counts plus the
   `update_surface_part` split, without the pool counters, the audit or
-  the `=2` abort level. Default path unchanged: with the knob unset the
-  pool never ran and the drain loops never found an entry. The live
-  question, a ranged TLB flush, stays open on the roadmap and is priced
-  by a post-wave `XEMU_GUEST_PROF` run.
+  the `=2` abort level, until its own removal on 2026-10-15 (below).
+  Default path unchanged: with the knob unset the pool never ran and the
+  drain loops never found an entry. The live question, a ranged TLB
+  flush, landed 2026-10-15 as `tlb_flush_host_range`.
 - **`XEMU_X87_ELIDE_CLEAN` removed.** The clean-ST(i) write-back elision
   (built in `8da40e6fed`, killed in `7aa746a952`, both 2026-08-04) goes
   with its `clean-wb` refuter check and the per-slot x87 dirty tracking
@@ -2251,6 +2241,23 @@ the next tag.
   Changes). `xemu_metal_acquire_drawable()` is folded back into
   `xemu_metal_begin_frame()`, the `drawable_acq` counter stays, and the
   default path is unchanged (acquire after the ring read, as before).
+- **`XEMU_PFIFO_KICK_STATS` removed (2026-10-15).** The `pgraph_write`
+  kick census and the PFIFO idle-park counter (`804bc5d87e`) answered
+  their one question on 2026-08-04: no kick is suppressible (Settled
+  vectors), and never suppressing one is an invariant. `pgraph_write`
+  loses a latch check and four note sites, `pfifo_thread` a getenv and
+  a counter in the park path; all three `pfifo_guest_kick` calls and
+  the park/doorbell logic are unchanged. Nothing else counts parks (the
+  `XEMU_PFIFO_HEARTBEAT` `iters` field counts loop passes); revert the
+  removal commit to count them again.
+- **`XEMU_SURFACE_CB_STATS` removed (2026-10-15).** The surface
+  CPU-access-callback census (`804bc5d87e`) sized the reuse pool (killed
+  2026-08-04) and then the ranged TLB flush, which landed 2026-10-15 as
+  `tlb_flush_host_range`; its receipt (199.8 events/s on F8) stays in
+  the Vulkan renderer bullet. The ranged refill does not touch `info
+  jit`'s flush counters, so re-counting the events means reverting the
+  removal commit. `invalidate_surface_full`, `surface_put` and
+  `update_surface_part` lose their latch checks.
 
 ## Failed / reverted experiments
 
@@ -2258,7 +2265,7 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
-| Surface-callback reuse pool default-on (`XEMU_SURFACE_CB_REUSE`, 2026-08-04) | The mechanism receipt was real — the zeta ping-pong's ~200 register/unregister events/s are 0.95:1 with ALL in-scene guest TLB flushes, each with a jump-cache wipe that also clears the near-return memo (`tcg_flush_jmp_cache` → `xemu_i386_ras_flush`) — and the pool survived every correctness gate (loadvm cycles clean, coverage audit 23,003/0, movement probe `tb_flush` flat). The fps A/B then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%** (idle-gated pairs, bar was ≥ +0.25): post-candoio-elision the vCPU's flush/refill cost was already off the critical path — the audit's +0.35..+1.5 band was priced against the PRE-wave profile — while the pool's park/reattach bookkeeping bills the render thread on every shape swap. That explanation was never measured: the bookkeeping is a 4-entry scan, and the A/B's pair order is not on record. Kept dark in-tree as the record until 2026-10-10, when the code was removed; restore it by reverting the removal commit, never `804bc5d87e`, which also carries `XEMU_PFIFO_KICK_STATS` and the SPIR-V cache key. `XEMU_SURFACE_CB_STATS` stays, minus the pool counters and audit. The live shape was the ranged-flush FIXME in `physmem.c`/`cputlb.c`, landed 2026-10-15 as `tlb_flush_host_range` |
+| Surface-callback reuse pool default-on (`XEMU_SURFACE_CB_REUSE`, 2026-08-04) | The mechanism receipt was real — the zeta ping-pong's ~200 register/unregister events/s are 0.95:1 with ALL in-scene guest TLB flushes, each with a jump-cache wipe that also clears the near-return memo (`tcg_flush_jmp_cache` → `xemu_i386_ras_flush`) — and the pool survived every correctness gate (loadvm cycles clean, coverage audit 23,003/0, movement probe `tb_flush` flat). The fps A/B then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%** (idle-gated pairs, bar was ≥ +0.25): post-candoio-elision the vCPU's flush/refill cost was already off the critical path — the audit's +0.35..+1.5 band was priced against the PRE-wave profile — while the pool's park/reattach bookkeeping bills the render thread on every shape swap. That explanation was never measured: the bookkeeping is a 4-entry scan, and the A/B's pair order is not on record. Kept dark in-tree as the record until 2026-10-10, when the code was removed; restore it by reverting the removal commit, never `804bc5d87e`, which also carries `XEMU_PFIFO_KICK_STATS` and the SPIR-V cache key. `XEMU_SURFACE_CB_STATS` stayed, minus the pool counters and audit, until 2026-10-15 (Retired diagnostics). The live shape was the ranged-flush FIXME in `physmem.c`/`cputlb.c`, landed 2026-10-15 as `tlb_flush_host_range` |
 | x87 clean-ST(i) write-back elision default-on (`XEMU_X87_ELIDE_CLEAN`, 2026-08-04) | Refuter said safe: it re-read memory for every clean slot at each flush and compared it with the cached double, 3.49e9 checks, 0 violations. That certifies the dirty marks were complete for every ST(i) writer the soak reached. It could not see the 80-bit residue the elision keeps, so the truncation signal was absent by construction. The idle-gated A/B read **−0.23 fps, 3/3 negative** vs the ≥ +0.20 bar. The original explanation here (the elidable flush population too thin to pay for the per-slot dirty tracking) was wrong. The dirty tracking ran at translate time and was identical in both arms, so the omitted store was the only runtime difference. The kill is an under-powered read: 3 pairs (one-sided sign p = 0.125), and the in-tree harness of that day ran B before E in every pair. **Code removed on 2026-10-10.** It changed numerics, it put a dirty-mark duty on every future ST(i) writer (21 sites in `ops_fpu.h` plus FXCH), and its reopen bar (clean-ST census ≥ 8M/s on some other title) did not hold together: the 7.04M/s census reading came from a run whose fps was not recorded, so the bar was never tied to a measured population at the ~48 fps shape the kill ran on. Restore it by reverting the removal commit, never `8da40e6fed`, which also carries the shipped `ELIDE_FT0` and `DEFER_FIP` mechanisms. Reopening needs per-op host-PC attribution tooling (`XEMU_GUEST_PROF` resolves only to whole TBs) plus the artifact A/B on a title that exercises the x87 transcendentals, which promotion always required and never got |
 | Reports idle-budget 300 → 50 µs (2026-08-04) | The deferred pinned-value scan ran: **−12.1 fps unanimous, draws/s −21.4%** — 50 µs qualifies far more idle episodes for early submits and lands on the arch-1.1 submit-storm side of the cliff, exactly as the scan's guard predicted. 300 µs validated as correctly above the cliff; scan closed permanently, and the knob was hardcoded at 300 µs on 2026-10-15 |
 | Ret-memo 13-bit index (`XEMU_RETC_BITS=13`, 2026-07-18) | Doubling the eip→TB memo (4096→8192 entries, 128→256 KiB) predicted +0.3-0.5 fps from fewer hash collisions; measured **−0.23 fps, 4/4 pairs negative** (scene identity clean, arm (b)-on shipping context). Same mechanism as the jump-cache 12→16-bit kill: the recurring ret set already fits at 12 bits, so the larger table pays cache footprint on every probe to avoid collisions that were mostly one-shot. "Recurring" is bounded by flushes: every full guest TLB flush (~190/s post-wave, nearly all from surface callbacks) wipes the memo through `tcg_flush_jmp_cache`, so what fits is the ret set seen between two full flushes; a per-page flush (INVLPG) drops only that page's entries, from the jump cache and, since 2026-10-10, from the memo. The A/B ran one binary with the table sized for 13 bits, so both arms carried 256 KiB and a 256 KiB memset per flush (the 12-bit arm addressed only the first half); that doubling of the default path was never measured against the 128 KiB build. **Knob code removed 2026-10-10**: the width is the compile-time `XEMU_RETC_BITS` (12, `target/i386/cpu.h`), the table and its per-flush memset are back to 128 KiB, and generated code is unchanged (same shift immediate). A re-test is a two-binary `scripts/bench-abx.sh` interleave, worth running only if the ranged-flush FIXME stops the per-flush wipe and a census shows ≥ 1M collision fills/s. Neither a memo hit nor a jump-cache hit checks the physical page; until 2026-10-10 INVLPG cleared the jump cache per page but never the memo (fixed then: see the near-return memo bullet under CPU / JIT) |
@@ -2345,7 +2352,7 @@ counter).
 | `qemu_cpu_kick` via `dispatch_semaphore_t` | Closed 2026-07-18: wrong premise. Under MTTCG this fork's vCPU kick is `tcg_kick_vcpu_thread` — two atomic flag stores, no signal; `pthread_kill(SIG_IPI)` (the ~50 µs P99 the vector cited) survives only on cold paths (`qemu_cpu_kick_self`, `pause_all_vcpus`). Nothing on the hot path to replace |
 | DSP JIT parmove+ALU fusion | Closed for the current title corpus 2026-07-18: the eligibility proxies (`alu_ccr_nz_skipped` / `alu_ccr_eu_skipped`) read **0** on both F8 and the Azurik audio mix, and the APU thread runs ~18% utilized off every critical path — ~0 fps ceiling regardless of the fold's local win. **Closed a second time, harder, 2026-08-04: the fold is instruction-neutral by construction**, so the local win is 0 too. Static count against the post-Phase-8 emitter every fold would have to change — `emit_pm_read_reg` (`dsp56k_jit_arm64.c`, ~:2029 as of 2026-10-10; that file moves, so re-derive with `grep -n -A85 "static void emit_pm_read_reg"`) — whose three source classes are exhaustive: pinned X/Y = 1 `UBFX` from the pin on either side of the ALU; A/B = the same multi-path limited-read block (fast / saturate / `pm_read_accu24` BLR) either side; anything else = 1 `LDR`. Nothing is staged that a fold could delete — the read writes its callee-saved destination directly. **Do not build the write-d=0 / non-aliasing eligibility counter this row used to propose** (design-doc row 8): a 100%-eligibility reading would authorize a 0-instruction win. Narrowed reopen condition: a non-audio DSP program whose parmove sources are neither pinned nor A/B — and even then, re-derive a *nonzero* static delta before any counter or emitter work. Full arithmetic: §2.5 of the retired `xemu-frontier-and-positioning` skill (`git show ad569d78c5:.claude/skills/xemu-frontier-and-positioning/SKILL.md`) |
 | COMISS / UCOMISS inline lowering (audit §1.4c) | Closed **permanently** 2026-08-04 by its own census before a line of the lowering was written. The whole candidate rode on an unmeasured compare rate, so the census counter shipped instead of the mechanism (`XEMU_X87_CENSUS=1` prints `sse scalar compares: ss=… sd=…` from `gen_VCOMI`/`gen_VUCOMI`): in-scene the guest executes **0.0 scalar compares/s** (496 for the entire process lifetime, all of them pre-`loadvm`), and **`sd` = 0** independently confirms the verifier's claim that COMISD is structurally unreachable — the guest is a Pentium III with no SSE2. There is nothing to lower. `decode-new.c.inc` was never touched; the census counter stays as the record and the reopen test. Reopen only if some title's census clears ~1.5M `ss`-compares/s |
-| `pfifo_kick` broadcast suppression (audit §1.5) | Closed 2026-08-04: the suppressible population is **empty**. `XEMU_PFIFO_KICK_STATS=1` counted **0 of 412,074 in-scene kicks** with no PFIFO wait-condition transition (7 such kicks exist for the whole process lifetime, all pre-`loadvm`), so a filter that skipped provably-useless broadcasts would skip nothing. That is the good outcome: archaeology 7.1 says a wrongly-skipped kick is a permanent PFIFO hang, and the census bought the answer at zero risk. Counter stays; suppression is not implemented and should not be. Separately noted, not proposed: 62.9% of broadcasts land with a kick already pending — provably redundant, but a *different* class from the one the audit proposed, and it needs its own sizing before anyone touches it |
+| `pfifo_kick` broadcast suppression (audit §1.5) | Closed 2026-08-04: the suppressible population is **empty**. `XEMU_PFIFO_KICK_STATS=1` counted **0 of 412,074 in-scene kicks** with no PFIFO wait-condition transition (7 such kicks exist for the whole process lifetime, all pre-`loadvm`), so a filter that skipped provably-useless broadcasts would skip nothing. That is the good outcome: archaeology 7.1 says a wrongly-skipped kick is a permanent PFIFO hang, and the census bought the answer at zero risk. The counter was removed 2026-10-15 (revert the removal commit to restore it); suppression is not implemented and should not be. Separately noted, not proposed: 62.9% of broadcasts land with a kick already pending — provably redundant, but a *different* class from the one the audit proposed, and it needs its own sizing before anyone touches it |
 | ImGui frame build under BQL + main-loop mutex (audit §1.9) | Closed 2026-08-04 exactly as the audit predicted it would be. The HUD build holds both locks, which looked like a vCPU-blocking hazard; the measurement (`XEMU_UI_LOCK_STATS=1`, which shipped precisely to answer this without a bespoke build) puts combined occupancy at **mean 0.386% / median 0.373%**, under the pre-registered 0.5% kill bar. No rework. The knob stays as the standing re-check — this is a "measure first, expect a kill" candidate that got its kill |
 | `notdirty_write` dirty-check **fps claim** (audit §1.2) — the claim, not the code | Killed 2026-08-04 while the code shipped. The audit sized the candidate on a profile where `notdirty_write` carried a 75.1% trap share; the 2026-07-18 arm-(b) store-prefilter promotion then inhaled that population, and the in-scene re-measurement reads **~2.6k calls/s at a 2.2% trap share — a 34-57x collapse of the benefit base**, ceiling ≤ 0.06% of the vCPU thread, i.e. under the ±0.02 fps protocol resolution. `XEMU_DIRTY_FAST=1` stays default-on as a behavior-equivalent simplification with **no individual fps claim and no individual A/B** (Changes manifest). The transferable lesson is the proxy-collapse one: a candidate sized against a *profile* rather than a *mechanism* silently expires when an earlier landing changes the population, so re-measure the benefit base at build time, not at audit time |
 | Lockless MMIO for the remaining BQL blocks (NV2A `PMC`/`PCRTC`/`PTIMER`, APU `main`/`gp`/`ep`) | Closed by written verdict 2026-08-04 — **[`docs/Finished/lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md)**, which satisfies archaeology 7.5's reopen condition ("audits for the remaining regions are written") without building anything. Fixture-independent ceiling: the *entire* pre-campaign BQL-MMIO prize was 117k ops/s × ~52 ns = **0.61% of one core**, and PFB/USER (78%) + APU-VP (~11%) + PGRAPH already harvested it — residual **< 0.07% of a core ≈ +0.01-0.06 fps**, at or below the ±0.02 fps static-baseline resolution. Correctness wall on top: these handlers call `nv2a_update_irq` inline, so BQL-free dispatch would drive `pci_irq_assert` with no BQL at all and race the iothread's vblank raise — the `pgraph-lockless-audit.md` §C race one level up, hang class, unfixable by atomics alone. Reopen bar: `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s — **measured 2026-08-04 at 75.6 ms per 75 s (2,178,310 BQL-taking ops, avg 47 ns, max 82.0 µs), 6.6x under the bar**, so the verdict now rests on a measurement and not only on the arithmetic (verdict page §A.1) |

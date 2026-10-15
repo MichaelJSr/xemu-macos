@@ -720,91 +720,6 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
     }
 }
 
-/*
- * xemu: CPU-access-callback churn census.
- *
- * Each surface create/destroy registers or unregisters below, and each
- * of those is one async_safe_run_on_cpu (an exclusive-execution vCPU
- * stop) that refills the TLB entries for the surface's pages
- * (tlb_flush_host_range, system/physmem.c). The census measures the
- * event rate:
- *
- *   XEMU_SURFACE_CB_STATS=1  count events, split by whether they came
- *                            from update_surface_part's invalidate-then-
- *                            create path (the zeta ping-pong) or from
- *                            anywhere else; atexit dump.
- *
- * The note hooks sit at the two call sites (invalidate_surface_full,
- * surface_put) so register/unregister_cpu_access_callback keep
- * upstream's form.
- */
-
-static struct {
-    uint64_t reg;
-    uint64_t reg_part;
-    uint64_t unreg;
-    uint64_t unreg_part;
-    uint64_t part_invalidate_then_create;
-} surface_cb_stats;
-
-/* PFIFO thread only, non-reentrant: update_surface_part attribution tag. */
-static int surface_cb_in_update_part;
-static int surface_cb_part_regs;
-static int surface_cb_part_unregs;
-
-static bool surface_cb_stats_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *env = getenv("XEMU_SURFACE_CB_STATS");
-        on = (env && env[0] >= '1' && env[0] <= '9') ? 1 : 0;
-    }
-    return on == 1;
-}
-
-static void surface_cb_stats_dump(void)
-{
-    fprintf(stderr,
-            "xemu: surface cpu-access-callback stats\n"
-            "xemu:   register        = %" PRIu64 " (update_surface_part %"
-            PRIu64 ")\n"
-            "xemu:   unregister      = %" PRIu64 " (update_surface_part %"
-            PRIu64 ")\n"
-            "xemu:   usp invalidate-then-create = %" PRIu64 "\n",
-            surface_cb_stats.reg, surface_cb_stats.reg_part,
-            surface_cb_stats.unreg, surface_cb_stats.unreg_part,
-            surface_cb_stats.part_invalidate_then_create);
-}
-
-static void surface_cb_stats_arm_dump(void)
-{
-    static bool registered;
-    if (!registered) {
-        registered = true;
-        atexit(surface_cb_stats_dump);
-    }
-}
-
-static void surface_cb_stats_note_register(void)
-{
-    surface_cb_stats_arm_dump();
-    surface_cb_stats.reg++;
-    if (surface_cb_in_update_part) {
-        surface_cb_stats.reg_part++;
-        surface_cb_part_regs++;
-    }
-}
-
-static void surface_cb_stats_note_unregister(void)
-{
-    surface_cb_stats_arm_dump();
-    surface_cb_stats.unreg++;
-    if (surface_cb_in_update_part) {
-        surface_cb_stats.unreg_part++;
-        surface_cb_part_unregs++;
-    }
-}
-
 static void register_cpu_access_callback(NV2AState *d, SurfaceBinding *surface)
 {
     if (tcg_enabled()) {
@@ -928,12 +843,6 @@ static void invalidate_surface_full(NV2AState *d, SurfaceBinding *surface,
         unbind_surface(d, false);
     }
 
-    /* access_cb is only set under TCG and physmem ignores a NULL one, so
-     * this counts exactly the unregisters that pay a vCPU stop and a
-     * ranged TLB refill. */
-    if (unlikely(surface_cb_stats_on()) && surface->access_cb) {
-        surface_cb_stats_note_unregister();
-    }
     unregister_cpu_access_callback(d, surface);
 
     surface_ranges_remove(r, surface);
@@ -1017,9 +926,6 @@ static void surface_put(NV2AState *d, SurfaceBinding *surface)
 
     invalidate_overlapping_surfaces(d, surface);
     register_cpu_access_callback(d, surface);
-    if (unlikely(surface_cb_stats_on()) && surface->access_cb) {
-        surface_cb_stats_note_register();
-    }
 
     QTAILQ_INSERT_HEAD(&r->surfaces, surface, entry);
     surface_ranges_insert(r, surface);
@@ -2177,12 +2083,6 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         }
         pgraph_vk_ensure_not_in_render_pass(pg);
 
-        if (unlikely(surface_cb_stats_on())) {
-            surface_cb_part_regs = 0;
-            surface_cb_part_unregs = 0;
-            surface_cb_in_update_part = 1;
-        }
-
         unbind_surface(d, color);
 
         SurfaceBinding *surface = pgraph_vk_surface_get(d, target.vram_addr);
@@ -2346,13 +2246,6 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
         bind_surface(r, surface);
         pg_surface->buffer_dirty = false;
-
-        if (unlikely(surface_cb_stats_on())) {
-            surface_cb_in_update_part = 0;
-            if (surface_cb_part_regs && surface_cb_part_unregs) {
-                surface_cb_stats.part_invalidate_then_create++;
-            }
-        }
     }
 
     if (!upload && pg_surface->draw_dirty) {

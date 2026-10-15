@@ -145,11 +145,10 @@ real flips.
 Re-rank inputs: `XEMU_GUEST_PROF=1` sampler + exit census,
 `XEMU_INV_PROF=1` (+`XEMU_INV_TIMING=1`) invalidation/trap counters,
 `XEMU_NV2A_NSPROF=1` frame attribution. Added 2026-08-04 for the candidates above:
-`XEMU_SURFACE_CB_STATS=1` (surface-callback / TLB-flush rate),
 `XEMU_X87_CENSUS=1` + `XEMU_X87_REFUTE=1` (x87 elidability and its
-adversarial checker), `XEMU_PFIFO_KICK_STATS=1`, `XEMU_UI_LOCK_STATS=1`,
-`XEMU_MMIO_PROF=1`, and `scripts/movement-probe.sh` for the first-visit
-streaming phase. Method and thresholds: the `xemu-operate` skill. Anchors and defaults on this
+adversarial checker), `XEMU_UI_LOCK_STATS=1`, `XEMU_MMIO_PROF=1`,
+and `scripts/movement-probe.sh` for the first-visit streaming phase.
+Method and thresholds: the `xemu-operate` skill. Anchors and defaults on this
 page are dated — re-verify before citing. An "archaeology N.M" citation
 is section N.M of the retired failure-archaeology skill:
 `git show ad569d78c5:.claude/skills/xemu-failure-archaeology/SKILL.md`.

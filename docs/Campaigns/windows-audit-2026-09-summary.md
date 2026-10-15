@@ -51,6 +51,11 @@ Known supersessions:
   was removed from `build.sh`. The skip arm on any platform is now
   `CFLAGS=-fzero-call-used-regs=skip ./build.sh`, and the macOS kill
   does not carry to Windows (the ledger's Failed row says why).
+- **`XEMU_PFIFO_KICK_STATS` and `XEMU_SURFACE_CB_STATS` are gone as of
+  2026-10-15.** Finding 44's "parks/iter" check now reads the
+  `XEMU_PFIFO_HEARTBEAT` `iters` rate (or reverts the removal commit),
+  and batch 4's surface-callback finish check reads nsprof's `finish_*`
+  counts alone.
 
 ## CONFIRMED (60)
 

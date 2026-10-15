@@ -607,26 +607,6 @@ static void pfifo_run_pusher(NV2AState *d)
     }
 }
 
-/*
- * xemu: PFIFO idle-park census (XEMU_PFIFO_KICK_STATS=1, default off,
- * zero cost when unset). The denominator for the pgraph_write kick
- * census in pgraph.c: a broadcast only buys a real (~1 us) wakeup when
- * the thread is actually parked in the untimed wait below — otherwise
- * it is a store plus a broadcast on an empty waiter list, ~10 ns. Only
- * the PFIFO thread writes these, so they are unsynchronised, like the
- * XEMU_PFIFO_KICK_STATS counters in pgraph.c.
- */
-static uint64_t pfifo_park_stats_iters;
-static uint64_t pfifo_park_stats_parks;
-
-static void pfifo_park_stats_dump(void)
-{
-    fprintf(stderr,
-            "xemu: pfifo idle-park census: loop-iters=%" PRIu64
-            " parks=%" PRIu64 "\n",
-            pfifo_park_stats_iters, pfifo_park_stats_parks);
-}
-
 void *pfifo_thread(void *arg)
 {
     NV2AState *d = (NV2AState *)arg;
@@ -660,15 +640,6 @@ void *pfifo_thread(void *arg)
     }
     int64_t pfifo_last_heartbeat_ns = 0;
     uint64_t pfifo_loop_iters = 0;
-
-    bool pfifo_park_stats = false;
-    {
-        const char *s = getenv("XEMU_PFIFO_KICK_STATS");
-        pfifo_park_stats = (s && s[0] == '1');
-    }
-    if (pfifo_park_stats) {
-        atexit(pfifo_park_stats_dump);
-    }
 
     qemu_mutex_lock(&d->pfifo.lock);
     while (true) {
@@ -743,10 +714,6 @@ void *pfifo_thread(void *arg)
             qatomic_set(&d->pfifo.parked, true);
             smp_mb();
             if (!qatomic_read(&d->pfifo.doorbell)) {
-                if (pfifo_park_stats) {
-                    pfifo_park_stats_parks++;
-                    pfifo_park_stats_iters = pfifo_loop_iters;
-                }
                 qatomic_store_release(&d->pfifo.idle_seq,
                                       d->pfifo.kick_seq);
                 qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
