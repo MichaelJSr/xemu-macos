@@ -18,9 +18,9 @@
  * constants (exact because runtime context at a TB exit equals that
  * TB's own translation context; non-base-cflags exit TBs simply
  * never match, which is a safe fallback). The live tb->cflags load
- * catches CF_INVALID from invalidation; breakpoint insertion
- * invalidates the affected TBs, so hits cannot skip a new
- * breakpoint. Interrupts are seen at the target TB's entry check,
+ * catches CF_INVALID from invalidation; gdb breakpoint insertion
+ * invalidates the TBs on the breakpoint's page (xemu_gdb_bp_invalidate
+ * in tcg-accel-ops.c), so hits cannot skip a new breakpoint. Interrupts are seen at the target TB's entry check,
  * as with any goto_tb/goto_ptr chain.
  */
 #include "qemu/osdep.h"

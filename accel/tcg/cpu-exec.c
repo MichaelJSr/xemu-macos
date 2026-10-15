@@ -1498,6 +1498,18 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 last_tb = NULL;
             }
 #endif
+#if defined(XBOX)
+            /*
+             * An armed breakpoint makes no new cross-page links: a link made
+             * through an alias mapping could later enter the breakpoint's
+             * page without a lookup (xemu_gdb_bp_invalidate).
+             */
+            if (last_tb && unlikely(!QTAILQ_EMPTY(&cpu->breakpoints)) &&
+                ((tb_page_addr0(last_tb) ^ tb_page_addr0(tb)) &
+                 TARGET_PAGE_MASK)) {
+                last_tb = NULL;
+            }
+#endif
             /* See if we can patch the calling TB. */
             if (last_tb) {
                 tb_add_jump(last_tb, tb_exit, tb);
