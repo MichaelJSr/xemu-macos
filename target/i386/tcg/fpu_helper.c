@@ -3845,20 +3845,9 @@ void helper_emms(CPUX86State *env)
  * first-source rule. Guests running a directed rounding mode or
  * mismatched FTZ/DAZ fall back to softfloat wholesale.
  *
- * XEMU_SSE_NEON=0 kills the path; XEMU_SSE_NEON=2 runs BOTH paths and
- * aborts on any non-NaN-class divergence (differential self-check).
- */
-
-/*
- * Ships DARK on Apple Silicon (opt-in): measured neutral on the heavy
- * bench scene once PGO landed — the profile-guided softfloat helpers
- * already recovered most of the margin, and the per-op FPCR bracket
- * (serializing msr when the guest runs FTZ) eats the rest
- * (interleaved A/B 2026-07-04: off 31.30 +/- 1.35 vs on
- * 31.72 +/- 0.17, deltas +2.17/-0.54/-0.39 — parity). Kept for
- * per-title A/B: the differential harness (=2) proved the path
- * bit-exact over live gameplay, so flipping it on is risk-free where
- * it wins.
+ * On by default on aarch64 hosts with perf.hard_fpu: the sticky bracket
+ * (d76ddd7b20) measured +1.9 fps, 3/3 pairs, and the differential
+ * harness proved the path bit-exact over live gameplay.
  *
  * On x86_64 hosts the fast path is stronger than on ARM: host and
  * guest share the ISA, so _mm_{add,sub,mul,div,min,max}_{ps,ss} ARE
@@ -3866,37 +3855,25 @@ void helper_emms(CPUX86State *env)
  * including NaN payload selection and (-0,+0) ordering — and the
  * MXCSR bracket can match FTZ and DAZ independently (no mixed-mode
  * fallback). Sticky-flag accumulation is still skipped (same
- * hard-fpu-family acceptance). Untested for perf on real x86_64
- * hardware — ships dark there too; XEMU_SSE_HOST=2 is the
- * correctness harness to run first (works under Rosetta).
+ * hard-fpu-family acceptance). Untested on real x86_64 hardware, so it
+ * ships dark there: XEMU_SSE_HOST=1 opts in (requires perf.hard_fpu).
  *
- * Knob: XEMU_SSE_HOST (preferred; XEMU_SSE_NEON accepted as a legacy
- * alias). 0/unset = off, 1 = on (requires perf.hard_fpu), 2 =
- * differential self-check (both paths, abort on divergence).
+ * XEMU_SSE_HOST=2, on any host, runs BOTH paths with strict brackets
+ * and aborts on any non-NaN-class divergence (differential self-check;
+ * works under Rosetta).
  */
 static int xemu_sse_neon_mode(void)
 {
     static int mode = -1;
     if (mode < 0) {
         const char *e = getenv("XEMU_SSE_HOST");
-        if (!e) {
-            e = getenv("XEMU_SSE_NEON");
-        }
-        if (e && e[0] == '1' && g_config.perf.hard_fpu) {
-            mode = 1;
-        } else if (e && e[0] == '2') {
+        if (e && e[0] == '2') {
             mode = 2;
-        } else if (e) {
-            mode = 0;
         } else {
 #if defined(__aarch64__)
-            /* Default on where the =2 bit-exactness receipt exists
-             * (60 s zero-divergence) and the sticky bracket measured
-             * +1.9 fps (3/3 pairs). x86_64 stays opt-in pending a
-             * clean =2 run on real silicon. */
             mode = g_config.perf.hard_fpu ? 1 : 0;
 #else
-            mode = 0;
+            mode = (e && e[0] == '1' && g_config.perf.hard_fpu) ? 1 : 0;
 #endif
         }
     }

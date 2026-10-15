@@ -55,11 +55,11 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | HLT BSOD recovery (force IF=1) | reverted | Masked a blocked thread; cured nothing | `6eea148914` |
 | icount warp from the main loop | fixed | Warped from a clock missing the slice's instructions: a timer fired late by host scheduling, ~3% of `vanilla-exit` replays diverged. cc5d72113f only made it rarer | `icount_vcpu_warps` |
 | Caching JIT write-protect flips | reverted | Parity; the 9.7% was sampler skid | ledger |
-| Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped, `XEMU_RAS=0`); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
+| Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
 | TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `XEMU_SUBPAGE_DIRTY=0` |
 | xpage full-flush backstop | fixed | Flushes aren't rare (139 per 20 s streaming) → the v0.11 lag; unlink registry | `XEMU_XPAGE_UNLINK=0` |
 | Superblock seams, then region formation | closed | −1.6% to −4.5%: TCG spills before any exiting branch | `ee1de9f654`, `d65fc5f83e` |
-| SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `XEMU_SSE_HOST=0` |
+| SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `d76ddd7b20` |
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
@@ -93,7 +93,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 
 ## Open frontier (ranked)
 1. **PFIFO doorbell lock wait.** On heavy-f1, `user_write` blocked on `pfifo.lock` is ≈9.6% of vCPU samples. PFIFO holds the lock mostly across the reports safety-valve fence wait (`REPORTS_SUBMIT`); moving that under `pgraph.lock` was −38% (see PFIFO dead ends). Open: deliver without a fence wait on the PFIFO thread at all.
-2. **x87 helpers.** The inline cache never ran after 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/) and its fork layers are removed; the exact write-through path (`XEMU_X87_WT`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU.
+2. **x87 helpers.** The inline cache never ran after 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/) and its fork layers are removed; the exact write-through path (`4d2466d106`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU.
 3. **Is W2 GPU-bound?** Fewest draws, slowest anchor. Run Phase 2.
 4. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
 5. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.

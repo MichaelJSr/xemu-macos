@@ -25,24 +25,13 @@
  * the fill-time eip pairing guards coincidental slot reuse.
  * Prediction state only: mispredicts fall back to
  * helper_lookup_tb_ptr, tb pointers are cleared with the jump cache
- * (xemu_i386_ras_flush, and per page xemu_i386_ras_flush_page),
- * XEMU_RAS=0 disables both sides.
+ * (xemu_i386_ras_flush, and per page xemu_i386_ras_flush_page).
  *
  * Anything that makes curr_cflags() differ from cpu->tcg_cflags —
  * gdb single-step, breakpoints, exec/nochain logging — delegates to
  * the generic helper wholesale, which also keeps its logging and
  * breakpoint semantics exact.
  */
-
-static bool xemu_ras_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_RAS");
-        on = !(e && e[0] == '0');
-    }
-    return on;
-}
 
 static uint64_t xemu_ras_hits, xemu_ras_fills;
 
@@ -75,8 +64,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
 {
     CPUState *cpu = env_cpu(env);
 
-    if (likely(xemu_ras_on()) &&
-        likely(!cpu->singlestep_enabled) &&
+    if (likely(!cpu->singlestep_enabled) &&
         likely(QTAILQ_EMPTY(&cpu->breakpoints)) &&
         likely(!qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC |
                                    CPU_LOG_TB_NOCHAIN))) {

@@ -1766,12 +1766,16 @@ static void gen_set_fptag(int offs, int value)
 }
 
 #if defined(XBOX)
-static bool xemu_x87_lean(void);
-
-/* Helper path with the lean bit-moving ops (xemu-x87.h). */
+/*
+ * With the inline x87 cache off (the helper path, which both modes run),
+ * the ops that only move bits in env -- push/pop, fnstsw, register moves
+ * and fxch, fchs/fabs, fld1/fldz, ffree -- are emitted as TCG code instead
+ * of helper calls. They write the same env bytes the helpers do, at the
+ * same point in the instruction.
+ */
 static bool x87_lean(void)
 {
-    return !g_use_hard_fpu_inline && xemu_x87_lean();
+    return !g_use_hard_fpu_inline;
 }
 
 /* Copy one 16-byte x87 register image (floatx80 and its padding). */
@@ -1956,8 +1960,7 @@ static void gen_flush_fp(DisasContext *s)
 
 #if defined(XBOX)
 /*
- * Exact write-through inline x87 (XEMU_X87_WT, default on where the backend
- * has FP ops; =0 keeps the helpers).
+ * Exact write-through inline x87 (aarch64 hosts whose backend has FP ops).
  *
  * The aarch64 __hard helpers (fpu_helper.c) read each operand from its
  * 80-bit image with floatx80_to_double_fast, compute one double operation
@@ -3414,16 +3417,6 @@ static void gen_bnd_jmp(DisasContext *s)
  * check. Misses fall through to the helper, which also owns every
  * special case (breakpoints, single-step, logging, epilogue return).
  */
-static bool xemu_ras_inline_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_RAS");
-        on = !(e && e[0] == '0');
-    }
-    return on;
-}
-
 static void xemu_gen_inline_ret_memo(DisasContext *s)
 {
     TCGLabel *slow = gen_new_label();
@@ -3508,18 +3501,20 @@ gen_eob(DisasContext *s, int mode)
          * The inline probes accept a target whose cflags equal this TB's.
          * A one-shot TB (cpu_io_recompile, SMC: CF_NOIRQ plus a count) must
          * not reach another one that way: it skips the icount budget check.
+         * Under -d nochain (CF_NO_GOTO_TB) every exit goes through the
+         * helper, so -d exec,nochain logs every TB.
          */
         bool xemu_probe_ok =
             !(tb_cflags(s->base.tb) &
-              (CF_NO_GOTO_PTR | CF_NOIRQ | CF_COUNT_MASK));
+              (CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_NOIRQ | CF_COUNT_MASK));
         if (s->xemu_ret_exit) {
             s->xemu_ret_exit = false;
-            if (xemu_ras_inline_on() && xemu_probe_ok) {
+            if (xemu_probe_ok) {
                 xemu_gen_inline_ret_memo(s);
             }
             tcg_gen_xemu_lookup_ret_and_goto_ptr();
         } else {
-            if (xemu_ras_inline_on() && xemu_probe_ok) {
+            if (xemu_probe_ok) {
                 TCGv_i32 lin = tcg_temp_new_i32();
                 tcg_gen_addi_i32(lin, cpu_eip, (int32_t)s->cs_base);
                 tcg_gen_xemu_jc_probe_and_goto_ptr(
@@ -3753,19 +3748,9 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
  *   P: sti; nop; nop; cli; cmp ebp,[ebp]; je J
  *   J == P                                    -> DPC list only
  *   J: cmp dword [ebx+0x2c],0; je P           -> DPC list and NextThread
- * Every byte must sit on the STI's page. XEMU_ICOUNT_IDLE=0 turns it off.
+ * Every byte must sit on the STI's page.
  */
 enum { XEMU_IDLE_NONE, XEMU_IDLE_DPC, XEMU_IDLE_DPC_THREAD };
-
-static bool xemu_idle_skip_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_ICOUNT_IDLE");
-        on = icount_enabled() && !(e && e[0] == '0');
-    }
-    return on;
-}
 
 static bool xemu_idle_bytes_match(DisasContext *s, vaddr pc,
                                   const uint8_t *want, int len)
@@ -3788,7 +3773,7 @@ static int xemu_idle_loop_kind(DisasContext *s)
     vaddr sti = s->pc - 1;
     vaddr page = sti & TARGET_PAGE_MASK;
 
-    if (!xemu_idle_skip_on() ||
+    if (!icount_enabled() ||
         ((s->pc + sizeof(head) - 1) & TARGET_PAGE_MASK) != page ||
         !xemu_idle_bytes_match(s, s->pc, head, sizeof(head))) {
         return XEMU_IDLE_NONE;
@@ -4064,16 +4049,14 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             bool emit_fds = true;
 
 #if defined(XBOX)
-            int ptr_mode = xemu_x87_ptr_mode();
-
             if (unlikely(xemu_x87_census_on())) {
                 xemu_gen_counter_inc(&xemu_x87_fdp_legacy);
             }
-            if (ptr_mode && xemu_x87_fdp_eager()) {
+            if (xemu_x87_fdp_eager()) {
                 emit_fds = xemu_x87_fds_needed(s, last_seg);
-            } else if (ptr_mode) {
+            } else {
                 xemu_x87_record_fdp(s, last_seg, last_addr);
-                emit_now = ptr_mode == 2;
+                emit_now = xemu_x87_refute_on();
             }
 #endif
             if (emit_now) {
@@ -4432,15 +4415,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         bool emit_now = true;
 
 #if defined(XBOX)
-        int ptr_mode = xemu_x87_ptr_mode();
-
         if (unlikely(xemu_x87_census_on())) {
             xemu_gen_counter_inc(&xemu_x87_fip_legacy);
         }
-        if (ptr_mode) {
-            xemu_x87_record_fip(s, eip_cur_tl(s));
-            emit_now = ptr_mode == 2;
-        }
+        xemu_x87_record_fip(s, eip_cur_tl(s));
+        emit_now = xemu_x87_refute_on();
 #endif
         if (emit_now) {
             tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
@@ -5207,11 +5186,8 @@ void tcg_x86_init(void)
      * hard helpers compute in 80-bit long double. The backend must have
      * FP ops (Windows ARM64 does not).
      */
-    {
-        const char *e = getenv("XEMU_X87_WT");
-        g_x87_wt = g_use_hard_fpu && !(e && e[0] == '0') &&
-                   tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0);
-    }
+    g_x87_wt = g_use_hard_fpu &&
+               tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0);
 #endif
 #endif
 }

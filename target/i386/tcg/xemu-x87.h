@@ -10,18 +10,17 @@
  * uint64 written only by the single xbox vCPU thread, dumped from atexit()
  * after that thread has stopped.
  *
- * Three mechanisms live here, each with its own latch:
+ * Three mechanisms live here:
  *
  *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Counts the per-instruction
  *       FIP/FDP store pairs against the deferred updates that replace them,
  *       measures mean x87 run length, and counts SSE scalar compares by
  *       operand width.
- *   (2) XEMU_X87_DEFER_FIP  (default on, =0 legacy) defers FIP/FCS/FDP/FDS
- *       to one update per contiguous x87 run. A mid-block exit lands a
- *       pending FIP/FCS from insn_start word 2 (xemu_x87_restore_fip). FDP
- *       has no such record, so under icount, where a mid-block MMIO access
- *       is routine, FDP stays per-insn and FDS is stored only when its
- *       segment changes.
+ *   (2) Exception-pointer deferral: FIP/FCS/FDP/FDS get one update per
+ *       contiguous x87 run. A mid-block exit lands a pending FIP/FCS from
+ *       insn_start word 2 (xemu_x87_restore_fip). FDP has no such record,
+ *       so under icount, where a mid-block MMIO access is routine, FDP
+ *       stays per-insn and FDS is stored only when its segment changes.
  *   (3) XEMU_X87_REFUTE=1 puts (2) in shadow mode: the legacy stores all
  *       still happen, the deferral is computed anyway, and every point where
  *       the deferred state could be observed is checked at runtime (every
@@ -101,6 +100,10 @@ static bool xemu_x87_census_on(void)
     return on;
 }
 
+/*
+ * Latched on first use, which is inside the first translated TB, so the
+ * value cannot change between TBs.
+ */
 static bool xemu_x87_refute_on(void)
 {
     static int on = -1;
@@ -114,46 +117,10 @@ static bool xemu_x87_refute_on(void)
     return on;
 }
 
-/*
- * Mode latches. 0 = legacy, 1 = mechanism live, 2 = refuter (legacy behavior
- * plus the shadow check). Latched on first use, which is inside the first
- * translated TB, so the value cannot change between TBs.
- */
-static int xemu_x87_ptr_mode(void)
-{
-    static int mode = -1;
-    if (mode < 0) {
-        const char *e = getenv("XEMU_X87_DEFER_FIP");
-        int m = (e && e[0] == '0') ? 0 : 1;
-        if (m && xemu_x87_refute_on()) {
-            m = 2;
-        }
-        mode = m;
-    }
-    return mode;
-}
-
 /* FDP per insn, FDS on segment change: see (2) above. */
 static bool xemu_x87_fdp_eager(void)
 {
     return icount_enabled();
-}
-
-/*
- * (4) XEMU_X87_LEAN (default on, =0 legacy). With the inline x87 cache off
- * (the helper path, which both modes run), the ops that only move bits in
- * env -- push/pop, fnstsw, register moves and fxch, fchs/fabs, fld1/fldz --
- * are emitted as TCG code instead of helper calls. They write the same env
- * bytes the helpers do, at the same point in the instruction.
- */
-static bool xemu_x87_lean(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_X87_LEAN");
-        on = (e && e[0] == '0') ? 0 : 1;
-    }
-    return on;
 }
 
 /* Emit "*counter += n". */
@@ -219,7 +186,7 @@ static void xemu_x87_record_fip(DisasContext *s, TCGv eip)
     s->xemu_fip_pc = s->base.pc_next;
     s->xemu_fip_val = eip;
     s->xemu_fip_pend = true;
-    if (xemu_x87_ptr_mode() == 2) {
+    if (xemu_x87_refute_on()) {
         xemu_x87_gen_store_u64(&xemu_x87_fip_rt_pend, 1);
     }
 }
@@ -248,12 +215,12 @@ static void xemu_x87_record_fdp(DisasContext *s, int seg, TCGv addr)
  */
 static void xemu_x87_flush_ptrs(DisasContext *s)
 {
-    int mode;
+    bool refute;
 
     if (!s->xemu_fip_pend && !s->xemu_fdp_pend) {
         return;
     }
-    mode = xemu_x87_ptr_mode();
+    refute = xemu_x87_refute_on();
 
     if (s->xemu_fip_pend) {
         /*
@@ -265,7 +232,7 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
         TCGv_i32 sel = tcg_temp_new_i32();
         tcg_gen_ld_i32(sel, tcg_env,
                        offsetof(CPUX86State, segs[R_CS].selector));
-        if (mode == 2) {
+        if (refute) {
             TCGv_i32 was = tcg_temp_new_i32();
             TCGv was_ip = tcg_temp_new();
             tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpcs));
@@ -285,7 +252,7 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
     }
 
     if (s->xemu_fdp_pend) {
-        if (mode == 2) {
+        if (refute) {
             TCGv_i32 was = tcg_temp_new_i32();
             TCGv was_dp = tcg_temp_new();
             tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpds));
@@ -322,7 +289,7 @@ static bool xemu_x87_fds_needed(DisasContext *s, int seg)
         s->xemu_fds_seg = seg;
         return true;
     }
-    if (xemu_x87_ptr_mode() == 2) {
+    if (xemu_x87_refute_on()) {
         TCGv_i32 sel = tcg_temp_new_i32();
         TCGv_i32 was = tcg_temp_new_i32();
         tcg_gen_ld16u_i32(sel, tcg_env,
@@ -343,7 +310,7 @@ static bool xemu_x87_fds_needed(DisasContext *s, int seg)
  */
 static void xemu_x87_boundary_check(DisasContext *s)
 {
-    if (xemu_x87_ptr_mode() != 2) {
+    if (!xemu_x87_refute_on()) {
         return;
     }
     if (s->xemu_fip_pend && s->pc_save != -1) {
@@ -383,7 +350,7 @@ static void xemu_x87_boundary_check(DisasContext *s)
 void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
                           uint64_t back)
 {
-    bool refute = xemu_x87_ptr_mode() == 2;
+    bool refute = xemu_x87_refute_on();
     target_ulong fip = env->eip - back;
     uint16_t fcs = env->segs[R_CS].selector;
 
