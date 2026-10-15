@@ -560,7 +560,7 @@ static uint64_t xemu_istep_cuts, xemu_istep_steps;
  * TB that follows an I/O instruction). Step TBs stay out of the jump
  * cache, are never chained to, and exit to this loop after each step. A
  * remainder longer than XEMU_ISTEP_MAX_RESUME runs as a normal TB, which
- * is cheaper than stepping it. XEMU_ICOUNT_STEP=0 restores upstream.
+ * is cheaper than stepping it. Replay keeps upstream's cut TBs.
  */
 #define XEMU_ISTEP_CF   (CF_NO_GOTO_TB | CF_NO_GOTO_PTR | 1)
 #define XEMU_ISTEP_MASK (CF_COUNT_MASK | CF_NO_GOTO_TB | CF_NO_GOTO_PTR | \
@@ -581,17 +581,6 @@ static struct {
 void xemu_istep_disarm(void)
 {
     xemu_istep.left = 0;
-}
-
-static bool xemu_icount_step_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_ICOUNT_STEP");
-        on = icount_enabled() && replay_mode == REPLAY_MODE_NONE &&
-             !(e && e[0] == '0');
-    }
-    return on;
 }
 
 static bool xemu_tbprof_on(void)
@@ -1392,7 +1381,8 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
         assert(insns_left <= CF_COUNT_MASK);
         assert(cpu->icount_extra == 0);
 #if defined(XBOX)
-        if (xemu_icount_step_on() && tb_cflags(tb) == curr_cflags(cpu) &&
+        if (replay_mode == REPLAY_MODE_NONE &&
+            tb_cflags(tb) == curr_cflags(cpu) &&
             QTAILQ_EMPTY(&cpu->breakpoints) &&
             QTAILQ_EMPTY(&cpu->watchpoints) && !cpu->singlestep_enabled) {
             /* CF_PCREL: the cpu state holds this TB's start pc now. */

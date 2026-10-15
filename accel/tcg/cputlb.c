@@ -59,7 +59,7 @@
 /*
  * Defined in accel/tcg/tb-maint.c (function-local extern idiom, as for
  * xemu_lookup_tb): xemu_io_prepare_calls / xemu_io_recompiles are the
- * XEMU_INV_PROF census that sizes XEMU_ELIDE_CANDOIO, and
+ * XEMU_INV_PROF census of the recompiles the can_do_io elision removes, and
  * xemu_tb_invalidate_phys_range_fast is tb_invalidate_phys_range_fast plus
  * a "page still holds code" answer.
  */

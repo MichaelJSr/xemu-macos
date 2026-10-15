@@ -89,9 +89,10 @@ uint64_t xemu_inv_recycle_cold;
 uint64_t xemu_inv_span_nochain;
 
 /*
- * (f) MMIO recompile census, counted in cputlb.c's io_prepare. Sizes the
- * XEMU_ELIDE_CANDOIO gate: the recompiles are exactly what the elision
- * removes, so the rate has to be read from a XEMU_ELIDE_CANDOIO=0 run.
+ * (f) MMIO recompile census, counted in cputlb.c's io_prepare. The
+ * recompiles are exactly what the can_do_io elision (translator.c)
+ * removes, so normal-mode runs read ~0; icount and replay keep the stores
+ * and populate it.
  */
 uint64_t xemu_io_prepare_calls;
 uint64_t xemu_io_recompiles;

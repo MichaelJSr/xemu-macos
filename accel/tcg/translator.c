@@ -29,8 +29,8 @@
 #endif
 
 /*
- * XEMU_ELIDE_CANDOIO (default 1): do not emit the per-TB can_do_io
- * bookkeeping stores. The flag is only ever read by icount
+ * Do not emit the per-TB can_do_io bookkeeping stores unless something
+ * observes the flag. It is only ever read by icount
  * (tcg-accel-ops-icount.c, icount-common.c), by replay debugging
  * (watchpoint.c), and by io_prepare()'s cpu_io_recompile() trigger,
  * which exists to re-run a mid-TB MMIO access under CF_MEMI_ONLY for
@@ -40,26 +40,18 @@
  *
  * Latched on the first translation, which is before the first TB runs;
  * icount and replay are both fixed at machine init, so a cached TB can
- * never outlive the answer. XEMU_ELIDE_CANDOIO=0 restores the stores.
+ * never outlive the answer.
  */
 static bool xemu_elide_can_do_io(void)
 {
     static int on = -1;
     if (on < 0) {
-        int m = 1;
-        const char *e = getenv("XEMU_ELIDE_CANDOIO");
-        if (e) {
-            m = (e[0] == '1') ? 1 : 0;
-        }
-        if (icount_enabled()) {
-            m = 0;
-        }
+        on = !icount_enabled();
 #ifndef CONFIG_USER_ONLY
         if (replay_mode != REPLAY_MODE_NONE) {
-            m = 0;
+            on = 0;
         }
 #endif
-        on = m;
     }
     return on;
 }
