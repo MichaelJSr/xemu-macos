@@ -341,6 +341,77 @@ int qemu_timeout_ns_to_ms(int64_t ns)
 }
 
 
+#if defined(XBOX) && defined(CONFIG_DARWIN) && !defined(CONFIG_PPOLL)
+#include <sys/event.h>
+/*
+ * xemu on macOS: there is no ppoll() and g_poll() takes milliseconds, so
+ * sub-millisecond deadlines (the PIT and both OHCI frame timers tick at
+ * 1 kHz) used to be busy-waited: a full core per instance. Sleep on a
+ * one-shot kqueue timer instead, whose fd joins the poll set so fd events
+ * still end the wait at once. NOTE_CRITICAL opts out of timer coalescing,
+ * which adds ~25% of the timeout to select/nanosleep sleeps. The last
+ * XBOX_POLL_SPIN_NS are spun so timers still fire within microseconds.
+ */
+#define XBOX_POLL_SPIN_NS 25000
+
+static __thread int xbox_poll_kq = -1;
+static __thread Notifier xbox_poll_kq_exit;
+
+static void xbox_poll_kq_close(Notifier *n, void *unused)
+{
+    close(xbox_poll_kq);
+    xbox_poll_kq = -1;
+}
+
+/* g_poll with a nanosecond timeout; -2 if there is no kqueue to sleep on */
+static int xbox_poll_timed(GPollFD *fds, guint nfds, int64_t timeout)
+{
+    struct kevent64_s kev;
+    GPollFD stack_fds[16], *all;
+    int ret;
+
+    if (xbox_poll_kq < 0) {
+        int kq = kqueue();
+        if (kq < 0) {
+            return -2;
+        }
+        if (kq >= FD_SETSIZE) {
+            /* glib's g_poll is select() based on macOS */
+            close(kq);
+            return -2;
+        }
+        qemu_set_cloexec(kq);
+        xbox_poll_kq = kq;
+        xbox_poll_kq_exit.notify = xbox_poll_kq_close;
+        qemu_thread_atexit_add(&xbox_poll_kq_exit);
+    }
+    EV_SET64(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+             NOTE_NSECONDS | NOTE_CRITICAL, timeout, 0, 0, 0);
+    if (kevent64(xbox_poll_kq, &kev, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE,
+                 NULL) < 0) {
+        return -2;
+    }
+    all = nfds < ARRAY_SIZE(stack_fds) ? stack_fds : g_new(GPollFD, nfds + 1);
+    memcpy(all, fds, nfds * sizeof(GPollFD));
+    all[nfds] = (GPollFD){ .fd = xbox_poll_kq, .events = G_IO_IN };
+    /* The millisecond timeout is only a backstop: the timer ends the wait. */
+    ret = g_poll(all, nfds + 1, qemu_timeout_ns_to_ms(timeout) + 1);
+    if (ret > 0 && (all[nfds].revents & G_IO_IN)) {
+        ret--;
+    }
+    for (guint i = 0; i < nfds; i++) {
+        fds[i].revents = all[i].revents;
+    }
+    /* Fired or not: deleting it also clears the kqueue's readability. */
+    EV_SET64(&kev, 1, EVFILT_TIMER, EV_DELETE, 0, 0, 0, 0, 0);
+    kevent64(xbox_poll_kq, &kev, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE, NULL);
+    if (all != stack_fds) {
+        g_free(all);
+    }
+    return ret;
+}
+#endif
+
 /* qemu implementation of g_poll which uses a nanosecond timeout but is
  * otherwise identical to g_poll
  */
@@ -364,6 +435,23 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
     }
 #else
 
+#if defined(XBOX) && defined(CONFIG_DARWIN)
+    if (timeout > 0) {
+        int64_t end = get_clock() + timeout;
+        int ret = timeout > XBOX_POLL_SPIN_NS
+            ? xbox_poll_timed(fds, nfds, timeout - XBOX_POLL_SPIN_NS) : 0;
+        if (ret != -2) {
+            if (ret != 0) {
+                return ret;     /* an fd is ready, or an error */
+            }
+            while (get_clock() < end) {
+                /* the last few microseconds */
+            }
+            return g_poll(fds, nfds, 0);
+        }
+        /* no kqueue: fall through to the spin below */
+    }
+#endif
 #ifdef XBOX
     /* Timers are facilitated by this function. Busy-wait if the deadline is
      * near, to avoid missing deadlines due to costly sleeps.
