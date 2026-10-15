@@ -38,6 +38,9 @@
 
 static int g_use_hard_fpu;
 static int g_use_hard_fpu_inline;
+#if defined(XBOX)
+static int g_x87_wt; /* write-through inline x87 (x87_wt_*) */
+#endif
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #include "ui/xemu-settings.h"
@@ -250,6 +253,11 @@ typedef struct DisasContext {
     int fpstt_delta;
     TCGv_fp fpregs[8];
     TCGv_fp ft0;
+#if defined(XBOX)
+    /* Write-through x87: canonical register values (x87_wt_*). */
+    TCGv_f64 wt_st[8];
+    TCGv_f64 wt_ft0;
+#endif
 } DisasContext;
 
 /*
@@ -1911,7 +1919,172 @@ static void gen_flush_fp(DisasContext *s)
 #endif
     s->fpstt_delta = 0;
     s->flcr_set = false;
+#if defined(XBOX)
+    /* Write-through: env is always current, so dropping the copies is all. */
+    for (int i = 0; i < 8; i++) {
+        s->wt_st[i] = NULL;
+    }
+    s->wt_ft0 = NULL;
+#endif
 }
+
+#if defined(XBOX)
+/*
+ * Exact write-through inline x87 (XEMU_X87_WT, default on where the backend
+ * has FP ops; =0 keeps the helpers).
+ *
+ * The aarch64 __hard helpers (fpu_helper.c) read each operand from its
+ * 80-bit image with floatx80_to_double_fast, compute one double operation
+ * under the live FPCR, and write double_to_floatx80_fast of the result.
+ * This path does exactly that inline, without the call:
+ *  - every result is written to env at once, as the helper writes it, so
+ *    env is current after each instruction and any mid-block exit
+ *    (cpu_io_recompile under icount, a guest #PF) is safe;
+ *  - the conversions are the backend's ld80f/st80f, which match the C
+ *    conversions bit for bit;
+ *  - each register's double, as the next helper would read it back (a
+ *    denormal becomes signed zero, a NaN the default quiet NaN), is kept
+ *    in a temp until the next helper call or block end (gen_flush_fp), so
+ *    a chain of x87 instructions does not reconvert;
+ *  - the FPCR is never written: the helpers round with whatever it holds.
+ * Only blocks with precision control double/extended (HF_FPU_PC) use it:
+ * single precision rounds results to float (pack_arm64) and keeps the
+ * helpers. FT0 temps from memory operands are consumed in the same
+ * instruction by an inline op, so they are not stored to env->ft0.
+ */
+static bool x87_wt(DisasContext *s)
+{
+    return g_x87_wt && fpu_using_double_precision(s);
+}
+
+/* canon = floatx80_to_double_fast(double_to_floatx80_fast(bits)) */
+static void x87_wt_canon(TCGv_i64 canon, TCGv_i64 bits)
+{
+    TCGv_i64 e = tcg_temp_new_i64();
+    TCGv_i64 f = tcg_temp_new_i64();
+    TCGv_i64 sgn = tcg_temp_new_i64();
+    TCGv_i64 x = tcg_temp_new_i64();
+    TCGv_i64 zero = tcg_constant_i64(0);
+
+    tcg_gen_extract_i64(e, bits, 52, 11);
+    tcg_gen_andi_i64(f, bits, 0x000FFFFFFFFFFFFFull);
+    tcg_gen_andi_i64(sgn, bits, 0x8000000000000000ull);
+    tcg_gen_ori_i64(x, sgn, 0x7FF8000000000000ull);
+    tcg_gen_movcond_i64(TCG_COND_NE, x, f, zero, x, bits);
+    tcg_gen_movcond_i64(TCG_COND_EQ, x, e, tcg_constant_i64(0x7ff), x, bits);
+    tcg_gen_movcond_i64(TCG_COND_EQ, canon, e, zero, sgn, x);
+}
+
+static TCGv_f64 x87_wt_from_bits(TCGv_i64 bits)
+{
+    TCGv_f64 v = tcg_temp_new_f64();
+    tcg_gen_mov64i_f64(v, bits);
+    return v;
+}
+
+/*
+ * ST(i) as the helpers read it. ld80f/st80f are the backend's inline
+ * floatx80_to_double_fast/double_to_floatx80_fast (tcg-target.c.inc), which
+ * match the C bit for bit.
+ */
+static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
+{
+    TCGv_f64 *slot = &s->wt_st[(s->fpstt_delta + i) & 7];
+    if (!*slot) {
+        *slot = tcg_temp_new_f64();
+        tcg_gen_ld80f_f64(*slot, gen_stn_ptr(i));
+    }
+    return *slot;
+}
+
+static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
+{
+    if (!s->wt_ft0) {
+        s->wt_ft0 = tcg_temp_new_f64();
+        tcg_gen_ld80f_f64(s->wt_ft0, gen_ft0_ptr());
+    }
+    return s->wt_ft0;
+}
+
+/* ST(i) = r, as a helper writes double_to_floatx80_fast(result). */
+static void x87_wt_set_st_both(DisasContext *s, int i, TCGv_f64 r,
+                               TCGv_i64 bits)
+{
+    TCGv_i64 canon = tcg_temp_new_i64();
+    tcg_gen_st80f_f64(r, gen_stn_ptr(i));
+    x87_wt_canon(canon, bits);
+    s->wt_st[(s->fpstt_delta + i) & 7] = x87_wt_from_bits(canon);
+}
+
+static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
+{
+    TCGv_i64 bits = tcg_temp_new_i64();
+    tcg_gen_mov64f_i64(bits, r);
+    x87_wt_set_st_both(s, i, r, bits);
+}
+
+static void x87_wt_set_st_bits(DisasContext *s, int i, TCGv_i64 bits)
+{
+    x87_wt_set_st_both(s, i, x87_wt_from_bits(bits), bits);
+}
+
+/* FT0 from a memory operand: only the canonical value, no env store. */
+static void x87_wt_set_ft0_bits(DisasContext *s, TCGv_i64 bits)
+{
+    TCGv_i64 canon = tcg_temp_new_i64();
+    x87_wt_canon(canon, bits);
+    s->wt_ft0 = x87_wt_from_bits(canon);
+}
+
+/* a op b for the arith ops' operand order; NULL for the compares. */
+static TCGv_f64 x87_wt_arith(int op, TCGv_f64 a, TCGv_f64 b)
+{
+    TCGv_f64 r = tcg_temp_new_f64();
+    switch (op) {
+    case 0:
+        tcg_gen_add_f64(r, a, b);
+        break;
+    case 1:
+        tcg_gen_mul_f64(r, a, b);
+        break;
+    case 4:
+        tcg_gen_sub_f64(r, a, b);
+        break;
+    case 5:
+        tcg_gen_sub_f64(r, b, a);
+        break;
+    case 6:
+        tcg_gen_div_f64(r, a, b);
+        break;
+    case 7:
+        tcg_gen_div_f64(r, b, a);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    return r;
+}
+
+/* helper_fcom_ST0_FT0: fpus C3/C2/C0 from a double compare. */
+static void x87_wt_fcom(TCGv_f64 a, TCGv_f64 b)
+{
+    TCGv_i64 res = tcg_temp_new_i64();
+    TCGv_i64 fpus = tcg_temp_new_i64();
+
+    tcg_gen_com_f64(res, a, b);     /* ZF|PF|CF = C3|C2|C0 at 6,2,0 */
+    tcg_gen_andi_i64(res, res, 0x45);
+    tcg_gen_shli_i64(res, res, 8);
+    tcg_gen_ld16u_i64(fpus, tcg_env, offsetof(CPUX86State, fpus));
+    tcg_gen_andi_i64(fpus, fpus, ~0x4500);
+    tcg_gen_or_i64(fpus, fpus, res);
+    tcg_gen_st16_i64(fpus, tcg_env, offsetof(CPUX86State, fpus));
+}
+#else
+static bool x87_wt(DisasContext *s)
+{
+    return false;
+}
+#endif
 
 /*
  * Ugly macros to handle soft FPU helper generation
@@ -1972,6 +2145,9 @@ static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_copy(gen_ft0_ptr(), gen_stn_ptr(st_index));
+        if (x87_wt(s)) {
+            s->wt_ft0 = s->wt_st[(s->fpstt_delta + st_index) & 7];
+        }
         return;
     }
 #endif
@@ -1984,6 +2160,10 @@ static void gen_fmov_ST0_STN(DisasContext *s, int st_index)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
+        if (x87_wt(s)) {
+            s->wt_st[s->fpstt_delta & 7] =
+                s->wt_st[(s->fpstt_delta + st_index) & 7];
+        }
         return;
     }
 #endif
@@ -1996,6 +2176,10 @@ static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
+        if (x87_wt(s)) {
+            s->wt_st[(s->fpstt_delta + st_index) & 7] =
+                s->wt_st[s->fpstt_delta & 7];
+        }
         return;
     }
 #endif
@@ -2044,6 +2228,13 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
         tcg_gen_st_i64(hi0, pn, 8);
         tcg_gen_st_i64(lon, p0, 0);
         tcg_gen_st_i64(hin, p0, 8);
+        if (x87_wt(s)) {
+            TCGv_f64 *a = &s->wt_st[s->fpstt_delta & 7];
+            TCGv_f64 *b = &s->wt_st[(s->fpstt_delta + st_index) & 7];
+            TCGv_f64 t = *a;
+            *a = *b;
+            *b = t;
+        }
         return;
     }
 #endif
@@ -2077,14 +2268,55 @@ static void gen_enter_mmx(DisasContext *s)
     }
 }
 
+#if defined(XBOX)
+/* (double) of a float32 memory operand, as float32_to_floatx80__hard. */
+static TCGv_f64 x87_wt_f32_to_f64(TCGv_i32 arg)
+{
+    TCGv_f32 t = tcg_temp_new_f32();
+    TCGv_f64 d = tcg_temp_new_f64();
+    tcg_gen_mov32i_f32(t, arg);
+    tcg_gen_cvt32f_f64(d, t);
+    return d;
+}
+
+static TCGv_i64 x87_wt_bits(TCGv_f64 d)
+{
+    TCGv_i64 bits = tcg_temp_new_i64();
+    tcg_gen_mov64f_i64(bits, d);
+    return bits;
+}
+
+/* (double) of an int32, exact: int32_to_floatx80__hard. */
+static TCGv_f64 x87_wt_i32_to_f64(TCGv_i32 arg)
+{
+    TCGv_f64 d = tcg_temp_new_f64();
+    tcg_gen_cvt32i_f64(d, arg);
+    return d;
+}
+#endif
+
 static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_set_ft0_bits(s, x87_wt_bits(x87_wt_f32_to_f64(arg)));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(flds_FT0, arg);
     fp_pc_wrapper(gen_flds_FT0)(s, arg);
 }
 
 static void gen_flds_ST0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_f64 d = x87_wt_f32_to_f64(arg);
+        gen_fpush(s);
+        x87_wt_set_st(s, 0, d);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(flds_ST0, arg);
     gen_fpush(s);
     fp_pc_wrapper(gen_flds_ST0)(s, arg);
@@ -2092,12 +2324,25 @@ static void gen_flds_ST0(DisasContext *s, TCGv_i32 arg)
 
 static void gen_fldl_FT0(DisasContext *s, TCGv_i64 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_set_ft0_bits(s, arg);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(fldl_FT0, arg);
     fp_pc_wrapper(gen_fldl_FT0)(s, arg);
 }
 
 static void gen_fldl_ST0(DisasContext *s, TCGv_i64 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        gen_fpush(s);
+        x87_wt_set_st_bits(s, 0, arg);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(fldl_ST0, arg);
     gen_fpush(s);
     fp_pc_wrapper(gen_fldl_ST0)(s, arg);
@@ -2105,12 +2350,26 @@ static void gen_fldl_ST0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fildl_FT0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_set_ft0_bits(s, x87_wt_bits(x87_wt_i32_to_f64(arg)));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(fildl_FT0, arg);
     fp_pc_wrapper(gen_fildl_FT0)(s, arg);
 }
 
 static void gen_fildl_ST0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_f64 d = x87_wt_i32_to_f64(arg);
+        gen_fpush(s);
+        x87_wt_set_st(s, 0, d);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_T(fildl_ST0, arg);
     gen_fpush(s);
     fp_pc_wrapper(gen_fildl_ST0)(s, arg);
@@ -2125,12 +2384,27 @@ static void gen_fildll_ST0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fsts_ST0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        /* (float) of the double, under the live FPCR */
+        TCGv_f32 t = tcg_temp_new_f32();
+        tcg_gen_cvt64f_f32(t, x87_wt_get_st(s, 0));
+        tcg_gen_mov32f_i32(arg, t);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_T_v(fsts_ST0, arg);
     fp_pc_wrapper(gen_fsts_ST0)(s, arg);
 }
 
 static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        tcg_gen_mov64f_i64(arg, x87_wt_get_st(s, 0));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_T_v(fstl_ST0, arg);
     fp_pc_wrapper(gen_fstl_ST0)(s, arg);
 }
@@ -2240,6 +2514,12 @@ static void gen_fchs_ST0(DisasContext *s)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_sign(gen_stn_ptr(0), true);
+        /*
+         * Reload rather than negate the cached double: for an 80-bit value
+         * beyond double range, floatx80_to_double_fast folds an exponent
+         * bit into bit 63, so it does not commute with the sign.
+         */
+        s->wt_st[s->fpstt_delta & 7] = NULL;
         return;
     }
 #endif
@@ -2252,6 +2532,7 @@ static void gen_fabs_ST0(DisasContext *s)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_sign(gen_stn_ptr(0), false);
+        s->wt_st[s->fpstt_delta & 7] = NULL;   /* as in gen_fchs_ST0 */
         return;
     }
 #endif
@@ -2321,6 +2602,19 @@ static void gen_fcos(DisasContext *s)
 
 static void gen_helper_fp_arith_ST0_FT0(DisasContext *s, int op)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_f64 a = x87_wt_get_st(s, 0);
+        TCGv_f64 b = x87_wt_get_ft0(s);
+        if (op == 2 || op == 3) {
+            x87_wt_fcom(a, b);
+        } else {
+            /* 4 fsub ST0-FT0, 5 fsubr FT0-ST0, 6 fdiv, 7 fdivr */
+            x87_wt_set_st(s, 0, x87_wt_arith(op, a, b));
+        }
+        return;
+    }
+#endif
     if (g_use_hard_fpu_inline) {
         fp_pc_wrapper(gen_helper_fp_arith_ST0_FT0)(s, op);
     } else {
@@ -2390,6 +2684,19 @@ static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
 /* NOTE the exception in "r" op ordering */
 static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        /*
+         * op 4 is fsubr_STN_ST0 (ST0 - STi), 5 fsub_STN_ST0 (STi - ST0),
+         * 6 fdivr_STN_ST0, 7 fdiv_STN_ST0: the reverse of the ST0_FT0
+         * order with STi in the first operand, hence op ^ 1.
+         */
+        TCGv_f64 a = x87_wt_get_st(s, opreg);
+        TCGv_f64 b = x87_wt_get_st(s, 0);
+        x87_wt_set_st(s, opreg, x87_wt_arith(op >= 4 ? op ^ 1 : op, a, b));
+        return;
+    }
+#endif
     if (g_use_hard_fpu_inline) {
         fp_pc_wrapper(gen_helper_fp_arith_STN_ST0)(s, op, opreg);
     } else {
@@ -2423,6 +2730,10 @@ static void gen_fld1_ST0(DisasContext *s)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_const(gen_stn_ptr(0), 0x3fff, 0x8000000000000000ULL);
+        if (x87_wt(s)) {
+            s->wt_st[s->fpstt_delta & 7] =
+                x87_wt_from_bits(tcg_constant_i64(0x3FF0000000000000ull));
+        }
         return;
     }
 #endif
@@ -2435,6 +2746,10 @@ static void gen_fldz_ST0(DisasContext *s)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_const(gen_stn_ptr(0), 0, 0);
+        if (x87_wt(s)) {
+            s->wt_st[s->fpstt_delta & 7] =
+                x87_wt_from_bits(tcg_constant_i64(0));
+        }
         return;
     }
 #endif
@@ -2448,6 +2763,9 @@ static void gen_fldz_FT0(DisasContext *s)
 #if defined(XBOX)
     if (x87_lean()) {
         x87_gen_const(gen_ft0_ptr(), 0, 0);
+        if (x87_wt(s)) {
+            s->wt_ft0 = x87_wt_from_bits(tcg_constant_i64(0));
+        }
         return;
     }
 #endif
@@ -3857,7 +4175,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_helper_frstor(tcg_env, s->A0,
                               tcg_constant_i32(s->dflag - 1));
             update_fip = update_fdp = false;
-            if (g_use_hard_fpu_inline) {
+            /*
+             * The restored control word may change precision control,
+             * which the write-through x87 path reads from the TB flags.
+             */
+            if (g_use_hard_fpu_inline || g_x87_wt) {
                 gen_update_eip_next(s);
                 gen_eob(s, DISAS_EOB_ONLY);
             }
@@ -5104,24 +5426,27 @@ void tcg_x86_init(void)
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_hard_fpu = g_config.perf.hard_fpu;
-#if TCG_TARGET_HAS_fpu
     /*
-     * The inline cache keeps x87 values in TCG temps until the block ends.
-     * Under icount every MMIO access that is not a block's last instruction
-     * longjmps out (cpu_io_recompile) and re-executes from the access, so
-     * the cached results would be lost; use the hard-FPU helpers instead.
-     */
-    g_use_hard_fpu_inline = g_use_hard_fpu && !icount_enabled();
-#else
-    /*
-     * The host TCG backend advertises no inline FP ops (Windows ARM64:
-     * TCG_TARGET_HAS_fpu is forced to 0 there to dodge an llvm-mingw
-     * qemu_build_not_reached link failure). Emitting inline FP TCG ops
-     * anyway makes tcg_op_supported() return 0 and trips the codegen
-     * assert (debug) / __builtin_unreachable (release). Keep the
-     * helper-based hard FPU on such hosts by leaving the inline path off.
+     * The old inline x87 cache stays off. It was gated on
+     * TCG_TARGET_HAS_fpu, which is private to tcg/ and so never defined
+     * here: it has not run since 3eb1b2de10 (2026-08-09). It is not exact
+     * against the helpers (dead push/pop values never reach env, f32
+     * caching, FUCOM as a double compare...) and loses cached values on a
+     * mid-block exit (cpu_io_recompile under icount, a guest #PF).
      */
     g_use_hard_fpu_inline = 0;
+#if defined(__aarch64__)
+    /*
+     * The write-through path (x87_wt_*) instead matches the aarch64
+     * double-based hard helpers bit for bit. Not on x86_64 hosts, whose
+     * hard helpers compute in 80-bit long double. The backend must have
+     * FP ops (Windows ARM64 does not).
+     */
+    {
+        const char *e = getenv("XEMU_X87_WT");
+        g_x87_wt = g_use_hard_fpu && !(e && e[0] == '0') &&
+                   tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0);
+    }
 #endif
 #endif
 }
@@ -5196,6 +5521,12 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->fpstt_delta = 0;
     dc->ft0 = NULL;
     dc->flcr_set = false;
+#if defined(XBOX)
+    for (int i = 0; i < 8; i++) {
+        dc->wt_st[i] = NULL;
+    }
+    dc->wt_ft0 = NULL;
+#endif
 }
 
 static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)

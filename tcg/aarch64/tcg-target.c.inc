@@ -3276,12 +3276,17 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
     /* MOVZ W(TMP2), #0x3C00 */
     tcg_out_insn(s, 3502, SUB, TCG_TYPE_I32,
                  TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP2);
-    /* TMP1 = exp64 (could be negative or > 2046 for edge cases we missed,
-       but AND below masks to 11 bits which is correct for normal range) */
+    /*
+     * TMP1 = exp80 - 15360, outside 1..2046 for an 80-bit exponent beyond
+     * double range. As floatx80_to_double_fast: its low 12 bits, shifted
+     * to bit 52, ORed in, so bit 11 lands on the sign bit (that C has no
+     * range check here, and the inline load must match it bit for bit).
+     */
     tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
-                     TCG_REG_TMP1, TCG_REG_TMP1, 0x7FF);
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 52);
+                     TCG_REG_TMP1, TCG_REG_TMP1, 0xFFF);
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_TMP1, 12, 11);
+    tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1);
     /* TMP0 = sign | (exp64 << 52) | frac_trunc */
     tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
               | ((TCG_REG_TMP0 & 0x1f) << 5));

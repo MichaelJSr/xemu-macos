@@ -234,10 +234,11 @@ Other automation interfaces (windowed or headless):
 
   Write tagged input while paused, then advance. `shift` is guest time
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs
-  ~1.5x faster (60 fps on Azurik's heavy scene on a loaded M2 Ultra,
-  40 fps with 0) and suits games that are not CPU-bound. Only the null
-  renderer is deterministic: offscreen rendering runs under icount but
-  GPU reports follow GPU time. Keep the network off and bind no XMU.
+  ~1.5x faster (about 90 fps on Azurik's heavy scene on a loaded M2
+  Ultra, about 46 with 0) and suits games that are not CPU-bound. Only
+  the null renderer is deterministic: offscreen rendering runs under
+  icount but GPU reports follow GPU time. Keep the network off and bind
+  no XMU.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once (a windowed one still crashes with a

@@ -2045,6 +2045,12 @@ static void gen_FXRSTOR(DisasContext *s, X86DecodedInsn *decode)
         gen_NM_exception(s);
     } else {
         gen_helper_fxrstor(tcg_env, s->A0);
+#ifdef XBOX
+        /* New precision control: see frstor in translate.c. */
+        if (g_x87_wt) {
+            s->base.is_jmp = DISAS_EOB_NEXT;
+        }
+#endif
     }
 }
 
@@ -4840,6 +4846,12 @@ static void gen_XRSTOR(DisasContext *s, X86DecodedInsn *decode)
 
     tcg_gen_concat_tl_i64(features, cpu_regs[R_EAX], cpu_regs[R_EDX]);
     gen_helper_xrstor(tcg_env, s->A0, features);
+#ifdef XBOX
+    /* New precision control: see frstor in translate.c. */
+    if (g_x87_wt) {
+        s->base.is_jmp = DISAS_EOB_NEXT;
+    }
+#endif
     if (s->cpuid_7_0_ebx_features & CPUID_7_0_EBX_MPX) {
         /*
          * XRSTOR is how MPX is enabled, which changes how
