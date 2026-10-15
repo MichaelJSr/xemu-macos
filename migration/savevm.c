@@ -27,6 +27,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/boards.h"
 #include "net/net.h"
 #include "migration.h"
@@ -178,6 +179,40 @@ static QEMUFile *qemu_fopen_bdrv(BlockDriverState *bs, int is_writable)
         return qemu_file_new_input(QIO_CHANNEL(qio_channel_block_new(bs)));
     }
 }
+
+#ifdef XBOX
+/*
+ * xemu: snapshot state in one block request. Through qemu_fopen_bdrv each
+ * 32 KiB QEMUFile buffer is its own coroutine and thread-pool round trip
+ * (about 2200 for a 70 MiB state, most of a loadvm's time). Loads read
+ * the whole state first; saves write it to memory and then in one go.
+ */
+static QEMUFile *qemu_fopen_bdrv_whole(BlockDriverState *bs, int64_t size,
+                                       Error **errp)
+{
+    QIOChannelBuffer *bioc;
+    QEMUFile *f;
+    uint8_t *buf;
+    int ret;
+
+    if (size <= 0 || size > INT_MAX || !(buf = g_try_malloc(size))) {
+        return qemu_fopen_bdrv(bs, 0);
+    }
+    ret = bdrv_load_vmstate(bs, buf, 0, size);
+    if (ret < 0) {
+        g_free(buf);
+        error_setg_errno(errp, -ret, "Could not read the VM state");
+        return NULL;
+    }
+    bioc = qio_channel_buffer_new(0);
+    g_free(bioc->data);
+    bioc->data = buf;
+    bioc->capacity = bioc->usage = size;
+    f = qemu_file_new_input(QIO_CHANNEL(bioc));
+    object_unref(OBJECT(bioc));
+    return f;
+}
+#endif
 
 
 /* QEMUFile timer support.
@@ -3306,6 +3341,26 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
     }
 
     /* save the VM state */
+#ifdef XBOX
+    {
+        /* In memory, then one write (qemu_fopen_bdrv_whole). */
+        QIOChannelBuffer *bioc = qio_channel_buffer_new(160 * MiB);
+        f = qemu_file_new_output(QIO_CHANNEL(bioc));
+        ret = qemu_savevm_state(f, errp);
+        ret2 = ret < 0 ? 0 : qemu_fflush(f);
+        vm_state_size = bioc->usage;
+        if (ret >= 0 && ret2 >= 0) {
+            ret2 = vm_state_size > INT_MAX ? -EFBIG :
+                bdrv_save_vmstate(bs, bioc->data, 0, vm_state_size);
+            if (ret2 < 0) {
+                error_setg_errno(errp, -ret2, "Error while writing VM state");
+            }
+        } else if (ret >= 0) {
+            error_setg_errno(errp, -ret2, "Error while writing VM state");
+        }
+        qemu_fclose(f);
+    }
+#else
     f = qemu_fopen_bdrv(bs, 1);
     if (!f) {
         error_setg(errp, "Could not open VM state file");
@@ -3314,6 +3369,7 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
     ret = qemu_savevm_state(f, errp);
     vm_state_size = qemu_file_transferred(f);
     ret2 = qemu_fclose(f);
+#endif
     if (ret < 0) {
         goto the_end;
     }
@@ -3478,11 +3534,18 @@ bool load_snapshot(const char *name, const char *vmstate,
     }
 
     /* restore the VM state */
+#ifdef XBOX
+    f = qemu_fopen_bdrv_whole(bs_vm_state, sn.vm_state_size, errp);
+    if (!f) {
+        goto err_drain;
+    }
+#else
     f = qemu_fopen_bdrv(bs_vm_state, 0);
     if (!f) {
         error_setg(errp, "Could not open VM state file");
         goto err_drain;
     }
+#endif
 
     qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
     mis->from_src_file = f;

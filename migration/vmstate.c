@@ -18,6 +18,7 @@
 #include "qobject/json-writer.h"
 #include "qemu-file.h"
 #include "qemu/bitops.h"
+#include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "trace.h"
 
@@ -131,6 +132,87 @@ static void vmstate_handle_alloc(void *ptr, const VMStateField *field,
     }
 }
 
+#ifdef XBOX
+/*
+ * xemu: an array of plain integers (the APU's and nv2a's register files and
+ * the DSP memories, about 400k elements a savestate) in one read and an
+ * in-place byte swap, instead of an info->get call per element. The stream
+ * is the same big-endian elements.
+ */
+static bool vmstate_scalar_array(const VMStateField *field, int n, int size)
+{
+    const VMStateInfo *info = field->info;
+
+    if (n < 16 ||
+        (field->flags & (VMS_STRUCT | VMS_VSTRUCT | VMS_ARRAY_OF_POINTER))) {
+        return false;
+    }
+    switch (size) {
+    case 1:
+        return info == &vmstate_info_uint8 || info == &vmstate_info_int8;
+    case 2:
+        return info == &vmstate_info_uint16 || info == &vmstate_info_int16;
+    case 4:
+        return info == &vmstate_info_uint32 || info == &vmstate_info_int32;
+    case 8:
+        return info == &vmstate_info_uint64 || info == &vmstate_info_int64;
+    default:
+        return false;
+    }
+}
+
+static int vmstate_load_scalar_array(QEMUFile *f, void *base, int n,
+                                     int size)
+{
+    size_t bytes = (size_t)n * size;
+
+    if (qemu_get_buffer(f, base, bytes) != bytes) {
+        return qemu_file_get_error(f) ?: -EIO;
+    }
+    for (int i = 0; i < n; i++) {
+        switch (size) {
+        case 2:
+            be16_to_cpus((uint16_t *)base + i);
+            break;
+        case 4:
+            be32_to_cpus((uint32_t *)base + i);
+            break;
+        case 8:
+            be64_to_cpus((uint64_t *)base + i);
+            break;
+        }
+    }
+    return qemu_file_get_error(f);
+}
+
+static void vmstate_save_scalar_array(QEMUFile *f, const void *base, int n,
+                                      int size)
+{
+    size_t bytes = (size_t)n * size;
+    g_autofree uint8_t *buf = NULL;
+
+    if (size == 1) {
+        qemu_put_buffer(f, base, bytes);
+        return;
+    }
+    buf = g_malloc(bytes);
+    for (int i = 0; i < n; i++) {
+        switch (size) {
+        case 2:
+            stw_be_p(buf + 2 * i, ((const uint16_t *)base)[i]);
+            break;
+        case 4:
+            stl_be_p(buf + 4 * i, ((const uint32_t *)base)[i]);
+            break;
+        case 8:
+            stq_be_p(buf + 8 * i, ((const uint64_t *)base)[i]);
+            break;
+        }
+    }
+    qemu_put_buffer(f, buf, bytes);
+}
+#endif
+
 int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
                        void *opaque, int version_id, Error **errp)
 {
@@ -184,6 +266,19 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
                 first_elem = *(void **)first_elem;
                 assert(first_elem || !n_elems || !size);
             }
+#ifdef XBOX
+            if (vmstate_scalar_array(field, n_elems, size)) {
+                ret = vmstate_load_scalar_array(f, first_elem, n_elems, size);
+                if (ret < 0) {
+                    error_setg(errp, "Failed to load %s state: stream error: "
+                               "%d", vmsd->name, ret);
+                    qemu_file_set_error(f, ret);
+                    trace_vmstate_load_field_error(field->name, ret);
+                    return ret;
+                }
+                n_elems = 0;
+            }
+#endif
             for (i = 0; i < n_elems; i++) {
                 void *curr_elem = first_elem + size * i;
                 const VMStateField *inner_field;
@@ -473,6 +568,16 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
                 assert(first_elem || !n_elems || !size);
             }
 
+#ifdef XBOX
+            /* The description of a compressible array names element 0. */
+            if (vmstate_scalar_array(field, n_elems, size) &&
+                (!vmdesc_loop || vmsd_can_compress(field))) {
+                vmsd_desc_field_start(vmsd, vmdesc_loop, field, 0, n_elems);
+                vmstate_save_scalar_array(f, first_elem, n_elems, size);
+                vmsd_desc_field_end(vmsd, vmdesc_loop, field, size);
+                n_elems = 0;
+            }
+#endif
             for (i = 0; i < n_elems; i++) {
                 void *curr_elem = first_elem + size * i;
                 const VMStateField *inner_field;
