@@ -49,6 +49,7 @@
 #include "tlb-bounds.h"
 #include "internal-common.h"
 #include "xemu-xpage.h"
+#include "exec/icount.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin-memory.h"
 #endif
@@ -222,6 +223,24 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
  * high), since otherwise we are likely to have a significant amount of
  * conflict misses.
  */
+#if defined(XBOX)
+/*
+ * xemu: the TLB is resized only when it is flushed. Under icount with the
+ * null renderer nothing flushes it in a steady scene (normal mode's ~190
+ * flushes/s come from the Vulkan/GL surface callbacks), and loadvm's flush
+ * skips clean mmu_idx, so a -S start kept tlb_init's 256 entries for good.
+ * Deterministic mode starts at, and never shrinks below, this size; the
+ * guest cannot observe it.
+ */
+#define XEMU_ICOUNT_TLB_BITS 13
+
+static size_t xemu_tlb_floor(void)
+{
+    return (size_t)1 << (icount_enabled() ? XEMU_ICOUNT_TLB_BITS
+                                          : CPU_TLB_DYN_MIN_BITS);
+}
+#endif
+
 static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
                                   int64_t now)
 {
@@ -258,6 +277,9 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         }
         new_size = MAX(ceil, 1 << CPU_TLB_DYN_MIN_BITS);
     }
+#if defined(XBOX)
+    new_size = MAX(new_size, xemu_tlb_floor());
+#endif
 
     if (new_size == old_size) {
         if (window_expired) {
@@ -320,6 +342,9 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
 static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
 {
     size_t n_entries = 1 << CPU_TLB_DYN_DEFAULT_BITS;
+#if defined(XBOX)
+    n_entries = MAX(n_entries, xemu_tlb_floor());
+#endif
 
     tlb_window_reset(desc, now, 0);
     desc->n_used_entries = 0;
@@ -956,6 +981,14 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
         unsigned int n = tlb_n_entries(fast);
         unsigned int i;
+
+        /*
+         * xemu: a clean mmu_idx holds no valid entry (filling one marks
+         * it dirty, only a full flush clears the mark), so skip the scan.
+         */
+        if (!(cpu->neg.tlb.c.dirty & (1 << mmu_idx))) {
+            continue;
+        }
 
         for (i = 0; i < n; i++) {
             tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
