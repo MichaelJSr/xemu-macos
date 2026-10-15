@@ -14,7 +14,9 @@
  * input). The arithmetic is kept operation for operation, so the output
  * is the library's bit for bit. On aarch64 the library's build fuses three
  * expressions into multiply-adds (the interpolation and the two bounds
- * checks); this file fuses those three and nothing else.
+ * checks); this file fuses those three and nothing else. Two rewrites give
+ * the same values with less work: the step 1 / ratio is divided once per
+ * ratio instead of once per sample, and the wrap to [0, 1) uses floor().
  */
 
 #ifndef HW_XBOX_MCPX_APU_VP_LINEAR_SRC_H
@@ -55,13 +57,15 @@ static inline bool linear_src_bad_ratio(double ratio)
            ratio > (1.0 * LINEAR_SRC_MAX_RATIO);
 }
 
+/*
+ * The library's fmod_one: x - lrint(x), plus one when that is negative.
+ * x - floor(x) is the same double for every |x| < 2^62 but -0.0 (checked
+ * on 3.5e8 values), and the input index here is never negative, while its
+ * dependency chain, which bounds the resampling loop, is half as long.
+ */
 static inline double linear_src_fmod_one(double x)
 {
-    double res = x - lrint(x);
-    if (res < 0.0) {
-        return res + 1.0;
-    }
-    return res;
+    return x - floor(x);
 }
 
 /*
@@ -79,7 +83,8 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
 #endif
     const int channels = s->channels;
     long in_count, in_used, out_count, out_gen;
-    double src_ratio, input_index, rem;
+    double src_ratio, step, input_index, rem;
+    bool ramp;
 
     *in_used_frames = *out_gen_frames = 0;
     if (s->last_ratio < (1.0 / LINEAR_SRC_MAX_RATIO)) {
@@ -103,6 +108,8 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
     if (linear_src_bad_ratio(src_ratio)) {
         return false;
     }
+    step = 1.0 / src_ratio;
+    ramp = out_count > 0 && fabs(s->last_ratio - target) > 1e-20;
     input_index = s->last_position;
 
     /* Samples before the first one of the input. */
@@ -111,10 +118,10 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
                             (double)in_used) >= in_count) {
             break;
         }
-        if (out_count > 0 &&
-            fabs(s->last_ratio - target) > 1e-20) {
+        if (ramp) {
             src_ratio = s->last_ratio +
                         out_gen * (target - s->last_ratio) / out_count;
+            step = 1.0 / src_ratio;
         }
         for (int ch = 0; ch < channels; ch++) {
             double last = s->last_value[ch];
@@ -123,7 +130,7 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
                                                   last);
             out_gen++;
         }
-        input_index += 1.0 / src_ratio;
+        input_index += step;
     }
 
     rem = linear_src_fmod_one(input_index);
@@ -133,10 +140,10 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
     while (out_gen < out_count &&
            LINEAR_SRC_MADD((double)channels, input_index,
                            (double)in_used) < in_count) {
-        if (out_count > 0 &&
-            fabs(s->last_ratio - target) > 1e-20) {
+        if (ramp) {
             src_ratio = s->last_ratio +
                         out_gen * (target - s->last_ratio) / out_count;
+            step = 1.0 / src_ratio;
         }
         for (int ch = 0; ch < channels; ch++) {
             double prev = in[in_used - channels + ch];
@@ -145,7 +152,7 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
                                                   prev, prev);
             out_gen++;
         }
-        input_index += 1.0 / src_ratio;
+        input_index += step;
         rem = linear_src_fmod_one(input_index);
         in_used += channels * lrint(input_index - rem);
         input_index = rem;
