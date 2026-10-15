@@ -19,7 +19,7 @@
 #   - phase timestamps in <outdir>/phases.log for interval attribution
 #   - a mid-forward screenshot scored by bench-screenshot.py
 #
-# Extra env (e.g. XEMU_SUBPAGE_FAST=0) is passed through to xemu.
+# Extra env (e.g. XEMU_INV_PROF=1) is passed through to xemu.
 # --app PATH clones that bundle instead of dist/xemu.app.
 # --isolate-caches gives the run its own cold shader/pipeline cache, the
 # same way bench-savestate-ab.sh does (portable-mode marker in the CLONED

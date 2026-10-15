@@ -63,7 +63,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Full TLB flush per MemAccessCallback change (~190/s in normal mode) | fixed | Its old 0.2%-of-vCPU estimate missed the refills and the rebuilt jump cache and near-return memo: 2.3% of host instructions per frame (det offscreen); now a ranged refill | `tlb_flush_host_range` |
 | Superblock seams, then region formation | closed | −1.6% to −4.5%: TCG spills before any exiting branch | `ee1de9f654`, `d65fc5f83e` |
 | SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `d76ddd7b20` |
-| Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
+| Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `ede35b84f9` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `4e7531cfae` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
 | Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |

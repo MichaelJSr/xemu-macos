@@ -102,34 +102,28 @@ int xemu_subpage_fast_mode(void)
     static int mode = -1;
     if (mode < 0) {
         /*
-         * Default-on since 2026-07-18 (quiet-machine receipts): the
-         * stub completes ~2M eligible stores/s inline on the heavy
-         * scene — the population is dominated by renderer-watched
-         * pages, ~20x the code-page trap count the original +0.3-0.7
-         * prediction was sized on — for +12% draws/s throughput (6/6
-         * interleaved pairs, both 3-pair batches; fps flat because the
-         * guest's effect-load controller re-saturates frame time).
-         * Refuter: ~19.5M validated decisions, 0 violations, across
-         * static, loadvm-cycling, and first-visit-streaming soaks.
-         * XEMU_SUBPAGE_FAST=0 reverts to the plain slow path.
-         */
-        /*
-         * Default matches the documented contract (header): on Apple
-         * (validated dev/CI target) default-on; elsewhere default-off.
-         * The aarch64 backend emits the stub on non-Apple aarch64 too
-         * (Linux/Windows ARM), where this path is unvalidated — don't
-         * ship it default-on there. XEMU_SUBPAGE_FAST=1 opts in.
+         * On since 2026-07-18 (quiet-machine receipts): the stub
+         * completes ~2M eligible stores/s inline on the heavy scene —
+         * the population is dominated by renderer-watched pages, ~20x
+         * the code-page trap count the original +0.3-0.7 prediction was
+         * sized on — for +12% draws/s throughput (6/6 interleaved
+         * pairs, both 3-pair batches; fps flat because the guest's
+         * effect-load controller re-saturates frame time). Refuter:
+         * ~19.5M validated decisions, 0 violations, across static,
+         * loadvm-cycling, and first-visit-streaming soaks.
+         *
+         * Always on for Apple (the validated dev/CI target). The
+         * aarch64 backend emits the stub on non-Apple aarch64 too
+         * (Linux/Windows ARM), where this path is unvalidated, so it
+         * stays off there unless XEMU_SUBPAGE_FAST=1 opts in.
          */
 #ifdef __APPLE__
         int m = 1;
 #else
-        int m = 0;
+        const char *f = getenv("XEMU_SUBPAGE_FAST");
+        int m = (f && f[0] == '1') ? 1 : 0;
 #endif
-        const char *e = getenv("XEMU_SUBPAGE_FAST");
-        if (e) {
-            m = (e[0] == '1') ? 1 : 0;
-        }
-        e = getenv("XEMU_SUBPAGE_FAST_REFUTE");
+        const char *e = getenv("XEMU_SUBPAGE_FAST_REFUTE");
         if (m && e && e[0] == '1') {
             m = 2;
         }

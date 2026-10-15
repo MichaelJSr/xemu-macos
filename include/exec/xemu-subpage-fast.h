@@ -28,8 +28,8 @@
 /*
  * Mode: 0 = off, 1 = inline skip, 2 = refute (decisions cross-checked
  * in C against ground truth; store always via the real helper).
- * Defaults: __APPLE__ 1, elsewhere 0; XEMU_SUBPAGE_FAST=0/1 overrides
- * both ways; XEMU_SUBPAGE_FAST_REFUTE=1 selects mode 2.
+ * Apple builds: always 1. Elsewhere 0 unless XEMU_SUBPAGE_FAST=1 opts in
+ * (unvalidated off Apple). XEMU_SUBPAGE_FAST_REFUTE=1 selects mode 2.
  * First >0 call performs lazy init; a missing "xbox.ram" block or
  * allocation failure forces mode 0 (warned once).
  */
