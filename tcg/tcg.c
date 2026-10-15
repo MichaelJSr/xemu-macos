@@ -1827,6 +1827,7 @@ static void tcg_context_init(unsigned max_threads)
 
     memset(s, 0, sizeof(*s));
     s->nb_globals = 0;
+    s->const_gen = 1;   /* gen 0 marks the zeroed slots empty */
 
     init_call_layout(&info_helper_ld32_mmu);
     init_call_layout(&info_helper_ld64_mmu);
@@ -1989,11 +1990,14 @@ void tcg_func_start(TCGContext *s)
     /* No temps have been previously allocated for size or locality.  */
     tcg_temp_ebb_reset_freed(s);
 
-    /* No constant temps have been previously allocated. */
-    for (int i = 0; i < TCG_TYPE_COUNT; ++i) {
-        if (s->const_table[i]) {
-            g_hash_table_remove_all(s->const_table[i]);
-        }
+    /*
+     * No constant temps have been previously allocated.  xemu: bumping the
+     * generation empties the table in O(1); upstream's per-type GHashTable
+     * shrank on g_hash_table_remove_all and regrew on every TB.
+     */
+    if (unlikely(++s->const_gen == 0)) {
+        memset(s->const_slots, 0, sizeof(s->const_slots));
+        s->const_gen = 1;
     }
 
     s->nb_ops = 0;
@@ -2359,21 +2363,46 @@ void tcg_temp_free_vec(TCGv_vec arg)
     tcg_temp_free_internal(tcgv_vec_temp(arg));
 }
 
+/*
+ * xemu: constants are deduplicated per TB by (type, value) in an open
+ * addressing table embedded in TCGContext, one for all types.  A TB holds
+ * at most TCG_MAX_TEMPS temps, so with twice as many slots a probe always
+ * reaches an empty slot.  The lookup result is exactly upstream's (same temp
+ * for the same type and value, new temps allocated in the same order), so
+ * the generated code does not change.
+ */
+QEMU_BUILD_BUG_ON(TCG_CONST_SLOTS < 2 * TCG_MAX_TEMPS);
+QEMU_BUILD_BUG_ON(TCG_MAX_TEMPS > UINT16_MAX + 1);
+QEMU_BUILD_BUG_ON(TCG_TYPE_COUNT > UINT8_MAX + 1);
+
+static inline unsigned tcg_const_hash(TCGType type, int64_t val)
+{
+    /* Fibonacci hashing; the type lands in bits 61-63, inside the top bits. */
+    uint64_t x = ((uint64_t)val ^ ((uint64_t)type << 61)) *
+                 0x9e3779b97f4a7c15ull;
+    return x >> (64 - TCG_CONST_HASH_BITS);
+}
+
 TCGTemp *tcg_constant_internal(TCGType type, int64_t val)
 {
     TCGContext *s = tcg_ctx;
-    GHashTable *h = s->const_table[type];
-    TCGTemp *ts;
+    uint32_t gen = s->const_gen;
+    unsigned i = tcg_const_hash(type, val);
+    TCGConstSlot *slot;
+    TCGTemp *ts = NULL;
 
-    if (h == NULL) {
-        h = g_hash_table_new(g_int64_hash, g_int64_equal);
-        s->const_table[type] = h;
+    for (;; i = (i + 1) & (TCG_CONST_SLOTS - 1)) {
+        slot = &s->const_slots[i];
+        if (slot->gen != gen) {
+            break;          /* empty: @slot takes the new constant */
+        }
+        if (slot->val == val && slot->type == type) {
+            ts = &s->temps[slot->temp_idx];
+            break;
+        }
     }
 
-    ts = g_hash_table_lookup(h, &val);
     if (ts == NULL) {
-        int64_t *val_ptr;
-
         ts = tcg_temp_alloc(s);
 
         if (TCG_TARGET_REG_BITS == 32 && type == TCG_TYPE_I64) {
@@ -2399,16 +2428,17 @@ TCGTemp *tcg_constant_internal(TCGType type, int64_t val)
              */
             ts[HOST_BIG_ENDIAN].val = val;
             ts[!HOST_BIG_ENDIAN].val = val >> 32;
-            val_ptr = &ts[HOST_BIG_ENDIAN].val;
         } else {
             ts->base_type = type;
             ts->type = type;
             ts->kind = TEMP_CONST;
             ts->temp_allocated = 1;
             ts->val = val;
-            val_ptr = &ts->val;
         }
-        g_hash_table_insert(h, val_ptr, ts);
+        slot->val = val;
+        slot->gen = gen;
+        slot->temp_idx = temp_idx(ts);
+        slot->type = type;
     }
 
     return ts;

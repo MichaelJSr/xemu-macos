@@ -325,6 +325,20 @@ typedef struct TCGTempSet {
 } TCGTempSet;
 
 /*
+ * xemu: one slot of the per-TB constant table (see tcg_constant_internal).
+ * The slot is live only while @gen equals TCGContext.const_gen.
+ */
+#define TCG_CONST_HASH_BITS 10
+#define TCG_CONST_SLOTS (1 << TCG_CONST_HASH_BITS)
+
+typedef struct TCGConstSlot {
+    int64_t val;
+    uint32_t gen;
+    uint16_t temp_idx;
+    uint8_t type;
+} TCGConstSlot;
+
+/*
  * With 1 128-bit output, a 32-bit host requires 4 output parameters,
  * which leaves a maximum of 28 other slots.  Which is enough for 7
  * 128-bit operands.
@@ -442,7 +456,6 @@ struct TCGContext {
      */
     bool carry_live;
 
-    GHashTable *const_table[TCG_TYPE_COUNT];
     TCGTempSet free_temps[TCG_TYPE_COUNT];
     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
 
@@ -466,6 +479,14 @@ struct TCGContext {
     sigjmp_buf jmp_trans;
 
     void *disas_ctx;
+
+    /*
+     * xemu: constant temps of the TB being translated, keyed by (type, value).
+     * Kept by value (not a pointer) because tcg_register_thread copies the
+     * context, and placed last so the other fields keep short offsets.
+     */
+    uint32_t const_gen;
+    TCGConstSlot const_slots[TCG_CONST_SLOTS];
 };
 
 static inline bool temp_readonly(TCGTemp *ts)
