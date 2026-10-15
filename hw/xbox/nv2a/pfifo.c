@@ -151,15 +151,34 @@ void pfifo_guest_kick(NV2AState *d)
 void pfifo_icount_sync(NV2AState *d)
 {
     if (qatomic_read(&d->pfifo.inline_pusher)) {
+        /*
+         * Nothing to push: the pusher would only read registers. Only the
+         * vCPU writes DMA_GET/DMA_PUT in this mode (reset and loads run
+         * with it parked).
+         */
+        if (d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] ==
+            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT]) {
+            return;
+        }
         /* As on the PFIFO thread, not under the guest's x87 rounding
          * mode, which TCG leaves in the host FPCR (see mcpx_apu_det_tick). */
         fenv_t guest_fenv;
         fegetenv(&guest_fenv);
         fesetenv(FE_DFL_ENV);
+        /*
+         * Hold both locks for the whole run instead of swapping them around
+         * every method (pfifo_run_puller): same order as pgraph_write. The
+         * method paths that take the BQL drop pfifo.lock first unless the
+         * BQL is already held (pgraph_inline_bql_lock).
+         */
         qemu_mutex_lock(&d->pfifo.lock);
+        qemu_mutex_lock(&d->pgraph.lock);
         if (!qatomic_read(&d->pfifo.halt)) {
+            d->pfifo.inline_locked = true;
             pfifo_run_pusher(d);
+            d->pfifo.inline_locked = false;
         }
+        qemu_mutex_unlock(&d->pgraph.lock);
         qemu_mutex_unlock(&d->pfifo.lock);
         fesetenv(&guest_fenv);
         return;
@@ -218,14 +237,19 @@ static bool pfifo_stall_for_flip(NV2AState *d)
     bool should_stall = false;
 
     if (qatomic_read(&d->pgraph.waiting_for_flip)) {
-        qemu_mutex_lock(&d->pgraph.lock);
+        bool locked = d->pfifo.inline_locked;
+        if (!locked) {
+            qemu_mutex_lock(&d->pgraph.lock);
+        }
         if (!is_flip_stall_complete(d)) {
             should_stall = true;
         } else {
             qatomic_set(&d->pgraph.waiting_for_flip, false);
             nsprof_flip_wait_end();
         }
-        qemu_mutex_unlock(&d->pgraph.lock);
+        if (!locked) {
+            qemu_mutex_unlock(&d->pgraph.lock);
+        }
     }
 
     return should_stall;
@@ -253,6 +277,8 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
     uint32_t *engine_reg = &d->pfifo.regs[NV_PFIFO_CACHE1_ENGINE];
     uint32_t *status = &d->pfifo.regs[NV_PFIFO_CACHE1_STATUS];
     ssize_t num_proc = -1;
+    /* Inline run on the vCPU: pgraph.lock is held throughout. */
+    bool locked = d->pfifo.inline_locked;
 
     // TODO think more about locking
 
@@ -277,8 +303,10 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         SET_MASK(*engine_reg, 3 << (4*subchannel), entry.engine);
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, entry.engine);
 
-        qemu_mutex_unlock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
+        if (!locked) {
+            qemu_mutex_unlock(&d->pfifo.lock);
+            qemu_mutex_lock(&d->pgraph.lock);
+        }
 
         if (can_fifo_access(d)) {
             pgraph_context_switch(d, entry.channel_id);
@@ -289,8 +317,10 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
             }
         }
 
-        qemu_mutex_unlock(&d->pgraph.lock);
-        qemu_mutex_lock(&d->pfifo.lock);
+        if (!locked) {
+            qemu_mutex_unlock(&d->pgraph.lock);
+            qemu_mutex_lock(&d->pfifo.lock);
+        }
 
     } else if (method >= 0x100) {
         // method passed to engine
@@ -316,8 +346,10 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         assert(engine == ENGINE_GRAPHICS);
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, engine);
 
-        qemu_mutex_unlock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
+        if (!locked) {
+            qemu_mutex_unlock(&d->pfifo.lock);
+            qemu_mutex_lock(&d->pgraph.lock);
+        }
 
         if (can_fifo_access(d)) {
             num_proc =
@@ -325,8 +357,10 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
                               num_words_available, max_lookahead_words, inc);
         }
 
-        qemu_mutex_unlock(&d->pgraph.lock);
-        qemu_mutex_lock(&d->pfifo.lock);
+        if (!locked) {
+            qemu_mutex_unlock(&d->pgraph.lock);
+            qemu_mutex_lock(&d->pfifo.lock);
+        }
     } else {
         assert(!"Unrecognized pfifo puller method");
     }

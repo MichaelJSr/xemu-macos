@@ -344,6 +344,35 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     }
 }
 
+/*
+ * Take the BQL from method context, with pg->lock dropped. The vCPU runs
+ * methods itself in deterministic null mode (pfifo_icount_sync), maybe
+ * under the BQL already; without it, it also drops pfifo.lock, which it
+ * holds for the whole inline run, so the BQL is never taken under it.
+ * Returns whether the BQL was already held.
+ */
+static bool pgraph_inline_bql_lock(NV2AState *d)
+{
+    bool had_bql = bql_locked();
+    if (!had_bql) {
+        if (d->pfifo.inline_locked) {
+            qemu_mutex_unlock(&d->pfifo.lock);
+        }
+        bql_lock();
+    }
+    return had_bql;
+}
+
+static void pgraph_inline_bql_unlock(NV2AState *d, bool had_bql)
+{
+    if (!had_bql) {
+        bql_unlock();
+        if (d->pfifo.inline_locked) {
+            qemu_mutex_lock(&d->pfifo.lock);
+        }
+    }
+}
+
 void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -366,20 +395,13 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
 
         qatomic_set(&pg->waiting_for_context_switch, true);
         qemu_mutex_unlock(&pg->lock);
-        /* The vCPU runs this itself in deterministic null mode, maybe
-         * under the BQL already (pfifo_icount_sync). */
-        bool had_bql = bql_locked();
-        if (!had_bql) {
-            bql_lock();
-        }
+        bool had_bql = pgraph_inline_bql_lock(d);
         /* Atomic RMW: pg->lock is dropped here, so this raise races the
          * vCPU's lock-free interrupt-clear once PGRAPH dispatch is BQL-free
          * (docs/Finished/pgraph-lockless-audit.md §C). */
         qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_CONTEXT_SWITCH);
         nv2a_update_irq(d);
-        if (!had_bql) {
-            bql_unlock();
-        }
+        pgraph_inline_bql_unlock(d, had_bql);
         qemu_mutex_lock(&pg->lock);
     }
 }
@@ -1165,15 +1187,9 @@ DEF_METHOD(NV097, NO_OPERATION)
     qatomic_set(&pg->waiting_for_nop, true);
 
     qemu_mutex_unlock(&pg->lock);
-    /* See pgraph_context_switch: maybe on the vCPU, under the BQL. */
-    bool had_bql = bql_locked();
-    if (!had_bql) {
-        bql_lock();
-    }
+    bool had_bql = pgraph_inline_bql_lock(d);
     nv2a_update_irq(d);
-    if (!had_bql) {
-        bql_unlock();
-    }
+    pgraph_inline_bql_unlock(d, had_bql);
     qemu_mutex_lock(&pg->lock);
 }
 

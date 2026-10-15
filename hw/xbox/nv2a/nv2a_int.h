@@ -111,6 +111,8 @@ typedef struct NV2AState {
         uint64_t idle_seq;
         /* Deterministic null mode: the vCPU runs the pusher (pfifo.c). */
         bool inline_pusher;
+        /* the vCPU runs the inline pusher holding pfifo and pgraph locks */
+        bool inline_locked;
     } pfifo;
 
     struct {

@@ -43,7 +43,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 ### Threads, locks, clocks
 - `QEMU_CLOCK_REALTIME` is `CLOCK_MONOTONIC`; `QEMU_CLOCK_HOST` is wall time and can jump. Pace and throttle on REALTIME. `util/qemu-timer.c`.
 - Never block while holding the BQL. `surface_access_callback` drops it before taking `pgraph.lock`. → the whole VM freezes.
-- Every `pfifo_kick(d)` caller holds `d->pfifo.lock` across the kick-set and the broadcast (the idle wait is an untimed `qemu_cond_wait`). `pfifo_run_puller` drops `pfifo.lock` to take `pgraph.lock`, so don't hoist checks that assume it's held. Never suppress a kick. → permanent PFIFO hang. `nv2a/pfifo.c`.
+- Every `pfifo_kick(d)` caller holds `d->pfifo.lock` across the kick-set and the broadcast (the idle wait is an untimed `qemu_cond_wait`). `pfifo_run_puller` drops `pfifo.lock` to take `pgraph.lock`, so don't hoist checks that assume it's held (except the deterministic null inline run, which holds both throughout: `pfifo.inline_locked`; method code that takes the BQL goes through `pgraph_inline_bql_lock`). Never suppress a kick. → permanent PFIFO hang. `nv2a/pfifo.c`.
 - `cpu->mem_access_callbacks` is an RCU list (entries freed after a grace period). Any thread doing guest DMA walks it and must be `rcu_register_thread()`-ed (qemu_main is, in `ui/xemu.c`). → SIGSEGV in `flatview_read_continue`. `system/physmem.c`.
 - PFIFO, vblank, and any new frame-critical thread run at `QOS_CLASS_USER_INTERACTIVE`. → jitter that looks like a regression.
 - The x87 control word changes only through `cpu_set_fpuc()`, because RC is baked into `tb->flags`. → wrong rounding in translated code.
