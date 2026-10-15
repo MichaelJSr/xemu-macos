@@ -302,7 +302,11 @@ void xemu_input_init(void)
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
 
-    if (!SDL_Init(SDL_INIT_GAMEPAD)) {
+    /*
+     * Deterministic mode ignores physical pads (pads change only from the
+     * pipe), so it skips probing the USB and Bluetooth devices for them.
+     */
+    if (!icount_enabled() && !SDL_Init(SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "Failed to initialize SDL gamepad subsystem: %s\n", SDL_GetError());
         exit(1);
     }

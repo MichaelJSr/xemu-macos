@@ -2089,6 +2089,22 @@ static void display_very_early_init(DisplayOptions *o)
     }
 #endif
 
+    if (headless == XEMU_HEADLESS_NULL) {
+        /*
+         * No window: SDL's events are all the loop needs. Without the
+         * video subsystem there is no Cocoa application to start (about
+         * 40 ms of launch on macOS), so no Dock icon either.
+         */
+        if (!SDL_Init(SDL_INIT_EVENTS)) {
+            fprintf(stderr, "Failed to initialize SDL events: %s\n",
+                    SDL_GetError());
+            exit(1);
+        }
+        fprintf(stderr, "CPU: %s\n", xemu_get_cpu_info());
+        fprintf(stderr, "OS_Version: %s\n", xemu_get_os_info());
+        return;
+    }
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Failed to initialize SDL video subsystem: %s\n",
                 SDL_GetError());
@@ -2105,13 +2121,6 @@ static void display_very_early_init(DisplayOptions *o)
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 #endif
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
-
-    if (headless == XEMU_HEADLESS_NULL) {
-        /* The null renderer draws nothing: no window, presenter or UI. */
-        fprintf(stderr, "CPU: %s\n", xemu_get_cpu_info());
-        fprintf(stderr, "OS_Version: %s\n", xemu_get_os_info());
-        return;
-    }
 
     bool use_metal = xemu_present_is_metal();
 

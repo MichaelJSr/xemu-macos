@@ -206,7 +206,8 @@ Other automation interfaces (windowed or headless):
   region that RAM doesn't fully back reads as `""`. Up to 256 regions
   of 1-4096 bytes; exact under icount.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
-  exist (about 1 s after launch; `loadvm` works from then on, no fixed
+  exist (about 30 ms after launch in headless null mode, which starts
+  no video or gamepad subsystem; `loadvm` works from then on, no fixed
   sleep needed) and `xemu: state loaded` after every `loadvm` or incoming
   migration.
 - **Park and resume a machine** without touching the HDD's snapshots:
