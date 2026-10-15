@@ -409,6 +409,50 @@ floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
 
 #endif /* __x86_64__ / __aarch64__ */
 
+/*
+ * xemu: integer fast path for the quiet 80-bit compare (fucom*, fucomi*),
+ * which otherwise runs softfloat on every call. When both operands are
+ * normal (integer bit set) or exactly zero, the order is the sign and then
+ * the (exponent, significand) magnitude, which is what softfloat returns
+ * for them, with no status flags. Everything else (NaN, infinity,
+ * denormals, unnormals, pseudo-denormals) still goes to softfloat.
+ */
+static inline bool floatx80_is_normal_or_zero__hard(floatx80 a)
+{
+    uint32_t e = a.high & 0x7fff;
+    return (e - 1u < 0x7ffeu) ? (a.low >> 63) : (e == 0 && a.low == 0);
+}
+
+static inline FloatRelation
+floatx80_compare_quiet__hard(floatx80 a, floatx80 b, float_status *status)
+{
+    if (likely(floatx80_is_normal_or_zero__hard(a) &&
+               floatx80_is_normal_or_zero__hard(b))) {
+        bool az = !(a.high & 0x7fff), bz = !(b.high & 0x7fff);
+        bool sa = a.high >> 15, sb = b.high >> 15;
+
+        if (az && bz) {
+            return float_relation_equal;
+        }
+        if (az) {
+            return sb ? float_relation_greater : float_relation_less;
+        }
+        if (bz || sa != sb) {
+            return sa ? float_relation_less : float_relation_greater;
+        }
+        unsigned __int128 ka = ((unsigned __int128)(a.high & 0x7fff) << 64) |
+                               a.low;
+        unsigned __int128 kb = ((unsigned __int128)(b.high & 0x7fff) << 64) |
+                               b.low;
+        if (ka == kb) {
+            return float_relation_equal;
+        }
+        return ((ka < kb) ^ sa) ? float_relation_less : float_relation_greater;
+    }
+    return floatx80_compare_quiet(a, b, status);
+}
+
+#define floatx80_compare_quiet floatx80_compare_quiet__hard
 #define floatx80_add          floatx80_add__hard
 #define floatx80_sub          floatx80_sub__hard
 #define floatx80_mul          floatx80_mul__hard
