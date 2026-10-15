@@ -64,7 +64,12 @@ static const int tcg_target_reg_alloc_order[] = {
 
     TCG_REG_V0, TCG_REG_V1, TCG_REG_V2, TCG_REG_V3,
     TCG_REG_V4, TCG_REG_V5, TCG_REG_V6, TCG_REG_V7,
-    /* V8 - V15 are call-saved, and skipped.  */
+    /*
+     * V8 - V15 are call-saved, but only their low 64 bits: scalar FP
+     * temps may use them (xemu); vector types may not.
+     */
+    TCG_REG_V8, TCG_REG_V9, TCG_REG_V10, TCG_REG_V11,
+    TCG_REG_V12, TCG_REG_V13, TCG_REG_V14, TCG_REG_V15,
     TCG_REG_V16, TCG_REG_V17, TCG_REG_V18, TCG_REG_V19,
     TCG_REG_V20, TCG_REG_V21, TCG_REG_V22, TCG_REG_V23,
     TCG_REG_V24, TCG_REG_V25, TCG_REG_V26, TCG_REG_V27,
@@ -155,6 +160,8 @@ static bool patch_reloc(tcg_insn_unit *code_ptr, int type,
 
 #define ALL_GENERAL_REGS  0xffffffffu
 #define ALL_VECTOR_REGS   0xffffffff00000000ull
+#define CALL_SAVED_FP_REGS 0x0000ff0000000000ull
+#define VECTOR_REGS       (ALL_VECTOR_REGS & ~CALL_SAVED_FP_REGS)
 
 /* Match a constant valid for addition (12-bit, optionally shifted).  */
 static inline bool is_aimm(uint64_t val)
@@ -4339,10 +4346,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O0_I1(r);
     case INDEX_op_ld80f_f32:
     case INDEX_op_ld80f_f64:
-        return C_O1_I1(w, r);
+        return C_O1_I1(W, r);
     case INDEX_op_st80f_f32:
     case INDEX_op_st80f_f64:
-        return C_O0_I2(w, r);
+        return C_O0_I2(W, r);
     case INDEX_op_add_f32:
     case INDEX_op_add_f64:
     case INDEX_op_sub_f32:
@@ -4351,7 +4358,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_mul_f64:
     case INDEX_op_div_f32:
     case INDEX_op_div_f64:
-        return C_O1_I2(w, w, w);
+        return C_O1_I2(W, W, W);
     case INDEX_op_abs_f32:
     case INDEX_op_abs_f64:
     case INDEX_op_chs_f32:
@@ -4368,14 +4375,14 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_sin_f64:
     case INDEX_op_cos_f32:
     case INDEX_op_cos_f64:
-        return C_O1_I1(w, w);
+        return C_O1_I1(W, W);
     case INDEX_op_cvt32i_f32:
     case INDEX_op_cvt32i_f64:
     case INDEX_op_cvt64i_f32:
     case INDEX_op_cvt64i_f64:
     case INDEX_op_mov32i_f32:
     case INDEX_op_mov64i_f64:
-        return C_O1_I1(w, r);
+        return C_O1_I1(W, r);
     case INDEX_op_cvt32f_i32:
     case INDEX_op_cvt32f_i64:
     case INDEX_op_cvt64f_i32:
@@ -4398,12 +4405,12 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_cvt_rp_i32_f64:
     case INDEX_op_cvt_rp_i64_f32:
     case INDEX_op_cvt_rp_i64_f64:
-        return C_O1_I1(r, w);
+        return C_O1_I1(r, W);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
     case INDEX_op_coms_f32:
     case INDEX_op_coms_f64:
-        return C_O1_I2(r, w, w);
+        return C_O1_I2(r, W, W);
 
     default:
         return C_NotImplemented;
@@ -4416,8 +4423,8 @@ static void tcg_target_init(TCGContext *s)
     tcg_target_available_regs[TCG_TYPE_I64] = 0xffffffffu;
     tcg_target_available_regs[TCG_TYPE_F32] = 0xffffffff00000000ull;
     tcg_target_available_regs[TCG_TYPE_F64] = 0xffffffff00000000ull;
-    tcg_target_available_regs[TCG_TYPE_V64] = 0xffffffff00000000ull;
-    tcg_target_available_regs[TCG_TYPE_V128] = 0xffffffff00000000ull;
+    tcg_target_available_regs[TCG_TYPE_V64] = VECTOR_REGS;
+    tcg_target_available_regs[TCG_TYPE_V128] = VECTOR_REGS;
 
     tcg_target_call_clobber_regs = -1ull;
     tcg_regset_reset_reg(tcg_target_call_clobber_regs, TCG_REG_X19);
@@ -4453,9 +4460,14 @@ static void tcg_target_init(TCGContext *s)
 /* Saving pairs: (X19, X20) .. (X27, X28), (X29(fp), X30(lr)).  */
 #define PUSH_SIZE  ((30 - 19 + 1) * 8)
 
+/* d8..d15, stored just above the outgoing call arguments.  */
+#define FP_SAVE_OFS  TCG_STATIC_CALL_ARGS_SIZE
+#define FP_SAVE_SIZE (8 * 8)
+
 #define FRAME_SIZE \
     ((PUSH_SIZE \
       + TCG_STATIC_CALL_ARGS_SIZE \
+      + FP_SAVE_SIZE \
       + CPU_TEMP_BUF_NLONGS * sizeof(long) \
       + TCG_TARGET_STACK_ALIGN - 1) \
      & ~(TCG_TARGET_STACK_ALIGN - 1))
@@ -4465,6 +4477,13 @@ QEMU_BUILD_BUG_ON(FRAME_SIZE >= (1 << 14));
 
 /* We're expecting to use a single ADDI insn.  */
 QEMU_BUILD_BUG_ON(FRAME_SIZE - PUSH_SIZE > 0xfff);
+
+static void tcg_out_fp_pair(TCGContext *s, bool load, TCGReg r, int ofs)
+{
+    /* STP/LDP Dt, Dt2, [sp, #ofs] */
+    tcg_out32(s, (load ? 0x6d400000u : 0x6d000000u) | (ofs >> 3) << 15
+              | ((r + 1) & 31) << 10 | TCG_REG_SP << 5 | (r & 31));
+}
 
 static void tcg_target_qemu_prologue(TCGContext *s)
 {
@@ -4489,8 +4508,12 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I64, TCG_REG_SP, TCG_REG_SP,
                  FRAME_SIZE - PUSH_SIZE);
 
+    for (r = TCG_REG_V8; r <= TCG_REG_V14; r += 2) {
+        tcg_out_fp_pair(s, false, r, FP_SAVE_OFS + (r - TCG_REG_V8) * 8);
+    }
+
     /* Inform TCG about how to find TCG locals with register, offset, size.  */
-    tcg_set_frame(s, TCG_REG_SP, TCG_STATIC_CALL_ARGS_SIZE,
+    tcg_set_frame(s, TCG_REG_SP, FP_SAVE_OFS + FP_SAVE_SIZE,
                   CPU_TEMP_BUF_NLONGS * sizeof(long));
 
     if (!tcg_use_softmmu) {
@@ -4518,6 +4541,10 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     /* TB epilogue */
     tb_ret_addr = tcg_splitwx_to_rx(s->code_ptr);
     tcg_out_bti(s, BTI_J);
+
+    for (r = TCG_REG_V8; r <= TCG_REG_V14; r += 2) {
+        tcg_out_fp_pair(s, true, r, FP_SAVE_OFS + (r - TCG_REG_V8) * 8);
+    }
 
     /* Remove TCG locals stack space.  */
     tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, TCG_REG_SP, TCG_REG_SP,

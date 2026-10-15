@@ -9,7 +9,8 @@
  * REGS(letter, register_mask)
  */
 REGS('r', ALL_GENERAL_REGS)
-REGS('w', ALL_VECTOR_REGS)
+REGS('w', VECTOR_REGS)
+REGS('W', ALL_VECTOR_REGS)   /* scalar FP: may use d8-d15 */
 
 /*
  * Define constraint letters for constants:
