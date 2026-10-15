@@ -527,11 +527,11 @@ static int mcpx_apu_pre_load(void *opaque)
     if (d->det.enabled) {
         /*
          * Not in the savestate: XGSCNT and the EP phase, and the DSP
-         * JIT's throttle history. Start from where a fresh process does.
+         * JIT's throttle history (GP only; the EP has no JIT state).
+         * Start from where a fresh process does.
          */
         d->ep_frame_div = 0;
         dsp_reset_jit_throttle(d->gp.dsp);
-        dsp_reset_jit_throttle(d->ep.dsp);
         d->det.rearm = true;
         d->det.loaded = true;
     }

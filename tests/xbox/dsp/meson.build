@@ -35,8 +35,8 @@ test('xbox-mcpx-dsp', exe,
 xbox_test_exes += exe
 
 # Interpreter/JIT differential corpus (see test-dsp-jit-diff.c). The
-# corpus itself is engine-independent; XEMU_DSP_JIT selects the engine
-# per PROCESS (parsed once), which is why each arm is its own test()
+# corpus itself is engine-independent; --jit selects the engine per
+# PROCESS (latched once), which is why each arm is its own test()
 # entry rather than a runtime toggle.
 diff_exe = executable('test-xbox-mcpx-dsp-jit-diff',
                       sources: files('test-dsp-jit-diff.c'),
@@ -46,21 +46,20 @@ xbox_test_exes += diff_exe
 
 # Arm 1: pure-interpreter golden regression. Runs on every platform.
 test('xbox-mcpx-dsp-corpus-interp', diff_exe,
-     env: environment(xbox_dsp_env + {'XEMU_DSP_JIT': '0'}),
+     env: environment(xbox_dsp_env),
      args: ['--tap', '-k', '-p', '/corpus'],
      protocol: 'tap',
      suite: xbox_dsp_suite)
 
 # The inline DSP56300 JIT exists on aarch64 POSIX hosts only
 # (DSP56K_JIT_SUPPORTED, hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h);
-# the JIT arms are meaningless elsewhere. The corpus cores are EP cores,
-# which start on the interpreter unless XEMU_DSP_JIT_EP=1.
+# the JIT arms are meaningless elsewhere.
 if host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
   # Arm 2: same goldens through the JIT, plus a translated-blocks-
   # executed assertion so translator bail-out can't false-green it.
   test('xbox-mcpx-dsp-corpus-jit', diff_exe,
-       env: environment(xbox_dsp_env + {'XEMU_DSP_JIT': '1', 'XEMU_DSP_JIT_EP': '1'}),
-       args: ['--tap', '-k', '-p', '/corpus'],
+       env: environment(xbox_dsp_env),
+       args: ['--tap', '-k', '-p', '/corpus', '--jit'],
        protocol: 'tap',
        suite: xbox_dsp_suite)
 
@@ -69,12 +68,10 @@ if host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
   # dsp_core_t semantic state compared; any divergence aborts.
   test('xbox-mcpx-dsp-jit-diff-sync', diff_exe,
        env: environment(xbox_dsp_env + {
-         'XEMU_DSP_JIT': '1',
-         'XEMU_DSP_JIT_EP': '1',
          'XEMU_DSP_JIT_DIFF': '1',
          'XEMU_DSP_JIT_DIFF_SYNC': '1',
        }),
-       args: ['--tap', '-k', '-p', '/corpus'],
+       args: ['--tap', '-k', '-p', '/corpus', '--jit'],
        protocol: 'tap',
        suite: xbox_dsp_suite)
 

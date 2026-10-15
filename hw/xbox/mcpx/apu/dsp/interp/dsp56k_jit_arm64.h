@@ -65,8 +65,8 @@ void dsp56k_jit_invalidate_all(dsp_core_t *dsp);
 void dsp56k_jit_reset_throttle(dsp_core_t *dsp);
 
 /*
- * Runtime flags. Parsed from XEMU_DSP_JIT / XEMU_DSP_JIT_DIFF on
- * first call. Cached thereafter.
+ * Runtime flags. Latched on the first call from the
+ * dsp56k_jit_set_enabled_from_config() value and XEMU_DSP_JIT_DIFF.
  */
 bool dsp56k_jit_enabled(void);
 bool dsp56k_jit_diff_enabled(void);
@@ -80,10 +80,10 @@ bool dsp56k_jit_diff_enabled(void);
 uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp);
 
 /*
- * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
- * Keeps the JIT source decoupled from ui/xemu-settings.h so the
- * standalone DSP test binary (which links libdsp.a without the
- * xemu settings library) continues to link.
+ * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled,
+ * and by the tests/xbox/dsp JIT arms. Keeps the JIT source decoupled
+ * from ui/xemu-settings.h so the standalone DSP test binary (which
+ * links libdsp.a without the xemu settings library) continues to link.
  */
 void dsp56k_jit_set_enabled_from_config(bool enabled);
 

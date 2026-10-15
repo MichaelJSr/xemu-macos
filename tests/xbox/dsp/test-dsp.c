@@ -31,10 +31,10 @@
  *
  * Zero-init means dsp_want_external_jit_engine() returns false, so
  * dsp_init() selects the C interpreter engine (dsp_c_init). On
- * aarch64 that engine embeds the fork's inline ARM64 JIT, toggled at
- * runtime by the XEMU_DSP_JIT env var (see the differential test
- * below) rather than by g_config — the JIT layer is decoupled from
- * g_config on purpose (dsp56k_jit_set_enabled_from_config()).
+ * aarch64 that engine embeds the fork's inline ARM64 JIT, off unless
+ * dsp56k_jit_set_enabled_from_config(true) is called (the differential
+ * test's --jit does) rather than read from g_config — the JIT layer is
+ * decoupled from g_config on purpose.
  */
 #include "ui/xemu-settings.h"
 struct config g_config;

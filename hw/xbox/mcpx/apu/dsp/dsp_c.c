@@ -297,6 +297,9 @@ void dsp_c_init(DSPState *dsp)
 {
     dsp_core_t *core = g_new0(dsp_core_t, 1);
     core->opaque = dsp;
+    /* The inline JIT keeps the EP on the interpreter. The emulator's first
+     * sync_from_vm sets this too; a bare dsp_init (the DSP tests) has none. */
+    core->is_gp = dsp->is_gp;
     core->read_peripheral = c_read_peripheral;
     core->write_peripheral = c_write_peripheral;
 

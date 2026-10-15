@@ -39,7 +39,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | DSP JIT `cur_inst` preset skip | reverted | A hidden runtime `cur_inst` reader (`op=0x001000`); harness removed, `git show 1f444fa272 4668947cc9` to reopen | `aa9eed38e8` |
 | A/B, then X/Y register pinning | fixed | Direct-slot parmove writes skipped the pin; new pins run `XEMU_DSP_JIT_PIN_AUDIT=1` | `bf82c37fba`, `54d1543d50` |
 | Inline diff validator | fixed | Held `d->lock` → startup hang; now async, one check per translation | `5c093dace1` |
-| JIT on the EP core | fixed | P-space overlays → retranslation churn; per-core throttle | `21e9045344`, `XEMU_DSP_JIT_NO_THROTTLE=1` |
+| JIT on the EP core | closed | P-space overlays → retranslation churn (~1 per 10 block executions); the EP stays on the interpreter, the GP keeps the churn throttle | `21e9045344`, `d287c6cb23` |
 | Merges: a rename rewrote `getenv` strings; `use_dsp_jit` flipped to false | fixed | Grep `getenv(` after renames; diff `config_spec.yml` after every merge | `21e9045344`, `2e0aad3e18` |
 | Parmove+ALU fusion | closed | 0 instructions saved in every source class; x28 is the SR pin | ledger Settled |
 | Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | `DSP_JIT_fallbacks` design (C) |

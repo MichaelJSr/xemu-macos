@@ -22,7 +22,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - **Surface expiry** throttles on monotonic time (`surface_expire_interval_ns` 33 ms), never on `pg->frame_time`. → black-screen freeze on rapid level loads. V`surface.c`. Exception, icount only: expiry runs once per flip or every 4096 updates, reports are delivered before PFIFO rests, and a load discards renderer state (`flush_discard`), so offscreen Vulkan is deterministic.
 
 ### DSP56300 JIT / APU
-- **Engine precedence** lives only in `dsp_want_external_jit_engine()`: `DSP56K_JIT_SUPPORTED` (aarch64, non-Windows) + `audio.dsp_jit.enabled` → fork JIT inside the C interpreter (`c_dsp_ops`); else `audio.use_dsp_jit` → upstream `jit_dsp_ops`; else the plain interpreter. Keep the `dsp56k_jit_*` (fork) and `dsp_jit_*` (upstream) namespaces apart. `use_dsp_jit: true` is a fork default: re-assert it after upstream merges. `XEMU_DSP_JIT=0/1` toggles only the inline JIT, never the engine. → wrong engine live; diagnostics measure the wrong one. `dsp/dsp.c`, `config_spec.yml`.
+- **Engine precedence** lives only in `dsp_want_external_jit_engine()`: `DSP56K_JIT_SUPPORTED` (aarch64, non-Windows) + `audio.dsp_jit.enabled` → fork JIT inside the C interpreter (`c_dsp_ops`); else `audio.use_dsp_jit` → upstream `jit_dsp_ops`; else the plain interpreter. Keep the `dsp56k_jit_*` (fork) and `dsp_jit_*` (upstream) namespaces apart. `use_dsp_jit: true` is a fork default: re-assert it after upstream merges. The inline JIT runs only the GP core (`dsp56k_jit_init` keys on `dsp_core_t.is_gp`, set in `dsp_c_init`); the EP gets no JIT state and stays on the interpreter. → wrong engine live; diagnostics measure the wrong one. `dsp/dsp.c`, `config_spec.yml`.
 - `dsp->core` is only the save/restore snapshot (`dsp_sync_to_vm`/`_from_vm`); live state is `dsp->backend`.
 - **W^X**: every code-buffer write, including `chain_repatch_b` patches into other blocks, happens inside `qemu_thread_jit_write()` → writes → `jit_clear_icache` → `qemu_thread_jit_execute()`, in one function. No TLS-cached W^X state, no `pthread_jit_write_with_callback_np`. → SIGSEGV now, or SIGSEGV/SIGILL about a minute in. J.
 - **Pins**: A/B in x26/x27, packed X/Y in x20/x21, SR low 16 bits in x28. `dsp->registers[]` stays authoritative: write through, and reload pins (`emit_reload_*_pins`, `emit_reload_sr_pin`) after any BLR fallback that may touch them. Verify with `XEMU_DSP_JIT_PIN_AUDIT=1`. → silent audio corruption on rare paths. J.
@@ -65,11 +65,11 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | AGX `setVisibilityResultMode` crash | Prefill 0? `primer_index` present? | `XEMU_MAX_QUERIES=64`: gone at 64 = capacity; crashes either way = primer/first pass | V`reports.c`/`draw.c` |
 | `vkWaitForFences timeout … (>5s)` abort | Which wait (`where`) | `sample xemu 5`; usually a MoltenVK deadlock | V`command.c` |
 | Frozen picture / black screen at level load | Just loaded a snapshot? (failed loads toast and resume) | `XEMU_PFIFO_HEARTBEAT=1` (see below) | `pfifo.c` |
-| SIGSEGV/SIGILL after a JIT change | Fault address in a MAP_JIT region? | `XEMU_DSP_JIT=0`; then audit the W^X windows | J |
+| SIGSEGV/SIGILL after a JIT change | Fault address in a MAP_JIT region? | `dsp_jit.enabled=false`; then audit the W^X windows | J |
 | SIGSEGV `flatview_read_continue` (OHCI) | Build contains `13afd5f244`? | Check the walking thread is RCU-registered | `physmem.c` |
 | Startup hang, dock icon bounces | `XEMU_DSP_JIT_DIFF*` set? | Unset it; else `sample xemu 5` | DSP diff validator |
 | Boot wedge with validators on | More than 2 refuters stacked? | Keep 2; `DIFF=10` | APU `d->lock` |
-| Audio crackle | `XEMU_APU_PROF=1` ≈100% or <187 frames/s? | Per run: `dsp_jit.enabled=false` (then also `use_dsp_jit=false`); `enabled=true` + `XEMU_DSP_JIT=0`; `XEMU_DSP_JIT_DIFF=10`; `_NO_THROTTLE=1` | APU/DSP |
+| Audio crackle | `XEMU_APU_PROF=1` ≈100% or <187 frames/s? | Per run: `dsp_jit.enabled=false` (then also `use_dsp_jit=false`); `XEMU_DSP_JIT_DIFF=10` | APU/DSP |
 | loadvm "Unknown section …usb-hub" | Pads bound at save time? CLI `-loadvm` always fails | Monitor `loadvm` after boot, with `usb-hub` at `1.<port_map[i]>`, `port_map={3,4,1,2}` | `ui/xemu-input.c` |
 | fps dropped | nsprof `draws per_flip` within 15%? (if not, a different scene) | Diff `finish_*` and `fence_wait`; then `XEMU_REPORTS_SYNC=1`, then `XEMU_VTX_EXACT=0` | VK sync policy |
 
@@ -80,7 +80,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | `XEMU_NV2A_NSPROF=1`: 5 s intervals, `N flips (X/s)` + per-counter `ev total per_flip max` | `draws`/flip = scene ID (menu ~3, attract 350-390, heavy-f1 ~679, heavy-w2 ~323); `renderpass` ~14 (~28 heavy); `fence_wait` 1-3.5 ms; `finish_flip_stall` ≈1; `pipeline_gen` ≈0 warm; `flip_idle` ≈1000/fps at cap | Passes in the hundreds; `fence_wait` ≥8 ms with few draws (sync bug); `pipeline_gen` bursts = stutter; `flip_idle`→0 = below cap. Drop the first interval after loadvm |
 | `XEMU_APU_PROF=1`: `apu: utilization N% (M frames/s)`, covers VP+DSP | 19-25%, ~187 frames/s | ≈100%, or frames/s well below 187 |
 | `XEMU_PFIFO_HEARTBEAT=1`: every ~2 s, `iters halt flush sync waiting_flip …` | `iters` advancing | `iters` frozen = PFIFO stuck; `flush`/`sync` stuck at 1 = hung in fence/submit; `waiting_flip` stuck with `flip_idle` growing = vblank/present stuck |
-| `XEMU_DSP_JIT_STATS=1` (exit, per core) | executed ≫ translated; ALU ~99% inlined, cf ~94% | A big `cf_fallback` bucket = inline it next; the EP runs the interpreter unless `XEMU_DSP_JIT_EP=1` (then `auto-throttled on EP core` = churn >1/16); ALU/CF counters are translate-time and shared by both cores |
+| `XEMU_DSP_JIT_STATS=1` (exit, GP core) | executed ≫ translated; ALU ~99% inlined, cf ~94% | A big `cf_fallback` bucket = inline it next; only a GP block prints (the EP has no JIT state); `auto-throttled on GP core` = churn >1/16; ALU/CF counters are translate-time and process-wide |
 | `XEMU_DSP_JIT_DIFF=N` (1 = every translation, N = sample), `_SYNC` | Silence | `DIFF FAILURE in block pc_start=…`, then abort |
 | `XEMU_DSP_JIT_PIN_AUDIT=1` | No output | `pin audit FAIL: which= pc=` (no abort) |
 | `XEMU_X87_REFUTE`, other refuters | `violations=0` with a large `checks=` | Any violation; never left on during an fps run |

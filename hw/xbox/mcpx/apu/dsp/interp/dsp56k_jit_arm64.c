@@ -122,25 +122,20 @@ static uint64_t g_alu_ccr_eu_skipped;
  * emit only fires in the translate path if the global is true.
  */
 static bool g_jit_pin_audit;
-static bool g_jit_no_throttle;
-static bool g_jit_ep;           /* XEMU_DSP_JIT_EP=1: EP starts on the JIT */
 
 /*
- * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
- * based on g_config.audio.dsp_jit.enabled. Avoids a hard link-time
- * dependency on ui/xemu-settings.cc — the tests/xbox/dsp test
- * binary statically links libdsp.a alone and doesn't pull in
- * g_config, so reading config directly from here would fail to
- * link those tests. The XEMU_DSP_JIT env var still overrides if
- * set.
+ * Set by the main xemu binary (gp_ep.c) during APU init from
+ * g_config.audio.dsp_jit.enabled, and by the tests/xbox/dsp JIT arms.
+ * Avoids a hard link-time dependency on ui/xemu-settings.cc — the
+ * tests/xbox/dsp test binary statically links libdsp.a alone and
+ * doesn't pull in g_config, so reading config directly from here
+ * would fail to link those tests.
  */
-static bool g_jit_config_enabled_override;
-static bool g_jit_config_set;
+static bool g_jit_config_enabled;
 
 void dsp56k_jit_set_enabled_from_config(bool enabled)
 {
-    g_jit_config_enabled_override = enabled;
-    g_jit_config_set = true;
+    g_jit_config_enabled = enabled;
 }
 
 static void parse_flags_once(void)
@@ -150,20 +145,11 @@ static void parse_flags_once(void)
     }
     g_jit_parsed = true;
 
-    /*
-     * Primary source of truth: dsp56k_jit_set_enabled_from_config()
-     * populates this from g_config.audio.dsp_jit.enabled (the
-     * menu toggle) during APU init. XEMU_DSP_JIT env var is kept
-     * as a developer override so CI / bisect scripts can force
-     * JIT on/off without rewriting the TOML.
-     */
-    g_jit_enabled = g_jit_config_set && g_jit_config_enabled_override;
+    /* The only switch is audio.dsp_jit.enabled (the menu toggle), latched
+     * here on the first query. */
+    g_jit_enabled = g_jit_config_enabled;
 
     const char *e;
-    e = getenv("XEMU_DSP_JIT");
-    if (e && e[0]) {
-        g_jit_enabled = (e[0] == '1');
-    }
 
     /* XEMU_DSP_JIT_DIFF (dev tool): bit-exact validate JIT output
      * against interpreter. No config-spec entry — it's only useful
@@ -210,16 +196,6 @@ static void parse_flags_once(void)
 
     e = getenv("XEMU_DSP_JIT_STATS");
     g_jit_stats = (e && e[0] == '1');
-
-    /* XEMU_DSP_JIT_NO_THROTTLE=1: disable the retranslation-churn
-     * auto-throttle (A/B / debugging; see DSP56K_JIT_THROTTLE_*). */
-    e = getenv("XEMU_DSP_JIT_NO_THROTTLE");
-    g_jit_no_throttle = (e && e[0] == '1');
-
-    /* XEMU_DSP_JIT_EP=1: the EP starts on the JIT too (it starts on the
-     * interpreter, see dsp56k_jit_execute_block). */
-    e = getenv("XEMU_DSP_JIT_EP");
-    g_jit_ep = (e && e[0] == '1');
 
     /* XEMU_DSP_JIT_PIN_AUDIT: emit a per-op runtime check that the
      * pinned A / B registers (x26 / x27) agree with the packed
@@ -1111,11 +1087,6 @@ typedef struct DiffQueue {
     QemuCond   cond;           /* worker wakeup */
     bool       worker_started;
     bool       exiting;
-
-    /* Back-pointer to the owning core so stats logs can name it
-     * (gp_ep.c sets dsp->core.is_gp AFTER dsp56k_jit_init, so we can't
-     * cache the bool at queue-creation time — read it fresh). */
-    dsp_core_t *owner;
 } DiffQueue;
 
 typedef struct DspJitState {
@@ -1154,23 +1125,19 @@ typedef struct DspJitState {
     bool stats_printed;
 
     /* Auto-throttle: programs that continuously rewrite P-space
-     * (the EP's per-pass code overlays, measured ~1 retranslation
-     * per 10 block executions on Azurik) spend more in the
-     * translator than the interpreter would spend executing. When a
-     * window shows sustained retranslation churn, permanently hand
-     * this core back to the interpreter. The 8 MiB code buffer
-     * stays mapped (freeing here would race the caller's engine
-     * teardown for marginal benefit). */
+     * spend more in the translator than the interpreter would spend
+     * executing. When a window shows sustained retranslation churn,
+     * permanently hand this core back to the interpreter. The 8 MiB
+     * code buffer stays mapped (freeing here would race the caller's
+     * engine teardown for marginal benefit). */
     bool auto_throttled;
-    bool engine_chosen;     /* is_gp is known by the first execution */
     uint32_t throttle_tick;
     uint64_t win_translated;
 } DspJitState;
 
 /* Evaluate churn every WINDOW block executions; throttle when more
  * than 1/RATIO of them caused a (re)translation. GP on Azurik
- * measures ~1:10000 (never trips); the EP overlay pattern measures
- * ~1:10 (trips on the first window). */
+ * measures ~1:10000 (never trips). */
 #define DSP56K_JIT_THROTTLE_WINDOW (256u * 1024u)
 #define DSP56K_JIT_THROTTLE_RATIO  16u
 
@@ -9760,7 +9727,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 /* Forward decls — the validator helpers are defined below this
  * Public API block, but dsp56k_jit_init / dsp56k_jit_finalize need to
  * call them. */
-static DiffQueue *diff_queue_create(dsp_core_t *owner);
+static DiffQueue *diff_queue_create(void);
 static void       diff_queue_destroy(DiffQueue *q);
 
 /* atexit-handler glue — needed because the normal xemu exit path
@@ -9775,7 +9742,15 @@ static void dsp56k_jit_stats_atexit_handler(void);
 void dsp56k_jit_init(dsp_core_t *dsp)
 {
     parse_flags_once();
-    if (!g_jit_enabled) {
+    /*
+     * Only the GP gets JIT state. The EP's microcode keeps storing into its
+     * own P-space (DSound's encoder, so most titles), which ends running
+     * blocks and evicts them: on Azurik ~1 retranslation per 10 block
+     * executions, 8% of the deterministic vCPU until the throttle gave up
+     * ~150 frames after every boot or load. The engines give the same
+     * results, so the EP stays on the interpreter (jit_state NULL).
+     */
+    if (!g_jit_enabled || !dsp->is_gp) {
         return;
     }
 
@@ -9798,7 +9773,7 @@ void dsp56k_jit_init(dsp_core_t *dsp)
          * creation fails (OOM / thread create refused), fall through
          * silently — the diff path auto-detects q == NULL and uses
          * sync mode per-block. */
-        s->diff_q = diff_queue_create(dsp);
+        s->diff_q = diff_queue_create();
         if (!s->diff_q) {
             fprintf(stderr, "xemu: DSP JIT: async validator init "
                             "failed, falling back to sync diff mode\n");
@@ -9817,9 +9792,10 @@ void dsp56k_jit_init(dsp_core_t *dsp)
      * NOT call dsp_destroy — it just exits — so the stats dump
      * wired into dsp56k_jit_finalize would never fire otherwise.
      *
-     * The registry is bounded (GP + EP = 2 cores max) and any
-     * subsequent core going through dsp56k_jit_finalize cleanly
-     * removes itself, so the atexit handler only sees live cores.
+     * The registry is bounded (2 slots; xemu registers only the GP)
+     * and any subsequent core going through dsp56k_jit_finalize
+     * cleanly removes itself, so the atexit handler only sees live
+     * cores.
      */
     if (g_jit_registered_count < DSP56K_JIT_MAX_REGISTERED_CORES) {
         g_jit_registered_cores[g_jit_registered_count++] = dsp;
@@ -9869,16 +9845,15 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
 
     if (s->diff_q) {
         fprintf(stderr,
-                "xemu: DSP JIT validator (%s core) final: "
+                "xemu: DSP JIT validator (GP core) final: "
                 "enqueued=%" PRIu64 " checked=%" PRIu64
                 " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
-                dsp->is_gp ? "GP" : "EP",
                 s->diff_q->enqueued, s->diff_q->checked,
                 s->diff_q->dropped, s->diff_q->failures);
     }
 
     fprintf(stderr,
-            "xemu: DSP JIT stats (%s core):\n"
+            "xemu: DSP JIT stats (GP core):\n"
             "  blocks_translated = %" PRIu64 "\n"
             "  blocks_executed   = %" PRIu64 "\n"
             "  cache_flushes     = %" PRIu64 "\n"
@@ -9897,7 +9872,6 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
             "  cf_inlined        = %" PRIu64
             " (%.1f%% of emitted ops)\n"
             "  cf_fallback       = %" PRIu64 "\n",
-            dsp->is_gp ? "GP" : "EP",
             s->blocks_translated, s->blocks_executed,
             s->cache_flushes, s->fallbacks,
             s->diff_ops_checked,
@@ -10072,7 +10046,6 @@ void dsp56k_jit_reset_throttle(dsp_core_t *dsp)
         return;
     }
     s->auto_throttled = false;
-    s->engine_chosen = false;
     s->throttle_tick = 0;
     s->win_translated = s->blocks_translated;
 }
@@ -10488,10 +10461,9 @@ static void *diff_worker_fn(void *opaque)
                  * diagnostic is the ONE piece of information the
                  * user needs from a failed validation. */
                 fprintf(stderr,
-                        "xemu: DSP JIT validator (%s core): "
+                        "xemu: DSP JIT validator (GP core): "
                         "checked=%" PRIu64 " failures=%" PRIu64
                         " dropped=%" PRIu64 " enqueued=%" PRIu64 "\n",
-                        (q->owner && q->owner->is_gp) ? "GP" : "EP",
                         q->checked, q->failures, q->dropped, q->enqueued);
                 fflush(stderr);
                 abort();
@@ -10508,7 +10480,7 @@ static void *diff_worker_fn(void *opaque)
 /* Allocate and start the validator queue + worker. Returns NULL if
  * allocation or thread creation fails (diff mode then falls back to
  * sync, matching the XEMU_DSP_JIT_DIFF_SYNC=1 path). */
-static DiffQueue *diff_queue_create(dsp_core_t *owner)
+static DiffQueue *diff_queue_create(void)
 {
     DiffQueue *q = g_malloc0(sizeof(*q));
     q->slots = g_try_malloc0(sizeof(DiffSlot) * DSP56K_JIT_DIFF_SLOTS);
@@ -10516,7 +10488,6 @@ static DiffQueue *diff_queue_create(dsp_core_t *owner)
         g_free(q);
         return NULL;
     }
-    q->owner = owner;
     qemu_mutex_init(&q->mu);
     qemu_cond_init(&q->cond);
     qemu_thread_create(&q->worker, "mcpx.dsp_diff",
@@ -10719,37 +10690,19 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
     if (s->auto_throttled) {
         return 0;
     }
-    if (unlikely(!s->engine_chosen)) {
-        /*
-         * The EP's microcode keeps storing into its own P-space (DSound's
-         * encoder, so most titles), which ends running blocks and evicts
-         * them: on Azurik ~1 retranslation per 10 block executions, 8% of
-         * the deterministic vCPU until the throttle below gave up ~150
-         * frames after every boot or load. Start the EP on the
-         * interpreter; XEMU_DSP_JIT_EP=1 runs it on the JIT with the
-         * throttle. The engines give the same results.
-         */
-        s->engine_chosen = true;
-        if (!dsp->is_gp && !g_jit_no_throttle && !g_jit_ep) {
-            s->auto_throttled = true;
-            return 0;
-        }
-    }
     if (++s->throttle_tick >= DSP56K_JIT_THROTTLE_WINDOW) {
         s->throttle_tick = 0;
         uint64_t win_xlat = s->blocks_translated - s->win_translated;
         s->win_translated = s->blocks_translated;
-        if (!g_jit_no_throttle &&
-            win_xlat * DSP56K_JIT_THROTTLE_RATIO >
+        if (win_xlat * DSP56K_JIT_THROTTLE_RATIO >
                 DSP56K_JIT_THROTTLE_WINDOW) {
             s->auto_throttled = true;
             fprintf(stderr,
-                    "xemu: DSP JIT auto-throttled on %s core: %" PRIu64
+                    "xemu: DSP JIT auto-throttled on GP core: %" PRIu64
                     " retranslations in the last %u block executions "
                     "(self-modifying overlay code); interpreter takes "
-                    "over. XEMU_DSP_JIT_NO_THROTTLE=1 disables this.\n",
-                    dsp->is_gp ? "GP" : "EP", win_xlat,
-                    DSP56K_JIT_THROTTLE_WINDOW);
+                    "over.\n",
+                    win_xlat, DSP56K_JIT_THROTTLE_WINDOW);
             return 0;
         }
     }

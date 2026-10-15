@@ -25,21 +25,25 @@
  *   - block-boundary / PC-exit behavior (short + long jumps, DO
  *     loop-back re-entry, REP repeat-in-place, halt mid-block)
  *
- * Three consumers, wired in meson.build:
- *   1. /corpus under XEMU_DSP_JIT=0 — golden-value regression of the
- *      interpreter (all platforms).
- *   2. /corpus under XEMU_DSP_JIT=1 — the same goldens through the
- *      inline ARM64 JIT, plus an assertion that the JIT actually
- *      engaged (dsp56k_jit_blocks_executed > 0). aarch64 POSIX only.
- *   3. /corpus under XEMU_DSP_JIT=1 XEMU_DSP_JIT_DIFF=1
- *      XEMU_DSP_JIT_DIFF_SYNC=1 — the in-engine per-block bit-exact
- *      validator replays every translated block through the
- *      interpreter and aborts on any state divergence.
- *   4. /jit-differential — re-executes this binary per program with
- *      XEMU_DSP_JIT=0 and =1 (engine selection is parsed once per
+ * Four consumers, wired in meson.build:
+ *   1. /corpus — golden-value regression of the interpreter (all
+ *      platforms).
+ *   2. /corpus --jit — the same goldens through the inline ARM64 JIT,
+ *      plus an assertion that the JIT actually engaged
+ *      (dsp56k_jit_blocks_executed > 0). aarch64 POSIX only.
+ *   3. /corpus --jit under XEMU_DSP_JIT_DIFF=1 XEMU_DSP_JIT_DIFF_SYNC=1
+ *      — the in-engine per-block bit-exact validator replays every
+ *      translated block through the interpreter and aborts on any
+ *      state divergence.
+ *   4. /jit-differential — re-executes this binary per program on the
+ *      interpreter and on the JIT (the JIT switch is latched once per
  *      process, so the arms must be separate processes) and
  *      byte-compares the final DspCoreState (registers, stacks, all
  *      memories, loop/interrupt/runtime fields) across the arms.
+ *
+ * --jit calls dsp56k_jit_set_enabled_from_config(true), the hook the
+ * emulator feeds from audio.dsp_jit.enabled. The corpus cores are GP
+ * cores: the EP always runs on the interpreter.
  *
  * The programs terminate by writing 1 to peripheral 0xFFFFC4 (the
  * halt request — the same idiom as tests/xbox/dsp/data/basic) and
@@ -73,7 +77,7 @@
  * Same reason as test-dsp.c: libdsp.a's engine-mediation code
  * (dsp.c) references g_config, normally defined by ui/xemu-settings.cc
  * which this standalone binary does not link. Zero-init selects the
- * C interpreter engine; XEMU_DSP_JIT toggles the inline JIT within it.
+ * C interpreter engine; --jit turns on the inline JIT within it.
  */
 #include "ui/xemu-settings.h"
 struct config g_config;
@@ -170,7 +174,7 @@ static uint32_t move_imm8_reg(uint32_t reg5, uint32_t imm8)
 
 static DSPState *make_dsp(void)
 {
-    return dsp_init(NULL, scratch_rw, fifo_rw, false);
+    return dsp_init(NULL, scratch_rw, fifo_rw, true);
 }
 
 static void run_to_halt(DSPState *s)
@@ -502,10 +506,10 @@ static void test_corpus_prog(gconstpointer arg)
 /* ------------------------------------------------------------------ */
 /* Cross-process differential                                          */
 /*                                                                     */
-/* Engine selection (XEMU_DSP_JIT) is parsed once per process, so the  */
-/* interpreter and JIT arms are separate child processes of this same  */
-/* binary (--dump-state <prog> <outfile>), and the parent              */
-/* byte-compares the resulting DspCoreState blobs.                     */
+/* The JIT switch is latched once per process, so the interpreter and */
+/* JIT arms are separate child processes of this same binary          */
+/* (--dump-state <prog> <outfile> <0|1>), and the parent              */
+/* byte-compares the resulting DspCoreState blobs.                    */
 /* ------------------------------------------------------------------ */
 
 static const char *g_argv0;
@@ -584,23 +588,20 @@ static GBytes *run_arm(const char *prog_name, const char *jit_value)
     g_close(fd, NULL);
 
     gchar **envp = g_get_environ();
-    envp = g_environ_setenv(envp, "XEMU_DSP_JIT", jit_value, TRUE);
-    /* The corpus cores are EP cores, which start on the interpreter. */
-    envp = g_environ_setenv(envp, "XEMU_DSP_JIT_EP", "1", TRUE);
     /* Hermetic children: no diff/stats knobs leaking in. */
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_SYNC");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_MAX");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_STATS");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_PIN_AUDIT");
-    envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_NO_THROTTLE");
 
-    gchar *args[5];
+    gchar *args[6];
     args[0] = (gchar *)g_argv0;
     args[1] = (gchar *)"--dump-state";
     args[2] = (gchar *)prog_name;
     args[3] = out_path;
-    args[4] = NULL;
+    args[4] = (gchar *)jit_value;
+    args[5] = NULL;
 
     gint wstatus = -1;
     gboolean spawned = g_spawn_sync(NULL, args, envp, G_SPAWN_DEFAULT,
@@ -668,9 +669,23 @@ int main(int argc, char **argv)
 {
     g_argv0 = argv[0];
 
-    if (argc == 4 && strcmp(argv[1], "--dump-state") == 0) {
+    if (argc == 5 && strcmp(argv[1], "--dump-state") == 0) {
+        dsp56k_jit_set_enabled_from_config(strcmp(argv[4], "1") == 0);
         return dump_state_main(argv[2], argv[3]);
     }
+
+    /* --jit (ours, so strip it before g_test_init sees it): run the
+     * corpus on the inline JIT. */
+    int n = 1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--jit") == 0) {
+            dsp56k_jit_set_enabled_from_config(true);
+        } else {
+            argv[n++] = argv[i];
+        }
+    }
+    argv[n] = NULL;
+    argc = n;
 
     g_test_init(&argc, &argv, NULL);
 

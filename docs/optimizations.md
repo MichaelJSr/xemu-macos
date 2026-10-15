@@ -72,9 +72,7 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_MFX_RESIZE_QUANTIZE` | **Default on since 2026-08-04** (`=0` restores the legacy continuous resize). Snaps the MetalFX output width to a 64-px ladder and holds a new shape for ~200 ms before rebuilding the scaler and its 3-texture ring, so a window drag stops rebuilding at the event rate (each rebuild drains MetalFX in-flight work and blocks the PFIFO thread). Height is re-derived from the quantized width (aspect preserved) and an explicit floor keeps the output strictly above `disp->width`, so quantization can never silently drop out of the upscale path. A guest mode change rebuilds immediately, no cooldown. Diagnostic: the `mfx_scaler_rebuild` counter under `XEMU_NV2A_NSPROF=1` |
 | `XEMU_UI_LOCK_STATS` | `1` prints the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build; previously it needed a `DEBUG_XEMU_C=1` build (which still forces it on). One predictable branch per lock when off. Compiled in on macOS and in `DEBUG_XEMU_C` builds only — Windows/Linux release paths preprocess away to today's code |
-| `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
-| `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 
@@ -1463,17 +1461,17 @@ platform choice since 2026-10-15), and
   **every** host, Apple included, and the fork JIT is opt-in via
   `[audio.dsp_jit] enabled = true`.
 - **Full inline DSP JIT (Apple Silicon).** ARM64
-  basic-block JIT for both MCPX DSP56300 cores (GP + EP). Enable
-  via `[audio.dsp_jit] enabled = true` (engine selection is
-  config-only; `XEMU_DSP_JIT=0` is a runtime kill-switch within the
-  selected engine).
+  basic-block JIT for the GP DSP56300 core (the EP stays on the
+  interpreter since `d287c6cb23`). Enable via
+  `[audio.dsp_jit] enabled = true`, the only switch.
 - **Per-core retranslation auto-throttle.** The EP core overlays its
   P-space every pass (~1 retranslation per 10 block executions), so
   translating it costs more than interpreting it; a sustained-churn
   window (>1/16) permanently hands that core back to the
   interpreter. APU-thread utilization: JIT-both-cores 25%,
   interpreter 22%, JIT with EP throttled **20%** (upstream dsp56300
-  engine 19%). GP never trips. `XEMU_DSP_JIT_NO_THROTTLE=1` for A/B.
+  engine 19%). GP never trips. Since `d287c6cb23` (2026-10-15) the EP
+  starts on the interpreter outright, and it gets no JIT state.
 - **JIT coverage + mechanics.** 100% ALU and 99.99% CF inlined
   (only `emu_undefined` and a few side-effect-register `bit_manip`
   variants stay on BLR); `pm_read_accu24` inlined for the scaling=0
