@@ -135,6 +135,7 @@ and turn fullscreen off.
 
 | Script | Use |
 |---|---|
+| `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, RAM hash per run. Also runs the goldens |
 | `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | B `VAR=0` vs E `VAR=1` (`--e-value`); takes `--app`, `--isolate-caches`. Exit 3 = artifact |
 | `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V"]` | Cross-binary, multi-var or numeric baseline |
 | `movement-probe.sh <out> [--app P] [VAR=V…]` | Streaming walk; a healthy TB-flush delta is 0-1 |
@@ -143,12 +144,23 @@ and turn fullscreen off.
 
 No-game tests: `cd build && ninja test-xbox && ./pyvenv/bin/meson test --suite xbox --no-rebuild`.
 
-**Lean default:** `scripts/bench-savestate-ab.sh azurik-heavy-f1 XEMU_FOO 2 45`
-(~6 min). Go by the receipt's verdict, mean ± sd and sign tally, and quote
-the `uptime` load in `meta.json`; `XEMU_NOOP_AB` gives the noise floor.
-Escalate only when the delta is under ~2%, signs are mixed, an arm spreads
-over 1 fps, or the number will be published. Then use a quiet box (load
-< 4, no builds or other harnesses) and 3-6 pairs × 75 s.
+**Lean default (CPU, TCG, APU):** `scripts/bench-det.py -n 4 base=A.app
+new=A.app:XEMU_FOO=0` (~4 min). The box is usually loaded and that's fine:
+judge by Mcycles/frame (back-to-back runs agree to ~0.5% at load 30;
+absolute values drift over minutes, so compare arms only within one
+interleaved session) and use Minsns/frame (~0.01%) as the mechanism
+check. Arms must agree on the RAM hash.
+**Renderer or pacing:** `scripts/bench-savestate-ab.sh azurik-heavy-f1
+XEMU_FOO 2 45` (~6 min), windowed wall fps. Go by the verdict, mean ± sd
+and sign tally, quote the load, and add pairs (3-6 × 75 s) when the delta
+is under ~2% or signs are mixed: there's no quiet box to wait for.
+
+**Goldens** (deterministic, `bench-det.py -n 1` on the final binary;
+see the README's deterministic mode): `-f 300` (azurik-heavy-f1)
+`f300=6a553d8c7727c6c6`; `-t azurik-stream-e2 -f 600 -i "axis ly 1.0"`
+`f600=1e98a85ee122f87c`; `-t - -f 1800 --hash-at 900,1800` (cold boot)
+`f900=9ffd0e1d2e1f36ea f1800=85dec4a26bcb49e9`. Re-check after any TCG,
+x87, APU, PFIFO or timer change and after a PGO retrain.
 
 Traps:
 

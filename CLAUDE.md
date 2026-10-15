@@ -12,10 +12,13 @@ xemu-project/xemu.
   `null`, frames via QMP `screendump`). Recipes are in the `xemu-operate`
   skill.
 - Verify in proportion to risk. Every change needs a clean compile. A
-  behaviour change needs one functional run. A perf claim needs the lean
-  A/B (`scripts/bench-savestate-ab.sh <tag> <VAR> 2 45`) with the host
-  load noted. Skip cold-box waits, soaks, refuters and multi-agent
-  reviews unless the change is risky or the number will be published.
+  behaviour change needs one functional run. A perf claim needs an A/B:
+  `scripts/bench-det.py -n 4` (deterministic host cycles per frame,
+  which shrugs off host load) for CPU, TCG and APU work, plus the
+  windowed `scripts/bench-savestate-ab.sh <tag> <VAR> 2 45` when the
+  renderer or real-time pacing is involved. Never wait for a cold box;
+  quote the load. Skip soaks, refuters and multi-agent reviews unless
+  the change is risky or the number will be published.
 - Commit one logical change as `<subsystem>: <short description>` plus a
   short body. Docs ride in the same commit: README for user-visible flags
   or features only. No separate docs or skills bookkeeping commits, and
