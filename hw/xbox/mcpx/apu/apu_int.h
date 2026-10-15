@@ -108,6 +108,7 @@ typedef struct MCPXAPUState {
         bool enabled;
         bool in_burst;
         bool rearm;     /* after realize or a load: restart on the grid */
+        bool voices_inline; /* the tick is running voices on the vCPU */
         QEMUTimer *timer;
     } det;
 
@@ -140,13 +141,14 @@ typedef struct MCPXAPUState {
 
 /*
  * Past guest RAM the accessors go through the memory API, which takes the
- * BQL for MMIO. A deterministic frame holds the BQL while it waits for the
- * voice workers, so a worker must not: there such a read returns 0 and a
- * write is dropped (a guest bug either way).
+ * BQL for MMIO. Deterministic voice processing drops such accesses (a guest
+ * bug either way): a read returns 0 and a write is lost. It used to run on
+ * workers that could not take the BQL the tick holds, and now runs on the
+ * vCPU with the same result.
  */
 static inline bool ram_oob_dropped(MCPXAPUState *d)
 {
-    return d->det.enabled && !bql_locked();
+    return d->det.enabled && (d->det.voices_inline || !bql_locked());
 }
 
 static inline uint32_t ram_ldl(MCPXAPUState *d, hwaddr addr)

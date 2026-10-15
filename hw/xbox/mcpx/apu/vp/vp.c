@@ -2178,6 +2178,20 @@ static void get_voice_bin_src_dst(MCPXAPUState *d, int v,
     }
 }
 
+/* One worker's share of a frame: its queue, summed in order. */
+static void __attribute__((noinline))
+voice_worker_run(MCPXAPUState *d, VoiceWorker *w)
+{
+    memset(w->mixbins, 0, sizeof(w->mixbins));
+    if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+        memset(w->sample_buf, 0, sizeof(w->sample_buf));
+    }
+    for (int i = 0; i < w->queue_len; i++) {
+        voice_process(d, w->mixbins, w->sample_buf, w->queue[i].voice,
+                      w->queue[i].list);
+    }
+}
+
 static void *voice_worker_thread(void *arg)
 {
     MCPXAPUState *d = arg;
@@ -2196,34 +2210,18 @@ static void *voice_worker_thread(void *arg)
 
         if (self->queue_len) {
             qemu_mutex_unlock(&vwd->lock);
-
-            // Process queued voices
-            memset(self->mixbins, 0, sizeof(self->mixbins));
-            if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
-                memset(self->sample_buf, 0, sizeof(self->sample_buf));
-            }
-            for (int i = 0; i < self->queue_len; i++) {
-                voice_process(d, self->mixbins, self->sample_buf,
-                              self->queue[i].voice, self->queue[i].list);
-            }
-
+            voice_worker_run(d, self);
             qemu_mutex_lock(&vwd->lock);
 
-            /*
-             * Deterministic mode sums the workers in index order after they
-             * finish (voice_work_dispatch); float addition in completion
-             * order would differ from run to run.
-             */
-            if (!d->det.enabled) {
-                for (int b = 0; b < NUM_MIXBINS; b++) {
-                    float_accumulate(vwd->mixbins[b], self->mixbins[b],
-                                     NUM_SAMPLES_PER_FRAME);
-                }
-                if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
-                    float_accumulate((float *)d->vp.sample_buf,
-                                     (float *)self->sample_buf,
-                                     NUM_SAMPLES_PER_FRAME * 2);
-                }
+            /* Deterministic mode runs no workers (voice_work_dispatch). */
+            for (int b = 0; b < NUM_MIXBINS; b++) {
+                float_accumulate(vwd->mixbins[b], self->mixbins[b],
+                                 NUM_SAMPLES_PER_FRAME);
+            }
+            if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+                float_accumulate((float *)d->vp.sample_buf,
+                                 (float *)self->sample_buf,
+                                 NUM_SAMPLES_PER_FRAME * 2);
             }
 
             self->queue_len = 0;
@@ -2343,6 +2341,50 @@ voice_work_dispatch(MCPXAPUState *d,
         qemu_cond_timedwait(&d->cond, &d->lock, 1);
     }
 
+    if (d->det.enabled) {
+        /*
+         * Deterministic mode runs each worker's share here, in worker
+         * order: the same partition, per-worker sums and combine order as
+         * concurrent workers would give, without the hand-off, whose wake-up
+         * latency cost more than the voices themselves (and stalled the
+         * guest whenever the host descheduled a worker).
+         */
+        if (vwd->queue_len) {
+            memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
+            voice_work_schedule(d);
+            d->det.voices_inline = true;
+            for (int w = 0; w < vwd->num_workers; w++) {
+                if (vwd->workers[w].queue_len) {
+                    voice_worker_run(d, &vwd->workers[w]);
+                }
+            }
+            d->det.voices_inline = false;
+            for (int w = 0; w < vwd->num_workers; w++) {
+                VoiceWorker *wk = &vwd->workers[w];
+                if (!wk->queue_len) {
+                    continue;
+                }
+                for (int b = 0; b < NUM_MIXBINS; b++) {
+                    float_accumulate(vwd->mixbins[b], wk->mixbins[b],
+                                     NUM_SAMPLES_PER_FRAME);
+                }
+                if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+                    float_accumulate((float *)d->vp.sample_buf,
+                                     (float *)wk->sample_buf,
+                                     NUM_SAMPLES_PER_FRAME * 2);
+                }
+                wk->queue_len = 0;
+            }
+            vwd->workers_pending = 0;
+            vwd->queue_len = 0;
+            for (int b = 0; b < NUM_MIXBINS; b++) {
+                float_accumulate(mixbins[b], vwd->mixbins[b],
+                                 NUM_SAMPLES_PER_FRAME);
+            }
+        }
+        return;
+    }
+
     qemu_mutex_lock(&vwd->lock);
 
     if (vwd->queue_len) {
@@ -2350,29 +2392,10 @@ voice_work_dispatch(MCPXAPUState *d,
 
         // Signal workers and wait for completion
         voice_work_schedule(d);
-        uint64_t ran = vwd->workers_pending;
         qemu_cond_broadcast(&vwd->work_pending);
         qemu_cond_wait(&vwd->work_finished, &vwd->lock);
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
-
-        if (d->det.enabled) {
-            for (int w = 0; w < vwd->num_workers; w++) {
-                if (!(ran & (1ULL << w))) {
-                    continue;
-                }
-                for (int b = 0; b < NUM_MIXBINS; b++) {
-                    float_accumulate(vwd->mixbins[b],
-                                     vwd->workers[w].mixbins[b],
-                                     NUM_SAMPLES_PER_FRAME);
-                }
-                if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
-                    float_accumulate((float *)d->vp.sample_buf,
-                                     (float *)vwd->workers[w].sample_buf,
-                                     NUM_SAMPLES_PER_FRAME * 2);
-                }
-            }
-        }
 
         for (int b = 0; b < NUM_MIXBINS; b++) {
             float_accumulate(mixbins[b], vwd->mixbins[b],
@@ -2405,9 +2428,12 @@ static void voice_work_init(MCPXAPUState *d)
     g_dbg.vp.num_workers = vwd->num_workers;
 
     qemu_mutex_init(&vwd->lock);
-    qemu_mutex_lock(&vwd->lock);
     qemu_cond_init(&vwd->work_pending);
     qemu_cond_init(&vwd->work_finished);
+    if (d->det.enabled) {
+        return; /* voices run on the vCPU (voice_work_dispatch) */
+    }
+    qemu_mutex_lock(&vwd->lock);
     for (int i = 0; i < vwd->num_workers; i++) {
         vwd->workers_pending |= 1 << i;
         qemu_thread_create(&vwd->workers[i].thread, "mcpx.voice_worker",
@@ -2426,7 +2452,7 @@ static void voice_work_finalize(MCPXAPUState *d)
     vwd->workers_should_exit = true;
     qemu_cond_broadcast(&vwd->work_pending);
     qemu_mutex_unlock(&vwd->lock);
-    for (int i = 0; i < vwd->num_workers; i++) {
+    for (int i = 0; i < vwd->num_workers && !d->det.enabled; i++) {
         qemu_thread_join(&vwd->workers[i].thread);
     }
     g_free(vwd->workers);
