@@ -739,7 +739,11 @@ hardening_flags = [
 #
 # NB: Clang 17 is broken and SEGVs
 # https://github.com/llvm/llvm-project/issues/75168
-if cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
+#
+# xemu-macos: skipped on macOS arm64, where the zeroing is 3.2% of the
+# emulation's host instructions and costs the helpers their tail calls.
+if not (host_os == 'darwin' and cpu == 'aarch64') and \
+   cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
                name: '-fzero-call-used-regs=used-gpr',
                args: ['-O2', '-fzero-call-used-regs=used-gpr'])
     hardening_flags += '-fzero-call-used-regs=used-gpr'

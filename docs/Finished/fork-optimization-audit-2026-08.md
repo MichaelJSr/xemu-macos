@@ -9,6 +9,8 @@
 > §3.1's `XEMU_HARDENING` knob was removed from `build.sh` on
 > 2026-10-10; its skip arm is
 > `CFLAGS=-fzero-call-used-regs=skip ./build.sh` (ledger Failed row).
+> §3.1 was reopened and shipped for macOS arm64 on 2026-10-15 (ledger
+> Build + packaging), where `meson.build` no longer adds the flag.
 
 A deep, adversarially-verified audit of the whole fork for remaining
 optimization and refinement candidates, run at the arm-(b)-on
