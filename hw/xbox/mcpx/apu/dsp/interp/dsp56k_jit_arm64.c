@@ -141,6 +141,7 @@ static uint64_t g_alu_ccr_eu_skipped;
  */
 static bool g_jit_pin_audit;
 static bool g_jit_no_throttle;
+static bool g_jit_ep;           /* XEMU_DSP_JIT_EP=1: EP starts on the JIT */
 
 /*
  * Set by the main xemu binary (gp_ep.c / apu.c) during APU init
@@ -232,6 +233,11 @@ static void parse_flags_once(void)
      * auto-throttle (A/B / debugging; see DSP56K_JIT_THROTTLE_*). */
     e = getenv("XEMU_DSP_JIT_NO_THROTTLE");
     g_jit_no_throttle = (e && e[0] == '1');
+
+    /* XEMU_DSP_JIT_EP=1: the EP starts on the JIT too (it starts on the
+     * interpreter, see dsp56k_jit_execute_block). */
+    e = getenv("XEMU_DSP_JIT_EP");
+    g_jit_ep = (e && e[0] == '1');
 
     /* XEMU_DSP_JIT_SENTINEL: debug harness for the round-4
      * cur_inst-skip bisect. Bit 0 = curinst poison. The old bit 1
@@ -1200,6 +1206,7 @@ typedef struct DspJitState {
      * stays mapped (freeing here would race the caller's engine
      * teardown for marginal benefit). */
     bool auto_throttled;
+    bool engine_chosen;     /* is_gp is known by the first execution */
     uint32_t throttle_tick;
     uint64_t win_translated;
 } DspJitState;
@@ -10202,6 +10209,7 @@ void dsp56k_jit_reset_throttle(dsp_core_t *dsp)
         return;
     }
     s->auto_throttled = false;
+    s->engine_chosen = false;
     s->throttle_tick = 0;
     s->win_translated = s->blocks_translated;
 }
@@ -10847,6 +10855,22 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
 
     if (s->auto_throttled) {
         return 0;
+    }
+    if (unlikely(!s->engine_chosen)) {
+        /*
+         * The EP's microcode keeps storing into its own P-space (DSound's
+         * encoder, so most titles), which ends running blocks and evicts
+         * them: on Azurik ~1 retranslation per 10 block executions, 8% of
+         * the deterministic vCPU until the throttle below gave up ~150
+         * frames after every boot or load. Start the EP on the
+         * interpreter; XEMU_DSP_JIT_EP=1 runs it on the JIT with the
+         * throttle. The engines give the same results.
+         */
+        s->engine_chosen = true;
+        if (!dsp->is_gp && !g_jit_no_throttle && !g_jit_ep) {
+            s->auto_throttled = true;
+            return 0;
+        }
     }
     if (++s->throttle_tick >= DSP56K_JIT_THROTTLE_WINDOW) {
         s->throttle_tick = 0;

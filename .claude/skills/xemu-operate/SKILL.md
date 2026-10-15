@@ -199,6 +199,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |
 | `XEMU_DSP_JIT_STATS=1`, `_DIFF=N` | DSP JIT stats; validator | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
+| `XEMU_DSP_JIT_EP=1` | The EP DSP starts on the JIT (default: interpreter) | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
 | `XEMU_INV_PROF=1`, `XEMU_TB_PROF=1` | Exit dumps (need `quit`) | `tcg/tb-maint.c`, `tcg/cpu-exec.c` |
 
 Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or

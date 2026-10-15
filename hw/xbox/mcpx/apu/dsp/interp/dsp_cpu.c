@@ -961,6 +961,14 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
         dsp->yram[address] = value;
     } else if (space == DSP_SPACE_P) {
         assert(address < DSP_PRAM_SIZE);
+        /*
+         * Rewriting a word with its own value (the EP re-DMAs the same
+         * overlay about 24 times a pass) leaves the decoded instruction
+         * and every translation valid.
+         */
+        if (ldl_le_p(&dsp->pram[address]) == value) {
+            return;
+        }
         stl_le_p(&dsp->pram[address], value);
         dsp->pram_opcache[address] = NULL;
         /* Any translated JIT block that covers this PC is now stale. */
