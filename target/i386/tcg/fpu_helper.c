@@ -209,6 +209,15 @@ int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
 
 #define HARDFPU_ALWAYS_INLINE static inline __attribute__((always_inline))
 
+/*
+ * xemu: keeps an edge-case block a real (cold) branch. Without it clang
+ * if-converts the zero/inf/NaN/denormal paths into csel chains that every
+ * conversion pays for on the x87 dependency chain (15 csel per fmul). An
+ * empty volatile asm cannot be speculated, so the block stays a branch;
+ * the arithmetic is unchanged.
+ */
+#define HARDFPU_COLD() __asm__ volatile("")
+
 typedef union { uint64_t u; double d; } u64_double;
 typedef union { uint32_t u; float f; } u32_float;
 
@@ -227,6 +236,7 @@ HARDFPU_ALWAYS_INLINE double floatx80_to_double_fast(floatx80 a)
 
     /* Single branch for all edge cases: exp80 in [0, 0x7FFF] or overflow */
     if (__builtin_expect((unsigned)(exp80 - 1) >= 0x7FFEu, 0)) {
+        HARDFPU_COLD();
         if (exp80 == 0) {
             if (frac == 0) {
                 return (u64_double){ .u = s }.d;
@@ -267,6 +277,7 @@ HARDFPU_ALWAYS_INLINE floatx80 double_to_floatx80_fast(double d)
     uint64_t low = 0x8000000000000000ULL | (frac52 << 11);
 
     if (__builtin_expect((unsigned)(exp64 - 1) >= 0x7FEu, 0)) {
+        HARDFPU_COLD();
         if (exp64 == 0) {
             return (floatx80){ .low = frac52 << 11,
                                .high = (uint16_t)(sign << 15) };
