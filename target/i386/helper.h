@@ -94,6 +94,7 @@ DEF_HELPER_FLAGS_2(flush_page, TCG_CALL_NO_RWG, void, env, tl)
 DEF_HELPER_FLAGS_1(hlt, TCG_CALL_NO_WG, noreturn, env)
 #if defined(XBOX)
 DEF_HELPER_2(xemu_ki_idle, void, env, i32)
+DEF_HELPER_2(xemu_rep_bulk, void, env, i32)
 #endif
 DEF_HELPER_FLAGS_2(monitor, TCG_CALL_NO_WG, void, env, tl)
 DEF_HELPER_FLAGS_2(mwait, TCG_CALL_NO_WG, noreturn, env, int)

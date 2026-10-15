@@ -13,6 +13,7 @@ i386_ss.add(when: 'CONFIG_TCG', if_true: files(
   'tcg-cpu.c',
   'translate.c',
   'xemu_ras_helper.c',
+  'xemu_rep_helper.c',
   'xemu_xpage_helper.c'), if_false: files('tcg-stub.c'))
 
 subdir('system')

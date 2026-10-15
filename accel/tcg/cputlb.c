@@ -1684,6 +1684,55 @@ void *tlb_vaddr_to_host(CPUArchState *env, vaddr addr,
     return flags ? NULL : host;
 }
 
+#if defined(XBOX)
+/*
+ * xemu: host address of [addr, addr + size) on one page, for a bulk copy
+ * standing in for that many guest accesses (REP MOVS/STOS), or NULL if the
+ * page isn't plain RAM: unmapped (no fault is raised), MMIO, ROM or ROMD
+ * for a store, or watched (watchpoints, MemAccessCallbacks). Nothing is
+ * done before that decision; then a clean page gets notdirty_write over
+ * the whole range, as the stores would have, which may unwind through
+ * @retaddr if they modify the current TB.
+ */
+void *xemu_probe_ram(CPUArchState *env, vaddr addr, int size,
+                     MMUAccessType access_type, int mmu_idx, uintptr_t retaddr)
+{
+    CPUTLBEntryFull *full;
+    void *host;
+    int flags;
+
+    flags = probe_access_internal(env_cpu(env), addr, size, access_type,
+                                  mmu_idx, true, &host, &full, retaddr,
+                                  true);
+    if (flags & ~TLB_NOTDIRTY) {
+        return NULL;
+    }
+    if (flags) {
+        notdirty_write(env_cpu(env), addr, size, full, retaddr);
+    }
+    return host;
+}
+
+/*
+ * xemu: after a bulk store probed with xemu_probe_ram. Outside icount a
+ * device thread can clear the page's dirty bits mid-copy (re-arming
+ * TLB_NOTDIRTY) and read half-new bytes; the loop's next store would have
+ * dirtied the page again, so do that.
+ */
+void xemu_probe_ram_stored(CPUArchState *env, vaddr addr, int size,
+                           int mmu_idx, uintptr_t retaddr)
+{
+    CPUState *cpu = env_cpu(env);
+    uint64_t tlb_addr = tlb_addr_write(tlb_entry(cpu, mmu_idx, addr));
+
+    if (unlikely(tlb_hit(tlb_addr, addr) && (tlb_addr & TLB_NOTDIRTY))) {
+        notdirty_write(cpu, addr, size,
+                       &cpu->neg.tlb.d[mmu_idx].fulltlb[
+                           tlb_index(cpu, mmu_idx, addr)], retaddr);
+    }
+}
+#endif
+
 /*
  * Return a ram_addr_t for the virtual address for execution.
  *

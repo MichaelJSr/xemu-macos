@@ -1521,6 +1521,15 @@ static void gen_outs(DisasContext *s, MemOp ot, TCGv dshift)
 
 #define REP_MAX 65535
 
+#if defined(XBOX)
+/*
+ * xemu: shortest REP MOVS/STOS (in elements) handed to helper_xemu_rep_bulk;
+ * below it the call costs more host instructions than the loop (heavy-f1:
+ * 4, 12 and 32 all save less than 8).
+ */
+#define REP_BULK_MIN 8
+#endif
+
 static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
                        void (*fn)(DisasContext *s, MemOp ot, TCGv dshift),
                        bool is_repz_nz)
@@ -1574,6 +1583,25 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      */
     gen_update_cc_op(s);
     tcg_set_insn_start_param(s->base.insn_start, 1, CC_OP_DYNAMIC);
+
+#if defined(XBOX)
+    /*
+     * Copy or fill what it can as host memmove/memset first. It stops where
+     * the loop below must take over, with ECX/ESI/EDI as the loop would
+     * have left them there, and never past one of the loop's TB exits.
+     */
+    if (can_loop && (fn == gen_movs || fn == gen_stos) &&
+        s->aflag == MO_32 && !ADDSEG(s) && s->override < 0) {
+        TCGLabel *loop_only = gen_new_label();
+
+        tcg_gen_brcondi_tl(TCG_COND_LTU, cpu_regs[R_ECX], REP_BULK_MIN,
+                           loop_only);
+        gen_helper_xemu_rep_bulk(tcg_env,
+                                 tcg_constant_i32(ot | (fn == gen_stos) << 2 |
+                                                  s->mem_index << 3));
+        gen_set_label(loop_only);
+    }
+#endif
 
     /* Any iteration at all?  */
     tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cpu_regs[R_ECX], cx_mask, done);

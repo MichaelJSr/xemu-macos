@@ -101,6 +101,22 @@ int probe_access_full_mmu(CPUArchState *env, vaddr addr, int size,
                           MMUAccessType access_type, int mmu_idx,
                           void **phost, CPUTLBEntryFull **pfull);
 
+#if defined(XBOX)
+/*
+ * xemu_probe_ram: like probe_access_flags(nonfault) for a bulk access,
+ * but returns NULL unless the page is plain RAM (no MMIO or watchpoint),
+ * deciding before any side effect; then gives a clean page notdirty_write
+ * over the range (dirty bits, TB invalidation), which may unwind through
+ * @retaddr. xemu_probe_ram_stored re-dirties the range after the store if
+ * a device thread cleared it meanwhile.
+ */
+void *xemu_probe_ram(CPUArchState *env, vaddr addr, int size,
+                     MMUAccessType access_type, int mmu_idx,
+                     uintptr_t retaddr);
+void xemu_probe_ram_stored(CPUArchState *env, vaddr addr, int size,
+                           int mmu_idx, uintptr_t retaddr);
+#endif
+
 #endif /* !CONFIG_USER_ONLY */
 
 /**
