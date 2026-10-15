@@ -435,6 +435,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (helper call, BB end, TB end), so an overwritten slot converts once;
   a mid-TB exit lands the pending ones from shadow doubles in
   `restore_state_to_opc` (2026-10-15, −5% det Minsns/frame).
+  `fucom*`/`fcomi*` compare the cached doubles (`fucom*` only when both
+  images are `st80f` of their doubles), `fcmov` selects instead of
+  branching, and the argument-only `cc_compute_all`/`cc_compute_c`
+  calls skip the flush, so the `fld; fld; fucomi; fcmov` min/max idiom
+  keeps its stores deferred (2026-10-15, −4.8% det Minsns/frame, −4.9%
+  Mcycles/frame).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
@@ -444,7 +450,8 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 - **Signaling vs quiet compares (retired with the cache, 2026-10-15).**
   `coms_f32`/`coms_f64` (FCMPE / COMISS) for FCOMI; `com_f32`/`com_f64`
   for FUCOMI. The `coms` ops are removed; `com` (FCMP, upstream's COMISD
-  on x86_64) stays for the write-through `fcom`.
+  on x86_64) stays for the write-through `fcom`, `fucom*` and `fcomi*`
+  (the `__hard` helpers raise no exception flags either way).
 - **Control-word resync.** Every path that writes `env->fpuc`
   (`fldcw`, `fldenv`, `frstor`, `fxrstor`, `fninit`, xsave helpers,
   `cpu_post_load`, gdbstub, SEV, reset) routes through

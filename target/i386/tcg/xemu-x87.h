@@ -55,6 +55,10 @@ static uint64_t xemu_sse_comi_sd;        /* (U)COMISD -- 64-bit scalar form */
 static uint64_t xemu_x87_wt_writes;      /* write-through results (set_st) */
 static uint64_t xemu_x87_wt_st80f;       /* ... st80f actually executed */
 static uint64_t xemu_x87_wt_landed;      /* deferred stores landed by restores */
+static uint64_t xemu_x87_wt_cmp_inline;  /* fucom*, fcomi* on the doubles */
+static uint64_t xemu_x87_wt_cmp_helper;  /* ... left to the helper */
+static uint64_t xemu_x87_wt_fcmov_inline; /* fcmov as a select */
+static uint64_t xemu_x87_wt_fcmov_branch; /* ... as a branch */
 
 /* (3) refuter ------------------------------------------------------------- */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
@@ -93,6 +97,12 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_wt_writes,
             (unsigned long long)xemu_x87_wt_st80f,
             (unsigned long long)xemu_x87_wt_landed);
+    fprintf(stderr, "xemu: x87 wt compares: inline=%llu helper=%llu "
+            "fcmov inline=%llu branch=%llu\n",
+            (unsigned long long)xemu_x87_wt_cmp_inline,
+            (unsigned long long)xemu_x87_wt_cmp_helper,
+            (unsigned long long)xemu_x87_wt_fcmov_inline,
+            (unsigned long long)xemu_x87_wt_fcmov_branch);
     fprintf(stderr, "xemu: x87 refuter: "
             "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
             "restore-pending=%llu boundaries=%llu boundary-pending=%llu "

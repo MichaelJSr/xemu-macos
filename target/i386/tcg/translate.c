@@ -271,6 +271,14 @@ typedef struct DisasContext {
     bool wt_epoch;
     bool wt_nodefer;
     int wt_base;
+    /*
+     * wt_st slots whose env image is, or once stored will be, st80f of the
+     * cached double (x87_wt_exact). A slot read with ld80f may hold more
+     * than a double (fldt, fild m64, fldpi, a softfloat helper's result).
+     */
+    uint8_t wt_exact;
+    /* The call being emitted reads only its arguments (gen_pure_call_*). */
+    bool pure_call;
 #endif
 } DisasContext;
 
@@ -1022,6 +1030,27 @@ static void gen_movs(DisasContext *s, MemOp ot, TCGv dshift)
     gen_op_add_reg(s, s->aflag, R_EDI, dshift);
 }
 
+/*
+ * Bracket a helper that reads only its arguments and cannot fault
+ * (cc_compute_all, cc_compute_c: TCG_CALL_NO_RWG_SE, no env): its call
+ * skips gen_bb_epilogue's x87 flush, which exists for C code that reads
+ * or writes env's x87 state or the FPCR. The deferred stores, the cached
+ * doubles and the FIP run stay as they were, as across inline code.
+ */
+static void gen_pure_call_begin(DisasContext *s)
+{
+#if defined(XBOX)
+    s->pure_call = true;
+#endif
+}
+
+static void gen_pure_call_end(DisasContext *s)
+{
+#if defined(XBOX)
+    s->pure_call = false;
+#endif
+}
+
 /* compute all eflags to reg */
 static void gen_mov_eflags(DisasContext *s, TCGv reg)
 {
@@ -1059,7 +1088,9 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
     } else {
         cc_op = cpu_cc_op;
     }
+    gen_pure_call_begin(s);
     gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
+    gen_pure_call_end(s);
 }
 
 /* compute all eflags to cc_src */
@@ -1166,8 +1197,10 @@ static CCPrepare gen_prepare_eflags_c(DisasContext *s, TCGv reg)
        if (!reg) {
            reg = tcg_temp_new();
        }
+       gen_pure_call_begin(s);
        gen_helper_cc_compute_c(reg, cpu_cc_dst, cpu_cc_src,
                                cpu_cc_src2, cpu_cc_op);
+       gen_pure_call_end(s);
        return (CCPrepare) { .cond = TCG_COND_NE, .reg = reg,
                             .no_setcond = true };
     }
@@ -1966,9 +1999,11 @@ static void gen_flush_fp(DisasContext *s)
 #if defined(XBOX)
     /*
      * Reached from gen_bb_epilogue() (every BB_END op and the top of every
-     * tcg_gen_callN) and from i386_tr_tb_stop(), so this is also the point
-     * where a deferred exception-pointer update must land: no consumer of
-     * env->fpip/fpcs/fpdp/fpds can run without passing through here first.
+     * tcg_gen_callN except the argument-only pure calls, which read no env
+     * state: gen_pure_call_begin) and from i386_tr_tb_stop(), so this is
+     * also the point where a deferred exception-pointer update must land:
+     * no consumer of env->fpip/fpcs/fpdp/fpds can run without passing
+     * through here first.
      */
     xemu_x87_flush_ptrs(s);
     xemu_x87_close_run(s);
@@ -1983,6 +2018,7 @@ static void gen_flush_fp(DisasContext *s)
         s->wt_st[i] = NULL;
     }
     s->wt_ft0 = NULL;
+    s->wt_exact = 0;
 #endif
 }
 
@@ -1994,15 +2030,15 @@ static void gen_flush_fp(DisasContext *s)
  * 80-bit image with floatx80_to_double_fast, compute one double operation
  * under the live FPCR, and write double_to_floatx80_fast of the result.
  * This path does exactly that inline, without the call:
- *  - every result reaches env by the next helper call or block end, as
- *    the helper would have written it; a mid-block exit before then
+ *  - every result reaches env by the next flush (gen_flush_fp), as the
+ *    helper would have written it; a mid-block exit before then
  *    (cpu_io_recompile under icount, a guest #PF) lands it from the
  *    shadow double (x87_wt_pend);
  *  - the conversions are the backend's ld80f/st80f, which match the C
  *    conversions bit for bit;
  *  - each register's double, as the next helper would read it back, is
- *    kept in a temp until the next helper call or block end (gen_flush_fp),
- *    so a chain of x87 instructions does not reconvert. st80f is exact, so
+ *    kept in a temp until the next flush (gen_flush_fp), so a chain of
+ *    x87 instructions does not reconvert. st80f is exact, so
  *    that is the computed result itself; only a double loaded from memory
  *    can be a signalling NaN, which reads back quieted (x87_wt_canon);
  *  - the FPCR is never written: the helpers round with whatever it holds.
@@ -2048,17 +2084,38 @@ static TCGv_f64 x87_wt_from_bits(TCGv_i64 bits)
  * it under the FPCR at use time. The two agree because FPCR changes only
  * inside helpers (update_fp_status, the SSE brackets, which restore it on
  * leave) and every helper call flushes wt_st (tcg_gen_callN ->
- * gen_bb_epilogue -> gen_flush_fp).
+ * gen_bb_epilogue -> gen_flush_fp), except the argument-only pure calls
+ * (gen_pure_call_begin), which leave the FPCR alone.
  */
 static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
 {
-    TCGv_f64 *slot = &s->wt_st[(s->fpstt_delta + i) & 7];
+    int r = (s->fpstt_delta + i) & 7;
+    TCGv_f64 *slot = &s->wt_st[r];
     if (!*slot) {
         X87Ptr p = gen_stn_ptr(i);
         *slot = tcg_temp_new_f64();
         tcg_gen_ld80f_f64(*slot, p.base, p.ofs);
+        s->wt_exact &= ~(1 << r);
     }
     return *slot;
+}
+
+/*
+ * Whether ST(i)'s image is st80f of its cached double. For two such
+ * operands the double compare orders them exactly as the helpers'
+ * floatx80_compare_quiet orders the images: st80f is exact and monotonic
+ * (subnormals come out normalised, a NaN quiet), so the 80-bit integer
+ * fast path and softfloat agree with FCMP, unordered included.
+ */
+static bool x87_wt_exact(DisasContext *s, int i)
+{
+    int r = (s->fpstt_delta + i) & 7;
+    return s->wt_st[r] && (s->wt_exact & (1 << r));
+}
+
+static void x87_wt_set_exact(DisasContext *s, int r, bool on)
+{
+    s->wt_exact = (s->wt_exact & ~(1 << r)) | (on << r);
 }
 
 static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
@@ -2073,7 +2130,8 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
 
 /*
  * Deferred stores. A result's st80f waits for the next flush (gen_flush_fp:
- * every helper call, BB_END op and the TB end), so a slot written again
+ * every helper call except the argument-only pure calls (gen_pure_call_begin),
+ * every BB_END op and the TB end), so a slot written again
  * before then, which most x87 chains do (fld, fmul, fadd... on one ST0),
  * converts once. Only an overwrite cancels a store: a popped slot is still
  * stored, since FSAVE/FXSAVE expose empty registers.
@@ -2094,7 +2152,8 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
  * image of a pending slot is stale, so TCG code that reads or writes the
  * raw image (x87_gen_copy, fxch, the sign ops, the constants) goes through
  * the cached double or x87_wt_sync first. Helpers need nothing: their call
- * flushes.
+ * flushes, and the pure calls that skip the flush read only their
+ * arguments.
  */
 static uint8_t x87_wt_rel_pend(DisasContext *s)
 {
@@ -2150,6 +2209,7 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
                             xemu_x87_shadow[(slot - s->wt_base) & 7]));
     s->wt_st[slot] = r;
     s->wt_pend |= 1 << slot;
+    s->wt_exact |= 1 << slot;
     if (unlikely(xemu_x87_refute_on())) {
         xemu_x87_gen_poison(gen_stn_ptr((slot - s->fpstt_delta) & 7));
     }
@@ -2236,6 +2296,7 @@ static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
     }
     if (s->wt_nodefer) {
         s->wt_st[slot] = r;
+        s->wt_exact |= 1 << slot;
         x87_wt_store(s, slot);
         return;
     }
@@ -2287,22 +2348,102 @@ static TCGv_f64 x87_wt_arith(int op, TCGv_f64 a, TCGv_f64 b)
     return r;
 }
 
-/* helper_fcom_ST0_FT0: fpus C3/C2/C0 from a double compare. */
-static void x87_wt_fcom(TCGv_f64 a, TCGv_f64 b)
+/* fpus C3/C2/C0 from a compare's ZF|PF|CF (tcg_gen_com_f64). */
+static void x87_wt_fpus_cc(TCGv_i64 res)
 {
-    TCGv_i64 res = tcg_temp_new_i64();
     TCGv_i64 fpus = tcg_temp_new_i64();
 
-    tcg_gen_com_f64(res, a, b);     /* ZF|PF|CF = C3|C2|C0 at 6,2,0 */
-    tcg_gen_andi_i64(res, res, 0x45);
+    tcg_gen_andi_i64(res, res, 0x45);   /* ZF|PF|CF = C3|C2|C0 at 6,2,0 */
     tcg_gen_shli_i64(res, res, 8);
     tcg_gen_ld16u_i64(fpus, tcg_env, offsetof(CPUX86State, fpus));
     tcg_gen_andi_i64(fpus, fpus, ~0x4500);
     tcg_gen_or_i64(fpus, fpus, res);
     tcg_gen_st16_i64(fpus, tcg_env, offsetof(CPUX86State, fpus));
 }
+
+/* helper_fcom_ST0_FT0: fpus C3/C2/C0 from a double compare. */
+static void x87_wt_fcom(TCGv_f64 a, TCGv_f64 b)
+{
+    TCGv_i64 res = tcg_temp_new_i64();
+
+    tcg_gen_com_f64(res, a, b);
+    x87_wt_fpus_cc(res);
+}
+
+/*
+ * ZF|PF|CF of ST0 against ST(i) for fucom* and fcomi* (helper_fucom_ST0_FT0,
+ * helper_f(u)comi_ST0_FT0, with FT0 = ST(i)), or NULL where the helper
+ * must run. The __hard helpers raise no exception flags
+ * (merge_exception_flags is empty under USE_HARD_FPU), so neither does
+ * this, quiet or not. fcomi* compares floatx80_to_double_fast of both
+ * images, which is what ld80f gives: always inline. fucom* orders the
+ * 80-bit images themselves (floatx80_compare_quiet__hard), so it runs
+ * inline only when both images are st80f of their doubles (x87_wt_exact):
+ * a register read from env may hold bits a double has not.
+ */
+static TCGv_i64 x87_wt_com_st(DisasContext *s, int i, bool quiet)
+{
+    TCGv_i64 res;
+
+    if (!x87_wt(s) ||
+        (quiet && !(x87_wt_exact(s, 0) && x87_wt_exact(s, i)))) {
+        if (x87_wt(s) && unlikely(xemu_x87_census_on())) {
+            xemu_gen_counter_inc(&xemu_x87_wt_cmp_helper);
+        }
+        return NULL;
+    }
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_wt_cmp_inline);
+    }
+    res = tcg_temp_new_i64();
+    tcg_gen_com_f64(res, x87_wt_get_st(s, 0), x87_wt_get_st(s, i));
+    return res;
+}
+
+/* fucom/fucomp/fucompp: false if the helper must run. */
+static bool gen_fucom_wt(DisasContext *s, int i)
+{
+    TCGv_i64 res = x87_wt_com_st(s, i, true);
+
+    if (!res) {
+        return false;
+    }
+    x87_wt_fpus_cc(res);
+    return true;
+}
+
+/*
+ * f(u)comi(p): ZF/PF/CF from the compare, the other flags as they were
+ * (cpu_cc_compute_all), CC_OP_EFLAGS; false if the helper must run.
+ * gen_compute_eflags' cc_compute_all call is a pure call: no flush.
+ */
+static bool gen_fcomi_wt(DisasContext *s, int i, bool quiet)
+{
+    TCGv_i64 res = x87_wt_com_st(s, i, quiet);
+    TCGv t;
+
+    if (!res) {
+        return false;
+    }
+    gen_compute_eflags(s);
+    t = tcg_temp_new();
+    tcg_gen_trunc_i64_tl(t, res);       /* com_f64 sets no other bit */
+    tcg_gen_andi_tl(cpu_cc_src, cpu_cc_src, ~(CC_Z | CC_P | CC_C));
+    tcg_gen_or_tl(cpu_cc_src, cpu_cc_src, t);
+    return true;
+}
 #else
 static bool x87_wt(DisasContext *s)
+{
+    return false;
+}
+
+static bool gen_fucom_wt(DisasContext *s, int i)
+{
+    return false;
+}
+
+static bool gen_fcomi_wt(DisasContext *s, int i, bool quiet)
 {
     return false;
 }
@@ -2417,6 +2558,7 @@ static void x87_lean_move(DisasContext *s, int d, int src_i)
     if (x87_wt(s)) {
         s->wt_st[dst] = s->wt_st[src];
         s->wt_pend &= ~(1 << dst);
+        x87_wt_set_exact(s, dst, s->wt_exact & (1 << src));
     }
 }
 #endif
@@ -2474,15 +2616,18 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
              * side is overwritten.
              */
             TCGv_f64 va = s->wt_st[a], vb = s->wt_st[b];
+            bool ea = s->wt_exact & (1 << a), eb = s->wt_exact & (1 << b);
             if (!pb) {
                 x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
                 s->wt_pend &= ~(1 << a);
                 s->wt_st[a] = vb;
+                x87_wt_set_exact(s, a, eb);
             }
             if (!pa) {
                 x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
                 s->wt_pend &= ~(1 << b);
                 s->wt_st[b] = va;
+                x87_wt_set_exact(s, b, ea);
             }
             if (pb) {
                 x87_wt_pend(s, a, vb);
@@ -2507,8 +2652,11 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
         tcg_gen_st_i64(hin, p0.base, p0.ofs + 8);
         if (x87_wt(s)) {
             TCGv_f64 t = s->wt_st[a];
+            bool ea = s->wt_exact & (1 << a);
             s->wt_st[a] = s->wt_st[b];
             s->wt_st[b] = t;
+            x87_wt_set_exact(s, a, s->wt_exact & (1 << b));
+            x87_wt_set_exact(s, b, ea);
         }
         return;
     }
@@ -2833,6 +2981,75 @@ static void gen_fcom_ST0_FT0(DisasContext *s)
     gen_helper_fp_arith_ST0_FT0(s, 2);
 }
 
+#if defined(XBOX)
+/*
+ * fcmov on the write-through path: ST0 = jcc(b) ? ST0 : ST(i), selected
+ * without a branch. A branch is a BB_END op, whose flush lands every
+ * deferred store and drops the cached doubles, so the fld/fld/fucomi/fcmov
+ * min/max idiom converted both loads every element. The select re-defers
+ * ST0 with either double, which leaves the image the move would only when
+ * both images are st80f of their doubles (x87_wt_exact); otherwise this
+ * branches on the condition it computed. False only off the path.
+ */
+static bool gen_fcmov_wt(DisasContext *s, int b, int opreg)
+{
+    TCGv c;
+    TCGLabel *l1;
+
+    if (!x87_wt(s)) {
+        return false;
+    }
+    /* First, so that a flushing call in it cannot outdate the check. */
+    c = tcg_temp_new();
+    gen_setcc(s, b, c);
+    if (x87_wt_exact(s, 0) && x87_wt_exact(s, opreg)) {
+        TCGv_i64 c64 = tcg_temp_new_i64();
+        TCGv_i64 keep = tcg_temp_new_i64();
+        TCGv_i64 mov = tcg_temp_new_i64();
+
+        if (unlikely(xemu_x87_census_on())) {
+            xemu_gen_counter_inc(&xemu_x87_wt_fcmov_inline);
+        }
+        tcg_gen_extu_tl_i64(c64, c);
+        tcg_gen_mov64f_i64(keep, x87_wt_get_st(s, 0));
+        tcg_gen_mov64f_i64(mov, x87_wt_get_st(s, opreg));
+        tcg_gen_movcond_i64(TCG_COND_NE, keep, c64, tcg_constant_i64(0),
+                            keep, mov);
+        x87_wt_set_st(s, 0, x87_wt_from_bits(keep));
+        return true;
+    }
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_wt_fcmov_branch);
+    }
+    l1 = gen_new_label();
+    tcg_gen_brcondi_tl(TCG_COND_NE, c, 0, l1);
+    gen_fmov_ST0_STN(s, opreg);
+    gen_set_label(l1);
+    return true;
+}
+#else
+static bool gen_fcmov_wt(DisasContext *s, int b, int opreg)
+{
+    return false;
+}
+#endif
+
+/* fcomi/fucomi ST0, ST(i): EFLAGS ZF/PF/CF, CC_OP_EFLAGS. */
+static void gen_fcomi_ST0_STN(DisasContext *s, int opreg, bool quiet)
+{
+    if (gen_fcomi_wt(s, opreg, quiet)) {
+        return;
+    }
+    gen_update_cc_op(s);
+    gen_fmov_FT0_STN(s, opreg);
+    if (quiet) {
+        gen_helper_fucomi_ST0_FT0(tcg_env);
+    } else {
+        gen_helper_fcomi_ST0_FT0(tcg_env);
+    }
+    assume_cc_op(s, CC_OP_EFLAGS);
+}
+
 static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
 {
     TCGv_i32 fpus = tcg_temp_new_i32();
@@ -2897,6 +3114,7 @@ static void gen_fld1_ST0(DisasContext *s)
             s->wt_st[s->fpstt_delta & 7] =
                 x87_wt_from_bits(tcg_constant_i64(0x3FF0000000000000ull));
             s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
+            s->wt_exact |= 1 << (s->fpstt_delta & 7);
         }
         return;
     }
@@ -2914,6 +3132,7 @@ static void gen_fldz_ST0(DisasContext *s)
             s->wt_st[s->fpstt_delta & 7] =
                 x87_wt_from_bits(tcg_constant_i64(0));
             s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
+            s->wt_exact |= 1 << (s->fpstt_delta & 7);
         }
         return;
     }
@@ -4595,8 +4814,10 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x15: /* da/5 */
             switch (rm) {
             case 1: /* fucompp */
-                gen_fmov_FT0_STN(s, 1);
-                gen_helper_fucom_ST0_FT0(tcg_env);
+                if (!gen_fucom_wt(s, 1)) {
+                    gen_fmov_FT0_STN(s, 1);
+                    gen_helper_fucom_ST0_FT0(tcg_env);
+                }
                 gen_fpop(s);
                 gen_fpop(s);
                 break;
@@ -4627,22 +4848,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x1d: /* fucomi */
-            if (!(s->cpuid_features & CPUID_CMOV)) {
-                goto illegal_op;
-            }
-            gen_update_cc_op(s);
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fucomi_ST0_FT0(tcg_env);
-            assume_cc_op(s, CC_OP_EFLAGS);
-            break;
         case 0x1e: /* fcomi */
             if (!(s->cpuid_features & CPUID_CMOV)) {
                 goto illegal_op;
             }
-            gen_update_cc_op(s);
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fcomi_ST0_FT0(tcg_env);
-            assume_cc_op(s, CC_OP_EFLAGS);
+            gen_fcomi_ST0_STN(s, opreg, op == 0x1d);
             break;
         case 0x28: /* ffree sti */
             gen_ffree_STN(s, opreg);
@@ -4658,13 +4868,14 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_fpop(s);
             break;
         case 0x2c: /* fucom st(i) */
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fucom_ST0_FT0(tcg_env);
-            break;
         case 0x2d: /* fucomp st(i) */
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fucom_ST0_FT0(tcg_env);
-            gen_fpop(s);
+            if (!gen_fucom_wt(s, opreg)) {
+                gen_fmov_FT0_STN(s, opreg);
+                gen_helper_fucom_ST0_FT0(tcg_env);
+            }
+            if (op == 0x2d) {
+                gen_fpop(s);
+            }
             break;
         case 0x33: /* de/3 */
             switch (rm) {
@@ -4698,24 +4909,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x3d: /* fucomip */
-            if (!(s->cpuid_features & CPUID_CMOV)) {
-                goto illegal_op;
-            }
-            gen_update_cc_op(s);
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fucomi_ST0_FT0(tcg_env);
-            gen_fpop(s);
-            assume_cc_op(s, CC_OP_EFLAGS);
-            break;
         case 0x3e: /* fcomip */
             if (!(s->cpuid_features & CPUID_CMOV)) {
                 goto illegal_op;
             }
-            gen_update_cc_op(s);
-            gen_fmov_FT0_STN(s, opreg);
-            gen_helper_fcomi_ST0_FT0(tcg_env);
+            gen_fcomi_ST0_STN(s, opreg, op == 0x3d);
             gen_fpop(s);
-            assume_cc_op(s, CC_OP_EFLAGS);
             break;
         case 0x10 ... 0x13: /* fcmovxx */
         case 0x18 ... 0x1b:
@@ -4733,6 +4932,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     goto illegal_op;
                 }
                 op1 = fcmov_cc[op & 3] | (((op >> 3) & 1) ^ 1);
+                if (gen_fcmov_wt(s, op1, opreg)) {
+                    break;
+                }
                 l1 = gen_new_label();
                 gen_jcc_noeob(s, op1, l1);
                 gen_fmov_ST0_STN(s, opreg);
@@ -5609,10 +5811,12 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     }
     dc->wt_ft0 = NULL;
     dc->wt_pend = 0;
+    dc->wt_exact = 0;
     dc->wt_insn_pend = 0;
     dc->wt_epoch = false;
     dc->wt_nodefer = false;
     dc->wt_base = 0;
+    dc->pure_call = false;
 #endif
 }
 
@@ -5791,5 +5995,12 @@ void x86_translate_code(CPUState *cpu, TranslationBlock *tb,
 
 void gen_bb_epilogue(void)
 {
-    gen_flush_fp((DisasContext *)tcg_ctx->disas_ctx);
+    DisasContext *s = (DisasContext *)tcg_ctx->disas_ctx;
+
+#if defined(XBOX)
+    if (s->pure_call) {
+        return;
+    }
+#endif
+    gen_flush_fp(s);
 }
