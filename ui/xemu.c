@@ -982,14 +982,31 @@ static void frame_run_bh(void *opaque)
     }
 }
 
+static bool frame_advance_debug_stop;
+
 static void frame_stop_bh(void *opaque)
 {
     Coroutine *co = frame_advance_co;
 
     frame_advance_co = NULL;
     frame_advance_stopping = false;
-    vm_stop(RUN_STATE_PAUSED);
+    /* A gdbstub stop ends the advance early; leave the VM to the debugger. */
+    if (!runstate_check(RUN_STATE_DEBUG)) {
+        vm_stop(RUN_STATE_PAUSED);
+    }
     aio_co_wake(co);
+}
+
+static void frame_advance_vm_state_change(void *opaque, bool running,
+                                          RunState state)
+{
+    if (!running && state == RUN_STATE_DEBUG && frame_advance_co &&
+        !frame_advance_stopping) {
+        frame_advance_stopping = true;
+        frame_advance_debug_stop = true;
+        aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh,
+                                NULL);
+    }
 }
 
 static void process_vblank(struct xemu_console *scon)
@@ -1083,12 +1100,24 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
             return NULL;
         }
     }
-    /* Prelaunch: started with -S, so that nothing runs before a load. */
+    /*
+     * Prelaunch: started with -S, so that nothing runs before a load.
+     * Debug: halted by the gdbstub, which a run continues from exactly
+     * that instruction (a gdbstub breakpoint still at it fires again).
+     */
     if (!runstate_is_running() && !runstate_check(RUN_STATE_PAUSED) &&
-        !runstate_check(RUN_STATE_PRELAUNCH)) {
-        error_setg(errp, "the VM is neither running nor paused");
+        !runstate_check(RUN_STATE_PRELAUNCH) &&
+        !runstate_check(RUN_STATE_DEBUG)) {
+        error_setg(errp, "the VM is neither running, paused nor stopped "
+                   "by the debugger");
         return NULL;
     }
+    static bool state_handler;
+    if (!state_handler) {
+        qemu_add_vm_change_state_handler(frame_advance_vm_state_change, NULL);
+        state_handler = true;
+    }
+    frame_advance_debug_stop = false;
 
     frame_advance_co = qemu_coroutine_self();
     frame_trace_regions = trace;
@@ -1108,6 +1137,10 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     if (trace) {
         info->trace = frame_trace_samples;
         info->has_trace = true;
+    }
+    if (frame_advance_debug_stop) {
+        info->has_debug_stop = true;
+        info->debug_stop = true;
     }
     frame_trace_regions = NULL;
     frame_trace_samples = NULL;

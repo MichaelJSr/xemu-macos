@@ -177,7 +177,10 @@ Other automation interfaces (windowed or headless):
   arrival.
 - **Frames** count vblanks while the VM runs. QMP `query-xemu-frame`
   returns `{frame, running}`; `xemu-frame-advance {"frames": N}` runs N
-  frames, pauses, and returns (`0` just pauses). In real time, replays
+  frames, pauses, and returns (`0` just pauses). It also starts a VM the
+  gdbstub stopped, from the instruction it stopped at (lift a breakpoint
+  under the PC first); a breakpoint or step that stops the VM during the
+  advance ends it early with `debug-stop: true`. In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
 - **Per-frame traces**: `xemu-frame-advance {"frames": N, "trace":

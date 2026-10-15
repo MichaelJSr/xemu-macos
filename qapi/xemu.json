@@ -55,11 +55,15 @@
 # @trace: the samples @xemu-frame-advance took (only when it was
 #     given @trace)
 #
+# @debug-stop: true when a gdbstub breakpoint or step stopped the VM
+#     before @xemu-frame-advance reached its frame; the VM is left
+#     stopped for the debugger
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
   'data': { 'frame': 'int', 'running': 'bool',
-            '*trace': ['XemuTraceSample'] } }
+            '*trace': ['XemuTraceSample'], '*debug-stop': 'bool' } }
 
 ##
 # @query-xemu-frame:
@@ -74,7 +78,8 @@
 # @xemu-frame-advance:
 #
 # Run the VM for @frames vblanks, then pause it.  Returns once it is
-# paused.  With @frames 0 the VM is just paused.
+# paused.  With @frames 0 the VM is just paused.  A VM the gdbstub
+# stopped runs on from the instruction it stopped at.
 #
 # @frames: vblanks to run (default 1)
 #
