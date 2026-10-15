@@ -42,10 +42,12 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | JIT on the EP core | closed | P-space overlays → retranslation churn (~1 per 10 block executions); the EP stays on the interpreter, the GP keeps the churn throttle | `21e9045344`, `d287c6cb23` |
 | Merges: a rename rewrote `getenv` strings; `use_dsp_jit` flipped to false | fixed | Grep `getenv(` after renames; diff `config_spec.yml` after every merge | `21e9045344`, `2e0aad3e18` |
 | Parmove+ALU fusion | closed | 0 instructions saved in every source class; x28 is the SR pin | ledger Settled |
-| Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | `DSP_JIT_fallbacks` design (C) |
+| Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | not committed |
 | APU `rate==1.0` resampler fast path | reverted | No silence pad on drain → `voice_process` spins | `68d5afe7fa` |
 | Voice-register cache, SE2FE re-notify skip, voice writeback batching | closed | DMA and the guest use RAM voice state; no write hook | ledger |
 | HRTF hand-written NEON | reopened, shipped | The gather-over-taps form lost to autovectorization; lanes over outputs on settled frames (96% of heavy-f1 calls) won, 2.9% fewer det cycles per frame | `aff8c229e9`, HRTF settled path |
+| Vectorizing the unsettled HRTF path | closed | After the settled fast path, VP is 1.2% of the vCPU on stream-e2 and HRTF leaves the top list | `75a295fdbd` |
+| EP DSP on the JIT (retested 2026-10-15) | closed | Still churns: 108,788 EP translations per 1200 heavy-f1 frames, Minsns/frame 125.4 vs 120.7; overlays are re-DMAed with different code. Reopen only with a P-space-content-keyed translation cache | `d287c6cb23` |
 | APU thread resumed by reset during loadvm | fixed | Resume only if `runstate_is_running()` | `d6da581d4b` |
 | **TCG / x87 / CPU** | | | |
 | floatx80 union overlay | closed | Layout mismatch; segfaults | — |
@@ -63,10 +65,15 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
-| Inline FUCOMI on the x87 write-through path | reverted | Helper gone, det heavy-f1 88.25 vs 88.08 fps: no gain | — |
 | Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |
 | `-fzero-call-used-regs=skip` | closed | −411 kB `__text`, fps 3+/2− then 3+/5−. Retest via `CFLAGS` | `7aa746a952` |
 | COMISS lowering, dirty-clear coalescing, xpage spanning dests | closed / parked | Census empty; <1% of vCPU; under 1M/s | ledger |
+| Chaining icount step TBs (step→step `goto_tb`, non-PCREL step TBs) | closed | Loop dispatches per cut 22→2.6, but Minsns/frame 123.33→123.30 and Mcycles/frame flat: the loop round trip is ~0.2% of the det vCPU (an earlier "+1%" was wall-fps noise). Trap: a non-`CF_PCREL` TB skips the EIP update on a linked exit, so it must never chain into a `CF_PCREL` TB | not committed |
+| REP bulk-helper minimum run 4 / 12 / 16 / 32 | closed | Minsns/frame 121.5 / 121.4 / 121.4 / 121.9 vs 121.2 at 8 (helper off: 123.4); 8 shipped | `51e7e7fe1e` |
+| Guest spin/idle skipping under icount | closed | Spinning is <0.5% of guest instructions (heavy-f1 0.38% at 0x13a136); halted: stream-e2 1.24%, cold boot 0.51% | not committed |
+| SHUFPS non-broadcast as four lane moves | closed | Minsns/frame −0.16% (4/4) but cycles leaned worse (~8/20 better): likely a store-forwarding stall (four narrow stores, then the helper's 128-bit load). The broadcast form shipped | `9947de1db3` |
+| Guarded inline `cc_compute` for flag reads before any flag setter in a block | closed | Translation-time cc_op predicts runtime 97.6-99.98%; the guard removed 97% of helper calls (47M→1.3M per 1200 frames) but only 0.19% of instructions, lost to spills around the guard branch. Only keying TBs on entry cc_op would pay (risky: chaining, fork lookups) | not committed |
+| SSE packed-single as vector TCG ops + an MXCSR hflag | closed for now | mulps+addps are 0.8-2.0% of the det vCPU, shufps 0.1-0.2%; needs new TCG vector-FP opcodes for at most 1-1.5% | not committed |
 | **PFIFO / threading** | | | |
 | Report delivery under `pgraph.lock` instead of `pfifo.lock`, plus doorbell broadcast after unlock | closed | heavy-f1 17.15 -> 10.67 fps (2/2): the fence wait then blocks the vCPU's PGRAPH reads and surface callbacks instead of the doorbell | 2026-10-14, not committed |
 | PFIFO untimed wait, descriptor bind-skip | re-added | Innocent; a new `pfifo_kick` site must hold `pfifo.lock` | `a005bb1560` |
@@ -82,35 +89,39 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | `-a x86_64` failure chain | fixed | Run `file` on the artifact | `e5134cc906`, `ae94399cd3` |
 | cp+codesign bundle refresh | incident | Dies at dyld; replay the `package_macos` fixups | `8db8f61b4d` |
 | Three refuters at once | incident | Wedges boot; use two at most, or `XEMU_DSP_JIT_DIFF=10` | ledger |
+| Bundle binary run with `-machine help` and no `-config_path` (2026-10-15) | incident | The exit-time save rewrote the personal `xemu.toml` (same settings). Even `-help` runs need `-config_path` | — |
 
 ## GPU frame-cost campaign (2026-10-13)
-- Anchor `azurik-heavy-f1` (replaced F8 on 2026-10-11): ~679 draws/flip, ~28.5 passes/flip, fence_wait ~3.9 ms/flip, `pipeline_gen`≈0, 28.9 fps on a loaded box. No quiet-box envelope yet. `azurik-heavy-w2`: 323 draws/flip, ~22 passes, 23.3 fps, cost not per-draw (`../fixtures/README.md`).
+- Anchor `azurik-heavy-f1` (replaced F8 on 2026-10-11): ~679 draws/flip, ~28.5 passes/flip, fence_wait ~3.9 ms/flip, `pipeline_gen`≈0, 28.9 fps on a loaded box. `azurik-heavy-w2`: 323 draws/flip, ~22 passes, 23.3 fps, cost not per-draw (`../fixtures/README.md`).
 - The 2026-07-04 F5 run (`038f596332`, `9b625f1126`) killed every mechanism. A1 subrange merge: zero opportunity. A2 cross-block merge: 10.6% candidates at ~0 PFIFO cost per call, since prefill=0 encodes on MoltenVK's thread. B per-draw CPU: <1 ms/flip. C pass cuts: savings land in ~14 ms/flip of GPU slack (clears are the top cause, 5.0/flip).
 - `da_multi_subrange` = 0 on heavy-f1 too, so A1 is closed. D `vkCmdDrawMultiEXT`: never wire it; MoltenVK unrolls it per draw. Re-check on a pin bump.
 - The scene is guest-CPU bound. vCPU% says nothing (the title busy-polls); PFIFO starvation is the signal.
 - If A2 is ever built: compare inline vertex-attribute values (no dirty flag), and never merge across a report or zpass-enable boundary.
-- Next: two quiet-box Phase 0 captures plus the merge/pass-cause nsprof counters on heavy-f1, then Metal System Trace on heavy-f1 and W2. Reopen A2/C only if GPU time ≈ frame time.
+- Next: two Phase 0 captures (load quoted) plus the merge/pass-cause nsprof counters on heavy-f1, then Metal System Trace on heavy-f1 and W2. Reopen A2/C only if GPU time ≈ frame time.
 
 ## Open frontier (ranked)
 1. **PFIFO doorbell lock wait.** On heavy-f1, `user_write` blocked on `pfifo.lock` is ≈9.6% of vCPU samples. PFIFO holds the lock mostly across the reports safety-valve fence wait (`REPORTS_SUBMIT`); moving that under `pgraph.lock` was −38% (see PFIFO dead ends). Open: deliver without a fence wait on the PFIFO thread at all.
 2. **x87 helpers.** The inline cache never ran after 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/) and its fork layers are removed; the exact write-through path (`4d2466d106`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU.
-3. **Is W2 GPU-bound?** Fewest draws, slowest anchor. Run Phase 2.
-4. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
-5. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.
-6. **Apple default for `audio.dsp_jit.enabled`** (still false). Wants an `XEMU_APU_PROF` receipt.
-7. **PAL 50 Hz guest vblank.** Present no longer uses the vblank timer. Needs region detection, an NTSC no-change A/B and a PAL fixture.
-8. **BINK via VideoToolbox.** Needs theory: there's no hook, and Azurik's movie never touches PVIDEO.
-9. **GL renderer under the Metal window.** Compatibility only.
-10. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
+3. **APU tick remainder.** GP DSP JIT ~2% plus EP interpreter ~1.5% of the deterministic vCPU. The EP stays off the JIT until a P-space-content-keyed translation cache exists (DSP/APU dead ends).
+4. **Short REP MOVSD.** Runs of 1-3 dwords stay in the per-element loop; the hottest site (eip 0x12378b, 6.2M runs, 3 dwords on average) is ~0.6% of the vCPU. Wants a cheaper inline loop, not the helper.
+5. **Is W2 GPU-bound?** Fewest draws, slowest anchor. Run Phase 2.
+6. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
+7. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.
+8. **Apple default for `audio.dsp_jit.enabled`** (still false; the APU numbers here were all measured with it on). Wants an `XEMU_APU_PROF` receipt.
+9. **PAL 50 Hz guest vblank.** Present no longer uses the vblank timer. Needs region detection, an NTSC no-change A/B and a PAL fixture.
+10. **BINK via VideoToolbox.** Needs theory: there's no hook, and Azurik's movie never touches PVIDEO.
+11. **GL renderer under the Metal window.** Compatibility only.
+12. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
 
 Parked, with bars: ranged TLB flush (~0.2% of vCPU vs a 1.5% gate); pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
 
 ## Benchmarking traps
 - Scene identity: check draws/flip in both arms (a ~3 draws/flip menu baseline once faked "−30%"). Select intervals by content, not log position.
 - Composition shift: Azurik spends freed CPU on more effect draws. When the arms' draws/flip differ, compare draws/s.
-- A loaded box or leftover harness loops: wait for load <4 and run `pgrep -fl xemu`. A 3+/2− sign split is noise.
+- A loaded box or leftover harness loops: run `pgrep -fl xemu`, quote the load and add pairs rather than waiting. A 3+/2− sign split is noise.
 - Warm vs cold caches: shared pipeline/shader caches hide first-visit hitches (`movement-probe.sh --isolate-caches`). Static A/Bs miss streaming costs.
 - Wrong binary or config: a running process keeps its old binary; Finder and shell launches get different environments; harnessing `dist/xemu.app` loses the config on rebuild.
+- Cheap-helper deletions: removing cheap, high-IPC helper calls shows in Minsns/frame (1-2%) but not in Mcycles/frame on this box, and heavy load widens the Mcycles/frame spread (28-40): interleave and add pairs.
 - Stale instruments: re-measure proxies on today's binary. Suspend samplers park on barriers (`pthread_jit_write_protect_np` ~10% is skid). Unfocused windows present unpaced.
 
 Full pre-2026-10-13 sagas: `git show ad569d78c5:.claude/skills/<old-skill-name>/SKILL.md` for `xemu-failure-archaeology`, `xemu-gpu-frame-campaign`, `xemu-frontier-and-positioning`, `xemu-research-methodology`.

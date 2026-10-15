@@ -1,9 +1,11 @@
 # Fork-wide optimization audit — 2026-08-04
 
 > **Finished 2026-08-04.** Every candidate was landed or measured dead the
-> same day; outcomes are in the [roadmap](../roadmap.md)'s 2026-08-04
-> state header and the [ledger](../optimizations.md), closing commit
-> `7aa746a952`. Figures and line anchors below are as of 2026-08-04.
+> same day; outcomes are in the [ledger](../optimizations.md)'s
+> 2026-08-04 wave block (Changes) and in the roadmap's 2026-07-19 and
+> 2026-08-04 state headers, now read with
+> `git show 82ccdbe813:docs/roadmap.md`; closing commit `7aa746a952`.
+> Figures and line anchors below are as of 2026-08-04.
 > §3.1's `XEMU_HARDENING` knob was removed from `build.sh` on
 > 2026-10-10; its skip arm is
 > `CFLAGS=-fzero-call-used-regs=skip ./build.sh` (ledger Failed row).

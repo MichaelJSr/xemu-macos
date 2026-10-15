@@ -537,8 +537,8 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     /*
      * Single queue. A second compute queue was acquired here at one
      * point but never submitted to (MoltenVK exposes queueCount=1
-     * anyway; see README "Failed experiments": separate compute
-     * queue).
+     * anyway; see docs/optimizations.md "Failed / reverted
+     * experiments": separate compute queue).
      */
     float queuePriority = 1.0f;
 

@@ -44,7 +44,7 @@ xemu-history), not here.
 - [`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md): the fork-wide optimization audit, closed 2026-08-04.
 - [`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md): BQL-free dispatch for the remaining MMIO blocks. Closed, do not build.
 - [`pgraph-lockless-audit.md`](Finished/pgraph-lockless-audit.md): BQL-free PGRAPH MMIO dispatch, shipped 2026-07-11.
-- [`roadmap-closed-items.md`](Finished/roadmap-closed-items.md): full write-ups of closed roadmap candidates.
+- [`roadmap-closed-items.md`](Finished/roadmap-closed-items.md): full write-ups of closed and parked roadmap candidates.
 - [`subpage-gate0-prediction.md`](Finished/subpage-gate0-prediction.md): sub-page dirty tracking, from sizing to results, with the original design as an appendix. Shipped 2026-07-11 and 2026-07-18.
 - [`windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md): review of the Windows wave-1 work, closed with v0.13.3.
 - [`xpage-design.md`](Finished/xpage-design.md): cross-page TB chaining soundness design, shipped 2026-07-11.

@@ -560,7 +560,7 @@ class Bench:
         env["XEMU_NV2A_NSPROF"] = "1"
         env.update(self.arm_env[arm])
         # nsprof writes to stdout, monitor/QEMU noise to stderr: capture both
-        # into one file (archaeology 9.x - a half-captured log gates INVALID).
+        # into one file (a half-captured log gates INVALID).
         logf = open(logpath, "w", encoding="utf-8", errors="replace")
         cmd = [exe, "-config_path", cfg,
                "-monitor", "tcp:127.0.0.1:%d,server,nowait" % port]
@@ -617,7 +617,7 @@ class Bench:
                     return
                 # Sidecar, NEVER the run log: xemu holds that file open with
                 # its own offset, and a parent write at offset 0 would
-                # overwrite the nsprof header lines (archaeology 9.8).
+                # overwrite the nsprof header lines.
                 with open(os.path.join(self.out, "mon_%s.log" % label), "w",
                           encoding="utf-8") as mf:
                     mf.write("loadvm %s\n" % self.snapshot)
@@ -750,7 +750,7 @@ class Bench:
 
     def write_verdict(self, label, line):
         # Sidecar file, never the run log: xemu's non-append stdout redirect
-        # overwrites bytes appended to the shared log (archaeology 9.8).
+        # overwrites bytes appended to the shared log.
         with open(os.path.join(self.out, "shot_%s.verdict" % label), "w",
                   encoding="utf-8") as f:
             f.write(line + "\n")

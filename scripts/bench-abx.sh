@@ -96,7 +96,8 @@ OUT=${pos[4]:-./bench-out-abx}
 [[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src or XEMU_TEST_CONFIG)" >&2; exit 2; }
 [[ -f $SUMMARIZER ]] || { echo "missing $SUMMARIZER (scene gate is mandatory)" >&2; exit 1; }
 # The monitor only knows qcow2 tags; `loadvm F8` errors on a socket nobody
-# reads and the guest keeps running the boot workload (incident 9.9).
+# reads and the guest keeps running the boot workload, which then gets
+# benchmarked silently.
 [[ $SNAP != [Ff][5-8] ]] || { echo "snapshot must be the qcow2 tag, not an F-key name" >&2; exit 2; }
 (( FULLSCREEN )) && SCREENSHOT=0
 
@@ -255,7 +256,7 @@ EOF
     ps -o %cpu= -p $pid >> $cpul 2>/dev/null || break
     if (( SCREENSHOT )) && [[ $j -eq $(( (n + 1) / 2 )) ]]; then
       # Own file: xemu's non-append stdout redirect overwrites bytes
-      # appended to the shared log (archaeology 9.8).
+      # appended to the shared log.
       python3 $SHOT_PY $pid $OUT/shot_$label.png > $OUT/shot_$label.verdict 2>&1 || true
     fi
   done

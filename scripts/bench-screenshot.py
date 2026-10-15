@@ -23,7 +23,7 @@ Exit code: 0 on PASS/SKIP, 3 on ARTIFACT (callers may treat 3 as soft).
 A SKIP is never an error: benches must not die because a window wasn't
 capturable (e.g. headless CI). Known benign class to keep in mind when
 reviewing a flagged PNG: the Azurik death flash is a single-frame
-full-screen magenta wash with the HUD intact (validation skill §1.3).
+full-screen magenta wash with the HUD intact.
 """
 import subprocess
 import sys

@@ -114,8 +114,8 @@ pgo_compiler_family() {
     # "cc -m64") still works. Deliberately NOT piped into grep: under
     # 'set -o pipefail' a grep -q that exits on the first match can
     # SIGPIPE the compiler mid-output and turn a clang toolchain into
-    # a "gcc" verdict (same class of trap as the archaeology 8.4/8.6
-    # CI reddenings).
+    # a "gcc" verdict (same class of trap as the xemu-history row
+    # "build.sh shell traps (PGO merge-skip, set -e glob, pipefail)").
     local defs
     defs=$(${CC:-cc} -dM -E - </dev/null 2>/dev/null || true)
     case "${defs}" in
@@ -224,8 +224,8 @@ setup_pgo() {
 #
 # awk reads build.log directly and carries every counter to END: no
 # pipe and no early-exit reader, so pipefail has nothing to misreport
-# (the trap that reddened CI twice — see the archaeology 8.4/8.6
-# entries).
+# (the trap that reddened CI twice — see the xemu-history row
+# "build.sh shell traps (PGO merge-skip, set -e glob, pipefail)").
 check_pgo_staleness() {
     [ "${XEMU_PGO:-}" = "use" ] || return 0
     [ -f build.log ] || return 0

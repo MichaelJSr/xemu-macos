@@ -9,7 +9,10 @@ the top-level [README](../README.md).
 Sections: the per-subsystem landed-change manifest (moved here from the
 README 2026-07-18), the runtime escape-hatch / diagnostic knob catalog
 (each knob exists because of a specific entry here), and the
-failed / reverted / settled-negative experiment tables.
+failed / reverted / settled-negative experiment tables. An
+"archaeology N.M" citation is section N.M of the retired
+failure-archaeology skill:
+`git show ad569d78c5:.claude/skills/xemu-failure-archaeology/SKILL.md`.
 
 ## Runtime escape-hatch / diagnostic knobs
 
@@ -18,10 +21,9 @@ the row names `0` as its escape hatch. Every knob here is
 the escape hatch or measurement channel for a specific entry in the
 Changes manifest below — the pairing is the fork's bisect discipline,
 and every one of them has a `getenv` on this branch. Knobs that exist
-only in the retired wave-1 work (tag `archive/windows-wave1-wip` since
-2026-10-10) are listed apart, under "Escape hatches on branch
-`windows-wave1-wip`" inside the Windows native port section, so a
-reader of main is never told to set a knob that does nothing.
+only in the retired wave-1 work are recorded in
+[`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
+and tag `archive/windows-wave1-wip`.
 
 | Env var | Purpose |
 |---|---|
@@ -41,7 +43,7 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` **plus** a full `tlb_flush_all_cpus_synced` **plus** an unconditional jump-cache wipe — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else. No behavior change |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
-| `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: the `inject_input.sh` in the diagnostics skill) |
+| `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `1` = live read (one frame late), `2` = flip-time snapshot (temporally correct); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
@@ -318,30 +320,6 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   behaviour change: the POSIX branch of `test_input_poll()` is
   byte-identical, the hatch lives inside `#ifdef _WIN32`, and both
   warning fixes are declaration placement only.
-
-#### Escape hatches on branch `windows-wave1-wip` (not on main)
-
-The branch was retired on 2026-10-10. The commit these rows land with is
-kept as tag `archive/windows-wave1-wip`.
-
-These two knobs belong to wave-1 commits that are **not** landed here,
-so setting one on a main build does nothing: verified 2026-09-08 with
-`git grep <name> HEAD` over `*.c *.h *.m *.mm *.cc *.sh *.yml *.py`,
-which matches nothing at all for either. Rows are kept in the knob
-table's shape so each can move back up verbatim if its commit is ever
-cherry-picked from the tag. Earlier rows moved up as their commits landed:
-`XEMU_WIN32_DXGI` did on 2026-09-08 with the `ec31facd7d` `ui/` hunks,
-`XEMU_SPIRV_CACHE` / `XEMU_SPIRV_CACHE_ATOMIC` the same day when
-`818fe27828` landed, `XEMU_VK_VOLK_DEVICE` when `736533709e` did,
-`XEMU_APU_RAM_DIRTY` with the APU half of `971292ed48` (a build-time
-platform choice since 2026-10-15), and
-`XEMU_WIN_O3` (to the build-knob table, with inverted polarity) when
-`fb42bce22e` was re-cut and landed.
-
-| Env var | Purpose | Lands with |
-|---|---|---|
-| `XEMU_PVIDEO_UPLOAD_ALWAYS` | `=0` restores the register-keyed PVIDEO upload skip (froze overlays whose VRAM changed under fixed registers); default re-uploads every composite while enabled | `285779ce83` |
-| `XEMU_DISPLAY_SKIP_STRICT` | `=0` restores the `draw_time`-only early-out in `pgraph_vk_render_display` (all hosts, macOS included — the branch commit body mislabels it non-Apple); default also re-composites on resolution / PVIDEO register changes | `285779ce83` |
 
 ### Rendering (correctness fixes)
 
@@ -2383,7 +2361,7 @@ counter).
 | Dirty-clear TLB-walk coalescing | Parked 2026-07-05 (~1-1.5 fps ceiling, widens an archaeology-1.9-class race window). 2026-07-18 gate re-check on the post-sub-page profile: renderer-attributable `test_and_clear_dirty` vCPU share is now **< 1%** (`physical_memory_is_clean` 0.47%, the walk itself absent from the top-25 sampler symbols) — the old "~6% echo" premise died with sub-page tracking. Stays parked |
 | Voice-register writeback batching | Closed 2026-07-18: unsafe by construction. Guest audio drivers read voice state (position / `PAR_STATE` / play cursors) directly from RAM with no MMIO interception point (`NV1BA0_PIO_GET_VOICE_POSITION` confirms live queries), so deferring `voice_set_mask`'s `ram_stl` to end-of-frame serves stale state mid-frame — archaeology 5.2's unsoundness, mirrored. The no-op-store elision already shipped |
 | `qemu_cpu_kick` via `dispatch_semaphore_t` | Closed 2026-07-18: wrong premise. Under MTTCG this fork's vCPU kick is `tcg_kick_vcpu_thread` — two atomic flag stores, no signal; `pthread_kill(SIG_IPI)` (the ~50 µs P99 the vector cited) survives only on cold paths (`qemu_cpu_kick_self`, `pause_all_vcpus`). Nothing on the hot path to replace |
-| DSP JIT parmove+ALU fusion | Closed for the current title corpus 2026-07-18: the eligibility proxies (`alu_ccr_nz_skipped` / `alu_ccr_eu_skipped`) read **0** on both F8 and the Azurik audio mix, and the APU thread runs ~18% utilized off every critical path — ~0 fps ceiling regardless of the fold's local win. **Closed a second time, harder, 2026-08-04: the fold is instruction-neutral by construction**, so the local win is 0 too. Static count against the post-Phase-8 emitter every fold would have to change — `emit_pm_read_reg` (`dsp56k_jit_arm64.c`, ~:2029 as of 2026-10-10; that file moves, so re-derive with `grep -n -A85 "static void emit_pm_read_reg"`) — whose three source classes are exhaustive: pinned X/Y = 1 `UBFX` from the pin on either side of the ALU; A/B = the same multi-path limited-read block (fast / saturate / `pm_read_accu24` BLR) either side; anything else = 1 `LDR`. Nothing is staged that a fold could delete — the read writes its callee-saved destination directly. **Do not build the write-d=0 / non-aliasing eligibility counter this row used to propose** (design-doc row 8): a 100%-eligibility reading would authorize a 0-instruction win. Narrowed reopen condition: a non-audio DSP program whose parmove sources are neither pinned nor A/B — and even then, re-derive a *nonzero* static delta before any counter or emitter work. Full arithmetic: `xemu-frontier-and-positioning` §2.5 |
+| DSP JIT parmove+ALU fusion | Closed for the current title corpus 2026-07-18: the eligibility proxies (`alu_ccr_nz_skipped` / `alu_ccr_eu_skipped`) read **0** on both F8 and the Azurik audio mix, and the APU thread runs ~18% utilized off every critical path — ~0 fps ceiling regardless of the fold's local win. **Closed a second time, harder, 2026-08-04: the fold is instruction-neutral by construction**, so the local win is 0 too. Static count against the post-Phase-8 emitter every fold would have to change — `emit_pm_read_reg` (`dsp56k_jit_arm64.c`, ~:2029 as of 2026-10-10; that file moves, so re-derive with `grep -n -A85 "static void emit_pm_read_reg"`) — whose three source classes are exhaustive: pinned X/Y = 1 `UBFX` from the pin on either side of the ALU; A/B = the same multi-path limited-read block (fast / saturate / `pm_read_accu24` BLR) either side; anything else = 1 `LDR`. Nothing is staged that a fold could delete — the read writes its callee-saved destination directly. **Do not build the write-d=0 / non-aliasing eligibility counter this row used to propose** (design-doc row 8): a 100%-eligibility reading would authorize a 0-instruction win. Narrowed reopen condition: a non-audio DSP program whose parmove sources are neither pinned nor A/B — and even then, re-derive a *nonzero* static delta before any counter or emitter work. Full arithmetic: §2.5 of the retired `xemu-frontier-and-positioning` skill (`git show ad569d78c5:.claude/skills/xemu-frontier-and-positioning/SKILL.md`) |
 | COMISS / UCOMISS inline lowering (audit §1.4c) | Closed **permanently** 2026-08-04 by its own census before a line of the lowering was written. The whole candidate rode on an unmeasured compare rate, so the census counter shipped instead of the mechanism (`XEMU_X87_CENSUS=1` prints `sse scalar compares: ss=… sd=…` from `gen_VCOMI`/`gen_VUCOMI`): in-scene the guest executes **0.0 scalar compares/s** (496 for the entire process lifetime, all of them pre-`loadvm`), and **`sd` = 0** independently confirms the verifier's claim that COMISD is structurally unreachable — the guest is a Pentium III with no SSE2. There is nothing to lower. `decode-new.c.inc` was never touched; the census counter stays as the record and the reopen test. Reopen only if some title's census clears ~1.5M `ss`-compares/s |
 | `pfifo_kick` broadcast suppression (audit §1.5) | Closed 2026-08-04: the suppressible population is **empty**. `XEMU_PFIFO_KICK_STATS=1` counted **0 of 412,074 in-scene kicks** with no PFIFO wait-condition transition (7 such kicks exist for the whole process lifetime, all pre-`loadvm`), so a filter that skipped provably-useless broadcasts would skip nothing. That is the good outcome: archaeology 7.1 says a wrongly-skipped kick is a permanent PFIFO hang, and the census bought the answer at zero risk. Counter stays; suppression is not implemented and should not be. Separately noted, not proposed: 62.9% of broadcasts land with a kick already pending — provably redundant, but a *different* class from the one the audit proposed, and it needs its own sizing before anyone touches it |
 | ImGui frame build under BQL + main-loop mutex (audit §1.9) | Closed 2026-08-04 exactly as the audit predicted it would be. The HUD build holds both locks, which looked like a vCPU-blocking hazard; the measurement (`XEMU_UI_LOCK_STATS=1`, which shipped precisely to answer this without a bespoke build) puts combined occupancy at **mean 0.386% / median 0.373%**, under the pre-registered 0.5% kill bar. No rework. The knob stays as the standing re-check — this is a "measure first, expect a kill" candidate that got its kill |

@@ -10,7 +10,8 @@
 # (ui/xemu-input.c test_input_poll). This works even when the xemu window is
 # NOT focused — the only automation path that does, because macOS drops
 # synthetic key events (System Events, CGEventPostToPid) for background
-# apps. POSIX-only (the pipe is compiled out on Windows).
+# apps. POSIX FIFO client; on Windows the pipe is a named pipe, driven by
+# scripts/win/inject_input.py.
 #
 # Usage:
 #   inject_input.sh create <fifo>                  create the FIFO if absent
@@ -44,7 +45,8 @@
 # start xemu first.
 #
 # Scancode table (name = SDL_Scancode value; the fork's default keyboard
-# bindings this table matches are documented in xemu-config-and-flags):
+# bindings this table matches are documented in the xemu-operate skill
+# and the README):
 #   W=26 A=4 S=22 D=7            WASD          (left stick, in the default map)
 #   UP=82 DOWN=81 LEFT=80 RIGHT=79   arrow keys (Down/Right/Left = A/B/X buttons
 #                                     in the default map; Up is provided for

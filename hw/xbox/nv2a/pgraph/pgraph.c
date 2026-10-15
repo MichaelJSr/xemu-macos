@@ -47,10 +47,10 @@ NV2AState *g_nv2a;
  * off, zero cost when unset). Audit 2026-08 §1.5 asks how many of these
  * broadcasts can ever unblock the PFIFO thread. This is a COUNTER ONLY:
  * suppression is deliberately not implemented, because a wrongly-skipped
- * kick is a permanent PFIFO hang (failure-archaeology 7.1 — the untimed
- * wait in pfifo_thread is only as safe as the complete enumeration of
- * its wakers), and the verifier re-derived the mean-fps gain at ~0.48%,
- * below the kill line. Buckets:
+ * kick is a permanent PFIFO hang (the untimed wait in pfifo_thread is
+ * only as safe as the complete enumeration of its wakers), and the
+ * verifier re-derived the mean-fps gain at ~0.48%, below the kill
+ * line. Buckets:
  *
  *   site        which kick in pgraph_write issued it
  *   trans       a PFIFO wait condition actually changed at this write:

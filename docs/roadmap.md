@@ -7,115 +7,17 @@ must clear. Landed and settled work lives in the
 [optimization ledger](optimizations.md); nothing here is planned work
 until it graduates into a design doc or a landing.
 
-**State as of 2026-08-04 (post-wave): the F8 heavy anchor now reads
-~48.1 fps.** The fork-wide optimization wave landed and measured
-**38.12 ± 0.59 → ~48.1 fps (+10.0 mean, +26% fps, +20.4% draws/s), 5
-clean interleaved cross-binary pairs, unanimous**; the biggest single
-contributors were the `can_do_io` elision (+6.53, 3/3) and the x87
-exception-pointer deferral (+7.46, 3/3), sub-additive in combination.
-Two attribution notes that matter for anything ranked below:
+## Top open candidates
 
-- **The prewave anchor was 38.1, not 46-48.** It lands inside the 36-39
-  band the 2026-07-19 header and the audit were written against, so the
-  fixture did not drift — the wave moved the anchor. Every fps figure in
-  the items below that predates 2026-08-04 was sized against ~38 fps and
-  is now a smaller *share* of the frame.
-- **Re-profile before re-ranking.** The wave removed the top-25 vCPU
-  symbol (`cpu_io_recompile` and its `tcg_tb_lookup` cluster) and a
-  large slice of x87 store traffic, so the shape of the remaining vCPU
-  time is unknown at the new equilibrium. Re-run `XEMU_GUEST_PROF`,
-  `XEMU_INV_PROF` and `XEMU_TB_PROF` at ~48 fps before trusting any
-  ranking here — including this page's own.
-
-Landed receipts and every honest kill from the wave are in the
-[ledger](optimizations.md); the candidate list it worked from is
-[`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md).
-
-**Same-day follow-up (2026-08-04, post-upstream-merge): the audit's
-remaining candidates are now all measured-dead.** Four idle-gated
-campaigns closed the queue — surface-CB reuse pool **−0.66 fps 3/3**,
-`XEMU_X87_ELIDE_CLEAN` **−0.23 3/3**, hardening-skip retest **−0.39
-over 8 pairs** (the earlier +0.52 was noise; upstream's register
-zeroing stands on macOS; the knob was removed 2026-10-10), reports-budget 50 µs **−12.1 3/3**
-(submit-storm cliff; 300 µs validated). Items 1/3/4 below carry the
-full receipts. The honest state: at the ~48 fps equilibrium this page
-has **no live fps candidate** — the next lever must come from a fresh
-profile at the new shape, the ranged-flush FIXME with a post-wave
-number, or the prewarm/hitch class (item 2), which is
-latency-not-throughput.
-
-*Historical state header, superseded by the block above — kept because
-the items below were ranked against it.* State when last re-ranked
-(2026-07-19, arm-(b)-on shape): F8 heavy
-anchor ~36-39 fps @ ~831 draws/flip windowed (M2 Ultra, local no-PGO
-build) — the sub-page store-skip promotion moved the scene equilibrium
-from ~740 draws/flip, so compare draws/s throughput (~30-31.6k, up
-from ~28.3k) across that boundary, not raw fps. F5 ~59, F6 at the 60
-vblank cap. The scene is CPU-bound on the guest vCPU thread: guest-TCG
-generated code ~55% of vCPU samples (top TB 3.2% — no hot loops),
-locks architectural, tb cache unpressured (`tb_flush` = 1/run). The
-old "notdirty traps ~90 k/s ≈ 2%" line was a ~20x-undercounting proxy
-(archaeology 6.9): the store slow path saw ~2M eligible stores/s,
-now completed inline by default. The 60 fps goal on F8 needed ~+60% at
-that anchor — from the post-wave ~48.1 it is ~+25%; there is no
-quantization wall below the cap. Re-profile
-(`XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF`) before re-ranking
-after any landing.
-
-**2026-08-04 audit note — written pre-campaign; the closeout it defers
-to is the "Top open candidates" section below.** A fork-wide optimization
-audit ran at this equilibrium and is committed as
-[`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md)
-(49 agents; 40 findings, each carrying `file:line` evidence and a
-pre-registered prediction + kill threshold, then an adversarial
-verifier per finding — 8 confirmed, 17 plausible, 15 refuted, with the
-verifiers' corrections folded into the published numbers). Nothing in
-it is planned work, and the ranking below is deliberately **unchanged**:
-its items are candidates gated on their own measurements, and
-re-ranking waits on the campaign's numbers (closeout pass). What it
-feeds: item 1 gets the vCPU-thread constant-factor candidates (§1.1
-`can_do_io` elision, §1.2 `notdirty_write` dirty-check fast path, §1.4
-the x87/SSE translator pack, §1.6/§1.8 the micro-gates) — none of them
-a region-formation reopen, so item 1's "fundamentally different attack"
-bar stands untouched. Item 4 is adjacent to §1.3's
-surface-callback TLB-flush rate question (same TB-lifetime /
-invalidation class, same required movement probe). Item 5 gets §3.2
-(converge the shipped MoltenVK with the tested one) and §3.3 (pin the
-CI `-mcpu` distribution floor). The feature/quality vectors below get
-§2.1-§2.3 (MetalFX output-size quantization, drawable-acquire
-ordering, UI-thread timing instrumentation) and §2.4 (the
-movement-probe gate that closes or reopens arch 1.12). Its §5 records
-15 verified negatives so the next sweep doesn't re-derive them, and its
-§4 record-hygiene closures have already landed: DSP parmove+ALU fusion
-and lockless MMIO for the remaining BQL blocks are both settled in the
-ledger, the latter with its own verdict page
-([`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md), whose owed
-measurement is now filled in at §A.1).
-
-**Closeout of that note (2026-08-04, same day).** The campaign ran and
-the numbers exist. Disposition of everything the note routed: §1.1,
-§1.4a/b, §1.6 and §1.8 shipped default-on with receipts (ledger); §1.2's
-code shipped but its **fps claim was killed** (benefit base collapsed
-34-57x under the arm-(b) promotion); §1.4c COMISS, §1.5 kick
-suppression and §1.9 the ImGui lock rework were all **closed by their
-own censuses** and are in Settled vectors; §1.3 measured *for* the
-per-flip theory and is candidate 1 above; §1.7 cleared its gate and is
-deferred as candidate 4; §2.1/§2.3 shipped, §2.2 stayed opt-in (code
-removed 2026-10-10; Failed row), §2.4 **reopened arch 1.12** as candidate 2, §2.5
-shipped; §3.1's hardening skip was **killed at the evidence bar** (a
-Failed row), §3.2-§3.5 shipped. Item 1's "fundamentally different
-attack" bar still stands untouched — nothing in the wave was a
-region-formation reopen.
-
-## Top open candidates (2026-08-04 wave closeout)
-
-These are the live candidates the wave produced or reopened, ranked by
-expected value at the ~48.1 fps equilibrium. Each already has its
-measurement; none is planned work. The older ranked list below is kept
-as a numbered list so citations elsewhere still resolve: items 1-3 are
-closed stubs, item 4 is parked below its bar, item 5 is the standing
-correctness debt. Closed entries keep their full write-ups in
-[Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md) (moved 2026-10-10).
+These are the candidates the 2026-08-04 wave produced or reopened.
+Each has its measurement; none is planned work. Every entry is now a
+one-line stub kept under its number so citations elsewhere still
+resolve: items 1 and 2 are parked behind the bars they state, items 3
+and 4 are closed. The older ranked list below follows the same
+convention: items 1-3 are closed stubs, item 4 is parked below its bar,
+item 5 is the standing correctness debt. Full write-ups are in
+[Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)
+(moved 2026-10-10; items 1 and 2 on 2026-10-15).
 
 **Profile at the new primary anchor (2026-10-11).** One `probe-run.sh`
 session on `azurik-heavy-f1` (80 s, release bundle `91D280C7`, retrained
@@ -133,9 +35,8 @@ on a box loaded by other jobs:
   three quarters of that is `user_write` (the PFIFO doorbell) blocked in
   `qemu_mutex_lock_impl` on `pfifo.lock` while the PFIFO thread holds it
   (~9.6% of vCPU samples); `vp_write` is another ~2%. That doorbell
-  wait is the largest single non-x87 item on the vCPU and is not on any
-  list yet: needs-theory (what the PFIFO thread holds the lock for, and
-  whether the put-pointer store can be published without it).
+  wait is the largest single non-x87 item on the vCPU; it is tracked
+  as Open frontier #1 in the `xemu-history` skill.
 - **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
   `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
   `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
@@ -152,70 +53,8 @@ on a box loaded by other jobs:
   non-zero events), as on F5. The GPU campaign's open fact is closed:
   multi-subrange draws do not occur on the heavy anchor either.
 
-1. **Surface CPU-access-callback churn — pool shape MEASURED AND
-   KILLED 2026-08-04 (same day); ranged flush is the only live shape,
-   needs-theory.** The mechanism receipt stands: **199.8 callback
-   events/s = 4.16 per flip** against **~190 full-mmuidx TLB flush
-   calls/s** (0.95:1) — NV2A surface register/unregister is essentially
-   *the* in-scene source of guest TLB flushes, each an
-   `async_safe_run_on_cpu` vCPU stop + full flush + unconditional
-   jump-cache wipe. But the fps half died on measurement: the
-   `XEMU_SURFACE_CB_REUSE=1` pool ran the full gauntlet (loadvm cycles
-   clean, coverage audit 23,003/0, movement probe `tb_flush` flat 1)
-   and then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%**
-   on idle-gated pairs against the pre-registered ≥ +0.25 bar. The
-   likely mechanism for the miss: post-candoio-elision the vCPU's
-   flush/refill cost was already off the critical path (the audit
-   priced §1.3 against the PRE-wave profile), while the pool's
-   park/reattach bookkeeping runs on the render thread every shape
-   swap. The pool stayed in-tree dark as the record until its code was
-   removed on 2026-10-10 (Failed row in the ledger; implementation in
-   `804bc5d87e`; a REUSE=1 arm means reverting the removal commit).
-   The only live shape is
-   (b) the `// FIXME: flush only applicable pages` ranged invalidation
-   in `system/physmem.c` / `accel/tcg/cputlb.c` (template:
-   `tlb_reset_dirty_range_locked`) — it spares the jump cache and
-   costs no per-swap bookkeeping, but needs a deferred/queued flush
-   API. Status: needs-theory; reopen only with a predicted number
-   derived from a POST-wave profile, not the audit's.
-   **2026-10-11:** the post-wave profile exists (above): guest TLB
-   flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1`, so the
-   ranged flush has nothing to win; stays parked.
-   Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
-   **`TLB full flushes` line is structurally unreachable on this guest**
-   (it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
-   has `NB_MMU_MODES=22` vs plain i386's 8) — use the partial + elided
-   counters.
-2. **Async/prewarm pipeline creation — arch 1.12 REOPENED 2026-08-04.**
-   The original kill measured steady state only. The audit's zero-code
-   gate (movement probe, forward first-visit phase vs the backward
-   control, gating on `max=` and event count rather than a per-flip
-   average) **fired**: forward-phase `pipeline_gen` runs **468.7
-   µs/flip with a single worst compile of 45.09 ms** — about two dropped
-   frames at the current anchor, inside the first-visit streaming
-   workload class the steady-state kill never sampled. That graduates
-   Experiment B option (a), prewarm, from
-   [`moltenvk-optimization-experiments.md`](Future/moltenvk-optimization-experiments.md)
-   into a ranked item **with a baseline number attached**. First steps:
-   re-run the probe with cold and warm `pipeline_cache.bin` to separate
-   "compile" from "cache miss", then price prewarm against that 45 ms
-   tail. Bar to attempt: the hitch must survive a warm-cache run — a
-   warm-cache-only hitch is a cache-coverage problem, not a
-   pipeline-creation one.
-   **2026-10-11: answered — cache coverage, not prewarm.** The
-   `azurik-stream-e2` walk (the first-visit streaming walk-in) never
-   reproduced a 45 ms-class compile: worst single compile in the forward
-   phase 0.8 ms pipeline / 2.3 ms shader with warm caches, 4.3 / 6.8 ms
-   cold (`movement-probe.sh --isolate-caches`), and its ~20 fps dip is
-   the same warm and cold, so it is scene cost. The one hitch of that
-   class came on `azurik-transition-f1`'s walk back into F1: a single
-   **52.7 ms** pipeline compile on the first-ever run of that route,
-   with the shared caches otherwise warm; the rerun, after that run had
-   saved its pipelines, peaked at 0.95 ms for the same 66-pipeline
-   burst. The hitch is a first-visit miss in the persistent pipeline
-   cache, gone once warm, so by this item's own bar it is a
-   cache-coverage problem and prewarm is not the fix. Parked; reopen
-   only on a forward-phase compile ≥ 16 ms that survives a warm rerun.
+1. **Surface CPU-access-callback churn — ranged flush parked 2026-10-11.** Guest TLB flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1` (profile above) against a 1.5% gate; the reuse-pool shape was killed 2026-08-04 (−0.66 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
+2. **Async/prewarm pipeline creation — parked 2026-10-11.** The 45-53 ms first-visit compile is a persistent pipeline-cache coverage miss, gone once warm, so prewarm is not the fix; reopen only on a forward-phase compile ≥ 16 ms that survives a warm rerun. Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
 3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments, which corrects the stated mechanism. The code was removed on 2026-10-10.
 4. **Reports idle-budget scan below 300 µs — closed 2026-08-04** (50 µs: −12.1 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
 
@@ -224,7 +63,8 @@ on a box loaded by other jobs:
 Historical ranking (2026-07-19). Items 1-3 are closed (write-ups in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)), item 4 is parked below its bar, and
 item 5 is the standing correctness debt, still open. The live
-candidates are in the section above.
+frontier is the 2026-10-11 profile above and the `xemu-history`
+skill's Open frontier.
 
 1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The machinery was removed on 2026-10-10.
 2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The `XEMU_RETC_BITS` knob was removed on 2026-10-10; the width is fixed at 12 bits.
@@ -309,4 +149,6 @@ Re-rank inputs: `XEMU_GUEST_PROF=1` sampler + exit census,
 adversarial checker), `XEMU_PFIFO_KICK_STATS=1`, `XEMU_UI_LOCK_STATS=1`,
 `XEMU_MMIO_PROF=1`, and `scripts/movement-probe.sh` for the first-visit
 streaming phase. Method and thresholds: the `xemu-operate` skill. Anchors and defaults on this
-page are dated — re-verify before citing.
+page are dated — re-verify before citing. An "archaeology N.M" citation
+is section N.M of the retired failure-archaeology skill:
+`git show ad569d78c5:.claude/skills/xemu-failure-archaeology/SKILL.md`.

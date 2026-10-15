@@ -1439,7 +1439,7 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
      * pthread_jit_write_with_callback_np war story at that site). The
      * missing bracket wedged the vCPU thread in a fault loop at the
      * first boot backstop when this landed (no crash report — the
-     * monitor answers once, then nothing; archaeology 1.24).
+     * monitor answers once, then nothing).
      */
     int64_t t0 = g_get_monotonic_time();
     qemu_thread_jit_write();
@@ -1801,9 +1801,9 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
              * page, with no byte-range overlap check. (b) counts how many of
              * those TBs the upstream check would have skipped; counting only,
              * the invalidation below stays unconditional. Re-applying the
-             * filter was tried and removed (archaeology 1.22); sub-page dirty
-             * tracking stops guest stores that miss every code block before
-             * they reach this loop.
+             * filter was tried and removed (live TBs keep the page trapping
+             * every data write); sub-page dirty tracking stops guest stores
+             * that miss every code block before they reach this loop.
              */
             if (unlikely(xemu_inv_prof_on())) {
                 tb_page_addr_t chk_start, chk_last;

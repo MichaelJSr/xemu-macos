@@ -7,10 +7,10 @@ the harness instead of left to operator discipline:
 
   gate      per-run scene-identity gate: parse one nsprof log (via
             nsprof_summarize.py --json), assert every kept interval's
-            draws/flip lies inside the required band (incident 9.1:
-            menu-vs-gameplay), and flag within-run bimodality via the
-            draws/flip coefficient of variation (incident 9.2:
-            attract-reel regime straddling). Writes a per-run JSON.
+            draws/flip lies inside the required band (menu/out-of-band
+            scene: menu-vs-gameplay), and flag within-run bimodality via
+            the draws/flip coefficient of variation (bimodal attract
+            reel: regime straddling). Writes a per-run JSON.
 
   receipt   aggregate per-run JSONs into the full protocol receipt:
             per-arm mean +/- sd, per-pair deltas and sign tally,
@@ -89,7 +89,7 @@ def cmd_gate(args):
     # TRAILING contiguous run of in-band intervals, then drop that run's
     # first interval as the post-load transient. A run that never enters
     # (or falls out of) the scene keeps nothing and gates INVALID —
-    # incidents 9.1/9.2 still fire.
+    # the menu/out-of-band and bimodal attract-reel gates still fire.
     def in_band(iv):
         return band_lo <= iv["draws_pf"] <= band_hi
     start = len(all_iv)
@@ -146,10 +146,10 @@ def cmd_gate(args):
     if not band_ok:
         detail.append(f"no usable in-band tail (intervals {out_of_band} "
                       f"outside draws/flip band [{band_lo:g},{band_hi:g}]; "
-                      f"incident-9.1 class)")
+                      f"menu/out-of-band scene)")
     if bimodal:
         detail.append(f"bimodal: draws/flip CV {cv:.3f} > {args.cv_max:g} "
-                      f"(incident-9.2 class)")
+                      f"(bimodal attract reel)")
     anchored = (f" pre-scene={boot_excluded}" if boot_excluded else "")
     print(f"gate[{args.label}]: {tag}  fps={fps_mean:.2f}±{fps_sd:.2f} "
           f"draws/flip={d_mean:.1f}±{d_sd:.1f} n={len(intervals)}{anchored}"
@@ -241,7 +241,7 @@ def cmd_receipt(args):
             scene["verdict"] = "invalid"
             scene["note"] = (f"arm draws/flip differ by {ratio*100:.0f}% "
                              "(>15%): different scenes, fps delta REFUSED "
-                             "(incident-9.1/9.2 class)")
+                             "(menu/out-of-band scene or bimodal attract reel)")
         elif ratio > CROSS_ARM_WARN:
             scene["verdict"] = "warn-composition"
             scene["note"] = (f"arm draws/flip differ by {ratio*100:.1f}% "
@@ -416,8 +416,8 @@ def cmd_selftest(args):
         expect(rc == 0, f"gate passes clean fixture {label}")
         run_jsons.append(rj)
 
-    # 2. the gate must FIRE on an incident-9.1 fixture (menu scene,
-    #    draws/flip ~3, steady) ...
+    # 2. the gate must FIRE on a menu/out-of-band scene fixture
+    #    (draws/flip ~3, steady) ...
     menu_log = os.path.join(outdir, "ab_menu-negative.log")
     write_fixture(menu_log, [(60.0, 3.0)] * 5)
     rc, menu_json = gate_fixture(outdir, args.summarizer, "menu-negative",
@@ -425,10 +425,10 @@ def cmd_selftest(args):
     with open(menu_json) as f:
         menu_run = json.load(f)
     expect(rc == GATE_EXIT_INVALID and not menu_run["band_ok"],
-           "gate FIRES on out-of-band menu fixture (incident 9.1)")
+           "gate FIRES on out-of-band menu fixture")
 
-    # 3. ... and on an incident-9.2 fixture (bimodal attract reel:
-    #    in-band regime mix, high CV)
+    # 3. ... and on a bimodal attract-reel fixture (in-band regime mix,
+    #    high CV)
     bimodal_log = os.path.join(outdir, "ab_bimodal-negative.log")
     write_fixture(bimodal_log,
                   [(48.0, 350.0), (20.0, 390.0), (58.0, 150.0),
@@ -438,7 +438,7 @@ def cmd_selftest(args):
     with open(bim_json) as f:
         bim_run = json.load(f)
     expect(rc == GATE_EXIT_INVALID and bim_run["bimodal"],
-           "gate FIRES on bimodal fixture (incident 9.2)")
+           "gate FIRES on bimodal fixture")
 
     # 4. receipt over the clean runs: expect verdict valid, 3/3 sign +
     meta = {

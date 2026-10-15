@@ -2,7 +2,9 @@
 
 > **Future.** Experiment A (`MVK_USE_METAL_PRIVATE_API`) was never built.
 > Experiment B's option (d) shipped (`ui/xemu.c`), and option (a),
-> pipeline prewarm, is [roadmap](../roadmap.md) top candidate 2. Driver
+> pipeline prewarm, was parked 2026-10-11 ([roadmap](../roadmap.md)
+> top candidate 2: the hitch is a pipeline-cache coverage miss; reopen
+> on a ≥ 16 ms compile that survives a warm rerun). Driver
 > versions below are as of 2026-07-21: releases now bundle MoltenVK 1.4.2
 > and local builds use the pin in `scripts/build-moltenvk.sh`.
 

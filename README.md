@@ -320,26 +320,16 @@ nsprof intervals, mid-run visual artifact checks, receipts) — full
 numbers and methods live in the
 [optimization ledger](docs/optimizations.md).
 
-Headline arc on the heavy in-game bench scene (Azurik savestate, M2
-Ultra, real fps — no interpolation): **15.8 → ~48.1 fps** across the
-fork's campaigns — the occlusion/report rework (+144%), PGO (+9.4%),
-sub-page code dirty tracking (+14%), cross-page TB chaining, inline
-dispatch probes, the sticky SSE/NEON bracket, the async Metal present
-chain, the inline NOTDIRTY store-skip (+12% heavy-scene rendering
-throughput at equal fps), and the 2026-08-04 optimization wave.
+Headline arc on the heavy in-game bench scene (the retired F8 Azurik
+savestate, M2 Ultra, real fps — no interpolation): **15.8 → ~48.1
+fps** across the fork's campaigns — the occlusion/report rework
+(+144%), PGO (+9.4%), sub-page code dirty tracking (+14%), cross-page
+TB chaining, inline dispatch probes, the sticky SSE/NEON bracket, the
+async Metal present chain, the inline NOTDIRTY store-skip (+12%
+heavy-scene rendering throughput at equal fps), and the 2026-08-04
+optimization wave.
 Lighter scenes hold the 60 fps vblank cap. MetalFX frame interpolation
 presents 60/120 Hz from real-30+ without changing simulation rate.
-
-The most recent step is the largest single one since the occlusion
-rework. Full protocol receipt for it (2026-08-04, interleaved
-cross-binary A/B on the same fixture): **38.12 ± 0.59 → ~48.1 fps,
-+10.0 fps mean, +26% fps, +20.4% draws/s, 5 clean pairs, unanimously
-positive** (one further pair excluded because its run hit a known
-upstream-class crash, noted in the receipt). Its two biggest
-contributors are the `can_do_io`/`cpu_io_recompile` elision (+6.53 fps,
-3/3) and the x87 exception-pointer deferral (+7.46 fps, 3/3) — with
-each mechanism's own receipt, the wave's honest kills, and every escape
-hatch in the [ledger](docs/optimizations.md).
 
 The remaining wall is still guest-TCG throughput. The
 superblock/region-formation campaign against the measured ~40%

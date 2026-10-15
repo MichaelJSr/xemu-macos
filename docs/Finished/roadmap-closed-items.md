@@ -1,7 +1,11 @@
 # Closed roadmap candidates — full write-ups
 
 > **Finished.** These entries left [`roadmap.md`](../roadmap.md) on
-> 2026-10-10 because they are closed; the roadmap keeps a one-line stub
+> 2026-10-10 because they are closed, except top candidates 1 and 2,
+> which followed on 2026-10-15 because they are parked with reopen bars
+> (ranged TLB flush: ~0.2% of vCPU vs a 1.5% gate; prewarm: a ≥ 16 ms
+> compile that survives a warm rerun). "Above" in those two means the
+> roadmap's 2026-10-11 profile. The roadmap keeps a one-line stub
 > under the same number so citations still resolve. Each is also
 > recorded in the [ledger](../optimizations.md). Text is moved verbatim;
 > figures are as of the date in each heading, and relative links are
@@ -11,6 +15,76 @@
 > `XEMU_RETC_BITS` knob (the width is fixed at 12) and top candidate 3's
 > `XEMU_X87_ELIDE_CLEAN` (the ledger's Failed row corrects its stated
 > mechanism); the figures stand as recorded.
+
+## Top candidate 1 — surface CPU-access-callback churn (parked 2026-10-11)
+
+**Surface CPU-access-callback churn — pool shape MEASURED AND
+KILLED 2026-08-04 (same day); ranged flush is the only live shape,
+needs-theory.** The mechanism receipt stands: **199.8 callback
+events/s = 4.16 per flip** against **~190 full-mmuidx TLB flush
+calls/s** (0.95:1) — NV2A surface register/unregister is essentially
+*the* in-scene source of guest TLB flushes, each an
+`async_safe_run_on_cpu` vCPU stop + full flush + unconditional
+jump-cache wipe. But the fps half died on measurement: the
+`XEMU_SURFACE_CB_REUSE=1` pool ran the full gauntlet (loadvm cycles
+clean, coverage audit 23,003/0, movement probe `tb_flush` flat 1)
+and then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%**
+on idle-gated pairs against the pre-registered ≥ +0.25 bar. The
+likely mechanism for the miss: post-candoio-elision the vCPU's
+flush/refill cost was already off the critical path (the audit
+priced §1.3 against the PRE-wave profile), while the pool's
+park/reattach bookkeeping runs on the render thread every shape
+swap. The pool stayed in-tree dark as the record until its code was
+removed on 2026-10-10 (Failed row in the ledger; implementation in
+`804bc5d87e`; a REUSE=1 arm means reverting the removal commit).
+The only live shape is
+(b) the `// FIXME: flush only applicable pages` ranged invalidation
+in `system/physmem.c` / `accel/tcg/cputlb.c` (template:
+`tlb_reset_dirty_range_locked`) — it spares the jump cache and
+costs no per-swap bookkeeping, but needs a deferred/queued flush
+API. Status: needs-theory; reopen only with a predicted number
+derived from a POST-wave profile, not the audit's.
+**2026-10-11:** the post-wave profile exists (above): guest TLB
+flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1`, so the
+ranged flush has nothing to win; stays parked.
+Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
+**`TLB full flushes` line is structurally unreachable on this guest**
+(it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
+has `NB_MMU_MODES=22` vs plain i386's 8) — use the partial + elided
+counters.
+
+## Top candidate 2 — async/prewarm pipeline creation (parked 2026-10-11)
+
+**Async/prewarm pipeline creation — arch 1.12 REOPENED 2026-08-04.**
+The original kill measured steady state only. The audit's zero-code
+gate (movement probe, forward first-visit phase vs the backward
+control, gating on `max=` and event count rather than a per-flip
+average) **fired**: forward-phase `pipeline_gen` runs **468.7
+µs/flip with a single worst compile of 45.09 ms** — about two dropped
+frames at the current anchor, inside the first-visit streaming
+workload class the steady-state kill never sampled. That graduates
+Experiment B option (a), prewarm, from
+[`moltenvk-optimization-experiments.md`](../Future/moltenvk-optimization-experiments.md)
+into a ranked item **with a baseline number attached**. First steps:
+re-run the probe with cold and warm `pipeline_cache.bin` to separate
+"compile" from "cache miss", then price prewarm against that 45 ms
+tail. Bar to attempt: the hitch must survive a warm-cache run — a
+warm-cache-only hitch is a cache-coverage problem, not a
+pipeline-creation one.
+**2026-10-11: answered — cache coverage, not prewarm.** The
+`azurik-stream-e2` walk (the first-visit streaming walk-in) never
+reproduced a 45 ms-class compile: worst single compile in the forward
+phase 0.8 ms pipeline / 2.3 ms shader with warm caches, 4.3 / 6.8 ms
+cold (`movement-probe.sh --isolate-caches`), and its ~20 fps dip is
+the same warm and cold, so it is scene cost. The one hitch of that
+class came on `azurik-transition-f1`'s walk back into F1: a single
+**52.7 ms** pipeline compile on the first-ever run of that route,
+with the shared caches otherwise warm; the rerun, after that run had
+saved its pipelines, peaked at 0.95 ms for the same 66-pipeline
+burst. The hitch is a first-visit miss in the persistent pipeline
+cache, gone once warm, so by this item's own bar it is a
+cache-coverage problem and prewarm is not the fix. Parked; reopen
+only on a forward-phase compile ≥ 16 ms that survives a warm rerun.
 
 ## Top candidate 3 — x87 clean-ST(i) write-back elision (closed 2026-08-04)
 

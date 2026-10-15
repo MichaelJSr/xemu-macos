@@ -188,9 +188,9 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 ## Flags
 
 `XEMU_*` vars are read once at launch. `vk/` is `hw/xbox/nv2a/pgraph/vk/`,
-`mcpx/` is `hw/xbox/mcpx/`, `tcg/` is `accel/tcg/`, `i386/` is
-`target/i386/tcg/`. To list them all:
-`grep -rn 'getenv("XEMU_' accel target hw ui audio system`.
+`mcpx/` is `hw/xbox/mcpx/`, `tcg/` is `accel/tcg/` (the top-level
+`tcg/` is written out), `i386/` is `target/i386/tcg/`. To list them all:
+`grep -rn 'getenv("XEMU_' accel target tcg hw ui audio system`.
 
 | Var | Effect | Read in |
 |---|---|---|
@@ -203,7 +203,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_ICOUNT_STEP` | Icount budget cuts step one-instruction TBs instead of translating cut blocks | `tcg/cpu-exec.c` |
 | *Off by default* | | |
 | `XEMU_REPORTS_SYNC=1` | Synchronous zpass reports (icount: eager, not lazy) | `vk/reports.c` |
-| `XEMU_ICOUNT_MO=1` | Keep TCG memory-order barriers under icount | `tcg/tcg-op-ldst.c` |
+| `XEMU_ICOUNT_MO=1` | Keep TCG memory-order barriers under icount | top-level `tcg/tcg-op-ldst.c` |
 | `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
 | `XEMU_MMIO_BQL=1` | MMIO under the BQL | `hw/xbox/nv2a/nv2a.c`, `mcpx/apu/apu.c` |
 | `XEMU_ZETA_SHAPE_READBACK=1`, `XEMU_TEX_BIND_RECHECK=1` | Legacy zeta and texture paths | `vk/surface.c`, `vk/texture.c` |

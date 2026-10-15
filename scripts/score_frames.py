@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """score_frames.py — magenta-artifact scorer for xemu window captures.
 
-Requires Pillow (pip3 install pillow). Not part of the Python standard
-library; every other script in this skill's scripts/ directory is
-stdlib-only, but this one needs image decoding.
+Requires Pillow (pip3 install pillow) for image decoding; it is not
+part of the Python standard library.
 
 Detects the "pink-tile" corruption pattern (see the pink-tile saga: giant
 magenta blocks under a MoltenVK prefill misconfiguration; smaller magenta
@@ -45,9 +44,7 @@ try:
 except ImportError:
     sys.exit(
         "error: score_frames.py requires Pillow, which is not installed.\n"
-        "       Install with: pip3 install pillow\n"
-        "       (every other script in this skill's scripts/ dir is "
-        "stdlib-only; this is the one exception.)")
+        "       Install with: pip3 install pillow")
 
 
 def is_magenta(r, g, b):

@@ -23,8 +23,9 @@ xemu-project/xemu.
   short body. Docs ride in the same commit: README for user-visible flags
   or features only. No separate docs or skills bookkeeping commits, and
   no measurement logs in skills.
-- Add an `XEMU_*` escape hatch only for risky default-on renderer, JIT or
-  TCG changes.
+- Add an `XEMU_*` switch only for a normal-mode change that the
+  deterministic goldens can't verify. No other legacy-path or opt-out
+  hatches (owner decision 2026-10-15).
 
 ## Hard rules
 

@@ -333,8 +333,8 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
              * adjacent channel state; all of this is already guarded
              * by d->pfifo.lock (held here). BQL is not required and
              * was intentionally removed when the BQL-event-batching
-             * experiment was reverted (see README "Failed / reverted
-             * experiments").
+             * experiment was reverted (see docs/optimizations.md
+             * "Failed / reverted experiments": BQL event batching).
              */
             RAMHTEntry entry = ramht_lookup(d, parameter);
             assert(entry.valid);

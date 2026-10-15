@@ -46,7 +46,7 @@
 # --dry-run validates all gate/receipt plumbing against synthetic
 # nsprof fixtures WITHOUT launching xemu and without reading the
 # user's config/hdd (see scripts/bench-receipt.py selftest — it also
-# proves the gates FIRE on incident-9.1/9.2 fixtures).
+# proves the gates FIRE on menu/out-of-band and bimodal-reel fixtures).
 #
 # Flags (all optional, may appear anywhere):
 #   --dry-run            plumbing self-test, no xemu, no user files
@@ -151,7 +151,9 @@ trap cleanup EXIT
 # ---- isolation: clone bundle, hdd, eeprom; scratch config -----------------
 # Never execute from dist/xemu.app: the user launches that bundle, and a
 # harness pointed there inherits their live config and takes their qcow2
-# write lock (incident 9.3). APFS clones are instant and space-free.
+# write lock (a rebuild wipes any planted portable config, so one such
+# run silently tested the owner's real config). APFS clones are instant
+# and space-free.
 APP=$WORK/xemu-bench.app
 cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
 APPBIN=$APP/Contents/MacOS/xemu
@@ -329,8 +331,9 @@ EOF
     return 0
   fi
 
-  # Scene-identity gate (incidents 9.1/9.2). A failed gate marks the
-  # run invalid in its JSON; the receipt carries the verdict.
+  # Scene-identity gate (menu/out-of-band scene, bimodal attract reel).
+  # A failed gate marks the run invalid in its JSON; the receipt carries
+  # the verdict.
   python3 $RECEIPT_PY gate --label $label --log $log --out $runjson \
       --summarizer $SUMMARIZER --band $DRAWS_BAND --cv-max $CV_MAX \
       ${warmupflag:+--warmup} --var-value $val || true

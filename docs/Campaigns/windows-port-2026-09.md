@@ -191,10 +191,11 @@ settles it is §9 below. Do not resume single-run bisects.
 The DXGI hatch, SPIR-V cache, PVIDEO/display,
 bounds checks, volk dispatch, diagnostics and build changes all ran
 clean in the surviving runs. Each batch
-commit body carries its gating and intended validation; the escape-hatch
-rows now live in `docs/optimizations.md` under "Escape hatches on branch
-`windows-wave1-wip` (not on main)" — none of them has a `getenv` on
-main, so they do nothing on a main build.
+commit body carries its gating and intended validation. The knobs of
+the commits that never landed on main are recorded in
+`docs/Finished/windows-wave1-review-2026-09-08.md` and tag
+`archive/windows-wave1-wip`; none of them has a `getenv` on main, so
+they do nothing on a main build.
 
 ## 6. Remaining plan (batches not yet implemented)
 
@@ -202,7 +203,7 @@ From the planner (`docs/Campaigns/windows-audit-2026-09.json` → `plan.batches`
 in recommended order. Batches marked *savestate* need the Azurik in-game
 savestate benchmark (not yet created on this box; the protocol is
 `scripts/bench-savestate-ab-win.py`, and the Mac's fixtures are listed
-in the `xemu-validation-and-qa` skill).
+in `../fixtures/README.md`).
 
 | # | Batch | Needs |
 |---|---|---|

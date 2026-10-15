@@ -3,8 +3,8 @@
 How releases are cut on
 [`MichaelJSr/xemu-macos`](https://github.com/MichaelJSr/xemu-macos).
 Intended audience: AI coding agents (and humans) preparing a release
-on this fork. Rewritten 2026-07-05 to match the CI release flow; the
-manual packaging recipe is kept at the end as the fallback.
+on this fork. Rewritten 2026-07-05 to match the CI release flow; a
+local `build.sh` packaging fallback is at the end.
 
 ## Scope
 
@@ -92,8 +92,8 @@ custom `/usr/local` pipeline (`scripts/build-moltenvk.sh`, currently
 a newer pin). `build.sh` logs the bundled version + UUID (`Bundling
 MoltenVK from …`) precisely so this tested-vs-shipped driver gap
 stays visible. Treat any MoltenVK pin bump as a renderer-behavior
-change: run the validation gauntlet (`xemu-validation-and-qa`)
-before trusting it for release.
+change: run the `xemu-operate` skill's Test section before trusting
+it for release.
 
 ## Release title format
 
@@ -126,9 +126,9 @@ dependency refresh; no performance change.">
 - <Group minor items: "Windows: 6 hardening fixes from the native-port
   audit.">
 
-**Validation:** <One line with the headline evidence, e.g. "F8 fps
-parity with v0.13.2 (21.35 vs 21.36 fps); 319-frame artifact soak
-clean; CI green.">
+**Validation:** <One line with the headline evidence, e.g.
+"azurik-heavy-f1 fps parity with vA (<b> vs <e> fps); goldens
+unchanged; CI green.">
 
 **Full Changelog**: https://github.com/MichaelJSr/xemu-macos/compare/vA...vB
 ```
@@ -144,51 +144,22 @@ Style rules:
 - No emojis, GitHub-Flavoured-Markdown callouts (`> [!NOTE]`) or
   screenshots.
 
-## Manual packaging fallback
+## Local packaging fallback
 
-Only needed if CI is unavailable or a local repackage must be
-shipped. The canonical logic is `build.sh`'s `package_macos`
-(MoltenVK selection: `resolve_moltenvk`, same file); mirror it —
-never hand-evolve a parallel recipe. The essential steps, in order:
+Only for when CI is unavailable. `build.sh`'s `package_macos` is the
+recipe: fix packaging bugs there, never by hand.
 
-1. `rm -rf dist`; copy `build/qemu-system-i386` to
-   `dist/xemu.app/Contents/MacOS/xemu`.
-2. `dylibbundler` with `-s` paths `macos-libs/${arch}/opt/local/lib`,
-   `/usr/local/lib`, `/opt/homebrew/lib`.
-3. Rewrite residual `/opt/local/` references on the main binary to
-   `@executable_path/../Libraries/${arch}/…`, and on every bundled
-   dylib to `@rpath/…` (re-codesign each dylib after).
-4. Strip all `LC_RPATH` entries, then add exactly
-   `@executable_path/../Libraries/${arch}/` (macOS 26+ dyld rejects
-   duplicates).
-5. Bundle `libMoltenVK.dylib` with id `@rpath/libMoltenVK.dylib`;
-   re-codesign. Check the `Bundling MoltenVK from …` provenance line.
-6. `.icns` via `iconutil` from `ui/icons/xemu_*.png`; copy
-   `Info.plist`; set versions via `plutil` (defaults to `0.0.0`
-   without an `XEMU_VERSION` file — fine; the tag is canonical).
-7. Ad-hoc codesign: `codesign --force --deep
-   --preserve-metadata=entitlements,requirements,flags,runtime --sign -`.
-8. `LICENSE.txt`:
-
-   ```bash
-   PKG_CONFIG_LIBDIR="$PWD/macos-libs/arm64/opt/local/lib/pkgconfig" \
-     python3 scripts/gen-license.py \
-       --version-file=macos-libs/arm64/INSTALLED > dist/LICENSE.txt
-   ```
-
-   `PKG_CONFIG_LIBDIR` is mandatory — without it the script fails on
-   `pkg-config --modversion slirp` and truncates. Expect ~4000
-   lines.
-9. Verify and zip (symlinks preserved, exact naming):
-
-   ```bash
-   codesign --verify --deep --strict dist/xemu.app
-   cd dist && zip -r -y -q "xemu-vX.Y.Z-macos-arm64.zip" xemu.app LICENSE.txt
-   ```
-
-   Expect the app ~30–35 MiB, the zip ~12–13 MiB; much smaller
-   means a dylib or MoltenVK wasn't bundled. Attach to the draft
-   with `gh release upload vX.Y.Z <zip>`.
+1. `XEMU_ARM_CPU=apple-m1 XEMU_PGO=use ./build.sh` builds `dist/xemu.app`
+   and `dist/LICENSE.txt`; check its `Bundling MoltenVK from …` line.
+2. `codesign --verify --deep --strict dist/xemu.app`, then
+   `cd dist && zip -r -y -q xemu-vX.Y.Z-macos-arm64.zip xemu.app LICENSE.txt`.
+   Expect the zip at ~12–13 MiB; much smaller means a dylib or MoltenVK
+   wasn't bundled.
+3. For the universal zip, keep that bundle, run `./build.sh -a x86_64`
+   (it reconfigures `build/` and rewrites `dist/`), then merge the two
+   as `build-macos.yml`'s `build_universal` job does: unzip both into
+   one `xemu.app`, `lipo -create` the two `Contents/MacOS/xemu`, re-sign.
+4. `gh release upload vX.Y.Z <zip>` onto the draft.
 
 ## Do-not-do list
 
