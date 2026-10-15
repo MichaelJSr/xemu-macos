@@ -68,7 +68,7 @@ enum NsprofCounter {
     NSPROF_FLIP_IDLE,     /* FLIP_STALL -> guest vblank release */
     NSPROF_PRESENT_WAIT,  /* UI-thread block on the present-handoff round
                              trip (pull-model qemu_event_wait). ~0 under
-                             XEMU_PUSH_PRESENT. Under the GL renderer, the
+                             push present. Under the GL renderer, the
                              wait for the PFIFO thread to compose the display
                              surface. Accumulated off-thread — see the header
                              comment above. */
@@ -148,7 +148,7 @@ enum NsprofEvent {
     NSPROF_EV_RENDERPASS_CAUSE_CLEAR,     /* NV097_CLEAR_SURFACE boundary */
     NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD, /* compute-unswizzle interleave */
     NSPROF_EV_RENDERPASS_CAUSE_OTHER,     /* surface create / RTT nondraw */
-    /* push-present ring pacing (XEMU_PUSH_PRESENT; see display.c) */
+    /* push-present ring pacing (see display.c) */
     NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
     NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
     NSPROF_EV_PUSH_POLICY_SKIP,    /* consumer catch-up skipped a stale step */

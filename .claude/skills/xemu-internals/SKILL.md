@@ -18,7 +18,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - **`MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0`**: a second layer on top of the primer; keep both. → prefill=2 corrupts streamed textures (large magenta rects), allows the AGX crash, and is slower.
 - **Vertex dirty tracking is page-granular.** The byte-exact refinement (`uploaded_span_content_differs`) may skip a finish only when memcmp proves the bytes identical. When unsure, finish. → stale vertices, intermittent garbled geometry. V`vertex.c`.
 - **A load must leave PGRAPH as a fresh process's load does** (icount): method state the main `nv2a` section lacks rides in `nv2a/pgraph-methods`; loads without it run `pgraph_reset_unsaved_state`, and every load marks all state dirty (`pgraph_mark_all_state_dirty`). New method state the next draws read goes in that subsection. → repeated loads in one process diverge (stale vertex arrays). `hw/xbox/nv2a/nv2a.c`.
-- **Deterministic reports are lazy** (icount): GET_REPORT records the slot and traps its page; the first guest access, flatview or mapped DMA to the slot, a pause, savevm/sync_ram, RESTORE_VM, slot reclaim and the full-pool or flush drains deliver. The APU's direct `ram_ptr` accesses are not trapped. A new renderer path that reads or writes guest VRAM calls `pgraph_vk_det_reports_guard`; a new reader that copies RAM directly (like trace samples) sets `nv2a_set_reports_eager`; after a load, `flush_discard` drops what is left. → RAM differs from an `XEMU_REPORTS_SYNC=1` run. V`reports.c`.
+- **Deterministic reports are lazy** (icount): GET_REPORT records the slot and traps its page; the first guest access, flatview or mapped DMA to the slot, a pause, savevm/sync_ram, RESTORE_VM, slot reclaim and the full-pool or flush drains deliver. The APU's direct `ram_ptr` accesses are not trapped. A new renderer path that reads or writes guest VRAM calls `pgraph_vk_det_reports_guard`; a new reader that copies RAM directly (like trace samples) sets `nv2a_set_reports_eager`; after a load, `flush_discard` drops what is left. → RAM differs from a traced `xemu-frame-advance` run (eager delivery). V`reports.c`.
 - **Surface expiry** throttles on monotonic time (`surface_expire_interval_ns` 33 ms), never on `pg->frame_time`. → black-screen freeze on rapid level loads. V`surface.c`. Exception, icount only: expiry runs once per flip or every 4096 updates, reports are delivered before PFIFO rests, and a load discards renderer state (`flush_discard`), so offscreen Vulkan is deterministic.
 
 ### DSP56300 JIT / APU
@@ -30,8 +30,8 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - Voice registers live in guest RAM; the `voice_buf` cache must fall through to `ram_ldl`. → stale voices. `apu/vp/vp.c`.
 
 ### Present path
-- **Push ring is the default** (`pgraph_vk_push_present_enabled`; off only with `XEMU_PUSH_PRESENT=0`; needs the Metal backend and the metal-objects extension). `pgraph_vk_present_schedule_publish` publishes at flip; `nv2a_get_present_frame_pushed` consumes. Leaf mutex (`present_slot_lock`), a CFRetain per entry, a generation counter: never lock-free. The cursor only moves forward. → use-after-free of IOSurface handles; frames out of order. V`display.c`.
-- **Pull fallback** (GL, before the first publish, after a resize, push off): `nv2a_get_present_frame` → `pgraph_vk_get_present_frame` (`sync_pending` + `pfifo_kick` + `qemu_event_wait`). One consumer (`framebuffer_in_use` assert). Keep both paths correct; add no synchronous work to the `sync_pending` handler. → UI latency on every frame. `pgraph/pgraph.c`, `ui/xemu.c` `metal_render_frame`.
+- **Push ring is the default** (`pgraph_vk_push_present_enabled`: Metal backend, metal-objects extension, not headless). `pgraph_vk_present_schedule_publish` publishes at flip; `nv2a_get_present_frame_pushed` consumes. Leaf mutex (`present_slot_lock`), a CFRetain per entry, a generation counter: never lock-free. The cursor only moves forward. → use-after-free of IOSurface handles; frames out of order. V`display.c`.
+- **Pull fallback** (GL, headless, before the first publish, after a resize): `nv2a_get_present_frame` → `pgraph_vk_get_present_frame` (`sync_pending` + `pfifo_kick` + `qemu_event_wait`). One consumer (`framebuffer_in_use` assert). Keep both paths correct; add no synchronous work to the `sync_pending` handler. → UI latency on every frame. `pgraph/pgraph.c`, `ui/xemu.c` `metal_render_frame`.
 - **`encodeWaitForEvent` comes before the drawable render pass** opens. → a frame the GPU hasn't finished gets presented. `ui/xemu-metal.m` `xemu_metal_begin_frame`.
 - **Vblank**: `vblank_timer_thread` ticks every `vblank_interval_ns = 16666666` on monotonic deadlines and raises the guest VBLANK interrupt; never tie it to host refresh. No PAL 50 Hz path exists. → guest simulation retimed. `ui/xemu.c`.
 - **Launch parity**: every `Info.plist` `LSEnvironment` variable is mirrored in `main()` with `setenv(...,0)` before MoltenVK loads (six MVK keys). A variable exported in the shell overrides both. → Finder and terminal launches run different configs. `ui/xemu.c`, `Info.plist`.
@@ -59,10 +59,10 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 |---|---|---|---|
 | Fix didn't take effect | Title `xemu \| v…` vs `git describe`; `pgrep -fl xemu` | Kill the stale process, relaunch | build |
 | Finder ≠ terminal | `env \| grep -E 'MVK_CONFIG\|XEMU_'` in each; bundle plist | Export nothing, then one variable at a time | launch env |
-| Small Morton magenta squares; stale or late textures | nsprof `tex_upload` active? | `XEMU_TEX_BIND_RECHECK=1` | V`texture.c` bind fast path |
+| Small Morton magenta squares; stale or late textures | nsprof `tex_upload` active? `texbind_skip` high? | Rebuild with `content_check_skipped` forced false (per-bind checks) | V`texture.c` bind fast path |
 | Large screen-aligned magenta rects | Effective prefill | Export `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0` | MVK config |
-| Garbled geometry | Recent vertex change? | `XEMU_VTX_EXACT=0` | V`vertex.c` |
-| Depth artifacts after a render-target switch | Same switch every time? | `XEMU_ZETA_SHAPE_READBACK=1` | V`surface.c` zeta switch |
+| Garbled geometry | Recent vertex change? `vtx_exact_skip` > 0? | Rebuild with `uploaded_span_content_differs` returning true (page-granular finishes) | V`vertex.c` |
+| Depth artifacts after a render-target switch | Same switch every time? | Rebuild with `skip_readback` false (zeta readback on shape switch) | V`surface.c` zeta switch |
 | AGX `setVisibilityResultMode` crash | Prefill 0? `primer_index` present? | `XEMU_MAX_QUERIES=64`: gone at 64 = capacity; crashes either way = primer/first pass | V`reports.c`/`draw.c` |
 | `vkWaitForFences timeout … (>5s)` abort | Which wait (`where`) | `sample xemu 5`; usually a MoltenVK deadlock | V`command.c` |
 | Frozen picture / black screen at level load | Just loaded a snapshot? (failed loads toast and resume) | `XEMU_PFIFO_HEARTBEAT=1` (see below) | `pfifo.c` |
@@ -72,7 +72,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | Boot wedge with validators on | More than 2 refuters stacked? | Keep 2; `DIFF=10` | APU `d->lock` |
 | Audio crackle | `XEMU_APU_PROF=1` ≈100% or <187 frames/s? | Per run: `dsp_jit.enabled=false` (then also `use_dsp_jit=false`); `XEMU_DSP_JIT_DIFF=10` | APU/DSP |
 | loadvm "Unknown section …usb-hub" | Pads bound at save time? CLI `-loadvm` always fails | Monitor `loadvm` after boot, with `usb-hub` at `1.<port_map[i]>`, `port_map={3,4,1,2}` | `ui/xemu-input.c` |
-| fps dropped | nsprof `draws per_flip` within 15%? (if not, a different scene) | Diff `finish_*` and `fence_wait`; then `XEMU_REPORTS_SYNC=1`, then `XEMU_VTX_EXACT=0` | VK sync policy |
+| fps dropped | nsprof `draws per_flip` within 15%? (if not, a different scene) | Diff `finish_*` (`finish_reports_submit`, `finish_vtx_dirty`), `vtx_exact_skip` and `fence_wait` | VK sync policy |
 
 ## Diagnostics
 
@@ -91,7 +91,7 @@ Notes: read `XEMU_INV_PROF`'s `(f)` line only from an `XEMU_ELIDE_CANDOIO=0` run
 ## Glossary (fork-specific)
 - **flip**: guest `FLIP_STALL`; flips/s = guest fps (cap 60). **finish**: `pgraph_vk_finish(reason)` = submit + wait on the previous slot's fence.
 - **zeta shape switch**: Azurik flips one depth allocation between 1280×480 and 256×256 swizzled every frame.
-- **zpass report**: occlusion query delivered at flip or slot reclaim; plain submit after 300 µs idle (`XEMU_REPORTS_BUDGET_US`). `XEMU_REPORTS_SYNC=1` is the only path to the legacy `STALLED` drain (under icount: eager delivery before every PFIFO park).
+- **zpass report**: occlusion query delivered at flip or slot reclaim; plain submit after 300 µs of FIFO idle (`REPORTS_IDLE_BUDGET_NS`). Under icount, delivered lazily (see Deterministic reports).
 - **EP** DSP runs at 1/8 of GP's rate and churns on P-space overlays. **hard_fpu**: x87 math in double precision (`hard_fpu=false` for exact). **Anchors**: `azurik-heavy-f1`, `-w2`, F5, listed in `../fixtures/README.md`.
 
 ## Analysis recipes

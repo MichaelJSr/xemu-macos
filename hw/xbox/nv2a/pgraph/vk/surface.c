@@ -1534,16 +1534,6 @@ static void expire_old_surfaces(NV2AState *d)
     }
 }
 
-static bool zeta_shape_readback_forced(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("XEMU_ZETA_SHAPE_READBACK");
-        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
-    }
-    return cached == 1;
-}
-
 static bool check_surface_compatibility(SurfaceBinding const *s1,
                                         SurfaceBinding const *s2, bool strict)
 {
@@ -2280,11 +2270,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                  * D24S8 compute conversion + multi-MB memcpy, twice
                  * per flip on affected titles. An already-requested
                  * CPU download (download_pending) is still honored.
-                 * XEMU_ZETA_SHAPE_READBACK=1 restores the readback.
                  */
                 bool skip_readback = !surface->color &&
-                                     !surface->download_pending &&
-                                     !zeta_shape_readback_forced();
+                                     !surface->download_pending;
                 if (skip_readback) {
                     zeta_shape_discard = true;
                     surface->draw_dirty = false;

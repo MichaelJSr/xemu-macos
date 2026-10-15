@@ -92,10 +92,10 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 }
 
 /*
- * Exact-conflict refinement (XEMU_VTX_EXACT=0 disables): guest dirty
- * bits are page-granular, so vertex-stream sync writes arrive padded
- * to page boundaries and consecutive writes false-share their
- * boundary page — the padded bytes re-copy identical content. A
+ * Exact-conflict refinement: guest dirty bits are page-granular, so
+ * vertex-stream sync writes arrive padded to page boundaries and
+ * consecutive writes false-share their boundary page — the padded
+ * bytes re-copy identical content. A
  * conflict with the recording command buffer is only real if the
  * incoming bytes DIFFER from the mirror somewhere inside a span the
  * recording window actually wrote (recorded draws can only have
@@ -113,15 +113,6 @@ static bool uploaded_span_content_differs(PGRAPHVkState *r, int slot,
                                           const uint8_t *data,
                                           size_t start_bit, size_t end_bit)
 {
-    static int exact = -1;
-    if (exact < 0) {
-        const char *e = getenv("XEMU_VTX_EXACT");
-        exact = !(e && e[0] == '0');
-    }
-    if (!exact) {
-        return true; /* legacy: every page-granular conflict finishes */
-    }
-
     const unsigned long *bm = r->flight[slot].uploaded_bitmap;
     const uint16_t *smin = r->flight[slot].page_span_min;
     const uint16_t *smax = r->flight[slot].page_span_max;

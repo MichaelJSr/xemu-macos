@@ -352,7 +352,7 @@ typedef struct PvideoState {
 
 #if HAVE_IOSURFACE_SHARING
 /*
- * One published present step in the push-model ring (XEMU_PUSH_PRESENT).
+ * One published present step in the push-model ring.
  * A flip publishes 1 entry with interpolation off, or `mode` entries with
  * interpolation on (the interp midpoint step(s) then the real frame), each
  * carrying its intended on-screen hold. Exactly one of mtl_texture /
@@ -540,7 +540,7 @@ typedef struct PGRAPHVkDisplayState {
 
 #if HAVE_IOSURFACE_SHARING
     /*
-     * Push-model present handoff (XEMU_PUSH_PRESENT). At flip the PFIFO
+     * Push-model present handoff. At flip the PFIFO
      * thread publishes this flip's present schedule — 1 step (interp off)
      * or `mode` steps (interp on) — into present_ring
      * (pgraph_vk_present_schedule_publish); the UI present thread consumes
@@ -1191,7 +1191,7 @@ void pgraph_vk_init_display(PGRAPHState *pg);
 void pgraph_vk_finalize_display(PGRAPHState *pg);
 void pgraph_vk_render_display(PGRAPHState *pg);
 #if HAVE_IOSURFACE_SHARING
-/* Push-model present (XEMU_PUSH_PRESENT); Metal backend only. */
+/* Push-model present; Metal backend only. */
 bool pgraph_vk_push_present_enabled(NV2AState *d);
 void pgraph_vk_present_schedule_publish(PGRAPHState *pg);
 bool pgraph_vk_present_slot_read(PGRAPHState *pg, struct NV2APresentFrame *frame);

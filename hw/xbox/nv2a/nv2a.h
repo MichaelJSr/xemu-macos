@@ -61,7 +61,7 @@ typedef struct NV2APresentFrame {
 bool nv2a_get_present_frame(NV2APresentFrame *frame);
 
 /*
- * Push-model present (XEMU_PUSH_PRESENT, Metal backend): read the frame
+ * Push-model present (Metal backend): read the frame
  * the renderer published at the last flip with NO cross-thread sync
  * round trip. Returns true and (like nv2a_get_present_frame) takes the
  * framebuffer_in_use handshake — pair with nv2a_release_framebuffer_-

@@ -808,16 +808,6 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
     }
 }
 
-static bool tex_bind_recheck_forced(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("XEMU_TEX_BIND_RECHECK");
-        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
-    }
-    return cached == 1;
-}
-
 static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
 {
     hwaddr end = TARGET_PAGE_ALIGN(addr + size);
@@ -1934,13 +1924,12 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
      * a CPU write landing between two binds of the same texture in
      * the same frame: it now takes effect one frame later
      * (render-to-texture content is unaffected — surfaces don't take
-     * this path). XEMU_TEX_BIND_RECHECK=1 restores per-bind checks.
+     * this path).
      */
     bool content_check_skipped = binding_found && !surface_to_texture &&
                                  !snode->possibly_dirty &&
                                  snode->verified_frame_time ==
-                                     pg->frame_time &&
-                                 !tex_bind_recheck_forced();
+                                     pg->frame_time;
     if (content_check_skipped) {
         nsprof_event(NSPROF_EV_TEXBIND_SKIP);
     }

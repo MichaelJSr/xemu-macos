@@ -1685,7 +1685,7 @@ static void metal_render_frame(struct xemu_console *scon)
      */
     NV2APresentFrame frame = { 0 };
     /*
-     * Push model (XEMU_PUSH_PRESENT): read the frame the PFIFO thread
+     * Push model: read the frame the PFIFO thread
      * published at the last flip with no cross-thread round trip. Falls
      * back to the pull handshake when push is inactive, on the GL
      * backend, or before the first publish (startup / post-resize) —

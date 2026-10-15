@@ -40,6 +40,12 @@ Known supersessions:
   of 2026-10-10**: `pgraph_vk_upload_surface_data` stages in the current
   flight slot's partition. The swizzled-zeta and compute-set items stay
   open.
+- **Batch 4's validation step for item (2) no longer works as written
+  as of 2026-10-15.** `XEMU_ZETA_SHAPE_READBACK` was removed with the
+  other legacy hatches, so setting it does nothing: the zeta readback
+  and seed upload on shape switches stay skipped, and the swizzled-zeta
+  upload path never runs. To exercise it, rebuild with `skip_readback`
+  forced false in `update_surface_part` (`vk/surface.c`).
 - **PLAUSIBLE finding 6 and batch 12's `XEMU_HARDENING` hoist are void
   as of 2026-10-10.** The hoist landed in `5dfde3356d`, then the knob
   was removed from `build.sh`. The skip arm on any platform is now

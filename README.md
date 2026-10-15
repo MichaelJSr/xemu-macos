@@ -287,9 +287,7 @@ Other automation interfaces (windowed or headless):
   Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
   included when taken paused, at about 60% of the null renderer's speed:
   a GPU report reaches RAM when the guest or a device first touches its
-  slot, or at a pause, save or load. `XEMU_REPORTS_SYNC=1` delivers each
-  report before PFIFO rests instead: the same RAM, ~3.7x slower, and
-  screendumps that can differ in a few pixels. Hash its RAM with
+  slot, or at a pause, save or load. Hash an offscreen run's RAM with
   `xemu-dump-ram` `"gpu-sync": false` (`gpu-sync` and `pmemsave` write
   GPU surfaces back, which changes later RAM), and expect matches only
   on the same Mac, macOS and MoltenVK. A cheap reproducible screenshot
@@ -389,14 +387,13 @@ fall back to the GL presentation path, and report the issue.
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
 
-**Depth artifacts after a render-target switch.** Set
-`XEMU_ZETA_SHAPE_READBACK=1` to restore the full GPU→CPU round trip on
-zeta shape switches (costs ~2 finishes + multi-MB copies per frame on
-affected titles) and report the title.
+**Depth artifacts after a render-target switch.** A depth surface
+re-shaped at the same address skips its GPU→CPU readback, because
+titles clear it before drawing. Report the title and the scene.
 
-**Stale/late-updating textures.** Set `XEMU_TEX_BIND_RECHECK=1` to
-restore per-bind content checks (a CPU write between two binds of the
-same texture within one frame otherwise lands a frame late).
+**Stale/late-updating textures.** Textures are content-checked once per
+frame, so a CPU write between two binds of the same texture within one
+frame lands a frame late. Report the title and the scene.
 
 **Audio glitches.** For DSP-heavy titles, confirm DSP JIT is enabled.
 

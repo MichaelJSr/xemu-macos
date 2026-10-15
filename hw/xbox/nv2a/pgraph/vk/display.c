@@ -90,24 +90,15 @@ static void display_set_present_texture(PGRAPHVkDisplayState *disp,
 }
 
 /*
- * Push-model present handoff (XEMU_PUSH_PRESENT). See the slot comment
- * in renderer.h (PGRAPHVkDisplayState) for the lifetime contract.
+ * Push-model present handoff. See the slot comment in renderer.h
+ * (PGRAPHVkDisplayState) for the lifetime contract. On since 2026-07-12:
+ * the pull handshake blocked the UI thread 499-607 ms per 5 s under 2x
+ * interpolation vs 0 with the ring, flips identical, ring refuter 60,104
+ * steps compared / 0 mismatches / 0 resurrections. The pull path stays
+ * for GL, headless, and before the first publish.
  */
 bool pgraph_vk_push_present_enabled(NV2AState *d)
 {
-    static int cached_env = -1;
-    if (cached_env < 0) {
-        /* Default ON since 2026-07-12 (owner promotion): the pull handshake
-         * blocked the UI thread 499-607 ms per 5 s under 2x interpolation vs
-         * 0 with the ring, flips identical, ring refuter 60,104 steps
-         * compared / 0 mismatches / 0 resurrections. XEMU_PUSH_PRESENT=0
-         * restores the legacy pull handshake wholesale. */
-        const char *e = getenv("XEMU_PUSH_PRESENT");
-        cached_env = (e && e[0] == '0') ? 0 : 1;
-    }
-    if (!cached_env) {
-        return false;
-    }
     if (!xemu_present_is_metal() || xemu_headless_mode()) {
         return false; /* headless: nothing consumes the ring */
     }
