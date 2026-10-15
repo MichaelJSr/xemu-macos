@@ -22,6 +22,7 @@
 #include "nv2a_int.h"
 #include "nsprof.h"
 #include "qemu/timer.h"
+#include <fenv.h>
 #if defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -89,9 +90,13 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         break;
     }
 
-    pfifo_kick(d);
+    pfifo_guest_kick(d);
 
     qemu_mutex_unlock(&d->pfifo.lock);
+
+    if (icount_enabled()) {
+        pfifo_icount_sync(d);
+    }
 }
 
 void pfifo_kick(NV2AState *d)
@@ -114,7 +119,71 @@ void pfifo_kick(NV2AState *d)
      * atomic release-wait.
      */
     d->pfifo.fifo_kick = true;
+    qatomic_set(&d->pfifo.kick_seq, d->pfifo.kick_seq + 1);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
+}
+
+/*
+ * A kick for a guest register write. In deterministic null mode the vCPU
+ * pushes inline right after the write (pfifo_icount_sync), so waking the
+ * thread would only make it contend for the locks.
+ */
+void pfifo_guest_kick(NV2AState *d)
+{
+    if (!qatomic_read(&d->pfifo.inline_pusher)) {
+        pfifo_kick(d);
+    }
+}
+
+/*
+ * Deterministic mode (icount): guest state that PFIFO changes (DMA_GET,
+ * semaphores, notifiers, reports, PGRAPH interrupts) must change at a fixed
+ * guest instruction count, not whenever the thread gets to it. So after any
+ * guest PFIFO, USER or PGRAPH register write, and before the vCPU runs again
+ * after a VM start (the icount sync hook), the vCPU brings PFIFO to rest:
+ * out of pushbuffer, or stalled on something only the guest can clear.
+ *
+ * With the null renderer, which keeps no per-thread state, the vCPU runs the
+ * pusher itself (inline_pusher, set by the thread once the renderer is up)
+ * and no thread handoff is needed. Otherwise it waits until the thread has
+ * acted on every kick so far and parked. Call without d->pfifo.lock.
+ */
+void pfifo_icount_sync(NV2AState *d)
+{
+    if (qatomic_read(&d->pfifo.inline_pusher)) {
+        /* As on the PFIFO thread, not under the guest's x87 rounding
+         * mode, which TCG leaves in the host FPCR (see mcpx_apu_det_tick). */
+        fenv_t guest_fenv;
+        fegetenv(&guest_fenv);
+        fesetenv(FE_DFL_ENV);
+        qemu_mutex_lock(&d->pfifo.lock);
+        if (!qatomic_read(&d->pfifo.halt)) {
+            pfifo_run_pusher(d);
+        }
+        qemu_mutex_unlock(&d->pfifo.lock);
+        fesetenv(&guest_fenv);
+        return;
+    }
+
+    if (qatomic_load_acquire(&d->pfifo.idle_seq) ==
+        qatomic_read(&d->pfifo.kick_seq)) {
+        return;
+    }
+
+    /* The thread takes the BQL to raise interrupts. */
+    bool had_bql = bql_locked();
+    if (had_bql) {
+        bql_unlock();
+    }
+    qemu_mutex_lock(&d->pfifo.lock);
+    while (d->pfifo.idle_seq != d->pfifo.kick_seq &&
+           !qatomic_read(&d->exiting)) {
+        qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
+    }
+    qemu_mutex_unlock(&d->pfifo.lock);
+    if (had_bql) {
+        bql_lock();
+    }
 }
 
 static bool can_fifo_access(NV2AState *d) {
@@ -508,6 +577,13 @@ void *pfifo_thread(void *arg)
 
     rcu_register_thread();
 
+    qemu_mutex_lock(&d->pfifo.lock);
+    if (icount_enabled() &&
+        d->pgraph.renderer->type == CONFIG_DISPLAY_RENDERER_NULL) {
+        qatomic_set(&d->pfifo.inline_pusher, true);
+    }
+    qemu_mutex_unlock(&d->pfifo.lock);
+
     /*
      * Diagnostic: rate-limited heartbeat + pending-flag snapshot.
      * Only active when XEMU_PFIFO_HEARTBEAT=1. Prints every ~2 s,
@@ -545,7 +621,8 @@ void *pfifo_thread(void *arg)
          * so TSAN is quiet and future refactors that drop the lock don't
          * silently tear.
          */
-        if (!qatomic_read(&d->pfifo.halt)) {
+        if (!qatomic_read(&d->pfifo.halt) &&
+            !qatomic_read(&d->pfifo.inline_pusher)) {
             pfifo_run_pusher(d);
         }
 
@@ -602,6 +679,7 @@ void *pfifo_thread(void *arg)
                 pfifo_park_stats_parks++;
                 pfifo_park_stats_iters = pfifo_loop_iters;
             }
+            qatomic_store_release(&d->pfifo.idle_seq, d->pfifo.kick_seq);
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
             /*
              * Untimed wait. Invariant: every pfifo_kick call site
@@ -614,10 +692,12 @@ void *pfifo_thread(void *arg)
             qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
         }
 
-        if (d->exiting) {
+        if (qatomic_read(&d->exiting)) {
             break;
         }
     }
+    /* Release any pfifo_icount_sync waiter. */
+    qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
     qemu_mutex_unlock(&d->pfifo.lock);
 
     rcu_unregister_thread();

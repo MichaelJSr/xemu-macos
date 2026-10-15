@@ -10195,6 +10195,17 @@ void dsp56k_jit_invalidate_all(dsp_core_t *dsp)
     s->cache_flushes++;
 }
 
+void dsp56k_jit_reset_throttle(dsp_core_t *dsp)
+{
+    DspJitState *s = (DspJitState *)dsp->jit_state;
+    if (!s) {
+        return;
+    }
+    s->auto_throttled = false;
+    s->throttle_tick = 0;
+    s->win_translated = s->blocks_translated;
+}
+
 /* --------------------------------------------------------------- *
  * Differential validator — off-APU-thread infrastructure
  * --------------------------------------------------------------- */

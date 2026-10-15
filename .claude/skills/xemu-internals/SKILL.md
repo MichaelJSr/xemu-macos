@@ -34,6 +34,12 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - **Vblank**: `vblank_timer_thread` ticks every `vblank_interval_ns = 16666666` on monotonic deadlines and raises the guest VBLANK interrupt; never tie it to host refresh. No PAL 50 Hz path exists. → guest simulation retimed. `ui/xemu.c`.
 - **Launch parity**: every `Info.plist` `LSEnvironment` variable is mirrored in `main()` with `setenv(...,0)` before MoltenVK loads (six MVK keys). A variable exported in the shell overrides both. → Finder and terminal launches run different configs. `ui/xemu.c`, `Info.plist`.
 
+### Deterministic mode (`-icount ... sleep=off`, null renderer)
+- **Guest state changes only at fixed instruction counts.** No device thread may touch guest RAM, registers or IRQs on its own schedule: PFIFO pushes inline on the vCPU (`pfifo_icount_sync`), APU frames run in `mcpx_apu_det_tick` (virtual timer, BQL held, `FE_DFL_ENV`), IDE drains before the guest access returns (`ide_bus_icount_settle`), pads change only at vblank ticks. A new device thread or async completion breaks bit-exact replays. → RAM differs between identical runs.
+- **Host state not in the savestate is reset on load** under icount (APU resamplers/HRTF/`ep_frame_div`, DSP JIT throttle, AC'97, the PM GPIO field pin). Per-read toggles and static counters in read handlers are the usual culprit. → runs alternate A/B/A/B.
+- **Run device work on the vCPU thread under `FE_DFL_ENV`**: TCG leaves the guest x87 RC in the host FPCR and reprograms it lazily. The inline x87 cache and FIP deferral stay off under icount (a mid-TB `cpu_io_recompile` loses them). → float results depend on history.
+- **Find a divergence** with a per-frame RAM hash (`xemu-frame-advance 1` + `pmemsave`), then a temporary MMIO/PIO trace diff (`memory_region_dispatch_read/write`); the first differing read names the device.
+
 ### Threads, locks, clocks
 - `QEMU_CLOCK_REALTIME` is `CLOCK_MONOTONIC`; `QEMU_CLOCK_HOST` is wall time and can jump. Pace and throttle on REALTIME. `util/qemu-timer.c`.
 - Never block while holding the BQL. `surface_access_callback` drops it before taking `pgraph.lock`. → the whole VM freezes.

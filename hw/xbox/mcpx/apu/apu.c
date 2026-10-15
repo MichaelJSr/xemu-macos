@@ -19,6 +19,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <fenv.h>
 #include "apu_int.h"
 #include "system/runstate.h"
 
@@ -273,6 +274,91 @@ static void se_frame(MCPXAPUState *d)
     mcpx_debug_end_frame();
 }
 
+/* Frames stop while the guest has the APU off, trapped or halted. */
+static bool apu_frames_gated(MCPXAPUState *d)
+{
+    int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
+                            NV_PAPU_SECTL_XCNTMODE);
+    uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
+    return xcntmode == NV_PAPU_SECTL_XCNTMODE_OFF ||
+           (fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) ||
+           (fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED);
+}
+
+/*
+ * Deterministic mode (icount): the APU's work and interrupts must land at
+ * fixed guest instruction counts, so frames run here, from a
+ * QEMU_CLOCK_VIRTUAL timer, with the BQL held and the vCPU parked, instead
+ * of on the frame thread paced by host time. One tick per EP period (8
+ * frames, 256 samples at 48 kHz) on a fixed grid of virtual time, running
+ * the period's frames back to back as the frame thread does. If a frame
+ * would wait on a voice the guest has locked, the tick retries shortly
+ * (in virtual time) so the guest can unlock it.
+ */
+#define APU_DET_PERIOD_NS_NUM 16000000 /* 256 / 48000 s = 16e6 / 3 ns */
+#define APU_DET_PERIOD_NS_DEN 3
+#define APU_DET_RETRY_NS 20000
+
+static int64_t apu_det_next(int64_t now)
+{
+    uint64_t k = muldiv64(now, APU_DET_PERIOD_NS_DEN,
+                          APU_DET_PERIOD_NS_NUM) + 1;
+    return DIV_ROUND_UP(k * APU_DET_PERIOD_NS_NUM, APU_DET_PERIOD_NS_DEN);
+}
+
+static void mcpx_apu_det_tick(void *opaque)
+{
+    MCPXAPUState *d = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t next = apu_det_next(now);
+
+    assert(bql_locked());
+    /* The DSP JIT now runs on the vCPU thread, which TCG may have left
+     * in write mode. */
+    qemu_thread_jit_execute();
+    /*
+     * TCG leaves the guest's x87 rounding mode in the host FPCR and
+     * re-programs it lazily, so mix and resample with the default FP
+     * environment the frame thread has, and give TCG its FPCR back.
+     */
+    fenv_t guest_fenv;
+    fegetenv(&guest_fenv);
+    fesetenv(FE_DFL_ENV);
+
+    qemu_mutex_lock(&d->lock);
+    d->det.in_burst = true;
+    while (d->det.in_burst) {
+        bool gated = apu_frames_gated(d);
+        if (gated) {
+            d->set_irq = true;
+        }
+        if (d->set_irq) {
+            update_irq(d);
+            d->set_irq = false;
+        }
+        if (gated) {
+            d->det.in_burst = false;
+            break;
+        }
+        if (mcpx_apu_vp_frame_would_block(d)) {
+            next = now + APU_DET_RETRY_NS;
+            break;
+        }
+        se_frame(d);
+        if (d->ep_frame_div % 8 == 0) {
+            d->det.in_burst = false;
+        }
+    }
+    if (d->set_irq) {
+        update_irq(d);
+        d->set_irq = false;
+    }
+    qemu_mutex_unlock(&d->lock);
+    fesetenv(&guest_fenv);
+
+    timer_mod_ns(d->det.timer, next);
+}
+
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
@@ -289,7 +375,8 @@ static void *mcpx_apu_frame_thread(void *arg)
 
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
-        if (qatomic_read(&d->pause_requested)) {
+        /* Deterministic mode: frames run in mcpx_apu_det_tick. */
+        if (qatomic_read(&d->pause_requested) || d->det.enabled) {
             d->is_idle = true;
             qemu_cond_signal(&d->idle_cond);
             qemu_cond_wait(&d->cond, &d->lock);
@@ -297,12 +384,7 @@ static void *mcpx_apu_frame_thread(void *arg)
             continue;
         }
 
-        int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
-                                NV_PAPU_SECTL_XCNTMODE);
-        uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
-        if (xcntmode == NV_PAPU_SECTL_XCNTMODE_OFF ||
-            (fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) ||
-            (fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED)) {
+        if (apu_frames_gated(d)) {
             d->set_irq = true;
         }
 
@@ -315,12 +397,7 @@ static void *mcpx_apu_frame_thread(void *arg)
             d->set_irq = false;
         }
 
-        xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
-                            NV_PAPU_SECTL_XCNTMODE);
-        fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
-        if (xcntmode == NV_PAPU_SECTL_XCNTMODE_OFF ||
-            (fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) ||
-            (fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED)) {
+        if (apu_frames_gated(d)) {
             qemu_cond_timedwait(&d->cond, &d->lock, 5);
             continue;
         }
@@ -412,14 +489,32 @@ static void mcpx_apu_vm_state_change(void *opaque, bool running, RunState state)
         bql_lock();
     } else {
         qemu_mutex_lock(&d->lock);
-        if (d->gp.dsp) {
+        /*
+         * Deterministic mode: only a load hands the DSPs new state. The JIT
+         * engine's round trip is not an identity (it re-widens M/N, wakes
+         * the core and flushes its cache), so a plain pause skips it.
+         */
+        bool sync = !d->det.enabled || d->det.rearm;
+        if (sync && d->gp.dsp) {
             dsp_sync_from_vm(d->gp.dsp);
         }
-        if (d->ep.dsp) {
+        if (sync && d->ep.dsp) {
             dsp_sync_from_vm(d->ep.dsp);
         }
         mcpx_apu_resume(d);
         qemu_mutex_unlock(&d->lock);
+        if (d->det.enabled &&
+            (d->det.rearm || !timer_pending(d->det.timer))) {
+            /*
+             * A load may have moved the virtual clock: restart on the grid.
+             * A plain pause leaves the schedule alone (the clock stood
+             * still), so where a run is paused cannot change its result.
+             */
+            d->det.rearm = false;
+            d->det.in_burst = false;
+            timer_mod_ns(d->det.timer,
+                         apu_det_next(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
+        }
     }
 }
 
@@ -428,6 +523,16 @@ static int mcpx_apu_pre_load(void *opaque)
     MCPXAPUState *d = opaque;
     qemu_mutex_lock(&d->lock);
     mcpx_apu_reset_locked(d);
+    if (d->det.enabled) {
+        /*
+         * Not in the savestate: XGSCNT and the EP phase, and the DSP
+         * JIT's throttle history. Start from where a fresh process does.
+         */
+        d->ep_frame_div = 0;
+        dsp_reset_jit_throttle(d->gp.dsp);
+        dsp_reset_jit_throttle(d->ep.dsp);
+        d->det.rearm = true;
+    }
     qemu_mutex_unlock(&d->lock);
     return 0;
 }
@@ -473,6 +578,11 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     d->set_irq = false;
     d->exiting = false;
     d->is_idle = false;
+    d->det.enabled = icount_enabled();
+    if (d->det.enabled) {
+        d->det.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mcpx_apu_det_tick, d);
+        d->det.rearm = true;
+    }
     qatomic_set(&d->pause_requested, true);
     qemu_mutex_init(&d->lock);
     qemu_mutex_lock(&d->lock);
@@ -508,6 +618,10 @@ static void mcpx_apu_exitfn(PCIDevice *dev)
     bql_lock();
 
     qemu_thread_join(&d->apu_thread);
+    if (d->det.timer) {
+        timer_free(d->det.timer);
+        d->det.timer = NULL;
+    }
     mcpx_apu_vp_finalize(d);
     mcpx_apu_monitor_finalize(d);
 }

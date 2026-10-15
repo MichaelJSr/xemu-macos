@@ -177,9 +177,9 @@ Other automation interfaces (windowed or headless):
   arrival.
 - **Frames** count vblanks while the VM runs. QMP `query-xemu-frame`
   returns `{frame, running}`; `xemu-frame-advance {"frames": N}` runs N
-  frames, pauses, and returns (`0` just pauses). Replays land within a
-  frame or two, not bit-exact: guest work per vblank still depends on
-  host speed.
+  frames, pauses, and returns (`0` just pauses). In real time, replays
+  land within a frame or two: guest work per vblank depends on host
+  speed. Deterministic mode (below) makes them bit-exact.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 1 s after launch; `loadvm` works from then on, no fixed
   sleep needed) and `xemu: state loaded` after every `loadvm` or incoming
@@ -194,8 +194,34 @@ Other automation interfaces (windowed or headless):
   and `memsave` (virtual; fails if the range touches an unmapped page).
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
-  since it was saved; `-rtc clock=vm` makes loads repeatable, but
-  snapshots saved under the default clock then read as 1970.
+  since it was saved; with `-rtc clock=vm` a load continues from the
+  date the snapshot saved, with no wall time added.
+- **Deterministic fast-forward**: add
+  `-icount shift=2,align=off,sleep=off` (with `XEMU_HEADLESS=null`).
+  Guest time then follows executed instructions, not the host clock, and
+  runs as fast as the host allows. The same savestate, the same
+  frame-tagged pipe input and the same QMP calls give bit-identical guest
+  RAM after N frames: across runs, processes and pause points (verified
+  on 128 MiB over 600 frames, including disc streaming). Under icount:
+  - vblank, the APU (8 frames every 5.33 ms of guest time), PFIFO and
+    PGRAPH, IDE completions and the RTC follow guest time; the RTC runs
+    from 2001-01-01 unless `-rtc` says otherwise;
+  - `xemu-frame-advance` stops on the vblank itself;
+  - pads change only at vblanks and only from the pipe (physical pads
+    and the host keyboard are ignored); an untagged line applies at the
+    next vblank, and an `@N` line read after frame N is warned about;
+  - each load starts host-side device state (APU, AC'97) as a fresh
+    process does, with neutral pads: held keys, axes and queued pipe
+    lines are dropped, so write a run's input after its load. Start with
+    `-S` so nothing runs before the load;
+  - host audio is off, windowed too.
+
+  Write tagged input while paused, then advance. `shift` is guest time
+  per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs
+  ~1.5x faster (60 fps on Azurik's heavy scene on a loaded M2 Ultra,
+  40 fps with 0) and suits games that are not CPU-bound. Only the null
+  renderer is deterministic: offscreen rendering runs under icount but
+  GPU reports follow GPU time. Keep the network off and bind no XMU.
 - **Lost GPU device**: when macOS stops accepting the process's GPU work
   (it does after repeated GPU errors, usually under heavy multi-instance
   load), a headless xemu prints `xemu: Vulkan device lost; exiting` and

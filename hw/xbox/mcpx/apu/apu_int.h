@@ -33,6 +33,8 @@
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
 #include "system/runstate.h"
+#include "qemu/timer.h"
+#include "exec/icount.h"
 #include "ui/xemu-settings.h"
 
 #include "trace.h"
@@ -97,6 +99,18 @@ typedef struct MCPXAPUState {
     uint32_t regs[0x20000];
 
     int ep_frame_div;
+
+    /*
+     * Deterministic mode (icount): frames run from a virtual-clock timer
+     * on the vCPU thread instead of the host-paced frame thread (apu.c).
+     */
+    struct {
+        bool enabled;
+        bool in_burst;
+        bool rearm;     /* after realize or a load: restart on the grid */
+        QEMUTimer *timer;
+    } det;
+
     int frame_work_acc_us;
     int frame_count;
     int64_t frame_count_time_us;
@@ -124,10 +138,24 @@ typedef struct MCPXAPUState {
     } monitor;
 } MCPXAPUState;
 
+/*
+ * Past guest RAM the accessors go through the memory API, which takes the
+ * BQL for MMIO. A deterministic frame holds the BQL while it waits for the
+ * voice workers, so a worker must not: there such a read returns 0 and a
+ * write is dropped (a guest bug either way).
+ */
+static inline bool ram_oob_dropped(MCPXAPUState *d)
+{
+    return d->det.enabled && !bql_locked();
+}
+
 static inline uint32_t ram_ldl(MCPXAPUState *d, hwaddr addr)
 {
     if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
         return ldl_le_p(&d->ram_ptr[addr]);
+    }
+    if (ram_oob_dropped(d)) {
+        return 0;
     }
     return ldl_le_phys(&address_space_memory, addr);
 }

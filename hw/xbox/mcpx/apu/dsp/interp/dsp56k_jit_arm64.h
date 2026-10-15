@@ -59,6 +59,12 @@ void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr);
 void dsp56k_jit_invalidate_all(dsp_core_t *dsp);
 
 /*
+ * Forget the auto-throttle's history (it counts since the process
+ * started), as a fresh core has none. For deterministic loads.
+ */
+void dsp56k_jit_reset_throttle(dsp_core_t *dsp);
+
+/*
  * Runtime flags. Parsed from XEMU_DSP_JIT / XEMU_DSP_JIT_DIFF on
  * first call. Cached thereafter.
  */

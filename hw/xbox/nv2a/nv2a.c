@@ -21,6 +21,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/main-loop.h"
+#include "ui/xemu-settings.h"
 
 void nv2a_update_irq(NV2AState *d)
 {
@@ -339,6 +340,11 @@ static void nv2a_reset(NV2AState *d)
     nv2a_unlock_fifo(d);
 }
 
+static void nv2a_icount_sync_hook(void *opaque)
+{
+    pfifo_icount_sync(opaque);
+}
+
 static void nv2a_realize(PCIDevice *dev, Error **errp)
 {
     NV2AState *d = NV2A_DEVICE(dev);
@@ -405,6 +411,15 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
     qemu_mutex_init(&d->pfifo.lock);
     qemu_cond_init(&d->pfifo.fifo_cond);
     qemu_cond_init(&d->pfifo.fifo_idle_cond);
+
+    if (icount_enabled()) {
+        icount_add_sync_hook(nv2a_icount_sync_hook, d);
+        if (g_config.display.renderer != CONFIG_DISPLAY_RENDERER_NULL) {
+            fprintf(stderr, "xemu: icount: only the null renderer "
+                    "(XEMU_HEADLESS=null) is deterministic; GPU reports and "
+                    "surface writebacks follow host and GPU time\n");
+        }
+    }
 }
 
 static void nv2a_exitfn(PCIDevice *dev)
@@ -412,9 +427,10 @@ static void nv2a_exitfn(PCIDevice *dev)
     NV2AState *d;
     d = NV2A_DEVICE(dev);
 
-    d->exiting = true;
+    qatomic_set(&d->exiting, true);
 
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
+    qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
     qemu_thread_join(&d->pfifo.thread);
 
     pgraph_destroy(&d->pgraph);
@@ -456,6 +472,10 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
         bql_unlock();
         pgraph_pre_shutdown_wait(d);
         bql_lock();
+    } else if (!running && icount_enabled()) {
+        /* Deterministic mode: let the work of the last frame finish, so a
+         * paused machine's RAM is what the next run from here starts on. */
+        pfifo_icount_sync(d);
     }
 }
 
@@ -476,6 +496,10 @@ static int nv2a_pre_load(void *opaque)
 static int nv2a_post_load(void *opaque, int version_id)
 {
     NV2AState *d = opaque;
+    if (icount_enabled()) {
+        /* Not migrated; counts reads since the last vblank. */
+        d->pcrtc.raster = 0;
+    }
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);
     return 0;

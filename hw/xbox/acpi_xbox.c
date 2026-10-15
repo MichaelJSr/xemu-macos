@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "exec/icount.h"
 #include "hw/hw.h"
 #include "hw/irq.h"
 #include "hw/i386/pc.h"
@@ -47,16 +48,15 @@
 
 #define XBOX_PM_GPIO_ASPECT_RATIO 0x16
 
-static int field_pin;
-
 static uint64_t xbox_pm_gpio_read(void *opaque, hwaddr addr, unsigned width)
 {
+    XBOX_PMRegs *pm = opaque;
     uint64_t r = 0;
     switch (addr) {
     case 0:
         /* field pin from tv encoder? */
-        field_pin = (field_pin + 1) & 1;
-        r = field_pin << 5;
+        pm->field_pin = (pm->field_pin + 1) & 1;
+        r = pm->field_pin << 5;
         break;
     default:
         break;
@@ -132,10 +132,27 @@ static void xbox_pm_gpe_writeb(void *opaque, hwaddr addr, uint64_t val,
      .offset     = vmstate_offset_pointer(_state, _field, uint8_t),  \
  }
 
+/*
+ * The field pin is not in the savestate, so after a load its phase is
+ * whatever ran before. Deterministic mode (icount) starts every load from
+ * the power-on phase; games read it once a frame, so it would otherwise
+ * flip from one replay to the next.
+ */
+static int xbox_pm_post_load(void *opaque, int version_id)
+{
+    XBOX_PMRegs *pm = opaque;
+
+    if (icount_enabled()) {
+        pm->field_pin = 0;
+    }
+    return 0;
+}
+
 const VMStateDescription vmstate_xbox_pm = {
     .name = "xbox-pm",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = xbox_pm_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT16(acpi_regs.pm1.evt.sts, XBOX_PMRegs),
         VMSTATE_UINT16(acpi_regs.pm1.evt.en, XBOX_PMRegs),

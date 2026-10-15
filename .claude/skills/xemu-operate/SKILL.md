@@ -117,6 +117,10 @@ and skips the UI, but the guest still renders. `XEMU_HEADLESS=null` adds
 the null renderer, for logic, RAM and gdbstub work. stderr then shows
 `xemu: headless mode: offscreen|null`. For frames, use QMP `screendump`
 (PNG with `"format":"png"`); it works windowed too, but not from HMP.
+Deterministic, bit-exact replays: add `-S -icount shift=2,align=off,sleep=off`
+(null renderer), `loadvm`, write `+N` pipe lines while paused, then
+`xemu-frame-advance`; same inputs give the same RAM (README). Compare runs by
+hashing `pmemsave 0 0x8000000`.
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:

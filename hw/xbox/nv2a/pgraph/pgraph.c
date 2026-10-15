@@ -22,6 +22,7 @@
 #include <math.h>
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "exec/icount.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-present.h"
@@ -239,7 +240,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
             pfifo_kick_stats_note(d, PFIFO_KICK_SITE_INTR,
                                   was_waiting && !still_waiting);
         }
-        pfifo_kick(d);
+        pfifo_guest_kick(d);
         break;
     }
     case NV_PGRAPH_INTR_EN:
@@ -258,7 +259,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                 pfifo_kick_stats_note(d, PFIFO_KICK_SITE_INCREMENT,
                                       qatomic_read(&pg->waiting_for_flip));
             }
-            pfifo_kick(d);
+            pfifo_guest_kick(d);
         }
         break;
     case NV_PGRAPH_RDI_DATA: {
@@ -322,12 +323,25 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                                             : PFIFO_KICK_SITE_FIFO_OFF,
                                   access_changed);
         }
-        pfifo_kick(d);
+        pfifo_guest_kick(d);
         break;
+    }
+
+    if (icount_enabled()) {
+        /*
+         * Deterministic mode: some writes change a stall condition without
+         * a kick (NV_PGRAPH_SURFACE, CTX_USER); let PFIFO see them now
+         * rather than at the thread's next host-timed wakeup.
+         */
+        pfifo_guest_kick(d);
     }
 
     qemu_mutex_unlock(&pg->lock);
     qemu_mutex_unlock(&d->pfifo.lock);
+
+    if (icount_enabled()) {
+        pfifo_icount_sync(d);
+    }
 }
 
 void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
@@ -352,13 +366,20 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
 
         qatomic_set(&pg->waiting_for_context_switch, true);
         qemu_mutex_unlock(&pg->lock);
-        bql_lock();
+        /* The vCPU runs this itself in deterministic null mode, maybe
+         * under the BQL already (pfifo_icount_sync). */
+        bool had_bql = bql_locked();
+        if (!had_bql) {
+            bql_lock();
+        }
         /* Atomic RMW: pg->lock is dropped here, so this raise races the
          * vCPU's lock-free interrupt-clear once PGRAPH dispatch is BQL-free
          * (docs/Finished/pgraph-lockless-audit.md §C). */
         qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_CONTEXT_SWITCH);
         nv2a_update_irq(d);
-        bql_unlock();
+        if (!had_bql) {
+            bql_unlock();
+        }
         qemu_mutex_lock(&pg->lock);
     }
 }
@@ -1144,9 +1165,15 @@ DEF_METHOD(NV097, NO_OPERATION)
     qatomic_set(&pg->waiting_for_nop, true);
 
     qemu_mutex_unlock(&pg->lock);
-    bql_lock();
+    /* See pgraph_context_switch: maybe on the vCPU, under the BQL. */
+    bool had_bql = bql_locked();
+    if (!had_bql) {
+        bql_lock();
+    }
     nv2a_update_irq(d);
-    bql_unlock();
+    if (!had_bql) {
+        bql_unlock();
+    }
     qemu_mutex_lock(&pg->lock);
 }
 
@@ -3507,11 +3534,14 @@ void pgraph_process_pending(NV2AState *d)
      * Under the Metal presentation backend a non-Vulkan renderer can't
      * present (the window has no GL surface) and its GL contexts were
      * never created (nv2a_context_init). Defer the switch to the next
-     * launch — the settings UI already tells the user to restart.
+     * launch — the settings UI already tells the user to restart. Always
+     * under icount: the null renderer's pusher then runs inline on the
+     * vCPU (pfifo.c), a choice made once at startup.
      */
     bool switch_deferred_to_restart =
-        xemu_present_is_metal() &&
-        g_config.display.renderer != CONFIG_DISPLAY_RENDERER_VULKAN;
+        icount_enabled() ||
+        (xemu_present_is_metal() &&
+         g_config.display.renderer != CONFIG_DISPLAY_RENDERER_VULKAN);
 
     if (!switch_deferred_to_restart &&
         g_config.display.renderer != pg->renderer->type &&

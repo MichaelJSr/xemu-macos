@@ -136,6 +136,10 @@ void page_table_config_init(void);
 #ifndef CONFIG_USER_ONLY
 G_NORETURN void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
 #endif /* CONFIG_USER_ONLY */
+#if defined(XBOX)
+bool xemu_io_pc_is_set(vaddr pc);
+void tb_phys_invalidate_io(TranslationBlock *tb);
+#endif
 
 void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
 void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);

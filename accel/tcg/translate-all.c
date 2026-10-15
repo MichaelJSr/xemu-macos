@@ -643,6 +643,33 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr)
     }
 }
 
+#if defined(XBOX)
+/*
+ * Under icount an MMIO access that is not its TB's last instruction makes
+ * cpu_io_recompile rewind the TB and re-run the access in a one-shot TB.
+ * The TB itself stays cached, so a polling loop paid that on every pass
+ * (~70k times a second in a heavy Azurik scene). Instead, remember the
+ * PCs of such accesses and drop the TB once: translator_loop ends the
+ * retranslation right after the access, so it runs as the last insn.
+ * Only the vCPU thread (single-threaded TCG under icount) touches the set.
+ */
+static GHashTable *xemu_io_pcs;
+
+bool xemu_io_pc_is_set(vaddr pc)
+{
+    return xemu_io_pcs &&
+           g_hash_table_contains(xemu_io_pcs, (gpointer)(uintptr_t)(pc + 1));
+}
+
+static void xemu_io_pc_note(vaddr pc)
+{
+    if (!xemu_io_pcs) {
+        xemu_io_pcs = g_hash_table_new(NULL, NULL);
+    }
+    g_hash_table_add(xemu_io_pcs, (gpointer)(uintptr_t)(pc + 1));
+}
+#endif
+
 #ifndef CONFIG_USER_ONLY
 /*
  * In deterministic execution mode, instructions doing device I/Os
@@ -662,6 +689,13 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
                   (void *)retaddr);
     }
     cpu_restore_state_from_tb(cpu, tb, retaddr);
+
+#if defined(XBOX)
+    if ((tb_cflags(tb) & CF_USE_ICOUNT) && !(tb_cflags(tb) & CF_COUNT_MASK)) {
+        xemu_io_pc_note(cpu->cc->get_pc(cpu));
+        tb_phys_invalidate_io(tb);
+    }
+#endif
 
     /*
      * Some guests must re-execute the branch when re-executing a delay

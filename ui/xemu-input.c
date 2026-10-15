@@ -27,6 +27,8 @@
 #include "qemu/option.h"
 #include "qemu/timer.h"
 #include "qemu/config-file.h"
+#include "exec/icount.h"
+#include "system/runstate.h"
 
 #include "xemu-input.h"
 #include "xemu-notifications.h"
@@ -261,8 +263,34 @@ static const char *get_bound_driver(int port)
 
 static const int port_map[4] = { 3, 4, 1, 2 };
 
+static void test_input_poll(void);
+static void xemu_input_publish_controller(ControllerState *state);
+
+/*
+ * Deterministic mode: on every start (cont, frame advance, after a load),
+ * queue what the pipe holds and publish every pad before the first guest
+ * instruction, so a run never starts on pad state from before the load.
+ */
+static void xemu_input_vm_state_change(void *opaque, bool running,
+                                       RunState state)
+{
+    ControllerState *iter;
+
+    if (!running) {
+        return;
+    }
+    test_input_poll();
+    QTAILQ_FOREACH(iter, &available_controllers, entry) {
+        xemu_input_publish_controller(iter);
+    }
+}
+
 void xemu_input_init(void)
 {
+    if (icount_enabled()) {
+        qemu_add_vm_change_state_handler(xemu_input_vm_state_change, NULL);
+    }
+
     if (g_config.input.background_input_capture) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
@@ -360,6 +388,12 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
 
 void xemu_input_process_sdl_events(const SDL_Event *event)
 {
+    if (icount_enabled() && (event->type == SDL_EVENT_GAMEPAD_ADDED ||
+                             event->type == SDL_EVENT_GAMEPAD_REMOVED)) {
+        /* Deterministic mode: only XEMU_INPUT_PIPE drives the pads. */
+        return;
+    }
+
     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
         DPRINTF("Controller Added: %d\n", event->gdevice.which);
 
@@ -505,14 +539,8 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
     }
 }
 
-void xemu_input_update_controller(ControllerState *state)
+static void xemu_input_publish_controller(ControllerState *state)
 {
-    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-    if (ABS(now - state->last_input_updated_ts) <
-        XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US) {
-        return;
-    }
-
     if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
         xemu_input_update_sdl_kbd_controller_state(state);
     } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
@@ -522,9 +550,37 @@ void xemu_input_update_controller(ControllerState *state)
     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 }
 
+void xemu_input_update_controller(ControllerState *state)
+{
+    /*
+     * Deterministic mode (icount): pads change only at vblanks
+     * (xemu_input_frame_tick), never on a host-time poll from the USB
+     * device or the UI loop.
+     */
+    if (icount_enabled()) {
+        return;
+    }
+
+    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    if (ABS(now - state->last_input_updated_ts) <
+        XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US) {
+        return;
+    }
+
+    xemu_input_publish_controller(state);
+}
+
 void xemu_input_update_controllers(void)
 {
     ControllerState *iter;
+
+    if (icount_enabled()) {
+        /* Queue pipe lines promptly, so "+N" counts from the frame they
+         * were written at, even while paused. */
+        test_input_poll();
+        return;
+    }
+
     QTAILQ_FOREACH(iter, &available_controllers, entry) {
         xemu_input_update_controller(iter);
     }
@@ -610,7 +666,15 @@ static void test_input_apply(const char *line)
 static void test_input_line(char *line)
 {
     if (line[0] != '@' && line[0] != '+') {
-        test_input_apply(line);
+        if (!icount_enabled()) {
+            test_input_apply(line);
+            return;
+        }
+        /* Deterministic mode: an untagged line waits for the next vblank. */
+        TestInputPending *p = g_new(TestInputPending, 1);
+        p->frame = test_input_frame;
+        p->line = g_strdup(line);
+        g_queue_push_tail(&test_input_pending, p);
         return;
     }
 
@@ -618,6 +682,11 @@ static void test_input_line(char *line)
     uint64_t n = strtoull(line + 1, &rest, 10);
     TestInputPending *p = g_new(TestInputPending, 1);
     p->frame = line[0] == '@' ? n : test_input_frame + n;
+    if (icount_enabled() && line[0] == '@' && n <= test_input_frame) {
+        fprintf(stderr, "xemu: input line for frame %" PRIu64 " read at "
+                "frame %" PRIu64 "; applied at the next vblank\n",
+                n, test_input_frame);
+    }
     p->line = g_strdup(g_strchug(rest));
     g_queue_push_tail(&test_input_pending, p);
 }
@@ -812,10 +881,39 @@ static void test_input_poll(void)
 }
 #endif /* !_WIN32 */
 
+/*
+ * After loadvm or an incoming migration (savevm.c). Deterministic mode
+ * starts every load from neutral pad input: lines still queued and keys or
+ * axes still held from the previous run are dropped, so an in-process replay
+ * matches a fresh one. Lines written after the load are kept.
+ */
+void xemu_input_state_loaded(void)
+{
+    if (!icount_enabled()) {
+        return;
+    }
+    test_input_poll();
+    TestInputPending *p;
+    while ((p = g_queue_pop_head(&test_input_pending))) {
+        g_free(p->line);
+        g_free(p);
+    }
+    memset(test_input_override, 0, sizeof(test_input_override));
+    memset(test_axis_override, 0, sizeof(test_axis_override));
+    test_input_partial_len = 0;
+}
+
 void xemu_input_frame_tick(uint64_t frame)
 {
     bool applied = false;
 
+    if (icount_enabled()) {
+        /*
+         * Lines written before this vblank count for it; "+N" counts from
+         * the frame they were written at.
+         */
+        test_input_poll();
+    }
     test_input_frame = frame;
     for (GList *l = test_input_pending.head, *next; l; l = next) {
         TestInputPending *p = l->data;
@@ -828,16 +926,23 @@ void xemu_input_frame_tick(uint64_t frame)
             applied = true;
         }
     }
+    ControllerState *iter;
+    if (icount_enabled()) {
+        /* Deterministic mode: every pad is published here and only here. */
+        QTAILQ_FOREACH(iter, &available_controllers, entry) {
+            xemu_input_publish_controller(iter);
+        }
+        return;
+    }
+
     if (!applied) {
         return;
     }
 
     /* Publish now, so the change lands on this vblank, not the UI's next poll. */
-    ControllerState *iter;
     QTAILQ_FOREACH(iter, &available_controllers, entry) {
         if (iter->type == INPUT_DEVICE_SDL_KEYBOARD) {
-            xemu_input_update_sdl_kbd_controller_state(iter);
-            iter->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+            xemu_input_publish_controller(iter);
         }
     }
 }
@@ -847,8 +952,16 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
     state->buttons = 0;
     memset(state->axis, 0, sizeof(state->axis));
 
-    test_input_poll();
-    const bool *kbd = SDL_GetKeyboardState(NULL);
+    /*
+     * Deterministic mode: the pipe is read at vblanks only (frame tick), and
+     * the host keyboard is ignored.
+     */
+    static const bool no_keys[SDL_SCANCODE_COUNT];
+    const bool *kbd = no_keys;
+    if (!icount_enabled()) {
+        test_input_poll();
+        kbd = SDL_GetKeyboardState(NULL);
+    }
 
 #define KBD_STATE(btn) \
     (kbd[g_config.input.keyboard_controller_scancode_map.btn] || \

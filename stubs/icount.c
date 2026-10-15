@@ -30,3 +30,19 @@ void icount_notify_exit(void)
 {
     abort();
 }
+int64_t icount_get(void)
+{
+    abort();
+    return 0;
+}
+int64_t icount_to_ns(int64_t icount)
+{
+    abort();
+    return 0;
+}
+void icount_add_sync_hook(void (*fn)(void *opaque), void *opaque)
+{
+}
+void icount_run_sync_hooks(void)
+{
+}

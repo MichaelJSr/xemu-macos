@@ -1308,6 +1308,30 @@ static void ac97_on_reset(AC97LinkState *s)
     mixer_reset(s);
 }
 
+void ac97_power_on_reset(AC97LinkState *s)
+{
+    for (int i = 0; i < LAST_INDEX; i++) {
+        AC97BusMasterRegs *r = &s->bm_regs[i];
+        if (i <= MC_INDEX) {
+            /* Lowers the line if this channel raised it. */
+            update_sr(s, r, SR_DCH);
+            voice_set_active(s, i, 0);
+            AC97BusMasterRegs fresh = { .sr = SR_DCH };
+            *r = fresh;
+        } else {
+            memset(r, 0, sizeof(*r));
+        }
+    }
+    s->glob_cnt = 0;
+    s->glob_sta = 0;
+    s->cas = 0;
+    s->last_samp = 0;
+    s->bup_flag = 0;
+    memset(s->invalid_freq, 0, sizeof(s->invalid_freq));
+    memset(s->silence, 0, sizeof(s->silence));
+    mixer_reset(s);
+}
+
 void ac97_common_init(AC97LinkState *s, PCIDevice *pci_dev, AddressSpace *as)
 {
   s->pci_dev = pci_dev;

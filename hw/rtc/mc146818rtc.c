@@ -782,7 +782,22 @@ static int rtc_post_load(void *opaque, int version_id)
 {
     MC146818RtcState *s = opaque;
 
+#ifdef XBOX
+    /*
+     * On the virtual clock, continue from the date the snapshot saved to
+     * CMOS (rtc_pre_save) whatever clock it ran on, with no host time added:
+     * a snapshot saved on the host clock otherwise reads as 1970, and loads
+     * repeat exactly. On the host clock, a last_update before 2001 cannot
+     * be wall time: the snapshot ran on the virtual clock (deterministic
+     * mode), so continue from its CMOS date too instead of decades ahead.
+     */
+    bool saved_on_vm_clock = rtc_clock == QEMU_CLOCK_HOST &&
+        s->last_update < 978307200LL * NANOSECONDS_PER_SECOND;
+    if (version_id <= 2 || rtc_clock == QEMU_CLOCK_REALTIME ||
+        rtc_clock == QEMU_CLOCK_VIRTUAL || saved_on_vm_clock) {
+#else
     if (version_id <= 2 || rtc_clock == QEMU_CLOCK_REALTIME) {
+#endif
         rtc_set_time(s);
         s->offset = 0;
         check_update_timer(s);

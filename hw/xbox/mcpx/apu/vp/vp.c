@@ -96,6 +96,9 @@ static inline uint16_t ram_ldw(MCPXAPUState *d, hwaddr addr)
     if (__builtin_expect(addr + 2 <= d->ram_size, 1)) {
         return lduw_le_p(&d->ram_ptr[addr]);
     }
+    if (ram_oob_dropped(d)) {
+        return 0;
+    }
     return lduw_le_phys(&address_space_memory, addr);
 }
 
@@ -103,6 +106,9 @@ static inline uint8_t ram_ldb(MCPXAPUState *d, hwaddr addr)
 {
     if (__builtin_expect(addr + 1 <= d->ram_size, 1)) {
         return d->ram_ptr[addr];
+    }
+    if (ram_oob_dropped(d)) {
+        return 0;
     }
     return ldub_phys(&address_space_memory, addr);
 }
@@ -160,7 +166,7 @@ static inline void ram_stl(MCPXAPUState *d, hwaddr addr, uint32_t val)
     if (__builtin_expect(addr + 4 <= d->ram_size, 1)) {
         stl_le_p(&d->ram_ptr[addr], val);
         ram_mark_dirty(d, addr, 4);
-    } else {
+    } else if (!ram_oob_dropped(d)) {
         stl_le_phys(&address_space_memory, addr, val);
     }
 }
@@ -170,7 +176,7 @@ static inline void ram_stb(MCPXAPUState *d, hwaddr addr, uint8_t val)
     if (__builtin_expect(addr + 1 <= d->ram_size, 1)) {
         d->ram_ptr[addr] = val;
         ram_mark_dirty(d, addr, 1);
-    } else {
+    } else if (!ram_oob_dropped(d)) {
         stb_phys(&address_space_memory, addr, val);
     }
 }
@@ -2203,14 +2209,21 @@ static void *voice_worker_thread(void *arg)
 
             qemu_mutex_lock(&vwd->lock);
 
-            for (int b = 0; b < NUM_MIXBINS; b++) {
-                float_accumulate(vwd->mixbins[b], self->mixbins[b],
-                                 NUM_SAMPLES_PER_FRAME);
-            }
-            if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
-                float_accumulate((float *)d->vp.sample_buf,
-                                 (float *)self->sample_buf,
-                                 NUM_SAMPLES_PER_FRAME * 2);
+            /*
+             * Deterministic mode sums the workers in index order after they
+             * finish (voice_work_dispatch); float addition in completion
+             * order would differ from run to run.
+             */
+            if (!d->det.enabled) {
+                for (int b = 0; b < NUM_MIXBINS; b++) {
+                    float_accumulate(vwd->mixbins[b], self->mixbins[b],
+                                     NUM_SAMPLES_PER_FRAME);
+                }
+                if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+                    float_accumulate((float *)d->vp.sample_buf,
+                                     (float *)self->sample_buf,
+                                     NUM_SAMPLES_PER_FRAME * 2);
+                }
             }
 
             self->queue_len = 0;
@@ -2318,7 +2331,12 @@ voice_work_dispatch(MCPXAPUState *d,
             return;
         }
 
-        if (!any_queued_voice_locked(d)) {
+        /*
+         * Deterministic mode runs frames with the vCPU parked, so a voice
+         * the guest has locked cannot be unlocked here; the tick checks
+         * first (mcpx_apu_vp_frame_would_block) and retries later instead.
+         */
+        if (d->det.enabled || !any_queued_voice_locked(d)) {
             break;
         }
 
@@ -2332,10 +2350,29 @@ voice_work_dispatch(MCPXAPUState *d,
 
         // Signal workers and wait for completion
         voice_work_schedule(d);
+        uint64_t ran = vwd->workers_pending;
         qemu_cond_broadcast(&vwd->work_pending);
         qemu_cond_wait(&vwd->work_finished, &vwd->lock);
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
+
+        if (d->det.enabled) {
+            for (int w = 0; w < vwd->num_workers; w++) {
+                if (!(ran & (1ULL << w))) {
+                    continue;
+                }
+                for (int b = 0; b < NUM_MIXBINS; b++) {
+                    float_accumulate(vwd->mixbins[b],
+                                     vwd->workers[w].mixbins[b],
+                                     NUM_SAMPLES_PER_FRAME);
+                }
+                if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+                    float_accumulate((float *)d->vp.sample_buf,
+                                     (float *)vwd->workers[w].sample_buf,
+                                     NUM_SAMPLES_PER_FRAME * 2);
+                }
+            }
+        }
 
         for (int b = 0; b < NUM_MIXBINS; b++) {
             float_accumulate(mixbins[b], vwd->mixbins[b],
@@ -2353,7 +2390,12 @@ static void voice_work_init(MCPXAPUState *d)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
-    int num_workers = g_config.audio.vp.num_workers ?: SDL_GetNumLogicalCPUCores();
+    /*
+     * Deterministic mode pins the count: which voices one worker sums
+     * together changes the float result, and so would differ by host.
+     */
+    int num_workers = g_config.audio.vp.num_workers ?:
+                      (d->det.enabled ? 4 : SDL_GetNumLogicalCPUCores());
     vwd->num_workers = MAX(1, MIN(num_workers, MAX_VOICE_WORKERS));
     vwd->workers = g_malloc0_n(vwd->num_workers, sizeof(VoiceWorker));
     vwd->workers_should_exit = false;
@@ -2389,6 +2431,37 @@ static void voice_work_finalize(MCPXAPUState *d)
     }
     g_free(vwd->workers);
     vwd->workers = NULL;
+}
+
+/*
+ * Deterministic mode: would the next frame queue an active voice the guest
+ * has locked? The same walk as mcpx_apu_vp_frame, read-only. Realtime
+ * frames wait for the unlock (voice_work_dispatch); the deterministic tick
+ * cannot, because the guest is parked while it runs, so it retries later.
+ */
+bool mcpx_apu_vp_frame_would_block(MCPXAPUState *d)
+{
+    if (!(qatomic_read(&d->vp.voice_locked[0]) |
+          qatomic_read(&d->vp.voice_locked[1]) |
+          qatomic_read(&d->vp.voice_locked[2]) |
+          qatomic_read(&d->vp.voice_locked[3]))) {
+        return false;
+    }
+
+    for (int list = 0; list < 3; list++) {
+        uint32_t v = qatomic_read(&d->regs[voice_list_regs[list].top]);
+        for (int i = 0; v != 0xFFFF && v < MCPX_HW_MAX_VOICES &&
+                        i < MCPX_HW_MAX_VOICES; i++) {
+            if (voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                               NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE) &&
+                is_voice_locked(d, v)) {
+                return true;
+            }
+            v = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                               NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+        }
+    }
+    return false;
 }
 
 void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
@@ -2513,5 +2586,24 @@ void mcpx_apu_vp_reset(MCPXAPUState *d)
     memset(d->vp.voice_locked, 0, sizeof(d->vp.voice_locked));
     for (int v = 0; v < ARRAY_SIZE(d->vp.filters); v++) {
         hrtf_filter_init(&d->vp.filters[v].hrtf);
+    }
+
+    if (d->det.enabled) {
+        /*
+         * Deterministic mode: nothing below is in the savestate, so a load
+         * must not inherit it from whatever ran before; start as a fresh
+         * process does.
+         */
+        for (int v = 0; v < ARRAY_SIZE(d->vp.filters); v++) {
+            MCPXAPUVoiceFilter *f = &d->vp.filters[v];
+            if (f->resampler) {
+                src_delete(f->resampler);
+                f->resampler = NULL;
+            }
+            f->resampler_stereo = false;
+            memset(f->resample_buf, 0, sizeof(f->resample_buf));
+            memset(f->svf, 0, sizeof(f->svf));
+        }
+        memset(&d->vp.hrtf, 0, sizeof(d->vp.hrtf));
     }
 }

@@ -1523,6 +1523,21 @@ void blk_dec_in_flight(BlockBackend *blk)
     aio_wait_kick();
 }
 
+/*
+ * xemu: run the main loop until no request of this BlockBackend is in
+ * flight, completion callbacks included (they may submit the next part of
+ * a transfer). Unlike blk_drain it does not quiesce the graph. Main loop
+ * context: the main loop thread, or a vCPU holding the BQL.
+ */
+void blk_wait_in_flight(BlockBackend *blk)
+{
+    GLOBAL_STATE_CODE();
+    if (qatomic_read(&blk->in_flight)) {
+        AIO_WAIT_WHILE(blk_get_aio_context(blk),
+                       qatomic_read(&blk->in_flight) > 0);
+    }
+}
+
 static void error_callback_bh(void *opaque)
 {
     struct BlockBackendAIOCB *acb = opaque;

@@ -30,6 +30,9 @@ typedef struct XBOX_PMRegs {
     MemoryRegion io_gpio;
 
     qemu_irq irq;
+
+    /* TV encoder field pin (GPIO 0, bit 5); flips on every read. */
+    int field_pin;
 } XBOX_PMRegs;
 
 void xbox_pm_init(PCIDevice *dev, XBOX_PMRegs *pm, qemu_irq sci_irq);

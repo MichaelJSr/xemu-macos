@@ -55,6 +55,9 @@ typedef struct TimersState {
     /* Only written by TCG thread */
     int64_t qemu_icount;
 
+    /* xemu: QEMU_CLOCK_VIRTUAL as migrated in the "timer" section. */
+    int64_t vm_clock_saved;
+
     /* for adjusting icount */
     QEMUTimer *icount_rt_timer;
     QEMUTimer *icount_vm_timer;

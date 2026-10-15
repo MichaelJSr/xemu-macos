@@ -44,6 +44,7 @@
 #include "hw/display/vga_regs.h"
 #include "hw/pci/pci.h"
 #include "cpu.h"
+#include "exec/icount.h"
 
 #include "trace.h"
 
@@ -102,6 +103,14 @@ typedef struct NV2AState {
         QemuCond fifo_idle_cond;
         bool fifo_kick;
         bool halt;
+        /*
+         * Every kick bumps kick_seq; the thread copies it to idle_seq when
+         * it parks with nothing left to do. Equal = caught up (icount sync).
+         */
+        uint64_t kick_seq;
+        uint64_t idle_seq;
+        /* Deterministic null mode: the vCPU runs the pusher (pfifo.c). */
+        bool inline_pusher;
     } pfifo;
 
     struct {

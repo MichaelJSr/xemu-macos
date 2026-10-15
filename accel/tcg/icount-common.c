@@ -310,6 +310,21 @@ void icount_start_warp_timer(void)
             return;
         }
 
+#ifdef XBOX
+        /*
+         * xemu: a vCPU stopped while the VM still runs (a vm_stop, reset
+         * or frame-advance stop on its way) counts as idle, but only HLT
+         * may advance time: a warp here would move guest time by host
+         * scheduling.
+         */
+        CPUState *cpu;
+        CPU_FOREACH(cpu) {
+            if (cpu->stopped) {
+                return;
+            }
+        }
+#endif
+
         if (qtest_enabled()) {
             /* When testing, qtest commands advance icount.  */
             return;
@@ -499,5 +514,31 @@ void icount_notify_exit(void)
     if (current_cpu) {
         qemu_cpu_kick(current_cpu);
         qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
+    }
+}
+
+typedef struct IcountSyncHook {
+    void (*fn)(void *opaque);
+    void *opaque;
+} IcountSyncHook;
+
+static GArray *icount_sync_hooks;
+
+void icount_add_sync_hook(void (*fn)(void *opaque), void *opaque)
+{
+    IcountSyncHook hook = { .fn = fn, .opaque = opaque };
+
+    if (!icount_sync_hooks) {
+        icount_sync_hooks = g_array_new(false, false, sizeof(IcountSyncHook));
+    }
+    g_array_append_val(icount_sync_hooks, hook);
+}
+
+void icount_run_sync_hooks(void)
+{
+    for (guint i = 0; icount_sync_hooks && i < icount_sync_hooks->len; i++) {
+        IcountSyncHook *hook = &g_array_index(icount_sync_hooks,
+                                              IcountSyncHook, i);
+        hook->fn(hook->opaque);
     }
 }

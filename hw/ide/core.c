@@ -40,6 +40,7 @@
 #include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "system/replay.h"
+#include "exec/icount.h"
 #include "system/runstate.h"
 #include "ide-internal.h"
 #include "trace.h"
@@ -1283,7 +1284,7 @@ const char *ATA_IOPORT_WR_lookup[ATA_IOPORT_WR_NUM_REGISTERS] = {
     [ATA_IOPORT_WR_COMMAND] = "Command"
 };
 
-void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+static void ide_ioport_write_impl(void *opaque, uint32_t addr, uint32_t val)
 {
     IDEBus *bus = opaque;
     IDEState *s = ide_bus_active_if(bus);
@@ -2370,7 +2371,7 @@ static void ide_bus_perform_srst(void *opaque)
     bus->cmd &= ~IDE_CTRL_RESET;
 }
 
-void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
+static void ide_ctrl_write_impl(void *opaque, uint32_t addr, uint32_t val)
 {
     IDEBus *bus = opaque;
     IDEState *s;
@@ -2385,8 +2386,18 @@ void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
             s = &bus->ifs[i];
             s->status |= BUSY_STAT;
         }
-        replay_bh_schedule_oneshot_event(qemu_get_aio_context(),
-                                         ide_bus_perform_srst, bus);
+        if (icount_enabled()) {
+            /*
+             * Deterministic mode: the reset lands at this instruction, as
+             * if the bottom half ran at once (it clears the reset bit).
+             */
+            bus->cmd = val;
+            ide_bus_perform_srst(bus);
+            return;
+        } else {
+            replay_bh_schedule_oneshot_event(qemu_get_aio_context(),
+                                             ide_bus_perform_srst, bus);
+        }
     }
 
     bus->cmd = val;
@@ -2412,7 +2423,7 @@ static bool ide_is_pio_out(IDEState *s)
     abort();
 }
 
-void ide_data_writew(void *opaque, uint32_t addr, uint32_t val)
+static void ide_data_writew_impl(void *opaque, uint32_t addr, uint32_t val)
 {
     IDEBus *bus = opaque;
     IDEState *s = ide_bus_active_if(bus);
@@ -2448,7 +2459,7 @@ void ide_data_writew(void *opaque, uint32_t addr, uint32_t val)
     }
 }
 
-uint32_t ide_data_readw(void *opaque, uint32_t addr)
+static uint32_t ide_data_readw_impl(void *opaque, uint32_t addr)
 {
     IDEBus *bus = opaque;
     IDEState *s = ide_bus_active_if(bus);
@@ -2486,7 +2497,7 @@ uint32_t ide_data_readw(void *opaque, uint32_t addr)
     return ret;
 }
 
-void ide_data_writel(void *opaque, uint32_t addr, uint32_t val)
+static void ide_data_writel_impl(void *opaque, uint32_t addr, uint32_t val)
 {
     IDEBus *bus = opaque;
     IDEState *s = ide_bus_active_if(bus);
@@ -2514,7 +2525,7 @@ void ide_data_writel(void *opaque, uint32_t addr, uint32_t val)
     }
 }
 
-uint32_t ide_data_readl(void *opaque, uint32_t addr)
+static uint32_t ide_data_readl_impl(void *opaque, uint32_t addr)
 {
     IDEBus *bus = opaque;
     IDEState *s = ide_bus_active_if(bus);
@@ -2543,6 +2554,63 @@ uint32_t ide_data_readl(void *opaque, uint32_t addr)
 
 out:
     trace_ide_data_readl(addr, ret, bus, s);
+    return ret;
+}
+
+/*
+ * Deterministic mode (icount): host I/O finishes whenever the host gets to
+ * it, so a read's data, status and interrupt would land at a different
+ * guest instruction each run. Complete the bus's requests before the guest
+ * access that started them returns instead: zero-latency I/O whose effects
+ * land at that instruction. ide_cancel_dma_sync drains from here already.
+ */
+void ide_bus_icount_settle(IDEBus *bus)
+{
+    if (!icount_enabled()) {
+        return;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (bus->ifs[i].blk) {
+            blk_wait_in_flight(bus->ifs[i].blk);
+        }
+    }
+}
+
+void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+{
+    ide_ioport_write_impl(opaque, addr, val);
+    ide_bus_icount_settle(opaque);
+}
+
+void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
+{
+    ide_ctrl_write_impl(opaque, addr, val);
+    ide_bus_icount_settle(opaque);
+}
+
+void ide_data_writew(void *opaque, uint32_t addr, uint32_t val)
+{
+    ide_data_writew_impl(opaque, addr, val);
+    ide_bus_icount_settle(opaque);
+}
+
+void ide_data_writel(void *opaque, uint32_t addr, uint32_t val)
+{
+    ide_data_writel_impl(opaque, addr, val);
+    ide_bus_icount_settle(opaque);
+}
+
+uint32_t ide_data_readw(void *opaque, uint32_t addr)
+{
+    uint32_t ret = ide_data_readw_impl(opaque, addr);
+    ide_bus_icount_settle(opaque);
+    return ret;
+}
+
+uint32_t ide_data_readl(void *opaque, uint32_t addr)
+{
+    uint32_t ret = ide_data_readl_impl(opaque, addr);
+    ide_bus_icount_settle(opaque);
     return ret;
 }
 

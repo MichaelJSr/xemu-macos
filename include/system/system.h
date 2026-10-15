@@ -23,6 +23,7 @@ void qemu_add_machine_init_done_notifier(Notifier *notify);
 void qemu_remove_machine_init_done_notifier(Notifier *notify);
 
 void configure_rtc(QemuOpts *opts);
+void configure_rtc_deterministic(QemuOpts *opts);
 
 void qemu_init_subsystems(void);
 

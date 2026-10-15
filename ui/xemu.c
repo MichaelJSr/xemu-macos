@@ -45,6 +45,9 @@
 #include "system/runstate.h"
 #include "system/runstate-action.h"
 #include "system/system.h"
+#include "system/cpus.h"
+#include "exec/icount.h"
+#include "hw/core/cpu.h"
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
 #include "xemu-settings.h"
@@ -924,7 +927,12 @@ static uint64_t frame_advance_target;
 static Coroutine *frame_advance_co;
 static bool frame_advance_stopping;
 
-/* vm_start/vm_stop must not run in coroutine context: do them in BHs. */
+/*
+ * vm_start/vm_stop must not run in coroutine context: do them in BHs, on
+ * the iohandler context, which only the main loop polls. In the main
+ * context a vCPU's nested aio_poll (an IDE wait under icount) could run
+ * them, where vm_stop only queues a request.
+ */
 static void frame_run_bh(void *opaque)
 {
     if (!runstate_is_running()) {
@@ -959,7 +967,21 @@ static void process_vblank(struct xemu_console *scon)
     if (frame_advance_co && !frame_advance_stopping &&
         frame_count >= frame_advance_target) {
         frame_advance_stopping = true;
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_stop_bh, NULL);
+        if (icount_enabled()) {
+            /*
+             * Deterministic mode: no guest instruction may run between this
+             * vblank and the pause, so stop the vCPU now; the BH only
+             * finishes the stop. This runs on the vCPU thread or, with the
+             * vCPU parked waiting for the BQL, on the main loop.
+             */
+            if (qemu_in_vcpu_thread()) {
+                cpu_stop_current();
+            } else if (first_cpu) {
+                first_cpu->stop = true;
+                qemu_cpu_kick(first_cpu);
+            }
+        }
+        aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
     }
 }
 
@@ -991,7 +1013,9 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         error_setg(errp, "a frame advance is already in progress");
         return NULL;
     }
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_PAUSED)) {
+    /* Prelaunch: started with -S, so that nothing runs before a load. */
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_PAUSED) &&
+        !runstate_check(RUN_STATE_PRELAUNCH)) {
         error_setg(errp, "the VM is neither running nor paused");
         return NULL;
     }
@@ -999,13 +1023,58 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     frame_advance_co = qemu_coroutine_self();
     if (frames == 0) {
         frame_advance_stopping = true;
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_stop_bh, NULL);
+        aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
     } else {
         frame_advance_target = frame_count + frames;
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), frame_run_bh, NULL);
+        aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_run_bh, NULL);
     }
     qemu_coroutine_yield();
     return frame_info();
+}
+
+/*
+ * Deterministic mode (icount): vblank is a QEMU_CLOCK_VIRTUAL timer on
+ * multiples of vblank_interval_ns, so frames follow executed instructions
+ * instead of the host clock (and with -icount sleep=off run as fast as the
+ * host allows). The deadline depends only on the virtual clock, which a
+ * loadvm restores, so a frame starts at the same instruction every run.
+ */
+static bool vblank_virtual;
+
+static int64_t vblank_virtual_next(void)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    return (now / vblank_interval_ns + 1) * vblank_interval_ns;
+}
+
+static void vblank_virtual_callback(void *opaque)
+{
+    process_vblank(opaque);
+    timer_mod_ns(vblank_timer, vblank_virtual_next());
+}
+
+static bool vblank_virtual_rearm;
+
+static void vblank_virtual_vm_state_change(void *opaque, bool running,
+                                           RunState state)
+{
+    if (running && (vblank_virtual_rearm || !timer_pending(vblank_timer))) {
+        /*
+         * A load may have moved the virtual clock: restart on the grid. A
+         * plain pause leaves the schedule alone, including a vblank that
+         * fell due just before it.
+         */
+        vblank_virtual_rearm = false;
+        timer_mod_ns(vblank_timer, vblank_virtual_next());
+    }
+}
+
+/* After loadvm or an incoming migration (savevm.c). */
+void xemu_state_loaded(void);
+void xemu_state_loaded(void)
+{
+    vblank_virtual_rearm = true;
+    xemu_input_state_loaded();
 }
 
 static void vblank_timer_callback(void *opaque)
@@ -2040,7 +2109,13 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     // Register event watch to handle rendering during these operations.
     SDL_AddEventWatch(event_watch_callback, &scon_list[0]);
 
-    if (use_vblank_timer_thread) {
+    if (icount_enabled()) {
+        vblank_virtual = true;
+        vblank_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                    vblank_virtual_callback, &scon_list[0]);
+        timer_mod_ns(vblank_timer, vblank_virtual_next());
+        qemu_add_vm_change_state_handler(vblank_virtual_vm_state_change, NULL);
+    } else if (use_vblank_timer_thread) {
         qemu_thread_create(&vblank_thread, "vblank-timer", vblank_timer_thread,
                            &scon_list[0], QEMU_THREAD_JOINABLE);
     } else {
@@ -2057,7 +2132,7 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
 
 static void display_finalize(void)
 {
-    if (use_vblank_timer_thread) {
+    if (use_vblank_timer_thread && !vblank_virtual) {
         qemu_thread_join(&vblank_thread);
     } else if (vblank_timer) {
         timer_free(vblank_timer);
@@ -2110,6 +2185,15 @@ static void *qemu_main(void *opaque)
     rcu_register_thread();
 
     qemu_init(gArgc, gArgv);
+#ifdef __APPLE__
+    if (icount_enabled()) {
+        /*
+         * Deterministic mode: with sleep=off an idle vCPU waits for this
+         * thread to warp the virtual clock, so it is frame-critical too.
+         */
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+#endif
     exit_status = qemu_main_loop();
     qatomic_set(&qemu_exiting, true);
     bql_unlock();

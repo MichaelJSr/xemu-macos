@@ -217,14 +217,58 @@ static const VMStateDescription icount_vmstate_timers = {
     }
 };
 
+/*
+ * xemu: the migrated cpu_clock_offset is QEMU_CLOCK_VIRTUAL at save time
+ * (the VM is stopped, so cpu_disable_ticks() froze it there), but only
+ * without icount; under icount the virtual clock is the instruction
+ * count. Save that instead, and under icount re-base the instruction
+ * clock onto the saved value on every load: a state saved without icount
+ * has no "timer/icount" subsection, and precise mode does not migrate the
+ * shift. Device timers restored after this section then keep their
+ * distance from "now" instead of lying minutes ahead. Without icount the
+ * stream and the restored clock are unchanged.
+ */
+static int timers_pre_save(void *opaque)
+{
+    TimersState *s = opaque;
+
+    s->vm_clock_saved = icount_enabled() ? icount_get() : s->cpu_clock_offset;
+    return 0;
+}
+
+static int timers_pre_load(void *opaque)
+{
+    TimersState *s = opaque;
+
+    s->vm_clock_saved = s->cpu_clock_offset;
+    return 0;
+}
+
+static int timers_post_load(void *opaque, int version_id)
+{
+    TimersState *s = opaque;
+
+    s->cpu_clock_offset = s->vm_clock_saved;
+    if (icount_enabled()) {
+        seqlock_write_lock(&s->vm_clock_seqlock, &s->vm_clock_lock);
+        qatomic_set_i64(&s->qemu_icount_bias,
+                        s->vm_clock_saved - icount_to_ns(s->qemu_icount));
+        seqlock_write_unlock(&s->vm_clock_seqlock, &s->vm_clock_lock);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_timers = {
     .name = "timer",
     .version_id = 2,
     .minimum_version_id = 1,
+    .pre_save = timers_pre_save,
+    .pre_load = timers_pre_load,
+    .post_load = timers_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(cpu_ticks_offset, TimersState),
         VMSTATE_UNUSED(8),
-        VMSTATE_INT64_V(cpu_clock_offset, TimersState, 2),
+        VMSTATE_INT64_V(vm_clock_saved, TimersState, 2),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

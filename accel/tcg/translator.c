@@ -229,6 +229,12 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
             plugin_gen_insn_start(cpu, db);
         }
 
+#if defined(XBOX)
+        /* An MMIO access seen by cpu_io_recompile ends the TB. */
+        bool xemu_io_stop = (cflags & CF_USE_ICOUNT) &&
+                            xemu_io_pc_is_set(db->pc_next);
+#endif
+
         /*
          * Disassemble one instruction.  The translate_insn hook should
          * update db->pc_next and db->is_jmp to indicate what should be
@@ -254,6 +260,12 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
         if (db->is_jmp != DISAS_NEXT) {
             break;
         }
+#if defined(XBOX)
+        if (xemu_io_stop) {
+            db->is_jmp = DISAS_TOO_MANY;
+            break;
+        }
+#endif
 
         /* Stop translation if the output buffer is full,
            or we have executed all of the allowed instructions.  */

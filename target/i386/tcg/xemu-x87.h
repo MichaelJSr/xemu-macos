@@ -136,7 +136,11 @@ static int xemu_x87_ptr_mode(void)
     static int mode = -1;
     if (mode < 0) {
         const char *e = getenv("XEMU_X87_DEFER_FIP");
-        int m = (e && e[0] == '0') ? 0 : 1;
+        /*
+         * Under icount a mid-block MMIO access longjmps out before the
+         * deferred update lands (see g_use_hard_fpu_inline).
+         */
+        int m = (e && e[0] == '0') || icount_enabled() ? 0 : 1;
         if (m && xemu_x87_refute_on()) {
             m = 2;
         }

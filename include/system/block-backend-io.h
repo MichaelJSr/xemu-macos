@@ -70,6 +70,7 @@ BlockAIOCB *blk_aio_ioctl(BlockBackend *blk, unsigned long int req, void *buf,
                           BlockCompletionFunc *cb, void *opaque);
 
 void blk_inc_in_flight(BlockBackend *blk);
+void blk_wait_in_flight(BlockBackend *blk);
 void blk_dec_in_flight(BlockBackend *blk);
 
 bool coroutine_fn GRAPH_RDLOCK blk_co_is_inserted(BlockBackend *blk);

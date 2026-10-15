@@ -3098,8 +3098,16 @@ void qemu_init(int argc, char **argv)
     fake_argv[fake_argc++] = strdup("-display");
     fake_argv[fake_argc++] = strdup("xemu");
 
-    if (xemu_headless_mode()) {
-        /* No host audio headless (the APU monitor stream is off too). */
+    bool user_icount = false;
+    for (int i = 1; i < argc; i++) {
+        user_icount |= argv[i] && !strcmp(argv[i], "-icount");
+    }
+    if (xemu_headless_mode() || user_icount) {
+        /*
+         * No host audio headless (the APU monitor stream is off too), nor
+         * in deterministic mode, where a host audio device would pace the
+         * AC'97 DMA by host time.
+         */
         fake_argv[fake_argc++] = strdup("-audio");
         fake_argv[fake_argc++] = strdup("none");
     }
@@ -4067,6 +4075,11 @@ void qemu_init(int argc, char **argv)
      */
     configure_accelerators(argv[0]);
     phase_advance(PHASE_ACCEL_CREATED);
+#ifdef XBOX
+    if (icount_enabled()) {
+        configure_rtc_deterministic(qemu_find_opts_singleton("rtc"));
+    }
+#endif
 
     /*
      * Beware, QOM objects created before this point miss global and

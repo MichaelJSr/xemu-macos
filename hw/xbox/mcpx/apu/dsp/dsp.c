@@ -231,6 +231,15 @@ void dsp_invalidate_opcache(DSPState *dsp)
     dsp->ops->invalidate_opcache(dsp);
 }
 
+void dsp_reset_jit_throttle(DSPState *dsp)
+{
+#if DSP56K_JIT_SUPPORTED
+    if (dsp->ops == &c_dsp_ops) {
+        dsp56k_jit_reset_throttle(dsp->backend);
+    }
+#endif
+}
+
 void dsp_sync_to_vm(DSPState *dsp)
 {
     dsp->ops->sync_to_vm(dsp);

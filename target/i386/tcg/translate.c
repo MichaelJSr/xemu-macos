@@ -34,6 +34,7 @@
 #include "decode-new.h"
 
 #include "exec/log.h"
+#include "exec/icount.h"
 
 static int g_use_hard_fpu;
 static int g_use_hard_fpu_inline;
@@ -209,6 +210,7 @@ typedef struct DisasContext {
     uint8_t xemu_x87_run;       /* x87 insns since the last cache flush */
     bool xemu_ft0_pending;      /* FT0 written, reader not reached yet */
     bool xemu_ft0_reloaded;     /* last get_ft0 came from env->ft0 */
+    CPUX86State *xemu_env;      /* code-byte peeks (xemu_idle_loop_kind) */
     bool xemu_fip_pend;         /* deferred FIP/FCS update outstanding */
     bool xemu_fdp_pend;         /* deferred FDP/FDS update outstanding */
     TCGv xemu_fip_val;
@@ -1525,10 +1527,23 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      * would also limit translation blocks to one instruction, so that gen_eob
      * can reset the flag; here however RF is set throughout the repetition, so
      * we can plow through until CX/ECX/RCX is zero.
+     *
+     * xemu: icount counts every iteration as an instruction upstream, which
+     * sends each one through the TCG main loop; Xbox games memcpy and memset
+     * with REP MOVSD/STOSD all the time, so under icount that was the largest
+     * single cost of deterministic mode. Loop here instead: the REP counts as
+     * one instruction per TB entry (and again every REP_MAX iterations), which
+     * is just as deterministic, only coarser in virtual time.
      */
+#if defined(XBOX)
+    bool can_loop =
+        (!(tb_cflags(s->base.tb) & CF_SINGLE_STEP)
+	 && !(s->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
+#else
     bool can_loop =
         (!(tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP))
 	 && !(s->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
+#endif
     bool had_rf = s->flags & HF_RF_MASK;
 
     /*
@@ -3198,16 +3213,22 @@ gen_eob(DisasContext *s, int mode)
                 xemu_inv_jcprobe_emitted++;
             }
         }
+        /*
+         * The inline probes accept a target whose cflags equal this TB's.
+         * A one-shot TB (cpu_io_recompile, SMC: CF_NOIRQ plus a count) must
+         * not reach another one that way: it skips the icount budget check.
+         */
+        bool xemu_probe_ok =
+            !(tb_cflags(s->base.tb) &
+              (CF_NO_GOTO_PTR | CF_NOIRQ | CF_COUNT_MASK));
         if (s->xemu_ret_exit) {
             s->xemu_ret_exit = false;
-            if (xemu_ras_inline_on() &&
-                !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+            if (xemu_ras_inline_on() && xemu_probe_ok) {
                 xemu_gen_inline_ret_memo(s);
             }
             tcg_gen_xemu_lookup_ret_and_goto_ptr();
         } else {
-            if (xemu_ras_inline_on() &&
-                !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+            if (xemu_ras_inline_on() && xemu_probe_ok) {
                 TCGv_i32 lin = tcg_temp_new_i32();
                 tcg_gen_addi_i32(lin, cpu_eip, (int32_t)s->cs_base);
                 tcg_gen_xemu_jc_probe_and_goto_ptr(
@@ -3424,6 +3445,81 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
     tcg_gen_ld_i128(t, tcg_env, offset + offsetof(YMMReg, YMM_X(1)));
     tcg_gen_qemu_st_i128(t, a0_hi, mem_index, mop);
 }
+
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+/*
+ * Deterministic mode (icount): the Xbox kernel's idle thread never executes
+ * HLT. KiIdleLoop spins on "sti; nop; nop; cli", checks the DPC list and
+ * the next-thread pointer, and goes round again; every STI ends a TB, so
+ * under icount each idle virtual microsecond costs hundreds of trips through
+ * the TCG loop and idle time, not game work, bounds fast-forward. Both exit
+ * conditions only change in interrupt handlers, so while they are false and
+ * nothing is pending, halting until the next interrupt (helper_xemu_ki_idle)
+ * is the same as spinning until it, and icount then warps virtual time to
+ * the next timer deadline at once.
+ *
+ * Matched on the loop's bytes, both forms the kernel has:
+ *   P: sti; nop; nop; cli; cmp ebp,[ebp]; je J
+ *   J == P                                    -> DPC list only
+ *   J: cmp dword [ebx+0x2c],0; je P           -> DPC list and NextThread
+ * Every byte must sit on the STI's page. XEMU_ICOUNT_IDLE=0 turns it off.
+ */
+enum { XEMU_IDLE_NONE, XEMU_IDLE_DPC, XEMU_IDLE_DPC_THREAD };
+
+static bool xemu_idle_skip_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_ICOUNT_IDLE");
+        on = icount_enabled() && !(e && e[0] == '0');
+    }
+    return on;
+}
+
+static bool xemu_idle_bytes_match(DisasContext *s, vaddr pc,
+                                  const uint8_t *want, int len)
+{
+    for (int i = 0; i < len; i++) {
+        if (want[i] != 0xff &&
+            translator_ldub(s->xemu_env, &s->base, pc + i) != want[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int xemu_idle_loop_kind(DisasContext *s)
+{
+    static const uint8_t head[] = {
+        0x90, 0x90, 0xfa, 0x3b, 0x6d, 0x00, 0x74, 0xff,
+    };
+    static const uint8_t tail[] = { 0x83, 0x7b, 0x2c, 0x00, 0x74, 0xff };
+    vaddr sti = s->pc - 1;
+    vaddr page = sti & TARGET_PAGE_MASK;
+
+    if (!xemu_idle_skip_on() ||
+        ((s->pc + sizeof(head) - 1) & TARGET_PAGE_MASK) != page ||
+        !xemu_idle_bytes_match(s, s->pc, head, sizeof(head))) {
+        return XEMU_IDLE_NONE;
+    }
+
+    vaddr j = s->pc + sizeof(head) +
+              (int8_t)translator_ldub(s->xemu_env, &s->base,
+                                      s->pc + sizeof(head) - 1);
+    if (j == sti) {
+        return XEMU_IDLE_DPC;
+    }
+    if ((j & TARGET_PAGE_MASK) != page ||
+        ((j + sizeof(tail) - 1) & TARGET_PAGE_MASK) != page ||
+        !xemu_idle_bytes_match(s, j, tail, sizeof(tail))) {
+        return XEMU_IDLE_NONE;
+    }
+    vaddr back = j + sizeof(tail) +
+                 (int8_t)translator_ldub(s->xemu_env, &s->base,
+                                         j + sizeof(tail) - 1);
+    return back == sti ? XEMU_IDLE_DPC_THREAD : XEMU_IDLE_NONE;
+}
+#endif
 
 #include "emit.c.inc"
 
@@ -4892,7 +4988,13 @@ void tcg_x86_init(void)
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_hard_fpu = g_config.perf.hard_fpu;
 #if TCG_TARGET_HAS_fpu
-    g_use_hard_fpu_inline = g_use_hard_fpu;
+    /*
+     * The inline cache keeps x87 values in TCG temps until the block ends.
+     * Under icount every MMIO access that is not a block's last instruction
+     * longjmps out (cpu_io_recompile) and re-executes from the access, so
+     * the cached results would be lost; use the hard-FPU helpers instead.
+     */
+    g_use_hard_fpu_inline = g_use_hard_fpu && !icount_enabled();
 #else
     /*
      * The host TCG backend advertises no inline FP ops (Windows ARM64:
@@ -4919,6 +5021,9 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cs_base = dc->base.tb->cs_base;
     dc->pc_save = dc->base.pc_next;
     dc->flags = flags;
+#if defined(XBOX)
+    dc->xemu_env = env;
+#endif
 #ifndef CONFIG_USER_ONLY
     dc->cpl = cpl;
     dc->iopl = iopl;

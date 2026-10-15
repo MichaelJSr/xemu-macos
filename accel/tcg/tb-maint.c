@@ -1576,6 +1576,34 @@ static void tb_phys_invalidate__locked(TranslationBlock *tb)
     qemu_thread_jit_execute();
 }
 
+#if defined(XBOX)
+/*
+ * For cpu_io_recompile (icount): drop a TB whose MMIO access is not its
+ * last instruction, so translator_loop retranslates it to end at the access
+ * (xemu_io_pc_is_set). Keep it out of the recycler, which would bring the
+ * old shape back. Called from a helper, with the thread in execute mode;
+ * the TB lives in the code buffer, so bracket the writes.
+ */
+void tb_phys_invalidate_io(TranslationBlock *tb)
+{
+    uint32_t cflags = tb_cflags(tb);
+    tb_page_addr_t phys_pc = tb_page_addr0(tb);
+    uint32_t h = tb_hash_func(phys_pc, (cflags & CF_PCREL ? 0 : tb->pc),
+                              tb->flags, tb->cs_base, cflags);
+
+    qemu_thread_jit_write();
+    if (phys_pc != -1) {
+        tb_lock_pages(tb);
+        do_tb_phys_invalidate(tb, true);
+        tb_unlock_pages(tb);
+    } else {
+        do_tb_phys_invalidate(tb, false);
+    }
+    qemu_thread_jit_execute();
+    qht_remove(&tb_ctx.inv_htable, tb, h);
+}
+#endif
+
 /*
  * Invalidate one TB.
  * Called with mmap_lock held in user-mode.

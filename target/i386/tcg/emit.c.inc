@@ -4124,6 +4124,15 @@ static void gen_STI(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_set_eflags(s, IF_MASK);
     s->base.is_jmp = DISAS_EOB_INHIBIT_IRQ;
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+    int idle = xemu_idle_loop_kind(s);
+    if (idle != XEMU_IDLE_NONE) {
+        gen_update_cc_op(s);
+        gen_update_eip_next(s);
+        gen_helper_xemu_ki_idle(tcg_env,
+                                tcg_constant_i32(idle == XEMU_IDLE_DPC_THREAD));
+    }
+#endif
 }
 
 static void gen_VAESKEYGEN(DisasContext *s, X86DecodedInsn *decode)

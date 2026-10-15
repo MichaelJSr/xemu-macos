@@ -3143,6 +3143,8 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
 
 #ifdef XBOX
     if (ret == 0) {
+        void xemu_state_loaded(void);
+        xemu_state_loaded();
         /* Readiness signal for harnesses (loadvm and incoming migration). */
         fprintf(stderr, "xemu: state loaded\n");
     }

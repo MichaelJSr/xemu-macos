@@ -29,6 +29,7 @@
 #include "fpu/softfloat-macros.h"
 #include "helper-tcg.h"
 #include "access.h"
+#include "exec/icount.h"
 
 /* float macros */
 #define FT0    (env->ft0)
@@ -3944,7 +3945,12 @@ static inline void xemu_hostfp_leave(uint64_t saved)
  */
 static inline void xemu_hostfp_leave_lazy(uint64_t saved)
 {
-    if (unlikely(xemu_sse_neon_mode() == 2)) {
+    /*
+     * Deterministic mode (icount) restores too: there the x87 helpers
+     * round with whatever FPCR holds, so it must depend only on the guest
+     * x87 control word, not on whether an SSE op ran since.
+     */
+    if (unlikely(xemu_sse_neon_mode() == 2) || icount_enabled()) {
         xemu_hostfp_leave(saved);
     }
 }

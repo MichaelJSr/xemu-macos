@@ -137,6 +137,7 @@ void dsp_set_halt_requested(DSPState *dsp, bool idle);
 uint32_t dsp_get_cycle_count(DSPState *dsp);
 void dsp_set_cycle_count(DSPState *dsp, uint32_t count);
 void dsp_invalidate_opcache(DSPState *dsp);
+void dsp_reset_jit_throttle(DSPState *dsp);
 
 /* Backend synchronization - sync backend state to/from DspCoreState */
 void dsp_sync_to_vm(DSPState *dsp);

@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/audio.h"
+#include "exec/icount.h"
 
 #define AUDIO_CAP "noaudio"
 #include "audio_int.h"
@@ -32,12 +33,36 @@
 typedef struct NoVoiceOut {
     HWVoiceOut hw;
     RateCtl rate;
+    bool rate_live; /* xemu: started, and not stopped by the guest */
 } NoVoiceOut;
 
 typedef struct NoVoiceIn {
     HWVoiceIn hw;
     RateCtl rate;
+    bool rate_live;
 } NoVoiceIn;
+
+/*
+ * xemu: under icount the rate runs on QEMU_CLOCK_VIRTUAL, which stands still
+ * while the VM is paused, so a resume continues it. Restarting it would
+ * re-phase the guest's audio DMA by where the pauses fell. A disable with
+ * the VM running is the guest stopping the voice; a pause runs with
+ * vm_running already false.
+ */
+static bool no_rate_enable(bool *live, bool vm_running, bool enable)
+{
+    if (!enable) {
+        if (vm_running) {
+            *live = false;
+        }
+        return false;
+    }
+    if (icount_enabled() && *live) {
+        return false;
+    }
+    *live = true;
+    return true;
+}
 
 static size_t no_write(HWVoiceOut *hw, void *buf, size_t len)
 {
@@ -64,7 +89,7 @@ static void no_enable_out(HWVoiceOut *hw, bool enable)
 {
     NoVoiceOut *no = (NoVoiceOut *) hw;
 
-    if (enable) {
+    if (no_rate_enable(&no->rate_live, hw->s->vm_running, enable)) {
         audio_rate_start(&no->rate);
     }
 }
@@ -97,7 +122,7 @@ static void no_enable_in(HWVoiceIn *hw, bool enable)
 {
     NoVoiceIn *no = (NoVoiceIn *) hw;
 
-    if (enable) {
+    if (no_rate_enable(&no->rate_live, hw->s->vm_running, enable)) {
         audio_rate_start(&no->rate);
     }
 }

@@ -63,7 +63,11 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
          * setting, so only prime the cache there (dsp_set_engine would
          * be a no-op anyway, and bql_lock() would recurse).
          */
-        if (last_known_jit_pref >= 0) {
+        if (last_known_jit_pref >= 0 && bql_locked()) {
+            /* Deterministic mode: frames run with the BQL held already. */
+            dsp_set_engine(d->gp.dsp, g_config.audio.use_dsp_jit);
+            dsp_set_engine(d->ep.dsp, g_config.audio.use_dsp_jit);
+        } else if (last_known_jit_pref >= 0) {
             qemu_mutex_unlock(&d->lock);
             bql_lock();
             qemu_mutex_lock(&d->lock);

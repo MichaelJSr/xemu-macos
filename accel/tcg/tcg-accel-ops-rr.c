@@ -24,6 +24,9 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 #include "qemu/lockable.h"
 #include "system/tcg.h"
 #include "system/replay.h"
@@ -209,6 +212,13 @@ static void *rr_cpu_thread_fn(void *arg)
 
     rr_start_kick_timer();
 
+#if defined(XBOX) && defined(__APPLE__)
+    if (icount_enabled()) {
+        /* Deterministic mode: the whole guest runs on this thread. */
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+#endif
+
     cpu = first_cpu;
 
     while (1) {
@@ -254,6 +264,15 @@ static void *rr_cpu_thread_fn(void *arg)
         }
 
         replay_mutex_unlock();
+
+        if (icount_enabled() && cpu_can_run(first_cpu)) {
+            /*
+             * xemu: device threads catch up before guest code runs. Not
+             * while the VM is stopped or starting: run-state handlers then
+             * hold device locks while they wait for the BQL.
+             */
+            icount_run_sync_hooks();
+        }
 
         if (!cpu) {
             cpu = first_cpu;

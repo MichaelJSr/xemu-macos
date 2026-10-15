@@ -74,6 +74,8 @@ struct AC97LinkState {
 void ac97_common_init (AC97LinkState *s,
                        PCIDevice *pci_dev,
                        AddressSpace *as);
+/* Back to the state ac97_common_init leaves (mcpx-aci, deterministic mode). */
+void ac97_power_on_reset(AC97LinkState *s);
 
 extern const MemoryRegionOps ac97_io_nam_ops;
 extern const MemoryRegionOps ac97_io_nabm_ops;

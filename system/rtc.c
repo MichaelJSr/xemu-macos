@@ -137,6 +137,23 @@ static void configure_rtc_base_datetime(const char *startdate)
     rtc_ref_start_datetime = rtc_start_datetime;
 }
 
+/*
+ * Deterministic mode (icount): an RTC on the host clock reads wall time.
+ * Unless -rtc says otherwise, run it on the virtual clock from a fixed
+ * date, so a boot reads the same time every run (loads continue from the
+ * time the snapshot saved; see rtc_post_load).
+ */
+void configure_rtc_deterministic(QemuOpts *opts)
+{
+    if (!qemu_opt_get(opts, "clock")) {
+        rtc_clock = QEMU_CLOCK_VIRTUAL;
+    }
+    if (!qemu_opt_get(opts, "base")) {
+        rtc_base_type = RTC_BASE_DATETIME;
+        configure_rtc_base_datetime("2001-01-01T00:00:00");
+    }
+}
+
 void configure_rtc(QemuOpts *opts)
 {
     const char *value;

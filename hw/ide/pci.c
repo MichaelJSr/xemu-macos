@@ -398,6 +398,7 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
     }
 
     bm->cmd = val & 0x09;
+    ide_bus_icount_settle(bm->bus);
 }
 
 void bmdma_status_writeb(BMDMAState *bm, uint32_t val)

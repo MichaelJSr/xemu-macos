@@ -79,7 +79,8 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
         return;
     }
 
-    if (d->monitor.stream) {
+    /* Deterministic mode runs ahead of real time; play nothing. */
+    if (d->monitor.stream && !d->det.enabled) {
         float vu = pow(fmax(0.0, fmin(g_config.audio.volume_limit, 1.0)), M_E);
         SDL_SetAudioStreamGain(d->monitor.stream, vu);
         SDL_PutAudioStreamData(d->monitor.stream, d->monitor.frame_buf,

@@ -564,6 +564,40 @@ G_NORETURN void helper_hlt(CPUX86State *env)
     cpu_loop_exit(cs);
 }
 
+#if defined(XBOX)
+/*
+ * Deterministic mode (icount): reached from the STI that opens the Xbox
+ * kernel's idle loop (see xemu_idle_loop_kind in translate.c), with EIP
+ * already past the STI. If the loop would only go round again -- no DPC
+ * queued (EBP = &Prcb->DpcListHead, empty when it points at itself), and
+ * for the full loop no thread waiting (Prcb->NextThread at EBX+0x2c) --
+ * and nothing is pending, halt as "sti; hlt" would. Only an interrupt can
+ * change either condition, so the guest then wakes on the same interrupt
+ * it would have spun until, and the loop's own checks run after it.
+ */
+void helper_xemu_ki_idle(CPUX86State *env, uint32_t check_next_thread)
+{
+    CPUState *cs = env_cpu(env);
+    uint32_t dpc_head = env->regs[R_EBP];
+
+    if (cpu_has_work(cs)) {
+        return;
+    }
+    if (cpu_ldl_data_ra(env, dpc_head, GETPC()) != dpc_head) {
+        return;
+    }
+    if (check_next_thread &&
+        cpu_ldl_data_ra(env, env->regs[R_EBX] + 0x2c, GETPC()) != 0) {
+        return;
+    }
+
+    do_end_instruction(env);
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
+}
+#endif
+
 void helper_monitor(CPUX86State *env, target_ulong ptr)
 {
     if ((uint32_t)env->regs[R_ECX] != 0) {

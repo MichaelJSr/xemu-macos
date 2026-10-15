@@ -73,4 +73,15 @@ void icount_start_warp_timer(void);
 void icount_account_warp_timer(void);
 void icount_notify_exit(void);
 
+/*
+ * xemu: a device thread that changes guest state on its own schedule
+ * (nv2a's PFIFO, the APU) registers a sync hook. Under icount the vCPU
+ * thread runs every hook, BQL held, before it executes guest code again;
+ * a hook returns once its thread has done all the work the guest and the
+ * virtual timers have asked of it, so that work lands at a fixed
+ * instruction count. A hook may drop the BQL while it waits.
+ */
+void icount_add_sync_hook(void (*fn)(void *opaque), void *opaque);
+void icount_run_sync_hooks(void);
+
 #endif /* EXEC_ICOUNT_H */

@@ -24,6 +24,7 @@
 #include "hw/pci/pci.h"
 #include "hw/audio/ac97_int.h"
 #include "migration/vmstate.h"
+#include "exec/icount.h"
 
 typedef struct MCPXACIState {
     PCIDevice dev;
@@ -68,10 +69,27 @@ static void mcpx_aci_realize(PCIDevice *dev, Error **errp)
     ac97_common_init(&d->ac97, &d->dev, pci_get_address_space(&d->dev));
 }
 
+/*
+ * The AC'97 registers are not in the savestate (FIXME below), so after a
+ * load they hold whatever ran before it. Deterministic mode (icount) starts
+ * every load from the power-on state instead, as a fresh process does.
+ * After the PCI state is in, so lowering the line keeps the bus's count.
+ */
+static int mcpx_aci_post_load(void *opaque, int version_id)
+{
+    MCPXACIState *d = opaque;
+
+    if (icount_enabled()) {
+        ac97_power_on_reset(&d->ac97);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_mcpx_aci = {
     .name = "mcpx-aci",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = mcpx_aci_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, MCPXACIState),
         // FIXME
