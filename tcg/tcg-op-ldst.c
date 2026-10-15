@@ -33,6 +33,28 @@
 #include "tcg-internal.h"
 #include "tcg-has.h"
 #include "tcg-target-mo.h"
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+#include "exec/icount.h"
+
+/*
+ * xemu, deterministic mode (icount): every device that touches guest RAM
+ * runs on the vCPU thread or with it parked (the APU tick, the inline or
+ * synced PFIFO pusher, settled IDE DMA, virtual-clock timers), so the
+ * barriers that order guest accesses for concurrent I/O threads order
+ * nothing (+4% on Azurik's heavy scene). Explicit guest fences (mfence,
+ * locked instructions) keep theirs. XEMU_ICOUNT_MO=1 keeps all of them.
+ */
+static bool xemu_elide_mo(void)
+{
+    static int elide = -1;
+
+    if (elide < 0) {
+        const char *e = getenv("XEMU_ICOUNT_MO");
+        elide = icount_enabled() && !(e && e[0] == '1');
+    }
+    return elide;
+}
+#endif
 
 static void check_max_alignment(unsigned a_bits)
 {
@@ -128,6 +150,11 @@ static void gen_st_i64(TCGv_i64 v, TCGTemp *addr, MemOpIdx oi)
 
 static void tcg_gen_req_mo(TCGBar type)
 {
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+    if (xemu_elide_mo()) {
+        return;
+    }
+#endif
     type &= tcg_ctx->guest_mo;
     type &= ~TCG_TARGET_DEFAULT_MO;
     if (type) {

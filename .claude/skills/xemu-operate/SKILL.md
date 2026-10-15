@@ -192,6 +192,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_ICOUNT_STEP` | Icount budget cuts step one-instruction TBs instead of translating cut blocks | `tcg/cpu-exec.c` |
 | *Off by default* | | |
 | `XEMU_REPORTS_SYNC=1` | Synchronous zpass reports (icount: eager, not lazy) | `vk/reports.c` |
+| `XEMU_ICOUNT_MO=1` | Keep TCG memory-order barriers under icount | `tcg/tcg-op-ldst.c` |
 | `XEMU_MMIO_BQL=1` | MMIO under the BQL | `hw/xbox/nv2a/nv2a.c`, `mcpx/apu/apu.c` |
 | `XEMU_ZETA_SHAPE_READBACK=1`, `XEMU_TEX_BIND_RECHECK=1` | Legacy zeta and texture paths | `vk/surface.c`, `vk/texture.c` |
 | `XEMU_COREAUDIO_FRAMES` | Audio buffer (1024; 2048 if crackling) | `audio/coreaudio.m` |
