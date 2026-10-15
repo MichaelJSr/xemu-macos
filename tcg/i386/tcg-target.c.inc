@@ -291,8 +291,6 @@ static bool tcg_target_const_match(int64_t val, int ct,
 #define OPC_CMP_GvEv	(OPC_ARITH_GvEv | (ARITH_CMP << 3))
 #define OPC_COMISD      (0x2f | P_EXT | P_DATA16)
 #define OPC_COMISS      (0x2f | P_EXT)
-#define OPC_UCOMISD     (0x2e | P_EXT | P_DATA16)
-#define OPC_UCOMISS     (0x2e | P_EXT)
 #define OPC_CVTSI2SD    (0x2a | P_EXT | P_SIMDF2)
 #define OPC_CVTSI2SS    (0x2a | P_EXT | P_SIMDF3)
 #define OPC_CVTSS2SD    (0x5a | P_EXT | P_SIMDF3)
@@ -2773,12 +2771,6 @@ static inline void tcg_out_fcos(TCGContext *s)
     tcg_out8(s, 0xff);
 }
 
-static inline void tcg_out_frndint(TCGContext *s)
-{
-    tcg_out8(s, 0xd9);
-    tcg_out8(s, 0xfc);
-}
-
 static const uint64_t fchs_mask32 = 0x80000000;
 static const uint64_t fchs_mask64 = 0x8000000000000000L;
 static const uint64_t fabs_mask32 = 0x7FFFFFFF;
@@ -3228,13 +3220,6 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                     dp ? fchs_mask64 : fchs_mask32, 0);
         break;
     OP_f32_f64(com):
-        /* Quiet compare (FUCOMI semantics): IE only on SNaN. */
-        tcg_out_modrm(s, dp ? OPC_UCOMISD : OPC_UCOMISS, a1, a2);
-        tcg_out8(s, OPC_PUSHF);
-        tcg_out_pop(s, a0);
-        break;
-    OP_f32_f64(coms):
-        /* Signaling compare (FCOMI semantics): IE on any NaN. */
         tcg_out_modrm(s, dp ? OPC_COMISD : OPC_COMISS, a1, a2);
         tcg_out8(s, OPC_PUSHF);
         tcg_out_pop(s, a0);
@@ -3250,17 +3235,6 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     OP_f32_f64(cos):
         tcg_out_fld_xmm(s, a1, dp);
         tcg_out_fcos(s);
-        tcg_out_fstp_xmm(s, a0, dp);
-        break;
-    OP_f32_f64(rint):
-        /*
-         * FRNDINT uses the host x87 CW rounding mode (not MXCSR).
-         * gen_flcr syncs the guest RC to MXCSR but not the x87 CW.
-         * The host default (round-to-nearest) matches the common guest
-         * default; same limitation as fsin/fcos above.
-         */
-        tcg_out_fld_xmm(s, a1, dp);
-        tcg_out_frndint(s);
         tcg_out_fstp_xmm(s, a0, dp);
         break;
     default:
@@ -4487,8 +4461,6 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_abs_f64:
     case INDEX_op_chs_f32:
     case INDEX_op_chs_f64:
-    case INDEX_op_rint_f32:
-    case INDEX_op_rint_f64:
     case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
     case INDEX_op_cos_f32:
@@ -4500,8 +4472,6 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I1(x, x);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
-    case INDEX_op_coms_f32:
-    case INDEX_op_coms_f64:
         return C_O1_I2(r, x, x);
     case INDEX_op_cvt32f_i32:
     case INDEX_op_cvt32f_i64:

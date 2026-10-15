@@ -80,18 +80,6 @@ void tcg_gen_com_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
                 tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
 }
 
-void tcg_gen_coms_f32(TCGv_i64 ret, TCGv_f32 arg1, TCGv_f32 arg2)
-{
-    tcg_gen_op3(INDEX_op_coms_f32, TCG_TYPE_I64,
-                tcgv_i64_arg(ret), tcgv_f32_arg(arg1), tcgv_f32_arg(arg2));
-}
-
-void tcg_gen_coms_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
-{
-    tcg_gen_op3(INDEX_op_coms_f64, TCG_TYPE_I64,
-                tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
-}
-
 void tcg_gen_cos_f32(TCGv_f32 ret, TCGv_f32 arg)
 {
     tcg_gen_op2(INDEX_op_cos_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(arg));
@@ -205,107 +193,6 @@ void tcg_gen_mul_f64(TCGv_f64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
     tcg_gen_op3(INDEX_op_mul_f64, TCG_TYPE_F64,
                 tcgv_f64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
 }
-
-void tcg_gen_rint_f32(TCGv_f32 ret, TCGv_f32 arg)
-{
-    tcg_gen_op2(INDEX_op_rint_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(arg));
-}
-
-void tcg_gen_rint_f64(TCGv_f64 ret, TCGv_f64 arg)
-{
-    tcg_gen_op2(INDEX_op_rint_f64, TCG_TYPE_F64, tcgv_f64_arg(ret), tcgv_f64_arg(arg));
-}
-
-/*
- * Fused rint + cvt-to-int. If the backend supports the fused opcode we
- * emit a single TCG op (one intermediate FP temp saved, one less IR
- * node to schedule); otherwise we fall back to the standard rint +
- * cvt pair. The AArch64 backend accepts the fused form today and
- * lowers to FRINTI + FCVTZS, the same host instructions the pair path
- * would produce but routed through a single TCG op.
- */
-void tcg_gen_rint_cvt_i32_f32(TCGv_i32 ret, TCGv_f32 arg)
-{
-    if (tcg_op_supported(INDEX_op_rint_cvt_i32_f32, TCG_TYPE_I32, 0)) {
-        tcg_gen_op2(INDEX_op_rint_cvt_i32_f32, TCG_TYPE_I32,
-                    tcgv_i32_arg(ret), tcgv_f32_arg(arg));
-    } else {
-        TCGv_f32 tmp = tcg_temp_new_f32();
-        tcg_gen_rint_f32(tmp, arg);
-        tcg_gen_cvt32f_i32(ret, tmp);
-    }
-}
-
-void tcg_gen_rint_cvt_i32_f64(TCGv_i32 ret, TCGv_f64 arg)
-{
-    if (tcg_op_supported(INDEX_op_rint_cvt_i32_f64, TCG_TYPE_I32, 0)) {
-        tcg_gen_op2(INDEX_op_rint_cvt_i32_f64, TCG_TYPE_I32,
-                    tcgv_i32_arg(ret), tcgv_f64_arg(arg));
-    } else {
-        TCGv_f64 tmp = tcg_temp_new_f64();
-        tcg_gen_rint_f64(tmp, arg);
-        tcg_gen_cvt64f_i32(ret, tmp);
-    }
-}
-
-void tcg_gen_rint_cvt_i64_f32(TCGv_i64 ret, TCGv_f32 arg)
-{
-    if (tcg_op_supported(INDEX_op_rint_cvt_i64_f32, TCG_TYPE_I64, 0)) {
-        tcg_gen_op2(INDEX_op_rint_cvt_i64_f32, TCG_TYPE_I64,
-                    tcgv_i64_arg(ret), tcgv_f32_arg(arg));
-    } else {
-        TCGv_f32 tmp = tcg_temp_new_f32();
-        tcg_gen_rint_f32(tmp, arg);
-        tcg_gen_cvt32f_i64(ret, tmp);
-    }
-}
-
-void tcg_gen_rint_cvt_i64_f64(TCGv_i64 ret, TCGv_f64 arg)
-{
-    if (tcg_op_supported(INDEX_op_rint_cvt_i64_f64, TCG_TYPE_I64, 0)) {
-        tcg_gen_op2(INDEX_op_rint_cvt_i64_f64, TCG_TYPE_I64,
-                    tcgv_i64_arg(ret), tcgv_f64_arg(arg));
-    } else {
-        TCGv_f64 tmp = tcg_temp_new_f64();
-        tcg_gen_rint_f64(tmp, arg);
-        tcg_gen_cvt64f_i64(ret, tmp);
-    }
-}
-
-/*
- * Mode-specific fused rint+cvt. Fallback forwards to rint_cvt_*, which
- * assumes FPCR has already been set to the desired mode (via gen_flcr
- * in the i386 frontend). AArch64 backend overrides with a single
- * FCVT{N,M,P}S instruction per mode.
- */
-#define DEFINE_CVT_MODE(mode, iwidth, fwidth)                               \
-    void tcg_gen_cvt_##mode##_i##iwidth##_f##fwidth(                        \
-        TCGv_i##iwidth ret, TCGv_f##fwidth arg)                             \
-    {                                                                       \
-        if (tcg_op_supported(INDEX_op_cvt_##mode##_i##iwidth##_f##fwidth,   \
-                             TCG_TYPE_I##iwidth, 0)) {                      \
-            tcg_gen_op2(INDEX_op_cvt_##mode##_i##iwidth##_f##fwidth,        \
-                        TCG_TYPE_I##iwidth, tcgv_i##iwidth##_arg(ret),      \
-                        tcgv_f##fwidth##_arg(arg));                         \
-        } else {                                                            \
-            tcg_gen_rint_cvt_i##iwidth##_f##fwidth(ret, arg);               \
-        }                                                                   \
-    }
-
-DEFINE_CVT_MODE(rn, 32, 32)
-DEFINE_CVT_MODE(rn, 32, 64)
-DEFINE_CVT_MODE(rn, 64, 32)
-DEFINE_CVT_MODE(rn, 64, 64)
-DEFINE_CVT_MODE(rm, 32, 32)
-DEFINE_CVT_MODE(rm, 32, 64)
-DEFINE_CVT_MODE(rm, 64, 32)
-DEFINE_CVT_MODE(rm, 64, 64)
-DEFINE_CVT_MODE(rp, 32, 32)
-DEFINE_CVT_MODE(rp, 32, 64)
-DEFINE_CVT_MODE(rp, 64, 32)
-DEFINE_CVT_MODE(rp, 64, 64)
-
-#undef DEFINE_CVT_MODE
 
 void tcg_gen_sin_f32(TCGv_f32 ret, TCGv_f32 arg)
 {

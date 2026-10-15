@@ -680,11 +680,9 @@ typedef enum {
     INSN_FCVT_SD    = 0x1e624000, /* double -> single */
     INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
 
-    /* Scalar FP compare. FCMPE is the signaling variant; opc2 bit 4 set. */
+    /* Scalar FP compare. */
     INSN_FCMP_S     = 0x1e202000,
     INSN_FCMP_D     = 0x1e602000,
-    INSN_FCMPE_S    = 0x1e202010,
-    INSN_FCMPE_D    = 0x1e602010,
 
     /* FP <-> GPR moves. */
     INSN_FMOV_SW    = 0x1e270000,
@@ -703,29 +701,6 @@ typedef enum {
     INSN_FCVTZS_XS  = 0x9e380000,
     INSN_FCVTZS_WD  = 0x1e780000,
     INSN_FCVTZS_XD  = 0x9e780000,
-
-    /*
-     * FP -> Int conversion in specific rounding modes. Bits [20:19]
-     * select rmode: 00 = N (to nearest, ties to even), 01 = P (toward
-     * +inf), 10 = M (toward -inf). FCVTZS above is rmode 11 (toward
-     * zero). ftype 00 = single, 01 = double, sf 0 = 32-bit, 1 = 64-bit.
-     */
-    INSN_FCVTNS_WS  = 0x1e200000,
-    INSN_FCVTNS_XS  = 0x9e200000,
-    INSN_FCVTNS_WD  = 0x1e600000,
-    INSN_FCVTNS_XD  = 0x9e600000,
-    INSN_FCVTMS_WS  = 0x1e300000,
-    INSN_FCVTMS_XS  = 0x9e300000,
-    INSN_FCVTMS_WD  = 0x1e700000,
-    INSN_FCVTMS_XD  = 0x9e700000,
-    INSN_FCVTPS_WS  = 0x1e280000,
-    INSN_FCVTPS_XS  = 0x9e280000,
-    INSN_FCVTPS_WD  = 0x1e680000,
-    INSN_FCVTPS_XD  = 0x9e680000,
-
-    /* FP round to integer using FPCR rounding mode. */
-    INSN_FRINTI_S   = 0x1e27c000,
-    INSN_FRINTI_D   = 0x1e67c000,
 
     /* System register access. */
     INSN_MSR_FPCR   = 0xd51b4400,
@@ -3658,101 +3633,6 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     OP_f32_f64(sqrt):
         tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
         break;
-    OP_f32_f64(rint):
-        tcg_out_fp_1src(s, dp ? INSN_FRINTI_D : INSN_FRINTI_S, a0, a1);
-        break;
-
-    /*
-     * Fused rint + cvt-to-int. Emits FRINTI (round using FPCR) into
-     * a scratch FP reg, then FCVTZS (truncate toward zero) into the
-     * destination GPR. Uses TCG_VEC_TMP0 (reserved by this backend)
-     * as the intermediate so no extra register pressure is visible
-     * to TCG register allocation. The two-instruction sequence is
-     * the same host cost as the unfused pair; the win is at IR
-     * level (one fewer TCG op, one fewer FP temp) and code clarity.
-     *
-     * A future ARMv8.5 refinement could emit FRINT32X before FCVTZS
-     * (which would clamp out-of-range inputs to int32 in the float
-     * domain before conversion), but semantics would still require a
-     * separate FCVTZS to land the value in a GPR, so no instruction
-     * is saved in the common path.
-     */
-    case INDEX_op_rint_cvt_i32_f32:
-        tcg_out_fp_1src(s, INSN_FRINTI_S, TCG_VEC_TMP0, a1);
-        tcg_out32(s, INSN_FCVTZS_WS
-                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_rint_cvt_i32_f64:
-        tcg_out_fp_1src(s, INSN_FRINTI_D, TCG_VEC_TMP0, a1);
-        tcg_out32(s, INSN_FCVTZS_WD
-                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_rint_cvt_i64_f32:
-        tcg_out_fp_1src(s, INSN_FRINTI_S, TCG_VEC_TMP0, a1);
-        tcg_out32(s, INSN_FCVTZS_XS
-                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_rint_cvt_i64_f64:
-        tcg_out_fp_1src(s, INSN_FRINTI_D, TCG_VEC_TMP0, a1);
-        tcg_out32(s, INSN_FCVTZS_XD
-                  | (a0 & 0x1f) | (((TCG_VEC_TMP0 - 32) & 0x1f) << 5));
-        break;
-
-    /*
-     * Mode-specific fused rint+cvt: a single FCVT{N,M,P}S instruction
-     * does FP-to-signed-int in the requested rounding mode. No
-     * intermediate FP temp needed, no FPCR reprogramming. Emitted when
-     * the i386 frontend knows the guest x87 RC at translate time from
-     * HF_FPU_RC in tb->flags.
-     */
-    case INDEX_op_cvt_rn_i32_f32:
-        tcg_out32(s, INSN_FCVTNS_WS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rn_i32_f64:
-        tcg_out32(s, INSN_FCVTNS_WD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rn_i64_f32:
-        tcg_out32(s, INSN_FCVTNS_XS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rn_i64_f64:
-        tcg_out32(s, INSN_FCVTNS_XD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rm_i32_f32:
-        tcg_out32(s, INSN_FCVTMS_WS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rm_i32_f64:
-        tcg_out32(s, INSN_FCVTMS_WD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rm_i64_f32:
-        tcg_out32(s, INSN_FCVTMS_XS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rm_i64_f64:
-        tcg_out32(s, INSN_FCVTMS_XD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rp_i32_f32:
-        tcg_out32(s, INSN_FCVTPS_WS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rp_i32_f64:
-        tcg_out32(s, INSN_FCVTPS_WD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rp_i64_f32:
-        tcg_out32(s, INSN_FCVTPS_XS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt_rp_i64_f64:
-        tcg_out32(s, INSN_FCVTPS_XD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
 
     case INDEX_op_mov_f64:
         dp = true; /* FALLTHRU */
@@ -3768,18 +3648,9 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_mov(s, TCG_TYPE_F32, a0, a1);
         break;
 
-    OP_f32_f64(com):
-    OP_f32_f64(coms): {
-        /*
-         * FCMP (quiet) / FCMPE (signaling) both set NZCV identically; the
-         * only difference is FPSR.IOC on QNaN. Map NZCV to x86 EFLAGS:
-         * CF=N|V, PF=V, ZF=Z|V.
-         */
-        bool signaling = (opc == INDEX_op_coms_f32 || opc == INDEX_op_coms_f64);
-        uint32_t cmp_insn = signaling
-            ? (dp ? INSN_FCMPE_D : INSN_FCMPE_S)
-            : (dp ? INSN_FCMP_D : INSN_FCMP_S);
-        tcg_out32(s, cmp_insn
+    OP_f32_f64(com): {
+        /* Quiet FCMP sets NZCV. Map it to x86 EFLAGS: CF=N|V, PF=V, ZF=Z|V. */
+        tcg_out32(s, (dp ? INSN_FCMP_D : INSN_FCMP_S)
                   | (((a2 - 32) & 0x1f) << 16) | (((a1 - 32) & 0x1f) << 5));
         tcg_out32(s, INSN_MRS_NZCV | (TCG_REG_TMP0 & 0x1f));
         /* V (bit 28) */
@@ -4363,8 +4234,6 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_abs_f64:
     case INDEX_op_chs_f32:
     case INDEX_op_chs_f64:
-    case INDEX_op_rint_f32:
-    case INDEX_op_rint_f64:
     case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
     case INDEX_op_mov_f32:
@@ -4389,27 +4258,9 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_cvt64f_i64:
     case INDEX_op_mov32f_i32:
     case INDEX_op_mov64f_i64:
-    case INDEX_op_rint_cvt_i32_f32:
-    case INDEX_op_rint_cvt_i32_f64:
-    case INDEX_op_rint_cvt_i64_f32:
-    case INDEX_op_rint_cvt_i64_f64:
-    case INDEX_op_cvt_rn_i32_f32:
-    case INDEX_op_cvt_rn_i32_f64:
-    case INDEX_op_cvt_rn_i64_f32:
-    case INDEX_op_cvt_rn_i64_f64:
-    case INDEX_op_cvt_rm_i32_f32:
-    case INDEX_op_cvt_rm_i32_f64:
-    case INDEX_op_cvt_rm_i64_f32:
-    case INDEX_op_cvt_rm_i64_f64:
-    case INDEX_op_cvt_rp_i32_f32:
-    case INDEX_op_cvt_rp_i32_f64:
-    case INDEX_op_cvt_rp_i64_f32:
-    case INDEX_op_cvt_rp_i64_f64:
         return C_O1_I1(r, W);
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
-    case INDEX_op_coms_f32:
-    case INDEX_op_coms_f64:
         return C_O1_I2(r, W, W);
 
     default:

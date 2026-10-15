@@ -478,15 +478,18 @@ platform choice since 2026-10-15), and
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
   word via fused `cvt_{rn,rm,rp}_i{32,64}_f{32,64}` TCG ops (single
-  host `FCVT{N,M,P,Z}S` on AArch64).
+  host `FCVT{N,M,P,Z}S` on AArch64). Those ops, `rint`, `rint_cvt` and
+  their backend lowerings were removed too.
 - **Signaling vs quiet compares (retired with the cache, 2026-10-15).**
   `coms_f32`/`coms_f64` (FCMPE / COMISS) for FCOMI; `com_f32`/`com_f64`
-  for FUCOMI.
+  for FUCOMI. The `coms` ops are removed; `com` (FCMP, upstream's COMISD
+  on x86_64) stays for the write-through `fcom`.
 - **Control-word resync.** Every path that writes `env->fpuc`
   (`fldcw`, `fldenv`, `frstor`, `fxrstor`, `fninit`, xsave helpers,
   `cpu_post_load`, gdbstub, SEV, reset) routes through
   `cpu_set_fpuc` so `HF_FPU_RC` / `HF_FPU_PC` in `hflags` are
-  rebuilt — otherwise fused FIST would round with the stale mode.
+  rebuilt — the write-through x87 path reads `HF_FPU_PC` from
+  `tb->flags` (fused FIST read `HF_FPU_RC` until it was removed).
 - **Misc.** `fnstcw` is one load; `insertion_sort_syncs` replaces
   `qsort` for N ≤ 16. (Retired with the cache on 2026-10-15: `gen_flcr`
   materializing rc-bits from `tb->flags`. The `flcr` op and its 5-insn
@@ -2333,7 +2336,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Vblank cadence aligned to host display refresh | Host `vblank_interval_ns` drives `process_vblank` → `graphic_hw_update` → `nv2a_vga_gfx_update` → `NV_PCRTC_INTR_0_VBLANK`. Retuning retimes the *guest* IRQ (titles gate sim on vblank count). Needs NV2A-internal timer (fixed 60 / 50 Hz) decoupled from host present cadence |
 | AArch64 `fsin` / `fcos` libm-helper inline | Swapping `gen_helper_fsin` / `_fcos` (floatx80 round-trip) for a thin `helper_sin_fast_f{32,64}` / `cos_fast_*` (f-bits → `memcpy` → libm → bits) made audio crackly on at least one title. Plausible causes: (a) `gen_flush_fp` was also the de-facto flush for *other* live x87 temps; (b) `TCG_CALL_NO_RWG_SE` let TCG reorder across boundaries the floatx80 helper implicitly fenced |
 | Voice-list `SE2FE_IDLE_VOICE` re-notify skip | No guest-write hook on `NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE` transitions → can't reliably clear a "notified this activation" flag. Risk of missing an FE-observed idle transition outweighs the per-frame save |
-| Cross-TB FPCR elision via `cached_fpuc_rc` as TCG global | TCG globals are memory-backed and reloaded per TB — a global doesn't eliminate the per-TB `ld16u` in `gen_flcr`, it just renames it. Eliminating the load needs either TB-chain metadata (RC equality across chain edges) or relaxing `gen_flush_fp`'s `flcr_set` reset — the same implicit-fence class that made the fsin/fcos inline regress. No win available at acceptable risk |
+| Cross-TB FPCR elision via `cached_fpuc_rc` as TCG global | TCG globals are memory-backed and reloaded per TB — a global doesn't eliminate the per-TB `ld16u` in `gen_flcr`, it just renames it. Eliminating the load needs either TB-chain metadata (RC equality across chain edges) or relaxing `gen_flush_fp`'s `flcr_set` reset — the same implicit-fence class that made the fsin/fcos inline regress. No win available at acceptable risk (`cached_fpuc_rc` and the cached `gen_flcr` were removed with the inline cache on 2026-10-15) |
 
 
 Session 2026-07-18 additions — the superblock seam-following campaign

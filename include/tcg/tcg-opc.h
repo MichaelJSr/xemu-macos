@@ -142,13 +142,6 @@ DEF(chs_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(chs_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(com_f32, 1, 2, 0, TCG_OPF_FP)
 DEF(com_f64, 1, 2, 0, TCG_OPF_FP)
-/*
- * Signaling variants: match x87 FCOMI semantics (raise IE on any NaN, not
- * just SNaN). Quiet com_f32/com_f64 above match FUCOMI semantics. Same
- * result-bit layout — only the host FP-exception side-effect differs.
- */
-DEF(coms_f32, 1, 2, 0, TCG_OPF_FP)
-DEF(coms_f64, 1, 2, 0, TCG_OPF_FP)
 DEF(cos_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(cos_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(cvt32f_f64, 1, 1, 0, TCG_OPF_FP)
@@ -171,42 +164,6 @@ DEF(mov_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(mov_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(mul_f32, 1, 2, 0, TCG_OPF_FP)
 DEF(mul_f64, 1, 2, 0, TCG_OPF_FP)
-DEF(rint_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(rint_f64, 1, 1, 0, TCG_OPF_FP)
-/*
- * Fused round-to-integer + convert-to-signed-integer. Equivalent to
- * rint_fN followed by cvtNf_iM; lets AArch64 emit FRINTI + FCVTZS as a
- * single TCG op without allocating an intermediate FP temp. On hosts
- * that don't implement the fused form, TCG expanders fall back to the
- * separate rint + cvt pair (see tcg-op-fp.c).
- */
-DEF(rint_cvt_i32_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(rint_cvt_i32_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(rint_cvt_i64_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(rint_cvt_i64_f64, 1, 1, 0, TCG_OPF_FP)
-/*
- * Mode-specific float-to-signed-integer converts. Each lowers to a
- * single host instruction on AArch64 (FCVTNS / FCVTMS / FCVTPS) so the
- * i386 frontend can emit a 1-insn FIST/FISTP when the guest x87 RC is
- * known at translate time (HF_FPU_RC in tb->flags). The existing
- * cvtNf_iM opcodes already cover truncate (RZ) mode via FCVTZS.
- *
- * Fallback on hosts that don't implement the fused op: tcg-op-fp.c
- * expanders forward to rint_cvt_iM_fN, which in turn expands to the
- * explicit rint + cvt pair.
- */
-DEF(cvt_rn_i32_f32, 1, 1, 0, TCG_OPF_FP)  /* round to nearest even */
-DEF(cvt_rn_i32_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rn_i64_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rn_i64_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rm_i32_f32, 1, 1, 0, TCG_OPF_FP)  /* round toward -inf */
-DEF(cvt_rm_i32_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rm_i64_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rm_i64_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rp_i32_f32, 1, 1, 0, TCG_OPF_FP)  /* round toward +inf */
-DEF(cvt_rp_i32_f64, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rp_i64_f32, 1, 1, 0, TCG_OPF_FP)
-DEF(cvt_rp_i64_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sqrt_f32, 1, 1, 0, TCG_OPF_FP)

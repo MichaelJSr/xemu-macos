@@ -2636,8 +2636,6 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_chs_f64:
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
-    case INDEX_op_coms_f32:
-    case INDEX_op_coms_f64:
     case INDEX_op_cos_f32:
     case INDEX_op_cos_f64:
     case INDEX_op_cvt32f_f64:
@@ -2660,8 +2658,6 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_mov_f64:
     case INDEX_op_mul_f32:
     case INDEX_op_mul_f64:
-    case INDEX_op_rint_f32:
-    case INDEX_op_rint_f64:
     case INDEX_op_sin_f32:
     case INDEX_op_sin_f64:
     case INDEX_op_sqrt_f32:
@@ -2669,24 +2665,6 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_sub_f32:
     case INDEX_op_sub_f64:
         return TCG_TARGET_HAS_fpu;
-
-    case INDEX_op_rint_cvt_i32_f32:
-    case INDEX_op_rint_cvt_i32_f64:
-    case INDEX_op_rint_cvt_i64_f32:
-    case INDEX_op_rint_cvt_i64_f64:
-    case INDEX_op_cvt_rn_i32_f32:
-    case INDEX_op_cvt_rn_i32_f64:
-    case INDEX_op_cvt_rn_i64_f32:
-    case INDEX_op_cvt_rn_i64_f64:
-    case INDEX_op_cvt_rm_i32_f32:
-    case INDEX_op_cvt_rm_i32_f64:
-    case INDEX_op_cvt_rm_i64_f32:
-    case INDEX_op_cvt_rm_i64_f64:
-    case INDEX_op_cvt_rp_i32_f32:
-    case INDEX_op_cvt_rp_i32_f64:
-    case INDEX_op_cvt_rp_i64_f32:
-    case INDEX_op_cvt_rp_i64_f64:
-        return TCG_TARGET_HAS_fpu && TCG_TARGET_HAS_rint_cvt;
 
     default:
         if (op < INDEX_op_last_generic) {
