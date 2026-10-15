@@ -61,6 +61,8 @@
 #include "io/channel-buffer.h"
 #include "io/channel-file.h"
 #include "system/replay.h"
+#include "system/tcg.h"
+#include "exec/tb-flush.h"
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/xen.h"
@@ -3143,6 +3145,14 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
 
 #ifdef XBOX
     if (ret == 0) {
+        /*
+         * RAM changed without the writes that invalidate translations.
+         * tcg_vm_change_state flushes only when the load stopped a running
+         * VM; a load while paused would keep running the previous code.
+         */
+        if (tcg_enabled()) {
+            tb_flush__exclusive_or_serial();
+        }
         void xemu_state_loaded(void);
         xemu_state_loaded();
         /* Readiness signal for harnesses (loadvm and incoming migration). */

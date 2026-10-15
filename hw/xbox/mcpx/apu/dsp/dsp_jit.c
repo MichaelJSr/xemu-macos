@@ -185,9 +185,13 @@ static void dsp_jit_sync_to_vm(DSPState *dsp)
     /* Mixbuffer is aliased at xram[0xC00] */
     memcpy(vm->mixbuffer, be->xram + 0xC00,
            DSP_MIXBUFFER_SIZE * sizeof(uint32_t));
-    /* Peripheral state: read current values via callbacks */
+    /*
+     * Peripheral state: read current values via callbacks. Except
+     * DMA_CONTROL, where a read counts down a running DMA: a pause or a
+     * savevm must not change what the DSP sees next.
+     */
     for (int i = 0; i < DSP_PERIPH_SIZE; i++) {
-        vm->periph[i] =
+        vm->periph[i] = 0xFFFF80 + i == 0xFFFFD6 ? dsp->dma.control :
             dsp56300_read_memory(jit, DSP56300_MEM_SPACE_X, 0xFFFF80 + i);
     }
 }
