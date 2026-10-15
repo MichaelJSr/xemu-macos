@@ -148,6 +148,27 @@ void qemu_clock_notify(QEMUClockType type)
     }
 }
 
+#ifdef XBOX
+/*
+ * xemu: qemu_clock_notify for a timer that just fell due on the vCPU under
+ * icount. Other lists (event loops of the main loop, iohandler and monitor
+ * threads) are woken only if they have a timer due: none polls
+ * QEMU_CLOCK_VIRTUAL there (qemu_clock_use_for_deadline), so waking them
+ * only cost a pipe write and a thread wake-up per deadline.
+ */
+void qemu_clock_notify_expired(QEMUClockType type)
+{
+    QEMUTimerList *timer_list;
+    QEMUClock *clock = qemu_clock_ptr(type);
+    QLIST_FOREACH(timer_list, &clock->timerlists, list) {
+        if (timer_list == main_loop_tlg.tl[type] ||
+            timerlist_expired(timer_list)) {
+            timerlist_notify(timer_list);
+        }
+    }
+}
+#endif
+
 /* Disabling the clock will wait for related timerlists to stop
  * executing qemu_run_timers.  Thus, this functions should not
  * be used from the callback of a timer that is based on @clock.

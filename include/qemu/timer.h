@@ -198,6 +198,9 @@ int64_t qemu_clock_deadline_ns_all(QEMUClockType type, int attr_mask);
  * list linked to the clock, or qemu_notify() if none.
  */
 void qemu_clock_notify(QEMUClockType type);
+#ifdef XBOX
+void qemu_clock_notify_expired(QEMUClockType type);
+#endif
 
 /**
  * qemu_clock_enable:

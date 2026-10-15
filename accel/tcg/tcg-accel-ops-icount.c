@@ -69,7 +69,11 @@ static int64_t icount_get_limit(void)
 static void icount_notify_aio_contexts(void)
 {
     /* Wake up other AioContexts.  */
+#ifdef XBOX
+    qemu_clock_notify_expired(QEMU_CLOCK_VIRTUAL);
+#else
     qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
+#endif
     qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
 }
 
