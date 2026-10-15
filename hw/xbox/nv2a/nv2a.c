@@ -583,6 +583,11 @@ static int nv2a_post_load(void *opaque, int version_id)
             d->pcrtc.raster = 0;
         }
         d->pcrtc.raster_loaded = false;
+        if (!d->pgraph_methods_loaded) {
+            pgraph_reset_unsaved_state(&d->pgraph);
+        }
+        d->pgraph_methods_loaded = false;
+        pgraph_mark_all_state_dirty(&d->pgraph);
         /* Drop, not write back, the previous session's GPU state. */
         qatomic_set(&d->pgraph.flush_discard, true);
     }
@@ -607,6 +612,75 @@ static int nv2a_raster_post_load(void *opaque, int version_id)
     d->pcrtc.raster_loaded = true;
     return 0;
 }
+
+/*
+ * Deterministic mode: PGRAPH method state the main section lacks (its
+ * vertex-attr entries are empty), which the next draws read. Only icount
+ * saves carry it; loads of other saves reset it (nv2a_post_load).
+ */
+static int nv2a_pgraph_methods_post_load(void *opaque, int version_id)
+{
+    NV2AState *d = opaque;
+    d->pgraph_methods_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_nv2a_vertex_attr_det = {
+    .name = "nv2a/pgraph-methods/vertex-attr",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(dma_select, VertexAttribute),
+        VMSTATE_UINT64(offset, VertexAttribute),
+        VMSTATE_UINT32(inline_array_offset, VertexAttribute),
+        VMSTATE_BUFFER_UNSAFE(inline_value, VertexAttribute, 0,
+                              sizeof_field(VertexAttribute, inline_value)),
+        VMSTATE_UINT32(format, VertexAttribute),
+        VMSTATE_UINT32(size, VertexAttribute),
+        VMSTATE_UINT32(count, VertexAttribute),
+        VMSTATE_UINT32(stride, VertexAttribute),
+        VMSTATE_BOOL(needs_conversion, VertexAttribute),
+        VMSTATE_BOOL(inline_buffer_populated, VertexAttribute),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+#define VMSTATE_NV2A_FLOATS(_f) \
+    VMSTATE_BUFFER_UNSAFE(_f, NV2AState, 0, sizeof_field(NV2AState, _f))
+
+static const VMStateDescription vmstate_nv2a_pgraph_methods = {
+    .name = "nv2a/pgraph-methods",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = nv2a_raster_needed,
+    .post_load = nv2a_pgraph_methods_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(pgraph.vertex_attributes, NV2AState,
+                             NV2A_VERTEXSHADER_ATTRIBUTES, 1,
+                             vmstate_nv2a_vertex_attr_det, VertexAttribute),
+        VMSTATE_UINT64(pgraph.beta.object_instance, NV2AState),
+        VMSTATE_UINT32(pgraph.beta.beta, NV2AState),
+        VMSTATE_BOOL_ARRAY(pgraph.texture_matrix_enable, NV2AState,
+                           NV2A_MAX_TEXTURES),
+        VMSTATE_NV2A_FLOATS(pgraph.material_alpha),
+        VMSTATE_NV2A_FLOATS(pgraph.light_infinite_half_vector),
+        VMSTATE_NV2A_FLOATS(pgraph.light_infinite_direction),
+        VMSTATE_NV2A_FLOATS(pgraph.light_local_position),
+        VMSTATE_NV2A_FLOATS(pgraph.light_local_attenuation),
+        VMSTATE_NV2A_FLOATS(pgraph.specular_params),
+        VMSTATE_NV2A_FLOATS(pgraph.specular_power),
+        VMSTATE_NV2A_FLOATS(pgraph.specular_params_back),
+        VMSTATE_NV2A_FLOATS(pgraph.specular_power_back),
+        VMSTATE_NV2A_FLOATS(pgraph.point_params),
+        VMSTATE_UINT16(pgraph.compressed_attrs, NV2AState),
+        VMSTATE_UINT16(pgraph.uniform_attrs, NV2AState),
+        VMSTATE_UINT16(pgraph.swizzle_attrs, NV2AState),
+        VMSTATE_UINT32(pgraph.draw_arrays_min_start, NV2AState),
+        VMSTATE_BOOL(pgraph.draw_arrays_prevent_connect, NV2AState),
+        VMSTATE_BOOL(pgraph.zpass_pixel_count_enable, NV2AState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription vmstate_nv2a_raster = {
     .name = "nv2a/pcrtc-raster",
@@ -759,6 +833,7 @@ static const VMStateDescription vmstate_nv2a = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_nv2a_raster,
+        &vmstate_nv2a_pgraph_methods,
         NULL
     },
 };

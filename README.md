@@ -222,9 +222,9 @@ Other automation interfaces (windowed or headless):
   `loadvm` does (reset, load, disk sectors the guest wrote since put
   back, runs on only if it was running), any number of times, with the
   same determinism. `query-xemu-checkpoints` lists them,
-  `xemu-checkpoint-delete` frees one. About 45 ms to save and 20-25 ms
-  to restore 128 MiB on an M2 Ultra; the qcow2 is never written for the
-  state.
+  `xemu-checkpoint-delete` frees one. About 20-30 ms to save and 20-25
+  ms to restore 128 MiB on a loaded M2 Ultra; the qcow2 is never written
+  for the state.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add
@@ -263,8 +263,9 @@ Other automation interfaces (windowed or headless):
     next vblank, and an `@N` line read after frame N is warned about;
   - a state saved under icount carries what the run depends on beyond
     guest RAM and registers (resampler, filter and HRTF history, the
-    APU schedule, AC'97, the RTC's sub-second phase, the field pin, pad
-    reports and held pipe keys and axes), so a run continued past its
+    APU schedule, AC'97, the RTC's sub-second phase, the field pin, the
+    GPU's vertex array and lighting method state, pad reports and held
+    pipe keys and axes), so a run continued past its
     `savevm` (or `xemu-checkpoint-save`) and every load of that save go
     on identically. A state saved without icount starts that host-side
     state as a fresh process does, with neutral pads. Pipe lines queued

@@ -123,10 +123,11 @@ static void pgraph_vk_flush(NV2AState *d)
     if (qatomic_xchg(&pg->flush_discard, false)) {
         /*
          * Deterministic mode, after a load: the previous session's GPU
-         * surfaces and reports belong to RAM that was just replaced, so
-         * drop them without writing back (reports were delivered when the
-         * load began, nv2a_vm_state_change; this only drops strays).
-         * Renderer state the savestate lacks starts as in a fresh process.
+         * surfaces, reports and queries belong to RAM that was just
+         * replaced, so drop them without writing back (reports were
+         * delivered when the load began, nv2a_vm_state_change; this only
+         * drops strays). Renderer state the savestate lacks starts as in a
+         * fresh process.
          */
         pgraph_vk_det_reports_discard(d);
         SurfaceBinding *s;
@@ -134,8 +135,6 @@ static void pgraph_vk_flush(NV2AState *d)
             s->draw_dirty = false;
             s->download_pending = false;
         }
-        r->zpass_pixel_count_result = 0;
-        pg->zpass_pixel_count_enable = false;
         r->last_expire_frame = pg->frame_time;
         r->expire_updates = 0;
     }

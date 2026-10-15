@@ -344,15 +344,26 @@ void pgraph_vk_request_report_delivery(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
-/* After a load replaced RAM: drop pending reports instead of writing them. */
+/*
+ * After a load replaced RAM: drop the previous session's reports instead of
+ * writing them, and its query counts too, so the occlusion sum restarts at
+ * zero as in a fresh process. A plain finish would leave the last queries
+ * on the GPU, to be added to the sum at the slot's reclaim, in the first
+ * frame after the load.
+ */
 void pgraph_vk_det_reports_discard(NV2AState *d)
 {
-    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
 
     r->det_reports.discard = true;
-    det_reports_deliver_all(d);
+    if (r->in_command_buffer) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_FLUSH);
+    }
+    pgraph_vk_drain_all_pending_reports(d);
     r->det_reports.discard = false;
     r->det_reports.park_drain = false;
+    r->zpass_pixel_count_result = 0;
 }
 
 /* Before RAM is saved or synced (pgraph_vk_download_dirty_surfaces). */

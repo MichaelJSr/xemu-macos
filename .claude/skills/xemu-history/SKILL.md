@@ -42,6 +42,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | JIT on the EP core | fixed | P-space overlays → retranslation churn; per-core throttle | `21e9045344`, `XEMU_DSP_JIT_NO_THROTTLE=1` |
 | Merges: a rename rewrote `getenv` strings; `use_dsp_jit` flipped to false | fixed | Grep `getenv(` after renames; diff `config_spec.yml` after every merge | `21e9045344`, `2e0aad3e18` |
 | Parmove+ALU fusion | closed | 0 instructions saved in every source class; x28 is the SR pin | ledger Settled |
+| Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | `DSP_JIT_fallbacks` design (C) |
 | APU `rate==1.0` resampler fast path | reverted | No silence pad on drain → `voice_process` spins | `68d5afe7fa` |
 | Voice-register cache, SE2FE re-notify skip, voice writeback batching | closed | DMA and the guest use RAM voice state; no write hook | ledger |
 | HRTF hand-written NEON | closed | The autovectorized FIR is faster | `aff8c229e9` |
@@ -62,6 +63,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
+| Inline FUCOMI on the x87 write-through path | reverted | Helper gone, det heavy-f1 88.25 vs 88.08 fps: no gain | — |
 | Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |
 | `-fzero-call-used-regs=skip` | closed | −411 kB `__text`, fps 3+/2− then 3+/5−. Retest via `CFLAGS` | `7aa746a952` |
 | COMISS lowering, dirty-clear coalescing, xpage spanning dests | closed / parked | Census empty; <1% of vCPU; under 1M/s | ledger |

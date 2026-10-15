@@ -145,6 +145,7 @@ typedef struct NV2AState {
         uint32_t raster;
         bool raster_loaded; /* nv2a/pcrtc-raster came with a load */
     } pcrtc;
+    bool pgraph_methods_loaded; /* nv2a/pgraph-methods came with a load */
 
     struct {
         uint32_t core_clock_coeff;

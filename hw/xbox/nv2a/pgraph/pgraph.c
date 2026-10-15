@@ -453,6 +453,63 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
     memset(pg->regs_dirty, 0, sizeof(pg->regs_dirty));
 }
 
+/*
+ * Method state that older savestates lack (nv2a/pgraph-methods), back to
+ * power-on values, as a fresh process has it: otherwise a load in a process
+ * that had run kept the previous session's vertex array formats and the
+ * like, and its first draws drew what a fresh load's do not.
+ */
+void pgraph_reset_unsaved_state(PGRAPHState *pg)
+{
+    memset(&pg->beta, 0, sizeof(pg->beta));
+    memset(pg->texture_matrix_enable, 0, sizeof(pg->texture_matrix_enable));
+    pg->material_alpha = 0.0f;
+    memset(pg->light_infinite_half_vector, 0,
+           sizeof(pg->light_infinite_half_vector));
+    memset(pg->light_infinite_direction, 0,
+           sizeof(pg->light_infinite_direction));
+    memset(pg->light_local_position, 0, sizeof(pg->light_local_position));
+    memset(pg->light_local_attenuation, 0,
+           sizeof(pg->light_local_attenuation));
+    memset(pg->specular_params, 0, sizeof(pg->specular_params));
+    pg->specular_power = 0.0f;
+    memset(pg->specular_params_back, 0, sizeof(pg->specular_params_back));
+    pg->specular_power_back = 0.0f;
+    memset(pg->point_params, 0, sizeof(pg->point_params));
+    for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
+        VertexAttribute *attr = &pg->vertex_attributes[i];
+        float *inline_buffer = attr->inline_buffer;
+        memset(attr, 0, sizeof(*attr));
+        attr->inline_buffer = inline_buffer;
+    }
+    pg->compressed_attrs = 0;
+    pg->uniform_attrs = 0;
+    pg->swizzle_attrs = 0;
+    pg->draw_arrays_min_start = 0;
+    pg->draw_arrays_prevent_connect = false;
+    pg->zpass_pixel_count_enable = false;
+}
+
+/*
+ * A load replaced the registers and constants behind the renderer's back.
+ * Its skip gates (shader and pipeline binds, uniform pulls) compare against
+ * what the previous session bound, so mark everything changed.
+ */
+void pgraph_mark_all_state_dirty(PGRAPHState *pg)
+{
+    /* regs_ is indexed by byte offset, regs_dirty by word. */
+    bitmap_fill(pg->regs_dirty, ARRAY_SIZE(pg->regs_) / sizeof(uint32_t));
+    pg->program_data_dirty = true;
+    pg->shader_uniform_inputs_dirty = true;
+    memset(pg->vsh_constants_dirty, 1, sizeof(pg->vsh_constants_dirty));
+    memset(pg->ltctxa_dirty, 1, sizeof(pg->ltctxa_dirty));
+    memset(pg->ltctxb_dirty, 1, sizeof(pg->ltctxb_dirty));
+    memset(pg->ltc1_dirty, 1, sizeof(pg->ltc1_dirty));
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        pg->texture_dirty[i] = true;
+    }
+}
+
 static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
 {
 #ifdef CONFIG_VULKAN

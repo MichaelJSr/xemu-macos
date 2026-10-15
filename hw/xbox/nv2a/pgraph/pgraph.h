@@ -364,6 +364,8 @@ static inline void pgraph_reg_w(PGRAPHState *pg, unsigned int r, uint32_t v)
 }
 
 void pgraph_clear_dirty_reg_map(PGRAPHState *pg);
+void pgraph_reset_unsaved_state(PGRAPHState *pg);
+void pgraph_mark_all_state_dirty(PGRAPHState *pg);
 
 static inline bool pgraph_is_reg_dirty(PGRAPHState *pg, unsigned int reg)
 {
