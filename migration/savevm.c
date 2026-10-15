@@ -3278,6 +3278,11 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
 
     global_state_store();
     vm_stop(RUN_STATE_SAVE_VM);
+#ifdef XBOX
+    /* A VM that was already paused gets no SAVE_VM state change. */
+    void nv2a_save_quiesce_paused(void);
+    nv2a_save_quiesce_paused();
+#endif
 
     bdrv_drain_all_begin();
 
@@ -3328,6 +3333,10 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
 
  the_end:
     bdrv_drain_all_end();
+#ifdef XBOX
+    void nv2a_save_done(void);
+    nv2a_save_done();
+#endif
 
     vm_resume(saved_state);
     return ret == 0;

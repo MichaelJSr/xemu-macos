@@ -467,18 +467,50 @@ static void nv2a_reset_hold(Object *obj, ResetType type)
 // Note: This is handled as a VM state change and not as a `pre_save` callback
 // because we want to halt the FIFO before any VM state is saved/restored to
 // avoid corruption.
+/*
+ * Before the state is serialized: halt PFIFO, write GPU-rendered surfaces
+ * back to RAM, and hold the FIFO locks until post_save, so RAM and the nv2a
+ * section describe one moment. Runs on the SAVE_VM / FINISH_MIGRATE state
+ * change, and from save_snapshot for a VM that was already paused (which
+ * gets no state change).
+ */
+static void nv2a_save_quiesce(NV2AState *d)
+{
+    if (d->save_quiesced) {
+        return;
+    }
+    nv2a_lock_fifo(d);
+    qatomic_set(&d->pfifo.halt, true);
+    pgraph_pre_savevm_trigger(d);
+    nv2a_unlock_fifo(d);
+    bql_unlock();
+    pgraph_pre_savevm_wait(d);
+    bql_lock();
+    nv2a_lock_fifo(d);
+    d->save_quiesced = true;
+}
+
+void nv2a_save_quiesce_paused(void)
+{
+    if (g_nv2a) {
+        nv2a_save_quiesce(g_nv2a);
+    }
+}
+
+/* Release the locks if the save failed before post_save. */
+void nv2a_save_done(void)
+{
+    if (g_nv2a && g_nv2a->save_quiesced) {
+        g_nv2a->save_quiesced = false;
+        nv2a_unlock_fifo(g_nv2a);
+    }
+}
+
 static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
 {
     NV2AState *d = opaque;
-    if (state == RUN_STATE_SAVE_VM) {
-        nv2a_lock_fifo(d);
-        qatomic_set(&d->pfifo.halt, true);
-        pgraph_pre_savevm_trigger(d);
-        nv2a_unlock_fifo(d);
-        bql_unlock();
-        pgraph_pre_savevm_wait(d);
-        bql_lock();
-        nv2a_lock_fifo(d);
+    if (state == RUN_STATE_SAVE_VM || state == RUN_STATE_FINISH_MIGRATE) {
+        nv2a_save_quiesce(d);
     } else if (state == RUN_STATE_RESTORE_VM) {
         nv2a_lock_fifo(d);
         qatomic_set(&d->pfifo.halt, true);
@@ -504,7 +536,11 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
 static int nv2a_post_save(void *opaque)
 {
     NV2AState *d = opaque;
-    nv2a_unlock_fifo(d);
+    /* Only what nv2a_save_quiesce locked: a paused migration has none. */
+    if (d->save_quiesced) {
+        d->save_quiesced = false;
+        nv2a_unlock_fifo(d);
+    }
     return 0;
 }
 

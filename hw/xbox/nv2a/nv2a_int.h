@@ -115,6 +115,9 @@ typedef struct NV2AState {
         bool inline_locked;
     } pfifo;
 
+    /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */
+    bool save_quiesced;
+
     struct {
         uint32_t regs[0x1000];
     } pvideo;
