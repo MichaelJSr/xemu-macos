@@ -81,7 +81,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | PFIFO untimed wait, descriptor bind-skip | re-added | Innocent; a new `pfifo_kick` site must hold `pfifo.lock` | `a005bb1560` |
 | Freeze hunt by reverting suspects | lesson | Build the discriminating diagnostic first | `XEMU_PFIFO_HEARTBEAT=1` |
 | BQL event batching; `can_fifo_access` hoist | closed | Starves the vCPU; the lock drops mid-loop → `ERROR_CALL` | ledger |
-| BQL-free MMIO (PFB/USER/PGRAPH/APU-VP) | shipped | Parity, less jitter; the remaining blocks are closed | `XEMU_MMIO_BQL=1` |
+| BQL-free MMIO (PFB/USER/PGRAPH/APU-VP) | shipped | Parity, less jitter; the remaining blocks are closed | `ee9100e538`, `4b92b2bc40`, `a477ad9f91` |
 | Kick suppression, semaphore kick, ImGui lock | closed | Empty population / wrong premise / harmless | ledger Settled |
 | Post-loadvm OHCI/`flatview` SIGSEGV | fixed | A freed `MemAccessCallback`, not OHCI; RCU-deferred free | `4161ab5f24`, `13afd5f244` |
 | **Build / CI / release / harness** | | | |

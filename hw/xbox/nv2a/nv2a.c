@@ -428,23 +428,10 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
      *     docs/Finished/pgraph-lockless-audit.md.
      * The TCG fast path honors lockless_io in accel/tcg/cputlb.c
      * (fork change; upstream only checks it in prepare_mmio_access).
-     * XEMU_MMIO_BQL=1 restores fully locked dispatch for all three blocks;
-     * XEMU_PGRAPH_LOCKLESS=0 restores BQL dispatch for PGRAPH only (this
-     * campaign's bisection hatch), leaving PFB/USER lockless.
      */
-    {
-        const char *e = getenv("XEMU_MMIO_BQL");
-        bool mmio_bql = e && e[0] == '1';
-        if (!mmio_bql) {
-            memory_region_enable_lockless_io(&d->block_mmio[NV_PFB]);
-            memory_region_enable_lockless_io(&d->block_mmio[NV_USER]);
-
-            const char *ep = getenv("XEMU_PGRAPH_LOCKLESS");
-            if (!(ep && ep[0] == '0')) {
-                memory_region_enable_lockless_io(&d->block_mmio[NV_PGRAPH]);
-            }
-        }
-    }
+    memory_region_enable_lockless_io(&d->block_mmio[NV_PFB]);
+    memory_region_enable_lockless_io(&d->block_mmio[NV_USER]);
+    memory_region_enable_lockless_io(&d->block_mmio[NV_PGRAPH]);
 
     /*
      * Lockless DMA_PUT doorbell and USER reads (pfifo_put_doorbell).

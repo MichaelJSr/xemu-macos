@@ -29,8 +29,6 @@ and tag `archive/windows-wave1-wip`.
 |---|---|
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
-| `XEMU_MMIO_BQL` | `1` restores BQL-locked TCG dispatch for the audited lockless NV2A regions (PFB, USER, APU VP, PGRAPH) — bisect hatch |
-| `XEMU_PGRAPH_LOCKLESS` | `0` restores BQL-locked dispatch for the PGRAPH block only (leaves PFB/USER lockless) — per-block bisect hatch for the PGRAPH audit (see `docs/Finished/pgraph-lockless-audit.md`) |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
@@ -1620,7 +1618,7 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   ~80%. Measured honestly at **fps parity** (not claimed as a
   speedup) with a consistent steadiness win: per-run fps stdev
   1.21 → 0.89, 5/6 pairs — the 340 µs BQL-spike class no longer
-  hits these ops. `XEMU_MMIO_BQL=1` restores locked dispatch.
+  hits these ops.
 - **PGRAPH joins the BQL-free MMIO set.** Interleaved A/B (F8, 3
   pairs, quiet): fps parity as expected for this class (legacy-BQL
   minus lockless = -0.65±1.43, sign-mixed), with the lockless arm's
@@ -1641,9 +1639,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (1.6M reads on the F5 stats run; count ratios — the load-immune
   figures — put ~11 PGRAPH MMIO ops on every PGRAPH interrupt, 3 INTR
   reads per ack). Soak: 8 F5⇄F8 loadvm cycles over a 12-min window,
-  zero hangs/asserts/artifacts; xbox suite green. `XEMU_PGRAPH_LOCKLESS=0`
-  restores BQL dispatch for PGRAPH only; `XEMU_MMIO_BQL=1` still
-  restores it for all blocks.
+  zero hangs/asserts/artifacts; xbox suite green. The bisect hatches
+  (`XEMU_PGRAPH_LOCKLESS=0` for PGRAPH, `XEMU_MMIO_BQL=1` for the whole
+  set) were removed on 2026-10-15; the lockless set is unconditional.
 - **PFIFO kick census (counter only, 2026-08-04; removed 2026-10-15).**
   `XEMU_PFIFO_KICK_STATS=1` bucketed every `pgraph_write` `pfifo_kick`
   by call site, wait-condition transition, `FIFO_ACCESS` and

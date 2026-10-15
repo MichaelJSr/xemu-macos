@@ -92,7 +92,13 @@ skill's Open frontier.
    owner decision. The shipped BQL-free MMIO dispatch belongs on this
    list too: Windows/Linux take the identical lockless path for
    PFB/USER/APU-VP/PGRAPH and no non-VM soak exists
-   (`docs/Finished/pgraph-lockless-audit.md` §I.3). Converting the *remaining*
+   (`docs/Finished/pgraph-lockless-audit.md` §I.3). The runtime switches
+   that put the BQL back (`XEMU_MMIO_BQL`, `XEMU_PGRAPH_LOCKLESS`) were
+   removed 2026-10-15, so bisecting a lockless-suspected failure there
+   takes a rebuild without the `memory_region_enable_lockless_io` calls
+   (three in `nv2a_realize`, one in `mcpx_apu_realize`) or a revert of
+   the removal commit; `XEMU_PFIFO_PUT_LOCK=1` still covers the separate
+   DMA_PUT doorbell. Converting the *remaining*
    blocks is closed by written verdict —
    [`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md) (2026-08-04):
    residual under 0.07% of a core (≈ +0.01-0.06 fps, at or below the

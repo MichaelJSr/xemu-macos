@@ -6,7 +6,12 @@
 > [roadmap](../roadmap.md) ranked item 5. "README roadmap item 3" below
 > predates the 2026-07-18 README split. The §F hit-rate counter
 > (`XEMU_PGRAPH_MMIO_STATS`) was removed 2026-10-10; the §G results
-> stand, and the §H grep for it now finds nothing.
+> stand, and the §H grep for it now finds nothing. The §F/§G bisect
+> hatches (`XEMU_MMIO_BQL`, `XEMU_PGRAPH_LOCKLESS`) were removed
+> 2026-10-15: the lockless set is unconditional and the §H hatch grep
+> now finds nothing. Bisecting a lockless-suspected failure (§I.3) now
+> takes a rebuild without the `memory_region_enable_lockless_io` calls
+> (three in `nv2a_realize`, one in `mcpx_apu_realize`).
 
 Static + concurrency audit of the NV2A **PGRAPH** register block
 (`0x400000`, size `0x2000`) to decide whether its guest MMIO dispatch can

@@ -202,7 +202,6 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | *Off by default* | | |
 | `XEMU_GUEST_MO=1` | Keep every guest memory-order barrier (normal mode drops the load-load ones and icount all, until a network backend attaches) | top-level `tcg/tcg-op-ldst.c` |
 | `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
-| `XEMU_MMIO_BQL=1` | MMIO under the BQL | `hw/xbox/nv2a/nv2a.c`, `mcpx/apu/apu.c` |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |

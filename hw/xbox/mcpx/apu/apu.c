@@ -558,14 +558,9 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
      * raising is already deferred — fe_method only sets d->set_irq
      * under d->lock, and the APU thread takes the BQL itself before
      * update_irq (se_frame). The main/gp/ep regions keep the BQL
-     * (direct update_irq calls). XEMU_MMIO_BQL=1 restores locking.
+     * (direct update_irq calls).
      */
-    {
-        const char *e = getenv("XEMU_MMIO_BQL");
-        if (!(e && e[0] == '1')) {
-            memory_region_enable_lockless_io(&d->vp.mmio);
-        }
-    }
+    memory_region_enable_lockless_io(&d->vp.mmio);
 
     memory_region_init_io(&d->gp.mmio, OBJECT(dev), &gp_ops, d,
                           "mcpx-apu-gp", 0x10000);
