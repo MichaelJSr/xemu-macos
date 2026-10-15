@@ -117,14 +117,12 @@ static inline double xemu_inv_tick_ns(void)
 /*
  * Sub-page dirty tracking (docs/Finished/subpage-gate0-prediction.md, arm (a))
  * fast-skips whole-page invalidation for a data store that misses every code
- * sub-block. Default on since 2026-07-11; XEMU_SUBPAGE_DIRTY=0 restores
- * whole-page invalidation. XEMU_SUBPAGE_REFUTE=1 runs that skip decision
- * against a ground-truth TB-overlap scan and counts violations (design
- * falsified if > 0); default off, zero cost when unset. Implemented entirely
- * inside tb-maint.c's XBOX paths; declared here so the shared INV_PROF dump can
+ * sub-block. XEMU_SUBPAGE_REFUTE=1 runs that skip decision against a
+ * ground-truth TB-overlap scan and counts violations (design falsified if
+ * > 0); default off, zero cost when unset. Implemented entirely inside
+ * tb-maint.c's XBOX paths; declared here so the shared INV_PROF dump can
  * print their counters.
  */
-bool xemu_subpage_dirty_on(void);
 bool xemu_subpage_refute_on(void);
 
 /* Current invalidation source, set by the entry points, read in

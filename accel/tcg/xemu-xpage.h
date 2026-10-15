@@ -47,13 +47,12 @@ bool xemu_xpage_allow(uint64_t dest);
  * sever every registered cross-page chain so full-TLB-flush classes the
  * INVLPG helper doesn't see (CR3 reloads, CR4.PGE toggles, mode switches,
  * loadvm) can't leave a chain pointing at a retired virtual->phys binding.
- * Default mechanism is the tb-maint.c link-registry unlink (keeps every
- * translation; chains relink lazily); XEMU_XPAGE_UNLINK=0 restores the
- * v0.11 wholesale queued tb_flush, and registry overflow falls back to it
- * automatically. No-op when cross-page chaining is off.
+ * The mechanism is the tb-maint.c link-registry unlink (keeps every
+ * translation; chains relink lazily); registry overflow falls back to the
+ * v0.11 wholesale queued tb_flush automatically. No-op when cross-page
+ * chaining is off.
  */
 void xemu_xpage_note_full_flush(CPUState *cpu);
-bool xemu_xpage_unlink_on(void);     /* XEMU_XPAGE_UNLINK, default 1 */
 extern uint64_t xemu_xpage_full_flush_backstops;
 
 /* tb-maint.c link registry (see the block comment there). phys_only marks

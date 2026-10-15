@@ -93,32 +93,19 @@ int xemu_xpage_chain_level(void)
  * tb-maint.c link-registry unlink: sever exactly the registered
  * cross-page chains, synchronously (which also closes the old
  * queue-to-safe-point window), keeping every translation. Chains relink
- * lazily on the next execution. XEMU_XPAGE_UNLINK=0 restores the v0.11
- * queued-flush behavior wholesale; registry overflow falls back to it
- * automatically, so correctness never depends on registry capacity.
+ * lazily on the next execution. Registry overflow falls back to the
+ * queued flush automatically, so correctness never depends on registry
+ * capacity.
  * Armed at every chain level that can create cross-page links (>=1; the
  * unlink is a no-op when nothing is registered).
  */
 uint64_t xemu_xpage_full_flush_backstops;
 
-bool xemu_xpage_unlink_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_XPAGE_UNLINK");
-        on = (e && e[0] == '0') ? 0 : 1;
-        if (e) {
-            xpage_arm();
-        }
-    }
-    return on;
-}
-
 void xemu_xpage_note_full_flush(CPUState *cpu)
 {
     if (xemu_xpage_chain_level() >= 1) {
         xemu_xpage_full_flush_backstops++;
-        if (!xemu_xpage_unlink_on() || !xemu_xpage_unlink_registered(cpu)) {
+        if (!xemu_xpage_unlink_registered(cpu)) {
             queue_tb_flush(cpu);
         }
     }
@@ -313,10 +300,9 @@ static void xemu_xpage_dump(void)
             (unsigned long long)xemu_xpage_emitted,
             (unsigned long long)xemu_xpage_full_flush_backstops);
     fprintf(stderr,
-            "xemu:      backstop unlink=%d: events=%llu dests-severed=%llu "
-            "reg-overflows=%llu reg-phys-only=%llu (overflow/unlink-off "
-            "fall back to queued tb_flush)\n",
-            xemu_xpage_unlink_on() ? 1 : 0,
+            "xemu:      backstop unlink: events=%llu dests-severed=%llu "
+            "reg-overflows=%llu reg-phys-only=%llu (overflow falls back to "
+            "queued tb_flush)\n",
             (unsigned long long)xemu_xpage_unlink_events,
             (unsigned long long)xemu_xpage_unlink_dests,
             (unsigned long long)xemu_xpage_reg_overflows,

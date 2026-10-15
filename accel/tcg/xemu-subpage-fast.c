@@ -17,7 +17,6 @@
 #include "exec/cpu-common.h"
 #include "system/physmem.h"
 #include "exec/xemu-subpage-fast.h"
-#include "xemu-inv-prof.h"
 #include "accel/tcg/probe.h"
 #include "accel/tcg/cpu-mmu-index.h"
 #include "tcg/tcg.h"
@@ -129,15 +128,6 @@ int xemu_subpage_fast_mode(void)
         const char *e = getenv("XEMU_SUBPAGE_FAST");
         if (e) {
             m = (e[0] == '1') ? 1 : 0;
-        }
-        /*
-         * Arm (a) maintains the code-block bitmap this probe consults
-         * (xemu_subpage_set_code runs under its gate). With arm (a)
-         * disabled the mirror would read all-clear — the wrong-code
-         * direction — so force off.
-         */
-        if (!xemu_subpage_dirty_on()) {
-            m = 0;
         }
         e = getenv("XEMU_SUBPAGE_FAST_REFUTE");
         if (m && e && e[0] == '1') {

@@ -58,13 +58,13 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | icount warp from the main loop | fixed | Warped from a clock missing the slice's instructions: a timer fired late by host scheduling, ~3% of `vanilla-exit` replays diverged. cc5d72113f only made it rarer | `icount_vcpu_warps` |
 | Caching JIT write-protect flips | reverted | Parity; the 9.7% was sampler skid | ledger |
 | Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
-| TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `XEMU_SUBPAGE_DIRTY=0` |
-| xpage full-flush backstop | fixed | Flushes aren't rare (139 per 20 s streaming) → the v0.11 lag; unlink registry | `XEMU_XPAGE_UNLINK=0` |
+| TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `683b919631` |
+| xpage full-flush backstop | fixed | Flushes aren't rare (139 per 20 s streaming) → the v0.11 lag; unlink registry | `f7d9cc2ff1` |
 | Full TLB flush per MemAccessCallback change (~190/s in normal mode) | fixed | Its old 0.2%-of-vCPU estimate missed the refills and the rebuilt jump cache and near-return memo: 2.3% of host instructions per frame (det offscreen); now a ranged refill | `tlb_flush_host_range` |
 | Superblock seams, then region formation | closed | −1.6% to −4.5%: TCG spills before any exiting branch | `ee1de9f654`, `d65fc5f83e` |
 | SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `d76ddd7b20` |
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
-| `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
+| `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `4e7531cfae` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
 | Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |
 | Normal mode: drop the store barriers too, or weaken them to `dmb ishst` | closed | +1.3% more frames/Gcycle than load-only (det, 5 pairs), and OHCI needs store-store order; `ishst` measured no cheaper than `ish` | `XEMU_GUEST_MO=1` |

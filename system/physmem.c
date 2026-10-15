@@ -1073,20 +1073,6 @@ bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client)
 }
 
 #if defined(XBOX)
-bool xemu_dirty_fast_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        int m = 1;
-        const char *e = getenv("XEMU_DIRTY_FAST");
-        if (e) {
-            m = (e[0] == '1') ? 1 : 0;
-        }
-        on = m;
-    }
-    return on;
-}
-
 /*
  * All five clients' bits for the single page holding @addr, under one RCU
  * read guard and one page/idx/offset computation — the shape the five
@@ -1123,10 +1109,8 @@ uint8_t physical_memory_page_dirty_bits(ram_addr_t addr)
 bool physical_memory_is_clean(ram_addr_t addr)
 {
 #if defined(XBOX)
-    if (xemu_dirty_fast_on()) {
-        return physical_memory_page_dirty_bits(addr) != DIRTY_CLIENTS_ALL;
-    }
-#endif
+    return physical_memory_page_dirty_bits(addr) != DIRTY_CLIENTS_ALL;
+#else
     bool nv2a = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_NV2A);
     bool nv2a_tex = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_NV2A_TEX);
     bool vga = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_VGA);
@@ -1134,6 +1118,7 @@ bool physical_memory_is_clean(ram_addr_t addr)
     bool migration =
         physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_MIGRATION);
     return !(nv2a && nv2a_tex && vga && code && migration);
+#endif
 }
 
 static bool physical_memory_all_dirty(ram_addr_t start, ram_addr_t length,

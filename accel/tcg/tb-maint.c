@@ -216,17 +216,14 @@ static void xemu_inv_prof_dump(void)
                 secs, secs > 0.0 ? xemu_io_recompiles / secs / 1000.0 : 0.0);
     }
 
-    if (xemu_subpage_dirty_on() || xemu_subpage_refute_on()) {
-        fprintf(stderr,
-                "xemu:  (e) SUBPAGE dirty=%d refute=%d  fast-skips=%llu"
-                "  |  refute: examined=%llu would-skip=%llu VIOLATIONS=%llu\n",
-                xemu_subpage_dirty_on() ? 1 : 0,
-                xemu_subpage_refute_on() ? 1 : 0,
-                (unsigned long long)xemu_subpage_skips,
-                (unsigned long long)xemu_subpage_refute_total,
-                (unsigned long long)xemu_subpage_refute_hits,
-                (unsigned long long)xemu_subpage_refute_violations);
-    }
+    fprintf(stderr,
+            "xemu:  (e) SUBPAGE refute=%d  fast-skips=%llu"
+            "  |  refute: examined=%llu would-skip=%llu VIOLATIONS=%llu\n",
+            xemu_subpage_refute_on() ? 1 : 0,
+            (unsigned long long)xemu_subpage_skips,
+            (unsigned long long)xemu_subpage_refute_total,
+            (unsigned long long)xemu_subpage_refute_hits,
+            (unsigned long long)xemu_subpage_refute_violations);
 }
 
 static bool xemu_inv_dump_armed;
@@ -290,26 +287,24 @@ bool xemu_inv_timing_on(void)
 /* Counters defined in the top counter block: xemu_subpage_skips,
  * xemu_subpage_refute_{total,hits,violations}. */
 
-bool xemu_subpage_dirty_on(void)
+bool xemu_subpage_refute_on(void)
 {
     static int on = -1;
     if (on < 0) {
-        /* Default ON since the 2026-07-11 interleaved A/B: +4.33±1.53 fps
-         * F8 (4/4 pairs), +11.63±0.52 fps F5 (3/3), refuter 60M+ skips
-         * over 45 reload cycles with 0 violations. XEMU_SUBPAGE_DIRTY=0
-         * restores whole-page invalidation wholesale. The default path
-         * does NOT arm the INV_PROF exit dump; request it explicitly via
-         * XEMU_INV_PROF / XEMU_SUBPAGE_REFUTE. */
-        const char *e = getenv("XEMU_SUBPAGE_DIRTY");
-        on = (e && e[0] == '0') ? 0 : 1;
+        const char *e = getenv("XEMU_SUBPAGE_REFUTE");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on && !xemu_inv_dump_armed) {
+            xemu_inv_dump_armed = true;
+            atexit(xemu_inv_prof_dump);
+        }
 #if !defined(__aarch64__)
         /*
          * Arm (b) -- "subpage-fast", the inline NOTDIRTY store pre-filter --
          * is emitted only by the aarch64 TCG backend, whose emitter is the only
          * consumer of xemu_subpage_fast_mode(), so on any other host
          * XEMU_SUBPAGE_FAST=1 was silently inert. Say so once from
-         * this arm-(a) latch, which every host does reach. Apple Silicon is
-         * aarch64 and never compiles this branch.
+         * this latch, which every host reaches on its first code-page store.
+         * Apple Silicon is aarch64 and never compiles this branch.
          */
         {
             const char *f = getenv("XEMU_SUBPAGE_FAST");
@@ -324,26 +319,6 @@ bool xemu_subpage_dirty_on(void)
 #endif
     }
     return on;
-}
-
-bool xemu_subpage_refute_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_SUBPAGE_REFUTE");
-        on = (e && e[0] == '1') ? 1 : 0;
-        if (on && !xemu_inv_dump_armed) {
-            xemu_inv_dump_armed = true;
-            atexit(xemu_inv_prof_dump);
-        }
-    }
-    return on;
-}
-
-/* Bitmap maintenance runs whenever either sub-page mode is armed. */
-static inline bool xemu_subpage_track_on(void)
-{
-    return xemu_subpage_dirty_on() || xemu_subpage_refute_on();
 }
 
 /* Block mask for the in-page byte range [start, last] (same page). */
@@ -516,10 +491,9 @@ struct PageDesc {
 #if defined(XBOX)
     /*
      * Sub-page dirty tracking: bit b set => some live TB on this page covers
-     * sub-block b (64 B). Maintained only when a sub-page mode is armed;
-     * separate from ram_list.dirty_memory[*] (never aliases the DIRTY_MEMORY_*
-     * bitmaps the PFIFO consumers read). See the block comment near
-     * xemu_subpage_dirty_on().
+     * sub-block b (64 B). Separate from ram_list.dirty_memory[*] (never
+     * aliases the DIRTY_MEMORY_* bitmaps the PFIFO consumers read). See the
+     * block comment near xemu_subpage_refute_on().
      */
     uint64_t code_blocks;
 #endif
@@ -1166,9 +1140,7 @@ static void tb_page_add(PageDesc *p, TranslationBlock *tb, unsigned int n)
     p->first_tb = (uintptr_t)tb | n;
 
 #if defined(XBOX)
-    if (unlikely(xemu_subpage_track_on())) {
-        xemu_subpage_set_code(p, tb, n);
-    }
+    xemu_subpage_set_code(p, tb, n);
 #endif
 
     /*
@@ -1969,44 +1941,40 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
         struct page_collection *pages;
 
 #if defined(XBOX)
-        /* Default-on since 2026-07-11 — no unlikely() hint (a stale one
-         * statically mispredicted this ~26k/s trap path). */
-        if (xemu_subpage_track_on()) {
-            bool filter_noncode = !xemu_subpage_code_overlaps(p, start, len);
+        bool filter_noncode = !xemu_subpage_code_overlaps(p, start, len);
 
-            if (unlikely(xemu_subpage_refute_on())) {
-                /*
-                 * Validation mode: take the lock and compare the filter
-                 * decision to a ground-truth TB-overlap scan (cost irrelevant
-                 * here). Then honor the arm (a) skip only if XEMU_SUBPAGE_DIRTY
-                 * is also set, so REFUTE alone changes no behavior.
-                 */
-                pages = page_collection_lock(start, last);
-                xemu_subpage_refute_check(p, start, last, filter_noncode);
-                if (xemu_subpage_dirty_on() && filter_noncode) {
-                    xemu_subpage_skips++;
-                    page_collection_unlock(pages);
-                    return true;
-                }
-                bool still_code =
-                    tb_invalidate_phys_page_range__locked(cpu, pages, p,
-                                                          start, last, ra);
-                page_collection_unlock(pages);
-                return still_code;
-            }
-
+        if (unlikely(xemu_subpage_refute_on())) {
+            /*
+             * Validation mode: take the lock and compare the filter decision
+             * to a ground-truth TB-overlap scan (cost irrelevant here), then
+             * honor the skip as the default path does, so the refuter
+             * validates the live mechanism.
+             */
+            pages = page_collection_lock(start, last);
+            xemu_subpage_refute_check(p, start, last, filter_noncode);
             if (filter_noncode) {
-                /*
-                 * Arm (a) fast path: the write lands entirely outside every
-                 * code sub-block, so no TB can have been modified. Skip the
-                 * page-collection lock, the TB scan, and the invalidation
-                 * altogether. The page stays write-protected (we did not empty
-                 * it), so notdirty_write's tail leaves TLB_NOTDIRTY set and the
-                 * next store re-traps into this O(1) check.
-                 */
                 xemu_subpage_skips++;
+                page_collection_unlock(pages);
                 return true;
             }
+            bool still_code =
+                tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                                      start, last, ra);
+            page_collection_unlock(pages);
+            return still_code;
+        }
+
+        if (filter_noncode) {
+            /*
+             * Arm (a) fast path: the write lands entirely outside every code
+             * sub-block, so no TB can have been modified. Skip the
+             * page-collection lock, the TB scan, and the invalidation
+             * altogether. The page stays write-protected (we did not empty
+             * it), so notdirty_write's tail leaves TLB_NOTDIRTY set and the
+             * next store re-traps into this O(1) check.
+             */
+            xemu_subpage_skips++;
+            return true;
         }
 #endif
 

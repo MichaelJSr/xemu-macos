@@ -1490,7 +1490,6 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     uint64_t xemu_t0 = xemu_time ? xemu_inv_ticks() : 0;
     uint64_t xemu_ti = 0;
     bool xemu_did_inval = false;
-    bool xemu_fast = xemu_dirty_fast_on();
     bool code_dirty;
 #endif
 
@@ -1504,10 +1503,8 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
      * four clients by construction, which makes physical_memory_is_clean()
      * exactly !code_dirty.
      */
-    code_dirty = xemu_fast
-        ? (physical_memory_page_dirty_bits(ram_addr) &
-           (1 << DIRTY_MEMORY_CODE)) != 0
-        : physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE);
+    code_dirty = (physical_memory_page_dirty_bits(ram_addr) &
+                  (1 << DIRTY_MEMORY_CODE)) != 0;
 
     if (!code_dirty) {
         bool still_code;
@@ -1529,7 +1526,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
 
     /* We remove the notdirty callback only if the code has been flushed. */
-    if (xemu_fast ? code_dirty : !physical_memory_is_clean(ram_addr)) {
+    if (code_dirty) {
         trace_memory_notdirty_set_dirty(mem_vaddr);
         tlb_set_dirty(cpu, mem_vaddr);
     }

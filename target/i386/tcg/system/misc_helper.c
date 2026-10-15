@@ -115,11 +115,11 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
 #if defined(XBOX)
         /*
          * A CR3 reload can change any mapping, so sever every cross-page
-         * chain. Routed through the shared backstop: default is the
-         * link-registry unlink (cheap, keeps translations — CR3 writes
-         * turned out NOT to be rare during level streaming, contrary to
-         * the original single-address-space assumption); XEMU_XPAGE_UNLINK=0
-         * or registry overflow falls back to the v0.11 queued tb_flush.
+         * chain. Routed through the shared backstop: the link-registry
+         * unlink (cheap, keeps translations — CR3 writes turned out NOT to
+         * be rare during level streaming, contrary to the original
+         * single-address-space assumption); registry overflow falls back
+         * to the v0.11 queued tb_flush.
          */
         xemu_xpage_note_full_flush(env_cpu(env));
 #endif

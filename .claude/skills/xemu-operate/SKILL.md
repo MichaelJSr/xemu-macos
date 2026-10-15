@@ -195,9 +195,9 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | Var | Effect | Read in |
 |---|---|---|
 | *On by default; `=0` restores legacy* | | |
-| `XEMU_SUBPAGE_DIRTY`, `_FAST` | Sub-page invalidation | `tcg/tb-maint.c`, `tcg/xemu-subpage-fast.c` |
-| `XEMU_XPAGE_CHAIN`, `_UNLINK` | Cross-page chaining | `tcg/xemu-xpage.c` |
-| `XEMU_ELIDE_CANDOIO`, `XEMU_DIRTY_FAST` | TCG store elisions | `tcg/translator.c`, `system/physmem.c` |
+| `XEMU_SUBPAGE_FAST` | Sub-page invalidation, store prefilter (arm b) | `tcg/xemu-subpage-fast.c` |
+| `XEMU_XPAGE_CHAIN` | Cross-page chaining | `tcg/xemu-xpage.c` |
+| `XEMU_ELIDE_CANDOIO` | TCG store elision | `tcg/translator.c` |
 | `XEMU_ICOUNT_STEP` | Icount budget cuts step one-instruction TBs instead of translating cut blocks | `tcg/cpu-exec.c` |
 | *Off by default* | | |
 | `XEMU_GUEST_MO=1` | Keep every guest memory-order barrier (normal mode drops the load-load ones and icount all, until a network backend attaches) | top-level `tcg/tcg-op-ldst.c` |
