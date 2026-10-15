@@ -287,6 +287,28 @@ static void nv2a_unlock_fifo(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
+/*
+ * Let PFIFO finish and write GPU-rendered surfaces back to guest RAM, as
+ * savevm does, so a copy of RAM (xemu-dump-ram) sees what the guest would.
+ * Call with the BQL held and the VM paused.
+ */
+void nv2a_sync_ram(void)
+{
+    NV2AState *d = g_nv2a;
+
+    nv2a_lock_fifo(d);
+    bool halted = qatomic_read(&d->pfifo.halt);
+    qatomic_set(&d->pfifo.halt, true);
+    pgraph_pre_savevm_trigger(d);
+    nv2a_unlock_fifo(d);
+    bql_unlock();
+    pgraph_pre_savevm_wait(d);
+    bql_lock();
+    nv2a_lock_fifo(d);
+    qatomic_set(&d->pfifo.halt, halted);
+    nv2a_unlock_fifo(d);
+}
+
 static void nv2a_reset(NV2AState *d)
 {
     nv2a_lock_fifo(d);

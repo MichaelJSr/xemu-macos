@@ -81,11 +81,16 @@ void gdb_init_gdbserver_state(void)
 /* writes 2*len+1 bytes in buf */
 void gdb_memtohex(GString *buf, const uint8_t *mem, int len)
 {
-    int i, c;
-    for(i = 0; i < len; i++) {
-        c = mem[i];
-        g_string_append_c(buf, tohex(c >> 4));
-        g_string_append_c(buf, tohex(c & 0xf));
+    /* xemu: sized once and filled from a table; megabyte reads are common. */
+    static const char hex[] = "0123456789abcdef";
+    gsize start = buf->len;
+    char *p;
+
+    g_string_set_size(buf, start + 2 * (gsize)len);
+    p = buf->str + start;
+    for (int i = 0; i < len; i++) {
+        p[2 * i] = hex[mem[i] >> 4];
+        p[2 * i + 1] = hex[mem[i] & 0xf];
     }
     g_string_append_c(buf, '\0');
 }
@@ -185,18 +190,24 @@ void gdb_put_strbuf(void)
 /* Encode data using the encoding for 'x' packets.  */
 void gdb_memtox(GString *buf, const char *mem, int len)
 {
-    char c;
-
-    while (len--) {
-        c = *(mem++);
-        switch (c) {
-        case '#': case '$': case '*': case '}':
+    /*
+     * xemu: escaped bytes are rare in guest memory, so copy the runs
+     * between them in bulk; megabyte 'x' reads are common.
+     */
+    while (len > 0) {
+        int run = 0;
+        while (run < len && mem[run] != '#' && mem[run] != '$' &&
+               mem[run] != '*' && mem[run] != '}') {
+            run++;
+        }
+        g_string_append_len(buf, mem, run);
+        mem += run;
+        len -= run;
+        if (len > 0) {
             g_string_append_c(buf, '}');
-            g_string_append_c(buf, c ^ 0x20);
-            break;
-        default:
-            g_string_append_c(buf, c);
-            break;
+            g_string_append_c(buf, *mem ^ 0x20);
+            mem++;
+            len--;
         }
     }
 }
@@ -1279,54 +1290,84 @@ static void handle_write_mem(GArray *params, void *user_ctx)
     gdb_put_packet("OK");
 }
 
+/*
+ * xemu: replies are built in growable buffers, so 'm' and 'x' reads may ask
+ * for up to this much (upstream: MAX_PACKET_LENGTH / 2, 64 KiB). Harnesses
+ * that sweep guest memory need far fewer round trips; clients that honour
+ * the advertised PacketSize are unaffected.
+ */
+#define XEMU_GDB_MAX_READ (4 * 1024 * 1024)
+
+/*
+ * Read @len bytes at @addr into mem_buf. Returns the bytes read: all of
+ * them, or the readable prefix, as the protocol allows, when the range runs
+ * into an unmapped page (a heap guard page past the end of an object, say);
+ * 0 when nothing is readable.
+ */
+static size_t gdb_read_mem_prefix(vaddr addr, size_t len)
+{
+    size_t done = 0;
+    size_t page = qemu_target_page_size();
+
+    g_byte_array_set_size(gdbserver_state.mem_buf, len);
+    if (!gdb_target_memory_rw_debug(gdbserver_state.g_cpu, addr,
+                                    gdbserver_state.mem_buf->data, len,
+                                    false)) {
+        return len;
+    }
+    while (done < len) {
+        size_t chunk = MIN(len - done, page - ((addr + done) & (page - 1)));
+        if (gdb_target_memory_rw_debug(gdbserver_state.g_cpu, addr + done,
+                                       gdbserver_state.mem_buf->data + done,
+                                       chunk, false)) {
+            break;
+        }
+        done += chunk;
+    }
+    g_byte_array_set_size(gdbserver_state.mem_buf, done);
+    return done;
+}
+
 static void handle_read_mem(GArray *params, void *user_ctx)
 {
-    if (params->len != 2) {
+    if (params->len != 2 ||
+        gdb_get_cmd_param(params, 1)->val_ull > XEMU_GDB_MAX_READ) {
         gdb_put_packet("E22");
         return;
     }
 
-    /* gdb_memtohex() doubles the required space */
-    if (gdb_get_cmd_param(params, 1)->val_ull > MAX_PACKET_LENGTH / 2) {
-        gdb_put_packet("E22");
+    if (!gdb_read_mem_prefix(gdb_get_cmd_param(params, 0)->val_ull,
+                             gdb_get_cmd_param(params, 1)->val_ull)) {
+        gdb_put_packet("E14");
         return;
-    }
-
-    g_byte_array_set_size(gdbserver_state.mem_buf,
-                          gdb_get_cmd_param(params, 1)->val_ull);
-
-    if (gdb_target_memory_rw_debug(gdbserver_state.g_cpu,
-                                   gdb_get_cmd_param(params, 0)->val_ull,
-                                   gdbserver_state.mem_buf->data,
-                                   gdbserver_state.mem_buf->len, false)) {
-        /*
-         * Reply with the readable prefix, as the protocol allows, so a read
-         * that runs into an unmapped page (a heap guard page past the end
-         * of an object, say) still returns the bytes before it.
-         */
-        hwaddr addr = gdb_get_cmd_param(params, 0)->val_ull;
-        size_t len = gdbserver_state.mem_buf->len, done = 0;
-        size_t page = qemu_target_page_size();
-
-        while (done < len) {
-            size_t chunk = MIN(len - done, page - ((addr + done) & (page - 1)));
-            if (gdb_target_memory_rw_debug(gdbserver_state.g_cpu, addr + done,
-                                           gdbserver_state.mem_buf->data + done,
-                                           chunk, false)) {
-                break;
-            }
-            done += chunk;
-        }
-        if (!done) {
-            gdb_put_packet("E14");
-            return;
-        }
-        g_byte_array_set_size(gdbserver_state.mem_buf, done);
     }
 
     gdb_memtohex(gdbserver_state.str_buf, gdbserver_state.mem_buf->data,
              gdbserver_state.mem_buf->len);
     gdb_put_strbuf();
+}
+
+/* 'x addr,length': binary read (GDB 16); reply "b" + escaped bytes. */
+static void handle_read_mem_bin(GArray *params, void *user_ctx)
+{
+    if (params->len != 2 ||
+        gdb_get_cmd_param(params, 1)->val_ull > XEMU_GDB_MAX_READ) {
+        gdb_put_packet("E22");
+        return;
+    }
+
+    if (!gdb_read_mem_prefix(gdb_get_cmd_param(params, 0)->val_ull,
+                             gdb_get_cmd_param(params, 1)->val_ull)) {
+        gdb_put_packet("E14");
+        return;
+    }
+
+    g_string_assign(gdbserver_state.str_buf, "b");
+    gdb_memtox(gdbserver_state.str_buf,
+               (const char *)gdbserver_state.mem_buf->data,
+               gdbserver_state.mem_buf->len);
+    gdb_put_packet_binary(gdbserver_state.str_buf->str,
+                          gdbserver_state.str_buf->len, true);
 }
 
 static void handle_write_all_regs(GArray *params, void *user_ctx)
@@ -1694,6 +1735,7 @@ void gdb_extend_qsupported_features(char *qflags)
 static void handle_query_supported(GArray *params, void *user_ctx)
 {
     g_string_printf(gdbserver_state.str_buf, "PacketSize=%x", MAX_PACKET_LENGTH);
+    g_string_append(gdbserver_state.str_buf, ";binary-upload+");
     if (gdb_get_core_xml_file(first_cpu)) {
         g_string_append(gdbserver_state.str_buf, ";qXfer:features:read+");
     }
@@ -2215,6 +2257,17 @@ static int gdb_handle_packet(const char *line_buf)
                 .schema = "L,L0"
             };
             cmd_parser = &read_mem_cmd_desc;
+        }
+        break;
+    case 'x':
+        {
+            static const GdbCmdParseEntry read_mem_bin_cmd_desc = {
+                .handler = handle_read_mem_bin,
+                .cmd = "x",
+                .cmd_startswith = true,
+                .schema = "L,L0"
+            };
+            cmd_parser = &read_mem_bin_cmd_desc;
         }
         break;
     case 'M':

@@ -24,6 +24,7 @@
 void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
 void nv2a_context_init(void);
 int nv2a_get_framebuffer_surface(void);
+void nv2a_sync_ram(void);
 
 /*
  * Metal-native presentation: pull the current present frame as an

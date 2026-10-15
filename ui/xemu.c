@@ -47,7 +47,11 @@
 #include "system/system.h"
 #include "system/cpus.h"
 #include "exec/icount.h"
+#include "exec/cpu-common.h"
+#include "exec/target_page.h"
 #include "hw/core/cpu.h"
+#include "qemu/rcu.h"
+#include "qemu/units.h"
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
 #include "xemu-settings.h"
@@ -1075,6 +1079,140 @@ void xemu_state_loaded(void)
 {
     vblank_virtual_rearm = true;
     xemu_input_state_loaded();
+}
+
+/*
+ * QMP xemu-dump-ram: guest memory to a file in one write, from the RAM
+ * block's host pointer (a 128 MiB dump takes tens of milliseconds; pmemsave
+ * goes 1 KiB at a time through the memory API).
+ */
+static void dump_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
+                         vaddr address, uint64_t size, int64_t *unmapped)
+{
+    CPUState *cpu = qemu_get_cpu(0);
+    uint64_t page = qemu_target_page_size();
+
+    for (uint64_t off = 0; off < size;) {
+        vaddr va = address + off;
+        uint64_t in_page = va & (page - 1);
+        uint64_t chunk = MIN(size - off, page - in_page);
+        hwaddr pa = cpu_get_phys_page_debug(cpu, va - in_page);
+
+        if (pa != -1 && pa + in_page + chunk <= ram_size) {
+            memcpy(out + off, ram + pa + in_page, chunk);
+        } else {
+            memset(out + off, 0, chunk);
+            (*unmapped)++;
+        }
+        off += chunk;
+    }
+}
+
+XemuRamDump *qmp_xemu_dump_ram(const char *filename,
+                               bool has_address, uint64_t address,
+                               bool has_size, uint64_t size,
+                               bool has_virtual, bool virt,
+                               bool has_pause, bool pause,
+                               bool has_gpu_sync, bool gpu_sync,
+                               Error **errp)
+{
+    RAMBlock *rb;
+    uint8_t *ram;
+    uint64_t ram_size;
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        rb = qemu_ram_block_by_name("xbox.ram");
+    }
+    if (!rb) {
+        error_setg(errp, "no xbox.ram block");
+        return NULL;
+    }
+    ram = qemu_ram_get_host_addr(rb);
+    ram_size = qemu_ram_get_used_length(rb);
+
+    if (!has_address) {
+        address = 0;
+    }
+    if (virt) {
+        if (!has_size) {
+            error_setg(errp, "a virtual dump needs a size");
+            return NULL;
+        }
+        if (size > 4ULL * GiB) {
+            error_setg(errp, "size must be at most 4 GiB");
+            return NULL;
+        }
+    } else {
+        if (address > ram_size) {
+            error_setg(errp, "address is past the end of RAM (%" PRIu64 ")",
+                       ram_size);
+            return NULL;
+        }
+        if (!has_size) {
+            size = ram_size - address;
+        }
+        if (size > ram_size - address) {
+            error_setg(errp, "range runs past the end of RAM (%" PRIu64 ")",
+                       ram_size);
+            return NULL;
+        }
+    }
+    if (!has_pause) {
+        pause = true;
+    }
+    if (!has_gpu_sync) {
+        gpu_sync = true;
+    }
+
+    bool resume = pause && runstate_is_running();
+    if (resume) {
+        vm_stop(RUN_STATE_PAUSED);
+    }
+    bool paused = !runstate_is_running();
+    if (paused && gpu_sync) {
+        nv2a_sync_ram();
+    }
+
+    int64_t t0 = get_clock();
+    int64_t unmapped = 0;
+    bool ok = false;
+    int fd = qemu_create(filename, O_WRONLY | O_TRUNC | O_BINARY, 0644, errp);
+    if (fd >= 0) {
+        const uint8_t *src = ram + address;
+        g_autofree uint8_t *buf = NULL;
+        if (virt) {
+            buf = g_try_malloc(size ? size : 1);
+            if (!buf) {
+                error_setg(errp, "out of memory for %" PRIu64 " bytes", size);
+            } else {
+                dump_virtual(buf, ram, ram_size, address, size, &unmapped);
+                src = buf;
+            }
+        }
+        if ((!virt || buf) && qemu_write_full(fd, src, size) != size) {
+            error_setg_errno(errp, errno, "writing '%s' failed", filename);
+        } else if (!virt || buf) {
+            ok = true;
+        }
+        close(fd);
+    }
+    int64_t elapsed_us = (get_clock() - t0) / SCALE_US;
+
+    if (resume) {
+        vm_start();
+    }
+    if (!ok) {
+        return NULL;
+    }
+
+    XemuRamDump *info = g_new0(XemuRamDump, 1);
+    info->size = size;
+    info->ram_size = ram_size;
+    info->frame = frame_count;
+    info->paused = paused;
+    info->unmapped = unmapped;
+    info->elapsed_us = elapsed_us;
+    return info;
 }
 
 static void vblank_timer_callback(void *opaque)

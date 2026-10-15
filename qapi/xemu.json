@@ -46,3 +46,58 @@
 ##
 { 'command': 'xemu-frame-advance', 'data': { '*frames': 'int' },
   'returns': 'XemuFrameInfo', 'coroutine': true }
+
+##
+# @XemuRamDump:
+#
+# @size: bytes written
+#
+# @ram-size: guest RAM size in bytes (64 MiB retail, 128 MiB devkit)
+#
+# @frame: the frame counter (see @query-xemu-frame) at the copy
+#
+# @paused: whether the VM was paused during the copy; a copy of a
+#     running VM is torn
+#
+# @unmapped: pages written as zeros because no guest RAM backs them
+#     (virtual dumps only)
+#
+# @elapsed-us: time spent copying and writing, in microseconds
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRamDump',
+  'data': { 'size': 'uint64', 'ram-size': 'uint64', 'frame': 'int',
+            'paused': 'bool', 'unmapped': 'int', 'elapsed-us': 'int' } }
+
+##
+# @xemu-dump-ram:
+#
+# Write guest memory to a file in one write: all of guest RAM by
+# default, or [@address, @address + @size).
+#
+# @filename: file to create or truncate
+#
+# @address: physical start address, or with @virtual a virtual one
+#     (CPU 0's page tables); default 0
+#
+# @size: bytes to write; default the rest of RAM (required with
+#     @virtual)
+#
+# @virtual: translate through the guest page tables; pages that no
+#     guest RAM backs (unmapped, or MMIO) read as zeros (default
+#     false)
+#
+# @pause: pause the VM for the copy and resume it afterwards if it was
+#     running (default true)
+#
+# @gpu-sync: when paused, first write GPU-rendered surfaces back to
+#     RAM, as savevm does (default true; nothing to do with the null
+#     renderer)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-dump-ram',
+  'data': { 'filename': 'str', '*address': 'uint64', '*size': 'uint64',
+            '*virtual': 'bool', '*pause': 'bool', '*gpu-sync': 'bool' },
+  'returns': 'XemuRamDump' }

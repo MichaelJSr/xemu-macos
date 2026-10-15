@@ -190,8 +190,24 @@ Other automation interfaces (windowed or headless):
   on an unchanged copy of the same HDD: wait for `xemu: ready`, run
   `migrate-incoming {"uri": "file:/path"}`, wait for `xemu: state
   loaded`, then `cont`.
-- **Bulk RAM dumps**: QMP `pmemsave` (physical; all 128 MiB in ~0.2 s)
-  and `memsave` (virtual; fails if the range touches an unmapped page).
+- **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
+  writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
+  128 MiB, pausing the VM for the copy unless `"pause": false`. Add
+  `"address"`/`"size"` for a physical range, or `"virtual": true` for a
+  range of CPU 0's virtual addresses, where pages that no RAM backs read
+  as zeros (counted in `unmapped`). `"gpu-sync"` (default on) first
+  writes GPU-rendered surfaces back to RAM, as savevm does. `pmemsave`
+  and `memsave` work too, 1 KiB at a time.
+- **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named POSIX
+  shared memory that another process can map (Python:
+  `multiprocessing.shared_memory.SharedMemory("<name>")`, then
+  `resource_tracker.unregister` so Python does not unlink it). The name
+  is replaced if it exists and unlinked at exit; savestates are
+  unaffected.
+- **gdbstub reads** may ask for up to 4 MiB per `m` (was 64 KiB), and the
+  binary `x addr,len` read (GDB 16, advertised as `binary-upload+`)
+  halves the bytes on the wire. In `Qqemu.PhyMemMode:1` a 150 MB sweep
+  takes under a second.
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

@@ -52,6 +52,10 @@
 #include "hw/xbox/xbox_pci.h"
 #include "hw/i2c/i2c.h"
 #include "hw/i2c/smbus_eeprom.h"
+#include "migration/vmstate.h"
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 #include "hw/xbox/nv2a/nv2a.h"
 #include "hw/xbox/mcpx/apu/apu.h"
 
@@ -173,6 +177,53 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
     g_free(bios_data); /* duplicated by `rom_add_blob_fixed` */
 }
 
+#ifndef _WIN32
+static char *xbox_ram_shm_name;
+
+static void xbox_ram_shm_unlink(void)
+{
+    shm_unlink(xbox_ram_shm_name);
+}
+
+/*
+ * XEMU_RAM_SHM=<name>: back guest RAM with named POSIX shared memory, so a
+ * harness can map it and read guest RAM with no copy at all (Python:
+ * multiprocessing.shared_memory.SharedMemory("<name>")). The RAM block
+ * keeps its name, so savestates load either way. A stale object of the
+ * same name (from a crashed run) is replaced; the name is unlinked at exit.
+ */
+static bool xbox_ram_shm_init(MemoryRegion *ram, uint64_t size)
+{
+    const char *e = getenv("XEMU_RAM_SHM");
+    if (!e || !e[0]) {
+        return false;
+    }
+
+    xbox_ram_shm_name = g_strdup_printf("%s%s", e[0] == '/' ? "" : "/", e);
+    shm_unlink(xbox_ram_shm_name);
+    int fd = shm_open(xbox_ram_shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || ftruncate(fd, size) < 0) {
+        error_report("XEMU_RAM_SHM: cannot create %s: %s", xbox_ram_shm_name,
+                     strerror(errno));
+        exit(1);
+    }
+    void *host = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (host == MAP_FAILED) {
+        error_report("XEMU_RAM_SHM: cannot map %s: %s", xbox_ram_shm_name,
+                     strerror(errno));
+        exit(1);
+    }
+    atexit(xbox_ram_shm_unlink);
+
+    memory_region_init_ram_ptr(ram, NULL, "xbox.ram", size, host);
+    vmstate_register_ram_global(ram);
+    fprintf(stderr, "xemu: guest RAM in shared memory %s\n",
+            xbox_ram_shm_name);
+    return true;
+}
+#endif
+
 static void xbox_memory_init(PCMachineState *pcms,
                              MemoryRegion *system_memory,
                              MemoryRegion *rom_memory,
@@ -191,8 +242,13 @@ static void xbox_memory_init(PCMachineState *pcms,
      * with older qemus that used qemu_ram_alloc().
      */
     ram = g_malloc(sizeof(*ram));
-    memory_region_init_ram(ram, NULL, "xbox.ram",
-                           machine->ram_size, &error_fatal);
+#ifndef _WIN32
+    if (!xbox_ram_shm_init(ram, machine->ram_size))
+#endif
+    {
+        memory_region_init_ram(ram, NULL, "xbox.ram",
+                               machine->ram_size, &error_fatal);
+    }
 
     *ram_memory = ram;
     memory_region_add_subregion(system_memory, 0, ram);
