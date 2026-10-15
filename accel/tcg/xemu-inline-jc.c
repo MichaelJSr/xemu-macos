@@ -15,9 +15,12 @@
  * the cached TB, otherwise it falls through to the caller's helper
  * fallback. Validation mirrors a helper jump-cache hit: entry pc
  * compare, then tb->cs_base/flags/cflags against the exit site's
- * constants (exact because runtime context at a TB exit equals that
- * TB's own translation context; non-base-cflags exit TBs simply
- * never match, which is a safe fallback). The live tb->cflags load
+ * values. cs_base and cflags are constants (exact because runtime
+ * context at a TB exit equals that TB's own translation context;
+ * non-base-cflags exit TBs simply never match, which is a safe
+ * fallback). flags is a constant too, except after an insn that
+ * rewrote some flag bits, where the caller passes them as computed at
+ * runtime (i386 fldcw: HF_FPU_RC/PC). The live tb->cflags load
  * catches CF_INVALID from invalidation; gdb breakpoint insertion
  * invalidates the TBs on the breakpoint's page (xemu_gdb_bp_invalidate
  * in tcg-accel-ops.c), so hits cannot skip a new breakpoint. Interrupts are seen at the target TB's entry check,
@@ -34,7 +37,7 @@
 #if defined(XBOX)
 void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32,
                                         intptr_t jc_env_offset,
-                                        uint64_t cs_base, uint32_t flags,
+                                        uint64_t cs_base, TCGv_i32 flags,
                                         uint32_t cflags)
 {
     /*
@@ -85,7 +88,7 @@ void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32,
     tcg_gen_brcond_i64(TCG_COND_NE, t64, pc64, slow);
 
     tcg_gen_ld_i32(t32, tbp, offsetof(TranslationBlock, flags));
-    tcg_gen_brcondi_i32(TCG_COND_NE, t32, (int32_t)flags, slow);
+    tcg_gen_brcond_i32(TCG_COND_NE, t32, flags, slow);
     tcg_gen_ld_i64(t64, tbp, offsetof(TranslationBlock, cs_base));
     tcg_gen_brcondi_i64(TCG_COND_NE, t64, (int64_t)cs_base, slow);
     tcg_gen_ld_i32(t32, tbp, offsetof(TranslationBlock, cflags));

@@ -70,17 +70,19 @@ skill's Open frontier.
 1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The machinery was removed on 2026-10-10.
 2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The `XEMU_RETC_BITS` knob was removed on 2026-10-10; the width is fixed at 12 bits.
 3. **Sub-page arm (b) — promoted default-on 2026-07-18** (`ede35b84f9`). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: CPU / JIT (ARM64).
-4. **Cross-page chaining, page-spanning-dest coverage gap — MEASURED
-   BELOW BAR 2026-07-18, parked.** The dispatch loop refuses to
-   direct-chain into a TB that itself spans two pages (`cpu-exec.c`
-   tb_page_addr1 guard). The sizing counter (`xemu_inv_span_nochain`,
-   INV_PROF dump (d')) read **0.26-0.54M declines/s in-game on F8**
-   (45.9M per ~85 s baseline run; roughly half that with arm (b) on)
-   against the pre-registered ≥ ~1M/s bar — and each decline costs
-   only a jump-cache-class lookup, so the ceiling is well under 2% of
-   the vCPU thread. Closing the gap means keying the xpage backstop on
-   *both* dest pages, an archaeology-1.24-class hazard — not worth it
-   at this rate. Reopen only if a title shows the counter ≥ 1M/s.
+4. **Cross-page chaining, page-spanning-dest coverage gap — parked
+   2026-07-18; its exits are routed since 2026-10-15.** The dispatch
+   loop refuses to direct-chain into a TB that itself spans two pages
+   (`cpu-exec.c` tb_page_addr1 guard). The sizing counter
+   (`xemu_inv_span_nochain`, INV_PROF dump (d')) read 0.26-0.54M
+   declines/s in-game on F8, and the item was parked on the belief that
+   a decline costs a jump-cache-class lookup. It cost a full exit
+   through `cpu_exec_loop`. `gen_jmp_rel` now sends every direct exit
+   to a target in the last 14 bytes of a page through the inline
+   jump-cache probe, which may enter a spanning TB: declines fell from
+   3.1M to under 1K per 1200 heavy-f1 det frames. Chaining into such
+   TBs (keying the xpage backstop on *both* dest pages, an
+   archaeology-1.24-class hazard) would now save only the probe.
 5. **Real-hardware validation debt (not fps; the largest open
    correctness item).** Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list

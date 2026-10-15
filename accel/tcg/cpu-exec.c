@@ -1496,6 +1496,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              */
             if (tb_page_addr1(tb) != -1) {
 #if defined(XBOX)
+                /*
+                 * Rare on the Xbox: i386 reaches a TB that may span two
+                 * pages through the jump-cache probe rather than a
+                 * goto_tb slot (gen_jmp_rel), so it seldom exits here.
+                 */
                 if (unlikely(xemu_inv_prof_on())) {
                     xemu_inv_span_nochain++;
                 }

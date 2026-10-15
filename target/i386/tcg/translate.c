@@ -209,6 +209,7 @@ typedef struct DisasContext {
     bool jmp_opt; /* use direct block chaining for direct jumps */
 #if defined(XBOX)
     bool xemu_ret_exit; /* current DISAS_JUMP terminator is a near ret */
+    bool xemu_fldcw_exit; /* current DISAS_JUMP terminator follows fldcw */
     /* x87 census / deferral (target/i386/tcg/xemu-x87.h) */
     uint8_t xemu_x87_run;       /* x87 insns since the last cache flush */
     CPUX86State *xemu_env;      /* code-byte peeks (xemu_idle_loop_kind) */
@@ -3516,14 +3517,29 @@ gen_eob(DisasContext *s, int mode)
         } else {
             if (xemu_probe_ok) {
                 TCGv_i32 lin = tcg_temp_new_i32();
+                TCGv_i32 flags =
+                    tcg_constant_i32((int32_t)s->base.tb->flags);
                 tcg_gen_addi_i32(lin, cpu_eip, (int32_t)s->cs_base);
+                if (s->xemu_fldcw_exit) {
+                    s->xemu_fldcw_exit = false;
+                    /*
+                     * fldcw rewrote HF_FPU_RC/PC (cpu_set_fpuc). Every
+                     * other flag bit is still this TB's, so take those
+                     * two from env->hflags and the rest as a constant.
+                     */
+                    const uint32_t fpu = HF_FPU_RC_MASK | HF_FPU_PC_MASK;
+                    flags = tcg_temp_new_i32();
+                    tcg_gen_ld_i32(flags, tcg_env,
+                                   offsetof(CPUX86State, hflags));
+                    tcg_gen_andi_i32(flags, flags, fpu);
+                    tcg_gen_ori_i32(flags, flags,
+                                    (int32_t)(s->base.tb->flags & ~fpu));
+                }
                 tcg_gen_xemu_jc_probe_and_goto_ptr(
                     lin,
                     offsetof(X86CPU, parent_obj.tb_jmp_cache) -
                         offsetof(X86CPU, env),
-                    (uint64_t)s->cs_base,
-                    (uint32_t)s->base.tb->flags,
-                    tb_cflags(s->base.tb));
+                    (uint64_t)s->cs_base, flags, tb_cflags(s->base.tb));
             }
             tcg_gen_lookup_and_goto_ptr();
         }
@@ -3621,6 +3637,25 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
             (tb_cflags(s->base.tb) & CF_PCREL)) {
             gen_helper_xemu_xpage_refute(tcg_env, tcg_constant_i64(s->cs_base));
         }
+    }
+#endif
+
+#if defined(XBOX)
+    /*
+     * A target in the last X86_MAX_INSN_LENGTH - 1 bytes of its page can
+     * start with an insn that crosses into the next page, and
+     * cpu_exec_loop never chains into a TB that spans two pages (its
+     * tb_page_addr1 guard), so a goto_tb slot to it would leave through
+     * the dispatch loop every time. Reach such targets through gen_eob's
+     * jump-cache probe and helper_lookup_tb_ptr instead: both may enter a
+     * spanning TB, because tlb_flush_page also clears the jump cache for
+     * the page before. This covers the fall-through out of a TB that
+     * stopped before a page-crossing insn too (i386_tr_translate_insn,
+     * case 2).
+     */
+    if (((uint32_t)new_pc & ~TARGET_PAGE_MASK) >
+        TARGET_PAGE_SIZE - X86_MAX_INSN_LENGTH) {
+        use_goto_tb = false;
     }
 #endif
 
@@ -3977,7 +4012,17 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_helper_fldcw(tcg_env, s->tmp2_i32);
             update_fip = update_fdp = false;
             gen_update_eip_next(s);
+#if defined(XBOX)
+            /*
+             * The new RC/PC are part of the next TB's flags, so no
+             * goto_tb; gen_eob's probe compares them as computed at
+             * runtime, and helper_lookup_tb_ptr reads them from env.
+             */
+            s->xemu_fldcw_exit = true;
+            gen_eob(s, DISAS_JUMP);
+#else
             gen_eob(s, DISAS_EOB_ONLY);
+#endif
             break;
         case 0x0e: /* fnstenv mem */
             gen_helper_fstenv(tcg_env, s->A0,
@@ -5250,6 +5295,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
 #if defined(XBOX)
     dc->xemu_ret_exit = false;
+    dc->xemu_fldcw_exit = false;
     dc->xemu_x87_run = 0;
     dc->xemu_fip_pend = false;
     dc->xemu_fdp_pend = false;

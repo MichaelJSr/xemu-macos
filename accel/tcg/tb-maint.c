@@ -198,8 +198,8 @@ static void xemu_inv_prof_dump(void)
             (unsigned long long)xemu_inv_retmemo_emitted,
             exits ? 100.0 * xemu_inv_retmemo_emitted / exits : 0.0);
 
-    /* Sizes the "page-spanning targets decline to chain" xpage coverage
-     * gap: runtime count of chain refusals at the spanning-dest guard. */
+    /* Runtime count of chain refusals at the spanning-dest guard (each a
+     * full dispatch-loop exit); near zero since gen_jmp_rel's page-end rule. */
     fprintf(stderr,
             "xemu:  (d') spanning-dest chain declines=%llu\n",
             (unsigned long long)xemu_inv_span_nochain);

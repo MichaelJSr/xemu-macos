@@ -166,8 +166,9 @@ extern uint64_t xemu_inv_jcprobe_emitted;   /* inline jump-cache probe (indirect
 extern uint64_t xemu_inv_retmemo_emitted;   /* inline ret-memo exits */
 
 /* (d') runtime count of direct-chain refusals because the DEST TB spans
- * two guest pages (cpu-exec.c tb_page_addr1 guard) — sizes the xpage
- * "page-spanning targets decline to chain" coverage gap. */
+ * two guest pages (cpu-exec.c tb_page_addr1 guard). Each one is a full
+ * dispatch-loop exit. Near zero on i386, whose direct exits to a target
+ * near a page end use the jump-cache probe instead (gen_jmp_rel). */
 extern uint64_t xemu_inv_span_nochain;
 
 /* (c) recycle-miss classifier: the inv_htable lookup without the ihash byte
