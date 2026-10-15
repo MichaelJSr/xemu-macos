@@ -593,7 +593,7 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
     uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
 
-    if (*dma_get != *dma_put) {
+    if (*dma_get != qatomic_read(dma_put)) {
         return;
     }
 

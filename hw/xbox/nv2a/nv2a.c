@@ -416,7 +416,8 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
      *     thread's tile-config reads, which were never BQL-protected.
      *   - user.c: both handlers take d->pfifo.lock for their entire
      *     body and pfifo_kick() under it (the Invariant-10 kick
-     *     discipline). The BQL added nothing.
+     *     discipline), or, in normal mode, run lockless
+     *     (pfifo_put_doorbell; user_read loads). The BQL added nothing.
      *   - pgraph.c: handlers hold pg->lock (read) or pfifo.lock+pg->lock
      *     (write); the PFIFO thread arbitrates regs_[] via pg->lock, not
      *     the BQL. The BQL's only real job was serialising the interrupt
@@ -443,6 +444,16 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
                 memory_region_enable_lockless_io(&d->block_mmio[NV_PGRAPH]);
             }
         }
+    }
+
+    /*
+     * Lockless DMA_PUT doorbell and USER reads (pfifo_put_doorbell).
+     * Deterministic mode keeps the locked ones, which bump kick_seq for
+     * pfifo_icount_sync. XEMU_PFIFO_PUT_LOCK=1 keeps them in normal mode.
+     */
+    {
+        const char *e = getenv("XEMU_PFIFO_PUT_LOCK");
+        d->pfifo.lockless_put = !icount_enabled() && !(e && e[0] == '1');
     }
 
     qemu_mutex_init(&d->pfifo.lock);

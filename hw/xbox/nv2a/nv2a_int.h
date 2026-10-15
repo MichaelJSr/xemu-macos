@@ -113,6 +113,10 @@ typedef struct NV2AState {
         bool inline_pusher;
         /* the vCPU runs the inline pusher holding pfifo and pgraph locks */
         bool inline_locked;
+        /* Normal mode: DMA_PUT doorbells skip pfifo.lock (pfifo_put_doorbell) */
+        bool lockless_put;
+        bool doorbell;
+        bool parked;
     } pfifo;
 
     /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */

@@ -320,6 +320,7 @@ void pgraph_check_within_begin_end_block(PGRAPHState *pg);
 void *pfifo_thread(void *arg);
 void pfifo_kick(NV2AState *d);
 void pfifo_guest_kick(NV2AState *d);
+void pfifo_put_doorbell(NV2AState *d, uint32_t put);
 void pfifo_icount_sync(NV2AState *d);
 
 void pgraph_renderer_register(const PGRAPHRenderer *renderer);

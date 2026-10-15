@@ -103,11 +103,13 @@ void pfifo_kick(NV2AState *d)
 {
     /*
      * Callers must hold d->pfifo.lock across the kick-set + broadcast
-     * pair. All call sites in the tree satisfy this (20 as of
-     * 2026-07-11 — re-verify the full set when adding one): pfifo_write,
-     * the pgraph/{gl,vk}/{surface,display,renderer}.c paths,
+     * pair. All call sites in the tree satisfy this (24 as of
+     * 2026-10-15, six of them through pfifo_guest_kick — re-verify the
+     * full set when adding one): pfifo_write,
+     * the pgraph/{gl,vk}/{surface,display,renderer,reports}.c paths,
      * nv2a.c:nv2a_unlock_fifo, pgraph.c:pgraph_write /
-     * do_wait_for_renderer_switch, and user.c:user_write. The
+     * do_wait_for_renderer_switch, user.c:user_write and
+     * pfifo_put_doorbell. The
      * PGRAPH-lockless audit (docs/Finished/pgraph-lockless-audit.md)
      * re-verified
      * this set unchanged: pgraph_write's three kicks (NV_PGRAPH_INTR /
@@ -132,6 +134,30 @@ void pfifo_guest_kick(NV2AState *d)
 {
     if (!qatomic_read(&d->pfifo.inline_pusher)) {
         pfifo_kick(d);
+    }
+}
+
+/*
+ * Normal mode: the guest's DMA_PUT doorbell (its hottest nv2a write)
+ * without pfifo.lock. The thread holds that lock across report fence waits
+ * (REPORTS_SUBMIT), which used to block the vCPU here for ~8% of its time.
+ * The release store publishes the pushbuffer words written before it to
+ * the pusher's acquire load of PUT. The doorbell flag and the thread's
+ * parked flag form a Dekker pair (full barrier on both sides): either this
+ * sees the thread parked and kicks it under the lock as before, or the
+ * thread sees the doorbell before it parks and runs the pusher again.
+ * Only the first doorbell per park pays for the lock and broadcast.
+ */
+void pfifo_put_doorbell(NV2AState *d, uint32_t put)
+{
+    qatomic_store_release(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT], put);
+    qatomic_store_release(&d->pfifo.doorbell, true);
+    smp_mb();
+    if (qatomic_read(&d->pfifo.parked) &&
+        qatomic_xchg(&d->pfifo.parked, false)) {
+        qemu_mutex_lock(&d->pfifo.lock);
+        pfifo_kick(d);
+        qemu_mutex_unlock(&d->pfifo.lock);
     }
 }
 
@@ -423,7 +449,8 @@ static void pfifo_run_pusher(NV2AState *d)
 
     while (!pfifo_pusher_should_stall(d)) {
         uint32_t dma_get_v = *dma_get;
-        uint32_t dma_put_v = *dma_put;
+        /* Pairs with the release in pfifo_put_doorbell. */
+        uint32_t dma_put_v = qatomic_load_acquire(dma_put);
         if (dma_get_v == dma_put_v) break;
         if (dma_get_v >= dma_len) {
             assert(!"Dma value is out of range in PFIFO pusher");
@@ -557,7 +584,8 @@ static void pfifo_run_pusher(NV2AState *d)
             }
         }
 
-        *dma_get = dma_get_v;
+        /* The words before GET are consumed (lockless user_read). */
+        qatomic_store_release(dma_get, dma_get_v);
 
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
             break;
@@ -645,6 +673,8 @@ void *pfifo_thread(void *arg)
     qemu_mutex_lock(&d->pfifo.lock);
     while (true) {
         d->pfifo.fifo_kick = false;
+        /* Before the pusher reads PUT (pfifo_put_doorbell). */
+        qatomic_xchg(&d->pfifo.doorbell, false);
 
         pgraph_process_pending(d);
 
@@ -709,21 +739,28 @@ void *pfifo_thread(void *arg)
         }
 
         if (!d->pfifo.fifo_kick) {
-            if (pfifo_park_stats) {
-                pfifo_park_stats_parks++;
-                pfifo_park_stats_iters = pfifo_loop_iters;
+            /* The other half of the pfifo_put_doorbell Dekker pair. */
+            qatomic_set(&d->pfifo.parked, true);
+            smp_mb();
+            if (!qatomic_read(&d->pfifo.doorbell)) {
+                if (pfifo_park_stats) {
+                    pfifo_park_stats_parks++;
+                    pfifo_park_stats_iters = pfifo_loop_iters;
+                }
+                qatomic_store_release(&d->pfifo.idle_seq,
+                                      d->pfifo.kick_seq);
+                qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
+                /*
+                 * Untimed wait. Invariant: every pfifo_kick call site
+                 * holds d->pfifo.lock across the fifo_kick-set +
+                 * cond_broadcast pair (see comment on pfifo_kick above),
+                 * so the reader's kick-check + qemu_cond_wait atomic
+                 * release is race-free. Eliminates the earlier ~1 kHz
+                 * safety-net wake-up.
+                 */
+                qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
             }
-            qatomic_store_release(&d->pfifo.idle_seq, d->pfifo.kick_seq);
-            qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
-            /*
-             * Untimed wait. Invariant: every pfifo_kick call site
-             * holds d->pfifo.lock across the fifo_kick-set +
-             * cond_broadcast pair (see comment on pfifo_kick above),
-             * so the reader's kick-check + qemu_cond_wait atomic
-             * release is race-free. Eliminates the earlier ~1 kHz
-             * safety-net wake-up.
-             */
-            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            qatomic_set(&d->pfifo.parked, false);
         }
 
         if (qatomic_read(&d->exiting)) {
