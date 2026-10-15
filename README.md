@@ -183,6 +183,21 @@ Other automation interfaces (windowed or headless):
   advance ends it early with `debug-stop: true`. In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
+- **Input recording**: `XEMU_INPUT_RECORD=<file>` writes, at every
+  vblank, the changes in what one pad gave the guest
+  (`XEMU_INPUT_RECORD_PORT=1-4`, default the first bound port) as
+  `XEMU_INPUT_PIPE` lines tagged `+N` from the last load, each load
+  opening a `# load` section. Buttons come out as `down`/`up` of their
+  keyboard-map scancodes and sticks and triggers as values that give
+  back the same 16-bit reading (a stick reaches -32768 at
+  `-1.000030518`), so a gamepad session replays through the keyboard
+  pad. While recording, pads change only at vblanks, as under icount.
+  To replay: bind the keyboard pad to that port with the same keyboard
+  map, load the same state paused, write the section's lines, advance.
+  A recording made under icount replays bit-identically; one made in
+  normal mode replays bit-identically from one replay to the next, and
+  follows the original closely (Azurik's player within 0.001 units over
+  240 frames) but not exactly, since guest time followed the host clock.
 - **Per-frame traces**: `xemu-frame-advance {"frames": N, "trace":
   [{"address": A, "size": S}, ...]}` also returns `trace`, one sample
   per vblank (`"trace-every": K` for every Kth, the last always

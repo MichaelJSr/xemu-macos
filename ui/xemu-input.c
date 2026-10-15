@@ -287,6 +287,8 @@ static void xemu_input_vm_state_change(void *opaque, bool running,
 }
 
 static void xemu_input_vmstate_init(void);
+static void input_record_init(void);
+static void input_record_load(void);
 
 void xemu_input_init(void)
 {
@@ -294,6 +296,7 @@ void xemu_input_init(void)
         qemu_add_vm_change_state_handler(xemu_input_vm_state_change, NULL);
     }
     xemu_input_vmstate_init();
+    input_record_init();
 
     if (g_config.input.background_input_capture) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -554,14 +557,22 @@ static void xemu_input_publish_controller(ControllerState *state)
     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 }
 
+static FILE *record_file;
+
+/*
+ * Pads change only at vblanks (xemu_input_frame_tick), never on a host-time
+ * poll from the USB device or the UI loop: in deterministic mode (icount),
+ * and while recording (XEMU_INPUT_RECORD), so that the recorded run gets
+ * its input on the vblanks a replay gives it.
+ */
+static bool input_at_vblanks(void)
+{
+    return icount_enabled() || record_file;
+}
+
 void xemu_input_update_controller(ControllerState *state)
 {
-    /*
-     * Deterministic mode (icount): pads change only at vblanks
-     * (xemu_input_frame_tick), never on a host-time poll from the USB
-     * device or the UI loop.
-     */
-    if (icount_enabled()) {
+    if (input_at_vblanks()) {
         return;
     }
 
@@ -661,7 +672,8 @@ static void test_input_apply(const char *line)
         bool trigger = axis == CONTROLLER_AXIS_LTRIG ||
                        axis == CONTROLLER_AXIS_RTRIG;
         if (axis >= 0 && (line[0] == 't') == trigger) {
-            v = MAX(trigger ? 0.0 : -1.0, MIN(v, 1.0));
+            /* A stick reaches -32768, one step below -1.0 (recordings). */
+            v = MAX(trigger ? 0.0 : -32768.0 / 32767.0, MIN(v, 1.0));
             test_axis_override[axis] = (int16_t)lround(v * 32767.0);
         }
     }
@@ -953,6 +965,7 @@ static void xemu_input_vmstate_init(void)
  */
 void xemu_input_state_loaded(void)
 {
+    input_record_load();
     if (!icount_enabled()) {
         test_input_loaded = false;
         return;
@@ -971,7 +984,110 @@ void xemu_input_state_loaded(void)
     test_input_partial_len = 0;
 }
 
+/*
+ * XEMU_INPUT_RECORD=<file>: at every vblank, the state one pad gave the
+ * guest (XEMU_INPUT_RECORD_PORT, 1-4; default the first bound port), as
+ * XEMU_INPUT_PIPE lines for the changes, tagged "+N" with the vblanks
+ * since the last load (or launch); each load starts a "# load" section
+ * from neutral. Buttons are written as down/up of their keyboard-map
+ * scancodes and sticks and triggers as values that give back the same
+ * 16-bit reading, so the keyboard pad bound to that port in a replay with
+ * the same keyboard map hands the guest the same state from the same
+ * vblank: write a section's lines after loading the same state, then run.
+ */
+static int record_port = -1;
+static uint64_t record_base;
+static uint16_t record_buttons;
+static int16_t record_axes[CONTROLLER_AXIS__COUNT];
+
+static void input_record_init(void)
+{
+    const char *path = getenv("XEMU_INPUT_RECORD");
+    const char *port = getenv("XEMU_INPUT_RECORD_PORT");
+
+    if (!path || !path[0]) {
+        return;
+    }
+    record_file = fopen(path, "w");
+    if (!record_file) {
+        fprintf(stderr, "xemu: XEMU_INPUT_RECORD open failed: %s\n", path);
+        return;
+    }
+    setvbuf(record_file, NULL, _IOLBF, 0);
+    if (port && port[0] >= '1' && port[0] <= '4' && !port[1]) {
+        record_port = port[0] - '1';
+    }
+    fprintf(record_file, "# xemu input recording: XEMU_INPUT_PIPE lines; "
+            "+N counts vblanks from the last load\n");
+}
+
+static void input_record_load(void)
+{
+    if (!record_file) {
+        return;
+    }
+    record_base = test_input_frame;
+    record_buttons = 0;
+    memset(record_axes, 0, sizeof(record_axes));
+    fprintf(record_file, "# load\n");
+}
+
+static void input_record_frame(uint64_t frame)
+{
+    static const int buttons[] = { /* bit order of ControllerState.buttons */
+        0, 1, 2, 3, 13, 11, 14, 12, 4, 6, 9, 10, 7, 8, 5,
+    };
+    static const char *const axes[CONTROLLER_AXIS__COUNT] = {
+        [CONTROLLER_AXIS_LTRIG] = "trigger lt", [CONTROLLER_AXIS_RTRIG] = "trigger rt",
+        [CONTROLLER_AXIS_LSTICK_X] = "axis lx", [CONTROLLER_AXIS_LSTICK_Y] = "axis ly",
+        [CONTROLLER_AXIS_RSTICK_X] = "axis rx", [CONTROLLER_AXIS_RSTICK_Y] = "axis ry",
+    };
+    ControllerState *c = NULL;
+    uint16_t now_buttons = 0;
+    const int16_t *now_axes = NULL;
+    uint64_t at = frame - record_base;
+
+    if (record_port >= 0) {
+        c = bound_controllers[record_port];
+    } else {
+        for (int i = 0; i < 4 && !c; i++) {
+            c = bound_controllers[i];
+        }
+    }
+    if (c) {
+        now_buttons = c->buttons;
+        now_axes = c->axis;
+    }
+    for (int i = 0; i < ARRAY_SIZE(buttons); i++) {
+        uint16_t bit = 1 << i;
+        if ((now_buttons ^ record_buttons) & bit) {
+            fprintf(record_file, "+%" PRIu64 " %s %d\n", at,
+                    now_buttons & bit ? "down" : "up",
+                    *g_keyboard_scancode_map[buttons[i]]);
+        }
+    }
+    record_buttons = now_buttons;
+    for (int i = 0; i < CONTROLLER_AXIS__COUNT; i++) {
+        int16_t v = now_axes ? now_axes[i] : 0;
+        if (v != record_axes[i]) {
+            fprintf(record_file, "+%" PRIu64 " %s %.9f\n", at, axes[i],
+                    v / 32767.0);
+            record_axes[i] = v;
+        }
+    }
+}
+
+static void input_frame_tick(uint64_t frame);
+
 void xemu_input_frame_tick(uint64_t frame)
+{
+    input_frame_tick(frame);
+    if (record_file) {
+        input_record_frame(frame);
+    }
+}
+
+static void input_frame_tick(uint64_t frame)
 {
     bool applied = false;
 
@@ -995,8 +1111,8 @@ void xemu_input_frame_tick(uint64_t frame)
         }
     }
     ControllerState *iter;
-    if (icount_enabled()) {
-        /* Deterministic mode: every pad is published here and only here. */
+    if (input_at_vblanks()) {
+        /* Every pad is published here and only here. */
         QTAILQ_FOREACH(iter, &available_controllers, entry) {
             xemu_input_publish_controller(iter);
         }
