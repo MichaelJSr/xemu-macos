@@ -22,6 +22,7 @@
 #define HW_XBOX_MCPX_VP_H
 
 #include <samplerate.h>
+#include "linear_src.h"
 
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
@@ -44,15 +45,12 @@ typedef struct MCPXAPUVoiceFilter {
     uint16_t voice;
     uint32_t *voice_buf;
     float resample_buf[NUM_SAMPLES_PER_FRAME * 2];
-    SRC_STATE *resampler;
     /*
-     * Channel count the current resampler instance was created with:
-     * true = 2-channel (stereo voice), false = 1-channel (mono voice).
-     * libsamplerate channel count is fixed at creation; a format
-     * change (rare voice-slot reuse) triggers src_delete + recreate
-     * via voice_resample.
+     * src.channels is 2 for a stereo voice, 1 for mono, 0 before the
+     * voice first resamples; a format change (rare voice-slot reuse)
+     * restarts it (voice_resample).
      */
-    bool resampler_stereo;
+    LinearSrc src;
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;

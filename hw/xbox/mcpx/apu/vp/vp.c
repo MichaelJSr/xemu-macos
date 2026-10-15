@@ -214,8 +214,9 @@ static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
     assert(v < MCPX_HW_MAX_VOICES);
     memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
     hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
-    if (d->vp.filters[v].resampler) {
-        src_reset(d->vp.filters[v].resampler);
+    if (d->vp.filters[v].src.channels) {
+        linear_src_reset(&d->vp.filters[v].src,
+                         d->vp.filters[v].src.channels);
     }
 }
 
@@ -1571,12 +1572,12 @@ static long voice_resample_callback(void *cb_data, float **data)
         sample_count = NUM_SAMPLES_PER_FRAME;
     }
 
-    if (!filter->resampler_stereo) {
+    if (filter->src.channels == 1) {
         /*
          * voice_get_samples writes 2-channel interleaved even for
          * mono voices (stereo bit off → the inner loop writes [0],
          * then the end-of-iteration duplicates [0] into [1]).
-         * Compact in place so libsamplerate operates on 1-channel
+         * Compact in place so the resampler operates on 1-channel
          * frames and skips half the linear-interp arithmetic.
          * Starting at i == 1 avoids the self-assign for index 0.
          */
@@ -1596,14 +1597,14 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
 
     /*
-     * NOTE: An earlier "rate == 1.0 fast path" that skipped libsamplerate
+     * NOTE: An earlier "rate == 1.0 fast path" that skipped the resampler
      * entirely was reverted. It produced audible artifacts / hangs on
      * voice drain (voice_resample_callback pads with silence on
-     * starvation so libsamplerate always returns NUM_SAMPLES_PER_FRAME;
+     * starvation so the resampler always returns NUM_SAMPLES_PER_FRAME;
      * the fast path returned early instead, and voice_process's outer
      * loop can deadlock retrying on a voice that's draining to completion
-     * during scene transitions). Keep the full libsamplerate path even
-     * for rate ≈ 1.0; SRC_LINEAR mode passes through unchanged samples
+     * during scene transitions). Keep the full resampler path even
+     * for rate ≈ 1.0; linear mode passes through unchanged samples
      * cheaply, and the callback overhead is negligible at 48 kHz.
      */
 
@@ -1611,35 +1612,20 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                                  NV_PAVS_VOICE_CFG_FMT_STEREO);
 
     /*
-     * libsamplerate channel count is fixed at creation; a voice-slot
-     * format change (e.g. guest reconfigures a previously-stereo
-     * slot as mono) requires a fresh SRC_STATE. The common case is
-     * no format change per voice activation cycle, so this only
-     * fires on reuse transitions.
+     * The channel count is fixed while a voice plays; a voice-slot format
+     * change (e.g. guest reconfigures a previously-stereo slot as mono)
+     * restarts the resampler, as a new libsamplerate state used to.
      */
-    if (filter->resampler != NULL && filter->resampler_stereo != stereo) {
-        src_delete(filter->resampler);
-        filter->resampler = NULL;
-    }
-
-    if (filter->resampler == NULL) {
+    if (filter->src.channels != (stereo ? 2 : 1)) {
         filter->voice = v;
-        filter->resampler_stereo = stereo;
-        int err;
-
-        /* Xbox MCPX APU uses linear interpolation for pitch shifting. */
-        filter->resampler = src_callback_new(&voice_resample_callback,
-                                             SRC_LINEAR,
-                                             stereo ? 2 : 1, &err, filter);
-        if (filter->resampler == NULL) {
-            fprintf(stderr, "src error: %s\n", src_strerror(err));
-            assert(0);
-        }
+        linear_src_reset(&filter->src, stereo ? 2 : 1);
     }
 
     if (stereo) {
-        int count = src_callback_read(filter->resampler, rate, requested_num,
-                                      (float *)samples);
+        int count = linear_src_callback_read(&filter->src,
+                                             voice_resample_callback, filter,
+                                             rate, requested_num,
+                                             (float *)samples);
         if (count == -1) {
             DPRINTF("resample error\n");
         }
@@ -1653,7 +1639,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     }
 
     /*
-     * Mono path: libsamplerate writes 1 float per frame into mono_out.
+     * Mono path: the resampler writes 1 float per frame into mono_out.
      * Broadcast each sample into both columns of samples[][2] so all
      * downstream stereo-in-2-channel consumers (SVF, HRTF, mixbin
      * accumulation) see the same interleaved layout as before.
@@ -1662,8 +1648,9 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
      */
     assert(requested_num <= NUM_SAMPLES_PER_FRAME);
     float mono_out[NUM_SAMPLES_PER_FRAME];
-    int count = src_callback_read(filter->resampler, rate, requested_num,
-                                  mono_out);
+    int count = linear_src_callback_read(&filter->src,
+                                         voice_resample_callback, filter,
+                                         rate, requested_num, mono_out);
     if (count == -1) {
         DPRINTF("resample error\n");
     }
@@ -2624,11 +2611,7 @@ void mcpx_apu_vp_reset(MCPXAPUState *d)
          */
         for (int v = 0; v < ARRAY_SIZE(d->vp.filters); v++) {
             MCPXAPUVoiceFilter *f = &d->vp.filters[v];
-            if (f->resampler) {
-                src_delete(f->resampler);
-                f->resampler = NULL;
-            }
-            f->resampler_stereo = false;
+            linear_src_reset(&f->src, 0);
             memset(f->resample_buf, 0, sizeof(f->resample_buf));
             memset(f->svf, 0, sizeof(f->svf));
         }
