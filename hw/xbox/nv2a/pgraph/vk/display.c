@@ -2321,44 +2321,18 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
             if (mfx_mode == 2 && metalfx_temporal_is_supported()) {
                 /*
-                 * Real depth (opt-in XEMU_MFX_REAL_DEPTH) feeds the
-                 * scaler NV2A zeta in place of synthetic luminance depth.
-                 *   1 = live read of the bound zeta's exported MTLTexture
-                 *       — one frame ahead by present time (documented).
-                 *   2 = the flip-time snapshot captured in surface.c,
-                 *       which is temporally correct for this frame.
+                 * Real depth (opt-in XEMU_MFX_REAL_DEPTH=2) feeds the
+                 * scaler the flip-time zeta snapshot captured in
+                 * surface.c, which is temporally correct for this frame,
+                 * in place of synthetic luminance depth.
                  * metalfx_temporal_init / _upscale_tex validate the
                  * texture's dims+format and fall back to synthetic on any
                  * mismatch, so a stale/mismatched handle is always safe.
                  */
                 void *zeta_tex = NULL;
-                int rd_mode = pgraph_vk_mfx_real_depth_mode();
-                if (rd_mode == 2) {
-                    /* Snapshot mirrors the bound zeta at flip; its dims
-                     * are validated by metalfx_temporal_init below. */
-                    if (r->zeta_snapshot_valid) {
-                        zeta_tex = r->zeta_snapshot_mtl_texture;
-                    }
-                } else if (rd_mode == 1 && disp->mtl_texture) {
-                    /*
-                     * Pick the zeta whose dimensions match the displayed
-                     * color surface, preferring the most recently drawn.
-                     * The *bound* zeta at sync time can be a different
-                     * shape entirely (e.g. a 2560-wide combined buffer
-                     * while the displayed surface is 1280 wide).
-                     */
-                    SurfaceBinding *best = NULL, *it;
-                    QTAILQ_FOREACH(it, &r->surfaces, entry) {
-                        if (!it->color && it->mtl_texture &&
-                            it->width == surface->width &&
-                            it->height == surface->height &&
-                            (!best || it->draw_time > best->draw_time)) {
-                            best = it;
-                        }
-                    }
-                    if (best) {
-                        zeta_tex = best->mtl_texture;
-                    }
+                if (pgraph_vk_mfx_real_depth_mode() == 2 &&
+                    r->zeta_snapshot_valid) {
+                    zeta_tex = r->zeta_snapshot_mtl_texture;
                 }
                 if (metalfx_temporal_init(disp->width, disp->height,
                                          out_w, out_h, zeta_tex)) {

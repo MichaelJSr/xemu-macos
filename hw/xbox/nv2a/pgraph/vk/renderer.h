@@ -171,13 +171,6 @@ typedef struct SurfaceBinding {
     VkImageLayout image_scratch_current_layout;
     VmaAllocation allocation_scratch;
 
-    /*
-     * Exported MTLTexture of a zeta image (opt-in real depth for
-     * MetalFX temporal, XEMU_MFX_REAL_DEPTH=1; requires
-     * metal_texture_export_enabled). Retained; NULL otherwise.
-     */
-    void *mtl_texture;
-
     bool initialized;
 
     /*
@@ -764,10 +757,12 @@ typedef struct PGRAPHVkState {
 
     /*
      * Flip-time zeta snapshot (XEMU_MFX_REAL_DEPTH=2): a dedicated,
-     * exportable image blitted from the bound zeta at FLIP_STALL, so
-     * the MetalFX temporal scaler samples depth that matches the
-     * *presented* frame rather than the next in-progress one the single
-     * live guest zeta already holds by present time. Recreated on zeta
+     * exportable image blitted at FLIP_STALL from the zeta whose
+     * dimensions match the bound color target (not necessarily the
+     * bound zeta; see pgraph_vk_zeta_snapshot_capture), so the MetalFX
+     * temporal scaler samples depth that matches the *presented* frame
+     * rather than the next in-progress one the single live guest zeta
+     * already holds by present time. Recreated on zeta
      * dims/format change; mtl_texture retained. Fields are declared
      * unconditionally (harmless pointers/handles) but only ever touched
      * under HAVE_IOSURFACE_SHARING.
@@ -1142,8 +1137,8 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 // surface.c
 void pgraph_vk_init_surfaces(PGRAPHState *pg);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
-/* XEMU_MFX_REAL_DEPTH: 0 = synthetic (default), 1 = live zeta read,
- * 2 = flip-time zeta snapshot. Cached env parse; safe on all platforms. */
+/* XEMU_MFX_REAL_DEPTH: 0 = synthetic (default), 2 = flip-time zeta
+ * snapshot. Cached env parse; safe on all platforms. */
 int pgraph_vk_mfx_real_depth_mode(void);
 /* Flip-time zeta snapshot producer/teardown (XEMU_MFX_REAL_DEPTH=2).
  * Capture records a depth blit into the frame's command buffer and must

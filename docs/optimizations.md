@@ -43,7 +43,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SURFACE_CB_STATS` | `1` prints an exit census of NV2A surface CPU-access-callback registrations/unregistrations — each one is an `async_safe_run_on_cpu` (one vCPU stop) that refills the TLB entries for the surface's pages (`tlb_flush_host_range`; a full all-mmuidx flush plus a jump-cache wipe until 2026-10-15) — split by whether the event came from `update_surface_part`'s invalidate-then-create path (the zeta ping-pong) or anywhere else. No behavior change |
 | `XEMU_PFIFO_KICK_STATS` | `1` prints an exit census of `pgraph_write`'s `pfifo_kick` broadcasts (call site × whether a PFIFO wait condition actually transitioned × `FIFO_ACCESS` × whether a kick was already pending) plus the PFIFO thread's idle-park count — the denominator that says how many broadcasts could ever have woken a parked waiter. Counter only: suppression is deliberately not implemented (archaeology 7.1 — a wrongly-skipped kick is a permanent PFIFO hang), and the 2026-08-04 census closed the idea (Settled vectors) |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
-| `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `1` = live read (one frame late), `2` = flip-time snapshot (temporally correct); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
+| `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols; TB lookups classified by exit kind. Measurement-run only (not benchmark-neutral) |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
@@ -1335,18 +1335,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 - **Opt-in real depth for temporal** (`XEMU_MFX_REAL_DEPTH`):
   feeds the temporal scaler the NV2A zeta (standard-Z) in place of
   synthetic luminance depth, with automatic fallback when the format
-  is rejected or no zeta matches the scaler's input dims. `1` exports
-  every zeta and hands the dims-matched one to the scaler live — but
-  by present time the single guest zeta already holds the *next*
-  in-progress frame's depth (one frame ahead). `2` instead blits the
-  display-matching zeta into a dedicated exportable snapshot at
+  is rejected or no zeta matches the scaler's input dims. `2` blits
+  the display-matching zeta into a dedicated exportable snapshot at
   FLIP_STALL, recorded into that frame's command buffer so it rides
   the same submission (one depth copy per flip, ~2 µs PFIFO record
   time), giving depth that is temporally correct for the presented
-  frame. Both ship dark for A/B. Engagement is title-dependent: a
-  guest that renders 3D at 2× the scanout width (AA super-width, e.g.
-  Azurik) exposes no zeta matching the scaler input, so both modes
-  fall back to synthetic there.
+  frame; it ships dark for A/B. Mode `1` (exporting every zeta and
+  reading the live one, a frame late by present time) was removed on
+  2026-10-15. Engagement is title-dependent: a guest that renders 3D
+  at 2× the scanout width (AA super-width, e.g. Azurik) exposes no
+  zeta matching the scaler input, so it falls back to synthetic
+  there.
 - **MetalFX resize quantization (default on, 2026-08-04).** The Metal
   backend's MetalFX output size tracked the live layer size with only
   even-pixel rounding, so dragging a window rebuilt the spatial/temporal
