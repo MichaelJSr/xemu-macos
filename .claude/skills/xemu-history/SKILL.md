@@ -62,6 +62,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `XEMU_DIRTY_FAST=0` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
+| Inline FUCOMI on the write-through path | closed | Helper gone, det heavy-f1 88.25 vs 88.08 fps: its sampled share was the shared ld80f conversions | not committed |
 | `-fzero-call-used-regs=skip` | closed | −411 kB `__text`, fps 3+/2− then 3+/5−. Retest via `CFLAGS` | `7aa746a952` |
 | COMISS lowering, dirty-clear coalescing, xpage spanning dests | closed / parked | Census empty; <1% of vCPU; under 1M/s | ledger |
 | **PFIFO / threading** | | | |

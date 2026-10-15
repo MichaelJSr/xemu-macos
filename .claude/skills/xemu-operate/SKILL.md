@@ -189,6 +189,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_XPAGE_CHAIN`, `_UNLINK` | Cross-page chaining | `tcg/xemu-xpage.c` |
 | `XEMU_RAS`, `XEMU_SSE_HOST`, `XEMU_X87_WT`, `XEMU_X87_LEAN`, `_ELIDE_FT0`, `_DEFER_FIP` | CPU fast paths (RAS off for `-d exec`) | `i386/` |
 | `XEMU_ELIDE_CANDOIO`, `XEMU_DIRTY_FAST` | TCG store elisions | `tcg/translator.c`, `system/physmem.c` |
+| `XEMU_ICOUNT_STEP` | Icount budget cuts step one-instruction TBs instead of translating cut blocks | `tcg/cpu-exec.c` |
 | *Off by default* | | |
 | `XEMU_REPORTS_SYNC=1` | Synchronous zpass reports | `vk/reports.c` |
 | `XEMU_MMIO_BQL=1` | MMIO under the BQL | `hw/xbox/nv2a/nv2a.c`, `mcpx/apu/apu.c` |

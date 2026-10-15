@@ -610,6 +610,49 @@ static void xemu_guestprof_start(void)
 static uint64_t xemu_tbprof_lookups;
 static uint64_t xemu_tbprof_jc_hits;
 static uint64_t xemu_tbprof_ht_found;
+static uint64_t xemu_istep_cuts, xemu_istep_steps;
+
+/*
+ * Deterministic mode (icount): when a slice's instruction budget ends
+ * inside a TB, upstream translates a TB cut to the budget, and the next
+ * slice a TB starting where it stopped. Timer deadlines fall at a
+ * different offset each time, so both are nearly always new translations
+ * (most of a deterministic run's translating). Instead, the cut block's
+ * instructions run as one-instruction TBs, each cached by its pc, until
+ * the block ends: the budget runs out between two of them, and the next
+ * slice steps on from there. Same instructions, budget and interrupt
+ * points (an interrupt check precedes every step, as it would precede the
+ * TB that follows an I/O instruction). Step TBs stay out of the jump
+ * cache, are never chained to, and exit to this loop after each step. A
+ * remainder longer than XEMU_ISTEP_MAX_RESUME runs as a normal TB, which
+ * is cheaper than stepping it. XEMU_ICOUNT_STEP=0 restores upstream.
+ */
+#define XEMU_ISTEP_CF   (CF_NO_GOTO_TB | CF_NO_GOTO_PTR | 1)
+#define XEMU_ISTEP_MASK (CF_COUNT_MASK | CF_NO_GOTO_TB | CF_NO_GOTO_PTR | \
+                         CF_SINGLE_STEP | CF_BP_PAGE | CF_NOIRQ | \
+                         CF_MEMI_ONLY)
+#define XEMU_ISTEP_MAX_RESUME 128
+
+static struct {
+    CPUState *cpu;
+    vaddr pc;           /* next instruction to step */
+    uint64_t cs_base;
+    uint32_t flags;
+    uint32_t left;      /* steps to the block's last instruction; 0: idle */
+    uint32_t budget;    /* steps the cut slice had budget for */
+    unsigned flush;     /* tb_flush_count when armed */
+} xemu_istep;
+
+static bool xemu_icount_step_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_ICOUNT_STEP");
+        on = icount_enabled() && replay_mode == REPLAY_MODE_NONE &&
+             !(e && e[0] == '0');
+    }
+    return on;
+}
 
 static bool xemu_tbprof_on(void)
 {
@@ -636,6 +679,11 @@ static void xemu_tbprof_dump(void)
             (unsigned long long)f, 100.0 * f / l,
             (unsigned long long)(l - h - f),
             qatomic_read(&tb_ctx.tb_flush_count));
+    if (xemu_istep_cuts) {
+        fprintf(stderr, "xemu: istep cuts=%llu steps=%llu\n",
+                (unsigned long long)xemu_istep_cuts,
+                (unsigned long long)xemu_istep_steps);
+    }
 }
 #endif
 
@@ -1424,6 +1472,25 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
     if (insns_left > 0 && insns_left < tb->icount)  {
         assert(insns_left <= CF_COUNT_MASK);
         assert(cpu->icount_extra == 0);
+#if defined(XBOX)
+        if (xemu_icount_step_on() && tb_cflags(tb) == curr_cflags(cpu) &&
+            QTAILQ_EMPTY(&cpu->breakpoints) &&
+            QTAILQ_EMPTY(&cpu->watchpoints) && !cpu->singlestep_enabled) {
+            /* CF_PCREL: the cpu state holds this TB's start pc now. */
+            TCGTBCPUState st = xemu_get_tb_cpu_state(cpu);
+            xemu_istep.cpu = cpu;
+            xemu_istep.pc = st.pc;
+            xemu_istep.cs_base = st.cs_base;
+            xemu_istep.flags = st.flags;
+            xemu_istep.left = tb->icount - 1;
+            xemu_istep.budget = insns_left;
+            xemu_istep.flush = qatomic_read(&tb_ctx.tb_flush_count);
+            if (unlikely(xemu_tbprof_on())) {
+                xemu_istep_cuts++;
+            }
+            return;
+        }
+#endif
         cpu->cflags_next_tb = (tb->cflags & ~CF_COUNT_MASK) | insns_left;
     }
 #endif
@@ -1455,6 +1522,20 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              */
             if (s.cflags == -1) {
                 s.cflags = curr_cflags(cpu);
+#if defined(XBOX)
+                if (unlikely(xemu_istep.left) && xemu_istep.cpu == cpu &&
+                    s.pc == xemu_istep.pc && s.flags == xemu_istep.flags &&
+                    s.cs_base == xemu_istep.cs_base &&
+                    xemu_istep.flush ==
+                        qatomic_read(&tb_ctx.tb_flush_count)) {
+                    if (xemu_istep.budget == 0 &&
+                        xemu_istep.left > XEMU_ISTEP_MAX_RESUME) {
+                        xemu_istep.left = 0;    /* long remainder: a TB */
+                    } else {
+                        s.cflags |= XEMU_ISTEP_CF;
+                    }
+                }
+#endif
             } else {
                 cpu->cflags_next_tb = -1;
             }
@@ -1463,6 +1544,20 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 break;
             }
 
+#if defined(XBOX)
+            bool istep = (s.cflags & XEMU_ISTEP_MASK) == XEMU_ISTEP_CF &&
+                         unlikely(xemu_istep.left);
+            if (unlikely(istep)) {
+                tb = tb_htable_lookup(cpu, s);
+                if (tb == NULL) {
+                    mmap_lock();
+                    tb = tb_gen_code(cpu, s);
+                    mmap_unlock();
+                }
+                last_tb = NULL;     /* never chain into a step TB */
+            } else
+#endif
+            {
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
                 CPUJumpCache *jc;
@@ -1480,6 +1575,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 jc = cpu->tb_jmp_cache;
                 jc->array[h].pc = s.pc;
                 qatomic_set(&jc->array[h].tb, tb);
+            }
             }
 
 #ifndef CONFIG_USER_ONLY
@@ -1516,6 +1612,19 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             }
 
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
+#if defined(XBOX)
+            if (unlikely(istep) && tb_exit != TB_EXIT_REQUESTED) {
+                /* The step ran (a fault would have left by longjmp). */
+                xemu_istep.pc += tb->size;
+                xemu_istep.left--;
+                if (xemu_istep.budget) {
+                    xemu_istep.budget--;
+                }
+                if (unlikely(xemu_tbprof_on())) {
+                    xemu_istep_steps++;
+                }
+            }
+#endif
 
             /* Try to align the host and virtual clocks
                if the guest is in advance */
