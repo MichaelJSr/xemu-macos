@@ -2,9 +2,9 @@
  * xemu: cross-page direct-chaining (Xbox-relaxed) — knobs, Gate-0 taken
  * counters, Gate-1 refuter shadow, R2 remap observer, atexit dump.
  *
- * See docs/Finished/xpage-design.md. Chaining is default on (broad) since
- * 2026-07-12; the counters, refuter and dump cost nothing unless their env vars
- * are set. Single vCPU writer; plain unsynchronized uint64 counters; dump from
+ * See docs/Finished/xpage-design.md. Chaining is always on (broad, since
+ * 2026-07-12); the counters, refuter and dump cost nothing unless their env
+ * vars are set. Single vCPU writer; plain unsynchronized uint64 counters; dump from
  * atexit after the thread has stopped (the fork's XEMU_INV_PROF model). Whole
  * body #if defined(XBOX); declarations in xemu-xpage.h are unconditional
  * (harmless), and every caller is XBOX-gated, so non-XBOX builds compile this
@@ -54,32 +54,6 @@ static void xpage_arm(void)
     }
 }
 
-/* ---------------- latched knobs ------------------------------------------- */
-int xemu_xpage_chain_level(void)
-{
-    static int lvl = -1;
-    if (lvl < 0) {
-        /*
-         * Default BROAD (2) since 2026-07-12: the generic tlb_flush
-         * backstop (xemu_xpage_note_full_flush) closed the last
-         * soundness residual (CR4.PGE / whole-TLB flush classes), so
-         * broad is sound by construction, and the quiet A/B measured
-         * +1.30±0.29 fps on F8 (7/7 pairs). XEMU_XPAGE_CHAIN=0
-         * restores upstream same-page-only chaining; =1 keeps the
-         * kernel-identity-window tier. The atexit dump is only armed
-         * when the env is set explicitly (default path stays silent).
-         */
-        const char *e = getenv("XEMU_XPAGE_CHAIN");
-        if (e) {
-            lvl = (e[0] >= '1' && e[0] <= '9') ? (e[0] - '0') : 0;
-            xpage_arm();
-        } else {
-            lvl = 2;
-        }
-    }
-    return lvl;
-}
-
 /*
  * Full-flush backstop: any full TLB flush class beyond the INVLPG helper
  * (CR3 reloads, CR4.PGE toggles, mode switches, loadvm restore) may retire
@@ -89,28 +63,25 @@ int xemu_xpage_chain_level(void)
  * retranslation storm: level streaming flushes the TLB continuously, and
  * the movement probe measured 139 tb_flushes in 20 s of first-visit
  * walking (F8, 2026-07-12) with an fps trough to 14.6 vs a 38.6 settled
- * baseline — the reported "new-area lag". The default is now the
+ * baseline — the reported "new-area lag". It is now the
  * tb-maint.c link-registry unlink: sever exactly the registered
  * cross-page chains, synchronously (which also closes the old
  * queue-to-safe-point window), keeping every translation. Chains relink
  * lazily on the next execution. Registry overflow falls back to the
  * queued flush automatically, so correctness never depends on registry
- * capacity.
- * Armed at every chain level that can create cross-page links (>=1; the
- * unlink is a no-op when nothing is registered).
+ * capacity. The unlink is a no-op when nothing is registered.
  */
 uint64_t xemu_xpage_full_flush_backstops;
 
 void xemu_xpage_note_full_flush(CPUState *cpu)
 {
-    if (xemu_xpage_chain_level() >= 1) {
-        xemu_xpage_full_flush_backstops++;
-        if (!xemu_xpage_unlink_registered(cpu)) {
-            queue_tb_flush(cpu);
-        }
+    xemu_xpage_full_flush_backstops++;
+    if (!xemu_xpage_unlink_registered(cpu)) {
+        queue_tb_flush(cpu);
     }
 }
 
+/* ---------------- latched knobs ------------------------------------------- */
 bool xemu_xpage_refute_on(void)
 {
     static int on = -1;
@@ -136,31 +107,6 @@ bool xemu_xpage_prof_on(void)
         }
     }
     return on;
-}
-
-bool xemu_xpage_allow(uint64_t dest)
-{
-    int lvl;
-
-    /* Refute mode observes on the safe (non-chaining) lookup path. */
-    if (xemu_xpage_refute_on()) {
-        return false;
-    }
-    lvl = xemu_xpage_chain_level();
-    if (lvl <= 0) {
-        return false;
-    }
-    if (lvl >= 2) {
-        return true;                          /* broad: any cross-page target */
-    }
-    /*
-     * R1-kernel: identity window only. Mask to the 32-bit linear target (the
-     * Xbox guest is always 32-bit) so a jump that wraps the 4 GiB boundary —
-     * huge unmasked dest, real target low/remappable — is NOT misclassified
-     * as the invariant kernel window. Wrapping jumps never occur on Xbox code
-     * layouts, but R1 must be sound by construction, not by likelihood.
-     */
-    return (dest & 0xffffffffULL) >= XEMU_XPAGE_KERNEL_BASE;
 }
 
 /* ---------------- shadow structures (reset on tb_flush) ------------------- */
@@ -254,10 +200,10 @@ void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage)
         if (e->ppage != pp) {
             xpage_obs_remaps++;
             /*
-             * Print only under explicit diagnostics: chaining is
-             * default-on since v0.11.1, so this path runs in normal
-             * gameplay, and overlay-heavy titles remap exec pages
-             * continuously — unbounded stderr noise otherwise.
+             * Print only under explicit diagnostics: chaining is always
+             * on, so this path runs in normal gameplay, and overlay-heavy
+             * titles remap exec pages continuously — unbounded stderr
+             * noise otherwise.
              */
             if (xpage_diag_armed) {
                 fprintf(stderr,
@@ -286,9 +232,8 @@ static void xemu_xpage_dump(void)
     double per5k = secs > 0 ? (double)xemu_xpage_taken_kernel / secs * 5.0 : 0.0;
 
     fprintf(stderr,
-            "xemu: XPAGE summary (elapsed=%.1fs chain_level=%d refute=%d "
-            "tb_flush=%u)\n",
-            secs, xemu_xpage_chain_level(), xemu_xpage_refute_on() ? 1 : 0,
+            "xemu: XPAGE summary (elapsed=%.1fs refute=%d tb_flush=%u)\n",
+            secs, xemu_xpage_refute_on() ? 1 : 0,
             qatomic_read(&tb_ctx.tb_flush_count));
     fprintf(stderr,
             "xemu:  (0) taken cross-page-direct exits=%llu "

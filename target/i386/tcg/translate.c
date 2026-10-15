@@ -1850,7 +1850,6 @@ extern uint64_t xemu_inv_retmemo_emitted;
  * function-local extern idiom. */
 extern bool xemu_xpage_refute_on(void);
 extern bool xemu_xpage_prof_on(void);
-extern bool xemu_xpage_allow(uint64_t dest);
 extern uint64_t xemu_xpage_taken_kernel;
 extern uint64_t xemu_xpage_taken_low;
 extern uint64_t xemu_xpage_emitted;
@@ -3582,11 +3581,11 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
 #if defined(XBOX)
             /*
              * Cross-page relaxation: the andi above keeps cpu_eip wrap-correct
-             * regardless, so only forbid the direct chain when the fork rule
-             * disallows it (translator_use_goto_tb agrees below). Default on
-             * (broad) since 2026-07-12; see docs/Finished/xpage-design.md.
+             * regardless, so only the refuter forbids the direct chain
+             * (translator_use_goto_tb agrees below). Always on (broad, since
+             * 2026-07-12); see docs/Finished/xpage-design.md.
              */
-            if (!use_goto_tb || !xemu_xpage_allow(new_pc)) {
+            if (xemu_xpage_refute_on()) {
                 use_goto_tb = false;
             }
 #else
@@ -3606,8 +3605,8 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
      */
     if (xpage_cpd) {
         if (unlikely(xemu_xpage_prof_on())) {
-            /* Masked 32-bit linear target, matching xemu_xpage_allow()'s
-             * kernel-window test (wrap-safe classification). */
+            /* Masked 32-bit linear target: kernel identity window
+             * (>= 0x80000000) vs low, wrap-safe. */
             uint64_t *cntp = (((uint64_t)new_pc & 0xffffffffULL) >= 0x80000000ULL)
                 ? &xemu_xpage_taken_kernel : &xemu_xpage_taken_low;
             TCGv_ptr cnt = tcg_constant_ptr(cntp);

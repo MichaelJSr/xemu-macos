@@ -4,7 +4,7 @@
  *
  * See docs/Finished/xpage-design.md for the full soundness argument.
  *
- * Chaining is default on (broad) since 2026-07-12; the counters and shadow cost
+ * Chaining is always on (broad, since 2026-07-12); the counters and shadow cost
  * nothing unless their env vars are set. The xbox machine runs exactly one vCPU
  * thread, which is the only writer of every counter/shadow here; the exit dump
  * runs from atexit() after that thread has stopped. Counters are plain
@@ -22,25 +22,13 @@
 #define XEMU_XPAGE_H
 
 /*
- * Kernel-identity window base: a linear address >= this is the fixed identity
- * alias of physical RAM the Xbox kernel maps at boot and never remaps for a
- * running title (XPAGE-DESIGN §2). Cross-page chains to such targets are
- * sound with no backstop.
+ * Latched knobs (getenv on first call). Every cross-page direct chain is
+ * allowed, whatever its target, unless the refuter is on: then
+ * translator_use_goto_tb() and gen_jmp_rel() decline them all, so each exit
+ * goes through the observing helper on the safe lookup path.
  */
-#define XEMU_XPAGE_KERNEL_BASE  0x80000000ULL
-
-/* Latched knobs (getenv on first call). */
-int  xemu_xpage_chain_level(void);   /* XEMU_XPAGE_CHAIN: 0 off, 1 kernel, 2 broad */
 bool xemu_xpage_refute_on(void);     /* XEMU_XPAGE_REFUTE=1 */
 bool xemu_xpage_prof_on(void);       /* XEMU_XPAGE_PROF=1 or XEMU_INV_PROF=1 */
-
-/*
- * Translate-time permission for a cross-page direct chain to @dest (a linear
- * address). Callers invoke this only for a dest already known to be
- * cross-page. Returns false whenever refute mode is on, so refute always
- * routes the exit through the observing helper on the safe lookup path.
- */
-bool xemu_xpage_allow(uint64_t dest);
 
 /*
  * Full-flush backstop (called from tlb_flush_by_mmuidx and the CR3 helper):
@@ -49,8 +37,7 @@ bool xemu_xpage_allow(uint64_t dest);
  * loadvm) can't leave a chain pointing at a retired virtual->phys binding.
  * The mechanism is the tb-maint.c link-registry unlink (keeps every
  * translation; chains relink lazily); registry overflow falls back to the
- * v0.11 wholesale queued tb_flush automatically. No-op when cross-page
- * chaining is off.
+ * v0.11 wholesale queued tb_flush automatically.
  */
 void xemu_xpage_note_full_flush(CPUState *cpu);
 extern uint64_t xemu_xpage_full_flush_backstops;
@@ -69,7 +56,8 @@ extern uint64_t xemu_xpage_unlink_total_us;
 extern uint64_t xemu_xpage_unlink_max_us;
 
 /* Gate-0 taken counters, inline-incremented from generated code in prof mode,
- * split by target region so the R1(kernel)-vs-broad opportunity is visible. */
+ * split by target region: the kernel's identity window (linear >= 0x80000000,
+ * never remapped for a running title) vs everything below it. */
 extern uint64_t xemu_xpage_taken_kernel;
 extern uint64_t xemu_xpage_taken_low;
 extern uint64_t xemu_xpage_emitted;   /* translate-time cross-page-direct sites */

@@ -10,7 +10,7 @@
  * have (XPAGE-DESIGN §1/§5). #if defined(XBOX), default-inert (emitted only
  * under XEMU_XPAGE_REFUTE=1).
  *
- * The broad-tier (XEMU_XPAGE_CHAIN=2) INVLPG/CR3 backstops live inside the
+ * The cross-page chaining INVLPG/CR3 backstops live inside the
  * existing helper_flush_page / helper_write_crN (system/misc_helper.c) so they
  * ride the guest's own TLB flush.
  *

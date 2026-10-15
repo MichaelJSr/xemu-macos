@@ -1087,8 +1087,8 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
 
 #if defined(XBOX)
     /*
-     * Cross-page direct link (permitted at translate time by
-     * xemu_xpage_allow): register the destination so the full-TLB-flush
+     * Cross-page direct link (permitted at translate time unless
+     * XEMU_XPAGE_REFUTE is on): register the destination so the full-TLB-flush
      * backstop can sever exactly these chains instead of flushing the
      * whole translation cache (tb-maint.c xpage link registry).
      * Registered strictly after dropping jmp_lock (registry lock order).

@@ -44,7 +44,6 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_XPAGE_CHAIN` | Cross-page direct chaining — **default ON (broad)** since 2026-07-12 (`0` restores upstream same-page-only chaining; `1` = kernel-identity window only). Sound by construction: INVLPG (per-page) backstop plus CR3 + generic `tlb_flush_by_mmuidx` backstops covering every full-flush class (0 refuter violations in 1.71B checks across the promotion soak). A/B: +1.30±0.29 fps F8 pre-subpage (7/7 pairs); +0.77±0.55 on top of sub-page tracking (3/3) |
 | `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). x86_64 hosts: `=1` opts in, dark until `=2` runs clean on real silicon. `=2`, on any host, runs both paths with strict brackets and aborts on divergence. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the x87 exception-pointer deferral: keeps every legacy store, computes the deferral anyway, and counts every runtime point where the deferred state could have been observed (deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
@@ -403,8 +402,7 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   page-table-walk, closing the stale-chain fetch-bypass hole): 0
   violations over 3.15B+1.71B checks across 20 reload cycles.
   Interleaved A/B: **+1.30±0.29 fps F8 (7/7 pairs) pre-subpage;
-  +0.77±0.55 (3/3) on top of sub-page tracking**. `XEMU_XPAGE_CHAIN=0`
-  restores upstream same-page-only chaining.
+  +0.77±0.55 (3/3) on top of sub-page tracking**.
   **Backstop v2 (v0.11.1, the "new-area lag" fix).** v0.11's full-flush
   backstop severed chains with a queued **whole translation-cache
   flush**; guest level streaming turned out to fire full-TLB-flush

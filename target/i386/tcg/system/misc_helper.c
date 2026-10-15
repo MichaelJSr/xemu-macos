@@ -34,12 +34,11 @@
 #include "exec/target_page.h"       /* TARGET_PAGE_MASK / TARGET_PAGE_SIZE */
 #include "hw/core/cpu.h"            /* cpu_get_phys_page_debug */
 /*
- * Broad-tier cross-page direct-chaining (XEMU_XPAGE_CHAIN=2) guest-flush
- * backstops live inside the guest's own INVLPG / CR3 helpers below. Function-
- * local extern idiom: accel/tcg/xemu-xpage.h is not on the target include
- * path. See docs/Finished/xpage-design.md §3.
+ * Cross-page direct-chaining guest-flush backstops live inside the guest's
+ * own INVLPG / CR3 helpers below. Function-local extern idiom:
+ * accel/tcg/xemu-xpage.h is not on the target include path. See
+ * docs/Finished/xpage-design.md §3.
  */
-extern int xemu_xpage_chain_level(void);
 extern void xemu_xpage_note_full_flush(CPUState *cpu);
 #endif
 
@@ -536,19 +535,17 @@ void helper_flush_page(CPUX86State *env, target_ulong addr)
 {
 #if defined(XBOX)
     /*
-     * INVLPG is the guest's per-page remap signal. Under broad-tier cross-page
-     * chaining, sever any stale cross-page chains into addr's CURRENT physical
-     * page before the remapped mapping can be used. Individual TB code is
-     * never freed until a tb_flush, and INVLPG ends the TB (DISAS_EOB_NEXT),
-     * so invalidating the current TB here is safe. See XPAGE-DESIGN §3.
+     * INVLPG is the guest's per-page remap signal. With cross-page chaining,
+     * sever any stale cross-page chains into addr's CURRENT physical page
+     * before the remapped mapping can be used. Individual TB code is never
+     * freed until a tb_flush, and INVLPG ends the TB (DISAS_EOB_NEXT), so
+     * invalidating the current TB here is safe. See XPAGE-DESIGN §3.
      */
-    if (xemu_xpage_chain_level() >= 2) {
-        hwaddr phys = cpu_get_phys_page_debug(env_cpu(env),
-                                              addr & TARGET_PAGE_MASK);
-        if (phys != (hwaddr)-1) {
-            tb_invalidate_phys_range(env_cpu(env), phys,
-                                     phys + TARGET_PAGE_SIZE - 1);
-        }
+    hwaddr phys = cpu_get_phys_page_debug(env_cpu(env),
+                                          addr & TARGET_PAGE_MASK);
+    if (phys != (hwaddr)-1) {
+        tb_invalidate_phys_range(env_cpu(env), phys,
+                                 phys + TARGET_PAGE_SIZE - 1);
     }
 #endif
     tlb_flush_page(env_cpu(env), addr);

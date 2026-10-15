@@ -196,7 +196,6 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 |---|---|---|
 | *On by default; `=0` restores legacy* | | |
 | `XEMU_SUBPAGE_FAST` | Sub-page invalidation, store prefilter (arm b) | `tcg/xemu-subpage-fast.c` |
-| `XEMU_XPAGE_CHAIN` | Cross-page chaining | `tcg/xemu-xpage.c` |
 | `XEMU_ELIDE_CANDOIO` | TCG store elision | `tcg/translator.c` |
 | `XEMU_ICOUNT_STEP` | Icount budget cuts step one-instruction TBs instead of translating cut blocks | `tcg/cpu-exec.c` |
 | *Off by default* | | |

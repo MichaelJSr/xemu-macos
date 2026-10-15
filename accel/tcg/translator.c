@@ -165,16 +165,16 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
     }
 #if defined(XBOX)
     /*
-     * Fork cross-page relaxation (default broad since 2026-07-12;
-     * XEMU_XPAGE_CHAIN=0 restores upstream). Upstream forbids cross-page
-     * goto_tb because "address mapping changes in system emulation" could leave
-     * a stale chain (cpu-exec.c). On the Xbox the executable mapping is
-     * effectively static; xemu_xpage_allow() gates the relaxation by rule
-     * (kernel-identity window under =1, broad + guest-flush backstop under =2,
-     * the default). Incoming-jump unlink on invalidation reuses jmp_list
-     * unchanged. See docs/Finished/xpage-design.md.
+     * Fork cross-page relaxation (broad since 2026-07-12). Upstream forbids
+     * cross-page goto_tb because "address mapping changes in system
+     * emulation" could leave a stale chain (cpu-exec.c). On the Xbox the
+     * executable mapping is effectively static, and the guest-flush
+     * backstops (INVLPG, CR3, every full TLB flush) cover the rest; only
+     * the refuter declines, so its exits take the observing lookup path.
+     * Incoming-jump unlink on invalidation reuses jmp_list unchanged. See
+     * docs/Finished/xpage-design.md.
      */
-    if (xemu_xpage_allow(dest)) {
+    if (!xemu_xpage_refute_on()) {
         return true;
     }
 #endif
