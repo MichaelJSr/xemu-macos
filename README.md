@@ -230,7 +230,21 @@ Other automation interfaces (windowed or headless):
     process does, with neutral pads: held keys, axes and queued pipe
     lines are dropped, so write a run's input after its load. Start with
     `-S` so nothing runs before the load;
-  - host audio is off, windowed too.
+  - host audio is off, windowed too;
+  - savestates cross modes: states saved without icount (the usual
+    case) load and replay as above, and states saved under icount load
+    in normal mode with guest time and the RTC date continuing from the
+    save (v0.14 and earlier read their RTC about 56 years ahead: load and
+    re-save here in normal mode first). Save with `sleep=off`; a state
+    saved with sleep on or `shift=auto` loads anywhere but drops its warp
+    deadlines;
+  - a load restarts host-side audio state (resampler and filter
+    history, the sample counter), so a run continued past its `savevm`
+    and a run loaded from that save differ from the next frame on. To
+    checkpoint a run, `savevm T` then `loadvm T` before continuing: every
+    later load of T replays it exactly. Frame numbers (`@N`,
+    `query-xemu-frame`) count the current process's frames, so use `+N`
+    after a load.
 
   Write tagged input while paused, then advance. `shift` is guest time
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs

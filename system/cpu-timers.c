@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "system/cpus.h"
@@ -158,6 +159,60 @@ static bool icount_shift_state_needed(void *opaque)
 }
 
 /*
+ * xemu: VMSTATE_TIMER_PTR for a timer the loading process may not have:
+ * the warp timer exists only with -icount sleep=on, the adjust timers only
+ * with shift=auto. The bytes on the wire are the same; a missing timer
+ * just drops the deadline instead of tripping vmstate's NULL-pointer
+ * assert, so such a state loads in normal mode or under sleep=off.
+ */
+static int get_timer_opt(QEMUFile *f, void *pv, size_t size,
+                         const VMStateField *field)
+{
+    QEMUTimer *t = *(QEMUTimer **)pv;
+    uint64_t expire_time = qemu_get_be64(f);
+
+    if (t) {
+        if (expire_time != -1) {
+            timer_mod_ns(t, expire_time);
+        } else {
+            timer_del(t);
+        }
+    }
+    return 0;
+}
+
+static int put_timer_opt(QEMUFile *f, void *pv, size_t size,
+                         const VMStateField *field, JSONWriter *vmdesc)
+{
+    timer_put(f, *(QEMUTimer **)pv); /* .needed saw it non-NULL */
+    return 0;
+}
+
+static const VMStateInfo vmstate_info_timer_opt = {
+    .name = "timer",
+    .get  = get_timer_opt,
+    .put  = put_timer_opt,
+};
+
+#define VMSTATE_TIMER_PTR_OPT(_f, _s) {                                 \
+    .name   = stringify(_f),                                            \
+    .info   = &vmstate_info_timer_opt,                                  \
+    .size   = sizeof(QEMUTimer *),                                      \
+    .flags  = VMS_SINGLE,                                               \
+    .offset = vmstate_offset_value(_s, _f, QEMUTimer *),                \
+}
+
+static int warp_timer_post_load(void *opaque, int version_id)
+{
+    TimersState *s = opaque;
+
+    if (!s->icount_warp_timer) {
+        s->vm_clock_warp_start = -1;
+    }
+    return 0;
+}
+
+/*
  * Subsection for warp timer migration is optional, because may not be created
  */
 static const VMStateDescription icount_vmstate_warp_timer = {
@@ -165,9 +220,10 @@ static const VMStateDescription icount_vmstate_warp_timer = {
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = warp_timer_state_needed,
+    .post_load = warp_timer_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(vm_clock_warp_start, TimersState),
-        VMSTATE_TIMER_PTR(icount_warp_timer, TimersState),
+        VMSTATE_TIMER_PTR_OPT(icount_warp_timer, TimersState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -178,17 +234,40 @@ static const VMStateDescription icount_vmstate_adjust_timers = {
     .minimum_version_id = 1,
     .needed = adjust_timers_state_needed,
     .fields = (const VMStateField[]) {
-        VMSTATE_TIMER_PTR(icount_rt_timer, TimersState),
-        VMSTATE_TIMER_PTR(icount_vm_timer, TimersState),
+        VMSTATE_TIMER_PTR_OPT(icount_rt_timer, TimersState),
+        VMSTATE_TIMER_PTR_OPT(icount_vm_timer, TimersState),
         VMSTATE_END_OF_LIST()
     }
 };
+
+/* xemu: only an adaptive (shift=auto) process takes a saved shift. */
+static int16_t icount_shift_configured;
+
+static int icount_shift_pre_load(void *opaque)
+{
+    TimersState *s = opaque;
+
+    icount_shift_configured = s->icount_time_shift;
+    return 0;
+}
+
+static int icount_shift_post_load(void *opaque, int version_id)
+{
+    TimersState *s = opaque;
+
+    if (icount_enabled() != ICOUNT_ADAPTATIVE) {
+        s->icount_time_shift = icount_shift_configured;
+    }
+    return 0;
+}
 
 static const VMStateDescription icount_vmstate_shift = {
     .name = "timer/icount/shift",
     .version_id = 2,
     .minimum_version_id = 2,
     .needed = icount_shift_state_needed,
+    .pre_load = icount_shift_pre_load,
+    .post_load = icount_shift_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT16(icount_time_shift, TimersState),
         VMSTATE_INT64(last_delta, TimersState),
