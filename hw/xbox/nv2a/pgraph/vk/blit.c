@@ -151,6 +151,11 @@ void pgraph_vk_image_blit(NV2AState *d)
     hwaddr clipped_dest_size =
         nv_clip_gpu_tile_blit(d, dest_addr + dest_offset, dest_size);
 
+    pgraph_vk_det_reports_guard(
+        d, source_addr + source_offset,
+        (image_blit->height - 1) * context_surfaces->source_pitch + row_bytes);
+    pgraph_vk_det_reports_guard(d, dest_addr + dest_offset, dest_size);
+
     if (clipped_dest_size < dest_size) {
         adjusted_height = clipped_dest_size / context_surfaces->dest_pitch;
         size_t consumed_bytes = adjusted_height * context_surfaces->dest_pitch;

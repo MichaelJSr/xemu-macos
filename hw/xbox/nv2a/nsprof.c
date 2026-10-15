@@ -81,6 +81,8 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_PUSH_POLICY_SKIP] = "push_policy_skip",
     [NSPROF_EV_UI_PRESENT] = "ui_present",
     [NSPROF_EV_MFX_SCALER_REBUILD] = "mfx_scaler_rebuild",
+    [NSPROF_EV_REP_TRAP] = "rep_trap",
+    [NSPROF_EV_REP_GPU_TOUCH] = "rep_gpu_touch",
 };
 
 static struct {

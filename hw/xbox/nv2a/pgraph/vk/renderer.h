@@ -311,7 +311,25 @@ struct QueryReport {
     bool clear;
     uint32_t parameter;
     unsigned int query_count;
+    /* Deterministic mode: the slot's VRAM offset, resolved at GET_REPORT,
+     * and whether it counts as pending in det_reports (reports.c). */
+    uint32_t ram_addr;
+    bool det_tracked;
 };
+
+/*
+ * Deterministic mode (icount): a page that holds report slots, trapped so
+ * that the first guest or DMA access to a slot with an undelivered report
+ * delivers every pending report first (reports.c).
+ */
+#define DET_REPORT_PAGES 64
+typedef struct DetReportPage {
+    uint32_t ram_page;
+    bool armed; /* the vCPU has installed the trap */
+    uint32_t total; /* reports pending on the page */
+    MemAccessCallback *cb;
+    uint16_t pending[4096 / 16];
+} DetReportPage;
 
 typedef struct PvideoState {
     bool enabled;
@@ -995,6 +1013,18 @@ typedef struct PGRAPHVkState {
     uint32_t zpass_pixel_count_result;
     QueryReportQueue report_queue; // Reports for the current recording
 
+    struct {
+        QemuMutex lock;             /* leaf: the page table and counts */
+        DetReportPage pages[DET_REPORT_PAGES];
+        int npages;
+        uint32_t pending;           /* tracked reports not yet in RAM */
+        bool eager;                 /* deliver before every park, as before */
+        bool park_drain;            /* an untracked report: deliver at park */
+        bool deliver;               /* a trap asked PFIFO to deliver */
+        bool discard;               /* RAM was reloaded: drop, not write */
+        QemuEvent delivered;
+    } det_reports;
+
     SurfaceFormatInfo kelvin_surface_zeta_vk_map[3];
 
     uint32_t clear_parameter;
@@ -1196,6 +1226,11 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
 void pgraph_vk_process_pending_reports(NV2AState *d);
 void pgraph_vk_drain_slot_reports(NV2AState *d, int slot);
 void pgraph_vk_drain_all_pending_reports(NV2AState *d);
+void pgraph_vk_request_report_delivery(NV2AState *d);
+void pgraph_vk_det_reports_process(NV2AState *d);
+void pgraph_vk_det_reports_discard(NV2AState *d);
+void pgraph_vk_det_reports_deliver(NV2AState *d);
+void pgraph_vk_det_reports_guard(NV2AState *d, hwaddr addr, hwaddr len);
 
 /*
  * The occlusion query pool is partitioned per flight slot so a slot's

@@ -292,6 +292,21 @@ static void nv2a_unlock_fifo(NV2AState *d)
  * savevm does, so a copy of RAM (xemu-dump-ram) sees what the guest would.
  * Call with the BQL held and the VM paused.
  */
+/*
+ * Deterministic mode: deliver GPU reports before PFIFO rests, not lazily,
+ * while something reads guest RAM without going through the access traps
+ * (xemu-frame-advance trace samples).
+ */
+void nv2a_set_reports_eager(bool eager)
+{
+    if (g_nv2a) {
+        qatomic_set(&g_nv2a->pgraph.det_reports_eager, eager);
+        if (eager && runstate_is_running()) {
+            pgraph_request_report_delivery(g_nv2a);
+        }
+    }
+}
+
 void nv2a_sync_ram(void)
 {
     NV2AState *d = g_nv2a;
@@ -513,6 +528,11 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
     if (state == RUN_STATE_SAVE_VM || state == RUN_STATE_FINISH_MIGRATE) {
         nv2a_save_quiesce(d);
     } else if (state == RUN_STATE_RESTORE_VM) {
+        if (icount_enabled()) {
+            /* Reports pending in the old session land in the old RAM. */
+            pgraph_request_report_delivery(d);
+            pfifo_icount_sync(d);
+        }
         nv2a_lock_fifo(d);
         qatomic_set(&d->pfifo.halt, true);
         nv2a_unlock_fifo(d);
@@ -528,8 +548,10 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
         pgraph_pre_shutdown_wait(d);
         bql_lock();
     } else if (!running && icount_enabled()) {
-        /* Deterministic mode: let the work of the last frame finish, so a
-         * paused machine's RAM is what the next run from here starts on. */
+        /* Deterministic mode: let the work of the last frame finish and
+         * its reports reach RAM, so a paused machine's RAM is what the
+         * next run from here starts on. */
+        pgraph_request_report_delivery(d);
         pfifo_icount_sync(d);
     }
 }

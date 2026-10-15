@@ -3221,6 +3221,10 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
     assert(semaphore_offset < semaphore_dma_len);
     semaphore_data += semaphore_offset;
 
+    if (d->pgraph.renderer->ops.report_guard) {
+        d->pgraph.renderer->ops.report_guard(
+            d, semaphore_data - d->vram_ptr, 4);
+    }
     stl_le_p((uint32_t*)semaphore_data, parameter);
 
     //qemu_mutex_lock(&d->pgraph.lock);
@@ -3507,27 +3511,38 @@ void pgraph_get_clear_depth_stencil_value(PGRAPHState *pg, float *depth,
     }
 }
 
-void pgraph_write_zpass_pixel_cnt_report(NV2AState *d, uint32_t parameter,
-                                         uint32_t result)
+/* The VRAM offset of the report slot a GET_REPORT parameter names. */
+hwaddr pgraph_report_vram_offset(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
-
-    uint64_t timestamp = 0x0011223344556677; /* FIXME: Update timestamp?! */
-    uint32_t done = 0; // FIXME: Check
-
     hwaddr report_dma_len;
     uint8_t *report_data =
         (uint8_t *)nv_dma_map(d, pg->dma_report, &report_dma_len);
-
     hwaddr offset = GET_MASK(parameter, NV097_GET_REPORT_OFFSET);
+
     assert(offset < report_dma_len);
-    report_data += offset;
+    return report_data + offset - d->vram_ptr;
+}
+
+void pgraph_write_zpass_pixel_cnt_report_at(NV2AState *d, hwaddr vram_offset,
+                                            uint32_t result)
+{
+    uint64_t timestamp = 0x0011223344556677; /* FIXME: Update timestamp?! */
+    uint32_t done = 0; // FIXME: Check
+    uint8_t *report_data = d->vram_ptr + vram_offset;
 
     stq_le_p((uint64_t *)&report_data[0], timestamp);
     stl_le_p((uint32_t *)&report_data[8], result);
     stl_le_p((uint32_t *)&report_data[12], done);
 
-    NV2A_DPRINTF("Report result %d @%" HWADDR_PRIx, result, offset);
+    NV2A_DPRINTF("Report result %d @%" HWADDR_PRIx, result, vram_offset);
+}
+
+void pgraph_write_zpass_pixel_cnt_report(NV2AState *d, uint32_t parameter,
+                                         uint32_t result)
+{
+    pgraph_write_zpass_pixel_cnt_report_at(
+        d, pgraph_report_vram_offset(d, parameter), result);
 }
 
 static void do_wait_for_renderer_switch(CPUState *cpu, run_on_cpu_data data)
@@ -3640,6 +3655,14 @@ void pgraph_process_pending_reports(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     pg->renderer->ops.process_pending_reports(d);
+}
+
+void pgraph_request_report_delivery(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+    if (pg->renderer->ops.request_report_delivery) {
+        pg->renderer->ops.request_report_delivery(d);
+    }
 }
 
 void pgraph_pre_savevm_trigger(NV2AState *d)

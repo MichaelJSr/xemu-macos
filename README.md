@@ -286,14 +286,17 @@ Other automation interfaces (windowed or headless):
   ~1.5x faster (about 90 fps on Azurik's heavy scene on a loaded M2
   Ultra, about 46 with 0) and suits games that are not CPU-bound.
   Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
-  included when taken paused, at about a third of the null renderer's
-  speed: every GPU report reaches RAM before PFIFO rests, so the GPU no
-  longer overlaps guest work. Hash its RAM with `xemu-dump-ram`
-  `"gpu-sync": false` (`gpu-sync` and `pmemsave` write GPU surfaces back,
-  which changes later RAM), and expect matches only on the same Mac,
-  macOS and MoltenVK. A cheap reproducible screenshot of frame F of a
-  null run: savevm there, load it in a short `XEMU_HEADLESS=1` icount
-  run, advance a few frames, screendump. OpenGL is not deterministic.
+  included when taken paused, at about 60% of the null renderer's speed:
+  a GPU report reaches RAM when the guest or a device first touches its
+  slot, or at a pause, save or load. `XEMU_REPORTS_SYNC=1` delivers each
+  report before PFIFO rests instead: the same RAM, ~3.7x slower, and
+  screendumps that can differ in a few pixels. Hash its RAM with
+  `xemu-dump-ram` `"gpu-sync": false` (`gpu-sync` and `pmemsave` write
+  GPU surfaces back, which changes later RAM), and expect matches only
+  on the same Mac, macOS and MoltenVK. A cheap reproducible screenshot
+  of frame F of a null run: savevm there, load it in a short
+  `XEMU_HEADLESS=1` icount run, advance a few frames, screendump. OpenGL
+  is not deterministic.
   Keep the network off and bind no XMU.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device

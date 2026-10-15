@@ -127,6 +127,10 @@ typedef struct PGRAPHRenderer {
         void (*pre_shutdown_wait)(NV2AState *d);
         void (*process_pending)(NV2AState *d);
         void (*process_pending_reports)(NV2AState *d);
+        /* deterministic mode: have PFIFO deliver pending reports (opt.) */
+        void (*request_report_delivery)(NV2AState *d);
+        /* ...and deliver any pending at these VRAM bytes, PFIFO (opt.) */
+        void (*report_guard)(NV2AState *d, hwaddr addr, hwaddr len);
         void (*surface_flush)(NV2AState *d);
         void (*surface_update)(NV2AState *d, bool upload, bool color_write, bool zeta_write);
         void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
@@ -256,6 +260,7 @@ typedef struct PGRAPHState {
     bool waiting_for_flip;
     /* deterministic mode: the next flush discards renderer state (load) */
     bool flush_discard;
+    bool det_reports_eager; /* traced frame advance: no lazy reports */
     bool waiting_for_context_switch;
 
     bool flush_pending;
@@ -459,5 +464,10 @@ static inline void pgraph_argb_pack32_to_rgba_float(uint32_t argb, float *rgba)
 }
 
 void pgraph_write_zpass_pixel_cnt_report(NV2AState *d, uint32_t parameter, uint32_t result);
+hwaddr pgraph_report_vram_offset(NV2AState *d, uint32_t parameter);
+void pgraph_write_zpass_pixel_cnt_report_at(NV2AState *d, hwaddr vram_offset,
+                                            uint32_t result);
+/* Deterministic mode: have PFIFO deliver pending GPU reports to RAM. */
+void pgraph_request_report_delivery(NV2AState *d);
 
 #endif

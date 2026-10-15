@@ -17,6 +17,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - **Primer query**: `pgraph_vk_begin_command_buffer` issues an empty query (`primer_index`) outside any pass, so MoltenVK's `_needsVisibilityResultMTLBuffer` is set before the first encoder exists. New render-pass paths go after it. Reset the query pool only at CB begin, never inside a pass. → AGX crash when a frame's first pass holds its first zpass draw (scenes that open with a clear hide it). V`draw.c`.
 - **`MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0`**: a second layer on top of the primer; keep both. → prefill=2 corrupts streamed textures (large magenta rects), allows the AGX crash, and is slower.
 - **Vertex dirty tracking is page-granular.** The byte-exact refinement (`uploaded_span_content_differs`) may skip a finish only when memcmp proves the bytes identical. When unsure, finish. → stale vertices, intermittent garbled geometry. V`vertex.c`.
+- **Deterministic reports are lazy** (icount): GET_REPORT records the slot and traps its page; the first guest access, flatview or mapped DMA to the slot, a pause, savevm/sync_ram, RESTORE_VM, slot reclaim and the full-pool or flush drains deliver. The APU's direct `ram_ptr` accesses are not trapped. A new renderer path that reads or writes guest VRAM calls `pgraph_vk_det_reports_guard`; a new reader that copies RAM directly (like trace samples) sets `nv2a_set_reports_eager`; after a load, `flush_discard` drops what is left. → RAM differs from an `XEMU_REPORTS_SYNC=1` run. V`reports.c`.
 - **Surface expiry** throttles on monotonic time (`surface_expire_interval_ns` 33 ms), never on `pg->frame_time`. → black-screen freeze on rapid level loads. V`surface.c`. Exception, icount only: expiry runs once per flip or every 4096 updates, reports are delivered before PFIFO rests, and a load discards renderer state (`flush_discard`), so offscreen Vulkan is deterministic.
 
 ### DSP56300 JIT / APU
@@ -87,7 +88,7 @@ Notes: read `XEMU_INV_PROF`'s `(f)` line only from an `XEMU_ELIDE_CANDOIO=0` run
 ## Glossary (fork-specific)
 - **flip**: guest `FLIP_STALL`; flips/s = guest fps (cap 60). **finish**: `pgraph_vk_finish(reason)` = submit + wait on the previous slot's fence.
 - **zeta shape switch**: Azurik flips one depth allocation between 1280×480 and 256×256 swizzled every frame.
-- **zpass report**: occlusion query delivered at flip or slot reclaim; plain submit after 300 µs idle (`XEMU_REPORTS_BUDGET_US`). `XEMU_REPORTS_SYNC=1` is the only path to the legacy `STALLED` drain.
+- **zpass report**: occlusion query delivered at flip or slot reclaim; plain submit after 300 µs idle (`XEMU_REPORTS_BUDGET_US`). `XEMU_REPORTS_SYNC=1` is the only path to the legacy `STALLED` drain (under icount: eager delivery before every PFIFO park).
 - **EP** DSP runs at 1/8 of GP's rate and churns on P-space overlays. **hard_fpu**: x87 math in double precision (`hard_fpu=false` for exact). **Anchors**: `azurik-heavy-f1`, `-w2`, F5, listed in `../fixtures/README.md`.
 
 ## Analysis recipes

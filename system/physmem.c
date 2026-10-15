@@ -43,6 +43,7 @@
 #include "system/xen.h"
 #include "system/kvm.h"
 #include "system/tcg.h"
+#include "exec/icount.h"
 #include "system/qtest.h"
 #include "system/physmem.h"
 #include "system/ramblock.h"
@@ -3967,6 +3968,15 @@ void *address_space_map(AddressSpace *as,
     *plen = flatview_extend_translation(fv, addr, len, mr, xlat,
                                         l, is_write, attrs);
     fuzz_dma_read_cb(addr, *plen, mr);
+#ifdef XBOX
+    if (icount_enabled()) {
+        /* Deterministic mode: mapped DMA (IDE) trips the access callbacks
+         * as flatview accesses do (lazily delivered GPU reports). */
+        mem_check_access_callback_ramaddr(
+            qemu_get_cpu(0), memory_region_get_ram_addr(mr) + xlat, *plen,
+            is_write ? BP_MEM_WRITE : BP_MEM_READ);
+    }
+#endif
     return qemu_ram_ptr_length(mr->ram_block, xlat, plen, true, is_write);
 }
 

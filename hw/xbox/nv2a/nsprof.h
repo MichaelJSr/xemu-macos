@@ -156,6 +156,9 @@ enum NsprofEvent {
     /* MetalFX output-shape change: the (in_w,in_h,out_w,out_h) tuple the
      * scaler + its texture ring are rebuilt for (display.c). */
     NSPROF_EV_MFX_SCALER_REBUILD,
+    /* deterministic lazy reports (vk/reports.c) */
+    NSPROF_EV_REP_TRAP,      /* guest/DMA touched an undelivered report */
+    NSPROF_EV_REP_GPU_TOUCH, /* the renderer read an undelivered report */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

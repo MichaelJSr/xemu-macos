@@ -241,6 +241,9 @@ void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
     PGRAPHVkState *r = pg->vk_renderer_state;
     hwaddr range_end = start + size;
 
+    pgraph_vk_det_reports_guard(container_of(pg, NV2AState, pgraph), start,
+                                size);
+
     for (int i = 0; i < r->surface_range_count; i++) {
         if (r->surface_ranges[i].start >= range_end) {
             break;
@@ -644,6 +647,9 @@ void pgraph_vk_process_pending_downloads(NV2AState *d)
 void pgraph_vk_download_dirty_surfaces(NV2AState *d)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    /* savevm and sync_ram: lazily delivered reports belong in RAM too. */
+    pgraph_vk_det_reports_deliver(d);
 
     SurfaceBinding *surface;
     QTAILQ_FOREACH(surface, &r->surfaces, entry) {

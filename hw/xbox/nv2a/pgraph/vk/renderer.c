@@ -123,11 +123,12 @@ static void pgraph_vk_flush(NV2AState *d)
     if (qatomic_xchg(&pg->flush_discard, false)) {
         /*
          * Deterministic mode, after a load: the previous session's GPU
-         * surfaces belong to RAM that was just replaced, so drop them
-         * without writing back (reports were all delivered before the
-         * pause, pgraph_vk_process_pending_reports). Renderer state the
-         * savestate lacks starts as in a fresh process.
+         * surfaces and reports belong to RAM that was just replaced, so
+         * drop them without writing back (reports were delivered when the
+         * load began, nv2a_vm_state_change; this only drops strays).
+         * Renderer state the savestate lacks starts as in a fresh process.
          */
+        pgraph_vk_det_reports_discard(d);
         SurfaceBinding *s;
         QTAILQ_FOREACH(s, &r->surfaces, entry) {
             s->draw_dirty = false;
@@ -200,10 +201,12 @@ static void pgraph_vk_process_pending(NV2AState *d)
     if (qatomic_read(&r->downloads_pending) ||
         qatomic_read(&r->download_dirty_surfaces_pending) ||
         qatomic_read(&d->pgraph.sync_pending) ||
-        qatomic_read(&d->pgraph.flush_pending)
+        qatomic_read(&d->pgraph.flush_pending) ||
+        qatomic_read(&r->det_reports.deliver)
     ) {
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_mutex_lock(&d->pgraph.lock);
+        pgraph_vk_det_reports_process(d);
         if (qatomic_read(&r->downloads_pending)) {
             pgraph_vk_process_pending_downloads(d);
         }
@@ -448,6 +451,8 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .pre_shutdown_wait = pgraph_vk_pre_shutdown_wait,
         .process_pending = pgraph_vk_process_pending,
         .process_pending_reports = pgraph_vk_process_pending_reports,
+        .request_report_delivery = pgraph_vk_request_report_delivery,
+        .report_guard = pgraph_vk_det_reports_guard,
         .surface_update = pgraph_vk_surface_update,
         .set_surface_scale_factor = pgraph_vk_set_surface_scale_factor,
         .get_surface_scale_factor = pgraph_vk_get_surface_scale_factor,
