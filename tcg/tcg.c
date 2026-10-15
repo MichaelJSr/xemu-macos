@@ -106,6 +106,8 @@ struct TCGLabelQemuLdst {
     TCGReg datahi_reg;      /* reg index for high word to be loaded or stored */
     const tcg_insn_unit *raddr;   /* addr of the next IR of qemu_ld/st IR */
     tcg_insn_unit *label_ptr[2]; /* label pointers to be updated */
+    /* A backend's own out-of-line stub, emitted instead of a slow path */
+    bool (*out_stub)(TCGContext *s, TCGLabelQemuLdst *l);
     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
 };
 
@@ -775,10 +777,10 @@ static int tcg_out_ldst_finalize(TCGContext *s)
 {
     TCGLabelQemuLdst *lb;
 
-    /* qemu_ld/st slow paths */
+    /* qemu_ld/st slow paths, and backend stubs */
     QSIMPLEQ_FOREACH(lb, &s->ldst_labels, next) {
-        if (lb->is_ld
-            ? !tcg_out_qemu_ld_slow_path(s, lb)
+        if (lb->out_stub ? !lb->out_stub(s, lb)
+            : lb->is_ld ? !tcg_out_qemu_ld_slow_path(s, lb)
             : !tcg_out_qemu_st_slow_path(s, lb)) {
             return -2;
         }

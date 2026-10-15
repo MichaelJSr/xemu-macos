@@ -3362,22 +3362,84 @@ static void tcg_out_x87_ld80_slow(TCGContext *s)
 }
 
 /*
+ * The conversions' rare cases are emitted out of line, after the TB's
+ * qemu_ld/st slow paths (tcg_out_ldst_finalize), so the common case falls
+ * through with no taken branch and the hot code stays short. A stub sees
+ * the scratch registers as the branch to it left them, touches only env
+ * and tcg_x87_ld80_slow, so it cannot fault and needs no restore data,
+ * and returns with a B to raddr.
+ */
+static TCGLabelQemuLdst *x87_new_stub(TCGContext *s,
+                                      bool (*out)(TCGContext *,
+                                                  TCGLabelQemuLdst *))
+{
+    TCGLabelQemuLdst *l = new_ldst_label(s);
+
+    l->out_stub = out;
+    return l;
+}
+
+/* CCMP Rn, #0, #nzcv, cond: flags = cond ? Rn - 0 : nzcv */
+static void tcg_out_ccmp0(TCGContext *s, TCGType ext, TCGReg rn,
+                          int nzcv, TCGCond c)
+{
+    tcg_out32(s, 0x7a400800 | ext << 31 | tcg_cond_to_aarch64[c] << 12
+              | rn << 5 | nzcv);
+}
+
+/* ld80f's cold path: ±0 here, everything else through the shared routine. */
+static bool tcg_out_ld80f_stub(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    TCGReg rd = l->datalo_reg;
+    tcg_insn_unit *br_slow;
+
+    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+        return false;
+    }
+    /* ±0: exponent bits to 63..49, the sign drops off */
+    tcg_out_insn(s, 3502S, ORR_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP2, TCG_REG_TMP0, TCG_REG_TMP1, 49);
+    br_slow = s->code_ptr;
+    tcg_out_insn(s, 3201, CBNZ, TCG_TYPE_I64, TCG_REG_TMP2, 0);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP1, 48);
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+    tcg_out_goto(s, l->raddr);
+
+    reloc_pc19(br_slow, tcg_splitwx_to_rx(s->code_ptr));
+    tcg_out_x87_ld80_slow(s);
+    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
+              | ((TCG_REG_TMP0 & 0x1f) << 5));
+    tcg_out_goto(s, l->raddr);
+    return true;
+}
+
+/*
  * tcg_out_ld80f_f64 — inline floatx80→IEEE double conversion.
  * Reads 10-byte floatx80 from [ptr], writes result to D-register rd.
- * Uses TMP0, TMP1, TMP2 as scratch GPRs and calls tcg_x87_ld80_slow,
- * which clobbers only those and NZCV. 15 insns on the in-range path.
+ * Uses TMP0, TMP1, TMP2 as scratch GPRs; the cold stub calls
+ * tcg_x87_ld80_slow, which clobbers only those and NZCV. 14 insns on the
+ * in-range path, which falls through.
  *
  * Matches the C reference: floatx80_to_double_fast() in fpu_helper.c.
  */
 static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
 {
-    tcg_insn_unit *br_range, *br_unnormal, *br_done, *br_done2, *br_stub;
+    TCGLabelQemuLdst *l;
+
+    l = x87_new_stub(s, tcg_out_ld80f_stub);
+    l->datalo_reg = rd;
 
     /* TMP0 = significand m, TMP1 = sign:exponent */
     tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP0, ptr, 0, 3);
     tcg_out_ldst(s, I3312_LDRH, TCG_REG_TMP1, ptr, 8, 1);
 
-    /* In range: exponent - 15361 below 2046 (double exponent 1..2046)... */
+    /*
+     * In range: exponent - 15361 below 2046 (double exponent 1..2046) and
+     * the integer bit set (m negative). Out of range the CCMP sets
+     * NZCV = 0, which reads GE just as m >= 0 does: one branch for both.
+     */
     tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I32,
                      TCG_REG_TMP2, TCG_REG_TMP1, 0x7FFF);
     tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I32,
@@ -3386,11 +3448,9 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
                  TCG_REG_TMP2, TCG_REG_TMP2, 0xC01);
     tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
                  TCG_REG_XZR, TCG_REG_TMP2, 2046);
-    br_range = s->code_ptr;
-    tcg_out_insn(s, 3202, B_C, TCG_COND_GEU, 0);
-    /* ... and the integer bit set. */
-    br_unnormal = s->code_ptr;
-    tcg_out_insn(s, 3205, TBZ, TCG_REG_TMP0, 63, 0);
+    tcg_out_ccmp0(s, TCG_TYPE_I64, TCG_REG_TMP0, 0, TCG_COND_LTU);
+    l->label_ptr[0] = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_GE, 0);
 
     /* TMP0 = m >> 11: the fraction in 51..0, the integer bit at 52 */
     tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, 11, 63);
@@ -3408,96 +3468,36 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr)
                  TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 63);
     tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
               | ((TCG_REG_TMP0 & 0x1f) << 5));
-    br_done = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-
-    /* === Cold: ±0 here (exponent bits to 63..49, the sign drops off) === */
-    reloc_pc19(br_range, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc14(br_unnormal, tcg_splitwx_to_rx(s->code_ptr));
-    tcg_out_insn(s, 3502S, ORR_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP2, TCG_REG_TMP0, TCG_REG_TMP1, 49);
-    br_stub = s->code_ptr;
-    tcg_out_insn(s, 3201, CBNZ, TCG_TYPE_I64, TCG_REG_TMP2, 0);
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP1, 48);
-    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
-              | ((TCG_REG_TMP0 & 0x1f) << 5));
-    br_done2 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-
-    /* === Cold: everything else, through the shared routine === */
-    reloc_pc19(br_stub, tcg_splitwx_to_rx(s->code_ptr));
-    tcg_out_x87_ld80_slow(s);
-    tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
-              | ((TCG_REG_TMP0 & 0x1f) << 5));
-
-    /* === Done === */
-    reloc_pc26(br_done, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc26(br_done2, tcg_splitwx_to_rx(s->code_ptr));
+    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
 }
 
 /*
- * tcg_out_st80f_f64 — inline IEEE double→floatx80 conversion.
- * Reads D-register src, writes 10-byte floatx80 to [ptr]. Exact for every
- * double; a signalling NaN is stored quieted.
- * Uses TMP0, TMP1, TMP2 as scratch GPRs. ~12 insns normal path.
- *
- * Matches the C reference: double_to_floatx80_fast() in fpu_helper.c.
+ * st80f's rare cases. TMP0 holds the double's bits (sign included), TMP1
+ * the sign, TMP2 the exponent: label 0 is taken for exponent 0, label 1
+ * for 0x7FF.
  */
-static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
+static bool tcg_out_st80f_stub(TCGContext *s, TCGLabelQemuLdst *l)
 {
-    /* Extract IEEE double bits to GPR */
-    tcg_out32(s, INSN_FMOV_XD | (TCG_REG_TMP0 & 0x1f)
-              | (((src - 32) & 0x1f) << 5));
-    /* TMP0 = IEEE double bits */
+    TCGReg ptr = l->addr_reg;
+    tcg_insn_unit *br_sub;
 
-    /* Extract fields */
-    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_TMP0, 63, 63);
-    /* TMP1 = sign (0 or 1) */
-    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP0, 52, 62);
-    /* UBFX with immr=52, imms=62: extracts bits 62:52 = 11-bit exp64 */
-    /* TMP2 = exp64 */
-    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64,
+    /* === Exponent 0: TMP0 = frac52, ±0 when that is 0 === */
+    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+        return false;
+    }
+    tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I64,
                      TCG_REG_TMP0, TCG_REG_TMP0, 0x000FFFFFFFFFFFFFULL);
-    /* TMP0 = frac52 */
-
-    /* Edge case: exp64 == 0 → zero or subnormal */
-    tcg_insn_unit *br_zero = s->code_ptr;
-    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP2, 0);
-
-    /* Edge case: exp64 == 0x7FF → inf or NaN */
-    tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
-                 TCG_REG_XZR, TCG_REG_TMP2, 0x7FF);
-    tcg_insn_unit *br_infnan = s->code_ptr;
-    tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
-
-    /* === Normal path === */
-    /* low = 0x8000000000000000 | (frac52 << 11) */
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
-                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
-    tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64,
-                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
-    /* Store low */
-    tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
-
-    /* high = (sign << 15) | (exp64 + 15360) */
-    tcg_out32(s, I3405_MOVZ | (0x3C00 << 5) | TCG_REG_TMP0);
-    /* MOVZ W(TMP0), #0x3C00 = 15360 */
-    tcg_out_insn(s, 3502, ADD, TCG_TYPE_I32,
-                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0);
-    /* TMP2 = exp80 */
+    br_sub = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_XZR, ptr, 0, 3);
+    /* high = sign << 15 */
     tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
-    /* TMP2 = exp80 | (sign << 15) = high16 */
-    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
+                 TCG_REG_TMP1, TCG_REG_XZR, TCG_REG_TMP1, 15);
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP1, ptr, 8, 1);
+    tcg_out_goto(s, l->raddr);
 
-    tcg_insn_unit *br_done = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-
-    /* === Cold path: exp64 == 0 → subnormal, normalised (exact) === */
-    reloc_pc19(br_zero, tcg_splitwx_to_rx(s->code_ptr));
-    tcg_insn_unit *br_szero = s->code_ptr;
-    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I64, TCG_REG_TMP0, 0);
+    /* === Subnormal, normalised (exact) === */
+    reloc_pc19(br_sub, tcg_splitwx_to_rx(s->code_ptr));
     /* low = frac52 << clz (12..63), high = (sign << 15) | (15372 - clz) */
     tcg_out_insn(s, 3507, CLZ, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP0);
     tcg_out_insn(s, 3508, LSLV, TCG_TYPE_I64,
@@ -3509,27 +3509,21 @@ static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
     tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
                  TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
     tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
-    tcg_insn_unit *br_done3 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
+    tcg_out_goto(s, l->raddr);
 
-    /* === Cold path: ±0 === */
-    reloc_pc19(br_szero, tcg_splitwx_to_rx(s->code_ptr));
-    tcg_out_ldst(s, I3312_STRX, TCG_REG_XZR, ptr, 0, 3);
-    /* high = sign << 15 */
-    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                 TCG_REG_TMP1, TCG_REG_XZR, TCG_REG_TMP1, 15);
-    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP1, ptr, 8, 1);
-    tcg_insn_unit *br_done2 = s->code_ptr;
-    tcg_out_insn(s, 3206, B, 0);
-
-    /* === Cold path: exp64 == 0x7FF → inf/NaN === */
-    reloc_pc19(br_infnan, tcg_splitwx_to_rx(s->code_ptr));
+    /* === Exponent 0x7FF: inf/NaN === */
+    if (!reloc_pc19(l->label_ptr[1], tcg_splitwx_to_rx(s->code_ptr))) {
+        return false;
+    }
     /* high = (sign << 15) | 0x7FFF */
     tcg_out32(s, I3405_MOVZ | (0x7FFF << 5) | TCG_REG_TMP2);
     tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
                  TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
     tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
-    /* low: inf → 0x8000..., NaN → 0xC000... | (frac52 << 11) */
+    /*
+     * low: inf → 0x8000..., NaN → 0xC000... | (frac52 << 11). The shift
+     * drops the sign and exponent but bit 52, which the ORR sets anyway.
+     */
     tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
                  TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
     tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64,
@@ -3546,11 +3540,59 @@ static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
     tcg_out_insn(s, 3510, ORR, TCG_TYPE_I64,
                  TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1);
     tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+    tcg_out_goto(s, l->raddr);
+    return true;
+}
 
-    /* === Done === */
-    reloc_pc26(br_done, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc26(br_done2, tcg_splitwx_to_rx(s->code_ptr));
-    reloc_pc26(br_done3, tcg_splitwx_to_rx(s->code_ptr));
+/*
+ * tcg_out_st80f_f64 — inline IEEE double→floatx80 conversion.
+ * Reads D-register src, writes 10-byte floatx80 to [ptr]. Exact for every
+ * double; a signalling NaN is stored quieted.
+ * Uses TMP0, TMP1, TMP2 as scratch GPRs. 13 insns for a normal double,
+ * which falls through; zeros, subnormals, infinities and NaNs go to the
+ * stub.
+ *
+ * Matches the C reference: double_to_floatx80_fast() in fpu_helper.c.
+ */
+static void tcg_out_st80f_f64(TCGContext *s, TCGReg src, TCGReg ptr)
+{
+    TCGLabelQemuLdst *l;
+
+    l = x87_new_stub(s, tcg_out_st80f_stub);
+    l->addr_reg = ptr;
+
+    /* TMP0 = IEEE double bits, TMP1 = sign, TMP2 = exp64 */
+    tcg_out32(s, INSN_FMOV_XD | (TCG_REG_TMP0 & 0x1f)
+              | (((src - 32) & 0x1f) << 5));
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_TMP0, 63, 63);
+    tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP0, 52, 62);
+
+    /* exp64 == 0: zero or subnormal; exp64 == 0x7FF: inf or NaN */
+    l->label_ptr[0] = s->code_ptr;
+    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP2, 0);
+    tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
+                 TCG_REG_XZR, TCG_REG_TMP2, 0x7FF);
+    l->label_ptr[1] = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
+
+    /*
+     * low = 0x8000000000000000 | (frac52 << 11): the shift drops the sign
+     * and the exponent but its bit 0, which lands on bit 63, set anyway.
+     */
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_XZR, TCG_REG_TMP0, 11);
+    tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64,
+                     TCG_REG_TMP0, TCG_REG_TMP0, 0x8000000000000000ULL);
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_TMP0, ptr, 0, 3);
+
+    /* high = (sign << 15) | (exp64 + 15360) */
+    tcg_out32(s, I3405_MOVZ | (0x3C00 << 5) | TCG_REG_TMP0);
+    tcg_out_insn(s, 3502, ADD, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0);
+    tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
+                 TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1, 15);
+    tcg_out_ldst(s, I3312_STRH, TCG_REG_TMP2, ptr, 8, 1);
+    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
 }
 
 static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
