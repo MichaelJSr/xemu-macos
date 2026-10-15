@@ -25,7 +25,6 @@
 #include "qemu/osdep.h"
 #include <CoreAudio/CoreAudio.h>
 #include <pthread.h>            /* pthread_X */
-#include <os/lock.h>
 
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -36,7 +35,7 @@
 
 typedef struct coreaudioVoiceOut {
     HWVoiceOut hw;
-    os_unfair_lock buf_lock;
+    pthread_mutex_t buf_mutex;
     AudioDeviceID outputDeviceID;
     int frameSizeSetting;
     uint32_t bufferCount;
@@ -216,7 +215,7 @@ static void G_GNUC_PRINTF (2, 3) coreaudio_logerr (
     va_list ap;
 
     va_start (ap, fmt);
-    AUD_vlog (AUDIO_CAP, fmt, ap);
+    AUD_log (AUDIO_CAP, fmt, ap);
     va_end (ap);
 
     coreaudio_logstatus (status);
@@ -243,15 +242,45 @@ static void G_GNUC_PRINTF (3, 4) coreaudio_logerr2 (
 #define coreaudio_playback_logerr(status, ...) \
     coreaudio_logerr2(status, "playback", __VA_ARGS__)
 
+static int coreaudio_buf_lock (coreaudioVoiceOut *core, const char *fn_name)
+{
+    int err;
+
+    err = pthread_mutex_lock (&core->buf_mutex);
+    if (err) {
+        dolog ("Could not lock voice for %s\nReason: %s\n",
+               fn_name, strerror (err));
+        return -1;
+    }
+    return 0;
+}
+
+static int coreaudio_buf_unlock (coreaudioVoiceOut *core, const char *fn_name)
+{
+    int err;
+
+    err = pthread_mutex_unlock (&core->buf_mutex);
+    if (err) {
+        dolog ("Could not unlock voice for %s\nReason: %s\n",
+               fn_name, strerror (err));
+        return -1;
+    }
+    return 0;
+}
+
 #define COREAUDIO_WRAPPER_FUNC(name, ret_type, args_decl, args) \
     static ret_type glue(coreaudio_, name)args_decl             \
     {                                                           \
         coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;     \
         ret_type ret;                                           \
                                                                 \
-        os_unfair_lock_lock(&core->buf_lock);                   \
+        if (coreaudio_buf_lock(core, "coreaudio_" #name)) {         \
+            return 0;                                           \
+        }                                                       \
+                                                                \
         ret = glue(audio_generic_, name)args;                   \
-        os_unfair_lock_unlock(&core->buf_lock);                 \
+                                                                \
+        coreaudio_buf_unlock(core, "coreaudio_" #name);             \
         return ret;                                             \
     }
 COREAUDIO_WRAPPER_FUNC(buffer_get_free, size_t, (HWVoiceOut *hw), (hw))
@@ -267,10 +296,6 @@ COREAUDIO_WRAPPER_FUNC(write, size_t, (HWVoiceOut *hw, void *buf, size_t size),
 /*
  * callback to feed audiooutput buffer. called without BQL.
  * allowed to lock "buf_mutex", but disallowed to have any other locks.
- *
- * Uses trylock to avoid blocking the real-time audio thread. If the
- * emulator thread holds the lock (writing to the ring), we output
- * silence rather than risk priority inversion.
  */
 static OSStatus audioDeviceIOProc(
     AudioDeviceID inDevice,
@@ -287,53 +312,23 @@ static OSStatus audioDeviceIOProc(
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hwptr;
     size_t len;
 
-    if (!os_unfair_lock_trylock(&core->buf_lock)) {
-        memset(outOutputData->mBuffers[0].mData, 0,
-               outOutputData->mBuffers[0].mDataByteSize);
+    if (coreaudio_buf_lock (core, "audioDeviceIOProc")) {
+        inInputTime = 0;
         return 0;
     }
 
     if (inDevice != core->outputDeviceID) {
-        os_unfair_lock_unlock(&core->buf_lock);
-        memset(out, 0, outOutputData->mBuffers[0].mDataByteSize);
+        coreaudio_buf_unlock (core, "audioDeviceIOProc(old device)");
         return 0;
     }
 
     frameCount = core->audioDevicePropertyBufferFrameSize;
     pending_frames = hw->pending_emul / hw->info.bytes_per_frame;
 
-    /*
-     * Partial underrun: drain what pending_emul holds (mixed with
-     * whatever the ring already produced) and zero only the tail the
-     * producer hasn't caught up on. Previously this path zeroed the
-     * entire IOProc buffer on even a single-frame shortfall, which
-     * made glitches audibly cliff-shaped; partial fill keeps the
-     * leading samples intact so a microsecond-late producer doesn't
-     * punch a hole through real audio.
-     */
+    /* if there are not enough samples, set signal and return */
     if (pending_frames < frameCount) {
-        size_t pending_bytes = pending_frames * hw->info.bytes_per_frame;
-        size_t total_bytes = outOutputData->mBuffers[0].mDataByteSize;
-        uint8_t *out_bytes = out;
-
-        while (pending_bytes) {
-            size_t start = audio_ring_posb(hw->pos_emul, hw->pending_emul,
-                                           hw->size_emul);
-            assert(start < hw->size_emul);
-            size_t write_len = MIN(MIN(hw->pending_emul, pending_bytes),
-                                   hw->size_emul - start);
-            memcpy(out_bytes, hw->buf_emul + start, write_len);
-            hw->pending_emul -= write_len;
-            pending_bytes -= write_len;
-            out_bytes += write_len;
-        }
-
-        size_t consumed = (size_t)out_bytes - (size_t)out;
-        if (consumed < total_bytes) {
-            memset(out_bytes, 0, total_bytes - consumed);
-        }
-
-        os_unfair_lock_unlock(&core->buf_lock);
+        inInputTime = 0;
+        coreaudio_buf_unlock (core, "audioDeviceIOProc(empty)");
         return 0;
     }
 
@@ -353,7 +348,7 @@ static OSStatus audioDeviceIOProc(
         out += write_len;
     }
 
-    os_unfair_lock_unlock(&core->buf_lock);
+    coreaudio_buf_unlock (core, "audioDeviceIOProc");
     return 0;
 }
 
@@ -381,15 +376,14 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     }
     if (core->outputDeviceID == kAudioDeviceUnknown) {
         dolog ("Could not initialize playback - Unknown Audiodevice\n");
-        return -1;
+        return status;
     }
 
     /* get minimum and maximum buffer frame sizes */
     status = coreaudio_get_framesizerange(core->outputDeviceID,
                                           &frameRange);
     if (status == kAudioHardwareBadObjectError) {
-        core->outputDeviceID = kAudioDeviceUnknown;
-        return status;
+        return 0;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -411,8 +405,7 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_set_framesize(core->outputDeviceID,
                                      &core->audioDevicePropertyBufferFrameSize);
     if (status == kAudioHardwareBadObjectError) {
-        core->outputDeviceID = kAudioDeviceUnknown;
-        return status;
+        return 0;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -425,8 +418,7 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_get_framesize(core->outputDeviceID,
                                      &core->audioDevicePropertyBufferFrameSize);
     if (status == kAudioHardwareBadObjectError) {
-        core->outputDeviceID = kAudioDeviceUnknown;
-        return status;
+        return 0;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -439,8 +431,7 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
     status = coreaudio_set_streamformat(core->outputDeviceID,
                                         &streamBasicDescription);
     if (status == kAudioHardwareBadObjectError) {
-        core->outputDeviceID = kAudioDeviceUnknown;
-        return status;
+        return 0;
     }
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr (status,
@@ -466,8 +457,7 @@ static OSStatus init_out_device(coreaudioVoiceOut *core)
                                        &core->hw,
                                        &core->ioprocid);
     if (status == kAudioHardwareBadDeviceError) {
-        core->outputDeviceID = kAudioDeviceUnknown;
-        return status;
+        return 0;
     }
     if (status != kAudioHardwareNoError || core->ioprocid == NULL) {
         coreaudio_playback_logerr (status, "Could not set IOProc\n");
@@ -571,37 +561,25 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
 {
     OSStatus status;
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;
+    int err;
     Audiodev *dev = drv_opaque;
     AudiodevCoreaudioPerDirectionOptions *cpdo = dev->u.coreaudio.out;
     struct audsettings obt_as;
 
-    core->buf_lock = OS_UNFAIR_LOCK_INIT;
+    /* create mutex */
+    err = pthread_mutex_init(&core->buf_mutex, NULL);
+    if (err) {
+        dolog("Could not create mutex\nReason: %s\n", strerror (err));
+        return -1;
+    }
 
     obt_as = *as;
     as = &obt_as;
     as->fmt = AUDIO_FORMAT_F32;
     audio_pcm_init_info (&hw->info, as);
 
-    /*
-     * Buffer size trade-off: 4096 frames (~85 ms @ 48 kHz) is very high
-     * latency for an interactive emulator. 1024 frames (~21 ms @ 48 kHz)
-     * is well within Apple's reliable IOProc budget on Apple Silicon
-     * while cutting latency ~4x. Override at runtime with
-     * XEMU_COREAUDIO_FRAMES (or QEMU -audiodev buffer options).
-     *
-     * The VP frame thread stays well under its budget (voice-struct
-     * stack memcpy, attenuation/pitch/LPF LUTs, vDSP_vsma mixbin,
-     * env-curve LUTs, bulk vcvtnq_s32_f32 on ARM64), so os_unfair_lock
-     * trylock contention between IOProc and the VP writer is rare
-     * in practice.
-     */
-    const char *buf_env = getenv("XEMU_COREAUDIO_FRAMES");
-    int default_frames = buf_env ? atoi(buf_env) : 1024;
-    if (default_frames <= 0) {
-        default_frames = 1024;
-    }
     core->frameSizeSetting = audio_buffer_frames(
-        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, default_frames);
+        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), as, 11610);
 
     core->bufferCount = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
 
@@ -633,6 +611,7 @@ static int coreaudio_init_out(HWVoiceOut *hw, struct audsettings *as,
 static void coreaudio_fini_out (HWVoiceOut *hw)
 {
     OSStatus status;
+    int err;
     coreaudioVoiceOut *core = (coreaudioVoiceOut *) hw;
 
     status = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
@@ -645,7 +624,11 @@ static void coreaudio_fini_out (HWVoiceOut *hw)
 
     fini_out_device(core);
 
-    /* os_unfair_lock requires no explicit destruction */
+    /* destroy mutex */
+    err = pthread_mutex_destroy(&core->buf_mutex);
+    if (err) {
+        dolog("Could not destroy mutex\nReason: %s\n", strerror (err));
+    }
 }
 
 static void coreaudio_enable_out(HWVoiceOut *hw, bool enable)

@@ -42,7 +42,7 @@ The upstream Windows build paths are preserved and CI-tested. All
 portable optimizations (the Vulkan renderer and APU work, the
 pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, the helper-based
 hard FPU on x86_64) apply automatically; macOS-only pieces (MetalFX,
-Metal/IOSurface presentation, CoreAudio, vDSP, the ARM64 DSP JIT, the
+Metal/IOSurface presentation, vDSP, the ARM64 DSP JIT, the
 AArch64 inline x87 FPU) compile out.
 
 - **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
@@ -408,8 +408,7 @@ affected titles) and report the title.
 restore per-bind content checks (a CPU write between two binds of the
 same texture within one frame otherwise lands a frame late).
 
-**Audio glitches.** `XEMU_COREAUDIO_FRAMES=2048` for a larger buffer.
-For DSP-heavy titles, confirm DSP JIT is enabled.
+**Audio glitches.** For DSP-heavy titles, confirm DSP JIT is enabled.
 
 **Vulkan renderer aborts at launch after an unclean exit.** A `.spv`
 file in the on-disk shader cache torn by a kill or a power loss used to
@@ -483,5 +482,5 @@ Xbox game (30fps, x87 FPU, MCPX APU)
        │
        └─ APU: VP (per-voice pitch / vol) + DSP JIT (ARM64)
            linear resampler (1ch mono / 2ch stereo) · fused mixbin
-           CoreAudio IOProc w/ partial-fill on underrun
+           host output: SDL3 audio stream
 ```
