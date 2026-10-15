@@ -227,13 +227,33 @@ GEN_INPUT_FLUSH3(float64_input_flush3, float64)
 # define QEMU_SOFTFLOAT_ATTR QEMU_FLATTEN __attribute__((noinline))
 #endif
 
+#if defined(XBOX) && defined(__aarch64__)
+/*
+ * xemu: the i386 x87 hard-FPU path keeps the guest x87 rounding mode in
+ * the host FPCR, so the host may not be rounding to nearest. Hardfloat is
+ * only exact then.
+ */
+static inline bool host_rounds_to_nearest(void)
+{
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    return !(fpcr & (3ull << 22));
+}
+#else
+static inline bool host_rounds_to_nearest(void)
+{
+    return true;
+}
+#endif
+
 static inline bool can_use_fpu(const float_status *s)
 {
     if (QEMU_NO_HARDFLOAT) {
         return false;
     }
     return likely(s->float_exception_flags & float_flag_inexact &&
-                  s->float_rounding_mode == float_round_nearest_even);
+                  s->float_rounding_mode == float_round_nearest_even &&
+                  host_rounds_to_nearest());
 }
 
 /*

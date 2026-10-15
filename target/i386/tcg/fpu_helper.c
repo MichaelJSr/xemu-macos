@@ -1238,13 +1238,6 @@ static void set_x86_rounding_mode(unsigned mode, float_status *status)
     };
     assert(mode < ARRAY_SIZE(x86_round_mode));
     set_float_rounding_mode(x86_round_mode[mode], status);
-
-#if defined(XBOX) && defined(__aarch64__)
-    static const int host_round_mode[4] = {
-        FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO
-    };
-    fesetround(host_round_mode[mode]);
-#endif
 }
 
 void update_fp_status(CPUX86State *env)
@@ -1255,6 +1248,20 @@ void update_fp_status(CPUX86State *env)
     /* set rounding mode */
     rnd_mode = (env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT;
     set_x86_rounding_mode(rnd_mode, &env->fp_status);
+#if defined(XBOX) && defined(__aarch64__)
+    {
+        /*
+         * The x87 hard-FPU paths round with the host FPCR, so it follows
+         * the x87 control word, and only it: MXCSR's rounding (SSE) used
+         * to overwrite it at LDMXCSR/FXRSTOR, leaving x87 math rounding
+         * per MXCSR until the next FLDCW.
+         */
+        static const int host_round_mode[4] = {
+            FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO
+        };
+        fesetround(host_round_mode[rnd_mode]);
+    }
+#endif
 
     switch ((env->fpuc >> 8) & 3) {
     case 0:
@@ -3917,15 +3924,7 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
      * exact cancellation under a leaked round-down. */
     want &= ~XEMU_FPCR_RMODE_MASK;
     if (want != fpcr) {
-        __asm__ volatile("msr fpcr, %0" : : "r"(want));
-        /*
-         * FPCR no longer holds what the inline-x87 path last wrote, and
-         * the sticky mode-1 leave keeps this SSE state across helpers.
-         * Invalidate the x87 rounding cache so gen_flcr's next
-         * cached_fpuc_rc compare misses and x87 code re-establishes its
-         * own FPCR instead of silently running under SSE FZ/RMode.
-         */
-        env->cached_fpuc_rc = 0xFFFF;
+        __asm__ volatile("msr fpcr, %0" : : "r"(want) : "memory");
     }
     return fpcr;
 }
@@ -3986,28 +3985,33 @@ static inline void xemu_hostfp_leave(uint64_t saved)
 #endif
 
 /*
- * Sticky bracket (mode 1): leave the host in guest-SSE mode between
- * helpers instead of restoring per op — the enter side compare-skips,
- * so runs of SSE ops pay one serializing mode write total instead of
- * two per op (measured parity vs softfloat with the strict bracket;
- * the write cost was the margin). Composition: the x87 hard-FPU
- * brackets save/restore around their own ops, softfloat and TCG
- * generated code carry no host FP-mode dependence, and host code on
- * the vCPU thread already tolerates guest rounding modes leaked by
- * the x87 path — the incremental exposure is FZ/DAZ on denormals
- * inside an opt-in knob. Differential mode (=2) keeps the strict
- * restore so its runs stay state-controlled.
+ * Both sides compare-skip, so a run of SSE ops costs no FPCR writes while
+ * the guest's SSE state matches the x87 rounding FPCR holds; otherwise
+ * each op writes FPCR on entry and puts the x87 mode back on exit.
  */
+/*
+ * Keep the bracketed arithmetic between the FPCR/MXCSR writes: they only
+ * order memory, so pin the operands after the enter and the result before
+ * the leave.
+ */
+#if defined(__aarch64__)
+#define XEMU_FP_PIN(x) __asm__ volatile("" : "+w"(x))
+#else
+#define XEMU_FP_PIN(x) __asm__ volatile("" : "+x"(x))
+#endif
+
 static inline void xemu_hostfp_leave_lazy(uint64_t saved)
 {
     /*
-     * Deterministic mode (icount) restores too: there the x87 helpers
-     * round with whatever FPCR holds, so it must depend only on the guest
-     * x87 control word, not on whether an SSE op ran since.
+     * The x87 hard-FPU helpers and write-through ops round with whatever
+     * FPCR holds (the guest x87 rounding mode, set at FLDCW and friends),
+     * so put back what the enter changed, in every mode: left in SSE mode
+     * (round to nearest, FZ from MXCSR), x87 math after an SSE op rounded
+     * wrongly until the next FLDCW. The compare-skip keeps this free while
+     * guest x87 and SSE agree (Azurik: FCW nearest, MXCSR without FTZ);
+     * only directed x87 rounding windows and FTZ titles pay the writes.
      */
-    if (unlikely(xemu_sse_neon_mode() == 2) || icount_enabled()) {
-        xemu_hostfp_leave(saved);
-    }
+    xemu_hostfp_leave(saved);
 }
 
 #if !defined(__aarch64__)
@@ -4038,7 +4042,9 @@ static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     xemu_v4f a = xemu_v4f_load(&v->ZMM_S(0));                               \
     xemu_v4f b = xemu_v4f_load(&s->ZMM_S(0));                               \
     uint64_t saved = xemu_hostfp_enter(env);                                \
+    XEMU_FP_PIN(a); XEMU_FP_PIN(b);                                         \
     xemu_v4f r = (EXPR);                                                    \
+    XEMU_FP_PIN(r);                                                         \
     xemu_hostfp_leave_lazy(saved);                                          \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         ZMMReg sv = *v, ss2 = *s;                                           \
@@ -4078,8 +4084,10 @@ static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     memcpy(&fa, &v->ZMM_L(0), 4);                                           \
     memcpy(&fb, &s->ZMM_L(0), 4);                                           \
     uint64_t saved = xemu_hostfp_enter(env);                                \
+    XEMU_FP_PIN(fa); XEMU_FP_PIN(fb);                                       \
     fr = (SEXPR);                                                           \
-    xemu_hostfp_leave_lazy(saved);                                       \
+    XEMU_FP_PIN(fr);                                                        \
+    xemu_hostfp_leave_lazy(saved);                                          \
     memcpy(&out, &fr, 4);                                                   \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \
