@@ -898,8 +898,19 @@ static void invalidate_surface_full(NV2AState *d, SurfaceBinding *surface,
      * just-submitted CB executing, so "not in the recording CB" alone
      * never proves the GPU is done with it.
      */
+    /*
+     * An async compositor command buffer is submitted after the frame it
+     * shows and samples its surface, but is not counted in submit_count;
+     * while one may be pending, wait for the next submission, which the
+     * single in-order queue runs after it.
+     */
+    bool compositor_pending = false;
+    for (int i = 0; i < COMPOSITOR_CB_RING; i++) {
+        compositor_pending |= r->compositor_pending[i];
+    }
     surface->evict_submit_seq =
-        (uint64_t)r->submit_count + (r->in_command_buffer ? 1 : 0);
+        (uint64_t)r->submit_count +
+        (r->in_command_buffer || compositor_pending ? 1 : 0);
 
     if (surface == r->color_binding) {
         nv2a_vk_assert(d->pgraph.surface_color.buffer_dirty);
@@ -2646,6 +2657,9 @@ void pgraph_vk_surface_flush(NV2AState *d)
     memset(&pg->last_surface_shape, 0, sizeof(pg->last_surface_shape));
     unbind_surface(d, true);
     unbind_surface(d, false);
+
+    /* Free means free: no compositor command buffer may still sample. */
+    pgraph_vk_drain_compositor_cbs(pg);
 
     SurfaceBinding *s, *next;
     QTAILQ_FOREACH_SAFE(s, &r->surfaces, entry, next) {

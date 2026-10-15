@@ -37,6 +37,15 @@ typedef struct SDL_Window SDL_Window;
 
 /* Window/layer/device setup. Returns false on failure. */
 bool xemu_metal_init(SDL_Window *window);
+
+/*
+ * Label an id<MTLCommandBuffer> and log it if it fails on the GPU. Metal
+ * stops accepting a process's work after repeated GPU errors, and the
+ * buffers the fork encodes itself (presenter, HUD, MetalFX) checked nothing,
+ * so the first fault went unreported. Call before commit; @what must be a
+ * string literal.
+ */
+void xemu_metal_watch_command_buffer(void *command_buffer, const char *what);
 void xemu_metal_finalize(void);
 
 /* CAMetalLayer.displaySyncEnabled (the Metal vsync analogue). */

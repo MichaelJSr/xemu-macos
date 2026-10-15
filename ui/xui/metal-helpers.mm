@@ -652,6 +652,7 @@ void MetalFboTarget(MetalFbo *fbo)
     id<MTLCommandQueue> queue =
         (id<MTLCommandQueue>)xemu_metal_get_command_queue();
     fbo->cmdbuf = [[queue commandBuffer] retain];
+    xemu_metal_watch_command_buffer(fbo->cmdbuf, "xemu HUD target");
 
     MTLRenderPassDescriptor *rpd =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -891,6 +892,7 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
     id<MTLCommandQueue> queue =
         (id<MTLCommandQueue>)xemu_metal_get_command_queue();
     id<MTLCommandBuffer> cb = [queue commandBuffer];
+    xemu_metal_watch_command_buffer(cb, "xemu frame readback");
 
     /* The source may be an in-flight MetalFX ring texture (produced on
      * a different queue with async signaling); order against it. */

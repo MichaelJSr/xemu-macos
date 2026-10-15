@@ -2436,8 +2436,13 @@ int main(int argc, char **argv)
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
     setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
-    /* Errors only; trims the driver's default INFO logging off the hot path. */
-    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+    /*
+     * Warnings, not INFO (the driver default, off the hot path). Not errors
+     * only: with RESUME_LOST_DEVICE, MoltenVK reports a command buffer that
+     * failed on the GPU as a warning, so errors-only hid every fault until
+     * macOS stopped accepting the process's work and the device was lost.
+     */
+    setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
     /*
      * NB: MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION was tried and
      * reverted — measured inert on macOS 26 / M2 Ultra (the compile-task

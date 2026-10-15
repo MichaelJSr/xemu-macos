@@ -123,6 +123,27 @@ bool xemu_metal_init(SDL_Window *window)
     return true;
 }
 
+void xemu_metal_watch_command_buffer(void *command_buffer, const char *what)
+{
+    static _Atomic int failures;
+    id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)command_buffer;
+
+    [cb setLabel:@(what)];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        if (done.status != MTLCommandBufferStatusError) {
+            return;
+        }
+        int n = atomic_fetch_add(&failures, 1);
+        if (n < 8 || n % 100 == 0) {
+            NSError *e = done.error;
+            fprintf(stderr, "xemu: Metal command buffer \"%s\" failed on the "
+                    "GPU (error %ld%s): %s\n", what, (long)e.code,
+                    n == 0 ? ", first" : "",
+                    e.localizedDescription.UTF8String ?: "?");
+        }
+    }];
+}
+
 void xemu_metal_finalize(void)
 {
     /* Drain any in-flight work before tearing the queue down. */
@@ -207,7 +228,7 @@ bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
     g_drawable_h = (int)g_drawable.texture.height;
 
     g_cmdbuf = [[g_queue commandBuffer] retain];
-    [g_cmdbuf setLabel:@"xemu present"];
+    xemu_metal_watch_command_buffer(g_cmdbuf, "xemu present");
 
     /*
      * Order against async MetalFX output: GPU-side wait, encoded

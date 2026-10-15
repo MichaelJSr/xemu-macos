@@ -478,10 +478,17 @@ static void create_pvideo_image(PGRAPHState *pg, int width, int height)
     PGRAPHVkState *r = pg->vk_renderer_state;
     PGRAPHVkDisplayState *d = &r->display;
 
-    if (d->pvideo.image == VK_NULL_HANDLE || d->pvideo.width != width ||
-        d->pvideo.height != height) {
+    if (d->pvideo.image != VK_NULL_HANDLE && d->pvideo.width == width &&
+        d->pvideo.height == height) {
+        return;
+    }
+    if (d->pvideo.image != VK_NULL_HANDLE) {
+        /* A compositor command buffer may still sample it. */
+        pgraph_vk_drain_compositor_cbs(pg);
         destroy_pvideo_image(pg);
     }
+    d->pvideo.width = width;
+    d->pvideo.height = height;
 
     VkImageCreateInfo image_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -999,6 +1006,9 @@ static void destroy_current_display_image(PGRAPHState *pg)
         return;
     }
 
+    /* Pending compositor command buffers render into it (resize). */
+    pgraph_vk_drain_compositor_cbs(pg);
+
     destroy_frame_buffer(pg);
 
 #if HAVE_EXTERNAL_MEMORY
@@ -1394,24 +1404,17 @@ static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
     PGRAPHVkDisplayState *disp = &r->display;
 
     bool pvideo_on = disp->pvideo.state.enabled;
-#ifdef __APPLE__
     /*
-     * Skip-if-unchanged cache. The key is a raw SurfaceBinding* that is
-     * never cleared when a surface is evicted, so after a surface is freed
-     * and its heap address reused for a new binding, this compares equal
-     * and skips the rewrite — leaving the descriptor pointed at the freed
-     * VkImageView. MoltenVK tolerates sampling a stale view (its backing
-     * MTLTexture is ARC-retained), but a native Vulkan driver samples a
-     * destroyed view as black. Keep the fast path only on Apple; native
-     * drivers rewrite the descriptor every present (two writes, cheap).
+     * Rewrite every present (two writes, cheap). An Apple-only cache once
+     * skipped this while the SurfaceBinding* was unchanged, but a surface
+     * freed by a flush (loadvm, reset) and reallocated at the same address
+     * compared equal and left the descriptor on the freed view. MoltenVK
+     * does not tolerate that: with argument buffers and a residency set
+     * its descriptors hold raw gpuResourceIDs, freeing an image releases
+     * its MTLTexture at once and command buffers do not retain resources,
+     * so the compositor sampled freed memory, a GPU fault that repeated
+     * every flip until macOS ignored the process ("Vulkan device lost").
      */
-    if (surface == disp->last_descriptor_surface &&
-        pvideo_on == disp->last_descriptor_pvideo) {
-        return;
-    }
-    disp->last_descriptor_surface = surface;
-    disp->last_descriptor_pvideo = pvideo_on;
-#endif
 
     VkDescriptorImageInfo image_infos[2];
     VkWriteDescriptorSet descriptor_writes[2];
@@ -2261,9 +2264,16 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         IOSurfaceRef current_surface = (IOSurfaceRef)disp->iosurface;
         IOSurfaceRef present_surface = current_surface;
 
-        /* --- MetalFX Upscaling --- */
+        /*
+         * --- MetalFX Upscaling ---
+         * Not headless: the target is the hidden window's layer, an
+         * arbitrary size nothing presents, so a screendump returns the
+         * composited guest frame and the GPU does no extra work.
+         */
         int mfx_mode = 0;
-        if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_SPATIAL) {
+        if (xemu_headless_mode()) {
+            mfx_mode = 0;
+        } else if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_SPATIAL) {
             mfx_mode = 1;
         } else if (g_config.display.metalfx_mode == CONFIG_DISPLAY_METALFX_MODE_TEMPORAL) {
             mfx_mode = 2;
@@ -2415,9 +2425,15 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             }
         }
 
-        /* --- Frame Interpolation (runs independently of upscaling) --- */
+        /*
+         * --- Frame Interpolation (runs independently of upscaling) ---
+         * Not headless: nothing presents there, and a screendump must be a
+         * real guest frame, not a synthesized midpoint.
+         */
         int interp_mode = 0;
-        if (g_config.display.frame_interpolation ==
+        if (xemu_headless_mode()) {
+            interp_mode = 0;
+        } else if (g_config.display.frame_interpolation ==
                 CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
             interp_mode = 2;
         } else if (g_config.display.frame_interpolation ==

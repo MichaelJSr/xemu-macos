@@ -50,9 +50,11 @@
     <string>1</string>
     <key>MVK_CONFIG_RESUME_LOST_DEVICE</key>
     <string>1</string>
-    <!-- Errors only (driver default is INFO). -->
+    <!-- Warnings (driver default is INFO): GPU faults in MoltenVK's
+         command buffers are reported as warnings while the device resumes;
+         errors-only hid them until the device was lost. -->
     <key>MVK_CONFIG_LOG_LEVEL</key>
-    <string>1</string>
+    <string>2</string>
   </dict>
 </dict>
 </plist>

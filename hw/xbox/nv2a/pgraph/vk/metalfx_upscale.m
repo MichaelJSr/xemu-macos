@@ -16,6 +16,7 @@
 #import <IOSurface/IOSurface.h>
 #include "metalfx_upscale.h"
 #include "ui/xemu-present.h"
+#include "ui/xemu-metal.h"
 
 #import <os/lock.h>
 #include <stdatomic.h>
@@ -66,8 +67,18 @@ static void metalfx_wait_inflight(_Atomic int *counter)
     while (atomic_load_explicit(counter, memory_order_acquire) > 0) {
         if (++spins < 1000) {
             /* Tight spin for the common case (<1ms) */
-        } else {
+        } else if (spins < 1000 + 20000) {
             usleep(100);
+        } else {
+            /*
+             * ~2 s: a command buffer that waits on an event a faulted
+             * submission never signals does not complete. Give up rather
+             * than freeze the PFIFO thread behind it.
+             */
+            fprintf(stderr, "xemu: MetalFX: %d command buffer(s) still "
+                    "in flight after 2 s; continuing\n",
+                    atomic_load_explicit(counter, memory_order_acquire));
+            return;
         }
     }
 }
@@ -581,8 +592,8 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
         }
         g_spatial.scaler.colorTexture = g_spatial.inputTexture;
         g_spatial.scaler.outputTexture = output;
-
         id<MTLCommandBuffer> cb = [g_spatial.commandQueue commandBuffer];
+        xemu_metal_watch_command_buffer(cb, "MetalFX spatial");
         metalfx_encode_input_wait(cb);
         [g_spatial.scaler encodeToCommandBuffer:cb];
         atomic_fetch_add_explicit(&g_spatial_inflight, 1, memory_order_acq_rel);
@@ -617,8 +628,8 @@ bool metalfx_upscale_tex(void *inputTexture)
         }
         g_spatial.scaler.colorTexture = (id<MTLTexture>)inputTexture;
         g_spatial.scaler.outputTexture = output;
-
         id<MTLCommandBuffer> cb = [g_spatial.commandQueue commandBuffer];
+        xemu_metal_watch_command_buffer(cb, "MetalFX spatial");
         metalfx_encode_input_wait(cb);
         [g_spatial.scaler encodeToCommandBuffer:cb];
         atomic_fetch_add_explicit(&g_spatial_inflight, 1, memory_order_acq_rel);
@@ -1018,8 +1029,8 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
             g_temporal.depthTexture = nil;
             g_temporal.cachedDepthSurfaceID = 0;
         }
-
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
+        xemu_metal_watch_command_buffer(cb, "MetalFX temporal");
         metalfx_encode_input_wait(cb);
 
         if (!g_temporal.depthTexture && g_temporal.syntheticDepthPipeline &&
@@ -1119,8 +1130,8 @@ bool metalfx_temporal_upscale_tex(void *inputTexture, void *depthTexture)
                 real_depth = dt;
             }
         }
-
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
+        xemu_metal_watch_command_buffer(cb, "MetalFX temporal");
         metalfx_encode_input_wait(cb);
 
         if (!real_depth && g_temporal.syntheticDepthPipeline &&
@@ -1689,8 +1700,8 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             interp.prevColorTexture = g_interp.cachedColorPrev;
             interp.outputTexture = output;
             interp_configure_common(interp, delta_time);
-
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            xemu_metal_watch_command_buffer(cb, "MetalFX interpolation");
             metalfx_encode_input_wait(cb);
             id<MTLTexture> depth = g_interp.cachedDepthCur;
             if (!depth && !g_interp.linked_to_temporal) {
@@ -1748,6 +1759,16 @@ bool metalfx_interpolation_generate_tex(void *prevTexture,
 
         id<MTLFXFrameInterpolator> interp =
             (id<MTLFXFrameInterpolator>)g_interp.interpolator;
+        id<MTLTexture> prev = (id<MTLTexture>)prevTexture;
+        id<MTLTexture> cur = (id<MTLTexture>)curTexture;
+        NSUInteger iw = (NSUInteger)g_interp.width;
+        NSUInteger ih = (NSUInteger)g_interp.height;
+        if (prev.width != iw || prev.height != ih ||
+            cur.width != iw || cur.height != ih) {
+            /* Straddles a resize of the MetalFX output; skip this one. */
+            os_unfair_lock_unlock(&g_metalfx_lock);
+            return false;
+        }
 
         @autoreleasepool {
             id<MTLTexture> output = ring_advance(&g_interp.ring);
@@ -1763,8 +1784,8 @@ bool metalfx_interpolation_generate_tex(void *prevTexture,
             interp.prevColorTexture = (id<MTLTexture>)prevTexture;
             interp.outputTexture = output;
             interp_configure_common(interp, delta_time);
-
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
+            xemu_metal_watch_command_buffer(cb, "MetalFX interpolation");
             metalfx_encode_input_wait(cb);
             id<MTLTexture> depth = nil;
             if (!g_interp.linked_to_temporal) {

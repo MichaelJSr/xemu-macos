@@ -526,8 +526,6 @@ typedef struct PGRAPHVkDisplayState {
      */
     void *mtl_texture;
 
-    SurfaceBinding *last_descriptor_surface;
-    bool last_descriptor_pvideo;
 
 #if HAVE_IOSURFACE_SHARING
     /*

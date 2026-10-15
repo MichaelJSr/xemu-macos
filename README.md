@@ -154,7 +154,7 @@ For harnesses that drive xemu only through QMP, the gdbstub and
 | `XEMU_HEADLESS` | Effect |
 |---|---|
 | unset or empty | Normal windowed xemu |
-| `1` | Offscreen: hidden window, no Dock icon, never takes focus, no UI, no host audio. The guest still renders, so `screendump` returns real frames |
+| `1` | Offscreen: hidden window, no Dock icon, never takes focus, no UI, no host audio. The guest still renders, so `screendump` returns real frames, at render resolution (no MetalFX upscaling or frame interpolation) |
 | `null` | As `1`, plus the null renderer: no GPU work. Game logic, vblank timing, input, gdbstub and QMP work as usual; `screendump` returns the VGA scanout (usually blank). The configured renderer is not saved over |
 
 At startup xemu prints `xemu: headless mode: offscreen` (or `null`) to
@@ -238,11 +238,18 @@ Other automation interfaces (windowed or headless):
   40 fps with 0) and suits games that are not CPU-bound. Only the null
   renderer is deterministic: offscreen rendering runs under icount but
   GPU reports follow GPU time. Keep the network off and bind no XMU.
-- **Lost GPU device**: when macOS stops accepting the process's GPU work
-  (it does after repeated GPU errors, usually under heavy multi-instance
-  load), a headless xemu prints `xemu: Vulkan device lost; exiting` and
-  exits at once. A windowed one still crashes with a report, which
-  freezes it for as long as the report takes and looks like a hang.
+- **Lost GPU device**: macOS stops accepting a process's GPU work after
+  repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
+  lost; exiting` and exits at once (a windowed one still crashes with a
+  report). The errors behind it were GPU reads of freed textures: after a
+  `loadvm` or reset freed every surface, the display compositor could
+  keep sampling a freed one, and its command buffers could outlive the
+  surfaces they sampled. Both are fixed. GPU errors are now logged when
+  they happen (MoltenVK warnings, and `xemu: Metal command buffer "..."
+  failed on the GPU` for the presenter, HUD and MetalFX), so a remaining
+  cause shows up before the device is lost. `[display] renderer =
+  'OPENGL'` avoids MoltenVK and the compositor entirely and works
+  offscreen, but runs Azurik's heavy scene about 3x slower.
 
 ---
 
