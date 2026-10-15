@@ -206,6 +206,17 @@ static void xpage_maybe_reset(void)
     }
 }
 
+/*
+ * A load keeps the TBs (xemu_tb_revalidate_after_load) but brings new page
+ * tables, and its tlb_flush has severed the cross-page chains: start both
+ * shadows over at their next use, as after a tb_flush. Called with the
+ * vCPU stopped.
+ */
+void xemu_xpage_shadow_reset(void)
+{
+    xpage_last_flush = 0xffffffff;
+}
+
 void xemu_xpage_refute_note(uint64_t target, uint64_t phys)
 {
     uint64_t vp, pp;

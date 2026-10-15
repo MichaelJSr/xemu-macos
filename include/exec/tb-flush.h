@@ -35,4 +35,13 @@ void queue_tb_flush(CPUState *cs);
 
 void tcg_flush_jmp_cache(CPUState *cs);
 
+#ifdef XBOX
+/*
+ * xemu_tb_revalidate_after_load() - after a successful load, drop the
+ * translations whose guest bytes changed and re-protect the code pages
+ * that keep some. Same calling context as tb_flush__exclusive_or_serial().
+ */
+void xemu_tb_revalidate_after_load(void);
+#endif
+
 #endif /* _TB_FLUSH_H_ */

@@ -89,4 +89,7 @@ void xemu_xpage_refute_note(uint64_t target, uint64_t phys);
  */
 void xemu_xpage_observe_mapping(uint64_t vpage, uint64_t ppage);
 
+/* Forget the refuter and observer bindings, as a tb_flush does (loads). */
+void xemu_xpage_shadow_reset(void);
+
 #endif /* XEMU_XPAGE_H */

@@ -52,4 +52,9 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t ram_addr,
 bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
                                     uintptr_t pc);
 
+#ifdef XBOX
+/* Forget a pending icount step (cpu-exec.c); a load keeps the TBs. */
+void xemu_istep_disarm(void);
+#endif
+
 #endif

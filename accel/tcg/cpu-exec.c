@@ -643,6 +643,11 @@ static struct {
     unsigned flush;     /* tb_flush_count when armed */
 } xemu_istep;
 
+void xemu_istep_disarm(void)
+{
+    xemu_istep.left = 0;
+}
+
 static bool xemu_icount_step_on(void)
 {
     static int on = -1;

@@ -3179,15 +3179,20 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
     cpu_synchronize_all_post_init();
 
 #ifdef XBOX
-    if (ret == 0) {
+    if (tcg_enabled()) {
         /*
-         * RAM changed without the writes that invalidate translations.
-         * tcg_vm_change_state flushes only when the load stopped a running
-         * VM; a load while paused would keep running the previous code.
+         * RAM changed without the writes that invalidate translations
+         * (tcg_vm_change_state leaves RESTORE_VM to here). Keep the
+         * translations whose guest bytes are unchanged; a failed load can
+         * leave RAM half written, so drop them all then.
          */
-        if (tcg_enabled()) {
+        if (ret == 0) {
+            xemu_tb_revalidate_after_load();
+        } else {
             tb_flush__exclusive_or_serial();
         }
+    }
+    if (ret == 0) {
         void xemu_state_loaded(void);
         xemu_state_loaded();
         /* Readiness signal for harnesses (loadvm and incoming migration). */

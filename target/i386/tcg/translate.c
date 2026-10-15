@@ -3777,8 +3777,16 @@ static int xemu_idle_loop_kind(DisasContext *s)
     vaddr page = sti & TARGET_PAGE_MASK;
 
     if (!icount_enabled() ||
-        ((s->pc + sizeof(head) - 1) & TARGET_PAGE_MASK) != page ||
-        !xemu_idle_bytes_match(s, s->pc, head, sizeof(head))) {
+        ((s->pc + sizeof(head) - 1) & TARGET_PAGE_MASK) != page) {
+        return XEMU_IDLE_NONE;
+    }
+    /*
+     * The TB ends at the STI, so whatever this returns rests on bytes its
+     * ihash doesn't cover: keep it out of the recycler and drop it at every
+     * load (tb-maint.c).
+     */
+    s->base.tb->xemu_xpage_reg |= XEMU_TB_PEEKS;
+    if (!xemu_idle_bytes_match(s, s->pc, head, sizeof(head))) {
         return XEMU_IDLE_NONE;
     }
 

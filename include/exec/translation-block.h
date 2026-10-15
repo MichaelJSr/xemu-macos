@@ -104,10 +104,14 @@ struct TranslationBlock {
      *       every dest this TB links is registered, independent of the
      *       phys-page heuristic (covers virtual-alias targets whose phys
      *       coincides with the source's).
+     *   XEMU_TB_PEEKS — translation read guest bytes past [pc, pc + size)
+     *       (the icount idle-loop match in gen_STI), which ihash doesn't
+     *       cover: never recycled, always dropped by a load.
      */
     uint8_t xemu_xpage_reg;
 #define XEMU_XPAGE_TB_REGISTERED    0x1
 #define XEMU_XPAGE_TB_CROSS_EMITTER 0x2
+#define XEMU_TB_PEEKS               0x4
     uint64_t ihash;
 
     struct tb_tc tc;

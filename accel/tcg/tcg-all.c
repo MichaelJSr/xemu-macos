@@ -96,7 +96,16 @@ static void tcg_vm_change_state(void *opaque, bool running, RunState state)
          * vm_stop() has just stopped all cpus, so we are exclusive.
          */
         assert(!running);
+#if defined(XBOX)
+        /*
+         * Not here: RAM still holds the old state. qemu_loadvm_state drops
+         * the translations the load changed, or all of them if the stream
+         * fails. A load that fails before the stream has changed RAM only
+         * through the reset, whose stores invalidate as usual.
+         */
+#else
         tb_flush__exclusive_or_serial();
+#endif
     }
 }
 #endif
