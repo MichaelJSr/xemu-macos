@@ -241,7 +241,6 @@ check_pgo_staleness() {
         return 0
     fi
 
-    local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
     local summary mism hotmism unpro hotunpro hotnames
     summary=$(awk '
         {
@@ -276,27 +275,11 @@ check_pgo_staleness() {
     ' build.log)
     read -r mism hotmism unpro hotunpro hotnames <<<"${summary}"
 
-    # Retrain point, in preference order: explicit override, the commit
-    # that last touched the committed profile, else the commit that was
-    # HEAD when the newest profile artifact was written.
-    local retrain_ref="" retrain_desc="unknown" commits="n/a" newest ts
-    if [ -n "${XEMU_PGO_RETRAIN_REF:-}" ]; then
-        retrain_ref="${XEMU_PGO_RETRAIN_REF}"
-    elif git -C "${project_source_dir}" rev-parse --git-dir >/dev/null 2>&1; then
+    # Retrain point: the commit that last touched the committed profile.
+    local retrain_ref="" retrain_desc="unknown" commits="n/a"
+    if git -C "${project_source_dir}" rev-parse --git-dir >/dev/null 2>&1; then
         retrain_ref=$(git -C "${project_source_dir}" log -1 --format=%H \
                       -- pgo 2>/dev/null || true)
-        if [ -z "${retrain_ref}" ]; then
-            newest=$(ls -t "${pgo_dir}"/*.profdata "${pgo_dir}"/*.profraw \
-                     2>/dev/null | head -1 || true)
-            if [ -n "${newest}" ]; then
-                ts=$(stat -f %m "${newest}" 2>/dev/null || \
-                     stat -c %Y "${newest}" 2>/dev/null || true)
-                if [ -n "${ts}" ]; then
-                    retrain_ref=$(git -C "${project_source_dir}" log -1 \
-                                  --until="@${ts}" --format=%H 2>/dev/null || true)
-                fi
-            fi
-        fi
     fi
     if [ -n "${retrain_ref}" ]; then
         retrain_desc=$(git -C "${project_source_dir}" log -1 \
@@ -859,35 +842,6 @@ case "$platform" in # Adjust compilation options based on platform
         setup_pgo
 
         sys_ldflags="${sys_ldflags:-}${sys_ldflags:+ }-headerpad_max_install_names"
-
-        # Optional binary-size / LTO passes. Off by default because
-        # QEMU uses __attribute__((constructor)) for type_init /
-        # module_init; macOS ld's -dead_strip keeps constructors by
-        # default but can prune sibling static helpers whose only
-        # reference is via the constructor, so validate before baking
-        # in. Opt in with XEMU_STRIP=1.
-        #
-        # -fvisibility=hidden alone is a smaller hammer: hides
-        # undeclared exports and gives LTO more freedom to inline /
-        # remove internal-only functions across the binary. QEMU's
-        # external-facing APIs (HS_DEF_HELPER_*, ImGui IMGUI_API,
-        # glslang public API) already tag themselves default; verified
-        # against this tree before landing. Opt in with XEMU_VIS=1.
-        #
-        # Binary size impact observed on this fork: XEMU_VIS=1 alone
-        # reduces arm64 qemu-system-i386-unsigned by ~1.5 MiB (mostly
-        # debug name strings from TCG helpers). Combined XEMU_VIS=1 +
-        # XEMU_STRIP=1 reduces ~4 MiB. Runtime perf delta is within
-        # noise on measurements so far; the main benefit is faster
-        # link time and cleaner LTO.
-        if [ "${XEMU_VIS:-0}" = "1" ]; then
-          sys_cflags="${sys_cflags} -fvisibility=hidden"
-          echo "Visibility: hidden default (XEMU_VIS=1)"
-        fi
-        if [ "${XEMU_STRIP:-0}" = "1" ]; then
-          sys_ldflags="${sys_ldflags:-}${sys_ldflags:+ }-Wl,-dead_strip"
-          echo "Linker: -dead_strip enabled (XEMU_STRIP=1)"
-        fi
         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
         opts="$opts --disable-cocoa --cross-prefix="
         postbuild='package_macos'

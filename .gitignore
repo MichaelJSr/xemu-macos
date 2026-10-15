@@ -23,12 +23,10 @@ GTAGS
 build.log
 /dist
 /xemu.ini
-/macos-libs/
-/macos-pkgs/
+/macos-libs
+/macos-pkgs
 /xemu.iconset/
 .DS_Store
-.cursorignore
-xemu-output.log
 /pgo/*.profraw
 bench-out*/
 

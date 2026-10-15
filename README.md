@@ -82,8 +82,6 @@ AArch64 inline x87 FPU) compile out.
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_MOLTENVK_VERSION` | `1.4.2` | MoltenVK release auto-vendored into `macos-libs` when no usable system copy exists. This default is the single home for the expected version — macOS CI asserts the packaged bundle's provenance line matches it |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
-| `XEMU_VIS` | `0` | `-fvisibility=hidden` (≈1.5 MiB smaller arm64 binary, cleaner LTO) |
-| `XEMU_STRIP` | `0` | `-Wl,-dead_strip` (≈4 MiB smaller combined with `XEMU_VIS=1`; validate `type_init` constructors survive before shipping) |
 
 Runtime debug / escape-hatch env vars (`XEMU_*`) are catalogued with
 the optimizations they belong to in
