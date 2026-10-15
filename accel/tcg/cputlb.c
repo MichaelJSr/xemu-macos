@@ -49,7 +49,6 @@
 #include "tlb-bounds.h"
 #include "internal-common.h"
 #include "xemu-xpage.h"
-#include "exec/icount.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin-memory.h"
 #endif
@@ -225,19 +224,17 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
  */
 #if defined(XBOX)
 /*
- * xemu: the TLB is resized only when it is flushed. Under icount with the
- * null renderer nothing flushes it in a steady scene (normal mode's ~190
- * flushes/s come from the Vulkan/GL surface callbacks), and loadvm's flush
- * skips clean mmu_idx, so a -S start kept tlb_init's 256 entries for good.
- * Deterministic mode starts at, and never shrinks below, this size; the
- * guest cannot observe it.
+ * xemu: the TLB is resized only when it is flushed, and nothing flushes it
+ * in a steady scene (MemAccessCallback changes use tlb_flush_host_range;
+ * loadvm's flush skips clean mmu_idx), so a start would keep tlb_init's
+ * 256 entries for good. The TLB starts at, and never shrinks below, this
+ * size; the guest cannot observe it.
  */
-#define XEMU_ICOUNT_TLB_BITS 13
+#define XEMU_TLB_FLOOR_BITS 13
 
 static size_t xemu_tlb_floor(void)
 {
-    return (size_t)1 << (icount_enabled() ? XEMU_ICOUNT_TLB_BITS
-                                          : CPU_TLB_DYN_MIN_BITS);
+    return (size_t)1 << XEMU_TLB_FLOOR_BITS;
 }
 #endif
 
@@ -1002,6 +999,62 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
+
+#if defined(XBOX)
+/* Called with tlb_c.lock held: does @ent map host RAM in the range? */
+static bool tlb_entry_maps_host_locked(const CPUTLBEntry *ent,
+                                       uintptr_t start, uintptr_t length)
+{
+    uint64_t addr = ent->addr_read;
+
+    if (addr == -1) {
+        addr = tlb_addr_write(ent);
+    }
+    if (addr == -1) {
+        return false;
+    }
+    /* I/O entries have a host page of 0, outside any RAM range. */
+    uintptr_t host = (addr & TARGET_PAGE_MASK) + ent->addend;
+    return host - start < length || start - host < TARGET_PAGE_SIZE;
+}
+
+/*
+ * xemu: drop the entries that map host RAM [start, start + length), so the
+ * next access refills them and tlb_set_page_full picks up a
+ * MemAccessCallback change. No mapping changes, so unlike the full flush
+ * this was, the other entries, the jump cache and the near-return memo
+ * stay. Called only from the vCPU context.
+ */
+void tlb_flush_host_range(CPUState *cpu, uintptr_t start, uintptr_t length)
+{
+    assert_cpu_is_self(cpu);
+
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
+        size_t n = tlb_n_entries(fast);
+
+        /* A clean mmu_idx holds no valid entry (see tlb_reset_dirty). */
+        if (!(cpu->neg.tlb.c.dirty & (1 << mmu_idx))) {
+            continue;
+        }
+        for (size_t i = 0; i < n; i++) {
+            if (tlb_entry_maps_host_locked(&fast->table[i], start, length)) {
+                memset(&fast->table[i], -1, sizeof(fast->table[i]));
+                tlb_n_used_entries_dec(cpu, mmu_idx);
+            }
+        }
+        /* Victim entries are not in n_used_entries (tlb_set_page_full). */
+        for (int k = 0; k < CPU_VTLB_SIZE; k++) {
+            if (tlb_entry_maps_host_locked(&desc->vtable[k], start, length)) {
+                memset(&desc->vtable[k], -1, sizeof(desc->vtable[k]));
+            }
+        }
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+#endif
 
 /* Called with tlb_c.lock held */
 static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,

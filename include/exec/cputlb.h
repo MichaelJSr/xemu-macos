@@ -32,6 +32,9 @@ void tlb_unprotect_code(ram_addr_t ram_addr);
 
 #ifndef CONFIG_USER_ONLY
 void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length);
+#ifdef XBOX
+void tlb_flush_host_range(CPUState *cpu, uintptr_t start, uintptr_t length);
+#endif
 void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
 #endif
 

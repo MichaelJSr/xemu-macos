@@ -169,7 +169,7 @@ static DetReportPage *det_report_page(PGRAPHVkState *r, uint32_t page)
 static void report_access_callback(void *opaque, MemoryRegion *mr,
                                    hwaddr addr, hwaddr len, bool write);
 
-/* vCPU safe work queued after the trap's insert and TLB flush. */
+/* vCPU safe work queued after the trap's insert and its TLB refill. */
 static void det_report_page_armed(CPUState *cpu, run_on_cpu_data data)
 {
     qatomic_store_release(&((DetReportPage *)data.host_ptr)->armed, true);

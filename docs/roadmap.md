@@ -40,7 +40,8 @@ on a box loaded by other jobs:
 - **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
   `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
   `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
-  load helpers add at most ~0.3%. Item 1 stays parked.
+  load helpers add at most ~0.3%. Item 1 stays parked (landed anyway
+  on 2026-10-15: instructions per frame showed what samples missed).
 - **x87 store traffic:** `helper_fsts_ST0__hard` 2.4% (plus
   `helper_fmov_FT0_STN__hard` 0.4%).
 - **Ret-memo:** `xemu: ras hits=45901 (0.5%) fills=10089110` over
@@ -53,7 +54,7 @@ on a box loaded by other jobs:
   non-zero events), as on F5. The GPU campaign's open fact is closed:
   multi-subrange draws do not occur on the heavy anchor either.
 
-1. **Surface CPU-access-callback churn — ranged flush parked 2026-10-11.** Guest TLB flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1` (profile above) against a 1.5% gate; the reuse-pool shape was killed 2026-08-04 (−0.66 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
+1. **Surface CPU-access-callback churn — ranged flush landed 2026-10-15** (`tlb_flush_host_range`). Deterministic offscreen heavy-f1 runs 2.3% fewer host instructions per frame: the ~0.2% sample estimate that parked it missed the refills and the jump-cache and near-return-memo wipes each full flush caused. The reuse-pool shape stays killed (−0.66 fps, 3/3, 2026-08-04). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
 2. **Async/prewarm pipeline creation — parked 2026-10-11.** The 45-53 ms first-visit compile is a persistent pipeline-cache coverage miss, gone once warm, so prewarm is not the fix; reopen only on a forward-phase compile ≥ 16 ms that survives a warm rerun. Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
 3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments, which corrects the stated mechanism. The code was removed on 2026-10-10.
 4. **Reports idle-budget scan below 300 µs — closed 2026-08-04** (50 µs: −12.1 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.

@@ -723,10 +723,10 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
 /*
  * xemu: CPU-access-callback churn census.
  *
- * Each register/unregister below is an async_safe_run_on_cpu *plus* an
- * unconditional tlb_flush_all_cpus_synced (system/physmem.c), i.e. two
- * exclusive-execution vCPU stops and a full all-mmuidx TLB flush with a
- * jump-cache wipe per surface create/destroy. The census measures the
+ * Each surface create/destroy registers or unregisters below, and each
+ * of those is one async_safe_run_on_cpu (an exclusive-execution vCPU
+ * stop) that refills the TLB entries for the surface's pages
+ * (tlb_flush_host_range, system/physmem.c). The census measures the
  * event rate:
  *
  *   XEMU_SURFACE_CB_STATS=1  count events, split by whether they came
@@ -929,7 +929,8 @@ static void invalidate_surface_full(NV2AState *d, SurfaceBinding *surface,
     }
 
     /* access_cb is only set under TCG and physmem ignores a NULL one, so
-     * this counts exactly the unregisters that pay a TLB flush. */
+     * this counts exactly the unregisters that pay a vCPU stop and a
+     * ranged TLB refill. */
     if (unlikely(surface_cb_stats_on()) && surface->access_cb) {
         surface_cb_stats_note_unregister();
     }

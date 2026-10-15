@@ -60,6 +60,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
 | TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `XEMU_SUBPAGE_DIRTY=0` |
 | xpage full-flush backstop | fixed | Flushes aren't rare (139 per 20 s streaming) → the v0.11 lag; unlink registry | `XEMU_XPAGE_UNLINK=0` |
+| Full TLB flush per MemAccessCallback change (~190/s in normal mode) | fixed | Its old 0.2%-of-vCPU estimate missed the refills and the rebuilt jump cache and near-return memo: 2.3% of host instructions per frame (det offscreen); now a ranged refill | `tlb_flush_host_range` |
 | Superblock seams, then region formation | closed | −1.6% to −4.5%: TCG spills before any exiting branch | `ee1de9f654`, `d65fc5f83e` |
 | SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `d76ddd7b20` |
 | Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `XEMU_SUBPAGE_FAST=0` |
@@ -113,7 +114,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 11. **GL renderer under the Metal window.** Compatibility only.
 12. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
 
-Parked, with bars: ranged TLB flush (~0.2% of vCPU vs a 1.5% gate); pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
+Parked, with bars: pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
 
 ## Benchmarking traps
 - Scene identity: check draws/flip in both arms (a ~3 draws/flip menu baseline once faked "−30%"). Select intervals by content, not log position.
