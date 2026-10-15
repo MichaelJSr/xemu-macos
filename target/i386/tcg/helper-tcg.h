@@ -58,6 +58,10 @@ static inline target_long lshift(target_long x, int n)
 
 /* translate.c */
 void tcg_x86_init(void);
+#if defined(XBOX)
+void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
+                          uint64_t back);
+#endif
 void x86_translate_code(CPUState *cs, TranslationBlock *tb,
                         int *max_insns, vaddr pc, void *host_pc);
 

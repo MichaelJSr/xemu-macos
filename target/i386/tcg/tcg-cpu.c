@@ -116,6 +116,9 @@ static void x86_restore_state_to_opc(CPUState *cs,
     if (cc_op != CC_OP_DYNAMIC) {
         env->cc_op = cc_op;
     }
+#if defined(XBOX)
+    xemu_x87_restore_fip(env, tb, data[2]);
+#endif
 }
 
 int x86_mmu_index_pl(CPUX86State *env, unsigned pl)

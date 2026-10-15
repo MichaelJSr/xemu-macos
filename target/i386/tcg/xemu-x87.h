@@ -21,10 +21,15 @@
  *   (2) XEMU_X87_ELIDE_FT0  (default on, =0 legacy) drops the write-back of
  *       the FT0 scratch when no reader of that value is still ahead.
  *   (3) XEMU_X87_DEFER_FIP  (default on, =0 legacy) defers FIP/FCS/FDP/FDS
- *       to one update per contiguous x87 run.
+ *       to one update per contiguous x87 run. A mid-block exit lands a
+ *       pending FIP/FCS from insn_start word 2 (xemu_x87_restore_fip). FDP
+ *       has no such record, so under icount, where a mid-block MMIO access
+ *       is routine, FDP stays per-insn and FDS is stored only when its
+ *       segment changes.
  *   (4) XEMU_X87_REFUTE=1 puts (2)(3) in shadow mode: the legacy stores
  *       all still happen, the elision decision is computed anyway, and every
- *       point where the elided state could be observed is checked at runtime.
+ *       point where the elided state could be observed is checked at runtime
+ *       (for (3), every insn boundary and every mid-block exit).
  *       Promotion gate is zero violations over the campaign soak.
  */
 #ifndef TARGET_I386_XEMU_X87_H
@@ -48,6 +53,12 @@ static uint64_t xemu_x87_ft0_stale;      /* 1 while an elided FT0 store stands *
 static uint64_t xemu_x87_ft0_viol;       /* stale env->ft0 fed to a reader */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
 static uint64_t xemu_x87_ptr_viol;       /* deferred value != legacy value */
+static uint64_t xemu_x87_fip_rt_pend;    /* 1 while a deferred FIP is unlanded */
+static uint64_t xemu_x87_rst_checks;     /* mid-block exits checked */
+static uint64_t xemu_x87_rst_pend;       /* ... of which with word 2 non-zero */
+static uint64_t xemu_x87_bnd_checks;     /* insn boundaries checked */
+static uint64_t xemu_x87_bnd_pend;       /* ... with a deferred FIP pending */
+static uint64_t xemu_x87_rst_viol;       /* restorable FIP/FCS != legacy */
 
 static void xemu_x87_dump(void)
 {
@@ -70,11 +81,18 @@ static void xemu_x87_dump(void)
     fprintf(stderr, "xemu: sse scalar compares: ss=%llu sd=%llu\n",
             (unsigned long long)xemu_sse_comi_ss,
             (unsigned long long)xemu_sse_comi_sd);
-    fprintf(stderr, "xemu: x87 refuter: ft0 violations=%llu; exc-ptr "
-            "checks=%llu violations=%llu\n",
+    fprintf(stderr, "xemu: x87 refuter: ft0-violations=%llu "
+            "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
+            "restore-pending=%llu boundaries=%llu boundary-pending=%llu "
+            "boundary-violations=%llu\n",
             (unsigned long long)xemu_x87_ft0_viol,
             (unsigned long long)xemu_x87_ptr_checks,
-            (unsigned long long)xemu_x87_ptr_viol);
+            (unsigned long long)xemu_x87_ptr_viol,
+            (unsigned long long)xemu_x87_rst_checks,
+            (unsigned long long)xemu_x87_rst_pend,
+            (unsigned long long)xemu_x87_bnd_checks,
+            (unsigned long long)xemu_x87_bnd_pend,
+            (unsigned long long)xemu_x87_rst_viol);
 }
 
 static void xemu_x87_arm_dump(void)
@@ -136,17 +154,19 @@ static int xemu_x87_ptr_mode(void)
     static int mode = -1;
     if (mode < 0) {
         const char *e = getenv("XEMU_X87_DEFER_FIP");
-        /*
-         * Under icount a mid-block MMIO access longjmps out before the
-         * deferred update lands (see g_use_hard_fpu_inline).
-         */
-        int m = (e && e[0] == '0') || icount_enabled() ? 0 : 1;
+        int m = (e && e[0] == '0') ? 0 : 1;
         if (m && xemu_x87_refute_on()) {
             m = 2;
         }
         mode = m;
     }
     return mode;
+}
+
+/* FDP per insn, FDS on segment change: see (3) above. */
+static bool xemu_x87_fdp_eager(void)
+{
+    return icount_enabled();
 }
 
 /*
@@ -274,8 +294,12 @@ static void xemu_x87_ft0_consume(DisasContext *s)
 
 static void xemu_x87_record_fip(DisasContext *s, TCGv eip)
 {
+    s->xemu_fip_pc = s->base.pc_next;
     s->xemu_fip_val = eip;
     s->xemu_fip_pend = true;
+    if (xemu_x87_ptr_mode() == 2) {
+        xemu_x87_gen_store_u64(&xemu_x87_fip_rt_pend, 1);
+    }
 }
 
 static void xemu_x87_record_fdp(DisasContext *s, int seg, TCGv addr)
@@ -329,6 +353,7 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
             xemu_x87_gen_ne_count_tl(&xemu_x87_ptr_viol, s->xemu_fip_val,
                                      was_ip);
             xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+            xemu_x87_gen_store_u64(&xemu_x87_fip_rt_pend, 0);
         } else {
             tcg_gen_st16_i32(sel, tcg_env, offsetof(CPUX86State, fpcs));
             tcg_gen_st_tl(s->xemu_fip_val, tcg_env,
@@ -361,6 +386,105 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
     if (unlikely(xemu_x87_census_on())) {
         xemu_gen_counter_inc(&xemu_x87_ptr_flushes);
     }
+}
+
+/*
+ * Under icount: is the FDS store needed? Not when this basic block already
+ * stored it from the same segment, whose selector changes only in a helper
+ * (every call ends the block's tracking via gen_flush_fp) or in
+ * gen_op_movl_seg_real. The refuter stores anyway and checks the skip.
+ */
+static bool xemu_x87_fds_needed(DisasContext *s, int seg)
+{
+    if (s->xemu_fds_seg != seg) {
+        s->xemu_fds_seg = seg;
+        return true;
+    }
+    if (xemu_x87_ptr_mode() == 2) {
+        TCGv_i32 sel = tcg_temp_new_i32();
+        TCGv_i32 was = tcg_temp_new_i32();
+        tcg_gen_ld16u_i32(sel, tcg_env,
+                          offsetof(CPUX86State, segs[seg].selector));
+        tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpds));
+        xemu_x87_gen_ne_count_i32(&xemu_x87_ptr_viol, sel, was);
+        xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Refuter, at the top of every insn: each boundary is a possible mid-block
+ * exit. With an FIP pending, what xemu_x87_restore_fip would land must be
+ * the legacy FIP/FCS; with none, nothing may be left unlanded (the FNSTENV
+ * and FNSAVE readers sit behind a call-site flush inside their insn).
+ */
+static void xemu_x87_boundary_check(DisasContext *s)
+{
+    if (xemu_x87_ptr_mode() != 2) {
+        return;
+    }
+    if (s->xemu_fip_pend && s->pc_save != -1) {
+        TCGv want = tcg_temp_new();
+        TCGv was = tcg_temp_new();
+        TCGv_i32 cs = tcg_temp_new_i32();
+        TCGv_i32 fcs = tcg_temp_new_i32();
+
+        tcg_gen_subi_tl(want, eip_cur_tl(s),
+                        s->base.pc_next - s->xemu_fip_pc);
+        if (!CODE64(s)) {
+            tcg_gen_ext32u_tl(want, want);
+        }
+        tcg_gen_ld_tl(was, tcg_env, offsetof(CPUX86State, fpip));
+        xemu_x87_gen_ne_count_tl(&xemu_x87_rst_viol, want, was);
+        tcg_gen_ld16u_i32(cs, tcg_env,
+                          offsetof(CPUX86State, segs[R_CS].selector));
+        tcg_gen_ld16u_i32(fcs, tcg_env, offsetof(CPUX86State, fpcs));
+        xemu_x87_gen_ne_count_i32(&xemu_x87_rst_viol, cs, fcs);
+        xemu_gen_counter_inc(&xemu_x87_bnd_pend);
+    } else if (!s->xemu_fip_pend) {
+        TCGv_i64 pend = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(pend, tcg_constant_ptr(&xemu_x87_fip_rt_pend), 0);
+        xemu_x87_gen_acc_i64(&xemu_x87_rst_viol, pend);
+    }
+    xemu_gen_counter_inc(&xemu_x87_bnd_checks);
+}
+
+/*
+ * x86_restore_state_to_opc() calls this on every mid-block exit (a guest
+ * fault, cpu_io_recompile) with the insn's restored eip and insn_start word
+ * 2. Non-zero means an FIP update recorded at that distance back has not
+ * landed: land it here, as the per-insn stores would have. FCS is the live
+ * CS, which changes only inside a helper, after a call-site flush.
+ */
+void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
+                          uint64_t back)
+{
+    bool refute = xemu_x87_ptr_mode() == 2;
+    target_ulong fip = env->eip - back;
+    uint16_t fcs = env->segs[R_CS].selector;
+
+    if (!back && !refute) {
+        return;
+    }
+    if (!(tb->flags & HF_CS64_MASK)) {
+        fip = (uint32_t)fip;
+    }
+    if (refute) {
+        xemu_x87_rst_checks++;
+        if (back) {
+            xemu_x87_rst_pend++;
+            xemu_x87_rst_viol += (target_ulong)env->fpip != fip ||
+                                 env->fpcs != fcs;
+        } else {
+            xemu_x87_rst_viol += xemu_x87_fip_rt_pend;
+        }
+        xemu_x87_fip_rt_pend = 0;
+        return;
+    }
+    env->fpip = deposit64(env->fpip, 0, TARGET_LONG_BITS, fip);
+    env->fpcs = fcs;
 }
 
 /* Run-length proxy: closed by the same flush that closes the register cache. */

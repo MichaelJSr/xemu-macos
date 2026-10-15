@@ -219,6 +219,8 @@ typedef struct DisasContext {
     TCGv xemu_fip_val;
     TCGv xemu_fdp_val;
     TCGv_i32 xemu_fdp_sel;
+    target_ulong xemu_fip_pc;   /* pc of the insn whose FIP is deferred */
+    int xemu_fds_seg;           /* segment env->fpds was last stored from */
 #endif
     bool cc_op_dirty;
 
@@ -1916,6 +1918,7 @@ static void gen_flush_fp(DisasContext *s)
      */
     xemu_x87_flush_ptrs(s);
     xemu_x87_close_run(s);
+    s->xemu_fds_seg = -1;
 #endif
     s->fpstt_delta = 0;
     s->flcr_set = false;
@@ -3269,9 +3272,11 @@ static void gen_op_movl_seg_real(DisasContext *s, X86Seg seg_reg, TCGv seg)
     /*
      * The real-mode segment load writes segs[].selector inline, with no
      * helper call to flush behind. A deferred FDP/FCS update reads the
-     * selector at its flush point, so land it before the value moves.
+     * selector at its flush point, so land it before the value moves, and
+     * forget which selector env->fpds holds.
      */
     xemu_x87_flush_ptrs(s);
+    s->xemu_fds_seg = -1;
 #endif
     tcg_gen_ext16u_tl(selector, seg);
     tcg_gen_st32_tl(selector, tcg_env,
@@ -4237,6 +4242,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         if (update_fdp) {
             int last_seg = s->override >= 0 ? s->override : decode->mem.def_seg;
             bool emit_now = true;
+            bool emit_fds = true;
 
 #if defined(XBOX)
             int ptr_mode = xemu_x87_ptr_mode();
@@ -4244,17 +4250,21 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             if (unlikely(xemu_x87_census_on())) {
                 xemu_gen_counter_inc(&xemu_x87_fdp_legacy);
             }
-            if (ptr_mode) {
+            if (ptr_mode && xemu_x87_fdp_eager()) {
+                emit_fds = xemu_x87_fds_needed(s, last_seg);
+            } else if (ptr_mode) {
                 xemu_x87_record_fdp(s, last_seg, last_addr);
                 emit_now = ptr_mode == 2;
             }
 #endif
             if (emit_now) {
-                tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
-                               offsetof(CPUX86State,
-                                        segs[last_seg].selector));
-                tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
-                                 offsetof(CPUX86State, fpds));
+                if (emit_fds) {
+                    tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
+                                   offsetof(CPUX86State,
+                                            segs[last_seg].selector));
+                    tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
+                                     offsetof(CPUX86State, fpds));
+                }
                 tcg_gen_st_tl(last_addr, tcg_env,
                               offsetof(CPUX86State, fpdp));
             }
@@ -5499,6 +5509,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->xemu_ft0_reloaded = false;
     dc->xemu_fip_pend = false;
     dc->xemu_fdp_pend = false;
+    dc->xemu_fds_seg = -1;
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
@@ -5540,6 +5551,16 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         pc_arg &= ~TARGET_PAGE_MASK;
     }
     tcg_gen_insn_start(pc_arg, dc->cc_op);
+#if defined(XBOX)
+    /*
+     * Word 2: how far back the insn whose FIP update is still deferred
+     * sits, so a mid-block exit can land it (xemu_x87_restore_fip).
+     */
+    if (dc->xemu_fip_pend) {
+        tcg_set_insn_start_param(tcg_last_op(), 2,
+                                 dc->base.pc_next - dc->xemu_fip_pc);
+    }
+#endif
 }
 
 static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
@@ -5548,6 +5569,10 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     bool orig_cc_op_dirty = dc->cc_op_dirty;
     CCOp orig_cc_op = dc->cc_op;
     target_ulong orig_pc_save = dc->pc_save;
+
+#if defined(XBOX)
+    xemu_x87_boundary_check(dc);
+#endif
 
 #ifdef TARGET_VSYSCALL_PAGE
     /*
