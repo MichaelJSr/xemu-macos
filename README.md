@@ -379,8 +379,8 @@ chain has no such cap. Check for
 upscaling active.
 
 **Interpolation ghosting on moving objects.** Should be fixed (motion
-estimation + paced presentation order); `XEMU_MFX_INTERP_ZERO_MOTION=1`
-restores the old zero-motion binding for A/B comparison.
+estimation + paced presentation order); report the title if it
+persists.
 
 **Black/garbled window or Metal init failure on launch.** Set
 `[display.window] presentation_backend = 'opengl'` in `xemu.toml` to

@@ -273,24 +273,12 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
  * frame sampling semantics — and the skipped stale steps are counted
  * (nsprof push_policy_skip). At step rates the display can keep up with,
  * the debt never exceeds 1-2 and the policy is inert, preserving the
- * paced interpolation cadence. XEMU_PUSH_DEBT overrides (0 = strict FIFO,
- * the pre-fix behavior).
+ * paced interpolation cadence.
  */
 static uint32_t push_present_max_debt(void)
 {
-    static int env_debt = -2;
-    if (env_debt == -2) {
-        const char *e = getenv("XEMU_PUSH_DEBT");
-        env_debt = e ? atoi(e) : -1;
-        if (env_debt < -1) {
-            env_debt = -1;
-        }
-    }
-    if (env_debt >= 0) {
-        return (uint32_t)env_debt;   /* 0 = strict FIFO (pre-fix) */
-    }
     /*
-     * Default: one full flip schedule plus two steps of slack. A flip
+     * One full flip schedule plus two steps of slack. A flip
      * publishes its whole schedule atomically under the slot lock
      * (mode-1 midpoints + the real frame), so unconsumed depth
      * legitimately jumps by `mode` at every publish — a threshold below
@@ -347,8 +335,7 @@ static PushPresentEntry *present_ring_next(PGRAPHVkDisplayState *disp)
         }
     }
 
-    uint32_t max_debt = push_present_max_debt();
-    if (max_debt && unconsumed > max_debt) {
+    if (unconsumed > push_present_max_debt()) {
         /* Behind: land on the newest unconsumed real frame (or the newest
          * step at all when no real is pending — 4x midpoint bursts). The
          * monotonic consume cursor then retires everything older. */
@@ -1402,9 +1389,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-    PGRAPHVkDisplayState *disp = &r->display;
 
-    bool pvideo_on = disp->pvideo.state.enabled;
     /*
      * Rewrite every present (two writes, cheap). An Apple-only cache once
      * skipped this while the SurfaceBinding* was unchanged, but a surface
@@ -1942,8 +1927,7 @@ out:
 }
 
 /*
- * MetalFX output-size stabilizer (XEMU_MFX_RESIZE_QUANTIZE=0 restores the
- * continuous per-event size).
+ * MetalFX output-size stabilizer.
  *
  * The Metal-backend output size tracks the live CAMetalLayer, so a window
  * drag walks it at the event rate; every distinct size destroys and rebuilds
@@ -1956,16 +1940,6 @@ out:
 #define MFX_OUT_QUANTUM 64
 #define MFX_RESIZE_SETTLE_NS 200000000LL
 
-static bool mfx_resize_quantize_enabled(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const char *e = getenv("XEMU_MFX_RESIZE_QUANTIZE");
-        cached = (e && e[0] == '0') ? 0 : 1;
-    }
-    return cached == 1;
-}
-
 static void mfx_stabilize_output_size(int in_w, int in_h, int *out_w,
                                       int *out_h)
 {
@@ -1973,7 +1947,7 @@ static void mfx_stabilize_output_size(int in_w, int in_h, int *out_w,
     static int pending_w, pending_h;
     static int64_t pending_since_ns;
 
-    if (!mfx_resize_quantize_enabled() || in_w <= 0 || in_h <= 0) {
+    if (in_w <= 0 || in_h <= 0) {
         return;
     }
 

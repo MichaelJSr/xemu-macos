@@ -1245,17 +1245,6 @@ typedef struct MetalFXInterpolationState {
     id<MTLTexture> cachedColorPrev;
     id<MTLTexture> cachedDepthCur;   /* bound if caller provides depth */
     /*
-     * Legacy zero-filled motion texture, created and bound only when
-     * XEMU_MFX_INTERP_ZERO_MOTION is set. A zeroed motion texture
-     * asserts "no pixel moved between the two frames", which makes
-     * the interpolator ghost-blend moving objects between their two
-     * positions (character flicker/blur against the background). The
-     * motionTexture property is nullable: leaving it nil lets MetalFX
-     * fall back to internal motion estimation, which handles game
-     * content far better.
-     */
-    id<MTLTexture> motionTexture;
-    /*
      * Synthetic depth for the interpolator (luminance proxy, same
      * kernel as the temporal scaler but at interpolation resolution).
      * Gives the interpolator object/background separation cues when
@@ -1288,16 +1277,6 @@ typedef struct MetalFXInterpolationState {
 
 static MetalFXInterpolationState g_interp = { 0 };
 
-static bool interp_zero_motion_requested(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("XEMU_MFX_INTERP_ZERO_MOTION");
-        cached = (env && env[0] && env[0] != '0') ? 1 : 0;
-    }
-    return cached == 1;
-}
-
 bool metalfx_interpolation_is_supported(void)
 {
     static int cached = -1;
@@ -1319,7 +1298,6 @@ static void metalfx_interpolation_destroy_locked(void)
     [g_interp.outputTexture release];          g_interp.outputTexture = nil;
     [g_interp.outputSharedTexture release];    g_interp.outputSharedTexture = nil;
     ring_destroy(&g_interp.ring);
-    [g_interp.motionTexture release];          g_interp.motionTexture = nil;
     [g_interp.synthDepthPipeline release];     g_interp.synthDepthPipeline = nil;
     [g_interp.synthDepthTexture release];      g_interp.synthDepthTexture = nil;
     [g_interp.cachedColorCur release];         g_interp.cachedColorCur = nil;
@@ -1453,32 +1431,6 @@ bool metalfx_interpolation_init(int width, int height,
             }
 
             /*
-             * Motion texture: only when explicitly requested via
-             * XEMU_MFX_INTERP_ZERO_MOTION (legacy/debug). The default
-             * is nil — internal motion estimation (see state struct
-             * comment).
-             */
-            if (interp_zero_motion_requested()) {
-                MTLTextureDescriptor *motionDesc = [MTLTextureDescriptor
-                    texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
-                                                width:width
-                                               height:height
-                                            mipmapped:NO];
-                motionDesc.usage = MTLTextureUsageShaderRead;
-                motionDesc.storageMode = MTLStorageModeShared;
-                g_interp.motionTexture =
-                    [g_interp.device newTextureWithDescriptor:motionDesc];
-                MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-                size_t bpr = width * 4;
-                void *zeros = calloc(height, bpr);
-                [g_interp.motionTexture replaceRegion:region
-                                          mipmapLevel:0
-                                            withBytes:zeros
-                                          bytesPerRow:bpr];
-                free(zeros);
-            }
-
-            /*
              * Synthetic luminance depth at interpolation resolution
              * (standalone interpolator only; a linked temporal scaler
              * supplies its own internal data).
@@ -1566,10 +1518,10 @@ API_AVAILABLE(macos(26.0))
 static void interp_configure_common(id<MTLFXFrameInterpolator> interp,
                                     float delta_time)
 {
-    /* nil by default: MetalFX internal motion estimation. The zeroed
-     * texture (legacy/debug env) asserts "nothing moved" and ghosts
-     * moving objects. */
-    interp.motionTexture = g_interp.motionTexture;
+    /* nil: MetalFX internal motion estimation. A zeroed motion texture
+     * asserts "nothing moved" and ghost-blends moving objects between
+     * their two positions (fab65b915d). */
+    interp.motionTexture = nil;
     interp.motionVectorScaleX = 1.0f;
     interp.motionVectorScaleY = 1.0f;
 

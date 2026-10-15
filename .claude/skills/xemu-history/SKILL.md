@@ -32,7 +32,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | **Present / MetalFX** | | | |
 | Async MetalFX under GL presentation | reverted | GL↔Metal can't fence; now lives in the Metal backend | `ea23058e1e` |
 | Vblank tied to host refresh | reverted | The host timer *is* the guest VBLANK IRQ → game speed scales with Hz | `649dd265a0` |
-| Push-present strict FIFO consume | fixed | Backlog dropped real frames ("double playing"); bounded debt | `XEMU_PUSH_DEBT=0` |
+| Push-present strict FIFO consume | fixed | Backlog dropped real frames ("double playing"); bounded debt | `78c4573dfb` |
 | Drawable-first present order | reverted | +0.50 fps, under noise | `1a8f466e2b` |
 | **DSP / APU** | | | |
 | DSP JIT EPI_NO_PC (skip the PC-mismatch exit) | closed | Sentinel: 9.75% legitimate divergence (mode-6 parmoves, REP/DO); fixed the classifier instead | `d0e1f0b27d`, `ca7fe51a0b` |

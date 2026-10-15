@@ -61,30 +61,15 @@ static const char *get_spirv_compiler_id(void)
 }
 
 /*
- * Escape hatches, read once (class-4 legacy restores; default = the
- * behaviour described below):
- *   XEMU_SPIRV_CACHE=0        - bypass the on-disk cache entirely (no
- *                               loads, no stores), for cold-compile A/B
- *                               measurement or if the cache directory is
- *                               unusable on some host.
- *   XEMU_SPIRV_CACHE_ATOMIC=0 - restore the legacy in-place write instead
- *                               of the temp-file + g_rename replace.
+ * XEMU_SPIRV_CACHE=0 (read once) bypasses the on-disk cache entirely (no
+ * loads, no stores), for cold-compile A/B measurement or if the cache
+ * directory is unusable on some host.
  */
 static bool spirv_cache_enabled(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("XEMU_SPIRV_CACHE");
-        on = !(e && e[0] == '0');
-    }
-    return on == 1;
-}
-
-static bool spirv_cache_atomic_write(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_SPIRV_CACHE_ATOMIC");
         on = !(e && e[0] == '0');
     }
     return on == 1;
@@ -299,17 +284,6 @@ static void save_spirv_to_cache(uint64_t hash, GByteArray *spv)
     }
 
     char *path = get_spirv_cache_path(hash);
-
-    if (!spirv_cache_atomic_write()) {
-        /* Legacy (XEMU_SPIRV_CACHE_ATOMIC=0): write in place. */
-        FILE *f = qemu_fopen(path, "wb");
-        if (f) {
-            fwrite(spv->data, 1, spv->len, f);
-            fclose(f);
-        }
-        g_free(path);
-        return;
-    }
 
     /* Write-then-rename, same discipline as the pipeline cache in draw.c:
      * a kill mid-write must not leave a torn .spv for the next boot to

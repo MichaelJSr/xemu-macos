@@ -329,6 +329,7 @@ static const VkFormat s32k_to_count[] = {
     VK_FORMAT_R16G16B16A16_SSCALED,
 };
 
+#if DEBUG_VK /* only NV2A_VK_DGROUP_BEGIN reads it */
 static char const * const vertex_data_array_format_to_str[] = {
     [NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_D3D] = "UB_D3D",
     [NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL] = "UB_OGL",
@@ -337,6 +338,7 @@ static char const * const vertex_data_array_format_to_str[] = {
     [NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_S32K] = "S32K",
     [NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_CMP] = "CMP",
 };
+#endif
 
 void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
                                       unsigned int max_element,
