@@ -133,18 +133,42 @@ static void xbox_pm_gpe_writeb(void *opaque, hwaddr addr, uint64_t val,
  }
 
 /*
- * The field pin is not in the savestate, so after a load its phase is
- * whatever ran before. Deterministic mode (icount) starts every load from
- * the power-on phase; games read it once a frame, so it would otherwise
- * flip from one replay to the next.
+ * The field pin's phase: games read it once a frame. Saves made in
+ * deterministic mode (icount) carry it; a load of an older save starts
+ * from the power-on phase there, so that replays agree.
  */
+static bool xbox_pm_field_pin_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int xbox_pm_field_pin_post_load(void *opaque, int version_id)
+{
+    XBOX_PMRegs *pm = opaque;
+    pm->field_pin_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_xbox_pm_field_pin = {
+    .name = "xbox-pm/field-pin",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = xbox_pm_field_pin_needed,
+    .post_load = xbox_pm_field_pin_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(field_pin, XBOX_PMRegs),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static int xbox_pm_post_load(void *opaque, int version_id)
 {
     XBOX_PMRegs *pm = opaque;
 
-    if (icount_enabled()) {
+    if (icount_enabled() && !pm->field_pin_loaded) {
         pm->field_pin = 0;
     }
+    pm->field_pin_loaded = false;
     return 0;
 }
 
@@ -162,6 +186,10 @@ const VMStateDescription vmstate_xbox_pm = {
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.sts, XBOX_PMRegs),
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.en, XBOX_PMRegs),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_xbox_pm_field_pin,
+        NULL
     },
 };
 

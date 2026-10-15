@@ -30,6 +30,7 @@ typedef struct MCPXACIState {
     PCIDevice dev;
 
     AC97LinkState ac97;
+    bool link_loaded; /* mcpx-aci/ac97 came with a load */
 
     MemoryRegion io_nam, io_nabm;
 
@@ -70,20 +71,55 @@ static void mcpx_aci_realize(PCIDevice *dev, Error **errp)
 }
 
 /*
- * The AC'97 registers are not in the savestate (FIXME below), so after a
- * load they hold whatever ran before it. Deterministic mode (icount) starts
- * every load from the power-on state instead, as a fresh process does.
- * After the PCI state is in, so lowering the line keeps the bus's count.
+ * The AC'97 registers are in the savestate only from deterministic mode
+ * (icount, mcpx-aci/ac97 below); older saves leave them holding whatever
+ * ran before the load. Deterministic mode then starts from the power-on
+ * state instead, as a fresh process does. After the PCI state is in, so
+ * lowering the line keeps the bus's count.
  */
 static int mcpx_aci_post_load(void *opaque, int version_id)
 {
     MCPXACIState *d = opaque;
 
-    if (icount_enabled()) {
+    if (d->link_loaded) {
+        ac97_link_post_load(&d->ac97);
+    } else if (icount_enabled()) {
         ac97_power_on_reset(&d->ac97);
     }
+    d->link_loaded = false;
     return 0;
 }
+
+static bool mcpx_aci_link_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int mcpx_aci_link_post_load(void *opaque, int version_id)
+{
+    MCPXACIState *d = opaque;
+    d->link_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_mcpx_aci_link = {
+    .name = "mcpx-aci/ac97",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mcpx_aci_link_needed,
+    .post_load = mcpx_aci_link_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(ac97.glob_cnt, MCPXACIState),
+        VMSTATE_UINT32(ac97.glob_sta, MCPXACIState),
+        VMSTATE_UINT32(ac97.cas, MCPXACIState),
+        VMSTATE_UINT32(ac97.last_samp, MCPXACIState),
+        VMSTATE_STRUCT_ARRAY(ac97.bm_regs, MCPXACIState, LAST_INDEX, 1,
+                             vmstate_ac97_bm_regs, AC97BusMasterRegs),
+        VMSTATE_BUFFER(ac97.mixer_data, MCPXACIState),
+        VMSTATE_INT32(ac97.bup_flag, MCPXACIState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription vmstate_mcpx_aci = {
     .name = "mcpx-aci",
@@ -92,8 +128,11 @@ static const VMStateDescription vmstate_mcpx_aci = {
     .post_load = mcpx_aci_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, MCPXACIState),
-        // FIXME
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_mcpx_aci_link,
+        NULL
     },
 };
 

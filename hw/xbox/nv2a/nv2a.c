@@ -556,8 +556,11 @@ static int nv2a_post_load(void *opaque, int version_id)
 {
     NV2AState *d = opaque;
     if (icount_enabled()) {
-        /* Not migrated; counts reads since the last vblank. */
-        d->pcrtc.raster = 0;
+        /* Counts reads since the last vblank; older saves lack it. */
+        if (!d->pcrtc.raster_loaded) {
+            d->pcrtc.raster = 0;
+        }
+        d->pcrtc.raster_loaded = false;
         /* Drop, not write back, the previous session's GPU state. */
         qatomic_set(&d->pgraph.flush_discard, true);
     }
@@ -565,6 +568,35 @@ static int nv2a_post_load(void *opaque, int version_id)
     nv2a_unlock_fifo(d);
     return 0;
 }
+
+/*
+ * Deterministic mode: the raster position the guest reads is a count of
+ * its reads since the last vblank, so a load continues it. Only icount
+ * saves carry it.
+ */
+static bool nv2a_raster_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int nv2a_raster_post_load(void *opaque, int version_id)
+{
+    NV2AState *d = opaque;
+    d->pcrtc.raster_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_nv2a_raster = {
+    .name = "nv2a/pcrtc-raster",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = nv2a_raster_needed,
+    .post_load = nv2a_raster_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(pcrtc.raster, NV2AState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 const VMStateDescription vmstate_nv2a_pgraph_vertex_attributes = {
     .name = "nv2a/pgraph/vertex-attr",
@@ -702,6 +734,10 @@ static const VMStateDescription vmstate_nv2a = {
         VMSTATE_UINT64_V(ptimer.time_offset, NV2AState, 4),
         VMSTATE_TIMER_V(ptimer.timer, NV2AState, 4),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_nv2a_raster,
+        NULL
     },
 };
 

@@ -143,6 +143,7 @@ typedef struct NV2AState {
         uint32_t enabled_interrupts;
         hwaddr start;
         uint32_t raster;
+        bool raster_loaded; /* nv2a/pcrtc-raster came with a load */
     } pcrtc;
 
     struct {

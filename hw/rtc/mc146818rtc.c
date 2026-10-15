@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "exec/icount.h"
 #include "qemu/cutils.h"
 #include "qemu/module.h"
 #include "qemu/bcd.h"
@@ -793,8 +794,17 @@ static int rtc_post_load(void *opaque, int version_id)
      */
     bool saved_on_vm_clock = rtc_clock == QEMU_CLOCK_HOST &&
         s->last_update < 978307200LL * NANOSECONDS_PER_SECOND;
-    if (version_id <= 2 || rtc_clock == QEMU_CLOCK_REALTIME ||
-        rtc_clock == QEMU_CLOCK_VIRTUAL || saved_on_vm_clock) {
+    /*
+     * A deterministic-mode save marks itself (mc146818rtc/vclock): saved
+     * and loaded on the virtual clock, the time and its sub-second phase
+     * carry over as they are, so a load continues the second exactly as
+     * the run past the save does.
+     */
+    bool same_vclock = s->vclock_loaded && rtc_clock == QEMU_CLOCK_VIRTUAL;
+    s->vclock_loaded = false;
+    if (!same_vclock &&
+        (version_id <= 2 || rtc_clock == QEMU_CLOCK_REALTIME ||
+         rtc_clock == QEMU_CLOCK_VIRTUAL || saved_on_vm_clock)) {
 #else
     if (version_id <= 2 || rtc_clock == QEMU_CLOCK_REALTIME) {
 #endif
@@ -841,6 +851,32 @@ static const VMStateDescription vmstate_rtc_irq_reinject_on_ack_count = {
     }
 };
 
+#ifdef XBOX
+static bool rtc_vclock_needed(void *opaque)
+{
+    return icount_enabled() && rtc_clock == QEMU_CLOCK_VIRTUAL;
+}
+
+static int rtc_vclock_post_load(void *opaque, int version_id)
+{
+    MC146818RtcState *s = opaque;
+    s->vclock_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_rtc_vclock = {
+    .name = "mc146818rtc/vclock",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = rtc_vclock_needed,
+    .post_load = rtc_vclock_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(last_update, MC146818RtcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+#endif
+
 static const VMStateDescription vmstate_rtc = {
     .name = "mc146818rtc",
     .version_id = 3,
@@ -865,6 +901,9 @@ static const VMStateDescription vmstate_rtc = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_rtc_irq_reinject_on_ack_count,
+#ifdef XBOX
+        &vmstate_rtc_vclock,
+#endif
         NULL
     }
 };

@@ -29,6 +29,7 @@
 #include "qemu/config-file.h"
 #include "exec/icount.h"
 #include "system/runstate.h"
+#include "migration/vmstate.h"
 
 #include "xemu-input.h"
 #include "xemu-notifications.h"
@@ -285,11 +286,14 @@ static void xemu_input_vm_state_change(void *opaque, bool running,
     }
 }
 
+static void xemu_input_vmstate_init(void);
+
 void xemu_input_init(void)
 {
     if (icount_enabled()) {
         qemu_add_vm_change_state_handler(xemu_input_vm_state_change, NULL);
     }
+    xemu_input_vmstate_init();
 
     if (g_config.input.background_input_capture) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -882,14 +886,75 @@ static void test_input_poll(void)
 #endif /* !_WIN32 */
 
 /*
+ * Deterministic mode (icount): the keys and axes the pipe holds are pad
+ * input the guest sees at the next vblank, so saves made there carry them
+ * and a load continues with them (xemu-input). Only icount saves have the
+ * section; normal-mode savestates keep their format.
+ */
+static bool test_input_loaded;
+
+/* The held input as it travels in xemu-input. */
+static struct {
+    uint8_t keys[SDL_SCANCODE_COUNT];
+    int16_t axes[CONTROLLER_AXIS__COUNT];
+} test_input_saved;
+
+static bool xemu_input_vmstate_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int xemu_input_vmstate_pre_save(void *opaque)
+{
+    memcpy(test_input_saved.keys, test_input_override,
+           sizeof(test_input_saved.keys));
+    memcpy(test_input_saved.axes, test_axis_override,
+           sizeof(test_input_saved.axes));
+    return 0;
+}
+
+static int xemu_input_vmstate_post_load(void *opaque, int version_id)
+{
+    memcpy(test_input_override, test_input_saved.keys,
+           sizeof(test_input_saved.keys));
+    memcpy(test_axis_override, test_input_saved.axes,
+           sizeof(test_input_saved.axes));
+    test_input_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_xemu_input = {
+    .name = "xemu-input",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = xemu_input_vmstate_needed,
+    .pre_save = xemu_input_vmstate_pre_save,
+    .post_load = xemu_input_vmstate_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER_UNSAFE(keys, typeof(test_input_saved), 0,
+                              sizeof(test_input_saved.keys)),
+        VMSTATE_INT16_ARRAY(axes, typeof(test_input_saved),
+                            CONTROLLER_AXIS__COUNT),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void xemu_input_vmstate_init(void)
+{
+    vmstate_register(NULL, 0, &vmstate_xemu_input, &test_input_saved);
+}
+
+/*
  * After loadvm or an incoming migration (savevm.c). Deterministic mode
- * starts every load from neutral pad input: lines still queued and keys or
- * axes still held from the previous run are dropped, so an in-process replay
- * matches a fresh one. Lines written after the load are kept.
+ * drops lines still queued from the previous run, so an in-process replay
+ * matches a fresh one; lines written after the load are kept. Keys and
+ * axes held at the save are restored (xemu-input); a save without them
+ * starts from neutral pad input.
  */
 void xemu_input_state_loaded(void)
 {
     if (!icount_enabled()) {
+        test_input_loaded = false;
         return;
     }
     test_input_poll();
@@ -898,8 +963,11 @@ void xemu_input_state_loaded(void)
         g_free(p->line);
         g_free(p);
     }
-    memset(test_input_override, 0, sizeof(test_input_override));
-    memset(test_axis_override, 0, sizeof(test_axis_override));
+    if (!test_input_loaded) {
+        memset(test_input_override, 0, sizeof(test_input_override));
+        memset(test_axis_override, 0, sizeof(test_axis_override));
+    }
+    test_input_loaded = false;
     test_input_partial_len = 0;
 }
 

@@ -121,6 +121,7 @@ typedef struct USBXIDGamepadState {
     XIDGamepadOutputReport out_state;
     XIDGamepadOutputReport out_state_capabilities;
     uint8_t device_index;
+    bool reports_loaded; /* usb-xbox-gamepad/reports came with a load */
 } USBXIDGamepadState;
 
 void update_input(USBXIDGamepadState *s);

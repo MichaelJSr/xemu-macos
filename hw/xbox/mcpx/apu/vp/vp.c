@@ -2591,6 +2591,96 @@ void mcpx_apu_vp_finalize(MCPXAPUState *d)
     voice_work_finalize(d);
 }
 
+/*
+ * Deterministic-mode savestates (apu.c, mcpx-apu/history): what a voice
+ * carries from frame to frame besides guest RAM, so that a load continues
+ * exactly where a run past the save goes on.
+ */
+const VMStateDescription vmstate_vp_voice_history = {
+    .name = "mcpx-apu/voice-history",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(src.channels, MCPXAPUVoiceFilter),
+        VMSTATE_BOOL(src.dirty, MCPXAPUVoiceFilter),
+        VMSTATE_BUFFER_UNSAFE(src.last_value, MCPXAPUVoiceFilter, 0,
+                              sizeof(float) * 2),
+        VMSTATE_BUFFER_UNSAFE(src.last_ratio, MCPXAPUVoiceFilter, 0,
+                              sizeof(double)),
+        VMSTATE_BUFFER_UNSAFE(src.last_position, MCPXAPUVoiceFilter, 0,
+                              sizeof(double)),
+        VMSTATE_INT64(src.saved_frames, MCPXAPUVoiceFilter),
+        VMSTATE_INT32(src.saved_offset, MCPXAPUVoiceFilter),
+        VMSTATE_BUFFER_UNSAFE(resample_buf, MCPXAPUVoiceFilter, 0,
+                              sizeof(float) * NUM_SAMPLES_PER_FRAME * 2),
+        VMSTATE_BUFFER_UNSAFE(svf_save, MCPXAPUVoiceFilter, 0,
+                              sizeof(float) * 2 * 8),
+        VMSTATE_INT32_ARRAY(svf_op_save, MCPXAPUVoiceFilter, 2),
+        VMSTATE_INT32(hrtf.buf_pos, MCPXAPUVoiceFilter),
+        VMSTATE_BUFFER_UNSAFE(hrtf.ch, MCPXAPUVoiceFilter, 0,
+                              sizeof(((HrtfFilter *)0)->ch)),
+        VMSTATE_BUFFER_UNSAFE(hrtf.itd_cur, MCPXAPUVoiceFilter, 0,
+                              sizeof(float)),
+        VMSTATE_BUFFER_UNSAFE(hrtf.itd_tar, MCPXAPUVoiceFilter, 0,
+                              sizeof(float)),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static float *svf_output(sv_filter *sv, int op)
+{
+    switch (op) {
+    case 1: return &sv->l;
+    case 2: return &sv->h;
+    case 3: return &sv->b;
+    case 4: return &sv->n;
+    case 5: return &sv->p;
+    default: return NULL;
+    }
+}
+
+void mcpx_apu_vp_history_pre_save(MCPXAPUState *d)
+{
+    for (int v = 0; v < MCPX_HW_MAX_VOICES; v++) {
+        MCPXAPUVoiceFilter *f = &d->vp.filters[v];
+
+        f->src.saved_offset = f->src.saved_data ?
+            (int32_t)(f->src.saved_data - f->resample_buf) : -1;
+        for (int ch = 0; ch < 2; ch++) {
+            sv_filter *sv = &f->svf[ch];
+            float vals[8] = { sv->f, sv->q, sv->qnrm, sv->h,
+                              sv->b, sv->l, sv->p, sv->n };
+            memcpy(f->svf_save[ch], vals, sizeof(vals));
+            f->svf_op_save[ch] = 0;
+            for (int op = 1; op <= 5; op++) {
+                if (sv->op == svf_output(sv, op)) {
+                    f->svf_op_save[ch] = op;
+                }
+            }
+        }
+    }
+}
+
+void mcpx_apu_vp_history_post_load(MCPXAPUState *d)
+{
+    for (int v = 0; v < MCPX_HW_MAX_VOICES; v++) {
+        MCPXAPUVoiceFilter *f = &d->vp.filters[v];
+        int off = f->src.saved_offset;
+
+        f->voice = v;
+        f->src.saved_data = off >= 0 &&
+            off <= (int)ARRAY_SIZE(f->resample_buf) ?
+            f->resample_buf + off : NULL;
+        for (int ch = 0; ch < 2; ch++) {
+            sv_filter *sv = &f->svf[ch];
+            const float *x = f->svf_save[ch];
+            sv->f = x[0]; sv->q = x[1]; sv->qnrm = x[2]; sv->h = x[3];
+            sv->b = x[4]; sv->l = x[5]; sv->p = x[6]; sv->n = x[7];
+            sv->op = svf_output(sv, f->svf_op_save[ch]);
+        }
+    }
+}
+
 void mcpx_apu_vp_reset(MCPXAPUState *d)
 {
     d->vp.ssl_base_page = 0;

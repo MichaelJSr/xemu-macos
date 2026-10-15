@@ -32,6 +32,7 @@ typedef struct LinearSrc {
     double last_position;
     const float *saved_data;    /* unread input, in the callback's buffer */
     int64_t saved_frames;
+    int32_t saved_offset;       /* saved_data as an index, for savestates */
 } LinearSrc;
 
 typedef long (*LinearSrcCallback)(void *opaque, float **data);

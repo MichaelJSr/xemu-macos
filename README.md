@@ -245,10 +245,15 @@ Other automation interfaces (windowed or headless):
   - pads change only at vblanks and only from the pipe (physical pads
     and the host keyboard are ignored); an untagged line applies at the
     next vblank, and an `@N` line read after frame N is warned about;
-  - each load starts host-side device state (APU, AC'97) as a fresh
-    process does, with neutral pads: held keys, axes and queued pipe
-    lines are dropped, so write a run's input after its load. Start with
-    `-S` so nothing runs before the load;
+  - a state saved under icount carries what the run depends on beyond
+    guest RAM and registers (resampler, filter and HRTF history, the
+    APU schedule, AC'97, the RTC's sub-second phase, the field pin, pad
+    reports and held pipe keys and axes), so a run continued past its
+    `savevm` (or `xemu-checkpoint-save`) and every load of that save go
+    on identically. A state saved without icount starts that host-side
+    state as a fresh process does, with neutral pads. Pipe lines queued
+    before a load are dropped either way, so write a run's input after
+    its load. Start with `-S` so nothing runs before the load;
   - host audio is off, windowed too;
   - savestates cross modes: states saved without icount (the usual
     case) load and replay as above, and states saved under icount load
@@ -257,13 +262,8 @@ Other automation interfaces (windowed or headless):
     re-save here in normal mode first). Save with `sleep=off`; a state
     saved with sleep on or `shift=auto` loads anywhere but drops its warp
     deadlines;
-  - a load restarts host-side audio state (resampler and filter
-    history, the sample counter), so a run continued past its `savevm`
-    and a run loaded from that save differ from the next frame on. To
-    checkpoint a run, `savevm T` then `loadvm T` before continuing: every
-    later load of T replays it exactly. Frame numbers (`@N`,
-    `query-xemu-frame`) count the current process's frames, so use `+N`
-    after a load.
+  - frame numbers (`@N`, `query-xemu-frame`) count the current
+    process's frames, so use `+N` after a load.
 
   Write tagged input while paused, then advance. `shift` is guest time
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs

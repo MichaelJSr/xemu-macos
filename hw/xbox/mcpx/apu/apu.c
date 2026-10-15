@@ -494,13 +494,14 @@ static void mcpx_apu_vm_state_change(void *opaque, bool running, RunState state)
          * engine's round trip is not an identity (it re-widens M/N, wakes
          * the core and flushes its cache), so a plain pause skips it.
          */
-        bool sync = !d->det.enabled || d->det.rearm;
+        bool sync = !d->det.enabled || d->det.loaded;
         if (sync && d->gp.dsp) {
             dsp_sync_from_vm(d->gp.dsp);
         }
         if (sync && d->ep.dsp) {
             dsp_sync_from_vm(d->ep.dsp);
         }
+        d->det.loaded = false;
         mcpx_apu_resume(d);
         qemu_mutex_unlock(&d->lock);
         if (d->det.enabled &&
@@ -532,6 +533,7 @@ static int mcpx_apu_pre_load(void *opaque)
         dsp_reset_jit_throttle(d->gp.dsp);
         dsp_reset_jit_throttle(d->ep.dsp);
         d->det.rearm = true;
+        d->det.loaded = true;
     }
     qemu_mutex_unlock(&d->lock);
     return 0;
@@ -582,6 +584,7 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     if (d->det.enabled) {
         d->det.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mcpx_apu_det_tick, d);
         d->det.rearm = true;
+        d->det.loaded = true;
     }
     qatomic_set(&d->pause_requested, true);
     qemu_mutex_init(&d->lock);
@@ -725,6 +728,75 @@ const VMStateDescription vmstate_vp_ssl_data = {
     }
 };
 
+/*
+ * Deterministic mode (icount): what the APU carries across a frame besides
+ * its registers and guest RAM. Without it a load starts these afresh
+ * (mcpx_apu_pre_load), and a run continued past a savevm differs from one
+ * loaded from it. Only icount saves carry it, so normal-mode savestates
+ * keep their format; a load without it still starts afresh.
+ */
+static bool mcpx_apu_history_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int mcpx_apu_history_pre_save(void *opaque)
+{
+    MCPXAPUState *d = opaque;
+    DSPState *dsps[2] = { d->gp.dsp, d->ep.dsp };
+
+    mcpx_apu_vp_history_pre_save(d);
+    for (int i = 0; i < 2; i++) {
+        /* The DSPs synced to dsp->core when the VM stopped. */
+        d->det.dsp_cycles[i] = dsps[i]->core.cycle_count;
+        d->det.dsp_idle[i] = dsps[i]->core.halt_requested;
+    }
+    d->det.deadline = d->det.timer && timer_pending(d->det.timer) ?
+                      timer_expire_time_ns(d->det.timer) : -1;
+    return 0;
+}
+
+static int mcpx_apu_history_post_load(void *opaque, int version_id)
+{
+    MCPXAPUState *d = opaque;
+    DSPState *dsps[2] = { d->gp.dsp, d->ep.dsp };
+
+    mcpx_apu_vp_history_post_load(d);
+    for (int i = 0; i < 2; i++) {
+        dsps[i]->core.cycle_count = d->det.dsp_cycles[i];
+        dsps[i]->core.halt_requested = d->det.dsp_idle[i];
+    }
+    if (d->det.enabled && d->det.deadline >= 0) {
+        /* Continue on the saved schedule, mid-burst or retrying alike. */
+        timer_mod_ns(d->det.timer, d->det.deadline);
+        d->det.rearm = false;
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_mcpx_apu_history = {
+    .name = "mcpx-apu/history",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mcpx_apu_history_needed,
+    .pre_save = mcpx_apu_history_pre_save,
+    .post_load = mcpx_apu_history_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(vp.filters, MCPXAPUState, MCPX_HW_MAX_VOICES, 1,
+                             vmstate_vp_voice_history, MCPXAPUVoiceFilter),
+        VMSTATE_INT32(vp.hrtf.current_entry, MCPXAPUState),
+        VMSTATE_BUFFER_UNSAFE(vp.hrtf.entries, MCPXAPUState, 0,
+                              sizeof(((MCPXAPUVPState *)0)->hrtf.entries)),
+        VMSTATE_INT32(ep_frame_div, MCPXAPUState),
+        VMSTATE_BOOL(set_irq, MCPXAPUState),
+        VMSTATE_BOOL(det.in_burst, MCPXAPUState),
+        VMSTATE_INT64(det.deadline, MCPXAPUState),
+        VMSTATE_UINT32_ARRAY(det.dsp_cycles, MCPXAPUState, 2),
+        VMSTATE_BOOL_ARRAY(det.dsp_idle, MCPXAPUState, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_mcpx_apu = {
     .name = "mcpx-apu",
     .version_id = 1,
@@ -749,6 +821,10 @@ static const VMStateDescription vmstate_mcpx_apu = {
         VMSTATE_UINT8_ARRAY(vp.submix_headroom, MCPXAPUState, NUM_MIXBINS),
         VMSTATE_UINT64_ARRAY(vp.voice_locked, MCPXAPUState, 4),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_mcpx_apu_history,
+        NULL
     },
 };
 

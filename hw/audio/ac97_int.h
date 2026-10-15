@@ -76,6 +76,9 @@ void ac97_common_init (AC97LinkState *s,
                        AddressSpace *as);
 /* Back to the state ac97_common_init leaves (mcpx-aci, deterministic mode). */
 void ac97_power_on_reset(AC97LinkState *s);
+/* Reopen voices and volumes for link state loaded from a savestate. */
+void ac97_link_post_load(AC97LinkState *s);
+extern const VMStateDescription vmstate_ac97_bm_regs;
 
 extern const MemoryRegionOps ac97_io_nam_ops;
 extern const MemoryRegionOps ac97_io_nabm_ops;

@@ -108,8 +108,13 @@ typedef struct MCPXAPUState {
         bool enabled;
         bool in_burst;
         bool rearm;     /* after realize or a load: restart on the grid */
+        bool loaded;    /* after a load: the DSPs take the loaded state */
         bool voices_inline; /* the tick is running voices on the vCPU */
         QEMUTimer *timer;
+        /* mcpx-apu/history, filled before a save and read after a load */
+        int64_t deadline;
+        uint32_t dsp_cycles[2];
+        bool dsp_idle[2];
     } det;
 
     int frame_work_acc_us;

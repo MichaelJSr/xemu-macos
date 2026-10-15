@@ -39,6 +39,9 @@ struct MC146818RtcState {
     /* update-ended timer */
     QEMUTimer *update_timer;
     uint64_t next_alarm_time;
+#ifdef XBOX
+    bool vclock_loaded; /* mc146818rtc/vclock came with a load */
+#endif
     uint16_t irq_reinject_on_ack_count;
     uint32_t irq_coalesced;
     uint32_t period;

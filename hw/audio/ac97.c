@@ -1124,7 +1124,10 @@ static void po_callback(void *opaque, int free)
     transfer_audio(opaque, PO_INDEX, free);
 }
 
-static const VMStateDescription vmstate_ac97_bm_regs = {
+#ifndef XBOX
+static
+#endif
+const VMStateDescription vmstate_ac97_bm_regs = {
     .name = "ac97_bm_regs",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -1142,6 +1145,21 @@ static const VMStateDescription vmstate_ac97_bm_regs = {
         VMSTATE_END_OF_LIST()
     }
 };
+
+#ifdef XBOX
+static int ac97_post_load(void *opaque, int version_id);
+
+/* mcpx-aci: the link state came from a savestate (deterministic mode). */
+void ac97_link_post_load(AC97LinkState *s)
+{
+    uint32_t last_samp = s->last_samp;
+    int bup_flag = s->bup_flag;
+
+    ac97_post_load(s, 0);
+    s->last_samp = last_samp;
+    s->bup_flag = bup_flag;
+}
+#endif
 
 static int ac97_post_load(void *opaque, int version_id)
 {

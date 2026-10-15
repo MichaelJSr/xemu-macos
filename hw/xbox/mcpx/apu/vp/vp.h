@@ -51,6 +51,9 @@ typedef struct MCPXAPUVoiceFilter {
      * restarts it (voice_resample).
      */
     LinearSrc src;
+    /* sv_filter's floats and output for savestates (svf has a pointer) */
+    float svf_save[2][8];
+    int32_t svf_op_save[2];
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;
@@ -115,5 +118,8 @@ void mcpx_apu_vp_finalize(MCPXAPUState *d);
 void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME]);
 void mcpx_apu_vp_reset(MCPXAPUState *d);
 bool mcpx_apu_vp_frame_would_block(MCPXAPUState *d);
+extern const VMStateDescription vmstate_vp_voice_history;
+void mcpx_apu_vp_history_pre_save(MCPXAPUState *d);
+void mcpx_apu_vp_history_post_load(MCPXAPUState *d);
 
 #endif

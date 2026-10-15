@@ -33,6 +33,7 @@ typedef struct XBOX_PMRegs {
 
     /* TV encoder field pin (GPIO 0, bit 5); flips on every read. */
     int field_pin;
+    bool field_pin_loaded; /* xbox-pm/field-pin came with a load */
 } XBOX_PMRegs;
 
 void xbox_pm_init(PCIDevice *dev, XBOX_PMRegs *pm, qemu_irq sci_irq);

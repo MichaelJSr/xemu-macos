@@ -20,6 +20,7 @@
  */
 
 #include "xid.h"
+#include "exec/icount.h"
 
 // #define DEBUG_XID
 #ifdef DEBUG_XID
@@ -249,22 +250,79 @@ static const Property xid_properties[] = {
     DEFINE_PROP_UINT8("index", USBXIDGamepadState, device_index, 0),
 };
 
+/*
+ * Deterministic mode (icount): the reports the guest polls between
+ * vblanks (the host publishes input at vblanks only). Saves made there
+ * carry them; a load of an older save starts from the neutral report a
+ * fresh process has, not from whatever the previous run left.
+ */
+static bool xid_reports_needed(void *opaque)
+{
+    return icount_enabled();
+}
+
+static int xid_reports_post_load(void *opaque, int version_id)
+{
+    USBXIDGamepadState *s = opaque;
+    s->reports_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_xid_reports = {
+    .name = "usb-xbox-gamepad/reports",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = xid_reports_needed,
+    .post_load = xid_reports_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER_UNSAFE(in_state, USBXIDGamepadState, 0,
+                              sizeof(XIDGamepadReport)),
+        VMSTATE_BUFFER_UNSAFE(out_state, USBXIDGamepadState, 0,
+                              sizeof(XIDGamepadOutputReport)),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int xid_post_load(void *opaque, int version_id)
+{
+    USBXIDGamepadState *s = opaque;
+
+    if (icount_enabled() && !s->reports_loaded) {
+        memset(&s->in_state, 0, sizeof(s->in_state));
+        s->in_state.bLength = sizeof(s->in_state);
+        memset(&s->out_state, 0, sizeof(s->out_state));
+        s->out_state.length = sizeof(s->out_state);
+    }
+    s->reports_loaded = false;
+    return 0;
+}
+
 static const VMStateDescription vmstate_usb_xbox = {
     .name = TYPE_USB_XID_GAMEPAD,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = xid_post_load,
     .fields = (VMStateField[]){ VMSTATE_USB_DEVICE(dev, USBXIDGamepadState),
                                 // FIXME
                                 VMSTATE_END_OF_LIST() },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_xid_reports,
+        NULL
+    },
 };
 
 static const VMStateDescription vmstate_usb_xbox_s = {
     .name = TYPE_USB_XID_GAMEPAD_S,
     .version_id = 0,
     .minimum_version_id = 0,
+    .post_load = xid_post_load,
     .fields = (VMStateField[]){ VMSTATE_USB_DEVICE(dev, USBXIDGamepadState),
                                 // FIXME
                                 VMSTATE_END_OF_LIST() },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_xid_reports,
+        NULL
+    },
 };
 
 static void usb_xbox_gamepad_class_init(ObjectClass *klass, const void *data)
