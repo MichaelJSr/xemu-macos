@@ -4701,6 +4701,20 @@ static void gen_VSHUF(DisasContext *s, X86DecodedInsn *decode)
 {
     TCGv_i32 imm = tcg_constant_i32(decode->immediate);
     SSEFunc_0_pppi ps, pd, fn;
+    int sel = decode->immediate & 3;
+
+    /*
+     * shufps x, x, imm with four equal selectors broadcasts one lane
+     * (half the SHUFPS Azurik runs): a plain element dup.
+     */
+    if (!(s->prefix & PREFIX_DATA) && !s->vex_l &&
+        decode->op[1].offset == decode->op[2].offset &&
+        (uint8_t)decode->immediate == sel * 0x55) {
+        tcg_gen_gvec_dup_mem(MO_32, decode->op[0].offset,
+                             vector_elem_offset(&decode->op[1], MO_32, sel),
+                             16, 16);
+        return;
+    }
     ps = s->vex_l ? gen_helper_shufps_ymm : gen_helper_shufps_xmm;
     pd = s->vex_l ? gen_helper_shufpd_ymm : gen_helper_shufpd_xmm;
     fn = s->prefix & PREFIX_DATA ? pd : ps;
