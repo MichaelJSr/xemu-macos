@@ -1407,9 +1407,10 @@ void xemu_xpage_link_note_cross(TranslationBlock *dest, bool phys_only)
             dest->xemu_xpage_reg |= XEMU_XPAGE_TB_REGISTERED;
             xpage_reg[xpage_reg_count++] = dest;
             if (phys_only) {
-                /* Registered by the phys-page comparison alone (source has
-                 * no cross-emitter flag) — the conservative over-approx
-                 * class; tracked because its size was not predicted. */
+                /* Canary: a non-emitter link whose dest is off the
+                 * source's first physical page. Non-emitter slots target
+                 * the source's first virtual page, so only a guest remap
+                 * between the two lookups lands here; expected ~0. */
                 xemu_xpage_reg_phys_only++;
             }
         } else if (!xpage_reg_overflowed) {

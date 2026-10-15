@@ -1174,15 +1174,18 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
      * Cross-page direct link (permitted at translate time by
      * xemu_xpage_allow): register the destination so the full-TLB-flush
      * backstop can sever exactly these chains instead of flushing the
-     * whole translation cache (tb-maint.c xpage link registry). Under
-     * upstream same-page-only chaining the condition is never true.
+     * whole translation cache (tb-maint.c xpage link registry).
      * Registered strictly after dropping jmp_lock (registry lock order).
+     *
+     * Emitters register every link. A non-emitter slot targets the
+     * source's first virtual page, so its dest belongs on the page of
+     * page_addr[0] (which holds the full physical PC, hence the masks).
+     * A dest anywhere else, the source's second page included, was
+     * linked across a guest remap and is registered too.
      */
     {
-        tb_page_addr_t d0 = tb_page_addr0(tb_next);
-        bool phys_cross = d0 != tb_page_addr0(tb) &&
-            (tb_page_addr1(tb) == (tb_page_addr_t)-1 ||
-             d0 != tb_page_addr1(tb));
+        tb_page_addr_t d0 = tb_page_addr0(tb_next) & TARGET_PAGE_MASK;
+        bool phys_cross = d0 != (tb_page_addr0(tb) & TARGET_PAGE_MASK);
         bool emitter = tb->xemu_xpage_reg & XEMU_XPAGE_TB_CROSS_EMITTER;
         if (emitter || phys_cross) {
             xemu_xpage_link_note_cross(tb_next, phys_cross && !emitter);

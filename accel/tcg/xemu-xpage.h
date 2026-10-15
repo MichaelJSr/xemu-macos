@@ -58,7 +58,7 @@ extern uint64_t xemu_xpage_full_flush_backstops;
 
 /* tb-maint.c link registry (see the block comment there). phys_only marks
  * a registration caused by the phys-page comparison with no cross-emitter
- * flag on the source (conservative over-approximation class, counted). */
+ * flag on the source (a canary class, expected ~0, counted). */
 struct TranslationBlock;
 void xemu_xpage_link_note_cross(struct TranslationBlock *dest, bool phys_only);
 bool xemu_xpage_unlink_registered(CPUState *cs);

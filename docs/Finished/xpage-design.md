@@ -213,7 +213,12 @@ the refuter must confirm empirically, not code constants.
   `reg-phys-only` in the dump because its observed size — thousands per
   soak even in refute mode, i.e. with zero relaxed slots emitted — was not
   predicted; severing a valid link is always safe, so this class is
-  over-approximation, not hazard). The backstop severs the registered
+  over-approximation, not hazard). (2026-10-15: the size was a bug. The
+  test compared the full physical PC in `page_addr[0]` unmasked, so every
+  same-page link counted. It now compares the dest's page with the
+  source's first page only, the one page a non-emitter slot targets, so
+  `reg-phys-only` is a canary expected at ~0 that counts links made
+  across a guest remap.) The backstop severs the registered
   destinations' incoming chains with `tb_jmp_unlink()` — synchronously,
   closing the old queue-to-safe-point window, under the same manual
   `qemu_thread_jit_write()/execute()` bracket `tb_phys_invalidate` uses

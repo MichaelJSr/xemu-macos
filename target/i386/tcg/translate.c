@@ -3633,7 +3633,10 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
              * tb_add_jump registers every dest it links in the backstop
              * registry (tb-maint.c), regardless of the phys-page
              * comparison — a virtual-alias target can share the source's
-             * phys page and would evade a phys-only test.
+             * phys page and would evade a phys-only test. This flag is
+             * the only thing that registers same-page dests; same-page
+             * slots from non-emitters stay chained across flushes, as
+             * upstream's do.
              */
             s->base.tb->xemu_xpage_reg |= XEMU_XPAGE_TB_CROSS_EMITTER;
         }
