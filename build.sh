@@ -852,7 +852,7 @@ case "$platform" in # Adjust compilation options based on platform
                 echo "*** Set XEMU_ARM_CPU=apple-m1 for anything you redistribute."
               fi
             fi
-            sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast"
+            sys_cflags="-mcpu=${arm_cpu} -ffp-contract=fast-honor-pragmas"
         fi
 
         profdata_prefix="xcrun "

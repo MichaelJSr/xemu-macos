@@ -45,7 +45,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | `DSP_JIT_fallbacks` design (C) |
 | APU `rate==1.0` resampler fast path | reverted | No silence pad on drain → `voice_process` spins | `68d5afe7fa` |
 | Voice-register cache, SE2FE re-notify skip, voice writeback batching | closed | DMA and the guest use RAM voice state; no write hook | ledger |
-| HRTF hand-written NEON | closed | The autovectorized FIR is faster | `aff8c229e9` |
+| HRTF hand-written NEON | reopened, shipped | The gather-over-taps form lost to autovectorization; lanes over outputs on settled frames (96% of heavy-f1 calls) won, 2.9% fewer det cycles per frame | `aff8c229e9`, HRTF settled path |
 | APU thread resumed by reset during loadvm | fixed | Resume only if `runstate_is_running()` | `d6da581d4b` |
 | **TCG / x87 / CPU** | | | |
 | floatx80 union overlay | closed | Layout mismatch; segfaults | — |
