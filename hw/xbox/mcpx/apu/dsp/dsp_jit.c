@@ -334,6 +334,7 @@ void dsp_jit_init(DSPState *dsp)
     dsp->dma.mem_opaque = be->jit;
     dsp->dma.mem_read = jit_dma_mem_read;
     dsp->dma.mem_write = jit_dma_mem_write;
+    dsp->dma.mem_span = NULL;
 }
 
 static void dsp_jit_finalize(DSPState *dsp)

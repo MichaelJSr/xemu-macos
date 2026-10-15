@@ -45,6 +45,12 @@ static void c_dma_mem_write(void *opaque, int space, uint32_t addr,
     dsp56k_write_memory((dsp_core_t *)opaque, space, addr, value);
 }
 
+static uint32_t *c_dma_mem_span(void *opaque, int space, uint32_t addr,
+                                uint32_t count)
+{
+    return dsp56k_memory_span((dsp_core_t *)opaque, space, addr, count);
+}
+
 static uint32_t c_read_peripheral(dsp_core_t *core, uint32_t address)
 {
     return read_peripheral((DSPState *)core->opaque, address);
@@ -300,6 +306,7 @@ void dsp_c_init(DSPState *dsp)
     dsp->dma.mem_opaque = core;
     dsp->dma.mem_read = c_dma_mem_read;
     dsp->dma.mem_write = c_dma_mem_write;
+    dsp->dma.mem_span = c_dma_mem_span;
 
     /* Ensure the interpreter's opcode decoder tables are initialized.
      * dsp56k_reset_cpu populates the static nonparallel_matches[] array

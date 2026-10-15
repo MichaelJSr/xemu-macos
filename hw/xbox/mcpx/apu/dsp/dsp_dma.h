@@ -42,12 +42,16 @@ typedef enum DSPDMARegister {
 /* Memory access callbacks for backend-agnostic DMA */
 typedef uint32_t (*dsp_dma_mem_read_func)(void *opaque, int space, uint32_t addr);
 typedef void (*dsp_dma_mem_write_func)(void *opaque, int space, uint32_t addr, uint32_t value);
+/* Optional: @count words at @addr if they are plain RAM in one array, else NULL */
+typedef uint32_t *(*dsp_dma_mem_span_func)(void *opaque, int space, uint32_t addr,
+                                           uint32_t count);
 
 typedef struct DSPDMAState {
     /* DSP memory access (backend-agnostic) */
     void *mem_opaque;
     dsp_dma_mem_read_func mem_read;
     dsp_dma_mem_write_func mem_write;
+    dsp_dma_mem_span_func mem_span;
 
     /* System memory access */
     void *rw_opaque;

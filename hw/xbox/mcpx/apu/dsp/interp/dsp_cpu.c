@@ -930,6 +930,35 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
     }
 }
 
+/*
+ * The words dsp56k_read_memory / dsp56k_write_memory would reach for
+ * address .. address + count - 1 when they are plain X or Y RAM in one
+ * array (no peripheral, no window edge), else NULL.
+ */
+uint32_t *dsp56k_memory_span(dsp_core_t *dsp, int space, uint32_t address,
+                             uint32_t count)
+{
+    uint32_t end = address + count;
+
+    if (space == DSP_SPACE_Y) {
+        return end <= DSP_YRAM_SIZE ? &dsp->yram[address] : NULL;
+    }
+    if (space != DSP_SPACE_X) {
+        return NULL;
+    }
+    if (end <= 0xc00) {
+        return &dsp->xram[address];
+    }
+    if (address >= 0xc00 && end <= 0xc00 + DSP_MIXBUFFER_SIZE) {
+        return &dsp->mixbuffer[address - 0xc00];
+    }
+    if (address >= DSP_MIXBUFFER_BASE &&
+        end <= DSP_MIXBUFFER_BASE + DSP_MIXBUFFER_SIZE) {
+        return &dsp->mixbuffer[address - DSP_MIXBUFFER_BASE];
+    }
+    return NULL;
+}
+
 void dsp56k_write_memory(dsp_core_t* dsp, int space, uint32_t address, uint32_t value)
 {
     if (TRACE_DSP_DISASM_MEM)

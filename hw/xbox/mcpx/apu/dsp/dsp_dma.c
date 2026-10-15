@@ -100,6 +100,32 @@ static void scratch_circular_copy(
     }
 }
 
+/*
+ * A transfer that lies in plain DSP RAM (most of them) is indexed directly
+ * instead of making a backend call per word.
+ */
+static uint32_t *dma_span(DSPDMAState *s, int space, uint32_t addr,
+                          uint32_t count)
+{
+    return s->mem_span ? s->mem_span(s->mem_opaque, space, addr, count) : NULL;
+}
+
+static inline uint32_t dma_mem_read(DSPDMAState *s, const uint32_t *span,
+                                    int space, uint32_t addr, uint32_t i)
+{
+    return span ? span[i] : s->mem_read(s->mem_opaque, space, addr + i);
+}
+
+static inline void dma_mem_write(DSPDMAState *s, uint32_t *span, int space,
+                                 uint32_t addr, uint32_t i, uint32_t v)
+{
+    if (span) {
+        span[i] = v;
+    } else {
+        s->mem_write(s->mem_opaque, space, addr + i, v);
+    }
+}
+
 static void dsp_dma_run(DSPDMAState *s)
 {
     if (!(s->control & DMA_CONTROL_RUNNING)
@@ -128,14 +154,15 @@ static void dsp_dma_run(DSPDMAState *s)
             assert(!"Dsp dma space address out of range");
         }
 
-        uint32_t next_block = s->mem_read(s->mem_opaque, block_space, block_addr);
-        uint32_t control = s->mem_read(s->mem_opaque, block_space, block_addr+1);
-        uint32_t count = s->mem_read(s->mem_opaque, block_space, block_addr+2);
+        const uint32_t *blk = dma_span(s, block_space, block_addr, 7);
+        uint32_t next_block = dma_mem_read(s, blk, block_space, block_addr, 0);
+        uint32_t control = dma_mem_read(s, blk, block_space, block_addr, 1);
+        uint32_t count = dma_mem_read(s, blk, block_space, block_addr, 2);
 
-        uint32_t dsp_offset = s->mem_read(s->mem_opaque, block_space, block_addr+3);
-        uint32_t scratch_offset = s->mem_read(s->mem_opaque, block_space, block_addr+4);
-        uint32_t scratch_base = s->mem_read(s->mem_opaque, block_space, block_addr+5);
-        uint32_t scratch_size = s->mem_read(s->mem_opaque, block_space, block_addr+6)+1;
+        uint32_t dsp_offset = dma_mem_read(s, blk, block_space, block_addr, 3);
+        uint32_t scratch_offset = dma_mem_read(s, blk, block_space, block_addr, 4);
+        uint32_t scratch_base = dma_mem_read(s, blk, block_space, block_addr, 5);
+        uint32_t scratch_size = dma_mem_read(s, blk, block_space, block_addr, 6)+1;
 
         s->next_block = next_block;
         if (s->next_block & NODE_POINTER_EOL) {
@@ -226,12 +253,14 @@ static void dsp_dma_run(DSPDMAState *s)
                 // FIXME: Above xfer size calculation instead of
                 // overwriting here
                 transfer_size = block_count * item_size * channel_count;
+                const uint32_t *span = dma_span(s, mem_space, mem_address,
+                                                channel_count * block_count);
 
                 // Interleave samples
                 for (int i = 0; i < block_count; i++) {
                     for (int ch = 0; ch < channel_count; ch++) {
-                        uint32_t v = s->mem_read(s->mem_opaque,
-                            mem_space, mem_address+ch*block_count+i);
+                        uint32_t v = dma_mem_read(s, span, mem_space,
+                                                  mem_address, ch*block_count+i);
                         switch(item_size) {
                         case 2:
                             *(uint16_t*)(scratch_buf + i*2*channel_count + ch*2) = v >> 8;
@@ -246,8 +275,10 @@ static void dsp_dma_run(DSPDMAState *s)
                     }
                 }
             } else {
+                const uint32_t *span = dma_span(s, mem_space, mem_address,
+                                                count);
                 for (int i = 0; i < count; i++) {
-                    uint32_t v = s->mem_read(s->mem_opaque, mem_space, mem_address+i);
+                    uint32_t v = dma_mem_read(s, span, mem_space, mem_address, i);
                     switch(item_size) {
                     case 2:
                         *(uint16_t*)(scratch_buf + i*2) = v >> 8;
@@ -294,6 +325,7 @@ static void dsp_dma_run(DSPDMAState *s)
                 assert(!"Unhandled dsp dma buffer");
             }
 
+            uint32_t *span = dma_span(s, mem_space, mem_address, count);
             for (int i = 0; i < count; i++) {
                 uint32_t v;
                 switch(item_size) {
@@ -309,7 +341,7 @@ static void dsp_dma_run(DSPDMAState *s)
                     break;
                 }
 
-                s->mem_write(s->mem_opaque, mem_space, mem_address+i, v);
+                dma_mem_write(s, span, mem_space, mem_address, i, v);
             }
         }
 

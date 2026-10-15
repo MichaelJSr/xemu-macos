@@ -182,6 +182,8 @@ void dsp56k_execute_instruction(dsp_core_t* dsp);	/* Execute 1 instruction */
 
 uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address);
 void dsp56k_write_memory(dsp_core_t* dsp, int space, uint32_t address, uint32_t value);
+uint32_t *dsp56k_memory_span(dsp_core_t *dsp, int space, uint32_t address,
+                             uint32_t count);
 
 /* Interrupt relative functions */
 void dsp56k_add_interrupt(dsp_core_t* dsp, uint16_t inter);
