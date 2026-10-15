@@ -187,7 +187,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_PUSH_PRESENT` | Push present ring | `vk/display.c` |
 | `XEMU_SUBPAGE_DIRTY`, `_FAST` | Sub-page invalidation | `tcg/tb-maint.c`, `tcg/xemu-subpage-fast.c` |
 | `XEMU_XPAGE_CHAIN`, `_UNLINK` | Cross-page chaining | `tcg/xemu-xpage.c` |
-| `XEMU_RAS`, `XEMU_SSE_HOST`, `XEMU_X87_ELIDE_FT0`, `_DEFER_FIP` | CPU fast paths (RAS off for `-d exec`) | `i386/` |
+| `XEMU_RAS`, `XEMU_SSE_HOST`, `XEMU_X87_ELIDE_FT0`, `_DEFER_FIP`, `_LEAN` | CPU fast paths (RAS off for `-d exec`) | `i386/` |
 | `XEMU_ELIDE_CANDOIO`, `XEMU_DIRTY_FAST` | TCG store elisions | `tcg/translator.c`, `system/physmem.c` |
 | *Off by default* | | |
 | `XEMU_REPORTS_SYNC=1` | Synchronous zpass reports | `vk/reports.c` |

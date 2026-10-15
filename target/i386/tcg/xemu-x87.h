@@ -149,6 +149,23 @@ static int xemu_x87_ptr_mode(void)
     return mode;
 }
 
+/*
+ * (5) XEMU_X87_LEAN (default on, =0 legacy). With the inline x87 cache off
+ * (the helper path, which both modes run), the ops that only move bits in
+ * env -- push/pop, fnstsw, register moves and fxch, fchs/fabs, fld1/fldz --
+ * are emitted as TCG code instead of helper calls. They write the same env
+ * bytes the helpers do, at the same point in the instruction.
+ */
+static bool xemu_x87_lean(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_X87_LEAN");
+        on = (e && e[0] == '0') ? 0 : 1;
+    }
+    return on;
+}
+
 /* Emit "*counter += n". */
 static void xemu_x87_gen_counter_add(uint64_t *counter, uint64_t n)
 {

@@ -1703,6 +1703,52 @@ static void gen_set_fptag(int offs, int value)
     tcg_gen_st8_i32(tmp, p, offsetof(CPUX86State, fptags[0]) + offs);
 }
 
+#if defined(XBOX)
+static bool xemu_x87_lean(void);
+
+/* Helper path with the lean bit-moving ops (xemu-x87.h). */
+static bool x87_lean(void)
+{
+    return !g_use_hard_fpu_inline && xemu_x87_lean();
+}
+
+/* Copy one 16-byte x87 register image (floatx80 and its padding). */
+static void x87_gen_copy(TCGv_ptr dst, TCGv_ptr src)
+{
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
+    tcg_gen_ld_i64(lo, src, 0);
+    tcg_gen_ld_i64(hi, src, 8);
+    tcg_gen_st_i64(lo, dst, 0);
+    tcg_gen_st_i64(hi, dst, 8);
+}
+
+/* Store a floatx80 constant (helper_fld1/fldz: ST0 = floatx80_one ...). */
+static void x87_gen_const(TCGv_ptr dst, uint16_t high, uint64_t low)
+{
+    tcg_gen_st_i64(tcg_constant_i64(low), dst, 0);
+    tcg_gen_st16_i32(tcg_constant_i32(high), dst, 8);
+}
+
+/* floatx80_chs / floatx80_abs on the sign/exponent halfword. */
+static void x87_gen_sign(TCGv_ptr p, bool chs)
+{
+    TCGv_i32 hi = tcg_temp_new_i32();
+    tcg_gen_ld16u_i32(hi, p, 8);
+    if (chs) {
+        tcg_gen_xori_i32(hi, hi, 0x8000);
+    } else {
+        tcg_gen_andi_i32(hi, hi, 0x7fff);
+    }
+    tcg_gen_st16_i32(hi, p, 8);
+}
+#else
+static bool x87_lean(void)
+{
+    return false;
+}
+#endif
+
 static bool fpu_using_double_precision(DisasContext *s)
 {
     /*
@@ -1896,7 +1942,9 @@ static void gen_flush_fp(DisasContext *s)
 
 static void gen_fpush(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fpush);
+    if (!x87_lean()) {
+        GEN_HELPER_FALLBACK_v_v(fpush);
+    }
 
     tcg_gen_subi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
@@ -1907,7 +1955,9 @@ static void gen_fpush(DisasContext *s)
 
 static void gen_fpop(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fpop);
+    if (!x87_lean()) {
+        GEN_HELPER_FALLBACK_v_v(fpop);
+    }
 
     gen_set_fptag(0, 1); /* invalidate stack entry */
     tcg_gen_addi_i32(fpstt, fpstt, 1);
@@ -1919,25 +1969,45 @@ static void gen_fpop(DisasContext *s)
 
 static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_copy(gen_ft0_ptr(), gen_stn_ptr(st_index));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_i(fmov_FT0_STN, st_index);
     fp_pc_wrapper(gen_fmov_FT0_STN)(s, st_index);
 }
 
 static void gen_fmov_ST0_STN(DisasContext *s, int st_index)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_i(fmov_ST0_STN, st_index);
     fp_pc_wrapper(gen_fmov_ST0_STN)(s, st_index);
 }
 
 static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_i(fmov_STN_ST0, st_index);
     fp_pc_wrapper(gen_fmov_STN_ST0)(s, st_index);
 }
 
 static void gen_ffree_STN(DisasContext *s, int st_index)
 {
-    GEN_HELPER_FALLBACK_v_i(ffree_STN, st_index);
+    if (!x87_lean()) {
+        GEN_HELPER_FALLBACK_v_i(ffree_STN, st_index);
+    }
 
     /*
      * Inline: env->fptags[(env->fpstt + st_index) & 7] = 1.
@@ -1960,6 +2030,23 @@ static void gen_ffree_STN(DisasContext *s, int st_index)
 
 static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        TCGv_ptr p0 = gen_stn_ptr(0);
+        TCGv_ptr pn = gen_stn_ptr(st_index);
+        TCGv_i64 lo0 = tcg_temp_new_i64(), hi0 = tcg_temp_new_i64();
+        TCGv_i64 lon = tcg_temp_new_i64(), hin = tcg_temp_new_i64();
+        tcg_gen_ld_i64(lo0, p0, 0);
+        tcg_gen_ld_i64(hi0, p0, 8);
+        tcg_gen_ld_i64(lon, pn, 0);
+        tcg_gen_ld_i64(hin, pn, 8);
+        tcg_gen_st_i64(lo0, pn, 0);
+        tcg_gen_st_i64(hi0, pn, 8);
+        tcg_gen_st_i64(lon, p0, 0);
+        tcg_gen_st_i64(hin, p0, 8);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_i(fxchg_ST0_STN, st_index);
 
     /* Ensure ST0, STN are loaded */
@@ -2150,12 +2237,24 @@ static void gen_fisttll_ST0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fchs_ST0(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_sign(gen_stn_ptr(0), true);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fchs_ST0);
     fp_pc_wrapper(gen_fchs_ST0)(s);
 }
 
 static void gen_fabs_ST0(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_sign(gen_stn_ptr(0), false);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fabs_ST0);
     fp_pc_wrapper(gen_fabs_ST0)(s);
 }
@@ -2321,12 +2420,24 @@ static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
 
 static void gen_fld1_ST0(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_const(gen_stn_ptr(0), 0x3fff, 0x8000000000000000ULL);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fld1_ST0);
     fp_pc_wrapper(gen_fld1_ST0)(s);
 }
 
 static void gen_fldz_ST0(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_const(gen_stn_ptr(0), 0, 0);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fldz_ST0);
     fp_pc_wrapper(gen_fldz_ST0)(s);
     /* FIXME: Set tag word */
@@ -2334,6 +2445,12 @@ static void gen_fldz_ST0(DisasContext *s)
 
 static void gen_fldz_FT0(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_lean()) {
+        x87_gen_const(gen_ft0_ptr(), 0, 0);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fldz_FT0);
     fp_pc_wrapper(gen_fldz_FT0)(s);
 }
@@ -3758,7 +3875,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             break;
         case 0x2f: /* fnstsw mem */
-            if (g_use_hard_fpu_inline) {
+            if (g_use_hard_fpu_inline || x87_lean()) {
                 gen_fnstsw_inline(s, s->tmp2_i32);
             } else {
                 gen_helper_fnstsw(s->tmp2_i32, tcg_env);
@@ -4138,7 +4255,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3c: /* df/4 */
             switch (rm) {
             case 0:
-                if (g_use_hard_fpu_inline) {
+                if (g_use_hard_fpu_inline || x87_lean()) {
                     gen_fnstsw_inline(s, s->tmp2_i32);
                 } else {
                     gen_helper_fnstsw(s->tmp2_i32, tcg_env);
