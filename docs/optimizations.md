@@ -75,7 +75,7 @@ reader of main is never told to set a knob that does nothing.
 | `XEMU_DSP_JIT` | `0` disables the fork DSP JIT inside the interpreter engine (kill-switch; *enabling* is config-only — `audio.dsp_jit.enabled`) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_NO_THROTTLE` | Disable the DSP JIT retranslation-churn auto-throttle |
-| `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_DUMP` / `_PIN_AUDIT` / `_SENTINEL` / `_FORCE` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
+| `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
 | `XEMU_APU_RAM_DIRTY` | **Landed 2026-09-08; the default is per-platform.** The APU's fast voice-register stores write `d->ram_ptr` directly and so skipped `invalidate_and_set_dirty()`; with the knob on they also mark the written range for the `DIRTY_CLIENTS_NOCODE` clients (VGA, MIGRATION, NV2A, NV2A_TEX). **Default off on Apple**, which is the platform whose audio path this fork tuned and whose shipped behaviour is the unmarked store, because the marking's cost here has never been measured (an RCU read lock — two real `smp_mb()`s, since this tree builds without `CONFIG_MEMBARRIER` — plus up to four contended bitmap ORs, per voice-register store, from every voice worker); **default on elsewhere**, where nothing was measured against the skip. `=1` opts in on Apple, `=0` opts out elsewhere; read once in `mcpx_apu_vp_init` |
 
@@ -1577,9 +1577,11 @@ cherry-picked from the tag. Earlier rows moved up as their commits landed:
   `emit_asr_w_imm`, `emit_tbz_w`, `emit_orr_x_reg`, `emit_adds_x_reg`,
   `emit_sxtb_w`, `emit_br`; added unused in `1288fae90f`, `4dfbae90d7`,
   `5e40a982ef`), the `dsp56k_jit_sentinel_enabled`/`_force_enabled`
-  accessors (the knobs are read through their statics, so
-  `XEMU_DSP_JIT_SENTINEL`/`XEMU_DSP_JIT_FORCE` work unchanged) and the
-  `dsp56k_jit_helper_update_rn` shim. No generated-code change.
+  accessors (the knobs were read through their statics, so
+  `XEMU_DSP_JIT_SENTINEL`/`XEMU_DSP_JIT_FORCE` kept working; both
+  removed 2026-10-15, the harness is in `1f444fa272`/`4668947cc9`)
+  and the `dsp56k_jit_helper_update_rn` shim. No generated-code
+  change.
 
 ### Input
 
@@ -2319,7 +2321,7 @@ Lessons worth preserving so they aren't re-attempted.
 | BQL event batching | Breaks QEMU cooperative scheduling |
 | TLS-cached `pthread_jit_write_protect_np` | Per-thread cache drifts from kernel W^X on nested `tb_gen_code` / setjmp paths → SIGSEGV/SIGILL after ~1 min |
 | Hoist `can_fifo_access` out of pfifo pusher word loop | `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, so "lock held throughout" is false → `ERROR_CALL` on boot |
-| DSP JIT round-4 `cur_inst` preset skip | Regresses on startup with `op=0x001000` — some inlined path reads `cur_inst` at runtime that the static classifier doesn't see. Harness (`XEMU_DSP_JIT_SENTINEL` / `_FORCE`) kept in-tree |
+| DSP JIT round-4 `cur_inst` preset skip | Regresses on startup with `op=0x001000` — some inlined path reads `cur_inst` at runtime that the static classifier doesn't see. Harness removed; recover from `1f444fa272`/`4668947cc9` |
 | DSP JIT round-4 EPI_NO_PC | 9.75% mismatch per pcskip sentinel — calc_ea mode 6 lengthens parmoves and REP/DO loops rewind pc; both legitimately diverge |
 | Vblank cadence aligned to host display refresh | Host `vblank_interval_ns` drives `process_vblank` → `graphic_hw_update` → `nv2a_vga_gfx_update` → `NV_PCRTC_INTR_0_VBLANK`. Retuning retimes the *guest* IRQ (titles gate sim on vblank count). Needs NV2A-internal timer (fixed 60 / 50 Hz) decoupled from host present cadence |
 | AArch64 `fsin` / `fcos` libm-helper inline | Swapping `gen_helper_fsin` / `_fcos` (floatx80 round-trip) for a thin `helper_sin_fast_f{32,64}` / `cos_fast_*` (f-bits → `memcpy` → libm → bits) made audio crackly on at least one title. Plausible causes: (a) `gen_flush_fp` was also the de-facto flush for *other* live x87 temps; (b) `TCG_CALL_NO_RWG_SE` let TCG reorder across boundaries the floatx80 helper implicitly fenced |

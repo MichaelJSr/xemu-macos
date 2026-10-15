@@ -587,16 +587,13 @@ static GBytes *run_arm(const char *prog_name, const char *jit_value)
     envp = g_environ_setenv(envp, "XEMU_DSP_JIT", jit_value, TRUE);
     /* The corpus cores are EP cores, which start on the interpreter. */
     envp = g_environ_setenv(envp, "XEMU_DSP_JIT_EP", "1", TRUE);
-    /* Hermetic children: no diff/stats/sentinel knobs leaking in. */
+    /* Hermetic children: no diff/stats knobs leaking in. */
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_SYNC");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_MAX");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_STATS");
-    envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_SENTINEL");
-    envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_FORCE");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_PIN_AUDIT");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_NO_THROTTLE");
-    envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DUMP");
 
     gchar *args[5];
     args[0] = (gchar *)g_argv0;

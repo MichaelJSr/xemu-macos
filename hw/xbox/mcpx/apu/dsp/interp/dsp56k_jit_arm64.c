@@ -84,24 +84,6 @@ static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks 
 static bool g_jit_stats;
 
 /*
- * Sentinel (debug) harness for the deferred round-4 cur_inst
- * skip optimization. Bit 0 re-enables the skip with a POISON
- * write so any inlined path that secretly reads dsp->cur_inst
- * observes a known garbage value and surfaces as an assert /
- * DIFF mismatch. See dsp56k_jit_arm64.h. Round-4's EPI_NO_PC (PC-check
- * skip) was dropped permanently after sentinel proved it unsafe
- * — no PC-watch knob exists anymore.
- */
-static uint32_t g_jit_sentinel;
-
-/*
- * Force-skip mode: re-applies the deferred round-4 cur_inst skip
- * literally (no diagnostics). Used to reproduce the regression on
- * demand while diagnosing. See dsp56k_jit_arm64.h.
- */
-static uint32_t g_jit_force;
-
-/*
  * Phase 8 lazy-flag globals. Defined here (before emit_ccr_e_u_n_z)
  * so the emitter can see them. Set by translate_block's one-step
  * lookahead; consumed by emit_ccr_e_u_n_z's fast-return path.
@@ -239,28 +221,6 @@ static void parse_flags_once(void)
     e = getenv("XEMU_DSP_JIT_EP");
     g_jit_ep = (e && e[0] == '1');
 
-    /* XEMU_DSP_JIT_SENTINEL: debug harness for the round-4
-     * cur_inst-skip bisect. Bit 0 = curinst poison. The old bit 1
-     * (pcskip logger) was removed when EPI_NO_PC was dropped. */
-    e = getenv("XEMU_DSP_JIT_SENTINEL");
-    if (e && e[0]) {
-        long n = strtol(e, NULL, 0);
-        if (n > 0 && n <= 1) {
-            g_jit_sentinel = (uint32_t)n;
-        }
-    }
-
-    /* XEMU_DSP_JIT_FORCE: literally re-apply the deferred round-4
-     * cur_inst skip. Bit 0 = cur_inst skip. Bit 1 (old PC-check
-     * skip) was removed when EPI_NO_PC was dropped permanently. */
-    e = getenv("XEMU_DSP_JIT_FORCE");
-    if (e && e[0]) {
-        long n = strtol(e, NULL, 0);
-        if (n > 0 && n <= 1) {
-            g_jit_force = (uint32_t)n;
-        }
-    }
-
     /* XEMU_DSP_JIT_PIN_AUDIT: emit a per-op runtime check that the
      * pinned A / B registers (x26 / x27) agree with the packed
      * contents of registers[A2/A1/A0] / registers[B2/B1/B0]. Emits
@@ -282,12 +242,8 @@ static void parse_flags_once(void)
         } else if (g_jit_diff) {
             mode_desc = " (DIFF=async, sampled)";
         }
-        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s%s%s\n",
+        fprintf(stderr, "xemu: DSP JIT enabled%s%s%s\n",
                 mode_desc, g_jit_stats ? " (stats)" : "",
-                (g_jit_sentinel & DSP56K_JIT_SENTINEL_CURINST)
-                    ? " (SENTINEL-curinst)" : "",
-                (g_jit_force & DSP56K_JIT_FORCE_CURINST_SKIP)
-                    ? " (FORCE-curinst-skip)" : "",
                 g_jit_pin_audit ? " (PIN-AUDIT)" : "");
     }
 }
@@ -5782,35 +5738,9 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
 {
     uint32_t select = (inst >> 20) & 0xf;
 
-    /*
-     * Set cur_inst, cur_inst_len=1, instr_cycle=2.
-     *
-     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): poison
-     * dsp->cur_inst for parmove classes that don't need the live
-     * inst at runtime. pm_4x is the one exception — it reads
-     * dsp->cur_inst inside the emu_pm_4x C handler, so we always
-     * write the real inst there. The pm_4 dispatcher re-writes
-     * cur_inst locally in that path anyway (see emit_parmove_pm4).
-     */
-    {
-        bool is_pm4x = (select == 4 &&
-                        (inst & 0xf40000u) == 0x400000u);
-        bool force_skip = !is_pm4x &&
-            (g_jit_force & DSP56K_JIT_FORCE_CURINST_SKIP);
-        if (force_skip) {
-            /* Force mode: literal round-4 parmove cur_inst skip
-             * (pm_4x always writes the real inst because emu_pm_4x
-             * reads it). */
-        } else {
-            uint32_t cur_inst_preset =
-                (!is_pm4x &&
-                 (g_jit_sentinel & DSP56K_JIT_SENTINEL_CURINST))
-                    ? DSP56K_JIT_SENTINEL_POISON
-                    : inst;
-            emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
-            emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
-        }
-    }
+    /* Set cur_inst, cur_inst_len=1, instr_cycle=2. */
+    emit_mov_imm32(e, /*rd=*/0, inst);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
     emit_movz_w(e, /*rd=*/0, 1, 0);
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_movz_w(e, /*rd=*/0, 2, 0);
@@ -8899,37 +8829,9 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
      * audit), so the skip caused the interpreter to later observe
      * stale instruction bits and assert on an unknown opcode. Keep
      * the unconditional preset until the offending reader is found.
-     *
-     * Sentinel mode (XEMU_DSP_JIT_SENTINEL bit 0): write
-     * DSP56K_JIT_SENTINEL_POISON to dsp->cur_inst instead of `inst`
-     * for ops that would have been skipped (inlinable CF / long-
-     * imm). Any handler that reads cur_inst at runtime observes
-     * the poison and produces an observable failure (lookup_opcode
-     * assert "op = 00adbeef", garbage register write caught by
-     * DIFF, etc.) — the resulting stack trace / DIFF diff pins
-     * down the reader.
      */
-    {
-        int cf_kind_sent = dsp56k_jit_helper_classify_cf((void *)emu_func);
-        int li_kind_sent = dsp56k_jit_helper_classify_long_imm((void *)emu_func);
-        bool will_inline_sent =
-            (cf_kind_sent != DSP56K_JIT_CF_NONE) ||
-            (li_kind_sent != DSP56K_JIT_LI_NONE);
-        bool force_skip = will_inline_sent &&
-            (g_jit_force & DSP56K_JIT_FORCE_CURINST_SKIP);
-        if (force_skip) {
-            /* Force mode: literal round-4 skip — leave cur_inst
-             * holding whatever the previous op wrote. */
-        } else {
-            uint32_t cur_inst_preset =
-                (will_inline_sent &&
-                 (g_jit_sentinel & DSP56K_JIT_SENTINEL_CURINST))
-                    ? DSP56K_JIT_SENTINEL_POISON
-                    : inst;
-            emit_mov_imm32(e, /*rd=*/0, cur_inst_preset);
-            emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
-        }
-    }
+    emit_mov_imm32(e, /*rd=*/0, inst);
+    emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST);
 
     /* 2. dsp->cur_inst_len = 1. This is the interpreter's initial
      * value — handlers that read a second word do cur_inst_len++,
@@ -9848,32 +9750,6 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     s->code_ptr = code_end;
     qemu_thread_jit_execute();
 
-    /* Optional hex dump of the emitted ARM64 block, for offline
-     * disassembly and verification. Gated to avoid noise; set
-     * XEMU_DSP_JIT_DUMP=1 to enable. */
-    static bool dump_parsed, dump_enabled;
-    if (!dump_parsed) {
-        dump_parsed = true;
-        const char *e = getenv("XEMU_DSP_JIT_DUMP");
-        dump_enabled = (e && e[0] == '1');
-    }
-    if (dump_enabled) {
-        fprintf(stderr,
-                "[dsp-jit] block pc_start=0x%04x pc_end=0x%04x num_ops=%u "
-                "entry=%p size=%zu bytes\n",
-                pc_start, pc_end, num_ops, (void *)entry_ptr,
-                (size_t)(code_end - (uint8_t *)entry_ptr));
-        uint32_t *p = (uint32_t *)entry_ptr;
-        uint32_t *pe = (uint32_t *)code_end;
-        for (uint32_t *pi = p; pi < pe; pi += 4) {
-            fprintf(stderr, "  %p:", (void *)pi);
-            for (int k = 0; k < 4 && pi + k < pe; k++) {
-                fprintf(stderr, " %08x", pi[k]);
-            }
-            fprintf(stderr, "\n");
-        }
-    }
-
     return block;
 }
 
@@ -10060,19 +9936,6 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
                     100.0 * (double)g_cf_fallback_buckets[k] /
                     (double)fb_total);
         }
-    }
-
-    /* Debug-knob summary: echo whether SENTINEL / FORCE were
-     * enabled for this run. Keeps the stats line self-describing
-     * when bisecting a cur_inst regression. */
-    if (g_jit_sentinel || g_jit_force) {
-        fprintf(stderr,
-                "  sentinel_mode     = 0x%x  (curinst_poison=%s)\n"
-                "  force_mode        = 0x%x  (curinst_skip=%s)\n",
-                g_jit_sentinel,
-                (g_jit_sentinel & DSP56K_JIT_SENTINEL_CURINST) ? "on" : "off",
-                g_jit_force,
-                (g_jit_force & DSP56K_JIT_FORCE_CURINST_SKIP) ? "on" : "off");
     }
     fflush(stderr);
 }

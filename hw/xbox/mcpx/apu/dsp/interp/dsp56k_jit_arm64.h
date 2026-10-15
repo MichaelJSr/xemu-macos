@@ -80,33 +80,6 @@ bool dsp56k_jit_diff_enabled(void);
 uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp);
 
 /*
- * Sentinel (debug / bisect) harness for the deferred round-4
- * cur_inst skip optimization. XEMU_DSP_JIT_SENTINEL=1 re-applies
- * the skip but substitutes DSP56K_JIT_SENTINEL_POISON (0x00adbeef)
- * for the correct inst. Any inlined-op handler path that reads
- * dsp->cur_inst at runtime will observe the poison and typically
- * surface as a visible failure (lookup_opcode_slow assert with
- * "op = 00adbeef", or a DIFF mismatch on a sub-field decode).
- * The stack trace / DIFF diff pinpoints the reader.
- *
- * The companion PC-skip sentinel (old bit 1) was removed after
- * the round-4 EPI_NO_PC optimization was dropped permanently —
- * see the EPI_NO_PC drop commit for the analysis (mode-6 parmove
- * lengthening + REP/DO loop rewinds make it unsafe).
- */
-#define DSP56K_JIT_SENTINEL_CURINST  (1u << 0)
-#define DSP56K_JIT_SENTINEL_POISON   0x00adbeefu
-
-/*
- * Force-apply the deferred round-4 cur_inst skip literally
- * (no sentinel poison). Use XEMU_DSP_JIT_FORCE=1 to reproduce
- * the underlying regression on demand while bisecting. If a
- * future fix makes FORCE=1 run clean, the cur_inst skip can be
- * re-landed permanently.
- */
-#define DSP56K_JIT_FORCE_CURINST_SKIP  (1u << 0)
-
-/*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled.
  * Keeps the JIT source decoupled from ui/xemu-settings.h so the
  * standalone DSP test binary (which links libdsp.a without the

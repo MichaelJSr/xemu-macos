@@ -85,7 +85,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | `XEMU_DSP_JIT_PIN_AUDIT=1` | No output | `pin audit FAIL: which= pc=` (no abort) |
 | `XEMU_X87_REFUTE`, other refuters | `violations=0` with a large `checks=` | Any violation; never left on during an fps run |
 
-Notes: read `XEMU_INV_PROF`'s `(f)` line only from an `XEMU_ELIDE_CANDOIO=0` run. `info jit` "TLB full flushes" is always 0 on this guest; use (Δpartial+Δelided)/16. Leave the historical `_SENTINEL`/`_FORCE` off. Host: `sample xemu 5 1 -file /tmp/s.txt`; `xcrun xctrace record --template 'Time Profiler' --attach xemu --time-limit 10s --output /tmp/x.trace`. A vCPU thread at ~95% doesn't prove CPU-bound (Azurik busy-polls); look at PFIFO starvation (cond_wait − `flip_idle`) instead.
+Notes: read `XEMU_INV_PROF`'s `(f)` line only from an `XEMU_ELIDE_CANDOIO=0` run. `info jit` "TLB full flushes" is always 0 on this guest; use (Δpartial+Δelided)/16. Host: `sample xemu 5 1 -file /tmp/s.txt`; `xcrun xctrace record --template 'Time Profiler' --attach xemu --time-limit 10s --output /tmp/x.trace`. A vCPU thread at ~95% doesn't prove CPU-bound (Azurik busy-polls); look at PFIFO starvation (cond_wait − `flip_idle`) instead.
 
 ## Glossary (fork-specific)
 - **flip**: guest `FLIP_STALL`; flips/s = guest fps (cap 60). **finish**: `pgraph_vk_finish(reason)` = submit + wait on the previous slot's fence.

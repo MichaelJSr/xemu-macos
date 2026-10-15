@@ -36,7 +36,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Drawable-first present order | reverted | +0.50 fps, under noise | `1a8f466e2b` |
 | **DSP / APU** | | | |
 | DSP JIT EPI_NO_PC (skip the PC-mismatch exit) | closed | Sentinel: 9.75% legitimate divergence (mode-6 parmoves, REP/DO); fixed the classifier instead | `d0e1f0b27d`, `ca7fe51a0b` |
-| DSP JIT `cur_inst` preset skip | fenced | A hidden runtime reader (`op=0x001000`); `XEMU_DSP_JIT_SENTINEL`/`_FORCE` kept | `aa9eed38e8` |
+| DSP JIT `cur_inst` preset skip | reverted | A hidden runtime `cur_inst` reader (`op=0x001000`); harness removed, `git show 1f444fa272 4668947cc9` to reopen | `aa9eed38e8` |
 | A/B, then X/Y register pinning | fixed | Direct-slot parmove writes skipped the pin; new pins run `XEMU_DSP_JIT_PIN_AUDIT=1` | `bf82c37fba`, `54d1543d50` |
 | Inline diff validator | fixed | Held `d->lock` → startup hang; now async, one check per translation | `5c093dace1` |
 | JIT on the EP core | fixed | P-space overlays → retranslation churn; per-core throttle | `21e9045344`, `XEMU_DSP_JIT_NO_THROTTLE=1` |
