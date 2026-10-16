@@ -45,15 +45,6 @@ Fbo *controller_fbo, *xmu_fbo, *logo_fbo;
 uintptr_t g_controller_duke_tex, g_controller_s_tex, g_logo_tex, g_icon_tex,
     g_xmu_tex;
 
-static inline bool UseMetal()
-{
-#ifdef __APPLE__
-    return xemu_present_is_metal();
-#else
-    return false;
-#endif
-}
-
 enum class ShaderType {
     BlitGamma,
     BlitGammaRect,
@@ -111,7 +102,7 @@ Fbo::Fbo(int width, int height)
     tex = 0;
 #ifdef __APPLE__
     mfbo = NULL;
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         mfbo = MetalFboCreate(width, height);
         return;
     }
@@ -237,7 +228,7 @@ static GLuint LoadTextureFromMemory(const unsigned char *buf, unsigned int size,
 uintptr_t CreateUiTextureFromRgba(const unsigned char *rgba, int w, int h)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         return MetalCreateTextureFromRgba(rgba, w, h);
     }
 #endif
@@ -250,7 +241,7 @@ void DestroyUiTexture(uintptr_t tex)
         return;
     }
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDestroyTexture(tex);
         return;
     }
@@ -262,7 +253,7 @@ void DestroyUiTexture(uintptr_t tex)
 void GetUiTextureDims(uintptr_t tex, int *w, int *h)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalTextureDims(tex, w, h);
         return;
     }
@@ -467,7 +458,7 @@ static void RenderDecal(DecalShader *s, float x, float y, float w, float h,
                         uint32_t primary, uint32_t secondary, uint32_t fill)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalRenderDecal(x, y, w, h, tex_x, tex_y, tex_w, tex_h, primary,
                          secondary, fill);
         return;
@@ -538,7 +529,7 @@ static void RenderDecal(DecalShader *s, float x, float y, float w, float h,
 static void DecalBegin(DecalShader *s, uintptr_t tex)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         /*
          * Always the Mask shader: every DecalBegin caller (controller,
          * ports, XMU) is mask-type; RenderLogo dispatches to Metal
@@ -562,7 +553,7 @@ static void DecalBegin(DecalShader *s, uintptr_t tex)
 static void DecalBlendNone()
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDecalBlend(MetalBlendMode::None);
         return;
     }
@@ -574,7 +565,7 @@ static void DecalBlendNone()
 static void DecalBlendCutout()
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDecalBlend(MetalBlendMode::Cutout);
         return;
     }
@@ -585,7 +576,7 @@ static void DecalBlendCutout()
 static void DecalBlendAlpha()
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDecalBlend(MetalBlendMode::Alpha);
         return;
     }
@@ -596,7 +587,7 @@ static void DecalBlendAlpha()
 static void DecalEnd()
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDecalEnd();
         return;
     }
@@ -636,7 +627,7 @@ enum tex_item_names {
 void InitCustomRendering(void)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         bool ok = MetalHelpersInit();
         assert(ok && "Metal UI helpers initialization failed");
 
@@ -1061,7 +1052,7 @@ void RenderLogo(uint32_t time)
     uint32_t color = 0x62ca13ff;
 
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalDecalBegin(MetalDecalKind::Logo, g_logo_tex);
         MetalDecalSetTime(time);
         MetalDecalBlend(MetalBlendMode::None);
@@ -1109,7 +1100,7 @@ extern "C" void xemu_set_framebuffer_texture_is_rect(bool is_rect)
 void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float scale[2])
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalRenderFramebuffer(tex, width, height, flip, scale,
                                g_config.display.filtering ==
                                    CONFIG_DISPLAY_FILTERING_NEAREST);
@@ -1183,7 +1174,7 @@ static float GetDisplayAspectRatio(int width, int height)
 static void GetFramebufferTexDims(uintptr_t tex, int *w, int *h)
 {
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalTextureDims(tex, w, h);
         return;
     }
@@ -1256,7 +1247,7 @@ static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
     pixels.resize(width * height * 3);
 
 #ifdef __APPLE__
-    if (UseMetal()) {
+    if (xemu_present_is_metal()) {
         return MetalRenderFramebufferToRgb(tex, flip, width, height,
                                            pixels.data());
     }

@@ -73,15 +73,6 @@ static int g_vsync;
 static uintptr_t g_tex;
 static bool g_flip_req;
 
-static inline bool HudUseMetal()
-{
-#ifdef __APPLE__
-    return xemu_present_is_metal();
-#else
-    return false;
-#endif
-}
-
 
 static void InitializeStyle()
 {
@@ -162,7 +153,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
 
     // Setup Platform/Renderer bindings
 #ifdef __APPLE__
-    if (HudUseMetal()) {
+    if (xemu_present_is_metal()) {
         ImGui_ImplSDL3_InitForMetal(window);
         MetalImGuiInit();
     } else
@@ -187,7 +178,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
 void xemu_hud_cleanup(void)
 {
 #ifdef __APPLE__
-    if (HudUseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalImGuiShutdown();
     } else
 #endif
@@ -242,7 +233,7 @@ void xemu_hud_update(void)
     }
 
 #ifdef __APPLE__
-    if (HudUseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalImGuiNewFrame();
     } else
 #endif
@@ -365,7 +356,7 @@ void xemu_hud_render()
 {
     ImGui::Render();
 #ifdef __APPLE__
-    if (HudUseMetal()) {
+    if (xemu_present_is_metal()) {
         MetalImGuiRenderDrawData(ImGui::GetDrawData());
     } else
 #endif
@@ -376,7 +367,7 @@ void xemu_hud_render()
     if (g_vsync != g_config.display.window.vsync) {
         g_vsync = g_config.display.window.vsync;
 #ifdef __APPLE__
-        if (HudUseMetal()) {
+        if (xemu_present_is_metal()) {
             xemu_metal_set_vsync(g_vsync != 0);
         } else
 #endif

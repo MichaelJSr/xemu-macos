@@ -21,27 +21,16 @@
 #include <fpng.h>
 #include <vector>
 
+#include "xemu-present.h"
 #include "xemu-snapshots.h"
 #include "xui/gl-helpers.hh"
 
 #ifdef __APPLE__
 #include "xui/metal-helpers.hh"
-extern "C" {
-#include "xemu-present.h"
-}
 #endif
 
 static uintptr_t display_tex = 0;
 static bool display_flip = false;
-
-static inline bool ThumbnailUseMetal()
-{
-#ifdef __APPLE__
-    return xemu_present_is_metal();
-#else
-    return false;
-#endif
-}
 
 void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
 {
@@ -51,7 +40,7 @@ void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
      * renderer (replaced on later frames); keep our own reference so
      * a savestate thumbnail capture can't read a freed object.
      */
-    if (ThumbnailUseMetal() && tex != display_tex) {
+    if (xemu_present_is_metal() && tex != display_tex) {
         MetalRetainTexture(tex);
         if (display_tex) {
             MetalDestroyTexture(display_tex);
@@ -89,7 +78,7 @@ void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size)
      * remove this altogether.
      */
     if (display_tex == 0 ||
-        (!ThumbnailUseMetal() && !SDL_GL_GetCurrentContext())) {
+        (!xemu_present_is_metal() && !SDL_GL_GetCurrentContext())) {
         return NULL;
     }
 
