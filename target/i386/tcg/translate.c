@@ -286,6 +286,8 @@ typedef struct DisasContext {
     uint8_t wt_exact;
     /* The call being emitted reads only its arguments (gen_pure_call_*). */
     bool pure_call;
+    /* fpstt is 0 and every tag valid since an MMX insn (gen_enter_mmx). */
+    bool mmx_entered;
 #endif
 } DisasContext;
 
@@ -2869,6 +2871,32 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 
 static void gen_enter_mmx(DisasContext *s)
 {
+#if defined(XBOX)
+    /*
+     * helper_enter_mmx inline, once per TB: an MMX insn sets fpstt to 0
+     * and every tag to valid, so the next one changes nothing until an insn
+     * that moves fpstt or the tags runs (x87 escapes, EMMS and FEMMS,
+     * FXRSTOR, XRSTOR), which clears mmx_entered. The flush lands the
+     * write-through x87 results and FIP first, as the helper call's
+     * gen_bb_epilogue did; nothing becomes pending again before such an
+     * insn.
+     */
+    if (s->mmx_entered) {
+        return;
+    }
+    s->mmx_entered = true;
+    gen_flush_fp(s);
+    tcg_gen_movi_i32(fpstt, 0);
+    if (QEMU_IS_ALIGNED(offsetof(CPUX86State, fptags), 8)) {
+        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
+                       offsetof(CPUX86State, fptags));
+    } else {
+        tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                       offsetof(CPUX86State, fptags));
+        tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                       offsetof(CPUX86State, fptags) + 4);
+    }
+#else
     GEN_HELPER_FALLBACK_v_v(enter_mmx);
 
     gen_flush_fp((DisasContext *)tcg_ctx->disas_ctx);
@@ -2879,6 +2907,7 @@ static void gen_enter_mmx(DisasContext *s)
     for (int i = 0; i < 8; i++) {
         tcg_gen_st8_i32(v, tcg_env, offsetof(CPUX86State, fptags[0]) + i);
     }
+#endif
 }
 
 #if defined(XBOX)
@@ -4545,6 +4574,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         return;
     }
 #if defined(XBOX)
+    /* Any x87 insn may move fpstt or change the tags (gen_enter_mmx). */
+    s->mmx_entered = false;
     if (s->xemu_x87_run < UINT8_MAX) {
         s->xemu_x87_run++;
     }
@@ -6008,6 +6039,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->wt_insn_flushed = false;
     dc->wt_insn_delta = 0;
     dc->pure_call = false;
+    dc->mmx_entered = false;
 #endif
 }
 
@@ -6055,6 +6087,7 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     target_ulong orig_pc_save = dc->pc_save;
 #if defined(XBOX)
     uint8_t orig_wt_pend = dc->wt_pend;
+    bool orig_mmx_entered = dc->mmx_entered;
 #endif
 
 #if defined(XBOX)
@@ -6106,6 +6139,7 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 #if defined(XBOX)
         /* Decoding ends before any op: no deferred x87 store or spill. */
         assert(dc->wt_pend == orig_wt_pend && !dc->wt_w2_land);
+        dc->mmx_entered = orig_mmx_entered;
 #endif
         dc->base.num_insns--;
         tcg_remove_ops_after(dc->prev_insn_end);

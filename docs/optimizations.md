@@ -587,6 +587,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   Mcycles (6/6) against this form (−6.7% Minsns against its parent), but
   they widen the re-arm race from one store to the rest of the segment,
   so they are not shipped.
+- **MMX entry inline, once per TB (2026-10-15).** `helper_enter_mmx`
+  (fpstt = 0, every tag valid) ran before every MMX insn. Marked
+  `TCG_CALL_NO_RW_PINNED`, the call still made TCG store and reload the
+  GPR homes (x8-x15 are call-clobbered) and sync every other global
+  around each one; before the pinned registers it was a call without
+  flags, which wrote back and reloaded all the guest registers: 6.6-18.6%
+  of the det vCPU in cold boot, from Azurik's boot-video YUV-to-RGB loop
+  (~50 MMX insns per 8 pixels). Now the TB's first MMX insn emits the
+  x87 flush the call implied, `fpstt = 0` and one 8-byte tag store;
+  later ones emit nothing until an x87 escape, EMMS/FEMMS, FXRSTOR or
+  XRSTOR clears `mmx_entered`. Det cold boot (on the MMX lane, before
+  the pinned registers; 1800 frames, 6 pairs, load 19-24): Minsns/frame
+  −10.4% (6/6), Mcycles/frame
+  −17.8% (6/6). heavy-f1, stream-e2 and the movie anchor run no MMX.
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,

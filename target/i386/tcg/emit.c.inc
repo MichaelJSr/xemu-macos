@@ -2043,6 +2043,9 @@ static void gen_DIV(DisasContext *s, X86DecodedInsn *decode)
 static void gen_EMMS(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_helper_emms(tcg_env);
+#ifdef XBOX
+    s->mmx_entered = false;     /* every tag empty (gen_enter_mmx) */
+#endif
 }
 
 static void gen_ENTER(DisasContext *s, X86DecodedInsn *decode)
@@ -2070,6 +2073,7 @@ static void gen_FXRSTOR(DisasContext *s, X86DecodedInsn *decode)
     } else {
         gen_helper_fxrstor(tcg_env, s->A0);
 #ifdef XBOX
+        s->mmx_entered = false;     /* new fpstt and tags */
         /*
          * New precision control (see frstor in translate.c) and
          * HF_SSE_DFL (see LDMXCSR).
@@ -4896,6 +4900,7 @@ static void gen_XRSTOR(DisasContext *s, X86DecodedInsn *decode)
     gen_helper_xrstor(tcg_env, s->A0, features);
 #ifdef XBOX
     /* As FXRSTOR. */
+    s->mmx_entered = false;
     if (g_x87_wt || xemu_sse_vfp) {
         s->base.is_jmp = DISAS_EOB_NEXT;
     }
