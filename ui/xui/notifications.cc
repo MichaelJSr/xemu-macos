@@ -151,6 +151,9 @@ void NotificationManager::DrawNotification(float t, const char *msg)
 
 void xemu_queue_notification(const char *msg)
 {
+    if (xemu_headless_mode()) {
+        fprintf(stderr, "xemu: notification: %s\n", msg); /* no HUD */
+    }
     notification_manager.QueueNotification(msg);
 }
 

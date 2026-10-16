@@ -164,7 +164,8 @@ stderr. Screenshots come from QMP, windowed or headless:
 `{"execute": "screendump", "arguments": {"filename": "/tmp/f.png", "format": "png"}}`
 (default format `ppm`). The command returns once the file is written.
 It is not available from HMP. Config, portable mode, savestates, the HDD
-and EEPROM and all command-line options behave as windowed.
+and EEPROM and all command-line options behave as windowed. In-app
+notifications go to stderr instead, as `xemu: notification: <text>`.
 
 Other automation interfaces (windowed or headless):
 
@@ -552,12 +553,27 @@ Other automation interfaces (windowed or headless):
   while what the start itself does on the vCPU (overdue device timers,
   PFIFO catching up) does not. It costs a RAM-sized copy (64 or 128
   MiB) and a few ms per load and per start.
-- **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named POSIX
-  shared memory that another process can map (Python:
+- **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named shared
+  memory that another process can map (Python:
   `multiprocessing.shared_memory.SharedMemory("<name>")`, then
-  `resource_tracker.unregister` so Python does not unlink it). The name
-  is replaced if it exists and unlinked at exit; savestates are
-  unaffected.
+  `resource_tracker.unregister`, or `track=False` from 3.13, so Python
+  does not unlink it): POSIX shm `/<name>` on macOS and Linux, a named
+  file mapping `<name>` on Windows (it lives while any process has it
+  open, a reader included, so close readers before relaunching or the
+  new xemu keeps private RAM). stderr says `xemu: guest RAM in
+  shared memory /<name>`. A name a live xemu holds is never taken: the
+  new xemu keeps private RAM and says why (`xemu: XEMU_RAM_SHM: /<name>
+  is held by a live xemu (pid N); guest RAM stays private`, plus a
+  notification). The holder keeps an flock on
+  `/tmp/xemu-shm-<uid>/<name>.lock` while it runs; a name nobody holds
+  (a crashed run) is replaced (`replaced a stale object`), unless its
+  bytes still change (a running build from before the lock, skipped
+  too). A build from before the lock takes no lock, so only its changing
+  bytes protect it: while it is paused or stopped (`-S`, a gdbstub
+  stop) its name is replaced, and its exit unlinks the name whoever
+  holds it by then. At exit the name is unlinked only if it is still
+  that xemu's object. Other failures to create it still end the launch. Savestates
+  are unaffected.
 - **gdbstub reads** may ask for up to 4 MiB per `m` (was 64 KiB), and the
   binary `x addr,len` read (GDB 16, advertised as `binary-upload+`)
   halves the bytes on the wire. In `Qqemu.PhyMemMode:1` a 150 MB sweep

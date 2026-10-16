@@ -55,8 +55,10 @@
 #include "hw/i2c/smbus_eeprom.h"
 #include "migration/vmstate.h"
 #ifndef _WIN32
+#include <sys/file.h>
 #include <sys/mman.h>
 #endif
+#include "ui/xemu-notifications.h"
 #include "hw/xbox/nv2a/nv2a.h"
 #include "hw/xbox/mcpx/apu/apu.h"
 
@@ -178,52 +180,323 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
     g_free(bios_data); /* duplicated by `rom_add_blob_fixed` */
 }
 
-#ifndef _WIN32
-static char *xbox_ram_shm_name;
+/*
+ * Shared guest RAM: XEMU_RAM_SHM=<name> backs guest RAM with a named
+ * shared memory object of the RAM's size, so another process can map it
+ * and read guest RAM with no copy at all (Python:
+ * multiprocessing.shared_memory.SharedMemory("<name>")). The RAM block
+ * keeps its name, so savestates load either way.
+ *
+ * A name a live xemu holds is never taken: this xemu keeps private RAM
+ * instead, with a stderr line and an in-app notification.
+ * - POSIX ("/<name>"): the creator holds an flock on
+ *   /tmp/xemu-shm-<uid>/<name>.lock for as long as it runs. A name whose
+ *   lock is free is stale (a crashed run) and is replaced, unless its
+ *   bytes still change (a running build older than the lock). Such a
+ *   build takes no lock, so one that is paused looks stale and loses its
+ *   name, and its exit unlinks the name whoever holds it by then. At
+ *   exit the name is unlinked only if it is still this xemu's object.
+ * - Windows ("<name>", session namespace): a named file mapping lives only
+ *   while a handle to it does (a reader's too), so an existing name always
+ *   has a live holder and none is ever stale.
+ */
+typedef enum {
+    RAM_SHM_CREATED,
+    RAM_SHM_HELD,   /* a live process holds the name */
+    RAM_SHM_ERROR,
+} RamShmResult;
 
-static void xbox_ram_shm_unlink(void)
+#ifndef _WIN32
+static struct {
+    char *name;
+    char *lock_path;
+    int lock_fd;
+    void *host;
+    uint64_t size;
+    dev_t dev;
+    ino_t ino;
+} ram_shm = { .lock_fd = -1 };
+
+static void xbox_ram_shm_unlock(void)
 {
-    shm_unlink(xbox_ram_shm_name);
+    /*
+     * Unlinked while still locked: a racer that opened this file before
+     * the unlink finds, once it gets the lock, that the path no longer
+     * names it, and opens the path again.
+     */
+    unlink(ram_shm.lock_path);
+    close(ram_shm.lock_fd);
+    ram_shm.lock_fd = -1;
+    g_free(ram_shm.lock_path);
+    ram_shm.lock_path = NULL;
 }
 
-/*
- * XEMU_RAM_SHM=<name>: back guest RAM with named POSIX shared memory, so a
- * harness can map it and read guest RAM with no copy at all (Python:
- * multiprocessing.shared_memory.SharedMemory("<name>")). The RAM block
- * keeps its name, so savestates load either way. A stale object of the
- * same name (from a crashed run) is replaced; the name is unlinked at exit.
- */
+/* Take the name's lock: CREATED (ours), HELD or ERROR (*why says). */
+static RamShmResult xbox_ram_shm_lock(const char *name, char **why)
+{
+    g_autofree char *dir = g_strdup_printf("/tmp/xemu-shm-%u",
+                                           (unsigned)getuid());
+    g_autofree char *base = g_strdup(name + 1);
+    struct stat st;
+
+    if (mkdir(dir, 0700) < 0 && errno != EEXIST) {
+        *why = g_strdup_printf("cannot create %s: %s", dir, strerror(errno));
+        return RAM_SHM_ERROR;
+    }
+    if (lstat(dir, &st) < 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != getuid()) {
+        *why = g_strdup_printf("%s is not a directory of this user's", dir);
+        return RAM_SHM_ERROR;
+    }
+
+    g_strdelimit(base, "/", '_');
+    char *path = g_strdup_printf("%s/%s.lock", dir, base);
+
+    for (int tries = 0; tries < 16; tries++) {
+        int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            *why = g_strdup_printf("cannot open %s: %s", path,
+                                   strerror(errno));
+            g_free(path);
+            return RAM_SHM_ERROR;
+        }
+        if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+            int err = errno;
+            char pid[32];
+            ssize_t n = pread(fd, pid, sizeof(pid) - 1, 0);
+
+            pid[MAX(n, 0)] = '\0';
+            g_strstrip(pid);
+            if (err == EWOULDBLOCK) {
+                *why = pid[0] ?
+                    g_strdup_printf("%s is held by a live xemu (pid %s)",
+                                    name, pid) :
+                    g_strdup_printf("%s is held by a live xemu", name);
+            } else {
+                *why = g_strdup_printf("cannot lock %s: %s", path,
+                                       strerror(err));
+            }
+            close(fd);
+            g_free(path);
+            return err == EWOULDBLOCK ? RAM_SHM_HELD : RAM_SHM_ERROR;
+        }
+
+        struct stat a, b;
+        if (fstat(fd, &a) == 0 && stat(path, &b) == 0 &&
+            a.st_dev == b.st_dev && a.st_ino == b.st_ino) {
+            g_autofree char *pid = g_strdup_printf("%ld\n", (long)getpid());
+            if (ftruncate(fd, 0) == 0) {
+                ssize_t w = pwrite(fd, pid, strlen(pid), 0); /* messages only */
+                (void)w;
+            }
+            ram_shm.lock_fd = fd;
+            ram_shm.lock_path = path;
+            return RAM_SHM_CREATED;
+        }
+        close(fd); /* its holder unlinked it meanwhile: open the path again */
+    }
+    *why = g_strdup_printf("%s keeps changing", path);
+    g_free(path);
+    return RAM_SHM_ERROR;
+}
+
+/* Whether an object's bytes change within 100 ms: an xemu still runs on it. */
+static bool xbox_ram_shm_changing(int fd)
+{
+    struct stat st;
+
+    if (fstat(fd, &st) < 0 || st.st_size < 8) {
+        return false;
+    }
+    size_t len = MIN((uint64_t)st.st_size, (uint64_t)256 << 20) & ~(size_t)7;
+    const uint64_t *p = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        return false;
+    }
+    uint64_t sum[2] = { 0, 0 };
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass) {
+            g_usleep(100 * 1000);
+        }
+        for (size_t i = 0; i < len / 8; i++) {
+            sum[pass] = (sum[pass] ^ p[i]) * 0x100000001b3ull;
+        }
+    }
+    munmap((void *)p, len);
+    return sum[0] != sum[1];
+}
+
+/* 1: the name is still this xemu's object, 0: another's, -1: gone. */
+static int xbox_ram_shm_still_ours(void)
+{
+    int fd = shm_open(ram_shm.name, O_RDONLY, 0);
+    struct stat st;
+    int ours = 0;
+
+    if (fd < 0) {
+        return errno == ENOENT ? -1 : 0;
+    }
+    if (fstat(fd, &st) == 0 && (uint64_t)st.st_size == ram_shm.size) {
+        if (ram_shm.ino) {
+            /* Linux: a /dev/shm file has an identity. */
+            ours = st.st_dev == ram_shm.dev && st.st_ino == ram_shm.ino;
+        } else {
+            /*
+             * macOS gives none: the same object shows the same bytes (again
+             * if a thread wrote RAM between the two reads of a byte).
+             */
+            void *p = mmap(NULL, ram_shm.size, PROT_READ, MAP_SHARED, fd, 0);
+            if (p != MAP_FAILED) {
+                for (int i = 0; i < 3 && !ours; i++) {
+                    ours = !memcmp(p, ram_shm.host, ram_shm.size);
+                }
+                munmap(p, ram_shm.size);
+            }
+        }
+    }
+    close(fd);
+    return ours;
+}
+
+static void xbox_ram_shm_exit(void)
+{
+    int ours = xbox_ram_shm_still_ours();
+
+    if (ours > 0) {
+        shm_unlink(ram_shm.name);
+    } else if (ours == 0) {
+        fprintf(stderr, "xemu: shared memory %s is no longer this xemu's; "
+                "left in place\n", ram_shm.name);
+    }
+    xbox_ram_shm_unlock();
+}
+
+static RamShmResult xbox_ram_shm_create(const char *name, uint64_t size,
+                                        void **host, char **why)
+{
+    RamShmResult r = xbox_ram_shm_lock(name, why);
+    if (r != RAM_SHM_CREATED) {
+        return r;
+    }
+
+    int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        /* Its lock is free: stale, unless an older build runs on it. */
+        int old = shm_open(name, O_RDONLY, 0);
+        bool live = old >= 0 && xbox_ram_shm_changing(old);
+        if (old >= 0) {
+            close(old);
+        }
+        if (live) {
+            *why = g_strdup_printf("%s is held by a running xemu that takes "
+                                   "no lock (an older build)", name);
+            xbox_ram_shm_unlock();
+            return RAM_SHM_HELD;
+        }
+        shm_unlink(name);
+        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            fprintf(stderr, "xemu: shared memory %s: replaced a stale "
+                    "object\n", name);
+        }
+    }
+    if (fd < 0) {
+        *why = g_strdup_printf("cannot create %s: %s", name, strerror(errno));
+        xbox_ram_shm_unlock();
+        return RAM_SHM_ERROR;
+    }
+
+    struct stat st = {};
+    void *p = MAP_FAILED;
+    if (ftruncate(fd, size) == 0 && fstat(fd, &st) == 0) {
+        p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    }
+    int err = errno;
+    close(fd);
+    if (p == MAP_FAILED) {
+        *why = g_strdup_printf("cannot map %s: %s", name, strerror(err));
+        shm_unlink(name);
+        xbox_ram_shm_unlock();
+        return RAM_SHM_ERROR;
+    }
+
+    ram_shm.name = g_strdup(name);
+    ram_shm.host = p;
+    ram_shm.size = size;
+    ram_shm.dev = st.st_dev;
+    ram_shm.ino = st.st_ino;
+    atexit(xbox_ram_shm_exit);
+    *host = p;
+    return RAM_SHM_CREATED;
+}
+#else
+static RamShmResult xbox_ram_shm_create(const char *name, uint64_t size,
+                                        void **host, char **why)
+{
+    HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                  (DWORD)(size >> 32),
+                                  (DWORD)(size & 0xffffffffu), name);
+    DWORD err = GetLastError();
+    void *p = NULL;
+
+    if (h && err == ERROR_ALREADY_EXISTS) {
+        CloseHandle(h);
+        *why = g_strdup_printf("%s is held by a live process", name);
+        return RAM_SHM_HELD;
+    }
+    if (h) {
+        p = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, (SIZE_T)size);
+        if (!p) {
+            err = GetLastError();
+            CloseHandle(h);
+        }
+    }
+    if (!p) {
+        g_autofree char *msg = g_win32_error_message((gint)err);
+        *why = g_strdup_printf("cannot create %s: %s", name, msg);
+        return RAM_SHM_ERROR;
+    }
+    /* The handle stays open: the name lives as long as a handle does. */
+    *host = p;
+    return RAM_SHM_CREATED;
+}
+#endif
+
 static bool xbox_ram_shm_init(MemoryRegion *ram, uint64_t size)
 {
     const char *e = getenv("XEMU_RAM_SHM");
+
     if (!e || !e[0]) {
         return false;
     }
-
-    xbox_ram_shm_name = g_strdup_printf("%s%s", e[0] == '/' ? "" : "/", e);
-    shm_unlink(xbox_ram_shm_name);
-    int fd = shm_open(xbox_ram_shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd < 0 || ftruncate(fd, size) < 0) {
-        error_report("XEMU_RAM_SHM: cannot create %s: %s", xbox_ram_shm_name,
-                     strerror(errno));
-        exit(1);
-    }
-    void *host = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (host == MAP_FAILED) {
-        error_report("XEMU_RAM_SHM: cannot map %s: %s", xbox_ram_shm_name,
-                     strerror(errno));
-        exit(1);
-    }
-    atexit(xbox_ram_shm_unlink);
-
-    memory_region_init_ram_ptr(ram, NULL, "xbox.ram", size, host);
-    vmstate_register_ram_global(ram);
-    fprintf(stderr, "xemu: guest RAM in shared memory %s\n",
-            xbox_ram_shm_name);
-    return true;
-}
+#ifdef _WIN32
+    g_autofree char *name = g_strdup(e[0] == '/' ? e + 1 : e);
+#else
+    g_autofree char *name = g_strdup_printf("%s%s", e[0] == '/' ? "" : "/",
+                                            e);
 #endif
+    g_autofree char *why = NULL;
+    void *host = NULL;
+    RamShmResult r = xbox_ram_shm_create(name, size, &host, &why);
+
+    if (r == RAM_SHM_CREATED) {
+        memory_region_init_ram_ptr(ram, NULL, "xbox.ram", size, host);
+        vmstate_register_ram_global(ram);
+        fprintf(stderr, "xemu: guest RAM in shared memory %s\n", name);
+        return true;
+    }
+    if (r == RAM_SHM_ERROR) {
+        error_report("XEMU_RAM_SHM: %s", why);
+        exit(1);
+    }
+
+    g_autofree char *toast = g_strdup_printf("Shared RAM not opened: %s",
+                                             why);
+    fprintf(stderr, "xemu: XEMU_RAM_SHM: %s; guest RAM stays private\n",
+            why);
+    xemu_queue_notification(toast);
+    return false;
+}
 
 static void xbox_memory_init(PCMachineState *pcms,
                              MemoryRegion *system_memory,
@@ -243,10 +516,7 @@ static void xbox_memory_init(PCMachineState *pcms,
      * with older qemus that used qemu_ram_alloc().
      */
     ram = g_malloc(sizeof(*ram));
-#ifndef _WIN32
-    if (!xbox_ram_shm_init(ram, machine->ram_size))
-#endif
-    {
+    if (!xbox_ram_shm_init(ram, machine->ram_size)) {
         memory_region_init_ram(ram, NULL, "xbox.ram",
                                machine->ram_size, &error_fatal);
     }
