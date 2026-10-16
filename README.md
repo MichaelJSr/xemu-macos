@@ -251,11 +251,42 @@ Other automation interfaces (windowed or headless):
   then has `stop`, the record, and `xemu-run-until` returns reason
   `mismatch` with `pc` and `regs`. With `"stop": false` it only marks
   the record. Under icount the records are exact and repeatable, and
-  hooks never change guest RAM. Stopping and resuming at a mismatch
-  gives no repeated or missing hit. gdbstub breakpoints and run-until at
-  the same PC work alongside, and the hook still sees each arrival once.
-  Hooks, hit numbers and keys stay across loads, so clear and set them
-  again to start over.
+  collect hooks never change guest RAM. Stopping and resuming at a
+  mismatch gives no repeated or missing hit. gdbstub breakpoints and
+  run-until at the same PC work alongside, and the hook still sees each
+  arrival once. Hooks, hit numbers, keys and queues stay across loads,
+  so clear and set them again to start over.
+- **Write at guest PCs**: a hook with `"write": [{"addr": E, "size":
+  N}, ...]` and `"set": [hex, ...]` writes, at each hit and before that
+  instruction runs, the next entry of its queue over the write regions
+  (concatenated, as `expect` covers `collect`; `??` keeps a byte, a
+  shorter string writes only that much, `""` writes nothing). With a
+  `key`, a repeated call in one tick takes no entry. Only guest RAM is
+  written, the way a gdbstub write does it (translated code over it is
+  dropped; page permissions don't apply); a region that doesn't resolve
+  to RAM is skipped and the record says `"unwritten": true`. Records
+  add `set` (which entry, from 0) or `"empty": true`. With
+  `"stop-empty": true` the first hit with no entry left ends the advance
+  before its instruction (`stop`; `xemu-run-until` reason `empty`), e.g.
+  at the entry after a replay's last tick. `xemu-hooks-push {"id": N,
+  "set": [...]}` appends entries while the VM is stopped (1,048,576 or
+  64 MiB may wait); a hit stopped on an empty queue takes the first
+  pushed entry when the VM resumes, and is recorded again with it. A
+  hook's mismatch stop comes before its write, which lands on resume at
+  the same instruction, so the stop shows what the check saw and a run
+  cut by stops writes what an uncut run does. Replaying an input string
+  as the Azurik harness does takes one `xemu-frame-advance` with three
+  hooks: the pad's 18 floats at the player update's entry (`ENTRY` =
+  0x8C230, decimal in JSON), `{"pcs": [ENTRY], "cond": [{"reg": "ecx",
+  "op": "eq", "value": PLAYER}], "key": {"addr": "ecx+0x18", "size":
+  8}, "write": [{"addr": PAD, "size": 72}], "set": [...],
+  "stop-empty": true}` (`PAD`: the active ControllerState, resolved
+  once); the camera where the game reads it (`CAMREAD` = 0x85276),
+  `{"pcs": [CAMREAD], "key": ..., "write": [{"addr": "esp+0x14",
+  "size": 8}], "set": [...]}`; and the observation, a collect hook at
+  the update's RETs. Under icount the same queues give the same RAM
+  every run, equal to writing the same bytes over the gdbstub at the
+  same instructions.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed

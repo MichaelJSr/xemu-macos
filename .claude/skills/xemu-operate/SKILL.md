@@ -145,9 +145,10 @@ analog and frame-tagged pipe input, `xemu-frame-advance`,
 `xemu-run-until` (stop at a guest PC with conditions and hit counts,
 frames as the budget; pause first), `xemu-hooks-set`/`-clear` (copy
 memory at guest PCs into records the next advance returns, optionally
-stopping on an `expect` mismatch; they persist until cleared), the
-`xemu: ready` / `xemu: state loaded` lines and their QMP events
-(`XEMU_READY`, `XEMU_STATE_LOADED`, `XEMU_DEVICE_LOST`;
+stopping on an `expect` mismatch, and write the next entry of a queue
+there: `write`/`set`, `stop-empty`, `xemu-hooks-push`; they persist
+until cleared), the `xemu: ready` / `xemu: state loaded` lines and their
+QMP events (`XEMU_READY`, `XEMU_STATE_LOADED`, `XEMU_DEVICE_LOST`;
 `ui/xemu-events.c`), park/resume via `migrate file:`. QMP sends events
 only after `qmp_capabilities`, and `XEMU_READY` often goes out first:
 check `query-xemu-status` after negotiating.

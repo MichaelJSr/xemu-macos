@@ -192,7 +192,7 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
     r->frame = info->frame;
     r->running = info->running;
     r->hits = until.hits;
-    /* xemu-hooks-set records, and a hook's expect mismatch that stopped. */
+    /* Hook records, and a hook mismatch or empty queue that stopped. */
     r->hooks = info->hooks;
     info->hooks = NULL;
     bool mismatch = !until.stopped && r->hooks && r->hooks->stop;
@@ -202,7 +202,10 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
         r->has_pc = true;
         r->pc = st->pc;
         if (mismatch) {
-            r->reason = XEMU_RUN_UNTIL_REASON_MISMATCH;
+            /* Or a set hook's empty queue (stop-empty). */
+            r->reason = r->hooks->stop->has_mismatch
+                        ? XEMU_RUN_UNTIL_REASON_MISMATCH
+                        : XEMU_RUN_UNTIL_REASON_EMPTY;
         } else {
             r->reason = XEMU_RUN_UNTIL_REASON_HIT;
             r->has_index = true;

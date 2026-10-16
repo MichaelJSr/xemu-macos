@@ -1,7 +1,8 @@
 /*
- * xemu QMP xemu-hooks-set / xemu-hooks-clear / query-xemu-hooks: guest PC
- * hooks that stay installed across advances and, at each hit, copy guest
- * memory into a record without stopping the VM (PROMPT-7 B2).
+ * xemu QMP xemu-hooks-set / xemu-hooks-clear / query-xemu-hooks /
+ * xemu-hooks-push: guest PC hooks that stay installed across advances and,
+ * at each hit, copy guest memory into a record (PROMPT-7 B2) and write the
+ * next entry of a queue (B3), without stopping the VM.
  *
  * Copyright (c) 2026 xemu-macos contributors
  *
@@ -9,11 +10,20 @@
  *
  * A hook (PHook) is one engine hook (tcg/xemu-hooks.h) per PC, at the
  * action priority, sharing one state: the hit count, the last key and the
- * expect queue. Only the vCPU touches that state while the VM runs. Hits
- * append to one record buffer in execution order, under rec_lock (the
- * vCPU runs hooks without the BQL), as raw bytes; xemu-frame-advance and
- * xemu-run-until take the buffer into their reply
+ * expect queue, the write queue. Only the vCPU touches that state while
+ * the VM runs; the main thread changes it (xemu-hooks-push) only while
+ * the VM is stopped. Hits append to one record buffer in execution order,
+ * under rec_lock (the vCPU runs hooks without the BQL), as raw bytes;
+ * xemu-frame-advance and xemu-run-until take the buffer into their reply
  * (xemu_hooks_take_trace), where it becomes hex.
+ *
+ * At a hit a hook reads its collect regions, checks its expect entry,
+ * takes its next write-queue entry and writes it (xemu_hook_write: RAM
+ * only, as the gdbstub writes), then records the hit. A stop (a mismatch,
+ * or an empty queue with stop-empty) comes before the write: the engine
+ * calls the hook again when the instruction runs on resume
+ * (xemu_hooks_stop_rerun), and the write lands then, at the same
+ * instruction, so a run cut by stops writes what an uncut run does.
  */
 
 #include "qemu/osdep.h"
@@ -39,6 +49,9 @@
 #define REC_MAX (256 * 1024)
 #define REC_DATA_MAX (16 * MiB)
 #define REC_READABLE 0x80000000u    /* region word: bytes follow */
+#define SET_MAX_WAITING (1024 * 1024)   /* queued entries per hook */
+#define SET_MAX_BYTES (64 * MiB)        /* queued bytes per hook */
+#define SET_COMPACT 1024                /* taken entries kept before a cut */
 
 typedef struct Region {
     XemuHookExpr addr;
@@ -65,6 +78,10 @@ typedef struct PHook {
     uint32_t nexpect;
     uint32_t *exp_off;          /* nexpect + 1 offsets into exp_val/mask */
     uint8_t *exp_val, *exp_mask;
+    int nwrites;                /* set hooks: the write regions */
+    Region *writes;
+    uint32_t wtotal;
+    bool stop_empty;
 
     /* vCPU state (read on the main thread while stopped) */
     int64_t hits;
@@ -72,6 +89,17 @@ typedef struct PHook {
     uint8_t last_key[HOOK_KEY_MAX];
     uint8_t *buf;               /* @total bytes */
     bool *readable;             /* per region */
+    /*
+     * The write queue: entry q_base + i spans [q_off[i], q_off[i + 1]) of
+     * q_val (bytes) and q_mask (0xff: write the byte, 0: keep it). The
+     * main thread appends while the VM is stopped.
+     */
+    GArray *q_off;              /* uint32_t */
+    GByteArray *q_val, *q_mask;
+    int64_t q_base;             /* the entry q_off[0] starts */
+    int64_t q_head;             /* the next entry a hit takes */
+    int64_t pend;               /* taken by a stop, written on resume */
+    bool pend_mismatch;
 } PHook;
 
 /* Main thread (BQL). */
@@ -89,6 +117,10 @@ typedef struct RecHdr {
     uint16_t nregions;
     bool mismatch;
     bool has_regs;
+    bool set_hook;              /* the hook has write regions */
+    bool empty;
+    bool unwritten;
+    int64_t set;                /* the entry taken, or -1 */
     uint32_t regs[XEMU_HREG_COUNT];
 } RecHdr;
 
@@ -106,6 +138,12 @@ static void phook_free(PHook *h)
     g_free(h->exp_mask);
     g_free(h->buf);
     g_free(h->readable);
+    g_free(h->writes);
+    if (h->q_off) {
+        g_array_free(h->q_off, true);
+        g_byte_array_free(h->q_val, true);
+        g_byte_array_free(h->q_mask, true);
+    }
     g_free(h);
 }
 
@@ -153,7 +191,8 @@ static bool expect_differs(PHook *h, int64_t hit)
 }
 
 static void rec_append(XemuHookCtx *ctx, PHook *h, int64_t hit,
-                       bool mismatch, bool stop)
+                       bool mismatch, bool stop, int64_t set, bool empty,
+                       bool unwritten)
 {
     RecHdr r = {
         .frame = xemu_frame_count(),
@@ -163,6 +202,10 @@ static void rec_append(XemuHookCtx *ctx, PHook *h, int64_t hit,
         .nregions = h->nregions,
         .mismatch = mismatch,
         .has_regs = h->regs,
+        .set_hook = h->nwrites > 0,
+        .empty = empty,
+        .unwritten = unwritten,
+        .set = set,
     };
     uint64_t need = 4 * h->nregions;
 
@@ -203,13 +246,112 @@ static void rec_append(XemuHookCtx *ctx, PHook *h, int64_t hit,
     qemu_mutex_unlock(&rec_lock);
 }
 
+static int64_t q_end(PHook *h)
+{
+    return h->q_base + h->q_off->len - 1;
+}
+
+/*
+ * Write queue entry @idx over the write regions (with !write, only check
+ * that it could be): each region's address is evaluated just before its
+ * bytes are written, and only the runs of bytes its mask selects are.
+ * False when part of the entry could not be written.
+ */
+static bool set_apply(XemuHookCtx *ctx, PHook *h, int64_t idx, bool write)
+{
+    int64_t i = idx - h->q_base;
+    uint32_t lo, n, pos = 0;
+    const uint8_t *val, *mask;
+    bool ok = true;
+
+    assert(i >= 0 && i + 1 < h->q_off->len);
+    lo = g_array_index(h->q_off, uint32_t, i);
+    n = g_array_index(h->q_off, uint32_t, i + 1) - lo;
+    val = h->q_val->data + lo;
+    mask = h->q_mask->data + lo;
+    for (int r = 0; r < h->nwrites && pos < n; r++) {
+        uint32_t len = MIN(h->writes[r].size, n - pos), a = 0, j = 0;
+        bool have_addr = false;
+
+        while (j < len) {
+            uint32_t k = j;
+
+            if (!mask[pos + j]) {
+                j++;
+                continue;
+            }
+            while (k < len && mask[pos + k]) {
+                k++;
+            }
+            if (!have_addr) {
+                if (!xemu_hook_expr_eval(ctx, &h->writes[r].addr, &a)) {
+                    ok = false;
+                    break;
+                }
+                have_addr = true;
+            }
+            if (write) {
+                ok &= xemu_hook_write(ctx, (uint32_t)(a + j), val + pos + j,
+                                      k - j);
+            } else {
+                ok &= xemu_hook_writable(ctx, (uint32_t)(a + j), k - j);
+            }
+            j = k;
+        }
+        pos += h->writes[r].size;
+    }
+    return ok;
+}
+
+static void collect(XemuHookCtx *ctx, PHook *h)
+{
+    uint32_t a, off = 0;
+
+    for (int i = 0; i < h->nregions; i++) {
+        Region *r = &h->regions[i];
+
+        h->readable[i] = xemu_hook_expr_eval(ctx, &r->addr, &a) &&
+                         xemu_hook_read(ctx->env, a, h->buf + off, r->size);
+        off += r->size;
+    }
+}
+
+/*
+ * The engine's re-run, when the instruction a stop held back runs again:
+ * write the entry the stop took or, after a stop on an empty queue, take
+ * the first entry pushed since (recording the hit again with it).
+ */
+static void phook_resumed(XemuHookCtx *ctx, PHook *h)
+{
+    int64_t take = h->pend;
+    bool unwritten;
+
+    h->pend = -1;
+    if (take >= 0) {
+        set_apply(ctx, h, take, true);
+        return;
+    }
+    if (h->q_head >= q_end(h)) {
+        return;
+    }
+    take = h->q_head++;
+    collect(ctx, h);
+    unwritten = !set_apply(ctx, h, take, true);
+    rec_append(ctx, h, h->hits - 1, h->pend_mismatch, false, take, false,
+               unwritten);
+}
+
 static void phook_fn(XemuHookCtx *ctx, void *opaque)
 {
     PHook *h = opaque;
-    uint32_t a, off = 0;
-    int64_t hit;
-    bool mismatch, stop;
+    uint32_t a;
+    int64_t hit, take = -1;
+    bool mismatch, stop, empty = false;
 
+    if (unlikely(ctx->resumed)) {
+        phook_resumed(ctx, h);
+        return;
+    }
     for (int i = 0; i < h->npred; i++) {
         if (!xemu_hook_pred_test(ctx, &h->pred[i])) {
             return;
@@ -229,21 +371,40 @@ static void phook_fn(XemuHookCtx *ctx, void *opaque)
         h->have_key = true;
     }
     hit = h->hits++;
-    for (int i = 0; i < h->nregions; i++) {
-        Region *r = &h->regions[i];
-
-        h->readable[i] = xemu_hook_expr_eval(ctx, &r->addr, &a) &&
-                         xemu_hook_read(ctx->env, a, h->buf + off, r->size);
-        off += r->size;
-    }
+    collect(ctx, h);
     mismatch = hit < h->nexpect && expect_differs(h, hit);
     stop = mismatch && h->stop;
-    rec_append(ctx, h, hit, mismatch, stop);
-    /* Takes the BQL: never with rec_lock held. Doesn't return if held. */
-    if (stop && !xemu_hooks_stop(ctx)) {
+    if (h->nwrites) {
+        if (h->q_head < q_end(h)) {
+            take = h->q_head++;
+        } else {
+            empty = true;
+            stop |= h->stop_empty;
+        }
+    }
+    if (!stop) {
+        bool unwritten = take >= 0 && !set_apply(ctx, h, take, true);
+
+        rec_append(ctx, h, hit, mismatch, false, take, empty, unwritten);
+        return;
+    }
+    rec_append(ctx, h, hit, mismatch, true, take, empty,
+               take >= 0 && !set_apply(ctx, h, take, false));
+    h->pend = take;
+    h->pend_mismatch = mismatch;
+    /*
+     * Takes the BQL: never with rec_lock held. Doesn't return if the stop
+     * held; a set hook writes on resume (phook_resumed).
+     */
+    if (!(h->nwrites ? xemu_hooks_stop_rerun(ctx) : xemu_hooks_stop(ctx))) {
+        /* No advance to end: the VM runs on, so write now. */
         qemu_mutex_lock(&rec_lock);
         rec_stop = -1;
         qemu_mutex_unlock(&rec_lock);
+        h->pend = -1;
+        if (take >= 0) {
+            set_apply(ctx, h, take, true);
+        }
     }
 }
 
@@ -304,6 +465,18 @@ static XemuHookRecord *rec_build(const RecHdr *r, const uint8_t *data)
         rec->has_mismatch = true;
         rec->mismatch = true;
     }
+    if (r->set_hook && r->set >= 0) {
+        rec->has_set = true;
+        rec->set = r->set;
+    }
+    if (r->empty) {
+        rec->has_empty = true;
+        rec->empty = true;
+    }
+    if (r->unwritten) {
+        rec->has_unwritten = true;
+        rec->unwritten = true;
+    }
     return rec;
 }
 
@@ -353,7 +526,10 @@ XemuHookTrace *xemu_hooks_take_trace(void)
     return t;
 }
 
-/* Hook reads copy RAM directly, past the lazy GPU report traps. */
+/*
+ * Hook reads copy RAM directly, past the lazy GPU report traps; hook writes
+ * must not race a report delivered later over them.
+ */
 static void eager_update(void)
 {
     bool want = false;
@@ -385,22 +561,27 @@ static int hex_nibble(char c)
     return g_ascii_xdigit_value(c);
 }
 
-static bool expect_compile(PHook *h, strList *list, Error **errp)
+/*
+ * Append @list's hex strings ("??" a masked byte) as entries of at most
+ * @max bytes: bytes to @val, masks (0xff, or 0 for "??") to @mask, each
+ * entry's end offset to @off. On error nothing is appended.
+ */
+static bool hex_entries_append(GByteArray *val, GByteArray *mask,
+                               GArray *off, strList *list, uint32_t max,
+                               const char *what, const char *of,
+                               Error **errp)
 {
-    GByteArray *val = g_byte_array_new(), *mask = g_byte_array_new();
-    GArray *off = g_array_new(false, false, sizeof(uint32_t));
-    uint32_t zero = 0;
+    guint val0 = val->len, off0 = off->len;
+    unsigned idx = 0;
 
-    g_array_append_val(off, zero);
-    for (strList *l = list; l; l = l->next) {
+    for (strList *l = list; l; l = l->next, idx++) {
         const char *s = l->value;
         size_t n = strlen(s);
 
-        if (n % 2 || n / 2 > h->total) {
-            error_setg(errp, "expect entry %u: %s", off->len - 1,
-                       n % 2 ? "odd number of hex digits"
-                             : "longer than the collected bytes");
-            goto out;
+        if (n % 2 || n / 2 > max) {
+            error_setg(errp, "%s entry %u: %s", what, idx,
+                       n % 2 ? "odd number of hex digits" : of);
+            goto undo;
         }
         for (size_t i = 0; i < n; i += 2) {
             uint8_t v = 0, m = 0xff;
@@ -410,9 +591,9 @@ static bool expect_compile(PHook *h, strList *list, Error **errp)
             } else if (hex_nibble(s[i]) >= 0 && hex_nibble(s[i + 1]) >= 0) {
                 v = hex_nibble(s[i]) << 4 | hex_nibble(s[i + 1]);
             } else {
-                error_setg(errp, "expect entry %u: '%.2s' is neither hex "
-                           "nor two question marks", off->len - 1, s + i);
-                goto out;
+                error_setg(errp, "%s entry %u: '%.2s' is neither hex "
+                           "nor two question marks", what, idx, s + i);
+                goto undo;
             }
             g_byte_array_append(val, &v, 1);
             g_byte_array_append(mask, &m, 1);
@@ -420,17 +601,73 @@ static bool expect_compile(PHook *h, strList *list, Error **errp)
         uint32_t end = val->len;
         g_array_append_val(off, end);
     }
+    return true;
+
+undo:
+    g_byte_array_set_size(val, val0);
+    g_byte_array_set_size(mask, val0);
+    g_array_set_size(off, off0);
+    return false;
+}
+
+static bool expect_compile(PHook *h, strList *list, Error **errp)
+{
+    GByteArray *val = g_byte_array_new(), *mask = g_byte_array_new();
+    GArray *off = g_array_new(false, false, sizeof(uint32_t));
+    uint32_t zero = 0;
+
+    g_array_append_val(off, zero);
+    if (!hex_entries_append(val, mask, off, list, h->total, "expect",
+                            "longer than the collected bytes", errp)) {
+        g_array_free(off, true);
+        g_byte_array_free(val, true);
+        g_byte_array_free(mask, true);
+        return false;
+    }
     h->nexpect = off->len - 1;
     h->exp_off = (uint32_t *)g_array_free(off, false);
     h->exp_val = g_byte_array_free(val, false);
     h->exp_mask = g_byte_array_free(mask, false);
     return true;
+}
 
-out:
-    g_array_free(off, true);
-    g_byte_array_free(val, true);
-    g_byte_array_free(mask, true);
-    return false;
+/*
+ * Append write-queue entries (the VM stopped), within the caps on what may
+ * wait; first drop entries long taken (keeping one a stop holds back).
+ */
+static bool set_push(PHook *h, strList *list, Error **errp)
+{
+    int64_t keep = h->pend >= 0 ? MIN(h->pend, h->q_head) : h->q_head;
+    guint drop = keep - h->q_base;
+
+    if (drop >= SET_COMPACT) {
+        uint32_t cut = g_array_index(h->q_off, uint32_t, drop);
+
+        g_byte_array_remove_range(h->q_val, 0, cut);
+        g_byte_array_remove_range(h->q_mask, 0, cut);
+        g_array_remove_range(h->q_off, 0, drop);
+        for (guint i = 0; i < h->q_off->len; i++) {
+            g_array_index(h->q_off, uint32_t, i) -= cut;
+        }
+        h->q_base = keep;
+    }
+
+    guint off0 = h->q_off->len, val0 = h->q_val->len;
+    if (!hex_entries_append(h->q_val, h->q_mask, h->q_off, list, h->wtotal,
+                            "set", "longer than the write regions", errp)) {
+        return false;
+    }
+    int64_t waiting = q_end(h) - h->q_head;
+    uint32_t from = g_array_index(h->q_off, uint32_t, h->q_head - h->q_base);
+    if (waiting > SET_MAX_WAITING || h->q_val->len - from > SET_MAX_BYTES) {
+        error_setg(errp, "at most %d entries or %d MiB may wait in a hook's "
+                   "queue", SET_MAX_WAITING, (int)(SET_MAX_BYTES / MiB));
+        g_byte_array_set_size(h->q_val, val0);
+        g_byte_array_set_size(h->q_mask, val0);
+        g_array_set_size(h->q_off, off0);
+        return false;
+    }
+    return true;
 }
 
 static PHook *phook_compile(XemuHookSpec *in, Error **errp)
@@ -511,6 +748,49 @@ static PHook *phook_compile(XemuHookSpec *in, Error **errp)
     if (!expect_compile(h, in->expect, errp)) {
         goto fail;
     }
+    n = 0;
+    for (XemuHookRegionList *l = in->write; l; l = l->next) {
+        n++;
+    }
+    if (n > HOOK_MAX_REGIONS) {
+        error_setg(errp, "at most %d write regions per hook",
+                   HOOK_MAX_REGIONS);
+        goto fail;
+    }
+    h->writes = g_new0(Region, MAX(n, 1));
+    for (XemuHookRegionList *l = in->write; l; l = l->next) {
+        Region *r = &h->writes[h->nwrites];
+
+        if (!region_compile(l->value, r, 4096, errp)) {
+            goto fail;
+        }
+        h->nwrites++;
+        h->wtotal += r->size;
+        if (h->wtotal > HOOK_MAX_BYTES) {
+            error_setg(errp, "a hook writes at most %d bytes a hit",
+                       (int)HOOK_MAX_BYTES);
+            goto fail;
+        }
+    }
+    h->stop_empty = in->has_stop_empty && in->stop_empty;
+    if (!h->nwrites && (in->set || h->stop_empty)) {
+        error_setg(errp, "set and stop-empty need write regions");
+        goto fail;
+    }
+    h->pend = -1;
+    if (h->nwrites) {
+        uint32_t zero = 0;
+
+        /* It writes guest memory: keep GPU reports eager (eager_update). */
+        h->reads_memory = true;
+        h->q_off = g_array_new(false, false, sizeof(uint32_t));
+        h->q_val = g_byte_array_new();
+        h->q_mask = g_byte_array_new();
+        g_array_append_val(h->q_off, zero);
+        if (!set_push(h, in->set, errp)) {
+            goto fail;
+        }
+    }
     h->regs = in->has_regs && in->regs;
     h->stop = !in->has_stop || in->stop;
     h->buf = g_malloc0(MAX(h->total, 1));
@@ -531,6 +811,10 @@ static XemuHookInfo *phook_info(PHook *h)
     info->hits = h->hits;
     for (int i = 0; i < h->npcs; i++) {
         QAPI_LIST_APPEND(tail, h->pcs[i]);
+    }
+    if (h->nwrites) {
+        info->has_queued = true;
+        info->queued = q_end(h) - h->q_head;
     }
     return info;
 }
@@ -628,6 +912,34 @@ void qmp_xemu_hooks_clear(bool has_ids, intList *ids, Error **errp)
         call_rcu1(&h->rcu, phook_free_rcu);
     }
     g_ptr_array_free(drop, true);
+}
+
+XemuHookInfo *qmp_xemu_hooks_push(int64_t id, strList *set, Error **errp)
+{
+    PHook *h = NULL;
+
+    phooks_init();
+    /* The queue is the vCPU's while the VM runs. */
+    if (runstate_is_running()) {
+        error_setg(errp, "pause the VM first (xemu-frame-advance frames=0)");
+        return NULL;
+    }
+    for (guint i = 0; i < phooks->len && !h; i++) {
+        PHook *p = g_ptr_array_index(phooks, i);
+        h = p->id == id ? p : NULL;
+    }
+    if (!h) {
+        error_setg(errp, "no hook %" PRId64, id);
+        return NULL;
+    }
+    if (!h->nwrites) {
+        error_setg(errp, "hook %" PRId64 " has no write regions", id);
+        return NULL;
+    }
+    if (!set_push(h, set, errp)) {
+        return NULL;
+    }
+    return phook_info(h);
 }
 
 XemuHookInfoList *qmp_query_xemu_hooks(Error **errp)

@@ -32,9 +32,14 @@
  *  - A hook reads registers with xemu_hook_reg() and guest memory with
  *    xemu_hook_read() (RAM only, through the guest page tables, never a
  *    device access), and may end the running xemu-frame-advance before the
- *    instruction with xemu_hooks_stop(). It must not change guest state
- *    except through documented helpers, so that under -icount every run
- *    with the same hooks executes the same instructions.
+ *    instruction with xemu_hooks_stop(). It changes guest state only
+ *    through xemu_hook_write() (RAM only, as the gdbstub writes it), so
+ *    that under -icount every run with the same hooks and the same writes
+ *    executes the same instructions. A write on a page of the hooked TB's
+ *    code (which drops every TB there, that one included) makes the
+ *    engine leave the TB once the hook returns and run the instruction
+ *    again from fresh code, the hooks up to the writer skipped, as a
+ *    gdbstub write at a stop there would.
  *  - Hooks run on the vCPU thread without the BQL. Add, remove and commit
  *    them on the main thread with the BQL held, best with the VM stopped:
  *    a commit while it runs drops the older TBs only at the next VM start.
@@ -57,6 +62,8 @@ typedef struct XemuHookCtx {
     uintptr_t ra;       /* helper return address, for xemu_hooks_stop() */
     uint64_t call;      /* engine-wide arrival number (see xemu_hooks_calls) */
     int prio, id;       /* the running hook's (engine) */
+    bool resumed;       /* the re-run xemu_hooks_stop_rerun() asked for */
+    bool own_code;      /* xemu_hook_write() hit this TB's pages (engine) */
 } XemuHookCtx;
 
 typedef void (*XemuHookFn)(XemuHookCtx *ctx, void *opaque);
@@ -90,6 +97,17 @@ uint64_t xemu_hooks_calls(void);
  */
 bool xemu_hooks_stop(XemuHookCtx *ctx);
 
+/*
+ * As xemu_hooks_stop(), but when the instruction runs again on resume the
+ * engine calls this hook once more for that arrival, with ctx->resumed
+ * set (the hooks before it are still skipped), so that it can finish what
+ * the stop held back. A load in between drops the re-run.
+ */
+bool xemu_hooks_stop_rerun(XemuHookCtx *ctx);
+
+/* ui/xemu.c, after a load: a stopped arrival is no longer resumed. */
+void xemu_hooks_state_loaded(void);
+
 /* Registers a hook or an expression names: R_EAX..R_EDI, then these. */
 enum { XEMU_HREG_EIP = CPU_NB_REGS32, XEMU_HREG_EFLAGS, XEMU_HREG_COUNT };
 uint32_t xemu_hook_reg(XemuHookCtx *ctx, int reg);
@@ -112,6 +130,17 @@ char *xemu_hook_hex(const uint8_t *p, size_t n);
 
 /* Guest memory at a linear address (RAM only). False when unreadable. */
 bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len);
+
+/*
+ * Write guest memory at a linear address, through CPU 0's page tables and
+ * the memory API as a gdbstub write does (TBs over the bytes invalidated,
+ * pages marked dirty, nv2a's access callbacks told), but only where every
+ * byte is writable guest RAM: otherwise nothing is written and it returns
+ * false. Page permissions don't apply. xemu_hook_writable() only checks.
+ */
+bool xemu_hook_write(XemuHookCtx *ctx, vaddr va, const void *buf,
+                     unsigned len);
+bool xemu_hook_writable(XemuHookCtx *ctx, vaddr va, unsigned len);
 
 /*
  * Address expressions: a register or a constant, then '+'/'-' constant

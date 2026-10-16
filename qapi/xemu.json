@@ -625,10 +625,14 @@
 #     entry first; the VM is paused before that instruction (see
 #     @XemuHookTrace's @stop)
 #
+# @empty: an @xemu-hooks-set hook with @stop-empty found its @set
+#     queue empty first; the VM is paused before that instruction (see
+#     @XemuHookTrace's @stop)
+#
 # Since: 10.2
 ##
 { 'enum': 'XemuRunUntilReason',
-  'data': [ 'hit', 'budget', 'debug', 'mismatch' ] }
+  'data': [ 'hit', 'budget', 'debug', 'mismatch', 'empty' ] }
 
 ##
 # @XemuRegs:
@@ -675,12 +679,13 @@
 #
 # @hits: hits counted (equals the request's @hits when @reason is hit)
 #
-# @pc: the hit's PC (only with @reason hit or mismatch)
+# @pc: the hit's PC (only with @reason hit, mismatch or empty)
 #
 # @index: which @until entry the hit matched, from 0 (only with
 #     @reason hit; the first that matched)
 #
-# @regs: the registers at the hit (only with @reason hit or mismatch)
+# @regs: the registers at the hit (only with @reason hit, mismatch or
+#     empty)
 #
 # @trace: the samples, as @xemu-frame-advance returns them (only when
 #     given @trace; a run that ends at a hit has no sample for the
@@ -738,14 +743,14 @@
 ##
 # @XemuHookRegion:
 #
-# Guest memory a hook reads at each hit.
+# Guest memory a hook reads (or writes) at each hit.
 #
 # @addr: guest virtual address (CPU 0's page tables at the hit, guest
 #     RAM only), an expression as for @XemuHookCond's @addr, e.g.
 #     "esp+0x14" or "[[[[0x83a6e2c0+0x20]+0x154]+0xcc]+0x20]+0x38"
 #
-# @size: bytes to read: 1 to 4096 for @XemuHookSpec's @collect, 1 to
-#     64 for its @key
+# @size: bytes: 1 to 4096 for @XemuHookSpec's @collect and @write, 1
+#     to 64 for its @key
 #
 # Since: 10.2
 ##
@@ -758,7 +763,8 @@
 # A hook for @xemu-hooks-set.  An arrival at one of @pcs, before that
 # instruction runs, with all of @cond true and, given @key, the key's
 # bytes changed, is a hit: the hook copies @collect into a record,
-# checks it against its @expect entry, and the VM runs on.
+# checks it against its @expect entry, writes its next @set entry over
+# @write, and the VM runs on.
 #
 # @pcs: linear addresses (EIP on the Xbox) of instructions' first
 #     bytes, 1 to 16; arrivals at any of them are hits of this one
@@ -786,14 +792,39 @@
 # @stop: a mismatch ends the running @xemu-frame-advance or
 #     @xemu-run-until with the VM paused before that instruction
 #     (default true); false only marks the record.  Outside those the
-#     VM runs on.
+#     VM runs on.  A hook with @write takes the hit's @set entry but
+#     writes it only when the VM resumes, before the instruction runs
+#     again: the stop shows the state the check saw.
+#
+# @write: guest memory a hit writes (at most 64 regions, 64 KiB in
+#     all; sizes 1 to 4096), at address expressions as for @collect,
+#     each evaluated after @collect is read, just before its bytes are
+#     written.  Only guest RAM is written, as a gdbstub write does
+#     (translated code over it is dropped); a region whose address
+#     doesn't resolve, or whose bytes aren't all guest RAM, is
+#     skipped.  Page permissions don't apply.
+#
+# @set: the write queue: one hex string per entry, over the @write
+#     regions concatenated.  Each hit takes the next entry and writes
+#     it before the instruction runs.  "??" leaves a byte as it is, a
+#     string shorter than the regions writes only that much, and ""
+#     writes nothing.  A hit with no entry left writes nothing (see
+#     @stop-empty); @xemu-hooks-push appends entries.  Needs @write.
+#
+# @stop-empty: a hit that finds the @set queue empty ends the running
+#     @xemu-frame-advance or @xemu-run-until before that instruction,
+#     as a mismatch does (default false).  If entries are pushed
+#     before the VM resumes, that hit takes the first of them when it
+#     does, and is recorded again with it.  Needs @write.
 #
 # Since: 10.2
 ##
 { 'struct': 'XemuHookSpec',
   'data': { 'pcs': ['uint64'], '*cond': ['XemuHookCond'],
             '*key': 'XemuHookRegion', '*collect': ['XemuHookRegion'],
-            '*regs': 'bool', '*expect': ['str'], '*stop': 'bool' } }
+            '*regs': 'bool', '*expect': ['str'], '*stop': 'bool',
+            '*write': ['XemuHookRegion'], '*set': ['str'],
+            '*stop-empty': 'bool' } }
 
 ##
 # @XemuHookInfo:
@@ -804,10 +835,13 @@
 #
 # @hits: its hits so far
 #
+# @queued: @set entries waiting (only for hooks with @write)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuHookInfo',
-  'data': { 'id': 'int', 'pcs': ['uint64'], 'hits': 'int' } }
+  'data': { 'id': 'int', 'pcs': ['uint64'], 'hits': 'int',
+            '*queued': 'int' } }
 
 ##
 # @XemuHookRecord:
@@ -830,11 +864,23 @@
 #
 # @mismatch: true when the hit differed from its @expect entry
 #
+# @set: which @set entry the hit took, from 0, counting every entry
+#     the hook was given (only for hooks with @write that found an
+#     entry)
+#
+# @empty: true when the hit found the @set queue empty and wrote
+#     nothing (only for hooks with @write)
+#
+# @unwritten: true when part of the entry was not written (a @write
+#     region whose address didn't resolve or isn't guest RAM; the rest
+#     was written)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuHookRecord',
   'data': { 'hook': 'int', 'pc': 'uint64', 'frame': 'int', 'hit': 'int',
-            'data': ['str'], '*regs': 'XemuRegs', '*mismatch': 'bool' } }
+            'data': ['str'], '*regs': 'XemuRegs', '*mismatch': 'bool',
+            '*set': 'int', '*empty': 'bool', '*unwritten': 'bool' } }
 
 ##
 # @XemuHookTrace:
@@ -845,8 +891,9 @@
 # @dropped: hits left out because 262,144 records or 16 MiB of
 #     collected bytes were already waiting
 #
-# @stop: the mismatch that ended this advance (also the last of
-#     @records); the VM is paused before its instruction
+# @stop: the mismatch, or the empty queue (@stop-empty), that ended
+#     this advance (also the last of @records); the VM is paused
+#     before its instruction
 #
 # Since: 10.2
 ##
@@ -857,17 +904,18 @@
 ##
 # @xemu-hooks-set:
 #
-# Install hooks at guest PCs that copy guest memory at each hit
-# without stopping the VM.  They stay until @xemu-hooks-clear, across
-# advances and loads (hit numbers and keys too; clear and set them
-# again to start over).  Their records come back with the next
-# @xemu-frame-advance or @xemu-run-until reply (@frames 0 just
-# returns them).  Under -icount the records are exact and repeatable,
-# and hooks never change what the guest does.  gdbstub breakpoints
-# and @xemu-run-until work alongside; a hook at the PC of either sees
-# that arrival once.  The first hook at a PC retranslates its code
-# page once.  The VM must be stopped: paused, prelaunch, or stopped by
-# the debugger.
+# Install hooks at guest PCs that copy guest memory at each hit, and
+# write queued bytes, without stopping the VM.  They stay until
+# @xemu-hooks-clear, across advances and loads (hit numbers, keys and
+# queues too; clear and set them again to start over).  Their records
+# come back with the next @xemu-frame-advance or @xemu-run-until reply
+# (@frames 0 just returns them).  Under -icount the records are exact
+# and repeatable, and hooks change what the guest does only through
+# their @set writes, at the same instruction every run.  gdbstub
+# breakpoints and @xemu-run-until work alongside; a hook at the PC of
+# either sees that arrival once.  The first hook at a PC retranslates
+# its code page once.  The VM must be stopped: paused, prelaunch, or
+# stopped by the debugger.
 #
 # @hooks: the hooks to add (at most 64 installed)
 #
@@ -898,3 +946,26 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-hooks', 'returns': ['XemuHookInfo'] }
+
+##
+# Guest PC hooks: write queues
+# ============================
+##
+
+##
+# @xemu-hooks-push:
+#
+# Append entries to the @set queue of an @xemu-hooks-set hook with
+# @write.  The VM must be stopped: paused, prelaunch, or stopped by
+# the debugger.  At most 1,048,576 entries or 64 MiB wait per hook.
+#
+# @id: the hook
+#
+# @set: the entries, as for @XemuHookSpec's @set
+#
+# Returns: the hook, with its @queued count
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-hooks-push', 'data': { 'id': 'int', 'set': ['str'] },
+  'returns': 'XemuHookInfo' }

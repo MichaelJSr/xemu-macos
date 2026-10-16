@@ -17,6 +17,7 @@
 #include "exec/target_page.h"
 #include "exec/tb-flush.h"
 #include "exec/translation-block.h"
+#include "tcg/tcg.h"
 #include "hw/core/cpu.h"
 #include "system/memory.h"
 #include "system/runstate.h"
@@ -77,15 +78,17 @@ static uint64_t hook_calls;
 static XemuHookStop hook_stop;
 
 /*
- * The arrival a stop interrupted: on resume its instruction runs again as
- * arrival @call (the vCPU's next; under icount nothing comes between),
- * where the hooks up to the stopper's (@prio, @id) in run order already
- * ran.
+ * The arrival a stop (or a re-execution) interrupted: on resume its
+ * instruction runs again as arrival @call (the vCPU's next; under icount
+ * nothing comes between), where the hooks up to the stopper's (@prio,
+ * @id) in run order already ran; with @rerun the stopper runs once more.
+ * Arrival numbers start at 1, so @call 0 resumes nothing.
  */
 static struct {
     uint64_t call;
     vaddr pc;
     int prio, id;
+    bool rerun;
 } hook_resume;
 
 /* The Xbox RAM block, for hook reads (looked up on the main thread). */
@@ -435,7 +438,16 @@ bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len)
     return true;
 }
 
-bool xemu_hooks_stop(XemuHookCtx *ctx)
+static void resume_set(XemuHookCtx *ctx, bool rerun)
+{
+    hook_resume.call = ctx->call + 1;
+    hook_resume.pc = ctx->pc;
+    hook_resume.prio = ctx->prio;
+    hook_resume.id = ctx->id;
+    hook_resume.rerun = rerun;
+}
+
+static bool hooks_stop(XemuHookCtx *ctx, bool rerun)
 {
     CPUX86State *env = ctx->env;
     CPUState *cs = env_cpu(env);
@@ -460,13 +472,139 @@ bool xemu_hooks_stop(XemuHookCtx *ctx)
     }
     hook_stop.regs[XEMU_HREG_EIP] = env->eip;
     hook_stop.regs[XEMU_HREG_EFLAGS] = cpu_compute_eflags(env);
-    hook_resume.call = ctx->call + 1;
-    hook_resume.pc = ctx->pc;
-    hook_resume.prio = ctx->prio;
-    hook_resume.id = ctx->id;
+    resume_set(ctx, rerun);
     /* cpu_stop_current() set cs->stop; leave before anything else runs. */
     cs->exception_index = EXCP_INTERRUPT;
     cpu_loop_exit(cs);
+}
+
+bool xemu_hooks_stop(XemuHookCtx *ctx)
+{
+    return hooks_stop(ctx, false);
+}
+
+bool xemu_hooks_stop_rerun(XemuHookCtx *ctx)
+{
+    return hooks_stop(ctx, true);
+}
+
+void xemu_hooks_state_loaded(void)
+{
+    hook_resume.call = 0;
+}
+
+/*
+ * A hook wrote on a code page of the TB it runs in, which the write
+ * invalidated (its rest, or old code its jumps lead to, would run stale):
+ * leave the TB, as a stop does but without stopping, and look the
+ * instruction up again, translated afresh or revived with reset jumps.
+ * The hooks up to this one already ran for the arrival.
+ */
+static G_NORETURN void hooks_reexec(XemuHookCtx *ctx)
+{
+    CPUState *cs = env_cpu(ctx->env);
+
+    cpu_restore_state(cs, ctx->ra);
+    resume_set(ctx, false);
+    cpu_loop_exit_noexc(cs);
+}
+
+/*
+ * The RAM a hook may write at @va: @n bytes on one page that the memory
+ * API writes directly (guest RAM, not ROM or a device), by CPU 0's page
+ * tables now. Fills the access for address_space_write and the RAM
+ * address.
+ */
+static bool hook_ram_span(CPUState *cs, vaddr va, unsigned n,
+                          AddressSpace **as, hwaddr *pa, MemTxAttrs *attrs,
+                          ram_addr_t *ra)
+{
+    hwaddr page = cpu_get_phys_page_attrs_debug(cs, va & TARGET_PAGE_MASK,
+                                                attrs);
+    bool ok = false;
+
+    if (page == -1) {
+        return false;
+    }
+    *pa = page + (va & ~TARGET_PAGE_MASK);
+    *as = cpu_get_address_space(cs, cpu_asidx_from_attrs(cs, *attrs));
+    WITH_RCU_READ_LOCK_GUARD() {
+        hwaddr xlat, l = n;
+        MemoryRegion *mr = address_space_translate(*as, *pa, &xlat, &l, true,
+                                                   *attrs);
+        if (l >= n && memory_region_is_ram(mr) &&
+            memory_access_is_direct(mr, true, *attrs)) {
+            *ra = memory_region_get_ram_addr(mr) + xlat;
+            ok = true;
+        }
+    }
+    return ok;
+}
+
+static bool hook_write(XemuHookCtx *ctx, vaddr va, const void *buf,
+                       unsigned len, bool write)
+{
+    CPUState *cs = env_cpu(ctx->env);
+    const uint8_t *in = buf;
+    TranslationBlock *tb = NULL;
+
+    /* Check every page first: all or nothing. */
+    for (int pass = 0; pass < (write ? 2 : 1); pass++) {
+        vaddr at = (uint32_t)va;
+        unsigned left = len, off = 0;
+
+        while (left) {
+            unsigned chunk = MIN(left, TARGET_PAGE_SIZE -
+                                       (at & ~TARGET_PAGE_MASK));
+            AddressSpace *as = NULL;
+            MemTxAttrs attrs = {};
+            hwaddr pa = 0;
+            ram_addr_t ra = 0;
+
+            if (!hook_ram_span(cs, at, chunk, &as, &pa, &attrs, &ra)) {
+                return false;
+            }
+            if (pass) {
+                /*
+                 * Is it on a page of the TB this hook runs in? Then the
+                 * write drops that TB with the rest of the page (this fork
+                 * invalidates page-wide), whatever bytes it covers, and
+                 * the TB must not run on: one invalidated before the
+                 * target of its direct jump leaves the target's jump list
+                 * with the jump in place, so the target's own invalidation
+                 * no longer resets it.
+                 */
+                if (!tb) {
+                    tb = tcg_tb_lookup(ctx->ra);
+                }
+                if (tb && tb_page_addr0(tb) != -1) {
+                    ram_addr_t page = ra & TARGET_PAGE_MASK;
+                    tb_page_addr_t p1 = tb_page_addr1(tb);
+
+                    if ((tb_page_addr0(tb) & TARGET_PAGE_MASK) == page ||
+                        (p1 != -1 && (p1 & TARGET_PAGE_MASK) == page)) {
+                        ctx->own_code = true;
+                    }
+                }
+                address_space_write(as, pa, attrs, in + off, chunk);
+            }
+            at = (uint32_t)(at + chunk);
+            off += chunk;
+            left -= chunk;
+        }
+    }
+    return true;
+}
+
+bool xemu_hook_write(XemuHookCtx *ctx, vaddr va, const void *buf,
+                     unsigned len)
+{
+    return hook_write(ctx, va, buf, len, true);
+}
+
+bool xemu_hook_writable(XemuHookCtx *ctx, vaddr va, unsigned len)
+{
+    return hook_write(ctx, va, NULL, len, false);
 }
 
 /*
@@ -501,14 +639,23 @@ void helper_xemu_hook(CPUX86State *env, target_ulong pc_arg, uint32_t pcrel)
     for (uint32_t i = 0; i < s->n; i++) {
         XemuHookEntry *e = &s->e[i];
 
-        if (unlikely(resume) &&
-            (e->prio < hook_resume.prio ||
-             (e->prio == hook_resume.prio && e->id <= hook_resume.id))) {
-            continue;
+        ctx.resumed = false;
+        if (unlikely(resume)) {
+            int c = e->prio != hook_resume.prio
+                    ? (e->prio < hook_resume.prio ? -1 : 1)
+                    : (e->id < hook_resume.id ? -1 : e->id > hook_resume.id);
+
+            if (c < 0 || (c == 0 && !hook_resume.rerun)) {
+                continue;
+            }
+            ctx.resumed = c == 0;
         }
         ctx.prio = e->prio;
         ctx.id = e->id;
         e->fn(&ctx, e->opaque);
+        if (unlikely(ctx.own_code)) {
+            hooks_reexec(&ctx);
+        }
     }
 }
 

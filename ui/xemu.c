@@ -1000,6 +1000,8 @@ static void frame_stop_bh(void *opaque)
 
 /* xemu-hooks-set records (target/i386/tcg/system/xemu-hooks-qmp.c). */
 XemuHookTrace *xemu_hooks_take_trace(void);
+/* After a load no hook-stopped arrival resumes (xemu-hooks.c). */
+void xemu_hooks_state_loaded(void);
 
 /*
  * Guest PC hooks (xemu-run-until, target/i386/tcg/xemu-hooks.h). The
@@ -1248,6 +1250,7 @@ void xemu_state_loaded(void)
 {
     vblank_virtual_rearm = true;
     xemu_input_state_loaded();
+    xemu_hooks_state_loaded();
 }
 
 /*
