@@ -826,6 +826,7 @@ void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr)
         page = (vaddr)(uint32_t)(e->cs_base + e->eip) & TARGET_PAGE_MASK;
         if (page == page_addr) {
             e->tb = NULL;
+            e->tc_ptr = NULL;
         } else if (xemu_retc_page_bit(page) == bit) {
             shared = true;
         }
@@ -5057,56 +5058,68 @@ static void gen_bnd_jmp(DisasContext *s)
 #if defined(XBOX)
 /*
  * Inline near-return memo probe (phase 2). Emitted at ret exits ahead
- * of the helper fallback. Validation against the ret site's
- * translate-time context constants is exact: nothing between TB entry
- * and its ret exit changes cs_base/flags/cflags, so the runtime
- * context at this exit equals this TB's own translation context. The
- * live tb->cflags load catches CF_INVALID (invalidation); flushes
- * clear entries (wholesale or per page), and empty entries fail the tb != NULL
- * check. Misses fall through to the helper, which also owns every
- * special case (breakpoints, single-step, logging, epilogue return).
+ * of the helper fallback, only in TBs with the base cflags
+ * (cpu->tcg_cflags). Validation against the ret site's translate-time
+ * context constants is exact: nothing between TB entry and its ret exit
+ * changes cs_base/flags/cflags, so the runtime context at this exit
+ * equals this TB's own translation context. A hit jumps to the entry's
+ * tc_ptr without reading the TB: the fill stores it only for a TB with
+ * the base cflags, and every invalidation clears the memo (see
+ * XemuRetcEntry), so CF_INVALID needs no check here; CONFIG_DEBUG_TCG
+ * builds still check the TB's cflags behind every hit. Empty entries
+ * hold tc_ptr == NULL. Misses fall through to the helper, which also
+ * owns every special case (breakpoints, single-step, logging, epilogue
+ * return).
  */
 static void xemu_gen_inline_ret_memo(DisasContext *s)
 {
     TCGLabel *slow = gen_new_label();
     TCGv_i32 eip = tcg_temp_new_i32();
     TCGv_i32 idx = tcg_temp_new_i32();
-    TCGv_i32 t32 = tcg_temp_new_i32();
     TCGv_i64 t64 = tcg_temp_new_i64();
     TCGv_ptr ep = tcg_temp_new_ptr();
-    TCGv_ptr tbp = tcg_temp_new_ptr();
     TCGv_ptr tcp = tcg_temp_new_ptr();
+    const intptr_t retc = offsetof(CPUX86State, xemu_retc);
 
     QEMU_BUILD_BUG_ON(sizeof(struct XemuRetcEntry) != 32);
     tcg_gen_mov_i32(eip, cpu_eip);
-    tcg_gen_muli_i32(idx, eip, (int32_t)2654435761u);
-    tcg_gen_shri_i32(idx, idx, 32 - XEMU_RETC_BITS);
-    tcg_gen_shli_i32(idx, idx, 5); /* 32-byte entry stride */
-    tcg_gen_ext_i32_ptr(ep, idx);
-    tcg_gen_add_ptr(ep, ep, tcg_env);
+    /* xemu_retc_index(eip) * 32, the entry stride */
+    tcg_gen_shri_i32(idx, eip, XEMU_RETC_HASH_SHIFT);
+    tcg_gen_xor_i32(idx, idx, eip);
+    tcg_gen_deposit_z_i32(idx, idx, 1, XEMU_RETC_BITS);
+    tcg_gen_add_zext_shl_ptr(ep, tcg_env, idx, 4);
 
-    tcg_gen_ld_i32(t32, ep,
-                   offsetof(CPUX86State, xemu_retc) +
-                   offsetof(struct XemuRetcEntry, eip));
-    tcg_gen_brcond_i32(TCG_COND_NE, t32, eip, slow);
-    tcg_gen_ld_i32(t32, ep,
-                   offsetof(CPUX86State, xemu_retc) +
-                   offsetof(struct XemuRetcEntry, flags));
-    tcg_gen_brcondi_i32(TCG_COND_NE, t32, (int32_t)s->base.tb->flags, slow);
-    tcg_gen_ld_i64(t64, ep,
-                   offsetof(CPUX86State, xemu_retc) +
-                   offsetof(struct XemuRetcEntry, cs_base));
+#if HOST_BIG_ENDIAN
+    {
+        TCGv_i32 t32 = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(t32, ep, retc + offsetof(struct XemuRetcEntry, eip));
+        tcg_gen_brcond_i32(TCG_COND_NE, t32, eip, slow);
+        tcg_gen_ld_i32(t32, ep, retc + offsetof(struct XemuRetcEntry, flags));
+        tcg_gen_brcondi_i32(TCG_COND_NE, t32, (int32_t)s->base.tb->flags,
+                            slow);
+    }
+#else
+    {
+        /* eip and flags as one little-endian word: flags << 32 | eip */
+        TCGv_i64 key = tcg_temp_new_i64();
+
+        QEMU_BUILD_BUG_ON(offsetof(struct XemuRetcEntry, flags) !=
+                          offsetof(struct XemuRetcEntry, eip) + 4);
+        tcg_gen_add_zext_i64(key, tcg_constant_i64(
+                                 (uint64_t)s->base.tb->flags << 32), eip);
+        tcg_gen_ld_i64(t64, ep, retc + offsetof(struct XemuRetcEntry, eip));
+        tcg_gen_brcond_i64(TCG_COND_NE, t64, key, slow);
+    }
+#endif
+    tcg_gen_ld_i64(t64, ep, retc + offsetof(struct XemuRetcEntry, cs_base));
     tcg_gen_brcondi_i64(TCG_COND_NE, t64, (int64_t)x87_key_cs_base(s), slow);
-    tcg_gen_ld_ptr(tbp, ep,
-                   offsetof(CPUX86State, xemu_retc) +
-                   offsetof(struct XemuRetcEntry, tb));
-    tcg_gen_brcondi_ptr(TCG_COND_EQ, tbp, 0, slow);
-    tcg_gen_ld_i32(t32, tbp, offsetof(TranslationBlock, cflags));
-    tcg_gen_brcondi_i32(TCG_COND_NE, t32,
-                        (int32_t)tb_cflags(s->base.tb), slow);
-
-    tcg_gen_ld_ptr(tcp, tbp, offsetof(TranslationBlock, tc) +
-                             offsetof(struct tb_tc, ptr));
+    tcg_gen_ld_ptr(tcp, ep, retc + offsetof(struct XemuRetcEntry, tc_ptr));
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, tcp, 0, slow);
+#ifdef CONFIG_DEBUG_TCG
+    tcg_gen_addi_ptr(ep, ep, retc);
+    gen_helper_xemu_retc_check(tcg_env, ep, tcp);
+#endif
     tcg_gen_xemu_goto_ptr(tcp);
 
     gen_set_label(slow);
@@ -5161,7 +5174,9 @@ gen_eob(DisasContext *s, int mode)
             x87_top_exit_ok(s);
         if (s->xemu_ret_exit) {
             s->xemu_ret_exit = false;
-            if (xemu_probe_ok) {
+            /* The memo holds only TBs with the base cflags (XemuRetcEntry). */
+            if (xemu_probe_ok && tb_cflags(s->base.tb) ==
+                                 env_cpu(s->xemu_env)->tcg_cflags) {
                 xemu_gen_inline_ret_memo(s);
             }
             tcg_gen_xemu_lookup_ret_and_goto_ptr();

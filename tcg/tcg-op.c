@@ -3124,6 +3124,22 @@ void tcg_gen_add_zext_shl_ptr(TCGv_ptr ret, TCGv_ptr base, TCGv_i32 idx,
 #endif
 }
 
+/* ret = base + (uint64_t)(uint32_t)idx: one ADD (extended register). */
+void tcg_gen_add_zext_i64(TCGv_i64 ret, TCGv_i64 base, TCGv_i32 idx)
+{
+#if TCG_TARGET_REG_BITS == 64
+    if (TCG_TARGET_HAS_add_zext_shl) {
+        tcg_gen_op4(INDEX_op_add_zext_shl, TCG_TYPE_I64, tcgv_i64_arg(ret),
+                    tcgv_i64_arg(base), tcgv_i32_arg(idx), 0);
+        return;
+    }
+#endif
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+    tcg_gen_extu_i32_i64(t, idx);
+    tcg_gen_add_i64(ret, base, t);
+    tcg_temp_free_i64(t);
+}
+
 void tcg_gen_ext_i32_i64(TCGv_i64 ret, TCGv_i32 arg)
 {
     if (TCG_TARGET_REG_BITS == 32) {

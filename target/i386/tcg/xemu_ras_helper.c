@@ -10,6 +10,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-proto-common.h"
@@ -73,7 +74,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
         xemu_ras_maybe_register_dump();
 
         uint32_t eip = (uint32_t)env->eip;
-        uint32_t idx = (eip * 2654435761u) >> (32 - XEMU_RETC_BITS);
+        uint32_t idx = xemu_retc_index(eip);
         struct XemuRetcEntry *e = &env->xemu_retc[idx];
         if (e->eip == eip) {
             TranslationBlock *tb = e->tb;
@@ -107,6 +108,22 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
             e->flags = tb->flags;
             e->cs_base = tb->cs_base;
             e->tb = tb;
+            /*
+             * The inline probe jumps to tc_ptr without reading the TB, so
+             * an entry must never outlive its TB's invalidation. Every
+             * i386 TB is CF_PCREL, and invalidating one clears the whole
+             * memo (tb_jmp_cache_inval_tb -> xemu_flush_jmp_cache), after
+             * setting CF_INVALID. Another thread may do that between the
+             * lookup above and these stores: so store, then re-read the
+             * cflags behind a full barrier (it pairs with the lock-ordered
+             * CF_INVALID store before the invalidator's memo clear) and
+             * take the entry back if the TB died meanwhile.
+             */
+            qatomic_set(&e->tc_ptr, tb->tc.ptr);
+            smp_mb();
+            if (unlikely(qatomic_read(&tb->cflags) != cpu->tcg_cflags)) {
+                qatomic_set(&e->tc_ptr, NULL);
+            }
             /* Same page key as xemu_i386_ras_flush_page(). */
             unsigned pbit = xemu_retc_page_bit((uint32_t)(e->cs_base + eip));
             env->xemu_retc_pages[pbit / 64] |= 1ull << (pbit % 64);
@@ -117,3 +134,41 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
 
     return helper_lookup_tb_ptr(env);
 }
+
+#ifdef CONFIG_DEBUG_TCG
+/*
+ * Behind every inline ret-memo hit (xemu_gen_inline_ret_memo): the entry's
+ * tc_ptr must be its TB's code, and the TB must be live with the base
+ * cflags, which is what the probe no longer checks. Without icount another
+ * thread may be invalidating the TB right now (it sets CF_INVALID, then
+ * clears the memo), so give it time to clear the entry before calling it
+ * a lost invalidation.
+ */
+void HELPER(xemu_retc_check)(CPUX86State *env, void *entry, const void *tc)
+{
+    CPUState *cpu = env_cpu(env);
+    struct XemuRetcEntry *e = entry;
+    TranslationBlock *tb = qatomic_read(&e->tb);
+
+    if (tb && tb->tc.ptr == tc &&
+        qatomic_read(&tb->cflags) == cpu->tcg_cflags) {
+        return;
+    }
+    if (!(cpu->tcg_cflags & CF_USE_ICOUNT)) {
+        int64_t end = get_clock_realtime() + NANOSECONDS_PER_SECOND;
+
+        while (qatomic_read(&e->tc_ptr) == tc &&
+               get_clock_realtime() < end) {
+            g_usleep(100);
+        }
+        if (qatomic_read(&e->tc_ptr) != tc) {
+            return;
+        }
+    }
+    fprintf(stderr, "xemu: ret memo hit eip=%08x tc=%p on tb=%p "
+            "(tc %p, cflags %08x, base %08x): a lost invalidation\n",
+            e->eip, tc, tb, tb ? tb->tc.ptr : NULL,
+            tb ? qatomic_read(&tb->cflags) : 0, cpu->tcg_cflags);
+    abort();
+}
+#endif

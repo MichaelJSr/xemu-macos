@@ -549,6 +549,7 @@ static inline void tcg_gen_brcondi_ptr(TCGCond cond, TCGv_ptr a,
 
 void tcg_gen_add_zext_shl_ptr(TCGv_ptr ret, TCGv_ptr base, TCGv_i32 idx,
                               unsigned sh);
+void tcg_gen_add_zext_i64(TCGv_i64 ret, TCGv_i64 base, TCGv_i32 idx);
 
 static inline void tcg_gen_ext_i32_ptr(TCGv_ptr r, TCGv_i32 a)
 {

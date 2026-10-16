@@ -2207,10 +2207,11 @@ typedef struct CPUArchState {
 #if defined(XBOX)
     /*
      * Near-return target memo: direct-mapped eip -> TB cache probed
-     * by the ret exit helper (and, in phase 2, inline at ret sites)
-     * ahead of the jump cache. Entries are validated like jump-cache
-     * hits (cs_base/flags/cflags/CF_INVALID against live state; the
-     * eip key substitutes for the pc compare since pc = cs_base+eip).
+     * inline at ret sites and by the ret exit helper, ahead of the jump
+     * cache. The helper validates entries like jump-cache hits
+     * (cs_base/flags/cflags/CF_INVALID against live state; the eip key
+     * substitutes for the pc compare since pc = cs_base+eip); the
+     * inline probe relies on the flushes instead (see the entry).
      * Prediction-only state: never migrated, tb pointers cleared with
      * the jump cache, on a full flush (xemu_i386_ras_flush) and per page
      * (xemu_i386_ras_flush_page) when INVLPG or a ranged flush drops one
@@ -2223,23 +2224,29 @@ typedef struct CPUArchState {
 #define XEMU_RETC_SIZE (1 << XEMU_RETC_BITS)
     /*
      * 32-byte stride so the inline probe addresses entries with a
-     * single shift (tb's 8-byte alignment plus the explicit pad keep
-     * the stride). flags/cs_base are captured at fill time: the
+     * single shift. flags/cs_base are captured at fill time: the
      * inline hit path compares them against the ret site's
      * translate-time constants (valid because nothing between TB
      * entry and its ret exit changes them, and the x87 TOP that
-     * cs_base carries is static there: x87_top_exit_ok), and re-loads
-     * the live tb->cflags to catch CF_INVALID. tb == NULL means empty
-     * (a full flush clears the whole block, a per-page flush that
-     * page's entries). cs_base is the TB's whole key value, x87 TOP
-     * included (XEMU_TB_KEY_TOP_SHIFT); its low 32 bits are the base.
+     * cs_base carries is static there: x87_top_exit_ok), then jumps to
+     * tc_ptr, the TB's code, without touching the TB. tc_ptr is set
+     * only for a TB with the base cflags (cpu->tcg_cflags), the only
+     * cflags of a TB that emits the probe; it stands in for the old
+     * live tb->cflags check because every i386 TB is CF_PCREL, whose
+     * invalidation clears the whole memo (tb_jmp_cache_inval_tb), and
+     * the fill re-checks CF_INVALID after a barrier for an invalidation
+     * racing it from another thread. tb == NULL (and tc_ptr == NULL)
+     * means empty (a full flush clears the whole block, a per-page
+     * flush that page's entries); the C lookup still validates tb.
+     * cs_base is the TB's whole key value, x87 TOP included
+     * (XEMU_TB_KEY_TOP_SHIFT); its low 32 bits are the base.
      */
     struct XemuRetcEntry {
         uint32_t eip;
         uint32_t flags;
         uint64_t cs_base;
         void *tb;
-        void *pad;
+        const void *tc_ptr;
     } xemu_retc[XEMU_RETC_SIZE];
     /*
      * One bit per virtual code page (page number modulo the map size) that
@@ -2263,6 +2270,18 @@ typedef struct CPUArchState {
 static inline unsigned xemu_retc_page_bit(vaddr addr)
 {
     return (addr >> TARGET_PAGE_BITS) % XEMU_RETC_PAGEMAP_BITS;
+}
+
+/*
+ * Memo slot of a return eip: its low 12 bits folded with bits 14-25. The
+ * inline probe computes the same (xemu_gen_inline_ret_memo: LSR, EOR,
+ * UBFIZ), three instructions shorter than a multiplicative hash; on
+ * Azurik it also misses 6-13% less than eip * 2654435761 >> 20 did.
+ */
+#define XEMU_RETC_HASH_SHIFT 14
+static inline unsigned xemu_retc_index(uint32_t eip)
+{
+    return (eip ^ (eip >> XEMU_RETC_HASH_SHIFT)) & (XEMU_RETC_SIZE - 1);
 }
 #endif
 

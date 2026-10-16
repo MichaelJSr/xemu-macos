@@ -726,6 +726,23 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   entry keeps the per-page flush O(1) unless the page may be in the
   memo; per-page flushes are rare on this guest (11k INVLPGs over a
   whole PGO training run). Generated code is unchanged.
+  **2026-10-16:** the inline probe no longer reads the TB. Each entry
+  now holds the TB's code pointer (`tc_ptr`, in the old pad slot), set
+  only for TBs with the base cflags, and only TBs with the base cflags
+  emit the probe. The live `tb->cflags` load that caught `CF_INVALID` is
+  gone: every i386 TB is `CF_PCREL`, whose invalidation clears the whole
+  memo, and the fill re-reads the cflags behind a barrier in case
+  another thread invalidates the TB between lookup and fill. eip and
+  flags compare as one 64-bit word, and the index is `eip ^ eip >> 14`
+  (LSR, EOR, UBFIZ) instead of a multiply: 15 host insns from the
+  return address to the `br`, with three loads, where it was 24 with
+  four dependent ones. That hash also misses less than the multiply on
+  Azurik: helper fills per run 945k → 825k on heavy-f1 1200 frames,
+  764k → 719k on stream-e2 600 (shifts 8-16 measured; 14 was best on
+  both). A `--debug` build checks the TB behind every inline hit.
+  Cross-binary det A/B against cced50204c, 4 pairs each at load 19-30:
+  heavy-f1 Minsns/frame −1.07% (4/4), stream-e2 −1.39% (4/4);
+  Mcycles/frame within the load noise of that run (see the commit).
 - **icount step TBs cached by pc (det mode, 2026-10-16).** Every
   one-instruction step of a cut block (`xemu_istep`) looked its TB up
   in the qht: `get_page_addr_code`, xxhash, the seqlock walk and
