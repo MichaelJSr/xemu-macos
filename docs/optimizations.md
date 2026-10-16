@@ -7,20 +7,24 @@ the doc of record for *what has been done*; the open candidates live in
 the top-level [README](../README.md).
 
 Sections: the per-subsystem landed-change manifest (moved here from the
-README 2026-07-18), the runtime escape-hatch / diagnostic knob catalog
-(each knob exists because of a specific entry here), and the
+README 2026-07-18), the runtime diagnostic-knob and normal-mode-switch
+catalog (each knob exists because of a specific entry here), and the
 failed / reverted / settled-negative experiment tables. An
 "archaeology N.M" citation is section N.M of the retired
 failure-archaeology skill:
 `git show ad569d78c5:.claude/skills/xemu-failure-archaeology/SKILL.md`.
 
-## Runtime escape-hatch / diagnostic knobs
+## Runtime diagnostic knobs and normal-mode switches
 
-Default-off knobs turn on with `1`; for a change that shipped default-on,
-the row names `0` as its escape hatch. Every knob here is
-the escape hatch or measurement channel for a specific entry in the
-Changes manifest below — the pairing is the fork's bisect discipline,
-and every one of them has a `getenv` on this branch. Knobs that exist
+Default-off knobs turn on with `1`; a `0` knob turns a default-on
+behavior off. Each knob is a diagnostic, harness interface, A/B lever,
+opt-in for an unvalidated host or tuning knob tied to an entry in the
+Changes manifest below, and every one has a `getenv` on this branch.
+Since 2026-10-15 (owner decision) a shipped change keeps a behavior
+switch only when it is a normal-mode change the deterministic goldens
+can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK` and
+`XEMU_GUEST_MO`, the first three rows. The other `=0` row,
+`XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass. Knobs that exist
 only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
@@ -61,8 +65,8 @@ and tag `archive/windows-wave1-wip`.
 ### Build-time and harness knobs
 
 Not runtime env vars — these are read by `build.sh` at configure time or
-by the bench harness, and are catalogued here because each is the escape
-hatch for a Changes bullet below. The README's `### Build knobs` table
+by the bench harness, and are catalogued here because each belongs to a
+Changes bullet below. The README's `### Build knobs` table
 carries the user-facing subset; `build.sh` itself is the full list of
 build knobs.
 

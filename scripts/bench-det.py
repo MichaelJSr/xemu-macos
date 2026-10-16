@@ -25,7 +25,8 @@ Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
 marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
 in /tmp/xemu-leases, and XEMU_BASE_PATH set to the bench cache.
 
-Example: bench-det.py -n 4 base=/tmp/a.app new=/tmp/a.app:XEMU_FOO=0
+Example: bench-det.py -n 4 base=/tmp/b.app new=/tmp/e.app
+(an arm can add env: new=/tmp/e.app:XEMU_GUEST_MO=1)
 Goldens: `-n 1 -f 300` (azurik-heavy-f1), `-t azurik-stream-e2 -f 600
 -i "axis ly 1.0"`, `-t - -f 1800 --hash-at 900,1800`.
 

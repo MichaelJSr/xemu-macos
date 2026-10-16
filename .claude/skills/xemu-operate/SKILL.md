@@ -204,8 +204,11 @@ the other arm does too).
 
 No-game tests: `cd build && ninja test-xbox && ./pyvenv/bin/meson test --suite xbox --no-rebuild`.
 
-**Lean default (CPU, TCG, APU):** `scripts/bench-det.py -n 4 base=A.app
-new=A.app:XEMU_FOO=0` (~4 min). The box is usually loaded and that's fine:
+**Lean default (CPU, TCG, APU):** build the base and the change into two
+bundle clones (locally, not from CI), then `scripts/bench-det.py -n 4
+base=B.app new=E.app` (~4 min). These changes get no `XEMU_*` switch
+(CLAUDE.md), so the A/B is cross-binary; `NAME=APP:K=V` arms remain for
+existing switches and diagnostics (`new=E.app:XEMU_GUEST_MO=1`). The box is usually loaded and that's fine:
 judge by Mcycles/frame (back-to-back runs agree to ~0.5% at load 30;
 absolute values drift over minutes, so compare arms only within one
 interleaved session) and use Minsns/frame (~0.01%) as the mechanism
@@ -283,8 +286,10 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
 
-To add a knob, read `getenv` once into a static, latch it before the first
-TB if it changes emitted code, and give POSIX-only code a `_WIN32` branch.
+Add a knob only for a normal-mode change the det goldens can't verify, a
+diagnostic, a harness interface or a user tuning knob (CLAUDE.md). Read
+`getenv` once into a static, latch it before the first TB if it changes
+emitted code, and give POSIX-only code a `_WIN32` branch.
 
 **MVK parity:** six `MVK_CONFIG_*` values live in `Info.plist`
 `LSEnvironment` (applied only by `open`/Finder) and in the `setenv(…, 0)`

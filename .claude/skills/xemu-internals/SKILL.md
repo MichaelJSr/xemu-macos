@@ -83,7 +83,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - The x87 control word changes only through `cpu_set_fpuc()`, because PC and RC are baked into `tb->flags`, and `cpu_set_fpuc()` changes no other `hflags` bit: fldcw leaves its TB through the jump-cache probe, which takes RC/PC from `env->hflags` and every other flag bit from the TB's own flags (`gen_eob`). One exception: in write-through blocks a word that keeps RC and PC bit 9 is stored inline with the softfloat precision, and the TB chains on (`gen_fldcw_wt`), so state that `update_fp_status` derives from other fpuc bits must be stored there too. → the write-through x87 path runs at a stale precision; the probe enters a TB built for other flags; softfloat helpers round at the old precision.
 - **A fatal error must end the process, never trap in place**: `qemu_thread_create` keeps SIGTRAP and SIGBUS deliverable on macOS, and fatal paths call `abort()` or `_exit()`, never `__builtin_trap()` (`VK_CHECK` and the fence waits end in `pgraph_vk_fatal_error`: headless exits 1 after a fixed line, windowed aborts). macOS does not force a synchronous signal through a blocked mask, so the thread re-executes the trap forever at full CPU, still holding its locks, and SIGTERM's shutdown request never runs. → a crash that looks like a hang (AZ-293: PFIFO on `pgraph_vk_finish`'s `brk`, the vCPU waiting for `pgraph.lock`). `util/qemu-thread-posix.c`, V`debug.h`.
 
-## Triage (one escape hatch per fresh launch)
+## Triage (one change per fresh launch)
 
 | Symptom | First check | Discriminating experiment | Owner |
 |---|---|---|---|

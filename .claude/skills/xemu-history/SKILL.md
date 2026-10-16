@@ -5,7 +5,7 @@ description: Has this been tried? Settled dead ends, reverts, fenced/dark flags,
 
 # xemu history: what's been tried, what's open
 
-Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or harness kept) · **dark** (off by default) · **fixed** (bug fixed; the hatch restores the old behavior) · **closed** (measured or argued dead) · **shipped**. Story: `git show --no-patch <sha>`. Record: `docs/optimizations.md` (Failed/Settled), `docs/roadmap.md`. Reopen only with a fresh number, on today's binary, that beats the row's reason.
+Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or harness kept) · **dark** (off by default) · **fixed** (bug fixed; where a switch exists, the Pointer column names it) · **closed** (measured or argued dead) · **shipped**. Story: `git show --no-patch <sha>`. Record: `docs/optimizations.md` (Failed/Settled), `docs/roadmap.md`. Reopen only with a fresh number, on today's binary, that beats the row's reason.
 
 ## Dead ends and reverts
 
