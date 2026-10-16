@@ -12,13 +12,20 @@
  * debug exception arrives, lets the vCPU run on instead of stopping the
  * VM. Off by default and for each new connection.
  *
+ * qxemu.read:addr,len;addr,len;...: many 'm' reads in one round trip. The
+ * reply holds one field per region, ';'-separated, each exactly what 'm'
+ * would answer: the bytes in hex, the readable prefix when the region runs
+ * into an unmapped page, or E14 when none of it is readable.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
+#include "qemu/ctype.h"
 #include "qemu/cutils.h"
 #include "exec/gdbstub.h"
 #include "exec/replay-core.h"
+#include "exec/target_page.h"
 #include "gdbstub/commands.h"
 #include "gdbstub/xemu.h"
 #include "hw/core/cpu.h"
@@ -140,15 +147,72 @@ static const GdbCmdParseEntry xemu_query_stepover = {
     .cmd = "xemu.stepover",
 };
 
+typedef struct XemuReadRegion {
+    uint64_t addr, len;
+} XemuReadRegion;
+
+static void handle_query_xemu_read(GArray *params, void *user_ctx)
+{
+    const char *p = params->len ? gdb_get_cmd_param(params, 0)->data : "";
+    g_autoptr(GArray) regions = g_array_new(false, false,
+                                            sizeof(XemuReadRegion));
+    GString *out = gdbserver_state.str_buf;
+    uint64_t total = 0;
+
+    /* Parse everything first: a malformed request gets E22 alone. */
+    do {
+        XemuReadRegion r;
+
+        if (!qemu_isxdigit(p[0]) || qemu_strtou64(p, &p, 16, &r.addr) ||
+            *p != ',' || !qemu_isxdigit(p[1]) ||
+            qemu_strtou64(p + 1, &p, 16, &r.len) || r.len == 0 ||
+            r.len > XEMU_GDB_MAX_READ - total || (*p && *p != ';')) {
+            gdb_put_packet("E22");
+            return;
+        }
+        total += r.len;
+        g_array_append_val(regions, r);
+        if (*p == ';') {
+            p++;
+        }
+    } while (*p);
+
+    /* Each field exactly as 'm' answers it (handle_read_mem). */
+    g_string_truncate(out, 0);
+    for (guint i = 0; i < regions->len; i++) {
+        XemuReadRegion *r = &g_array_index(regions, XemuReadRegion, i);
+        size_t done = gdb_read_mem_prefix(r->addr, r->len);
+
+        if (i) {
+            g_string_append_c(out, ';');
+        }
+        if (done) {
+            gdb_memtohex(out, gdbserver_state.mem_buf->data, done);
+            g_string_truncate(out, out->len - 1);   /* its trailing NUL */
+        } else {
+            g_string_append(out, "E14");
+        }
+    }
+    gdb_put_strbuf();
+}
+
+static const GdbCmdParseEntry xemu_query_read = {
+    .handler = handle_query_xemu_read,
+    .cmd = "xemu.read:",
+    .cmd_startswith = true,
+    .schema = "s0",
+};
+
 void xemu_gdb_init(void)
 {
     g_autoptr(GPtrArray) queries = g_ptr_array_new();
     g_autoptr(GPtrArray) sets = g_ptr_array_new();
 
     g_ptr_array_add(queries, (gpointer)&xemu_query_stepover);
+    g_ptr_array_add(queries, (gpointer)&xemu_query_read);
     g_ptr_array_add(sets, (gpointer)&xemu_set_stepover);
     gdb_extend_query_table(queries);
     gdb_extend_set_table(sets);
-    gdb_extend_qsupported_features((char *)";Qxemu.stepover+");
+    gdb_extend_qsupported_features((char *)";Qxemu.stepover+;qxemu.read+");
     qemu_add_vm_change_state_handler(xemu_gdb_vm_state_change, NULL);
 }

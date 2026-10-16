@@ -129,6 +129,23 @@ void gdb_put_strbuf(void);
 int gdb_put_packet_binary(const char *buf, int len, bool dump);
 void gdb_memtohex(GString *buf, const uint8_t *mem, int len);
 void gdb_memtox(GString *buf, const char *mem, int len);
+
+/*
+ * xemu: replies are built in growable buffers, so 'm', 'x' and qxemu.read
+ * reads may ask for up to this much (upstream: MAX_PACKET_LENGTH / 2,
+ * 64 KiB). Harnesses that sweep guest memory need far fewer round trips;
+ * clients that honour the advertised PacketSize are unaffected.
+ */
+#define XEMU_GDB_MAX_READ (4 * 1024 * 1024)
+
+/*
+ * xemu: 'm' and 'x' (and each qxemu.read region): read @len bytes at @addr
+ * of g_cpu into mem_buf. Returns the bytes read: all of them, or the
+ * readable prefix, as the protocol allows, when the range runs into an
+ * unmapped page (a heap guard page past the end of an object, say); 0 when
+ * nothing is readable.
+ */
+size_t gdb_read_mem_prefix(vaddr addr, size_t len);
 void gdb_read_byte(uint8_t ch);
 
 /*

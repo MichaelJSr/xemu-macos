@@ -159,7 +159,7 @@ park/resume via `migrate file:`. QMP sends events only after
 gdbstub drivers: every `Z0`/`z0` invalidates the code on its page, so
 don't lift and re-arm breakpoints around each resume. `s` already steps
 over a breakpoint under the PC, and after `Qxemu.stepover:1` a plain `c`
-does.
+does. Batch independent reads at a stop with `qxemu.read`.
 
 ## Test
 

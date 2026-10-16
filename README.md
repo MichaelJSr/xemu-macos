@@ -450,6 +450,12 @@ Other automation interfaces (windowed or headless):
   page). `s` steps over a breakpoint under the PC in every build. Off by
   default and for each new connection; `Qxemu.stepover:0` turns it off,
   `qxemu.stepover` reads it.
+- **gdbstub batched reads**: `qxemu.read:addr,len;addr,len;...`
+  (advertised as `qxemu.read+`; hex, up to 4 MiB in all) answers many
+  `m` reads in one round trip. The reply has one `;`-separated field per
+  region, each what `m` would answer: the bytes in hex, the readable
+  prefix when the region runs into an unmapped page, or `E14` when none
+  of it is readable. A malformed request gets `E22`.
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

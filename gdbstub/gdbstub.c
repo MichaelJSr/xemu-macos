@@ -1293,21 +1293,7 @@ static void handle_write_mem(GArray *params, void *user_ctx)
     gdb_put_packet("OK");
 }
 
-/*
- * xemu: replies are built in growable buffers, so 'm' and 'x' reads may ask
- * for up to this much (upstream: MAX_PACKET_LENGTH / 2, 64 KiB). Harnesses
- * that sweep guest memory need far fewer round trips; clients that honour
- * the advertised PacketSize are unaffected.
- */
-#define XEMU_GDB_MAX_READ (4 * 1024 * 1024)
-
-/*
- * Read @len bytes at @addr into mem_buf. Returns the bytes read: all of
- * them, or the readable prefix, as the protocol allows, when the range runs
- * into an unmapped page (a heap guard page past the end of an object, say);
- * 0 when nothing is readable.
- */
-static size_t gdb_read_mem_prefix(vaddr addr, size_t len)
+size_t gdb_read_mem_prefix(vaddr addr, size_t len)
 {
     size_t done = 0;
     size_t page = qemu_target_page_size();
