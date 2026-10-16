@@ -1,6 +1,6 @@
 ---
 name: xemu-internals
-description: xemu-macos invariants and triage. Load before touching hw/xbox/nv2a/pgraph/vk, hw/xbox/mcpx/apu/dsp, the ui/xemu.c / xemu-metal.m present path, BQL or clocks; when triaging a crash, hang, artifact or fps regression; or when reading XEMU_* diagnostic output.
+description: xemu-macos invariants and triage. Load before touching hw/xbox/nv2a (pgraph/vk, PFIFO), hw/xbox/mcpx/apu, accel/tcg, tcg/aarch64 or target/i386/tcg (x87, SSE, pinned registers, TLB memo), deterministic/icount mode, the ui/xemu.c / xemu-metal.m present path, BQL or clocks; when triaging a crash, hang, artifact or fps regression; or when reading XEMU_* diagnostic output.
 ---
 
 # xemu internals: what must not break, and how to triage
