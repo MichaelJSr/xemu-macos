@@ -16,6 +16,7 @@
 #include "exec/translation-block.h"
 #include "tcg/tcg.h"
 #include "hw/core/cpu.h"
+#include "exec/xemu-breakpoints.h"
 
 /*
  * Near-return exit: consult the return-address stack before the
@@ -64,8 +65,9 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
 {
     CPUState *cpu = env_cpu(env);
 
+    /* A gdb breakpoint's site TB stops by itself (exec/xemu-breakpoints.h). */
     if (likely(!cpu->singlestep_enabled) &&
-        likely(QTAILQ_EMPTY(&cpu->breakpoints)) &&
+        likely(!xemu_cpu_breakpoints(cpu)) &&
         likely(!qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC |
                                    CPU_LOG_TB_NOCHAIN))) {
         xemu_ras_maybe_register_dump();

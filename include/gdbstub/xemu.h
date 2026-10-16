@@ -16,6 +16,17 @@
  */
 bool xemu_gdb_stepover_done(CPUState *cpu);
 
+/*
+ * tcg_insert_breakpoint() and friends: a gdb breakpoint (BP_GDB) at @pc
+ * is a guest PC hook site whose hook stops the VM before the instruction
+ * with EXCP_DEBUG (target/i386/tcg/system/xemu-hooks.c). Insert once per
+ * cpu_breakpoint_insert round, remove once per removal; the first insert
+ * at a PC invalidates its page, nothing else does. BQL held.
+ */
+void xemu_gdb_bp_site_insert(vaddr pc);
+void xemu_gdb_bp_site_remove(vaddr pc);
+void xemu_gdb_bp_site_remove_all(void);
+
 /* The rest is for the system gdbstub only. */
 
 /* Register the packets and the run-state handler (once, at server start). */

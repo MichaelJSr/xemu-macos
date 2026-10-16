@@ -2703,6 +2703,36 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   XXH3 replies equal across identical det runs, match an independent
   xxHash 0.8.3 build of the dumped RAM, and change in exactly one page
   after a one-byte gdbstub write.
+- **gdbstub breakpoints are guest PC hook sites (2026-10-16).** An
+  armed `Z0` made every lookup in its page take CF_BP_PAGE (one
+  instruction per TB, no goto_tb), turned off the return memo, the
+  icount step cut and new cross-page links, and every `Z0`/`z0`
+  invalidated the page (~460 TBs per `z0`/`s`/`Z0`/`c` stop). Each
+  BP_GDB PC is now a hook site (`xemu_gdb_bp_site_insert`): its TB calls
+  a `XEMU_HOOK_PRIO_GDB` hook, first at the site, that raises EXCP_DEBUG
+  after `cpu_restore_state` unless the vCPU is single-stepping (`s`, and
+  the Qxemu.stepover step), however the TB is entered. The lookup's
+  exact-PC check stays; CF_BP_PAGE and the fast-path opt-outs remain
+  only for DR7 (BP_CPU) breakpoints (`xemu_cpu_breakpoints`). Only a
+  PC's first breakpoint invalidates its page (norecycle); a `z0` leaves
+  the hookless site, so re-arming costs nothing. CF_BP_PAGE also kept
+  apart TBs translated at another mapping of the page, which i386's
+  CF_PCREL lookup otherwise hands to the breakpoint's address, so every
+  hook site now also cuts and calls at the RAM addresses its PC has
+  mapped to; the call reads the running PC. Det heavy-f1, `TICK`
+  (`0x8C230`) run once through its `0xF0000000` alias (the NV2A's view
+  of RAM) with a breakpoint on its third insn: the next call at
+  `0x8C230` ran the alias's TB past it, and the first stop came 14.1 s
+  later; now that call stops. Same-binary pairs at
+  load 15-16, heavy-f1 120 frames: a never-hit `Z0` on the hot TICK
+  page costs +0.1%/+0.6% Mcycles/frame and +0.1% Minsns (old binary
+  +31% and +50%, 22.09 vs 16.81 Mcycles/frame); per stop, `z0`/`s`/`Z0`/
+  `c` 14.6 → 3.3 Mcycles with no invalidations beyond the advance's own
+  (56,034 → 374 per 120-frame walk), Qxemu.stepover 7.7 → 2.9 Mcycles.
+  A 300-hit gdb walk to frame 300 ends on `f300=6a553d8c7727c6c6` both
+  ways (stepover and z0/s/Z0), 11.5 → 7.4 Gcycles. gdb alltests: only
+  the three known rerun.py FAILs; hooks run_all 95 PASS; goldens exact on
+  release and debug-TCG; xbox suite 7/7.
 
 ### Retired diagnostics and dark experiments (2026-10-10)
 

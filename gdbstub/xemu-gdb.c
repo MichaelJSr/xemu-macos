@@ -5,8 +5,9 @@
  * resume from a halt at an armed software breakpoint first executes the
  * instruction under the PC, without reporting that breakpoint again and
  * without lifting it. Clients otherwise lift it, single-step and re-arm
- * (z0/s/Z0/c), and in this fork every Z0 and z0 invalidates the code on the
- * breakpoint's page (xemu_gdb_bp_invalidate). The stub does the same step
+ * (z0/s/Z0/c): four packets and two stops (a breakpoint is a guest PC hook
+ * site, xemu_gdb_bp_site_insert, so they invalidate no code after the
+ * first Z0 at a PC). The stub does the same step
  * itself: it single-steps the vCPU with the client's single-step flags (by
  * default no IRQs and no timers, exactly as 's') and, when that step's
  * debug exception arrives, lets the vCPU run on instead of stopping the

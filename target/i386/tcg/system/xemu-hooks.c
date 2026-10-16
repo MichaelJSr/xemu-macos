@@ -21,6 +21,7 @@
 #include "hw/core/cpu.h"
 #include "system/memory.h"
 #include "system/runstate.h"
+#include "gdbstub/xemu.h"
 #include "tcg/xemu-hooks.h"
 
 /* Main thread (BQL): every hook, and every site. */
@@ -63,11 +64,19 @@ typedef struct XemuHookSite {
     XemuHookEntry *e;
 } XemuHookSite;
 
+/*
+ * @phys: the RAM addresses the sites' PCs have mapped to (SiteRec pages),
+ * ascending. i386 TBs are CF_PCREL, so a TB translated at another mapping
+ * of a site's page also runs at the site's PC: the translator cuts and
+ * calls at those addresses too, and the call reads the running PC.
+ */
 typedef struct XemuHookTable {
     struct rcu_head rcu;
     uint32_t nsites;
     XemuHookSite *sites;
     XemuHookEntry *entries;
+    uint32_t nphys;
+    ram_addr_t *phys;
 } XemuHookTable;
 
 static XemuHookTable *hook_table;
@@ -110,17 +119,41 @@ static XemuHookSite *site_find(XemuHookTable *t, vaddr pc)
     return lo < t->nsites && t->sites[lo].pc == pc ? &t->sites[lo] : NULL;
 }
 
-bool xemu_hooks_site_at_slow(vaddr pc)
+static bool phys_find(XemuHookTable *t, ram_addr_t ra)
+{
+    uint32_t lo = 0, hi = t->nphys;
+
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (t->phys[mid] < ra) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < t->nphys && t->phys[lo] == ra;
+}
+
+bool xemu_hooks_site_at_slow(vaddr pc, uint64_t phys)
 {
     XemuHookTable *t = qatomic_rcu_read(&hook_table);
-    return t && site_find(t, pc);
+    return t && (site_find(t, pc) ||
+                 (phys != (uint64_t)-1 && phys_find(t, phys)));
 }
 
 static void table_free(XemuHookTable *t)
 {
     g_free(t->sites);
     g_free(t->entries);
+    g_free(t->phys);
     g_free(t);
+}
+
+static gint ram_addr_cmp(gconstpointer a, gconstpointer b)
+{
+    ram_addr_t x = *(const ram_addr_t *)a, y = *(const ram_addr_t *)b;
+
+    return x < y ? -1 : x > y;
 }
 
 static gint rec_cmp(gconstpointer a, gconstpointer b)
@@ -169,6 +202,20 @@ static void table_publish(void)
         }
     }
     assert(r == hook_recs->len);
+
+    GArray *phys = g_array_new(false, false, sizeof(ram_addr_t));
+    for (guint i = 0; i < sites->len; i++) {
+        SiteRec *sr = &g_array_index(sites, SiteRec, i);
+        for (guint j = 0; j < sr->pages->len; j++) {
+            ram_addr_t ra = g_array_index(sr->pages, ram_addr_t, j) |
+                            (sr->pc & ~TARGET_PAGE_MASK);
+            g_array_append_val(phys, ra);
+        }
+    }
+    g_array_sort(phys, ram_addr_cmp);
+    t->nphys = phys->len;
+    t->phys = (ram_addr_t *)g_array_free(phys, false);
+
     if (t->nsites) {
         qatomic_rcu_set(&hook_table, t);
         qatomic_set(&xemu_hooks_nsites, t->nsites);
@@ -220,22 +267,33 @@ static bool site_has_hooks(vaddr pc)
     return false;
 }
 
+static void cover_page_work(CPUState *cpu, run_on_cpu_data data)
+{
+    ram_addr_t *ra = data.host_ptr;
+
+    xemu_tb_invalidate_page_norecycle(*ra);
+    g_free(ra);
+}
+
 /*
- * Invalidate, as xemu_gdb_bp_invalidate does for a gdb breakpoint, the
- * TBs that may hold a hooked site's code without its call: those on the
- * page its PC maps to now, unless done since the site was created (this
- * fork invalidates page-wide), or all TBs when it is unmapped, as an
- * earlier mapping may have left some. Run with the vCPU stopped, before
- * the VM starts: a TB translated concurrently from the old table could
- * otherwise land after the invalidation.
+ * Invalidate the TBs that may hold a hooked site's code without its call:
+ * those on the page its PC maps to now, unless done since the site was
+ * created (this fork invalidates page-wide), or all TBs when it is
+ * unmapped, as an earlier mapping may have left some. Run with the vCPU
+ * stopped, before the VM starts: a TB translated concurrently from the
+ * old table could otherwise land after the invalidation. With @running
+ * (a gdb breakpoint inserted while the VM runs) the invalidation waits
+ * for the vCPU as safe work instead, which no translation straddles.
+ * Returns true when it recorded a page, which the table's @phys lists
+ * once published again; publish before the vCPU runs.
  */
-static void sites_cover(void)
+static bool sites_cover(bool running)
 {
     CPUState *cpu = first_cpu;
-    bool flush = false;
+    bool flush = false, added = false;
 
     if (!cpu) {
-        return;
+        return false;
     }
     for (guint i = 0; i < sites->len; i++) {
         SiteRec *s = &g_array_index(sites, SiteRec, i);
@@ -256,8 +314,15 @@ static void sites_cover(void)
                 }
             }
             if (j == s->pages->len) {
-                xemu_tb_invalidate_page_norecycle(ra);
+                if (running) {
+                    async_safe_run_on_cpu(cpu, cover_page_work,
+                                          RUN_ON_CPU_HOST_PTR(
+                                              g_memdup2(&ra, sizeof(ra))));
+                } else {
+                    xemu_tb_invalidate_page_norecycle(ra);
+                }
                 g_array_append_val(s->pages, ra);
+                added = true;
             }
             break;
         }
@@ -265,6 +330,7 @@ static void sites_cover(void)
     if (flush) {
         queue_tb_flush(cpu);
     }
+    return added;
 }
 
 /* Drop the site at index @i; its TBs are invalidated (only for speed). */
@@ -317,7 +383,9 @@ static void hooks_vm_state_change(void *opaque, bool running, RunState state)
     }
     if (running) {
         /* The vCPU hasn't resumed yet; a load may have moved the code. */
-        sites_cover();
+        if (sites_cover(false)) {
+            table_publish();
+        }
     } else {
         sites_purge(sites->len > XEMU_HOOK_MAX_SITES);
     }
@@ -385,11 +453,11 @@ void xemu_hooks_commit(void)
     if (stopped && sites->len > XEMU_HOOK_MAX_SITES) {
         sites_purge(true);
     }
-    table_publish();
     /* A running VM gets its old TBs dropped at its next start. */
     if (stopped) {
-        sites_cover();
+        sites_cover(false);
     }
+    table_publish();
 }
 
 uint64_t xemu_hooks_calls(void)
@@ -486,6 +554,116 @@ bool xemu_hooks_stop(XemuHookCtx *ctx)
 bool xemu_hooks_stop_rerun(XemuHookCtx *ctx)
 {
     return hooks_stop(ctx, true);
+}
+
+/*
+ * gdb breakpoints (BP_GDB, gdbstub Z0/Z1) are hook sites: the site's TB
+ * calls the hook however it is entered (a lookup, a chain, the jump-cache
+ * probe, the return memo), so the rest of the page runs as usual instead
+ * of one instruction per TB (CF_BP_PAGE), and only a PC's first
+ * breakpoint costs an invalidation. Each PC's hook runs first
+ * (XEMU_HOOK_PRIO_GDB) and stops the VM as check_for_breakpoints_slow
+ * does at a lookup at that PC (which still fires, before the TB): EIP at
+ * the site, none of the TB run, EXCP_DEBUG, so the arrival's other hooks
+ * run only when the instruction does. gdb clients insert a breakpoint
+ * once per resume, so a PC keeps its hook while any is armed there.
+ */
+typedef struct GdbBp {
+    vaddr pc;
+    int id;
+    int refs;
+} GdbBp;
+
+static GArray *gdb_bps;         /* GdbBp, main thread (BQL) */
+
+static void gdb_bp_hook(XemuHookCtx *ctx, void *opaque)
+{
+    CPUState *cs = env_cpu(ctx->env);
+
+    /*
+     * Single-step overrides breakpoints, as at a lookup: 's', and the
+     * Qxemu.stepover step over the breakpoint under the PC, which runs
+     * single-stepped. The breakpoint list says whether a z0 since the
+     * table was published removed it.
+     */
+    if (cs->singlestep_enabled ||
+        !cpu_breakpoint_test(cs, ctx->pc, BP_GDB)) {
+        return;
+    }
+    /* EIP, cc_op, deferred x87 state and icount back to the site. */
+    cpu_restore_state(cs, ctx->ra);
+    cs->exception_index = EXCP_DEBUG;
+    cpu_loop_exit(cs);
+}
+
+static GdbBp *gdb_bp_find(vaddr pc, guint *index)
+{
+    for (guint i = 0; gdb_bps && i < gdb_bps->len; i++) {
+        GdbBp *b = &g_array_index(gdb_bps, GdbBp, i);
+        if (b->pc == pc) {
+            *index = i;
+            return b;
+        }
+    }
+    return NULL;
+}
+
+void xemu_gdb_bp_site_insert(vaddr pc)
+{
+    GdbBp b = { .pc = pc, .refs = 1 };
+    guint i;
+    GdbBp *old = gdb_bp_find(pc, &i);
+
+    assert(bql_locked());
+    if (old) {
+        old->refs++;
+        return;
+    }
+    xemu_hooks_init();
+    if (!gdb_bps) {
+        gdb_bps = g_array_new(false, false, sizeof(GdbBp));
+    }
+    b.id = xemu_hooks_add(pc, XEMU_HOOK_PRIO_GDB, gdb_bp_hook, NULL);
+    g_array_append_val(gdb_bps, b);
+    if (runstate_is_running()) {
+        /* The safe work runs after this publish: it needs the BQL. */
+        sites_cover(true);
+        table_publish();
+    } else {
+        xemu_hooks_commit();
+    }
+}
+
+static void gdb_bp_drop(guint i)
+{
+    xemu_hooks_remove(g_array_index(gdb_bps, GdbBp, i).id);
+    g_array_remove_index_fast(gdb_bps, i);
+}
+
+/* The site stays, hookless, so a later breakpoint there costs nothing. */
+void xemu_gdb_bp_site_remove(vaddr pc)
+{
+    guint i;
+    GdbBp *b = gdb_bp_find(pc, &i);
+
+    assert(bql_locked());
+    if (!b || --b->refs) {
+        return;
+    }
+    gdb_bp_drop(i);
+    xemu_hooks_commit();
+}
+
+void xemu_gdb_bp_site_remove_all(void)
+{
+    assert(bql_locked());
+    if (!gdb_bps || !gdb_bps->len) {
+        return;
+    }
+    while (gdb_bps->len) {
+        gdb_bp_drop(0);
+    }
+    xemu_hooks_commit();
 }
 
 void xemu_hooks_state_loaded(void)

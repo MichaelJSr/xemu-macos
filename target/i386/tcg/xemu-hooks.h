@@ -18,13 +18,20 @@
  *    TB, which re-executes an instruction that already started
  *    (cpu_io_recompile under icount, precise SMC, a watchpoint), has no
  *    call: the hooks ran for that arrival in the TB it started in.
- *    gdbstub breakpoints are separate (cpu->breakpoints) and keep
- *    working beside hooks.
+ *    gdbstub breakpoints (BP_GDB) are sites too, with a hook that runs
+ *    first and raises EXCP_DEBUG (xemu_gdb_bp_site_insert); the lookup's
+ *    exact-PC check (check_for_breakpoints_slow) still fires before a
+ *    TB, and DR7 breakpoints (BP_CPU) keep the one-instruction TBs.
  *  - A TB translated after a site exists holds its call, so only older
  *    TBs need invalidating: at each commit and each VM start, for every
  *    site with hooks, the TBs on the physical page its PC maps to then,
  *    once per page (a load may map the PC elsewhere), or all TBs when it
- *    is unmapped, as for a gdb breakpoint. Removing the last hook of a
+ *    is unmapped, as for a gdb breakpoint. A CF_PCREL TB runs at every
+ *    mapping of its code, so the translator also cuts and calls at each
+ *    address whose RAM address a site's PC has mapped to (those pages);
+ *    the call reads the running PC, so elsewhere it finds no site and a
+ *    TB translated at an alias still runs the hooks at the site's PC.
+ *    Removing the last hook of a
  *    site keeps the site: a later hook at the same PC then costs no
  *    retranslation. A hookless site that still runs often (more than
  *    XEMU_HOOK_IDLE_PURGE arrivals) is dropped, and its pages
@@ -70,6 +77,7 @@ typedef void (*XemuHookFn)(XemuHookCtx *ctx, void *opaque);
 
 /* Hooks at one PC run in ascending priority, then in the order added. */
 enum {
+    XEMU_HOOK_PRIO_GDB = -1,        /* a gdb breakpoint: before any hook */
     XEMU_HOOK_PRIO_UNTIL = 0,       /* run-until checks: before any action */
     XEMU_HOOK_PRIO_ACTION = 100,    /* collectors and setters */
 };
@@ -196,14 +204,19 @@ bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *p);
 uint64_t xemu_hook_pred_raw(const uint8_t *b, int size);
 bool xemu_hook_pred_compare(const XemuHookPred *p, uint64_t raw);
 
-/* Translator side (vCPU thread, under RCU). */
+/*
+ * Translator side (vCPU thread, under RCU): whether the insn at @pc, RAM
+ * address @phys (-1: none), starts a site's TB. A TB at another mapping
+ * of a site's code is cut there too: under CF_PCREL it may run at the
+ * site's PC.
+ */
 extern unsigned xemu_hooks_nsites;
-bool xemu_hooks_site_at_slow(vaddr pc);
+bool xemu_hooks_site_at_slow(vaddr pc, uint64_t phys);
 
-static inline bool xemu_hooks_site_at(vaddr pc)
+static inline bool xemu_hooks_site_at(vaddr pc, uint64_t phys)
 {
     return unlikely(qatomic_read(&xemu_hooks_nsites) != 0) &&
-           xemu_hooks_site_at_slow(pc);
+           xemu_hooks_site_at_slow(pc, phys);
 }
 
 /* ui/xemu.c: the frame advance a hook can end (BQL held). */

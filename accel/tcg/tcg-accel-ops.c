@@ -39,9 +39,7 @@
 #include "exec/tb-flush.h"
 #include "exec/translation-block.h"
 #if defined(XBOX)
-#include "exec/target_page.h"
-#include "system/memory.h"
-#include "qemu/rcu.h"
+#include "gdbstub/xemu.h"
 #endif
 #include "exec/watchpoint.h"
 #include "gdbstub/enums.h"
@@ -135,51 +133,20 @@ static inline int xlat_gdb_type(CPUState *cpu, int gdbtype)
     return cputype;
 }
 
-#if defined(XBOX)
 /*
- * xemu: a gdb breakpoint must invalidate the code it sits in. Upstream
- * checks breakpoints only where a TB is looked up and gets away without
- * invalidating because goto_tb never leaves a page, so every arrival in a
- * page passes a lookup. This fork enters a page without one through
- * cross-page goto_tb chains (xpage), the inline jump-cache probe and the
- * inline return memo, so a breakpoint on warm code could take hundreds of
- * frames to fire. Invalidating the TBs on the breakpoint's physical page
- * (tb_invalidate_phys_range is page-wide in this fork; the byte alone
- * would do) unlinks the chains into them and fails both probes (CF_INVALID,
- * and under CF_PCREL the jump cache and return memo are cleared). Removal
- * does the same, dropping links made to single-instruction BP-page TBs
- * while it was armed. A page with no mapping now could still hold TBs from
- * an earlier mapping: flush everything then. gdb re-inserts breakpoints on
- * each resume, so each step pays one page invalidation.
+ * xemu: a gdb breakpoint is a guest PC hook site (xemu_gdb_bp_site_insert,
+ * target/i386/tcg/system/xemu-hooks.c). Upstream checks breakpoints only
+ * where a TB is looked up and runs the rest of the breakpoint's page one
+ * instruction per TB (CF_BP_PAGE), and gets away without invalidating
+ * because goto_tb never leaves a page. This fork also enters a page
+ * through cross-page chains (xpage), the inline jump-cache probe and the
+ * inline return memo, so it invalidated the page at every Z0 and z0, and
+ * the one-instruction TBs cost ~30% of a frame on a hot page. The site's
+ * TB calls a hook that raises EXCP_DEBUG however it is entered; only a
+ * PC's first breakpoint invalidates its page (or flushes everything for
+ * an unmapped PC, as an earlier mapping may have left TBs), and a z0
+ * leaves the hookless site behind, so z0/s/Z0/c invalidates nothing.
  */
-static void xemu_gdb_bp_invalidate(CPUState *cpu, vaddr pc)
-{
-    MemTxAttrs attrs;
-    hwaddr page = cpu_get_phys_page_attrs_debug(cpu, pc & TARGET_PAGE_MASK,
-                                                &attrs);
-    ram_addr_t ra = RAM_ADDR_INVALID;
-
-    if (page == -1) {
-        queue_tb_flush(cpu);
-        return;
-    }
-    WITH_RCU_READ_LOCK_GUARD() {
-        AddressSpace *as =
-            cpu_get_address_space(cpu, cpu_asidx_from_attrs(cpu, attrs));
-        hwaddr xlat, len = 1;
-        MemoryRegion *mr = address_space_translate(
-            as, page | (pc & ~TARGET_PAGE_MASK), &xlat, &len, false, attrs);
-        if (memory_region_is_ram(mr) || memory_region_is_romd(mr)) {
-            ra = memory_region_get_ram_addr(mr) + xlat;
-        }
-    }
-    /* MMIO code runs from one-shot TBs (phys_pc == -1): nothing cached. */
-    if (ra != RAM_ADDR_INVALID) {
-        tb_invalidate_phys_range(NULL, ra, ra);
-    }
-}
-#endif
-
 static int tcg_insert_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
 {
     CPUState *cpu;
@@ -196,7 +163,7 @@ static int tcg_insert_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
         }
 #if defined(XBOX)
         if (!err) {
-            xemu_gdb_bp_invalidate(cs, addr);
+            xemu_gdb_bp_site_insert(addr);
         }
 #endif
         return err;
@@ -230,9 +197,9 @@ static int tcg_remove_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
                 break;
             }
         }
-        #if defined(XBOX)
+#if defined(XBOX)
         if (!err) {
-            xemu_gdb_bp_invalidate(cs, addr);
+            xemu_gdb_bp_site_remove(addr);
         }
 #endif
         return err;
@@ -255,12 +222,7 @@ static int tcg_remove_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
 static inline void tcg_remove_all_breakpoints(CPUState *cpu)
 {
 #if defined(XBOX)
-    CPUBreakpoint *bp;
-    QTAILQ_FOREACH(bp, &cpu->breakpoints, entry) {
-        if (bp->flags & BP_GDB) {
-            xemu_gdb_bp_invalidate(cpu, bp->pc);
-        }
-    }
+    xemu_gdb_bp_site_remove_all();
 #endif
     cpu_breakpoint_remove_all(cpu, BP_GDB);
     cpu_watchpoint_remove_all(cpu, BP_GDB);

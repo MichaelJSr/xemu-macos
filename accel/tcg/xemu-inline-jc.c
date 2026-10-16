@@ -24,10 +24,11 @@
  * set is probed: a way-1 entry falls through to the helper, whose C
  * lookup swaps it into way 0 (a second inline way cost more to
  * translate than it saved). The live tb->cflags load
- * catches CF_INVALID from invalidation; gdb breakpoint insertion
- * invalidates the TBs on the breakpoint's page (xemu_gdb_bp_invalidate
- * in tcg-accel-ops.c), so hits cannot skip a new breakpoint. Interrupts are seen at the target TB's entry check,
- * as with any goto_tb/goto_ptr chain.
+ * catches CF_INVALID from invalidation; a gdb breakpoint is a hook
+ * site, whose first insertion invalidates the TBs on its page and whose
+ * TB raises the stop itself, so hits cannot skip a new breakpoint.
+ * Interrupts are seen at the target TB's entry check, as with any
+ * goto_tb/goto_ptr chain.
  */
 #include "qemu/osdep.h"
 #include "exec/translation-block.h"

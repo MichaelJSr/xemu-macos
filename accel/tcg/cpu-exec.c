@@ -49,6 +49,7 @@
 #include "internal-common.h"
 #if defined(XBOX)
 #include "xemu-inv-prof.h"
+#include "exec/xemu-breakpoints.h"
 #include "xemu-xpage.h"
 #endif
 
@@ -848,6 +849,14 @@ static bool check_for_breakpoints_slow(CPUState *cpu, vaddr pc,
                 return true;
             }
         } else if (((pc ^ bp->pc) & TARGET_PAGE_MASK) == 0) {
+#if defined(XBOX)
+            /*
+             * xemu: a gdb breakpoint is a guest PC hook site whose TB
+             * raises EXCP_DEBUG however it is entered (tcg-accel-ops.c),
+             * so its page runs as usual. DR7 breakpoints still single-step.
+             */
+            if (bp->flags & BP_CPU)
+#endif
             match_page = true;
         }
     }
@@ -1499,7 +1508,7 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 #if defined(XBOX)
         if (replay_mode == REPLAY_MODE_NONE &&
             tb_cflags(tb) == curr_cflags(cpu) &&
-            QTAILQ_EMPTY(&cpu->breakpoints) &&
+            !xemu_cpu_breakpoints(cpu) &&
             QTAILQ_EMPTY(&cpu->watchpoints) && !cpu->singlestep_enabled) {
             /* CF_PCREL: the cpu state holds this TB's start pc now. */
             TCGTBCPUState st = xemu_get_tb_cpu_state(cpu);
@@ -1636,13 +1645,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #endif
 #if defined(XBOX)
             /*
-             * An armed breakpoint makes no new cross-page links: a link made
-             * through an alias mapping could later enter the breakpoint's
-             * page without a lookup (xemu_gdb_bp_invalidate).
+             * An armed DR7 breakpoint makes no new cross-page links: a link
+             * made through an alias mapping could later enter the
+             * breakpoint's page without a lookup, past its one-instruction
+             * TBs. A gdb breakpoint's site TB raises EXCP_DEBUG however it
+             * is entered (tcg-accel-ops.c), so it needs no such care.
              */
-            if (last_tb && unlikely(!QTAILQ_EMPTY(&cpu->breakpoints)) &&
-                ((tb_page_addr0(last_tb) ^ tb_page_addr0(tb)) &
-                 TARGET_PAGE_MASK)) {
+            if (last_tb && ((tb_page_addr0(last_tb) ^ tb_page_addr0(tb)) &
+                            TARGET_PAGE_MASK) &&
+                unlikely(xemu_cpu_breakpoints(cpu))) {
                 last_tb = NULL;
             }
 #endif

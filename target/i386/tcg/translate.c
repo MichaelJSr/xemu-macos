@@ -7168,6 +7168,18 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 #endif
 }
 
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+/* The RAM address of @pc on the TB's first page, or -1 (MMIO code). */
+static uint64_t xemu_hook_phys(DisasContext *dc, vaddr pc)
+{
+    tb_page_addr_t p0 = tb_page_addr0(dc->base.tb);
+
+    assert(translator_is_same_page(&dc->base, pc));
+    return p0 == -1 ? (uint64_t)-1
+                    : (p0 & TARGET_PAGE_MASK) | (pc & ~TARGET_PAGE_MASK);
+}
+#endif
+
 static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
@@ -7196,7 +7208,8 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
      */
     if (dc->base.num_insns == 1 &&
         !(tb_cflags(dc->base.tb) & CF_NOIRQ) &&
-        xemu_hooks_site_at(dc->base.pc_next)) {
+        xemu_hooks_site_at(dc->base.pc_next,
+                           xemu_hook_phys(dc, dc->base.pc_next))) {
         gen_helper_xemu_hook(tcg_env, tcg_constant_tl(dc->base.pc_next),
                              tcg_constant_i32(tb_cflags(dc->base.tb) &
                                               CF_PCREL ? 1 : 0));
@@ -7260,7 +7273,8 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         } else if (!translator_is_same_page(&dc->base, dc->base.pc_next)) {
             dc->base.is_jmp = DISAS_TOO_MANY;
 #if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
-        } else if (xemu_hooks_site_at(dc->base.pc_next)) {
+        } else if (xemu_hooks_site_at(dc->base.pc_next,
+                                      xemu_hook_phys(dc, dc->base.pc_next))) {
             /* Start the next TB at the hook site. */
             dc->base.is_jmp = DISAS_TOO_MANY;
 #endif

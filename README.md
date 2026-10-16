@@ -311,9 +311,9 @@ Other automation interfaces (windowed or headless):
   starts at doesn't count, so repeated calls walk hit to hit; `trace`
   and `trace-every` work as for `xemu-frame-advance`. Under icount it is
   exact and repeatable, and a run cut into hits ends on the same RAM as
-  one straight advance. The hooks are compiled into the translated code:
-  gdbstub breakpoints keep working beside them, and the fast paths a
-  breakpoint turns off stay on. The first call at a PC retranslates its
+  one straight advance. The hooks are compiled into the translated code,
+  so the fast paths stay on; gdbstub breakpoints are built the same way
+  and keep working beside them. The first call at a PC retranslates its
   page once; later calls there cost about 1-2 ms each.
 - **Collect at guest PCs**: `xemu-hooks-set {"hooks": [{"pcs": [P,
   ...], "cond": [...], "key": {"addr": E, "size": N}, "collect":
@@ -572,10 +572,18 @@ Other automation interfaces (windowed or headless):
   first instead of reporting that breakpoint again. The stub single-steps
   it itself with the `s` flags (no IRQs, no timers), so the guest runs
   exactly as under `z0`/`s`/`Z0`/`c` (same RAM under icount), in one
-  packet and with no code invalidation (each `Z0`/`z0` invalidates its
-  page). `s` steps over a breakpoint under the PC in every build. Off by
+  packet. `s` steps over a breakpoint under the PC in every build. Off by
   default and for each new connection; `Qxemu.stepover:0` turns it off,
   `qxemu.stepover` reads it.
+- **gdbstub breakpoints cost nothing until hit**: a `Z0`/`Z1` breakpoint
+  is compiled into the translated code as an `xemu-run-until` PC is, so
+  an armed one leaves the rest of its page at full speed (it used to run
+  one instruction per block: about 30% more host cycles per frame for a
+  breakpoint on hot code), and only the first `Z0` at a PC retranslates
+  its page; `z0` and a later `Z0` there invalidate nothing, so a
+  `z0`/`s`/`Z0`/`c` stop costs about a quarter of what it did. DR7
+  hardware breakpoints the guest sets itself still single-step their
+  page.
 - **gdbstub batched reads**: `qxemu.read:addr,len;addr,len;...`
   (advertised as `qxemu.read+`; hex, up to 4 MiB in all) answers many
   `m` reads in one round trip. The reply has one `;`-separated field per
