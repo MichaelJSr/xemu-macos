@@ -504,7 +504,6 @@ XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
                 st->missed += capture_page(img, b, i, base, copy, &n);
             }
         }
-        st->logged |= partial;
     }
 
     if (n) {
@@ -595,7 +594,6 @@ void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
                 st->missed += restore_page(b, i, img);
             }
         }
-        st->logged |= partial;
     }
     synced_to(img);
 }

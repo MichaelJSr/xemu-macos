@@ -22,7 +22,6 @@ typedef struct XemuRamStats {
     uint64_t checked;   /* pages compared */
     uint64_t differ;    /* pages that differed: stored or written back */
     uint64_t missed;    /* with verify: differing pages the log missed */
-    bool logged;        /* the dirty log chose the pages */
 } XemuRamStats;
 
 /*
