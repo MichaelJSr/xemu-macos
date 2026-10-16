@@ -1093,3 +1093,132 @@
             '*trace': ['XemuTraceRegion'], '*trace-every': 'int',
             '*stop-when': ['XemuRunStop'], '*hits': 'int' },
   'returns': 'XemuRunInfo', 'coroutine': true }
+
+##
+# Guest memory access log
+# =======================
+##
+
+##
+# @XemuWatchAccess:
+#
+# Which accesses a watched range logs, or what a logged access did.
+#
+# @r: reads
+#
+# @w: writes
+#
+# @rw: reads and writes; in a hit, an atomic read-modify-write
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuWatchAccess', 'data': [ 'r', 'w', 'rw' ] }
+
+##
+# @XemuWatchRange:
+#
+# Guest memory whose CPU accesses @xemu-watch-start logs.
+#
+# @address: physical address, or with @virtual a virtual one
+#
+# @size: bytes, 1 to 16 MiB; the range must end at or below 4 GiB
+#
+# @virtual: match the virtual addresses accesses use (default false:
+#     match physical addresses, so every mapping of the RAM is seen,
+#     the 0xF0000000 window included).  A physical range lies in RAM
+#     or entirely outside it (device MMIO).
+#
+# @access: the accesses to log
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuWatchRange',
+  'data': { 'address': 'uint64', 'size': 'uint64', '*virtual': 'bool',
+            'access': 'XemuWatchAccess' } }
+
+##
+# @XemuWatchHit:
+#
+# One CPU access that overlapped a watched range.
+#
+# @frame: the frame counter (see @query-xemu-frame) at the access
+#
+# @pc: linear address of the instruction that made it (EIP plus the
+#     CS base, which is 0 on the Xbox)
+#
+# @address: virtual address of the access
+#
+# @physical: physical address of the access
+#
+# @size: bytes accessed (an access that crosses a page is logged as
+#     one hit per page)
+#
+# @access: r, w, or rw for an atomic read-modify-write
+#
+# @value: the bytes accessed, in memory order, as lowercase hex (at
+#     most the first 64): what a read read, and what a write left
+#     there, read back at the next logged access or at the end of the
+#     current translated block (a logged write kicks the vCPU so that
+#     it reads the bytes back there).  Absent for device MMIO, whose
+#     reads have side effects.
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuWatchHit',
+  'data': { 'frame': 'int', 'pc': 'uint64', 'address': 'uint64',
+            'physical': 'uint64', 'size': 'int',
+            'access': 'XemuWatchAccess', '*value': 'str' } }
+
+##
+# @XemuWatchLog:
+#
+# @hits: the logged accesses, in the order the guest made them
+#
+# @dropped: accesses past @xemu-watch-start's max that were counted
+#     but not kept
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuWatchLog',
+  'data': { 'hits': ['XemuWatchHit'], 'dropped': 'int' } }
+
+##
+# @xemu-watch-start:
+#
+# Start logging the CPU's accesses to @ranges without stopping the
+# VM: while it runs (@xemu-frame-advance, cont, the gdbstub), every
+# load or store that overlaps a range of the right access is kept
+# with its frame, pc, address, size and value.  Under -icount the log
+# is the same in every run, and the guest runs exactly as it would
+# without the log.  Device DMA is not seen.  Start it with the VM
+# paused for a log that begins at an exact instruction.
+#
+# @ranges: what to watch, 1 to 64 ranges
+#
+# @max: the most hits to keep until the next @xemu-watch-drain or
+#     @xemu-watch-stop, 1 to 1000000 (default 100000)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-watch-start',
+  'data': { 'ranges': ['XemuWatchRange'], '*max': 'int' } }
+
+##
+# @xemu-watch-drain:
+#
+# Return the hits logged since the start or the last drain, and keep
+# logging.
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-watch-drain', 'returns': 'XemuWatchLog' }
+
+##
+# @xemu-watch-stop:
+#
+# Stop logging and return the hits logged since the start or the last
+# drain.
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-watch-stop', 'returns': 'XemuWatchLog' }

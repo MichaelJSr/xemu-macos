@@ -473,6 +473,30 @@ Other automation interfaces (windowed or headless):
   `xemu-frame-advance`, which returns `debug-stop: true` at each hit)
   runs to the next hit as `c` does. (Before this fix the first hit wedged
   the vCPU thread, and QMP and the gdbstub went silent.)
+- **Memory access log** (who reads or writes a field, without stops):
+  QMP `xemu-watch-start {"ranges": [{"address": A, "size": S, "access":
+  "w"}]}` logs every CPU load or store that overlaps a range while the
+  VM runs (`xemu-frame-advance`, `cont`, the gdbstub). `"access"` is
+  `r`, `w` or `rw`. A range is physical by default and then matches every
+  mapping of that RAM (or device MMIO, for a range outside RAM);
+  `"virtual": true` matches virtual addresses. Up to 64 ranges of 1 byte
+  to 16 MiB, below 4 GiB. `xemu-watch-drain` returns the hits so far and
+  keeps logging; `xemu-watch-stop` returns them and stops. A hit is
+  `{frame, pc, address, physical, size, access, value}`: `pc` is the
+  accessing instruction, and `value` holds the bytes in hex (at most 64),
+  that is, what a read read and what a write left. MMIO hits have no
+  `value`. Hits past `"max"` (default 100000, up to 1000000) are only
+  counted, in `dropped`. Under icount the log is the same in every run and
+  the guest's RAM is the same as without it. Start the log while paused
+  for an exact first instruction. Not logged: device DMA and page-table
+  walks. An access that crosses a page boundary gives one hit per page.
+  Every access to a watched page takes the slow path, and a logged
+  write makes the vCPU leave its chain of translated blocks once to read
+  the value back, so a busy page costs some speed. Beside gdb `Z2`-`Z4`
+  watchpoints the log still sees every access, the one that hit
+  included. Example: Azurik's player entity, `+0x18` (event
+  clock, virtual): two dword stores every frame, from `pc` `0xab8a1` and
+  `0xab8a4`.
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

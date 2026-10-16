@@ -49,6 +49,7 @@
 #include "tlb-bounds.h"
 #include "internal-common.h"
 #include "xemu-xpage.h"
+#include "exec/xemu-watch.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin-memory.h"
 #endif
@@ -1253,6 +1254,7 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     wp_flags |= mem_access_callback_address_matches(cpu,
                                                     iotlb & TARGET_PAGE_MASK,
                                                     TARGET_PAGE_SIZE);
+    wp_flags |= xemu_watch_tlb_flags(cpu, addr_page, paddr_page, addend);
 #endif
 
     index = tlb_index(cpu, mmu_idx, addr_page);
@@ -1718,6 +1720,8 @@ void *probe_access(CPUArchState *env, vaddr addr, int size,
 #ifdef XBOX
             mem_check_access_callback_vaddr(env_cpu(env), addr, size, wp_access,
                                             full);
+            xemu_watch_check(env_cpu(env), addr, size, wp_access, full,
+                             flags, host, retaddr);
 #endif
             cpu_check_watchpoint(env_cpu(env), addr, size,
                                  full->attrs, wp_access, retaddr);
@@ -1974,6 +1978,7 @@ static void mmu_watch_or_dirty(CPUState *cpu, MMULookupPageData *data,
         int wp = access_type == MMU_DATA_STORE ? BP_MEM_WRITE : BP_MEM_READ;
 #ifdef XBOX
         mem_check_access_callback_vaddr(cpu, addr, size, wp, full);
+        xemu_watch_check(cpu, addr, size, wp, full, flags, data->haddr, ra);
 #endif
         cpu_check_watchpoint(cpu, addr, size, full->attrs, wp, ra);
         flags &= ~TLB_WATCHPOINT;
@@ -2167,6 +2172,8 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
         }
 #ifdef XBOX
         mem_check_access_callback_vaddr(cpu, addr, size, wp_flags, full);
+        xemu_watch_check(cpu, addr, size, wp_flags, full, tlb_addr,
+                         hostaddr, retaddr);
 #endif      
         cpu_check_watchpoint(cpu, addr, size,
                              full->attrs, wp_flags, retaddr);

@@ -159,7 +159,9 @@ park/resume via `migrate file:`. QMP sends events only after
 gdbstub drivers: every `Z0`/`z0` invalidates the code on its page, so
 don't lift and re-arm breakpoints around each resume. `s` already steps
 over a breakpoint under the PC, and after `Qxemu.stepover:1` a plain `c`
-does. Batch independent reads at a stop with `qxemu.read`. gdbstub
+does. Batch independent reads at a stop with `qxemu.read`. To find
+who reads or writes a field, use the QMP access log (`xemu-watch-start`,
+no stops) rather than `Z2`-`Z4`, which work but stop at every hit. gdbstub
 memory packets never reach MMIO (`E14`); HMP `xp` and `pmemsave` do, so
 keep those to RAM.
 

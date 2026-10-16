@@ -41,4 +41,5 @@ system_ss.add(files(
   'tcg-accel-ops-mttcg.c',
   'tcg-accel-ops-rr.c',
   'watchpoint.c',
+  'xemu-watch.c',
 ))
