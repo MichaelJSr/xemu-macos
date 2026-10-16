@@ -265,6 +265,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
 | `XEMU_STRICT_CPUID=1` | Instructions the guest CPU model lacks raise #UD (pentium3: SSE2, SSE3's FISTTP, LFENCE), reported on stderr and as QMP `XEMU_CPUID_FAULT`; by default TCG runs them. A new legacy 0F-map SSE opcode from an upstream merge needs a row in its table | `i386/xemu_strict_cpuid.c` (table: `i386/xemu-strict-cpuid.c.inc`) |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
+| `XEMU_PFIFO_STALL_DOORBELL=0` | Normal mode: a DMA_PUT doorbell inside a flip stall wakes the PFIFO thread again (by default it only publishes PUT) | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |

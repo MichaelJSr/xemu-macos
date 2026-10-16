@@ -473,6 +473,8 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
     {
         const char *e = getenv("XEMU_PFIFO_PUT_LOCK");
         d->pfifo.lockless_put = !icount_enabled() && !(e && e[0] == '1');
+        e = getenv("XEMU_PFIFO_STALL_DOORBELL");
+        d->pfifo.stall_doorbell = !(e && e[0] == '0');
     }
 
     qemu_mutex_init(&d->pfifo.lock);

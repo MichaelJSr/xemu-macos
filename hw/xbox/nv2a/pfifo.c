@@ -153,6 +153,30 @@ void pfifo_put_doorbell(NV2AState *d, uint32_t put)
     qatomic_store_release(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT], put);
     qatomic_store_release(&d->pfifo.doorbell, true);
     smp_mb();
+    /*
+     * Inside a flip stall a new PUT gives the thread nothing to do: it
+     * would only take pgraph.lock, find the flip incomplete and park
+     * again (three of four wakes on heavy-f1). Only the vCPU ends the
+     * stall, by moving READ_3D: NV_PGRAPH_INCREMENT kicks, and a direct
+     * NV_PGRAPH_SURFACE write (no kick) is the vCPU's own store, which
+     * this test reads. The acquire pairs with FLIP_STALL's release, so
+     * WRITE_3D is the one the stall compares against. After the barrier
+     * above, a stale true can't meet a thread that parked without seeing
+     * the doorbell, which stays set: a thread that hasn't parked runs the
+     * pusher once more. A PUT equal to GET (a re-rung doorbell on an idle
+     * FIFO, as a guest polling a report value might write) still wakes:
+     * the FIFO-idle report delivery (process_pending_reports) runs only
+     * then. XEMU_PFIFO_STALL_DOORBELL=0 always wakes.
+     */
+    if (d->pfifo.stall_doorbell &&
+        qatomic_load_acquire(&d->pgraph.waiting_for_flip) &&
+        put != qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET])) {
+        uint32_t s = qatomic_read(&d->pgraph.regs_[NV_PGRAPH_SURFACE]);
+        if (GET_MASK(s, NV_PGRAPH_SURFACE_READ_3D) ==
+            GET_MASK(s, NV_PGRAPH_SURFACE_WRITE_3D)) {
+            return;
+        }
+    }
     if (qatomic_read(&d->pfifo.parked) &&
         qatomic_xchg(&d->pfifo.parked, false)) {
         qemu_mutex_lock(&d->pfifo.lock);

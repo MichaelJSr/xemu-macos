@@ -115,6 +115,8 @@ typedef struct NV2AState {
         bool inline_locked;
         /* Normal mode: DMA_PUT doorbells skip pfifo.lock (pfifo_put_doorbell) */
         bool lockless_put;
+        /* ... and don't wake the thread inside a flip stall */
+        bool stall_doorbell;
         bool doorbell;
         bool parked;
     } pfifo;

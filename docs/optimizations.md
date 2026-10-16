@@ -22,8 +22,8 @@ opt-in for an unvalidated host or tuning knob tied to an entry in the
 Changes manifest below, and every one has a `getenv` on this branch.
 Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
-can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK` and
-`XEMU_GUEST_MO`, the first three rows. The other `=0` row,
+can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
+`XEMU_PFIFO_STALL_DOORBELL` and `XEMU_GUEST_MO`, the first four rows. The other `=0` row,
 `XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass. Knobs that exist
 only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
@@ -33,6 +33,7 @@ and tag `archive/windows-wave1-wip`.
 |---|---|
 | `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`; `0` leaves it at the default class (less P-core time and power, slower under load). Deterministic mode's RR thread always requests it. Threads + runtime, P-core QoS |
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
+| `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
@@ -2184,6 +2185,33 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (+19.7%, 3+/1−). Goldens unchanged; xbox suite 7/7.
   `XEMU_PFIFO_PUT_LOCK=1` restores the lock in normal mode
   (normal-mode switch: the goldens always take the locked path).
+- **No doorbell wake inside a flip stall (2026-10-16).** On windowed
+  heavy-f1 the PFIFO thread parked ~27k times a second and three of four
+  wakes landed inside a flip stall (58% of wall), where a new PUT gives
+  it nothing to do: it took `pgraph.lock`, found the flip incomplete
+  and parked again, and the vCPU paid ~1.5 µs per broadcast.
+  `pfifo_put_doorbell` now returns after publishing PUT and the doorbell
+  flag when `waiting_for_flip` is set (acquire, against FLIP_STALL's
+  now-release store, so WRITE_3D is current), READ_3D == WRITE_3D and
+  the new PUT differs from GET.
+  Only the vCPU ends a flip stall: NV_PGRAPH_INCREMENT kicks, and a
+  direct NV_PGRAPH_SURFACE write is the vCPU's own store, which the
+  doorbell's test reads. The flag stays set, so a thread that has not
+  parked yet runs the pusher once more, and the full barrier keeps a
+  stale `waiting_for_flip` from meeting a thread that parked without
+  seeing it. Reports are unaffected: their delivery returns early while
+  GET != PUT, which every skipped doorbell makes true; a re-rung PUT
+  equal to GET (a guest polling a report on an idle FIFO) still wakes,
+  so FIFO-idle delivery runs as before (heavy-f1 and the cold boot write
+  none: 0 of 838k doorbells). Same binary,
+  `XEMU_PFIFO_STALL_DOORBELL=0` vs default, windowed at the cap: in-stall
+  wakes heavy-f1 4246 → 182/s (−96%), W2 2806 → 314/s (−89%) (xwx
+  interposer, load 15-20); PFIFO thread CPU heavy-f1 40.4 → 36.0%, W2
+  30.1 → 26.3% (2 pairs each, load 10-59; its system time 7.9 → 3.0%
+  and 6.5 → 2.3%); bench-abx 2 pairs × 45 s at load 15-26: heavy-f1
+  60.14 → 60.10 fps, process CPU 178.5 → 166.8%; W2 60.11 → 60.11 fps,
+  169.9 → 161.4%. Heartbeat soak over 12 loadvms advancing, transition,
+  stream-e2 walk and movie runs flip throughout; goldens unchanged.
 - **BQL-free MMIO dispatch for the hottest guest register blocks.**
   `XEMU_MMIO_PROF` measured 78% of 8.2M guest MMIO ops/70 s hitting
   just PFB (`NV_PFB_WBC` polling) and USER doorbells, each paying
@@ -2223,6 +2251,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   already-pending, plus the PFIFO thread's idle parks. It closed kick
   suppression (0 of 412,074 suppressible; Settled vectors). No kick is
   ever suppressed: a wrongly-skipped kick is a permanent PFIFO hang.
+  The one exception is the DMA_PUT doorbell inside a flip stall (above),
+  where the thread can't act on the new PUT and only the vCPU's
+  INCREMENT kick or its next doorbell ends the stall.
 - **Leaner deterministic inline pusher (2026-10-15).** With the null
   renderer under icount the vCPU runs the pusher itself
   (`pfifo_icount_sync`) holding both locks, and PMI put the pusher's own

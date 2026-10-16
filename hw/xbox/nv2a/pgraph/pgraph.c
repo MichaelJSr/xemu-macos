@@ -1241,7 +1241,8 @@ DEF_METHOD(NV097, FLIP_STALL)
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
     nsprof_flip_wait_begin();
-    qatomic_set(&pg->waiting_for_flip, true);
+    /* Release: the DMA_PUT doorbell reads WRITE_3D after this. */
+    qatomic_store_release(&pg->waiting_for_flip, true);
 }
 
 // TODO: these should be loading the dma objects from ramin here?
