@@ -32,6 +32,7 @@ xemu_ss.add(files(
   'xemu.c',
   'xemu-data.c',
   'xemu-snapshots.c',
+  'xemu-disc-fingerprint.c',
   'xemu-checkpoints.c',
   'xemu-checkpoint-ram.c',
   'xemu-ram-digest.c',

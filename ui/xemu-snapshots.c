@@ -55,6 +55,7 @@ static void xemu_snapshots_load_data(BlockDriverState *bs_ro,
                                      XemuSnapshotData *data, Error **err)
 {
     data->disc_path = NULL;
+    data->has_disc_fp = false;
     data->xbe_title_name = NULL;
     data->thumbnail = 0;
 
@@ -119,6 +120,23 @@ static void xemu_snapshots_load_data(BlockDriverState *bs_ro,
         data->thumbnail =
             xemu_snapshots_load_png_thumbnail(&buf[offset], thumbnail_size);
         offset += thumbnail_size;
+    }
+
+    while (offset + 8 <= size) {
+        uint32_t tag = ldl_be_p(&buf[offset]);
+        uint32_t len = ldl_be_p(&buf[offset + 4]);
+        offset += 8;
+        if (len > size - offset) {
+            break;
+        }
+        if (tag == XEMU_SNAPSHOT_DISC_FP_TAG &&
+            len == XEMU_SNAPSHOT_DISC_FP_LEN && data->disc_path) {
+            data->disc_fp.size = ldq_be_p(&buf[offset]);
+            memcpy(data->disc_fp.digest, &buf[offset + 8],
+                   XEMU_DISC_DIGEST_LEN);
+            data->has_disc_fp = true;
+        }
+        offset += len;
     }
 
     g_free(buf);
@@ -269,6 +287,11 @@ void xemu_snapshots_save_extra_data(QEMUFile *f)
     char *path = xemu_get_currently_loaded_disc_path();
     size_t path_size = path ? strlen(path) : 0;
 
+    /* The image's identity by content, for menu loads from other paths */
+    XemuDiscFingerprint disc_fp = { 0 };
+    bool has_disc_fp = path_size && xemu_disc_fingerprint(path, &disc_fp,
+                                                          NULL);
+
     size_t xbe_title_name_size = 0;
     char *xbe_title_name = NULL;
     struct xbe *xbe_data = xemu_get_xbe_info();
@@ -285,7 +308,8 @@ void xemu_snapshots_save_extra_data(QEMUFile *f)
 
     qemu_put_be32(f, XEMU_SNAPSHOT_DATA_MAGIC);
     qemu_put_be32(f, XEMU_SNAPSHOT_DATA_VERSION);
-    qemu_put_be32(f, 4 + path_size + 1 + xbe_title_name_size + 4 + thumbnail_size);
+    qemu_put_be32(f, 4 + path_size + 1 + xbe_title_name_size + 4 + thumbnail_size +
+                     (has_disc_fp ? 8 + XEMU_SNAPSHOT_DISC_FP_LEN : 0));
 
     qemu_put_be32(f, path_size);
     if (path_size) {
@@ -303,6 +327,13 @@ void xemu_snapshots_save_extra_data(QEMUFile *f)
     if (thumbnail_size) {
         qemu_put_buffer(f, (const uint8_t *)thumbnail_buf, thumbnail_size);
         g_free(thumbnail_buf);
+    }
+
+    if (has_disc_fp) {
+        qemu_put_be32(f, XEMU_SNAPSHOT_DISC_FP_TAG);
+        qemu_put_be32(f, XEMU_SNAPSHOT_DISC_FP_LEN);
+        qemu_put_be64(f, disc_fp.size);
+        qemu_put_buffer(f, disc_fp.digest, XEMU_DISC_DIGEST_LEN);
     }
 
     xemu_snapshots_dirty = true;

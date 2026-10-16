@@ -62,9 +62,11 @@ void SnapshotManager::LoadSnapshotChecked(const char *name)
     Refresh();
 
     XemuSnapshotData *data = NULL;
+    QEMUSnapshotInfo *info = NULL;
     for (int i = 0; i < m_snapshots_len; i++) {
         if (!strcmp(m_snapshots[i].name, name)) {
             data = &m_extra_data[i];
+            info = &m_snapshots[i];
             break;
         }
     }
@@ -75,15 +77,43 @@ void SnapshotManager::LoadSnapshotChecked(const char *name)
 
     char *current_disc_path = xemu_get_currently_loaded_disc_path();
     if (data->disc_path && (!current_disc_path || strcmp(current_disc_path, data->disc_path))) {
-        if (current_disc_path) {
-            m_current_disc_path = current_disc_path;
+        /*
+         * Another path: load with the tray's disc if it has the content
+         * the snapshot was saved with, else ask.
+         */
+        char *how = NULL;
+        if (current_disc_path &&
+            xemu_disc_same_content(current_disc_path, data->disc_path,
+                                   data->has_disc_fp ? &data->disc_fp : NULL,
+                                   info->date_sec, &how)) {
+            fprintf(stderr,
+                    "xemu: snapshot '%s': loading with the tray's disc %s, "
+                    "the same as its disc %s (%s)\n",
+                    name, current_disc_path, data->disc_path, how);
+            LoadSnapshot(name);
         } else {
-            m_current_disc_path.clear();
+            if (current_disc_path) {
+                fprintf(stderr,
+                        "xemu: snapshot '%s': saved with disc %s, the tray "
+                        "holds %s (%s); asking\n",
+                        name, data->disc_path, current_disc_path, how);
+            } else {
+                fprintf(stderr,
+                        "xemu: snapshot '%s': saved with disc %s, the tray "
+                        "is empty; asking\n", name, data->disc_path);
+            }
+            if (current_disc_path) {
+                m_current_disc_path = current_disc_path;
+            } else {
+                m_current_disc_path.clear();
+            }
+            m_target_disc_path = data->disc_path;
+            m_target_disc_exists =
+                g_file_test(data->disc_path, G_FILE_TEST_EXISTS);
+            m_pending_load_name = name;
+            m_open_pending = true;
         }
-        m_target_disc_path = data->disc_path;
-        m_target_disc_exists = g_file_test(data->disc_path, G_FILE_TEST_EXISTS);
-        m_pending_load_name = name;
-        m_open_pending = true;
+        g_free(how);
     } else {
         if (!data->disc_path) {
             xemu_eject_disc(NULL);

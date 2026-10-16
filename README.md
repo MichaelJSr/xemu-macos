@@ -257,13 +257,32 @@ Other automation interfaces (windowed or headless):
   port afterwards (config, settings or `xemu-input-bind`) drives the
   plugged pad without a replug. Only pads and their hubs are plugged,
   never memory units.
-- **Snapshots and the disc**: a Snapshots menu (or F5-F8) load whose
-  saved disc path isn't the tray's asks in the "DVD Drive Image"
-  dialog. In the dialog, Yes opens the saved image before the tray's
-  disc comes out, so a Yes that fails leaves the tray as it was
-  (`xemu: snapshot '<tag>': <error>; the tray keeps <tray>; not
-  loaded`), and a saved image that no longer exists is marked missing
-  and gets no Yes (Load Anyway or Cancel, with Cancel focused).
+- **Snapshots and the disc**: a savevm records the tray's disc path and
+  a fingerprint of its image, the size and an XXH3-128 digest of every
+  byte (two builds can differ in one level file rewritten in place, so
+  nothing less tells them apart). It rides after the fields older xemu
+  builds read, so either build loads the other's snapshots. Each image is
+  hashed once per process (cached by path, size, mtime, ctime and inode),
+  so the first savevm with a disc in the tray reads all of it, on up to 8
+  threads, and prints `xemu: disc fingerprint: <path>: <n> bytes,
+  xxh3-128 <hex> (<t> s)` (0.1-0.6 s for the 2.7 GB fixture disc at load
+  50-65); later savevms cost what they did. A read projected past 10 s
+  (a network share) is given up, and that snapshot has no fingerprint.
+  `loadvm`, `snapshot-load` and CLI `-loadvm` still compare no discs and
+  load with whatever is in the tray. The Snapshots menu (and F5-F8)
+  loads with no dialog when the tray holds the same image under another
+  path, such as a sandbox's clone, and says so on stderr: `xemu: snapshot
+  '<tag>': loading with the tray's disc <tray>, the same as its disc
+  <saved> (<how>)`. A snapshot saved before fingerprints is compared with
+  its saved path's file while that file is unchanged since the save
+  (mtime and ctime at or before the snapshot's date; on Windows, which
+  has no change time, such snapshots always ask). Anything else asks,
+  as before, and stderr says why (`... the tray holds <tray> (<reason>);
+  asking`). In the dialog, Yes opens the saved image before the tray's
+  disc comes out, so a Yes that fails leaves the tray as it was (`...;
+  the tray keeps <tray>; not loaded`), and a saved image that no longer
+  exists is marked missing and gets no Yes (Load Anyway or Cancel, with
+  Cancel focused).
 - **Demos as played (live pads under icount)**: with
   `XEMU_ICOUNT_LIVE_PADS=1` and `-icount shift=2,align=on,sleep=on`
   (windowed or headless), host gamepads, and the host keyboard on the

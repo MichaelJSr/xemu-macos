@@ -28,9 +28,19 @@ extern "C" {
 
 #include "block/snapshot.h"
 #include <epoxy/gl.h>
+#include "xemu-disc-fingerprint.h"
 
 #define XEMU_SNAPSHOT_DATA_MAGIC 0x78656d75 // 'xemu'
 #define XEMU_SNAPSHOT_DATA_VERSION 1
+
+/*
+ * Records after version 1's fields, inside its size: <tag> <len> <len
+ * bytes>, all big-endian. Older xemu reads the fields and skips the rest,
+ * so never bump the version for them (a reader that rejects the version
+ * drops the disc path too, and then ejects the disc on a menu load).
+ */
+#define XEMU_SNAPSHOT_DISC_FP_TAG 0x78646670 // 'xdfp': u64 size, digest
+#define XEMU_SNAPSHOT_DISC_FP_LEN (8 + XEMU_DISC_DIGEST_LEN)
 
 #define XEMU_SNAPSHOT_THUMBNAIL_WIDTH 160
 #define XEMU_SNAPSHOT_THUMBNAIL_HEIGHT 120
@@ -39,6 +49,8 @@ extern const char **g_snapshot_shortcut_index_key_map[];
 
 typedef struct XemuSnapshotData {
     char *disc_path;
+    bool has_disc_fp;
+    XemuDiscFingerprint disc_fp;    /* of disc_path's image at the save */
     char *xbe_title_name;
     /* Backend UI texture handle (GLuint or id<MTLTexture>), 0 = none */
     uintptr_t thumbnail;
