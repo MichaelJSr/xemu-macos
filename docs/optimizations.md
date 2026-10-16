@@ -1353,9 +1353,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 - **Monotonic sync clock.** `pgraph_vk_sync` uses
   `QEMU_CLOCK_REALTIME` (CLOCK_MONOTONIC — suspend / NTP slew don't
   stall the 8 ms gate; see "Monotonic present-path clocks" below).
-- **Fence-wait diagnostics.** 5 s timeout wrapper on single-time CBs
-  aborts with the named call site instead of hanging silently on
-  MoltenVK internal-mutex deadlocks.
+- **Fence-wait diagnostics.** The fence-wait wrapper warns at 5 s and
+  aborts at 60 s with the named call site instead of hanging silently on
+  MoltenVK internal-mutex deadlocks (5 s alone killed a startup upload
+  at host load 212).
 - **Narrowed GPU syncs.** `pgraph_vk_upload_surface_data`'s full
   sync only fires when the target is the active color/zeta binding
   or a CB is recording; otherwise MoltenVK's single-queue order +

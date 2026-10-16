@@ -24,14 +24,16 @@
 #include <limits.h>
 
 /*
- * 5 s timeout on fence waits. Normal CPU-side waits should be sub-ms
- * even on MoltenVK; anything past the seconds range is a real hang
- * (driver mutex deadlock, queue starvation, GPU hang). Previously
- * UINT64_MAX masked these as silent freezes with no user-visible
- * diagnostic, matching the failure mode of the reverted depth-export
- * experiment that deadlocked MoltenVK's internal mutex.
+ * Fence waits warn after 5 s and abort after 60 s. Normal CPU-side waits
+ * are sub-ms even on MoltenVK, but a host at load 200+ has stalled a
+ * startup upload past 5 s, so the abort waits for a real hang (driver
+ * mutex deadlock, queue starvation, GPU hang). Previously UINT64_MAX
+ * masked these as silent freezes with no user-visible diagnostic,
+ * matching the failure mode of the reverted depth-export experiment that
+ * deadlocked MoltenVK's internal mutex.
  */
-#define NV2A_VK_FENCE_WAIT_NS (5ull * 1000ull * 1000ull * 1000ull)
+#define NV2A_VK_FENCE_WARN_NS (5ull * 1000ull * 1000ull * 1000ull)
+#define NV2A_VK_FENCE_WAIT_NS (60ull * 1000ull * 1000ull * 1000ull)
 
 void pgraph_vk_exit_if_headless_device_lost(int vk_result)
 {
@@ -51,7 +53,15 @@ static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
                                      const char *where)
 {
     VkResult res =
-        vkWaitForFences(device, 1, &fence, VK_TRUE, NV2A_VK_FENCE_WAIT_NS);
+        vkWaitForFences(device, 1, &fence, VK_TRUE, NV2A_VK_FENCE_WARN_NS);
+    if (res == VK_TIMEOUT) {
+        fprintf(stderr,
+                "xemu: vkWaitForFences in %s still waiting after 5 s "
+                "(host load or GPU contention?); aborting at 60 s\n",
+                where);
+        res = vkWaitForFences(device, 1, &fence, VK_TRUE,
+                              NV2A_VK_FENCE_WAIT_NS - NV2A_VK_FENCE_WARN_NS);
+    }
     if (res == VK_SUCCESS) {
         return;
     }
@@ -65,7 +75,7 @@ static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
     }
     if (res == VK_TIMEOUT) {
         fprintf(stderr,
-                "xemu: vkWaitForFences timeout in %s (>5s). GPU or driver "
+                "xemu: vkWaitForFences timeout in %s (>60 s). GPU or driver "
                 "appears hung; aborting so the user sees the failure "
                 "rather than a frozen window.\n",
                 where);

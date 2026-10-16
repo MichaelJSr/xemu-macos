@@ -47,7 +47,7 @@ have them on any platform. Windows gets them via the same C paths.
 | B4 | Redundant-bind skips: descriptor sets, vertex/index buffers, push constants, dynamic-state caches (`draw.c`) | Equivalence-argued from Vulkan pipeline-layout compatibility and CB-scoped state rules (reasoning in code comments); caches reset at CB begin |
 | B5 | PFIFO untimed idle wait (`pfifo.c`) | Platform-neutral: the lost-wakeup proof is the enumerated kick-site lock discipline, not a platform property |
 | B6 | Surface-expiry host-time throttle (`surface.c`, `QEMU_CLOCK_REALTIME`) | Platform-neutral; monotonic clock on all POSIX + Windows (`get_clock()` uses the monotonic source under both) |
-| B7 | `vk_wait_for_fence_or_die` 5 s abort (`command.c`) | Deliberate cross-platform behavior change: converts silent driver hangs into diagnosable aborts. 5 s is far beyond any legitimate fence wait observed (max ~8 ms in captures) |
+| B7 | `vk_wait_for_fence_or_die` 60 s abort, warning at 5 s (`command.c`) | Deliberate cross-platform behavior change: converts silent driver hangs into diagnosable aborts. A loaded macOS host once stalled a startup upload past 5 s; legitimate waits are ~8 ms in captures |
 | B8 | Deferred zeta-shape eviction + quarantine reuse (`surface.c`) | Reuse: **equivalence-proven** — a migrated image keeps its attachment layout; first GPU touch is ordered against all earlier same-queue submissions by the draw render pass's explicit `VK_SUBPASS_EXTERNAL` dependency (attachment stages/accesses) or the attachment-stage src masks of the transfer transitions; proof comment at `get_any_compatible_invalid_surface`. Destruction: was **formally invalid on every platform** (see C below), fixed by `a045dfc780` |
 | B9 | nsprof + Phase-1 attribution counters (`nsprof.c`, default-off) | Portable C, `getenv`-gated, zero-cost when unset (three flag stores per draw otherwise) |
 | B10 | APU fixes (reset-hold runstate gate `d6da581d4b`, engine-aware mixbuffer bulk copy) | Platform-neutral; engine-gated paths select by `DSPOps`, not platform |
@@ -76,7 +76,7 @@ None of this can be exercised on this machine (VMs expose no Vulkan ICD):
 3. Zeta quarantine/reuse soak on native drivers — equivalence is proven on
    paper, a soak on real HW is the confirmation (B8).
 4. Byte-exact vertex refinement under WHPX guest-write timing (B3).
-5. Fence-or-die 5 s timeout margin on slow/loaded Windows systems (B7).
+5. Fence-or-die margin on slow/loaded Windows systems (B7: warns at 5 s, aborts at 60 s).
 6. Performance: no macOS number transfers; Windows needs its own savestate
    A/B baseline before any perf claim.
 7. Windows PGO (2026-07-05 parity audit): CI's Windows legs are

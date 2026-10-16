@@ -492,8 +492,8 @@
 #
 # @device-lost: the GPU driver returned VK_ERROR_DEVICE_LOST
 #
-# @fence-timeout: a GPU fence did not signal within 5 s (a hung GPU or
-#     driver)
+# @fence-timeout: a GPU fence did not signal within 60 s (a hung
+#     GPU or driver)
 #
 # Since: 10.2
 ##

@@ -543,7 +543,8 @@ Other automation interfaces (windowed or headless):
     before xemu dies of a lost Vulkan device: `reason` is
     `device-lost` (a headless xemu then prints `xemu: Vulkan device
     lost; exiting` and exits with status 1, a windowed one aborts) or
-    `fence-timeout` (no fence within 5 s; a headless xemu then prints
+    `fence-timeout` (no fence within 60 s, after a `still waiting`
+    line at 5 s; a headless xemu then prints
     `xemu: Vulkan call failed; exiting` and exits with status 1, a
     windowed one aborts). `where` names
     the fence wait, if a wait saw it. Best effort: the event is lost
