@@ -332,7 +332,16 @@ static int timers_post_load(void *opaque, int version_id)
         seqlock_write_lock(&s->vm_clock_seqlock, &s->vm_clock_lock);
         qatomic_set_i64(&s->qemu_icount_bias,
                         s->vm_clock_saved - icount_to_ns(s->qemu_icount));
+        /*
+         * A sleep=on warp measures real time on QEMU_CLOCK_VIRTUAL_RT,
+         * which this load just moved: drop the one in progress (an idle
+         * vCPU starts a new one), or its next account adds the jump.
+         */
+        s->vm_clock_warp_start = -1;
         seqlock_write_unlock(&s->vm_clock_seqlock, &s->vm_clock_lock);
+        if (s->icount_warp_timer) {
+            timer_del(s->icount_warp_timer);
+        }
     }
     return 0;
 }

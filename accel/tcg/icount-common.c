@@ -514,6 +514,15 @@ bool icount_configure(QemuOpts *opts, Error **errp)
     }
 
     icount_align_option = align;
+#ifdef XBOX
+    /*
+     * xemu: no warp is pending at start in precise mode either. Left at 0,
+     * the first sleep=on warp added the whole QEMU_CLOCK_VIRTUAL_RT reading,
+     * which after a load is the snapshot's guest uptime (align=on then
+     * slept that long).
+     */
+    timers_state.vm_clock_warp_start = -1;
+#endif
 
     if (time_shift >= 0) {
         timers_state.icount_time_shift = time_shift;
