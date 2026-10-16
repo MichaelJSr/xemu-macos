@@ -3090,6 +3090,8 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
 #ifdef XBOX
     void xemu_checkpoint_ram_loading(void);
     xemu_checkpoint_ram_loading();
+    void xemu_load_verify_loading(void);
+    xemu_load_verify_loading();
     if (!xemu_snapshots_offset_extra_data(f)) {
         return -EINVAL;
     }
@@ -3201,6 +3203,8 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
     if (ret == 0) {
         void xemu_state_loaded(void);
         xemu_state_loaded();
+        void xemu_load_verify_loaded(void);
+        xemu_load_verify_loaded();
         /* Readiness signal for harnesses (loadvm and incoming migration). */
         fprintf(stderr, "xemu: state loaded\n");
     }
@@ -3559,6 +3563,11 @@ bool load_snapshot(const char *name, const char *vmstate,
     }
 #endif
 
+#ifdef XBOX
+    /* XEMU_LOAD_VERIFY: check the last load's RAM before the reset. */
+    void xemu_load_verify_loading(void);
+    xemu_load_verify_loading();
+#endif
     qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
     mis->from_src_file = f;
 
@@ -3702,6 +3711,12 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
         return false;
     }
 
+    /*
+     * XEMU_LOAD_VERIFY: check the last load's RAM now, while it is still
+     * there; load_ram replaces it before qemu_loadvm_state runs.
+     */
+    void xemu_load_verify_loading(void);
+    xemu_load_verify_loading();
     vm_stop(RUN_STATE_RESTORE_VM);
     replay_flush_events();
     /* Stopped and drained, but before drain_begin parks device requests. */

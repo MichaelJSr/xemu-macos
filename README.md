@@ -284,6 +284,17 @@ Other automation interfaces (windowed or headless):
   ms more). `"against": "<checkpoint>"` returns `differ`, the page
   numbers (address / 4096) whose bytes differ from the RAM that
   checkpoint holds (~10 ms; no `sha256` unless `"sha256": true`).
+- **Load check**: with `XEMU_LOAD_VERIFY=1`, every load (`loadvm`,
+  `xemu-checkpoint-restore`, an incoming migration) keeps a copy of
+  guest RAM, and when the VM next starts, or the next load begins
+  first, any page that changed meanwhile is reported in one stderr
+  line: `xemu: load verify: RAM changed between the load and the VM
+  start (frame F): N pages 0x... 0x...` (up to 8 listed). Nothing
+  should change a loaded VM's RAM before it runs; your own writes in
+  that window (gdbstub `M`, a `gpu-sync` dump under Vulkan) count too,
+  while what the start itself does on the vCPU (overdue device timers,
+  PFIFO catching up) does not. It costs a RAM-sized copy (64 or 128
+  MiB) and a few ms per load and per start.
 - **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named POSIX
   shared memory that another process can map (Python:
   `multiprocessing.shared_memory.SharedMemory("<name>")`, then
