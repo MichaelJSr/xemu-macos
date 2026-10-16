@@ -459,6 +459,57 @@ static void xemu_gp_report_top(GHashTable *table, uint32_t filled, int cap,
     }
 }
 
+#ifdef TCG_TARGET_COLD_CODE
+/*
+ * Samples in a TB's cold code (slow paths, stubs: tb->xemu_cold, which
+ * tcg_tb_lookup does not cover) go to its TB through these ranges.
+ */
+typedef struct {
+    uintptr_t lo, hi;
+    TranslationBlock *tb;
+} XemuGpCold;
+
+static gboolean xemu_gp_cold_add(gpointer key, gpointer value, gpointer data)
+{
+    TranslationBlock *tb = value;
+
+    if (tb->xemu_cold.size) {
+        XemuGpCold c = {
+            (uintptr_t)tb->xemu_cold.ptr,
+            (uintptr_t)tb->xemu_cold.ptr + tb->xemu_cold.size, tb
+        };
+        g_array_append_val((GArray *)data, c);
+    }
+    return false;
+}
+
+static gint xemu_gp_cold_cmp(gconstpointer a, gconstpointer b)
+{
+    uintptr_t x = ((const XemuGpCold *)a)->lo, y = ((const XemuGpCold *)b)->lo;
+
+    return x < y ? -1 : x > y;
+}
+
+static TranslationBlock *xemu_gp_cold_lookup(GArray *cold, uintptr_t pc)
+{
+    guint lo = 0, hi = cold->len;
+
+    while (lo < hi) {
+        guint mid = (lo + hi) / 2;
+        XemuGpCold *c = &g_array_index(cold, XemuGpCold, mid);
+
+        if (pc < c->lo) {
+            hi = mid;
+        } else if (pc >= c->hi) {
+            lo = mid + 1;
+        } else {
+            return c->tb;
+        }
+    }
+    return NULL;
+}
+#endif
+
 static void xemu_guestprof_dump(void)
 {
     qatomic_set(&xemu_gp_sampler_stop, true);
@@ -474,11 +525,23 @@ static void xemu_guestprof_dump(void)
     GHashTable *guest = g_hash_table_new(g_direct_hash, g_direct_equal);
     GHashTable *pages = g_hash_table_new(g_direct_hash, g_direct_equal);
     GHashTable *host = g_hash_table_new(g_str_hash, g_str_equal);
-    uint64_t guest_total = 0, host_total = 0, unknown = 0;
+    uint64_t guest_total = 0, host_total = 0, unknown = 0, cold_total = 0;
+#ifdef TCG_TARGET_COLD_CODE
+    GArray *cold = g_array_new(false, false, sizeof(XemuGpCold));
+
+    tcg_tb_foreach(xemu_gp_cold_add, cold);
+    g_array_sort(cold, xemu_gp_cold_cmp);
+#endif
 
     for (uint32_t i = 0; i < filled; i++) {
         uint64_t pc = xemu_gp_ring[i];
         TranslationBlock *tb = tcg_tb_lookup((uintptr_t)pc);
+#ifdef TCG_TARGET_COLD_CODE
+        if (!tb) {
+            tb = xemu_gp_cold_lookup(cold, pc);
+            cold_total += tb != NULL;
+        }
+#endif
         if (tb) {
             XemuGpEnt *e = xemu_gp_find(tb->tc.ptr);
             uint64_t gpc = e ? e->guest_pc : 0;
@@ -512,11 +575,15 @@ static void xemu_guestprof_dump(void)
         }
     }
 
+#ifdef TCG_TARGET_COLD_CODE
+    g_array_free(cold, true);
+#endif
     fprintf(stderr,
-            "xemu: guestprof %u samples: guest-TCG %llu (%.1f%%), "
-            "host %llu (%.1f%%, %llu unsymbolized)\n",
+            "xemu: guestprof %u samples: guest-TCG %llu (%.1f%%, %llu in "
+            "cold code), host %llu (%.1f%%, %llu unsymbolized)\n",
             filled, (unsigned long long)guest_total,
-            100.0 * guest_total / filled, (unsigned long long)host_total,
+            100.0 * guest_total / filled, (unsigned long long)cold_total,
+            (unsigned long long)host_total,
             100.0 * host_total / filled, (unsigned long long)unknown);
 
     xemu_gp_report_top(host, filled, 512, 25, true,

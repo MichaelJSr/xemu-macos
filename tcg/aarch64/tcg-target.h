@@ -49,4 +49,14 @@ typedef enum {
 
 #define TCG_TARGET_NB_REGS 64
 
+/*
+ * Hot/cold TB layout (tcg/region.c): a TB's body goes to the hot part of
+ * a 1 MiB chunk, its slow paths, stubs, constant pool, TranslationBlock
+ * and search data to the cold part. Every hot<->cold reference stays in
+ * one chunk, within the +-1 MiB of B.cond, CBZ, ADR and LDR (literal);
+ * no TBZ/TBNZ (+-32 KiB) may cross.
+ */
+#define TCG_TARGET_COLD_CODE 1
+#define TCG_COLD_CHUNK_SIZE (1 << 20)
+
 #endif /* AARCH64_TCG_TARGET_H */

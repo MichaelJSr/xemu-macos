@@ -442,6 +442,18 @@ struct TCGContext {
     /* Threshold to flush the translated code buffer.  */
     void *code_gen_highwater;
 
+#ifdef TCG_TARGET_COLD_CODE
+    /*
+     * Hot/cold layout (tcg/region.c): code_gen_ptr and code_gen_highwater
+     * cover the hot part of the current chunk [code_gen_hot_start, ...),
+     * these its cold part, which ends at code_gen_chunk_end.
+     */
+    void *code_gen_hot_start;
+    void *code_gen_cold_ptr;
+    void *code_gen_cold_highwater;
+    void *code_gen_chunk_end;
+#endif
+
     /* Track which vCPU triggers events */
     CPUState *cpu;                      /* *_trans */
 
@@ -1034,6 +1046,14 @@ static inline size_t tcg_current_code_size(TCGContext *s)
 {
     return tcg_ptr_byte_diff(s->code_ptr, s->code_buf);
 }
+
+#ifdef TCG_TARGET_COLD_CODE
+/* Make the next tcg_tb_alloc() move both cursors to a fresh chunk. */
+static inline void tcg_code_gen_chunk_full(TCGContext *s)
+{
+    s->code_gen_cold_ptr = s->code_gen_chunk_end;
+}
+#endif
 
 /**
  * tcg_qemu_tb_exec:

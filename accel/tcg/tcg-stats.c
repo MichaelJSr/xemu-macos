@@ -114,6 +114,9 @@ static gboolean tb_tree_stats_iter(gpointer key, gpointer value, gpointer data)
 
     tst->nb_tbs++;
     tst->host_size += tb->tc.size;
+#ifdef TCG_TARGET_COLD_CODE
+    tst->host_size += tb->xemu_cold.size;
+#endif
     tst->target_size += tb->size;
     if (tb->size > tst->max_target_size) {
         tst->max_target_size = tb->size;

@@ -108,7 +108,11 @@ static int64_t decode_sleb128(const uint8_t **pp)
 
 static int encode_search(TranslationBlock *tb, uint8_t *block)
 {
+#ifdef TCG_TARGET_COLD_CODE
+    uint8_t *highwater = tcg_ctx->code_gen_cold_highwater;
+#else
     uint8_t *highwater = tcg_ctx->code_gen_highwater;
+#endif
     uint64_t *insn_data = tcg_ctx->gen_insn_data;
     uint16_t *insn_end_off = tcg_ctx->gen_insn_end_off;
     uint8_t *p = block;
@@ -146,7 +150,7 @@ static int cpu_unwind_data_from_tb(TranslationBlock *tb, uintptr_t host_pc,
                                    uint64_t *data)
 {
     uintptr_t iter_pc = (uintptr_t)tb->tc.ptr;
-    const uint8_t *p = tb->tc.ptr + tb->tc.size;
+    const uint8_t *p = tb->xemu_cold.ptr + tb->xemu_cold.size;
     int i, j, num_insns = tb->icount;
 
     host_pc -= GETPC_ADJ;
@@ -272,6 +276,7 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     TranslationBlock *tb, *existing_tb;
     tb_page_addr_t phys_pc, phys_p2;
     tcg_insn_unit *gen_code_buf;
+    uint8_t *search_data;
     int gen_code_size, search_size, max_insns;
     int64_t ti;
     void *host_pc;
@@ -438,10 +443,15 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     }
     tcg_ctx->gen_tb = NULL;
 
-    search_size = encode_search(tb, (void *)gen_code_buf + gen_code_size);
+    /* The search data follows the cold code (tcg_gen_code). */
+    search_data = tcg_splitwx_to_rw(tb->xemu_cold.ptr) + tb->xemu_cold.size;
+    search_size = encode_search(tb, search_data);
     if (unlikely(search_size < 0)) {
         trace_tb_gen_code_buffer_overflow("encode_search");
         tb_unlock_pages(tb);
+#ifdef TCG_TARGET_COLD_CODE
+        tcg_code_gen_chunk_full(tcg_ctx);
+#endif
         goto buffer_overflow;
     }
     tb->tc.size = gen_code_size;
@@ -458,16 +468,23 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         if (logfile) {
             int code_size, data_size;
             const tcg_target_ulong *rx_data_gen_ptr;
+            const void *cold = tb->xemu_cold.ptr;
+            const void *cold_end = cold + tb->xemu_cold.size;
             size_t chunk_start;
             int insn = 0;
 
+            /*
+             * The body, by guest insn, then the cold code: slow paths and
+             * stubs, then the constant pool (TCG_TARGET_COLD_CODE puts them
+             * apart from the body, which is all [size=] counts).
+             */
             if (tcg_ctx->data_gen_ptr) {
                 rx_data_gen_ptr = tcg_splitwx_to_rx(tcg_ctx->data_gen_ptr);
-                code_size = (const void *)rx_data_gen_ptr - tb->tc.ptr;
-                data_size = gen_code_size - code_size;
+                code_size = (const void *)rx_data_gen_ptr - cold;
+                data_size = cold_end - (const void *)rx_data_gen_ptr;
             } else {
                 rx_data_gen_ptr = 0;
-                code_size = gen_code_size;
+                code_size = cold_end - cold;
                 data_size = 0;
             }
 
@@ -496,10 +513,9 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
                 insn++;
             }
 
-            if (chunk_start < code_size) {
+            if (code_size) {
                 fprintf(logfile, "  -- tb slow paths + alignment\n");
-                disas(logfile, tb->tc.ptr + chunk_start,
-                      code_size - chunk_start);
+                disas(logfile, cold, code_size);
             }
 
             /* Finally dump any data we may have after the block */
@@ -525,9 +541,15 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         }
     }
 
+#ifdef TCG_TARGET_COLD_CODE
     qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
-        ROUND_UP((uintptr_t)gen_code_buf + gen_code_size + search_size,
-                 CODE_GEN_ALIGN));
+        ROUND_UP((uintptr_t)gen_code_buf + gen_code_size, CODE_GEN_ALIGN));
+    qatomic_set(&tcg_ctx->code_gen_cold_ptr, (void *)
+        ROUND_UP((uintptr_t)search_data + search_size, CODE_GEN_ALIGN));
+#else
+    qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
+        ROUND_UP((uintptr_t)search_data + search_size, CODE_GEN_ALIGN));
+#endif
 
     /* init jump list */
     qemu_spin_init(&tb->jmp_lock);
@@ -594,10 +616,16 @@ recycle_tb:
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
         if (!recycled) {
+#ifdef TCG_TARGET_COLD_CODE
+            /* Both parts: the body, and from the TranslationBlock on. */
+            qatomic_set(&tcg_ctx->code_gen_ptr, gen_code_buf);
+            qatomic_set(&tcg_ctx->code_gen_cold_ptr, (void *)tb);
+#else
             uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
 
             orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
             qatomic_set(&tcg_ctx->code_gen_ptr, (void *)orig_aligned);
+#endif
         }
         tcg_tb_remove(tb);
         return existing_tb;

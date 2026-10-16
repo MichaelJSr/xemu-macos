@@ -345,6 +345,55 @@ static void tcg_region_bounds(size_t curr_region, void **pstart, void **pend)
     *pend = end;
 }
 
+#ifdef TCG_TARGET_COLD_CODE
+/*
+ * Hot/cold TB layout. A region is cut into chunks of TCG_COLD_CHUNK_SIZE,
+ * each a hot part (its first quarter) followed by a cold part. A TB's body
+ * (tb->tc) goes to the hot part, back to back with the bodies before it;
+ * its TranslationBlock, then its qemu_ld/st slow paths, backend stubs and
+ * constant pool (tb->xemu_cold), then its search data, go to the cold
+ * part. Bodies are about a quarter of the bytes (heavy-f1), and the rest
+ * is rarely or never executed, so the code that runs sits densely in few
+ * pages and cache lines. Each part fills upward under its own highwater
+ * mark; when either runs out, both move to the next chunk
+ * (tcg_region_next_chunk; a TB that overflowed starts over there). The
+ * region's tail short of a whole chunk is one more, shorter chunk, split
+ * the same way, unless it is under a quarter chunk (with -accel
+ * tcg,tb-size=2 the tail is most of the buffer). A chunk spans at most
+ * 1 MiB, so every reference between the two parts of a TB, all in one
+ * chunk, is within reach of B.cond, CBZ/CBNZ, ADR and LDR (literal).
+ */
+static bool tcg_region_chunk_init(TCGContext *s, void *start)
+{
+    void *end = s->code_gen_buffer + s->code_gen_buffer_size;
+    size_t size = MIN(TCG_COLD_CHUNK_SIZE, end - start);
+    size_t hot = QEMU_ALIGN_DOWN(size / 4, 128);
+
+    if (size < TCG_COLD_CHUNK_SIZE / 4 && start != s->code_gen_buffer) {
+        return false;
+    }
+    s->code_gen_hot_start = start;
+    s->code_gen_ptr = start;
+    s->code_gen_highwater = start + hot - TCG_HIGHWATER;
+    s->code_gen_cold_ptr = start + hot;
+    s->code_gen_cold_highwater = start + size - TCG_HIGHWATER;
+    s->code_gen_chunk_end = start + size;
+    return true;
+}
+
+/*
+ * Move both cursors to the next chunk once either part of this one
+ * filled up. Returns true if the whole buffer is full.
+ */
+bool tcg_region_next_chunk(TCGContext *s)
+{
+    if (tcg_region_chunk_init(s, s->code_gen_chunk_end)) {
+        return false;
+    }
+    return tcg_region_alloc(s);
+}
+#endif
+
 static void tcg_region_assign(TCGContext *s, size_t curr_region)
 {
     void *start, *end;
@@ -355,6 +404,9 @@ static void tcg_region_assign(TCGContext *s, size_t curr_region)
     s->code_gen_ptr = start;
     s->code_gen_buffer_size = end - start;
     s->code_gen_highwater = end - TCG_HIGHWATER;
+#ifdef TCG_TARGET_COLD_CODE
+    tcg_region_chunk_init(s, start);
+#endif
 }
 
 static bool tcg_region_alloc__locked(TCGContext *s)
@@ -894,7 +946,12 @@ size_t tcg_code_size(void)
         const TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         size_t size;
 
+#ifdef TCG_TARGET_COLD_CODE
+        /* The cold part of the current chunk lies above its hot part. */
+        size = qatomic_read(&s->code_gen_cold_ptr) - s->code_gen_buffer;
+#else
         size = qatomic_read(&s->code_gen_ptr) - s->code_gen_buffer;
+#endif
         g_assert(size <= s->code_gen_buffer_size);
         total += size;
     }

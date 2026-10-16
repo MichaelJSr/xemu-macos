@@ -34,7 +34,8 @@ typedef ram_addr_t tb_page_addr_t;
  * This struct exists just for convenience; we keep track of TB's in a binary
  * search tree, and the only fields needed to compare TB's in the tree are
  * @ptr and @size.
- * Note: the address of search data can be obtained by adding @size to @ptr.
+ * Note: the address of search data can be obtained by adding @size to @ptr
+ * of the TB's xemu_cold.
  */
 struct tb_tc {
     const void *ptr;    /* pointer to the translated code */
@@ -115,6 +116,14 @@ struct TranslationBlock {
     uint64_t ihash;
 
     struct tb_tc tc;
+    /*
+     * xemu: the TB's cold code (slow paths, backend stubs, constant pool),
+     * which the search data follows. With TCG_TARGET_COLD_CODE it sits in
+     * the cold part of tc's chunk (tcg/region.c), outside tc, so
+     * tcg_tb_lookup() never finds it; otherwise it is the tail of tc, or
+     * empty right after it.
+     */
+    struct tb_tc xemu_cold;
 
     /*
      * Track tb_page_addr_t intervals that intersect this TB.

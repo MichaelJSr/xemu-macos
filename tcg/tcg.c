@@ -794,7 +794,7 @@ static void new_pool_l8(TCGContext *s, int rtype, tcg_insn_unit *label,
  * Generate TB finalization at the end of block
  */
 
-static int tcg_out_ldst_finalize(TCGContext *s)
+static int tcg_out_ldst_finalize(TCGContext *s, void *highwater)
 {
     TCGLabelQemuLdst *lb;
 
@@ -812,14 +812,14 @@ static int tcg_out_ldst_finalize(TCGContext *s)
          * the buffer completely.  Thus we can test for overflow after
          * generating code without having to check during generation.
          */
-        if (unlikely((void *)s->code_ptr > s->code_gen_highwater)) {
+        if (unlikely((void *)s->code_ptr > highwater)) {
             return -1;
         }
     }
     return 0;
 }
 
-static int tcg_out_pool_finalize(TCGContext *s)
+static int tcg_out_pool_finalize(TCGContext *s, void *highwater)
 {
     TCGLabelPoolData *p = s->pool_labels;
     TCGLabelPoolData *l = NULL;
@@ -843,7 +843,7 @@ static int tcg_out_pool_finalize(TCGContext *s)
         uintptr_t value;
 
         if (!l || l->nlong != p->nlong || memcmp(l->data, p->data, size)) {
-            if (unlikely(a > s->code_gen_highwater)) {
+            if (unlikely(a > highwater)) {
                 return -1;
             }
             memcpy(a, p->data, size);
@@ -1948,6 +1948,20 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     void *next;
 
  retry:
+#ifdef TCG_TARGET_COLD_CODE
+    /* In the chunk's cold part, which its cold code then follows. */
+    tb = (void *)ROUND_UP((uintptr_t)s->code_gen_cold_ptr, align);
+    next = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+
+    if (unlikely(next > s->code_gen_cold_highwater ||
+                 s->code_gen_ptr > s->code_gen_highwater)) {
+        if (tcg_region_next_chunk(s)) {
+            return NULL;
+        }
+        goto retry;
+    }
+    qatomic_set(&s->code_gen_cold_ptr, next);
+#else
     tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
     next = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
 
@@ -1958,6 +1972,7 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
         goto retry;
     }
     qatomic_set(&s->code_gen_ptr, next);
+#endif
     return tb;
 }
 
@@ -1985,7 +2000,7 @@ void tcg_prologue_init(void)
 
     /* Allow the prologue to put e.g. guest_base into a pool entry.  */
     {
-        int result = tcg_out_pool_finalize(s);
+        int result = tcg_out_pool_finalize(s, s->code_gen_highwater);
         tcg_debug_assert(result == 0);
     }
 
@@ -7429,10 +7444,31 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
 }
 
+/*
+ * The TB ran past a highwater mark: start over in a fresh chunk (-1; the
+ * next tcg_tb_alloc moves on once this one is marked full), or with
+ * fewer insns (-2) if it started at the bottom of one already.
+ */
+static int tcg_code_overflow(TCGContext *s)
+{
+#ifdef TCG_TARGET_COLD_CODE
+    if (s->code_buf == s->code_gen_hot_start) {
+        return -2;
+    }
+    tcg_code_gen_chunk_full(s);
+#endif
+    return -1;
+}
+
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 {
     int i, num_insns;
     TCGOp *op;
+    tcg_insn_unit *cold_buf, *cold_end;
+    void *cold_highwater;
+#ifdef TCG_TARGET_COLD_CODE
+    tcg_insn_unit *hot_end;
+#endif
 
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP)
                  && qemu_log_in_addr_range(pc_start))) {
@@ -7633,7 +7669,12 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
            the buffer completely.  Thus we can test for overflow after
            generating code without having to check during generation.  */
         if (unlikely((void *)s->code_ptr > s->code_gen_highwater)) {
-            return -1;
+#ifdef TCG_TARGET_COLD_CODE
+            /* Any further and this op wrote over the chunk's cold part. */
+            g_assert((void *)s->code_ptr <=
+                     s->code_gen_highwater + TCG_HIGHWATER);
+#endif
+            return tcg_code_overflow(s);
         }
         /* Test for TB overflow, as seen by gen_insn_end_off.  */
         if (unlikely(tcg_current_code_size(s) > UINT16_MAX)) {
@@ -7646,26 +7687,62 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     tcg_debug_assert(num_insns + 1 == s->gen_tb->icount);
     s->gen_insn_end_off[num_insns] = tcg_current_code_size(s);
 
-    /* Generate TB finalization at the end of block */
-    i = tcg_out_ldst_finalize(s);
-    if (i < 0) {
-        return i;
+    /*
+     * Generate TB finalization at the end of block: the slow paths, stubs
+     * and constant pool, in the chunk's cold part right behind the TB's
+     * TranslationBlock (tcg/region.c), else right behind its body.
+     */
+#ifdef TCG_TARGET_COLD_CODE
+    hot_end = s->code_ptr;
+    s->code_ptr = s->code_gen_cold_ptr;
+    cold_highwater = s->code_gen_cold_highwater;
+#else
+    cold_highwater = s->code_gen_highwater;
+#endif
+    cold_buf = s->code_ptr;
+    i = tcg_out_ldst_finalize(s, cold_highwater);
+    if (i == 0) {
+        i = tcg_out_pool_finalize(s, cold_highwater);
     }
-    i = tcg_out_pool_finalize(s);
     if (i < 0) {
-        return i;
+        return i == -1 ? tcg_code_overflow(s) : i;
     }
+    cold_end = s->code_ptr;
+#ifdef TCG_TARGET_COLD_CODE
+    s->code_ptr = hot_end;
+#endif
     if (!tcg_resolve_relocs(s)) {
         return -2;
     }
+    tb->xemu_cold.ptr = tcg_splitwx_to_rx(cold_buf);
+    tb->xemu_cold.size = tcg_ptr_byte_diff(cold_end, cold_buf);
 
 #ifndef CONFIG_TCG_INTERPRETER
+#ifdef TCG_TARGET_COLD_CODE
+    /* flush instruction cache: both parts, one barrier sequence */
+    {
+        static __thread FlushIdcacheBatch *batch;
+
+        if (!batch) {
+            batch = g_new(FlushIdcacheBatch, 1);
+        }
+        flush_idcache_defer_begin(batch);
+        flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_buf),
+                            (uintptr_t)s->code_buf,
+                            tcg_ptr_byte_diff(s->code_ptr, s->code_buf));
+        flush_idcache_range((uintptr_t)tb->xemu_cold.ptr, (uintptr_t)cold_buf,
+                            tb->xemu_cold.size);
+        flush_idcache_defer_end(batch);
+    }
+#else
     /* flush instruction cache */
     flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_buf),
                         (uintptr_t)s->code_buf,
                         tcg_ptr_byte_diff(s->code_ptr, s->code_buf));
 #endif
+#endif
 
+    /* The body only: tb->tc, gen_insn_end_off and the UINT16_MAX bound. */
     return tcg_current_code_size(s);
 }
 

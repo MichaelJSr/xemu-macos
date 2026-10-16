@@ -1092,6 +1092,38 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   at load 35-42. Explicit fences (`mfence`, locked instructions) are
   untouched. `XEMU_GUEST_MO=1` keeps every barrier (normal-mode switch:
   the goldens can't see device-thread ordering).
+- **Hot/cold TB layout (2026-10-16).** A TB's qemu_ld/st slow paths,
+  x87 stubs, constant pool, TranslationBlock and search data sat right
+  behind its body, about three quarters of its bytes (heavy-f1: 1143 B
+  of buffer per TB, 240 B of it body), so the code that runs was spread
+  over nearly five times the bytes it needs. On aarch64
+  (`TCG_TARGET_COLD_CODE`) each region is now cut into 1 MiB chunks:
+  bodies pack back to back in a chunk's first quarter (`tb->tc`), the
+  rest goes to its cold part (`tb->xemu_cold`), so every reference
+  between a TB's two parts stays within the ±1 MiB of B.cond, CBZ, ADR
+  and LDR (literal); a TB that overflows either part starts over in the
+  next chunk. Det, cross-binary, `bench-det -n 6`: heavy-f1 −7.7%
+  Mcycles/frame (5/6, load 16-33), stream-e2 −2.6% (4/6, load 18-29);
+  at load 30-41, stream-e2 −6.0% (5/6) and movie-e2 −10.9% (6/6);
+  Minsns/frame −0.06..−0.14%, goldens unchanged (release and debug-TCG).
+  Eight and sixteen concurrent det instances (load ~90): −5..−11%
+  Mcycles/frame each. Windowed heavy-f1 stays at the 60 fps cap (2
+  pairs, load 65-90), where the busy-polling vCPU hides any headroom.
+  Cycle-weighted samples on a TB's first insn (the entry `bti`) fell
+  from 11.5-12.0% to 7.1-7.9% of the vCPU (CPU Profiler, heavy-f1, two
+  runs each); L1I and L1I-TLB demand misses per 1K P-core insns read
+  −3% at the median, inside their run-to-run spread.
+  Keeping the warm stubs beside the body (heavy-f1 per frame: ~2.5K
+  ld80d image-path loads, ~2.6K TLB-memo re-walks, ~1.4K store
+  prefilters, against ~1.9K slow-path helper calls) cost 3-7% against
+  all-cold in a same-binary trial. `-d out_asm` prints the cold code
+  as "tb slow paths" at its own address, `XEMU_GUEST_PROF` attributes
+  cold samples to their TB, and Linux perf maps now cover bodies only
+  (they used to include the slow paths). A region's tail short of a
+  chunk is one more, shorter chunk when it is at least 256 KiB: unused,
+  it left `-accel tcg,tb-size=2` stress runs 1 MiB of their 2 (det
+  stream-e2, 600 frames: 697.7 Mcycles/frame, 382.3 with the tail
+  chunk, 380.8 before the layout; load 24-28).
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -3339,4 +3371,5 @@ counter).
 | ImGui frame build under BQL + main-loop mutex (audit §1.9) | Closed 2026-08-04 exactly as the audit predicted it would be. The HUD build holds both locks, which looked like a vCPU-blocking hazard; the measurement (`XEMU_UI_LOCK_STATS=1`, which shipped precisely to answer this without a bespoke build) puts combined occupancy at **mean 0.386% / median 0.373%**, under the pre-registered 0.5% kill bar. No rework. The knob stays as the standing re-check — this is a "measure first, expect a kill" candidate that got its kill |
 | `notdirty_write` dirty-check **fps claim** (audit §1.2) — the claim, not the code | Killed 2026-08-04 while the code shipped. The audit sized the candidate on a profile where `notdirty_write` carried a 75.1% trap share; the 2026-07-18 arm-(b) store-prefilter promotion then inhaled that population, and the in-scene re-measurement reads **~2.6k calls/s at a 2.2% trap share — a 34-57x collapse of the benefit base**, ceiling ≤ 0.06% of the vCPU thread, i.e. under the ±0.02 fps protocol resolution. The code stays (unconditionally since its `XEMU_DIRTY_FAST` hatch was removed on 2026-10-15) as a behavior-equivalent simplification with **no individual fps claim and no individual A/B** (Changes manifest). The transferable lesson is the proxy-collapse one: a candidate sized against a *profile* rather than a *mechanism* silently expires when an earlier landing changes the population, so re-measure the benefit base at build time, not at audit time |
 | Lockless MMIO for the remaining BQL blocks (NV2A `PMC`/`PCRTC`/`PTIMER`, APU `main`/`gp`/`ep`) | Closed by written verdict 2026-08-04 — **[`docs/Finished/lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md)**, which satisfies archaeology 7.5's reopen condition ("audits for the remaining regions are written") without building anything. Fixture-independent ceiling: the *entire* pre-campaign BQL-MMIO prize was 117k ops/s × ~52 ns = **0.61% of one core**, and PFB/USER (78%) + APU-VP (~11%) + PGRAPH already harvested it — residual **< 0.07% of a core ≈ +0.01-0.06 fps**, at or below the ±0.02 fps static-baseline resolution. Correctness wall on top: these handlers call `nv2a_update_irq` inline, so BQL-free dispatch would drive `pci_irq_assert` with no BQL at all and race the iothread's vblank raise — the `pgraph-lockless-audit.md` §C race one level up, hang class, unfixable by atomics alone. Reopen bar: `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s — **measured 2026-08-04 at 75.6 ms per 75 s (2,178,310 BQL-taking ops, avg 47 ns, max 82.0 µs), 6.6x under the bar**, so the verdict now rests on a measurement and not only on the arithmetic (verdict page §A.1) |
+| Code buffer within ADRP reach of the binary (2026-10-16) | Darwin maps the 1 GiB buffer above the shared cache (0x300000000), more than 4 GiB from QEMU's text, on about half the launches, so helper calls build their target with MOVZ+MOVK×2 before the BLR (ADRP+ADD on the rest). A `vm_region` hole search past the text moved it within 4 GiB on every launch; no hole lies within BL reach (the ICU data and malloc zones sit between), and the 2 GiB below the shared cache sometimes has no 1 GiB hole, so the buffer shrank to the largest one. Only ~44K external helper calls run per heavy-f1 or stream-e2 frame (counted with an instrumented build), so the ceiling is −0.07% instructions; vCPU Minsns/frame read −0.01% (median pair, 6 pairs) and the spread did not narrow. Not committed |
 | icount TB-entry store forwarding (`icount_decr.low` stored 16-bit, the next TB loads `.u32`) | Closed 2026-10-15: no measurable stall. A matched 32-bit store (racy, since it can drop a cross-thread kick) measured 0% pooled over 14 heavy-f1 and 10 stream-e2 det pairs. The exact form, loading the two halves separately and ORing in the sign-extended `.high`, cost +1.4..+1.5% Minsns/frame and +1.3..+2.7% Mcycles/frame. On top of the `can_do_io` change it still cost +1.3% Minsns/frame, and its cycles were mixed (−3.2%, 4/6 pairs, then +1.7%, 2/8; new against base, negative is fewer). A microbenchmark shows the partial-forward penalty, about 1 cycle, only when TB bodies are under ~25 host insns. So the sampler's 3.5% of the vCPU on the entry `ldur` is not a forwarding stall; it is probably skid from the TB-entry redirect |
