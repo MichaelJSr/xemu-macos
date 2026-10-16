@@ -384,6 +384,11 @@ persists.
 `[display.window] presentation_backend = 'opengl'` in `xemu.toml` to
 fall back to the GL presentation path, and report the issue.
 
+**More battery drain or fan noise on a laptop.** Since 2026-10-15 the
+emulated CPU's thread runs at macOS's user-interactive QoS class, like
+the GPU threads, so it keeps a performance core under background load.
+`XEMU_VCPU_QOS=0` leaves it at the default class.
+
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
 

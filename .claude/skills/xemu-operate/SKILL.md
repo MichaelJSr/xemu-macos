@@ -177,8 +177,8 @@ Traps:
 
 | Tag | Role |
 |---|---|
-| `azurik-heavy-f1` | Primary heavy: ~679 draws/flip, ~29 fps on a loaded box |
-| `azurik-heavy-w2` | Second heavy: 323 draws/flip, ~23 fps, cost isn't in draws |
+| `azurik-heavy-f1` | Primary heavy: ~650-680 draws/flip below the cap, ~576 at it. Usually at the 60 fps cap since the vCPU QoS change; single runs dip to 40-54 fps at load 31-43 (xemu-history, Capped anchors) |
+| `azurik-heavy-w2` | Second heavy: ~306-323 draws/flip, vCPU-bound. Usually at the 60 fps cap, same dips as heavy-f1 |
 | `vm-20260704032357` (F5) | Close to the 60 fps cap. Regressions and PGO only, never speedups |
 | `azurik-stream-e2`, `-transition-f1`, `-movie-e2` | Walk-ins: streaming, area load, cutscene |
 
@@ -199,6 +199,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_SUBPAGE_FAST=1` | Non-Apple aarch64 opt-in for the sub-page store prefilter (arm b), unvalidated there; always on in Apple builds, inert on x86_64 | `tcg/xemu-subpage-fast.c` |
 | `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
+| `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |

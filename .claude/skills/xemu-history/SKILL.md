@@ -19,6 +19,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | `VK_KHR_dynamic_rendering` (B2) | fenced | No implicit SUBPASS_EXTERNAL dependency → tile stall, transition hang. Needs explicit barriers | `c37110d0aa` |
 | `VK_EXT_external_memory_host` direct VRAM | fenced | Torn GPU reads (flicker); saves <0.5 ms/5 s vs a ≥1 ms/frame bar | `59b85d1e86`, `accfcac580` |
 | Prune throttle keyed on `pg->frame_time` | fixed | No flips during loads → black-screen freeze. Key on `QEMU_CLOCK_REALTIME` | `f156b009a1` |
+| Triangle-fan CPU emulation (TRIANGLE_LIST in MoltenVK's (v[i+1], v[i+2], v0) order through draw.c's emulated-index path) | closed | Pixel-identical; saves ~0.55 ms GPU/frame and ~28% of MoltenVK's encode thread, but ~0 fps on the M2 Ultra (GPU ≤41% busy, PFIFO idle 67-88%). Reopen for smaller GPUs, `surface_scale` ≥3 or 4x interpolation | 2026-10-15, not committed |
 | Texture hash: 192-byte sampling; early dirty-range flush; incremental on misaligned | closed / reverted / fixed | Missed FMV changes; bitmap cleared early; `test_and_clear` stole a neighbor's dirty bit | `5ebda9a33c`, `76f4e2072b` |
 | Surface-range binary search on `end` | closed | `end` isn't monotonic in start order | `e71a85f643` |
 | Depth export (CPU readback, `vkExportMetalObjectsEXT`) | reverted | 2 ms/frame; the export deadlocks MoltenVK | `248c4d282f` |
@@ -34,6 +35,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Vblank tied to host refresh | reverted | The host timer *is* the guest VBLANK IRQ → game speed scales with Hz | `649dd265a0` |
 | Push-present strict FIFO consume | fixed | Backlog dropped real frames ("double playing"); bounded debt | `78c4573dfb` |
 | Drawable-first present order | reverted | +0.50 fps, under noise | `1a8f466e2b` |
+| MetalFX 2x interpolation as a GPU serializer | closed | heavy-f1 2x vs off, 4×50 s, load 18-59: 31.7 ± 13.4 vs 27.4 ± 16.9 fps, signs 2/2. It is ~70% of xemu's GPU time, but the GPU is ≤41% busy | 2026-10-15 |
 | **DSP / APU** | | | |
 | DSP JIT EPI_NO_PC (skip the PC-mismatch exit) | closed | Sentinel: 9.75% legitimate divergence (mode-6 parmoves, REP/DO); fixed the classifier instead | `d0e1f0b27d`, `ca7fe51a0b` |
 | DSP JIT `cur_inst` preset skip | reverted | A hidden runtime `cur_inst` reader (`op=0x001000`); harness removed, `git show 1f444fa272 4668947cc9` to reopen | `aa9eed38e8` |
@@ -85,6 +87,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | BQL event batching; `can_fifo_access` hoist | closed | Starves the vCPU; the lock drops mid-loop → `ERROR_CALL` | ledger |
 | BQL-free MMIO (PFB/USER/PGRAPH/APU-VP) | shipped | Parity, less jitter; the remaining blocks are closed | `ee9100e538`, `4b92b2bc40`, `a477ad9f91` |
 | Kick suppression, semaphore kick, ImGui lock | closed | Empty population / wrong premise / harmless | ledger Settled |
+| Normal-mode vCPU at default QoS | fixed | The busy-polling MTTCG thread decayed to PRI 30-31 under load, below PFIFO/vblank (PRI 46) and other agents' UI-QoS det runs. At `USER_INTERACTIVE`: heavy-f1 37.2 → 58.3 fps, W2 41.5 → 54.6 (load 13-64); heavy-f1 report-valve submits 1-14 → ~0 per flip | `XEMU_VCPU_QOS=0` |
 | Post-loadvm OHCI/`flatview` SIGSEGV | fixed | A freed `MemAccessCallback`, not OHCI; RCU-deferred free | `4161ab5f24`, `13afd5f244` |
 | **Build / CI / release / harness** | | | |
 | Release CI portability (CRC32, CXXFLAGS, SDK-26 guard, Windows LTO, FILEVERSION, POSIX-only input pipe) | fixed | The CI matrix is the test; tagged builds hit new paths | `378915e067`, `497c1ff3e6` |
@@ -101,14 +104,14 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 - `da_multi_subrange` = 0 on heavy-f1 too, so A1 is closed. D `vkCmdDrawMultiEXT`: never wire it; MoltenVK unrolls it per draw. Re-check on a pin bump.
 - The scene is guest-CPU bound. vCPU% says nothing (the title busy-polls); PFIFO starvation is the signal.
 - If A2 is ever built: compare inline vertex-attribute values (no dirty flag), and never merge across a report or zpass-enable boundary.
-- Next: two Phase 0 captures (load quoted) plus the merge/pass-cause nsprof counters on heavy-f1, then Metal System Trace on heavy-f1 and W2. Reopen A2/C only if GPU time ≈ frame time.
+- Metal System Trace (2026-10-15, M2 Ultra, W2 and heavy-f1): the GPU is ≤41% busy; ~70% of xemu's share is MetalFX 2x interpolation at 2880×2160, the emulated frame's own work is ~1.2 ms, and MoltenVK's triangle-fan conversion is about half of that. Both anchors are vCPU-bound; with the vCPU at UI QoS they usually sit at the 60 fps cap (see Capped anchors below). Reopen A2/C only if GPU time ≈ frame time.
 
 ## Open frontier (ranked)
-1. **Reports safety valve (`REPORTS_SUBMIT`).** The doorbell no longer waits on it (lockless doorbell, 2026-10-15), but it still fires 6-30 times per flip on heavy-f1: Azurik issues ~600 GET_REPORTs per flip and the FIFO idles ~90 times per frame with one pending, so each idle 300 µs after the first one submits, splits the pass and waits the other slot's fence. Under GPU contention it feeds back (33-77 per flip, 4-8 fps runs). Not a free knob: a 100 ms budget drops draws/flip 693 → 601 and fps, so the title consumes reports mid-frame. Open: a submit that never waits on the PFIFO thread.
+1. **Reports safety valve (`REPORTS_SUBMIT`).** The doorbell no longer waits on it (lockless doorbell, 2026-10-15), but it still fires 6-30 times per flip on heavy-f1: Azurik issues ~600 GET_REPORTs per flip and the FIFO idles ~90 times per frame with one pending, so each idle 300 µs after the first one submits, splits the pass and waits the other slot's fence. The 4-8 fps feedback runs (33-77 per flip) were mostly vCPU starvation: since the vCPU runs at UI QoS (2026-10-15) heavy-f1 usually sits at the cap with 0.0-0.2 submits per flip (4 runs, load 31-62), so re-baseline before working on it. Not a free knob: a 100 ms budget drops draws/flip 693 → 601 and fps, so the title consumes reports mid-frame. Open: a submit that never waits on the PFIFO thread.
 2. **x87 helpers.** The inline cache never ran after 3eb1b2de10 (its `TCG_TARGET_HAS_fpu` gate is private to tcg/) and its fork layers are removed; the exact write-through path (`4d2466d106`) replaced it in both modes. What is left are fucom*/fcomi, fist*, transcendentals and PC=single blocks, ≈4% of the deterministic vCPU. Since the deferred stores (2026-10-15), every helper call also lands the pending x87 results (one st80f each), so inlining fucom*/fcomi now saves those too; the closed FUCOMI row predates that.
 3. **APU tick remainder.** GP DSP JIT ~2% plus EP interpreter ~1.5% of the deterministic vCPU. The EP stays off the JIT until a P-space-content-keyed translation cache exists (DSP/APU dead ends).
 4. **Short REP MOVSD.** Runs of 1-3 dwords stay in the per-element loop; the hottest site (eip 0x12378b, 6.2M runs, 3 dwords on average) is ~0.6% of the vCPU. Wants a cheaper inline loop, not the helper.
-5. **Is W2 GPU-bound?** Fewest draws, slowest anchor. Run Phase 2.
+5. **Thread priority follow-ups** (each needs its own A/B): `qemu_main` at UI QoS in normal mode too (det mode does it in `ui/xemu.c`); `VK_KHR_global_priority` HIGH at device creation (MoltenVK's queue is USER_INITIATED, PRI 37). With the vCPU fixed, fence_wait is already ~0.03 ms/flip, so expect little.
 6. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
 7. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.
 8. **Apple default for `audio.dsp_jit.enabled`** (still false; the APU numbers here were all measured with it on). Wants an `XEMU_APU_PROF` receipt.
@@ -126,6 +129,7 @@ Parked, with bars: pipeline prewarm (cache misses only; reopen on a ≥16 ms com
 - Warm vs cold caches: shared pipeline/shader caches hide first-visit hitches (`movement-probe.sh --isolate-caches`). Static A/Bs miss streaming costs.
 - Wrong binary or config: a running process keeps its old binary; Finder and shell launches get different environments; harnessing `dist/xemu.app` loses the config on rebuild.
 - Cheap-helper deletions: removing cheap, high-IPC helper calls shows in Minsns/frame (1-2%) but not in Mcycles/frame on this box, and heavy load widens the Mcycles/frame spread (28-40): interleave and add pairs.
+- Capped anchors: since the vCPU QoS change both heavy anchors usually sit at the 60 fps cap (6 of 8 UI-QoS runs at ≥59 fps; single runs dipped to 40.6 and 53.5 fps at load 31-43 through short 1-29 fps stalls, so load doesn't predict it and one dipped run isn't a regression). Draws/flip at the cap: heavy-f1 ~576, W2 ~306. Windowed fps hides renderer and CPU gains there; use bench-det, or quote draws/s and per-flip nsprof costs. Older loaded-box windowed receipts partly measure the vCPU's default-QoS share.
 - Stale instruments: re-measure proxies on today's binary. Suspend samplers park on barriers (`pthread_jit_write_protect_np` ~10% is skid). Unfocused windows present unpaced.
 
 Full pre-2026-10-13 sagas: `git show ad569d78c5:.claude/skills/<old-skill-name>/SKILL.md` for `xemu-failure-archaeology`, `xemu-gpu-frame-campaign`, `xemu-frontier-and-positioning`, `xemu-research-methodology`.

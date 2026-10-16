@@ -1624,7 +1624,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   reader, registers itself (`4161ab5f24`). Upstream xemu master has the
   same code.
 - **P-core QoS.** PFIFO and vblank-timer threads request
-  `QOS_CLASS_USER_INTERACTIVE`.
+  `QOS_CLASS_USER_INTERACTIVE`, and so does the vCPU thread: the RR
+  thread in deterministic mode, the MTTCG thread in normal mode since
+  2026-10-15 (`XEMU_VCPU_QOS=0` leaves it at the default class).
 - **BQL discipline.** `surface_access_callback` drops BQL before
   blocking so the vblank thread can still fire interrupts.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +

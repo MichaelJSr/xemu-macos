@@ -24,6 +24,9 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 #include "system/tcg.h"
 #include "system/replay.h"
 #include "exec/icount.h"
@@ -74,6 +77,22 @@ static void *mttcg_cpu_thread_fn(void *arg)
     force_rcu.cpu = cpu;
     rcu_add_force_rcu_notifier(&force_rcu.notifier);
     tcg_register_thread();
+
+#if defined(XBOX) && defined(__APPLE__)
+    {
+        /*
+         * The guest runs on this thread and it never sleeps (titles
+         * busy-poll), so at default QoS the scheduler decays its
+         * priority below the PFIFO and vblank threads it feeds, and
+         * under host load it loses part of its core.
+         * XEMU_VCPU_QOS=0 leaves it at default.
+         */
+        const char *e = getenv("XEMU_VCPU_QOS");
+        if (!(e && e[0] == '0')) {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
+    }
+#endif
 
     bql_lock();
     qemu_thread_get_self(cpu->thread);

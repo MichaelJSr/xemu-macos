@@ -24,7 +24,7 @@ section moved there in the 2026-07-18 README split).
 | A3 | `vk/instance.c` ~540 | Apple relaxes device features (`geometryShader`, `occlusionQueryPrecise`, … off) | `#else` requires the strict upstream feature set |
 | A4 | `vk/instance.c` 55/167/233 | MoltenVK portability-subset/enumeration extensions | not requested; standard Vulkan init |
 | A5 | `pgraph.c get_default_renderer` | Vulkan is default on Apple only | non-Apple order identical to upstream (OpenGL, then Vulkan) — verified against `upstream/master` |
-| A6 | `pfifo.c:504`, `ui/xemu.c` (vblank thread) | `QOS_CLASS_USER_INTERACTIVE` bumps | compiled out; no scheduling change |
+| A6 | `pfifo.c` (`pfifo_thread`), `ui/xemu.c` (vblank thread; `qemu_main` under icount), `tcg-accel-ops-mttcg.c` (vCPU), `tcg-accel-ops-rr.c` (vCPU under icount) | `QOS_CLASS_USER_INTERACTIVE` bumps | compiled out; no scheduling change |
 | A7 | `ui/xemu.c` MVK_CONFIG `setenv` block (~1897) | `#ifdef __APPLE__` | absent — MoltenVK config vars are meaningless off macOS |
 | A8 | Metal present / MetalFX / IOSurface (`ui/xemu-metal.m`, `vk/metalfx_upscale.m`, `ui/xui/metal-helpers.mm`) | Objective-C sources added only under `host_os == 'darwin'` in meson | not compiled at all; GL presentation path as upstream |
 | A9 | `hw/xbox/mcpx/apu/vp/vp.c` | vDSP (Accelerate) FIR path | `#else` portable C path (autovectorized) |
