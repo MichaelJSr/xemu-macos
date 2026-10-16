@@ -300,11 +300,11 @@ silently diverge, which is how the pink-tile bug hid. Exported values win.
 
 ## Ship
 
-- Commit straight to `macos-optimizations` (no PRs; merges only from
+- Commit straight to `master` (no PRs; merges only from
   upstream). Title `<subsystem>: <imperative summary>` (see
   `git log --oneline -- <path>`). Body: why, what, numbers, then the
   harness `Co-Authored-By:` trailer. Push only when asked, then
-  `gh run list --repo MichaelJSr/xemu-macos --branch macos-optimizations --limit 3`.
+  `gh run list --repo MichaelJSr/xemu-macos --branch master --limit 3`.
   CI also builds Windows and Linux, so `#ifdef` platform-only code in the
   same commit.
 - **Release** (when the owner asks):

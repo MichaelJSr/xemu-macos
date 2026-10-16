@@ -1,6 +1,6 @@
 # xemu-macos working agreement
 
-The fork's main branch is `macos-optimizations`; commit straight to it.
+The fork's main branch is `master`; commit straight to it.
 `AGENTS.md` applies only to pull requests aimed at upstream
 xemu-project/xemu.
 

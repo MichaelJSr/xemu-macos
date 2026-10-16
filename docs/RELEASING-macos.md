@@ -8,8 +8,8 @@ local `build.sh` packaging fallback is at the end.
 
 ## Scope
 
-- Releases are cut from the `macos-optimizations` branch. Do **not**
-  target upstream or release from `master`.
+- Releases are cut from the fork's `master` branch. Do **not** target
+  upstream xemu-project/xemu.
 - CI builds every platform, but macOS arm64 is the tested,
   first-class artifact (macOS 14+; macOS 26 Tahoe recommended for
   MetalFX + frame interpolation). Windows/Linux artifacts ship as
@@ -41,7 +41,7 @@ local `build.sh` packaging fallback is at the end.
 
    ```bash
    git status
-   git log origin/macos-optimizations..HEAD --oneline   # must be empty
+   git log origin/master..HEAD --oneline   # must be empty
    LAST=$(gh release list --repo MichaelJSr/xemu-macos --limit 1 \
           --json tagName --jq '.[0].tagName')
    git log "$LAST"..HEAD --oneline                      # must be non-empty

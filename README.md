@@ -30,7 +30,6 @@ Apple Silicon, Xcode Command Line Tools,
 ```bash
 git clone --recurse-submodules https://github.com/MichaelJSr/xemu-macos.git
 cd xemu-macos
-git checkout macos-optimizations
 git submodule update --init --recursive
 ./build.sh
 open dist/xemu.app
