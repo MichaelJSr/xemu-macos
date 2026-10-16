@@ -15,6 +15,10 @@
  * xemu_input_bind() (the settings UI, auto-binding) drives a pad already
  * on the port instead of plugging a second one onto the occupied port.
  *
+ * XEMU_LOADVM_ADD_PADS=1: a load that stops at a pad or pad hub the
+ * machine lacks plugs it (xemu_input_add_snapshot_pad, from savevm.c) and
+ * starts over.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
@@ -26,7 +30,11 @@
 #include "monitor/qdev.h"
 #include "hw/qdev-core.h"
 #include "hw/xbox/xid.h"
+#include "migration/snapshot.h"
+#include "system/runstate.h"
+#include "system/system.h"
 #include "xemu-input.h"
+#include "xemu-loadvm-pads.h"
 #include "xemu-notifications.h"
 
 typedef struct PortPin {
@@ -550,4 +558,132 @@ XemuInputPort *qmp_xemu_input_bind(int64_t port, XemuInputSource source,
         }
     }
     return port_info(index);
+}
+
+/*
+ * XEMU_LOADVM_ADD_PADS=1: the load stopped at section idstr, which the
+ * machine lacks. When it names a pad hub ("<host>/1.P/usb-hub") or a pad
+ * ("<host>/1.P.1/usb-xbox-gamepad[-s]"), plug it (a hub with its pad, of
+ * the port's configured type) so that savevm.c can start the load over.
+ * The machine is stopped and the next attempt resets and loads it, so the
+ * plug's effects on the host controller and hub state are loaded over.
+ */
+static bool add_pads_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *e = getenv("XEMU_LOADVM_ADD_PADS");
+        enabled = e && !strcmp(e, "1");
+    }
+    return enabled;
+}
+
+bool xemu_input_add_snapshot_pad(const char *idstr)
+{
+    const char *name = strrchr(idstr, '/'), *port;
+    char hub_path[16], pad_path[16];
+    DeviceState *made = NULL, *old;
+    Error *err = NULL;
+    BusState *bus;
+    int n, index;
+    bool hub;
+
+    if (!add_pads_enabled() || !name || name == idstr) {
+        return false;
+    }
+    g_autofree char *dev_path = g_strndup(idstr, name - idstr);
+    name++;
+    port = strrchr(dev_path, '/');
+    port = port ? port + 1 : dev_path;
+    hub = !strcmp(name, "usb-hub");
+    if ((!hub && strcmp(name, DRIVER_DUKE) && strcmp(name, DRIVER_S)) ||
+        strncmp(port, "1.", 2) || port[2] < '1' || port[2] > '4' ||
+        strcmp(port + 3, hub ? "" : ".1")) {
+        return false;
+    }
+    n = port[2] - '0';
+    for (index = 0; xemu_input_hub_ports[index] != n; index++) {
+    }
+    snprintf(hub_path, sizeof(hub_path), "1.%d", n);
+    snprintf(pad_path, sizeof(pad_path), "1.%d.1", n);
+    bus = pad_bus();
+    if (!bus) {
+        return false;
+    }
+
+    if (hub) {
+        if (usb_dev_at(bus, hub_path, NULL)) {
+            return false;
+        }
+        made = plug("usb-hub", hub_path, index, &err);
+        if (made) {
+            plug(bound_drivers[index], pad_path, index, &err);
+        }
+    } else {
+        if (!usb_dev_at(bus, hub_path, "usb-hub")) {
+            return false;
+        }
+        old = usb_dev_at(bus, pad_path, NULL);
+        if (old) {
+            /* A pad of the other type (the hub came with the port's). */
+            if (!as_pad(OBJECT(old)) ||
+                !strcmp(object_get_typename(OBJECT(old)), name)) {
+                return false;
+            }
+            qdev_unplug(old, &err);
+        }
+        made = err ? NULL : plug(name, pad_path, index, &err);
+    }
+    if (err) {
+        error_report_err(err);
+    }
+    if (made) {
+        g_autofree char *path = qdev_get_dev_path(made);
+        if (path && !strcmp(path, dev_path)) {
+            fprintf(stderr, "xemu: loadvm: plugged %s at %s for port %d, "
+                    "which the snapshot has\n",
+                    hub ? "a pad hub and pad" : name, hub ? hub_path : pad_path,
+                    index + 1);
+            return true;
+        }
+        /* Not the device the section names: take it out again. */
+        qdev_unplug(made, NULL);
+    }
+    return false;
+}
+
+/*
+ * XEMU_LOADVM_ADD_PADS=1 and CLI -loadvm: vl.c would load before the
+ * config's pads are bound (xemu_input_init), so a port the config binds
+ * but the state lacks would be plugged after the load, a hot-plug the
+ * guest sees. Load it from ui/xemu.c instead, after xemu_input_init, as
+ * a loadvm sent after "xemu: ready" is: those pads exist and the loaded
+ * USB state hides them, and the pads the state names are plugged.
+ */
+static char *deferred_loadvm;
+static bool deferred_start;
+
+bool xemu_loadvm_defer(const char *name, bool start)
+{
+    if (!add_pads_enabled()) {
+        return false;
+    }
+    deferred_loadvm = g_strdup(name);
+    deferred_start = start;
+    return true;
+}
+
+void xemu_loadvm_run_deferred(void)
+{
+    g_autofree char *name = g_steal_pointer(&deferred_loadvm);
+    RunState state = runstate_get();
+
+    if (!name) {
+        return;
+    }
+    autostart = deferred_start;
+    vm_stop(RUN_STATE_RESTORE_VM);
+    load_snapshot(name, NULL, false, NULL, &error_fatal);
+    load_snapshot_resume(deferred_start ? RUN_STATE_RUNNING : state);
 }

@@ -147,6 +147,7 @@
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-net.h"
 #include "ui/xemu-input.h"
+#include "ui/xemu-loadvm-pads.h"
 #include "ui/xemu-present.h"
 #include "hw/xbox/eeprom_generation.h"
 
@@ -2880,6 +2881,16 @@ void qmp_x_exit_preconfig(Error **errp)
         return;
     }
 
+#ifdef XBOX
+    /*
+     * XEMU_LOADVM_ADD_PADS: ui/xemu.c loads it, and starts the VM, once the
+     * config's pads are bound (ui/xemu-input-bind.c).
+     */
+    if (loadvm && xemu_loadvm_defer(loadvm, autostart)) {
+        loadvm = NULL;
+        autostart = 0;
+    }
+#endif
     if (loadvm) {
         RunState state = autostart ? RUN_STATE_RUNNING : runstate_get();
         load_snapshot(loadvm, NULL, false, NULL, &error_fatal);

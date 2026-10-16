@@ -154,7 +154,7 @@ bool xemu_input_pads_at_vblanks(void);
 
 /*
  * ui/xemu-input-bind.c: ports whose emulated pad outlives its host source
- * (QMP xemu-input-bind).
+ * (QMP xemu-input-bind). Loads that plug pads: xemu-loadvm-pads.h.
  */
 void *xemu_input_port_adopt_pad(int index, const char *driver);
 bool xemu_input_port_pinned(int index);

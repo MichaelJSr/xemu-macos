@@ -21,6 +21,14 @@ void xemu_events_load_source(XemuLoadSource source, const char *name);
 /* Start of qemu_loadvm_state: take the pending source for this load. */
 void xemu_events_load_begin(void);
 
+/*
+ * A failed checkpoint restore starts over: its next qemu_loadvm_state takes
+ * its source again (the restore resets it if the retry fails first).
+ * load_snapshot sets its source before every attempt instead, so a retry
+ * that fails early leaves nothing pending.
+ */
+void xemu_events_load_retry(void);
+
 /* End of qemu_loadvm_state: emit XEMU_STATE_LOADED if @ok. */
 void xemu_events_load_done(bool ok);
 

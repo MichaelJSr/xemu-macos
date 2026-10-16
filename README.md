@@ -218,6 +218,22 @@ Other automation interfaces (windowed or headless):
   isn't open yet is waited for. `query-xemu-input-bindings` lists the
   ports (source, pad, its type, pinned, pending) and the open gamepads
   with their GUIDs; host gamepads open only in normal mode.
+- **Loads that plug missing pads**: with `XEMU_LOADVM_ADD_PADS=1`, a
+  load (`loadvm`, QMP `snapshot-load`, the Snapshots menu, CLI
+  `-loadvm`, `xemu-checkpoint-restore`) that stops at a pad hub or pad
+  the machine lacks (`Unknown section or instance
+  'pci.0:02.0/1.3/usb-hub'`) plugs it with no host source and loads
+  again, and a pad of the other type (Duke or S) on that port is
+  swapped for the one the state has. stderr says `xemu: loadvm: plugged
+  ...`. Every attempt resets the machine and loads the whole state, so
+  the result equals a load with the pad already there (azurik-heavy-f1
+  without pad stubs gives the `f300` golden). CLI `-loadvm` works too:
+  it runs once the config's pads are bound, just before `xemu: ready`
+  (and before the VM starts, without `-S`), so it equals a `loadvm`
+  sent after `xemu: ready` in the same config. Binding a source to that
+  port afterwards (config, settings or `xemu-input-bind`) drives the
+  plugged pad without a replug. Only pads and their hubs are plugged,
+  never memory units.
 - **Per-frame traces**: `xemu-frame-advance {"frames": N, "trace":
   [{"address": A, "size": S}, ...]}` also returns `trace`, one sample
   per vblank (`"trace-every": K` for every Kth, the last always

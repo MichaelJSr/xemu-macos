@@ -89,7 +89,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | Startup hang, dock icon bounces | `XEMU_DSP_JIT_DIFF*` set? | Unset it; else `sample xemu 5` | DSP diff validator |
 | Boot wedge with validators on | More than 2 refuters stacked? | Keep 2; `DIFF=10` | APU `d->lock` |
 | Audio crackle | `XEMU_APU_PROF=1` ≈100% or <187 frames/s? | Per run: `dsp_jit.enabled=false` (then also `use_dsp_jit=false`); `XEMU_DSP_JIT_DIFF=10` | APU/DSP |
-| loadvm "Unknown section …usb-hub" | Pads bound at save time? CLI `-loadvm` always fails | Monitor `loadvm` after boot, with `usb-hub` at `1.<port_map[i]>`, `port_map={3,4,1,2}` | `ui/xemu-input.c` |
+| loadvm "Unknown section …usb-hub" | Pads bound at save time? CLI `-loadvm` fails unless `XEMU_LOADVM_ADD_PADS=1` | Monitor `loadvm` after boot, with `usb-hub` at `1.<xemu_input_hub_ports[i]>`, `{3,4,1,2}`, or `XEMU_LOADVM_ADD_PADS=1` | `ui/xemu-input.c`, `ui/xemu-input-bind.c` |
 | fps dropped | nsprof `draws per_flip` within 15%? (if not, a different scene) | Diff `finish_*` (`finish_reports_submit`, `finish_vtx_dirty`), `vtx_exact_skip` and `fence_wait` | VK sync policy |
 
 ## Diagnostics

@@ -57,6 +57,15 @@ void xemu_events_load_begin(void)
     pending_name = NULL;
 }
 
+void xemu_events_load_retry(void)
+{
+    /* The same load starts over (XEMU_LOADVM_ADD_PADS): it keeps its source. */
+    pending_source = load_source;
+    g_free(pending_name);
+    pending_name = g_steal_pointer(&load_name);
+    load_source = XEMU_LOAD_SOURCE_INCOMING;
+}
+
 void xemu_events_load_done(bool ok)
 {
     if (ok) {

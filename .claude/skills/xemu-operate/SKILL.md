@@ -108,7 +108,9 @@ sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i
 
 - **Monitor:** `loadvm`/`savevm <tag>`, `info snapshots`, `info jit`,
   `quit` (flushes atexit dumps, PGO and config). Send `loadvm` after ~25 s:
-  CLI `-loadvm` runs before the pad hubs exist (`Unknown section …usb-hub`).
+  CLI `-loadvm` runs before the pad hubs exist (`Unknown section …usb-hub`)
+  unless `XEMU_LOADVM_ADD_PADS=1`, which plugs the pads a state names
+  and runs CLI `-loadvm` once the config's pads are bound.
   Use qcow2 tags; errors only reach the socket; socket path ≤104 bytes.
 - **Snapshots** live in the HDD qcow2 (locked while xemu runs):
   `cp -c ../fixtures/xbox_hdd.qcow2 /tmp/s.qcow2 && python3 -I scripts/list_snapshots.py /tmp/s.qcow2`.
@@ -250,6 +252,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
+| `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |

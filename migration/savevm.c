@@ -77,6 +77,7 @@
 
 #include "ui/xemu-snapshots.h"
 #include "ui/xemu-events.h"
+#include "ui/xemu-loadvm-pads.h"
 
 const unsigned int postcopy_ram_discard_version;
 
@@ -270,6 +271,27 @@ static void whole_buf_release(QIOChannelBuffer *bioc)
         bioc->capacity = bioc->usage = bioc->offset = 0;
         object_unref(OBJECT(bioc));
     }
+}
+
+/*
+ * XEMU_LOADVM_ADD_PADS=1: a load that stops at a pad or pad hub the
+ * machine lacks plugs it (ui/xemu-input-bind.c) and starts over, until the
+ * USB tree matches. Every attempt resets the machine and loads it whole,
+ * so a plug's effect on the host controller and hub state is loaded over.
+ */
+static char xemu_loadvm_unknown[256]; /* the section the load stopped at */
+
+static bool xemu_loadvm_retry(int attempt, Error **errp)
+{
+    bool retry = attempt < 8 && xemu_loadvm_unknown[0] &&
+                 xemu_input_add_snapshot_pad(xemu_loadvm_unknown);
+
+    xemu_loadvm_unknown[0] = '\0';
+    if (retry) {
+        error_free(*errp);
+        *errp = NULL;
+    }
+    return retry;
 }
 #endif
 
@@ -2727,6 +2749,9 @@ qemu_loadvm_section_start_full(QEMUFile *f, uint8_t type, Error **errp)
     /* Find savevm section */
     se = find_se(idstr, instance_id);
     if (se == NULL) {
+#ifdef XBOX
+        pstrcpy(xemu_loadvm_unknown, sizeof(xemu_loadvm_unknown), idstr);
+#endif
         error_setg(errp, "Unknown section or instance '%s' %"PRIu32". "
                    "Make sure that your current VM setup matches your "
                    "saved VM setup, including any hotplugged devices",
@@ -3150,6 +3175,7 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
     xemu_checkpoint_ram_loading();
     void xemu_load_verify_loading(void);
     xemu_load_verify_loading();
+    xemu_loadvm_unknown[0] = '\0';
     if (!xemu_snapshots_offset_extra_data(f)) {
         return -EINVAL;
     }
@@ -3566,6 +3592,8 @@ bool load_snapshot(const char *name, const char *vmstate,
     MigrationIncomingState *mis = migration_incoming_get_current();
 #ifdef XBOX
     QIOChannelBuffer *whole = NULL;
+    Error *load_err = NULL;
+    int attempt = 0;
 #endif
 
     if (!migrate_can_snapshot(errp)) {
@@ -3617,6 +3645,7 @@ bool load_snapshot(const char *name, const char *vmstate,
 
     /* restore the VM state */
 #ifdef XBOX
+retry:
     f = qemu_fopen_bdrv_whole(bs_vm_state, sn.vm_state_size, &whole, errp);
     if (!f) {
         goto err_drain;
@@ -3643,12 +3672,17 @@ bool load_snapshot(const char *name, const char *vmstate,
     }
 #ifdef XBOX
     xemu_events_load_source(XEMU_LOAD_SOURCE_LOADVM, name);
-#endif
-    ret = qemu_loadvm_state(f, errp);
-#ifdef XBOX
+    ret = qemu_loadvm_state(f, &load_err);
     whole_buf_release(g_steal_pointer(&whole));
-#endif
     migration_incoming_state_destroy();
+    if (ret < 0 && xemu_loadvm_retry(attempt++, &load_err)) {
+        goto retry;
+    }
+    error_propagate(errp, load_err);
+#else
+    ret = qemu_loadvm_state(f, errp);
+    migration_incoming_state_destroy();
+#endif
 
     bdrv_drain_all_end();
 
@@ -3777,6 +3811,8 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
     RunState saved_state = runstate_get();
     QIOChannelBuffer *bioc;
     QEMUFile *f;
+    Error *load_err = NULL;
+    int attempt = 0;
     int ret;
 
     if (!migrate_can_snapshot(errp)) {
@@ -3795,6 +3831,7 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
     revert_disks(opaque);
     bdrv_drain_all_begin();
 
+retry:
     bioc = qio_channel_buffer_new(0);
     g_free(bioc->data);
     bioc->data = data;
@@ -3804,8 +3841,8 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
     load_ram(opaque);
     mis->from_src_file = f;
 
-    if (yank_register_instance(MIGRATION_YANK_INSTANCE, errp)) {
-        ret = qemu_loadvm_state(f, errp);
+    if (yank_register_instance(MIGRATION_YANK_INSTANCE, &load_err)) {
+        ret = qemu_loadvm_state(f, &load_err);
     } else {
         ret = -EINVAL;
     }
@@ -3814,8 +3851,14 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
     bioc->capacity = bioc->usage = bioc->offset = 0;
     object_unref(OBJECT(bioc));
     migration_incoming_state_destroy();
+    if (ret < 0 && xemu_loadvm_retry(attempt++, &load_err)) {
+        /* The restore set its source once, before this call: keep it. */
+        xemu_events_load_retry();
+        goto retry;
+    }
     bdrv_drain_all_end();
     if (ret < 0) {
+        error_propagate(errp, load_err);
         return false;
     }
     load_snapshot_resume(saved_state);
