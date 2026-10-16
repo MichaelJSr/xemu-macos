@@ -27,8 +27,10 @@ are in `xemu-history`.
   launchers in `scripts/` do it (via `scripts/xemu_lease.py` /
   `xemu-lease.zsh`, which also take one of `XEMU_FORK_SLOTS`=4 slots and
   write a `/tmp/xemu-leases/<pid>.json` lease); the Windows bench adds
-  only the marker. A hand-written launcher must mark and nice too; it
-  takes no slot, so run one at a time. Never mark an xemu the owner
+  the marker, the mute and its own bench cache
+  (`%LOCALAPPDATA%\xemu-fork-bench`), but no nice, slot or lease. A
+  hand-written launcher must mark and nice too; it takes no slot, so run
+  one at a time. Never mark an xemu the owner
   plays.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu

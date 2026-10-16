@@ -24,7 +24,15 @@ What it enforces (the Windows equivalents of the macOS disciplines):
   isolation      never runs from the user's live files: dist\\ is copied to a
                  work dir (--no-copy-exe opts out), the qcow2 and eeprom are
                  copied, and a scratch xemu.toml is passed with -config_path.
-                 The user's config/hdd are only ever COPY SOURCES.
+                 The user's config/hdd are only ever COPY SOURCES (template:
+                 --config-template, else $XEMU_TEST_CONFIG, else %APPDATA%).
+                 Shader/pipeline caches go to the bench cache via
+                 XEMU_BASE_PATH ($XEMU_BENCH_CACHE, else
+                 %LOCALAPPDATA%\\xemu-fork-bench), never the player's data
+                 folder; --isolate-caches (automatic for a binary older
+                 than XEMU_BASE_PATH) plants a portable marker in the copy.
+  muted          every scratch config sets [audio] volume_limit = 0, as
+                 scripts/harness-config.py does on macOS.
   config parity  xemu REWRITES its toml on exit (it drops default-valued keys
                  and adds display.vulkan.preferred_physical_device), so the
                  scratch config is regenerated from the template BEFORE EVERY
@@ -67,8 +75,9 @@ Cross-binary / multi-variable arms (the abx.sh shapes): --b-exe/--e-exe give
 each arm its own binary, --b-env/--e-env give each arm an env SET
 ("XEMU_A=1 XEMU_B=2"). Pass "-" for <ENV_VAR> when using --b-env/--e-env.
 
-Escape hatches / knobs are xemu's own XEMU_* env vars; this script only sets
-XEMU_NV2A_NSPROF=1 (the measurement channel) plus the arm's variables.
+Knobs are xemu's own XEMU_* env vars; this script only sets
+XEMU_NV2A_NSPROF=1 (the measurement channel), XEMU_BASE_PATH (the bench
+cache) and the arm's variables.
 
 Requirements: Python >= 3.10, stdlib only, Windows. PowerShell is used for
 the screenshot and the quiet check; both degrade to SKIP/override rather than
@@ -120,6 +129,26 @@ def sha256_file(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def binary_mentions(path, needle):
+    """True when the file contains the byte string (chunked, overlapping)."""
+    tail = b""
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            if needle in tail + chunk:
+                return True
+            tail = chunk[-len(needle):]
+    return False
+
+
+def bench_cache():
+    """The benches' own data base path (created on first use)."""
+    d = os.environ.get("XEMU_BENCH_CACHE") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "xemu-fork-bench")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def git_describe():
@@ -368,12 +397,14 @@ class Bench:
         self.exe = {}          # label prefix -> exe path
         self.arm_env = {}      # 'B'/'E' -> dict
         self.staged = {}       # source dir -> work-dir copy
+        self.cache_base = None # XEMU_BASE_PATH, or None when isolated
 
     # -- setup ------------------------------------------------------------
     def prepare(self):
         a = self.a
-        src_cfg = a.config_template or os.path.join(
-            os.environ.get("APPDATA", ""), "xemu", "xemu", "xemu.toml")
+        src_cfg = (a.config_template or os.environ.get("XEMU_TEST_CONFIG")
+                   or os.path.join(os.environ.get("APPDATA", ""), "xemu",
+                                   "xemu", "xemu.toml"))
         if not os.path.isfile(src_cfg):
             die("no config template at %s (--config-template)" % src_cfg)
         self.config_source = os.path.abspath(src_cfg)
@@ -444,10 +475,19 @@ class Bench:
         default_exe = a.exe or os.path.join(ROOT, "dist", "xemu.exe")
         b_exe = a.b_exe or default_exe
         e_exe = a.e_exe or default_exe
-        for tag, src in (("B", b_exe), ("E", e_exe)):
+        for src in (b_exe, e_exe):
             if not os.path.isfile(src):
                 die("no xemu binary at %s (build first, or --exe)" % src)
+        if not a.isolate_caches and not all(
+                binary_mentions(src, b"XEMU_BASE_PATH")
+                for src in (b_exe, e_exe)):
+            # XEMU_BASE_PATH would be ignored and the caches would land in
+            # the player's data folder: isolate instead.
+            log("a binary predates XEMU_BASE_PATH; isolating its caches")
+            a.isolate_caches = True
+        for tag, src in (("B", b_exe), ("E", e_exe)):
             self.exe[tag] = self.stage_exe(tag, os.path.abspath(src))
+        self.cache_base = None if a.isolate_caches else bench_cache()
         self.exe_source = {"B": os.path.abspath(b_exe),
                            "E": os.path.abspath(e_exe)}
 
@@ -530,6 +570,8 @@ class Bench:
         t.set("display.window", "fullscreen_on_startup", "false")
         t.set("general", "show_welcome", "false")
         t.set("general.updates", "check", "false")
+        # Mute: test runs never play on the owner's speakers.
+        t.set("audio", "volume_limit", "0")
         if self.a.surface_scale:
             t.set("display.quality", "surface_scale", str(self.a.surface_scale))
         if self.a.isolate_caches:
@@ -558,6 +600,11 @@ class Bench:
 
         env = dict(os.environ)
         env["XEMU_NV2A_NSPROF"] = "1"
+        if self.cache_base:
+            env["XEMU_BASE_PATH"] = self.cache_base
+        else:
+            # The portable marker must win; XEMU_BASE_PATH goes first.
+            env.pop("XEMU_BASE_PATH", None)
         env.update(self.arm_env[arm])
         # nsprof writes to stdout, monitor/QEMU noise to stderr: capture both
         # into one file (a half-captured log gates INVALID).
@@ -875,7 +922,9 @@ class Bench:
             log("cross-binary A/B: E sha256 %s..." % sha["E"][:16])
         log("work dir %s" % self.work)
         log("hdd copy %s (source %s untouched)" % (self.hdd, self.hdd_source))
-        log("cache isolation %s" % ("ON" if a.isolate_caches else "OFF"))
+        log("cache isolation %s" % (
+            "ON" if a.isolate_caches else
+            "OFF (bench cache %s)" % self.cache_base))
         if a.menu:
             log("MENU MODE: no loadvm. Menu fps swings between intervals - "
                 "this is a plumbing check, not a citable number.")
@@ -895,6 +944,7 @@ class Bench:
                 "draws_band": a.draws_band, "cv_max": a.cv_max,
                 "boot_wait": a.boot_wait,
                 "cache_isolation": "on" if a.isolate_caches else "off",
+                "cache_base": self.cache_base or "(portable, in the work dir)",
                 "renderer": self.renderer,
                 "interleave": self.interleave,
                 "mode": "menu" if a.menu else "savestate",
