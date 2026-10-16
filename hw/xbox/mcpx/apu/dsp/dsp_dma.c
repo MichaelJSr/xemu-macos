@@ -247,6 +247,13 @@ static void dsp_dma_run(DSPDMAState *s)
             scratch_buf_size = count * item_size;
             scratch_buf = g_realloc(scratch_buf, scratch_buf_size);
         }
+        /*
+         * The copy loops below use a local copy of the pointer: with
+         * -fno-strict-aliasing every store through it may alias the
+         * static, which made the compiler reload it per element. Each
+         * loop is specialised on item_size for the same reason.
+         */
+        uint8_t *const buf = scratch_buf;
 
         if (direction) {
             if (dsp_interleave) {
@@ -257,41 +264,45 @@ static void dsp_dma_run(DSPDMAState *s)
                                                 channel_count * block_count);
 
                 // Interleave samples
-                for (int i = 0; i < block_count; i++) {
-                    for (int ch = 0; ch < channel_count; ch++) {
-                        uint32_t v = dma_mem_read(s, span, mem_space,
-                                                  mem_address, ch*block_count+i);
-                        switch(item_size) {
-                        case 2:
-                            *(uint16_t*)(scratch_buf + i*2*channel_count + ch*2) = v >> 8;
-                            break;
-                        case 4:
-                            *(uint32_t*)(scratch_buf + i*4*channel_count + ch*4) = v;
-                            break;
-                        default:
-                            assert(!"Invalid dsp dma item size for interleaved samples");
-                            break;
+                if (item_size == 2) {
+                    for (int i = 0; i < block_count; i++) {
+                        for (int ch = 0; ch < channel_count; ch++) {
+                            uint32_t v = dma_mem_read(s, span, mem_space,
+                                                      mem_address,
+                                                      ch*block_count+i);
+                            *(uint16_t*)(buf + i*2*channel_count + ch*2) = v >> 8;
                         }
                     }
+                } else if (item_size == 4) {
+                    for (int i = 0; i < block_count; i++) {
+                        for (int ch = 0; ch < channel_count; ch++) {
+                            uint32_t v = dma_mem_read(s, span, mem_space,
+                                                      mem_address,
+                                                      ch*block_count+i);
+                            *(uint32_t*)(buf + i*4*channel_count + ch*4) = v;
+                        }
+                    }
+                } else if (block_count > 0) {
+                    assert(!"Invalid dsp dma item size for interleaved samples");
                 }
             } else {
                 const uint32_t *span = dma_span(s, mem_space, mem_address,
                                                 count);
-                for (int i = 0; i < count; i++) {
-                    uint32_t v = dma_mem_read(s, span, mem_space, mem_address, i);
-                    switch(item_size) {
-                    case 2:
-                        *(uint16_t*)(scratch_buf + i*2) = v >> 8;
-                        break;
-                    case 4:
-                        *(uint32_t*)(scratch_buf + i*4) = v;
-                        break;
-                    default:
-                        assert(!"Invalid dsp dma item size");
-                        break;
+                if (item_size == 2) {
+                    for (int i = 0; i < count; i++) {
+                        uint32_t v = dma_mem_read(s, span, mem_space,
+                                                  mem_address, i);
+                        *(uint16_t*)(buf + i*2) = v >> 8;
                     }
+                } else if (item_size == 4) {
+                    for (int i = 0; i < count; i++) {
+                        uint32_t v = dma_mem_read(s, span, mem_space,
+                                                  mem_address, i);
+                        *(uint32_t*)(buf + i*4) = v;
+                    }
+                } else if (count > 0) {
+                    assert(!"Invalid dsp dma item size");
                 }
-
             }
 
             /* FIXME: Move to function; then reuse for both directions */
@@ -325,23 +336,21 @@ static void dsp_dma_run(DSPDMAState *s)
                 assert(!"Unhandled dsp dma buffer");
             }
 
+            /* P-space targets have no span: every word still goes
+             * through mem_write, which invalidates JIT blocks. */
             uint32_t *span = dma_span(s, mem_space, mem_address, count);
-            for (int i = 0; i < count; i++) {
-                uint32_t v;
-                switch(item_size) {
-                case 2:
-                    v = *(uint16_t*)(scratch_buf + i*2) << 8;
-                    break;
-                case 4:
-                    v = (*(uint32_t*)(scratch_buf + i*4)) & item_mask;
-                    break;
-                default:
-                    v = 0;
-                    assert(!"Invalid dsp dma item size");
-                    break;
+            if (item_size == 2) {
+                for (int i = 0; i < count; i++) {
+                    uint32_t v = *(uint16_t*)(buf + i*2) << 8;
+                    dma_mem_write(s, span, mem_space, mem_address, i, v);
                 }
-
-                dma_mem_write(s, span, mem_space, mem_address, i, v);
+            } else if (item_size == 4) {
+                for (int i = 0; i < count; i++) {
+                    uint32_t v = (*(uint32_t*)(buf + i*4)) & item_mask;
+                    dma_mem_write(s, span, mem_space, mem_address, i, v);
+                }
+            } else if (count > 0) {
+                assert(!"Invalid dsp dma item size");
             }
         }
 

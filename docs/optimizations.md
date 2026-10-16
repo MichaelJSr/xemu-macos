@@ -1631,6 +1631,16 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   stream-e2, cold boot and a normal-mode run; translations unchanged
   (GP 44 / EP 86). Not done: LA-specialised blocks (the LA load and
   compare are 0.27% of the vCPU after this).
+- **DSP DMA copy loops keep the scratch pointer in a register
+  (2026-10-16).** QEMU builds with `-fno-strict-aliasing`, so every
+  `uint16_t`/`uint32_t` store through the static `scratch_buf` could
+  alias it and `dsp_dma_run` reloaded it per element. The loops now use
+  a local copy and are specialised on `item_size` instead of switching
+  per element; masking, shifts and the `mem_write` path for P-space
+  targets (which invalidates JIT blocks) are unchanged. Det, RAM equal:
+  instructions −0.15% per frame on heavy-f1 (8/8), −0.10% on stream-e2
+  (7/8), about −2% on a cold boot (DSP program loads, 3/3); cycles
+  within noise.
 - **Guest voice handles bounds-checked; APU RAM dirty marking behind a
   per-platform default (2026-09-08).** Cherry-picked from `971292ed48`
   on `windows-wave1-wip` (APU half; the XID half lands separately).
