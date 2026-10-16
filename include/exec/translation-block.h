@@ -241,6 +241,10 @@ TranslationBlock *xemu_lookup_tb(CPUState *cpu);
  * the jump cache: wholesale, or one virtual page. */
 void xemu_i386_ras_flush(CPUState *cpu);
 void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr);
+/* xemu: drop the TBs on @addr's page, and keep the recycler from reviving
+ * any TB of that page (guest PC hooks; accel/tcg/tb-maint.c). The vCPU
+ * must be stopped. */
+void xemu_tb_invalidate_page_norecycle(tb_page_addr_t addr);
 #endif
 
 #endif /* EXEC_TRANSLATION_BLOCK_H */

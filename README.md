@@ -203,6 +203,28 @@ Other automation interfaces (windowed or headless):
   that vblank. `"virtual": true` reads through CPU 0's page tables; a
   region that RAM doesn't fully back reads as `""`. Up to 256 regions
   of 1-4096 bytes; exact under icount.
+- **Run until a guest PC**: `xemu-run-until {"until": [{"pc": P,
+  "cond": [...]}, ...], "hits": N, "frames": F}` runs a paused (or
+  gdbstub-stopped) VM until execution reaches one of the PCs with all
+  its conditions true for the Nth time (default 1), or for F vblanks,
+  and pauses it. The reply's `reason` is `hit` (with `pc`, `index` of
+  the entry, `hits`, `frame` and `regs`: eax..edi, eip, eflags), `budget`
+  or `debug` (a gdbstub breakpoint stopped it first). A hit stops the VM
+  before that instruction, outside the gdbstub, so a debugger that
+  attaches finds it halted there with no stop to report. Arrivals that
+  don't match never stop the VM. A condition is `{"reg": "ecx", "op":
+  "eq", "value": V}` or `{"addr": E, "size": 1|2|4|8, "type": "u"|"s"|"f",
+  "op": "eq"|"ne"|"lt"|"gt"|"le"|"ge", "value": V}`, where `E` is a
+  register or constant plus offsets with up to 4 `[ ]` pointer reads,
+  e.g. `"esp+0x14"` or `"[[ecx+0x20]]+0x15c"` (guest RAM through CPU 0's
+  page tables; unreadable memory is false). The instruction the run
+  starts at doesn't count, so repeated calls walk hit to hit; `trace`
+  and `trace-every` work as for `xemu-frame-advance`. Under icount it is
+  exact and repeatable, and a run cut into hits ends on the same RAM as
+  one straight advance. The hooks are compiled into the translated code:
+  gdbstub breakpoints keep working beside them, and the fast paths a
+  breakpoint turns off stay on. The first call at a PC retranslates its
+  page once; later calls there cost about 1-2 ms each.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed

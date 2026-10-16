@@ -2211,6 +2211,31 @@ void xemu_tb_revalidate_after_load(void)
     }
     g_ptr_array_free(r.stale, true);
 }
+
+/*
+ * Guest PC hooks (target/i386/tcg/xemu-hooks.h): a hook site changes how
+ * a page's code translates while its bytes stay the same, so the page's
+ * TBs must go and the recycler must not revive them or any older TB of
+ * the page. Call with the vCPU stopped (the recycler takes its TBs out of
+ * inv_htable without a lock held across the lookup).
+ */
+static bool xemu_tb_on_page(void *p, uint32_t h, void *userp)
+{
+    TranslationBlock *tb = p;
+    tb_page_addr_t page = *(tb_page_addr_t *)userp;
+    tb_page_addr_t p1 = tb_page_addr1(tb);
+
+    return (tb_page_addr0(tb) & TARGET_PAGE_MASK) == page ||
+           (p1 != -1 && (p1 & TARGET_PAGE_MASK) == page);
+}
+
+void xemu_tb_invalidate_page_norecycle(tb_page_addr_t addr)
+{
+    tb_page_addr_t page = addr & TARGET_PAGE_MASK;
+
+    tb_invalidate_phys_range(NULL, page, page | ~TARGET_PAGE_MASK);
+    qht_iter_remove(&tb_ctx.inv_htable, xemu_tb_on_page, &page);
+}
 #endif
 
 #endif /* CONFIG_USER_ONLY */

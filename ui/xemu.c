@@ -998,6 +998,26 @@ static void frame_stop_bh(void *opaque)
     aio_co_wake(co);
 }
 
+/*
+ * Guest PC hooks (xemu-run-until, target/i386/tcg/xemu-hooks.h). The
+ * stop is called on the vCPU thread with the BQL, from a hook that then
+ * leaves its TB at once (cpu_loop_exit), with EIP at the hooked
+ * instruction: stop the vCPU there in either mode, then finish as a
+ * vblank stop does. False when no advance runs or it is already ending.
+ */
+bool xemu_frame_advance_hook_stop(void);
+bool xemu_frame_advance_hook_stop(void)
+{
+    assert(bql_locked());
+    if (!frame_advance_co || frame_advance_stopping) {
+        return false;
+    }
+    frame_advance_stopping = true;
+    cpu_stop_current();
+    aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
+    return true;
+}
+
 static void frame_advance_vm_state_change(void *opaque, bool running,
                                           RunState state)
 {
@@ -1070,41 +1090,39 @@ XemuFrameInfo *qmp_query_xemu_frame(Error **errp)
     return frame_info();
 }
 
-XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
-                                                   int64_t frames,
-                                                   bool has_trace,
-                                                   XemuTraceRegionList *trace,
-                                                   bool has_trace_every,
-                                                   int64_t trace_every,
-                                                   Error **errp)
+/*
+ * The advance's argument and run-state checks, shared with the commands
+ * built on it (xemu-run-until, xemu-run), which call this before they
+ * change anything.
+ */
+bool xemu_frame_advance_check(int64_t frames, XemuTraceRegionList *trace,
+                              bool has_trace_every, int64_t trace_every,
+                              Error **errp);
+bool xemu_frame_advance_check(int64_t frames, XemuTraceRegionList *trace,
+                              bool has_trace_every, int64_t trace_every,
+                              Error **errp)
 {
-    if (!has_frames) {
-        frames = 1;
-    }
     if (frames < 0) {
         error_setg(errp, "frames must not be negative");
-        return NULL;
+        return false;
     }
     if (frame_advance_co) {
         error_setg(errp, "a frame advance is already in progress");
-        return NULL;
+        return false;
     }
-    if (!has_trace_every) {
-        trace_every = 1;
-    }
-    if (trace_every < 1) {
+    if (has_trace_every && trace_every < 1) {
         error_setg(errp, "trace-every must be at least 1");
-        return NULL;
+        return false;
     }
     int regions = 0;
     for (XemuTraceRegionList *l = trace; l; l = l->next) {
         if (l->value->size < 1 || l->value->size > 4096) {
             error_setg(errp, "a trace region's size must be 1 to 4096");
-            return NULL;
+            return false;
         }
         if (++regions > 256) {
             error_setg(errp, "at most 256 trace regions");
-            return NULL;
+            return false;
         }
     }
     /*
@@ -1117,7 +1135,28 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         !runstate_check(RUN_STATE_DEBUG)) {
         error_setg(errp, "the VM is neither running, paused nor stopped "
                    "by the debugger");
+        return false;
+    }
+    return true;
+}
+
+XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
+                                                   int64_t frames,
+                                                   bool has_trace,
+                                                   XemuTraceRegionList *trace,
+                                                   bool has_trace_every,
+                                                   int64_t trace_every,
+                                                   Error **errp)
+{
+    if (!has_frames) {
+        frames = 1;
+    }
+    if (!xemu_frame_advance_check(frames, trace, has_trace_every, trace_every,
+                                  errp)) {
         return NULL;
+    }
+    if (!has_trace_every) {
+        trace_every = 1;
     }
     static bool state_handler;
     if (!state_handler) {

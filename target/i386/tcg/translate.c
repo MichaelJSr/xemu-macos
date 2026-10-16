@@ -35,6 +35,9 @@
 
 #include "exec/log.h"
 #include "exec/icount.h"
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+#include "xemu-hooks.h"
+#endif
 
 static int g_use_hard_fpu;
 static int g_use_hard_fpu_inline;
@@ -6058,6 +6061,23 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     xemu_x87_boundary_check(dc);
     x87_wt_boundary_check(dc);
 #endif
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+    /*
+     * A guest PC hook site always starts its TB (see the cut below), so
+     * nothing is pending here and no page-crossing retry can drop this.
+     * A CF_NOIRQ TB re-executes an instruction that has already started
+     * (cpu_io_recompile, precise SMC, a watchpoint), whose hooks already
+     * ran at the top of the TB it started in: no second call. (Record and
+     * replay's one-instruction TB is CF_NOIRQ too; xemu doesn't run it.)
+     */
+    if (dc->base.num_insns == 1 &&
+        !(tb_cflags(dc->base.tb) & CF_NOIRQ) &&
+        xemu_hooks_site_at(dc->base.pc_next)) {
+        gen_helper_xemu_hook(tcg_env, tcg_constant_tl(dc->base.pc_next),
+                             tcg_constant_i32(tb_cflags(dc->base.tb) &
+                                              CF_PCREL ? 1 : 0));
+    }
+#endif
 
 #ifdef TARGET_VSYSCALL_PAGE
     /*
@@ -6113,6 +6133,11 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
             dc->base.is_jmp = DISAS_EOB_NEXT;
         } else if (!translator_is_same_page(&dc->base, dc->base.pc_next)) {
             dc->base.is_jmp = DISAS_TOO_MANY;
+#if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
+        } else if (xemu_hooks_site_at(dc->base.pc_next)) {
+            /* Start the next TB at the hook site. */
+            dc->base.is_jmp = DISAS_TOO_MANY;
+#endif
         }
     }
 }

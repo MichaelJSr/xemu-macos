@@ -485,3 +485,235 @@
 { 'event': 'XEMU_CPUID_FAULT',
   'data': { 'pc': 'int', 'feature': 'XemuCpuidFeature', 'opcode': 'str',
             'count': 'int' } }
+
+##
+# Guest PC hooks: run-until
+# =========================
+##
+
+##
+# @XemuHookReg:
+#
+# A guest register a hook condition reads.
+#
+# @eax: EAX
+#
+# @ecx: ECX
+#
+# @edx: EDX
+#
+# @ebx: EBX
+#
+# @esp: ESP
+#
+# @ebp: EBP
+#
+# @esi: ESI
+#
+# @edi: EDI
+#
+# @eip: EIP (the hooked instruction's)
+#
+# @eflags: EFLAGS
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuHookReg',
+  'data': [ 'eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi',
+            'eip', 'eflags' ] }
+
+##
+# @XemuHookCmp:
+#
+# How a hook condition compares its operand with its value.
+#
+# @eq: equal
+#
+# @ne: not equal
+#
+# @lt: operand less than value
+#
+# @gt: operand greater than value
+#
+# @le: operand less than or equal to value
+#
+# @ge: operand greater than or equal to value
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuHookCmp', 'data': [ 'eq', 'ne', 'lt', 'gt', 'le', 'ge' ] }
+
+##
+# @XemuHookType:
+#
+# How a hook condition reads its operand.
+#
+# @u: unsigned integer
+#
+# @s: signed (two's complement) integer
+#
+# @f: IEEE float (@size 4 or 8); a NaN compares unequal to everything
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuHookType', 'data': [ 'u', 's', 'f' ] }
+
+##
+# @XemuHookCond:
+#
+# One comparison, made each time execution reaches the hook's PC.
+# Exactly one of @reg and @addr names the operand.
+#
+# @reg: compare this register (4 bytes)
+#
+# @addr: compare the @size bytes at this guest virtual address (CPU
+#     0's page tables at that moment, guest RAM only; unreadable
+#     memory makes the condition false).  An expression: a register
+#     (eax ecx edx ebx esp ebp esi edi eip) or a constant, then
+#     '+'/'-' constants, where [ ] reads the 32-bit pointer at what it
+#     encloses, at most 4 deep, e.g. "esp+0x14", "0x2f1c40" or
+#     "[[ecx+0x20]]+0x15c"
+#
+# @size: bytes read at @addr: 1, 2, 4 or 8 (default 4)
+#
+# @type: how operand and @value compare (default u)
+#
+# @op: the comparison, operand @op @value
+#
+# @value: a JSON number, or a string holding one ("0x8c230"); for u
+#     and s an integer the operand's size can hold
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookCond',
+  'data': { '*reg': 'XemuHookReg', '*addr': 'str', '*size': 'int',
+            '*type': 'XemuHookType', 'op': 'XemuHookCmp', 'value': 'any' } }
+
+##
+# @XemuUntil:
+#
+# A guest PC that ends @xemu-run-until.
+#
+# @pc: linear address (EIP on the Xbox) of an instruction's first byte
+#
+# @cond: comparisons that must all hold for an arrival at @pc to count
+#     as a hit (default none: every arrival counts; at most 16)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuUntil',
+  'data': { 'pc': 'uint64', '*cond': ['XemuHookCond'] } }
+
+##
+# @XemuRunUntilReason:
+#
+# What ended @xemu-run-until.
+#
+# @hit: the @hits'th hit; the VM is paused before that instruction
+#
+# @budget: @frames vblanks ran first; the VM is paused there
+#
+# @debug: a gdbstub breakpoint or step stopped the VM first; it is
+#     left stopped for the debugger
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuRunUntilReason', 'data': [ 'hit', 'budget', 'debug' ] }
+
+##
+# @XemuRegs:
+#
+# The general registers at a hit (the instruction not yet executed).
+#
+# @eax: EAX
+#
+# @ecx: ECX
+#
+# @edx: EDX
+#
+# @ebx: EBX
+#
+# @esp: ESP
+#
+# @ebp: EBP
+#
+# @esi: ESI
+#
+# @edi: EDI
+#
+# @eip: EIP
+#
+# @eflags: EFLAGS
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRegs',
+  'data': { 'eax': 'uint32', 'ecx': 'uint32', 'edx': 'uint32',
+            'ebx': 'uint32', 'esp': 'uint32', 'ebp': 'uint32',
+            'esi': 'uint32', 'edi': 'uint32', 'eip': 'uint32',
+            'eflags': 'uint32' } }
+
+##
+# @XemuRunUntilInfo:
+#
+# @reason: what ended the run
+#
+# @frame: the frame counter (see @query-xemu-frame) at the end
+#
+# @running: whether the VM still runs (false unless something resumed
+#     it)
+#
+# @hits: hits counted (equals the request's @hits when @reason is hit)
+#
+# @pc: the hit's PC (only with @reason hit)
+#
+# @index: which @until entry the hit matched, from 0 (only with
+#     @reason hit; the first that matched)
+#
+# @regs: the registers at the hit (only with @reason hit)
+#
+# @trace: the samples, as @xemu-frame-advance returns them (only when
+#     given @trace; a run that ends at a hit has no sample for the
+#     unfinished frame)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRunUntilInfo',
+  'data': { 'reason': 'XemuRunUntilReason', 'frame': 'int',
+            'running': 'bool', 'hits': 'int', '*pc': 'uint64',
+            '*index': 'int', '*regs': 'XemuRegs',
+            '*trace': ['XemuTraceSample'] } }
+
+##
+# @xemu-run-until:
+#
+# Run the VM, as @xemu-frame-advance does, until execution reaches one
+# of the @until PCs with its conditions true for the @hits'th time, or
+# for @frames vblanks, whichever comes first, then pause it.  A hit
+# stops the VM before the instruction, without the gdbstub: a debugger
+# that attaches sees the VM halted there, with no pending stop to
+# report.  Arrivals that don't match leave the VM running.  An arrival
+# at the instruction the run starts from doesn't count (the run steps
+# off it first), so consecutive calls walk from hit to hit.  Under
+# -icount the result is exact and repeatable, and a run cut into hits
+# ends on the same RAM as one uninterrupted run.  gdbstub breakpoints
+# keep working alongside.  The hooks exist only during the call; their
+# first use at a PC retranslates that code page once.  The VM must be
+# stopped: paused, prelaunch, or stopped by the debugger.
+#
+# @until: PCs that end the run (1 to 64 entries)
+#
+# @hits: matching arrivals to count, across all entries (default 1)
+#
+# @frames: the budget in vblanks
+#
+# @trace: as for @xemu-frame-advance
+#
+# @trace-every: as for @xemu-frame-advance
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-run-until',
+  'data': { 'until': ['XemuUntil'], '*hits': 'int', 'frames': 'int',
+            '*trace': ['XemuTraceRegion'], '*trace-every': 'int' },
+  'returns': 'XemuRunUntilInfo', 'coroutine': true }
