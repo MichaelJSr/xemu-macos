@@ -380,7 +380,9 @@ Other automation interfaces (windowed or headless):
 - **One-call candidate runs**: `xemu-run {"checkpoint": "c", "input":
   ["+0 axis ly 1.0", "+12 down 81", ...], "frames": F, "trace": [...],
   "trace-every": K, "stop-when": [...], "hits": N}` restores an
-  `xemu-checkpoint-save` checkpoint (optional), queues the input lines
+  `xemu-checkpoint-save` checkpoint (optional; incrementally, as
+  `xemu-checkpoint-restore`'s `"incremental": true` does, unless
+  `"incremental": false`), queues the input lines
   as if the pipe delivered them right after the restore (pipe syntax;
   `+N` counts vblanks from there, blank and `#` lines are skipped, and a
   malformed line refuses the call), then runs as `xemu-run-until` does,
@@ -406,9 +408,9 @@ Other automation interfaces (windowed or headless):
   across the restore (clear and set them again before each run to start
   over); and a run stopped anywhere, then continued, ends on the same
   RAM as an uncut one. A 16-frame candidate from a field state
-  (azurik-stream-e2) takes about 136 ms on one core of a loaded M2
-  Ultra, 11-13 ms of it the restore, as the three calls did; stops add
-  no measurable cost.
+  (azurik-stream-e2) takes about 100 ms on one core of an M2 Ultra at
+  load 32, and a 1-frame one about 16 ms (20 ms with a full restore);
+  stops add no measurable cost.
 - **Trace recording**: `XEMU_TRACE_RECORD=<file>` writes a line per
   vblank while the VM runs, in any mode, windowed or headless:
   `<n> <frame> <hex per region>`, where `n` counts vblanks from the last

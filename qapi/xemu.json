@@ -1064,6 +1064,10 @@
 #     as @xemu-checkpoint-restore does (default: run on from the
 #     current state)
 #
+# @incremental: restore @checkpoint as @xemu-checkpoint-restore's
+#     @incremental does (default true; false compares every page, as
+#     after RAM writes the dirty log can't see, from XEMU_RAM_SHM)
+#
 # @input: XEMU_INPUT_PIPE lines (at most 65,536), queued in order
 #     after the restore as if written to the pipe then: "+N" counts
 #     vblanks from there ("+0" and "+1" both mean the run's first
@@ -1089,7 +1093,8 @@
 # Since: 10.2
 ##
 { 'command': 'xemu-run',
-  'data': { '*checkpoint': 'str', '*input': ['str'], 'frames': 'int',
+  'data': { '*checkpoint': 'str', '*incremental': 'bool',
+            '*input': ['str'], 'frames': 'int',
             '*trace': ['XemuTraceRegion'], '*trace-every': 'int',
             '*stop-when': ['XemuRunStop'], '*hits': 'int' },
   'returns': 'XemuRunInfo', 'coroutine': true }

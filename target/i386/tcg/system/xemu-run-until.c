@@ -392,16 +392,22 @@ static bool watch_init(RunWatch *w, int index, XemuRunStop *in, Error **errp)
 typedef struct RunRestore {
     Coroutine *co;
     const char *name;
+    bool incremental;
     Error *err;
 } RunRestore;
 
-/* Out of coroutine context, as QMP runs xemu-checkpoint-restore. */
+/*
+ * Out of coroutine context, as QMP runs xemu-checkpoint-restore. By
+ * default incremental: it ends on the same machine as a full restore,
+ * comparing only the pages the dirty log or the two images name.
+ */
 static void run_restore_bh(void *opaque)
 {
     RunRestore *rr = opaque;
 
     qapi_free_XemuCheckpointInfo(qmp_xemu_checkpoint_restore(rr->name,
-                                                             false, false,
+                                                             true,
+                                                             rr->incremental,
                                                              false, false,
                                                              &rr->err));
     aio_co_wake(rr->co);
@@ -413,6 +419,7 @@ static char *watch_hex(bool ok, const uint8_t *b, int size)
 }
 
 XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
+                                       bool has_incremental, bool incremental,
                                        bool has_input, strList *input,
                                        int64_t frames, bool has_trace,
                                        XemuTraceRegionList *trace,
@@ -489,7 +496,8 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
     }
 
     if (checkpoint) {
-        RunRestore rr = { .co = qemu_coroutine_self(), .name = checkpoint };
+        RunRestore rr = { .co = qemu_coroutine_self(), .name = checkpoint,
+                          .incremental = !has_incremental || incremental };
 
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), run_restore_bh,
                                 &rr);

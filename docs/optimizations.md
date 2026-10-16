@@ -2668,6 +2668,19 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   `GetWindowRect`, with a try/catch fallback to the old path, so crops on
   a scaled display are no longer offset. `--dry-run` covers the new
   paths (21 checks); no Windows execution yet.
+- **`xemu-run` restores incrementally (2026-10-16).** Its restore was
+  a full one: every RAM page compared against the checkpoint's. It now
+  passes `incremental` to `qmp_xemu_checkpoint_restore` (default true;
+  `"incremental": false` asks for the full compare, for RAM written by
+  another process through `XEMU_RAM_SHM`). The first restore, and the
+  first after a loadvm, an incoming migration or a failed restore,
+  still compares every page. Cross-binary, two det null instances side
+  by side, 5 interleaved reps of 40 candidates: heavy-f1 at load 59-64
+  L=1 −22.0% Mcycles per candidate (5/5), −31% Minsns, 21.2 → 16.0 ms;
+  stream-e2 at load 32 L=1 −19.0% (5/5), L=16 −6.0% (5/5). 200 random
+  candidates (input, traces) gave the same reply, trace and RAM sha256
+  as a full restore followed by `xemu-run` without a checkpoint, and an
+  incremental `verify` restore after 20 more found `pages-missed` 0.
 
 ### Retired diagnostics and dark experiments (2026-10-10)
 
