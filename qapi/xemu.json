@@ -1356,3 +1356,24 @@
 { 'command': 'xemu-input-bind',
   'data': { 'port': 'int', 'source': 'XemuInputSource', '*guid': 'str' },
   'returns': 'XemuInputPort' }
+
+##
+# Trace recording
+# ===============
+##
+
+##
+# @xemu-trace-regions:
+#
+# Replace the guest memory that XEMU_TRACE_RECORD writes at every
+# vblank (initially XEMU_TRACE_REGIONS), from the next vblank on,
+# which also writes a "# regions" line.  Fails when XEMU_TRACE_RECORD
+# is not set.
+#
+# @regions: the regions, in line order (at most 256, 1 to 4096 bytes
+#     each); an empty list leaves only the vblank counts
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-trace-regions',
+  'data': { 'regions': ['XemuTraceRegion'] } }

@@ -36,6 +36,7 @@ xemu_ss.add(files(
   'xemu-ram-digest.c',
   'xemu-load-verify.c',
   'xemu-input-bind.c',
+  'xemu-trace-record.c',
   'xemu-thumbnail.cc',
   'xemu-widescreen.c',
 ))

@@ -55,6 +55,7 @@
 #include "qemu/units.h"
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
+#include "xemu-trace-record.h"
 #include "xemu-settings.h"
 #include "xemu-snapshots.h"
 #include "xemu-loadvm-pads.h"
@@ -940,9 +941,6 @@ static int64_t frame_trace_every;
 static uint64_t frame_trace_start;
 static XemuTraceSampleList *frame_trace_samples, **frame_trace_tail;
 
-static void dump_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
-                         vaddr address, uint64_t size, int64_t *unmapped);
-
 static void frame_trace_sample(void)
 {
     RAMBlock *rb = qemu_ram_block_by_name("xbox.ram");
@@ -955,16 +953,9 @@ static void frame_trace_sample(void)
     sample->frame = frame_count;
     for (XemuTraceRegionList *l = frame_trace_regions; l; l = l->next) {
         XemuTraceRegion *r = l->value;
-        int64_t unmapped = 0;
+        bool ok = xemu_trace_region_read(buf, ram, ram_size, r);
 
-        if (r->q_virtual) {
-            dump_virtual(buf, ram, ram_size, r->address, r->size, &unmapped);
-        } else if (r->address + r->size <= ram_size) {
-            memcpy(buf, ram + r->address, r->size);
-        } else {
-            unmapped = 1;
-        }
-        QAPI_LIST_APPEND(tail, unmapped ? g_strdup("") :
+        QAPI_LIST_APPEND(tail, !ok ? g_strdup("") :
                          g_string_free(qemu_hexdump_line(NULL, buf, r->size,
                                                          0, 0), false));
     }
@@ -1071,6 +1062,7 @@ static void process_vblank(struct xemu_console *scon)
              frame_count == frame_advance_target)) {
             frame_trace_sample();
         }
+        xemu_trace_record_frame(frame_count);
     }
 
     graphic_hw_update(scon->dcl.con);
@@ -1139,16 +1131,8 @@ bool xemu_frame_advance_check(int64_t frames, XemuTraceRegionList *trace,
         error_setg(errp, "trace-every must be at least 1");
         return false;
     }
-    int regions = 0;
-    for (XemuTraceRegionList *l = trace; l; l = l->next) {
-        if (l->value->size < 1 || l->value->size > 4096) {
-            error_setg(errp, "a trace region's size must be 1 to 4096");
-            return false;
-        }
-        if (++regions > 256) {
-            error_setg(errp, "at most 256 trace regions");
-            return false;
-        }
+    if (!xemu_trace_regions_check(trace, errp)) {
+        return false;
     }
     /*
      * Prelaunch: started with -S, so that nothing runs before a load.
@@ -1271,6 +1255,7 @@ void xemu_state_loaded(void)
     vblank_virtual_rearm = true;
     xemu_input_state_loaded();
     xemu_hooks_state_loaded();
+    xemu_trace_record_load(frame_count);
 }
 
 /*
@@ -1290,7 +1275,7 @@ static void dump_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
         uint64_t chunk = MIN(size - off, page - in_page);
         hwaddr pa = cpu_get_phys_page_debug(cpu, va - in_page);
 
-        if (pa != -1 && pa + in_page + chunk <= ram_size) {
+        if (pa != -1 && pa < ram_size && in_page + chunk <= ram_size - pa) {
             memcpy(out + off, ram + pa + in_page, chunk);
         } else {
             memset(out + off, 0, chunk);
@@ -2752,6 +2737,7 @@ int main(int argc, char **argv)
 
     xemu_main_loop_lock();
     xemu_input_init();
+    xemu_trace_record_init();
     xemu_loadvm_run_deferred(); /* CLI -loadvm under XEMU_LOADVM_ADD_PADS */
     xemu_events_ready();   /* QMP XEMU_READY */
     xemu_main_loop_unlock();

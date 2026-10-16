@@ -278,7 +278,7 @@ Other automation interfaces (windowed or headless):
   included) with each region's bytes as hex, read before the guest sees
   that vblank. `"virtual": true` reads through CPU 0's page tables; a
   region that RAM doesn't fully back reads as `""`. Up to 256 regions
-  of 1-4096 bytes; exact under icount.
+  of 1-4096 bytes, each ending at or below 4 GiB; exact under icount.
 - **Run until a guest PC**: `xemu-run-until {"until": [{"pc": P,
   "cond": [...]}, ...], "hits": N, "frames": F}` runs a paused (or
   gdbstub-stopped) VM until execution reaches one of the PCs with all
@@ -395,6 +395,29 @@ Other automation interfaces (windowed or headless):
   (azurik-stream-e2) takes about 136 ms on one core of a loaded M2
   Ultra, 11-13 ms of it the restore, as the three calls did; stops add
   no measurable cost.
+- **Trace recording**: `XEMU_TRACE_RECORD=<file>` writes a line per
+  vblank while the VM runs, in any mode, windowed or headless:
+  `<n> <frame> <hex per region>`, where `n` counts vblanks from the last
+  load (the input recording's `+N`), `frame` is the process's frame
+  counter and `-` stands for a region RAM doesn't fully back. A
+  `# load frame=F` line marks each load and a `# regions ...` line the
+  list. Regions come from `XEMU_TRACE_REGIONS=0x157b000:256,v0x10000:64`
+  (`v` reads through CPU 0's page tables; 1-4096 bytes ending at or
+  below 4 GiB, at most 256), and QMP `xemu-trace-regions {"regions":
+  [{"address": A, "size": S, "virtual": true}]}` replaces them from the
+  next vblank (an empty list leaves only the counts). Under icount the
+  line is taken at the vblank, before the guest sees it, where
+  `xemu-frame-advance` samples its trace, from RAM as it is, so
+  recording never changes the run: a live-pads session's lines equal its
+  replay's (windowed, on macOS only: see live pads), and under the null
+  renderer a traced frame advance of it. With a GPU renderer, a report
+  slot the guest hasn't read yet holds old or new bytes (deterministic
+  reports are lazy), and a traced frame advance delivers reports
+  eagerly, which on offscreen Vulkan can change later report values, so
+  compare Vulkan runs recording to recording. In normal mode the vCPU
+  thread takes the sample between blocks of guest code around that
+  vblank's interrupt: never mid-instruction, but where the guest is
+  depends on host timing.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed

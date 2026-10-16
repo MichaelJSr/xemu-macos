@@ -1252,12 +1252,13 @@ static void input_record_init(void)
         fprintf(stderr, "xemu: XEMU_INPUT_RECORD open failed: %s\n", path);
         return;
     }
-    setvbuf(record_file, NULL, _IOLBF, 0);
     if (port && port[0] >= '1' && port[0] <= '4' && !port[1]) {
         record_port = port[0] - '1';
     }
+    /* Flushed per write, not _IOLBF, which is full buffering on Windows. */
     fprintf(record_file, "# xemu input recording: XEMU_INPUT_PIPE lines; "
             "+N counts vblanks from the last load\n");
+    fflush(record_file);
 }
 
 static void input_record_load(void)
@@ -1269,6 +1270,7 @@ static void input_record_load(void)
     record_buttons = 0;
     memset(record_axes, 0, sizeof(record_axes));
     fprintf(record_file, "# load\n");
+    fflush(record_file);
 }
 
 static void input_record_frame(uint64_t frame)
@@ -1335,6 +1337,7 @@ static void input_record_frame(uint64_t frame)
             record_axes[i] = v;
         }
     }
+    fflush(record_file);
 }
 
 static void input_frame_tick(uint64_t frame);
