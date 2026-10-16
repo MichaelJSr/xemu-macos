@@ -983,3 +983,39 @@ bool xemu_hook_expr_eval(XemuHookCtx *ctx, const XemuHookExpr *e,
     *out = v;
     return true;
 }
+
+/* exec/xemu-hook-expr.h: expressions for target-independent code. */
+
+XemuHookExpr *xemu_hook_expr_new(const char *s, Error **errp)
+{
+    XemuHookExpr *e = g_new(XemuHookExpr, 1);
+
+    if (!xemu_hook_expr_parse(s, e, errp)) {
+        g_free(e);
+        return NULL;
+    }
+    return e;
+}
+
+XemuHookExprRead xemu_hook_expr_read_cpu0(const XemuHookExpr *e, void *buf,
+                                          unsigned len)
+{
+    CPUState *cs = qemu_get_cpu(0);
+    CPUX86State *env;
+    XemuHookCtx ctx = { 0 };
+    uint32_t a;
+
+    assert(bql_locked());
+    if (!cs) {
+        return XEMU_HOOK_EXPR_UNRESOLVED;
+    }
+    xemu_hooks_init();
+    env = cpu_env(cs);
+    ctx.env = env;
+    ctx.pc = (uint32_t)(env->segs[R_CS].base + env->eip);
+    if (!xemu_hook_expr_eval(&ctx, e, &a)) {
+        return XEMU_HOOK_EXPR_UNRESOLVED;
+    }
+    return xemu_hook_read(env, a, buf, len) ? XEMU_HOOK_EXPR_READ_OK
+                                            : XEMU_HOOK_EXPR_UNBACKED;
+}

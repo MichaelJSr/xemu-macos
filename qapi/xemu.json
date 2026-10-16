@@ -657,7 +657,7 @@
 #     memory makes the condition false).  An expression: a register
 #     (eax ecx edx ebx esp ebp esi edi eip) or a constant, then
 #     '+'/'-' constants, where [ ] reads the 32-bit pointer at what it
-#     encloses, at most 4 deep, e.g. "esp+0x14", "0x2f1c40" or
+#     encloses, at most 8 deep, e.g. "esp+0x14", "0x2f1c40" or
 #     "[[ecx+0x20]]+0x15c"
 #
 # @size: bytes read at @addr: 1, 2, 4 or 8 (default 4)
@@ -1458,6 +1458,36 @@
 ##
 
 ##
+# @XemuTraceRecordRegion:
+#
+# Guest memory that XEMU_TRACE_RECORD writes at every vblank: at
+# @address, as for @XemuTraceRegion, or at @addr, as for a hook's
+# @collect region (so an @XemuHookRegion is one too).
+#
+# @address: physical address, or with @virtual a virtual one (CPU 0's
+#     page tables at that vblank)
+#
+# @addr: instead of @address, an address expression as for
+#     @XemuHookRegion's @addr, e.g. "[[0x83a6e2c0+0x20]+0x154]": a
+#     virtual address, evaluated with CPU 0's registers and page
+#     tables at every line, so the region follows pointers the guest
+#     moves.
+#     Its line field is "?" when a dereference reads memory that is
+#     not guest RAM (e.g. through a null pointer), and "-" when the
+#     bytes it points at aren't all guest RAM.
+#
+# @size: bytes to read, 1 to 4096
+#
+# @virtual: translate @address through the guest page tables (default
+#     false); @addr is always virtual, so false is refused with it
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuTraceRecordRegion',
+  'data': { '*address': 'uint64', '*addr': 'str', 'size': 'int',
+            '*virtual': 'bool' } }
+
+##
 # @xemu-trace-regions:
 #
 # Replace the guest memory that XEMU_TRACE_RECORD writes at every
@@ -1471,7 +1501,7 @@
 # Since: 10.2
 ##
 { 'command': 'xemu-trace-regions',
-  'data': { 'regions': ['XemuTraceRegion'] } }
+  'data': { 'regions': ['XemuTraceRecordRegion'] } }
 
 ##
 # Pad input query

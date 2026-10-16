@@ -369,7 +369,7 @@ Other automation interfaces (windowed or headless):
   don't match never stop the VM. A condition is `{"reg": "ecx", "op":
   "eq", "value": V}` or `{"addr": E, "size": 1|2|4|8, "type": "u"|"s"|"f",
   "op": "eq"|"ne"|"lt"|"gt"|"le"|"ge", "value": V}`, where `E` is a
-  register or constant plus offsets with up to 4 `[ ]` pointer reads,
+  register or constant plus offsets with up to 8 `[ ]` pointer reads,
   e.g. `"esp+0x14"` or `"[[ecx+0x20]]+0x15c"` (guest RAM through CPU 0's
   page tables; unreadable memory is false). The instruction the run
   starts at doesn't count, so repeated calls walk hit to hit; `trace`
@@ -485,8 +485,21 @@ Other automation interfaces (windowed or headless):
   (`v` reads through CPU 0's page tables; 1-4096 bytes ending at or
   below 4 GiB, at most 256), and QMP `xemu-trace-regions {"regions":
   [{"address": A, "size": S, "virtual": true}]}` replaces them from the
-  next vblank (an empty list leaves only the counts). Under icount the
-  line is taken at the vblank, before the guest sees it, where
+  next vblank (an empty list leaves only the counts). An address may
+  also be a hook address expression (as in `xemu-hooks-set`'s
+  `collect`, `[ ]` up to 8 deep), such as
+  `XEMU_TRACE_REGIONS='[[[[0x1BF63C]+0x2C]+0xC0]+0x180]+0x38:12'` or
+  `{"addr": "[[0x1BF63C]+0x2C]+0xC0", "size": 4}` over QMP (a hook
+  region object works as is): it is virtual, and evaluated afresh with
+  CPU 0's registers and page tables for every line, so a row follows a
+  pointer the game re-allocates (a respawn, a level change, a load) from
+  the first line after the move, with no stale row and no pause. Its
+  field is `?` when a dereference reads memory that isn't guest RAM
+  (such as a null pointer; a pointer to a freed heap block still reads
+  it) and `-` when the bytes it points at aren't all RAM. The
+  `# regions` line writes it as `v<expression>:<size>` without blanks,
+  so the line's items parse back as `XEMU_TRACE_REGIONS`. Under icount
+  the line is taken at the vblank, before the guest sees it, where
   `xemu-frame-advance` samples its trace, from RAM as it is, so
   recording never changes the run: a live-pads session's lines equal its
   replay's (windowed, on macOS only: see live pads), and under the null

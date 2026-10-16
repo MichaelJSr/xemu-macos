@@ -5,9 +5,9 @@
  * for demos played in real time (windowed or headless) and for any run:
  *
  *   # xemu trace recording: <n> <frame> <hex per region>; ...
- *   # regions 0x1000:16 v0x80012340:64
+ *   # regions 0x1000:16 v0x80012340:64 v[[0x83a6e2c0+0x20]+0x154]:4
  *   # load frame=1234
- *   1 1235 00112233... 8899aabb...
+ *   1 1235 00112233... 8899aabb... 01000000
  *
  * <n> counts vblanks since the last load (or launch), as the "+N" of an
  * XEMU_INPUT_RECORD recording does, and <frame> is the process's frame
@@ -19,8 +19,16 @@
  * Regions: XEMU_TRACE_REGIONS=<addr>:<size>[,<addr>:<size>...] (C number
  * syntax, size 1-4096, ending at or below 4 GiB, at most 256 regions); a
  * "v" before the address reads it through CPU 0's page tables at that
- * vblank. QMP xemu-trace-regions replaces the list from the next vblank
- * on (an empty list leaves only the counts).
+ * vblank. An address that is not a number is a hook address expression
+ * (XemuHookRegion's addr, e.g. "[[0x83a6e2c0+0x20]+0x154]", the hooks'
+ * parser and reader), always virtual, evaluated afresh at every line with
+ * CPU 0's registers and page tables, so the region follows pointers the
+ * guest re-allocates; its field is "?" when a dereference reads memory
+ * that is not guest RAM (such as a null pointer; a freed heap block is
+ * still RAM) and "-" when the bytes it points at aren't all RAM. A "# regions" line writes such a region
+ * as "v<expression>:<size>", blanks dropped, so each item parses back as
+ * a region reading the same memory. QMP xemu-trace-regions replaces the
+ * list from the next vblank on (an empty list leaves only the counts).
  *
  * Under icount a line is taken at the vblank itself, before the guest
  * sees it, where xemu-frame-advance takes its trace samples, so a
@@ -40,46 +48,68 @@
 #include "qemu/cutils.h"
 #include "qemu/rcu.h"
 #include "qapi/error.h"
-#include "qapi/clone-visitor.h"
 #include "qapi/qapi-commands-xemu.h"
-#include "qapi/qapi-visit-xemu.h"
 #include "exec/icount.h"
 #include "exec/cpu-common.h"
 #include "exec/target_page.h"
 #include "hw/core/cpu.h"
+#include "exec/xemu-hook-expr.h"
 #include "xemu-trace-record.h"
 
 #define MAX_REGIONS 256
 #define MAX_REGION_SIZE 4096
 
+/* A recorded region: a fixed address, or an address expression. */
+typedef struct TraceRegion {
+    uint64_t address;           /* fixed */
+    uint32_t size;
+    bool virt;                  /* fixed: through CPU 0's page tables */
+    XemuHookExpr *expr;         /* or NULL */
+    char *text;                 /* expr's source, blanks dropped */
+} TraceRegion;
+
 static FILE *trace_file;
-static XemuTraceRegionList *trace_regions, *trace_pending;
-static bool trace_pending_set; /* trace_pending (NULL: no regions) is due */
+static GArray *trace_regions, *trace_pending;   /* TraceRegion, or NULL */
+static bool trace_pending_set; /* trace_pending is due */
 static bool trace_regions_changed;
 static uint64_t trace_base;   /* frame counter at the last load */
 static uint32_t trace_gen;    /* bumped by loads: drops queued samples */
 
+static bool size_check(int64_t size, Error **errp)
+{
+    if (size < 1 || size > MAX_REGION_SIZE) {
+        error_setg(errp, "a trace region's size must be 1 to %d",
+                   MAX_REGION_SIZE);
+        return false;
+    }
+    return true;
+}
+
 /*
- * Shared with xemu-frame-advance traces (ui/xemu.c): a region list's
- * limits. The guest's RAM and virtual addresses lie below 4 GiB, which
- * also keeps address + size from wrapping.
+ * The guest's RAM and virtual addresses lie below 4 GiB, which also keeps
+ * address + size from wrapping.
  */
+static bool fixed_check(uint64_t address, int64_t size, Error **errp)
+{
+    if (!size_check(size, errp)) {
+        return false;
+    }
+    if (address > UINT32_MAX ||
+        size > (int64_t)(UINT32_MAX - address) + 1) {
+        error_setg(errp, "trace region 0x%" PRIx64 ":%" PRId64
+                   " ends past 4 GiB", address, size);
+        return false;
+    }
+    return true;
+}
+
+/* Shared with xemu-frame-advance traces (ui/xemu.c): a list's limits. */
 bool xemu_trace_regions_check(XemuTraceRegionList *list, Error **errp)
 {
     int n = 0;
 
     for (; list; list = list->next) {
-        XemuTraceRegion *r = list->value;
-
-        if (r->size < 1 || r->size > MAX_REGION_SIZE) {
-            error_setg(errp, "a trace region's size must be 1 to %d",
-                       MAX_REGION_SIZE);
-            return false;
-        }
-        if (r->address > UINT32_MAX ||
-            r->size > (int64_t)(UINT32_MAX - r->address) + 1) {
-            error_setg(errp, "trace region 0x%" PRIx64 ":%" PRId64
-                       " ends past 4 GiB", r->address, r->size);
+        if (!fixed_check(list->value->address, list->value->size, errp)) {
             return false;
         }
         if (++n > MAX_REGIONS) {
@@ -90,14 +120,82 @@ bool xemu_trace_regions_check(XemuTraceRegionList *list, Error **errp)
     return true;
 }
 
-static XemuTraceRegionList *parse_regions(const char *spec, Error **errp)
+static void region_clear(gpointer p)
 {
-    XemuTraceRegionList *head = NULL, **tail = &head;
+    TraceRegion *r = p;
+
+    g_free(r->expr);
+    g_free(r->text);
+}
+
+static GArray *regions_new(void)
+{
+    GArray *a = g_array_new(false, true, sizeof(TraceRegion));
+
+    g_array_set_clear_func(a, region_clear);
+    return a;
+}
+
+static void regions_free(GArray *a)
+{
+    if (a) {
+        g_array_free(a, true);
+    }
+}
+
+static bool count_check(GArray *a, Error **errp)
+{
+    if (a->len >= MAX_REGIONS) {
+        error_setg(errp, "at most %d trace regions", MAX_REGIONS);
+        return false;
+    }
+    return true;
+}
+
+static bool add_fixed(GArray *a, uint64_t address, int64_t size, bool virt,
+                      Error **errp)
+{
+    TraceRegion r = { .address = address, .size = size, .virt = virt };
+
+    if (!fixed_check(address, size, errp) || !count_check(a, errp)) {
+        return false;
+    }
+    g_array_append_val(a, r);
+    return true;
+}
+
+static bool add_expr(GArray *a, const char *text, int64_t size, Error **errp)
+{
+    TraceRegion r = { .size = size, .virt = true };
+    GString *g;
+
+    if (!size_check(size, errp) || !count_check(a, errp)) {
+        return false;
+    }
+    r.expr = xemu_hook_expr_new(text, errp);
+    if (!r.expr) {
+        return false;
+    }
+    /* Blanks only separate tokens: dropped, the "# regions" item is one. */
+    g = g_string_new(NULL);
+    for (const char *c = text; *c; c++) {
+        if (!g_ascii_isspace(*c)) {
+            g_string_append_c(g, *c);
+        }
+    }
+    r.text = g_string_free(g, false);
+    g_array_append_val(a, r);
+    return true;
+}
+
+static GArray *parse_regions(const char *spec, Error **errp)
+{
+    GArray *a = regions_new();
     g_auto(GStrv) items = g_strsplit(spec, ",", -1);
 
     for (char **it = items; *it; it++) {
-        const char *p = g_strstrip(*it), *end;
-        XemuTraceRegion *r;
+        const char *p = g_strstrip(*it), *colon, *end;
+        g_autofree char *at = NULL;
         uint64_t addr, size;
         bool virt = false;
 
@@ -108,25 +206,29 @@ static XemuTraceRegionList *parse_regions(const char *spec, Error **errp)
             virt = true;
             p++;
         }
-        if (qemu_strtou64(p, &end, 0, &addr) || *end != ':' ||
-            qemu_strtou64(end + 1, NULL, 0, &size)) {
+        colon = strchr(p, ':');
+        if (!colon || qemu_strtou64(colon + 1, NULL, 0, &size)) {
             error_setg(errp, "XEMU_TRACE_REGIONS: '%s' is not "
                        "[v]<address>:<size>", *it);
-            qapi_free_XemuTraceRegionList(head);
-            return NULL;
+            goto fail;
         }
-        r = g_new0(XemuTraceRegion, 1);
-        r->address = addr;
-        r->size = size;
-        r->has_q_virtual = virt;
-        r->q_virtual = virt;
-        QAPI_LIST_APPEND(tail, r);
+        at = g_strndup(p, colon - p);
+        g_strstrip(at);
+        /* A number is a fixed address; anything else an expression. */
+        if (!qemu_strtou64(at, &end, 0, &addr) && !*end) {
+            if (!add_fixed(a, addr, size, virt, errp)) {
+                goto fail;
+            }
+        } else if (!add_expr(a, at, size, errp)) {
+            error_prepend(errp, "XEMU_TRACE_REGIONS: '%s': ", *it);
+            goto fail;
+        }
     }
-    if (!xemu_trace_regions_check(head, errp)) {
-        qapi_free_XemuTraceRegionList(head);
-        return NULL;
-    }
-    return head;
+    return a;
+
+fail:
+    regions_free(a);
+    return NULL;
 }
 
 /*
@@ -143,10 +245,15 @@ static void write_regions(void)
 {
     GString *s = g_string_new("# regions");
 
-    for (XemuTraceRegionList *l = trace_regions; l; l = l->next) {
-        g_string_append_printf(s, " %s0x%" PRIx64 ":%" PRId64,
-                               l->value->q_virtual ? "v" : "",
-                               l->value->address, l->value->size);
+    for (guint i = 0; trace_regions && i < trace_regions->len; i++) {
+        TraceRegion *r = &g_array_index(trace_regions, TraceRegion, i);
+
+        if (r->expr) {
+            g_string_append_printf(s, " v%s:%" PRIu32, r->text, r->size);
+        } else {
+            g_string_append_printf(s, " %s0x%" PRIx64 ":%" PRIu32,
+                                   r->virt ? "v" : "", r->address, r->size);
+        }
     }
     g_string_append_c(s, '\n');
     trace_write(s->str);
@@ -206,17 +313,23 @@ static bool read_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
  * Shared with xemu-frame-advance traces: region r's bytes into buf, or
  * false when guest RAM does not back all of it.
  */
+static bool read_fixed(uint8_t *buf, const uint8_t *ram, uint64_t ram_size,
+                       uint64_t address, uint64_t size, bool virt)
+{
+    if (virt) {
+        return read_virtual(buf, ram, ram_size, address, size);
+    }
+    if (address >= ram_size || size > ram_size - address) {
+        return false;
+    }
+    memcpy(buf, ram + address, size);
+    return true;
+}
+
 bool xemu_trace_region_read(uint8_t *buf, const uint8_t *ram,
                             uint64_t ram_size, const XemuTraceRegion *r)
 {
-    if (r->q_virtual) {
-        return read_virtual(buf, ram, ram_size, r->address, r->size);
-    }
-    if (r->address >= ram_size || r->size > ram_size - r->address) {
-        return false;
-    }
-    memcpy(buf, ram + r->address, r->size);
-    return true;
+    return read_fixed(buf, ram, ram_size, r->address, r->size, r->q_virtual);
 }
 
 static void trace_sample(uint64_t frame)
@@ -243,12 +356,21 @@ static void trace_sample(uint64_t frame)
     s = g_string_sized_new(64);
     g_string_append_printf(s, "%" PRIu64 " %" PRIu64, frame - trace_base,
                            frame);
-    for (XemuTraceRegionList *l = trace_regions; l; l = l->next) {
+    for (guint i = 0; trace_regions && i < trace_regions->len; i++) {
+        TraceRegion *r = &g_array_index(trace_regions, TraceRegion, i);
+        XemuHookExprRead got;
+
         g_string_append_c(s, ' ');
-        if (xemu_trace_region_read(buf, ram, ram_size, l->value)) {
-            qemu_hexdump_line(s, buf, l->value->size, 0, 0);
+        if (r->expr) {
+            got = xemu_hook_expr_read_cpu0(r->expr, buf, r->size);
         } else {
-            g_string_append_c(s, '-');
+            got = read_fixed(buf, ram, ram_size, r->address, r->size, r->virt)
+                  ? XEMU_HOOK_EXPR_READ_OK : XEMU_HOOK_EXPR_UNBACKED;
+        }
+        if (got == XEMU_HOOK_EXPR_READ_OK) {
+            qemu_hexdump_line(s, buf, r->size, 0, 0);
+        } else {
+            g_string_append_c(s, got == XEMU_HOOK_EXPR_UNRESOLVED ? '?' : '-');
         }
     }
     g_string_append_c(s, '\n');
@@ -273,7 +395,7 @@ void xemu_trace_record_frame(uint64_t frame)
         return;
     }
     if (trace_pending_set) {
-        qapi_free_XemuTraceRegionList(trace_regions);
+        regions_free(trace_regions);
         trace_regions = trace_pending;
         trace_pending = NULL;
         trace_pending_set = false;
@@ -301,17 +423,38 @@ void xemu_trace_record_load(uint64_t frame)
     trace_write(line);
 }
 
-void qmp_xemu_trace_regions(XemuTraceRegionList *regions, Error **errp)
+void qmp_xemu_trace_regions(XemuTraceRecordRegionList *regions,
+                            Error **errp)
 {
+    GArray *a;
+
     if (!trace_file) {
         error_setg(errp, "XEMU_TRACE_RECORD is not set");
         return;
     }
-    if (!xemu_trace_regions_check(regions, errp)) {
-        return;
+    a = regions_new();
+    for (; regions; regions = regions->next) {
+        XemuTraceRecordRegion *r = regions->value;
+        bool ok;
+
+        if (r->has_address == !!r->addr) {
+            error_setg(errp, "a trace region takes one of address and addr");
+            ok = false;
+        } else if (r->addr && r->has_q_virtual && !r->q_virtual) {
+            error_setg(errp, "an address expression is always virtual");
+            ok = false;
+        } else if (r->addr) {
+            ok = add_expr(a, r->addr, r->size, errp);
+        } else {
+            ok = add_fixed(a, r->address, r->size, r->q_virtual, errp);
+        }
+        if (!ok) {
+            regions_free(a);
+            return;
+        }
     }
-    /* An empty list arrives as NULL, and is a change too. */
-    qapi_free_XemuTraceRegionList(trace_pending);
-    trace_pending = QAPI_CLONE(XemuTraceRegionList, regions);
+    /* An empty list is a change too. */
+    regions_free(trace_pending);
+    trace_pending = a;
     trace_pending_set = true;
 }

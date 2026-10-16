@@ -920,6 +920,7 @@ static XemuTraceRegionList *frame_trace_regions;
 static int64_t frame_trace_every;
 static uint64_t frame_trace_start;
 static XemuTraceSampleList *frame_trace_samples, **frame_trace_tail;
+static uint64_t frame_trace_last;   /* the last sample's frame, or the start */
 
 static void frame_trace_sample(void)
 {
@@ -931,6 +932,7 @@ static void frame_trace_sample(void)
     uint8_t buf[4096];
 
     sample->frame = frame_count;
+    frame_trace_last = frame_count;
     for (XemuTraceRegionList *l = frame_trace_regions; l; l = l->next) {
         XemuTraceRegion *r = l->value;
         bool ok = xemu_trace_region_read(buf, ram, ram_size, r);
@@ -1002,8 +1004,9 @@ bool xemu_frame_advance_hook_stop(void)
 
 /*
  * xemu-run's value stops (target/i386/tcg/system/xemu-run-until.c): asked
- * at each vblank of an advance, before its trace sample; true ends the
- * advance on that vblank, as reaching its last frame does.
+ * at each vblank of an advance, before its trace sample (in normal mode
+ * on the vCPU thread just after it, frame_vblank_stop_on_cpu); true ends
+ * the advance on that vblank, as reaching its last frame does.
  */
 static bool (*frame_advance_vblank_stop)(void);
 
@@ -1068,6 +1071,29 @@ static void frame_advance_vm_state_change(void *opaque, bool running,
     aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
 }
 
+/*
+ * Normal mode: a value stop's address may use CPU 0's registers, which TB
+ * code keeps in host registers while the vCPU runs without the BQL (the
+ * pinned globals), so the vblank thread would read stale ones. The vCPU
+ * thread asks the stops between blocks instead, with the BQL, as
+ * XEMU_TRACE_RECORD's lines are taken; one that fires ends the advance on
+ * the frame it is asked in, sampled.
+ */
+static void frame_vblank_stop_on_cpu(CPUState *cpu, run_on_cpu_data data)
+{
+    if (data.host_ulong != frame_advance_gen || !frame_advance_co ||
+        frame_advance_stopping || !frame_advance_vblank_stop ||
+        !frame_advance_vblank_stop()) {
+        return;
+    }
+    frame_advance_target = frame_count;
+    if (frame_trace_regions && frame_trace_last != frame_count) {
+        frame_trace_sample();
+    }
+    frame_advance_stopping = true;
+    aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
+}
+
 static void process_vblank(struct xemu_console *scon)
 {
     assert(bql_locked());
@@ -1079,9 +1105,15 @@ static void process_vblank(struct xemu_console *scon)
         /* Input tagged for this frame lands before the vblank IRQ. */
         xemu_input_frame_tick(frame_count);
         if (frame_advance_vblank_stop && frame_advance_co &&
-            !frame_advance_stopping && frame_count <= frame_advance_target &&
-            frame_advance_vblank_stop()) {
-            frame_advance_target = frame_count;
+            !frame_advance_stopping && frame_count <= frame_advance_target) {
+            if (icount_enabled()) {
+                if (frame_advance_vblank_stop()) {
+                    frame_advance_target = frame_count;
+                }
+            } else if (first_cpu) {
+                async_run_on_cpu(first_cpu, frame_vblank_stop_on_cpu,
+                                 RUN_ON_CPU_HOST_ULONG(frame_advance_gen));
+            }
         }
         if (frame_trace_regions && frame_advance_co &&
             !frame_advance_stopping && frame_count <= frame_advance_target &&
@@ -1206,6 +1238,7 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     frame_trace_regions = trace;
     frame_trace_every = trace_every;
     frame_trace_start = frame_count;
+    frame_trace_last = frame_count;
     frame_trace_samples = NULL;
     frame_trace_tail = &frame_trace_samples;
     /* Samples copy RAM directly, past the lazy report traps. */

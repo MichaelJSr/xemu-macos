@@ -17,8 +17,10 @@
  *
  * xemu-run's value stops are read at each vblank of its advance, from
  * ui/xemu.c's vblank (xemu_frame_advance_set_vblank_stop), where the
- * trace samples are: RAM only, with no hook and no retranslation. One
- * that fires ends the advance on that vblank as its last frame would.
+ * trace samples are (in normal mode on the vCPU thread right after it,
+ * since an address may use registers): RAM only, with no hook and no
+ * retranslation. One that fires ends the advance on that vblank as its
+ * last frame would.
  */
 
 #include "qemu/osdep.h"
@@ -306,16 +308,9 @@ static struct {
 
 static bool watch_read(RunWatch *w, uint8_t *buf)
 {
-    CPUX86State *env = cpu_env(first_cpu);
-    XemuHookCtx ctx = {
-        .env = env,
-        .pc = (uint32_t)(env->segs[R_CS].base + env->eip),
-    };
-    uint32_t a;
-
     memset(buf, 0, 8);
-    return xemu_hook_expr_eval(&ctx, &w->addr, &a) &&
-           xemu_hook_read(env, a, buf, w->size);
+    return xemu_hook_expr_read_cpu0(&w->addr, buf, w->size) ==
+           XEMU_HOOK_EXPR_READ_OK;
 }
 
 static bool run_vblank_stop(void)

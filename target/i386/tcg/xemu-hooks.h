@@ -61,6 +61,7 @@
 #define TARGET_I386_XEMU_HOOKS_H
 
 #include "qemu/atomic.h"
+#include "exec/xemu-hook-expr.h"
 #include "cpu.h"
 
 typedef struct XemuHookCtx {
@@ -158,11 +159,12 @@ bool xemu_hook_writable(XemuHookCtx *ctx, vaddr va, unsigned len);
  * offsets, with [ ] reading the 32-bit pointer at what is inside, at most
  * XEMU_HOOK_EXPR_DEREFS deep. Examples: "esp+0x14", "0x2f1c40",
  * "[[ecx+0x20]]+0x15c". Registers: eax ecx edx ebx esp ebp esi edi eip.
+ * Outside a hook, exec/xemu-hook-expr.h reads one through CPU 0.
  */
-#define XEMU_HOOK_EXPR_DEREFS 4
-#define XEMU_HOOK_EXPR_OPS 16
+#define XEMU_HOOK_EXPR_DEREFS 8
+#define XEMU_HOOK_EXPR_OPS 24
 
-typedef struct XemuHookExpr {
+struct XemuHookExpr {
     int8_t base_reg;            /* -1: base is a constant */
     uint8_t nops;
     uint32_t base;
@@ -170,7 +172,7 @@ typedef struct XemuHookExpr {
         bool deref;             /* read the u32 at the value */
         uint32_t add;           /* else add this (mod 2^32) */
     } op[XEMU_HOOK_EXPR_OPS];
-} XemuHookExpr;
+};
 
 bool xemu_hook_expr_parse(const char *s, XemuHookExpr *e, Error **errp);
 /* False when a dereference reads unmapped or non-RAM memory. */
