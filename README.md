@@ -257,6 +257,13 @@ Other automation interfaces (windowed or headless):
   port afterwards (config, settings or `xemu-input-bind`) drives the
   plugged pad without a replug. Only pads and their hubs are plugged,
   never memory units.
+- **Snapshots and the disc**: a Snapshots menu (or F5-F8) load whose
+  saved disc path isn't the tray's asks in the "DVD Drive Image"
+  dialog. In the dialog, Yes opens the saved image before the tray's
+  disc comes out, so a Yes that fails leaves the tray as it was
+  (`xemu: snapshot '<tag>': <error>; the tray keeps <tray>; not
+  loaded`), and a saved image that no longer exists is marked missing
+  and gets no Yes (Load Anyway or Cancel, with Cancel focused).
 - **Demos as played (live pads under icount)**: with
   `XEMU_ICOUNT_LIVE_PADS=1` and `-icount shift=2,align=on,sleep=on`
   (windowed or headless), host gamepads, and the host keyboard on the

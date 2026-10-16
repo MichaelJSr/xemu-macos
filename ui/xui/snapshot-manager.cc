@@ -30,6 +30,7 @@ SnapshotManager::SnapshotManager()
     m_extra_data = NULL;
     m_load_failed = false;
     m_open_pending = false;
+    m_target_disc_exists = true;
     m_snapshots_len = 0;
 }
 
@@ -80,6 +81,7 @@ void SnapshotManager::LoadSnapshotChecked(const char *name)
             m_current_disc_path.clear();
         }
         m_target_disc_path = data->disc_path;
+        m_target_disc_exists = g_file_test(data->disc_path, G_FILE_TEST_EXISTS);
         m_pending_load_name = name;
         m_open_pending = true;
     } else {
@@ -126,30 +128,44 @@ void SnapshotManager::DrawSnapshotDiscLoadDialog()
     ImGui::Spacing();
     ImGui::Indent();
     ImGui::Text("Current Image: %s", m_current_disc_path.length() ? m_current_disc_path.c_str() : "(None)");
-    ImGui::Text("Expected Image: %s", m_target_disc_path.length() ? m_target_disc_path.c_str() : "(None)");
+    ImGui::Text("Expected Image: %s%s", m_target_disc_path.length() ? m_target_disc_path.c_str() : "(None)",
+                m_target_disc_exists ? "" : " (missing)");
     ImGui::Unindent();
     ImGui::Spacing();
-    ImGui::Text("Would you like to load it now?");
-    
+    if (m_target_disc_exists) {
+        ImGui::Text("Would you like to load it now?");
+    } else {
+        ImGui::Text("The expected image no longer exists, so it can't be loaded.");
+        ImGui::Text("Load the snapshot with the current image anyway?");
+    }
+
     ImGui::Dummy(ImVec2(0,16));
 
-    if (ImGui::Button("Yes", ImVec2(120, 0))) {
-        xemu_eject_disc(NULL);
-        
-        Error *err = NULL;
-        xemu_load_disc(m_target_disc_path.c_str(), &err);
-        if (err) {
-            xemu_queue_error_message(error_get_pretty(err));
-            error_free(err);
-        } else {
-            LoadSnapshot(m_pending_load_name.c_str());
-        }
+    if (m_target_disc_exists) {
+        if (ImGui::Button("Yes", ImVec2(120, 0))) {
+            /* The current disc leaves the tray only once this one opened. */
+            Error *err = NULL;
+            xemu_load_disc(m_target_disc_path.c_str(), &err);
+            if (err) {
+                fprintf(stderr,
+                        "xemu: snapshot '%s': %s; the tray keeps %s; "
+                        "not loaded\n",
+                        m_pending_load_name.c_str(), error_get_pretty(err),
+                        m_current_disc_path.length() ?
+                            m_current_disc_path.c_str() : "no disc");
+                xemu_queue_error_message(error_get_pretty(err));
+                error_free(err);
+            } else {
+                LoadSnapshot(m_pending_load_name.c_str());
+            }
 
-        ImGui::CloseCurrentPopup();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
     }
-    
-    ImGui::SameLine();
-    if (ImGui::Button("No", ImVec2(120, 0))) {
+
+    if (ImGui::Button(m_target_disc_exists ? "No" : "Load Anyway",
+                      ImVec2(m_target_disc_exists ? 120 : 0, 0))) {
         LoadSnapshot(m_pending_load_name.c_str());
         ImGui::CloseCurrentPopup();
     }
@@ -157,6 +173,10 @@ void SnapshotManager::DrawSnapshotDiscLoadDialog()
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120, 0))) {
         ImGui::CloseCurrentPopup();
+    }
+    if (!m_target_disc_exists) {
+        /* Without Yes, a reflex A or Enter cancels rather than loads */
+        ImGui::SetItemDefaultFocus();
     }
 
     ImGui::EndPopup();

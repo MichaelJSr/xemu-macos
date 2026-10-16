@@ -2755,17 +2755,19 @@ void xemu_load_disc(const char *path, Error **errp)
 {
     Error *error = NULL;
 
-    // Ensure an eject sequence is always triggered so Xbox software reloads
-    xbox_smc_eject_button();
-    xemu_settings_set_string(&g_config.sys.files.dvd_path, "");
-
+    /*
+     * The change opens the new image before it takes the old one out, so
+     * a failure leaves the tray, the config and the SMC as they were.
+     */
     qmp_blockdev_change_medium("ide0-cd1", NULL, path, "raw", false, false,
                                false, 0, &error);
     if (error) {
         error_propagate(errp, error);
-    } else {
-        xemu_settings_set_string(&g_config.sys.files.dvd_path, path);
+        return;
     }
 
+    // Ensure an eject sequence is always triggered so Xbox software reloads
+    xbox_smc_eject_button();
+    xemu_settings_set_string(&g_config.sys.files.dvd_path, path);
     xbox_smc_update_tray_state();
 }

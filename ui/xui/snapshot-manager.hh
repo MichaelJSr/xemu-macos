@@ -28,6 +28,7 @@ public:
     XemuSnapshotData *m_extra_data;
     bool m_load_failed;
     bool m_open_pending;
+    bool m_target_disc_exists;
     int m_snapshots_len;
 
     std::string m_pending_load_name;
