@@ -3,8 +3,11 @@ name: CI
 on:
   pull_request:
   # Upstream skips master here because its prerelease job builds it; that
-  # job only runs for xemu-project, so the fork's master builds here.
+  # job only runs for xemu-project, so the fork's master builds here. A
+  # push filter with only tags-ignore would skip every branch push.
   push:
+    branches:
+      - '**'
     tags-ignore:
       - "v*"
 
