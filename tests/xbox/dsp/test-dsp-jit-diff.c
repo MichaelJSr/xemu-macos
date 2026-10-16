@@ -31,6 +31,8 @@
  *   - the per-op epilogue's constant-pc ops and out-of-line paths: a
  *     one-op DO body, REP at a DO loop's LA, modulo calc_ea under REP,
  *     a P write into the next op, a halt mid-block
+ *   - dsp_run's budget (/corpus/budget-*): a frame wait polled across two
+ *     chained blocks returns from every dsp_run
  *
  * Four consumers, wired in meson.build:
  *   1. /corpus — golden-value regression of the interpreter (all
@@ -790,6 +792,67 @@ static void test_corpus_prog(gconstpointer arg)
 }
 
 /* ------------------------------------------------------------------ */
+/* dsp_run's budget                                                    */
+/* ------------------------------------------------------------------ */
+
+static void check_jit_engaged(DSPState *s)
+{
+#if DSP56K_JIT_SUPPORTED
+    dsp_core_t *core = (dsp_core_t *)s->backend;
+    if (dsp56k_jit_enabled() && core->jit_state) {
+        g_assert_cmpuint(dsp56k_jit_blocks_executed(core), >, 0);
+    }
+#endif
+}
+
+/*
+ * A frame wait polled across two blocks: x:$FFFFC5 bit 1 (START_FRAME)
+ * is set only by dsp_start_frame, between dsp_run calls, so every
+ * dsp_run must come back once its budget is used. Variant 0 polls with
+ * JSET, whose fall-through chains to the JMP back; variant 1 with JCLR,
+ * whose taken path does. A chained JIT run that ignored the budget
+ * never returned.
+ */
+static void test_budget_poll(gconstpointer arg)
+{
+    DSPState *s = make_dsp();
+    Prog p;
+    uint32_t top, tail;
+
+    begin_prog(&p, s);
+    top = here(&p);
+    if (GPOINTER_TO_INT(arg) == 0) {
+        emit(&p, 0x0A85A1);                     /* jset #1,x:$ffffc5,go */
+        uint32_t go_word = reserve(&p);
+        emit(&p, 0x0C0000 | top);               /* jmp top */
+        tail = emit_halt_tail(&p);
+        patch(&p, go_word, tail);
+    } else {
+        emit(&p, 0x0A8581);                     /* jclr #1,x:$ffffc5,wait */
+        uint32_t wait_word = reserve(&p);
+        uint32_t go_jmp = reserve(&p);          /* jmp go */
+        uint32_t wait = here(&p);
+        emit(&p, 0x0C0000 | top);               /* wait: jmp top */
+        emit(&p, 0x000000);                     /* nop */
+        tail = emit_halt_tail(&p);
+        patch(&p, wait_word, wait);
+        patch(&p, go_jmp, 0x0C0000 | tail);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        dsp_run(s, 1000);
+        g_assert_false(dsp_get_halt_requested(s));
+        /* Stopped within one op of the budget. */
+        g_assert_cmpint(s->save_cycles, <=, 0);
+        g_assert_cmpint(s->save_cycles, >, -64);
+    }
+    dsp_start_frame(s);
+    run_to_halt(s);
+    check_jit_engaged(s);
+    dsp_destroy(s);
+}
+
+/* ------------------------------------------------------------------ */
 /* Cross-process differential                                          */
 /*                                                                     */
 /* The JIT switch is latched once per process, so the interpreter and */
@@ -989,6 +1052,10 @@ int main(int argc, char **argv)
 #endif
         g_free(path);
     }
+    g_test_add_data_func("/corpus/budget-poll-jset", GINT_TO_POINTER(0),
+                         test_budget_poll);
+    g_test_add_data_func("/corpus/budget-poll-jclr", GINT_TO_POINTER(1),
+                         test_budget_poll);
 
     return g_test_run();
 }

@@ -126,10 +126,15 @@ struct dsp_core_s {
      * effect when diff mode is off. */
     uint8_t jit_skip_diff_compare;
 
+    /* The num_inst at which a chained JIT run stops: every block's
+     * chain entry leaves before its first op once num_inst reaches it
+     * (dsp56k_jit_execute_block sets it from dsp_run's budget). */
+    uint32_t jit_chain_limit;
+
     /* End of the JIT-hot block. dsp_state_diff() compares
      * [0, offsetof(jit_exit_block_request)) unconditionally and
-     * skips jit_exit_block_request and jit_skip_diff_compare; keep
-     * those two bytes last here. */
+     * skips jit_exit_block_request, jit_skip_diff_compare and
+     * jit_chain_limit; keep those last here. */
 
     uint32_t xram[DSP_XRAM_SIZE];
     uint32_t yram[DSP_YRAM_SIZE];

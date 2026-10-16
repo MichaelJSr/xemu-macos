@@ -2007,6 +2007,49 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (6/6). Cycles, both binaries at once (load 18-20): heavy-f1 median
   −0.33% (5/8), cold boot −0.04% (4/8); sequential sessions −1.2%
   heavy-f1 (10/12 wins), −0.4% cold boot (load 16-26).
+- **DSP JIT chains fall-throughs, calls, DO entries and loop rewinds
+  (2026-10-16).** `XEMU_DSP_JIT_STATS` now files each return to the
+  dispatcher under a reason and counts chain-site passes. Per 1200
+  heavy-f1 frames the GP entered blocks 5.99M times and the EP 1.99M
+  (~19 host cycles each). The GP's exits: taken bit-test branches
+  (`BRSET`, never chainable) 31%, DO-loop rewinds to a loop start in
+  another block 31%, not-taken two-word branches 10% (the length
+  classifier calls `Bcc xxxx`, `JCLR` and the like one word, so their
+  fall-through never matched), calls 8%, returns 10%; the EP's: rewinds
+  to the block's own start 47%. Now a block-ending op ends in chain
+  sites for every static successor (`jit_static_succ`): the taken target
+  of each branch and call with a static one (bit tests and mode-6 `_ea`
+  forms included), the fall-through of the conditional ones (a second
+  compare where the first site's pc check fails) and of DO / DOR /
+  ENDDO. The op at the LA of the DO loop that ran when its block was
+  translated chains a rewind to that loop's start, its own block
+  included (LC bounds it). Each site sits behind the exit-word test and
+  a pc compare and is registered for unpatching. Entries per 1200
+  heavy-f1 frames: GP 1.00M, EP 0.40M (−83%, −80%); what still exits is
+  returns and two-word mode-6 `movep`/`move` ops that end a block. Det,
+  RAM and WAV equal: instructions per frame −0.77% heavy-f1 (16/16
+  pairs), −1.22% cold boot (14/14), −1.11% movie-e2 (6/6). Cycles, both
+  binaries run at once so load swings cancel: heavy-f1 median −0.26%
+  (mean −0.50%, 6/8, load 18-21), cold boot −0.62% (mean −0.71%, 8/8,
+  load 16-19); in sequential sessions cold boot −0.74% and −1.09% (10
+  and 14 pairs), heavy-f1 +0.4% and −0.95% (12 and 16 pairs, load
+  16-47). `XEMU_DSP_JIT_DIFF=1` failures 0 (chaining is off under it);
+  `XEMU_DSP_JIT_PIN_AUDIT=1` silent with chaining on. A chained run
+  still stops where `dsp_run`'s budget stops dispatching one block at a
+  time: each block's chain entry compares `num_inst` with
+  `jit_chain_limit` (four instructions) and leaves before its first op
+  once the budget is spent. Without that bound a frame wait polled
+  across two blocks (`jset #1,x:$ffffc5,go` / `jmp`, or the `jclr`
+  form) never came back from `dsp_run`, so the APU frame thread spun
+  holding `d->lock` and the emulator hung, and where a run stopped
+  depended on which sites were patched (xbox suite
+  `/corpus/budget-poll-*`). The bound costs +0.12% instructions per
+  frame (det heavy-f1 and stream-e2, 4/4 pairs each, load 29-57); in
+  normal mode a tenth of the dispatcher entries are budget exits. The
+  auto-throttle (more than 1/16 of
+  dispatcher entries retranslating) counts a chained run once, so the
+  same churn now weighs about five times as much; Azurik's cores stay
+  far below it.
 
 ### Input
 

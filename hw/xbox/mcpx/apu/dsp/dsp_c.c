@@ -108,7 +108,7 @@ static void dsp_c_run(DSPState *dsp, int cycles)
              * on any fallback condition (unsupported op at block
              * start, translator bail-out), in which case we run one
              * interpreter step and retry. */
-            consumed = dsp56k_jit_execute_block(core);
+            consumed = dsp56k_jit_execute_block(core, dsp->save_cycles);
         }
 
         if (consumed == 0) {

@@ -38,13 +38,15 @@ void dsp56k_jit_finalize(dsp_core_t *dsp);
 
 /*
  * Execute translated code starting at dsp->pc. Returns the number
- * of cycles consumed across the block (sum of dsp->instr_cycle per
- * op). On any fallback-required condition (unsupported op on first
- * translation, interrupt pending on entry, etc.) the function may
- * return 0 without advancing, and the caller should run one
- * interpreter step.
+ * of cycles consumed across the block and the blocks chained from it
+ * (sum of dsp->instr_cycle per op); a chained run stops at the first
+ * block entry once @budget (> 0) cycles are used, as dispatching one
+ * block at a time would. On any fallback-required condition
+ * (unsupported op on first translation, interrupt pending on entry,
+ * etc.) the function may return 0 without advancing, and the caller
+ * should run one interpreter step.
  */
-unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp);
+unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp, int budget);
 
 /*
  * Invalidate any translated block whose PC range includes addr.
@@ -343,8 +345,9 @@ int dsp56k_jit_helper_classify_long_imm(void *fn);
 
 static inline void dsp56k_jit_init(dsp_core_t *dsp) { (void)dsp; }
 static inline void dsp56k_jit_finalize(dsp_core_t *dsp) { (void)dsp; }
-static inline unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp) {
-    (void)dsp; return 0;
+static inline unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp,
+                                                    int budget) {
+    (void)dsp; (void)budget; return 0;
 }
 static inline void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr) {
     (void)dsp; (void)addr;

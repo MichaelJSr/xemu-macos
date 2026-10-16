@@ -588,6 +588,7 @@ static inline void emit_cbnz_x(ArmEmit *e, int rn, int32_t off_bytes)
 #define ARM_COND_EQ 0x0
 #define ARM_COND_NE 0x1
 #define ARM_COND_HS 0x2
+#define ARM_COND_PL 0x5
 static inline void emit_bcond(ArmEmit *e, int cond, int32_t off_bytes)
 {
     int32_t imm19 = off_bytes >> 2;
@@ -1012,6 +1013,37 @@ typedef void (*dsp56k_jit_entry_fn)(dsp_core_t *dsp);
  */
 #define DSP56K_JIT_MAX_PENDING_CHAINS 128
 
+/* Why a block returned to the dispatcher (XEMU_DSP_JIT_STATS). */
+enum {
+    DSP56K_JIT_EXIT_IDLE,       /* exit word: is_idle */
+    DSP56K_JIT_EXIT_REQUEST,    /* exit word: jit_exit_block_request */
+    DSP56K_JIT_EXIT_IRQ,        /* exit word: an interrupt field */
+    DSP56K_JIT_EXIT_REP,        /* a REP still running */
+    DSP56K_JIT_EXIT_LOOP_SELF,  /* DO-loop rewind to the block's start */
+    DSP56K_JIT_EXIT_LOOP_OTHER, /* DO-loop rewind elsewhere */
+    DSP56K_JIT_EXIT_NOT_TAKEN,  /* conditional branch / call fell through */
+    DSP56K_JIT_EXIT_TAKEN,      /* branch taken, not chained */
+    DSP56K_JIT_EXIT_CALL,       /* JSR / BSR / JScc / JSCLR / JSSET taken */
+    DSP56K_JIT_EXIT_RET,        /* RTS / RTI */
+    DSP56K_JIT_EXIT_DO,         /* after DO / DOR / ENDDO */
+    DSP56K_JIT_EXIT_END,        /* the block was cut (op limit, an op it
+                                 * can't translate) */
+    DSP56K_JIT_EXIT_PC_OTHER,   /* any other pc mismatch */
+    DSP56K_JIT_EXIT_EVICTED,    /* the exiting block was evicted */
+    DSP56K_JIT_EXIT_BUDGET,     /* a chained run reached dsp_run's budget
+                                 * at this block's entry */
+    DSP56K_JIT_EXIT_MAX,
+};
+
+/* Chained transitions by chain site (XEMU_DSP_JIT_STATS). */
+enum {
+    DSP56K_JIT_CHAIN_TAKEN,     /* branch / jump taken */
+    DSP56K_JIT_CHAIN_FALL,      /* not taken; after DO / DOR / ENDDO */
+    DSP56K_JIT_CHAIN_CALL,      /* static call */
+    DSP56K_JIT_CHAIN_LOOP,      /* DO-loop rewind to the block's start */
+    DSP56K_JIT_CHAIN_MAX,
+};
+
 typedef struct DspJitBlock DspJitBlock;
 
 typedef struct DspJitPendingChain {
@@ -1053,6 +1085,11 @@ struct DspJitBlock {
     dsp56k_jit_entry_fn entry;    /* pointer into code buffer */
     uint32_t num_ops;
     uint32_t write_set;        /* DSP56K_JIT_WS_* bitmask */
+    /* The last op, for the XEMU_DSP_JIT_STATS exit reasons: its pc,
+     * where it falls through to and its DSP56K_JIT_CF_* (terminators). */
+    uint32_t last_pc;
+    uint32_t last_fall;
+    uint8_t  last_cf;
     /*
      * Differential-validator gate. A translated block is fully
      * deterministic given its pre-state (same JIT stubs run, each
@@ -1074,12 +1111,11 @@ struct DspJitBlock {
 
     /* ---------- Static block chaining (Phase 5b/5c) ----------
      *
-     * When a block ends with a chainable terminator (unconditional
-     * BRA/JMP with statically-known target, conditional branch's
-     * taken path), and the target block is already translated in
-     * the cache, the source block's last-op epilogue emits a
-     * direct B to target->chain_entry instead of returning to the
-     * dispatcher. This saves one dispatcher round-trip (cache
+     * When a block ends in an op whose successors are known at
+     * translate time (see "Static block chaining" below), its
+     * epilogue branches straight to each successor block's
+     * chain_entry instead of returning to the dispatcher. This
+     * saves one dispatcher round-trip (cache
      * lookup + call overhead) per chained branch, and — more
      * importantly — lets tight inner loops stay entirely inside
      * JIT code across iterations.
@@ -1211,6 +1247,14 @@ typedef struct DspJitState {
     /* Stats */
     uint64_t blocks_translated;
     uint64_t blocks_executed;
+    /*
+     * XEMU_DSP_JIT_STATS: a block's shared exit stores its pc_start
+     * here, and dsp56k_jit_execute_block files the exit under a reason;
+     * chain sites count the transitions they make (jit_stats_count_exit).
+     */
+    uint32_t stats_exit_pc;
+    uint64_t exits[DSP56K_JIT_EXIT_MAX];
+    uint64_t chains[DSP56K_JIT_CHAIN_MAX];
     uint64_t cache_flushes;
     uint64_t fallbacks;
     uint64_t diff_ops_checked;
@@ -1246,9 +1290,9 @@ static const char *jit_core_name(const dsp_core_t *dsp)
     return dsp->is_gp ? "GP" : "EP";
 }
 
-/* Evaluate churn every WINDOW block executions; throttle when more
- * than 1/RATIO of them caused a (re)translation. GP on Azurik
- * measures ~1:10000 (never trips). */
+/* Evaluate churn every WINDOW dispatcher entries (a chained run of
+ * blocks is one); throttle when more than 1/RATIO of them caused a
+ * (re)translation. Azurik's GP and EP never trip it. */
 #define DSP56K_JIT_THROTTLE_WINDOW (256u * 1024u)
 #define DSP56K_JIT_THROTTLE_RATIO  16u
 
@@ -1302,6 +1346,7 @@ static void jit_clear_icache(void *start, void *end)
 #define OFF_SR                       ((uint32_t)(offsetof(dsp_core_t, registers) + 4u * DSP_REG_SR))
 #define OFF_JIT_EXIT_BLOCK_REQ       ((uint32_t)offsetof(dsp_core_t, jit_exit_block_request))
 #define OFF_JIT_SKIP_DIFF            ((uint32_t)offsetof(dsp_core_t, jit_skip_diff_compare))
+#define OFF_JIT_CHAIN_LIMIT          ((uint32_t)offsetof(dsp_core_t, jit_chain_limit))
 
 /* Stack-relative scratch offsets (see emit_prologue for frame layout). */
 #define OFF_SP_SCRATCH0  0
@@ -1338,6 +1383,7 @@ QEMU_BUILD_BUG_ON(OFF_CUR_INST_LEN             > OFF_WINDOW_W);
 QEMU_BUILD_BUG_ON(OFF_NUM_INST                 > OFF_WINDOW_W);
 QEMU_BUILD_BUG_ON(OFF_LOOP_REP                 > OFF_WINDOW_W);
 QEMU_BUILD_BUG_ON(OFF_PC_ON_REP                > OFF_WINDOW_W);
+QEMU_BUILD_BUG_ON(OFF_JIT_CHAIN_LIMIT          > OFF_WINDOW_W);
 
 /*
  * The exit word (dsp_cpu.h): interrupt_state, interrupt_counter,
@@ -1473,7 +1519,18 @@ typedef struct {
     uint32_t expected_next_pc;
     bool const_pc;         /* main line stores pc from a constant */
     bool const_cyc;        /* instr_cycle is still 2 at Step 7 */
+    /* The op sits at LA: a rewind to this pc chains (emit_cold_stubs). */
+    uint32_t loop_chain_pc;
 } ColdStub;
+
+/* A chain site the translator emitted (a B, routed once the block is
+ * installed: translate_block). */
+typedef struct {
+    uint32_t *site;
+    uint32_t target_pc;
+} XlateChain;
+
+#define DSP56K_JIT_NO_PC UINT32_MAX
 
 /* Each per-op epilogue records up to 4 exit-check branches on its
  * main line and cold paths (pc mismatch, interrupt_counter, is_idle +
@@ -1489,6 +1546,13 @@ typedef struct {
     int cold_count;
     /* The previous op's body may have set loop_rep (OPFX_REP). */
     bool prev_may_set_rep;
+    /* sites[] index of the last op's main-line pc check, or -1. */
+    int main_pc_idx;
+    /* At translate time a DO loop ran with this LA and start (SSH):
+     * the op at loop_la chains its rewind (DSP56K_JIT_NO_PC: none). */
+    uint32_t loop_la, loop_start;
+    XlateChain chains[4];
+    int chain_count;
 } ExitPatchList;
 
 static void record_exit_patch(ExitPatchList *l, uint32_t *site)
@@ -1508,6 +1572,9 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
 {
     for (int i = 0; i < l->count; i++) {
         uint32_t *site = l->sites[i];
+        if (!site) {
+            continue;   /* taken over by a chain stub */
+        }
         int32_t off = (int32_t)((uint8_t *)exit_label - (uint8_t *)site);
         patch_branch(site, off);
     }
@@ -5794,7 +5861,10 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         .expected_next_pc = expected_next_pc,
         .const_pc = const_pc,
         .const_cyc = !(fx & OPFX_CYC),
+        .loop_chain_pc = const_pc && op_pc == exits->loop_la ?
+                         exits->loop_start : DSP56K_JIT_NO_PC,
     };
+    exits->main_pc_idx = -1;
     g_epi_ops++;
     g_epi_const_pc += const_pc;
     g_epi_const_cyc += cs->const_cyc;
@@ -5845,6 +5915,7 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
 
     if (!const_pc) {
         emit_epi_pc_check(e, exits, expected_next_pc);
+        exits->main_pc_idx = exits->count - 1;
     }
     cs->cont = e->buf;
 }
@@ -5860,12 +5931,29 @@ static void patch_to(uint32_t *site, uint32_t *dst, bool is_b)
     }
 }
 
+/* XEMU_DSP_JIT_STATS: ++*ctr on the way through a chain site. */
+static void emit_stats_inc(ArmEmit *e, uint64_t *ctr)
+{
+    if (!g_jit_stats) {
+        return;
+    }
+    emit_mov_imm64(e, /*rd=*/0, (uint64_t)(uintptr_t)ctr);
+    emit_ldr_x_imm(e, /*rd=*/1, /*rn=*/0, 0);
+    emit_u32(e, 0x91000421u);       /* ADD x1, x1, #1 */
+    emit_u32(e, 0xf9000001u);       /* STR x1, [x0] */
+}
+
 /*
  * Every op's out-of-line epilogue paths (see
  * emit_post_instruction_epilogue), emitted after the block's shared
  * exit and before its REP tail. Exit branches go on the patch list.
+ *
+ * The op at the loop end the translator saw (loop_chain_pc) chains a
+ * DO-loop rewind: when its tail's pc check fails and pc is the loop
+ * start, it branches to that block (the exit word was zero, and each
+ * rewind decrements LC, so the loop stays bounded).
  */
-static void emit_cold_stubs(ArmEmit *e, ExitPatchList *exits)
+static void emit_cold_stubs(ArmEmit *e, ExitPatchList *exits, DspJitState *s)
 {
     for (int i = 0; i < exits->cold_count; i++) {
         ColdStub *cs = &exits->cold[i];
@@ -5913,7 +6001,20 @@ static void emit_cold_stubs(ArmEmit *e, ExitPatchList *exits)
             to_cold_from_tail = e->buf;
             emit_cbnz_x(e, 0, 0);                   /* -> cold_k */
             emit_epi_pc_check(e, exits, cs->expected_next_pc);
-            emit_b(e, (int32_t)((uint8_t *)cs->cont - (uint8_t *)e->buf));
+            if (cs->loop_chain_pc != DSP56K_JIT_NO_PC &&
+                exits->chain_count < ARRAY_SIZE(exits->chains)) {
+                /* pc != LA + 1: a rewind. To the loop start, chain. */
+                uint32_t *mismatch = exits->sites[--exits->count];
+                emit_b(e, (int32_t)((uint8_t *)cs->cont - (uint8_t *)e->buf));
+                patch_to(mismatch, e->buf, false);
+                emit_epi_pc_check(e, exits, cs->loop_chain_pc);
+                emit_stats_inc(e, &s->chains[DSP56K_JIT_CHAIN_LOOP]);
+                exits->chains[exits->chain_count++] =
+                    (XlateChain){ e->buf, cs->loop_chain_pc };
+                emit_b(e, 0);                       /* routed later */
+            } else {
+                emit_b(e, (int32_t)((uint8_t *)cs->cont - (uint8_t *)e->buf));
+            }
         } else {
             emit_b(e, (int32_t)((uint8_t *)cs->after - (uint8_t *)e->buf));
         }
@@ -6610,11 +6711,10 @@ static void emit_cf_bcc_long_op(ArmEmit *e, dsp_core_t *dsp, uint32_t pc,
  * dsp_postexecute_update_pc BLR in the epilogue (which the JIT
  * invokes for every op, including the loop body's own ops).
  *
- * None of these are chain candidates: REP sets loop_rep which
- * forces an exit to the C dispatcher after the single stub; DO/
- * DOR set SR.LF which the post-exec PC check reads each subsequent
- * iteration; ENDDO pops the loop stack — all semantics live in
- * post-exec, not in the instruction itself.
+ * REP sets loop_rep, which forces an exit to the C dispatcher after
+ * the single stub. DO / DOR / ENDDO chain to the op after them like
+ * any other static fall-through (jit_static_succ): the loop itself
+ * lives in each op's epilogue, not in the instruction.
  * ============================================================== */
 
 /* Common REP prologue: LCSAVE = LC; pc_on_rep = 1; loop_rep = 1.
@@ -9296,48 +9396,32 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
  */
 
 /* --------------------------------------------------------------- *
- * Static block chaining (Phase 5b / 5c)
+ * Static block chaining
  *
- * A "chainable terminator" is a CF op whose target pc is known at
- * translate time:
+ * A block-ending op whose successors are known at translate time ends
+ * in chain sites, B instructions to the successor blocks' chain_entry
+ * (jit_static_succ lists them): the taken target of BRA / JMP / Bcc /
+ * Jcc / JScc / JSR / BSR, the bit-test branches and calls and the
+ * mode-6 (absolute) _ea forms, and the fall-through of the conditional
+ * ones and of DO / DOR / ENDDO. The op at the LA of the DO loop that ran
+ * when the block was translated also chains the loop's rewind to its
+ * start (emit_cold_stubs). Each site sits behind the op's exit-word test
+ * and a pc compare against its target, so a wrong guess only exits.
  *
- *   BRA #xxx        — 9-bit signed PC-rel, target = pc + offset
- *   BRA xxxx        — 2-word, target = pc + pram[pc+1]
- *   JMP #xxxxxx     — 12-bit absolute, target = inst[11:0]
- *
- * (Phase 5c could add the taken-path of JCC / BCC / JSCC — a
- * per-block conditional chain dispatch — but that requires
- * splitting the epilogue's PC-mismatch check which is a bigger
- * refactor than 5b covers.)
- *
- * When the target block for such a terminator is already
- * translated AND not invalidated AND diff mode is off, we emit a
- * direct B to target->chain_entry in place of the shared-exit
- * fall-through at the end of the source block. The chain site
- * gets registered in target->incoming_chains so we can un-patch
- * it on target invalidation. The source block's own generation
- * counter is stamped at registration time; if the source is
- * itself re-translated before target invalidates, the stamp won't
- * match and we skip the un-patch (the site pointer is stale).
+ * Sites are routed when the block is installed (chain_route): to the
+ * target's chain_entry when that block is live, else to this block's
+ * shared exit, with a pending registration that a later translation at
+ * the target patches (retro-chaining). A site is registered in its
+ * target's incoming_chains, so evicting the target unpatches it; the
+ * source's generation is stamped there, so a site in re-translated code
+ * is skipped. No chaining in XEMU_DSP_JIT_DIFF mode (one block per
+ * dispatcher call), and no site to the block's own start but a loop
+ * rewind (LC bounds it; a branch to itself returns each time).
  *
  * The chain B instruction is a single 26-bit-immediate B (±128 MB
  * range; our code buffer is 8 MB so well within range). No
  * trampoline needed.
  * --------------------------------------------------------------- */
-
-/*
- * Emit a B instruction at *e->buf pointing at `target_code`.
- * Returns the address of the emitted instruction for later
- * patching. Caller is responsible for being on a writable JIT
- * page (qemu_thread_jit_write() has been called).
- */
-static uint32_t *emit_b_absolute(ArmEmit *e, uint32_t *target_code)
-{
-    uint32_t *site = e->buf;
-    int32_t off_bytes = (int32_t)((uint8_t *)target_code - (uint8_t *)site);
-    emit_b(e, off_bytes);
-    return site;
-}
 
 /*
  * Register that the B instruction at `site` is a chain branch
@@ -9483,94 +9567,153 @@ static void jit_evict_block(DspJitState *s, DspJitBlock *b)
 }
 
 /*
- * Decide at translate time whether a chainable terminator op should
- * emit a direct chain branch to its target. Returns the target block
- * if chaining is viable, NULL otherwise. Target pc is computed from
- * inst bits for the three supported chainable handlers, identified
- * via the CF classifier (so we don't need direct access to the
- * file-static emu_* symbols in dsp_emu.c.inc).
+ * The successors of a block-ending op that are known at translate time:
+ * *taken, where a branch, jump or call goes (from the instruction word
+ * or its second word, which the block's dependency range covers), and
+ * *fall, where a conditional one goes otherwise and where DO / DOR /
+ * ENDDO continue (DSP56K_JIT_NO_PC when not static). Each is computed as
+ * the op's emitter computes it; a chain site is still guarded by a pc
+ * compare, so a wrong guess only costs the chain.
  */
-static DspJitBlock *chain_target_for_terminator(DspJitState *s,
-                                                int cf_kind,
-                                                dsp_core_t *dsp,
-                                                uint32_t pc,
-                                                uint32_t inst,
-                                                uint32_t *out_target_pc,
-                                                bool *out_retro_eligible)
+static void jit_static_succ(int cf_kind, const dsp_core_t *dsp, uint32_t pc,
+                            uint32_t inst, uint32_t *taken, uint32_t *fall,
+                            bool *is_call)
 {
-    *out_retro_eligible = false;
+    uint32_t w2 = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
+    /*
+     * An ea (bits 8-13) in mode 6 is the second word: a jump's target
+     * (calc_ea reads it at run time, from a word the dependency range
+     * covers), or the address a bit test reads, which makes that 3
+     * words long when not taken.
+     */
+    bool ea6 = ((inst >> 11) & 7) == 6;
 
-    if (dsp56k_jit_diff_enabled()) {
-        /* Diff mode: one block per dispatcher call is required for
-         * the pre/post snapshot semantics. */
-        return NULL;
-    }
-
-    uint32_t target_pc;
+    *taken = *fall = DSP56K_JIT_NO_PC;
+    *is_call = false;
     switch (cf_kind) {
-    /* --- Unconditional branches (Phase 5b) ---
-     * Single-target chains. target_pc is always reached if the
-     * op executes. */
-    case DSP56K_JIT_CF_BRA_IMM: {
-        /* 9-bit signed PC-rel, same decode as emit_cf_bra_imm_op. */
-        int32_t off = cf_decode_signed_9(inst);
-        target_pc = ((int32_t)pc + off) & 0xffffff;
+    case DSP56K_JIT_CF_BRA_IMM:
+        *taken = ((int32_t)pc + cf_decode_signed_9(inst)) & 0xffffff;
         break;
-    }
-    case DSP56K_JIT_CF_BRA_LONG: {
-        uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
-        target_pc = (pc + xxxx) & 0xffffff;
+    case DSP56K_JIT_CF_BRA_LONG:
+        *taken = (pc + w2) & 0xffffff;
         break;
-    }
     case DSP56K_JIT_CF_JMP_IMM:
-        target_pc = inst & 0xfff;
+        *taken = inst & 0xfff;
         break;
-    /* --- Conditional branches (Phase 5c) ---
-     * Chain only the TAKEN target. By passing target_pc as
-     * expected_next_pc to the epilogue, the PC-mismatch check
-     * passes on the taken branch (pc == target) and the chain B
-     * is reached; on the not-taken branch pc diverges from target
-     * and the check fires, routing to the shared exit. Not-taken
-     * target chaining would require dual-path chain dispatch
-     * (deferred — the common hot case is loop-back-if-cc-true,
-     * which is the taken path). */
+    case DSP56K_JIT_CF_JSR_IMM:
+        *taken = inst & 0xfff;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_BSR_IMM:
+        *taken = ((int32_t)pc + cf_decode_signed_9(inst)) & 0xffffff;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_BSR_LONG:
+        *taken = (pc + w2) & 0xffffff;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_JMP_EA:
+        *taken = ea6 ? w2 : DSP56K_JIT_NO_PC;
+        break;
+    case DSP56K_JIT_CF_JSR_EA:
+        *taken = ea6 ? w2 : DSP56K_JIT_NO_PC;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_JCC_EA:
+        if (ea6) {
+            *taken = w2;
+            *fall = pc + 2;
+        }
+        break;
+    case DSP56K_JIT_CF_JSCC_EA:
+        if (ea6) {
+            *taken = w2;
+            *fall = pc + 2;
+        }
+        *is_call = true;
+        break;
     case DSP56K_JIT_CF_JCC_IMM:
+        *taken = inst & 0xfff;
+        *fall = pc + 1;
+        break;
     case DSP56K_JIT_CF_JSCC_IMM:
-        /* 12-bit absolute, cc_code in inst[15:12] (not relevant
-         * for target computation). */
-        target_pc = inst & 0xfff;
+        *taken = inst & 0xfff;
+        *fall = pc + 1;
+        *is_call = true;
         break;
-    case DSP56K_JIT_CF_BCC_IMM: {
-        /* 9-bit signed PC-rel (bcc_imm decodes identically to
-         * bra_imm for the offset). */
-        int32_t off = cf_decode_signed_9(inst);
-        target_pc = ((int32_t)pc + off) & 0xffffff;
+    case DSP56K_JIT_CF_BCC_IMM:
+        *taken = ((int32_t)pc + cf_decode_signed_9(inst)) & 0xffffff;
+        *fall = pc + 1;
         break;
-    }
-    case DSP56K_JIT_CF_BCC_LONG: {
-        uint32_t xxxx = (pc + 1 < DSP_PRAM_SIZE) ? dsp->pram[pc + 1] : 0;
-        target_pc = (pc + xxxx) & 0xffffff;
+    case DSP56K_JIT_CF_BCC_LONG:
+        *taken = (pc + w2) & 0xffffff;
+        *fall = pc + 2;
         break;
-    }
+    case DSP56K_JIT_CF_JCLR_AA: case DSP56K_JIT_CF_JCLR_PP:
+    case DSP56K_JIT_CF_JCLR_REG: case DSP56K_JIT_CF_JSET_AA:
+    case DSP56K_JIT_CF_JSET_PP: case DSP56K_JIT_CF_JSET_REG:
+        *taken = w2 & 0xffffff;
+        *fall = pc + 2;
+        break;
+    case DSP56K_JIT_CF_JCLR_EA: case DSP56K_JIT_CF_JSET_EA:
+        *taken = w2 & 0xffffff;
+        *fall = ea6 ? DSP56K_JIT_NO_PC : pc + 2;
+        break;
+    case DSP56K_JIT_CF_JSCLR_AA: case DSP56K_JIT_CF_JSCLR_PP:
+    case DSP56K_JIT_CF_JSCLR_REG: case DSP56K_JIT_CF_JSSET_AA:
+    case DSP56K_JIT_CF_JSSET_PP: case DSP56K_JIT_CF_JSSET_REG:
+        *taken = w2 & 0xffffff;
+        *fall = pc + 2;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_JSCLR_EA: case DSP56K_JIT_CF_JSSET_EA:
+        *taken = w2 & 0xffffff;
+        *fall = ea6 ? DSP56K_JIT_NO_PC : pc + 2;
+        *is_call = true;
+        break;
+    case DSP56K_JIT_CF_BRCLR_PP: case DSP56K_JIT_CF_BRCLR_REG:
+    case DSP56K_JIT_CF_BRSET_PP: case DSP56K_JIT_CF_BRSET_REG:
+        *taken = (pc + w2) & 0xffffff;
+        *fall = pc + 2;
+        break;
+    case DSP56K_JIT_CF_DO_IMM: case DSP56K_JIT_CF_DO_AA:
+    case DSP56K_JIT_CF_DO_EA: case DSP56K_JIT_CF_DO_REG:
+    case DSP56K_JIT_CF_DOR_IMM: case DSP56K_JIT_CF_DOR_REG:
+        *fall = pc + 2;
+        break;
+    case DSP56K_JIT_CF_ENDDO:
+        *fall = pc + 1;
+        break;
     default:
-        return NULL;
+        break;
     }
+    if (*taken >= DSP_PRAM_SIZE) {
+        *taken = DSP56K_JIT_NO_PC;
+    }
+    if (*fall >= DSP_PRAM_SIZE) {
+        *fall = DSP56K_JIT_NO_PC;
+    }
+}
 
-    if (target_pc >= DSP_PRAM_SIZE) {
-        return NULL;
+/*
+ * Route a chain site of the block just installed: to its target's
+ * chain_entry when that block is live and takes another incoming
+ * site, else to the block's own exit, waiting (retro-chaining) for a
+ * block at target_pc if there is none yet.
+ */
+static void chain_route(DspJitState *s, DspJitBlock *block, XlateChain *c,
+                        uint32_t *exit_label)
+{
+    DspJitBlock *target = &s->blocks[c->target_pc];
+    if (target->entry && target->chain_entry &&
+        chain_register_incoming(target, block, c->site)) {
+        chain_repatch_b(c->site, target->chain_entry);
+        return;
     }
-    DspJitBlock *target = &s->blocks[target_pc];
-    if (!target->entry || !target->chain_entry) {
-        /* Not translated yet (or invalidated). Retro-chain: report
-         * the decoded target so the caller can register a pending
-         * chain site, patched if/when a block lands at target_pc. */
-        *out_target_pc = target_pc;
-        *out_retro_eligible = true;
-        return NULL;
+    chain_repatch_b(c->site, exit_label);
+    if (!target->entry) {
+        pending_chain_register(s, c->target_pc, block, c->site);
     }
-
-    *out_target_pc = target_pc;
-    return target;
 }
 
 /*
@@ -9580,9 +9723,15 @@ static DspJitBlock *chain_target_for_terminator(DspJitState *s,
  * with the pinned x26 / x27), no additional spill is needed here —
  * the register file is already consistent.
  */
-static uint32_t *emit_epilogue(ArmEmit *e)
+static uint32_t *emit_epilogue(ArmEmit *e, DspJitState *s, uint32_t pc_start)
 {
     uint32_t *label = e->buf;
+    if (g_jit_stats) {
+        /* s->stats_exit_pc = pc_start (jit_stats_count_exit) */
+        emit_mov_imm64(e, /*rd=*/0, (uint64_t)(uintptr_t)&s->stats_exit_pc);
+        emit_mov_imm32(e, /*rd=*/1, pc_start);
+        emit_u32(e, 0xb9000001u);   /* STR w1, [x0] */
+    }
     /* Deallocate 16-byte scratch area. */
     emit_u32(e, 0x910043ffu);   /* ADD SP, SP, #16 */
     /* Restore in reverse of prologue's push order. */
@@ -9796,7 +9945,40 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
      * up x19 = dsp, x20/x21 = helper ptrs, and pushed the frame. */
     uint32_t *chain_entry_ptr = e.buf;
 
-    ExitPatchList exits = { .count = 0 };
+    ExitPatchList exits = {
+        .count = 0,
+        .main_pc_idx = -1,
+        .loop_la = DSP56K_JIT_NO_PC,
+        .loop_start = DSP56K_JIT_NO_PC,
+    };
+    const bool can_chain = !dsp56k_jit_diff_enabled();
+    /*
+     * dsp_run's budget: a chained run leaves at a block's entry, before
+     * its first op, once num_inst has reached jit_chain_limit, the
+     * block boundary where dsp_c_run would have stopped dispatching.
+     * Without it a polling loop of two chained blocks never returned,
+     * and where a run stopped depended on which sites were patched.
+     * The dispatcher's own entry always passes: the limit lies ahead.
+     * num_inst - limit's sign: both wrap.
+     */
+    if (can_chain) {
+        emit_ldr_w_any(&e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+        emit_ldr_w_any(&e, /*rd=*/1, /*rn=*/19, SCRATCH,
+                       OFF_JIT_CHAIN_LIMIT);
+        emit_cmp_w_reg(&e, /*rn=*/0, /*rm=*/1);
+        uint32_t *site = e.buf;
+        emit_bcond(&e, ARM_COND_PL, 0);
+        record_exit_patch(&exits, site);
+    }
+    /*
+     * A DO loop running now: the op at its end chains a rewind to its
+     * start (emit_cold_stubs). Rewinds elsewhere still exit.
+     */
+    if (can_chain && (dsp->registers[DSP_REG_SR] & (1u << DSP_SR_LF)) &&
+        dsp->registers[DSP_REG_SSH] < DSP_PRAM_SIZE) {
+        exits.loop_la = dsp->registers[DSP_REG_LA];
+        exits.loop_start = dsp->registers[DSP_REG_SSH];
+    }
 
     uint32_t pc = pc_start;
     uint32_t pc_end = pc_start;
@@ -9807,19 +9989,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
      * movem p:aa words baked on the way. */
     uint32_t peek_end = pc_start;
     uint32_t last_op_pc = pc_start;
+    uint32_t last_fall = pc_start;
+    uint8_t last_cf = DSP56K_JIT_CF_NONE;
     g_xlate_bake_mask = 0;
-
-    /* If the last op is a chainable terminator whose target is
-     * already translated, we'll emit a direct chain branch to that
-     * target's chain_entry in place of the fall-through to the
-     * shared exit. Tracked so we can register the site with the
-     * target after emit_epilogue (when we know this block's
-     * shared_exit for the source->unchain path). */
-    DspJitBlock *pending_chain_target = NULL;
-    uint32_t *pending_chain_site = NULL;
-    /* Retro-chain: terminator target decoded but not translated yet.
-     * UINT32_MAX = none. */
-    uint32_t pending_retro_pc = UINT32_MAX;
 
     /* Lazy-flag one-shot is per-op. Always start each translation
      * with a clear flag so a leftover state from a previous
@@ -9899,6 +10071,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             }
 
             last_op_pc = pc;
+            last_fall = pc + inst_len;
+            last_cf = DSP56K_JIT_CF_NONE;
             pc_end = pc + inst_len;
             pc = pc_end;
             num_ops++;
@@ -9920,44 +10094,47 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             lazy_flag_lookahead(dsp, pc, inst_len, num_ops, &peek_end);
 
             /*
-             * Static block chaining (Phase 5b): if this is a
-             * chainable terminator (BRA/JMP imm/long) whose target
-             * is already translated, we'll emit a direct B to the
-             * target's chain_entry after this op's epilogue. The
-             * epilogue is told to use `target_pc` as its expected
-             * next-pc so the PC-mismatch check PASSES on the
-             * taken-branch outcome and we fall through into the
-             * chain B. Other exit paths (interrupts / loop_rep /
-             * exit-request) still reach this block's shared exit.
-             *
-             * Only fires when num_ops < max AND target != pc_start
-             * (a self-chain would infinite-loop inside the JIT
-             * without returning to the dispatcher for interrupt
-             * checks — the per-op interrupt_counter check handles
-             * that, but it's safer to let the dispatcher observe
-             * the tight self-loop).
+             * Static block chaining. A block-ending op whose successors
+             * are known at translate time (jit_static_succ) ends in
+             * chain sites instead of falling into the shared exit. The
+             * epilogue expects the first successor, so its pc check
+             * passes into a B to that block; with two successors (a
+             * conditional branch or call), the check's mismatch goes on
+             * to a compare against the other and a second B. Every path
+             * there has tested the exit word first, so interrupts, idle
+             * and exit requests still return to the dispatcher. No site
+             * targets this block's own start: a branch to itself (a
+             * spin) keeps returning to the dispatcher; DO-loop rewinds
+             * may (emit_cold_stubs), since LC bounds them. Sites are
+             * routed once the block is installed (chain_route).
              */
+            int cf_kind = is_term ?
+                dsp56k_jit_helper_classify_cf((void *)emu) : DSP56K_JIT_CF_NONE;
+            uint32_t chain_first = DSP56K_JIT_NO_PC;
+            uint32_t chain_second = DSP56K_JIT_NO_PC;
+            int first_kind = DSP56K_JIT_CHAIN_TAKEN;
+            uint32_t taken = DSP56K_JIT_NO_PC, fall = pc + inst_len;
+            bool is_call = false;
             if (is_term) {
-                int cf_kind = dsp56k_jit_helper_classify_cf((void *)emu);
-                uint32_t chain_pc = 0;
-                bool retro_eligible = false;
-                DspJitBlock *tgt = chain_target_for_terminator(
-                    s, cf_kind, dsp, pc, inst, &chain_pc, &retro_eligible);
-                if (tgt && chain_pc != pc_start) {
-                    /* Swap expected_next_pc so the PC check passes on
-                     * the taken path (pc == chain_pc after the op)
-                     * rather than exiting to the dispatcher. */
-                    expected_next_pc = chain_pc;
-                    pending_chain_target = tgt;
-                    /* pending_chain_site is filled in below after
-                     * we know e.buf's position post-epilogue. */
-                } else if (!tgt && retro_eligible && chain_pc != pc_start) {
-                    /* Retro-chain: emit the chain site anyway (it
-                     * initially routes to our shared exit) and
-                     * register it so a later translation at chain_pc
-                     * can patch it to its chain_entry. */
-                    expected_next_pc = chain_pc;
-                    pending_retro_pc = chain_pc;
+                jit_static_succ(cf_kind, dsp, pc, inst, &taken, &fall,
+                                &is_call);
+            }
+            if (is_term && can_chain) {
+                if (taken != DSP56K_JIT_NO_PC && taken != pc_start) {
+                    chain_first = taken;
+                    first_kind = is_call ? DSP56K_JIT_CHAIN_CALL :
+                                           DSP56K_JIT_CHAIN_TAKEN;
+                }
+                if (fall != DSP56K_JIT_NO_PC && fall != pc_start) {
+                    if (chain_first == DSP56K_JIT_NO_PC) {
+                        chain_first = fall;
+                        first_kind = DSP56K_JIT_CHAIN_FALL;
+                    } else {
+                        chain_second = fall;
+                    }
+                }
+                if (chain_first != DSP56K_JIT_NO_PC) {
+                    expected_next_pc = chain_first;
                 }
             }
 
@@ -9965,20 +10142,27 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                                           inst_len, emu, expected_next_pc,
                                           is_term, &write_set);
 
-            /* If we set pending_chain_target, emit the chain B now
-             * (immediately after the op's epilogue fall-through
-             * reaches here). */
-            if (pending_chain_target) {
-                pending_chain_site = emit_b_absolute(
-                    &e, pending_chain_target->chain_entry);
-            } else if (pending_retro_pc != UINT32_MAX) {
-                /* Placeholder B-to-self; patched to the shared exit
-                 * after emit_epilogue (and to the target chain_entry
-                 * if/when that block is translated). */
-                pending_chain_site = emit_b_absolute(&e, e.buf);
+            if (chain_first != DSP56K_JIT_NO_PC) {
+                int mismatch_idx = exits.main_pc_idx;
+                emit_stats_inc(&e, &s->chains[first_kind]);
+                exits.chains[exits.chain_count++] =
+                    (XlateChain){ e.buf, chain_first };
+                emit_b(&e, 0);                      /* routed later */
+                if (chain_second != DSP56K_JIT_NO_PC && mismatch_idx >= 0) {
+                    uint32_t *mismatch = exits.sites[mismatch_idx];
+                    exits.sites[mismatch_idx] = NULL;
+                    patch_to(mismatch, e.buf, false);
+                    emit_epi_pc_check(&e, &exits, chain_second);
+                    emit_stats_inc(&e, &s->chains[DSP56K_JIT_CHAIN_FALL]);
+                    exits.chains[exits.chain_count++] =
+                        (XlateChain){ e.buf, chain_second };
+                    emit_b(&e, 0);                  /* routed later */
+                }
             }
 
             last_op_pc = pc;
+            last_fall = fall;
+            last_cf = is_term ? cf_kind : DSP56K_JIT_CF_NONE;
             pc_end = pc + inst_len;
             pc = pc_end;
             num_ops++;
@@ -9999,8 +10183,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
     /* Emit the shared exit/epilogue and the ops' out-of-line
      * epilogue paths, patch the exit branches, then the REP tail. */
-    uint32_t *exit_label = emit_epilogue(&e);
-    emit_cold_stubs(&e, &exits);
+    uint32_t *exit_label = emit_epilogue(&e, s, pc_start);
+    emit_cold_stubs(&e, &exits, s);
     patch_exits(&exits, exit_label);
     emit_rep_tail(&e, &exits, exit_label);
 
@@ -10022,6 +10206,9 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     block->entry = (dsp56k_jit_entry_fn)entry_ptr;
     block->num_ops = num_ops;
     block->write_set = write_set;
+    block->last_pc = last_op_pc;
+    block->last_fall = last_fall;
+    block->last_cf = last_cf;
     /* Chain entry + shared exit for Phase 5b chaining. Generation
      * bumps on each fresh translation so stale incoming chain sites
      * (from pre-invalidation incarnations) won't be patched. */
@@ -10034,27 +10221,10 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     qatomic_set(&block->diff_checked, 0);
     s->blocks_translated++;
 
-    /* If we emitted a pending chain branch, register the site with
-     * the target so it can un-patch us on target invalidation. Must
-     * happen AFTER `block` has its generation / shared_exit set
-     * (the target stamps source generation at registration), and
-     * BEFORE qemu_thread_jit_execute() — chain_repatch_b writes
-     * into the code buffer. */
-    if (pending_chain_target && pending_chain_site) {
-        if (!chain_register_incoming(pending_chain_target, block,
-                                     pending_chain_site)) {
-            /* Target's incoming list is full — re-patch the chain
-             * branch to be a branch to our own shared exit, so the
-             * block exits to the dispatcher as if un-chained. */
-            chain_repatch_b(pending_chain_site, exit_label);
-        }
-    } else if (pending_retro_pc != UINT32_MAX && pending_chain_site) {
-        /* Retro-chain source side: route the placeholder to our
-         * shared exit (unchained for now) and register the site so a
-         * future translation at pending_retro_pc can claim it. */
-        chain_repatch_b(pending_chain_site, exit_label);
-        pending_chain_register(s, pending_retro_pc, block,
-                               pending_chain_site);
+    /* Route the chain sites (the block's generation and shared exit are
+     * set; the target stamps them), still inside the JIT write window. */
+    for (int i = 0; i < exits.chain_count; i++) {
+        chain_route(s, block, &exits.chains[i], exit_label);
     }
 
     /* Retro-chain target side: patch earlier blocks' pending sites
@@ -10246,6 +10416,31 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
             "  epilogues         = %" PRIu64 " (constant pc %" PRIu64
             ", constant cycles %" PRIu64 ", loop_rep tests %" PRIu64 ")\n",
             g_epi_ops, g_epi_const_pc, g_epi_const_cyc, g_epi_rep_checks);
+    static const char *const exit_names[DSP56K_JIT_EXIT_MAX] = {
+        "idle", "exit request", "interrupt", "rep", "loop rewind (self)",
+        "loop rewind (other)", "not taken", "taken", "call", "return",
+        "after do", "block cut", "pc other", "evicted", "budget",
+    };
+    static const char *const chain_names[DSP56K_JIT_CHAIN_MAX] = {
+        "taken", "fall-through", "call", "loop rewind",
+    };
+    fprintf(stderr, "  exits (to the dispatcher, by reason):\n");
+    for (int k = 0; k < DSP56K_JIT_EXIT_MAX; k++) {
+        if (s->exits[k]) {
+            fprintf(stderr, "    %-20s = %" PRIu64 " (%.1f%%)\n",
+                    exit_names[k], s->exits[k],
+                    100.0 * (double)s->exits[k] /
+                    (double)MAX(s->blocks_executed, 1));
+        }
+    }
+    fprintf(stderr, "  chain sites passed (retro sites not yet patched "
+                    "exit, and count as taken there too):\n");
+    for (int k = 0; k < DSP56K_JIT_CHAIN_MAX; k++) {
+        if (s->chains[k]) {
+            fprintf(stderr, "    %-20s = %" PRIu64 "\n", chain_names[k],
+                    s->chains[k]);
+        }
+    }
 
     /* Per-handler cf_fallback breakdown (only emitted when at
      * least one bucket is non-zero — keeps the stats output tidy
@@ -10474,7 +10669,7 @@ static void diff_shim_write_peripheral(dsp_core_t *core, uint32_t address,
  *   - jit_state pointer (our own bookkeeping).
  *   - jit_exit_block_request / jit_skip_diff_compare (flags we
  *     manipulate during the compare; compare them separately if
- *     needed).
+ *     needed) and jit_chain_limit (dispatcher bookkeeping).
  *   - disasm_* tail (debug/trace only).
  */
 static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
@@ -10491,8 +10686,8 @@ static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
          * exit word up to its last byte). */
         { 0,
           offsetof(dsp_core_t, jit_exit_block_request), false, 0 },
-        /* skip jit_exit_block_request (the exit word's last byte) +
-         * jit_skip_diff_compare */
+        /* skip jit_exit_block_request (the exit word's last byte),
+         * jit_skip_diff_compare and jit_chain_limit */
         /* [1] xram (WS_XRAM-gated) */
         { offsetof(dsp_core_t, xram),
           offsetof(dsp_core_t, yram), true, DSP56K_JIT_WS_XRAM },
@@ -11055,12 +11250,85 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
     return jit_cycles;
 }
 
-unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
+static bool jit_cf_in(int cf, int lo, int hi)
+{
+    return cf >= lo && cf <= hi;
+}
+
+/*
+ * XEMU_DSP_JIT_STATS: file the block exit that just returned to the
+ * dispatcher under a reason, from the exiting block (its shared exit
+ * stored its pc_start) and the state it left.
+ */
+static void jit_stats_count_exit(DspJitState *s, dsp_core_t *dsp)
+{
+    int r;
+    const DspJitBlock *b = &s->blocks[s->stats_exit_pc % DSP_PRAM_SIZE];
+    uint32_t pc = dsp->pc;
+
+    if (dsp->is_idle) {
+        r = DSP56K_JIT_EXIT_IDLE;
+    } else if (dsp->jit_exit_block_request) {
+        r = DSP56K_JIT_EXIT_REQUEST;
+    } else if (dsp->interrupt_state | dsp->interrupt_counter |
+               dsp->interrupt_pipeline_count) {
+        r = DSP56K_JIT_EXIT_IRQ;
+    } else if (dsp->loop_rep) {
+        r = DSP56K_JIT_EXIT_REP;
+    } else if (!b->entry) {
+        r = DSP56K_JIT_EXIT_EVICTED;
+    } else if (pc == b->pc_start &&
+               (int32_t)(dsp->num_inst - dsp->jit_chain_limit) >= 0) {
+        /* (or the last pass of a block that branches to itself) */
+        r = DSP56K_JIT_EXIT_BUDGET;
+    } else {
+        int cf = b->last_cf;
+        uint32_t fall = b->last_fall;
+        bool lf = dsp->registers[DSP_REG_SR] & (1u << DSP_SR_LF);
+        if (lf && pc != fall && pc == dsp->registers[DSP_REG_SSH]) {
+            r = pc == b->pc_start ? DSP56K_JIT_EXIT_LOOP_SELF :
+                                    DSP56K_JIT_EXIT_LOOP_OTHER;
+        } else if (cf == DSP56K_JIT_CF_JSR_IMM || cf == DSP56K_JIT_CF_JSR_EA ||
+                   cf == DSP56K_JIT_CF_BSR_IMM || cf == DSP56K_JIT_CF_BSR_LONG ||
+                   cf == DSP56K_JIT_CF_JSCC_IMM ||
+                   cf == DSP56K_JIT_CF_JSCC_EA ||
+                   jit_cf_in(cf, DSP56K_JIT_CF_JSCLR_AA,
+                             DSP56K_JIT_CF_JSSET_REG)) {
+            r = pc == fall ? DSP56K_JIT_EXIT_NOT_TAKEN : DSP56K_JIT_EXIT_CALL;
+        } else if (cf == DSP56K_JIT_CF_RTS || cf == DSP56K_JIT_CF_RTI) {
+            r = DSP56K_JIT_EXIT_RET;
+        } else if (cf == DSP56K_JIT_CF_JCC_IMM || cf == DSP56K_JIT_CF_JCC_EA ||
+                   cf == DSP56K_JIT_CF_BCC_IMM ||
+                   cf == DSP56K_JIT_CF_BCC_LONG ||
+                   jit_cf_in(cf, DSP56K_JIT_CF_JCLR_AA,
+                             DSP56K_JIT_CF_JSET_REG) ||
+                   jit_cf_in(cf, DSP56K_JIT_CF_BRCLR_PP,
+                             DSP56K_JIT_CF_BRSET_REG)) {
+            r = pc == fall ? DSP56K_JIT_EXIT_NOT_TAKEN : DSP56K_JIT_EXIT_TAKEN;
+        } else if (cf == DSP56K_JIT_CF_JMP_IMM || cf == DSP56K_JIT_CF_JMP_EA ||
+                   cf == DSP56K_JIT_CF_BRA_IMM ||
+                   cf == DSP56K_JIT_CF_BRA_LONG) {
+            r = DSP56K_JIT_EXIT_TAKEN;
+        } else if (pc == fall &&
+                   jit_cf_in(cf, DSP56K_JIT_CF_DO_IMM, DSP56K_JIT_CF_ENDDO)) {
+            r = DSP56K_JIT_EXIT_DO;
+        } else if (pc == fall) {
+            r = DSP56K_JIT_EXIT_END;
+        } else {
+            r = DSP56K_JIT_EXIT_PC_OTHER;
+        }
+    }
+    s->exits[r]++;
+}
+
+unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp, int budget)
 {
     DspJitState *s = (DspJitState *)dsp->jit_state;
     if (!s || dsp->pc >= DSP_PRAM_SIZE) {
         return 0;
     }
+    /* Chained runs stop at the first block entry past the budget. */
+    dsp->jit_chain_limit = dsp->num_inst + (uint32_t)MAX(budget, 1);
 
     if (s->auto_throttled) {
         return 0;
@@ -11144,6 +11412,9 @@ normal_path:;
     uint32_t num_inst_before = dsp->num_inst;
     b->entry(dsp);
     s->blocks_executed++;
+    if (unlikely(g_jit_stats)) {
+        jit_stats_count_exit(s, dsp);
+    }
     return dsp->num_inst - num_inst_before;
 }
 
