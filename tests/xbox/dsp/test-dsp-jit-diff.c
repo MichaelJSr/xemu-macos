@@ -24,6 +24,10 @@
  *     (taken and not-taken) and through final SR state
  *   - block-boundary / PC-exit behavior (short + long jumps, DO
  *     loop-back re-entry, REP repeat-in-place, halt mid-block)
+ *   - P writes: a rewrite inside two overlapping blocks (entered at
+ *     shared PCs), and of a word movem p:aa baked from outside a block
+ *   - lazy-flag elision: E/U/N/Z kept live across a DO-loop edge, past
+ *     ENDDO, and into a Tcc that reads E
  *
  * Four consumers, wired in meson.build:
  *   1. /corpus — golden-value regression of the interpreter (all
@@ -43,7 +47,7 @@
  *
  * --jit calls dsp56k_jit_set_enabled_from_config(true), the hook the
  * emulator feeds from audio.dsp_jit.enabled. The corpus cores are GP
- * cores: the EP always runs on the interpreter.
+ * cores; the EP runs the same JIT.
  *
  * The programs terminate by writing 1 to peripheral 0xFFFFC4 (the
  * halt request — the same idiom as tests/xbox/dsp/data/basic) and
@@ -154,6 +158,7 @@ static void begin_prog(Prog *p, DSPState *s)
 #define CC_EQ 0xA
 #define CC_MI 0xB
 #define CC_CS 0x8
+#define CC_ES 0xD
 static uint32_t jcc_imm(uint32_t cc, uint32_t addr)
 {
     g_assert(addr < 0x1000);
@@ -444,6 +449,208 @@ static void check_mode6_jumps(DSPState *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* Program 4: P writes into overlapping blocks and into a baked word   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * S0 and S1 are two entries into one straight-line routine, so the JIT
+ * builds two overlapping blocks. A movem then rewrites the routine's
+ * third op (add -> sub), which both blocks cover: running either one
+ * stale shows in A. T reads P:$20 with movem p:aa, which the JIT bakes
+ * as an immediate; that word sits outside every block, and rewriting
+ * it must still reach T. Stale code would leave A1 = 10, B1 = $22.
+ */
+static void build_smc(DSPState *s)
+{
+    Prog p;
+    begin_prog(&p, s);
+    patch(&p, 0x20, 0x000011);                 /* data word T bakes  */
+
+    emit(&p, 0x44F400); emit(&p, 0x000001);    /* move #1,x0         */
+    emit(&p, 0x200013);                        /* clr a              */
+    emit(&p, 0x20001B);                        /* clr b              */
+    uint32_t j_s0a = reserve(&p);              /* jsr S0: A1 += 3    */
+    uint32_t j_s1a = reserve(&p);              /* jsr S1: A1 += 2    */
+    uint32_t r0_set = reserve(&p);             /* move #S2,r0        */
+    emit(&p, 0x45F400); emit(&p, 0x200044);    /* move #(sub x0,a),x1 */
+    emit(&p, 0x076085);                        /* movem x1,p:(r0)    */
+    uint32_t j_s0b = reserve(&p);              /* jsr S0: A1 += 1    */
+    uint32_t j_s1b = reserve(&p);              /* jsr S1: A1 += 0    */
+    uint32_t j_ta = reserve(&p);               /* jsr T: B1 += $11   */
+    emit(&p, 0x45F400); emit(&p, 0x000022);    /* move #$22,x1       */
+    emit(&p, 0x072005);                        /* movem x1,p:$20     */
+    uint32_t j_tb = reserve(&p);               /* jsr T: B1 += $22   */
+    emit_halt_tail(&p);
+
+    uint32_t s0 = here(&p);
+    emit(&p, 0x200040);                        /* S0: add x0,a       */
+    uint32_t s1 = here(&p);
+    emit(&p, 0x200040);                        /* S1: add x0,a       */
+    uint32_t s2 = here(&p);
+    emit(&p, 0x200040);                        /* S2: add x0,a (patched) */
+    emit(&p, 0x00000C);                        /* rts                */
+    uint32_t t = here(&p);
+    emit(&p, 0x07A006);                        /* T: movem p:$20,y0  */
+    emit(&p, 0x200058);                        /* add y0,b           */
+    emit(&p, 0x00000C);                        /* rts                */
+
+    patch(&p, j_s0a, 0x0D0000 | s0);
+    patch(&p, j_s1a, 0x0D0000 | s1);
+    patch(&p, r0_set, move_imm8_reg(DSP_REG_R0, s2));
+    patch(&p, j_s0b, 0x0D0000 | s0);
+    patch(&p, j_s1b, 0x0D0000 | s1);
+    patch(&p, j_ta, 0x0D0000 | t);
+    patch(&p, j_tb, 0x0D0000 | t);
+}
+
+static void check_smc(DSPState *s)
+{
+    g_assert_cmphex(REG(s, DSP_REG_A2), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_A1), ==, 6);
+    g_assert_cmphex(REG(s, DSP_REG_A0), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_B2), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_B1), ==, 0x33);
+    g_assert_cmphex(REG(s, DSP_REG_B0), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_Y0), ==, 0x22);
+    g_assert_cmphex(s->core.pram[0x20], ==, 0x22);
+}
+
+/* ------------------------------------------------------------------ */
+/* Program 5: E/U/N/Z the JIT's lazy-flag lookahead must keep live     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The lookahead drops an op's E/U/N/Z update when a later op in
+ * program order overwrites the flags before anything reads them. Each
+ * section below breaks that "later op" in one way, and the stale flag
+ * shows up in a branch or a Tcc:
+ *   A-D: a DO loop's last op (or the op before it) is followed, past
+ *        LA, by a full writer (A, B), an N/Z writer (C) or a Tcc plus a
+ *        full writer (D). The loop edge runs SSH next, and SSH reads
+ *        the flag. In B the edge fires on a walked-over move at LA.
+ *   E:   ENDDO keeps SR's CCR, so it is no writer.
+ *   F:   Tcc ES reads E, so the E/U walk can't pass it.
+ */
+static void build_lazy_flags(DSPState *s)
+{
+    Prog p;
+    begin_prog(&p, s);
+    uint32_t la_word, j, la, l;
+
+    emit(&p, move_imm8_reg(DSP_REG_R0, 0x50)); /* r0=$50 */
+    emit(&p, 0x44F400); emit(&p, 0x000001);    /* move #1,x0 */
+
+    /* A: full writer after LA; jeq at SSH sets r6 when Z=0. */
+    emit(&p, 0x200013);                        /* clr a  Z=1 */
+    emit(&p, 0x060380);                        /* do #3,LA */
+    la_word = reserve(&p);
+    j = reserve(&p);                           /* SSH: jeq L */
+    emit(&p, move_imm8_reg(DSP_REG_R6, 0x21));
+    l = here(&p);
+    emit(&p, 0x000000);                        /* L: nop */
+    la = here(&p);
+    emit(&p, 0x200040);                        /* LA: add x0,a */
+    patch(&p, la_word, la);
+    patch(&p, j, jcc_imm(CC_EQ, l));
+    emit(&p, 0x567000); emit(&p, 0x000100);    /* move a,x:$100 */
+    emit(&p, 0x20001B);                        /* clr b (full writer) */
+
+    /* B: the edge fires on the move at LA, after the add. */
+    emit(&p, 0x200013);                        /* clr a */
+    emit(&p, 0x060380);                        /* do #3,LA */
+    la_word = reserve(&p);
+    j = reserve(&p);                           /* SSH: jeq L */
+    emit(&p, move_imm8_reg(DSP_REG_R7, 0x22));
+    l = here(&p);
+    emit(&p, 0x200040);                        /* L: add x0,a */
+    la = here(&p);
+    emit(&p, 0x545800);                        /* LA: move a1,x:(r0)+ */
+    patch(&p, la_word, la);
+    patch(&p, j, jcc_imm(CC_EQ, l));
+    emit(&p, 0x20001B);                        /* clr b */
+
+    /* C: lsl b after LA overwrites N/Z (E/U stay live). A goes 1,
+     * 0, -1: Z is set only at the second loop start. */
+    emit(&p, 0x200013);                        /* clr a */
+    emit(&p, 0x200040);                        /* add x0,a  Z=0 */
+    emit(&p, 0x060380);                        /* do #3,LA */
+    la_word = reserve(&p);
+    j = reserve(&p);                           /* SSH: jne L */
+    emit(&p, move_imm8_reg(DSP_REG_R3, 0x23));
+    l = here(&p);
+    emit(&p, 0x000000);                        /* L: nop */
+    la = here(&p);
+    emit(&p, 0x200044);                        /* LA: sub x0,a */
+    patch(&p, la_word, la);
+    patch(&p, j, jcc_imm(CC_NE, l));
+    emit(&p, 0x20003B);                        /* lsl b */
+    emit(&p, 0x0C0000 | (here(&p) + 1));       /* jmp next */
+
+    /* D: teq a,b then tst b after LA kill E/U; jes at SSH. A goes
+     * 0, $400000, $800000: E is clear at the first two loop starts. */
+    emit(&p, 0x200013);                        /* clr a */
+    emit(&p, 0x44F400); emit(&p, 0x400000);    /* move #$400000,x0 */
+    emit(&p, 0x060380);                        /* do #3,LA */
+    la_word = reserve(&p);
+    j = reserve(&p);                           /* SSH: jes L */
+    emit(&p, 0x545800);                        /* move a1,x:(r0)+ */
+    l = here(&p);
+    emit(&p, 0x000000);                        /* L: nop */
+    la = here(&p);
+    emit(&p, 0x200040);                        /* LA: add x0,a */
+    patch(&p, la_word, la);
+    patch(&p, j, jcc_imm(CC_ES, l));
+    emit(&p, 0x02A008);                        /* teq a,b */
+    emit(&p, 0x20000B);                        /* tst b */
+
+    /* E: the add before ENDDO clears Z; jeq after it must not take. */
+    emit(&p, 0x44F400); emit(&p, 0x000001);    /* move #1,x0 */
+    emit(&p, 0x200013);                        /* clr a  Z=1 */
+    emit(&p, 0x060280);                        /* do #2,LA */
+    la_word = reserve(&p);
+    emit(&p, 0x200040);                        /* add x0,a  Z=0 */
+    emit(&p, 0x00008C);                        /* enddo */
+    la = here(&p);
+    emit(&p, 0x000000);                        /* LA: nop */
+    patch(&p, la_word, la);
+    uint32_t j_e = reserve(&p);                /* jeq poison */
+
+    /* F: tes a,b reads the E the second add sets. */
+    emit(&p, 0x200013);                        /* clr a */
+    emit(&p, 0x20001B);                        /* clr b */
+    emit(&p, 0x44F400); emit(&p, 0x400000);    /* move #$400000,x0 */
+    emit(&p, 0x200040);                        /* add x0,a  E=0 */
+    emit(&p, 0x200040);                        /* add x0,a  E=1 */
+    emit(&p, 0x02D008);                        /* tes a,b  B=A */
+    emit(&p, 0x200003);                        /* tst a */
+
+    uint32_t done = emit_halt_tail(&p);
+    uint32_t poison = here(&p);
+    emit(&p, move_imm8_reg(DSP_REG_N7, 0x66));
+    emit(&p, 0x0C0000 | done);                 /* jmp halt */
+    patch(&p, j_e, jcc_imm(CC_EQ, poison));
+}
+
+static void check_lazy_flags(DSPState *s)
+{
+    check_no_poison(s);                                /* E */
+    g_assert_cmphex(REG(s, DSP_REG_R6), ==, 0x21);     /* A */
+    g_assert_cmphex(REG(s, DSP_REG_R7), ==, 0x22);     /* B */
+    g_assert_cmphex(REG(s, DSP_REG_R3), ==, 0x23);     /* C */
+    g_assert_cmphex(XMEM(s, 0x100), ==, 3);
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmphex(XMEM(s, 0x50 + i), ==, i + 1); /* B */
+    }
+    g_assert_cmphex(XMEM(s, 0x53), ==, 0);             /* D */
+    g_assert_cmphex(XMEM(s, 0x54), ==, 0x400000);
+    g_assert_cmphex(REG(s, DSP_REG_R0), ==, 0x55);
+    g_assert_cmphex(REG(s, DSP_REG_B2), ==, 0);        /* F */
+    g_assert_cmphex(REG(s, DSP_REG_B1), ==, 0x800000);
+    g_assert_cmphex(REG(s, DSP_REG_B0), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_SR) & (1 << DSP_SR_LF), ==, 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* Corpus table + runners                                              */
 /* ------------------------------------------------------------------ */
 
@@ -457,6 +664,8 @@ static const TestProg progs[] = {
     { "parmove",     build_parmove,     check_parmove },
     { "rep-do",      build_rep_do,      check_rep_do },
     { "mode6-jumps", build_mode6_jumps, check_mode6_jumps },
+    { "smc",         build_smc,         check_smc },
+    { "lazy-flags",  build_lazy_flags,  check_lazy_flags },
 };
 
 static const TestProg *find_prog(const char *name)

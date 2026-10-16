@@ -211,7 +211,7 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 
 | `xemu.toml` (`config_spec.yml`) | Default | Note |
 |---|---|---|
-| `audio.dsp_jit.enabled` | false | The only switch for the fork's DSP JIT (GP core; the EP stays on the interpreter) |
+| `audio.dsp_jit.enabled` | false | The only switch for the fork's DSP JIT (both cores, GP and EP) |
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
 

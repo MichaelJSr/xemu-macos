@@ -113,9 +113,10 @@ void dsp_start_frame_impl(DSPState *dsp)
 /*
  * Engine selection. The C interpreter engine embeds its own inline
  * basic-block JIT on Apple Silicon (interp/dsp56k_jit_arm64.c,
- * audio.dsp_jit.enabled); when that is supported and enabled it is
- * this fork's preferred engine and takes precedence over the
- * dsp56300-subproject JIT engine (audio.use_dsp_jit).
+ * audio.dsp_jit.enabled) for both the GP and the EP; when that is
+ * supported and enabled it is this fork's preferred engine and takes
+ * precedence over the dsp56300-subproject JIT engine
+ * (audio.use_dsp_jit).
  */
 static bool dsp_want_external_jit_engine(void)
 {

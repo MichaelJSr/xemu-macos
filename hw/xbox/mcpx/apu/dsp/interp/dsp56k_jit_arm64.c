@@ -92,9 +92,23 @@ static bool g_jit_stats;
 static bool g_ccr_dead_next_emit;
 static bool g_ccr_nz_dead_next_emit;
 static bool g_ccr_eu_dead_next_emit;
+/* The op's PC and, per dead half, the distance to the op that kills
+ * it: the update is dropped only while no DO-loop edge can fire in
+ * between (emit_ccr_edge_guard). */
+static uint32_t g_ccr_op_pc;
+static uint32_t g_ccr_dead_span;
+static uint32_t g_ccr_nz_span;
+static uint32_t g_ccr_eu_span;
 static uint64_t g_alu_ccr_skipped;
 static uint64_t g_alu_ccr_nz_skipped;
 static uint64_t g_alu_ccr_eu_skipped;
+
+/*
+ * P words below 0x40 the current translation baked as immediates
+ * (emit_cf_movem_aa_op). translate_block clears it and stores it in
+ * the block's bake_mask, so a later write to one of them evicts it.
+ */
+static uint64_t g_xlate_bake_mask;
 
 /*
  * Phase 8 extended lazy-flag lookahead depth. Each translate
@@ -526,6 +540,7 @@ static inline void emit_cbnz_w(ArmEmit *e, int rn, int32_t off_bytes)
 /* B.cond #imm19   — condition encoded in lowest nibble */
 #define ARM_COND_EQ 0x0
 #define ARM_COND_NE 0x1
+#define ARM_COND_HS 0x2
 static inline void emit_bcond(ArmEmit *e, int cond, int32_t off_bytes)
 {
     int32_t imm19 = off_bytes >> 2;
@@ -891,6 +906,14 @@ static void patch_branch(uint32_t *insn_addr, int32_t new_off_bytes)
 
 #define DSP56K_JIT_CODE_BYTES (8u * 1024u * 1024u)   /* 8 MiB code buffer per core */
 #define DSP56K_JIT_MAX_OPS_PER_BLOCK 32
+/*
+ * Bound on dep_end - pc_start, which the invalidation scan relies on.
+ * 32 ops of up to two words reach 64; the lookahead only walks while
+ * num_ops + 1 + step < MAX_OPS, which keeps it inside that too. The
+ * lookahead margin on top is slack, asserted at install.
+ */
+#define DSP56K_JIT_MAX_DEP_SPAN \
+    (2 * DSP56K_JIT_MAX_OPS_PER_BLOCK + 2 * DSP56K_JIT_CCR_LF_MAX_STEPS)
 
 typedef void (*dsp56k_jit_entry_fn)(dsp_core_t *dsp);
 
@@ -964,6 +987,16 @@ typedef struct DspJitIncomingChain {
 struct DspJitBlock {
     uint32_t pc_start;
     uint32_t pc_end;           /* exclusive — last covered PC + cur_inst_len */
+    /*
+     * Exclusive end of the P words the translation depends on:
+     * [pc_start, dep_end) covers pc_end, the second word of a
+     * two-word last op the length classifier calls one word (DO,
+     * BRA long, mode-6 ea), and the lazy-flag lookahead past pc_end.
+     * A P write inside this range evicts the block.
+     */
+    uint32_t dep_end;
+    /* P words below 0x40 that movem p:aa baked into the code. */
+    uint64_t bake_mask;
     dsp56k_jit_entry_fn entry;    /* pointer into code buffer */
     uint32_t num_ops;
     uint32_t write_set;        /* DSP56K_JIT_WS_* bitmask */
@@ -1026,9 +1059,12 @@ struct DspJitBlock {
     uint32_t  num_incoming_chains;
     DspJitIncomingChain incoming_chains[DSP56K_JIT_MAX_INCOMING_CHAINS];
 
-    /* Blocks are slotted 1-per-PC into DspJitState.blocks[]. No
-     * explicit free list — eviction goes through dsp56k_jit_invalidate
-     * (per-block) or dsp56k_jit_invalidate_all (cache flush). */
+    /* Blocks are slotted 1-per-start-PC into DspJitState.blocks[] and
+     * looked up by start PC, so translations may overlap: entering
+     * mid-block builds a second block there and leaves the first one
+     * alone. No explicit free list — eviction goes through
+     * dsp56k_jit_invalidate (P write inside dep range) or
+     * dsp56k_jit_invalidate_all (cache flush). */
 };
 
 /* --------------------------------------------------------------- *
@@ -1098,6 +1134,7 @@ typedef struct DiffQueue {
     QemuCond   cond;           /* worker wakeup */
     bool       worker_started;
     bool       exiting;
+    const char *core;          /* "GP" or "EP", for messages */
 } DiffQueue;
 
 typedef struct DspJitState {
@@ -1107,8 +1144,13 @@ typedef struct DspJitState {
     uint8_t *code_ptr;         /* bump allocator write cursor */
 
     /* Blocks */
-    DspJitBlock blocks[DSP_PRAM_SIZE];  /* one slot per possible PC */
-    DspJitBlock *pc_to_block[DSP_PRAM_SIZE];  /* pc -> owner block (or NULL) */
+    DspJitBlock blocks[DSP_PRAM_SIZE];  /* one slot per possible start PC */
+    /* Live blocks whose [pc_start, dep_end) holds each P word, so a P
+     * write that no translation read (the EP's data stores) returns
+     * at once. */
+    uint16_t cover[DSP_PRAM_SIZE];
+    /* OR of the live blocks' bake_mask (a superset after evictions). */
+    uint64_t bake_any;
 
     /* Differential validator (XEMU_DSP_JIT_DIFF=1). NULL if diff off. */
     DiffQueue *diff_q;
@@ -1145,6 +1187,11 @@ typedef struct DspJitState {
     uint32_t throttle_tick;
     uint64_t win_translated;
 } DspJitState;
+
+static const char *jit_core_name(const dsp_core_t *dsp)
+{
+    return dsp->is_gp ? "GP" : "EP";
+}
 
 /* Evaluate churn every WINDOW block executions; throttle when more
  * than 1/RATIO of them caused a (re)translation. GP on Azurik
@@ -2546,6 +2593,31 @@ static void emit_load_alu_src(ArmEmit *e, int xsrc,
 }
 
 /*
+ * Lazy-flag edge guard. Dropping a dead E/U/N/Z update is safe only
+ * while the ops up to its killer run in program order. Inside the
+ * lookahead window just one thing breaks that order: a DO-loop edge.
+ * Under SR.LF, an op that ends at LA + 1 goes on to SSH, which can
+ * read the flags. The edge can fire after any op from this one up to
+ * (but not including) the killer, so an LA in [op_pc, op_pc + span)
+ * keeps the update. LF isn't tested, since 93% of GP ops run inside a
+ * loop; a stale LA in range only costs the update. Any later edge
+ * needs this loop's edge first: passthroughs don't write LA.
+ *
+ *     LDR  w, [LA];  SUB w, w, #op_pc;  CMP w, #span;  B.HS skip
+ *
+ * Returns the B.HS for the caller to patch to its skip label.
+ */
+static uint32_t *emit_ccr_edge_guard(ArmEmit *e, int wtmp, uint32_t span)
+{
+    emit_ldr_w_imm(e, wtmp, /*rn=*/19, OFF_REG(DSP_REG_LA));
+    emit_sub_w_imm(e, wtmp, wtmp, g_ccr_op_pc);
+    emit_cmp_w_imm(e, wtmp, span);
+    uint32_t *site = e->buf;
+    emit_bcond(e, ARM_COND_HS, 0);
+    return site;
+}
+
+/*
  * Emit fully-inlined E / U / N / Z update matching the interpreter's
  * emu_ccr_update_e_u_n_z (dsp_emu.c.inc:288) for every scaling
  * mode. No BLR fallback remains — the 4-way dispatch on SR.S0 /
@@ -2606,40 +2678,33 @@ static void emit_load_alu_src(ArmEmit *e, int xsrc,
  */
 static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
 {
-    /* Phase 8 lazy-flag one-shot. translate_block sets this to
-     * true when the NEXT op will be a full ccr writer; we consume
-     * the flag and emit NOTHING, saving ~25 ARM64 insns per
-     * skipped op on the emit side AND the corresponding cycles
-     * at run time. Flag is cleared on consume so the next op's
-     * ccr call (if live) executes normally.
-     *
-     * `g_ccr_nz_dead_next_emit` is the partial-kill variant: a
-     * downstream op within the lookahead window overwrites N/Z
-     * (but not necessarily E/U — e.g. AND/OR/EOR/NOT parmove,
-     * LSL/LSR/ROL/ROR, LSL_IMM/AND_IMM CF, long-imm AND/OR),
-     * so upstream's N/Z emit is dead while the E/U emit must
-     * still run. Skips only the N/Z block (~8 insns), preserving
-     * the per-scaling-mode E/U computation. Consumed unconditionally
-     * to avoid leaking state into the next op. */
+    /* Phase 8 lazy-flag one-shot, consumed here so it can't leak into
+     * the next op. translate_block sets g_ccr_dead_next_emit when a
+     * later op overwrites all of E/U/N/Z before anything reads them,
+     * and the _nz/_eu variants when only that half is overwritten
+     * (an N/Z writer such as AND or LSL, or a full writer reached past
+     * a Tcc). A dead half costs only the edge guard at run time,
+     * instead of ~25 instructions for the whole update or the E/U
+     * part, and ~8 for N/Z. Both halves dead counts as all dead. */
+    bool skip_all = g_ccr_dead_next_emit;
     bool skip_nz = g_ccr_nz_dead_next_emit;
     bool skip_eu = g_ccr_eu_dead_next_emit;
+    uint32_t all_span = g_ccr_dead_span;
+    g_ccr_dead_next_emit = false;
     g_ccr_nz_dead_next_emit = false;
     g_ccr_eu_dead_next_emit = false;
-    if (g_ccr_dead_next_emit) {
-        g_ccr_dead_next_emit = false;
-        g_alu_ccr_skipped++;
-        return;
+    if (!skip_all && skip_eu && skip_nz) {
+        skip_all = true;
+        all_span = MAX(g_ccr_eu_span, g_ccr_nz_span);
     }
-    /* skip_eu && skip_nz is equivalent to full-dead — the entire
-     * SR.E/U/N/Z quartet is destined to be overwritten before any
-     * reader. The extended lookahead can set both independently
-     * via different walks; fold them here so we don't emit dead
-     * code (even just the clear + store) if both fire. */
-    if (skip_eu && skip_nz) {
+    uint32_t *to_end = NULL;
+    if (skip_all) {
         g_alu_ccr_skipped++;
-        return;
-    }
-    if (skip_eu) {
+        /* w9 is free until the SR load; xaccu never names it. */
+        assert(xaccu != 9);
+        to_end = emit_ccr_edge_guard(e, 9, all_span);
+        skip_eu = skip_nz = false;
+    } else if (skip_eu) {
         g_alu_ccr_eu_skipped++;
     } else if (skip_nz) {
         g_alu_ccr_nz_skipped++;
@@ -2676,8 +2741,11 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
     uint32_t *s1_to_nz = NULL;
     uint32_t *to_s2 = NULL;
     uint32_t *to_s1 = NULL;
+    /* A dead E/U half leaves the cleared bits. */
+    uint32_t *eu_to_nz = skip_eu ? emit_ccr_edge_guard(e, 11, g_ccr_eu_span)
+                                 : NULL;
 
-    if (!skip_eu) {
+    {
         /* Scaling == 2 → branch. */
         emit_cmp_w_imm(e, /*rn=*/10, 2);
         to_s2 = e->buf;
@@ -2769,63 +2837,44 @@ static void emit_ccr_e_u_n_z(ArmEmit *e, int xaccu)
         emit_cset_w(e, /*rd=*/11, ARM_COND_EQ);
         emit_orr_w_reg(e, /*rd=*/12, /*rn=*/12, /*rm=*/11);
         emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_U, 1);
-        /* Fall through to N/Z block (or store_sr_h when skip_nz). */
+        /* Fall through to the N/Z block. */
     }
-    /*
-     * skip_eu fall-through path: the scaling==3 branch above was
-     * the only branch emitted — for scaling 0/1/2 we want to go
-     * straight to N/Z (or store_sr_h if skip_nz is also set, in
-     * which case both halves are fully elided). The clear step
-     * already wrote 0 to E/U in w9; no E/U BFI happens.
-     */
 
     /* ==================== N / Z (shared across 0/1/2) ==================== */
     uint32_t *nz_label = e->buf;
-    if (!skip_nz) {
-        if (!skip_eu) {
-            patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label -
-                                        (uint8_t *)s0_to_nz));
-            patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label -
-                                        (uint8_t *)s1_to_nz));
-        }
-
-        /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
-        emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
-        emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
-        emit_cmp_w_imm(e, /*rn=*/11, 0);
-        emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
-        emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
-
-        /* N: bit 7 of A2 at SR[3]. */
-        emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
-        emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
-    } else {
-        (void)nz_label;
+    patch_b(s0_to_nz, (int32_t)((uint8_t *)nz_label - (uint8_t *)s0_to_nz));
+    patch_b(s1_to_nz, (int32_t)((uint8_t *)nz_label - (uint8_t *)s1_to_nz));
+    if (eu_to_nz) {
+        patch_branch(eu_to_nz,
+                     (int32_t)((uint8_t *)nz_label - (uint8_t *)eu_to_nz));
     }
+    /* A dead N/Z half leaves the cleared bits. */
+    uint32_t *nz_to_store = skip_nz ? emit_ccr_edge_guard(e, 11, g_ccr_nz_span)
+                                    : NULL;
+
+    /* Z: (A2 == 0) && (A1 == 0) && (A0 == 0). */
+    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/1, /*rm=*/2);
+    emit_orr_w_reg(e, /*rd=*/11, /*rn=*/11, /*rm=*/3);
+    emit_cmp_w_imm(e, /*rn=*/11, 0);
+    emit_cset_w(e, /*rd=*/12, ARM_COND_EQ);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/12, DSP_SR_Z, 1);
+
+    /* N: bit 7 of A2 at SR[3]. */
+    emit_ubfx_w(e, /*rd=*/11, /*rn=*/1, 7, 1);
+    emit_bfi_x(e, /*rd=*/9, /*rn=*/11, DSP_SR_N, 1);
 
     /* ==================== Store SR (shared target of scaling==3 skip) ==================== */
-    uint32_t *skip_nz_label = e->buf;
-    patch_branch(to_skip_nz, (int32_t)((uint8_t *)skip_nz_label -
+    uint32_t *store_label = e->buf;
+    patch_branch(to_skip_nz, (int32_t)((uint8_t *)store_label -
                                        (uint8_t *)to_skip_nz));
-    if (skip_nz && !skip_eu) {
-        /* When skip_nz is set AND skip_eu is false, the N/Z block
-         * wasn't emitted so scaling==2 falls straight through to
-         * store_sr_h, and the S0/S1 `B`'s land on store_sr_h too
-         * (nz_label == skip_nz_label in this path). Patch the
-         * two conditional fall-through emit_b's to target
-         * skip_nz_label directly; this also saves the redundant
-         * 1-insn `B` we'd otherwise emit after S2 just to skip
-         * zero bytes of N/Z code.
-         *
-         * When skip_eu is true the scaling branches weren't
-         * emitted at all, so s0_to_nz / s1_to_nz are NULL — no
-         * patching needed. */
-        patch_b(s0_to_nz, (int32_t)((uint8_t *)skip_nz_label -
-                                    (uint8_t *)s0_to_nz));
-        patch_b(s1_to_nz, (int32_t)((uint8_t *)skip_nz_label -
-                                    (uint8_t *)s1_to_nz));
+    if (nz_to_store) {
+        patch_branch(nz_to_store, (int32_t)((uint8_t *)store_label -
+                                            (uint8_t *)nz_to_store));
     }
     emit_store_sr_h(e, 9);
+    if (to_end) {
+        patch_branch(to_end, (int32_t)((uint8_t *)e->buf - (uint8_t *)to_end));
+    }
 }
 
 /* --------------------------------------------------------------- *
@@ -4404,7 +4453,7 @@ static uint64_t g_alu_fallback_count;
  *     decoding.
  *
  *   — Non-parmove CF: most aren't full writers, but a handful
- *     are (RTI/ENDDO pop full SR; asl_imm/asr_imm call
+ *     are (RTI pops the full SR; asl_imm/asr_imm call
  *     emu_ccr_update_e_u_n_z; inc/dec/add_imm/sub_imm/cmp_imm
  *     reuse the full-writer ALU pipeline). Looked up via the
  *     dsp56k_jit_helper_classify_cf helper.
@@ -4466,11 +4515,12 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
         return (sub == 0 || sub == 4 || sub == 5);
     }
     /*
-     * Phase 8 extended lazy-flag: RTI and ENDDO pop SR off the
-     * stack in their entirety, fully overwriting E/U/N/Z (and
-     * every other SR bit). Any prior op's CCR computation that
-     * hasn't been consumed by the time the pop runs is therefore
-     * dead. These are looked up via the emu_func classifier to
+     * Phase 8 extended lazy-flag: RTI pops SR off the stack in its
+     * entirety, fully overwriting E/U/N/Z (and every other SR bit).
+     * Any prior op's CCR computation that hasn't been consumed by
+     * the time the pop runs is therefore dead. ENDDO is no writer:
+     * it keeps SR's low 7 bits (the CCR) and takes only LF from the
+     * stack. These are looked up via the emu_func classifier to
      * avoid maintaining a parallel instruction-pattern table —
      * the helper is authoritative and classifies every inlined
      * CF kind the JIT knows about. Unknown CF handlers fall
@@ -4480,7 +4530,7 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
     emu_func_t emu = dsp56k_jit_helper_lookup_emu(inst);
     if (emu) {
         int cf_kind = dsp56k_jit_helper_classify_cf((void *)emu);
-        if (cf_kind == DSP56K_JIT_CF_RTI || cf_kind == DSP56K_JIT_CF_ENDDO) {
+        if (cf_kind == DSP56K_JIT_CF_RTI) {
             return true;
         }
         /* ASL_IMM / ASR_IMM / long-imm short forms all run
@@ -4530,8 +4580,8 @@ static bool inst_is_full_ccr_writer(uint32_t inst)
  * E/U/N/Z), MOVEC / MOVEM / MOVEP / MOVE_X_LONG when dest is SR
  * (conservative — decoding dest is too much work for small
  * gain), TCC / JCC / JSCC / BCC / BRCLR / BRSET / JCLR / JSET /
- * JSCLR / JSSET (all read CCR), RTI / ENDDO (full writers —
- * see inst_is_full_ccr_writer).
+ * JSCLR / JSSET (all read CCR), RTI (full writer — see
+ * inst_is_full_ccr_writer), ENDDO (pops LA/LF).
  */
 static bool inst_is_ccr_passthrough(uint32_t inst)
 {
@@ -4605,8 +4655,8 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
      * Deliberately NOT included: ANDI/ORI (dest CCR touches
      * E/U/N/Z when reg=1), MOVEC/MOVEM/MOVEP/MOVE_X_* (dest can
      * be SR), TCC (reads CCR for the condition), all
-     * conditional branches (read CCR), RTI/ENDDO (full writers,
-     * handled in inst_is_full_ccr_writer).
+     * conditional branches (read CCR), RTI (full writer, handled
+     * in inst_is_full_ccr_writer), ENDDO (pops LA/LF).
      */
     emu_func_t emu_pt = dsp56k_jit_helper_lookup_emu(inst);
     if (emu_pt) {
@@ -4665,18 +4715,16 @@ static bool inst_is_ccr_passthrough(uint32_t inst)
  * The set is strictly broader than `inst_is_ccr_passthrough`:
  * CCR-passthroughs all satisfy (a)+(b) automatically (they read
  * nothing in CCR). On top of that we add CCR READERS that read
- * only C/V/N/Z, NOT E/U:
+ * only C/V/N/Z/L, NOT E/U:
  *
  *   TCC — conditional register transfer based on the 4-bit cc
- *         code. The cc evaluation (emu_calc_cc) uses only
- *         C/V/Z/N/L; E and U are never inputs. Non-terminator.
+ *         code, except the four codes whose emu_calc_cc test
+ *         reads E or U (NN, EC, NR, ES). Non-terminator.
  *
  * Conditional branches (JCC/BCC/JSCC/JSCLR/JSSET/BRCLR/BRSET/
- * JCLR/JSET variants) ALSO only read C/V/N/Z from CCR (for the
- * cc-code ones) or test a single bit (for the bit-test ones),
- * but they're terminators — they end the block and the walk
- * breaks on them naturally (they're not in any passthrough
- * set). So we don't need to add them here.
+ * JCLR/JSET variants) are terminators: they end the block and
+ * the walk breaks on them naturally (they're not in any
+ * passthrough set). So we don't need to add them here.
  *
  * Conservative "false" for unknowns.
  */
@@ -4687,13 +4735,15 @@ static bool inst_is_eu_passthrough(uint32_t inst)
     if (inst_is_ccr_passthrough(inst)) {
         return true;
     }
-    /* TCC is the only non-terminator CCR-reader that reads only
-     * C/V/N/Z. */
+    /* TCC is the only non-terminator CCR reader, and all but four of
+     * its conditions read no E/U: NN (4), EC (5), NR (12) and ES (13)
+     * do (emu_calc_cc). The cc field is bits 12-15 in every form. */
     emu_func_t emu_eu = dsp56k_jit_helper_lookup_emu(inst);
     if (emu_eu) {
         int cf_kind = dsp56k_jit_helper_classify_cf((void *)emu_eu);
         if (cf_kind == DSP56K_JIT_CF_TCC) {
-            return true;
+            uint32_t cc = (inst >> 12) & 0xf;
+            return cc != 4 && cc != 5 && cc != 12 && cc != 13;
         }
     }
     return false;
@@ -4739,7 +4789,6 @@ static bool inst_overwrites_nz(uint32_t inst)
         case DSP56K_JIT_CF_SUB_IMM:
         case DSP56K_JIT_CF_CMP_IMM:
         case DSP56K_JIT_CF_RTI:
-        case DSP56K_JIT_CF_ENDDO:
             return true;
         default:
             return false;
@@ -7671,9 +7720,12 @@ static bool emit_cf_movem_aa_op(ArmEmit *e, uint32_t inst, dsp_core_t *dsp)
             numreg == DSP_REG_SSL) return false;
         /* Bake the p-space word as a 24-bit compile-time immediate.
          * Matches read_memory_p(dsp, addr) exactly since addr is
-         * always < 0x40 (< DSP_PRAM_SIZE). */
+         * always < 0x40 (< DSP_PRAM_SIZE). The word is usually
+         * outside the block, so it joins the block's dependencies
+         * through bake_mask. */
         uint32_t pval = (addr < DSP_PRAM_SIZE)
                             ? (dsp->pram[addr] & 0xFFFFFFu) : 0u;
+        g_xlate_bake_mask |= 1ull << addr;
         emit_mov_imm32(e, /*rd=*/5, pval);
         emit_dsp_write_reg(e, numreg, /*value_wreg=*/5);
     } else {
@@ -9168,6 +9220,30 @@ static void chain_unpatch_incoming(DspJitBlock *target)
 }
 
 /*
+ * Evict one live block: unchain its callers, drop its P coverage and
+ * stale-stamp it (outgoing chain sites, in-flight validator entries).
+ * Its code stays in the buffer until the next flush, so a block that
+ * evicts itself mid-run finishes the current op and exits on
+ * jit_exit_block_request. Caller has qemu_thread_jit_write() in
+ * effect.
+ */
+static void jit_evict_block(DspJitState *s, DspJitBlock *b)
+{
+    chain_unpatch_incoming(b);
+    for (uint32_t p = b->pc_start; p < b->dep_end; p++) {
+        s->cover[p]--;
+    }
+    b->dep_end = b->pc_start;
+    b->bake_mask = 0;
+    b->entry = NULL;
+    b->chain_entry = NULL;
+    b->shared_exit = NULL;
+    b->num_ops = 0;
+    b->generation++;
+    qatomic_set(&b->diff_checked, 0);
+}
+
+/*
  * Decide at translate time whether a chainable terminator op should
  * emit a direct chain branch to its target. Returns the target block
  * if chaining is viable, NULL otherwise. Target pc is computed from
@@ -9244,20 +9320,11 @@ static DspJitBlock *chain_target_for_terminator(DspJitState *s,
     if (target_pc >= DSP_PRAM_SIZE) {
         return NULL;
     }
-    DspJitBlock *target = s->pc_to_block[target_pc];
-    if (!target || !target->entry || !target->chain_entry) {
+    DspJitBlock *target = &s->blocks[target_pc];
+    if (!target->entry || !target->chain_entry) {
         /* Not translated yet (or invalidated). Retro-chain: report
          * the decoded target so the caller can register a pending
          * chain site, patched if/when a block lands at target_pc. */
-        *out_target_pc = target_pc;
-        *out_retro_eligible = true;
-        return NULL;
-    }
-    if (target->pc_start != target_pc) {
-        /* Target pc falls inside another block (not at its start).
-         * Chaining to a mid-block point would require a dedicated
-         * entry there — but a future translation starting exactly at
-         * target_pc can still be retro-chained. */
         *out_target_pc = target_pc;
         *out_retro_eligible = true;
         return NULL;
@@ -9374,26 +9441,91 @@ static void emit_prologue(ArmEmit *e)
     emit_reload_sr_pin(e);
 }
 
+/* Lookahead read of P word pc; widens the dependency range to it. */
+static inline uint32_t xlate_peek_p(const dsp_core_t *dsp, uint32_t pc,
+                                    uint32_t *peek_end)
+{
+    if (pc + 1 > *peek_end) {
+        *peek_end = pc + 1;
+    }
+    return dsp->pram[pc];
+}
+
+/*
+ * Phase 8 lazy-flag lookahead for the op at `pc`: decide which of its
+ * E/U/N/Z updates the ops after it overwrite before anything reads
+ * them, for emit_ccr_e_u_n_z (CF and misc ops never consume the flags;
+ * the per-op reset clears them). Two walks of up to
+ * DSP56K_JIT_CCR_LF_MAX_STEPS ops, staying inside what the block could
+ * still hold:
+ *   - over CCR passthroughs to a full writer: all of E/U/N/Z dead; an
+ *     N/Z writer on the way kills only the N/Z half;
+ *   - over E/U passthroughs (adds a Tcc that reads no E/U) to a full
+ *     writer: the E/U half dead.
+ * Every dead half records how far its killer is, for the DO-loop edge
+ * guard. Every word read lands in the block's dependency range.
+ */
+static void lazy_flag_lookahead(const dsp_core_t *dsp, uint32_t pc,
+                                uint32_t inst_len, int num_ops,
+                                uint32_t *peek_end)
+{
+    g_ccr_op_pc = pc;
+
+    uint32_t next = pc + inst_len;
+    bool saw_nz_ovr = false;
+    for (int step = 0;
+         step < DSP56K_JIT_CCR_LF_MAX_STEPS &&
+         num_ops + 1 + step < DSP56K_JIT_MAX_OPS_PER_BLOCK &&
+         next < DSP_PRAM_SIZE;
+         step++) {
+        uint32_t look = xlate_peek_p(dsp, next, peek_end);
+        if (inst_is_full_ccr_writer(look)) {
+            g_ccr_dead_next_emit = true;
+            g_ccr_dead_span = next - pc;
+            return;   /* subsumes both halves */
+        }
+        if (!saw_nz_ovr && inst_overwrites_nz(look)) {
+            saw_nz_ovr = true;
+            g_ccr_nz_span = next - pc;
+        }
+        if (!inst_is_ccr_passthrough(look)) {
+            break;    /* potential reader / partial writer */
+        }
+        next += dsp56k_jit_helper_inst_length(look);
+    }
+    g_ccr_nz_dead_next_emit = saw_nz_ovr;
+
+    next = pc + inst_len;
+    for (int step = 0;
+         step < DSP56K_JIT_CCR_LF_MAX_STEPS &&
+         num_ops + 1 + step < DSP56K_JIT_MAX_OPS_PER_BLOCK &&
+         next < DSP_PRAM_SIZE;
+         step++) {
+        uint32_t look = xlate_peek_p(dsp, next, peek_end);
+        if (inst_is_full_ccr_writer(look)) {
+            g_ccr_eu_dead_next_emit = true;
+            g_ccr_eu_span = next - pc;
+            return;
+        }
+        if (!inst_is_eu_passthrough(look)) {
+            return;
+        }
+        next += dsp56k_jit_helper_inst_length(look);
+    }
+}
+
 static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                                     uint32_t pc_start)
 {
-    /* If any existing block covers pc_start, invalidate it first so we
-     * never have two translated blocks with overlapping PC ranges. The
-     * old block may have incoming chain sites from other blocks; route
-     * them back to their respective source blocks' shared_exit paths
-     * before we evict, so the sources don't jump into stale code. */
-    if (s->pc_to_block[pc_start]) {
-        DspJitBlock *old = s->pc_to_block[pc_start];
+    /* Blocks may overlap: one that covers pc_start further in stays
+     * live. Evicting it here made two blocks entered at shared PCs
+     * rebuild each other forever (the EP's churn). Only this start
+     * PC's own slot is replaced; the lookups never ask for a live one,
+     * so this is defensive. */
+    DspJitBlock *old = &s->blocks[pc_start];
+    if (old->entry) {
         qemu_thread_jit_write();
-        chain_unpatch_incoming(old);
-        for (uint32_t p = old->pc_start; p < old->pc_end && p < DSP_PRAM_SIZE; p++) {
-            s->pc_to_block[p] = NULL;
-        }
-        old->entry = NULL;
-        old->chain_entry = NULL;
-        old->shared_exit = NULL;
-        old->num_ops = 0;
-        old->generation++;      /* stale-stamp any still-live incoming */
+        jit_evict_block(s, old);
     }
 
     /* If the code buffer is near-full, flush the cache.
@@ -9431,6 +9563,12 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     uint32_t pc_end = pc_start;
     int num_ops = 0;
     uint32_t write_set = 0;
+    /* Dependency range bookkeeping (see DspJitBlock.dep_end): the
+     * furthest P word the lookahead read, the last op's PC, and the
+     * movem p:aa words baked on the way. */
+    uint32_t peek_end = pc_start;
+    uint32_t last_op_pc = pc_start;
+    g_xlate_bake_mask = 0;
 
     /* If the last op is a chainable terminator whose target is
      * already translated, we'll emit a direct chain branch to that
@@ -9508,65 +9646,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             uint32_t inst_len = dsp56k_jit_helper_inst_length(inst);
             uint32_t expected_next_pc = pc + inst_len;
 
-            /* Phase 8 extended lazy-flag lookahead. Walk forward
-             * up to DSP56K_JIT_CCR_LF_MAX_STEPS ops, skipping over
-             * passthrough parmoves (ALU=MOVE, neither reads nor
-             * writes E/U/N/Z). If we hit a full CCR writer before
-             * hitting any unknown / reader / block-boundary, this
-             * parmove's ccr call is dead. Flag is one-shot and
-             * cleared at the top of each iter. */
-            uint32_t next_pc_lf = pc + inst_len;
-            int lf_step = 0;
-            bool saw_nz_ovr = false;
-            while (lf_step < DSP56K_JIT_CCR_LF_MAX_STEPS &&
-                   num_ops + 1 + lf_step < DSP56K_JIT_MAX_OPS_PER_BLOCK &&
-                   next_pc_lf < DSP_PRAM_SIZE) {
-                uint32_t look_inst = dsp->pram[next_pc_lf];
-                if (inst_is_full_ccr_writer(look_inst)) {
-                    g_ccr_dead_next_emit = true;
-                    break;
-                }
-                if (inst_overwrites_nz(look_inst)) {
-                    saw_nz_ovr = true;
-                }
-                if (!inst_is_ccr_passthrough(look_inst)) {
-                    break;   /* potential reader / partial writer */
-                }
-                next_pc_lf += dsp56k_jit_helper_inst_length(look_inst);
-                lf_step++;
-            }
-            if (!g_ccr_dead_next_emit && saw_nz_ovr) {
-                /* Partial kill: N/Z half of this op's emit is dead
-                 * (a walked-over passthrough overwrites N/Z). */
-                g_ccr_nz_dead_next_emit = true;
-            }
-            /*
-             * Extended E/U walk: rerun the forward scan with the
-             * broader eu-passthrough set (CCR-passthrough + TCC),
-             * looking for a full writer. If the main walk already
-             * found one (g_ccr_dead_next_emit), this is redundant
-             * — full-dead subsumes eu-dead.
-             */
-            if (!g_ccr_dead_next_emit) {
-                uint32_t next_pc_eu = pc + inst_len;
-                int eu_step = 0;
-                while (eu_step < DSP56K_JIT_CCR_LF_MAX_STEPS &&
-                       num_ops + 1 + eu_step <
-                           DSP56K_JIT_MAX_OPS_PER_BLOCK &&
-                       next_pc_eu < DSP_PRAM_SIZE) {
-                    uint32_t look_inst = dsp->pram[next_pc_eu];
-                    if (inst_is_full_ccr_writer(look_inst)) {
-                        g_ccr_eu_dead_next_emit = true;
-                        break;
-                    }
-                    if (!inst_is_eu_passthrough(look_inst)) {
-                        break;
-                    }
-                    next_pc_eu +=
-                        dsp56k_jit_helper_inst_length(look_inst);
-                    eu_step++;
-                }
-            }
+            lazy_flag_lookahead(dsp, pc, inst_len, num_ops, &peek_end);
 
             if (!emit_parmove_stub(&e, &exits, inst, alu, expected_next_pc,
                                    &write_set, dsp, pc)) {
@@ -9579,9 +9659,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                 break;
             }
 
-            for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
-                s->pc_to_block[p] = &s->blocks[pc_start];
-            }
+            last_op_pc = pc;
             pc_end = pc + inst_len;
             pc = pc_end;
             num_ops++;
@@ -9600,56 +9678,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             bool is_term = dsp56k_jit_helper_is_terminator((void *)emu);
             uint32_t expected_next_pc = pc + inst_len;
 
-            /* Phase 8 extended lazy-flag lookahead for non-parmove
-             * ops. Same walk-through-passthrough semantics as the
-             * parmove path above; see that comment for invariants.
-             * Flag is consumed by emit_ccr_e_u_n_z only (no-op
-             * consumption for CF / misc ops — per-iter reset
-             * clears it regardless). */
-            uint32_t next_pc_lf2 = pc + inst_len;
-            int lf_step2 = 0;
-            bool saw_nz_ovr2 = false;
-            while (lf_step2 < DSP56K_JIT_CCR_LF_MAX_STEPS &&
-                   num_ops + 1 + lf_step2 < DSP56K_JIT_MAX_OPS_PER_BLOCK &&
-                   next_pc_lf2 < DSP_PRAM_SIZE) {
-                uint32_t look_inst = dsp->pram[next_pc_lf2];
-                if (inst_is_full_ccr_writer(look_inst)) {
-                    g_ccr_dead_next_emit = true;
-                    break;
-                }
-                if (inst_overwrites_nz(look_inst)) {
-                    saw_nz_ovr2 = true;
-                }
-                if (!inst_is_ccr_passthrough(look_inst)) {
-                    break;
-                }
-                next_pc_lf2 += dsp56k_jit_helper_inst_length(look_inst);
-                lf_step2++;
-            }
-            if (!g_ccr_dead_next_emit && saw_nz_ovr2) {
-                g_ccr_nz_dead_next_emit = true;
-            }
-            /* Extended E/U walk — see parmove path comment. */
-            if (!g_ccr_dead_next_emit) {
-                uint32_t next_pc_eu2 = pc + inst_len;
-                int eu_step2 = 0;
-                while (eu_step2 < DSP56K_JIT_CCR_LF_MAX_STEPS &&
-                       num_ops + 1 + eu_step2 <
-                           DSP56K_JIT_MAX_OPS_PER_BLOCK &&
-                       next_pc_eu2 < DSP_PRAM_SIZE) {
-                    uint32_t look_inst = dsp->pram[next_pc_eu2];
-                    if (inst_is_full_ccr_writer(look_inst)) {
-                        g_ccr_eu_dead_next_emit = true;
-                        break;
-                    }
-                    if (!inst_is_eu_passthrough(look_inst)) {
-                        break;
-                    }
-                    next_pc_eu2 +=
-                        dsp56k_jit_helper_inst_length(look_inst);
-                    eu_step2++;
-                }
-            }
+            lazy_flag_lookahead(dsp, pc, inst_len, num_ops, &peek_end);
 
             /*
              * Static block chaining (Phase 5b): if this is a
@@ -9710,10 +9739,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
                 pending_chain_site = emit_b_absolute(&e, e.buf);
             }
 
-            for (uint32_t p = pc; p < pc + inst_len && p < DSP_PRAM_SIZE; p++) {
-                s->pc_to_block[p] = &s->blocks[pc_start];
-            }
-
+            last_op_pc = pc;
             pc_end = pc + inst_len;
             pc = pc_end;
             num_ops++;
@@ -9741,6 +9767,17 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     DspJitBlock *block = &s->blocks[pc_start];
     block->pc_start = pc_start;
     block->pc_end = pc_end;
+    /* The emitters read at most the op's second word (pc + 1), even
+     * for ops the length classifier calls one word. */
+    uint32_t dep_end = MAX(MAX(pc_end, last_op_pc + 2), peek_end);
+    dep_end = MIN(dep_end, DSP_PRAM_SIZE);
+    assert(dep_end - pc_start <= DSP56K_JIT_MAX_DEP_SPAN);
+    block->dep_end = dep_end;
+    for (uint32_t p = pc_start; p < dep_end; p++) {
+        s->cover[p]++;
+    }
+    block->bake_mask = g_xlate_bake_mask;
+    s->bake_any |= g_xlate_bake_mask;
     block->entry = (dsp56k_jit_entry_fn)entry_ptr;
     block->num_ops = num_ops;
     block->write_set = write_set;
@@ -9799,7 +9836,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 /* Forward decls — the validator helpers are defined below this
  * Public API block, but dsp56k_jit_init / dsp56k_jit_finalize need to
  * call them. */
-static DiffQueue *diff_queue_create(void);
+static DiffQueue *diff_queue_create(const char *core);
 static void       diff_queue_destroy(DiffQueue *q);
 
 /* atexit-handler glue — needed because the normal xemu exit path
@@ -9815,14 +9852,15 @@ void dsp56k_jit_init(dsp_core_t *dsp)
 {
     parse_flags_once();
     /*
-     * Only the GP gets JIT state. The EP's microcode keeps storing into its
-     * own P-space (DSound's encoder, so most titles), which ends running
-     * blocks and evicts them: on Azurik ~1 retranslation per 10 block
-     * executions, 8% of the deterministic vCPU until the throttle gave up
-     * ~150 frames after every boot or load. The engines give the same
-     * results, so the EP stays on the interpreter (jit_state NULL).
+     * Both cores get JIT state. The EP used to stay on the interpreter
+     * because it retranslated about once per 10 block executions. That
+     * was never self-modifying code (its P stores are data next to the
+     * code): it enters blocks mid-way, and when one PC owned one block,
+     * the two blocks at a shared PC kept evicting each other. Blocks now
+     * overlap, and the EP builds ~86 blocks per heavy-f1 run (111 on a
+     * cold boot to frame 1800).
      */
-    if (!g_jit_enabled || !dsp->is_gp) {
+    if (!g_jit_enabled) {
         return;
     }
 
@@ -9845,7 +9883,7 @@ void dsp56k_jit_init(dsp_core_t *dsp)
          * creation fails (OOM / thread create refused), fall through
          * silently — the diff path auto-detects q == NULL and uses
          * sync mode per-block. */
-        s->diff_q = diff_queue_create();
+        s->diff_q = diff_queue_create(jit_core_name(dsp));
         if (!s->diff_q) {
             fprintf(stderr, "xemu: DSP JIT: async validator init "
                             "failed, falling back to sync diff mode\n");
@@ -9864,7 +9902,7 @@ void dsp56k_jit_init(dsp_core_t *dsp)
      * NOT call dsp_destroy — it just exits — so the stats dump
      * wired into dsp56k_jit_finalize would never fire otherwise.
      *
-     * The registry is bounded (2 slots; xemu registers only the GP)
+     * The registry is bounded (2 slots: the GP and the EP)
      * and any subsequent core going through dsp56k_jit_finalize
      * cleanly removes itself, so the atexit handler only sees live
      * cores.
@@ -9917,15 +9955,16 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
 
     if (s->diff_q) {
         fprintf(stderr,
-                "xemu: DSP JIT validator (GP core) final: "
+                "xemu: DSP JIT validator (%s core) final: "
                 "enqueued=%" PRIu64 " checked=%" PRIu64
                 " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
-                s->diff_q->enqueued, s->diff_q->checked,
-                s->diff_q->dropped, s->diff_q->failures);
+                jit_core_name(dsp), s->diff_q->enqueued,
+                s->diff_q->checked, s->diff_q->dropped,
+                s->diff_q->failures);
     }
 
     fprintf(stderr,
-            "xemu: DSP JIT stats (GP core):\n"
+            "xemu: DSP JIT stats (%s core):\n"
             "  blocks_translated = %" PRIu64 "\n"
             "  blocks_executed   = %" PRIu64 "\n"
             "  cache_flushes     = %" PRIu64 "\n"
@@ -9944,6 +9983,7 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
             "  cf_inlined        = %" PRIu64
             " (%.1f%% of emitted ops)\n"
             "  cf_fallback       = %" PRIu64 "\n",
+            jit_core_name(dsp),
             s->blocks_translated, s->blocks_executed,
             s->cache_flushes, s->fallbacks,
             s->diff_ops_checked,
@@ -10046,41 +10086,54 @@ void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr)
         return;
     }
     /*
-     * Set the self-mod exit-request flag unconditionally. If we're
-     * running under a JIT block right now (called from inside an
-     * emu handler that wrote P-space), the current block's next
-     * exit check will see this flag and exit early so the block
-     * doesn't continue executing stubs with stale pram. If we're
-     * outside the JIT (called from e.g. dsp_bootstrap), the flag
-     * is harmlessly read + cleared at the start of the next block.
+     * Most P writes are data no translation read (the EP changes ~70
+     * P words a frame next to its code): one coverage load, no exit.
      */
-    dsp->jit_exit_block_request = 1;
-
-    DspJitBlock *b = s->pc_to_block[addr];
-    if (!b) {
+    bool hit_code = s->cover[addr] != 0;
+    bool hit_bake = addr < 64 && ((s->bake_any >> addr) & 1);
+    if (!hit_code && !hit_bake) {
         return;
     }
-    /* Un-patch any incoming chain sites before clearing entry —
-     * they currently reference code that's about to become stale.
-     * Re-patching writes into the JIT code buffer so we need the
-     * page writable. */
+
+    /* Un-patching incoming chain sites writes into the code buffer. */
     qemu_thread_jit_write();
-    chain_unpatch_incoming(b);
+    if (hit_code) {
+        /* Every block whose [pc_start, dep_end) holds addr starts at
+         * most DSP56K_JIT_MAX_DEP_SPAN - 1 words before it. */
+        uint32_t lo = addr >= DSP56K_JIT_MAX_DEP_SPAN - 1
+                          ? addr - (DSP56K_JIT_MAX_DEP_SPAN - 1) : 0;
+        for (uint32_t p = lo; p <= addr && s->cover[addr]; p++) {
+            DspJitBlock *b = &s->blocks[p];
+            if (b->entry && addr < b->dep_end) {
+                jit_evict_block(s, b);
+            }
+        }
+    }
+    if (hit_bake) {
+        uint64_t still = 0;
+        for (uint32_t p = 0; p < DSP_PRAM_SIZE; p++) {
+            DspJitBlock *b = &s->blocks[p];
+            if (!b->entry || !b->bake_mask) {
+                continue;
+            }
+            if ((b->bake_mask >> addr) & 1) {
+                jit_evict_block(s, b);
+            } else {
+                still |= b->bake_mask;
+            }
+        }
+        s->bake_any = still;
+    }
     qemu_thread_jit_execute();
 
-    /* Evict all PCs covered by this block. */
-    for (uint32_t p = b->pc_start; p < b->pc_end && p < DSP_PRAM_SIZE; p++) {
-        s->pc_to_block[p] = NULL;
-    }
-    b->entry = NULL;
-    b->chain_entry = NULL;
-    b->shared_exit = NULL;
-    b->num_ops = 0;
-    b->generation++;          /* stale-stamp outgoing chain sites */
-    /* Clear diff_checked so any in-flight validator entry for this
-     * translation (same block pointer, different entry) can't race
-     * and stamp the retranslated block as "validated" later. */
-    qatomic_set(&b->diff_checked, 0);
+    /*
+     * A block may have evicted itself (an emu handler wrote into its
+     * own range): its next exit check sees this and leaves before any
+     * stub that read the old word runs. A block whose range misses
+     * addr runs on. Outside the JIT (dsp_bootstrap, DMA) the next
+     * block's prologue clears it.
+     */
+    dsp->jit_exit_block_request = 1;
 }
 
 void dsp56k_jit_invalidate_all(dsp_core_t *dsp)
@@ -10097,7 +10150,8 @@ void dsp56k_jit_invalidate_all(dsp_core_t *dsp)
      * chain lists: the entire code buffer is being reused, so all
      * chain sites will be overwritten.
      */
-    memset(s->pc_to_block, 0, sizeof(s->pc_to_block));
+    memset(s->cover, 0, sizeof(s->cover));
+    s->bake_any = 0;
     for (uint32_t i = 0; i < DSP_PRAM_SIZE; i++) {
         DspJitBlock *b = &s->blocks[i];
         uint32_t gen = b->generation;
@@ -10533,10 +10587,11 @@ static void *diff_worker_fn(void *opaque)
                  * diagnostic is the ONE piece of information the
                  * user needs from a failed validation. */
                 fprintf(stderr,
-                        "xemu: DSP JIT validator (GP core): "
+                        "xemu: DSP JIT validator (%s core): "
                         "checked=%" PRIu64 " failures=%" PRIu64
                         " dropped=%" PRIu64 " enqueued=%" PRIu64 "\n",
-                        q->checked, q->failures, q->dropped, q->enqueued);
+                        q->core, q->checked, q->failures, q->dropped,
+                        q->enqueued);
                 fflush(stderr);
                 abort();
             }
@@ -10552,9 +10607,10 @@ static void *diff_worker_fn(void *opaque)
 /* Allocate and start the validator queue + worker. Returns NULL if
  * allocation or thread creation fails (diff mode then falls back to
  * sync, matching the XEMU_DSP_JIT_DIFF_SYNC=1 path). */
-static DiffQueue *diff_queue_create(void)
+static DiffQueue *diff_queue_create(const char *core)
 {
     DiffQueue *q = g_malloc0(sizeof(*q));
+    q->core = core;
     q->slots = g_try_malloc0(sizeof(DiffSlot) * DSP56K_JIT_DIFF_SLOTS);
     if (!q->slots) {
         g_free(q);
@@ -10674,8 +10730,8 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
     }
 
     /* Run the JIT block on the live dsp. */
-    DspJitBlock *b = s->pc_to_block[dsp->pc];
-    if (!b || b->entry == NULL || b->pc_start != dsp->pc) {
+    DspJitBlock *b = &s->blocks[dsp->pc];
+    if (b->entry == NULL) {
         b = translate_block(dsp, s, dsp->pc);
         if (!b || !b->entry) {
             s->fallbacks++;
@@ -10770,11 +10826,11 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
                 DSP56K_JIT_THROTTLE_WINDOW) {
             s->auto_throttled = true;
             fprintf(stderr,
-                    "xemu: DSP JIT auto-throttled on GP core: %" PRIu64
-                    " retranslations in the last %u block executions "
-                    "(self-modifying overlay code); interpreter takes "
-                    "over.\n",
-                    win_xlat, DSP56K_JIT_THROTTLE_WINDOW);
+                    "xemu: DSP JIT auto-throttled on %s core: %" PRIu64
+                    " retranslations in the last %u block executions; "
+                    "interpreter takes over.\n",
+                    jit_core_name(dsp), win_xlat,
+                    DSP56K_JIT_THROTTLE_WINDOW);
             return 0;
         }
     }
@@ -10790,9 +10846,8 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
          * program loop drowns the APU thread in snapshot memcpys
          * and stalls the emulator's main thread (blocked on
          * d->lock via MCPX MMIO). */
-        DspJitBlock *b_peek = s->pc_to_block[dsp->pc];
-        if (b_peek && b_peek->entry != NULL &&
-            b_peek->pc_start == dsp->pc &&
+        DspJitBlock *b_peek = &s->blocks[dsp->pc];
+        if (b_peek->entry != NULL &&
             qatomic_read(&b_peek->diff_checked)) {
             goto normal_path;
         }
@@ -10829,8 +10884,8 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp)
     }
 normal_path:;
 
-    DspJitBlock *b = s->pc_to_block[dsp->pc];
-    if (!b || b->entry == NULL || b->pc_start != dsp->pc) {
+    DspJitBlock *b = &s->blocks[dsp->pc];
+    if (b->entry == NULL) {
         /* Block miss: translate. On failure, caller falls back. */
         b = translate_block(dsp, s, dsp->pc);
         if (!b || !b->entry) {

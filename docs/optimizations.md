@@ -1463,17 +1463,16 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   **every** host, Apple included, and the fork JIT is opt-in via
   `[audio.dsp_jit] enabled = true`.
 - **Full inline DSP JIT (Apple Silicon).** ARM64
-  basic-block JIT for the GP DSP56300 core (the EP stays on the
-  interpreter since `d287c6cb23`). Enable via
+  basic-block JIT for both DSP56300 cores, GP and EP. Enable via
   `[audio.dsp_jit] enabled = true`, the only switch.
-- **Per-core retranslation auto-throttle.** The EP core overlays its
-  P-space every pass (~1 retranslation per 10 block executions), so
-  translating it costs more than interpreting it; a sustained-churn
-  window (>1/16) permanently hands that core back to the
-  interpreter. APU-thread utilization: JIT-both-cores 25%,
-  interpreter 22%, JIT with EP throttled **20%** (upstream dsp56300
-  engine 19%). GP never trips. Since `d287c6cb23` (2026-10-15) the EP
-  starts on the interpreter outright, and it gets no JIT state.
+- **Per-core retranslation auto-throttle.** A sustained-churn window
+  (>1/16 of block executions retranslating) permanently hands that
+  core back to the interpreter; a safety net, which neither core
+  trips. The EP's old churn (~1 retranslation per 10 block
+  executions, blamed on P-space overlays) was block bookkeeping: one
+  owner block per PC, so a mid-block entry evicted the covering block
+  and the two rebuilt each other. From `d287c6cb23` until blocks
+  could overlap (2026-10-15), the EP ran on the interpreter.
 - **JIT coverage + mechanics.** 100% ALU and 99.99% CF inlined
   (only `emu_undefined` and a few side-effect-register `bit_manip`
   variants stay on BLR); `pm_read_accu24` inlined for the scaling=0
