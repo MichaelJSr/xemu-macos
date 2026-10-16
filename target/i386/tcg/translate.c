@@ -230,6 +230,7 @@ typedef struct DisasContext {
     TCGv_i32 xemu_fdp_sel;
     target_ulong xemu_fip_pc;   /* pc of the insn whose FIP is deferred */
     int xemu_fds_seg;           /* segment env->fpds was last stored from */
+    int xemu_fds_pend;          /* deferred FDS: its segment, or -1 */
     bool xemu_strict_cpuid;     /* XEMU_STRICT_CPUID (xemu-strict-cpuid.c.inc) */
     uint8_t xemu_esc;           /* opcode map: 0, 0x0f, 0x38 or 0x3a */
 #endif
@@ -5869,8 +5870,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 xemu_gen_counter_inc(&xemu_x87_fdp_legacy);
             }
             if (xemu_x87_fdp_eager()) {
-                emit_fds = xemu_x87_fds_needed(s, last_seg);
                 emit_fdp = !xemu_x87_defer_fdp(s, last_addr);
+                emit_fds = emit_fdp ? xemu_x87_fds_needed(s, last_seg)
+                                    : xemu_x87_defer_fds(s, last_seg);
             } else {
                 xemu_x87_record_fdp(s, last_seg, last_addr);
                 emit_now = xemu_x87_refute_on();
@@ -7113,6 +7115,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->xemu_fip_pend = false;
     dc->xemu_fdp_pend = false;
     dc->xemu_fds_seg = -1;
+    dc->xemu_fds_pend = -1;
     dc->xemu_strict_cpuid = xemu_strict_cpuid_enabled();
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
@@ -7192,6 +7195,13 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 
         tcg_set_insn_start_param(op, 2, tcg_get_insn_start_param(op, 2) |
                                         XEMU_X87_W2_FDP);
+    }
+    if (dc->xemu_fds_pend >= 0) {
+        TCGOp *op = tcg_last_op();
+
+        tcg_set_insn_start_param(op, 2, tcg_get_insn_start_param(op, 2) |
+                                 (uint64_t)(dc->xemu_fds_pend + 1)
+                                 << XEMU_X87_W2_FDS_SHIFT);
     }
     dc->wt_insn_pend = dc->wt_pend;
     dc->wt_insn_delta = dc->fpstt_delta;

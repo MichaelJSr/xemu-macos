@@ -22,8 +22,10 @@
  *       so under icount, where a mid-block MMIO access is routine, a
  *       deferred FDP is stored by the slow path of every guest access
  *       while it is pending (write-through blocks, xemu_x87_defer_fdp;
- *       per-insn elsewhere), and FDS is stored only when its segment
- *       changes.
+ *       per-insn elsewhere). FDS is deferred with it there, landed by the
+ *       flush and at a mid-block exit from insn_start word 2's segment
+ *       (xemu_x87_defer_fds); elsewhere it is stored only when its
+ *       segment changes.
  *   (3) XEMU_X87_REFUTE=1 puts (2) in shadow mode: the legacy stores all
  *       still happen, the deferral is computed anyway, and every point where
  *       the deferred state could be observed is checked at runtime (every
@@ -53,7 +55,8 @@
  * (translate.c x87_wt_land): bits 23-25 how far fpstt moves, bits 26-33
  * which tag bytes land (by slot, from the same base as the shadows) and
  * bits 34-41 their values. Bit 42, XEMU_X87_REFUTE only: the insn started
- * with a deferred FDP, which the restore checks.
+ * with a deferred FDP, which the restore checks. Bits 43-45: one more
+ * than the segment whose selector a deferred FDS takes (0: none pending).
  */
 #ifndef TARGET_I386_XEMU_X87_H
 #define TARGET_I386_XEMU_X87_H
@@ -67,6 +70,7 @@
 #define XEMU_X87_W2_TAGM_SHIFT  26
 #define XEMU_X87_W2_TAGV_SHIFT  34
 #define XEMU_X87_W2_FDP         (1ull << 42)
+#define XEMU_X87_W2_FDS_SHIFT   43      /* 3 bits: deferred FDS segment + 1 */
 /* The stack fields, cleared when a flush in the insn lands them early. */
 #define XEMU_X87_W2_STACK_MASK  ((7ull << XEMU_X87_W2_MOVE_SHIFT) | \
                                  (0xffull << XEMU_X87_W2_TAGM_SHIFT) | \
@@ -441,6 +445,22 @@ static bool xemu_x87_defer_fdp(DisasContext *s, TCGv addr)
 }
 
 /*
+ * Under icount, with this insn's FDP deferred (xemu_x87_defer_fdp): defer
+ * its FDS too. The flush stores segs[seg].selector to fpds with the FDP,
+ * and a mid-block exit lands it from insn_start word 2's segment
+ * (XEMU_X87_W2_FDS_SHIFT): a selector changes only inside a helper, after
+ * its call-site flush, or in gen_op_movl_seg_real, which flushes first,
+ * so the selector at the exit is the insn's. True: store it now as well
+ * (the refuter keeps the per-insn stores and checks the deferred value).
+ */
+static bool xemu_x87_defer_fds(DisasContext *s, int seg)
+{
+    s->xemu_fds_pend = seg;
+    s->xemu_fds_seg = -1;
+    return xemu_x87_refute_on();
+}
+
+/*
  * Emit the deferred exception-pointer update. Called from gen_flush_fp(), so
  * it runs at every BB_END op and at the top of every tcg_gen_callN() -- which
  * covers the only TCG-visible reader (do_fstenv, reached through the FNSTENV
@@ -489,7 +509,29 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
 
     if (s->xemu_fdp_pend) {
         if (!s->xemu_fdp_sel) {
-            /* xemu_x87_defer_fdp: FDS is in env already. */
+            /* xemu_x87_defer_fdp, FDS with it (xemu_x87_defer_fds) */
+            if (s->xemu_fds_pend >= 0) {
+                TCGv_i32 sel = tcg_temp_ebb_new_i32();
+
+                tcg_gen_ld_i32(sel, tcg_env,
+                               offsetof(CPUX86State,
+                                        segs[s->xemu_fds_pend].selector));
+                if (refute) {
+                    TCGv_i32 was = tcg_temp_ebb_new_i32();
+
+                    tcg_gen_ld16u_i32(was, tcg_env,
+                                      offsetof(CPUX86State, fpds));
+                    tcg_gen_ext16u_i32(sel, sel);
+                    xemu_x87_gen_ne_count_i32(&xemu_x87_ptr_viol, sel, was);
+                    xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+                    tcg_temp_free_i32(was);
+                } else {
+                    tcg_gen_st16_i32(sel, tcg_env,
+                                     offsetof(CPUX86State, fpds));
+                }
+                tcg_temp_free_i32(sel);
+                s->xemu_fds_pend = -1;
+            }
             tcg_gen_st_tl(s->xemu_fdp_val, tcg_env,
                           offsetof(CPUX86State, fpdp));
         } else if (refute) {
@@ -723,11 +765,23 @@ void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
                       uint64_t word2)
 {
     unsigned top = (word2 >> XEMU_X87_W2_TOP_SHIFT) & 7;
+    unsigned fds = (word2 >> XEMU_X87_W2_FDS_SHIFT) & 7;
 
     if ((word2 & XEMU_X87_W2_FDP) && xemu_x87_refute_on()) {
         xemu_x87_fdp_rst_checks++;
         xemu_x87_fdp_rst_viol += (target_ulong)env->fpdp !=
                                  (target_ulong)env->xemu_x87_fdp_chk;
+    }
+    if (fds) {
+        /* The deferred FDS: the selector of the insn's segment. */
+        uint16_t sel = env->segs[fds - 1].selector;
+
+        if (xemu_x87_refute_on()) {
+            xemu_x87_fdp_rst_checks++;
+            xemu_x87_fdp_rst_viol += env->fpds != sel;
+        } else {
+            env->fpds = sel;
+        }
     }
     xemu_x87_restore_fip(env, tb, word2 & XEMU_X87_W2_FIP_MASK);
     xemu_x87_restore_pend(env, (word2 >> XEMU_X87_W2_PEND_SHIFT) & 0xff,

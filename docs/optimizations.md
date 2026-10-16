@@ -952,7 +952,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   pending value, so a mid-TB exit still finds it in env (2026-10-15, on
   the x87 lane det heavy-f1 −0.77% Minsns/frame, −1.2% Mcycles/frame
   paired median over 24 pairs; on top of the pinned registers and TLB
-  memo −0.96% Minsns/frame, cycles unresolved). Adversarial refuter
+  memo −0.96% Minsns/frame, cycles unresolved). FDS then rode with it
+  (2026-10-16): the flush stores the selector of the last x87 memory
+  insn's segment with the FDP, and a mid-TB exit lands it from insn_start
+  word 2 (bits 43-45: segment + 1), where until then every basic block's
+  first x87 memory insn per segment stored it (296K selector loads and
+  `strh` per heavy-f1 frame). A directed test (fld fs:[0], then an NV2A
+  MMIO read in the same block, which `cpu_io_recompile` re-runs, then
+  FNSTENV) stores FS's selector, and the refuter's restore check runs
+  on it. Det A/B against the movd commit: heavy-f1 6 pairs at load
+  20-25, Minsns/frame −0.69% (6/6), Mcycles/frame −2.0% (3/6);
+  stream-e2 4 pairs, −0.59% (4/4) and −1.9% (3/4). Adversarial refuter
   (`XEMU_X87_REFUTE`, legacy stores kept and the elision decision run
   as a shadow): **FT0 violations 0; 2.06e10 exception-pointer checks,
   violations 0.** Interleaved A/B on F8, each 3/3 pairs positive: FT0 **+1.56 fps**, FIP **+7.46 fps** (draws/s
