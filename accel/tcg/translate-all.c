@@ -703,35 +703,48 @@ static void xemu_io_pc_note(vaddr pc)
  *
  * A code address keeps its answer until tb_flush() reuses the buffer
  * (recycled TBs keep their code, and only never-run code is discarded),
- * so a small cache keyed by the flush count keeps the tcg_tb_lookup()
- * tree walk off the per-access path. icount runs a single vCPU thread,
- * the only caller.
+ * so a cache keyed by the flush count keeps the tcg_tb_lookup() tree walk
+ * and the unwind off the per-access path: 1024 sets of 4 ways, a set per
+ * cache line, newest first. A direct-mapped (ra >> 2) % 256 aliased
+ * every KiB of code, and a frame's ~200 access sites replaced 4-24
+ * entries per frame. icount runs a single vCPU thread, the only caller.
  */
+#define XEMU_IO_RA_SETS 1024
+#define XEMU_IO_RA_WAYS 4
+
+typedef struct XemuIoRa {
+    uintptr_t ra;
+    unsigned flush;
+    bool last;
+} XemuIoRa;
+
+uint64_t xemu_io_ra_misses;
+
 bool xemu_io_ra_in_last_insn(uintptr_t retaddr)
 {
-    static struct {
-        uintptr_t ra;
-        unsigned flush;
-        bool last;
-    } cache[256];
-    unsigned h = (retaddr >> 2) % ARRAY_SIZE(cache);
+    static XemuIoRa cache[XEMU_IO_RA_SETS][XEMU_IO_RA_WAYS] QEMU_ALIGNED(64);
+    XemuIoRa *set = cache[((retaddr >> 2) ^ (retaddr >> 14)) &
+                          (XEMU_IO_RA_SETS - 1)];
     unsigned flush = qatomic_read(&tb_ctx.tb_flush_count);
     uint64_t data[INSN_START_WORDS];
     TranslationBlock *tb;
     bool last;
 
+    QEMU_BUILD_BUG_ON(sizeof(cache[0]) != 64);
     if (!retaddr) {
         return true;
     }
-    if (cache[h].ra == retaddr && cache[h].flush == flush) {
-        return cache[h].last;
+    for (int i = 0; i < XEMU_IO_RA_WAYS; i++) {
+        if (set[i].ra == retaddr && set[i].flush == flush) {
+            return set[i].last;
+        }
     }
+    xemu_io_ra_misses++;
     tb = tcg_tb_lookup(retaddr);
     /* cpu_unwind_data_from_tb() counts the insns left, this one included. */
     last = !tb || cpu_unwind_data_from_tb(tb, retaddr, data) <= 1;
-    cache[h].ra = retaddr;
-    cache[h].flush = flush;
-    cache[h].last = last;
+    memmove(&set[1], &set[0], (XEMU_IO_RA_WAYS - 1) * sizeof(*set));
+    set[0] = (XemuIoRa){ .ra = retaddr, .flush = flush, .last = last };
     return last;
 }
 

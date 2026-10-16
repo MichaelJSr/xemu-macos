@@ -46,7 +46,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
-| `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
+| `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, the recompiles/s rate over the measured window, and the icount io-retaddr cache's misses — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low), the backstop's unlink walks (events, dests, cost), the jumps those walks reset split by `tb_add_jump`'s predicate (same-page, an emitter's jump onto its own page, cross-page), the link patches per second and the link flush queue (stale-slot exits and the patches drained there, at `cpu_exec` returns and in full queues); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
@@ -823,7 +823,18 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   median −2.7%; a load spike). A same-binary toggle gave −3.7% (5/6) on
   heavy-f1 and −0.4% (2/6) on stream-e2. Duplicating the stores instead
   cost +4.5% (0/6). With the flag left true, icount's "Bad icount read"
-  guard no longer fires.
+  guard no longer fires. **2026-10-16: the cache is 1024 sets of 4
+  ways** (a set per cache line, newest first, indexed by
+  `(ra >> 2) ^ (ra >> 14)`). The direct-mapped 256 entries aliased every
+  KiB of code: ~200 live access sites replaced 4-24 entries per frame,
+  and each miss (region lock, `g_tree_lookup`,
+  `cpu_unwind_data_from_tb`) was 0.27-0.34% of the det vCPU. Now
+  ~1,000 misses per 1200 heavy-f1 or stream-e2 frames, ~all
+  compulsory (`XEMU_INV_PROF`'s `(f)` line counts them); `io_prepare`
+  and recompile counts are unchanged. Cross-binary det, two or three
+  sessions pooled (load 9-45; negative is fewer): Mcycles/frame
+  stream-e2 −2.9% (15/21 pairs), heavy-f1 −0.9% (8/14), cold boot
+  +0.7% (6/14, noise); Minsns/frame −0.13% (14/21) and −0.16% (13/14).
 - **`notdirty_write` dirty-check fast path (default on, deliberately
   no fps claim, 2026-08-04).** The store slow path's tail re-read the
   dirty bitmap to decide whether to clear `TLB_NOTDIRTY` after the same
