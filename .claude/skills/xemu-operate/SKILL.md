@@ -257,7 +257,9 @@ Traps:
 - Fullscreen captures come out black.
 - DSP JIT: `[audio.dsp_jit] enabled = true` plus
   `XEMU_DSP_JIT_DIFF=1 XEMU_DSP_JIT_STATS=1` must report
-  `checked>0 failures=0`.
+  `checked>0 failures=0`, with `enqueued` near `blocks_translated`
+  (coverage). `XEMU_DSP_JIT_DIFF_SYNC=1` checks every translation inline
+  (fine under icount).
 
 **Anchors** (Azurik only; `../fixtures/README.md` is the source of truth):
 

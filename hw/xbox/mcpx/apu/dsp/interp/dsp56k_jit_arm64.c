@@ -11219,19 +11219,19 @@ static void diff_queue_finish_push(DiffQueue *q, DiffSlot *slot,
 
     /* Publish: release-store the new tail so the consumer sees the
      * filled slot. */
-    uint64_t tail = qatomic_read(&q->tail);
-    qatomic_store_release(&q->tail, tail + 1);
+    qatomic_store_release(&q->tail, qatomic_read(&q->tail) + 1);
 
-    /* Wake the worker. We use a signal under the mutex to avoid
-     * missed wakeups, but only when the ring was empty before this
-     * push — otherwise the worker is either running or about to
-     * re-check the tail, so no wake needed. This keeps the common-
-     * case producer path off the mutex entirely. */
-    if (tail == qatomic_read(&q->head)) {
-        qemu_mutex_lock(&q->mu);
-        qemu_cond_signal(&q->cond);
-        qemu_mutex_unlock(&q->mu);
-    }
+    /* Wake the worker on every push. Signalling only when this load of
+     * head saw an empty ring lost wakeups: the worker stores head, then
+     * re-reads tail, while this thread stores tail, then reads head, and
+     * neither order is a full barrier, so both could read the old value.
+     * The worker then slept on a non-empty ring, no later push found it
+     * empty, and the ring stayed full: every later block was dropped
+     * from validation for the rest of the run. Pushes happen once per
+     * translation, so the mutex costs nothing. */
+    qemu_mutex_lock(&q->mu);
+    qemu_cond_signal(&q->cond);
+    qemu_mutex_unlock(&q->mu);
 }
 
 static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
