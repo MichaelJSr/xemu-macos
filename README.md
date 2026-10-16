@@ -276,9 +276,13 @@ Other automation interfaces (windowed or headless):
   215-230 MB after a few thousand frames. A full checkpoint adds about
   75 MB, one saved against a base its own pages plus about 7 MB of
   device state; deleting it gives that back, as a finished `loadvm` or
-  `savevm` gives back its buffer. 16-frame candidate runs from one
-  checkpoint (incremental restore, then advance) reach about 140 frames
-  per CPU second on Azurik's heavy scene.
+  `savevm` gives back its buffer. Page copies a deleted checkpoint
+  shared with newer ones stay only while one uses them (a delete moves
+  them out of page blocks that are at least half unused, about 2 ms with
+  8 checkpoints): 8 kept from a chain of 10-frame saves, each against
+  the last, held about 200 MB from the 8th save to the 120th. 16-frame
+  candidate runs from one checkpoint (incremental restore, then advance)
+  reach about 140 frames per CPU second on Azurik's heavy scene.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

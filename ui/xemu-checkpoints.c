@@ -316,6 +316,7 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name,
     }
     if (old) {
         g_ptr_array_remove(checkpoints, old);
+        xemu_ram_images_compact();
     }
 
     Checkpoint *c = g_new0(Checkpoint, 1);
@@ -396,6 +397,7 @@ void qmp_xemu_checkpoint_delete(const char *name, Error **errp)
     if (!checkpoints->len) {
         xemu_ram_log_stop();
     }
+    xemu_ram_images_compact();
 }
 
 XemuCheckpointInfoList *qmp_query_xemu_checkpoints(Error **errp)

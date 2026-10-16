@@ -49,6 +49,11 @@ const uint8_t *const *xemu_ram_image_block(XemuRamImage *img, RAMBlock *rb,
                                            uint64_t *pages);
 
 /*
+ * After a checkpoint goes: move the page copies other images still use
+ * out of chunks that are at least half unused, and free those chunks.
+ */
+void xemu_ram_images_compact(void);
+/*
  * The dirty log for incremental restores and saves against a base; stop
  * it when the last checkpoint goes (which also drops RAM's image).
  */

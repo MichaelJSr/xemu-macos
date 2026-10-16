@@ -6,7 +6,10 @@
  * every migratable RAM block to a copy of the page, NULL for a zero page.
  * An image saved against a base starts from the base's pointers and
  * copies only the pages that differ, so it shares the rest of the base's
- * copies (refcounted chunks, which outlive a deleted base).
+ * copies (refcounted chunks, which outlive a deleted base; an image
+ * holds only the chunks it points into). Once a checkpoint goes,
+ * xemu_ram_images_compact moves the copies still in use out of chunks
+ * at least half unused, so a long chain doesn't pin a chunk a save.
  *
  * RAM equals one image right after a save or a restore (ram.synced).
  * From then on a page can differ from another image only if something
@@ -96,6 +99,10 @@ struct XemuRamImage {
     uint64_t own;           /* pages it copied itself */
 };
 
+/* Every image not yet freed, for xemu_ram_images_compact. */
+static GPtrArray *live_images;
+static bool image_freed;    /* since the last compaction */
+
 static struct {
     Block *blocks;
     unsigned nblocks;
@@ -157,7 +164,9 @@ XemuRamImage *xemu_ram_image_ref(XemuRamImage *img)
 void xemu_ram_image_unref(XemuRamImage *img)
 {
     if (img && !--img->refs) {
+        g_ptr_array_remove_fast(live_images, img);
         g_ptr_array_free(img->chunks, true);
+        image_freed = true;
         g_free(img->page);
         g_free(img);
     }
@@ -395,6 +404,53 @@ static bool capture_page(XemuRamImage *img, Block *b, uint64_t i,
     return true;
 }
 
+static int chunk_cmp(const void *a, const void *b)
+{
+    const Chunk *x = *(Chunk *const *)a, *y = *(Chunk *const *)b;
+
+    return x->data < y->data ? -1 : x->data > y->data;
+}
+
+/*
+ * Reference only those of @base's chunks that @img still points into, so
+ * a chunk goes once no image uses any of its copies. Taking them all kept
+ * every ancestor's chunks alive down a chain of saves against a base.
+ */
+static void ref_used_chunks(XemuRamImage *img, XemuRamImage *base)
+{
+    guint nc = base->chunks->len;
+    g_autofree Chunk **sorted = g_memdup2(base->chunks->pdata,
+                                          nc * sizeof(Chunk *));
+    g_autofree bool *used = g_new0(bool, nc);
+
+    qsort(sorted, nc, sizeof(*sorted), chunk_cmp);
+    for (uint64_t i = 0; i < ram.pages; i++) {
+        const uint8_t *p = img->page[i];
+        guint lo = 0, hi = nc;
+
+        if (!p) {
+            continue;
+        }
+        while (lo < hi) {           /* the first chunk past p */
+            guint mid = lo + (hi - lo) / 2;
+            if (sorted[mid]->data <= p) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo && p < sorted[lo - 1]->data + sorted[lo - 1]->size) {
+            used[lo - 1] = true;
+        }
+    }
+    for (guint k = 0; k < nc; k++) {
+        if (used[k]) {
+            sorted[k]->refs++;
+            g_ptr_array_add(img->chunks, sorted[k]);
+        }
+    }
+}
+
 XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
                                      XemuRamStats *st)
 {
@@ -412,13 +468,13 @@ XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
     }
     img->refs = 1;
     img->chunks = g_ptr_array_new_with_free_func(chunk_unref);
+    if (!live_images) {
+        live_images = g_ptr_array_new();
+    }
+    g_ptr_array_add(live_images, img);
     if (base) {
+        /* Its chunks stay alive meanwhile: the base's checkpoint holds it. */
         img->page = g_memdup2(base->page, ram.pages * sizeof(*img->page));
-        for (guint i = 0; i < base->chunks->len; i++) {
-            Chunk *c = g_ptr_array_index(base->chunks, i);
-            c->refs++;
-            g_ptr_array_add(img->chunks, c);
-        }
     } else {
         img->page = g_new0(const uint8_t *, ram.pages);
     }
@@ -476,6 +532,9 @@ XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
                 dst += ps;
             }
         }
+    }
+    if (base) {
+        ref_used_chunks(img, base);
     }
     img->own = n;
     synced_to(img);
@@ -539,6 +598,173 @@ void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
         st->logged |= partial;
     }
     synced_to(img);
+}
+
+/* A chunk during xemu_ram_images_compact. */
+typedef struct ChunkUse {
+    Chunk *c;
+    uint64_t pages;
+    uint64_t nlive;
+    unsigned long *live;    /* its pages some image points to */
+    uint64_t *to;           /* a victim's: its pages' indexes in the new one */
+} ChunkUse;
+
+static int use_cmp(const void *a, const void *b)
+{
+    const ChunkUse *x = a, *y = b;
+
+    return x->c->data < y->c->data ? -1 : x->c->data > y->c->data;
+}
+
+/* The chunk (in @u, sorted by address) that holds page copy @p. */
+static ChunkUse *use_find(ChunkUse *u, guint n, const uint8_t *p)
+{
+    guint lo = 0, hi = n;
+
+    while (lo < hi) {
+        guint mid = lo + (hi - lo) / 2;
+        if (u[mid].c->data <= p) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    assert(lo && p < u[lo - 1].c->data + u[lo - 1].c->size);
+    return &u[lo - 1];
+}
+
+void xemu_ram_images_compact(void)
+{
+    size_t ps = ram.page_size;
+    g_autoptr(GHashTable) seen = g_hash_table_new(NULL, NULL);
+    g_autoptr(GArray) arr = g_array_new(false, true, sizeof(ChunkUse));
+    g_autoptr(GHashTable) victims = g_hash_table_new(NULL, NULL);
+    ChunkUse *u;
+    guint n;
+    uint64_t total = 0;
+    Chunk *nc = NULL;
+
+    /* Only a freed image leaves copies nobody uses. */
+    if (!image_freed || !live_images || !live_images->len) {
+        return;
+    }
+    image_freed = false;
+    for (guint i = 0; i < live_images->len; i++) {
+        XemuRamImage *img = g_ptr_array_index(live_images, i);
+        for (guint j = 0; j < img->chunks->len; j++) {
+            Chunk *c = g_ptr_array_index(img->chunks, j);
+            if (g_hash_table_add(seen, c)) {
+                ChunkUse cu = { .c = c, .pages = c->size / ps };
+                cu.live = bitmap_new(cu.pages);
+                g_array_append_val(arr, cu);
+            }
+        }
+    }
+    u = (ChunkUse *)arr->data;
+    n = arr->len;
+    qsort(u, n, sizeof(*u), use_cmp);
+
+    /* Which copies some image still points to. */
+    for (guint i = 0; i < live_images->len; i++) {
+        XemuRamImage *img = g_ptr_array_index(live_images, i);
+        for (uint64_t k = 0; k < ram.pages; k++) {
+            const uint8_t *p = img->page[k];
+            if (p) {
+                ChunkUse *cu = use_find(u, n, p);
+                set_bit((p - cu->c->data) / ps, cu->live);
+            }
+        }
+    }
+
+    /* Victims: chunks at least half dead, by 64 pages or more. */
+    for (guint i = 0; i < n; i++) {
+        u[i].nlive = bitmap_count_one(u[i].live, u[i].pages);
+        if (u[i].nlive * 2 <= u[i].pages && u[i].pages - u[i].nlive >= 64) {
+            g_hash_table_add(victims, u[i].c);
+            total += u[i].nlive;
+        }
+    }
+    if (!g_hash_table_size(victims)) {
+        goto out;
+    }
+
+    /* Their live copies move, in order, into one new chunk. */
+    if (total) {
+        uint64_t k = 0;
+
+        nc = g_new0(Chunk, 1);
+        nc->size = total * ps;
+        nc->data = qemu_anon_ram_alloc(chunk_map_size(nc->size), NULL, false,
+                                       false);
+        if (!nc->data) {
+            /* No room to move them: keep them where they are. */
+            g_free(nc);
+            goto out;
+        }
+        for (guint i = 0; i < n; i++) {
+            if (!g_hash_table_contains(victims, u[i].c)) {
+                continue;
+            }
+            u[i].to = g_new(uint64_t, u[i].pages);
+            for (uint64_t j = find_first_bit(u[i].live, u[i].pages);
+                 j < u[i].pages;
+                 j = find_next_bit(u[i].live, u[i].pages, j + 1)) {
+                memcpy(nc->data + k * ps, u[i].c->data + j * ps, ps);
+                u[i].to[j] = k++;
+            }
+        }
+    }
+
+    /*
+     * Point every image at the new copies (one per old copy, so equal
+     * pointers still mean equal pages) and swap its references. The hold
+     * keeps each victim until no image is left to look it up; it goes
+     * with its last reference.
+     */
+    for (guint i = 0; i < n; i++) {
+        if (g_hash_table_contains(victims, u[i].c)) {
+            u[i].c->refs++;
+        }
+    }
+    for (guint i = 0; i < live_images->len; i++) {
+        XemuRamImage *img = g_ptr_array_index(live_images, i);
+        bool moved = false;
+
+        for (uint64_t k = 0; nc && k < ram.pages; k++) {
+            const uint8_t *p = img->page[k];
+            if (p) {
+                ChunkUse *cu = use_find(u, n, p);
+                if (cu->to) {
+                    img->page[k] = nc->data +
+                                   cu->to[(p - cu->c->data) / ps] * ps;
+                    moved = true;
+                }
+            }
+        }
+        for (guint j = 0; j < img->chunks->len;) {
+            if (g_hash_table_contains(victims,
+                                      g_ptr_array_index(img->chunks, j))) {
+                g_ptr_array_remove_index_fast(img->chunks, j);
+            } else {
+                j++;
+            }
+        }
+        if (moved) {
+            nc->refs++;
+            g_ptr_array_add(img->chunks, nc);
+        }
+    }
+    for (guint i = 0; i < n; i++) {
+        if (g_hash_table_contains(victims, u[i].c)) {
+            chunk_unref(u[i].c);
+        }
+    }
+
+out:
+    for (guint i = 0; i < n; i++) {
+        g_free(u[i].live);
+        g_free(u[i].to);
+    }
 }
 
 void xemu_ram_restore_begin(void)
