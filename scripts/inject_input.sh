@@ -29,7 +29,7 @@
 #
 # Example — start xemu with the pipe, then drive it from another shell:
 #   mkfifo /tmp/xemu.fifo
-#   XEMU_INPUT_PIPE=/tmp/xemu.fifo dist/xemu.app/Contents/MacOS/xemu &
+#   XEMU_INPUT_PIPE=/tmp/xemu.fifo <muted bundle clone: xemu-operate Run> &
 #   inject_input.sh tap /tmp/xemu.fifo W 200      # walk forward 200ms
 #   inject_input.sh down /tmp/xemu.fifo DOWN      # hold the A button
 #   sleep 1
