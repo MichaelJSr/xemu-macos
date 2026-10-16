@@ -27,6 +27,9 @@
 #include "block/aio-wait.h"
 
 AioWait global_aio_wait;
+#ifdef XBOX
+__thread unsigned aio_wait_self_waiters;
+#endif
 
 static void dummy_bh_cb(void *opaque)
 {
@@ -50,9 +53,16 @@ void aio_wait_kick(void)
      */
     smp_mb();
 
+#ifdef XBOX
+    /* Waiters in this thread's aio_poll() recheck (aio_wait_self_waiters). */
+    if (qatomic_read(&global_aio_wait.num_waiters) > aio_wait_self_waiters) {
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), dummy_bh_cb, NULL);
+    }
+#else
     if (qatomic_read(&global_aio_wait.num_waiters)) {
         aio_bh_schedule_oneshot(qemu_get_aio_context(), dummy_bh_cb, NULL);
     }
+#endif
 }
 
 typedef struct {

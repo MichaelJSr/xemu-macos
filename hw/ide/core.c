@@ -2599,42 +2599,68 @@ void ide_bus_icount_settle(IDEBus *bus)
             blk_wait_in_flight(bus->ifs[i].blk);
         }
     }
+#ifdef XBOX
+    aio_bh_notify_defer_end();
+#endif
+}
+
+/*
+ * The settle runs the access's completions on this thread, so their bottom
+ * halves needn't wake the main loop (aio_bh_notify_defer_begin).
+ */
+void ide_bus_icount_begin(void)
+{
+#ifdef XBOX
+    if (icount_enabled()) {
+        aio_bh_notify_defer_begin(qemu_get_aio_context());
+    }
+#endif
 }
 
 void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
+    ide_bus_icount_begin();
     ide_ioport_write_impl(opaque, addr, val);
     ide_bus_icount_settle(opaque);
 }
 
 void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
 {
+    ide_bus_icount_begin();
     ide_ctrl_write_impl(opaque, addr, val);
     ide_bus_icount_settle(opaque);
 }
 
 void ide_data_writew(void *opaque, uint32_t addr, uint32_t val)
 {
+    ide_bus_icount_begin();
     ide_data_writew_impl(opaque, addr, val);
     ide_bus_icount_settle(opaque);
 }
 
 void ide_data_writel(void *opaque, uint32_t addr, uint32_t val)
 {
+    ide_bus_icount_begin();
     ide_data_writel_impl(opaque, addr, val);
     ide_bus_icount_settle(opaque);
 }
 
 uint32_t ide_data_readw(void *opaque, uint32_t addr)
 {
-    uint32_t ret = ide_data_readw_impl(opaque, addr);
+    uint32_t ret;
+
+    ide_bus_icount_begin();
+    ret = ide_data_readw_impl(opaque, addr);
     ide_bus_icount_settle(opaque);
     return ret;
 }
 
 uint32_t ide_data_readl(void *opaque, uint32_t addr)
 {
-    uint32_t ret = ide_data_readl_impl(opaque, addr);
+    uint32_t ret;
+
+    ide_bus_icount_begin();
+    ret = ide_data_readl_impl(opaque, addr);
     ide_bus_icount_settle(opaque);
     return ret;
 }

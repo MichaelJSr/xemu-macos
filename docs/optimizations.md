@@ -2461,6 +2461,25 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   would burn the kick-to-unlock time as well (3-18 µs). Goldens
   unchanged (the RR thread never spins). `XEMU_BQL_SPIN=0` keeps the
   plain lock (normal-mode switch).
+- **Deterministic IDE requests settle without waking the main loop
+  (2026-10-16).** Under icount the vCPU finishes every IDE request
+  inside the access that issued it, but each request still scheduled
+  two bottom halves on the main context (the completion and
+  `AIO_WAIT_WHILE`'s kick), and each wrote the main loop's notifier:
+  ~51,000 wakeups per fixture cold boot, each taking the BQL between the
+  vCPU's port accesses to find nothing to do (12,400 contended vCPU
+  acquisitions, 575 ms of waiting). `aio_wait_kick` now skips its
+  bottom half when every waiter is inside one of the calling thread's
+  own `aio_poll`s (`aio_wait_self_waiters`; a kick raised while a
+  condition is evaluated still wakes), and the IDE accessors open a
+  window (`ide_bus_icount_begin`) in which the thread's main-context
+  bottom halves don't notify; the settle notifies once if one is left
+  queued or `qemu_notify_event` ran. `bench-det --timeline` null cold
+  boot, 3 pairs: 14.15 → 9.47 s (−33%), Mcycles −26%, other threads'
+  CPU 624 → 44 ms; on master with round 5, 8.10 → 6.10 s (−25%),
+  Mcycles −24% (3/3). Offscreen cold boot Mcycles −9.2% (−16 to −18%
+  before steady play), a cache rebuild −12% wall (4/6), det stream-e2
+  −8% Mcycles/frame (6/7), heavy-f1 neutral. Goldens unchanged.
 - **Deterministic mode's FP brackets write FPCR only when it differs.**
   Device work on the vCPU thread (the inline PFIFO pusher, ~360 runs
   per frame on heavy-f1, and the APU tick) ran between `fegetenv`,
@@ -3452,6 +3471,7 @@ counter).
 
 | Vector | Measured reality / why closed |
 |---|---|
+| Synchronous qcow2 reads for the icount vCPU (2026-10-16) | After the IDE settle fix a cold boot still spends ~4.6% of the vCPU in the block layer, 2.9 points of it the `pread` itself. The trial read cached-L2 plain, zero and unallocated qcow2 clusters and file-posix data without a coroutine (`xemu_sync_preadv`, anything else on the coroutine path), let the settle run the main context's bottom halves directly, and didn't kick the vCPU for bottom halves scheduled in the IDE window. Host instructions per cold boot −0.7..−1.0% (9/9 pairs, ~5,000 per HDD read), but no 3-pair session had wall and Mcycles both 3/3; over 6 pairs Mcycles 4/6 (median −2.8%) and wall 3/6 (load 54-72), against ±15% run-to-run swings in the phases with no disk I/O. Goldens exact. Not committed; the no-kick part alone is untested |
 | x87 residue after the FP-register accesses (2026-10-16) | Helper census, det heavy-f1 per frame: ~6.3K x87 helper calls, 1.0-1.7% of vCPU samples (fwait 3.2K, fxam 760, fsin/fcos ~500 each, fpatan 413, fild m64 400, fprem 381); no PC=single blocks; 15 fucom* fallbacks. fwait as a no-op, measured by deleting it: heavy-f1 Minsns/frame −0.13% (8/8), Mcycles −0.50% (5/8); stream-e2 nothing. Pinning the doubles in d8-d15 across TBs, bounded by duplicating the work it removes (192K flush stores, 40K ld80d reloads per frame) and adding the spills it needs, within one process on P-core cycles: net +1.15% [0.24, 1.94], P(≥1%) 0.60, realistic 0.2-0.8%, under the 1% bar for weeks of backend work. Not committed; reopen with a removal-direction prototype measuring ≥1% |
 | `preserve_most` for the flag helpers (2026-10-16) | `cc_compute_all` and `cc_compute_c` (~30K calls per heavy-f1 frame, all from TB code) were built with clang's `preserve_most` on aarch64 hosts, which also saves x9-x15, and their calls flagged so TCG stored and reloaded only EAX's x8 around them (STR + LDR where four STP and four LDP were); the attribute and the flag came from one test in `exec/helper-head.h.inc` (aarch64, clang, not Windows), and a `--debug` build checked that x9-x15 survived each call. On top of the m32fp/m64fp FP-register accesses: Minsns/frame −0.26% heavy-f1 1200 f, −0.27..−0.37% stream-e2 600 f (16/16 pairs), but Mcycles/frame better in only 4/8 heavy-f1 and 5/8 stream-e2 pairs (load 41-53), short of the 3/4 gate. Only leaf helpers qualify: `cc_compute_nz` asserts, so its `preserve_most` prologue saved all seven registers on every entry. Not committed; reopen if more guest state moves into caller-saved registers |
 | xpage backstop severing only the cross-page jumps (2026-10-16) | The walk resets every jump into a registered dest; same-page jumps (source not an emitter, its first physical page the dest's) need no sever, as the same jumps into unregistered dests show. `XEMU_XPAGE_PROF`'s census on a normal-mode stream-e2 walk (stream-e2, 32 s window, load 40-60): 894-916 walks reset 726-749k jumps, 5.9% same-page, 5.2% from an emitter onto its own page (the emitter flag is per TB, so per-slot bits could keep at most these), 89% onto another physical page. Every registration came from an emitter (`reg-phys-only=0`). The cut keeps at most ~11% of the ~790k link patches a walk run pays, below the 50% bar. Reopen only with a backstop that keeps the cross-page chains whose target page still maps where it did |

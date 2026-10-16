@@ -450,6 +450,26 @@ QEMUBH *aio_bh_new_full(AioContext *ctx, QEMUBHFunc *cb, void *opaque,
  */
 void aio_notify(AioContext *ctx);
 
+#ifdef XBOX
+/**
+ * aio_bh_notify_defer_begin, aio_bh_notify_defer_end: bottom halves this
+ * thread schedules on @ctx until the matching end don't wake @ctx's event
+ * loop, for a caller that runs them itself before it lets go (deterministic
+ * mode's IDE accesses: ide_bus_icount_settle). The end wakes the loop once
+ * if any bottom half is still queued there, or if aio_bh_notify_defer_wake()
+ * asked for it. Not nestable.
+ */
+void aio_bh_notify_defer_begin(AioContext *ctx);
+void aio_bh_notify_defer_end(void);
+/**
+ * aio_bh_notify_defer_wake: the deferring thread's end must wake @ctx's loop
+ * even if the thread runs the bottom halves itself: qemu_notify_event()'s
+ * bottom half exists to make the main loop iterate (requests, timers), which
+ * the settle running it doesn't do.
+ */
+void aio_bh_notify_defer_wake(AioContext *ctx);
+#endif
+
 /**
  * aio_notify_accept: Acknowledge receiving an aio_notify.
  *

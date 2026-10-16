@@ -175,6 +175,9 @@ void qemu_notify_event(void)
         return;
     }
     qemu_bh_schedule(qemu_notify_bh);
+#ifdef XBOX
+    aio_bh_notify_defer_wake(qemu_aio_context);
+#endif
 }
 
 static GArray *gpollfds;

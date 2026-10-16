@@ -409,6 +409,7 @@ void ide_atapi_io_error(IDEState *s, int ret);
 
 void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val);
 void ide_bus_icount_settle(IDEBus *bus);
+void ide_bus_icount_begin(void);
 uint32_t ide_ioport_read(void *opaque, uint32_t addr1);
 uint32_t ide_status_read(void *opaque, uint32_t addr);
 void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val);

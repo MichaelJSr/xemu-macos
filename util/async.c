@@ -69,6 +69,46 @@ struct QEMUBH {
     MemReentrancyGuard *reentrancy_guard;
 };
 
+#ifdef XBOX
+/*
+ * xemu: under icount every IDE request completes inside the guest access
+ * that issued it: ide_bus_icount_settle runs the request's completion
+ * bottom half on the vCPU, polling the main context itself. Waking the
+ * main loop for it only cost a pipe write, and a main loop that took the
+ * BQL between the vCPU's port accesses; on a loaded host each such handoff
+ * parked the vCPU until the scheduler ran it again.
+ */
+static __thread AioContext *bh_notify_defer_ctx;
+static __thread bool bh_notify_deferred, bh_notify_wake;
+
+void aio_bh_notify_defer_begin(AioContext *ctx)
+{
+    bh_notify_defer_ctx = ctx;
+}
+
+void aio_bh_notify_defer_wake(AioContext *ctx)
+{
+    if (bh_notify_defer_ctx == ctx) {
+        bh_notify_wake = true;
+    }
+}
+
+void aio_bh_notify_defer_end(void)
+{
+    AioContext *ctx = bh_notify_defer_ctx;
+    bool wake = bh_notify_wake;
+
+    bh_notify_defer_ctx = NULL;
+    bh_notify_wake = false;
+    if (bh_notify_deferred) {
+        bh_notify_deferred = false;
+        if (wake || !QSLIST_EMPTY_RCU(&ctx->bh_list)) {
+            aio_notify(ctx);
+        }
+    }
+}
+#endif
+
 /* Called concurrently from any thread */
 static void aio_bh_enqueue(QEMUBH *bh, unsigned new_flags)
 {
@@ -94,6 +134,11 @@ static void aio_bh_enqueue(QEMUBH *bh, unsigned new_flags)
         QSLIST_INSERT_HEAD_ATOMIC(&ctx->bh_list, bh, next);
     }
 
+#ifdef XBOX
+    if (unlikely(bh_notify_defer_ctx == ctx)) {
+        bh_notify_deferred = true;
+    } else
+#endif
     aio_notify(ctx);
     if (unlikely(icount_enabled())) {
         /*

@@ -58,6 +58,24 @@ typedef struct {
 
 extern AioWait global_aio_wait;
 
+#ifdef XBOX
+/*
+ * xemu: AIO_WAIT_WHILE() aio_poll()s this thread is inside. aio_wait_kick()
+ * skips its wakeup when every waiter is one of them: the kick comes from a
+ * callback that aio_poll() dispatched, and aio_poll() returns to the
+ * waiter's condition check once its callbacks have run. A kick raised
+ * while a condition is evaluated (job_finish_sync's job_enter()) still
+ * wakes. Under icount every IDE request completes inside the vCPU's own
+ * wait, and each kick's bottom half woke the main loop for nothing.
+ */
+extern __thread unsigned aio_wait_self_waiters;
+#define AIO_WAIT_SELF_INC() (aio_wait_self_waiters++)
+#define AIO_WAIT_SELF_DEC() (aio_wait_self_waiters--)
+#else
+#define AIO_WAIT_SELF_INC() ((void)0)
+#define AIO_WAIT_SELF_DEC() ((void)0)
+#endif
+
 /**
  * AIO_WAIT_WHILE_INTERNAL:
  * @ctx: the aio context, or NULL if multiple aio contexts (for which the
@@ -85,14 +103,18 @@ extern AioWait global_aio_wait;
     smp_mb__after_rmw();                                           \
     if (ctx_ && in_aio_context_home_thread(ctx_)) {                \
         while ((cond)) {                                           \
+            AIO_WAIT_SELF_INC();                                   \
             aio_poll(ctx_, true);                                  \
+            AIO_WAIT_SELF_DEC();                                   \
             waited_ = true;                                        \
         }                                                          \
     } else {                                                       \
         assert(qemu_get_current_aio_context() ==                   \
                qemu_get_aio_context());                            \
         while ((cond)) {                                           \
+            AIO_WAIT_SELF_INC();                                   \
             aio_poll(qemu_get_aio_context(), true);                \
+            AIO_WAIT_SELF_DEC();                                   \
             waited_ = true;                                        \
         }                                                          \
     }                                                              \

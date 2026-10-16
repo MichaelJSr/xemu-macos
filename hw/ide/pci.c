@@ -380,6 +380,7 @@ static void bmdma_irq(void *opaque, int n, int level)
 void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
 {
     trace_bmdma_cmd_writeb(val);
+    ide_bus_icount_begin();
 
     /* Ignore writes to SSBM if it keeps the old value */
     if ((val & BM_CMD_START) != (bm->cmd & BM_CMD_START)) {
