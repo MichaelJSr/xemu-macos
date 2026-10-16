@@ -17,18 +17,27 @@
  * would answer: the bytes in hex, the readable prefix when the region runs
  * into an unmapped page, or E14 when none of it is readable.
  *
+ * Memory packets (m, M, x, qxemu.read, and Qqemu.PhyMemMode:1) reach RAM
+ * and ROM only: device MMIO, or an address nothing backs, fails as an
+ * unmapped page does, without touching the device. Always on.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "qemu/ctype.h"
 #include "qemu/cutils.h"
+#include "exec/cpu-common.h"
 #include "exec/gdbstub.h"
 #include "exec/replay-core.h"
 #include "exec/target_page.h"
 #include "gdbstub/commands.h"
 #include "gdbstub/xemu.h"
 #include "hw/core/cpu.h"
+#include "qemu/rcu.h"
+#include "system/address-spaces.h"
+#include "system/hw_accel.h"
+#include "system/memory.h"
 #include "system/runstate.h"
 #include "system/tcg.h"
 #include "internals.h"
@@ -202,6 +211,93 @@ static const GdbCmdParseEntry xemu_query_read = {
     .cmd_startswith = true,
     .schema = "s0",
 };
+
+/*
+ * True when RAM or a ROM fully backs [addr, addr + len) of @as, so a
+ * debugger access is a plain copy. Device MMIO has side effects (reads that
+ * clear status, FIFO doorbells) and many of xemu's device models assert on
+ * accesses a guest never makes; an address nothing backs counts as MMIO.
+ */
+static bool phys_range_is_memory(AddressSpace *as, hwaddr addr, hwaddr len,
+                                 MemTxAttrs attrs, bool is_write)
+{
+    RCU_READ_LOCK_GUARD();
+    while (len) {
+        hwaddr xlat, l = len;
+        MemoryRegion *mr = address_space_translate(as, addr, &xlat, &l,
+                                                   is_write, attrs);
+
+        if (!l || !memory_region_supports_direct_access(mr)) {
+            return false;
+        }
+        addr += l;
+        len -= l;
+    }
+    return true;
+}
+
+/*
+ * As cpu_memory_rw_debug(), page by page through @cpu's page tables, but
+ * only RAM or ROM may back each page's range. That check and the copy
+ * share one walk of the page tables. With no @buf, only checks.
+ */
+static int virt_rw(CPUState *cpu, vaddr addr, uint8_t *buf, size_t len,
+                   bool is_write)
+{
+    size_t page = qemu_target_page_size();
+
+    cpu_synchronize_state(cpu);
+    while (len) {
+        vaddr base = addr & ~(vaddr)(page - 1);
+        size_t l = MIN(len, base + page - addr);
+        MemTxAttrs attrs;
+        hwaddr pa = cpu_get_phys_page_attrs_debug(cpu, base, &attrs);
+        AddressSpace *as;
+
+        if (pa == -1) {
+            return -1;
+        }
+        as = cpu_get_address_space(cpu, cpu_asidx_from_attrs(cpu, attrs));
+        pa += addr - base;
+        if (!phys_range_is_memory(as, pa, l, attrs, is_write) ||
+            (buf && address_space_rw(as, pa, attrs, buf, l, is_write) !=
+                    MEMTX_OK)) {
+            return -1;
+        }
+        if (buf) {
+            buf += l;
+        }
+        addr += l;
+        len -= l;
+    }
+    return 0;
+}
+
+int xemu_gdb_memory_rw_debug(CPUState *cpu, vaddr addr, uint8_t *buf,
+                             size_t len, bool phys, bool is_write)
+{
+    if (phys) {
+        if (!phys_range_is_memory(&address_space_memory, addr, len,
+                                  MEMTXATTRS_UNSPECIFIED, is_write)) {
+            return -1;
+        }
+        if (is_write) {
+            cpu_physical_memory_write(addr, buf, len);
+        } else {
+            cpu_physical_memory_read(addr, buf, len);
+        }
+        return 0;
+    }
+    if (cpu->cc->memory_rw_debug) {
+        /* The target's own debug access decides. */
+        return cpu->cc->memory_rw_debug(cpu, addr, buf, len, is_write);
+    }
+    /* A write is checked whole first, so none of it lands unless all can. */
+    if (is_write && virt_rw(cpu, addr, NULL, len, true)) {
+        return -1;
+    }
+    return virt_rw(cpu, addr, buf, len, is_write);
+}
 
 void xemu_gdb_init(void)
 {

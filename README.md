@@ -439,6 +439,13 @@ Other automation interfaces (windowed or headless):
   binary `x addr,len` read (GDB 16, advertised as `binary-upload+`)
   halves the bytes on the wire. In `Qqemu.PhyMemMode:1` a 150 MB sweep
   takes under a second.
+- **gdbstub memory packets reach RAM and ROM only**: `m`, `M`, `x` and
+  `qxemu.read`, virtual or in `Qqemu.PhyMemMode:1`, return `E14` (or
+  stop at the readable prefix) on device MMIO, such as the NV2A at
+  `0xFD000000`-`0xFDFFFFFF`, the APU, USB and the NIC, without touching
+  the device, so a stray read or write can't abort xemu or change guest
+  state. A physical address nothing backs is `E14` too (it read as
+  zeros). HMP `x`/`xp` and QMP `pmemsave`/`memsave` still reach devices.
 - **gdbstub step-over**: `Qxemu.stepover:1` (or `xemu.stepover+` in the
   client's `qSupported`; the stub advertises `Qxemu.stepover+`) makes a
   resume from a halt on an armed `Z0` breakpoint (`c`, `vCont;c`, or

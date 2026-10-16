@@ -458,20 +458,9 @@ static int phy_memory_mode;
 int gdb_target_memory_rw_debug(CPUState *cpu, hwaddr addr,
                                uint8_t *buf, int len, bool is_write)
 {
-    if (phy_memory_mode) {
-        if (is_write) {
-            cpu_physical_memory_write(addr, buf, len);
-        } else {
-            cpu_physical_memory_read(addr, buf, len);
-        }
-        return 0;
-    }
-
-    if (cpu->cc->memory_rw_debug) {
-        return cpu->cc->memory_rw_debug(cpu, addr, buf, len, is_write);
-    }
-
-    return cpu_memory_rw_debug(cpu, addr, buf, len, is_write);
+    /* xemu: RAM and ROM only, never device MMIO (gdbstub/xemu-gdb.c). */
+    return xemu_gdb_memory_rw_debug(cpu, addr, buf, len, phy_memory_mode,
+                                    is_write);
 }
 
 /*
