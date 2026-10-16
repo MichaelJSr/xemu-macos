@@ -18,9 +18,12 @@
  *       operand width.
  *   (2) Exception-pointer deferral: FIP/FCS/FDP/FDS get one update per
  *       contiguous x87 run. A mid-block exit lands a pending FIP/FCS from
- *       insn_start word 2 (xemu_x87_restore_fip). FDP has no such record,
- *       so under icount, where a mid-block MMIO access is routine, FDP
- *       stays per-insn and FDS is stored only when its segment changes.
+ *       insn_start word 2 (xemu_x87_restore_fip). FDP is a runtime value,
+ *       so under icount, where a mid-block MMIO access is routine, a
+ *       deferred FDP is stored by the slow path of every guest access
+ *       while it is pending (write-through blocks, xemu_x87_defer_fdp;
+ *       per-insn elsewhere), and FDS is stored only when its segment
+ *       changes.
  *   (3) XEMU_X87_REFUTE=1 puts (2) in shadow mode: the legacy stores all
  *       still happen, the deferral is computed anyway, and every point where
  *       the deferred state could be observed is checked at runtime (every
@@ -40,7 +43,8 @@
  * shadow slot 0 sits from fpstt, and the deferred stack bookkeeping
  * (translate.c x87_wt_land): bits 23-25 how far fpstt moves, bits 26-33
  * which tag bytes land (by slot, from the same base as the shadows) and
- * bits 34-41 their values.
+ * bits 34-41 their values. Bit 42, XEMU_X87_REFUTE only: the insn started
+ * with a deferred FDP, which the restore checks.
  */
 #ifndef TARGET_I386_XEMU_X87_H
 #define TARGET_I386_XEMU_X87_H
@@ -53,6 +57,7 @@
 #define XEMU_X87_W2_MOVE_SHIFT  23
 #define XEMU_X87_W2_TAGM_SHIFT  26
 #define XEMU_X87_W2_TAGV_SHIFT  34
+#define XEMU_X87_W2_FDP         (1ull << 42)
 /* The stack fields, cleared when a flush in the insn lands them early. */
 #define XEMU_X87_W2_STACK_MASK  ((7ull << XEMU_X87_W2_MOVE_SHIFT) | \
                                  (0xffull << XEMU_X87_W2_TAGM_SHIFT) | \
@@ -86,6 +91,8 @@ static uint64_t xemu_x87_rst_pend;       /* ... of which with word 2 non-zero */
 static uint64_t xemu_x87_bnd_checks;     /* insn boundaries checked */
 static uint64_t xemu_x87_bnd_pend;       /* ... with a deferred FIP pending */
 static uint64_t xemu_x87_rst_viol;       /* restorable FIP/FCS != legacy */
+static uint64_t xemu_x87_fdp_rst_checks; /* restores with an FDP deferred */
+static uint64_t xemu_x87_fdp_rst_viol;   /* ... where env's FDP != per-insn */
 static uint64_t xemu_x87_wt_bnd_checks;  /* insn boundaries checked (stores) */
 static uint64_t xemu_x87_wt_bnd_viol;    /* poison where none is pending,
                                           * or none where one is */
@@ -133,14 +140,17 @@ static void xemu_x87_dump(void)
     fprintf(stderr, "xemu: x87 refuter: "
             "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
             "restore-pending=%llu boundaries=%llu boundary-pending=%llu "
-            "boundary-violations=%llu\n",
+            "boundary-violations=%llu fdp-restores=%llu "
+            "fdp-restore-violations=%llu\n",
             (unsigned long long)xemu_x87_ptr_checks,
             (unsigned long long)xemu_x87_ptr_viol,
             (unsigned long long)xemu_x87_rst_checks,
             (unsigned long long)xemu_x87_rst_pend,
             (unsigned long long)xemu_x87_bnd_checks,
             (unsigned long long)xemu_x87_bnd_pend,
-            (unsigned long long)xemu_x87_rst_viol);
+            (unsigned long long)xemu_x87_rst_viol,
+            (unsigned long long)xemu_x87_fdp_rst_checks,
+            (unsigned long long)xemu_x87_fdp_rst_viol);
     fprintf(stderr, "xemu: x87 refuter: wt-boundaries=%llu "
             "wt-boundary-violations=%llu wt-flush-violations=%llu "
             "wt-exits=%llu wt-exit-violations=%llu "
@@ -198,7 +208,7 @@ static bool xemu_x87_refute_on(void)
     return on;
 }
 
-/* FDP per insn, FDS on segment change: see (2) above. */
+/* Under icount: FDS on segment change, FDP exact at every exit (see (2)). */
 static bool xemu_x87_fdp_eager(void)
 {
     return icount_enabled();
@@ -322,6 +332,30 @@ static void xemu_x87_record_fdp(DisasContext *s, int seg, TCGv addr)
 }
 
 /*
+ * Under icount, on the write-through path: defer an insn's FDP like FIP (FDS
+ * stays eager, on segment change, so a pending FDP and env's FDS always
+ * come from the same insn). Its value is a runtime one, so every guest
+ * access while it is pending stores it on its slow path
+ * (gen_ldst_prologue), the one way that access leaves the TB, and the
+ * flush stores it in line. XEMU_X87_REFUTE also stores the per-insn value
+ * to xemu_x87_fdp_chk, which restores at an insn that started with an
+ * FDP pending compare (XEMU_X87_W2_FDP). False: store it now.
+ */
+static bool xemu_x87_defer_fdp(DisasContext *s, TCGv addr)
+{
+    if (!x87_wt(s)) {
+        return false;
+    }
+    s->xemu_fdp_sel = NULL;
+    s->xemu_fdp_val = addr;
+    s->xemu_fdp_pend = true;
+    if (xemu_x87_refute_on()) {
+        tcg_gen_st_tl(addr, tcg_env, offsetof(CPUX86State, xemu_x87_fdp_chk));
+    }
+    return true;
+}
+
+/*
  * Emit the deferred exception-pointer update. Called from gen_flush_fp(), so
  * it runs at every BB_END op and at the top of every tcg_gen_callN() -- which
  * covers the only TCG-visible reader (do_fstenv, reached through the FNSTENV
@@ -367,7 +401,11 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
     }
 
     if (s->xemu_fdp_pend) {
-        if (refute) {
+        if (!s->xemu_fdp_sel) {
+            /* xemu_x87_defer_fdp: FDS is in env already. */
+            tcg_gen_st_tl(s->xemu_fdp_val, tcg_env,
+                          offsetof(CPUX86State, fpdp));
+        } else if (refute) {
             TCGv_i32 was = tcg_temp_new_i32();
             TCGv was_dp = tcg_temp_new();
             tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpds));
@@ -581,6 +619,11 @@ void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
 {
     unsigned top = (word2 >> XEMU_X87_W2_TOP_SHIFT) & 7;
 
+    if ((word2 & XEMU_X87_W2_FDP) && xemu_x87_refute_on()) {
+        xemu_x87_fdp_rst_checks++;
+        xemu_x87_fdp_rst_viol += (target_ulong)env->fpdp !=
+                                 (target_ulong)env->xemu_x87_fdp_chk;
+    }
     xemu_x87_restore_fip(env, tb, word2 & XEMU_X87_W2_FIP_MASK);
     xemu_x87_restore_pend(env, (word2 >> XEMU_X87_W2_PEND_SHIFT) & 0xff,
                           top);

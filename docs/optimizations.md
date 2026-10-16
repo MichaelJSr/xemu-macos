@@ -800,7 +800,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   mid-TB. Since 2026-10-15 this also runs under icount: a pending
   FIP/FCS lands at mid-TB exits from insn_start word 2, FDP stays per
   instruction and FDS is stored on segment change (det heavy-f1 +3.5%
-  frames/Gcycle, −4.0% host instructions). Adversarial refuter
+  frames/Gcycle, −4.0% host instructions). Write-through blocks then
+  deferred FDP as well: the slow path of every guest access stores the
+  pending value, so a mid-TB exit still finds it in env (2026-10-15, on
+  the x87 lane det heavy-f1 −0.77% Minsns/frame, −1.2% Mcycles/frame
+  paired median over 24 pairs; on top of the pinned registers and TLB
+  memo −0.96% Minsns/frame, cycles unresolved). Adversarial refuter
   (`XEMU_X87_REFUTE`, legacy stores kept and the elision decision run
   as a shadow): **FT0 violations 0; 2.06e10 exception-pointer checks,
   violations 0.** Interleaved A/B on F8, each 3/3 pairs positive: FT0 **+1.56 fps**, FIP **+7.46 fps** (draws/s

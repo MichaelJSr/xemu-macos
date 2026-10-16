@@ -1938,6 +1938,8 @@ typedef struct CPUArchState {
     /* XEMU_X87_REFUTE's eager fpstt and tags (translate.c x87_wt_land). */
     uint32_t xemu_x87_fpstt_chk;
     uint8_t xemu_x87_fptags_chk[8];
+    /* ... and its per-insn FDP under icount (xemu_x87_defer_fdp). */
+    uint64_t xemu_x87_fdp_chk;
 #endif
 #ifdef TARGET_X86_64
     uint8_t xtilecfg[64];

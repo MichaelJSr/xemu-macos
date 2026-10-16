@@ -330,10 +330,12 @@ typedef struct TCGContext TCGContext;
 
 /*
  * xemu: where an st_f64_slow value lives when its guest access is emitted:
- * a register, a frame slot (reg + val) or a constant (val).
+ * a register, a frame slot (reg + val) or a constant (val), and its type
+ * (F64, or I32/I64 from tcg_gen_st_i32_slow/tcg_gen_st_i64_slow).
  */
 typedef struct TCGSlowSt {
     TCGTempVal kind;
+    TCGType type;
     TCGReg reg;
     int64_t val;
     intptr_t ofs;           /* the env offset stored to */
@@ -511,7 +513,9 @@ struct TCGContext {
      * performs them on its slow path only (tcg_reg_alloc_st_f64_slow).
      */
     unsigned nb_slow_st;
-    TCGSlowSt slow_st[8];
+    TCGSlowSt slow_st[9];
+    /* Integer registers they read, kept out of the access's allocation. */
+    TCGRegSet slow_st_held;
 
     /*
      * xemu: constant temps of the TB being translated, keyed by (type, value).

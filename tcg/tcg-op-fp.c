@@ -77,6 +77,25 @@ void tcg_gen_st_f64_slow(TCGv_f64 arg, tcg_target_long ofs)
     }
 }
 
+/* The same for an integer value, stored with its own width. */
+void tcg_gen_st_i32_slow(TCGv_i32 arg, tcg_target_long ofs)
+{
+    if (TCG_TARGET_HAS_st_f64_slow) {
+        tcg_gen_op2(INDEX_op_st_f64_slow, TCG_TYPE_I32, tcgv_i32_arg(arg), ofs);
+    } else {
+        tcg_gen_st_i32(arg, tcg_env, ofs);
+    }
+}
+
+void tcg_gen_st_i64_slow(TCGv_i64 arg, tcg_target_long ofs)
+{
+    if (TCG_TARGET_HAS_st_f64_slow) {
+        tcg_gen_op2(INDEX_op_st_f64_slow, TCG_TYPE_I64, tcgv_i64_arg(arg), ofs);
+    } else {
+        tcg_gen_st_i64(arg, tcg_env, ofs);
+    }
+}
+
 void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs)
 {
     ptr = x80_addr(ptr, &ofs);

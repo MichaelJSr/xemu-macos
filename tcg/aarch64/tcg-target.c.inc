@@ -2124,17 +2124,21 @@ static const TCGLdstHelperParam ldst_helper_param = {
 static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
 {
     for (unsigned i = 0; i < n; i++, e++) {
+        bool fp = e->type == TCG_TYPE_F64;
+        TCGType itype = fp ? TCG_TYPE_I64 : e->type;
+        TCGReg tmp = fp ? TCG_VEC_TMP0 : TCG_REG_TMP0;
+
         switch (e->kind) {
         case TEMP_VAL_REG:
-            tcg_out_st(s, TCG_TYPE_F64, e->reg, TCG_AREG0, e->ofs);
+            tcg_out_st(s, e->type, e->reg, TCG_AREG0, e->ofs);
             break;
         case TEMP_VAL_MEM:
-            tcg_out_ld(s, TCG_TYPE_F64, TCG_VEC_TMP0, e->reg, e->val);
-            tcg_out_st(s, TCG_TYPE_F64, TCG_VEC_TMP0, TCG_AREG0, e->ofs);
+            tcg_out_ld(s, e->type, tmp, e->reg, e->val);
+            tcg_out_st(s, e->type, tmp, TCG_AREG0, e->ofs);
             break;
         case TEMP_VAL_CONST:
             tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0, e->val);
-            tcg_out_st(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_AREG0, e->ofs);
+            tcg_out_st(s, itype, TCG_REG_TMP0, TCG_AREG0, e->ofs);
             break;
         default:
             g_assert_not_reached();
@@ -2348,31 +2352,47 @@ static void sf_out_counter_inc(TCGContext *s, TCGReg t0, TCGReg t1,
  * the fast path's B_C: TMP0 = tlb comparator (addr_write), TMP1 = TLB
  * addend, TMP2 = flag-free masked address, plus the op's addr/data
  * regs. qemu_st is TCG_OPF_CALL_CLOBBER, so every call-clobbered
- * register except the op's own inputs, the pinned guest registers
- * (x8-x15) and the TLB memo (x4-x7) is dead here — scratch is picked
- * from x0-x3 avoiding addr/data.
+ * register is dead here except the op's own inputs, the integer
+ * registers its st_f64_slow stores still read (tcg_out_slow_st runs
+ * after this, on the demote path), the pinned guest registers (x8-x15)
+ * and the TLB memo (x4-x7, which a store completed here leaves valid
+ * for the accesses after it) — scratch is picked from x0-x3 avoiding
+ * those. Nothing is emitted if two are not free.
  */
 static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
                                    MemOp opc, int mode)
 {
-    static const TCGReg pool[4] = {
+    static const TCGReg pool[] = {
         TCG_REG_X0, TCG_REG_X1, TCG_REG_X2, TCG_REG_X3,
     };
     TCGType at = s->addr_type;
     TCGReg raddr = lb->addr_reg, rdata = lb->datalo_reg;
     TCGReg rp = 0, rw = 0;
+    TCGRegSet busy = 0;
     tcg_insn_unit *br_r1, *br_r4, *br_r2, *br_r3[XEMU_SF_NCLIENTS];
     int npicked = 0;
     int prof = xemu_sf_prof_on();
 
-    for (int i = 0; i < 4 && npicked < 2; i++) {
-        if (pool[i] != raddr && pool[i] != rdata) {
+    tcg_regset_set_reg(busy, raddr);
+    tcg_regset_set_reg(busy, rdata);
+    for (unsigned i = 0; i < lb->nb_slow_st; i++) {
+        const TCGSlowSt *e = &lb->slow_st[i];
+
+        if (e->kind == TEMP_VAL_REG && e->type != TCG_TYPE_F64) {
+            tcg_regset_set_reg(busy, e->reg);
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(pool) && npicked < 2; i++) {
+        if (!tcg_regset_test_reg(busy, pool[i])) {
             if (npicked++ == 0) {
                 rp = pool[i];
             } else {
                 rw = pool[i];
             }
         }
+    }
+    if (npicked < 2) {
+        return;
     }
 
     /* (1) mismatch is EXACTLY TLB_NOTDIRTY? (tag match, aligned, no

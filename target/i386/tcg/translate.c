@@ -5115,6 +5115,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             int last_seg = s->override >= 0 ? s->override : decode->mem.def_seg;
             bool emit_now = true;
             bool emit_fds = true;
+            bool emit_fdp = true;
 
 #if defined(XBOX)
             if (unlikely(xemu_x87_census_on())) {
@@ -5122,6 +5123,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             }
             if (xemu_x87_fdp_eager()) {
                 emit_fds = xemu_x87_fds_needed(s, last_seg);
+                emit_fdp = !xemu_x87_defer_fdp(s, last_addr);
             } else {
                 xemu_x87_record_fdp(s, last_seg, last_addr);
                 emit_now = xemu_x87_refute_on();
@@ -5135,8 +5137,10 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
                                      offsetof(CPUX86State, fpds));
                 }
-                tcg_gen_st_tl(last_addr, tcg_env,
-                              offsetof(CPUX86State, fpdp));
+                if (emit_fdp) {
+                    tcg_gen_st_tl(last_addr, tcg_env,
+                                  offsetof(CPUX86State, fpdp));
+                }
             }
         }
     } else {
@@ -6389,6 +6393,12 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
         tcg_debug_assert(w2 <= XEMU_X87_W2_FIP_MASK);
         tcg_set_insn_start_param(tcg_last_op(), 2, w2);
     }
+    if (dc->xemu_fdp_pend && !dc->xemu_fdp_sel && xemu_x87_refute_on()) {
+        TCGOp *op = tcg_last_op();
+
+        tcg_set_insn_start_param(op, 2, tcg_get_insn_start_param(op, 2) |
+                                        XEMU_X87_W2_FDP);
+    }
     dc->wt_insn_pend = dc->wt_pend;
     dc->wt_insn_delta = dc->fpstt_delta;
     dc->wt_insn_tag_mask = dc->wt_tag_mask;
@@ -6578,6 +6588,14 @@ void gen_ldst_prologue(void)
 
     if (s && (s->wt_insn_pend || s->wt_insn_fp)) {
         x87_wt_spill(s);
+    }
+    /* Last: nothing may come between these and the access. */
+    if (s && s->xemu_fdp_pend && !s->xemu_fdp_sel) {
+#if TARGET_LONG_BITS == 32
+        tcg_gen_st_i32_slow(s->xemu_fdp_val, offsetof(CPUX86State, fpdp));
+#else
+        tcg_gen_st_i64_slow(s->xemu_fdp_val, offsetof(CPUX86State, fpdp));
+#endif
     }
 }
 #endif

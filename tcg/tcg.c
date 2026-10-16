@@ -2062,6 +2062,9 @@ void tcg_func_start(TCGContext *s)
     s->nb_ops = 0;
     s->nb_labels = 0;
     s->nb_slow_st = 0;
+    /* An aborted tcg_gen_code may have left some held. */
+    s->reserved_regs &= ~s->slow_st_held;
+    s->slow_st_held = 0;
     s->current_frame_offset = s->frame_start;
 
 #ifdef CONFIG_DEBUG_TCG
@@ -5513,7 +5516,10 @@ static void tcg_reg_alloc_mov(TCGContext *s, const TCGOp *op)
  * follows (nothing comes between) stores it on its slow path. Nothing is
  * emitted here, and nothing the access emits before its slow-path branch
  * writes an FP register, so a register recorded here still holds the
- * value there even if the temp dies here.
+ * value there even if the temp dies here. The access does allocate
+ * integer registers (a moved input, a materialized constant), so an
+ * integer value's register is reserved until the access is emitted
+ * (tcg_slow_st_release).
  */
 static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
 {
@@ -5524,10 +5530,24 @@ static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
     tcg_debug_assert(s->nb_slow_st < ARRAY_SIZE(s->slow_st));
     e = &s->slow_st[s->nb_slow_st++];
     e->kind = ts->val_type;
+    e->type = TCGOP_TYPE(op);
     e->ofs = op->args[1];
     switch (ts->val_type) {
     case TEMP_VAL_REG:
         e->reg = ts->reg;
+        /*
+         * A reserved register needs no hold and must not get one: the
+         * release would hand it to the allocator. That is a pinned
+         * global's home (tcg_pin_env_global), which nothing else is
+         * allocated and the access does not write; the optimizer
+         * prefers the global over its copies, so an x87 FDP often is a
+         * pinned guest register.
+         */
+        if (e->type != TCG_TYPE_F64 &&
+            !tcg_regset_test_reg(s->reserved_regs, ts->reg)) {
+            tcg_regset_set_reg(s->slow_st_held, ts->reg);
+            tcg_regset_set_reg(s->reserved_regs, ts->reg);
+        }
         break;
     case TEMP_VAL_MEM:
         e->reg = ts->mem_base->reg;
@@ -5544,6 +5564,13 @@ static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
     }
 }
 
+/* The guest access is emitted: free the registers st_f64_slow held. */
+static void tcg_slow_st_release(TCGContext *s)
+{
+    s->reserved_regs &= ~s->slow_st_held;
+    s->slow_st_held = 0;
+}
+
 /* Perform the pending st_f64_slow stores here, unconditionally. */
 static void tcg_out_slow_st_now(TCGContext *s)
 {
@@ -5553,6 +5580,7 @@ static void tcg_out_slow_st_now(TCGContext *s)
     g_assert_not_reached();
 #endif
     s->nb_slow_st = 0;
+    tcg_slow_st_release(s);
 }
 
 /*
@@ -7585,6 +7613,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
                some common argument patterns */
             tcg_reg_alloc_op(s, op);
             break;
+        }
+        if (unlikely(s->slow_st_held) && opc != INDEX_op_st_f64_slow) {
+            tcg_slow_st_release(s);
         }
         /* Test for (pending) buffer overflow.  The assumption is that any
            one operation beginning below the high water mark cannot overrun
