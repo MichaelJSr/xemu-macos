@@ -1422,8 +1422,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   so the 31-tap convolution runs over contiguous memory with no
   per-tap modulo — the `% HRTF_BUFLEN` indexing defeated the
   autovectorizer and dominated 3D-voice CPU time. Frames with settled
-  parameters take a hand-NEON pass over outputs; the per-sample path
-  stays autovectorized (an older gather-over-taps NEON lost to it).
+  parameters take a hand-NEON pass over outputs; frames whose
+  parameters still move first run the smoothing into a per-output
+  coefficient table, then take one too (an older gather-over-taps NEON
+  lost to the autovectorizer). Other hosts keep the C forms.
 - **SSE2 mix kernels (non-Apple x86_64).** The vDSP mixbin
   accumulate, `float_accumulate`, and `float_to_24b_bulk` now have
   SSE2 equivalents so Windows / Linux x86_64 builds get the same
@@ -2343,7 +2345,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Two-level quick texture hash / hash-skip > 64 KiB | 192-byte sampling missed content changes (YUV / FMV); false positives caused GPU re-upload churn |
 | Dirty-range VRAM flush (early) | Bitmap cleared before `flush_memory_buffer` read it. Tracked per-flight `[first, last]` range does the safe equivalent |
 | Incremental texture hash on misaligned textures | Host-page boundaries straddle chunks → `test_and_clear_dirty` steals another chunk's signal. Gated to page-aligned textures only |
-| HRTF hand-NEON (gather over taps) | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Lanes over outputs on settled frames later shipped (2026-10-15) |
+| HRTF hand-NEON (gather over taps) | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Lanes over outputs later shipped for settled and moving-parameter frames (2026-10-15) |
 | BQL event batching | Breaks QEMU cooperative scheduling |
 | TLS-cached `pthread_jit_write_protect_np` | Per-thread cache drifts from kernel W^X on nested `tb_gen_code` / setjmp paths → SIGSEGV/SIGILL after ~1 min |
 | Hoist `can_fifo_access` out of pfifo pusher word loop | `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, so "lock held throughout" is false → `ERROR_CALL` on boot |

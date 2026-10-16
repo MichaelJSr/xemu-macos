@@ -152,15 +152,20 @@ static inline bool hrtf_filter_params_settled(const HrtfFilter *f)
 }
 
 /* Interaural time difference (channel delay), whole and fractional. */
-static inline void hrtf_filter_delay(const HrtfFilter *f, int ch, int *di,
-                                     float *dfrac)
+static inline void hrtf_delay_split(float itd, int ch, int *di, float *dfrac)
 {
-    float d = f->itd_cur * (ch == 0 ? +1.0f : -1.0f);
+    float d = itd * (ch == 0 ? +1.0f : -1.0f);
     if (d < 0.0f) {
         d = 0.0f;
     }
     *di = d;
     *dfrac = d - *di;
+}
+
+static inline void hrtf_filter_delay(const HrtfFilter *f, int ch, int *di,
+                                     float *dfrac)
+{
+    hrtf_delay_split(f->itd_cur, ch, di, dfrac);
 }
 
 /*
@@ -244,6 +249,176 @@ hrtf_filter_convolve_settled(const HrtfFilter *f,
     }
 }
 
+/* A frame whose parameters move: step them, then filter, per output. */
+static inline void hrtf_filter_convolve_per_sample(
+    HrtfFilter *f, float lin[2][HRTF_BUFLEN + HRTF_SAMPLES_PER_FRAME],
+    float out[HRTF_SAMPLES_PER_FRAME][2])
+{
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        hrtf_filter_step_parameters(f);
+
+        for (int ch = 0; ch < 2; ch++) {
+            const float *coeff = f->ch[ch].hrir_coeff_cur;
+            int di;
+            float dfrac;
+            hrtf_filter_delay(f, ch, &di, &dfrac);
+            float one_minus_dfrac = 1.0f - dfrac;
+
+            /*
+             * base points at the newest tap (k == 0). Indices stay in
+             * bounds: HRTF_BUFLEN(73) - di(<=42) - k(<=30) - 1 >= 0.
+             */
+            const float *base = &lin[ch][HRTF_BUFLEN + n - di];
+
+            /* HRIR convolution */
+            float acc = 0.0f;
+            for (int k = 0; k < HRTF_NUM_TAPS; k++) {
+                float s = HRTF_MADD(base[-k], one_minus_dfrac,
+                                    base[-k - 1] * dfrac);
+                acc = k < HRTF_FUSED_TAPS_FROM ? acc + coeff[k] * s :
+                                                 HRTF_MADD(coeff[k], s, acc);
+            }
+
+            out[n][ch] = acc;
+        }
+    }
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+/*
+ * The per-sample form, bit for bit, with lanes over outputs. The smoothing
+ * runs first, one step per output for all taps at once (lanes over taps,
+ * each lane taking the per-sample form's steps), into a table of
+ * per-output coefficients. Then each group of four outputs runs the 31
+ * taps for both channels: vld4q transposes the table so that lanes run
+ * over outputs, and each output sums its taps in the per-sample order with
+ * its own coefficients and fractional delay. A group whose whole-sample
+ * delay changes inside it (well under 1% of groups) is redone output by
+ * output from the table.
+ */
+static inline void
+hrtf_filter_convolve_moving(HrtfFilter *f,
+                            float lin[2][HRTF_BUFLEN + HRTF_SAMPLES_PER_FRAME],
+                            float out[HRTF_SAMPLES_PER_FRAME][2])
+{
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    /* Taps in groups of four, padded with a zero tap 31. */
+    enum { NG = HRTF_SAMPLES_PER_FRAME / 4, NKV = (HRTF_NUM_TAPS + 3) / 4 };
+    /* coeff[ch][kv][n][j]: tap 4 * kv + j of output n */
+    QEMU_UNINITIALIZED float coeff[2][NKV][HRTF_SAMPLES_PER_FRAME][4];
+    float cur[2][4 * NKV], tar[2][4 * NKV];
+    float32x4_t c[2][NKV];
+    const float32x4_t alpha = vdupq_n_f32(HRTF_PARAM_SMOOTH_ALPHA);
+
+    for (int ch = 0; ch < 2; ch++) {
+        memcpy(cur[ch], f->ch[ch].hrir_coeff_cur,
+               sizeof(f->ch[ch].hrir_coeff_cur));
+        memcpy(tar[ch], f->ch[ch].hrir_coeff_tar,
+               sizeof(f->ch[ch].hrir_coeff_tar));
+        for (int k = HRTF_NUM_TAPS; k < 4 * NKV; k++) {
+            cur[ch][k] = tar[ch][k] = 0.0f;
+        }
+        for (int kv = 0; kv < NKV; kv++) {
+            c[ch][kv] = vld1q_f32(&cur[ch][4 * kv]);
+        }
+    }
+    /* Both channels at once: 16 independent recurrences hide the latency. */
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        for (int ch = 0; ch < 2; ch++) {
+            for (int kv = 0; kv < NKV; kv++) {
+                /* hrtf_filter_smooth_param in every lane */
+                float32x4_t t = vld1q_f32(&tar[ch][4 * kv]);
+                c[ch][kv] = vfmaq_f32(c[ch][kv], alpha, t - c[ch][kv]);
+                vst1q_f32(coeff[ch][kv][n], c[ch][kv]);
+            }
+        }
+    }
+    for (int ch = 0; ch < 2; ch++) {
+        for (int kv = 0; kv < NKV; kv++) {
+            vst1q_f32(&cur[ch][4 * kv], c[ch][kv]);
+        }
+        memcpy(f->ch[ch].hrir_coeff_cur, cur[ch],
+               sizeof(f->ch[ch].hrir_coeff_cur));
+    }
+
+    float itd[HRTF_SAMPLES_PER_FRAME];
+    float itd_cur = f->itd_cur;
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        itd[n] = itd_cur = hrtf_filter_smooth_param(itd_cur, f->itd_tar);
+    }
+    f->itd_cur = itd_cur;
+
+    int di[2][HRTF_SAMPLES_PER_FRAME];
+    float dfrac[2][HRTF_SAMPLES_PER_FRAME], omd[2][HRTF_SAMPLES_PER_FRAME];
+    for (int ch = 0; ch < 2; ch++) {
+        for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+            hrtf_delay_split(itd[n], ch, &di[ch][n], &dfrac[ch][n]);
+            omd[ch][n] = 1.0f - dfrac[ch][n];
+        }
+    }
+
+    for (int g = 0; g < NG; g++) {
+        const int n0 = 4 * g;
+        const float *base[2];
+        float32x4_t vdfrac[2], vomd[2];
+        float32x4x2_t acc;
+        for (int ch = 0; ch < 2; ch++) {
+            /* base[ch][i - k] is tap k of output n0 + i (if di agrees) */
+            base[ch] = &lin[ch][HRTF_BUFLEN + n0 - di[ch][n0]];
+            vdfrac[ch] = vld1q_f32(&dfrac[ch][n0]);
+            vomd[ch] = vld1q_f32(&omd[ch][n0]);
+            acc.val[ch] = vdupq_n_f32(0.0f);
+        }
+        /* Plain operators, as in hrtf_filter_convolve_settled. */
+        for (int kv = 0; kv < NKV; kv++) {
+            for (int ch = 0; ch < 2; ch++) {
+                /* lane i of cv.val[j]: tap 4 * kv + j of output n0 + i */
+                float32x4x4_t cv = vld4q_f32(coeff[ch][kv][n0]);
+                for (int j = 0; j < 4; j++) {
+                    const int k = 4 * kv + j;
+                    if (k >= HRTF_NUM_TAPS) {
+                        break;
+                    }
+                    float32x4_t s =
+                        vfmaq_f32(vld1q_f32(base[ch] - k - 1) * vdfrac[ch],
+                                  vld1q_f32(base[ch] - k), vomd[ch]);
+                    acc.val[ch] = k < HRTF_FUSED_TAPS_FROM ?
+                                      acc.val[ch] + cv.val[j] * s :
+                                      vfmaq_f32(acc.val[ch], cv.val[j], s);
+                }
+            }
+        }
+        vst2q_f32(out[n0], acc);
+    }
+
+    for (int ch = 0; ch < 2; ch++) {
+        for (int n0 = 0; n0 < HRTF_SAMPLES_PER_FRAME; n0 += 4) {
+            if (di[ch][n0] == di[ch][n0 + 1] && di[ch][n0] == di[ch][n0 + 2] &&
+                di[ch][n0] == di[ch][n0 + 3]) {
+                continue;
+            }
+            for (int n = n0; n < n0 + 4; n++) {
+                const float *base = &lin[ch][HRTF_BUFLEN + n - di[ch][n]];
+                float a = 0.0f;
+                for (int k = 0; k < HRTF_NUM_TAPS; k++) {
+                    float cn = coeff[ch][k / 4][n][k % 4];
+                    float s = HRTF_MADD(base[-k], omd[ch][n],
+                                        base[-k - 1] * dfrac[ch][n]);
+                    a = k < HRTF_FUSED_TAPS_FROM ? a + cn * s :
+                                                   HRTF_MADD(cn, s, a);
+                }
+                out[n][ch] = a;
+            }
+        }
+    }
+}
+#endif
+
 static inline void hrtf_filter_process(HrtfFilter *f,
                                        float in[HRTF_SAMPLES_PER_FRAME][2],
                                        float out[HRTF_SAMPLES_PER_FRAME][2])
@@ -257,16 +432,16 @@ static inline void hrtf_filter_process(HrtfFilter *f,
      * below runs over contiguous memory with no per-tap modulo. The
      * `% HRTF_BUFLEN` indexing in the previous per-sample form
      * defeated the autovectorizer and was the dominant cost for
-     * 3D/HRTF voices. Frames with settled parameters then take the
-     * hand-NEON pass over outputs above; the per-sample path is left to
-     * the autovectorizer (an older gather-over-taps NEON lost to it).
+     * 3D/HRTF voices. Both kinds of frame then take a hand-NEON pass
+     * with lanes over outputs (an older gather-over-taps NEON lost to
+     * the autovectorizer); other hosts keep the C forms.
      *
      * Layout: lin[ch][0 .. HRTF_BUFLEN-1] is history, oldest first;
      * lin[ch][HRTF_BUFLEN + n] is input sample n. Prefilling all
      * inputs up front also makes in == out aliasing (the common call
      * pattern) explicitly safe.
      */
-    float lin[2][HRTF_BUFLEN + HRTF_SAMPLES_PER_FRAME];
+    QEMU_UNINITIALIZED float lin[2][HRTF_BUFLEN + HRTF_SAMPLES_PER_FRAME];
 
     for (int ch = 0; ch < 2; ch++) {
         const float *buf = f->ch[ch].buf;
@@ -282,34 +457,11 @@ static inline void hrtf_filter_process(HrtfFilter *f,
     if (hrtf_filter_params_settled(f)) {
         hrtf_filter_convolve_settled(f, lin, out);
     } else {
-        for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
-            hrtf_filter_step_parameters(f);
-
-            for (int ch = 0; ch < 2; ch++) {
-                const float *coeff = f->ch[ch].hrir_coeff_cur;
-                int di;
-                float dfrac;
-                hrtf_filter_delay(f, ch, &di, &dfrac);
-                float one_minus_dfrac = 1.0f - dfrac;
-
-                /*
-                 * base points at the newest tap (k == 0). Indices stay in
-                 * bounds: HRTF_BUFLEN(73) - di(<=42) - k(<=30) - 1 >= 0.
-                 */
-                const float *base = &lin[ch][HRTF_BUFLEN + n - di];
-
-                // HRIR Convolution
-                float acc = 0.0f;
-                for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-                    float s = HRTF_MADD(base[-k], one_minus_dfrac,
-                                        base[-k - 1] * dfrac);
-                    acc = k < HRTF_FUSED_TAPS_FROM ? acc + coeff[k] * s :
-                                                     HRTF_MADD(coeff[k], s, acc);
-                }
-
-                out[n][ch] = acc;
-            }
-        }
+#if defined(__aarch64__) && defined(__ARM_NEON)
+        hrtf_filter_convolve_moving(f, lin, out);
+#else
+        hrtf_filter_convolve_per_sample(f, lin, out);
+#endif
     }
 
     /*

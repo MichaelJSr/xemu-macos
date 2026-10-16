@@ -48,7 +48,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | APU `rate==1.0` resampler fast path | reverted | No silence pad on drain → `voice_process` spins | `68d5afe7fa` |
 | Voice-register cache, SE2FE re-notify skip, voice writeback batching | closed | DMA and the guest use RAM voice state; no write hook | ledger |
 | HRTF hand-written NEON | reopened, shipped | The gather-over-taps form lost to autovectorization; lanes over outputs on settled frames (96% of heavy-f1 calls) won, 2.9% fewer det cycles per frame | `aff8c229e9`, HRTF settled path |
-| Vectorizing the unsettled HRTF path | closed | After the settled fast path, VP is 1.2% of the vCPU on stream-e2 and HRTF leaves the top list | `75a295fdbd` |
+| Vectorizing the unsettled HRTF path | reopened, shipped | The "VP 1.2% on stream-e2" read counted idle samples: on det stream-e2 1200 VP is 3.9% of cycles, and unsettled frames are 40% of HRTF calls and 47% of VP time. A per-output coefficient table (the smoothing run lanes over taps) then lanes over outputs, bit-exact: −77% per unsettled frame, det instructions −1.8% and cycles ≈−3.9% per frame on stream-e2 | `hrtf_filter_convolve_moving` |
 | EP DSP on the JIT (retested 2026-10-15) | closed | Still churns: 108,788 EP translations per 1200 heavy-f1 frames, Minsns/frame 125.4 vs 120.7; overlays are re-DMAed with different code. Reopen only with a P-space-content-keyed translation cache | `d287c6cb23` |
 | APU thread resumed by reset during loadvm | fixed | Resume only if `runstate_is_running()` | `d6da581d4b` |
 | **TCG / x87 / CPU** | | | |
