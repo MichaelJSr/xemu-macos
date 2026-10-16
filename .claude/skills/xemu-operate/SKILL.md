@@ -178,7 +178,8 @@ frames as the budget; pause first), `xemu-hooks-set`/`-clear` (copy
 memory at guest PCs into records the next advance returns, optionally
 stopping on an `expect` mismatch, and write the next entry of a queue
 there: `write`/`set`, `stop-empty`, `xemu-hooks-push`; they persist
-until cleared), `xemu-run` (one call: restore a checkpoint, queue pipe
+until cleared; `xemu-hooks-drain` takes the records without pausing),
+`xemu-run` (one call: restore a checkpoint, queue pipe
 lines, run until frames, a PC or a value leaving `[lo,hi]` or changing;
 three calls and a pipe in one; hooks keep hit numbers and queues across
 its restore, so clear and set them per candidate), the `xemu: ready` /

@@ -1003,7 +1003,8 @@
 # @xemu-hooks-clear, across advances and loads (hit numbers, keys and
 # queues too; clear and set them again to start over).  Their records
 # come back with the next @xemu-frame-advance or @xemu-run-until reply
-# (@frames 0 just returns them).  Under -icount the records are exact
+# (@frames 0 just returns them), or from @xemu-hooks-drain, which
+# leaves the VM running.  Under -icount the records are exact
 # and repeatable, and hooks change what the guest does only through
 # their @set writes, at the same instruction every run.  gdbstub
 # breakpoints and @xemu-run-until work alongside; a hook at the PC of
@@ -1040,6 +1041,23 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-hooks', 'returns': ['XemuHookInfo'] }
+
+##
+# @xemu-hooks-drain:
+#
+# Take the @xemu-hooks-set records waiting, those the next
+# @xemu-frame-advance or @xemu-run-until reply would carry, without
+# pausing the VM: it may be running, and its hooks record on from
+# where the call cut, so successive calls return every hit once, in
+# execution order.  QMP runs one command at a time: a call sent during
+# an @xemu-frame-advance, @xemu-run-until or @xemu-run waits for its
+# reply, which takes the records itself.
+#
+# Returns: the records and @dropped, as in those replies (no @stop)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-hooks-drain', 'returns': 'XemuHookTrace' }
 
 ##
 # Guest PC hooks: write queues

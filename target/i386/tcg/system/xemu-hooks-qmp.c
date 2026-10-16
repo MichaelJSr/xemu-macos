@@ -15,7 +15,8 @@
  * the VM is stopped. Hits append to one record buffer in execution order,
  * under rec_lock (the vCPU runs hooks without the BQL), as raw bytes;
  * xemu-frame-advance and xemu-run-until take the buffer into their reply
- * (xemu_hooks_take_trace), where it becomes hex.
+ * (xemu_hooks_take_trace), where it becomes hex, and xemu-hooks-drain
+ * takes it outside them, also while the VM runs.
  *
  * At a hit a hook reads its collect regions, checks its expect entry,
  * takes its next write-queue entry and writes it (xemu_hook_write: RAM
@@ -940,6 +941,25 @@ XemuHookInfo *qmp_xemu_hooks_push(int64_t id, strList *set, Error **errp)
         return NULL;
     }
     return phook_info(h);
+}
+
+XemuHookTrace *qmp_xemu_hooks_drain(Error **errp)
+{
+    /*
+     * QMP runs one command at a time, so no advance (which takes the
+     * records itself, its stop included) is under way here. The vCPU
+     * appends under rec_lock: the VM may run. A stop marked here is one
+     * the hook is still about to find no advance for (it waits for the
+     * BQL we hold, then clears it and runs on), so it is no stop.
+     */
+    XemuHookTrace *t = xemu_hooks_take_trace();
+
+    if (!t) {
+        return g_new0(XemuHookTrace, 1);
+    }
+    qapi_free_XemuHookRecord(t->stop);
+    t->stop = NULL;
+    return t;
 }
 
 XemuHookInfoList *qmp_query_xemu_hooks(Error **errp)

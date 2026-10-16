@@ -398,14 +398,19 @@ Other automation interfaces (windowed or headless):
   `hit` from 0, `data` with one hex string per region, `""` when
   unreadable, and `regs` with `"regs": true`), plus `dropped` (hits past
   262,144 waiting records or 16 MiB). `"frames": 0` just returns them,
-  also to a VM the gdbstub stopped. `expect` holds one hex string per
-  hit that the hit's collected bytes, concatenated, must start with
-  (`??` matches any byte, `""` checks nothing). A mismatch marks the
-  record and ends the running advance before that instruction: `hooks`
-  then has `stop`, the record, and `xemu-run-until` returns reason
-  `mismatch` with `pc` and `regs`. With `"stop": false` it only marks
-  the record. Under icount the records are exact and repeatable, and
-  collect hooks never change guest RAM. Stopping and resuming at a
+  also to a VM the gdbstub stopped. `xemu-hooks-drain` returns them too
+  (`{records, dropped}`) without pausing the VM: it may run on, its
+  hooks recording from where the call cut, so polling it keeps every
+  hit once, e.g. one record per player tick from a hook keyed on the
+  event clock (sent during an advance, it waits for the advance's reply,
+  which takes them). `expect` holds one hex string per hit that the
+  hit's collected bytes, concatenated, must start with (`??` matches
+  any byte, `""` checks nothing). A mismatch marks the record and ends
+  the running advance before that instruction: `hooks` then has `stop`,
+  the record, and `xemu-run-until` returns reason `mismatch` with `pc`
+  and `regs`. With `"stop": false` it only marks the record. Under
+  icount the records are exact and repeatable, and collect hooks never
+  change guest RAM. Stopping and resuming at a
   mismatch gives no repeated or missing hit. gdbstub breakpoints and
   run-until at the same PC work alongside, and the hook still sees each
   arrival once. Hooks, hit numbers, keys and queues stay across loads,
