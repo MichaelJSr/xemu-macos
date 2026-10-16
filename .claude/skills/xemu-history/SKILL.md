@@ -142,7 +142,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 10. **GL renderer under the Metal window.** Compatibility only.
 11. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
 
-Parked, with bars: pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
+Parked, with bars: pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun; the one that did, glslang's ~60 ms built-in symbol tables at each process's first miss, warms at renderer init since 2026-10-16); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
 
 ## Benchmarking traps
 - Scene identity: check draws/flip in both arms (a ~3 draws/flip menu baseline once faked "−30%"). Select intervals by content, not log position.

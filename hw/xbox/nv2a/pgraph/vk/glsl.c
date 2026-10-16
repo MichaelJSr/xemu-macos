@@ -411,13 +411,39 @@ static const glslang_resource_t
                             .general_constant_matrix_vector_indexing = 1,
                         } };
 
+/*
+ * glslang builds its built-in symbol tables on the first compile for each
+ * (version, profile, SPIR-V, source), all stages at once, under a global
+ * lock: ~57 ms that every process used to pay on the PFIFO thread at its
+ * first SPIR-V cache miss, mid-game. Every Vulkan shader here is
+ * #version 450 with the same inputs, so one throwaway compile at renderer
+ * init, on its own thread, builds the only tables they use. A miss that
+ * comes while it runs waits on glslang's lock for the rest of it.
+ */
+static QemuThread glsl_warm_thread;
+static bool glsl_warm_started;
+
+static void *glsl_warm_thread_fn(void *opaque)
+{
+    g_byte_array_unref(pgraph_vk_compile_glsl_to_spv(
+        GLSLANG_STAGE_VERTEX, "#version 450\nvoid main() {}\n"));
+    return NULL;
+}
+
 void pgraph_vk_init_glsl_compiler(void)
 {
     glslang_initialize_process();
+    qemu_thread_create(&glsl_warm_thread, "glslang warm", glsl_warm_thread_fn,
+                       NULL, QEMU_THREAD_JOINABLE);
+    glsl_warm_started = true;
 }
 
 void pgraph_vk_finalize_glsl_compiler(void)
 {
+    if (glsl_warm_started) {
+        qemu_thread_join(&glsl_warm_thread);
+        glsl_warm_started = false;
+    }
     glslang_finalize_process();
 }
 

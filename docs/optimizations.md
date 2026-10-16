@@ -1381,6 +1381,24 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   one is deleted and recompiled. The orchestrator's landing check is to
   force-truncate a cached `.spv` and confirm the entry is deleted and
   regenerated instead of aborting the launch.
+- **glslang's built-in symbol tables warm at renderer init
+  (2026-10-16).** glslang builds them on the first compile for each
+  (version, profile, SPIR-V, source), every stage at once, under a
+  global lock: 57-73 ms, which every process paid on the PFIFO thread at
+  its first SPIR-V cache miss (PMI: a 166 ms e2-walk frame with the vCPU
+  88% idle, and inside the transition's load frame). Every Vulkan shader
+  is `#version 450` with the same compile inputs, so
+  `pgraph_vk_init_glsl_compiler` compiles and drops a throwaway
+  `#version 450` shader on a short-lived thread, joined before
+  `glslang_finalize_process`. A miss during those ~70 ms waits on
+  glslang's lock for the rest, which is what a cold cache's first
+  compile at renderer init does (~10 ms after the start: no change
+  there). Boot-primed SPIR-V cache, stream-e2 walk, 2 runs per arm
+  (load 20-30): first in-game compile 64.2/68.6 → 2.5/2.8 ms, load
+  interval `shader_gen` max 64.8/69.3 → 7.9/6.8 ms, load frame
+  336/332 → 265/249 ms; renderer init within noise (180-196 ms both).
+  The 67 SPIR-V blobs of a cold run match byte for byte. No switch: the
+  output is identical.
 - **Guest-driven bounds checks are real in release, on every platform
   (2026-09-08).** `nv2a_vk_bounds_check()` used to compile to
   `if (!(x)) __builtin_unreachable();` whenever `NV2A_VK_PERF_BUILD` was

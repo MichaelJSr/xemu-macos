@@ -9,7 +9,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 
 ## Invariants (rule → what breaks → where)
 
-### NV2A Vulkan renderer (all of V runs on the PFIFO thread)
+### NV2A Vulkan renderer (all of V runs on the PFIFO thread, except `glsl.c`'s init-time glslang warm-up thread, which touches no renderer state)
 - **One queue** (`queueCount = 1`). Apple fast paths (`target_is_active` in `pgraph_vk_upload_surface_data`) assume submission order = execution order. Add no second queue or submit thread; keep the non-Apple `#else` full-finish branches. → in-flight image reuse, corruption/crash. V`instance.c`, V`surface.c`.
 - **Deferred eviction**: `invalidate_surface_full(allow_deferred)` parks images in `r->invalid_surfaces`. Reuse and prune skip anything `surface_image_in_recording_cb()`. Destroy only when `evict_submit_seq <= retired_submit_count`, on all platforms (submitted ≠ done). New fence-observation sites advance the watermark; new destroy paths take the same gate. → destroying an in-flight image. V`surface.c` `prune_invalid_surfaces`; V`command.c` `pgraph_vk_wait_slot_fence`.
 - **One command buffer per frame, `NUM_FLIGHT_SLOTS = 2`**. `pgraph_vk_init_flight_partitions` splits descriptor sets, staging buffers and the query pool per slot. A new per-slot resource, or a faster consumption rate, needs a runtime submit-and-continue guard: release builds compile `nv2a_vk_assert` out. → overrun into the next slot: corruption or a MoltenVK crash. V`renderer.h`, V`debug.h`.
