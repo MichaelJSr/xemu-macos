@@ -1580,12 +1580,22 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             {
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
+                unsigned flush = qatomic_read(&tb_ctx.tb_flush_count);
                 CPUJumpCache *jc;
                 uint32_t h;
 
                 mmap_lock();
                 tb = tb_gen_code(cpu, s);
                 mmap_unlock();
+
+                /*
+                 * In serial context tb_gen_code flushes a full buffer and
+                 * carries on (tb_flush__exclusive_or_serial), so last_tb
+                 * may be gone: patching it would write into reused code.
+                 */
+                if (unlikely(flush != qatomic_read(&tb_ctx.tb_flush_count))) {
+                    last_tb = NULL;
+                }
 
                 /*
                  * We add the TB in the virtual pc hash table
