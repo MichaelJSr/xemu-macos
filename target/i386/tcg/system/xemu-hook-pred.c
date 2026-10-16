@@ -27,7 +27,6 @@ bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *c)
 {
     uint64_t raw;
     int size = c->size;
-    int rel;
 
     if (c->reg >= 0) {
         raw = xemu_hook_reg(ctx, c->reg);
@@ -39,9 +38,21 @@ bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *c)
             !xemu_hook_read(ctx->env, a, b, size)) {
             return false;
         }
-        raw = size == 1 ? b[0] : size == 2 ? lduw_le_p(b)
-            : size == 4 ? (uint32_t)ldl_le_p(b) : ldq_le_p(b);
+        raw = xemu_hook_pred_raw(b, size);
     }
+    return xemu_hook_pred_compare(c, raw);
+}
+
+uint64_t xemu_hook_pred_raw(const uint8_t *b, int size)
+{
+    return size == 1 ? b[0] : size == 2 ? lduw_le_p(b)
+         : size == 4 ? (uint32_t)ldl_le_p(b) : ldq_le_p(b);
+}
+
+bool xemu_hook_pred_compare(const XemuHookPred *c, uint64_t raw)
+{
+    int size = c->size;
+    int rel;
 
     switch (c->type) {
     case XEMU_HOOK_TYPE_S: {

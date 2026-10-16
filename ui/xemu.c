@@ -1023,6 +1023,20 @@ bool xemu_frame_advance_hook_stop(void)
     return true;
 }
 
+/*
+ * xemu-run's value stops (target/i386/tcg/system/xemu-run-until.c): asked
+ * at each vblank of an advance, before its trace sample; true ends the
+ * advance on that vblank, as reaching its last frame does.
+ */
+static bool (*frame_advance_vblank_stop)(void);
+
+void xemu_frame_advance_set_vblank_stop(bool (*fn)(void));
+void xemu_frame_advance_set_vblank_stop(bool (*fn)(void))
+{
+    assert(bql_locked());
+    frame_advance_vblank_stop = fn;
+}
+
 static void frame_advance_vm_state_change(void *opaque, bool running,
                                           RunState state)
 {
@@ -1045,6 +1059,11 @@ static void process_vblank(struct xemu_console *scon)
         frame_count++;
         /* Input tagged for this frame lands before the vblank IRQ. */
         xemu_input_frame_tick(frame_count);
+        if (frame_advance_vblank_stop && frame_advance_co &&
+            !frame_advance_stopping && frame_count <= frame_advance_target &&
+            frame_advance_vblank_stop()) {
+            frame_advance_target = frame_count;
+        }
         if (frame_trace_regions && frame_advance_co &&
             !frame_advance_stopping && frame_count <= frame_advance_target &&
             ((frame_count - frame_trace_start) % frame_trace_every == 0 ||

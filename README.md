@@ -287,6 +287,38 @@ Other automation interfaces (windowed or headless):
   the update's RETs. Under icount the same queues give the same RAM
   every run, equal to writing the same bytes over the gdbstub at the
   same instructions.
+- **One-call candidate runs**: `xemu-run {"checkpoint": "c", "input":
+  ["+0 axis ly 1.0", "+12 down 81", ...], "frames": F, "trace": [...],
+  "trace-every": K, "stop-when": [...], "hits": N}` restores an
+  `xemu-checkpoint-save` checkpoint (optional), queues the input lines
+  as if the pipe delivered them right after the restore (pipe syntax;
+  `+N` counts vblanks from there, blank and `#` lines are skipped, and a
+  malformed line refuses the call), then runs as `xemu-run-until` does,
+  for F vblanks or until a `stop-when` entry fires, and pauses. The VM
+  must be stopped (paused, prelaunch or held by the debugger). Nothing
+  runs between the restore, the queueing and the start, so there is no
+  pipe write to race the advance. A `stop-when` entry is either a PC,
+  `{"pc": P, "cond": [...]}` as for `xemu-run-until` (`hits` counts
+  them, default 1), or a value, `{"addr": E, "size": 1|2|4|8, "type":
+  "u"|"s"|"f", "lo": A, "hi": B}` (either bound optional), which fires
+  at the first vblank where the value lies outside [A, B] (a NaN or an
+  unreadable value counts as outside), or `{"addr": E, ..., "change":
+  true}`, which fires when its bytes differ from the run's start. Values
+  are read at each vblank, where the trace samples are, so the run ends
+  on that vblank, sampled. The reply is `xemu-run-until`'s (`reason`,
+  now also `value`; `index`, the `stop-when` entry that fired; `pc` and
+  `regs` at a hit; `frame`, `hits`, `trace`, `hooks`) plus `frames` (run
+  by the call) and, at a value stop, `data` and `previous` (the value's
+  bytes as hex, `""` when unreadable). Under icount the same checkpoint,
+  input and stops give the same RAM, reply and trace every time (but for
+  `frame` numbers: the counter never rewinds) while no `xemu-hooks-set`
+  hook is installed, as hooks keep their hit numbers, keys and queues
+  across the restore (clear and set them again before each run to start
+  over); and a run stopped anywhere, then continued, ends on the same
+  RAM as an uncut one. A 16-frame candidate from a field state
+  (azurik-stream-e2) takes about 136 ms on one core of a loaded M2
+  Ultra, 11-13 ms of it the restore, as the three calls did; stops add
+  no measurable cost.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed

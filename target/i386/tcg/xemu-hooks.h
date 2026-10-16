@@ -77,6 +77,9 @@ enum {
 #define XEMU_HOOK_IDLE_PURGE 4096
 #define XEMU_HOOK_MAX_SITES 256
 
+/* Main thread, BQL held: before reading guest memory outside a hook. */
+void xemu_hooks_init(void);
+
 /* Main thread, BQL held. Changes take effect at xemu_hooks_commit(). */
 int xemu_hooks_add(vaddr pc, int prio, XemuHookFn fn, void *opaque);
 void xemu_hooks_remove(int id);
@@ -191,6 +194,9 @@ struct XemuHookCond;
 bool xemu_hook_pred_compile(struct XemuHookCond *in, XemuHookPred *p,
                             bool *reads_memory, Error **errp);
 bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *p);
+/* The test on an operand already read: @size little-endian bytes. */
+uint64_t xemu_hook_pred_raw(const uint8_t *b, int size);
+bool xemu_hook_pred_compare(const XemuHookPred *p, uint64_t raw);
 
 /* Translator side (vCPU thread, under RCU). */
 extern unsigned xemu_hooks_nsites;
@@ -215,5 +221,10 @@ bool xemu_frame_advance_check(int64_t frames, struct XemuTraceRegionList *trace,
                               Error **errp);
 /* ui/xemu.c: vblanks delivered so far (see query-xemu-frame). */
 int64_t xemu_frame_count(void);
+/* ui/xemu.c: xemu-run's value stops, asked at each vblank of an advance. */
+void xemu_frame_advance_set_vblank_stop(bool (*fn)(void));
+/* ui/xemu-input.c: XEMU_INPUT_PIPE lines handed over by QMP (BQL held). */
+bool xemu_input_check_line(const char *line, Error **errp);
+void xemu_input_queue_line(const char *line);
 
 #endif

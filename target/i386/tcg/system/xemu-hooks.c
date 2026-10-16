@@ -323,7 +323,7 @@ static void hooks_vm_state_change(void *opaque, bool running, RunState state)
     }
 }
 
-static void hooks_init(void)
+void xemu_hooks_init(void)
 {
     if (hook_recs) {
         return;
@@ -347,7 +347,7 @@ int xemu_hooks_add(vaddr pc, int prio, XemuHookFn fn, void *opaque)
     guint i;
 
     assert(bql_locked());
-    hooks_init();
+    xemu_hooks_init();
     g_array_append_val(hook_recs, h);
     for (i = 0; i < sites->len; i++) {
         vaddr at = g_array_index(sites, SiteRec, i).pc;

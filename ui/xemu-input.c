@@ -26,6 +26,7 @@
 #include "qobject/qdict.h"
 #include "qemu/option.h"
 #include "qemu/timer.h"
+#include "qemu/cutils.h"
 #include "qemu/config-file.h"
 #include "exec/icount.h"
 #include "system/runstate.h"
@@ -725,6 +726,97 @@ static void test_input_feed(const char *data, size_t n)
         } else if (test_input_partial_len < sizeof(test_input_partial) - 1) {
             test_input_partial[test_input_partial_len++] = c;
         }
+    }
+}
+
+/*
+ * QMP xemu-run: pipe lines handed over in the call (BQL held, VM stopped),
+ * queued as if the pipe had delivered them now. The check accepts what
+ * test_input_apply() acts on, written exactly (a new pipe verb goes in
+ * both), and what the pipe ignores: blank lines and '#' comments, as
+ * XEMU_INPUT_RECORD writes them, which are not queued.
+ */
+static const char *input_line_body(const char *p, Error **errp)
+{
+    if (*p == '@' || *p == '+') {
+        uint64_t n;
+        const char *rest;
+
+        if (!g_ascii_isdigit(p[1]) || qemu_strtou64(p + 1, &rest, 10, &n)) {
+            error_setg(errp, "input line '%s': a tag is @ or + and a frame "
+                       "number", p);
+            return NULL;
+        }
+        p = rest;
+        while (g_ascii_isspace(*p)) {
+            p++;
+        }
+    }
+    return p;
+}
+
+static bool input_line_ignored(const char *body)
+{
+    return !body[0] || body[0] == '#';
+}
+
+bool xemu_input_check_line(const char *line, Error **errp);
+bool xemu_input_check_line(const char *line, Error **errp)
+{
+    g_autofree char *copy = g_strstrip(g_strdup(line));
+    const char *p = input_line_body(copy, errp);
+    char name[8];
+    double v;
+    int sc, end = -1;
+
+    if (!p) {
+        return false;
+    }
+    if (input_line_ignored(p) || !strcmp(p, "clear")) {
+        return true;
+    }
+    if ((sscanf(p, "down %d%n", &sc, &end) == 1 ||
+         sscanf(p, "up %d%n", &sc, &end) == 1) && end >= 0 && !p[end]) {
+        if (sc < 0 || sc >= SDL_SCANCODE_COUNT) {
+            error_setg(errp, "input line '%s': scancode out of range", line);
+            return false;
+        }
+        return true;
+    }
+    end = -1;
+    if ((sscanf(p, "axis %7s %lf%n", name, &v, &end) == 2 ||
+         sscanf(p, "trigger %7s %lf%n", name, &v, &end) == 2) &&
+        end >= 0 && !p[end]) {
+        int axis = test_input_axis(name);
+        bool trigger = axis == CONTROLLER_AXIS_LTRIG ||
+                       axis == CONTROLLER_AXIS_RTRIG;
+
+        if (axis < 0 || (p[0] == 't') != trigger) {
+            error_setg(errp, "input line '%s': no such %s", line,
+                       p[0] == 't' ? "trigger (lt, rt)"
+                                   : "axis (lx, ly, rx, ry)");
+            return false;
+        }
+        if (!isfinite(v)) {
+            error_setg(errp, "input line '%s': the value is not finite",
+                       line);
+            return false;
+        }
+        return true;
+    }
+    error_setg(errp, "input line '%s' is none of down, up, clear, axis and "
+               "trigger", line);
+    return false;
+}
+
+void xemu_input_queue_line(const char *line);
+void xemu_input_queue_line(const char *line)
+{
+    g_autofree char *copy = g_strstrip(g_strdup(line));
+    const char *body = input_line_body(copy, NULL);
+
+    if (body && !input_line_ignored(body)) {
+        test_input_line(copy);
     }
 }
 

@@ -612,7 +612,7 @@
 ##
 # @XemuRunUntilReason:
 #
-# What ended @xemu-run-until.
+# What ended @xemu-run-until or @xemu-run.
 #
 # @hit: the @hits'th hit; the VM is paused before that instruction
 #
@@ -629,10 +629,13 @@
 #     queue empty first; the VM is paused before that instruction (see
 #     @XemuHookTrace's @stop)
 #
+# @value: (@xemu-run only) an @addr stop's check fired; the VM is
+#     paused on that vblank, before the guest sees it
+#
 # Since: 10.2
 ##
 { 'enum': 'XemuRunUntilReason',
-  'data': [ 'hit', 'budget', 'debug', 'mismatch', 'empty' ] }
+  'data': [ 'hit', 'budget', 'debug', 'mismatch', 'empty', 'value' ] }
 
 ##
 # @XemuRegs:
@@ -682,7 +685,8 @@
 # @pc: the hit's PC (only with @reason hit, mismatch or empty)
 #
 # @index: which @until entry the hit matched, from 0 (only with
-#     @reason hit; the first that matched)
+#     @reason hit; the first that matched).  For @xemu-run, which
+#     @stop-when entry ended the run (with @reason hit or value)
 #
 # @regs: the registers at the hit (only with @reason hit, mismatch or
 #     empty)
@@ -969,3 +973,123 @@
 ##
 { 'command': 'xemu-hooks-push', 'data': { 'id': 'int', 'set': ['str'] },
   'returns': 'XemuHookInfo' }
+
+##
+# Candidate runs in one call: xemu-run
+# ====================================
+##
+
+##
+# @XemuRunStop:
+#
+# A condition that ends @xemu-run.  Exactly one of @pc and @addr
+# names it: a guest PC, as an @XemuUntil entry, or a value in guest
+# memory that leaves [@lo, @hi] or, with @change, changes.  A value
+# is checked at every vblank of the run, where @xemu-frame-advance
+# takes its trace samples, before the guest sees that vblank; the run
+# then ends on that vblank, sampled.  A value that becomes unreadable
+# (an expression that no longer resolves to guest RAM) lies outside
+# any range and has changed, as does one that becomes readable.  Each
+# @addr entry needs @lo, @hi or @change.
+#
+# @pc: linear address (EIP on the Xbox) of an instruction's first
+#     byte; the run ends before that instruction, as at an
+#     @xemu-run-until hit
+#
+# @cond: with @pc: comparisons that must all hold, as for @XemuUntil
+#     (at most 16)
+#
+# @addr: the value's guest virtual address, an expression as for
+#     @XemuHookCond's @addr (registers read where the vCPU was at the
+#     vblank, so prefer constants and [ ] reads)
+#
+# @size: the value's bytes: 1, 2, 4 or 8 (default 4)
+#
+# @type: how @lo and @hi compare with it (default u); a float NaN
+#     lies outside every range
+#
+# @lo: the run ends at the first check that finds the value below
+#     @lo, a number or a numeric string as @XemuHookCond's @value
+#     (default no lower bound)
+#
+# @hi: likewise, above @hi (default no upper bound)
+#
+# @change: the run ends at the first check whose bytes differ from
+#     those at the run's start (default false)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRunStop',
+  'data': { '*pc': 'uint64', '*cond': ['XemuHookCond'], '*addr': 'str',
+            '*size': 'int', '*type': 'XemuHookType', '*lo': 'any',
+            '*hi': 'any', '*change': 'bool' } }
+
+##
+# @XemuRunInfo:
+#
+# What @xemu-run returns: what @xemu-run-until does (@hits counts @pc
+# stop hits, and @index names the @stop-when entry that ended the
+# run), and these.
+#
+# @frames: vblanks the run delivered
+#
+# @data: the value's bytes in guest memory order, as lowercase hex,
+#     "" when unreadable (only with @reason value)
+#
+# @previous: its bytes at the check before, or at the start of the
+#     run (only with @reason value)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRunInfo', 'base': 'XemuRunUntilInfo',
+  'data': { 'frames': 'int', '*data': 'str', '*previous': 'str' } }
+
+##
+# @xemu-run:
+#
+# One candidate run in one call: restore @checkpoint, queue @input,
+# then run as @xemu-run-until does, for @frames vblanks or until a
+# @stop-when entry ends it, and pause.  Nothing runs between the
+# restore, the queueing and the start, so frame-tagged input lands on
+# the same vblank every time, with no pipe to race.  Under -icount the
+# same checkpoint, input and stops give the same RAM, trace and reply
+# every time, but for frame counter values (a restore doesn't rewind
+# the counter), while no @xemu-hooks-set hook is installed: hooks keep
+# their hit numbers, keys and @set queues across the restore (clear
+# and set them again before each run to start over).  The VM must be
+# stopped: paused, prelaunch, or stopped by the debugger.  Nothing is
+# changed when an argument is refused.
+#
+# @checkpoint: an @xemu-checkpoint-save checkpoint to restore first,
+#     as @xemu-checkpoint-restore does (default: run on from the
+#     current state)
+#
+# @input: XEMU_INPUT_PIPE lines (at most 65,536), queued in order
+#     after the restore as if written to the pipe then: "+N" counts
+#     vblanks from there ("+0" and "+1" both mean the run's first
+#     vblank), "@N" names a frame counter value, and an untagged line
+#     applies at the first vblank under -icount, at once otherwise.  A
+#     line is "down N", "up N" (N an SDL scancode), "clear", "axis
+#     lx|ly|rx|ry V" or "trigger lt|rt V"; any other is refused, but
+#     for blank lines and '#' comments (as XEMU_INPUT_RECORD writes),
+#     which are skipped, as the pipe ignores them.  Lines still queued
+#     at the end stay queued for the next run, and a restore drops
+#     them.
+#
+# @frames: the budget in vblanks (0 just restores and queues)
+#
+# @trace: as for @xemu-frame-advance
+#
+# @trace-every: as for @xemu-frame-advance
+#
+# @stop-when: conditions that end the run early (at most 64)
+#
+# @hits: @pc stop hits to count, across all @pc entries (default 1)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-run',
+  'data': { '*checkpoint': 'str', '*input': ['str'], 'frames': 'int',
+            '*trace': ['XemuTraceRegion'], '*trace-every': 'int',
+            '*stop-when': ['XemuRunStop'], '*hits': 'int' },
+  'returns': 'XemuRunInfo', 'coroutine': true }
