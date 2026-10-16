@@ -76,6 +76,22 @@ void ViewportManager::Update()
 
     m_scale = fmaxf(m_scale, 1.0);
 
+    /*
+     * Shrink the UI in windows smaller than the menus need at this scale
+     * (about 700x480 points at 1x: the main menu's tab column and setting
+     * descriptions, and its eight tabs plus margins), so it stays inside the
+     * window instead of spilling past its edges. The factor moves in 5%
+     * steps, so a live resize rebuilds the font atlas a few times rather
+     * than on every pixel.
+     */
+    int win_w, win_h;
+    if (SDL_GetWindowSize(window, &win_w, &win_h) && win_w > 0 && win_h > 0) {
+        float fit = fminf(win_w / (700.0f * m_scale), win_h / (480.0f * m_scale));
+        if (fit < 1.0f) {
+            m_scale *= fmaxf(floorf(fit * 20.0f) / 20.0f, 0.4f);
+        }
+    }
+
     if (io.DisplaySize.x > 640*m_scale) {
         m_extents.x = 25 * m_scale; // Distance from Left
         m_extents.y = 25 * m_scale; // '' Top
