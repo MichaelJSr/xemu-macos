@@ -138,6 +138,7 @@ G_NORETURN void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
 #endif /* CONFIG_USER_ONLY */
 #if defined(XBOX)
 bool xemu_io_pc_is_set(vaddr pc);
+unsigned xemu_io_pc_count(unsigned *filter_bits);
 void tb_phys_invalidate_io(TranslationBlock *tb);
 #endif
 

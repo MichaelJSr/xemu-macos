@@ -835,6 +835,16 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   sessions pooled (load 9-45; negative is fewer): Mcycles/frame
   stream-e2 −2.9% (15/21 pairs), heavy-f1 −0.9% (8/14), cold boot
   +0.7% (6/14, noise); Minsns/frame −0.13% (14/21) and −0.16% (13/14).
+  The translator asks `xemu_io_pc_is_set` for every insn under icount
+  (the pcs `cpu_io_recompile` once saw end their retranslated TB), and
+  its `g_hash_table_contains` was 0.64% of the det cold boot's vCPU.
+  Since 2026-10-16 a 32768-bit filter keyed by a multiplicative pc
+  hash answers first: a cold boot notes 1,262 pcs (3.8% of the bits;
+  the `(f)` line prints both), and a bit is never cleared, like the
+  set. Cold boot, two sessions pooled (load 16-45): Mcycles/frame
+  −1.1% (9/14 pairs), Minsns −0.23% (12/14); stream-e2 and heavy-f1
+  neutral (12 more pairs each: +0.3% and +1.2% median, 6/12 and 4/12,
+  means +0.5% and +0.2% with se 1.1 and 0.9).
 - **`notdirty_write` dirty-check fast path (default on, deliberately
   no fps claim, 2026-08-04).** The store slow path's tail re-read the
   dirty bitmap to decide whether to clear `TLB_NOTDIRTY` after the same

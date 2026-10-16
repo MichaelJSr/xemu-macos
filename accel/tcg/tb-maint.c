@@ -209,16 +209,17 @@ static void xemu_inv_prof_dump(void)
         double secs = xemu_inv_prof_t0_us ?
             (g_get_monotonic_time() - xemu_inv_prof_t0_us) / 1.0e6 : 0.0;
         extern uint64_t xemu_io_ra_misses;  /* translate-all.c */
+        unsigned io_pc_bits, io_pcs = xemu_io_pc_count(&io_pc_bits);
         fprintf(stderr,
                 "xemu:  (f) io_prepare=%llu  cpu_io_recompile=%llu (%.1f%% of "
                 "io_prepare)  window=%.1fs => %.1fk recompiles/s  "
-                "io-ra cache misses=%llu\n",
+                "io-ra cache misses=%llu  io pcs=%u (filter bits %u)\n",
                 (unsigned long long)xemu_io_prepare_calls,
                 (unsigned long long)xemu_io_recompiles,
                 xemu_io_prepare_calls ?
                     100.0 * xemu_io_recompiles / xemu_io_prepare_calls : 0.0,
                 secs, secs > 0.0 ? xemu_io_recompiles / secs / 1000.0 : 0.0,
-                (unsigned long long)xemu_io_ra_misses);
+                (unsigned long long)xemu_io_ra_misses, io_pcs, io_pc_bits);
     }
 
     fprintf(stderr,

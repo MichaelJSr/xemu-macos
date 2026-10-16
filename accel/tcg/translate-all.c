@@ -675,9 +675,26 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr)
  */
 static GHashTable *xemu_io_pcs;
 
+/*
+ * The translator asks for every insn under icount, and a cold boot puts
+ * ~1300 pcs in the set, so a 32768-bit filter keyed by a pc hash (~4%
+ * false hits) answers most of them without the hash table. A bit is set
+ * with its pc and never cleared, as the set is never emptied: a false
+ * hit only costs a lookup.
+ */
+#define XEMU_IO_PC_FILTER_SHIFT 15
+static unsigned long
+xemu_io_pc_filter[BITS_TO_LONGS(1 << XEMU_IO_PC_FILTER_SHIFT)];
+
+static inline unsigned xemu_io_pc_bit(vaddr pc)
+{
+    return (uint32_t)((uint32_t)pc * 0x9e3779b1u) >>
+           (32 - XEMU_IO_PC_FILTER_SHIFT);
+}
+
 bool xemu_io_pc_is_set(vaddr pc)
 {
-    return xemu_io_pcs &&
+    return test_bit(xemu_io_pc_bit(pc), xemu_io_pc_filter) &&
            g_hash_table_contains(xemu_io_pcs, (gpointer)(uintptr_t)(pc + 1));
 }
 
@@ -687,6 +704,14 @@ static void xemu_io_pc_note(vaddr pc)
         xemu_io_pcs = g_hash_table_new(NULL, NULL);
     }
     g_hash_table_add(xemu_io_pcs, (gpointer)(uintptr_t)(pc + 1));
+    set_bit(xemu_io_pc_bit(pc), xemu_io_pc_filter);
+}
+
+/* XEMU_INV_PROF's (f) line: how many pcs, and filter bits set. */
+unsigned xemu_io_pc_count(unsigned *bits)
+{
+    *bits = bitmap_count_one(xemu_io_pc_filter, 1 << XEMU_IO_PC_FILTER_SHIFT);
+    return xemu_io_pcs ? g_hash_table_size(xemu_io_pcs) : 0;
 }
 #endif
 
