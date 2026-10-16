@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cacheflush.h"
 #include "qemu/interval-tree.h"
 #include "qemu/qtree.h"
 #include "exec/cputlb.h"
@@ -1358,6 +1359,8 @@ static unsigned xpage_reg_count;
 static unsigned xpage_reg_gen;
 static bool xpage_reg_overflowed;
 static QemuSpin xpage_reg_lock = { .value = 0 };
+/* The unlink walk's queued jump-patch icache flushes; under xpage_reg_lock. */
+static FlushIdcacheBatch xpage_unlink_icache;
 
 uint64_t xemu_xpage_unlink_events;
 uint64_t xemu_xpage_unlink_dests;
@@ -1420,9 +1423,18 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
      * missing bracket wedged the vCPU thread in a fault loop at the
      * first boot backstop when this landed (no crash report — the
      * monitor answers once, then nothing).
+     *
+     * A stream-e2 walk severs ~300-400 dests and resets ~650-850 jumps
+     * on average, up to ~3k. Each reset's 4-byte icache flush cost
+     * ~350 ns as its own DSB/IC/DSB/ISB, ~80% of the walk, so they are
+     * queued and run as one batch before this returns. The walk runs on
+     * the vCPU's own thread (a CR3 write, or tlb_flush_by_mmuidx, which
+     * asserts it) or with the VM stopped, so no TB executes before the
+     * batch is done.
      */
     int64_t t0 = g_get_monotonic_time();
     qemu_thread_jit_write();
+    flush_idcache_defer_begin(&xpage_unlink_icache);
     while (xpage_reg_count) {
         TranslationBlock *dest = xpage_reg[--xpage_reg_count];
         /* Only the REGISTERED bit — CROSS_EMITTER is translate-time state
@@ -1431,6 +1443,7 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
         tb_jmp_unlink(dest);
         n++;
     }
+    flush_idcache_defer_end(&xpage_unlink_icache);
     qemu_thread_jit_execute();
     xpage_reg_overflowed = false;
     qemu_spin_unlock(&xpage_reg_lock);

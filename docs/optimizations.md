@@ -419,7 +419,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   fallback as belt-and-braces — and the backstop synchronously unlinks
   exactly those chains (`tb_jmp_unlink`), keeping every translation;
   chains relink lazily. Registry overflow (128k dests) falls back to
-  the v0.11 queued full flush.
+  the v0.11 queued full flush. A stream-e2 walk severs ~300 (det) to
+  ~390 (normal mode) dests and resets ~640 to ~840 jumps on average, up
+  to ~3k (`XEMU_INV_PROF` plus a temporary jump counter, 2026-10-15).
+  Each reset's own 4-byte `sys_icache_invalidate` (DSB, IC IVAU, DSB,
+  ISB; ~350 ns on the M2 Ultra) was ~80% of the walk; since 2026-10-15
+  the walk queues them (`flush_idcache_defer_begin`) and runs one
+  sequence before returning. Measured on the misc lane (22329bd8bc plus
+  the MMX commits, before the pinned registers and TLB memo):
+  normal-mode stream-e2 (1800 frames, 2 runs per arm, load 22-25): walk
+  mean 449 → 98 µs, p99 1.2 → 0.3 ms, max 1.4 → 0.4 ms, walks over 1 ms
+  56-95 → 0. Det stream-e2 (3000 frames, 19 pairs, load 14-38): walk
+  mean 285 → 60 µs, Mcycles/frame −1.5% paired median (14/19),
+  Minsns/frame flat. What is left, ~100 ns per reset in both modes, is
+  the list walk and the batched flush.
 - **Inline hard FPU (retired).** The inline x87 cache (native AArch64
   FP with values held in D-regs across instructions; inline `fucomi`,
   `frndint`, the FPU constant loads, 16-bit `FIST` and `FISTTP`; "~30%

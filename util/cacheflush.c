@@ -239,12 +239,83 @@ static void __attribute__((constructor)) init_cache_info(void)
  * performs a call to FlushInstructionCache, through __builtin___clear_cache.
  */
 
+/* This thread's open flush_idcache_defer_begin() queue, if any. */
+static __thread FlushIdcacheBatch *idcache_batch;
+
+static void flush_idcache_batch_run(FlushIdcacheBatch *b);
+
+static bool flush_idcache_deferred(uintptr_t rx, uintptr_t rw, size_t len)
+{
+    FlushIdcacheBatch *b = idcache_batch;
+
+    if (likely(!b)) {
+        return false;
+    }
+    if (b->n == FLUSH_IDCACHE_BATCH_MAX) {
+        flush_idcache_batch_run(b);
+    }
+    b->e[b->n].rx = rx;
+    b->e[b->n].rw = rw;
+    b->e[b->n].len = len;
+    b->n++;
+    return true;
+}
+
+void flush_idcache_defer_begin(FlushIdcacheBatch *b)
+{
+    assert(!idcache_batch);
+    b->n = 0;
+    idcache_batch = b;
+}
+
+void flush_idcache_defer_end(FlushIdcacheBatch *b)
+{
+    assert(idcache_batch == b);
+    idcache_batch = NULL;
+    flush_idcache_batch_run(b);
+}
+
 #ifdef CONFIG_DARWIN
 /* Apple does not expose CTR_EL0, so we must use system interfaces. */
 #include <libkern/OSCacheControl.h>
 
+/*
+ * sys_icache_invalidate() over every entry, paying its barriers once.
+ * Apple cores keep instruction fetch coherent with the dcache
+ * (sys_dcache_flush() is a bare DSB), so libsystem_platform runs DSB,
+ * then IC IVAU per 64-byte line, then DSB and ISB, adding a DSB after
+ * every 20 IC IVAUs on the CPU families in cpus_that_need_dsb_for_ic_ivau
+ * (M1 to M4). Do the same, with that DSB on every Apple core. A 4-byte
+ * patch costs ~30 ns here against ~350 ns as its own call (M2 Ultra).
+ */
+static void flush_idcache_batch_run(FlushIdcacheBatch *b)
+{
+    unsigned k = 0;
+
+    if (!b->n) {
+        return;
+    }
+    asm volatile("dsb\tish" : : : "memory");
+    for (size_t i = 0; i < b->n; i++) {
+        uintptr_t p, end = b->e[i].rx + b->e[i].len;
+
+        for (p = b->e[i].rx & -64; p < end; p += 64) {
+            asm volatile("ic\tivau, %0" : : "r"(p) : "memory");
+            if (++k == 20) {
+                asm volatile("dsb\tish" : : : "memory");
+                k = 0;
+            }
+        }
+    }
+    asm volatile("dsb\tish\n\tisb" : : : "memory");
+    b->n = 0;
+}
+
 void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len)
 {
+    if (flush_idcache_deferred(rx, rw, len)) {
+        return;
+    }
     if (rx == rw) {
         /*
          * sys_icache_invalidate() syncs the dcache and icache,
@@ -256,6 +327,44 @@ void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len)
     sys_icache_invalidate((void *)rx, len);
 }
 #else
+
+/* flush_idcache_range()'s sequence over every entry, barriers paid once. */
+static void flush_idcache_batch_run(FlushIdcacheBatch *b)
+{
+    const unsigned CTR_IDC = 1u << 28;
+    const unsigned CTR_DIC = 1u << 29;
+    const uint64_t ctr_el0 = save_ctr_el0;
+    const uintptr_t icache_lsize = qemu_icache_linesize;
+    const uintptr_t dcache_lsize = qemu_dcache_linesize;
+    uintptr_t p;
+    size_t i;
+
+    if (!b->n) {
+        return;
+    }
+    if (!(ctr_el0 & CTR_IDC)) {
+        for (i = 0; i < b->n; i++) {
+            uintptr_t rw = b->e[i].rw, len = b->e[i].len;
+
+            for (p = rw & -dcache_lsize; p < rw + len; p += dcache_lsize) {
+                asm volatile("dc\tcvau, %0" : : "r" (p) : "memory");
+            }
+        }
+    }
+    asm volatile("dsb\tish" : : : "memory");
+    if (!(ctr_el0 & CTR_DIC)) {
+        for (i = 0; i < b->n; i++) {
+            uintptr_t rx = b->e[i].rx, len = b->e[i].len;
+
+            for (p = rx & -icache_lsize; p < rx + len; p += icache_lsize) {
+                asm volatile("ic\tivau, %0" : : "r"(p) : "memory");
+            }
+        }
+        asm volatile ("dsb\tish" : : : "memory");
+    }
+    asm volatile("isb" : : : "memory");
+    b->n = 0;
+}
 
 /*
  * This is a copy of gcc's __aarch64_sync_cache_range, modified
@@ -269,6 +378,10 @@ void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len)
     const uintptr_t icache_lsize = qemu_icache_linesize;
     const uintptr_t dcache_lsize = qemu_dcache_linesize;
     uintptr_t p;
+
+    if (flush_idcache_deferred(rx, rw, len)) {
+        return;
+    }
 
     /*
      * If CTR_EL0.IDC is enabled, Data cache clean to the Point of Unification

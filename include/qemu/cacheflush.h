@@ -39,4 +39,40 @@ void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len);
 
 #endif
 
+/**
+ * flush_idcache_defer_begin, flush_idcache_defer_end:
+ * @b: caller-owned queue, used by one thread at a time
+ *
+ * Between the two calls, this thread's flush_idcache_range() calls are
+ * queued in @b, then run at _end (or when @b fills) with one barrier
+ * sequence for the whole batch instead of one per call. Code written in
+ * the window must not run, on any thread, before _end returns. Hosts
+ * with coherent caches or without a batched sequence flush at once.
+ */
+#if defined(__aarch64__) && !defined(CONFIG_WIN32)
+
+#define FLUSH_IDCACHE_BATCH_MAX 256
+
+typedef struct FlushIdcacheBatch {
+    size_t n;
+    struct {
+        uintptr_t rx, rw;
+        size_t len;
+    } e[FLUSH_IDCACHE_BATCH_MAX];
+} FlushIdcacheBatch;
+
+void flush_idcache_defer_begin(FlushIdcacheBatch *b);
+void flush_idcache_defer_end(FlushIdcacheBatch *b);
+
+#else
+
+typedef struct FlushIdcacheBatch {
+    char unused;
+} FlushIdcacheBatch;
+
+static inline void flush_idcache_defer_begin(FlushIdcacheBatch *b) { }
+static inline void flush_idcache_defer_end(FlushIdcacheBatch *b) { }
+
+#endif
+
 #endif /* QEMU_CACHEFLUSH_H */
