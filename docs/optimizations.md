@@ -27,6 +27,9 @@ and tag `archive/windows-wave1-wip`.
 
 | Env var | Purpose |
 |---|---|
+| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`; `0` leaves it at the default class (less P-core time and power, slower under load). Deterministic mode's RR thread always requests it. Threads + runtime, P-core QoS |
+| `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
+| `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -940,6 +943,27 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   at load 14-33: cold boot −1.1% (11/16), heavy-f1 −0.9% (14/20),
   stream-e2 +0.1% (7/14), all inside the load noise. The gain is a cold
   boot one; heavy-f1 and stream-e2 gain ≤0.25%.
+- **Guest memory-order barriers only where a device thread can see the
+  order (2026-10-15).** System-mode TCG puts a `dmb ishld` before every
+  guest load and a `dmb ish` before every store (about 21 per hot
+  x87/SSE block) so I/O threads see the x86 order. Under icount nothing
+  reads guest RAM concurrently (APU tick, inline or synced pusher,
+  settled IDE DMA and timers all run on the vCPU thread or with it
+  parked), so icount drops them all (`30316da269`): det heavy-f1, 1200
+  frames, 97.0 → 103.1 fps (3/3, load 9-12), goldens unchanged. Normal
+  mode drops only the load-load barriers (`60fc127871`): on the
+  single-CPU Xbox the writer-ordered publishers a guest polls with
+  loads alone are nvnet RX rings (silent while no network backend is
+  attached) and PFIFO data behind a semaphore, where the guest's own
+  store between the two loads usually orders them; stores keep theirs
+  because OHCI walks guest-linked TD/ED lists from the main loop.
+  `xemu_net_enable` (startup included) restores every barrier in both
+  modes and flushes translations as vCPU safe work. The normal-mode set
+  applied under icount, 5 pairs at load 11-20: +4.1% det frames per
+  Gcycle (5/5), −1.4% host instructions (5/5); windowed fps unreadable
+  at load 35-42. Explicit fences (`mfence`, locked instructions) are
+  untouched. `XEMU_GUEST_MO=1` keeps every barrier (normal-mode switch:
+  the goldens can't see device-thread ordering).
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -1986,7 +2010,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 - **P-core QoS.** PFIFO and vblank-timer threads request
   `QOS_CLASS_USER_INTERACTIVE`, and so does the vCPU thread: the RR
   thread in deterministic mode, the MTTCG thread in normal mode since
-  2026-10-15 (`XEMU_VCPU_QOS=0` leaves it at the default class).
+  2026-10-15 (`94a722acd8`; windowed heavy-f1 37.2 → 58.3 fps, W2
+  41.5 → 54.6, 4/4 each at load 13-64; `XEMU_VCPU_QOS=0` leaves it at
+  the default class).
   Since 2026-10-16 the APU frame thread and its voice workers do too.
   The frame thread holds `d->lock` across each frame (8-frame bursts
   per EP period) and `vp_write` takes it on the vCPU; at the default
@@ -2016,7 +2042,28 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   blocking so the vblank thread can still fire interrupts.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +
   release-wait under `d->pfifo.lock` guarantees no missed wake-up.
-  `halt` via `qatomic_read` matches the writer contract.
+  `halt` via `qatomic_read` matches the writer contract. Normal mode's
+  DMA_PUT doorbell skips the lock (`pfifo_put_doorbell`): a release
+  store of PUT plus a doorbell/parked Dekker pair keeps the
+  no-missed-wakeup guarantee, and only the first doorbell per park
+  takes the lock.
+- **Lockless DMA_PUT doorbell in normal mode (2026-10-15,
+  `3391b92357`).** On windowed heavy-f1 the vCPU spent 12% of its
+  samples in `user_write`, 7.9% of them blocked on `pfifo.lock` while
+  the PFIFO thread held it across the reports safety-valve fence wait
+  (REPORTS_SUBMIT). The doorbell now stores PUT with release (the
+  pusher loads it with acquire) and pairs a doorbell flag with the
+  thread's parked flag, full barrier on both sides: either the vCPU
+  sees the thread parked and kicks it under the lock as before, or the
+  thread sees the doorbell before it parks and runs the pusher again.
+  USER reads skip the lock too (DMA_GET polls would otherwise wait out
+  the same fence); the pusher publishes GET with release.
+  Deterministic mode keeps the locked path (`kick_seq` feeds
+  `pfifo_icount_sync`). vCPU samples in the doorbell 12% → 2.2%;
+  windowed heavy-f1, interleaved 4×45 s at load 2-16: 35.3 → 42.3 fps
+  (+19.7%, 3+/1−). Goldens unchanged; xbox suite 7/7.
+  `XEMU_PFIFO_PUT_LOCK=1` restores the lock in normal mode
+  (normal-mode switch: the goldens always take the locked path).
 - **BQL-free MMIO dispatch for the hottest guest register blocks.**
   `XEMU_MMIO_PROF` measured 78% of 8.2M guest MMIO ops/70 s hitting
   just PFB (`NV_PFB_WBC` polling) and USER doorbells, each paying
