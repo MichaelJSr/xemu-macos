@@ -54,6 +54,15 @@ extern uint64_t xemu_xpage_reg_overflows;
 extern uint64_t xemu_xpage_reg_phys_only;
 extern uint64_t xemu_xpage_unlink_total_us;
 extern uint64_t xemu_xpage_unlink_max_us;
+/*
+ * Jumps into the dests the backstop walked (prof mode): same-page by
+ * tb_add_jump's predicate (xemu_xpage_jump_cross), from an emitter onto
+ * its own physical page, and onto another page; and every link patch.
+ */
+extern uint64_t xemu_xpage_walk_same;
+extern uint64_t xemu_xpage_walk_emitter_same;
+extern uint64_t xemu_xpage_walk_cross;
+extern uint64_t xemu_xpage_links;
 
 /* Gate-0 taken counters, inline-incremented from generated code in prof mode,
  * split by target region: the kernel's identity window (linear >= 0x80000000,

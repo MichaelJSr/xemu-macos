@@ -1211,13 +1211,10 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
      * A dest anywhere else, the source's second page included, was
      * linked across a guest remap and is registered too.
      */
-    {
-        tb_page_addr_t d0 = tb_page_addr0(tb_next) & TARGET_PAGE_MASK;
-        bool phys_cross = d0 != (tb_page_addr0(tb) & TARGET_PAGE_MASK);
+    xemu_xpage_links++;
+    if (xemu_xpage_jump_cross(tb, tb_next)) {
         bool emitter = tb->xemu_xpage_reg & XEMU_XPAGE_TB_CROSS_EMITTER;
-        if (emitter || phys_cross) {
-            xemu_xpage_link_note_cross(tb_next, phys_cross && !emitter);
-        }
+        xemu_xpage_link_note_cross(tb_next, !emitter);
     }
 #endif
 

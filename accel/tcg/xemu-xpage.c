@@ -260,6 +260,21 @@ static void xemu_xpage_dump(void)
             xemu_xpage_unlink_events ?
                 (double)xemu_xpage_unlink_total_us /
                 (double)xemu_xpage_unlink_events : 0.0);
+    {
+        uint64_t walked = xemu_xpage_walk_same + xemu_xpage_walk_emitter_same +
+                          xemu_xpage_walk_cross;
+        fprintf(stderr,
+                "xemu:      walked jumps=%llu: same-page=%llu (%.1f%%) "
+                "emitter-same-page=%llu cross-page=%llu  link patches=%llu "
+                "(%.0f/s)\n",
+                (unsigned long long)walked,
+                (unsigned long long)xemu_xpage_walk_same,
+                walked ? 100.0 * xemu_xpage_walk_same / walked : 0.0,
+                (unsigned long long)xemu_xpage_walk_emitter_same,
+                (unsigned long long)xemu_xpage_walk_cross,
+                (unsigned long long)xemu_xpage_links,
+                secs > 0 ? xemu_xpage_links / secs : 0.0);
+    }
     fprintf(stderr,
             "xemu:      approx per-5s: total=%.0f kernel=%.0f "
             "(kill threshold X=10,000,000/5s; contended runs undercount)\n",

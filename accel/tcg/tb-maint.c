@@ -1419,6 +1419,10 @@ uint64_t xemu_xpage_reg_overflows;
 uint64_t xemu_xpage_reg_phys_only;
 uint64_t xemu_xpage_unlink_total_us;
 uint64_t xemu_xpage_unlink_max_us;
+uint64_t xemu_xpage_walk_same;
+uint64_t xemu_xpage_walk_cross;
+uint64_t xemu_xpage_walk_emitter_same;
+uint64_t xemu_xpage_links;
 
 static void xpage_reg_reset_locked(unsigned gen)
 {
@@ -1484,6 +1488,7 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
      * batch is done.
      */
     int64_t t0 = g_get_monotonic_time();
+    bool prof = xemu_xpage_prof_on();
     qemu_thread_jit_write();
     flush_idcache_defer_begin(&xpage_unlink_icache);
     while (xpage_reg_count) {
@@ -1491,6 +1496,29 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
         /* Only the REGISTERED bit — CROSS_EMITTER is translate-time state
          * that must survive for the TB's remaining lifetime. */
         dest->xemu_xpage_reg &= ~XEMU_XPAGE_TB_REGISTERED;
+        if (unlikely(prof)) {
+            /*
+             * Census of the jumps this walk resets, by tb_add_jump's
+             * registration predicate: same-page ones need no sever. An
+             * emitter's jump onto its own page may come from its
+             * same-page slot (the flag is per TB, not per slot).
+             */
+            TranslationBlock *src;
+            int k;
+
+            qemu_spin_lock(&dest->jmp_lock);
+            TB_FOR_EACH_JMP(dest, src, k) {
+                if (!xemu_xpage_jump_cross(src, dest)) {
+                    xemu_xpage_walk_same++;
+                } else if ((tb_page_addr0(src) ^ tb_page_addr0(dest)) &
+                           TARGET_PAGE_MASK) {
+                    xemu_xpage_walk_cross++;
+                } else {
+                    xemu_xpage_walk_emitter_same++;
+                }
+            }
+            qemu_spin_unlock(&dest->jmp_lock);
+        }
         tb_jmp_unlink(dest);
         n++;
     }

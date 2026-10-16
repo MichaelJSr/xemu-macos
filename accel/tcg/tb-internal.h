@@ -10,6 +10,7 @@
 #define ACCEL_TCG_TB_INTERNAL_TARGET_H
 
 #include "exec/translation-block.h"
+#include "exec/target_page.h"
 
 /*
  * The true return address will often point to a host insn that is part of
@@ -62,6 +63,19 @@ bool xemu_elide_can_do_io(void);
 bool xemu_io_ra_in_last_insn(uintptr_t retaddr);
 /* Either mode: false when io_prepare() will cpu_io_recompile() it. */
 bool xemu_io_ok(CPUState *cpu, uintptr_t retaddr);
+
+/*
+ * Is @src's direct jump into @dest a cross-page chain, which tb_add_jump
+ * registers for the xpage backstop? Yes when @src has a cross-page goto_tb
+ * slot (an emitter registers every link) or @dest is off the physical page
+ * of @src's first byte (page_addr[0] holds the full physical pc).
+ */
+static inline bool xemu_xpage_jump_cross(const TranslationBlock *src,
+                                         const TranslationBlock *dest)
+{
+    return (src->xemu_xpage_reg & XEMU_XPAGE_TB_CROSS_EMITTER) ||
+           ((tb_page_addr0(src) ^ tb_page_addr0(dest)) & TARGET_PAGE_MASK);
+}
 #endif
 
 #endif
