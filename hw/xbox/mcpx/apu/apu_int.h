@@ -149,7 +149,8 @@ typedef struct MCPXAPUState {
  * BQL for MMIO. Deterministic voice processing drops such accesses (a guest
  * bug either way): a read returns 0 and a write is lost. It used to run on
  * workers that could not take the BQL the tick holds, and now runs on the
- * vCPU with the same result.
+ * vCPU with the same result. Realtime voices run on the frame thread, which
+ * holds no BQL, and still take the memory API.
  */
 static inline bool ram_oob_dropped(MCPXAPUState *d)
 {

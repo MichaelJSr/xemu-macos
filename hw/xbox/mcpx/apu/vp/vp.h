@@ -81,8 +81,12 @@ typedef struct VoiceWorkItem {
     int list;
 } VoiceWorkItem;
 
+/*
+ * One partition of a frame's voices (audio.vp.num_workers of them). The
+ * frame runs them one after another on the APU's own thread; a partition
+ * fixes which voices are summed together, and so the float result.
+ */
 typedef struct VoiceWorker {
-    QemuThread thread;
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
     VoiceWorkItem queue[MCPX_HW_MAX_VOICES];
@@ -90,13 +94,9 @@ typedef struct VoiceWorker {
 } VoiceWorker;
 
 typedef struct VoiceWorkDispatch {
-    QemuMutex lock;
     int num_workers;
     VoiceWorker *workers;
-    bool workers_should_exit;
-    QemuCond work_pending;
-    uint64_t workers_pending;
-    QemuCond work_finished;
+    uint64_t workers_pending; /* partitions with voices this frame */
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     VoiceWorkItem queue[MCPX_HW_MAX_VOICES];
     int queue_len;

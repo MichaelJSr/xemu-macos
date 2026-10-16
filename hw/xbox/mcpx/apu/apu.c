@@ -380,9 +380,8 @@ static void *mcpx_apu_frame_thread(void *arg)
      * This thread enters RCU read-side critical sections indirectly:
      * scatter_gather_rw() marks guest RAM dirty after its memcpy, the
      * VP's ram_st* helpers do the same, and the address_space_*
-     * fallbacks take the RCU lock too. Register like the voice worker
-     * threads (vp.c) do so those readers are visible to
-     * synchronize_rcu() instead of being invisible to it.
+     * fallbacks take the RCU lock too. Register so those readers are
+     * visible to synchronize_rcu() instead of being invisible to it.
      */
     rcu_register_thread();
 
@@ -438,9 +437,9 @@ static void *mcpx_apu_frame_thread(void *arg)
 static void mcpx_apu_wait_for_idle(MCPXAPUState *d)
 {
     /*
-     * Worker threads (voice_work_dispatch) read pause_requested atomically
-     * without d->lock; use qatomic_set here so the store is visible
-     * without relying on a lock-release hazard.
+     * The frame thread's waits (throttle, voice_work_dispatch) read
+     * pause_requested atomically; use qatomic_set here so the store is
+     * visible without relying on a lock-release hazard.
      */
     qatomic_set(&d->pause_requested, true);
     qemu_cond_signal(&d->cond);

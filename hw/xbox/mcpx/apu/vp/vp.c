@@ -138,7 +138,7 @@ static inline uint8_t ram_ldb(MCPXAPUState *d, hwaddr addr)
  * (include/qemu/sys_membarrier.h) is a real smp_mb() - two full
  * barriers per call - plus up to four contended atomic bitmap ORs
  * (DIRTY_CLIENTS_NOCODE covers VGA, MIGRATION, NV2A, NV2A_TEX), paid
- * by every voice worker thread on every voice-register store.
+ * by the APU frame thread on every voice-register store.
  *
  * The marking is therefore a per-platform build choice, in the style of
  * the sub-page dirty gate (0aeb1998c3): off on Apple, the platform whose
@@ -361,7 +361,7 @@ static inline uint32_t *voice_snapshot(MCPXAPUState *d, uint16_t h)
  * puts it past d->ram_size and into the address_space_* fallback.
  * That fallback calls prepare_mmio_access() (system/physmem.c), which
  * takes the BQL when the target turns out to be MMIO - and these
- * accessors run on the APU frame thread and the voice workers, with
+ * accessors run on the APU frame thread with
  * d->lock held, while gp_write()/ep_write() take d->lock with the BQL
  * already held (dsp/gp_ep.c). BQL-after-d->lock is the inverse order:
  * a hang, not a crash. So drop the access (reads return 0, writes are
@@ -2239,7 +2239,7 @@ static void get_voice_bin_src_dst(MCPXAPUState *d, int v,
     }
 }
 
-/* One worker's share of a frame: its queue, summed in order. */
+/* One partition's share of a frame: its queue, summed in order. */
 static void __attribute__((noinline))
 voice_worker_run(MCPXAPUState *d, VoiceWorker *w)
 {
@@ -2251,49 +2251,6 @@ voice_worker_run(MCPXAPUState *d, VoiceWorker *w)
         voice_process(d, w->mixbins, w->sample_buf, w->queue[i].voice,
                       w->queue[i].list);
     }
-}
-
-static void *voice_worker_thread(void *arg)
-{
-    MCPXAPUState *d = arg;
-    VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
-
-    rcu_register_thread();
-#if defined(__APPLE__)
-    /* The frame thread waits for the workers while it holds d->lock (apu.c). */
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
-    qemu_mutex_lock(&vwd->lock);
-
-    int worker_id = ctz64(vwd->workers_pending);
-    VoiceWorker *self = &d->vp.voice_work_dispatch.workers[worker_id];
-    self->queue_len = 0;
-
-    do {
-        int64_t start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-        g_dbg.vp.workers[worker_id].num_voices = self->queue_len;
-
-        if (self->queue_len) {
-            qemu_mutex_unlock(&vwd->lock);
-            voice_worker_run(d, self);
-            qemu_mutex_lock(&vwd->lock);
-            /* The dispatcher sums the workers (voice_work_combine). */
-            self->queue_len = 0;
-        }
-
-        vwd->workers_pending &= ~(1 << worker_id);
-        if (!vwd->workers_pending) {
-            qemu_cond_signal(&vwd->work_finished);
-        }
-
-        int64_t end_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-        g_dbg.vp.workers[worker_id].time_us = end_time - start_time;
-
-        qemu_cond_wait(&vwd->work_pending, &vwd->lock);
-    } while (!vwd->workers_should_exit);
-
-    rcu_unregister_thread();
-    return NULL;
 }
 
 static void voice_work_enqueue(MCPXAPUState *d, int v, int list)
@@ -2339,7 +2296,7 @@ static void voice_work_schedule(MCPXAPUState *d)
             group = true;
         }
 
-        // Assign voice to worker
+        // Assign voice to a partition
         VoiceWorker *worker = &vwd->workers[next_worker_to_schedule];
         worker->queue[worker->queue_len++] = vwd->queue[i];
         vwd->workers_pending |= 1 << next_worker_to_schedule;
@@ -2370,8 +2327,8 @@ static bool any_queued_voice_locked(MCPXAPUState *d)
 }
 
 /*
- * Sum the workers that ran, in worker order, into the frame's mixbins: a
- * fixed float order (completion order would vary from run to run).
+ * Sum the partitions that ran, in partition order, into the frame's
+ * mixbins: a fixed float order.
  */
 static void voice_work_combine(MCPXAPUState *d,
                                float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME],
@@ -2424,52 +2381,46 @@ voice_work_dispatch(MCPXAPUState *d,
         qemu_cond_timedwait(&d->cond, &d->lock, 1);
     }
 
-    if (d->det.enabled) {
-        /*
-         * Deterministic mode runs each worker's share here, in worker
-         * order: the same partition, per-worker sums and combine order as
-         * concurrent workers would give, without the hand-off, whose wake-up
-         * latency cost more than the voices themselves (and stalled the
-         * guest whenever the host descheduled a worker).
-         */
-        if (vwd->queue_len) {
-            memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
-            voice_work_schedule(d);
-            uint64_t ran = vwd->workers_pending;
-            d->det.voices_inline = true;
-            for (int w = 0; w < vwd->num_workers; w++) {
-                if (ran & (1ULL << w)) {
-                    voice_worker_run(d, &vwd->workers[w]);
-                    vwd->workers[w].queue_len = 0;
-                }
-            }
-            d->det.voices_inline = false;
-            vwd->workers_pending = 0;
-            vwd->queue_len = 0;
-            voice_work_combine(d, mixbins, ran);
-        }
-        return;
-    }
-
-    qemu_mutex_lock(&vwd->lock);
-
+    /*
+     * Each partition's share runs here, in partition order, then
+     * voice_work_combine sums them in that order: the float result
+     * depends on the partition count alone, not on threads or the host.
+     * Voice worker threads used to run the partitions, but a frame's
+     * voices are tens of microseconds of work, less than their wake-ups
+     * and hand-off cost while the frame thread waited for them holding
+     * d->lock, which vp_write takes on the vCPU.
+     */
+    bool timed = !d->det.enabled;
     if (vwd->queue_len) {
         memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
-
-        // Signal workers and wait for completion
         voice_work_schedule(d);
         uint64_t ran = vwd->workers_pending;
-        qemu_cond_broadcast(&vwd->work_pending);
-        qemu_cond_wait(&vwd->work_finished, &vwd->lock);
-        assert(!vwd->workers_pending);
+        int64_t t = start_time;
+        /* ram_oob_dropped: the tick holds the BQL; drop, don't take it */
+        d->det.voices_inline = d->det.enabled;
+        for (int w = 0; w < vwd->num_workers; w++) {
+            VoiceWorker *worker = &vwd->workers[w];
+            g_dbg.vp.workers[w].num_voices = worker->queue_len;
+            if (ran & (1ULL << w)) {
+                voice_worker_run(d, worker);
+                worker->queue_len = 0;
+            }
+            if (timed) {
+                int64_t t1 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+                g_dbg.vp.workers[w].time_us = t1 - t;
+                t = t1;
+            }
+        }
+        d->det.voices_inline = false;
+        vwd->workers_pending = 0;
         vwd->queue_len = 0;
         voice_work_combine(d, mixbins, ran);
     }
 
-    int64_t end_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-    g_dbg.vp.total_worker_time_us = end_time - start_time;
-
-    qemu_mutex_unlock(&vwd->lock);
+    if (timed) {
+        int64_t end_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        g_dbg.vp.total_worker_time_us = end_time - start_time;
+    }
 }
 
 static void voice_work_init(MCPXAPUState *d)
@@ -2477,51 +2428,24 @@ static void voice_work_init(MCPXAPUState *d)
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
     /*
-     * Deterministic mode pins the count: which voices one worker sums
-     * together changes the float result, and so would differ by host.
-     * Otherwise at most 4 too: a frame's voices are tens of microseconds
-     * of work, and one wake-up broadcast to every core (24 on an M2 Ultra)
-     * mostly bought lock contention on the APU frame thread.
+     * Which voices one partition sums together changes the float result,
+     * so the default count is fixed, never taken from the host: the same
+     * 4 in both modes, so a realtime frame mixes exactly as the
+     * deterministic one does.
      */
-    int num_workers = g_config.audio.vp.num_workers ?:
-                      (d->det.enabled ? 4 :
-                       MIN(SDL_GetNumLogicalCPUCores(), 4));
+    int num_workers = g_config.audio.vp.num_workers ?: 4;
     vwd->num_workers = MAX(1, MIN(num_workers, MAX_VOICE_WORKERS));
     vwd->workers = g_malloc0_n(vwd->num_workers, sizeof(VoiceWorker));
-    vwd->workers_should_exit = false;
     vwd->workers_pending = 0;
     vwd->queue_len = 0;
 
     g_dbg.vp.num_workers = vwd->num_workers;
-
-    qemu_mutex_init(&vwd->lock);
-    qemu_cond_init(&vwd->work_pending);
-    qemu_cond_init(&vwd->work_finished);
-    if (d->det.enabled) {
-        return; /* voices run on the vCPU (voice_work_dispatch) */
-    }
-    qemu_mutex_lock(&vwd->lock);
-    for (int i = 0; i < vwd->num_workers; i++) {
-        vwd->workers_pending |= 1 << i;
-        qemu_thread_create(&vwd->workers[i].thread, "mcpx.voice_worker",
-                           voice_worker_thread, d, QEMU_THREAD_JOINABLE);
-    }
-    qemu_cond_wait(&vwd->work_finished, &vwd->lock);
-    assert(!vwd->workers_pending);
-    qemu_mutex_unlock(&vwd->lock);
 }
 
 static void voice_work_finalize(MCPXAPUState *d)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
-    qemu_mutex_lock(&vwd->lock);
-    vwd->workers_should_exit = true;
-    qemu_cond_broadcast(&vwd->work_pending);
-    qemu_mutex_unlock(&vwd->lock);
-    for (int i = 0; i < vwd->num_workers && !d->det.enabled; i++) {
-        qemu_thread_join(&vwd->workers[i].thread);
-    }
     g_free(vwd->workers);
     vwd->workers = NULL;
 }

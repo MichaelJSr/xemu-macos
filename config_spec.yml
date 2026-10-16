@@ -329,7 +329,7 @@ audio:
   vp:
     num_workers:
       type: integer
-      default: 0  # 0 = auto
+      default: 0  # 0 = 4 (voice partitions, run in turn on the APU thread)
   use_dsp: bool
   # Inline basic-block JIT for the C interpreter engine (AArch64
   # POSIX hosts only — DSP56K_JIT_SUPPORTED, dsp56k_jit_arm64.h),

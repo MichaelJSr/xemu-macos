@@ -37,9 +37,9 @@
  * samples) at a time, without volume_limit applied. Periods the APU does
  * not run (VM paused, APU gated) leave no gap.
  *
- * Both run where the APU does: the frame thread and the voice workers in
- * real time, the vCPU thread (BQL held) under icount, where the files are
- * as deterministic as the RAM. Neither changes what the guest sees, and
+ * Both run where the APU does: the frame thread in real time, the vCPU
+ * thread (BQL held) under icount, where the files are as deterministic as
+ * the RAM. Neither changes what the guest sees, and
  * both are flushed when the VM stops, when they stop, and at exit; the
  * voice log also at a row 250 ms or more after its last flush (its file
  * plumbing is ui/xemu-filelog.c's), the WAV (header included) every

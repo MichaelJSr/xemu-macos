@@ -1788,7 +1788,7 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 - **Atomic consistency.** `d->regs[]` writers, `voice_locked[]`,
   `pause_requested`, `NV_PAPU_FEMEMADDR` load, and `VPVADDR` /
   `FENADDR` reads in lock-free VP paths all use `qatomic_*` so the
-  VP frame thread, workers, and lock-free MMIO dispatcher agree
+  VP frame thread and the lock-free MMIO dispatcher agree
   under weak ordering. `fe_method`'s register reads (FECV / FEAV /
   list tops / VPSGEADDR / VPSSLADDR / FETFORCE1) follow the same
   contract.
@@ -1960,6 +1960,25 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   removed 2026-10-15, the harness is in `1f444fa272`/`4668947cc9`)
   and the `dsp56k_jit_helper_update_rn` shim. No generated-code
   change.
+- **Voices run on the APU frame thread (2026-10-16).** Four voice
+  worker threads summed a frame's voices in partitions while the frame
+  thread waited for them holding `d->lock`, which `vp_write` takes on
+  the vCPU. A frame's voices are 10-15 µs of work; each worker woke 1500
+  times a second for ~0.5% user time and 70-90% sys, and the frame
+  thread's broadcast-and-wait took 23-27 µs a frame. `voice_work_dispatch`
+  now runs the partitions in order on the frame thread and sums them in
+  that order, as deterministic mode already did, so the floats are the
+  same. `audio.vp.num_workers` still sets the partition count; its
+  default is 4 in both modes (normal mode took `MIN(cores, 4)`), so a
+  realtime frame mixes exactly as a deterministic one. Windowed, muted,
+  30 s windows, ABBA, load 31-74: process CPU heavy-f1 184.1/182.3% →
+  170.3/175.0% (−10.5 points), W2 168.7/172.7% → 157.4/161.5% (−11.2);
+  the APU's threads 15.1% → 4.5% of a core (the frame thread 6.8% →
+  4.5%, its sys 2.9% → 0.7%); `XEMU_APU_PROF` 9-10% → 3.5-4.1% at 1500
+  frames/s. xwx on heavy-f1 (load 18-21): the vCPU's `d->lock` waits in
+  `vp_write` 1.12% → 0.52% of wall (mean 39 → 17 µs, max 951 → 321 µs),
+  the frame thread's broadcasts 45k → 154 per 30 s. Normal-mode
+  `XEMU_AUDIO_WAV` captures show no gaps. Deterministic goldens unchanged.
 
 ### Input
 
@@ -2018,7 +2037,8 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   2026-10-15 (`94a722acd8`; windowed heavy-f1 37.2 → 58.3 fps, W2
   41.5 → 54.6, 4/4 each at load 13-64; `XEMU_VCPU_QOS=0` leaves it at
   the default class).
-  Since 2026-10-16 the APU frame thread and its voice workers do too.
+  Since 2026-10-16 the APU frame thread does too (its voice workers did
+  until the voices moved onto it, see MCPX APU).
   The frame thread holds `d->lock` across each frame (8-frame bursts
   per EP period) and `vp_write` takes it on the vCPU; at the default
   class (PRI 29-31, partly on E-cores) host load preempted it inside the
