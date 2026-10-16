@@ -51,7 +51,6 @@ done
 for iso in $ISOS; do [[ -f $iso ]] || { echo "no such iso: $iso" >&2; exit 1; }; done
 [[ -f $CONFIG_SRC ]] || { echo "config not found: $CONFIG_SRC" >&2; exit 1; }
 [[ -d $APP_SRC ]] || { echo "bundle not found: $APP_SRC" >&2; exit 1; }
-if [[ $APP_SRC:A == $ROOT/dist/xemu.app ]]; then :; fi   # cloned below, never run in place
 
 mkdir -p $OUT
 OUT=$OUT:A
@@ -59,6 +58,7 @@ WORK=$(mktemp -d /tmp/xemu-bootsmoke.XXXXXX)
 cleanup() { xemu_auto_end; (( KEEP_WORK )) || rm -rf $WORK; }
 trap cleanup EXIT
 
+# Always run a clone, never dist/xemu.app in place.
 APP=$WORK/xemu-smoke.app
 cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
 APPBIN=$APP/Contents/MacOS/xemu
