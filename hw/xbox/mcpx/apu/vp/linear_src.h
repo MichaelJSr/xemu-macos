@@ -72,16 +72,14 @@ static inline double linear_src_fmod_one(double x)
  * libsamplerate's linear_vari_process, for one src_process() call; false
  * on its one error (a ratio gone bad, which a valid target never makes).
  */
-static inline bool linear_src_process(LinearSrc *s, const float *in,
-                                      long in_frames, float *out,
-                                      long out_frames, double target,
-                                      long *in_used_frames,
-                                      long *out_gen_frames)
+static inline __attribute__((always_inline)) bool
+linear_src_process(LinearSrc *s, const float *in, long in_frames, float *out,
+                   long out_frames, double target, long *in_used_frames,
+                   long *out_gen_frames, const int channels)
 {
 #if defined(__clang__)
 #pragma clang fp contract(off)
 #endif
-    const int channels = s->channels;
     long in_count, in_used, out_count, out_gen;
     double src_ratio, step, input_index, rem;
     bool ramp;
@@ -175,11 +173,15 @@ static inline bool linear_src_process(LinearSrc *s, const float *in,
     return true;
 }
 
-/* libsamplerate's src_callback_read: @frames frames of output into @out. */
-static inline long linear_src_callback_read(LinearSrc *s,
-                                            LinearSrcCallback cb,
-                                            void *opaque, double ratio,
-                                            long frames, float *out)
+/*
+ * libsamplerate's src_callback_read: @frames frames of output into @out.
+ * @channels is s->channels, passed as a constant so that each caller gets
+ * the per-sample loops compiled for its channel count.
+ */
+static inline __attribute__((always_inline)) long
+linear_src_callback_read(LinearSrc *s, LinearSrcCallback cb, void *opaque,
+                         double ratio, long frames, float *out,
+                         const int channels)
 {
     const float *in = s->saved_data;
     long in_frames = s->saved_frames;
@@ -200,14 +202,14 @@ static inline long linear_src_callback_read(LinearSrc *s,
             end_of_input = in_frames == 0;
         }
         if (!linear_src_process(s, in, in_frames, out, frames - gen, ratio,
-                                &used, &made)) {
+                                &used, &made, channels)) {
             s->saved_data = in;
             s->saved_frames = in_frames;
             return 0;
         }
-        in += used * s->channels;
+        in += used * channels;
         in_frames -= used;
-        out += made * s->channels;
+        out += made * channels;
         gen += made;
         if (end_of_input && made == 0) {
             break;

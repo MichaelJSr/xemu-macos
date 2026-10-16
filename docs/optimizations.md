@@ -1531,6 +1531,13 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   buffer gave, not the voice's previous block. Det host instructions per
   frame -0.14% on heavy-f1 and -0.42% on stream-e2 (6/6 pairs each),
   -2.2% inside the APU tick.
+- **Resampler loops per channel count.** `linear_src_callback_read`
+  takes the channel count as a constant, and `voice_src_read` builds it
+  once for mono and once for stereo, out of line (inlining both copies
+  into `voice_worker_run` cost more instructions than it saved). Same
+  operations in the same order, fused where they were. Det host
+  instructions per frame -0.27% heavy-f1 and -0.16% stream-e2 on top of
+  the ADPCM reuse (6/6 pairs each), -2.0% inside the APU tick.
 - **Accelerate / vDSP.** An inline fused loop (Apple Silicon; `vDSP_vsma`
   on Intel) for 8-bin × 32-sample mix accumulation, skipping zero-gain
   sends, `vDSP_vadd` for `float_accumulate`; `float_to_24b`

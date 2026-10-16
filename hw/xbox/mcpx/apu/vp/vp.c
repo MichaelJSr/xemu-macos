@@ -1634,6 +1634,19 @@ static long voice_resample_callback(void *cb_data, float **data)
     return sample_count;
 }
 
+/* The resampler, compiled for each channel count. */
+static __attribute__((noinline)) long
+voice_src_read(MCPXAPUVoiceFilter *filter, double ratio, long frames,
+               float *out)
+{
+    if (filter->src.channels == 2) {
+        return linear_src_callback_read(&filter->src, voice_resample_callback,
+                                        filter, ratio, frames, out, 2);
+    }
+    return linear_src_callback_read(&filter->src, voice_resample_callback,
+                                    filter, ratio, frames, out, 1);
+}
+
 static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                           int requested_num, float rate)
 {
@@ -1666,10 +1679,8 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     }
 
     if (stereo) {
-        int count = linear_src_callback_read(&filter->src,
-                                             voice_resample_callback, filter,
-                                             rate, requested_num,
-                                             (float *)samples);
+        int count = voice_src_read(filter, rate, requested_num,
+                                   (float *)samples);
         if (count == -1) {
             DPRINTF("resample error\n");
         }
@@ -1692,9 +1703,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
      */
     assert(requested_num <= NUM_SAMPLES_PER_FRAME);
     float mono_out[NUM_SAMPLES_PER_FRAME];
-    int count = linear_src_callback_read(&filter->src,
-                                         voice_resample_callback, filter,
-                                         rate, requested_num, mono_out);
+    int count = voice_src_read(filter, rate, requested_num, mono_out);
     if (count == -1) {
         DPRINTF("resample error\n");
     }
