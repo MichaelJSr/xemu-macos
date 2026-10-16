@@ -37,7 +37,10 @@
  *
  * insn_start word 2 carries both deferrals: bits 0-11 the FIP distance,
  * bits 12-19 the pending x87 stores by shadow slot, bits 20-22 how far
- * shadow slot 0 sits from fpstt.
+ * shadow slot 0 sits from fpstt, and the deferred stack bookkeeping
+ * (translate.c x87_wt_land): bits 23-25 how far fpstt moves, bits 26-33
+ * which tag bytes land (by slot, from the same base as the shadows) and
+ * bits 34-41 their values.
  */
 #ifndef TARGET_I386_XEMU_X87_H
 #define TARGET_I386_XEMU_X87_H
@@ -47,6 +50,13 @@
 #define XEMU_X87_W2_FIP_MASK    0xfffu
 #define XEMU_X87_W2_PEND_SHIFT  12
 #define XEMU_X87_W2_TOP_SHIFT   20
+#define XEMU_X87_W2_MOVE_SHIFT  23
+#define XEMU_X87_W2_TAGM_SHIFT  26
+#define XEMU_X87_W2_TAGV_SHIFT  34
+/* The stack fields, cleared when a flush in the insn lands them early. */
+#define XEMU_X87_W2_STACK_MASK  ((7ull << XEMU_X87_W2_MOVE_SHIFT) | \
+                                 (0xffull << XEMU_X87_W2_TAGM_SHIFT) | \
+                                 (0xffull << XEMU_X87_W2_TAGV_SHIFT))
 
 /* (1) census -------------------------------------------------------------- */
 static uint64_t xemu_x87_fip_legacy;     /* per-insn FIP/FCS store pairs */
@@ -59,6 +69,9 @@ static uint64_t xemu_sse_comi_sd;        /* (U)COMISD -- 64-bit scalar form */
 static uint64_t xemu_x87_wt_writes;      /* write-through results (set_st) */
 static uint64_t xemu_x87_wt_st80f;       /* ... st80f actually executed */
 static uint64_t xemu_x87_wt_landed;      /* deferred stores landed by restores */
+static uint64_t xemu_x87_wt_stack_landed; /* ... deferred fpstt/tags */
+static uint64_t xemu_x87_wt_stack_early; /* fpstt/tags landed early in an
+                                          * insn (x87_wt_land_early) */
 static uint64_t xemu_x87_wt_cmp_inline;  /* fucom*, fcomi* on the doubles */
 static uint64_t xemu_x87_wt_cmp_helper;  /* ... left to the helper */
 static uint64_t xemu_x87_wt_fcmov_inline; /* fcmov as a select */
@@ -86,6 +99,8 @@ static uint64_t xemu_x87_wt_rst_viol;    /* poison left after the restore,
                                           * a shadow the slow path did not
                                           * store, or a landing that changes
                                           * a register already stored */
+static uint64_t xemu_x87_wt_top_checks;  /* deferred fpstt/tags checked */
+static uint64_t xemu_x87_wt_top_viol;    /* ... != the eager copy */
 
 static void xemu_x87_dump(void)
 {
@@ -102,10 +117,13 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_sse_comi_ss,
             (unsigned long long)xemu_sse_comi_sd);
     fprintf(stderr, "xemu: x87 wt stores: writes=%llu st80f=%llu "
-            "landed-by-restore=%llu\n",
+            "landed-by-restore=%llu stack-landed-by-restore=%llu "
+            "stack-early=%llu\n",
             (unsigned long long)xemu_x87_wt_writes,
             (unsigned long long)xemu_x87_wt_st80f,
-            (unsigned long long)xemu_x87_wt_landed);
+            (unsigned long long)xemu_x87_wt_landed,
+            (unsigned long long)xemu_x87_wt_stack_landed,
+            (unsigned long long)xemu_x87_wt_stack_early);
     fprintf(stderr, "xemu: x87 wt compares: inline=%llu helper=%llu "
             "fcmov inline=%llu branch=%llu\n",
             (unsigned long long)xemu_x87_wt_cmp_inline,
@@ -127,7 +145,8 @@ static void xemu_x87_dump(void)
             "wt-boundary-violations=%llu wt-flush-violations=%llu "
             "wt-exits=%llu wt-exit-violations=%llu "
             "wt-restores=%llu wt-restore-pending=%llu "
-            "wt-restore-violations=%llu\n",
+            "wt-restore-violations=%llu wt-stack-checks=%llu "
+            "wt-stack-violations=%llu\n",
             (unsigned long long)xemu_x87_wt_bnd_checks,
             (unsigned long long)xemu_x87_wt_bnd_viol,
             (unsigned long long)xemu_x87_wt_flush_viol,
@@ -135,7 +154,9 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_wt_exit_viol,
             (unsigned long long)xemu_x87_wt_rst_checks,
             (unsigned long long)xemu_x87_wt_rst_pend,
-            (unsigned long long)xemu_x87_wt_rst_viol);
+            (unsigned long long)xemu_x87_wt_rst_viol,
+            (unsigned long long)xemu_x87_wt_top_checks,
+            (unsigned long long)xemu_x87_wt_top_viol);
 }
 
 static void xemu_x87_arm_dump(void)
@@ -519,16 +540,51 @@ static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend,
 }
 
 /*
+ * Stack half: the tag bytes and the fpstt move still deferred at the
+ * start of the insn (translate.c x87_wt_land). env->fpstt is still the
+ * flush interval's, which nothing in a write-through block writes before
+ * the flush: tag slot r is register (fpstt + top + r) & 7, as for the
+ * stores, then fpstt moves.
+ */
+static void xemu_x87_restore_stack(CPUX86State *env, uint64_t word2,
+                                   unsigned top)
+{
+    unsigned move = (word2 >> XEMU_X87_W2_MOVE_SHIFT) & 7;
+    unsigned tagm = (word2 >> XEMU_X87_W2_TAGM_SHIFT) & 0xff;
+    unsigned tagv = (word2 >> XEMU_X87_W2_TAGV_SHIFT) & 0xff;
+
+    if (!move && !tagm) {
+        return;
+    }
+    for (int r = 0; r < 8; r++) {
+        if (tagm & (1u << r)) {
+            env->fptags[(env->fpstt + top + r) & 7] = (tagv >> r) & 1;
+        }
+    }
+    env->fpstt = (env->fpstt + move) & 7;
+    xemu_x87_wt_stack_landed++;
+    if (xemu_x87_refute_on()) {
+        xemu_x87_wt_top_checks++;
+        xemu_x87_wt_top_viol += env->fpstt != env->xemu_x87_fpstt_chk ||
+                                memcmp(env->fptags, env->xemu_x87_fptags_chk,
+                                       sizeof(env->fptags)) != 0;
+    }
+}
+
+/*
  * x86_restore_state_to_opc() calls this on every mid-block exit (a guest
  * fault, cpu_io_recompile) with the insn's restored eip and insn_start word
- * 2 (FIP distance and pending x87 stores, see XEMU_X87_W2_*).
+ * 2 (FIP distance, pending x87 stores and stack, see XEMU_X87_W2_*).
  */
 void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
                       uint64_t word2)
 {
+    unsigned top = (word2 >> XEMU_X87_W2_TOP_SHIFT) & 7;
+
     xemu_x87_restore_fip(env, tb, word2 & XEMU_X87_W2_FIP_MASK);
     xemu_x87_restore_pend(env, (word2 >> XEMU_X87_W2_PEND_SHIFT) & 0xff,
-                          (word2 >> XEMU_X87_W2_TOP_SHIFT) & 7);
+                          top);
+    xemu_x87_restore_stack(env, word2, top);
 }
 
 /* Run-length proxy: closed by the same flush that closes the register cache. */

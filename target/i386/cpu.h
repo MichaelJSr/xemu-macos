@@ -1935,6 +1935,9 @@ typedef struct CPUArchState {
      */
     double xemu_x87_shadow[8];
     double xemu_x87_shadow_chk[8];
+    /* XEMU_X87_REFUTE's eager fpstt and tags (translate.c x87_wt_land). */
+    uint32_t xemu_x87_fpstt_chk;
+    uint8_t xemu_x87_fptags_chk[8];
 #endif
 #ifdef TARGET_X86_64
     uint8_t xtilecfg[64];

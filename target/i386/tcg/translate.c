@@ -284,6 +284,24 @@ typedef struct DisasContext {
      * than a double (fldt, fild m64, fldpi, a softfloat helper's result).
      */
     uint8_t wt_exact;
+    /*
+     * Deferred stack bookkeeping (x87_wt_land): push and pop move only
+     * fpstt_delta and these tag bytes, by slot relative to wt_top, which
+     * holds env->fpstt as the flush interval found it (loaded on first
+     * use); env->fpstt and env->fptags catch up at the next flush. The
+     * wt_insn_tag_* copies are their values at the start of the insn;
+     * wt_w2_fp: word 2 carries them and fpstt_delta (an access before any
+     * flush in this insn), and wt_w2_pos is where that access's spill
+     * begins (x87_wt_land_early).
+     */
+    TCGv_i32 wt_top;
+    uint8_t wt_tag_mask;
+    uint8_t wt_tag_val;
+    uint8_t wt_insn_tag_mask;
+    uint8_t wt_insn_tag_val;
+    bool wt_insn_fp;
+    bool wt_w2_fp;
+    TCGOp *wt_w2_pos;
     /* The call being emitted reads only its arguments (gen_pure_call_*). */
     bool pure_call;
     /* fpstt is 0 and every tag valid since an MMX insn (gen_enter_mmx). */
@@ -1945,18 +1963,39 @@ typedef struct X87Ptr {
     intptr_t ofs;
 } X87Ptr;
 
-/* (fpstt + opreg) & 7; fpstt itself is always 0..7. */
-static TCGv_i32 gen_st_index(int opreg)
+static bool x87_wt(DisasContext *s);
+#if defined(XBOX)
+static TCGv_i32 x87_wt_top(DisasContext *s);
+#endif
+
+/* (top + opreg) & 7; top itself is always 0..7. */
+static TCGv_i32 gen_top_index(TCGv_i32 top, int opreg)
 {
     TCGv_i32 idx;
 
     if (opreg == 0) {
-        return fpstt;
+        return top;
     }
     idx = tcg_temp_new_i32();
-    tcg_gen_addi_i32(idx, fpstt, opreg);
+    tcg_gen_addi_i32(idx, top, opreg);
     tcg_gen_andi_i32(idx, idx, 7);
     return idx;
+}
+
+/*
+ * (fpstt + opreg) & 7. Write-through blocks defer fpstt (x87_wt_land):
+ * there it is the interval's starting fpstt plus fpstt_delta.
+ */
+static TCGv_i32 gen_st_index(int opreg)
+{
+#if defined(XBOX)
+    DisasContext *s = tcg_ctx->disas_ctx;
+
+    if (x87_wt(s)) {
+        return gen_top_index(x87_wt_top(s), (s->fpstt_delta + opreg) & 7);
+    }
+#endif
+    return gen_top_index(fpstt, opreg);
 }
 
 static X87Ptr gen_stn_ptr(int opreg)
@@ -2363,6 +2402,204 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
 }
 
 /*
+ * Deferred stack bookkeeping. Push and pop only move fpstt_delta and note
+ * the tag byte (x87_wt_set_tag); env->fpstt and env->fptags catch up at
+ * the next flush (x87_wt_land), from wt_top, env->fpstt as the flush
+ * interval found it. Nothing else in a write-through block writes
+ * env->fpstt (the fpstt global is unused there), so it holds wt_top at
+ * every exit, and an insn's first guest access before any flush puts the
+ * insn's starting delta and tags in word 2 (x87_wt_spill), which a
+ * restore lands (xemu_x87_restore_stack).
+ *
+ * A flush after that access in the same insn lands them as well, so an
+ * exit later in the insn must not apply them again: fpstt would move
+ * twice. That flush moves a landing of the insn's starting state to just
+ * before the access and clears the stack fields from word 2, whose
+ * shadow base then sits -delta from the fpstt landed there
+ * (x87_wt_land_early). wt_top is loaded before that point, so the moved
+ * code and the flush both build on the interval's fpstt.
+ *
+ * XEMU_X87_REFUTE keeps the eager fpstt and tags in env's *_chk copies,
+ * synced from env where wt_top is loaded, and compares the deferred view
+ * with them at every insn boundary, flush and restore.
+ */
+static void x87_wt_chk_sync(TCGv_i32 top)
+{
+    TCGv_i64 t = tcg_temp_new_i64();
+
+    tcg_gen_st_i32(top, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
+    tcg_gen_ld_i64(t, tcg_env, offsetof(CPUX86State, fptags));
+    tcg_gen_st_i64(t, tcg_env, offsetof(CPUX86State, xemu_x87_fptags_chk));
+}
+
+static TCGv_i32 x87_wt_top(DisasContext *s)
+{
+    if (!s->wt_top) {
+        s->wt_top = tcg_temp_new_i32();
+        tcg_gen_ld_i32(s->wt_top, tcg_env, offsetof(CPUX86State, fpstt));
+        if (unlikely(xemu_x87_refute_on())) {
+            x87_wt_chk_sync(s->wt_top);
+        }
+    }
+    return s->wt_top;
+}
+
+/* Refuter: the eager copy of "fpstt += move; tag(ST(opreg)) = value". */
+static void x87_wt_chk_step(DisasContext *s, int move, int opreg, int value)
+{
+    TCGv_i32 chk = tcg_temp_new_i32();
+
+    x87_wt_top(s);
+    tcg_gen_ld_i32(chk, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
+    if (move) {
+        tcg_gen_addi_i32(chk, chk, move);
+        tcg_gen_andi_i32(chk, chk, 7);
+        tcg_gen_st_i32(chk, tcg_env,
+                       offsetof(CPUX86State, xemu_x87_fpstt_chk));
+    }
+    if (value >= 0) {
+        TCGv_ptr p = tcg_temp_new_ptr();
+        tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_top_index(chk, opreg), 0);
+        tcg_gen_st8_i32(tcg_constant_i32(value), p,
+                        offsetof(CPUX86State, xemu_x87_fptags_chk[0]));
+    }
+}
+
+/* fpstt += move (push -1, pop +1, fdecstp, fincstp). */
+static void x87_wt_move(DisasContext *s, int move)
+{
+    if (unlikely(xemu_x87_refute_on())) {
+        x87_wt_chk_step(s, move, 0, -1);
+    }
+    s->fpstt_delta += move;
+}
+
+/* The tag of ST(opreg) = value (0 valid, 1 empty), as gen_set_fptag_stn. */
+static void x87_wt_set_tag(DisasContext *s, int opreg, int value)
+{
+    int r = (s->fpstt_delta + opreg) & 7;
+
+    if (unlikely(xemu_x87_refute_on())) {
+        x87_wt_chk_step(s, 0, opreg, value);
+    }
+    s->wt_tag_mask |= 1 << r;
+    s->wt_tag_val = (s->wt_tag_val & ~(1 << r)) | (value << r);
+}
+
+/* Emit the tag bytes `mask`/`val` by slot from top, and fpstt = top + move. */
+static void x87_wt_gen_land(TCGv_i32 top, uint8_t mask, uint8_t val,
+                            int move)
+{
+    for (int r = 0; r < 8; r++) {
+        if (mask & (1 << r)) {
+            TCGv_ptr p = tcg_temp_new_ptr();
+            tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_top_index(top, r), 0);
+            tcg_gen_st8_i32(tcg_constant_i32((val >> r) & 1), p,
+                            offsetof(CPUX86State, fptags[0]));
+        }
+    }
+    if (move & 7) {
+        tcg_gen_st_i32(gen_top_index(top, move & 7), tcg_env,
+                       offsetof(CPUX86State, fpstt));
+    }
+}
+
+/* Refuter: count env's fpstt and tags differing from the eager copy. */
+static void x87_wt_chk_env(void)
+{
+    TCGv_i32 a = tcg_temp_new_i32(), b = tcg_temp_new_i32();
+    TCGv_i64 x = tcg_temp_new_i64(), y = tcg_temp_new_i64();
+
+    tcg_gen_ld_i32(a, tcg_env, offsetof(CPUX86State, fpstt));
+    tcg_gen_ld_i32(b, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
+    xemu_x87_gen_ne_count_i32(&xemu_x87_wt_top_viol, a, b);
+    tcg_gen_ld_i64(x, tcg_env, offsetof(CPUX86State, fptags));
+    tcg_gen_ld_i64(y, tcg_env, offsetof(CPUX86State, xemu_x87_fptags_chk));
+    tcg_gen_setcond_i64(TCG_COND_NE, x, x, y);
+    xemu_x87_gen_acc_i64(&xemu_x87_wt_top_viol, x);
+    xemu_gen_counter_inc(&xemu_x87_wt_top_checks);
+}
+
+/*
+ * Refuter, at the top of every insn: the deferred view (wt_top +
+ * fpstt_delta, env's tags under the noted ones) is the eager copy.
+ */
+static void x87_wt_chk_view(DisasContext *s)
+{
+    TCGv_i32 a, b;
+
+    if (!s->wt_top) {
+        return;
+    }
+    a = gen_top_index(s->wt_top, s->fpstt_delta & 7);
+    b = tcg_temp_new_i32();
+    tcg_gen_ld_i32(b, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
+    xemu_x87_gen_ne_count_i32(&xemu_x87_wt_top_viol, a, b);
+    for (int r = 0; r < 8; r++) {
+        TCGv_ptr p = tcg_temp_new_ptr();
+        TCGv_i32 want = tcg_temp_new_i32(), have = tcg_temp_new_i32();
+
+        tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_top_index(s->wt_top, r), 0);
+        if (s->wt_tag_mask & (1 << r)) {
+            tcg_gen_movi_i32(want, (s->wt_tag_val >> r) & 1);
+        } else {
+            tcg_gen_ld8u_i32(want, p, offsetof(CPUX86State, fptags[0]));
+        }
+        tcg_gen_ld8u_i32(have, p,
+                         offsetof(CPUX86State, xemu_x87_fptags_chk[0]));
+        xemu_x87_gen_ne_count_i32(&xemu_x87_wt_top_viol, want, have);
+    }
+    xemu_gen_counter_inc(&xemu_x87_wt_top_checks);
+}
+
+/* The flush's half: land the tags and fpstt, then start a new interval. */
+static void x87_wt_land(DisasContext *s)
+{
+    if (!x87_wt(s)) {
+        return;
+    }
+    if (s->wt_tag_mask || (s->fpstt_delta & 7)) {
+        x87_wt_gen_land(x87_wt_top(s), s->wt_tag_mask, s->wt_tag_val,
+                        s->fpstt_delta);
+    }
+    if (unlikely(xemu_x87_refute_on()) && s->wt_top) {
+        x87_wt_chk_env();
+    }
+    s->wt_top = NULL;
+    s->wt_tag_mask = 0;
+    s->wt_tag_val = 0;
+}
+
+/*
+ * A flush after the insn's first access, which put the insn's starting
+ * delta and tags in word 2: land those just before that access instead,
+ * so that no exit in the insn applies them on top of this flush.
+ */
+static void x87_wt_land_early(DisasContext *s)
+{
+    TCGOp *last = tcg_last_op();
+    TCGOp *pos = s->wt_w2_pos;
+    TCGOp *op = s->base.insn_start;
+    uint64_t w2 = tcg_get_insn_start_param(op, 2);
+
+    w2 &= ~(XEMU_X87_W2_STACK_MASK | (7ull << XEMU_X87_W2_TOP_SHIFT));
+    w2 |= (uint64_t)(-s->wt_insn_delta & 7) << XEMU_X87_W2_TOP_SHIFT;
+    tcg_set_insn_start_param(op, 2, w2);
+
+    x87_wt_gen_land(s->wt_top, s->wt_insn_tag_mask, s->wt_insn_tag_val,
+                    s->wt_insn_delta);
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_wt_stack_early);
+    }
+    while ((op = QTAILQ_NEXT(last, link)) != NULL) {
+        QTAILQ_REMOVE(&tcg_ctx->ops, op, link);
+        QTAILQ_INSERT_AFTER(&tcg_ctx->ops, pos, op, link);
+        pos = op;
+    }
+    s->wt_w2_fp = false;
+}
+
+/*
  * Refuter, at every guest access that can land stores: exactly the
  * landing slots hold the poison. Their doubles also go to
  * env->xemu_x87_shadow_chk here, in line, which the restore compares with
@@ -2379,8 +2616,10 @@ static void x87_wt_exit_check(DisasContext *s, uint8_t land)
                            offsetof(CPUX86State, xemu_x87_shadow_chk[r]));
         }
     }
-    /* Translate-time: word 2's fpstt offset holds at this access. */
-    xemu_x87_wt_exit_viol += s->fpstt_delta != s->wt_insn_delta;
+    /* Translate-time: word 2's stack fields hold at this access. */
+    xemu_x87_wt_exit_viol += s->fpstt_delta != s->wt_insn_delta ||
+                             s->wt_tag_mask != s->wt_insn_tag_mask ||
+                             s->wt_tag_val != s->wt_insn_tag_val;
     xemu_gen_counter_inc(&xemu_x87_wt_exit_checks);
 }
 
@@ -2395,15 +2634,27 @@ static void x87_wt_spill(DisasContext *s)
 {
     uint8_t land = s->wt_insn_pend & s->wt_pend;
 
-    if (!land || s->wt_insn_flushed) {
+    if ((!land && !s->wt_insn_fp) || s->wt_insn_flushed) {
         return;
     }
-    if (!s->wt_w2_land) {
+    if (!s->wt_w2_land && !s->wt_w2_fp) {
         TCGOp *op = s->base.insn_start;
         uint64_t w2 = tcg_get_insn_start_param(op, 2);
 
+        /*
+         * env->fpstt is the flush interval's (x87_wt_land), the base of
+         * shadow slot 0: no shadow offset.
+         */
         w2 |= (uint64_t)land << XEMU_X87_W2_PEND_SHIFT;
-        w2 |= (uint64_t)(-s->wt_insn_delta & 7) << XEMU_X87_W2_TOP_SHIFT;
+        if (s->wt_insn_fp) {
+            /* A flush later in this insn moves the landing here. */
+            x87_wt_top(s);
+            s->wt_w2_pos = tcg_last_op();
+            s->wt_w2_fp = true;
+            w2 |= (uint64_t)(s->wt_insn_delta & 7) << XEMU_X87_W2_MOVE_SHIFT;
+            w2 |= (uint64_t)s->wt_insn_tag_mask << XEMU_X87_W2_TAGM_SHIFT;
+            w2 |= (uint64_t)s->wt_insn_tag_val << XEMU_X87_W2_TAGV_SHIFT;
+        }
         tcg_set_insn_start_param(op, 2, w2);
         s->wt_w2_land = land;
         for (int r = 0; r < 8; r++) {
@@ -2411,6 +2662,8 @@ static void x87_wt_spill(DisasContext *s)
         }
     }
     tcg_debug_assert(s->fpstt_delta == s->wt_insn_delta);
+    tcg_debug_assert(s->wt_tag_mask == s->wt_insn_tag_mask &&
+                     s->wt_tag_val == s->wt_insn_tag_val);
     if (unlikely(xemu_x87_refute_on())) {
         x87_wt_exit_check(s, land);
     }
@@ -2423,11 +2676,15 @@ static void x87_wt_spill(DisasContext *s)
 }
 
 /*
- * The flush's half: store every pending slot. Called from gen_flush_fp
- * before it drops wt_st and fpstt_delta.
+ * The flush's half: store every pending slot, then the stack bookkeeping
+ * (x87_wt_land). Called from gen_flush_fp before it drops wt_st and
+ * fpstt_delta.
  */
 static void x87_wt_flush(DisasContext *s)
 {
+    if (s->wt_w2_fp && !s->wt_insn_flushed) {
+        x87_wt_land_early(s);
+    }
     if (s->wt_w2_land && !s->wt_insn_flushed) {
         /*
          * An exit later in this insn lands word 2's slots again: give
@@ -2458,6 +2715,7 @@ static void x87_wt_flush(DisasContext *s)
             xemu_x87_gen_poison_scan(&xemu_x87_wt_flush_viol);
         }
     }
+    x87_wt_land(s);
     s->wt_insn_flushed = true;
 }
 
@@ -2478,6 +2736,7 @@ static void x87_wt_boundary_check(DisasContext *s)
     }
     xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol, gen_ft0_ptr(), false);
     xemu_gen_counter_inc(&xemu_x87_wt_bnd_checks);
+    x87_wt_chk_view(s);
 }
 
 /*
@@ -2674,6 +2933,13 @@ static void gen_fpush(DisasContext *s)
         GEN_HELPER_FALLBACK_v_v(fpush);
     }
 
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_move(s, -1);
+        x87_wt_set_tag(s, 0, 0); /* validate stack entry */
+        return;
+    }
+#endif
     tcg_gen_subi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
     gen_set_fptag_stn(0, 0); /* validate stack entry */
@@ -2687,6 +2953,14 @@ static void gen_fpop(DisasContext *s)
         GEN_HELPER_FALLBACK_v_v(fpop);
     }
 
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_set_tag(s, 0, 1); /* invalidate stack entry */
+        fp_pc_wrapper(gen_fpop)(s);
+        x87_wt_move(s, 1);
+        return;
+    }
+#endif
     gen_set_fptag_stn(0, 1); /* invalidate stack entry */
     tcg_gen_addi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
@@ -2789,6 +3063,12 @@ static void gen_ffree_STN(DisasContext *s, int st_index)
      * Inline: a single byte write into the tag word; no register spill,
      * no env fpus change (ffree only marks the tag slot empty).
      */
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        x87_wt_set_tag(s, st_index, 1);
+        return;
+    }
+#endif
     gen_set_fptag_stn(st_index, 1);
 }
 
@@ -2879,14 +3159,21 @@ static void gen_enter_mmx(DisasContext *s)
      * FXRSTOR, XRSTOR), which clears mmx_entered. The flush lands the
      * write-through x87 results and FIP first, as the helper call's
      * gen_bb_epilogue did; nothing becomes pending again before such an
-     * insn.
+     * insn. Write-through blocks keep fpstt in env and leave the fpstt
+     * global unused (x87_wt_land), so they store env->fpstt; the flush
+     * started a new interval, whose wt_top reads it back.
      */
     if (s->mmx_entered) {
         return;
     }
     s->mmx_entered = true;
     gen_flush_fp(s);
-    tcg_gen_movi_i32(fpstt, 0);
+    if (x87_wt(s)) {
+        tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                       offsetof(CPUX86State, fpstt));
+    } else {
+        tcg_gen_movi_i32(fpstt, 0);
+    }
     if (QEMU_IS_ALIGNED(offsetof(CPUX86State, fptags), 8)) {
         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                        offsetof(CPUX86State, fptags));
@@ -3275,8 +3562,16 @@ static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
     tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
     tcg_gen_andi_i32(fpus, fpus, ~0x3800);
     TCGv_i32 top = tcg_temp_new_i32();
-    tcg_gen_andi_i32(top, fpstt, 0x7);
-    tcg_gen_shli_i32(top, top, 11);
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        /* fpstt is deferred (x87_wt_land) */
+        tcg_gen_shli_i32(top, gen_st_index(0), 11);
+    } else
+#endif
+    {
+        tcg_gen_andi_i32(top, fpstt, 0x7);
+        tcg_gen_shli_i32(top, top, 11);
+    }
     tcg_gen_or_i32(result, fpus, top);
 }
 
@@ -4950,9 +5245,16 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 break;
             case 6: /* fdecstp */
             {
-                tcg_gen_subi_i32(fpstt, fpstt, 1);
-                tcg_gen_andi_i32(fpstt, fpstt, 7);
-                s->fpstt_delta -= 1;
+#if defined(XBOX)
+                if (x87_wt(s)) {
+                    x87_wt_move(s, -1);
+                } else
+#endif
+                {
+                    tcg_gen_subi_i32(fpstt, fpstt, 1);
+                    tcg_gen_andi_i32(fpstt, fpstt, 7);
+                    s->fpstt_delta -= 1;
+                }
                 TCGv_i32 fpus_tmp = tcg_temp_new_i32();
                 tcg_gen_ld16u_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
                 tcg_gen_andi_i32(fpus_tmp, fpus_tmp, ~0x4700);
@@ -4962,9 +5264,16 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             default:
             case 7: /* fincstp */
             {
-                tcg_gen_addi_i32(fpstt, fpstt, 1);
-                tcg_gen_andi_i32(fpstt, fpstt, 7);
-                s->fpstt_delta += 1;
+#if defined(XBOX)
+                if (x87_wt(s)) {
+                    x87_wt_move(s, 1);
+                } else
+#endif
+                {
+                    tcg_gen_addi_i32(fpstt, fpstt, 1);
+                    tcg_gen_andi_i32(fpstt, fpstt, 7);
+                    s->fpstt_delta += 1;
+                }
                 TCGv_i32 fpus_tmp = tcg_temp_new_i32();
                 tcg_gen_ld16u_i32(fpus_tmp, tcg_env, offsetof(CPUX86State, fpus));
                 tcg_gen_andi_i32(fpus_tmp, fpus_tmp, ~0x4700);
@@ -6038,6 +6347,14 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->wt_w2_land = 0;
     dc->wt_insn_flushed = false;
     dc->wt_insn_delta = 0;
+    dc->wt_top = NULL;
+    dc->wt_tag_mask = 0;
+    dc->wt_tag_val = 0;
+    dc->wt_insn_tag_mask = 0;
+    dc->wt_insn_tag_val = 0;
+    dc->wt_insn_fp = false;
+    dc->wt_w2_fp = false;
+    dc->wt_w2_pos = NULL;
     dc->pure_call = false;
     dc->mmx_entered = false;
 #endif
@@ -6074,8 +6391,12 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
     dc->wt_insn_pend = dc->wt_pend;
     dc->wt_insn_delta = dc->fpstt_delta;
+    dc->wt_insn_tag_mask = dc->wt_tag_mask;
+    dc->wt_insn_tag_val = dc->wt_tag_val;
+    dc->wt_insn_fp = x87_wt(dc) && ((dc->fpstt_delta & 7) || dc->wt_tag_mask);
     dc->wt_insn_flushed = false;
     dc->wt_w2_land = 0;
+    dc->wt_w2_fp = false;
 #endif
 }
 
@@ -6255,7 +6576,7 @@ void gen_ldst_prologue(void)
 {
     DisasContext *s = (DisasContext *)tcg_ctx->disas_ctx;
 
-    if (s && s->wt_insn_pend) {
+    if (s && (s->wt_insn_pend || s->wt_insn_fp)) {
         x87_wt_spill(s);
     }
 }

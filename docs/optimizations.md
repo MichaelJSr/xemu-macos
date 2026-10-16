@@ -457,7 +457,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   branching, and the argument-only `cc_compute_all`/`cc_compute_c`
   calls skip the flush, so the `fld; fld; fucomi; fcmov` min/max idiom
   keeps its stores deferred (2026-10-15, −4.8% det Minsns/frame, −4.9%
-  Mcycles/frame).
+  Mcycles/frame). Push, pop, `ffree`, `fdecstp` and `fincstp` only move
+  a translate-time `fpstt` offset and note tag bytes; `env->fpstt` and
+  `env->fptags` land at the next flush, and a mid-TB exit applies the
+  insn's starting offset and tags from insn_start word 2 (2026-10-15,
+  det heavy-f1 −3.2% Minsns/frame, −5.7% Mcycles/frame paired median,
+  on the x87 lane: 22329bd8bc, before the pinned registers and TLB memo).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
