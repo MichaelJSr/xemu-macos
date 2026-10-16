@@ -270,6 +270,52 @@
 { 'command': 'query-xemu-checkpoints', 'returns': ['XemuCheckpointInfo'] }
 
 ##
+# @XemuRamDigest:
+#
+# @sha256: lowercase hex sha256 of all of guest RAM, which is the
+#     sha256 of @xemu-dump-ram's file (absent with @sha256 false)
+#
+# @ram-size: guest RAM size in bytes (64 MiB retail, 128 MiB devkit)
+#
+# @frame: the frame counter (see @query-xemu-frame) at the digest
+#
+# @page-hashes: with @pages, 16 lowercase hex digits per 4 KiB page,
+#     in address order: the first 8 bytes of the page's sha256
+#
+# @differ: with @against, the pages whose bytes differ from the
+#     checkpoint's, as ascending page numbers (physical address
+#     divided by 4096)
+#
+# @elapsed-us: time spent hashing and comparing, in microseconds
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuRamDigest',
+  'data': { '*sha256': 'str', 'ram-size': 'uint64', 'frame': 'int',
+            '*page-hashes': 'str', '*differ': ['int'],
+            'elapsed-us': 'int' } }
+
+##
+# @xemu-ram-digest:
+#
+# Hash guest RAM in place: no file, and no write-back of GPU-rendered
+# surfaces (unlike @xemu-dump-ram's default @gpu-sync).  The VM is
+# paused for it and resumes if it was running.
+#
+# @sha256: hash all of RAM (default true, or false with @against)
+#
+# @pages: also return @page-hashes (default false)
+#
+# @against: a checkpoint's name (see @xemu-checkpoint-save): return
+#     @differ, the pages that differ from the RAM it holds
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-ram-digest',
+  'data': { '*sha256': 'bool', '*pages': 'bool', '*against': 'str' },
+  'returns': 'XemuRamDigest' }
+
+##
 # Readiness and device events
 # ===========================
 ##

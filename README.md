@@ -276,6 +276,14 @@ Other automation interfaces (windowed or headless):
   as zeros (counted in `unmapped`). `"gpu-sync"` (default on) first
   writes GPU-rendered surfaces back to RAM, as savevm does. `pmemsave`
   and `memsave` work too, 1 KiB at a time.
+- **RAM digests**: QMP `xemu-ram-digest` returns `sha256`, the sha256 of
+  all of guest RAM (what `xemu-dump-ram`'s file hashes to), with no
+  file and no GPU write-back, pausing a running VM for it (~55 ms for
+  128 MiB). `"pages": true` adds `page-hashes`: 16 hex digits per 4 KiB
+  page in address order, the first 8 bytes of each page's sha256 (~60
+  ms more). `"against": "<checkpoint>"` returns `differ`, the page
+  numbers (address / 4096) whose bytes differ from the RAM that
+  checkpoint holds (~10 ms; no `sha256` unless `"sha256": true`).
 - **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named POSIX
   shared memory that another process can map (Python:
   `multiprocessing.shared_memory.SharedMemory("<name>")`, then

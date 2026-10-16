@@ -133,11 +133,11 @@ the null renderer, for logic, RAM and gdbstub work. stderr then shows
 (PNG with `"format":"png"`); it works windowed too, but not from HMP.
 Deterministic, bit-exact replays: add `-S -icount shift=2,align=off,sleep=off`
 (null renderer), `loadvm`, write `+N` pipe lines while paused, then
-`xemu-frame-advance`; same inputs give the same RAM (README). Compare runs by
-hashing `pmemsave 0 0x8000000`. Branch loops: `xemu-checkpoint-save` with
-`base`, then `xemu-checkpoint-restore` with `incremental` (README); audit the
-dirty log with `verify` (`pages-missed` 0) after touching any device that
-writes RAM.
+`xemu-frame-advance`; same inputs give the same RAM (README). Compare runs with
+QMP `xemu-ram-digest` (RAM's sha256, no file; `against` a checkpoint lists the
+pages that changed). Branch loops: `xemu-checkpoint-save` with `base`, then
+`xemu-checkpoint-restore` with `incremental` (README); audit the dirty log
+with `verify` (`pages-missed` 0) after touching any device that writes RAM.
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:

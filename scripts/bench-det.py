@@ -8,8 +8,8 @@ Each run clones the fixture HDD, EEPROM and config into a fresh temp dir
 (muted, pad stubs via harness-config.py), starts APP headless with the
 null renderer under `-S -icount shift=2,align=off,sleep=off`, loads TAG
 (`-` boots cold), writes the -i pipe lines, advances FRAMES frames and
-hashes guest RAM (sha256[:16] of xemu-dump-ram). Arms run interleaved,
-PAIRS times.
+hashes guest RAM (sha256[:16]: QMP xemu-ram-digest, or xemu-dump-ram's
+file on builds without it). Arms run interleaved, PAIRS times.
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
 and instructions per guest frame across the whole process. A
@@ -116,6 +116,20 @@ def scratch(d):
     return toml, pads, fifo, sock, log
 
 
+def ram_sha256(q, d):
+    """sha256 of guest RAM: QMP xemu-ram-digest (no file), else xemu-dump-ram's file."""
+    try:
+        return q.cmd('xemu-ram-digest')['sha256']
+    except RuntimeError as e:
+        if 'CommandNotFound' not in str(e):
+            raise
+    ram = os.path.join(d, 'ram.bin')
+    q.cmd('xemu-dump-ram', filename=ram, **{'gpu-sync': False})
+    h = hashlib.sha256(open(ram, 'rb').read()).hexdigest()
+    os.remove(ram)
+    return h
+
+
 def run_once(app, env, a, purpose=''):
     d = tempfile.mkdtemp(prefix='xbd.', dir='/tmp')
     try:
@@ -147,10 +161,7 @@ def run_once(app, env, a, purpose=''):
                 wall += time.time() - t
                 i1, c1 = counters(proc.pid)
                 ins, cyc, done = ins + i1 - i0, cyc + c1 - c0, s
-                ram = os.path.join(d, 'ram.bin')
-                q.cmd('xemu-dump-ram', filename=ram, **{'gpu-sync': False})
-                hashes.append(f'f{s}=' + hashlib.sha256(open(ram, 'rb').read()).hexdigest()[:16])
-                os.remove(ram)
+                hashes.append(f'f{s}=' + ram_sha256(q, d)[:16])
             try:
                 q.cmd('quit')
             except Exception:

@@ -33,6 +33,7 @@ xemu_ss.add(files(
   'xemu-snapshots.c',
   'xemu-checkpoints.c',
   'xemu-checkpoint-ram.c',
+  'xemu-ram-digest.c',
   'xemu-thumbnail.cc',
   'xemu-widescreen.c',
 ))
