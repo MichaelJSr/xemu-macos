@@ -694,6 +694,26 @@ Other automation interfaces (windowed or headless):
   `scripts/` also run them at `nice -n 10` with a lease
   `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
   `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`.
+- **Host-time profile**: QMP `query-xemu-host-profile` returns counters
+  cumulative since launch: `translate-ns`/`translations` (host time
+  translating guest code), `apu-ns`/`apu-ticks` (the APU's ticks under
+  icount) and `idle-ns`/`idle-warps` (guest time a halted vCPU skipped
+  under `sleep=off`, which costs no host time). Diff two queries for an
+  interval. Disk request latency is in `query-blockstats`
+  (`rd/wr/flush_total_time_ns`, per drive). `scripts/bench-det.py
+  --timeline APP` builds a cold boot's timeline from them under icount:
+  guest frames, host ms and where the host time went (vCPU CPU,
+  translation, APU, disk requests, qcow2 growth, other threads) for each
+  phase from power-on to steady play (kernel, logos, prophecy.bik,
+  title, save list, level load, first player tick, steady). It finds
+  the phases with gdbstub breakpoints and a frame-tagged menu walk
+  once, then times replays of that walk with no debugger; `-n` sets the
+  replays, and two or more arms give per-phase deltas. Replays must end
+  on the marker pass's RAM (it says so), so the phases are the same
+  frames in every arm. `--renderer offscreen` times Vulkan on a
+  portable clone (cold shader caches); `--route dpad_left,a` starts a
+  new game instead of loading the save under the cursor; `--dvd` boots
+  another disc (`--va` moves the event addresses for another release).
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once with status 1 (a windowed one aborts

@@ -22,6 +22,7 @@
 #include <fenv.h>
 #include "apu_int.h"
 #include "system/runstate.h"
+#include "qemu/xemu-hostprof.h"
 
 MCPXAPUState *g_state; // Used via debug handlers
 
@@ -308,6 +309,7 @@ static int64_t apu_det_next(int64_t now)
 
 static void mcpx_apu_det_tick(void *opaque)
 {
+    XEMU_HOSTPROF_SCOPE(xemu_hostprof_apu_end);
     MCPXAPUState *d = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t next = apu_det_next(now);

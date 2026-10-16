@@ -37,6 +37,7 @@ xemu_ss.add(files(
   'xemu-load-verify.c',
   'xemu-input-bind.c',
   'xemu-trace-record.c',
+  'xemu-hostprof.c',
   'xemu-thumbnail.cc',
   'xemu-widescreen.c',
 ))

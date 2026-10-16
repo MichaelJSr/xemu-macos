@@ -37,6 +37,9 @@
 #include "tb-internal.h"
 #include "internal-common.h"
 #include "xemu-inv-prof.h"
+#if defined(XBOX)
+#include "qemu/xemu-hostprof.h"
+#endif
 #include "tcg/perf.h"
 #include "tcg/insn-start-words.h"
 
@@ -274,6 +277,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     int64_t ti;
     void *host_pc;
     bool recycled = false;
+#if defined(XBOX)
+    XEMU_HOSTPROF_SCOPE(xemu_hostprof_translate_end);
+#endif
 
     assert_memory_lock();
     qemu_thread_jit_write();

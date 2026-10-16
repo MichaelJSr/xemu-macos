@@ -37,6 +37,9 @@
 #include "hw/core/cpu.h"
 #include "exec/icount.h"
 #include "system/cpu-timers-internal.h"
+#ifdef XBOX
+#include "qemu/xemu-hostprof.h"
+#endif
 
 /*
  * ICOUNT: Instruction Counter
@@ -511,6 +514,9 @@ void icount_start_warp_timer(void)
                             timers_state.qemu_icount_bias + deadline);
             seqlock_write_unlock(&timers_state.vm_clock_seqlock,
                                  &timers_state.vm_clock_lock);
+#ifdef XBOX
+            xemu_hostprof_idle_warp(deadline);
+#endif
             qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
         } else {
             /*

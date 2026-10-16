@@ -1519,3 +1519,48 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-input', 'returns': 'XemuInputState' }
+
+##
+# Host-time profile
+# =================
+##
+
+##
+# @XemuHostProfile:
+#
+# Host-side counters, cumulative since launch, for profiling where a
+# run's host time goes; diff two queries for an interval
+# (scripts/bench-det.py --timeline does, per boot phase).  Times are
+# nanoseconds on the vCPU thread.  Disk request latency is in
+# query-blockstats (rd/wr/flush_total_time_ns, per drive).
+#
+# @translate-ns: host time spent translating guest code
+#
+# @translations: translation blocks generated
+#
+# @apu-ns: host time in the APU's frame ticks under -icount (it runs
+#     on its own thread otherwise, and this stays 0)
+#
+# @apu-ticks: those ticks
+#
+# @idle-ns: guest time skipped while the vCPU was halted: under
+#     -icount sleep=off the clock warps straight to the next timer,
+#     which costs no host time
+#
+# @idle-warps: those warps
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHostProfile',
+  'data': { 'translate-ns': 'int', 'translations': 'int',
+            'apu-ns': 'int', 'apu-ticks': 'int',
+            'idle-ns': 'int', 'idle-warps': 'int' } }
+
+##
+# @query-xemu-host-profile:
+#
+# Return the host-time counters.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-host-profile', 'returns': 'XemuHostProfile' }
