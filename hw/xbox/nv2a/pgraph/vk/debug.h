@@ -52,20 +52,27 @@ extern int nv2a_vk_dgroup_indent;
 #endif
 
 /*
- * Headless runs belong to a harness: on a lost device, exit at once with a
- * clear line instead of sitting frozen while macOS writes a crash report
- * (which looks like a hang). Windowed runs keep the trap and the report.
+ * A failed Vulkan call ends xemu at once. Headless runs belong to a
+ * harness: they exit with status 1 after a fixed line ("xemu: Vulkan device
+ * lost; exiting" for a lost device, else "xemu: Vulkan call failed;
+ * exiting"). Windowed runs abort with a crash report. Never
+ * __builtin_trap(): on macOS a trap on a thread that blocks SIGTRAP (as
+ * QEMU threads did) re-executes forever, so the PFIFO thread spun in
+ * pgraph_vk_finish holding pgraph.lock and the process ignored SIGTERM
+ * (the flip-stall "hang" after a loadvm).
  */
 void pgraph_vk_exit_if_headless_device_lost(int vk_result);
+void pgraph_vk_fatal_error(void) __attribute__((noreturn));
 
-#define VK_CHECK(x)                                           \
-    do {                                                      \
-        VkResult vk_result = (x);                             \
-        if (vk_result != VK_SUCCESS) {                        \
-            fprintf(stderr, "vk_result = %d\n", vk_result);   \
-            pgraph_vk_exit_if_headless_device_lost(vk_result); \
-            __builtin_trap();                                  \
-        }                                                     \
+#define VK_CHECK(x)                                                  \
+    do {                                                             \
+        VkResult vk_result = (x);                                    \
+        if (vk_result != VK_SUCCESS) {                               \
+            fprintf(stderr, "vk_result = %d in %s (%s:%d)\n",        \
+                    vk_result, __func__, __FILE__, __LINE__);        \
+            pgraph_vk_exit_if_headless_device_lost(vk_result);       \
+            pgraph_vk_fatal_error();                                 \
+        }                                                            \
     } while (0)
 
 /*

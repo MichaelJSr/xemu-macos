@@ -229,8 +229,10 @@ Other automation interfaces (windowed or headless):
   - `XEMU_DEVICE_LOST {reason, where, vk-result}`, at most once, just
     before xemu dies of a lost Vulkan device: `reason` is
     `device-lost` (a headless xemu then prints `xemu: Vulkan device
-    lost; exiting` and exits with status 1, a windowed one traps) or
-    `fence-timeout` (no fence within 5 s; xemu aborts). `where` names
+    lost; exiting` and exits with status 1, a windowed one aborts) or
+    `fence-timeout` (no fence within 5 s; a headless xemu then prints
+    `xemu: Vulkan call failed; exiting` and exits with status 1, a
+    windowed one aborts). `where` names
     the fence wait, if a wait saw it. Best effort: the event is lost
     if the client left earlier output unread.
 - **Park and resume a machine** without touching the HDD's snapshots:
@@ -405,9 +407,14 @@ Other automation interfaces (windowed or headless):
   `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
-  lost; exiting` and exits at once (a windowed one still crashes with a
-  report). The errors behind it were GPU reads of freed textures: after a
-  `loadvm` or reset freed every surface, the display compositor could
+  lost; exiting` and exits at once with status 1 (a windowed one aborts
+  with a crash report). Any other failed Vulkan call prints `vk_result =
+  N in <function> (<file>:<line>)`; headless then exits 1 after `xemu:
+  Vulkan call failed; exiting`, windowed aborts. Earlier builds instead
+  spun forever on the GPU thread at full CPU, answered no QMP and ignored
+  SIGTERM (only SIGKILL ended them): that was the flip-stall "hang" after
+  a `loadvm`. The errors behind it were GPU reads of freed textures: after
+  a `loadvm` or reset freed every surface, the display compositor could
   keep sampling a freed one, and its command buffers could outlive the
   surfaces they sampled. Both are fixed. GPU errors are now logged when
   they happen (MoltenVK warnings, and `xemu: Metal command buffer "..."

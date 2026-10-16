@@ -38,7 +38,7 @@ void pgraph_vk_exit_if_headless_device_lost(int vk_result)
     if (vk_result != VK_ERROR_DEVICE_LOST) {
         return;
     }
-    /* QMP XEMU_DEVICE_LOST, windowed too (it then traps). */
+    /* QMP XEMU_DEVICE_LOST, windowed too (it then aborts). */
     xemu_events_device_lost(XEMU_DEVICE_LOST_REASON_DEVICE_LOST, NULL,
                             vk_result);
     if (xemu_headless_mode()) {
@@ -75,7 +75,7 @@ static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
                 where, (int)res);
         pgraph_vk_exit_if_headless_device_lost(res);
     }
-    abort();
+    pgraph_vk_fatal_error();
 }
 
 static void create_command_pool(PGRAPHState *pg)

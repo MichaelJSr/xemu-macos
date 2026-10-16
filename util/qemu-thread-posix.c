@@ -422,7 +422,18 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     sigdelset(&set, SIGSEGV);
     sigdelset(&set, SIGFPE);
     sigdelset(&set, SIGILL);
-    /* TODO avoid SIGBUS loss on macOS */
+#ifdef CONFIG_DARWIN
+    /*
+     * macOS does not force a synchronous signal through a blocked mask:
+     * a trap instruction (__builtin_trap, glib's G_BREAKPOINT on arm64)
+     * or a bus error on a thread that blocks SIGTRAP or SIGBUS returns to
+     * the faulting instruction and faults again forever, at full CPU,
+     * instead of ending the process. Keep both deliverable so the process
+     * dies, as it does on Linux.
+     */
+    sigdelset(&set, SIGTRAP);
+    sigdelset(&set, SIGBUS);
+#endif
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
 
     qemu_thread_args = g_new0(QemuThreadArgs, 1);

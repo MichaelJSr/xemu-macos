@@ -91,6 +91,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Kick suppression, semaphore kick, ImGui lock | closed | Empty population / wrong premise / harmless | ledger Settled |
 | Normal-mode vCPU at default QoS | fixed | The busy-polling MTTCG thread decayed to PRI 30-31 under load, below PFIFO/vblank (PRI 46) and other agents' UI-QoS det runs. At `USER_INTERACTIVE`: heavy-f1 37.2 → 58.3 fps, W2 41.5 → 54.6 (load 13-64); heavy-f1 report-valve submits 1-14 → ~0 per flip | `XEMU_VCPU_QOS=0` |
 | Post-loadvm OHCI/`flatview` SIGSEGV | fixed | A freed `MemAccessCallback`, not OHCI; RCU-deferred free | `4161ab5f24`, `13afd5f244` |
+| Flip-stall "hang" after a loadvm (AZ-293) | fixed | Not a renderer spin: `VK_CHECK`'s `brk` re-executing on a SIGTRAP-blocked QEMU thread once Metal ignored the process's GPU work (device lost after the compositor's freed-surface reads, `24465976a6`). `bb5ce7e3ec`'s "a crash report freezes it" was wrong | `pgraph_vk_fatal_error` |
 | **Build / CI / release / harness** | | | |
 | Release CI portability (CRC32, CXXFLAGS, SDK-26 guard, Windows LTO, FILEVERSION, POSIX-only input pipe) | fixed | The CI matrix is the test; tagged builds hit new paths | `378915e067`, `497c1ff3e6` |
 | Deleting or re-pushing a published tag | incident | The release flips to draft; tags are immutable | `docs/RELEASING-macos.md` |

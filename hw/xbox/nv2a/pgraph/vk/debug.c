@@ -19,6 +19,7 @@
 
 #include "renderer.h"
 #include "debug.h"
+#include "ui/xemu-present.h"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -32,6 +33,20 @@
 #endif
 
 int nv2a_vk_dgroup_indent = 0;
+
+void pgraph_vk_fatal_error(void)
+{
+    /*
+     * Headless runs belong to a harness: a fixed line and status 1, no
+     * crash report. A crash also makes macOS ask the next launch of any
+     * xemu to reopen its windows, which stalls builds that don't opt out.
+     */
+    if (xemu_headless_mode()) {
+        fprintf(stderr, "xemu: Vulkan call failed; exiting\n");
+        _exit(EXIT_FAILURE);
+    }
+    abort();
+}
 
 void pgraph_vk_debug_init(void)
 {

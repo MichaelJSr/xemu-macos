@@ -419,9 +419,9 @@
 #
 # Emitted at most once, when the Vulkan renderer loses its GPU
 # device, just before xemu ends: a headless xemu then prints "xemu:
-# Vulkan device lost; exiting" and exits with status 1; a windowed
-# one, or any xemu after a fence timeout, prints its diagnostic and
-# aborts.
+# Vulkan device lost; exiting" (after a fence timeout, "xemu: Vulkan
+# call failed; exiting") and exits with status 1; a windowed one
+# prints its diagnostic and aborts.
 # Delivery is best effort: the event is lost if the client left
 # earlier output unread.
 #
