@@ -37,6 +37,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - **`encodeWaitForEvent` comes before the drawable render pass** opens. → a frame the GPU hasn't finished gets presented. `ui/xemu-metal.m` `xemu_metal_begin_frame`.
 - **Vblank**: `vblank_timer_thread` ticks every `vblank_interval_ns = 16666666` on monotonic deadlines and raises the guest VBLANK interrupt; never tie it to host refresh. No PAL 50 Hz path exists. → guest simulation retimed. `ui/xemu.c`.
 - **Launch parity**: every `Info.plist` `LSEnvironment` variable is mirrored in `main()` with `setenv(...,0)` before MoltenVK loads (six MVK keys). A variable exported in the shell overrides both. → Finder and terminal launches run different configs. `ui/xemu.c`, `Info.plist`.
+- **AppKit window restoration stays off** (`ApplePersistenceIgnoreState`, registered by a constructor before `main()`): SDL3 registers it only after AppKit's launch-time check, so after a crash of any app named xemu the next windowed or offscreen launch runs a hidden "reopen windows?" alert on the main thread. → screendump and `quit` stall until someone answers (null mode starts no Cocoa app). `ui/xemu-os-utils-macos.m`.
 
 ### Deterministic mode (`-icount ... sleep=off`, null renderer)
 - **Guest state changes only at fixed instruction counts.** No device thread may touch guest RAM, registers or IRQs on its own schedule: PFIFO pushes inline on the vCPU (`pfifo_icount_sync`), APU frames run in `mcpx_apu_det_tick` (virtual timer, BQL held, `FE_DFL_ENV`), IDE drains before the guest access returns (`ide_bus_icount_settle`), pads change only at vblank ticks. A new device thread or async completion breaks bit-exact replays. → RAM differs between identical runs.
@@ -79,6 +80,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | AGX `setVisibilityResultMode` crash | Prefill 0? `primer_index` present? | `XEMU_MAX_QUERIES=64`: gone at 64 = capacity; crashes either way = primer/first pass | V`reports.c`/`draw.c` |
 | `vkWaitForFences timeout … (>5s)` abort | Which wait (`where`) | `sample xemu 5`; usually a MoltenVK deadlock | V`command.c` |
 | One thread at ~100% CPU, QMP silent, SIGTERM ignored | `sample xemu 1`: that thread's top frame is a bare PC with no callee | Disassemble the PC: a `brk` is a trap re-executing on a SIGTRAP-blocked thread (builds before the unmask); the stderr line before it names the call | `util/qemu-thread-posix.c` |
+| screendump or `quit` never returns (QMP was fine until then) | `sample xemu 1`: main thread in `promptToIgnorePersistentState` | A build without `xemu_os_ignore_persistent_state`: answer the alert, or run `XEMU_HEADLESS=null` | `ui/xemu-os-utils-macos.m` |
 | Frozen picture / black screen at level load | Just loaded a snapshot? (failed loads toast and resume) | `XEMU_PFIFO_HEARTBEAT=1` (see below) | `pfifo.c` |
 | SIGSEGV/SIGILL after a JIT change | Fault address in a MAP_JIT region? | `dsp_jit.enabled=false`; then audit the W^X windows | J |
 | SIGSEGV `flatview_read_continue` (OHCI) | Build contains `13afd5f244`? | Check the walking thread is RCU-registered | `physmem.c` |

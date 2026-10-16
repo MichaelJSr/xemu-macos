@@ -21,6 +21,23 @@
 #import <AppKit/AppKit.h>
 #include "xemu-os-utils.h"
 
+/*
+ * After a crash of any app named xemu, AppKit's next launch asks whether
+ * to reopen its windows: a modal alert run on the main thread while it
+ * handles the launch event, invisible when headless. That thread serves
+ * screendump and quit, so both stall until someone answers. SDL registers
+ * ApplePersistenceIgnoreState, but only after that check. xemu has no
+ * windows to restore, so register it before main() runs.
+ */
+__attribute__((constructor))
+static void xemu_os_ignore_persistent_state(void)
+{
+	@autoreleasepool {
+		[[NSUserDefaults standardUserDefaults]
+			registerDefaults:@{ @"ApplePersistenceIgnoreState" : @YES }];
+	}
+}
+
 const char *xemu_get_os_info(void)
 {
 	return [[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String];
