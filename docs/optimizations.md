@@ -23,8 +23,9 @@ Changes manifest below, and every one has a `getenv` on this branch.
 Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
-`XEMU_PFIFO_STALL_DOORBELL` and `XEMU_GUEST_MO`, the first four rows. The other `=0` row,
-`XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass. Knobs that exist
+`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO` and `XEMU_KI_IDLE_HALT`,
+the first five rows. The other `=0` row, `XEMU_SPIRV_CACHE`, is a
+cold-compile A/B bypass. Knobs that exist
 only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
@@ -35,6 +36,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
+| `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -2166,6 +2168,46 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   12-14). The gain is the lock-wait cut under heavy load, at no CPU
   cost. No switch: a scheduling hint, and det mode runs the APU on the
   vCPU.
+- **Normal mode halts the vCPU in the kernel's idle loop
+  (2026-10-16).** KiIdleLoop never executes HLT: it spins on `sti;
+  nop; nop; cli` and the DPC-list and NextThread checks, and every STI
+  ends a TB. The round-4 profile put 35-67% of the windowed vCPU there
+  (heavy-f1 35-38%, W2 36%, the movie 67%), with the vCPU at 97-99%
+  CPU in every scene. Deterministic mode already halted there; normal
+  mode now runs the same byte match and checks in
+  `helper_xemu_ki_idle`, spins 50 µs of host time per idle span (calls
+  under 5 µs apart), then halts as HLT does and wakes through the
+  stock kick. Same binary, `XEMU_KI_IDLE_HALT=0` against the default,
+  windowed at the 60 fps cap: bench-abx heavy-f1 60.08 → 60.14 fps
+  (2/2 +), process CPU 179 → 153% (load 26-33); W2 58.67 → 60.13 fps
+  (2/2 +), 161 → 125% (load 43-64). Over five scenes, two runs each,
+  load 13-29: process CPU W2 163-169 → 128-130%, stream-e2 walk
+  161-162 → 111-122%, transition 153-154 → 88-107%, movie 133-135 →
+  59-66%, and the vCPU thread from 98% to 76-79% (heavy-f1), 62-63%
+  (W2), 28-30% (movie). Every heavy-f1 run at the cap: 184% (10 runs)
+  → 156% (14 runs). The guest-EIP sampler's spin samples at idle EIPs
+  (JIT code and the dispatch loop) fell from 22% of the vCPU's to
+  0.7%; 31% now sit in the halt wait. Frames over 20 ms did not rise
+  in quiet runs (stream-e2 walk 17 → 12 over four walks; transition 14
+  → 9 over the last two pairs, load 14-18). Under heavy GPU contention
+  from other processes (fence waits 1.1-2.0 s per 5 s) the transition
+  hitched more (122 off against 224 and 351 on): likely a halted vCPU
+  waiting for a core while other processes' user-interactive threads
+  hold them. Under CPU load alone it did not: a review re-run at load
+  22-40 had transition frames over 20 ms 34 → 19 over five pairs (no
+  pair worse), process CPU 158 → 95%, and bench-abx heavy-f1 176 →
+  150% (2 pairs, load 19-44). A halt wake costs 6-36 µs on average,
+  with millisecond tails at load 30+. Rejected budgets and variants: 0 µs saved ~9
+  points more CPU on heavy-f1 (6 runs) but halted up to 4700 times/s,
+  a wake on every short wait; 200 µs cost ~5 points more than 50;
+  halting at once within 20 µs of a halt wake, a 20-50 µs span gap and
+  spinning while PFIFO is busy each cost CPU for no frame-time gain.
+  Goldens unchanged (release and debug-TCG); x87 refuter clean; xbox
+  suite 7/7; PROMPT-7 hooks 97 PASS, gdb tests only the known
+  z3/z2/zirq failures; a normal-mode loadvm soak (6 cycles, PFIFO
+  heartbeat advancing) and a 9-minute windowed heavy-f1 → transition →
+  movie session ran clean. `XEMU_KI_IDLE_HALT=0` keeps the spin
+  (normal-mode switch: the goldens never take the budget path).
 - **Deterministic mode's FP brackets write FPCR only when it differs.**
   Device work on the vCPU thread (the inline PFIFO pusher, ~360 runs
   per frame on heavy-f1, and the APU tick) ran between `fegetenv`,

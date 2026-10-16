@@ -2107,11 +2107,11 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
  * bytes sit at ram_addr page_addr[0], then page_addr[1] past the page end. A
  * TB whose bytes changed is invalidated (into the recycler, which revives
  * only on an exact hash match); a kept TB is what translating now would
- * produce. A TB whose translation read past its end (XEMU_TB_PEEKS: the
- * icount idle-loop STI) is always dropped, and never recycled. This also
- * catches RAM changed by writers that skip invalidation (DSP DMA's
- * memory_region_set_dirty, APU and nv2a host-pointer stores), which the
- * flush used to hide.
+ * produce. A TB whose translation read past its end (XEMU_TB_PEEKS: an
+ * STI checked for the kernel idle loop) is always dropped, and never
+ * recycled. This also catches RAM changed by writers that skip
+ * invalidation (DSP DMA's memory_region_set_dirty, APU and nv2a
+ * host-pointer stores), which the flush used to hide.
  *
  * The rest of what the flush reset:
  * - Write protection. Guest stores invalidate only while a code page's

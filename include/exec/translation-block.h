@@ -105,7 +105,7 @@ struct TranslationBlock {
      *       phys-page heuristic (covers virtual-alias targets whose phys
      *       coincides with the source's).
      *   XEMU_TB_PEEKS — translation read guest bytes past [pc, pc + size)
-     *       (the icount idle-loop match in gen_STI), which ihash doesn't
+     *       (the kernel idle-loop match in gen_STI), which ihash doesn't
      *       cover: never recycled, always dropped by a load.
      */
     uint8_t xemu_xpage_reg;

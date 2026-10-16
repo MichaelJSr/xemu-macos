@@ -81,10 +81,11 @@ static void *mttcg_cpu_thread_fn(void *arg)
 #if defined(XBOX) && defined(__APPLE__)
     {
         /*
-         * The guest runs on this thread and it never sleeps (titles
-         * busy-poll), so at default QoS the scheduler decays its
-         * priority below the PFIFO and vblank threads it feeds, and
-         * under host load it loses part of its core.
+         * The guest runs on this thread and titles busy-poll (it
+         * sleeps only in the kernel's idle loop), so at default QoS
+         * the scheduler decays its priority below the PFIFO and
+         * vblank threads it feeds, and under host load it loses part
+         * of its core.
          * XEMU_VCPU_QOS=0 leaves it at default.
          */
         const char *e = getenv("XEMU_VCPU_QOS");

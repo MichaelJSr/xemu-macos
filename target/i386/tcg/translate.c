@@ -5472,15 +5472,19 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
 
 #if defined(XBOX) && defined(CONFIG_SYSTEM_ONLY)
 /*
- * Deterministic mode (icount): the Xbox kernel's idle thread never executes
- * HLT. KiIdleLoop spins on "sti; nop; nop; cli", checks the DPC list and
- * the next-thread pointer, and goes round again; every STI ends a TB, so
- * under icount each idle virtual microsecond costs hundreds of trips through
- * the TCG loop and idle time, not game work, bounds fast-forward. Both exit
- * conditions only change in interrupt handlers, so while they are false and
- * nothing is pending, halting until the next interrupt (helper_xemu_ki_idle)
- * is the same as spinning until it, and icount then warps virtual time to
- * the next timer deadline at once.
+ * The Xbox kernel's idle thread never executes HLT. KiIdleLoop spins on
+ * "sti; nop; nop; cli", checks the DPC list and the next-thread pointer,
+ * and goes round again; every STI ends a TB, so idle time goes round the
+ * TCG dispatch loop as fast as the host can. Both exit conditions only
+ * change in interrupt handlers, so while they are false and nothing is
+ * pending, halting until the next interrupt (helper_xemu_ki_idle) is the
+ * same as spinning until it.
+ *
+ * Deterministic mode (icount) halts at once: the spin made idle time, not
+ * game work, bound fast-forward, and icount warps virtual time to the next
+ * timer deadline. Normal mode (MTTCG) halts after a short spin, which gives
+ * the host core back instead of burning it until the next interrupt;
+ * XEMU_KI_IDLE_HALT=0 keeps the spin there.
  *
  * Matched on the loop's bytes, both forms the kernel has:
  *   P: sti; nop; nop; cli; cmp ebp,[ebp]; je J
@@ -5502,6 +5506,17 @@ static bool xemu_idle_bytes_match(DisasContext *s, vaddr pc,
     return true;
 }
 
+static bool xemu_ki_idle_halt_normal(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("XEMU_KI_IDLE_HALT");
+        on = !(e && !strcmp(e, "0"));
+    }
+    return on;
+}
+
 static int xemu_idle_loop_kind(DisasContext *s)
 {
     static const uint8_t head[] = {
@@ -5511,7 +5526,7 @@ static int xemu_idle_loop_kind(DisasContext *s)
     vaddr sti = s->pc - 1;
     vaddr page = sti & TARGET_PAGE_MASK;
 
-    if (!icount_enabled() ||
+    if ((!icount_enabled() && !xemu_ki_idle_halt_normal()) ||
         ((s->pc + sizeof(head) - 1) & TARGET_PAGE_MASK) != page) {
         return XEMU_IDLE_NONE;
     }

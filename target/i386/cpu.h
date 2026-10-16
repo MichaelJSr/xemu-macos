@@ -2249,6 +2249,13 @@ typedef struct CPUArchState {
      */
 #define XEMU_RETC_PAGEMAP_BITS 4096
     uint64_t xemu_retc_pages[XEMU_RETC_PAGEMAP_BITS / 64];
+    /*
+     * Normal-mode KiIdleLoop spin budget (helper_xemu_ki_idle): host ns
+     * when the current idle span began and when the helper last ran.
+     * Not migrated; a stale value only starts a new span.
+     */
+    int64_t xemu_idle_t0;
+    int64_t xemu_idle_last;
 #endif
 } CPUX86State;
 

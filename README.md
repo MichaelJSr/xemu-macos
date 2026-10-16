@@ -911,6 +911,13 @@ emulated CPU's thread runs at macOS's user-interactive QoS class, like
 the GPU threads, so it keeps a performance core under background load.
 `XEMU_VCPU_QOS=0` leaves it at the default class.
 
+**Hitches while other heavy apps load the GPU and every core.** Since
+2026-10-16 the emulated CPU sleeps in the Xbox kernel's idle loop after
+50 µs instead of spinning until the next interrupt, which frees a
+fifth to two thirds of a core at the 60 fps cap. Waking it can take a
+millisecond or more when no core is free; `XEMU_KI_IDLE_HALT=0`
+restores the spin.
+
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
 

@@ -32,6 +32,8 @@
 #include "exec/translation-block.h" /* tb_invalidate_phys_range */
 #include "exec/target_page.h"       /* TARGET_PAGE_MASK / TARGET_PAGE_SIZE */
 #include "hw/core/cpu.h"            /* cpu_get_phys_page_debug */
+#include "exec/icount.h"            /* icount_enabled */
+#include "qemu/timer.h"             /* get_clock */
 /*
  * Cross-page direct-chaining guest-flush backstops live inside the guest's
  * own INVLPG / CR3 helpers below. Function-local extern idiom:
@@ -562,14 +564,26 @@ G_NORETURN void helper_hlt(CPUX86State *env)
 
 #if defined(XBOX)
 /*
- * Deterministic mode (icount): reached from the STI that opens the Xbox
- * kernel's idle loop (see xemu_idle_loop_kind in translate.c), with EIP
- * already past the STI. If the loop would only go round again -- no DPC
- * queued (EBP = &Prcb->DpcListHead, empty when it points at itself), and
- * for the full loop no thread waiting (Prcb->NextThread at EBX+0x2c) --
- * and nothing is pending, halt as "sti; hlt" would. Only an interrupt can
- * change either condition, so the guest then wakes on the same interrupt
- * it would have spun until, and the loop's own checks run after it.
+ * Normal mode spins this long in an idle span before it halts: many spans
+ * are short waits that end inside it without paying a halt wake (a mean
+ * 6-36 us, longer under host load). A span is a run of helper calls less
+ * than XEMU_KI_IDLE_GAP_NS apart; one trip round the loop takes ~70 ns.
+ */
+#define XEMU_KI_IDLE_BUDGET_NS 50000
+#define XEMU_KI_IDLE_GAP_NS 5000
+
+/*
+ * Reached from the STI that opens the Xbox kernel's idle loop (see
+ * xemu_idle_loop_kind in translate.c), with EIP already past the STI. If
+ * the loop would only go round again -- no DPC queued (EBP =
+ * &Prcb->DpcListHead, empty when it points at itself), and for the full
+ * loop no thread waiting (Prcb->NextThread at EBX+0x2c) -- and nothing is
+ * pending, halt as "sti; hlt" would. Only an interrupt can change either
+ * condition, so the guest then wakes on the same interrupt it would have
+ * spun until, and the loop's own checks run after it. Deterministic mode
+ * (icount) halts at once; normal mode first spins out its budget, then
+ * halts the same way and wakes through the stock HLT path (the interrupt
+ * raiser's kick, halt_cond, cpu_handle_halt).
  */
 void helper_xemu_ki_idle(CPUX86State *env, uint32_t check_next_thread)
 {
@@ -585,6 +599,17 @@ void helper_xemu_ki_idle(CPUX86State *env, uint32_t check_next_thread)
     if (check_next_thread &&
         cpu_ldl_data_ra(env, env->regs[R_EBX] + 0x2c, GETPC()) != 0) {
         return;
+    }
+    if (!icount_enabled()) {
+        int64_t now = get_clock();
+
+        if (now - env->xemu_idle_last > XEMU_KI_IDLE_GAP_NS) {
+            env->xemu_idle_t0 = now;
+        }
+        env->xemu_idle_last = now;
+        if (now - env->xemu_idle_t0 < XEMU_KI_IDLE_BUDGET_NS) {
+            return;
+        }
     }
 
     do_end_instruction(env);
