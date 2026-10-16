@@ -40,6 +40,7 @@ static int g_use_hard_fpu;
 static int g_use_hard_fpu_inline;
 #if defined(XBOX)
 static int g_x87_wt; /* write-through inline x87 (x87_wt_*) */
+int xemu_sse_vfp; /* inline packed-single add/sub/mul/div (gen_fp_sse_inline) */
 #endif
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
@@ -5520,6 +5521,14 @@ void tcg_x86_init(void)
      */
     g_x87_wt = g_use_hard_fpu &&
                tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0);
+    /*
+     * Packed-single add/sub/mul/div as host vector FP ops, bit for bit
+     * the NEON helpers (same instructions, same FPCR) in TBs where those
+     * would not touch FPCR: MXCSR default (HF_SSE_DFL) and x87 RC nearest.
+     * Not under the XEMU_SSE_HOST=2 self-check, which checks the helpers.
+     */
+    xemu_sse_vfp = g_use_hard_fpu && xemu_sse_host_mode() == 1 &&
+                   tcg_op_supported(INDEX_op_fmul_vec, TCG_TYPE_V128, 0);
 #endif
 #endif
 }

@@ -51,6 +51,9 @@
 #define TCG_TARGET_HAS_v256             0
 #endif
 
+#ifndef TCG_TARGET_HAS_fvec
+#define TCG_TARGET_HAS_fvec             0
+#endif
 #ifndef TCG_TARGET_HAS_fpu
 #define TCG_TARGET_HAS_fpu              0
 #endif

@@ -1272,6 +1272,29 @@ static void set_x86_rounding_mode(unsigned mode, float_status *status)
     set_float_rounding_mode(x86_round_mode[mode], status);
 }
 
+#if defined(XBOX) && defined(__aarch64__)
+/* x87 RC (nearest, down, up, zero) as host rounding modes. */
+static const int xemu_host_round_mode[4] = {
+    FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO
+};
+
+/*
+ * x86_cpu_exec_enter, on the vCPU thread: x87 math and the inline SSE
+ * arithmetic round with this thread's FPCR, but update_fp_status sets the
+ * calling thread's, and reset, the gdbstub and loadvm's post_load call it
+ * from the main thread while the vCPU is stopped. Re-apply the guest's
+ * x87 RC before guest code runs.
+ */
+void xemu_sync_host_rounding(CPUX86State *env)
+{
+    int want = xemu_host_round_mode[(env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT];
+
+    if (unlikely(fegetround() != want)) {
+        fesetround(want);
+    }
+}
+#endif
+
 void update_fp_status(CPUX86State *env)
 {
     int rnd_mode;
@@ -1281,18 +1304,14 @@ void update_fp_status(CPUX86State *env)
     rnd_mode = (env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT;
     set_x86_rounding_mode(rnd_mode, &env->fp_status);
 #if defined(XBOX) && defined(__aarch64__)
-    {
-        /*
-         * The x87 hard-FPU paths round with the host FPCR, so it follows
-         * the x87 control word, and only it: MXCSR's rounding (SSE) used
-         * to overwrite it at LDMXCSR/FXRSTOR, leaving x87 math rounding
-         * per MXCSR until the next FLDCW.
-         */
-        static const int host_round_mode[4] = {
-            FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO
-        };
-        fesetround(host_round_mode[rnd_mode]);
-    }
+    /*
+     * The x87 hard-FPU paths round with the host FPCR, so it follows the
+     * x87 control word, and only it: MXCSR's rounding (SSE) used to
+     * overwrite it at LDMXCSR/FXRSTOR, leaving x87 math rounding per MXCSR
+     * until the next FLDCW. This sets the calling thread's FPCR; the vCPU
+     * thread's follows at its next cpu_exec entry (xemu_sync_host_rounding).
+     */
+    fesetround(xemu_host_round_mode[rnd_mode]);
 #endif
 
     switch ((env->fpuc >> 8) & 3) {
@@ -3786,6 +3805,22 @@ void update_mxcsr_status(CPUX86State *env)
 
     /* set flush to zero */
     set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->sse_status);
+
+#if defined(XBOX)
+    /*
+     * xemu: TBs built with HF_SSE_DFL run packed-single add/sub/mul/div
+     * inline on the host FPU, which then rounds per the x87 RC (also in
+     * the TB flags) without FTZ/DAZ. Set only while that path is on
+     * (xemu_sse_vfp): then the TCG writers end their TB (LDMXCSR, FXRSTOR,
+     * XRSTOR), and reset, the gdbstub and post_load re-enter from the main
+     * loop. Otherwise the bit stays clear and TB flags never vary with MXCSR.
+     */
+    if (xemu_sse_vfp && !(mxcsr & (SSE_RC_MASK | SSE_FZ | SSE_DAZ))) {
+        env->hflags |= HF_SSE_DFL_MASK;
+    } else {
+        env->hflags &= ~HF_SSE_DFL_MASK;
+    }
+#endif
 }
 
 void update_mxcsr_from_sse_status(CPUX86State *env)
@@ -3856,7 +3891,10 @@ void helper_emms(CPUX86State *env)
  *
  * On by default on aarch64 hosts with perf.hard_fpu: the sticky bracket
  * (d76ddd7b20) measured +1.9 fps, 3/3 pairs, and the differential
- * harness proved the path bit-exact over live gameplay.
+ * harness proved the path bit-exact over live gameplay. There, packed
+ * add/sub/mul/div mostly never get here: the translator emits the same
+ * NEON instruction inline in TBs where this bracket would leave FPCR
+ * alone (gen_fp_sse_inline, HF_SSE_DFL), except under mode 2.
  *
  * On x86_64 hosts the fast path is stronger than on ARM: host and
  * guest share the ISA, so _mm_{add,sub,mul,div,min,max}_{ps,ss} ARE
@@ -3887,6 +3925,15 @@ static int xemu_sse_neon_mode(void)
         }
     }
     return mode;
+}
+
+/*
+ * For the translator, which inlines packed-single add/sub/mul/div only in
+ * mode 1 (xemu_sse_vfp): mode 2 must see every op here.
+ */
+int xemu_sse_host_mode(void)
+{
+    return xemu_sse_neon_mode();
 }
 
 static inline bool xemu_sse_neon_usable(CPUX86State *env)

@@ -38,6 +38,10 @@ static void x86_cpu_exec_enter(CPUState *cs)
     env->df = 1 - (2 * ((env->eflags >> 10) & 1));
     CC_OP = CC_OP_EFLAGS;
     env->eflags &= ~(DF_MASK | CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+#if defined(XBOX) && defined(__aarch64__)
+    /* The x87 RC into this thread's FPCR (main-thread FCW writers). */
+    xemu_sync_host_rounding(env);
+#endif
 }
 
 static void x86_cpu_exec_exit(CPUState *cs)

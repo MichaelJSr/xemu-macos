@@ -141,6 +141,13 @@ typedef enum X86Seg {
    positions to ease oring with eflags. */
 /* current cpl */
 #define HF_CPL_SHIFT         0
+/*
+ * xemu: MXCSR rounds to nearest with FTZ and DAZ clear, so packed-single
+ * add/sub/mul/div may run inline on the host FPU (gen_fp_sse_inline). Every
+ * MXCSR write reaches update_mxcsr_status, which keeps it while that path
+ * is on (xemu_sse_vfp) and clears it otherwise.
+ */
+#define HF_SSE_DFL_SHIFT     2
 /* true if hardware interrupts must be disabled for next instruction */
 #define HF_INHIBIT_IRQ_SHIFT 3
 /* 16 or 32 segments */
@@ -174,6 +181,7 @@ typedef enum X86Seg {
 #define HF_FPU_RC_SHIFT     30 /* FPU Rounding Control (2 bits at 30-31)*/
 
 #define HF_CPL_MASK          (3 << HF_CPL_SHIFT)
+#define HF_SSE_DFL_MASK      (1 << HF_SSE_DFL_SHIFT)
 #define HF_INHIBIT_IRQ_MASK  (1 << HF_INHIBIT_IRQ_SHIFT)
 #define HF_CS32_MASK         (1 << HF_CS32_SHIFT)
 #define HF_SS32_MASK         (1 << HF_SS32_SHIFT)
@@ -204,8 +212,8 @@ typedef enum X86Seg {
  * FPU Rounding Control: two bits extracted from FPUC[11:10] and
  * baked into TB flags. A guest FLDCW that changes RC will cause TB
  * lookup to miss the old TB and either hit a cached TB for the new RC
- * or trigger a fresh translation. No translator path reads it since
- * the inline x87 cache was removed.
+ * or trigger a fresh translation. The inline SSE arithmetic reads it
+ * (gen_fp_sse_inline): the host FPCR rounds per the x87 RC, not MXCSR.
  */
 #define HF_FPU_RC_MASK       (3u << HF_FPU_RC_SHIFT)
 

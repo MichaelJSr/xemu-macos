@@ -11,7 +11,6 @@
 #include "system/kvm.h"
 #include "system/kvm_xen.h"
 #include "system/tcg.h"
-#include "exec/icount.h"
 
 #include "qemu/error-report.h"
 
@@ -311,14 +310,6 @@ static int cpu_pre_save(void *opaque)
     return 0;
 }
 
-#if defined(XBOX)
-/* Runs on the vCPU thread (see cpu_post_load). */
-static void x86_cpu_resync_host_fpu(CPUState *cs, run_on_cpu_data unused)
-{
-    update_fp_status(&X86_CPU(cs)->env);
-}
-#endif
-
 static int cpu_post_load(void *opaque, int version_id)
 {
     X86CPU *cpu = opaque;
@@ -341,21 +332,11 @@ static int cpu_post_load(void *opaque, int version_id)
     /*
      * Resync hflags (HF_FPU_RC / HF_FPU_PC): vmstate only restores
      * env->fpuc's raw bits, and the write-through x87 path reads precision
-     * control from tb->flags.
+     * control from tb->flags. This sets this (main) thread's host rounding;
+     * the vCPU thread's follows at its next cpu_exec entry
+     * (x86_cpu_exec_enter).
      */
     cpu_set_fpuc(env, env->fpuc);
-#if defined(XBOX)
-    if (icount_enabled()) {
-        /*
-         * Deterministic mode: x87 runs in the hard-FPU helpers, which round
-         * with the vCPU thread's host FPCR, and cpu_set_fpuc just set this
-         * (main) thread's. Re-apply the loaded control word on the vCPU
-         * thread before it runs guest code, or the first x87 ops after a
-         * load round as whatever ran before it did.
-         */
-        async_run_on_cpu(cs, x86_cpu_resync_host_fpu, RUN_ON_CPU_NULL);
-    }
-#endif
     /*
      * Real mode guest segments register DPL should be zero.
      * Older KVM version were setting it wrongly.

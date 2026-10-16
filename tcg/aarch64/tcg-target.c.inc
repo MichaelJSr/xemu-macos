@@ -611,6 +611,10 @@ typedef enum {
 
     /* AdvSIMD three same.  */
     I3616_ADD       = 0x0e208400,
+    I3616_FADD      = 0x0e20d400,
+    I3616_FSUB      = 0x0ea0d400,
+    I3616_FMUL      = 0x2e20dc00,
+    I3616_FDIV      = 0x2e20fc00,
     I3616_AND       = 0x0e201c00,
     I3616_BIC       = 0x0e601c00,
     I3616_BIF       = 0x2ee01c00,
@@ -3852,6 +3856,19 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
     case INDEX_op_mul_vec:
         tcg_out_insn(s, 3616, MUL, is_q, vece, a0, a1, a2);
         break;
+    /* sz (bit 22) = vece - MO_32; tcg_out_insn_3616 puts vece at 22. */
+    case INDEX_op_fadd_vec:
+        tcg_out_insn(s, 3616, FADD, is_q, vece - MO_32, a0, a1, a2);
+        break;
+    case INDEX_op_fsub_vec:
+        tcg_out_insn(s, 3616, FSUB, is_q, vece - MO_32, a0, a1, a2);
+        break;
+    case INDEX_op_fmul_vec:
+        tcg_out_insn(s, 3616, FMUL, is_q, vece - MO_32, a0, a1, a2);
+        break;
+    case INDEX_op_fdiv_vec:
+        tcg_out_insn(s, 3616, FDIV, is_q, vece - MO_32, a0, a1, a2);
+        break;
     case INDEX_op_neg_vec:
         if (is_scalar) {
             tcg_out_insn(s, 3612, NEG, vece, a0, a1);
@@ -4144,6 +4161,11 @@ int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
     case INDEX_op_umax_vec:
     case INDEX_op_umin_vec:
         return vece < MO_64;
+    case INDEX_op_fadd_vec:
+    case INDEX_op_fsub_vec:
+    case INDEX_op_fmul_vec:
+    case INDEX_op_fdiv_vec:
+        return TCG_TARGET_HAS_fvec && vece == MO_32;
 
     default:
         return 0;
@@ -4225,6 +4247,10 @@ static TCGConstraintSetIndex
 tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
 {
     switch (op) {
+    case INDEX_op_fadd_vec:
+    case INDEX_op_fsub_vec:
+    case INDEX_op_fmul_vec:
+    case INDEX_op_fdiv_vec:
     case INDEX_op_add_vec:
     case INDEX_op_sub_vec:
     case INDEX_op_mul_vec:

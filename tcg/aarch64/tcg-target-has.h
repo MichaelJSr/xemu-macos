@@ -68,6 +68,9 @@
 #define TCG_TARGET_HAS_fpu              1
 #endif
 
+/* fadd/fsub/fmul/fdiv_vec (inline SSE packed single): with the FP ops. */
+#define TCG_TARGET_HAS_fvec             TCG_TARGET_HAS_fpu
+
 /* ADD Xd, Xn, Wm, UXTW #sh */
 #define TCG_TARGET_HAS_add_zext_shl     1
 

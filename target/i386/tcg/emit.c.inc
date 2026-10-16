@@ -597,9 +597,48 @@ static inline void gen_fp_sse(DisasContext *s, X86DecodedInsn *decode,
     }
 }
 
-#define FP_SSE(uname, lname)                                                       \
+#if defined(XBOX)
+typedef void (*XemuGenVecFP)(unsigned, TCGv_vec, TCGv_vec, TCGv_vec);
+
+/*
+ * xemu: legacy-SSE packed-single add/sub/mul/div as one host vector FP op
+ * (xemu_sse_vfp). Bit for bit the NEON helpers, which run the same
+ * FADD/FSUB/FMUL/FDIV .4S under FPCR {RN, FZ=0}: in these TBs FPCR already
+ * holds that, because MXCSR is default (HF_SSE_DFL) and FPCR follows the
+ * x87 RC (update_fp_status, xemu_sync_host_rounding), which is nearest.
+ * The helpers' accepted differences from x86 carry over: no MXCSR sticky
+ * flags, ARM NaN selection and default NaN. FTZ/DAZ and directed rounding
+ * stay on the helpers. Never fuse a mul and an add: x86 rounds both.
+ */
+static bool gen_fp_sse_inline(DisasContext *s, X86DecodedInsn *decode,
+                              XemuGenVecFP fn)
+{
+    TCGv_vec a, b;
+
+    if (!fn || !xemu_sse_vfp || !(s->flags & HF_SSE_DFL_MASK) ||
+        (s->flags & HF_FPU_RC_MASK) || s->vex_l ||
+        (s->prefix & (PREFIX_DATA | PREFIX_REPZ | PREFIX_REPNZ | PREFIX_VEX))) {
+        return false;
+    }
+    a = tcg_temp_new_vec(TCG_TYPE_V128);
+    b = tcg_temp_new_vec(TCG_TYPE_V128);
+    tcg_gen_ld_vec(a, tcg_env, vector_reg_offset(&decode->op[1]));
+    /* A memory operand is in xmm_t0 already (gen_load). */
+    tcg_gen_ld_vec(b, tcg_env, vector_reg_offset(&decode->op[2]));
+    fn(MO_32, a, a, b);
+    tcg_gen_st_vec(a, tcg_env, vector_reg_offset(&decode->op[0]));
+    return true;
+}
+#else
+#define gen_fp_sse_inline(s, decode, fn) false
+#endif
+
+#define FP_SSE(uname, lname, vfp)                                                  \
 static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
 {                                                                                  \
+    if (gen_fp_sse_inline(s, decode, vfp)) {                                       \
+        return;                                                                    \
+    }                                                                              \
     gen_fp_sse(s, decode,                                                          \
                gen_helper_##lname##pd_xmm,                                         \
                gen_helper_##lname##ps_xmm,                                         \
@@ -608,12 +647,13 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                gen_helper_##lname##sd,                                             \
                gen_helper_##lname##ss);                                            \
 }
-FP_SSE(VADD, add)
-FP_SSE(VMUL, mul)
-FP_SSE(VSUB, sub)
-FP_SSE(VMIN, min)
-FP_SSE(VDIV, div)
-FP_SSE(VMAX, max)
+FP_SSE(VADD, add, tcg_gen_fadd_vec)
+FP_SSE(VMUL, mul, tcg_gen_fmul_vec)
+FP_SSE(VSUB, sub, tcg_gen_fsub_vec)
+/* x86 min/max return the second source on NaN and +-0: not FMIN/FMAX. */
+FP_SSE(VMIN, min, NULL)
+FP_SSE(VDIV, div, tcg_gen_fdiv_vec)
+FP_SSE(VMAX, max, NULL)
 
 #define FMA_SSE_PACKED(uname, ptr0, ptr1, ptr2, even, odd)                         \
 static void gen_##uname##Px(DisasContext *s, X86DecodedInsn *decode)               \
@@ -2030,8 +2070,11 @@ static void gen_FXRSTOR(DisasContext *s, X86DecodedInsn *decode)
     } else {
         gen_helper_fxrstor(tcg_env, s->A0);
 #ifdef XBOX
-        /* New precision control: see frstor in translate.c. */
-        if (g_x87_wt) {
+        /*
+         * New precision control (see frstor in translate.c) and
+         * HF_SSE_DFL (see LDMXCSR).
+         */
+        if (g_x87_wt || xemu_sse_vfp) {
             s->base.is_jmp = DISAS_EOB_NEXT;
         }
 #endif
@@ -2377,6 +2420,15 @@ static void gen_LDMXCSR(DisasContext *s, X86DecodedInsn *decode)
 
     tcg_gen_trunc_tl_i32(tmp, s->T0);
     gen_helper_ldmxcsr(tcg_env, tmp);
+#ifdef XBOX
+    /*
+     * HF_SSE_DFL may have changed. Through the main loop: DISAS_JUMP's
+     * jump-cache probe would take the old flags.
+     */
+    if (xemu_sse_vfp) {
+        s->base.is_jmp = DISAS_EOB_NEXT;
+    }
+#endif
 }
 
 static void gen_lxx_seg(DisasContext *s, X86DecodedInsn *decode, int seg)
@@ -4843,8 +4895,8 @@ static void gen_XRSTOR(DisasContext *s, X86DecodedInsn *decode)
     tcg_gen_concat_tl_i64(features, cpu_regs[R_EAX], cpu_regs[R_EDX]);
     gen_helper_xrstor(tcg_env, s->A0, features);
 #ifdef XBOX
-    /* New precision control: see frstor in translate.c. */
-    if (g_x87_wt) {
+    /* As FXRSTOR. */
+    if (g_x87_wt || xemu_sse_vfp) {
         s->base.is_jmp = DISAS_EOB_NEXT;
     }
 #endif

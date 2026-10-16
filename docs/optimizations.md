@@ -43,7 +43,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). x86_64 hosts: `=1` opts in, dark until `=2` runs clean on real silicon. `=2`, on any host, runs both paths with strict brackets and aborts on divergence. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
+| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). x86_64 hosts: `=1` opts in, dark until `=2` runs clean on real silicon. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the x87 exception-pointer deferral: keeps every legacy store, computes the deferral anyway, and counts every runtime point where the deferred state could have been observed (deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **On since 2026-07-18, and always on in Apple builds** (the `=0` off switch was removed on 2026-10-15; on non-Apple aarch64, where it is unvalidated, `=1` opts in): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04). The prefilter is emitted only by the aarch64 TCG backend, so on any other host (x86_64 Windows/Linux) this knob and its refuter are inert — since 2026-09-08 an explicit `=1` says so once on stderr from the `XEMU_SUBPAGE_REFUTE` latch in `accel/tcg/tb-maint.c` |
@@ -450,7 +450,15 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `cpu_post_load`, gdbstub, SEV, reset) routes through
   `cpu_set_fpuc` so `HF_FPU_RC` / `HF_FPU_PC` in `hflags` are
   rebuilt — the write-through x87 path reads `HF_FPU_PC` from
-  `tb->flags` (fused FIST read `HF_FPU_RC` until it was removed).
+  `tb->flags` and the inline SSE arithmetic `HF_FPU_RC`.
+  `update_fp_status` sets the calling thread's FPCR, and reset, the
+  gdbstub and `cpu_post_load` call it from the main thread, so since
+  2026-10-15 `x86_cpu_exec_enter` re-applies the x87 RC to the vCPU
+  thread's FPCR at every `cpu_exec` entry (one compare; before, only a
+  load under icount resynced it, from `cpu_post_load`). Likewise every
+  MXCSR write reaches `update_mxcsr_status`, which keeps `HF_SSE_DFL`
+  while the inline SSE path is on; reset now goes through
+  `cpu_set_mxcsr`.
 - **Misc.** `fnstcw` is one load; `insertion_sort_syncs` replaces
   `qsort` for N ≤ 16. (Retired with the cache on 2026-10-15: `gen_flcr`
   materializing rc-bits from `tb->flags`. The `flcr` op and its 5-insn
@@ -474,6 +482,22 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   2026-10-15): the *inline* x87 path skipped its `MSR FPCR` whenever
   the `cached_fpuc_rc` cache matched the TB's rounding bits, so the
   bracket invalidated that cache when it rewrote FPCR.
+- **Inline SSE packed-single arithmetic (2026-10-15).** Legacy-SSE
+  `addps`/`subps`/`mulps`/`divps` compile to one AArch64
+  `FADD`/`FSUB`/`FMUL`/`FDIV .4S` (new generic `f{add,sub,mul,div}_vec`
+  TCG ops behind `TCG_TARGET_HAS_fvec`: aarch64 only, off on
+  Windows/ARM64 with the other FP ops) instead of a ~53-instruction
+  helper call. Only in TBs whose flags carry `HF_SSE_DFL` (hflags bit 2:
+  MXCSR rounds to nearest, FTZ and DAZ clear) and x87 RC nearest: there
+  the host FPCR already holds what the NEON helper's bracket would set,
+  so results are the helper's bit for bit. LDMXCSR, FXRSTOR and XRSTOR
+  end their TB. Azurik's population is one 4x4 matrix multiply (16
+  `mulps` + 12 `addps` per call, ~50k ops per heavy-f1 frame). Det
+  heavy-f1, 34 order-balanced pairs at load 40-68: Minsns/frame −2.67%
+  (34/34), Mcycles/frame −0.9% (22/34, 95% CI −2.3..+0.5%); a 28-pair
+  recheck at load 12-41: −2.61% (28/28) and +0.2% (13/28, CI
+  −1.2..+1.6%), so cycle-neutral. Stream-e2 walk, 8 pairs: Minsns/frame
+  −2.1% (8/8), Mcycles/frame −2.5% (6/8, 95% CI −5.5..+0.7%).
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,

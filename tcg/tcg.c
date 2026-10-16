@@ -2622,6 +2622,11 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return has_type && TCG_TARGET_HAS_eqv_vec;
     case INDEX_op_mul_vec:
         return has_type && TCG_TARGET_HAS_mul_vec;
+    case INDEX_op_fadd_vec:
+    case INDEX_op_fsub_vec:
+    case INDEX_op_fmul_vec:
+    case INDEX_op_fdiv_vec:
+        return has_type && TCG_TARGET_HAS_fvec;
     case INDEX_op_shli_vec:
     case INDEX_op_shri_vec:
     case INDEX_op_sari_vec:

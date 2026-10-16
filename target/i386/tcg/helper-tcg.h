@@ -61,8 +61,14 @@ void tcg_x86_init(void);
 #if defined(XBOX)
 void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
                       uint64_t word2);
+/* fpu_helper.c: 1 = SSE host fast path on, 2 = differential self-check. */
+int xemu_sse_host_mode(void);
+/* translate.c: inline packed-single add/sub/mul/div on (HF_SSE_DFL kept). */
+extern int xemu_sse_vfp;
 #endif
 #if defined(XBOX) && defined(__aarch64__)
+/* fpu_helper.c: re-apply the x87 RC to this (vCPU) thread's FPCR. */
+void xemu_sync_host_rounding(CPUX86State *env);
 /* fpu_helper.c: double_to_floatx80_fast, the C twin of the inline st80f. */
 floatx80 xemu_x87_double_to_floatx80(double d);
 #endif
