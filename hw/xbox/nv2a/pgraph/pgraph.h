@@ -262,6 +262,13 @@ typedef struct PGRAPHState {
     bool flush_discard;
     bool det_reports_eager; /* traced frame advance: no lazy reports */
     bool waiting_for_context_switch;
+    /*
+     * Deterministic inline pusher only: the subchannel whose CTX_CACHE1-5
+     * pgraph_method last copied to CTX_SWITCH1-5 in this run, or -1. Nothing
+     * else writes those registers mid-run, so the copy can be skipped while
+     * the subchannel repeats; every inline run starts at -1.
+     */
+    int ctx_switch_subch;
 
     bool flush_pending;
     QemuEvent flush_complete;

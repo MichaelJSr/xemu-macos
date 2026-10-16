@@ -285,6 +285,7 @@ void pgraph_init(NV2AState *d)
 
     pg->frame_time = 0;
     pg->draw_time = 0;
+    pg->ctx_switch_subch = -1;
 
     /* Force the first shader bind after init to populate uniforms. */
     pg->shader_uniform_inputs_dirty = true;
@@ -771,6 +772,12 @@ static void pgraph_method_log(unsigned int subchannel,
     static unsigned int last = 0;
     static unsigned int count = 0;
 
+    /* Runs for every method word: free when the build traces nothing. */
+    if (!trace_event_get_state_backends(TRACE_NV2A_PGRAPH_METHOD) &&
+        !trace_event_get_state_backends(TRACE_NV2A_PGRAPH_METHOD_ABBREV)) {
+        return;
+    }
+
     if (last == NV097_ARRAY_ELEMENT16 && method != last) {
         method_name = "NV097_ARRAY_ELEMENT16";
         trace_nv2a_pgraph_method_abbrev(subchannel, graphics_class, last,
@@ -867,6 +874,13 @@ static void pgraph_method_non_inc(MethodFunc handler, METHOD_HANDLER_ARG_DECL)
     }                                                             \
     DEF_METHOD_INT(gclass, name)
 
+/*
+ * The pusher's per-method call (pfifo.c): inline it there under clang LTO.
+ * Only the PGO profile used to, so a stale one brought the call back.
+ */
+#ifdef __clang__
+QEMU_ALWAYS_INLINE
+#endif
 int pgraph_method(NV2AState *d, unsigned int subchannel,
                    unsigned int method, uint32_t parameter,
                    uint32_t *parameters, size_t num_words_available,
@@ -903,17 +917,24 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
         pgraph_reg_w(pg, NV_PGRAPH_CTX_CACHE5 + subchannel * 4, ctx_5);
     }
 
-    // is this right?
-    pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH1,
-                 pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE1 + subchannel * 4));
-    pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH2,
-                 pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE2 + subchannel * 4));
-    pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH3,
-                 pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE3 + subchannel * 4));
-    pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH4,
-                 pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE4 + subchannel * 4));
-    pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH5,
-                 pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE5 + subchannel * 4));
+    /*
+     * The inline pusher skips a copy that would change nothing: the same
+     * subchannel's CACHE values, already in SWITCH (pg->ctx_switch_subch).
+     */
+    if (method == NV_SET_OBJECT || (int)subchannel != pg->ctx_switch_subch) {
+        // is this right?
+        pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH1,
+                     pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE1 + subchannel * 4));
+        pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH2,
+                     pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE2 + subchannel * 4));
+        pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH3,
+                     pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE3 + subchannel * 4));
+        pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH4,
+                     pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE4 + subchannel * 4));
+        pgraph_reg_w(pg, NV_PGRAPH_CTX_SWITCH5,
+                     pgraph_reg_r(pg, NV_PGRAPH_CTX_CACHE5 + subchannel * 4));
+        pg->ctx_switch_subch = d->pfifo.inline_locked ? (int)subchannel : -1;
+    }
 
     uint32_t graphics_class = PG_GET_MASK(NV_PGRAPH_CTX_SWITCH1,
                                        NV_PGRAPH_CTX_SWITCH1_GRCLASS);

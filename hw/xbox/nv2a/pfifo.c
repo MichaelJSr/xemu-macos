@@ -288,12 +288,19 @@ static bool pfifo_puller_should_stall(NV2AState *d)
            !can_fifo_access(d);
 }
 
-static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
-                                uint32_t parameter, uint32_t *parameters,
-                                size_t num_words_available,
-                                size_t max_lookahead_words)
+/* inl: the deterministic inline run (pfifo.inline_locked), see the pusher. */
+static inline QEMU_ALWAYS_INLINE ssize_t
+pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
+                 uint32_t *parameters, size_t num_words_available,
+                 size_t max_lookahead_words, const bool inl)
 {
-    if (pfifo_puller_should_stall(d)) {
+    /*
+     * Inline, the pusher has just checked FIFO access and waiting_for_nop
+     * and cleared LOW_MARK, and no other thread can change them.
+     */
+    if (inl ? pfifo_stall_for_flip(d) ||
+                  qatomic_read(&d->pgraph.waiting_for_context_switch)
+            : pfifo_puller_should_stall(d)) {
         return -1;
     }
 
@@ -303,12 +310,12 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
     uint32_t *status = &d->pfifo.regs[NV_PFIFO_CACHE1_STATUS];
     ssize_t num_proc = -1;
     /* Inline run on the vCPU: pgraph.lock is held throughout. */
-    bool locked = d->pfifo.inline_locked;
+    const bool locked = inl;
 
     // TODO think more about locking
 
     if (!GET_MASK(*pull0, NV_PFIFO_CACHE1_PULL0_ACCESS) ||
-        (*status & NV_PFIFO_CACHE1_STATUS_LOW_MARK)) {
+        (!inl && (*status & NV_PFIFO_CACHE1_STATUS_LOW_MARK))) {
         return -1;
     }
 
@@ -333,7 +340,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
             qemu_mutex_lock(&d->pgraph.lock);
         }
 
-        if (can_fifo_access(d)) {
+        if (inl || can_fifo_access(d)) {
             pgraph_context_switch(d, entry.channel_id);
             if (!qatomic_read(&d->pgraph.waiting_for_context_switch)) {
                 num_proc =
@@ -376,7 +383,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
             qemu_mutex_lock(&d->pgraph.lock);
         }
 
-        if (can_fifo_access(d)) {
+        if (inl || can_fifo_access(d)) {
             num_proc =
                 pgraph_method(d, subchannel, method, parameter, parameters,
                               num_words_available, max_lookahead_words, inc);
@@ -403,7 +410,18 @@ static bool pfifo_pusher_should_stall(NV2AState *d)
            qatomic_read(&d->pgraph.waiting_for_nop);
 }
 
-static void pfifo_run_pusher(NV2AState *d)
+/*
+ * inl: the deterministic inline run (pfifo_icount_sync, pfifo.inline_locked).
+ * The vCPU is then the only thread that touches PFIFO and PGRAPH state for
+ * the whole run: it holds both locks (it drops them only to take the BQL,
+ * and no other thread writes this state then either), and no guest access
+ * comes in until it returns. So nothing else moves DMA_PUT or reads DMA_GET
+ * mid-run, and the release/acquire pair the threaded pusher needs (the
+ * lockless doorbell and USER reads) guards nothing. pfifo_run_pusher builds
+ * one copy of this loop per mode.
+ */
+static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
+                                                            const bool inl)
 {
     uint32_t *push0 = &d->pfifo.regs[NV_PFIFO_CACHE1_PUSH0];
     uint32_t *push1 = &d->pfifo.regs[NV_PFIFO_CACHE1_PUSH1];
@@ -446,10 +464,18 @@ static void pfifo_run_pusher(NV2AState *d)
     hwaddr dma_len;
     uint8_t *dma = nv_dma_map(d, dma_instance, &dma_len);
 
+    /* Inline, GET lives in a register and nothing moves PUT. */
+    uint32_t get = inl ? *dma_get : 0;
+    const uint32_t put = inl ? *dma_put : 0;
+    if (inl) {
+        /* Guest writes and loads may have changed CTX_SWITCH since. */
+        d->pgraph.ctx_switch_subch = -1;
+    }
+
     while (!pfifo_pusher_should_stall(d)) {
-        uint32_t dma_get_v = *dma_get;
+        uint32_t dma_get_v = inl ? get : *dma_get;
         /* Pairs with the release in pfifo_put_doorbell. */
-        uint32_t dma_put_v = qatomic_load_acquire(dma_put);
+        uint32_t dma_put_v = inl ? put : qatomic_load_acquire(dma_put);
         if (dma_get_v == dma_put_v) break;
         if (dma_get_v >= dma_len) {
             assert(!"Dma value is out of range in PFIFO pusher");
@@ -494,7 +520,7 @@ static void pfifo_run_pusher(NV2AState *d)
             ssize_t num_words_processed =
                 pfifo_run_puller(d, method_entry, word, word_ptr,
                                  MIN(method_count, num_words_available),
-                                 num_words_available);
+                                 num_words_available, inl);
             if (num_words_processed < 0) {
                 break;
             }
@@ -583,8 +609,12 @@ static void pfifo_run_pusher(NV2AState *d)
             }
         }
 
-        /* The words before GET are consumed (lockless user_read). */
-        qatomic_store_release(dma_get, dma_get_v);
+        if (inl) {
+            *dma_get = get = dma_get_v;
+        } else {
+            /* The words before GET are consumed (lockless user_read). */
+            qatomic_store_release(dma_get, dma_get_v);
+        }
 
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
             break;
@@ -603,6 +633,15 @@ static void pfifo_run_pusher(NV2AState *d)
 
         // d->pfifo.pending_interrupts |= NV_PFIFO_INTR_0_DMA_PUSHER;
         // nv2a_update_irq(d);
+    }
+}
+
+static void pfifo_run_pusher(NV2AState *d)
+{
+    if (d->pfifo.inline_locked) {
+        pfifo_run_pusher_impl(d, true);
+    } else {
+        pfifo_run_pusher_impl(d, false);
     }
 }
 

@@ -2020,6 +2020,35 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   already-pending, plus the PFIFO thread's idle parks. It closed kick
   suppression (0 of 412,074 suppressible; Settled vectors). No kick is
   ever suppressed: a wrongly-skipped kick is a permanent PFIFO hang.
+- **Leaner deterministic inline pusher (2026-10-15).** With the null
+  renderer under icount the vCPU runs the pusher itself
+  (`pfifo_icount_sync`) holding both locks, and PMI put the pusher's own
+  per-method loop at 2.8% of the det heavy-f1 vCPU. That inline run now
+  gets its own copy of the loop (`pfifo_run_pusher_impl(d, true)`; the
+  threaded copy keeps every check). It keeps DMA_GET in a register with
+  a plain store per word and reads DMA_PUT once, so the release/acquire
+  pair the lockless doorbell needs is gone. The puller skips the second
+  FIFO-access and `waiting_for_nop` checks and the LOW_MARK test the
+  pusher has just made, and `pgraph_method` skips the five
+  CTX_CACHE → CTX_SWITCH compare-and-copies while the subchannel repeats
+  (`pg->ctx_switch_subch`, reset at every run start). Nothing else
+  writes those registers mid-run. `pgraph_method_log` returns at once
+  when its two trace events are off, which under the nop backend drops
+  its static bookkeeping from every method word in both modes. The
+  edit cost `pfifo_run_pusher` its PGO counts, which had been all that
+  inlined `pgraph_method` there (+0.69% instructions with the call
+  back), so `pgraph_method` is `always_inline` under clang (ThinLTO
+  honours it across files). On the misc lane (22329bd8bc plus the MMX
+  commits, the icache batching and W^X, before the pinned registers and
+  TLB memo): det heavy-f1 Minsns/frame −1.64% (44/44), per step −0.36%
+  (GET/PUT), −0.27% (stall checks), −0.50% (CTX copies), −0.55% (log);
+  stream-e2 −1.65% (4/4); cold boot 0.00%. Cycles:
+  same-binary alternate-chunk A/B (old inline path in alternate 20-frame
+  chunks, load 16-24) heavy-f1 −1.08% Mcycles/frame (se 0.26, median
+  −1.27%), against an old path that ran 0.7% more instructions than the
+  real base (no PGO layout), so expect nearer −0.8%. Cross-binary paired
+  medians at load 16-26 couldn't resolve it: heavy-f1 −0.12% (22/44, CI
+  −2.0..+1.4%), cold boot +0.6% (9/19, CI −2.2..+4.1%).
 - **PTIMER zero-divisor guard (2026-09-08).** The upstream merge gave
   `NV_PTIMER_ALARM_0` a write handler that schedules a QEMU timer
   (`d73326b621`), and every conversion on that path divides by
@@ -2685,7 +2714,7 @@ Lessons worth preserving so they aren't re-attempted.
 | HRTF hand-NEON (gather over taps) | Gather-then-FMA on a circular buffer defeated OoO overlap; `-O3 -mcpu=native` autovectorizes better. Lanes over outputs later shipped for settled and moving-parameter frames (2026-10-15) |
 | BQL event batching | Breaks QEMU cooperative scheduling |
 | TLS-cached `pthread_jit_write_protect_np` | Per-thread cache drifts from kernel W^X on nested `tb_gen_code` / setjmp paths → SIGSEGV/SIGILL after ~1 min |
-| Hoist `can_fifo_access` out of pfifo pusher word loop | `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, so "lock held throughout" is false → `ERROR_CALL` on boot |
+| Hoist `can_fifo_access` out of pfifo pusher word loop | `pfifo_run_puller` drops `pfifo.lock` when taking `pgraph.lock`, so "lock held throughout" is false → `ERROR_CALL` on boot. The deterministic inline run does hold both locks throughout, and since 2026-10-15 its copy of the loop drops the repeated checks (Threads + runtime, Leaner deterministic inline pusher) |
 | DSP JIT round-4 `cur_inst` preset skip | Regresses on startup with `op=0x001000` — some inlined path reads `cur_inst` at runtime that the static classifier doesn't see. Harness removed; recover from `1f444fa272`/`4668947cc9` |
 | DSP JIT round-4 EPI_NO_PC | 9.75% mismatch per pcskip sentinel — calc_ea mode 6 lengthens parmoves and REP/DO loops rewind pc; both legitimately diverge |
 | Vblank cadence aligned to host display refresh | Host `vblank_interval_ns` drives `process_vblank` → `graphic_hw_update` → `nv2a_vga_gfx_update` → `NV_PCRTC_INTR_0_VBLANK`. Retuning retimes the *guest* IRQ (titles gate sim on vblank count). Needs NV2A-internal timer (fixed 60 / 50 Hz) decoupled from host present cadence |
