@@ -4,8 +4,9 @@
     bench-det.py [-n PAIRS] [-f FRAMES] [-t TAG] [-i LINE]... [--hash-at F,F]
                  [--icount ARGS] [--out FILE] NAME=APP[:K=V,K=V] ...
 
-Each run clones the fixture HDD, EEPROM and config into a fresh temp dir
-(muted, pad stubs via harness-config.py), starts APP headless with the
+Each run clones the source config ($XEMU_TEST_CONFIG, else
+../fixtures/xemu.toml) and the HDD and EEPROM it names into a fresh temp
+dir (muted, pad stubs via harness-config.py), starts APP headless with the
 null renderer under `-S -icount shift=2,align=off,sleep=off`, loads TAG
 (`-` boots cold), writes the -i pipe lines, advances FRAMES frames and
 hashes guest RAM (sha256[:16]: QMP xemu-ram-digest, or xemu-dump-ram's
@@ -51,7 +52,11 @@ import os, re, shutil
 import socket, statistics, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FIX = os.environ.get('XEMU_FIXTURES', os.path.join(os.path.dirname(REPO), 'fixtures'))
+# The source config, as for every harness: $XEMU_TEST_CONFIG, else
+# ../fixtures/xemu.toml beside the checkout. Its hdd_path / eeprom_path /
+# dvd_path name the files to clone (else the same names beside it).
+CFG = os.environ.get('XEMU_TEST_CONFIG') or os.path.join(
+    os.path.dirname(REPO), 'fixtures', 'xemu.toml')
 _spec = importlib.util.spec_from_file_location(
     'xemu_lease', os.path.join(REPO, 'scripts/xemu_lease.py'))
 lease = importlib.util.module_from_spec(_spec)  # marker, nice, slot, lease, bench cache
@@ -116,11 +121,19 @@ def wait_log(log, text, count, proc, timeout=120):
         time.sleep(0.01)
 
 
+def cfg_path(key):
+    """A path the source config names (hdd_path, eeprom_path, dvd_path), or None."""
+    m = re.search(rf"""(?m)^\s*{key}\s*=\s*['"](.*)['"]\s*$""", open(CFG).read())
+    return m and m.group(1)
+
+
 def scratch(d):
     """Clone the fixture HDD, EEPROM and config (muted, pads stubbed) into d."""
-    for src, dst in (('xbox_hdd.qcow2', 'hdd.qcow2'), ('eeprom.bin', 'eeprom.bin')):
-        subprocess.run(['cp', '-c', os.path.join(FIX, src), os.path.join(d, dst)], check=True)
-    cfg = open(os.path.join(FIX, 'xemu.toml')).read()
+    for key, name, dst in (('hdd_path', 'xbox_hdd.qcow2', 'hdd.qcow2'),
+                           ('eeprom_path', 'eeprom.bin', 'eeprom.bin')):
+        src = cfg_path(key) or os.path.join(os.path.dirname(CFG), name)
+        subprocess.run(['cp', '-c', src, os.path.join(d, dst)], check=True)
+    cfg = open(CFG).read()
     for k, v in (('hdd_path', f'{d}/hdd.qcow2'), ('eeprom_path', f'{d}/eeprom.bin'),
                  ('screenshot_dir', d)):
         cfg = re.sub(rf'(?m)^{k} = .*$', f"{k} = '{v}'", cfg)
@@ -624,8 +637,7 @@ def timeline(a, arms):
         sys.exit('--timeline boots cold: leave -t at its default or pass -t -')
     va = dict(TL_VAS)
     if not a.dvd:
-        m = re.search(r"(?m)^dvd_path = '(.*)'$", open(os.path.join(FIX, 'xemu.toml')).read())
-        iso = m and m.group(1)
+        iso = cfg_path('dvd_path')
     else:
         iso = a.dvd
     va['xbe_entry'] = xbe_entry(iso) if iso else None
