@@ -26,7 +26,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 - `dsp->core` is only the save/restore snapshot (`dsp_sync_to_vm`/`_from_vm`); live state is `dsp->backend`.
 - **W^X**: every code-buffer write, including `chain_repatch_b` patches into other blocks, happens inside `qemu_thread_jit_write()` → writes → `jit_clear_icache` → `qemu_thread_jit_execute()`, in one function. No TLS-cached W^X state, no `pthread_jit_write_with_callback_np`. → SIGSEGV now, or SIGSEGV/SIGILL about a minute in. J.
 - **Pins**: A/B in x26/x27, packed X/Y in x20/x21, SR low 16 bits in x28. `dsp->registers[]` stays authoritative: write through, and reload pins (`emit_reload_*_pins`, `emit_reload_sr_pin`) after any BLR fallback that may touch them. Verify with `XEMU_DSP_JIT_PIN_AUDIT=1`. → silent audio corruption on rare paths. J.
-- No block boundary may skip `dsp_postexecute_update_pc`, which decides REP/DO continuation. → PC desync.
+- No block boundary may skip `dsp_postexecute_update_pc`, which decides REP/DO continuation. The JIT epilogue inlines all but REP and the loop edge (`dsp_do_loop_edge`, shared with the interpreter) and re-reads `loop_rep` only after the REP helper, so anything new that sets `loop_rep` after Step 5 must exit the block itself. → PC desync.
 - Voice registers live in guest RAM; the `voice_buf` cache must fall through to `ram_ldl`. → stale voices. `apu/vp/vp.c`.
 
 ### Present path

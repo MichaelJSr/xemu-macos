@@ -67,6 +67,7 @@
  * from that file (see dsp56k_jit_helper_* at the bottom of dsp_cpu.c).
  */
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp);
+void dsp56k_jit_helper_do_loop_edge(dsp_core_t *dsp);
 void dsp56k_jit_helper_postexecute_interrupts(dsp_core_t *dsp);
 
 typedef void (*emu_func_t)(dsp_core_t *dsp);
@@ -540,14 +541,24 @@ static inline void emit_b(ArmEmit *e, int32_t off_bytes)
     emit_u32(e, 0x14000000u | ((uint32_t)imm26 & 0x03ffffff));
 }
 
-/* TBNZ Wt, #bit, #imm14     — pc-relative branch if bit set. */
-static inline void emit_tbnz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
+/* TBZ Wt, #bit, #imm14      — pc-relative branch if bit clear. */
+static inline void emit_tbz_w(ArmEmit *e, int rt, int bit, int32_t off_bytes)
 {
     int32_t imm14 = off_bytes >> 2;
     assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
     assert(bit >= 0 && bit < 32);
-    emit_u32(e, 0x37000000u | ((uint32_t)(bit & 0x1f) << 19) |
+    emit_u32(e, 0x36000000u | ((uint32_t)(bit & 0x1f) << 19) |
                 (((uint32_t)imm14 & 0x3fff) << 5) | (rt & 0x1f));
+}
+
+/* Patch a previously-emitted TBZ/TBNZ with a new byte delta (imm14). */
+static void patch_tb(uint32_t *insn_addr, int32_t new_off_bytes)
+{
+    int32_t imm14 = new_off_bytes >> 2;
+    assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
+    uint32_t insn = *insn_addr & ~(0x3fffu << 5);
+    insn |= ((uint32_t)imm14 & 0x3fff) << 5;
+    *insn_addr = insn;
 }
 
 /* ORR Wd, Wn, Wm  (shifted-register form, shift #0) */
@@ -1277,19 +1288,29 @@ QEMU_BUILD_BUG_ON(OFF_PC_ON_REP                > OFF_WINDOW_W);
  * Pending patch sites for the shared exit_label. We collect them as
  * we emit each op and patch them after the epilogue is placed.
  */
-/* Each per-op epilogue records up to 5 exit-check branches
- * (interrupt_counter / loop_rep / is_idle / jit_exit_block_request
- * / pc-mismatch). Size the array accordingly, with a small safety
+/* Each per-op epilogue records up to 3 exit-check branches
+ * (interrupt_counter / is_idle + jit_exit_block_request /
+ * pc-mismatch) and one branch to the block's REP tail (see
+ * emit_rep_tail). Size the arrays accordingly, with a safety
  * margin. */
 typedef struct {
     uint32_t *sites[DSP56K_JIT_MAX_OPS_PER_BLOCK * 8];
     int count;
+    uint32_t *rep_sites[DSP56K_JIT_MAX_OPS_PER_BLOCK * 2];
+    int rep_count;
 } ExitPatchList;
 
 static void record_exit_patch(ExitPatchList *l, uint32_t *site)
 {
     assert(l->count < (int)(sizeof(l->sites) / sizeof(l->sites[0])));
     l->sites[l->count++] = site;
+}
+
+static void record_rep_tail_patch(ExitPatchList *l, uint32_t *site)
+{
+    assert(l->rep_count <
+           (int)(sizeof(l->rep_sites) / sizeof(l->rep_sites[0])));
+    l->rep_sites[l->rep_count++] = site;
 }
 
 static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
@@ -1327,9 +1348,9 @@ static void patch_exits(ExitPatchList *l, uint32_t *exit_label)
  *
  * The two helper-pointer BLR sites in emit_post_instruction_epilogue's
  * slow path now materialise the helper addresses inline via
- * emit_mov_imm64 (+4 insns / call). The slow path only fires when
- * REP / DO loop state is active — a rare path whose extra cost is
- * dwarfed by the fast-path savings from pinning X/Y. */
+ * emit_mov_imm64 (+4 insns / call). The slow path only fires on REP,
+ * a DO-loop edge or a pending interrupt — a rare path whose extra
+ * cost is dwarfed by the fast-path savings from pinning X/Y. */
 #define DSP56K_JIT_A_PIN_REG  26
 #define DSP56K_JIT_B_PIN_REG  27
 #define DSP56K_JIT_X_PIN_REG  20   /* packed X1:X0 (previously update_pc ptr) */
@@ -5384,18 +5405,101 @@ static void emit_parmove_pm5(ArmEmit *e, uint32_t inst, emu_func_t alu,
 }
 
 /*
+ * Per-op epilogue Step 7: num_inst += instr_cycle.
+ */
+static void emit_epi_num_inst(ArmEmit *e)
+{
+    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+    emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
+    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+}
+
+/*
+ * Per-op epilogue Step 6: inline postexecute_interrupts fast path.
+ * The helper is a no-op when every interrupt-tracking field is
+ * zero; skip the BLR in that common case. SR.T (trace bit) is NOT
+ * in the quick check — xemu doesn't expose a DSP single-step
+ * debugger so no production title sets it.
+ *
+ * With exits != NULL this also emits Step 8, the interrupt_counter
+ * exit check ("there's a pending interrupt, re-enter the dispatcher
+ * so it can hand off to the C interpreter for pipeline-accurate
+ * delivery"), on the BLR path only: when the quick check skips the
+ * BLR, interrupt_counter was just read as zero.
+ */
+static void emit_epi_interrupts(ArmEmit *e, ExitPatchList *exits)
+{
+    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
+    emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+    emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH,
+                  OFF_INTERRUPT_PIPELINE_COUNT);
+    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
+
+    uint32_t *skip_site = e->buf;
+    emit_cbz_w(e, /*rn=*/0, 0);
+
+    emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+    /* x21 is now the Y-bank pin — materialise the interrupt
+     * helper address inline (slow path, fires only when an
+     * interrupt is pending). */
+    emit_mov_imm64(e, /*rd=*/15,
+        (uint64_t)(uintptr_t)&dsp56k_jit_helper_postexecute_interrupts);
+    emit_blr(e, /*rn=*/15);
+    /* The interrupt helper may invoke dsp_stack_push and tweak
+     * SR / pc, but doesn't touch X/Y/A/B. A/B pins stay valid;
+     * SR pin reload needed (long-interrupt rewrites SR mask). */
+    emit_reload_sr_pin(e);
+    if (exits) {
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH,
+                      OFF_INTERRUPT_COUNTER);
+        uint32_t *site = e->buf;
+        emit_cbnz_w(e, 0, 0);
+        record_exit_patch(exits, site);
+    }
+
+    uint32_t *after_label = e->buf;
+    patch_branch(skip_site,
+                 (int32_t)((uint8_t *)after_label - (uint8_t *)skip_site));
+}
+
+/*
+ * The block's REP tail, emitted after the shared exit epilogue when
+ * any op recorded a branch to it. Step 5 jumps here when loop_rep is
+ * still set after postexecute_update_pc: the block exits anyway, so
+ * only Steps 7 and 6 remain before the exit.
+ */
+static void emit_rep_tail(ArmEmit *e, ExitPatchList *l, uint32_t *exit_label)
+{
+    if (l->rep_count == 0) {
+        return;
+    }
+    uint32_t *tail = e->buf;
+    emit_epi_num_inst(e);
+    emit_epi_interrupts(e, NULL);
+    emit_b(e, (int32_t)((uint8_t *)exit_label - (uint8_t *)e->buf));
+    for (int i = 0; i < l->rep_count; i++) {
+        uint32_t *site = l->rep_sites[i];
+        patch_branch(site, (int32_t)((uint8_t *)tail - (uint8_t *)site));
+    }
+}
+
+/*
  * Shared per-op epilogue emitter. Called by both the non-parmove
  * stub (emit_instruction) and the parmove stubs (emit_parmove_pmN).
  *
  * Invoked AFTER the emu handler / parmove work has finished. Emits:
- *   5. postexecute_update_pc fast path (inline pc += cur_inst_len
- *      when no REP / DO loop active; else BLR x20 cached helper)
- *   6. postexecute_interrupts fast path (skip BLR when all
- *      interrupt fields are zero; else BLR x21 cached helper)
+ *   5. postexecute_update_pc inline (pc += cur_inst_len and the
+ *      DO-loop end compare); BLR only on REP or a DO-loop edge. A
+ *      REP still active after the helper goes to the REP tail
  *   7. num_inst += instr_cycle
- *   8-11. Block-exit checks: pending IRQ / loop_rep set /
- *      is_idle set / PC mismatch — all branch to the shared
- *      exit epilogue via the exits patch list.
+ *   6. postexecute_interrupts fast path (skip BLR when all
+ *      interrupt fields are zero), then 8: exit if
+ *      interrupt_counter is set after the BLR
+ *   9-11. Block-exit checks: is_idle / jit_exit_block_request /
+ *      PC mismatch — all branch to the shared exit epilogue via
+ *      the exits patch list.
  *
  * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25.
  */
@@ -5417,134 +5521,101 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
                                            uint32_t expected_next_pc)
 {
     /*
-     * Step 5: inline postexecute_update_pc fast path. The helper
-     * does (a) REP state machine if loop_rep set; (b) pc +=
-     * cur_inst_len; (c) DO loop end check if SR.LF set. Common
-     * case (no REP, no DO) is just (b). Emit inline for the
-     * common case.
+     * Step 5: dsp_postexecute_update_pc, inline except for REP and
+     * the DO-loop edge. The helper does (a) the REP state machine if
+     * loop_rep is set; (b) pc += cur_inst_len; (c) under SR.LF, the
+     * loop-end test pc == LA + 1. REP keeps the full helper. Otherwise
+     * (b) and the (c) compare run inline and only a loop edge calls
+     * dsp56k_jit_helper_do_loop_edge (--LC; pop or pc = SSH). Most
+     * ops in a DO loop are not its last, so this skips the BLR for
+     * nearly every op the hot DSP loops run.
+     *
+     *     LDR  w0, [loop_rep];  CBNZ w0, full
+     *     LDR  w0, [len];  LDR w1, [pc];  ADD w1, w1, w0;  STR w1, [pc]
+     *     TBZ  w28, #LF, after
+     *     LDR  w2, [LA];  ADD w2, w2, #1;  CMP w1, w2;  B.NE after
+     *     BLR  do_loop_edge;  reload SR pin;  B after
+     *   full:
+     *     BLR  postexecute_update_pc;  reload SR pin
+     *   after:
+     *
+     * The SR pin (x28) is current here: every SR writer updates it
+     * and every BLR fallback reloads it. Neither helper touches
+     * A/B/X/Y; both may rewrite SR (a loop end restores LF), so both
+     * reload the SR pin.
      */
     {
         emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-        uint32_t *to_call_helper_1 = e->buf;
+        uint32_t *to_full = e->buf;
         emit_cbnz_w(e, 0, 0);       /* patched below */
-
-        emit_load_sr(e, 0);
-        uint32_t *to_call_helper_2 = e->buf;
-        emit_tbnz_w(e, /*rt=*/0, DSP_SR_LF, 0);   /* patched below */
 
         emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
         emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
         emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
         emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
 
-        uint32_t *to_after = e->buf;
-        emit_b(e, 0);
+        uint32_t *to_after_nolf = e->buf;
+        emit_tbz_w(e, DSP56K_JIT_SR_PIN_REG, DSP_SR_LF, 0);  /* patched */
 
-        uint32_t *call_helper_label = e->buf;
-        patch_branch(to_call_helper_1,
-                     (int32_t)((uint8_t *)call_helper_label -
-                               (uint8_t *)to_call_helper_1));
-        /* TBNZ uses imm14 at bits 18:5 — custom patch. */
-        {
-            int32_t off = (int32_t)((uint8_t *)call_helper_label -
-                                    (uint8_t *)to_call_helper_2);
-            int32_t imm14 = off >> 2;
-            assert(imm14 >= -(1 << 13) && imm14 < (1 << 13));
-            uint32_t insn = *to_call_helper_2 & ~(0x3fffu << 5);
-            insn |= ((uint32_t)imm14 & 0x3fff) << 5;
-            *to_call_helper_2 = insn;
-        }
+        emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+        emit_add_w_imm(e, /*rd=*/2, /*rn=*/2, 1);
+        emit_cmp_w_reg(e, /*rn=*/1, /*rm=*/2);
+        uint32_t *to_after_noedge = e->buf;
+        emit_bcond(e, ARM_COND_NE, 0);                      /* patched */
+
         emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        /* Phase 8 X/Y pinning repurposed x20 as the X-bank pin;
-         * materialise the postexecute_update_pc helper address
-         * inline here (slow path, fires only when loop_rep / DO
-         * loop state is active). */
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp56k_jit_helper_do_loop_edge);
+        emit_blr(e, /*rn=*/15);
+        emit_reload_sr_pin(e);
+        uint32_t *to_after_edge = e->buf;
+        emit_b(e, 0);                                       /* patched */
+
+        uint32_t *full_label = e->buf;
+        patch_branch(to_full,
+                     (int32_t)((uint8_t *)full_label - (uint8_t *)to_full));
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        /* Phase 8 X/Y pinning repurposed x20 as the X-bank pin, so the
+         * helper addresses are materialised inline. */
         emit_mov_imm64(e, /*rd=*/15,
             (uint64_t)(uintptr_t)&dsp56k_jit_helper_postexecute_update_pc);
         emit_blr(e, /*rn=*/15);
-        /* The helper reads/writes registers[PC/LA/LC/SR/stack] and
-         * may invoke dsp_stack_push/pop — none of X0/X1/Y0/Y1 are
-         * touched, so no X/Y pin reload is required. A/B likewise
-         * unchanged. SR can be mutated (DO loop end clears SR.LF),
-         * so reload the SR pin. */
         emit_reload_sr_pin(e);
+        /* A REP still running must leave the block (Step 9 used to
+         * re-read loop_rep for every op). Nothing after Step 5 sets
+         * loop_rep, so the other paths reach Step 9 with it zero. */
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+        {
+            uint32_t *site = e->buf;
+            emit_cbnz_w(e, 0, 0);
+            record_rep_tail_patch(exits, site);
+        }
 
         uint32_t *after_label = e->buf;
-        patch_b(to_after, (int32_t)((uint8_t *)after_label -
-                                    (uint8_t *)to_after));
-    }
-
-    /*
-     * Step 6: inline postexecute_interrupts fast path. Helper is a
-     * no-op when every interrupt-tracking field is zero; skip the
-     * BLR in that common case. SR.T (trace bit) is NOT in the
-     * quick check — xemu doesn't expose a DSP single-step debugger
-     * so no production title sets it.
-     */
-    {
-        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_STATE);
-        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
-        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
-        emit_ldrh_any(e, /*rd=*/2, /*rn=*/19, SCRATCH,
-                      OFF_INTERRUPT_PIPELINE_COUNT);
-        emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/2);
-
-        uint32_t *skip_site = e->buf;
-        emit_cbz_w(e, /*rn=*/0, 0);
-
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        /* x21 is now the Y-bank pin — materialise the interrupt
-         * helper address inline (slow path, fires only when an
-         * interrupt is pending). */
-        emit_mov_imm64(e, /*rd=*/15,
-            (uint64_t)(uintptr_t)&dsp56k_jit_helper_postexecute_interrupts);
-        emit_blr(e, /*rn=*/15);
-        /* The interrupt helper may invoke dsp_stack_push and tweak
-         * SR / pc, but doesn't touch X/Y/A/B. A/B pins stay valid;
-         * SR pin reload needed (long-interrupt rewrites SR mask). */
-        emit_reload_sr_pin(e);
-
-        uint32_t *after_label = e->buf;
-        patch_branch(skip_site,
+        patch_tb(to_after_nolf,
+                 (int32_t)((uint8_t *)after_label - (uint8_t *)to_after_nolf));
+        patch_branch(to_after_noedge,
                      (int32_t)((uint8_t *)after_label -
-                               (uint8_t *)skip_site));
+                               (uint8_t *)to_after_noedge));
+        patch_b(to_after_edge,
+                (int32_t)((uint8_t *)after_label - (uint8_t *)to_after_edge));
     }
 
-    /* Step 7: num_inst += instr_cycle */
-    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
-    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
-    emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
-    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
-
-    /* Step 8: exit-check: interrupt_counter (uint16_t). Kept as its
-     * own branch — interrupt_counter is the primary signal for
-     * "there's a pending interrupt, re-enter dispatcher so it can
-     * hand off to the C interpreter for pipeline-accurate delivery". */
-    emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_INTERRUPT_COUNTER);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
+    /* Step 7, then Step 6 with Step 8 folded in (the interrupt
+     * helper reads neither instr_cycle nor num_inst). */
+    emit_epi_num_inst(e);
+    emit_epi_interrupts(e, exits);
 
     /*
      * Steps 9 / 10 / 10b fused:
-     *   loop_rep (u32)          — REP entered; block-boundary exit.
      *   is_idle (u8)            — STOP / WAIT executed.
      *   jit_exit_block_request  — self-mod: pram write invalidated
      *                             a block (possibly this one).
-     *
-     * All three are "exit-to-dispatcher" signals with identical
-     * handling. Instead of three separate LDR + CBNZ pairs, OR
-     * them into w0 and branch once. Saves two exit-patch entries
-     * + two CBNZ instructions per op with no change in semantics
-     * (a non-zero OR still triggers the same exit path). The
-     * ordering of bytes in the OR is arbitrary since we're only
-     * testing for non-zero.
+     * Both are "exit-to-dispatcher" signals with identical handling:
+     * OR them into w0 and branch once. loop_rep (REP entered) is the
+     * third such signal; Step 5 already routes it to the REP tail.
      */
-    emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-    emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
-    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
+    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
     emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_JIT_EXIT_BLOCK_REQ);
     emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
     {
@@ -9326,11 +9397,11 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     }
 
     /* If the code buffer is near-full, flush the cache.
-     * Per-stub worst case is ~80 ARM64 instructions (~320 bytes)
-     * once the fast-path branches are included; budget 512 bytes
-     * per stub for safety. */
+     * The largest stub measured on Azurik is 262 ARM64 instructions
+     * (~1 KiB, a parmove with the full epilogue on a cold boot;
+     * heavy-f1 peaks at ~173); budget 2 KiB per stub for safety. */
     size_t space_left = (s->code_buf + s->code_cap) - s->code_ptr;
-    size_t worst_case = 256 + DSP56K_JIT_MAX_OPS_PER_BLOCK * 512;
+    size_t worst_case = 256 + DSP56K_JIT_MAX_OPS_PER_BLOCK * 2048;
     if (space_left < worst_case) {
         dsp56k_jit_invalidate_all(dsp);
     }
@@ -9652,10 +9723,10 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
             break;
         }
 
-        /* Defensive overflow check before next iteration (worst-case
-         * per-op emit is ~80 ARM64 instructions = 320 bytes; leave
-         * 512 bytes as comfortable headroom). */
-        if ((e.buf_end - e.buf) < 128) {
+        /* Defensive overflow check before next iteration (the
+         * largest stub measured is 262 ARM64 instructions; leave 512
+         * instructions = 2 KiB of headroom). */
+        if ((e.buf_end - e.buf) < 512) {
             break;
         }
     }
@@ -9663,6 +9734,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     /* Emit shared exit/epilogue and patch pending exit branches. */
     uint32_t *exit_label = emit_epilogue(&e);
     patch_exits(&exits, exit_label);
+    emit_rep_tail(&e, &exits, exit_label);
 
     /* Install the block (plain data — no JIT-write needed, but we
      * are still in jit-write mode for the chain patching below). */

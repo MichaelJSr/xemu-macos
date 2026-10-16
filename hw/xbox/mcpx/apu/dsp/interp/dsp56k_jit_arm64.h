@@ -93,6 +93,7 @@ void dsp56k_jit_set_enabled_from_config(bool enabled);
  * Not part of the public API — do not call from outside the JIT.
  */
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp);
+void dsp56k_jit_helper_do_loop_edge(dsp_core_t *dsp);
 void dsp56k_jit_helper_postexecute_interrupts(dsp_core_t *dsp);
 
 /* Pin-audit diagnostic (XEMU_DSP_JIT_PIN_AUDIT=1). Called by the

@@ -51,6 +51,7 @@
  **********************************/
 
 static void dsp_postexecute_update_pc(dsp_core_t* dsp);
+static inline void dsp_do_loop_edge(dsp_core_t *dsp);
 static void dsp_postexecute_interrupts(dsp_core_t* dsp);
 
 static uint32_t read_memory_p(dsp_core_t* dsp, uint32_t address);
@@ -718,22 +719,30 @@ static void dsp_postexecute_update_pc(dsp_core_t* dsp)
 
         /* Did we execute the last instruction in loop ? */
         if (dsp->pc == dsp->registers[DSP_REG_LA] + 1) {
-            --dsp->registers[DSP_REG_LC];
-            dsp->registers[DSP_REG_LC] &= BITMASK(16);
-
-            if (dsp->registers[DSP_REG_LC] == 0) {
-                /* end of loop */
-                uint32_t saved_pc, saved_sr;
-
-                dsp_stack_pop(dsp, &saved_pc, &saved_sr);
-                dsp->registers[DSP_REG_SR] &= 0x7f;
-                dsp->registers[DSP_REG_SR] |= saved_sr & (1<<DSP_SR_LF);
-                dsp_stack_pop(dsp, &dsp->registers[DSP_REG_LA], &dsp->registers[DSP_REG_LC]);
-            } else {
-                /* Loop one more time */
-                dsp->pc = dsp->registers[DSP_REG_SSH];
-            }
+            dsp_do_loop_edge(dsp);
         }
+    }
+}
+
+/* The DO-loop edge: pc has just advanced to LA + 1 under SR.LF. Shared
+ * with the JIT, which runs the rest of dsp_postexecute_update_pc
+ * inline and calls dsp56k_jit_helper_do_loop_edge only here. */
+static inline void dsp_do_loop_edge(dsp_core_t *dsp)
+{
+    --dsp->registers[DSP_REG_LC];
+    dsp->registers[DSP_REG_LC] &= BITMASK(16);
+
+    if (dsp->registers[DSP_REG_LC] == 0) {
+        /* end of loop */
+        uint32_t saved_pc, saved_sr;
+
+        dsp_stack_pop(dsp, &saved_pc, &saved_sr);
+        dsp->registers[DSP_REG_SR] &= 0x7f;
+        dsp->registers[DSP_REG_SR] |= saved_sr & (1<<DSP_SR_LF);
+        dsp_stack_pop(dsp, &dsp->registers[DSP_REG_LA], &dsp->registers[DSP_REG_LC]);
+    } else {
+        /* Loop one more time */
+        dsp->pc = dsp->registers[DSP_REG_SSH];
     }
 }
 
@@ -1415,6 +1424,11 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
 {
     dsp_postexecute_update_pc(dsp);
+}
+
+void dsp56k_jit_helper_do_loop_edge(dsp_core_t *dsp)
+{
+    dsp_do_loop_edge(dsp);
 }
 
 void dsp56k_jit_helper_postexecute_interrupts(dsp_core_t *dsp)

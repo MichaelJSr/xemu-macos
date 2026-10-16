@@ -44,7 +44,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | JIT on the EP core | closed | P-space overlays → retranslation churn (~1 per 10 block executions); the EP stays on the interpreter, the GP keeps the churn throttle | `21e9045344`, `d287c6cb23` |
 | Merges: a rename rewrote `getenv` strings; `use_dsp_jit` flipped to false | fixed | Grep `getenv(` after renames; diff `config_spec.yml` after every merge | `21e9045344`, `2e0aad3e18` |
 | Parmove+ALU fusion | closed | 0 instructions saved in every source class; x28 is the SR pin | ledger Settled |
-| Inline DO-loop `postexecute_update_pc` in the JIT epilogue | deferred | The GP JIT is ~2.6% of the vCPU and the helper ~0.5%: under A/B resolution for a pin-reload risk | not committed |
+| Inline DO-loop `postexecute_update_pc` in the JIT epilogue | reopened, shipped | 93% of GP ops run inside a DO loop and took the BLR; 3.3% of those are a loop edge. Inline pc/LA compare, plus no per-op `loop_rep`/`interrupt_counter` reloads: GP cycles −15%, det instructions −0.94% per frame (heavy-f1) | `dsp56k_jit_helper_do_loop_edge` |
 | APU `rate==1.0` resampler fast path | reverted | No silence pad on drain → `voice_process` spins | `68d5afe7fa` |
 | Voice-register cache, SE2FE re-notify skip, voice writeback batching | closed | DMA and the guest use RAM voice state; no write hook | ledger |
 | HRTF hand-written NEON | reopened, shipped | The gather-over-taps form lost to autovectorization; lanes over outputs on settled frames (96% of heavy-f1 calls) won, 2.9% fewer det cycles per frame | `aff8c229e9`, HRTF settled path |
