@@ -198,8 +198,12 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
             r->index = until.stop_index;
         }
         r->regs = xemu_hook_regs_qapi(xemu_hooks_last_stop()->regs);
-    } else if (info->has_debug_stop && info->debug_stop) {
-        r->reason = XEMU_RUN_UNTIL_REASON_DEBUG;
+    } else if (info->has_stopped) {
+        r->reason = info->stopped == RUN_STATE_DEBUG
+                    ? XEMU_RUN_UNTIL_REASON_DEBUG
+                    : XEMU_RUN_UNTIL_REASON_STOPPED;
+        r->has_stopped = true;
+        r->stopped = info->stopped;
     } else {
         r->reason = XEMU_RUN_UNTIL_REASON_BUDGET;
     }

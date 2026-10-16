@@ -169,11 +169,12 @@ port: keep live sources on it; windowed replays are exact on macOS).
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:
-analog and frame-tagged pipe input, `xemu-frame-advance`,
-`query-xemu-display` (frame and load count at the guest's last flip,
-the picture `screendump` writes), `xemu-run-until` (stop at a guest PC
-with conditions and hit counts, frames as the budget; pause first),
-`xemu-hooks-set`/`-clear` (copy
+analog and frame-tagged pipe input, `xemu-frame-advance` (any stop it
+didn't make, such as a gdbstub attach, ^C or SIGTERM, ends it with that
+run state in `stopped`), `query-xemu-display` (frame and load count at
+the guest's last flip, the picture `screendump` writes),
+`xemu-run-until` (stop at a guest PC with conditions and hit counts,
+frames as the budget; pause first), `xemu-hooks-set`/`-clear` (copy
 memory at guest PCs into records the next advance returns, optionally
 stopping on an `expect` mismatch, and write the next entry of a queue
 there: `write`/`set`, `stop-empty`, `xemu-hooks-push`; they persist
@@ -186,11 +187,12 @@ its restore, so clear and set them per candidate), the `xemu: ready` /
 park/resume via `migrate file:`. QMP sends events only after
 `qmp_capabilities`, and `XEMU_READY` often goes out first: check
 `query-xemu-status` after negotiating.
-gdbstub drivers: every `Z0`/`z0` invalidates the code on its page, so
-don't lift and re-arm breakpoints around each resume. `s` already steps
-over a breakpoint under the PC, and after `Qxemu.stepover:1` a plain `c`
-does. Batch independent reads at a stop with `qxemu.read`. To find
-who reads or writes a field, use the QMP access log (`xemu-watch-start`,
+gdbstub drivers: only the first `Z0` at a PC retranslates its page, and
+lifting and re-arming around a resume (`z0`/`s`/`Z0`/`c`) invalidates
+nothing; still, `s` steps over a breakpoint under the PC, and after
+`Qxemu.stepover:1` a plain `c` does, which saves the packets. Batch
+independent reads at a stop with `qxemu.read`. To find who reads or
+writes a field, use the QMP access log (`xemu-watch-start`,
 no stops) rather than `Z2`-`Z4`, which work but stop at every hit. gdbstub
 memory packets never reach MMIO (`E14`); HMP `xp` and `pmemsave` do, so
 keep those to RAM.

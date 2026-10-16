@@ -205,7 +205,19 @@ Other automation interfaces (windowed or headless):
   gdbstub stopped, from the instruction it stopped at (lift a breakpoint
   under the PC first, or use `Qxemu.stepover:1`); a breakpoint or step
   that stops the VM during the advance ends it early with
-  `debug-stop: true`. In real time, replays
+  `debug-stop: true`. Any other stop it didn't make ends it early too,
+  with the VM left as that stop left it and the reply's `stopped`
+  naming the run state: `paused` when a gdbstub client attaches, sends
+  ^C, or sends any byte while the VM runs (a breakpoint gives `debug`
+  beside `debug-stop`), `shutdown` on SIGTERM. Earlier builds waited
+  for vblanks that never came, holding QMP: the command never returned,
+  new connections got no greeting or were refused even after its client
+  gave up, and SIGTERM never ended xemu. A save or load (HMP `savevm`
+  or `loadvm`, the Snapshots menu) doesn't end an advance, since it
+  starts the VM again before it returns, unless it fails and leaves the
+  VM stopped, as a failed HMP `loadvm` or `snapshot-load` does: the
+  advance then ends with `stopped: restore-vm`, and the VM stays there
+  until `cont` or a load that works. In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
 - **Picture age**: QMP `query-xemu-display` returns `{frame, loads,
@@ -349,8 +361,9 @@ Other automation interfaces (windowed or headless):
   gdbstub-stopped) VM until execution reaches one of the PCs with all
   its conditions true for the Nth time (default 1), or for F vblanks,
   and pauses it. The reply's `reason` is `hit` (with `pc`, `index` of
-  the entry, `hits`, `frame` and `regs`: eax..edi, eip, eflags), `budget`
-  or `debug` (a gdbstub breakpoint stopped it first). A hit stops the VM
+  the entry, `hits`, `frame` and `regs`: eax..edi, eip, eflags), `budget`,
+  `debug` (a gdbstub breakpoint stopped it first) or `stopped` (another
+  stop first, in `stopped` as for `xemu-frame-advance`). A hit stops the VM
   before that instruction, outside the gdbstub, so a debugger that
   attaches finds it halted there with no stop to report. Arrivals that
   don't match never stop the VM. A condition is `{"reg": "ecx", "op":

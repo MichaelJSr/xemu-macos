@@ -955,7 +955,8 @@ static void frame_run_bh(void *opaque)
     }
 }
 
-static bool frame_advance_debug_stop;
+/* The run state of a stop the advance didn't make, or RUN_STATE__MAX. */
+static RunState frame_advance_stopped = RUN_STATE__MAX;
 
 static void frame_stop_bh(void *opaque)
 {
@@ -963,8 +964,12 @@ static void frame_stop_bh(void *opaque)
 
     frame_advance_co = NULL;
     frame_advance_stopping = false;
-    /* A gdbstub stop ends the advance early; leave the VM to the debugger. */
-    if (!runstate_check(RUN_STATE_DEBUG)) {
+    /*
+     * A stop the advance didn't make (a gdbstub breakpoint, attach or
+     * interrupt, an I/O error) ends it early: leave the VM as that left it.
+     */
+    if (frame_advance_stopped == RUN_STATE__MAX &&
+        !runstate_check(RUN_STATE_DEBUG)) {
         vm_stop(RUN_STATE_PAUSED);
     }
     aio_co_wake(co);
@@ -1009,16 +1014,58 @@ void xemu_frame_advance_set_vblank_stop(bool (*fn)(void))
     frame_advance_vblank_stop = fn;
 }
 
+/* Bumped at each advance's start, so a late check can't end the next. */
+static uintptr_t frame_advance_gen;
+
+/*
+ * After a save or load stop, once the code that stopped the VM has
+ * returned: a BH on the iohandler context runs only from the main loop (or
+ * monitor_cleanup's poll), after the HMP command, menu action or job BH. A
+ * load that failed in HMP loadvm or a snapshot-load job left the VM in
+ * restore-vm (upstream resumes only on success), and nothing would start it
+ * again: end the advance as any other stop does. A save still under way (a
+ * detached dump-guest-memory, which restarts the VM from its thread) is
+ * waited out.
+ */
+static void frame_saveload_check_bh(void *opaque)
+{
+    if ((uintptr_t)opaque != frame_advance_gen || !frame_advance_co ||
+        frame_advance_stopping || runstate_is_running() ||
+        runstate_check(RUN_STATE_SAVE_VM)) {
+        return;
+    }
+    frame_advance_stopping = true;
+    frame_advance_stopped = runstate_get();
+    frame_stop_bh(NULL);
+}
+
+/*
+ * Any stop the advance didn't make ends it there. It waits for vblanks,
+ * which come only while the VM runs (under icount not even a timer fires
+ * while it is stopped), and holds every QMP command behind it: a stop it
+ * waited out would hang both until something started the VM again. A
+ * gdbstub client stops it without a breakpoint by attaching, by ^C, or by
+ * any byte it sends while the VM runs. vm_shutdown's stop (SIGTERM) must
+ * end it too: monitor_cleanup waits for the QMP dispatcher. Saves and
+ * loads (save-vm, restore-vm: savevm, loadvm, the Snapshots menu) start
+ * the VM again before they return, so an advance goes on across them,
+ * unless one leaves it stopped (frame_saveload_check_bh).
+ */
 static void frame_advance_vm_state_change(void *opaque, bool running,
                                           RunState state)
 {
-    if (!running && state == RUN_STATE_DEBUG && frame_advance_co &&
-        !frame_advance_stopping) {
-        frame_advance_stopping = true;
-        frame_advance_debug_stop = true;
-        aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh,
-                                NULL);
+    if (running || !frame_advance_co || frame_advance_stopping) {
+        return;
     }
+    if (state == RUN_STATE_SAVE_VM || state == RUN_STATE_RESTORE_VM) {
+        aio_bh_schedule_oneshot(iohandler_get_aio_context(),
+                                frame_saveload_check_bh,
+                                (void *)frame_advance_gen);
+        return;
+    }
+    frame_advance_stopping = true;
+    frame_advance_stopped = state;
+    aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
 }
 
 static void process_vblank(struct xemu_console *scon)
@@ -1152,7 +1199,8 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         qemu_add_vm_change_state_handler(frame_advance_vm_state_change, NULL);
         state_handler = true;
     }
-    frame_advance_debug_stop = false;
+    frame_advance_stopped = RUN_STATE__MAX;
+    frame_advance_gen++;
 
     frame_advance_co = qemu_coroutine_self();
     frame_trace_regions = trace;
@@ -1182,9 +1230,11 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         info->has_trace = true;
     }
     info->hooks = xemu_hooks_take_trace();
-    if (frame_advance_debug_stop) {
-        info->has_debug_stop = true;
-        info->debug_stop = true;
+    if (frame_advance_stopped != RUN_STATE__MAX) {
+        info->has_stopped = true;
+        info->stopped = frame_advance_stopped;
+        info->has_debug_stop = info->debug_stop =
+            frame_advance_stopped == RUN_STATE_DEBUG;
     }
     frame_trace_regions = NULL;
     frame_trace_samples = NULL;

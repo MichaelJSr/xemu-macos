@@ -13,6 +13,8 @@
 # stands still while it is paused.
 ##
 
+{ 'include': 'run-state.json' }
+
 ##
 # @XemuTraceRegion:
 #
@@ -59,6 +61,16 @@
 #     before @xemu-frame-advance reached its frame; the VM is left
 #     stopped for the debugger
 #
+# @stopped: the run state of a stop that @xemu-frame-advance didn't
+#     make and that ended it before its frame: debug (with
+#     @debug-stop), paused (a gdbstub client attached, sent ^C, or
+#     sent a byte while the VM ran), io-error, shutdown...  The VM is
+#     left as that stop left it.  A save or load (save-vm,
+#     restore-vm) starts the VM again before it returns and doesn't
+#     end an advance, unless it fails and leaves the VM stopped, as a
+#     failed HMP loadvm or snapshot-load does: then @stopped is
+#     restore-vm.
+#
 # @hooks: the hits of the @xemu-hooks-set hooks since the last reply
 #     that carried them (only from @xemu-frame-advance, while a hook
 #     is installed or records are waiting)
@@ -68,7 +80,7 @@
 { 'struct': 'XemuFrameInfo',
   'data': { 'frame': 'int', 'running': 'bool',
             '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
-            '*hooks': 'XemuHookTrace' } }
+            '*stopped': 'RunState', '*hooks': 'XemuHookTrace' } }
 
 ##
 # @query-xemu-frame:
@@ -690,6 +702,10 @@
 # @debug: a gdbstub breakpoint or step stopped the VM first; it is
 #     left stopped for the debugger
 #
+# @stopped: something else stopped the VM first (see
+#     @XemuFrameInfo's @stopped: a gdbstub client attaching or sending
+#     ^C, an I/O error...); it is left as that stop left it
+#
 # @mismatch: an @xemu-hooks-set hook's hit differed from its @expect
 #     entry first; the VM is paused before that instruction (see
 #     @XemuHookTrace's @stop)
@@ -704,7 +720,8 @@
 # Since: 10.2
 ##
 { 'enum': 'XemuRunUntilReason',
-  'data': [ 'hit', 'budget', 'debug', 'mismatch', 'empty', 'value' ] }
+  'data': [ 'hit', 'budget', 'debug', 'stopped', 'mismatch', 'empty',
+            'value' ] }
 
 ##
 # @XemuRegs:
@@ -766,13 +783,17 @@
 #
 # @hooks: as @XemuFrameInfo's @hooks
 #
+# @stopped: as @XemuFrameInfo's @stopped (only with @reason debug or
+#     stopped)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuRunUntilInfo',
   'data': { 'reason': 'XemuRunUntilReason', 'frame': 'int',
             'running': 'bool', 'hits': 'int', '*pc': 'uint64',
             '*index': 'int', '*regs': 'XemuRegs',
-            '*trace': ['XemuTraceSample'], '*hooks': 'XemuHookTrace' } }
+            '*trace': ['XemuTraceSample'], '*hooks': 'XemuHookTrace',
+            '*stopped': 'RunState' } }
 
 ##
 # @xemu-run-until:
