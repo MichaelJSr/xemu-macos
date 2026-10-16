@@ -53,7 +53,8 @@ int xemu_sf_prof_on(void);
 extern uint64_t *xemu_sf_block_map;     /* per-RAM-page code-block words */
 extern uintptr_t xemu_sf_ram_host;      /* host base of xbox.ram */
 extern uint64_t xemu_sf_ram_pages;      /* xbox.ram size in target pages */
-/* Resolved dirty_memory[c]->blocks[0] for the four NOCODE clients. */
+/* The four NOCODE clients' dirty bitmaps, rebased so word 0 holds
+ * xbox.ram's first page (xbox.ram is not at ram_addr 0). */
 #define XEMU_SF_NCLIENTS 4
 extern unsigned long *xemu_sf_dirty0[XEMU_SF_NCLIENTS];
 

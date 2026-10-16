@@ -65,7 +65,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Full TLB flush per MemAccessCallback change (~190/s in normal mode) | fixed | Its old 0.2%-of-vCPU estimate missed the refills and the rebuilt jump cache and near-return memo: 2.3% of host instructions per frame (det offscreen); now a ranged refill | `tlb_flush_host_range` |
 | Superblock seams, then region formation | closed | −1.6% to −4.5%: TCG spills before any exiting branch | `ee1de9f654`, `d65fc5f83e` |
 | SSE on NEON, strict brackets | shipped | Parity until the leave bracket went sticky (+1.90 fps) | `d76ddd7b20` |
-| Arm (b) store prefilter | shipped | fps flat, draws/s +12% | `ede35b84f9` |
+| Arm (b) store prefilter | fixed | Indexed pc.ram's dirty bitmaps (xbox.ram is at ram_addr 0x8000000) until 2026-10-15, so it skipped every NOTDIRTY store: code-page invalidations and renderer marks included. Its +12% draws/s and refuter receipts came from that build | `ede35b84f9` |
 | `notdirty_write` dirty-check fps claim | closed | Base collapsed 34-57×; the code stays | `4e7531cfae` |
 | x87 clean write-back elision | reverted | −0.23 fps 3/3 | `987a2aae24` |
 | Inline FUCOMI on the write-through path | reopened, shipped | The 2026-10 close (88.25 vs 88.08 wall fps) predated the deferred stores, whose flush every helper call forced. Shipped with fcmov as a select and flush-free `cc_compute` calls: det heavy-f1 Minsns/frame −4.8%, Mcycles/frame −4.9% paired median (13/18), st80f/frame 264K→215K | `x87_wt_com_st`, `gen_fcmov_wt` |

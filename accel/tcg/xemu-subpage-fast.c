@@ -25,6 +25,7 @@
 uint64_t *xemu_sf_block_map;
 uintptr_t xemu_sf_ram_host;
 uint64_t xemu_sf_ram_pages;
+static ram_addr_t xemu_sf_ram_base;
 unsigned long *xemu_sf_dirty0[XEMU_SF_NCLIENTS];
 
 uint64_t xemu_sf_seen;
@@ -73,9 +74,18 @@ static bool xemu_sf_init(void)
         warn_report("subpage-fast: no xbox.ram block; disabled");
         return false;
     }
+    /*
+     * xbox.ram is not at ram_addr 0: the PC machine's unused default
+     * "pc.ram" backend sits below it. The generated code indexes pages
+     * from xbox.ram's host base, so the dirty bitmaps are rebased to
+     * xbox.ram's first page here and the code-block mirror is indexed
+     * relative to it in xemu_sf_sync_page.
+     */
+    uint64_t base_page;
+    xemu_sf_ram_base = qemu_ram_get_offset(rb);
+    base_page = xemu_sf_ram_base >> TARGET_PAGE_BITS;
     xemu_sf_ram_host = (uintptr_t)qemu_ram_get_host_addr(rb);
     xemu_sf_ram_pages = qemu_ram_get_used_length(rb) >> TARGET_PAGE_BITS;
-    xemu_sf_block_map = g_malloc0(xemu_sf_ram_pages * sizeof(uint64_t));
 
     /*
      * Resolve dirty_memory[c]->blocks[0] once: DIRTY_MEMORY_BLOCK_SIZE
@@ -83,6 +93,13 @@ static bool xemu_sf_init(void)
      * and the blocks array is never reallocated for fixed-size RAM.
      */
     QEMU_BUILD_BUG_ON(DIRTY_MEMORY_BLOCK_SIZE < (1 << 20));
+    if (base_page % BITS_PER_LONG ||
+        base_page + xemu_sf_ram_pages > DIRTY_MEMORY_BLOCK_SIZE) {
+        warn_report("subpage-fast: xbox.ram at ram_addr 0x%" PRIx64
+                    " is outside the first dirty block; disabled",
+                    (uint64_t)xemu_sf_ram_base);
+        return false;
+    }
     for (int i = 0; i < XEMU_SF_NCLIENTS; i++) {
         DirtyMemoryBlocks *b =
             qatomic_rcu_read(&ram_list.dirty_memory[sf_clients[i]]);
@@ -91,8 +108,9 @@ static bool xemu_sf_init(void)
                         sf_clients[i]);
             return false;
         }
-        xemu_sf_dirty0[i] = b->blocks[0];
+        xemu_sf_dirty0[i] = b->blocks[0] + base_page / BITS_PER_LONG;
     }
+    xemu_sf_block_map = g_malloc0(xemu_sf_ram_pages * sizeof(uint64_t));
     atexit(xemu_sf_dump);
     return true;
 }
@@ -167,7 +185,8 @@ int xemu_sf_prof_on(void)
 
 void xemu_sf_sync_page(hwaddr page_addr, uint64_t code_blocks)
 {
-    uint64_t idx = page_addr >> TARGET_PAGE_BITS;
+    /* page_addr is a ram_addr; pages below xbox.ram wrap and miss. */
+    uint64_t idx = (page_addr - xemu_sf_ram_base) >> TARGET_PAGE_BITS;
     if (xemu_sf_block_map && idx < xemu_sf_ram_pages) {
         xemu_sf_block_map[idx] = code_blocks;
     }
@@ -216,6 +235,7 @@ static void xemu_sf_refute_check(struct CPUArchState *env, uint64_t addr,
                 "xbox.ram for vaddr 0x%" PRIx64 "\n", addr);
         return;
     }
+    paddr += xemu_sf_ram_base;    /* ground truth is keyed by ram_addr */
 
     /* Condition 2 ground truth: bitmap AND live-TB scan agree non-code. */
     if (!xemu_sf_ground_truth(paddr, size, &bitmap_says, &live_says)) {
