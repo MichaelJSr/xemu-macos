@@ -1774,6 +1774,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `QOS_CLASS_USER_INTERACTIVE`, and so does the vCPU thread: the RR
   thread in deterministic mode, the MTTCG thread in normal mode since
   2026-10-15 (`XEMU_VCPU_QOS=0` leaves it at the default class).
+- **Deterministic mode's FP brackets write FPCR only when it differs.**
+  Device work on the vCPU thread (the inline PFIFO pusher, ~360 runs
+  per frame on heavy-f1, and the APU tick) ran between `fegetenv`,
+  `fesetenv(FE_DFL_ENV)` and `fesetenv(&guest)`: two FPCR and two FPSR
+  writes each time. `hw/xbox/host_fp.h` reads FPCR and writes the
+  default only when TCG left another x87 rounding mode in it (0 of
+  430k pusher runs on heavy-f1 1200), puts it back only if it changed,
+  and leaves FPSR alone: nothing on the vCPU thread reads it. Other
+  hosts keep `fenv`. A pusher run costs ~75 fewer cycles (thread
+  counters around it, both arm orders, 8/8 pairs), ~0.1% of det
+  heavy-f1 cycles.
 - **BQL discipline.** `surface_access_callback` drops BQL before
   blocking so the vblank thread can still fire interrupts.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +

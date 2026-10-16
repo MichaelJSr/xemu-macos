@@ -19,8 +19,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <fenv.h>
 #include "apu_int.h"
+#include "hw/xbox/host_fp.h"
 #include "system/runstate.h"
 #include "qemu/xemu-hostprof.h"
 
@@ -321,11 +321,10 @@ static void mcpx_apu_det_tick(void *opaque)
     /*
      * TCG leaves the guest's x87 rounding mode in the host FPCR and
      * re-programs it lazily, so mix and resample with the default FP
-     * environment the frame thread has, and give TCG its FPCR back.
+     * rounding the frame thread has, and give TCG its FPCR back.
      */
-    fenv_t guest_fenv;
-    fegetenv(&guest_fenv);
-    fesetenv(FE_DFL_ENV);
+    XboxHostFp guest_fp;
+    xbox_host_fp_enter(&guest_fp);
 
     qemu_mutex_lock(&d->lock);
     d->det.in_burst = true;
@@ -356,7 +355,7 @@ static void mcpx_apu_det_tick(void *opaque)
         d->set_irq = false;
     }
     qemu_mutex_unlock(&d->lock);
-    fesetenv(&guest_fenv);
+    xbox_host_fp_leave(&guest_fp);
 
     timer_mod_ns(d->det.timer, next);
 }

@@ -22,7 +22,7 @@
 #include "nv2a_int.h"
 #include "nsprof.h"
 #include "qemu/timer.h"
-#include <fenv.h>
+#include "hw/xbox/host_fp.h"
 #if defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -188,9 +188,8 @@ void pfifo_icount_sync(NV2AState *d)
         }
         /* As on the PFIFO thread, not under the guest's x87 rounding
          * mode, which TCG leaves in the host FPCR (see mcpx_apu_det_tick). */
-        fenv_t guest_fenv;
-        fegetenv(&guest_fenv);
-        fesetenv(FE_DFL_ENV);
+        XboxHostFp guest_fp;
+        xbox_host_fp_enter(&guest_fp);
         /*
          * Hold both locks for the whole run instead of swapping them around
          * every method (pfifo_run_puller): same order as pgraph_write. The
@@ -206,7 +205,7 @@ void pfifo_icount_sync(NV2AState *d)
         }
         qemu_mutex_unlock(&d->pgraph.lock);
         qemu_mutex_unlock(&d->pfifo.lock);
-        fesetenv(&guest_fenv);
+        xbox_host_fp_leave(&guest_fp);
         return;
     }
 
