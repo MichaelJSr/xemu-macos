@@ -998,6 +998,9 @@ static void frame_stop_bh(void *opaque)
     aio_co_wake(co);
 }
 
+/* xemu-hooks-set records (target/i386/tcg/system/xemu-hooks-qmp.c). */
+XemuHookTrace *xemu_hooks_take_trace(void);
+
 /*
  * Guest PC hooks (xemu-run-until, target/i386/tcg/xemu-hooks.h). The
  * stop is called on the vCPU thread with the BQL, from a hook that then
@@ -1192,6 +1195,7 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         info->trace = frame_trace_samples;
         info->has_trace = true;
     }
+    info->hooks = xemu_hooks_take_trace();
     if (frame_advance_debug_stop) {
         info->has_debug_stop = true;
         info->debug_stop = true;

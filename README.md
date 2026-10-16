@@ -225,6 +225,37 @@ Other automation interfaces (windowed or headless):
   gdbstub breakpoints keep working beside them, and the fast paths a
   breakpoint turns off stay on. The first call at a PC retranslates its
   page once; later calls there cost about 1-2 ms each.
+- **Collect at guest PCs**: `xemu-hooks-set {"hooks": [{"pcs": [P,
+  ...], "cond": [...], "key": {"addr": E, "size": N}, "collect":
+  [{"addr": E, "size": N}, ...], "regs": true, "expect": [...]}]}`
+  installs hooks (paused VM; at most 64) that copy guest memory at each
+  hit, before that instruction runs, and leave the VM running. It
+  returns each hook's `id`; `xemu-hooks-clear {"ids": [...]}` (default
+  all) removes them and `query-xemu-hooks` lists them with their `hits`.
+  A hit is an arrival at one of the `pcs` (1-16, numbered together, e.g.
+  a function's RETs) with all of `cond` true (as for `xemu-run-until`)
+  and, given `key` (1-64 bytes, e.g. `"ecx+0x18"`, an event clock), the
+  key changed since the hook's last hit, so a repeated call in one tick
+  is folded. `collect` takes up to 64 regions of 1-4096 bytes (64 KiB a
+  hit) at address expressions as for `xemu-run-until`, such as
+  `"[[[[0x15fe410+0x20]+0x154]+0xcc]+0x20]+0x38"`. The next
+  `xemu-frame-advance` or `xemu-run-until` reply carries `hooks`:
+  `records`, one per hit in execution order (`hook`, `pc`, `frame`,
+  `hit` from 0, `data` with one hex string per region, `""` when
+  unreadable, and `regs` with `"regs": true`), plus `dropped` (hits past
+  262,144 waiting records or 16 MiB). `"frames": 0` just returns them,
+  also to a VM the gdbstub stopped. `expect` holds one hex string per
+  hit that the hit's collected bytes, concatenated, must start with
+  (`??` matches any byte, `""` checks nothing). A mismatch marks the
+  record and ends the running advance before that instruction: `hooks`
+  then has `stop`, the record, and `xemu-run-until` returns reason
+  `mismatch` with `pc` and `regs`. With `"stop": false` it only marks
+  the record. Under icount the records are exact and repeatable, and
+  hooks never change guest RAM. Stopping and resuming at a mismatch
+  gives no repeated or missing hit. gdbstub breakpoints and run-until at
+  the same PC work alongside, and the hook still sees each arrival once.
+  Hooks, hit numbers and keys stay across loads, so clear and set them
+  again to start over.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed

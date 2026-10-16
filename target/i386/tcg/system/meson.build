@@ -8,5 +8,7 @@ i386_system_ss.add(when: ['CONFIG_TCG', 'CONFIG_SYSTEM_ONLY'], if_true: files(
   'svm_helper.c',
   'seg_helper.c',
   'xemu-hooks.c',
+  'xemu-hook-pred.c',
+  'xemu-hooks-qmp.c',
   'xemu-run-until.c',
 ))

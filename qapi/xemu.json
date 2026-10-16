@@ -59,11 +59,16 @@
 #     before @xemu-frame-advance reached its frame; the VM is left
 #     stopped for the debugger
 #
+# @hooks: the hits of the @xemu-hooks-set hooks since the last reply
+#     that carried them (only from @xemu-frame-advance, while a hook
+#     is installed or records are waiting)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
   'data': { 'frame': 'int', 'running': 'bool',
-            '*trace': ['XemuTraceSample'], '*debug-stop': 'bool' } }
+            '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
+            '*hooks': 'XemuHookTrace' } }
 
 ##
 # @query-xemu-frame:
@@ -616,9 +621,14 @@
 # @debug: a gdbstub breakpoint or step stopped the VM first; it is
 #     left stopped for the debugger
 #
+# @mismatch: an @xemu-hooks-set hook's hit differed from its @expect
+#     entry first; the VM is paused before that instruction (see
+#     @XemuHookTrace's @stop)
+#
 # Since: 10.2
 ##
-{ 'enum': 'XemuRunUntilReason', 'data': [ 'hit', 'budget', 'debug' ] }
+{ 'enum': 'XemuRunUntilReason',
+  'data': [ 'hit', 'budget', 'debug', 'mismatch' ] }
 
 ##
 # @XemuRegs:
@@ -665,16 +675,18 @@
 #
 # @hits: hits counted (equals the request's @hits when @reason is hit)
 #
-# @pc: the hit's PC (only with @reason hit)
+# @pc: the hit's PC (only with @reason hit or mismatch)
 #
 # @index: which @until entry the hit matched, from 0 (only with
 #     @reason hit; the first that matched)
 #
-# @regs: the registers at the hit (only with @reason hit)
+# @regs: the registers at the hit (only with @reason hit or mismatch)
 #
 # @trace: the samples, as @xemu-frame-advance returns them (only when
 #     given @trace; a run that ends at a hit has no sample for the
 #     unfinished frame)
+#
+# @hooks: as @XemuFrameInfo's @hooks
 #
 # Since: 10.2
 ##
@@ -682,7 +694,7 @@
   'data': { 'reason': 'XemuRunUntilReason', 'frame': 'int',
             'running': 'bool', 'hits': 'int', '*pc': 'uint64',
             '*index': 'int', '*regs': 'XemuRegs',
-            '*trace': ['XemuTraceSample'] } }
+            '*trace': ['XemuTraceSample'], '*hooks': 'XemuHookTrace' } }
 
 ##
 # @xemu-run-until:
@@ -717,3 +729,172 @@
   'data': { 'until': ['XemuUntil'], '*hits': 'int', 'frames': 'int',
             '*trace': ['XemuTraceRegion'], '*trace-every': 'int' },
   'returns': 'XemuRunUntilInfo', 'coroutine': true }
+
+##
+# Guest PC hooks: collect
+# =======================
+##
+
+##
+# @XemuHookRegion:
+#
+# Guest memory a hook reads at each hit.
+#
+# @addr: guest virtual address (CPU 0's page tables at the hit, guest
+#     RAM only), an expression as for @XemuHookCond's @addr, e.g.
+#     "esp+0x14" or "[[[[0x83a6e2c0+0x20]+0x154]+0xcc]+0x20]+0x38"
+#
+# @size: bytes to read: 1 to 4096 for @XemuHookSpec's @collect, 1 to
+#     64 for its @key
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookRegion',
+  'data': { 'addr': 'str', 'size': 'int' } }
+
+##
+# @XemuHookSpec:
+#
+# A hook for @xemu-hooks-set.  An arrival at one of @pcs, before that
+# instruction runs, with all of @cond true and, given @key, the key's
+# bytes changed, is a hit: the hook copies @collect into a record,
+# checks it against its @expect entry, and the VM runs on.
+#
+# @pcs: linear addresses (EIP on the Xbox) of instructions' first
+#     bytes, 1 to 16; arrivals at any of them are hits of this one
+#     hook, numbered together (e.g. a function's RETs)
+#
+# @cond: comparisons that must all hold, as for @XemuUntil (at most
+#     16)
+#
+# @key: a hit counts only when these bytes differ from the key at the
+#     hook's previous hit (the first always counts; an unreadable key
+#     makes no hit), e.g. {"addr": "ecx+0x18", "size": 8}, an event
+#     clock, so a second call in the same tick is no hit
+#
+# @collect: memory to copy into each hit's record (at most 64 regions,
+#     64 KiB in all; default none)
+#
+# @regs: also record the general registers (default false)
+#
+# @expect: one hex string per hit, in hit order: what the hit's
+#     collected bytes (the @collect regions concatenated) must start
+#     with.  "??" matches any byte and "" checks nothing; hits past
+#     the end are not checked.  A hit whose bytes differ, or whose
+#     checked bytes are unreadable, is a mismatch.
+#
+# @stop: a mismatch ends the running @xemu-frame-advance or
+#     @xemu-run-until with the VM paused before that instruction
+#     (default true); false only marks the record.  Outside those the
+#     VM runs on.
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookSpec',
+  'data': { 'pcs': ['uint64'], '*cond': ['XemuHookCond'],
+            '*key': 'XemuHookRegion', '*collect': ['XemuHookRegion'],
+            '*regs': 'bool', '*expect': ['str'], '*stop': 'bool' } }
+
+##
+# @XemuHookInfo:
+#
+# @id: the hook's id, for @xemu-hooks-clear and its records
+#
+# @pcs: its PCs
+#
+# @hits: its hits so far
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookInfo',
+  'data': { 'id': 'int', 'pcs': ['uint64'], 'hits': 'int' } }
+
+##
+# @XemuHookRecord:
+#
+# One hit of an @xemu-hooks-set hook.
+#
+# @hook: the hook's id
+#
+# @pc: where it was hit
+#
+# @frame: the frame counter at the hit (see @query-xemu-frame)
+#
+# @hit: the hook's hit number, from 0 (also its @expect index)
+#
+# @data: one lowercase hex string per @collect region, in order; an
+#     empty string when guest RAM does not back the whole region
+#
+# @regs: the registers before the instruction (only with the hook's
+#     @regs)
+#
+# @mismatch: true when the hit differed from its @expect entry
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookRecord',
+  'data': { 'hook': 'int', 'pc': 'uint64', 'frame': 'int', 'hit': 'int',
+            'data': ['str'], '*regs': 'XemuRegs', '*mismatch': 'bool' } }
+
+##
+# @XemuHookTrace:
+#
+# @records: the hits since the last reply that carried records, in
+#     execution order, cleared hooks' included
+#
+# @dropped: hits left out because 262,144 records or 16 MiB of
+#     collected bytes were already waiting
+#
+# @stop: the mismatch that ended this advance (also the last of
+#     @records); the VM is paused before its instruction
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuHookTrace',
+  'data': { 'records': ['XemuHookRecord'], 'dropped': 'int',
+            '*stop': 'XemuHookRecord' } }
+
+##
+# @xemu-hooks-set:
+#
+# Install hooks at guest PCs that copy guest memory at each hit
+# without stopping the VM.  They stay until @xemu-hooks-clear, across
+# advances and loads (hit numbers and keys too; clear and set them
+# again to start over).  Their records come back with the next
+# @xemu-frame-advance or @xemu-run-until reply (@frames 0 just
+# returns them).  Under -icount the records are exact and repeatable,
+# and hooks never change what the guest does.  gdbstub breakpoints
+# and @xemu-run-until work alongside; a hook at the PC of either sees
+# that arrival once.  The first hook at a PC retranslates its code
+# page once.  The VM must be stopped: paused, prelaunch, or stopped by
+# the debugger.
+#
+# @hooks: the hooks to add (at most 64 installed)
+#
+# Returns: the new hooks, in request order
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-hooks-set', 'data': { 'hooks': ['XemuHookSpec'] },
+  'returns': ['XemuHookInfo'] }
+
+##
+# @xemu-hooks-clear:
+#
+# Remove @xemu-hooks-set hooks.  Records they made stay until the
+# next reply that carries records.
+#
+# @ids: the hooks to remove (default all)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-hooks-clear', 'data': { '*ids': ['int'] } }
+
+##
+# @query-xemu-hooks:
+#
+# List the installed @xemu-hooks-set hooks.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-hooks', 'returns': ['XemuHookInfo'] }

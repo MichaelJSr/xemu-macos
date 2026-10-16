@@ -52,6 +52,7 @@ static int hook_next_id = 1;
 typedef struct XemuHookEntry {
     XemuHookFn fn;
     void *opaque;
+    int prio, id;
 } XemuHookEntry;
 
 typedef struct XemuHookSite {
@@ -74,6 +75,18 @@ unsigned xemu_hooks_nsites;
 /* vCPU thread only. */
 static uint64_t hook_calls;
 static XemuHookStop hook_stop;
+
+/*
+ * The arrival a stop interrupted: on resume its instruction runs again as
+ * arrival @call (the vCPU's next; under icount nothing comes between),
+ * where the hooks up to the stopper's (@prio, @id) in run order already
+ * ran.
+ */
+static struct {
+    uint64_t call;
+    vaddr pc;
+    int prio, id;
+} hook_resume;
 
 /* The Xbox RAM block, for hook reads (looked up on the main thread). */
 static const uint8_t *hook_ram;
@@ -143,6 +156,8 @@ static void table_publish(void)
             HookRec *h = &g_array_index(hook_recs, HookRec, r);
             t->entries[r].fn = h->fn;
             t->entries[r].opaque = h->opaque;
+            t->entries[r].prio = h->prio;
+            t->entries[r].id = h->id;
             s->n++;
             r++;
         }
@@ -443,8 +458,12 @@ bool xemu_hooks_stop(XemuHookCtx *ctx)
     for (int i = 0; i < CPU_NB_REGS32; i++) {
         hook_stop.regs[i] = env->regs[i];
     }
-    hook_stop.eip = env->eip;
-    hook_stop.eflags = cpu_compute_eflags(env);
+    hook_stop.regs[XEMU_HREG_EIP] = env->eip;
+    hook_stop.regs[XEMU_HREG_EFLAGS] = cpu_compute_eflags(env);
+    hook_resume.call = ctx->call + 1;
+    hook_resume.pc = ctx->pc;
+    hook_resume.prio = ctx->prio;
+    hook_resume.id = ctx->id;
     /* cpu_stop_current() set cs->stop; leave before anything else runs. */
     cs->exception_index = EXCP_INTERRUPT;
     cpu_loop_exit(cs);
@@ -478,8 +497,18 @@ void helper_xemu_hook(CPUX86State *env, target_ulong pc_arg, uint32_t pcrel)
 
     XemuHookCtx ctx = { .env = env, .pc = pc, .ra = GETPC(),
                         .call = hook_calls };
+    bool resume = hook_resume.call == hook_calls && hook_resume.pc == pc;
     for (uint32_t i = 0; i < s->n; i++) {
-        s->e[i].fn(&ctx, s->e[i].opaque);
+        XemuHookEntry *e = &s->e[i];
+
+        if (unlikely(resume) &&
+            (e->prio < hook_resume.prio ||
+             (e->prio == hook_resume.prio && e->id <= hook_resume.id))) {
+            continue;
+        }
+        ctx.prio = e->prio;
+        ctx.id = e->id;
+        e->fn(&ctx, e->opaque);
     }
 }
 

@@ -56,6 +56,7 @@ typedef struct XemuHookCtx {
     vaddr pc;           /* linear address of the hooked instruction */
     uintptr_t ra;       /* helper return address, for xemu_hooks_stop() */
     uint64_t call;      /* engine-wide arrival number (see xemu_hooks_calls) */
+    int prio, id;       /* the running hook's (engine) */
 } XemuHookCtx;
 
 typedef void (*XemuHookFn)(XemuHookCtx *ctx, void *opaque);
@@ -82,22 +83,32 @@ uint64_t xemu_hooks_calls(void);
  * before the hooked instruction (EIP = ctx->pc, nothing of it executed,
  * later hooks at this PC not run). Records the registers there (see
  * xemu_hooks_last_stop) and does not return. Returns false, and the VM
- * runs on, when no advance runs or it is already ending.
+ * runs on, when no advance runs or it is already ending. When the
+ * instruction runs again on resume, as the vCPU's next arrival, the
+ * hooks that ran for it before the stop (this one included) are skipped,
+ * so each hook sees each arrival once.
  */
 bool xemu_hooks_stop(XemuHookCtx *ctx);
 
+/* Registers a hook or an expression names: R_EAX..R_EDI, then these. */
+enum { XEMU_HREG_EIP = CPU_NB_REGS32, XEMU_HREG_EFLAGS, XEMU_HREG_COUNT };
+uint32_t xemu_hook_reg(XemuHookCtx *ctx, int reg);
+
 typedef struct XemuHookStop {
     vaddr pc;
-    uint32_t regs[CPU_NB_REGS32];   /* R_EAX.. R_EDI */
-    uint32_t eip, eflags;
+    uint32_t regs[XEMU_HREG_COUNT];     /* by xemu_hook_reg() number */
 } XemuHookStop;
 
 /* The registers of the last successful xemu_hooks_stop() (BQL held). */
 const XemuHookStop *xemu_hooks_last_stop(void);
 
-/* Registers a hook or an expression names: R_EAX..R_EDI, then these. */
-enum { XEMU_HREG_EIP = CPU_NB_REGS32, XEMU_HREG_EFLAGS };
-uint32_t xemu_hook_reg(XemuHookCtx *ctx, int reg);
+/*
+ * xemu-hooks-qmp.c, for the hook commands' replies (main thread): the
+ * QAPI XemuRegs of registers by xemu_hook_reg() number, and lowercase hex.
+ */
+struct XemuRegs;
+struct XemuRegs *xemu_hook_regs_qapi(const uint32_t *regs);
+char *xemu_hook_hex(const uint8_t *p, size_t n);
 
 /* Guest memory at a linear address (RAM only). False when unreadable. */
 bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len);
@@ -128,6 +139,30 @@ bool xemu_hook_expr_eval(XemuHookCtx *ctx, const XemuHookExpr *e,
 /* True when the expression reads guest memory (has a dereference). */
 bool xemu_hook_expr_reads_memory(const XemuHookExpr *e);
 
+/*
+ * Conditions (QAPI XemuHookCond, xemu-hook-pred.c): a register, or 1, 2,
+ * 4 or 8 bytes at an address expression, compared as unsigned, signed or
+ * float with eq/ne/lt/gt/le/ge. Unreadable memory makes one false.
+ */
+#define XEMU_HOOK_MAX_CONDS 16
+
+typedef struct XemuHookPred {
+    int reg;                    /* -1: the @size bytes at @addr */
+    XemuHookExpr addr;
+    int size;
+    int type;                   /* XemuHookType */
+    int op;                     /* XemuHookCmp */
+    uint64_t u;
+    int64_t s;
+    uint64_t f;                 /* float64 bits */
+} XemuHookPred;
+
+struct XemuHookCond;
+/* Sets *reads_memory when the condition reads guest memory. */
+bool xemu_hook_pred_compile(struct XemuHookCond *in, XemuHookPred *p,
+                            bool *reads_memory, Error **errp);
+bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *p);
+
 /* Translator side (vCPU thread, under RCU). */
 extern unsigned xemu_hooks_nsites;
 bool xemu_hooks_site_at_slow(vaddr pc);
@@ -149,5 +184,7 @@ struct XemuTraceRegionList;
 bool xemu_frame_advance_check(int64_t frames, struct XemuTraceRegionList *trace,
                               bool has_trace_every, int64_t trace_every,
                               Error **errp);
+/* ui/xemu.c: vblanks delivered so far (see query-xemu-frame). */
+int64_t xemu_frame_count(void);
 
 #endif
