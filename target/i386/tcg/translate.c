@@ -2251,16 +2251,11 @@ static void gen_set_fptag_stn(int opreg, int value)
 
 #if defined(XBOX)
 /*
- * With the inline x87 cache off (the helper path, which both modes run),
- * the ops that only move bits in env -- push/pop, fnstsw, register moves
+ * The ops that only move bits in env -- push/pop, fnstsw, register moves
  * and fxch, fchs/fabs, fld1/fldz, ffree -- are emitted as TCG code instead
- * of helper calls. They write the same env bytes the helpers do, at the
- * same point in the instruction.
+ * of helper calls (both modes; the inline x87 cache stays off). They write
+ * the same env bytes the helpers do, at the same point in the instruction.
  */
-static bool x87_lean(void)
-{
-    return !g_use_hard_fpu_inline;
-}
 
 /* Copy one 16-byte x87 register image (floatx80 and its padding). */
 static void x87_gen_copy(X87Ptr dst, X87Ptr src)
@@ -2291,11 +2286,6 @@ static void x87_gen_sign(X87Ptr p, bool chs)
         tcg_gen_andi_i32(hi, hi, 0x7fff);
     }
     tcg_gen_st16_i32(hi, p.base, p.ofs + 8);
-}
-#else
-static bool x87_lean(void)
-{
-    return false;
 }
 #endif
 
@@ -3345,9 +3335,9 @@ static bool gen_fcomi_wt(DisasContext *s, int i, bool quiet)
 
 static void gen_fpush(DisasContext *s)
 {
-    if (!x87_lean()) {
-        GEN_HELPER_FALLBACK_v_v(fpush);
-    }
+#if !defined(XBOX)
+    GEN_HELPER_FALLBACK_v_v(fpush);
+#endif
 
 #if defined(XBOX)
     if (x87_wt(s)) {
@@ -3368,9 +3358,9 @@ static void gen_fpush(DisasContext *s)
 
 static void gen_fpop(DisasContext *s)
 {
-    if (!x87_lean()) {
-        GEN_HELPER_FALLBACK_v_v(fpop);
-    }
+#if !defined(XBOX)
+    GEN_HELPER_FALLBACK_v_v(fpop);
+#endif
 
 #if defined(XBOX)
     if (x87_wt(s)) {
@@ -3395,7 +3385,7 @@ static void gen_fpop(DisasContext *s)
 static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
+    {
         int src = (s->fpstt_delta + st_index) & 7;
         if (x87_wt(s)) {
             if (!x87_wt_pending(s, src) &&
@@ -3461,10 +3451,8 @@ static void x87_lean_move(DisasContext *s, int d, int src_i)
 static void gen_fmov_ST0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        x87_lean_move(s, 0, st_index);
-        return;
-    }
+    x87_lean_move(s, 0, st_index);
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_i(fmov_ST0_STN, st_index);
     fp_pc_wrapper(gen_fmov_ST0_STN)(s, st_index);
@@ -3473,10 +3461,8 @@ static void gen_fmov_ST0_STN(DisasContext *s, int st_index)
 static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        x87_lean_move(s, st_index, 0);
-        return;
-    }
+    x87_lean_move(s, st_index, 0);
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_i(fmov_STN_ST0, st_index);
     fp_pc_wrapper(gen_fmov_STN_ST0)(s, st_index);
@@ -3484,9 +3470,9 @@ static void gen_fmov_STN_ST0(DisasContext *s, int st_index)
 
 static void gen_ffree_STN(DisasContext *s, int st_index)
 {
-    if (!x87_lean()) {
-        GEN_HELPER_FALLBACK_v_i(ffree_STN, st_index);
-    }
+#if !defined(XBOX)
+    GEN_HELPER_FALLBACK_v_i(ffree_STN, st_index);
+#endif
 
     /*
      * Inline: a single byte write into the tag word; no register spill,
@@ -3504,7 +3490,7 @@ static void gen_ffree_STN(DisasContext *s, int st_index)
 static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
+    {
         int a = s->fpstt_delta & 7;
         int b = (s->fpstt_delta + st_index) & 7;
         bool pa = x87_wt(s) && x87_wt_pending(s, a);
@@ -3923,21 +3909,19 @@ static void x87_wt_sign_dbl(DisasContext *s, bool chs)
 static void gen_fchs_ST0(DisasContext *s)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        if (x87_wt_sign_pending(s, true)) {
-            return;
-        }
-        x87_gen_sign(gen_stn_ptr(0), true);
-        x87_wt_sign_dbl(s, true);
-        /*
-         * Reload rather than negate the cached double: the conversion does
-         * not commute with the sign for an 80-bit value beyond double range
-         * under RP/RM (inf on one side, DBL_MAX on the other), nor for the
-         * fixed-sign default NaN of an unnormal or pseudo-NaN.
-         */
-        s->wt_st[s->fpstt_delta & 7] = NULL;
+    if (x87_wt_sign_pending(s, true)) {
         return;
     }
+    x87_gen_sign(gen_stn_ptr(0), true);
+    x87_wt_sign_dbl(s, true);
+    /*
+     * Reload rather than negate the cached double: the conversion does
+     * not commute with the sign for an 80-bit value beyond double range
+     * under RP/RM (inf on one side, DBL_MAX on the other), nor for the
+     * fixed-sign default NaN of an unnormal or pseudo-NaN.
+     */
+    s->wt_st[s->fpstt_delta & 7] = NULL;
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_v(fchs_ST0);
     fp_pc_wrapper(gen_fchs_ST0)(s);
@@ -3946,15 +3930,13 @@ static void gen_fchs_ST0(DisasContext *s)
 static void gen_fabs_ST0(DisasContext *s)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        if (x87_wt_sign_pending(s, false)) {
-            return;
-        }
-        x87_gen_sign(gen_stn_ptr(0), false);
-        x87_wt_sign_dbl(s, false);
-        s->wt_st[s->fpstt_delta & 7] = NULL;   /* as in gen_fchs_ST0 */
+    if (x87_wt_sign_pending(s, false)) {
         return;
     }
+    x87_gen_sign(gen_stn_ptr(0), false);
+    x87_wt_sign_dbl(s, false);
+    s->wt_st[s->fpstt_delta & 7] = NULL;   /* as in gen_fchs_ST0 */
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_v(fabs_ST0);
     fp_pc_wrapper(gen_fabs_ST0)(s);
@@ -4194,24 +4176,23 @@ static void gen_fcomi_ST0_STN(DisasContext *s, int opreg, bool quiet)
     assume_cc_op(s, CC_OP_EFLAGS);
 }
 
+#if defined(XBOX)
 static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
 {
     TCGv_i32 fpus = tcg_temp_new_i32();
     tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
     tcg_gen_andi_i32(fpus, fpus, ~0x3800);
     TCGv_i32 top = tcg_temp_new_i32();
-#if defined(XBOX)
     if (x87_wt(s)) {
         /* fpstt is deferred (x87_wt_land) */
         tcg_gen_shli_i32(top, gen_st_index(0), 11);
-    } else
-#endif
-    {
+    } else {
         tcg_gen_andi_i32(top, fpstt, 0x7);
         tcg_gen_shli_i32(top, top, 11);
     }
     tcg_gen_or_i32(result, fpus, top);
 }
+#endif
 
 /* NOTE the exception in "r" op ordering */
 static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
@@ -4260,22 +4241,20 @@ static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
 static void gen_fld1_ST0(DisasContext *s)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        if (x87_wt_dbl(s)) {
-            /* A pending double, as any result (x87_wt_dbl). */
-            x87_wt_set_st(s, 0, x87_wt_from_bits(
-                              tcg_constant_i64(0x3FF0000000000000ull)));
-            return;
-        }
-        x87_gen_const(gen_stn_ptr(0), 0x3fff, 0x8000000000000000ULL);
-        if (x87_wt(s)) {
-            s->wt_st[s->fpstt_delta & 7] =
-                x87_wt_from_bits(tcg_constant_i64(0x3FF0000000000000ull));
-            s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
-            s->wt_exact |= 1 << (s->fpstt_delta & 7);
-        }
+    if (x87_wt_dbl(s)) {
+        /* A pending double, as any result (x87_wt_dbl). */
+        x87_wt_set_st(s, 0, x87_wt_from_bits(
+                          tcg_constant_i64(0x3FF0000000000000ull)));
         return;
     }
+    x87_gen_const(gen_stn_ptr(0), 0x3fff, 0x8000000000000000ULL);
+    if (x87_wt(s)) {
+        s->wt_st[s->fpstt_delta & 7] =
+            x87_wt_from_bits(tcg_constant_i64(0x3FF0000000000000ull));
+        s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
+        s->wt_exact |= 1 << (s->fpstt_delta & 7);
+    }
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_v(fld1_ST0);
     fp_pc_wrapper(gen_fld1_ST0)(s);
@@ -4284,20 +4263,18 @@ static void gen_fld1_ST0(DisasContext *s)
 static void gen_fldz_ST0(DisasContext *s)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        if (x87_wt_dbl(s)) {
-            x87_wt_set_st(s, 0, x87_wt_from_bits(tcg_constant_i64(0)));
-            return;
-        }
-        x87_gen_const(gen_stn_ptr(0), 0, 0);
-        if (x87_wt(s)) {
-            s->wt_st[s->fpstt_delta & 7] =
-                x87_wt_from_bits(tcg_constant_i64(0));
-            s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
-            s->wt_exact |= 1 << (s->fpstt_delta & 7);
-        }
+    if (x87_wt_dbl(s)) {
+        x87_wt_set_st(s, 0, x87_wt_from_bits(tcg_constant_i64(0)));
         return;
     }
+    x87_gen_const(gen_stn_ptr(0), 0, 0);
+    if (x87_wt(s)) {
+        s->wt_st[s->fpstt_delta & 7] =
+            x87_wt_from_bits(tcg_constant_i64(0));
+        s->wt_pend &= ~(1 << (s->fpstt_delta & 7));
+        s->wt_exact |= 1 << (s->fpstt_delta & 7);
+    }
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_v(fldz_ST0);
     fp_pc_wrapper(gen_fldz_ST0)(s);
@@ -4307,13 +4284,11 @@ static void gen_fldz_ST0(DisasContext *s)
 static void gen_fldz_FT0(DisasContext *s)
 {
 #if defined(XBOX)
-    if (x87_lean()) {
-        x87_gen_const(gen_ft0_ptr(), 0, 0);
-        if (x87_wt(s)) {
-            s->wt_ft0 = x87_wt_from_bits(tcg_constant_i64(0));
-        }
-        return;
+    x87_gen_const(gen_ft0_ptr(), 0, 0);
+    if (x87_wt(s)) {
+        s->wt_ft0 = x87_wt_from_bits(tcg_constant_i64(0));
     }
+    return;
 #endif
     GEN_HELPER_FALLBACK_v_v(fldz_FT0);
     fp_pc_wrapper(gen_fldz_FT0)(s);
@@ -5825,11 +5800,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             update_fip = update_fdp = false;
             break;
         case 0x2f: /* fnstsw mem */
-            if (x87_lean()) {
-                gen_fnstsw_inline(s, s->tmp2_i32);
-            } else {
-                gen_helper_fnstsw(s->tmp2_i32, tcg_env);
-            }
+#if defined(XBOX)
+            gen_fnstsw_inline(s, s->tmp2_i32);
+#else
+            gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+#endif
             tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                 s->mem_index, MO_LEUW);
             update_fip = update_fdp = false;
@@ -6206,11 +6181,11 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3c: /* df/4 */
             switch (rm) {
             case 0:
-                if (x87_lean()) {
-                    gen_fnstsw_inline(s, s->tmp2_i32);
-                } else {
-                    gen_helper_fnstsw(s->tmp2_i32, tcg_env);
-                }
+#if defined(XBOX)
+                gen_fnstsw_inline(s, s->tmp2_i32);
+#else
+                gen_helper_fnstsw(s->tmp2_i32, tcg_env);
+#endif
                 tcg_gen_extu_i32_tl(s->T0, s->tmp2_i32);
                 gen_op_mov_reg_v(s, MO_16, R_EAX, s->T0);
                 break;
