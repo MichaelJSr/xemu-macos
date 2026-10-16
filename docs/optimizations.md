@@ -545,6 +545,48 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   with them), Minsns/frame −4.0% (12/12); stream-e2
   −3.9% (21/28; mean −3.5%, 20/24, without the four spike pairs, −1.5%
   with them), Minsns/frame −4.0% (28/28).
+- **Softmmu TLB walks shared within straight-line TB code
+  (2026-10-15).** The JIT study put the qemu_ld/st fast-path TLB walk at
+  24% of the det vCPU: 2.4M walks per heavy-f1 frame, ~9 host insns
+  with two dependent loads each. An access to the page that an earlier
+  access of the same kind and mmu_idx walked now reuses that walk. The
+  walk leaves ntag = -page in x4 (loads) or x6 (stores), plus the
+  addend in x5 (loads) or the TLB entry's address in x7 (stores). A
+  sharing load checks `zext(addr) + ntag <= PAGE_SIZE - size` (3
+  insns), then loads from addend + addr. A sharing store also re-reads
+  `addr_write` and the addend from the entry and requires `addr_write
+  == page` (6 insns, one `ccmn`). That covers nv2a's dirty tracking,
+  which re-arms TLB_NOTDIRTY from its own thread (`tlb_reset_dirty`):
+  a store that missed the re-arm would leave the page clean. A miss
+  walks the TLB out of line and refills the slot. Labels, helper calls,
+  TB exits and the TB start end every slot at translation time. Slow
+  paths set ntag = 1 << 32, which no address matches. Accesses with an
+  alignment requirement never share.
+  The translation-time plan (`tcg_tlbm_plan`) tracks each address as
+  (root value, constant offset) through mov/add/sub. An access shares
+  when it has its slot's root and lies within half a page of the fill
+  (on the same page, for constant addresses). A slot is filled only
+  when a later access shares the fill and needs it sooner than the
+  slot's current page. 42% of heavy-f1 accesses share, and 0.4% of the
+  checks miss; sharing whenever a slot was live missed 34%. Reserving
+  x4-x7 costs the allocator almost nothing (+0.06% Minsns,
+  pressure-only build): qemu_ld/st are `TCG_OPF_CALL_CLOBBER`, so no
+  value lives in x0-x7 across them anyway. Reserving the call-saved
+  x20-x23 instead cost +2.1% in spills. A `--debug` build walks the TLB
+  behind every shared access and aborts if it disagrees. For stores it
+  ignores TLB_NOTDIRTY in the live entry, which another thread may set
+  after the share check (the fast path's usual compare-then-store
+  race), and checks instead that the share check read the bare page;
+  dropping the store's `addr_write` compare aborts within the f300 run.
+  Cross-binary det A/B against its parent (on the pin lane, based on
+  94a722acd8): heavy-f1 Mcycles/frame median −3.9% (mean −4.4%, CI
+  −6.6..−2.2, 15/18 pairs, load 14-34), Minsns/frame −5.25% (18/18);
+  stream-e2 median −4.1% (mean −4.5%, CI
+  −7.3..−1.8, 10/12, load 20-28), Minsns −4.1% (12/12). Stores that keep
+  the addend and skip the re-read measured −1.6% Minsns and −2.9%
+  Mcycles (6/6) against this form (−6.7% Minsns against its parent), but
+  they widen the re-arm race from one store to the rest of the segment,
+  so they are not shipped.
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,
