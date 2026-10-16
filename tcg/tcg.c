@@ -2027,6 +2027,13 @@ void tcg_func_start(TCGContext *s)
 
 #ifdef CONFIG_DEBUG_TCG
     s->goto_tb_issue_mask = 0;
+    /*
+     * xemu: a TB overflow (tcg_raise_tb_overflow, e.g. TCG_MAX_TEMPS) can
+     * siglongjmp out of a gvec expansion before it restores the list it
+     * swapped in. The restart would then check its first vector op
+     * outside any expansion against that list (tcg_assert_listed_vecop).
+     */
+    s->vecop_list = NULL;
 #endif
 
     QTAILQ_INIT(&s->ops);
