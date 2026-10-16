@@ -23,7 +23,9 @@ upscaling + frame interpolation, and Accelerate-backed audio.
 ## Quick start
 
 Prerequisites: macOS 14.0+ (macOS 26 for MetalFX + frame interpolation),
-Apple Silicon, Xcode Command Line Tools, Homebrew `pkg-config`.
+Apple Silicon, Xcode Command Line Tools,
+`brew install pkg-config ninja cmake dylibbundler`,
+`pip3 install pyyaml requests`, and network on the first build.
 
 ```bash
 git clone --recurse-submodules https://github.com/MichaelJSr/xemu-macos.git
@@ -666,8 +668,7 @@ Other automation interfaces (windowed or headless):
 
   Write tagged input while paused, then advance. `shift` is guest time
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs
-  ~1.5x faster (about 90 fps on Azurik's heavy scene on a loaded M2
-  Ultra, about 46 with 0) and suits games that are not CPU-bound.
+  ~1.5x faster and suits games that are not CPU-bound.
   Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
   included when taken paused, at about 60% of the null renderer's speed:
   a GPU report reaches RAM when the guest or a device first touches its
