@@ -172,7 +172,21 @@ Other automation interfaces (windowed or headless):
   `axis lx|ly|rx|ry <-1..1>` and `trigger lt|rt <0..1>` (positive is
   right/up; `0` hands the axis back to the keys). Prefix any line with
   `@<frame>` or `+<frames>` to apply it at that frame instead of on
-  arrival.
+  arrival. An untagged `clear` releases every key and axis and drops
+  every line still queued, so nothing written before it lands later
+  (under icount it releases at the next vblank). Earlier builds kept the
+  queue; `+0 clear` still does, releasing at the next vblank.
+- **Input state**: QMP `query-xemu-input` returns `{frame, ports, keys,
+  queued}`. `ports` gives each port's source and the `buttons` (`a`,
+  `dpad-up`, `white`, ...), sticks `lx`/`ly`/`rx`/`ry` and triggers
+  `lt`/`rt` its pad reports from the next vblank on, raw (a pipe value
+  v reads as round(v × 32767); the guest reads triggers shifted right
+  by 7). For the keyboard pad that is what the pipe holds once the lines
+  due at that vblank apply, plus the host keyboard where it counts;
+  for a host gamepad, its last reading. `keys` lists the scancodes the
+  pipe holds then, `queued` the lines still waiting, each with the
+  `frame` of the vblank that applies it (`frame + 1` is the next). It
+  reads the pipe first and never changes the run.
 - **Frames** count vblanks while the VM runs. QMP `query-xemu-frame`
   returns `{frame, running}`; `xemu-frame-advance {"frames": N}` runs N
   frames, pauses, and returns (`0` just pauses). It also starts a VM the

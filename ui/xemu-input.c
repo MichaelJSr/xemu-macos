@@ -22,6 +22,7 @@
 #include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
+#include "qapi/qapi-commands-xemu.h"
 #include "monitor/qdev.h"
 #include "qobject/qdict.h"
 #include "qemu/option.h"
@@ -747,6 +748,11 @@ void xemu_input_update_controllers(void)
  * keys). Any line may start with "@<frame>" or "+<frames>" to apply it
  * at that frame (vblanks while running, see xemu_input_frame_tick)
  * instead of on arrival; "+0" means the next vblank.
+ *
+ * An untagged "clear" also drops every line still queued when it is
+ * read, so nothing written before it lands later; a tagged one only
+ * releases everything at its frame. QMP query-xemu-input shows what the
+ * next vblank applies and the queue.
  */
 static uint8_t test_input_override[SDL_SCANCODE_COUNT];
 static int16_t test_axis_override[CONTROLLER_AXIS__COUNT];
@@ -776,7 +782,8 @@ static int test_input_axis(const char *name)
     return -1;
 }
 
-static void test_input_apply(const char *line)
+/* Apply one line to held keys and axes (the pipe's, or a query's copy). */
+static void test_input_apply(const char *line, uint8_t *keys, int16_t *axes)
 {
     int sc;
     char name[8];
@@ -784,15 +791,15 @@ static void test_input_apply(const char *line)
 
     if (sscanf(line, "down %d", &sc) == 1) {
         if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-            test_input_override[sc] = 1;
+            keys[sc] = 1;
         }
     } else if (sscanf(line, "up %d", &sc) == 1) {
         if (sc >= 0 && sc < SDL_SCANCODE_COUNT) {
-            test_input_override[sc] = 0;
+            keys[sc] = 0;
         }
     } else if (!strncmp(line, "clear", 5)) {
-        memset(test_input_override, 0, sizeof(test_input_override));
-        memset(test_axis_override, 0, sizeof(test_axis_override));
+        memset(keys, 0, SDL_SCANCODE_COUNT * sizeof(keys[0]));
+        memset(axes, 0, CONTROLLER_AXIS__COUNT * sizeof(axes[0]));
     } else if (sscanf(line, "axis %7s %lf", name, &v) == 2 ||
                sscanf(line, "trigger %7s %lf", name, &v) == 2) {
         int axis = test_input_axis(name);
@@ -801,16 +808,29 @@ static void test_input_apply(const char *line)
         if (axis >= 0 && (line[0] == 't') == trigger) {
             /* A stick reaches -32768, one step below -1.0 (recordings). */
             v = MAX(trigger ? 0.0 : -32768.0 / 32767.0, MIN(v, 1.0));
-            test_axis_override[axis] = (int16_t)lround(v * 32767.0);
+            axes[axis] = (int16_t)lround(v * 32767.0);
         }
+    }
+}
+
+static void test_input_drop_queued(void)
+{
+    TestInputPending *p;
+
+    while ((p = g_queue_pop_head(&test_input_pending))) {
+        g_free(p->line);
+        g_free(p);
     }
 }
 
 static void test_input_line(char *line)
 {
     if (line[0] != '@' && line[0] != '+') {
+        if (!strncmp(line, "clear", 5)) {
+            test_input_drop_queued();
+        }
         if (!icount_enabled()) {
-            test_input_apply(line);
+            test_input_apply(line, test_input_override, test_axis_override);
             return;
         }
         /* Deterministic mode: an untagged line waits for the next vblank. */
@@ -1210,11 +1230,7 @@ void xemu_input_state_loaded(void)
         }
     }
     test_input_poll();
-    TestInputPending *p;
-    while ((p = g_queue_pop_head(&test_input_pending))) {
-        g_free(p->line);
-        g_free(p);
-    }
+    test_input_drop_queued();
     if (!test_input_loaded) {
         memset(test_input_override, 0, sizeof(test_input_override));
         memset(test_axis_override, 0, sizeof(test_axis_override));
@@ -1410,7 +1426,7 @@ static void input_frame_tick(uint64_t frame)
         TestInputPending *p = l->data;
         next = l->next;
         if (p->frame <= frame) {
-            test_input_apply(p->line);
+            test_input_apply(p->line, test_input_override, test_axis_override);
             g_free(p->line);
             g_free(p);
             g_queue_delete_link(&test_input_pending, l);
@@ -1443,27 +1459,43 @@ static void input_frame_tick(uint64_t frame)
     }
 }
 
+/*
+ * The host keyboard as the keyboard pad reads it. Deterministic mode
+ * ignores it (unless live pads sampled it at the last vblank).
+ */
+static const bool *kbd_host_keys(void)
+{
+    static const bool no_keys[SDL_SCANCODE_COUNT];
+
+    if (!icount_enabled()) {
+        return SDL_GetKeyboardState(NULL);
+    }
+    return xemu_input_live_pads() ? live_keys : no_keys;
+}
+
+/* The keyboard pad from host keys plus the pipe's held keys and axes. */
+static void kbd_pad_state(ControllerState *state, const bool *kbd,
+                          const uint8_t *keys, const int16_t *axes);
+
 void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
+{
+    /* Deterministic mode reads the pipe at vblanks only (frame tick). */
+    if (!icount_enabled()) {
+        test_input_poll();
+    }
+    kbd_pad_state(state, kbd_host_keys(), test_input_override,
+                  test_axis_override);
+}
+
+static void kbd_pad_state(ControllerState *state, const bool *kbd,
+                          const uint8_t *keys, const int16_t *axes)
 {
     state->buttons = 0;
     memset(state->axis, 0, sizeof(state->axis));
 
-    /*
-     * Deterministic mode: the pipe is read at vblanks only (frame tick), and
-     * the host keyboard is ignored.
-     */
-    static const bool no_keys[SDL_SCANCODE_COUNT];
-    const bool *kbd = no_keys;
-    if (!icount_enabled()) {
-        test_input_poll();
-        kbd = SDL_GetKeyboardState(NULL);
-    } else if (xemu_input_live_pads()) {
-        kbd = live_keys;
-    }
-
 #define KBD_STATE(btn) \
     (kbd[g_config.input.keyboard_controller_scancode_map.btn] || \
-     test_input_override[g_config.input.keyboard_controller_scancode_map.btn])
+     keys[g_config.input.keyboard_controller_scancode_map.btn])
 
     state->buttons |= KBD_STATE(a) << 0;
     state->buttons |= KBD_STATE(b) << 1;
@@ -1506,8 +1538,8 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
 #undef KBD_STATE
 
     for (int i = 0; i < CONTROLLER_AXIS__COUNT; i++) {
-        if (test_axis_override[i]) {
-            state->axis[i] = test_axis_override[i];
+        if (axes[i]) {
+            state->axis[i] = axes[i];
         }
     }
 }
@@ -1910,4 +1942,103 @@ void xemu_input_reset_input_mapping(ControllerState *state)
     } else if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
         xemu_settings_reset_keyboard_mapping();
     }
+}
+
+/*
+ * QMP query-xemu-input: the input every port's pad reports from the next
+ * vblank on, and the pipe's queued lines (BQL held, as for the pipe's other
+ * readers). Read-only, apart from reading what was written to the pipe.
+ */
+
+/* A line applies at the first vblank whose counter reaches its frame. */
+static uint64_t test_input_due(const TestInputPending *p)
+{
+    return MAX(p->frame, test_input_frame + 1);
+}
+
+static gint test_input_due_cmp(gconstpointer a, gconstpointer b,
+                               gpointer opaque)
+{
+    uint64_t fa = test_input_due(a), fb = test_input_due(b);
+
+    return fa < fb ? -1 : fa > fb;
+}
+
+static XemuInputPadState *pad_state_info(const ControllerState *c)
+{
+    XemuInputPadState *s = g_new0(XemuInputPadState, 1);
+    XemuInputButtonList **tail = &s->buttons;
+
+    /* XemuInputButton follows the bit order of ControllerState.buttons. */
+    for (int i = 0; i < XEMU_INPUT_BUTTON__MAX; i++) {
+        if (c->buttons & (1 << i)) {
+            QAPI_LIST_APPEND(tail, i);
+        }
+    }
+    s->lx = c->axis[CONTROLLER_AXIS_LSTICK_X];
+    s->ly = c->axis[CONTROLLER_AXIS_LSTICK_Y];
+    s->rx = c->axis[CONTROLLER_AXIS_RSTICK_X];
+    s->ry = c->axis[CONTROLLER_AXIS_RSTICK_Y];
+    s->lt = c->axis[CONTROLLER_AXIS_LTRIG];
+    s->rt = c->axis[CONTROLLER_AXIS_RTRIG];
+    return s;
+}
+
+XemuInputState *qmp_query_xemu_input(Error **errp)
+{
+    XemuInputState *st = g_new0(XemuInputState, 1);
+    XemuInputPortStateList **ports = &st->ports;
+    XemuInputQueuedLineList **queued = &st->queued;
+    intList **keys = &st->keys;
+    uint8_t next_keys[SDL_SCANCODE_COUNT];
+    int16_t next_axes[CONTROLLER_AXIS__COUNT];
+    GList *lines;
+
+    test_input_poll();
+    st->frame = test_input_frame;
+
+    /* The vblank applies its due lines in queue order: a stable sort. */
+    memcpy(next_keys, test_input_override, sizeof(next_keys));
+    memcpy(next_axes, test_axis_override, sizeof(next_axes));
+    lines = g_list_sort_with_data(g_list_copy(test_input_pending.head),
+                                  test_input_due_cmp, NULL);
+    for (GList *l = lines; l; l = l->next) {
+        TestInputPending *p = l->data;
+        XemuInputQueuedLine *q = g_new0(XemuInputQueuedLine, 1);
+
+        q->frame = test_input_due(p);
+        q->line = g_strdup(p->line);
+        QAPI_LIST_APPEND(queued, q);
+        if (q->frame == test_input_frame + 1) {
+            test_input_apply(p->line, next_keys, next_axes);
+        }
+    }
+    g_list_free(lines);
+
+    for (int sc = 0; sc < SDL_SCANCODE_COUNT; sc++) {
+        if (next_keys[sc]) {
+            QAPI_LIST_APPEND(keys, sc);
+        }
+    }
+
+    for (int i = 0; i < 4; i++) {
+        XemuInputPortState *ps = g_new0(XemuInputPortState, 1);
+        ControllerState *c = bound_controllers[i];
+        ControllerState next = { 0 };
+
+        ps->port = i + 1;
+        if (!c) {
+            ps->source = XEMU_INPUT_SOURCE_NONE;
+        } else if (c->type == INPUT_DEVICE_SDL_KEYBOARD) {
+            ps->source = XEMU_INPUT_SOURCE_KEYBOARD;
+            kbd_pad_state(&next, kbd_host_keys(), next_keys, next_axes);
+        } else {
+            ps->source = XEMU_INPUT_SOURCE_GAMEPAD;
+            next.buttons = c->buttons;
+            memcpy(next.axis, c->axis, sizeof(next.axis));
+        }
+        ps->next = pad_state_info(&next);
+        QAPI_LIST_APPEND(ports, ps);
+    }
+    return st;
 }

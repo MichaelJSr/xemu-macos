@@ -117,7 +117,10 @@ sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i
 - **Input:** `XEMU_INPUT_PIPE=<fifo>` takes `down`/`up <sdl_scancode>` and
   `clear` lines (`scripts/inject_input.sh`) for the keyboard pad (fixture
   port 2), even unfocused. Keys: WASD 26/4/22/7, A 81, B 79, start 42.
-  Writes to a dead xemu hang, so check `kill -0` first. A port's pad
+  Writes to a dead xemu hang, so check `kill -0` first. An untagged
+  `clear` also drops queued lines (`+0 clear` keeps them); assert pad
+  state and the queue with QMP `query-xemu-input` rather than tracking
+  them. A port's pad
   keeps its binding across loads, restores and resets; QMP
   `xemu-input-bind` swaps the source (keyboard/pipe, a gamepad GUID,
   none) under the plugged pad. Never bind the owner's pad in a test run.

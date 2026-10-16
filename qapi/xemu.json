@@ -1377,3 +1377,145 @@
 ##
 { 'command': 'xemu-trace-regions',
   'data': { 'regions': ['XemuTraceRegion'] } }
+
+##
+# Pad input query
+# ===============
+##
+
+##
+# @XemuInputButton:
+#
+# A button of an Xbox pad.
+#
+# @a: A
+#
+# @b: B
+#
+# @x: X
+#
+# @y: Y
+#
+# @dpad-left: d-pad left
+#
+# @dpad-up: d-pad up
+#
+# @dpad-right: d-pad right
+#
+# @dpad-down: d-pad down
+#
+# @back: Back
+#
+# @start: Start
+#
+# @white: White (a host gamepad's left shoulder)
+#
+# @black: Black (a host gamepad's right shoulder)
+#
+# @lstick: the left stick's click
+#
+# @rstick: the right stick's click
+#
+# @guide: Guide (an xemu extension)
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuInputButton',
+  'data': [ 'a', 'b', 'x', 'y', 'dpad-left', 'dpad-up', 'dpad-right',
+            'dpad-down', 'back', 'start', 'white', 'black', 'lstick',
+            'rstick', 'guide' ] }
+
+##
+# @XemuInputPadState:
+#
+# The input an Xbox pad reports.  A pipe value v reads as round(v *
+# 32767).
+#
+# @buttons: the buttons held
+#
+# @lx: the left stick's x, -32768 to 32767 (positive is right)
+#
+# @ly: the left stick's y, -32768 to 32767 (positive is up)
+#
+# @rx: the right stick's x
+#
+# @ry: the right stick's y
+#
+# @lt: the left trigger, 0 to 32767 (the guest reads it shifted right
+#     by 7)
+#
+# @rt: the right trigger
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputPadState',
+  'data': { 'buttons': ['XemuInputButton'], 'lx': 'int', 'ly': 'int',
+            'rx': 'int', 'ry': 'int', 'lt': 'int', 'rt': 'int' } }
+
+##
+# @XemuInputPortState:
+#
+# @port: the port, 1 to 4
+#
+# @source: the host source driving the port (see
+#     @query-xemu-input-bindings; a change @xemu-input-bind left
+#     pending is not counted)
+#
+# @next: the input the port's pad reports from the next vblank on.
+#     For @keyboard, the lines due at that vblank applied to what the
+#     pipe holds, plus the host keyboard in normal mode or with
+#     XEMU_ICOUNT_LIVE_PADS (as last read).  For @gamepad, its last
+#     reading.  Neutral for @none.  In normal mode host sources and
+#     untagged lines also change it between vblanks.
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputPortState',
+  'data': { 'port': 'int', 'source': 'XemuInputSource',
+            'next': 'XemuInputPadState' } }
+
+##
+# @XemuInputQueuedLine:
+#
+# @frame: the frame counter at the vblank that applies it
+#
+# @line: the line, without its "@" or "+" tag
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputQueuedLine',
+  'data': { 'frame': 'int', 'line': 'str' } }
+
+##
+# @XemuInputState:
+#
+# @frame: the frame counter (see @query-xemu-frame); the next vblank
+#     is @frame + 1
+#
+# @ports: ports 1 to 4
+#
+# @keys: the scancodes the pipe holds down from the next vblank on,
+#     whether or not the keyboard map uses them
+#
+# @queued: the XEMU_INPUT_PIPE lines waiting for a vblank, in the
+#     order they apply (in deterministic mode untagged lines too)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputState',
+  'data': { 'frame': 'int', 'ports': ['XemuInputPortState'],
+            'keys': ['int'], 'queued': ['XemuInputQueuedLine'] } }
+
+##
+# @query-xemu-input:
+#
+# Return the pad input every port gets from the next vblank on and the
+# XEMU_INPUT_PIPE lines still queued.  Lines written to the pipe
+# before the call are read first.  An untagged "clear" line drops
+# every queued line and releases all keys and axes (in deterministic
+# mode at the next vblank); "+0 clear" releases them at the next
+# vblank and keeps the queue.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-input', 'returns': 'XemuInputState' }
