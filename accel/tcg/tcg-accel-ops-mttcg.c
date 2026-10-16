@@ -95,6 +95,10 @@ static void *mttcg_cpu_thread_fn(void *arg)
     }
 #endif
 
+#ifdef XBOX
+    bql_spin_enable_self();
+#endif
+
     bql_lock();
     qemu_thread_get_self(cpu->thread);
 

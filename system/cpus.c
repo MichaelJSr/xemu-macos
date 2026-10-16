@@ -47,6 +47,7 @@
 #include "system/whpx.h"
 #include "hw/boards.h"
 #include "hw/hw.h"
+#include "qemu/timer.h"
 #include "trace.h"
 
 #ifdef CONFIG_LINUX
@@ -569,6 +570,85 @@ void rust_bql_mock_lock(void)
     abort();
 }
 
+#ifdef XBOX
+/*
+ * The normal-mode vCPU spins up to BQL_SPIN_NS for a contended BQL before
+ * it sleeps on it. Most of its waits end within a microsecond (a device
+ * thread that raises an interrupt kicks the vCPU before it unlocks) and
+ * nearly all within 5 us; a main loop iteration (about 9 us) is the
+ * longest common hold. The mutex sleeps in the kernel at once (macOS,
+ * glibc), and the wake adds 4-5 us, far more under host load. Only the
+ * MTTCG vCPU thread spins (bql_spin_enable_self); icount runs on the
+ * round-robin thread and never does. The halt wait re-takes the BQL
+ * inside qemu_cond_wait and still sleeps. XEMU_BQL_SPIN=0 keeps the
+ * plain lock.
+ */
+#define BQL_SPIN_NS 10000
+#define BQL_SPIN_POLL_NS 200
+
+static __thread bool bql_spin_self;
+static int64_t bql_spin_budget, bql_spin_poll;   /* in bql_spin_clock ticks */
+
+/*
+ * macOS's CLOCK_MONOTONIC counts whole microseconds, too coarse to pace
+ * the polls; aarch64 reads the virtual counter (24 MHz on Apple Silicon).
+ */
+static inline int64_t bql_spin_clock(void)
+{
+#if defined(__aarch64__)
+    int64_t v;
+
+    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return get_clock();
+#endif
+}
+
+void bql_spin_enable_self(void)
+{
+    const char *e = getenv("XEMU_BQL_SPIN");
+    int64_t hz = NANOSECONDS_PER_SECOND;
+
+#if defined(__aarch64__)
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+#endif
+    bql_spin_budget = BQL_SPIN_NS * hz / NANOSECONDS_PER_SECOND;
+    bql_spin_poll = MAX(1, BQL_SPIN_POLL_NS * hz / NANOSECONDS_PER_SECOND);
+    bql_spin_self = hz > 0 && !(e && e[0] == '0');
+}
+
+/*
+ * A failed trylock takes the mutex's line, so space the polls out: the
+ * holder's unlock pays for one move.
+ */
+static bool bql_lock_spin(const char *file, int line)
+{
+    int64_t now, next, end;
+
+    if (qemu_mutex_trylock_impl(&bql, file, line) == 0) {
+        return true;
+    }
+    now = bql_spin_clock();
+    next = now + bql_spin_poll;
+    end = now + bql_spin_budget;
+    for (;;) {
+        cpu_relax();
+        now = bql_spin_clock();
+        if (now < next) {
+            continue;
+        }
+        if (qemu_mutex_trylock_impl(&bql, file, line) == 0) {
+            return true;
+        }
+        if (now >= end) {
+            return false;
+        }
+        next = now + bql_spin_poll;
+    }
+}
+#endif
+
 /*
  * The BQL is taken from so many places that it is worth profiling the
  * callers directly, instead of funneling them all through a single function.
@@ -578,6 +658,12 @@ void bql_lock_impl(const char *file, int line)
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
+#ifdef XBOX
+    if (bql_spin_self && bql_lock_fn == qemu_mutex_lock_impl &&
+        bql_lock_spin(file, line)) {
+        return;
+    }
+#endif
     bql_lock_fn(&bql, file, line);
 }
 

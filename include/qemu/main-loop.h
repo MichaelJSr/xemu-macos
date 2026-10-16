@@ -368,6 +368,15 @@ bool qemu_in_main_thread(void);
 #define bql_lock() bql_lock_impl(__FILE__, __LINE__)
 void bql_lock_impl(const char *file, int line);
 
+#ifdef XBOX
+/*
+ * bql_spin_enable_self: the calling thread's contended bql_lock() spins
+ * briefly before it sleeps (the normal-mode vCPU thread; XEMU_BQL_SPIN=0
+ * leaves it off).
+ */
+void bql_spin_enable_self(void);
+#endif
+
 /**
  * bql_unlock: Unlock the Big QEMU Lock (BQL).
  *

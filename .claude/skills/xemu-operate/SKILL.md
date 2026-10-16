@@ -289,6 +289,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_PFIFO_STALL_DOORBELL=0` | Normal mode: a DMA_PUT doorbell inside a flip stall wakes the PFIFO thread again (by default it only publishes PUT) | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
 | `XEMU_KI_IDLE_HALT=0` | Normal mode: the vCPU spins in the guest kernel's idle loop again instead of halting after 50 µs (icount always halts) | `i386/translate.c` |
+| `XEMU_BQL_SPIN=0` | Normal mode: the vCPU sleeps on a contended BQL at once instead of polling it for up to 10 µs first (icount never spins) | `system/cpus.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |

@@ -23,9 +23,9 @@ Changes manifest below, and every one has a `getenv` on this branch.
 Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
-`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO` and `XEMU_KI_IDLE_HALT`,
-the first five rows. The other `=0` row, `XEMU_SPIRV_CACHE`, is a
-cold-compile A/B bypass. Knobs that exist
+`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO`, `XEMU_KI_IDLE_HALT` and
+`XEMU_BQL_SPIN`, the first six rows. The other `=0` row,
+`XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass. Knobs that exist
 only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
@@ -37,6 +37,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
 | `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
+| `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -2423,6 +2424,43 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   heartbeat advancing) and a 9-minute windowed heavy-f1 → transition →
   movie session ran clean. `XEMU_KI_IDLE_HALT=0` keeps the spin
   (normal-mode switch: the goldens never take the budget path).
+- **The normal-mode vCPU spins for a contended BQL (2026-10-16).** The
+  macOS mutex sleeps in the kernel at once. After the KiIdleLoop halt
+  the vCPU still waited 1.0-2.7% of its wall time for the BQL (heavy-f1
+  windowed), mostly at the interrupt path in `cpu_exec_loop`: the device
+  thread that raises an interrupt kicks the vCPU before it unlocks.
+  `bql_lock_impl` now polls with trylock every 200 ns for up to 10 µs on
+  the MTTCG thread (`bql_spin_enable_self`), then sleeps as before. The
+  polls run on `cntvct_el0`, because macOS's `CLOCK_MONOTONIC` counts
+  whole microseconds.
+  An instrumented build (same binary, switch off vs on, 3 interleaved
+  pairs at load 37-43) measured the vCPU's contended-acquire time: off
+  1.43-2.69% of wall (mean 2.12%, mean wait 6.3-9.6 µs) against on
+  0.52-0.53% (mean wait 1.8-5.0 µs), 0.24-0.28% of it spinning. 93-98%
+  of spins acquire before the budget runs out, 47-84% within a
+  microsecond and over 90% within 5 µs; the longest common holder is a
+  main-loop iteration (about 9 µs). The first instrumented builds re-armed
+  the poll 200 counter ticks (8.3 µs) apart and reported 1.91 → 0.98%
+  with 0.6-1.1% spinning and a peak at 8-15 µs that the gap made.
+  Release builds, heavy-f1 windowed at the cap:
+  - Process CPU is flat; the run-to-run spread is ±5 points. Against the
+    base: 127.5 → 122.2% over 6 pairs (load 37-43) and 131.4 → 133.6%
+    over 4 pairs (load 33-53). One binary, `XEMU_BQL_SPIN=0` vs on, 2 ×
+    45 s: 132.1 → 130.0% (ps samples). The vCPU's sys time fell (2.7 →
+    2.0%; 3.4 → 2.9%, 4/4 pairs).
+  - Under the xwx interposer, 2 pairs at load 22-59: the PFIFO thread's
+    BQL waits did not change (0.08-0.09% → 0.06-0.09% of wall). The main
+    loop's waits went from 82-91/s to 259-277/s and from 0.39-0.46% to
+    0.67-0.93% of its wall: macOS mutexes are first-fit, and the spinning
+    vCPU takes the lock first.
+  - fps stays at the cap: `bench-abx` 2 × 45 s, load 19-29, 60.11 →
+    60.10 (+1/−1).
+  The halt wake still re-takes the BQL inside `qemu_cond_wait`. That
+  costs 4-6 µs from the raiser's unlock to the vCPU running, at 0.7-2.7k
+  wakes/s (0.3-1.2% of vCPU wall). It is left alone: spinning there
+  would burn the kick-to-unlock time as well (3-18 µs). Goldens
+  unchanged (the RR thread never spins). `XEMU_BQL_SPIN=0` keeps the
+  plain lock (normal-mode switch).
 - **Deterministic mode's FP brackets write FPCR only when it differs.**
   Device work on the vCPU thread (the inline PFIFO pusher, ~360 runs
   per frame on heavy-f1, and the APU tick) ran between `fegetenv`,
