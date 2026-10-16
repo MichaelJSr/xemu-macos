@@ -1697,7 +1697,8 @@ static void tcg_tlbm_plan(TCGContext *s)
     QTAILQ_FOREACH(op, &s->ops, link) {
         n += op->opc == INDEX_op_qemu_ld || op->opc == INDEX_op_qemu_st ||
              op->opc == INDEX_op_qemu_ld2 || op->opc == INDEX_op_qemu_st2 ||
-             op->opc == INDEX_op_qemu_ld_v128;
+             op->opc == INDEX_op_qemu_ld_v128 ||
+             op->opc == INDEX_op_qemu_ld_fp || op->opc == INDEX_op_qemu_st_fp;
     }
     if (!n) {
         return;
@@ -1758,11 +1759,14 @@ static void tcg_tlbm_plan(TCGContext *s)
         case INDEX_op_qemu_st:
         case INDEX_op_qemu_ld2:
         case INDEX_op_qemu_st2:
-        case INDEX_op_qemu_ld_v128: {
+        case INDEX_op_qemu_ld_v128:
+        case INDEX_op_qemu_ld_fp:
+        case INDEX_op_qemu_st_fp: {
             /* One data register, or two (the i128 accesses) */
             int nd = opc == INDEX_op_qemu_ld2 || opc == INDEX_op_qemu_st2
                      ? 2 : 1;
-            bool is_st = opc == INDEX_op_qemu_st || opc == INDEX_op_qemu_st2;
+            bool is_st = opc == INDEX_op_qemu_st || opc == INDEX_op_qemu_st2 ||
+                         opc == INDEX_op_qemu_st_fp;
             MemOpIdx oi = op->args[nd + 1];
             MemOp mop = get_memop(oi);
             TLBMAccess *x = &acc[k++];
@@ -2386,9 +2390,33 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     tcg_out_call_int(s, qemu_ld_helpers[opc & MO_SIZE]);
     tcg_out_pinned_slow_reload(s);
     tlbm_out_invalidate(s);
-    tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
+    if (lb->type == TCG_TYPE_F32 || lb->type == TCG_TYPE_F64) {
+        /* qemu_ld_fp: the helper returns the bits in x0 */
+        tcg_out_mov(s, lb->type, lb->datalo_reg, TCG_REG_X0);
+    } else {
+        tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
+    }
     tcg_out_goto(s, lb->raddr);
     return true;
+}
+
+/*
+ * The store helpers take the data in a GPR: a qemu_st_fp's goes there
+ * through TMP1 (the addend, dead once the helper path runs), which @tmp
+ * then describes.
+ */
+static const TCGLabelQemuLdst *tcg_out_st_data_gpr(TCGContext *s,
+                                                   const TCGLabelQemuLdst *lb,
+                                                   TCGLabelQemuLdst *tmp)
+{
+    if (lb->type != TCG_TYPE_F32 && lb->type != TCG_TYPE_F64) {
+        return lb;
+    }
+    tcg_out_mov(s, lb->type, TCG_REG_TMP1, lb->datalo_reg);
+    *tmp = *lb;
+    tmp->type = lb->type == TCG_TYPE_F32 ? TCG_TYPE_I32 : TCG_TYPE_I64;
+    tmp->datalo_reg = TCG_REG_TMP1;
+    return tmp;
 }
 
 #if defined(XBOX)
@@ -2558,8 +2586,11 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
             [MO_32] = xemu_sf_refute_stl,
             [MO_64] = xemu_sf_refute_stq,
         };
+        TCGLabelQemuLdst l;
+
         tcg_out_pinned_slow_store(s);
-        tcg_out_st_helper_args(s, lb, &ldst_helper_param);
+        tcg_out_st_helper_args(s, tcg_out_st_data_gpr(s, lb, &l),
+                               &ldst_helper_param);
         tcg_out_call_int(s, sf_refute[opc & MO_SIZE]);
         tcg_out_pinned_slow_reload(s);
         tlbm_out_invalidate(s);
@@ -2608,6 +2639,7 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
 static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
+    TCGLabelQemuLdst l;
 
     if (!tlbm_out_slow_entry(s, lb)) {
         return false;
@@ -2625,7 +2657,8 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     /* After the prefilter, whose inline stores cannot exit and call nothing. */
     tcg_out_slow_st(s, lb->slow_st, lb->nb_slow_st);
     tcg_out_pinned_slow_store(s);
-    tcg_out_st_helper_args(s, lb, &ldst_helper_param);
+    tcg_out_st_helper_args(s, tcg_out_st_data_gpr(s, lb, &l),
+                           &ldst_helper_param);
     tcg_out_call_int(s, qemu_st_helpers[opc & MO_SIZE]);
     tcg_out_pinned_slow_reload(s);
     tlbm_out_invalidate(s);
@@ -2786,13 +2819,16 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
                        data_r, h.base, h.index_ext, h.index);
         break;
     case MO_UL:
-        tcg_out_ldst_r(s, I3312_LDRW, data_r, h.base, h.index_ext, h.index);
+        /* A V register for qemu_ld_fp, here and below */
+        tcg_out_ldst_r(s, data_r < 32 ? I3312_LDRW : I3312_LDRVS,
+                       data_r, h.base, h.index_ext, h.index);
         break;
     case MO_SL:
         tcg_out_ldst_r(s, I3312_LDRSWX, data_r, h.base, h.index_ext, h.index);
         break;
     case MO_UQ:
-        tcg_out_ldst_r(s, I3312_LDRX, data_r, h.base, h.index_ext, h.index);
+        tcg_out_ldst_r(s, data_r < 32 ? I3312_LDRX : I3312_LDRVD,
+                       data_r, h.base, h.index_ext, h.index);
         break;
     default:
         g_assert_not_reached();
@@ -2810,10 +2846,13 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
         tcg_out_ldst_r(s, I3312_STRH, data_r, h.base, h.index_ext, h.index);
         break;
     case MO_32:
-        tcg_out_ldst_r(s, I3312_STRW, data_r, h.base, h.index_ext, h.index);
+        /* A V register for qemu_st_fp, here and below */
+        tcg_out_ldst_r(s, data_r < 32 ? I3312_STRW : I3312_STRVS,
+                       data_r, h.base, h.index_ext, h.index);
         break;
     case MO_64:
-        tcg_out_ldst_r(s, I3312_STRX, data_r, h.base, h.index_ext, h.index);
+        tcg_out_ldst_r(s, data_r < 32 ? I3312_STRX : I3312_STRVD,
+                       data_r, h.base, h.index_ext, h.index);
         break;
     default:
         g_assert_not_reached();
@@ -4459,6 +4498,14 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     case INDEX_op_qemu_ld_v128:
         tcg_out_qemu_ld_v128(s, a0, a1, a2);
         break;
+    case INDEX_op_qemu_ld_fp:
+        /* LDR St/Dt; the slow path moves the helper's x0 there */
+        tgen_qemu_ld(s, type, a0, a1, a2);
+        break;
+    case INDEX_op_qemu_st_fp:
+        /* STR St/Dt; the slow path passes the bits in a GPR */
+        tgen_qemu_st(s, type, a0, a1, a2);
+        break;
 
     case INDEX_op_add_zext_shl:
         /* add a0, a1, w(a2), uxtw #a3 */
@@ -5153,6 +5200,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I2(r, r, r);
     case INDEX_op_qemu_ld_v128:
         return C_O1_I1(w, r);
+    case INDEX_op_qemu_ld_fp:
+        return C_O1_I1(W, r);
+    case INDEX_op_qemu_st_fp:
+        return C_O0_I2(W, r);
 
     /* Scalar floating-point ops */
     case INDEX_op_flcr:

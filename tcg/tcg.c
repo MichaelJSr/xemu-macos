@@ -2862,6 +2862,10 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_movcond_f64;
     case INDEX_op_qemu_ld_v128:
         return TCG_TARGET_HAS_qemu_ld_v128 && type == TCG_TYPE_V128;
+    case INDEX_op_qemu_ld_fp:
+    case INDEX_op_qemu_st_fp:
+        return TCG_TARGET_HAS_qemu_ldst_fp &&
+               (type == TCG_TYPE_F32 || type == TCG_TYPE_F64);
 
     default:
         if (op < INDEX_op_last_generic) {
@@ -3351,6 +3355,8 @@ void tcg_dump_ops(TCGContext *s, FILE *f, bool have_prefs)
             case INDEX_op_qemu_st:
             case INDEX_op_qemu_ld2:
             case INDEX_op_qemu_st2:
+            case INDEX_op_qemu_ld_fp:
+            case INDEX_op_qemu_st_fp:
                 {
                     const char *s_al, *s_tlb, *s_op, *s_at;
                     MemOpIdx oi = op->args[k++];
@@ -5538,12 +5544,11 @@ static void tcg_reg_alloc_mov(TCGContext *s, const TCGOp *op)
 /*
  * xemu: st_f64_slow records where its value lives; the guest access that
  * follows (nothing comes between) stores it on its slow path. Nothing is
- * emitted here, and nothing the access emits before its slow-path branch
- * writes an FP register, so a register recorded here still holds the
- * value there even if the temp dies here. The access does allocate
- * integer registers (a moved input, a materialized constant), so an
- * integer value's register is reserved until the access is emitted
- * (tcg_slow_st_release).
+ * emitted here, but the access allocates registers before its slow-path
+ * branch (a moved input, a materialized constant, the F32/F64 data of
+ * qemu_ld_fp/qemu_st_fp), so the value's register is reserved until the
+ * access is emitted (tcg_slow_st_release): it still holds the value
+ * there even if the temp dies here.
  */
 static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
 {
@@ -5567,8 +5572,7 @@ static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
          * prefers the global over its copies, so an x87 FDP often is a
          * pinned guest register.
          */
-        if (e->type != TCG_TYPE_F64 &&
-            !tcg_regset_test_reg(s->reserved_regs, ts->reg)) {
+        if (!tcg_regset_test_reg(s->reserved_regs, ts->reg)) {
             tcg_regset_set_reg(s->slow_st_held, ts->reg);
             tcg_regset_set_reg(s->reserved_regs, ts->reg);
         }
@@ -7574,7 +7578,8 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
         if (unlikely(s->nb_slow_st) && opc != INDEX_op_st_f64_slow &&
             opc != INDEX_op_qemu_ld && opc != INDEX_op_qemu_st &&
             opc != INDEX_op_qemu_ld2 && opc != INDEX_op_qemu_st2 &&
-            opc != INDEX_op_qemu_ld_v128) {
+            opc != INDEX_op_qemu_ld_v128 && opc != INDEX_op_qemu_ld_fp &&
+            opc != INDEX_op_qemu_st_fp) {
             tcg_out_slow_st_now(s);
         }
 

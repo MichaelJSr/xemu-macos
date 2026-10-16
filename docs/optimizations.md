@@ -536,6 +536,38 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   ret-memo commit, 4 pairs each at load 26-29: heavy-f1 Minsns/frame
   −1.46% (4/4), stream-e2 −1.69% (4/4); Mcycles/frame within that
   run's load noise (+2.9% and −1.9%, 3/4 and 2/4).
+- **x87 m32fp/m64fp operands go straight between the guest page and an
+  FP register (2026-10-16).** The write-through path loaded a float32
+  operand into a GPR (LDR W), moved it to an FP register (FMOV S, W) and
+  widened it; `fst`/`fstp` m32fp narrowed, moved back (FMOV W, S) and
+  stored, and m64fp stores went FMOV X, D, STR X. Heavy-f1 runs ~300K
+  `fld` m32 and ~160K `fst`/`fstp` m32 per frame, and the round-4
+  profile put GPR↔FP moves at 0.84M insns per frame (1.1% of the det
+  vCPU's cycles). New `qemu_ld_fp`/`qemu_st_fp` ops take an F32/F64
+  temp (`tcg_gen_qemu_ld_f32` and friends; aarch64: LDR/STR S or D on
+  the guest page, other hosts an integer access and a move) for `fld`,
+  the m32 arithmetic operands and `fst`/`fstp` m32fp/m64fp. They share
+  TLB walks as qemu_ld/st do; the load slow path moves the helper's x0
+  into the V register, the store slow path hands the bits to the helper
+  through TMP1, and the sub-page prefilter stores from the V register.
+  Because the access now allocates V registers before its slow-path
+  branch, every `st_f64_slow` register, not only the integer ones, stays
+  reserved until the access is emitted. m64fp loads keep the integer
+  SNaN quieting (FMAX would quiet in the FP domain, but bit-exactly only
+  under FPCR.DN = FZ = 0); `fild`/`fist` gain nothing (SCVTF and FCVTZS
+  take GPRs). Cross-binary det A/B against 9a8cb87de9 (both on the
+  committed PGO profile, whose only new mismatch is
+  `tcg_out_qemu_st_direct`), each arm first in half the pairs, load
+  26-85: heavy-f1 1200 f Minsns/frame −1.28% (16/16), Mcycles/frame
+  −2.1% median, −2.7% mean (12/16); stream-e2 600 f Minsns/frame −1.1%
+  (27/28), Mcycles/frame flat within its ±8% run noise (14/28, median
+  +0.3%). Base-first-only sessions had read heavy-f1 Mcycles −5.8% and
+  −5.2%; the reversed order did not reproduce that size. Goldens exact
+  on release and debug-TCG (f300, stream-e2, cold boot), x87 refuter
+  clean, also across 20K mid-block exits forced by a gdb access
+  watchpoint on a hot stack page (at least 1,250 of them right after an
+  m32fp load, store or arithmetic operand); sub-page refuter
+  `VIOLATIONS=0` on heavy-f1 and stream-e2.
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
@@ -3382,6 +3414,8 @@ counter).
 
 | Vector | Measured reality / why closed |
 |---|---|
+| x87 residue after the FP-register accesses (2026-10-16) | Helper census, det heavy-f1 per frame: ~6.3K x87 helper calls, 1.0-1.7% of vCPU samples (fwait 3.2K, fxam 760, fsin/fcos ~500 each, fpatan 413, fild m64 400, fprem 381); no PC=single blocks; 15 fucom* fallbacks. fwait as a no-op, measured by deleting it: heavy-f1 Minsns/frame −0.13% (8/8), Mcycles −0.50% (5/8); stream-e2 nothing. Pinning the doubles in d8-d15 across TBs, bounded by duplicating the work it removes (192K flush stores, 40K ld80d reloads per frame) and adding the spills it needs, within one process on P-core cycles: net +1.15% [0.24, 1.94], P(≥1%) 0.60, realistic 0.2-0.8%, under the 1% bar for weeks of backend work. Not committed; reopen with a removal-direction prototype measuring ≥1% |
+| `preserve_most` for the flag helpers (2026-10-16) | `cc_compute_all` and `cc_compute_c` (~30K calls per heavy-f1 frame, all from TB code) were built with clang's `preserve_most` on aarch64 hosts, which also saves x9-x15, and their calls flagged so TCG stored and reloaded only EAX's x8 around them (STR + LDR where four STP and four LDP were); the attribute and the flag came from one test in `exec/helper-head.h.inc` (aarch64, clang, not Windows), and a `--debug` build checked that x9-x15 survived each call. On top of the m32fp/m64fp FP-register accesses: Minsns/frame −0.26% heavy-f1 1200 f, −0.27..−0.37% stream-e2 600 f (16/16 pairs), but Mcycles/frame better in only 4/8 heavy-f1 and 5/8 stream-e2 pairs (load 41-53), short of the 3/4 gate. Only leaf helpers qualify: `cc_compute_nz` asserts, so its `preserve_most` prologue saved all seven registers on every entry. Not committed; reopen if more guest state moves into caller-saved registers |
 | xpage backstop severing only the cross-page jumps (2026-10-16) | The walk resets every jump into a registered dest; same-page jumps (source not an emitter, its first physical page the dest's) need no sever, as the same jumps into unregistered dests show. `XEMU_XPAGE_PROF`'s census on a normal-mode stream-e2 walk (stream-e2, 32 s window, load 40-60): 894-916 walks reset 726-749k jumps, 5.9% same-page, 5.2% from an emitter onto its own page (the emitter flag is per TB, so per-slot bits could keep at most these), 89% onto another physical page. Every registration came from an emitter (`reg-phys-only=0`). The cut keeps at most ~11% of the ~790k link patches a walk run pays, below the 50% bar. Reopen only with a backstop that keeps the cross-page chains whose target page still maps where it did |
 | PFIFO spin before parking (2026-10-16) | Normal mode parked PFIFO ~10k times/s on heavy-f1/W2, most parks under 25 µs, each ended by a kernel broadcast from the vCPU and a 5-20 µs wakeup. The trial: before the untimed wait, drop `pfifo.lock` and poll `doorbell`/`fifo_kick`/`exiting` every 250 ns for up to 30 µs with `parked` false. Mechanism held (xwx interposer: parks −92..−95%, vCPU `pthread_cond_broadcast` time −83..−87%), fps did not: `bench-abx`, same binary, spin off vs on, heavy-f1 7 pairs over two sessions 2+/5− (54.25→53.94 at load 10-44; 54.19→54.26 at load 7-20, below the cap, so vCPU-bound), W2 6 pairs 56.76→59.06 (one dipped baseline) and 60.12→60.11 at the cap; process CPU +1-6% of a core. Polling with only an `isb` between reads lost fps outright (the poll steals the flags' line from the vCPU's doorbell barrier). Not committed |
 | APU lock hand-off to a waiting vCPU between frames (2026-10-16) | With the frame thread at user-interactive QoS the vCPU still waited on `d->lock` for 0.73-0.91% of wall (load 11-16), two thirds of it in ~450 µs waits for the rest of an 8-frame EP burst. The trial: `vp_write` trylocks and counts itself in `fe_waiters`; after each `se_frame` the thread unlocks and waits until the waiter is through and the guest's method writes pause (10 µs quiet, 100 µs cap). xwx, 4 runs: 0.73→0.72, 0.91→0.61, 0.84→0.55, 0.86→0.45% (mean −30%): the long waits went, but each later write in a run waited for the next frame instead (40-160 µs waits up from ~150 to ~1800 per ring). Not committed: ~0.25% of vCPU wall for a timing change. Splitting `d->lock` across VP/DSP is out (`fe_method` writes outbuf/SGE state the DSP DMA reads) |

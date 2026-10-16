@@ -337,6 +337,11 @@ void tcg_gen_qemu_ld_i128_chk(TCGv_i128, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_ld_env_i128_chk(intptr_t, TCGTemp *, TCGArg, MemOp,
                                   TCGType);
 void tcg_gen_qemu_st_i128_chk(TCGv_i128, TCGTemp *, TCGArg, MemOp, TCGType);
+#if defined(XBOX)
+void tcg_gen_qemu_ld_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
+void tcg_gen_qemu_st_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
+void tcg_gen_qemu_st_f64_chk(TCGv_f64, TCGTemp *, TCGArg, MemOp, TCGType);
+#endif
 
 /* Atomic ops */
 

@@ -3678,6 +3678,30 @@ static TCGv_f64 x87_wt_i32_to_f64(TCGv_i32 arg)
     tcg_gen_cvt32i_f64(d, arg);
     return d;
 }
+
+/*
+ * The m32fp operand at A0 as a double, as x87_wt_f32_to_f64. The guest
+ * load goes straight into an FP register (qemu_ld_fp: LDR St), not
+ * through a GPR and an FMOV.
+ */
+static TCGv_f64 x87_wt_ld_f32(DisasContext *s)
+{
+    TCGv_f32 t = tcg_temp_new_f32();
+    TCGv_f64 d = tcg_temp_new_f64();
+
+    tcg_gen_qemu_ld_f32(t, s->A0, s->mem_index, MO_LEUL);
+    tcg_gen_cvt32f_f64(d, t);
+    return d;
+}
+
+/* fst/fstp m32fp: gen_fsts_ST0's float, stored from its FP register. */
+static void x87_wt_st_f32(DisasContext *s)
+{
+    TCGv_f32 t = tcg_temp_new_f32();
+
+    tcg_gen_cvt64f_f32(t, x87_wt_get_st(s, 0));
+    tcg_gen_qemu_st_f32(t, s->A0, s->mem_index, MO_LEUL);
+}
 #endif
 
 static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
@@ -5600,6 +5624,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
                 switch (op >> 4) {
                 case 0:
+#if defined(XBOX)
+                    if (x87_wt(s)) {
+                        s->wt_ft0 = x87_wt_ld_f32(s);
+                        break;
+                    }
+#endif
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     gen_flds_FT0(s, s->tmp2_i32);
@@ -5639,6 +5669,15 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             case 0:
                 switch (op >> 4) {
                 case 0:
+#if defined(XBOX)
+                    if (x87_wt(s)) {
+                        TCGv_f64 d = x87_wt_ld_f32(s);
+
+                        gen_fpush(s);
+                        x87_wt_set_st(s, 0, d);
+                        break;
+                    }
+#endif
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     gen_flds_ST0(s, s->tmp2_i32);
@@ -5686,6 +5725,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             default:
                 switch (op >> 4) {
                 case 0:
+#if defined(XBOX)
+                    if (x87_wt(s)) {
+                        x87_wt_st_f32(s);
+                        break;
+                    }
+#endif
                     gen_fsts_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
@@ -5696,6 +5741,14 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                                         s->mem_index, MO_LEUL);
                     break;
                 case 2:
+#if defined(XBOX)
+                    if (x87_wt(s)) {
+                        /* The double's bits, from its FP register */
+                        tcg_gen_qemu_st_f64(x87_wt_get_st(s, 0), s->A0,
+                                            s->mem_index, MO_LEUQ);
+                        break;
+                    }
+#endif
                     gen_fstl_ST0(s, s->tmp1_i64);
                     tcg_gen_qemu_st_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);

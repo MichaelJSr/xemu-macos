@@ -445,6 +445,74 @@ void tcg_gen_qemu_st_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
     tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
 }
 
+#if defined(XBOX)
+/*
+ * xemu: a 4- or 8-byte guest load into an F32/F64 temp, or a store from
+ * one. With qemu_ld_fp/qemu_st_fp (aarch64: LDR/STR St or Dt on the
+ * guest page) the bits never pass through a GPR, where qemu_ld/st would
+ * need an FMOV each way (i386's x87 m32fp loads, m32fp/m64fp stores; an
+ * m64fp load quiets SNaNs on the integer bits). Accesses in host byte
+ * order without plugin instrumentation only; otherwise an integer access
+ * and a move.
+ */
+static bool tcg_qemu_fp_direct(MemOp memop)
+{
+    return TCG_TARGET_HAS_qemu_ldst_fp && TCG_TARGET_REG_BITS == 64 &&
+#ifdef CONFIG_PLUGIN
+           tcg_ctx->plugin_insn == NULL &&
+#endif
+           !(memop & MO_BSWAP);
+}
+
+static void tcg_gen_qemu_ldst_fp(TCGOpcode opc, TCGType type, TCGTemp *val,
+                                 TCGTemp *addr, TCGArg idx, MemOp memop)
+{
+    bool st = opc == INDEX_op_qemu_st_fp;
+    TCGTemp *addr_new;
+
+    tcg_gen_req_mo(st ? TCG_MO_LD_ST | TCG_MO_ST_ST
+                      : TCG_MO_LD_LD | TCG_MO_ST_LD);
+    memop = tcg_canonicalize_memop(memop, type == TCG_TYPE_F64, st);
+    addr_new = tci_extend_addr(addr);
+    gen_ldst1(opc, type, val, addr_new, make_memop_idx(memop, idx));
+    maybe_free_addr(addr, addr_new);
+}
+
+void tcg_gen_qemu_ld_f32_chk(TCGv_f32 val, TCGTemp *addr, TCGArg idx,
+                             MemOp memop, TCGType addr_type)
+{
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert((memop & MO_SSIZE) == MO_UL);
+    if (tcg_qemu_fp_direct(memop)) {
+        tcg_gen_qemu_ldst_fp(INDEX_op_qemu_ld_fp, TCG_TYPE_F32,
+                             tcgv_f32_temp(val), addr, idx, memop);
+    } else {
+        TCGv_i32 t = tcg_temp_ebb_new_i32();
+
+        tcg_gen_qemu_ld_i32_int(t, addr, idx, memop);
+        tcg_gen_mov32i_f32(val, t);
+        tcg_temp_free_i32(t);
+    }
+}
+
+void tcg_gen_qemu_st_f32_chk(TCGv_f32 val, TCGTemp *addr, TCGArg idx,
+                             MemOp memop, TCGType addr_type)
+{
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert((memop & MO_SIZE) == MO_32);
+    if (tcg_qemu_fp_direct(memop)) {
+        tcg_gen_qemu_ldst_fp(INDEX_op_qemu_st_fp, TCG_TYPE_F32,
+                             tcgv_f32_temp(val), addr, idx, memop);
+    } else {
+        TCGv_i32 t = tcg_temp_ebb_new_i32();
+
+        tcg_gen_mov32f_i32(t, val);
+        tcg_gen_qemu_st_i32_int(t, addr, idx, memop);
+        tcg_temp_free_i32(t);
+    }
+}
+#endif
+
 static void tcg_gen_qemu_ld_i64_int(TCGv_i64 val, TCGTemp *addr,
                                     TCGArg idx, MemOp memop)
 {
@@ -564,6 +632,26 @@ void tcg_gen_qemu_st_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
     tcg_debug_assert((memop & MO_SIZE) <= MO_64);
     tcg_gen_qemu_st_i64_int(val, addr, idx, memop);
 }
+
+#if defined(XBOX)
+/* As tcg_gen_qemu_st_f32_chk, for 8 bytes. */
+void tcg_gen_qemu_st_f64_chk(TCGv_f64 val, TCGTemp *addr, TCGArg idx,
+                             MemOp memop, TCGType addr_type)
+{
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert((memop & MO_SIZE) == MO_64);
+    if (tcg_qemu_fp_direct(memop)) {
+        tcg_gen_qemu_ldst_fp(INDEX_op_qemu_st_fp, TCG_TYPE_F64,
+                             tcgv_f64_temp(val), addr, idx, memop);
+    } else {
+        TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+        tcg_gen_mov64f_i64(t, val);
+        tcg_gen_qemu_st_i64_int(t, addr, idx, memop);
+        tcg_temp_free_i64(t);
+    }
+}
+#endif
 
 /*
  * Return true if @mop, without knowledge of the pointer alignment,

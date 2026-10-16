@@ -132,6 +132,11 @@ DEF(qemu_st2, 0, 3, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT
 /* xemu: a 16-byte guest load into a V128 temp (args[2] the MemOpIdx) */
 DEF(qemu_ld_v128, 1, 1, 1,
     TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
+/* xemu: a 4/8-byte guest load into an F32/F64 temp, and a store from one */
+DEF(qemu_ld_fp, 1, 1, 1,
+    TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_FP)
+DEF(qemu_st_fp, 0, 2, 1,
+    TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_FP)
 
 /* Host floating point support. */
 DEF(flcr, 0, 1, 0, TCG_OPF_FP)
