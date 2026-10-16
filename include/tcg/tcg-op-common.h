@@ -84,6 +84,7 @@ void tcg_gen_xemu_goto_ptr(TCGv_ptr ptr);
 void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32, intptr_t jc_env_offset,
                                         uint64_t cs_base, TCGv_i32 flags,
                                         uint32_t cflags);
+void tcg_gen_xemu_guest_mo(bool store);
 #endif
 
 void tcg_gen_plugin_cb(unsigned from);

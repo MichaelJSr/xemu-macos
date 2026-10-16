@@ -219,6 +219,19 @@ static void tcg_gen_req_mo(TCGBar type)
     }
 }
 
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+/*
+ * xemu: the barrier a guest load (@store false) or store carries in this
+ * mode, for front-end host accesses that stand in for guest ones on RAM
+ * already probed inline (i386 short REP MOVS/STOS).
+ */
+void tcg_gen_xemu_guest_mo(bool store)
+{
+    tcg_gen_req_mo(store ? TCG_MO_LD_ST | TCG_MO_ST_ST
+                         : TCG_MO_LD_LD | TCG_MO_ST_LD);
+}
+#endif
+
 static TCGTemp *tci_extend_addr(TCGTemp *addr)
 {
 #ifdef CONFIG_TCG_INTERPRETER

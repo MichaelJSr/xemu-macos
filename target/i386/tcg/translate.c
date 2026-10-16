@@ -1596,11 +1596,147 @@ static void gen_outs(DisasContext *s, MemOp ot, TCGv dshift)
 
 #if defined(XBOX)
 /*
- * xemu: shortest REP MOVS/STOS (in elements) handed to helper_xemu_rep_bulk;
- * below it the call costs more host instructions than the loop (heavy-f1:
- * 4, 12 and 32 all save less than 8).
+ * xemu: shortest REP MOVS/STOS (in elements) handed to helper_xemu_rep_bulk
+ * when the inline path below can't take it; below it the call costs more
+ * host instructions than the loop (heavy-f1: 4, 12 and 32 all save less
+ * than 8).
  */
 #define REP_BULK_MIN 8
+
+/*
+ * xemu: runs of 1 to REP_INLINE_MAX elements (3 dwords on average at the
+ * hottest heavy-f1 site, mostly 6-16 at the rest) copy or fill inline as
+ * plain host loads and stores once both ranges pass the softmmu fast
+ * path's own TLB compare in one piece. The loop pays two TLB lookups and
+ * a pass through its label (registers reloaded and spilled) per element,
+ * the helper a call and two C probes per run. Longer runs, and runs the
+ * probes refuse, take the helper and the loop as before. Little-endian
+ * hosts that take unaligned plain loads and stores, 32-bit guests only.
+ */
+#if !defined(TARGET_X86_64) && !HOST_BIG_ENDIAN && \
+    (defined(__aarch64__) || defined(__x86_64__))
+#define REP_INLINE_MAX 31
+#endif
+#endif
+
+#ifdef REP_INLINE_MAX
+/*
+ * Inline TLB probe of [addr, addr + last] for an access of @type, exactly
+ * the qemu_ld/st fast path's compare (also with the last byte, so one
+ * page): plain RAM with that access allowed, not MMIO, watched or clean.
+ * ORs the mismatch into @miss (0 on a hit) and returns the host address.
+ */
+static TCGv_ptr gen_rep_probe(TCGv addr, TCGv last, TCGv mask,
+                              TCGv_ptr table, MMUAccessType type, TCGv miss)
+{
+    TCGv_ptr ent = tcg_temp_new_ptr();
+    TCGv_ptr host = tcg_temp_new_ptr();
+    TCGv t = tcg_temp_new();
+    TCGv cmp = tcg_temp_new();
+
+    tcg_gen_shri_tl(t, addr, TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+    tcg_gen_and_tl(t, t, mask);
+    tcg_gen_add_zext_shl_ptr(ent, table, t, 0);
+    /* The low half of the comparator, as the backends compare it. */
+    tcg_gen_ld_tl(cmp, ent, type == MMU_DATA_STORE
+                            ? offsetof(CPUTLBEntry, addr_write)
+                            : offsetof(CPUTLBEntry, addr_read));
+    tcg_gen_ld_ptr(host, ent, offsetof(CPUTLBEntry, addend));
+    tcg_gen_add_tl(t, addr, last);
+    tcg_gen_andi_tl(t, t, TARGET_PAGE_MASK);
+    tcg_gen_xor_tl(t, t, cmp);
+    tcg_gen_or_tl(miss, miss, t);
+    tcg_gen_add_zext_shl_ptr(host, host, addr, 0);
+    return host;
+}
+
+/*
+ * Run a REP MOVS/STOS of ECX <= REP_INLINE_MAX elements with DF=0 inline
+ * and branch to @done with ECX/ESI/EDI as the loop leaves them, or branch
+ * to @miss with nothing done. Nothing here can fault; the elements go in
+ * the loop's order (load, store, ascending, so a destination inside the
+ * source reads earlier stores), each host access carries the barrier its
+ * guest access would, and the loop would also have run them all in this
+ * TB pass, so icount is unchanged. A device thread re-arming TLB_NOTDIRTY
+ * after the compare races at most 31 stores, as it races the fast path's
+ * one store; its clear-then-read can't fit in that window (the bulk
+ * helper's page-long one re-dirties instead).
+ */
+static void gen_rep_short(DisasContext *s, MemOp ot, bool stos, TCGv dshift,
+                          TCGLabel *miss, TCGLabel *done)
+{
+    int fast_ofs = offsetof(CPUNegativeOffsetState,
+                            tlb.f[mmuidx_to_fast_index(s->mem_index)]) -
+                   sizeof(CPUNegativeOffsetState);
+    TCGv n1 = tcg_temp_new();
+    TCGv bytes = tcg_temp_new();
+    TCGv last = tcg_temp_new();
+    TCGv mask = tcg_temp_new();
+    TCGv bad = tcg_temp_new();
+    TCGv_ptr table = tcg_temp_new_ptr();
+    TCGv_ptr hs = NULL, hd;
+    TCGv val = NULL;
+
+    tcg_gen_brcondi_tl(TCG_COND_EQ, cpu_regs[R_ECX], 0, done);
+    tcg_gen_brcondi_tl(TCG_COND_LT, dshift, 0, miss);
+
+    tcg_gen_subi_tl(n1, cpu_regs[R_ECX], 1);
+    tcg_gen_shli_tl(bytes, cpu_regs[R_ECX], ot);
+    tcg_gen_subi_tl(last, bytes, 1);
+    /* The mask is (entries - 1) << CPU_TLB_ENTRY_BITS: its low half. */
+    tcg_gen_ld_tl(mask, tcg_env, fast_ofs + offsetof(CPUTLBDescFast, mask));
+    tcg_gen_ld_ptr(table, tcg_env, fast_ofs + offsetof(CPUTLBDescFast, table));
+    tcg_gen_movi_tl(bad, 0);
+    if (!stos) {
+        hs = gen_rep_probe(cpu_regs[R_ESI], last, mask, table,
+                           MMU_DATA_LOAD, bad);
+    }
+    hd = gen_rep_probe(cpu_regs[R_EDI], last, mask, table,
+                       MMU_DATA_STORE, bad);
+    tcg_gen_brcondi_tl(TCG_COND_NE, bad, 0, miss);
+
+    if (stos) {
+        val = cpu_regs[R_EAX];
+    } else {
+        gen_op_add_reg(s, MO_32, R_ESI, bytes);
+    }
+    gen_op_add_reg(s, MO_32, R_EDI, bytes);
+    tcg_gen_movi_tl(cpu_regs[R_ECX], 0);
+
+    for (int i = 0; i < REP_INLINE_MAX; i++) {
+        if (i) {
+            tcg_gen_brcondi_tl(TCG_COND_EQ, n1, i - 1, done);
+        }
+        if (!stos) {
+            val = tcg_temp_new();
+            tcg_gen_xemu_guest_mo(false);
+            switch (ot) {
+            case MO_8:
+                tcg_gen_ld8u_tl(val, hs, i);
+                break;
+            case MO_16:
+                tcg_gen_ld16u_tl(val, hs, i << 1);
+                break;
+            default:
+                tcg_gen_ld_tl(val, hs, i << 2);
+                break;
+            }
+        }
+        tcg_gen_xemu_guest_mo(true);
+        switch (ot) {
+        case MO_8:
+            tcg_gen_st8_tl(val, hd, i);
+            break;
+        case MO_16:
+            tcg_gen_st16_tl(val, hd, i << 1);
+            break;
+        default:
+            tcg_gen_st_tl(val, hd, i << 2);
+            break;
+        }
+    }
+    tcg_gen_br(done);
+}
 #endif
 
 static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
@@ -1659,16 +1795,29 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
 
 #if defined(XBOX)
     /*
-     * Copy or fill what it can as host memmove/memset first. It stops where
-     * the loop below must take over, with ECX/ESI/EDI as the loop would
-     * have left them there, and never past one of the loop's TB exits.
+     * Copy or fill a short run inline, else what the helper can as host
+     * memmove/memset first. Both stop where the loop below must take over,
+     * with ECX/ESI/EDI as the loop would have left them there, and never
+     * past one of the loop's TB exits.
      */
     if (can_loop && (fn == gen_movs || fn == gen_stos) &&
         s->aflag == MO_32 && !ADDSEG(s) && s->override < 0) {
         TCGLabel *loop_only = gen_new_label();
+        TCGLabel *bulk = gen_new_label();
 
+#ifdef REP_INLINE_MAX
+        if (!s->base.plugin_enabled) {
+            TCGLabel *miss = gen_new_label();
+
+            tcg_gen_brcondi_tl(TCG_COND_GTU, cpu_regs[R_ECX], REP_INLINE_MAX,
+                               bulk);
+            gen_rep_short(s, ot, fn == gen_stos, dshift, miss, done);
+            gen_set_label(miss);
+        }
+#endif
         tcg_gen_brcondi_tl(TCG_COND_LTU, cpu_regs[R_ECX], REP_BULK_MIN,
                            loop_only);
+        gen_set_label(bulk);
         gen_helper_xemu_rep_bulk(tcg_env,
                                  tcg_constant_i32(ot | (fn == gen_stos) << 2 |
                                                   s->mem_index << 3));
