@@ -266,8 +266,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
-/* Called with mmap_lock held for user mode emulation.  */
-TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
@@ -282,7 +281,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 #endif
 
     assert_memory_lock();
-    qemu_thread_jit_write();
 
     phys_pc = get_page_addr_code_hostp(env, s.pc, &host_pc);
 
@@ -619,6 +617,24 @@ recycle_tb:
     }
 #endif
 
+    return tb;
+}
+
+/*
+ * Called with mmap_lock held for user mode emulation.
+ *
+ * A write bracket that closes itself: the vCPU thread stays in execute
+ * mode outside such brackets, so cpu_tb_exec enters a TB without
+ * flipping W^X. A fault that leaves translation by longjmp is closed
+ * by cpu_exec_longjmp_cleanup.
+ */
+TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+{
+    TranslationBlock *tb;
+
+    qemu_thread_jit_write();
+    tb = do_tb_gen_code(cpu, s);
+    qemu_thread_jit_execute();
     return tb;
 }
 

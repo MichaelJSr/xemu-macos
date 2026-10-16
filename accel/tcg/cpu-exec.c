@@ -968,7 +968,13 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
         log_cpu_exec(log_pc(cpu, itb), cpu, itb);
     }
 
-    qemu_thread_jit_execute();
+    /*
+     * No W^X flip here: this thread is in execute mode outside the write
+     * brackets, which close themselves (tb_gen_code, tb_add_jump, the
+     * tb-maint invalidation paths, the DSP JIT; cpu_exec_longjmp_cleanup
+     * for a fault that leaves one by longjmp). A missed bracket wedges
+     * this thread in a fault loop at the next TB entry.
+     */
     ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);
     cpu->neg.can_do_io = true;
     qemu_plugin_disable_mem_helpers(cpu);
@@ -1077,6 +1083,8 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
         bql_unlock();
     }
     assert_no_pages_locked();
+    /* A fault inside tb_gen_code's write bracket lands here. */
+    qemu_thread_jit_execute();
 }
 
 void cpu_exec_step_atomic(CPUState *cpu)
@@ -1199,12 +1207,14 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     }
 #endif
 
+    qemu_thread_jit_execute();
     qemu_log_mask(CPU_LOG_EXEC, "Linking TBs %p index %d -> %p\n",
                   tb->tc.ptr, n, tb_next->tc.ptr);
     return;
 
  out_unlock_next:
     qemu_spin_unlock(&tb_next->jmp_lock);
+    qemu_thread_jit_execute();
 }
 
 static inline bool cpu_handle_halt(CPUState *cpu)
@@ -1686,6 +1696,13 @@ int cpu_exec(CPUState *cpu)
      */
     init_delay_params(&sc, cpu);
 
+    /*
+     * A safety net, once per slice: every write bracket closes itself, so
+     * this only matters for the thread's first slice and for code outside
+     * cpu_exec that opens one and forgets to close it. cpu_tb_exec no
+     * longer flips W^X.
+     */
+    qemu_thread_jit_execute();
     ret = cpu_exec_setjmp(cpu, &sc);
 
     cpu_exec_exit(cpu);

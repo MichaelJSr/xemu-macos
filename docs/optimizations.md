@@ -868,6 +868,42 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   clean was left out: `tlb_set_page_full` tests `physical_memory_is_clean`
   before taking the lock, so an entry can go in writable-clean just after
   a clear, and today's next walk is what re-arms it.
+- **No W^X flip per TB entry (Apple, both modes, 2026-10-15).**
+  `cpu_tb_exec` called `pthread_jit_write_protect_np(true)` before every
+  TB entry: 37 instructions and ~60 cycles even when the thread was
+  already in execute mode (a tight-loop microbenchmark). Deterministic
+  mode enters TBs ~1.3k times per heavy-f1 frame and ~5k times per
+  cold-boot frame (icount steps, loop dispatches; from the instruction
+  deltas), so the flip predicts ~1.8% of a ~17 Mcycle cold-boot frame
+  but only ~0.4% of a ~22 Mcycle heavy-f1 frame (those frame costs and
+  every figure in this bullet are from the misc lane: 22329bd8bc plus
+  the MMX commits and the icache batching, before the pinned registers
+  and TLB memo). PMI's 1.66% on heavy-f1 and 2.1% on stream-e2
+  overstated it: the A/B below finds at most ~0.25% there, so those
+  shares were most likely skid onto the flip's ISB, the trap the
+  2026-07 caching row describes; only the cold boot's 2.6% roughly
+  matches its A/B. The vCPU thread now stays in
+  execute mode outside write brackets that close themselves:
+  `tb_gen_code` is a write / execute wrapper around `do_tb_gen_code`,
+  `tb_add_jump` closes on both exits, and `cpu_exec_longjmp_cleanup`
+  flips back for a fault that leaves translation by longjmp (the path
+  that broke the 2026-07 TLS cache). The tb-maint paths and the DSP JIT
+  already closed theirs (`tb_phys_invalidate` too, which a watchpoint
+  hit, gdbstub or guest DR7, reaches from a helper: the gdb watchpoint
+  fix bracketed it), so the det APU tick's own flip went too;
+  `cpu_exec` keeps one flip per slice as a safety net for work outside
+  `cpu_exec` and the thread's first slice. No thread-local state. A
+  stress build that longjmps out of every 5th or 7th translation keeps
+  every golden; without the cleanup's flip it wedges at the first
+  longjmp, the vCPU spinning at a code-buffer address with
+  no crash report. Same-binary alternate-chunk A/B (the per-entry flip
+  toggled every 20 frames, opposite phases paired chunk by chunk, load
+  16-33): cold boot −2.07% Mcycles/frame (se 0.26); heavy-f1 −0.24%
+  (se 0.20) and stream-e2 −0.24% (se 0.23), both unresolved;
+  Minsns/frame −0.31%, −0.05% and −0.07%. Cross-binary paired medians
+  at load 14-33: cold boot −1.1% (11/16), heavy-f1 −0.9% (14/20),
+  stream-e2 +0.1% (7/14), all inside the load noise. The gain is a cold
+  boot one; heavy-f1 and stream-e2 gain ≤0.25%.
 
 ### Vulkan renderer (pgraph/vk)
 
@@ -2623,7 +2659,7 @@ Lessons worth preserving so they aren't re-attempted.
 | Ret-memo 13-bit index (`XEMU_RETC_BITS=13`, 2026-07-18) | Doubling the eip→TB memo (4096→8192 entries, 128→256 KiB) predicted +0.3-0.5 fps from fewer hash collisions; measured **−0.23 fps, 4/4 pairs negative** (scene identity clean, arm (b)-on shipping context). Same mechanism as the jump-cache 12→16-bit kill: the recurring ret set already fits at 12 bits, so the larger table pays cache footprint on every probe to avoid collisions that were mostly one-shot. "Recurring" is bounded by flushes: every full guest TLB flush (~190/s post-wave, nearly all from surface callbacks) wipes the memo through `tcg_flush_jmp_cache`, so what fits is the ret set seen between two full flushes; a per-page flush (INVLPG) drops only that page's entries, from the jump cache and, since 2026-10-10, from the memo. The A/B ran one binary with the table sized for 13 bits, so both arms carried 256 KiB and a 256 KiB memset per flush (the 12-bit arm addressed only the first half); that doubling of the default path was never measured against the 128 KiB build. **Knob code removed 2026-10-10**: the width is the compile-time `XEMU_RETC_BITS` (12, `target/i386/cpu.h`), the table and its per-flush memset are back to 128 KiB, and generated code is unchanged (same shift immediate). A re-test is a two-binary `scripts/bench-abx.sh` interleave, worth running only if the ranged-flush FIXME stops the per-flush wipe and a census shows ≥ 1M collision fills/s. Neither a memo hit nor a jump-cache hit checks the physical page; until 2026-10-10 INVLPG cleared the jump cache per page but never the memo (fixed then: see the near-return memo bullet under CPU / JIT) |
 | TB byte-range invalidation filter (`XEMU_TB_RANGE_INV`, 2026-07-11) | `XEMU_INV_PROF` measured 100% of TB invalidations as data-write false sharing (0 true SMC, 100% recycle-hit) — so re-applying upstream's overlap filter looked free. Counter A/B: invalidations 338k → 675 (works) but notdirty traps **25.2×** (198k → 4.98M, per-run totals) + 46M range scans — whole-page invalidation is what empties the page and fires `tlb_unprotect_code`, making subsequent data writes free. Base xemu dropped the check in `703566ce33` with no rationale recorded; `c1e4e87f5f` added the invalidated-TB recycle cache 20 days later, which suggests a performance choice. Killed on that trap proxy before any fps A/B, and the proxy did not hold up: the Gate-0 timed run measured invalidating traps 190k → 1.56M (9.3× per second) and total `notdirty_write` calls only 1.89×, a +0.7% vCPU body cost that came entirely from the O(N) range scan (archaeology 1.23 lesson 1). Never fps-measured; superseded the same day by sub-page dirty tracking, whose arm (a) is this filter with an O(1) bitmap consult in place of the scan (default on since 2026-07-11; arm (b) since 2026-07-18). The knob shipped dark until its code was removed on 2026-10-10; the `(b)`/`(b')` `XEMU_INV_PROF` counters that measured it remain |
 | L2 victim jump-cache (2026-07-05) | 64k-entry victim tier probed on L1 miss looked capacity-shaped (410k TBs vs 4096 entries) — but live hit rate measured **11.2%**: residual misses are one-shot/cold pcs, not a recurring set. Ceiling ~0.1 fps; instrument-killed without an fps A/B. Measure the miss stream's *shape* (recurrence), not its volume, before building any cache tier |
-| JIT write-protect flip caching (2026-07-05) | Sampling attributed 9.7% of the vCPU thread to per-TB-entry `pthread_jit_write_protect_np`; a thread-local skip of redundant flips measured **parity** (6 pairs, −0.10 mean). The 9.7% was `thread_suspend`-sampling skid onto barrier instructions — discount barrier-heavy symbols in suspend-based profiles |
+| JIT write-protect flip caching (2026-07-05) | Sampling attributed 9.7% of the vCPU thread to per-TB-entry `pthread_jit_write_protect_np`; a thread-local skip of redundant flips measured **parity** (6 pairs, −0.10 mean). The 9.7% was `thread_suspend`-sampling skid onto barrier instructions — discount barrier-heavy symbols in suspend-based profiles. **Reopened and shipped 2026-10-15** (CPU / JIT, No W^X flip per TB entry): the deterministic cold boot enters TBs ~5k times per frame, and self-closing brackets with no cached state removed the flip there for −2.07% Mcycles/frame (misc lane, 22329bd8bc). heavy-f1 and stream-e2 gained ≤0.25% (unresolved) although PMI had put the flip at 1.7-2.1% of their vCPU: PMI skids onto the ISB too, so check a barrier-heavy symbol's share against entries × cost before trusting it |
 | Per-depth return-address ring (2026-07-05) | Classic shadow stack: eip prediction paired at 99.6%, but per-depth slots are shared by every same-depth call site, so TB fills ran 2.6× hits; a 512-deep ring changed nothing (a key problem, not a depth problem). Superseded same day by the eip-keyed ret-target memo: the ret target is already in `env->eip` at dispatch, so depth-shaped state adds nothing a target-keyed cache doesn't |
 | Vertex copy-on-conflict transient remap (`XEMU_VTX_TRANSIENT`, 2026-07-05) | Replace the ~6/flip conflict finishes with per-slot transient copies + remapped draw bindings. Faithfully implemented; **−2.09 fps, 6/6 pairs negative**: the title rewrites broad vertex ranges every frame, so the 64-entry/2 MiB table overflowed every frame (each overflow an all-slot drain, heavier than the waits it replaced) while the remap search ran 227 times/flip. The targeted submitted-slot wait remains the shipped design |
 | TB jump-cache enlargement (12→16 bits, 2026-07-05) | 93.4% hit at 15.8M lookups/s made capacity misses look like free money; measured **−1.10 fps, 4/6 pairs negative** — the 4096-entry (64 KiB) cache is L1-resident, and a 1 MiB cache pays a few ns on each of 14.8M *hits*/s to avoid ~500k walks. Target lookup *volume*, not cache geometry |

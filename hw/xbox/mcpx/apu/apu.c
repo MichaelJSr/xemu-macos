@@ -330,9 +330,6 @@ static void mcpx_apu_det_tick(void *opaque)
     int64_t next = apu_det_next(now);
 
     assert(bql_locked());
-    /* The DSP JIT now runs on the vCPU thread, which TCG may have left
-     * in write mode. */
-    qemu_thread_jit_execute();
     /*
      * TCG leaves the guest's x87 rounding mode in the host FPCR and
      * re-programs it lazily, so mix and resample with the default FP
