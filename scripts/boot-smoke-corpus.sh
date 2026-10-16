@@ -29,7 +29,7 @@ source $ROOT/scripts/xemu-lease.zsh
 APP_SRC=$ROOT/dist/xemu.app
 CONFIG_SRC=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}
 SECS=120
-OUT=./boot-smoke-out
+OUT=./bench-out-smoke
 INPUT=1
 KEEP_WORK=0
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
