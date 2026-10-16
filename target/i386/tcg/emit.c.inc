@@ -2734,6 +2734,21 @@ static void gen_MOVD_to(DisasContext *s, X86DecodedInsn *decode)
     int vec_len = vector_len(s, decode);
     int lo_ofs = vector_elem_offset(&decode->op[0], ot, 0);
 
+#if defined(XBOX)
+    if (vec_len == 8 && ot == MO_32) {
+        /*
+         * movd mm, r/m32: one 8-byte store of the zero-extended value,
+         * not a zero store and a 4-byte one, so the next 64-bit read of
+         * the register forwards from a single store.
+         */
+        TCGv_i64 t = tcg_temp_new_i64();
+
+        tcg_gen_extu_tl_i64(t, s->T1);
+        tcg_gen_st_i64(t, tcg_env, vector_elem_offset(&decode->op[0],
+                                                       MO_64, 0));
+        return;
+    }
+#endif
     tcg_gen_gvec_dup_imm(MO_64, decode->op[0].offset, vec_len, vec_len, 0);
 
     switch (ot) {

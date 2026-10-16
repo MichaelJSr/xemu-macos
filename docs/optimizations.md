@@ -726,7 +726,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   The MMX `punpck{l,h}{bw,wd,dq}` and `pmulhw` then became i64 TCG ops
   (shift/deposit; sign-extract, multiply, deposit), which leaves the
   loop helper-free: Minsns/frame −2.6% more (12/12), Mcycles/frame
-  flat (7/12).
+  flat (7/12). `movd mm, r/m32` (112K a frame in the loop) then became
+  one 8-byte store of the zero-extended value instead of a zero store
+  and a 4-byte store, which the loop's next 64-bit read of the register
+  could not forward from (2026-10-16): det cold boot 900 frames, 8
+  pairs at load 16-20, Minsns/frame −0.27% (8/8), Mcycles/frame −2.9%
+  (7/8).
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,
