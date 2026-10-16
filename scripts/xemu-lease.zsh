@@ -6,7 +6,9 @@
 #   $XEMU_MARK  (-name xemu-fork-auto)     first arguments after the binary
 #   $XEMU_LEASE_DIR                        lease folder: as inherited, else /tmp/xemu-leases
 #   xemu_slot_acquire                      wait for one of $XEMU_FORK_SLOTS (4):
-#                                          flock(2) on an fd the next xemu inherits
+#                                          flock(2) on an fd the next xemu inherits;
+#                                          first waits while an owner-demo.json names a
+#                                          live pid (XEMU_OWNER_DEMO_WAIT=0: exit 75)
 #   xemu_lease_write <pid> <purpose> <s>   lease for the xemu just started, which
 #                                          now holds the slot alone (until it exits)
 #   xemu_auto_end                          drop that lease (and a slot not handed on)
@@ -21,6 +23,9 @@
 zmodload zsh/datetime
 setopt no_bg_nice   # background launches get exactly nice 10, not zsh's +5 on top
 XEMU_LEASE_DIR=${XEMU_LEASE_DIR:-/tmp/xemu-leases}
+# The lease folder's owner-demo.json and, always, the harness's: a moved
+# lease folder has its own leases and slots, never its own demo guard.
+typeset -gaU XEMU_OWNER_DEMO_FILES=($XEMU_LEASE_DIR/owner-demo.json /tmp/xemu-leases/owner-demo.json)
 XEMU_NICE=(nice -n 10)
 XEMU_MARK=(-name xemu-fork-auto)
 typeset -g XEMU_SLOT="" XEMU_SLOT_FD="" XEMU_LEASE_PID="" XEMU_BENCH_BASE="" XEMU_BENCH_PORTABLE=0
@@ -48,6 +53,41 @@ xemu_leases_sweep() {   # stale = older than 10 s and its pid no longer a marked
   return 0
 }
 
+xemu_owner_demo_pid() {   # "<pid> <file>": the first owner-demo.json whose pid runs
+  local f pid
+  for f in $XEMU_OWNER_DEMO_FILES; do
+    [[ -e $f ]] || continue
+    # parsed as xemu_lease.owner_demo does: a file that doesn't parse is no demo
+    pid=$(python3 -I -c '
+import json, sys
+p = json.load(open(sys.argv[1]))["pid"]
+if isinstance(p, bool): raise TypeError
+print(int(p))' $f 2>/dev/null) || continue
+    [[ $pid == <1-> ]] && ps -p $pid > /dev/null 2>&1 || continue
+    print -r -- "$pid $f"
+    return 0
+  done
+  return 1
+}
+
+xemu_owner_demo_wait() {   # return once no owner demo runs
+  local demo pid f t0=$EPOCHSECONDS said=-1
+  while demo=$(xemu_owner_demo_pid); do
+    pid=${demo%% *} f=${demo#* }
+    if [[ $XEMU_OWNER_DEMO_WAIT == 0 ]]; then
+      echo "lease: owner demo running (pid $pid; $f): not starting xemu (XEMU_OWNER_DEMO_WAIT=0)" >&2
+      exit 75
+    fi
+    if (( said < 0 || EPOCHSECONDS - t0 - said >= 60 )); then
+      echo "lease: owner demo running (pid $pid; $f): no new xemu until it ends; waiting" >&2
+      said=$(( EPOCHSECONDS - t0 ))
+    fi
+    sleep 2
+  done
+  (( said < 0 )) || echo "lease: owner demo over after $(( EPOCHSECONDS - t0 )) s" >&2
+  return 0
+}
+
 # A slot is flock(2)ed through a descriptor the xemu launched next inherits:
 # the lock belongs to the open file, so it outlives this script (SIGKILL
 # included) for as long as that xemu runs. zsystem flock takes fcntl locks,
@@ -60,6 +100,7 @@ xemu_slot_acquire() {
   mkdir -p $XEMU_LEASE_DIR/slots
   xemu_leases_sweep
   while :; do
+    xemu_owner_demo_wait
     fds=()
     for (( i = 0; i < n; i++ )); do
       exec {fd}<>$XEMU_LEASE_DIR/slots/$i.lock
@@ -78,6 +119,10 @@ for i, fd in enumerate(sys.argv[1:]):
       [[ $i == $got ]] && continue
       fd=${fds[i+1]}; exec {fd}<&-
     done
+    if [[ -n $got ]] && xemu_owner_demo_pid > /dev/null; then
+      fd=${fds[got+1]}; exec {fd}<&-   # a demo began meanwhile: wait for it
+      continue
+    fi
     if [[ -n $got ]]; then
       XEMU_SLOT=$got XEMU_SLOT_FD=${fds[got+1]}
       (( said >= 0 )) && echo "lease: slot $got free after $(( EPOCHSECONDS - t0 )) s" >&2

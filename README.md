@@ -718,7 +718,20 @@ Other automation interfaces (windowed or headless):
   launcher is killed. A launch by hand takes a slot with `python3
   scripts/xemu_lease.py run -- <xemu> -config_path <toml> ...` (nice,
   marker, bench cache, lease; the xemu replaces the helper, same pid).
-  `XEMU_LEASE_DIR` moves the lease folder (tests only). Every
+  While `/tmp/xemu-leases/owner-demo.json` names a running pid, the
+  launchers and `run` start no new xemu: they wait, saying `lease: owner
+  demo running (pid N; ...): no new xemu until it ends; waiting` once a
+  minute, or exit 75 with `XEMU_OWNER_DEMO_WAIT=0`. The harness writes
+  that file for each owner sitting: a JSON object with an integer
+  `"pid"` (a process that lives as long as the sitting) and optional
+  `"who"`, `"purpose"` and `"expected_end"` strings; a dead pid or a
+  file that doesn't parse counts as no demo, so write it atomically
+  (a temp file in the same folder, then rename). `python3
+  scripts/xemu_lease.py` shows a running demo and the live leases.
+  `XEMU_LEASE_DIR` moves the lease folder (tests only), and with it the
+  leases and slots, so those launches don't count against the shared
+  slots; the demo rule still holds there (`/tmp/xemu-leases/owner-demo.json`
+  and the moved folder's own `owner-demo.json` both count). Every
   launch line in `scripts/`, the agent skills and the docs carries the
   marker or `XEMU_BASE_PATH` (the quick start's `open dist/xemu.app` is
   the user's own launch). The launchers (and the Windows bench) pass xemu

@@ -200,7 +200,10 @@ Bench scripts in `scripts/` accept `-h`. Harnesses read
 and turn fullscreen off. Each xemu they start is niced and marked, holds
 a slot for its whole life (all busy: `lease: all 4 fork-xemu slots busy`,
 it waits; raise `XEMU_FORK_SLOTS` only on a quiet box) and a lease, and
-keeps its caches
+starts only while no owner demo runs (`/tmp/xemu-leases/owner-demo.json`,
+checked under any `XEMU_LEASE_DIR` too, names a live pid: `lease: owner
+demo running`, it waits;
+`XEMU_OWNER_DEMO_WAIT=0` exits 75 instead), and keeps its caches
 in `$XEMU_BENCH_CACHE` (default `~/Library/Caches/xemu-fork-bench`,
 shared by every bench, cold the first time; a binary older than
 `XEMU_BASE_PATH` gets a per-batch cache in its clone, and in bench-abx

@@ -25,10 +25,22 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
   - never inherits AUTOMATION_ENV: the variables that name something
     another xemu or the harness may own (the owner's XEMU_RAM_SHM name,
     a pipe, a record or log file) or that bind host pads. A launcher
-    drops them from its own environment; a value it sets itself stays.
+    drops them from its own environment; a value it sets itself stays;
+  - never starts while an owner demo runs: while /tmp/xemu-leases/
+    owner-demo.json (or, under a moved lease dir, its owner-demo.json)
+    names a running pid, a launcher waits before taking its slot,
+    saying so on stderr every minute (XEMU_OWNER_DEMO_WAIT=0: it exits
+    75 instead). The harness writes that file for each owner sitting: a
+    JSON object with at least "pid" (int: a process that lives as long
+    as the sitting); "who", "purpose" and "expected_end" (strings) are
+    shown if present. A dead pid or a file that doesn't parse counts as
+    no demo, so write it atomically (a temp file in the lease dir, then
+    rename).
 
 The lease dir is $XEMU_LEASE_DIR, default /tmp/xemu-leases (the harness
-reads it; tests point the variable elsewhere).
+reads it; tests point the variable elsewhere). A moved lease dir has its
+own leases and slots, but /tmp/xemu-leases/owner-demo.json is honoured
+either way: the override never turns the demo guard off.
 
 zsh twin: scripts/xemu-lease.zsh. `python3 xemu_lease.py` lists the live
 leases and sweeps the stale ones. A launch by hand takes a slot too:
@@ -56,11 +68,13 @@ except ImportError:  # Windows: no slots or leases, the marker still applies
 MARKER = 'xemu-fork-auto'
 MARK = ['-name', MARKER]
 NICE = ['nice', '-n', '10']
-LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or '/tmp/xemu-leases'
+DEFAULT_LEASE_DIR = '/tmp/xemu-leases'
+LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or DEFAULT_LEASE_DIR
 AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
                   'XEMU_ICOUNT_LIVE_PADS')
+OWNER_DEMO = 'owner-demo.json'
 _dropped = set()
 
 
@@ -115,11 +129,81 @@ def sweep():
             pass
 
 
+def owner_demo_files():
+    """<lease dir>/owner-demo.json and, always, the harness's
+    /tmp/xemu-leases/owner-demo.json: XEMU_LEASE_DIR moves the leases and
+    slots, never the demo guard."""
+    return list(dict.fromkeys(os.path.normpath(os.path.join(d, OWNER_DEMO))
+                              for d in (LEASE_DIR, DEFAULT_LEASE_DIR)))
+
+
+def owner_demo():
+    """(file, record) for the first owner-demo.json whose pid runs, else
+    None."""
+    for f in owner_demo_files():
+        rec = _owner_demo_record(f)
+        if rec is not None:
+            return f, rec
+    return None
+
+
+def _owner_demo_record(f):
+    try:
+        with open(f) as fh:
+            rec = json.load(fh)
+        if isinstance(rec['pid'], bool):
+            raise TypeError
+        pid = int(rec['pid'])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        if f not in _dropped:
+            _dropped.add(f)
+            print(f'lease: ignoring {f}: not a JSON object with an integer "pid"',
+                  file=sys.stderr, flush=True)
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass  # runs, as another user
+    return rec
+
+
+def wait_owner_demo(quiet=False):
+    """Return once no owner demo runs (XEMU_OWNER_DEMO_WAIT=0: exit 75)."""
+    t0 = time.time()
+    said = None
+    while (found := owner_demo()) is not None:
+        where, rec = found
+        what = f'pid {rec["pid"]}'
+        for k in ('who', 'purpose', 'expected_end'):
+            if rec.get(k):
+                what += f', {k} {rec[k]}'
+        if os.environ.get('XEMU_OWNER_DEMO_WAIT') == '0':
+            print(f'lease: owner demo running ({what}; {where}): not starting xemu '
+                  '(XEMU_OWNER_DEMO_WAIT=0)', file=sys.stderr, flush=True)
+            raise SystemExit(75)
+        w = int(time.time() - t0)
+        if not quiet and (said is None or w - said >= 60):
+            print(f'lease: owner demo running ({what}; {where}): no new xemu until it '
+                  'ends; waiting', file=sys.stderr, flush=True)
+            said = w
+        time.sleep(2)
+    if said is not None and not quiet:
+        print(f'lease: owner demo over after {time.time() - t0:.0f} s',
+              file=sys.stderr, flush=True)
+
+
 class Slot:
     """One of XEMU_FORK_SLOTS machine-wide slots: an flock'd descriptor
     (fd). The xemu inherits it (popen's pass_fds, run's exec) and holds
     the slot until it exits; handoff() then drops the launcher's copy.
-    Until then, or without a child, release() frees it."""
+    Until then, or without a child, release() frees it. Taken only while
+    no owner demo runs."""
 
     def __init__(self, quiet=False):
         self.index, self.fd = None, None
@@ -135,6 +219,7 @@ class Slot:
         t0 = time.time()
         said = None
         while True:
+            wait_owner_demo(quiet)
             for i in range(n):
                 fd = os.open(os.path.join(d, f'{i}.lock'), os.O_RDWR | os.O_CREAT, 0o666)
                 try:
@@ -142,11 +227,16 @@ class Slot:
                 except OSError:
                     os.close(fd)
                     continue
+                if owner_demo() is not None:  # one began meanwhile: wait for it
+                    os.close(fd)
+                    break
                 self.index, self.fd = i, fd
                 if said is not None and not quiet:
                     print(f'lease: slot {i} free after {time.time() - t0:.0f} s',
                           file=sys.stderr, flush=True)
                 return
+            if owner_demo() is not None:
+                continue
             w = int(time.time() - t0)
             if not quiet and (said is None or w - said >= 60):
                 print(f'lease: all {n} fork-xemu slots busy (XEMU_FORK_SLOTS); waiting',
@@ -275,6 +365,9 @@ def main():
     if sys.argv[1:2] == ['run']:
         run(sys.argv[2:])
     sweep()
+    found = owner_demo()
+    if found is not None:
+        print(f'owner demo running ({found[0]}): {json.dumps(found[1])}')
     try:
         names = sorted(os.listdir(LEASE_DIR))
     except OSError:
