@@ -157,7 +157,14 @@
 #
 # @name: the checkpoint's name
 #
-# @size: bytes of host memory its machine state takes
+# @size: bytes of host memory it holds itself: its device state and
+#     @ram-pages pages
+#
+# @ram-pages: guest RAM pages (4 KiB) it holds a copy of; the others
+#     are zero, or shared with the checkpoint it was saved against
+#
+# @base: the checkpoint it was saved against (see
+#     @xemu-checkpoint-save)
 #
 # @frame: the frame counter (see @query-xemu-frame) when it was saved
 #
@@ -166,11 +173,26 @@
 #
 # @elapsed-us: how long the save or restore took, in microseconds
 #
+# @pages-checked: the RAM pages a save compared with its base's
+#     (every page without one), or a restore with the checkpoint's
+#     (every page unless @incremental)
+#
+# @pages-copied: after a restore, the RAM pages it wrote back because
+#     they differed
+#
+# @pages-missed: after a save against a base or an incremental
+#     restore, with @verify: the RAM pages that differed although the
+#     dirty log hadn't named them (stored or written back all the
+#     same); anything but 0 is a writer the log misses
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuCheckpointInfo',
-  'data': { 'name': 'str', 'size': 'uint64', 'frame': 'int',
-            'disk-sectors': 'int', '*elapsed-us': 'int' } }
+  'data': { 'name': 'str', 'size': 'uint64', 'ram-pages': 'uint64',
+            '*base': 'str', 'frame': 'int',
+            'disk-sectors': 'int', '*elapsed-us': 'int',
+            '*pages-checked': 'uint64', '*pages-copied': 'uint64',
+            '*pages-missed': 'uint64' } }
 
 ##
 # @xemu-checkpoint-save:
@@ -182,9 +204,21 @@
 #
 # @name: the checkpoint's name
 #
+# @base: an existing checkpoint (it may be @name's): store only the
+#     RAM pages that differ from its RAM and share the rest with it
+#     (deleting or replacing @base later keeps them).  It also starts
+#     the dirty log that incremental restores use, so the next saves
+#     against a base compare only the pages written since the last
+#     save or restore.
+#
+# @verify: with @base, also compare every page the dirty log didn't
+#     name, and report the ones that differed in @pages-missed
+#     (default false)
+#
 # Since: 10.2
 ##
-{ 'command': 'xemu-checkpoint-save', 'data': { 'name': 'str' },
+{ 'command': 'xemu-checkpoint-save',
+  'data': { 'name': 'str', '*base': 'str', '*verify': 'bool' },
   'returns': 'XemuCheckpointInfo' }
 
 ##
@@ -196,9 +230,23 @@
 #
 # @name: the checkpoint's name
 #
+# @incremental: compare and write back only the RAM pages that may
+#     differ: those written since the last checkpoint save or restore
+#     (QEMU's migration dirty log, which this starts), and those the
+#     two checkpoints hold differently.  The machine ends as a full
+#     restore leaves it.  The first one, and the first after a loadvm,
+#     an incoming migration or a failed restore, compares every page.
+#     Writes into guest RAM from another process (XEMU_RAM_SHM) are
+#     not seen.  The log stops when the last checkpoint is deleted.
+#     (default false)
+#
+# @verify: with @incremental, also compare every other page, and
+#     report the ones that differed in @pages-missed (default false)
+#
 # Since: 10.2
 ##
-{ 'command': 'xemu-checkpoint-restore', 'data': { 'name': 'str' },
+{ 'command': 'xemu-checkpoint-restore',
+  'data': { 'name': 'str', '*incremental': 'bool', '*verify': 'bool' },
   'returns': 'XemuCheckpointInfo' }
 
 ##

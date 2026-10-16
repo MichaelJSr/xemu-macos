@@ -245,9 +245,29 @@ Other automation interfaces (windowed or headless):
   `loadvm` does (reset, load, disk sectors the guest wrote since put
   back, runs on only if it was running), any number of times, with the
   same determinism. `query-xemu-checkpoints` lists them,
-  `xemu-checkpoint-delete` frees one. About 20-30 ms to save and 20-25
-  ms to restore 128 MiB on a loaded M2 Ultra; the qcow2 is never written
-  for the state.
+  `xemu-checkpoint-delete` frees one. A checkpoint is its device state
+  (about 6 MB, nv2a and APU mostly) plus a copy of each nonzero RAM page;
+  the qcow2 is never written for the state. With 128 MiB a save takes
+  about 13 ms and a restore 9-12 ms on a loaded M2 Ultra.
+- **Branching from checkpoints**: `xemu-checkpoint-save {"name": "c1",
+  "base": "c0"}` stores only the RAM pages that differ from checkpoint
+  `c0` and shares the rest with it (deleting or replacing `c0` later
+  keeps them): about 1,600 pages (6.5 MB) plus the device state after 16
+  frames of play, in about 4 ms. `xemu-checkpoint-restore {"name": "c0",
+  "incremental": true}` compares and writes back only the pages written
+  since the last checkpoint save or restore (QEMU's migration dirty
+  log, which this and `base` start) plus those the two checkpoints hold
+  differently, and ends on the same machine as a full restore: about 2
+  ms with nothing run, 4-5 ms after 16-128 frames (most of it the
+  reset, the device state and rechecking translations, not RAM). The
+  first one, and the first after a `loadvm`, an incoming migration or a
+  failed restore, compares every page. Replies carry `ram-pages`
+  (pages it holds itself), `base`, and for restores `pages-checked` and
+  `pages-copied`. Add `"verify": true` to either command to also
+  compare every page the log didn't name: `pages-missed` must be 0, or
+  something wrote RAM behind the log's back (another process writing
+  through `XEMU_RAM_SHM` does; nothing inside xemu should). The log
+  stops when the last checkpoint is deleted.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

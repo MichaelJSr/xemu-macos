@@ -2,12 +2,16 @@
  * xemu checkpoints: whole-machine states in host memory
  *
  * QMP xemu-checkpoint-save/-restore/-delete and query-xemu-checkpoints.
- * A checkpoint is the savevm stream (RAM and devices) in a host buffer,
- * written and read by the savevm/loadvm code itself, so a restore is a
- * loadvm without the qcow2. loadvm also reverts the disks; here every
- * sector the guest writes after a checkpoint is kept as it was at the
- * checkpoint (xemu_checkpoint_disk_prewrite, from the IDE write paths) and
- * written back on restore.
+ * A checkpoint is the device sections of a savevm stream in a host
+ * buffer, written and read by the savevm/loadvm code itself, and an image
+ * of guest RAM (xemu-checkpoint-ram.c) copied and written back where that
+ * code would put RAM in the stream, so a restore is a loadvm without the
+ * qcow2. An image saved against a base holds only the pages that differ
+ * from it; an incremental restore writes back only the pages the dirty
+ * log says may differ. loadvm also reverts the disks; here every sector
+ * the guest writes after a checkpoint is kept as it was at the checkpoint
+ * (xemu_checkpoint_disk_prewrite, from the IDE write paths) and written
+ * back on restore.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -26,8 +30,10 @@
 
 typedef struct Checkpoint {
     char *name;
-    uint8_t *state;
+    uint8_t *state;         /* the device sections */
     size_t size;
+    XemuRamImage *ram;
+    char *base;             /* saved against it, if not NULL */
     int64_t frame;
     /* BlockBackend * -> (sector -> its SECTOR bytes at the checkpoint) */
     GHashTable *disks;
@@ -43,6 +49,8 @@ static void checkpoint_free(gpointer p)
 
     g_free(c->name);
     g_free(c->state);
+    xemu_ram_image_unref(c->ram);
+    g_free(c->base);
     g_hash_table_unref(c->disks);
     g_free(c);
 }
@@ -107,6 +115,8 @@ typedef struct Revert {
     Checkpoint *c;
     int64_t sectors;
     bool failed;
+    bool incremental, verify;
+    XemuRamStats ram;
 } Revert;
 
 static gint cmp_sector(gconstpointer a, gconstpointer b)
@@ -195,14 +205,24 @@ static void checkpoint_revert_disks(void *opaque)
     }
 }
 
+static void checkpoint_load_ram(void *opaque)
+{
+    Revert *r = opaque;
+
+    xemu_ram_image_load(r->c->ram, r->incremental, r->verify, &r->ram);
+}
+
 static XemuCheckpointInfo *checkpoint_info(Checkpoint *c, int64_t elapsed_ns)
 {
     XemuCheckpointInfo *info = g_new0(XemuCheckpointInfo, 1);
     GHashTableIter di;
     gpointer blk, table;
+    uint64_t pages = xemu_ram_image_own_pages(c->ram);
 
     info->name = g_strdup(c->name);
-    info->size = c->size;
+    info->size = c->size + pages * xemu_ram_image_page_size();
+    info->ram_pages = pages;
+    info->base = g_strdup(c->base);
     info->frame = c->frame;
     g_hash_table_iter_init(&di, c->disks);
     while (g_hash_table_iter_next(&di, &blk, &table)) {
@@ -215,16 +235,48 @@ static XemuCheckpointInfo *checkpoint_info(Checkpoint *c, int64_t elapsed_ns)
     return info;
 }
 
-XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name, Error **errp)
+typedef struct Capture {
+    XemuRamImage *base;
+    bool verify;
+    XemuRamImage *ram;
+    XemuRamStats st;
+} Capture;
+
+static void checkpoint_save_ram(void *opaque)
+{
+    Capture *cap = opaque;
+
+    cap->ram = xemu_ram_image_capture(cap->base, cap->verify, &cap->st);
+}
+
+XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name,
+                                             const char *base,
+                                             bool has_verify, bool verify,
+                                             Error **errp)
 {
     int64_t t0 = get_clock();
     Checkpoint *old = checkpoint_find(name);
+    Checkpoint *parent = base ? checkpoint_find(base) : NULL;
+    Capture cap = { .verify = verify };
     size_t size = 0;
-    /* A save is about the size of the last one, or of RAM plus devices. */
-    size_t hint = old ? old->size + (1 << 20) : 160 * MiB;
-    uint8_t *state = xemu_checkpoint_save_state(hint, &size, errp);
+    /* A save is about the size of the last one's device sections. */
+    size_t hint = old ? old->size + (1 << 20) : 4 * MiB;
+    uint8_t *state;
+    XemuCheckpointInfo *info;
 
+    if (base && !parent) {
+        error_setg(errp, "no checkpoint '%s'", base);
+        return NULL;
+    }
+    if (parent) {
+        /* Later saves against a base, and restores, compare less. */
+        xemu_ram_log_start();
+        cap.base = parent->ram;
+    }
+    state = xemu_checkpoint_save_state(hint, &size, checkpoint_save_ram, &cap,
+                                       errp);
     if (!state) {
+        xemu_ram_image_unref(cap.ram);
         return NULL;
     }
     if (!checkpoints) {
@@ -238,28 +290,49 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name, Error **errp)
     c->name = g_strdup(name);
     c->state = state;
     c->size = size;
+    c->ram = cap.ram;
+    c->base = g_strdup(base);
     c->frame = xemu_frame_count();
     c->disks = g_hash_table_new_full(NULL, NULL, NULL,
                                      (GDestroyNotify)g_hash_table_unref);
     g_ptr_array_add(checkpoints, c);
-    return checkpoint_info(c, get_clock() - t0);
+    info = checkpoint_info(c, get_clock() - t0);
+    info->has_pages_checked = true;
+    info->pages_checked = cap.st.checked;
+    if (base && verify) {
+        info->has_pages_missed = true;
+        info->pages_missed = cap.st.missed;
+    }
+    return info;
 }
 
 XemuCheckpointInfo *qmp_xemu_checkpoint_restore(const char *name,
+                                                bool has_incremental,
+                                                bool incremental,
+                                                bool has_verify, bool verify,
                                                 Error **errp)
 {
     int64_t t0 = get_clock();
     Checkpoint *c = checkpoint_find(name);
-    Revert r = { .c = c };
+    Revert r = { .c = c, .incremental = incremental, .verify = verify };
+    XemuCheckpointInfo *info;
+    bool ok;
 
     if (!c) {
         error_setg(errp, "no checkpoint '%s'", name);
         return NULL;
     }
+    if (incremental) {
+        xemu_ram_log_start();
+    }
     /* Names the load in XEMU_STATE_LOADED; the load itself resets it. */
     xemu_events_load_source(XEMU_LOAD_SOURCE_CHECKPOINT, name);
-    if (!xemu_checkpoint_load_state(c->state, c->size,
-                                    checkpoint_revert_disks, &r, errp)) {
+    xemu_ram_restore_begin();
+    ok = xemu_checkpoint_load_state(c->state, c->size,
+                                    checkpoint_revert_disks,
+                                    checkpoint_load_ram, &r, errp);
+    xemu_ram_restore_end(ok);
+    if (!ok) {
         xemu_events_load_source(XEMU_LOAD_SOURCE_INCOMING, NULL);
         return NULL;
     }
@@ -268,7 +341,15 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_restore(const char *name,
                    "machine is restored, its disk is not", name);
         return NULL;
     }
-    return checkpoint_info(c, get_clock() - t0);
+    info = checkpoint_info(c, get_clock() - t0);
+    info->has_pages_checked = info->has_pages_copied = true;
+    info->pages_checked = r.ram.checked;
+    info->pages_copied = r.ram.differ;
+    if (incremental && verify) {
+        info->has_pages_missed = true;
+        info->pages_missed = r.ram.missed;
+    }
+    return info;
 }
 
 void qmp_xemu_checkpoint_delete(const char *name, Error **errp)
@@ -280,6 +361,9 @@ void qmp_xemu_checkpoint_delete(const char *name, Error **errp)
         return;
     }
     g_ptr_array_remove(checkpoints, c);
+    if (!checkpoints->len) {
+        xemu_ram_log_stop();
+    }
 }
 
 XemuCheckpointInfoList *qmp_query_xemu_checkpoints(Error **errp)
@@ -291,4 +375,11 @@ XemuCheckpointInfoList *qmp_query_xemu_checkpoints(Error **errp)
                                                                  i), -1));
     }
     return list;
+}
+
+XemuRamImage *xemu_checkpoint_ram(const char *name)
+{
+    Checkpoint *c = checkpoint_find(name);
+
+    return c ? c->ram : NULL;
 }

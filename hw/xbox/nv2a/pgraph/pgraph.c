@@ -3139,6 +3139,10 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
             d, semaphore_data - d->vram_ptr, 4);
     }
     stl_le_p((uint32_t*)semaphore_data, parameter);
+    if (unlikely(global_dirty_tracking)) {
+        memory_region_set_client_dirty(d->vram, semaphore_data - d->vram_ptr,
+                                       4, DIRTY_MEMORY_MIGRATION);
+    }
 
     //qemu_mutex_lock(&d->pgraph.lock);
     //bql_unlock();
@@ -3447,6 +3451,10 @@ void pgraph_write_zpass_pixel_cnt_report_at(NV2AState *d, hwaddr vram_offset,
     stq_le_p((uint64_t *)&report_data[0], timestamp);
     stl_le_p((uint32_t *)&report_data[8], result);
     stl_le_p((uint32_t *)&report_data[12], done);
+    if (unlikely(global_dirty_tracking)) {
+        memory_region_set_client_dirty(d->vram, vram_offset, 16,
+                                       DIRTY_MEMORY_MIGRATION);
+    }
 
     NV2A_DPRINTF("Report result %d @%" HWADDR_PRIx, result, vram_offset);
 }

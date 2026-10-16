@@ -3088,6 +3088,8 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
     }
 
 #ifdef XBOX
+    void xemu_checkpoint_ram_loading(void);
+    xemu_checkpoint_ram_loading();
     if (!xemu_snapshots_offset_extra_data(f)) {
         return -EINVAL;
     }
@@ -3585,14 +3587,54 @@ err_drain:
 
 #ifdef XBOX
 /*
+ * The device sections of a savevm stream, without the iterable RAM
+ * section: header and configuration, every non-RAM section as
+ * qemu_savevm_state's last stage writes it, EOF, and an empty
+ * description (the loader reads one after the EOF).
+ */
+static int xemu_checkpoint_save_devices(QEMUFile *f, Error **errp)
+{
+    MigrationState *ms = migrate_get_current();
+    JSONWriter *vmdesc = ms->vmdesc;
+    SaveStateEntry *se;
+    int ret;
+
+    ms->vmdesc = NULL;
+    qemu_savevm_state_header(f);
+    ms->vmdesc = vmdesc;
+
+    cpu_synchronize_all_states();
+    QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if (se->is_ram) {
+            continue;
+        }
+        ret = vmstate_save(f, se, NULL, errp);
+        if (ret) {
+            return ret;
+        }
+    }
+    qemu_put_byte(f, QEMU_VM_EOF);
+    if (should_send_vmdesc()) {
+        qemu_put_byte(f, QEMU_VM_VMDESCRIPTION);
+        qemu_put_be32(f, 2);
+        qemu_put_buffer(f, (const uint8_t *)"{}", 2);
+    }
+    return qemu_file_get_error(f);
+}
+
+/*
  * xemu checkpoints (ui/xemu-checkpoints.c): savevm and loadvm with the VM
- * state in host memory instead of the qcow2 image. The same stream, run
- * states, quiesce and reset as save_snapshot/load_snapshot, so a restore
- * is a loadvm. The disk is the caller's: it reverts the guest's writes.
- * A buffer channel frees its data on close, so the bytes are taken out
- * of it after a save and lent to a fresh one for each restore.
+ * state in host memory instead of the qcow2 image. The same run states,
+ * quiesce and reset as save_snapshot/load_snapshot, and the same device
+ * sections, so a restore is a loadvm. RAM and the disk are the caller's:
+ * save_ram copies RAM where a savevm stream holds it (stopped, before
+ * the devices), load_ram writes it back where loadvm does (after the
+ * reset, before the devices), and revert_disks reverts the guest's
+ * writes. A buffer channel frees its data on close, so the bytes are
+ * taken out of it after a save and lent to a fresh one for each restore.
  */
 uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
+                                    void (*save_ram)(void *), void *opaque,
                                     Error **errp)
 {
     RunState saved_state = runstate_get();
@@ -3602,6 +3644,10 @@ uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
     int ret;
 
     if (!migrate_can_snapshot(errp) || migration_is_blocked(errp)) {
+        return NULL;
+    }
+    if (migration_is_running()) {
+        error_setg(errp, "There's a migration process in progress");
         return NULL;
     }
     if (!replay_can_snapshot()) {
@@ -3614,11 +3660,12 @@ uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
     void nv2a_save_quiesce_paused(void);
     nv2a_save_quiesce_paused();
     bdrv_drain_all_begin();
+    save_ram(opaque);
 
     bioc = qio_channel_buffer_new(size_hint);
     qio_channel_set_name(QIO_CHANNEL(bioc), "xemu-checkpoint");
     f = qemu_file_new_output(QIO_CHANNEL(bioc));
-    ret = qemu_savevm_state(f, errp);
+    ret = xemu_checkpoint_save_devices(f, errp);
     if (!ret) {
         ret = qemu_fflush(f);
         if (ret) {
@@ -3641,7 +3688,8 @@ uint8_t *xemu_checkpoint_save_state(size_t size_hint, size_t *size,
 }
 
 bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
-                                void (*revert_disks)(void *), void *opaque,
+                                void (*revert_disks)(void *),
+                                void (*load_ram)(void *), void *opaque,
                                 Error **errp)
 {
     MigrationIncomingState *mis = migration_incoming_get_current();
@@ -3666,6 +3714,7 @@ bool xemu_checkpoint_load_state(uint8_t *data, size_t size,
     bioc->capacity = bioc->usage = size;
     f = qemu_file_new_input(QIO_CHANNEL(bioc));
     qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
+    load_ram(opaque);
     mis->from_src_file = f;
 
     if (yank_register_instance(MIGRATION_YANK_INSTANCE, errp)) {

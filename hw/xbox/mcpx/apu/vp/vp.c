@@ -151,6 +151,15 @@ static inline void ram_mark_dirty(MCPXAPUState *d, hwaddr addr, hwaddr size)
     physical_memory_set_dirty_range(
         memory_region_get_ram_addr(d->ram) + addr, size,
         DIRTY_CLIENTS_NOCODE);
+#else
+    /*
+     * Except for the migration dirty log while it runs: migration and
+     * incremental checkpoint restores copy only the pages it names.
+     */
+    if (unlikely(global_dirty_tracking)) {
+        memory_region_set_client_dirty(d->ram, addr, size,
+                                       DIRTY_MEMORY_MIGRATION);
+    }
 #endif
 }
 

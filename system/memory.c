@@ -2312,8 +2312,17 @@ void memory_region_set_client_dirty(MemoryRegion *mr, hwaddr addr,
                                               size, client);
     }
     assert(mr->terminates);
+    /*
+     * The callers store straight into RAM, past the address space: the
+     * migration dirty log (migration, incremental checkpoint restores)
+     * must see those stores too while it runs.
+     */
+    uint8_t mask = 1 << client;
+    if (global_dirty_tracking) {
+        mask |= 1 << DIRTY_MEMORY_MIGRATION;
+    }
     return physical_memory_set_dirty_range(memory_region_get_ram_addr(mr) + addr,
-                                           size, 1 << client);
+                                           size, mask);
 }
 
 /*

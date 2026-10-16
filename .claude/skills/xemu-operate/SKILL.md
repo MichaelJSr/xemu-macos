@@ -134,7 +134,10 @@ the null renderer, for logic, RAM and gdbstub work. stderr then shows
 Deterministic, bit-exact replays: add `-S -icount shift=2,align=off,sleep=off`
 (null renderer), `loadvm`, write `+N` pipe lines while paused, then
 `xemu-frame-advance`; same inputs give the same RAM (README). Compare runs by
-hashing `pmemsave 0 0x8000000`.
+hashing `pmemsave 0 0x8000000`. Branch loops: `xemu-checkpoint-save` with
+`base`, then `xemu-checkpoint-restore` with `incremental` (README); audit the
+dirty log with `verify` (`pages-missed` 0) after touching any device that
+writes RAM.
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:

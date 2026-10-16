@@ -71,7 +71,10 @@ static inline void fuzz_dma_read_cb(size_t addr,
 /* Dirty tracking enabled because dirty limit */
 #define GLOBAL_DIRTY_LIMIT      (1U << 2)
 
-#define GLOBAL_DIRTY_MASK  (0x7)
+/* xemu: dirty tracking for incremental checkpoint restores */
+#define GLOBAL_DIRTY_XEMU       (1U << 3)
+
+#define GLOBAL_DIRTY_MASK  (0xf)
 
 extern unsigned int global_dirty_tracking;
 
@@ -2147,7 +2150,10 @@ void memory_region_set_log(MemoryRegion *mr, bool log, unsigned client);
  * memory_region_set_dirty: Mark a range of bytes as dirty in a memory region.
  *
  * Marks a range of bytes as dirty, after it has been dirtied outside
- * guest code.
+ * guest code.  While global dirty tracking runs, the range is marked for
+ * %DIRTY_MEMORY_MIGRATION too: a device store straight into RAM calls this
+ * (with that client alone if it marks none) so the migration log and
+ * incremental checkpoint restores see it.
  *
  * @mr: the memory region being dirtied.
  * @addr: the address (relative to the start of the region) being dirtied.
@@ -2164,7 +2170,10 @@ bool memory_region_test_and_clear_dirty(MemoryRegion *mr, hwaddr addr,
  *                                 in a memory region for a specified client.
  *
  * Marks a range of bytes as dirty, after it has been dirtied outside
- * guest code.
+ * guest code.  While global dirty tracking runs, the range is marked for
+ * %DIRTY_MEMORY_MIGRATION too: a device store straight into RAM calls this
+ * (with that client alone if it marks none) so the migration log and
+ * incremental checkpoint restores see it.
  *
  * @mr: the memory region being dirtied.
  * @addr: the address (relative to the start of the region) being dirtied.
