@@ -17,7 +17,11 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     the next launcher sweeps it;
   - keeps its data (shader and pipeline caches) in the bench cache,
     XEMU_BASE_PATH=$XEMU_BENCH_CACHE (default
-    ~/Library/Caches/xemu-fork-bench), never in the owner's pref dir.
+    ~/Library/Caches/xemu-fork-bench), never in the owner's pref dir;
+  - never inherits AUTOMATION_ENV: the variables that name something
+    another xemu or the harness may own (the owner's XEMU_RAM_SHM name,
+    a pipe, a record or log file) or that bind host pads. A launcher
+    drops them from its own environment; a value it sets itself stays.
 
 zsh twin: scripts/xemu-lease.zsh. `python3 xemu_lease.py` lists the live
 leases and sweeps the stale ones.
@@ -33,7 +37,27 @@ MARKER = 'xemu-fork-auto'
 MARK = ['-name', MARKER]
 NICE = ['nice', '-n', '10']
 LEASE_DIR = '/tmp/xemu-leases'
+AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
+                  'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
+                  'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
+                  'XEMU_ICOUNT_LIVE_PADS')
 _held = set()
+_dropped = set()
+
+
+def environ(env=None):
+    """env (default os.environ) for an automated xemu: without the
+    AUTOMATION_ENV values it inherited from this process's environment.
+    A value the caller set itself (not the inherited one) stays."""
+    e = dict(os.environ if env is None else env)
+    for k in AUTOMATION_ENV:
+        if k in os.environ and e.get(k) == os.environ[k]:
+            del e[k]
+            if k not in _dropped:
+                _dropped.add(k)
+                print(f'lease: not passing the inherited {k} to xemu (set it per run)',
+                      file=sys.stderr, flush=True)
+    return e
 
 
 def bench_cache():
@@ -148,9 +172,11 @@ def auto_cmd(cmd):
 
 @contextlib.contextmanager
 def popen(cmd, purpose, expected_secs, **kw):
-    """subprocess.Popen(auto_cmd(cmd), **kw) inside a slot and a lease.
-    nice execs xemu, so proc.pid is xemu's pid. On exit a still-running
-    xemu is killed, then the lease and the slot go."""
+    """subprocess.Popen(auto_cmd(cmd), **kw) inside a slot and a lease,
+    with environ(kw's env). nice execs xemu, so proc.pid is xemu's pid.
+    On exit a still-running xemu is killed, then the lease and the slot
+    go."""
+    kw['env'] = environ(kw.get('env'))
     slot = Slot()
     proc = None
     try:

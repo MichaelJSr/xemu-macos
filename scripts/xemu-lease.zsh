@@ -7,6 +7,7 @@
 #   xemu_slot_acquire                      wait for one of $XEMU_FORK_SLOTS (4)
 #   xemu_lease_write <pid> <purpose> <s>   lease for the xemu just started
 #   xemu_auto_end                          drop that lease, free the slot
+#   (sourcing it)                          unsets the inherited $XEMU_AUTOMATION_ENV
 #   xemu_bench_cache <xemu binary> <isolate 0|1>
 #       sets XEMU_BENCH_BASE, the data base path the run passes as
 #       XEMU_BASE_PATH, and XEMU_BENCH_PORTABLE=1 when the caller must
@@ -20,6 +21,19 @@ XEMU_LEASE_DIR=/tmp/xemu-leases
 XEMU_NICE=(nice -n 10)
 XEMU_MARK=(-name xemu-fork-auto)
 typeset -g XEMU_SLOT="" XEMU_SLOT_FD="" XEMU_LEASE_PID="" XEMU_BENCH_BASE="" XEMU_BENCH_PORTABLE=0
+# An automated xemu never inherits these (AUTOMATION_ENV in xemu_lease.py):
+# the caller passes them per run (VAR=V arguments, --b-env/--e-env).
+XEMU_AUTOMATION_ENV=(XEMU_RAM_SHM XEMU_INPUT_PIPE XEMU_INPUT_RECORD XEMU_INPUT_RECORD_PORT
+  XEMU_TRACE_RECORD XEMU_TRACE_REGIONS XEMU_BLOCK_LOG XEMU_VOICE_LOG XEMU_AUDIO_WAV
+  XEMU_ICOUNT_LIVE_PADS)
+() {
+  local v
+  for v in $XEMU_AUTOMATION_ENV; do
+    (( ${+parameters[$v]} )) || continue
+    echo "lease: not passing the inherited $v to xemu (set it per run)" >&2
+    unset $v
+  done
+}
 
 xemu_leases_sweep() {   # stale = older than 10 s and its pid no longer a marked xemu
   local f c rc   # every step tolerates failure: the benches run under set -e

@@ -31,7 +31,10 @@ are in `xemu-history`.
   (`%LOCALAPPDATA%\xemu-fork-bench`), but no nice, slot or lease. A
   hand-written launcher must mark and nice too; it takes no slot, so run
   one at a time. Never mark an xemu the owner
-  plays.
+  plays. Launchers pass xemu none of the automation variables they
+  inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
+  pads: `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. Every
+  launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu
   saves its config on exit, so skipping `-config_path` overwrites the
@@ -91,8 +94,10 @@ LTO). Look for `Bundling MoltenVK from …` in the log.
 
 ## Run
 
-The direct binary inherits only the shell env. `open -n -a <app> --env K=V
---stdout F --stderr G --args …` adds `LSEnvironment`, but then xemu hangs on
+The direct binary inherits only the shell env. `open` passes none of it:
+`open -n -a <clone> --env XEMU_BASE_PATH=<bench cache> --env K=V --stdout F
+--stderr G --args -name xemu-fork-auto -config_path <scratch toml> …` adds
+`LSEnvironment` (no nice: `renice 10` the pid), but then xemu hangs on
 a hidden TCC prompt if its ROM/HDD paths are under `~/Documents` (the
 fixtures are), so clone them to `/tmp`. The title
 (`xemu | v<git describe>`) names the build.
@@ -104,7 +109,7 @@ sed -e "s|^hdd_path = .*|hdd_path = '$W/hdd.qcow2'|;s|^eeprom_path = .*|eeprom_p
     -e "s|^fullscreen_on_startup = .*|fullscreen_on_startup = false|;s|^screenshot_dir = .*|screenshot_dir = '$W'|" \
     $F/xemu.toml > $W/xemu.toml   # the fixture's screenshot_dir is personal
 PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml)"})   # mute + pad stubs (zsh)
-XEMU_NV2A_NSPROF=1 XEMU_BASE_PATH=~/Library/Caches/xemu-fork-bench nice -n 10 \
+env -u XEMU_RAM_SHM XEMU_NV2A_NSPROF=1 XEMU_BASE_PATH=$HOME/Library/Caches/xemu-fork-bench nice -n 10 \
   $W/xemu.app/Contents/MacOS/xemu -name xemu-fork-auto -config_path $W/xemu.toml \
   -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error

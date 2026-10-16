@@ -77,7 +77,8 @@ each arm its own binary, --b-env/--e-env give each arm an env SET
 
 Knobs are xemu's own XEMU_* env vars; this script only sets
 XEMU_NV2A_NSPROF=1 (the measurement channel), XEMU_BASE_PATH (the bench
-cache) and the arm's variables.
+cache) and the arm's variables, and drops the inherited automation
+variables (AUTOMATION_ENV in scripts/xemu_lease.py).
 
 Requirements: Python >= 3.10, stdlib only, Windows. PowerShell is used for
 the screenshot and the quiet check; both degrade to SKIP/override rather than
@@ -87,6 +88,7 @@ failing a batch.
 import argparse
 import ctypes
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -106,6 +108,10 @@ WIN_DIR = os.path.join(ROOT, "scripts", "win")
 CAPTURE_PS1 = os.path.join(WIN_DIR, "capture_screen.ps1")
 SCORER = os.path.join(WIN_DIR, "score_shot_win.py")
 QUIET_CHECK = os.path.join(WIN_DIR, "quiet_check.py")
+_spec = importlib.util.spec_from_file_location(
+    "xemu_lease", os.path.join(ROOT, "scripts", "xemu_lease.py"))
+lease = importlib.util.module_from_spec(_spec)  # environ(); no slots or leases here
+_spec.loader.exec_module(lease)
 
 EXIT_ARTIFACT = 3
 
@@ -598,7 +604,7 @@ class Bench:
         cfg = self.write_config(label, exe)
         port = free_port()
 
-        env = dict(os.environ)
+        env = lease.environ()
         env["XEMU_NV2A_NSPROF"] = "1"
         if self.cache_base:
             env["XEMU_BASE_PATH"] = self.cache_base

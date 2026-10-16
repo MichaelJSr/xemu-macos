@@ -32,10 +32,14 @@ git clone --recurse-submodules https://github.com/MichaelJSr/xemu-macos.git
 cd xemu-macos
 git submodule update --init --recursive
 ./build.sh
-open dist/xemu.app
+open dist/xemu.app   # your own interactive launch: it reads your xemu.toml
 ```
 
 Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
+Automation never launches xemu this way: agents, benches and test
+harnesses run bundle clones marked `-name xemu-fork-auto`, with
+`XEMU_BASE_PATH` and their own `-config_path` (Headless mode
+(automation), "Automated-run marker").
 
 ### Building for Windows
 
@@ -707,7 +711,17 @@ Other automation interfaces (windowed or headless):
   it; an interactive xemu never has it). The macOS launchers in
   `scripts/` also run them at `nice -n 10` with a lease
   `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
-  `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`.
+  `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`. Every
+  launch line in `scripts/`, the agent skills and the docs carries the
+  marker or `XEMU_BASE_PATH` (the quick start's `open dist/xemu.app` is
+  the user's own launch). The launchers (and the Windows bench) pass xemu
+  none of the automation variables they inherited: `XEMU_RAM_SHM`,
+  `XEMU_INPUT_PIPE`, `XEMU_INPUT_RECORD` and `_PORT`,
+  `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
+  `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS` (stderr:
+  `lease: not passing the inherited ...`), so a bench never takes the
+  owner's shared-RAM name, pipe or files; set one per run (`VAR=V`
+  arguments, an arm's `K=V`) to use it.
 - **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one

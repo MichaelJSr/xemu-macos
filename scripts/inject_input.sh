@@ -27,9 +27,11 @@
 # name. Names and values below are verified against
 # macos-libs/*/opt/local/include/SDL3/SDL_scancode.h.
 #
-# Example — start xemu with the pipe, then drive it from another shell:
+# Example — start xemu with the pipe, then drive it from another shell
+# ($W holds a bundle clone and a muted scratch config: xemu-operate Run):
 #   mkfifo /tmp/xemu.fifo
-#   XEMU_INPUT_PIPE=/tmp/xemu.fifo <muted bundle clone: xemu-operate Run> &
+#   env -u XEMU_RAM_SHM XEMU_INPUT_PIPE=/tmp/xemu.fifo XEMU_BASE_PATH=$HOME/Library/Caches/xemu-fork-bench \
+#     nice -n 10 $W/xemu.app/Contents/MacOS/xemu -name xemu-fork-auto -config_path $W/xemu.toml &
 #   inject_input.sh tap /tmp/xemu.fifo W 200      # walk forward 200ms
 #   inject_input.sh down /tmp/xemu.fifo DOWN      # hold the A button
 #   sleep 1

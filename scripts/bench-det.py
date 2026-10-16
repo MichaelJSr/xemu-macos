@@ -24,7 +24,9 @@ hash unless the change is meant to.
 
 Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
 marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
-in /tmp/xemu-leases, and XEMU_BASE_PATH set to the bench cache.
+in /tmp/xemu-leases, XEMU_BASE_PATH set to the bench cache, and none of
+the automation variables this process inherited (XEMU_RAM_SHM, ...; an
+arm's own K=V stays).
 
 Example: bench-det.py -n 4 base=/tmp/b.app new=/tmp/e.app
 (an arm can add env: new=/tmp/e.app:XEMU_GUEST_MO=1)
@@ -167,7 +169,7 @@ def run_once(app, env, a, purpose=''):
         toml, pads, fifo, sock, log = scratch(d)
         e = dict(os.environ, XEMU_HEADLESS='null', XEMU_INPUT_PIPE=fifo,
                  XEMU_BASE_PATH=lease.bench_cache(), **env)
-        cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,
+        cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
                '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
         stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
         with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
@@ -343,7 +345,7 @@ def tl_launch(app, env, a, d, gdb, stack):
         app = clone
     e = dict(os.environ, XEMU_HEADLESS='null' if a.renderer == 'null' else '1',
              XEMU_INPUT_PIPE=fifo, XEMU_BASE_PATH=base, **env)
-    cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,
+    cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
            '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
     if a.dvd:
         cmd += ['-dvd_path', a.dvd]
