@@ -3731,14 +3731,64 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
     fp_pc_wrapper(gen_fstl_ST0)(s, arg);
 }
 
+#if defined(XBOX)
+/*
+ * ST0 as an integer, as the __hard fist helpers compute it:
+ * llrint(floatx80_to_double_fast(ST0)), which is FRINTX under the live
+ * FPCR (the x87 RC) and a saturating FCVTZS to 64 bits: NaN gives 0.
+ * fistl keeps the low 32 bits of that, not the integer indefinite. No
+ * flags: merge_exception_flags is empty under USE_HARD_FPU, and the
+ * invalid flag helper_fist_ST0 leaves in fp_status is never read (every
+ * reader clears the flags first).
+ */
+static TCGv_i64 x87_wt_fist(DisasContext *s)
+{
+    TCGv_f64 r = tcg_temp_new_f64();
+    TCGv_i64 v = tcg_temp_new_i64();
+
+    tcg_gen_rint_f64(r, x87_wt_get_st(s, 0));
+    tcg_gen_cvt64f_i64(v, r);
+    return v;
+}
+#endif
+
+/* fist/fistp m16: helper_fist_ST0 gives -32768 outside int16. */
+static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
+{
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_i32 t = tcg_temp_new_i32();
+
+        tcg_gen_extrl_i64_i32(arg, x87_wt_fist(s));
+        tcg_gen_ext16s_i32(t, arg);
+        tcg_gen_movcond_i32(TCG_COND_NE, arg, t, arg,
+                            tcg_constant_i32(-32768), arg);
+        return;
+    }
+#endif
+    gen_helper_fist_ST0(arg, tcg_env);
+}
+
 static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        tcg_gen_extrl_i64_i32(arg, x87_wt_fist(s));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_T_v(fistl_ST0, arg);
     fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
 static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        tcg_gen_mov_i64(arg, x87_wt_fist(s));
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg);
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
 }
@@ -3833,10 +3883,90 @@ static void gen_fabs_ST0(DisasContext *s)
     fp_pc_wrapper(gen_fabs_ST0)(s);
 }
 
+#if defined(XBOX)
+/*
+ * floatx80_is_neg(ST(i)) as a helper would see it, 0 or 1. An exact slot's
+ * image is st80f of its double, which copies the sign through. Otherwise
+ * env holds the register: its double while stale (x87_wt_dbl), else its
+ * image, whose sign the double may not have (ld80f gives the fixed-sign
+ * default NaN for an unnormal or pseudo-NaN).
+ */
+static TCGv_i32 x87_wt_sign(DisasContext *s, int i)
+{
+    TCGv_f64 d = x87_wt_get_st(s, i);       /* first: it may clear exact */
+    bool exact = x87_wt_exact(s, i);
+    bool stale = !exact && x87_maybe_stale(s, x87_phys(s, i));
+    TCGv_i32 neg, img = NULL;
+    TCGv_i64 b;
+
+    if (!exact) {
+        X87Ptr p = gen_stn_ptr(i);
+
+        img = tcg_temp_new_i32();
+        tcg_gen_ld16u_i32(img, p.base, p.ofs + 8);
+        tcg_gen_extract_i32(img, img, 15, 1);
+        if (!stale) {
+            return img;
+        }
+    }
+    neg = tcg_temp_new_i32();
+    b = tcg_temp_new_i64();
+    tcg_gen_mov64f_i64(b, d);
+    tcg_gen_extract_i64(b, b, 63, 1);
+    tcg_gen_extrl_i64_i32(neg, b);
+    if (stale) {
+        TCGv_i32 st = tcg_temp_new_i32();
+
+        tcg_gen_ld8u_i32(st, tcg_env, X87_STALE_OFS(x87_phys(s, i)));
+        tcg_gen_movcond_i32(TCG_COND_NE, neg, st, tcg_constant_i32(0),
+                            neg, img);
+    }
+    return neg;
+}
+#endif
+
+/*
+ * helper_fsqrt: a negative ST0 (-0 included) sets C2 and clears C3/C1/C0
+ * first; the result is double_to_floatx80_fast(sqrt(the double)), which
+ * FSQRT gives under the live FPCR (__hard ignores precision control).
+ */
 static void gen_fsqrt(DisasContext *s)
 {
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_i32 neg = x87_wt_sign(s, 0);
+        TCGv_i32 fpus = tcg_temp_new_i32();
+        TCGv_i32 t = tcg_temp_new_i32();
+        TCGv_f64 r = tcg_temp_new_f64();
+
+        tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
+        tcg_gen_andi_i32(t, fpus, ~0x4700);
+        tcg_gen_ori_i32(t, t, 0x400);
+        tcg_gen_movcond_i32(TCG_COND_NE, fpus, neg, tcg_constant_i32(0),
+                            t, fpus);
+        tcg_gen_st16_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
+        tcg_gen_sqrt_f64(r, x87_wt_get_st(s, 0));
+        x87_wt_set_st(s, 0, r);
+        return;
+    }
+#endif
     GEN_HELPER_FALLBACK_v_v(fsqrt);
     fp_pc_wrapper(gen_fsqrt)(s);
+}
+
+/* helper_frndint: double_to_floatx80_fast(rint(the double)). */
+static void gen_frndint(DisasContext *s)
+{
+#if defined(XBOX)
+    if (x87_wt(s)) {
+        TCGv_f64 r = tcg_temp_new_f64();
+
+        tcg_gen_rint_f64(r, x87_wt_get_st(s, 0));
+        x87_wt_set_st(s, 0, r);
+        return;
+    }
+#endif
+    gen_helper_frndint(tcg_env);
 }
 
 static void gen_clear_fpus_c2(DisasContext *s)
@@ -5160,6 +5290,48 @@ static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num)
     gen_jmp_rel(s, CODE32(s) ? MO_32 : MO_16, diff, tb_num);
 }
 
+#if defined(XBOX)
+/*
+ * fldcw in a write-through block, after the load of the new word. One that
+ * keeps the bits in the TB flags, RC (HF_FPU_RC) and precision control's
+ * bit 9 (HF_FPU_PC), leaves cpu_set_fpuc nothing to do but store fpuc and
+ * the softfloat precision, double or extended (bit 9 is set here): the
+ * hflags, the softfloat rounding mode and the host FPCR stay. So it skips
+ * the helper and chains to the next insn (goto_tb) with the TB's own
+ * flags. Azurik's CRT switches 0x23f to 0x133f or 0x27f and back around
+ * its math calls, 98% of its fldcw. Any other word takes the helper and
+ * the jump-cache probe, which reads the new RC/PC from env (gen_eob).
+ * Only while jmp_opt holds, so neither exit resets RF or the IRQ inhibit.
+ */
+static void gen_fldcw_wt(DisasContext *s, TCGv_i32 val)
+{
+    TCGLabel *slow = gen_new_label();
+    TCGv_i32 t = tcg_temp_new_i32();
+
+    QEMU_BUILD_BUG_ON(floatx80_precision_x != 0 ||
+                      floatx80_precision_d != 1);
+    gen_update_cc_op(s);
+    tcg_gen_ld16u_i32(t, tcg_env, offsetof(CPUX86State, fpuc));
+    tcg_gen_xor_i32(t, t, val);
+    tcg_gen_andi_i32(t, t, 0xe00);      /* RC, PC bit 9 */
+    tcg_gen_brcondi_i32(TCG_COND_NE, t, 0, slow);
+
+    tcg_gen_st16_i32(val, tcg_env, offsetof(CPUX86State, fpuc));
+    tcg_gen_extract_i32(t, val, 8, 1);  /* PC 3: extended, 2: double */
+    tcg_gen_xori_i32(t, t, 1);
+    tcg_gen_st8_i32(t, tcg_env,
+                    offsetof(CPUX86State,
+                             fp_status.floatx80_rounding_precision));
+    gen_jmp_rel_csize(s, 0, 0);
+
+    gen_set_label(slow);
+    gen_helper_fldcw(tcg_env, val);
+    gen_update_eip_next(s);
+    s->xemu_fldcw_exit = true;
+    gen_eob(s, DISAS_JUMP);
+}
+#endif
+
 static inline void gen_ldq_env_A0(DisasContext *s, int offset)
 {
     tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0, s->mem_index, MO_LEUQ);
@@ -5446,7 +5618,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     break;
                 case 3:
                 default:
-                    gen_helper_fist_ST0(s->tmp2_i32, tcg_env);
+                    gen_fist_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUW);
                     break;
@@ -5470,8 +5642,14 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x0d: /* fldcw mem */
             tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                 s->mem_index, MO_LEUW);
-            gen_helper_fldcw(tcg_env, s->tmp2_i32);
             update_fip = update_fdp = false;
+#if defined(XBOX)
+            if (x87_wt(s) && s->jmp_opt) {
+                gen_fldcw_wt(s, s->tmp2_i32);
+                break;
+            }
+#endif
+            gen_helper_fldcw(tcg_env, s->tmp2_i32);
             gen_update_eip_next(s);
 #if defined(XBOX)
             /*
@@ -5786,7 +5964,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 #endif
                 break;
             case 4: /* frndint */
-                gen_helper_frndint(tcg_env);
+                gen_frndint(s);
                 break;
             case 5: /* fscale */
                 gen_helper_fscale(tcg_env);
@@ -6744,7 +6922,8 @@ void tcg_x86_init(void)
      * FP ops (Windows ARM64 does not).
      */
     g_x87_wt = g_use_hard_fpu &&
-               tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0);
+               tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0) &&
+               tcg_op_supported(INDEX_op_rint_f64, TCG_TYPE_I64, 0);
 #if !defined(TARGET_X86_64)
     /* Write-through blocks address ST(i) from the key's TOP (x87_top). */
     xemu_x87_top_key = g_x87_wt;

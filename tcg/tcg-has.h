@@ -72,5 +72,8 @@
 #ifndef TCG_TARGET_HAS_ld80d
 #define TCG_TARGET_HAS_ld80d            0
 #endif
+#ifndef TCG_TARGET_HAS_rint_f64
+#define TCG_TARGET_HAS_rint_f64         0
+#endif
 
 #endif

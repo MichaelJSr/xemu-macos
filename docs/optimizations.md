@@ -473,13 +473,22 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   stale (`env->xemu_x87_dstale`), the next block reads the double, and
   C code converts a stale register when it touches it (2026-10-15, det
   heavy-f1 −2.5% Minsns/frame, −2.9% Mcycles/frame paired median, x87
-  lane).
+  lane). `fsqrt`,
+  `frndint` and `fist`/`fistp` run inline as well (FSQRT; FRINTX, then
+  FCVTZS for `fist`, under the live FPCR as the helpers' `sqrt`, `rint`
+  and `llrint` do), and an `fldcw` that keeps RC and precision control's
+  bit 9 stores `fpuc` and the softfloat precision itself and chains on to
+  the next insn instead of calling the helper and taking the probe; the
+  helper and the probe remain only for words that change those
+  (2026-10-15, det heavy-f1 −1.2% Minsns/frame, −4.2% Mcycles/frame
+  paired median, x87 lane).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
   word via fused `cvt_{rn,rm,rp}_i{32,64}_f{32,64}` TCG ops (single
   host `FCVT{N,M,P,Z}S` on AArch64). Those ops, `rint`, `rint_cvt` and
-  their backend lowerings were removed too.
+  their backend lowerings were removed too; `rint_f64` (FRINTX) is back
+  for the write-through `frndint` and `fist`.
 - **Signaling vs quiet compares (retired with the cache, 2026-10-15).**
   `coms_f32`/`coms_f64` (FCMPE / COMISS) for FCOMI; `com_f32`/`com_f64`
   for FUCOMI. The `coms` ops are removed; `com` (FCMP, upstream's COMISD
@@ -490,7 +499,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `cpu_post_load`, gdbstub, SEV, reset) routes through
   `cpu_set_fpuc` so `HF_FPU_RC` / `HF_FPU_PC` in `hflags` are
   rebuilt — the write-through x87 path reads `HF_FPU_PC` from
-  `tb->flags` and the inline SSE arithmetic `HF_FPU_RC`.
+  `tb->flags` and the inline SSE arithmetic `HF_FPU_RC`. The one
+  exception, the write-through `fldcw` fast path (`gen_fldcw_wt`), runs
+  only for a word that keeps RC and PC bit 9, so no `hflags` bit
+  changes, and stores what `update_fp_status` would change then
+  (`fpuc` and the softfloat precision).
   `update_fp_status` sets the calling thread's FPCR, and reset, the
   gdbstub and `cpu_post_load` call it from the main thread, so since
   2026-10-15 `x86_cpu_exec_enter` re-applies the x87 RC to the vCPU

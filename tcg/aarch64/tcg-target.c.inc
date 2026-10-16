@@ -681,6 +681,7 @@ typedef enum {
     INSN_FNEG_D     = 0x1e614000,
     INSN_FSQRT_S    = 0x1e21c000,
     INSN_FSQRT_D    = 0x1e61c000,
+    INSN_FRINTX_D   = 0x1e674000, /* round per FPCR.RMode */
     INSN_FCVT_SD    = 0x1e624000, /* double -> single */
     INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
 
@@ -4351,6 +4352,9 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     OP_f32_f64(sqrt):
         tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
         break;
+    case INDEX_op_rint_f64:
+        tcg_out_fp_1src(s, INSN_FRINTX_D, a0, a1);
+        break;
 
     case INDEX_op_st_f64:
         tcg_out_st(s, TCG_TYPE_F64, a0, a1, a2);
@@ -4985,6 +4989,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_chs_f64:
     case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
+    case INDEX_op_rint_f64:
     case INDEX_op_mov_f32:
     case INDEX_op_mov_f64:
     case INDEX_op_cvt32f_f64:
