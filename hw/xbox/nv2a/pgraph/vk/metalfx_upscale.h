@@ -56,7 +56,7 @@ bool metalfx_upscale(IOSurfaceRef inputSurface);
 bool metalfx_upscale_tex(void *inputTexture);
 void metalfx_destroy(void);
 
-/* Temporal upscaler (color + optional depth IOSurface, zero-motion) */
+/* Temporal upscaler (zero-motion; synthetic depth unless the _tex variant gets a zeta) */
 bool metalfx_temporal_is_supported(void);
 /*
  * depth_format_from: optional id<MTLTexture> whose pixel format the
@@ -69,8 +69,7 @@ bool metalfx_temporal_init(int input_w, int input_h,
 IOSurfaceRef metalfx_temporal_get_output_surface(void);
 void *metalfx_temporal_get_output_texture(void); /* retained; Metal-native */
 void metalfx_temporal_reset(void);
-bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
-                              IOSurfaceRef depthSurface);
+bool metalfx_temporal_upscale(IOSurfaceRef colorSurface);
 /*
  * Texture-input variant (exported compositor MTLTexture; no wrap).
  * depthTexture: optional exported zeta MTLTexture for real depth
@@ -97,8 +96,6 @@ IOSurfaceRef metalfx_interpolation_get_output_surface(void);
 void *metalfx_interpolation_get_output_texture(void); /* retained; Metal-native */
 bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                                     IOSurfaceRef colorB,
-                                    IOSurfaceRef depthA,
-                                    IOSurfaceRef depthB,
                                     float delta_time);
 /* Metal-native variant: prev/cur are retained id<MTLTexture> handles */
 bool metalfx_interpolation_generate_tex(void *prevTexture,

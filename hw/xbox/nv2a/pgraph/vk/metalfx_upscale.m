@@ -665,8 +665,6 @@ typedef struct MetalFXTemporalState {
     id<MTLCommandQueue> commandQueue;
     id<MTLFXTemporalScaler> scaler;
     id<MTLTexture> colorTexture;
-    id<MTLTexture> depthTexture;
-    IOSurfaceID cachedDepthSurfaceID;
     id<MTLTexture> motionTexture;
     id<MTLTexture> outputTexture;
     id<MTLTexture> outputSharedTexture;
@@ -706,8 +704,6 @@ static void metalfx_temporal_destroy_locked(void)
 {
     [g_temporal.scaler release];                g_temporal.scaler = nil;
     [g_temporal.colorTexture release];          g_temporal.colorTexture = nil;
-    [g_temporal.depthTexture release];          g_temporal.depthTexture = nil;
-    g_temporal.cachedDepthSurfaceID = 0;
     [g_temporal.motionTexture release];         g_temporal.motionTexture = nil;
     [g_temporal.syntheticDepthPipeline release];
     g_temporal.syntheticDepthPipeline = nil;
@@ -984,8 +980,7 @@ void metalfx_temporal_reset(void)
     os_unfair_lock_unlock(&g_metalfx_lock);
 }
 
-bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
-                              IOSurfaceRef depthSurface)
+bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
 {
     os_unfair_lock_lock(&g_metalfx_lock);
     if (!g_temporal.initialized || !colorSurface) {
@@ -1011,30 +1006,12 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
             return false;
         }
 
-        if (depthSurface) {
-            IOSurfaceID depthID = IOSurfaceGetID(depthSurface);
-            if (depthID != g_temporal.cachedDepthSurfaceID) {
-                id<MTLTexture> tex = texture_from_iosurface(
-                    g_temporal.device, depthSurface, MTLPixelFormatR32Float,
-                    g_temporal.inputWidth, g_temporal.inputHeight,
-                    MTLTextureUsageShaderRead);
-                if (tex) {
-                    [g_temporal.depthTexture release];
-                    g_temporal.depthTexture = tex;
-                    g_temporal.cachedDepthSurfaceID = depthID;
-                }
-            }
-        } else {
-            [g_temporal.depthTexture release];
-            g_temporal.depthTexture = nil;
-            g_temporal.cachedDepthSurfaceID = 0;
-        }
         id<MTLCommandBuffer> cb = [g_temporal.commandQueue commandBuffer];
         xemu_metal_watch_command_buffer(cb, "MetalFX temporal");
         metalfx_encode_input_wait(cb);
 
-        if (!g_temporal.depthTexture && g_temporal.syntheticDepthPipeline &&
-            g_temporal.syntheticDepthTexture && g_temporal.colorTexture) {
+        if (g_temporal.syntheticDepthPipeline &&
+            g_temporal.syntheticDepthTexture) {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:g_temporal.syntheticDepthPipeline];
             [enc setTexture:g_temporal.colorTexture atIndex:0];
@@ -1055,9 +1032,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface,
         g_temporal.scaler.colorTexture = g_temporal.colorTexture;
         g_temporal.scaler.outputTexture = output;
         g_temporal.scaler.motionTexture = g_temporal.motionTexture;
-        if (g_temporal.depthTexture) {
-            g_temporal.scaler.depthTexture = g_temporal.depthTexture;
-        } else if (g_temporal.syntheticDepthTexture) {
+        if (g_temporal.syntheticDepthTexture) {
             g_temporal.scaler.depthTexture = g_temporal.syntheticDepthTexture;
         }
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
@@ -1243,7 +1218,6 @@ typedef struct MetalFXInterpolationState {
     MetalFXOutputRing ring; /* Metal-native mode */
     id<MTLTexture> cachedColorCur;
     id<MTLTexture> cachedColorPrev;
-    id<MTLTexture> cachedDepthCur;   /* bound if caller provides depth */
     /*
      * Synthetic depth for the interpolator (luminance proxy, same
      * kernel as the temporal scaler but at interpolation resolution).
@@ -1254,12 +1228,6 @@ typedef struct MetalFXInterpolationState {
     id<MTLTexture> synthDepthTexture;
     IOSurfaceID lastColorCurID;
     IOSurfaceID lastColorPrevID;
-    IOSurfaceID lastDepthCurID;
-    /*
-     * MTLFXFrameInterpolator (macOS 26) takes color cur/prev but only
-     * current-frame depth — no prev-depth binding. If a future SDK adds
-     * it, reintroduce cachedDepthPrev + lastDepthPrevID here.
-     */
     int width, height;
     bool initialized;
     bool firstFrame;
@@ -1302,10 +1270,8 @@ static void metalfx_interpolation_destroy_locked(void)
     [g_interp.synthDepthTexture release];      g_interp.synthDepthTexture = nil;
     [g_interp.cachedColorCur release];         g_interp.cachedColorCur = nil;
     [g_interp.cachedColorPrev release];        g_interp.cachedColorPrev = nil;
-    [g_interp.cachedDepthCur release];         g_interp.cachedDepthCur = nil;
     g_interp.lastColorCurID = 0;
     g_interp.lastColorPrevID = 0;
-    g_interp.lastDepthCurID = 0;
     g_interp.linked_to_temporal = false;
     if (g_interp.outputSurface) {
         CFRelease(g_interp.outputSurface);
@@ -1575,8 +1541,6 @@ static id<MTLTexture> interp_encode_synth_depth(id<MTLCommandBuffer> cb,
 
 bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                                     IOSurfaceRef colorB,
-                                    IOSurfaceRef depthA,
-                                    IOSurfaceRef depthB,
                                     float delta_time)
 {
     if (@available(macOS 26.0, *)) {
@@ -1620,30 +1584,6 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                 return false;
             }
 
-            /*
-             * Only current-frame depth is bindable on MTLFXFrameInterpolator
-             * in macOS 26 (depthA / previous-depth is kept as an unused
-             * forward-compat parameter; see state struct comment).
-             */
-            if (depthB) {
-                IOSurfaceID depthBID = IOSurfaceGetID(depthB);
-                if (depthBID != g_interp.lastDepthCurID) {
-                    id<MTLTexture> tex = texture_from_iosurface(
-                        g_interp.device, depthB, MTLPixelFormatR32Float,
-                        g_interp.width, g_interp.height, readUsage);
-                    if (tex) {
-                        [g_interp.cachedDepthCur release];
-                        g_interp.cachedDepthCur = tex;
-                        g_interp.lastDepthCurID = depthBID;
-                    }
-                }
-            } else if (g_interp.cachedDepthCur) {
-                [g_interp.cachedDepthCur release];
-                g_interp.cachedDepthCur = nil;
-                g_interp.lastDepthCurID = 0;
-            }
-            (void)depthA;  /* reserved for prev-depth when Apple adds it */
-
             id<MTLTexture> output = ring_advance(&g_interp.ring);
             if (!output) {
                 output = g_interp.outputTexture;
@@ -1655,8 +1595,8 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             id<MTLCommandBuffer> cb = [g_interp.commandQueue commandBuffer];
             xemu_metal_watch_command_buffer(cb, "MetalFX interpolation");
             metalfx_encode_input_wait(cb);
-            id<MTLTexture> depth = g_interp.cachedDepthCur;
-            if (!depth && !g_interp.linked_to_temporal) {
+            id<MTLTexture> depth = nil;
+            if (!g_interp.linked_to_temporal) {
                 depth = interp_encode_synth_depth(cb, g_interp.cachedColorCur);
             }
             interp.depthTexture = depth; /* nil is valid */
@@ -1689,7 +1629,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
             return true;
         }
     }
-    (void)colorA; (void)colorB; (void)depthA; (void)depthB;
+    (void)colorA; (void)colorB;
     return false;
 }
 
@@ -1803,13 +1743,10 @@ void *metalfx_interpolation_get_output_texture(void)
 }
 
 bool metalfx_interpolation_generate(IOSurfaceRef colorA, IOSurfaceRef colorB,
-                                    IOSurfaceRef depthA, IOSurfaceRef depthB,
                                     float delta_time)
 {
     (void)colorA;
     (void)colorB;
-    (void)depthA;
-    (void)depthB;
     (void)delta_time;
     return false;
 }

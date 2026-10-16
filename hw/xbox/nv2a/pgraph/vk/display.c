@@ -2142,7 +2142,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             if (metalfx_interpolation_generate(
                     (IOSurfaceRef)disp->interp_prev_surface,
                     (IOSurfaceRef)disp->interp_cur_surface,
-                    NULL, NULL, delta_sec)) {
+                    delta_sec)) {
                 IOSurfaceRef interp =
                     metalfx_interpolation_get_output_surface();
                 uint32_t interp_id = interp ? IOSurfaceGetID(interp) : 0;
@@ -2327,12 +2327,10 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                 }
                 if (metalfx_temporal_init(disp->width, disp->height,
                                          out_w, out_h, zeta_tex)) {
-                    IOSurfaceRef depth_surface = NULL;
                     bool ok = disp->mtl_texture ?
                         metalfx_temporal_upscale_tex(disp->mtl_texture,
                                                      zeta_tex) :
-                        metalfx_temporal_upscale(current_surface,
-                                                 depth_surface);
+                        metalfx_temporal_upscale(current_surface);
                     if (ok) {
                         if (metal_native) {
                             present_tex =
