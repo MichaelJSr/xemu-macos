@@ -12,8 +12,8 @@ until it graduates into a design doc or a landing.
 These are the candidates the 2026-08-04 wave produced or reopened.
 Each has its measurement; none is planned work. Every entry is now a
 one-line stub kept under its number so citations elsewhere still
-resolve: items 1 and 2 are parked behind the bars they state, items 3
-and 4 are closed. The older ranked list below follows the same
+resolve: item 1 landed on 2026-10-15, item 2 is parked behind its bar,
+items 3 and 4 are closed. The older ranked list below follows the same
 convention: items 1-3 are closed stubs, item 4 is parked below its bar,
 item 5 is the standing correctness debt. Full write-ups are in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)
@@ -34,14 +34,16 @@ on a box loaded by other jobs:
   come from: `helper_stl_mmu` is 12.8% of vCPU samples inclusive, and
   three quarters of that is `user_write` (the PFIFO doorbell) blocked in
   `qemu_mutex_lock_impl` on `pfifo.lock` while the PFIFO thread holds it
-  (~9.6% of vCPU samples); `vp_write` is another ~2%. That doorbell
-  wait is the largest single non-x87 item on the vCPU; it is tracked
-  as Open frontier #1 in the `xemu-history` skill.
+  (~9.6% of vCPU samples); `vp_write` is another ~2%. The lockless
+  DMA_PUT doorbell (2026-10-15, `3391b92357`) cut the doorbell from 12%
+  to 2.2% of vCPU samples; the REPORTS_SUBMIT valve behind that wait is
+  now Open frontier #1 in the `xemu-history` skill.
 - **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
   `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
   `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
-  load helpers add at most ~0.3%. Item 1 stays parked (landed anyway
-  on 2026-10-15: instructions per frame showed what samples missed).
+  load helpers add at most ~0.3%. Item 1 was parked on this number and
+  landed on 2026-10-15 anyway: instructions per frame showed what
+  samples missed.
 - **x87 store traffic:** `helper_fsts_ST0__hard` 2.4% (plus
   `helper_fmov_FT0_STN__hard` 0.4%).
 - **Ret-memo:** `xemu: ras hits=45901 (0.5%) fills=10089110` over
@@ -64,8 +66,10 @@ on a box loaded by other jobs:
 Historical ranking (2026-07-19). Items 1-3 are closed (write-ups in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)), item 4 is parked below its bar, and
 item 5 is the standing correctness debt, still open. The live
-frontier is the 2026-10-11 profile above and the `xemu-history`
-skill's Open frontier.
+frontier is the `xemu-history` skill's Open frontier. The 2026-10-11
+profile above predates the 2026-10-15/16 TCG, x87 and threading work
+(inline MMX entry, x87 doubles and write-through, no per-TB W^X flip,
+lockless doorbell, vCPU QoS); re-profile before ranking work from it.
 
 1. **Trace/superblock/region formation in TCG — campaign closed 2026-07-18.** Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The machinery was removed on 2026-10-10.
 2. **Ret-memo remainder — closed 2026-07-18** (13-bit index −0.23 fps, 4/4). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments. The `XEMU_RETC_BITS` knob was removed on 2026-10-10; the width is fixed at 12 bits.

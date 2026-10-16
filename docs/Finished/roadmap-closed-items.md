@@ -2,9 +2,10 @@
 
 > **Finished.** These entries left [`roadmap.md`](../roadmap.md) on
 > 2026-10-10 because they are closed, except top candidates 1 and 2,
-> which followed on 2026-10-15 because they are parked with reopen bars
+> which followed on 2026-10-15 because they were parked with reopen bars
 > (ranged TLB flush: ~0.2% of vCPU vs a 1.5% gate; prewarm: a ≥ 16 ms
-> compile that survives a warm rerun). "Above" in those two means the
+> compile that survives a warm rerun). Top candidate 1 landed the same
+> day anyway (see its 2026-10-15 note). "Above" in those two means the
 > roadmap's 2026-10-11 profile. The roadmap keeps a one-line stub
 > under the same number so citations still resolve. Each is also
 > recorded in the [ledger](../optimizations.md). Text is moved verbatim;
@@ -47,6 +48,9 @@ derived from a POST-wave profile, not the audit's.
 **2026-10-11:** the post-wave profile exists (above): guest TLB
 flush + refill is ~0.2% of vCPU samples on `azurik-heavy-f1`, so the
 ranged flush has nothing to win; stays parked.
+**2026-10-15:** the ranged flush landed anyway (`tlb_flush_host_range`,
+`d1198c3592`): −2.3% host instructions per frame on deterministic
+offscreen heavy-f1; see the ledger.
 Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
 **`TLB full flushes` line is structurally unreachable on this guest**
 (it counts only `to_clean == ALL_MMUIDX_BITS`, and the Xbox target
