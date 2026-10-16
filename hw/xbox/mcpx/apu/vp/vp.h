@@ -41,6 +41,9 @@ typedef struct MCPXAPUVPSSLData {
     int ssl_seg;
 } MCPXAPUVPSSLData;
 
+/* The largest ADPCM block a voice reads: 36 bytes per channel. */
+#define ADPCM_MAX_BLOCK_BYTES (36 * 2)
+
 typedef struct MCPXAPUVoiceFilter {
     uint16_t voice;
     uint32_t *voice_buf;
@@ -56,6 +59,21 @@ typedef struct MCPXAPUVoiceFilter {
     int32_t svf_op_save[2];
     sv_filter svf[2];
     HrtfFilter hrtf;
+    /*
+     * The ADPCM block this voice decoded last: its bytes as read from
+     * guest RAM, and their decode. The resampler takes 32 samples at a
+     * time and a block holds 64, so each block used to be decoded twice.
+     * The decode is a function of the bytes alone, so voice_get_samples
+     * reads the block every time and reuses pcm while the bytes, size and
+     * channel count match. Host state, not in savestates.
+     */
+    struct {
+        uint32_t raw[ADPCM_MAX_BLOCK_BYTES / 4];
+        /* a mono block of 72 bytes decodes to 137 samples */
+        int16_t pcm[1 + (ADPCM_MAX_BLOCK_BYTES - 4) * 2];
+        uint8_t size; /* 0: empty */
+        uint8_t channels;
+    } adpcm;
 } MCPXAPUVoiceFilter;
 
 typedef struct VoiceWorkItem {

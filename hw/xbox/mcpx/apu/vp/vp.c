@@ -1253,6 +1253,37 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
     }
 }
 
+/*
+ * Decode an ADPCM block the voice just read into filter->adpcm.pcm, unless
+ * that already holds the decode of these bytes.
+ */
+static void voice_adpcm_decode(MCPXAPUVoiceFilter *filter,
+                               const uint32_t *block, size_t size,
+                               unsigned int channels)
+{
+    if (filter->adpcm.size == size && filter->adpcm.channels == channels &&
+        !memcmp(filter->adpcm.raw, block, size)) {
+        return;
+    }
+    memcpy(filter->adpcm.raw, block, size);
+    filter->adpcm.size = size;
+    filter->adpcm.channels = channels;
+    if (unlikely(adpcm_decode_block(filter->adpcm.pcm, (const uint8_t *)block,
+                                    size, channels) <
+                 ADPCM_SAMPLES_PER_BLOCK)) {
+        /*
+         * A malformed or short block leaves samples unwritten, which the
+         * old per-call stack buffer read as zeros (-ftrivial-auto-var-init
+         * =zero). Decode it over zeros, so that pcm stays a function of
+         * the bytes and such a block plays silence, not the tail of this
+         * voice's previous block.
+         */
+        memset(filter->adpcm.pcm, 0, sizeof(filter->adpcm.pcm));
+        adpcm_decode_block(filter->adpcm.pcm, (const uint8_t *)block, size,
+                           channels);
+    }
+}
+
 static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                        int num_samples_requested)
 {
@@ -1307,8 +1338,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
     size_t block_size;
 
     int adpcm_block_index = -1;
-    uint32_t adpcm_block[36*2/4];
-    int16_t adpcm_decoded[65*2]; // FIXME: Move out of here
+    uint32_t adpcm_block[ADPCM_MAX_BLOCK_BYTES / 4];
+    MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
+    const int16_t *adpcm_decoded = filter->adpcm.pcm;
 
     // FIXME: Only update if necessary
     struct McpxApuDebugVoice *dbg = &g_dbg.vp.v[v];
@@ -1460,8 +1492,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                         linear_addr += 4;
                     }
                 }
-                adpcm_decode_block(adpcm_decoded, (uint8_t *)adpcm_block,
-                                   block_size, channels);
+                voice_adpcm_decode(filter, adpcm_block, block_size, channels);
                 adpcm_block_index = block_index;
             }
 
@@ -2727,6 +2758,7 @@ void mcpx_apu_vp_reset(MCPXAPUState *d)
             linear_src_reset(&f->src, 0);
             memset(f->resample_buf, 0, sizeof(f->resample_buf));
             memset(f->svf, 0, sizeof(f->svf));
+            memset(&f->adpcm, 0, sizeof(f->adpcm));
         }
         memset(&d->vp.hrtf, 0, sizeof(d->vp.hrtf));
     }

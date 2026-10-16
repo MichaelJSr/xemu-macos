@@ -1518,6 +1518,19 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   voices (was always 2-channel with duplicated output); format
   changes trigger `src_delete` + recreate. Halves the resampler's
   inner loop for the common mono case.
+- **ADPCM block reuse.** Each voice keeps the ADPCM block it decoded
+  last, bytes and samples (`MCPXAPUVoiceFilter.adpcm`, host state).
+  `voice_get_samples` still reads the block from guest RAM on every call
+  and decodes only when the bytes, size or channel count differ: the
+  resampler pulls 32 samples at a time and a block holds 64, so each
+  block was decoded twice (half the decodes hit on heavy-f1 and
+  stream-e2). The decoder keeps each channel's predictor and step index
+  in locals (one loop for mono, one for stereo) instead of arrays
+  indexed by channel. A malformed or short block is decoded over zeros,
+  so its unwritten samples still play silence as the zeroed stack
+  buffer gave, not the voice's previous block. Det host instructions per
+  frame -0.14% on heavy-f1 and -0.42% on stream-e2 (6/6 pairs each),
+  -2.2% inside the APU tick.
 - **Accelerate / vDSP.** An inline fused loop (Apple Silicon; `vDSP_vsma`
   on Intel) for 8-bin × 32-sample mix accumulation, skipping zero-gain
   sends, `vDSP_vadd` for `float_accumulate`; `float_to_24b`
