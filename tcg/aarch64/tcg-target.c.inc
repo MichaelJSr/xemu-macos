@@ -4042,14 +4042,9 @@ static bool tcg_out_ld80f_stub(TCGContext *s, TCGLabelQemuLdst *l)
  *
  * Matches the C reference: floatx80_to_double_fast() in fpu_helper.c.
  */
-static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr,
-                              intptr_t ofs)
+static void tcg_out_ld80f_body(TCGContext *s, TCGReg rd, TCGReg ptr,
+                               intptr_t ofs, tcg_insn_unit **cold)
 {
-    TCGLabelQemuLdst *l;
-
-    l = x87_new_stub(s, tcg_out_ld80f_stub);
-    l->datalo_reg = rd;
-
     /* TMP0 = significand m, TMP1 = sign:exponent */
     tcg_out_ldst(s, I3312_LDRX, TCG_REG_TMP0, ptr, ofs, 3);
     tcg_out_ldst(s, I3312_LDRH, TCG_REG_TMP1, ptr, ofs + 8, 1);
@@ -4068,7 +4063,7 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr,
     tcg_out_insn(s, 3401, SUBSI, TCG_TYPE_I32,
                  TCG_REG_XZR, TCG_REG_TMP2, 2046);
     tcg_out_ccmp0(s, TCG_TYPE_I64, TCG_REG_TMP0, 0, TCG_COND_LTU);
-    l->label_ptr[0] = s->code_ptr;
+    *cold = s->code_ptr;
     tcg_out_insn(s, 3202, B_C, TCG_COND_GE, 0);
 
     /* TMP0 = m >> 11: the fraction in 51..0, the integer bit at 52 */
@@ -4087,6 +4082,56 @@ static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr,
                  TCG_REG_TMP0, TCG_REG_TMP0, TCG_REG_TMP1, 63);
     tcg_out32(s, INSN_FMOV_DX | ((rd - 32) & 0x1f)
               | ((TCG_REG_TMP0 & 0x1f) << 5));
+}
+
+static void tcg_out_ld80f_f64(TCGContext *s, TCGReg rd, TCGReg ptr,
+                              intptr_t ofs)
+{
+    TCGLabelQemuLdst *l;
+
+    l = x87_new_stub(s, tcg_out_ld80f_stub);
+    l->datalo_reg = rd;
+    tcg_out_ld80f_body(s, rd, ptr, ofs, &l->label_ptr[0]);
+    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
+}
+
+/* ld80d's image path: the whole ld80f, its cold cases right behind it. */
+static bool tcg_out_ld80d_stub(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    TCGLabelQemuLdst cold = {
+        .datalo_reg = l->datalo_reg,
+        .raddr = l->raddr,
+    };
+
+    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+        return false;
+    }
+    tcg_out_ld80f_body(s, l->datalo_reg, l->addr_reg, l->addr_ofs,
+                       &cold.label_ptr[0]);
+    tcg_out_goto(s, l->raddr);
+    return tcg_out_ld80f_stub(s, &cold);
+}
+
+/*
+ * tcg_out_ld80d_f64 — rd = the double at [ptr + ofs_dbl] while the byte at
+ * [ptr + ofs_stale] is set, else ld80f of the floatx80 at [ptr + ofs_img],
+ * out of line (target/i386 x87_wt_dbl). Three insns on the double's path.
+ * Offsets as for ld80f (tcg_gen_ld80d_f64 checks them); TMP0-TMP2 scratch.
+ */
+static void tcg_out_ld80d_f64(TCGContext *s, TCGReg rd, TCGReg ptr,
+                              intptr_t ofs_img, intptr_t ofs_stale,
+                              intptr_t ofs_dbl)
+{
+    TCGLabelQemuLdst *l;
+
+    l = x87_new_stub(s, tcg_out_ld80d_stub);
+    l->datalo_reg = rd;
+    l->addr_reg = ptr;
+    l->addr_ofs = ofs_img;
+    tcg_out_ldst(s, I3312_LDRB, TCG_REG_TMP0, ptr, ofs_stale, 0);
+    l->label_ptr[0] = s->code_ptr;
+    tcg_out_insn(s, 3201, CBZ, TCG_TYPE_I32, TCG_REG_TMP0, 0);
+    tcg_out_ldst(s, I3312_LDRVD, rd, ptr, ofs_dbl, 3);
     l->raddr = tcg_splitwx_to_rx(s->code_ptr);
 }
 
@@ -4269,6 +4314,10 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
             tcg_out_ld80f_f64(s, TCG_VEC_TMP0, a1, a2);
             tcg_out_fp_1src(s, INSN_FCVT_SD, a0, TCG_VEC_TMP0);
         }
+        break;
+
+    case INDEX_op_ld80d_f64:
+        tcg_out_ld80d_f64(s, a0, a1, a2, args[3], args[4]);
         break;
 
     OP_f32_f64(st80f):
@@ -4915,6 +4964,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O0_I1(r);
     case INDEX_op_ld80f_f32:
     case INDEX_op_ld80f_f64:
+    case INDEX_op_ld80d_f64:
         return C_O1_I1(W, r);
     case INDEX_op_st80f_f32:
     case INDEX_op_st80f_f64:

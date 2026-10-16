@@ -69,5 +69,8 @@
 #ifndef TCG_TARGET_HAS_pinned_globals
 #define TCG_TARGET_HAS_pinned_globals   0
 #endif
+#ifndef TCG_TARGET_HAS_ld80d
+#define TCG_TARGET_HAS_ld80d            0
+#endif
 
 #endif

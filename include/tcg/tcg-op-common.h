@@ -599,6 +599,8 @@ void tcg_gen_st_i32_slow(TCGv_i32 arg, tcg_target_long ofs);
 void tcg_gen_st_i64_slow(TCGv_i64 arg, tcg_target_long ofs);
 void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs);
 void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs);
+void tcg_gen_ld80d_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs_img,
+                       tcg_target_long ofs_stale, tcg_target_long ofs_dbl);
 void tcg_gen_abs_f32(TCGv_f32 ret, TCGv_f32 src);
 void tcg_gen_abs_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_add_f32(TCGv_f32 ret, TCGv_f32 arg1, TCGv_f32 arg2);

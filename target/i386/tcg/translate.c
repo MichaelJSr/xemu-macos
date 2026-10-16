@@ -43,6 +43,7 @@ static int g_use_hard_fpu;
 static int g_use_hard_fpu_inline;
 #if defined(XBOX)
 static int g_x87_wt; /* write-through inline x87 (x87_wt_*) */
+static int g_x87_dbl; /* doubles-primary registers (x87_wt_dbl) */
 bool xemu_x87_top_key; /* TB keys carry the x87 TOP (x87_top) */
 int xemu_sse_vfp; /* inline packed-single add/sub/mul/div (gen_fp_sse_inline) */
 #endif
@@ -310,6 +311,19 @@ typedef struct DisasContext {
      * a runtime amount, or when TBs are not keyed (x87_top_move).
      */
     int8_t x87_top;
+    /*
+     * Doubles-primary registers (x87_wt_dbl): physical registers known
+     * not stale here (env->xemu_x87_dstale clear), read with plain ld80f.
+     */
+    uint8_t wt_nstale;
+    /*
+     * No register can be stale at runtime here: an MMX entry converted
+     * any stale one (helper_enter_mmx_sync, behind a test of env's stale
+     * bytes), and no flush in this TB has stored a double since. Unlike wt_nstale this survives flushes:
+     * C code never makes a register stale, and gen_enter_mmx never runs
+     * inside a branch within an insn, the only kind a TB holds.
+     */
+    bool mmx_synced;
     /* The call being emitted reads only its arguments (gen_pure_call_*). */
     bool pure_call;
     /* fpstt is 0 and every tag valid since an MMX insn (gen_enter_mmx). */
@@ -2021,11 +2035,19 @@ static void x87_top_move(DisasContext *s, int move)
     }
 }
 
-/* After a helper that leaves fpstt = top, or -1: by a runtime amount. */
+/*
+ * After a helper that leaves fpstt = top, or -1: by a runtime amount.
+ * Those helpers convert every stale register first (xemu_x87_sync), so
+ * the rest of the TB, which addresses registers from env->fpstt, runs
+ * with images only (x87_wt_dbl).
+ */
 static void x87_top_set(DisasContext *s, int top)
 {
     if (xemu_x87_top_key) {
         s->x87_top = top;
+        if (top < 0) {
+            s->wt_nstale = 0xff;
+        }
     }
 }
 
@@ -2055,6 +2077,110 @@ static uint64_t x87_key_cs_base(DisasContext *s)
 static int x87_wt_base(DisasContext *s)
 {
     return s->x87_top >= 0 ? (s->x87_top - s->fpstt_delta) & 7 : -1;
+}
+
+/*
+ * Doubles-primary registers, in write-through blocks with a static TOP.
+ * A flush stores a pending result's double to env->xemu_x87_dbl and sets
+ * its env->xemu_x87_dstale byte instead of converting it with st80f, and
+ * a TB that reads a register takes the double while the byte is set
+ * (ld80d), else ld80f of the image. So a value passed from one TB or
+ * basic block to the next is not converted at all, and one a later
+ * write replaces never is.
+ *
+ * Only C code needs the image: whatever reads or writes env->fpregs
+ * converts a stale register first (fpu_helper.c x87_reg for the helpers,
+ * xemu_x87_sync elsewhere, including helper_enter_mmx_sync before MMX
+ * code reads the registers raw: gen_enter_mmx), which clears its byte.
+ * TB code that moves an image raw moves the double and the byte with it
+ * (x87_wt_copy_dbl), flips the double's sign with the image's
+ * (fchs/fabs), and converts through a helper for FT0 (gen_fmov_FT0_STN).
+ * A mid-block restore lands images and clears their bytes
+ * (xemu_x87_restore_pend). Blocks without the write-through path never
+ * see a byte set: precision control single takes cpu_set_fpuc, which
+ * converts all first (update_fp_status), and a helper after which the
+ * TOP is unknown converts all as well (x87_top_set), so the rest of that
+ * TB stores images.
+ */
+static bool x87_wt_dbl(DisasContext *s)
+{
+    return g_x87_dbl && s->x87_top >= 0 && x87_wt(s);
+}
+
+/* Physical register of ST(i), for a static TOP. */
+static int x87_phys(DisasContext *s, int i)
+{
+    return (s->x87_top + i) & 7;
+}
+
+#define X87_IMG_OFS(p)   (offsetof(CPUX86State, fpregs[0].d) + \
+                          (p) * sizeof(FPReg))
+#define X87_DBL_OFS(p)   (offsetof(CPUX86State, xemu_x87_dbl) + \
+                          (p) * sizeof(double))
+#define X87_STALE_OFS(p) (offsetof(CPUX86State, xemu_x87_dstale) + (p))
+
+/* Whether physical register p may be stale (its byte set) here. */
+static bool x87_maybe_stale(DisasContext *s, int p)
+{
+    return x87_wt_dbl(s) && !(s->wt_nstale & (1 << p));
+}
+
+/* env->xemu_x87_dstale[p] = 0, unless known already. */
+static void x87_clear_stale(DisasContext *s, int p)
+{
+    if (x87_maybe_stale(s, p)) {
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env, X87_STALE_OFS(p));
+        s->wt_nstale |= 1 << p;
+    }
+}
+
+/*
+ * After a raw image copy ST(d) = ST(src), or a swap: give ST(d) the
+ * double and the byte of ST(src) as well, so it has the same value
+ * whichever is current; with swap, ST(src) gets ST(d)'s.
+ */
+static void x87_wt_copy_dbl(DisasContext *s, int d, int src, bool swap)
+{
+    int pd = x87_phys(s, d), ps = x87_phys(s, src);
+    bool kd = !x87_maybe_stale(s, pd), ks = !x87_maybe_stale(s, ps);
+    TCGv_i64 dd = NULL, ds = NULL;
+    TCGv_i32 bd = NULL, bs = NULL;
+
+    if (!x87_wt_dbl(s) || (kd && ks)) {
+        return;
+    }
+    if (!ks) {
+        ds = tcg_temp_new_i64();
+        bs = tcg_temp_new_i32();
+        tcg_gen_ld_i64(ds, tcg_env, X87_DBL_OFS(ps));
+        tcg_gen_ld8u_i32(bs, tcg_env, X87_STALE_OFS(ps));
+    }
+    if (swap && !kd) {
+        dd = tcg_temp_new_i64();
+        bd = tcg_temp_new_i32();
+        tcg_gen_ld_i64(dd, tcg_env, X87_DBL_OFS(pd));
+        tcg_gen_ld8u_i32(bd, tcg_env, X87_STALE_OFS(pd));
+    }
+    if (ks) {
+        x87_clear_stale(s, pd);
+    } else {
+        tcg_gen_st_i64(ds, tcg_env, X87_DBL_OFS(pd));
+        tcg_gen_st8_i32(bs, tcg_env, X87_STALE_OFS(pd));
+        s->wt_nstale &= ~(1 << pd);
+    }
+    if (swap) {
+        if (kd) {
+            if (!ks) {
+                tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                                X87_STALE_OFS(ps));
+                s->wt_nstale |= 1 << ps;
+            }
+        } else {
+            tcg_gen_st_i64(dd, tcg_env, X87_DBL_OFS(ps));
+            tcg_gen_st8_i32(bd, tcg_env, X87_STALE_OFS(ps));
+            s->wt_nstale &= ~(1 << ps);
+        }
+    }
 }
 #endif
 
@@ -2315,6 +2441,8 @@ static void gen_flush_fp(DisasContext *s)
     }
     s->wt_ft0 = NULL;
     s->wt_exact = 0;
+    /* Code after a BB_END op may be reached by a branch as well. */
+    s->wt_nstale = 0;
 #endif
 }
 
@@ -2335,7 +2463,8 @@ static void gen_flush_fp(DisasContext *s)
  *    conversions bit for bit;
  *  - each register's double, as the next helper would read it back, is
  *    kept in a temp until the next flush (gen_flush_fp), so a chain of
- *    x87 instructions does not reconvert. st80f is exact, so
+ *    x87 instructions does not reconvert, and past the flush in env
+ *    (x87_wt_dbl). st80f is exact, so
  *    that is the computed result itself; only a double loaded from memory
  *    can be a signalling NaN, which reads back quieted (x87_wt_canon);
  *  - the FPCR is never written: the helpers round with whatever it holds.
@@ -2389,9 +2518,22 @@ static TCGv_f64 x87_wt_get_st(DisasContext *s, int i)
     int r = (s->fpstt_delta + i) & 7;
     TCGv_f64 *slot = &s->wt_st[r];
     if (!*slot) {
-        X87Ptr p = gen_stn_ptr(i);
         *slot = tcg_temp_new_f64();
-        tcg_gen_ld80f_f64(*slot, p.base, p.ofs);
+        if (x87_maybe_stale(s, x87_phys(s, i))) {
+            /* The double while stale (x87_wt_dbl), else ld80f. */
+            int ph = x87_phys(s, i);
+            tcg_gen_ld80d_f64(*slot, tcg_env, X87_IMG_OFS(ph),
+                              X87_STALE_OFS(ph), X87_DBL_OFS(ph));
+            if (unlikely(xemu_x87_census_on())) {
+                TCGv_i64 b = tcg_temp_new_i64();
+                tcg_gen_ld8u_i64(b, tcg_env, X87_STALE_OFS(ph));
+                xemu_x87_gen_acc_i64(&xemu_x87_dbl_hit, b);
+                xemu_gen_counter_inc(&xemu_x87_dbl_reads);
+            }
+        } else {
+            X87Ptr p = gen_stn_ptr(i);
+            tcg_gen_ld80f_f64(*slot, p.base, p.ofs);
+        }
         s->wt_exact &= ~(1 << r);
     }
     return *slot;
@@ -2426,12 +2568,13 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
 }
 
 /*
- * Deferred stores. A result's st80f waits for the next flush (gen_flush_fp:
+ * Deferred stores. A result's store waits for the next flush (gen_flush_fp:
  * every helper call except the argument-only pure calls (gen_pure_call_begin),
  * every BB_END op and the TB end), so a slot written again
  * before then, which most x87 chains do (fld, fmul, fadd... on one ST0),
- * converts once. Only an overwrite cancels a store: a popped slot is still
- * stored, since FSAVE/FXSAVE expose empty registers.
+ * stores once: its double, the image left stale, with a static TOP
+ * (x87_wt_dbl), else st80f. Only an overwrite cancels a store: a popped
+ * slot is still stored, since FSAVE/FXSAVE expose empty registers.
  *
  * A mid-block exit (a guest fault, cpu_io_recompile) must still leave env
  * as the eager stores would. Only a guest access (qemu_ld/st) or a helper
@@ -2458,18 +2601,21 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
  * Invariants: a pending slot always has its double in wt_st; and env's
  * image of a pending slot is stale, so TCG code that reads or writes the
  * raw image (x87_gen_copy, fxch, the sign ops, the constants) goes through
- * the cached double or x87_wt_sync first. Helpers need nothing: their call
- * flushes, and the pure calls that skip the flush read only their
- * arguments. fpstt does not move between an insn's start and its last
- * guest access (the restore does not roll it back, so no front-end op may).
+ * the cached double or x87_wt_sync first (and, for a register a flush left
+ * stale, x87_wt_dbl). Helpers need nothing: their call flushes, and the
+ * pure calls that skip the flush read only their arguments. An insn's own
+ * push, pop and tag changes may not reach env before its last guest
+ * access, since a restore does not roll them back; x87_wt_land_early
+ * lands only the stack state deferred from earlier insns, before the
+ * first access.
  */
 static bool x87_wt_pending(DisasContext *s, int slot)
 {
     return s->wt_pend & (1 << slot);
 }
 
-/* Store wt_st slot `slot` now, as the eager path did. */
-static void x87_wt_store(DisasContext *s, int slot)
+/* Store wt_st slot `slot`'s image now, as the eager path did. */
+static void x87_wt_store_img(DisasContext *s, int slot)
 {
     X87Ptr p = gen_stn_ptr((slot - s->fpstt_delta) & 7);
 
@@ -2479,11 +2625,36 @@ static void x87_wt_store(DisasContext *s, int slot)
     }
 }
 
+/*
+ * The flush's store of a pending slot: its double, the image left stale
+ * (x87_wt_dbl), or st80f.
+ */
+static void x87_wt_store(DisasContext *s, int slot)
+{
+    int ph;
+
+    if (!x87_wt_dbl(s)) {
+        x87_wt_store_img(s, slot);
+        return;
+    }
+    ph = (x87_wt_base(s) + slot) & 7;
+    tcg_gen_st_f64(s->wt_st[slot], tcg_env, X87_DBL_OFS(ph));
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env, X87_STALE_OFS(ph));
+    s->wt_nstale &= ~(1 << ph);
+    s->mmx_synced = false;
+    if (unlikely(xemu_x87_census_on())) {
+        xemu_gen_counter_inc(&xemu_x87_dbl_stores);
+    }
+}
+
 /* Make env's image of a slot current before TCG code reads it raw. */
 static void x87_wt_sync(DisasContext *s, int slot)
 {
     if (x87_wt_pending(s, slot)) {
-        x87_wt_store(s, slot);
+        x87_wt_store_img(s, slot);
+        if (x87_wt_dbl(s)) {
+            x87_clear_stale(s, (x87_wt_base(s) + slot) & 7);
+        }
         s->wt_pend &= ~(1 << slot);
     }
 }
@@ -2855,9 +3026,15 @@ static void x87_wt_boundary_check(DisasContext *s)
         return;
     }
     for (int r = 0; r < 8; r++) {
-        xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol,
-                                  gen_stn_ptr((r - s->fpstt_delta) & 7),
-                                  x87_wt_pending(s, r));
+        if (x87_wt_pending(s, r) || !x87_wt_dbl(s)) {
+            xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol,
+                                      gen_stn_ptr((r - s->fpstt_delta) & 7),
+                                      x87_wt_pending(s, r));
+        } else {
+            /* Poison exactly while stale (x87_wt_dbl). */
+            xemu_x87_gen_poison_stale(&xemu_x87_wt_bnd_viol,
+                                      (x87_wt_base(s) + r) & 7);
+        }
     }
     xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol, gen_ft0_ptr(), false);
     xemu_gen_counter_inc(&xemu_x87_wt_bnd_checks);
@@ -3145,6 +3322,12 @@ static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
     if (x87_lean()) {
         int src = (s->fpstt_delta + st_index) & 7;
         if (x87_wt(s)) {
+            if (!x87_wt_pending(s, src) &&
+                x87_maybe_stale(s, x87_phys(s, st_index))) {
+                /* Its image may be stale: the helper converts it first. */
+                gen_helper_fmov_FT0_STN(tcg_env, tcg_constant_i32(st_index));
+                return;
+            }
             x87_wt_sync(s, src);
         }
         x87_gen_copy(gen_ft0_ptr(), gen_stn_ptr(st_index));
@@ -3191,6 +3374,7 @@ static void x87_lean_move(DisasContext *s, int d, int src_i)
     }
     x87_gen_copy(gen_stn_ptr(d), gen_stn_ptr(src_i));
     if (x87_wt(s)) {
+        x87_wt_copy_dbl(s, d, src_i, false);
         s->wt_st[dst] = s->wt_st[src];
         s->wt_pend &= ~(1 << dst);
         x87_wt_set_exact(s, dst, s->wt_exact & (1 << src));
@@ -3260,12 +3444,14 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
             bool ea = s->wt_exact & (1 << a), eb = s->wt_exact & (1 << b);
             if (!pb) {
                 x87_gen_copy(gen_stn_ptr(0), gen_stn_ptr(st_index));
+                x87_wt_copy_dbl(s, 0, st_index, false);
                 s->wt_pend &= ~(1 << a);
                 s->wt_st[a] = vb;
                 x87_wt_set_exact(s, a, eb);
             }
             if (!pa) {
                 x87_gen_copy(gen_stn_ptr(st_index), gen_stn_ptr(0));
+                x87_wt_copy_dbl(s, st_index, 0, false);
                 s->wt_pend &= ~(1 << b);
                 s->wt_st[b] = va;
                 x87_wt_set_exact(s, b, ea);
@@ -3291,6 +3477,7 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
         tcg_gen_st_i64(hi0, pn.base, pn.ofs + 8);
         tcg_gen_st_i64(lon, p0.base, p0.ofs);
         tcg_gen_st_i64(hin, p0.base, p0.ofs + 8);
+        x87_wt_copy_dbl(s, 0, st_index, true);
         if (x87_wt(s)) {
             TCGv_f64 t = s->wt_st[a];
             bool ea = s->wt_exact & (1 << a);
@@ -3318,6 +3505,26 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
     s->fpregs[(s->fpstt_delta + st_index) & 7] = i;
 }
 
+#if defined(XBOX)
+/*
+ * Refuter, at every MMX entry (XEMU_X87_REFUTE): MMX code moves the x87
+ * images raw, so no register may be stale (x87_wt_dbl) once it runs.
+ */
+static void gen_mmx_stale_check(void)
+{
+    TCGv_i64 t;
+
+    if (!g_x87_dbl || likely(!xemu_x87_refute_on())) {
+        return;
+    }
+    t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, tcg_env, offsetof(CPUX86State, xemu_x87_dstale));
+    tcg_gen_setcondi_i64(TCG_COND_NE, t, t, 0);
+    xemu_x87_gen_acc_i64(&xemu_x87_mmx_viol, t);
+    xemu_gen_counter_inc(&xemu_x87_mmx_checks);
+}
+#endif
+
 static void gen_enter_mmx(DisasContext *s)
 {
 #if defined(XBOX)
@@ -3328,16 +3535,37 @@ static void gen_enter_mmx(DisasContext *s)
      * FXRSTOR, XRSTOR), which clears mmx_entered; until then x87_top stays
      * 0 too. The flush lands the write-through x87 results and FIP first,
      * as the helper call's gen_bb_epilogue did; nothing becomes pending
-     * again before such an insn. Write-through blocks keep fpstt in env
-     * and leave the fpstt global unused (x87_wt_land), so they store
-     * env->fpstt; the flush started a new interval, whose wt_top reads it
-     * back.
+     * again before such an insn, so no double is stored before the next
+     * entry either. Write-through blocks keep fpstt in env and leave the
+     * fpstt global unused (x87_wt_land), so they store env->fpstt; the
+     * flush started a new interval, whose wt_top reads it back.
      */
     if (s->mmx_entered) {
+        gen_mmx_stale_check();
         return;
     }
     s->mmx_entered = true;
     gen_flush_fp(s);
+    if (g_x87_dbl && !s->mmx_synced) {
+        /*
+         * MMX code moves the images raw, so a register left as a double
+         * (x87_wt_dbl) is converted first. Decided after the flush, which
+         * may itself store one (x87_wt_store clears mmx_synced). At
+         * runtime one is stale only if this TB or an earlier one stored a
+         * double since the last conversion: one load of the eight stale
+         * bytes skips the call otherwise. Both ways no register is stale
+         * past the label, which mmx_synced records for the TB.
+         */
+        TCGLabel *synced = gen_new_label();
+        TCGv_i64 t = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(t, tcg_env, offsetof(CPUX86State, xemu_x87_dstale));
+        tcg_gen_brcondi_i64(TCG_COND_EQ, t, 0, synced);
+        gen_helper_enter_mmx_sync(tcg_env);
+        gen_set_label(synced);
+        s->mmx_synced = true;
+    }
+    gen_mmx_stale_check();
     if (x87_wt(s)) {
         tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
                        offsetof(CPUX86State, fpstt));
@@ -3539,6 +3767,30 @@ static bool x87_wt_sign_pending(DisasContext *s, bool chs)
     x87_wt_pend(s, slot, r);
     return true;
 }
+
+/*
+ * After the sign op on ST0's image, the same on its double, which is the
+ * value while the image is stale (x87_wt_dbl): st80f copies the sign
+ * through on every path.
+ */
+static void x87_wt_sign_dbl(DisasContext *s, bool chs)
+{
+    int ph;
+    TCGv_i64 t;
+
+    if (!x87_wt(s) || !x87_maybe_stale(s, x87_phys(s, 0))) {
+        return;
+    }
+    ph = x87_phys(s, 0);
+    t = tcg_temp_new_i64();
+    tcg_gen_ld_i64(t, tcg_env, X87_DBL_OFS(ph));
+    if (chs) {
+        tcg_gen_xori_i64(t, t, INT64_MIN);
+    } else {
+        tcg_gen_andi_i64(t, t, INT64_MAX);
+    }
+    tcg_gen_st_i64(t, tcg_env, X87_DBL_OFS(ph));
+}
 #endif
 
 static void gen_fchs_ST0(DisasContext *s)
@@ -3549,6 +3801,7 @@ static void gen_fchs_ST0(DisasContext *s)
             return;
         }
         x87_gen_sign(gen_stn_ptr(0), true);
+        x87_wt_sign_dbl(s, true);
         /*
          * Reload rather than negate the cached double: the conversion does
          * not commute with the sign for an 80-bit value beyond double range
@@ -3571,6 +3824,7 @@ static void gen_fabs_ST0(DisasContext *s)
             return;
         }
         x87_gen_sign(gen_stn_ptr(0), false);
+        x87_wt_sign_dbl(s, false);
         s->wt_st[s->fpstt_delta & 7] = NULL;   /* as in gen_fchs_ST0 */
         return;
     }
@@ -3795,6 +4049,12 @@ static void gen_fld1_ST0(DisasContext *s)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        if (x87_wt_dbl(s)) {
+            /* A pending double, as any result (x87_wt_dbl). */
+            x87_wt_set_st(s, 0, x87_wt_from_bits(
+                              tcg_constant_i64(0x3FF0000000000000ull)));
+            return;
+        }
         x87_gen_const(gen_stn_ptr(0), 0x3fff, 0x8000000000000000ULL);
         if (x87_wt(s)) {
             s->wt_st[s->fpstt_delta & 7] =
@@ -3813,6 +4073,10 @@ static void gen_fldz_ST0(DisasContext *s)
 {
 #if defined(XBOX)
     if (x87_lean()) {
+        if (x87_wt_dbl(s)) {
+            x87_wt_set_st(s, 0, x87_wt_from_bits(tcg_constant_i64(0)));
+            return;
+        }
         x87_gen_const(gen_stn_ptr(0), 0, 0);
         if (x87_wt(s)) {
             s->wt_st[s->fpstt_delta & 7] =
@@ -6484,6 +6748,9 @@ void tcg_x86_init(void)
 #if !defined(TARGET_X86_64)
     /* Write-through blocks address ST(i) from the key's TOP (x87_top). */
     xemu_x87_top_key = g_x87_wt;
+    /* ... and keep doubles across flushes (x87_wt_dbl). */
+    g_x87_dbl = xemu_x87_top_key &&
+                tcg_op_supported(INDEX_op_ld80d_f64, TCG_TYPE_I64, 0);
 #endif
     /*
      * Packed-single add/sub/mul/div as host vector FP ops, bit for bit
@@ -6597,6 +6864,8 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->wt_insn_fp = false;
     dc->wt_w2_fp = false;
     dc->wt_w2_pos = NULL;
+    dc->wt_nstale = 0;
+    dc->mmx_synced = false;
     dc->pure_call = false;
     dc->mmx_entered = false;
 #endif

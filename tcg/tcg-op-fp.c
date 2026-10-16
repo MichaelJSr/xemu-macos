@@ -110,6 +110,23 @@ void tcg_gen_ld80f_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs)
                 tcgv_ptr_arg(ptr), ofs);
 }
 
+/*
+ * ret = the double at [ptr + ofs_dbl] while the byte at [ptr + ofs_stale]
+ * is set, else ld80f of [ptr + ofs_img] (target/i386 x87_wt_dbl). Only
+ * where the backend has it (tcg_op_supported), with offsets its loads
+ * take as immediates.
+ */
+void tcg_gen_ld80d_f64(TCGv_f64 ret, TCGv_ptr ptr, tcg_target_long ofs_img,
+                       tcg_target_long ofs_stale, tcg_target_long ofs_dbl)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_ld80d);
+    tcg_debug_assert(ofs_img >= 0 && ofs_img < 4096 && !(ofs_img & 7));
+    tcg_debug_assert(ofs_stale >= 0 && ofs_stale < 4096);
+    tcg_debug_assert(ofs_dbl >= 0 && ofs_dbl < 32768 && !(ofs_dbl & 7));
+    tcg_gen_op5(INDEX_op_ld80d_f64, TCG_TYPE_F64, tcgv_f64_arg(ret),
+                tcgv_ptr_arg(ptr), ofs_img, ofs_stale, ofs_dbl);
+}
+
 void tcg_gen_abs_f32(TCGv_f32 ret, TCGv_f32 src)
 {
     tcg_gen_op2(INDEX_op_abs_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(src));

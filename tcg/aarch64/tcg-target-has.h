@@ -78,6 +78,8 @@
 #define TCG_TARGET_HAS_st_f64           TCG_TARGET_HAS_fpu
 /* ... emitted in the next guest access's slow-path stub */
 #define TCG_TARGET_HAS_st_f64_slow      TCG_TARGET_HAS_fpu
+/* LDRB, CBZ to an out-of-line ld80f, LDR Dt */
+#define TCG_TARGET_HAS_ld80d            TCG_TARGET_HAS_fpu
 
 /*
  * tcg_pin_env_global: x8-x15 and x24-x27, call-clobbered and call-saved

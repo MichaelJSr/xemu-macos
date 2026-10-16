@@ -142,7 +142,11 @@ int x86_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
         int st_index = n - IDX_FP_REGS;
         int r_index = (st_index + env->fpstt) % 8;
         floatx80 *fp = &env->fpregs[r_index].d;
-        int len = gdb_get_reg64(mem_buf, cpu_to_le64(fp->low));
+        int len;
+#if defined(XBOX) && defined(CONFIG_TCG)
+        xemu_x87_sync(env);
+#endif
+        len = gdb_get_reg64(mem_buf, cpu_to_le64(fp->low));
         len += gdb_get_reg16(mem_buf, cpu_to_le16(fp->high));
         return len;
     } else if (n >= IDX_XMM_REGS && n < IDX_XMM_REGS + CPU_NB_REGS) {
@@ -300,6 +304,9 @@ int x86_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
         }
     } else if (n >= IDX_FP_REGS && n < IDX_FP_REGS + 8) {
         floatx80 *fp = (floatx80 *) &env->fpregs[n - IDX_FP_REGS];
+#if defined(XBOX) && defined(CONFIG_TCG)
+        xemu_x87_sync(env);
+#endif
         fp->low = le64_to_cpu(* (uint64_t *) mem_buf);
         fp->high = le16_to_cpu(* (uint16_t *) (mem_buf + 8));
         return 10;

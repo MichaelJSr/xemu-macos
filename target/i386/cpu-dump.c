@@ -498,7 +498,11 @@ void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                      env->mxcsr);
         for(i=0;i<8;i++) {
             CPU_LDoubleU u;
+#if defined(XBOX) && defined(CONFIG_TCG)
+            u.d = xemu_x87_reg_value(env, i);   /* may run beside the vCPU */
+#else
             u.d = env->fpregs[i].d;
+#endif
             qemu_fprintf(f, "FPR%d=%016" PRIx64 " %04x",
                          i, u.l.lower, u.l.upper);
             if ((i & 1) == 1)

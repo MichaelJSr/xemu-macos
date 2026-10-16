@@ -61,6 +61,8 @@ void tcg_x86_init(void);
 #if defined(XBOX)
 void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
                       uint64_t word2);
+/* translate.c: convert register i's double into its image (x87_wt_dbl). */
+void xemu_x87_materialize_reg(CPUX86State *env, int i);
 /* fpu_helper.c: 1 = SSE host fast path on, 2 = differential self-check. */
 int xemu_sse_host_mode(void);
 /* translate.c: inline packed-single add/sub/mul/div on (HF_SSE_DFL kept). */

@@ -3234,6 +3234,16 @@ void tcg_optimize(TCGContext *s)
             remove_mem_copy_in(&ctx, op->args[1], op->args[1] + 7);
             done = finish_folding(&ctx, op);
             break;
+        case INDEX_op_st80f_f32:
+        case INDEX_op_st80f_f64:
+            /* A floatx80 image's 10 bytes, as for st_f64_slow. */
+            if (op->args[1] == tcgv_ptr_arg(tcg_env)) {
+                remove_mem_copy_in(&ctx, op->args[2], op->args[2] + 9);
+            } else {
+                remove_mem_copy_all(&ctx);
+            }
+            done = finish_folding(&ctx, op);
+            break;
         case INDEX_op_st:
         case INDEX_op_st_vec:
             done = fold_tcg_st_memcopy(&ctx, op);

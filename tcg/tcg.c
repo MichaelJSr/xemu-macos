@@ -2839,6 +2839,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_st_f64;
     case INDEX_op_st_f64_slow:
         return TCG_TARGET_HAS_st_f64_slow;
+    case INDEX_op_ld80d_f64:
+        return TCG_TARGET_HAS_ld80d;
 
     default:
         if (op < INDEX_op_last_generic) {

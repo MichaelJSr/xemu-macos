@@ -223,6 +223,9 @@ static int cpu_pre_save(void *opaque)
     int i;
     env->v_tpr = env->int_ctl & V_TPR_MASK;
     /* FPU */
+#if defined(XBOX) && defined(CONFIG_TCG)
+    xemu_x87_sync(env);     /* the images are what migrates */
+#endif
     env->fpus_vmstate = (env->fpus & ~0x3800) | (env->fpstt & 0x7) << 11;
     env->fptag_vmstate = 0;
     for(i = 0; i < 8; i++) {
@@ -328,6 +331,10 @@ static int cpu_post_load(void *opaque, int version_id)
         error_report("Unsupported old non-softfloat CPU state");
         return -EINVAL;
     }
+#if defined(XBOX) && defined(CONFIG_TCG)
+    /* The loaded images are current (before cpu_set_fpuc may sync). */
+    xemu_x87_drop(env);
+#endif
 
     /*
      * Resync hflags (HF_FPU_RC / HF_FPU_PC): vmstate only restores

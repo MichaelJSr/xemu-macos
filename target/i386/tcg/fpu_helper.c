@@ -33,8 +33,27 @@
 
 /* float macros */
 #define FT0    (env->ft0)
-#define ST0    (env->fpregs[env->fpstt].d)
-#define ST(n)  (env->fpregs[(env->fpstt + (n)) & 7].d)
+#if defined(XBOX) && defined(__aarch64__)
+/*
+ * xemu: a register through its image, converted first while the
+ * write-through path has left it stale (translate.c x87_wt_dbl), so that
+ * reads and writes alike see the current value. Only the aarch64
+ * write-through path leaves one stale.
+ */
+static inline floatx80 *x87_reg(CPUX86State *env, int i)
+{
+    if (unlikely(env->xemu_x87_dstale[i])) {
+        xemu_x87_materialize_reg(env, i);
+    }
+    return &env->fpregs[i].d;
+}
+#define FPR(i) (*x87_reg(env, (i)))
+#else
+#define FPR(i) (env->fpregs[i].d)
+#endif
+/* ST(n), and physical register i (FPR) */
+#define ST0    FPR(env->fpstt)
+#define ST(n)  FPR((env->fpstt + (n)) & 7)
 #define ST1    ST(1)
 
 #define FPU_RC_SHIFT        10
@@ -799,7 +818,7 @@ void helper_flds_ST0(CPUX86State *env, uint32_t val)
 
     new_fpstt = (env->fpstt - 1) & 7;
     u.i = val;
-    env->fpregs[new_fpstt].d = float32_to_floatx80(u.f, &env->fp_status);
+    FPR(new_fpstt) = float32_to_floatx80(u.f, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
     merge_exception_flags(env, old_flags);
@@ -816,7 +835,7 @@ void helper_fldl_ST0(CPUX86State *env, uint64_t val)
 
     new_fpstt = (env->fpstt - 1) & 7;
     u.i = val;
-    env->fpregs[new_fpstt].d = float64_to_floatx80(u.f, &env->fp_status);
+    FPR(new_fpstt) = float64_to_floatx80(u.f, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
     merge_exception_flags(env, old_flags);
@@ -835,7 +854,7 @@ void helper_fildl_ST0(CPUX86State *env, int32_t val)
     FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
-    env->fpregs[new_fpstt].d = int32_to_floatx80(val, &env->fp_status);
+    FPR(new_fpstt) = int32_to_floatx80(val, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
 
@@ -848,7 +867,7 @@ void helper_fildll_ST0(CPUX86State *env, int64_t val)
     FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
-    env->fpregs[new_fpstt].d = int64_to_floatx80(val, &env->fp_status);
+    FPR(new_fpstt) = int64_to_floatx80(val, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
 
@@ -969,7 +988,7 @@ void helper_fldt_ST0(CPUX86State *env, target_ulong ptr)
     access_prepare(&ac, env, ptr, 10, MMU_DATA_LOAD, GETPC());
 
     new_fpstt = (env->fpstt - 1) & 7;
-    env->fpregs[new_fpstt].d = do_fldt(&ac, ptr);
+    FPR(new_fpstt) = do_fldt(&ac, ptr);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
 }
@@ -1299,6 +1318,17 @@ void update_fp_status(CPUX86State *env)
 {
     int rnd_mode;
     FloatX80RoundPrec rnd_prec;
+
+#if defined(XBOX) && defined(__aarch64__)
+    /*
+     * Precision control single (HF_FPU_PC clear) takes TBs off the
+     * write-through path, whose lean ops move images raw: none may be
+     * stale there (translate.c x87_wt_dbl).
+     */
+    if (!(env->fpuc & 0x200)) {
+        xemu_x87_sync(env);
+    }
+#endif
 
     /* set rounding mode */
     rnd_mode = (env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT;
@@ -1835,6 +1865,10 @@ void helper_f2xm1(CPUX86State *env)
 void helper_fptan(CPUX86State *env)
 {
     double fptemp = floatx80_to_double(env, ST0);
+
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
 
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
@@ -2848,6 +2882,10 @@ void helper_fsincos(CPUX86State *env)
 {
     double fptemp = floatx80_to_double(env, ST0);
 
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
+
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
@@ -2992,7 +3030,7 @@ static void do_fstenv(X86Access *ac, target_ulong ptr, int data32)
         if (env->fptags[i]) {
             fptag |= 3;
         } else {
-            tmp.d = env->fpregs[i].d;
+            tmp.d = FPR(i);
             exp = EXPD(tmp);
             mant = MANTD(tmp);
             if (exp == 0 && mant == 0) {
@@ -3070,6 +3108,9 @@ void helper_fldenv(CPUX86State *env, target_ulong ptr, int data32)
 {
     X86Access ac;
 
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
     access_prepare(&ac, env, ptr, 14 << data32, MMU_DATA_STORE, GETPC());
     do_fldenv(&ac, ptr, data32);
 }
@@ -3118,6 +3159,9 @@ void helper_frstor(CPUX86State *env, target_ulong ptr, int data32)
     int size = (14 << data32) + 80;
     X86Access ac;
 
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
     access_prepare(&ac, env, ptr, size, MMU_DATA_LOAD, GETPC());
     do_frstor(&ac, ptr, data32);
 }
@@ -3500,6 +3544,9 @@ void helper_fxrstor(CPUX86State *env, target_ulong ptr)
     uintptr_t ra = GETPC();
     X86Access ac;
 
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
     /* The operand must be 16 byte aligned */
     if (ptr & 0xf) {
         raise_exception_ra(env, EXCP0D_GPF, ra);
@@ -3545,6 +3592,9 @@ static void do_xrstor(X86Access *ac, target_ulong ptr,
         } else {
             do_fninit(env);
             memset(env->fpregs, 0, sizeof(env->fpregs));
+#if defined(XBOX)
+            xemu_x87_drop(env);
+#endif
         }
     }
     if (rfbm & XSTATE_SSE_MASK) {
@@ -3604,6 +3654,9 @@ void helper_xrstor(CPUX86State *env, target_ulong ptr, uint64_t rfbm)
     uint64_t xstate_bv;
     unsigned size, size_ext;
 
+#if defined(XBOX)
+    xemu_x87_sync(env);     /* the TOP becomes unknown: x87_top_set */
+#endif
     do_xsave_chk(env, ptr, ra);
 
     /* Begin with just the minimum size to validate the header. */
@@ -3852,6 +3905,19 @@ void helper_enter_mmx(CPUX86State *env)
     *(uint32_t *)(env->fptags) = 0;
     *(uint32_t *)(env->fptags + 4) = 0;
 }
+
+#if defined(XBOX)
+/*
+ * xemu: MMX code reads and writes the images raw, so the first MMX insn
+ * of a TB, and the first after the TB may have left a register stale,
+ * converts them all first (translate.c gen_enter_mmx, x87_wt_dbl).
+ */
+void helper_enter_mmx_sync(CPUX86State *env)
+{
+    xemu_x87_sync(env);
+    helper_enter_mmx(env);
+}
+#endif
 
 void helper_emms(CPUX86State *env)
 {

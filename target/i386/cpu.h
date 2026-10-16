@@ -1940,6 +1940,14 @@ typedef struct CPUArchState {
     uint8_t xemu_x87_fptags_chk[8];
     /* ... and its per-insn FDP under icount (xemu_x87_defer_fdp). */
     uint64_t xemu_x87_fdp_chk;
+    /*
+     * Doubles-primary x87 registers (translate.c x87_wt_dbl), by physical
+     * register: while xemu_x87_dstale[p] is set, fpregs[p] is stale and
+     * the register's value is st80f(xemu_x87_dbl[p]), an exact double.
+     * Not migrated: cpu_pre_save materializes, cpu_post_load clears.
+     */
+    double xemu_x87_dbl[8];
+    uint8_t xemu_x87_dstale[8] QEMU_ALIGNED(8);
 #endif
 #ifdef TARGET_X86_64
     uint8_t xtilecfg[64];
@@ -3058,6 +3066,36 @@ TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs);
  */
 #define XEMU_TB_KEY_TOP_SHIFT 32
 extern bool xemu_x87_top_key;
+
+/*
+ * Doubles-primary x87 registers (env->xemu_x87_dstale): C code that reads
+ * or writes env->fpregs directly calls xemu_x87_sync() first, which
+ * converts every stale register's double into its image (translate.c).
+ * xemu_x87_reg_value() reads one register without writing env.
+ */
+void xemu_x87_materialize(CPUX86State *env);
+floatx80 xemu_x87_reg_value(CPUX86State *env, int i);
+
+static inline bool xemu_x87_any_stale(CPUX86State *env)
+{
+    uint64_t v;
+
+    memcpy(&v, env->xemu_x87_dstale, sizeof(v));
+    return v != 0;
+}
+
+static inline void xemu_x87_sync(CPUX86State *env)
+{
+    if (unlikely(xemu_x87_any_stale(env))) {
+        xemu_x87_materialize(env);
+    }
+}
+
+/* Forget the doubles: env->fpregs was just loaded wholesale. */
+static inline void xemu_x87_drop(CPUX86State *env)
+{
+    memset(env->xemu_x87_dstale, 0, sizeof(env->xemu_x87_dstale));
+}
 #endif
 
 /* majority(NOT a, b, c) = (a ^ b) ? b : c */

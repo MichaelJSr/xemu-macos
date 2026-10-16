@@ -468,7 +468,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   chained exits pass their TOP as a constant (2026-10-15, det heavy-f1
   −2.1% Minsns/frame on the x87 lane and −2.45% on top of the pinned
   registers and TLB memo, Mcycles/frame neutral on both: code run at
-  several TOPs is translated once per TOP).
+  several TOPs is translated once per TOP). Results also cross flushes
+  as doubles: a flush stores the double and marks the register's image
+  stale (`env->xemu_x87_dstale`), the next block reads the double, and
+  C code converts a stale register when it touches it (2026-10-15, det
+  heavy-f1 −2.5% Minsns/frame, −2.9% Mcycles/frame paired median, x87
+  lane).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
@@ -621,9 +626,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (~50 MMX insns per 8 pixels). Now the TB's first MMX insn emits the
   x87 flush the call implied, `fpstt = 0` and one 8-byte tag store;
   later ones emit nothing until an x87 escape, EMMS/FEMMS, FXRSTOR or
-  XRSTOR clears `mmx_entered`. Det cold boot (on the MMX lane, before
-  the pinned registers; 1800 frames, 6 pairs, load 19-24): Minsns/frame
-  −10.4% (6/6), Mcycles/frame
+  XRSTOR clears `mmx_entered`. Since the x87 registers stay doubles
+  between blocks (x87 bullet above), that first entry also loads the
+  eight stale bytes (`env->xemu_x87_dstale`, one 8-byte load) and calls
+  `helper_enter_mmx_sync` only when one is set. Det cold boot (on the
+  MMX lane, before the pinned registers; 1800 frames, 6 pairs, load
+  19-24): Minsns/frame −10.4% (6/6), Mcycles/frame
   −17.8% (6/6). heavy-f1, stream-e2 and the movie anchor run no MMX.
   The MMX `punpck{l,h}{bw,wd,dq}` and `pmulhw` then became i64 TCG ops
   (shift/deposit; sign-extract, multiply, deposit), which leaves the

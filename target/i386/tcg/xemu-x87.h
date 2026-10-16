@@ -10,7 +10,7 @@
  * uint64 written only by the single xbox vCPU thread, dumped from atexit()
  * after that thread has stopped.
  *
- * Three mechanisms live here:
+ * Four mechanisms live here:
  *
  *   (1) XEMU_X87_CENSUS=1   Gate-0 census. Counts the per-instruction
  *       FIP/FDP store pairs against the deferred updates that replace them,
@@ -38,7 +38,14 @@
  *       every guest access with stores to land copies their doubles in
  *       line, for the restore to check the shadows its slow path stored.
  *       And it checks TOP-keyed translation (translate.c x87_top): the
- *       static TOP against env at every insn boundary (top-key-*).
+ *       static TOP against env at every insn boundary (top-key-*), and
+ *       that an MMX entry without a sync finds no register stale
+ *       (mmx-*, translate.c gen_enter_mmx).
+ *       A register a flush left stale (translate.c x87_wt_dbl) keeps its
+ *       poison until converted, so the checks expect the poison exactly
+ *       where a store is pending or the register is stale.
+ *   (4) The doubles-primary registers' C side (translate.c x87_wt_dbl):
+ *       converting a stale register's double into its image.
  *
  * insn_start word 2 carries both deferrals: bits 0-11 the FIP distance,
  * bits 12-19 the pending x87 stores by shadow slot, bits 20-22 how far
@@ -83,6 +90,10 @@ static uint64_t xemu_x87_wt_cmp_inline;  /* fucom*, fcomi* on the doubles */
 static uint64_t xemu_x87_wt_cmp_helper;  /* ... left to the helper */
 static uint64_t xemu_x87_wt_fcmov_inline; /* fcmov as a select */
 static uint64_t xemu_x87_wt_fcmov_branch; /* ... as a branch */
+static uint64_t xemu_x87_dbl_reads;      /* ld80d executed (x87_wt_dbl) */
+static uint64_t xemu_x87_dbl_hit;        /* ... that took the double */
+static uint64_t xemu_x87_dbl_stores;     /* flush stores of a double */
+static uint64_t xemu_x87_dbl_mat;        /* stale images converted in C */
 
 /* (3) refuter ------------------------------------------------------------- */
 static uint64_t xemu_x87_ptr_checks;     /* deferred-vs-legacy comparisons */
@@ -112,6 +123,8 @@ static uint64_t xemu_x87_wt_top_checks;  /* deferred fpstt/tags checked */
 static uint64_t xemu_x87_wt_top_viol;    /* ... != the eager copy */
 static uint64_t xemu_x87_key_checks;     /* static TOP (x87_top) checked */
 static uint64_t xemu_x87_key_viol;       /* ... != env's fpstt */
+static uint64_t xemu_x87_mmx_checks;     /* MMX entries (after any sync) */
+static uint64_t xemu_x87_mmx_viol;       /* ... with a register stale */
 
 static void xemu_x87_dump(void)
 {
@@ -141,6 +154,12 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_wt_cmp_helper,
             (unsigned long long)xemu_x87_wt_fcmov_inline,
             (unsigned long long)xemu_x87_wt_fcmov_branch);
+    fprintf(stderr, "xemu: x87 doubles: reads=%llu took-double=%llu "
+            "stores=%llu converted-in-c=%llu\n",
+            (unsigned long long)xemu_x87_dbl_reads,
+            (unsigned long long)xemu_x87_dbl_hit,
+            (unsigned long long)xemu_x87_dbl_stores,
+            (unsigned long long)xemu_x87_dbl_mat);
     fprintf(stderr, "xemu: x87 refuter: "
             "exc-ptr-checks=%llu exc-ptr-violations=%llu restores=%llu "
             "restore-pending=%llu boundaries=%llu boundary-pending=%llu "
@@ -161,7 +180,7 @@ static void xemu_x87_dump(void)
             "wt-restores=%llu wt-restore-pending=%llu "
             "wt-restore-violations=%llu wt-stack-checks=%llu "
             "wt-stack-violations=%llu top-key-checks=%llu "
-            "top-key-violations=%llu\n",
+            "top-key-violations=%llu mmx-checks=%llu mmx-violations=%llu\n",
             (unsigned long long)xemu_x87_wt_bnd_checks,
             (unsigned long long)xemu_x87_wt_bnd_viol,
             (unsigned long long)xemu_x87_wt_flush_viol,
@@ -173,7 +192,9 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_wt_top_checks,
             (unsigned long long)xemu_x87_wt_top_viol,
             (unsigned long long)xemu_x87_key_checks,
-            (unsigned long long)xemu_x87_key_viol);
+            (unsigned long long)xemu_x87_key_viol,
+            (unsigned long long)xemu_x87_mmx_checks,
+            (unsigned long long)xemu_x87_mmx_viol);
 }
 
 static void xemu_x87_arm_dump(void)
@@ -302,11 +323,32 @@ static void xemu_x87_gen_poison_check(uint64_t *counter, X87Ptr p, bool want)
     xemu_x87_gen_acc_i64(counter, d);
 }
 
-/* Emit a count of poisoned images among all eight registers and FT0. */
+/*
+ * Emit "*counter += (image of physical register p is poison) != its
+ * xemu_x87_dstale byte": a stale register keeps the poison its pending
+ * store left (translate.c x87_wt_dbl), any other holds none.
+ */
+static void xemu_x87_gen_poison_stale(uint64_t *counter, int p)
+{
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 st = tcg_temp_new_i64();
+
+    tcg_gen_ld_i64(lo, tcg_env, X87_IMG_OFS(p));
+    tcg_gen_setcondi_i64(TCG_COND_EQ, lo, lo, XEMU_X87_POISON_LO);
+    tcg_gen_ld8u_i64(st, tcg_env, X87_STALE_OFS(p));
+    tcg_gen_setcondi_i64(TCG_COND_NE, st, st, 0);
+    tcg_gen_setcond_i64(TCG_COND_NE, lo, lo, st);
+    xemu_x87_gen_acc_i64(counter, lo);
+}
+
+/*
+ * Emit a count of poisoned images among the eight registers that are not
+ * stale, and FT0.
+ */
 static void xemu_x87_gen_poison_scan(uint64_t *counter)
 {
-    for (int i = 0; i < 8; i++) {
-        xemu_x87_gen_poison_check(counter, gen_stn_ptr(i), false);
+    for (int p = 0; p < 8; p++) {
+        xemu_x87_gen_poison_stale(counter, p);
     }
     xemu_x87_gen_poison_check(counter, gen_ft0_ptr(), false);
 }
@@ -570,6 +612,7 @@ static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend,
                 }
             }
             f->d = v;
+            env->xemu_x87_dstale[(env->fpstt + top + b) & 7] = 0;
             xemu_x87_wt_landed++;
         }
     }
@@ -579,7 +622,10 @@ static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend,
 #endif
     if (refute) {
         for (int i = 0; i < 8; i++) {
-            xemu_x87_wt_rst_viol += env->fpregs[i].d.low == XEMU_X87_POISON_LO;
+            /* A stale register keeps its poison (translate.c x87_wt_dbl). */
+            xemu_x87_wt_rst_viol += env->fpregs[i].d.low ==
+                                    XEMU_X87_POISON_LO &&
+                                    !env->xemu_x87_dstale[i];
         }
     }
 }
@@ -635,6 +681,40 @@ void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
     xemu_x87_restore_pend(env, (word2 >> XEMU_X87_W2_PEND_SHIFT) & 0xff,
                           top);
     xemu_x87_restore_stack(env, word2, top);
+}
+
+/* (4) doubles-primary registers (translate.c x87_wt_dbl) ---------------- */
+
+/* Convert register i's double into its image, which is then current. */
+void xemu_x87_materialize_reg(CPUX86State *env, int i)
+{
+#if defined(__aarch64__)
+    env->fpregs[i].d = xemu_x87_double_to_floatx80(env->xemu_x87_dbl[i]);
+    xemu_x87_dbl_mat++;
+#else
+    /* Only the aarch64 write-through path leaves registers stale. */
+    g_assert_not_reached();
+#endif
+    env->xemu_x87_dstale[i] = 0;
+}
+
+void xemu_x87_materialize(CPUX86State *env)
+{
+    for (int i = 0; i < 8; i++) {
+        if (env->xemu_x87_dstale[i]) {
+            xemu_x87_materialize_reg(env, i);
+        }
+    }
+}
+
+floatx80 xemu_x87_reg_value(CPUX86State *env, int i)
+{
+#if defined(__aarch64__)
+    if (env->xemu_x87_dstale[i]) {
+        return xemu_x87_double_to_floatx80(env->xemu_x87_dbl[i]);
+    }
+#endif
+    return env->fpregs[i].d;
 }
 
 /* Run-length proxy: closed by the same flush that closes the register cache. */
