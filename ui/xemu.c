@@ -60,6 +60,7 @@
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
 #include "xemu-present.h"
+#include "xemu-events.h"
 
 #include "data/xemu_64x64.png.h"
 
@@ -2685,6 +2686,7 @@ int main(int argc, char **argv)
 
     xemu_main_loop_lock();
     xemu_input_init();
+    xemu_events_ready();   /* QMP XEMU_READY */
     xemu_main_loop_unlock();
     /* Machine and pads exist: a harness may loadvm or migrate-incoming now. */
     fprintf(stderr, "xemu: ready\n");

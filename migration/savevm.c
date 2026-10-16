@@ -76,6 +76,7 @@
 #include "options.h"
 
 #include "ui/xemu-snapshots.h"
+#include "ui/xemu-events.h"
 
 const unsigned int postcopy_ram_discard_version;
 
@@ -3079,6 +3080,9 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
     MigrationIncomingState *mis = migration_incoming_get_current();
     int ret;
 
+#ifdef XBOX
+    xemu_events_load_begin();   /* before any return: the source is single-use */
+#endif
     if (qemu_savevm_state_blocked(errp)) {
         return -EINVAL;
     }
@@ -3198,6 +3202,7 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
         /* Readiness signal for harnesses (loadvm and incoming migration). */
         fprintf(stderr, "xemu: state loaded\n");
     }
+    xemu_events_load_done(ret == 0);   /* QMP XEMU_STATE_LOADED */
 #endif
 
     return ret;
@@ -3559,6 +3564,9 @@ bool load_snapshot(const char *name, const char *vmstate,
         ret = -EINVAL;
         goto err_drain;
     }
+#ifdef XBOX
+    xemu_events_load_source(XEMU_LOAD_SOURCE_LOADVM, name);
+#endif
     ret = qemu_loadvm_state(f, errp);
     migration_incoming_state_destroy();
 

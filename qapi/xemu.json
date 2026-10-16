@@ -220,3 +220,126 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-checkpoints', 'returns': ['XemuCheckpointInfo'] }
+
+##
+# Readiness and device events
+# ===========================
+##
+
+##
+# QMP events for what the stderr lines "xemu: ready", "xemu: state
+# loaded" and "xemu: Vulkan device lost; exiting" report; the lines
+# stay.  A client receives an event only once it has sent
+# qmp_capabilities, so one that connects at launch reads
+# @query-xemu-status after negotiating and waits for @XEMU_READY only
+# while @ready is false.
+##
+
+##
+# @XemuStatus:
+#
+# @ready: @XEMU_READY has been emitted (the machine and its pads
+#     exist; a loadvm or an incoming migration works from then on)
+#
+# @loads: successful machine state loads since launch (see
+#     @XEMU_STATE_LOADED)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuStatus',
+  'data': { 'ready': 'bool', 'loads': 'int' } }
+
+##
+# @query-xemu-status:
+#
+# Return whether xemu is ready and how many loads it has made.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-status', 'returns': 'XemuStatus' }
+
+##
+# @XEMU_READY:
+#
+# Emitted once per launch, when the machine and its pads exist, just
+# before the stderr line "xemu: ready".
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_READY' }
+
+##
+# @XemuLoadSource:
+#
+# What loaded a machine state.
+#
+# @loadvm: a snapshot in the disk image (HMP loadvm, QMP
+#     snapshot-load, the UI, -loadvm)
+#
+# @checkpoint: @xemu-checkpoint-restore
+#
+# @incoming: an incoming migration (-incoming, migrate-incoming)
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuLoadSource',
+  'data': [ 'loadvm', 'checkpoint', 'incoming' ] }
+
+##
+# @XEMU_STATE_LOADED:
+#
+# Emitted after each successful load of a machine state, with the
+# stderr line "xemu: state loaded": before loadvm, snapshot-load's job
+# or @xemu-checkpoint-restore returns, and when an incoming migration
+# has read its stream.  A failed load emits nothing.
+#
+# @source: what loaded it
+#
+# @name: the snapshot or checkpoint (absent for an incoming migration)
+#
+# @frame: the frame counter (see @query-xemu-frame) at the load
+#
+# @loads: successful loads since launch, this one included
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_STATE_LOADED',
+  'data': { 'source': 'XemuLoadSource', '*name': 'str', 'frame': 'int',
+            'loads': 'int' } }
+
+##
+# @XemuDeviceLostReason:
+#
+# @device-lost: the GPU driver returned VK_ERROR_DEVICE_LOST
+#
+# @fence-timeout: a GPU fence did not signal within 5 s (a hung GPU or
+#     driver)
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuDeviceLostReason',
+  'data': [ 'device-lost', 'fence-timeout' ] }
+
+##
+# @XEMU_DEVICE_LOST:
+#
+# Emitted at most once, when the Vulkan renderer loses its GPU
+# device, just before xemu ends: a headless xemu then prints "xemu:
+# Vulkan device lost; exiting" and exits with status 1; a windowed
+# one, or any xemu after a fence timeout, prints its diagnostic and
+# aborts.
+# Delivery is best effort: the event is lost if the client left
+# earlier output unread.
+#
+# @reason: what failed
+#
+# @where: the wait that failed (absent when a Vulkan call returned the
+#     error)
+#
+# @vk-result: the VkResult
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_DEVICE_LOST',
+  'data': { 'reason': 'XemuDeviceLostReason', '*where': 'str',
+            'vk-result': 'int' } }

@@ -20,6 +20,7 @@
 #include "renderer.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-present.h"
+#include "ui/xemu-events.h"
 #include <limits.h>
 
 /*
@@ -34,7 +35,13 @@
 
 void pgraph_vk_exit_if_headless_device_lost(int vk_result)
 {
-    if (vk_result == VK_ERROR_DEVICE_LOST && xemu_headless_mode()) {
+    if (vk_result != VK_ERROR_DEVICE_LOST) {
+        return;
+    }
+    /* QMP XEMU_DEVICE_LOST, windowed too (it then traps). */
+    xemu_events_device_lost(XEMU_DEVICE_LOST_REASON_DEVICE_LOST, NULL,
+                            vk_result);
+    if (xemu_headless_mode()) {
         fprintf(stderr, "xemu: Vulkan device lost; exiting\n");
         _exit(EXIT_FAILURE);
     }
@@ -47,6 +54,14 @@ static void vk_wait_for_fence_or_die(VkDevice device, VkFence fence,
         vkWaitForFences(device, 1, &fence, VK_TRUE, NV2A_VK_FENCE_WAIT_NS);
     if (res == VK_SUCCESS) {
         return;
+    }
+    /* QMP XEMU_DEVICE_LOST, naming the wait. */
+    if (res == VK_TIMEOUT) {
+        xemu_events_device_lost(XEMU_DEVICE_LOST_REASON_FENCE_TIMEOUT, where,
+                                res);
+    } else if (res == VK_ERROR_DEVICE_LOST) {
+        xemu_events_device_lost(XEMU_DEVICE_LOST_REASON_DEVICE_LOST, where,
+                                res);
     }
     if (res == VK_TIMEOUT) {
         fprintf(stderr,

@@ -208,6 +208,31 @@ Other automation interfaces (windowed or headless):
   no video or gamepad subsystem; `loadvm` works from then on, no fixed
   sleep needed) and `xemu: state loaded` after every `loadvm` or incoming
   migration.
+- **QMP events** carry the same news, so nothing needs to poll the log
+  (the lines stay):
+  - `XEMU_READY`, once per launch, with `xemu: ready`. QMP sends events
+    only to a client that has sent `qmp_capabilities`, and the socket
+    answers about when xemu gets ready, so the event may go out first:
+    after negotiating, call `query-xemu-status` (`{ready, loads}`) and
+    wait for `XEMU_READY` only while `ready` is false.
+  - `XEMU_STATE_LOADED {source, name, frame, loads}`, once per
+    successful load, with `xemu: state loaded`: `source` is `loadvm`
+    (any load of a disk-image snapshot; `name` is its tag),
+    `checkpoint` (`xemu-checkpoint-restore`; `name` is the checkpoint)
+    or `incoming` (an incoming migration, no `name`). `frame` is the
+    `query-xemu-frame` counter at the load; `loads` counts this
+    process's successful loads, this one included. It arrives before
+    the reply of the `loadvm` (or `human-monitor-command`) or
+    `xemu-checkpoint-restore` that caused it. After
+    `migrate-incoming`, which replies before it loads, it is the signal
+    that the load is done. A failed load sends nothing.
+  - `XEMU_DEVICE_LOST {reason, where, vk-result}`, at most once, just
+    before xemu dies of a lost Vulkan device: `reason` is
+    `device-lost` (a headless xemu then prints `xemu: Vulkan device
+    lost; exiting` and exits with status 1, a windowed one traps) or
+    `fence-timeout` (no fence within 5 s; xemu aborts). `where` names
+    the fence wait, if a wait saw it. Best effort: the event is lost
+    if the client left earlier output unread.
 - **Park and resume a machine** without touching the HDD's snapshots:
   QMP `stop`, then `migrate {"uri": "file:/path"}` (poll `query-migrate`
   for `completed`). Resume in a new xemu started with `-incoming defer`

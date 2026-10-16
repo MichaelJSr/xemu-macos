@@ -20,6 +20,7 @@
 #include "system/block-backend.h"
 #include "block/block.h"
 #include "xemu-checkpoints.h"
+#include "xemu-events.h"
 
 #define SECTOR 512
 
@@ -255,8 +256,11 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_restore(const char *name,
         error_setg(errp, "no checkpoint '%s'", name);
         return NULL;
     }
+    /* Names the load in XEMU_STATE_LOADED; the load itself resets it. */
+    xemu_events_load_source(XEMU_LOAD_SOURCE_CHECKPOINT, name);
     if (!xemu_checkpoint_load_state(c->state, c->size,
                                     checkpoint_revert_disks, &r, errp)) {
+        xemu_events_load_source(XEMU_LOAD_SOURCE_INCOMING, NULL);
         return NULL;
     }
     if (r.failed) {
