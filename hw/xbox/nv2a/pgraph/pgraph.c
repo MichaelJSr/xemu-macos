@@ -875,28 +875,18 @@ static void pgraph_method_non_inc(MethodFunc handler, METHOD_HANDLER_ARG_DECL)
     DEF_METHOD_INT(gclass, name)
 
 /*
- * The pusher's per-method call (pfifo.c): inline it there under clang LTO.
- * Only the PGO profile used to, so a stale one brought the call back.
+ * The per-method preamble: the CTX_CACHE -> CTX_SWITCH copy for the
+ * subchannel, then the graphics class it selects.
  */
-#ifdef __clang__
-QEMU_ALWAYS_INLINE
-#endif
-int pgraph_method(NV2AState *d, unsigned int subchannel,
-                   unsigned int method, uint32_t parameter,
-                   uint32_t *parameters, size_t num_words_available,
-                   size_t max_lookahead_words, bool inc)
+static inline QEMU_ALWAYS_INLINE uint32_t
+pgraph_method_class(NV2AState *d, unsigned int subchannel, unsigned int method,
+                    uint32_t parameter)
 {
-    int num_processed = 1;
-
     PGRAPHState *pg = &d->pgraph;
 
     bool channel_valid =
         PG_GET_MASK(NV_PGRAPH_CTX_CONTROL, NV_PGRAPH_CTX_CONTROL_CHID);
     assert(channel_valid);
-
-    ContextSurfaces2DState *context_surfaces_2d = &pg->context_surfaces_2d;
-    ImageBlitState *image_blit = &pg->image_blit;
-    BetaState *beta = &pg->beta;
 
     assert(subchannel < 8);
 
@@ -939,12 +929,115 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
     uint32_t graphics_class = PG_GET_MASK(NV_PGRAPH_CTX_SWITCH1,
                                        NV_PGRAPH_CTX_SWITCH1_GRCLASS);
 
-    pgraph_method_log(subchannel, graphics_class, method, parameter);
-
     if (subchannel != 0) {
         // catches context switching issues on xbox d3d
         assert(graphics_class != 0x97);
     }
+
+    return graphics_class;
+}
+
+/*
+ * One kelvin handler call for the word at parameters[0]: a batch of words
+ * for DEF_METHOD_INC/_NON_INC handlers, plus the BEGIN,DRAW_ARRAYS,END
+ * squash. Returns the words consumed.
+ */
+static inline QEMU_ALWAYS_INLINE size_t
+pgraph_kelvin_method(NV2AState *d, unsigned int subchannel,
+                     unsigned int method, uint32_t parameter,
+                     uint32_t *parameters, size_t num_words_available,
+                     size_t max_lookahead_words, bool inc)
+{
+    PGRAPHState *pg = &d->pgraph;
+    MethodFunc handler =
+        pgraph_kelvin_methods[METHOD_ADDR_TO_INDEX(method)].handler;
+    if (handler == NULL) {
+        trace_nv2a_pgraph_method_unhandled(subchannel, NV_KELVIN_PRIMITIVE,
+                                           method, parameter);
+        return 1;
+    }
+    size_t num_words_consumed = 1;
+    handler(d, pg, subchannel, method, parameter, parameters,
+            num_words_available, &num_words_consumed, inc);
+
+    /* Squash repeated BEGIN,DRAW_ARRAYS,END */
+    #define LAM(i, mthd) ((parameters[i*2+1] & 0x31fff) == (mthd))
+    #define LAP(i, prm) (parameters[i*2+2] == (prm))
+    #define LAMP(i, mthd, prm) (LAM(i, mthd) && LAP(i, prm))
+
+    if (method == NV097_DRAW_ARRAYS && (max_lookahead_words >= 7) &&
+        pg->inline_elements_length == 0 &&
+        pg->draw_arrays_length <
+            (ARRAY_SIZE(pg->draw_arrays_start) - 1) &&
+        LAMP(0, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END) &&
+        LAMP(1, NV097_SET_BEGIN_END, pg->primitive_mode) &&
+        LAM(2, NV097_DRAW_ARRAYS)) {
+        num_words_consumed += 4;
+        pg->draw_arrays_prevent_connect = true;
+    }
+
+    #undef LAM
+    #undef LAP
+    #undef LAMP
+
+    return num_words_consumed;
+}
+
+/*
+ * The deterministic inline pusher's fused command loop (pfifo.c), once per
+ * command: the preamble pgraph_method runs per word. The subchannel stays
+ * the same for the whole command, and only NV_SET_OBJECT (method 0, which
+ * the loop leaves to pgraph_method) writes CTX_CACHE/CTX_SWITCH.
+ */
+#ifdef __clang__
+QEMU_ALWAYS_INLINE
+#endif
+uint32_t pgraph_inline_command_class(NV2AState *d, unsigned int subchannel,
+                                     unsigned int method)
+{
+    return pgraph_method_class(d, subchannel, method, 0);
+}
+
+/* ... and per handler call: pgraph_method's kelvin case. */
+#ifdef __clang__
+QEMU_ALWAYS_INLINE
+#endif
+size_t pgraph_inline_kelvin_method(NV2AState *d, unsigned int subchannel,
+                                   unsigned int method, uint32_t parameter,
+                                   uint32_t *parameters,
+                                   size_t num_words_available,
+                                   size_t max_lookahead_words, bool inc)
+{
+    pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method, parameter);
+    return pgraph_kelvin_method(d, subchannel, method, parameter, parameters,
+                                num_words_available, max_lookahead_words,
+                                inc);
+}
+
+/*
+ * The pusher's per-method call (pfifo.c): inline it there under clang LTO.
+ * Only the PGO profile used to, so a stale one brought the call back.
+ */
+#ifdef __clang__
+QEMU_ALWAYS_INLINE
+#endif
+int pgraph_method(NV2AState *d, unsigned int subchannel,
+                   unsigned int method, uint32_t parameter,
+                   uint32_t *parameters, size_t num_words_available,
+                   size_t max_lookahead_words, bool inc)
+{
+    int num_processed = 1;
+
+    PGRAPHState *pg = &d->pgraph;
+
+    ContextSurfaces2DState *context_surfaces_2d = &pg->context_surfaces_2d;
+    ImageBlitState *image_blit = &pg->image_blit;
+    BetaState *beta = &pg->beta;
+
+    uint32_t graphics_class =
+        pgraph_method_class(d, subchannel, method, parameter);
+
+    pgraph_method_log(subchannel, graphics_class, method, parameter);
 
     /* ugly switch for now */
     switch (graphics_class) {
@@ -1040,39 +1133,11 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
         }
         break;
     }
-    case NV_KELVIN_PRIMITIVE: {
-        MethodFunc handler =
-            pgraph_kelvin_methods[METHOD_ADDR_TO_INDEX(method)].handler;
-        if (handler == NULL) {
-            goto unhandled;
-        }
-        size_t num_words_consumed = 1;
-        handler(d, pg, subchannel, method, parameter, parameters,
-                num_words_available, &num_words_consumed, inc);
-
-        /* Squash repeated BEGIN,DRAW_ARRAYS,END */
-        #define LAM(i, mthd) ((parameters[i*2+1] & 0x31fff) == (mthd))
-        #define LAP(i, prm) (parameters[i*2+2] == (prm))
-        #define LAMP(i, mthd, prm) (LAM(i, mthd) && LAP(i, prm))
-
-        if (method == NV097_DRAW_ARRAYS && (max_lookahead_words >= 7) &&
-            pg->inline_elements_length == 0 &&
-            pg->draw_arrays_length <
-                (ARRAY_SIZE(pg->draw_arrays_start) - 1) &&
-            LAMP(0, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END) &&
-            LAMP(1, NV097_SET_BEGIN_END, pg->primitive_mode) &&
-            LAM(2, NV097_DRAW_ARRAYS)) {
-            num_words_consumed += 4;
-            pg->draw_arrays_prevent_connect = true;
-        }
-
-        #undef LAM
-        #undef LAP
-        #undef LAMP
-
-        num_processed = num_words_consumed;
+    case NV_KELVIN_PRIMITIVE:
+        num_processed = pgraph_kelvin_method(d, subchannel, method, parameter,
+                                             parameters, num_words_available,
+                                             max_lookahead_words, inc);
         break;
-    }
     default:
         goto unhandled;
     }

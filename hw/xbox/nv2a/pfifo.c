@@ -404,6 +404,91 @@ pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
     return num_proc;
 }
 
+/*
+ * The deterministic inline run's fused command loop: the data words of one
+ * kelvin command from byte offset get on, until the command or the
+ * pushbuffer ends or a handler sets a stall flag. The checks and state the
+ * per-word path (pfifo_run_puller, pgraph_method) repeats for every word
+ * run once per command; per word only the kelvin handler call is left, then
+ * one test of the flags a handler can set (waiting_for_nop: NO_OPERATION;
+ * waiting_for_flip: FLIP_STALL; waiting_for_context_switch). FIFO access,
+ * PULL0, the engine binding, CTX_SWITCH and the DMA error change only by
+ * guest MMIO, loads, reset, method 0 and the pusher's header decode, none
+ * of which lands mid-command, so the subchannel whose PULL0, engine and
+ * class were checked stays checked (*fused_subch) until the per-word path
+ * runs a method again or the run ends. DMA_STATE, DCOUNT, DATA_SHADOW and
+ * LOW_MARK are written back at the end as the per-word path would have
+ * left them. Returns the new GET; get itself, having changed nothing that
+ * path would not, when the command needs it: method 0 or an object method
+ * (RAMHT lookups), a method range that would wrap, a non-kelvin class, or a
+ * flip or context-switch stall pending.
+ */
+static inline QEMU_ALWAYS_INLINE uint32_t
+pfifo_inline_command(NV2AState *d, uint8_t *dma, hwaddr dma_len,
+                     uint32_t put, uint32_t get, uint32_t method, bool inc,
+                     unsigned int subchannel, uint32_t method_count,
+                     int *fused_subch)
+{
+    PGRAPHState *pg = &d->pgraph;
+    uint32_t *dma_state = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    /* The methods the command can reach: [method, end) */
+    uint32_t end = inc ? method + 4 * method_count : method + 4;
+    /* As in the per-word path, this wraps when GET is past PUT. */
+    uint32_t avail = (put - get) / 4;
+    uint32_t words = MIN(method_count, avail);
+
+    if (method < 0x100 || end > 0x2000 || (method < 0x200 && end > 0x180) ||
+        (hwaddr)get + 4 * (hwaddr)words > dma_len ||
+        (pg->waiting_for_flip | pg->waiting_for_context_switch)) {
+        return get;
+    }
+    if (unlikely((int)subchannel != *fused_subch)) {
+        if (!GET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_PULL0],
+                      NV_PFIFO_CACHE1_PULL0_ACCESS) ||
+            GET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_ENGINE],
+                     3 << (4 * subchannel)) != ENGINE_GRAPHICS) {
+            return get;
+        }
+        SET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_PULL1],
+                 NV_PFIFO_CACHE1_PULL1_ENGINE, ENGINE_GRAPHICS);
+        if (pgraph_inline_command_class(d, subchannel, method) !=
+            NV_KELVIN_PRIMITIVE) {
+            return get;
+        }
+        *fused_subch = subchannel;
+    }
+
+    uint32_t *const start = (uint32_t *)(dma + get);
+    uint32_t *const limit = start + words;
+    uint32_t *p = start;
+    uint32_t word;
+    do {
+        word = ldl_le_p(p);
+        size_t n = pgraph_inline_kelvin_method(d, subchannel, method, word, p,
+                                               limit - p,
+                                               avail - (uint32_t)(p - start),
+                                               inc);
+        p += n;
+        if (inc) {
+            method += 4 * n;
+        }
+    } while (p < limit &&
+             !(pg->waiting_for_nop | pg->waiting_for_flip |
+               pg->waiting_for_context_switch));
+
+    /* Past the command only by the DRAW_ARRAYS squash, and never past PUT. */
+    uint32_t done = p - start;
+    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DATA_SHADOW] = word;
+    if (inc) {
+        SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD, method >> 2);
+    }
+    SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT,
+             done < method_count ? method_count - done : 0);
+    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DCOUNT] += done;
+    d->pfifo.regs[NV_PFIFO_CACHE1_STATUS] |= NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+    return get + 4 * done;
+}
+
 static bool pfifo_pusher_should_stall(NV2AState *d)
 {
     return !can_fifo_access(d) ||
@@ -467,6 +552,8 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
     /* Inline, GET lives in a register and nothing moves PUT. */
     uint32_t get = inl ? *dma_get : 0;
     const uint32_t put = inl ? *dma_put : 0;
+    /* Inline: see pfifo_inline_command. */
+    int fused_subch = -1;
     if (inl) {
         /* Guest writes and loads may have changed CTX_SWITCH since. */
         d->pgraph.ctx_switch_subch = -1;
@@ -504,7 +591,21 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         uint32_t subroutine_state =
             GET_MASK(*dma_subroutine, NV_PFIFO_CACHE1_DMA_SUBROUTINE_STATE);
 
-        if (method_count) {
+        uint32_t fused_get;
+        if (method_count && inl &&
+            (fused_get = pfifo_inline_command(
+                 d, dma, dma_len, put, dma_get_v - 4, method,
+                 method_type == NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC,
+                 method_subchannel, method_count, &fused_subch)) !=
+                dma_get_v - 4) {
+            /* The rest of the command, or up to a stall or PUT. */
+            dma_get_v = fused_get;
+        } else if (method_count) {
+            if (inl) {
+                /* It may run method 0, which binds a new context. */
+                fused_subch = -1;
+            }
+
             /* data word of methods command */
             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DATA_SHADOW] = word;
 
@@ -588,6 +689,12 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
                 SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE,
                          NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC);
                 *dma_dcount = 0;
+                if (inl && (word >> 18) & 0x7ff && dma_get_v != put) {
+                    /* Straight into the data words. */
+                    dma_get_v = pfifo_inline_command(
+                        d, dma, dma_len, put, dma_get_v, word & 0x1ffc, true,
+                        (word >> 13) & 7, (word >> 18) & 0x7ff, &fused_subch);
+                }
             } else if ((word & 0xe0030003) == 0x40000000) {
                 /* non-increasing methods */
                 SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD,
@@ -599,6 +706,11 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
                 SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE,
                          NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_NON_INC);
                 *dma_dcount = 0;
+                if (inl && (word >> 18) & 0x7ff && dma_get_v != put) {
+                    dma_get_v = pfifo_inline_command(
+                        d, dma, dma_len, put, dma_get_v, word & 0x1ffc, false,
+                        (word >> 13) & 7, (word >> 18) & 0x7ff, &fused_subch);
+                }
             } else {
                 NV2A_DPRINTF("pb reserved cmd 0x%x - 0x%x\n",
                              dma_get_v, word);

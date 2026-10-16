@@ -2252,6 +2252,30 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   real base (no PGO layout), so expect nearer −0.8%. Cross-binary paired
   medians at load 16-26 couldn't resolve it: heavy-f1 −0.12% (22/44, CI
   −2.0..+1.4%), cold boot +0.6% (9/19, CI −2.2..+4.1%).
+- **Fused per-command loop in the deterministic inline pusher
+  (2026-10-16).** The inline run still went around the whole pusher
+  loop for every data word: stall and FIFO-access checks, the DMA_STATE
+  decode, the puller's PULL0, engine and object-method tests,
+  `pgraph_method`'s context checks and class switch, and five register
+  write-backs. A replay of heavy-f1's pushbuffer (6 frames) gives 37.8k
+  loop iterations per frame: 12.8k headers and 25.0k data iterations,
+  11.2k of them one-word steps of unbatched multi-word commands
+  (texture bump-env, combiner registers). `pfifo_inline_command` now
+  runs a kelvin command's data words in one loop, entered straight from
+  the header decode: PULL0, the engine binding and the class are checked
+  once per subchannel per run, and per word only the handler lookup and
+  call are left (`pgraph_method`'s kelvin case, factored out with its
+  batching and the DRAW_ARRAYS squash), then one test of the three stall
+  flags a handler can set. DMA_GET, DMA_STATE, DCOUNT, DATA_SHADOW and
+  LOW_MARK are written back at the command's end or stall. Method 0,
+  object methods and non-kelvin classes keep the per-word path, as does
+  the threaded pusher. Goldens unchanged; offscreen det (threaded
+  pusher) heavy-f1 RAM equal; per-frame PFIFO GET/PUT/DMA_STATE and RAM
+  equal over 6 heavy-f1 frames (one stalled mid-command); xbox suite
+  7/7. Cross-binary det, load 13-58: heavy-f1 Minsns/frame −1.92%
+  (paired median, 10/10), Mcycles/frame −2.9% (8/10, range
+  −21.8..+6.8%); stream-e2 Minsns −1.64% (4/4), Mcycles −1.1% (2/4,
+  unresolved).
 - **Headless null mode scans VGA only for a screendump (2026-10-15).**
   Every vblank ran `vga_update_display` for a surface that nothing shows
   under `XEMU_HEADLESS=null`. Its dirty-bitmap clear re-arms

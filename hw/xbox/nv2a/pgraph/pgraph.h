@@ -322,6 +322,13 @@ int pgraph_method(NV2AState *d, unsigned int subchannel, unsigned int method,
                   uint32_t parameter, uint32_t *parameters,
                   size_t num_words_available, size_t max_lookahead_words,
                   bool inc);
+uint32_t pgraph_inline_command_class(NV2AState *d, unsigned int subchannel,
+                                     unsigned int method);
+size_t pgraph_inline_kelvin_method(NV2AState *d, unsigned int subchannel,
+                                   unsigned int method, uint32_t parameter,
+                                   uint32_t *parameters,
+                                   size_t num_words_available,
+                                   size_t max_lookahead_words, bool inc);
 void pgraph_check_within_begin_end_block(PGRAPHState *pg);
 
 void *pfifo_thread(void *arg);
