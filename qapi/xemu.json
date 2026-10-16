@@ -1233,8 +1233,9 @@
 #
 # A host source for an emulated Xbox pad.
 #
-# @keyboard: the keyboard pad: the host keyboard (normal mode only)
-#     plus the lines written to XEMU_INPUT_PIPE
+# @keyboard: the keyboard pad: the host keyboard (in normal mode, or
+#     read at vblanks with XEMU_ICOUNT_LIVE_PADS=1) plus the lines
+#     written to XEMU_INPUT_PIPE
 #
 # @pipe: the same source as @keyboard (the pipe's lines drive the
 #     keyboard pad)
@@ -1309,7 +1310,8 @@
 # @ports: ports 1 to 4
 #
 # @gamepads: the host gamepads xemu has open (none in deterministic
-#     mode, which opens no host gamepad)
+#     mode, which opens no host gamepad unless
+#     XEMU_ICOUNT_LIVE_PADS=1)
 #
 # Since: 10.2
 ##
@@ -1332,12 +1334,13 @@
 # the pad plugged: the guest sees no unplug, and loadvm, checkpoint
 # restores and system_reset keep it, as for any bound port.  A port
 # with no emulated pad gets one plugged, as binding it in the settings
-# does.  A source bound to another port moves here; that port keeps
-# its pad with no source.  The port is then pinned (see
-# @XemuInputPort).  The change is not saved to the config.  In
-# deterministic mode and while XEMU_INPUT_RECORD records it applies at
-# the next vblank, so it lands at a fixed instruction count; otherwise
-# at once.
+# does, except with XEMU_ICOUNT_LIVE_PADS=1, where that is an error (a
+# replay of the session's input could not repeat the plug).  A source
+# bound to another port moves here; that port keeps its pad with no
+# source.  The port is then pinned (see @XemuInputPort).  The change
+# is not saved to the config.  In deterministic mode and while
+# XEMU_INPUT_RECORD records it applies at the next vblank, so it lands
+# at a fixed instruction count; otherwise at once.
 #
 # @port: the port, 1 to 4
 #

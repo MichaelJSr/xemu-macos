@@ -75,6 +75,10 @@ void icount_account_warp_timer(void);
 /* sleep=off: the vCPU thread warps over idle time itself, between slices. */
 bool icount_vcpu_warps(void);
 bool icount_vcpu_timer_due(void);
+/* XEMU_ICOUNT_LIVE_PADS=1 with sleep=on: exact warps paced on real time. */
+bool icount_live_pads_requested(void); /* the variable is "1" */
+int64_t icount_paced_wait_ns(void);
+void icount_paced_align(int64_t *diff_clk);
 #endif
 void icount_notify_exit(void);
 

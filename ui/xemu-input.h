@@ -134,6 +134,8 @@ void xemu_input_update_sdl_controller_state(ControllerState *state);
 void xemu_input_update_rumble(ControllerState *state);
 // Apply XEMU_INPUT_PIPE lines tagged for this frame. BQL held.
 void xemu_input_frame_tick(uint64_t frame);
+// XEMU_ICOUNT_LIVE_PADS=1 under icount: host pads sampled at vblanks.
+bool xemu_input_live_pads(void);
 void xemu_input_state_loaded(void);
 ControllerState *xemu_input_get_bound(int index);
 void xemu_input_bind(int index, ControllerState *state, int save);
@@ -161,6 +163,8 @@ bool xemu_input_port_pinned(int index);
 void xemu_input_port_unpin(int index);
 bool xemu_input_pinned_detach(ControllerState *state);
 int xemu_input_pinned_attach(ControllerState *state);
+bool xemu_input_port_has_pad(int index);
+bool xemu_input_live_detach(ControllerState *state);
 void xemu_input_bind_frame_tick(void);
 
 #ifdef __cplusplus

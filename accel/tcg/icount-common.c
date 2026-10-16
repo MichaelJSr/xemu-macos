@@ -50,6 +50,113 @@ static bool icount_sleep = true;
 
 bool icount_align_option;
 
+#ifdef XBOX
+/*
+ * xemu: XEMU_ICOUNT_LIVE_PADS=1 with sleep=on ("paced"; ui/xemu-input.c
+ * samples the host pads at vblanks). Idle time warps as with sleep=off:
+ * from the vCPU thread, by exactly the time to the next timer, so a run
+ * depends only on its instructions and its vblank input, and a sleep=off
+ * replay of that input gives the same RAM. The warp waits for real time
+ * first: with align=on until QEMU_CLOCK_VIRTUAL_RT (which a load sets to
+ * the virtual clock) reaches the timer, otherwise for the deadline's
+ * length from when the vCPU went idle. Stock sleep=on adds the real time
+ * that passed instead, which made such runs irreproducible. No warp timer
+ * is created, so saves have the sleep=off sections.
+ */
+static bool icount_paced;
+static int64_t paced_wait_ns;   /* real time the idle vCPU's warp waits for */
+static int64_t paced_idle_virtual = -1, paced_idle_rt;
+
+/*
+ * The one reading of XEMU_ICOUNT_LIVE_PADS. Pacing needs sleep=on; the
+ * input side (xemu_input_live_pads) works under any icount.
+ */
+bool icount_live_pads_requested(void)
+{
+    static int requested = -1;
+
+    if (requested < 0) {
+        const char *e = getenv("XEMU_ICOUNT_LIVE_PADS");
+        requested = e && !strcmp(e, "1");
+    }
+    return requested;
+}
+
+/* Warps land exactly on the next deadline, made by the vCPU thread. */
+static bool icount_exact_warps(void)
+{
+    return !icount_sleep || icount_paced;
+}
+
+/* Paced: true while real time has not reached the warp's end yet. */
+static bool icount_paced_wait(int64_t deadline)
+{
+    int64_t virt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t rt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
+    int64_t left;
+
+    if (icount_align_option) {
+        left = virt + deadline - rt;
+    } else {
+        if (virt != paced_idle_virtual) {
+            paced_idle_virtual = virt;
+            paced_idle_rt = rt;
+        }
+        left = paced_idle_rt + deadline - rt;
+    }
+    paced_wait_ns = MAX(left, 0);
+    return left > 0;
+}
+
+int64_t icount_paced_wait_ns(void)
+{
+    return icount_paced && runstate_is_running() ? paced_wait_ns : 0;
+}
+
+/*
+ * Paced with align=on, from init_delay_params: a guest more than this far
+ * behind real time is let off the rest, so a heavy scene plays slower
+ * instead of building a debt the guest later repays at full host speed.
+ * Only QEMU_CLOCK_VIRTUAL_RT moves (align's reference and nothing the
+ * guest reads under icount).
+ */
+#define PACED_MAX_LAG_NS (100 * SCALE_MS)
+
+void icount_paced_align(int64_t *diff_clk)
+{
+    static int64_t window_rt, window_lag;
+    int64_t rt, lag;
+
+    if (!icount_paced) {
+        return;
+    }
+    rt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (!window_rt) {
+        window_rt = rt;
+    }
+    if (*diff_clk < -PACED_MAX_LAG_NS) {
+        lag = -*diff_clk - PACED_MAX_LAG_NS;
+        seqlock_write_lock(&timers_state.vm_clock_seqlock,
+                           &timers_state.vm_clock_lock);
+        timers_state.cpu_clock_offset -= lag;
+        seqlock_write_unlock(&timers_state.vm_clock_seqlock,
+                             &timers_state.vm_clock_lock);
+        *diff_clk += lag;
+        window_lag += lag;
+    }
+    if (rt - window_rt >= 10 * NANOSECONDS_PER_SECOND) {
+        if (window_lag * 100 >= rt - window_rt) {
+            fprintf(stderr, "xemu: icount live pads: the guest ran at %.0f%% "
+                    "of real time over the last %.0f s\n",
+                    100.0 - 100.0 * window_lag / (rt - window_rt),
+                    (rt - window_rt) / 1e9);
+        }
+        window_rt = rt;
+        window_lag = 0;
+    }
+}
+#endif
+
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -315,9 +422,10 @@ void icount_start_warp_timer(void)
      * past the next deadline by however far the slice had run: guest time
      * moved by host scheduling, and identical runs rarely diverged.
      */
-    if (!icount_sleep && first_cpu && !qemu_cpu_is_self(first_cpu)) {
+    if (icount_exact_warps() && first_cpu && !qemu_cpu_is_self(first_cpu)) {
         return;
     }
+    paced_wait_ns = 0;
 #endif
 
     if (replay_mode != REPLAY_MODE_PLAY) {
@@ -381,7 +489,15 @@ void icount_start_warp_timer(void)
          * the vCPU isn't running any insns and thus doesn't advance the
          * QEMU_CLOCK_VIRTUAL.
          */
+#ifdef XBOX
+        if (icount_exact_warps()) {
+            if (icount_paced && icount_paced_wait(deadline)) {
+                /* rr_wait_io_event waits paced_wait_ns, then comes back. */
+                return;
+            }
+#else
         if (!icount_sleep) {
+#endif
             /*
              * We never let VCPUs sleep in no sleep icount mode.
              * If there is a pending QEMU_CLOCK_VIRTUAL timer we just advance
@@ -424,7 +540,7 @@ void icount_start_warp_timer(void)
 #ifdef XBOX
 bool icount_vcpu_warps(void)
 {
-    return icount_enabled() && !icount_sleep;
+    return icount_enabled() && icount_exact_warps();
 }
 
 /*
@@ -450,9 +566,15 @@ bool icount_vcpu_timer_due(void)
 
 void icount_account_warp_timer(void)
 {
+#ifdef XBOX
+    if (icount_exact_warps()) {
+        return;
+    }
+#else
     if (!icount_sleep) {
         return;
     }
+#endif
 
     /*
      * Nothing to do if the VM is stopped: QEMU_CLOCK_VIRTUAL timers
@@ -508,7 +630,12 @@ bool icount_configure(QemuOpts *opts, Error **errp)
     }
 
     icount_sleep = sleep;
+#ifdef XBOX
+    icount_paced = sleep && icount_live_pads_requested();
+    if (icount_sleep && !icount_paced) {
+#else
     if (icount_sleep) {
+#endif
         timers_state.icount_warp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL_RT,
                                          icount_timer_cb, NULL);
     }

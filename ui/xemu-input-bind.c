@@ -216,6 +216,43 @@ bool xemu_input_port_pinned(int index)
     return pins[index].on;
 }
 
+/*
+ * An emulated pad sits where port index's goes (a pad of this index at
+ * 1.P, or a hub there with a pad at 1.P.1), so binding plugs nothing.
+ */
+bool xemu_input_port_has_pad(int index)
+{
+    BusState *bus;
+    DeviceState *at;
+    char path[16];
+
+    if (port_slot(index, &bus, &at) != SLOT_PAD) {
+        return false;
+    }
+    if (!object_dynamic_cast(OBJECT(at), "usb-hub")) {
+        return true;
+    }
+    snprintf(path, sizeof(path), "1.%d.1", xemu_input_hub_ports[index]);
+    at = usb_dev_at(bus, path, NULL);
+    return at && as_pad(OBJECT(at));
+}
+
+/*
+ * XEMU_ICOUNT_LIVE_PADS: a pad plugged mid-run is a hot-plug the guest
+ * sees and XEMU_INPUT_RECORD can't express, so a replay couldn't repeat
+ * it. Live mode binds only ports whose pad is plugged.
+ */
+static bool live_refuses_plug(int index, Error **errp)
+{
+    if (!xemu_input_live_pads() || xemu_input_port_has_pad(index)) {
+        return false;
+    }
+    error_setg(errp, "port %d has no pad plugged; under "
+               "XEMU_ICOUNT_LIVE_PADS a plug mid-run can't be replayed, so "
+               "bind a port the loaded state has a pad on", index + 1);
+    return true;
+}
+
 static int pending_count;
 
 void xemu_input_port_unpin(int index)
@@ -294,6 +331,8 @@ static bool port_attach(int index, ControllerState *c, Error **errp)
         }
         old->bound = -1;
         old->device = NULL;
+    } else if (live_refuses_plug(index, errp)) {
+        return false;
     } else {
         c->device = xemu_input_port_adopt_pad(index, bound_drivers[index]);
     }
@@ -332,6 +371,11 @@ static bool port_apply(int index, bool dry, Error **errp)
         c = keyboard_source();
     } else if (pin->source == XEMU_INPUT_SOURCE_GAMEPAD) {
         c = gamepad_source(pin->guid, index);
+    }
+    /* Also for a gamepad not open yet, which would plug when it connects. */
+    if (pin->source != XEMU_INPUT_SOURCE_NONE && !old &&
+        live_refuses_plug(index, errp)) {
+        return false;
     }
     if (c == old) {
         return true;
@@ -414,6 +458,26 @@ bool xemu_input_pinned_detach(ControllerState *c)
     snprintf(buf, sizeof(buf), "Port %d disconnected (pad kept)", index + 1);
     xemu_queue_notification(buf);
     return true;
+}
+
+/*
+ * XEMU_ICOUNT_LIVE_PADS: a host gamepad that disconnects never unplugs its
+ * port's pad (a replay of the session's input could not repeat that). The
+ * port keeps it with neutral input and is pinned to wait for the gamepad.
+ */
+bool xemu_input_live_detach(ControllerState *c)
+{
+    int index = c->bound;
+
+    if (index < 0 || has_mu(c)) {
+        return false;
+    }
+    if (!pins[index].on) {
+        pins[index] = (PortPin){ .on = true,
+                                 .source = XEMU_INPUT_SOURCE_GAMEPAD,
+                                 .guid = c->sdl_joystick_guid };
+    }
+    return xemu_input_pinned_detach(c);
 }
 
 /* A host gamepad connected: drive the pinned port that waits for it. */
@@ -524,7 +588,7 @@ XemuInputPort *qmp_xemu_input_bind(int64_t port, XemuInputSource source,
         }
         if (!SDL_WasInit(SDL_INIT_GAMEPAD)) {
             error_setg(errp, "host gamepads are not open (deterministic "
-                       "mode opens none)");
+                       "mode opens none without XEMU_ICOUNT_LIVE_PADS=1)");
             return NULL;
         }
         g = SDL_StringToGUID(guid);

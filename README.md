@@ -190,7 +190,9 @@ Other automation interfaces (windowed or headless):
   keyboard-map scancodes and sticks and triggers as values that give
   back the same 16-bit reading (a stick reaches -32768 at
   `-1.000030518`), so a gamepad session replays through the keyboard
-  pad. While recording, pads change only at vblanks, as under icount.
+  pad. While recording, pads change only at vblanks, as under icount,
+  and stderr warns once per port when another port's pad gets input
+  the recording leaves out.
   To replay: bind the keyboard pad to that port with the same keyboard
   map, load the same state paused, write the section's lines, advance.
   A recording made under icount replays bit-identically; one made in
@@ -209,15 +211,17 @@ Other automation interfaces (windowed or headless):
   port's host source without unplugging its pad (`"keyboard"` or
   `"pipe"`: the keyboard pad; `"none"`: neutral input). A source bound to
   another port moves, and that port keeps its pad; a port with no pad
-  gets one plugged. The port is then pinned: its pad stays plugged while
-  its host gamepad disconnects (neutral input meanwhile), the gamepad
-  drives it again when it reconnects, auto-binding leaves it alone, and
-  picking a device for it in the settings ends the pin. Nothing is saved
-  to the config. Under icount and while recording, the change applies at
-  the next vblank (`"pending": true` until then). A gamepad whose GUID
-  isn't open yet is waited for. `query-xemu-input-bindings` lists the
-  ports (source, pad, its type, pinned, pending) and the open gamepads
-  with their GUIDs; host gamepads open only in normal mode.
+  gets one plugged (except with `XEMU_ICOUNT_LIVE_PADS=1`). The port is
+  then pinned: its pad stays plugged while its host gamepad disconnects
+  (neutral input meanwhile), the gamepad drives it again when it
+  reconnects, auto-binding leaves it alone, and picking a device for it
+  in the settings ends the pin. Nothing is saved to the config. Under
+  icount and while recording, the change applies at the next vblank
+  (`"pending": true` until then). A gamepad whose GUID isn't open yet is
+  waited for. `query-xemu-input-bindings` lists the ports (source, pad,
+  its type, pinned, pending) and the open gamepads with their GUIDs;
+  host gamepads open only in normal mode and with
+  `XEMU_ICOUNT_LIVE_PADS=1`.
 - **Loads that plug missing pads**: with `XEMU_LOADVM_ADD_PADS=1`, a
   load (`loadvm`, QMP `snapshot-load`, the Snapshots menu, CLI
   `-loadvm`, `xemu-checkpoint-restore`) that stops at a pad hub or pad
@@ -234,6 +238,40 @@ Other automation interfaces (windowed or headless):
   port afterwards (config, settings or `xemu-input-bind`) drives the
   plugged pad without a replug. Only pads and their hubs are plugged,
   never memory units.
+- **Demos as played (live pads under icount)**: with
+  `XEMU_ICOUNT_LIVE_PADS=1` and `-icount shift=2,align=on,sleep=on`
+  (windowed or headless), host gamepads, and the host keyboard on the
+  keyboard pad, drive their ports as in normal mode while the run stays
+  deterministic. They are read once per vblank, where pipe lines apply,
+  so `XEMU_INPUT_RECORD` (set `XEMU_INPUT_RECORD_PORT` to the pad's
+  port) holds exactly the input the guest got: its last section, written
+  after a load of the same state in another process (`sleep=off` for
+  speed), ends on the session's RAM, and the session's `savevm`s are
+  icount saves. The recording holds one port, so keep every live source
+  on it (the keyboard pad included, when the window has focus); stderr
+  warns once per port when another port's pad gets input. Windowed runs
+  replay bit-exactly on macOS, where the Vulkan push ring keeps the
+  window's frame pulls out of a running frame; elsewhere, record runs
+  that must replay headless (`XEMU_HEADLESS=1` or `null`). Idle time
+  warps as with `sleep=off`, by exactly the time to the next timer, but
+  only once real time gets there. `align=on` keeps the guest at most
+  3 ms ahead of real time and at most 0.1 s behind: a scene the host
+  can't run at full speed plays slower instead of racing to catch up
+  later, and stderr says `xemu: icount live pads: the guest ran at N% of
+  real time over the last 10 s` when it does. A gamepad that connects
+  drives, from the next vblank, the port waiting for it
+  (`xemu-input-bind`), else its configured port or (auto-bind) a free
+  one, if that port's pad is already plugged; one that disconnects
+  leaves its pad plugged with neutral input and its port waiting for it.
+  Nothing is plugged or unplugged, which a replay could not repeat
+  (except that a pad with a memory unit on its hub unplugs at a vblank,
+  as in normal mode): `xemu-input-bind` refuses a port with no pad
+  plugged, so use a port the loaded state has a pad on. Rebind with
+  `xemu-input-bind` (applied at a vblank), not the settings menu. A
+  heavy scene can run below 60 vblanks/s windowed (the Vulkan renderer's
+  deterministic cost, which `sleep=off` doesn't beat either); the guest
+  then plays slower, never more than 0.1 s behind, and stderr reports
+  the shortfall.
 - **Per-frame traces**: `xemu-frame-advance {"frames": N, "trace":
   [{"address": A, "size": S}, ...]}` also returns `trace`, one sample
   per vblank (`"trace-every": K` for every Kth, the last always
@@ -565,7 +603,8 @@ Other automation interfaces (windowed or headless):
     from 2001-01-01 unless `-rtc` says otherwise;
   - `xemu-frame-advance` stops on the vblank itself;
   - pads change only at vblanks and only from the pipe (physical pads
-    and the host keyboard are ignored); an untagged line applies at the
+    and the host keyboard are ignored, unless `XEMU_ICOUNT_LIVE_PADS=1`
+    reads them at vblanks); an untagged line applies at the
     next vblank, and an `@N` line read after frame N is warned about;
   - a state saved under icount carries what the run depends on beyond
     guest RAM and registers (resampler, filter and HRTF history, the
@@ -582,7 +621,8 @@ Other automation interfaces (windowed or headless):
     case) load and replay as above, and states saved under icount load
     in normal mode with guest time and the RTC date continuing from the
     save (v0.14 and earlier read their RTC about 56 years ahead: load and
-    re-save here in normal mode first). Save with `sleep=off`; a state
+    re-save here in normal mode first). Save with `sleep=off` (or under
+    `XEMU_ICOUNT_LIVE_PADS=1`, whose saves are `sleep=off` saves); a state
     saved with sleep on or `shift=auto` loads anywhere but drops its warp
     deadlines;
   - frame numbers (`@N`, `query-xemu-frame`) count the current

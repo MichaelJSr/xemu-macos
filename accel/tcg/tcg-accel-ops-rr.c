@@ -118,6 +118,16 @@ static void rr_wait_io_event(void)
 #endif
            ) {
         rr_stop_kick_timer();
+#ifdef XBOX
+        /* Paced icount: the warp waits for real time, then is retried. */
+        int64_t wait_ns = icount_enabled() ? icount_paced_wait_ns() : 0;
+        if (wait_ns > 0) {
+            qemu_cond_timedwait_bql(first_cpu->halt_cond,
+                                    DIV_ROUND_UP(wait_ns, SCALE_MS));
+            icount_start_warp_timer();
+            continue;
+        }
+#endif
         qemu_cond_wait_bql(first_cpu->halt_cond);
     }
 

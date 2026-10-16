@@ -270,6 +270,35 @@ static void test_input_poll(void);
 static void xemu_input_publish_controller(ControllerState *state);
 
 /*
+ * XEMU_ICOUNT_LIVE_PADS=1 (icount only): host gamepads and the host
+ * keyboard drive their ports as in normal mode, but are sampled only at
+ * vblanks, where pipe lines apply, so the run stays deterministic for its
+ * input and XEMU_INPUT_RECORD replays it. With sleep=on the idle vCPU is
+ * paced on real time (accel/tcg/icount-common.c). A gamepad's connect and
+ * disconnect apply at a vblank and never plug or unplug an emulated pad:
+ * a connected pad drives a port whose pad is plugged, a disconnected one
+ * leaves its pad plugged with neutral input and its port waiting for it.
+ */
+bool xemu_input_live_pads(void)
+{
+    static int live = -1;
+
+    if (live < 0) {
+        live = icount_enabled() && icount_live_pads_requested();
+    }
+    return live;
+}
+
+static bool live_keys[SDL_SCANCODE_COUNT]; /* the host keyboard at the last vblank */
+static GQueue live_added = G_QUEUE_INIT;   /* gamepads to bind at the next vblank */
+static GQueue live_removed = G_QUEUE_INIT; /* bound gamepads gone, let go then */
+/*
+ * Let go at a vblank, freed by the UI thread: the settings UI reads the
+ * bound gamepads without the BQL, so it must not race a vCPU-thread free.
+ */
+static GQueue live_freed = G_QUEUE_INIT;
+
+/*
  * Deterministic mode: on every start (cont, frame advance, after a load),
  * queue what the pipe holds and publish every pad before the first guest
  * instruction, so a run never starts on pad state from before the load.
@@ -284,6 +313,9 @@ static void xemu_input_vm_state_change(void *opaque, bool running,
     }
     test_input_poll();
     QTAILQ_FOREACH(iter, &available_controllers, entry) {
+        if (xemu_input_live_pads() && iter->type == INPUT_DEVICE_SDL_GAMEPAD) {
+            continue; /* keeps its last vblank's sample (neutral after a load) */
+        }
         xemu_input_publish_controller(iter);
     }
 }
@@ -306,11 +338,17 @@ void xemu_input_init(void)
 
     /*
      * Deterministic mode ignores physical pads (pads change only from the
-     * pipe), so it skips probing the USB and Bluetooth devices for them.
+     * pipe), so it skips probing the USB and Bluetooth devices for them,
+     * unless XEMU_ICOUNT_LIVE_PADS samples them at vblanks.
      */
-    if (!icount_enabled() && !SDL_Init(SDL_INIT_GAMEPAD)) {
+    if ((!icount_enabled() || xemu_input_live_pads()) &&
+        !SDL_Init(SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "Failed to initialize SDL gamepad subsystem: %s\n", SDL_GetError());
         exit(1);
+    }
+    if (xemu_input_live_pads()) {
+        fprintf(stderr, "xemu: icount live pads: host gamepads and keyboard "
+                "drive their ports, sampled at vblanks\n");
     }
 
     if (g_config.input.gamecontrollerdb_path && strlen(g_config.input.gamecontrollerdb_path) > 0) {
@@ -399,10 +437,97 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
         peripheral_parameter == NULL ? "" : peripheral_parameter);
 }
 
+/*
+ * A gamepad that just connected takes the pinned port waiting for it, else
+ * a port configured for its GUID, else (auto_bind) any free port. Live pads
+ * (at a vblank) take only a port whose emulated pad is already plugged and
+ * plug no memory units.
+ */
+static void gamepad_autobind(ControllerState *new_con, bool live)
+{
+    bool skipped = false;
+
+    // A pinned port (QMP xemu-input-bind) waiting for this pad
+    int port = xemu_input_pinned_attach(new_con);
+    if (port >= 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Connected '%s' to port %d",
+                 new_con->name, port + 1);
+        xemu_queue_notification(buf);
+        return;
+    }
+
+    // Do not replace binding for a currently bound device. In the case that
+    // the same GUID is specified multiple times, on different ports, allow
+    // any available port to be bound.
+    //
+    // This can happen naturally with X360 wireless receiver, in which each
+    // controller gets the same GUID (go figure). We cannot remember which
+    // controller is which in this case, but we can try to tolerate this
+    // situation by binding to any previously bound port with this GUID. The
+    // upside in this case is that a person can use the same GUID on all
+    // ports and just needs to bind to the receiver and never needs to hit
+    // this dialog.
+
+
+    // Attempt to re-bind to port previously bound to
+    port = 0;
+    bool did_bind = false;
+    while (!did_bind) {
+        port = xemu_input_get_controller_default_bind_port(new_con, port);
+        if (port < 0) {
+            // No (additional) default mappings
+            break;
+        } else if (!xemu_input_get_bound(port) &&
+                   !xemu_input_port_pinned(port) &&
+                   (!live || xemu_input_port_has_pad(port))) {
+            xemu_input_bind(port, new_con, 0);
+            did_bind = true;
+            break;
+        } else {
+            skipped |= live && !xemu_input_get_bound(port) &&
+                       !xemu_input_port_pinned(port);
+            // Try again for another port
+            port++;
+        }
+    }
+
+    // Try to bind to any open port, and if so remember the binding
+    if (!did_bind && g_config.input.auto_bind) {
+        for (port = 0; port < 4; port++) {
+            if (!xemu_input_get_bound(port) &&
+                !xemu_input_port_pinned(port)) {
+                if (live && !xemu_input_port_has_pad(port)) {
+                    skipped = true;
+                    continue;
+                }
+                xemu_input_bind(port, new_con, 1);
+                did_bind = true;
+                break;
+            }
+        }
+    }
+
+    if (did_bind) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Connected '%s' to port %d", new_con->name, port+1);
+        xemu_queue_notification(buf);
+        if (!live) {
+            xemu_input_rebind_xmu(port);
+        }
+    } else if (skipped) {
+        fprintf(stderr, "xemu: icount live pads: '%s' drives no port: its "
+                "free ports have no pad plugged, and live pads plug none "
+                "mid-run (bind it to a port with a pad: QMP "
+                "xemu-input-bind)\n", new_con->name);
+    }
+}
+
 void xemu_input_process_sdl_events(const SDL_Event *event)
 {
-    if (icount_enabled() && (event->type == SDL_EVENT_GAMEPAD_ADDED ||
-                             event->type == SDL_EVENT_GAMEPAD_REMOVED)) {
+    if (icount_enabled() && !xemu_input_live_pads() &&
+        (event->type == SDL_EVENT_GAMEPAD_ADDED ||
+         event->type == SDL_EVENT_GAMEPAD_REMOVED)) {
         /* Deterministic mode: only XEMU_INPUT_PIPE drives the pads. */
         return;
     }
@@ -440,66 +565,12 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
         xemu_input_bindings_reload_map(new_con);
 
-        // A pinned port (QMP xemu-input-bind) waiting for this pad
-        int port = xemu_input_pinned_attach(new_con);
-        if (port >= 0) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "Connected '%s' to port %d",
-                     new_con->name, port + 1);
-            xemu_queue_notification(buf);
+        if (icount_enabled()) {
+            /* Live pads: it takes a port at the next vblank. */
+            g_queue_push_tail(&live_added, new_con);
             return;
         }
-
-        // Do not replace binding for a currently bound device. In the case that
-        // the same GUID is specified multiple times, on different ports, allow
-        // any available port to be bound.
-        //
-        // This can happen naturally with X360 wireless receiver, in which each
-        // controller gets the same GUID (go figure). We cannot remember which
-        // controller is which in this case, but we can try to tolerate this
-        // situation by binding to any previously bound port with this GUID. The
-        // upside in this case is that a person can use the same GUID on all
-        // ports and just needs to bind to the receiver and never needs to hit
-        // this dialog.
-
-
-        // Attempt to re-bind to port previously bound to
-        port = 0;
-        bool did_bind = false;
-        while (!did_bind) {
-            port = xemu_input_get_controller_default_bind_port(new_con, port);
-            if (port < 0) {
-                // No (additional) default mappings
-                break;
-            } else if (!xemu_input_get_bound(port) &&
-                       !xemu_input_port_pinned(port)) {
-                xemu_input_bind(port, new_con, 0);
-                did_bind = true;
-                break;
-            } else {
-                // Try again for another port
-                port++;
-            }
-        }
-
-        // Try to bind to any open port, and if so remember the binding
-        if (!did_bind && g_config.input.auto_bind) {
-            for (port = 0; port < 4; port++) {
-                if (!xemu_input_get_bound(port) &&
-                    !xemu_input_port_pinned(port)) {
-                    xemu_input_bind(port, new_con, 1);
-                    did_bind = true;
-                    break;
-                }
-            }
-        }
-
-        if (did_bind) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "Connected '%s' to port %d", new_con->name, port+1);
-            xemu_queue_notification(buf);
-            xemu_input_rebind_xmu(port);
-        }
+        gamepad_autobind(new_con, false);
     } else if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
         DPRINTF("Controller Removed: %d\n", event->gdevice.which);
         int handled = 0;
@@ -509,6 +580,23 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
 
             if (iter->sdl_joystick_id == event->gdevice.which) {
                 DPRINTF("Device removed: %s\n", iter->name);
+
+                if (icount_enabled()) {
+                    g_queue_remove(&live_added, iter);
+                }
+                if (icount_enabled() && iter->bound >= 0) {
+                    /*
+                     * Live pads: its port lets go at the next vblank; until
+                     * then the guest sees the last vblank's sample.
+                     */
+                    QTAILQ_REMOVE(&available_controllers, iter, entry);
+                    SDL_CloseGamepad(iter->sdl_gamepad);
+                    iter->sdl_gamepad = NULL;
+                    iter->name = "Disconnected gamepad"; /* SDL's is freed */
+                    g_queue_push_tail(&live_removed, iter);
+                    handled = 1;
+                    break;
+                }
 
                 // Disconnect (a pinned port keeps its emulated pad)
                 if (iter->bound >= 0 && !xemu_input_pinned_detach(iter)) {
@@ -616,6 +704,22 @@ void xemu_input_update_controllers(void)
         /* Queue pipe lines promptly, so "+N" counts from the frame they
          * were written at, even while paused. */
         test_input_poll();
+        if (xemu_input_live_pads()) {
+            while ((iter = g_queue_pop_head(&live_freed))) {
+                for (int i = 0; i < 2; i++) {
+                    if (iter->peripheral_types[i] == PERIPHERAL_XMU &&
+                        iter->peripherals[i]) {
+                        g_free((void *)((XmuState *)iter->peripherals[i])
+                                   ->filename);
+                    }
+                    g_free(iter->peripherals[i]);
+                }
+                free(iter);
+            }
+            QTAILQ_FOREACH(iter, &available_controllers, entry) {
+                xemu_input_update_rumble(iter);
+            }
+        }
         return;
     }
 
@@ -1084,6 +1188,27 @@ void xemu_input_state_loaded(void)
         test_input_loaded = false;
         return;
     }
+    if (xemu_input_live_pads()) {
+        /*
+         * Live sources start neutral, as a recording's "# load" section
+         * does; the next vblank samples them.
+         */
+        ControllerState *c;
+        memset(live_keys, 0, sizeof(live_keys));
+        for (int i = 0; i < 4; i++) {
+            c = bound_controllers[i];
+            if (c && c->type == INPUT_DEVICE_SDL_GAMEPAD) {
+                c->buttons = 0;
+                memset(c->axis, 0, sizeof(c->axis));
+            }
+        }
+        QTAILQ_FOREACH(c, &available_controllers, entry) {
+            if (c->type == INPUT_DEVICE_SDL_GAMEPAD) {
+                c->buttons = 0;
+                memset(c->axis, 0, sizeof(c->axis));
+            }
+        }
+    }
     test_input_poll();
     TestInputPending *p;
     while ((p = g_queue_pop_head(&test_input_pending))) {
@@ -1156,16 +1281,37 @@ static void input_record_frame(uint64_t frame)
         [CONTROLLER_AXIS_LSTICK_X] = "axis lx", [CONTROLLER_AXIS_LSTICK_Y] = "axis ly",
         [CONTROLLER_AXIS_RSTICK_X] = "axis rx", [CONTROLLER_AXIS_RSTICK_Y] = "axis ry",
     };
+    static bool warned[4];
     ControllerState *c = NULL;
     uint16_t now_buttons = 0;
     const int16_t *now_axes = NULL;
     uint64_t at = frame - record_base;
+    int port = record_port;
 
-    if (record_port >= 0) {
-        c = bound_controllers[record_port];
-    } else {
-        for (int i = 0; i < 4 && !c; i++) {
-            c = bound_controllers[i];
+    if (port < 0) {
+        for (port = 0; port < 3 && !bound_controllers[port]; port++) {
+        }
+    }
+    c = bound_controllers[port];
+
+    /*
+     * Input another port's pad got (a host gamepad there or, with live
+     * pads, the host keyboard on the keyboard pad) is not in the
+     * recording, so a replay diverges from that vblank on.
+     */
+    for (int i = 0; i < 4; i++) {
+        ControllerState *o = bound_controllers[i];
+        bool active = o && o->buttons;
+
+        for (int a = 0; o && a < CONTROLLER_AXIS__COUNT; a++) {
+            active |= o->axis[a] != 0;
+        }
+        if (i != port && active && !warned[i]) {
+            warned[i] = true;
+            fprintf(stderr, "xemu: XEMU_INPUT_RECORD: port %d's pad got "
+                    "input at +%" PRIu64 " that the recording (port %d) "
+                    "leaves out; a replay diverges from there\n", i + 1, at,
+                    port + 1);
         }
     }
     if (c) {
@@ -1193,9 +1339,52 @@ static void input_record_frame(uint64_t frame)
 
 static void input_frame_tick(uint64_t frame);
 
+/* Live pads: gamepad connects and disconnects take effect at a vblank. */
+static void live_hotplug_apply(void)
+{
+    ControllerState *c;
+
+    while ((c = g_queue_pop_head(&live_removed))) {
+        if (c->bound >= 0 && !xemu_input_live_detach(c)) {
+            /*
+             * A memory unit rides on its hub: unplug, as normal mode does.
+             * Its state goes with c (freed by the UI thread), not with the
+             * unbind here.
+             */
+            void *mus[2] = { c->peripherals[0], c->peripherals[1] };
+            char buf[128];
+
+            for (int i = 0; i < 2; i++) {
+                XmuState *xmu = mus[i];
+                if (c->peripheral_types[i] == PERIPHERAL_XMU && xmu &&
+                    xmu->dev) {
+                    qdev_unplug((DeviceState *)xmu->dev, &error_abort);
+                    object_unref(OBJECT(xmu->dev));
+                    xmu->dev = NULL;
+                }
+                c->peripherals[i] = NULL;
+            }
+            snprintf(buf, sizeof(buf), "Port %d disconnected", c->bound + 1);
+            xemu_queue_notification(buf);
+            xemu_input_bind(c->bound, NULL, 0);
+            c->peripherals[0] = mus[0];
+            c->peripherals[1] = mus[1];
+        }
+        g_queue_push_tail(&live_freed, c);
+    }
+    while ((c = g_queue_pop_head(&live_added))) {
+        if (c->bound < 0) {
+            gamepad_autobind(c, true);
+        }
+    }
+}
+
 void xemu_input_frame_tick(uint64_t frame)
 {
     xemu_input_bind_frame_tick();
+    if (xemu_input_live_pads()) {
+        live_hotplug_apply();
+    }
     input_frame_tick(frame);
     if (record_file) {
         input_record_frame(frame);
@@ -1227,6 +1416,11 @@ static void input_frame_tick(uint64_t frame)
     }
     ControllerState *iter;
     if (input_at_vblanks()) {
+        if (xemu_input_live_pads()) {
+            int n;
+            const bool *keys = SDL_GetKeyboardState(&n);
+            memcpy(live_keys, keys, MIN(n, SDL_SCANCODE_COUNT) * sizeof(bool));
+        }
         /* Every pad is published here and only here. */
         QTAILQ_FOREACH(iter, &available_controllers, entry) {
             xemu_input_publish_controller(iter);
@@ -1260,6 +1454,8 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
     if (!icount_enabled()) {
         test_input_poll();
         kbd = SDL_GetKeyboardState(NULL);
+    } else if (xemu_input_live_pads()) {
+        kbd = live_keys;
     }
 
 #define KBD_STATE(btn) \

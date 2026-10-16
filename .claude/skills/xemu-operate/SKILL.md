@@ -143,6 +143,10 @@ QMP `xemu-ram-digest` (RAM's sha256, no file; `against` a checkpoint lists the
 pages that changed). Branch loops: `xemu-checkpoint-save` with `base`, then
 `xemu-checkpoint-restore` with `incremental` (README); audit the dirty log
 with `verify` (`pages-missed` 0) after touching any device that writes RAM.
+A demo played in real time yet deterministic: `XEMU_ICOUNT_LIVE_PADS=1` with
+`-icount shift=2,align=on,sleep=on` (host pads read at vblanks); its
+`XEMU_INPUT_RECORD` replays under `sleep=off` to the same RAM (it holds one
+port: keep live sources on it; windowed replays are exact on macOS).
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:
@@ -253,6 +257,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
+| `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |

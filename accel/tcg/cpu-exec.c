@@ -145,6 +145,9 @@ static void init_delay_params(SyncClocks *sc, CPUState *cpu)
     }
     sc->realtime_clock = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
     sc->diff_clk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - sc->realtime_clock;
+#ifdef XBOX
+    icount_paced_align(&sc->diff_clk); /* XEMU_ICOUNT_LIVE_PADS lag cap */
+#endif
     sc->last_cpu_icount
         = cpu->icount_extra + cpu->neg.icount_decr.u16.low;
     if (sc->diff_clk < max_delay) {
