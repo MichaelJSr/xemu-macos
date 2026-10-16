@@ -237,6 +237,44 @@ void qio_channel_socket_connect_async(QIOChannelSocket *ioc,
 }
 
 
+#ifndef _WIN32
+/*
+ * xemu: the path of the unix socket file a listener is bound to, or NULL
+ * (not unix, unnamed, or a Linux abstract address).
+ */
+static char *qio_channel_socket_unix_path(QIOChannelSocket *sioc)
+{
+    struct sockaddr_un *un = (struct sockaddr_un *)&sioc->localAddr;
+    socklen_t off = offsetof(struct sockaddr_un, sun_path);
+
+    if (sioc->localAddr.ss_family != AF_UNIX ||
+        sioc->localAddrLen <= off || !un->sun_path[0]) {
+        return NULL;
+    }
+    return g_strndup(un->sun_path, sioc->localAddrLen - off);
+}
+#endif
+
+/*
+ * xemu: closing a unix listener unlinks its path only while the path is
+ * still the socket file it bound: another process may have replaced it.
+ * With no file recorded at listen, it unlinks nothing.
+ */
+static void qio_channel_socket_listen_cleanup(QIOChannelSocket *sioc,
+                                              Error **errp)
+{
+#ifndef _WIN32
+    g_autofree char *path = qio_channel_socket_unix_path(sioc);
+    struct stat st;
+
+    if (path && (!sioc->unixIno || lstat(path, &st) < 0 ||
+                 st.st_dev != sioc->unixDev || st.st_ino != sioc->unixIno)) {
+        return;
+    }
+#endif
+    socket_listen_cleanup(sioc->fd, errp);
+}
+
 int qio_channel_socket_listen_sync(QIOChannelSocket *ioc,
                                    SocketAddress *addr,
                                    int num,
@@ -257,6 +295,17 @@ int qio_channel_socket_listen_sync(QIOChannelSocket *ioc,
         return -1;
     }
     qio_channel_set_feature(QIO_CHANNEL(ioc), QIO_CHANNEL_FEATURE_LISTEN);
+#ifndef _WIN32
+    {
+        g_autofree char *path = qio_channel_socket_unix_path(ioc);
+        struct stat st;
+
+        if (path && lstat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
+            ioc->unixDev = st.st_dev;
+            ioc->unixIno = st.st_ino;
+        }
+    }
+#endif
 
     return 0;
 }
@@ -455,7 +504,7 @@ static void qio_channel_socket_finalize(Object *obj)
         if (qio_channel_has_feature(ioc_local, QIO_CHANNEL_FEATURE_LISTEN)) {
             Error *err = NULL;
 
-            socket_listen_cleanup(ioc->fd, &err);
+            qio_channel_socket_listen_cleanup(ioc, &err);
             if (err) {
                 error_report_err(err);
                 err = NULL;
@@ -990,7 +1039,7 @@ qio_channel_socket_close(QIOChannel *ioc,
         qemu_socket_unselect_nofail(sioc->fd);
 #endif
         if (qio_channel_has_feature(ioc, QIO_CHANNEL_FEATURE_LISTEN)) {
-            socket_listen_cleanup(sioc->fd, errp);
+            qio_channel_socket_listen_cleanup(sioc, errp);
         }
 
         if (close(sioc->fd) < 0) {

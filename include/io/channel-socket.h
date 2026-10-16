@@ -55,6 +55,11 @@ struct QIOChannelSocket {
      * zerocopy since the last qio_channel_socket_flush() call.
      */
     bool new_zero_copy_sent_success;
+#ifndef _WIN32
+    /* xemu: the unix socket file this listener bound (0: none, never unlink) */
+    dev_t unixDev;
+    ino_t unixIno;
+#endif
 };
 
 

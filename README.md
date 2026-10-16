@@ -708,6 +708,17 @@ Other automation interfaces (windowed or headless):
   `scripts/` also run them at `nice -n 10` with a lease
   `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
   `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`.
+- **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
+  `-chardev socket,path=`, `chardev-add`) are never taken from a live
+  process. If a socket at the path still has a listener, the new one
+  fails with `UNIX socket <path> is in use by a live listener: Address
+  already in use` (at launch, xemu exits 1), and the running one keeps
+  its socket. A stale socket or a plain file is replaced, as before.
+  When a listener closes, it unlinks the path only if the path is still
+  its own socket file. On macOS the QMP monitor serves one client at a
+  time and queues one more connection, so further connects fail with
+  `ECONNREFUSED` while a client holds it. That means busy, not gone: the
+  file is still there.
 - **Host-time profile**: QMP `query-xemu-host-profile` returns counters
   cumulative since launch: `translate-ns`/`translations` (host time
   translating guest code), `apu-ns`/`apu-ticks` (the APU's ticks under

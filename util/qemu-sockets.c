@@ -950,6 +950,40 @@ static bool saddr_is_tight(UnixSocketAddress *saddr)
 #endif
 }
 
+#ifndef _WIN32
+/*
+ * xemu: is a live socket bound to the unix socket file @path?
+ * unix_listen_saddr() unlinks whatever is at its path before it binds, so
+ * a second process given the same path would take it from a running one,
+ * whose socket file then vanishes while it keeps listening.  Only a stale
+ * socket (nothing bound: connect() is refused) or a non-socket may be
+ * replaced.  The probe is a datagram connect(): on a stream listener it
+ * fails with EPROTOTYPE before the kernel looks at the accept queue, so it
+ * queues no connection and a busy listener (a chardev with its one client)
+ * still reads as live, where a stream probe is refused on macOS.
+ */
+static bool unix_path_has_listener(const char *path, size_t pathlen)
+{
+    struct sockaddr_un un = { .sun_family = AF_UNIX };
+    struct stat st;
+    bool live;
+    int fd;
+
+    if (lstat(path, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+        return false;
+    }
+    fd = qemu_socket(PF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    memcpy(un.sun_path, path, pathlen);
+    live = connect(fd, (struct sockaddr *)&un, sizeof(un)) == 0 ||
+           errno == EPROTOTYPE;
+    close(fd);
+    return live;
+}
+#endif
+
 static int unix_listen_saddr(UnixSocketAddress *saddr,
                              int num,
                              Error **errp)
@@ -1001,6 +1035,14 @@ static int unix_listen_saddr(UnixSocketAddress *saddr,
         }
         close(fd);
     }
+
+#ifndef _WIN32
+    if (!abstract && unix_path_has_listener(path, pathlen)) {
+        error_setg_errno(errp, EADDRINUSE,
+                         "UNIX socket %s is in use by a live listener", path);
+        goto err;
+    }
+#endif
 
     if (!abstract && unlink(path) < 0 && errno != ENOENT) {
         error_setg_errno(errp, errno,
