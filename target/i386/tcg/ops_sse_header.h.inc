@@ -93,23 +93,28 @@ DEF_HELPER_3(glue(pshufhw, SUFFIX), void, Reg, Reg, int)
 /* FPU ops */
 /* XXX: not accurate */
 
+/* Arithmetic only: no flags, no faults (NO_PIN: helper.h). */
 #define SSE_HELPER_P4(name)                                             \
-    DEF_HELPER_4(glue(name ## ps, SUFFIX), void, env, Reg, Reg, Reg)    \
-    DEF_HELPER_4(glue(name ## pd, SUFFIX), void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(glue(name ## ps, SUFFIX), NO_PIN,                \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(glue(name ## pd, SUFFIX), NO_PIN,                \
+                       void, env, Reg, Reg, Reg)
 
 #define SSE_HELPER_P3(name, ...)                                        \
-    DEF_HELPER_3(glue(name ## ps, SUFFIX), void, env, Reg, Reg)         \
-    DEF_HELPER_3(glue(name ## pd, SUFFIX), void, env, Reg, Reg)
+    DEF_HELPER_FLAGS_3(glue(name ## ps, SUFFIX), NO_PIN,                \
+                       void, env, Reg, Reg)                             \
+    DEF_HELPER_FLAGS_3(glue(name ## pd, SUFFIX), NO_PIN,                \
+                       void, env, Reg, Reg)
 
 #if SHIFT == 1
 #define SSE_HELPER_S4(name)                                             \
     SSE_HELPER_P4(name)                                                 \
-    DEF_HELPER_4(name ## ss, void, env, Reg, Reg, Reg)                  \
-    DEF_HELPER_4(name ## sd, void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(name ## ss, NO_PIN, void, env, Reg, Reg, Reg)    \
+    DEF_HELPER_FLAGS_4(name ## sd, NO_PIN, void, env, Reg, Reg, Reg)
 #define SSE_HELPER_S3(name)                                             \
     SSE_HELPER_P3(name)                                                 \
-    DEF_HELPER_4(name ## ss, void, env, Reg, Reg, Reg)                  \
-    DEF_HELPER_4(name ## sd, void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(name ## ss, NO_PIN, void, env, Reg, Reg, Reg)    \
+    DEF_HELPER_FLAGS_4(name ## sd, NO_PIN, void, env, Reg, Reg, Reg)
 #else
 #define SSE_HELPER_S4(name, ...) SSE_HELPER_P4(name)
 #define SSE_HELPER_S3(name, ...) SSE_HELPER_P3(name)
@@ -162,7 +167,7 @@ DEF_HELPER_2(cvtsd2sq, s64, env, ZMMReg)
 
 DEF_HELPER_3(cvttps2pi, void, env, MMXReg, ZMMReg)
 DEF_HELPER_3(cvttpd2pi, void, env, MMXReg, ZMMReg)
-DEF_HELPER_2(cvttss2si, s32, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvttss2si, NO_PIN, s32, env, ZMMReg)
 DEF_HELPER_2(cvttsd2si, s32, env, ZMMReg)
 #ifdef TARGET_X86_64
 DEF_HELPER_2(cvttss2sq, s64, env, ZMMReg)

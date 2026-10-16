@@ -117,6 +117,12 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 #define HS_DEF_HELPER_3(name, ret, t1, t2, t3) \
 	DEF_HELPER_3(name ## __soft, ret, t1, t2, t3) \
 	DEF_HELPER_3(name ## __hard, ret, t1, t2, t3)
+#define HS_DEF_HELPER_FLAGS_1(name, fl, ret, t1) \
+	DEF_HELPER_FLAGS_1(name ## __soft, fl, ret, t1) \
+	DEF_HELPER_FLAGS_1(name ## __hard, fl, ret, t1)
+#define HS_DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2) \
+	DEF_HELPER_FLAGS_2(name ## __soft, fl, ret, t1, t2) \
+	DEF_HELPER_FLAGS_2(name ## __hard, fl, ret, t1, t2)
 #else
 #define HS_DEF_HELPER_1(name, ret, t1) \
 	DEF_HELPER_1(name, ret, t1)
@@ -124,7 +130,18 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 	DEF_HELPER_2(name, ret, t1, t2)
 #define HS_DEF_HELPER_3(name, ret, t1, t2, t3) \
 	DEF_HELPER_3(name, ret, t1, t2, t3)
+#define HS_DEF_HELPER_FLAGS_1(name, fl, ret, t1) \
+	DEF_HELPER_FLAGS_1(name, fl, ret, t1)
+#define HS_DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2) \
+	DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2)
 #endif
+
+/*
+ * TCG_CALL_NO_RW_PINNED (EIP and the CC_* fields stay in their host
+ * registers) only on hot helpers that touch neither and cannot raise:
+ * not fcomi/fucomi (CC_SRC), fwait (#MF) or anything accessing memory.
+ */
+#define NO_PIN TCG_CALL_NO_RW_PINNED
 
 HS_DEF_HELPER_2(flds_FT0, void, env, i32)
 HS_DEF_HELPER_2(fldl_FT0, void, env, i64)
@@ -132,15 +149,15 @@ HS_DEF_HELPER_2(fildl_FT0, void, env, s32)
 HS_DEF_HELPER_2(flds_ST0, void, env, i32)
 HS_DEF_HELPER_2(fldl_ST0, void, env, i64)
 HS_DEF_HELPER_2(fildl_ST0, void, env, s32)
-HS_DEF_HELPER_2(fildll_ST0, void, env, s64)
+HS_DEF_HELPER_FLAGS_2(fildll_ST0, NO_PIN, void, env, s64)
 HS_DEF_HELPER_1(fsts_ST0, i32, env)
 HS_DEF_HELPER_1(fstl_ST0, i64, env)
-HS_DEF_HELPER_1(fist_ST0, s32, env)
-HS_DEF_HELPER_1(fistl_ST0, s32, env)
-HS_DEF_HELPER_1(fistll_ST0, s64, env)
+HS_DEF_HELPER_FLAGS_1(fist_ST0, NO_PIN, s32, env)
+HS_DEF_HELPER_FLAGS_1(fistl_ST0, NO_PIN, s32, env)
+HS_DEF_HELPER_FLAGS_1(fistll_ST0, NO_PIN, s64, env)
 HS_DEF_HELPER_1(fistt_ST0, s32, env)
-HS_DEF_HELPER_1(fisttl_ST0, s32, env)
-HS_DEF_HELPER_1(fisttll_ST0, s64, env)
+HS_DEF_HELPER_FLAGS_1(fisttl_ST0, NO_PIN, s32, env)
+HS_DEF_HELPER_FLAGS_1(fisttll_ST0, NO_PIN, s64, env)
 HS_DEF_HELPER_2(fldt_ST0, void, env, tl)
 HS_DEF_HELPER_2(fstt_ST0, void, env, tl)
 HS_DEF_HELPER_1(fpush, void, env)
@@ -169,7 +186,7 @@ HS_DEF_HELPER_2(fdiv_STN_ST0, void, env, int)
 HS_DEF_HELPER_2(fdivr_STN_ST0, void, env, int)
 HS_DEF_HELPER_1(fchs_ST0, void, env)
 HS_DEF_HELPER_1(fabs_ST0, void, env)
-HS_DEF_HELPER_1(fxam_ST0, void, env)
+HS_DEF_HELPER_FLAGS_1(fxam_ST0, NO_PIN, void, env)
 HS_DEF_HELPER_1(fld1_ST0, void, env)
 HS_DEF_HELPER_1(fldl2t_ST0, void, env)
 HS_DEF_HELPER_1(fldl2e_ST0, void, env)
@@ -179,26 +196,26 @@ HS_DEF_HELPER_1(fldln2_ST0, void, env)
 HS_DEF_HELPER_1(fldz_ST0, void, env)
 HS_DEF_HELPER_1(fldz_FT0, void, env)
 HS_DEF_HELPER_1(fnstsw, i32, env)
-HS_DEF_HELPER_2(fldcw, void, env, i32)
+HS_DEF_HELPER_FLAGS_2(fldcw, NO_PIN, void, env, i32)
 HS_DEF_HELPER_1(fclex, void, env)
 HS_DEF_HELPER_1(fwait, void, env)
 HS_DEF_HELPER_1(fninit, void, env)
 HS_DEF_HELPER_2(fbld_ST0, void, env, tl)
 HS_DEF_HELPER_2(fbst_ST0, void, env, tl)
-HS_DEF_HELPER_1(f2xm1, void, env)
-HS_DEF_HELPER_1(fyl2x, void, env)
-HS_DEF_HELPER_1(fptan, void, env)
-HS_DEF_HELPER_1(fpatan, void, env)
-HS_DEF_HELPER_1(fxtract, void, env)
-HS_DEF_HELPER_1(fprem1, void, env)
-HS_DEF_HELPER_1(fprem, void, env)
-HS_DEF_HELPER_1(fyl2xp1, void, env)
-HS_DEF_HELPER_1(fsqrt, void, env)
-HS_DEF_HELPER_1(fsincos, void, env)
-HS_DEF_HELPER_1(frndint, void, env)
-HS_DEF_HELPER_1(fscale, void, env)
-HS_DEF_HELPER_1(fsin, void, env)
-HS_DEF_HELPER_1(fcos, void, env)
+HS_DEF_HELPER_FLAGS_1(f2xm1, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fyl2x, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fptan, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fpatan, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fxtract, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fprem1, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fprem, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fyl2xp1, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fsqrt, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fsincos, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(frndint, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fscale, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fsin, NO_PIN, void, env)
+HS_DEF_HELPER_FLAGS_1(fcos, NO_PIN, void, env)
 HS_DEF_HELPER_3(fstenv, void, env, tl, int)
 HS_DEF_HELPER_3(fldenv, void, env, tl, int)
 HS_DEF_HELPER_3(fsave, void, env, tl, int)
@@ -207,6 +224,8 @@ HS_DEF_HELPER_3(frstor, void, env, tl, int)
 #undef HS_DEF_HELPER_1
 #undef HS_DEF_HELPER_2
 #undef HS_DEF_HELPER_3
+#undef HS_DEF_HELPER_FLAGS_1
+#undef HS_DEF_HELPER_FLAGS_2
 
 DEF_HELPER_FLAGS_2(fxsave, TCG_CALL_NO_WG, void, env, tl)
 /* fxrstor/xrstor write env->fpstt, a TCG global in xemu (translate.c). */
@@ -226,7 +245,7 @@ DEF_HELPER_FLAGS_2(pext, TCG_CALL_NO_RWG_SE, tl, tl, tl)
 
 DEF_HELPER_2(ldmxcsr, void, env, i32)
 DEF_HELPER_1(update_mxcsr, void, env)
-DEF_HELPER_1(enter_mmx, void, env)
+DEF_HELPER_FLAGS_1(enter_mmx, NO_PIN, void, env)
 DEF_HELPER_1(emms, void, env)
 
 #define SHIFT 0
@@ -235,5 +254,7 @@ DEF_HELPER_1(emms, void, env)
 #include "tcg/ops_sse_header.h.inc"
 #define SHIFT 2
 #include "tcg/ops_sse_header.h.inc"
+
+#undef NO_PIN
 
 DEF_HELPER_1(rdrand, tl, env)

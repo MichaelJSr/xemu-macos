@@ -79,6 +79,12 @@
 /* ... emitted in the next guest access's slow-path stub */
 #define TCG_TARGET_HAS_st_f64_slow      TCG_TARGET_HAS_fpu
 
+/*
+ * tcg_pin_env_global: x8-x15 and x24-x27, call-clobbered and call-saved
+ * alike under AAPCS64 and the Windows ARM64 variant (x18 stays reserved).
+ */
+#define TCG_TARGET_HAS_pinned_globals   1
+
 #define TCG_TARGET_extract_valid(type, ofs, len)   1
 #define TCG_TARGET_sextract_valid(type, ofs, len)  1
 #define TCG_TARGET_deposit_valid(type, ofs, len)   1

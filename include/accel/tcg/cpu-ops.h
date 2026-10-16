@@ -49,6 +49,14 @@ struct TCGCPUOps {
      */
     void (*initialize)(void);
     /**
+     * @pin_globals: Ask for env globals to live in host registers
+     *
+     * Optional. Called with tcg_pin_env_global() requests once TCG is
+     * up, before the prologue is generated and before @initialize
+     * creates the globals.
+     */
+    void (*pin_globals)(void);
+    /**
      * @translate_code: Translate guest instructions to TCGOps
      * @cpu: cpu context
      * @tb: translation block

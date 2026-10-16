@@ -66,5 +66,8 @@
 #ifndef TCG_TARGET_HAS_st_f64_slow
 #define TCG_TARGET_HAS_st_f64_slow      0
 #endif
+#ifndef TCG_TARGET_HAS_pinned_globals
+#define TCG_TARGET_HAS_pinned_globals   0
+#endif
 
 #endif

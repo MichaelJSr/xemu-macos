@@ -1140,7 +1140,40 @@ typedef struct TCGOutOpSubtract {
                     TCGReg a0, tcg_target_long a1, TCGReg a2);
 } TCGOutOpSubtract;
 
+/*
+ * Pinned globals (tcg_pin_env_global), sorted by env offset. Fixed by
+ * tcg_prologue_init(); every context shares the table, and a pinned
+ * global has the same temp index in all of them. Bit i of the masks
+ * below and of the backend's tcg_out_pinned() masks is tcg_pinned[i].
+ */
+#define TCG_MAX_PINNED 16
+typedef struct TCGPinnedGlobal {
+    intptr_t offset;
+    TCGReg reg;
+    bool call_saved;
+    int temp_idx;               /* -1 until the global is created */
+} TCGPinnedGlobal;
+
+static TCGPinnedGlobal tcg_pinned[TCG_MAX_PINNED];
+static int tcg_nb_pinned;
+static bool tcg_pinned_frozen;
+static uint32_t tcg_pinned_all;         /* every entry */
+static uint32_t tcg_pinned_clobbered;   /* entries in call-clobbered regs */
+
 #include "tcg-target.c.inc"
+
+#if !TCG_TARGET_HAS_pinned_globals
+static void tcg_out_pinned(TCGContext *s, uint32_t mask, bool load)
+{
+    g_assert_not_reached();
+}
+
+static void tcg_out_pinned_after_call(TCGContext *s, uint32_t stored,
+                                      uint32_t loaded)
+{
+    g_assert_not_reached();
+}
+#endif
 
 #ifndef CONFIG_TCG_INTERPRETER
 /* Validate CPUTLBDescFast placement. */
@@ -1930,6 +1963,9 @@ void tcg_prologue_init(void)
     TCGContext *s = tcg_ctx;
     size_t prologue_size;
 
+    /* The prologue and epilogue load and store the pinned globals. */
+    tcg_pinned_frozen = true;
+
     s->code_ptr = s->code_gen_ptr;
     s->code_buf = s->code_gen_ptr;
     s->data_gen_ptr = NULL;
@@ -2093,6 +2129,67 @@ void tcg_set_frame(TCGContext *s, TCGReg reg, intptr_t start, intptr_t size)
         = tcg_global_reg_new_internal(s, TCG_TYPE_PTR, reg, "_frame");
 }
 
+bool tcg_pin_env_global(intptr_t offset, bool call_saved)
+{
+#if TCG_TARGET_HAS_pinned_globals
+    const TCGReg *pool = call_saved ? tcg_target_pin_regs_saved
+                                    : tcg_target_pin_regs_clobbered;
+    int pool_n = call_saved ? ARRAY_SIZE(tcg_target_pin_regs_saved)
+                            : ARRAY_SIZE(tcg_target_pin_regs_clobbered);
+    int used = 0, i;
+
+    g_assert(!tcg_pinned_frozen);
+    for (i = 0; i < tcg_nb_pinned; i++) {
+        g_assert(tcg_pinned[i].offset != offset);
+        used += tcg_pinned[i].call_saved == call_saved;
+    }
+    if (used == pool_n || tcg_nb_pinned == TCG_MAX_PINNED) {
+        return false;
+    }
+
+    /* Keep the table sorted by offset, so neighbours can pair up. */
+    for (i = tcg_nb_pinned; i > 0 && tcg_pinned[i - 1].offset > offset; i--) {
+        tcg_pinned[i] = tcg_pinned[i - 1];
+    }
+    tcg_pinned[i] = (TCGPinnedGlobal) {
+        .offset = offset, .reg = pool[used], .call_saved = call_saved,
+        .temp_idx = -1,
+    };
+    tcg_nb_pinned++;
+    tcg_regset_set_reg(tcg_ctx->reserved_regs, pool[used]);
+
+    tcg_pinned_all = tcg_pinned_clobbered = 0;
+    for (i = 0; i < tcg_nb_pinned; i++) {
+        tcg_pinned_all |= 1u << i;
+        if (tcg_regset_test_reg(tcg_target_call_clobber_regs,
+                                tcg_pinned[i].reg)) {
+            tcg_pinned_clobbered |= 1u << i;
+        }
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+/* Make @ts the pinned global for its env offset, if one was asked for. */
+static void tcg_global_pin(TCGContext *s, TCGTemp *ts, TCGTemp *base_ts)
+{
+    if (base_ts != tcgv_ptr_temp(tcg_env) || ts->type != TCG_TYPE_I32) {
+        return;
+    }
+    for (int i = 0; i < tcg_nb_pinned; i++) {
+        if (tcg_pinned[i].offset == ts->mem_offset) {
+            /* A second global over a pinned field would read stale env. */
+            g_assert(tcg_pinned[i].temp_idx < 0);
+            tcg_pinned[i].temp_idx = temp_idx(ts);
+            ts->pinned = 1;
+            ts->reg = tcg_pinned[i].reg;
+            return;
+        }
+    }
+}
+
 static TCGTemp *tcg_global_mem_new_internal(TCGv_ptr base, intptr_t offset,
                                             const char *name, TCGType type)
 {
@@ -2149,6 +2246,7 @@ static TCGTemp *tcg_global_mem_new_internal(TCGv_ptr base, intptr_t offset,
         ts->mem_base = base_ts;
         ts->mem_offset = offset;
         ts->name = name;
+        tcg_global_pin(s, ts, base_ts);
     }
     return ts;
 }
@@ -2962,6 +3060,16 @@ static void tcg_reg_alloc_start(TCGContext *s)
     }
 
     memset(s->reg_to_temp, 0, sizeof(s->reg_to_temp));
+
+    /* A pinned global is in its register, never coherent with env. */
+    for (i = 0; i < tcg_nb_pinned; i++) {
+        if (tcg_pinned[i].temp_idx >= 0) {
+            TCGTemp *ts = &s->temps[tcg_pinned[i].temp_idx];
+            ts->val_type = TEMP_VAL_REG;
+            ts->mem_coherent = 0;
+            s->reg_to_temp[ts->reg] = ts;
+        }
+    }
 }
 
 static char *tcg_get_arg_str_ptr(TCGContext *s, char *buf, int buf_size,
@@ -4854,6 +4962,10 @@ static void temp_free_or_dead(TCGContext *s, TCGTemp *ts, int free_or_dead)
 {
     TCGTempVal new_type;
 
+    if (ts->pinned) {
+        /* Stays in its register; syncs are the backend's (tcg_out_pinned). */
+        return;
+    }
     switch (ts->kind) {
     case TEMP_FIXED:
         return;
@@ -4886,6 +4998,9 @@ static inline void temp_dead(TCGContext *s, TCGTemp *ts)
 static void temp_sync(TCGContext *s, TCGTemp *ts, TCGRegSet allocated_regs,
                       TCGRegSet preferred_regs, int free_or_dead)
 {
+    if (ts->pinned) {
+        return;
+    }
     if (!temp_readonly(ts) && !ts->mem_coherent) {
         if (!ts->mem_allocated) {
             temp_allocate_frame(s, ts);
@@ -5124,7 +5239,8 @@ static void temp_save(TCGContext *s, TCGTemp *ts, TCGRegSet allocated_regs)
 {
     /* The liveness analysis already ensures that globals are back
        in memory. Keep an tcg_debug_assert for safety. */
-    tcg_debug_assert(ts->val_type == TEMP_VAL_MEM || temp_readonly(ts));
+    tcg_debug_assert(ts->val_type == TEMP_VAL_MEM || temp_readonly(ts) ||
+                     ts->pinned);
 }
 
 /* save globals to their canonical location and assume they can be
@@ -5150,6 +5266,7 @@ static void sync_globals(TCGContext *s, TCGRegSet allocated_regs)
         TCGTemp *ts = &s->temps[i];
         tcg_debug_assert(ts->val_type != TEMP_VAL_REG
                          || ts->kind == TEMP_FIXED
+                         || ts->pinned
                          || ts->mem_coherent);
     }
 }
@@ -5222,6 +5339,11 @@ static void tcg_reg_alloc_do_movi(TCGContext *s, TCGTemp *ots,
     /* ENV should not be modified.  */
     tcg_debug_assert(!temp_readonly(ots));
 
+    if (ots->pinned) {
+        tcg_out_movi(s, ots->type, ots->reg, val);
+        return;
+    }
+
     /* The movi is not explicitly generated here.  */
     set_temp_val_nonreg(s, ots, TEMP_VAL_CONST);
     ots->val = val;
@@ -5230,6 +5352,51 @@ static void tcg_reg_alloc_do_movi(TCGContext *s, TCGTemp *ots,
         temp_sync(s, ots, s->reserved_regs, preferred_regs, IS_DEAD_ARG(0));
     } else if (IS_DEAD_ARG(0)) {
         temp_dead(s, ots);
+    }
+}
+
+/* INDEX_op_mov into a pinned global: the value goes to its register. */
+static void tcg_reg_alloc_mov_pinned(TCGContext *s, const TCGOp *op,
+                                     TCGTemp *ots, TCGTemp *ts)
+{
+    const TCGLifeData arg_life = op->life;
+
+    switch (ts->val_type) {
+    case TEMP_VAL_CONST:
+        tcg_out_movi(s, ots->type, ots->reg, ts->val);
+        break;
+    case TEMP_VAL_REG:
+        if (ts->reg == ots->reg && !ts->pinned) {
+            /*
+             * tcg_reg_alloc_op computed this temp straight into the
+             * register (tcg_reg_alloc_coalesce_pinned); only the temp
+             * has to go. It was never entered in reg_to_temp.
+             */
+            tcg_debug_assert(IS_DEAD_ARG(1));
+            ts->val_type = ts->kind == TEMP_EBB ? TEMP_VAL_DEAD : TEMP_VAL_MEM;
+            return;
+        }
+        if (ts->reg != ots->reg) {
+            bool ok = tcg_out_mov(s, ots->type, ots->reg, ts->reg);
+            tcg_debug_assert(ok);
+            (void)ok;
+        }
+        break;
+    case TEMP_VAL_MEM:
+        if (IS_DEAD_ARG(1)) {
+            tcg_out_ld(s, ots->type, ots->reg, ts->mem_base->reg,
+                       ts->mem_offset);
+        } else {
+            temp_load(s, ts, tcg_target_available_regs[ts->type],
+                      s->reserved_regs, 0);
+            tcg_out_mov(s, ots->type, ots->reg, ts->reg);
+        }
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    if (IS_DEAD_ARG(1)) {
+        temp_dead(s, ts);
     }
 }
 
@@ -5255,6 +5422,11 @@ static void tcg_reg_alloc_mov(TCGContext *s, const TCGOp *op)
     /* Note that otype != itype for no-op truncation.  */
     otype = ots->type;
     itype = ts->type;
+
+    if (ots->pinned) {
+        tcg_reg_alloc_mov_pinned(s, op, ots, ts);
+        return;
+    }
 
     if (ts->val_type == TEMP_VAL_CONST) {
         /* propagate constant or generate sti */
@@ -5292,7 +5464,7 @@ static void tcg_reg_alloc_mov(TCGContext *s, const TCGOp *op)
         return;
     }
 
-    if (IS_DEAD_ARG(1) && ts->kind != TEMP_FIXED) {
+    if (IS_DEAD_ARG(1) && ts->kind != TEMP_FIXED && !ts->pinned) {
         /*
          * The mov can be suppressed.  Kill input first, so that it
          * is unlinked from reg_to_temp, then set the output to the
@@ -5493,6 +5665,42 @@ static void tcg_reg_alloc_dup(TCGContext *s, const TCGOp *op)
     }
 }
 
+/*
+ * Output @ts of @op feeds only "mov pinned, ts" right after: compute it
+ * straight into the pinned global's register (in *@preg), where that
+ * mov finds it (tcg_reg_alloc_mov_pinned). Since the mov is the next op,
+ * the register's old value is dead once @op has read its inputs.
+ */
+static bool tcg_reg_alloc_coalesce_pinned(TCGContext *s, const TCGOp *op,
+                                          TCGTemp *ts,
+                                          const TCGArgConstraint *arg_ct,
+                                          int nb_oargs, TCGReg *preg)
+{
+    const TCGOp *nx;
+    TCGTemp *pin;
+
+    if (!tcg_nb_pinned || nb_oargs != 1 || arg_ct->pair || arg_ct->oalias ||
+        arg_ct->newreg || (ts->kind != TEMP_EBB && ts->kind != TEMP_TB)) {
+        return false;
+    }
+    nx = QTAILQ_NEXT(op, link);
+    if (!nx || nx->opc != INDEX_op_mov || arg_temp(nx->args[1]) != ts ||
+        !(nx->life & (DEAD_ARG << 1))) {
+        return false;
+    }
+    pin = arg_temp(nx->args[0]);
+    if (!pin->pinned || pin->type != ts->type ||
+        !tcg_regset_test_reg(arg_ct->regs, pin->reg)) {
+        return false;
+    }
+    /* Not entered in reg_to_temp: the register stays the global's. */
+    ts->val_type = TEMP_VAL_REG;
+    ts->reg = pin->reg;
+    ts->mem_coherent = 0;
+    *preg = pin->reg;
+    return true;
+}
+
 static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
 {
     const TCGLifeData arg_life = op->life;
@@ -5508,6 +5716,9 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
     TCGArg new_args[TCG_MAX_OP_ARGS];
     int const_args[TCG_MAX_OP_ARGS];
     TCGCond op_cond;
+    TCGTemp *pin_fix_ts[TCG_MAX_OP_ARGS];
+    TCGReg pin_fix_reg[TCG_MAX_OP_ARGS];
+    int nb_pin_fix = 0;
 
     if (def->flags & TCG_OPF_CARRY_IN) {
         tcg_debug_assert(s->carry_live);
@@ -5595,9 +5806,15 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
                  * If the input is readonly, then it cannot also be an
                  * output and aliased to itself.  If the input is not
                  * dead after the instruction, we must allocate a new
-                 * register and move it.
+                 * register and move it.  A pinned global may share its
+                 * register only with itself as the output.
                  */
-                if (temp_readonly(ts) || !IS_DEAD_ARG(i)
+                if (ts->pinned) {
+                    allocate_new_reg =
+                        !IS_DEAD_ARG(i)
+                        || args_ct[arg_ct->alias_index].newreg
+                        || arg_temp(op->args[arg_ct->alias_index]) != ts;
+                } else if (temp_readonly(ts) || !IS_DEAD_ARG(i)
                     || args_ct[arg_ct->alias_index].newreg) {
                     allocate_new_reg = true;
                 } else if (ts->val_type == TEMP_VAL_REG) {
@@ -5642,7 +5859,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
                 i_preferred_regs = output_pref(op, arg_ct->alias_index);
                 if (IS_DEAD_ARG(i1) &&
                     IS_DEAD_ARG(i2) &&
-                    !temp_readonly(ts) &&
+                    !temp_readonly(ts) && !ts->pinned &&
                     ts->val_type == TEMP_VAL_REG &&
                     ts->reg < TCG_TARGET_NB_REGS - 1 &&
                     tcg_regset_test_reg(i_required_regs, reg) &&
@@ -5678,7 +5895,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
             i_preferred_regs = output_pref(op, arg_ct->alias_index);
 
             if (IS_DEAD_ARG(i) &&
-                !temp_readonly(ts) &&
+                !temp_readonly(ts) && !ts->pinned &&
                 ts->val_type == TEMP_VAL_REG &&
                 reg > 0 &&
                 s->reg_to_temp[reg - 1] == NULL &&
@@ -5700,7 +5917,8 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
              * If an aliased input is not dead after the instruction,
              * we must allocate a new register and move it.
              */
-            if (arg_ct->ialias && (!IS_DEAD_ARG(i) || temp_readonly(ts))) {
+            if (arg_ct->ialias &&
+                (!IS_DEAD_ARG(i) || temp_readonly(ts) || ts->pinned)) {
                 TCGRegSet t_allocated_regs = i_allocated_regs;
 
                 /*
@@ -5792,6 +6010,34 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
 
             /* ENV should not be modified.  */
             tcg_debug_assert(!temp_readonly(ts));
+
+            if (ts->pinned) {
+                /* Into its register, or elsewhere and moved home after. */
+                tcg_debug_assert(arg_ct->pair == 0);
+                if (arg_ct->oalias && !const_args[arg_ct->alias_index]) {
+                    reg = new_args[arg_ct->alias_index];
+                } else if (!arg_ct->newreg &&
+                           tcg_regset_test_reg(arg_ct->regs, ts->reg)) {
+                    reg = ts->reg;
+                } else {
+                    reg = tcg_reg_alloc(s, arg_ct->regs,
+                                        i_allocated_regs | o_allocated_regs,
+                                        0, false);
+                }
+                if (reg != ts->reg) {
+                    pin_fix_ts[nb_pin_fix] = ts;
+                    pin_fix_reg[nb_pin_fix++] = reg;
+                }
+                tcg_regset_set_reg(o_allocated_regs, reg);
+                new_args[i] = reg;
+                continue;
+            }
+            if (tcg_reg_alloc_coalesce_pinned(s, op, ts, arg_ct, nb_oargs,
+                                              &reg)) {
+                tcg_regset_set_reg(o_allocated_regs, reg);
+                new_args[i] = reg;
+                continue;
+            }
 
             switch (arg_ct->pair) {
             case 0: /* not paired */
@@ -6192,6 +6438,13 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
         s->carry_live = true;
     }
 
+    for (k = 0; k < nb_pin_fix; k++) {
+        bool ok = tcg_out_mov(s, pin_fix_ts[k]->type, pin_fix_ts[k]->reg,
+                              pin_fix_reg[k]);
+        tcg_debug_assert(ok);
+        (void)ok;
+    }
+
     /* move the outputs in the correct register if needed */
     for(i = 0; i < nb_oargs; i++) {
         ts = arg_temp(op->args[i]);
@@ -6439,7 +6692,35 @@ static void tcg_reg_alloc_call(TCGContext *s, TCGOp *op)
         load_arg_ref(s, 0, ts->mem_base->reg, ts->mem_offset, &allocated_regs);
     }
 
+    /*
+     * Pinned globals: call-clobbered registers are saved to env before
+     * the call and reloaded after it; call-saved ones are stored if the
+     * helper may read them (or leave through an exception, which reads
+     * them all), reloaded if it may write them.
+     */
+    uint32_t pin_st = 0, pin_ld = 0;
+    if (tcg_nb_pinned) {
+        unsigned f = info->flags;
+        uint32_t saved = tcg_pinned_all & ~tcg_pinned_clobbered;
+
+        pin_st = pin_ld = tcg_pinned_clobbered;
+        if (!(f & TCG_CALL_NO_RW_PINNED)) {
+            if ((f & (TCG_CALL_NO_READ_GLOBALS | TCG_CALL_NO_SIDE_EFFECTS))
+                != (TCG_CALL_NO_READ_GLOBALS | TCG_CALL_NO_SIDE_EFFECTS)) {
+                pin_st |= saved;
+            }
+            if (!(f & (TCG_CALL_NO_READ_GLOBALS | TCG_CALL_NO_WRITE_GLOBALS))) {
+                pin_ld |= saved;
+            }
+        }
+        tcg_out_pinned(s, pin_st, false);
+    }
+
     tcg_out_call(s, tcg_call_func(op), info);
+
+    if (tcg_nb_pinned && !(info->flags & TCG_CALL_NO_RETURN)) {
+        tcg_out_pinned_after_call(s, pin_st, pin_ld);
+    }
 
     /* Assign output registers and emit moves if needed.  */
     switch (info->out_kind) {
@@ -6451,6 +6732,10 @@ static void tcg_reg_alloc_call(TCGContext *s, TCGOp *op)
             /* ENV should not be modified.  */
             tcg_debug_assert(!temp_readonly(ts));
 
+            if (ts->pinned) {
+                tcg_out_mov(s, ts->type, ts->reg, reg);
+                continue;
+            }
             set_temp_val_reg(s, ts, reg);
             ts->mem_coherent = 0;
         }

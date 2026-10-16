@@ -249,6 +249,12 @@ typedef TCGv_i64 TCGv_vaddr;
 #define TCG_CALL_NO_SIDE_EFFECTS    0x0004
 /* Helper is G_NORETURN.  */
 #define TCG_CALL_NO_RETURN          0x0008
+/*
+ * Helper neither reads nor writes any pinned global (tcg_pin_env_global),
+ * and cannot leave through an exception or cpu_loop_exit: the pinned
+ * globals in call-saved host registers are not synced around the call.
+ */
+#define TCG_CALL_NO_RW_PINNED       0x0010
 
 /* convenience version of most used call flags */
 #define TCG_CALL_NO_RWG         TCG_CALL_NO_READ_GLOBALS
@@ -305,6 +311,8 @@ typedef struct TCGTemp {
     unsigned int mem_allocated:1;
     unsigned int temp_allocated:1;
     unsigned int temp_subindex:2;
+    /* Global that lives in @reg across TBs (tcg_pin_env_global). */
+    unsigned int pinned:1;
 
     int64_t val;
     struct TCGTemp *mem_base;
@@ -813,6 +821,24 @@ void tb_target_set_jmp_target(const TranslationBlock *, int,
                               uintptr_t, uintptr_t);
 
 void tcg_set_frame(TCGContext *s, TCGReg reg, intptr_t start, intptr_t size);
+
+/**
+ * tcg_pin_env_global: keep a 32-bit env global in a host register
+ * @offset: offset of the field in CPUArchState (the tcg_env base)
+ * @call_saved: true to take a call-saved host register, which is synced
+ *   to env only around helpers that may read the global and reloaded
+ *   only after helpers that may write it; false to take a call-clobbered
+ *   one, which is stored before and reloaded after every call
+ *
+ * Call before tcg_prologue_init(). The tcg_global_mem_new_i32() of tcg_env
+ * at @offset made later then lives in that register across TBs instead
+ * of in memory. env holds its value only at the prologue/epilogue, around
+ * qemu_ld/st slow-path helpers and around helper calls as above, so C code
+ * may read or write the field only there (see TCG_CALL_NO_RW_PINNED).
+ * Returns false, leaving the global in memory, if the backend has no
+ * register left in that class.
+ */
+bool tcg_pin_env_global(intptr_t offset, bool call_saved);
 
 #define TCG_CT_CONST      1  /* any constant of register size */
 #define TCG_CT_REG_ZERO   2  /* zero, in TCG_REG_ZERO */

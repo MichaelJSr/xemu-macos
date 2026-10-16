@@ -509,6 +509,42 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   recheck at load 12-41: −2.61% (28/28) and +0.2% (13/28, CI
   −1.2..+1.6%), so cycle-neutral. Stream-e2 walk, 8 pairs: Minsns/frame
   −2.1% (8/8), Mcycles/frame −2.5% (6/8, 95% CI −5.5..+0.7%).
+- **Guest registers pinned in host registers (2026-10-15).** TB code
+  keeps EAX..EDI in x8-x15 and EIP, CC_DST, CC_SRC and CC_OP in x24-x27
+  instead of in `CPUX86State`. The JIT study counted ~5.9M env loads and
+  stores of these per heavy-f1 frame (GPRs 3.2M, CC_* 1.5M, EIP 1.2M),
+  most of its ~6.5M guest-state syncs (segment bases are the rest).
+  TCG core: the target calls `tcg_pin_env_global()` from the new
+  `TCGCPUOps.pin_globals` hook, before the prologue is generated; the
+  global then stays resident in its register, and an op whose result
+  only feeds the next op's mov into a pinned global computes straight
+  into the home. The aarch64 prologue loads the homes and the epilogue
+  stores them. qemu_ld/st slow paths (after the sub-page prefilter) BL
+  two shared routines behind the epilogue, one storing every home before
+  the helper and one reloading x8-x15 after it; inlined, those 11 insns
+  per stub grew TB code 14.7%, now 0.3%. Helper calls save and reload
+  the GPR homes (call-clobbered); they store EIP/CC_* only if the helper
+  may read globals or fault, and reload them only if it may write them.
+  `TCG_CALL_NO_RW_PINNED` exempts the x87 and SSE compute helpers that
+  touch none of it and cannot fault (not fcomi/fucomi, which write
+  CC_SRC, nor fwait); it saves under 0.1%. TB lookups read EIP and keep
+  the sync. Layouts that lost in the prototype (det heavy-f1, 4 pairs):
+  all eight GPRs in call-saved x20-x27 cost +4.6% Mcycles/frame, since
+  the allocator's call-preserved registers are gone and temps live
+  across calls spill; without the coalescing it was +5.1%. The FP temps
+  (d8-d15) and vector SSE ops allocate exactly as before; 18 of 15,797
+  heavy-f1 TBs gain a spill (x87 FDP addresses across a load). A
+  `--debug` build (CONFIG_DEBUG_TCG) poisons the env homes (0xdeadbeef)
+  whenever TB code owns them and aborts if a helper without a reload
+  changed one: wrongly marking `fucomi` aborts on its CC_SRC write,
+  wrongly marking `read_eflags` breaks the f300 golden, and the real
+  build passes all goldens. Cross-binary det A/B against its parent
+  (measured on the pin lane, based on 94a722acd8), load 7-29, median
+  per-pair Mcycles/frame: heavy-f1 −3.9% (11/12 pairs; mean −3.7%
+  without the two pairs a load spike moved by more than 10%, −5.3%
+  with them), Minsns/frame −4.0% (12/12); stream-e2
+  −3.9% (21/28; mean −3.5%, 20/24, without the four spike pairs, −1.5%
+  with them), Minsns/frame −4.0% (28/28).
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,

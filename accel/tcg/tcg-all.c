@@ -163,6 +163,9 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
     tcg_init(s->tb_size * MiB, s->splitwx_enabled, max_threads);
 
 #if defined(CONFIG_SOFTMMU)
+    if (cc->tcg_ops->pin_globals) {
+        cc->tcg_ops->pin_globals();
+    }
     /*
      * There's no guest base to take into account, so go ahead and
      * initialize the prologue now.

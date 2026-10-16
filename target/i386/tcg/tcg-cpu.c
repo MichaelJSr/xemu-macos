@@ -25,6 +25,7 @@
 #include "exec/translation-block.h"
 #include "exec/target_page.h"
 #include "accel/tcg/cpu-ops.h"
+#include "tcg/tcg.h"
 #include "tcg-cpu.h"
 
 /* Frob eflags into and out of the CPU temporary format.  */
@@ -168,6 +169,26 @@ static vaddr x86_pointer_wrap(CPUState *cs, int mmu_idx,
 }
 #endif
 
+#if defined(XBOX) && TARGET_LONG_BITS == 32
+/*
+ * The guest GPRs live in call-clobbered host registers across TBs, saved
+ * to env around every call; EIP and CC_DST/CC_SRC/CC_OP in call-saved
+ * ones, synced only around the helpers that may touch them. C code reads
+ * or writes these fields only at a sync point (tcg_pin_env_global), so a
+ * new helper that touches them must not claim TCG_CALL_NO_RW_PINNED.
+ */
+static void tcg_x86_pin_globals(void)
+{
+    for (int i = 0; i < CPU_NB_REGS; i++) {
+        tcg_pin_env_global(offsetof(CPUX86State, regs[i]), false);
+    }
+    tcg_pin_env_global(offsetof(CPUX86State, eip), true);
+    tcg_pin_env_global(offsetof(CPUX86State, cc_dst), true);
+    tcg_pin_env_global(offsetof(CPUX86State, cc_src), true);
+    tcg_pin_env_global(offsetof(CPUX86State, cc_op), true);
+}
+#endif
+
 const TCGCPUOps x86_tcg_ops = {
     .mttcg_supported = true,
     .precise_smc = true,
@@ -176,6 +197,9 @@ const TCGCPUOps x86_tcg_ops = {
      */
     .guest_default_memory_order = TCG_MO_ALL & ~TCG_MO_ST_LD,
     .initialize = tcg_x86_init,
+#if defined(XBOX) && TARGET_LONG_BITS == 32
+    .pin_globals = tcg_x86_pin_globals,
+#endif
     .translate_code = x86_translate_code,
     .get_tb_cpu_state = x86_get_tb_cpu_state,
     .synchronize_from_tb = x86_cpu_synchronize_from_tb,
