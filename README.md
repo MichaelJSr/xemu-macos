@@ -197,6 +197,27 @@ Other automation interfaces (windowed or headless):
   normal mode replays bit-identically from one replay to the next, and
   follows the original closely (Azurik's player within 0.001 units over
   240 frames) but not exactly, since guest time followed the host clock.
+- **Pads across loads, and rebinding them**: an emulated pad reads its
+  port's host source at every guest poll, so whatever is bound to a port
+  (the keyboard pad, which the pipe drives, or a host gamepad) keeps
+  driving the pad on that port across `loadvm`, checkpoint restores and
+  `system_reset`, with no replug. The state must have been saved with a
+  pad of the same type (Duke or S) on that port: the game doesn't see a
+  pad the state lacks, so use the port the state was saved with (port 2
+  for states saved with the keyboard pad there). QMP `xemu-input-bind
+  {"port": 2, "source": "gamepad", "guid": "<32 hex digits>"}` changes a
+  port's host source without unplugging its pad (`"keyboard"` or
+  `"pipe"`: the keyboard pad; `"none"`: neutral input). A source bound to
+  another port moves, and that port keeps its pad; a port with no pad
+  gets one plugged. The port is then pinned: its pad stays plugged while
+  its host gamepad disconnects (neutral input meanwhile), the gamepad
+  drives it again when it reconnects, auto-binding leaves it alone, and
+  picking a device for it in the settings ends the pin. Nothing is saved
+  to the config. Under icount and while recording, the change applies at
+  the next vblank (`"pending": true` until then). A gamepad whose GUID
+  isn't open yet is waited for. `query-xemu-input-bindings` lists the
+  ports (source, pad, its type, pinned, pending) and the open gamepads
+  with their GUIDs; host gamepads open only in normal mode.
 - **Per-frame traces**: `xemu-frame-advance {"frames": N, "trace":
   [{"address": A, "size": S}, ...]}` also returns `trace`, one sample
   per vblank (`"trace-every": K` for every Kth, the last always

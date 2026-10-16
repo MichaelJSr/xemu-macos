@@ -26,10 +26,9 @@ For each of players 1 and 2 that is not bound to the keyboard, this
 drops the binding and stubs the pad with -device args instead: an
 unbound pad reports neutral input (hw/xbox/xid.c). It also sets
 [input] auto_bind = false. Without that, a pad connecting mid-run would
-bind to the stubbed port and xemu_input_bind() would abort on the
-occupied USB port. A stub on a tag saved without that player (the
-vm-2026070* tags carry only player 2) is a device the stream does not
-mention, which loadvm tolerates.
+bind to the stubbed port and drive the stub. A stub on a tag saved
+without that player (the vm-2026070* tags carry only player 2) is a
+device the stream does not mention, which loadvm tolerates.
 """
 import re
 import sys

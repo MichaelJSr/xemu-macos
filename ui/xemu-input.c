@@ -263,7 +263,8 @@ static const char *get_bound_driver(int port)
     return DRIVER_DUKE;
 }
 
-static const int port_map[4] = { 3, 4, 1, 2 };
+/* Player index -> port on the motherboard hub (also ui/xemu-input-bind.c). */
+const int xemu_input_hub_ports[4] = { 3, 4, 1, 2 };
 
 static void test_input_poll(void);
 static void xemu_input_publish_controller(ControllerState *state);
@@ -439,6 +440,16 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
         xemu_input_bindings_reload_map(new_con);
 
+        // A pinned port (QMP xemu-input-bind) waiting for this pad
+        int port = xemu_input_pinned_attach(new_con);
+        if (port >= 0) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Connected '%s' to port %d",
+                     new_con->name, port + 1);
+            xemu_queue_notification(buf);
+            return;
+        }
+
         // Do not replace binding for a currently bound device. In the case that
         // the same GUID is specified multiple times, on different ports, allow
         // any available port to be bound.
@@ -453,14 +464,15 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
 
 
         // Attempt to re-bind to port previously bound to
-        int port = 0;
+        port = 0;
         bool did_bind = false;
         while (!did_bind) {
             port = xemu_input_get_controller_default_bind_port(new_con, port);
             if (port < 0) {
                 // No (additional) default mappings
                 break;
-            } else if (!xemu_input_get_bound(port)) {
+            } else if (!xemu_input_get_bound(port) &&
+                       !xemu_input_port_pinned(port)) {
                 xemu_input_bind(port, new_con, 0);
                 did_bind = true;
                 break;
@@ -473,7 +485,8 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
         // Try to bind to any open port, and if so remember the binding
         if (!did_bind && g_config.input.auto_bind) {
             for (port = 0; port < 4; port++) {
-                if (!xemu_input_get_bound(port)) {
+                if (!xemu_input_get_bound(port) &&
+                    !xemu_input_port_pinned(port)) {
                     xemu_input_bind(port, new_con, 1);
                     did_bind = true;
                     break;
@@ -497,8 +510,8 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
             if (iter->sdl_joystick_id == event->gdevice.which) {
                 DPRINTF("Device removed: %s\n", iter->name);
 
-                // Disconnect
-                if (iter->bound >= 0) {
+                // Disconnect (a pinned port keeps its emulated pad)
+                if (iter->bound >= 0 && !xemu_input_pinned_detach(iter)) {
                     // Queue a notification to inform user controller disconnected
                     // FIXME: Probably replace with a callback registration thing,
                     // but this works well enough for now.
@@ -573,6 +586,11 @@ static FILE *record_file;
 static bool input_at_vblanks(void)
 {
     return icount_enabled() || record_file;
+}
+
+bool xemu_input_pads_at_vblanks(void)
+{
+    return input_at_vblanks();
 }
 
 void xemu_input_update_controller(ControllerState *state)
@@ -1177,6 +1195,7 @@ static void input_frame_tick(uint64_t frame);
 
 void xemu_input_frame_tick(uint64_t frame)
 {
+    xemu_input_bind_frame_tick();
     input_frame_tick(frame);
     if (record_file) {
         input_record_frame(frame);
@@ -1392,6 +1411,8 @@ void xemu_input_bind(int index, ControllerState *state, int save)
     // FIXME: Attempt to disable rumble when unbinding so it's not left
     // in rumble mode
 
+    xemu_input_port_unpin(index);
+
     // Unbind existing controller
     if (bound_controllers[index]) {
         assert(bound_controllers[index]->device != NULL);
@@ -1445,12 +1466,20 @@ void xemu_input_bind(int index, ControllerState *state, int save)
         bound_controllers[index] = state;
         bound_controllers[index]->bound = index;
 
+        // An emulated pad already on the port with no host source (a
+        // -device stub, a pinned port, a pad a load plugged): drive it
+        // rather than plug a second one onto the occupied hub port.
+        state->device = xemu_input_port_adopt_pad(index, bound_drivers[index]);
+        if (state->device) {
+            return;
+        }
+
         char *tmp;
 
         // Create controller's internal USB hub.
         QDict *usbhub_qdict = qdict_new();
         qdict_put_str(usbhub_qdict, "driver", "usb-hub");
-        tmp = g_strdup_printf("1.%d", port_map[index]);
+        tmp = g_strdup_printf("1.%d", xemu_input_hub_ports[index]);
         qdict_put_str(usbhub_qdict, "port", tmp);
         qdict_put_int(usbhub_qdict, "ports", 3);
         QemuOpts *usbhub_opts = qemu_opts_from_qdict(qemu_find_opts("device"), usbhub_qdict, &error_abort);
@@ -1471,7 +1500,7 @@ void xemu_input_bind(int index, ControllerState *state, int save)
 
         // Specify index/port
         qdict_put_int(qdict, "index", index);
-        tmp = g_strdup_printf("1.%d.1", port_map[index]);
+        tmp = g_strdup_printf("1.%d.1", xemu_input_hub_ports[index]);
         qdict_put_str(qdict, "port", tmp);
         g_free(tmp);
 
@@ -1568,7 +1597,7 @@ bool xemu_input_bind_xmu(int player_index, int expansion_slot_index,
     g_free(tmp);
 
     // Specify index/port
-    tmp = g_strdup_printf("1.%d.%d", port_map[player_index],
+    tmp = g_strdup_printf("1.%d.%d", xemu_input_hub_ports[player_index],
                           xmu_map[expansion_slot_index]);
     qdict_put_str(qdict2, "port", tmp);
     g_free(tmp);

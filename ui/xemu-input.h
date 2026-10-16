@@ -117,6 +117,7 @@ typedef QTAILQ_HEAD(, ControllerState) ControllerStateList;
 extern ControllerStateList available_controllers;
 extern ControllerState *bound_controllers[4];
 extern const char *bound_drivers[4];
+extern const int xemu_input_hub_ports[4]; /* player index -> hub port */
 
 #ifdef __cplusplus
 extern "C" {
@@ -148,6 +149,19 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
 void xemu_input_set_test_mode(int enabled);
 int xemu_input_get_test_mode(void);
 void xemu_input_reset_input_mapping(ControllerState *state);
+// Pads change only at vblanks: icount, or XEMU_INPUT_RECORD recording.
+bool xemu_input_pads_at_vblanks(void);
+
+/*
+ * ui/xemu-input-bind.c: ports whose emulated pad outlives its host source
+ * (QMP xemu-input-bind).
+ */
+void *xemu_input_port_adopt_pad(int index, const char *driver);
+bool xemu_input_port_pinned(int index);
+void xemu_input_port_unpin(int index);
+bool xemu_input_pinned_detach(ControllerState *state);
+int xemu_input_pinned_attach(ControllerState *state);
+void xemu_input_bind_frame_tick(void);
 
 #ifdef __cplusplus
 }

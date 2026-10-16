@@ -1222,3 +1222,134 @@
 # Since: 10.2
 ##
 { 'command': 'xemu-watch-stop', 'returns': 'XemuWatchLog' }
+
+##
+# Controller port bindings
+# ========================
+##
+
+##
+# @XemuInputSource:
+#
+# A host source for an emulated Xbox pad.
+#
+# @keyboard: the keyboard pad: the host keyboard (normal mode only)
+#     plus the lines written to XEMU_INPUT_PIPE
+#
+# @pipe: the same source as @keyboard (the pipe's lines drive the
+#     keyboard pad)
+#
+# @gamepad: a host gamepad, picked by its SDL GUID
+#
+# @none: no host source; the emulated pad stays plugged and reports
+#     neutral input
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuInputSource',
+  'data': [ 'keyboard', 'pipe', 'gamepad', 'none' ] }
+
+##
+# @XemuInputPort:
+#
+# A controller port: the emulated pad on it and its host source.
+#
+# @port: the port, 1 to 4
+#
+# @source: the host source driving the port now (@keyboard, @gamepad
+#     or @none)
+#
+# @name: the source's name
+#
+# @guid: the gamepad's SDL GUID (with @source @gamepad)
+#
+# @pad: whether an emulated pad sits on the port (a usb-xbox-gamepad
+#     or usb-xbox-gamepad-s whose index is this port)
+#
+# @driver: the emulated pad's device type
+#
+# @pinned: the port was bound with @xemu-input-bind: its emulated pad
+#     stays plugged while its host gamepad disconnects and reconnects,
+#     and auto-binding leaves it alone
+#
+# @pinned-source: the source @xemu-input-bind asked for
+#
+# @pinned-guid: the gamepad GUID @xemu-input-bind asked for
+#
+# @pending: the binding @xemu-input-bind asked for applies at the next
+#     vblank (deterministic mode and XEMU_INPUT_RECORD)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputPort',
+  'data': { 'port': 'int', 'source': 'XemuInputSource', '*name': 'str',
+            '*guid': 'str', 'pad': 'bool', '*driver': 'str',
+            'pinned': 'bool', '*pinned-source': 'XemuInputSource',
+            '*pinned-guid': 'str', 'pending': 'bool' } }
+
+##
+# @XemuInputGamepad:
+#
+# A host gamepad xemu has open.
+#
+# @name: its name
+#
+# @guid: its SDL GUID, as the config's [input.bindings] stores it
+#
+# @port: the port it drives, if any
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputGamepad',
+  'data': { 'name': 'str', 'guid': 'str', '*port': 'int' } }
+
+##
+# @XemuInputBindings:
+#
+# @ports: ports 1 to 4
+#
+# @gamepads: the host gamepads xemu has open (none in deterministic
+#     mode, which opens no host gamepad)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputBindings',
+  'data': { 'ports': ['XemuInputPort'], 'gamepads': ['XemuInputGamepad'] } }
+
+##
+# @query-xemu-input-bindings:
+#
+# List the controller ports and the host gamepads.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-input-bindings', 'returns': 'XemuInputBindings' }
+
+##
+# @xemu-input-bind:
+#
+# Change the host source that drives a port's emulated pad, keeping
+# the pad plugged: the guest sees no unplug, and loadvm, checkpoint
+# restores and system_reset keep it, as for any bound port.  A port
+# with no emulated pad gets one plugged, as binding it in the settings
+# does.  A source bound to another port moves here; that port keeps
+# its pad with no source.  The port is then pinned (see
+# @XemuInputPort).  The change is not saved to the config.  In
+# deterministic mode and while XEMU_INPUT_RECORD records it applies at
+# the next vblank, so it lands at a fixed instruction count; otherwise
+# at once.
+#
+# @port: the port, 1 to 4
+#
+# @source: the new source
+#
+# @guid: with @source @gamepad, the gamepad's SDL GUID (32 hex
+#     digits).  When several open gamepads share it, one no other
+#     port uses is taken.  When none is open, the port reports neutral
+#     input until one connects, which then drives it without a replug.
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-input-bind',
+  'data': { 'port': 'int', 'source': 'XemuInputSource', '*guid': 'str' },
+  'returns': 'XemuInputPort' }
