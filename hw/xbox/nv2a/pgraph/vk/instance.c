@@ -496,21 +496,6 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
     return true;
 }
 
-#ifndef __APPLE__
-/* XEMU_VK_VOLK_DEVICE=0 restores legacy instance-level (loader trampoline)
- * dispatch for device-level Vulkan entry points. Read once; called from the
- * renderer init path only. */
-static bool volk_device_dispatch_enabled(void)
-{
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *v = getenv("XEMU_VK_VOLK_DEVICE");
-        enabled = !(v && v[0] == '0');
-    }
-    return enabled != 0;
-}
-#endif
-
 static bool create_logical_device(PGRAPHState *pg, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -720,9 +705,7 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
      * loader trampoline to bypass, so the Apple dispatch stays exactly as
      * volkLoadInstance() left it.
      */
-    if (volk_device_dispatch_enabled()) {
-        volkLoadDevice(r->device);
-    }
+    volkLoadDevice(r->device);
 #endif
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);

@@ -32,7 +32,6 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
 | `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
-| `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
@@ -1385,7 +1384,7 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `volkLoadInstance()` alone every device entry point is the Vulkan
   loader's trampoline, which re-derives the ICD dispatch table from the
   handle on each call; `volkLoadDevice()` after device creation
-  (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) replaces those globals
+  (`hw/xbox/nv2a/pgraph/vk/instance.c:708`) replaces those globals
   with `vkGetDeviceProcAddr()` results that enter the ICD directly.
   Sound because the renderer creates exactly one `VkDevice` (a second
   would need `volkLoadDeviceTable()`); the only extension entry points
@@ -1393,8 +1392,8 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `vkGetMemoryFdKHR`, whose extensions are required, `VK_EXT_debug_utils`
   stays on volk's instance loader, `vkExportMetalObjectsEXT` is resolved
   separately, and VMA builds its own table with `volkLoadDeviceTable()`
-  regardless. Hygiene, not a measured win; `XEMU_VK_VOLK_DEVICE=0`
-  restores instance-level dispatch. **Apple is untouched** — the whole
+  regardless. Hygiene, not a measured win. Its `XEMU_VK_VOLK_DEVICE=0`
+  hatch was removed on 2026-10-16. **Apple is untouched** — the whole
   block is `#ifndef __APPLE__`, MoltenVK is the ICD and there is no
   trampoline to bypass.
 - **`VK_KHR_external_semaphore_win32` is optional, not required

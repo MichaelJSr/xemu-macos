@@ -108,9 +108,8 @@ nothing links against a Vulkan library at build time.
 On Windows and Linux the renderer additionally calls `volkLoadDevice()`
 after creating its `VkDevice` (since 2026-09-08), so `vkCmd*` and
 friends enter the driver's ICD directly instead of going through the
-loader trampoline; `XEMU_VK_VOLK_DEVICE=0` restores the old
-instance-level dispatch. On macOS nothing changes — MoltenVK is the ICD
-and there is no trampoline to bypass.
+loader trampoline. On macOS nothing changes — MoltenVK is the ICD and
+there is no trampoline to bypass.
 
 ### Recommended `xemu.toml`
 
