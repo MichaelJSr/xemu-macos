@@ -35,7 +35,6 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_VK_VOLK_DEVICE` | Non-Apple only, **default on since 2026-09-08**. `=0` restores instance-level volk dispatch, i.e. the device-level entry points (`vkCmd*`, `vkQueueSubmit`, ...) stay the pointers `vkGetInstanceProcAddr` returned — the Vulkan loader's trampoline (`vulkan-1.dll` on Windows, the distro `libvulkan` on Linux). The default calls `volkLoadDevice()` once after device creation (`hw/xbox/nv2a/pgraph/vk/instance.c:723-724`) so those calls enter the ICD directly. Hygiene, not a measured win. Never read on Apple: the block is inside `#ifndef __APPLE__` (`instance.c:499-512,700-726`), MoltenVK is the ICD and there is no trampoline to bypass, so Apple dispatch stays exactly as `volkLoadInstance()` left it |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
-| `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
@@ -191,7 +190,8 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `docs/Finished/windows-wave1-review-2026-09-08.md` §3 and
   `docs/Campaigns/windows-port-2026-09.md` §9. Contents: (1) **landed on main
   2026-09-08** (with the transport half of (8) — see the bullet below):
-  `XEMU_WIN32_DXGI` hatch + the two non-Apple compile warnings in `ui/`
+  `XEMU_WIN32_DXGI` hatch (removed 2026-10-16) + the two non-Apple
+  compile warnings in `ui/`
   (present header included unconditionally, `g_framebuffer_rect_shader`
   gated). (2) SPIR-V disk
   cache — **landed on main 2026-09-08** (`818fe27828` plus the review's
@@ -292,11 +292,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   and a one-shot writer that arrives before the next poll would otherwise
   be turned away with `ERROR_PIPE_BUSY`. Unset = nothing is created and
   nothing is polled.
-  Landed alongside it: `XEMU_WIN32_DXGI=0` restores `SDL_GL_SwapWindow`
-  presentation so a DXGI-specific regression stays bisectable (and the
-  "present failed or unavailable" warning no longer fires when the
-  presenter was disabled on purpose), and the two non-Apple compile
-  warnings are gone — `ui/xemu-present.h` is included unconditionally in
+  Landed alongside it: `XEMU_WIN32_DXGI=0` restored `SDL_GL_SwapWindow`
+  presentation so a DXGI-specific regression stayed bisectable (removed
+  2026-10-16 under the no-hatch rule; upstream's own fallback to
+  `SDL_GL_SwapWindow` when the presenter can't start remains), and the
+  two non-Apple compile warnings are gone — `ui/xemu-present.h` is included unconditionally in
   `ui/xemu.c`, and the Apple-only `g_framebuffer_rect_shader` is now
   declared inside `#ifdef __APPLE__` like its two uses. Windows-only
   behaviour change: the POSIX branch of `test_input_poll()` is

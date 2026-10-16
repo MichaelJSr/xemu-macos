@@ -151,26 +151,6 @@ XemuHeadlessMode xemu_headless_mode(void)
     return mode;
 }
 
-#ifdef _WIN32
-/*
- * XEMU_WIN32_DXGI=0 restores the legacy present path: skip the DXGI
- * flip-model swapchain + WGL_NV_DX_interop presenter entirely and present
- * with SDL_GL_SwapWindow. Unset or any other value keeps the DXGI
- * presenter (the default). Read once; the first call is on the main
- * thread during display_early_init(), before any frame is rendered, so
- * the cached value is stable for the process lifetime.
- */
-static bool win32_dxgi_present_enabled(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const char *e = getenv("XEMU_WIN32_DXGI");
-        cached = (e && e[0] == '0') ? 0 : 1;
-    }
-    return cached == 1;
-}
-#endif
-
 /*
  * Drain and log the first OpenGL error observed per session.
  * Upstream uses `assert(glGetError() == GL_NO_ERROR)` at the end of
@@ -1543,9 +1523,7 @@ static void gl_render_frame(struct xemu_console *scon)
         win32_dxgi_present_end_frame(g_config.display.window.vsync);
     } else {
         static bool warned = false;
-        /* Not a failure when XEMU_WIN32_DXGI=0 disabled the presenter on
-         * purpose -- that path already logged once at init. */
-        if (!warned && win32_dxgi_present_enabled()) {
+        if (!warned) {
             fprintf(stderr,
                     "win32_dxgi present failed or unavailable, falling back to "
                     "SDL_GL_SwapWindow\n");
@@ -2357,12 +2335,7 @@ static void display_early_init(DisplayOptions *o)
          * swaps go through D3D11 so a vsync wait can't stall the pfifo
          * thread behind the driver's GL swap lock. Only the GL presenter
          * reaches here; the Metal presenter is Apple-only. */
-        if (win32_dxgi_present_enabled()) {
-            win32_dxgi_present_init(m_window);
-        } else {
-            fprintf(stderr, "win32_dxgi_present: disabled by XEMU_WIN32_DXGI=0, "
-                            "presenting with SDL_GL_SwapWindow\n");
-        }
+        win32_dxgi_present_init(m_window);
 #endif
     }
     xemu_hud_init(m_window, m_context);

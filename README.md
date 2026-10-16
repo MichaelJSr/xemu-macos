@@ -941,10 +941,10 @@ expected. `vulkaninfo` shows what the loader sees.
 unavailable` line in the log.** Windows always presents through the GL
 path, and since the 2026-09-07 upstream merge that path drives a DXGI
 flip-model swapchain via `WGL_NV_DX_interop`, so a vsync wait cannot
-stall the pfifo thread behind the driver's GL swap lock. Set
-`XEMU_WIN32_DXGI=0` to skip that presenter and swap with
-`SDL_GL_SwapWindow` instead (the pre-merge path — it gives the stall
-back), and report the GPU/driver.
+stall the pfifo thread behind the driver's GL swap lock. When that
+presenter can't start, xemu logs that line once and swaps with
+`SDL_GL_SwapWindow` instead (the pre-merge path, which gives the stall
+back). Report the GPU/driver.
 
 **Windows: black screen with working audio on Vulkan.** Fixed in
 v0.13.2 — an invalid cross-stage uniform-buffer descriptor write that
