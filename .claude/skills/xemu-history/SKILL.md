@@ -138,11 +138,10 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 4. **Thread priority follow-ups** (each needs its own A/B): `qemu_main` at UI QoS in normal mode too (det mode does it in `ui/xemu.c`); `VK_KHR_global_priority` HIGH at device creation (MoltenVK's queue is USER_INITIATED, PRI 37). With the vCPU fixed, fence_wait is already ~0.03 ms/flip, so expect little.
 5. **Real-hardware validation debt.** `docs/windows-gating-audit.md`'s list, geometry-shader vs CPU-emulated primitive parity, non-Apple aarch64 `XEMU_DSP_JIT_DIFF`, `XEMU_SSE_HOST=2` on real x86_64, a lockless-MMIO soak.
 6. **Real depth on super-width titles.** Resolve the zeta to scanout size at flip so `XEMU_MFX_REAL_DEPTH=2` engages. A quality change, ~0 fps.
-7. **Apple default for `audio.dsp_jit.enabled`** (still false; the APU numbers here were all measured with it on). Det heavy-f1 at c7a7d9e858: upstream's JIT costs +4.9% cycles/frame (4/4) against the fork JIT, RAM equal; normal mode used 7.5% fewer process cycles with the fork JIT but the APU thread's utilization rose 22% → 25%. Re-measure with the EP on the JIT before flipping it.
-8. **PAL 50 Hz guest vblank.** Present no longer uses the vblank timer. Needs region detection, an NTSC no-change A/B and a PAL fixture.
-9. **BINK via VideoToolbox.** Needs theory: there's no hook, and Azurik's movie never touches PVIDEO.
-10. **GL renderer under the Metal window.** Compatibility only.
-11. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
+7. **PAL 50 Hz guest vblank.** Present no longer uses the vblank timer. Needs region detection, an NTSC no-change A/B and a PAL fixture.
+8. **BINK via VideoToolbox.** Needs theory: there's no hook, and Azurik's movie never touches PVIDEO.
+9. **GL renderer under the Metal window.** Compatibility only.
+10. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
 
 Parked, with bars: pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun; the one that did, glslang's ~60 ms built-in symbol tables at each process's first miss, warms at renderer init since 2026-10-16); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
 

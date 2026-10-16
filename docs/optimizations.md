@@ -1975,12 +1975,14 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   inline ARM64 JIT lives *inside* the interpreter engine
   (`interp/dsp56k_jit_arm64.c`, symbols `dsp56k_jit_*`); when
   supported and enabled it takes precedence and `use_dsp_jit` is
-  ignored. So a stock config runs upstream's dsp56300 engine on
-  **every** host, Apple included, and the fork JIT is opt-in via
-  `[audio.dsp_jit] enabled = true`.
+  ignored. Since 2026-10-16 `audio.dsp_jit.enabled` defaults to true,
+  so a stock config runs the fork JIT on AArch64 POSIX hosts (Apple
+  Silicon, Linux arm64) and upstream's dsp56300 engine elsewhere
+  (x86_64, Windows).
 - **Full inline DSP JIT (Apple Silicon).** ARM64
-  basic-block JIT for both DSP56300 cores, GP and EP. Enable via
-  `[audio.dsp_jit] enabled = true`, the only switch.
+  basic-block JIT for both DSP56300 cores, GP and EP. On by default
+  since 2026-10-16; `[audio.dsp_jit] enabled = false` (or the Settings
+  toggle) turns it off, the only switch.
 - **Per-core retranslation auto-throttle.** A sustained-churn window
   (>1/16 of block executions retranslating) permanently hands that
   core back to the interpreter; a safety net, which neither core

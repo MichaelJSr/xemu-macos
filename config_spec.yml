@@ -333,13 +333,14 @@ audio:
   use_dsp: bool
   # Inline basic-block JIT for the C interpreter engine (AArch64
   # POSIX hosts only — DSP56K_JIT_SUPPORTED, dsp56k_jit_arm64.h),
-  # on both DSP cores (GP and EP). When supported and enabled it
-  # takes precedence over use_dsp_jit below — see
-  # dsp_want_external_jit_engine() in dsp.c.
+  # on both DSP cores (GP and EP). On by default (2026-10-16); when
+  # supported and enabled it takes precedence over use_dsp_jit below,
+  # which still selects the engine on other hosts or with this off —
+  # see dsp_want_external_jit_engine() in dsp.c.
   dsp_jit:
     enabled:
       type: bool
-      default: false
+      default: true
   # Upstream dsp56300-subproject JIT execution engine. This default
   # is fork-owned: upstream flipped it to false in fc13b78060
   # ("Disable DSP JIT by default for first release") and the

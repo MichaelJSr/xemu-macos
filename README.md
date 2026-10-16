@@ -143,7 +143,7 @@ hard_fpu = true                 # ARM64 inline x87
 cache_shaders = true
 
 [audio.dsp_jit]
-enabled = true                  # ARM64 inline basic-block DSP JIT
+enabled = true                  # ARM64 inline DSP JIT (the default)
 ```
 
 In-app Settings covers the main toggles.
