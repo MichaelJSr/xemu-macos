@@ -37,6 +37,10 @@ BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func, void *arg,
                                    BlockCompletionFunc *cb, void *opaque);
 int coroutine_fn thread_pool_submit_co(ThreadPoolFunc *func, void *arg);
 void thread_pool_update_params(ThreadPoolAio *pool, struct AioContext *ctx);
+#ifdef XBOX
+/* xemu: run thread_pool_submit_co() work inline in threads @fn accepts. */
+void thread_pool_set_inline(bool (*fn)(void));
+#endif
 
 /* ------------------------------------------- */
 /* Generic thread pool types and methods below */

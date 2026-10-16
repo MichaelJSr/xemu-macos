@@ -281,10 +281,34 @@ static void thread_pool_co_cb(void *opaque, int ret)
     aio_co_wake(co->co);
 }
 
+#ifdef XBOX
+/*
+ * xemu: a caller that waits for every request anyway (deterministic mode's
+ * disk requests, ide_bus_icount_settle) gains nothing from a worker, which
+ * only adds two thread wakeups and the completion's notifications to each
+ * request: about 90 us against a 5 us pread of a cached 4 KiB block on a
+ * loaded host. Work submitted from a thread @fn accepts runs in that thread.
+ * Only thread_pool_submit_co() checks, which is what file-posix (macOS,
+ * Linux) and qcow2's threads use; file-win32 submits through
+ * thread_pool_submit_aio(), so Windows hosts keep their workers.
+ */
+static bool (*thread_pool_inline_fn)(void);
+
+void thread_pool_set_inline(bool (*fn)(void))
+{
+    thread_pool_inline_fn = fn;
+}
+#endif
+
 int coroutine_fn thread_pool_submit_co(ThreadPoolFunc *func, void *arg)
 {
     ThreadPoolCo tpc = { .co = qemu_coroutine_self(), .ret = -EINPROGRESS };
     assert(qemu_in_coroutine());
+#ifdef XBOX
+    if (thread_pool_inline_fn && thread_pool_inline_fn()) {
+        return func(arg);
+    }
+#endif
     thread_pool_submit_aio(func, arg, thread_pool_co_cb, &tpc);
     qemu_coroutine_yield();
     return tpc.ret;

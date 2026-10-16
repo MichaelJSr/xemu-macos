@@ -41,6 +41,8 @@
 #include "qemu/cutils.h"
 #include "system/replay.h"
 #include "exec/icount.h"
+#include "block/thread-pool.h"
+#include "system/cpus.h"
 #ifdef XBOX
 #include "ui/xemu-checkpoints.h"
 #endif
@@ -2914,6 +2916,16 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
     }
     bus->irq = irq_out;
     bus->dma = &ide_dma_nop;
+#ifdef XBOX
+    if (icount_enabled()) {
+        /*
+         * Deterministic mode waits for each request before the guest access
+         * that issued it returns (ide_bus_icount_settle): do the host I/O
+         * in the vCPU thread instead of handing it to a worker.
+         */
+        thread_pool_set_inline(qemu_in_vcpu_thread);
+    }
+#endif
 }
 
 void ide_bus_set_irq(IDEBus *bus)
