@@ -1227,7 +1227,8 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip)
 
 static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
                                    std::vector<uint8_t> &pixels, int &width,
-                                   int &height, int max_width, int max_height)
+                                   int &height, int max_width, int max_height,
+                                   void *wait_event, uint64_t wait_value)
 {
     if (!tex) {
         return false;
@@ -1249,7 +1250,8 @@ static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
 #ifdef __APPLE__
     if (xemu_present_is_metal()) {
         return MetalRenderFramebufferToRgb(tex, flip, width, height,
-                                           pixels.data());
+                                           pixels.data(), wait_event,
+                                           wait_value);
     }
 #endif
 
@@ -1275,7 +1277,7 @@ bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png,
     int width, height;
 
     if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, max_width,
-                                max_height)) {
+                                max_height, NULL, 0)) {
         return false;
     }
     return fpng::fpng_encode_image_to_memory(pixels.data(), width, height, 3, png);
@@ -1311,13 +1313,15 @@ extern "C" bool xemu_hud_save_rgb(const uint8_t *rgb, int width, int height,
     return ok;
 }
 
-extern "C" bool xemu_hud_save_frame(uintptr_t tex, bool flip, const char *path,
-                                    bool png, Error **errp)
+extern "C" bool xemu_hud_save_frame(uintptr_t tex, bool flip,
+                                    void *wait_event, uint64_t wait_value,
+                                    const char *path, bool png, Error **errp)
 {
     std::vector<uint8_t> pixels;
     int width, height;
 
-    if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, 0, 0)) {
+    if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, 0, 0,
+                                wait_event, wait_value)) {
         error_setg(errp, "Failed to read back the frame");
         return false;
     }

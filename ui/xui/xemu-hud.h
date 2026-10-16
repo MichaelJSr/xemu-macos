@@ -52,8 +52,10 @@ void xemu_set_framebuffer_texture_is_rect(bool is_rect);
 
 // Implemented in gl-helpers.cc. Write a renderer frame (a texture as
 // passed to xemu_hud_set_framebuffer_texture) or an RGB24 buffer to
-// path as PNG or PPM. UI thread only.
-bool xemu_hud_save_frame(uintptr_t tex, bool flip, const char *path, bool png,
+// path as PNG or PPM. UI thread only. Metal: the frame is read once
+// wait_event (id<MTLSharedEvent>, may be NULL) reaches wait_value.
+bool xemu_hud_save_frame(uintptr_t tex, bool flip, void *wait_event,
+                         uint64_t wait_value, const char *path, bool png,
                          Error **errp);
 bool xemu_hud_save_rgb(const uint8_t *rgb, int width, int height,
                        const char *path, bool png, Error **errp);

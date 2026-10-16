@@ -2076,8 +2076,10 @@ static void screendump_service(struct xemu_console *scon)
             }
             nv2a_release_framebuffer_surface();
             if (tex) {
-                xemu_hud_save_frame(tex, false, req->filename, req->png,
-                                    &req->err);
+                /* As the present does: the compositor may still be on it. */
+                xemu_hud_save_frame(tex, false, frame.event,
+                                    frame.event_value, req->filename,
+                                    req->png, &req->err);
                 done = true;
             }
             if (frame.mtl_texture) {
@@ -2093,8 +2095,8 @@ static void screendump_service(struct xemu_console *scon)
                 xemu_set_framebuffer_texture_is_rect(
                     g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN);
 #endif
-                xemu_hud_save_frame(tex, false, req->filename, req->png,
-                                    &req->err);
+                xemu_hud_save_frame(tex, false, NULL, 0, req->filename,
+                                    req->png, &req->err);
                 done = true;
             }
             nv2a_release_framebuffer_surface();

@@ -163,6 +163,13 @@ At startup xemu prints `xemu: headless mode: offscreen` (or `null`) to
 stderr. Screenshots come from QMP, windowed or headless:
 `{"execute": "screendump", "arguments": {"filename": "/tmp/f.png", "format": "png"}}`
 (default format `ppm`). The command returns once the file is written.
+It writes the frame on screen, the guest's last flip, once the GPU has
+finished compositing it; while no renderer frame covers the scanout
+(right after a load, before the guest draws), it writes the guest RAM
+there instead, at the video mode's size. Earlier builds could write the
+previous screendump's picture while the GPU was still busy: most often
+the first rendered frame after a load, and a stop at a gdbstub
+breakpoint just after a flip.
 It is not available from HMP. Config, portable mode, savestates, the HDD
 and EEPROM and all command-line options behave as windowed. In-app
 notifications go to stderr instead, as `xemu: notification: <text>`.

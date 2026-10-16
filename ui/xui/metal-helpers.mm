@@ -868,7 +868,8 @@ void MetalRenderFramebuffer(uintptr_t tex, int width, int height, bool flip,
 }
 
 bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
-                                 int height, uint8_t *rgb_out)
+                                 int height, uint8_t *rgb_out,
+                                 void *wait_event, uint64_t wait_value)
 {
     if (!tex || width <= 0 || height <= 0) {
         return false;
@@ -902,6 +903,17 @@ bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
         [cb encodeWaitForEvent:ev value:metalfx_present_event_last_value()];
     }
 #endif
+    /*
+     * The frame's own producer: the async compositor renders on the
+     * Vulkan queue and signals its timeline when done. Without this wait
+     * the copy can run first and read what the texture held before, the
+     * previous composite (a screendump showed the frame of the screendump
+     * before it, from before a load or a level change).
+     */
+    if (wait_event && wait_value) {
+        [cb encodeWaitForEvent:(id<MTLSharedEvent>)wait_event
+                         value:wait_value];
+    }
 
     MTLRenderPassDescriptor *rpd =
         [MTLRenderPassDescriptor renderPassDescriptor];

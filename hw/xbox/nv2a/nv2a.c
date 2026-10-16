@@ -220,11 +220,13 @@ static bool nv2a_vga_scan_on_demand(void)
 /*
  * BQL held. A full redraw, so it clears no dirty bits. invalidate forces
  * it through the size check, not by faking a mode change, which would
- * also restart the text cursor's blink and flip it on every call.
+ * also restart the text cursor's blink and flip it on every call. Every
+ * mode: the vblank's scan has not run yet after a load or at launch
+ * (offscreen showed black, or the frame before the load).
  */
 void nv2a_vga_refresh(void)
 {
-    if (g_nv2a && nv2a_vga_scan_on_demand()) {
+    if (g_nv2a) {
         VGACommonState *vga = &g_nv2a->vga;
         vga->hw_ops->invalidate(vga);
         vga->hw_ops->gfx_update(vga);

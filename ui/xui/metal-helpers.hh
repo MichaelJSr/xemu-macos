@@ -91,9 +91,12 @@ void MetalRenderFramebuffer(uintptr_t tex, int width, int height, bool flip,
 
 // Render `tex` through the gamma blit into an offscreen target of the
 // given size and read back tightly-packed RGB8. Synchronous (used for
-// screenshots / savestate thumbnails only).
+// screenshots / savestate thumbnails only). With a wait_event
+// (id<MTLSharedEvent>), the GPU reads `tex` only once the event reaches
+// wait_value: the producer's signal for that frame (NV2APresentFrame).
 bool MetalRenderFramebufferToRgb(uintptr_t tex, bool flip, int width,
-                                 int height, uint8_t *rgb_out);
+                                 int height, uint8_t *rgb_out,
+                                 void *wait_event, uint64_t wait_value);
 
 const char *MetalGetDeviceName();
 
