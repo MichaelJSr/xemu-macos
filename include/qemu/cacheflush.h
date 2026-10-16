@@ -75,4 +75,38 @@ static inline void flush_idcache_defer_end(FlushIdcacheBatch *b) { }
 
 #endif
 
+/**
+ * flush_idcache_link, flush_idcache_link_drain:
+ *
+ * flush_idcache_link() queues the flush of a patch whose old and new
+ * instructions may both run, because the host permits that modification
+ * while the code executes (one direct branch replaced by another on
+ * aarch64), on this thread's link queue. The queue runs as one barrier
+ * sequence when it fills or at flush_idcache_link_drain(), which returns
+ * how many patches it flushed. Until then any core may fetch the old
+ * instruction, so the patcher must accept it running and drain before
+ * the old code's memory is reused. Hosts with coherent caches need
+ * nothing; hosts without a batched sequence flush at once.
+ */
+#if defined(__aarch64__) && !defined(CONFIG_WIN32)
+
+#define FLUSH_IDCACHE_LINK_MAX 64
+
+void flush_idcache_link(uintptr_t rx, uintptr_t rw, size_t len);
+size_t flush_idcache_link_drain(void);
+
+#else
+
+static inline void flush_idcache_link(uintptr_t rx, uintptr_t rw, size_t len)
+{
+    flush_idcache_range(rx, rw, len);
+}
+
+static inline size_t flush_idcache_link_drain(void)
+{
+    return 0;
+}
+
+#endif
+
 #endif /* QEMU_CACHEFLUSH_H */

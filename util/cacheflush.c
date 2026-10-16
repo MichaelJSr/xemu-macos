@@ -275,6 +275,46 @@ void flush_idcache_defer_end(FlushIdcacheBatch *b)
     flush_idcache_batch_run(b);
 }
 
+/*
+ * This thread's queued link patches (flush_idcache_link), drained as one
+ * sequence when FLUSH_IDCACHE_LINK_MAX are queued or by
+ * flush_idcache_link_drain(). Allocated by the first link: only vCPU
+ * threads patch links.
+ */
+static __thread FlushIdcacheBatch *idcache_link_queue;
+
+void flush_idcache_link(uintptr_t rx, uintptr_t rw, size_t len)
+{
+    FlushIdcacheBatch *q = idcache_link_queue;
+
+    /* An open window drains before any TB runs: stricter, use it. */
+    if (flush_idcache_deferred(rx, rw, len)) {
+        return;
+    }
+    if (unlikely(!q)) {
+        q = idcache_link_queue = g_new0(FlushIdcacheBatch, 1);
+    }
+    q->e[q->n].rx = rx;
+    q->e[q->n].rw = rw;
+    q->e[q->n].len = len;
+    if (++q->n == FLUSH_IDCACHE_LINK_MAX) {
+        flush_idcache_batch_run(q);
+    }
+}
+
+size_t flush_idcache_link_drain(void)
+{
+    FlushIdcacheBatch *q = idcache_link_queue;
+    size_t n;
+
+    if (likely(!q || !q->n)) {
+        return 0;
+    }
+    n = q->n;
+    flush_idcache_batch_run(q);
+    return n;
+}
+
 #ifdef CONFIG_DARWIN
 /* Apple does not expose CTR_EL0, so we must use system interfaces. */
 #include <libkern/OSCacheControl.h>

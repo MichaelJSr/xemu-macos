@@ -49,7 +49,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
-| `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low), the backstop's unlink walks (events, dests, cost), the jumps those walks reset split by `tb_add_jump`'s predicate (same-page, an emitter's jump onto its own page, cross-page) and the link patches per second; also armed by `XEMU_INV_PROF`. Dark; atexit summary |
+| `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low), the backstop's unlink walks (events, dests, cost), the jumps those walks reset split by `tb_add_jump`'s predicate (same-page, an emitter's jump onto its own page, cross-page), the link patches per second and the link flush queue (stale-slot exits and the patches drained there, at `cpu_exec` returns and in full queues); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
 | `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). x86_64 hosts: `=1` opts in, dark until `=2` runs clean on real silicon. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
@@ -446,6 +446,34 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   jumps would not shrink it: a normal-mode stream-e2 walk resets 5.9%
   same-page jumps and 5.2% from an emitter onto its own page
   (`XEMU_XPAGE_PROF`, Settled vectors).
+- **Link patches queue their icache flush (2026-10-16).** Every
+  `tb_add_jump` that wrote a B into a reset slot paid its own 4-byte
+  `sys_icache_invalidate` (~430 ns): 272k per 600 det stream-e2 frames
+  (118 ms, 2.7% of the vCPU; xic interposer) and ~800k per 32 s
+  normal-mode stream-e2 walk (340 ms, 100 ms of it in the 2.5 s burst
+  ~13 s after the load), because each backstop walk resets ~800 jumps
+  that relink at once. A B replacing another B is a permitted
+  concurrent modification and the old one (the reset B) exits to the
+  dispatcher, so the aarch64 backend queues a link's flush on the
+  thread's link queue (`flush_idcache_link`). The queue runs as one
+  DSB / IC IVAU / DSB / ISB sequence when 64 are queued, when
+  `tb_add_jump` finds the slot it would link already linked to that TB
+  (the TB left through a stale line), at every `cpu_exec` return and
+  before `tb_flush` reuses the buffer. Resets, LDR-form links and new
+  code flush at once. Det stream-e2: 20.6k stale exits per 600 frames,
+  each draining ~11 patches. The link count is unchanged (relinks are
+  as many as before; only their flushes went). Cross-binary det against
+  cced50204c, three sessions pooled (load 9-45; negative is fewer):
+  Mcycles/frame stream-e2 median −1.4% (15/21 pairs), cold boot −0.75%
+  (9/14), heavy-f1 +0.1% (6/14, few relinks); Minsns flat. Harness
+  (`candlen.py`, 4 rounds per arm, load 15-38): fitted fixed cost
+  37.2 → 32.9 Mcyc per candidate restore-then-advance (−12%) and 49.8 →
+  39.5 per `xemu-run` (−21%); 1-4 frame candidates −2..−5%. Normal mode,
+  16 walks per arm (load 14-33): flush calls in the window 801k → 37k
+  (translation only), burst frames over 25 ms per walk median 4.5 →
+  3.0, over 33 ms 13 → 11 in all (P(fewer) 0.56: no change resolved).
+  `XEMU_XPAGE_REFUTE`: 140M checks, 0 violations. A 1000-restore loop
+  digests as the base binary does.
 - **Inline hard FPU (retired).** The inline x87 cache (native AArch64
   FP with values held in D-regs across instructions; inline `fucomi`,
   `frndint`, the FPU constant loads, 16-bit `FIST` and `FISTTP`; "~30%

@@ -1276,6 +1276,8 @@ void tb_flush__exclusive_or_serial(void)
     xemu_peeks_take(NULL);
 #endif
 
+    /* The buffer is reused: run this thread's queued link flushes first. */
+    flush_idcache_link_drain();
     tcg_region_reset_all();
     /* XXX: flush processor icache at this point if cache flush is expensive */
     qatomic_inc(&tb_ctx.tb_flush_count);
@@ -1423,6 +1425,9 @@ uint64_t xemu_xpage_walk_same;
 uint64_t xemu_xpage_walk_cross;
 uint64_t xemu_xpage_walk_emitter_same;
 uint64_t xemu_xpage_links;
+uint64_t xemu_xpage_link_stale;
+uint64_t xemu_xpage_link_stale_flushed;
+uint64_t xemu_xpage_link_exit_flushed;
 
 static void xpage_reg_reset_locked(unsigned gen)
 {

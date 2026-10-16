@@ -2949,6 +2949,22 @@ void tb_target_set_jmp_target(const TranslationBlock *tb, int n,
     /* Either directly branch, or indirect branch load. */
     if (d_offset == sextract64(d_offset, 0, 28)) {
         insn = deposit32(I3206_B, 0, 26, d_offset >> 2);
+#if defined(XBOX)
+        /*
+         * A link: tb_add_jump replaces the reset B with a B to the next
+         * TB. Both may run (a permitted concurrent modification), and the
+         * old one exits to the dispatcher, so the flush waits in the link
+         * queue: tb_add_jump drains it when a TB leaves through a slot
+         * it has linked, cpu_exec at every return, a tb_flush before the
+         * buffer is reused. Resets (unlinks) still flush now, and B <->
+         * LDR is not a permitted modification.
+         */
+        if (d_addr != (uintptr_t)tb->tc.ptr + tb->jmp_reset_offset[n]) {
+            qatomic_set((uint32_t *)jmp_rw, insn);
+            flush_idcache_link(jmp_rx, jmp_rw, 4);
+            return;
+        }
+#endif
     } else {
         uintptr_t i_addr = (uintptr_t)&tb->jmp_target_addr[n];
         ptrdiff_t i_offset = i_addr - jmp_rx;

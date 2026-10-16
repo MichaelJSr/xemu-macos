@@ -63,6 +63,15 @@ extern uint64_t xemu_xpage_walk_same;
 extern uint64_t xemu_xpage_walk_emitter_same;
 extern uint64_t xemu_xpage_walk_cross;
 extern uint64_t xemu_xpage_links;
+/*
+ * Link flushes wait in a queue (flush_idcache_link): TB exits through a
+ * slot already linked (a stale fetch) and the patches they flushed, and
+ * the patches flushed when cpu_exec returned; the rest went in full
+ * queues.
+ */
+extern uint64_t xemu_xpage_link_stale;
+extern uint64_t xemu_xpage_link_stale_flushed;
+extern uint64_t xemu_xpage_link_exit_flushed;
 
 /* Gate-0 taken counters, inline-incremented from generated code in prof mode,
  * split by target region: the kernel's identity window (linear >= 0x80000000,

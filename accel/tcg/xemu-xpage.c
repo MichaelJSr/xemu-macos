@@ -274,6 +274,16 @@ static void xemu_xpage_dump(void)
                 (unsigned long long)xemu_xpage_walk_cross,
                 (unsigned long long)xemu_xpage_links,
                 secs > 0 ? xemu_xpage_links / secs : 0.0);
+        fprintf(stderr,
+                "xemu:      link flush queue: stale-slot exits=%llu "
+                "(flushed %llu patches) slice-end flushed=%llu "
+                "full-queue=%llu\n",
+                (unsigned long long)xemu_xpage_link_stale,
+                (unsigned long long)xemu_xpage_link_stale_flushed,
+                (unsigned long long)xemu_xpage_link_exit_flushed,
+                (unsigned long long)(xemu_xpage_links -
+                                     xemu_xpage_link_stale_flushed -
+                                     xemu_xpage_link_exit_flushed));
     }
     fprintf(stderr,
             "xemu:      approx per-5s: total=%.0f kernel=%.0f "

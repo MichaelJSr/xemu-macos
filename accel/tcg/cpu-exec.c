@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/qemu-print.h"
+#include "qemu/cacheflush.h"
 #include "qapi/error.h"
 #include "qapi/type-helpers.h"
 #include "hw/core/cpu.h"
@@ -1185,6 +1186,17 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     old = qatomic_cmpxchg(&tb->jmp_dest[n], (uintptr_t)NULL,
                           (uintptr_t)tb_next);
     if (old) {
+#if defined(XBOX)
+        /*
+         * Linked already, yet the TB left through the slot's reset B: the
+         * link's icache flush is still queued and this core fetched the
+         * old branch (flush_idcache_link). Run the queue.
+         */
+        if (old == (uintptr_t)tb_next) {
+            xemu_xpage_link_stale++;
+            xemu_xpage_link_stale_flushed += flush_idcache_link_drain();
+        }
+#endif
         goto out_unlock_next;
     }
 
@@ -1728,6 +1740,10 @@ int cpu_exec(CPUState *cpu)
     qemu_thread_jit_execute();
     ret = cpu_exec_setjmp(cpu, &sc);
 
+#if defined(XBOX)
+    /* No queued link flush outlives the slice (tb_add_jump). */
+    xemu_xpage_link_exit_flushed += flush_idcache_link_drain();
+#endif
     cpu_exec_exit(cpu);
     return ret;
 }
