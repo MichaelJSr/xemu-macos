@@ -706,6 +706,34 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   read −0.63% and −3.6%, 4/4); stream-e2 4 pairs, −0.34% (4/4) and
   +0.5% (1/4). The two halves alone: shared aligned walks −0.22%
   Minsns (4/4), with the LDR Q path −0.39..−0.46%.
+  **2026-10-16, deterministic mode:** stores keep the addend after all,
+  under icount only (`tlbm_st_addend`, latched in `tcg_target_init`), so
+  a sharing store is the load's 3 insns. An audit of every caller of
+  `physical_memory_dirty_bits_cleared` (the only path to the one
+  cross-thread TLB writer, `tlb_reset_dirty`) found no re-arm that can
+  land while the vCPU runs TB code under icount: the renderer's texture
+  and vertex dirty clears run on the PFIFO thread only while the vCPU
+  waits in `pfifo_icount_sync` (an MMIO slow path, or before the slice),
+  the VGA scan runs on the vCPU (the vblank is a virtual timer, and the
+  main loop runs no virtual timers under icount), checkpoints and loads
+  stop the VM, and migration's bitmap sync waits for the vCPU to leave
+  the TB (`memory_global_after_dirty_log_sync`) before it reads the
+  pages it cleared. One same-thread path did break the old addend-only
+  form: the sub-page prefilter's inline store returns to the TB after a
+  walk that met TLB_NOTDIRTY, which left the slot holding that page, so
+  the segment's later stores skipped the trap and its per-sub-block code
+  test (without the fix the `--debug` check aborts within the f300 run,
+  as it did when the compare was dropped above, likely for this reason).
+  The prefilter now ends the slot. The `--debug` check is strict for these
+  stores (the live `addr_write` must be the bare page; TLB_NOTDIRTY is
+  allowed only while a migration runs). Normal mode keeps the 6-insn
+  form, so the det goldens no longer cover it. Cross-binary det A/B
+  against 9a8cb87de9, 26 pairs per anchor in two sessions at load
+  33-85 (Mcycles swung 5-10% per pair): Minsns/frame −2.48% on
+  heavy-f1 1200 frames and −2.07% on stream-e2 600 frames (26/26
+  each); Mcycles/frame stream-e2 median −2.7% (mean −3.4%, 20/26),
+  heavy-f1 median −3.2% but mean −1.2% (15/26; the second session's
+  20 pairs alone: median −0.2%, 10/20).
 - **MMX entry inline, once per TB (2026-10-15).** `helper_enter_mmx`
   (fpstt = 0, every tag valid) ran before every MMX insn. Marked
   `TCG_CALL_NO_RW_PINNED`, the call still made TCG store and reload the

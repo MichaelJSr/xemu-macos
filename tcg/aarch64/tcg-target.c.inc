@@ -11,6 +11,7 @@
  */
 
 #include "qemu/bitops.h"
+#include "exec/icount.h"
 
 /* Used for function call generation. */
 #define TCG_REG_CALL_STACK              TCG_REG_SP
@@ -1554,11 +1555,27 @@ static void tcg_out_call_int(TCGContext *s, const tcg_insn_unit *target)
  * of it (on the same page, for constant addresses); otherwise it walks
  * the TLB, and fills the slot only if a later access shares the fill and
  * needs it sooner than the slot's current page.
+ *
+ * Deterministic mode (icount, tlbm_st_addend) keeps the store's addend
+ * in x7 as well, so a sharing store is the load's 3 insns. Under icount
+ * nothing re-arms TLB_NOTDIRTY while the vCPU runs TB code: PFIFO's
+ * renderer dirty clears run only while the vCPU waits in
+ * pfifo_icount_sync (an MMIO slow path or helper, or before the slice),
+ * VGA scans and checkpoints run on the vCPU or with the VM stopped, and
+ * migration's bitmap sync waits for the vCPU to leave the TB
+ * (memory_global_after_dirty_log_sync) before it reads the pages it
+ * cleared. The one TB-side path back from a missed walk without an
+ * invalidation, the sub-page prefilter's inline store, ends the slot
+ * itself. CONFIG_DEBUG_TCG builds check that the live entry still holds
+ * the bare page and the addend.
  */
 #define TCG_TARGET_TLB_MEMO 1
 #define TLBM_SLOTS 2
 
-/* Slot 0 serves loads {ntag, addend}, slot 1 stores {ntag, entry}. */
+/*
+ * Slot 0 serves loads {ntag, addend}, slot 1 stores {ntag, entry}, or
+ * {ntag, addend} with tlbm_st_addend.
+ */
 static const TCGReg tlbm_regs[TLBM_SLOTS][2] = {
     { TCG_REG_X4, TCG_REG_X5 }, { TCG_REG_X6, TCG_REG_X7 },
 };
@@ -1568,6 +1585,16 @@ static const TCGReg tlbm_regs[TLBM_SLOTS][2] = {
 
 /* x4-x7, reserved from the allocator, when the memo is in use. */
 static TCGRegSet tlbm_call_regs;
+
+/* Stores keep the addend (icount, latched in tcg_target_init). */
+static bool tlbm_st_addend;
+
+/* Where a walk that fills or re-walks @slot leaves the addend. */
+static inline TCGReg tlbm_addend_reg(int slot)
+{
+    return slot == 0 ? TLBM_ADD
+         : slot == 1 && tlbm_st_addend ? TLBM_ENT : TCG_REG_TMP1;
+}
 
 enum { TLBM_WALK, TLBM_FILL, TLBM_SHARE };
 
@@ -1582,7 +1609,7 @@ static void tlbm_out_invalidate(TCGContext *s)
     for (int i = 0; i < TLBM_SLOTS; i++) {
         if (s->tlbm_filled & (1u << i)) {
             tcg_out_movi(s, TCG_TYPE_I64, TLBM_NTAG(i), 1ull << 32);
-            if (i == 1) {
+            if (i == 1 && !tlbm_st_addend) {
                 /* The store check loads from the "entry" before it fails. */
                 tcg_out_mov(s, TCG_TYPE_I64, TLBM_ENT, TCG_AREG0);
             }
@@ -2164,17 +2191,18 @@ static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
 
 /*
  * The TLB load and compare: flags EQ on a hit, TMP0 = the comparator,
- * TMP2 = the masked address, the addend in TMP1 (in x5 when filling the
- * load slot). Filling a memo slot also sets its ntag = -TMP2, and the
- * store slot's entry register.
+ * TMP2 = the masked address, the addend in tlbm_addend_reg(slot) (TMP1,
+ * or the slot's second register for the load slot and tlbm_st_addend's
+ * store slot). Filling a memo slot also sets its ntag = -TMP2, and the
+ * entry form's store slot its entry register.
  */
 static void tcg_out_tlb_walk(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
                              bool is_ld, unsigned a_mask, int slot)
 {
     TCGType addr_type = s->addr_type;
     unsigned s_mask = (1u << (get_memop(oi) & MO_SIZE)) - 1;
-    TCGReg addend = slot == 0 ? TLBM_ADD : TCG_REG_TMP1;
-    TCGReg ent = slot == 1 ? TLBM_ENT : TCG_REG_TMP1;
+    TCGReg addend = tlbm_addend_reg(slot);
+    TCGReg ent = slot == 1 && !tlbm_st_addend ? TLBM_ENT : TCG_REG_TMP1;
     TCGReg addr_adj;
     uint64_t compare_mask;
 
@@ -2231,6 +2259,7 @@ static void tcg_out_tlb_walk(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
 
 #ifdef CONFIG_DEBUG_TCG
 #include "exec/tlb-flags.h"
+#include "system/memory.h"   /* global_dirty_tracking */
 
 static G_NORETURN void tlbm_lost(uint64_t addr)
 {
@@ -2246,12 +2275,16 @@ static G_NORETURN void tlbm_lost(uint64_t addr)
  * tlb_reset_dirty re-arms it from another thread (the fast path's usual
  * compare-then-store race), so stores mask that bit and instead re-check
  * that the addr_write the share check read was the bare page.
+ * tlbm_st_addend's stores read no addr_write, and rely on no re-arm
+ * landing while the TB runs, so the live entry must still be the bare
+ * page, except while a migration runs: its bitmap sync re-arms from its
+ * own thread and then waits for the TB to end before it reads the pages.
  * Leaves the addend in TMP1.
  */
 static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
                            bool is_ld, unsigned a_mask)
 {
-    tcg_insn_unit *bad[3], *ok;
+    tcg_insn_unit *bad[4], *ok, *bare = NULL;
     int nbad = 0;
 
     if (a_mask) {
@@ -2260,7 +2293,7 @@ static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
         bad[nbad++] = s->code_ptr;
         tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
     }
-    if (!is_ld) {
+    if (!is_ld && !tlbm_st_addend) {
         /* cmn w_tmp2, w_ntag: the share check's CCMN saw addr_write == page */
         tcg_out_insn(s, 3502, ADDS, TCG_TYPE_I32, TCG_REG_XZR,
                      TCG_REG_TMP2, TLBM_NTAG(1));
@@ -2268,6 +2301,11 @@ static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
         tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
     }
     tcg_out_tlb_walk(s, addr_reg, oi, is_ld, 0, -1);
+    if (!is_ld && tlbm_st_addend) {
+        /* The bare page; or TLB_NOTDIRTY alone, with a migration running. */
+        bare = s->code_ptr;
+        tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
+    }
     if (!is_ld) {
         tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, TCG_REG_TMP0,
                          TCG_REG_TMP0, ~(uint64_t)TLB_NOTDIRTY);
@@ -2276,9 +2314,22 @@ static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
     }
     bad[nbad++] = s->code_ptr;
     tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+    if (bare) {
+        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
+                     (intptr_t)&global_dirty_tracking);
+        tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_TMP0, TCG_REG_TMP0, 0);
+        tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I32, TCG_REG_XZR,
+                         TCG_REG_TMP0, GLOBAL_DIRTY_MIGRATION);
+        bad[nbad++] = s->code_ptr;
+        tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
+        reloc_pc19(bare, tcg_splitwx_to_rx(s->code_ptr));
+    }
     if (is_ld) {
         tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_EQ, TCG_REG_TMP1,
                     TLBM_ADD, false);
+    } else if (tlbm_st_addend) {
+        tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_EQ, TCG_REG_TMP1,
+                    TLBM_ENT, false);
     } else {
         tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP0, TLBM_ENT,
                    offsetof(CPUTLBEntry, addend));
@@ -2390,6 +2441,8 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
     };
     TCGType at = s->addr_type;
     TCGReg raddr = lb->addr_reg, rdata = lb->datalo_reg;
+    /* The addend of the walk that sent this store here. */
+    TCGReg radd = tlbm_addend_reg(lb->memo_slot - 1);
     TCGReg rp = 0, rw = 0;
     TCGRegSet busy = 0;
     tcg_insn_unit *br_r1, *br_r4, *br_r2, *br_r3[XEMU_SF_NCLIENTS];
@@ -2438,7 +2491,7 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
     } else {
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP2, raddr);
     }
-    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP1);
+    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP2, TCG_REG_TMP2, radd);
     tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0, xemu_sf_ram_host);
     tcg_out_insn(s, 3502, SUB, 1, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0);
     tgen_shri(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP2, TARGET_PAGE_BITS);
@@ -2483,9 +2536,18 @@ static void sf_out_store_prefilter(TCGContext *s, TCGLabelQemuLdst *lb,
         /* Complete the store inline: same HostAddress shape as the
          * fast path (addend + vaddr carries no flag bits). */
         HostAddress h = {
-            .base = TCG_REG_TMP1, .index = raddr, .index_ext = at
+            .base = radd, .index = raddr, .index_ext = at
         };
         tcg_out_qemu_st_direct(s, opc, rdata, h);
+        if (radd == TLBM_ENT) {
+            /*
+             * The walk filled the store slot from an entry with
+             * TLB_NOTDIRTY. tlbm_st_addend's shares read no addr_write,
+             * so end the slot, or the next store to the page would skip
+             * the trap (and this check's per-sub-block code test).
+             */
+            tcg_out_movi(s, TCG_TYPE_I64, TLBM_NTAG(1), 1ull << 32);
+        }
         tcg_out_goto(s, lb->raddr);
     } else {
         /* Refute mode: decision cross-checked in C, store via the real
@@ -2634,7 +2696,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
                              TCG_REG_TMP0, a_bits);
             }
             ldst->memo_shared = true;
-            if (is_ld) {
+            if (is_ld || tlbm_st_addend) {
                 tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_GTU, TCG_REG_TMP0,
                             bound, true);
                 ldst->label_ptr[0] = s->code_ptr;
@@ -2668,7 +2730,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
             }
         }
 
-        h->base = slot == 0 ? TLBM_ADD : TCG_REG_TMP1;
+        h->base = tlbm_addend_reg(slot);
         h->index = addr_reg;
         h->index_ext = addr_type;
     } else {
@@ -5199,6 +5261,11 @@ static void tcg_target_init(TCGContext *s)
             tcg_regset_set_reg(tlbm_call_regs, tlbm_regs[i][1]);
         }
         s->reserved_regs |= tlbm_call_regs;
+        /*
+         * Before the first TB: icount is configured ahead of the
+         * accelerator (configure_accelerators), and never changes.
+         */
+        tlbm_st_addend = icount_enabled();
     }
 }
 
