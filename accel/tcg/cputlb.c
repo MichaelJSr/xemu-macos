@@ -1056,18 +1056,25 @@ void tlb_flush_host_range(CPUState *cpu, uintptr_t start, uintptr_t length)
 }
 #endif
 
-/* Called with tlb_c.lock held */
+/*
+ * Called with tlb_c.lock held. Only an entry for the page the store
+ * dirtied: another mmu_idx may map the same virtual page to another one
+ * (x86's MMU_PHYS_IDX, which the page table walker sets accessed and
+ * dirty bits through), whose clean bits must keep trapping.
+ */
 static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
-                                         vaddr addr)
+                                         CPUTLBEntryFull *full,
+                                         vaddr addr, hwaddr xlat_section)
 {
-    if (tlb_entry->addr_write == (addr | TLB_NOTDIRTY)) {
+    if (tlb_entry->addr_write == (addr | TLB_NOTDIRTY) &&
+        full->xlat_section == xlat_section) {
         tlb_entry->addr_write = addr;
     }
 }
 
-/* update the TLB corresponding to virtual page vaddr
-   so that it is no longer dirty */
-static void tlb_set_dirty(CPUState *cpu, vaddr addr)
+/* update the TLB corresponding to virtual page vaddr, mapped to the page
+   at vaddr + xlat_section, so that it is no longer dirty */
+static void tlb_set_dirty(CPUState *cpu, vaddr addr, hwaddr xlat_section)
 {
     int mmu_idx;
 
@@ -1076,13 +1083,19 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
     addr &= TARGET_PAGE_MASK;
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
+        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+
+        tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr),
+                              &desc->fulltlb[tlb_index(cpu, mmu_idx, addr)],
+                              addr, xlat_section);
     }
 
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         int k;
         for (k = 0; k < CPU_VTLB_SIZE; k++) {
-            tlb_set_dirty1_locked(&cpu->neg.tlb.d[mmu_idx].vtable[k], addr);
+            tlb_set_dirty1_locked(&desc->vtable[k], &desc->vfulltlb[k],
+                                  addr, xlat_section);
         }
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
@@ -1527,7 +1540,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     /* We remove the notdirty callback only if the code has been flushed. */
     if (code_dirty) {
         trace_memory_notdirty_set_dirty(mem_vaddr);
-        tlb_set_dirty(cpu, mem_vaddr);
+        tlb_set_dirty(cpu, mem_vaddr, full->xlat_section);
     }
 #else
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
@@ -1543,7 +1556,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     /* We remove the notdirty callback only if the code has been flushed. */
     if (!physical_memory_is_clean(ram_addr)) {
         trace_memory_notdirty_set_dirty(mem_vaddr);
-        tlb_set_dirty(cpu, mem_vaddr);
+        tlb_set_dirty(cpu, mem_vaddr, full->xlat_section);
     }
 #endif
 
