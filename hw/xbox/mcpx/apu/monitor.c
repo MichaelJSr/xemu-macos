@@ -19,6 +19,7 @@
 
 #include "apu_int.h"
 #include "ui/xemu-present.h"
+#include "xemu-audio-log.h"
 
 void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
 {
@@ -30,8 +31,11 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
 
     d->monitor.stream = NULL;
 
-    /* No audio device headless; with no stream the APU paces to real time. */
-    if (xemu_headless_mode()) {
+    /*
+     * No audio device headless or with XEMU_AUDIO_WAV; with no stream the
+     * APU paces to real time.
+     */
+    if (xemu_headless_mode() || xemu_audio_wav_from_env()) {
         return;
     }
 
@@ -85,6 +89,11 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
         SDL_SetAudioStreamGain(d->monitor.stream, vu);
         SDL_PutAudioStreamData(d->monitor.stream, d->monitor.frame_buf,
                             sizeof(d->monitor.frame_buf));
+    }
+
+    if (unlikely(qatomic_read(&xemu_audio_wav_on))) {
+        xemu_audio_wav_write(&d->monitor.frame_buf[0][0],
+                             ARRAY_SIZE(d->monitor.frame_buf));
     }
 
     memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));

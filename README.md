@@ -750,6 +750,54 @@ Other automation interfaces (windowed or headless):
   nothing measurable.
   `scripts/bench-det.py --timeline --block-log DIR` logs each timing run
   and checks the rows against every phase's blockstats.
+- **Voice log** (audio checks at volume 0): `XEMU_VOICE_LOG=<file>` (from
+  launch) or QMP `xemu-voice-log-start {"filename": F}` (`"append":
+  true` keeps F's rows) and `xemu-voice-log-stop` (returns `{filename,
+  rows}`) write one tab-separated row per APU voice event under a header
+  line: `frame guest_ns voice event why phys bytes fmt ch flags ba cbo lbo
+  ebo pitch hz vol bins wav_pos runs`. `event` is `start` (the guest's
+  VOICE_ON), `release`, `pause`, `resume` or `stop`, and `why` says what
+  stopped it: `guest` (VOICE_OFF), `end` (a buffer without loop, or a
+  stream, ran out), `env` (the envelope finished its release) or
+  `stream` (a stream without PERSIST left before its release). Only
+  `start` rows are written for a voice that isn't playing, and a voice
+  already playing when the log opens (a loaded state's) has no `start`.
+  `phys` is the physical address of the voice's first sample byte and
+  `bytes` its data's length (a buffer voice: BA through sample EBO; a
+  stream voice: the SSL segment it is on); `runs` lists the data's
+  physical extents in order as `0xADDR+LEN`, pages the VP's
+  scatter-gather table maps contiguously merged (game buffers are
+  scattered; at most 256 runs, then `...`), so `xemu-dump-ram` of each
+  run gives back the exact bytes the voice plays. `fmt` is `u8`, `s16`,
+  `s24`, `s32` or `adpcm`, `ch` 1 or 2, `flags` `l`(oop) `s`(tream)
+  `p`(ersist) `m`(ultipass) or `-`; `ba` is the buffer's scatter-gather
+  offset and `cbo`/`lbo`/`ebo` the current, loop and end sample offsets;
+  `pitch` is the raw signed pitch (1/4096 octave from 48 kHz) and `hz`
+  the sample rate it gives; `vol` is the 8 volume slots as hex
+  attenuations in 1/64 dB (`fff` is silent) and `bins` their mixbins (a
+  3D voice, 0-63, sends slots 0-3 to the HRTF submixes); `wav_pos` is
+  the sample of the open WAV (below) the next APU frame lands on,
+  else -1 (with `audio.use_dsp` on, a voice is heard from about
+  `wav_pos + 259`, one EP period of DSP latency). `frame` is
+  `query-xemu-frame`'s and `guest_ns` the virtual clock. Pitch and volume
+  are the values at the event, not later changes. One log at a time; it is
+  flushed when the VM pauses, when it stops, at exit, and at a row 250 ms
+  or more after the last flush.
+- **Audio to a WAV**: `XEMU_AUDIO_WAV=<file>` (from launch; xemu then
+  opens no host audio device, windowed too, and prints `xemu: audio WAV:
+  <file> (no host audio device)`) or QMP `xemu-audio-wav-start
+  {"filename": F}` and `xemu-audio-wav-stop` (returns `{filename,
+  samples}`) write what xemu would play, before `volume_limit`: 48 kHz
+  stereo 16-bit PCM, one EP period (256 samples) at a time. Nothing is
+  played aloud. Periods the APU doesn't run (VM paused, APU off) leave no
+  gap, so the WAV's time is the APU's. The header's sizes are filled in
+  at every second of audio, when the VM pauses, when it stops and at
+  exit. One WAV at a time; a QMP-started one leaves a windowed run's host
+  device as it was (mute it with `volume_limit = 0`).
+  Both files are deterministic under icount like the RAM (same run, same
+  bytes; a log or WAV stopped and restarted at a frame is the full run's
+  file split there), neither changes what the guest sees, and neither
+  costs anything measurable, on or off.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once with status 1 (a windowed one aborts

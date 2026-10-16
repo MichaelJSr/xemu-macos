@@ -1614,3 +1614,91 @@
 # Since: 10.2
 ##
 { 'command': 'xemu-block-log-stop', 'returns': 'XemuBlockLogInfo' }
+
+##
+# Audio checks
+# ============
+##
+
+##
+# @XemuVoiceLogInfo:
+#
+# @filename: the voice log file
+#
+# @rows: rows written to it
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuVoiceLogInfo',
+  'data': { 'filename': 'str', 'rows': 'int' } }
+
+##
+# @xemu-voice-log-start:
+#
+# Write one tab-separated row per APU voice event to @filename:
+# frame (see @query-xemu-frame) and QEMU_CLOCK_VIRTUAL nanoseconds,
+# the voice handle, the event (start, release, pause, resume, stop)
+# and what stopped it (guest, end, env, stream), the physical address
+# of its first sample byte and the data's length, the sample format,
+# channels and flags, the buffer offset and current, loop and end
+# sample offsets, the pitch and the sample rate it gives, the 8 volume
+# attenuations and their mixbins, the sample a WAV from
+# @xemu-audio-wav-start is at, and the data's physical extents (runs:
+# ADDR+LEN, pages mapped contiguously merged).
+# XEMU_VOICE_LOG=<file> starts a log at launch.  Fails while a log is
+# open.
+#
+# @filename: the log file; truncated unless @append
+#
+# @append: append rows (no header line when the file is not empty)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-voice-log-start',
+  'data': { 'filename': 'str', '*append': 'bool' } }
+
+##
+# @xemu-voice-log-stop:
+#
+# Close the open voice log (from @xemu-voice-log-start or
+# XEMU_VOICE_LOG).
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-voice-log-stop', 'returns': 'XemuVoiceLogInfo' }
+
+##
+# @XemuAudioWavInfo:
+#
+# @filename: the WAV file
+#
+# @samples: stereo samples written to it (48000 a second)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuAudioWavInfo',
+  'data': { 'filename': 'str', 'samples': 'int' } }
+
+##
+# @xemu-audio-wav-start:
+#
+# Write the APU's output (what xemu would play, before volume_limit)
+# to @filename as a 48 kHz stereo 16-bit PCM WAV, 256 samples at a
+# time, while the APU runs.  XEMU_AUDIO_WAV=<file> starts one at
+# launch and opens no host audio device.  Fails while a WAV is open.
+#
+# @filename: the WAV file; truncated
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-audio-wav-start', 'data': { 'filename': 'str' } }
+
+##
+# @xemu-audio-wav-stop:
+#
+# Close the open WAV (from @xemu-audio-wav-start or XEMU_AUDIO_WAV),
+# with its header's sizes filled in.
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-audio-wav-stop', 'returns': 'XemuAudioWavInfo' }

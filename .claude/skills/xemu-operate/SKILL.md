@@ -35,6 +35,8 @@ are in `xemu-history`.
   saves its config on exit, so skipping `-config_path` overwrites the
   owner's. (Adding a savestate: `../fixtures/README.md`.)
 - **Mute:** per-run `[audio] volume_limit = 0` (`scripts/harness-config.py`).
+  To check sound, write it with `XEMU_AUDIO_WAV` (and `XEMU_VOICE_LOG`)
+  instead of listening.
 - **`dist/xemu.app` is the owner's bundle.** You may rebuild it. Never
   launch it for tests and never add files to it; a
   `Contents/Resources/xemu.toml` hijacks their next launch.
@@ -270,6 +272,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_DSP_JIT_STATS=1`, `_DIFF=N` | DSP JIT stats; validator | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
 | `XEMU_INV_PROF=1`, `XEMU_TB_PROF=1` | Exit dumps (need `quit`) | `tcg/tb-maint.c`, `tcg/cpu-exec.c` |
 | `XEMU_BLOCK_LOG=<file>` | One TSV row per IDE/ATAPI data command (README; QMP `xemu-block-log-start`/`-stop`); 1-2% host time while on | `hw/ide/xemu-block-log.c` |
+| `XEMU_VOICE_LOG=<file>`, `XEMU_AUDIO_WAV=<file>` | One TSV row per APU voice start/release/pause/resume/stop (buffer's physical runs, format, pitch, volume); the APU's output as a 48 kHz WAV, with no host device (README; QMP `xemu-voice-log-*`, `xemu-audio-wav-*`). Deterministic under icount | `mcpx/apu/xemu-audio-log.c` |
 
 Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 `XEMU_MMIO_PROF` set.

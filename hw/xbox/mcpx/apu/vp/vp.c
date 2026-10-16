@@ -21,6 +21,7 @@
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "system/physmem.h"
+#include "hw/xbox/mcpx/apu/xemu-audio-log.h"
 #include "adpcm.h"
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
@@ -471,8 +472,9 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
     ram_stl(d, voice + offset, new_val);
 }
 
-static void voice_off(MCPXAPUState *d, uint16_t v)
+static void voice_off(MCPXAPUState *d, uint16_t v, XemuVoiceWhy why)
 {
+    xemu_voice_log(d, v, XEMU_VOICE_STOP, why);
     voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                    NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 0);
 
@@ -629,6 +631,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         voice_reset_filters(d, selected_handle);
         voice_set_mask(d, selected_handle, NV_PAVS_VOICE_PAR_STATE,
                        NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 1);
+        xemu_voice_log(d, selected_handle, XEMU_VOICE_START,
+                       XEMU_VOICE_WHY_NONE);
 
         if (!locked) {
             voice_lock_locked(d, selected_handle, false);
@@ -663,6 +667,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         voice_set_mask(d, selected_handle, NV_PAVS_VOICE_PAR_STATE,
                        NV_PAVS_VOICE_PAR_STATE_EFCUR,
                        NV_PAVS_VOICE_PAR_STATE_EFCUR_RELEASE);
+        xemu_voice_log(d, selected_handle, XEMU_VOICE_RELEASE,
+                       XEMU_VOICE_WHY_NONE);
 
         if (!locked) {
             voice_lock_locked(d, selected_handle, false);
@@ -671,12 +677,17 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         break;
     }
     case NV1BA0_PIO_VOICE_OFF:
-        voice_off(d, argument & NV1BA0_PIO_VOICE_OFF_HANDLE);
+        voice_off(d, argument & NV1BA0_PIO_VOICE_OFF_HANDLE,
+                  XEMU_VOICE_WHY_GUEST);
         break;
     case NV1BA0_PIO_VOICE_PAUSE:
         voice_set_mask(d, argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE,
                        NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_PAUSED,
                        (argument & NV1BA0_PIO_VOICE_PAUSE_ACTION) != 0);
+        xemu_voice_log(d, argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE,
+                       (argument & NV1BA0_PIO_VOICE_PAUSE_ACTION) ?
+                       XEMU_VOICE_PAUSE : XEMU_VOICE_RESUME,
+                       XEMU_VOICE_WHY_NONE);
         break;
     case NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY: {
         int handle = GET_MASK(argument, NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY_HANDLE);
@@ -1232,7 +1243,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
     }
     case NV_PAVS_VOICE_PAR_STATE_EFCUR_FORCE_RELEASE:
         if (count_mask == NV_PAVS_VOICE_CUR_ECNT_EACOUNT) {
-            voice_off(d, v);
+            voice_off(d, v, XEMU_VOICE_WHY_ENV);
         }
         return 0.0f;
     default:
@@ -1334,7 +1345,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 DPRINTF("Voice %d envelope not in release state (%d) and "
                         "persist is not set. Ending stream now!\n",
                         v, eacur);
-                voice_off(d, v);
+                voice_off(d, v, XEMU_VOICE_WHY_STREAM);
                 return -1;
             }
         }
@@ -1355,7 +1366,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
             d->vp.ssl[v].ssl_seg = 0;
             if (!persist) {
                 d->vp.ssl[v].ssl_index = 0;
-                voice_off(d, v);
+                voice_off(d, v, XEMU_VOICE_WHY_END);
             } else {
                 set_notify_status(
                     d, v, MCPX_HW_NOTIFIER_SSLA_DONE + d->vp.ssl[v].ssl_index,
@@ -1533,7 +1544,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 cbo = lbo;
             } else {
                 cbo = ebo;
-                voice_off(d, v);
+                voice_off(d, v, XEMU_VOICE_WHY_END);
                 DPRINTF("end of buffer!\n");
             }
         }
