@@ -726,6 +726,30 @@ Other automation interfaces (windowed or headless):
   `--watch-movie` lets prophecy.bik play instead of skipping it with
   START (the fixture's disc ends it at once; the retail disc plays 5,542
   frames).
+- **Per-drive I/O log**: `XEMU_BLOCK_LOG=<file>` (from launch) or QMP
+  `xemu-block-log-start {"filename": F}` (`"append": true` keeps F's rows)
+  and `xemu-block-log-stop` (returns `{filename, rows}`) write one
+  tab-separated row per IDE or ATAPI command that reads, writes, flushes
+  or discards, under a header line: `frame drive op lba sectors bytes
+  status cmd guest_ns`. `frame` (as in `query-xemu-frame`) and `guest_ns`
+  (the virtual clock) are read when the command is issued; `drive` is
+  query-blockstats' device name (`ide0-hd0`, `ide0-cd1`); `op` is `r`,
+  `w`, `f` (flush) or `d` (discard); `lba` and `sectors` are what the
+  command asked for, in 512-byte sectors on the HDD and 2048-byte ones on
+  the DVD; `bytes` is what query-blockstats counted for the command, so
+  over any window the rows add up to the blockstats deltas; `status` is
+  `ok`, `err`, or `open` when the command was still running as the log
+  closed; `cmd` is the ATA (HDD) or ATAPI packet (DVD) opcode in hex. No
+  data. ATAPI replies sent by DMA (REQUEST SENSE, READ CAPACITY) count as
+  reads in blockstats and show up as `r` rows with `lba` -1. One log at a
+  time; a command already running when it starts is not logged. The file
+  is flushed when the VM pauses, when the log stops, at exit, and at a row
+  250 ms or more after the last flush. Under icount the file is
+  deterministic like the RAM. A cold boot to steady play writes ~70,000
+  rows and takes 1-2% more host time with the log on; off, it costs
+  nothing measurable.
+  `scripts/bench-det.py --timeline --block-log DIR` logs each timing run
+  and checks the rows against every phase's blockstats.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once with status 1 (a windowed one aborts

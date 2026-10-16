@@ -1564,3 +1564,53 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-host-profile', 'returns': 'XemuHostProfile' }
+
+##
+# Per-drive I/O log
+# =================
+##
+
+##
+# @XemuBlockLogInfo:
+#
+# @filename: the log file
+#
+# @rows: rows written to it
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuBlockLogInfo',
+  'data': { 'filename': 'str', 'rows': 'int' } }
+
+##
+# @xemu-block-log-start:
+#
+# Write one tab-separated row per IDE or ATAPI command that reads,
+# writes, flushes or discards to @filename, when the command ends:
+# frame (see @query-xemu-frame) and QEMU_CLOCK_VIRTUAL nanoseconds at
+# issue, the drive (the device name of query-blockstats), the
+# operation (r, w, f, d), the LBA and sector count asked for (512-byte
+# sectors on the HDD, 2048 on the DVD), the bytes query-blockstats
+# counted for it, the status (ok, err, or open when the command had
+# not ended), and the command opcode.  No data.  XEMU_BLOCK_LOG=<file>
+# starts a log at launch.  Fails while a log is open.
+#
+# @filename: the log file; truncated unless @append
+#
+# @append: append rows (no header line when the file is not empty)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-block-log-start',
+  'data': { 'filename': 'str', '*append': 'bool' } }
+
+##
+# @xemu-block-log-stop:
+#
+# Close the open block log (from @xemu-block-log-start or
+# XEMU_BLOCK_LOG), first writing commands still running with status
+# open.
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-block-log-stop', 'returns': 'XemuBlockLogInfo' }

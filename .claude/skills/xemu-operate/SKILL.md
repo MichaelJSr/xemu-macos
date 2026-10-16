@@ -193,7 +193,7 @@ the other arm does too).
 | Script | Use |
 |---|---|
 | `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, RAM hash per run. Also runs the goldens |
-| `bench-det.py --timeline [-n runs] [--renderer offscreen] NAME=APP …` | Cold boot to steady play under icount, per phase (kernel, logos, prophecy, title, save list, level load, steady): frames, host ms, vCPU/translate/APU/disk/other split; per-phase deltas across arms. Replays must report `same RAM` |
+| `bench-det.py --timeline [-n runs] [--renderer offscreen] NAME=APP …` | Cold boot to steady play under icount, per phase (kernel, logos, prophecy, title, save list, level load, steady): frames, host ms, vCPU/translate/APU/disk/other split; per-phase deltas across arms. Replays must report `same RAM`. `--block-log DIR` adds `XEMU_BLOCK_LOG` per run and checks its rows against each phase's blockstats |
 | `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | B `VAR=0` vs E `VAR=1` (`--e-value`); takes `--app`, `--isolate-caches`. Exit 3 = artifact |
 | `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V"]` | Cross-binary, multi-var or numeric baseline |
 | `movement-probe.sh <out> [--app P] [VAR=V…]` | Streaming walk; a healthy TB-flush delta is 0-1 |
@@ -269,6 +269,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LOAD_VERIFY=1` | One line when guest RAM changed between a load and the VM's start (or the next load) | `ui/xemu-load-verify.c` |
 | `XEMU_DSP_JIT_STATS=1`, `_DIFF=N` | DSP JIT stats; validator | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
 | `XEMU_INV_PROF=1`, `XEMU_TB_PROF=1` | Exit dumps (need `quit`) | `tcg/tb-maint.c`, `tcg/cpu-exec.c` |
+| `XEMU_BLOCK_LOG=<file>` | One TSV row per IDE/ATAPI data command (README; QMP `xemu-block-log-start`/`-stop`); 1-2% host time while on | `hw/ide/xemu-block-log.c` |
 
 Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 `XEMU_MMIO_PROF` set.

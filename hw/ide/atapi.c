@@ -30,6 +30,9 @@
 #include "scsi/constants.h"
 #include "ide-internal.h"
 #include "trace.h"
+#ifdef XBOX
+#include "xemu-block-log.h"
+#endif
 
 #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
 #define ATAPI_SECTOR_SIZE (1 << ATAPI_SECTOR_BITS)
@@ -1308,6 +1311,11 @@ void ide_atapi_cmd(IDEState *s)
     const struct AtapiCmd *cmd = &atapi_cmd_table[s->io_buffer[0]];
 
     trace_ide_atapi_cmd(s, s->io_buffer[0]);
+#ifdef XBOX
+    if (unlikely(xemu_block_log_on)) {
+        xemu_block_log_atapi(s, buf);
+    }
+#endif
 
     if (trace_event_get_state_backends(TRACE_IDE_ATAPI_CMD_PACKET)) {
         g_autoptr(GString) str =

@@ -45,6 +45,7 @@
 #include "system/cpus.h"
 #ifdef XBOX
 #include "ui/xemu-checkpoints.h"
+#include "xemu-block-log.h"
 #endif
 #include "system/runstate.h"
 #include "ide-internal.h"
@@ -609,6 +610,11 @@ void ide_transfer_start(IDEState *s, uint8_t *buf, int size,
 
 static void ide_cmd_done(IDEState *s)
 {
+#ifdef XBOX
+    if (unlikely(xemu_block_log_on)) {
+        xemu_block_log_done(s);
+    }
+#endif
     if (s->bus->dma->ops->cmd_done) {
         s->bus->dma->ops->cmd_done(s->bus->dma);
     }
@@ -2209,6 +2215,11 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
         return;
     }
 
+#ifdef XBOX
+    if (unlikely(xemu_block_log_on)) {
+        xemu_block_log_ata(s, val);
+    }
+#endif
     s->status = READY_STAT | BUSY_STAT;
     s->error = 0;
     s->io_buffer_offset = 0;

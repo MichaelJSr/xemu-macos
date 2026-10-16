@@ -41,10 +41,12 @@ the host time went. Every timing pass must end on the marker pass's RAM,
 or its phases aren't the same frames. --renderer offscreen runs Vulkan on
 a portable clone of APP (cold caches); --hdd-io runs qemu-io commands on
 the scratch HDD first ("write -z 0x800 0x200": the game rebuilds its HDD
-cache). Example: bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
+cache); --block-log DIR sets XEMU_BLOCK_LOG on each timing run and checks
+its rows against every phase's query-blockstats deltas and the first run.
+Example: bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
 """
-import argparse, contextlib, ctypes, ctypes.util, hashlib, importlib.util, json, os, re
-import shutil
+import argparse, bisect, contextlib, csv, ctypes, ctypes.util, hashlib, importlib.util, json
+import os, re, shutil
 import socket, statistics, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -544,6 +546,42 @@ def tl_timing(app, env, a, marks, info, schedule):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def tl_block_log(path, rows):
+    """XEMU_BLOCK_LOG's rows against each phase's query-blockstats deltas."""
+    recs = list(csv.DictReader(open(path), delimiter='\t'))
+    drives = {'ide0-hd0': ('hdd', 512), 'ide0-cd1': ('dvd', 2048)}
+    phases = sorted((r['start'], r['frames'], p) for p, r in rows.items())   # empty ones first
+    starts = [s for s, _, _ in phases]
+    got, tot, short, failed = {}, {}, 0, 0
+    for x in recs:
+        if x['drive'] not in drives or x['op'] not in 'rw':
+            continue
+        dev, size = drives[x['drive']]
+        lba, sectors, nbytes = int(x['lba']), int(x['sectors']), int(x['bytes'])
+        ok = x['status'] == 'ok'
+        failed += not ok
+        short += ok and lba >= 0 and sectors * size != nbytes
+        i = bisect.bisect_right(starts, int(x['frame'])) - 1
+        k = (phases[max(i, 0)][2], f"{dev}.{'rd' if x['op'] == 'r' else 'wr'}_bytes")
+        # A command that ended ok moved what it asked for; a failed one (err,
+        # open) what blockstats counted; lba -1 is a DMA reply.
+        got[k] = got.get(k, 0) + (sectors * size if ok and lba >= 0 else nbytes)
+        t = tot.setdefault(k[1], [0, 0])
+        t[0], t[1] = t[0] + 1, t[1] + nbytes
+    bad = [f'{p} {k}: rows {got.get((p, k), 0)} B, blockstats {r[k]} B'
+           for p, r in rows.items() for k in ('hdd.rd_bytes', 'hdd.wr_bytes', 'dvd.rd_bytes')
+           if got.get((p, k), 0) != r[k]]
+    out = (f'  block log: {len(recs)} rows; ' +
+           ', '.join(f'{k[:-6]} {n} rows {b / 2**20:.1f} MiB' for k, (n, b) in sorted(tot.items())) +
+           ('; sectors match query-blockstats in every phase' if not bad else
+            '; MISMATCH ' + '; '.join(bad)))
+    if failed:
+        out += f'; {failed} rows failed (status err or open: their bytes, not their sectors)'
+    if short:
+        out += f'; {short} ok rows moved less than they asked for'
+    return out, hashlib.sha256(open(path, 'rb').read()).hexdigest()
+
+
 def tl_print(name, runs, base=None):
     """Per phase, the mean over runs; returns the means for the next arm's deltas."""
     phases = [p for p in runs[0] if p != 'tail']
@@ -602,8 +640,14 @@ def timeline(a, arms):
           f'{len(schedule) // 2} presses; {time.time() - t:.1f} s', flush=True)
     res = {n: [] for n, _, _ in arms}
     out = open(a.out, 'a') if a.out else None
+    first_log = None
+    if a.block_log:
+        os.makedirs(a.block_log, exist_ok=True)
     for i in range(a.pairs):
         for n, app, env in arms:
+            if a.block_log:
+                blog = os.path.join(a.block_log, f'{n}-{i + 1}.tsv')
+                env = dict(env, XEMU_BLOCK_LOG=blog)
             rows, ram = tl_timing(app, env, a, marks, info, schedule)
             res[n].append(rows)
             tot = sum(r['ms'] for p, r in rows.items() if p != 'tail')
@@ -616,6 +660,11 @@ def timeline(a, arms):
             if ram != info['ram']:
                 print('timeline: the replay left the marker pass\'s path; phase frames are not '
                       'comparable', file=sys.stderr)
+            if a.block_log:
+                line, digest = tl_block_log(blog, rows)
+                first_log = first_log or digest
+                print(line + ('; same rows as the first run' if digest == first_log else
+                              '; rows DIFFER from the first run'), flush=True)
     load = os.getloadavg()
     print(f'load {load[0]:.1f} {load[1]:.1f} {load[2]:.1f}')
     print('ms: host wall time; vcpu: CPU ms of the vCPU thread (ms - vcpu = waiting: disk '
@@ -655,6 +704,9 @@ def main():
                    help='qemu-io command on the scratch HDD before power-on; '
                         '"write -z 0x800 0x200" empties the cache-partition table, '
                         'so the game copies its HDD cache again')
+    t.add_argument('--block-log', default='', metavar='DIR',
+                   help='XEMU_BLOCK_LOG per timing run into DIR/<arm>-<run>.tsv; checks the rows '
+                        'against each phase\'s query-blockstats deltas and against the first run')
     t.add_argument('--va', action='append', default=[],
                    help='NAME=ADDR override: ' + ', '.join(TL_VAS) + ', xbe_entry')
     p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')
