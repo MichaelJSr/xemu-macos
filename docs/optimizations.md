@@ -1979,6 +1979,23 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `vp_write` 1.12% → 0.52% of wall (mean 39 → 17 µs, max 951 → 321 µs),
   the frame thread's broadcasts 45k → 154 per 30 s. Normal-mode
   `XEMU_AUDIO_WAV` captures show no gaps. Deterministic goldens unchanged.
+- **Fewer fixed costs per APU frame (2026-10-16).** Three costs ran
+  every frame whether or not anything used them. The debug snapshot
+  (an 18.5 KB copy of `g_dbg` and a 256-voice reset, 1500 times a
+  second) now runs only while the Audio debug window reads it (each
+  `mcpx_apu_get_debug_info` call re-arms a 3000-frame countdown) or a
+  voice is isolated (`voice_should_mute` reads it); `voice_work_dispatch`
+  reads the realtime clock only for that window too. Each voice
+  partition records the mixbins it wrote (`bins_written`), so a frame
+  clears and sums only those, straight into the frame's zeroed mixbins.
+  Exact: an unwritten bin is +0, and adding +0 changes nothing for a
+  mixbin, which starts at +0 and only accumulates, so is never -0 (the
+  silent-send skip relies on the same). Det, RAM and WAV equal:
+  instructions per frame −0.70% heavy-f1 (12/12 pairs), −0.82% cold
+  boot, −0.76% movie-e2 (6/6). Cycles, both binaries run at once so
+  load swings cancel (load 18-19): heavy-f1 median −0.57% (8/8 pairs),
+  cold boot −0.67% (7/8); sequential sessions −0.67% heavy-f1 (12 pairs)
+  and −2.8% cold boot (10 pairs, load 16-26, ±3% per pair).
 
 ### Input
 

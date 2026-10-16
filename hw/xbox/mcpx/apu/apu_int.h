@@ -172,6 +172,8 @@ extern MCPXAPUState *g_state; // Used via debug handlers
 extern struct McpxApuDebug g_dbg, g_dbg_cache;
 extern int g_dbg_voice_monitor;
 extern uint64_t g_dbg_muted_voices[4];
+/* This frame fills the debug snapshot: someone reads it (debug.c). */
+extern bool g_dbg_snapshot;
 
 void mcpx_debug_begin_frame(void);
 void mcpx_debug_end_frame(void);

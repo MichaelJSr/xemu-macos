@@ -24,14 +24,34 @@
 struct McpxApuDebug g_dbg, g_dbg_cache;
 int g_dbg_voice_monitor = -1;
 uint64_t g_dbg_muted_voices[4];
+bool g_dbg_snapshot;
+
+/*
+ * Frames publish g_dbg to g_dbg_cache (~18.5 KB, 1500 times a second) only
+ * while someone reads it: the Audio debug window, which calls
+ * mcpx_apu_get_debug_info every UI frame while it is open, or a voice
+ * isolation (voice_should_mute reads the snapshot). A read re-arms a
+ * countdown of APU frames.
+ */
+#define DBG_SNAPSHOT_FRAMES 3000 /* 2 s */
+static int g_dbg_snapshot_frames;
 
 const struct McpxApuDebug *mcpx_apu_get_debug_info(void)
 {
+    qatomic_set(&g_dbg_snapshot_frames, DBG_SNAPSHOT_FRAMES);
     return &g_dbg_cache;
 }
 
 void mcpx_debug_begin_frame(void)
 {
+    int n = qatomic_read(&g_dbg_snapshot_frames);
+    if (n > 0) {
+        qatomic_set(&g_dbg_snapshot_frames, n - 1);
+    }
+    g_dbg_snapshot = n > 0 || g_dbg_voice_monitor >= 0;
+    if (!g_dbg_snapshot) {
+        return;
+    }
     for (int i = 0; i < MCPX_HW_MAX_VOICES; i++) {
         g_dbg.vp.v[i].active = false;
         g_dbg.vp.v[i].multipass_dst_voice = 0xFFFF;
@@ -40,7 +60,9 @@ void mcpx_debug_begin_frame(void)
 
 void mcpx_debug_end_frame(void)
 {
-    g_dbg_cache = g_dbg;
+    if (g_dbg_snapshot) {
+        g_dbg_cache = g_dbg;
+    }
 }
 
 void mcpx_apu_debug_set_gp_realtime_enabled(bool run)

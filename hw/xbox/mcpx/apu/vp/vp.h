@@ -88,6 +88,8 @@ typedef struct VoiceWorkItem {
  */
 typedef struct VoiceWorker {
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
+    /* mixbins outside this mask are +0 (voice_worker_run) */
+    uint32_t bins_written;
     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
     VoiceWorkItem queue[MCPX_HW_MAX_VOICES];
     int queue_len;
@@ -97,7 +99,6 @@ typedef struct VoiceWorkDispatch {
     int num_workers;
     VoiceWorker *workers;
     uint64_t workers_pending; /* partitions with voices this frame */
-    float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     VoiceWorkItem queue[MCPX_HW_MAX_VOICES];
     int queue_len;
 } VoiceWorkDispatch;

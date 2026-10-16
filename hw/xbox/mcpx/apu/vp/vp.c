@@ -1815,6 +1815,7 @@ static void get_multipass_samples(MCPXAPUState *d,
 
 static void voice_process(MCPXAPUState *d,
                           float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME],
+                          uint32_t *bins_written,
                           float sample_buf[NUM_SAMPLES_PER_FRAME][2],
                           uint16_t v, int voice_list)
 {
@@ -2084,6 +2085,7 @@ static void voice_process(MCPXAPUState *d,
         if (g == 0.0f) {
             continue;
         }
+        *bins_written |= 1u << bin[b];
 #if XEMU_USE_VDSP && defined(__aarch64__)
         /*
          * dst[i] = samples[i][ch] * g + dst[i], fused: what vDSP_vsma
@@ -2239,17 +2241,25 @@ static void get_voice_bin_src_dst(MCPXAPUState *d, int v,
     }
 }
 
-/* One partition's share of a frame: its queue, summed in order. */
+/*
+ * One partition's share of a frame: its queue, summed in order. Only the
+ * mix loop in voice_process stores non-zero values into mixbins, and it
+ * records the bin in bins_written, so clearing last frame's bins leaves
+ * all of them +0.
+ */
 static void __attribute__((noinline))
 voice_worker_run(MCPXAPUState *d, VoiceWorker *w)
 {
-    memset(w->mixbins, 0, sizeof(w->mixbins));
+    for (uint32_t m = w->bins_written; m; m &= m - 1) {
+        memset(w->mixbins[ctz32(m)], 0, sizeof(w->mixbins[0]));
+    }
+    w->bins_written = 0;
     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
         memset(w->sample_buf, 0, sizeof(w->sample_buf));
     }
     for (int i = 0; i < w->queue_len; i++) {
-        voice_process(d, w->mixbins, w->sample_buf, w->queue[i].voice,
-                      w->queue[i].list);
+        voice_process(d, w->mixbins, &w->bins_written, w->sample_buf,
+                      w->queue[i].voice, w->queue[i].list);
     }
 }
 
@@ -2328,7 +2338,10 @@ static bool any_queued_voice_locked(MCPXAPUState *d)
 
 /*
  * Sum the partitions that ran, in partition order, into the frame's
- * mixbins: a fixed float order.
+ * mixbins, which arrive zeroed (se_frame): a fixed float order. A bin a
+ * partition never wrote is +0, and adding +0 changes nothing: a mixbin
+ * starts at +0 and only accumulates, so it is never -0 (voice_process
+ * skips silent sends on the same grounds).
  */
 static void voice_work_combine(MCPXAPUState *d,
                                float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME],
@@ -2340,18 +2353,17 @@ static void voice_work_combine(MCPXAPUState *d,
         if (!(ran & (1ULL << w))) {
             continue;
         }
-        for (int b = 0; b < NUM_MIXBINS; b++) {
-            float_accumulate(vwd->mixbins[b], vwd->workers[w].mixbins[b],
+        VoiceWorker *worker = &vwd->workers[w];
+        for (uint32_t m = worker->bins_written; m; m &= m - 1) {
+            int b = ctz32(m);
+            float_accumulate(mixbins[b], worker->mixbins[b],
                              NUM_SAMPLES_PER_FRAME);
         }
         if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
             float_accumulate((float *)d->vp.sample_buf,
-                             (float *)vwd->workers[w].sample_buf,
+                             (float *)worker->sample_buf,
                              NUM_SAMPLES_PER_FRAME * 2);
         }
-    }
-    for (int b = 0; b < NUM_MIXBINS; b++) {
-        float_accumulate(mixbins[b], vwd->mixbins[b], NUM_SAMPLES_PER_FRAME);
     }
 }
 
@@ -2361,7 +2373,9 @@ voice_work_dispatch(MCPXAPUState *d,
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
-    int64_t start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    /* Times for the Audio debug window, only while it reads them */
+    bool timed = g_dbg_snapshot;
+    int64_t start_time = timed ? qemu_clock_get_us(QEMU_CLOCK_REALTIME) : 0;
 
     while (true) {
         if (qatomic_read(&d->pause_requested)) {
@@ -2390,9 +2404,7 @@ voice_work_dispatch(MCPXAPUState *d,
      * and hand-off cost while the frame thread waited for them holding
      * d->lock, which vp_write takes on the vCPU.
      */
-    bool timed = !d->det.enabled;
     if (vwd->queue_len) {
-        memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
         voice_work_schedule(d);
         uint64_t ran = vwd->workers_pending;
         int64_t t = start_time;
