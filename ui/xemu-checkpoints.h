@@ -48,7 +48,10 @@ size_t xemu_ram_image_page_size(void);
 const uint8_t *const *xemu_ram_image_block(XemuRamImage *img, RAMBlock *rb,
                                            uint64_t *pages);
 
-/* The dirty log for incremental restores and saves against a base. */
+/*
+ * The dirty log for incremental restores and saves against a base; stop
+ * it when the last checkpoint goes (which also drops RAM's image).
+ */
 void xemu_ram_log_start(void);
 void xemu_ram_log_stop(void);
 /* Around a checkpoint restore's load: a failed one leaves RAM unknown. */

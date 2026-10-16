@@ -58,6 +58,7 @@
 #define SMALL_BLOCK (4 * MiB)
 
 typedef struct Block {
+    RAMBlock *rb;
     uint8_t *host;
     ram_addr_t offset;      /* ram_addr_t of its first byte */
     uint64_t first;         /* index of its first page in an image */
@@ -66,10 +67,27 @@ typedef struct Block {
     unsigned long *dirty;   /* pages written since ram.synced */
 } Block;
 
+/*
+ * Page copies come from mmap, not the heap: Apple's malloc keeps a freed
+ * large block resident for good, so a deleted checkpoint's 70 MiB stayed
+ * in the footprint.
+ */
 typedef struct Chunk {
     int refs;
     uint8_t *data;
+    size_t size;
 } Chunk;
+
+/*
+ * A chunk's mapping: whole host pages, which target pages need not fill.
+ * qemu_ram_mmap unmaps its alignment slack after the mapping's end, and
+ * munmap refuses an address off a page boundary (a Linux host with pages
+ * over 4 KiB would leave up to 2 MiB reserved per chunk).
+ */
+static size_t chunk_map_size(size_t size)
+{
+    return ROUND_UP(size, qemu_real_host_page_size());
+}
 
 struct XemuRamImage {
     int refs;
@@ -104,6 +122,7 @@ static void blocks_init(void)
                 continue;
             }
             Block b = {
+                .rb = rb,
                 .host = qemu_ram_get_host_addr(rb),
                 .offset = qemu_ram_get_offset(rb),
                 .first = ram.pages,
@@ -124,7 +143,7 @@ static void chunk_unref(gpointer p)
     Chunk *c = p;
 
     if (!--c->refs) {
-        g_free(c->data);
+        qemu_anon_ram_free(c->data, chunk_map_size(c->size));
         g_free(c);
     }
 }
@@ -263,13 +282,14 @@ void xemu_ram_log_start(void)
 
 void xemu_ram_log_stop(void)
 {
+    /* No checkpoint is left to compare with: let RAM's image go too. */
+    set_synced(NULL);
     if (!ram.on) {
         return;
     }
     memory_listener_unregister(&ram.listener);
     memory_global_dirty_log_stop(GLOBAL_DIRTY_XEMU);
     ram.on = false;
-    set_synced(NULL);
     /* As the log found them: all dirty, so no page traps for it. */
     for (unsigned k = 0; k < ram.nblocks; k++) {
         physical_memory_set_dirty_range(ram.blocks[k].offset,
@@ -318,6 +338,38 @@ static void synced_to(XemuRamImage *img)
         bitmap_zero(ram.blocks[k].dirty, ram.blocks[k].pages);
     }
     set_synced(img);
+}
+
+/*
+ * A xemu_zero block (the Xbox's unused pc.ram, see RAMBlock) is all zero
+ * and is never read: reading it would fault 128 MiB into the footprint.
+ * Make @img hold it as zero pages; the number it held otherwise.
+ */
+static uint64_t zero_block_capture(XemuRamImage *img, Block *b)
+{
+    const uint8_t **p = img->page + b->first;
+    uint64_t n = 0;
+
+    for (uint64_t i = 0; i < b->pages; i++) {
+        if (p[i]) {
+            p[i] = NULL;
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Whether @img holds the xemu_zero block @b as zero pages, as RAM does. */
+static bool zero_block_matches(XemuRamImage *img, Block *b)
+{
+    const uint8_t **p = img->page + b->first;
+
+    for (uint64_t i = 0; i < b->pages; i++) {
+        if (p[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /*
@@ -377,6 +429,10 @@ XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
         Block *b = &ram.blocks[k];
         bool partial;
 
+        if (qemu_ram_xemu_zero(b->rb)) {
+            st->differ += zero_block_capture(img, b);
+            continue;
+        }
         g_free(cand);
         cand = bitmap_new(b->pages);
         partial = block_candidates(b, base, cand);
@@ -400,7 +456,14 @@ XemuRamImage *xemu_ram_image_capture(XemuRamImage *base, bool verify,
         uint8_t *dst;
 
         c->refs = 1;
-        c->data = dst = g_malloc(n * ps);
+        c->size = n * ps;
+        c->data = dst = qemu_anon_ram_alloc(chunk_map_size(c->size), NULL,
+                                            false, false);
+        if (!dst) {
+            error_report("xemu checkpoint: out of memory for %" PRIu64
+                         " pages", n);
+            abort();
+        }
         g_ptr_array_add(img->chunks, c);
         for (unsigned k = 0; k < ram.nblocks; k++) {
             Block *b = &ram.blocks[k];
@@ -451,6 +514,13 @@ void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
         Block *b = &ram.blocks[k];
         bool partial;
 
+        if (qemu_ram_xemu_zero(b->rb)) {
+            if (zero_block_matches(img, b)) {
+                continue;
+            }
+            /* The image holds data for it: write it back as usual. */
+            b->rb->xemu_zero = false;
+        }
         g_free(cand);
         cand = bitmap_new(b->pages);
         partial = incremental && block_candidates(b, img, cand);

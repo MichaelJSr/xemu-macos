@@ -1238,7 +1238,9 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         return 0;
     }
 
-    if (!buffer_is_zero(p, TARGET_PAGE_SIZE)) {
+    /* xemu: a xemu_zero block's pages are zero; reading one faults it in. */
+    if (!qemu_ram_xemu_zero(pss->block) &&
+        !buffer_is_zero(p, TARGET_PAGE_SIZE)) {
         return 0;
     }
 
@@ -4315,6 +4317,7 @@ static int ram_load_precopy(QEMUFile *f)
     while (!ret && !(flags & RAM_SAVE_FLAG_EOS)) {
         ram_addr_t addr;
         void *host = NULL, *host_bak = NULL;
+        bool zero_block = false;
         uint8_t ch;
 
         /*
@@ -4382,6 +4385,18 @@ static int ram_load_precopy(QEMUFile *f)
             if (!migration_incoming_in_colo_state()) {
                 ramblock_recv_bitmap_set(block, host);
             }
+            /*
+             * xemu: a xemu_zero block already holds the zero pages, and
+             * ram_handle_zero's read would fault each one in. Data loaded
+             * into it ends that.
+             */
+            if (qemu_ram_xemu_zero(block)) {
+                if (flags & (RAM_SAVE_FLAG_PAGE | RAM_SAVE_FLAG_XBZRLE)) {
+                    block->xemu_zero = false;
+                } else {
+                    zero_block = true;
+                }
+            }
 
             trace_ram_load_loop(block->idstr, (uint64_t)addr, flags, host);
         }
@@ -4408,7 +4423,9 @@ static int ram_load_precopy(QEMUFile *f)
                 ret = -EINVAL;
                 break;
             }
-            ram_handle_zero(host, TARGET_PAGE_SIZE);
+            if (!zero_block) {
+                ram_handle_zero(host, TARGET_PAGE_SIZE);
+            }
             break;
 
         case RAM_SAVE_FLAG_PAGE:
@@ -4483,6 +4500,15 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
      */
     trace_ram_load_start();
     WITH_RCU_READ_LOCK_GUARD() {
+        /* xemu: only the plain precopy loop keeps xemu_zero blocks zero. */
+        if (postcopy_running || migrate_multifd() || migrate_mapped_ram() ||
+            migrate_rdma() || migration_incoming_colo_enabled()) {
+            RAMBlock *rb;
+
+            RAMBLOCK_FOREACH_NOT_IGNORED(rb) {
+                rb->xemu_zero = false;
+            }
+        }
         if (postcopy_running) {
             /*
              * Note!  Here RAM_CHANNEL_PRECOPY is the precopy channel of

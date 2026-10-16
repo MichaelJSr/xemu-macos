@@ -30,7 +30,7 @@
 
 typedef struct Checkpoint {
     char *name;
-    uint8_t *state;         /* the device sections */
+    uint8_t *state;         /* the device sections, mmap'd (keep_state) */
     size_t size;
     XemuRamImage *ram;
     char *base;             /* saved against it, if not NULL */
@@ -43,12 +43,22 @@ static GPtrArray *checkpoints;
 
 int64_t xemu_frame_count(void);
 
+/*
+ * A state's mapping: whole host pages, as qemu_ram_mmap's unmap of its
+ * alignment slack after the mapping's end needs (munmap refuses an address
+ * off a page boundary; on Linux each save would leave up to 2 MiB reserved).
+ */
+static size_t state_map_size(size_t size)
+{
+    return ROUND_UP(size, qemu_real_host_page_size());
+}
+
 static void checkpoint_free(gpointer p)
 {
     Checkpoint *c = p;
 
     g_free(c->name);
-    g_free(c->state);
+    qemu_anon_ram_free(c->state, state_map_size(c->size));
     xemu_ram_image_unref(c->ram);
     g_free(c->base);
     g_hash_table_unref(c->disks);
@@ -242,6 +252,23 @@ typedef struct Capture {
     XemuRamStats st;
 } Capture;
 
+/*
+ * Move a save's device sections from the heap into mmap'd memory, which a
+ * delete gives back: Apple's malloc keeps a freed large block resident for
+ * good (deleted checkpoints left about 7 MiB each). NULL if out of memory.
+ */
+static uint8_t *keep_state(uint8_t *heap, size_t size)
+{
+    uint8_t *kept = qemu_anon_ram_alloc(state_map_size(size), NULL, false,
+                                        false);
+
+    if (kept) {
+        memcpy(kept, heap, size);
+    }
+    g_free(heap);
+    return kept;
+}
+
 static void checkpoint_save_ram(void *opaque)
 {
     Capture *cap = opaque;
@@ -260,7 +287,8 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name,
     Capture cap = { .verify = verify };
     size_t size = 0;
     /* A save is about the size of the last one's device sections. */
-    size_t hint = old ? old->size + (1 << 20) : 4 * MiB;
+    static size_t last_size = 3 * MiB;
+    size_t hint = (old ? old->size : last_size) + MiB;
     uint8_t *state;
     XemuCheckpointInfo *info;
 
@@ -275,10 +303,14 @@ XemuCheckpointInfo *qmp_xemu_checkpoint_save(const char *name,
     }
     state = xemu_checkpoint_save_state(hint, &size, checkpoint_save_ram, &cap,
                                        errp);
+    if (state && !(state = keep_state(state, size))) {
+        error_setg(errp, "out of memory for a %zu-byte checkpoint", size);
+    }
     if (!state) {
         xemu_ram_image_unref(cap.ram);
         return NULL;
     }
+    last_size = size;
     if (!checkpoints) {
         checkpoints = g_ptr_array_new_with_free_func(checkpoint_free);
     }

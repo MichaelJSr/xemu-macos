@@ -248,7 +248,8 @@ Other automation interfaces (windowed or headless):
   `xemu-checkpoint-delete` frees one. A checkpoint is its device state
   (about 6 MB, nv2a and APU mostly) plus a copy of each nonzero RAM page;
   the qcow2 is never written for the state. With 128 MiB a save takes
-  about 13 ms and a restore 9-12 ms on a loaded M2 Ultra.
+  about 10 ms and a restore about 8 ms on a lightly loaded M2 Ultra
+  (about 15 ms each at load 34).
 - **Branching from checkpoints**: `xemu-checkpoint-save {"name": "c1",
   "base": "c0"}` stores only the RAM pages that differ from checkpoint
   `c0` and shares the rest with it (deleting or replacing `c0` later
@@ -268,6 +269,16 @@ Other automation interfaces (windowed or headless):
   something wrote RAM behind the log's back (another process writing
   through `XEMU_RAM_SHM` does; nothing inside xemu should). The log
   stops when the last checkpoint is deleted.
+- **Host cost of one instance** (headless null, icount, 128 MiB): paused,
+  no thread runs (0.1% of a core, about 45 timer wakeups a second);
+  advancing, one core, nearly all of it the vCPU thread (the APU, PFIFO
+  and IDE run on it). The footprint is about 165 MB after a `loadvm` and
+  215-230 MB after a few thousand frames. A full checkpoint adds about
+  75 MB, one saved against a base its own pages plus about 7 MB of
+  device state; deleting it gives that back, as a finished `loadvm` or
+  `savevm` gives back its buffer. 16-frame candidate runs from one
+  checkpoint (incremental restore, then advance) reach about 140 frames
+  per CPU second on Azurik's heavy scene.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

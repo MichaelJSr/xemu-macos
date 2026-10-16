@@ -40,6 +40,7 @@
 #include "system/arch_init.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
+#include "system/ramblock.h"
 #include "cpu.h"
 
 #include "qapi/error.h"
@@ -257,6 +258,26 @@ static void xbox_memory_init(PCMachineState *pcms,
     pc_system_flash_cleanup_unused(pcms);
 }
 
+/*
+ * The PC machine's default RAM backend, pc.ram (machine->ram), is never
+ * mapped: the guest runs on xbox.ram. It stays in the RAM list, so every
+ * savestate carries it as zero pages, but loads and saves no longer read
+ * its 128 MiB (which faulted it all into the footprint on macOS).
+ */
+static void xbox_unused_ram_done(Notifier *n, void *data)
+{
+    MachineState *machine = MACHINE(qdev_get_machine());
+
+    if (machine->ram && machine->ram->ram_block &&
+        !memory_region_is_mapped(machine->ram)) {
+        machine->ram->ram_block->xemu_zero = true;
+    }
+}
+
+static Notifier xbox_unused_ram_notifier = {
+    .notify = xbox_unused_ram_done,
+};
+
 /* PC hardware initialisation */
 static void xbox_init(MachineState *machine)
 {
@@ -310,6 +331,7 @@ void xbox_init_common(MachineState *machine,
 
     /* allocate ram and load rom/bios */
     xbox_memory_init(pcms, system_memory, rom_memory, &ram_memory);
+    qemu_add_machine_init_done_notifier(&xbox_unused_ram_notifier);
 
     gsi_state = pc_gsi_create(&x86ms->gsi, pcmc->pci_enabled);
 

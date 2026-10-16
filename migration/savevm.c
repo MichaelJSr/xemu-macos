@@ -187,31 +187,89 @@ static QEMUFile *qemu_fopen_bdrv(BlockDriverState *bs, int is_writable)
  * 32 KiB QEMUFile buffer is its own coroutine and thread-pool round trip
  * (about 2200 for a 70 MiB state, most of a loadvm's time). Loads read
  * the whole state first; saves write it to memory and then in one go.
+ *
+ * The buffer comes from mmap and goes back to the OS when the load or the
+ * save is done (whole_buf_release, before the QEMUFile's close would
+ * g_free it): Apple's malloc keeps a freed large block resident for good,
+ * so each loadvm and savevm left 70-90 MiB in the footprint. *@whole
+ * keeps a reference to the channel for the release.
  */
 static QEMUFile *qemu_fopen_bdrv_whole(BlockDriverState *bs, int64_t size,
+                                       QIOChannelBuffer **whole,
                                        Error **errp)
 {
     QIOChannelBuffer *bioc;
     QEMUFile *f;
-    uint8_t *buf;
+    uint8_t *buf = NULL;
+    size_t map = 0;
     int ret;
 
-    if (size <= 0 || size > INT_MAX || !(buf = g_try_malloc(size))) {
+    *whole = NULL;
+    if (size > 0 && size <= INT_MAX) {
+        /*
+         * Whole host pages: qemu_ram_mmap unmaps its alignment slack after
+         * the mapping's end, which munmap refuses off a page boundary (on
+         * Linux each load would leave up to 2 MiB reserved).
+         */
+        map = ROUND_UP(size, qemu_real_host_page_size());
+        buf = qemu_anon_ram_alloc(map, NULL, false, false);
+    }
+    if (!buf) {
         return qemu_fopen_bdrv(bs, 0);
     }
     ret = bdrv_load_vmstate(bs, buf, 0, size);
     if (ret < 0) {
-        g_free(buf);
+        qemu_anon_ram_free(buf, map);
         error_setg_errno(errp, -ret, "Could not read the VM state");
         return NULL;
     }
     bioc = qio_channel_buffer_new(0);
     g_free(bioc->data);
     bioc->data = buf;
-    bioc->capacity = bioc->usage = size;
+    bioc->capacity = map;   /* whole_buf_release unmaps this */
+    bioc->usage = size;
     f = qemu_file_new_input(QIO_CHANNEL(bioc));
-    object_unref(OBJECT(bioc));
+    *whole = bioc;
     return f;
+}
+
+/*
+ * A save's buffer, the same way: room for all of RAM plus 256 MiB of
+ * device state (about 7 MiB in practice), mapped but untouched until
+ * written, so the channel never has to grow it (its g_realloc can't take
+ * an mmap'd buffer). NULL where that isn't free: Windows commits what it
+ * maps, so it keeps the heap buffer.
+ */
+static QIOChannelBuffer *whole_buf_new_output(void)
+{
+#ifndef _WIN32
+    uint64_t ram = ram_bytes_total();
+    size_t size = ram + ram / 8 + 256 * MiB;
+    uint8_t *buf = qemu_anon_ram_alloc(size, NULL, false, false);
+    QIOChannelBuffer *bioc;
+
+    if (!buf) {
+        return NULL;
+    }
+    bioc = qio_channel_buffer_new(0);
+    g_free(bioc->data);
+    bioc->data = buf;
+    bioc->capacity = size;
+    return bioc;
+#else
+    return NULL;
+#endif
+}
+
+/* Unmap a whole-state buffer and drop the reference to its channel. */
+static void whole_buf_release(QIOChannelBuffer *bioc)
+{
+    if (bioc) {
+        qemu_anon_ram_free(bioc->data, bioc->capacity);
+        bioc->data = NULL;
+        bioc->capacity = bioc->usage = bioc->offset = 0;
+        object_unref(OBJECT(bioc));
+    }
 }
 #endif
 
@@ -3360,7 +3418,8 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
 #ifdef XBOX
     {
         /* In memory, then one write (qemu_fopen_bdrv_whole). */
-        QIOChannelBuffer *bioc = qio_channel_buffer_new(160 * MiB);
+        QIOChannelBuffer *whole = whole_buf_new_output();
+        QIOChannelBuffer *bioc = whole ?: qio_channel_buffer_new(160 * MiB);
         f = qemu_file_new_output(QIO_CHANNEL(bioc));
         ret = qemu_savevm_state(f, errp);
         ret2 = ret < 0 ? 0 : qemu_fflush(f);
@@ -3374,7 +3433,11 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
         } else if (ret >= 0) {
             error_setg_errno(errp, -ret2, "Error while writing VM state");
         }
+        whole_buf_release(whole);
         qemu_fclose(f);
+        if (!whole) {
+            object_unref(OBJECT(bioc));
+        }
     }
 #else
     f = qemu_fopen_bdrv(bs, 1);
@@ -3501,6 +3564,9 @@ bool load_snapshot(const char *name, const char *vmstate,
     QEMUFile *f;
     int ret;
     MigrationIncomingState *mis = migration_incoming_get_current();
+#ifdef XBOX
+    QIOChannelBuffer *whole = NULL;
+#endif
 
     if (!migrate_can_snapshot(errp)) {
         return false;
@@ -3551,7 +3617,7 @@ bool load_snapshot(const char *name, const char *vmstate,
 
     /* restore the VM state */
 #ifdef XBOX
-    f = qemu_fopen_bdrv_whole(bs_vm_state, sn.vm_state_size, errp);
+    f = qemu_fopen_bdrv_whole(bs_vm_state, sn.vm_state_size, &whole, errp);
     if (!f) {
         goto err_drain;
     }
@@ -3579,6 +3645,9 @@ bool load_snapshot(const char *name, const char *vmstate,
     xemu_events_load_source(XEMU_LOAD_SOURCE_LOADVM, name);
 #endif
     ret = qemu_loadvm_state(f, errp);
+#ifdef XBOX
+    whole_buf_release(g_steal_pointer(&whole));
+#endif
     migration_incoming_state_destroy();
 
     bdrv_drain_all_end();
@@ -3590,6 +3659,9 @@ bool load_snapshot(const char *name, const char *vmstate,
     return true;
 
 err_drain:
+#ifdef XBOX
+    whole_buf_release(whole);
+#endif
     bdrv_drain_all_end();
     return false;
 }

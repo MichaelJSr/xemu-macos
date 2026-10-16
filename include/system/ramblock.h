@@ -89,7 +89,22 @@ struct RAMBlock {
      * could not have been valid on the source.
      */
     ram_addr_t postcopy_length;
+
+    /*
+     * xemu: every byte is zero because nothing maps the block, so loads,
+     * saves and checkpoints take its pages as zero pages without reading
+     * them (on macOS a read of an untouched page faults in a real one).
+     * The machine sets it for a block it never maps (the Xbox's unused
+     * pc.ram); data loaded into the block clears it for good. Test it
+     * with qemu_ram_xemu_zero().
+     */
+    bool xemu_zero;
 };
+
+static inline bool qemu_ram_xemu_zero(RAMBlock *rb)
+{
+    return rb->xemu_zero && !memory_region_is_mapped(rb->mr);
+}
 
 struct RamBlockAttributes {
     Object parent;
