@@ -343,3 +343,51 @@
 { 'event': 'XEMU_DEVICE_LOST',
   'data': { 'reason': 'XemuDeviceLostReason', '*where': 'str',
             'vk-result': 'int' } }
+
+##
+# Strict CPUID
+# ============
+##
+
+##
+# @XemuCpuidFeature:
+#
+# A CPUID feature an instruction needs.
+#
+# @mmx: MMX
+#
+# @sse: SSE
+#
+# @sse2: SSE2
+#
+# @sse3: SSE3
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuCpuidFeature',
+  'data': [ 'mmx', 'sse', 'sse2', 'sse3' ] }
+
+##
+# @XEMU_CPUID_FAULT:
+#
+# Emitted when xemu runs with XEMU_STRICT_CPUID=1 and the guest
+# executes an instruction its CPU model lacks (on the Xbox's
+# pentium3: any SSE2 or SSE3 instruction), just before the
+# instruction raises #UD, with the stderr line "xemu: strict CPUID:
+# #UD at ...".  Reported for the first 32 such faults of a launch;
+# later ones still raise #UD.
+#
+# @pc: linear address of the instruction (CS base plus EIP)
+#
+# @feature: what it needs
+#
+# @opcode: its SSE prefix, escape and opcode bytes and ModRM byte, in
+#     hex ("F2 0F 58 C1" for addsd xmm0, xmm1)
+#
+# @count: strict-CPUID faults since launch, this one included
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_CPUID_FAULT',
+  'data': { 'pc': 'int', 'feature': 'XemuCpuidFeature', 'opcode': 'str',
+            'count': 'int' } }

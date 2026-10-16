@@ -221,6 +221,8 @@ typedef struct DisasContext {
     TCGv_i32 xemu_fdp_sel;
     target_ulong xemu_fip_pc;   /* pc of the insn whose FIP is deferred */
     int xemu_fds_seg;           /* segment env->fpds was last stored from */
+    bool xemu_strict_cpuid;     /* XEMU_STRICT_CPUID (xemu-strict-cpuid.c.inc) */
+    uint8_t xemu_esc;           /* opcode map: 0, 0x0f, 0x38 or 0x3a */
 #endif
     bool cc_op_dirty;
 
@@ -2064,6 +2066,7 @@ extern uint64_t xemu_xpage_emitted;
 #endif
 
 #include "xemu-x87.h"
+#include "xemu-strict-cpuid.h"
 
 static void gen_flcr(DisasContext *s)
 {
@@ -5971,6 +5974,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->xemu_fip_pend = false;
     dc->xemu_fdp_pend = false;
     dc->xemu_fds_seg = -1;
+    dc->xemu_strict_cpuid = xemu_strict_cpuid_enabled();
 #endif
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));

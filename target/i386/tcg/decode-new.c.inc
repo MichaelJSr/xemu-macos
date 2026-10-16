@@ -804,6 +804,9 @@ static const X86OpEntry opcodes_0F38_F0toFF[16][5] = {
 
 static void decode_0F38(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
 {
+#if defined(XBOX)
+    s->xemu_esc = 0x38;
+#endif
     *b = x86_ldub_code(env, s);
     if (*b < 0xf0) {
         *entry = opcodes_0F38_00toEF[*b];
@@ -900,6 +903,9 @@ static const X86OpEntry opcodes_0F3A[256] = {
 
 static void decode_0F3A(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
 {
+#if defined(XBOX)
+    s->xemu_esc = 0x3a;
+#endif
     *b = x86_ldub_code(env, s);
     *entry = opcodes_0F3A[*b];
 }
@@ -1437,6 +1443,9 @@ static void do_decode_0F(DisasContext *s, CPUX86State *env, X86OpEntry *entry, u
 
 static void decode_0F(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
 {
+#if defined(XBOX)
+    s->xemu_esc = 0x0f;
+#endif
     *b = x86_ldub_code(env, s);
     do_decode_0F(s, env, entry, b);
 }
@@ -2522,6 +2531,10 @@ illegal:
     return false;
 }
 
+#if defined(XBOX)
+#include "xemu-strict-cpuid.c.inc"
+#endif
+
 /*
  * Convert one instruction. s->base.is_jmp is set if the translation must
  * be stopped.
@@ -2548,6 +2561,9 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     s->vex_w = false;
     s->has_modrm = false;
     s->prefix = 0;
+#if defined(XBOX)
+    s->xemu_esc = 0;
+#endif
 
  next_byte:;
 #ifdef TARGET_X86_64
@@ -2722,6 +2738,11 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     if (!has_cpuid_feature(s, decode.e.cpuid)) {
         goto illegal_op;
     }
+#if defined(XBOX)
+    if (unlikely(s->xemu_strict_cpuid) && xemu_strict_cpuid_fault(s, &decode)) {
+        return;
+    }
+#endif
 
     /* Checks that result in #UD come first.  */
     if (decode.e.check) {

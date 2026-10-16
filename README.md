@@ -270,6 +270,21 @@ Other automation interfaces (windowed or headless):
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the
   date the snapshot saved, with no wall time added.
+- **Strict CPUID**: QEMU's decoder raises #UD for a missing CPUID
+  feature only on instructions whose table entry names one, so on the
+  Xbox's `pentium3` (MMX and SSE, no SSE2) every SSE2 instruction but
+  MFENCE and MOVNTI runs, as do SSE3's FISTTP and LFENCE, and code built
+  for a later CPU works here but faults on a real Xbox.
+  `XEMU_STRICT_CPUID=1` makes them raise #UD as the CPU model would (the
+  legacy SSE/SSE2/SSE3/MMX opcodes by prefix, FISTTP and LFENCE; the
+  inline x87 and host SSE fast paths sit behind the same decoder). Each
+  fault prints `xemu: strict CPUID: #UD at <linear pc>: F2 0F 58 C1
+  needs SSE2` and sends QMP `XEMU_CPUID_FAULT {pc, feature, opcode,
+  count}` before the guest's #UD handler runs (the first 32 per launch;
+  the Xbox kernel's handler usually bugchecks next). Off by default,
+  where translation is unchanged. Retail Azurik and the cold boot never
+  trip it (the deterministic goldens match with it on), and it is
+  deterministic under icount.
 - **Deterministic fast-forward**: add
   `-icount shift=2,align=off,sleep=off` (with `XEMU_HEADLESS=null`).
   Guest time then follows executed instructions, not the host clock, and
