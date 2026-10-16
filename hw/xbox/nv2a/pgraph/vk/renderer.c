@@ -19,6 +19,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "exec/icount.h"
+#include "system/runstate.h"
 #include "renderer.h"
 
 #include "gloffscreen.h"
@@ -180,9 +181,22 @@ static void pgraph_vk_sync(NV2AState *d)
                       r->display.pending_real_texture != NULL;
 #endif
 
-    /* Under icount a screendump (taken paused) shows the current frame. */
-    if (elapsed >= min_sync_interval_ns || has_interp_work ||
-        icount_enabled()) {
+    /*
+     * Under icount a screendump (taken paused) shows the current frame.
+     * While the VM runs with the push ring on, the window keeps the frames
+     * flips publish: a render here would finish the frame's command buffer
+     * at a point the UI thread picks, and report sums can depend on where
+     * it splits (windowed icount azurik-heavy-w2 ended on a second RAM hash
+     * in 2 of 16 paced runs).
+     */
+    bool keep_flip_frames = false;
+#if HAVE_IOSURFACE_SHARING
+    keep_flip_frames = icount_enabled() && runstate_is_running() &&
+                       pgraph_vk_push_present_enabled(d);
+#endif
+    if (!keep_flip_frames &&
+        (elapsed >= min_sync_interval_ns || has_interp_work ||
+         icount_enabled())) {
         pgraph_vk_render_display(pg);
         if (elapsed >= min_sync_interval_ns) {
             last_sync_time_ns = now;
