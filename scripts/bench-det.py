@@ -39,8 +39,9 @@ walks the menus with frame-tagged input (START until the list opens, then
 with no debugger and print, per phase, guest frames, host ms and where
 the host time went. Every timing pass must end on the marker pass's RAM,
 or its phases aren't the same frames. --renderer offscreen runs Vulkan on
-a portable clone of APP (cold caches). Example:
-bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
+a portable clone of APP (cold caches); --hdd-io runs qemu-io commands on
+the scratch HDD first ("write -z 0x800 0x200": the game rebuilds its HDD
+cache). Example: bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
 """
 import argparse, contextlib, ctypes, ctypes.util, hashlib, importlib.util, json, os, re
 import shutil
@@ -338,6 +339,8 @@ def tl_launch(app, env, a, d, gdb, stack):
     wait_log(log, 'xemu: ready', 1, proc)
     q = QMP(sock, proc)
     q.cmd('stop')
+    for c in a.hdd_io:   # on the scratch clone, before power-on
+        q.cmd('human-monitor-command', **{'command-line': f'qemu-io ide0-hd0 "{c}"'})
     return proc, q, fifo, log
 
 
@@ -400,7 +403,7 @@ def tl_markers(app, env, a, va):
                     stage = 'prophecy-start'
                 elif stage == 'prophecy-start' and eip == va['prophecy']:
                     mark('prophecy-start'); arm(va['prophecy'], False); arm(va['prophecy_end'])
-                    stage, due = 'prophecy-end', (frame + 2, 'start')
+                    stage, due = 'prophecy-end', None if a.watch_movie else (frame + 2, 'start')
                 elif stage == 'prophecy-end' and eip == va['prophecy_end']:
                     mark('prophecy-end'); arm(va['prophecy_end'], False); arm(va['inv_reset'])
                     stage, due = 'title', None
@@ -644,8 +647,14 @@ def main():
     t.add_argument('--route', default='a',
                    help='save-list presses, comma-separated (dpad_left,a: new game)')
     t.add_argument('--steady', type=int, default=120, help='player ticks after the first')
+    t.add_argument('--watch-movie', action='store_true',
+                   help="don't press START to skip prophecy.bik (times Bink decoding)")
     t.add_argument('--title-every', type=int, default=30, help='frames between STARTs at the title')
     t.add_argument('--phase-frames', type=int, default=6000, help='frames a phase may take')
+    t.add_argument('--hdd-io', action='append', default=[],
+                   help='qemu-io command on the scratch HDD before power-on; '
+                        '"write -z 0x800 0x200" empties the cache-partition table, '
+                        'so the game copies its HDD cache again')
     t.add_argument('--va', action='append', default=[],
                    help='NAME=ADDR override: ' + ', '.join(TL_VAS) + ', xbe_entry')
     p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')

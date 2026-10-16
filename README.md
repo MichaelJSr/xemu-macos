@@ -713,7 +713,19 @@ Other automation interfaces (windowed or headless):
   frames in every arm. `--renderer offscreen` times Vulkan on a
   portable clone (cold shader caches); `--route dpad_left,a` starts a
   new game instead of loading the save under the cursor; `--dvd` boots
-  another disc (`--va` moves the event addresses for another release).
+  another disc (`--va` moves the event addresses for another release);
+  `--hdd-io "write -z 0x800 0x200"` empties the scratch HDD's
+  cache-partition table first, so the game formats a cache partition
+  and copies its files to it again (writes, qcow2 growth), and
+  `--hdd-io "reopen -o lazy-refcounts=on"` drops the qcow2's own
+  ordering flushes while it allocates (a fifth of that boot's host time;
+  QMP `human-monitor-command` `qemu-io ide0-hd0 "reopen -o
+  lazy-refcounts=on"` before power-on does the same for any scratch
+  image, which a killed xemu leaves marked dirty and the next open
+  repairs);
+  `--watch-movie` lets prophecy.bik play instead of skipping it with
+  START (the fixture's disc ends it at once; the retail disc plays 5,542
+  frames).
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once with status 1 (a windowed one aborts
