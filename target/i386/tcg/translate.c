@@ -3199,13 +3199,15 @@ static TCGv_f64 x87_wt_arith(int op, TCGv_f64 a, TCGv_f64 b)
     return r;
 }
 
-/* fpus C3/C2/C0 from a compare's ZF|PF|CF (tcg_gen_com_f64). */
+/*
+ * fpus C3/C2/C0 from a compare's ZF|PF|CF in their fpus places
+ * (tcg_gen_com_sh_f64 by 8: ZF, PF, CF at 6, 2, 0 become C3, C2, C0 at
+ * 14, 10, 8); C1 and the rest stay.
+ */
 static void x87_wt_fpus_cc(TCGv_i64 res)
 {
     TCGv_i64 fpus = tcg_temp_new_i64();
 
-    tcg_gen_andi_i64(res, res, 0x45);   /* ZF|PF|CF = C3|C2|C0 at 6,2,0 */
-    tcg_gen_shli_i64(res, res, 8);
     tcg_gen_ld16u_i64(fpus, tcg_env, offsetof(CPUX86State, fpus));
     tcg_gen_andi_i64(fpus, fpus, ~0x4500);
     tcg_gen_or_i64(fpus, fpus, res);
@@ -3217,7 +3219,7 @@ static void x87_wt_fcom(TCGv_f64 a, TCGv_f64 b)
 {
     TCGv_i64 res = tcg_temp_new_i64();
 
-    tcg_gen_com_f64(res, a, b);
+    tcg_gen_com_sh_f64(res, a, b, 8);
     x87_wt_fpus_cc(res);
 }
 
@@ -3232,7 +3234,8 @@ static void x87_wt_fcom(TCGv_f64 a, TCGv_f64 b)
  * inline only when both images are st80f of their doubles (x87_wt_exact):
  * a register read from env may hold bits a double has not.
  */
-static TCGv_i64 x87_wt_com_st(DisasContext *s, int i, bool quiet)
+static TCGv_i64 x87_wt_com_st(DisasContext *s, int i, bool quiet,
+                              unsigned sh)
 {
     TCGv_i64 res;
 
@@ -3247,14 +3250,14 @@ static TCGv_i64 x87_wt_com_st(DisasContext *s, int i, bool quiet)
         xemu_gen_counter_inc(&xemu_x87_wt_cmp_inline);
     }
     res = tcg_temp_new_i64();
-    tcg_gen_com_f64(res, x87_wt_get_st(s, 0), x87_wt_get_st(s, i));
+    tcg_gen_com_sh_f64(res, x87_wt_get_st(s, 0), x87_wt_get_st(s, i), sh);
     return res;
 }
 
 /* fucom/fucomp/fucompp: false if the helper must run. */
 static bool gen_fucom_wt(DisasContext *s, int i)
 {
-    TCGv_i64 res = x87_wt_com_st(s, i, true);
+    TCGv_i64 res = x87_wt_com_st(s, i, true, 8);
 
     if (!res) {
         return false;
@@ -3270,7 +3273,7 @@ static bool gen_fucom_wt(DisasContext *s, int i)
  */
 static bool gen_fcomi_wt(DisasContext *s, int i, bool quiet)
 {
-    TCGv_i64 res = x87_wt_com_st(s, i, quiet);
+    TCGv_i64 res = x87_wt_com_st(s, i, quiet, 0);
     TCGv t;
 
     if (!res) {
@@ -4128,36 +4131,41 @@ static void gen_fcom_ST0_FT0(DisasContext *s)
  */
 static bool gen_fcmov_wt(DisasContext *s, int b, int opreg)
 {
-    TCGv c;
+    CCPrepare cc;
+    TCGv c2;
     TCGLabel *l1;
 
     if (!x87_wt(s)) {
         return false;
     }
-    /* First, so that a flushing call in it cannot outdate the check. */
-    c = tcg_temp_new();
-    gen_setcc(s, b, c);
+    /*
+     * First, so that a flushing call in it cannot outdate the check. The
+     * condition is used as prepared (after fucomi: TSTNE on CC_SRC),
+     * without a setcond; no_setcond values are 0 or 1, so comparing them
+     * with 0 under their condition is what gen_setcc computes.
+     */
+    cc = gen_prepare_cc(s, b, NULL);
+    c2 = cc.use_reg2 ? cc.reg2 : tcg_constant_tl(cc.imm);
     if (x87_wt_exact(s, 0) && x87_wt_exact(s, opreg)) {
-        TCGv_i64 c64 = tcg_temp_new_i64();
-        TCGv_i64 keep = tcg_temp_new_i64();
-        TCGv_i64 mov = tcg_temp_new_i64();
+        TCGv_f64 r = tcg_temp_new_f64();
 
         if (unlikely(xemu_x87_census_on())) {
             xemu_gen_counter_inc(&xemu_x87_wt_fcmov_inline);
         }
-        tcg_gen_extu_tl_i64(c64, c);
-        tcg_gen_mov64f_i64(keep, x87_wt_get_st(s, 0));
-        tcg_gen_mov64f_i64(mov, x87_wt_get_st(s, opreg));
-        tcg_gen_movcond_i64(TCG_COND_NE, keep, c64, tcg_constant_i64(0),
-                            keep, mov);
-        x87_wt_set_st(s, 0, x87_wt_from_bits(keep));
+        tcg_gen_movcond_tl_f64(cc.cond, r, cc.reg, c2,
+                               x87_wt_get_st(s, 0), x87_wt_get_st(s, opreg));
+        x87_wt_set_st(s, 0, r);
         return true;
     }
     if (unlikely(xemu_x87_census_on())) {
         xemu_gen_counter_inc(&xemu_x87_wt_fcmov_branch);
     }
     l1 = gen_new_label();
-    tcg_gen_brcondi_tl(TCG_COND_NE, c, 0, l1);
+    if (cc.cond == TCG_COND_ALWAYS) {
+        tcg_gen_br(l1);
+    } else if (cc.cond != TCG_COND_NEVER) {
+        tcg_gen_brcond_tl(cc.cond, cc.reg, c2, l1);
+    }
     gen_fmov_ST0_STN(s, opreg);
     gen_set_label(l1);
     return true;

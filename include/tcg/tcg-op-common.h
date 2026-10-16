@@ -610,6 +610,8 @@ void tcg_gen_chs_f32(TCGv_f32 ret, TCGv_f32 src);
 void tcg_gen_chs_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_com_f32(TCGv_i64 ret, TCGv_f32 arg1, TCGv_f32 arg2);
 void tcg_gen_com_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2);
+void tcg_gen_com_sh_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2,
+                        unsigned sh);
 void tcg_gen_cos_f32(TCGv_f32 ret, TCGv_f32 arg);
 void tcg_gen_cos_f64(TCGv_f64 ret, TCGv_f64 arg);
 void tcg_gen_cvt32f_f64(TCGv_f64 ret, TCGv_f32 arg);
@@ -628,6 +630,10 @@ void tcg_gen_mov32f_i32(TCGv_i32 ret, TCGv_f32 src);
 void tcg_gen_mov32i_f32(TCGv_f32 ret, TCGv_i32 arg);
 void tcg_gen_mov64f_i64(TCGv_i64 ret, TCGv_f64 src);
 void tcg_gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg);
+void tcg_gen_movcond_i32_f64(TCGCond cond, TCGv_f64 ret, TCGv_i32 c1,
+                             TCGv_i32 c2, TCGv_f64 v1, TCGv_f64 v2);
+void tcg_gen_movcond_i64_f64(TCGCond cond, TCGv_f64 ret, TCGv_i64 c1,
+                             TCGv_i64 c2, TCGv_f64 v1, TCGv_f64 v2);
 void tcg_gen_mov_f32(TCGv_f32 ret, TCGv_f32 src);
 void tcg_gen_mov_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_mul_f32(TCGv_f32 ret, TCGv_f32 arg1, TCGv_f32 arg2);

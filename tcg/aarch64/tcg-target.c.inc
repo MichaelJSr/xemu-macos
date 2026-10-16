@@ -685,9 +685,10 @@ typedef enum {
     INSN_FCVT_SD    = 0x1e624000, /* double -> single */
     INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
 
-    /* Scalar FP compare. */
+    /* Scalar FP compare and select. */
     INSN_FCMP_S     = 0x1e202000,
     INSN_FCMP_D     = 0x1e602000,
+    INSN_FCSEL_D    = 0x1e600c00,
 
     /* FP <-> GPR moves. */
     INSN_FMOV_SW    = 0x1e270000,
@@ -4391,34 +4392,42 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         break;
 
     OP_f32_f64(com): {
-        /* Quiet FCMP sets NZCV. Map it to x86 EFLAGS: CF=N|V, PF=V, ZF=Z|V. */
+        /*
+         * Quiet FCMP sets NZCV to exactly one of: less N, equal ZC,
+         * greater C, unordered CV. x86 wants CF for less, ZF for equal,
+         * ZF|PF|CF for unordered, nothing for greater: select those as
+         * constants on MI, EQ and VS (shifted by args[3], 0 or 8, which
+         * places them as the x87 C0, C3 and C3|C2|C0).
+         */
+        unsigned sh = args[3];
+
         tcg_out32(s, (dp ? INSN_FCMP_D : INSN_FCMP_S)
                   | (((a2 - 32) & 0x1f) << 16) | (((a1 - 32) & 0x1f) << 5));
-        tcg_out32(s, INSN_MRS_NZCV | (TCG_REG_TMP0 & 0x1f));
-        /* V (bit 28) */
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP1, TCG_REG_TMP0, 28, 28);
-        /* a0 = V | (V << 2): CF at bit 0, PF at bit 2 */
-        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                     a0, TCG_REG_TMP1, TCG_REG_TMP1, 2);
-        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32, a0, a0, TCG_REG_TMP1);
-        /* N (bit 31) → OR into bit 0 for CF = N|V */
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP1, TCG_REG_TMP0, 31, 31);
-        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32, a0, a0, TCG_REG_TMP1);
-        /* Z (bit 30) */
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP1, TCG_REG_TMP0, 30, 30);
-        /* V (bit 28) again */
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP0, TCG_REG_TMP0, 28, 28);
-        tcg_out_insn(s, 3510, ORR, TCG_TYPE_I32,
-                     TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0);
-        /* a0 |= (Z|V) << 6 → ZF at bit 6 */
-        tcg_out_insn(s, 3502S, ADD_LSL, TCG_TYPE_I32,
-                     a0, a0, TCG_REG_TMP1, 6);
+        if (sh == 0) {
+            /* CSINC a0, wzr, wzr, PL: 1 on MI */
+            tcg_out32(s, I3506_CSINC | TCG_REG_XZR << 16 | COND_PL << 12
+                      | TCG_REG_XZR << 5 | a0);
+        } else {
+            tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP0, 0x01 << sh);
+            tcg_out32(s, I3506_CSEL | TCG_REG_XZR << 16 | COND_MI << 12
+                      | TCG_REG_TMP0 << 5 | a0);
+        }
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP0, 0x40 << sh);
+        tcg_out32(s, I3506_CSEL | a0 << 16 | COND_EQ << 12
+                  | TCG_REG_TMP0 << 5 | a0);
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP0, 0x45 << sh);
+        tcg_out32(s, I3506_CSEL | a0 << 16 | COND_VS << 12
+                  | TCG_REG_TMP0 << 5 | a0);
         break;
     }
+
+    case INDEX_op_movcond_f64:
+        /* a0 = cond(a1, a2) ? args[3] : args[4], doubles */
+        tcg_out_cmp(s, type, args[5], a1, a2, const_args[2]);
+        tcg_out32(s, INSN_FCSEL_D | ((args[4] - 32) & 0x1f) << 16
+                  | tcg_cond_to_aarch64[args[5]] << 12
+                  | ((args[3] - 32) & 0x1f) << 5 | ((a0 - 32) & 0x1f));
+        break;
 
     OP_f32_f64(cvt32i):
         tcg_out32(s, (dp ? INSN_SCVTF_DW : INSN_SCVTF_SW)
@@ -5032,6 +5041,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
         return C_O1_I2(r, W, W);
+    case INDEX_op_movcond_f64:
+        return C_O1_I4(W, r, rC, W, W);
 
     default:
         return C_NotImplemented;

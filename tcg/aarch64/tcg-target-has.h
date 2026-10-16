@@ -82,6 +82,8 @@
 #define TCG_TARGET_HAS_ld80d            TCG_TARGET_HAS_fpu
 /* FRINTX Dd, Dn */
 #define TCG_TARGET_HAS_rint_f64         TCG_TARGET_HAS_fpu
+/* CMP or TST, FCSEL Dd, Dn, Dm, cond */
+#define TCG_TARGET_HAS_movcond_f64      TCG_TARGET_HAS_fpu
 
 /*
  * tcg_pin_env_global: x8-x15 and x24-x27, call-clobbered and call-saved

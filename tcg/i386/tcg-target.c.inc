@@ -3223,6 +3223,11 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_modrm(s, dp ? OPC_COMISD : OPC_COMISS, a1, a2);
         tcg_out8(s, OPC_PUSHF);
         tcg_out_pop(s, a0);
+        /* ZF|PF|CF only, shifted by args[3] (0 or 8) */
+        tgen_arithi(s, ARITH_AND, a0, 0x45, 0);
+        if (args[3]) {
+            tcg_out_shifti(s, SHIFT_SHL, a0, args[3]);
+        }
         break;
     OP_f32_f64(sqrt):
         tcg_out_modrm(s, dp ? OPC_SQRTSD : OPC_SQRTSS, a0, a1);

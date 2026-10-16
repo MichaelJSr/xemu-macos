@@ -161,14 +161,25 @@ void tcg_gen_chs_f64(TCGv_f64 ret, TCGv_f64 src)
 
 void tcg_gen_com_f32(TCGv_i64 ret, TCGv_f32 arg1, TCGv_f32 arg2)
 {
-    tcg_gen_op3(INDEX_op_com_f32, TCG_TYPE_I64,
-                tcgv_i64_arg(ret), tcgv_f32_arg(arg1), tcgv_f32_arg(arg2));
+    tcg_gen_op4(INDEX_op_com_f32, TCG_TYPE_I64,
+                tcgv_i64_arg(ret), tcgv_f32_arg(arg1), tcgv_f32_arg(arg2), 0);
 }
 
 void tcg_gen_com_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
 {
-    tcg_gen_op3(INDEX_op_com_f64, TCG_TYPE_I64,
-                tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
+    tcg_gen_com_sh_f64(ret, arg1, arg2, 0);
+}
+
+/*
+ * x86 ZF|PF|CF (0x40/0x04/0x01; unordered sets all three) of arg1 against
+ * arg2, shifted left by sh: 0 for EFLAGS, 8 for the x87 C3/C2/C0 in fpus.
+ */
+void tcg_gen_com_sh_f64(TCGv_i64 ret, TCGv_f64 arg1, TCGv_f64 arg2,
+                        unsigned sh)
+{
+    tcg_debug_assert(sh == 0 || sh == 8);
+    tcg_gen_op4(INDEX_op_com_f64, TCG_TYPE_I64,
+                tcgv_i64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2), sh);
 }
 
 void tcg_gen_cos_f32(TCGv_f32 ret, TCGv_f32 arg)
@@ -261,6 +272,77 @@ void tcg_gen_mov64f_i64(TCGv_i64 ret, TCGv_f64 src)
 void tcg_gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg)
 {
     tcg_gen_op2(INDEX_op_mov64i_f64, TCG_TYPE_F64, tcgv_f64_arg(ret), tcgv_i64_arg(arg));
+}
+
+/*
+ * ret = cond(c1, c2) ? v1 : v2 on doubles, compared in type (one FCSEL
+ * after the compare on aarch64). Elsewhere the doubles go through GPRs.
+ */
+static void tcg_gen_movcond_f64_int(TCGCond cond, TCGType type, TCGv_f64 ret,
+                                    TCGArg c1, TCGArg c2,
+                                    TCGv_f64 v1, TCGv_f64 v2)
+{
+    if (TCG_TARGET_HAS_movcond_f64) {
+        tcg_gen_op6(INDEX_op_movcond_f64, type, tcgv_f64_arg(ret), c1, c2,
+                    tcgv_f64_arg(v1), tcgv_f64_arg(v2), cond);
+    } else {
+        TCGv_i64 a = tcg_temp_ebb_new_i64();
+        TCGv_i64 b = tcg_temp_ebb_new_i64();
+
+        tcg_gen_mov64f_i64(a, v1);
+        tcg_gen_mov64f_i64(b, v2);
+        if (type == TCG_TYPE_I32) {
+            TCGv_i32 t = tcg_temp_ebb_new_i32();
+            TCGv_i64 t64 = tcg_temp_ebb_new_i64();
+
+            tcg_gen_op4(INDEX_op_setcond, TCG_TYPE_I32, tcgv_i32_arg(t),
+                        c1, c2, cond);
+            tcg_gen_extu_i32_i64(t64, t);
+            tcg_gen_movcond_i64(TCG_COND_NE, a, t64, tcg_constant_i64(0),
+                                a, b);
+            tcg_temp_free_i32(t);
+            tcg_temp_free_i64(t64);
+        } else {
+            tcg_gen_op6(INDEX_op_movcond, TCG_TYPE_I64, tcgv_i64_arg(a),
+                        c1, c2, tcgv_i64_arg(a), tcgv_i64_arg(b), cond);
+        }
+        tcg_gen_mov64i_f64(ret, a);
+        tcg_temp_free_i64(a);
+        tcg_temp_free_i64(b);
+    }
+}
+
+/*
+ * ALWAYS and NEVER are plain moves. Their compare operands may be NULL (a
+ * CCPrepare for a constant condition has no reg), so decide them before
+ * anything converts c1 and c2 to args: a debug build asserts on NULL.
+ */
+static bool tcg_gen_movcond_f64_const(TCGCond cond, TCGv_f64 ret,
+                                      TCGv_f64 v1, TCGv_f64 v2)
+{
+    if (cond == TCG_COND_ALWAYS || cond == TCG_COND_NEVER) {
+        tcg_gen_mov_f64(ret, cond == TCG_COND_ALWAYS ? v1 : v2);
+        return true;
+    }
+    return false;
+}
+
+void tcg_gen_movcond_i32_f64(TCGCond cond, TCGv_f64 ret, TCGv_i32 c1,
+                             TCGv_i32 c2, TCGv_f64 v1, TCGv_f64 v2)
+{
+    if (!tcg_gen_movcond_f64_const(cond, ret, v1, v2)) {
+        tcg_gen_movcond_f64_int(cond, TCG_TYPE_I32, ret, tcgv_i32_arg(c1),
+                                tcgv_i32_arg(c2), v1, v2);
+    }
+}
+
+void tcg_gen_movcond_i64_f64(TCGCond cond, TCGv_f64 ret, TCGv_i64 c1,
+                             TCGv_i64 c2, TCGv_f64 v1, TCGv_f64 v2)
+{
+    if (!tcg_gen_movcond_f64_const(cond, ret, v1, v2)) {
+        tcg_gen_movcond_f64_int(cond, TCG_TYPE_I64, ret, tcgv_i64_arg(c1),
+                                tcgv_i64_arg(c2), v1, v2);
+    }
 }
 
 void tcg_gen_mov_f32(TCGv_f32 ret, TCGv_f32 src)

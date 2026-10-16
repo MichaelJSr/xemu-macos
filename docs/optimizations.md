@@ -522,7 +522,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   the next insn instead of calling the helper and taking the probe; the
   helper and the probe remain only for words that change those
   (2026-10-15, det heavy-f1 −1.2% Minsns/frame, −4.2% Mcycles/frame
-  paired median, x87 lane).
+  paired median, x87 lane). The compares and `fcmov` got shorter
+  (2026-10-16): `com` reads the FCMP result with three CSELs on MI, EQ
+  and VS instead of MRS NZCV and ten ALU ops, and can place ZF/PF/CF
+  straight as the x87 C3/C2/C0 (a shift operand, 8 for fpus), so
+  `fcom*`/`fucom*` merge them into fpus without the AND and LSL;
+  `fcmov` is the new `movcond_f64` op on the prepared condition (after
+  `fucomi`: TST of CC_SRC, then FCSEL; other hosts expand it through
+  GPRs) instead of SETCOND plus four FMOVs and a CSEL. A memory `fcomp`
+  went from 20 host insns to 12 after the load, `fucomi` from 12 to 6
+  plus the EFLAGS merge, `fcmov` from 7-8 to 2-3. Census counts
+  (`XEMU_X87_CENSUS`) unchanged. Cross-binary det A/B against the
+  ret-memo commit, 4 pairs each at load 26-29: heavy-f1 Minsns/frame
+  −1.46% (4/4), stream-e2 −1.69% (4/4); Mcycles/frame within that
+  run's load noise (+2.9% and −1.9%, 3/4 and 2/4).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control

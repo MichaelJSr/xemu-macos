@@ -2843,6 +2843,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_ld80d;
     case INDEX_op_rint_f64:
         return TCG_TARGET_HAS_rint_f64;
+    case INDEX_op_movcond_f64:
+        return TCG_TARGET_HAS_movcond_f64;
 
     default:
         if (op < INDEX_op_last_generic) {
@@ -3315,6 +3317,7 @@ void tcg_dump_ops(TCGContext *s, FILE *f, bool have_prefs)
             case INDEX_op_setcond:
             case INDEX_op_negsetcond:
             case INDEX_op_movcond:
+            case INDEX_op_movcond_f64:
             case INDEX_op_brcond2_i32:
             case INDEX_op_setcond2_i32:
             case INDEX_op_cmp_vec:
@@ -5783,6 +5786,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
         op_cond = op->args[4];
         break;
     case INDEX_op_movcond:
+    case INDEX_op_movcond_f64:
     case INDEX_op_setcond2_i32:
     case INDEX_op_cmpsel_vec:
         op_cond = op->args[5];
