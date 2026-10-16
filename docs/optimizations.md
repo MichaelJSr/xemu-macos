@@ -601,6 +601,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   the pinned registers; 1800 frames, 6 pairs, load 19-24): Minsns/frame
   −10.4% (6/6), Mcycles/frame
   −17.8% (6/6). heavy-f1, stream-e2 and the movie anchor run no MMX.
+  The MMX `punpck{l,h}{bw,wd,dq}` and `pmulhw` then became i64 TCG ops
+  (shift/deposit; sign-extract, multiply, deposit), which leaves the
+  loop helper-free: Minsns/frame −2.6% more (12/12), Mcycles/frame
+  flat (7/12).
 - **TB-dispatch inline probes (+1.5 fps family, 2026-07-05).** The
   first guest-side profile (`XEMU_GUEST_PROF`: mach-thread sampler +
   per-exit-kind TB-lookup census; the census was removed 2026-10-15,

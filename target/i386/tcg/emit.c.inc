@@ -930,6 +930,90 @@ static inline void gen_binary_int_sse(DisasContext *s, X86DecodedInsn *decode,
     }
 }
 
+#if defined(XBOX)
+typedef void (*XemuGenMMX)(TCGv_i64 r, TCGv_i64 a, TCGv_i64 b);
+
+/*
+ * xemu: MMX (no prefix) unpacks and PMULHW as i64 ops on the registers'
+ * env images, bit for bit the ops_sse.h _mmx helpers (r = op(a, b), a the
+ * destination's old value and b the source, as the helpers' v and s).
+ * Azurik's boot-video YUV-to-RGB loop runs 11 of them per 8 pixels; a
+ * helper call costs more than the ops, and makes TCG write back and
+ * reload the guest registers around it.
+ */
+static bool gen_mmx_inline(DisasContext *s, X86DecodedInsn *decode,
+                           XemuGenMMX fn)
+{
+    TCGv_i64 a, b, r;
+
+    if (s->prefix & (PREFIX_DATA | PREFIX_VEX)) {
+        return false;
+    }
+    a = tcg_temp_new_i64();
+    b = tcg_temp_new_i64();
+    r = tcg_temp_new_i64();
+    tcg_gen_ld_i64(a, tcg_env, vector_reg_offset(&decode->op[1]));
+    /* A memory operand is in mmx_t0 already (gen_load). */
+    tcg_gen_ld_i64(b, tcg_env, vector_reg_offset(&decode->op[2]));
+    fn(r, a, b);
+    tcg_gen_st_i64(r, tcg_env, vector_reg_offset(&decode->op[0]));
+    return true;
+}
+
+/*
+ * punpck{l,h}{bw,wd,dq}: interleave the low (base 0) or high (base 32)
+ * halves' lanes of width 8 << ot, a's lane first.
+ */
+static void gen_mmx_unpck(TCGv_i64 r, TCGv_i64 a, TCGv_i64 b, MemOp ot,
+                          int base)
+{
+    int w = 8 << ot;
+    TCGv_i64 t = tcg_temp_new_i64();
+
+    tcg_gen_shri_i64(r, a, base);
+    for (int i = 0; i < 32 / w; i++) {
+        if (i) {
+            tcg_gen_shri_i64(t, a, base + i * w);
+            tcg_gen_deposit_i64(r, r, t, 2 * i * w, w);
+        }
+        tcg_gen_shri_i64(t, b, base + i * w);
+        tcg_gen_deposit_i64(r, r, t, (2 * i + 1) * w, w);
+    }
+}
+
+#define XEMU_MMX_UNPCK(lname, ot, base)                                            \
+static void gen_mmx_##lname(TCGv_i64 r, TCGv_i64 a, TCGv_i64 b)                    \
+{                                                                                  \
+    gen_mmx_unpck(r, a, b, ot, base);                                              \
+}
+XEMU_MMX_UNPCK(punpcklbw, MO_8, 0)
+XEMU_MMX_UNPCK(punpcklwd, MO_16, 0)
+XEMU_MMX_UNPCK(punpckldq, MO_32, 0)
+XEMU_MMX_UNPCK(punpckhbw, MO_8, 32)
+XEMU_MMX_UNPCK(punpckhwd, MO_16, 32)
+XEMU_MMX_UNPCK(punpckhdq, MO_32, 32)
+
+/* PMULHW per word: bits 16-31 of the signed 32-bit product. */
+static void gen_mmx_pmulhw(TCGv_i64 r, TCGv_i64 a, TCGv_i64 b)
+{
+    TCGv_i64 x = tcg_temp_new_i64();
+    TCGv_i64 y = tcg_temp_new_i64();
+
+    for (int i = 0; i < 4; i++) {
+        tcg_gen_sextract_i64(x, a, 16 * i, 16);
+        tcg_gen_sextract_i64(y, b, 16 * i, 16);
+        tcg_gen_mul_i64(x, x, y);
+        if (i == 0) {
+            tcg_gen_shri_i64(r, x, 16);
+        } else {
+            tcg_gen_shri_i64(x, x, 16);
+            tcg_gen_deposit_i64(r, r, x, 16 * i, 16);
+        }
+    }
+}
+#else
+#define gen_mmx_inline(s, decode, fn) false
+#endif
 
 #define BINARY_INT_MMX(uname, lname)                                               \
 static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
@@ -939,21 +1023,33 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                           gen_helper_##lname##_xmm,                                \
                           gen_helper_##lname##_ymm);                               \
 }
-BINARY_INT_MMX(PUNPCKLBW,  punpcklbw)
-BINARY_INT_MMX(PUNPCKLWD,  punpcklwd)
-BINARY_INT_MMX(PUNPCKLDQ,  punpckldq)
+/* As BINARY_INT_MMX, with the MMX form inline (gen_mmx_inline). */
+#define BINARY_INT_MMX_I64(uname, lname)                                           \
+static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
+{                                                                                  \
+    if (gen_mmx_inline(s, decode, gen_mmx_##lname)) {                              \
+        return;                                                                    \
+    }                                                                              \
+    gen_binary_int_sse(s, decode,                                                  \
+                          gen_helper_##lname##_mmx,                                \
+                          gen_helper_##lname##_xmm,                                \
+                          gen_helper_##lname##_ymm);                               \
+}
+BINARY_INT_MMX_I64(PUNPCKLBW,  punpcklbw)
+BINARY_INT_MMX_I64(PUNPCKLWD,  punpcklwd)
+BINARY_INT_MMX_I64(PUNPCKLDQ,  punpckldq)
 BINARY_INT_MMX(PACKSSWB,   packsswb)
 BINARY_INT_MMX(PACKUSWB,   packuswb)
-BINARY_INT_MMX(PUNPCKHBW,  punpckhbw)
-BINARY_INT_MMX(PUNPCKHWD,  punpckhwd)
-BINARY_INT_MMX(PUNPCKHDQ,  punpckhdq)
+BINARY_INT_MMX_I64(PUNPCKHBW,  punpckhbw)
+BINARY_INT_MMX_I64(PUNPCKHWD,  punpckhwd)
+BINARY_INT_MMX_I64(PUNPCKHDQ,  punpckhdq)
 BINARY_INT_MMX(PACKSSDW,   packssdw)
 
 BINARY_INT_MMX(PAVGB,   pavgb)
 BINARY_INT_MMX(PAVGW,   pavgw)
 BINARY_INT_MMX(PMADDWD, pmaddwd)
 BINARY_INT_MMX(PMULHUW, pmulhuw)
-BINARY_INT_MMX(PMULHW,  pmulhw)
+BINARY_INT_MMX_I64(PMULHW,  pmulhw)
 BINARY_INT_MMX(PMULUDQ, pmuludq)
 BINARY_INT_MMX(PSADBW,  psadbw)
 
