@@ -242,14 +242,41 @@ static bool xemu_x87_fdp_eager(void)
     return icount_enabled();
 }
 
+/*
+ * The census and refuter code below takes its scratch values from EBB
+ * temps and frees them before it returns. TB temps (tcg_temp_new_*) are
+ * never freed, and the refuter's per-insn checks took ~90 of them, so
+ * TCG_MAX_TEMPS cut every TB to a few insns and XEMU_X87_REFUTE never ran
+ * production-length TBs. An EBB temp dies at the next label: each such
+ * sequence here is straight-line, with nothing live across its end.
+ */
+static TCGv xemu_x87_temp_ebb_tl(void)
+{
+#if TARGET_LONG_BITS == 32
+    return tcg_temp_ebb_new_i32();
+#else
+    return tcg_temp_ebb_new_i64();
+#endif
+}
+
+static void xemu_x87_temp_free_tl(TCGv t)
+{
+#if TARGET_LONG_BITS == 32
+    tcg_temp_free_i32(t);
+#else
+    tcg_temp_free_i64(t);
+#endif
+}
+
 /* Emit "*counter += n". */
 static void xemu_x87_gen_counter_add(uint64_t *counter, uint64_t n)
 {
     TCGv_ptr p = tcg_constant_ptr(counter);
-    TCGv_i64 t = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
     tcg_gen_ld_i64(t, p, 0);
     tcg_gen_addi_i64(t, t, n);
     tcg_gen_st_i64(t, p, 0);
+    tcg_temp_free_i64(t);
 }
 
 /* Emit "*counter += 1": the translate-time census bump the x87 sites here
@@ -269,33 +296,38 @@ static void xemu_x87_gen_store_u64(uint64_t *slot, uint64_t v)
 static void xemu_x87_gen_acc_i64(uint64_t *counter, TCGv_i64 delta)
 {
     TCGv_ptr p = tcg_constant_ptr(counter);
-    TCGv_i64 acc = tcg_temp_new_i64();
+    TCGv_i64 acc = tcg_temp_ebb_new_i64();
 
     tcg_gen_ld_i64(acc, p, 0);
     tcg_gen_add_i64(acc, acc, delta);
     tcg_gen_st_i64(acc, p, 0);
+    tcg_temp_free_i64(acc);
 }
 
 /* Branchless "*counter += (a != b)" in the two widths the checks need. */
 static void xemu_x87_gen_ne_count_i32(uint64_t *counter, TCGv_i32 a,
                                       TCGv_i32 b)
 {
-    TCGv_i32 d = tcg_temp_new_i32();
-    TCGv_i64 d64 = tcg_temp_new_i64();
+    TCGv_i32 d = tcg_temp_ebb_new_i32();
+    TCGv_i64 d64 = tcg_temp_ebb_new_i64();
 
     tcg_gen_setcond_i32(TCG_COND_NE, d, a, b);
     tcg_gen_extu_i32_i64(d64, d);
     xemu_x87_gen_acc_i64(counter, d64);
+    tcg_temp_free_i32(d);
+    tcg_temp_free_i64(d64);
 }
 
 static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
 {
-    TCGv d = tcg_temp_new();
-    TCGv_i64 d64 = tcg_temp_new_i64();
+    TCGv d = xemu_x87_temp_ebb_tl();
+    TCGv_i64 d64 = tcg_temp_ebb_new_i64();
 
     tcg_gen_setcond_tl(TCG_COND_NE, d, a, b);
     tcg_gen_extu_tl_i64(d64, d);
     xemu_x87_gen_acc_i64(counter, d64);
+    xemu_x87_temp_free_tl(d);
+    tcg_temp_free_i64(d64);
 }
 
 /*
@@ -314,13 +346,15 @@ static void xemu_x87_gen_poison(X87Ptr p)
 /* Emit "*counter += (image at p is poison) != want". */
 static void xemu_x87_gen_poison_check(uint64_t *counter, X87Ptr p, bool want)
 {
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 d = tcg_temp_new_i64();
+    TCGv_i64 lo = tcg_temp_ebb_new_i64();
+    TCGv_i64 d = tcg_temp_ebb_new_i64();
 
     tcg_gen_ld_i64(lo, p.base, p.ofs);
     tcg_gen_setcondi_i64(want ? TCG_COND_NE : TCG_COND_EQ, d, lo,
                          XEMU_X87_POISON_LO);
     xemu_x87_gen_acc_i64(counter, d);
+    tcg_temp_free_i64(lo);
+    tcg_temp_free_i64(d);
 }
 
 /*
@@ -330,8 +364,8 @@ static void xemu_x87_gen_poison_check(uint64_t *counter, X87Ptr p, bool want)
  */
 static void xemu_x87_gen_poison_stale(uint64_t *counter, int p)
 {
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 st = tcg_temp_new_i64();
+    TCGv_i64 lo = tcg_temp_ebb_new_i64();
+    TCGv_i64 st = tcg_temp_ebb_new_i64();
 
     tcg_gen_ld_i64(lo, tcg_env, X87_IMG_OFS(p));
     tcg_gen_setcondi_i64(TCG_COND_EQ, lo, lo, XEMU_X87_POISON_LO);
@@ -339,6 +373,8 @@ static void xemu_x87_gen_poison_stale(uint64_t *counter, int p)
     tcg_gen_setcondi_i64(TCG_COND_NE, st, st, 0);
     tcg_gen_setcond_i64(TCG_COND_NE, lo, lo, st);
     xemu_x87_gen_acc_i64(counter, lo);
+    tcg_temp_free_i64(lo);
+    tcg_temp_free_i64(st);
 }
 
 /*
@@ -431,8 +467,8 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
         tcg_gen_ld_i32(sel, tcg_env,
                        offsetof(CPUX86State, segs[R_CS].selector));
         if (refute) {
-            TCGv_i32 was = tcg_temp_new_i32();
-            TCGv was_ip = tcg_temp_new();
+            TCGv_i32 was = tcg_temp_ebb_new_i32();
+            TCGv was_ip = xemu_x87_temp_ebb_tl();
             tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpcs));
             tcg_gen_ext16u_i32(sel, sel);
             xemu_x87_gen_ne_count_i32(&xemu_x87_ptr_viol, sel, was);
@@ -441,6 +477,8 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
                                      was_ip);
             xemu_gen_counter_inc(&xemu_x87_ptr_checks);
             xemu_x87_gen_store_u64(&xemu_x87_fip_rt_pend, 0);
+            tcg_temp_free_i32(was);
+            xemu_x87_temp_free_tl(was_ip);
         } else {
             tcg_gen_st16_i32(sel, tcg_env, offsetof(CPUX86State, fpcs));
             tcg_gen_st_tl(s->xemu_fip_val, tcg_env,
@@ -455,8 +493,8 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
             tcg_gen_st_tl(s->xemu_fdp_val, tcg_env,
                           offsetof(CPUX86State, fpdp));
         } else if (refute) {
-            TCGv_i32 was = tcg_temp_new_i32();
-            TCGv was_dp = tcg_temp_new();
+            TCGv_i32 was = tcg_temp_ebb_new_i32();
+            TCGv was_dp = xemu_x87_temp_ebb_tl();
             tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpds));
             tcg_gen_ext16u_i32(s->xemu_fdp_sel, s->xemu_fdp_sel);
             xemu_x87_gen_ne_count_i32(&xemu_x87_ptr_viol, s->xemu_fdp_sel,
@@ -465,6 +503,8 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
             xemu_x87_gen_ne_count_tl(&xemu_x87_ptr_viol, s->xemu_fdp_val,
                                      was_dp);
             xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+            tcg_temp_free_i32(was);
+            xemu_x87_temp_free_tl(was_dp);
         } else {
             tcg_gen_st16_i32(s->xemu_fdp_sel, tcg_env,
                              offsetof(CPUX86State, fpds));
@@ -492,13 +532,15 @@ static bool xemu_x87_fds_needed(DisasContext *s, int seg)
         return true;
     }
     if (xemu_x87_refute_on()) {
-        TCGv_i32 sel = tcg_temp_new_i32();
-        TCGv_i32 was = tcg_temp_new_i32();
+        TCGv_i32 sel = tcg_temp_ebb_new_i32();
+        TCGv_i32 was = tcg_temp_ebb_new_i32();
         tcg_gen_ld16u_i32(sel, tcg_env,
                           offsetof(CPUX86State, segs[seg].selector));
         tcg_gen_ld16u_i32(was, tcg_env, offsetof(CPUX86State, fpds));
         xemu_x87_gen_ne_count_i32(&xemu_x87_ptr_viol, sel, was);
         xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+        tcg_temp_free_i32(sel);
+        tcg_temp_free_i32(was);
         return true;
     }
     return false;
@@ -516,13 +558,18 @@ static void xemu_x87_boundary_check(DisasContext *s)
         return;
     }
     if (s->xemu_fip_pend && s->pc_save != -1) {
-        TCGv want = tcg_temp_new();
-        TCGv was = tcg_temp_new();
-        TCGv_i32 cs = tcg_temp_new_i32();
-        TCGv_i32 fcs = tcg_temp_new_i32();
+        TCGv want = xemu_x87_temp_ebb_tl();
+        TCGv was = xemu_x87_temp_ebb_tl();
+        TCGv_i32 cs = tcg_temp_ebb_new_i32();
+        TCGv_i32 fcs = tcg_temp_ebb_new_i32();
 
-        tcg_gen_subi_tl(want, eip_cur_tl(s),
-                        s->base.pc_next - s->xemu_fip_pc);
+        /* eip_cur_tl, which takes a TB temp under CF_PCREL. */
+        if (tb_cflags(s->base.tb) & CF_PCREL) {
+            tcg_gen_addi_tl(want, cpu_eip, s->xemu_fip_pc - s->pc_save);
+        } else {
+            tcg_gen_subi_tl(want, eip_cur_tl(s),
+                            s->base.pc_next - s->xemu_fip_pc);
+        }
         if (!CODE64(s)) {
             tcg_gen_ext32u_tl(want, want);
         }
@@ -533,11 +580,16 @@ static void xemu_x87_boundary_check(DisasContext *s)
         tcg_gen_ld16u_i32(fcs, tcg_env, offsetof(CPUX86State, fpcs));
         xemu_x87_gen_ne_count_i32(&xemu_x87_rst_viol, cs, fcs);
         xemu_gen_counter_inc(&xemu_x87_bnd_pend);
+        xemu_x87_temp_free_tl(want);
+        xemu_x87_temp_free_tl(was);
+        tcg_temp_free_i32(cs);
+        tcg_temp_free_i32(fcs);
     } else if (!s->xemu_fip_pend) {
-        TCGv_i64 pend = tcg_temp_new_i64();
+        TCGv_i64 pend = tcg_temp_ebb_new_i64();
 
         tcg_gen_ld_i64(pend, tcg_constant_ptr(&xemu_x87_fip_rt_pend), 0);
         xemu_x87_gen_acc_i64(&xemu_x87_rst_viol, pend);
+        tcg_temp_free_i64(pend);
     }
     xemu_gen_counter_inc(&xemu_x87_bnd_checks);
 }

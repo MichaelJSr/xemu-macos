@@ -116,7 +116,7 @@ Symbols, not line numbers: re-grep before relying on one. For past failed attemp
 | `XEMU_DSP_JIT_STATS=1` (exit, one block per core) | executed ≫ translated (heavy-f1 1200 frames: GP 44, EP ~86 translations); ALU ~99% inlined, cf ~94% | A big `cf_fallback` bucket = inline it next; EP `blocks_translated` in the thousands = block churn is back; `auto-throttled on GP/EP core` = churn >1/16; ALU/CF counters are translate-time and process-wide (both cores) |
 | `XEMU_DSP_JIT_DIFF=N` (1 = every translation, N = sample), `_SYNC` | Silence | `DIFF FAILURE in block pc_start=…`, then abort |
 | `XEMU_DSP_JIT_PIN_AUDIT=1` | No output | `pin audit FAIL: which= pc=` (no abort) |
-| `XEMU_X87_REFUTE`, other refuters | `violations=0` with a large `checks=` | Any violation; never left on during an fps run |
+| `XEMU_X87_REFUTE`, other refuters | `violations=0` with a large `checks=` | Any violation; never left on during an fps run. A clean x87 run covers TBs up to ~260 guest bytes only: its checks emit ~1 KB of host code per guest insn against the 64 KB a TB may hold (production TBs reach ~800), so a fault that needs a longer block needs a stress build |
 
 Notes: `XEMU_INV_PROF`'s `(f)` line reads ~0 in normal mode (the `can_do_io` elision removes the recompiles it counts); only icount runs populate it. `info jit` "TLB full flushes" is always 0 on this guest; use (Δpartial+Δelided)/16. Host: `sample xemu 5 1 -file /tmp/s.txt`; `xcrun xctrace record --template 'Time Profiler' --attach xemu --time-limit 10s --output /tmp/x.trace`. A vCPU thread at ~95% doesn't prove CPU-bound (Azurik busy-polls); look at PFIFO starvation (cond_wait − `flip_idle`) instead.
 

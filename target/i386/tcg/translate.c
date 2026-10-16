@@ -24,6 +24,10 @@
 #include "exec/translation-block.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg-op-gvec.h"
+#if defined(XBOX)
+/* EBB temps for the x87 census and refuter checks (xemu-x87.h). */
+#include "tcg/tcg-temp-internal.h"
+#endif
 #include "exec/translator.h"
 #include "exec/target_page.h"
 #include "fpu/softfloat.h"
@@ -2659,6 +2663,46 @@ static void x87_wt_sync(DisasContext *s, int slot)
     }
 }
 
+/*
+ * Refuter: (top + opreg) & 7, as gen_top_index computes it, in an EBB
+ * temp the caller frees (xemu-x87.h, xemu_x87_temp_ebb_tl).
+ */
+static TCGv_i32 x87_chk_index(TCGv_i32 top, int opreg)
+{
+    TCGv_i32 idx = tcg_temp_ebb_new_i32();
+
+    tcg_gen_addi_i32(idx, top, opreg);
+    tcg_gen_andi_i32(idx, idx, 7);
+    return idx;
+}
+
+/*
+ * Refuter: gen_stn_ptr in a write-through block, where a TOP that is not
+ * static (x87_top < 0) takes an EBB temp the caller frees
+ * (x87_chk_ptr_free).
+ */
+static X87Ptr x87_chk_stn_ptr(DisasContext *s, int opreg)
+{
+    TCGv_ptr base;
+    TCGv_i32 idx;
+
+    if (s->x87_top >= 0) {
+        return gen_stn_ptr(opreg);
+    }
+    idx = x87_chk_index(x87_wt_top(s), (s->fpstt_delta + opreg) & 7);
+    base = tcg_temp_ebb_new_ptr();
+    tcg_gen_add_zext_shl_ptr(base, tcg_env, idx, 4);
+    tcg_temp_free_i32(idx);
+    return (X87Ptr){ base, offsetof(CPUX86State, fpregs[0].d) };
+}
+
+static void x87_chk_ptr_free(X87Ptr p)
+{
+    if (p.base != tcg_env) {
+        tcg_temp_free_ptr(p.base);
+    }
+}
+
 /* Defer slot `slot`'s store of r. */
 static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
 {
@@ -2666,7 +2710,10 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
     s->wt_pend |= 1 << slot;
     s->wt_exact |= 1 << slot;
     if (unlikely(xemu_x87_refute_on())) {
-        xemu_x87_gen_poison(gen_stn_ptr((slot - s->fpstt_delta) & 7));
+        X87Ptr p = x87_chk_stn_ptr(s, (slot - s->fpstt_delta) & 7);
+
+        xemu_x87_gen_poison(p);
+        x87_chk_ptr_free(p);
     }
 }
 
@@ -2694,11 +2741,12 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
  */
 static void x87_wt_chk_sync(TCGv_i32 top)
 {
-    TCGv_i64 t = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
 
     tcg_gen_st_i32(top, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
     tcg_gen_ld_i64(t, tcg_env, offsetof(CPUX86State, fptags));
     tcg_gen_st_i64(t, tcg_env, offsetof(CPUX86State, xemu_x87_fptags_chk));
+    tcg_temp_free_i64(t);
 }
 
 static TCGv_i32 x87_wt_top(DisasContext *s)
@@ -2710,12 +2758,13 @@ static TCGv_i32 x87_wt_top(DisasContext *s)
             /* TOP-keyed (x87_top): a constant; the refuter syncs from env. */
             s->wt_top = tcg_constant_i32(base);
             if (unlikely(xemu_x87_refute_on())) {
-                TCGv_i32 t = tcg_temp_new_i32();
+                TCGv_i32 t = tcg_temp_ebb_new_i32();
 
                 tcg_gen_ld_i32(t, tcg_env, offsetof(CPUX86State, fpstt));
                 x87_wt_chk_sync(t);
                 xemu_x87_gen_ne_count_i32(&xemu_x87_key_viol, t, s->wt_top);
                 xemu_gen_counter_inc(&xemu_x87_key_checks);
+                tcg_temp_free_i32(t);
             }
             return s->wt_top;
         }
@@ -2731,9 +2780,10 @@ static TCGv_i32 x87_wt_top(DisasContext *s)
 /* Refuter: the eager copy of "fpstt += move; tag(ST(opreg)) = value". */
 static void x87_wt_chk_step(DisasContext *s, int move, int opreg, int value)
 {
-    TCGv_i32 chk = tcg_temp_new_i32();
+    TCGv_i32 chk;
 
     x87_wt_top(s);
+    chk = tcg_temp_ebb_new_i32();
     tcg_gen_ld_i32(chk, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
     if (move) {
         tcg_gen_addi_i32(chk, chk, move);
@@ -2742,11 +2792,16 @@ static void x87_wt_chk_step(DisasContext *s, int move, int opreg, int value)
                        offsetof(CPUX86State, xemu_x87_fpstt_chk));
     }
     if (value >= 0) {
-        TCGv_ptr p = tcg_temp_new_ptr();
-        tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_top_index(chk, opreg), 0);
+        TCGv_ptr p = tcg_temp_ebb_new_ptr();
+        TCGv_i32 idx = x87_chk_index(chk, opreg);
+
+        tcg_gen_add_zext_shl_ptr(p, tcg_env, idx, 0);
         tcg_gen_st8_i32(tcg_constant_i32(value), p,
                         offsetof(CPUX86State, xemu_x87_fptags_chk[0]));
+        tcg_temp_free_ptr(p);
+        tcg_temp_free_i32(idx);
     }
+    tcg_temp_free_i32(chk);
 }
 
 /* fpstt += move (push -1, pop +1, fdecstp, fincstp). */
@@ -2803,8 +2858,8 @@ static void x87_wt_gen_land(TCGv_i32 top, int base, uint8_t mask,
 /* Refuter: count env's fpstt and tags differing from the eager copy. */
 static void x87_wt_chk_env(void)
 {
-    TCGv_i32 a = tcg_temp_new_i32(), b = tcg_temp_new_i32();
-    TCGv_i64 x = tcg_temp_new_i64(), y = tcg_temp_new_i64();
+    TCGv_i32 a = tcg_temp_ebb_new_i32(), b = tcg_temp_ebb_new_i32();
+    TCGv_i64 x = tcg_temp_ebb_new_i64(), y = tcg_temp_ebb_new_i64();
 
     tcg_gen_ld_i32(a, tcg_env, offsetof(CPUX86State, fpstt));
     tcg_gen_ld_i32(b, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
@@ -2814,6 +2869,10 @@ static void x87_wt_chk_env(void)
     tcg_gen_setcond_i64(TCG_COND_NE, x, x, y);
     xemu_x87_gen_acc_i64(&xemu_x87_wt_top_viol, x);
     xemu_gen_counter_inc(&xemu_x87_wt_top_checks);
+    tcg_temp_free_i32(a);
+    tcg_temp_free_i32(b);
+    tcg_temp_free_i64(x);
+    tcg_temp_free_i64(y);
 }
 
 /*
@@ -2827,15 +2886,19 @@ static void x87_wt_chk_view(DisasContext *s)
     if (!s->wt_top) {
         return;
     }
-    a = gen_top_index(s->wt_top, s->fpstt_delta & 7);
-    b = tcg_temp_new_i32();
+    a = x87_chk_index(s->wt_top, s->fpstt_delta & 7);
+    b = tcg_temp_ebb_new_i32();
     tcg_gen_ld_i32(b, tcg_env, offsetof(CPUX86State, xemu_x87_fpstt_chk));
     xemu_x87_gen_ne_count_i32(&xemu_x87_wt_top_viol, a, b);
+    tcg_temp_free_i32(a);
+    tcg_temp_free_i32(b);
     for (int r = 0; r < 8; r++) {
-        TCGv_ptr p = tcg_temp_new_ptr();
-        TCGv_i32 want = tcg_temp_new_i32(), have = tcg_temp_new_i32();
+        TCGv_ptr p = tcg_temp_ebb_new_ptr();
+        TCGv_i32 idx = x87_chk_index(s->wt_top, r);
+        TCGv_i32 want = tcg_temp_ebb_new_i32();
+        TCGv_i32 have = tcg_temp_ebb_new_i32();
 
-        tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_top_index(s->wt_top, r), 0);
+        tcg_gen_add_zext_shl_ptr(p, tcg_env, idx, 0);
         if (s->wt_tag_mask & (1 << r)) {
             tcg_gen_movi_i32(want, (s->wt_tag_val >> r) & 1);
         } else {
@@ -2844,6 +2907,10 @@ static void x87_wt_chk_view(DisasContext *s)
         tcg_gen_ld8u_i32(have, p,
                          offsetof(CPUX86State, xemu_x87_fptags_chk[0]));
         xemu_x87_gen_ne_count_i32(&xemu_x87_wt_top_viol, want, have);
+        tcg_temp_free_ptr(p);
+        tcg_temp_free_i32(idx);
+        tcg_temp_free_i32(want);
+        tcg_temp_free_i32(have);
     }
     xemu_gen_counter_inc(&xemu_x87_wt_top_checks);
 }
@@ -2905,9 +2972,10 @@ static void x87_wt_exit_check(DisasContext *s, uint8_t land)
 {
     for (int r = 0; r < 8; r++) {
         if (land & (1 << r)) {
-            xemu_x87_gen_poison_check(&xemu_x87_wt_exit_viol,
-                                      gen_stn_ptr((r - s->fpstt_delta) & 7),
-                                      true);
+            X87Ptr p = x87_chk_stn_ptr(s, (r - s->fpstt_delta) & 7);
+
+            xemu_x87_gen_poison_check(&xemu_x87_wt_exit_viol, p, true);
+            x87_chk_ptr_free(p);
             tcg_gen_st_f64(s->wt_st[r], tcg_env,
                            offsetof(CPUX86State, xemu_x87_shadow_chk[r]));
         }
@@ -3027,9 +3095,11 @@ static void x87_wt_boundary_check(DisasContext *s)
     }
     for (int r = 0; r < 8; r++) {
         if (x87_wt_pending(s, r) || !x87_wt_dbl(s)) {
-            xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol,
-                                      gen_stn_ptr((r - s->fpstt_delta) & 7),
+            X87Ptr p = x87_chk_stn_ptr(s, (r - s->fpstt_delta) & 7);
+
+            xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol, p,
                                       x87_wt_pending(s, r));
+            x87_chk_ptr_free(p);
         } else {
             /* Poison exactly while stale (x87_wt_dbl). */
             xemu_x87_gen_poison_stale(&xemu_x87_wt_bnd_viol,
@@ -3054,7 +3124,7 @@ static void x87_top_check(DisasContext *s)
     if (!xemu_x87_refute_on() || s->x87_top < 0) {
         return;
     }
-    t = tcg_temp_new_i32();
+    t = tcg_temp_ebb_new_i32();
     if (x87_wt(s)) {
         tcg_gen_ld_i32(t, tcg_env, offsetof(CPUX86State, fpstt));
         xemu_x87_gen_ne_count_i32(&xemu_x87_key_viol, t,
@@ -3065,6 +3135,7 @@ static void x87_top_check(DisasContext *s)
                                   tcg_constant_i32(s->x87_top));
     }
     xemu_gen_counter_inc(&xemu_x87_key_checks);
+    tcg_temp_free_i32(t);
 }
 
 /*
@@ -3517,11 +3588,12 @@ static void gen_mmx_stale_check(void)
     if (!g_x87_dbl || likely(!xemu_x87_refute_on())) {
         return;
     }
-    t = tcg_temp_new_i64();
+    t = tcg_temp_ebb_new_i64();
     tcg_gen_ld_i64(t, tcg_env, offsetof(CPUX86State, xemu_x87_dstale));
     tcg_gen_setcondi_i64(TCG_COND_NE, t, t, 0);
     xemu_x87_gen_acc_i64(&xemu_x87_mmx_viol, t);
     xemu_gen_counter_inc(&xemu_x87_mmx_checks);
+    tcg_temp_free_i64(t);
 }
 #endif
 
