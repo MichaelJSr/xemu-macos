@@ -77,7 +77,25 @@ const char *xemu_settings_get_base_path(void)
         return base_path;
     }
 
-    if (xemu_settings_detect_portable_mode()) {
+    /*
+     * XEMU_BASE_PATH moves the data folder (shader and pipeline caches,
+     * plus xemu.toml and eeprom.bin when nothing else names them) for
+     * automation, ahead of portable mode: the fork's benches point it at
+     * a cache of their own so they never write the player's pref dir.
+     * -config_path stays independent of it.
+     */
+    const char *env = g_getenv("XEMU_BASE_PATH");
+    if (env && *env) {
+        char *dir = g_canonicalize_filename(env, NULL);
+        if (g_mkdir_with_parents(dir, 0755) != 0) {
+            fprintf(stderr, "%s: cannot create XEMU_BASE_PATH %s\n", __func__,
+                    dir);
+        }
+        base_path = g_str_has_suffix(dir, G_DIR_SEPARATOR_S) ?
+                        g_strdup(dir) :
+                        g_strconcat(dir, G_DIR_SEPARATOR_S, NULL);
+        g_free(dir);
+    } else if (xemu_settings_detect_portable_mode()) {
         const char *base = SDL_GetBasePath();
         assert(base != NULL);
         base_path = g_strdup(base);

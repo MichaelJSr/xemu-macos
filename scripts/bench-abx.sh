@@ -18,7 +18,13 @@
 # dir, the qcow2 and eeprom cloned once (the arms run sequentially),
 # a scratch xemu.toml passed with -config_path, monitor socket in /tmp
 # (104-byte unix-socket path cap). Never runs dist/xemu.app or the
-# user's config/hdd in place.
+# user's config/hdd in place. Shader and pipeline caches live in the
+# bench cache (XEMU_BASE_PATH=$XEMU_BENCH_CACHE, default
+# ~/Library/Caches/xemu-fork-bench), never the owner's pref dir; if
+# either arm's binary predates XEMU_BASE_PATH, both get --isolate-caches.
+# Every xemu runs under nice -n 10 with the argv marker
+# `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots and a
+# /tmp/xemu-leases lease (scripts/xemu-lease.zsh).
 #
 # Pair order alternates (B,E) / (E,B) to cancel monotone drift. Each arm
 # gets its own 40 s warmup run.
@@ -28,9 +34,10 @@
 #   --b-env "K=V ..." / --e-env   extra environment per arm
 #   --isolate-caches   plant the scratch config as a portable marker in
 #                      EACH cloned bundle, so every arm owns its shader and
-#                      pipeline caches. Use it whenever the arms differ in
-#                      glslang or MoltenVK: a shared pipeline_cache.bin is
-#                      rejected and rewritten on every arm switch.
+#                      pipeline caches (cold at batch start). Use it
+#                      whenever the arms differ in glslang or MoltenVK: a
+#                      shared pipeline_cache.bin is rejected and rewritten
+#                      on every arm switch.
 #   --fullscreen       keep fullscreen_on_startup = true. macOS Game Mode
 #                      then engages ~2 s after launch (verified 2026-10-10)
 #                      and lifts xemu's CPU/GPU priority over background
@@ -55,6 +62,7 @@
 set -e
 
 ROOT=${0:a:h:h}
+source $ROOT/scripts/xemu-lease.zsh
 RECEIPT_PY=$ROOT/scripts/bench-receipt.py
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
 SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
@@ -129,6 +137,13 @@ for arm in B E; do
   vn=${arm}_ENV; ENVSET[$arm]=${(P)vn}
   echo "abx: arm $arm = ${IDENT_DESC[$arm]:-unknown} sha256 ${IDENT_SHA[$arm][1,16]}..." \
        "MoltenVK ${IDENT_MVK[$arm]:-unknown} env '${ENVSET[$arm]}' ($src)"
+  # A binary without XEMU_BASE_PATH would write the owner's pref dir, so it
+  # gets a cold cache in its clone; isolate both arms then, or the A/B
+  # would compare a cold cache against the warm shared one too.
+  if (( ! ISOLATE )) && ! grep -qa XEMU_BASE_PATH $bin; then
+    ISOLATE=1
+    echo "abx: arm $arm's binary predates XEMU_BASE_PATH; isolating both arms' caches"
+  fi
 done
 echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, cache isolation $( (( ISOLATE )) && echo per-arm || echo off)," \
      "fullscreen $( (( FULLSCREEN )) && echo on || echo off)"
@@ -147,7 +162,7 @@ echo "abx: load $(sysctl -n vm.loadavg)"
 mkdir -p $OUT
 WORK=$OUT/work.$$
 mkdir -p $WORK
-cleanup() { (( KEEP_WORK )) || rm -rf $WORK; }
+cleanup() { xemu_auto_end; (( KEEP_WORK )) || rm -rf $WORK; }
 trap cleanup EXIT
 
 [[ -z $HDD_SRC ]] && HDD_SRC=$(read_toml_path hdd_path)
@@ -178,19 +193,22 @@ EOF
 # may lack (an absent bound controller): see scripts/harness-config.py.
 PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $BASECONF)"})
 
-typeset -A APPBIN CONF
+typeset -A APPBIN CONF BASE
 for arm in B E; do
   vn=${arm}_APP_SRC
   app=$WORK/xemu-$arm.app
   cp -Rc ${(P)vn} $app 2>/dev/null || cp -R ${(P)vn} $app
   APPBIN[$arm]=$app/Contents/MacOS/xemu
-  if (( ISOLATE )); then
+  xemu_bench_cache ${APPBIN[$arm]} $ISOLATE
+  BASE[$arm]=$XEMU_BENCH_BASE
+  if (( XEMU_BENCH_PORTABLE )); then
     mkdir -p $app/Contents/Resources
     cp $BASECONF $app/Contents/Resources/xemu.toml
     CONF[$arm]=$app/Contents/Resources/xemu.toml
   else
     CONF[$arm]=$BASECONF
   fi
+  echo "abx: arm $arm caches in ${BASE[$arm]}"
 done
 
 # ---- launch-path parity: canonical MVK_CONFIG_* (mirrors main()) ------------
@@ -201,7 +219,9 @@ export MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0
 export MVK_CONFIG_RESUME_LOST_DEVICE=1
 
 typeset -a RUN_JSONS INTERLEAVE
-run_one() {
+# Each run holds a fork-xemu slot and a lease while its xemu lives.
+run_one() { xemu_slot_acquire; run_one_xemu "$@"; xemu_auto_end; }
+run_one_xemu() {
   local label=$1 arm=$2 secs=$3 warmupflag=$4
   local log=$OUT/ab_$label.log cpul=$OUT/ab_$label.cpu
   local sock=/tmp/xemu-abx.$$.$label.sock runjson=$OUT/run_$label.json
@@ -209,10 +229,11 @@ run_one() {
   local t0=$(date '+%Y-%m-%d %H:%M:%S') tload="" t1=""
   echo "$(date +%H:%M:%S) $label start (load $(sysctl -n vm.loadavg | awk '{print $2}'))" >> $OUT/timeline.txt
 
-  env ${=ENVSET[$arm]} XEMU_NV2A_NSPROF=1 \
-      ${APPBIN[$arm]} -config_path ${CONF[$arm]} "${PAD_ARGS[@]}" -monitor unix:$sock,server,nowait \
-      > $log 2>&1 &
+  $XEMU_NICE env XEMU_BASE_PATH=${BASE[$arm]} ${=ENVSET[$arm]} XEMU_NV2A_NSPROF=1 \
+      ${APPBIN[$arm]} $XEMU_MARK -config_path ${CONF[$arm]} "${PAD_ARGS[@]}" \
+      -monitor unix:$sock,server,nowait > $log 2>&1 &
   local pid=$! up=0 i
+  xemu_lease_write $pid "bench-abx $label (arm $arm) $SNAP ${secs}s" $(( BOOT_WAIT + secs + 45 ))
   for i in $(seq 1 30); do
     kill -0 $pid 2>/dev/null || break
     [[ -S $sock ]] && { up=1; break; }
@@ -315,6 +336,7 @@ json.dump({
     "secs": int("$SECS"), "draws_band": "$DRAWS_BAND", "cv_max": float("$CV_MAX"),
     "boot_wait": int("$BOOT_WAIT"),
     "cache_isolation": "per-arm" if "$ISOLATE" == "1" else "off",
+    "cache_base": {"B": "${BASE[B]}", "E": "${BASE[E]}"},
     "fullscreen": "$FULLSCREEN" == "1",
     "interleave": "${(j:,:)INTERLEAVE}".split(","),
   },

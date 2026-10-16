@@ -21,15 +21,23 @@ session. Judge A/Bs by cycles per frame; instructions per frame (exact
 to ~0.01%) is the mechanism check. Every arm must give the same RAM
 hash unless the change is meant to.
 
+Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
+marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
+in /tmp/xemu-leases, and XEMU_BASE_PATH set to the bench cache.
+
 Example: bench-det.py -n 4 base=/tmp/a.app new=/tmp/a.app:XEMU_FOO=0
 Goldens: `-n 1 -f 300` (azurik-heavy-f1), `-t azurik-stream-e2 -f 600
 -i "axis ly 1.0"`, `-t - -f 1800 --hash-at 900,1800`.
 """
-import argparse, ctypes, ctypes.util, hashlib, json, os, re, shutil
+import argparse, ctypes, ctypes.util, hashlib, importlib.util, json, os, re, shutil
 import socket, statistics, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.environ.get('XEMU_FIXTURES', os.path.join(os.path.dirname(REPO), 'fixtures'))
+_spec = importlib.util.spec_from_file_location(
+    'xemu_lease', os.path.join(REPO, 'scripts/xemu_lease.py'))
+lease = importlib.util.module_from_spec(_spec)  # marker, nice, slot, lease, bench cache
+_spec.loader.exec_module(lease)
 
 _libproc = ctypes.CDLL(ctypes.util.find_library('proc') or '/usr/lib/libproc.dylib')
 
@@ -108,16 +116,18 @@ def scratch(d):
     return toml, pads, fifo, sock, log
 
 
-def run_once(app, env, a):
+def run_once(app, env, a, purpose=''):
     d = tempfile.mkdtemp(prefix='xbd.', dir='/tmp')
     try:
         toml, pads, fifo, sock, log = scratch(d)
-        e = dict(os.environ, XEMU_HEADLESS='null', XEMU_INPUT_PIPE=fifo, **env)
+        e = dict(os.environ, XEMU_HEADLESS='null', XEMU_INPUT_PIPE=fifo,
+                 XEMU_BASE_PATH=lease.bench_cache(), **env)
         cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,
                '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
-        proc = subprocess.Popen(cmd, env=e, stdout=subprocess.DEVNULL,
-                                stderr=open(log, 'w'))
-        try:
+        stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
+        with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
+                         30 + stops[-1] // 20, env=e, stdout=subprocess.DEVNULL,
+                         stderr=open(log, 'w')) as proc:
             wait_log(log, 'xemu: ready', 1, proc)
             q = QMP(sock, proc)
             q.cmd('stop')
@@ -129,7 +139,6 @@ def run_once(app, env, a):
                 os.write(fd, ('\n'.join(a.input) + '\n').encode())
                 os.close(fd)
                 time.sleep(0.2)
-            stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
             done, wall, ins, cyc, hashes = 0, 0.0, 0, 0, []
             for s in stops:
                 i0, c0 = counters(proc.pid)
@@ -147,9 +156,6 @@ def run_once(app, env, a):
             except Exception:
                 pass
             proc.wait(timeout=30)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
                 'ram': ' '.join(hashes)}
     finally:
@@ -176,7 +182,8 @@ def main():
     out = open(a.out, 'a') if a.out else None
     for i in range(a.pairs):
         for name, app, env in arms:
-            r = run_once(app, env, a)
+            r = run_once(app, env, a, f'bench-det {name} pair {i + 1}/{a.pairs} '
+                                      f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames')
             res[name].append(r)
             line = (f'{i + 1} {name}: {r["fps"]:.1f} fps  {r["mcyc"]:.3f} Mcyc/f  '
                     f'{r["mins"]:.3f} Mins/f  {r["ram"]}')

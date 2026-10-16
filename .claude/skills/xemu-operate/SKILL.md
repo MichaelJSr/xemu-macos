@@ -16,8 +16,20 @@ are in `xemu-history`.
 ## Hard rules
 
 - **Never touch the personal setup:** `~/Documents/Xemu/` and
-  `~/Library/Application Support/xemu/xemu/` (`xemu.toml`, `eeprom.bin`).
-  Tests share only its shader/pipeline caches.
+  `~/Library/Application Support/xemu/xemu/` (`xemu.toml`, `eeprom.bin`,
+  caches). Tests keep their caches in the bench cache instead
+  (`XEMU_BASE_PATH`, below); the Azurik harness checks that folder is
+  unchanged after its sittings.
+- **Mark every automated launch** (the Azurik harness waits for any
+  unmarked xemu, which may be the owner playing): `nice -n 10 <xemu>
+  -name xemu-fork-auto …` (marker right after the binary) with
+  `XEMU_BASE_PATH=~/Library/Caches/xemu-fork-bench`. The macOS
+  launchers in `scripts/` do it (via `scripts/xemu_lease.py` /
+  `xemu-lease.zsh`, which also take one of `XEMU_FORK_SLOTS`=4 slots and
+  write a `/tmp/xemu-leases/<pid>.json` lease); the Windows bench adds
+  only the marker. A hand-written launcher must mark and nice too; it
+  takes no slot, so run one at a time. Never mark an xemu the owner
+  plays.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu
   saves its config on exit, so skipping `-config_path` overwrites the
@@ -88,7 +100,8 @@ sed -e "s|^hdd_path = .*|hdd_path = '$W/hdd.qcow2'|;s|^eeprom_path = .*|eeprom_p
     -e "s|^fullscreen_on_startup = .*|fullscreen_on_startup = false|;s|^screenshot_dir = .*|screenshot_dir = '$W'|" \
     $F/xemu.toml > $W/xemu.toml   # the fixture's screenshot_dir is personal
 PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml)"})   # mute + pad stubs (zsh)
-XEMU_NV2A_NSPROF=1 $W/xemu.app/Contents/MacOS/xemu -config_path $W/xemu.toml \
+XEMU_NV2A_NSPROF=1 XEMU_BASE_PATH=~/Library/Caches/xemu-fork-bench nice -n 10 \
+  $W/xemu.app/Contents/MacOS/xemu -name xemu-fork-auto -config_path $W/xemu.toml \
   -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error
 ```
@@ -107,7 +120,8 @@ sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i
   stderr carries diagnostics and stdout the QEMU command line. For `open`:
   `/usr/bin/log stream --predicate 'process == "xemu"'`.
 - An `xemu.toml` in `Contents/Resources/` makes a bundle portable, caches
-  included (`--isolate-caches`).
+  included (`--isolate-caches`), unless `XEMU_BASE_PATH` names the data
+  folder, which wins.
 
 ## Headless mode
 
@@ -131,7 +145,14 @@ ready` / `xemu: state loaded` lines, park/resume via `migrate file:`.
 
 Bench scripts in `scripts/` accept `-h`. Harnesses read
 `../fixtures/xemu.toml` (or `XEMU_TEST_CONFIG`), clone everything, mute,
-and turn fullscreen off.
+and turn fullscreen off. Each xemu they start is niced and marked, holds
+a slot (all busy: `lease: all 4 fork-xemu slots busy`, it waits; raise
+`XEMU_FORK_SLOTS` only on a quiet box) and a lease, and keeps its caches
+in `$XEMU_BENCH_CACHE` (default `~/Library/Caches/xemu-fork-bench`,
+shared by every bench, cold the first time; a binary older than
+`XEMU_BASE_PATH` gets a per-batch cache in its clone, and in bench-abx
+the other arm does too).
+`python3 scripts/xemu_lease.py` lists the live leases.
 
 | Script | Use |
 |---|---|
@@ -200,6 +221,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_VCPU_QOS=0` | macOS normal mode: leave the vCPU thread at default QoS instead of `USER_INTERACTIVE` (less P-core time and power, slower under load) | `tcg/tcg-accel-ops-mttcg.c` |
+| `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |

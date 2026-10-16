@@ -562,7 +562,8 @@ class Bench:
         # nsprof writes to stdout, monitor/QEMU noise to stderr: capture both
         # into one file (a half-captured log gates INVALID).
         logf = open(logpath, "w", encoding="utf-8", errors="replace")
-        cmd = [exe, "-config_path", cfg,
+        # -name xemu-fork-auto marks an automated xemu (scripts/xemu_lease.py).
+        cmd = [exe, "-name", "xemu-fork-auto", "-config_path", cfg,
                "-monitor", "tcp:127.0.0.1:%d,server,nowait" % port]
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
                                 cwd=os.path.dirname(exe), env=env)

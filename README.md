@@ -295,6 +295,20 @@ Other automation interfaces (windowed or headless):
   `XEMU_HEADLESS=1` icount run, advance a few frames, screendump. OpenGL
   is not deterministic.
   Keep the network off and bind no XMU.
+- **Data folder**: `XEMU_BASE_PATH=<dir>` moves xemu's data folder (the
+  `spirv_cache_v*/` shader cache and `pipeline_cache.bin`, plus
+  `xemu.toml` and `eeprom.bin` when no `-config_path` or `eeprom_path`
+  names them) to `<dir>`, created if missing, ahead of portable mode.
+  Unset, it stays the portable folder or the SDL pref dir
+  (`~/Library/Application Support/xemu/xemu/` on macOS); `-config_path`
+  never moves it. stderr names it: `xemu_settings_get_base_path: base
+  path: <dir>/`.
+- **Automated-run marker**: xemus started by this fork's tooling carry
+  `-name xemu-fork-auto` right after the binary (`ps -axo command` shows
+  it; an interactive xemu never has it). The macOS launchers in
+  `scripts/` also run them at `nice -n 10` with a lease
+  `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
+  `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`.
 - **Lost GPU device**: macOS stops accepting a process's GPU work after
   repeated GPU errors; a headless xemu then prints `xemu: Vulkan device
   lost; exiting` and exits at once (a windowed one still crashes with a

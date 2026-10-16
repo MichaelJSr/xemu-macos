@@ -8,8 +8,10 @@
 #   soak-cycles.sh <app> <outdir> [cycles=3] [dwell=10]
 # The two tags default to the heavy anchor azurik-heavy-f1 and F5
 # (vm-20260704032357); override with SOAK_SNAP_A / SOAK_SNAP_B (qcow2
-# tags, not F-key names).
+# tags, not F-key names). Caches in the bench cache; nice, marker, slot and
+# lease per scripts/xemu-lease.zsh.
 set -e
+source ${0:a:h}/xemu-lease.zsh
 APP_SRC=${1:?app}; OUT=${2:?outdir}; CYC=${3:-3}; DWELL=${4:-10}
 CONFIG_SRC=${XEMU_TEST_CONFIG:-${0:a:h:h:h}/fixtures/xemu.toml}
 [[ -f $CONFIG_SRC ]] || { echo "soak-cycles: no test config at $CONFIG_SRC (set XEMU_TEST_CONFIG)" >&2; exit 1; }
@@ -20,7 +22,7 @@ WORK=$OUT/work.$$
 mkdir -p $WORK
 SOCK=/tmp/xsc-$$.sock
 PID=""
-cleanup() { [[ -n $PID ]] && kill -9 $PID 2>/dev/null; rm -rf $WORK; rm -f $SOCK; }
+cleanup() { [[ -n $PID ]] && kill -9 $PID 2>/dev/null; xemu_auto_end; rm -rf $WORK; rm -f $SOCK; }
 trap cleanup EXIT
 
 APP=$WORK/xemu-soak.app; cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
@@ -46,10 +48,14 @@ PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
 export MVK_CONFIG_FAST_MATH_ENABLED=1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_RESUME_LOST_DEVICE=1
 
-env XEMU_SUBPAGE_FAST_REFUTE=1 XEMU_NV2A_NSPROF=1 \
-    $APP/Contents/MacOS/xemu -config_path $CONFIG "${PAD_ARGS[@]}" \
+xemu_bench_cache $APP/Contents/MacOS/xemu 0
+(( XEMU_BENCH_PORTABLE )) && { cp $CONFIG $APP/Contents/Resources/xemu.toml; CONFIG=$APP/Contents/Resources/xemu.toml; }
+xemu_slot_acquire
+$XEMU_NICE env XEMU_BASE_PATH=$XEMU_BENCH_BASE XEMU_SUBPAGE_FAST_REFUTE=1 XEMU_NV2A_NSPROF=1 \
+    $APP/Contents/MacOS/xemu $XEMU_MARK -config_path $CONFIG "${PAD_ARGS[@]}" \
     -monitor unix:$SOCK,server,nowait > $OUT/run.log 2>&1 &
 PID=$!
+xemu_lease_write $PID "soak-cycles $SNAP_A/$SNAP_B x$CYC" $(( 60 + CYC * 2 * (DWELL + 4) ))
 for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || { echo "soak-cycles: died at launch"; exit 1; }; [[ -S $SOCK ]] && break; sleep 1; done
 sleep 25
 
@@ -76,6 +82,7 @@ mon quit > /dev/null 2>&1 || true
 for i in $(seq 1 15); do kill -0 $PID 2>/dev/null || break; sleep 1; done
 kill -0 $PID 2>/dev/null && { echo "soak-cycles: quit hung, killing"; kill -9 $PID; }
 PID=""
+xemu_auto_end
 
 echo "---- refute dump ----"
 grep "subpage-fast" $OUT/run.log || echo "soak-cycles: NO REFUTE DUMP (fail)"

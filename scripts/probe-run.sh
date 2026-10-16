@@ -1,9 +1,11 @@
 #!/bin/zsh
 # Counter-probe run: boot, loadvm one tag, dwell in-scene, clean monitor
 # quit so every atexit dump (INV_PROF a-e, subpage-fast, ras) lands in
-# run.log. Extra VAR=V args exported to xemu.
+# run.log. Extra VAR=V args exported to xemu. Caches in the bench cache;
+# nice, marker, slot and lease per scripts/xemu-lease.zsh.
 #   probe-run.sh <app> <outdir> <vm-tag> [dwell=80] [VAR=V ...]
 set -e
+source ${0:a:h}/xemu-lease.zsh
 APP_SRC=${1:?app}; OUT=${2:?outdir}; SNAP=${3:?vm-tag}; DWELL=${4:-80}
 shift 4 2>/dev/null || shift 3
 typeset -a EXTRA_ENV; EXTRA_ENV=("$@")
@@ -14,7 +16,7 @@ WORK=$OUT/work.$$
 mkdir -p $WORK
 SOCK=/tmp/xpr-$$.sock
 PID=""
-cleanup() { [[ -n $PID ]] && kill -9 $PID 2>/dev/null; rm -rf $WORK; rm -f $SOCK; }
+cleanup() { [[ -n $PID ]] && kill -9 $PID 2>/dev/null; xemu_auto_end; rm -rf $WORK; rm -f $SOCK; }
 trap cleanup EXIT
 
 APP=$WORK/xemu-probe.app; cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
@@ -40,10 +42,14 @@ PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
 export MVK_CONFIG_FAST_MATH_ENABLED=1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_RESUME_LOST_DEVICE=1
 
-env "${EXTRA_ENV[@]}" XEMU_NV2A_NSPROF=1 \
-    $APP/Contents/MacOS/xemu -config_path $CONFIG "${PAD_ARGS[@]}" \
+xemu_bench_cache $APP/Contents/MacOS/xemu 0
+(( XEMU_BENCH_PORTABLE )) && { cp $CONFIG $APP/Contents/Resources/xemu.toml; CONFIG=$APP/Contents/Resources/xemu.toml; }
+xemu_slot_acquire
+$XEMU_NICE env XEMU_BASE_PATH=$XEMU_BENCH_BASE "${EXTRA_ENV[@]}" XEMU_NV2A_NSPROF=1 \
+    $APP/Contents/MacOS/xemu $XEMU_MARK -config_path $CONFIG "${PAD_ARGS[@]}" \
     -monitor unix:$SOCK,server,nowait > $OUT/run.log 2>&1 &
 PID=$!
+xemu_lease_write $PID "probe-run $SNAP ${DWELL}s" $(( DWELL + 70 ))
 for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || { echo "probe-run: died at launch"; exit 1; }; [[ -S $SOCK ]] && break; sleep 1; done
 sleep 25
 
@@ -64,5 +70,6 @@ mon quit > /dev/null 2>&1 || true
 for i in $(seq 1 15); do kill -0 $PID 2>/dev/null || break; sleep 1; done
 kill -0 $PID 2>/dev/null && { echo "probe-run: quit hung, killing (dumps lost)"; kill -9 $PID; }
 PID=""
+xemu_auto_end
 echo "---- atexit dumps ----"
 grep -E "^xemu: " $OUT/run.log | grep -v "^xemu: nsprof" | head -40

@@ -502,10 +502,14 @@ static void save_pipeline_cache_to_disk(VkDevice device,
     if (result == VK_SUCCESS) {
         char *path = get_pipeline_cache_path();
         /* Write-then-rename so a kill mid-write can't leave a torn
-         * cache file for the next boot to ingest. g_rename replaces
+         * cache file for the next boot to ingest. The temp name carries
+         * the pid so instances sharing one cache (the benches run up to
+         * four) can't interleave their writes; init_pipeline_cache
+         * sweeps the orphans a kill leaves. g_rename replaces
          * an existing target on Windows too (plain rename() fails
          * there once the file exists). */
-        char *tmp_path = g_strdup_printf("%s.tmp", path);
+        char *tmp_path =
+            g_strdup_printf("%s.%u.tmp", path, (unsigned)getpid());
         FILE *f = qemu_fopen(tmp_path, "wb");
         if (f) {
             bool ok = fwrite(data, 1, size, f) == size;
@@ -550,9 +554,45 @@ void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
     r->pipeline_cache_last_save_ns = now;
 }
 
+/*
+ * A kill between the temp write and the rename in
+ * save_pipeline_cache_to_disk leaves a pipeline_cache.bin.<pid>.tmp that
+ * no later run reads or overwrites (the pid differs), so sweep them once
+ * at init, before this process writes its own; the glob also takes the
+ * fixed pipeline_cache.bin.tmp of older builds. Only files untouched for
+ * a minute go: a sibling sharing the folder writes its temp file in well
+ * under a second, and a younger orphan is swept by a later launch.
+ */
+static void sweep_stale_pipeline_cache_temp_files(void)
+{
+    const char *base = xemu_settings_get_base_path();
+    GDir *d = g_dir_open(base, 0, NULL);
+    if (!d) {
+        return;
+    }
+
+    gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+    const char *name;
+    while ((name = g_dir_read_name(d)) != NULL) {
+        if (!g_str_has_prefix(name, "pipeline_cache.bin.") ||
+            !g_str_has_suffix(name, ".tmp")) {
+            continue;
+        }
+        char *path = g_build_filename(base, name, NULL);
+        GStatBuf st;
+        if (g_stat(path, &st) == 0 && now - (gint64)st.st_mtime > 60) {
+            g_unlink(path);
+        }
+        g_free(path);
+    }
+    g_dir_close(d);
+}
+
 static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    sweep_stale_pipeline_cache_temp_files();
 
     void *cache_data = NULL;
     size_t cache_size = 0;

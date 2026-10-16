@@ -23,7 +23,10 @@
 # --app PATH clones that bundle instead of dist/xemu.app.
 # --isolate-caches gives the run its own cold shader/pipeline cache, the
 # same way bench-savestate-ab.sh does (portable-mode marker in the CLONED
-# bundle); without it the run shares the user's warm caches.
+# bundle); without it the run uses the benches' warm cache
+# (XEMU_BASE_PATH=$XEMU_BENCH_CACHE, default ~/Library/Caches/xemu-fork-bench).
+# xemu runs under nice -n 10 with the argv marker `-name xemu-fork-auto`,
+# a fork-xemu slot and a lease (scripts/xemu-lease.zsh).
 # Isolation matches bench-savestate-ab.sh: bundle/hdd/eeprom cloned,
 # scratch config via -config_path, fullscreen forced off, source files
 # only ever clone sources. The source config is $XEMU_TEST_CONFIG, else
@@ -32,6 +35,7 @@
 set -e
 
 ROOT=${0:a:h:h}
+source $ROOT/scripts/xemu-lease.zsh
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
 SNAP=${MOVEMENT_SNAP:-azurik-stream-e2}
 FWD_SC=${MOVEMENT_FWD_SC:-26}    # W = left-stick up (owner bindings)
@@ -62,6 +66,7 @@ mkfifo $FIFO
 
 cleanup() {
   [[ -n $PID ]] && kill -9 $PID 2>/dev/null || true
+  xemu_auto_end
   rm -f $SOCK $FIFO
   rm -rf $WORK
 }
@@ -105,13 +110,15 @@ EOF
 # may lack (an absent bound controller): see scripts/harness-config.py.
 PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
 
-if (( ISOLATE_CACHES )); then
+xemu_bench_cache $APPBIN $ISOLATE_CACHES
+if (( XEMU_BENCH_PORTABLE )); then
   mkdir -p $APP/Contents/Resources
   cp $CONFIG $APP/Contents/Resources/xemu.toml
   CONFIG=$APP/Contents/Resources/xemu.toml
+  (( ISOLATE_CACHES )) || echo "probe: this binary predates XEMU_BASE_PATH; isolating its caches"
   echo "probe: cache isolation ON (cold shader/pipeline caches in the cloned bundle)"
 else
-  echo "probe: cache isolation OFF (shader/pipeline caches shared with the user's base path)"
+  echo "probe: cache isolation OFF (shader/pipeline caches in the bench cache $XEMU_BENCH_BASE)"
 fi
 
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0
@@ -124,10 +131,12 @@ LOG=$OUT/run.log
 PHASES=$OUT/phases.log
 : > $PHASES
 
-env "${EXTRA_ENV[@]}" XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$FIFO \
-    $APPBIN -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$SOCK,server,nowait \
+xemu_slot_acquire
+$XEMU_NICE env XEMU_BASE_PATH=$XEMU_BENCH_BASE "${EXTRA_ENV[@]}" XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$FIFO \
+    $APPBIN $XEMU_MARK -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$SOCK,server,nowait \
     > $LOG 2>&1 &
 PID=$!
+xemu_lease_write $PID "movement-probe $SNAP" 150
 
 for i in $(seq 1 30); do
   kill -0 $PID 2>/dev/null || { echo "probe: xemu died at launch" >&2; exit 1; }
@@ -192,6 +201,7 @@ mon quit > /dev/null 2>&1 || true
 for i in $(seq 1 15); do kill -0 $PID 2>/dev/null || break; sleep 1; done
 kill -0 $PID 2>/dev/null && { echo "probe: quit hung, killing" >&2; kill -9 $PID; }
 PID=""
+xemu_auto_end
 
 echo "probe: phases:"
 cat $PHASES

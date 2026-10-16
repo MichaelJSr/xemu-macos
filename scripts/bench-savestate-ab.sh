@@ -63,17 +63,23 @@
 #   --isolate-caches     give the run its own shader/pipeline cache
 #                        (env: XEMU_BENCH_ISOLATE_CACHES=1)
 #
-# Cache isolation. -config_path moves the CONFIG file only; xemu's data
-# base path (spirv_cache_v*/, pipeline_cache.bin) is still
-# SDL_GetPrefPath, so by default both arms share the user's warm
-# caches. That stays the DEFAULT — it is what a player has, and it
-# keeps existing baselines comparable. Pass --isolate-caches when the
-# thing under test is the shader compiler or pipeline creation itself:
-# the scratch config is planted as a portable-mode marker inside the
-# CLONED bundle's Contents/Resources, so the base path becomes the
-# clone. Caches then start cold at batch start, warm during the warmup
-# run, and are shared identically by both arms. Costs one cold shader
-# compile pass in the warmup (~671 shaders, lazy, 2-10 ms each).
+# Automated-launch etiquette (scripts/xemu-lease.zsh): every xemu runs
+# under nice -n 10 with the argv marker `-name xemu-fork-auto`, holds one
+# of XEMU_FORK_SLOTS (4) machine-wide slots and a /tmp/xemu-leases lease.
+#
+# Cache isolation. -config_path moves the CONFIG file only; the data base
+# path (spirv_cache_v*/, pipeline_cache.bin) is XEMU_BASE_PATH, which
+# defaults to the bench cache shared by every bench
+# ($XEMU_BENCH_CACHE, else ~/Library/Caches/xemu-fork-bench): warm across
+# benches, never the owner's pref dir. A binary that predates
+# XEMU_BASE_PATH gets the --isolate-caches treatment instead. Pass
+# --isolate-caches when the thing under test is the shader compiler or
+# pipeline creation itself: the scratch config is planted as a
+# portable-mode marker inside the CLONED bundle's Contents/Resources, so
+# the base path becomes the clone. Caches then start cold at batch start,
+# warm during the warmup run, and are shared identically by both arms.
+# Costs one cold shader compile pass in the warmup (~671 shaders, lazy,
+# 2-10 ms each).
 #
 # Analysis note: baseline reproducibility of this protocol measured at
 # +/-0.02 fps on static scenes. Default 3 pairs is a smoke bar; a
@@ -82,6 +88,7 @@
 set -e
 
 ROOT=${0:a:h:h}
+source $ROOT/scripts/xemu-lease.zsh
 RECEIPT_PY=$ROOT/scripts/bench-receipt.py
 SHOT_PY=$ROOT/scripts/bench-screenshot.py
 SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
@@ -144,6 +151,7 @@ WORK=$OUT/work.$$
 mkdir -p $WORK
 
 cleanup() {
+  xemu_auto_end
   if (( ! KEEP_WORK )); then rm -rf $WORK; fi
 }
 trap cleanup EXIT
@@ -204,20 +212,22 @@ EOF
 # may lack (an absent bound controller): see scripts/harness-config.py.
 PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
 
-# ---- optional shader/pipeline cache isolation -----------------------------
-# Default OFF: both arms share the user's warm spirv_cache_v*/ and
-# pipeline_cache.bin, which is what today's baselines were taken
-# against. ON plants the scratch config where portable-mode detection
-# looks (SDL_GetBasePath() == the CLONED bundle's Contents/Resources,
-# ui/xemu-settings.cc), which moves the whole data base path into the
-# work dir — never dist/xemu.app, so the hands-off rule still holds.
-if (( ISOLATE_CACHES )); then
+# ---- shader/pipeline cache: the bench cache, or isolated -------------------
+# Default: XEMU_BASE_PATH = the bench cache every bench shares (warm, never
+# the owner's). ON (or a binary without XEMU_BASE_PATH) plants the scratch
+# config where portable-mode detection looks (SDL_GetBasePath() == the
+# CLONED bundle's Contents/Resources, ui/xemu-settings.cc), which moves the
+# whole data base path into the work dir — never dist/xemu.app, so the
+# hands-off rule still holds.
+xemu_bench_cache $APPBIN $ISOLATE_CACHES
+if (( XEMU_BENCH_PORTABLE )); then
   mkdir -p $APP/Contents/Resources
   cp $CONFIG $APP/Contents/Resources/xemu.toml
   CONFIG=$APP/Contents/Resources/xemu.toml
-  echo "bench: cache isolation ON (base path $APP/Contents/Resources; cold at batch start, warmed by the warmup run)"
+  (( ISOLATE_CACHES )) || echo "bench: this binary predates XEMU_BASE_PATH; isolating its caches"
+  echo "bench: cache isolation ON (base path $XEMU_BENCH_BASE; cold at batch start, warmed by the warmup run)"
 else
-  echo "bench: cache isolation OFF (shader/pipeline caches shared with the user's base path)"
+  echo "bench: cache isolation OFF (shader/pipeline caches in the bench cache $XEMU_BENCH_BASE)"
 fi
 
 # ---- launch-path parity: canonical MVK_CONFIG_* (mirrors main()) ----------
@@ -240,7 +250,9 @@ echo "bench: hdd clone $HDD (source $HDD_SRC untouched)"
 typeset -a RUN_JSONS INTERLEAVE
 
 # ---- one run ---------------------------------------------------------------
-run_one() {
+# Each run holds a fork-xemu slot and a lease while its xemu lives.
+run_one() { xemu_slot_acquire; run_one_xemu "$@"; xemu_auto_end; }
+run_one_xemu() {
   local label=$1 val=$2 secs=$3 warmupflag=$4
   local log=$OUT/ab_$label.log cpul=$OUT/ab_$label.cpu
   # Socket lives in /tmp, NOT $WORK: unix socket paths are capped at
@@ -253,10 +265,11 @@ run_one() {
   INTERLEAVE+=($label)
   rm -f $sock
 
-  env $VAR=$val XEMU_NV2A_NSPROF=1 \
-      $APPBIN -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$sock,server,nowait \
+  $XEMU_NICE env $VAR=$val XEMU_NV2A_NSPROF=1 XEMU_BASE_PATH=$XEMU_BENCH_BASE \
+      $APPBIN $XEMU_MARK -config_path $CONFIG "${PAD_ARGS[@]}" -monitor unix:$sock,server,nowait \
       > $log 2>&1 &
   local pid=$!
+  xemu_lease_write $pid "bench-savestate-ab $label $VAR=$val $SNAP ${secs}s" $(( BOOT_WAIT + secs + 45 ))
 
   # Wait for the monitor socket instead of blind-sleeping; a dead
   # launch becomes a recorded DEAD run, not a batch abort.
@@ -358,7 +371,8 @@ meta = {
     "snapshot": "$SNAP", "env_var": "$VAR", "pairs": int("$PAIRS"),
     "secs": int("$SECS"), "draws_band": "$DRAWS_BAND",
     "cv_max": float("$CV_MAX"), "boot_wait": int("$BOOT_WAIT"),
-    "cache_isolation": "on" if "$ISOLATE_CACHES" == "1" else "off",
+    "cache_isolation": "on" if "$XEMU_BENCH_PORTABLE" == "1" else "off",
+    "cache_base": "$XEMU_BENCH_BASE",
     "interleave": "${(j:,:)INTERLEAVE}".split(","),
   },
   "binary": {

@@ -19,10 +19,13 @@
 # Isolation rules are the harness's (scripts/bench-savestate-ab.sh): never
 # points at dist/xemu.app's config, never opens the user's qcow2. The
 # source config defaults to $XEMU_TEST_CONFIG, else ../fixtures/xemu.toml
-# beside the checkout.
+# beside the checkout. Caches live in the bench cache; every xemu runs
+# under nice -n 10 with the argv marker `-name xemu-fork-auto`, a
+# fork-xemu slot and a lease (scripts/xemu-lease.zsh).
 
 set -u
 ROOT=${0:A:h:h}
+source $ROOT/scripts/xemu-lease.zsh
 APP_SRC=$ROOT/dist/xemu.app
 CONFIG_SRC=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}
 SECS=120
@@ -53,13 +56,14 @@ if [[ $APP_SRC:A == $ROOT/dist/xemu.app ]]; then :; fi   # cloned below, never r
 mkdir -p $OUT
 OUT=$OUT:A
 WORK=$(mktemp -d /tmp/xemu-bootsmoke.XXXXXX)
-cleanup() { (( KEEP_WORK )) || rm -rf $WORK; }
+cleanup() { xemu_auto_end; (( KEEP_WORK )) || rm -rf $WORK; }
 trap cleanup EXIT
 
 APP=$WORK/xemu-smoke.app
 cp -Rc $APP_SRC $APP 2>/dev/null || cp -R $APP_SRC $APP
 APPBIN=$APP/Contents/MacOS/xemu
 [[ -x $APPBIN ]] || { echo "clone failed: $APPBIN" >&2; exit 1; }
+xemu_bench_cache $APPBIN 0
 
 read_toml() {   # read_toml <file> <key>
   python3 - "$1" "$2" <<'EOF'
@@ -129,9 +133,14 @@ open(dst, "w").writelines(out)
 EOF
   # Mute the run (scripts/harness-config.py); no loadvm, so no pad stubs.
   python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs
-  env XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$fifo \
-      $APPBIN -config_path $cfg -monitor unix:$sock,server,nowait > $log 2>&1 &
+  if (( XEMU_BENCH_PORTABLE )); then   # binary predates XEMU_BASE_PATH
+    cp $cfg $APP/Contents/Resources/xemu.toml; cfg=$APP/Contents/Resources/xemu.toml
+  fi
+  xemu_slot_acquire
+  $XEMU_NICE env XEMU_BASE_PATH=$XEMU_BENCH_BASE XEMU_NV2A_NSPROF=1 XEMU_INPUT_PIPE=$fifo \
+      $APPBIN $XEMU_MARK -config_path $cfg -monitor unix:$sock,server,nowait > $log 2>&1 &
   pid=$!
+  xemu_lease_write $pid "boot-smoke-corpus $name" $(( SECS + 45 ))
   up=0
   for i in $(seq 1 30); do
     kill -0 $pid 2>/dev/null || break
@@ -141,7 +150,7 @@ EOF
   if (( ! up )); then
     wait $pid; st=$?
     echo "$name: CRASHED at launch (exit $st) — see $log"; RC=2
-    rm -f $sock $fifo; continue
+    xemu_auto_end; rm -f $sock $fifo; continue
   fi
   n=$(( SECS / 2 )); alive=1; st=0
   for j in $(seq 1 $n); do
@@ -165,6 +174,7 @@ s.close()
 EOF
     sleep 2; kill $pid 2>/dev/null; sleep 1; kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
   fi
+  xemu_auto_end
   rm -f $sock $fifo
   asserts=$(grep -cE 'Assertion|abort\(\)|nv2a_vk_bounds|Segmentation|Bus error|Illegal instruction|SIG(SEGV|ILL|BUS|ABRT)' $log 2>/dev/null || true)
   lastint=$(grep -E 'nsprof: .*interval' $log | tail -1 | sed -E 's/.*interval, //')
