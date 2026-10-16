@@ -30,8 +30,8 @@
 # Example — start xemu with the pipe, then drive it from another shell
 # ($W holds a bundle clone and a muted scratch config: xemu-operate Run):
 #   mkfifo /tmp/xemu.fifo
-#   env -u XEMU_RAM_SHM XEMU_INPUT_PIPE=/tmp/xemu.fifo XEMU_BASE_PATH=$HOME/Library/Caches/xemu-fork-bench \
-#     nice -n 10 $W/xemu.app/Contents/MacOS/xemu -name xemu-fork-auto -config_path $W/xemu.toml &
+#   python3 -I scripts/xemu_lease.py run --env XEMU_INPUT_PIPE=/tmp/xemu.fifo --purpose 'pipe test' \
+#     -- $W/xemu.app/Contents/MacOS/xemu -config_path $W/xemu.toml &   # (xemu_lease.py run adds the marker)
 #   inject_input.sh tap /tmp/xemu.fifo W 200      # walk forward 200ms
 #   inject_input.sh down /tmp/xemu.fifo DOWN      # hold the A button
 #   sleep 1

@@ -8,10 +8,14 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     binary (MARK), so `ps -axo command` tells it from the owner's
     interactive xemu, which never has it;
   - runs under `nice -n 10` (NICE), as the harness's sandboxes do;
-  - holds one of XEMU_FORK_SLOTS (default 4) machine-wide slots while it
-    runs: fcntl locks on /tmp/xemu-leases/slots/<i>.lock, so a launcher
-    that dies frees its slot;
-  - has a lease /tmp/xemu-leases/<xemu pid>.json {who, purpose, started,
+  - holds one of XEMU_FORK_SLOTS (default 4) machine-wide slots for as
+    long as it runs: flock(2) on <lease dir>/slots/<i>.lock, through a
+    descriptor the xemu inherits. A flock lock belongs to the open file,
+    not the process, so it stays with the xemu when its launcher dies
+    (SIGKILL included) and goes when the xemu exits. On macOS flock and
+    fcntl locks exclude each other, so older launchers' lockf slots
+    count;
+  - has a lease <lease dir>/<xemu pid>.json {who, purpose, started,
     expected_end, ...}, removed when it exits. A lease is live only while
     its pid runs with the marker in its argv; anything else is stale and
     the next launcher sweeps it;
@@ -23,8 +27,24 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     a pipe, a record or log file) or that bind host pads. A launcher
     drops them from its own environment; a value it sets itself stays.
 
+The lease dir is $XEMU_LEASE_DIR, default /tmp/xemu-leases (the harness
+reads it; tests point the variable elsewhere).
+
 zsh twin: scripts/xemu-lease.zsh. `python3 xemu_lease.py` lists the live
-leases and sweeps the stale ones.
+leases and sweeps the stale ones. A launch by hand takes a slot too:
+
+    python3 scripts/xemu_lease.py run [--env K=V]... [--purpose TEXT] \
+        [--secs N] -- <xemu> -config_path <scratch toml> [args...]
+
+waits for a slot, writes the lease, and execs `nice`d `<xemu> -name
+xemu-fork-auto args` in its own process (same pid), with the inherited
+AUTOMATION_ENV dropped (--env sets any variable for this run) and
+XEMU_BASE_PATH set to the bench cache unless already set; the xemu
+keeps the slot until it exits. It refuses a binary without
+XEMU_BASE_PATH (no such string in it: any build from a tree without
+0babe23fbc, whatever its version) unless its clone is portable (an
+xemu.toml in Contents/Resources): it would keep its caches in the
+owner's pref dir.
 """
 import contextlib, json, os, subprocess, sys, time
 
@@ -36,12 +56,11 @@ except ImportError:  # Windows: no slots or leases, the marker still applies
 MARKER = 'xemu-fork-auto'
 MARK = ['-name', MARKER]
 NICE = ['nice', '-n', '10']
-LEASE_DIR = '/tmp/xemu-leases'
+LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or '/tmp/xemu-leases'
 AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
                   'XEMU_ICOUNT_LIVE_PADS')
-_held = set()
 _dropped = set()
 
 
@@ -97,7 +116,10 @@ def sweep():
 
 
 class Slot:
-    """One of XEMU_FORK_SLOTS machine-wide slots, held until release()."""
+    """One of XEMU_FORK_SLOTS machine-wide slots: an flock'd descriptor
+    (fd). The xemu inherits it (popen's pass_fds, run's exec) and holds
+    the slot until it exits; handoff() then drops the launcher's copy.
+    Until then, or without a child, release() frees it."""
 
     def __init__(self, quiet=False):
         self.index, self.fd = None, None
@@ -114,16 +136,13 @@ class Slot:
         said = None
         while True:
             for i in range(n):
-                if i in _held:
-                    continue
                 fd = os.open(os.path.join(d, f'{i}.lock'), os.O_RDWR | os.O_CREAT, 0o666)
                 try:
-                    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError:
                     os.close(fd)
                     continue
                 self.index, self.fd = i, fd
-                _held.add(i)
                 if said is not None and not quiet:
                     print(f'lease: slot {i} free after {time.time() - t0:.0f} s',
                           file=sys.stderr, flush=True)
@@ -135,11 +154,17 @@ class Slot:
                 said = w
             time.sleep(2)
 
+    def handoff(self):
+        """The xemu inherited fd: drop the launcher's copy, so the slot
+        lasts exactly as long as that xemu (index stays for the lease)."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
     def release(self):
         if self.fd is not None:
-            os.close(self.fd)  # closing the descriptor drops the lock
-            _held.discard(self.index)
-            self.index, self.fd = None, None
+            os.close(self.fd)  # the last descriptor of the open file drops the lock
+        self.index, self.fd = None, None
 
 
 def _stamp(t):
@@ -173,14 +198,17 @@ def auto_cmd(cmd):
 @contextlib.contextmanager
 def popen(cmd, purpose, expected_secs, **kw):
     """subprocess.Popen(auto_cmd(cmd), **kw) inside a slot and a lease,
-    with environ(kw's env). nice execs xemu, so proc.pid is xemu's pid.
-    On exit a still-running xemu is killed, then the lease and the slot
-    go."""
+    with environ(kw's env). nice execs xemu, so proc.pid is xemu's pid,
+    and xemu inherits the slot's descriptor. On exit a still-running
+    xemu is killed, then the lease goes."""
     kw['env'] = environ(kw.get('env'))
     slot = Slot()
     proc = None
     try:
+        if slot.fd is not None:
+            kw['pass_fds'] = tuple(kw.get('pass_fds', ())) + (slot.fd,)
         proc = subprocess.Popen(auto_cmd(cmd), **kw)
+        slot.handoff()
         if fcntl is not None:
             write_lease(proc.pid, purpose, expected_secs, slot.index)
         yield proc
@@ -193,7 +221,59 @@ def popen(cmd, purpose, expected_secs, **kw):
         slot.release()
 
 
+def knows_base_path(binary):
+    """True if xemu binary honours XEMU_BASE_PATH, or runs portable (an
+    xemu.toml in SDL's base path: the bundle's Contents/Resources, or a
+    bare binary's folder)."""
+    d = os.path.dirname(os.path.abspath(binary))
+    if any(os.path.exists(os.path.join(p, 'xemu.toml'))
+           for p in (os.path.join(d, '..', 'Resources'), d)):
+        return True
+    import mmap
+    with open(binary, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+        return m.find(b'XEMU_BASE_PATH') >= 0
+
+
+def run(argv):
+    """`run [--env K=V]... [--purpose TEXT] [--secs N] -- <xemu> args`: a
+    launch by hand, as the launchers do it (module docstring). Never
+    returns."""
+    import argparse
+    ap = argparse.ArgumentParser(prog='xemu_lease.py run')
+    ap.add_argument('--env', action='append', default=[], metavar='K=V',
+                    help='set for xemu (AUTOMATION_ENV is never inherited)')
+    ap.add_argument('--purpose', default='hand launch')
+    ap.add_argument('--secs', type=int, default=3600, help='expected run time (lease)')
+    ap.add_argument('cmd', nargs=argparse.REMAINDER, help='-- <xemu> args...')
+    a = ap.parse_args(argv)
+    cmd = a.cmd[1:] if a.cmd[:1] == ['--'] else a.cmd
+    if not cmd or not os.access(cmd[0], os.X_OK):
+        ap.error('needs -- <xemu binary> [args]')
+    if '-config_path' not in cmd:
+        ap.error('needs -config_path <scratch toml>: xemu saves its config at exit')
+    if not knows_base_path(cmd[0]):
+        ap.error(f'{cmd[0]} predates XEMU_BASE_PATH and would keep its caches in the '
+                 "owner's pref dir: put a scratch xemu.toml in its clone's "
+                 'Contents/Resources (portable mode) or use a newer build')
+    env = environ()
+    for kv in a.env:
+        k, eq, v = kv.partition('=')
+        if not k or not eq:
+            ap.error(f'--env {kv!r}: want K=V')
+        env[k] = v
+    env.setdefault('XEMU_BASE_PATH', bench_cache())
+    slot = Slot()
+    if slot.fd is not None:
+        os.set_inheritable(slot.fd, True)   # exec keeps it: the xemu holds the slot
+        write_lease(os.getpid(), a.purpose, a.secs, slot.index, who='xemu_lease.py run')
+    if hasattr(os, 'nice'):
+        os.nice(10)
+    os.execve(cmd[0], [cmd[0]] + MARK + cmd[1:], env)
+
+
 def main():
+    if sys.argv[1:2] == ['run']:
+        run(sys.argv[2:])
     sweep()
     try:
         names = sorted(os.listdir(LEASE_DIR))

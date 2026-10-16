@@ -4,9 +4,12 @@
 #
 #   $XEMU_NICE  (nice -n 10)               prefix of every automated launch
 #   $XEMU_MARK  (-name xemu-fork-auto)     first arguments after the binary
-#   xemu_slot_acquire                      wait for one of $XEMU_FORK_SLOTS (4)
-#   xemu_lease_write <pid> <purpose> <s>   lease for the xemu just started
-#   xemu_auto_end                          drop that lease, free the slot
+#   $XEMU_LEASE_DIR                        lease folder: as inherited, else /tmp/xemu-leases
+#   xemu_slot_acquire                      wait for one of $XEMU_FORK_SLOTS (4):
+#                                          flock(2) on an fd the next xemu inherits
+#   xemu_lease_write <pid> <purpose> <s>   lease for the xemu just started, which
+#                                          now holds the slot alone (until it exits)
+#   xemu_auto_end                          drop that lease (and a slot not handed on)
 #   (sourcing it)                          unsets the inherited $XEMU_AUTOMATION_ENV
 #   xemu_bench_cache <xemu binary> <isolate 0|1>
 #       sets XEMU_BENCH_BASE, the data base path the run passes as
@@ -15,9 +18,9 @@
 #       --isolate-caches, and for a binary that predates XEMU_BASE_PATH
 #       (it would otherwise write the owner's pref dir)
 
-zmodload zsh/system zsh/datetime
+zmodload zsh/datetime
 setopt no_bg_nice   # background launches get exactly nice 10, not zsh's +5 on top
-XEMU_LEASE_DIR=/tmp/xemu-leases
+XEMU_LEASE_DIR=${XEMU_LEASE_DIR:-/tmp/xemu-leases}
 XEMU_NICE=(nice -n 10)
 XEMU_MARK=(-name xemu-fork-auto)
 typeset -g XEMU_SLOT="" XEMU_SLOT_FD="" XEMU_LEASE_PID="" XEMU_BENCH_BASE="" XEMU_BENCH_PORTABLE=0
@@ -45,21 +48,41 @@ xemu_leases_sweep() {   # stale = older than 10 s and its pid no longer a marked
   return 0
 }
 
+# A slot is flock(2)ed through a descriptor the xemu launched next inherits:
+# the lock belongs to the open file, so it outlives this script (SIGKILL
+# included) for as long as that xemu runs. zsystem flock takes fcntl locks,
+# which a child doesn't inherit, so python3 locks our descriptors for us.
 xemu_slot_acquire() {
-  local n=${XEMU_FORK_SLOTS:-4} i fd t0=$EPOCHSECONDS said=-1
+  local n=${XEMU_FORK_SLOTS:-4} i fd got t0=$EPOCHSECONDS said=-1
+  local -a fds
   [[ -n $XEMU_SLOT_FD ]] && return 0
   [[ $n == <1-> ]] || n=4
   mkdir -p $XEMU_LEASE_DIR/slots
   xemu_leases_sweep
   while :; do
+    fds=()
     for (( i = 0; i < n; i++ )); do
-      [[ -e $XEMU_LEASE_DIR/slots/$i.lock ]] || : >> $XEMU_LEASE_DIR/slots/$i.lock
-      if zsystem flock -t 0 -f fd $XEMU_LEASE_DIR/slots/$i.lock 2>/dev/null; then
-        XEMU_SLOT=$i XEMU_SLOT_FD=$fd
-        (( said >= 0 )) && echo "lease: slot $i free after $(( EPOCHSECONDS - t0 )) s" >&2
-        return 0
-      fi
+      exec {fd}<>$XEMU_LEASE_DIR/slots/$i.lock
+      fds+=($fd)
     done
+    got=$(python3 -I -c '
+import fcntl, sys
+for i, fd in enumerate(sys.argv[1:]):
+    try:
+        fcntl.flock(int(fd), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        continue
+    print(i)
+    break' $fds 2>/dev/null) || got=
+    for (( i = 0; i < n; i++ )); do
+      [[ $i == $got ]] && continue
+      fd=${fds[i+1]}; exec {fd}<&-
+    done
+    if [[ -n $got ]]; then
+      XEMU_SLOT=$got XEMU_SLOT_FD=${fds[got+1]}
+      (( said >= 0 )) && echo "lease: slot $got free after $(( EPOCHSECONDS - t0 )) s" >&2
+      return 0
+    fi
     if (( said < 0 || EPOCHSECONDS - t0 - said >= 60 )); then
       echo "lease: all $n fork-xemu slots busy (XEMU_FORK_SLOTS); waiting" >&2
       said=$(( EPOCHSECONDS - t0 ))
@@ -79,11 +102,16 @@ xemu_lease_write() {   # <pid> <purpose> <expected seconds>
     "\"expected_end_epoch\": $(( now + secs )), \"slot\": ${XEMU_SLOT:-null}," \
     "\"launcher_pid\": $$, \"marker\": \"xemu-fork-auto\"}" > $f.$$.tmp && mv -f $f.$$.tmp $f
   XEMU_LEASE_PID=$pid
+  # That xemu inherited the slot's descriptor: drop ours, so the slot lasts
+  # exactly as long as the xemu (and later children don't hold it).
+  if [[ -n $XEMU_SLOT_FD ]]; then local fd=$XEMU_SLOT_FD; exec {fd}<&-; XEMU_SLOT_FD=""; fi
+  return 0
 }
 
 xemu_auto_end() {
+  local fd=$XEMU_SLOT_FD
   [[ -n $XEMU_LEASE_PID ]] && rm -f $XEMU_LEASE_DIR/$XEMU_LEASE_PID.json
-  [[ -n $XEMU_SLOT_FD ]] && { zsystem flock -u $XEMU_SLOT_FD 2>/dev/null || true; }
+  [[ -n $fd ]] && exec {fd}<&-
   XEMU_LEASE_PID="" XEMU_SLOT="" XEMU_SLOT_FD=""
   return 0
 }

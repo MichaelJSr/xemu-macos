@@ -29,8 +29,13 @@ are in `xemu-history`.
   write a `/tmp/xemu-leases/<pid>.json` lease); the Windows bench adds
   the marker, the mute and its own bench cache
   (`%LOCALAPPDATA%\xemu-fork-bench`), but no nice, slot or lease. A
-  hand-written launcher must mark and nice too; it takes no slot, so run
-  one at a time. Never mark an xemu the owner
+  launch by hand goes through `python3 -I scripts/xemu_lease.py run
+  [--env K=V] -- <xemu> -config_path <toml> …` (nice, marker, bench
+  cache, slot, lease; it execs the xemu, which holds the slot until it
+  exits, even if the launcher is killed; it refuses a binary without
+  `XEMU_BASE_PATH` (no such string in it, e.g. today's `dist/xemu.app`)
+  unless its clone is portable, since that one keeps its caches in the
+  owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
   pads: `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. Every
@@ -97,7 +102,8 @@ LTO). Look for `Bundling MoltenVK from …` in the log.
 The direct binary inherits only the shell env. `open` passes none of it:
 `open -n -a <clone> --env XEMU_BASE_PATH=<bench cache> --env K=V --stdout F
 --stderr G --args -name xemu-fork-auto -config_path <scratch toml> …` adds
-`LSEnvironment` (no nice: `renice 10` the pid), but then xemu hangs on
+`LSEnvironment` (no nice: `renice 10` the pid; no slot; a binary without
+`XEMU_BASE_PATH` needs the portable clone below), but then xemu hangs on
 a hidden TCC prompt if its ROM/HDD paths are under `~/Documents` (the
 fixtures are), so clone them to `/tmp`. The title
 (`xemu | v<git describe>`) names the build.
@@ -109,9 +115,10 @@ sed -e "s|^hdd_path = .*|hdd_path = '$W/hdd.qcow2'|;s|^eeprom_path = .*|eeprom_p
     -e "s|^fullscreen_on_startup = .*|fullscreen_on_startup = false|;s|^screenshot_dir = .*|screenshot_dir = '$W'|" \
     $F/xemu.toml > $W/xemu.toml   # the fixture's screenshot_dir is personal
 PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml)"})   # mute + pad stubs (zsh)
-env -u XEMU_RAM_SHM XEMU_NV2A_NSPROF=1 XEMU_BASE_PATH=$HOME/Library/Caches/xemu-fork-bench nice -n 10 \
-  $W/xemu.app/Contents/MacOS/xemu -name xemu-fork-auto -config_path $W/xemu.toml \
-  -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
+grep -qa XEMU_BASE_PATH $W/xemu.app/Contents/MacOS/xemu ||   # an older build ignores it:
+  : > $W/xemu.app/Contents/Resources/xemu.toml               # portable clone keeps its caches
+XEMU_NV2A_NSPROF=1 python3 -I scripts/xemu_lease.py run -- $W/xemu.app/Contents/MacOS/xemu \
+  -config_path $W/xemu.toml -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error
 ```
 
@@ -191,8 +198,9 @@ keep those to RAM.
 Bench scripts in `scripts/` accept `-h`. Harnesses read
 `../fixtures/xemu.toml` (or `XEMU_TEST_CONFIG`), clone everything, mute,
 and turn fullscreen off. Each xemu they start is niced and marked, holds
-a slot (all busy: `lease: all 4 fork-xemu slots busy`, it waits; raise
-`XEMU_FORK_SLOTS` only on a quiet box) and a lease, and keeps its caches
+a slot for its whole life (all busy: `lease: all 4 fork-xemu slots busy`,
+it waits; raise `XEMU_FORK_SLOTS` only on a quiet box) and a lease, and
+keeps its caches
 in `$XEMU_BENCH_CACHE` (default `~/Library/Caches/xemu-fork-bench`,
 shared by every bench, cold the first time; a binary older than
 `XEMU_BASE_PATH` gets a per-batch cache in its clone, and in bench-abx

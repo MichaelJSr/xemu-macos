@@ -711,7 +711,14 @@ Other automation interfaces (windowed or headless):
   it; an interactive xemu never has it). The macOS launchers in
   `scripts/` also run them at `nice -n 10` with a lease
   `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
-  `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`. Every
+  `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`. Each
+  holds one of `XEMU_FORK_SLOTS` (4) slots, an `flock` on
+  `/tmp/xemu-leases/slots/<i>.lock` through a descriptor the xemu
+  inherits, so the slot lasts as long as that xemu, even when its
+  launcher is killed. A launch by hand takes a slot with `python3
+  scripts/xemu_lease.py run -- <xemu> -config_path <toml> ...` (nice,
+  marker, bench cache, lease; the xemu replaces the helper, same pid).
+  `XEMU_LEASE_DIR` moves the lease folder (tests only). Every
   launch line in `scripts/`, the agent skills and the docs carries the
   marker or `XEMU_BASE_PATH` (the quick start's `open dist/xemu.app` is
   the user's own launch). The launchers (and the Windows bench) pass xemu
