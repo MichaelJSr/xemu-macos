@@ -50,7 +50,6 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "qemu/bswap.h"
-#include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/thread.h"
 #include "qemu/timer.h"

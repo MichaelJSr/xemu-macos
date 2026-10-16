@@ -22,7 +22,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
-#include "qemu/cutils.h"
 #include "qapi/error.h"
 #include "qapi/util.h"
 #include "qapi/qapi-commands-xemu.h"

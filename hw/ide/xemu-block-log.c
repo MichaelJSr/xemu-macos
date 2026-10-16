@@ -26,7 +26,6 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
-#include "qemu/error-report.h"
 #include "qemu/lockable.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"

@@ -36,7 +36,6 @@
 #if defined(XBOX)
 
 #include "qemu/cutils.h"
-#include "qemu/main-loop.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-xemu.h"
@@ -45,7 +44,6 @@
 #include "exec/cputlb.h"
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
-#include "exec/tlb-common.h"
 #include "exec/translation-block.h"
 #include "exec/xemu-watch.h"
 #include "hw/core/cpu.h"

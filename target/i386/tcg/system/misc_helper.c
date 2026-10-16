@@ -29,7 +29,6 @@
 #include "hw/i386/apic.h"
 
 #if defined(XBOX)
-#include "exec/tb-flush.h"          /* queue_tb_flush */
 #include "exec/translation-block.h" /* tb_invalidate_phys_range */
 #include "exec/target_page.h"       /* TARGET_PAGE_MASK / TARGET_PAGE_SIZE */
 #include "hw/core/cpu.h"            /* cpu_get_phys_page_debug */

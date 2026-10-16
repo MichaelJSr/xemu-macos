@@ -29,7 +29,6 @@
 #include "fpu/softfloat-macros.h"
 #include "helper-tcg.h"
 #include "access.h"
-#include "exec/icount.h"
 
 /* float macros */
 #define FT0    (env->ft0)

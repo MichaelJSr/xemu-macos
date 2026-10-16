@@ -29,7 +29,6 @@
 #include "qemu/cutils.h"
 #include "exec/cpu-common.h"
 #include "exec/cpu-interrupt.h"
-#include "exec/gdbstub.h"
 #include "exec/replay-core.h"
 #include "exec/target_page.h"
 #include "gdbstub/commands.h"

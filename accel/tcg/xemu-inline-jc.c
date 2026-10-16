@@ -33,7 +33,6 @@
 #include "exec/translation-block.h"
 #include "exec/target_page.h"
 #include "tcg/tcg-op-common.h"
-#include "tcg/tcg-temp-internal.h"
 #include "tb-jmp-cache.h"
 #include "tb-hash.h"
 
