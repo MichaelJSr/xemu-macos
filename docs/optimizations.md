@@ -592,18 +592,24 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   cold-boot gain over the way-0-only probe. Unlike the
   16-bit enlargement (failed table) the way-0 hit path and the cache
   footprint did not grow.
-- **`can_do_io` bookkeeping elided when icount and replay are off
-  (default on, 2026-08-04).** Upstream emits `set_can_do_io(false)` /
-  `(true)` into every multi-insn TB body unconditionally, and
+- **`can_do_io` bookkeeping elided unless replay is on (default on,
+  2026-08-04; under icount too since 2026-10-15).** Upstream emits
+  `set_can_do_io(false)` / `(true)` into every multi-insn TB body
+  unconditionally, and
   `io_prepare` turns any mid-TB MMIO access into a `cpu_io_recompile`
   round trip — `tcg_tb_lookup`'s g_tree walk, state restore, siglongjmp,
   a `CF_MEMI_ONLY` re-translate, then re-execute — which is a stable
-  top-25 vCPU symbol on the heavy scene. Nothing observes the flag with
-  icount and replay off (watchpoint.c's use is nested inside
-  `replay_running_debug()`), so both stores now sit behind a
-  translate-time latch that force-disables itself under icount or
-  `replay_mode != REPLAY_MODE_NONE`; `mem_io_pc` assignment is
-  unchanged, so the APIC TPR-access unwind keeps its semantics. Gate
+  top-25 vCPU symbol on the heavy scene. Nothing observed the flag with
+  icount and replay off then (watchpoint.c's use was nested inside
+  `replay_running_debug()`), so both stores went behind a
+  translate-time latch that force-disabled itself under icount or
+  `replay_mode != REPLAY_MODE_NONE` (only under replay since
+  2026-10-15, below); `mem_io_pc` assignment is unchanged, so the APIC
+  TPR-access unwind keeps its semantics. Since the gdb watchpoint fix
+  (`32b1ddf856`), `cpu_watchpoint_hit_reruns` reads the flag in every
+  mode; outside replay it is always true, so an access at ra 0 counts
+  as a debug-interrupt delivery. The xemu-watch access log asks
+  `xemu_io_ok` instead (below). Gate
   (`XEMU_INV_PROF` `(f)` line, read from a knob-off run): **242k
   recompiles/s against a 40k/s build bar (5.2-6.1x)**, and
   `XEMU_GUEST_PROF` shows the symbol plus its callee cluster
@@ -615,6 +621,27 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   thread). Independent of the lockless-MMIO campaign: ~91% of guest
   MMIO already bypasses the BQL and the recompiles fire on exactly
   those lockless regions.
+  **2026-10-15: elided under icount too** (only replay keeps the
+  stores). The two byte stores were 1.6-1.9% of a deterministic run's
+  host instructions. `io_prepare` now asks `xemu_io_ok`, which under
+  icount calls `xemu_io_ra_in_last_insn` instead of reading the flag
+  (the xemu-watch log asks it too, to skip the first pass of an access
+  that `cpu_io_recompile` reruns). That finds the TB from the access's
+  return address and calls the access last-insn exactly when
+  `cpu_unwind_data_from_tb` reports one insn left, which is when the
+  flag was true. A 256-entry cache
+  keyed by `tb_flush_count` keeps the `tcg_tb_lookup` walk off the
+  ~1,800 MMIO accesses per heavy-f1 frame. `XEMU_INV_PROF` reads
+  1,076,129 `io_prepare` calls and 193 recompiles in both binaries. The
+  goldens stay bit-exact. Cross-binary det A/B against 94a722acd8 (load
+  9-21; new against base, negative is fewer): Minsns/frame −1.6% on
+  heavy-f1 (16/16 pairs) and −1.7..−1.8% on stream-e2 (16/16).
+  Mcycles/frame is within noise: heavy-f1 +0.9% (3/6 pairs faster) and
+  +0.3% (6/10, median −0.9%), stream-e2 −3.7% (6/8) and +3.3% (5/8,
+  median −2.7%; a load spike). A same-binary toggle gave −3.7% (5/6) on
+  heavy-f1 and −0.4% (2/6) on stream-e2. Duplicating the stores instead
+  cost +4.5% (0/6). With the flag left true, icount's "Bad icount read"
+  guard no longer fires.
 - **`notdirty_write` dirty-check fast path (default on, deliberately
   no fps claim, 2026-08-04).** The store slow path's tail re-read the
   dirty bitmap to decide whether to clear `TLB_NOTDIRTY` after the same
@@ -2574,3 +2601,4 @@ counter).
 | ImGui frame build under BQL + main-loop mutex (audit §1.9) | Closed 2026-08-04 exactly as the audit predicted it would be. The HUD build holds both locks, which looked like a vCPU-blocking hazard; the measurement (`XEMU_UI_LOCK_STATS=1`, which shipped precisely to answer this without a bespoke build) puts combined occupancy at **mean 0.386% / median 0.373%**, under the pre-registered 0.5% kill bar. No rework. The knob stays as the standing re-check — this is a "measure first, expect a kill" candidate that got its kill |
 | `notdirty_write` dirty-check **fps claim** (audit §1.2) — the claim, not the code | Killed 2026-08-04 while the code shipped. The audit sized the candidate on a profile where `notdirty_write` carried a 75.1% trap share; the 2026-07-18 arm-(b) store-prefilter promotion then inhaled that population, and the in-scene re-measurement reads **~2.6k calls/s at a 2.2% trap share — a 34-57x collapse of the benefit base**, ceiling ≤ 0.06% of the vCPU thread, i.e. under the ±0.02 fps protocol resolution. The code stays (unconditionally since its `XEMU_DIRTY_FAST` hatch was removed on 2026-10-15) as a behavior-equivalent simplification with **no individual fps claim and no individual A/B** (Changes manifest). The transferable lesson is the proxy-collapse one: a candidate sized against a *profile* rather than a *mechanism* silently expires when an earlier landing changes the population, so re-measure the benefit base at build time, not at audit time |
 | Lockless MMIO for the remaining BQL blocks (NV2A `PMC`/`PCRTC`/`PTIMER`, APU `main`/`gp`/`ep`) | Closed by written verdict 2026-08-04 — **[`docs/Finished/lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md)**, which satisfies archaeology 7.5's reopen condition ("audits for the remaining regions are written") without building anything. Fixture-independent ceiling: the *entire* pre-campaign BQL-MMIO prize was 117k ops/s × ~52 ns = **0.61% of one core**, and PFB/USER (78%) + APU-VP (~11%) + PGRAPH already harvested it — residual **< 0.07% of a core ≈ +0.01-0.06 fps**, at or below the ±0.02 fps static-baseline resolution. Correctness wall on top: these handlers call `nv2a_update_irq` inline, so BQL-free dispatch would drive `pci_irq_assert` with no BQL at all and race the iothread's vblank raise — the `pgraph-lockless-audit.md` §C race one level up, hang class, unfixable by atomics alone. Reopen bar: `XEMU_MMIO_PROF` `BQL wait total` ≥ 500 ms / 75 s — **measured 2026-08-04 at 75.6 ms per 75 s (2,178,310 BQL-taking ops, avg 47 ns, max 82.0 µs), 6.6x under the bar**, so the verdict now rests on a measurement and not only on the arithmetic (verdict page §A.1) |
+| icount TB-entry store forwarding (`icount_decr.low` stored 16-bit, the next TB loads `.u32`) | Closed 2026-10-15: no measurable stall. A matched 32-bit store (racy, since it can drop a cross-thread kick) measured 0% pooled over 14 heavy-f1 and 10 stream-e2 det pairs. The exact form, loading the two halves separately and ORing in the sign-extended `.high`, cost +1.4..+1.5% Minsns/frame and +1.3..+2.7% Mcycles/frame. On top of the `can_do_io` change it still cost +1.3% Minsns/frame, and its cycles were mixed (−3.2%, 4/6 pairs, then +1.7%, 2/8; new against base, negative is fewer). A microbenchmark shows the partial-forward penalty, about 1 cycle, only when TB bodies are under ~25 host insns. So the sampler's 3.5% of the vCPU on the entry `ldur` is not a forwarding stall; it is probably skid from the TB-entry redirect |

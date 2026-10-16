@@ -56,6 +56,12 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
 /* Forget a pending icount step (cpu-exec.c); a load keeps the TBs. */
 void xemu_istep_disarm(void);
 void xemu_flush_jmp_cache(CPUState *cpu, bool steps);
+/* TBs keep cpu->neg.can_do_io only under replay (translator.c). */
+bool xemu_elide_can_do_io(void);
+/* Under icount: may the access returning to @retaddr do I/O now? */
+bool xemu_io_ra_in_last_insn(uintptr_t retaddr);
+/* Either mode: false when io_prepare() will cpu_io_recompile() it. */
+bool xemu_io_ok(CPUState *cpu, uintptr_t retaddr);
 #endif
 
 #endif

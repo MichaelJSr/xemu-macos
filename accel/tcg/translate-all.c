@@ -675,6 +675,66 @@ static void xemu_io_pc_note(vaddr pc)
 #endif
 
 #ifndef CONFIG_USER_ONLY
+#if defined(XBOX)
+/*
+ * Under icount, may the guest access returning to @retaddr do device I/O
+ * now? Only from the last insn of its TB, whose whole insn count is
+ * already charged, so the clock is exact there; anywhere else
+ * cpu_io_recompile() first ends the TB at that insn. This is the answer
+ * the per-TB can_do_io stores used to give (translator.c no longer emits
+ * them outside replay). An access from outside TB code (retaddr 0, or a
+ * C caller's address) never recompiles, as when the flag was true there.
+ *
+ * A code address keeps its answer until tb_flush() reuses the buffer
+ * (recycled TBs keep their code, and only never-run code is discarded),
+ * so a small cache keyed by the flush count keeps the tcg_tb_lookup()
+ * tree walk off the per-access path. icount runs a single vCPU thread,
+ * the only caller.
+ */
+bool xemu_io_ra_in_last_insn(uintptr_t retaddr)
+{
+    static struct {
+        uintptr_t ra;
+        unsigned flush;
+        bool last;
+    } cache[256];
+    unsigned h = (retaddr >> 2) % ARRAY_SIZE(cache);
+    unsigned flush = qatomic_read(&tb_ctx.tb_flush_count);
+    uint64_t data[INSN_START_WORDS];
+    TranslationBlock *tb;
+    bool last;
+
+    if (!retaddr) {
+        return true;
+    }
+    if (cache[h].ra == retaddr && cache[h].flush == flush) {
+        return cache[h].last;
+    }
+    tb = tcg_tb_lookup(retaddr);
+    /* cpu_unwind_data_from_tb() counts the insns left, this one included. */
+    last = !tb || cpu_unwind_data_from_tb(tb, retaddr, data) <= 1;
+    cache[h].ra = retaddr;
+    cache[h].flush = flush;
+    cache[h].last = last;
+    return last;
+}
+
+/*
+ * May the access returning to @retaddr do device I/O now, or does
+ * io_prepare() first end its TB there with cpu_io_recompile(), so that
+ * the access runs again? Under icount this is the retaddr check above:
+ * cpu->neg.can_do_io stays true there, so code that must tell the first
+ * pass of such an access from its rerun (xemu-watch.c) asks this.
+ */
+bool xemu_io_ok(CPUState *cpu, uintptr_t retaddr)
+{
+    if (icount_enabled() && xemu_elide_can_do_io()) {
+        return xemu_io_ra_in_last_insn(retaddr);
+    }
+    return cpu->neg.can_do_io;
+}
+#endif
+
 /*
  * In deterministic execution mode, instructions doing device I/Os
  * must be at the end of the TB.

@@ -52,6 +52,7 @@
 #include "system/tcg.h"
 #include "tcg/insn-start-words.h"
 #include "tcg/tcg.h"
+#include "tb-internal.h"
 
 #define WATCH_MAX_RANGES 64
 #define WATCH_MAX_SIZE (16 * MiB)
@@ -240,8 +241,11 @@ void xemu_watch_check(CPUState *cpu, vaddr addr, vaddr len, int flags,
         watch_rerun = WATCH_RERUN_LOG;
     }
     rerun = watch_rerun == WATCH_RERUN_LOG;
-    /* I/O without can_do_io: cpu_io_recompile reruns it (icount). */
-    if (!h8 && !cpu->neg.can_do_io) {
+    /*
+     * I/O that io_prepare sends through cpu_io_recompile, which reruns it
+     * (icount; cpu->neg.can_do_io stays true there, xemu_io_ok).
+     */
+    if (!h8 && !xemu_io_ok(cpu, ra)) {
         return;
     }
     if (watch_npend && !rerun) {

@@ -67,7 +67,11 @@ int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len)
 #ifdef XBOX
 bool cpu_watchpoint_hit_reruns(CPUState *cpu, uintptr_t ra)
 {
-    /* No TB holds an access at ra 0; outside one, can_do_io is set. */
+    /*
+     * No TB holds an access at ra 0; outside one, can_do_io is set. TBs
+     * keep the flag only under replay (translator.c), so elsewhere, under
+     * icount too, ra 0 alone means a delivery.
+     */
     return ra || !cpu->neg.can_do_io;
 }
 #endif

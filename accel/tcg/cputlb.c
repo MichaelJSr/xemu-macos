@@ -1780,8 +1780,12 @@ io_prepare(hwaddr *out_offset, CPUState *cpu, hwaddr xlat,
     if (unlikely(xemu_inv_prof_on())) {
         xemu_io_prepare_calls++;
     }
+    /* Outside replay the TBs no longer keep can_do_io (translator.c). */
+    bool io_ok = xemu_io_ok(cpu, retaddr);
+#else
+    bool io_ok = cpu->neg.can_do_io;
 #endif
-    if (!cpu->neg.can_do_io) {
+    if (!io_ok) {
 #if defined(XBOX)
         if (unlikely(xemu_inv_prof_on())) {
             xemu_io_recompiles++;

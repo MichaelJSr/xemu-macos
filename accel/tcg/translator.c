@@ -23,30 +23,34 @@
 #include "tb-internal.h"
 #include "xemu-xpage.h"
 #if defined(XBOX)
-#include "exec/icount.h"
 #ifndef CONFIG_USER_ONLY
 #include "exec/replay-core.h"
 #endif
 
 /*
- * Do not emit the per-TB can_do_io bookkeeping stores unless something
- * observes the flag. It is only ever read by icount
- * (tcg-accel-ops-icount.c, icount-common.c), by replay debugging
- * (watchpoint.c), and by io_prepare()'s cpu_io_recompile() trigger,
- * which exists to re-run a mid-TB MMIO access under CF_MEMI_ONLY for
- * icount/replay determinism. With icount and replay both off nothing
- * observes it, the flag stays true, and the guest's device-register
- * traffic stops paying the recompile round trip.
+ * Do not emit the per-TB can_do_io bookkeeping stores (false before a
+ * multi-insn TB's first insn, true before its last) unless replay is on.
+ * The flag tells io_prepare() whether an MMIO access sits mid-TB and must
+ * cpu_io_recompile() to end the TB at it (icount determinism); icount
+ * reads and replay watchpoints check it too. With icount off nothing
+ * needs that answer: the flag stays true and device-register traffic
+ * never pays the recompile round trip. Under icount, io_prepare() gets
+ * the same answer from the access's return address instead
+ * (xemu_io_ra_in_last_insn()), since the two byte stores were 1.6-1.9%
+ * of a deterministic run's host instructions (2026-10-15). The flag then
+ * stays true there too, so icount-common.c's "Bad icount read" guard can
+ * no longer catch a mid-TB clock read: anything reading the virtual
+ * clock from TB code must end its TB (translator_io_start).
  *
  * Latched on the first translation, which is before the first TB runs;
- * icount and replay are both fixed at machine init, so a cached TB can
- * never outlive the answer.
+ * replay is fixed at machine init, so a cached TB can never outlive the
+ * answer.
  */
-static bool xemu_elide_can_do_io(void)
+bool xemu_elide_can_do_io(void)
 {
     static int on = -1;
     if (on < 0) {
-        on = !icount_enabled();
+        on = 1;
 #ifndef CONFIG_USER_ONLY
         if (replay_mode != REPLAY_MODE_NONE) {
             on = 0;
