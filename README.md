@@ -528,10 +528,15 @@ Other automation interfaces (windowed or headless):
   all of guest RAM (what `xemu-dump-ram`'s file hashes to), with no
   file and no GPU write-back, pausing a running VM for it (~55 ms for
   128 MiB). `"pages": true` adds `page-hashes`: 16 hex digits per 4 KiB
-  page in address order, the first 8 bytes of each page's sha256 (~60
-  ms more). `"against": "<checkpoint>"` returns `differ`, the page
+  page in address order, the first 8 bytes of each page's sha256,
+  hashed on all cores (~5 ms more). `"algorithm": "xxh3-128"` returns
+  `xxh3-128` instead of `sha256`, the XXH3-128 of all of RAM (32 hex
+  digits, as `xxh128sum` prints it; ~4 ms), and makes `page-hashes`
+  each page's XXH3-64 (~1 ms): not cryptographic, but equal across
+  identical runs and different after any changed byte.
+  `"against": "<checkpoint>"` returns `differ`, the page
   numbers (address / 4096) whose bytes differ from the RAM that
-  checkpoint holds (~10 ms; no `sha256` unless `"sha256": true`).
+  checkpoint holds (~5 ms; no `sha256` unless `"sha256": true`).
 - **Load check**: with `XEMU_LOAD_VERIFY=1`, every load (`loadvm`,
   `xemu-checkpoint-restore`, an incoming migration) keeps a copy of
   guest RAM, and when the VM next starts, or the next load begins

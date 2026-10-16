@@ -2681,6 +2681,28 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   candidates (input, traces) gave the same reply, trace and RAM sha256
   as a full restore followed by `xemu-run` without a checkpoint, and an
   incremental `verify` restore after 20 more found `pages-missed` 0.
+- **`xemu-ram-digest` takes `"algorithm": "xxh3-128"` and hashes pages
+  in parallel (2026-10-16).** The sha256 of 128 MiB is ~55 ms, nearly
+  all of it `AccelerateCrypto_SHA256_compress` (CPU SHA-2 at ~2.4 GB/s,
+  the serial ceiling), and `pages` added ~60 ms of serial per-page
+  sha256. XXH3-128 of all of RAM takes ~4 ms; page hashes (sha256, or
+  XXH3-64 with the new algorithm) run as 64 tasks of 512 pages on
+  `dispatch_apply_f` (QEMU's `ThreadPool` elsewhere), since the VM is
+  paused. The default reply is unchanged and byte-identical to the old
+  binary's (whole, pages and `against`); `against` stays serial (memory
+  bound: in parallel it took 1.2 instead of 4.7 ms but tripled the CPU
+  time). xxHash is compiled inline in the file: the in-tree library is
+  built with every `auto` feature disabled (configure
+  `--without-default-features`), `XXH_CPU_LITTLE_ENDIAN=0` included, so
+  its XXH3 matches no other xxHash (a zero page hashes to
+  `d91784870c6ee3f1`, not `93d76fe148c689ba`); `fast_hash` only compares
+  its own hashes, so it is left alone. Cross-binary, load 10, median of
+  10: sha256 57.6 → 54.9 ms (same algorithm), XXH3-128 4.4 ms (−92% wall
+  against sha256), `pages` 125 → 68 ms wall (page part 62 → 5 ms; 0.8 ms
+  with XXH3), process cycles for `pages` unchanged (385 → 392 Mcycles).
+  XXH3 replies equal across identical det runs, match an independent
+  xxHash 0.8.3 build of the dumped RAM, and change in exactly one page
+  after a one-byte gdbstub write.
 
 ### Retired diagnostics and dark experiments (2026-10-10)
 

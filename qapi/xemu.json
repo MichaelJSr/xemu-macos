@@ -275,17 +275,38 @@
 { 'command': 'query-xemu-checkpoints', 'returns': ['XemuCheckpointInfo'] }
 
 ##
+# @XemuDigestAlgorithm:
+#
+# How @xemu-ram-digest hashes.
+#
+# @sha256: SHA-256 (the whole-RAM hash equals the sha256 of
+#     @xemu-dump-ram's file)
+#
+# @xxh3-128: XXH3-128 for all of RAM and XXH3-64 per page (xxHash
+#     0.8, canonical big-endian byte order, as xxhsum prints them):
+#     about 15 times faster, but not a cryptographic hash
+#
+# Since: 10.2
+##
+{ 'enum': 'XemuDigestAlgorithm', 'data': [ 'sha256', 'xxh3-128' ] }
+
+##
 # @XemuRamDigest:
 #
 # @sha256: lowercase hex sha256 of all of guest RAM, which is the
-#     sha256 of @xemu-dump-ram's file (absent with @sha256 false)
+#     sha256 of @xemu-dump-ram's file (only with @algorithm sha256;
+#     absent with @sha256 false)
+#
+# @xxh3-128: 32 lowercase hex digits, the XXH3-128 of all of guest RAM
+#     (only with @algorithm xxh3-128; absent with @sha256 false)
 #
 # @ram-size: guest RAM size in bytes (64 MiB retail, 128 MiB devkit)
 #
 # @frame: the frame counter (see @query-xemu-frame) at the digest
 #
 # @page-hashes: with @pages, 16 lowercase hex digits per 4 KiB page,
-#     in address order: the first 8 bytes of the page's sha256
+#     in address order: the first 8 bytes of the page's sha256, or
+#     with @algorithm xxh3-128 the page's XXH3-64
 #
 # @differ: with @against, the pages whose bytes differ from the
 #     checkpoint's, as ascending page numbers (physical address
@@ -296,7 +317,8 @@
 # Since: 10.2
 ##
 { 'struct': 'XemuRamDigest',
-  'data': { '*sha256': 'str', 'ram-size': 'uint64', 'frame': 'int',
+  'data': { '*sha256': 'str', '*xxh3-128': 'str', 'ram-size': 'uint64',
+            'frame': 'int',
             '*page-hashes': 'str', '*differ': ['int'],
             'elapsed-us': 'int' } }
 
@@ -307,17 +329,22 @@
 # surfaces (unlike @xemu-dump-ram's default @gpu-sync).  The VM is
 # paused for it and resumes if it was running.
 #
-# @sha256: hash all of RAM (default true, or false with @against)
+# @sha256: hash all of RAM, with @algorithm (default true, or false
+#     with @against)
 #
 # @pages: also return @page-hashes (default false)
 #
 # @against: a checkpoint's name (see @xemu-checkpoint-save): return
 #     @differ, the pages that differ from the RAM it holds
 #
+# @algorithm: the hash for all of RAM and for @page-hashes (default
+#     sha256)
+#
 # Since: 10.2
 ##
 { 'command': 'xemu-ram-digest',
-  'data': { '*sha256': 'bool', '*pages': 'bool', '*against': 'str' },
+  'data': { '*sha256': 'bool', '*pages': 'bool', '*against': 'str',
+            '*algorithm': 'XemuDigestAlgorithm' },
   'returns': 'XemuRamDigest' }
 
 ##
