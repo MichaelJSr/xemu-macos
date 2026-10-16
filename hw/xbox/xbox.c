@@ -58,7 +58,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #endif
-#include "ui/xemu-notifications.h"
+#include "ui/xemu-automation.h"
 #include "hw/xbox/nv2a/nv2a.h"
 #include "hw/xbox/mcpx/apu/apu.h"
 
@@ -181,9 +181,10 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
 }
 
 /*
- * Shared guest RAM: XEMU_RAM_SHM=<name> backs guest RAM with a named
- * shared memory object of the RAM's size, so another process can map it
- * and read guest RAM with no copy at all (Python:
+ * Shared guest RAM: XEMU_RAM_SHM=<name>, or xemu.toml's [automation]
+ * ram_shm (ui/xemu-automation.c), backs guest RAM with a named shared
+ * memory object of the RAM's size, so another process can map it and read
+ * guest RAM with no copy at all (Python:
  * multiprocessing.shared_memory.SharedMemory("<name>")). The RAM block
  * keeps its name, so savestates load either way.
  *
@@ -464,9 +465,10 @@ static RamShmResult xbox_ram_shm_create(const char *name, uint64_t size,
 
 static bool xbox_ram_shm_init(MemoryRegion *ram, uint64_t size)
 {
-    const char *e = getenv("XEMU_RAM_SHM");
+    bool from_toml;
+    const char *e = xemu_automation_ram_shm(&from_toml);
 
-    if (!e || !e[0]) {
+    if (!e) {
         return false;
     }
 #ifdef _WIN32
@@ -482,19 +484,27 @@ static bool xbox_ram_shm_init(MemoryRegion *ram, uint64_t size)
     if (r == RAM_SHM_CREATED) {
         memory_region_init_ram_ptr(ram, NULL, "xbox.ram", size, host);
         vmstate_register_ram_global(ram);
-        fprintf(stderr, "xemu: guest RAM in shared memory %s\n", name);
+        if (from_toml) {
+            fprintf(stderr, "xemu: [automation] ram_shm = \"%s\": applied: "
+                    "guest RAM in shared memory %s\n", e, name);
+        } else {
+            fprintf(stderr, "xemu: guest RAM in shared memory %s\n", name);
+        }
         return true;
     }
-    if (r == RAM_SHM_ERROR) {
+    if (r == RAM_SHM_ERROR && !from_toml) {
         error_report("XEMU_RAM_SHM: %s", why);
         exit(1);
     }
 
+    g_autofree char *line = from_toml ?
+        g_strdup_printf("xemu: [automation] ram_shm = \"%s\": skipped: %s",
+                        e, why) :
+        g_strdup_printf("xemu: XEMU_RAM_SHM: %s; guest RAM stays private",
+                        why);
     g_autofree char *toast = g_strdup_printf("Shared RAM not opened: %s",
                                              why);
-    fprintf(stderr, "xemu: XEMU_RAM_SHM: %s; guest RAM stays private\n",
-            why);
-    xemu_queue_notification(toast);
+    xemu_automation_skipped(line, toast);
     return false;
 }
 

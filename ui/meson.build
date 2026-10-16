@@ -26,6 +26,7 @@ xemu_ss.add(files(
   'xemu-net.c',
   'xemu-events.c',
   'xemu-settings.cc',
+  'xemu-automation.c',
   'xemu-controllers.cc',
 
   'xemu.c',

@@ -87,6 +87,14 @@ void MainMenuGeneralView::Draw()
                });
     // toggle("Throttle DVD/HDD speeds", &g_config.general.throttle_io,
     //        "Limit DVD/HDD throughput to approximate Xbox load times");
+
+    if ((g_config.automation.ram_shm && *g_config.automation.ram_shm) ||
+        (g_config.automation.qmp && *g_config.automation.qmp)) {
+        SectionTitle("Automation");
+        Toggle("Automation endpoints", &g_config.automation.enabled,
+               "Open xemu.toml's [automation] shared RAM and QMP monitor "
+               "(requires restart)");
+    }
 }
 
 bool MainMenuInputView::ConsumeRebindEvent(SDL_Event *event)

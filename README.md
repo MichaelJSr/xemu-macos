@@ -553,8 +553,9 @@ Other automation interfaces (windowed or headless):
   while what the start itself does on the vCPU (overdue device timers,
   PFIFO catching up) does not. It costs a RAM-sized copy (64 or 128
   MiB) and a few ms per load and per start.
-- **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` puts guest RAM in named shared
-  memory that another process can map (Python:
+- **Zero-copy RAM**: `XEMU_RAM_SHM=<name>` (or the player's
+  `[automation] ram_shm`, below) puts guest RAM in named shared memory
+  that another process can map (Python:
   `multiprocessing.shared_memory.SharedMemory("<name>")`, then
   `resource_tracker.unregister`, or `track=False` from 3.13, so Python
   does not unlink it): POSIX shm `/<name>` on macOS and Linux, a named
@@ -574,6 +575,41 @@ Other automation interfaces (windowed or headless):
   holds it by then. At exit the name is unlinked only if it is still
   that xemu's object. Other failures to create it still end the launch. Savestates
   are unaffected.
+- **`[automation]` in the player's `xemu.toml`** turns endpoints on for
+  a tool that reads the running game, so a Dock or Finder launch needs
+  no arguments:
+
+  ```toml
+  [automation]
+  ram_shm = "azurik-live"                        # as XEMU_RAM_SHM
+  qmp = "tcp:127.0.0.1:4444,server=on,wait=off"  # what -qmp takes
+  ```
+
+  The table applies only to the player's own launch: `xemu.toml` is the
+  SDL pref dir's (no `-config_path`, no `XEMU_BASE_PATH`, not portable
+  mode) and the guest name is not `xemu-fork-auto`. A harness's scratch
+  config (its own `-config_path`) or a bench (`XEMU_BASE_PATH`) never
+  takes the player's name or port, even from a copied toml. A non-empty
+  `XEMU_RAM_SHM` overrides `ram_shm`, and a QMP monitor on the command
+  line (`-qmp`, `-qmp-pretty`, `-mon mode=control`) overrides `qmp`.
+  Each key that is set gets one stderr line, `xemu: [automation] <key> =
+  "<value>": applied`, `ignored (<why>)` or `skipped: <why>`. An
+  endpoint that can't open (something listens on that address and port,
+  a live listener holds the unix socket path, a live xemu holds the
+  name) is skipped with that line and an in-app notification, and xemu
+  keeps running. On macOS a listener on another address doesn't count:
+  with another program on `*:4444`, `127.0.0.1:4444` still opens (QEMU
+  sets `SO_REUSEADDR`), the key says `applied`, and loopback connections
+  to that port reach xemu. The monitor's `wait` is always off, so a
+  launch never waits for a client. `open` without `-n` starts no second
+  copy of a bundle id: while any windowed or offscreen xemu runs, a
+  bench's or an agent's clone included (clones keep `app.xemu.xemu`;
+  headless `null` runs don't count), it starts nothing, and a Dock
+  launch may only bring that copy forward.
+  Settings > General > Automation endpoints
+  (`automation.enabled`, shown once a key is set) turns the table off
+  without deleting it. A build without the table (upstream xemu, or a
+  fork build from before it) drops it when it saves `xemu.toml` at exit.
 - **gdbstub reads** may ask for up to 4 MiB per `m` (was 64 KiB), and the
   binary `x addr,len` read (GDB 16, advertised as `binary-upload+`)
   halves the bytes on the wire. In `Qqemu.PhyMemMode:1` a 150 MB sweep
@@ -724,7 +760,8 @@ Other automation interfaces (windowed or headless):
   path: <dir>/`.
 - **Automated-run marker**: xemus started by this fork's tooling carry
   `-name xemu-fork-auto` right after the binary (`ps -axo command` shows
-  it; an interactive xemu never has it). The macOS launchers in
+  it; an interactive xemu never has it, and the marker keeps the
+  player's `[automation]` table off). The macOS launchers in
   `scripts/` also run them at `nice -n 10` with a lease
   `/tmp/xemu-leases/<xemu pid>.json` and the bench cache as
   `XEMU_BASE_PATH`; the contract is in `scripts/xemu_lease.py`. Each
@@ -762,13 +799,14 @@ Other automation interfaces (windowed or headless):
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one
   fails with `UNIX socket <path> is in use by a live listener: Address
-  already in use` (at launch, xemu exits 1), and the running one keeps
-  its socket. A stale socket or a plain file is replaced, as before.
-  When a listener closes, it unlinks the path only if the path is still
-  its own socket file. On macOS the QMP monitor serves one client at a
-  time and queues one more connection, so further connects fail with
-  `ECONNREFUSED` while a client holds it. That means busy, not gone: the
-  file is still there.
+  already in use` (at launch, xemu exits 1; the player's `[automation]
+  qmp` is skipped instead), and the running one keeps its socket. A
+  stale socket or a plain file is replaced, as before. When a listener
+  closes, it unlinks the path only if the path is still its own socket
+  file. On macOS the QMP monitor serves one client at a time and queues
+  one more connection, so further connects fail with `ECONNREFUSED`
+  while a client holds it. That means busy, not gone: the file is still
+  there.
 - **Host-time profile**: QMP `query-xemu-host-profile` returns counters
   cumulative since launch: `translate-ns`/`translations` (host time
   translating guest code), `apu-ns`/`apu-ticks` (the APU's ticks under

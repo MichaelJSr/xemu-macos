@@ -305,6 +305,7 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 | `audio.dsp_jit.enabled` | false | The only switch for the fork's DSP JIT (both cores, GP and EP) |
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
+| `automation.ram_shm`, `.qmp`, `.enabled` | "", "", true | The player's tracker endpoints (as `XEMU_RAM_SHM`, `-qmp`); applied only to the pref dir's config with no `-config_path`, `XEMU_BASE_PATH` or marker (README) |
 
 Add a knob only for a normal-mode change the det goldens can't verify, a
 diagnostic, a harness interface or a user tuning knob (CLAUDE.md). Read

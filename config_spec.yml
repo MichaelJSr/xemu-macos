@@ -406,3 +406,15 @@ perf:
   cache_shaders:
     type: bool
     default: true
+
+# Endpoints for a tool that reads the running game (ui/xemu-automation.c),
+# applied only to the player's own launch: the SDL pref dir's xemu.toml,
+# with no -config_path, no XEMU_BASE_PATH, not portable mode, and no
+# -name xemu-fork-auto. XEMU_RAM_SHM and a command-line QMP monitor
+# override the keys; enabled is the Settings toggle.
+automation:
+  enabled:
+    type: bool
+    default: true
+  ram_shm: string
+  qmp: string

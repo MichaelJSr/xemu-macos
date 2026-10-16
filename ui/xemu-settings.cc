@@ -41,6 +41,8 @@ struct config g_config;
 
 static const char *filename = "xemu.toml";
 static const char *settings_path;
+static bool settings_path_from_cli; /* -config_path */
+static bool base_path_portable;
 static std::string error_msg;
 
 const char *xemu_settings_get_error_message(void)
@@ -67,6 +69,7 @@ void xemu_settings_set_path(const char *path)
     assert(path != NULL);
     assert(settings_path == NULL);
     settings_path = path;
+    settings_path_from_cli = true;
     fprintf(stderr, "%s: config path: %s\n", __func__, settings_path);
 }
 
@@ -99,6 +102,7 @@ const char *xemu_settings_get_base_path(void)
         const char *base = SDL_GetBasePath();
         assert(base != NULL);
         base_path = g_strdup(base);
+        base_path_portable = true;
     } else {
         char *base = SDL_GetPrefPath("xemu", "xemu");
         assert(base != NULL);
@@ -120,6 +124,23 @@ const char *xemu_settings_get_path(void)
     settings_path = g_strdup_printf("%s%s", base, filename);
     fprintf(stderr, "%s: config path: %s\n", __func__, settings_path);
     return settings_path;
+}
+
+const char *xemu_settings_why_not_pref_dir(void)
+{
+    const char *env = g_getenv("XEMU_BASE_PATH");
+
+    if (settings_path_from_cli) {
+        return "-config_path names the config";
+    }
+    if (env && *env) {
+        return "XEMU_BASE_PATH is set";
+    }
+    xemu_settings_get_base_path();
+    if (base_path_portable) {
+        return "portable mode: xemu.toml beside the app";
+    }
+    return NULL;
 }
 
 const char *xemu_settings_get_default_eeprom_path(void)

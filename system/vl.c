@@ -149,6 +149,7 @@
 #include "ui/xemu-input.h"
 #include "ui/xemu-loadvm-pads.h"
 #include "ui/xemu-present.h"
+#include "ui/xemu-automation.h"
 #include "hw/xbox/eeprom_generation.h"
 
 #define MAX_VIRTIO_CONSOLES 1
@@ -4121,6 +4122,10 @@ void qemu_init(int argc, char **argv)
      */
     qemu_create_late_backends();
     phase_advance(PHASE_LATE_BACKENDS_CREATED);
+#ifdef XBOX
+    /* xemu.toml's [automation] (QMP now; its shared RAM name at board init) */
+    xemu_automation_apply();
+#endif
 
     /*
      * Note: creates a QOM object, must run only after global and

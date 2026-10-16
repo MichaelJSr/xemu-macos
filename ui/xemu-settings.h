@@ -51,6 +51,10 @@ const char *xemu_settings_get_base_path(void);
 // Get path of the config file on disk
 const char *xemu_settings_get_path(void);
 
+// NULL when xemu.toml is the SDL pref dir's (the player's own config: no
+// -config_path, no XEMU_BASE_PATH, not portable mode), else why not
+const char *xemu_settings_why_not_pref_dir(void);
+
 // Get path of the default generated eeprom file on disk
 const char *xemu_settings_get_default_eeprom_path(void);
 
