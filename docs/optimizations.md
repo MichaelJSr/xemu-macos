@@ -1605,6 +1605,32 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   outside the 16380 word window, costing an extra `ADD` on every emitted
   Y-space access) — shipping it here would have contaminated the
   pre-registered `code_buf_used` band.
+- **One exit-word test per DSP op (2026-10-16).** The JIT's per-op
+  epilogue ran ~27 host instructions of bookkeeping (31 inside a DO
+  loop), 53% of DSP JIT cycles on det heavy-f1. `interrupt_state`,
+  `interrupt_counter`, `interrupt_pipeline_count`, `is_idle` and
+  `jit_exit_block_request` now fill one aligned 8-byte word
+  (`jit_exit_word`) tested with `LDR X` + `CBNZ`; a non-zero word runs
+  the old checks in the old order, out of line after the block's exit,
+  with the REP helper and the loop edge. The emitters record what an
+  op's body may change (stores to `pc`, `cur_inst_len`, `instr_cycle`,
+  `loop_rep`; any BLR outside a whitelist of memory/peripheral,
+  `pm_read_accu24`, `rnd56` and `calc_ea`'s slow call). An op that
+  can't move pc stores it from a constant and drops the main-line PC
+  check (88% of executed ops; the REP, loop-edge and interrupt paths
+  keep it), compares LA against a constant, and adds a constant to
+  `num_inst` when `instr_cycle` can't change (82%); `loop_rep` is tested
+  only on a block's first op and around ops that may set it (13.5%). A
+  typical in-loop op's epilogue is 11 instructions. Every check fires
+  at the same op as before. Det, RAM equal in every arm: heavy-f1 1200,
+  18 pairs in 2 sessions (load 12-47), instructions −1.26% per frame
+  (18/18), cycles paired median −0.95% (11/18, noisy); stream-e2 600,
+  8 pairs, instructions −1.18% (8/8), cycles within noise. xctrace PMI
+  on det heavy-f1: DSP JIT 3.93% → 3.09% of the vCPU, bookkeeping
+  2.09% → 1.26%. `XEMU_DSP_JIT_DIFF=1` failures=0 on heavy-f1,
+  stream-e2, cold boot and a normal-mode run; translations unchanged
+  (GP 44 / EP 86). Not done: LA-specialised blocks (the LA load and
+  compare are 0.27% of the vCPU after this).
 - **Guest voice handles bounds-checked; APU RAM dirty marking behind a
   per-platform default (2026-09-08).** Cherry-picked from `971292ed48`
   on `windows-wave1-wip` (APU half; the XID half lands separately).

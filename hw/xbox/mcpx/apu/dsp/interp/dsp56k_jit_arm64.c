@@ -275,11 +275,36 @@ bool dsp56k_jit_diff_enabled(void)
  * little-endian instruction stream. Opcodes are emitted as uint32_t.
  * --------------------------------------------------------------- */
 
+/*
+ * What an op's emitted body may change, on any path, for the per-op
+ * epilogue (emit_post_instruction_epilogue). Collected by the store
+ * primitives (any STR/STRH/STRB to [x19, #field]) and by emit_blr
+ * (blr_effects: a helper not on its whitelist may change all three).
+ */
+#define OPFX_PC   (1u << 0)   /* pc or cur_inst_len */
+#define OPFX_CYC  (1u << 1)   /* instr_cycle */
+#define OPFX_REP  (1u << 2)   /* loop_rep */
+#define OPFX_ALL  (OPFX_PC | OPFX_CYC | OPFX_REP)
+
 typedef struct {
     uint32_t *buf;       /* write head */
     uint32_t *buf_start;
     uint32_t *buf_end;   /* exclusive */
+    /* OPFX_* the current op's body may cause; the op stubs reset it
+     * after their cur_inst / cur_inst_len / instr_cycle presets. */
+    uint32_t op_fx;
+    /* The last emit_mov_imm64 (a BLR target) and where it ended, so
+     * emit_blr can name its callee. */
+    uint32_t *imm64_end;
+    int imm64_rd;
+    uint64_t imm64_val;
+    /* EA mode of the calc_ea slow call being emitted (blr_effects). */
+    uint32_t slow_ea_mode;
 } ArmEmit;
+
+static void note_store(ArmEmit *e, int rn, unsigned int off,
+                       unsigned int size);
+static uint32_t blr_effects(const ArmEmit *e, uint64_t target);
 
 static inline void emit_u32(ArmEmit *e, uint32_t insn)
 {
@@ -337,6 +362,9 @@ static void emit_mov_imm64(ArmEmit *e, int rd, uint64_t imm)
     if (((imm >> 48) & 0xffff) != 0) {
         emit_movk_x(e, rd, (imm >> 48) & 0xffff, 48);
     }
+    e->imm64_end = e->buf;
+    e->imm64_rd = rd;
+    e->imm64_val = imm;
 }
 
 /*
@@ -358,6 +386,14 @@ static inline void emit_ldrh_imm(ArmEmit *e, int rd, int rn, unsigned int off)
     emit_u32(e, 0x79400000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
 }
 
+/* LDR Xd, [Xn, #imm]  — 64-bit load, offset mul. of 8, <= 32760. */
+static inline void emit_ldr_x_imm(ArmEmit *e, int rd, int rn, unsigned int off)
+{
+    assert((off & 7) == 0 && off <= 32760);
+    uint32_t imm12 = off / 8;
+    emit_u32(e, 0xf9400000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f));
+}
+
 /* LDRB Wd, [Xn, #imm] */
 static inline void emit_ldrb_imm(ArmEmit *e, int rd, int rn, unsigned int off)
 {
@@ -370,6 +406,7 @@ static inline void emit_ldrb_imm(ArmEmit *e, int rd, int rn, unsigned int off)
 static inline void emit_str_w_imm(ArmEmit *e, int rs, int rn, unsigned int off)
 {
     assert((off & 3) == 0 && off <= 16380);
+    note_store(e, rn, off, 4);
     uint32_t imm12 = off / 4;
     emit_u32(e, 0xb9000000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rs & 0x1f));
 }
@@ -378,6 +415,7 @@ static inline void emit_str_w_imm(ArmEmit *e, int rs, int rn, unsigned int off)
 static inline void emit_strh_imm(ArmEmit *e, int rs, int rn, unsigned int off)
 {
     assert((off & 1) == 0 && off <= 8190);
+    note_store(e, rn, off, 2);
     uint32_t imm12 = off / 2;
     emit_u32(e, 0x79000000u | (imm12 << 10) | ((rn & 0x1f) << 5) | (rs & 0x1f));
 }
@@ -386,6 +424,7 @@ static inline void emit_strh_imm(ArmEmit *e, int rs, int rn, unsigned int off)
 static inline void emit_strb_imm(ArmEmit *e, int rs, int rn, unsigned int off)
 {
     assert(off <= 4095);
+    note_store(e, rn, off, 1);
     emit_u32(e, 0x39000000u | (off << 10) | ((rn & 0x1f) << 5) | (rs & 0x1f));
 }
 
@@ -535,6 +574,14 @@ static inline void emit_cbnz_w(ArmEmit *e, int rn, int32_t off_bytes)
     int32_t imm19 = off_bytes >> 2;
     assert(imm19 >= -(1 << 18) && imm19 < (1 << 18));
     emit_u32(e, 0x35000000u | (((uint32_t)imm19 & 0x7ffff) << 5) | (rn & 0x1f));
+}
+
+/* CBNZ Xn, #imm19 */
+static inline void emit_cbnz_x(ArmEmit *e, int rn, int32_t off_bytes)
+{
+    int32_t imm19 = off_bytes >> 2;
+    assert(imm19 >= -(1 << 18) && imm19 < (1 << 18));
+    emit_u32(e, 0xb5000000u | (((uint32_t)imm19 & 0x7ffff) << 5) | (rn & 0x1f));
 }
 
 /* B.cond #imm19   — condition encoded in lowest nibble */
@@ -855,9 +902,15 @@ static void patch_b(uint32_t *insn_addr, int32_t new_off_bytes)
     *insn_addr = insn;
 }
 
-/* BLR Xn */
+/* BLR Xn. A callee materialised by the emit_mov_imm64 right before
+ * it is looked up in blr_effects; any other BLR may change anything. */
 static inline void emit_blr(ArmEmit *e, int rn)
 {
+    if (e->imm64_end == e->buf && e->imm64_rd == rn) {
+        e->op_fx |= blr_effects(e, e->imm64_val);
+    } else {
+        e->op_fx |= OPFX_ALL;
+    }
     emit_u32(e, 0xd63f0000u | ((rn & 0x1f) << 5));
 }
 
@@ -1286,6 +1339,77 @@ QEMU_BUILD_BUG_ON(OFF_NUM_INST                 > OFF_WINDOW_W);
 QEMU_BUILD_BUG_ON(OFF_LOOP_REP                 > OFF_WINDOW_W);
 QEMU_BUILD_BUG_ON(OFF_PC_ON_REP                > OFF_WINDOW_W);
 
+/*
+ * The exit word (dsp_cpu.h): interrupt_state, interrupt_counter,
+ * interrupt_pipeline_count, is_idle and jit_exit_block_request fill
+ * one aligned 8-byte word, so the per-op fast path tests all of them
+ * with LDR X + CBNZ. The cold path reads is_idle and
+ * jit_exit_block_request together with one LDRH.
+ */
+#define OFF_EXIT_WORD ((uint32_t)offsetof(dsp_core_t, jit_exit_word))
+QEMU_BUILD_BUG_ON(OFF_EXIT_WORD % 8 != 0 || OFF_EXIT_WORD > 32760);
+QEMU_BUILD_BUG_ON(sizeof(((dsp_core_t *)0)->jit_exit_word) != 8);
+QEMU_BUILD_BUG_ON(sizeof(bool) != 1);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_STATE != OFF_EXIT_WORD);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_COUNTER != OFF_EXIT_WORD + 2);
+QEMU_BUILD_BUG_ON(OFF_INTERRUPT_PIPELINE_COUNT != OFF_EXIT_WORD + 4);
+QEMU_BUILD_BUG_ON(OFF_IS_IDLE != OFF_EXIT_WORD + 6);
+QEMU_BUILD_BUG_ON(OFF_JIT_EXIT_BLOCK_REQ != OFF_EXIT_WORD + 7);
+
+/* Store-side half of the OPFX_* tracking (see ArmEmit). */
+static void note_store(ArmEmit *e, int rn, unsigned int off,
+                       unsigned int size)
+{
+    if (rn != 19) {
+        return;
+    }
+#define STORE_HITS(f, n) (off < (f) + (n) && (f) < off + size)
+    if (STORE_HITS(OFF_PC, 4) || STORE_HITS(OFF_CUR_INST_LEN, 4)) {
+        e->op_fx |= OPFX_PC;
+    }
+    if (STORE_HITS(OFF_INSTR_CYCLE, 2)) {
+        e->op_fx |= OPFX_CYC;
+    }
+    if (STORE_HITS(OFF_LOOP_REP, 4)) {
+        e->op_fx |= OPFX_REP;
+    }
+#undef STORE_HITS
+}
+
+/*
+ * BLR-side half: what a helper may change. Only helpers read here to
+ * leave pc, cur_inst_len, instr_cycle and loop_rep alone are listed;
+ * everything else (emu_* fallbacks, opcodes_alu[] kernels, pm_4x,
+ * the stack helpers, the epilogue helpers) may change all of them.
+ *   - dsp56k_read_memory / dsp56k_write_memory, peripherals included
+ *     (a P write sets jit_exit_block_request, 0xFFFFC4 sets is_idle:
+ *     both are in the exit word, which every op still checks);
+ *   - pm_read_accu24, rnd56, the pin-audit report;
+ *   - calc_ea: the slow call never sees mode 6 (cur_inst_len++, baked
+ *     inline), and only modes 5 and 7 add cycles.
+ */
+static uint32_t blr_effects(const ArmEmit *e, uint64_t target)
+{
+    if (target == (uint64_t)(uintptr_t)&dsp56k_read_memory ||
+        target == (uint64_t)(uintptr_t)&dsp56k_write_memory ||
+        target == (uint64_t)(uintptr_t)&dsp56k_jit_helper_pm_read_accu24 ||
+        target == (uint64_t)(uintptr_t)&dsp56k_jit_helper_rnd56 ||
+        target == (uint64_t)(uintptr_t)&dsp56k_jit_helper_pin_audit_fail) {
+        return 0;
+    }
+    if (target == (uint64_t)(uintptr_t)&dsp56k_jit_helper_calc_ea) {
+        switch ((e->slow_ea_mode >> 3) & 7) {
+        case 0: case 1: case 2: case 3: case 4:
+            return 0;
+        case 5: case 7:
+            return OPFX_CYC;
+        default:
+            return OPFX_ALL;
+        }
+    }
+    return OPFX_ALL;
+}
+
 /* --------------------------------------------------------------- *
  * Block translation
  *
@@ -1335,16 +1459,36 @@ QEMU_BUILD_BUG_ON(OFF_PC_ON_REP                > OFF_WINDOW_W);
  * Pending patch sites for the shared exit_label. We collect them as
  * we emit each op and patch them after the epilogue is placed.
  */
-/* Each per-op epilogue records up to 3 exit-check branches
- * (interrupt_counter / is_idle + jit_exit_block_request /
- * pc-mismatch) and one branch to the block's REP tail (see
- * emit_rep_tail). Size the arrays accordingly, with a safety
- * margin. */
+/*
+ * One op's out-of-line epilogue paths, emitted after the block's
+ * shared exit (emit_cold_stubs): the exit-word slow path, the DO-loop
+ * edge and the REP helper. See emit_post_instruction_epilogue.
+ */
+typedef struct {
+    uint32_t *exit_site;   /* CBNZ X0 (exit word) -> cold path */
+    uint32_t *edge_site;   /* B.EQ (pc == LA + 1) -> edge path */
+    uint32_t *full_site;   /* CBNZ (loop_rep), or NULL -> REP helper */
+    uint32_t *after;       /* main line after Step 5 */
+    uint32_t *cont;        /* main line after the exit checks */
+    uint32_t expected_next_pc;
+    bool const_pc;         /* main line stores pc from a constant */
+    bool const_cyc;        /* instr_cycle is still 2 at Step 7 */
+} ColdStub;
+
+/* Each per-op epilogue records up to 4 exit-check branches on its
+ * main line and cold paths (pc mismatch, interrupt_counter, is_idle +
+ * jit_exit_block_request, pc mismatch after the slow path) and up to
+ * two branches to the block's REP tail (see emit_rep_tail). Size the
+ * arrays accordingly, with a safety margin. */
 typedef struct {
     uint32_t *sites[DSP56K_JIT_MAX_OPS_PER_BLOCK * 8];
     int count;
     uint32_t *rep_sites[DSP56K_JIT_MAX_OPS_PER_BLOCK * 2];
     int rep_count;
+    ColdStub cold[DSP56K_JIT_MAX_OPS_PER_BLOCK];
+    int cold_count;
+    /* The previous op's body may have set loop_rep (OPFX_REP). */
+    bool prev_may_set_rep;
 } ExitPatchList;
 
 static void record_exit_patch(ExitPatchList *l, uint32_t *site)
@@ -1467,6 +1611,7 @@ static void emit_calc_ea_slow_call(ArmEmit *e, uint32_t ea_mode,
     emit_add_x_imm(e, /*rd=*/2, /*rn=*/31, OFF_SP_SCRATCH0);  /* x2 = &SP[scratch0] */
     emit_mov_imm64(e, /*rd=*/3,
         (uint64_t)(uintptr_t)&dsp56k_jit_helper_calc_ea);
+    e->slow_ea_mode = ea_mode;
     emit_blr(e, /*rn=*/3);
     /* w0 now holds the retour flag; scratch0 holds the address. */
     emit_ldr_w_imm(e, out_addr_reg, /*rn=*/31, OFF_SP_SCRATCH0);
@@ -5534,153 +5679,12 @@ static void emit_rep_tail(ArmEmit *e, ExitPatchList *l, uint32_t *exit_label)
     }
 }
 
-/*
- * Shared per-op epilogue emitter. Called by both the non-parmove
- * stub (emit_instruction) and the parmove stubs (emit_parmove_pmN).
- *
- * Invoked AFTER the emu handler / parmove work has finished. Emits:
- *   5. postexecute_update_pc inline (pc += cur_inst_len and the
- *      DO-loop end compare); BLR only on REP or a DO-loop edge. A
- *      REP still active after the helper goes to the REP tail
- *   7. num_inst += instr_cycle
- *   6. postexecute_interrupts fast path (skip BLR when all
- *      interrupt fields are zero), then 8: exit if
- *      interrupt_counter is set after the BLR
- *   9-11. Block-exit checks: is_idle / jit_exit_block_request /
- *      PC mismatch — all branch to the shared exit epilogue via
- *      the exits patch list.
- *
- * Clobbers: w0, w1, w2, x3 (SCRATCH). Preserves: x19-x25.
- */
-/*
- * Shared per-op epilogue. The PC-mismatch check at the end is
- * ALWAYS emitted — round-4's EPI_NO_PC optimization (skipping the
- * check for ops the translator believed couldn't mutate pc) was
- * dropped after the sentinel harness proved it unsafe: parmove
- * stubs with calc_ea mode 6 run for two words (cur_inst_len++
- * shifts pc beyond expected_next_pc), and any op inside a REP /
- * DO loop has its pc rewound by postexecute_update_pc's BLR
- * helper. Both legitimately diverge and the PC check is the only
- * signal that forces the block to exit to the dispatcher in
- * those cases. See the commit that dropped EPI_NO_PC for the
- * sentinel_pc_diff data (9.75% mismatch rate across 59M watched
- * ops in Azurik).
- */
-static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
-                                           uint32_t expected_next_pc)
+/* Step 11: exit if pc != expected_next_pc. SUB + CBNZ when
+ * expected_next_pc fits imm12 (DSP PRAM is 4 KiB, so all but a
+ * 2-word op at pram[0xFFE]); else MOV imm32 + CMP + B.NE. */
+static void emit_epi_pc_check(ArmEmit *e, ExitPatchList *exits,
+                              uint32_t expected_next_pc)
 {
-    /*
-     * Step 5: dsp_postexecute_update_pc, inline except for REP and
-     * the DO-loop edge. The helper does (a) the REP state machine if
-     * loop_rep is set; (b) pc += cur_inst_len; (c) under SR.LF, the
-     * loop-end test pc == LA + 1. REP keeps the full helper. Otherwise
-     * (b) and the (c) compare run inline and only a loop edge calls
-     * dsp56k_jit_helper_do_loop_edge (--LC; pop or pc = SSH). Most
-     * ops in a DO loop are not its last, so this skips the BLR for
-     * nearly every op the hot DSP loops run.
-     *
-     *     LDR  w0, [loop_rep];  CBNZ w0, full
-     *     LDR  w0, [len];  LDR w1, [pc];  ADD w1, w1, w0;  STR w1, [pc]
-     *     TBZ  w28, #LF, after
-     *     LDR  w2, [LA];  ADD w2, w2, #1;  CMP w1, w2;  B.NE after
-     *     BLR  do_loop_edge;  reload SR pin;  B after
-     *   full:
-     *     BLR  postexecute_update_pc;  reload SR pin
-     *   after:
-     *
-     * The SR pin (x28) is current here: every SR writer updates it
-     * and every BLR fallback reloads it. Neither helper touches
-     * A/B/X/Y; both may rewrite SR (a loop end restores LF), so both
-     * reload the SR pin.
-     */
-    {
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-        uint32_t *to_full = e->buf;
-        emit_cbnz_w(e, 0, 0);       /* patched below */
-
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
-        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
-        emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
-        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
-
-        uint32_t *to_after_nolf = e->buf;
-        emit_tbz_w(e, DSP56K_JIT_SR_PIN_REG, DSP_SR_LF, 0);  /* patched */
-
-        emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
-        emit_add_w_imm(e, /*rd=*/2, /*rn=*/2, 1);
-        emit_cmp_w_reg(e, /*rn=*/1, /*rm=*/2);
-        uint32_t *to_after_noedge = e->buf;
-        emit_bcond(e, ARM_COND_NE, 0);                      /* patched */
-
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        emit_mov_imm64(e, /*rd=*/15,
-            (uint64_t)(uintptr_t)&dsp56k_jit_helper_do_loop_edge);
-        emit_blr(e, /*rn=*/15);
-        emit_reload_sr_pin(e);
-        uint32_t *to_after_edge = e->buf;
-        emit_b(e, 0);                                       /* patched */
-
-        uint32_t *full_label = e->buf;
-        patch_branch(to_full,
-                     (int32_t)((uint8_t *)full_label - (uint8_t *)to_full));
-        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
-        /* Phase 8 X/Y pinning repurposed x20 as the X-bank pin, so the
-         * helper addresses are materialised inline. */
-        emit_mov_imm64(e, /*rd=*/15,
-            (uint64_t)(uintptr_t)&dsp56k_jit_helper_postexecute_update_pc);
-        emit_blr(e, /*rn=*/15);
-        emit_reload_sr_pin(e);
-        /* A REP still running must leave the block (Step 9 used to
-         * re-read loop_rep for every op). Nothing after Step 5 sets
-         * loop_rep, so the other paths reach Step 9 with it zero. */
-        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
-        {
-            uint32_t *site = e->buf;
-            emit_cbnz_w(e, 0, 0);
-            record_rep_tail_patch(exits, site);
-        }
-
-        uint32_t *after_label = e->buf;
-        patch_tb(to_after_nolf,
-                 (int32_t)((uint8_t *)after_label - (uint8_t *)to_after_nolf));
-        patch_branch(to_after_noedge,
-                     (int32_t)((uint8_t *)after_label -
-                               (uint8_t *)to_after_noedge));
-        patch_b(to_after_edge,
-                (int32_t)((uint8_t *)after_label - (uint8_t *)to_after_edge));
-    }
-
-    /* Step 7, then Step 6 with Step 8 folded in (the interrupt
-     * helper reads neither instr_cycle nor num_inst). */
-    emit_epi_num_inst(e);
-    emit_epi_interrupts(e, exits);
-
-    /*
-     * Steps 9 / 10 / 10b fused:
-     *   is_idle (u8)            — STOP / WAIT executed.
-     *   jit_exit_block_request  — self-mod: pram write invalidated
-     *                             a block (possibly this one).
-     * Both are "exit-to-dispatcher" signals with identical handling:
-     * OR them into w0 and branch once. loop_rep (REP entered) is the
-     * third such signal; Step 5 already routes it to the REP tail.
-     */
-    emit_ldrb_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
-    emit_ldrb_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_JIT_EXIT_BLOCK_REQ);
-    emit_orr_w_reg(e, /*rd=*/0, /*rn=*/0, /*rm=*/1);
-    {
-        uint32_t *site = e->buf;
-        emit_cbnz_w(e, 0, 0);
-        record_exit_patch(exits, site);
-    }
-
-    /*
-     * Step 11: exit-check: PC mismatch. Emission uses SUB + CBNZ
-     * rather than MOV imm + CMP + BCOND — saves one ARM64 insn
-     * because expected_next_pc fits in imm12 (DSP PRAM is 4 KiB,
-     * so pc_start + inst_len <= 0xFFF in all but the rare 2-word
-     * op at pram[0xFFE] edge case). Non-zero SUB result means
-     * mismatch; CBNZ branches to the shared exit patch list.
-     */
     emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_PC);
     if (expected_next_pc <= 0xfff) {
         emit_sub_w_imm(e, /*rd=*/0, /*rn=*/0, expected_next_pc);
@@ -5688,14 +5692,247 @@ static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
         emit_cbnz_w(e, 0, 0);
         record_exit_patch(exits, site);
     } else {
-        /* Edge case (expected_next_pc > 0xfff — possible when the
-         * block's last op is 2-word at pc == 0xFFE). Fall back to
-         * MOV imm32 + CMP + B.NE. */
         emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
         emit_cmp_w_reg(e, /*rn=*/0, /*rm=*/1);
         uint32_t *site = e->buf;
         emit_bcond(e, ARM_COND_NE, 0);
         record_exit_patch(exits, site);
+    }
+}
+
+/* Step 7 when instr_cycle is known to be the preset 2 (no store to it
+ * and no helper that may change it in the op body); else from memory.
+ * The preset store stays: C helpers read instr_cycle. */
+static void emit_epi_num_inst_for(ArmEmit *e, bool const_cyc)
+{
+    if (!const_cyc) {
+        emit_epi_num_inst(e);
+        return;
+    }
+    emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+    emit_add_w_imm(e, /*rd=*/1, /*rn=*/1, 2);
+    emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_NUM_INST);
+}
+
+/* Translate-time, process-wide: epilogues emitted, and how many got
+ * a constant pc, a constant cycle count and a loop_rep test. */
+static uint64_t g_epi_ops, g_epi_const_pc, g_epi_const_cyc, g_epi_rep_checks;
+
+/*
+ * Shared per-op epilogue emitter. Called by both the non-parmove
+ * stub (emit_instruction) and the parmove stubs (emit_parmove_pmN),
+ * AFTER the op's body. Runs the interpreter's post-op sequence with
+ * the same checks at the same op as dsp56k_execute_instruction:
+ *   5. postexecute_update_pc: the REP helper if loop_rep is set,
+ *      pc += cur_inst_len, and the DO-loop end compare (helper only
+ *      on the edge). A REP still active after the helper goes to the
+ *      block's REP tail.
+ *   7. num_inst += instr_cycle
+ *   6. postexecute_interrupts (helper only when an interrupt field
+ *      is set), then 8: exit if interrupt_counter is set after it
+ *   9-10. exit on is_idle / jit_exit_block_request
+ *   11. exit on pc != expected_next_pc
+ *
+ * Main line (the common op inside a DO loop: 11 insns):
+ *
+ *     [LDR w0, [loop_rep]; CBNZ w0, rep_k]      first op / REP setters
+ *     MOV w1, #next_pc; STR w1, [pc]            constant pc, or
+ *       LDR len; LDR pc; ADD; STR pc            when the body may move it
+ *     TBZ w28, #LF, after
+ *     LDR w2, [LA]; CMP w2, #next_pc-1; B.EQ edge_k
+ *   after:
+ *     LDR w1, [num]; ADD w1, #2; STR w1, [num]  or LDRH instr_cycle + ADD
+ *     LDR x0, [exit word]; CBNZ x0, cold_k      Steps 6 / 8 / 9 / 10
+ *     [LDR w0, [pc]; SUB; CBNZ exit]            Step 11, non-constant pc
+ *   cont:
+ *
+ * Out of line, after the block's shared exit (emit_cold_stubs):
+ *   rep_k:  BLR postexecute_update_pc; SR reload; loop_rep -> REP tail
+ *   edge_k: BLR do_loop_edge; SR reload
+ *   then both resume at `after`, or for a constant pc at a tail that
+ *   repeats Step 7, the exit-word test and Step 11
+ *   cold_k: Step 6 (quick check, BLR, SR reload, Step 8), Steps 9/10
+ *           and Step 11, then back to `cont`
+ *
+ * Exactness:
+ *   - The exit word (dsp_cpu.h) is interrupt_state, interrupt_counter,
+ *     interrupt_pipeline_count, is_idle and jit_exit_block_request:
+ *     zero means the interrupt helper would be skipped and neither
+ *     flag is set, which is all Steps 6-10 tested. Otherwise cold_k
+ *     runs the old sequence in the old order.
+ *   - Constant pc (no OPFX_PC in the body, next_pc == op pc + 1): the
+ *     op entered with pc == its own address (the block entry, or the
+ *     previous op's Step 11) and cur_inst_len == 1 (the preset), and
+ *     nothing in the body moved either. Step 11 is dropped only on
+ *     the main line, where pc was just stored from that constant;
+ *     every path that can move pc again (the REP helper, the loop
+ *     edge, the interrupt helper) keeps it. EPI_NO_PC dropped it
+ *     everywhere and broke mode-6 parmoves and loop rewinds (both
+ *     have OPFX_PC or go through those paths).
+ *   - loop_rep is tested on the block's first op, on any op whose
+ *     body may set it (it must run the REP helper itself), and on
+ *     the op after one. Elsewhere it is zero: the REP helper path
+ *     exits the block while it stays set, and nothing after Step 5
+ *     (the loop edge, the interrupt helper) sets it.
+ *
+ * Clobbers: x0, w1, w2, x3 (SCRATCH), x15 on the slow paths.
+ * Preserves: x19-x28.
+ */
+static void emit_post_instruction_epilogue(ArmEmit *e, ExitPatchList *exits,
+                                           uint32_t expected_next_pc,
+                                           uint32_t op_pc)
+{
+    const uint32_t fx = e->op_fx;
+    const bool check_rep = exits->cold_count == 0 || (fx & OPFX_REP) ||
+                           exits->prev_may_set_rep;
+    const bool const_pc = !(fx & OPFX_PC) && expected_next_pc == op_pc + 1;
+
+    exits->prev_may_set_rep = (fx & OPFX_REP) != 0;
+    assert(exits->cold_count < DSP56K_JIT_MAX_OPS_PER_BLOCK);
+    ColdStub *cs = &exits->cold[exits->cold_count++];
+    *cs = (ColdStub){
+        .expected_next_pc = expected_next_pc,
+        .const_pc = const_pc,
+        .const_cyc = !(fx & OPFX_CYC),
+    };
+    g_epi_ops++;
+    g_epi_const_pc += const_pc;
+    g_epi_const_cyc += cs->const_cyc;
+    g_epi_rep_checks += check_rep;
+
+    /* Step 5. The SR pin (x28) is current here: every SR writer
+     * updates it and every BLR fallback reloads it. */
+    if (check_rep) {
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+        cs->full_site = e->buf;
+        emit_cbnz_w(e, 0, 0);                       /* -> rep_k */
+    }
+    if (const_pc) {
+        emit_mov_imm32(e, /*rd=*/1, expected_next_pc);
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+    } else {
+        emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
+        emit_ldr_w_any(e, /*rd=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+        emit_add_w_reg(e, /*rd=*/1, /*rn=*/1, /*rm=*/0);
+        emit_str_w_any(e, /*rs=*/1, /*rn=*/19, SCRATCH, OFF_PC);
+    }
+
+    uint32_t *to_after_nolf = e->buf;
+    emit_tbz_w(e, DSP56K_JIT_SR_PIN_REG, DSP_SR_LF, 0);   /* patched */
+    emit_ldr_w_any(e, /*rd=*/2, /*rn=*/19, SCRATCH, OFF_REG(DSP_REG_LA));
+    if (const_pc) {
+        /* pc == LA + 1  <=>  LA == next_pc - 1 (32-bit wrap both ways);
+         * next_pc - 1 is the op's own pc, < DSP_PRAM_SIZE. */
+        assert(op_pc <= 0xfff);
+        emit_cmp_w_imm(e, /*rn=*/2, op_pc);
+    } else {
+        emit_add_w_imm(e, /*rd=*/2, /*rn=*/2, 1);
+        emit_cmp_w_reg(e, /*rn=*/1, /*rm=*/2);
+    }
+    cs->edge_site = e->buf;
+    emit_bcond(e, ARM_COND_EQ, 0);                      /* -> edge_k */
+
+    cs->after = e->buf;
+    patch_tb(to_after_nolf,
+             (int32_t)((uint8_t *)cs->after - (uint8_t *)to_after_nolf));
+
+    /* Step 7, then Steps 6/8/9/10 as one test of the exit word (the
+     * interrupt helper reads neither instr_cycle nor num_inst). */
+    emit_epi_num_inst_for(e, cs->const_cyc);
+    emit_ldr_x_imm(e, /*rd=*/0, /*rn=*/19, OFF_EXIT_WORD);
+    cs->exit_site = e->buf;
+    emit_cbnz_x(e, 0, 0);                               /* -> cold_k */
+
+    if (!const_pc) {
+        emit_epi_pc_check(e, exits, expected_next_pc);
+    }
+    cs->cont = e->buf;
+}
+
+/* Patch an imm19 branch (CBZ/CBNZ/B.cond) or a B at `site` to `dst`. */
+static void patch_to(uint32_t *site, uint32_t *dst, bool is_b)
+{
+    int32_t off = (int32_t)((uint8_t *)dst - (uint8_t *)site);
+    if (is_b) {
+        patch_b(site, off);
+    } else {
+        patch_branch(site, off);
+    }
+}
+
+/*
+ * Every op's out-of-line epilogue paths (see
+ * emit_post_instruction_epilogue), emitted after the block's shared
+ * exit and before its REP tail. Exit branches go on the patch list.
+ */
+static void emit_cold_stubs(ArmEmit *e, ExitPatchList *exits)
+{
+    for (int i = 0; i < exits->cold_count; i++) {
+        ColdStub *cs = &exits->cold[i];
+        uint32_t *to_tail = NULL;
+
+        /* rep_k: the REP state machine (and the rest of Step 5) in C.
+         * A REP still running must leave the block. */
+        if (cs->full_site) {
+            patch_to(cs->full_site, e->buf, false);
+            emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+            emit_mov_imm64(e, /*rd=*/15,
+                (uint64_t)(uintptr_t)&dsp56k_jit_helper_postexecute_update_pc);
+            emit_blr(e, /*rn=*/15);
+            emit_reload_sr_pin(e);
+            emit_ldr_w_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_LOOP_REP);
+            uint32_t *site = e->buf;
+            emit_cbnz_w(e, 0, 0);
+            record_rep_tail_patch(exits, site);
+            if (cs->const_pc) {
+                to_tail = e->buf;
+                emit_b(e, 0);                       /* -> tail */
+            } else {
+                emit_b(e, (int32_t)((uint8_t *)cs->after - (uint8_t *)e->buf));
+            }
+        }
+
+        /* edge_k: the DO-loop edge (--LC; pop, or pc = SSH). Neither
+         * helper touches A/B/X/Y; both may rewrite SR. */
+        patch_to(cs->edge_site, e->buf, false);
+        emit_mov_x_reg(e, /*rd=*/0, /*rn=*/19);
+        emit_mov_imm64(e, /*rd=*/15,
+            (uint64_t)(uintptr_t)&dsp56k_jit_helper_do_loop_edge);
+        emit_blr(e, /*rn=*/15);
+        emit_reload_sr_pin(e);
+
+        uint32_t *to_cold_from_tail = NULL;
+        if (cs->const_pc) {
+            /* tail: the main line from `after`, with Step 11 (the
+             * helpers above may have moved pc). */
+            if (to_tail) {
+                patch_to(to_tail, e->buf, true);
+            }
+            emit_epi_num_inst_for(e, cs->const_cyc);
+            emit_ldr_x_imm(e, /*rd=*/0, /*rn=*/19, OFF_EXIT_WORD);
+            to_cold_from_tail = e->buf;
+            emit_cbnz_x(e, 0, 0);                   /* -> cold_k */
+            emit_epi_pc_check(e, exits, cs->expected_next_pc);
+            emit_b(e, (int32_t)((uint8_t *)cs->cont - (uint8_t *)e->buf));
+        } else {
+            emit_b(e, (int32_t)((uint8_t *)cs->after - (uint8_t *)e->buf));
+        }
+
+        /* cold_k: the exit word is non-zero. Step 6 + 8, then 9/10
+         * (is_idle and jit_exit_block_request in one LDRH), then 11. */
+        patch_to(cs->exit_site, e->buf, false);
+        if (to_cold_from_tail) {
+            patch_to(to_cold_from_tail, e->buf, false);
+        }
+        emit_epi_interrupts(e, exits);
+        emit_ldrh_any(e, /*rd=*/0, /*rn=*/19, SCRATCH, OFF_IS_IDLE);
+        {
+            uint32_t *site = e->buf;
+            emit_cbnz_w(e, 0, 0);
+            record_exit_patch(exits, site);
+        }
+        emit_epi_pc_check(e, exits, cs->expected_next_pc);
+        emit_b(e, (int32_t)((uint8_t *)cs->cont - (uint8_t *)e->buf));
     }
 }
 
@@ -5832,6 +6069,7 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     emit_str_w_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_CUR_INST_LEN);
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+    e->op_fx = 0;   /* the body's effects, for the epilogue */
 
     /* Skip the ALU BLR when opcodes_alu[0] (emu_move) is the
      * selected ALU — it's a no-op, and most pure-MOVE parmoves in
@@ -5878,15 +6116,15 @@ static bool emit_parmove_stub(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
-     * Parmove stubs always emit the PC-mismatch check. Round-4
-     * experimented with eliding it (EPI_NO_PC) — the sentinel
-     * harness proved unsafe: calc_ea mode 6 makes parmoves 2-word
-     * ops, and REP/DO loops rewind pc, both of which legitimately
-     * diverge and need the check to exit the block. See the
-     * EPI_NO_PC removal commit for the 9.75% mismatch rate.
+     * The epilogue keeps the PC-mismatch check on every path that can
+     * move pc (see emit_post_instruction_epilogue). Round-4's
+     * EPI_NO_PC elided it outright and the sentinel harness proved
+     * that unsafe: calc_ea mode 6 makes parmoves 2-word ops (a
+     * cur_inst_len store, so OPFX_PC here), and REP/DO loops rewind
+     * pc in their helpers (9.75% mismatch rate).
      */
     emit_pin_audit_check(e, pc, inst);
-    emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, pc);
     if (out_write_set) {
         *out_write_set |= parmove_write_set(inst);
     }
@@ -8938,6 +9176,7 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     /* 3. dsp->instr_cycle = 2 (handlers will += more if needed) */
     emit_movz_w(e, /*rd=*/0, 2, 0);
     emit_strh_any(e, /*rs=*/0, /*rn=*/19, SCRATCH, OFF_INSTR_CYCLE);
+    e->op_fx = 0;   /* the body's effects, for the epilogue */
 
     /*
      * 4. Call the handler. Two inline paths are tried in order,
@@ -8995,13 +9234,13 @@ static bool emit_instruction(ArmEmit *e, ExitPatchList *exits,
     }
 
     /*
-     * Always emit the PC-mismatch check. Round-4's EPI_NO_PC was
-     * dropped after sentinel proved it unsafe for both parmoves
-     * (mode-6 lengthening) and long-imm (REP/DO loop rewinds).
-     * The SUB+CBNZ imm12 fast path keeps the cost to 2 insns.
+     * The PC-mismatch check stays on every path that can move pc
+     * (see emit_post_instruction_epilogue): Round-4's EPI_NO_PC,
+     * which dropped it outright, was unsafe for parmoves (mode-6
+     * lengthening) and long-imm ops (REP/DO loop rewinds).
      */
     emit_pin_audit_check(e, pc, inst);
-    emit_post_instruction_epilogue(e, exits, expected_next_pc);
+    emit_post_instruction_epilogue(e, exits, expected_next_pc, pc);
 
     /*
      * Write-set bookkeeping for the differential validator:
@@ -9751,14 +9990,17 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
 
         /* Defensive overflow check before next iteration (the
          * largest stub measured is 262 ARM64 instructions; leave 512
-         * instructions = 2 KiB of headroom). */
-        if ((e.buf_end - e.buf) < 512) {
+         * instructions = 2 KiB of headroom, plus up to 64 per op for
+         * the out-of-line epilogue paths still to come). */
+        if ((e.buf_end - e.buf) < 512 + 64 * exits.cold_count) {
             break;
         }
     }
 
-    /* Emit shared exit/epilogue and patch pending exit branches. */
+    /* Emit the shared exit/epilogue and the ops' out-of-line
+     * epilogue paths, patch the exit branches, then the REP tail. */
     uint32_t *exit_label = emit_epilogue(&e);
+    emit_cold_stubs(&e, &exits);
     patch_exits(&exits, exit_label);
     emit_rep_tail(&e, &exits, exit_label);
 
@@ -10001,6 +10243,10 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
                 100.0 * (double)g_cf_inlined_count /
                 (double)(g_cf_inlined_count + g_cf_fallback_count),
             g_cf_fallback_count);
+    fprintf(stderr,
+            "  epilogues         = %" PRIu64 " (constant pc %" PRIu64
+            ", constant cycles %" PRIu64 ", loop_rep tests %" PRIu64 ")\n",
+            g_epi_ops, g_epi_const_pc, g_epi_const_cyc, g_epi_rep_checks);
 
     /* Per-handler cf_fallback breakdown (only emitted when at
      * least one bucket is non-zero — keeps the stats output tidy
@@ -10241,11 +10487,13 @@ static size_t dsp_state_diff(const dsp_core_t *a, const dsp_core_t *b,
     struct diff_range { size_t off; size_t end; bool gated; uint32_t bit; };
     const struct diff_range ranges[] = {
         /* [0] Always: head through the JIT-hot scalar block
-         * (is_gp..cur_inst — pc, registers, stack, loop_rep,
-         * interrupt_*, num_inst, cur_inst_len, cur_inst). */
+         * (is_gp..is_idle — pc, registers, stack, loop_rep,
+         * interrupt_*, num_inst, cur_inst_len, cur_inst, and the
+         * exit word up to its last byte). */
         { 0,
           offsetof(dsp_core_t, jit_exit_block_request), false, 0 },
-        /* skip jit_exit_block_request + jit_skip_diff_compare */
+        /* skip jit_exit_block_request (the exit word's last byte) +
+         * jit_skip_diff_compare */
         /* [1] xram (WS_XRAM-gated) */
         { offsetof(dsp_core_t, xram),
           offsetof(dsp_core_t, yram), true, DSP56K_JIT_WS_XRAM },

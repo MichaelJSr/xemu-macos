@@ -47,7 +47,6 @@ typedef struct dsp_core_s dsp_core_t;
 
 struct dsp_core_s {
     bool is_gp;
-    bool is_idle;
     uint32_t cycle_count;
 
     /* DSP instruction Cycle counter */
@@ -75,13 +74,11 @@ struct dsp_core_s {
     uint32_t loop_rep;      /* executing rep ? */
     uint32_t pc_on_rep;     /* True if PC is on REP instruction */
 
-    /* Interruptions */
-    uint16_t interrupt_state;        /* NONE, FAST or LONG interrupt */
+    /* Interruptions (interrupt_state, interrupt_counter and
+     * interrupt_pipeline_count live in the exit word below) */
     uint16_t interrupt_instr_fetch;        /* vector of the current interrupt */
     uint16_t interrupt_save_pc;        /* save next pc value before interrupt */
-    uint16_t interrupt_counter;        /* count number of pending interrupts */
     uint16_t interrupt_ipl_to_raise;     /* save the IPL level to save in the SR register */
-    uint16_t interrupt_pipeline_count; /* used to prefetch correctly the 2 inter instructions */
     int16_t interrupt_ipl[4];
     uint16_t interrupt_is_pending[4];
 
@@ -93,13 +90,29 @@ struct dsp_core_s {
     /* Current instruction */
     uint32_t cur_inst;
 
-    /* Self-modifying-code exit flag. Set by dsp56k_jit_invalidate()
-     * whenever a block is invalidated (which happens from inside a
-     * handler running under the JIT when it writes to P-space).
-     * Checked in each stub's exit-check epilogue; cleared in the
-     * JIT block prologue. Avoids the JIT continuing to execute stale
-     * instruction stubs that baked in pre-write pram words. */
-    uint8_t jit_exit_block_request;
+    /*
+     * The exit word: every field the JIT's per-op epilogue tests for
+     * "leave the fast path", in one aligned 8-byte word so the
+     * epilogue checks them with a single LDR X + CBNZ. Zero means no
+     * interrupt work, not idle and no exit request.
+     *
+     * jit_exit_block_request is the self-modifying-code exit flag:
+     * set by dsp56k_jit_invalidate() whenever a block is invalidated
+     * (which happens from inside a handler running under the JIT when
+     * it writes to P-space), cleared in the JIT block prologue. Avoids
+     * the JIT continuing to execute stale instruction stubs that baked
+     * in pre-write pram words.
+     */
+    union {
+        struct {
+            uint16_t interrupt_state;        /* NONE, FAST or LONG interrupt */
+            uint16_t interrupt_counter;        /* count number of pending interrupts */
+            uint16_t interrupt_pipeline_count; /* used to prefetch correctly the 2 inter instructions */
+            bool is_idle;
+            uint8_t jit_exit_block_request;
+        };
+        uint64_t jit_exit_word;
+    };
 
     /* "This block touched externally-visible I/O with side effects
      * that aren't captured in dsp_core_t" flag. Set when a handler
@@ -115,7 +128,8 @@ struct dsp_core_s {
 
     /* End of the JIT-hot block. dsp_state_diff() compares
      * [0, offsetof(jit_exit_block_request)) unconditionally and
-     * skips the two flag bytes above; keep them last here. */
+     * skips jit_exit_block_request and jit_skip_diff_compare; keep
+     * those two bytes last here. */
 
     uint32_t xram[DSP_XRAM_SIZE];
     uint32_t yram[DSP_YRAM_SIZE];

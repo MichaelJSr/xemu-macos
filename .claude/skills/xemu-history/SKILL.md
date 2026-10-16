@@ -37,7 +37,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Drawable-first present order | reverted | +0.50 fps, under noise | `1a8f466e2b` |
 | MetalFX 2x interpolation as a GPU serializer | closed | heavy-f1 2x vs off, 4×50 s, load 18-59: 31.7 ± 13.4 vs 27.4 ± 16.9 fps, signs 2/2. It is ~70% of xemu's GPU time, but the GPU is ≤41% busy | 2026-10-15 |
 | **DSP / APU** | | | |
-| DSP JIT EPI_NO_PC (skip the PC-mismatch exit) | closed | Sentinel: 9.75% legitimate divergence (mode-6 parmoves, REP/DO); fixed the classifier instead | `d0e1f0b27d`, `ca7fe51a0b` |
+| DSP JIT EPI_NO_PC (skip the PC-mismatch exit) | closed; narrow form shipped | Sentinel: 9.75% legitimate divergence (mode-6 parmoves, REP/DO); fixed the classifier instead. Shipped since: only an op that provably can't move pc (no `pc`/`cur_inst_len` store, whitelisted helpers) stores it from a constant and drops the main-line check; the REP, loop-edge and interrupt paths keep it | `d0e1f0b27d`, `ca7fe51a0b`, `emit_post_instruction_epilogue` |
 | DSP JIT `cur_inst` preset skip | reverted | A hidden runtime `cur_inst` reader (`op=0x001000`); harness removed, `git show 1f444fa272 4668947cc9` to reopen | `aa9eed38e8` |
 | A/B, then X/Y register pinning | fixed | Direct-slot parmove writes skipped the pin; new pins run `XEMU_DSP_JIT_PIN_AUDIT=1` | `bf82c37fba`, `54d1543d50` |
 | Inline diff validator | fixed | Held `d->lock` → startup hang; now async, one check per translation | `5c093dace1` |

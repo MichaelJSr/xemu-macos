@@ -28,6 +28,9 @@
  *     shared PCs), and of a word movem p:aa baked from outside a block
  *   - lazy-flag elision: E/U/N/Z kept live across a DO-loop edge, past
  *     ENDDO, and into a Tcc that reads E
+ *   - the per-op epilogue's constant-pc ops and out-of-line paths: a
+ *     one-op DO body, REP at a DO loop's LA, modulo calc_ea under REP,
+ *     a P write into the next op, a halt mid-block
  *
  * Four consumers, wired in meson.build:
  *   1. /corpus — golden-value regression of the interpreter (all
@@ -651,6 +654,79 @@ static void check_lazy_flags(DSPState *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* Program 6: the JIT per-op epilogue's out-of-line paths              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The JIT's per-op epilogue (emit_post_instruction_epilogue) stores pc
+ * from a constant for an op that can't move it and leaves the exit
+ * checks to one test of the exit word; its out-of-line paths run the
+ * REP helper, the DO-loop edge and the exit-word slow path. Covered
+ * here: a one-op DO body (SSH == LA), a REP whose repeated op is a DO
+ * loop's LA, calc_ea's modulo slow call (modes 3 and 5) under REP, a
+ * movem that rewrites the next op of its own block, and a one-word
+ * bset on x:$ffffc4 that halts mid-block ahead of a poison op (an op
+ * that ignores the exit word runs the poison).
+ */
+static void build_epi_paths(DSPState *s)
+{
+    Prog p;
+    begin_prog(&p, s);
+    uint32_t la_word, la;
+
+    emit(&p, 0x44F400); emit(&p, 0x000001);    /* move #1,x0 */
+    emit(&p, 0x200013);                        /* clr a */
+    emit(&p, 0x20001B);                        /* clr b */
+
+    emit(&p, 0x060580);                        /* do #5,LA */
+    la_word = reserve(&p);
+    la = here(&p);
+    emit(&p, 0x200040);                        /* LA: add x0,a  (A1=5) */
+    patch(&p, la_word, la);
+    emit(&p, 0x567000); emit(&p, 0x000100);    /* move a,x:$100 */
+
+    emit(&p, 0x060380);                        /* do #3,LA */
+    la_word = reserve(&p);
+    emit(&p, 0x200040);                        /*   add x0,a */
+    emit(&p, 0x0602A0);                        /*   rep #2 */
+    la = here(&p);
+    emit(&p, 0x200048);                        /* LA: add x0,b */
+    patch(&p, la_word, la);                    /* A1=8, B1=6 */
+
+    emit(&p, 0x0503A0);                        /* movec #3,m0 (mod 4) */
+    emit(&p, move_imm8_reg(DSP_REG_R0, 0x60)); /* r0=$60 */
+    emit(&p, move_imm8_reg(DSP_REG_N0, 0x01)); /* n0=1 */
+    emit(&p, 0x0606A0);                        /* rep #6 */
+    emit(&p, 0x545800);                        /* move a1,x:(r0)+ */
+    emit(&p, 0x46E800);                        /* move x:(r0+n0),y0 */
+
+    uint32_t r0_set = reserve(&p);             /* move #next,r0 */
+    emit(&p, 0x45F400); emit(&p, 0x200044);    /* move #(sub x0,a),x1 */
+    emit(&p, 0x076085);                        /* movem x1,p:(r0) */
+    uint32_t next = here(&p);
+    emit(&p, 0x200040);                        /* add x0,a -> sub (A1=7) */
+    patch(&p, r0_set, move_imm8_reg(DSP_REG_R0, next));
+
+    emit(&p, 0x0A8420);                        /* bset #0,x:$ffffc4 */
+    emit(&p, move_imm8_reg(DSP_REG_N7, 0x66)); /* poison */
+    emit(&p, 0x0C0000 | here(&p));             /* jmp self */
+}
+
+static void check_epi_paths(DSPState *s)
+{
+    check_no_poison(s);
+    g_assert_cmphex(XMEM(s, 0x100), ==, 5);
+    g_assert_cmphex(REG(s, DSP_REG_A1), ==, 7);
+    g_assert_cmphex(REG(s, DSP_REG_B1), ==, 6);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(XMEM(s, 0x60 + i), ==, 8);
+    }
+    g_assert_cmphex(REG(s, DSP_REG_Y0), ==, 8);
+    g_assert_cmphex(REG(s, DSP_REG_SR) & (1 << DSP_SR_LF), ==, 0);
+    g_assert_cmpuint(s->core.loop_rep, ==, 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* Corpus table + runners                                              */
 /* ------------------------------------------------------------------ */
 
@@ -666,6 +742,7 @@ static const TestProg progs[] = {
     { "mode6-jumps", build_mode6_jumps, check_mode6_jumps },
     { "smc",         build_smc,         check_smc },
     { "lazy-flags",  build_lazy_flags,  check_lazy_flags },
+    { "epi-paths",   build_epi_paths,   check_epi_paths },
 };
 
 static const TestProg *find_prog(const char *name)
