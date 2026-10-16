@@ -736,11 +736,20 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
 
 #endif /* CONFIG_USER_ONLY */
 
+#if defined(XBOX)
+/*
+ * @steps false (tb_jmp_cache_inval_tb) leaves the step TB cache: it holds
+ * no TB that a mapping change dropped, and an invalidated TB misses there
+ * on CF_INVALID.
+ */
+void xemu_flush_jmp_cache(CPUState *cpu, bool steps)
+#else
 /*
  * Called by generic code at e.g. cpu reset after cpu creation,
  * therefore we must be prepared to allocate the jump cache.
  */
 void tcg_flush_jmp_cache(CPUState *cpu)
+#endif
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
 
@@ -758,4 +767,24 @@ void tcg_flush_jmp_cache(CPUState *cpu)
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
         qatomic_set(&jc->array[i].tb, NULL);
     }
+#if defined(XBOX)
+    if (steps) {
+        uint64_t now = ++jc->step_clock;
+
+        for (int i = 0; i < XEMU_STEPC_PAGES; i++) {
+            jc->step_page_at[i] = now;
+        }
+    }
+#endif
 }
+
+#if defined(XBOX)
+/*
+ * Called by generic code at e.g. cpu reset after cpu creation,
+ * therefore we must be prepared to allocate the jump cache.
+ */
+void tcg_flush_jmp_cache(CPUState *cpu)
+{
+    xemu_flush_jmp_cache(cpu, true);
+}
+#endif

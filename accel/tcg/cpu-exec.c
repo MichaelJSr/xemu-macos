@@ -549,6 +549,7 @@ static uint64_t xemu_tbprof_lookups;
 static uint64_t xemu_tbprof_jc_hits;
 static uint64_t xemu_tbprof_ht_found;
 static uint64_t xemu_istep_cuts, xemu_istep_steps;
+static uint64_t xemu_stepc_hits, xemu_stepc_misses;
 
 /*
  * Deterministic mode (icount): when a slice's instruction budget ends
@@ -612,10 +613,57 @@ static void xemu_tbprof_dump(void)
             (unsigned long long)(l - h - f),
             qatomic_read(&tb_ctx.tb_flush_count));
     if (xemu_istep_cuts) {
-        fprintf(stderr, "xemu: istep cuts=%llu steps=%llu\n",
+        uint64_t sl = xemu_stepc_hits + xemu_stepc_misses;
+        fprintf(stderr, "xemu: istep cuts=%llu steps=%llu step_hit=%llu "
+                "(%.2f%%) step_miss=%llu\n",
                 (unsigned long long)xemu_istep_cuts,
-                (unsigned long long)xemu_istep_steps);
+                (unsigned long long)xemu_istep_steps,
+                (unsigned long long)xemu_stepc_hits,
+                sl ? 100.0 * xemu_stepc_hits / sl : 0.0,
+                (unsigned long long)xemu_stepc_misses);
     }
+}
+
+/*
+ * A step TB by pc (the cache is described at XEMU_STEPC_BITS). A hit
+ * passes the jump cache's checks; CF_INVALID in cflags makes an
+ * invalidated TB miss, and TBs are freed only by tb_flush, which clears
+ * the jump caches. A miss takes the qht path the steps always took.
+ * A TB off RAM (page_addr0 == -1) is a one-shot translation and is
+ * never cached: its count-1 cflags would otherwise match the next step.
+ */
+static TranslationBlock *xemu_step_lookup(CPUState *cpu, TCGTBCPUState s)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    typeof(jc->step[0]) *e = &jc->step[s.pc & (XEMU_STEPC_SIZE - 1)];
+    TranslationBlock *tb = e->tb;
+
+    if (likely(e->pc == s.pc &&
+               e->at >= jc->step_page_at[xemu_stepc_page(s.pc)] &&
+               tb->cs_base == s.cs_base && tb->flags == s.flags &&
+               tb_cflags(tb) == s.cflags)) {
+        if (unlikely(xemu_tbprof_on())) {
+            xemu_stepc_hits++;
+        }
+        return tb;
+    }
+    if (unlikely(xemu_tbprof_on())) {
+        xemu_stepc_misses++;
+    }
+
+    tb = tb_htable_lookup(cpu, s);
+    if (tb == NULL) {
+        mmap_lock();
+        tb = tb_gen_code(cpu, s);
+        mmap_unlock();
+    }
+    if (tb_page_addr0(tb) != -1) {
+        /* The clock as of now: a tb_flush in tb_gen_code moved it. */
+        e->pc = s.pc;
+        e->tb = tb;
+        e->at = jc->step_clock;
+    }
+    return tb;
 }
 #endif
 
@@ -1460,12 +1508,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             bool istep = (s.cflags & XEMU_ISTEP_MASK) == XEMU_ISTEP_CF &&
                          unlikely(xemu_istep.left);
             if (unlikely(istep)) {
-                tb = tb_htable_lookup(cpu, s);
-                if (tb == NULL) {
-                    mmap_lock();
-                    tb = tb_gen_code(cpu, s);
-                    mmap_unlock();
-                }
+                tb = xemu_step_lookup(cpu, s);
                 last_tb = NULL;     /* never chain into a step TB */
             } else
 #endif
@@ -1621,6 +1664,11 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
 #if defined(XBOX)
+    /* Zeroed step entries (at 0) predate every bucket's stamp. */
+    cpu->tb_jmp_cache->step_clock = 1;
+    for (int i = 0; i < XEMU_STEPC_PAGES; i++) {
+        cpu->tb_jmp_cache->step_page_at[i] = 1;
+    }
     if (xemu_tbprof_on()) {
         atexit(xemu_tbprof_dump);
     }

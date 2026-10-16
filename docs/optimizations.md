@@ -37,7 +37,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
-| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count) |
+| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
@@ -544,6 +544,28 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   entry keeps the per-page flush O(1) unless the page may be in the
   memo; per-page flushes are rare on this guest (11k INVLPGs over a
   whole PGO training run). Generated code is unchanged.
+- **icount step TBs cached by pc (det mode, 2026-10-16).** Every
+  one-instruction step of a cut block (`xemu_istep`) looked its TB up
+  in the qht: `get_page_addr_code`, xxhash, the seqlock walk and
+  `tb_lookup_cmp`, ~130 cycles, 1100-3900 times per frame (cold boot
+  3852, heavy-f1 1106). `xemu_step_lookup` puts a direct-mapped cache
+  in front of it: 8192 `{pc, tb, stamp}` entries indexed by the low pc
+  bits in `CPUJumpCache`, a hit passing the jump cache's own checks
+  (`CF_INVALID` makes an invalidated TB miss). It drops pages exactly
+  when the jump cache does, without a walk: `tb_jmp_cache_clear_page`
+  stamps the page's bucket (256 buckets) with a new clock value and
+  `tcg_flush_jmp_cache` stamps all of them; an entry counts only if it
+  was filled at or after its bucket's stamp. `CF_PCREL` TB
+  invalidation clears the jump cache but not this one. Off-RAM
+  one-shot TBs are never cached. Step hits (`XEMU_TB_PROF`
+  `step_hit`): cold boot 94.2%, heavy-f1 81.4%, stream-e2 53.3%. Cold
+  boot 1800 frames, 8 pairs at load 11-15: Mcycles/frame −1.68% paired
+  median (6/8), Minsns/frame −1.42% (8/8); heavy-f1 1200 frames, 8
+  pairs at load 13-29: −0.21% (4/8) and −0.23% (8/8). Cold-boot cycles
+  swing ±10% run to run with IDE wait polling, and an early 4-pair
+  heavy-f1 batch at load 50-80 read +5.2%; the instruction counts are
+  the steady receipt. Step TBs still stay out of the jump cache and
+  unchained.
 - **`can_do_io` bookkeeping elided when icount and replay are off
   (default on, 2026-08-04).** Upstream emits `set_can_do_io(false)` /
   `(true)` into every multi-insn TB body unconditionally, and

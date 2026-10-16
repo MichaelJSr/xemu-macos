@@ -1472,7 +1472,11 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
     if (tb_cflags(tb) & CF_PCREL) {
         /* A TB may be at any virtual address */
         CPU_FOREACH(cpu) {
+#if defined(XBOX)
+            xemu_flush_jmp_cache(cpu, false);
+#else
             tcg_flush_jmp_cache(cpu);
+#endif
         }
     } else {
         uint32_t h = tb_jmp_cache_hash_func(tb->pc);

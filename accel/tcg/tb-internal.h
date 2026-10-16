@@ -55,6 +55,7 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
 #ifdef XBOX
 /* Forget a pending icount step (cpu-exec.c); a load keeps the TBs. */
 void xemu_istep_disarm(void);
+void xemu_flush_jmp_cache(CPUState *cpu, bool steps);
 #endif
 
 #endif

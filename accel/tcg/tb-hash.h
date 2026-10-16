@@ -51,6 +51,14 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
            | (tmp & TB_JMP_ADDR_MASK));
 }
 
+#if defined(XBOX)
+/* The step TB cache's page bucket (tb-jmp-cache.h). */
+static inline unsigned int xemu_stepc_page(vaddr addr)
+{
+    return (addr >> TARGET_PAGE_BITS) & (XEMU_STEPC_PAGES - 1);
+}
+#endif
+
 #else
 
 /* In user-mode we can get better hashing because we do not have a TLB */
