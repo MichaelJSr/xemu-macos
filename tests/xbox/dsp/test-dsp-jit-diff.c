@@ -32,7 +32,8 @@
  *     one-op DO body, REP at a DO loop's LA, modulo calc_ea under REP,
  *     a P write into the next op, a halt mid-block
  *   - dsp_run's budget (/corpus/budget-*): a frame wait polled across two
- *     chained blocks returns from every dsp_run
+ *     chained blocks returns from every dsp_run, and a checkpoint
+ *     restored with the translated blocks kept runs as it first did
  *
  * Four consumers, wired in meson.build:
  *   1. /corpus — golden-value regression of the interpreter (all
@@ -852,6 +853,67 @@ static void test_budget_poll(gconstpointer arg)
     dsp_destroy(s);
 }
 
+/*
+ * A checkpoint restored twice runs as it did the first time. Translated
+ * blocks and the chains between them survive dsp_sync_from_vm, so after
+ * a restore the loop below runs chained where it first ran unchained;
+ * each dsp_run must still stop at the same block boundary. A counted
+ * loop of two blocks, run in 6-cycle budgets from a saved DspCoreState,
+ * restored as a snapshot load does.
+ */
+#define BUDGET_REPLAY_RUNS 48
+
+static void budget_replay_trace(DSPState *s, uint32_t *t)
+{
+    for (int i = 0; i < BUDGET_REPLAY_RUNS; i++) {
+        dsp_run(s, 6);
+        dsp_sync_to_vm(s);
+        *t++ = s->core.pc;
+        *t++ = s->core.registers[DSP_REG_A1];
+        *t++ = s->core.cycle_count;
+        *t++ = (uint32_t)s->save_cycles;
+    }
+}
+
+static void test_budget_replay(void)
+{
+    DSPState *s = make_dsp();
+    Prog p;
+    uint32_t t[3][BUDGET_REPLAY_RUNS * 4];
+
+    begin_prog(&p, s);
+    emit(&p, 0x44F400); emit(&p, 0x000001);    /* move #1,x0 */
+    emit(&p, 0x56F400); emit(&p, 0x000064);    /* move #100,a */
+    uint32_t loop = here(&p);
+    emit(&p, 0x200044);                        /* L: sub x0,a */
+    uint32_t out_word = reserve(&p);           /* jeq out */
+    emit(&p, 0x0C0000 | loop);                 /* jmp L */
+    emit(&p, 0x000000);                        /* nop */
+    patch(&p, out_word, jcc_imm(CC_EQ, emit_halt_tail(&p)));
+
+    dsp_sync_to_vm(s);
+    DspCoreState *saved = g_memdup2(&s->core, sizeof(s->core));
+    int saved_cycles = s->save_cycles;
+
+    for (int k = 0; k < 3; k++) {
+        if (k) {
+            s->core = *saved;
+            s->save_cycles = saved_cycles;
+            dsp_sync_from_vm(s);
+        }
+        budget_replay_trace(s, t[k]);
+    }
+    for (int i = 0; i < BUDGET_REPLAY_RUNS * 4; i++) {
+        g_assert_cmphex(t[1][i], ==, t[0][i]);
+        g_assert_cmphex(t[2][i], ==, t[0][i]);
+    }
+    run_to_halt(s);
+    g_assert_cmphex(REG(s, DSP_REG_A1), ==, 0);
+    check_jit_engaged(s);
+    g_free(saved);
+    dsp_destroy(s);
+}
+
 /* ------------------------------------------------------------------ */
 /* Cross-process differential                                          */
 /*                                                                     */
@@ -1056,6 +1118,7 @@ int main(int argc, char **argv)
                          test_budget_poll);
     g_test_add_data_func("/corpus/budget-poll-jclr", GINT_TO_POINTER(1),
                          test_budget_poll);
+    g_test_add_func("/corpus/budget-replay", test_budget_replay);
 
     return g_test_run();
 }

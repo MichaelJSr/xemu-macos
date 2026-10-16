@@ -55,10 +55,16 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp, int budget);
 void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr);
 
 /*
- * Invalidate all translated blocks (e.g., on DSP reset, bootstrap
- * reload of pram, or code-cache full).
+ * Invalidate all translated blocks (code-cache full).
  */
 void dsp56k_jit_invalidate_all(dsp_core_t *dsp);
+
+/*
+ * P memory may have changed in bulk (reset, bootstrap, a load, an
+ * opcode-cache flush): before the next block runs, keep the blocks
+ * whose dependency words are unchanged and evict the rest.
+ */
+void dsp56k_jit_revalidate_all(dsp_core_t *dsp);
 
 /*
  * Forget the auto-throttle's history (it counts since the process
@@ -353,6 +359,7 @@ static inline void dsp56k_jit_invalidate(dsp_core_t *dsp, uint32_t addr) {
     (void)dsp; (void)addr;
 }
 static inline void dsp56k_jit_invalidate_all(dsp_core_t *dsp) { (void)dsp; }
+static inline void dsp56k_jit_revalidate_all(dsp_core_t *dsp) { (void)dsp; }
 static inline bool dsp56k_jit_enabled(void) { return false; }
 static inline bool dsp56k_jit_diff_enabled(void) { return false; }
 static inline void dsp56k_jit_set_enabled_from_config(bool enabled) { (void)enabled; }

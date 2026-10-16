@@ -2050,6 +2050,30 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   dispatcher entries retranslating) counts a chained run once, so the
   same churn now weighs about five times as much; Azurik's cores stay
   far below it.
+- **DSP JIT blocks survive DSP resets and loads (2026-10-16).** DSP
+  reset, bootstrap, opcode-cache flushes and `sync_from_vm` flushed the
+  whole JIT cache, so every harness restore (the APU reset flushes, the
+  load's sync again) retranslated all of it: over 41 restores × 16
+  frames, 1848 GP and 3612 EP translations against 44 and 86 without
+  restores. They now call `dsp56k_jit_revalidate_all`, which marks the
+  cache; the next block lookup compares each live block's P dependency
+  words (`[pc_start, dep_end)` and its `bake_mask` words, copied at
+  translation into `dep_words`) with P memory and evicts only the blocks
+  that differ, before any block runs, so chains still join verified
+  blocks only. The same loop: 44 / 86 translations, no flushes, 42
+  revalidations keeping all 1804 / 3526 blocks, RAM digests equal in
+  every candidate and to the old binary. Per-candidate fixed cost
+  (`xemu-run checkpoint` at L = 1..64 frames, linear fit, 2 runs each,
+  load 23-25): 72.96 → 68.37 Minsn (−6.3%), cycles 44.3 → 40.0 Mcyc
+  (−10%, noisy). 500 restores with `XEMU_DSP_JIT_DIFF=1`: failures 0,
+  one RAM digest; goldens and det WAVs unchanged. `XEMU_DSP_JIT_DIFF`
+  turns chaining off, so it can't see the one way kept blocks could
+  change a replay: where a chained run stops. Chained runs stop at
+  `dsp_run`'s budget (`jit_chain_limit`), so a restore runs as the
+  first pass did whatever the cache holds; without that bound a counted
+  loop of two blocks ran to its end in the first `dsp_run` after a
+  restore instead of stopping where the first pass did (xbox suite
+  `/corpus/budget-replay`).
 
 ### Input
 

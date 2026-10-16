@@ -78,9 +78,8 @@ static void dsp_c_reset(DSPState *dsp)
 {
     dsp56k_reset_cpu(c_core(dsp));
     dsp->save_cycles = 0;
-    /* Reset wipes PRAM and clears pram_opcache; any translated JIT
-     * blocks that referenced the old code are now stale. */
-    dsp56k_jit_invalidate_all(c_core(dsp));
+    /* Translated blocks whose P words survive stay. */
+    dsp56k_jit_revalidate_all(c_core(dsp));
 }
 
 static void dsp_c_step(DSPState *dsp)
@@ -139,9 +138,8 @@ static void dsp_c_bootstrap(DSPState *dsp)
         }
     }
     memset(core->pram_opcache, 0, sizeof(core->pram_opcache));
-    /* Fresh code loaded — any previously-translated JIT blocks are
-     * now stale. */
-    dsp56k_jit_invalidate_all(core);
+    /* Fresh code loaded: keep the blocks it leaves unchanged. */
+    dsp56k_jit_revalidate_all(core);
 }
 
 static uint32_t dsp_c_read_memory(DSPState *dsp, char space, uint32_t address)
@@ -212,7 +210,7 @@ static void dsp_c_set_cycle_count(DSPState *dsp, uint32_t count)
 static void dsp_c_invalidate_opcache(DSPState *dsp)
 {
     memset(c_core(dsp)->pram_opcache, 0, sizeof(c_core(dsp)->pram_opcache));
-    dsp56k_jit_invalidate_all(c_core(dsp));
+    dsp56k_jit_revalidate_all(c_core(dsp));
 }
 
 /*
@@ -290,7 +288,7 @@ static void dsp_c_sync_from_vm(DSPState *dsp)
 
     memset(core->pram_opcache, 0, sizeof(core->pram_opcache));
     /* PRAM contents may have changed (snapshot load / engine switch). */
-    dsp56k_jit_invalidate_all(core);
+    dsp56k_jit_revalidate_all(core);
 }
 
 void dsp_c_init(DSPState *dsp)

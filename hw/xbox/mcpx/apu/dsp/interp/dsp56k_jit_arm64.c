@@ -54,6 +54,7 @@
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
 #include "qemu/atomic.h"
+#include "qemu/host-utils.h"
 #include "dsp_cpu.h"
 #include "dsp56k_jit_arm64.h"
 
@@ -1013,6 +1014,9 @@ typedef void (*dsp56k_jit_entry_fn)(dsp_core_t *dsp);
  */
 #define DSP56K_JIT_MAX_PENDING_CHAINS 128
 
+/* dep_words capacity: room for 16 words per P word's block. */
+#define DSP56K_JIT_DEP_WORDS (16 * DSP_PRAM_SIZE)
+
 /* Why a block returned to the dispatcher (XEMU_DSP_JIT_STATS). */
 enum {
     DSP56K_JIT_EXIT_IDLE,       /* exit word: is_idle */
@@ -1082,6 +1086,9 @@ struct DspJitBlock {
     uint32_t dep_end;
     /* P words below 0x40 that movem p:aa baked into the code. */
     uint64_t bake_mask;
+    /* Where the translation's copy of those words starts in dep_words:
+     * [pc_start, dep_end), then one word per bake_mask bit. */
+    uint32_t dep_off;
     dsp56k_jit_entry_fn entry;    /* pointer into code buffer */
     uint32_t num_ops;
     uint32_t write_set;        /* DSP56K_JIT_WS_* bitmask */
@@ -1240,6 +1247,15 @@ typedef struct DspJitState {
     uint16_t cover[DSP_PRAM_SIZE];
     /* OR of the live blocks' bake_mask (a superset after evictions). */
     uint64_t bake_any;
+    /*
+     * The P words each live block was translated from (DspJitBlock
+     * dep_off), bump-allocated and reset with the code buffer. After a
+     * bulk P change (dsp56k_jit_revalidate_all) the next block lookup
+     * compares them first (jit_verify_all).
+     */
+    uint32_t *dep_words;
+    uint32_t dep_used;
+    bool verify_pending;
 
     /* Differential validator (XEMU_DSP_JIT_DIFF=1). NULL if diff off. */
     DiffQueue *diff_q;
@@ -1256,6 +1272,7 @@ typedef struct DspJitState {
     uint64_t exits[DSP56K_JIT_EXIT_MAX];
     uint64_t chains[DSP56K_JIT_CHAIN_MAX];
     uint64_t cache_flushes;
+    uint64_t revalidations, blocks_kept, blocks_dropped;
     uint64_t fallbacks;
     uint64_t diff_ops_checked;
 
@@ -9922,7 +9939,8 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
      * heavy-f1 peaks at ~173); budget 2 KiB per stub for safety. */
     size_t space_left = (s->code_buf + s->code_cap) - s->code_ptr;
     size_t worst_case = 256 + DSP56K_JIT_MAX_OPS_PER_BLOCK * 2048;
-    if (space_left < worst_case) {
+    if (space_left < worst_case ||
+        s->dep_used + DSP56K_JIT_MAX_DEP_SPAN + 64 > DSP56K_JIT_DEP_WORDS) {
         dsp56k_jit_invalidate_all(dsp);
     }
 
@@ -10203,6 +10221,14 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     }
     block->bake_mask = g_xlate_bake_mask;
     s->bake_any |= g_xlate_bake_mask;
+    /* What the translation read, for jit_verify_all. */
+    block->dep_off = s->dep_used;
+    memcpy(&s->dep_words[s->dep_used], &dsp->pram[pc_start],
+           (dep_end - pc_start) * sizeof(uint32_t));
+    s->dep_used += dep_end - pc_start;
+    for (uint64_t m = g_xlate_bake_mask; m; m &= m - 1) {
+        s->dep_words[s->dep_used++] = dsp->pram[ctz64(m)];
+    }
     block->entry = (dsp56k_jit_entry_fn)entry_ptr;
     block->num_ops = num_ops;
     block->write_set = write_set;
@@ -10285,6 +10311,7 @@ void dsp56k_jit_init(dsp_core_t *dsp)
         return;
     }
     s->code_cap = DSP56K_JIT_CODE_BYTES;
+    s->dep_words = g_new(uint32_t, DSP56K_JIT_DEP_WORDS);
     s->code_ptr = s->code_buf;
 
     if (g_jit_diff && !g_jit_diff_sync) {
@@ -10379,6 +10406,8 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
             "  blocks_translated = %" PRIu64 "\n"
             "  blocks_executed   = %" PRIu64 "\n"
             "  cache_flushes     = %" PRIu64 "\n"
+            "  revalidations     = %" PRIu64 " (blocks kept %" PRIu64
+            ", dropped %" PRIu64 ")\n"
             "  fallbacks         = %" PRIu64 "\n"
             "  diff_ops_checked  = %" PRIu64 "\n"
             "  code_buf_used     = %zu bytes / %zu bytes\n"
@@ -10396,7 +10425,8 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
             "  cf_fallback       = %" PRIu64 "\n",
             jit_core_name(dsp),
             s->blocks_translated, s->blocks_executed,
-            s->cache_flushes, s->fallbacks,
+            s->cache_flushes, s->revalidations, s->blocks_kept,
+            s->blocks_dropped, s->fallbacks,
             s->diff_ops_checked,
             (size_t)(s->code_ptr - s->code_buf), s->code_cap,
             g_alu_inlined_count,
@@ -10515,6 +10545,7 @@ void dsp56k_jit_finalize(dsp_core_t *dsp)
     }
 
     jit_code_free(s->code_buf, s->code_cap);
+    g_free(s->dep_words);
     g_free(s);
     dsp->jit_state = NULL;
 }
@@ -10602,7 +10633,70 @@ void dsp56k_jit_invalidate_all(dsp_core_t *dsp)
      * points into the code buffer that is being recycled. */
     s->num_pending_chains = 0;
     s->code_ptr = s->code_buf;
+    s->dep_used = 0;
+    s->verify_pending = false;
     s->cache_flushes++;
+}
+
+void dsp56k_jit_revalidate_all(dsp_core_t *dsp)
+{
+    DspJitState *s = (DspJitState *)dsp->jit_state;
+    if (s) {
+        s->verify_pending = true;
+    }
+}
+
+/* Are the P words block b was translated from still in P memory? */
+static bool jit_block_deps_match(const dsp_core_t *dsp, const DspJitState *s,
+                                 const DspJitBlock *b)
+{
+    const uint32_t *w = &s->dep_words[b->dep_off];
+    uint32_t n = b->dep_end - b->pc_start;
+    if (memcmp(w, &dsp->pram[b->pc_start], n * sizeof(uint32_t))) {
+        return false;
+    }
+    w += n;
+    for (uint64_t m = b->bake_mask; m; m &= m - 1) {
+        if (*w++ != dsp->pram[ctz64(m)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * After a bulk P change (dsp56k_jit_revalidate_all), before any block
+ * runs: keep each live block whose dependency words are unchanged and
+ * evict the rest, which unpatches the chain sites into them. Chains
+ * between kept blocks stay, so every chain still joins verified code.
+ * A reset or load that leaves the program alone keeps all of it.
+ */
+static void jit_verify_all(dsp_core_t *dsp, DspJitState *s)
+{
+    bool writing = false;
+
+    s->verify_pending = false;
+    s->revalidations++;
+    for (uint32_t pc = 0; pc < DSP_PRAM_SIZE; pc++) {
+        DspJitBlock *b = &s->blocks[pc];
+        if (!b->entry) {
+            continue;
+        }
+        if (jit_block_deps_match(dsp, s, b)) {
+            s->blocks_kept++;
+            continue;
+        }
+        if (!writing) {
+            /* Un-patching incoming chain sites writes into the code buffer. */
+            qemu_thread_jit_write();
+            writing = true;
+        }
+        jit_evict_block(s, b);
+        s->blocks_dropped++;
+    }
+    if (writing) {
+        qemu_thread_jit_execute();
+    }
 }
 
 void dsp56k_jit_reset_throttle(dsp_core_t *dsp)
@@ -11332,6 +11426,9 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp, int budget)
 
     if (s->auto_throttled) {
         return 0;
+    }
+    if (unlikely(s->verify_pending)) {
+        jit_verify_all(dsp, s);
     }
     if (++s->throttle_tick >= DSP56K_JIT_THROTTLE_WINDOW) {
         s->throttle_tick = 0;
