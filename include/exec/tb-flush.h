@@ -42,6 +42,14 @@ void tcg_flush_jmp_cache(CPUState *cs);
  * that keep some. Same calling context as tb_flush__exclusive_or_serial().
  */
 void xemu_tb_revalidate_after_load(void);
+/*
+ * xemu_tb_revalidate_pages() - the same after an incremental checkpoint
+ * restore, visiting only the TBs on the ram_addr pages set in @scope
+ * (@pages bits), the pages anything wrote since the last check, plus every
+ * XEMU_TB_PEEKS TB. XEMU_TB_REVAL_REFUTE=1 also runs the full check and
+ * reports what only it would do.
+ */
+void xemu_tb_revalidate_pages(const unsigned long *scope, uint64_t pages);
 #endif
 
 #endif /* _TB_FLUSH_H_ */

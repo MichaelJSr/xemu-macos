@@ -37,6 +37,14 @@
  * next one compares every page. Not seen: another process writing guest
  * RAM through XEMU_RAM_SHM's mapping.
  *
+ * The same log scopes the translation check after an incremental restore
+ * (xemu_tb_revalidate_pages): a page can hold a translation its bytes no
+ * longer match only if something wrote it since the last check, that is,
+ * the restore itself (restore_page), or a write the log saw (reset, the
+ * device load, and anything before the restore, saves included: each
+ * collect also ORs into Block.reval, which only a check clears). That
+ * holds while the log ran since the last check (ram.reval_ok).
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
@@ -68,6 +76,7 @@ typedef struct Block {
     uint64_t pages;
     bool small;
     unsigned long *dirty;   /* pages written since ram.synced */
+    unsigned long *reval;   /* pages written since the last TB check */
 } Block;
 
 /*
@@ -112,6 +121,10 @@ static struct {
     bool restoring;         /* a checkpoint restore is loading */
     XemuRamImage *synced;   /* RAM equalled it then, unless NULL */
     MemoryListener listener;
+    bool reval_ok;          /* the log ran since the last TB check */
+    bool scope_ok;          /* this restore's load can scope the check */
+    uint64_t scope_bits;    /* pages of ram_addr space the blocks span */
+    unsigned long *scope;   /* by ram_addr page: what the check visits */
 } ram;
 
 static void blocks_init(void)
@@ -137,12 +150,16 @@ static void blocks_init(void)
             };
             b.small = qemu_ram_get_used_length(rb) <= SMALL_BLOCK;
             b.dirty = bitmap_new(b.pages);
+            b.reval = bitmap_new(b.pages);
             ram.pages += b.pages;
+            ram.scope_bits = MAX(ram.scope_bits,
+                                 b.offset / ram.page_size + b.pages);
             g_array_append_val(a, b);
         }
     }
     ram.nblocks = a->len;
     ram.blocks = (Block *)g_array_free(g_steal_pointer(&a), false);
+    ram.scope = bitmap_new(ram.scope_bits);
 }
 
 static void chunk_unref(gpointer p)
@@ -236,6 +253,7 @@ static void log_collect(bool clear)
                         v = qatomic_xchg(w, 0);
                     }
                     b->dirty[i / BITS_PER_LONG] |= v;
+                    b->reval[i / BITS_PER_LONG] |= v;
                     any = true;
                 }
                 i += BITS_PER_LONG;
@@ -243,6 +261,7 @@ static void log_collect(bool clear)
                 if (test_bit(off, map) &&
                     (!clear || bitmap_test_and_clear_atomic(map, off, 1))) {
                     set_bit(i, b->dirty);
+                    set_bit(i, b->reval);
                     any = true;
                 }
                 i++;
@@ -287,6 +306,7 @@ void xemu_ram_log_start(void)
     ram.on = true;
     /* Writes before now weren't logged. */
     set_synced(NULL);
+    ram.reval_ok = false;
 }
 
 void xemu_ram_log_stop(void)
@@ -299,6 +319,7 @@ void xemu_ram_log_stop(void)
     memory_listener_unregister(&ram.listener);
     memory_global_dirty_log_stop(GLOBAL_DIRTY_XEMU);
     ram.on = false;
+    ram.reval_ok = false;
     /* As the log found them: all dirty, so no page traps for it. */
     for (unsigned k = 0; k < ram.nblocks; k++) {
         physical_memory_set_dirty_range(ram.blocks[k].offset,
@@ -558,6 +579,12 @@ static bool restore_page(Block *b, uint64_t i, XemuRamImage *img)
     return true;
 }
 
+/* Page @i of @b, written by the restore: the TB check visits it. */
+static void scope_page(Block *b, uint64_t i)
+{
+    set_bit(b->offset / ram.page_size + i, ram.scope);
+}
+
 void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
                          XemuRamStats *st)
 {
@@ -568,6 +595,13 @@ void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
     if (ram.on) {
         log_collect(true);
     }
+    /*
+     * The TB check may skip the pages nothing wrote, after an incremental
+     * restore whose large blocks all went by the log; a full compare
+     * keeps the full check, as loadvm does.
+     */
+    ram.scope_ok = incremental && ram.reval_ok;
+    bitmap_zero(ram.scope, ram.scope_bits);
     for (unsigned k = 0; k < ram.nblocks; k++) {
         Block *b = &ram.blocks[k];
         bool partial;
@@ -582,20 +616,60 @@ void xemu_ram_image_load(XemuRamImage *img, bool incremental, bool verify,
         g_free(cand);
         cand = bitmap_new(b->pages);
         partial = incremental && block_candidates(b, img, cand);
+        if (!partial && !b->small) {
+            ram.scope_ok = false;
+        }
         for (uint64_t i = next_page(b, cand, partial, 0); i < b->pages;
              i = next_page(b, cand, partial, i + 1)) {
             st->checked++;
-            st->differ += restore_page(b, i, img);
+            if (restore_page(b, i, img)) {
+                st->differ++;
+                scope_page(b, i);
+            }
         }
         if (partial && verify) {
             for (uint64_t i = find_first_zero_bit(cand, b->pages);
                  i < b->pages;
                  i = find_next_zero_bit(cand, b->pages, i + 1)) {
-                st->missed += restore_page(b, i, img);
+                if (restore_page(b, i, img)) {
+                    st->missed++;
+                    scope_page(b, i);
+                }
             }
         }
     }
     synced_to(img);
+}
+
+bool xemu_checkpoint_ram_reval_scope(const unsigned long **scope,
+                                     uint64_t *pages)
+{
+    bool ok = ram.restoring && ram.scope_ok && ram.on && ram.reval_ok;
+
+    ram.scope_ok = false;
+    if (!ram.blocks) {
+        return false;
+    }
+    /* The device load's writes, and with them every write since. */
+    if (ram.on) {
+        log_collect(false);
+    }
+    for (unsigned k = 0; k < ram.nblocks; k++) {
+        Block *b = &ram.blocks[k];
+
+        if (ok) {
+            for (uint64_t i = find_first_bit(b->reval, b->pages);
+                 i < b->pages; i = find_next_bit(b->reval, b->pages, i + 1)) {
+                scope_page(b, i);
+            }
+        }
+        bitmap_zero(b->reval, b->pages);
+    }
+    /* Whatever check follows (scoped, or every TB) starts the record. */
+    ram.reval_ok = ram.on;
+    *scope = ram.scope;
+    *pages = ram.scope_bits;
+    return ok;
 }
 
 /* A chunk during xemu_ram_images_compact. */
@@ -768,11 +842,13 @@ out:
 void xemu_ram_restore_begin(void)
 {
     ram.restoring = true;
+    ram.scope_ok = false;
 }
 
 void xemu_ram_restore_end(bool ok)
 {
     ram.restoring = false;
+    ram.scope_ok = false;
     if (!ok) {
         set_synced(NULL);
     }

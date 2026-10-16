@@ -1207,6 +1207,54 @@ static void tb_remove(TranslationBlock *tb)
  * Must be called from a context in which no cpus are running,
  * e.g. start_exclusive() or vm_stop().
  */
+#if defined(XBOX)
+/*
+ * Every live XEMU_TB_PEEKS TB, which every load drops (what it read past
+ * its end isn't in its ihash), so that the scoped check after an
+ * incremental restore (xemu_tb_revalidate_pages) finds them off its pages.
+ * Entries of TBs invalidated since go stale (CF_INVALID; such TBs are
+ * never recycled); a load or a flush empties the list.
+ */
+static QemuSpin xemu_peeks_lock;
+static GPtrArray *xemu_peeks;
+
+static void xemu_peeks_note(TranslationBlock *tb)
+{
+    qemu_spin_lock(&xemu_peeks_lock);
+    if (!xemu_peeks) {
+        xemu_peeks = g_ptr_array_new();
+    }
+    if (xemu_peeks->len >= 1024) {
+        for (guint i = 0; i < xemu_peeks->len;) {
+            TranslationBlock *old = g_ptr_array_index(xemu_peeks, i);
+            if (tb_cflags(old) & CF_INVALID) {
+                g_ptr_array_remove_index_fast(xemu_peeks, i);
+            } else {
+                i++;
+            }
+        }
+    }
+    g_ptr_array_add(xemu_peeks, tb);
+    qemu_spin_unlock(&xemu_peeks_lock);
+}
+
+/* Move the live ones to @stale (with @stale NULL, forget them). */
+static void xemu_peeks_take(GPtrArray *stale)
+{
+    qemu_spin_lock(&xemu_peeks_lock);
+    for (guint i = 0; stale && xemu_peeks && i < xemu_peeks->len; i++) {
+        TranslationBlock *tb = g_ptr_array_index(xemu_peeks, i);
+        if (!(tb_cflags(tb) & CF_INVALID)) {
+            g_ptr_array_add(stale, tb);
+        }
+    }
+    if (xemu_peeks) {
+        g_ptr_array_set_size(xemu_peeks, 0);
+    }
+    qemu_spin_unlock(&xemu_peeks_lock);
+}
+#endif
+
 void tb_flush__exclusive_or_serial(void)
 {
     CPUState *cpu;
@@ -1224,6 +1272,9 @@ void tb_flush__exclusive_or_serial(void)
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
     qht_reset_size(&tb_ctx.inv_htable, CODE_GEN_HTABLE_SIZE);
     tb_remove_all();
+#if defined(XBOX)
+    xemu_peeks_take(NULL);
+#endif
 
     tcg_region_reset_all();
     /* XXX: flush processor icache at this point if cache flush is expensive */
@@ -1681,6 +1732,11 @@ TranslationBlock *tb_link_page(TranslationBlock *tb)
         tb_unlock_pages(tb);
         return existing_tb;
     }
+#if defined(XBOX)
+    if (unlikely(tb->xemu_xpage_reg & XEMU_TB_PEEKS)) {
+        xemu_peeks_note(tb);
+    }
+#endif
 
     tb_unlock_pages(tb);
     return tb;
@@ -2077,6 +2133,17 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
  * TB, and one pass per page list rather than a list search per TB. Such a
  * load costs 9-22 ms in all; one that drops little, 1-6 ms.
  *
+ * After an incremental checkpoint restore the check is scoped
+ * (xemu_tb_revalidate_pages): a TB's bytes can have changed only on a
+ * page something wrote since the last check, and the checkpoint code
+ * knows those (xemu_checkpoint_ram_reval_scope: what the restore wrote,
+ * and every write the migration dirty log saw since, reset and device
+ * load included, as long as the log ran). Only the TBs on those pages are
+ * hashed, only those pages are re-protected (the writers that set
+ * DIRTY_MEMORY_CODE behind live TBs mark the log too), and the XEMU_TB_PEEKS
+ * TBs come from their own list. Restores that copy ~1.7k of 32k pages
+ * visit ~2.5k pages instead of every one of ~36k TBs.
+ *
  * Call stopped, from the same context as tb_flush__exclusive_or_serial.
  */
 typedef struct XemuTbReval {
@@ -2158,9 +2225,33 @@ static void xemu_tb_reval_unlink(GPtrArray *stale)
 }
 
 /*
- * Re-protect the pages that keep code; give the ones the drop emptied the
- * page-empty tail. tb_remove_all_1's walk; @base is the page index. Only
- * the stopped vCPU adds TBs, so the unlocked pre-check misses none.
+ * Re-protect page @pd (at @addr) if it keeps code; give it the page-empty
+ * tail if the drop emptied it. Only the stopped vCPU adds TBs, so the
+ * unlocked pre-check misses none.
+ */
+static void xemu_tb_reval_protect_page(PageDesc *pd, ram_addr_t addr,
+                                       XemuTbReval *r)
+{
+    if (!pd->first_tb && !pd->code_blocks) {
+        return;
+    }
+    page_lock(pd);
+    if (pd->first_tb) {
+        r->pages++;
+        r->reprotected += physical_memory_test_and_clear_dirty(
+            addr, TARGET_PAGE_SIZE, DIRTY_MEMORY_CODE);
+    } else {
+        r->emptied++;
+        pd->code_blocks = 0;
+        xemu_sf_sync_page(addr, 0);
+        tlb_unprotect_code(addr);
+    }
+    page_unlock(pd);
+}
+
+/*
+ * xemu_tb_reval_protect_page for every page: tb_remove_all_1's walk;
+ * @base is the page index.
  */
 static void xemu_tb_reval_protect(int level, void **lp, tb_page_addr_t base,
                                   XemuTbReval *r)
@@ -2172,23 +2263,8 @@ static void xemu_tb_reval_protect(int level, void **lp, tb_page_addr_t base,
         PageDesc *pd = *lp;
 
         for (int i = 0; i < V_L2_SIZE; i++) {
-            ram_addr_t addr = (base | i) << TARGET_PAGE_BITS;
-
-            if (!pd[i].first_tb && !pd[i].code_blocks) {
-                continue;
-            }
-            page_lock(&pd[i]);
-            if (pd[i].first_tb) {
-                r->pages++;
-                r->reprotected += physical_memory_test_and_clear_dirty(
-                    addr, TARGET_PAGE_SIZE, DIRTY_MEMORY_CODE);
-            } else {
-                r->emptied++;
-                pd[i].code_blocks = 0;
-                xemu_sf_sync_page(addr, 0);
-                tlb_unprotect_code(addr);
-            }
-            page_unlock(&pd[i]);
+            xemu_tb_reval_protect_page(&pd[i],
+                                       (base | i) << TARGET_PAGE_BITS, r);
         }
     } else {
         void **pp = *lp;
@@ -2201,11 +2277,53 @@ static void xemu_tb_reval_protect(int level, void **lp, tb_page_addr_t base,
     }
 }
 
+/* Drop @stale's TBs: invalidate them, then take them off their pages. */
+static void xemu_tb_reval_drop(GPtrArray *stale)
+{
+    /* TBs live in the code buffer: their fields and jumps are JIT writes. */
+    qatomic_set(&tb_jmp_cache_inval_deferred, true);
+    qemu_thread_jit_write();
+    for (guint i = 0; i < stale->len; i++) {
+        do_tb_phys_invalidate(g_ptr_array_index(stale, i), false);
+    }
+    xemu_tb_reval_unlink(stale);
+    qemu_thread_jit_execute();
+    qatomic_set(&tb_jmp_cache_inval_deferred, false);
+}
+
+static void xemu_tb_reval_protect_all(XemuTbReval *r)
+{
+    for (int i = 0; i < v_l1_size; i++) {
+        xemu_tb_reval_protect(v_l2_levels, l1_map + i,
+                              (tb_page_addr_t)i << v_l1_shift, r);
+    }
+}
+
+/* What every load resets besides the TBs and the protection. */
+static void xemu_tb_reval_finish(XemuTbReval *r, int64_t t0,
+                                 const char *what)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        tlb_flush(cpu);
+    }
+    xemu_istep_disarm();
+    xemu_xpage_shadow_reset();
+
+    if (unlikely(xemu_inv_prof_on())) {
+        fprintf(stderr, "xemu: load%s kept %u TBs, dropped %u; %u code pages "
+                "(%u re-protected), %u emptied; %lld us\n",
+                what, r->kept, r->stale->len, r->pages, r->reprotected,
+                r->emptied, (long long)(g_get_monotonic_time() - t0));
+    }
+    g_ptr_array_free(r->stale, true);
+}
+
 void xemu_tb_revalidate_after_load(void)
 {
     int64_t t0 = unlikely(xemu_inv_prof_on()) ? g_get_monotonic_time() : 0;
     XemuTbReval r = { .stale = g_ptr_array_new() };
-    CPUState *cpu;
 
     assert(tcg_enabled());
     assert(!runstate_is_running() ||
@@ -2216,34 +2334,157 @@ void xemu_tb_revalidate_after_load(void)
         qht_iter(&tb_ctx.htable, xemu_tb_reval_check, &r);
     }
     g_free(r.buf);
+    /* The walk found every XEMU_TB_PEEKS TB. */
+    xemu_peeks_take(NULL);
 
-    /* TBs live in the code buffer: their fields and jumps are JIT writes. */
-    qatomic_set(&tb_jmp_cache_inval_deferred, true);
-    qemu_thread_jit_write();
+    xemu_tb_reval_drop(r.stale);
+    xemu_tb_reval_protect_all(&r);
+    xemu_tb_reval_finish(&r, t0, "");
+}
+
+/*
+ * XEMU_TB_REVAL_REFUTE=1: after each scoped check, also run the full one
+ * and count what only it does: TBs it drops (their bytes changed off the
+ * scope, or an XEMU_TB_PEEKS TB the list missed) and code pages it
+ * re-protects. Both must stay 0; the full check's results are kept, so a
+ * violation doesn't spread.
+ */
+static struct {
+    int on;
+    unsigned loads, extra, unprotected, untailed;
+    uint64_t scoped, full;
+} xemu_reval_refute = { .on = -1 };
+
+static void xemu_reval_refute_report(void)
+{
+    fprintf(stderr, "xemu: reval refute: %u scoped loads, %" PRIu64
+            " TBs checked by the scope, %" PRIu64 " by the full walk; "
+            "extra drops %u, unprotected pages %u, untailed pages %u\n",
+            xemu_reval_refute.loads, xemu_reval_refute.scoped,
+            xemu_reval_refute.full, xemu_reval_refute.extra,
+            xemu_reval_refute.unprotected, xemu_reval_refute.untailed);
+}
+
+static void xemu_reval_refute_check(XemuTbReval *r, uint8_t *buf)
+{
+    XemuTbReval f = { .stale = g_ptr_array_new(), .buf = buf };
+    XemuTbReval g = { 0 };
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        qht_iter(&tb_ctx.htable, xemu_tb_reval_check, &f);
+    }
+    for (guint i = 0; i < MIN(f.stale->len, 8); i++) {
+        TranslationBlock *tb = g_ptr_array_index(f.stale, i);
+
+        fprintf(stderr, "xemu: reval refute: VIOLATION: kept a stale TB at "
+                "ram_addr " TB_PAGE_ADDR_FMT " (+" TB_PAGE_ADDR_FMT
+                "), %u bytes%s\n", tb_page_addr0(tb), tb_page_addr1(tb),
+                tb->size, tb->xemu_xpage_reg & XEMU_TB_PEEKS ? ", peeks" : "");
+    }
+    xemu_tb_reval_drop(f.stale);
+    xemu_tb_reval_protect_all(&g);
+    if (f.stale->len || g.reprotected) {
+        fprintf(stderr, "xemu: reval refute: VIOLATION: load %u: the full "
+                "check drops %u more TBs and re-protects %u pages\n",
+                xemu_reval_refute.loads + 1, f.stale->len, g.reprotected);
+    }
+    xemu_reval_refute.loads++;
+    xemu_reval_refute.scoped += r->kept + r->stale->len;
+    xemu_reval_refute.full += f.kept + f.stale->len;
+    xemu_reval_refute.extra += f.stale->len;
+    xemu_reval_refute.unprotected += g.reprotected;
+    xemu_reval_refute.untailed += g.emptied;
+    if (!(xemu_reval_refute.loads % 256)) {
+        xemu_reval_refute_report();
+    }
+    g_ptr_array_free(f.stale, true);
+}
+
+void xemu_tb_revalidate_pages(const unsigned long *scope, uint64_t pages)
+{
+    int64_t t0 = unlikely(xemu_inv_prof_on()) ? g_get_monotonic_time() : 0;
+    XemuTbReval r = { .stale = g_ptr_array_new() };
+    g_autoptr(GArray) off = g_array_new(false, false, sizeof(tb_page_addr_t));
+
+    assert(tcg_enabled());
+    assert(!runstate_is_running() ||
+           (current_cpu && cpu_in_serial_context(current_cpu)));
+    if (xemu_reval_refute.on < 0) {
+        const char *e = getenv("XEMU_TB_REVAL_REFUTE");
+
+        xemu_reval_refute.on = e && e[0] == '1';
+        if (xemu_reval_refute.on) {
+            atexit(xemu_reval_refute_report);
+        }
+    }
+
+    r.buf = g_malloc(TARGET_PAGE_SIZE);
+    /* Every TB that read past its end goes, wherever it is. */
+    xemu_peeks_take(r.stale);
+    /* xemu_tb_reval_check maps RAM (qemu_map_ram_ptr), as the full walk. */
+    WITH_RCU_READ_LOCK_GUARD() {
+        for (uint64_t p = find_first_bit(scope, pages); p < pages;
+             p = find_next_bit(scope, pages, p + 1)) {
+            PageDesc *pd = page_find(p);
+            TranslationBlock *tb;
+            PageForEachNext n;
+
+            if (!pd || !pd->first_tb) {
+                continue;
+            }
+            page_lock(pd);
+            PAGE_FOR_EACH_TB(unused, unused, pd, tb, n) {
+                tb_page_addr_t p0 = tb_page_addr0(tb) >> TARGET_PAGE_BITS;
+
+                /* A TB on two pages of the scope is checked from its first. */
+                if ((n && p0 < pages && test_bit(p0, scope)) ||
+                    (tb->xemu_xpage_reg & XEMU_TB_PEEKS)) {
+                    continue;
+                }
+                xemu_tb_reval_check(tb, 0, &r);
+            }
+            page_unlock(pd);
+        }
+    }
+
+    /* Pages a dropped TB also sits on, off the scope: maybe emptied. */
     for (guint i = 0; i < r.stale->len; i++) {
-        do_tb_phys_invalidate(g_ptr_array_index(r.stale, i), false);
-    }
-    xemu_tb_reval_unlink(r.stale);
-    qemu_thread_jit_execute();
-    qatomic_set(&tb_jmp_cache_inval_deferred, false);
+        TranslationBlock *tb = g_ptr_array_index(r.stale, i);
+        tb_page_addr_t q[2] = { tb_page_addr0(tb), tb_page_addr1(tb) };
 
-    for (int i = 0; i < v_l1_size; i++) {
-        xemu_tb_reval_protect(v_l2_levels, l1_map + i,
-                              (tb_page_addr_t)i << v_l1_shift, &r);
+        for (int k = 0; k < 2; k++) {
+            tb_page_addr_t idx = q[k] >> TARGET_PAGE_BITS;
+            if (q[k] != -1 && (idx >= pages || !test_bit(idx, scope))) {
+                g_array_append_val(off, idx);
+            }
+        }
     }
-    CPU_FOREACH(cpu) {
-        tlb_flush(cpu);
+    xemu_tb_reval_drop(r.stale);
+    for (uint64_t p = find_first_bit(scope, pages); p < pages;
+         p = find_next_bit(scope, pages, p + 1)) {
+        PageDesc *pd = page_find(p);
+        if (pd) {
+            xemu_tb_reval_protect_page(pd, p << TARGET_PAGE_BITS, &r);
+        }
     }
-    xemu_istep_disarm();
-    xemu_xpage_shadow_reset();
+    g_array_sort_with_data(off, tb_page_addr_cmp, NULL);
+    for (guint i = 0; i < off->len; i++) {
+        tb_page_addr_t idx = g_array_index(off, tb_page_addr_t, i);
+        PageDesc *pd;
 
-    if (unlikely(xemu_inv_prof_on())) {
-        fprintf(stderr, "xemu: load kept %u TBs, dropped %u; %u code pages "
-                "(%u re-protected), %u emptied; %lld us\n",
-                r.kept, r.stale->len, r.pages, r.reprotected, r.emptied,
-                (long long)(g_get_monotonic_time() - t0));
+        if (i && idx == g_array_index(off, tb_page_addr_t, i - 1)) {
+            continue;
+        }
+        pd = page_find(idx);
+        if (pd) {
+            xemu_tb_reval_protect_page(pd, idx << TARGET_PAGE_BITS, &r);
+        }
     }
-    g_ptr_array_free(r.stale, true);
+    if (unlikely(xemu_reval_refute.on)) {
+        xemu_reval_refute_check(&r, r.buf);
+    }
+    g_free(r.buf);
+    xemu_tb_reval_finish(&r, t0, " (scoped)");
 }
 
 /*

@@ -3279,7 +3279,17 @@ int qemu_loadvm_state(QEMUFile *f, Error **errp)
          * leave RAM half written, so drop them all then.
          */
         if (ret == 0) {
-            xemu_tb_revalidate_after_load();
+            bool xemu_checkpoint_ram_reval_scope(const unsigned long **scope,
+                                                 uint64_t *pages);
+            const unsigned long *scope;
+            uint64_t scope_pages;
+
+            /* An incremental restore names the pages anything wrote. */
+            if (xemu_checkpoint_ram_reval_scope(&scope, &scope_pages)) {
+                xemu_tb_revalidate_pages(scope, scope_pages);
+            } else {
+                xemu_tb_revalidate_after_load();
+            }
         } else {
             tb_flush__exclusive_or_serial();
         }

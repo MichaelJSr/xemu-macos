@@ -2733,6 +2733,34 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   ways (stepover and z0/s/Z0), 11.5 → 7.4 Gcycles. gdb alltests: only
   the three known rerun.py FAILs; hooks run_all 95 PASS; goldens exact on
   release and debug-TCG; xbox suite 7/7.
+- **The TB check after an incremental restore visits only written pages
+  (2026-10-16).** Every load hashed all ~36.5k live TBs against their
+  bytes (`xemu_tb_revalidate_after_load`: 42% of the restoring thread in
+  the incremental-restore profile, `XXH3_64bits` 31%), though a restore
+  copies ~1.7k of 32k pages and drops ~129 TBs. After an incremental
+  restore, `xemu_tb_revalidate_pages` hashes the TBs, and re-protects,
+  only on the pages `xemu_checkpoint_ram_reval_scope` names: those
+  `restore_page` wrote plus every page the migration dirty log saw
+  written since the last check (reset and the device load included;
+  `Block.reval` survives saves, and counts only while the log ran since
+  that check). `XEMU_TB_PEEKS` TBs come from their own list and are
+  always dropped; pages a dropped TB leaves off the scope get the
+  page-empty tail. loadvm, incoming migrations and full restores keep
+  the full walk. Cross-binary against the previous commit, two det null
+  instances side by side, heavy-f1, 5 interleaved reps (load 17): an
+  incremental restore after 16 frames 17.5 → 12.2 Mcycles (−31%, 5/5),
+  5.5 → 3.8 ms; `xemu-run` L=1 −11.9%, L=4 −4.9%, L=16 −3.2% (5/5 each).
+  All four commits against the branch point (lat.py, load 16-18): an
+  incremental restore after 16 frames 19.9 → 13.5 Mcycles, with nothing
+  run 17.2 → 9.2; a 16-frame `xemu-run` 362.5 → 328.3 Mcycles.
+  `XEMU_TB_REVAL_REFUTE=1` (the full walk after each scoped check,
+  counting what it alone would drop or re-protect) reported 0 extra
+  drops, 0 unprotected and 0 untailed pages over 1,110 scoped restores
+  each on heavy-f1 and stream-e2 (random `xemu-run` candidates from two
+  checkpoints, saves against a base between them; 201 more on
+  debug-TCG), and through the hooks (1,126 loads) and loads (260) suites;
+  `verify` restores found `pages-missed` 0, and 300 candidates matched a
+  full restore's reply, trace and RAM sha256.
 
 ### Retired diagnostics and dark experiments (2026-10-10)
 

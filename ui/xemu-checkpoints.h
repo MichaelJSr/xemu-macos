@@ -63,6 +63,14 @@ void xemu_ram_restore_begin(void);
 void xemu_ram_restore_end(bool ok);
 /* From every qemu_loadvm_state: other loads leave RAM unknown. */
 void xemu_checkpoint_ram_loading(void);
+/*
+ * From every successful qemu_loadvm_state, before its TB check: true when
+ * the check may visit only the ram_addr pages set in *@scope (*@pages
+ * bits): an incremental restore's, with the log running since the last
+ * check. Either way the record of writes starts again.
+ */
+bool xemu_checkpoint_ram_reval_scope(const unsigned long **scope,
+                                     uint64_t *pages);
 
 /* The RAM image checkpoint @name holds, or NULL. */
 XemuRamImage *xemu_checkpoint_ram(const char *name);
