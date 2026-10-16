@@ -1039,12 +1039,12 @@ typedef struct DspJitIncomingChain {
 
 struct DspJitBlock {
     uint32_t pc_start;
-    uint32_t pc_end;           /* exclusive — last covered PC + cur_inst_len */
     /*
      * Exclusive end of the P words the translation depends on:
-     * [pc_start, dep_end) covers pc_end, the second word of a
-     * two-word last op the length classifier calls one word (DO,
-     * BRA long, mode-6 ea), and the lazy-flag lookahead past pc_end.
+     * [pc_start, dep_end) covers the ops' words up to the last op's
+     * end, the second word of a two-word last op the length classifier
+     * calls one word (DO, BRA long, mode-6 ea), and the lazy-flag
+     * lookahead past the last op.
      * A P write inside this range evicts the block.
      */
     uint32_t dep_end;
@@ -10008,7 +10008,6 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
      * are still in jit-write mode for the chain patching below). */
     DspJitBlock *block = &s->blocks[pc_start];
     block->pc_start = pc_start;
-    block->pc_end = pc_end;
     /* The emitters read at most the op's second word (pc + 1), even
      * for ops the length classifier calls one word. */
     uint32_t dep_end = MAX(MAX(pc_end, last_op_pc + 2), peek_end);
