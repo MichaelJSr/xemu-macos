@@ -1626,6 +1626,23 @@ static void gl_render_frame(struct xemu_console *scon)
 #endif
 }
 
+static uint64_t present_refresh_ns;
+
+uint64_t xemu_present_refresh_ns(void)
+{
+    return qatomic_read(&present_refresh_ns);
+}
+
+bool xemu_present_interp_gate(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("XEMU_INTERP_GATE");
+        enabled = !(e && e[0] == '0');
+    }
+    return enabled;
+}
+
 #ifdef __APPLE__
 /*
  * Push-present refuter (XEMU_PUSH_PRESENT_REFUTE=1, debug). Every frame,
@@ -1745,6 +1762,41 @@ static void push_present_refute_step(void)
     }
 }
 
+static void present_refresh_update(void)
+{
+    static uint64_t last_ms;
+    uint64_t now_ms = SDL_GetTicks();
+    if (last_ms && now_ms - last_ms < 500) {
+        return;
+    }
+    last_ms = now_ms;
+    const SDL_DisplayMode *mode =
+        SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(m_window));
+    qatomic_set(&present_refresh_ns,
+                mode && mode->refresh_rate > 0 ?
+                    (uint64_t)(1e9 / mode->refresh_rate) : 0);
+}
+
+/*
+ * Minimum hold of a paced interpolation step, on the refresh grid.
+ * presentDrawable:afterMinimumDuration: shows the next drawable at the
+ * first vsync after the previous one has been up that long, so a hold a
+ * hair over n refreshes lasts n+1: 2x steps of a 30 fps frame (16.7 ms,
+ * plus capture jitter) often stayed up two refreshes of a 60 Hz panel,
+ * the UI fell behind the schedule and the push ring skipped a step every
+ * two or three flips. Hold whole refreshes (at least one; up to 1/8 of a
+ * refresh of jitter counts as the next), 1 ms short of the vsync.
+ */
+static uint64_t present_hold_ns(uint64_t hold_ns)
+{
+    uint64_t r = qatomic_read(&present_refresh_ns);
+    if (!hold_ns || !r || !xemu_present_interp_gate()) {
+        return hold_ns;
+    }
+    uint64_t n = MAX((hold_ns + r / 8) / r, 1);
+    return n * r - MIN(r / 4, 1000000);
+}
+
 /**
  * Metal-native sibling of gl_render_frame: same structure (pull the
  * NV2A present frame, run the HUD, release, present), but the game
@@ -1782,6 +1834,8 @@ static void metal_render_frame(struct xemu_console *scon)
         }
         last_present_ns = now_ns;
     }
+
+    present_refresh_update();
 
     if (push_present_refute_enabled()) {
         push_present_refute_step();
@@ -1895,7 +1949,8 @@ static void metal_render_frame(struct xemu_console *scon)
     }
 
     /* GPU-enforced hold time for paced interpolation steps */
-    xemu_metal_set_present_duration(frame.display_duration_ns);
+    xemu_metal_set_present_duration(
+        present_hold_ns(frame.display_duration_ns));
 
     if (!tex) {
         /* VGA fallback (pixman surface, software rendering). */

@@ -124,7 +124,7 @@ there is no trampoline to bypass.
 [display]
 renderer = 'VULKAN'
 metalfx_mode = 'spatial'        # off | spatial | temporal
-frame_interpolation = '4x'      # off | 2x | 4x
+frame_interpolation = '2x'      # off | 2x | 4x (see Performance)
 
 [display.quality]
 surface_scale = 2               # 1 = 640x480 ... 4 = 2560x1920
@@ -1025,8 +1025,31 @@ TB chaining, inline dispatch probes, the sticky SSE/NEON bracket, the
 async Metal present chain, the inline NOTDIRTY store-skip (+12%
 heavy-scene rendering throughput at equal fps), and the 2026-08-04
 optimization wave.
-Lighter scenes hold the 60 fps vblank cap. MetalFX frame interpolation
-presents 60/120 Hz from real-30+ without changing simulation rate.
+Lighter scenes hold the 60 fps vblank cap.
+
+MetalFX frame interpolation (`frame_interpolation`, Metal backend)
+shows a generated midpoint before each real frame without changing the
+simulation rate, but only as many steps as the window's display can
+show: a mode runs while a guest frame lasts that many refreshes (2 for
+2x, 4 for 4x; on from 90% of that, off below 75%). `4x` drops to 2x
+when only 2x fits, and both turn off when not even 2x fits: the real
+frames then go out as with interpolation off, and the interpolator's
+GPU time is saved (~4 ms per frame at 2880x2160 on an M2 Ultra).
+
+- 60 Hz panel: 2x runs while the game is at or below ~33 fps (once on,
+  up to 40) and is off at the 60 fps cap. 4x never fits (frames longer
+  than 50 ms count as hitches, which skip interpolation), so `4x` acts
+  as 2x.
+- 120 Hz panel: 2x runs up to the 60 fps cap; `4x` runs 4x at or below
+  ~33 fps (once on, up to 40) and 2x above.
+
+Each step is held whole refreshes: a 30 fps game shows the midpoint and
+the real frame for one refresh each on a 60 Hz panel. MetalFX makes one
+midpoint per real frame, so 4x shows it for three of the four steps and
+holds the real frame back longer: 2x is the smoother setting wherever
+both fit. With an unknown refresh rate, or on the OpenGL presentation
+backend, the configured mode runs every frame, as it does with
+`XEMU_INTERP_GATE=0` (which also drops the whole-refresh holds).
 
 The remaining wall is still guest-TCG throughput. The
 superblock/region-formation campaign against the measured ~40%

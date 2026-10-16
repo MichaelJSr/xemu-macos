@@ -37,7 +37,8 @@ on a box loaded by other jobs:
   (~9.6% of vCPU samples); `vp_write` is another ~2%. The lockless
   DMA_PUT doorbell (2026-10-15, `3391b92357`) cut the doorbell from 12%
   to 2.2% of vCPU samples; the REPORTS_SUBMIT valve behind that wait is
-  now Open frontier #1 in the `xemu-history` skill.
+  parked in the `xemu-history` skill (0 submits per flip with both
+  heavy anchors at the 60 fps cap, 2026-10-16).
 - **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
   `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
   `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path

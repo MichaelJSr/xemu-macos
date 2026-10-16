@@ -528,6 +528,14 @@ typedef struct PGRAPHVkDisplayState {
      * blending across a content jump.
      */
     uint64_t interp_avg_gap_ns;
+    /*
+     * Steps per guest frame the display can show (interp_fit_mode): the
+     * configured mode, 2 when only 2x fits, 0 when not even 2x does.
+     * interp_cycle_mode is the mode of the cycle in flight: its steps,
+     * their pacing and the push schedule.
+     */
+    int interp_fit;
+    int interp_cycle_mode;
 #endif
 
     /*
@@ -576,6 +584,7 @@ typedef struct PGRAPHVkDisplayState {
     uint64_t present_ring_consumed;   // highest frame_seq handed to reader
     uint64_t present_ring_pub_seq;    // highest frame_seq pushed (dedup)
     uint64_t present_ring_generation; // bumped on invalidate
+    uint32_t present_ring_sched;      // steps the newest publish pushed
 #endif
 } PGRAPHVkDisplayState;
 

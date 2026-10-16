@@ -23,10 +23,10 @@ Changes manifest below, and every one has a `getenv` on this branch.
 Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
-`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO`, `XEMU_KI_IDLE_HALT` and
-`XEMU_BQL_SPIN`, the first six rows. The other `=0` row,
-`XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass. Knobs that exist
-only in the retired wave-1 work are recorded in
+`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO`, `XEMU_KI_IDLE_HALT`,
+`XEMU_BQL_SPIN` and `XEMU_INTERP_GATE`, the first seven rows. The
+other `=0` row, `XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass.
+Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
 
@@ -38,6 +38,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
 | `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
 | `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |
+| `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -1946,6 +1947,26 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   preprocess away unchanged). Both exist because the ImGui-under-lock
   rework needed a number before anyone built it — it got one, and the
   number closed it (Settled vectors).
+
+- **Interpolate only as many steps as the display can show
+  (2026-10-16).** At the 60 fps cap on a 60 Hz panel, 2x published two
+  steps per flip while the UI shows one per refresh, so the push ring
+  skipped one per flip, and the interpolator's ~4 ms of GPU per flip at
+  2880×2160 (72% of xemu's GPU time on W2, 54% on heavy-f1) bought
+  nothing; the PFIFO thread also waited for it in
+  `metalfx_drain_inflight`. A mode now runs only while the guest frame
+  period holds `mode` refreshes (on from 0.9×, off below 0.75×; the UI
+  reads the refresh rate from SDL every 500 ms): the configured mode,
+  else 2x, else none, with a MetalFX history reset at each change; the
+  push schedule and the debt bound follow the mode the flip ran. Paced
+  steps are held whole refreshes (`present_hold_ns`), because
+  `presentDrawable:afterMinimumDuration:` turns a hold a hair over n
+  refreshes into n+1. Windowed 2×45 s against `XEMU_INTERP_GATE=0`:
+  heavy-w2 58.49 ± 2.07 → 59.93 ± 0.28 fps, `push_policy_skip` 1.0 → 0,
+  `mfx_drain` 2.0-4.1 ms → ≤9 µs/flip; heavy-f1 at the cap, `mfx_drain`
+  ≤1.2 ms → 0.1 µs/flip; at a forced ~30 fps, 2x skips 0.41-0.45 →
+  ≤0.05 per flip and 4x drops to 2x. nsprof: `interp_gated`,
+  `interp_degraded`.
 
 ### MCPX APU
 

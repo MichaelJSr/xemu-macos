@@ -152,6 +152,8 @@ enum NsprofEvent {
     NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
     NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
     NSPROF_EV_PUSH_POLICY_SKIP,    /* consumer catch-up skipped a stale step */
+    NSPROF_EV_INTERP_GATED,        /* flip without midpoints: none fit */
+    NSPROF_EV_INTERP_DEGRADED,     /* flip at 2x: 4x steps don't fit */
     NSPROF_EV_UI_PRESENT,          /* completed UI present (end_frame) */
     /* MetalFX output-shape change: the (in_w,in_h,out_w,out_h) tuple the
      * scaler + its texture ring are rebuilt for (display.c). */

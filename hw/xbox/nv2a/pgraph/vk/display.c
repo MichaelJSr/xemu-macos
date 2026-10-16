@@ -147,13 +147,14 @@ static void present_ring_push(PGRAPHVkDisplayState *disp,
 }
 
 /* Writer (PFIFO thread, at flip): build this flip's present schedule from
- * the just-rendered display state and push it into the ring. Interp off:
- * one entry (the real frame, unpaced). Interp on: (mode-1) copies of the
- * interpolated midpoint step then the held real frame, each held
- * interp_step_ns and numbered with the next present_frame_seq exactly as
- * the pull path steps them. No-op when render_display published nothing
- * newer than the ring already holds (the flip gate opened with no new
- * frame), so duplicate-seq entries can't accumulate. */
+ * the just-rendered display state and push it into the ring. No cycle
+ * (interp off, or steps the display can't show): one entry (the real
+ * frame, unpaced). A cycle: (mode-1) copies of the interpolated midpoint
+ * step then the held real frame, mode = the cycle's (interp_fit_mode),
+ * each held interp_step_ns and numbered with the next present_frame_seq
+ * exactly as the pull path steps them. No-op when render_display published
+ * nothing newer than the ring already holds (the flip gate opened with no
+ * new frame), so duplicate-seq entries can't accumulate. */
 void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
 {
     PGRAPHVkDisplayState *disp = &pg->vk_renderer_state->display;
@@ -165,19 +166,13 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
         return;
     }
 
-    int mode = 0;
-    if (g_config.display.frame_interpolation ==
-            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
-        mode = 2;
-    } else if (g_config.display.frame_interpolation ==
-                   CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
-        mode = 4;
-    }
-
+    int mode = disp->interp_cycle_mode;
     uint64_t gen = disp->present_ring_generation;
 
+    disp->present_ring_sched = 1;
     if (mode >= 2 && disp->pending_real_texture &&
         disp->interp_midpoint_texture) {
+        disp->present_ring_sched = mode;
         uint64_t seq = disp->present_frame_seq;
         for (int i = 0; i < mode - 1; i++) {
             PushPresentEntry e = {
@@ -266,24 +261,18 @@ void pgraph_vk_present_schedule_publish(PGRAPHState *pg)
  * the debt never exceeds 1-2 and the policy is inert, preserving the
  * paced interpolation cadence.
  */
-static uint32_t push_present_max_debt(void)
+static uint32_t push_present_max_debt(PGRAPHVkDisplayState *disp)
 {
     /*
      * One full flip schedule plus two steps of slack. A flip
      * publishes its whole schedule atomically under the slot lock
      * (mode-1 midpoints + the real frame), so unconsumed depth
      * legitimately jumps by `mode` at every publish — a threshold below
-     * that false-fires on healthy transients and eats midpoints.
+     * that false-fires on healthy transients and eats midpoints. The
+     * newest publish's size, not the configured mode: a flip without
+     * midpoints (interp_fit_mode) pushes one step, as interp off does.
      */
-    int mode = 1;
-    if (g_config.display.frame_interpolation ==
-            CONFIG_DISPLAY_FRAME_INTERPOLATION_2X) {
-        mode = 2;
-    } else if (g_config.display.frame_interpolation ==
-                   CONFIG_DISPLAY_FRAME_INTERPOLATION_4X) {
-        mode = 4;
-    }
-    return (uint32_t)(mode + 2);
+    return MAX(disp->present_ring_sched, 1) + 2;
 }
 
 /* Pick the entry to hand the reader: the oldest step past the consume
@@ -326,7 +315,7 @@ static PushPresentEntry *present_ring_next(PGRAPHVkDisplayState *disp)
         }
     }
 
-    if (unconsumed > push_present_max_debt()) {
+    if (unconsumed > push_present_max_debt(disp)) {
         /* Behind: land on the newest unconsumed real frame (or the newest
          * step at all when no real is pending — 4x midpoint bursts). The
          * monotonic consume cursor then retires everything older. */
@@ -1918,6 +1907,54 @@ out:
 }
 
 /*
+ * Interpolation steps the display can show. MetalFX makes one midpoint
+ * per real frame; a cycle shows it for mode-1 steps, then the real frame,
+ * each frame_period / mode long, but the UI presents at most one step per
+ * refresh. With the guest near the refresh rate (Azurik at the 60 fps cap
+ * on a 60 Hz panel) the push ring's debt bound skipped about one step per
+ * flip under 2x, the steps it did show mixed midpoints with late real
+ * frames (content advancing e.g. 0.5, 0.5, 0.5, then 2.5 frames per
+ * refresh), and the interpolator still cost ~4 ms of GPU per flip at
+ * 2880x2160.
+ *
+ * A mode fits while the guest frame period (the hitch guard's capture-gap
+ * average) holds `mode` refresh periods of the window's display: from 0.9x
+ * when that mode isn't running, down to 0.75x while it or a higher one
+ * does. The configured mode runs if it fits, else 2x if that does, else
+ * none (the real frame goes out unpaced, as with interpolation off). An
+ * unknown refresh rate or gap keeps the configured mode. Every change
+ * resets the interpolator's history: the frames before it were paired
+ * under another mode or not at all. The UI holds each step whole
+ * refreshes (present_hold_ns). XEMU_INTERP_GATE=0 runs the configured
+ * mode every flip and holds steps as computed.
+ */
+static int interp_fit_mode(PGRAPHVkDisplayState *disp, int mode)
+{
+    uint64_t refresh = xemu_present_refresh_ns();
+    uint64_t gap = disp->interp_avg_gap_ns;
+    int fit = mode;
+    if (xemu_present_interp_gate() && refresh && gap) {
+        fit = 0;
+        for (int m = mode; m >= 2; m /= 2) {
+            uint64_t need = refresh * m;
+            if (disp->interp_fit >= m ? gap * 4 >= need * 3 :
+                                        gap * 10 >= need * 9) {
+                fit = m;
+                break;
+            }
+        }
+    }
+    if (fit != disp->interp_fit) {
+        metalfx_interpolation_reset();
+        disp->interp_fit = fit;
+    }
+    if (fit < mode) {
+        nsprof_event(fit ? NSPROF_EV_INTERP_DEGRADED : NSPROF_EV_INTERP_GATED);
+    }
+    return fit;
+}
+
+/*
  * MetalFX output-size stabilizer.
  *
  * The Metal-backend output size tracks the live CAMetalLayer, so a window
@@ -2465,9 +2502,16 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                          * them the same way). */
                         pgraph_vk_present_slot_invalidate(pg);
                     } else if (disp->interp_prev_surface) {
-                        disp->interp_remaining = (interp_mode == 4) ? 3 : 1;
-                        disp->interp_width = iw;
-                        disp->interp_height = ih;
+                        int mode = metal_native ?
+                                       interp_fit_mode(disp, interp_mode) :
+                                       interp_mode;
+                        /* No midpoints: drop a pull-stepped leftover. */
+                        disp->interp_remaining = mode ? mode - 1 : 0;
+                        if (mode) {
+                            disp->interp_cycle_mode = mode;
+                            disp->interp_width = iw;
+                            disp->interp_height = ih;
+                        }
                     }
                 }
             }
@@ -2542,7 +2586,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
                         disp->interp_remaining--;
                         disp->interp_step_ns =
                             (uint64_t)(delta_sec * 1.0e9f) /
-                            (uint64_t)interp_mode;
+                            (uint64_t)disp->interp_cycle_mode;
                         disp->last_present_step_ns =
                             qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
                         disp->present_duration_ns = disp->interp_step_ns;

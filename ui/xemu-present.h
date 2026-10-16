@@ -24,6 +24,7 @@
 #define XEMU_PRESENT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,20 @@ typedef enum XemuHeadlessMode {
 } XemuHeadlessMode;
 
 XemuHeadlessMode xemu_headless_mode(void);
+
+/*
+ * Refresh period of the display the Metal window is on, in ns, as the
+ * UI thread last read it (every 500 ms); 0 while unknown (GL backend,
+ * headless, no mode). Any thread.
+ */
+uint64_t xemu_present_refresh_ns(void);
+
+/*
+ * Fit frame interpolation to the display (default): run only the modes
+ * whose steps it can show, and hold steps whole refreshes.
+ * XEMU_INTERP_GATE=0: the configured mode every flip, holds as computed.
+ */
+bool xemu_present_interp_gate(void);
 
 #ifdef __cplusplus
 }
