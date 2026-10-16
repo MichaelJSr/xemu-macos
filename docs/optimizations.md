@@ -2049,6 +2049,38 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   real base (no PGO layout), so expect nearer −0.8%. Cross-binary paired
   medians at load 16-26 couldn't resolve it: heavy-f1 −0.12% (22/44, CI
   −2.0..+1.4%), cold boot +0.6% (9/19, CI −2.2..+4.1%).
+- **Headless null mode scans VGA only for a screendump (2026-10-15).**
+  Every vblank ran `vga_update_display` for a surface that nothing shows
+  under `XEMU_HEADLESS=null`. Its dirty-bitmap clear re-arms
+  `TLB_NOTDIRTY` on the framebuffer pages (`tlb_reset_dirty`), so the
+  next guest write to each takes the notdirty slow path. On the misc
+  lane (22329bd8bc plus the MMX, icache-batching, W^X and pusher
+  changes, before the pinned registers, the TLB memo and
+  `bd02c7c745`'s writable-clean TLB bitmaps), where every figure in
+  this bullet but the last was measured, the clear also walked the
+  whole TLB, and the scan was 0.45-0.5% of the det vCPU (PMI). `nv2a_vga_gfx_update` now skips the scan in null mode (the
+  VBLANK interrupt and raster reset stay), and `screendump_vga`, the
+  surface's only reader there, calls `nv2a_vga_refresh()` under the BQL
+  first: a full redraw (`hw_ops->invalidate`, so the size check forces
+  it) that clears no dirty bits. Faking a mode change instead
+  (`graphic_mode = -1`) would restart the text cursor's blink and flip
+  it on every screendump. Screendumps match the old binary byte for
+  byte at cold boot f1-f1800 (across the f180-f240 mode switch),
+  heavy-f1 f1/f300, stream-e2 f600 and live in normal mode; one taken
+  right after a `loadvm`, before any frame runs, now shows the loaded
+  state instead of the one before it. Same-binary alternate-chunk A/B
+  (old path in alternate 20-frame chunks, load 7-19): heavy-f1 −0.39%
+  Mcycles/frame (se 0.09), stream-e2 −0.81% (se 0.29), cold boot
+  unresolved (−0.7%, se 2.3); Minsns/frame −0.25%, −0.26%, −0.36%.
+  Cross-binary at load 7-21: Minsns/frame −0.28% on heavy-f1 (24/24)
+  and stream-e2 (9/10); Mcycles/frame paired medians −1.1% (15/24) and
+  +1.2% (4/10), under the noise (se 1.2 and 2.5). With the bitmaps the
+  clear visits only writable-clean entries, and the skip saves less:
+  re-measured on top of them (2026-10-16, against the same binary
+  forced to scan by a temporary switch, load 4-7), Minsns/frame −0.12%
+  on heavy-f1 (9/10 pairs), −0.06% on stream-e2 (3/3) and −0.17% on
+  cold boot (3/3), Mcycles/frame within noise. Windowed and offscreen
+  modes still scan every vblank.
 - **PTIMER zero-divisor guard (2026-09-08).** The upstream merge gave
   `NV_PTIMER_ALARM_0` a write handler that schedules a QEMU timer
   (`d73326b621`), and every conversion on that path divides by

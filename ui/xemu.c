@@ -2051,6 +2051,7 @@ static bool screendump_vga(struct xemu_console *scon, ScreendumpRequest *req)
     bool ok = false;
 
     xemu_main_loop_lock();
+    nv2a_vga_refresh();
     DisplaySurface *surface = scon->surface;
     if (!surface || surface_bytes_per_pixel(surface) != 4) {
         error_setg(&req->err, "no displayable frame");

@@ -33,6 +33,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | **Present / MetalFX** | | | |
 | Async MetalFX under GL presentation | reverted | GL↔Metal can't fence; now lives in the Metal backend | `ea23058e1e` |
 | Vblank tied to host refresh | reverted | The host timer *is* the guest VBLANK IRQ → game speed scales with Hz | `649dd265a0` |
+| Per-vblank VGA scan in headless null mode | shipped on demand | Nothing shows the surface, but its dirty clear re-armed notdirty traps on the framebuffer every vblank (and walked the whole TLB before the writable-clean TLB bitmaps). Only `screendump_vga` refreshes it now, with a full redraw forced by `invalidate` (faking a mode change with `graphic_mode = -1` would flip the text cursor on every dump); screendumps byte-identical. Det heavy-f1 −0.4% Mcycles/frame on the misc lane (22329bd8bc); on top of the bitmaps only −0.12% Minsns/frame (9/10 pairs), cycles within noise | `nv2a_vga_refresh` |
 | Push-present strict FIFO consume | fixed | Backlog dropped real frames ("double playing"); bounded debt | `78c4573dfb` |
 | Drawable-first present order | reverted | +0.50 fps, under noise | `1a8f466e2b` |
 | MetalFX 2x interpolation as a GPU serializer | closed | heavy-f1 2x vs off, 4×50 s, load 18-59: 31.7 ± 13.4 vs 27.4 ± 16.9 fps, signs 2/2. It is ~70% of xemu's GPU time, but the GPU is ≤41% busy | 2026-10-15 |

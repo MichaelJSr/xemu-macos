@@ -21,6 +21,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/main-loop.h"
+#include "ui/xemu-present.h"
 #include "ui/xemu-settings.h"
 
 void nv2a_update_irq(NV2AState *d)
@@ -205,10 +206,37 @@ int nv2a_get_screen_off(void)
     return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
 }
 
+/*
+ * Headless null mode shows nothing, and only a screendump reads the VGA
+ * surface, so the vblank skips the scan (its dirty-bitmap clear re-arms
+ * TLB_NOTDIRTY, so the next write to each framebuffer page traps).
+ * nv2a_vga_refresh() brings the surface up to date for the screendump.
+ */
+static bool nv2a_vga_scan_on_demand(void)
+{
+    return xemu_headless_mode() == XEMU_HEADLESS_NULL;
+}
+
+/*
+ * BQL held. A full redraw, so it clears no dirty bits. invalidate forces
+ * it through the size check, not by faking a mode change, which would
+ * also restart the text cursor's blink and flip it on every call.
+ */
+void nv2a_vga_refresh(void)
+{
+    if (g_nv2a && nv2a_vga_scan_on_demand()) {
+        VGACommonState *vga = &g_nv2a->vga;
+        vga->hw_ops->invalidate(vga);
+        vga->hw_ops->gfx_update(vga);
+    }
+}
+
 static void nv2a_vga_gfx_update(void *opaque)
 {
     VGACommonState *vga = opaque;
-    vga->hw_ops->gfx_update(vga);
+    if (!nv2a_vga_scan_on_demand()) {
+        vga->hw_ops->gfx_update(vga);
+    }
 
     NV2AState *d = container_of(vga, NV2AState, vga);
     d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
