@@ -52,6 +52,15 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 }
 
 #if defined(XBOX)
+/*
+ * The jump cache is 2048 two-way sets (tb-jmp-cache.h): the way-0 index
+ * of pc's set. Way 1 is the next entry, inside the same page range.
+ */
+static inline unsigned int tb_jmp_cache_way0(vaddr pc)
+{
+    return tb_jmp_cache_hash_func(pc) & ~1u;
+}
+
 /* The step TB cache's page bucket (tb-jmp-cache.h). */
 static inline unsigned int xemu_stepc_page(vaddr addr)
 {

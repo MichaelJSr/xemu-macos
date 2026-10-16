@@ -1479,7 +1479,11 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
 #endif
         }
     } else {
+#if defined(XBOX)
+        uint32_t h = tb_jmp_cache_way0(tb->pc);
+#else
         uint32_t h = tb_jmp_cache_hash_func(tb->pc);
+#endif
 
         CPU_FOREACH(cpu) {
             CPUJumpCache *jc = cpu->tb_jmp_cache;
@@ -1487,6 +1491,11 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
             if (qatomic_read(&jc->array[h].tb) == tb) {
                 qatomic_set(&jc->array[h].tb, NULL);
             }
+#if defined(XBOX)
+            if (qatomic_read(&jc->array[h | 1].tb) == tb) {
+                qatomic_set(&jc->array[h | 1].tb, NULL);
+            }
+#endif
         }
     }
 }

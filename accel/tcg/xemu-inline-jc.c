@@ -20,7 +20,10 @@
  * non-base-cflags exit TBs simply never match, which is a safe
  * fallback). flags is a constant too, except after an insn that
  * rewrote some flag bits, where the caller passes them as computed at
- * runtime (i386 fldcw: HF_FPU_RC/PC). The live tb->cflags load
+ * runtime (i386 fldcw: HF_FPU_RC/PC). Only way 0 of the pc's two-way
+ * set is probed: a way-1 entry falls through to the helper, whose C
+ * lookup swaps it into way 0 (a second inline way cost more to
+ * translate than it saved). The live tb->cflags load
  * catches CF_INVALID from invalidation; gdb breakpoint insertion
  * invalidates the TBs on the breakpoint's page (xemu_gdb_bp_invalidate
  * in tcg-accel-ops.c), so hits cannot skip a new breakpoint. Interrupts are seen at the target TB's entry check,
@@ -65,12 +68,12 @@ void tcg_gen_xemu_jc_probe_and_goto_ptr(TCGv_i32 pc32,
 
     tcg_gen_extu_i32_i64(pc64, pc32);
 
-    /* tb_jmp_cache_hash_func for a 32-bit guest pc. */
+    /* tb_jmp_cache_way0 for a 32-bit guest pc. */
     tcg_gen_shri_i32(tmp, pc32, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
     tcg_gen_xor_i32(tmp, tmp, pc32);
     tcg_gen_shri_i32(h, tmp, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
     tcg_gen_andi_i32(h, h, TB_JMP_PAGE_MASK);
-    tcg_gen_andi_i32(tmp, tmp, TB_JMP_ADDR_MASK);
+    tcg_gen_andi_i32(tmp, tmp, TB_JMP_ADDR_MASK & ~1);
     tcg_gen_or_i32(h, h, tmp);
 
     tcg_gen_ld_ptr(jc, tcg_env, jc_env_offset);

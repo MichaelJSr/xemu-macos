@@ -59,7 +59,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | HLT BSOD recovery (force IF=1) | reverted | Masked a blocked thread; cured nothing | `6eea148914` |
 | icount warp from the main loop | fixed | Warped from a clock missing the slice's instructions: a timer fired late by host scheduling, ~3% of `vanilla-exit` replays diverged. cc5d72113f only made it rarer | `icount_vcpu_warps` |
 | Caching JIT write-protect flips | reverted | Parity; the 9.7% was sampler skid | ledger |
-| Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped); −1.10 fps; 11.2% hits; −0.23 fps | `02364e6960` |
+| Return-address ring; jump cache at 16 bits; L2 victim tier; ret memo at 13 bits | replaced / reverted | Per-depth key thrashes (the eip ret memo shipped); −1.10 fps; 11.2% hits; −0.23 fps. What did pay was two ways at the same 64 KiB, for recurring conflicts such as fldcw RC variants of one pc (cold boot htable walks −92%), probed inline in way 0 only: an inline way-1 check cost more translation than it saved (+0.2% Minsns/frame on heavy-f1) | `02364e6960`, `tb_jmp_cache_way0` |
 | TB byte-range invalidation filter | closed | Trap storm; sub-page tracking shipped instead (+14-25%) | `b8ee034131`, `683b919631` |
 | xpage full-flush backstop | fixed | Flushes aren't rare (139 per 20 s streaming) → the v0.11 lag; unlink registry | `f7d9cc2ff1` |
 | Full TLB flush per MemAccessCallback change (~190/s in normal mode) | fixed | Its old 0.2%-of-vCPU estimate missed the refills and the rebuilt jump cache and near-return memo: 2.3% of host instructions per frame (det offscreen); now a ranged refill | `tlb_flush_host_range` |

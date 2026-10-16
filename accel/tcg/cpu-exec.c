@@ -547,6 +547,7 @@ static void xemu_guestprof_start(void)
  */
 static uint64_t xemu_tbprof_lookups;
 static uint64_t xemu_tbprof_jc_hits;
+static uint64_t xemu_tbprof_jc_hits1;
 static uint64_t xemu_tbprof_ht_found;
 static uint64_t xemu_istep_cuts, xemu_istep_steps;
 static uint64_t xemu_stepc_hits, xemu_stepc_misses;
@@ -606,9 +607,10 @@ static void xemu_tbprof_dump(void)
         return;
     }
     fprintf(stderr,
-            "xemu: tbprof lookups=%llu jc_hit=%llu (%.2f%%) ht_found=%llu "
-            "(%.2f%%) translate=%llu tb_flush=%u\n",
+            "xemu: tbprof lookups=%llu jc_hit=%llu (%.2f%%) jc_hit_way1=%llu "
+            "ht_found=%llu (%.2f%%) translate=%llu tb_flush=%u\n",
             (unsigned long long)l, (unsigned long long)h, 100.0 * h / l,
+            (unsigned long long)xemu_tbprof_jc_hits1,
             (unsigned long long)f, 100.0 * f / l,
             (unsigned long long)(l - h - f),
             qatomic_read(&tb_ctx.tb_flush_count));
@@ -667,6 +669,25 @@ static TranslationBlock *xemu_step_lookup(CPUState *cpu, TCGTBCPUState s)
 }
 #endif
 
+#if defined(XBOX)
+/*
+ * Jump-cache fill at way-0 index @h: way 0's entry, if any, moves to
+ * way 1, so a set keeps its two most recent TBs.
+ */
+static inline void tb_jmp_cache_fill(CPUJumpCache *jc, uint32_t h,
+                                     vaddr pc, TranslationBlock *tb)
+{
+    TranslationBlock *old = qatomic_read(&jc->array[h].tb);
+
+    if (old) {
+        jc->array[h | 1].pc = jc->array[h].pc;
+        qatomic_set(&jc->array[h | 1].tb, old);
+    }
+    jc->array[h].pc = pc;
+    qatomic_set(&jc->array[h].tb, tb);
+}
+#endif
+
 static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
@@ -676,7 +697,11 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     /* we should never be trying to look up an INVALID tb */
     tcg_debug_assert(!(s.cflags & CF_INVALID));
 
+#if defined(XBOX)
+    hash = tb_jmp_cache_way0(s.pc);
+#else
     hash = tb_jmp_cache_hash_func(s.pc);
+#endif
     jc = cpu->tb_jmp_cache;
 
 #if defined(XBOX)
@@ -699,6 +724,30 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
         goto hit;
     }
 
+#if defined(XBOX)
+    {
+        TranslationBlock *tb1 = qatomic_read(&jc->array[hash | 1].tb);
+
+        if (tb1 &&
+            jc->array[hash | 1].pc == s.pc &&
+            tb1->cs_base == s.cs_base &&
+            tb1->flags == s.flags &&
+            tb_cflags(tb1) == s.cflags) {
+            /* Swap: the inline probe reads way 0 only. */
+            jc->array[hash | 1].pc = jc->array[hash].pc;
+            qatomic_set(&jc->array[hash | 1].tb, tb);
+            jc->array[hash].pc = s.pc;
+            qatomic_set(&jc->array[hash].tb, tb1);
+            if (unlikely(xemu_tbprof_on())) {
+                xemu_tbprof_jc_hits++;
+                xemu_tbprof_jc_hits1++;
+            }
+            tb = tb1;
+            goto hit;
+        }
+    }
+#endif
+
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) {
         return NULL;
@@ -707,10 +756,11 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     if (unlikely(xemu_tbprof_on())) {
         xemu_tbprof_ht_found++;
     }
-#endif
-
+    tb_jmp_cache_fill(jc, hash, s.pc, tb);
+#else
     jc->array[hash].pc = s.pc;
     qatomic_set(&jc->array[hash].tb, tb);
+#endif
 
 hit:
     /*
@@ -1526,10 +1576,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  * We add the TB in the virtual pc hash table
                  * for the fast lookup
                  */
-                h = tb_jmp_cache_hash_func(s.pc);
                 jc = cpu->tb_jmp_cache;
+#if defined(XBOX)
+                h = tb_jmp_cache_way0(s.pc);
+                tb_jmp_cache_fill(jc, h, s.pc, tb);
+#else
+                h = tb_jmp_cache_hash_func(s.pc);
                 jc->array[h].pc = s.pc;
                 qatomic_set(&jc->array[h].tb, tb);
+#endif
             }
             }
 

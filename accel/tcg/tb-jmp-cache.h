@@ -39,6 +39,14 @@
  * no need for qatomic_rcu_read() and pc is always consistent with a
  * non-NULL value of 'tb'.  Strictly speaking pc is only needed for
  * CF_PCREL, but it's used always for simplicity.
+ *
+ * xemu: array[] is 2048 two-way sets. tb_jmp_cache_hash_func(pc) & ~1
+ * is way 0, which holds the set's most recently filled or hit entry; a
+ * fill moves it to way 1 (| 1). A set lies inside its page's
+ * TB_JMP_PAGE_SIZE range, so the page and full clears are unchanged.
+ * Other threads only clear tb (tb_jmp_cache_inval_tb, both ways); a
+ * swap racing with that can keep an invalidated TB, which then misses
+ * on CF_INVALID like any stale entry.
  */
 typedef struct CPUJumpCache {
     struct rcu_head rcu;

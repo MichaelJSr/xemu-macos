@@ -37,7 +37,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_WIN32_DXGI` | Windows only (landed 2026-09-08). `=0` skips upstream's DXGI/WGL_NV_DX_interop presenter and presents with `SDL_GL_SwapWindow` (legacy); unset = DXGI flip-model. Read once during `display_early_init()`, so it is latched for the process |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
-| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
+| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, and the recompiles/s rate over the measured window — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
@@ -566,6 +566,32 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   heavy-f1 batch at load 50-80 read +5.2%; the instruction counts are
   the steady receipt. Step TBs still stay out of the jump cache and
   unchained.
+- **Two-way jump cache (2026-10-16).** The 4096-entry, 64 KiB jump
+  cache is now 2048 two-way sets: way 0 is
+  `tb_jmp_cache_hash_func(pc) & ~1`, way 1 the next entry, both inside
+  the page's 64-entry range, so page and full clears are unchanged.
+  `tb_lookup` probes way 0, then way 1 (a hit swaps it into way 0); a
+  fill moves way 0's entry to way 1. The inline probe
+  (`xemu-inline-jc.c`) still reads way 0 only, with the same
+  instructions as before (one mask bit differs), so a way-1 entry
+  costs a helper call instead of a qht walk. The target was recurring
+  conflicts, not capacity: cold boot alternates the two fldcw RC
+  variants of one pc (flags `0x604000b4` / `0x204000b4`) in one slot
+  ~2700 times a frame. `XEMU_TB_PROF` per frame against the step-cache
+  build: htable walks 3711 → 287 on cold boot and 450 → 224 on
+  heavy-f1. Det A/B against the step-cache build at load 8-11:
+  heavy-f1 1200 frames, 4 pairs, Mcycles/frame −0.80% paired median
+  (3/4), Minsns/frame −0.06% (3/4); stream-e2 600 frames, 3 pairs,
+  −1.68% (3/3) and −0.07% (2/3); cold boot 1800 frames, 4 pairs,
+  Minsns −2.12% (4/4; cycles are bimodal there). A second, inline
+  way-1 check (rebuilt from eip and env so that no TCG temp crossed
+  its label) also took cold boot's C lookups from 4510 to 1256 a frame,
+  but its extra branches and temps cost translation: +0.18-0.21%
+  Minsns/frame on heavy-f1 and stream-e2 against the step-cache build
+  (0/11 pairs better; heavy-f1 Mcycles +0.5-0.9%), and no measurable
+  cold-boot gain over the way-0-only probe. Unlike the
+  16-bit enlargement (failed table) the way-0 hit path and the cache
+  footprint did not grow.
 - **`can_do_io` bookkeeping elided when icount and replay are off
   (default on, 2026-08-04).** Upstream emits `set_can_do_io(false)` /
   `(true)` into every multi-insn TB body unconditionally, and
