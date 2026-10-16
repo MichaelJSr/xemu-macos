@@ -156,18 +156,32 @@ static MemOp tcg_canonicalize_memop(MemOp op, bool is64, bool st)
     return op;
 }
 
+/*
+ * xemu: a guest access may leave the TB here (a fault, cpu_io_recompile),
+ * so the front end first makes what a restore lands current (i386's
+ * deferred x87 stores, translate.c x87_wt_spill).
+ */
 static void gen_ldst1(TCGOpcode opc, TCGType type, TCGTemp *v,
                       TCGTemp *addr, MemOpIdx oi)
 {
-    TCGOp *op = tcg_gen_op3(opc, type, temp_arg(v), temp_arg(addr), oi);
+    TCGOp *op;
+
+#if defined(XBOX)
+    gen_ldst_prologue();
+#endif
+    op = tcg_gen_op3(opc, type, temp_arg(v), temp_arg(addr), oi);
     TCGOP_FLAGS(op) = get_memop(oi) & MO_SIZE;
 }
 
 static void gen_ldst2(TCGOpcode opc, TCGType type, TCGTemp *vl, TCGTemp *vh,
                       TCGTemp *addr, MemOpIdx oi)
 {
-    TCGOp *op = tcg_gen_op4(opc, type, temp_arg(vl), temp_arg(vh),
-                            temp_arg(addr), oi);
+    TCGOp *op;
+
+#if defined(XBOX)
+    gen_ldst_prologue();
+#endif
+    op = tcg_gen_op4(opc, type, temp_arg(vl), temp_arg(vh), temp_arg(addr), oi);
     TCGOP_FLAGS(op) = get_memop(oi) & MO_SIZE;
 }
 

@@ -31,10 +31,13 @@
  *       slot's env image is overwritten with a poison value no conversion
  *       produces, so a raw read of a pending slot, a flush that misses one
  *       or a restore that lands the wrong set leaves it where the checks
- *       (insn boundaries, flushes, restores) and the RAM hash see it.
+ *       (insn boundaries, flushes, restores) and the RAM hash see it; and
+ *       every guest access with stores to land copies their doubles in
+ *       line, for the restore to check the shadows its slow path stored.
  *
  * insn_start word 2 carries both deferrals: bits 0-11 the FIP distance,
- * bits 12-19 the pending x87 stores by shadow slot.
+ * bits 12-19 the pending x87 stores by shadow slot, bits 20-22 how far
+ * shadow slot 0 sits from fpstt.
  */
 #ifndef TARGET_I386_XEMU_X87_H
 #define TARGET_I386_XEMU_X87_H
@@ -43,6 +46,7 @@
 
 #define XEMU_X87_W2_FIP_MASK    0xfffu
 #define XEMU_X87_W2_PEND_SHIFT  12
+#define XEMU_X87_W2_TOP_SHIFT   20
 
 /* (1) census -------------------------------------------------------------- */
 static uint64_t xemu_x87_fip_legacy;     /* per-insn FIP/FCS store pairs */
@@ -70,13 +74,18 @@ static uint64_t xemu_x87_bnd_checks;     /* insn boundaries checked */
 static uint64_t xemu_x87_bnd_pend;       /* ... with a deferred FIP pending */
 static uint64_t xemu_x87_rst_viol;       /* restorable FIP/FCS != legacy */
 static uint64_t xemu_x87_wt_bnd_checks;  /* insn boundaries checked (stores) */
-static uint64_t xemu_x87_wt_bnd_viol;    /* poison where none is pending, or
-                                          * none, a stale shadow or pend_top
-                                          * where one is */
+static uint64_t xemu_x87_wt_bnd_viol;    /* poison where none is pending,
+                                          * or none where one is */
 static uint64_t xemu_x87_wt_flush_viol;  /* poison left after a flush */
+static uint64_t xemu_x87_wt_exit_checks; /* guest accesses checked (stores) */
+static uint64_t xemu_x87_wt_exit_viol;   /* a landing slot without poison,
+                                          * or fpstt moved within the insn */
 static uint64_t xemu_x87_wt_rst_checks;  /* mid-block exits checked (stores) */
 static uint64_t xemu_x87_wt_rst_pend;    /* ... with stores to land */
-static uint64_t xemu_x87_wt_rst_viol;    /* poison left after the restore */
+static uint64_t xemu_x87_wt_rst_viol;    /* poison left after the restore,
+                                          * a shadow the slow path did not
+                                          * store, or a landing that changes
+                                          * a register already stored */
 
 static void xemu_x87_dump(void)
 {
@@ -116,11 +125,14 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_rst_viol);
     fprintf(stderr, "xemu: x87 refuter: wt-boundaries=%llu "
             "wt-boundary-violations=%llu wt-flush-violations=%llu "
+            "wt-exits=%llu wt-exit-violations=%llu "
             "wt-restores=%llu wt-restore-pending=%llu "
             "wt-restore-violations=%llu\n",
             (unsigned long long)xemu_x87_wt_bnd_checks,
             (unsigned long long)xemu_x87_wt_bnd_viol,
             (unsigned long long)xemu_x87_wt_flush_viol,
+            (unsigned long long)xemu_x87_wt_exit_checks,
+            (unsigned long long)xemu_x87_wt_exit_viol,
             (unsigned long long)xemu_x87_wt_rst_checks,
             (unsigned long long)xemu_x87_wt_rst_pend,
             (unsigned long long)xemu_x87_wt_rst_viol);
@@ -215,15 +227,6 @@ static void xemu_x87_gen_ne_count_i32(uint64_t *counter, TCGv_i32 a,
     tcg_gen_setcond_i32(TCG_COND_NE, d, a, b);
     tcg_gen_extu_i32_i64(d64, d);
     xemu_x87_gen_acc_i64(counter, d64);
-}
-
-static void xemu_x87_gen_ne_count_i64(uint64_t *counter, TCGv_i64 a,
-                                      TCGv_i64 b)
-{
-    TCGv_i64 d = tcg_temp_new_i64();
-
-    tcg_gen_setcond_i64(TCG_COND_NE, d, a, b);
-    xemu_x87_gen_acc_i64(counter, d);
 }
 
 static void xemu_x87_gen_ne_count_tl(uint64_t *counter, TCGv a, TCGv b)
@@ -469,10 +472,15 @@ static void xemu_x87_restore_fip(CPUX86State *env, const TranslationBlock *tb,
 /*
  * Store half: land the write-through stores still deferred at the start of
  * the insn, as the eager st80f would have left them (translate.c
- * x87_wt_pend). pend_top 0 means a flush inside this insn already stored
- * them, and a helper may have written the registers since.
+ * x87_wt_spill): shadow slot b is register (fpstt + top + b) & 7, fpstt
+ * having stood still since the insn began. A flush inside the insn may
+ * have stored them already, after the access that recorded them; it left
+ * their shadows equal to what it stored, so landing them again changes
+ * nothing, unless a helper wrote the register since (the refuter counts
+ * that).
  */
-static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend)
+static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend,
+                                  unsigned top)
 {
     bool refute = xemu_x87_refute_on();
 
@@ -481,15 +489,22 @@ static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend)
         xemu_x87_wt_rst_pend += pend != 0;
     }
 #if defined(__aarch64__)
-    unsigned top = env->xemu_x87_pend_top;
+    for (int b = 0; b < 8; b++) {
+        if (pend & (1u << b)) {
+            FPReg *f = &env->fpregs[(env->fpstt + top + b) & 7];
+            floatx80 v = xemu_x87_double_to_floatx80(env->xemu_x87_shadow[b]);
 
-    if (pend && (top & 8)) {
-        for (int b = 0; b < 8; b++) {
-            if (pend & (1u << b)) {
-                env->fpregs[(top + b) & 7].d =
-                    xemu_x87_double_to_floatx80(env->xemu_x87_shadow[b]);
-                xemu_x87_wt_landed++;
+            if (refute) {
+                xemu_x87_wt_rst_viol += memcmp(&env->xemu_x87_shadow[b],
+                                               &env->xemu_x87_shadow_chk[b],
+                                               sizeof(double)) != 0;
+                if (f->d.low != XEMU_X87_POISON_LO) {
+                    xemu_x87_wt_rst_viol += f->d.low != v.low ||
+                                            f->d.high != v.high;
+                }
             }
+            f->d = v;
+            xemu_x87_wt_landed++;
         }
     }
 #else
@@ -512,7 +527,8 @@ void xemu_x87_restore(CPUX86State *env, const TranslationBlock *tb,
                       uint64_t word2)
 {
     xemu_x87_restore_fip(env, tb, word2 & XEMU_X87_W2_FIP_MASK);
-    xemu_x87_restore_pend(env, word2 >> XEMU_X87_W2_PEND_SHIFT);
+    xemu_x87_restore_pend(env, (word2 >> XEMU_X87_W2_PEND_SHIFT) & 0xff,
+                          (word2 >> XEMU_X87_W2_TOP_SHIFT) & 7);
 }
 
 /* Run-length proxy: closed by the same flush that closes the register cache. */

@@ -76,6 +76,8 @@
 
 /* STR Dt, [Xn, #ofs] */
 #define TCG_TARGET_HAS_st_f64           TCG_TARGET_HAS_fpu
+/* ... emitted in the next guest access's slow-path stub */
+#define TCG_TARGET_HAS_st_f64_slow      TCG_TARGET_HAS_fpu
 
 #define TCG_TARGET_extract_valid(type, ofs, len)   1
 #define TCG_TARGET_sextract_valid(type, ofs, len)  1

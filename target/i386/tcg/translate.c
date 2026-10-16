@@ -261,16 +261,18 @@ typedef struct DisasContext {
     TCGv_f64 wt_ft0;
     /*
      * Deferred stores (x87_wt_pend): wt_st slots whose st80f waits for the
-     * next flush, the fpstt_delta that bit 0 of env->xemu_x87_shadow maps
-     * to (wt_base, valid while wt_epoch), the pending set at the start of
-     * this insn as recorded in insn_start word 2 (wt_insn_pend), and
-     * whether a flush inside this insn ended deferral for the rest of it.
+     * next flush; the pending set and fpstt_delta at the start of this
+     * insn (wt_insn_pend, wt_insn_delta); whether a flush has run inside
+     * this insn; and the slots insn_start word 2 lands with their values,
+     * set by the insn's first guest access (wt_w2_land, wt_w2_val,
+     * x87_wt_spill).
      */
     uint8_t wt_pend;
     uint8_t wt_insn_pend;
-    bool wt_epoch;
-    bool wt_nodefer;
-    int wt_base;
+    uint8_t wt_w2_land;
+    bool wt_insn_flushed;
+    int wt_insn_delta;
+    TCGv_f64 wt_w2_val[8];
     /*
      * wt_st slots whose env image is, or once stored will be, st80f of the
      * cached double (x87_wt_exact). A slot read with ld80f may hold more
@@ -2033,7 +2035,8 @@ static void gen_flush_fp(DisasContext *s)
  *  - every result reaches env by the next flush (gen_flush_fp), as the
  *    helper would have written it; a mid-block exit before then
  *    (cpu_io_recompile under icount, a guest #PF) lands it from the
- *    shadow double (x87_wt_pend);
+ *    shadow double the exiting access's slow path stored (x87_wt_spill,
+ *    st_f64_slow);
  *  - the conversions are the backend's ld80f/st80f, which match the C
  *    conversions bit for bit;
  *  - each register's double, as the next helper would read it back, is
@@ -2137,36 +2140,35 @@ static TCGv_f64 x87_wt_get_ft0(DisasContext *s)
  * stored, since FSAVE/FXSAVE expose empty registers.
  *
  * A mid-block exit (a guest fault, cpu_io_recompile) must still leave env
- * as the eager stores would. So every deferred value is also stored as a
- * double in env->xemu_x87_shadow (one STR), insn_start word 2 names the
- * slots pending at the start of each insn, and x86_restore_state_to_opc
- * converts those (xemu_x87_restore) with double_to_floatx80_fast, st80f's
- * C twin. Shadow slot b is physical register (pend_top + b) & 7, pend_top
- * being the fpstt stored when the first store of a flush interval was
- * deferred. A flush inside an insn that started with stores pending zeroes
- * pend_top, so an exit later in that insn (a helper's fault) lands nothing
- * over what the flush and the helper wrote, and the rest of the insn
- * stores eagerly.
+ * as the eager stores would. Only a guest access (qemu_ld/st) or a helper
+ * call can leave mid-block, and a call flushes first; an access leaves
+ * only through its slow path. So before each guest access, x87_wt_spill
+ * (gen_ldst_prologue, from tcg-op-ldst.c) has the access's slow path store
+ * the doubles of the slots pending at the start of the insn to
+ * env->xemu_x87_shadow (st_f64_slow: no code on the fast path), and the
+ * insn's first access writes into insn_start word 2 those slots and where
+ * fpstt stands. Shadow slot r is wt_st slot r: physical register
+ * (fpstt + r) & 7 for the fpstt at the flush interval's start. A restore
+ * (x86_restore_state_to_opc -> xemu_x87_restore) converts them with
+ * double_to_floatx80_fast, st80f's C twin.
+ *
+ * A flush inside the insn freezes word 2: if no access came first, its
+ * pending part stays 0, so an exit later in the insn (the helper's fault,
+ * a later access) lands nothing over what the flush and the helper wrote.
+ * If one came first (`div [mem]`, an SSE helper with a memory operand),
+ * the flush also stores each landing slot's shadow, in line, as it stores
+ * the slot, so a later exit lands the same bytes: no helper reached after
+ * an access in the same insn writes x87 registers (XEMU_X87_REFUTE checks
+ * it at every restore).
  *
  * Invariants: a pending slot always has its double in wt_st; and env's
  * image of a pending slot is stale, so TCG code that reads or writes the
  * raw image (x87_gen_copy, fxch, the sign ops, the constants) goes through
  * the cached double or x87_wt_sync first. Helpers need nothing: their call
  * flushes, and the pure calls that skip the flush read only their
- * arguments.
+ * arguments. fpstt does not move between an insn's start and its last
+ * guest access (the restore does not roll it back, so no front-end op may).
  */
-static uint8_t x87_wt_rel_pend(DisasContext *s)
-{
-    uint8_t rel = 0;
-
-    for (int r = 0; r < 8; r++) {
-        if (s->wt_pend & (1 << r)) {
-            rel |= 1 << ((r - s->wt_base) & 7);
-        }
-    }
-    return rel;
-}
-
 static bool x87_wt_pending(DisasContext *s, int slot)
 {
     return s->wt_pend & (1 << slot);
@@ -2195,18 +2197,6 @@ static void x87_wt_sync(DisasContext *s, int slot)
 /* Defer slot `slot`'s store of r. */
 static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
 {
-    if (!s->wt_epoch) {
-        TCGv_i32 top = tcg_temp_new_i32();
-
-        tcg_gen_ori_i32(top, fpstt, 8);
-        tcg_gen_st8_i32(top, tcg_env,
-                        offsetof(CPUX86State, xemu_x87_pend_top));
-        s->wt_epoch = true;
-        s->wt_base = s->fpstt_delta;
-    }
-    tcg_gen_st_f64(r, tcg_env,
-                   offsetof(CPUX86State,
-                            xemu_x87_shadow[(slot - s->wt_base) & 7]));
     s->wt_st[slot] = r;
     s->wt_pend |= 1 << slot;
     s->wt_exact |= 1 << slot;
@@ -2216,11 +2206,89 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
 }
 
 /*
+ * Refuter, at every guest access that can land stores: exactly the
+ * landing slots hold the poison. Their doubles also go to
+ * env->xemu_x87_shadow_chk here, in line, which the restore compares with
+ * what the slow path stored (xemu_x87_restore_pend).
+ */
+static void x87_wt_exit_check(DisasContext *s, uint8_t land)
+{
+    for (int r = 0; r < 8; r++) {
+        if (land & (1 << r)) {
+            xemu_x87_gen_poison_check(&xemu_x87_wt_exit_viol,
+                                      gen_stn_ptr((r - s->fpstt_delta) & 7),
+                                      true);
+            tcg_gen_st_f64(s->wt_st[r], tcg_env,
+                           offsetof(CPUX86State, xemu_x87_shadow_chk[r]));
+        }
+    }
+    /* Translate-time: word 2's fpstt offset holds at this access. */
+    xemu_x87_wt_exit_viol += s->fpstt_delta != s->wt_insn_delta;
+    xemu_gen_counter_inc(&xemu_x87_wt_exit_checks);
+}
+
+/*
+ * Before a guest access, which may leave the TB here: a restore at this
+ * insn lands word 2's slots, the stores pending at the start of the insn,
+ * from their shadows, which the access's slow path stores (st_f64_slow:
+ * no code on the fast path). Nothing to do once a flush ran in this insn
+ * (word 2 is frozen, see above).
+ */
+static void x87_wt_spill(DisasContext *s)
+{
+    uint8_t land = s->wt_insn_pend & s->wt_pend;
+
+    if (!land || s->wt_insn_flushed) {
+        return;
+    }
+    if (!s->wt_w2_land) {
+        TCGOp *op = s->base.insn_start;
+        uint64_t w2 = tcg_get_insn_start_param(op, 2);
+
+        w2 |= (uint64_t)land << XEMU_X87_W2_PEND_SHIFT;
+        w2 |= (uint64_t)(-s->wt_insn_delta & 7) << XEMU_X87_W2_TOP_SHIFT;
+        tcg_set_insn_start_param(op, 2, w2);
+        s->wt_w2_land = land;
+        for (int r = 0; r < 8; r++) {
+            s->wt_w2_val[r] = s->wt_st[r];
+        }
+    }
+    tcg_debug_assert(s->fpstt_delta == s->wt_insn_delta);
+    if (unlikely(xemu_x87_refute_on())) {
+        x87_wt_exit_check(s, land);
+    }
+    for (int r = 0; r < 8; r++) {
+        if (land & (1 << r)) {
+            tcg_gen_st_f64_slow(s->wt_st[r],
+                                offsetof(CPUX86State, xemu_x87_shadow[r]));
+        }
+    }
+}
+
+/*
  * The flush's half: store every pending slot. Called from gen_flush_fp
  * before it drops wt_st and fpstt_delta.
  */
 static void x87_wt_flush(DisasContext *s)
 {
+    if (s->wt_w2_land && !s->wt_insn_flushed) {
+        /*
+         * An exit later in this insn lands word 2's slots again: give
+         * their shadows what this flush stores (they are unchanged since
+         * the access, see above).
+         */
+        for (int r = 0; r < 8; r++) {
+            if (s->wt_w2_land & (1 << r)) {
+                tcg_gen_st_f64(s->wt_w2_val[r], tcg_env,
+                               offsetof(CPUX86State, xemu_x87_shadow[r]));
+                if (unlikely(xemu_x87_refute_on())) {
+                    tcg_gen_st_f64(s->wt_w2_val[r], tcg_env,
+                                   offsetof(CPUX86State,
+                                            xemu_x87_shadow_chk[r]));
+                }
+            }
+        }
+    }
     if (s->wt_pend) {
         for (int r = 0; r < 8; r++) {
             if (s->wt_pend & (1 << r)) {
@@ -2233,18 +2301,13 @@ static void x87_wt_flush(DisasContext *s)
             xemu_x87_gen_poison_scan(&xemu_x87_wt_flush_viol);
         }
     }
-    if (s->wt_insn_pend && !s->wt_nodefer) {
-        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
-                        offsetof(CPUX86State, xemu_x87_pend_top));
-    }
-    s->wt_nodefer = s->wt_insn_pend != 0;
-    s->wt_epoch = false;
+    s->wt_insn_flushed = true;
 }
 
 /*
  * Refuter, at the top of every insn: exactly the pending slots hold the
- * poison, their shadows hold their doubles, and pend_top maps the shadow
- * slots onto them, so a mid-block exit here would land exactly them.
+ * poison (their shadows are checked where an exit can happen,
+ * x87_wt_exit_check).
  */
 static void x87_wt_boundary_check(DisasContext *s)
 {
@@ -2252,33 +2315,11 @@ static void x87_wt_boundary_check(DisasContext *s)
         return;
     }
     for (int r = 0; r < 8; r++) {
-        bool pend = x87_wt_pending(s, r);
-
         xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol,
-                                  gen_stn_ptr((r - s->fpstt_delta) & 7), pend);
-        if (pend) {
-            TCGv_i64 want = tcg_temp_new_i64();
-            TCGv_i64 was = tcg_temp_new_i64();
-
-            tcg_gen_mov64f_i64(want, s->wt_st[r]);
-            tcg_gen_ld_i64(was, tcg_env,
-                           offsetof(CPUX86State,
-                                    xemu_x87_shadow[(r - s->wt_base) & 7]));
-            xemu_x87_gen_ne_count_i64(&xemu_x87_wt_bnd_viol, want, was);
-        }
+                                  gen_stn_ptr((r - s->fpstt_delta) & 7),
+                                  x87_wt_pending(s, r));
     }
     xemu_x87_gen_poison_check(&xemu_x87_wt_bnd_viol, gen_ft0_ptr(), false);
-    if (s->wt_pend) {
-        TCGv_i32 want = tcg_temp_new_i32();
-        TCGv_i32 was = tcg_temp_new_i32();
-
-        tcg_gen_addi_i32(want, fpstt, s->wt_base - s->fpstt_delta);
-        tcg_gen_andi_i32(want, want, 7);
-        tcg_gen_ori_i32(want, want, 8);
-        tcg_gen_ld8u_i32(was, tcg_env,
-                         offsetof(CPUX86State, xemu_x87_pend_top));
-        xemu_x87_gen_ne_count_i32(&xemu_x87_wt_bnd_viol, want, was);
-    }
     xemu_gen_counter_inc(&xemu_x87_wt_bnd_checks);
 }
 
@@ -2293,12 +2334,6 @@ static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
 
     if (unlikely(xemu_x87_census_on())) {
         xemu_gen_counter_inc(&xemu_x87_wt_writes);
-    }
-    if (s->wt_nodefer) {
-        s->wt_st[slot] = r;
-        s->wt_exact |= 1 << slot;
-        x87_wt_store(s, slot);
-        return;
     }
     x87_wt_pend(s, slot, r);
 }
@@ -5813,9 +5848,9 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->wt_pend = 0;
     dc->wt_exact = 0;
     dc->wt_insn_pend = 0;
-    dc->wt_epoch = false;
-    dc->wt_nodefer = false;
-    dc->wt_base = 0;
+    dc->wt_w2_land = 0;
+    dc->wt_insn_flushed = false;
+    dc->wt_insn_delta = 0;
     dc->pure_call = false;
 #endif
 }
@@ -5840,22 +5875,19 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
      * Word 2, what a mid-block exit in this insn must land
      * (xemu_x87_restore): how far back the insn whose FIP update is still
      * deferred sits, below 4096 as every insn of a TB starts on its first
-     * page, and the x87 stores still deferred, by shadow slot.
+     * page, and the x87 stores still deferred, by shadow slot. The first
+     * guest access of the insn adds those (x87_wt_spill).
      */
-    {
-        uint64_t w2 = 0;
+    if (dc->xemu_fip_pend) {
+        uint64_t w2 = dc->base.pc_next - dc->xemu_fip_pc;
 
-        if (dc->xemu_fip_pend) {
-            w2 = dc->base.pc_next - dc->xemu_fip_pc;
-            tcg_debug_assert(w2 <= XEMU_X87_W2_FIP_MASK);
-        }
-        dc->wt_insn_pend = x87_wt_rel_pend(dc);
-        dc->wt_nodefer = false;
-        w2 |= (uint64_t)dc->wt_insn_pend << XEMU_X87_W2_PEND_SHIFT;
-        if (w2) {
-            tcg_set_insn_start_param(tcg_last_op(), 2, w2);
-        }
+        tcg_debug_assert(w2 <= XEMU_X87_W2_FIP_MASK);
+        tcg_set_insn_start_param(tcg_last_op(), 2, w2);
     }
+    dc->wt_insn_pend = dc->wt_pend;
+    dc->wt_insn_delta = dc->fpstt_delta;
+    dc->wt_insn_flushed = false;
+    dc->wt_w2_land = 0;
 #endif
 }
 
@@ -5899,8 +5931,8 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         assert(dc->cc_op == orig_cc_op);
         assert(dc->pc_save == orig_pc_save);
 #if defined(XBOX)
-        /* Decoding ends before any op: no deferred x87 store was emitted. */
-        assert(dc->wt_pend == orig_wt_pend);
+        /* Decoding ends before any op: no deferred x87 store or spill. */
+        assert(dc->wt_pend == orig_wt_pend && !dc->wt_w2_land);
 #endif
         dc->base.num_insns--;
         tcg_remove_ops_after(dc->prev_insn_end);
@@ -5937,8 +5969,8 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
 #if defined(XBOX)
-    /* Past the last insn's exits: its deferred stores need no pend_top reset. */
-    dc->wt_insn_pend = 0;
+    /* Past the last insn's exits: no shadow need match this flush. */
+    dc->wt_insn_flushed = true;
 #endif
     gen_flush_fp(dc);
 
@@ -6004,3 +6036,15 @@ void gen_bb_epilogue(void)
 #endif
     gen_flush_fp(s);
 }
+
+#if defined(XBOX)
+/* Before every guest load or store (tcg-op-ldst.c gen_ldst1/2). */
+void gen_ldst_prologue(void)
+{
+    DisasContext *s = (DisasContext *)tcg_ctx->disas_ctx;
+
+    if (s && s->wt_insn_pend) {
+        x87_wt_spill(s);
+    }
+}
+#endif

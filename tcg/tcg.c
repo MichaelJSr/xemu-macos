@@ -109,6 +109,9 @@ struct TCGLabelQemuLdst {
     /* A backend's own out-of-line stub, emitted instead of a slow path */
     bool (*out_stub)(TCGContext *s, TCGLabelQemuLdst *l);
     intptr_t addr_ofs;      /* out_stub: the access's offset from addr_reg */
+    /* st_f64_slow stores the slow path performs first */
+    unsigned nb_slow_st;
+    TCGSlowSt *slow_st;
     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
 };
 
@@ -663,6 +666,20 @@ static TCGLabelQemuLdst *new_ldst_label(TCGContext *s)
     QSIMPLEQ_INSERT_TAIL(&s->ldst_labels, l, next);
 
     return l;
+}
+
+/* The backend emitting a guest access with a slow path takes its stores. */
+static void __attribute__((unused))
+ldst_take_slow_st(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    if (s->nb_slow_st) {
+        size_t n = s->nb_slow_st * sizeof(TCGSlowSt);
+
+        l->slow_st = tcg_malloc(n);
+        memcpy(l->slow_st, s->slow_st, n);
+        l->nb_slow_st = s->nb_slow_st;
+        s->nb_slow_st = 0;
+    }
 }
 
 /*
@@ -2005,6 +2022,7 @@ void tcg_func_start(TCGContext *s)
 
     s->nb_ops = 0;
     s->nb_labels = 0;
+    s->nb_slow_st = 0;
     s->current_frame_offset = s->frame_start;
 
 #ifdef CONFIG_DEBUG_TCG
@@ -2708,6 +2726,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return type == TCG_TYPE_I64 && has_type && TCG_TARGET_HAS_add_zext_shl;
     case INDEX_op_st_f64:
         return TCG_TARGET_HAS_st_f64;
+    case INDEX_op_st_f64_slow:
+        return TCG_TARGET_HAS_st_f64_slow;
 
     default:
         if (op < INDEX_op_last_generic) {
@@ -4494,6 +4514,9 @@ liveness_pass_1(TCGContext *s)
 
             /* Incorporate constraints for this operand.  */
             switch (opc) {
+            case INDEX_op_st_f64_slow:
+                /* Any location will do: keep the uses' preference. */
+                break;
             case INDEX_op_mov:
                 /* Note that these are TCG_OPF_NOT_PRESENT and do not
                    have proper constraints.  That said, special case
@@ -5301,6 +5324,53 @@ static void tcg_reg_alloc_mov(TCGContext *s, const TCGOp *op)
     if (NEED_SYNC_ARG(0)) {
         temp_sync(s, ots, allocated_regs, 0, 0);
     }
+}
+
+/*
+ * xemu: st_f64_slow records where its value lives; the guest access that
+ * follows (nothing comes between) stores it on its slow path. Nothing is
+ * emitted here, and nothing the access emits before its slow-path branch
+ * writes an FP register, so a register recorded here still holds the
+ * value there even if the temp dies here.
+ */
+static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
+{
+    TCGLifeData arg_life = op->life;
+    TCGTemp *ts = arg_temp(op->args[0]);
+    TCGSlowSt *e;
+
+    tcg_debug_assert(s->nb_slow_st < ARRAY_SIZE(s->slow_st));
+    e = &s->slow_st[s->nb_slow_st++];
+    e->kind = ts->val_type;
+    e->ofs = op->args[1];
+    switch (ts->val_type) {
+    case TEMP_VAL_REG:
+        e->reg = ts->reg;
+        break;
+    case TEMP_VAL_MEM:
+        e->reg = ts->mem_base->reg;
+        e->val = ts->mem_offset;
+        break;
+    case TEMP_VAL_CONST:
+        e->val = ts->val;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    if (IS_DEAD_ARG(0)) {
+        temp_dead(s, ts);
+    }
+}
+
+/* Perform the pending st_f64_slow stores here, unconditionally. */
+static void tcg_out_slow_st_now(TCGContext *s)
+{
+#if TCG_TARGET_HAS_st_f64_slow
+    tcg_out_slow_st(s, s->slow_st, s->nb_slow_st);
+#else
+    g_assert_not_reached();
+#endif
+    s->nb_slow_st = 0;
 }
 
 /*
@@ -7120,6 +7190,13 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     QTAILQ_FOREACH(op, &s->ops, link) {
         TCGOpcode opc = op->opc;
 
+        /* st_f64_slow belongs to the guest access right after it. */
+        if (unlikely(s->nb_slow_st) && opc != INDEX_op_st_f64_slow &&
+            opc != INDEX_op_qemu_ld && opc != INDEX_op_qemu_st &&
+            opc != INDEX_op_qemu_ld2 && opc != INDEX_op_qemu_st2) {
+            tcg_out_slow_st_now(s);
+        }
+
         switch (opc) {
         case INDEX_op_extrl_i64_i32:
             assert(TCG_TARGET_REG_BITS == 64);
@@ -7160,6 +7237,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
             break;
         case INDEX_op_discard:
             temp_dead(s, arg_temp(op->args[0]));
+            break;
+        case INDEX_op_st_f64_slow:
+            tcg_reg_alloc_st_f64_slow(s, op);
             break;
         case INDEX_op_set_label:
             tcg_reg_alloc_bb_end(s, s->reserved_regs);
@@ -7210,6 +7290,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
         }
     }
     assert_carry_dead(s);
+    tcg_debug_assert(!s->nb_slow_st);
 
     tcg_debug_assert(num_insns + 1 == s->gen_tb->icount);
     s->gen_insn_end_off[num_insns] = tcg_current_code_size(s);

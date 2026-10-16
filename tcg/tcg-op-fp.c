@@ -62,6 +62,21 @@ void tcg_gen_st_f64(TCGv_f64 arg, TCGv_ptr ptr, tcg_target_long ofs)
     }
 }
 
+/*
+ * env[ofs] = arg, done only if the next guest access (qemu_ld/st, which
+ * must follow at once) takes its slow path, the one way that access can
+ * leave the TB: for state only a mid-block exit's restore reads. Without
+ * backend support, an unconditional store.
+ */
+void tcg_gen_st_f64_slow(TCGv_f64 arg, tcg_target_long ofs)
+{
+    if (TCG_TARGET_HAS_st_f64_slow) {
+        tcg_gen_op2(INDEX_op_st_f64_slow, TCG_TYPE_F64, tcgv_f64_arg(arg), ofs);
+    } else {
+        tcg_gen_st_f64(arg, tcg_env, ofs);
+    }
+}
+
 void tcg_gen_ld80f_f32(TCGv_f32 ret, TCGv_ptr ptr, tcg_target_long ofs)
 {
     ptr = x80_addr(ptr, &ofs);

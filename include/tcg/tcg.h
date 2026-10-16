@@ -320,6 +320,17 @@ typedef struct TCGTemp {
 
 typedef struct TCGContext TCGContext;
 
+/*
+ * xemu: where an st_f64_slow value lives when its guest access is emitted:
+ * a register, a frame slot (reg + val) or a constant (val).
+ */
+typedef struct TCGSlowSt {
+    TCGTempVal kind;
+    TCGReg reg;
+    int64_t val;
+    intptr_t ofs;           /* the env offset stored to */
+} TCGSlowSt;
+
 typedef struct TCGTempSet {
     unsigned long l[BITS_TO_LONGS(TCG_MAX_TEMPS)];
 } TCGTempSet;
@@ -479,6 +490,13 @@ struct TCGContext {
     sigjmp_buf jmp_trans;
 
     void *disas_ctx;
+
+    /*
+     * xemu: the st_f64_slow stores waiting for the next guest access, which
+     * performs them on its slow path only (tcg_reg_alloc_st_f64_slow).
+     */
+    unsigned nb_slow_st;
+    TCGSlowSt slow_st[8];
 
     /*
      * xemu: constant temps of the TB being translated, keyed by (type, value).
@@ -1077,5 +1095,8 @@ void tcg_dump_ops(TCGContext *s, FILE *f, bool have_prefs);
 void tcg_dump_stats(GString *buf);
 
 void gen_bb_epilogue(void); /* translate.c */
+#if defined(XBOX)
+void gen_ldst_prologue(void); /* translate.c */
+#endif
 
 #endif /* TCG_H */

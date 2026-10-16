@@ -1907,15 +1907,6 @@ typedef struct CPUArchState {
     uint16_t fpus;
     uint16_t fpuc;
     uint8_t fptags[8];   /* 0 = valid, 1 = empty */
-#if defined(XBOX)
-    /*
-     * Deferred x87 write-through stores (translate.c x87_wt_pend), not
-     * migrated: 8 | the fpstt that bit 0 of xemu_x87_shadow maps to, or 0
-     * once a flush inside the restored insn has landed them. Sits in the
-     * padding before fpregs.
-     */
-    uint8_t xemu_x87_pend_top;
-#endif
     FPReg fpregs[8];
     /* KVM-only so far */
     uint16_t fpop;
@@ -1938,11 +1929,12 @@ typedef struct CPUArchState {
     uint64_t opmask_regs[NB_OPMASK_REGS];
 #if defined(XBOX)
     /*
-     * The doubles of the deferred x87 stores, by slot relative to
-     * xemu_x87_pend_top; x86_restore_state_to_opc converts the ones
-     * insn_start word 2 names.
+     * The doubles of the deferred x87 stores (translate.c x87_wt_spill),
+     * not migrated: x86_restore_state_to_opc converts the ones insn_start
+     * word 2 names. XEMU_X87_REFUTE's in-line copy beside them.
      */
     double xemu_x87_shadow[8];
+    double xemu_x87_shadow_chk[8];
 #endif
 #ifdef TARGET_X86_64
     uint8_t xtilecfg[64];

@@ -3229,6 +3229,11 @@ void tcg_optimize(TCGContext *s)
         case INDEX_op_st_f64:
             done = fold_tcg_st(&ctx, op);
             break;
+        case INDEX_op_st_f64_slow:
+            /* It may store to env: forget what was copied from there. */
+            remove_mem_copy_in(&ctx, op->args[1], op->args[1] + 7);
+            done = finish_folding(&ctx, op);
+            break;
         case INDEX_op_st:
         case INDEX_op_st_vec:
             done = fold_tcg_st_memcopy(&ctx, op);

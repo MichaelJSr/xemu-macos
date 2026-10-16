@@ -434,7 +434,10 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `ld80f`/`st80f`. Each result's `st80f` waits for the next flush
   (helper call, BB end, TB end), so an overwritten slot converts once;
   a mid-TB exit lands the pending ones from shadow doubles in
-  `restore_state_to_opc` (2026-10-15, −5% det Minsns/frame).
+  `restore_state_to_opc` (2026-10-15, −5% det Minsns/frame), which
+  only the slow path of the guest access an exit leaves through
+  stores (`st_f64_slow`; 2026-10-15, −1.2% Minsns/frame, −2.8%
+  Mcycles/frame).
   `fucom*`/`fcomi*` compare the cached doubles (`fucom*` only when both
   images are `st80f` of their doubles), `fcmov` selects instead of
   branching, and the argument-only `cc_compute_all`/`cc_compute_c`

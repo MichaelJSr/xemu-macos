@@ -1717,6 +1717,31 @@ static const TCGLdstHelperParam ldst_helper_param = {
     .ntmp = 1, .tmp = { TCG_REG_TMP0 }
 };
 
+/*
+ * st_f64_slow stores (tcg_reg_alloc_st_f64_slow): at the head of a slow
+ * path, or in line if the access has none. Clobbers TMP0 and VEC_TMP0.
+ */
+static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++, e++) {
+        switch (e->kind) {
+        case TEMP_VAL_REG:
+            tcg_out_st(s, TCG_TYPE_F64, e->reg, TCG_AREG0, e->ofs);
+            break;
+        case TEMP_VAL_MEM:
+            tcg_out_ld(s, TCG_TYPE_F64, TCG_VEC_TMP0, e->reg, e->val);
+            tcg_out_st(s, TCG_TYPE_F64, TCG_VEC_TMP0, TCG_AREG0, e->ofs);
+            break;
+        case TEMP_VAL_CONST:
+            tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0, e->val);
+            tcg_out_st(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_AREG0, e->ofs);
+            break;
+        default:
+            g_assert_not_reached();
+        }
+    }
+}
+
 static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
@@ -1725,6 +1750,7 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
         return false;
     }
 
+    tcg_out_slow_st(s, lb->slow_st, lb->nb_slow_st);
     tcg_out_ld_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_ld_helpers[opc & MO_SIZE]);
     tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
@@ -1933,6 +1959,8 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     }
 #endif
 
+    /* After the prefilter, which completes only stores that cannot exit. */
+    tcg_out_slow_st(s, lb->slow_st, lb->nb_slow_st);
     tcg_out_st_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_st_helpers[opc & MO_SIZE]);
     tcg_out_goto(s, lb->raddr);
@@ -1974,6 +2002,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         ldst->is_ld = is_ld;
         ldst->oi = oi;
         ldst->addr_reg = addr_reg;
+        ldst_take_slow_st(s, ldst);
 
         /* Load CPUTLBDescFast.{mask,table} into {tmp0,tmp1}. */
         QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, mask) != 0);
@@ -2027,6 +2056,10 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         h->index = addr_reg;
         h->index_ext = addr_type;
     } else {
+        if (s->nb_slow_st) {
+            tcg_out_slow_st(s, s->slow_st, s->nb_slow_st);
+            s->nb_slow_st = 0;
+        }
         if (a_mask) {
             ldst = new_ldst_label(s);
 

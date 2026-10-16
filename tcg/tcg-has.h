@@ -63,5 +63,8 @@
 #ifndef TCG_TARGET_HAS_st_f64
 #define TCG_TARGET_HAS_st_f64           0
 #endif
+#ifndef TCG_TARGET_HAS_st_f64_slow
+#define TCG_TARGET_HAS_st_f64_slow      0
+#endif
 
 #endif
