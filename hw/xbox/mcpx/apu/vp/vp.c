@@ -2259,6 +2259,10 @@ static void *voice_worker_thread(void *arg)
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
     rcu_register_thread();
+#if defined(__APPLE__)
+    /* The frame thread waits for the workers while it holds d->lock (apu.c). */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     qemu_mutex_lock(&vwd->lock);
 
     int worker_id = ctz64(vwd->workers_pending);

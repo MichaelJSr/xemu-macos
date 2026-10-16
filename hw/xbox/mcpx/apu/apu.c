@@ -23,6 +23,9 @@
 #include "hw/xbox/host_fp.h"
 #include "system/runstate.h"
 #include "qemu/xemu-hostprof.h"
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 MCPXAPUState *g_state; // Used via debug handlers
 
@@ -385,6 +388,17 @@ static void *mcpx_apu_frame_thread(void *arg)
      * synchronize_rcu() instead of being invisible to it.
      */
     rcu_register_thread();
+
+#if defined(__APPLE__)
+    /*
+     * The vCPU waits on this thread: a VP method write blocks on d->lock,
+     * which the thread holds across each frame, and the interrupt it raises
+     * goes through the BQL. At the default class, under host load, it ran at
+     * a third of the vCPU's priority and partly on efficiency cores, so the
+     * vCPU waited for it to be scheduled again.
+     */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {

@@ -1779,6 +1779,20 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `QOS_CLASS_USER_INTERACTIVE`, and so does the vCPU thread: the RR
   thread in deterministic mode, the MTTCG thread in normal mode since
   2026-10-15 (`XEMU_VCPU_QOS=0` leaves it at the default class).
+  Since 2026-10-16 the APU frame thread and its voice workers do too.
+  The frame thread holds `d->lock` across each frame (8-frame bursts
+  per EP period) and `vp_write` takes it on the vCPU; at the default
+  class (PRI 29-31, partly on E-cores) host load preempted it inside the
+  lock. Windowed heavy-f1/W2 at load 76-94, xwx interposer, 4/4 runs:
+  the vCPU's contended `d->lock` waits fell from 3.3-12.5% of wall
+  (mean 0.28-1.34 ms) to 0.83-0.92% (mean 32-55 µs); `XEMU_APU_PROF`
+  utilization 34-48% → 9-10% at 1500 frames/s. Windowed fps shows no
+  change at moderate load: `bench-abx` heavy-f1 49.2 → 59.7 over 2 pairs
+  (load 25-56, but one baseline run dipped to 40.9) and 57.9 → 57.1
+  over 3 pairs (1+/2−, load 12-26); W2 60.09 → 60.08 at the cap (load
+  12-14). The gain is the lock-wait cut under heavy load, at no CPU
+  cost. No switch: a scheduling hint, and det mode runs the APU on the
+  vCPU.
 - **Deterministic mode's FP brackets write FPCR only when it differs.**
   Device work on the vCPU thread (the inline PFIFO pusher, ~360 runs
   per frame on heavy-f1, and the APU tick) ran between `fegetenv`,
@@ -2541,6 +2555,8 @@ counter).
 
 | Vector | Measured reality / why closed |
 |---|---|
+| PFIFO spin before parking (2026-10-16) | Normal mode parked PFIFO ~10k times/s on heavy-f1/W2, most parks under 25 µs, each ended by a kernel broadcast from the vCPU and a 5-20 µs wakeup. The trial: before the untimed wait, drop `pfifo.lock` and poll `doorbell`/`fifo_kick`/`exiting` every 250 ns for up to 30 µs with `parked` false. Mechanism held (xwx interposer: parks −92..−95%, vCPU `pthread_cond_broadcast` time −83..−87%), fps did not: `bench-abx`, same binary, spin off vs on, heavy-f1 7 pairs over two sessions 2+/5− (54.25→53.94 at load 10-44; 54.19→54.26 at load 7-20, below the cap, so vCPU-bound), W2 6 pairs 56.76→59.06 (one dipped baseline) and 60.12→60.11 at the cap; process CPU +1-6% of a core. Polling with only an `isb` between reads lost fps outright (the poll steals the flags' line from the vCPU's doorbell barrier). Not committed |
+| APU lock hand-off to a waiting vCPU between frames (2026-10-16) | With the frame thread at user-interactive QoS the vCPU still waited on `d->lock` for 0.73-0.91% of wall (load 11-16), two thirds of it in ~450 µs waits for the rest of an 8-frame EP burst. The trial: `vp_write` trylocks and counts itself in `fe_waiters`; after each `se_frame` the thread unlocks and waits until the waiter is through and the guest's method writes pause (10 µs quiet, 100 µs cap). xwx, 4 runs: 0.73→0.72, 0.91→0.61, 0.84→0.55, 0.86→0.45% (mean −30%): the long waits went, but each later write in a run waited for the next frame instead (40-160 µs waits up from ~150 to ~1800 per ring). Not committed: ~0.25% of vCPU wall for a timing change. Splitting `d->lock` across VP/DSP is out (`fe_method` writes outbuf/SGE state the DSP DMA reads) |
 | Texture-upload barrier batching | Per-mip `pre/post_compute` pairs are load-bearing on reused `COMPUTE_DST/SRC`; total upload time ≤ 15 ms per 5 s even during streaming-heavy transitions, ~0 steady state — not worth the risk |
 | GPU S3TC decode (compute shader) | Total texture-upload CPU incl. S3TC ~0 steady, ≤ 15 ms/5 s streaming — no longer a meaningful cost center |
 | `VK_EXT_external_memory_host` revival (snapshot scheme) | The snapshot memcpy it would eliminate totals < 0.5 ms per 5 s in-game — far below the ≥ 1 ms/frame bar; the direct form is a torn-read correctness hole (archaeology 1.6) |
