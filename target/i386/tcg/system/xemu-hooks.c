@@ -784,16 +784,6 @@ bool xemu_hook_expr_parse(const char *s, XemuHookExpr *e, Error **errp)
     return true;
 }
 
-bool xemu_hook_expr_reads_memory(const XemuHookExpr *e)
-{
-    for (int i = 0; i < e->nops; i++) {
-        if (e->op[i].deref) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool xemu_hook_expr_eval(XemuHookCtx *ctx, const XemuHookExpr *e,
                          uint32_t *out)
 {

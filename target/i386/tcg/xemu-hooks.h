@@ -168,8 +168,6 @@ bool xemu_hook_expr_parse(const char *s, XemuHookExpr *e, Error **errp);
 /* False when a dereference reads unmapped or non-RAM memory. */
 bool xemu_hook_expr_eval(XemuHookCtx *ctx, const XemuHookExpr *e,
                          uint32_t *out);
-/* True when the expression reads guest memory (has a dereference). */
-bool xemu_hook_expr_reads_memory(const XemuHookExpr *e);
 
 /*
  * Conditions (QAPI XemuHookCond, xemu-hook-pred.c): a register, or 1, 2,
