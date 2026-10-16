@@ -37,6 +37,8 @@
  *       (insn boundaries, flushes, restores) and the RAM hash see it; and
  *       every guest access with stores to land copies their doubles in
  *       line, for the restore to check the shadows its slow path stored.
+ *       And it checks TOP-keyed translation (translate.c x87_top): the
+ *       static TOP against env at every insn boundary (top-key-*).
  *
  * insn_start word 2 carries both deferrals: bits 0-11 the FIP distance,
  * bits 12-19 the pending x87 stores by shadow slot, bits 20-22 how far
@@ -108,6 +110,8 @@ static uint64_t xemu_x87_wt_rst_viol;    /* poison left after the restore,
                                           * a register already stored */
 static uint64_t xemu_x87_wt_top_checks;  /* deferred fpstt/tags checked */
 static uint64_t xemu_x87_wt_top_viol;    /* ... != the eager copy */
+static uint64_t xemu_x87_key_checks;     /* static TOP (x87_top) checked */
+static uint64_t xemu_x87_key_viol;       /* ... != env's fpstt */
 
 static void xemu_x87_dump(void)
 {
@@ -156,7 +160,8 @@ static void xemu_x87_dump(void)
             "wt-exits=%llu wt-exit-violations=%llu "
             "wt-restores=%llu wt-restore-pending=%llu "
             "wt-restore-violations=%llu wt-stack-checks=%llu "
-            "wt-stack-violations=%llu\n",
+            "wt-stack-violations=%llu top-key-checks=%llu "
+            "top-key-violations=%llu\n",
             (unsigned long long)xemu_x87_wt_bnd_checks,
             (unsigned long long)xemu_x87_wt_bnd_viol,
             (unsigned long long)xemu_x87_wt_flush_viol,
@@ -166,7 +171,9 @@ static void xemu_x87_dump(void)
             (unsigned long long)xemu_x87_wt_rst_pend,
             (unsigned long long)xemu_x87_wt_rst_viol,
             (unsigned long long)xemu_x87_wt_top_checks,
-            (unsigned long long)xemu_x87_wt_top_viol);
+            (unsigned long long)xemu_x87_wt_top_viol,
+            (unsigned long long)xemu_x87_key_checks,
+            (unsigned long long)xemu_x87_key_viol);
 }
 
 static void xemu_x87_arm_dump(void)

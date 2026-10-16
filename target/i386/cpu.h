@@ -2219,14 +2219,17 @@ typedef struct CPUArchState {
      * the stride). flags/cs_base are captured at fill time: the
      * inline hit path compares them against the ret site's
      * translate-time constants (valid because nothing between TB
-     * entry and its ret exit changes them), and re-loads the live
-     * tb->cflags to catch CF_INVALID. tb == NULL means empty (a full
-     * flush clears the whole block, a per-page flush that page's entries).
+     * entry and its ret exit changes them, and the x87 TOP that
+     * cs_base carries is static there: x87_top_exit_ok), and re-loads
+     * the live tb->cflags to catch CF_INVALID. tb == NULL means empty
+     * (a full flush clears the whole block, a per-page flush that
+     * page's entries). cs_base is the TB's whole key value, x87 TOP
+     * included (XEMU_TB_KEY_TOP_SHIFT); its low 32 bits are the base.
      */
     struct XemuRetcEntry {
         uint32_t eip;
         uint32_t flags;
-        uint32_t cs_base;
+        uint64_t cs_base;
         void *tb;
         void *pad;
     } xemu_retc[XEMU_RETC_SIZE];
@@ -3046,6 +3049,15 @@ static inline bool ctl_has_irq(CPUX86State *env)
  * it and still installs it in the ops table).
  */
 TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs);
+
+/*
+ * TOP-keyed translation: while the write-through x87 path is on
+ * (translate.c x87_top), a TB's lookup key carries env->fpstt in
+ * cs_base bits 32-34, above the 32-bit segment base, so its code can
+ * address ST(i) as fixed env offsets. Set once, before the first TB.
+ */
+#define XEMU_TB_KEY_TOP_SHIFT 32
+extern bool xemu_x87_top_key;
 #endif
 
 /* majority(NOT a, b, c) = (a ^ b) ? b : c */

@@ -463,6 +463,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   insn's starting offset and tags from insn_start word 2 (2026-10-15,
   det heavy-f1 −3.2% Minsns/frame, −5.7% Mcycles/frame paired median,
   on the x87 lane: 22329bd8bc, before the pinned registers and TLB memo).
+  TBs are also keyed on the TOP (`env->fpstt` in `cs_base` bits 32-34),
+  so those blocks address ST(i) and the tags as fixed env offsets and
+  chained exits pass their TOP as a constant (2026-10-15, det heavy-f1
+  −2.1% Minsns/frame on the x87 lane and −2.45% on top of the pinned
+  registers and TLB memo, Mcycles/frame neutral on both: code run at
+  several TOPs is translated once per TOP).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control

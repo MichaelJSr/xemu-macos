@@ -576,7 +576,12 @@ static uint64_t xemu_stepc_hits, xemu_stepc_misses;
 static struct {
     CPUState *cpu;
     vaddr pc;           /* next instruction to step */
-    uint64_t cs_base;
+    /*
+     * The low half of the key's cs_base: the i386 upper half is the x87
+     * TOP (XEMU_TB_KEY_TOP_SHIFT), which a step may move, and each step
+     * TB is still looked up with the whole key.
+     */
+    uint32_t cs_base;
     uint32_t flags;
     uint32_t left;      /* steps to the block's last instruction; 0: idle */
     uint32_t budget;    /* steps the cut slice had budget for */
@@ -1500,7 +1505,7 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
             TCGTBCPUState st = xemu_get_tb_cpu_state(cpu);
             xemu_istep.cpu = cpu;
             xemu_istep.pc = st.pc;
-            xemu_istep.cs_base = st.cs_base;
+            xemu_istep.cs_base = (uint32_t)st.cs_base;
             xemu_istep.flags = st.flags;
             xemu_istep.left = tb->icount - 1;
             xemu_istep.budget = insns_left;
@@ -1545,7 +1550,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #if defined(XBOX)
                 if (unlikely(xemu_istep.left) && xemu_istep.cpu == cpu &&
                     s.pc == xemu_istep.pc && s.flags == xemu_istep.flags &&
-                    s.cs_base == xemu_istep.cs_base &&
+                    (uint32_t)s.cs_base == xemu_istep.cs_base &&
                     xemu_istep.flush ==
                         qatomic_read(&tb_ctx.tb_flush_count)) {
                     if (xemu_istep.budget == 0 &&

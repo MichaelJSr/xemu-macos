@@ -2170,6 +2170,7 @@ static void gen_FXRSTOR(DisasContext *s, X86DecodedInsn *decode)
         gen_helper_fxrstor(tcg_env, s->A0);
 #ifdef XBOX
         s->mmx_entered = false;     /* new fpstt and tags */
+        x87_top_set(s, -1); /* a TOP from memory */
         /*
          * New precision control (see frstor in translate.c) and
          * HF_SSE_DFL (see LDMXCSR).
@@ -4997,6 +4998,7 @@ static void gen_XRSTOR(DisasContext *s, X86DecodedInsn *decode)
 #ifdef XBOX
     /* As FXRSTOR. */
     s->mmx_entered = false;
+    x87_top_set(s, -1);
     if (g_x87_wt || xemu_sse_vfp) {
         s->base.is_jmp = DISAS_EOB_NEXT;
     }

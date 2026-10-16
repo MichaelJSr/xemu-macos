@@ -61,6 +61,7 @@ static TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs)
 {
     CPUX86State *env = cpu_env(cs);
     uint32_t flags, cs_base;
+    uint64_t key;
     vaddr pc;
 
     flags = env->hflags |
@@ -72,8 +73,18 @@ static TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs)
         cs_base = env->segs[R_CS].base;
         pc = (uint32_t)(cs_base + env->eip);
     }
+    key = cs_base;
+#if defined(XBOX) && !defined(TARGET_X86_64)
+    /*
+     * The x87 TOP above the 32-bit base (translate.c x87_top). Every user
+     * of tb->cs_base as a base truncates it to 32 bits.
+     */
+    if (xemu_x87_top_key) {
+        key |= (uint64_t)env->fpstt << XEMU_TB_KEY_TOP_SHIFT;
+    }
+#endif
 
-    return (TCGTBCPUState){ .pc = pc, .flags = flags, .cs_base = cs_base };
+    return (TCGTBCPUState){ .pc = pc, .flags = flags, .cs_base = key };
 }
 
 static void x86_cpu_synchronize_from_tb(CPUState *cs,

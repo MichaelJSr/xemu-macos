@@ -77,7 +77,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
             TranslationBlock *tb = e->tb;
             if (tb) {
                 TCGTBCPUState s = x86_get_tb_cpu_state(cpu);
-                if (e->cs_base == (uint32_t)s.cs_base &&
+                if (e->cs_base == s.cs_base &&
                     e->flags == s.flags &&
                     tb_cflags(tb) == cpu->tcg_cflags &&
                     tb->cs_base == s.cs_base &&
@@ -103,7 +103,7 @@ const void *HELPER(xemu_lookup_ret)(CPUX86State *env)
         if (tb_cflags(tb) == cpu->tcg_cflags) {
             e->eip = eip;
             e->flags = tb->flags;
-            e->cs_base = (uint32_t)tb->cs_base;
+            e->cs_base = tb->cs_base;
             e->tb = tb;
             /* Same page key as xemu_i386_ras_flush_page(). */
             unsigned pbit = xemu_retc_page_bit((uint32_t)(e->cs_base + eip));
