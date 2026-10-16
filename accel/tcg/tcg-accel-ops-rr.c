@@ -307,8 +307,26 @@ static void *rr_cpu_thread_fn(void *arg)
             }
             current_cpu = cpu;
 
+#ifdef XBOX
+            /*
+             * xemu: under icount, leave the virtual clock to vm_start and
+             * vm_stop while this vCPU can't run. pause_all_vcpus() disables
+             * it before its stop request wakes this thread, which may still
+             * pass here afterwards and used to enable it again for the rest
+             * of the pause. Overdue timers then ran in the stopped VM when
+             * host scheduling let them: after a paused loadvm moved the clock
+             * past the old session's deadlines, an APU frame burst, a vblank,
+             * OHCI frames and PIT ticks landed before the first instruction
+             * and changed the RAM the load had just restored.
+             */
+            if (!icount_enabled() || cpu_can_run(cpu)) {
+                qemu_clock_enable(QEMU_CLOCK_VIRTUAL,
+                                  (cpu->singlestep_enabled & SSTEP_NOTIMER) == 0);
+            }
+#else
             qemu_clock_enable(QEMU_CLOCK_VIRTUAL,
                               (cpu->singlestep_enabled & SSTEP_NOTIMER) == 0);
+#endif
 
             if (cpu_can_run(cpu)) {
                 int r;
