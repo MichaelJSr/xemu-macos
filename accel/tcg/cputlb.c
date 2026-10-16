@@ -118,6 +118,126 @@ static inline size_t sizeof_tlb(CPUTLBDescFast *fast)
     return fast->mask + (1 << CPU_TLB_ENTRY_BITS);
 }
 
+#if defined(XBOX)
+/*
+ * xemu: CPUTLBDesc.wclean, the writable-clean bitmaps. tlb_reset_dirty runs
+ * on every renderer and VGA dirty clear, from the PFIFO and vblank threads,
+ * and used to scan every main entry under tlb_c.lock (8-16k per dirty
+ * mmu_idx at the TLB floor), with the vCPU spinning on the lock. It
+ * now visits only entries whose bit is set: in the whole-table bitmap, or,
+ * for a range of up to half as many pages as there are buckets (most ranges
+ * are one page), in the bitmaps of the buckets its host pages hash to. Each
+ * bitmap holds a superset of the eligible entries (each under its host
+ * page's bucket); a walk drops the stale bits it meets. A bucket's summary
+ * has a bit per nonzero word, so a walk costs what the bucket holds.
+ * Anything that makes a main entry eligible sets its bits; everything is
+ * done under tlb_c.lock.
+ *
+ * Layout for a table of n entries, nw = n / 64 words per bitmap: the
+ * whole-table bitmap, the buckets' bitmaps, then the buckets' summaries
+ * (DIV_ROUND_UP(nw, 64) words each).
+ */
+#define TLB_WCLEAN_BUCKETS 64
+
+static inline size_t tlb_wclean_words(size_t n_entries)
+{
+    return DIV_ROUND_UP(n_entries, 64);
+}
+
+static inline size_t tlb_wclean_sum_words(size_t nw)
+{
+    return DIV_ROUND_UP(nw, 64);
+}
+
+static inline size_t tlb_wclean_bytes(size_t n_entries)
+{
+    size_t nw = tlb_wclean_words(n_entries);
+
+    return ((1 + TLB_WCLEAN_BUCKETS) * nw +
+            TLB_WCLEAN_BUCKETS * tlb_wclean_sum_words(nw)) * sizeof(uint64_t);
+}
+
+static inline uint64_t *tlb_wclean_map(CPUTLBDesc *desc, size_t nw,
+                                       unsigned b)
+{
+    return desc->wclean + (1 + b) * nw;
+}
+
+static inline uint64_t *tlb_wclean_sum(CPUTLBDesc *desc, size_t nw,
+                                       unsigned b)
+{
+    return desc->wclean + (1 + TLB_WCLEAN_BUCKETS) * nw +
+           b * tlb_wclean_sum_words(nw);
+}
+
+static inline unsigned tlb_wclean_bucket(uintptr_t host)
+{
+    return (host >> TARGET_PAGE_BITS) & (TLB_WCLEAN_BUCKETS - 1);
+}
+
+static inline uintptr_t tlb_entry_host(const CPUTLBEntry *ent, uintptr_t addr)
+{
+    return (addr & TARGET_PAGE_MASK) + ent->addend;
+}
+
+/* Could tlb_reset_dirty arm TLB_NOTDIRTY on this entry? */
+static inline bool tlb_wclean_eligible(uintptr_t addr_write, int slow_store)
+{
+    return !((addr_write | slow_store) &
+             (TLB_INVALID_MASK | TLB_MMIO | TLB_DISCARD_WRITE | TLB_NOTDIRTY));
+}
+
+static void tlb_wclean_refute_init(void);
+
+/*
+ * Called with tlb_c.lock held, after main entry @index changed: set its
+ * bits if it is eligible, else drop its whole-table bit (a bucket bit left
+ * behind is dropped by the next walk of that bucket).
+ */
+static inline void tlb_wclean_note(CPUTLBDesc *desc, CPUTLBDescFast *fast,
+                                   size_t index, bool eligible)
+{
+    size_t nw = tlb_wclean_words(tlb_n_entries(fast));
+    size_t w = index / 64;
+    uint64_t m = 1ull << (index % 64);
+
+    if (eligible) {
+        const CPUTLBEntry *ent = &fast->table[index];
+        unsigned b = tlb_wclean_bucket(tlb_entry_host(ent, ent->addr_write));
+
+        desc->wclean[w] |= m;
+        tlb_wclean_map(desc, nw, b)[w] |= m;
+        tlb_wclean_sum(desc, nw, b)[w / 64] |= 1ull << (w % 64);
+    } else {
+        desc->wclean[w] &= ~m;
+    }
+}
+
+/*
+ * Called with tlb_c.lock held, on a flushed table: clear every bitmap.
+ * The buckets only through their summaries, so a flush costs what they
+ * hold (allocations come zeroed).
+ */
+static void tlb_wclean_clear(CPUTLBDesc *desc, size_t n_entries)
+{
+    size_t nw = tlb_wclean_words(n_entries);
+    size_t ns = tlb_wclean_sum_words(nw);
+
+    memset(desc->wclean, 0, nw * sizeof(uint64_t));
+    for (unsigned b = 0; b < TLB_WCLEAN_BUCKETS; b++) {
+        uint64_t *map = tlb_wclean_map(desc, nw, b);
+        uint64_t *sum = tlb_wclean_sum(desc, nw, b);
+
+        for (size_t sw = 0; sw < ns; sw++) {
+            for (uint64_t sb = sum[sw]; sb; sb &= sb - 1) {
+                map[sw * 64 + ctz64(sb)] = 0;
+            }
+            sum[sw] = 0;
+        }
+    }
+}
+#endif
+
 static inline uint64_t tlb_read_idx(const CPUTLBEntry *entry,
                                     MMUAccessType access_type)
 {
@@ -288,12 +408,18 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
 
     g_free(fast->table);
     g_free(desc->fulltlb);
+#if defined(XBOX)
+    g_free(desc->wclean);
+#endif
 
     tlb_window_reset(desc, now, 0);
     /* desc->n_used_entries is cleared by the caller */
     fast->mask = (new_size - 1) << CPU_TLB_ENTRY_BITS;
     fast->table = g_try_new(CPUTLBEntry, new_size);
     desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
+#if defined(XBOX)
+    desc->wclean = g_try_malloc0(tlb_wclean_bytes(new_size));
+#endif
 
     /*
      * If the allocations fail, try smaller sizes. We just freed some
@@ -302,7 +428,11 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
      * allocations to fail though, so we progressively reduce the allocation
      * size, aborting if we cannot even allocate the smallest TLB we support.
      */
-    while (fast->table == NULL || desc->fulltlb == NULL) {
+    while (fast->table == NULL || desc->fulltlb == NULL
+#if defined(XBOX)
+           || desc->wclean == NULL
+#endif
+           ) {
         if (new_size == (1 << CPU_TLB_DYN_MIN_BITS)) {
             error_report("%s: %s", __func__, strerror(errno));
             abort();
@@ -314,6 +444,10 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         g_free(desc->fulltlb);
         fast->table = g_try_new(CPUTLBEntry, new_size);
         desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
+#if defined(XBOX)
+        g_free(desc->wclean);
+        desc->wclean = g_try_malloc0(tlb_wclean_bytes(new_size));
+#endif
     }
 }
 
@@ -325,6 +459,9 @@ static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
     desc->vindex = 0;
     memset(fast->table, -1, sizeof_tlb(fast));
     memset(desc->vtable, -1, sizeof(desc->vtable));
+#if defined(XBOX)
+    tlb_wclean_clear(desc, tlb_n_entries(fast));
+#endif
 }
 
 static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
@@ -349,6 +486,9 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
     fast->mask = (n_entries - 1) << CPU_TLB_ENTRY_BITS;
     fast->table = g_new(CPUTLBEntry, n_entries);
     desc->fulltlb = g_new(CPUTLBEntryFull, n_entries);
+#if defined(XBOX)
+    desc->wclean = g_malloc0(tlb_wclean_bytes(n_entries));
+#endif
     tlb_mmu_flush_locked(desc, fast);
 }
 
@@ -371,6 +511,9 @@ void tlb_init(CPUState *cpu)
 
     /* All tlbs are initialized flushed. */
     cpu->neg.tlb.c.dirty = 0;
+#if defined(XBOX)
+    tlb_wclean_refute_init();
+#endif
 
     for (i = 0; i < NB_MMU_MODES; i++) {
         tlb_mmu_init(&cpu->neg.tlb.d[i], cpu_tlb_fast(cpu, i), now);
@@ -388,6 +531,9 @@ void tlb_destroy(CPUState *cpu)
 
         g_free(fast->table);
         g_free(desc->fulltlb);
+#if defined(XBOX)
+        g_free(desc->wclean);
+#endif
     }
 }
 
@@ -964,6 +1110,175 @@ static inline void copy_tlb_helper_locked(CPUTLBEntry *d, const CPUTLBEntry *s)
     *d = *s;
 }
 
+#if defined(XBOX)
+/*
+ * xemu: XEMU_TLB_WCLEAN_REFUTE=1 re-runs the full scan after every bitmap
+ * pass and counts what the bitmap missed: misses = eligible entries in the
+ * range left unarmed (armed here, so the run stays correct), unset =
+ * eligible entries anywhere without their bit. Diagnostic only.
+ */
+static bool tlb_wclean_refute;
+static uint64_t tlb_wclean_calls, tlb_wclean_armed_calls;
+static uint64_t tlb_wclean_checks, tlb_wclean_entries;
+static uint64_t tlb_wclean_misses, tlb_wclean_unset;
+
+static void tlb_wclean_refute_dump(void)
+{
+    fprintf(stderr, "xemu: tlb-wclean refute checks=%" PRIu64
+            " entries=%" PRIu64 " misses=%" PRIu64 " unset=%" PRIu64
+            " (calls=%" PRIu64 " arming=%" PRIu64 ")\n",
+            tlb_wclean_checks, tlb_wclean_entries, tlb_wclean_misses,
+            tlb_wclean_unset, tlb_wclean_calls, tlb_wclean_armed_calls);
+}
+
+static void tlb_wclean_refute_init(void)
+{
+    const char *e = getenv("XEMU_TLB_WCLEAN_REFUTE");
+
+    if (e && e[0] == '1' && !tlb_wclean_refute) {
+        tlb_wclean_refute = true;
+        atexit(tlb_wclean_refute_dump);
+    }
+}
+
+/* Called with tlb_c.lock held, right after the bitmap pass. */
+static void tlb_wclean_refute_scan_locked(CPUTLBDesc *desc,
+                                          CPUTLBDescFast *fast, int mmu_idx,
+                                          uintptr_t start, uintptr_t length)
+{
+    size_t n = tlb_n_entries(fast), nw = tlb_wclean_words(n);
+
+    tlb_wclean_checks++;
+    tlb_wclean_entries += n;
+    for (size_t i = 0; i < n; i++) {
+        CPUTLBEntry *ent = &fast->table[i];
+        uintptr_t addr = ent->addr_write;
+        uintptr_t host = tlb_entry_host(ent, addr);
+        unsigned b = tlb_wclean_bucket(host);
+        size_t w = i / 64;
+
+        if (!tlb_wclean_eligible(addr,
+                                 desc->fulltlb[i].slow_flags[MMU_DATA_STORE])) {
+            continue;
+        }
+        if (!(desc->wclean[w] & tlb_wclean_map(desc, nw, b)[w] &
+              (1ull << (i % 64))) ||
+            !(tlb_wclean_sum(desc, nw, b)[w / 64] & (1ull << (w % 64)))) {
+            tlb_wclean_unset++;
+        }
+        if (host - start < length) {
+            if (tlb_wclean_misses++ < 8) {
+                fprintf(stderr, "xemu: tlb-wclean miss mmu_idx=%d index=%zu "
+                        "addr_write=0x%" PRIxPTR "\n", mmu_idx, i, addr);
+            }
+            qatomic_set(&ent->addr_write, addr | TLB_NOTDIRTY);
+        }
+    }
+}
+
+/*
+ * Called with tlb_c.lock held: tlb_reset_dirty_range_locked over the main
+ * entries in word @w whose bit is set in @bits, from the whole-table bitmap
+ * (@bucket < 0) or bucket @bucket's. Returns the bits to keep: an armed or
+ * ineligible entry drops its bit and also goes into *@drop (its whole-table
+ * bit goes too), an entry hashed to another bucket drops its bucket bit,
+ * and an eligible one outside the range keeps it. The host range is tested
+ * before the slow flags are loaded, so a pass touches only the main table
+ * for entries it leaves alone.
+ */
+static inline uint64_t tlb_wclean_word_locked(CPUTLBDesc *desc,
+                                              CPUTLBDescFast *fast,
+                                              uint64_t bits, size_t w,
+                                              int bucket, uintptr_t start,
+                                              uintptr_t length,
+                                              uint64_t *drop, unsigned *armed)
+{
+    uint64_t keep = bits;
+
+    *drop = 0;
+    for (; bits; bits &= bits - 1) {
+        unsigned b = ctz64(bits);
+        uint64_t m = 1ull << b;
+        size_t i = w * 64 + b;
+        CPUTLBEntry *ent = &fast->table[i];
+        uintptr_t addr = ent->addr_write;
+        uintptr_t host = tlb_entry_host(ent, addr);
+
+        if (addr & (TLB_INVALID_MASK | TLB_NOTDIRTY)) {
+            *drop |= m;
+        } else if (bucket >= 0 && tlb_wclean_bucket(host) != bucket) {
+            keep &= ~m;
+        } else if (host - start < length) {
+            if (!(desc->fulltlb[i].slow_flags[MMU_DATA_STORE] &
+                  (TLB_MMIO | TLB_DISCARD_WRITE))) {
+                qatomic_set(&ent->addr_write, addr | TLB_NOTDIRTY);
+                (*armed)++;
+            }
+            *drop |= m;
+        } else if (unlikely(addr & TLB_FORCE_SLOW) &&
+                   (desc->fulltlb[i].slow_flags[MMU_DATA_STORE] &
+                    (TLB_MMIO | TLB_DISCARD_WRITE))) {
+            /* Slow flags imply TLB_FORCE_SLOW (tlb_set_compare). */
+            *drop |= m;
+        }
+    }
+    return keep & ~*drop;
+}
+
+/*
+ * Called with tlb_c.lock held: arm every eligible main entry that maps host
+ * RAM in [start, start + length), walking the buckets of its pages, or the
+ * whole-table bitmap for a range of more than half as many pages as there
+ * are buckets. Returns the number of entries armed.
+ */
+static unsigned tlb_reset_dirty_wclean_locked(CPUTLBDesc *desc,
+                                              CPUTLBDescFast *fast,
+                                              uintptr_t start, uintptr_t length)
+{
+    size_t nw = tlb_wclean_words(tlb_n_entries(fast));
+    size_t ns = tlb_wclean_sum_words(nw);
+    uint64_t *all = desc->wclean, drop;
+    uintptr_t p0, p1;
+    unsigned armed = 0;
+
+    if (length == 0) {
+        return 0;
+    }
+    p0 = start >> TARGET_PAGE_BITS;
+    p1 = (start + length - 1) >> TARGET_PAGE_BITS;
+    if (p1 - p0 >= TLB_WCLEAN_BUCKETS / 2) {
+        for (size_t w = 0; w < nw; w++) {
+            if (all[w]) {
+                all[w] = tlb_wclean_word_locked(desc, fast, all[w], w, -1,
+                                                start, length, &drop, &armed);
+            }
+        }
+        return armed;
+    }
+    for (uintptr_t p = p0; p <= p1; p++) {
+        unsigned b = p & (TLB_WCLEAN_BUCKETS - 1);
+        uint64_t *map = tlb_wclean_map(desc, nw, b);
+        uint64_t *sum = tlb_wclean_sum(desc, nw, b);
+
+        for (size_t sw = 0; sw < ns; sw++) {
+            for (uint64_t sb = sum[sw]; sb; sb &= sb - 1) {
+                size_t w = sw * 64 + ctz64(sb);
+                uint64_t keep = tlb_wclean_word_locked(desc, fast, map[w], w,
+                                                       b, start, length,
+                                                       &drop, &armed);
+
+                map[w] = keep;
+                all[w] &= ~drop;
+                if (!keep) {
+                    sum[sw] &= ~(sb & -sb);
+                }
+            }
+        }
+    }
+    return armed;
+}
+#endif
+
 /* This is a cross vCPU call (i.e. another vCPU resetting the flags of
  * the target vCPU).
  * We must take tlb_c.lock to avoid racing with another vCPU update. The only
@@ -972,12 +1287,14 @@ static inline void copy_tlb_helper_locked(CPUTLBEntry *d, const CPUTLBEntry *s)
 void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
 {
     int mmu_idx;
+#if defined(XBOX)
+    unsigned armed = 0;
+#endif
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
-        unsigned int n = tlb_n_entries(fast);
         unsigned int i;
 
         /*
@@ -988,16 +1305,29 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
             continue;
         }
 
-        for (i = 0; i < n; i++) {
+#if defined(XBOX)
+        armed += tlb_reset_dirty_wclean_locked(desc, fast, start, length);
+        if (unlikely(tlb_wclean_refute)) {
+            tlb_wclean_refute_scan_locked(desc, fast, mmu_idx, start, length);
+        }
+#else
+        for (i = 0; i < tlb_n_entries(fast); i++) {
             tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
                                          start, length);
         }
+#endif
 
         for (i = 0; i < CPU_VTLB_SIZE; i++) {
             tlb_reset_dirty_range_locked(&desc->vfulltlb[i], &desc->vtable[i],
                                          start, length);
         }
     }
+#if defined(XBOX)
+    if (unlikely(tlb_wclean_refute)) {
+        tlb_wclean_calls++;
+        tlb_wclean_armed_calls += armed != 0;
+    }
+#endif
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
 
@@ -1061,16 +1391,19 @@ void tlb_flush_host_range(CPUState *cpu, uintptr_t start, uintptr_t length)
  * Called with tlb_c.lock held. Only an entry for the page the store
  * dirtied: another mmu_idx may map the same virtual page to another one
  * (x86's MMU_PHYS_IDX, which the page table walker sets accessed and
- * dirty bits through), whose clean bits must keep trapping.
+ * dirty bits through), whose clean bits must keep trapping. True if the
+ * entry is now writable-clean.
  */
-static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+static inline bool tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
                                          CPUTLBEntryFull *full,
                                          vaddr addr, hwaddr xlat_section)
 {
     if (tlb_entry->addr_write == (addr | TLB_NOTDIRTY) &&
         full->xlat_section == xlat_section) {
         tlb_entry->addr_write = addr;
+        return true;
     }
+    return false;
 }
 
 /* update the TLB corresponding to virtual page vaddr, mapped to the page
@@ -1085,10 +1418,14 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, hwaddr xlat_section)
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+        uintptr_t index = tlb_index(cpu, mmu_idx, addr);
 
-        tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr),
-                              &desc->fulltlb[tlb_index(cpu, mmu_idx, addr)],
-                              addr, xlat_section);
+        if (tlb_set_dirty1_locked(&cpu_tlb_fast(cpu, mmu_idx)->table[index],
+                                  &desc->fulltlb[index], addr, xlat_section)) {
+#if defined(XBOX)
+            tlb_wclean_note(desc, cpu_tlb_fast(cpu, mmu_idx), index, true);
+#endif
+        }
     }
 
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
@@ -1331,6 +1668,11 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
                     MMU_DATA_STORE, prot & PAGE_WRITE);
 
     copy_tlb_helper_locked(te, &tn);
+#if defined(XBOX)
+    tlb_wclean_note(desc, cpu_tlb_fast(cpu, mmu_idx), index,
+                    tlb_wclean_eligible(tn.addr_write,
+                                        full->slow_flags[MMU_DATA_STORE]));
+#endif
     tlb_n_used_entries_inc(cpu, mmu_idx);
     qemu_spin_unlock(&tlb->c.lock);
 }
@@ -1479,16 +1821,30 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
             /* Found entry in victim tlb, swap tlb and iotlb.  */
             CPUTLBEntry tmptlb, *tlb = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
 
+            CPUTLBEntryFull *f1 = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
+            CPUTLBEntryFull *f2 = &cpu->neg.tlb.d[mmu_idx].vfulltlb[vidx];
+            CPUTLBEntryFull tmpf;
+
             qemu_spin_lock(&cpu->neg.tlb.c.lock);
             copy_tlb_helper_locked(&tmptlb, tlb);
             copy_tlb_helper_locked(tlb, vtlb);
             copy_tlb_helper_locked(vtlb, &tmptlb);
-            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
-
-            CPUTLBEntryFull *f1 = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
-            CPUTLBEntryFull *f2 = &cpu->neg.tlb.d[mmu_idx].vfulltlb[vidx];
-            CPUTLBEntryFull tmpf;
+#if defined(XBOX)
+            /*
+             * xemu: swap the full entries under the lock too, so that
+             * tlb_reset_dirty never pairs an entry with the other one's
+             * slow flags, and give the new main entry its wclean bit.
+             */
             tmpf = *f1; *f1 = *f2; *f2 = tmpf;
+            tlb_wclean_note(&cpu->neg.tlb.d[mmu_idx], cpu_tlb_fast(cpu, mmu_idx),
+                            index,
+                            tlb_wclean_eligible(tlb->addr_write,
+                                                f1->slow_flags[MMU_DATA_STORE]));
+            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+#else
+            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+            tmpf = *f1; *f1 = *f2; *f2 = tmpf;
+#endif
             return true;
         }
     }

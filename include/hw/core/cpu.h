@@ -294,6 +294,15 @@ typedef struct CPUTLBDesc {
     CPUTLBEntry vtable[CPU_VTLB_SIZE];
     CPUTLBEntryFull vfulltlb[CPU_VTLB_SIZE];
     CPUTLBEntryFull *fulltlb;
+#if defined(XBOX)
+    /*
+     * xemu: bitmaps over the main table, whole and bucketed by host page
+     * (layout in cputlb.c), each a superset of the entries tlb_reset_dirty
+     * could arm with TLB_NOTDIRTY (writable RAM, no INVALID, MMIO,
+     * DISCARD_WRITE or NOTDIRTY). Protected by tlb_c.lock.
+     */
+    uint64_t *wclean;
+#endif
 } CPUTLBDesc;
 
 /*
