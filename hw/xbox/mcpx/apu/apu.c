@@ -231,9 +231,26 @@ static void se_frame(MCPXAPUState *d)
     g_dbg.gp_realtime = d->gp.realtime;
     g_dbg.ep_realtime = d->ep.realtime;
 
-    int64_t start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    /* XEMU_APU_PROF=1: per-second APU-thread utilization to
+     * stderr (same numbers as the debug UI). Handy for A/B of
+     * the DSP engines without attaching the UI. */
+    static int apu_prof = -1;
+    if (apu_prof < 0) {
+        const char *v = getenv("XEMU_APU_PROF");
+        apu_prof = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    /*
+     * Deterministic mode runs frames in bursts on the vCPU thread, where
+     * the utilization means nothing: skip its clock reads unless
+     * XEMU_APU_PROF asks for it.
+     */
+    bool timed = !d->det.enabled || apu_prof;
+    int64_t start_us = 0;
+    if (timed) {
+        start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
     int64_t elapsed_us = start_us - d->frame_count_time_us;
-    if (elapsed_us >= 1000000) {
+    if (timed && elapsed_us >= 1000000) {
         /* A rudimentary calculation to determine approximately how taxed the APU
          * thread is, by measuring how much time we spend building frames.
          * =1: thread is not sleeping and likely falling behind realtime
@@ -243,14 +260,6 @@ static void se_frame(MCPXAPUState *d)
         g_dbg.frames_processed = (int)(d->frame_count * 1000000.0 / elapsed_us + 0.5);
         throttle_publish_debug(d);
 
-        /* XEMU_APU_PROF=1: per-second APU-thread utilization to
-         * stderr (same numbers as the debug UI). Handy for A/B of
-         * the DSP engines without attaching the UI. */
-        static int apu_prof = -1;
-        if (apu_prof < 0) {
-            const char *v = getenv("XEMU_APU_PROF");
-            apu_prof = (v && v[0] && v[0] != '0') ? 1 : 0;
-        }
         if (apu_prof) {
             fprintf(stderr, "apu: utilization %5.1f%% (%d frames/s)\n",
                     g_dbg.utilization * 100.0, g_dbg.frames_processed);
@@ -270,7 +279,10 @@ static void se_frame(MCPXAPUState *d)
     mcpx_apu_monitor_frame(d);
 
     d->ep_frame_div++;
-    d->frame_work_acc_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_us;
+    if (timed) {
+        d->frame_work_acc_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) -
+                                start_us;
+    }
 
     mcpx_debug_end_frame();
 }

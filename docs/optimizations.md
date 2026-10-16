@@ -55,7 +55,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_UI_LOCK_STATS` | `1` prints the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build; previously it needed a `DEBUG_XEMU_C=1` build (which still forces it on). One predictable branch per lock when off. Compiled in on macOS and in `DEBUG_XEMU_C` builds only — Windows/Linux release paths preprocess away to today's code |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
-| `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr |
+| `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr (deterministic mode measures it only when this is set) |
 
 ### Build-time and harness knobs
 
@@ -1538,6 +1538,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   operations in the same order, fused where they were. Det host
   instructions per frame -0.27% heavy-f1 and -0.16% stream-e2 on top of
   the ADPCM reuse (6/6 pairs each), -2.0% inside the APU tick.
+- **No utilization clock in deterministic mode.** `se_frame` read
+  `QEMU_CLOCK_REALTIME` twice per frame for the utilization the debug
+  UI and `XEMU_APU_PROF` show, which means nothing while frames run in
+  bursts on the vCPU thread. Deterministic mode skips it unless
+  `XEMU_APU_PROF` is set: ~4k fewer instructions per APU tick.
 - **Accelerate / vDSP.** An inline fused loop (Apple Silicon; `vDSP_vsma`
   on Intel) for 8-bin × 32-sample mix accumulation, skipping zero-gain
   sends, `vDSP_vadd` for `float_accumulate`; `float_to_24b`
