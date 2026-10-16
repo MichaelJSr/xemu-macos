@@ -747,7 +747,13 @@ static int mcpx_apu_history_pre_save(void *opaque)
         d->det.dsp_cycles[i] = dsps[i]->core.cycle_count;
         d->det.dsp_idle[i] = dsps[i]->core.halt_requested;
     }
-    d->det.deadline = d->det.timer && timer_pending(d->det.timer) ?
+    /*
+     * Between a load and the next start the timer may still hold the old
+     * session's deadline; the start puts it on the grid instead (rearm),
+     * so a save made then must too, or its restore differs from the load.
+     */
+    d->det.deadline = d->det.timer && !d->det.rearm &&
+                      timer_pending(d->det.timer) ?
                       timer_expire_time_ns(d->det.timer) : -1;
     return 0;
 }
