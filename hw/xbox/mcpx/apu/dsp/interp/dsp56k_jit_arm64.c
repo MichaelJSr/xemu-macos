@@ -1109,10 +1109,11 @@ struct DspJitBlock {
      *   0 : not yet enqueued (diff path will enqueue on next hit)
      *   1 : enqueued or validated (diff path skips from now on)
      *
-     * Cleared by translate_block (fresh translation) and
-     * dsp56k_jit_invalidate (block evicted). Writes are unsynchronised
-     * because a lost update only means at most one extra validation
-     * for a block — harmless.
+     * Set by the diff path when it enqueues or checks the
+     * translation; cleared by translate_block (fresh translation)
+     * and jit_evict_block, all under the APU lock. The validator
+     * thread never writes it: a set from there could land after a
+     * retranslation's clear and leave the new code unchecked.
      */
     uint8_t  diff_checked;
 
@@ -1205,15 +1206,6 @@ typedef struct DiffSlot {
     uint32_t   jit_cycles;
     uint32_t   write_set;      /* DSP56K_JIT_WS_* bitmask */
     uint8_t    skip_compare;   /* JIT hit DMA_CONTROL: skip validation */
-    /*
-     * Block pointer + its `entry` at enqueue time. The worker marks
-     * the block as validated only if block->entry still matches —
-     * otherwise the translation has been invalidated and re-emitted
-     * (e.g. self-modifying code), and the new code must be
-     * re-validated from scratch.
-     */
-    DspJitBlock *block;
-    dsp56k_jit_entry_fn block_entry;
 } DiffSlot;
 
 typedef struct DiffQueue {
@@ -10242,8 +10234,7 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
     block->shared_exit = exit_label;
     block->generation++;
     block->num_incoming_chains = 0;
-    /* Fresh translation — must go through validation again. Written
-     * atomically because the validator thread may read it. */
+    /* Fresh translation — must go through validation again. */
     qatomic_set(&block->diff_checked, 0);
     s->blocks_translated++;
 
@@ -11092,23 +11083,10 @@ static void *diff_worker_fn(void *opaque)
             uint64_t head = qatomic_read(&q->head);
             DiffSlot *slot = &q->slots[head % DSP56K_JIT_DIFF_SLOTS];
 
-            DspJitBlock     *block       = slot->block;
-            dsp56k_jit_entry_fn block_entry = slot->block_entry;
-            bool             passed      = diff_validate_slot(slot, q);
-
-            /* Mark the block as checked iff:
-             *   (a) the compare passed (divergence would have
-             *       aborted the process already);
-             *   (b) the block has not been retranslated since
-             *       enqueue (entry pointer still matches) —
-             *       otherwise the new translation is different
-             *       code and needs its own validation pass, which
-             *       the producer's diff_checked=0 will trigger on
-             *       its next call. Plain pointer read is atomic
-             *       enough on ARM64 / macOS for this check. */
-            if (passed && block && block->entry == block_entry) {
-                qatomic_set(&block->diff_checked, 1);
-            }
+            /* The producer marked the translation when it pushed it,
+             * so the worker touches nothing outside its slot (see
+             * DspJitBlock.diff_checked). */
+            bool passed = diff_validate_slot(slot, q);
 
             /* Consumer-side advance: release-store so the producer
              * (if racing against a nearly-full ring) sees the slot
@@ -11294,8 +11272,6 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
          * immediately. Mark the block as enqueued so any overlapping
          * re-entries while the worker is draining don't publish a
          * duplicate snapshot. */
-        slot->block       = b;
-        slot->block_entry = b_entry;
         diff_queue_finish_push(q, slot, dsp, pc_start, num_inst_before,
                                jit_cycles, write_set, skip_compare);
         qatomic_set(&b->diff_checked, 1);
@@ -11324,8 +11300,6 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
         slot->jit_cycles      = jit_cycles;
         slot->write_set       = write_set;
         slot->skip_compare    = skip_compare;
-        slot->block           = b;
-        slot->block_entry     = b_entry;
         s->diff_ops_checked++;
 
         if (!diff_validate_slot(slot, NULL)) {
