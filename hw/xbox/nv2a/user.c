@@ -28,7 +28,13 @@ uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
     NV2AState *d = (NV2AState *)opaque;
 
     unsigned int channel_id = addr >> 16;
-    assert(channel_id < NV2A_NUM_CHANNELS);
+    if (channel_id >= NV2A_NUM_CHANNELS) {
+        /* The window is 128 channels wide; the model has 32. Read as 0. */
+        qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER read past the last "
+                      "channel (%u)\n", channel_id);
+        nv2a_reg_log_read(NV_USER, addr, size, 0);
+        return 0;
+    }
 
     /*
      * With the lockless doorbell, reads skip pfifo.lock too, since the
@@ -95,8 +101,18 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_USER, addr, size, val);
 
+    /*
+     * Writes the model doesn't handle (past the last channel, an offset
+     * other than PUT/GET/REF, a channel that isn't current, PIO mode) are
+     * ignored and logged, as user_read reads them as 0. Guests don't make
+     * them; a debugger or a stray pointer might.
+     */
     unsigned int channel_id = addr >> 16;
-    assert(channel_id < NV2A_NUM_CHANNELS);
+    if (channel_id >= NV2A_NUM_CHANNELS) {
+        qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER write past the last "
+                      "channel (%u) ignored\n", channel_id);
+        return;
+    }
 
     /*
      * The pushbuffer doorbell skips pfifo.lock in normal mode. The channel
@@ -113,6 +129,7 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     qemu_mutex_lock(&d->pfifo.lock);
 
+    bool handled = false;
     uint32_t channel_modes = d->pfifo.regs[NV_PFIFO_MODE];
     if (channel_modes & (1 << channel_id)) {
         /* DMA Mode */
@@ -121,6 +138,7 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                      NV_PFIFO_CACHE1_PUSH1_CHID);
 
         if (channel_id == cur_channel_id) {
+            handled = true;
             switch (addr & 0xFFFF) {
             case NV_USER_DMA_PUT:
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] = val;
@@ -132,25 +150,30 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                 d->pfifo.regs[NV_PFIFO_CACHE1_REF] = val;
                 break;
             default:
-                NV2A_DPRINTF(true, "Unsupported NV_USER write: channel=%u offset=0x%04x\n", channel_id, (unsigned)(addr & 0xFFFF));
-                assert(!"Unsupported NV_USER DMA register write offset");
+                handled = false;
+                qemu_log_mask(LOG_UNIMP, "nv2a: unsupported NV_USER write "
+                              "ignored: channel %u offset 0x%04x\n",
+                              channel_id, (unsigned)(addr & 0xFFFF));
                 break;
             }
 
-            pfifo_guest_kick(d);
-
+            if (handled) {
+                pfifo_guest_kick(d);
+            }
         } else {
-            /* ramfc */
-            assert(!"Invalid channel id");
+            /* ramfc: unsupported */
+            qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER write of inactive "
+                          "channel %u ignored\n", channel_id);
         }
     } else {
-        /* PIO Mode */
-        assert(!"Failed to enter DMA mode - entered PIO mode");
+        /* PIO Mode: unsupported */
+        qemu_log_mask(LOG_UNIMP, "nv2a: NV_USER write in PIO mode ignored, "
+                      "channel %u\n", channel_id);
     }
 
     qemu_mutex_unlock(&d->pfifo.lock);
 
-    if (icount_enabled()) {
+    if (handled && icount_enabled()) {
         pfifo_icount_sync(d);
     }
 }
