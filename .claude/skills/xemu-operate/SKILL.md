@@ -170,8 +170,10 @@ fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:
 analog and frame-tagged pipe input, `xemu-frame-advance`,
-`xemu-run-until` (stop at a guest PC with conditions and hit counts,
-frames as the budget; pause first), `xemu-hooks-set`/`-clear` (copy
+`query-xemu-display` (frame and load count at the guest's last flip,
+the picture `screendump` writes), `xemu-run-until` (stop at a guest PC
+with conditions and hit counts, frames as the budget; pause first),
+`xemu-hooks-set`/`-clear` (copy
 memory at guest PCs into records the next advance returns, optionally
 stopping on an `expect` mismatch, and write the next entry of a queue
 there: `write`/`set`, `stop-empty`, `xemu-hooks-push`; they persist

@@ -1,5 +1,6 @@
 /*
- * xemu QMP events: XEMU_READY, XEMU_STATE_LOADED, XEMU_DEVICE_LOST
+ * xemu QMP events: XEMU_READY, XEMU_STATE_LOADED, XEMU_DEVICE_LOST, and
+ * query-xemu-display's flip counters
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -31,6 +32,12 @@ void xemu_events_load_retry(void);
 
 /* End of qemu_loadvm_state: emit XEMU_STATE_LOADED if @ok. */
 void xemu_events_load_done(bool ok);
+
+/*
+ * The guest wrote the CRTC start address (a flip; query-xemu-display).
+ * vCPU thread, BQL held.
+ */
+void xemu_events_flip(void);
 
 /*
  * The Vulkan renderer lost its device; xemu ends next. Any thread; only

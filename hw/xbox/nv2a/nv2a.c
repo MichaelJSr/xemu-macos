@@ -206,6 +206,11 @@ int nv2a_get_screen_off(void)
     return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
 }
 
+uint32_t nv2a_get_crtc_start(void)
+{
+    return g_nv2a ? g_nv2a->pcrtc.start : 0;
+}
+
 /*
  * Headless null mode shows nothing, and only a screendump reads the VGA
  * surface, so the vblank skips the scan (its dirty-bitmap clear re-arms

@@ -208,6 +208,19 @@ Other automation interfaces (windowed or headless):
   `debug-stop: true`. In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
+- **Picture age**: QMP `query-xemu-display` returns `{frame, loads,
+  flips, flip-frame, flip-loads, scanout}`: the frame counter and load
+  count now, the guest's flips so far (writes of the CRTC start address,
+  `scanout`; Azurik makes two per present) and the frame counter and
+  load count at the last one. `screendump` writes the frame that flip
+  put on screen. When `flip-loads` is below `loads`, the guest has not
+  flipped since the last load and the picture is the loaded state's
+  own, as it was saved; Azurik's first flip comes 1-3 frames after a
+  paused load. Two exceptions: a game that draws into the scanout
+  before it flips (Azurik keeps one scanout buffer, resolves each frame
+  into it, then flips) shows that frame to a screendump taken in
+  between, and windowed frame interpolation can show a step between
+  the last two flips. It only reads counters.
 - **Input recording**: `XEMU_INPUT_RECORD=<file>` writes, at every
   vblank, the changes in what one pad gave the guest
   (`XEMU_INPUT_RECORD_PORT=1-4`, default the first bound port) as

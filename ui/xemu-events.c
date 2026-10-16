@@ -1,5 +1,6 @@
 /*
- * xemu QMP events: XEMU_READY, XEMU_STATE_LOADED, XEMU_DEVICE_LOST
+ * xemu QMP events: XEMU_READY, XEMU_STATE_LOADED, XEMU_DEVICE_LOST, and
+ * query-xemu-display's flip counters
  *
  * Harnesses used to poll the run log for the stderr lines "xemu: ready",
  * "xemu: state loaded" and "xemu: Vulkan device lost; exiting". The lines
@@ -14,6 +15,7 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-xemu.h"
 #include "qapi/qapi-events-xemu.h"
+#include "hw/xbox/nv2a/nv2a.h"
 #include "xemu-events.h"
 
 int64_t xemu_frame_count(void);
@@ -27,6 +29,8 @@ static char *pending_name;
 static XemuLoadSource load_source = XEMU_LOAD_SOURCE_INCOMING;
 static char *load_name;
 static bool device_lost_sent;
+/* Guest flips: NV_PCRTC_START writes, on the vCPU thread under the BQL. */
+static int64_t flips, flip_frame, flip_loads;
 
 void xemu_events_ready(void)
 {
@@ -96,4 +100,28 @@ XemuStatus *qmp_query_xemu_status(Error **errp)
     s->ready = ready;
     s->loads = loads;
     return s;
+}
+
+void xemu_events_flip(void)
+{
+    flips++;
+    flip_frame = xemu_frame_count();
+    flip_loads = loads;
+}
+
+XemuDisplayInfo *qmp_query_xemu_display(Error **errp)
+{
+    XemuDisplayInfo *info = g_new0(XemuDisplayInfo, 1);
+
+    info->frame = xemu_frame_count();
+    info->loads = loads;
+    info->flips = flips;
+    if (flips) {
+        info->has_flip_frame = true;
+        info->flip_frame = flip_frame;
+        info->has_flip_loads = true;
+        info->flip_loads = flip_loads;
+    }
+    info->scanout = nv2a_get_crtc_start();
+    return info;
 }

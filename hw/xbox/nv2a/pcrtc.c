@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "ui/xemu-events.h"
 
 uint64_t pcrtc_read(void *opaque, hwaddr addr, unsigned int size)
 {
@@ -66,6 +67,7 @@ void pcrtc_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         val &= 0x07FFFFFF;
         // assert(val < memory_region_size(d->vram));
         d->pcrtc.start = val;
+        xemu_events_flip();
 
         NV2A_DPRINTF("PCRTC_START - %x %x %x %x\n",
                 d->vram_ptr[val+64], d->vram_ptr[val+64+1],

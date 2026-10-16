@@ -385,6 +385,48 @@
 { 'command': 'query-xemu-status', 'returns': 'XemuStatus' }
 
 ##
+# @XemuDisplayInfo:
+#
+# How old the frame is that @screendump writes.  A flip is a guest
+# write of the CRTC start address (NV_PCRTC_START), which puts a
+# finished frame on screen; D3D titles make one or more at every
+# present.  @screendump writes the frame on screen: the last flip's
+# or, before the first flip after a load, the loaded state's own (the
+# one it showed when it was saved).
+#
+# @frame: the frame counter now (see @query-xemu-frame)
+#
+# @loads: successful machine state loads since launch (see
+#     @query-xemu-status)
+#
+# @flips: flips since launch
+#
+# @flip-frame: the frame counter at the last flip (absent before the
+#     first)
+#
+# @flip-loads: @loads at the last flip (absent before the first); less
+#     than @loads until the first flip after the last load
+#
+# @scanout: the guest physical address on screen (the CRTC start)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuDisplayInfo',
+  'data': { 'frame': 'int', 'loads': 'int', 'flips': 'int',
+            '*flip-frame': 'int', '*flip-loads': 'int',
+            'scanout': 'uint64' } }
+
+##
+# @query-xemu-display:
+#
+# Return when the guest last flipped, which dates the frame
+# @screendump writes.  It reads counters only.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-display', 'returns': 'XemuDisplayInfo' }
+
+##
 # @XEMU_READY:
 #
 # Emitted once per launch, when the machine and its pads exist, just
