@@ -177,8 +177,9 @@ Other automation interfaces (windowed or headless):
   returns `{frame, running}`; `xemu-frame-advance {"frames": N}` runs N
   frames, pauses, and returns (`0` just pauses). It also starts a VM the
   gdbstub stopped, from the instruction it stopped at (lift a breakpoint
-  under the PC first); a breakpoint or step that stops the VM during the
-  advance ends it early with `debug-stop: true`. In real time, replays
+  under the PC first, or use `Qxemu.stepover:1`); a breakpoint or step
+  that stops the VM during the advance ends it early with
+  `debug-stop: true`. In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
 - **Input recording**: `XEMU_INPUT_RECORD=<file>` writes, at every
@@ -438,6 +439,17 @@ Other automation interfaces (windowed or headless):
   binary `x addr,len` read (GDB 16, advertised as `binary-upload+`)
   halves the bytes on the wire. In `Qqemu.PhyMemMode:1` a 150 MB sweep
   takes under a second.
+- **gdbstub step-over**: `Qxemu.stepover:1` (or `xemu.stepover+` in the
+  client's `qSupported`; the stub advertises `Qxemu.stepover+`) makes a
+  resume from a halt on an armed `Z0` breakpoint (`c`, `vCont;c`, or
+  QMP `cont` and `xemu-frame-advance`) run the instruction under the PC
+  first instead of reporting that breakpoint again. The stub single-steps
+  it itself with the `s` flags (no IRQs, no timers), so the guest runs
+  exactly as under `z0`/`s`/`Z0`/`c` (same RAM under icount), in one
+  packet and with no code invalidation (each `Z0`/`z0` invalidates its
+  page). `s` steps over a breakpoint under the PC in every build. Off by
+  default and for each new connection; `Qxemu.stepover:0` turns it off,
+  `qxemu.stepover` reads it.
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

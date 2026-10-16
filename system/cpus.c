@@ -31,6 +31,7 @@
 #include "qapi/qapi-events-run-state.h"
 #include "qapi/qmp/qerror.h"
 #include "exec/gdbstub.h"
+#include "gdbstub/xemu.h"
 #include "accel/accel-cpu-ops.h"
 #include "system/hw_accel.h"
 #include "exec/cpu-common.h"
@@ -352,6 +353,8 @@ void cpu_handle_guest_debug(CPUState *cpu)
         } else {
             cpu_single_step(cpu, 0);
         }
+    } else if (xemu_gdb_stepover_done(cpu)) {
+        /* xemu: the gdbstub stepped over a breakpoint; run on. */
     } else {
         gdb_set_stop_cpu(cpu);
         qemu_system_debug_request();

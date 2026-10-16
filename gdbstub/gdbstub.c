@@ -33,6 +33,9 @@
 #include "exec/gdbstub.h"
 #include "gdbstub/commands.h"
 #include "gdbstub/syscalls.h"
+#ifndef CONFIG_USER_ONLY
+#include "gdbstub/xemu.h"
+#endif
 #ifdef CONFIG_USER_ONLY
 #include "accel/tcg/vcpu-state.h"
 #include "gdbstub/user.h"
@@ -1765,6 +1768,8 @@ static void handle_query_supported(GArray *params, void *user_ctx)
         }
 #if defined(CONFIG_USER_ONLY)
         gdb_handle_query_supported_user(gdb_supported);
+#else
+        xemu_gdb_client_features(gdb_supported);
 #endif
     }
 

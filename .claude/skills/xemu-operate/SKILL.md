@@ -156,6 +156,10 @@ its restore, so clear and set them per candidate), the `xemu: ready` /
 park/resume via `migrate file:`. QMP sends events only after
 `qmp_capabilities`, and `XEMU_READY` often goes out first: check
 `query-xemu-status` after negotiating.
+gdbstub drivers: every `Z0`/`z0` invalidates the code on its page, so
+don't lift and re-arm breakpoints around each resume. `s` already steps
+over a breakpoint under the PC, and after `Qxemu.stepover:1` a plain `c`
+does.
 
 ## Test
 

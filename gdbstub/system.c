@@ -31,6 +31,7 @@
 #include "monitor/monitor.h"
 #include "trace.h"
 #include "internals.h"
+#include "gdbstub/xemu.h"
 
 /* System emulation specific state */
 typedef struct {
@@ -97,8 +98,12 @@ static void gdb_chr_event(void *opaque, QEMUChrEvent event)
         s->c_cpu = gdb_first_attached_cpu();
         s->g_cpu = s->c_cpu;
 
+        xemu_gdb_session_reset();
         vm_stop(RUN_STATE_PAUSED);
         replay_gdb_attached();
+        break;
+    case CHR_EVENT_CLOSED:
+        xemu_gdb_session_reset();
         break;
     default:
         break;
@@ -384,6 +389,7 @@ bool gdbserver_start(const char *device, Error **errp)
         gdb_init_gdbserver_state();
 
         qemu_add_vm_change_state_handler(gdb_vm_state_change, NULL);
+        xemu_gdb_init();
 
         /* Initialize a monitor terminal for gdb */
         mon_chr = qemu_chardev_new(NULL, TYPE_CHARDEV_GDB,
@@ -578,9 +584,11 @@ int gdb_continue_partial(char *newstates)
             switch (newstates[cpu->cpu_index]) {
             case 0:
             case 1:
+                xemu_gdb_stepover_cancel(cpu);
                 break; /* nothing to do here */
             case 's':
                 trace_gdbstub_op_stepping(cpu->cpu_index);
+                xemu_gdb_stepover_cancel(cpu);
                 cpu_single_step(cpu, gdbserver_state.sstep_flags);
                 cpu_resume(cpu);
                 flag = 1;

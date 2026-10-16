@@ -14,7 +14,8 @@ user_ss.add(files(
 system_ss.add(files(
   'gdbstub.c',
   'syscalls.c',
-  'system.c'
+  'system.c',
+  'xemu-gdb.c'
 ))
 
 # The user-target is specialised by the guest
