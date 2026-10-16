@@ -1251,6 +1251,14 @@ typedef struct DspJitState {
 
     /* Differential validator (XEMU_DSP_JIT_DIFF=1). NULL if diff off. */
     DiffQueue *diff_q;
+    /*
+     * The slot sync diff mode snapshots into (DIFF_SYNC, or the async
+     * queue failed to start); NULL otherwise. Not a stack local: the
+     * diff path is inlined into dsp_c_run, where a 160 KB local made
+     * every run probe its stack, and -ftrivial-auto-var-init=zero
+     * cleared it on every diff-path block, ring-full drops included.
+     */
+    DiffSlot *diff_sync_slot;
 
     /* Stats */
     uint64_t blocks_translated;
@@ -10318,6 +10326,9 @@ void dsp56k_jit_init(dsp_core_t *dsp)
                             "failed, falling back to sync diff mode\n");
         }
     }
+    if (g_jit_diff && !s->diff_q) {
+        s->diff_sync_slot = g_new(DiffSlot, 1);
+    }
 
     /* Stash on dsp_core via hidden slot. We use dsp->pram_opcache slot
      * 0xFFF0-ish? No — that would collide. Add a dedicated field via
@@ -10537,6 +10548,7 @@ void dsp56k_jit_finalize(dsp_core_t *dsp)
 
     jit_code_free(s->code_buf, s->code_cap);
     g_free(s->dep_words);
+    g_free(s->diff_sync_slot);
     g_free(s);
     dsp->jit_state = NULL;
 }
@@ -11225,20 +11237,19 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
      *     (increment q->dropped, still run the JIT normally). Keeps
      *     the APU thread fast under load spikes; validation becomes
      *     a sampler over the full run.
-     *   - sync (XEMU_DSP_JIT_DIFF_SYNC=1 or no q): snapshot into a
-     *     stack-local slot, run JIT, validate inline on the APU
+     *   - sync (XEMU_DSP_JIT_DIFF_SYNC=1 or no q): snapshot into
+     *     s->diff_sync_slot, run JIT, validate inline on the APU
      *     thread. Slow, for bring-up debugging only.
      */
 
     enum { MODE_ASYNC, MODE_DROP, MODE_SYNC } mode;
-    DiffSlot  sync_slot;
     DiffSlot *slot = NULL;
 
     if (q && !g_jit_diff_sync) {
         slot = diff_queue_begin_push(q, dsp);
         mode = slot ? MODE_ASYNC : MODE_DROP;
     } else {
-        slot = &sync_slot;
+        slot = s->diff_sync_slot;
         memcpy(&slot->pre, dsp, sizeof(*dsp));
         mode = MODE_SYNC;
     }
