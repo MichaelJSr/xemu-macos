@@ -1996,6 +1996,17 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   load swings cancel (load 18-19): heavy-f1 median −0.57% (8/8 pairs),
   cold boot −0.67% (7/8); sequential sessions −0.67% heavy-f1 (12 pairs)
   and −2.8% cold boot (10 pairs, load 16-26, ±3% per pair).
+- **DSP DMA copies RAM spans in bulk (2026-10-16).** `dsp_dma_run`
+  tested for a span (plain X/Y RAM) on every word; it now tests once
+  per transfer. With one, a 4-byte read is a `memcpy`, a 4-byte write a
+  masked loop the compiler vectorises, and the 2-byte and interleaved
+  forms index the span directly. P-space and peripheral targets keep
+  the per-word backend calls in the old order (P writes invalidate JIT
+  blocks). Det, RAM and WAV equal: instructions per frame −0.37%
+  heavy-f1 (12/12 pairs), −0.45% cold boot (9/10), −0.50% movie-e2
+  (6/6). Cycles, both binaries at once (load 18-20): heavy-f1 median
+  −0.33% (5/8), cold boot −0.04% (4/8); sequential sessions −1.2%
+  heavy-f1 (10/12 wins), −0.4% cold boot (load 16-26).
 
 ### Input
 

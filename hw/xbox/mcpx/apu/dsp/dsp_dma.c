@@ -116,16 +116,6 @@ static inline uint32_t dma_mem_read(DSPDMAState *s, const uint32_t *span,
     return span ? span[i] : s->mem_read(s->mem_opaque, space, addr + i);
 }
 
-static inline void dma_mem_write(DSPDMAState *s, uint32_t *span, int space,
-                                 uint32_t addr, uint32_t i, uint32_t v)
-{
-    if (span) {
-        span[i] = v;
-    } else {
-        s->mem_write(s->mem_opaque, space, addr + i, v);
-    }
-}
-
 static void dsp_dma_run(DSPDMAState *s)
 {
     if (!(s->control & DMA_CONTROL_RUNNING)
@@ -255,6 +245,12 @@ static void dsp_dma_run(DSPDMAState *s)
          */
         uint8_t *const buf = scratch_buf;
 
+        /*
+         * With a span (plain X/Y RAM) the loops index it directly: a 4-byte
+         * read is a memcpy and the rest vectorise. Without one (P-space,
+         * peripherals) every word takes the backend call, in the same
+         * order as before.
+         */
         if (direction) {
             if (dsp_interleave) {
                 // FIXME: Above xfer size calculation instead of
@@ -264,21 +260,39 @@ static void dsp_dma_run(DSPDMAState *s)
                                                 channel_count * block_count);
 
                 // Interleave samples
-                if (item_size == 2) {
+                if (item_size == 4 && span && channel_count == 1) {
+                    memcpy(buf, span, block_count * 4);
+                } else if (item_size == 2 && span) {
+                    uint16_t *restrict dst = (uint16_t *)buf;
                     for (int i = 0; i < block_count; i++) {
                         for (int ch = 0; ch < channel_count; ch++) {
-                            uint32_t v = dma_mem_read(s, span, mem_space,
-                                                      mem_address,
-                                                      ch*block_count+i);
+                            dst[i * channel_count + ch] =
+                                span[ch * block_count + i] >> 8;
+                        }
+                    }
+                } else if (item_size == 4 && span) {
+                    uint32_t *restrict dst = (uint32_t *)buf;
+                    for (int i = 0; i < block_count; i++) {
+                        for (int ch = 0; ch < channel_count; ch++) {
+                            dst[i * channel_count + ch] =
+                                span[ch * block_count + i];
+                        }
+                    }
+                } else if (item_size == 2) {
+                    for (int i = 0; i < block_count; i++) {
+                        for (int ch = 0; ch < channel_count; ch++) {
+                            uint32_t v = s->mem_read(s->mem_opaque, mem_space,
+                                                     mem_address +
+                                                     ch*block_count+i);
                             *(uint16_t*)(buf + i*2*channel_count + ch*2) = v >> 8;
                         }
                     }
                 } else if (item_size == 4) {
                     for (int i = 0; i < block_count; i++) {
                         for (int ch = 0; ch < channel_count; ch++) {
-                            uint32_t v = dma_mem_read(s, span, mem_space,
-                                                      mem_address,
-                                                      ch*block_count+i);
+                            uint32_t v = s->mem_read(s->mem_opaque, mem_space,
+                                                     mem_address +
+                                                     ch*block_count+i);
                             *(uint32_t*)(buf + i*4*channel_count + ch*4) = v;
                         }
                     }
@@ -288,16 +302,23 @@ static void dsp_dma_run(DSPDMAState *s)
             } else {
                 const uint32_t *span = dma_span(s, mem_space, mem_address,
                                                 count);
-                if (item_size == 2) {
+                if (item_size == 4 && span) {
+                    memcpy(buf, span, count * 4);
+                } else if (item_size == 2 && span) {
+                    uint16_t *restrict dst = (uint16_t *)buf;
                     for (int i = 0; i < count; i++) {
-                        uint32_t v = dma_mem_read(s, span, mem_space,
-                                                  mem_address, i);
+                        dst[i] = span[i] >> 8;
+                    }
+                } else if (item_size == 2) {
+                    for (int i = 0; i < count; i++) {
+                        uint32_t v = s->mem_read(s->mem_opaque, mem_space,
+                                                 mem_address + i);
                         *(uint16_t*)(buf + i*2) = v >> 8;
                     }
                 } else if (item_size == 4) {
                     for (int i = 0; i < count; i++) {
-                        uint32_t v = dma_mem_read(s, span, mem_space,
-                                                  mem_address, i);
+                        uint32_t v = s->mem_read(s->mem_opaque, mem_space,
+                                                 mem_address + i);
                         *(uint32_t*)(buf + i*4) = v;
                     }
                 } else if (count > 0) {
@@ -339,15 +360,27 @@ static void dsp_dma_run(DSPDMAState *s)
             /* P-space targets have no span: every word still goes
              * through mem_write, which invalidates JIT blocks. */
             uint32_t *span = dma_span(s, mem_space, mem_address, count);
-            if (item_size == 2) {
+            if (item_size == 4 && span) {
+                const uint32_t *restrict src = (const uint32_t *)buf;
+                uint32_t *restrict dst = span;
+                for (int i = 0; i < count; i++) {
+                    dst[i] = src[i] & item_mask;
+                }
+            } else if (item_size == 2 && span) {
+                const uint16_t *restrict src = (const uint16_t *)buf;
+                uint32_t *restrict dst = span;
+                for (int i = 0; i < count; i++) {
+                    dst[i] = (uint32_t)src[i] << 8;
+                }
+            } else if (item_size == 2) {
                 for (int i = 0; i < count; i++) {
                     uint32_t v = *(uint16_t*)(buf + i*2) << 8;
-                    dma_mem_write(s, span, mem_space, mem_address, i, v);
+                    s->mem_write(s->mem_opaque, mem_space, mem_address + i, v);
                 }
             } else if (item_size == 4) {
                 for (int i = 0; i < count; i++) {
                     uint32_t v = (*(uint32_t*)(buf + i*4)) & item_mask;
-                    dma_mem_write(s, span, mem_space, mem_address, i, v);
+                    s->mem_write(s->mem_opaque, mem_space, mem_address + i, v);
                 }
             } else if (count > 0) {
                 assert(!"Invalid dsp dma item size");
