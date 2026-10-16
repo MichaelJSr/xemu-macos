@@ -683,6 +683,29 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   Mcycles (6/6) against this form (−6.7% Minsns against its parent), but
   they widen the re-arm race from one store to the rest of the segment,
   so they are not shipped.
+  **2026-10-16:** accesses with an alignment requirement share too, and
+  the 16-byte ones (qemu_ld2/st2) take part in the plan; until then
+  every `movaps`/`mulps` m128 operand walked the TLB (64.5K walks per
+  heavy-f1 frame, 57.7K on stream-e2). The share check rotates the page
+  offset right by the alignment bits (EXTR) and compares against the
+  bound shifted the same way, so a misaligned address becomes huge and
+  takes the slow path, whose re-walk checks the alignment and leaves the
+  #GP to the helper (tested: `movaps xmm1, [eax+1]` sharing the walk of
+  `movaps xmm0, [eax]` faults at the second insn). A 16-byte SSE load
+  now goes through a new `qemu_ld_v128` op (one LDR Q into a vector
+  temp, then one STR Q to env) instead of an LDP and two 8-byte stores
+  that the consumer's 16-byte reload could not forward from; the
+  optimizer's env-copy tracking hands the temp straight to the inline
+  `mulps`/`addps`, `movaps xmm, m128` loads straight into the register,
+  and vector env copies are dropped at guest accesses (vector temps
+  never live in call-saved registers, so carrying one across meant a
+  spill and a reload). The matrix multiply's `movaps` is 6 host insns
+  (add, ror, cmp, b.hi, ldr q, str q) where it was 14. Cross-binary det
+  A/B against the x87-compare commit: heavy-f1 6 pairs at load 15-18,
+  Minsns/frame −0.59% (6/6), Mcycles/frame −2.0% (4/6; a 4-pair run
+  read −0.63% and −3.6%, 4/4); stream-e2 4 pairs, −0.34% (4/4) and
+  +0.5% (1/4). The two halves alone: shared aligned walks −0.22%
+  Minsns (4/4), with the LDR Q path −0.39..−0.46%.
 - **MMX entry inline, once per TB (2026-10-15).** `helper_enter_mmx`
   (fpstt = 0, every tag valid) ran before every MMX insn. Marked
   `TCG_CALL_NO_RW_PINNED`, the call still made TCG store and reload the

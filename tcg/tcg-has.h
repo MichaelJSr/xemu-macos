@@ -63,6 +63,9 @@
 #ifndef TCG_TARGET_HAS_movcond_f64
 #define TCG_TARGET_HAS_movcond_f64      0
 #endif
+#ifndef TCG_TARGET_HAS_qemu_ld_v128
+#define TCG_TARGET_HAS_qemu_ld_v128     0
+#endif
 #ifndef TCG_TARGET_HAS_st_f64
 #define TCG_TARGET_HAS_st_f64           0
 #endif

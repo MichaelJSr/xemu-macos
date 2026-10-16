@@ -769,6 +769,60 @@ void tcg_gen_qemu_ld_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
     tcg_gen_qemu_ld_i128_int(val, addr, idx, memop);
 }
 
+/*
+ * xemu: a 16-byte guest load stored to env + env_ofs, as
+ * tcg_gen_qemu_ld_i128 then tcg_gen_st_i128 would. Where the backend has
+ * qemu_ld_v128 (aarch64: one LDR Q), the data goes through a V128 temp
+ * and one 16-byte store, so a later 16-byte load of the slot either uses
+ * the temp (the optimizer's env copy tracking) or forwards from one store
+ * instead of two 8-byte ones. Env is written only once the whole guest
+ * load has succeeded.
+ */
+void tcg_gen_qemu_ld_env_i128_chk(intptr_t env_ofs, TCGTemp *addr,
+                                  TCGArg idx, MemOp memop, TCGType addr_type)
+{
+    MemOp m = memop;
+
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert((memop & MO_SIZE) == MO_128);
+    tcg_debug_assert((memop & MO_SIGN) == 0);
+    if (!(tcg_ctx->gen_tb->cflags & CF_PARALLEL)) {
+        m = (m & ~MO_ATOM_MASK) | MO_ATOM_NONE;
+    }
+    if (TCG_TARGET_HAS_qemu_ld_v128 && TCG_TARGET_REG_BITS == 64 &&
+        (m & MO_BSWAP) == MO_LE &&
+        ((m & MO_ATOM_MASK) == MO_ATOM_NONE ||
+         (m & MO_ATOM_MASK) == MO_ATOM_IFALIGN_PAIR) &&
+#ifdef CONFIG_PLUGIN
+        tcg_ctx->plugin_insn == NULL &&
+#endif
+        !(env_ofs & 15)) {
+        TCGv_vec v = tcg_temp_new_vec(TCG_TYPE_V128);
+        TCGTemp *addr_new;
+        TCGOp *op;
+
+        check_max_alignment(memop_alignment_bits(memop));
+        tcg_gen_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+        addr_new = tci_extend_addr(addr);
+#if defined(XBOX)
+        gen_ldst_prologue();
+#endif
+        op = tcg_gen_op3(INDEX_op_qemu_ld_v128, TCG_TYPE_V128,
+                         tcgv_vec_arg(v), temp_arg(addr_new),
+                         make_memop_idx(m, idx));
+        TCGOP_FLAGS(op) = MO_128;
+        maybe_free_addr(addr, addr_new);
+        /* Not freed: a later load of the slot may use v (env copies). */
+        tcg_gen_st_vec(v, tcg_env, env_ofs);
+    } else {
+        TCGv_i128 t = tcg_temp_ebb_new_i128();
+
+        tcg_gen_qemu_ld_i128_int(t, addr, idx, memop);
+        tcg_gen_st_i128(t, tcg_env, env_ofs);
+        tcg_temp_free_i128(t);
+    }
+}
+
 static void tcg_gen_qemu_st_i128_int(TCGv_i128 val, TCGTemp *addr,
                                      TCGArg idx, MemOp memop)
 {

@@ -84,6 +84,8 @@
 #define TCG_TARGET_HAS_rint_f64         TCG_TARGET_HAS_fpu
 /* CMP or TST, FCSEL Dd, Dn, Dm, cond */
 #define TCG_TARGET_HAS_movcond_f64      TCG_TARGET_HAS_fpu
+/* LDR Qt from the guest */
+#define TCG_TARGET_HAS_qemu_ld_v128     1
 
 /*
  * tcg_pin_env_global: x8-x15 and x24-x27, call-clobbered and call-saved

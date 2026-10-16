@@ -2845,6 +2845,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_rint_f64;
     case INDEX_op_movcond_f64:
         return TCG_TARGET_HAS_movcond_f64;
+    case INDEX_op_qemu_ld_v128:
+        return TCG_TARGET_HAS_qemu_ld_v128 && type == TCG_TYPE_V128;
 
     default:
         if (op < INDEX_op_last_generic) {
@@ -7535,7 +7537,8 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
         /* st_f64_slow belongs to the guest access right after it. */
         if (unlikely(s->nb_slow_st) && opc != INDEX_op_st_f64_slow &&
             opc != INDEX_op_qemu_ld && opc != INDEX_op_qemu_st &&
-            opc != INDEX_op_qemu_ld2 && opc != INDEX_op_qemu_st2) {
+            opc != INDEX_op_qemu_ld2 && opc != INDEX_op_qemu_st2 &&
+            opc != INDEX_op_qemu_ld_v128) {
             tcg_out_slow_st_now(s);
         }
 

@@ -239,6 +239,8 @@ static bool sse_needs_alignment(DisasContext *s, X86DecodedInsn *decode, MemOp o
     }
 }
 
+static void gen_MOVDQ(DisasContext *s, X86DecodedInsn *decode);
+
 static void gen_load(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv v)
 {
     X86DecodedOp *op = &decode->op[opn];
@@ -303,6 +305,20 @@ static void gen_load(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv v)
 
     case X86_OP_SSE:
         compute_xmm_offset(op);
+#if defined(XBOX)
+        /*
+         * A 16-byte load into an XMM register (movaps/movdqa xmm, m128)
+         * goes straight to the register, not through xmm_t0 and a copy:
+         * gen_MOVDQ's move is then to itself. The load writes env only
+         * once it has succeeded, so a fault leaves the register as it was.
+         */
+        if (op->has_ea && opn == 2 && op->ot == MO_128 &&
+            decode->e.gen == gen_MOVDQ &&
+            decode->op[0].unit == X86_OP_SSE && !decode->op[0].has_ea &&
+            decode->op[0].ot == MO_128) {
+            op->offset = decode->op[0].offset;
+        }
+#endif
     load_vector:
         if (op->has_ea) {
             bool aligned = sse_needs_alignment(s, decode, op->ot);

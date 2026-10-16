@@ -5444,11 +5444,9 @@ static inline void gen_ldo_env_A0(DisasContext *s, int offset, bool align)
     MemOp atom = (s->cpuid_ext_features & CPUID_EXT_AVX
                   ? MO_ATOM_IFALIGN : MO_ATOM_IFALIGN_PAIR);
     MemOp mop = MO_128 | MO_LE | atom | (align ? MO_ALIGN_16 : 0);
-    int mem_index = s->mem_index;
-    TCGv_i128 t = tcg_temp_new_i128();
 
-    tcg_gen_qemu_ld_i128(t, s->A0, mem_index, mop);
-    tcg_gen_st_i128(t, tcg_env, offset);
+    /* One 16-byte store where the backend can, so a reload forwards. */
+    tcg_gen_qemu_ld_env_i128(offset, s->A0, s->mem_index, mop);
 }
 
 static inline void gen_sto_env_A0(DisasContext *s, int offset, bool align)

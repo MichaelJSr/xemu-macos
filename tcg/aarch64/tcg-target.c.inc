@@ -1541,9 +1541,12 @@ static void tcg_out_call_int(TCGContext *s, const tcg_insn_unit *target)
  * paths: every label, call, TB exit and the TB start forget both slots
  * at translation time, and every slow path sets the ntags to 1 << 32,
  * which no zero-extended address matches (and points x7 at env, so the
- * store check's loads stay harmless). Accesses with an alignment
- * requirement never share. CONFIG_DEBUG_TCG builds walk the TLB behind
- * every shared access and abort if it disagrees.
+ * store check's loads stay harmless). An access with an alignment
+ * requirement rotates its page offset right by the alignment bits before
+ * the bound check, so a misaligned address becomes huge and takes the
+ * slow path, which re-walks with the alignment bits and lets the helper
+ * fault. CONFIG_DEBUG_TCG builds walk the TLB behind every shared access
+ * and abort if it disagrees.
  *
  * tcg_tlbm_plan decides at translation time, tracking each address as
  * (root value, constant offset) through mov/add/sub: an access shares
@@ -1594,7 +1597,6 @@ typedef struct {
     int8_t slot;        /* 0: loads, 1: stores */
     int8_t mmu;
     uint8_t size;
-    bool aligned;       /* needs an alignment check: cannot share */
 } TLBMAccess;
 
 static void tlbm_val(int *vroot, uint32_t *voff, int *next, TCGArg a,
@@ -1628,7 +1630,7 @@ static void tlbm_def(int *vroot, uint32_t *voff, TCGArg a, int r, uint32_t o)
 static bool tlbm_hits(const TLBMAccess *f, const TLBMAccess *x)
 {
     if (f->seg != x->seg || f->slot != x->slot || f->mmu != x->mmu
-        || f->root != x->root || x->aligned) {
+        || f->root != x->root) {
         return false;
     }
     if (x->root == -1) {
@@ -1666,7 +1668,9 @@ static void tcg_tlbm_plan(TCGContext *s)
         return;
     }
     QTAILQ_FOREACH(op, &s->ops, link) {
-        n += op->opc == INDEX_op_qemu_ld || op->opc == INDEX_op_qemu_st;
+        n += op->opc == INDEX_op_qemu_ld || op->opc == INDEX_op_qemu_st ||
+             op->opc == INDEX_op_qemu_ld2 || op->opc == INDEX_op_qemu_st2 ||
+             op->opc == INDEX_op_qemu_ld_v128;
     }
     if (!n) {
         return;
@@ -1724,20 +1728,27 @@ static void tcg_tlbm_plan(TCGContext *s)
             tlbm_def(vroot, voff, op->args[0], r, o);
             break;
         case INDEX_op_qemu_ld:
-        case INDEX_op_qemu_st: {
-            bool is_st = opc == INDEX_op_qemu_st;
-            MemOpIdx oi = op->args[2];
+        case INDEX_op_qemu_st:
+        case INDEX_op_qemu_ld2:
+        case INDEX_op_qemu_st2:
+        case INDEX_op_qemu_ld_v128: {
+            /* One data register, or two (the i128 accesses) */
+            int nd = opc == INDEX_op_qemu_ld2 || opc == INDEX_op_qemu_st2
+                     ? 2 : 1;
+            bool is_st = opc == INDEX_op_qemu_st || opc == INDEX_op_qemu_st2;
+            MemOpIdx oi = op->args[nd + 1];
             MemOp mop = get_memop(oi);
             TLBMAccess *x = &acc[k++];
 
-            tlbm_val(vroot, voff, &next, op->args[1], &x->root, &x->off);
+            tlbm_val(vroot, voff, &next, op->args[nd], &x->root, &x->off);
             x->seg = seg;
             x->slot = is_st;
             x->mmu = get_mmuidx(oi);
             x->size = 1u << (mop & MO_SIZE);
-            x->aligned = memop_alignment_bits(mop) != 0;
             if (!is_st) {
-                tlbm_def(vroot, voff, op->args[0], next++, 0);
+                for (int i = 0; i < nd; i++) {
+                    tlbm_def(vroot, voff, op->args[i], next++, 0);
+                }
             }
             break;
         }
@@ -2238,11 +2249,17 @@ static G_NORETURN void tlbm_lost(uint64_t addr)
  * Leaves the addend in TMP1.
  */
 static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
-                           bool is_ld)
+                           bool is_ld, unsigned a_mask)
 {
-    tcg_insn_unit *bad[2], *ok;
+    tcg_insn_unit *bad[3], *ok;
     int nbad = 0;
 
+    if (a_mask) {
+        /* The share check let no misaligned address through. */
+        tcg_out_logicali(s, I3404_ANDSI, 0, TCG_REG_XZR, addr_reg, a_mask);
+        bad[nbad++] = s->code_ptr;
+        tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+    }
     if (!is_ld) {
         /* cmn w_tmp2, w_ntag: the share check's CCMN saw addr_write == page */
         tcg_out_insn(s, 3502, ADDS, TCG_TYPE_I32, TCG_REG_XZR,
@@ -2279,9 +2296,13 @@ static void tlbm_out_check(TCGContext *s, TCGReg addr_reg, MemOpIdx oi,
 }
 #endif
 
+static unsigned tlbm_a_mask(TCGContext *s, MemOpIdx oi);
+
 /*
  * Slow-path entry. After a shared access's memo check failed, walk the
- * TLB here, refilling the slot, and go back to the access on a hit.
+ * TLB here, refilling the slot, and go back to the access on a hit. The
+ * walk checks the access's alignment too, so a misaligned address that
+ * the memo check sent here goes on to the helper, which faults.
  */
 static bool tlbm_out_slow_entry(TCGContext *s, TCGLabelQemuLdst *lb)
 {
@@ -2293,8 +2314,8 @@ static bool tlbm_out_slow_entry(TCGContext *s, TCGLabelQemuLdst *lb)
     if (!lb->memo_shared) {
         return true;
     }
-    tcg_out_tlb_walk(s, lb->addr_reg, lb->oi, lb->is_ld, 0,
-                     lb->memo_slot - 1);
+    tcg_out_tlb_walk(s, lb->addr_reg, lb->oi, lb->is_ld,
+                     tlbm_a_mask(s, lb->oi), lb->memo_slot - 1);
     hit = s->code_ptr;
     tcg_out_insn(s, 3202, B_C, TCG_COND_EQ, 0);
     return reloc_pc19(hit, lb->memo_access);
@@ -2550,6 +2571,20 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     return true;
 }
 
+static TCGAtomAlign aa64_atom_and_align(TCGContext *s, MemOp opc)
+{
+    return atom_and_align_for_opc(s, opc,
+                                  have_lse2 ? MO_ATOM_WITHIN16
+                                            : MO_ATOM_IFALIGN,
+                                  (opc & MO_SIZE) == MO_128);
+}
+
+/* The alignment bits prepare_host_addr checks for @oi. */
+static unsigned tlbm_a_mask(TCGContext *s, MemOpIdx oi)
+{
+    return (1 << aa64_atom_and_align(s, get_memop(oi)).align) - 1;
+}
+
 /*
  * For system-mode, perform the TLB load and compare.
  * For user-mode, perform any required alignment tests.
@@ -2566,10 +2601,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     MemOp s_bits = opc & MO_SIZE;
     unsigned a_mask;
 
-    h->aa = atom_and_align_for_opc(s, opc,
-                                   have_lse2 ? MO_ATOM_WITHIN16
-                                             : MO_ATOM_IFALIGN,
-                                   s_bits == MO_128);
+    h->aa = aa64_atom_and_align(s, opc);
     a_mask = (1 << h->aa.align) - 1;
 
     if (tcg_use_softmmu) {
@@ -2585,14 +2617,26 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         ldst_take_slow_st(s, ldst);
         ldst->memo_slot = slot + 1;
 
-        if (hint == TLBM_SHARE && s->tlbm_mmu[slot] == mmu && a_mask == 0) {
-            /* TMP0 <= bound: both ends on the memo's page. */
+        if (hint == TLBM_SHARE && s->tlbm_mmu[slot] == mmu) {
+            /*
+             * TMP0 <= bound: both ends on the memo's page. With an
+             * alignment requirement, rotate the offset right by its bits
+             * first: aligned, that divides it exactly; misaligned, the
+             * low bits land on top and fail the (divided) bound.
+             */
+            unsigned a_bits = h->aa.align;
+            unsigned bound = (TARGET_PAGE_SIZE - 1 - s_mask) >> a_bits;
+
             tcg_out_insn(s, 3501, ADD, TCG_TYPE_I64, TCG_REG_TMP0,
                          TLBM_NTAG(slot), addr_reg, MO_32, 0);
+            if (a_bits) {
+                tcg_out_extr(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0,
+                             TCG_REG_TMP0, a_bits);
+            }
             ldst->memo_shared = true;
             if (is_ld) {
                 tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_GTU, TCG_REG_TMP0,
-                            TARGET_PAGE_SIZE - 1 - s_mask, true);
+                            bound, true);
                 ldst->label_ptr[0] = s->code_ptr;
                 tcg_out_insn(s, 3202, B_C, TCG_COND_GTU, 0);
             } else {
@@ -2602,7 +2646,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
                 tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP1, TLBM_ENT,
                            offsetof(CPUTLBEntry, addend));
                 tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_GTU, TCG_REG_TMP0,
-                            TARGET_PAGE_SIZE - 1 - s_mask, true);
+                            bound, true);
                 /* ccmn w_tmp2, w_ntag, #0, ls: Z = in range && == page */
                 tcg_out32(s, 0x3a400000 | TLBM_NTAG(slot) << 16
                           | COND_LS << 12 | TCG_REG_TMP2 << 5);
@@ -2610,7 +2654,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
                 tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
             }
 #ifdef CONFIG_DEBUG_TCG
-            tlbm_out_check(s, addr_reg, oi, is_ld);
+            tlbm_out_check(s, addr_reg, oi, is_ld, a_mask);
 #endif
         } else {
             tcg_out_tlb_walk(s, addr_reg, oi, is_ld, a_mask, slot);
@@ -2770,7 +2814,11 @@ static void tcg_out_qemu_ldst_i128(TCGContext *s, TCGReg datalo, TCGReg datahi,
     TCGReg base;
     bool use_pair;
 
-    ldst = prepare_host_addr(s, &h, addr_reg, oi, is_ld, false);
+    ldst = prepare_host_addr(s, &h, addr_reg, oi, is_ld, true);
+    if (ldst) {
+        /* A shared check's slow-path walk comes back here on a hit. */
+        ldst->memo_access = tcg_splitwx_to_rx(s->code_ptr);
+    }
 
     /* Compose the final address, as LDP/STP have no indexing. */
     if (h.index == TCG_REG_XZR) {
@@ -2885,6 +2933,56 @@ static const TCGOutOpQemuLdSt2 outop_qemu_st2 = {
     .base.static_constraint = C_O0_I3(rz, rz, r),
     .out = tgen_qemu_st2,
 };
+
+/*
+ * qemu_ld_v128's slow path: the 16-byte helper returns the data in x0:x1,
+ * which go to the output vector register.
+ */
+static bool tcg_out_qemu_ld_v128_slow(TCGContext *s, TCGLabelQemuLdst *lb)
+{
+    TCGReg v = lb->datalo_reg;
+
+    if (!tlbm_out_slow_entry(s, lb)) {
+        return false;
+    }
+    tcg_out_slow_st(s, lb->slow_st, lb->nb_slow_st);
+    tcg_out_pinned_slow_store(s);
+    tcg_out_ld_helper_args(s, lb, &ldst_helper_param);
+    tcg_out_call_int(s, qemu_ld_helpers[MO_128]);
+    tcg_out_pinned_slow_reload(s);
+    tlbm_out_invalidate(s);
+    /* fmov dv, x0; ins v.d[1], x1 */
+    tcg_out32(s, INSN_FMOV_DX | ((v - 32) & 0x1f) | TCG_REG_X0 << 5);
+    tcg_out_insn(s, 3605, INS, 0, v, TCG_REG_X1, 24, 0);
+    tcg_out_goto(s, lb->raddr);
+    return true;
+}
+
+/*
+ * A 16-byte guest load into a vector register: one LDR Q, where qemu_ld2
+ * takes an LDP into two GPRs (and the caller two 8-byte stores to env,
+ * which a later 16-byte load of the slot cannot forward from). Only for
+ * the atomicity LDR Q gives (none, or each 8-byte half:
+ * tcg_gen_qemu_ld_env_i128_chk).
+ */
+static void tcg_out_qemu_ld_v128(TCGContext *s, TCGReg data, TCGReg addr_reg,
+                                 MemOpIdx oi)
+{
+    TCGLabelQemuLdst *ldst;
+    HostAddress h;
+
+    ldst = prepare_host_addr(s, &h, addr_reg, oi, true, true);
+    if (ldst) {
+        ldst->memo_access = tcg_splitwx_to_rx(s->code_ptr);
+    }
+    tcg_out_ldst_r(s, I3312_LDRVQ, data, h.base, h.index_ext, h.index);
+    if (ldst) {
+        ldst->type = TCG_TYPE_V128;
+        ldst->datalo_reg = data;
+        ldst->out_stub = tcg_out_qemu_ld_v128_slow;
+        ldst->raddr = tcg_splitwx_to_rx(s->code_ptr);
+    }
+}
 
 static const tcg_insn_unit *tb_ret_addr;
 
@@ -4296,6 +4394,10 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
 
     dp = false;
     switch (opc) {
+    case INDEX_op_qemu_ld_v128:
+        tcg_out_qemu_ld_v128(s, a0, a1, a2);
+        break;
+
     case INDEX_op_add_zext_shl:
         /* add a0, a1, w(a2), uxtw #a3 */
         tcg_out_insn(s, 3501, ADD, TCG_TYPE_I64, a0, a1, a2, MO_32, args[3]);
@@ -4987,6 +5089,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
 
     case INDEX_op_add_zext_shl:
         return C_O1_I2(r, r, r);
+    case INDEX_op_qemu_ld_v128:
+        return C_O1_I1(w, r);
 
     /* Scalar floating-point ops */
     case INDEX_op_flcr:

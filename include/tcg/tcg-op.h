@@ -114,6 +114,12 @@ tcg_gen_qemu_st_i128(TCGv_i128 v, TCGv a, TCGArg i, MemOp m)
     tcg_gen_qemu_st_i128_chk(v, tcgv_tl_temp(a), i, m, TCG_TYPE_TL);
 }
 
+static inline void
+tcg_gen_qemu_ld_env_i128(intptr_t ofs, TCGv a, TCGArg i, MemOp m)
+{
+    tcg_gen_qemu_ld_env_i128_chk(ofs, tcgv_tl_temp(a), i, m, TCG_TYPE_TL);
+}
+
 #define DEF_ATOMIC2(N, S)                                               \
     static inline void N##_##S(TCGv_##S r, TCGv a, TCGv_##S v,          \
                                TCGArg i, MemOp m)                       \
