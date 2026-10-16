@@ -697,6 +697,19 @@ void icount_notify_exit(void)
 
     if (current_cpu) {
         qemu_cpu_kick(current_cpu);
+#ifdef XBOX
+        /*
+         * xemu: this runs for every bottom half the vCPU schedules (a disk
+         * request schedules two). Outside record/replay no event loop waits
+         * on QEMU_CLOCK_VIRTUAL under icount (qemu_clock_use_for_deadline),
+         * so notifying its lists only wrote the AioContexts' notifier pipes
+         * and woke the main loop, as in qemu_clock_notify_expired; the main
+         * loop's own list would only kick this vCPU again.
+         */
+        if (replay_mode == REPLAY_MODE_NONE) {
+            return;
+        }
+#endif
         qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
     }
 }
