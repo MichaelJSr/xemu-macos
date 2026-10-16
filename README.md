@@ -463,6 +463,16 @@ Other automation interfaces (windowed or headless):
   region, each what `m` would answer: the bytes in hex, the readable
   prefix when the region runs into an unmapped page, or `E14` when none
   of it is readable. A malformed request gets `E22`.
+- **gdbstub watchpoints**: `Z2` (write), `Z3` (read) and `Z4` (access)
+  stop the VM after the access, as on hardware, in normal and
+  deterministic mode, with QMP answering throughout. Under icount a run
+  with a watchpoint ends with the same RAM as one without. Each stop
+  retranslates the block that hit. A hit on the frame the CPU pushes for
+  an interrupt or exception (a watched stack slot) stops at the handler's
+  first instruction, after the whole frame. A QMP resume (`cont`,
+  `xemu-frame-advance`, which returns `debug-stop: true` at each hit)
+  runs to the next hit as `c` does. (Before this fix the first hit wedged
+  the vCPU thread, and QMP and the gdbstub went silent.)
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

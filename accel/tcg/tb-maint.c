@@ -1608,6 +1608,13 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
         xemu_inv_cur_src = XEMU_INV_SRC_SINGLE;
     }
 #endif
+    /*
+     * The only caller is tb_check_watchpoint, from a load/store helper:
+     * the thread is in execute mode and the TB lives in the code buffer.
+     * Without the bracket the first write (tb->jmp_lock) faulted forever,
+     * which was the Z2/Z3/Z4 "livelock" on Apple Silicon.
+     */
+    qemu_thread_jit_write();
     if (page_addr == -1 && tb_page_addr0(tb) != -1) {
         tb_lock_pages(tb);
         do_tb_phys_invalidate(tb, true);
@@ -1615,6 +1622,7 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
     } else {
         do_tb_phys_invalidate(tb, false);
     }
+    qemu_thread_jit_execute();
 }
 
 /*

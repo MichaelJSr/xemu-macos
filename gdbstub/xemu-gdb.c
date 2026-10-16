@@ -28,6 +28,7 @@
 #include "qemu/ctype.h"
 #include "qemu/cutils.h"
 #include "exec/cpu-common.h"
+#include "exec/cpu-interrupt.h"
 #include "exec/gdbstub.h"
 #include "exec/replay-core.h"
 #include "exec/target_page.h"
@@ -81,6 +82,39 @@ void xemu_gdb_stepover_cancel(CPUState *cpu)
     }
 }
 
+/* A debug stop came since the last resume: any watchpoint hit is spent. */
+static bool debug_stopped;
+
+/*
+ * A watchpoint hit leaves cpu->watchpoint_hit set and, from the access's
+ * rerun, CPU_INTERRUPT_DEBUG pending until its debug stop; nothing clears
+ * either after that stop but the stub's stop reply (watchpoint_hit only),
+ * which goes only to a pending c, s or vCont. So a stop that a QMP resume
+ * (cont, xemu-frame-advance) ran into kept watchpoint_hit, and
+ * cpu_check_watchpoint() then took every later access to a watched page
+ * for the rerun of that hit: a debug stop at an unrelated access or, under
+ * icount, a fatal "Raised interrupt while not in I/O function". And a hit
+ * in an insn that a single-step ends (s, the step-over) stops the VM by the
+ * step's own debug exception, leaving the interrupt to stop the next
+ * resume before it ran an insn. The resume after a debug stop drops both.
+ * (The rerun follows its hit at once, CF_NOIRQ, so no stop falls between
+ * them; another stop between a hit in an interrupt delivery and its debug
+ * stop keeps the hit, which then stops the VM as it resumes.)
+ */
+static void drop_spent_watchpoint_hit(CPUState *cpu)
+{
+    CPUWatchpoint *wp;
+
+    cpu_reset_interrupt(cpu, CPU_INTERRUPT_DEBUG);
+    if (!cpu->watchpoint_hit) {
+        return;
+    }
+    cpu->watchpoint_hit = NULL;
+    QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
+        wp->flags &= ~BP_WATCHPOINT_HIT;
+    }
+}
+
 /*
  * Every resume, whoever asks for it (c, vCont;c, QMP cont or
  * xemu-frame-advance): a vCPU halted on one of the client's breakpoints
@@ -97,7 +131,16 @@ static void xemu_gdb_vm_state_change(void *opaque, bool running,
         CPU_FOREACH(cpu) {
             xemu_gdb_stepover_cancel(cpu);
         }
+        if (state == RUN_STATE_DEBUG) {
+            debug_stopped = true;
+        }
         return;
+    }
+    if (debug_stopped) {
+        debug_stopped = false;
+        CPU_FOREACH(cpu) {
+            drop_spent_watchpoint_hit(cpu);
+        }
     }
     if (!stepover_on || replay_mode != REPLAY_MODE_NONE || !tcg_enabled()) {
         return;

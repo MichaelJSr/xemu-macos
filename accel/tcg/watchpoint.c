@@ -64,6 +64,14 @@ int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len)
     return ret;
 }
 
+#ifdef XBOX
+bool cpu_watchpoint_hit_reruns(CPUState *cpu, uintptr_t ra)
+{
+    /* No TB holds an access at ra 0; outside one, can_do_io is set. */
+    return ra || !cpu->neg.can_do_io;
+}
+#endif
+
 /* Generate a debug exception if a watchpoint has been hit.  */
 void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
                           MemTxAttrs attrs, int flags, uintptr_t ra)
@@ -76,10 +84,10 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
          * We re-entered the check after replacing the TB.
          * Now raise the debug interrupt so that it will
          * trigger after the current instruction.
+         * xemu: or a later access of the delivery below, under the BQL.
          */
-        bql_lock();
+        BQL_LOCK_GUARD();
         cpu_interrupt(cpu, CPU_INTERRUPT_DEBUG);
-        bql_unlock();
         return;
     }
 
@@ -123,6 +131,23 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
                 continue;
             }
             cpu->watchpoint_hit = wp;
+
+#ifdef XBOX
+            /*
+             * xemu: the CPU's own interrupt or exception delivery pushing
+             * its frame has no insn to rerun: the rerun would drop the
+             * delivery, and with it an interrupt the PIC has already
+             * acknowledged, whose ISR bit then blocks every interrupt at or
+             * below it for good. Let the delivery finish; the VM stops at
+             * the handler's first insn. (The BQL is held there already.)
+             */
+            if (!cpu_watchpoint_hit_reruns(cpu, ra) &&
+                !(wp->flags & BP_STOP_BEFORE_ACCESS)) {
+                BQL_LOCK_GUARD();
+                cpu_interrupt(cpu, CPU_INTERRUPT_DEBUG);
+                return;
+            }
+#endif
 
             /* This call also restores vCPU state */
             tb_check_watchpoint(cpu, ra);

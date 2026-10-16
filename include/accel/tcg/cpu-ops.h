@@ -322,6 +322,16 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
  */
 int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len);
 
+#ifdef XBOX
+/*
+ * xemu: whether cpu_check_watchpoint() makes a hit at @ra leave before the
+ * access and rerun its insn alone. Not with @ra 0 outside translated code
+ * (can_do_io): the CPU's own interrupt or exception delivery, whose access
+ * goes ahead, and the VM stops after the delivery.
+ */
+bool cpu_watchpoint_hit_reruns(CPUState *cpu, uintptr_t ra);
+#endif
+
 /*
  * Common pointer_wrap implementations.
  */
