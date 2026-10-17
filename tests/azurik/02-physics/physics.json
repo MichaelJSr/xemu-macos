@@ -1,6 +1,6 @@
 {
  "format": "fork-pack-02/1",
- "row_semantics": "row k: the player at the entry of 0x8CCC0 on the k-th player tick after the load (or, cold, after the arena is steady); a schedule's lines are sent while halted at row k's 0x8CCC0 (the pipe's keyboard pad on port 2): a press at row k reaches ControllerState at k+1 and moves the player at k+2",
+ "row_semantics": "row k: the player at the entry of 0x8CCC0 on the k-th player tick after the load (or, cold, after the arena is steady); a schedule's lines are sent while halted at row k's 0x8CCC0 (the pipe's keyboard pad on port 2), tagged @F+1, F the halt's query-xemu-frame frame (enemy-hits' and ledge-j14's expect are @F+1's): a press at row k reaches ControllerState at k+1 and moves the player at k+2",
  "buttons": "our harness's pad names: a b x y black white lstick_up lstick_down ...; map each to the fork's own keyboard-map scancode",
  "cases": [
   {
@@ -341,11 +341,11 @@
     "hp_first": 400,
     "hits": [
      [
-      186,
+      188,
       25
      ],
      [
-      421,
+      425,
       25
      ]
     ],
@@ -372,14 +372,32 @@
      ]
     ]
    },
-   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a76; captures/06-walk90_stand.json",
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a76; captures/06-walk90_stand.json; the fork's PROMPT-9 answer, part 02 (v0.15 @F+1)",
    "measured": [
     {
      "xemu": "0.13.3-37-gd5ad94f4bf",
      "mode": "normal (real time), keyboard pad on port 2",
      "sitting": "s6, 2026-10-11"
+    },
+    {
+     "xemu": "0.15 (binary e1869fccc44a)",
+     "mode": "-icount shift=2, null; the fork's hooks; schedule lines tagged @F+1",
+     "sitting": "the fork's PROMPT-9 run, 2026-10-17"
     }
-   ]
+   ],
+   "s6_expect": {
+    "hits": [
+     [
+      186,
+      25
+     ],
+     [
+      421,
+      25
+     ]
+    ]
+   },
+   "note": "expect is v0.15's under icount with the schedule tagged @F+1 (F: the halt's frame), the same in three processes. The hits follow input timing: @F+2 gives 187 and 361, our untagged gdbstub capture on the same build (J02) 175 and 348, and s6's 186 and 421 (s6_expect) came from real-time untagged input. The after-hit states are the same in all four."
   },
   {
    "id": "ledge-j14",
@@ -405,6 +423,44 @@
    },
    "takeoff_before_block_m": 4.39,
    "expect": {
+    "rise_m": 1.2578,
+    "states": [
+     [
+      16,
+      "0x2"
+     ],
+     [
+      38,
+      "0x3"
+     ],
+     [
+      40,
+      "0x0"
+     ],
+     [
+      41,
+      "0x100"
+     ],
+     [
+      46,
+      "0x0"
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j14.json; the fork's PROMPT-9 answer, part 02 (v0.15 @F+1)",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    },
+    {
+     "xemu": "0.15 (binary e1869fccc44a)",
+     "mode": "-icount shift=2, null; the fork's hooks; schedule lines tagged @F+1",
+     "sitting": "the fork's PROMPT-9 run, 2026-10-17"
+    }
+   ],
+   "s6_expect": {
     "rise_m": 0.0,
     "states": [
      [
@@ -417,14 +473,7 @@
      ]
     ]
    },
-   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j14.json",
-   "measured": [
-    {
-     "xemu": "0.13.3-37-gd5ad94f4bf",
-     "mode": "normal (real time), keyboard pad on port 2",
-     "sitting": "s6, 2026-10-11"
-    }
-   ]
+   "note": "expect is v0.15's under icount (@F+1, in two processes; @F+2 still ends on the ledge, each state row +1; J02's untagged capture gave the same rows): the jump ends on the ledge. s6's floor ending (s6_expect) was a real-time run: most likely real-time tick timing [inferred, the fork's], not the input, since moving the input one vblank (@F+2) leaves it on the ledge."
   },
   {
    "id": "ledge-j16",

@@ -11,6 +11,8 @@ release, or after CPU/JIT, x87, GPU or timing work. They are not part of the per
 | `02-physics` | 12 player-control cases: walk, roll, jump, swim, flaps and the shield drop, enemy hits, ledges, cold-boot jump | `physics_check.py`, `physics.json` | ~30 s for the 11 D98 cases in one process, plus ~17 s for cold-jump |
 | `03-heavy-scenes` | Four vanilla scenes from a plain load with pad input only: RAM at +300/+600, plus two hook checks | `scenes.json` | ~5-10 s per scene in bench-det |
 | `05-bink-movie` | `death.bik` in game (6,042 vblanks of Bink), then the d2 load | `movie.json` | ~40 s to F2 |
+| `04-level-tour` | All 22 levels of the game's debug menu, each warped to by recorded pad lines from one load: RAM at the first steady tick plus block-log totals | `tour.json`, `results-v0.15.json` (lines and oracle) | ~1-3 s per level |
+| `10-audio-e6-song` | e6's crystal song by recorded pad lines, under the voice log and the WAV | `song.json` (hook), `results-v0.15.json` (lines and oracle) | ~7 s |
 
 Each pack's `README.md` is the harness's own, copied unchanged, and holds the full recipe: hooks, addresses and
 start steps. In those READMEs, "we" and "our side" mean the Modkit harness. Its drivers (`ours/`,
@@ -37,7 +39,13 @@ export XEMU_TEST_CONFIG=$S/xemu.toml   # bench-det clones the HDD and EEPROM, mu
 
 The keyboard pad is on port 2, with the D98 map: A is 81, Y is 44.
 
-Packs 01, 02 and 05, and 03's checks, run over QMP. The repo has no driver for them yet. Use one xemu per
+**Packs 04 and 10 use another keyboard map.** Their lines were recorded in the Modkit's sandbox, whose
+scratch config binds xemu's 25 keyboard-pad inputs, in `config_spec.yml` order (`a b x y back guide start
+lstick_btn rstick_btn white black dpad_up dpad_down dpad_left dpad_right lstick_up lstick_left lstick_right
+lstick_down ltrigger rstick_up rstick_left rstick_right rstick_down rtrigger`), to scancodes 232-256. Replace
+the scratch config's `[input.keyboard_controller_scancode_map]` with that map, or nothing moves.
+
+Packs 01, 02, 04, 05 and 10, and 03's checks, run over QMP. The repo has no driver for them yet. Use one xemu per
 run, set up the way `bench-det.py`'s `scratch()` and `run_once()` do it: a per-run clone and config, a
 `scripts/xemu_lease.py` launch, `XEMU_HEADLESS=null`, `-S -icount shift=2,align=off,sleep=off`, then `stop`
 and HMP `loadvm <tag>` (the VM stays paused). After that, apply the pack's hooks with the main README's
@@ -75,9 +83,8 @@ On v0.15 it gives 19 PASS and 0 FAIL.
 - **Recipe:** per case, the README's run-until-row recipe, with the schedule lines tagged `@F+1`.
 - **Check:** `python3 -I 02-physics/physics_check.py check <case> records.json`.
 
-10 of the 12 cases pass. `enemy-hits` and `ledge-j14` fail against `physics.json`, which holds real-time
-numbers from sitting s6. Both v0.15 results repeated exactly in three processes, so they are the icount values
-to expect:
+All 12 cases pass. `physics.json` now expects v0.15's icount `@F+1` values for `enemy-hits` and `ledge-j14`
+(s6's real-time numbers stay as `s6_expect`). Both repeated exactly in three processes:
 - **`enemy-hits`:** hits `[[188, 25], [425, 25]]`, against s6's `[[186, 25], [421, 25]]`. After each hit:
   0x102 for 13 rows, then 0x2 for 6. It follows input timing: tagging the lines `@F+2` moves the hits to 187
   and 361. Always tag them `@F+1`.
@@ -137,6 +144,23 @@ windowed and offscreen, so windowed A/Bs can't show a speedup on them. `azurik-h
 windowed anchors. e7's `f600` is this pass's deterministic golden: it covers combat and is x87-sensitive. It
 takes about 7 s a process, with no disc I/O.
 
+### 04. level-tour
+
+Per level, in a fresh process: `vanilla-beach-shield5` (start `c637e9851b64`), `xemu-block-log-start`, the
+level's `lines` from `results-v0.15.json` as `@<base+N>`, then `xemu-frame-advance <frames>`. The RAM must
+start with the level's `ram12`, and the block log's rows and bytes per drive and op must equal its `block`
+(and `blockstats`). v0.15.1 matched all 22 levels in two processes each (44 of 44), all rows `ok`.
+
+### 10. audio-e6-song
+
+`vanilla-rz-e6-song` (start `d1925e02d35e`), `song.json`'s `hooks`, then `xemu-voice-log-start` and
+`xemu-audio-wav-start`, the 213 lines as `@<base+N>`, and `xemu-frame-advance 3202`. Expect, with the DSP JIT
+on or off:
+- **RAM:** `3e23917e16ee` (the song solved).
+- **WAV:** `14bf0e233fe9`, 2,531,328 samples.
+- **Voice log:** 395 rows (start 129, resume 129, stop 123 of which 72 `guest` and 51 `end`, pause 14), 47
+  distinct start `hz`. With the frame column counted from the load, its rows hash to `3e701e5179ff`.
+
 ### 05. bink-movie
 
 The recipe is the README's: `vanilla-beach-shield5` with `movie.json`'s hooks, then `xemu-run-until` 0x53750
@@ -154,7 +178,6 @@ twice, then advance to F2 + 900.
 
 | Pack | Why it isn't here | v0.15 headline |
 |---|---|---|
-| 04, 10 | They wait on recordings from the harness (jobs 04-a and 10-a). | - |
 | 06 europe-pal50 | It needs the Europe disc (bench-det picks Europe's VAs itself and `--route dpad_left,a` now moves on when no save preview appears). | PAL50 EEPROM: F = 25. Fixture EEPROM: F = 30. ~30.06 player ticks per guest second at 60 Hz. |
 | 09 grown-iso-io | It needs a local 2.8 GB ISO built by the Modkit. | +75,238,912 B of HDD writes, all in the logos phase. Repeatable block logs. |
 | 07 owner-recording | Local-only soak. | Sections 50 and 81 end on `3edb08f3c2ea` and `648e70df76c4` in two processes, with lines sent as `@<frame>`. |

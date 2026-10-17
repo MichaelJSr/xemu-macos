@@ -19,14 +19,14 @@ These numbers are the game's own physics, measured on the vanilla disc. A build 
 
 | File | Bytes | What it is |
 |---|---|---|
-| `physics.json` | 11,124 | 12 cases (8 rows): start, poke, tick count, input schedule, and the expected numbers with their source and builds |
+| `physics.json` | 12,759 | 12 cases (8 rows): start, poke, tick count, input schedule, and the expected numbers with their source and builds (`enemy-hits` and `ledge-j14`: v0.15's icount numbers, s6's beside them as `s6_expect`) |
 | `physics_check.py` | 7,314 | stdlib only. Prints the collect hook (`hook`), and turns the hook's records into rows and judges them against a case's numbers (`check CASE RECORDS.json`) |
 | `ours/j02_physics_v015.py` | 2,603 | Our measurement driver for v0.15 (job J02); it writes `v015-physics.json` here |
 | `v015-physics.json` | 4,341 | J02's v0.15 numbers and verdicts for all 12 cases (logged in our sitting x38-j01; `LOCAL/02-physics.md`) |
 
 ## The rows
 
-All rows are from D98 states on the vanilla USA disc, except the cold boot. They were measured in sitting s6 (2026-10-11, v0.13.3-37-gd5ad94f4bf, normal mode).
+All rows are from D98 states on the vanilla USA disc, except the cold boot. They were measured in sitting s6 (2026-10-11, v0.13.3-37-gd5ad94f4bf, normal mode), and all but two hold under icount. `enemy-hits` and `ledge-j14` expect the fork's v0.15 icount numbers, with the schedule tagged `@F+1` (the fork's PROMPT-9 answer, 2026-10-17).
 
 | Case | Start | Input (row: pipe line) | Control numbers |
 |---|---|---|---|
@@ -36,8 +36,8 @@ All rows are from D98 states on the vanilla USA disc, except the cold boot. They
 | `swim` | `vanilla-ocean` | 10 down lstick_up, 100 up | From row 12, v_h(n) = 10·(1 − 0.1^(n/30)) within 1.2e-6 over n = 1-90 (0.73881, 9.0, 9.9, 9.99 at n 1, 30, 60, 90). From row 102, ×0.926119 per tick. State 6 throughout. |
 | `beach-jump` | `vanilla-beach-shield5` | 40 down y, 46 up | With air power: takeoff row 42, v0 4.849742413, h 1.2, 29 airborne ticks, apex 1.1199 m. |
 | `beach-flaps` | `vanilla-beach-shield5` | Y tapped (2 rows) at 4, 12, …, 60, then 200, 208, 216 | 5 flaps at rows 14, 22, 30, 38, 46: vz 4.849742, 3.825263, 1.764722, 0.992530, 1.056628. Fuel 0.8, 0.6, 0.4, 0.2, 0.0. At row 46 the armor goes Level 3 → 1, Flaps 5 → 0: **the 5th flap drops the shield**. The later presses don't flap. 64 airborne ticks, landing at row 70. The next jump (row 202) is plain: v0 4.643274784, h 1.1, no flap. |
-| `enemy-hits` | `vanilla-enemy`, HP poked to 400 at row 0 | 1 down lstick_up, 90 up | A blaze sentinel hits twice: HP −25 at rows 186 and 421 (the hits of ticks 185 and 420). After each: state 0x102 for 13 rows, 2 for 6, then 0. |
-| `ledge-j14`, `-j16`, `-j28`, `-j30` | `vanilla-wall` | 5 down lstick_up, J down y, J+1 up y, 85 up lstick_up | A running jump at row 16 or 28 (3.69 and 0.89 m before the blocked spot) ends 1.2578 m up, on the ledge, with no other state (0 → 2 → 0). At row 14 or 30 (4.39 and 0.42 m) it ends on the floor; j30 passes through state 3 (slope). |
+| `enemy-hits` | `vanilla-enemy`, HP poked to 400 at row 0 | 1 down lstick_up, 90 up | A blaze sentinel hits twice: HP −25 at rows 188 and 425 (v0.15, icount, `@F+1`, in three processes). s6 had 186 and 421 from real-time untagged input. After each: state 0x102 for 13 rows, 2 for 6, then 0 (on every build). The hit rows follow input timing, not the CPU: one vblank later (`@F+2`) gives 187 and 361. |
+| `ledge-j14`, `-j16`, `-j28`, `-j30` | `vanilla-wall` | 5 down lstick_up, J down y, J+1 up y, 85 up lstick_up | A running jump at row 16 or 28 (3.69 and 0.89 m before the blocked spot) ends 1.2578 m up, on the ledge, with no other state (0 → 2 → 0). At row 14 (4.39 m), under icount, it ends on the ledge too: rise 1.2578 m, states 2 at 16, 3 at 38, 0 at 40, 0x100 at 41, 0 at 46 (v0.15, `@F+1` in two processes; `@F+2` moves each row by +1). s6's floor ending (0 → 2 → 0) was a real-time run; its cause is most likely real-time tick timing [inferred, the fork's], not the input: moving the input one vblank (`@F+2`) leaves it on the ledge. At row 30 (0.42 m) it ends on the floor and passes through state 3 (slope). |
 | `cold-jump` | power on, vanilla disc | The menu route, then one Y | v0 4.643274784, h 1.1, Δvz −0.326667, 28 airborne ticks, landed. `.text` 979,408 B, 0 bytes differ. |
 
 Each row's exact schedule, tick count and expected values are in `physics.json`.
@@ -79,7 +79,7 @@ If the fork's `key` takes no `[ ]` expression, resolve E = `[esp+4]` at row 0 an
    1. run-until `0x8CCC0` with `hits` = k minus the current row;
    2. at that halt, write the row's lines to `XEMU_INPUT_PIPE`: `down`/`up` with the scancode the fork's keyboard map gives the named pad input (`lstick_up`, `y`, `black`), for the keyboard pad on port 2.
 
-   A line written at the halt of row k reaches ControllerState at row k+1 and moves the player at row k+2, as in s6. To pin it to the next vblank whatever the pipe's read latency, tag it `@F+1`, where F is `query-xemu-frame`'s `frame` at the halt. That this equals the untagged arrival our harness used is [inferred].
+   A line written at the halt of row k reaches ControllerState at row k+1 and moves the player at row k+2, as in s6. Tag it `@F+1`, where F is `query-xemu-frame`'s `frame` at the halt: `physics.json`'s numbers are `@F+1`'s. It equals our untagged gdbstub capture (J02) in 11 of 12 cases, not in `enemy-hits` (J02: rows 175 and 348), whose hits follow input timing.
 6. Run on to the case's tick count. Pass the records the replies carry (`hooks.records`) to `physics_check.py check <case> records.json`.
 
 **The cold jump:** the fork's own cold boot to `levels/training_room`, by the route in the `cold-jump` case's `start`. Then the same hook, with Y down on the first row ≥ 4 in state 0 and up 6 rows later.
@@ -99,24 +99,12 @@ If the fork's `key` takes no `[ ]` expression, resolve E = `[esp+4]` at row 0 an
   - v0.14-36, offscreen deterministic (2.75b S1-01): roll 21 ticks, flat jumps 28 ticks, apex 1.024 m. Those are from that sitting's own starts.
   - v0.15: every case, by job J02 (below).
 - **The cold jump:** v0.13.3-37 (the region study's usa-na2 boot), v0.14-12 (X.24 §2, deterministic) and v0.14-36 (X.30 §3, deterministic, 27.4 s from the relaunch). All gave v0 4.643274784, 28 ticks. The region study's four Europe boots belong to pack 06.
-- **v0.15 (job J02, 2026-10-16 22:33-22:34, `v015-physics.json`):** the fixtures' v0.15 copy, null renderer, `-S -icount shift=2,align=off,sleep=off`, our gdbstub capture (`Sandbox.capture`); the first time the walk, swim, flap, hit and ledge rows ran under icount.
-  - **10 of 12 cases equal s6:** walk, roll, jump, swim (model error 1.14e-6), beach-jump, beach-flaps (all five flaps, the fuel steps and the shield drop at row 46), ledge-j16, ledge-j28, ledge-j30 and cold-jump (`.text` 979,408 B, 0 differ).
-  - **enemy-hits differs:** two hits of 25, but at rows 175 and 348 (s6: 186 and 421). The after-hit states are s6's (0x102 for 13 rows, 2 for 6).
-  - **ledge-j14 differs:** it ends on the ledge (rise 1.2578 m; states 2 at 16, 3 at 38, 0 at 40, 0x100 at 41, 0 at 46). s6 ended it on the floor (0 → 2 → 0).
-  - Both were measured once. A rerun was cut by the stop of the sitting, so whether icount (s6 ran in real time) or v0.15 moved them is open, and `physics.json` still holds s6's numbers. `physics_check.py check` fails those two cases on this build until that is settled.
+- **v0.15 (job J02, 2026-10-16 22:33-22:34, `v015-physics.json`):** the fixtures' v0.15 copy, null renderer, `-S -icount shift=2,align=off,sleep=off`, our gdbstub capture (`Sandbox.capture`), lines untagged; the first time the walk, swim, flap, hit and ledge rows ran under icount. 10 of 12 cases equal s6. `enemy-hits` hit at rows 175 and 348; `ledge-j14` ended on the ledge (the rows `physics.json` now expects).
+- **v0.15 (the fork, 2026-10-17, its PROMPT-9 answer part 02):** binary `e1869fccc44a`, all 12 cases by hooks, icount, null, schedule lines tagged `@F+1`; every case gave exactly its tick count of records. 10 of 12 equal s6, with J02's numbers (the swim's model error 1.1398707e-06; the cold jump's route: one START at the movie, one at the title, A to `levels/training_room`, three A for the welcome dialog). `enemy-hits`: rows 188 and 425, end RAM `75b7170edc8f` in three processes; `@F+2`: 187 and 361 (`389493182913`). `ledge-j14`: on the ledge, J02's states, `ff2d63cd224a` in two processes (one ran the cases in reverse); `@F+2`: on the ledge, each row +1 (`66b5a70573ae`). So `enemy-hits` follows input timing (s6's 186/421, J02's 175/348, the fork's 188/425), not a CPU or x87 change, and `ledge-j14` is stable under icount; s6's floor ending is most likely real-time tick timing [inferred, the fork's]. `physics.json` took the `@F+1` numbers for both (s6's stay as `s6_expect`).
 
 ## Report back on v0.15
 
-Run all 12 cases by hooks on v0.15, under icount, and send per case `physics_check.py check`'s JSON line (its `numbers`, `pass` and `bad`). The numbers to watch, against s6 (v0.13.3-37, real time) and J02 (v0.15, icount, ours):
-- walk: ramp 3.26691, 6.53610, 7.00009; stop 7.00009, 3.73227, 0.46353, 0 (both);
-- roll: 21 ticks from row 12, 3.37521 m (both);
-- jump and cold-jump: v0 4.643274784, 28 airborne ticks, Δvz −0.326667, apex 1.0235 m on the wall jump (both); for the cold jump also `.text` 979,408 B, 0 differ;
-- swim: v_h 0.73881, 9.0, 9.9, 9.99, the model's error (1.14e-6 on J02) and the ×0.926119 release (both);
-- beach-jump and beach-flaps: v0 4.849742413, 29 airborne ticks; the five flap vz, the fuel steps, the drop at row 46 and the plain jump after it (both);
-- enemy-hits: the hit rows (s6 186 and 421; J02 175 and 348) and the states after each;
-- ledge-j14 to -j30: each one's rise and state rows (J02 differs from s6 on j14 only).
-
-Two runs of enemy-hits and ledge-j14 in two processes would also say whether those two repeat on v0.15.
+Received 2026-10-17 (the fork's PROMPT-9 answer, part 02; above): all 12 cases pass against `physics.json` as it is now, and both changed cases repeat across processes. A later build reports per case `physics_check.py check`'s JSON line (its `numbers`, `pass` and `bad`), with the schedule tagged `@F+1`; `enemy-hits` moves with any change in input timing, so judge it by its tagging first.
 
 ## Sharing
 

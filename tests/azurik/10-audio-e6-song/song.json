@@ -1,0 +1,78 @@
+{
+ "pack": "10-audio-e6-song",
+ "disc": "the vanilla USA disc (sha256 6989c84e...84be)",
+ "tag": "vanilla-rz-e6-song",
+ "start12": "d1925e02d35e",
+ "pad": "the keyboard pad on port 2; scancodes are the D98 config's map",
+ "mode": "XEMU_HEADLESS=null, -S -icount shift=2,align=off,sleep=off",
+ "setup": "sitting r18f's placed set-up, as one write hook at the first player tick (0x8CCC0) after the load: the element levels E1 A1 F1 W1 (inventory [[[0x1BF63C]+0x2C]+0xE0] +0x04..+0x10, i32) and e6's four crystal latches (attributes input and update 1.0, node +0x10 all ones), standing in for the crystals hit in e2, e5 and e7. Without them a hit counts as a bad tone (index 5; measured for whirlwind, inferred for the rest) and the song never solves.",
+ "latches": {
+  "SongWhirlwind4_hit_latch": 762,
+  "SongFire1_hit_latch": 764,
+  "SongSmash2_hit_latch": 768,
+  "SongLightning3_hit_latch": 772
+ },
+ "graph_records": 3498,
+ "graph": "e6's main graph, graph 0 of gamedata/e6.xbr: [[[0x1BF63C]+0x2C]+0xDC]; its node vector at +0x24 (4 bytes a node); a node's attribute block at node+0x8",
+ "hooks": [
+  {
+   "pcs": [
+    576704
+   ],
+   "write": [
+    {
+     "addr": "[[[0x1bf63c]+0x2c]+0xe0]+0x4",
+     "size": 16
+    },
+    {
+     "addr": "[[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xbe8]+0x8]",
+     "size": 8
+    },
+    {
+     "addr": "[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xbe8]+0x10",
+     "size": 4
+    },
+    {
+     "addr": "[[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xbf0]+0x8]",
+     "size": 8
+    },
+    {
+     "addr": "[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xbf0]+0x10",
+     "size": 4
+    },
+    {
+     "addr": "[[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xc00]+0x8]",
+     "size": 8
+    },
+    {
+     "addr": "[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xc00]+0x10",
+     "size": 4
+    },
+    {
+     "addr": "[[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xc10]+0x8]",
+     "size": 8
+    },
+    {
+     "addr": "[[[[[0x1bf63c]+0x2c]+0xdc]+0x24]+0xc10]+0x10",
+     "size": 4
+    }
+   ],
+   "set": [
+    "010000000100000001000000010000000000803f0000803fffffffff0000803f0000803fffffffff0000803f0000803fffffffff0000803f0000803fffffffff"
+   ]
+  }
+ ],
+ "hooks_note": "pcs are decimal: 576704 = 0x8CCC0. The one entry is taken by the first hit; later hits find the queue empty and write nothing.",
+ "song_order": [
+  "smash",
+  "lightning",
+  "fire",
+  "whirlwind",
+  "lightning",
+  "smash",
+  "fire"
+ ],
+ "song_order_source": "Tone01..07_solution_toggle's turnOn windows in e6's data (sitting r18f, read by Minigames.song_order)",
+ "logs": "xemu-voice-log-start and xemu-audio-wav-start right after the hook is set, before any frame; stopped after the advance",
+ "results": "results-v0.15.json (job 10-a): the recorded lines, frames, RAM, the WAV's sha256[:12] and samples, the voice log's counts"
+}

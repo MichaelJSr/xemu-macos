@@ -1,0 +1,2292 @@
+{
+ "pack": "04-level-tour",
+ "job": "04-a",
+ "app": "xemu-v0.15.app",
+ "tag": "vanilla-beach-shield5",
+ "levels": {
+  "levels/air/a1": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 238",
+    "+128 up 238"
+   ],
+   "frames": 194,
+   "ram12": "2477b5456bc8",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 660,
+     "bytes": 21159424
+    },
+    "ide0-hd0 w": {
+     "rows": 2102,
+     "bytes": 33338880
+    },
+    "ide0-cd1 r": {
+     "rows": 366,
+     "bytes": 34304000
+    }
+   },
+   "block_rows": 3128,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 21159424,
+     "wr": 33338880
+    },
+    "ide0-cd1": {
+     "rd": 34304000,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/air/a1",
+    "loads": [
+     "levels/air/a1"
+    ],
+    "taps": 4,
+    "code_frames": 16,
+    "s": 2.2,
+    "posted": {
+     "movie": "",
+     "level": "levels/air/a1",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/air/a3": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 238",
+    "+144 up 238"
+   ],
+   "frames": 240,
+   "ram12": "382647b41368",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 931,
+     "bytes": 15950336
+    },
+    "ide0-hd0 w": {
+     "rows": 49,
+     "bytes": 80896
+    },
+    "ide0-cd1 r": {
+     "rows": 10,
+     "bytes": 1056768
+    }
+   },
+   "block_rows": 990,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 15950336,
+     "wr": 80896
+    },
+    "ide0-cd1": {
+     "rd": 1056768,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/air/a3",
+    "loads": [
+     "levels/air/a3"
+    ],
+    "taps": 5,
+    "code_frames": 16,
+    "s": 2.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/air/a3",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/air/a5": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 238",
+    "+160 up 238"
+   ],
+   "frames": 251,
+   "ram12": "a5b3a3c6d007",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 660,
+     "bytes": 10288640
+    },
+    "ide0-hd0 w": {
+     "rows": 1758,
+     "bytes": 28032512
+    },
+    "ide0-cd1 r": {
+     "rows": 300,
+     "bytes": 27959296
+    }
+   },
+   "block_rows": 2718,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 10288640,
+     "wr": 28032512
+    },
+    "ide0-cd1": {
+     "rd": 27959296,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/air/a5",
+    "loads": [
+     "levels/air/a5"
+    ],
+    "taps": 6,
+    "code_frames": 16,
+    "s": 2.4,
+    "posted": {
+     "movie": "",
+     "level": "levels/air/a5",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/air/a6": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 238",
+    "+176 up 238"
+   ],
+   "frames": 258,
+   "ram12": "eac60d449eea",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 502,
+     "bytes": 12172800
+    },
+    "ide0-hd0 w": {
+     "rows": 1398,
+     "bytes": 21989376
+    },
+    "ide0-cd1 r": {
+     "rows": 254,
+     "bytes": 22972416
+    }
+   },
+   "block_rows": 2154,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 12172800,
+     "wr": 21989376
+    },
+    "ide0-cd1": {
+     "rd": 22972416,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/air/a6",
+    "loads": [
+     "levels/air/a6"
+    ],
+    "taps": 7,
+    "code_frames": 16,
+    "s": 1.9,
+    "posted": {
+     "movie": "",
+     "level": "levels/air/a6",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/air/airship": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 238",
+    "+192 up 238"
+   ],
+   "frames": 254,
+   "ram12": "c7c117e32db5",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 374,
+     "bytes": 7251456
+    },
+    "ide0-hd0 w": {
+     "rows": 57,
+     "bytes": 211968
+    },
+    "ide0-cd1 r": {
+     "rows": 13,
+     "bytes": 1187840
+    }
+   },
+   "block_rows": 444,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 7251456,
+     "wr": 211968
+    },
+    "ide0-cd1": {
+     "rd": 1187840,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/air/airship",
+    "loads": [
+     "levels/air/airship"
+    ],
+    "taps": 8,
+    "code_frames": 16,
+    "s": 1.8,
+    "posted": {
+     "movie": "",
+     "level": "levels/air/airship",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/death/d1": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 238",
+    "+256 up 238"
+   ],
+   "frames": 313,
+   "ram12": "0d26b2a9612b",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 487,
+     "bytes": 9960448
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 505,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 9960448,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/death/d1",
+    "loads": [
+     "levels/death/d1"
+    ],
+    "taps": 12,
+    "code_frames": 16,
+    "s": 2.2,
+    "posted": {
+     "movie": "",
+     "level": "levels/death/d1",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/death/d2": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 238",
+    "+272 up 238"
+   ],
+   "frames": 653,
+   "ram12": "060edfeb2367",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 694,
+     "bytes": 12560896
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 712,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 12560896,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/death/d2",
+    "loads": [
+     "levels/death/d2"
+    ],
+    "taps": 13,
+    "code_frames": 16,
+    "s": 5.5,
+    "posted": {
+     "movie": "",
+     "level": "levels/death/d2",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/earth/e2": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 238",
+    "+368 up 238"
+   ],
+   "frames": 439,
+   "ram12": "0bac9d09d431",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 758,
+     "bytes": 19148800
+    },
+    "ide0-hd0 w": {
+     "rows": 56,
+     "bytes": 84480
+    },
+    "ide0-cd1 r": {
+     "rows": 12,
+     "bytes": 1060864
+    }
+   },
+   "block_rows": 826,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 19148800,
+     "wr": 84480
+    },
+    "ide0-cd1": {
+     "rd": 1060864,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/earth/e2",
+    "loads": [
+     "levels/earth/e2"
+    ],
+    "taps": 19,
+    "code_frames": 16,
+    "s": 3.4,
+    "posted": {
+     "movie": "",
+     "level": "levels/earth/e2",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/earth/e5": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 238",
+    "+384 up 238"
+   ],
+   "frames": 496,
+   "ram12": "1b91e05aba5e",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 932,
+     "bytes": 18287104
+    },
+    "ide0-hd0 w": {
+     "rows": 2366,
+     "bytes": 37639168
+    },
+    "ide0-cd1 r": {
+     "rows": 807,
+     "bytes": 38535168
+    }
+   },
+   "block_rows": 4105,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 18287104,
+     "wr": 37639168
+    },
+    "ide0-cd1": {
+     "rd": 38535168,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/earth/e5",
+    "loads": [
+     "levels/earth/e5"
+    ],
+    "taps": 20,
+    "code_frames": 16,
+    "s": 4.4,
+    "posted": {
+     "movie": "",
+     "level": "levels/earth/e5",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/earth/e6": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 238",
+    "+400 up 238"
+   ],
+   "frames": 494,
+   "ram12": "e1d01039ca42",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 721,
+     "bytes": 18657280
+    },
+    "ide0-hd0 w": {
+     "rows": 5286,
+     "bytes": 84779008
+    },
+    "ide0-cd1 r": {
+     "rows": 1331,
+     "bytes": 84697088
+    }
+   },
+   "block_rows": 7338,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 18657280,
+     "wr": 84779008
+    },
+    "ide0-cd1": {
+     "rd": 84697088,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/earth/e6",
+    "loads": [
+     "levels/earth/e6"
+    ],
+    "taps": 21,
+    "code_frames": 16,
+    "s": 4.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/earth/e6",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/earth/e7": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 238",
+    "+416 up 238"
+   ],
+   "frames": 604,
+   "ram12": "300444d39f0b",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 406,
+     "bytes": 7962624
+    },
+    "ide0-hd0 w": {
+     "rows": 3214,
+     "bytes": 51511296
+    },
+    "ide0-cd1 r": {
+     "rows": 940,
+     "bytes": 51441664
+    }
+   },
+   "block_rows": 4560,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 7962624,
+     "wr": 51511296
+    },
+    "ide0-cd1": {
+     "rd": 51441664,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/earth/e7",
+    "loads": [
+     "levels/earth/e7"
+    ],
+    "taps": 22,
+    "code_frames": 16,
+    "s": 6.6,
+    "posted": {
+     "movie": "",
+     "level": "levels/earth/e7",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/fire/f1": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 238",
+    "+432 up 238"
+   ],
+   "frames": 521,
+   "ram12": "e0fd79b70caa",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 656,
+     "bytes": 14306304
+    },
+    "ide0-hd0 w": {
+     "rows": 38,
+     "bytes": 75264
+    },
+    "ide0-cd1 r": {
+     "rows": 12,
+     "bytes": 1060864
+    }
+   },
+   "block_rows": 706,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 14306304,
+     "wr": 75264
+    },
+    "ide0-cd1": {
+     "rd": 1060864,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/fire/f1",
+    "loads": [
+     "levels/fire/f1"
+    ],
+    "taps": 23,
+    "code_frames": 16,
+    "s": 5.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/fire/f1",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/fire/f2": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 238",
+    "+448 up 238"
+   ],
+   "frames": 524,
+   "ram12": "28c213212338",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 519,
+     "bytes": 10988544
+    },
+    "ide0-hd0 w": {
+     "rows": 7198,
+     "bytes": 115467264
+    },
+    "ide0-cd1 r": {
+     "rows": 2045,
+     "bytes": 115396608
+    }
+   },
+   "block_rows": 9762,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 10988544,
+     "wr": 115467264
+    },
+    "ide0-cd1": {
+     "rd": 115396608,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/fire/f2",
+    "loads": [
+     "levels/fire/f2"
+    ],
+    "taps": 24,
+    "code_frames": 16,
+    "s": 5.6,
+    "posted": {
+     "movie": "",
+     "level": "levels/fire/f2",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/fire/f3": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 238",
+    "+464 up 238"
+   ],
+   "frames": 540,
+   "ram12": "72ade1850cbe",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 462,
+     "bytes": 11197440
+    },
+    "ide0-hd0 w": {
+     "rows": 3505,
+     "bytes": 56174080
+    },
+    "ide0-cd1 r": {
+     "rows": 939,
+     "bytes": 56098816
+    }
+   },
+   "block_rows": 4906,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 11197440,
+     "wr": 56174080
+    },
+    "ide0-cd1": {
+     "rd": 56098816,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/fire/f3",
+    "loads": [
+     "levels/fire/f3"
+    ],
+    "taps": 25,
+    "code_frames": 16,
+    "s": 5.8,
+    "posted": {
+     "movie": "",
+     "level": "levels/fire/f3",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/fire/f4": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 238",
+    "+480 up 238"
+   ],
+   "frames": 552,
+   "ram12": "f0ce55548139",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 612,
+     "bytes": 15518208
+    },
+    "ide0-hd0 w": {
+     "rows": 6000,
+     "bytes": 96121344
+    },
+    "ide0-cd1 r": {
+     "rows": 1859,
+     "bytes": 97099776
+    }
+   },
+   "block_rows": 8471,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 15518208,
+     "wr": 96121344
+    },
+    "ide0-cd1": {
+     "rd": 97099776,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/fire/f4",
+    "loads": [
+     "levels/fire/f4"
+    ],
+    "taps": 26,
+    "code_frames": 16,
+    "s": 5.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/fire/f4",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/fire/f6": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 238",
+    "+496 up 238"
+   ],
+   "frames": 572,
+   "ram12": "b9ae6ec16233",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 484,
+     "bytes": 11416064
+    },
+    "ide0-hd0 w": {
+     "rows": 1342,
+     "bytes": 21076480
+    },
+    "ide0-cd1 r": {
+     "rows": 469,
+     "bytes": 22061056
+    }
+   },
+   "block_rows": 2295,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 11416064,
+     "wr": 21076480
+    },
+    "ide0-cd1": {
+     "rd": 22061056,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/fire/f6",
+    "loads": [
+     "levels/fire/f6"
+    ],
+    "taps": 27,
+    "code_frames": 16,
+    "s": 5.2,
+    "posted": {
+     "movie": "",
+     "level": "levels/fire/f6",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/life": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 238",
+    "+512 up 238"
+   ],
+   "frames": 576,
+   "ram12": "574f767532a5",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 484,
+     "bytes": 8679936
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 502,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 8679936,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/life",
+    "loads": [
+     "levels/life"
+    ],
+    "taps": 28,
+    "code_frames": 16,
+    "s": 4.9,
+    "posted": {
+     "movie": "",
+     "level": "levels/life",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/town": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 244",
+    "+514 up 244",
+    "+522 down 238",
+    "+528 up 238"
+   ],
+   "frames": 613,
+   "ram12": "ebb3fb801442",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 973,
+     "bytes": 21890048
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 991,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 21890048,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/town",
+    "loads": [
+     "levels/town"
+    ],
+    "taps": 29,
+    "code_frames": 16,
+    "s": 5.5,
+    "posted": {
+     "movie": "",
+     "level": "levels/town",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/water/w1": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 244",
+    "+514 up 244",
+    "+522 down 244",
+    "+530 up 244",
+    "+538 down 238",
+    "+544 up 238"
+   ],
+   "frames": 600,
+   "ram12": "8afdd4a0c68f",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 509,
+     "bytes": 14659584
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 527,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 14659584,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/water/w1",
+    "loads": [
+     "levels/water/w1"
+    ],
+    "taps": 30,
+    "code_frames": 16,
+    "s": 4.7,
+    "posted": {
+     "movie": "",
+     "level": "levels/water/w1",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/water/w2": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 244",
+    "+514 up 244",
+    "+522 down 244",
+    "+530 up 244",
+    "+538 down 244",
+    "+546 up 244",
+    "+554 down 238",
+    "+560 up 238"
+   ],
+   "frames": 645,
+   "ram12": "18a931bb73f7",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 557,
+     "bytes": 13342208
+    },
+    "ide0-hd0 w": {
+     "rows": 18,
+     "bytes": 65024
+    }
+   },
+   "block_rows": 575,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 13342208,
+     "wr": 65024
+    },
+    "ide0-cd1": {
+     "rd": 0,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/water/w2",
+    "loads": [
+     "levels/water/w2"
+    ],
+    "taps": 31,
+    "code_frames": 16,
+    "s": 4.6,
+    "posted": {
+     "movie": "",
+     "level": "levels/water/w2",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/water/w3": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 244",
+    "+514 up 244",
+    "+522 down 244",
+    "+530 up 244",
+    "+538 down 244",
+    "+546 up 244",
+    "+554 down 244",
+    "+562 up 244",
+    "+570 down 238",
+    "+576 up 238"
+   ],
+   "frames": 639,
+   "ram12": "9de354d5f22c",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 580,
+     "bytes": 11752448
+    },
+    "ide0-hd0 w": {
+     "rows": 32,
+     "bytes": 72192
+    },
+    "ide0-cd1 r": {
+     "rows": 12,
+     "bytes": 1060864
+    }
+   },
+   "block_rows": 624,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 11752448,
+     "wr": 72192
+    },
+    "ide0-cd1": {
+     "rd": 1060864,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/water/w3",
+    "loads": [
+     "levels/water/w3"
+    ],
+    "taps": 32,
+    "code_frames": 16,
+    "s": 4.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/water/w3",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  },
+  "levels/water/w4": {
+   "lines": [
+    "+8 axis lx 1.000000000",
+    "+8 axis rx -1.000030519",
+    "+12 axis lx -1.000030519",
+    "+12 axis rx 1.000000000",
+    "+16 down 232",
+    "+16 axis lx 0.000000000",
+    "+16 axis rx 0.000000000",
+    "+20 up 232",
+    "+20 down 233",
+    "+24 up 233",
+    "+24 down 240",
+    "+28 down 239",
+    "+28 up 240",
+    "+32 up 239",
+    "+34 down 238",
+    "+42 up 238",
+    "+90 down 238",
+    "+98 up 238",
+    "+106 down 244",
+    "+114 up 244",
+    "+122 down 244",
+    "+130 up 244",
+    "+138 down 244",
+    "+146 up 244",
+    "+154 down 244",
+    "+162 up 244",
+    "+170 down 244",
+    "+178 up 244",
+    "+186 down 244",
+    "+194 up 244",
+    "+202 down 244",
+    "+210 up 244",
+    "+218 down 244",
+    "+226 up 244",
+    "+234 down 244",
+    "+242 up 244",
+    "+250 down 244",
+    "+258 up 244",
+    "+266 down 244",
+    "+274 up 244",
+    "+282 down 244",
+    "+290 up 244",
+    "+298 down 244",
+    "+306 up 244",
+    "+314 down 244",
+    "+322 up 244",
+    "+330 down 244",
+    "+338 up 244",
+    "+346 down 244",
+    "+354 up 244",
+    "+362 down 244",
+    "+370 up 244",
+    "+378 down 244",
+    "+386 up 244",
+    "+394 down 244",
+    "+402 up 244",
+    "+410 down 244",
+    "+418 up 244",
+    "+426 down 244",
+    "+434 up 244",
+    "+442 down 244",
+    "+450 up 244",
+    "+458 down 244",
+    "+466 up 244",
+    "+474 down 244",
+    "+482 up 244",
+    "+490 down 244",
+    "+498 up 244",
+    "+506 down 244",
+    "+514 up 244",
+    "+522 down 244",
+    "+530 up 244",
+    "+538 down 244",
+    "+546 up 244",
+    "+554 down 244",
+    "+562 up 244",
+    "+570 down 244",
+    "+578 up 244",
+    "+586 down 238",
+    "+592 up 238"
+   ],
+   "frames": 664,
+   "ram12": "b6525dbf048e",
+   "equal_record_replay": true,
+   "arrived": true,
+   "block": {
+    "ide0-hd0 r": {
+     "rows": 943,
+     "bytes": 22667776
+    },
+    "ide0-hd0 w": {
+     "rows": 40,
+     "bytes": 76288
+    },
+    "ide0-cd1 r": {
+     "rows": 10,
+     "bytes": 1056768
+    }
+   },
+   "block_rows": 993,
+   "blockstats": {
+    "ide0-hd0": {
+     "rd": 22667776,
+     "wr": 76288
+    },
+    "ide0-cd1": {
+     "rd": 1056768,
+     "wr": 0
+    }
+   },
+   "start12": "c637e9851b64",
+   "warp": {
+    "ok": true,
+    "level": "levels/water/w4",
+    "loads": [
+     "levels/water/w4"
+    ],
+    "taps": 33,
+    "code_frames": 16,
+    "s": 5.3,
+    "posted": {
+     "movie": "",
+     "level": "levels/water/w4",
+     "spot": "startspot"
+    },
+    "spot_written": false
+   }
+  }
+ },
+ "modkit": {
+  "checkout": "X.39",
+  "fallback": false,
+  "head": "290556fab3b8",
+  "xemu_oracle_sha12": "6192e4054d6c",
+  "xemu_oracle_changed": false,
+  "play_recording_sha12": "8ba2f1af5f85"
+ },
+ "xemu": "0.15",
+ "xemu_sha12": "e1869fccc44a"
+}

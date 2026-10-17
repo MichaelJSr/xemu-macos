@@ -1,0 +1,18 @@
+{
+  "pack": "04-level-tour",
+  "disc": "the vanilla USA disc (sha256 6989c84e...84be)",
+  "tag": "vanilla-beach-shield5",
+  "start12": "c637e9851b64",
+  "pad": "the keyboard pad on port 2; scancodes are the D98 config's map",
+  "mode": "XEMU_HEADLESS=null, -S -icount shift=2,align=off,sleep=off",
+  "per_level": "stop, loadvm <tag> (stays paused), write the level's recorded lines, each +N body as @<base+N> body (base: query-xemu-frame's frame right after the load; a pipe +N counts from the frame xemu reads it at), xemu-frame-advance <frames>; RAM there; block-log totals over the run",
+  "hash": "sha256[:12] of all guest RAM from xemu-dump-ram with gpu-sync false (bench-det's f<N>= is its first 16 digits)",
+  "how_recorded": "one icount sitting (job 04-a): per level a paused loadvm of the tag, then Sitting.warp: the game's own debug-menu cheat code, START on 'Change level...', the D-pad to the level's row, START; the row posts (movie '', the level, spot 'startspot'); run until 20 player ticks on the ground or in water in the new level, A pressed on a stall; then 1 vblank. XEMU_INPUT_RECORD on port 2 records what the pad gave the guest. The replay in a fresh xemu must end on the sitting's RAM.",
+  "levels": ["levels/air/a1", "levels/air/a3", "levels/air/a5", "levels/air/a6", "levels/air/airship",
+             "levels/death/d1", "levels/death/d2",
+             "levels/earth/e2", "levels/earth/e5", "levels/earth/e6", "levels/earth/e7",
+             "levels/fire/f1", "levels/fire/f2", "levels/fire/f3", "levels/fire/f4", "levels/fire/f6",
+             "levels/life", "levels/town",
+             "levels/water/w1", "levels/water/w2", "levels/water/w3", "levels/water/w4"],
+  "results": "results-v0.15.json (job 04-a): per level its lines, frames, RAM and block-log totals"
+}
