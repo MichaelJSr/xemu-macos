@@ -6,6 +6,7 @@
 #define METALFX_UPSCALE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __APPLE__
 #include <IOSurface/IOSurfaceRef.h>
@@ -26,6 +27,20 @@ void *metalfx_present_event(void); /* id<MTLSharedEvent>, borrowed */
 uint64_t metalfx_present_event_last_value(void);
 void *metalfx_wrap_iosurface_texture(IOSurfaceRef surface); /* retained */
 void metalfx_texture_dims(void *texture, int *w, int *h);
+
+/*
+ * Copy-present (Vulkan driver without VK_EXT_metal_objects): a linear
+ * BGRA8 texture over the start of an exported placement MTLHeap
+ * (id<MTLHeap>); row_bytes must be a multiple of
+ * metalfx_heap_linear_alignment(). Returns a retained id<MTLTexture>
+ * (CFRelease), or NULL.
+ */
+uint32_t metalfx_heap_linear_alignment(void *heap);
+/* Retained id<MTLSharedEvent> on the system default device; CFRelease. */
+void *metalfx_new_shared_event(void);
+void metalfx_shared_event_signal(void *event, uint64_t value);
+void *metalfx_heap_linear_texture(void *heap, uint32_t width,
+                                  uint32_t height, uint32_t row_bytes);
 
 /*
  * Wait (CPU-side) for all in-flight MetalFX command buffers to

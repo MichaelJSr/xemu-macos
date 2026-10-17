@@ -472,6 +472,24 @@ static void add_optional_device_extension_names(
     r->metal_objects_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+    /*
+     * Without metal_objects, VK_EXT_external_memory_metal's MTLHeap
+     * export still gets the compositor output to Metal (copy-present,
+     * display.c). XEMU_VK_COPY_PRESENT=1 forces that mode on a driver
+     * that has metal_objects too, for A/B.
+     */
+    r->metal_copy_present = false;
+    const char *copy_present = getenv("XEMU_VK_COPY_PRESENT");
+    bool force_copy = copy_present && atoi(copy_present) != 0;
+    if ((!r->metal_objects_extension_enabled || force_copy) &&
+        add_extension_if_available(available_extensions,
+                                   enabled_extension_names,
+                                   VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME)) {
+        r->metal_copy_present = true;
+        if (force_copy) {
+            r->metal_objects_extension_enabled = false;
+        }
+    }
 #endif
 }
 

@@ -544,6 +544,14 @@ typedef struct PGRAPHVkDisplayState {
      * directly by MetalFX and the UI present pass.
      */
     void *mtl_texture;
+    /*
+     * Copy-present mode (metal_copy_present): the compositor image is
+     * copied into this buffer, whose dedicated memory is exported as an
+     * MTLHeap; mtl_texture is then a linear texture over that heap.
+     */
+    VkBuffer copy_buffer;
+    VkDeviceMemory copy_memory;
+    uint32_t copy_row_texels;
 
 
 #if HAVE_IOSURFACE_SHARING
@@ -629,6 +637,14 @@ typedef struct PGRAPHVkState {
     bool memory_budget_extension_enabled;
 #if HAVE_IOSURFACE_SHARING
     bool metal_objects_extension_enabled;
+    /*
+     * No VK_EXT_metal_objects but VK_EXT_external_memory_metal (stock
+     * Mesa KosmicKrisp): the compositor output reaches Metal through a
+     * per-frame copy into an MTLHeap-exported buffer (display.c), and
+     * the compositor submit stays synchronous (no event to export).
+     */
+    bool metal_copy_present;
+    void *get_memory_metal_handle_fn; /* PFN_vkGetMemoryMetalHandleEXT */
 #endif
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
@@ -773,6 +789,17 @@ typedef struct PGRAPHVkState {
     VkSemaphore present_timeline;
     uint64_t present_timeline_value;
     void *present_timeline_event; /* id<MTLSharedEvent>, retained */
+    /*
+     * Copy-present (no VK_EXT_metal_objects): present_timeline is a plain
+     * timeline and present_timeline_event an xemu-owned MTLSharedEvent a
+     * helper thread signals once vkWaitSemaphores sees each value.
+     */
+    bool present_forward;
+    QemuThread present_forward_thread;
+    QemuMutex present_forward_lock;
+    QemuCond present_forward_cond;
+    uint64_t present_forward_target;
+    bool present_forward_quit;
 
     /*
      * Direct MTLTexture export of the compositor image (Metal
@@ -1093,6 +1120,14 @@ typedef struct PGRAPHVkState {
     int last_expire_frame;      /* deterministic mode: expire per flip */
     uint32_t expire_updates;
 } PGRAPHVkState;
+
+#if HAVE_IOSURFACE_SHARING
+/* The compositor output can be handed to Metal (texture export or copy). */
+static inline bool pgraph_vk_metal_present_interop(PGRAPHVkState *r)
+{
+    return r->metal_objects_extension_enabled || r->metal_copy_present;
+}
+#endif
 
 // renderer.c
 void pgraph_vk_check_memory_budget(PGRAPHState *pg);

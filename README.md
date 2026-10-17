@@ -135,6 +135,14 @@ mangled Azurik's HUD gauges in offscreen det runs);
 `XEMU_VK_CPU_FANS=0/1` overrides that per-driver default. nsprof's
 `vk_fan_draw` counts those draws.
 
+A driver without `VK_EXT_metal_objects` (stock KosmicKrisp; LunarG
+won't add it) gets *copy-present* when it has
+`VK_EXT_external_memory_metal`: the compositor image is copied each
+frame into a buffer exported as an MTLHeap, which Metal (MetalFX, the
+UI, screendumps) reads as a linear texture, and a helper thread turns
+the compositor's timeline value into an xemu-owned MTLSharedEvent.
+`XEMU_VK_COPY_PRESENT=1` forces it on a driver that has metal_objects.
+
 ### Recommended `xemu.toml`
 
 `~/Library/Application Support/xemu/xemu/xemu.toml`:
