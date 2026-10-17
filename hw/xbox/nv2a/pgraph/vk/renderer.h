@@ -638,6 +638,8 @@ typedef struct PGRAPHVkState {
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
     VkPhysicalDeviceProperties device_props;
+    VkDriverId driver_id; /* 0 when the device predates Vulkan 1.2 */
+    bool driver_is_moltenvk;
     VkDevice device;
     VmaAllocator allocator;
     uint32_t allocator_last_submit_index;
