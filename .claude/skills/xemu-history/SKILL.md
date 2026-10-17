@@ -13,7 +13,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 |---|---|---|---|
 | **Renderer / MoltenVK** | | | |
 | Occlusion-rework intermediates (in-pass queries + sync drains; submit per report) | reverted | 6.86 / ~11.2 fps vs 15.78. Placement and delivery are one policy; shipped form: 38.57 fps, passes 376→14. Never re-add per-draw pass teardown (TBDR) | `6bfbc22863` |
-| CPU-side wait/fence elimination for streamed vertices (byte-exact refine; per-flight 128 MiB mirrors) | closed | fps flat twice: the wait is GPU time changing call site. The byte-exact refine shipped alone (+5.4%) | `099efcb734`, `268daf69ac` |
+| CPU-side wait/fence elimination for streamed vertices (byte-exact refine; per-flight 128 MiB mirrors) | closed; reopened for det offscreen | fps flat twice: the wait is GPU time changing call site. The byte-exact refine shipped alone (+5.4%). Under icount the pusher uploads each streamed batch before the guest writes the next beside it, ~34 finishes and GPU round trips a flip in d2: waits now skip when no pending draw reads a changed byte (read spans), offscreen bench-det heavy-f1 +54% wall fps, same RAM and pictures; windowed heavy-f1 stays capped | `099efcb734`, `268daf69ac`, `read_span_content_differs` |
 | Vertex copy-on-conflict remap | reverted | −2.09 fps 6/6: broad rewrites overflow the table into all-slot drains | `64a8a6b543` |
 | Eager report submit; idle budget 300→50 µs | reverted / closed | −0.08 fps, signs mixed; −12.1 fps (submit storm). 300 µs stays | `7a9b116680` |
 | `VK_KHR_dynamic_rendering` (B2) | fenced | No implicit SUBPASS_EXTERNAL dependency → tile stall, transition hang. Needs explicit barriers | `c37110d0aa` |

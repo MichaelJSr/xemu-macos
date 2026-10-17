@@ -1810,6 +1810,35 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   unchanged; those install no hooks. What d2 still pays is ~30
   `finish_vtx_dirty` per flip (windowed: none).
 
+- **Vertex copies wait only for draws that read a changed byte
+  (2026-10-17).** Guest dirty bits are page-granular and every vertex
+  sync uploads whole pages, so a draw's upload of a page also carries
+  the bytes the guest has written beside an earlier draw's since. The
+  deterministic pusher uploads each streamed batch before the guest
+  writes the next one, so in d2 the page-wide check finds ~34 conflicts
+  a flip (windowed real time: none, its uploads come later and match),
+  and each finish then waited for the command buffer it had just
+  submitted. Each flight slot now keeps read spans: the attribute byte
+  ranges of the draws it records, noted in `begin_draw` once the
+  draw's command buffer is fixed. The finish stays (page-wide, as
+  before: pass splits move pixels on AGX), but its wait, and the wait
+  for a submitted slot, happen only when the copy changes a byte that
+  slot's draws read (nsprof `vtx_wait_skip` counts the skips). A
+  submitted slot is checked on every copy against all the pages its
+  draws read, uploaded in its window or not (it used to be checked only
+  on pages it had uploaded, then retired by the wait). RAM and
+  screendumps are identical to the previous binary on d2 (F2+900),
+  heavy-f1 600 and stream-e2 600 offscreen. Pack 05 d2 tail: 21.8 →
+  15.8 s wall, fence 30.4 → 17.3 ms/flip, finishes unchanged (load
+  37). Offscreen bench-det, 3 pairs, load 67-75: heavy-f1 600 wall fps
+  21.1 → 32.0 (+52%, 3/3), Mcyc/frame −6.7% (3/3); stream-e2 600 wall
+  fps 29.8 → 42.1 (+41%, 3/3), Mcyc/frame −8.0% (3/3). Windowed
+  heavy-f1, 2 pairs: both at the 60 fps cap, same draws/flip. Skipping
+  the finishes as well (read spans deciding them) takes d2 to ~3.5
+  finishes and 11 passes a flip and 56.8 → 38.7 Mcyc/frame with the same
+  RAM, but moves 29 pixels of the d2 screendump by ≤2 levels, so it is
+  not shipped.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

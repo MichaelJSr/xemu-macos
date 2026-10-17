@@ -95,48 +95,81 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
  * Exact-conflict refinement: guest dirty bits are page-granular, so
  * vertex-stream sync writes arrive padded to page boundaries and
  * consecutive writes false-share their boundary page — the padded
- * bytes re-copy identical content. A
- * conflict with the recording command buffer is only real if the
- * incoming bytes DIFFER from the mirror somewhere inside a span the
- * recording window actually wrote (recorded draws can only have
- * consumed those spans from this window's uploads; mirror content
- * over a recorded span cannot change value within a window — any
- * differing write triggers the finish, and identical writes are
- * no-ops). Returns true when a differing byte exists (finish
- * required), false when every conflicting byte is identical.
+ * bytes re-copy identical content. A conflict with the recording
+ * command buffer is only real if the incoming bytes DIFFER from the
+ * mirror somewhere on a page the recording window uploaded (each upload
+ * covers whole pages). Returns true when a differing byte exists
+ * (finish required), false when every conflicting byte is identical.
  *
  * Measured (Azurik attract demo): forced mid-frame finishes drop
  * from 4-5.6 to ~0.9 per flip.
  */
-static bool uploaded_span_content_differs(PGRAPHVkState *r, int slot,
+static bool uploaded_page_content_differs(PGRAPHVkState *r, int slot,
                                           hwaddr offset, VkDeviceSize size,
                                           const uint8_t *data,
                                           size_t start_bit, size_t end_bit)
 {
     const unsigned long *bm = r->flight[slot].uploaded_bitmap;
-    const uint16_t *smin = r->flight[slot].page_span_min;
-    const uint16_t *smax = r->flight[slot].page_span_max;
     const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
 
-    size_t bit = start_bit;
-    for (;;) {
+    for (size_t bit = start_bit;; bit++) {
         bit = find_next_bit(bm, end_bit, bit);
         if (bit >= end_bit) {
             return false;
         }
         hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
-        hwaddr in_lo = MAX(offset, page_base);
-        hwaddr in_hi = MIN(offset + size, page_base + TARGET_PAGE_SIZE);
-        hwaddr sp_lo = page_base + smin[bit];
-        hwaddr sp_hi = page_base + smax[bit];
-        hwaddr lo = MAX(in_lo, sp_lo);
-        hwaddr hi = MIN(in_hi, sp_hi);
+        hwaddr lo = MAX(offset, page_base);
+        hwaddr hi = MIN(offset + size, page_base + TARGET_PAGE_SIZE);
         if (lo < hi &&
             memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
             return true;
         }
-        bit++;
     }
+}
+
+/*
+ * Whether the incoming bytes differ from the mirror anywhere a draw
+ * recorded in @slot's window reads (its read spans). When they don't, no
+ * draw of that slot still on the GPU reads a byte the copy changes, so
+ * the copy need not wait for it. Guest dirty bits are page-granular and
+ * a draw's upload of a page also carries the bytes the guest has written
+ * next to an earlier draw's since: each streamed batch after the last,
+ * which the deterministic pusher uploads before the guest writes the
+ * next (Azurik's death level: ~30 such conflicts a flip, each a GPU
+ * round trip).
+ */
+static bool read_span_content_differs(PGRAPHVkState *r, int slot,
+                                      hwaddr offset, VkDeviceSize size,
+                                      const uint8_t *data,
+                                      size_t start_bit, size_t end_bit)
+{
+    const unsigned long *rb = r->flight[slot].read_bitmap;
+    const uint16_t *smin = r->flight[slot].page_span_min;
+    const uint16_t *smax = r->flight[slot].page_span_max;
+    const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
+
+    for (size_t bit = start_bit;; bit++) {
+        bit = find_next_bit(rb, end_bit, bit);
+        if (bit >= end_bit) {
+            return false;
+        }
+        hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
+        hwaddr lo = MAX(offset, page_base + smin[bit]);
+        hwaddr hi = MIN(offset + size, page_base + smax[bit]);
+        if (lo < hi &&
+            memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
+            return true;
+        }
+    }
+}
+
+/* @slot's GPU reads have retired (or it never recorded any). */
+static void forget_slot_vertex_ram(PGRAPHVkState *r, int slot)
+{
+    bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);
+    bitmap_clear(r->flight[slot].read_bitmap, 0, r->bitmap_size);
+    r->flight[slot].uploaded_first_dirty_bit = ULONG_MAX;
+    r->flight[slot].uploaded_last_dirty_bit = 0;
 }
 
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
@@ -155,6 +188,34 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
         if (!r->flight[i].uploaded_bitmap) {
             continue;
         }
+        if (i != r->current_flight) {
+            /*
+             * A submitted slot: its draws may still be on the GPU, and
+             * read only the bytes in its read spans. The copy waits for
+             * them only when it changes one of those bytes, so a slot
+             * can stay pending past its finish (below); then its pages
+             * count whether or not its window uploaded them. After the
+             * wait, the slot's tracking is cleared so further writes
+             * this frame skip the (already signaled) fence.
+             *
+             * This used to wait whenever the slot had uploaded any of
+             * the copy's pages (it already beat a full
+             * pgraph_vk_finish, which also submitted and rotated the
+             * current command buffer: measured in-game 3-6x per flip
+             * on streamed vertex data, serializing the 2-slot pipeline).
+             */
+            if (read_span_content_differs(r, i, offset, size,
+                                          (const uint8_t *)data,
+                                          start_bit, end_bit)) {
+                pgraph_vk_wait_slot_fence(pg, i);
+                forget_slot_vertex_ram(r, i);
+            } else if (r->flight[i].uploaded_first_dirty_bit != ULONG_MAX &&
+                       find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
+                                     start_bit) < end_bit) {
+                nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
+            }
+            continue;
+        }
         /*
          * Fast reject: if the query range doesn't intersect this slot's
          * tracked [first..last] dirty-page window, no overlap is
@@ -169,65 +230,56 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
             continue;
         }
         if (find_next_bit(r->flight[i].uploaded_bitmap,
-                          start_bit + nbits, start_bit) < end_bit) {
-            if (i == r->current_flight) {
-                if (!uploaded_span_content_differs(r, i, offset, size,
-                                                   (const uint8_t *)data,
-                                                   start_bit, end_bit)) {
-                    /*
-                     * Every conflicting byte is identical to what the
-                     * recording window already uploaded — recorded
-                     * draws observe the same data, so the finish (and
-                     * its rotation + mid-frame reclaim wait) is a
-                     * false positive from page padding.
-                     */
-                    nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
-                    continue;
-                }
-                /*
-                 * The currently recording command buffer references
-                 * this range: it must be submitted before the mirror
-                 * is overwritten, and the submit's fence waited.
-                 *
-                 * pgraph_vk_finish alone no longer guarantees the
-                 * second half: with flight-slot pipelining it waits
-                 * only the PREVIOUS slot's fence and leaves the
-                 * just-submitted CB executing (upstream's single-slot
-                 * finish really did drain). Without the explicit wait
-                 * below, the memcpy into the mirror races the
-                 * submitted CB's vertex fetches of the old content —
-                 * torn geometry on any driver, merely masked on macOS
-                 * by MoltenVK's deferred encode delay. Wait the slot
-                 * we just submitted, then clear its upload tracking
-                 * (its reads have retired) so later writes this frame
-                 * skip the already-signaled fence entirely.
-                 */
-                int submitted_slot = r->current_flight;
-                pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
-                pgraph_vk_wait_slot_fence(pg, submitted_slot);
-                bitmap_clear(r->flight[submitted_slot].uploaded_bitmap, 0,
-                             r->bitmap_size);
-                r->flight[submitted_slot].uploaded_first_dirty_bit =
-                    ULONG_MAX;
-                r->flight[submitted_slot].uploaded_last_dirty_bit = 0;
-                break;
-            }
-            /*
-             * The conflicting GPU reads were already submitted with
-             * slot i. Waiting that slot's fence is sufficient — the
-             * previous behavior (a full pgraph_vk_finish) also
-             * submitted and rotated the current command buffer,
-             * costing a submit + cross-slot fence wait per conflict.
-             * Measured in-game this fired 3-6x per flip on streamed
-             * vertex data, serializing the 2-slot pipeline. After the
-             * wait, the slot's upload tracking is cleared so further
-             * writes this frame skip the (already signaled) fence.
-             */
-            pgraph_vk_wait_slot_fence(pg, i);
-            bitmap_clear(r->flight[i].uploaded_bitmap, 0, r->bitmap_size);
-            r->flight[i].uploaded_first_dirty_bit = ULONG_MAX;
-            r->flight[i].uploaded_last_dirty_bit = 0;
+                          start_bit + nbits, start_bit) >= end_bit) {
+            continue;
         }
+        if (!uploaded_page_content_differs(r, i, offset, size,
+                                           (const uint8_t *)data,
+                                           start_bit, end_bit)) {
+            /*
+             * Every conflicting byte is identical to what the recording
+             * window already uploaded — recorded draws observe the same
+             * data, so the finish (and its rotation + mid-frame reclaim
+             * wait) is a false positive from page padding.
+             */
+            nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
+            continue;
+        }
+        /*
+         * The currently recording command buffer references this range:
+         * it must be submitted before the mirror is overwritten, and the
+         * submit's fence waited.
+         *
+         * pgraph_vk_finish alone no longer guarantees the second half:
+         * with flight-slot pipelining it waits only the PREVIOUS slot's
+         * fence and leaves the just-submitted CB executing (upstream's
+         * single-slot finish really did drain). Without the explicit wait
+         * below, the memcpy into the mirror races the submitted CB's
+         * vertex fetches of the old content — torn geometry on any
+         * driver, merely masked on macOS by MoltenVK's deferred encode
+         * delay. Wait the slot we just submitted, then clear its tracking
+         * (its reads have retired) so later writes this frame skip the
+         * already-signaled fence entirely, unless no recorded draw reads
+         * a byte the copy changes: then the slot stays pending, and a
+         * later copy that changes one waits on the path above.
+         *
+         * The finish itself stays: where command buffers and passes split
+         * moves some pixels (by a few levels on AGX), so it is kept where
+         * page-wide content differs.
+         */
+        int submitted_slot = r->current_flight;
+        bool reads_changed =
+            read_span_content_differs(r, submitted_slot, offset, size,
+                                      (const uint8_t *)data, start_bit,
+                                      end_bit);
+        pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
+        if (reads_changed) {
+            pgraph_vk_wait_slot_fence(pg, submitted_slot);
+            forget_slot_vertex_ram(r, submitted_slot);
+        } else {
+            nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
+        }
+        break;
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
@@ -235,32 +287,7 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
     nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
 
-    {
-        unsigned long *bm = r->flight[r->current_flight].uploaded_bitmap;
-        uint16_t *smin = r->flight[r->current_flight].page_span_min;
-        uint16_t *smax = r->flight[r->current_flight].page_span_max;
-        hwaddr write_end = offset + size;
-        for (size_t b = start_bit; b < end_bit; b++) {
-            hwaddr page_base = (hwaddr)b * TARGET_PAGE_SIZE;
-            uint16_t lo = offset > page_base ?
-                              (uint16_t)(offset - page_base) : 0;
-            uint16_t hi = write_end < page_base + TARGET_PAGE_SIZE ?
-                              (uint16_t)(write_end - page_base) :
-                              (uint16_t)TARGET_PAGE_SIZE;
-            if (test_bit(b, bm)) {
-                if (lo < smin[b]) {
-                    smin[b] = lo;
-                }
-                if (hi > smax[b]) {
-                    smax[b] = hi;
-                }
-            } else {
-                set_bit(b, bm);
-                smin[b] = lo;
-                smax[b] = hi;
-            }
-        }
-    }
+    bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
 
     /*
      * Track dirty-page min/max so aux_has_work() and flush_memory_buffer()
@@ -281,15 +308,60 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     }
 }
 
-static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)
+/*
+ * A draw's attribute array: sync [addr, addr + size) with guest RAM, and
+ * note that the draw reads [addr, addr + read_size) of the mirror.
+ */
+static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size,
+                                 hwaddr read_size)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     assert(r->num_vertex_ram_buffer_syncs <
            ARRAY_SIZE(r->vertex_ram_buffer_syncs));
+    r->vertex_ram_buffer_reads[r->num_vertex_ram_buffer_syncs] =
+        (MemorySyncRequirement){ .addr = addr, .size = read_size };
     r->vertex_ram_buffer_syncs[r->num_vertex_ram_buffer_syncs++] =
         (MemorySyncRequirement){ .addr = addr, .size = size };
+}
+
+/*
+ * As a draw is recorded (begin_draw): note the mirror bytes it reads in
+ * the current slot's window (read_bitmap and the page spans), for the
+ * copies in pgraph_vk_update_vertex_ram_buffer.
+ */
+void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int slot = r->current_flight;
+    unsigned long *rb = r->flight[slot].read_bitmap;
+    uint16_t *smin = r->flight[slot].page_span_min;
+    uint16_t *smax = r->flight[slot].page_span_max;
+    hwaddr vram_end = (hwaddr)r->bitmap_size * TARGET_PAGE_SIZE;
+
+    for (size_t i = 0; i < r->num_vertex_ram_buffer_syncs; i++) {
+        hwaddr lo = r->vertex_ram_buffer_reads[i].addr;
+        hwaddr hi = MIN(lo + r->vertex_ram_buffer_reads[i].size, vram_end);
+
+        for (hwaddr page = lo & TARGET_PAGE_MASK; page < hi;
+             page += TARGET_PAGE_SIZE) {
+            size_t b = page / TARGET_PAGE_SIZE;
+            uint16_t plo = lo > page ? (uint16_t)(lo - page) : 0;
+            uint16_t phi = hi < page + TARGET_PAGE_SIZE ?
+                               (uint16_t)(hi - page) :
+                               (uint16_t)TARGET_PAGE_SIZE;
+
+            if (test_bit(b, rb)) {
+                smin[b] = MIN(smin[b], plo);
+                smax[b] = MAX(smax[b], phi);
+            } else {
+                set_bit(b, rb);
+                smin[b] = plo;
+                smax[b] = phi;
+            }
+        }
+    }
 }
 
 static const VkFormat float_to_count[] = {
@@ -426,7 +498,11 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
             attrib_data_addr = attr_data + attr->offset - d->vram_ptr;
             stride = attr->stride;
             start = attrib_data_addr + min_element * stride;
-            update_memory_buffer(d, start, num_elements * stride);
+            /* The last element may reach past its stride. */
+            update_memory_buffer(
+                d, start, num_elements * stride,
+                (hwaddr)(num_elements - 1) * stride +
+                    MAX(stride, (size_t)attr->size * attr->count));
         }
 
         uint32_t provoking_element_index =

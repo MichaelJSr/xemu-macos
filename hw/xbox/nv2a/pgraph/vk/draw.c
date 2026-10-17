@@ -2327,6 +2327,14 @@ static void begin_draw(PGRAPHState *pg)
     nv2a_vk_assert(r->in_command_buffer);
 
     /*
+     * The command buffer that records this draw is fixed from here on
+     * (finishes for buffer space or queries came before): note what the
+     * draw reads of the vertex RAM mirror in its slot.
+     */
+    pgraph_vk_note_vertex_ram_reads(pg);
+    r->num_vertex_ram_buffer_syncs = 0;
+
+    /*
      * Visibility testing: rotate / stop occlusion queries inside the
      * render pass. Ending or beginning a query no longer ends the
      * pass (see the bulk vkCmdResetQueryPool at command-buffer
@@ -2613,8 +2621,6 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
                                                size);
         }
     }
-
-    r->num_vertex_ram_buffer_syncs = 0;
 
     NV2A_VK_DGROUP_END();
 }

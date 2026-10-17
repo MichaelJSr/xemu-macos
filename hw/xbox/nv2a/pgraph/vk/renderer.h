@@ -678,18 +678,20 @@ typedef struct PGRAPHVkState {
         unsigned long uploaded_first_dirty_bit;
         unsigned long uploaded_last_dirty_bit;
         /*
-         * Page-relative byte span [min,max) written to each uploaded
-         * page during this slot's recording window. Valid only where
-         * the corresponding uploaded_bitmap bit is set (the bit
-         * guards validity, so reset needs no clearing). Used by the
-         * exact-conflict refinement in update_vertex_ram_buffer:
-         * guest dirty bits are page-granular, so vertex-stream sync
-         * writes arrive page-padded and consecutive writes
-         * false-share their boundary page; comparing the incoming
-         * bytes against the mirror over just this span proves most
-         * such conflicts change nothing the recorded draws could
-         * have read.
+         * Pages of the vertex RAM mirror that draws recorded in this
+         * slot's window read, and per page the byte span [min,max)
+         * those reads cover: the draws' attribute ranges, not padded
+         * to pages. The spans are valid only where read_bitmap is set
+         * (the bit guards validity, so reset needs no clearing). Used
+         * by the conflict check in update_vertex_ram_buffer: guest
+         * dirty bits are page-granular, so vertex-stream syncs arrive
+         * page-padded, and a draw's upload of a page carries the bytes
+         * the guest has since written next to an earlier draw's;
+         * comparing the incoming bytes against the mirror over just
+         * these spans proves such conflicts change nothing a recorded
+         * draw reads.
          */
+        unsigned long *read_bitmap;
         uint16_t *page_span_min;
         uint16_t *page_span_max;
         bool submitted;
@@ -895,6 +897,8 @@ typedef struct PGRAPHVkState {
     StorageBuffer storage_buffers[BUFFER_COUNT];
 
     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
+    /* The bytes each sync's draw reads (vertex_ram_buffer_syncs' index). */
+    MemorySyncRequirement vertex_ram_buffer_reads[NV2A_VERTEXSHADER_ATTRIBUTES];
     size_t num_vertex_ram_buffer_syncs;
     size_t bitmap_size;
 
@@ -1137,6 +1141,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
 void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
                                     VkDeviceSize size);
+void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg);
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size);
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
