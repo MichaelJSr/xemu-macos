@@ -64,6 +64,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_SUPLOAD_ZETA] = "supload_zeta",
     [NSPROF_EV_TEXBIND_SKIP] = "texbind_skip",
     [NSPROF_EV_VTX_EXACT_SKIP] = "vtx_exact_skip",
+    [NSPROF_EV_VTX_WAIT_SKIP] = "vtx_wait_skip",
     [NSPROF_EV_RENDERPASS] = "renderpass",
     [NSPROF_EV_PIPELINE_BIND] = "pipeline_bind",
     [NSPROF_EV_VK_DRAW_CALL] = "vk_draw_call",

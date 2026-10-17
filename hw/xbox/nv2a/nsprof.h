@@ -118,6 +118,7 @@ enum NsprofEvent {
     NSPROF_EV_SUPLOAD_ZETA,   /* RAM -> zeta surface upload */
     NSPROF_EV_TEXBIND_SKIP,   /* once-per-frame verified-bind fast path */
     NSPROF_EV_VTX_EXACT_SKIP, /* byte-identical vertex conflict, finish skipped */
+    NSPROF_EV_VTX_WAIT_SKIP,  /* vertex copy: no pending draw reads a change */
     NSPROF_EV_RENDERPASS,     /* vkCmdBeginRenderPass on the main CB */
     NSPROF_EV_PIPELINE_BIND,  /* vkCmdBindPipeline (graphics) */
     /*
