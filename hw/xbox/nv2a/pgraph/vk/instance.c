@@ -648,6 +648,34 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         }
     }
 
+    /*
+     * glsl.c compiles for Vulkan 1.3 / SPIR-V 1.6, where glslang lowers
+     * discard to OpDemoteToHelperInvocation, and that capability needs
+     * this feature enabled: without it the validation layer flags every
+     * fragment shader (MoltenVK and KosmicKrisp alike). Core in 1.3;
+     * enabled only when the device reports it.
+     */
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures demote_features = {
+        .sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES,
+    };
+    if (r->vk_api_version >= VK_API_VERSION_1_3) {
+        VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures query = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES,
+        };
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &query,
+        };
+        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
+        if (query.shaderDemoteToHelperInvocation == VK_TRUE) {
+            demote_features.shaderDemoteToHelperInvocation = VK_TRUE;
+            demote_features.pNext = next_struct;
+            next_struct = &demote_features;
+        }
+    }
+
     VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_features;
     if (r->custom_border_color_extension_enabled) {
         custom_border_features = (VkPhysicalDeviceCustomBorderColorFeaturesEXT){
