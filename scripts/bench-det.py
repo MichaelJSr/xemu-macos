@@ -13,7 +13,9 @@ hashes guest RAM (sha256[:16]: QMP xemu-ram-digest, or xemu-dump-ram's
 file on builds without it). Arms run interleaved, PAIRS times.
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
-and instructions per guest frame across the whole process. A
+and instructions per guest frame across the whole process, and its CPU
+and runnable seconds (on a core or waiting for one, summed over threads):
+runnable well above CPU means the run waited for a core. A
 deterministic run does fixed guest work, so cycles per frame hardly
 feels host load from one run to the next (~0.2-0.5% back to back at
 load 30, where wall fps swings 5-10%); it still drifts over minutes with
@@ -81,10 +83,24 @@ class _RusageV4(ctypes.Structure):
         'runnable_time').split()]
 
 
-def counters(pid):
+class _Timebase(ctypes.Structure):
+    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+
+
+_tb = _Timebase()
+ctypes.CDLL(None).mach_timebase_info(ctypes.byref(_tb))
+_TICK_S = _tb.numer / _tb.denom / 1e9   # rusage times are mach ticks (41.67 ns on Apple silicon)
+
+
+def counters(pid, times=False):
+    """(instructions, cycles) of the whole process; with times, also CPU and
+    runnable seconds (runnable = on a core or waiting for one, all threads)."""
     r = _RusageV4()
     if _libproc.proc_pid_rusage(pid, 4, ctypes.byref(r)) != 0:  # RUSAGE_INFO_V4
         raise OSError('proc_pid_rusage failed')
+    if times:
+        return (r.instructions, r.cycles, (r.user_time + r.system_time) * _TICK_S,
+                r.runnable_time * _TICK_S)
     return r.instructions, r.cycles
 
 
@@ -186,14 +202,15 @@ def run_once(app, env, a, purpose=''):
                 os.write(fd, ('\n'.join(a.input) + '\n').encode())
                 os.close(fd)
                 time.sleep(0.2)
-            done, wall, ins, cyc, hashes = 0, 0.0, 0, 0, []
+            done, wall, ins, cyc, cpu, run, hashes = 0, 0.0, 0, 0, 0.0, 0.0, []
             for s in stops:
-                i0, c0 = counters(proc.pid)
+                i0, c0, u0, r0 = counters(proc.pid, True)
                 t = time.time()
                 q.cmd('xemu-frame-advance', frames=s - done)
                 wall += time.time() - t
-                i1, c1 = counters(proc.pid)
+                i1, c1, u1, r1 = counters(proc.pid, True)
                 ins, cyc, done = ins + i1 - i0, cyc + c1 - c0, s
+                cpu, run = cpu + u1 - u0, run + r1 - r0
                 hashes.append(f'f{s}=' + ram_sha256(q, d)[:16])
             try:
                 q.cmd('quit')
@@ -201,7 +218,7 @@ def run_once(app, env, a, purpose=''):
                 pass
             proc.wait(timeout=30)
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
-                'ram': ' '.join(hashes)}
+                'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes)}
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -744,7 +761,8 @@ def main():
                                       f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames')
             res[name].append(r)
             line = (f'{i + 1} {name}: {r["fps"]:.1f} fps  {r["mcyc"]:.3f} Mcyc/f  '
-                    f'{r["mins"]:.3f} Mins/f  {r["ram"]}')
+                    f'{r["mins"]:.3f} Mins/f  {r["cpu_s"]:.2f}/{r["runnable_s"]:.2f} cpu/runnable s  '
+                    f'{r["ram"]}')
             print(line, flush=True)
             if out:
                 out.write(json.dumps({'pair': i + 1, 'arm': name, **r}) + '\n')
