@@ -2304,8 +2304,9 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
      * a frame whose FIRST pass contains the first zpass draw got
      * an encoder with a nil visibility buffer and crashed in AGX
      * setVisibilityResultMode (user-reported, real gameplay).
+     * MoltenVK only: other drivers have no such flag.
      */
-    {
+    if (r->driver_is_moltenvk) {
         int primer_index =
             pgraph_vk_slot_query_base(r, r->current_flight) +
             r->num_queries_in_flight;

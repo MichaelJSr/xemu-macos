@@ -1504,10 +1504,12 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
      * a native driver may overlap an in-flight slot's reads/writes of
      * this surface's image with the aux-CB upload (visible under WHPX,
      * where render_display force-uploads every present). Keep the
-     * upstream full-finish semantics on non-Apple hosts.
+     * upstream full-finish semantics on non-Apple hosts, and on Apple
+     * drivers other than MoltenVK (KosmicKrisp's heaps are untracked).
      */
 #ifdef __APPLE__
     bool target_is_active =
+        !r->driver_is_moltenvk ||
         (surface == r->color_binding) ||
         (surface == r->zeta_binding) ||
         r->in_command_buffer;
