@@ -1,6 +1,6 @@
 # xemu-macos on real Windows hardware: test plan
 
-Written 2026-10-17 on the Mac; branch `windows` starts at master `42900e676d` (v0.15.1). It is meant for a fresh Claude Code session on the Windows machine, working with the owner. Work top to bottom. Every step has exact PowerShell and a pass/fail line. Write results into `C:\xemu-kit\results\RESULTS.md` as you go (template in section 6).
+Written 2026-10-17 on the Mac; branch `windows` starts at master `42900e676d` (v0.15.1). It is meant for a fresh Claude Code session on the Windows machine, working with the owner; the kit's `AGENT-START.md` is the one-page brief to read first. Work top to bottom. Every step has exact PowerShell and a pass/fail line. Write results into `C:\xemu-kit\results\RESULTS.md` as you go (template in section 6).
 
 Tags used below: **[owner]** means a person has to look, listen or hold the controller. **[agent]** means Claude can run it alone. **P0** = do first, **P1** = do this session, **P2** = only if there's time.
 
@@ -25,6 +25,7 @@ Tags used below: **[owner]** means a person has to look, listen or hold the cont
 - Don't wait for an idle machine. Quote the load, and add pairs instead.
 - Personal set (`kit\personal`): use it for playing and for smoke-testing the owner's real setup. Fixture set (`kit\fixtures`): use it for benchmarks, goldens and savestate tests. Never mix them.
 - Map macOS paths in the skills to Windows ones: `../fixtures` becomes `C:\xemu-kit\fixtures` (via `$env:XEMU_TEST_CONFIG`), `bench-det.py` becomes `scripts\win\det_golden.py`, `bench-savestate-ab.sh` becomes `bench-savestate-ab-win.py`, `ninja -C build qemu-system-i386` becomes `ninja -C build qemu-system-i386w.exe` (MSYS2), and APFS clones become plain copies.
+- Claude Code runs these blocks through its PowerShell tool, one fresh process per call: dot-source `kit.ps1` in every call, keep each `Start-Xemu` with its `Stop-Xemu`, and run anything longer than 2 min in the background (1.10).
 
 ### Time budget
 
@@ -66,7 +67,11 @@ if (Get-Command vulkaninfo -ErrorAction SilentlyContinue) { vulkaninfo --summary
 
 `arch=9` is x86_64 and `arch=12` is ARM64 (Windows on Snapdragon). Note whether the CPU is a hybrid (Intel 12th gen or later, with P- and E-cores), because section 3.13 depends on it.
 
-### 1.2 Install prerequisites [owner, about 10 min]
+### 1.2 Install prerequisites [owner, about 15 min]
+
+First the GPU driver: install the vendor's current driver (from the NVIDIA, AMD or Intel website, not only Windows Update) and reboot. Then check that `Test-Path "$env:WINDIR\System32\vulkan-1.dll"` is True and that `Get-CimInstance Win32_VideoController` doesn't show "Microsoft Basic Display Adapter". On a laptop, plug in, and once 1.5 has unzipped the builds, set Settings > System > Display > Graphics to High performance for each `xemu.exe` under `C:\xemu-kit\bin`.
+
+If `winget` isn't recognized on a fresh PC, update "App Installer" from the Microsoft Store (or run `Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe`) and open a new window.
 
 Open PowerShell (Windows Terminal is fine) and run:
 
@@ -75,17 +80,23 @@ $wg = '--accept-source-agreements', '--accept-package-agreements', '-e'
 winget install @wg --id Git.Git
 winget install @wg --id Python.Python.3.12
 winget install @wg --id GitHub.cli
-winget install @wg --id OpenJS.NodeJS.LTS
 winget install @wg --id 7zip.7zip
 # only if you will build xemu yourself (section 7):
 winget install @wg --id MSYS2.MSYS2
+# Claude Code, native installer: auto-updates, needs no Node, puts claude.exe in %USERPROFILE%\.local\bin
+irm https://claude.ai/install.ps1 | iex      # alternative: winget install @wg --id Anthropic.ClaudeCode
 # make the new tools visible in this window
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-npm install -g @anthropic-ai/claude-code     # alternatives: irm https://claude.ai/install.ps1 | iex, or the winget package if `winget search claude` lists one
+if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ";$env:USERPROFILE\.local\bin", 'User')
+  $env:Path += ";$env:USERPROFILE\.local\bin"
+}
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
-git --version; py -3 --version; gh --version; node --version; claude --version
+git --version; py -3 --version; gh --version; claude --version
 gh auth login
 ```
+
+`gh auth login` is an [owner] step: pick GitHub.com, HTTPS, "Authenticate Git with your GitHub credentials" = Yes, and the browser login. It's needed to push `windows` and for `gh run`. The repo is public, so the clone and the kit's zips need no login.
 
 Pass: every `--version` prints and `gh auth status` says you're logged in. Use `py -3` for every script. MSYS2's own python must not run the bench: it refuses, because it needs `os.name == 'nt'`.
 
@@ -101,7 +112,7 @@ git clone https://github.com/MichaelJSr/xemu-macos.git
 Set-Location xemu-macos
 git fetch origin
 git switch windows
-if ($LASTEXITCODE -ne 0) { git switch -c windows origin/master }
+if ($LASTEXITCODE -ne 0) { git fetch C:\xemu-kit\repo\xemu-macos.bundle windows:windows; git switch windows }
 git remote add upstream https://github.com/xemu-project/xemu.git
 git log --oneline -3; git describe --tags
 ```
@@ -119,10 +130,13 @@ The repo should live at `C:\Users\<you>\xemu-macos`. Keep it free of spaces in t
 
 ### 1.4 Lay out the kit and verify it [agent]
 
-The kit is copied to `C:\xemu-kit` (see `WINDOWS-KIT-README.md` for the layout and the SHA256 check). If it's still on an external drive (here `E:`), copy it first:
+The kit is copied to `C:\xemu-kit` (see `WINDOWS-KIT-README.md` for the layout and the SHA256 check). It needs about 14 GB, plus another 25 GB free for play copies, builds, caches and scratch runs (check with `Get-PSDrive C`). If it's still on an external drive (here `E:`), copy it first. The folder on the drive is named `xemu-fork-windows-kit` when it comes from the Mac; use its real name. robocopy exit codes 0-7 mean success, 8 or more failure.
 
 ```powershell
-robocopy E:\xemu-kit C:\xemu-kit /E /J /R:1 /W:1 /NFL /NDL
+robocopy E:\xemu-fork-windows-kit C:\xemu-kit /E /J /R:1 /W:1 /NFL /NDL
+# macOS leaves ._* and .DS_Store files on exFAT drives, and a download marks files as from the internet
+Get-ChildItem C:\xemu-kit -Recurse -Force -File | Where-Object { $_.Name -like '._*' -or $_.Name -eq '.DS_Store' } | Remove-Item -Force
+Get-ChildItem C:\xemu-kit -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 ```
 
 Then verify every file against `SHA256SUMS.txt` (about 15 min for roughly 13 GB) and mark the two pristine sets read-only:
@@ -142,29 +156,32 @@ Get-Content -LiteralPath "$Kit\SHA256SUMS.txt" | ForEach-Object {
 Get-ChildItem -LiteralPath "$Kit\personal", "$Kit\fixtures" -Recurse -File | ForEach-Object { $_.IsReadOnly = $true }
 ```
 
-Pass: `problems: 0`. The fixture hashes must also match the 2026-10-11 manifest in `kit\fixtures\README.md`: `xbox_hdd.qcow2` 1c6f030a..., `Azurik_qol.iso` c167168e..., `eeprom.bin` a1784937..., `mcpx_1.0.bin` e99e3a77..., `Complex_4627v1.03.bin` 1de4c87e....
+Pass: `problems: 0`. `SHA256SUMS.txt` is authoritative. `fixtures\README.md`'s manifest dates from 2026-10-11 and the HDD has changed since (same 11 snapshot tags), so its `xbox_hdd.qcow2` line (1c6f030a...) is stale; don't treat that mismatch as corruption. The fixtures hash to `xbox_hdd.qcow2` 9e31cd901452ed87..., `Azurik_qol.iso` c167168e..., `eeprom.bin` a1784937..., `mcpx_1.0.bin` e99e3a77..., `Complex_4627v1.03.bin` 1de4c87e....
 
-### 1.5 Get the release zips and unzip them [agent]
+### 1.5 Unzip the release builds [agent]
 
-Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. Use the newest fork release (v0.15.1 when this was written): `gh release list --repo MichaelJSr/xemu-macos --limit 3`; if a newer one exists, set `$Ver` here and in `kit.ps1`. The kit's `releases\` folder may already hold these files, in which case `--skip-existing` skips them.
+Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. The kit already holds every x86_64 zip (matching GitHub's digests) and the v0.15.1 arm64 ones: the fork's v0.15.1 and v0.14 zips in `releases\`, upstream's v0.8.137 in `releases\upstream-v0.8.137\`. The `gh release download` lines below only run when `gh auth status` passes, and with `--skip-existing` they only fetch what's missing. If `gh release list --repo MichaelJSr/xemu-macos --limit 3` shows a release newer than v0.15.1, set `$Ver` here and in `kit.ps1`.
 
 ```powershell
 $Kit = 'C:\xemu-kit'
 $Arch = if ((Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture -eq 12) { 'arm64' } else { 'x86_64' }
 $Ver = 'v0.15.1'; $V = $Ver.TrimStart('v')
-New-Item -ItemType Directory -Force "$Kit\releases" | Out-Null
-gh release download $Ver --repo MichaelJSr/xemu-macos --dir "$Kit\releases" --skip-existing `
-  --pattern "xemu-$V-windows-$Arch.zip" --pattern "xemu-$V-windows-$Arch-pdb.zip" `
-  --pattern "xemu-$V-dbg-windows-$Arch.zip" --pattern "xemu-$V-dbg-windows-$Arch-pdb.zip"
-gh release download v0.14 --repo MichaelJSr/xemu-macos --dir "$Kit\releases" --skip-existing --pattern "xemu-0.14-windows-$Arch.zip"
-gh release download v0.8.137 --repo xemu-project/xemu --dir "$Kit\releases" --skip-existing --pattern "xemu-0.8.137-windows-$Arch.zip"
-Get-ChildItem "$Kit\releases\*.zip" | Unblock-File
-Expand-Archive "$Kit\releases\xemu-$V-windows-$Arch.zip"         "$Kit\bin\$Ver"     -Force
-Expand-Archive "$Kit\releases\xemu-$V-windows-$Arch-pdb.zip"     "$Kit\bin\$Ver"     -Force
-Expand-Archive "$Kit\releases\xemu-$V-dbg-windows-$Arch.zip"     "$Kit\bin\$Ver-dbg" -Force
-Expand-Archive "$Kit\releases\xemu-$V-dbg-windows-$Arch-pdb.zip" "$Kit\bin\$Ver-dbg" -Force
-Expand-Archive "$Kit\releases\xemu-0.14-windows-$Arch.zip"       "$Kit\bin\v0.14"    -Force
-Expand-Archive "$Kit\releases\xemu-0.8.137-windows-$Arch.zip"    "$Kit\bin\upstream-0.8.137" -Force
+$Rel = "$Kit\releases"; $Up = "$Rel\upstream-v0.8.137"
+gh auth status *> $null
+if ($LASTEXITCODE -eq 0) {
+  gh release download $Ver --repo MichaelJSr/xemu-macos --dir $Rel --skip-existing `
+    --pattern "xemu-$V-windows-$Arch.zip" --pattern "xemu-$V-windows-$Arch-pdb.zip" `
+    --pattern "xemu-$V-dbg-windows-$Arch.zip" --pattern "xemu-$V-dbg-windows-$Arch-pdb.zip"
+  gh release download v0.14 --repo MichaelJSr/xemu-macos --dir $Rel --skip-existing --pattern "xemu-0.14-windows-$Arch.zip"
+  gh release download v0.8.137 --repo xemu-project/xemu --dir $Up --skip-existing --pattern "xemu-0.8.137-windows-$Arch.zip"
+}
+Get-ChildItem $Rel -Recurse -Filter *.zip | Unblock-File
+Expand-Archive "$Rel\xemu-$V-windows-$Arch.zip"         "$Kit\bin\$Ver"     -Force
+Expand-Archive "$Rel\xemu-$V-windows-$Arch-pdb.zip"     "$Kit\bin\$Ver"     -Force
+Expand-Archive "$Rel\xemu-$V-dbg-windows-$Arch.zip"     "$Kit\bin\$Ver-dbg" -Force
+Expand-Archive "$Rel\xemu-$V-dbg-windows-$Arch-pdb.zip" "$Kit\bin\$Ver-dbg" -Force
+Expand-Archive "$Rel\xemu-0.14-windows-$Arch.zip"       "$Kit\bin\v0.14"    -Force
+Expand-Archive "$Up\xemu-0.8.137-windows-$Arch.zip"     "$Kit\bin\upstream-0.8.137" -Force
 Get-ChildItem "$Kit\bin\*\xemu.exe" | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_ -Algorithm SHA256).Hash.Substring(0, 16), $_.FullName }
 ```
 
@@ -202,6 +219,7 @@ Set-TomlKey $cfg 'general' 'show_welcome'    'false'
 Set-TomlKey $cfg 'general.updates' 'check'   'false'
 Set-TomlKey $cfg 'audio' 'volume_limit'      '0'
 Set-TomlKey $cfg 'display' 'renderer'        "'VULKAN'"
+Remove-TomlKey $cfg 'display.vulkan' 'preferred_physical_device'   # the Mac's 'Apple M2 Ultra'; 2.3 checks the pick
 Set-TomlKey $cfg 'display.window' 'fullscreen_on_startup' 'false'
 Set-TomlKey $cfg 'input' 'auto_bind'         'false'
 if ((Get-TomlKey $cfg 'input.bindings' 'port1') -ne 'keyboard') { Remove-TomlKey $cfg 'input.bindings' 'port1' }  # the Mac controller GUID; runs stub player 1
@@ -209,7 +227,9 @@ Select-String -LiteralPath $cfg -Pattern '_path|games_dir|volume_limit|renderer|
 
 # --- personal: the owner's setup (play copies of the HDD and EEPROM; ROMs and discs read in place) ---
 $P = "$Kit\personal"
-Copy-Item -LiteralPath "$P\xbox_hdd.qcow2", "$P\eeprom.bin" "$Kit\play" -Force
+foreach ($f in 'xbox_hdd.qcow2', 'eeprom.bin') {   # never overwrite the owner's Windows play copies on a re-run
+  if (-not (Test-Path -LiteralPath "$Kit\play\$f")) { Copy-Item -LiteralPath "$P\$f" "$Kit\play" }
+}
 Get-ChildItem -LiteralPath "$Kit\play" -File | ForEach-Object { $_.IsReadOnly = $false }
 Select-String -LiteralPath "$P\xemu.toml" -Pattern 'bootrom_path|flashrom_path|dvd_path|mem_limit'   # the macOS file names, for reference
 $bios = Get-ChildItem -LiteralPath "$P\BIOS" -File | Where-Object Name -eq 'Complex_4627v1.03.bin'
@@ -231,6 +251,10 @@ Set-TomlKey $cfg 'general' 'screenshot_dir'  (Q "$Work\shots")
 Set-TomlKey $cfg 'general.updates' 'check'   'false'
 Set-TomlKey $cfg 'audio' 'volume_limit'      '0'      # muted for agent runs; raise it in Settings > Audio when you play
 Set-TomlKey $cfg 'display.window' 'fullscreen_on_startup' 'false'
+Remove-TomlKey $cfg 'display.vulkan' 'preferred_physical_device'   # xemu picks and saves this PC's GPU
+Set-TomlKey $cfg 'display.ui' 'auto_scale' 'true'                    # the Mac's 2x Retina UI scale doesn't fit here
+Remove-TomlKey $cfg 'display.ui' 'scale'
+Remove-TomlKey $cfg 'display.window' 'startup_size'
 if ((Get-TomlKey $cfg 'input.bindings' 'port1') -ne 'keyboard') { Remove-TomlKey $cfg 'input.bindings' 'port1' }  # your pad gets a Windows GUID; bind it in Settings > Input
 Select-String -LiteralPath $cfg -Pattern '_path|games_dir|volume_limit|renderer|port[1-4]|mem_limit'
 ```
@@ -288,9 +312,11 @@ claude            # log in, check that it starts in the repo, then /exit
 Get-ChildItem "$env:USERPROFILE\.claude\projects" | Select-Object Name
 ```
 
-Check after the first `claude` run. If the folder Claude created differs from `$proj` (for example a lower-case drive letter), move the files: `Move-Item "$mem\*" "$env:USERPROFILE\.claude\projects\<created-name>\memory\"`. Then start again with `claude` and ask "what do you remember about this project?". It should mention the golden hashes and the lean dev process. If Claude Code can't find Git Bash: `$env:CLAUDE_CODE_GIT_BASH_PATH = 'C:\Program Files\Git\bin\bash.exe'`.
+Check after the first `claude` run. If the folder Claude created differs from `$proj` (for example a lower-case drive letter), move the files: `Move-Item "$mem\*" "$env:USERPROFILE\.claude\projects\<created-name>\memory\"`. Then start Claude Code in the repo with the kit as an extra working directory, `claude --add-dir C:\xemu-kit` (CLAUDE.md, the skills and the memory load only for a session started in the repo), and ask "what do you remember about this project?". It should mention the golden hashes, the lean dev process and the `windows-session` memory (commit to `windows` only). If Claude Code can't find Git Bash, set `CLAUDE_CODE_GIT_BASH_PATH` to `C:\Program Files\Git\bin\bash.exe` (in the `env` block of `%USERPROFILE%\.claude\settings.json`, or in the environment before starting `claude`).
 
-Claude Code's shell on Windows is Git Bash. Run the PowerShell blocks in this plan in a PowerShell window. Alternatively, Claude can write a block to `C:\xemu-kit\work\step.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass -File C:\xemu-kit\work\step.ps1`. xemu writes its stderr to the redirected file only when its parent has a console. Launched without one, it writes `xemu.log` in its working directory, fully buffered. If a run's `stderr.log` stays empty, run the same command from a PowerShell window (section 3.1).
+How Claude runs this plan's PowerShell: Claude Code on Windows has a PowerShell tool, on by default with Git for Windows (claude.ai and Console accounts). It uses `pwsh` 7 if installed, else Windows PowerShell 5.1, with `-ExecutionPolicy Bypass`; the Bash tool (Git Bash) stays for POSIX commands. Each call is a fresh process, so functions, `$p` and `$env:` changes don't carry over: start every call with `. C:\xemu-kit\tools\kit.ps1`, and keep each `Start-Xemu` and its `Stop-Xemu` in the same call. Foreground calls time out after 2 min by default (10 min at most). Run longer blocks (2.2, 2.3, 3.7, 3.8, 3.10a, 3.10d, 3.11, 3.12, 3.13, section 4) in the background: write the block to `C:\xemu-kit\work\step-<id>.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass -File C:\xemu-kit\work\step-<id>.ps1 *> C:\xemu-kit\results\step-<id>.log` with `run_in_background`, then read the log when it finishes. After any interrupted call, run `Stop-AutoXemu` before the next launch.
+
+xemu writes to the redirected `stderr.log` only when it can attach to its parent's console. Without one, it sends both streams to `xemu.log` in its working directory. The kit's helpers cope (`Get-XemuLog`), but the bench's `ab_*.log` captures don't. Step 3.1 shows which case you're in. If its `xemu.log` exists, give the bench blocks a console of their own: `Start-Process powershell -WindowStyle Minimized -Wait -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "& 'C:\xemu-kit\work\step-<id>.ps1' *> 'C:\xemu-kit\results\step-<id>.log'"` (in the background as above).
 
 ### 1.11 Vulkan SDK for validation layers [owner, optional, needed by 3.10a]
 
@@ -358,6 +384,8 @@ foreach ($t in 'azurik-heavy-f1', 'azurik-heavy-w2', 'azurik-stream-e2', 'vm-202
 ```
 
 Pass, for each tag: `loaded <tag>`, a PASS screenshot, and nsprof draws per flip in the tag's band. Expect heavy-f1 576-690, W2 306-323, F5 about 471, and stream-e2 about 207 standing. There should be no `vkWaitForFences` warning and the process should stay alive. A `loadvm` error `Unknown section ... 1.3/usb-hub` means the player-1 stub is missing. The `-Stub` switch adds it through `scripts\harness-config.py`; outside it, set `XEMU_LOADVM_ADD_PADS=1` (v0.15 and later).
+
+Also check the GPU: `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'Selected physical device'` must name the discrete GPU. With no `preferred_physical_device`, xemu takes the first compatible device, which can be the integrated one. If it does, pin it: `Set-TomlKey "$Work\xemu-fixtures.toml" 'display.vulkan' 'preferred_physical_device' (Q '<exact name from the "Available physical devices" list in the same log>')`, and repeat 2.3.
 
 ### 2.4 Vulkan versus OpenGL on this GPU [agent, 5 min]
 
@@ -952,8 +980,9 @@ Leave out `results\dumps` if it's large (full dumps are GBs); copy those separat
 ```powershell
 Set-Location "$env:USERPROFILE\xemu-macos"
 git switch windows
-git add scripts/win/xemu_ctl.py scripts/win/det_golden.py
-git commit -m 'scripts/win: QMP client and deterministic golden runner' -m 'Windows stand-ins for bench-det.py (macOS-only: libproc, AF_UNIX, .app) and for the nc/socat monitor one-liners. det_golden.py repeats bench-det run_once on xemu.exe: fixture clone, harness-config pad stubs, headless null, -S -icount, loadvm, pipe lines, frame-advance, xemu-ram-digest sha256[:16]; Mcyc/frame from QueryProcessCycleTime.' -m 'Co-Authored-By: <the trailer your harness gives>'
+git status --short
+git add <changed files>
+git commit -m '<subsystem>: <short description>' -m '<why, what, numbers>' -m 'Co-Authored-By: <exact trailer from your system prompt>'
 git push -u origin windows
 gh run list --repo MichaelJSr/xemu-macos --branch windows --limit 3
 ```
@@ -1057,7 +1086,7 @@ Every session must end in a clean QMP `quit` (`Stop-Xemu` sends one) so the coun
 | Crash | exit code, `results\dumps`, the Application event log | WinDbg with the PDB; repeat with `$XNewDbg` |
 | Freeze | `XEMU_PFIFO_HEARTBEAT=1` `iters` frozen? GPU TDR event 4101? | `XEMU_PFIFO_PUT_LOCK=1`; the fence warning names its wait site |
 | `loadvm` fails with `Unknown section ...usb-hub` | player-1 pad missing | `-Stub`, or `XEMU_LOADVM_ADD_PADS=1` |
-| Bench runs INVALID | `ab_*.log` empty? | run from a PowerShell window (3.1) |
+| Bench runs INVALID | `ab_*.log` empty, `xemu.log` next to the exe? | give the bench a console of its own (1.10, 3.1) |
 | Pipe `cannot open` | `XEMU_INPUT_PIPE` set on that launch? the keyboard bound to port 2? | `query-xemu-input`; `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'test-input pipe'` |
 | QMP refused, or `Start-Xemu` throws `port 4444 or 4445 already in use` | a leftover xemu holds the port (an interrupted call) | `Stop-AutoXemu` (stops only marked runs) |
 
