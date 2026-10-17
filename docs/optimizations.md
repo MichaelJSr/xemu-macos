@@ -554,10 +554,11 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   through TMP1, and the sub-page prefilter stores from the V register.
   Because the access now allocates V registers before its slow-path
   branch, every `st_f64_slow` register, not only the integer ones, stays
-  reserved until the access is emitted. m64fp loads keep the integer
+  reserved until the access is emitted. m64fp loads kept the integer
   SNaN quieting (FMAX would quiet in the FP domain, but bit-exactly only
-  under FPCR.DN = FZ = 0); `fild`/`fist` gain nothing (SCVTF and FCVTZS
-  take GPRs). Cross-binary det A/B against 9a8cb87de9 (both on the
+  under FPCR.DN = FZ = 0; the next entry adopts it); `fild`/`fist` gain
+  nothing (SCVTF and FCVTZS take GPRs). Cross-binary det A/B against
+  9a8cb87de9 (both on the
   committed PGO profile, whose only new mismatch is
   `tcg_out_qemu_st_direct`), each arm first in half the pairs, load
   26-85: heavy-f1 1200 f Minsns/frame −1.28% (16/16), Mcycles/frame
@@ -570,6 +571,32 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   watchpoint on a hot stack page (at least 1,250 of them right after an
   m32fp load, store or arithmetic operand); sub-page refuter
   `VIOLATIONS=0` on heavy-f1 and stream-e2.
+- **x87 m64fp loads quiet SNaNs on the FP side (2026-10-16).** An
+  m64fp `fld` or arithmetic operand still loaded into a GPR, quieted a
+  signalling NaN on the integer bits (AND, ORR, the 0x7FF0... constant,
+  CMP, CSEL) and moved the result to an FP register. It now loads
+  straight into a V register (`tcg_gen_qemu_ld_f64`, LDR D) and quiets
+  there with the new `quiet_f64` op, FMAX Dd, Dn, Dn on aarch64. That is
+  bit-exact only under FPCR.DN = FZ = 0 (and AH = 0), which is the
+  vCPU's FPCR outside the SSE helpers' bracket and what the m32fp loads'
+  FCVT already relies on. A differential test of FMAX against
+  `floatx80_to_double_fast(double_to_floatx80_fast(x))` (the helpers'
+  read-back, with the shared `tcg_x87_ld80_slow` routine) and against
+  `x87_wt_canon`, over 8.3e8 operands (every class, random payloads,
+  every exponent and the top 14 fraction bits) in all four RModes,
+  found 0 mismatches; FZ = 1 or DN = 1 broke every subnormal or NaN, as
+  a control. Det A/B against v0.15 (6f9f751565), 8 pairs per anchor,
+  each arm first in half, load 53-83: heavy-f1 1200 f Minsns/frame
+  −0.38% median (8/8), Mcycles/frame −0.52% median (5/8); stream-e2
+  600 f Minsns/frame −0.41% (8/8), Mcycles/frame −1.7% median (6/8).
+  Review re-measure (own builds, 8 pairs per anchor, both orders, load
+  33-41): heavy-f1 Minsns/frame −0.34% (8/8), Mcycles/frame −1.1%
+  median (4/8); stream-e2 Minsns/frame −0.59% (8/8), Mcycles/frame
+  +0.1% median (4/8). The cycle medians sit inside both sessions'
+  per-pair noise (up to ±24%); the instruction counts are the firm
+  numbers.
+  Goldens exact on release and debug-TCG, x87 refuter clean (heavy-f1
+  f600, every `*violations=` 0).
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control

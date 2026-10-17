@@ -450,8 +450,8 @@ void tcg_gen_qemu_st_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
  * xemu: a 4- or 8-byte guest load into an F32/F64 temp, or a store from
  * one. With qemu_ld_fp/qemu_st_fp (aarch64: LDR/STR St or Dt on the
  * guest page) the bits never pass through a GPR, where qemu_ld/st would
- * need an FMOV each way (i386's x87 m32fp loads, m32fp/m64fp stores; an
- * m64fp load quiets SNaNs on the integer bits). Accesses in host byte
+ * need an FMOV each way (i386's x87 m32fp/m64fp loads and stores).
+ * Accesses in host byte
  * order without plugin instrumentation only; otherwise an integer access
  * and a move.
  */
@@ -634,6 +634,24 @@ void tcg_gen_qemu_st_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
 }
 
 #if defined(XBOX)
+/* As tcg_gen_qemu_ld_f32_chk, for 8 bytes. */
+void tcg_gen_qemu_ld_f64_chk(TCGv_f64 val, TCGTemp *addr, TCGArg idx,
+                             MemOp memop, TCGType addr_type)
+{
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert((memop & MO_SSIZE) == MO_UQ);
+    if (tcg_qemu_fp_direct(memop)) {
+        tcg_gen_qemu_ldst_fp(INDEX_op_qemu_ld_fp, TCG_TYPE_F64,
+                             tcgv_f64_temp(val), addr, idx, memop);
+    } else {
+        TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+        tcg_gen_qemu_ld_i64_int(t, addr, idx, memop);
+        tcg_gen_mov64i_f64(val, t);
+        tcg_temp_free_i64(t);
+    }
+}
+
 /* As tcg_gen_qemu_st_f32_chk, for 8 bytes. */
 void tcg_gen_qemu_st_f64_chk(TCGv_f64 val, TCGTemp *addr, TCGArg idx,
                              MemOp memop, TCGType addr_type)

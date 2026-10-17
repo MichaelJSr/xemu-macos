@@ -82,6 +82,8 @@
 #define TCG_TARGET_HAS_ld80d            TCG_TARGET_HAS_fpu
 /* FRINTX Dd, Dn */
 #define TCG_TARGET_HAS_rint_f64         TCG_TARGET_HAS_fpu
+/* FMAX Dd, Dn, Dn */
+#define TCG_TARGET_HAS_quiet_f64        TCG_TARGET_HAS_fpu
 /* CMP or TST, FCSEL Dd, Dn, Dm, cond */
 #define TCG_TARGET_HAS_movcond_f64      TCG_TARGET_HAS_fpu
 /* LDR Qt from the guest */

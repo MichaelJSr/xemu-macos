@@ -84,5 +84,8 @@
 #ifndef TCG_TARGET_HAS_rint_f64
 #define TCG_TARGET_HAS_rint_f64         0
 #endif
+#ifndef TCG_TARGET_HAS_quiet_f64
+#define TCG_TARGET_HAS_quiet_f64        0
+#endif
 
 #endif

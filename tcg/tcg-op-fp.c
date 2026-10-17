@@ -375,6 +375,21 @@ void tcg_gen_rint_f64(TCGv_f64 ret, TCGv_f64 arg)
                 tcgv_f64_arg(arg));
 }
 
+/*
+ * xemu: arg, except that a signalling NaN comes back quiet (quiet bit set,
+ * sign and payload kept): what an x87 m64fp load reads back after its
+ * double has been through floatx80 (i386 x87_wt_canon). aarch64: FMAX Dd,
+ * Dn, Dn, exact only under FPCR.DN = FZ = 0 (and AH = 0), the vCPU's FPCR
+ * outside the SSE helpers' bracket, which the m32fp loads' FCVT already
+ * relies on. Hosts without it quiet the integer bits.
+ */
+void tcg_gen_quiet_f64(TCGv_f64 ret, TCGv_f64 arg)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_quiet_f64);
+    tcg_gen_op2(INDEX_op_quiet_f64, TCG_TYPE_F64, tcgv_f64_arg(ret),
+                tcgv_f64_arg(arg));
+}
+
 void tcg_gen_sin_f32(TCGv_f32 ret, TCGv_f32 arg)
 {
     tcg_gen_op2(INDEX_op_sin_f32, TCG_TYPE_F32, tcgv_f32_arg(ret), tcgv_f32_arg(arg));

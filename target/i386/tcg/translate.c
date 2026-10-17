@@ -48,6 +48,7 @@ static int g_use_hard_fpu_inline;
 #if defined(XBOX)
 static int g_x87_wt; /* write-through inline x87 (x87_wt_*) */
 static int g_x87_dbl; /* doubles-primary registers (x87_wt_dbl) */
+static int g_x87_quiet; /* m64fp loads quiet SNaNs on the FP side */
 bool xemu_x87_top_key; /* TB keys carry the x87 TOP (x87_top) */
 int xemu_sse_vfp; /* inline packed-single add/sub/mul/div (gen_fp_sse_inline) */
 #endif
@@ -2462,7 +2463,8 @@ static void gen_flush_fp(DisasContext *s)
  *    x87 instructions does not reconvert, and past the flush in env
  *    (x87_wt_dbl). st80f is exact, so
  *    that is the computed result itself; only a double loaded from memory
- *    can be a signalling NaN, which reads back quieted (x87_wt_canon);
+ *    can be a signalling NaN, which reads back quieted (x87_wt_canon, or
+ *    FMAX on the FP side for m64fp loads, x87_wt_ld_f64);
  *  - the FPCR is never written: the helpers round with whatever it holds.
  * Only blocks with precision control double/extended (HF_FPU_PC) use it:
  * single precision rounds results to float (pack_arm64) and keeps the
@@ -3132,8 +3134,8 @@ static void x87_top_check(DisasContext *s)
 
 /*
  * ST(i) = r, as a helper writes double_to_floatx80_fast(result). r reads
- * back unchanged: it is computed by the host (fadd, fcvt, scvtf...), which
- * never returns a signalling NaN.
+ * back unchanged: it is computed by the host (fadd, fcvt, scvtf, fmax...),
+ * which never returns a signalling NaN.
  */
 static void x87_wt_set_st(DisasContext *s, int i, TCGv_f64 r)
 {
@@ -3691,6 +3693,21 @@ static TCGv_f64 x87_wt_ld_f32(DisasContext *s)
 
     tcg_gen_qemu_ld_f32(t, s->A0, s->mem_index, MO_LEUL);
     tcg_gen_cvt32f_f64(d, t);
+    return d;
+}
+
+/*
+ * The m64fp operand at A0 as x87_wt_canon gives it: loaded straight into
+ * an FP register (LDR Dt), a signalling NaN quieted there (quiet_f64:
+ * FMAX Dd, Dn, Dn), instead of LDR X, the integer select and an FMOV.
+ */
+static TCGv_f64 x87_wt_ld_f64(DisasContext *s)
+{
+    TCGv_f64 t = tcg_temp_new_f64();
+    TCGv_f64 d = tcg_temp_new_f64();
+
+    tcg_gen_qemu_ld_f64(t, s->A0, s->mem_index, MO_LEUQ);
+    tcg_gen_quiet_f64(d, t);
     return d;
 }
 
@@ -5640,6 +5657,12 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     gen_fildl_FT0(s, s->tmp2_i32);
                     break;
                 case 2:
+#if defined(XBOX)
+                    if (x87_wt(s) && g_x87_quiet) {
+                        s->wt_ft0 = x87_wt_ld_f64(s);
+                        break;
+                    }
+#endif
                     tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);
                     gen_fldl_FT0(s, s->tmp1_i64);
@@ -5688,6 +5711,15 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     gen_fildl_ST0(s, s->tmp2_i32);
                     break;
                 case 2:
+#if defined(XBOX)
+                    if (x87_wt(s) && g_x87_quiet) {
+                        TCGv_f64 d = x87_wt_ld_f64(s);
+
+                        gen_fpush(s);
+                        x87_wt_set_st(s, 0, d);
+                        break;
+                    }
+#endif
                     tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);
                     gen_fldl_ST0(s, s->tmp1_i64);
@@ -7062,6 +7094,9 @@ void tcg_x86_init(void)
     g_x87_wt = g_use_hard_fpu &&
                tcg_op_supported(INDEX_op_add_f64, TCG_TYPE_I64, 0) &&
                tcg_op_supported(INDEX_op_rint_f64, TCG_TYPE_I64, 0);
+    /* m64fp loads into an FP register, quieted there (x87_wt_ld_f64). */
+    g_x87_quiet = g_x87_wt &&
+                  tcg_op_supported(INDEX_op_quiet_f64, TCG_TYPE_I64, 0);
 #if !defined(TARGET_X86_64)
     /* Write-through blocks address ST(i) from the key's TOP (x87_top). */
     xemu_x87_top_key = g_x87_wt;

@@ -181,6 +181,8 @@ DEF(movcond_f64, 1, 4, 1, TCG_OPF_FP)
 DEF(mul_f32, 1, 2, 0, TCG_OPF_FP)
 DEF(mul_f64, 1, 2, 0, TCG_OPF_FP)
 DEF(rint_f64, 1, 1, 0, TCG_OPF_FP)
+/* xemu: the operand, with a signalling NaN quieted (x87 m64fp loads) */
+DEF(quiet_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f32, 1, 1, 0, TCG_OPF_FP)
 DEF(sin_f64, 1, 1, 0, TCG_OPF_FP)
 DEF(sqrt_f32, 1, 1, 0, TCG_OPF_FP)

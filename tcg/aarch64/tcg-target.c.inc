@@ -672,6 +672,7 @@ typedef enum {
     INSN_FMUL_D     = 0x1e600800,
     INSN_FDIV_S     = 0x1e201800,
     INSN_FDIV_D     = 0x1e601800,
+    INSN_FMAX_D     = 0x1e604800,
 
     /* Scalar floating-point (one source). */
     INSN_FMOV_S     = 0x1e204000,
@@ -4583,6 +4584,15 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     case INDEX_op_rint_f64:
         tcg_out_fp_1src(s, INSN_FRINTX_D, a0, a1);
         break;
+    case INDEX_op_quiet_f64:
+        /*
+         * FMAX of the operand with itself: a signalling NaN comes back
+         * quieted with its sign and payload (FPCR.DN = 0), anything else
+         * unchanged (FZ = 0: a subnormal is not flushed). See
+         * tcg_gen_quiet_f64 for why FPCR holds that here.
+         */
+        tcg_out_fp_2src(s, INSN_FMAX_D, a0, a1, a1);
+        break;
 
     case INDEX_op_st_f64:
         tcg_out_st(s, TCG_TYPE_F64, a0, a1, a2);
@@ -5232,6 +5242,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
     case INDEX_op_rint_f64:
+    case INDEX_op_quiet_f64:
     case INDEX_op_mov_f32:
     case INDEX_op_mov_f64:
     case INDEX_op_cvt32f_f64:

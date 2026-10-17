@@ -339,6 +339,7 @@ void tcg_gen_qemu_ld_env_i128_chk(intptr_t, TCGTemp *, TCGArg, MemOp,
 void tcg_gen_qemu_st_i128_chk(TCGv_i128, TCGTemp *, TCGArg, MemOp, TCGType);
 #if defined(XBOX)
 void tcg_gen_qemu_ld_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
+void tcg_gen_qemu_ld_f64_chk(TCGv_f64, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_st_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_st_f64_chk(TCGv_f64, TCGTemp *, TCGArg, MemOp, TCGType);
 #endif
@@ -646,6 +647,7 @@ void tcg_gen_mov_f64(TCGv_f64 ret, TCGv_f64 src);
 void tcg_gen_mul_f32(TCGv_f32 ret, TCGv_f32 arg1, TCGv_f32 arg2);
 void tcg_gen_mul_f64(TCGv_f64 ret, TCGv_f64 arg1, TCGv_f64 arg2);
 void tcg_gen_rint_f64(TCGv_f64 ret, TCGv_f64 arg);
+void tcg_gen_quiet_f64(TCGv_f64 ret, TCGv_f64 arg);
 void tcg_gen_sin_f32(TCGv_f32 ret, TCGv_f32 arg);
 void tcg_gen_sin_f64(TCGv_f64 ret, TCGv_f64 arg);
 void tcg_gen_sqrt_f32(TCGv_f32 ret, TCGv_f32 arg);

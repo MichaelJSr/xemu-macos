@@ -128,6 +128,12 @@ tcg_gen_qemu_ld_f32(TCGv_f32 v, TCGv a, TCGArg i, MemOp m)
 }
 
 static inline void
+tcg_gen_qemu_ld_f64(TCGv_f64 v, TCGv a, TCGArg i, MemOp m)
+{
+    tcg_gen_qemu_ld_f64_chk(v, tcgv_tl_temp(a), i, m, TCG_TYPE_TL);
+}
+
+static inline void
 tcg_gen_qemu_st_f32(TCGv_f32 v, TCGv a, TCGArg i, MemOp m)
 {
     tcg_gen_qemu_st_f32_chk(v, tcgv_tl_temp(a), i, m, TCG_TYPE_TL);
