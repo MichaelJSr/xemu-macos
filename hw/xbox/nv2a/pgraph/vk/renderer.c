@@ -86,9 +86,10 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
 
     PGRAPHVkState *r = pg->vk_renderer_state;
 #if HAVE_IOSURFACE_SHARING
-    fprintf(stderr, "IOSurface sharing: %s (VK_EXT_metal_objects=%s)\n",
+    fprintf(stderr, "IOSurface sharing: %s (VK_EXT_metal_objects=%s%s)\n",
             r->metal_objects_extension_enabled ? "enabled" : "disabled",
-            r->metal_objects_extension_enabled ? "yes" : "no");
+            r->metal_objects_extension_enabled ? "yes" : "no",
+            r->metal_copy_present ? ", copy-present" : "");
 #elif HAVE_EXTERNAL_MEMORY
     fprintf(stderr, "External memory sharing: enabled\n");
 #else
@@ -373,7 +374,7 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
     SurfaceBinding *surface = pgraph_vk_surface_get_within(
         d, d->pcrtc.start + vga_display_params.line_offset);
     if (surface == NULL || !surface->color ||
-        !r->metal_objects_extension_enabled) {
+        !pgraph_vk_metal_present_interop(r)) {
         qemu_mutex_unlock(&d->pfifo.lock);
         return false;
     }

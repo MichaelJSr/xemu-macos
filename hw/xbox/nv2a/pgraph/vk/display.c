@@ -109,7 +109,7 @@ bool pgraph_vk_push_present_enabled(NV2AState *d)
      * GPU-side. See pgraph_vk_present_schedule_publish.
      */
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
-    return r && r->metal_objects_extension_enabled;
+    return r && pgraph_vk_metal_present_interop(r);
 }
 
 /* Push one already-built step into the ring under the slot lock (caller
@@ -1003,6 +1003,14 @@ static void destroy_current_display_image(PGRAPHState *pg)
         CFRelease(d->mtl_texture);
         d->mtl_texture = NULL;
     }
+    if (d->copy_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, d->copy_buffer, NULL);
+        d->copy_buffer = VK_NULL_HANDLE;
+    }
+    if (d->copy_memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, d->copy_memory, NULL);
+        d->copy_memory = VK_NULL_HANDLE;
+    }
     if (d->present_iosurface) {
         CFRelease((IOSurfaceRef)d->present_iosurface);
         d->present_iosurface = NULL;
@@ -1046,6 +1054,101 @@ static void destroy_current_display_image(PGRAPHState *pg)
 
     d->draw_time = 0;
 }
+
+#if HAVE_IOSURFACE_SHARING
+/*
+ * Copy-present target (driver without VK_EXT_metal_objects, e.g. stock
+ * Mesa KosmicKrisp): a buffer whose dedicated memory is exported as an
+ * MTLHeap (VK_EXT_external_memory_metal), and a linear MTLTexture over
+ * that heap for MetalFX and the UI. render_display copies the
+ * compositor image into the buffer every frame. KosmicKrisp has no
+ * linear color attachments, so the compositor can't render there
+ * directly.
+ */
+static void create_display_copy_target(PGRAPHState *pg, int width, int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+    PFN_vkGetMemoryMetalHandleEXT get_handle =
+        (PFN_vkGetMemoryMetalHandleEXT)r->get_memory_metal_handle_fn;
+    if (!get_handle) {
+        fprintf(stderr, "nv2a: copy-present: no vkGetMemoryMetalHandleEXT\n");
+        return;
+    }
+
+    /*
+     * The row pitch must be a multiple of Metal's linear-texture
+     * alignment, known only once the heap (and its device) exists; 256
+     * bytes covers Apple GPUs and is checked below.
+     */
+    uint32_t row_bytes = ROUND_UP(width * 4, 256);
+
+    VkExternalMemoryBufferCreateInfo ext_buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
+    };
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = &ext_buffer_info,
+        .size = (VkDeviceSize)row_bytes * height,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VK_CHECK(vkCreateBuffer(r->device, &buffer_info, NULL, &d->copy_buffer));
+
+    VkMemoryRequirements reqs;
+    vkGetBufferMemoryRequirements(r->device, d->copy_buffer, &reqs);
+    VkMemoryDedicatedAllocateInfo dedicated_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .buffer = d->copy_buffer,
+    };
+    VkExportMemoryAllocateInfo export_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedicated_info,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
+    };
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &export_info,
+        .allocationSize = reqs.size,
+        .memoryTypeIndex = pgraph_vk_get_memory_type(
+            pg, reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
+    VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->copy_memory));
+    VK_CHECK(vkBindBufferMemory(r->device, d->copy_buffer, d->copy_memory, 0));
+
+    VkMemoryGetMetalHandleInfoEXT handle_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_METAL_HANDLE_INFO_EXT,
+        .memory = d->copy_memory,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
+    };
+    void *heap = NULL;
+    if (get_handle(r->device, &handle_info, &heap) != VK_SUCCESS || !heap) {
+        fprintf(stderr, "nv2a: copy-present: MTLHeap export failed\n");
+        return;
+    }
+    uint32_t align = metalfx_heap_linear_alignment(heap);
+    if (!align || row_bytes % align) {
+        fprintf(stderr, "nv2a: copy-present: row pitch %u not a multiple "
+                "of Metal's linear alignment %u\n", row_bytes, align);
+        return;
+    }
+    d->mtl_texture = metalfx_heap_linear_texture(heap, width, height,
+                                                 row_bytes);
+    d->copy_row_texels = row_bytes / 4;
+    if (d->mtl_texture) {
+        DISPLAY_DPRINTF("[Metal] copy-present texture %dx%d\n", width,
+                        height);
+    } else {
+        fprintf(stderr, "nv2a: copy-present: linear MTLTexture failed at "
+                "%dx%d\n", width, height);
+    }
+}
+#endif
+
+#if HAVE_IOSURFACE_SHARING
+static void present_forward_post(PGRAPHVkState *r, uint64_t value);
+#endif
 
 static void create_display_image(PGRAPHState *pg, int width, int height)
 {
@@ -1100,7 +1203,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     // Create image
     VkFormat display_format = VK_FORMAT_R8G8B8A8_UNORM;
 #if HAVE_IOSURFACE_SHARING
-    if (r->metal_objects_extension_enabled) {
+    if (pgraph_vk_metal_present_interop(r)) {
         display_format = VK_FORMAT_B8G8R8A8_UNORM;
     }
 #endif
@@ -1313,6 +1416,9 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                     image_create_info.extent.width,
                     image_create_info.extent.height);
         }
+    } else if (r->metal_copy_present && xemu_present_is_metal()) {
+        create_display_copy_target(pg, image_create_info.extent.width,
+                                   image_create_info.extent.height);
     } else if (r->metal_objects_extension_enabled && imported_iosurface) {
         d->iosurface = (void *)CFRetain(imported_iosurface);
 
@@ -1659,10 +1765,48 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    pgraph_vk_transition_image_layout(pg, cmd, disp->image,
-                                      disp->format,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+#if HAVE_IOSURFACE_SHARING
+    if (disp->copy_buffer != VK_NULL_HANDLE && disp->mtl_texture) {
+        /* Copy-present: hand Metal the frame through the exported heap. */
+        pgraph_vk_transition_image_layout(
+            pg, cmd, disp->image, disp->format,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy region = {
+            .bufferRowLength = disp->copy_row_texels,
+            .bufferImageHeight = disp->height,
+            .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .imageSubresource.layerCount = 1,
+            .imageExtent = { disp->width, disp->height, 1 },
+        };
+        vkCmdCopyImageToBuffer(cmd, disp->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               disp->copy_buffer, 1, &region);
+        VkBufferMemoryBarrier copy_barrier = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_HOST_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = disp->copy_buffer,
+            .size = VK_WHOLE_SIZE,
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                                 VK_PIPELINE_STAGE_HOST_BIT,
+                             0, 0, NULL, 1, &copy_barrier, 0, NULL);
+        pgraph_vk_transition_image_layout(
+            pg, cmd, disp->image, disp->format,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    } else
+#endif
+    {
+        pgraph_vk_transition_image_layout(
+            pg, cmd, disp->image, disp->format,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 
     pgraph_vk_end_debug_marker(r, cmd);
 #if HAVE_IOSURFACE_SHARING
@@ -1677,6 +1821,9 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
         pgraph_vk_end_compositor_commands_async(pg, cmd,
                                                 r->present_timeline, value);
         r->present_timeline_value = value;
+        if (r->present_forward) {
+            present_forward_post(r, value);
+        }
         metalfx_set_input_wait(r->present_timeline_event, value);
     } else
 #endif
@@ -1730,6 +1877,109 @@ static void destroy_surface_sampler(PGRAPHState *pg)
  * deadlocked MoltenVK was *per-frame* depth-image export; this is a
  * single semaphore export at init with the device idle).
  */
+static void *present_forward_thread_fn(void *opaque)
+{
+    PGRAPHVkState *r = opaque;
+    uint64_t done = 0;
+
+    qemu_mutex_lock(&r->present_forward_lock);
+    while (!r->present_forward_quit) {
+        if (r->present_forward_target <= done) {
+            qemu_cond_wait(&r->present_forward_cond, &r->present_forward_lock);
+            continue;
+        }
+        uint64_t target = r->present_forward_target;
+        qemu_mutex_unlock(&r->present_forward_lock);
+
+        VkSemaphoreWaitInfo wait_info = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .semaphoreCount = 1,
+            .pSemaphores = &r->present_timeline,
+            .pValues = &target,
+        };
+        VkResult res;
+        do {
+            res = vkWaitSemaphores(r->device, &wait_info, 100000000ull);
+        } while (res == VK_TIMEOUT && !qatomic_read(&r->present_forward_quit));
+        /* Signal even on error so no Metal consumer waits forever. */
+        metalfx_shared_event_signal(r->present_timeline_event, target);
+        done = target;
+
+        qemu_mutex_lock(&r->present_forward_lock);
+    }
+    qemu_mutex_unlock(&r->present_forward_lock);
+    return NULL;
+}
+
+/*
+ * Copy-present has no exportable event: submit the compositor with a
+ * plain timeline value and let present_forward_thread_fn turn its
+ * completion into an xemu-owned MTLSharedEvent signal, so the PFIFO
+ * thread still doesn't block in vkWaitForFences. Costs one CPU wakeup
+ * of latency per frame.
+ */
+static void create_present_forward(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    VkSemaphoreTypeCreateInfo type_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0,
+    };
+    VkSemaphoreCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &type_info,
+    };
+    if (vkCreateSemaphore(r->device, &create_info, NULL,
+                          &r->present_timeline) != VK_SUCCESS) {
+        r->present_timeline = VK_NULL_HANDLE;
+        return;
+    }
+    r->present_timeline_event = metalfx_new_shared_event();
+    if (!r->present_timeline_event) {
+        vkDestroySemaphore(r->device, r->present_timeline, NULL);
+        r->present_timeline = VK_NULL_HANDLE;
+        return;
+    }
+    qemu_mutex_init(&r->present_forward_lock);
+    qemu_cond_init(&r->present_forward_cond);
+    r->present_forward_target = 0;
+    r->present_forward_quit = false;
+    r->present_forward = true;
+    qemu_thread_create(&r->present_forward_thread, "nv2a.present_fwd",
+                       present_forward_thread_fn, r, QEMU_THREAD_JOINABLE);
+    fprintf(stderr, "nv2a: async compositor submit enabled (timeline "
+                    "forwarded to an MTLSharedEvent by a CPU thread)\n");
+}
+
+static void present_forward_post(PGRAPHVkState *r, uint64_t value)
+{
+    qemu_mutex_lock(&r->present_forward_lock);
+    r->present_forward_target = value;
+    qemu_cond_signal(&r->present_forward_cond);
+    qemu_mutex_unlock(&r->present_forward_lock);
+}
+
+static void destroy_present_forward(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!r->present_forward) {
+        return;
+    }
+    qemu_mutex_lock(&r->present_forward_lock);
+    qatomic_set(&r->present_forward_quit, true);
+    qemu_cond_signal(&r->present_forward_cond);
+    qemu_mutex_unlock(&r->present_forward_lock);
+    qemu_thread_join(&r->present_forward_thread);
+    metalfx_shared_event_signal(r->present_timeline_event,
+                                r->present_timeline_value);
+    qemu_cond_destroy(&r->present_forward_cond);
+    qemu_mutex_destroy(&r->present_forward_lock);
+    r->present_forward = false;
+}
+
 static void create_present_timeline(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1737,6 +1987,13 @@ static void create_present_timeline(PGRAPHState *pg)
     r->present_timeline = VK_NULL_HANDLE;
     r->present_timeline_event = NULL;
     r->present_timeline_value = 0;
+    r->present_forward = false;
+
+    if (xemu_present_is_metal() && r->timeline_semaphore_enabled &&
+        !r->metal_objects_extension_enabled && r->metal_copy_present) {
+        create_present_forward(pg);
+        return;
+    }
 
     if (!xemu_present_is_metal() || !r->timeline_semaphore_enabled ||
         !r->metal_objects_extension_enabled) {
@@ -1804,6 +2061,8 @@ static void create_present_timeline(PGRAPHState *pg)
 static void destroy_present_timeline(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    destroy_present_forward(pg);
 
     if (r->present_timeline_event) {
         CFRelease(r->present_timeline_event);
@@ -2025,11 +2284,22 @@ void pgraph_vk_init_display(PGRAPHState *pg)
 
     r->display.format = VK_FORMAT_R8G8B8A8_UNORM;
 #if HAVE_IOSURFACE_SHARING
-    if (r->metal_objects_extension_enabled) {
+    if (pgraph_vk_metal_present_interop(r)) {
         r->display.format = VK_FORMAT_B8G8R8A8_UNORM;
     }
-    r->export_metal_objects_fn = (void *)vkGetDeviceProcAddr(
-        r->device, "vkExportMetalObjectsEXT");
+    r->export_metal_objects_fn =
+        r->metal_objects_extension_enabled ?
+            (void *)vkGetDeviceProcAddr(r->device, "vkExportMetalObjectsEXT") :
+            NULL;
+    r->get_memory_metal_handle_fn =
+        r->metal_copy_present ?
+            (void *)vkGetDeviceProcAddr(r->device, "vkGetMemoryMetalHandleEXT") :
+            NULL;
+    if (r->metal_copy_present && xemu_present_is_metal()) {
+        fprintf(stderr, "nv2a: copy-present: compositor frames reach Metal "
+                        "through an MTLHeap-exported buffer (no "
+                        "VK_EXT_metal_objects)\n");
+    }
     qemu_mutex_init(&r->display.present_slot_lock);
     create_present_timeline(pg);
     probe_metal_texture_export(pg);
@@ -2259,7 +2529,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
 #if HAVE_IOSURFACE_SHARING
     if ((!disp->iosurface && !disp->mtl_texture) ||
-        !r->metal_objects_extension_enabled) {
+        !pgraph_vk_metal_present_interop(r)) {
         goto done_metalfx;
     }
 
