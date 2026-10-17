@@ -32,7 +32,7 @@ and tag `archive/windows-wave1-wip`.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`; `0` leaves it at the default class (less P-core time and power, slower under load). Deterministic mode's RR thread always requests it. Threads + runtime, P-core QoS |
+| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it. Threads + runtime, P-core QoS |
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
@@ -2506,6 +2506,36 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   2026-10-15 (`94a722acd8`; windowed heavy-f1 37.2 → 58.3 fps, W2
   41.5 → 54.6, 4/4 each at load 13-64; `XEMU_VCPU_QOS=0` leaves it at
   the default class).
+  Since 2026-10-16 the main-loop thread (`qemu_main`) does too in normal
+  mode, as it already did under icount; `XEMU_VCPU_QOS=0` covers it. It
+  runs timers, bottom halves, QMP and block completions holding the
+  BQL, and at the default class host load preempted it inside the lock.
+  A BQL contention build (per-thread contended waits and holds, not
+  committed), same binary, main loop default vs UI QoS, windowed 45 s
+  runs. First session, 3 pairs per anchor, load 31-55: the vCPU's
+  contended-BQL wait fell from 0.80-0.91% to 0.40-0.55% of wall on
+  heavy-f1 and from 0.89-1.02% to 0.43-0.47% on W2; its waits of 100 µs
+  or more from 401-760 to 3-12 per run (W2 456-732 → 7-9), and the main
+  loop's holds of 100 µs or more from 1047-2139 to 4-24 (hold share
+  2.0-3.3% → 1.2-1.4%). A review re-run (heavy-f1, 6 pairs, load 57-93)
+  kept the tail cut, smaller: the vCPU's ≥100 µs waits 150-1067 → 18-82,
+  the main loop's ≥100 µs holds 831-4762 → 33-131 (6/6 pairs each), hold
+  share 2.1-6.0% → 1.3-1.9%. The mean wait share did not halve there
+  (0.56-1.67% → 0.44-0.73%, medians 0.66 → 0.65%): the vCPU contends
+  more often (1500-3840 → 3510-4450 acquisitions/s), for less each.
+  Release `bench-abx` (lane tip before → after), fps at the cap within
+  noise: heavy-f1 60.13 → 60.10 (3 pairs, load 42-75), 59.96 → 59.45
+  (6 pairs, 2+/4−, three after-runs with 52-55 fps intervals, load
+  40-72), 60.06 → 60.08 (6 pairs, 5+/1−, load 20-41); W2 60.10 → 60.10
+  (3 pairs, load 42-55), 60.08 → 60.11 (6 pairs, 4+/2−, load 44-81);
+  the contention build's re-run 59.89 → 59.81 (4+/2−, one dipping run
+  per arm). Process CPU within the run spread (±5-10 points): heavy-f1
+  110.6 → 113.9%, 128.9 → 129.6%, 129.8 → 123.1%; W2 101.6 → 102.1%,
+  111.1 → 111.4% (the contention build: 113.4 → 118.0%, 130.9 → 130.5%;
+  W2 100.6 → 95.0%); fence_wait, drawable wait and the frame-time
+  maximum unchanged within noise. Like the APU frame thread's: a
+  lock-stall cut in the tail that holds fps at the cap, at no
+  measurable CPU cost.
   Since 2026-10-16 the APU frame thread does too (its voice workers did
   until the voices moved onto it, see MCPX APU).
   The frame thread holds `d->lock` across each frame (8-frame bursts
@@ -3608,7 +3638,8 @@ counter).
 
 | Vector | Measured reality / why closed |
 |---|---|
-| Synchronous qcow2 reads for the icount vCPU (2026-10-16) | After the IDE settle fix a cold boot still spends ~4.6% of the vCPU in the block layer, 2.9 points of it the `pread` itself. The trial read cached-L2 plain, zero and unallocated qcow2 clusters and file-posix data without a coroutine (`xemu_sync_preadv`, anything else on the coroutine path), let the settle run the main context's bottom halves directly, and didn't kick the vCPU for bottom halves scheduled in the IDE window. Host instructions per cold boot −0.7..−1.0% (9/9 pairs, ~5,000 per HDD read), but no 3-pair session had wall and Mcycles both 3/3; over 6 pairs Mcycles 4/6 (median −2.8%) and wall 3/6 (load 54-72), against ±15% run-to-run swings in the phases with no disk I/O. Goldens exact. Not committed; the no-kick part alone is untested |
+| Synchronous qcow2 reads for the icount vCPU (2026-10-16) | After the IDE settle fix a cold boot still spends ~4.6% of the vCPU in the block layer, 2.9 points of it the `pread` itself. The trial read cached-L2 plain, zero and unallocated qcow2 clusters and file-posix data without a coroutine (`xemu_sync_preadv`, anything else on the coroutine path), let the settle run the main context's bottom halves directly, and didn't kick the vCPU for bottom halves scheduled in the IDE window. Host instructions per cold boot −0.7..−1.0% (9/9 pairs, ~5,000 per HDD read), but no 3-pair session had wall and Mcycles both 3/3; over 6 pairs Mcycles 4/6 (median −2.8%) and wall 3/6 (load 54-72), against ±15% run-to-run swings in the phases with no disk I/O. Goldens exact. Not committed; the no-kick part alone is the next row |
+| IDE-window bottom halves without a vCPU kick (2026-10-16) | The r6-qcow2 trial's third part alone, on master's IDE settle fix: bottom halves scheduled inside the IDE icount window skip icount_notify_exit, and the window's end kicks once if any is left queued. Cold boot timeline, 4 sessions × 6 pairs over both arm orders (load 55-80): host instructions −0.52% (24/24), Mcycles 3/6, 6/6, 4/6, 3/6 (pooled median −1.04%), wall 13/24. On heavy-f1 and stream-e2 (8 pairs each) no instruction change (4/8 each) and Mcycles within noise. Same RAM, goldens exact. Not committed |
 | DSP JIT residue after chaining (2026-10-16) | Three candidates, each under cycle resolution. The X mixbuffer windows read and written inline: Minsns/frame −0.34..−0.45% heavy-f1, −0.33..−0.41% stream-e2 (every pair), Mcycles/frame better in 5/12 and 7/12 pairs. `num_inst` stored only at exits and chain sites: Minsns −0.26% heavy-f1, −0.22% stream-e2, −0.92% cold boot, Mcycles 6/12 and 6/12. The exits left after chaining (det heavy-f1 census: GP 490 RTS + 319 other pc exits per frame, EP 184 + 119), through an RTS inline cache and a two-word length for mode-6 `movep`/`move`: ~1,110 removable exits at ~35-50 cycles each, 0.21-0.30% of cycles, under the 0.3% stop line; not built. Reopen for a title whose DSP load is several times Azurik's |
 | x87 residue after the FP-register accesses (2026-10-16) | Helper census, det heavy-f1 per frame: ~6.3K x87 helper calls, 1.0-1.7% of vCPU samples (fwait 3.2K, fxam 760, fsin/fcos ~500 each, fpatan 413, fild m64 400, fprem 381); no PC=single blocks; 15 fucom* fallbacks. fwait as a no-op, measured by deleting it: heavy-f1 Minsns/frame −0.13% (8/8), Mcycles −0.50% (5/8); stream-e2 nothing. Pinning the doubles in d8-d15 across TBs, bounded by duplicating the work it removes (192K flush stores, 40K ld80d reloads per frame) and adding the spills it needs, within one process on P-core cycles: net +1.15% [0.24, 1.94], P(≥1%) 0.60, realistic 0.2-0.8%, under the 1% bar for weeks of backend work. Not committed; reopen with a removal-direction prototype measuring ≥1% |
 | Lazy FCS/FDS at x87 exception-pointer landings (2026-10-16) | ~124K landings per heavy-f1 frame each did LDR+STRH for FCS and for FDS. Marking them instead cut Minsns/frame −0.54..−0.66% heavy-f1 and −0.46..−0.55% stream-e2 (every pair), but stream-e2 Mcycles/frame came out +0.45% median (6/16), against an upper bound of −1.5%/−0.6% Mcycles for dropping the stores. Not worth a sync in every selector-write path for a value no guest here reads; reopen with a cheaper marker or a title that reads FCS/FDS. Not committed |

@@ -1108,8 +1108,9 @@ fall back to the GL presentation path, and report the issue.
 
 **More battery drain or fan noise on a laptop.** Since 2026-10-15 the
 emulated CPU's thread runs at macOS's user-interactive QoS class, like
-the GPU threads, so it keeps a performance core under background load.
-`XEMU_VCPU_QOS=0` leaves it at the default class.
+the GPU threads, so it keeps a performance core under background load;
+since 2026-10-16 so does the emulator's main-loop thread, which mostly
+sleeps. `XEMU_VCPU_QOS=0` leaves both at the default class.
 
 **Hitches while other heavy apps load the GPU and every core.** Since
 2026-10-16 the emulated CPU sleeps in the Xbox kernel's idle loop after

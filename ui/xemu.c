@@ -2624,12 +2624,19 @@ static void *qemu_main(void *opaque)
 
     qemu_init(gArgc, gArgv);
 #ifdef __APPLE__
-    if (icount_enabled()) {
+    {
         /*
-         * Deterministic mode: with sleep=off an idle vCPU waits for this
-         * thread to warp the virtual clock, so it is frame-critical too.
+         * The main loop runs timers, bottom halves, QMP and the block
+         * layer's completions holding the BQL, so preempting it parks the
+         * vCPU at its next MMIO or interrupt. Deterministic mode: with
+         * sleep=off an idle vCPU also waits for this thread to warp the
+         * virtual clock. XEMU_VCPU_QOS=0 leaves it at default QoS in
+         * normal mode, with the vCPU.
          */
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        const char *e = getenv("XEMU_VCPU_QOS");
+        if (icount_enabled() || !(e && e[0] == '0')) {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
     }
 #endif
     exit_status = qemu_main_loop();

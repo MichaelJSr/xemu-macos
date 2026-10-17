@@ -86,7 +86,8 @@ static void *mttcg_cpu_thread_fn(void *arg)
          * the scheduler decays its priority below the PFIFO and
          * vblank threads it feeds, and under host load it loses part
          * of its core.
-         * XEMU_VCPU_QOS=0 leaves it at default.
+         * XEMU_VCPU_QOS=0 leaves it at default, and the main-loop
+         * thread too (qemu_main, ui/xemu.c).
          */
         const char *e = getenv("XEMU_VCPU_QOS");
         if (!(e && e[0] == '0')) {
