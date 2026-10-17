@@ -89,6 +89,12 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         d->pfifo.enabled_interrupts = val;
         nv2a_update_irq(d);
         break;
+    case NV_PFIFO_CACHE1_DMA_PUT:
+    case NV_PFIFO_CACHE1_DMA_GET:
+        /* The pusher's position moves: a frozen ring tail is stale. */
+        pfifo_frozen_drop(&d->pfifo.frozen);
+        d->pfifo.regs[addr] = val;
+        break;
     default:
         d->pfifo.regs[addr] = val;
         break;
@@ -142,6 +148,41 @@ void pfifo_guest_kick(NV2AState *d)
 }
 
 /*
+ * A DMA_PUT write that moves PUT back behind DMA_GET restarts the ring:
+ * freeze the words from DMA_GET up to and including the old PUT's (the
+ * jump back), which the hardware would already have fetched into CACHE1,
+ * before the guest can write over them (pfifo_frozen.h). Normal mode only
+ * (ring_freeze), before the new PUT is published; the caller holds
+ * pfifo.lock or is the lockless doorbell, and the channel registers read
+ * here change only by guest writes on the vCPU thread.
+ * XEMU_PFIFO_RING_FREEZE=0 turns it off.
+ */
+void pfifo_freeze_unread(NV2AState *d, uint32_t old_put, uint32_t new_put)
+{
+    if (!d->pfifo.ring_freeze) {
+        return;
+    }
+    hwaddr dma_instance =
+        GET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_DMA_INSTANCE],
+                 NV_PFIFO_CACHE1_DMA_INSTANCE_ADDRESS) << 4;
+    if (dma_instance + 12 > memory_region_size(&d->ramin)) {
+        return;
+    }
+    DMAObject dma = nv_dma_load(d, dma_instance);
+    uint64_t address = dma.address & 0x07FFFFFF;
+    uint64_t vram_size = memory_region_size(d->vram);
+    if (address >= vram_size) {
+        return;
+    }
+    /* As nv_dma_map for the pusher, but kept inside guest RAM. */
+    uint64_t limit = MIN((uint64_t)dma.limit, vram_size - 1 - address);
+    uint32_t get =
+        qatomic_load_acquire(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]);
+    pfifo_frozen_capture(&d->pfifo.frozen, d->vram_ptr + address, limit, get,
+                         old_put, new_put);
+}
+
+/*
  * Normal mode: the guest's DMA_PUT doorbell (its hottest nv2a write)
  * without pfifo.lock. The thread holds that lock across report fence waits
  * (REPORTS_SUBMIT), which used to block the vCPU here for ~8% of its time.
@@ -154,6 +195,10 @@ void pfifo_guest_kick(NV2AState *d)
  */
 void pfifo_put_doorbell(NV2AState *d, uint32_t put)
 {
+    uint32_t old_put = qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT]);
+    if (unlikely(put < old_put)) {
+        pfifo_freeze_unread(d, old_put, put);
+    }
     qatomic_store_release(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT], put);
     qatomic_store_release(&d->pfifo.doorbell, true);
     smp_mb();
@@ -605,6 +650,15 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
 
         uint32_t *word_ptr = (uint32_t*)(dma + dma_get_v);
         uint32_t word = ldl_le_p(word_ptr);
+        if (!inl) {
+            /* Words frozen at a ring restart (pfifo_freeze_unread) */
+            uint32_t *frozen = pfifo_frozen_lookup(
+                &d->pfifo.frozen, dma_get_v, &num_words_available);
+            if (unlikely(frozen)) {
+                word_ptr = frozen;
+                word = ldl_le_p(word_ptr);
+            }
+        }
         dma_get_v += 4;
 
         uint32_t method_type =
@@ -667,6 +721,16 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         } else {
             /* no command active - this is the first word of a new one */
             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_RSVD_SHADOW] = word;
+
+            /*
+             * A jump, call or return leaves a frozen ring tail for good: its
+             * target may lie inside the frozen range but holds new words.
+             */
+            if (!inl && ((word & 0xe0000003) == 0x20000000 ||
+                         (word & 3) == 1 || (word & 3) == 2 ||
+                         word == 0x00020000)) {
+                pfifo_frozen_drop(&d->pfifo.frozen);
+            }
 
             /* match all forms */
             if ((word & 0xe0000003) == 0x20000000) {

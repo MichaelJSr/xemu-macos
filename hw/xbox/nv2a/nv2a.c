@@ -382,6 +382,7 @@ static void nv2a_reset(NV2AState *d)
     }
 
     memset(d->pfifo.regs, 0, sizeof(d->pfifo.regs));
+    pfifo_frozen_drop(&d->pfifo.frozen);
     memset(d->pgraph.regs_, 0, sizeof(d->pgraph.regs_));
     memset(d->pvideo.regs, 0, sizeof(d->pvideo.regs));
 
@@ -482,6 +483,9 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
         d->pfifo.lockless_put = !icount_enabled() && !(e && e[0] == '1');
         e = getenv("XEMU_PFIFO_STALL_DOORBELL");
         d->pfifo.stall_doorbell = !(e && e[0] == '0');
+        /* Normal mode only: icount's pusher runs at every guest write. */
+        e = getenv("XEMU_PFIFO_RING_FREEZE");
+        d->pfifo.ring_freeze = !icount_enabled() && !(e && e[0] == '0');
     }
 
     qemu_mutex_init(&d->pfifo.lock);
@@ -630,6 +634,8 @@ static int nv2a_post_load(void *opaque, int version_id)
         /* Drop, not write back, the previous session's GPU state. */
         qatomic_set(&d->pgraph.flush_discard, true);
     }
+    /* The loaded pusher position belongs to the loaded RAM. */
+    pfifo_frozen_drop(&d->pfifo.frozen);
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);
     return 0;

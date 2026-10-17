@@ -140,10 +140,16 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         if (channel_id == cur_channel_id) {
             handled = true;
             switch (addr & 0xFFFF) {
-            case NV_USER_DMA_PUT:
+            case NV_USER_DMA_PUT: {
+                uint32_t old_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
+                if (val < old_put) {
+                    pfifo_freeze_unread(d, old_put, val);
+                }
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] = val;
                 break;
+            }
             case NV_USER_DMA_GET:
+                pfifo_frozen_drop(&d->pfifo.frozen);
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] = val;
                 break;
             case NV_USER_REF:

@@ -23,8 +23,9 @@ Changes manifest below, and every one has a `getenv` on this branch.
 Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
-`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_GUEST_MO`, `XEMU_KI_IDLE_HALT`,
-`XEMU_BQL_SPIN` and `XEMU_INTERP_GATE`, the first seven rows. The
+`XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
+`XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN` and `XEMU_INTERP_GATE`, the first
+eight rows. The
 other `=0` row, `XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass.
 Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
@@ -35,6 +36,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it. Threads + runtime, P-core QoS |
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
+| `XEMU_PFIFO_RING_FREEZE` | Normal mode, **default on since 2026-10-17**: a DMA_PUT write that moves PUT back behind DMA_GET (a pushbuffer ring restart) copies the words from DMA_GET through the old PUT's (at most 256, CACHE1's worth) and the threaded pusher reads them from the copy (`pfifo_frozen.h`), so a guest that rewrites the ring head before DMA_GET gets there doesn't change commands the pusher hasn't read; `0` reads guest RAM as before. pbkit's `pb_reset()` waits only 100 ticks for DMA_GET: when PFIFO lagged longer on the macOS CI runner, the next frame overwrote the unread tail (Roswell FpuTestXiso hang, "Reserved pb command" aborts). Deterministic mode never freezes: its pusher runs at every guest write. Threads + runtime |
 | `XEMU_GUEST_MO` | `1` keeps every guest memory-order barrier in both modes. By default normal mode drops the load-load barriers (`60fc127871`) and icount drops all of them (`30316da269`) until a network backend attaches: `xemu_net_enable` calls `xemu_guest_mo_keep_all`, which restores them and queues a safe-work tb flush. Normal-mode stores and explicit fences keep their barriers. Replaces `XEMU_ICOUNT_MO`, which is gone. CPU / JIT |
 | `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
 | `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |

@@ -6,6 +6,7 @@
 xbox_test_exes = []
 
 subdir('dsp')
+subdir('pfifo')
 subdir('ptimer')
 subdir('swizzle')
 

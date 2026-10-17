@@ -44,6 +44,7 @@
 #include "hw/display/vga_regs.h"
 #include "hw/pci/pci.h"
 #include "cpu.h"
+#include "pfifo_frozen.h"
 #include "exec/icount.h"
 
 #include "trace.h"
@@ -119,6 +120,13 @@ typedef struct NV2AState {
         bool stall_doorbell;
         bool doorbell;
         bool parked;
+        /*
+         * Normal mode: the words the threaded pusher hadn't read when the
+         * guest restarted the ring (pfifo_freeze_unread; pfifo_frozen.h),
+         * unless XEMU_PFIFO_RING_FREEZE=0 clears ring_freeze
+         */
+        bool ring_freeze;
+        PFIFOFrozen frozen;
     } pfifo;
 
     /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */
