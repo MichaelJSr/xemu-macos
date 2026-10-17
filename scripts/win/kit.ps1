@@ -1,5 +1,3 @@
-New-Item -ItemType Directory -Force C:\xemu-kit\tools | Out-Null
-$kitps1 = @'
 # kit.ps1 - session setup for the xemu-macos Windows test kit.
 # Dot-source it at the start of every PowerShell session:  . C:\xemu-kit\tools\kit.ps1
 $Ver     = 'v0.15.1'          # fork release under test (set a newer one if it exists)
@@ -135,5 +133,3 @@ function Stop-AutoXemu {
   Get-CimInstance Win32_Process -Filter "Name='xemu.exe'" | Where-Object CommandLine -like '*xemu-fork-auto*' |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force; "stopped $($_.ProcessId)" }
 }
-'@
-[IO.File]::WriteAllText('C:\xemu-kit\tools\kit.ps1', $kitps1.Replace("`r`n", "`n"))

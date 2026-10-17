@@ -172,7 +172,7 @@ Record the hashes under "Builds" in RESULTS.md. The `-dbg` build has asserts: us
 
 ### 1.6 Session helpers [agent]
 
-The kit already ships `C:\xemu-kit\tools\kit.ps1` (it is also in the repo at `scripts\win\kit.ps1`). Start every PowerShell session with:
+The kit ships `C:\xemu-kit\tools\kit.ps1`, byte-identical to the repo's `scripts\win\kit.ps1`. Dot-source it directly. If it's missing: `Copy-Item "$env:USERPROFILE\xemu-macos\scripts\win\kit.ps1" C:\xemu-kit\tools\`. Start every PowerShell session (and every Claude Code PowerShell call, see 1.10) with:
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -1065,7 +1065,7 @@ Every session must end in a clean QMP `quit` (`Stop-Xemu` sends one) so the coun
 
 The helpers live in the repo so they can't get lost:
 
-- `scripts\win\kit.ps1`: session setup for the kit (paths, muted scratch configs, launches with `-config_path`). Copy it to `C:\xemu-kit\tools\kit.ps1` and dot-source it at the start of every PowerShell session: `. C:\xemu-kit\tools\kit.ps1`.
+- `scripts\win\kit.ps1`: session setup for the kit (paths, muted scratch configs, launches with `-config_path`). It is the same file as the kit's `tools\kit.ps1`; dot-source either at the start of every PowerShell session: `. C:\xemu-kit\tools\kit.ps1`.
 - `scripts\win\xemu_ctl.py`: QMP and gdbstub control for Windows test runs (loadvm, screendump, frame advance, RAM digest).
 - `scripts\win\det_golden.py`: deterministic golden runs on Windows (the macOS `bench-det.py` doesn't run there).
 
