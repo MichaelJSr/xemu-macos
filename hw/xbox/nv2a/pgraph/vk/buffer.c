@@ -120,6 +120,9 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .buffer_size = memory_region_size(d->vram),
     };
 
+    const char *span_env = getenv("XEMU_VTX_SPAN_FINISH");
+    r->vtx_span_finish = !(span_env && !strcmp(span_env, "0"));
+
     r->bitmap_size = memory_region_size(d->vram) / 4096;
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
         r->flight[i].uploaded_bitmap = bitmap_new(r->bitmap_size);

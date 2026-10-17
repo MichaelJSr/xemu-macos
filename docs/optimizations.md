@@ -24,8 +24,8 @@ Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
-`XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN` and `XEMU_INTERP_GATE`, the first
-eight rows. The
+`XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE` and
+`XEMU_VTX_SPAN_FINISH`, the first nine rows. The
 other `=0` row, `XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass.
 Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
@@ -41,6 +41,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
 | `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |
 | `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
+| `XEMU_VTX_SPAN_FINISH` | Vulkan renderer, **default on since 2026-10-17**: a copy into the vertex RAM mirror finishes the recording command buffer only when it changes a byte one of that buffer's draws reads (the slot's read spans, on every page they read); `0` restores the page-wide check (finish when the copy changes a page the recording window uploaded, anywhere on it). Pass splits move a few pixels on AGX, so the null-renderer goldens can't see it; RAM is the same either way. Refuter: `XEMU_VTX_SPAN_REFUTE` |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -1931,10 +1932,33 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   screendumps byte-identical. Normal mode takes the same path (offscreen
   unpaced: heavy-f1 2.7, stream-e2 1.9 skipped waits a flip, pictures
   clean). Windowed heavy-f1, 2 pairs: both at the 60 fps cap, same
-  draws/flip. Skipping the finishes as well (read spans deciding them)
-  takes d2 to ~3.5 finishes and 11 passes a flip and 56.8 → 38.7
-  Mcyc/frame with the same RAM, but moves 29 pixels of the d2
-  screendump by ≤2 levels, so it is not shipped.
+  draws/flip.
+
+- **Read spans decide vertex finishes too (2026-10-17, default on;
+  `XEMU_VTX_SPAN_FINISH=0` restores the page-wide check).** The recording
+  command buffer now finishes only when a copy changes a byte one of
+  its draws reads, on any page they read (the page-wide check finished
+  whenever the page changed anywhere, and only for pages the recording
+  window had uploaded, so a copy changing bytes a recorded draw read
+  from an older upload landed before that draw ran; a counting build
+  saw none on d2, heavy-f1 or stream-e2). The byte-exact refinement
+  (`uploaded_page_content_differs`) now serves only the `=0` path; nsprof
+  `vtx_exact_skip` counts finishes the read spans skipped on pages the
+  window uploaded. Same RAM everywhere (d2 F2+900 `10b5a35aa66b`,
+  heavy-f1 600 `adcf86bd78fd71f9` and stream-e2 600 `3b986ed5d3acf666`
+  offscreen), but fewer pass splits move pixels: d2's screendump 29 of
+  1.2M pixels by ≤2 levels, heavy-f1's 2 and stream-e2's 1 by 1 level;
+  `=0` gives base's screendumps byte for byte. Parked for that, then
+  shipped the same day once the owner accepted such imperceptible
+  changes (tag `archive/vtx-read-span-finish`). Offscreen bench-det
+  600 frames, 8 pairs (4 in each arm order), load 76-90: heavy-f1
+  **Mcyc/frame 87.8 → 60.8 (−31%), Minsns/frame 128.2 → 97.9 (−24%),
+  wall fps 30.6 → 41.8 (+37%)**, 8/8; stream-e2 86.7 → 65.3 (−25%),
+  125.0 → 103.7 (−17%), 32.3 → 42.1 fps (+30%), 8/8 (fps 7/8). d2: ~29
+  → 3 vtx finishes and 36 → 10.5 passes a flip, Minsns/frame 88.3 →
+  75.4 (round 8). Windowed heavy-f1 bench-abx 2×45 s, load ~80: both
+  arms at the 60 fps cap (60.08 vs 60.11), process CPU ~125% vs ~130%
+  (noise), screenshots PASS.
 
 ### MetalFX + presentation
 

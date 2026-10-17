@@ -900,6 +900,11 @@ typedef struct PGRAPHVkState {
     /* The bytes each sync's draw reads (vertex_ram_buffer_syncs' index). */
     MemorySyncRequirement vertex_ram_buffer_reads[NV2A_VERTEXSHADER_ATTRIBUTES];
     size_t num_vertex_ram_buffer_syncs;
+    /*
+     * Read spans decide the recording command buffer's vertex finishes
+     * (default); XEMU_VTX_SPAN_FINISH=0 restores the page-wide check.
+     */
+    bool vtx_span_finish;
     size_t bitmap_size;
 
     VkVertexInputAttributeDescription vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
