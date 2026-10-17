@@ -38,8 +38,10 @@
  *    invalidated, the next time the VM stops.
  *  - A hook reads registers with xemu_hook_reg() and guest memory with
  *    xemu_hook_read() (RAM only, through the guest page tables, never a
- *    device access), and may end the running xemu-frame-advance before the
- *    instruction with xemu_hooks_stop(). It changes guest state only
+ *    device access; the GPU reports it would see are delivered first, so
+ *    deterministic offscreen runs keep lazy reports), and may end the
+ *    running xemu-frame-advance before the instruction with
+ *    xemu_hooks_stop(). It changes guest state only
  *    through xemu_hook_write() (RAM only, as the gdbstub writes it), so
  *    that under -icount every run with the same hooks and the same writes
  *    executes the same instructions. A write on a page of the hooked TB's
@@ -72,6 +74,7 @@ typedef struct XemuHookCtx {
     int prio, id;       /* the running hook's (engine) */
     bool resumed;       /* the re-run xemu_hooks_stop_rerun() asked for */
     bool own_code;      /* xemu_hook_write() hit this TB's pages (engine) */
+    bool raw;           /* xemu_hook_read(): RAM as it is (trace records) */
 } XemuHookCtx;
 
 typedef void (*XemuHookFn)(XemuHookCtx *ctx, void *opaque);
@@ -140,8 +143,12 @@ struct XemuRegs;
 struct XemuRegs *xemu_hook_regs_qapi(const uint32_t *regs);
 char *xemu_hook_hex(const uint8_t *p, size_t n);
 
-/* Guest memory at a linear address (RAM only). False when unreadable. */
-bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len);
+/*
+ * Guest memory at a linear address (RAM only). False when unreadable.
+ * Under icount a GPU report still undelivered in the bytes reaches RAM
+ * first, as a guest read would trap and deliver it (unless ctx->raw).
+ */
+bool xemu_hook_read(XemuHookCtx *ctx, vaddr va, void *buf, unsigned len);
 
 /*
  * Write guest memory at a linear address, through CPU 0's page tables and
@@ -198,9 +205,8 @@ typedef struct XemuHookPred {
 } XemuHookPred;
 
 struct XemuHookCond;
-/* Sets *reads_memory when the condition reads guest memory. */
 bool xemu_hook_pred_compile(struct XemuHookCond *in, XemuHookPred *p,
-                            bool *reads_memory, Error **errp);
+                            Error **errp);
 bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *p);
 /* The test on an operand already read: @size little-endian bytes. */
 uint64_t xemu_hook_pred_raw(const uint8_t *b, int size);

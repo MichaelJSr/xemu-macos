@@ -35,7 +35,7 @@ bool xemu_hook_pred_test(XemuHookCtx *ctx, const XemuHookPred *c)
         uint8_t b[8];
 
         if (!xemu_hook_expr_eval(ctx, &c->addr, &a) ||
-            !xemu_hook_read(ctx->env, a, b, size)) {
+            !xemu_hook_read(ctx, a, b, size)) {
             return false;
         }
         raw = xemu_hook_pred_raw(b, size);
@@ -190,8 +190,7 @@ static bool pred_value(QObject *o, XemuHookPred *c, Error **errp)
     return true;
 }
 
-bool xemu_hook_pred_compile(XemuHookCond *in, XemuHookPred *c,
-                            bool *reads_memory, Error **errp)
+bool xemu_hook_pred_compile(XemuHookCond *in, XemuHookPred *c, Error **errp)
 {
     if (in->has_reg == !!in->addr) {
         error_setg(errp, "a condition names exactly one of 'reg' and 'addr'");
@@ -216,7 +215,6 @@ bool xemu_hook_pred_compile(XemuHookCond *in, XemuHookPred *c,
         if (!xemu_hook_expr_parse(in->addr, &c->addr, errp)) {
             return false;
         }
-        *reads_memory = true;
     }
     if (c->type == XEMU_HOOK_TYPE_F && c->size != 4 && c->size != 8) {
         error_setg(errp, "a float condition has size 4 or 8");

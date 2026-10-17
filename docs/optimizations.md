@@ -1878,6 +1878,30 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   bounds-check change. `pgraph_vk_mark_textures_possibly_dirty` keeps
   its debug-only assert: it only compares ranges.
 
+- **Deterministic reports stay lazy while hooks, traces and value stops
+  read RAM (2026-10-17).** Guest PC hooks that read memory (collect,
+  key, conditions, address dereferences, writes), traced
+  `xemu-frame-advance` and xemu-run value stops used to switch on eager
+  report delivery for as long as they were set: every PFIFO park with a
+  report pending ran `pgraph_vk_finish(STALLED)`, and Azurik kicks the
+  FIFO after each visibility test. The Azurik harness's part-9 pack 05
+  (death.bik, then the d2 level, `vanilla-beach-shield5` with its movie
+  hooks) ran d2 offscreen at 9 flips/s with 76-80 finishes, ~92 passes
+  and 79 ms of fence wait per flip. Now each of those readers asks
+  `nv2a_det_reports_sync_read` for the bytes it copies, which delivers
+  only when a pending report sits there, as the access trap does for a
+  guest read; `XEMU_TRACE_RECORD` still reads RAM as it is. F2 to F2+900,
+  3 processes per arm, load 37-72: **89.5 → 56.7 Mcyc/frame (−37%),
+  129.8 → 89.0 Minsns/frame, 47.6 → 24.0 s wall**, 0.8 STALLED finishes,
+  38 passes and 31 ms fence per flip. RAM at F2+900 is
+  `10b5a35aa66b` in every run. The screendump there now equals the old
+  binary's with the hooks cleared after F1 (`0b8b60320c61`); the old
+  hooked one differed in 52 of 1.2M pixels (≤8 levels), as eager vs
+  lazy did on heavy-f1 when lazy delivery landed. Null goldens and the
+  offscreen bench-det hashes (heavy-f1 600, stream-e2 600) are
+  unchanged; those install no hooks. What d2 still pays is ~30
+  `finish_vtx_dirty` per flip (windowed: none).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

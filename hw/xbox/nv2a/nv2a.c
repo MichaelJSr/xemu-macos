@@ -328,21 +328,17 @@ static void nv2a_unlock_fifo(NV2AState *d)
  * Call with the BQL held and the VM paused.
  */
 /*
- * Deterministic mode: deliver GPU reports before PFIFO rests, not lazily,
- * while something reads guest RAM without going through the access traps
- * (xemu-frame-advance trace samples, guest PC hooks). Calls nest: each
- * true is undone by one false. BQL held.
+ * Deterministic mode: a reader on the vCPU thread that copies guest RAM
+ * at physical [addr, addr + len) directly, past the access traps (guest PC
+ * hooks, xemu-frame-advance trace samples, xemu-run value stops), calls
+ * this first: a GPU report still undelivered there reaches RAM before it
+ * returns, as the trap delivers it before a guest access. Drops the BQL
+ * while it waits, if held. XEMU_TRACE_RECORD reads RAM as it is instead.
  */
-void nv2a_set_reports_eager(bool eager)
+void nv2a_det_reports_sync_read(uint64_t addr, uint64_t len)
 {
-    static int eager_refs;
-
-    eager_refs = eager ? eager_refs + 1 : MAX(eager_refs - 1, 0);
-    if (g_nv2a) {
-        qatomic_set(&g_nv2a->pgraph.det_reports_eager, eager_refs > 0);
-        if (eager && runstate_is_running()) {
-            pgraph_request_report_delivery(g_nv2a);
-        }
+    if (g_nv2a && icount_enabled()) {
+        pgraph_report_sync_read(g_nv2a, addr, len);
     }
 }
 

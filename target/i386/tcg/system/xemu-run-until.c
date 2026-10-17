@@ -30,10 +30,8 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-xemu.h"
 #include "cpu.h"
-#include "exec/icount.h"
 #include "system/runstate.h"
 #include "block/aio.h"
-#include "hw/xbox/nv2a/nv2a.h"
 #include "tcg/xemu-hooks.h"
 
 #define UNTIL_MAX_ENTRIES 64
@@ -100,8 +98,7 @@ static void until_hook(XemuHookCtx *ctx, void *opaque)
 
 /* One @until entry (or xemu-run @pc stop), its reply index @index. */
 static bool until_entry_init(UntilEntry *e, int index, uint64_t pc,
-                             XemuHookCondList *cond, bool *reads_memory,
-                             Error **errp)
+                             XemuHookCondList *cond, Error **errp)
 {
     e->pc = pc;
     e->index = index;
@@ -115,8 +112,7 @@ static bool until_entry_init(UntilEntry *e, int index, uint64_t pc,
                        XEMU_HOOK_MAX_CONDS);
             return false;
         }
-        if (!xemu_hook_pred_compile(c->value, &e->cond[e->ncond++],
-                                    reads_memory, errp)) {
+        if (!xemu_hook_pred_compile(c->value, &e->cond[e->ncond++], errp)) {
             return false;
         }
     }
@@ -128,7 +124,6 @@ static bool until_entry_init(UntilEntry *e, int index, uint64_t pc,
  * and say what ended it. Takes @set. The VM is stopped.
  */
 static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
-                                                bool reads_memory,
                                                 int64_t frames,
                                                 bool has_trace,
                                                 XemuTraceRegionList *trace,
@@ -154,17 +149,9 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
     }
     qatomic_set(&until.armed, true);
 
-    /* Hook reads copy RAM directly, past the lazy report traps. */
-    bool eager = reads_memory && icount_enabled();
-    if (eager) {
-        nv2a_set_reports_eager(true);
-    }
     XemuFrameInfo *info = qmp_xemu_frame_advance(true, frames, has_trace,
                                                  trace, has_trace_every,
                                                  trace_every, errp);
-    if (eager) {
-        nv2a_set_reports_eager(false);
-    }
     qatomic_set(&until.armed, false);
     for (int i = 0; i < set->n; i++) {
         xemu_hooks_remove(set->e[i].hook_id);
@@ -246,7 +233,6 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
                                                   int64_t trace_every,
                                                   Error **errp)
 {
-    bool reads_memory = false;
     int n = 0;
 
     if (!has_hits) {
@@ -272,13 +258,13 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
     n = 0;
     for (XemuUntilList *l = list; l; l = l->next, n++) {
         if (!until_entry_init(&set->e[n], n, l->value->pc, l->value->cond,
-                              &reads_memory, errp)) {
+                              errp)) {
             g_free(set);
             return NULL;
         }
     }
-    return until_run(set, hits, reads_memory, frames, has_trace, trace,
-                     has_trace_every, trace_every, errp);
+    return until_run(set, hits, frames, has_trace, trace, has_trace_every,
+                     trace_every, errp);
 }
 
 /*
@@ -309,7 +295,7 @@ static struct {
 static bool watch_read(RunWatch *w, uint8_t *buf)
 {
     memset(buf, 0, 8);
-    return xemu_hook_expr_read_cpu0(&w->addr, buf, w->size) ==
+    return xemu_hook_expr_read_cpu0(&w->addr, buf, w->size, false) ==
            XEMU_HOOK_EXPR_READ_OK;
 }
 
@@ -347,9 +333,7 @@ static bool watch_bound(XemuRunStop *in, QObject *value, XemuHookCmp op,
         .has_type = in->has_type, .type = in->type, .op = op,
         .value = value,
     };
-    bool reads_memory;
-
-    return xemu_hook_pred_compile(&c, p, &reads_memory, errp);
+    return xemu_hook_pred_compile(&c, p, errp);
 }
 
 static bool watch_init(RunWatch *w, int index, XemuRunStop *in, Error **errp)
@@ -429,7 +413,6 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
                                        bool has_hits, int64_t hits,
                                        Error **errp)
 {
-    bool reads_memory = false;
     int npc = 0, nwatch = 0, nstop = 0, ninput = 0;
     UntilSet *set = NULL;
     RunWatch *w = NULL;
@@ -486,7 +469,7 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
         XemuRunStop *st = l->value;
         bool ok = st->has_pc
             ? until_entry_init(&set->e[set->n++], nstop, st->pc, st->cond,
-                               &reads_memory, errp)
+                               errp)
             : watch_init(&w[nwatch++], nstop, st, errp);
 
         if (!ok) {
@@ -525,12 +508,10 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
         run_watch.n = nwatch;
         run_watch.w = w;
         run_watch.fired = -1;
-        reads_memory = true;
         xemu_frame_advance_set_vblank_stop(run_vblank_stop);
     }
-    XemuRunUntilInfo *u = until_run(set, hits, reads_memory, frames,
-                                    has_trace, trace, has_trace_every,
-                                    trace_every, errp);
+    XemuRunUntilInfo *u = until_run(set, hits, frames, has_trace, trace,
+                                    has_trace_every, trace_every, errp);
     set = NULL;
     int fired = -1;
     if (nwatch) {

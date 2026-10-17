@@ -131,6 +131,8 @@ typedef struct PGRAPHRenderer {
         void (*request_report_delivery)(NV2AState *d);
         /* ...and deliver any pending at these VRAM bytes, PFIFO (opt.) */
         void (*report_guard)(NV2AState *d, hwaddr addr, hwaddr len);
+        /* ...the same for a direct RAM reader on the vCPU thread (opt.) */
+        void (*report_sync_read)(NV2AState *d, hwaddr addr, hwaddr len);
         void (*surface_flush)(NV2AState *d);
         void (*surface_update)(NV2AState *d, bool upload, bool color_write, bool zeta_write);
         void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
@@ -258,7 +260,6 @@ typedef struct PGRAPHState {
     bool waiting_for_flip;
     /* deterministic mode: the next flush discards renderer state (load) */
     bool flush_discard;
-    bool det_reports_eager; /* traced frame advance: no lazy reports */
     bool waiting_for_context_switch;
     /*
      * Deterministic inline pusher only: the subchannel whose CTX_CACHE1-5
@@ -485,5 +486,7 @@ void pgraph_write_zpass_pixel_cnt_report_at(NV2AState *d, hwaddr vram_offset,
                                             uint32_t result);
 /* Deterministic mode: have PFIFO deliver pending GPU reports to RAM. */
 void pgraph_request_report_delivery(NV2AState *d);
+/* ...if one sits in these VRAM bytes, and wait (vCPU-thread RAM reader). */
+void pgraph_report_sync_read(NV2AState *d, hwaddr addr, hwaddr len);
 
 #endif

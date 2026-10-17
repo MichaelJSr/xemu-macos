@@ -510,12 +510,12 @@ Other automation interfaces (windowed or headless):
   replay's (windowed, on macOS only: see live pads), and under the null
   renderer a traced frame advance of it. With a GPU renderer, a report
   slot the guest hasn't read yet holds old or new bytes (deterministic
-  reports are lazy), and a traced frame advance delivers reports
-  eagerly, which on offscreen Vulkan can change later report values, so
-  compare Vulkan runs recording to recording. In normal mode the vCPU
-  thread takes the sample between blocks of guest code around that
-  vblank's interrupt: never mid-instruction, but where the guest is
-  depends on host timing.
+  reports are lazy), while a traced frame advance first delivers the
+  reports pending in the bytes it samples, as a guest read would, so
+  compare a report slot's samples recording to recording. In normal
+  mode the vCPU thread takes the sample between blocks of guest code
+  around that vblank's interrupt: never mid-instruction, but where the
+  guest is depends on host timing.
 - **Readiness lines** on stderr: `xemu: ready` once the machine and pads
   exist (about 30 ms after launch in headless null mode, which starts
   no video or gamepad subsystem; `loadvm` works from then on, no fixed
@@ -820,7 +820,9 @@ Other automation interfaces (windowed or headless):
   Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
   included when taken paused, at about 60% of the null renderer's speed:
   a GPU report reaches RAM when the guest or a device first touches its
-  slot, or at a pause, save or load. Hash an offscreen run's RAM with
+  slot, when a hook, trace sample or value stop reads it, or at a pause,
+  save or load, so hooks that read no pending report slot don't slow a
+  run or change its pictures. Hash an offscreen run's RAM with
   `xemu-dump-ram` `"gpu-sync": false` (`gpu-sync` and `pmemsave` write
   GPU surfaces back, which changes later RAM), and expect matches only
   on the same Mac, macOS and MoltenVK. A cheap reproducible screenshot

@@ -37,9 +37,7 @@
 #include "qapi/qapi-commands-xemu.h"
 #include "qapi/qapi-visit-xemu.h"
 #include "cpu.h"
-#include "exec/icount.h"
 #include "system/runstate.h"
-#include "hw/xbox/nv2a/nv2a.h"
 #include "tcg/xemu-hooks.h"
 
 #define HOOKS_MAX 64
@@ -75,7 +73,6 @@ typedef struct PHook {
     uint32_t total;             /* bytes collected per hit */
     bool regs;
     bool stop;
-    bool reads_memory;
     uint32_t nexpect;
     uint32_t *exp_off;          /* nexpect + 1 offsets into exp_val/mask */
     uint8_t *exp_val, *exp_mask;
@@ -106,7 +103,6 @@ typedef struct PHook {
 /* Main thread (BQL). */
 static GPtrArray *phooks;       /* PHook, ascending id */
 static int phook_next_id = 1;
-static bool eager_held;
 
 /* A hit, as the vCPU stores it. */
 typedef struct RecHdr {
@@ -312,7 +308,7 @@ static void collect(XemuHookCtx *ctx, PHook *h)
         Region *r = &h->regions[i];
 
         h->readable[i] = xemu_hook_expr_eval(ctx, &r->addr, &a) &&
-                         xemu_hook_read(ctx->env, a, h->buf + off, r->size);
+                         xemu_hook_read(ctx, a, h->buf + off, r->size);
         off += r->size;
     }
 }
@@ -362,7 +358,7 @@ static void phook_fn(XemuHookCtx *ctx, void *opaque)
         uint8_t key[HOOK_KEY_MAX];
 
         if (!xemu_hook_expr_eval(ctx, &h->key, &a) ||
-            !xemu_hook_read(ctx->env, a, key, h->key_size)) {
+            !xemu_hook_read(ctx, a, key, h->key_size)) {
             return;
         }
         if (h->have_key && !memcmp(key, h->last_key, h->key_size)) {
@@ -527,23 +523,6 @@ XemuHookTrace *xemu_hooks_take_trace(void)
     return t;
 }
 
-/*
- * Hook reads copy RAM directly, past the lazy GPU report traps; hook writes
- * must not race a report delivered later over them.
- */
-static void eager_update(void)
-{
-    bool want = false;
-
-    for (guint i = 0; icount_enabled() && i < phooks->len; i++) {
-        want |= ((PHook *)g_ptr_array_index(phooks, i))->reads_memory;
-    }
-    if (want != eager_held) {
-        nv2a_set_reports_eager(want);
-        eager_held = want;
-    }
-}
-
 /* QMP. */
 
 static bool region_compile(XemuHookRegion *in, Region *r, uint32_t max,
@@ -706,8 +685,7 @@ static PHook *phook_compile(XemuHookSpec *in, Error **errp)
                        XEMU_HOOK_MAX_CONDS);
             goto fail;
         }
-        if (!xemu_hook_pred_compile(c->value, &h->pred[h->npred++],
-                                    &h->reads_memory, errp)) {
+        if (!xemu_hook_pred_compile(c->value, &h->pred[h->npred++], errp)) {
             goto fail;
         }
     }
@@ -720,7 +698,6 @@ static PHook *phook_compile(XemuHookSpec *in, Error **errp)
         h->has_key = true;
         h->key = k.addr;
         h->key_size = k.size;
-        h->reads_memory = true;
     }
     for (XemuHookRegionList *l = in->collect; l; l = l->next) {
         n++;
@@ -744,7 +721,6 @@ static PHook *phook_compile(XemuHookSpec *in, Error **errp)
                        (int)HOOK_MAX_BYTES);
             goto fail;
         }
-        h->reads_memory = true;
     }
     if (!expect_compile(h, in->expect, errp)) {
         goto fail;
@@ -782,8 +758,6 @@ static PHook *phook_compile(XemuHookSpec *in, Error **errp)
     if (h->nwrites) {
         uint32_t zero = 0;
 
-        /* It writes guest memory: keep GPU reports eager (eager_update). */
-        h->reads_memory = true;
         h->q_off = g_array_new(false, false, sizeof(uint32_t));
         h->q_val = g_byte_array_new();
         h->q_mask = g_byte_array_new();
@@ -863,7 +837,6 @@ XemuHookInfoList *qmp_xemu_hooks_set(XemuHookSpecList *hooks, Error **errp)
         QAPI_LIST_APPEND(tail, phook_info(h));
     }
     xemu_hooks_commit();
-    eager_update();
     return ret;
 }
 
@@ -905,7 +878,6 @@ void qmp_xemu_hooks_clear(bool has_ids, intList *ids, Error **errp)
     }
     if (drop->len) {
         xemu_hooks_commit();
-        eager_update();
     }
     /* A running vCPU may still be in a hook until a grace period ends. */
     for (guint i = 0; i < drop->len; i++) {

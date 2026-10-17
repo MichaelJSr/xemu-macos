@@ -1241,11 +1241,6 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     frame_trace_last = frame_count;
     frame_trace_samples = NULL;
     frame_trace_tail = &frame_trace_samples;
-    /* Samples copy RAM directly, past the lazy report traps. */
-    bool reports_eager = trace && icount_enabled();
-    if (reports_eager) {
-        nv2a_set_reports_eager(true);
-    }
     if (frames == 0) {
         frame_advance_stopping = true;
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_stop_bh, NULL);
@@ -1254,9 +1249,6 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_run_bh, NULL);
     }
     qemu_coroutine_yield();
-    if (reports_eager) {
-        nv2a_set_reports_eager(false);
-    }
     XemuFrameInfo *info = frame_info();
     if (trace) {
         info->trace = frame_trace_samples;

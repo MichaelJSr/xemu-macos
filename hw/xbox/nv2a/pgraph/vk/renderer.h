@@ -1235,6 +1235,7 @@ void pgraph_vk_det_reports_process(NV2AState *d);
 void pgraph_vk_det_reports_discard(NV2AState *d);
 void pgraph_vk_det_reports_deliver(NV2AState *d);
 void pgraph_vk_det_reports_guard(NV2AState *d, hwaddr addr, hwaddr len);
+void pgraph_vk_det_reports_sync_read(NV2AState *d, hwaddr addr, hwaddr len);
 
 /*
  * The occlusion query pool is partitioned per flight slot so a slot's
