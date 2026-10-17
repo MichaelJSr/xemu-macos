@@ -280,6 +280,7 @@ def run_once(app, env, a, purpose=''):
 TL_VAS = {'prophecy': 0x5F748, 'prophecy_end': 0x5F774, 'inv_reset': 0x57B70,
           'load_level': 0x53750, 'tick': 0x8C230, 'boot_state': 0x1BF61C}
 TL_TITLE, TL_LIST = 6, 8          # boot states: the title; START opened the save list
+TL_PREVIEW_WAIT = 120             # frames a save-list cursor move may take to preview a save
 TL_KEYS = {'start': 42, 'a': 81, 'b': 79, 'dpad_left': 37, 'dpad_right': 38,
            'dpad_up': 94, 'dpad_down': 92}   # the fixture's keyboard pad map
 TL_PHASES = (('kernel', 'reset', 'xbe-entry'), ('logos', 'xbe-entry', 'prophecy-start'),
@@ -457,7 +458,7 @@ def tl_markers(app, env, a, va):
         else:
             stage = 'prophecy-start'
             arm(va['prophecy'])
-        due = None                        # next press: (frame, key)
+        due, move = None, None            # next press: (frame, key); cursor move: (key, frame)
         route = list(a.route)
         tick_ent, ticks, deadline = None, 0, limit
         while stage != 'done':
@@ -492,8 +493,8 @@ def tl_markers(app, env, a, va):
                     stage, due = 'save-list', (frame + 30, route[0])
                 elif stage == 'save-list' and eip == va['inv_reset']:
                     arm(va['inv_reset'], False)    # the cursor's move previewed its save
-                    route.pop(0)
-                    due = (frame + 30, route[0])
+                    print(f'  {move[0]} previewed a save after {frame - move[1]} frames', flush=True)
+                    due, move = (frame + 30, route[0]), None
                 elif stage == 'save-list' and eip == va['load_level']:
                     esp = g.reg(4)
                     p = g.u32(esp + 8)
@@ -519,15 +520,21 @@ def tl_markers(app, env, a, va):
                 deadline = frame + limit
             if due is not None and frame >= due[0] - 1:
                 at, key = max(due[0], frame + 1), due[1]
+                if move:
+                    print(f'  {move[0]} previewed no save in {at - move[1]} frames', flush=True)
+                    move = None
                 press(key, at)
                 if stage == 'prophecy-end':
                     due = (at + 90, 'start')          # START every 1.5 s until the movie ends
                 elif stage == 'title':
                     due = (at + a.title_every, 'start')   # until the list opens
                 elif stage == 'save-list' and len(route) > 1:
-                    arm(va['inv_reset'])              # a cursor move: wait for its preview
-                    due = (at + 180, key)
+                    arm(va['inv_reset'])              # a cursor move: wait for its preview,
+                    route.pop(0)                      # but "Start New Game" shows none, so the
+                    due = (at + TL_PREVIEW_WAIT, route[0])   # next key goes in after a while
+                    move = (key, at)
                 elif stage == 'save-list':
+                    arm(va['inv_reset'], False)
                     arm(va['load_level'])
                     due = (at + 1500, key)            # pressed again after 25 s without a load
                 else:
@@ -769,7 +776,8 @@ def main():
     t.add_argument('--renderer', choices=('null', 'offscreen'), default='null')
     t.add_argument('--dvd', default='', help='disc to boot (default: the fixture config\'s)')
     t.add_argument('--route', default='a',
-                   help='save-list presses, comma-separated (dpad_left,a: new game)')
+                   help='save-list presses, comma-separated (dpad_left,a: new game); each key '
+                        'but the last waits for its save preview, at most %d frames' % TL_PREVIEW_WAIT)
     t.add_argument('--steady', type=int, default=120, help='player ticks after the first')
     t.add_argument('--watch-movie', action='store_true',
                    help="don't press START to skip prophecy.bik (times Bink decoding)")

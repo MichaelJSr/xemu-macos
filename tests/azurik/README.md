@@ -155,7 +155,7 @@ twice, then advance to F2 + 900.
 | Pack | Why it isn't here | v0.15 headline |
 |---|---|---|
 | 04, 10 | They wait on recordings from the harness (jobs 04-a and 10-a). | - |
-| 06 europe-pal50 | It needs the Europe disc. `bench-det --route dpad_left,a` stalls at the save list. | PAL50 EEPROM: F = 25. Fixture EEPROM: F = 30. ~30.06 player ticks per guest second at 60 Hz. |
+| 06 europe-pal50 | It needs the Europe disc (bench-det picks Europe's VAs itself and `--route dpad_left,a` now moves on when no save preview appears). | PAL50 EEPROM: F = 25. Fixture EEPROM: F = 30. ~30.06 player ticks per guest second at 60 Hz. |
 | 09 grown-iso-io | It needs a local 2.8 GB ISO built by the Modkit. | +75,238,912 B of HDD writes, all in the logos phase. Repeatable block logs. |
 | 07 owner-recording | Local-only soak. | Sections 50 and 81 end on `3edb08f3c2ea` and `648e70df76c4` in two processes, with lines sent as `@<frame>`. |
 | 08 v22-boot-hang | Soak. | 0 of 10 cold boots hung. All reached `0x5F748` at frame 1350, with identical block logs. |
