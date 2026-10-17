@@ -324,11 +324,19 @@ for (( k = 1; k <= PAIRS; k++ )); do
 done
 
 # ---- receipt ---------------------------------------------------------------
+# The Vulkan driver each arm ran, as the renderer logs it beside
+# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)").
+typeset -A IDENT_DRV
+for arm in B E; do
+  IDENT_DRV[$arm]=$(grep -h '^- Driver: ' $OUT/ab_warmup$arm.log $OUT/ab_$arm<->.log(N) \
+                    2>/dev/null | head -1 | cut -c11-)
+done
 META=$OUT/meta.json
 python3 - "$META" <<EOF
 import json, platform, subprocess
-arm = lambda a, d, s, m, e: {"git_describe": d, "binary_sha256": s,
-                             "moltenvk_version": m, "env": e, "app_source": a}
+arm = lambda a, d, s, m, e, v: {"git_describe": d, "binary_sha256": s,
+                                "moltenvk_version": m, "vk_driver": v,
+                                "env": e, "app_source": a}
 json.dump({
   "config": {
     "experiment": "cross-binary arms B vs E",
@@ -342,8 +350,10 @@ json.dump({
   },
   "binary": {
     "arms": {
-      "B": arm("$B_APP_SRC", "${IDENT_DESC[B]}", "${IDENT_SHA[B]}", "${IDENT_MVK[B]}", "${ENVSET[B]}"),
-      "E": arm("$E_APP_SRC", "${IDENT_DESC[E]}", "${IDENT_SHA[E]}", "${IDENT_MVK[E]}", "${ENVSET[E]}"),
+      "B": arm("$B_APP_SRC", "${IDENT_DESC[B]}", "${IDENT_SHA[B]}", "${IDENT_MVK[B]}", "${ENVSET[B]}",
+               "${IDENT_DRV[B]:-unknown}"),
+      "E": arm("$E_APP_SRC", "${IDENT_DESC[E]}", "${IDENT_SHA[E]}", "${IDENT_MVK[E]}", "${ENVSET[E]}",
+               "${IDENT_DRV[E]:-unknown}"),
     },
     "app_clone": "$WORK/xemu-{B,E}.app", "config_path": "${CONF[E]}",
     "hdd_clone": "$HDD", "hdd_source": "$HDD_SRC",

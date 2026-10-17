@@ -363,6 +363,9 @@ for (( k = 1; k <= PAIRS; k++ )); do
 done
 
 # ---- receipt ---------------------------------------------------------------
+# The Vulkan driver the runs used, as the renderer logs it beside
+# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)").
+VK_DRIVER=$(grep -h '^- Driver: ' $OUT/ab_*.log(N) 2>/dev/null | head -1 | cut -c11-)
 META=$OUT/meta.json
 python3 - "$META" <<EOF
 import json, os, platform, subprocess, sys
@@ -377,7 +380,8 @@ meta = {
   },
   "binary": {
     "git_describe": "$GIT_DESC", "binary_sha256": "$BIN_SHA",
-    "moltenvk_version": "$MVK_VER", "app_clone": "$APP",
+    "moltenvk_version": "$MVK_VER", "vk_driver": "${VK_DRIVER:-unknown}",
+    "app_clone": "$APP",
     "app_source": "$APP_SRC", "config_path": "$CONFIG",
     "config_source": "$CONFIG_SRC", "hdd_clone": "$HDD",
     "hdd_source": "$HDD_SRC",

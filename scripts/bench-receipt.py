@@ -311,10 +311,14 @@ def print_receipt_block(r):
               f"sha256 {str(a.get('binary_sha256', '?'))[:16]}...  "
               f"MoltenVK {a.get('moltenvk_version', '?')}  "
               f"env '{a.get('env', '')}'")
+        if a.get('vk_driver'):
+            print(f"driver {arm}      : {a['vk_driver']}")
     if not b.get('arms'):
         print(f"binary        : {b.get('git_describe', '?')}  "
               f"sha256 {str(b.get('binary_sha256', '?'))[:16]}...  "
               f"MoltenVK {b.get('moltenvk_version', '?')}")
+        if b.get('vk_driver'):
+            print(f"driver        : {b['vk_driver']}")
     print(f"isolation     : app clone {b.get('app_clone', '?')}")
     print(f"                config {b.get('config_path', '?')}")
     print(f"                hdd clone {b.get('hdd_clone', '?')}")

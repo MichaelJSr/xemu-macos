@@ -59,15 +59,13 @@ static char const *const required_device_extensions[] = {
 #endif
 #endif
 
-// TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
-#ifdef __APPLE__
     /*
-     * macOS/MoltenVK requires the Portability Subset extension to be explicitly
-     * enabled, otherwise the physical device will be hidden and Vulkan
-     * initialization will fail on Apple Silicon.
+     * Not VK_KHR_portability_subset: a portability driver (MoltenVK)
+     * advertises it and must have it enabled, which
+     * add_optional_device_extension_names() does; a conformant driver
+     * (Mesa KosmicKrisp) doesn't advertise it and was rejected while it
+     * sat in this list.
      */
-    VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
-#endif
 };
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -366,6 +364,17 @@ static void add_optional_device_extension_names(
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /*
+     * The spec requires enabling VK_KHR_portability_subset whenever the
+     * device advertises it. First, so MoltenVK's list keeps the order it
+     * had while the extension was required.
+     */
+    if (is_extension_available(available_extensions,
+                               VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        const char *name = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+        g_array_append_val(enabled_extension_names, name);
+    }
+
     r->custom_border_color_extension_enabled =
         add_extension_if_available(available_extensions, enabled_extension_names,
                                    VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -492,6 +501,24 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
             VK_VERSION_MAJOR(r->device_props.driverVersion),
             VK_VERSION_MINOR(r->device_props.driverVersion),
             VK_VERSION_PATCH(r->device_props.driverVersion));
+
+    /*
+     * Which driver, for logs and bench receipts: "- Driver: MoltenVK,
+     * 1.4.3 (id 14)". Core in 1.2 (vk_api_version is already capped by
+     * both the instance and the device).
+     */
+    if (r->vk_api_version >= VK_API_VERSION_1_2) {
+        VkPhysicalDeviceDriverProperties driver_props = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        };
+        VkPhysicalDeviceProperties2 props2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &driver_props,
+        };
+        vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
+        fprintf(stderr, "- Driver: %s, %s (id %d)\n", driver_props.driverName,
+                driver_props.driverInfo, driver_props.driverID);
+    }
 
     return true;
 }
