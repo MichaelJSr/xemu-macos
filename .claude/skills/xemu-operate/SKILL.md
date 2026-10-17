@@ -258,11 +258,14 @@ Traps:
   stock MoltenVK.
 - A crashed run voids its pair.
 - Fullscreen captures come out black.
-- DSP JIT: `[audio.dsp_jit] enabled = true` plus
-  `XEMU_DSP_JIT_DIFF=1 XEMU_DSP_JIT_STATS=1` must report
-  `checked>0 failures=0`, with `enqueued` near `blocks_translated`
-  (coverage). `XEMU_DSP_JIT_DIFF_SYNC=1` checks every translation inline
-  (fine under icount).
+- DSP JIT: `[audio.dsp_jit] enabled = true` plus `XEMU_DSP_JIT_DIFF=1`
+  prints a final validator line per core at `quit` (the worker drains
+  first): it must report `checked>0 failures=0 pending=0`, with
+  `enqueued` = checked + skipped (blocks with peripheral I/O a replay
+  can't reproduce: det heavy-f1 GP 18 of 44, EP 13 of 86) and near
+  `blocks_translated` from `XEMU_DSP_JIT_STATS=1` (coverage; `dropped`
+  counts ring-full attempts, retried later). `XEMU_DSP_JIT_DIFF_SYNC=1`
+  checks every translation inline (fine under icount).
 
 **Anchors** (Azurik only; `../fixtures/README.md` is the source of truth):
 

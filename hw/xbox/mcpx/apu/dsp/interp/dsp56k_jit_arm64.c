@@ -1208,14 +1208,29 @@ typedef struct DiffSlot {
     uint8_t    skip_compare;   /* JIT hit DMA_CONTROL: skip validation */
 } DiffSlot;
 
+/*
+ * Validator outcomes, written only by whoever validates: the worker
+ * (async) or the APU thread (sync). checked counts the compares that
+ * ran, failures among them. A skipped slot was never compared: the live
+ * block hit DMA_CONTROL (skipped_io) or the interpreter replay touched a
+ * peripheral (skipped_replay); a replay on a private copy can reproduce
+ * neither. Once the worker has drained, enqueued = checked + skipped_io
+ * + skipped_replay.
+ */
+typedef struct DiffCounts {
+    uint64_t checked;
+    uint64_t failures;
+    uint64_t skipped_io;
+    uint64_t skipped_replay;
+} DiffCounts;
+
 typedef struct DiffQueue {
     DiffSlot *slots;           /* DSP56K_JIT_DIFF_SLOTS entries, heap-alloc */
     uint64_t  head;            /* consumer index, monotonic */
     uint64_t  tail;            /* producer index, monotonic */
-    uint64_t  dropped;         /* ring-full drops */
-    uint64_t  checked;         /* successful validations */
-    uint64_t  failures;        /* divergences detected */
-    uint64_t  enqueued;        /* total slots accepted into the ring */
+    uint64_t  dropped;         /* ring-full drops (producer) */
+    uint64_t  enqueued;        /* slots published to the ring (producer) */
+    DiffCounts counts;         /* worker */
 
     QemuThread worker;
     QemuMutex  mu;             /* guards cond + exiting; not the ring */
@@ -1259,6 +1274,10 @@ typedef struct DspJitState {
      * cleared it on every diff-path block, ring-full drops included.
      */
     DiffSlot *diff_sync_slot;
+    /* Sync-mode outcomes (the APU thread validates inline). */
+    DiffCounts diff_sync_counts;
+    /* The final validator line went out (dsp56k_jit_diff_finish). */
+    bool diff_reported;
 
     /* Stats */
     uint64_t blocks_translated;
@@ -10273,7 +10292,11 @@ static DspJitBlock *translate_block(dsp_core_t *dsp, DspJitState *s,
  * Public API block, but dsp56k_jit_init / dsp56k_jit_finalize need to
  * call them. */
 static DiffQueue *diff_queue_create(const char *core);
+static void       diff_queue_stop(DiffQueue *q);
 static void       diff_queue_destroy(DiffQueue *q);
+static void       diff_print_line(const char *core, const char *mode,
+                                  const char *when, uint64_t enqueued,
+                                  const DiffCounts *c, uint64_t dropped);
 
 /* atexit-handler glue — needed because the normal xemu exit path
  * never calls dsp_destroy / dsp56k_jit_finalize. Definitions live
@@ -10350,10 +10373,69 @@ void dsp56k_jit_init(dsp_core_t *dsp)
     if (g_jit_registered_count < DSP56K_JIT_MAX_REGISTERED_CORES) {
         g_jit_registered_cores[g_jit_registered_count++] = dsp;
     }
-    if (g_jit_stats && !g_jit_atexit_registered) {
+    if ((g_jit_stats || g_jit_diff) && !g_jit_atexit_registered) {
         g_jit_atexit_registered = true;
         atexit(dsp56k_jit_stats_atexit_handler);
     }
+}
+
+/*
+ * The validator's final line, once per core: the async worker first
+ * validates every published slot and stops (diff_queue_stop), so the
+ * line is complete (pending=0). Runs from the atexit handler at a normal
+ * quit, after vm_shutdown has idled the APU thread and the vCPU (the
+ * producers), and from dsp56k_jit_finalize.
+ */
+static void dsp56k_jit_diff_finish(dsp_core_t *dsp)
+{
+    DspJitState *s = (DspJitState *)dsp->jit_state;
+    if (!s || !g_jit_diff || s->diff_reported) {
+        return;
+    }
+    s->diff_reported = true;
+    if (s->diff_q) {
+        diff_queue_stop(s->diff_q);
+        diff_print_line(jit_core_name(dsp), "async", "final",
+                        s->diff_q->enqueued, &s->diff_q->counts,
+                        s->diff_q->dropped);
+    } else {
+        const DiffCounts *c = &s->diff_sync_counts;
+        diff_print_line(jit_core_name(dsp), "sync", "final",
+                        c->checked + c->skipped_io + c->skipped_replay, c,
+                        0);
+    }
+}
+
+bool dsp56k_jit_diff_counts(dsp_core_t *dsp, Dsp56kJitDiffCounts *out)
+{
+    DspJitState *s = (DspJitState *)dsp->jit_state;
+    if (!s || !g_jit_diff) {
+        return false;
+    }
+    DiffQueue *q = s->diff_q;
+    const DiffCounts *c;
+    if (q) {
+        /* The worker stores head (release) after a slot's counts. */
+        while (q->worker_started &&
+               qatomic_load_acquire(&q->head) != qatomic_read(&q->tail)) {
+            qemu_mutex_lock(&q->mu);
+            qemu_cond_signal(&q->cond);
+            qemu_mutex_unlock(&q->mu);
+            g_usleep(100);
+        }
+        c = &q->counts;
+        out->enqueued = q->enqueued;
+        out->dropped = q->dropped;
+    } else {
+        c = &s->diff_sync_counts;
+        out->enqueued = c->checked + c->skipped_io + c->skipped_replay;
+        out->dropped = 0;
+    }
+    out->checked = c->checked;
+    out->failures = c->failures;
+    out->skipped_io = c->skipped_io;
+    out->skipped_replay = c->skipped_replay;
+    return true;
 }
 
 /*
@@ -10392,16 +10474,6 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
         return;
     }
     s->stats_printed = true;
-
-    if (s->diff_q) {
-        fprintf(stderr,
-                "xemu: DSP JIT validator (%s core) final: "
-                "enqueued=%" PRIu64 " checked=%" PRIu64
-                " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
-                jit_core_name(dsp), s->diff_q->enqueued,
-                s->diff_q->checked, s->diff_q->dropped,
-                s->diff_q->failures);
-    }
 
     fprintf(stderr,
             "xemu: DSP JIT stats (%s core):\n"
@@ -10508,13 +10580,13 @@ static void dsp56k_jit_print_stats(dsp_core_t *dsp)
  */
 static void dsp56k_jit_stats_atexit_handler(void)
 {
-    if (!g_jit_stats) {
-        return;
-    }
     for (int i = 0; i < g_jit_registered_count; i++) {
         dsp_core_t *d = g_jit_registered_cores[i];
         if (d && d->jit_state) {
-            dsp56k_jit_print_stats(d);
+            dsp56k_jit_diff_finish(d);
+            if (g_jit_stats) {
+                dsp56k_jit_print_stats(d);
+            }
         }
     }
 }
@@ -10526,12 +10598,13 @@ void dsp56k_jit_finalize(dsp_core_t *dsp)
         return;
     }
 
+    /* Drain and stop the validator (and report it) BEFORE freeing the
+     * queue: the worker holds a pointer into s->diff_q->slots. */
+    dsp56k_jit_diff_finish(dsp);
     if (g_jit_stats) {
         dsp56k_jit_print_stats(dsp);
     }
 
-    /* Drain and stop the validator BEFORE freeing the queue: the
-     * worker holds a pointer into s->diff_q->slots. */
     if (s->diff_q) {
         diff_queue_destroy(s->diff_q);
         s->diff_q = NULL;
@@ -11004,12 +11077,14 @@ static void diff_report_failure(const uint32_t *pre_pram_window,
  * on the validator thread (async mode) — the logic is identical.
  *
  * Returns true on success or skipped; false on divergence (caller
- * aborts the process in either mode).
+ * aborts the process in either mode). Every call lands in exactly one
+ * of c's checked, skipped_io and skipped_replay.
  */
-static bool diff_validate_slot(DiffSlot *slot, DiffQueue *q)
+static bool diff_validate_slot(DiffSlot *slot, DiffCounts *c)
 {
     if (slot->skip_compare) {
         /* JIT block hit DMA / non-replayable I/O. Validation meaningless. */
+        c->skipped_io++;
         return true;
     }
 
@@ -11041,13 +11116,12 @@ static bool diff_validate_slot(DiffSlot *slot, DiffQueue *q)
         dsp56k_execute_instruction(&slot->pre);
         if (slot->pre.jit_skip_diff_compare) {
             /* Interp replay hit a peripheral; abort the compare. */
+            c->skipped_replay++;
             return true;
         }
     }
 
-    if (q) {
-        q->checked++;
-    }
+    c->checked++;
 
     size_t diff_off = dsp_state_diff(&slot->pre, &slot->post,
                                      slot->write_set);
@@ -11055,14 +11129,35 @@ static bool diff_validate_slot(DiffSlot *slot, DiffQueue *q)
         return true;
     }
 
-    if (q) {
-        q->failures++;
-    }
+    c->failures++;
     diff_report_failure(pre_pram_window, slot->pc_start,
                         &slot->pre /* post-interp */,
                         &slot->post /* post-JIT */,
                         slot->jit_cycles, diff_off);
     return false;
+}
+
+/*
+ * One validator summary line. pending: published slots no validator
+ * has finished (0 once the worker drained; a line printed at failure
+ * may still see some).
+ */
+static void diff_print_line(const char *core, const char *mode,
+                            const char *when, uint64_t enqueued,
+                            const DiffCounts *c, uint64_t dropped)
+{
+    uint64_t done = c->checked + c->skipped_io + c->skipped_replay;
+    fprintf(stderr,
+            "xemu: DSP JIT validator (%s core, %s) %s: "
+            "enqueued=%" PRIu64 " checked=%" PRIu64
+            " skipped=%" PRIu64 " (live I/O %" PRIu64 ", replay I/O %" PRIu64
+            ") dropped=%" PRIu64 " failures=%" PRIu64 " pending=%" PRIu64
+            "\n",
+            core, mode, when, enqueued, c->checked,
+            c->skipped_io + c->skipped_replay, c->skipped_io,
+            c->skipped_replay, dropped, c->failures,
+            enqueued > done ? enqueued - done : 0);
+    fflush(stderr);
 }
 
 /*
@@ -11098,7 +11193,7 @@ static void *diff_worker_fn(void *opaque)
             /* The producer marked the translation when it pushed it,
              * so the worker touches nothing outside its slot (see
              * DspJitBlock.diff_checked). */
-            bool passed = diff_validate_slot(slot, q);
+            bool passed = diff_validate_slot(slot, &q->counts);
 
             /* Consumer-side advance: release-store so the producer
              * (if racing against a nearly-full ring) sees the slot
@@ -11112,13 +11207,9 @@ static void *diff_worker_fn(void *opaque)
                  * process terminates abruptly, and the divergence
                  * diagnostic is the ONE piece of information the
                  * user needs from a failed validation. */
-                fprintf(stderr,
-                        "xemu: DSP JIT validator (%s core): "
-                        "checked=%" PRIu64 " failures=%" PRIu64
-                        " dropped=%" PRIu64 " enqueued=%" PRIu64 "\n",
-                        q->core, q->checked, q->failures, q->dropped,
-                        q->enqueued);
-                fflush(stderr);
+                diff_print_line(q->core, "async", "at failure",
+                                qatomic_read(&q->enqueued), &q->counts,
+                                qatomic_read(&q->dropped));
                 abort();
             }
         }
@@ -11150,18 +11241,31 @@ static DiffQueue *diff_queue_create(const char *core)
     return q;
 }
 
+/*
+ * Stop the worker once it has validated every published slot (it drains
+ * the ring before it honours exiting). The producer must be quiet: at a
+ * normal quit vm_shutdown has idled the APU thread and the vCPU before
+ * the atexit handler runs. A slot pushed afterwards stays pending.
+ */
+static void diff_queue_stop(DiffQueue *q)
+{
+    if (!q || !q->worker_started) {
+        return;
+    }
+    qemu_mutex_lock(&q->mu);
+    q->exiting = true;
+    qemu_cond_signal(&q->cond);
+    qemu_mutex_unlock(&q->mu);
+    qemu_thread_join(&q->worker);
+    q->worker_started = false;
+}
+
 static void diff_queue_destroy(DiffQueue *q)
 {
     if (!q) {
         return;
     }
-    if (q->worker_started) {
-        qemu_mutex_lock(&q->mu);
-        q->exiting = true;
-        qemu_cond_signal(&q->cond);
-        qemu_mutex_unlock(&q->mu);
-        qemu_thread_join(&q->worker);
-    }
+    diff_queue_stop(q);
     qemu_cond_destroy(&q->cond);
     qemu_mutex_destroy(&q->mu);
     g_free(q->slots);
@@ -11300,11 +11404,10 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
         /* Sync: run the validator inline on the APU thread. No lock
          * release/re-acquire — the validator operates entirely on
          * the private copy (slot->pre / slot->post), so d->lock
-         * stays held but nothing outside dsp_core_t is mutated. We
-         * pass q == NULL to diff_validate_slot; it's defined to
-         * skip the per-slot stats increments in that case. On
+         * stays held but nothing outside dsp_core_t is mutated. The
+         * outcome lands in s->diff_sync_counts. On
          * divergence the diagnostic from diff_report_failure has
-         * already been printed; just abort. */
+         * already been printed; add the counts and abort. */
         memcpy(&slot->post, dsp, sizeof(*dsp));
         slot->pc_start        = pc_start;
         slot->num_inst_before = num_inst_before;
@@ -11313,8 +11416,11 @@ static unsigned int dsp56k_jit_execute_block_diff(dsp_core_t *dsp,
         slot->skip_compare    = skip_compare;
         s->diff_ops_checked++;
 
-        if (!diff_validate_slot(slot, NULL)) {
-            fflush(stderr);
+        DiffCounts *c = &s->diff_sync_counts;
+        if (!diff_validate_slot(slot, c)) {
+            diff_print_line(jit_core_name(dsp), "sync", "at failure",
+                            c->checked + c->skipped_io + c->skipped_replay,
+                            c, 0);
             abort();
         }
         /* Sync mode validates inline: on success, the block is

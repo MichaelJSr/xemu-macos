@@ -27,6 +27,22 @@
 #define DSP56K_JIT_SUPPORTED 0
 #endif
 
+/*
+ * XEMU_DSP_JIT_DIFF validator outcomes for one core (dsp56k_jit_diff_counts).
+ * Each enqueued snapshot ends up checked (compared; failures among them) or
+ * skipped: the live block hit DMA_CONTROL (skipped_io) or the interpreter
+ * replay touched a peripheral (skipped_replay). dropped: blocks the async
+ * ring had no slot for, never snapshotted.
+ */
+typedef struct Dsp56kJitDiffCounts {
+    uint64_t enqueued;
+    uint64_t checked;
+    uint64_t failures;
+    uint64_t skipped_io;
+    uint64_t skipped_replay;
+    uint64_t dropped;
+} Dsp56kJitDiffCounts;
+
 #if DSP56K_JIT_SUPPORTED
 
 /*
@@ -86,6 +102,12 @@ bool dsp56k_jit_diff_enabled(void);
  * false-green the comparison). 0 when the JIT never ran.
  */
 uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp);
+
+/*
+ * Test hook: once the async validator has finished every snapshot it was
+ * handed, fill *out with this core's outcomes. False when diff mode is off.
+ */
+bool dsp56k_jit_diff_counts(dsp_core_t *dsp, Dsp56kJitDiffCounts *out);
 
 /*
  * Called from APU init (gp_ep.c) with g_config.audio.dsp_jit.enabled,
@@ -365,6 +387,10 @@ static inline bool dsp56k_jit_diff_enabled(void) { return false; }
 static inline void dsp56k_jit_set_enabled_from_config(bool enabled) { (void)enabled; }
 static inline uint64_t dsp56k_jit_blocks_executed(const dsp_core_t *dsp) {
     (void)dsp; return 0;
+}
+static inline bool dsp56k_jit_diff_counts(dsp_core_t *dsp,
+                                          Dsp56kJitDiffCounts *out) {
+    (void)dsp; (void)out; return false;
 }
 
 #endif  /* DSP56K_JIT_SUPPORTED */

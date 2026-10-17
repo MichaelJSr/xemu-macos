@@ -41,10 +41,12 @@
  *   2. /corpus --jit — the same goldens through the inline ARM64 JIT,
  *      plus an assertion that the JIT actually engaged
  *      (dsp56k_jit_blocks_executed > 0). aarch64 POSIX only.
- *   3. /corpus --jit under XEMU_DSP_JIT_DIFF=1 XEMU_DSP_JIT_DIFF_SYNC=1
- *      — the in-engine per-block bit-exact validator replays every
- *      translated block through the interpreter and aborts on any
- *      state divergence.
+ *   3. /corpus --jit under XEMU_DSP_JIT_DIFF=1, with and without
+ *      XEMU_DSP_JIT_DIFF_SYNC=1 — the in-engine per-block bit-exact
+ *      validator replays every translated block through the interpreter
+ *      (inline, or on its worker thread from a snapshot ring) and aborts
+ *      on any state divergence; each program then checks the validator's
+ *      accounting (dsp56k_jit_diff_counts).
  *   4. /jit-differential — re-executes this binary per program on the
  *      interpreter and on the JIT (the JIT switch is latched once per
  *      process, so the arms must be separate processes) and
@@ -758,6 +760,32 @@ static const TestProg *find_prog(const char *name)
     return NULL;
 }
 
+#if DSP56K_JIT_SUPPORTED
+/*
+ * Under XEMU_DSP_JIT_DIFF (the jit-diff-sync and jit-diff-async arms): once
+ * the validator has drained, every snapshot it was handed ended checked or
+ * skipped (peripheral I/O a replay can't reproduce), none failed (a failure
+ * aborts before this), and some of the program's blocks were compared.
+ */
+static void check_diff_counts(dsp_core_t *core)
+{
+    Dsp56kJitDiffCounts c;
+
+    if (!dsp56k_jit_diff_counts(core, &c)) {
+        return;
+    }
+    g_test_message("validator: enqueued=%" PRIu64 " checked=%" PRIu64
+                   " skipped io=%" PRIu64 " replay=%" PRIu64
+                   " dropped=%" PRIu64 " failures=%" PRIu64,
+                   c.enqueued, c.checked, c.skipped_io, c.skipped_replay,
+                   c.dropped, c.failures);
+    g_assert_cmpuint(c.failures, ==, 0);
+    g_assert_cmpuint(c.enqueued, ==,
+                     c.checked + c.skipped_io + c.skipped_replay);
+    g_assert_cmpuint(c.checked, >, 0);
+}
+#endif
+
 static void test_corpus_prog(gconstpointer arg)
 {
     const TestProg *tp = arg;
@@ -785,6 +813,7 @@ static void test_corpus_prog(gconstpointer arg)
                            "skipped");
         } else {
             g_assert_cmpuint(dsp56k_jit_blocks_executed(core), >, 0);
+            check_diff_counts(core);
         }
     }
 #endif

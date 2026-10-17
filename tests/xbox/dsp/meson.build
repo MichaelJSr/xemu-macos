@@ -75,6 +75,18 @@ if host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
        protocol: 'tap',
        suite: xbox_dsp_suite)
 
+  # Arm 3b: the same validator in its default async mode: snapshots go to
+  # a ring that a worker thread replays and compares. Each program drains
+  # it and checks the counts (every snapshot checked or skipped, none
+  # failed, some checked).
+  test('xbox-mcpx-dsp-jit-diff-async', diff_exe,
+       env: environment(xbox_dsp_env + {
+         'XEMU_DSP_JIT_DIFF': '1',
+       }),
+       args: ['--tap', '-k', '-p', '/corpus', '--jit'],
+       protocol: 'tap',
+       suite: xbox_dsp_suite)
+
   # Arm 4: cross-process differential — runs each corpus program in an
   # interpreter child and a JIT child and byte-compares the final
   # DspCoreState (registers, stacks, all memories, loop state).
