@@ -1937,6 +1937,116 @@ static const struct fpatan_data fpatan_table[9] = {
       make_floatx80_init(0xbfbc, 0xece675d1fc8f8cbcULL) },
 };
 
+#if defined(USE_HARD_FPU) && defined(__aarch64__)
+/*
+ * xemu: the aarch64 __hard helper_fpatan keeps upstream's algorithm and
+ * its exact results, with cheaper steps: the softfloat roundings inline
+ * (fpatan_pack), the polynomial on doubles (fpatan_poly), and no NaN
+ * tests on operands whose exponents rule NaNs out.
+ * A differential test against the original body over random and captured
+ * operands, in every RC and PC, found no difference in ST1 or in the
+ * exception flags left in fp_status.
+ */
+#define XEMU_FPATAN_FAST 1
+
+/*
+ * normalizeRoundAndPackFloatx80(floatx80_precision_x, sign, exp, sig0,
+ * sig1, s), inline: normalise, raise inexact if sig1 is nonzero, round
+ * by the status's mode, exactly as roundAndPackFloatx80's precision80
+ * path does for an exponent in the normal range. A zero sig0, an exponent
+ * outside that range, and other rounding modes take the softfloat
+ * routines.
+ */
+static inline floatx80 fpatan_pack(bool sign, int32_t exp, uint64_t sig0,
+                                   uint64_t sig1, float_status *s)
+{
+    FloatRoundMode mode = s->float_rounding_mode;
+    bool inc;
+    int sh;
+
+    if (unlikely(sig0 == 0)) {
+        return normalizeRoundAndPackFloatx80(floatx80_precision_x, sign,
+                                             exp, sig0, sig1, s);
+    }
+    sh = clz64(sig0);
+    shortShift128Left(sig0, sig1, sh, &sig0, &sig1);
+    exp -= sh;
+    if (unlikely((uint32_t)(exp - 1) >= 0x7FFD)) {
+        return roundAndPackFloatx80(floatx80_precision_x, sign, exp,
+                                    sig0, sig1, s);
+    }
+    switch (mode) {
+    case float_round_nearest_even:
+    case float_round_ties_away:
+        inc = (int64_t)sig1 < 0;
+        break;
+    case float_round_to_zero:
+        inc = false;
+        break;
+    case float_round_up:
+        inc = !sign && sig1;
+        break;
+    case float_round_down:
+        inc = sign && sig1;
+        break;
+    default:
+        return roundAndPackFloatx80(floatx80_precision_x, sign, exp,
+                                    sig0, sig1, s);
+    }
+    if (sig1) {
+        float_raise(float_flag_inexact, s);
+    }
+    if (inc) {
+        if (++sig0 == 0) {
+            exp++;
+            sig0 = 0x8000000000000000ULL;
+        } else if (!(sig1 << 1) && mode == float_round_nearest_even) {
+            sig0 &= ~1ULL;
+        }
+    }
+    return packFloatx80(sign, exp, sig0);
+}
+
+/* Keeps a product out of a fused multiply-add (-ffp-contract=fast). */
+#define FPATAN_FP_PIN(x) __asm__("" : "+w"(x))
+
+/*
+ * The polynomial's lower parts, z2 * (c1 + z2 * (c2 + ... z2 * c6)), as
+ * the __hard floatx80_mul/floatx80_add chain computes them: each step
+ * reads both operands with floatx80_to_double_fast, does one double
+ * operation under the live FPCR, and writes double_to_floatx80_fast of
+ * the result (pack_arm64: the path runs at floatx80_precision_x). Every
+ * step's result is finite, and a finite double survives that round trip
+ * exactly, so the chain runs on doubles and converts once at the end.
+ * The coefficients read as floatx80_to_double_fast reads them
+ * (truncated).
+ */
+static inline floatx80 fpatan_poly(floatx80 z2)
+{
+    double z = floatx80_to_double_fast(z2);
+    double a;
+
+    a = floatx80_to_double_fast(fpatan_coeff_6) * z;
+    FPATAN_FP_PIN(a);
+    a = floatx80_to_double_fast(fpatan_coeff_5) + a;
+    a = a * z;
+    FPATAN_FP_PIN(a);
+    a = floatx80_to_double_fast(fpatan_coeff_4) + a;
+    a = a * z;
+    FPATAN_FP_PIN(a);
+    a = floatx80_to_double_fast(fpatan_coeff_3) + a;
+    a = a * z;
+    FPATAN_FP_PIN(a);
+    a = floatx80_to_double_fast(fpatan_coeff_2) + a;
+    a = a * z;
+    FPATAN_FP_PIN(a);
+    a = floatx80_to_double_fast(fpatan_coeff_1) + a;
+    a = a * z;
+    FPATAN_FP_PIN(a);
+    return double_to_floatx80_fast(a);
+}
+#endif
+
 void helper_fpatan(CPUX86State *env)
 {
     int old_flags = save_exception_flags(env);
@@ -1946,20 +2056,27 @@ void helper_fpatan(CPUX86State *env)
     uint64_t arg1_sig = extractFloatx80Frac(ST1);
     int32_t arg1_exp = extractFloatx80Exp(ST1);
     bool arg1_sign = extractFloatx80Sign(ST1);
+#ifdef XEMU_FPATAN_FAST
+    /* Only an exponent of 0x7fff can hold a NaN. */
+    bool nan_exp = arg0_exp == 0x7fff || arg1_exp == 0x7fff;
+#else
+    bool nan_exp = true;
+#endif
 
-    if (floatx80_is_signaling_nan(ST0, &env->fp_status)) {
+    if (nan_exp && floatx80_is_signaling_nan(ST0, &env->fp_status)) {
         float_raise(float_flag_invalid, &env->fp_status);
         ST1 = floatx80_silence_nan(ST0, &env->fp_status);
-    } else if (floatx80_is_signaling_nan(ST1, &env->fp_status)) {
+    } else if (nan_exp &&
+               floatx80_is_signaling_nan(ST1, &env->fp_status)) {
         float_raise(float_flag_invalid, &env->fp_status);
         ST1 = floatx80_silence_nan(ST1, &env->fp_status);
     } else if (floatx80_invalid_encoding(ST0, &env->fp_status) ||
                floatx80_invalid_encoding(ST1, &env->fp_status)) {
         float_raise(float_flag_invalid, &env->fp_status);
         ST1 = floatx80_default_nan(&env->fp_status);
-    } else if (floatx80_is_any_nan(ST0)) {
+    } else if (nan_exp && floatx80_is_any_nan(ST0)) {
         ST1 = ST0;
-    } else if (floatx80_is_any_nan(ST1)) {
+    } else if (nan_exp && floatx80_is_any_nan(ST1)) {
         /* Pass this NaN through.  */
     } else if (floatx80_is_zero(ST1) && !arg0_sign) {
         /* Pass this zero through.  */
@@ -2126,9 +2243,14 @@ void helper_fpatan(CPUX86State *env)
              * Split x as x = t + y, where t = n/8 is the nearest
              * multiple of 1/8 to x.
              */
+#ifdef XEMU_FPATAN_FAST
+            x8 = fpatan_pack(false, xexp + 3, xsig0, xsig1,
+                             &env->fp_status);
+#else
             x8 = normalizeRoundAndPackFloatx80(floatx80_precision_x,
                                                false, xexp + 3, xsig0,
                                                xsig1, &env->fp_status);
+#endif
             n = floatx80_to_int32(x8, &env->fp_status);
             if (n == 0) {
                 ysign = false;
@@ -2248,6 +2370,11 @@ void helper_fpatan(CPUX86State *env)
                 /* Compute z^2.  */
                 mul128To256(zsig0, zsig1, zsig0, zsig1,
                             &z2sig0, &z2sig1, &z2sig2, &z2sig3);
+#ifdef XEMU_FPATAN_FAST
+                z2 = fpatan_pack(false, zexp + zexp - 0x3ffe, z2sig0,
+                                 z2sig1, &env->fp_status);
+                accum = fpatan_poly(z2);
+#else
                 z2 = normalizeRoundAndPackFloatx80(floatx80_precision_x, false,
                                                    zexp + zexp - 0x3ffe,
                                                    z2sig0, z2sig1,
@@ -2265,6 +2392,7 @@ void helper_fpatan(CPUX86State *env)
                 accum = floatx80_mul(accum, z2, &env->fp_status);
                 accum = floatx80_add(fpatan_coeff_1, accum, &env->fp_status);
                 accum = floatx80_mul(accum, z2, &env->fp_status);
+#endif
 
                 /*
                  * The full polynomial expansion is z*(fpatan_coeff_0 + accum).
@@ -2368,8 +2496,12 @@ void helper_fpatan(CPUX86State *env)
         }
         /* This result is inexact.  */
         rsig1 |= 1;
+#ifdef XEMU_FPATAN_FAST
+        ST1 = fpatan_pack(rsign, rexp, rsig0, rsig1, &env->fp_status);
+#else
         ST1 = normalizeRoundAndPackFloatx80(floatx80_precision_x, rsign, rexp,
                                             rsig0, rsig1, &env->fp_status);
+#endif
     }
 
     fpop(env);

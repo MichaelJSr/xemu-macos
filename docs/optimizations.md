@@ -597,6 +597,43 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   numbers.
   Goldens exact on release and debug-TCG, x87 refuter clean (heavy-f1
   f600, every `*violations=` 0).
+- **fpatan: upstream's algorithm with cheaper steps (2026-10-16).** The
+  aarch64 `helper_fpatan__hard` (413 calls per heavy-f1 frame, ~490
+  cycles each) keeps every step's result and gets there more cheaply
+  (compile-time `XEMU_FPATAN_FAST`, not a switch): the three
+  `normalizeRoundAndPackFloatx80` calls run inline (`fpatan_pack`,
+  roundAndPackFloatx80's precision80 path for
+  a normal exponent, softfloat for the rest), the polynomial runs as one
+  double chain (`fpatan_poly`: each `__hard` mul/add read both operands
+  with `floatx80_to_double_fast` and wrote `double_to_floatx80_fast` of a
+  finite result, a round trip that is exact, so only the last result
+  converts; an empty asm keeps each product out of an FMADD under
+  `-ffp-contract=fast`), and the NaN tests run only when an exponent is
+  0x7fff. Differential test (outside the tree): the original body, taken
+  from the source by a generator, against the new one, ST1 and the
+  fp_status flags compared, in all four RC (host FPCR RMode with it) and
+  all three PC, over 1e8 random pairs (aimed at the k/8 and k/8+1/16
+  splits and their ties, every special class, raw bit patterns; every n,
+  both y branches, the division and its exact-quotient correction,
+  subnormal operands all hit) and the 542,842 operand pairs captured
+  from det heavy-f1 1200 f and stream-e2 600 f: 0 mismatches in
+  1.2e9 + 6.2e6 checks. Microbenchmark on the captured pairs, per
+  call: heavy-f1 ~923 → ~585 insns and ~470 → ~305 cycles, stream-e2
+  ~652 → ~411 insns and ~300 → ~186 cycles. Det A/B against the m64fp
+  commit, each arm first in half the pairs, load 52-100: heavy-f1 1200 f
+  Minsns/frame −0.23% median (8/8), Mcycles/frame −1.6% median (6/8);
+  stream-e2 600 f runs ~94 calls per frame (~23K insns, 0.04%, below
+  its run-to-run Minsns noise): Minsns/frame −0.06% median (10/16),
+  Mcycles/frame −0.45% median (8/16). Review re-measure (own builds,
+  both orders): heavy-f1 8 pairs, load 41-43, Minsns/frame −0.15%
+  median (8/8), Mcycles/frame −0.66% median (5/8); stream-e2 24 pairs,
+  load 42-49, Minsns/frame −0.03% median (13/24), Mcycles/frame +0.5%
+  median (11/24), per-pair swings to ±32%. stream-e2 cannot meet the
+  every-pair rule for a 0.04% effect; the commit stands on heavy-f1 and
+  on bit-identity (the differential test re-run on the committed body:
+  2.4e8 random and 6.2e6 captured checks, 0 mismatches; no FMADD in
+  the built helper). Goldens exact on release and
+  debug-TCG, x87 refuter clean.
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
