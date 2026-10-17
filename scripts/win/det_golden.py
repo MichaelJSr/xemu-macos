@@ -80,7 +80,7 @@ def run(a):
     tag = os.path.basename(d)
     res = {'label': a.label, 'exe': a.exe, 'tag': a.tag, 'input': a.input,
            'set': a.set, 'env': a.env, 'renderer': a.renderer}
-    proc = h = log = None
+    proc = h = log = hdd = None
     rc = 1
     try:
         t = bw.TomlEdit(open(a.config, encoding='utf-8', errors='replace').read())
@@ -182,6 +182,11 @@ def run(a):
                 if os.path.exists(p):
                     with open(p, errors='replace') as f:
                         res['log_tail_' + n] = f.read()[-2000:]
+        if rc and hdd and not a.keep:
+            try:  # keep the failed run's logs and config, drop its 2.2 GB HDD copy
+                os.remove(hdd)
+            except OSError:
+                pass
         if a.keep or rc:
             res['dir'] = d
         else:
@@ -212,7 +217,8 @@ def main():
     ap.add_argument('--save', default=os.path.join(KIT, 'results', 'det'), help='artifact folder')
     ap.add_argument('--label', default='')
     ap.add_argument('--out', default='', help='append the JSON line to this file')
-    ap.add_argument('--keep', action='store_true', help='keep the scratch dir (about 2.2 GB)')
+    ap.add_argument('--keep', action='store_true',
+                    help='keep the scratch dir with its HDD copy (about 2.2 GB); a failed run keeps its logs and config only')
     return run(ap.parse_args())
 
 

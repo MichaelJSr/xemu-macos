@@ -178,7 +178,7 @@ The kit ships `C:\xemu-kit\tools\kit.ps1`, byte-identical to the repo's `scripts
 . C:\xemu-kit\tools\kit.ps1
 ```
 
-It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`.
+It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to.
 
 ### 1.7 Write the two Windows configs [agent]
 
@@ -338,7 +338,7 @@ The log prints in this PowerShell window. Go through the checklist below and wri
 }
 ```
 
-Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of `stderr.log`. Repeat with `$XNewDbg`, then go to section 7.3.
+Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of the run's log (`Get-Content (Get-XemuLog $d) -Tail 30`). Repeat with `$XNewDbg`, then go to section 7.3.
 
 ### 2.3 The fixture savestates load [agent, 10 min]
 
@@ -412,12 +412,12 @@ $d = New-Scratch -Name logs
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_PFIFO_HEARTBEAT = '1'; XEMU_NV2A_NSPROF = '1' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-heavy-f1; Start-Sleep 20
 Stop-Process -Id $p.Id -Force          # a hard kill, the case the Windows flush exists for
-Get-Content "$d\stderr.log" -TotalCount 5
-Select-String "$d\stderr.log" -Pattern 'heartbeat|nsprof: .*interval' | Select-Object -Last 3
+Get-Content (Get-XemuLog $d) -TotalCount 5
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'heartbeat|nsprof: .*interval' | Select-Object -Last 3
 Test-Path "$d\xemu.log"
 ```
 
-Pass: `xemu_version:` and `xemu_commit:` sit at the top, the last heartbeat or nsprof line is no older than about 5 s before the kill, and there's no `xemu.log` (the redirect worked). If `stderr.log` is empty and `xemu.log` exists, the launching shell had no console. Run the benches from a PowerShell window, and note this in RESULTS.md.
+Pass: `xemu_version:` and `xemu_commit:` sit at the top, the last heartbeat or nsprof line is no older than about 5 s before the kill, and there's no `xemu.log` (the redirect worked). If `stderr.log` is empty and `xemu.log` exists, the launching shell had no console. The kit's helpers then read `xemu.log` (`Get-XemuLog`), but the bench's `ab_*.log` captures stay empty, so run the benches from a console (1.10) and note this in RESULTS.md.
 
 ### 3.2 Headless mode [agent, P0, 5 min]
 
@@ -426,7 +426,7 @@ Pass: `xemu_version:` and `xemu_commit:` sit at the top, the last heartbeat or n
 $d = New-Scratch -Name headless-offscreen
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_HEADLESS = '1' }
 py -3 $Ctl wait 4444 180
-Select-String "$d\stderr.log" -Pattern 'headless mode'
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'
 (Get-Process -Id $p.Id).MainWindowHandle        # 0 = no visible window
 py -3 $Ctl loadvm 4444 azurik-heavy-f1; Start-Sleep 10
 Save-Shot "$d\offscreen.png"; Stop-Xemu $p
@@ -473,7 +473,7 @@ Pass: replay same = True, the dump file matches, the restore with `verify=true` 
 $d = New-Scratch -Name pipe
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_INPUT_PIPE = 'xemu-kit-pipe'; XEMU_NV2A_NSPROF = '1' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-stream-e2
-Select-String "$d\stderr.log" -Pattern 'test-input pipe'
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'test-input pipe'
 Save-Shot "$d\before.png"
 py -3 $Inj down xemu-kit-pipe W; Start-Sleep 1
 py -3 $Ctl qmp 4444 query-xemu-input              # keys contains 26, port 2 ly > 0
@@ -495,7 +495,7 @@ Run it while another window has focus. Pass: `xemu: test-input pipe listening on
 $d = New-Scratch -Name shm
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' } -Extra '-S'
 py -3 $Ctl wait 4444 180
-Select-String "$d\stderr.log" -Pattern 'shared memory'
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'shared memory'
 py -3 $Ctl loadvm 4444 azurik-heavy-f1
 py -3 $Ctl qmp 4444 xemu-frame-advance frames=60
 $dig = py -3 $Ctl qmp 4444 xemu-ram-digest | ConvertFrom-Json
@@ -505,12 +505,12 @@ $shm = py -3 $Ctl shmhash xemu-kit-shm $dig.'ram-size'
 $d2 = New-Scratch -Name shm2
 $p2 = Start-Xemu -Exe $XNew -Dir $d2 -Stub -Qmp 4446 -Mon 4447 -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' }
 py -3 $Ctl wait 4446 180
-Select-String "$d2\stderr.log" -Pattern 'XEMU_RAM_SHM|shared memory'
+Select-String -LiteralPath (Get-XemuLog $d2) -Pattern 'XEMU_RAM_SHM|shared memory'
 Stop-Xemu $p2 -Qmp 4446; Stop-Xemu $p
 # the name is free again once both have exited
 $d3 = New-Scratch -Name shm3
 $p3 = Start-Xemu -Exe $XNew -Dir $d3 -Stub -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' }
-py -3 $Ctl wait 4444 180; Select-String "$d3\stderr.log" -Pattern 'shared memory'; Stop-Xemu $p3
+py -3 $Ctl wait 4444 180; Select-String -LiteralPath (Get-XemuLog $d3) -Pattern 'shared memory'; Stop-Xemu $p3
 ```
 
 Pass: `xemu: guest RAM in shared memory xemu-kit-shm`, the hashes match, the second xemu prints that the name is held and that guest RAM stays private, without exiting, and the third launch gets the name. The README says a reader that keeps the mapping open across a relaunch makes the new xemu keep private RAM. That's expected, not a bug.
@@ -592,7 +592,7 @@ $d = New-Scratch -Name sse2-live
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_SSE_HOST = '2'; XEMU_INPUT_PIPE = 'xemu-kit-sse' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-stream-e2; py -3 $Inj send xemu-kit-sse 'axis ly 1.0'
 Start-Sleep 300; $alive = -not $p.HasExited; Stop-Xemu $p; "alive after 5 min: $alive"
-Select-String "$d\stderr.log" -Pattern 'SSE|diverg' | Select-Object -Last 5
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'SSE|diverg' | Select-Object -Last 5
 ```
 
 Pass: no abort, the process is alive after 5 minutes, and on x86_64 the det hash equals the default-config hash from 3.7 for the same frames (softfloat is the default there). If it's clean, run the `XEMU_SSE_HOST=1` speed A/B in 4.5.
@@ -610,11 +610,11 @@ $d = New-Scratch -Name subpage-arm64
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_SUBPAGE_FAST = '1'; XEMU_SUBPAGE_FAST_REFUTE = '1'; XEMU_SUBPAGE_FAST_STATS = '1'; XEMU_INPUT_PIPE = 'xemu-kit-sp' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-stream-e2; py -3 $Inj send xemu-kit-sp 'axis ly 1.0'
 Start-Sleep 180; py -3 $Ctl loadvm 4444 azurik-transition-f1; py -3 $Inj send xemu-kit-sp 'axis ly 1.0'; Start-Sleep 60
-Stop-Xemu $p; Select-String "$d\stderr.log" -Pattern 'subpage|VIOLATION|violation' | Select-Object -Last 10
+Stop-Xemu $p; Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'subpage|VIOLATION|violation' | Select-Object -Last 10
 ```
 
   Pass: no `VIOLATION` and every `violations=` count is 0.
-- DSP: the fork's JIT is compiled out on Windows by design, so `XEMU_DSP_JIT_DIFF` does nothing here. Instead, record which engine works and what it costs. Run heavy-f1 (2.3 style, 60 s in the scene) with `-Vars @{ XEMU_APU_PROF = '1' }` twice: once on the default scratch config (upstream's dsp56300 JIT) and once after `Set-TomlKey "$d\xemu.toml" 'audio' 'use_dsp_jit' 'false'` (the interpreter). Read `Select-String "$d\stderr.log" -Pattern 'apu: utilization'`. Pass: utilization well under 100% at about 1500 frames/s, with no crackle on the owner's listen.
+- DSP: the fork's JIT is compiled out on Windows by design, so `XEMU_DSP_JIT_DIFF` does nothing here. Instead, record which engine works and what it costs. Run heavy-f1 (2.3 style, 60 s in the scene) with `-Vars @{ XEMU_APU_PROF = '1' }` twice: once on the default scratch config (upstream's dsp56300 JIT) and once after `Set-TomlKey "$d\xemu.toml" 'audio' 'use_dsp_jit' 'false'` (the interpreter). Read `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'apu: utilization'`. Pass: utilization well under 100% at about 1500 frames/s, with no crackle on the owner's listen.
 - Vulkan on Adreno: if init prints `Error: Device does not support required feature <name>`, record the name. That's a concrete finding: the Apple branch already relaxes that list, and non-Apple relaxed only `shaderTessellationAndGeometryPointSize`. Fall back to OpenGL and continue.
 - Run `XEMU_SSE_HOST=2` (3.8) here too. This is gating-audit item I.10.
 
@@ -635,13 +635,13 @@ foreach ($t in 'azurik-heavy-f1', 'azurik-heavy-w2', 'azurik-stream-e2', 'azurik
   Start-Sleep 60; py -3 $Inj clear xemu-kit-val; Save-Shot "$d\$t.png"
 }
 Stop-Xemu $p
-Select-String "$d\stderr.log" -Pattern 'Validation layers enabled|validation layers not available'
-Select-String "$d\stderr.log" -Pattern 'VUID-[A-Za-z0-9_-]+' -AllMatches | ForEach-Object { $_.Matches.Value } | Group-Object | Sort-Object Count -Descending | Format-Table Count, Name
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'Validation layers enabled|validation layers not available'
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'VUID-[A-Za-z0-9_-]+' -AllMatches | ForEach-Object { $_.Matches.Value } | Group-Object | Sort-Object Count -Descending | Format-Table Count, Name
 ```
 
 Pass: zero VUIDs. Each VUID is a finding: put the full `[vk]` message in RESULTS.md and the log in results. This covers B1 (occlusion queries), B4 (bind skips), B8 (zeta quarantine), F1 (texture LRU) and the 2026-08 descriptor class.
 
-b) Query-pool capacity guard (B1, audit batch 3): repeat 2.3 for heavy-f1 with `-Vars @{ XEMU_MAX_QUERIES = '64'; XEMU_NV2A_NSPROF = '1' }` and 120 s in the scene. Pass: no crash or abort, the scene renders, and `Select-String "$d\stderr.log" -Pattern 'finish_queries_full'` shows the guard firing.
+b) Query-pool capacity guard (B1, audit batch 3): repeat 2.3 for heavy-f1 with `-Vars @{ XEMU_MAX_QUERIES = '64'; XEMU_NV2A_NSPROF = '1' }` and 120 s in the scene. Pass: no crash or abort, the scene renders, and `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'finish_queries_full'` shows the guard firing.
 
 c) Walk-ins (B3 vertex refinement, B6 surface expiry on monotonic time, B7 fence watchdog, B8, F1): the 3.11 soak covers stream-e2. Also walk `azurik-transition-f1` forward about 4 s (it loads F6), wait 15 s, walk back (it reloads F1) three times, and walk `azurik-movie-e2` forward into its cutscene. Use `py -3 $Inj down <pipe> W` / `up` / `S`. Pass: no garbled geometry, no black freeze at the loads, no magenta, and no `vkWaitForFences timeout` warning.
 
@@ -679,8 +679,8 @@ for ($i = 0; $i -lt 30; $i++) {
   "$i $t frame=$f | $r | $s" | Tee-Object -Append $log
 }
 Stop-Xemu $p
-Select-String "$d\stderr.log" -Pattern 'vkWaitForFences|rror|assert' | Select-Object -Last 20 | Tee-Object -Append $log
-Select-String "$d\stderr.log" -Pattern 'heartbeat' | Select-Object -Last 3 | Tee-Object -Append $log
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'vkWaitForFences|rror|assert' | Select-Object -Last 20 | Tee-Object -Append $log
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'heartbeat' | Select-Object -Last 3 | Tee-Object -Append $log
 ```
 
 Pass: 30 of 30 cycles, every screenshot PASS, the frame counter rising every cycle, the heartbeat `iters` still rising at the end, and no fence warnings, errors or asserts. A frozen `iters` means PFIFO is stuck; re-run with `XEMU_PFIFO_PUT_LOCK=1` to split the doorbell off. Don't use the machine during the soak. If `Select-String` reports the log as in use while xemu runs, it works after `Stop-Xemu`.
@@ -700,7 +700,7 @@ foreach ($pair in @(@{ XEMU_SUBPAGE_REFUTE = '1'; XEMU_XPAGE_REFUTE = '1'; XEMU_
     py -3 $Ctl loadvm 4444 $t 120; py -3 $Inj send xemu-kit-ref 'axis ly 1.0'; Start-Sleep 60; py -3 $Inj clear xemu-kit-ref
   }
   Stop-Xemu $p                       # the dumps print at a clean quit
-  Select-String "$d\stderr.log" -Pattern 'refute|VIOLATION|XPAGE summary|subpage' | Select-Object -Last 12
+  Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'refute|VIOLATION|XPAGE summary|subpage' | Select-Object -Last 12
 }
 ```
 
@@ -753,7 +753,7 @@ Use the personal setup (`xemu-personal.toml`, play copies):
 
 ### 3.15 Smaller checks [agent, P2]
 
-- A second xemu with the same `-qmp tcp:127.0.0.1:4444` fails cleanly (address in use) and leaves the first one running. Windows keeps upstream's socket behaviour here.
+- A second xemu with the same `-qmp tcp:127.0.0.1:4444` fails cleanly (address in use) and leaves the first one running. Windows keeps upstream's socket behaviour here. Launch the second one with `Start-Process` directly (same arguments as `Start-Xemu` builds), because `Start-Xemu` refuses busy ports.
 - Live pads under icount, then a replay: start with `-Vars @{ XEMU_ICOUNT_LIVE_PADS = '1'; XEMU_INPUT_RECORD = "$d\rec.txt"; XEMU_INPUT_RECORD_PORT = '1' } -Extra '-icount','shift=2,align=on,sleep=on'` and a controller bound to port 1, play 30 s after a `loadvm`, then quit. Replaying the record's last section through `det_golden.py -i` lines under `sleep=off` should reach the same RAM digest. That's exact on macOS and unverified on Windows.
 - `[automation]` in the pref-dir config (`%APPDATA%\xemu\xemu\xemu.toml`): only test it if the owner sets up their own Windows play config there. Each key prints an `xemu: [automation] ...: applied` line.
 
@@ -940,7 +940,7 @@ $stamp = Get-Date -Format yyyyMMdd
 Compress-Archive -Path C:\xemu-kit\results\* -DestinationPath "C:\xemu-kit\windows-results-$stamp.zip" -Force
 ```
 
-Leave out `results\dumps` if it's large (full dumps are GBs); copy those separately. The zip holds RESULTS.md, machine.json, dxdiag.txt, the det-*.jsonl files, `results\det` (page hashes, WAVs, PNGs), the bench out dirs, the soak log and every interesting `stderr.log` (copy them in from `C:\xemu-kit\work\<run>`). Clean up scratch copies (about 2.2 GB each) with `Remove-Item -Recurse -Force C:\xemu-kit\work\*-*` once you've copied out what you need.
+Leave out `results\dumps` if it's large (full dumps are GBs); copy those separately. The zip holds RESULTS.md, machine.json, dxdiag.txt, the det-*.jsonl files, `results\det` (page hashes, WAVs, PNGs), the bench out dirs, the soak log and every interesting `stderr.log` or `xemu.log` (copy them in from `C:\xemu-kit\work\<run>`). `New-Scratch` already deletes each finished run's HDD copy and `det_golden.py` drops a failed run's, so the run dirs left in `work` are small. Once you've copied out what you need, clear them with `Get-ChildItem C:\xemu-kit\work -Directory | Where-Object Name -ne 'shots' | Remove-Item -Recurse -Force` (it keeps the two configs and the `shots` folder).
 
 ### 6.3 Filing findings as commits on `windows`
 
@@ -1058,8 +1058,8 @@ Every session must end in a clean QMP `quit` (`Stop-Xemu` sends one) so the coun
 | Freeze | `XEMU_PFIFO_HEARTBEAT=1` `iters` frozen? GPU TDR event 4101? | `XEMU_PFIFO_PUT_LOCK=1`; the fence warning names its wait site |
 | `loadvm` fails with `Unknown section ...usb-hub` | player-1 pad missing | `-Stub`, or `XEMU_LOADVM_ADD_PADS=1` |
 | Bench runs INVALID | `ab_*.log` empty? | run from a PowerShell window (3.1) |
-| Pipe `cannot open` | `XEMU_INPUT_PIPE` set on that launch? the keyboard bound to port 2? | `query-xemu-input`; `Select-String stderr.log 'test-input pipe'` |
-| QMP refused | another xemu holds port 4444 | `Stop-AutoXemu` (stops only marked runs) |
+| Pipe `cannot open` | `XEMU_INPUT_PIPE` set on that launch? the keyboard bound to port 2? | `query-xemu-input`; `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'test-input pipe'` |
+| QMP refused, or `Start-Xemu` throws `port 4444 or 4445 already in use` | a leftover xemu holds the port (an interrupted call) | `Stop-AutoXemu` (stops only marked runs) |
 
 ## Appendices: helper scripts
 

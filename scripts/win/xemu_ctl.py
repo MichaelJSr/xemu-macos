@@ -187,7 +187,7 @@ def main(argv):
         port = int(argv[2])
         if op == 'gdbcheck':
             return gdbcheck(port, int(rest[0], 16), float(rest[1]) if len(rest) > 1 else 30.0)
-        q = QMP(port)
+        q = QMP(port, float(rest[0]) if op == 'wait' and rest else 60.0)  # wait 180 covers a slow first start
         rc = 0
         if op == 'wait':
             wait_ready(q, float(rest[0]) if rest else 120.0)

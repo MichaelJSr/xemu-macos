@@ -64,7 +64,16 @@ function Remove-TomlKey([string]$Path, [string]$Section, [string]$Key) {
 }
 
 # A run dir with copies of the template's HDD and EEPROM and a muted scratch config.
+# It first deletes the HDD copy (about 2.2 GB) of every earlier run dir under $Work whose
+# xemu has exited and that is more than 2 min old; logs, configs and screenshots stay.
 function New-Scratch([string]$Name = 'run', [string]$Template = $env:XEMU_TEST_CONFIG) {
+  $live = @(Get-CimInstance Win32_Process -Filter "Name='xemu.exe'" | ForEach-Object { $_.CommandLine })
+  $old = (Get-Date).AddMinutes(-2)
+  Get-ChildItem -LiteralPath $Work -Directory | ForEach-Object {
+    $h = Join-Path $_.FullName 'hdd.qcow2'
+    if ((Test-Path -LiteralPath $h) -and (Get-Item -LiteralPath $h).LastWriteTime -lt $old -and
+        -not ($live -like "*$($_.FullName)\*")) { Remove-Item -LiteralPath $h -Force }
+  }
   $d = Join-Path $Work ('{0}-{1:MMdd-HHmmss}' -f $Name, (Get-Date))
   New-Item -ItemType Directory -Force $d | Out-Null
   Copy-Item -LiteralPath (Get-TomlKey $Template 'sys.files' 'hdd_path') (Join-Path $d 'hdd.qcow2')
@@ -84,6 +93,10 @@ function New-Scratch([string]$Name = 'run', [string]$Template = $env:XEMU_TEST_C
 # -Stub runs scripts\harness-config.py (mute, auto_bind off, player-1/2 pad stubs).
 function Start-Xemu([string]$Exe, [string]$Dir, [hashtable]$Vars = @{}, [string[]]$Extra = @(),
                     [int]$Qmp = 4444, [int]$Mon = 4445, [switch]$Stub) {
+  # A leftover xemu on these ports would make the new one exit and xemu_ctl drive the old one.
+  if (Get-NetTCPConnection -LocalPort $Qmp, $Mon -State Listen -ErrorAction SilentlyContinue) {
+    throw "port $Qmp or $Mon already in use (leftover xemu?); run Stop-AutoXemu"
+  }
   $cfg = Join-Path $Dir 'xemu.toml'
   $argv = @('-name', 'xemu-fork-auto', '-config_path', $cfg,
             '-qmp', "tcp:127.0.0.1:$Qmp,server=on,wait=off",
@@ -98,8 +111,10 @@ function Start-Xemu([string]$Exe, [string]$Dir, [hashtable]$Vars = @{}, [string[
     [Environment]::SetEnvironmentVariable($k, $set[$k], 'Process')
   }
   try {
-    Start-Process -FilePath $Exe -ArgumentList $argv -WorkingDirectory $Dir -PassThru `
+    $proc = Start-Process -FilePath $Exe -ArgumentList $argv -WorkingDirectory $Dir -PassThru `
       -RedirectStandardOutput (Join-Path $Dir 'stdout.log') -RedirectStandardError (Join-Path $Dir 'stderr.log')
+    $null = $proc.Handle   # keep a handle open so ExitCode survives the exit
+    $proc
   } finally {
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
   }
@@ -115,8 +130,15 @@ function Save-Shot([string]$Path, [int]$Qmp = 4444) {
   py -3 $Score $Path
 }
 
+# The run's log: stderr.log, or xemu.log when xemu found no console to attach to (ui/xemu.c
+# then sends both streams to xemu.log in its working directory).
+function Get-XemuLog([string]$Dir) {
+  $e = Join-Path $Dir 'stderr.log'
+  if ((Test-Path -LiteralPath $e) -and (Get-Item -LiteralPath $e).Length) { $e } else { Join-Path $Dir 'xemu.log' }
+}
+
 function Show-Nsprof([string]$Dir, [int]$Last = 12) {
-  Select-String -LiteralPath (Join-Path $Dir 'stderr.log') -Pattern 'nsprof: .*interval|nsprof:\s+(draws|renderpass|fence_wait)\b' -ErrorAction SilentlyContinue |
+  Select-String -LiteralPath (Get-XemuLog $Dir) -Pattern 'nsprof: .*interval|nsprof:\s+(draws|renderpass|fence_wait)\b' -ErrorAction SilentlyContinue |
     Select-Object -Last $Last | ForEach-Object { $_.Line }
 }
 
