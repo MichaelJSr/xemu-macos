@@ -141,6 +141,7 @@ static bool read_span_content_differs(PGRAPHVkState *r, int slot,
     const unsigned long *rb = r->flight[slot].read_bitmap;
     const uint16_t *smin = r->flight[slot].page_span_min;
     const uint16_t *smax = r->flight[slot].page_span_max;
+    const uint8_t *count = r->flight[slot].page_span_count;
     const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
 
     for (size_t bit = start_bit;; bit++) {
@@ -149,11 +150,14 @@ static bool read_span_content_differs(PGRAPHVkState *r, int slot,
             return false;
         }
         hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
-        hwaddr lo = MAX(offset, page_base + smin[bit]);
-        hwaddr hi = MIN(offset + size, page_base + smax[bit]);
-        if (lo < hi &&
-            memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
-            return true;
+        size_t first = bit * VTX_PAGE_SPANS;
+        for (size_t k = first; k < first + count[bit]; k++) {
+            hwaddr lo = MAX(offset, page_base + smin[k]);
+            hwaddr hi = MIN(offset + size, page_base + smax[k]);
+            if (lo < hi &&
+                memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
+                return true;
+            }
         }
     }
 }
@@ -481,6 +485,7 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
     unsigned long *rb = r->flight[slot].read_bitmap;
     uint16_t *smin = r->flight[slot].page_span_min;
     uint16_t *smax = r->flight[slot].page_span_max;
+    uint8_t *count = r->flight[slot].page_span_count;
     hwaddr vram_end = (hwaddr)r->bitmap_size * TARGET_PAGE_SIZE;
 
     for (size_t i = 0; i < r->num_vertex_ram_buffer_syncs; i++) {
@@ -495,13 +500,39 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
                                (uint16_t)(hi - page) :
                                (uint16_t)TARGET_PAGE_SIZE;
 
-            if (test_bit(b, rb)) {
-                smin[b] = MIN(smin[b], plo);
-                smax[b] = MAX(smax[b], phi);
-            } else {
+            uint16_t *mn = &smin[b * VTX_PAGE_SPANS];
+            uint16_t *mx = &smax[b * VTX_PAGE_SPANS];
+
+            if (!test_bit(b, rb)) {
                 set_bit(b, rb);
-                smin[b] = plo;
-                smax[b] = phi;
+                mn[0] = plo;
+                mx[0] = phi;
+                count[b] = 1;
+                continue;
+            }
+            /*
+             * Join a span this read overlaps or touches; else take a
+             * free one; else widen the nearest (a superset either way).
+             * Separate spans keep a gap between two draws' bytes on a
+             * page out: Azurik's next batch is often written there.
+             */
+            int c = count[b], best = 0;
+            unsigned best_gap = UINT_MAX;
+            for (int k = 0; k < c; k++) {
+                unsigned gap = phi < mn[k] ? mn[k] - phi :
+                               plo > mx[k] ? plo - mx[k] : 0;
+                if (gap < best_gap) {
+                    best_gap = gap;
+                    best = k;
+                }
+            }
+            if (best_gap > 0 && c < VTX_PAGE_SPANS) {
+                mn[c] = plo;
+                mx[c] = phi;
+                count[b] = c + 1;
+            } else {
+                mn[best] = MIN(mn[best], plo);
+                mx[best] = MAX(mx[best], phi);
             }
         }
     }

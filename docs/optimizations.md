@@ -1970,6 +1970,33 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   per-page [min,max) union (a page's draws leave gaps the next batch
   fills).
 
+- **Up to four read spans per page (2026-10-17).** One [min,max) span
+  per page let a page holding two draws' attributes with a gap between
+  them treat the next batch, written into the gap, as a change to bytes
+  a recorded draw reads: `XEMU_VTX_SPAN_REFUTE`'s per-binding ranges
+  showed none of the ~17 vertex finishes a flip left on det heavy-f1
+  was needed. Each page now keeps up to `VTX_PAGE_SPANS` (4) spans; a
+  read joins a span it overlaps or touches, takes a free one, or widens
+  the nearest, so they stay a superset of the reads. Offscreen det 600:
+  vertex finishes heavy-f1 ~17 → 2 a flip, stream-e2 ~6.5 → 0.5;
+  normal-mode offscreen heavy-f1 40 s 2027 → 1 in ~2100 flips. RAM
+  identical; heavy-f1's screendump is one span's, stream-e2's moves 10
+  pixels by 1 level from base (one span: 1); `XEMU_VTX_SPAN_FINISH=0`
+  still gives base's screendumps byte for byte; null goldens exact,
+  xbox suite 9/9. Refuter 0 violations (det heavy-f1 27083 checks,
+  stream-e2 15753; normal-mode heavy-f1 40 s 30630). Offscreen
+  bench-det 600, base / one span / four spans, 4 pairs in both arm
+  orders, load 45-47: heavy-f1 **Mcyc/frame 73.3 / 49.6 / 41.5 (−16%
+  on one span, −43% on base), Minsns/frame 127.6 / 97.7 / 90.1, wall
+  fps 38.7 / 56.8 / 77.1** (4/4); stream-e2 69.1 / 54.7 / 49.1 (−10%,
+  −29%), 124.3 / 103.4 / 98.2, 44.6 / 55.2 / 65.5 fps (4/4). d2 (F2+900,
+  one pair, load 54-57), base → four spans: RAM `10b5a35aa66b` both,
+  vertex finishes 34.6 → 0.6 and passes 42.5 → 7.7 a flip, tail
+  Mcyc/frame 61.9 → 36.0, Minsns/frame 89.1 → 73.0, screendump 39 of
+  1.2M pixels by ≤2 levels, refuter 0 violations (17788 checks).
+  Windowed heavy-f1 bench-abx 2×45 s, load ~50: both arms at the 60 fps
+  cap (60.13 vs 60.08), process CPU ~121% vs ~118%, screenshots PASS.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

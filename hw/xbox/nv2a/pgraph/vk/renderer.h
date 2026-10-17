@@ -644,6 +644,8 @@ typedef struct PGRAPHVkState {
 
     VkQueue queue;
 #define NUM_FLIGHT_SLOTS 2
+/* Read spans kept per vertex RAM page and flight slot (see read_bitmap). */
+#define VTX_PAGE_SPANS 4
 
     VkCommandPool command_pool;
 
@@ -679,10 +681,13 @@ typedef struct PGRAPHVkState {
         unsigned long uploaded_last_dirty_bit;
         /*
          * Pages of the vertex RAM mirror that draws recorded in this
-         * slot's window read, and per page the byte span [min,max)
-         * those reads cover: the draws' attribute ranges, not padded
-         * to pages. The spans are valid only where read_bitmap is set
-         * (the bit guards validity, so reset needs no clearing). Used
+         * slot's window read, and per page up to VTX_PAGE_SPANS byte
+         * spans [min,max) those reads cover (page_span_count of them,
+         * at page * VTX_PAGE_SPANS): the draws' attribute ranges, not
+         * padded to pages; a read that fits no span when they're all
+         * taken widens the nearest. The spans are valid only where
+         * read_bitmap is set (the bit guards validity, so reset needs
+         * no clearing). Used
          * by the conflict check in update_vertex_ram_buffer: guest
          * dirty bits are page-granular, so vertex-stream syncs arrive
          * page-padded, and a draw's upload of a page carries the bytes
@@ -694,6 +699,7 @@ typedef struct PGRAPHVkState {
         unsigned long *read_bitmap;
         uint16_t *page_span_min;
         uint16_t *page_span_max;
+        uint8_t *page_span_count;
         /*
          * XEMU_VTX_SPAN_REFUTE=1 only: the mirror byte ranges this
          * slot's draws read, taken from their vertex buffer bindings
