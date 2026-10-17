@@ -23,6 +23,7 @@
 #include "system/runstate.h"
 #include "gdbstub/xemu.h"
 #include "tcg/xemu-hooks.h"
+#include "hw/xbox/nv2a/nv2a.h"
 
 /* Main thread (BQL): every hook, and every site. */
 typedef struct HookRec {
@@ -484,9 +485,9 @@ uint32_t xemu_hook_reg(XemuHookCtx *ctx, int reg)
     return cpu_compute_eflags(env);
 }
 
-bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len)
+bool xemu_hook_read(XemuHookCtx *ctx, vaddr va, void *buf, unsigned len)
 {
-    CPUState *cs = env_cpu(env);
+    CPUState *cs = env_cpu(ctx->env);
     uint8_t *out = buf;
 
     va = (uint32_t)va;
@@ -497,6 +498,9 @@ bool xemu_hook_read(CPUX86State *env, vaddr va, void *buf, unsigned len)
 
         if (pa == -1 || !hook_ram || pa + in_page + chunk > hook_ram_size) {
             return false;
+        }
+        if (!ctx->raw) {
+            nv2a_det_reports_sync_read(pa + in_page, chunk);
         }
         memcpy(out, hook_ram + pa + in_page, chunk);
         out += chunk;
@@ -972,7 +976,7 @@ bool xemu_hook_expr_eval(XemuHookCtx *ctx, const XemuHookExpr *e,
         if (e->op[i].deref) {
             uint8_t b[4];
 
-            if (!xemu_hook_read(ctx->env, v, b, 4)) {
+            if (!xemu_hook_read(ctx, v, b, 4)) {
                 return false;
             }
             v = ldl_le_p(b);
@@ -998,11 +1002,11 @@ XemuHookExpr *xemu_hook_expr_new(const char *s, Error **errp)
 }
 
 XemuHookExprRead xemu_hook_expr_read_cpu0(const XemuHookExpr *e, void *buf,
-                                          unsigned len)
+                                          unsigned len, bool raw)
 {
     CPUState *cs = qemu_get_cpu(0);
     CPUX86State *env;
-    XemuHookCtx ctx = { 0 };
+    XemuHookCtx ctx = { .raw = raw };
     uint32_t a;
 
     assert(bql_locked());
@@ -1016,6 +1020,6 @@ XemuHookExprRead xemu_hook_expr_read_cpu0(const XemuHookExpr *e, void *buf,
     if (!xemu_hook_expr_eval(&ctx, e, &a)) {
         return XEMU_HOOK_EXPR_UNRESOLVED;
     }
-    return xemu_hook_read(env, a, buf, len) ? XEMU_HOOK_EXPR_READ_OK
-                                            : XEMU_HOOK_EXPR_UNBACKED;
+    return xemu_hook_read(&ctx, a, buf, len) ? XEMU_HOOK_EXPR_READ_OK
+                                             : XEMU_HOOK_EXPR_UNBACKED;
 }

@@ -25,9 +25,12 @@ typedef enum XemuHookExprRead {
  * Outside a hook, with the BQL held and no guest instruction running (at
  * a vblank under icount, or on the vCPU thread between blocks): evaluate
  * @e with CPU 0's registers and page tables and copy the @len bytes at
- * the result into @buf, as a hook's collect region reads them.
+ * the result into @buf, as a hook's collect region reads them. Under
+ * icount a GPU report undelivered in the bytes read reaches RAM first
+ * (the BQL is dropped while PFIFO delivers), unless @raw: RAM as it is,
+ * for readers that must not change the run (XEMU_TRACE_RECORD).
  */
 XemuHookExprRead xemu_hook_expr_read_cpu0(const XemuHookExpr *e, void *buf,
-                                          unsigned len);
+                                          unsigned len, bool raw);
 
 #endif

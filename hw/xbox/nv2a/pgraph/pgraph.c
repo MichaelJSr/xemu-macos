@@ -3589,6 +3589,14 @@ void pgraph_request_report_delivery(NV2AState *d)
     }
 }
 
+void pgraph_report_sync_read(NV2AState *d, hwaddr addr, hwaddr len)
+{
+    PGRAPHState *pg = &d->pgraph;
+    if (pg->renderer->ops.report_sync_read) {
+        pg->renderer->ops.report_sync_read(d, addr, len);
+    }
+}
+
 void pgraph_pre_savevm_trigger(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;

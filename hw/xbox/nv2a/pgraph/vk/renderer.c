@@ -466,6 +466,7 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .process_pending_reports = pgraph_vk_process_pending_reports,
         .request_report_delivery = pgraph_vk_request_report_delivery,
         .report_guard = pgraph_vk_det_reports_guard,
+        .report_sync_read = pgraph_vk_det_reports_sync_read,
         .surface_update = pgraph_vk_surface_update,
         .set_surface_scale_factor = pgraph_vk_set_surface_scale_factor,
         .get_surface_scale_factor = pgraph_vk_get_surface_scale_factor,

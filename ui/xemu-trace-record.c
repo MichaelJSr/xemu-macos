@@ -36,8 +36,8 @@
  * bytes are RAM as it is: recording never changes the run. (With a GPU
  * renderer, a report slot the guest has not read yet still holds its old
  * bytes, since deterministic reports are lazy; a traced frame advance
- * delivers them eagerly instead, which on Vulkan can change later report
- * values, so compare those under the null renderer.) In normal mode the
+ * delivers the reports pending in the bytes it reads first, as a guest
+ * read would, so its samples of a report slot can differ.) In normal mode the
  * sample is queued to the vCPU thread, which takes it between two blocks
  * of guest code around that vblank's interrupt (never mid-instruction;
  * where the guest is depends on host timing).
@@ -54,6 +54,7 @@
 #include "exec/target_page.h"
 #include "hw/core/cpu.h"
 #include "exec/xemu-hook-expr.h"
+#include "hw/xbox/nv2a/nv2a.h"
 #include "xemu-trace-record.h"
 
 #define MAX_REGIONS 256
@@ -287,9 +288,12 @@ void xemu_trace_record_init(void)
     write_regions();
 }
 
-/* CPU 0's page tables, page by page. */
+/*
+ * CPU 0's page tables, page by page. @sync: deliver the GPU reports
+ * pending in the bytes first (nv2a_det_reports_sync_read).
+ */
 static bool read_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
-                         vaddr address, uint64_t size)
+                         vaddr address, uint64_t size, bool sync)
 {
     CPUState *cpu = qemu_get_cpu(0);
     uint64_t page = qemu_target_page_size();
@@ -303,6 +307,9 @@ static bool read_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
         if (pa == -1 || pa >= ram_size || in_page + chunk > ram_size - pa) {
             return false;
         }
+        if (sync) {
+            nv2a_det_reports_sync_read(pa + in_page, chunk);
+        }
         memcpy(out + off, ram + pa + in_page, chunk);
         off += chunk;
     }
@@ -311,16 +318,21 @@ static bool read_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
 
 /*
  * Shared with xemu-frame-advance traces: region r's bytes into buf, or
- * false when guest RAM does not back all of it.
+ * false when guest RAM does not back all of it. A trace record reads RAM
+ * as it is (it must not change the run); a frame-advance trace sees the
+ * GPU reports a guest read would (@sync).
  */
 static bool read_fixed(uint8_t *buf, const uint8_t *ram, uint64_t ram_size,
-                       uint64_t address, uint64_t size, bool virt)
+                       uint64_t address, uint64_t size, bool virt, bool sync)
 {
     if (virt) {
-        return read_virtual(buf, ram, ram_size, address, size);
+        return read_virtual(buf, ram, ram_size, address, size, sync);
     }
     if (address >= ram_size || size > ram_size - address) {
         return false;
+    }
+    if (sync) {
+        nv2a_det_reports_sync_read(address, size);
     }
     memcpy(buf, ram + address, size);
     return true;
@@ -329,7 +341,8 @@ static bool read_fixed(uint8_t *buf, const uint8_t *ram, uint64_t ram_size,
 bool xemu_trace_region_read(uint8_t *buf, const uint8_t *ram,
                             uint64_t ram_size, const XemuTraceRegion *r)
 {
-    return read_fixed(buf, ram, ram_size, r->address, r->size, r->q_virtual);
+    return read_fixed(buf, ram, ram_size, r->address, r->size, r->q_virtual,
+                      true);
 }
 
 static void trace_sample(uint64_t frame)
@@ -362,9 +375,10 @@ static void trace_sample(uint64_t frame)
 
         g_string_append_c(s, ' ');
         if (r->expr) {
-            got = xemu_hook_expr_read_cpu0(r->expr, buf, r->size);
+            got = xemu_hook_expr_read_cpu0(r->expr, buf, r->size, true);
         } else {
-            got = read_fixed(buf, ram, ram_size, r->address, r->size, r->virt)
+            got = read_fixed(buf, ram, ram_size, r->address, r->size, r->virt,
+                             false)
                   ? XEMU_HOOK_EXPR_READ_OK : XEMU_HOOK_EXPR_UNBACKED;
         }
         if (got == XEMU_HOOK_EXPR_READ_OK) {

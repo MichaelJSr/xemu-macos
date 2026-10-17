@@ -146,8 +146,12 @@ static QueryReport *alloc_report(PGRAPHState *pg)
  * depend on where command buffers split (passes load/store, queries are
  * precise). The renderer's own VRAM reads and writes that could see a slot
  * check it (pgraph_vk_det_reports_guard), so a later write in the same
- * pusher run lands after the report, in hardware order. A traced frame
- * advance, whose samples read RAM directly, delivers eagerly.
+ * pusher run lands after the report, in hardware order. Readers that copy
+ * RAM directly (hooks, frame-advance traces, value stops) check the bytes
+ * they read first (pgraph_vk_det_reports_sync_read). Delivering every
+ * report before PFIFO parked made each of Azurik's visibility tests a
+ * finish again: 80-120 a flip in its death level whenever a hook read
+ * memory.
  */
 #define DET_GRANULE 16
 
@@ -290,6 +294,29 @@ static void det_reports_deliver_all(NV2AState *d)
 }
 
 /*
+ * Have PFIFO deliver every pending report and wait until it has (not on
+ * the PFIFO thread). Drops the BQL while it waits, as
+ * surface_access_callback does.
+ */
+static void det_reports_await(NV2AState *d)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    bool had_bql = bql_locked();
+    if (had_bql) {
+        bql_unlock();
+    }
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_event_reset(&r->det_reports.delivered);
+    qatomic_set(&r->det_reports.deliver, true);
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_event_wait(&r->det_reports.delivered);
+    if (had_bql) {
+        bql_lock();
+    }
+}
+
+/*
  * The guest or a DMA is about to touch a trapped report page: if the
  * access covers a slot with an undelivered report, have PFIFO deliver all
  * of them first (as surface_access_callback does for surfaces).
@@ -309,19 +336,23 @@ static void report_access_callback(void *opaque, MemoryRegion *mr,
         return;
     }
     nsprof_event(NSPROF_EV_REP_TRAP);
+    det_reports_await(d);
+}
 
-    bool had_bql = bql_locked();
-    if (had_bql) {
-        bql_unlock();
-    }
-    qemu_mutex_lock(&d->pfifo.lock);
-    qemu_event_reset(&r->det_reports.delivered);
-    qatomic_set(&r->det_reports.deliver, true);
-    pfifo_kick(d);
-    qemu_mutex_unlock(&d->pfifo.lock);
-    qemu_event_wait(&r->det_reports.delivered);
-    if (had_bql) {
-        bql_lock();
+/*
+ * Renderer op: a reader on the vCPU thread is about to copy [addr, addr +
+ * len) of guest RAM directly, past the traps (guest PC hooks, frame-advance
+ * trace samples, xemu-run value stops). Deliver first if a pending report
+ * sits there, as the trap does for a guest access, so the reader sees
+ * what the guest would and lazy delivery stays on while it reads.
+ */
+void pgraph_vk_det_reports_sync_read(NV2AState *d, hwaddr addr, hwaddr len)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (r && det_reports_overlap(r, addr, len)) {
+        nsprof_event(NSPROF_EV_REP_TRAP);
+        det_reports_await(d);
     }
 }
 
@@ -578,10 +609,7 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
          * sums do not depend on where command buffers split: passes always
          * load/store and the queries are precise.
          */
-        if (r->det_reports.eager || r->det_reports.park_drain ||
-            (qatomic_read(&pg->det_reports_eager) &&
-             (qatomic_read(&r->det_reports.pending) ||
-              !QSIMPLEQ_EMPTY(&r->report_queue)))) {
+        if (r->det_reports.eager || r->det_reports.park_drain) {
             r->det_reports.park_drain = false;
             det_reports_deliver_all(d);
         }
