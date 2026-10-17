@@ -634,6 +634,11 @@ typedef struct PGRAPHVkState {
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
     bool supports_geom_point_size;
+    /*
+     * Triangle fans (and filled polygons) go out as CPU-built triangle
+     * lists through the emulated-index path instead of TRIANGLE_FAN.
+     */
+    bool emulate_triangle_fans;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
