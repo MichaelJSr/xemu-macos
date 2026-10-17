@@ -1,0 +1,24 @@
+{
+  "pack": "05-bink-movie",
+  "disc": "the vanilla USA disc (sha256 6989c84e...84be)",
+  "tag": "vanilla-beach-shield5",
+  "start12": "c637e9851b64",
+  "mode": "XEMU_HEADLESS=null, -S -icount shift=2,align=off,sleep=off; no pad input at all",
+  "movie": {"file": "movies/Death.bik", "bytes": 50295624, "sha12": "0a67fb91691a",
+            "bink_header": {"frames": 3006, "rate": "30/1", "width": 640, "height": 480, "audio_tracks": 1}},
+  "exit": {"node": "D2_movie_levelSwitch", "level": "d1", "record": "d1/g0/r2271",
+           "node_strings": {"movie": "bink:death.bik", "dest": "levels/death/d2", "spot": "D1_D2_Fall"},
+           "arrival": "d2/g0/r185 (by the spot)"},
+  "request": "R7 with the node's own strings: each string and its NUL at the levelSwitch request buffer 0x38D320 (movie, level, spot; 0x104 bytes a slot), then that buffer's address at the request block's level slot [[[0x1BF63C]+0x2C]+0xD8]+0x10; written at the first player tick (0x8CCC0) after the load; the game posts it at its next update",
+  "hooks": [
+    {"pcs": [576704],
+     "write": [{"addr": "0x38d320", "size": 15}, {"addr": "0x38d424", "size": 16}, {"addr": "0x38d528", "size": 11},
+               {"addr": "[[[0x1bf63c]+0x2c]+0xd8]+0x10", "size": 4}],
+     "set": ["62696e6b3a64656174682e62696b006c6576656c732f64656174682f64320044315f44325f46616c6c0020d33800"]},
+    {"pcs": [341840], "collect": [{"addr": "[esp+8]", "size": 64}, {"addr": "[esp+0xc]", "size": 32}]}
+  ],
+  "hooks_note": "pcs are decimal: 576704 = 0x8CCC0 (the player state machine, once per player tick), 341840 = 0x53750 (load_level_from_path, stdcall; [esp+8] = the path, [esp+0xc] = the spot or NULL). The write hook's one entry is taken by its first hit; later hits find the queue empty and write nothing.",
+  "tail": 900,
+  "oracle_def": "0x53750 receives bink:death.bik (spot NULL) at F1, then levels/death/d2 with spot D1_D2_Fall at F2 (frames from the paused load); the RAM at F2 + 900 vblanks; the DVD bytes read between F1 and F2",
+  "results": "results-v0.15.json (job 05-a)"
+}

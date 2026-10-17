@@ -1,0 +1,615 @@
+{
+ "format": "fork-pack-02/1",
+ "row_semantics": "row k: the player at the entry of 0x8CCC0 on the k-th player tick after the load (or, cold, after the arena is steady); a schedule's lines are sent while halted at row k's 0x8CCC0 (the pipe's keyboard pad on port 2): a press at row k reaches ControllerState at k+1 and moves the player at k+2",
+ "buttons": "our harness's pad names: a b x y black white lstick_up lstick_down ...; map each to the fork's own keyboard-map scancode",
+ "cases": [
+  {
+   "id": "walk",
+   "row": "walk and stop",
+   "kind": "walk",
+   "start": {
+    "loadvm": "vanilla-flat"
+   },
+   "ticks": 85,
+   "schedule": {
+    "10": [
+     "down lstick_up"
+    ],
+    "55": [
+     "up lstick_up"
+    ]
+   },
+   "at": {
+    "press": 10,
+    "release": 55
+   },
+   "expect": {
+    "ramp": [
+     3.26691,
+     6.5361,
+     7.00009
+    ],
+    "plateau": [
+     7.00009
+    ],
+    "stop": [
+     7.00009,
+     3.73227,
+     0.46353,
+     0.0
+    ],
+    "states": [
+     "0x0"
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a74; captures/04-walk_lstick_up_45.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "roll",
+   "row": "roll (BLACK) from standing",
+   "kind": "roll",
+   "start": {
+    "loadvm": "vanilla-flat"
+   },
+   "ticks": 60,
+   "schedule": {
+    "10": [
+     "down black"
+    ],
+    "13": [
+     "up black"
+    ]
+   },
+   "expect": {
+    "roll_first_k": 12,
+    "roll_ticks": 21,
+    "contiguous": true,
+    "roll_m": 3.37521
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a74; captures/04-roll_stand.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "jump",
+   "row": "plain jump",
+   "kind": "jump",
+   "start": {
+    "loadvm": "vanilla-wall"
+   },
+   "ticks": 50,
+   "schedule": {
+    "5": [
+     "down y"
+    ],
+    "6": [
+     "up y"
+    ]
+   },
+   "expect": {
+    "takeoff_k": 7,
+    "v0": 4.643274784,
+    "h": 1.1,
+    "airborne_ticks": 28,
+    "dvz_set": [
+     -0.326667
+    ],
+    "apex_m": 1.0235,
+    "land_state": 0
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75; captures/05-jump_tap.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "swim",
+   "row": "swim stroke and release",
+   "kind": "swim",
+   "start": {
+    "loadvm": "vanilla-ocean"
+   },
+   "ticks": 130,
+   "schedule": {
+    "10": [
+     "down lstick_up"
+    ],
+    "100": [
+     "up lstick_up"
+    ]
+   },
+   "at": {
+    "press": 10,
+    "release": 100
+   },
+   "expect": {
+    "first_moving_k": 12,
+    "v_h": [
+     0.73881,
+     9.0,
+     9.9,
+     9.99
+    ],
+    "model_max_err_le": 1.2e-06,
+    "release_ratio": [
+     0.926119
+    ],
+    "states": [
+     "0x6"
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a73; captures/03-swim_lstick_up_90-150024.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "beach-jump",
+   "row": "jump with air power (h 1.2)",
+   "kind": "jump",
+   "start": {
+    "loadvm": "vanilla-beach-shield5"
+   },
+   "ticks": 85,
+   "schedule": {
+    "40": [
+     "down y"
+    ],
+    "46": [
+     "up y"
+    ]
+   },
+   "expect": {
+    "takeoff_k": 42,
+    "v0": 4.849742413,
+    "h": 1.2,
+    "airborne_ticks": 29,
+    "dvz_set": [
+     -0.326667
+    ],
+    "apex_m": 1.1199,
+    "land_state": 0
+   },
+   "source": "xemu-oracle-2026-10-11-s6 captures/proof-beach-shield5-jump.json; game-reference skill (29 airborne ticks, apex 1.1199 m)",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "beach-flaps",
+   "row": "5 flaps; the 5th drops the shield",
+   "kind": "flaps",
+   "start": {
+    "loadvm": "vanilla-beach-shield5"
+   },
+   "ticks": 260,
+   "schedule": {
+    "4": [
+     "down y"
+    ],
+    "6": [
+     "up y"
+    ],
+    "12": [
+     "down y"
+    ],
+    "14": [
+     "up y"
+    ],
+    "20": [
+     "down y"
+    ],
+    "22": [
+     "up y"
+    ],
+    "28": [
+     "down y"
+    ],
+    "30": [
+     "up y"
+    ],
+    "36": [
+     "down y"
+    ],
+    "38": [
+     "up y"
+    ],
+    "44": [
+     "down y"
+    ],
+    "46": [
+     "up y"
+    ],
+    "52": [
+     "down y"
+    ],
+    "54": [
+     "up y"
+    ],
+    "60": [
+     "down y"
+    ],
+    "62": [
+     "up y"
+    ],
+    "200": [
+     "down y"
+    ],
+    "202": [
+     "up y"
+    ],
+    "208": [
+     "down y"
+    ],
+    "210": [
+     "up y"
+    ],
+    "216": [
+     "down y"
+    ],
+    "218": [
+     "up y"
+    ]
+   },
+   "expect": {
+    "takeoff_k": 6,
+    "v0": 4.849742413,
+    "airborne_ticks": 64,
+    "land_k": 70,
+    "flap_k": [
+     14,
+     22,
+     30,
+     38,
+     46
+    ],
+    "flap_vz": [
+     4.849742,
+     3.825263,
+     1.764722,
+     0.99253,
+     1.056628
+    ],
+    "fuel": [
+     0.8,
+     0.6,
+     0.4,
+     0.2,
+     0.0
+    ],
+    "level_before": 3,
+    "drop_k": 46,
+    "after_drop": [
+     1,
+     0
+    ],
+    "next_v0": 4.643274784,
+    "next_h": 1.1,
+    "next_flaps": 0
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a71(a); captures/01-flaps5.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "enemy-hits",
+   "row": "a blaze sentinel's hits",
+   "kind": "hits",
+   "start": {
+    "loadvm": "vanilla-enemy",
+    "hp": 400
+   },
+   "ticks": 450,
+   "schedule": {
+    "1": [
+     "down lstick_up"
+    ],
+    "90": [
+     "up lstick_up"
+    ]
+   },
+   "expect": {
+    "hp_first": 400,
+    "hits": [
+     [
+      186,
+      25
+     ],
+     [
+      421,
+      25
+     ]
+    ],
+    "after_hit": [
+     [
+      [
+       "0x102",
+       13
+      ],
+      [
+       "0x2",
+       6
+      ]
+     ],
+     [
+      [
+       "0x102",
+       13
+      ],
+      [
+       "0x2",
+       6
+      ]
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a76; captures/06-walk90_stand.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "ledge-j14",
+   "row": "running jumps at the 1.2578 m ledge",
+   "kind": "ledge",
+   "start": {
+    "loadvm": "vanilla-wall"
+   },
+   "ticks": 90,
+   "schedule": {
+    "5": [
+     "down lstick_up"
+    ],
+    "14": [
+     "down y"
+    ],
+    "15": [
+     "up y"
+    ],
+    "85": [
+     "up lstick_up"
+    ]
+   },
+   "takeoff_before_block_m": 4.39,
+   "expect": {
+    "rise_m": 0.0,
+    "states": [
+     [
+      16,
+      "0x2"
+     ],
+     [
+      58,
+      "0x0"
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j14.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "ledge-j16",
+   "row": "running jumps at the 1.2578 m ledge",
+   "kind": "ledge",
+   "start": {
+    "loadvm": "vanilla-wall"
+   },
+   "ticks": 90,
+   "schedule": {
+    "5": [
+     "down lstick_up"
+    ],
+    "16": [
+     "down y"
+    ],
+    "17": [
+     "up y"
+    ],
+    "85": [
+     "up lstick_up"
+    ]
+   },
+   "takeoff_before_block_m": 3.69,
+   "expect": {
+    "rise_m": 1.2578,
+    "states": [
+     [
+      18,
+      "0x2"
+     ],
+     [
+      47,
+      "0x0"
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j16.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "ledge-j28",
+   "row": "running jumps at the 1.2578 m ledge",
+   "kind": "ledge",
+   "start": {
+    "loadvm": "vanilla-wall"
+   },
+   "ticks": 90,
+   "schedule": {
+    "5": [
+     "down lstick_up"
+    ],
+    "28": [
+     "down y"
+    ],
+    "29": [
+     "up y"
+    ],
+    "85": [
+     "up lstick_up"
+    ]
+   },
+   "takeoff_before_block_m": 0.89,
+   "expect": {
+    "rise_m": 1.2578,
+    "states": [
+     [
+      30,
+      "0x2"
+     ],
+     [
+      50,
+      "0x0"
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j28.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "ledge-j30",
+   "row": "running jumps at the 1.2578 m ledge",
+   "kind": "ledge",
+   "start": {
+    "loadvm": "vanilla-wall"
+   },
+   "ticks": 90,
+   "schedule": {
+    "5": [
+     "down lstick_up"
+    ],
+    "30": [
+     "down y"
+    ],
+    "31": [
+     "up y"
+    ],
+    "85": [
+     "up lstick_up"
+    ]
+   },
+   "takeoff_before_block_m": 0.42,
+   "expect": {
+    "rise_m": 0.0,
+    "states": [
+     [
+      32,
+      "0x2"
+     ],
+     [
+      48,
+      "0x3"
+     ],
+     [
+      53,
+      "0x2"
+     ],
+     [
+      67,
+      "0x0"
+     ]
+    ]
+   },
+   "source": "xemu-oracle-2026-10-11-s6 REPORT \u00a75 (the ledge table); captures/05-ledge_tap_j30.json",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal (real time), keyboard pad on port 2",
+     "sitting": "s6, 2026-10-11"
+    }
+   ]
+  },
+  {
+   "id": "cold-jump",
+   "row": "cold boot to the Training Arena, one jump",
+   "kind": "cold-jump",
+   "start": {
+    "cold": "power on with the vanilla USA disc; START skips prophecy.bik (0x5F748 .. 0x5F774); at the title (u32 [0x1BF61C] == 6) START, DPAD_LEFT, A (Start New Game); 0x53750 loads levels/training_room; run until the player tick has run for 20 s of the entity's event clock ([esp+4]+0x18, f64), A on a stall (the arena's welcome dialog); row 0 is the next 0x8CCC0"
+   },
+   "ticks": 45,
+   "schedule": {
+    "rule": "down y on the first row k >= 4 with state 0, up y 6 rows later"
+   },
+   "expect": {
+    "v0": 4.643274784,
+    "h": 1.1,
+    "airborne_ticks": 28,
+    "dvz_set": [
+     -0.326667
+    ],
+    "land_state": 0
+   },
+   "also_expect": {
+    "text": ".text 979,408 B, 0 bytes differ from the disc's default.xbe"
+   },
+   "source": "x30 REPORT \u00a73 (d05), x24 REPORT \u00a72, region-study measure-saves.md \u00a73 (usa-na2)",
+   "measured": [
+    {
+     "xemu": "0.13.3-37-gd5ad94f4bf",
+     "mode": "normal",
+     "sitting": "region study usa-na2, 2026-10-12"
+    },
+    {
+     "xemu": "0.14-12-g1723609ea0",
+     "mode": "-icount shift=2, null",
+     "sitting": "x24, 2026-10-14"
+    },
+    {
+     "xemu": "0.14-36-g08fe118fa0",
+     "mode": "-icount shift=2, null",
+     "sitting": "x30 d05, 2026-10-15; 27.4 s from the relaunch"
+    }
+   ]
+  }
+ ]
+}

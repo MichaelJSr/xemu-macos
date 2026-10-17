@@ -1,0 +1,59 @@
+{
+  "pack": "03-heavy-scenes",
+  "disc": "the vanilla USA disc (sha256 6989c84e...84be)",
+  "states": "the Modkit's D98 states (their drive and config: LOCAL/03-heavy-scenes.md)",
+  "pad": "the keyboard pad on port 2; scancodes are the D98 config's map (a 81, y 44)",
+  "mode": "XEMU_HEADLESS=null, -S -icount shift=2,align=off,sleep=off",
+  "start": "stop, loadvm <tag> (stays paused), write the lines, then xemu-frame-advance to each stop",
+  "lines_count_from": "the paused load: +N is N vblanks after it",
+  "hash": "sha256[:12] of all guest RAM from xemu-dump-ram with gpu-sync false; bench-det's f<N>= value is the same sha256's first 16 digits",
+  "stops": [300, 600],
+  "inputs": {
+    "x24": ["+2 clear", "+10 axis ly 1.000000", "+30 down 44", "+36 up 44", "+60 axis lx -0.500000",
+            "+90 axis ly 0.000000", "+90 axis lx 0.000000"],
+    "ride": ["+2 axis ly 1.000000", "+182 axis ly 0.000000"],
+    "fight": null
+  },
+  "fight_rule": "walk at one stick heading for W vblanks, stop, then A (81) down 4 vblanks every 16 vblanks to +600; job 03-a keeps the first heading (forward first) and W (60, 120, 180, 240) whose run lands an apply_damage (0x44640) on a critter other than the player",
+  "fight_candidates": {
+    "order": "every W for the first heading, then the next heading",
+    "headings_lx_ly": [[0.0, 1.0], [-0.707107, 0.707107], [0.707107, 0.707107], [-1.0, 0.0], [1.0, 0.0],
+                       [-0.707107, -0.707107], [0.707107, -0.707107], [0.0, -1.0]],
+    "walks_W": [60, 120, 180, 240],
+    "lines": "'+2 axis lx <lx>' and '+2 axis ly <ly>' (each only if not 0; 6 decimals), the same axes '+<2+W> axis .. 0.000000', then '+<k> down 81' and '+<k+4> up 81' for k = 4+W, 20+W, ... while k+4 < 600"
+  },
+  "check_hooks": {
+    "vanilla-rz-e2-cart": {"pcs": [341840], "collect": [{"addr": "[esp+8]", "size": 64}]},
+    "vanilla-rz-e7-keylord": {"pcs": [280128], "collect": [{"addr": "esp+4", "size": 8}, {"addr": "[[0x1bf63c]+0x2c]+0xc0", "size": 4}]},
+    "note": "xemu-hooks-set after the paused load, before the lines; pcs decimal: 341840 = 0x53750 (load_level; [esp+8] the path), 280128 = 0x44640 (apply_damage; [esp+4] the critter, [esp+8] the new HP; [pd+0xC0] the player's critter). Collect only: the RAM is bench-det's"
+  },
+  "scenes": [
+    {"tag": "vanilla-rz-new", "input": "x24", "start12": "4fbb36cc0967",
+     "what": "new game, w1 just after the scripted walk: the level still streams (36,130,816 B DVD, 7,297,024 B HDD read in the first 120 vblanks)",
+     "check": null},
+    {"tag": "vanilla-rz-e6-song", "input": "x24", "start12": "d1925e02d35e",
+     "what": "e6 at the crystal song puzzle: the slowest scene we have in real time",
+     "check": null},
+    {"tag": "vanilla-rz-e7-keylord", "input": "fight", "start12": "d9e66aad9afc",
+     "what": "e7 in view of a live red keylord: a fight, pad input only",
+     "check": "at least one apply_damage (0x44640, stdcall(critter, new_hp, flag)) on a critter other than the player"},
+    {"tag": "vanilla-rz-e2-cart", "input": "ride", "start12": "5d322a1f90fb",
+     "what": "e2 beside the minecart: walk into the bucket, ride it, the e5 load",
+     "check": "0x53750 (load_level, stdcall; [esp+8] = path) receives levels/earth/e5 before +600"}
+  ],
+  "measured_v0.14-36": {
+    "source": "Step X.30 d01b, 2026-10-15: null renderer, deterministic, 120 vblanks with the x24 lines, two runs in one xemu, host load 20.9-29.7",
+    "vanilla-rz-new":        {"fps": [36.5, 32.9],  "end12": "602d613deb1f", "read": {"ide0-cd1": 36130816, "ide0-hd0": 7297024}},
+    "vanilla-rz-e6-song":    {"fps": [86.7, 86.2],  "end12": "ae74dee21cf1", "read": {"ide0-cd1": 0, "ide0-hd0": 110592}},
+    "vanilla-rz-e7-keylord": {"fps": [74.3, 70.7],  "end12": "b0a1ce8b06f6", "read": {"ide0-cd1": 0, "ide0-hd0": 6144}},
+    "vanilla-rz-e2-cart":    {"fps": [125.6, 37.0], "end12": "012cce7d0aca", "read": {"ide0-cd1": 0, "ide0-hd0": 501248}}
+  },
+  "measured_v0.15": {
+    "source": "Step X.32 sitting x32 a02, 2026-10-16: the same 120-vblank x24 runs as X.30's d01b, two runs in one xemu, host load 28.5-32.4",
+    "vanilla-rz-new":        {"fps": [167.7, 164.4], "end12": "602d613deb1f"},
+    "vanilla-rz-e6-song":    {"fps": [461.1, 463.2], "end12": "ae74dee21cf1"},
+    "vanilla-rz-e7-keylord": {"fps": [248.8, 283.2], "end12": "23ab6ea774c0"},
+    "vanilla-rz-e2-cart":    {"fps": [246.3, 289.6], "end12": "012cce7d0aca"}
+  },
+  "results": "results-v0.15.json (job 03-a, ours; not run yet, so not in the pack)"
+}

@@ -228,6 +228,7 @@ the other arm does too).
 | `nsprof_summarize.py`, `score_frames.py`, `bench-screenshot.py` | nsprof tables and A/B; magenta scoring; window capture |
 
 No-game tests: `cd build && ninja test-xbox && ./pyvenv/bin/meson test --suite xbox --no-rebuild`.
+Pre-release correctness pass (never per change): `tests/azurik/README.md`, the Azurik harness's replays, physics, heavy scenes and Bink checks on the Modkit's D98 fixtures, with v0.15's results. Its vanilla scenes sit at their 30 fps cap windowed, so they don't replace heavy-f1/W2.
 
 **Lean default (CPU, TCG, APU):** build the base and the change into two
 bundle clones (locally, not from CI), then `scripts/bench-det.py -n 4
