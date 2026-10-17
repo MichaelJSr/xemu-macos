@@ -22,6 +22,10 @@
 #include "renderer.h"
 #include "xemu-version.h"
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
 #define VkExtensionPropertiesArray GArray
 #define StringArray GArray
 
@@ -180,15 +184,99 @@ add_optional_instance_extension_names(PGRAPHState *pg,
 #endif
 }
 
+#ifndef _WIN32
+typedef VkResult(VKAPI_PTR *IcdNegotiateFn)(uint32_t *version);
+
+/*
+ * XEMU_VK_DRIVER picks the Vulkan driver at launch, so one binary can
+ * run either driver for an A/B. Unset or empty: volkInitialize() as
+ * before (the bundled libMoltenVK.dylib). "kosmickrisp" (or "kk") and
+ * "moltenvk" (or "mvk") name the driver bundled next to the binary's
+ * other dylibs; anything else is a dylib path in dlopen() syntax
+ * (absolute, @executable_path/..., @rpath/...). The driver is called
+ * directly, with no Vulkan loader in between: through its
+ * vkGetInstanceProcAddr when it exports one (MoltenVK), otherwise
+ * through the loader-ICD entry vk_icdGetInstanceProcAddr after the
+ * interface negotiation a loader would do (Mesa KosmicKrisp exports
+ * only the vk_icd* entry points).
+ */
+static bool load_vk_driver(const char *spec, Error **errp)
+{
+    const char *path = spec;
+#ifdef __APPLE__
+    if (!g_ascii_strcasecmp(spec, "kosmickrisp") ||
+        !g_ascii_strcasecmp(spec, "kk")) {
+        path = "@rpath/libvulkan_kosmickrisp.dylib";
+    } else if (!g_ascii_strcasecmp(spec, "moltenvk") ||
+               !g_ascii_strcasecmp(spec, "mvk")) {
+        path = "@rpath/libMoltenVK.dylib";
+    }
+#endif
+
+    void *module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!module) {
+        error_setg(errp, "XEMU_VK_DRIVER: cannot load %s: %s", path,
+                   dlerror());
+        return false;
+    }
+
+    const char *entry = "vkGetInstanceProcAddr";
+    PFN_vkGetInstanceProcAddr gipa =
+        (PFN_vkGetInstanceProcAddr)dlsym(module, entry);
+    uint32_t icd_version = 0;
+    if (!gipa) {
+        entry = "vk_icdGetInstanceProcAddr";
+        IcdNegotiateFn negotiate = (IcdNegotiateFn)dlsym(
+            module, "vk_icdNegotiateLoaderICDInterfaceVersion");
+        if (negotiate) {
+            icd_version = 7;
+            if (negotiate(&icd_version) != VK_SUCCESS) {
+                error_setg(errp, "XEMU_VK_DRIVER: %s rejected the loader-ICD "
+                           "interface negotiation", path);
+                dlclose(module);
+                return false;
+            }
+        }
+        gipa = (PFN_vkGetInstanceProcAddr)dlsym(module, entry);
+    }
+    if (!gipa) {
+        error_setg(errp, "XEMU_VK_DRIVER: %s exports neither "
+                   "vkGetInstanceProcAddr nor vk_icdGetInstanceProcAddr", path);
+        dlclose(module);
+        return false;
+    }
+
+    /* Never closed, like the module volkInitialize() opens. */
+    volkInitializeCustom(gipa);
+    if (icd_version) {
+        fprintf(stderr, "xemu: Vulkan driver %s (%s, ICD interface %u)\n",
+                path, entry, icd_version);
+    } else {
+        fprintf(stderr, "xemu: Vulkan driver %s (%s)\n", path, entry);
+    }
+    return true;
+}
+#endif
+
 static bool create_instance(PGRAPHState *pg, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
-    result = volkInitialize();
-    if (result != VK_SUCCESS) {
-        error_setg(errp, "volkInitialize failed");
-        return false;
+#ifndef _WIN32
+    const char *driver = getenv("XEMU_VK_DRIVER");
+    if (driver && *driver) {
+        if (!load_vk_driver(driver, errp)) {
+            return false;
+        }
+    } else
+#endif
+    {
+        result = volkInitialize();
+        if (result != VK_SUCCESS) {
+            error_setg(errp, "volkInitialize failed");
+            return false;
+        }
     }
 
     uint32_t instance_version = VK_API_VERSION_1_0;
@@ -504,9 +592,12 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
 
     /*
      * Which driver, for logs and bench receipts: "- Driver: MoltenVK,
-     * 1.4.3 (id 14)". Core in 1.2 (vk_api_version is already capped by
-     * both the instance and the device).
+     * 1.4.3 (id 14)", and for the few paths that depend on MoltenVK's
+     * behaviour rather than on the Vulkan spec. Core in 1.2
+     * (vk_api_version is already capped by both the instance and the
+     * device).
      */
+    r->driver_id = 0;
     if (r->vk_api_version >= VK_API_VERSION_1_2) {
         VkPhysicalDeviceDriverProperties driver_props = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
@@ -516,9 +607,11 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
             .pNext = &driver_props,
         };
         vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
+        r->driver_id = driver_props.driverID;
         fprintf(stderr, "- Driver: %s, %s (id %d)\n", driver_props.driverName,
                 driver_props.driverInfo, driver_props.driverID);
     }
+    r->driver_is_moltenvk = r->driver_id == VK_DRIVER_ID_MOLTENVK;
 
     return true;
 }
@@ -632,6 +725,7 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
     r->supports_geometry_shaders =
         r->enabled_physical_device_features.geometryShader == VK_TRUE;
+
     /*
      * Whether a geometry shader may write gl_PointSize. Emitting that write
      * makes glslang declare the GeometryPointSize SPIR-V capability, which
@@ -737,7 +831,6 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         return false;
     }
 
-#ifndef __APPLE__
     /*
      * With volkLoadInstance() alone, every device-level entry point
      * (vkCmdDraw, vkCmdBindDescriptorSets, ...) is the pointer
@@ -756,12 +849,18 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
      * is resolved separately via vkGetDeviceProcAddr; and VMA builds its own
      * table with volkLoadDeviceTable() regardless.
      *
-     * Skipped on Apple, where MoltenVK is linked as the ICD and there is no
-     * loader trampoline to bypass, so the Apple dispatch stays exactly as
-     * volkLoadInstance() left it.
+     * Skipped for MoltenVK, which is loaded as the ICD with no loader
+     * trampoline to bypass, so its dispatch stays exactly as
+     * volkLoadInstance() left it. Not for other Apple drivers: Mesa
+     * KosmicKrisp hands out per-device trampolines through
+     * vk_icdGetInstanceProcAddr.
      */
-    volkLoadDevice(r->device);
+#ifdef __APPLE__
+    if (!r->driver_is_moltenvk)
 #endif
+    {
+        volkLoadDevice(r->device);
+    }
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
 

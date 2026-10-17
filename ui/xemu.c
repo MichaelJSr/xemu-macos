@@ -2737,19 +2737,29 @@ int main(int argc, char **argv)
      * corrupts streamed textures now that command buffers span
      * whole frames, enabled an AGX visibility crash, and measures
      * slower (encoding lands on the PFIFO thread).
+     *
+     * Skipped when XEMU_VK_DRIVER names Mesa KosmicKrisp (see
+     * hw/xbox/nv2a/pgraph/vk/instance.c), which ignores them anyway;
+     * kept for any other value, which may still end up in MoltenVK
+     * (e.g. a Vulkan loader).
      */
-    setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0);
-    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
-    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
-    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
-    setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
-    /*
-     * Warnings, not INFO (the driver default, off the hot path). Not errors
-     * only: with RESUME_LOST_DEVICE, MoltenVK reports a command buffer that
-     * failed on the GPU as a warning, so errors-only hid every fault until
-     * macOS stopped accepting the process's work and the device was lost.
-     */
-    setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
+    const char *vk_driver = getenv("XEMU_VK_DRIVER");
+    if (!vk_driver || !(strcasestr(vk_driver, "kosmickrisp") ||
+                        !strcasecmp(vk_driver, "kk"))) {
+        setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 0);
+        setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+        setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 0);
+        setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
+        setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
+        /*
+         * Warnings, not INFO (the driver default, off the hot path).
+         * Not errors only: with RESUME_LOST_DEVICE, MoltenVK reports a
+         * command buffer that failed on the GPU as a warning, so
+         * errors-only hid every fault until macOS stopped accepting the
+         * process's work and the device was lost.
+         */
+        setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
+    }
     /*
      * NB: MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION was tried and
      * reverted — measured inert on macOS 26 / M2 Ultra (the compile-task

@@ -113,8 +113,21 @@ nothing links against a Vulkan library at build time.
 On Windows and Linux the renderer additionally calls `volkLoadDevice()`
 after creating its `VkDevice` (since 2026-09-08), so `vkCmd*` and
 friends enter the driver's ICD directly instead of going through the
-loader trampoline. On macOS nothing changes — MoltenVK is the ICD and
-there is no trampoline to bypass.
+loader trampoline. On macOS nothing changes for MoltenVK — it is the
+ICD and there is no trampoline to bypass.
+
+`XEMU_VK_DRIVER` (POSIX) picks the Vulkan driver at launch, so one
+binary can run either driver: `kosmickrisp`/`kk` or `moltenvk`/`mvk`
+load the copy bundled next to the other dylibs
+(`Contents/Libraries/arm64/libvulkan_kosmickrisp.dylib`,
+`libMoltenVK.dylib`); any other value is a dylib path in `dlopen()`
+syntax, e.g. a Vulkan loader (`/opt/homebrew/lib/libvulkan.1.dylib`
+with `VK_DRIVER_FILES=<icd.json>`, for validation layers). The driver
+is called directly: its `vkGetInstanceProcAddr`, or the ICD entry
+`vk_icdGetInstanceProcAddr` after the loader-ICD negotiation (Mesa
+KosmicKrisp exports only that). Non-MoltenVK drivers get
+`volkLoadDevice()` too. stderr names the driver
+(`- Driver: KosmicKrisp, Mesa …`).
 
 ### Recommended `xemu.toml`
 
