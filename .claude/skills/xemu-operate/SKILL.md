@@ -310,6 +310,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |
 | `XEMU_LOAD_VERIFY=1` | One line when guest RAM changed between a load and the VM's start (or the next load) | `ui/xemu-load-verify.c` |
+| `XEMU_VTX_SPAN_REFUTE=1` | Checks every skipped vertex finish/wait against the draws' actual vertex bindings; exit line `xemu: vtx-span refute checks=N violations=M` (needs `quit`) | `vk/vertex.c` |
 | `XEMU_DSP_JIT_STATS=1`, `_DIFF=N` | DSP JIT stats; validator | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
 | `XEMU_INV_PROF=1`, `XEMU_TB_PROF=1` | Exit dumps (need `quit`) | `tcg/tb-maint.c`, `tcg/cpu-exec.c` |
 | `XEMU_BLOCK_LOG=<file>` | One TSV row per IDE/ATAPI data command (README; QMP `xemu-block-log-start`/`-stop`); 1-2% host time while on | `hw/ide/xemu-block-log.c` |

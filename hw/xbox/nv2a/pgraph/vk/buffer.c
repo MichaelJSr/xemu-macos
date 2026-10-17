@@ -122,6 +122,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
 
     const char *span_env = getenv("XEMU_VTX_SPAN_FINISH");
     r->vtx_span_finish = !(span_env && !strcmp(span_env, "0"));
+    pgraph_vk_init_vtx_span_refute(r);
 
     r->bitmap_size = memory_region_size(d->vram) / 4096;
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
@@ -207,6 +208,7 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
         g_free(r->flight[i].page_span_max);
         r->flight[i].page_span_max = NULL;
     }
+    pgraph_vk_finalize_vtx_span_refute(r);
 }
 
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,

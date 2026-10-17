@@ -282,6 +282,7 @@ void pgraph_vk_wait_for_previous_flight(PGRAPHState *pg)
         bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);
         bitmap_clear(r->flight[slot].read_bitmap, 0, r->bitmap_size);
     }
+    pgraph_vk_refute_forget(r, slot);
     r->flight[slot].uploaded_first_dirty_bit = ULONG_MAX;
     r->flight[slot].uploaded_last_dirty_bit = 0;
 }

@@ -158,6 +158,126 @@ static bool read_span_content_differs(PGRAPHVkState *r, int slot,
     }
 }
 
+/*
+ * XEMU_VTX_SPAN_REFUTE=1: checks the read spans against an independent
+ * record of what each slot's draws read of the mirror, taken from the
+ * vertex buffer bindings themselves (offset, stride, element size and the
+ * draw's vertex count) rather than from the syncs that feed the spans.
+ * Every finish or fence wait a copy skips is checked: a recorded read
+ * whose bytes the copy changes is a violation (a GPU reader the spans
+ * miss). Counts print at exit.
+ */
+typedef struct VtxRefuteRead {
+    hwaddr lo, hi;
+} VtxRefuteRead;
+
+static uint64_t vtx_refute_checks, vtx_refute_violations;
+
+static void vtx_refute_dump(void)
+{
+    fprintf(stderr,
+            "xemu: vtx-span refute checks=%" PRIu64 " violations=%" PRIu64
+            "\n", vtx_refute_checks, vtx_refute_violations);
+}
+
+void pgraph_vk_init_vtx_span_refute(PGRAPHVkState *r)
+{
+    static bool registered;
+    const char *e = getenv("XEMU_VTX_SPAN_REFUTE");
+
+    r->vtx_span_refute = e && *e && strcmp(e, "0");
+    if (!r->vtx_span_refute) {
+        return;
+    }
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        r->flight[i].refute_reads =
+            g_array_new(FALSE, FALSE, sizeof(VtxRefuteRead));
+    }
+    if (!registered) {
+        registered = true;
+        atexit(vtx_refute_dump);
+    }
+}
+
+void pgraph_vk_finalize_vtx_span_refute(PGRAPHVkState *r)
+{
+    for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
+        if (r->flight[i].refute_reads) {
+            g_array_free(r->flight[i].refute_reads, TRUE);
+            r->flight[i].refute_reads = NULL;
+        }
+    }
+}
+
+void pgraph_vk_refute_forget(PGRAPHVkState *r, int slot)
+{
+    if (r->flight[slot].refute_reads) {
+        g_array_set_size(r->flight[slot].refute_reads, 0);
+    }
+}
+
+/* A binding of the draw being recorded reads the mirror at @offset. */
+void pgraph_vk_refute_note_read(PGRAPHVkState *r, hwaddr offset,
+                                uint32_t stride, uint32_t element_size)
+{
+    GArray *a = r->flight[r->current_flight].refute_reads;
+    hwaddr vram_end = (hwaddr)r->bitmap_size * TARGET_PAGE_SIZE;
+    uint32_t n = r->refute_draw_vertices;
+    /* A path that binds the mirror without a vertex count: assume all. */
+    hwaddr hi = n ? offset + (hwaddr)(n - 1) * stride + element_size :
+                    vram_end;
+    VtxRefuteRead rr = { .lo = offset, .hi = MIN(hi, vram_end) };
+
+    if (!a || rr.lo >= rr.hi) {
+        return;
+    }
+    if (a->len) {
+        VtxRefuteRead *last = &g_array_index(a, VtxRefuteRead, a->len - 1);
+        if (last->lo == rr.lo && last->hi == rr.hi) {
+            return;
+        }
+    }
+    g_array_append_val(a, rr);
+}
+
+/* A copy skipped @slot's finish or fence wait: check that's sound. */
+static void vtx_refute_skip(PGRAPHVkState *r, int slot, hwaddr offset,
+                            VkDeviceSize size, const uint8_t *data)
+{
+    GArray *a = r->flight[slot].refute_reads;
+    const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
+    hwaddr end = offset + size;
+    bool overlaps = false;
+
+    if (!a) {
+        return;
+    }
+    for (guint k = 0; k < a->len; k++) {
+        VtxRefuteRead *rr = &g_array_index(a, VtxRefuteRead, k);
+        hwaddr lo = MAX(rr->lo, offset);
+        hwaddr hi = MIN(rr->hi, end);
+        if (lo >= hi) {
+            continue;
+        }
+        overlaps = true;
+        if (memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
+            if (vtx_refute_violations < 8) {
+                fprintf(stderr,
+                        "xemu: vtx-span refute violation: slot %d%s copy "
+                        "[0x%" HWADDR_PRIx ", +0x%" PRIx64 ") changes read "
+                        "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")\n",
+                        slot, slot == r->current_flight ? " (recording)" : "",
+                        offset, (uint64_t)size, rr->lo, rr->hi);
+            }
+            vtx_refute_violations++;
+            break;
+        }
+    }
+    if (overlaps) {
+        vtx_refute_checks++;
+    }
+}
+
 /* @slot's GPU reads have retired (or it never recorded any). */
 static void forget_slot_vertex_ram(PGRAPHVkState *r, int slot)
 {
@@ -165,6 +285,7 @@ static void forget_slot_vertex_ram(PGRAPHVkState *r, int slot)
     bitmap_clear(r->flight[slot].read_bitmap, 0, r->bitmap_size);
     r->flight[slot].uploaded_first_dirty_bit = ULONG_MAX;
     r->flight[slot].uploaded_last_dirty_bit = 0;
+    pgraph_vk_refute_forget(r, slot);
 }
 
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
@@ -203,9 +324,14 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                                           start_bit, end_bit)) {
                 pgraph_vk_wait_slot_fence(pg, i);
                 forget_slot_vertex_ram(r, i);
-            } else if (r->flight[i].uploaded_first_dirty_bit != ULONG_MAX &&
-                       find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
-                                     start_bit) < end_bit) {
+                continue;
+            }
+            if (r->vtx_span_refute) {
+                vtx_refute_skip(r, i, offset, size, (const uint8_t *)data);
+            }
+            if (r->flight[i].uploaded_first_dirty_bit != ULONG_MAX &&
+                find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
+                              start_bit) < end_bit) {
                 nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
             }
             continue;
@@ -222,11 +348,19 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                 end_bit <= slot_first ||
                 find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
                               start_bit) >= end_bit) {
+                if (r->vtx_span_refute) {
+                    vtx_refute_skip(r, i, offset, size,
+                                    (const uint8_t *)data);
+                }
                 continue;
             }
             if (!uploaded_page_content_differs(r, i, offset, size,
                                                (const uint8_t *)data,
                                                start_bit, end_bit)) {
+                if (r->vtx_span_refute) {
+                    vtx_refute_skip(r, i, offset, size,
+                                    (const uint8_t *)data);
+                }
                 nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
                 continue;
             }
@@ -240,6 +374,10 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                 pgraph_vk_wait_slot_fence(pg, submitted_slot);
                 forget_slot_vertex_ram(r, submitted_slot);
             } else {
+                if (r->vtx_span_refute) {
+                    vtx_refute_skip(r, submitted_slot, offset, size,
+                                    (const uint8_t *)data);
+                }
                 nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
             }
             break;
@@ -255,6 +393,9 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
         if (!read_span_content_differs(r, i, offset, size,
                                        (const uint8_t *)data, start_bit,
                                        end_bit)) {
+            if (r->vtx_span_refute) {
+                vtx_refute_skip(r, i, offset, size, (const uint8_t *)data);
+            }
             if (r->flight[i].uploaded_first_dirty_bit != ULONG_MAX &&
                 find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
                               start_bit) < end_bit) {

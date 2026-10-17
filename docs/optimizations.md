@@ -65,6 +65,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_TLB_WCLEAN_REFUTE` | `1` re-runs the full TLB scan after every `tlb_reset_dirty` bitmap pass, arms whatever the writable-clean bitmaps missed (so the run stays correct) and prints `xemu: tlb-wclean refute checks= entries= misses= unset= (calls= arming=)` at exit: `misses` counts eligible entries in the range left unarmed, `unset` eligible entries anywhere missing a bit. The gate is `misses=0 unset=0`. Diagnostic only (a full scan per dirty clear); never for an fps run |
 | `XEMU_UI_FRAME_CAP_NS` | Test-only: floor the UI present period in ns (`16666666` ≈ a 60 Hz consumer). Unfocused/occluded bench windows present unpaced (~200 Hz observed), so ring-pacing behavior is invisible headless without it. Zero cost unset |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
+| `XEMU_VTX_SPAN_REFUTE` | `1` checks every vertex finish or fence wait a copy skips (`vk/vertex.c`) against an independent record of what each flight slot's draws read of the vertex RAM mirror, taken from the vertex buffer bindings themselves (offset, stride, element size, the draw's vertex count) rather than the syncs that feed the read spans; a recorded read whose bytes the copy changes is a violation (a GPU reader the spans miss; the first 8 print). Exit line `xemu: vtx-span refute checks=N violations=M` (checks = skips whose copy overlapped a recorded read). With `XEMU_VTX_SPAN_FINISH=0` it also counts the page-wide check's blind spot |
 | `XEMU_UI_LOCK_STATS` | `1` prints the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build; previously it needed a `DEBUG_XEMU_C=1` build (which still forces it on). One predictable branch per lock when off. Compiled in on macOS and in `DEBUG_XEMU_C` builds only — Windows/Linux release paths preprocess away to today's code |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
@@ -1958,7 +1959,16 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   → 3 vtx finishes and 36 → 10.5 passes a flip, Minsns/frame 88.3 →
   75.4 (round 8). Windowed heavy-f1 bench-abx 2×45 s, load ~80: both
   arms at the 60 fps cap (60.08 vs 60.11), process CPU ~125% vs ~130%
-  (noise), screenshots PASS.
+  (noise), screenshots PASS. `XEMU_VTX_SPAN_REFUTE=1` found 0
+  violations: det heavy-f1 600 17844 checks, stream-e2 600 11336,
+  normal-mode offscreen heavy-f1 40 s 26719. Positive control: a scratch
+  refuter that assumed a reader 256 B past each binding flagged 3978 of
+  8614 (heavy-f1 300). A scratch build that skipped every span finish
+  and wait still gave 0 violations and the same RAM on heavy-f1 and
+  stream-e2: no copy there changes a byte a bound draw reads, and the
+  ~17 finishes a flip left on det heavy-f1 are false positives of the
+  per-page [min,max) union (a page's draws leave gaps the next batch
+  fills).
 
 ### MetalFX + presentation
 

@@ -694,6 +694,12 @@ typedef struct PGRAPHVkState {
         unsigned long *read_bitmap;
         uint16_t *page_span_min;
         uint16_t *page_span_max;
+        /*
+         * XEMU_VTX_SPAN_REFUTE=1 only: the mirror byte ranges this
+         * slot's draws read, taken from their vertex buffer bindings
+         * (VtxRefuteRead), cleared with read_bitmap.
+         */
+        GArray *refute_reads;
         bool submitted;
         /* r->submit_count value of this slot's last submission; feeds
          * retired_submit_count when the slot fence is observed. */
@@ -905,6 +911,9 @@ typedef struct PGRAPHVkState {
      * (default); XEMU_VTX_SPAN_FINISH=0 restores the page-wide check.
      */
     bool vtx_span_finish;
+    /* XEMU_VTX_SPAN_REFUTE=1; vertices the next bound draw reads. */
+    bool vtx_span_refute;
+    uint32_t refute_draw_vertices;
     size_t bitmap_size;
 
     VkVertexInputAttributeDescription vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
@@ -1147,6 +1156,11 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
                                     VkDeviceSize size);
 void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg);
+void pgraph_vk_init_vtx_span_refute(PGRAPHVkState *r);
+void pgraph_vk_finalize_vtx_span_refute(PGRAPHVkState *r);
+void pgraph_vk_refute_note_read(PGRAPHVkState *r, hwaddr offset,
+                                uint32_t stride, uint32_t element_size);
+void pgraph_vk_refute_forget(PGRAPHVkState *r, int slot);
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size);
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,

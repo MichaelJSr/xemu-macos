@@ -2792,7 +2792,14 @@ static void bind_vertex_buffer(PGRAPHState *pg, uint16_t inline_map,
                                                           BUFFER_VERTEX_RAM;
         buffers[i] = r->storage_buffers[buffer_idx].buffer;
         offsets[i] = offset + r->vertex_attribute_offsets[attr_idx];
+        if (r->vtx_span_refute && buffer_idx == BUFFER_VERTEX_RAM) {
+            VertexAttribute *attr = &pg->vertex_attributes[attr_idx];
+            pgraph_vk_refute_note_read(r, offsets[i],
+                                       r->vertex_binding_descriptions[i].stride,
+                                       attr->size * attr->count);
+        }
     }
+    r->refute_draw_vertices = 0;
 
     if (nsprof_enabled()) {
         /* Merge attribution only; duplicates the skip compare below so
@@ -3119,6 +3126,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Draw Arrays");
         begin_draw(pg);
+        r->refute_draw_vertices = range_vertices;
         bind_vertex_buffer(pg, remap.attributes, 0);
         if (emulate_primitives) {
             uint32_t *all_indices = get_emulated_indices_buf(r, total_emulated_index_count);
@@ -3213,6 +3221,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
         }
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE, "Inline Elements");
         begin_draw(pg);
+        r->refute_draw_vertices = range_vertices;
         bind_vertex_buffer(pg, remap.attributes, 0);
         if (index_count > 0) {
             VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
