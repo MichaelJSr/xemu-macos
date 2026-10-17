@@ -29,6 +29,8 @@ const char *xemu_get_os_info(void);
 #ifdef __APPLE__
 /* No Dock icon, never takes focus, and no App Nap. */
 void xemu_os_set_background_app(void);
+/* The role a checked-in app gets, without AppKit: QoS requests apply. */
+void xemu_os_set_app_role(void);
 #endif
 
 #ifdef CONFIG_CPUID_H

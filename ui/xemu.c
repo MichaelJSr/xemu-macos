@@ -2272,8 +2272,12 @@ static void display_very_early_init(DisplayOptions *o)
         /*
          * No window: SDL's events are all the loop needs. Without the
          * video subsystem there is no Cocoa application to start (about
-         * 40 ms of launch on macOS), so no Dock icon either.
+         * 40 ms of launch on macOS), so no Dock icon either, and no role
+         * from RunningBoard: set it, or the threads' QoS is ignored.
          */
+#ifdef __APPLE__
+        xemu_os_set_app_role();
+#endif
         if (!SDL_Init(SDL_INIT_EVENTS)) {
             fprintf(stderr, "Failed to initialize SDL events: %s\n",
                     SDL_GetError());

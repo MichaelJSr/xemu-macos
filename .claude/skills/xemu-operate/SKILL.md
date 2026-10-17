@@ -237,8 +237,9 @@ base=B.app new=E.app` (~4 min). These changes get no `XEMU_*` switch
 existing switches and diagnostics (`new=E.app:XEMU_GUEST_MO=1`). The box is usually loaded and that's fine:
 judge by Mcycles/frame (back-to-back runs agree to ~0.5% at load 30;
 absolute values drift over minutes, so compare arms only within one
-interleaved session) and use Minsns/frame (~0.01%) as the mechanism
-check. Arms must agree on the RAM hash.
+interleaved session, and never with numbers from before 2026-10-17,
+when null mode's vCPU ran squashed to legacy QoS) and use Minsns/frame
+(~0.01%) as the mechanism check. Arms must agree on the RAM hash.
 **Renderer or pacing:** `scripts/bench-savestate-ab.sh azurik-heavy-f1
 XEMU_FOO 2 45` (~6 min), windowed wall fps. Go by the verdict, mean ± sd
 and sign tally, quote the load, and add pairs (3-6 × 75 s) when the delta

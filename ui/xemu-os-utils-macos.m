@@ -19,7 +19,16 @@
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#include <sys/resource.h>
 #include "xemu-os-utils.h"
+
+/* Private <sys/resource.h> values (xnu bsd/sys/resource.h). */
+#ifndef PRIO_DARWIN_ROLE
+#define PRIO_DARWIN_ROLE 6
+#endif
+#ifndef PRIO_DARWIN_ROLE_UI
+#define PRIO_DARWIN_ROLE_UI 0x2
+#endif
 
 /*
  * After a crash of any app named xemu, AppKit's next launch asks whether
@@ -41,6 +50,22 @@ static void xemu_os_ignore_persistent_state(void)
 const char *xemu_get_os_info(void)
 {
 	return [[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String];
+}
+
+void xemu_os_set_app_role(void)
+{
+	/*
+	 * A process started from an app (Terminal, an agent's app) inherits
+	 * the app type but no role, and the kernel squashes the
+	 * USER_INTERACTIVE and USER_INITIATED threads of a roleless app to
+	 * the legacy priority (31, which decays under load). AppKit's check-in
+	 * gets offscreen xemu the role UI from RunningBoard (an unfocused
+	 * window gets UI non-focal); null mode starts no Cocoa app, so take
+	 * offscreen's role here, or its vCPU waits for a core most of the time
+	 * on a loaded host. A daemon-type process (a launchd job) gets ENOTSUP
+	 * and changes nothing: its launchd ProcessType caps its QoS instead.
+	 */
+	setpriority(PRIO_DARWIN_ROLE, 0, PRIO_DARWIN_ROLE_UI);
 }
 
 void xemu_os_set_background_app(void)

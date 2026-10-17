@@ -33,7 +33,7 @@ and tag `archive/windows-wave1-wip`.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it. Threads + runtime, P-core QoS |
+| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it (applied in null mode only since 2026-10-17, which gives the process the role UI: `xemu_os_set_app_role`). Threads + runtime, P-core QoS |
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_PFIFO_RING_FREEZE` | Normal mode, **default on since 2026-10-17**: a DMA_PUT write that moves PUT back behind DMA_GET (a pushbuffer ring restart) copies the words from DMA_GET through the old PUT's (at most 256, CACHE1's worth) and the threaded pusher reads them from the copy (`pfifo_frozen.h`), so a guest that rewrites the ring head before DMA_GET gets there doesn't change commands the pusher hasn't read; `0` reads guest RAM as before. pbkit's `pb_reset()` waits only 100 ticks for DMA_GET: when PFIFO lagged longer on the macOS CI runner, the next frame overwrote the unread tail (Roswell FpuTestXiso hang, "Reserved pb command" aborts). Deterministic mode never freezes: its pusher runs at every guest write. Threads + runtime |
@@ -2553,6 +2553,39 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   12-14). The gain is the lock-wait cut under heavy load, at no CPU
   cost. No switch: a scheduling hint, and det mode runs the APU on the
   vCPU.
+- **Null mode takes the app role UI (2026-10-17).** None of those QoS
+  requests applied under `XEMU_HEADLESS=null`. A process spawned from
+  an app (Terminal, an agent's app) inherits the app type but no role,
+  and xnu squashes the USER_INTERACTIVE and USER_INITIATED threads of a
+  roleless app to the legacy priority, 31, which decays under load
+  (pthread still reports the class it asked for). Windowed and
+  offscreen xemu check in through AppKit and get a role from
+  RunningBoard (offscreen UI, an unfocused window UI non-focal; base
+  priority 46 either way). Null mode starts no Cocoa app, so its
+  RR vCPU ran at 31 (PRI down to 12 under load), with 30-52% of its
+  CPU time on E-cores (rusage v6 P-core counters), all of it billed as
+  legacy QoS. It now sets the role
+  itself (`xemu_os_set_app_role`: `setpriority(PRIO_DARWIN_ROLE, 0,
+  PRIO_DARWIN_ROLE_UI)`, one syscall). A daemon-type process (a launchd
+  job) gets ENOTSUP and keeps the QoS cap its ProcessType sets (a
+  `launchctl submit` job's UI-QoS thread ran at 20). Cross-binary
+  bench-det, 600 frames, 4 pairs, at load 71-96: heavy-f1 82 → 213
+  wall fps, 3.9 → 2.8 CPU s, 7.5 → 2.85 runnable s per run; vanilla
+  `vanilla-rz-e7-keylord` with the fight string 64 → 286 fps, 3.3 →
+  2.15 CPU s, 6.7-15.2 → 2.2-2.3 runnable s. RAM hashes unchanged
+  (det goldens exact). Mcycles/frame fell 21.7% and 26.9% (4/4 each)
+  with the move to P-cores, and Minsns/frame 0.36% and 0.9% (the main
+  thread's 16 ms poll loop runs over less wall time), so absolute
+  bench-det numbers from before this change are not comparable with
+  later ones; A/Bs within one session were fair, both arms squashed.
+  The cut depends on load: the review's rerun at load 59-72, 4 pairs
+  in each arm order per scene, measured heavy-f1 −17.8% and −16.3%,
+  e7 −20.6% and −31.5% (16/16; the base is bimodal, 12.0-16.6
+  Mcycles/frame on e7, as it gets P-cores or not), Minsns/frame −0.3%
+  and −1.0%; whole-process P-core cycles 87-99% for new against
+  55-76% for base. Part 9 lane B saw the same gap as null 57.8 s wall against offscreen
+  17.3 s for one Bink movie at load 60-71. No switch: a scheduling
+  hint, verified by the goldens.
 - **Normal mode halts the vCPU in the kernel's idle loop
   (2026-10-16).** KiIdleLoop never executes HLT: it spins on `sti;
   nop; nop; cli` and the DPC-list and NextThread checks, and every STI
