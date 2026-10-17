@@ -240,13 +240,19 @@ void qemu_chr_be_update_read_handlers(Chardev *s,
            || !context);
 
 #ifdef XBOX
-    if (context != NULL) {
-#endif
-
+    /*
+     * NULL is the main loop's context, which is qemu_main_context here (a
+     * source attached to NULL would go to GLib's global default context,
+     * which the main loop doesn't poll). Never keep the old one: a QMP
+     * monitor's chardev runs in the monitor iothread's context until
+     * monitor_data_destroy() hands it back with NULL, and a watch re-added
+     * there was freed with that context in iothread_destroy(), so
+     * qemu_chr_cleanup() destroyed it again (g_source_destroy's
+     * ref_count assertion on every QMP quit).
+     */
+    s->gcontext = context ? context : qemu_main_context;
+#else
     s->gcontext = context;
-
-#ifdef XBOX
-    }
 #endif
 
     if (cc->chr_update_read_handler) {
