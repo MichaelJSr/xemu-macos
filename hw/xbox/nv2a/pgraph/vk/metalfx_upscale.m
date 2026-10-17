@@ -676,7 +676,6 @@ typedef struct MetalFXTemporalState {
     int requestedOutputW, requestedOutputH;
     bool initialized;
     bool needsReset;
-    uint32_t frameIndex;
     int failedInputW, failedInputH;
     int failedOutputW, failedOutputH;
     id<MTLComputePipelineState> syntheticDepthPipeline;
@@ -917,8 +916,16 @@ bool metalfx_temporal_init(int input_w, int input_h,
 
         g_temporal.scaler.motionVectorScaleX = 1.0f;
         g_temporal.scaler.motionVectorScaleY = 1.0f;
+        /*
+         * pgraph never jitters its projection: every frame samples
+         * pixel centres, so the scaler gets a zero offset. Telling it
+         * about a Halton offset the frame doesn't have made it shift
+         * history by up to half a pixel each frame (shimmer on still
+         * scenes, smeared edges).
+         */
+        g_temporal.scaler.jitterOffsetX = 0.0f;
+        g_temporal.scaler.jitterOffsetY = 0.0f;
         g_temporal.needsReset = true;
-        g_temporal.frameIndex = 0;
 
         NSError *err = nil;
         id<MTLLibrary> lib = [g_temporal.device
@@ -1038,13 +1045,6 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
 
-        static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
-        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.444f };
-        int jidx = g_temporal.frameIndex % 8;
-        g_temporal.scaler.jitterOffsetX = halton_x[jidx];
-        g_temporal.scaler.jitterOffsetY = halton_y[jidx];
-        g_temporal.frameIndex++;
-
         g_temporal.scaler.reset = g_temporal.needsReset;
         g_temporal.needsReset = false;
 
@@ -1145,13 +1145,6 @@ bool metalfx_temporal_upscale_tex(void *inputTexture, void *depthTexture)
         }
         g_temporal.scaler.inputContentWidth = g_temporal.inputWidth;
         g_temporal.scaler.inputContentHeight = g_temporal.inputHeight;
-
-        static const float halton_x[] = { 0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f };
-        static const float halton_y[] = { 0.0f, -0.333f, 0.333f, -0.111f, 0.222f, -0.222f, 0.111f, -0.444f };
-        int jidx = g_temporal.frameIndex % 8;
-        g_temporal.scaler.jitterOffsetX = halton_x[jidx];
-        g_temporal.scaler.jitterOffsetY = halton_y[jidx];
-        g_temporal.frameIndex++;
 
         g_temporal.scaler.reset = g_temporal.needsReset;
         g_temporal.needsReset = false;

@@ -2111,7 +2111,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   interpolation receive genuinely distinct prev/cur frames (the
   single shared output surface aliased them).
 - **Spatial + temporal upscaling** (`MTLFXSpatialScaler` /
-  `MTLFXTemporalScaler`). Temporal uses 8-frame Halton(2,3) jitter
+  `MTLFXTemporalScaler`). Temporal gets a zero jitter offset (pgraph
+  renders unjittered; the old per-frame Halton offsets described
+  jitter the frame never had and blurred it, 2026-10-17)
   + optional compute-kernel synthetic depth. Shared `MTLDevice` +
   `MTLCommandQueue` refcounted with MRC discipline.
 - **Frame interpolation** (`MTLFXFrameInterpolator`, macOS 26+):
