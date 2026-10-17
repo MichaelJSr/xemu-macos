@@ -80,7 +80,9 @@ install_name_tool -add_rpath $L/ $B && codesign -f --deep --preserve-metadata=en
 
 **PGO:** CI arm64 releases use the committed `pgo/default.profdata`;
 locally, set `XEMU_PGO=use`. To retrain, build with `XEMU_PGO=generate`,
-play, monitor `quit`, then rebuild with `use`.
+`rm -f pgo/*.profraw`, run `scripts/pgo-train.py` on a clone of
+`dist/xemu.app` (~15 min; its windowed sessions open muted, unfocused
+windows), rebuild with `use` and commit `pgo/default.profdata`.
 
 **MoltenVK:** build.sh bundles the first arm64 dylib in
 `macos-libs/<arch>/opt/local/lib`, `/usr/local/lib` or `/opt/homebrew/lib`,
