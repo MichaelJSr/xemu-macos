@@ -92,51 +92,15 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 }
 
 /*
- * Exact-conflict refinement: guest dirty bits are page-granular, so
- * vertex-stream sync writes arrive padded to page boundaries and
- * consecutive writes false-share their boundary page — the padded
- * bytes re-copy identical content. A conflict with the recording
- * command buffer is only real if the incoming bytes DIFFER from the
- * mirror somewhere on a page the recording window uploaded (each upload
- * covers whole pages). Returns true when a differing byte exists
- * (finish required), false when every conflicting byte is identical.
- *
- * Measured (Azurik attract demo): forced mid-frame finishes drop
- * from 4-5.6 to ~0.9 per flip.
- */
-static bool uploaded_page_content_differs(PGRAPHVkState *r, int slot,
-                                          hwaddr offset, VkDeviceSize size,
-                                          const uint8_t *data,
-                                          size_t start_bit, size_t end_bit)
-{
-    const unsigned long *bm = r->flight[slot].uploaded_bitmap;
-    const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
-
-    for (size_t bit = start_bit;; bit++) {
-        bit = find_next_bit(bm, end_bit, bit);
-        if (bit >= end_bit) {
-            return false;
-        }
-        hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
-        hwaddr lo = MAX(offset, page_base);
-        hwaddr hi = MIN(offset + size, page_base + TARGET_PAGE_SIZE);
-        if (lo < hi &&
-            memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
-            return true;
-        }
-    }
-}
-
-/*
  * Whether the incoming bytes differ from the mirror anywhere a draw
  * recorded in @slot's window reads (its read spans). When they don't, no
  * draw of that slot still on the GPU reads a byte the copy changes, so
- * the copy need not wait for it. Guest dirty bits are page-granular and
- * a draw's upload of a page also carries the bytes the guest has written
- * next to an earlier draw's since: each streamed batch after the last,
- * which the deterministic pusher uploads before the guest writes the
- * next (Azurik's death level: ~30 such conflicts a flip, each a GPU
- * round trip).
+ * the copy need neither finish nor wait for it. Guest dirty bits are
+ * page-granular and a draw's upload of a page also carries the bytes the
+ * guest has written next to an earlier draw's since: each streamed batch
+ * after the last, which the deterministic pusher uploads before the guest
+ * writes the next (Azurik's death level: ~30 such conflicts a flip, each
+ * a finish and a GPU round trip).
  */
 static bool read_span_content_differs(PGRAPHVkState *r, int slot,
                                       hwaddr offset, VkDeviceSize size,
@@ -192,9 +156,9 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
             /*
              * A submitted slot: its draws may still be on the GPU, and
              * read only the bytes in its read spans. The copy waits for
-             * them only when it changes one of those bytes, so a slot
-             * can stay pending past its finish (below); then its pages
-             * count whether or not its window uploaded them. After the
+             * them only when it changes one of those bytes, on any page
+             * they read, whether or not the slot's window uploaded it.
+             * After the
              * wait, the slot's tracking is cleared so further writes
              * this frame skip the (already signaled) fence.
              *
@@ -217,37 +181,24 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
             continue;
         }
         /*
-         * Fast reject: if the query range doesn't intersect this slot's
-         * tracked [first..last] dirty-page window, no overlap is
-         * possible and we can skip the find_next_bit scan.
+         * The recording command buffer: a conflict is only real if the
+         * copy changes a byte one of its draws reads (its read spans).
+         * The page-wide check this replaced finished whenever the page
+         * changed anywhere, ~34 times a flip in d2 under icount, where
+         * every streamed batch's upload carries the next batch's bytes.
          */
-        unsigned long slot_first = r->flight[i].uploaded_first_dirty_bit;
-        if (slot_first == ULONG_MAX) {
-            continue;
-        }
-        unsigned long slot_last = r->flight[i].uploaded_last_dirty_bit;
-        if (start_bit > slot_last || end_bit <= slot_first) {
-            continue;
-        }
-        if (find_next_bit(r->flight[i].uploaded_bitmap,
-                          start_bit + nbits, start_bit) >= end_bit) {
-            continue;
-        }
-        if (!uploaded_page_content_differs(r, i, offset, size,
-                                           (const uint8_t *)data,
-                                           start_bit, end_bit)) {
-            /*
-             * Every conflicting byte is identical to what the recording
-             * window already uploaded — recorded draws observe the same
-             * data, so the finish (and its rotation + mid-frame reclaim
-             * wait) is a false positive from page padding.
-             */
-            nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
+        if (!read_span_content_differs(r, i, offset, size,
+                                       (const uint8_t *)data, start_bit,
+                                       end_bit)) {
+            if (r->flight[i].uploaded_first_dirty_bit != ULONG_MAX &&
+                find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
+                              start_bit) < end_bit) {
+                nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
+            }
             continue;
         }
         /*
-         * The currently recording command buffer references this range:
-         * it must be submitted before the mirror is overwritten, and the
+         * It must be submitted before the mirror is overwritten, and the
          * submit's fence waited.
          *
          * pgraph_vk_finish alone no longer guarantees the second half:
@@ -259,26 +210,12 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
          * driver, merely masked on macOS by MoltenVK's deferred encode
          * delay. Wait the slot we just submitted, then clear its tracking
          * (its reads have retired) so later writes this frame skip the
-         * already-signaled fence entirely, unless no recorded draw reads
-         * a byte the copy changes: then the slot stays pending, and a
-         * later copy that changes one waits on the path above.
-         *
-         * The finish itself stays: where command buffers and passes split
-         * moves some pixels (by a few levels on AGX), so it is kept where
-         * page-wide content differs.
+         * already-signaled fence entirely.
          */
         int submitted_slot = r->current_flight;
-        bool reads_changed =
-            read_span_content_differs(r, submitted_slot, offset, size,
-                                      (const uint8_t *)data, start_bit,
-                                      end_bit);
         pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
-        if (reads_changed) {
-            pgraph_vk_wait_slot_fence(pg, submitted_slot);
-            forget_slot_vertex_ram(r, submitted_slot);
-        } else {
-            nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
-        }
+        pgraph_vk_wait_slot_fence(pg, submitted_slot);
+        forget_slot_vertex_ram(r, submitted_slot);
         break;
     }
 

@@ -1833,11 +1833,21 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   37). Offscreen bench-det, 3 pairs, load 67-75: heavy-f1 600 wall fps
   21.1 → 32.0 (+52%, 3/3), Mcyc/frame −6.7% (3/3); stream-e2 600 wall
   fps 29.8 → 42.1 (+41%, 3/3), Mcyc/frame −8.0% (3/3). Windowed
-  heavy-f1, 2 pairs: both at the 60 fps cap, same draws/flip. Skipping
-  the finishes as well (read spans deciding them) takes d2 to ~3.5
-  finishes and 11 passes a flip and 56.8 → 38.7 Mcyc/frame with the same
-  RAM, but moves 29 pixels of the d2 screendump by ≤2 levels, so it is
-  not shipped.
+  heavy-f1, 2 pairs: both at the 60 fps cap, same draws/flip.
+
+- **Read spans decide vertex finishes too (2026-10-17).** The recording
+  command buffer now finishes only when a copy changes a byte one of
+  its draws reads, on any page they read (the page-wide check finished
+  whenever the page changed anywhere). Same RAM everywhere (d2 F2+900
+  `10b5a35aa66b`, heavy-f1 and stream-e2 600 offscreen), but fewer pass
+  splits move pixels: d2's screendump 29 of 1.2M pixels by ≤2 levels,
+  heavy-f1's 2 and stream-e2's 1 by 1 level. Offscreen bench-det, 3
+  pairs, load 20-29: heavy-f1 600 **Mcyc/frame −32%, Minsns/frame
+  −23.5%, wall fps +41%** (3/3); stream-e2 600 −20%, −16.6%, +25%
+  (3/3). d2: ~29 → 3 vtx finishes and 36 → 10.5 passes a flip, Minsns/
+  frame 88.3 → 75.4. Windowed heavy-f1: capped in both arms; in the
+  phase where normal mode finishes for vertices (~1.2 a flip) it drops
+  to ~0.8.
 
 ### MetalFX + presentation
 
