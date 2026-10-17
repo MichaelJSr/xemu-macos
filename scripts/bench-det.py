@@ -275,10 +275,13 @@ def run_once(app, env, a, purpose=''):
 # frame-tagged input; timing passes replay that input with no debugger
 # (breakpoints switch off TCG fast paths) and read host counters at each
 # phase boundary. VAs are Azurik's USA release (the harness's
-# xemu_oracle.py); --va overrides them for another release.
+# xemu_oracle.py), or Europe's (XDK 4039) when default.xbe's entry says so
+# (the Azurik harness's region table); --va overrides them.
 
 TL_VAS = {'prophecy': 0x5F748, 'prophecy_end': 0x5F774, 'inv_reset': 0x57B70,
           'load_level': 0x53750, 'tick': 0x8C230, 'boot_state': 0x1BF61C}
+TL_RELEASES = {0xE338A: ('Europe', {'prophecy': 0x5F6F8, 'prophecy_end': 0x5F724,
+                                    'tick': 0x8C1E0, 'boot_state': 0x1C15BC})}
 TL_TITLE, TL_LIST = 6, 8          # boot states: the title; START opened the save list
 TL_PREVIEW_WAIT = 120             # frames a save-list cursor move may take to preview a save
 TL_KEYS = {'start': 42, 'a': 81, 'b': 79, 'dpad_left': 37, 'dpad_right': 38,
@@ -710,12 +713,14 @@ def timeline(a, arms):
     else:
         iso = a.dvd
     va['xbe_entry'] = xbe_entry(iso) if iso else None
+    release, vas = TL_RELEASES.get(va['xbe_entry'], ('USA', {}))
+    va.update(vas)
     for kv in a.va:
         k, v = kv.split('=', 1)
         va[k] = int(v, 0)
     name, app, env = arms[0]
     print(f'timeline: markers on {name} ({a.renderer}); disc {iso}; XBE entry '
-          f'{va["xbe_entry"] and hex(va["xbe_entry"])}', flush=True)
+          f'{va["xbe_entry"] and hex(va["xbe_entry"])} ({release} VAs)', flush=True)
     t = time.time()
     marks, info, schedule = tl_markers(app, env, a, va)
     print(f'  level {info.get("level")}; end frame {info["end"]} ram {info["ram"]}; '

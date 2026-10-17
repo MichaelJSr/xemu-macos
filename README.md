@@ -906,7 +906,8 @@ Other automation interfaces (windowed or headless):
   frames in every arm. `--renderer offscreen` times Vulkan on a
   portable clone (cold shader caches); `--route dpad_left,a` starts a
   new game instead of loading the save under the cursor; `--dvd` boots
-  another disc (`--va` moves the event addresses for another release);
+  another disc (a Europe disc gets Europe's event addresses, from its
+  XBE entry; `--va` moves them for another release);
   `--hdd-io "write -z 0x800 0x200"` empties the scratch HDD's
   cache-partition table first, so the game formats a cache partition
   and copies its files to it again (writes, qcow2 growth), and
