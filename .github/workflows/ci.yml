@@ -28,3 +28,6 @@ jobs:
     uses: xemu-project/xemu-test/.github/workflows/test-roswell.yml@wheel-202610142116
     with:
       xemu_build_configuration: release
+      # Test sources from the fork's branch: macos_roswell.json also expects the arm64 hard FPU's TestFloat failures.
+      xemu_test_repository: MichaelJSr/xemu-test
+      xemu_test_ref: xemu-macos
