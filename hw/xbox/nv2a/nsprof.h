@@ -134,6 +134,7 @@ enum NsprofEvent {
      */
     NSPROF_EV_VK_DRAW_CALL,
     NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE, /* draw_arrays_length > 1, non-emulated */
+    NSPROF_EV_VK_FAN_DRAW, /* VK_DRAW_CALL of a guest fan / filled polygon */
     NSPROF_EV_DRAW_MERGE_IDENTICAL,
     NSPROF_EV_DRAW_MERGE_CANDIDATE,
     NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF,

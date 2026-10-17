@@ -126,6 +126,22 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
     }
 }
 
+/* nsprof: one per Vulkan draw of a guest triangle fan or filled polygon
+ * (native TRIANGLE_FAN, or its CPU triangle list). */
+static void count_fan_draw(PGRAPHState *pg)
+{
+    if (!nsprof_enabled()) {
+        return;
+    }
+    int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
+                                NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    if (pg->primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+        (pg->primitive_mode == PRIM_TYPE_POLYGON &&
+         polygon_mode == POLY_MODE_FILL)) {
+        nsprof_event(NSPROF_EV_VK_FAN_DRAW);
+    }
+}
+
 static bool draw_needs_primitive_emulation(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -3196,6 +3212,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   buffer_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
                                  -(int32_t)min_start, 0);
             }
@@ -3208,6 +3225,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                          count = pg->draw_arrays_count[i];
                 NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDraw(r->command_buffer, count, 1, start - min_start, 0);
             }
         }
@@ -3273,6 +3291,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                               r->storage_buffers[BUFFER_INDEX].buffer,
                               buffer_offset, VK_INDEX_TYPE_UINT32);
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
                              -(int32_t)min_element, 0);
         }
@@ -3332,10 +3351,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
         }
         end_draw(pg);
@@ -3401,11 +3422,13 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, actual_index_count, 1, 0, 0,
                                  0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
         }
         end_draw(pg);
