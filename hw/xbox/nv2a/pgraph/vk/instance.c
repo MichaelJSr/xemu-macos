@@ -383,6 +383,11 @@ static void add_optional_device_extension_names(
         available_extensions, enabled_extension_names,
         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
+    /* Lets the pipeline cache save only when it gained entries (draw.c). */
+    r->pipeline_creation_feedback_enabled = add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
+
 #if HAVE_IOSURFACE_SHARING
     r->metal_objects_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
@@ -518,6 +523,9 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
         vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
         fprintf(stderr, "- Driver: %s, %s (id %d)\n", driver_props.driverName,
                 driver_props.driverInfo, driver_props.driverID);
+        /* MoltenVK caches shader stages, never whole pipelines (draw.c). */
+        r->pipeline_cache_stage_hits_suffice =
+            driver_props.driverID == VK_DRIVER_ID_MOLTENVK;
     }
 
     return true;

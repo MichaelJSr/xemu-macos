@@ -816,12 +816,22 @@ typedef struct PGRAPHVkState {
 
     /*
      * Periodic VkPipelineCache persistence. App quit does not reliably
-     * reach pgraph_destroy()/finalize, so the cache is also flushed to
-     * disk from the PFIFO thread at flip boundaries once new pipelines
-     * have accumulated and a minimum interval has elapsed.
+     * reach pgraph_destroy()/finalize and a crash or kill never does, so
+     * flip boundaries also start a background save once new cache
+     * entries have accumulated (see pgraph_vk_maybe_save_pipeline_cache).
+     * pipeline_cache_unsaved counts pipelines that missed the
+     * VkPipelineCache (creation feedback), or every creation when the
+     * driver gives no feedback.
      */
     uint32_t pipeline_cache_unsaved;
     int64_t pipeline_cache_last_save_ns;
+    int64_t pipeline_cache_loadvm_ns;
+    int64_t pipeline_cache_last_miss_ns;
+    bool pipeline_creation_feedback_enabled;
+    bool pipeline_cache_stage_hits_suffice;
+    bool pipeline_cache_save_thread_live;
+    bool pipeline_cache_save_busy;
+    QemuThread pipeline_cache_save_thread;
 
     /*
      * Per-command-buffer dynamic-state cache. Vulkan dynamic state is
@@ -1308,6 +1318,21 @@ typedef enum FinishReason {
 void pgraph_vk_init_pipelines(PGRAPHState *pg);
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg);
 void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg);
+void pgraph_vk_pipeline_cache_note_flush(PGRAPHState *pg);
+/* Creation-feedback miss counting for every vk_pipeline_cache user. */
+typedef struct PipelineCacheFeedback {
+    VkPipelineCreationFeedbackCreateInfo info;
+    VkPipelineCreationFeedback pipeline;
+    VkPipelineCreationFeedback stages[4];
+} PipelineCacheFeedback;
+void pgraph_vk_pipeline_cache_feedback_chain(PGRAPHVkState *r,
+                                             const void **pnext,
+                                             uint32_t stage_count,
+                                             PipelineCacheFeedback *fb);
+void pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r,
+                                           const void *pnext,
+                                           uint32_t stage_count,
+                                           const PipelineCacheFeedback *fb);
 void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter);
 void pgraph_vk_draw_begin(NV2AState *d);
 void pgraph_vk_draw_end(NV2AState *d);

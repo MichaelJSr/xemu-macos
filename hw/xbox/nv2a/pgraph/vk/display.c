@@ -922,9 +922,15 @@ static void create_display_pipeline(PGRAPHState *pg)
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
+    PipelineCacheFeedback feedback;
+    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_info.pNext,
+                                            pipeline_info.stageCount,
+                                            &feedback);
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL,
                                        &r->display.pipeline));
+    pgraph_vk_pipeline_cache_note_created(r, pipeline_info.pNext,
+                                          pipeline_info.stageCount, &feedback);
 }
 
 static void destroy_display_pipeline(PGRAPHState *pg)

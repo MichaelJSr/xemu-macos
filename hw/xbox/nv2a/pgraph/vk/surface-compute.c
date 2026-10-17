@@ -450,10 +450,15 @@ static VkPipeline create_compute_pipeline(PGRAPHVkState *r, const char *glsl)
                 .module = module->module,
             },
     };
+    PipelineCacheFeedback feedback;
+    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_info.pNext, 1,
+                                            &feedback);
     VkPipeline pipeline;
     VK_CHECK(vkCreateComputePipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL,
                                        &pipeline));
+    pgraph_vk_pipeline_cache_note_created(r, pipeline_info.pNext, 1,
+                                          &feedback);
 
     pgraph_vk_destroy_shader_module(r, module);
 

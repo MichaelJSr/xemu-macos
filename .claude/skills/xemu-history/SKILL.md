@@ -157,6 +157,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 7. **BINK via VideoToolbox.** Needs theory: there's no hook, and Azurik's movie never touches PVIDEO.
 8. **GL renderer under the Metal window.** Compatibility only.
 9. **Unexplained white window** in 2 of 13 warm `azurik-stream-e2` walks while nsprof looked normal. Needs an in-app screenshot hook.
+10. **Pipeline-cache merge on save.** Instances sharing a base path still lose each other's new entries (last rename wins; only cold multi-instance runs). Union with the file on disk in the save thread: scratch `VkPipelineCache` from the file, `vkMergePipelineCaches` ours into it, write that. Watch MoltenVK's merge and the doubled memory.
 
 Parked, with bars: the reports safety valve (`REPORTS_SUBMIT`: 0 submits per flip with both anchors at the cap, 2026-10-16; fence_wait medians 18 µs (W2) and 82 µs (heavy-f1) at load 81-110, though another heavy-f1 session read 1.5-2 ms/flip at 60 fps; a 100 ms budget drops draws/flip 693 → 601, so the title consumes reports mid-frame; reopen when an anchor below the cap submits more than once per flip); pipeline prewarm (cache misses only; reopen on a ≥16 ms compile that survives a warm rerun; the one that did, glslang's ~60 ms built-in symbol tables at each process's first miss, warms at renderer init since 2026-10-16); dynamic rendering (no measured upside); MTLResidencySet (MoltenVK has none).
 

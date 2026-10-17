@@ -1347,6 +1347,29 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   pipelines accumulated; write-then-rename keeps the file
   crash-consistent). Warm-cache worst case measured ≤ 4 ms — a ~40x
   hitch reduction on pipeline-heavy scene transitions.
+- **Pipeline-cache saves off the PFIFO thread, sooner, and only when
+  the cache grew** (2026-10-17). The flip-time save serialized and
+  wrote the whole cache (~11 MB on the heavy scene) on the PFIFO
+  thread, counted every LRU miss as new, so warm and det runs rewrote
+  it every 30 s and at exit (clobbering siblings sharing the folder),
+  and a crash within 30 s of a compile burst lost it. Every creation
+  through the cache (draw, clear, display, surface compute) now
+  chains `VkPipelineCreationFeedback` and counts only cache misses (on
+  MoltenVK, which caches shader stages only, a stage miss); a background thread saves once 16 new entries or a
+  load's burst (3 s after the flush) are in and 1 s has passed without
+  a miss, ≥5 s apart, else after 30 s; exit saves only unsaved
+  entries. Measured (load 70-90): with the 11.4 MB bench cache and
+  every stage missing (`debug_shaders`), a save takes 13-19 ms on the
+  save thread, work that used to sit on a flip (48-228 ms when the
+  thread ran at utility QoS, so it keeps the PFIFO thread's). On a warm
+  relaunch base rewrote the cache twice in 37 s and this build never
+  did. Heavy-f1 cold, kill -9 60 s after the loadvm, relaunch: both
+  had already saved the full 1.07 MB (base's 30 s timer happened to
+  land 5 s after the load); relaunch `pipeline_gen` 63.7 ms base,
+  41-52 ms new (two runs) for 88-89 creations; 1 MB saves take
+  2-3 ms. Two cold instances sharing one base path, saving twice each,
+  then kill -9: a third loaded the full 1.07 MB and saved nothing. Det f300 A/B -n 4: 14.96 → 15.08
+  Mcyc/frame (sd 0.45/0.34), 55.13 → 55.16 Minsns, neutral.
 - **`XEMU_NV2A_NSPROF=1` wall-time profiler.** `nv2a/nsprof.[ch]`:
   release-build-safe ns accumulators around every PFIFO-thread cost
   center (shader/pipeline gen, texture hash/snapshot/upload, fence

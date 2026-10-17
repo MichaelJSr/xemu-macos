@@ -491,6 +491,7 @@ static void load_pipeline_cache_from_disk(void **data, size_t *size)
 static void save_pipeline_cache_to_disk(VkDevice device,
                                         VkPipelineCache cache)
 {
+    int64_t t0 = g_get_monotonic_time();
     size_t size = 0;
     VkResult result = vkGetPipelineCacheData(device, cache, &size, NULL);
     if (result != VK_SUCCESS || size == 0) {
@@ -515,8 +516,9 @@ static void save_pipeline_cache_to_disk(VkDevice device,
             bool ok = fwrite(data, 1, size, f) == size;
             ok &= fclose(f) == 0;
             if (ok && g_rename(tmp_path, path) == 0) {
-                fprintf(stderr, "Saved pipeline cache (%zu bytes) to %s\n",
-                        size, path);
+                fprintf(stderr,
+                        "Saved pipeline cache (%zu bytes, %.1f ms) to %s\n",
+                        size, (g_get_monotonic_time() - t0) / 1000.0, path);
             } else {
                 g_unlink(tmp_path);
             }
@@ -528,14 +530,61 @@ static void save_pipeline_cache_to_disk(VkDevice device,
 }
 
 /*
- * Flush the pipeline cache to disk from the PFIFO thread once new
- * pipelines have accumulated and the save interval has elapsed.
- * Called at flip boundaries (renderer idle), so the serialize + write
- * cost lands between frames at most once per interval. All pipeline
- * creation happens on this thread, so no external synchronization of
- * the VkPipelineCache is needed.
+ * Background save. The VkPipelineCache is not created externally
+ * synchronized, so vkGetPipelineCacheData may run on this thread while
+ * the PFIFO thread keeps creating pipelines through the same cache (the
+ * driver locks it; MoltenVK's cache is about 11 MB on the heavy scene,
+ * tens of ms to serialize and write, which used to land on a flip).
+ * One save at a time; finalize joins it before destroying the cache.
+ * It keeps the PFIFO thread's QoS: a creation that needs the cache waits
+ * for the serialization, so a demoted saver would stall it longer.
+ */
+static void *pipeline_cache_save_thread(void *opaque)
+{
+    PGRAPHVkState *r = opaque;
+
+    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    qatomic_store_release(&r->pipeline_cache_save_busy, false);
+    return NULL;
+}
+
+static void pipeline_cache_save_join(PGRAPHVkState *r)
+{
+    if (r->pipeline_cache_save_thread_live) {
+        qemu_thread_join(&r->pipeline_cache_save_thread);
+        r->pipeline_cache_save_thread_live = false;
+    }
+}
+
+static bool pipeline_cache_save_start(PGRAPHVkState *r)
+{
+    if (qatomic_load_acquire(&r->pipeline_cache_save_busy)) {
+        return false;
+    }
+    pipeline_cache_save_join(r);
+    qatomic_set(&r->pipeline_cache_save_busy, true);
+    qemu_thread_create(&r->pipeline_cache_save_thread, "vk.pcache_save",
+                       pipeline_cache_save_thread, r, QEMU_THREAD_JOINABLE);
+    r->pipeline_cache_save_thread_live = true;
+    return true;
+}
+
+/*
+ * Called from the PFIFO thread at flip boundaries. A crash or kill loses
+ * every pipeline compiled since the last save, so save, in the
+ * background, once PIPELINE_CACHE_SAVE_BATCH new cache entries have
+ * accumulated or a loadvm's compile burst has settled, but only after
+ * PIPELINE_CACHE_SAVE_QUIET_NS without a miss (so the save doesn't make
+ * the rest of a burst wait on the cache) and never twice within
+ * PIPELINE_CACHE_SAVE_MIN_NS; anything left over goes after
+ * PIPELINE_CACHE_SAVE_INTERVAL_NS. A warm run (every stage a cache hit)
+ * never saves, so it can't clobber a sibling's fuller cache either.
  */
 #define PIPELINE_CACHE_SAVE_INTERVAL_NS (30ll * 1000000000ll)
+#define PIPELINE_CACHE_SAVE_MIN_NS (5ll * 1000000000ll)
+#define PIPELINE_CACHE_SAVE_SETTLE_NS (3ll * 1000000000ll)
+#define PIPELINE_CACHE_SAVE_QUIET_NS (1ll * 1000000000ll)
+#define PIPELINE_CACHE_SAVE_BATCH 16
 
 void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
 {
@@ -545,13 +594,89 @@ void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
         return;
     }
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    if (now - r->pipeline_cache_last_save_ns <
-        PIPELINE_CACHE_SAVE_INTERVAL_NS) {
+    int64_t since = now - r->pipeline_cache_last_save_ns;
+    bool settled = r->pipeline_cache_loadvm_ns &&
+                   now - r->pipeline_cache_loadvm_ns >=
+                       PIPELINE_CACHE_SAVE_SETTLE_NS;
+    bool quiet = now - r->pipeline_cache_last_miss_ns >=
+                 PIPELINE_CACHE_SAVE_QUIET_NS;
+    if (since < PIPELINE_CACHE_SAVE_INTERVAL_NS &&
+        (since < PIPELINE_CACHE_SAVE_MIN_NS || !quiet ||
+         (r->pipeline_cache_unsaved < PIPELINE_CACHE_SAVE_BATCH &&
+          !settled))) {
         return;
     }
-    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    if (!pipeline_cache_save_start(r)) {
+        return;
+    }
     r->pipeline_cache_unsaved = 0;
+    r->pipeline_cache_loadvm_ns = 0;
     r->pipeline_cache_last_save_ns = now;
+}
+
+/* A loadvm (or reset) flush: save once the new scene's pipelines are in. */
+void pgraph_vk_pipeline_cache_note_flush(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    r->pipeline_cache_loadvm_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+}
+
+__attribute__((noinline)) void
+pgraph_vk_pipeline_cache_feedback_chain(PGRAPHVkState *r, const void **pnext,
+                                        uint32_t stage_count,
+                                        PipelineCacheFeedback *fb)
+{
+    if (!r->pipeline_creation_feedback_enabled ||
+        stage_count > ARRAY_SIZE(fb->stages)) {
+        return;
+    }
+    memset(fb, 0, sizeof(*fb));
+    fb->info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+    fb->info.pNext = *pnext;
+    fb->info.pPipelineCreationFeedback = &fb->pipeline;
+    fb->info.pipelineStageCreationFeedbackCount = stage_count;
+    fb->info.pPipelineStageCreationFeedbacks = fb->stages;
+    *pnext = &fb->info;
+}
+
+/*
+ * The cache gained an entry unless the pipeline was a cache hit, or, on
+ * MoltenVK, which caches shader stages and never reports pipeline hits,
+ * every stage was. Other drivers may cache whole pipelines behind stage
+ * hits, so there stage hits alone still count as new. No feedback counts
+ * as new, which was the rule before feedback. Every creation through
+ * vk_pipeline_cache (draw, clear, display, surface compute) reports
+ * here, or its misses would never be saved on an otherwise warm run.
+ * Both helpers stay out of line so begin_pre_draw, which inlines the
+ * creation paths, keeps its PGO profile.
+ */
+__attribute__((noinline)) void
+pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
+                                      uint32_t stage_count,
+                                      const PipelineCacheFeedback *fb)
+{
+    const VkPipelineCreationFeedbackFlags hit =
+        VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+
+    if (pnext == &fb->info) {
+        if ((fb->pipeline.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) &&
+            (fb->pipeline.flags & hit)) {
+            return;
+        }
+        bool all_hit = r->pipeline_cache_stage_hits_suffice && stage_count > 0;
+        for (uint32_t i = 0; all_hit && i < stage_count; i++) {
+            if (!(fb->stages[i].flags & hit)) {
+                all_hit = false;
+                break;
+            }
+        }
+        if (all_hit) {
+            return;
+        }
+    }
+    r->pipeline_cache_unsaved++;
+    r->pipeline_cache_last_miss_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 }
 
 /*
@@ -617,6 +742,10 @@ static void init_pipeline_cache(PGRAPHState *pg)
 
     r->pipeline_cache_unsaved = 0;
     r->pipeline_cache_last_save_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    r->pipeline_cache_loadvm_ns = 0;
+    r->pipeline_cache_last_miss_ns = 0;
+    r->pipeline_cache_save_thread_live = false;
+    r->pipeline_cache_save_busy = false;
 
     const size_t pipeline_cache_size = 4096;
     lru_init(&r->pipeline_cache);
@@ -636,7 +765,10 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    pipeline_cache_save_join(r);
+    if (r->pipeline_cache_unsaved) {
+        save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    }
 
     lru_flush(&r->pipeline_cache);
     g_free(r->pipeline_cache_entries);
@@ -1063,10 +1195,16 @@ static void create_clear_pipeline(PGRAPHState *pg)
         .basePipelineHandle = VK_NULL_HANDLE,
     };
 
+    PipelineCacheFeedback feedback;
+    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_info.pNext,
+                                            pipeline_info.stageCount,
+                                            &feedback);
+
     VkPipeline pipeline;
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL, &pipeline));
-    r->pipeline_cache_unsaved++;
+    pgraph_vk_pipeline_cache_note_created(r, pipeline_info.pNext,
+                                          pipeline_info.stageCount, &feedback);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
 
     snode->pipeline = pipeline;
@@ -1525,10 +1663,16 @@ static void create_pipeline(PGRAPHState *pg)
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
+    PipelineCacheFeedback feedback;
+    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_create_info.pNext,
+                                            pipeline_create_info.stageCount,
+                                            &feedback);
     VkPipeline pipeline;
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_create_info, NULL, &pipeline));
-    r->pipeline_cache_unsaved++;
+    pgraph_vk_pipeline_cache_note_created(r, pipeline_create_info.pNext,
+                                          pipeline_create_info.stageCount,
+                                          &feedback);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
 
     snode->pipeline = pipeline;
