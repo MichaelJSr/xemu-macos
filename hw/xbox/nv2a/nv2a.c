@@ -707,9 +707,9 @@ static const VMStateDescription vmstate_nv2a_pgraph_methods = {
         VMSTATE_NV2A_FLOATS(pgraph.light_local_position),
         VMSTATE_NV2A_FLOATS(pgraph.light_local_attenuation),
         VMSTATE_NV2A_FLOATS(pgraph.specular_params),
-        VMSTATE_NV2A_FLOATS(pgraph.specular_power),
+        VMSTATE_UNUSED(sizeof(float)), /* was pgraph.specular_power, gone upstream */
         VMSTATE_NV2A_FLOATS(pgraph.specular_params_back),
-        VMSTATE_NV2A_FLOATS(pgraph.specular_power_back),
+        VMSTATE_UNUSED(sizeof(float)), /* was pgraph.specular_power_back, gone upstream */
         VMSTATE_NV2A_FLOATS(pgraph.point_params),
         VMSTATE_UINT16(pgraph.compressed_attrs, NV2AState),
         VMSTATE_UINT16(pgraph.uniform_attrs, NV2AState),
