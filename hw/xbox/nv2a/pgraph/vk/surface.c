@@ -2204,9 +2204,19 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
              * Not under icount: the discarded image would keep whatever a
              * recycled one held, which depends on prune and retirement
              * timing; uploading from RAM is deterministic.
+             *
+             * The skipped upload is what marks a surface initialized, so
+             * mark it here: the image (new, or recycled from an invalid
+             * surface) already rests in its attachment layout, and its
+             * content is undefined on purpose until the guest's clear.
+             * Left false, the next draw's begin_pre_draw assert fired in
+             * every debug normal-mode run (the first ping-pong switch
+             * after a heavy-f1 load), and the MetalFX real-depth snapshot
+             * never took such a zeta.
              */
             if (zeta_shape_discard && !target.color && !icount_enabled()) {
                 target.upload_pending = false;
+                target.initialized = true;
             }
             surface = get_any_compatible_invalid_surface(r, &target);
             if (surface) {
