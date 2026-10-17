@@ -24,6 +24,9 @@ session. Judge A/Bs by cycles per frame; instructions per frame (exact
 to ~0.01%) is the mechanism check. Every arm must give the same RAM
 hash unless the change is meant to.
 
+Run dirs are /tmp/xbd.<bench-det pid>.*; each start removes the ones a
+killed bench-det left (owner gone and no live process naming the dir).
+
 Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
 marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
 in /tmp/xemu-leases, XEMU_BASE_PATH set to the bench cache, and none of
@@ -165,6 +168,46 @@ def scratch(d):
     return toml, pads, fifo, sock, log
 
 
+def scratch_dir():
+    """A fresh /tmp/xbd.<our pid>.* run dir, so sweep_scratch can tell its owner."""
+    return tempfile.mkdtemp(prefix=f'xbd.{os.getpid()}.', dir='/tmp')
+
+
+def sweep_scratch():
+    """Remove /tmp/xbd.* run dirs a killed bench-det left (each holds HDD and
+    EEPROM clones): those whose owner pid is gone, or, without a pid in the
+    name (older bench-det), unchanged for an hour, and in both cases named in
+    no live process's arguments (an orphaned xemu still runs on it)."""
+    args = subprocess.run(['ps', '-axww', '-o', 'args='], capture_output=True,
+                          text=True).stdout
+    gone = []
+    for name in os.listdir('/tmp'):
+        d = os.path.join('/tmp', name)
+        m = re.fullmatch(r'xbd\.(?:(\d+)\.)?[a-z0-9_]{8}', name)
+        try:
+            st = os.lstat(d)
+        except OSError:
+            continue
+        if not m or not os.path.isdir(d) or os.path.islink(d) or st.st_uid != os.getuid() \
+                or d + '/' in args:
+            continue
+        if m.group(1):
+            try:
+                os.kill(int(m.group(1)), 0)
+                continue          # owner alive
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                continue
+        elif time.time() - st.st_mtime < 3600:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        gone.append(name)
+    if gone:
+        print(f'bench-det: removed {len(gone)} stale run dir(s): {" ".join(sorted(gone))}',
+              file=sys.stderr)
+
+
 def ram_sha256(q, d):
     """sha256 of guest RAM: QMP xemu-ram-digest (no file), else xemu-dump-ram's file."""
     try:
@@ -180,7 +223,7 @@ def ram_sha256(q, d):
 
 
 def run_once(app, env, a, purpose=''):
-    d = tempfile.mkdtemp(prefix='xbd.', dir='/tmp')
+    d = scratch_dir()
     try:
         toml, pads, fifo, sock, log = scratch(d)
         e = dict(os.environ, XEMU_HEADLESS='null', XEMU_INPUT_PIPE=fifo,
@@ -385,7 +428,7 @@ def tl_ram(q, d):
 
 def tl_markers(app, env, a, va):
     """Marker pass: each event's frame, the input schedule, the end RAM."""
-    d = tempfile.mkdtemp(prefix='xbd.', dir='/tmp')
+    d = scratch_dir()
     stack = contextlib.ExitStack()
     try:
         proc, q, fifo, log = tl_launch(app, env, a, d, True, stack)
@@ -530,7 +573,7 @@ def tl_row(s0, s1, frames):
 
 def tl_timing(app, env, a, marks, info, schedule):
     """Timing pass: replay the schedule without a debugger, snap each phase."""
-    d = tempfile.mkdtemp(prefix='xbd.', dir='/tmp')
+    d = scratch_dir()
     stack = contextlib.ExitStack()
     try:
         proc, q, fifo, log = tl_launch(app, env, a, d, False, stack)
@@ -743,6 +786,7 @@ def main():
                    help='NAME=ADDR override: ' + ', '.join(TL_VAS) + ', xbe_entry')
     p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')
     a = p.parse_args()
+    sweep_scratch()
     arms = []
     for spec in a.arms:
         name, rest = spec.split('=', 1)
