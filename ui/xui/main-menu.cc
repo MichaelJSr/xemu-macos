@@ -844,9 +844,21 @@ void MainMenuDisplayView::Draw()
                  "MetalFX upscaling mode");
     ChevronCombo("Frame Interpolation", &g_config.display.frame_interpolation,
                  "Off\0"
-                 "2x (60fps)\0"
-                 "4x (120fps)\0",
-                 "Generate intermediate frames for smoother output (requires MetalFX)");
+                 "2x\0"
+                 "4x\0",
+                 "MetalFX midpoints, only while the display can show them");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::TextUnformatted(
+            "Shows a generated midpoint before each real frame. 2x runs "
+            "only while a game frame lasts 2 display refreshes (60 Hz "
+            "panel: at or below ~33 fps, off at the 60 fps cap); 4x only "
+            "while it lasts 4, else it falls back to 2x. When neither "
+            "fits, real frames show as with interpolation off. 2x is the "
+            "smoother setting wherever both fit.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
 #endif
 
     SectionTitle("Window");
