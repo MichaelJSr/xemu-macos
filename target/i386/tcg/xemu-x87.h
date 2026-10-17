@@ -532,6 +532,17 @@ static void xemu_x87_flush_ptrs(DisasContext *s)
                 tcg_temp_free_i32(sel);
                 s->xemu_fds_pend = -1;
             }
+            if (refute) {
+                /* The held FDP is the last insn's (xemu_x87_defer_fdp) */
+                TCGv was_dp = xemu_x87_temp_ebb_tl();
+
+                tcg_gen_ld_tl(was_dp, tcg_env,
+                              offsetof(CPUX86State, xemu_x87_fdp_chk));
+                xemu_x87_gen_ne_count_tl(&xemu_x87_ptr_viol, s->xemu_fdp_val,
+                                         was_dp);
+                xemu_gen_counter_inc(&xemu_x87_ptr_checks);
+                xemu_x87_temp_free_tl(was_dp);
+            }
             tcg_gen_st_tl(s->xemu_fdp_val, tcg_env,
                           offsetof(CPUX86State, fpdp));
         } else if (refute) {

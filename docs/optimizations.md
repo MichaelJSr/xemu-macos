@@ -634,6 +634,32 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   2.4e8 random and 6.2e6 captured checks, 0 mismatches; no FMADD in
   the built helper). Goldens exact on release and
   debug-TCG, x87 refuter clean.
+- **x87 memory operands hold their own FDP (2026-10-16).** An x87
+  memory insn computed its address into the TB-wide A0 and copied it to
+  a fresh temp that held the FDP until the flush; with A0 still needed
+  by the access, every operand with a displacement or an index paid a
+  MOV (`add w20, w14, #8; mov w21, w20`). With 32-bit addressing and no
+  segment base to add, the linear address is the offset FDP takes, so
+  the insn now gets an A0 of its own that no later insn writes, and that
+  temp is the FDP hold too. Heavy-f1 runs ~765K x87 memory insns and
+  ~124K exception-pointer landings per frame (`XEMU_X87_CENSUS`). Det
+  A/B against the fpatan commit, 8 pairs per anchor, each arm first in
+  half, load 59-71: heavy-f1 1200 f Minsns/frame −1.30% median (8/8),
+  Mcycles/frame −1.5% median (5/8); stream-e2 600 f Minsns/frame −1.23%
+  (8/8), Mcycles/frame −1.8% median (5/8). Goldens exact on release and
+  debug-TCG, x87 refuter clean. `XEMU_X87_REFUTE` now also checks the
+  held FDP at every flush against the value its insn computed
+  (`xemu_x87_fdp_chk`): 105M more `exc-ptr-checks` on heavy-f1 f600, 0
+  violations; a build that let later insns write the hold failed it
+  808K times in 30 frames. Review re-measure (own builds, 8 pairs per
+  anchor, both orders, load 42-72): heavy-f1 Minsns/frame −1.33% (8/8),
+  Mcycles/frame −0.73% median (5/8); stream-e2 Minsns/frame −1.26%
+  (8/8), Mcycles/frame −5.1% median (7/8). Mid-block exits with an FDP
+  pending, which the anchors never take: a gdb Z4 watchpoint on the hot
+  stack page forced 400K of them (250K heavy-f1, 150K stream-e2) under
+  `XEMU_X87_REFUTE`, with 56K `fdp-restores` and 52K restores landing
+  shadow stores, every `*violations=` 0; a 40 s normal-mode refuter run
+  is clean too.
 - **FPCR caching + rounding-correct FIST (retired with the cache,
   2026-10-15).** `MSR FPCR` was re-emitted only when guest RC bits
   changed (`cached_fpuc_rc`), and `FIST`/`FISTP` honored the control
@@ -3585,6 +3611,7 @@ counter).
 | Synchronous qcow2 reads for the icount vCPU (2026-10-16) | After the IDE settle fix a cold boot still spends ~4.6% of the vCPU in the block layer, 2.9 points of it the `pread` itself. The trial read cached-L2 plain, zero and unallocated qcow2 clusters and file-posix data without a coroutine (`xemu_sync_preadv`, anything else on the coroutine path), let the settle run the main context's bottom halves directly, and didn't kick the vCPU for bottom halves scheduled in the IDE window. Host instructions per cold boot −0.7..−1.0% (9/9 pairs, ~5,000 per HDD read), but no 3-pair session had wall and Mcycles both 3/3; over 6 pairs Mcycles 4/6 (median −2.8%) and wall 3/6 (load 54-72), against ±15% run-to-run swings in the phases with no disk I/O. Goldens exact. Not committed; the no-kick part alone is untested |
 | DSP JIT residue after chaining (2026-10-16) | Three candidates, each under cycle resolution. The X mixbuffer windows read and written inline: Minsns/frame −0.34..−0.45% heavy-f1, −0.33..−0.41% stream-e2 (every pair), Mcycles/frame better in 5/12 and 7/12 pairs. `num_inst` stored only at exits and chain sites: Minsns −0.26% heavy-f1, −0.22% stream-e2, −0.92% cold boot, Mcycles 6/12 and 6/12. The exits left after chaining (det heavy-f1 census: GP 490 RTS + 319 other pc exits per frame, EP 184 + 119), through an RTS inline cache and a two-word length for mode-6 `movep`/`move`: ~1,110 removable exits at ~35-50 cycles each, 0.21-0.30% of cycles, under the 0.3% stop line; not built. Reopen for a title whose DSP load is several times Azurik's |
 | x87 residue after the FP-register accesses (2026-10-16) | Helper census, det heavy-f1 per frame: ~6.3K x87 helper calls, 1.0-1.7% of vCPU samples (fwait 3.2K, fxam 760, fsin/fcos ~500 each, fpatan 413, fild m64 400, fprem 381); no PC=single blocks; 15 fucom* fallbacks. fwait as a no-op, measured by deleting it: heavy-f1 Minsns/frame −0.13% (8/8), Mcycles −0.50% (5/8); stream-e2 nothing. Pinning the doubles in d8-d15 across TBs, bounded by duplicating the work it removes (192K flush stores, 40K ld80d reloads per frame) and adding the spills it needs, within one process on P-core cycles: net +1.15% [0.24, 1.94], P(≥1%) 0.60, realistic 0.2-0.8%, under the 1% bar for weeks of backend work. Not committed; reopen with a removal-direction prototype measuring ≥1% |
+| Lazy FCS/FDS at x87 exception-pointer landings (2026-10-16) | ~124K landings per heavy-f1 frame each did LDR+STRH for FCS and for FDS. Marking them instead cut Minsns/frame −0.54..−0.66% heavy-f1 and −0.46..−0.55% stream-e2 (every pair), but stream-e2 Mcycles/frame came out +0.45% median (6/16), against an upper bound of −1.5%/−0.6% Mcycles for dropping the stores. Not worth a sync in every selector-write path for a value no guest here reads; reopen with a cheaper marker or a title that reads FCS/FDS. Not committed |
 | `preserve_most` for the flag helpers (2026-10-16) | `cc_compute_all` and `cc_compute_c` (~30K calls per heavy-f1 frame, all from TB code) were built with clang's `preserve_most` on aarch64 hosts, which also saves x9-x15, and their calls flagged so TCG stored and reloaded only EAX's x8 around them (STR + LDR where four STP and four LDP were); the attribute and the flag came from one test in `exec/helper-head.h.inc` (aarch64, clang, not Windows), and a `--debug` build checked that x9-x15 survived each call. On top of the m32fp/m64fp FP-register accesses: Minsns/frame −0.26% heavy-f1 1200 f, −0.27..−0.37% stream-e2 600 f (16/16 pairs), but Mcycles/frame better in only 4/8 heavy-f1 and 5/8 stream-e2 pairs (load 41-53), short of the 3/4 gate. Only leaf helpers qualify: `cc_compute_nz` asserts, so its `preserve_most` prologue saved all seven registers on every entry. Not committed; reopen if more guest state moves into caller-saved registers |
 | xpage backstop severing only the cross-page jumps (2026-10-16) | The walk resets every jump into a registered dest; same-page jumps (source not an emitter, its first physical page the dest's) need no sever, as the same jumps into unregistered dests show. `XEMU_XPAGE_PROF`'s census on a normal-mode stream-e2 walk (stream-e2, 32 s window, load 40-60): 894-916 walks reset 726-749k jumps, 5.9% same-page, 5.2% from an emitter onto its own page (the emitter flag is per TB, so per-slot bits could keep at most these), 89% onto another physical page. Every registration came from an emitter (`reg-phys-only=0`). The cut keeps at most ~11% of the ~790k link patches a walk run pays, below the 50% bar. Reopen only with a backstop that keeps the cross-page chains whose target page still maps where it did |
 | PFIFO spin before parking (2026-10-16) | Normal mode parked PFIFO ~10k times/s on heavy-f1/W2, most parks under 25 µs, each ended by a kernel broadcast from the vCPU and a 5-20 µs wakeup. The trial: before the untimed wait, drop `pfifo.lock` and poll `doorbell`/`fifo_kick`/`exiting` every 250 ns for up to 30 µs with `parked` false. Mechanism held (xwx interposer: parks −92..−95%, vCPU `pthread_cond_broadcast` time −83..−87%), fps did not: `bench-abx`, same binary, spin off vs on, heavy-f1 7 pairs over two sessions 2+/5− (54.25→53.94 at load 10-44; 54.19→54.26 at load 7-20, below the cap, so vCPU-bound), W2 6 pairs 56.76→59.06 (one dipped baseline) and 60.12→60.11 at the cap; process CPU +1-6% of a core. Polling with only an `isb` between reads lost fps outright (the poll steals the flags' line from the vCPU's doorbell barrier). Not committed |
