@@ -399,10 +399,30 @@ void *xemu_metal_upload_vga_surface(const void *data, int w, int h,
             return NULL;
         }
     }
-    [g_vga_tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
-                 mipmapLevel:0
-                   withBytes:data
-                 bytesPerRow:(NSUInteger)stride_bytes];
+    /*
+     * A shared VGA surface takes its stride from the guest's CRTC line
+     * offset, which can be shorter than a row (or 0) while the guest
+     * sets a mode up. Metal wants bytesPerRow >= w * 4 (AGX prints
+     * "bytes_per_row >= used_bytes_per_row" otherwise), so such a
+     * surface goes up a row at a time, overlapping rows read as pixman
+     * reads them.
+     */
+    if (stride_bytes >= w * 4) {
+        [g_vga_tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                     mipmapLevel:0
+                       withBytes:data
+                     bytesPerRow:(NSUInteger)stride_bytes];
+    } else if (stride_bytes >= 0) {
+        for (int y = 0; y < h; y++) {
+            [g_vga_tex replaceRegion:MTLRegionMake2D(0, y, w, 1)
+                         mipmapLevel:0
+                           withBytes:(const uint8_t *)data +
+                                     (size_t)y * stride_bytes
+                         bytesPerRow:(NSUInteger)w * 4];
+        }
+    } else {
+        return NULL;
+    }
     return (void *)g_vga_tex;
 }
 
