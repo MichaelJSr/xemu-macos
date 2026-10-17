@@ -45,12 +45,18 @@ typedef struct TempOptInfo {
     uint64_t z_mask;  /* mask bit is 0 if and only if value bit is 0 */
     uint64_t o_mask;  /* mask bit is 1 if and only if value bit is 1 */
     uint64_t s_mask;  /* mask bit is 1 if value bit matches msb */
+    unsigned ebb;     /* xemu: OptContext.ebb when last initialized */
 } TempOptInfo;
 
 typedef struct OptContext {
     TCGContext *tcg;
     TCGOp *prev_mb;
-    TCGTempSet temps_used;
+    /*
+     * xemu: the number of the current extended basic block.  A temp is in
+     * use in it once its info's ebb matches (a temp bitmap indexed by
+     * temp_idx cost a TLS read per argument).
+     */
+    unsigned ebb;
 
     IntervalTreeRoot mem_copy;
     QSIMPLEQ_HEAD(, MemCopyInfo) mem_free;
@@ -125,19 +131,15 @@ static TCGTemp *cmp_better_copy(TCGTemp *a, TCGTemp *b)
 /* Initialize and activate a temporary.  */
 static void init_ts_info(OptContext *ctx, TCGTemp *ts)
 {
-    size_t idx = temp_idx(ts);
-    TempOptInfo *ti;
+    TempOptInfo *ti = ts->state_ptr;
 
-    if (test_bit(idx, ctx->temps_used.l)) {
-        return;
-    }
-    set_bit(idx, ctx->temps_used.l);
-
-    ti = ts->state_ptr;
     if (ti == NULL) {
         ti = tcg_malloc(sizeof(TempOptInfo));
         ts->state_ptr = ti;
+    } else if (ti->ebb == ctx->ebb) {
+        return;
     }
+    ti->ebb = ctx->ebb;
 
     ti->next_copy = ts;
     ti->prev_copy = ts;
@@ -965,19 +967,24 @@ static int do_constant_folding_cond2(OptContext *ctx, TCGOp *op, TCGArg *args)
     return -1;
 }
 
-static void init_arguments(OptContext *ctx, TCGOp *op, int nb_args)
+/*
+ * Initialize the arguments, then replace each input by the best of its
+ * copies.  xemu: in one walk over the arguments rather than two, which
+ * propagates the same: initializing a temp never touches the copy list
+ * of an initialized one.
+ */
+static void init_and_copy_propagate(OptContext *ctx, TCGOp *op,
+                                    int nb_oargs, int nb_iargs)
 {
-    for (int i = 0; i < nb_args; i++) {
-        TCGTemp *ts = arg_temp(op->args[i]);
-        init_ts_info(ctx, ts);
-    }
-}
+    int i;
 
-static void copy_propagate(OptContext *ctx, TCGOp *op,
-                           int nb_oargs, int nb_iargs)
-{
-    for (int i = nb_oargs; i < nb_oargs + nb_iargs; i++) {
+    for (i = 0; i < nb_oargs; i++) {
+        init_ts_info(ctx, arg_temp(op->args[i]));
+    }
+    for (; i < nb_oargs + nb_iargs; i++) {
         TCGTemp *ts = arg_temp(op->args[i]);
+
+        init_ts_info(ctx, ts);
         if (ts_is_copy(ts)) {
             op->args[i] = temp_arg(find_better_copy(ts));
         }
@@ -994,7 +1001,7 @@ static void finish_ebb(OptContext *ctx)
 {
     finish_bb(ctx);
     /* We only optimize across extended basic blocks. */
-    memset(&ctx->temps_used, 0, sizeof(ctx->temps_used));
+    ctx->ebb++;
     remove_mem_copy_all(ctx);
 }
 
@@ -1768,8 +1775,7 @@ static bool fold_call(OptContext *ctx, TCGOp *op)
     int nb_iargs = TCGOP_CALLI(op);
     int flags, i;
 
-    init_arguments(ctx, op, nb_oargs + nb_iargs);
-    copy_propagate(ctx, op, nb_oargs, nb_iargs);
+    init_and_copy_propagate(ctx, op, nb_oargs, nb_iargs);
 
     /* If the function reads or writes globals, reset temp data. */
     flags = tcg_call_flags(op);
@@ -1777,8 +1783,11 @@ static bool fold_call(OptContext *ctx, TCGOp *op)
         int nb_globals = s->nb_globals;
 
         for (i = 0; i < nb_globals; i++) {
-            if (test_bit(i, ctx->temps_used.l)) {
-                reset_ts(ctx, &ctx->tcg->temps[i]);
+            TCGTemp *ts = &ctx->tcg->temps[i];
+            TempOptInfo *ti = ts_info(ts);
+
+            if (ti && ti->ebb == ctx->ebb) {
+                reset_ts(ctx, ts);
             }
         }
     }
@@ -3150,8 +3159,7 @@ void tcg_optimize(TCGContext *s)
         }
 
         def = &tcg_op_defs[opc];
-        init_arguments(&ctx, op, def->nb_oargs + def->nb_iargs);
-        copy_propagate(&ctx, op, def->nb_oargs, def->nb_iargs);
+        init_and_copy_propagate(&ctx, op, def->nb_oargs, def->nb_iargs);
 
         /* Pre-compute the type of the operation. */
         ctx.type = TCGOP_TYPE(op);

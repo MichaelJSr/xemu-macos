@@ -1186,6 +1186,32 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   it left `-accel tcg,tb-size=2` stress runs 1 MiB of their 2 (det
   stream-e2, 600 frames: 697.7 Mcycles/frame, 382.3 with the tail
   chunk, 380.8 before the layout; load 24-28).
+- **Liveness and the optimizer visit only the temps in play
+  (2026-10-16).** Liveness pass 1 reset or synced every temp of the TB
+  at each block end, conditional branch, side-effect op and call: ~1,190
+  temp visits per TB on cold boot (30 globals, 57 temps; `la_cross_call`
+  alone walked 543 to find 82 live ones). It now keeps four bitmaps
+  (`LivenessSets`: live, lacking `TS_MEM`, dead with a copied
+  preference, `TEMP_TB`) and visits only their temps; any other temp is
+  as `la_func_end` leaves it. Liveness pass 0 runs inside
+  `reachable_code_pass` on the ops it keeps instead of walking the op
+  list again. `tcg_optimize` initializes and copy-propagates each op's
+  arguments in one walk, and marks a temp in use by a per-temp EBB
+  number instead of a bitmap cleared at every EBB end. The generated
+  code is the same: a normalized `-d out_asm` diff over 91,989 cold-boot
+  TBs, and an in-process double translation (old and new passes on
+  every TB) over cold boot, heavy-f1 and stream-e2 (174k TBs) found 0
+  differences (on 9bc470fc21). Det cold boot to steady play (`bench-det --timeline -n
+  6`, 1188 frames, against master built in the main checkout, load
+  39-47): whole-process Mcycles −1.5% paired median (6/6), translation
+  ms −4.0% (5/6), vCPU CPU −1.9% (6/6), wall −2.9% (4/6), Minsns −0.48%
+  (6/6). Against a control built in the same build dir (the main
+  checkout links the system libcurl, the worktree the subproject's):
+  Mcycles −2.6%, translation −9.3%, vCPU −3.6% (6/6 each). Steady play,
+  two sessions at load 34-45: heavy-f1 Mcycles/frame −3.1% (6/10),
+  Minsns −0.17% (10/10); stream-e2 +0.9% (5/12, pairs −12..+11%),
+  Minsns −0.44% (12/12). The changed functions run without PGO counts
+  until the next profile retrain.
 
 ### Vulkan renderer (pgraph/vk)
 
