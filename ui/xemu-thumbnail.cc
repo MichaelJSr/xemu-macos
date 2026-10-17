@@ -26,13 +26,18 @@
 #include "xui/gl-helpers.hh"
 
 #ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
 #include "xui/metal-helpers.hh"
 #endif
 
 static uintptr_t display_tex = 0;
 static bool display_flip = false;
+static void *display_wait_event;
+static uint64_t display_wait_value;
 
-void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
+void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip,
+                                            void *wait_event,
+                                            uint64_t wait_value)
 {
 #ifdef __APPLE__
     /*
@@ -46,9 +51,25 @@ void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip)
             MetalDestroyTexture(display_tex);
         }
     }
+    /*
+     * The compositor's timeline event (unlike MetalFX's) is released
+     * when the Vulkan renderer is torn down, and a monitor savevm can
+     * read this pair long after the frame that set it: keep our own
+     * reference.
+     */
+    if (wait_event != display_wait_event) {
+        if (wait_event) {
+            CFRetain(wait_event);
+        }
+        if (display_wait_event) {
+            CFRelease(display_wait_event);
+        }
+    }
 #endif
     display_tex = tex;
     display_flip = flip;
+    display_wait_event = wait_event;
+    display_wait_value = wait_value;
 }
 
 uintptr_t xemu_snapshots_load_png_thumbnail(const void *buf, size_t size)
@@ -85,7 +106,8 @@ void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size)
     std::vector<uint8_t> png;
     if (!RenderFramebufferToPng(display_tex, display_flip, png,
                                 2 * XEMU_SNAPSHOT_THUMBNAIL_WIDTH,
-                                2 * XEMU_SNAPSHOT_THUMBNAIL_HEIGHT)) {
+                                2 * XEMU_SNAPSHOT_THUMBNAIL_HEIGHT,
+                                display_wait_event, display_wait_value)) {
         return NULL;
     }
 

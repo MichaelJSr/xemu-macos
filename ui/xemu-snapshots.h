@@ -69,7 +69,11 @@ bool xemu_snapshots_offset_extra_data(QEMUFile *f);
 void xemu_snapshots_mark_dirty(void);
 
 // Implemented in xemu-thumbnail.cc
-void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip);
+/* wait_event/wait_value: the frame's producer event (NV2APresentFrame),
+ * which a thumbnail readback waits on; NULL/0 for none. */
+void xemu_snapshots_set_framebuffer_texture(uintptr_t tex, bool flip,
+                                            void *wait_event,
+                                            uint64_t wait_value);
 uintptr_t xemu_snapshots_load_png_thumbnail(const void *buf, size_t size);
 void xemu_snapshots_free_thumbnail(uintptr_t tex);
 void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size);

@@ -47,7 +47,10 @@ void xemu_hud_update(void);
 void xemu_hud_render(void);
 void xemu_hud_process_sdl_events(SDL_Event *event);
 void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse);
-void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip);
+// wait_event/wait_value: the frame's producer event (NV2APresentFrame),
+// which the screenshot hotkey's readback waits on; NULL/0 for none.
+void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip,
+                                      void *wait_event, uint64_t wait_value);
 void xemu_set_framebuffer_texture_is_rect(bool is_rect);
 
 // Implemented in gl-helpers.cc. Write a renderer frame (a texture as

@@ -1271,13 +1271,14 @@ static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
     return true;
 }
 
-bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
+bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height,
+                            void *wait_event, uint64_t wait_value)
 {
     std::vector<uint8_t> pixels;
     int width, height;
 
     if (!RenderFramebufferToRgb(tex, flip, pixels, width, height, max_width,
-                                max_height, NULL, 0)) {
+                                max_height, wait_event, wait_value)) {
         return false;
     }
     return fpng::fpng_encode_image_to_memory(pixels.data(), width, height, 3, png);
@@ -1328,13 +1329,15 @@ extern "C" bool xemu_hud_save_frame(uintptr_t tex, bool flip,
     return xemu_hud_save_rgb(pixels.data(), width, height, path, png, errp);
 }
 
-void SaveScreenshot(uintptr_t tex, bool flip)
+void SaveScreenshot(uintptr_t tex, bool flip, void *wait_event,
+                    uint64_t wait_value)
 {
     Error *err = NULL;
     char fname[128];
     std::vector<uint8_t> png;
 
-    if (RenderFramebufferToPng(tex, flip, png)) {
+    if (RenderFramebufferToPng(tex, flip, png, 0, 0, wait_event,
+                               wait_value)) {
         time_t t = time(NULL);
         struct tm *tmp = localtime(&t);
         if (tmp) {

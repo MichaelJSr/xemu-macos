@@ -1578,8 +1578,8 @@ static void gl_render_frame(struct xemu_console *scon)
 
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
-    xemu_snapshots_set_framebuffer_texture(tex, flip_required);
-    xemu_hud_set_framebuffer_texture(tex, flip_required);
+    xemu_snapshots_set_framebuffer_texture(tex, flip_required, NULL, 0);
+    xemu_hud_set_framebuffer_texture(tex, flip_required, NULL, 0);
 
     xemu_main_loop_lock();
     xemu_hud_update();
@@ -1930,8 +1930,9 @@ static void metal_render_frame(struct xemu_console *scon)
      */
     nv2a_release_framebuffer_surface();
 
-    if (!xemu_metal_begin_frame(frame.event,
-                                tex ? frame.event_value : 0)) {
+    /* The renderer's frame waits for its producer; a VGA upload doesn't. */
+    uint64_t tex_wait_value = tex ? frame.event_value : 0;
+    if (!xemu_metal_begin_frame(frame.event, tex_wait_value)) {
         /* No drawable available (e.g. window fully occluded). */
         if (frame.mtl_texture) {
             xemu_metal_release_handle(frame.mtl_texture);
@@ -1967,8 +1968,15 @@ static void metal_render_frame(struct xemu_console *scon)
         xemu_main_loop_unlock();
     }
 
-    xemu_snapshots_set_framebuffer_texture(tex, flip_required);
-    xemu_hud_set_framebuffer_texture(tex, flip_required);
+    /*
+     * The screenshot hotkey and a savestate thumbnail read this texture
+     * on the UI's queue before the present commits: like screendump,
+     * they wait for the compositor first.
+     */
+    xemu_snapshots_set_framebuffer_texture(tex, flip_required, frame.event,
+                                           tex_wait_value);
+    xemu_hud_set_framebuffer_texture(tex, flip_required, frame.event,
+                                     tex_wait_value);
 
     int64_t nsprof_lock_t0 = nsprof_begin();
     xemu_main_loop_lock();

@@ -72,6 +72,8 @@ static float g_last_scale;
 static int g_vsync;
 static uintptr_t g_tex;
 static bool g_flip_req;
+static void *g_tex_wait_event;
+static uint64_t g_tex_wait_value;
 
 
 static void InitializeStyle()
@@ -206,10 +208,13 @@ void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse)
     if (mouse) *mouse = io.WantCaptureMouse;
 }
 
-void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip)
+void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip,
+                                      void *wait_event, uint64_t wait_value)
 {
     g_tex = tex;
     g_flip_req = flip;
+    g_tex_wait_event = wait_event;
+    g_tex_wait_value = wait_value;
 }
 
 void xemu_hud_update(void)
@@ -377,7 +382,8 @@ void xemu_hud_render()
     }
 
     if (g_screenshot_pending) {
-        SaveScreenshot(g_tex, g_flip_req);
+        /* As screendump does: the compositor may still be on it. */
+        SaveScreenshot(g_tex, g_flip_req, g_tex_wait_event, g_tex_wait_value);
         g_screenshot_pending = false;
     }
 }

@@ -67,8 +67,10 @@ void RenderXmu(float frame_x, float frame_y, uint32_t primary_color,
 extern "C" void xemu_set_framebuffer_texture_is_rect(bool is_rect);
 void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip);
 void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float scale[2]);
-bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width = 0, int max_height = 0);
-void SaveScreenshot(uintptr_t tex, bool flip);
+bool RenderFramebufferToPng(uintptr_t tex, bool flip, std::vector<uint8_t> &png, int max_width = 0, int max_height = 0,
+                            void *wait_event = NULL, uint64_t wait_value = 0);
+void SaveScreenshot(uintptr_t tex, bool flip, void *wait_event = NULL,
+                    uint64_t wait_value = 0);
 void ScaleDimensions(int src_width, int src_height, int max_width, int max_height, int *out_width, int *out_height);
 
 uintptr_t CreateUiTextureFromRgba(const unsigned char *rgba, int w, int h);
