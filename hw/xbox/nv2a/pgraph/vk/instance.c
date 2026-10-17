@@ -727,6 +727,26 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         r->enabled_physical_device_features.geometryShader == VK_TRUE;
 
     /*
+     * Metal has no triangle fans. MoltenVK converts them itself; Mesa
+     * KosmicKrisp unrolls each fan draw in a compute pass that ends the
+     * render encoder (a render-pass split per fan draw) and, as of Mesa
+     * 27.0-devel 335d5698dc, mangles some of them (Azurik's HUD gauges
+     * in azurik-heavy-w2 / -stream-e2), so convert them on the CPU
+     * there. XEMU_VK_CPU_FANS=0/1 overrides the per-driver default.
+     */
+    const char *cpu_fans = getenv("XEMU_VK_CPU_FANS");
+#ifdef __APPLE__
+    bool cpu_fans_default = !r->driver_is_moltenvk;
+#else
+    bool cpu_fans_default = false;
+#endif
+    r->emulate_triangle_fans = cpu_fans && *cpu_fans ?
+                                   atoi(cpu_fans) != 0 :
+                                   cpu_fans_default;
+    fprintf(stderr, "nv2a: triangle fans: %s\n",
+            r->emulate_triangle_fans ? "CPU triangle lists" : "native");
+
+    /*
      * Whether a geometry shader may write gl_PointSize. Emitting that write
      * makes glslang declare the GeometryPointSize SPIR-V capability, which
      * requires this feature; if it's unavailable the GS pipeline would fail

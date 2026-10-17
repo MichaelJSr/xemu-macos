@@ -129,6 +129,13 @@ KosmicKrisp exports only that). Non-MoltenVK drivers get
 `volkLoadDevice()` too. stderr names the driver
 (`- Driver: KosmicKrisp, Mesa …`).
 
+On Apple drivers other than MoltenVK, guest triangle fans and filled
+polygons go out as CPU-built triangle lists (KosmicKrisp unrolls each
+fan in a compute pass that splits the render pass, and its unroll
+mangled Azurik's HUD gauges in offscreen det runs);
+`XEMU_VK_CPU_FANS=0/1` overrides that per-driver default. nsprof's
+`vk_fan_draw` counts those draws.
+
 ### Recommended `xemu.toml`
 
 `~/Library/Application Support/xemu/xemu/xemu.toml`:

@@ -84,6 +84,13 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
         }
     }
 
+    if (r->emulate_triangle_fans &&
+        (primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+         (primitive_mode == PRIM_TYPE_POLYGON &&
+          polygon_mode == POLY_MODE_FILL))) {
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+
     // FIXME: Replace with LUT
     switch (primitive_mode) {
     case PRIM_TYPE_POINTS:
@@ -123,10 +130,6 @@ static bool draw_needs_primitive_emulation(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    if (r->supports_geometry_shaders) {
-        return false;
-    }
-
     // Read primitive and polygon modes directly from hardware registers instead
     // of relying on r->shader_binding. This prevents stale shader state from
     // causing assertions or crashes (SIGSEGV) when binding shaders mid-draw,
@@ -134,6 +137,17 @@ static bool draw_needs_primitive_emulation(PGRAPHState *pg)
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
+
+    if (r->emulate_triangle_fans &&
+        (primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+         (primitive_mode == PRIM_TYPE_POLYGON &&
+          polygon_mode == POLY_MODE_FILL))) {
+        return true;
+    }
+
+    if (r->supports_geometry_shaders) {
+        return false;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -193,8 +207,16 @@ static size_t get_max_emulated_index_count(PGRAPHState *pg, uint32_t in_count)
         result = in_count;
         break;
     case PRIM_TYPE_POLYGON:
-        result =
-            (polygon_mode == POLY_MODE_LINE && in_count > 1) ? in_count * 2 : 0;
+        if (polygon_mode == POLY_MODE_FILL) {
+            result = in_count >= 3 ? (in_count - 2) * 3 : 0;
+        } else {
+            result = (polygon_mode == POLY_MODE_LINE && in_count > 1) ?
+                         in_count * 2 :
+                         0;
+        }
+        break;
+    case PRIM_TYPE_TRIANGLE_FAN:
+        result = in_count >= 3 ? (in_count - 2) * 3 : 0;
         break;
     default:
         result = 0;
@@ -241,6 +263,17 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+        (primitive_mode == PRIM_TYPE_POLYGON &&
+         polygon_mode == POLY_MODE_FILL)) {
+        /* Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order:
+         * same winding, same provoking vertex. */
+        for (uint32_t i = 0; i + 2 < count; i++) {
+            EMIT3(start + i + 1, start + i + 2, start);
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -312,6 +345,7 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
@@ -346,6 +380,28 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+        (primitive_mode == PRIM_TYPE_POLYGON &&
+         polygon_mode == POLY_MODE_FILL)) {
+        /*
+         * Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order. The
+         * native path enabled primitive restart for fans, so a
+         * 0xFFFFFFFF index starts a new fan here too.
+         */
+        uint32_t first = 0;
+        while (first < in_count) {
+            uint32_t end = first;
+            while (end < in_count && in[end] != 0xFFFFFFFF) {
+                end++;
+            }
+            for (uint32_t i = first; i + 2 < end; i++) {
+                EMIT3(in[i + 1], in[i + 2], in[first]);
+            }
+            first = end + 1;
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -414,6 +470,7 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
