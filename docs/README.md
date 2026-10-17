@@ -27,6 +27,7 @@ xemu-history), not here.
 | [`roadmap.md`](roadmap.md) | The open candidates, each with its decision inputs and bar. Closed entries leave it for the ledger and `Finished/`. |
 | [`RELEASING-macos.md`](RELEASING-macos.md) | The release runbook, used every release. |
 | [`windows-gating-audit.md`](windows-gating-audit.md) | The cross-platform gating register and the list of changes that still need real-hardware validation. The release runbook and roadmap item 5 depend on it. |
+| [`kosmickrisp.md`](kosmickrisp.md) | The KosmicKrisp migration: verdict, measurements, conditions to make it the default, and the migration plan. It exists only on the `kosmickrisp` branch and is kept current there until the flip. |
 | `README.md` | This index. |
 
 ## Campaigns
