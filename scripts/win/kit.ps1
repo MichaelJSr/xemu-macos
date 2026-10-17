@@ -1,5 +1,7 @@
 # kit.ps1 - session setup for the xemu-macos Windows test kit.
 # Dot-source it at the start of every PowerShell session:  . C:\xemu-kit\tools\kit.ps1
+# Reload PATH from the registry, so tools installed after this shell (or Claude Code) started are found.
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 $Ver     = 'v0.15.1'          # fork release under test (set a newer one if it exists)
 $Kit     = 'C:\xemu-kit'
 $Repo    = Join-Path $env:USERPROFILE 'xemu-macos'
@@ -77,6 +79,7 @@ function New-Scratch([string]$Name = 'run', [string]$Template = $env:XEMU_TEST_C
   $d = Join-Path $Work ('{0}-{1:MMdd-HHmmss}' -f $Name, (Get-Date))
   New-Item -ItemType Directory -Force $d | Out-Null
   Copy-Item -LiteralPath (Get-TomlKey $Template 'sys.files' 'hdd_path') (Join-Path $d 'hdd.qcow2')
+  (Get-Item -LiteralPath (Join-Path $d 'hdd.qcow2')).LastWriteTime = Get-Date   # the 2-minute guard above must see a fresh copy
   Copy-Item -LiteralPath (Get-TomlKey $Template 'sys.files' 'eeprom_path') (Join-Path $d 'eeprom.bin')
   Copy-Item -LiteralPath $Template (Join-Path $d 'xemu.toml')
   Get-ChildItem -LiteralPath $d -File | ForEach-Object { $_.IsReadOnly = $false }

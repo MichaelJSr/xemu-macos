@@ -82,7 +82,7 @@ winget install @wg --id Python.Python.3.12
 winget install @wg --id GitHub.cli
 winget install @wg --id 7zip.7zip
 # only if you will build xemu yourself (section 7):
-winget install @wg --id MSYS2.MSYS2
+# winget install @wg --id MSYS2.MSYS2   # only if you will build (section 7)
 # Claude Code, native installer: auto-updates, needs no Node, puts claude.exe in %USERPROFILE%\.local\bin
 irm https://claude.ai/install.ps1 | iex      # alternative: winget install @wg --id Anthropic.ClaudeCode
 # make the new tools visible in this window
