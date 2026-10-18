@@ -804,7 +804,7 @@ Use the personal setup (`xemu-personal.toml`, play copies):
 
 - The instrument is `scripts\bench-savestate-ab-win.py`: windowed Vulkan, nsprof 5 s intervals, interleaved B/E pairs, a scene gate (draws per flip), a mid-run screenshot and a receipt. Never compare absolute fps across hosts.
 - Keep the xemu window visible, unobscured and on the primary screen. Don't use fullscreen (captures come out black). Plug the laptop in, set the power plan to High performance (record it), and don't use the machine during a batch.
-- `quiet_check.py` refuses a busy machine. Re-run with `--no-quiet-check` and copy the load it printed into RESULTS.md. Don't wait for an idle machine.
+- The bench logs the load (`quiet_check.py`) and stops only for a leftover xemu; copy the load it printed into RESULTS.md. Don't wait for an idle machine. (Before 2026-10-18 it refused a busy machine unless given `--no-quiet-check`.)
 - `XEMU_NOOP_AB` is a variable nothing reads. Use it as the dummy for A/A runs and cross-binary runs (the script needs an `<ENV_VAR>`).
 - The `azurik-*` tags need player 1. The bench doesn't stub pads, so set `XEMU_LOADVM_ADD_PADS=1` (v0.15+) in the session. For v0.14 arms use F5 (`vm-20260704032357`, player 2 only) or a template with a real controller bound to port 1 (4.4).
 - If the anchors sit at the 60 fps cap on this machine, windowed fps can't show a speedup. Then compare CPU% (`ab_*.cpu`) and draws/s, and use the deterministic Mcyc/frame metric (4.6) for CPU-side work.

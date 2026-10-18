@@ -37,11 +37,11 @@ What it enforces (the Windows equivalents of the macOS disciplines):
                  and adds display.vulkan.preferred_physical_device), so the
                  scratch config is regenerated from the template BEFORE EVERY
                  RUN and patched by [section] + key, never by key alone.
-  quiet machine  scripts/win/quiet_check.py runs before the batch: leftover
-                 xemu processes, build/harness processes matched by COMMAND
-                 LINE (the leftover-harness-LOOP class owns no xemu process
-                 between cycles), CPU load and nvidia-smi GPU utilization.
-                 --no-quiet-check to override, recorded in the receipt.
+  load check     scripts/win/quiet_check.py runs before the batch: a leftover
+                 xemu stops it (ports, GPU, qcow2); build/harness processes
+                 matched by COMMAND LINE, CPU load and nvidia-smi GPU
+                 utilization are logged and recorded in the receipt, never a
+                 reason to wait. --no-quiet-check skips it.
   renderer pin   display.renderer is read from the template, recorded in
                  meta/receipt and pinned into every scratch config. The batch
                  REFUSES to start on anything but VULKAN (--allow-renderer
@@ -896,17 +896,20 @@ class Bench:
                                capture_output=True, text=True, timeout=180)
             res = json.loads(p.stdout)
         except Exception as e:                       # noqa: BLE001
-            die("quiet-machine check could not run (%s); --no-quiet-check to "
-                "proceed anyway" % e)
-        if not res.get("quiet"):
-            for prob in res.get("problems", []):
-                print("bench:   - %s" % prob, file=sys.stderr)
-            die("machine is not quiet - a timed run against a loaded machine "
-                "is an environment failure, not a result. Kill the listed "
-                "processes (harness LOOPS first, they respawn xemu) or pass "
-                "--no-quiet-check.")
-        log("quiet-machine check OK (cpu=%s%% gpu=%s%%)" %
-            (res.get("cpu_load"), res.get("gpu_util")))
+            die("load check could not run (%s), so a leftover xemu would go "
+                "unseen; --no-quiet-check to proceed anyway" % e)
+        if "xemu_processes" not in res:
+            die("load check failed (%s); --no-quiet-check to proceed anyway"
+                % "; ".join(res.get("problems", [])))
+        # A leftover xemu holds the ports, the GPU and maybe the qcow2. Load
+        # doesn't stop a batch (never wait for a cold box): it goes in the
+        # receipt, and the interleaved pairs absorb it.
+        if res["xemu_processes"]:
+            die("xemu already running: %s (Stop-AutoXemu stops marked runs)"
+                % ", ".join(str(x["pid"]) for x in res["xemu_processes"]))
+        for prob in res.get("problems", []):
+            log("load: %s" % prob)
+        log("load: cpu=%s%% gpu=%s%%" % (res.get("cpu_load"), res.get("gpu_util")))
         return res
 
     def host_info(self):
