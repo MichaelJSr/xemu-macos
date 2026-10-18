@@ -61,7 +61,14 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
     r->det_reports.eager = !tcg_enabled();
 
     r->query_results_buf = g_malloc_n(r->max_queries_in_flight, sizeof(uint64_t));
-    r->report_pool = g_malloc_n(r->max_queries_in_flight, sizeof(QueryReport));
+    /*
+     * Reports keep the default size when XEMU_MAX_QUERIES shrinks the
+     * query pool: Azurik allocates two per query rotation (CLEAR and GET),
+     * so with equal pools REPORTS_FULL always fired first and the
+     * begin_pre_draw QUERIES_FULL guard went untested.
+     */
+    r->max_reports_in_flight = MAX(r->max_queries_in_flight, 4096);
+    r->report_pool = g_malloc_n(r->max_reports_in_flight, sizeof(QueryReport));
     r->report_pool_next = 0;
 
     for (int i = 0; i < NUM_FLIGHT_SLOTS; i++) {
@@ -108,21 +115,21 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
  * current recording allocates from the current slot's partition; at
  * submit time pgraph_vk_finish() hands the recording's reports +
  * query count to the slot, and they are drained when the slot fence
- * is reaped instead of stalling on the just-submitted work.
- *
- * One query index is reserved beyond the report cap because a query
- * may be begun after the last report of a recording.
+ * is reaped instead of stalling on the just-submitted work. The query
+ * pool has its own guard in begin_pre_draw; the report cap keeps the old
+ * one-entry slack so default runs submit exactly as before.
  */
 static QueryReport *alloc_report(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    int per_slot = r->max_reports_in_flight / NUM_FLIGHT_SLOTS;
 
-    if (r->report_pool_next >= pgraph_vk_queries_per_slot(r) - 1) {
+    if (r->report_pool_next >= per_slot - 1) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_REPORTS_FULL);
     }
     /* finish() may have advanced the flight slot; re-read it. */
-    int base = pgraph_vk_slot_query_base(r, r->current_flight);
-    QueryReport *report = &r->report_pool[base + r->report_pool_next];
+    QueryReport *report =
+        &r->report_pool[r->current_flight * per_slot + r->report_pool_next];
     r->report_pool_next++;
     return report;
 }

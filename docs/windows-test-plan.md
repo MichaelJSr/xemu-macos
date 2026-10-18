@@ -674,7 +674,7 @@ Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'VUID-[A-Za-z0-9_-]+' -AllM
 
 Pass: zero VUIDs. Each VUID is a finding: put the full `[vk]` message in RESULTS.md and the log in results. This covers B1 (occlusion queries), B4 (bind skips), B8 (zeta quarantine), F1 (texture LRU) and the 2026-08 descriptor class.
 
-b) Query-pool capacity guard (B1, audit batch 3): repeat 2.3 for heavy-f1 with `-Vars @{ XEMU_MAX_QUERIES = '64'; XEMU_NV2A_NSPROF = '1' }` and 120 s in the scene. Pass: no crash or abort, the scene renders, and `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'finish_queries_full'` shows the guard firing.
+b) Query-pool capacity guard (B1, audit batch 3): repeat 2.3 for heavy-f1 with `-Vars @{ XEMU_MAX_QUERIES = '64'; XEMU_NV2A_NSPROF = '1' }` and 120 s in the scene. Pass: no crash or abort, the scene renders, and `Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'finish_(queries|reports)_full'` shows `finish_queries_full` firing and no `finish_reports_full` (the report pool keeps its default size; before 2026-10-18 it shrank with the query pool, and its guard fired first).
 
 c) Walk-ins (B3 vertex refinement, B6 surface expiry on monotonic time, B7 fence watchdog, B8, F1): the 3.11 soak covers stream-e2. Also walk `azurik-transition-f1` forward about 4 s (it loads F6), wait 15 s, walk back (it reloads F1) three times, and walk `azurik-movie-e2` forward into its cutscene. Use `py -3 $Inj down <pipe> W` / `up` / `S`. Pass: no garbled geometry, no black freeze at the loads, no magenta, and no `vkWaitForFences timeout` warning.
 
