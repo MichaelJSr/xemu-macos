@@ -732,12 +732,20 @@ foreach ($pair in @(@{ XEMU_SUBPAGE_REFUTE = '1'; XEMU_XPAGE_REFUTE = '1'; XEMU_
   foreach ($t in 'azurik-stream-e2', 'azurik-transition-f1', 'azurik-heavy-f1', 'azurik-stream-e2') {
     py -3 $Ctl loadvm 4444 $t 120; py -3 $Inj send xemu-kit-ref 'axis ly 1.0'; Start-Sleep 60; py -3 $Inj clear xemu-kit-ref
   }
+  if ($pair.ContainsKey('XEMU_TB_REVAL_REFUTE')) {
+    # the reval refuter audits the scoped check of incremental checkpoint restores; the first restore after a save takes the full walk
+    py -3 $Ctl qmp 4444 xemu-checkpoint-save name=reval
+    for ($i = 0; $i -lt 6; $i++) {
+      py -3 $Inj send xemu-kit-ref 'axis ly 1.0'; Start-Sleep 10; py -3 $Inj clear xemu-kit-ref
+      py -3 $Ctl qmp 4444 xemu-checkpoint-restore name=reval incremental=true
+    }
+  }
   Stop-Xemu $p                       # the dumps print at a clean quit
   Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'refute|VIOLATION|XPAGE summary|subpage' | Select-Object -Last 12
 }
 ```
 
-Pass: no line containing `VIOLATION`, `tlb-wclean refute ... misses=0 unset=0`, and the reval refuter reporting 0 extra drops and 0 unprotected pages. On x86_64, also confirm that `XEMU_SUBPAGE_FAST=1` prints `xemu: XEMU_SUBPAGE_FAST: no inline store-prefilter emitter for this TCG host backend (aarch64 only); ignored`, because the store prefilter is aarch64-only.
+Pass: no line containing `VIOLATION`, `tlb-wclean refute ... misses=0 unset=0`, and `xemu: reval refute: N scoped loads ...` with N of at least 5 (the restores minus one), `extra drops 0, unprotected pages 0`. On x86_64, also confirm that `XEMU_SUBPAGE_FAST=1` prints `xemu: XEMU_SUBPAGE_FAST: no inline store-prefilter emitter for this TCG host backend (aarch64 only); ignored`, because the store prefilter is aarch64-only.
 
 ### 3.13 Threads, timers and priority [agent, P1, 30 min]
 

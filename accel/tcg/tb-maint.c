@@ -2357,28 +2357,6 @@ static void xemu_tb_reval_finish(XemuTbReval *r, int64_t t0,
     g_ptr_array_free(r->stale, true);
 }
 
-void xemu_tb_revalidate_after_load(void)
-{
-    int64_t t0 = unlikely(xemu_inv_prof_on()) ? g_get_monotonic_time() : 0;
-    XemuTbReval r = { .stale = g_ptr_array_new() };
-
-    assert(tcg_enabled());
-    assert(!runstate_is_running() ||
-           (current_cpu && cpu_in_serial_context(current_cpu)));
-
-    r.buf = g_malloc(TARGET_PAGE_SIZE);
-    WITH_RCU_READ_LOCK_GUARD() {
-        qht_iter(&tb_ctx.htable, xemu_tb_reval_check, &r);
-    }
-    g_free(r.buf);
-    /* The walk found every XEMU_TB_PEEKS TB. */
-    xemu_peeks_take(NULL);
-
-    xemu_tb_reval_drop(r.stale);
-    xemu_tb_reval_protect_all(&r);
-    xemu_tb_reval_finish(&r, t0, "");
-}
-
 /*
  * XEMU_TB_REVAL_REFUTE=1: after each scoped check, also run the full one
  * and count what only it does: TBs it drops (their bytes changed off the
@@ -2400,6 +2378,42 @@ static void xemu_reval_refute_report(void)
             xemu_reval_refute.loads, xemu_reval_refute.scoped,
             xemu_reval_refute.full, xemu_reval_refute.extra,
             xemu_reval_refute.unprotected, xemu_reval_refute.untailed);
+}
+
+/* Armed at the first load of any kind, so a run with nothing scoped says so. */
+static void xemu_reval_refute_init(void)
+{
+    if (xemu_reval_refute.on < 0) {
+        const char *e = getenv("XEMU_TB_REVAL_REFUTE");
+
+        xemu_reval_refute.on = e && e[0] == '1';
+        if (xemu_reval_refute.on) {
+            atexit(xemu_reval_refute_report);
+        }
+    }
+}
+
+void xemu_tb_revalidate_after_load(void)
+{
+    int64_t t0 = unlikely(xemu_inv_prof_on()) ? g_get_monotonic_time() : 0;
+    XemuTbReval r = { .stale = g_ptr_array_new() };
+
+    assert(tcg_enabled());
+    assert(!runstate_is_running() ||
+           (current_cpu && cpu_in_serial_context(current_cpu)));
+    xemu_reval_refute_init();
+
+    r.buf = g_malloc(TARGET_PAGE_SIZE);
+    WITH_RCU_READ_LOCK_GUARD() {
+        qht_iter(&tb_ctx.htable, xemu_tb_reval_check, &r);
+    }
+    g_free(r.buf);
+    /* The walk found every XEMU_TB_PEEKS TB. */
+    xemu_peeks_take(NULL);
+
+    xemu_tb_reval_drop(r.stale);
+    xemu_tb_reval_protect_all(&r);
+    xemu_tb_reval_finish(&r, t0, "");
 }
 
 static void xemu_reval_refute_check(XemuTbReval *r, uint8_t *buf)
@@ -2446,14 +2460,7 @@ void xemu_tb_revalidate_pages(const unsigned long *scope, uint64_t pages)
     assert(tcg_enabled());
     assert(!runstate_is_running() ||
            (current_cpu && cpu_in_serial_context(current_cpu)));
-    if (xemu_reval_refute.on < 0) {
-        const char *e = getenv("XEMU_TB_REVAL_REFUTE");
-
-        xemu_reval_refute.on = e && e[0] == '1';
-        if (xemu_reval_refute.on) {
-            atexit(xemu_reval_refute_report);
-        }
-    }
+    xemu_reval_refute_init();
 
     r.buf = g_malloc(TARGET_PAGE_SIZE);
     /* Every TB that read past its end goes, wherever it is. */
