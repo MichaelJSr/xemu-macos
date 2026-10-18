@@ -2898,6 +2898,16 @@ int main(int argc, char **argv)
         if (headless) {
             /* Nothing to present; keep input and screendump responsive. */
             SDL_DelayNS(vblank_interval_ns);
+#ifdef _WIN32
+        } else if (SDL_GetWindowFlags(scon->real_window) &
+                   SDL_WINDOW_MINIMIZED) {
+            /*
+             * Minimized, flip-model Present returns DXGI_STATUS_OCCLUDED
+             * at once, so the loop spun: a PFIFO round trip, the HUD under
+             * the BQL and the interop copies, unpaced. Nothing shows.
+             */
+            SDL_DelayNS(vblank_interval_ns);
+#endif
         } else {
             render_frame(scon);
         }

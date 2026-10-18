@@ -2705,6 +2705,13 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   heavy-f1, native builds running on CPUs 4-7 (load 26%): 16.9 → 29.3 fps,
   3/3 pairs (one busy-waiting run fell to 3.9 fps); the quieter warmups
   tie (28.9 / 28.9). The goldens are unchanged.
+- **Minimized on Windows, the UI loop waits a vblank (2026-10-18).** A
+  minimized flip-model swap chain returns `DXGI_STATUS_OCCLUDED` at once,
+  so the loop spun unpaced: a PFIFO round trip, the HUD under the BQL and
+  the interop copies, for nothing on screen. It now sleeps a vblank
+  interval instead of rendering. Minimized heavy-f1: process CPU 176% →
+  158% of one core (3.13a, a CI build with the waitable timer against
+  one with both); the guest vblank stays at 60.4/s in every window state.
 
 - **Memory-access callback list is RCU-protected (2026-10-11).** Fixes
   the recurring SIGSEGV in `flatview_read_continue` under
