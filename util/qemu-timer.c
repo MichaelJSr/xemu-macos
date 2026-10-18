@@ -410,6 +410,78 @@ static int xbox_poll_timed(GPollFD *fds, guint nfds, int64_t timeout)
     }
     return ret;
 }
+#define XBOX_POLL_TIMED 1
+#elif defined(XBOX) && defined(_WIN32)
+#include "qemu/processor.h"
+/*
+ * xemu on Windows: g_poll() takes milliseconds, so the sub-millisecond
+ * deadlines (the PIT and both OHCI frame timers tick at 1 kHz) were
+ * busy-waited: 95% of a logical CPU on the main thread. Sleep on a
+ * high-resolution waitable timer (Windows 10 1803+) whose handle joins the
+ * poll set instead, as macOS does on a kqueue timer. It wakes on the
+ * kernel's timer grid (0.5 ms on the i7-4770K test PC), so a callback can
+ * run up to that late; the timers re-arm from their own deadlines, so
+ * nothing drifts. The last XBOX_POLL_SPIN_NS are spun.
+ */
+#define XBOX_POLL_SPIN_NS 50000
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2   /* older mingw headers */
+#endif
+
+static __thread HANDLE xbox_poll_timer;
+static __thread bool xbox_poll_timer_failed;
+static __thread Notifier xbox_poll_timer_exit;
+
+static void xbox_poll_timer_close(Notifier *n, void *unused)
+{
+    CloseHandle(xbox_poll_timer);
+    xbox_poll_timer = NULL;
+}
+
+/* g_poll with a nanosecond timeout; -2 if there is no timer to sleep on */
+static int xbox_poll_timed(GPollFD *fds, guint nfds, int64_t timeout)
+{
+    GPollFD stack_fds[16], *all;
+    LARGE_INTEGER due;
+    int ret;
+
+    if (!xbox_poll_timer) {
+        if (xbox_poll_timer_failed) {
+            return -2;
+        }
+        xbox_poll_timer = CreateWaitableTimerExW(
+            NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS);
+        if (!xbox_poll_timer) {
+            xbox_poll_timer_failed = true;
+            return -2;
+        }
+        xbox_poll_timer_exit.notify = xbox_poll_timer_close;
+        qemu_thread_atexit_add(&xbox_poll_timer_exit);
+    }
+    due.QuadPart = -MAX(1, timeout / 100); /* relative, in 100 ns units */
+    if (!SetWaitableTimer(xbox_poll_timer, &due, 0, NULL, NULL, FALSE)) {
+        return -2;
+    }
+    all = nfds < ARRAY_SIZE(stack_fds) ? stack_fds : g_new(GPollFD, nfds + 1);
+    memcpy(all, fds, nfds * sizeof(GPollFD));
+    all[nfds] = (GPollFD){ .fd = (gintptr)xbox_poll_timer, .events = G_IO_IN };
+    /* The millisecond timeout is only a backstop: the timer ends the wait. */
+    ret = g_poll(all, nfds + 1, qemu_timeout_ns_to_ms(timeout) + 1);
+    if (ret > 0 && (all[nfds].revents & G_IO_IN)) {
+        ret--;
+    }
+    for (guint i = 0; i < nfds; i++) {
+        fds[i].revents = all[i].revents;
+    }
+    /* Fired or not; the next SetWaitableTimer resets a late signal. */
+    CancelWaitableTimer(xbox_poll_timer);
+    if (all != stack_fds) {
+        g_free(all);
+    }
+    return ret;
+}
+#define XBOX_POLL_TIMED 1
 #endif
 
 /* qemu implementation of g_poll which uses a nanosecond timeout but is
@@ -435,7 +507,7 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
     }
 #else
 
-#if defined(XBOX) && defined(CONFIG_DARWIN)
+#ifdef XBOX_POLL_TIMED
     if (timeout > 0) {
         int64_t end = get_clock() + timeout;
         int ret = timeout > XBOX_POLL_SPIN_NS
@@ -446,10 +518,13 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
             }
             while (get_clock() < end) {
                 /* the last few microseconds */
+#ifdef _WIN32
+                cpu_relax();
+#endif
             }
             return g_poll(fds, nfds, 0);
         }
-        /* no kqueue: fall through to the spin below */
+        /* no timer: fall through to the spin below */
     }
 #endif
 #ifdef XBOX

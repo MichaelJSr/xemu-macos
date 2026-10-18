@@ -2634,6 +2634,19 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 ### Threads + runtime
 
+- **Windows main loop sleeps on a high-resolution waitable timer
+  (2026-10-18).** `g_poll` takes milliseconds, so `qemu_poll_ns`
+  busy-waited every sub-millisecond deadline (the PIT and both OHCI frame
+  timers tick at 1 kHz): 95% of a logical CPU on the main thread in
+  windowed heavy-f1. The timer handle (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
+  Windows 10 1803+) now joins the poll set, as the kqueue timer does on
+  macOS, and only the last 50 µs are spun; it wakes on the kernel's
+  ~0.5 ms grid, and the timers re-arm from their own deadlines, so
+  nothing drifts. Whole process 245.9% → 147.5% of one core. Windowed
+  heavy-f1, native builds running on CPUs 4-7 (load 26%): 16.9 → 29.3 fps,
+  3/3 pairs (one busy-waiting run fell to 3.9 fps); the quieter warmups
+  tie (28.9 / 28.9). The goldens are unchanged.
+
 - **Memory-access callback list is RCU-protected (2026-10-11).** Fixes
   the recurring SIGSEGV in `flatview_read_continue` under
   `ohci_frame_boundary` / `ohci_service_ed_list`, most often just after
