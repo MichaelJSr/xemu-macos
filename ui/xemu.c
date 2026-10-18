@@ -2785,6 +2785,14 @@ int main(int argc, char **argv)
         }
     }
 
+    /*
+     * The CRT fully buffers a stderr that goes to a file or pipe (4 KiB
+     * blocks), so a redirected log (stderr.log under the harnesses, or
+     * xemu.log) stayed empty while xemu ran and lost its tail in a crash.
+     * Unbuffered, as stderr is on macOS and Linux.
+     */
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     _set_error_mode(_OUT_TO_STDERR);
 #endif
 
