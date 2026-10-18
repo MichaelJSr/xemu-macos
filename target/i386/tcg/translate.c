@@ -58,6 +58,9 @@ int xemu_sse_vfp; /* inline packed-single add/sub/mul/div (gen_fp_sse_inline) */
 #define MAP_GEN_HELPER_SOFT_HARD(name) \
     (g_use_hard_fpu ? gen_helper_##name##__hard : gen_helper_##name##__soft)
 #define gen_helper_flds_FT0       MAP_GEN_HELPER_SOFT_HARD(flds_FT0)
+#define gen_helper_fop_ST0_m32    MAP_GEN_HELPER_SOFT_HARD(fop_ST0_m32)
+#define gen_helper_fop_ST0_m64    MAP_GEN_HELPER_SOFT_HARD(fop_ST0_m64)
+#define gen_helper_fop_ST0_i32    MAP_GEN_HELPER_SOFT_HARD(fop_ST0_i32)
 #define gen_helper_fldl_FT0       MAP_GEN_HELPER_SOFT_HARD(fldl_FT0)
 #define gen_helper_fildl_FT0      MAP_GEN_HELPER_SOFT_HARD(fildl_FT0)
 #define gen_helper_flds_ST0       MAP_GEN_HELPER_SOFT_HARD(flds_ST0)
@@ -2258,15 +2261,19 @@ static void gen_set_fptag_stn(int opreg, int value)
  * the same env bytes the helpers do, at the same point in the instruction.
  */
 
-/* Copy one 16-byte x87 register image (floatx80 and its padding). */
+/*
+ * The 10 bytes of a floatx80, not its padding: an 8-byte load across bytes
+ * 8-15 doesn't forward from the 10-byte fstpt the x86_64 hard helpers
+ * store, and stalls until it commits.
+ */
 static void x87_gen_copy(X87Ptr dst, X87Ptr src)
 {
     TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 hi = tcg_temp_new_i64();
+    TCGv_i32 hi = tcg_temp_new_i32();
     tcg_gen_ld_i64(lo, src.base, src.ofs);
-    tcg_gen_ld_i64(hi, src.base, src.ofs + 8);
+    tcg_gen_ld16u_i32(hi, src.base, src.ofs + 8);
     tcg_gen_st_i64(lo, dst.base, dst.ofs);
-    tcg_gen_st_i64(hi, dst.base, dst.ofs + 8);
+    tcg_gen_st16_i32(hi, dst.base, dst.ofs + 8);
 }
 
 /* Store a floatx80 constant (helper_fld1/fldz: ST0 = floatx80_one ...). */
@@ -3531,16 +3538,17 @@ static void gen_fxchg_ST0_STN(DisasContext *s, int st_index)
 
         X87Ptr p0 = gen_stn_ptr(0);
         X87Ptr pn = gen_stn_ptr(st_index);
-        TCGv_i64 lo0 = tcg_temp_new_i64(), hi0 = tcg_temp_new_i64();
-        TCGv_i64 lon = tcg_temp_new_i64(), hin = tcg_temp_new_i64();
+        TCGv_i64 lo0 = tcg_temp_new_i64(), lon = tcg_temp_new_i64();
+        TCGv_i32 hi0 = tcg_temp_new_i32(), hin = tcg_temp_new_i32();
+        /* 10 bytes each, as x87_gen_copy */
         tcg_gen_ld_i64(lo0, p0.base, p0.ofs);
-        tcg_gen_ld_i64(hi0, p0.base, p0.ofs + 8);
+        tcg_gen_ld16u_i32(hi0, p0.base, p0.ofs + 8);
         tcg_gen_ld_i64(lon, pn.base, pn.ofs);
-        tcg_gen_ld_i64(hin, pn.base, pn.ofs + 8);
+        tcg_gen_ld16u_i32(hin, pn.base, pn.ofs + 8);
         tcg_gen_st_i64(lo0, pn.base, pn.ofs);
-        tcg_gen_st_i64(hi0, pn.base, pn.ofs + 8);
+        tcg_gen_st16_i32(hi0, pn.base, pn.ofs + 8);
         tcg_gen_st_i64(lon, p0.base, p0.ofs);
-        tcg_gen_st_i64(hin, p0.base, p0.ofs + 8);
+        tcg_gen_st16_i32(hin, p0.base, p0.ofs + 8);
         x87_wt_copy_dbl(s, 0, st_index, true);
         if (x87_wt(s)) {
             TCGv_f64 t = s->wt_st[a];
@@ -5665,6 +5673,40 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 int op1;
                 op1 = op & 7;
 
+#if defined(XBOX)
+                if (!x87_wt(s) && !g_use_hard_fpu_inline) {
+                    /* The load into FT0 and the op in one helper call. */
+                    TCGv_i32 opc = tcg_constant_i32(op1);
+
+                    switch (op >> 4) {
+                    case 0:
+                        tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
+                                            s->mem_index, MO_LEUL);
+                        gen_helper_fop_ST0_m32(tcg_env, s->tmp2_i32, opc);
+                        break;
+                    case 1:
+                        tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
+                                            s->mem_index, MO_LEUL);
+                        gen_helper_fop_ST0_i32(tcg_env, s->tmp2_i32, opc);
+                        break;
+                    case 2:
+                        tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
+                                            s->mem_index, MO_LEUQ);
+                        gen_helper_fop_ST0_m64(tcg_env, s->tmp1_i64, opc);
+                        break;
+                    default:
+                        tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
+                                            s->mem_index, MO_LESW);
+                        gen_helper_fop_ST0_i32(tcg_env, s->tmp2_i32, opc);
+                        break;
+                    }
+                    if (op1 == 3) {
+                        /* fcomp needs pop */
+                        gen_fpop(s);
+                    }
+                    break;
+                }
+#endif
                 switch (op >> 4) {
                 case 0:
 #if defined(XBOX)

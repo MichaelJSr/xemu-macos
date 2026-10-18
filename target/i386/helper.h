@@ -126,6 +126,9 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 #define HS_DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2) \
 	DEF_HELPER_FLAGS_2(name ## __soft, fl, ret, t1, t2) \
 	DEF_HELPER_FLAGS_2(name ## __hard, fl, ret, t1, t2)
+#define HS_DEF_HELPER_FLAGS_3(name, fl, ret, t1, t2, t3) \
+	DEF_HELPER_FLAGS_3(name ## __soft, fl, ret, t1, t2, t3) \
+	DEF_HELPER_FLAGS_3(name ## __hard, fl, ret, t1, t2, t3)
 #else
 #define HS_DEF_HELPER_1(name, ret, t1) \
 	DEF_HELPER_1(name, ret, t1)
@@ -137,6 +140,8 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 	DEF_HELPER_FLAGS_1(name, fl, ret, t1)
 #define HS_DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2) \
 	DEF_HELPER_FLAGS_2(name, fl, ret, t1, t2)
+#define HS_DEF_HELPER_FLAGS_3(name, fl, ret, t1, t2, t3) \
+	DEF_HELPER_FLAGS_3(name, fl, ret, t1, t2, t3)
 #endif
 
 /*
@@ -146,49 +151,66 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
  */
 #define NO_PIN TCG_CALL_NO_RW_PINNED
 
-HS_DEF_HELPER_2(flds_FT0, void, env, i32)
-HS_DEF_HELPER_2(fldl_FT0, void, env, i64)
-HS_DEF_HELPER_2(fildl_FT0, void, env, s32)
+/*
+ * x87 helpers that write no TCG global: they read fpstt but don't move
+ * it, and don't touch CC_*. On x86_64 hosts, where every x87 op is a
+ * helper call, the guest registers then stay in host registers across
+ * the call instead of being reloaded after it. aarch64 keeps its flags
+ * (its pinned registers and write-through path).
+ */
+#if defined(__x86_64__)
+#define X87_NO_WG TCG_CALL_NO_WG
+#else
+#define X87_NO_WG 0
+#endif
+
+HS_DEF_HELPER_FLAGS_2(flds_FT0, X87_NO_WG, void, env, i32)
+HS_DEF_HELPER_FLAGS_2(fldl_FT0, X87_NO_WG, void, env, i64)
+HS_DEF_HELPER_FLAGS_2(fildl_FT0, X87_NO_WG, void, env, s32)
 HS_DEF_HELPER_2(flds_ST0, void, env, i32)
 HS_DEF_HELPER_2(fldl_ST0, void, env, i64)
 HS_DEF_HELPER_2(fildl_ST0, void, env, s32)
 HS_DEF_HELPER_FLAGS_2(fildll_ST0, NO_PIN, void, env, s64)
-HS_DEF_HELPER_1(fsts_ST0, i32, env)
-HS_DEF_HELPER_1(fstl_ST0, i64, env)
-HS_DEF_HELPER_FLAGS_1(fist_ST0, NO_PIN, s32, env)
-HS_DEF_HELPER_FLAGS_1(fistl_ST0, NO_PIN, s32, env)
-HS_DEF_HELPER_FLAGS_1(fistll_ST0, NO_PIN, s64, env)
-HS_DEF_HELPER_1(fistt_ST0, s32, env)
-HS_DEF_HELPER_FLAGS_1(fisttl_ST0, NO_PIN, s32, env)
-HS_DEF_HELPER_FLAGS_1(fisttll_ST0, NO_PIN, s64, env)
+HS_DEF_HELPER_FLAGS_1(fsts_ST0, X87_NO_WG, i32, env)
+HS_DEF_HELPER_FLAGS_1(fstl_ST0, X87_NO_WG, i64, env)
+HS_DEF_HELPER_FLAGS_1(fist_ST0, NO_PIN | X87_NO_WG, s32, env)
+HS_DEF_HELPER_FLAGS_1(fistl_ST0, NO_PIN | X87_NO_WG, s32, env)
+HS_DEF_HELPER_FLAGS_1(fistll_ST0, NO_PIN | X87_NO_WG, s64, env)
+HS_DEF_HELPER_FLAGS_1(fistt_ST0, X87_NO_WG, s32, env)
+HS_DEF_HELPER_FLAGS_1(fisttl_ST0, NO_PIN | X87_NO_WG, s32, env)
+HS_DEF_HELPER_FLAGS_1(fisttll_ST0, NO_PIN | X87_NO_WG, s64, env)
 HS_DEF_HELPER_2(fldt_ST0, void, env, tl)
 HS_DEF_HELPER_2(fstt_ST0, void, env, tl)
 HS_DEF_HELPER_1(fpush, void, env)
 HS_DEF_HELPER_1(fpop, void, env)
-HS_DEF_HELPER_2(ffree_STN, void, env, int)
-HS_DEF_HELPER_1(fmov_ST0_FT0, void, env)
-HS_DEF_HELPER_2(fmov_FT0_STN, void, env, int)
-HS_DEF_HELPER_2(fmov_ST0_STN, void, env, int)
-HS_DEF_HELPER_2(fmov_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fxchg_ST0_STN, void, env, int)
-HS_DEF_HELPER_1(fcom_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fucom_ST0_FT0, void, env)
+HS_DEF_HELPER_FLAGS_2(ffree_STN, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_1(fmov_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_2(fmov_FT0_STN, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fmov_ST0_STN, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fmov_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fxchg_ST0_STN, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_1(fcom_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fucom_ST0_FT0, X87_NO_WG, void, env)
 HS_DEF_HELPER_1(fcomi_ST0_FT0, void, env)
 HS_DEF_HELPER_1(fucomi_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fadd_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fmul_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fsub_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fsubr_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fdiv_ST0_FT0, void, env)
-HS_DEF_HELPER_1(fdivr_ST0_FT0, void, env)
-HS_DEF_HELPER_2(fadd_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fmul_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fsub_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fsubr_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fdiv_STN_ST0, void, env, int)
-HS_DEF_HELPER_2(fdivr_STN_ST0, void, env, int)
-HS_DEF_HELPER_1(fchs_ST0, void, env)
-HS_DEF_HELPER_1(fabs_ST0, void, env)
+HS_DEF_HELPER_FLAGS_1(fadd_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fmul_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fsub_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fsubr_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fdiv_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fdivr_ST0_FT0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_2(fadd_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fmul_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fsub_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fsubr_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fdiv_STN_ST0, X87_NO_WG, void, env, int)
+HS_DEF_HELPER_FLAGS_2(fdivr_STN_ST0, X87_NO_WG, void, env, int)
+/* fxxx m32fp/m64fp/m16int/m32int: the load into FT0 and the op in one call */
+HS_DEF_HELPER_FLAGS_3(fop_ST0_m32, X87_NO_WG, void, env, i32, i32)
+HS_DEF_HELPER_FLAGS_3(fop_ST0_m64, X87_NO_WG, void, env, i64, i32)
+HS_DEF_HELPER_FLAGS_3(fop_ST0_i32, X87_NO_WG, void, env, s32, i32)
+HS_DEF_HELPER_FLAGS_1(fchs_ST0, X87_NO_WG, void, env)
+HS_DEF_HELPER_FLAGS_1(fabs_ST0, X87_NO_WG, void, env)
 HS_DEF_HELPER_FLAGS_1(fxam_ST0, NO_PIN, void, env)
 HS_DEF_HELPER_1(fld1_ST0, void, env)
 HS_DEF_HELPER_1(fldl2t_ST0, void, env)
@@ -197,7 +219,7 @@ HS_DEF_HELPER_1(fldpi_ST0, void, env)
 HS_DEF_HELPER_1(fldlg2_ST0, void, env)
 HS_DEF_HELPER_1(fldln2_ST0, void, env)
 HS_DEF_HELPER_1(fldz_ST0, void, env)
-HS_DEF_HELPER_1(fldz_FT0, void, env)
+HS_DEF_HELPER_FLAGS_1(fldz_FT0, X87_NO_WG, void, env)
 HS_DEF_HELPER_1(fnstsw, i32, env)
 HS_DEF_HELPER_FLAGS_2(fldcw, NO_PIN, void, env, i32)
 HS_DEF_HELPER_1(fclex, void, env)
@@ -229,6 +251,7 @@ HS_DEF_HELPER_3(frstor, void, env, tl, int)
 #undef HS_DEF_HELPER_3
 #undef HS_DEF_HELPER_FLAGS_1
 #undef HS_DEF_HELPER_FLAGS_2
+#undef HS_DEF_HELPER_FLAGS_3
 
 DEF_HELPER_FLAGS_2(fxsave, TCG_CALL_NO_WG, void, env, tl)
 /* fxrstor/xrstor write env->fpstt, a TCG global in xemu (translate.c). */

@@ -166,6 +166,9 @@ static inline FloatRelation ld_compare(long double a, long double b)
 #define X87_MUL(d, a, b) ((d).fval = pack_ld((a).fval * (b).fval, &env->fp_status))
 #define X87_DIV(d, a, b) ((d).fval = pack_ld((a).fval / (b).fval, &env->fp_status))
 #define X87_CMP(a, b)          ld_compare((a).fval, (b).fval)
+/* the x87 compare orders denormals and makes unnormals unordered, as softfloat */
+#define X87_UCMP(a, b)         ld_compare((a).fval, (b).fval)
+#define X87_FROM_I32(d, v)     ((d).fval = (v))
 #define X87_FROM_F32(d, v)     ((d).fval = ld_from_f32(v))
 #define X87_FROM_F64(d, v)     ((d).fval = ld_from_f64(v))
 #define X87_TO_F32(a)          ld_to_f32((a).fval)
@@ -625,6 +628,9 @@ floatx80_compare_quiet__hard(floatx80 a, floatx80 b, float_status *status)
 #endif
 
 #define helper_flds_FT0       MAP_HELPER_SOFT_HARD(flds_FT0)
+#define helper_fop_ST0_m32    MAP_HELPER_SOFT_HARD(fop_ST0_m32)
+#define helper_fop_ST0_m64    MAP_HELPER_SOFT_HARD(fop_ST0_m64)
+#define helper_fop_ST0_i32    MAP_HELPER_SOFT_HARD(fop_ST0_i32)
 #define helper_fldl_FT0       MAP_HELPER_SOFT_HARD(fldl_FT0)
 #define helper_fildl_FT0      MAP_HELPER_SOFT_HARD(fildl_FT0)
 #define helper_flds_ST0       MAP_HELPER_SOFT_HARD(flds_ST0)
@@ -863,6 +869,8 @@ static void merge_exception_flags(CPUX86State *env, int old_flags)
 #define X87_MUL(d, a, b)   ((d) = floatx80_mul((a), (b), &env->fp_status))
 #define X87_DIV(d, a, b)   ((d) = helper_fdiv(env, (a), (b)))
 #define X87_CMP(a, b)      floatx80_compare((a), (b), &env->fp_status)
+#define X87_UCMP(a, b)     floatx80_compare_quiet((a), (b), &env->fp_status)
+#define X87_FROM_I32(d, v) ((d) = int32_to_floatx80((v), &env->fp_status))
 #define X87_FROM_F32(d, v) ((d) = float32_to_floatx80((v), &env->fp_status))
 #define X87_FROM_F64(d, v) ((d) = float64_to_floatx80((v), &env->fp_status))
 #define X87_TO_F32(a)      floatx80_to_float32((a), &env->fp_status)
@@ -917,7 +925,7 @@ void helper_fldl_FT0(CPUX86State *env, uint64_t val)
 
 void helper_fildl_FT0(CPUX86State *env, int32_t val)
 {
-    FT0 = int32_to_floatx80(val, &env->fp_status);
+    X87_FROM_I32(FT0, val);
 }
 
 void helper_flds_ST0(CPUX86State *env, uint32_t val)
@@ -967,7 +975,7 @@ void helper_fildl_ST0(CPUX86State *env, int32_t val)
     FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
-    FPR(new_fpstt) = int32_to_floatx80(val, &env->fp_status);
+    X87_FROM_I32(FPR(new_fpstt), val);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
 
@@ -1179,7 +1187,7 @@ void helper_fucom_ST0_FT0(CPUX86State *env)
     int old_flags = save_exception_flags(env);
     FloatRelation ret;
 
-    ret = floatx80_compare_quiet(ST0, FT0, &env->fp_status);
+    ret = X87_UCMP(ST0, FT0);
     env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
     merge_exception_flags(env, old_flags);
 }
@@ -1205,7 +1213,7 @@ void helper_fucomi_ST0_FT0(CPUX86State *env)
     int eflags;
     FloatRelation ret;
 
-    ret = floatx80_compare_quiet(ST0, FT0, &env->fp_status);
+    ret = X87_UCMP(ST0, FT0);
     eflags = cpu_cc_compute_all(env) & ~(CC_Z | CC_P | CC_C);
     CC_SRC = eflags | fcomi_ccval[ret + 1];
     CC_OP = CC_OP_EFLAGS;
@@ -1248,6 +1256,53 @@ void helper_fdiv_ST0_FT0(CPUX86State *env)
 void helper_fdivr_ST0_FT0(CPUX86State *env)
 {
     X87_DIV(ST0, FT0, ST0);
+}
+
+/* fxxx with a memory operand: the load into FT0 and the op in one call */
+static inline void fop_ST0_FT0(CPUX86State *env, uint32_t op)
+{
+    switch (op) {
+    case 0:
+        helper_fadd_ST0_FT0(env);
+        break;
+    case 1:
+        helper_fmul_ST0_FT0(env);
+        break;
+    case 2:
+    case 3:
+        helper_fcom_ST0_FT0(env);
+        break;
+    case 4:
+        helper_fsub_ST0_FT0(env);
+        break;
+    case 5:
+        helper_fsubr_ST0_FT0(env);
+        break;
+    case 6:
+        helper_fdiv_ST0_FT0(env);
+        break;
+    default:
+        helper_fdivr_ST0_FT0(env);
+        break;
+    }
+}
+
+void helper_fop_ST0_m32(CPUX86State *env, uint32_t val, uint32_t op)
+{
+    helper_flds_FT0(env, val);
+    fop_ST0_FT0(env, op);
+}
+
+void helper_fop_ST0_m64(CPUX86State *env, uint64_t val, uint32_t op)
+{
+    helper_fldl_FT0(env, val);
+    fop_ST0_FT0(env, op);
+}
+
+void helper_fop_ST0_i32(CPUX86State *env, int32_t val, uint32_t op)
+{
+    helper_fildl_FT0(env, val);
+    fop_ST0_FT0(env, op);
 }
 
 /* fp operations between STN and ST0 */
