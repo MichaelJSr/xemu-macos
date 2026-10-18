@@ -98,23 +98,11 @@ static inline floatx80 *x87_reg(CPUX86State *env, int i)
 
 #if defined(__x86_64__)
 /*
- * x86_64 hard FPU: use host long double (80-bit x87) via union overlay.
+ * x86_64 hard FPU: use host long double (80-bit x87) via union overlay. The
+ * x87 unit runs under the guest's precision and rounding control
+ * (xemu_sync_host_x87_cw), so each op rounds once to the guest's precision
+ * over the full exponent range, as the guest's x87 does.
  */
-static inline QEMU_ALWAYS_INLINE
-long double pack_ld(long double v, float_status *status)
-{
-    switch (status->floatx80_rounding_precision) {
-    case floatx80_precision_s: return (float)v;
-    case floatx80_precision_d: return (double)v;
-    default: return v; /* floatx80_precision_x */
-    }
-}
-
-static inline
-floatx80 pack(floatx80 v, float_status *status)
-{
-    return (floatx80){ .fval = pack_ld(v.fval, status) };
-}
 
 /*
  * The hot helpers compute on each register's long double in place: fldt
@@ -161,10 +149,10 @@ static inline FloatRelation ld_compare(long double a, long double b)
     return float_relation_unordered;
 }
 
-#define X87_ADD(d, a, b) ((d).fval = pack_ld((a).fval + (b).fval, &env->fp_status))
-#define X87_SUB(d, a, b) ((d).fval = pack_ld((a).fval - (b).fval, &env->fp_status))
-#define X87_MUL(d, a, b) ((d).fval = pack_ld((a).fval * (b).fval, &env->fp_status))
-#define X87_DIV(d, a, b) ((d).fval = pack_ld((a).fval / (b).fval, &env->fp_status))
+#define X87_ADD(d, a, b)       ((d).fval = (a).fval + (b).fval)
+#define X87_SUB(d, a, b)       ((d).fval = (a).fval - (b).fval)
+#define X87_MUL(d, a, b)       ((d).fval = (a).fval * (b).fval)
+#define X87_DIV(d, a, b)       ((d).fval = (a).fval / (b).fval)
 #define X87_CMP(a, b)          ld_compare((a).fval, (b).fval)
 /* the x87 compare orders denormals and makes unnormals unordered, as softfloat */
 #define X87_UCMP(a, b)         ld_compare((a).fval, (b).fval)
@@ -177,26 +165,26 @@ static inline FloatRelation ld_compare(long double a, long double b)
 static inline
 floatx80 floatx80_add__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval + b.fval) }, status);
+    return (floatx80){ .fval = a.fval + b.fval };
 }
 
 static inline
 floatx80 floatx80_sub__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval - b.fval) }, status);
+    return (floatx80){ .fval = a.fval - b.fval };
 }
 
 static inline
 floatx80 floatx80_mul__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval * b.fval) }, status);
+    return (floatx80){ .fval = a.fval * b.fval };
 }
 
 static inline
 floatx80 floatx80_div__hard(floatx80 a, floatx80 b, float_status *status)
 {
     /* FIXME: Exceptions */
-    return pack((floatx80){ .fval = (a.fval / b.fval) }, status);
+    return (floatx80){ .fval = a.fval / b.fval };
 }
 
 static inline
@@ -253,27 +241,14 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
 static inline
 floatx80 floatx80_sqrt__hard(floatx80 a, float_status *status)
 {
-    return pack((floatx80){ .fval = sqrtl(a.fval) }, status);
+    return (floatx80){ .fval = sqrtl(a.fval) };
 }
 
-/*
- * The guest's rounding control. Nothing programs this thread's x87 control
- * word (its RC is nearest), so pick the rounding by hand: mingw's floorl,
- * ceill and truncl set their own RC. A guest floor() (fldcw RC down,
- * frndint) or _ftol (fldcw chop, fistp) otherwise rounded to nearest.
- */
+/* frndint, under the guest's rounding control (the thread's x87 RC) */
 static inline long double hard_round(long double x, float_status *status)
 {
-    switch (status->float_rounding_mode) {
-    case float_round_down:
-        return floorl(x);
-    case float_round_up:
-        return ceill(x);
-    case float_round_to_zero:
-        return truncl(x);
-    default:
-        return rintl(x);
-    }
+    __asm__("frndint" : "+t"(x));
+    return x;
 }
 
 static inline
@@ -1482,6 +1457,32 @@ void xemu_sync_host_rounding(CPUX86State *env)
 }
 #endif
 
+#if defined(XBOX) && defined(__x86_64__)
+/*
+ * x86_64 hosts: the hard FPU's x87 math runs on the vCPU thread's x87 unit
+ * under its control word, so that takes the guest's precision and rounding
+ * control, exceptions masked: each op then rounds once, as the guest's x87
+ * does. Windows starts threads at 0x27f (53-bit) and nothing set it, so
+ * extended-precision guest math ran at double precision, and the hard ops
+ * rounded to nearest whatever the guest's RC. update_fp_status sets it on
+ * the vCPU thread; reset, loadvm and the gdbstub write FCW from the main
+ * thread, so x86_cpu_exec_enter re-applies it. Reserved PC 01 runs as
+ * extended, as softfloat's does.
+ */
+void xemu_sync_host_x87_cw(CPUX86State *env)
+{
+    uint16_t cw, want = (env->fpuc & 0x0f00) | 0x007f;
+
+    if ((want & 0x0300) == 0x0100) {
+        want |= 0x0300;
+    }
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    if (unlikely(cw != want)) {
+        __asm__ volatile("fldcw %0" : : "m"(want));
+    }
+}
+#endif
+
 void update_fp_status(CPUX86State *env)
 {
     int rnd_mode;
@@ -1510,6 +1511,10 @@ void update_fp_status(CPUX86State *env)
      * thread's follows at its next cpu_exec entry (xemu_sync_host_rounding).
      */
     fesetround(xemu_host_round_mode[rnd_mode]);
+#elif defined(XBOX) && defined(__x86_64__)
+    if (current_cpu && cpu_env(current_cpu) == env) {
+        xemu_sync_host_x87_cw(env);
+    }
 #endif
 
     switch ((env->fpuc >> 8) & 3) {
@@ -2030,6 +2035,28 @@ void helper_f2xm1(CPUX86State *env)
     merge_exception_flags(env, old_flags);
 }
 
+#if defined(XBOX) && defined(__x86_64__)
+/*
+ * libm, which may use the x87 unit, under the default control word, not the
+ * guest's (xemu_sync_host_x87_cw): the transcendentals it stands in for
+ * ignore precision control.
+ */
+static double xemu_libm(double (*fn)(double), double x)
+{
+    uint16_t cw, dflt = 0x037f;
+    double r;
+
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    __asm__ volatile("fldcw %0" : : "m"(dflt));
+    r = fn(x);
+    __asm__ volatile("fldcw %0" : : "m"(cw));
+    return r;
+}
+#define XEMU_LIBM(fn, x) xemu_libm(fn, (x))
+#else
+#define XEMU_LIBM(fn, x) fn(x)
+#endif
+
 void helper_fptan(CPUX86State *env)
 {
     double fptemp = floatx80_to_double(env, ST0);
@@ -2041,7 +2068,7 @@ void helper_fptan(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        fptemp = tan(fptemp);
+        fptemp = XEMU_LIBM(tan, fptemp);
         ST0 = double_to_floatx80(env, fptemp);
         fpush(env);
         ST0 = floatx80_one;
@@ -3189,9 +3216,9 @@ void helper_fsincos(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, sin(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(sin, fptemp));
         fpush(env);
-        ST0 = double_to_floatx80(env, cos(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(cos, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**63 only */
     }
@@ -3262,7 +3289,7 @@ void helper_fsin(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, sin(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(sin, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**53 only */
     }
@@ -3275,7 +3302,7 @@ void helper_fcos(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, cos(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(cos, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**63 only */
     }

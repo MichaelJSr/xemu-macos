@@ -42,6 +42,9 @@ static void x86_cpu_exec_enter(CPUState *cs)
 #if defined(XBOX) && defined(__aarch64__)
     /* The x87 RC into this thread's FPCR (main-thread FCW writers). */
     xemu_sync_host_rounding(env);
+#elif defined(XBOX) && defined(__x86_64__)
+    /* The x87 PC and RC into this thread's x87 control word. */
+    xemu_sync_host_x87_cw(env);
 #endif
 }
 

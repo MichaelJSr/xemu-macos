@@ -68,6 +68,10 @@ int xemu_sse_host_mode(void);
 /* translate.c: inline packed-single add/sub/mul/div on (HF_SSE_DFL kept). */
 extern int xemu_sse_vfp;
 #endif
+#if defined(XBOX) && defined(__x86_64__)
+/* fpu_helper.c: the guest's x87 PC and RC into this thread's x87 CW. */
+void xemu_sync_host_x87_cw(CPUX86State *env);
+#endif
 #if defined(XBOX) && defined(__aarch64__)
 /* fpu_helper.c: re-apply the x87 RC to this (vCPU) thread's FPCR. */
 void xemu_sync_host_rounding(CPUX86State *env);
