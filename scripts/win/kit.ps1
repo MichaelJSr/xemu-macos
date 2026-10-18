@@ -143,8 +143,9 @@ function Save-Shot([string]$Path, [int]$Qmp = 4444) {
   py -3 $Score $Path
 }
 
-# The run's log: stderr.log, or xemu.log when xemu found no console to attach to (ui/xemu.c
-# then sends both streams to xemu.log in its working directory, created at startup). Decide by
+# The run's log: stderr.log, or xemu.log when a v0.15.1 or older xemu found no console to attach to
+# (it then sends both streams to xemu.log in its working directory, created at startup; later builds
+# keep the redirected file). Decide by
 # xemu.log, not by stderr.log's size: stderr.log is still empty before xemu's first line.
 function Get-XemuLog([string]$Dir) {
   $x = Join-Path $Dir 'xemu.log'

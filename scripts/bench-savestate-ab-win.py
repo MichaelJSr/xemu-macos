@@ -812,11 +812,12 @@ class Bench:
     def dead_reason(self, base, logpath, arm, check_nsprof):
         """Name the two Windows failure shapes a bare exit code hides.
 
-        empty capture   xemu only inherits this harness's stdout when
-                        AttachConsole(ATTACH_PARENT_PROCESS) succeeds; with no
-                        console attached it freopens BOTH streams to xemu.log
-                        in its cwd (ui/xemu.c), leaving the redirected file
-                        here at 0 bytes with the real output in the sidecar.
+        empty capture   v0.15.1 and older only inherit this harness's
+                        stdout when AttachConsole(ATTACH_PARENT_PROCESS)
+                        succeeds; with no console attached they freopen BOTH
+                        streams to xemu.log in their cwd, leaving the
+                        redirected file here at 0 bytes with the real output
+                        in the sidecar (later builds keep redirected files).
         no nsprof       a log with zero interval headers means the run never
                         reached a 5 s summary (both renderers tick nsprof
                         since 2026-09-08); look at xemu.log and the run
