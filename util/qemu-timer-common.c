@@ -32,6 +32,7 @@ int64_t clock_start;
 #ifdef _WIN32
 
 int64_t clock_freq;
+int64_t clock_ns_mult;
 
 static void __attribute__((constructor)) init_get_clock(void)
 {
@@ -43,6 +44,9 @@ static void __attribute__((constructor)) init_get_clock(void)
         exit(1);
     }
     clock_freq = freq.QuadPart;
+    /* 10 MHz on every TSC-based Windows 10 1607+: 100 ns a tick */
+    clock_ns_mult = NANOSECONDS_PER_SECOND % clock_freq ? 0 :
+                    NANOSECONDS_PER_SECOND / clock_freq;
     clock_start = get_clock();
 }
 

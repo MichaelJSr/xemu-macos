@@ -825,11 +825,16 @@ extern int64_t clock_start;
    an infinite recursion! */
 #ifdef _WIN32
 extern int64_t clock_freq;
+extern int64_t clock_ns_mult;
 
 static inline int64_t get_clock(void)
 {
     LARGE_INTEGER ti;
     QueryPerformanceCounter(&ti);
+    /* xemu: the 128-bit divide only when ns aren't a whole tick multiple */
+    if (likely(clock_ns_mult)) {
+        return ti.QuadPart * clock_ns_mult;
+    }
     return muldiv64(ti.QuadPart, NANOSECONDS_PER_SECOND, clock_freq);
 }
 
