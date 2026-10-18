@@ -48,6 +48,52 @@ static inline void xbox_host_fp_leave(const XboxHostFp *s)
     }
 }
 
+#elif defined(__x86_64__)
+
+/*
+ * x86_64: the guest's precision and rounding control stay in the x87
+ * control word (target/i386 xemu_sync_host_x87_cw), so device code gets
+ * FE_DFL_ENV's control state, x87 CW 0x37f and MXCSR's 0x1f80 control
+ * bits, compare-skipped as on aarch64; mingw's fegetenv/fesetenv cost ~1%
+ * of the det vCPU. The exit puts both registers back exactly.
+ */
+#include <xmmintrin.h>
+
+typedef struct XboxHostFp {
+    uint32_t mxcsr;
+    uint16_t fpcw;
+} XboxHostFp;
+
+static inline void xbox_host_fp_enter(XboxHostFp *s)
+{
+    uint16_t cw, dflt = 0x037f;
+    uint32_t csr = _mm_getcsr();
+
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    s->fpcw = cw;
+    s->mxcsr = csr;
+    if (cw != dflt) {
+        __asm__ volatile("fldcw %0" : : "m"(dflt));
+    }
+    if (unlikely((csr & ~0x3fu) != 0x1f80)) {
+        _mm_setcsr(0x1f80 | (csr & 0x3f));
+    }
+}
+
+static inline void xbox_host_fp_leave(const XboxHostFp *s)
+{
+    uint16_t cw;
+    uint32_t csr = _mm_getcsr();
+
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    if (cw != s->fpcw) {
+        __asm__ volatile("fldcw %0" : : "m"(s->fpcw));
+    }
+    if (csr != s->mxcsr) {
+        _mm_setcsr(s->mxcsr);
+    }
+}
+
 #else
 
 #include <fenv.h>

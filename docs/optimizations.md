@@ -2851,10 +2851,18 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   writes each time. `hw/xbox/host_fp.h` reads FPCR and writes the
   default only when TCG left another x87 rounding mode in it (0 of
   430k pusher runs on heavy-f1 1200), puts it back only if it changed,
-  and leaves FPSR alone: nothing on the vCPU thread reads it. Other
-  hosts keep `fenv`. A pusher run costs ~75 fewer cycles (thread
-  counters around it, both arm orders, 8/8 pairs), ~0.1% of det
-  heavy-f1 cycles.
+  and leaves FPSR alone: nothing on the vCPU thread reads it. A pusher
+  run costs ~75 fewer cycles (thread counters around it, both arm
+  orders, 8/8 pairs), ~0.1% of det heavy-f1 cycles. x86_64 hosts do the
+  same with the x87 control word and MXCSR (2026-10-18): `fnstcw` and
+  `stmxcsr`, then FE_DFL_ENV's control state (CW `0x37f`, which mingw's
+  `fesetenv(FE_DFL_ENV)` sets, and MXCSR's `0x1f80` control bits) only
+  where they differ, put back exactly. The CW always differs there now
+  that it holds the guest's precision (Azurik: PC double), but two
+  `fldcw` cost far less than mingw's `fegetenv`/`fesetenv`
+  (`fnstenv`/`fldenv` plus encoding, ~0.9% of the det vCPU): det
+  heavy-f1 instructions −0.58% (4/4), core cycles −2.0% (3/4), goldens
+  unchanged. Other hosts keep `fenv`.
 - **BQL discipline.** `surface_access_callback` drops BQL before
   blocking so the vblank thread can still fire interrupts.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +
