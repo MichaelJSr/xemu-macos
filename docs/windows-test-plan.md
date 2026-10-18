@@ -9,7 +9,7 @@ Tags used below: **[owner]** means a person has to look, listen or hold the cont
 ### What is already known about this fork on Windows
 
 - The only earlier real-hardware session was 2026-09-07: Windows 10, i7-4770K, NVIDIA TITAN Xp. The Vulkan renderer rendered correctly. Upstream's DXGI presenter was fixed there (`2182baec46`). Audio picked `dsound`. The title screen ran at 21-25 fps, below its 30 fps cap, so that CPU had headroom to recover. Details are in `docs/Campaigns/windows-port-2026-09.md`.
-- One problem from that session is still open: native MSYS2 builds of the "wave-1" branch crashed intermittently (about 5 runs in 6) 6-10 s after launch. Review blamed the `-O3 -Dstack_protector=disabled` flags, but that was never confirmed on hardware. Release zips are CI cross-builds at `-O2`, and today `-O3` is opt-in (`XEMU_WIN_O3=1`). The protocol is in section 7.3.
+- One problem from that session is still open: native MSYS2 builds of the "wave-1" branch crashed intermittently (about 5 runs in 6) 6-10 s after launch. Review blamed the `-O3 -Dstack_protector=disabled` flags, but that was never confirmed on hardware. 2026-10-18: it was SDL's WIN_OpenClipboard race (fixed in the SDL wrap); the 7.3 protocol ran clean on both `-O2` and `-O3`, and x86_64 builds now default to `-O3`.
 - v0.13.1 gave a black screen on an AMD GPU. It was fixed in v0.13.2 (two Vulkan spec violations that MoltenVK tolerated). The current renderer has never been checked on AMD or Intel hardware.
 - Everything that shipped from v0.14 onward has never run on real Windows. That covers headless mode, the QMP automation commands, deterministic mode and its goldens, `XEMU_RAM_SHM` (a Windows named file mapping), the `XEMU_INPUT_PIPE` named pipe in a full run, the normal-mode BQL spin and KiIdle halt, and the fork's aarch64 TCG backend on Windows ARM64. `scripts/bench-savestate-ab-win.py` has never driven a full A/B, so expect rough edges and fix them as commits (section 6.3).
 - `docs/windows-gating-audit.md` lists what CI compile alone has validated: the B-list, D1-D8 and I.9-I.11. `docs/roadmap.md` item 5 and xemu-history's frontier item 4 ("Real-hardware validation debt") track the same debt.
@@ -889,7 +889,7 @@ Upstream v0.8.137 most likely can't load the fork's savestates, because the fork
 
 ### 4.8 Local builds [P2]
 
-Builds go through section 7. The cross-binary A/Bs worth having are the CI release against a native MSYS2 `-O2` build (toolchain effect), native `-O2` against `XEMU_WIN_O3=1`, and native `-O2` against GCC PGO. Run each with `py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 4 75 <out> --b-exe <B> --e-exe <E>`, plus 4.6 with `--exe` swapped per arm.
+Builds go through section 7. The cross-binary A/Bs worth having are the CI release against a native MSYS2 `-O2` build (toolchain effect), native `-O2` (`./build.sh -Doptimization=2 -Dstack_protector=auto`) against the default `-O3`, and native against GCC PGO. Run each with `py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 4 75 <out> --b-exe <B> --e-exe <E>`, plus 4.6 with `--exe` swapped per arm.
 
 ### Numbers to bring back
 
@@ -1054,8 +1054,8 @@ Only run this if section 2.2 or any native build crashed. Pre-commit the interpr
 . C:\xemu-kit\tools\kit.ps1
 $msys = 'C:\msys64\usr\bin\bash.exe'; $env:MSYSTEM = 'MINGW64'; $env:CHERE_INVOKING = '1'; Set-Location $Repo
 git rev-parse HEAD
-& $msys -lc 'rm -rf build && ./build.sh 2>&1 | tail -n 3'; Copy-Dist local-O2                  # arm A (control)
-& $msys -lc 'rm -rf build && XEMU_WIN_O3=1 ./build.sh 2>&1 | tail -n 3'; Copy-Dist local-O3     # arm B
+& $msys -lc 'rm -rf build && ./build.sh -Doptimization=2 -Dstack_protector=auto 2>&1 | tail -n 3'; Copy-Dist local-O2   # arm A (control)
+& $msys -lc 'rm -rf build && ./build.sh 2>&1 | tail -n 3'; Copy-Dist local-O3     # arm B (the default since 2026-10-18)
 Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING
 foreach ($arm in 'local-O2', 'local-O3') { 1..6 | ForEach-Object {
   $d = New-Scratch -Name "$arm-$_"; $p = Start-Xemu -Exe "$Kit\bin\$arm\xemu.exe" -Dir $d -Stub

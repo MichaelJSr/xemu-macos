@@ -51,11 +51,9 @@ Metal/IOSurface presentation, vDSP, the ARM64 DSP JIT, the
 AArch64 inline x87 FPU) compile out.
 
 - **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
-  builds default to `-Dx86_version=3` (AVX2/BMI2/FMA) at meson's project
-  default `optimization=2`, i.e. `-O2`; `XEMU_WIN_O3=1` opts into `-O3`
-  with the stack protector disabled, which is experimental — no CI leg
-  builds that configuration and the 2026-09-08 review names exactly that
-  flip as the prime suspect for an intermittent crash on the Windows box.
+  builds default to `-Dx86_version=3` (AVX2/BMI2/FMA) at `-O3` with the
+  stack protector off, as on macOS and Linux (x86_64 only; Windows arm64
+  stays at `-O2`).
   `XEMU_PGO` works on the stock MSYS2 GCC toolchain since 2026-09-08:
   `build.sh` probes the compiler family and drives gcov `.gcda` profiles
   (`-fprofile-generate` / `-fprofile-use`) instead of `llvm-profdata`,
@@ -83,7 +81,6 @@ AArch64 inline x87 FPU) compile out.
 |---|---|---|
 | `XEMU_ARM_CPU` | auto | Override `-mcpu=`; auto-picks `apple-mN` from `sysctl machdep.cpu.brand_string` |
 | `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use`. A trained profile is committed at `pgo/default.profdata` and applied by CI to arm64 release builds (+9.4% fps). Retrain after large code churn: `generate` build → `scripts/pgo-train.py` on a clone of the bundle → `use` build → commit the regenerated profdata. A `use` build prints a staleness summary (hot-path CFG-hash mismatches + commits since retrain) and warns when the profile has drifted — see the ledger |
-| `XEMU_WIN_O3` | `0` | Native MSYS2/MinGW only: `1` builds the release at `-Doptimization=3 -Dstack_protector=disabled` instead of meson's `-O2` + probed `-fstack-protector-strong`. Experimental, uncovered by CI, and the leading suspect for the 2026-09-07 native-Windows crash — see the ledger before using it. Ignored on `win64-cross` |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_MOLTENVK_VERSION` | `1.4.2` | MoltenVK release auto-vendored into `macos-libs` when no usable system copy exists. This default is the single home for the expected version — macOS CI asserts the packaged bundle's provenance line matches it |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
