@@ -421,3 +421,82 @@ void tcg_gen_sub_f64(TCGv_f64 ret, TCGv_f64 arg1, TCGv_f64 arg2)
     tcg_gen_op3(INDEX_op_sub_f64, TCG_TYPE_F64,
                 tcgv_f64_arg(ret), tcgv_f64_arg(arg1), tcgv_f64_arg(arg2));
 }
+
+/* x87_*: images at [ptr + ofs], the host x87 unit computing (x86 hosts). */
+void tcg_gen_x87_arith(int op, TCGv_ptr a, tcg_target_long aofs,
+                       TCGv_ptr b, tcg_target_long bofs)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op5(INDEX_op_x87_arith, TCG_TYPE_I64, tcgv_ptr_arg(a),
+                tcgv_ptr_arg(b), aofs, bofs, op);
+}
+
+void tcg_gen_x87_arith_i32(int op, int type, TCGv_ptr a, tcg_target_long ofs,
+                           TCGv_i32 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_arith_m, TCG_TYPE_I64, tcgv_ptr_arg(a),
+                tcgv_i32_arg(val), ofs, op | type << 3);
+}
+
+void tcg_gen_x87_arith_i64(int op, int type, TCGv_ptr a, tcg_target_long ofs,
+                           TCGv_i64 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_arith_m, TCG_TYPE_I64, tcgv_ptr_arg(a),
+                tcgv_i64_arg(val), ofs, op | type << 3);
+}
+
+void tcg_gen_x87_ld_i32(int type, TCGv_ptr d, tcg_target_long ofs,
+                        TCGv_i32 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_ld, TCG_TYPE_I64, tcgv_ptr_arg(d),
+                tcgv_i32_arg(val), ofs, type);
+}
+
+void tcg_gen_x87_ld_i64(int type, TCGv_ptr d, tcg_target_long ofs,
+                        TCGv_i64 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_ld, TCG_TYPE_I64, tcgv_ptr_arg(d),
+                tcgv_i64_arg(val), ofs, type);
+}
+
+void tcg_gen_x87_st_i32(TCGv_i32 ret, TCGv_ptr s, tcg_target_long ofs)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_st, TCG_TYPE_I64, tcgv_i32_arg(ret),
+                tcgv_ptr_arg(s), ofs, TCG_X87_M32F);
+}
+
+void tcg_gen_x87_st_i64(TCGv_i64 ret, TCGv_ptr s, tcg_target_long ofs)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op4(INDEX_op_x87_st, TCG_TYPE_I64, tcgv_i64_arg(ret),
+                tcgv_ptr_arg(s), ofs, TCG_X87_M64F);
+}
+
+void tcg_gen_x87_cmp(TCGv_i32 ret, TCGv_ptr a, tcg_target_long aofs,
+                     TCGv_ptr b, tcg_target_long bofs)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op5(INDEX_op_x87_cmp, TCG_TYPE_I64, tcgv_i32_arg(ret),
+                tcgv_ptr_arg(a), tcgv_ptr_arg(b), aofs, bofs);
+}
+
+void tcg_gen_x87_cmp_i32(TCGv_i32 ret, int type, TCGv_ptr a,
+                         tcg_target_long ofs, TCGv_i32 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op5(INDEX_op_x87_cmp_m, TCG_TYPE_I64, tcgv_i32_arg(ret),
+                tcgv_ptr_arg(a), tcgv_i32_arg(val), ofs, type);
+}
+
+void tcg_gen_x87_cmp_i64(TCGv_i32 ret, int type, TCGv_ptr a,
+                         tcg_target_long ofs, TCGv_i64 val)
+{
+    tcg_debug_assert(TCG_TARGET_HAS_x87);
+    tcg_gen_op5(INDEX_op_x87_cmp_m, TCG_TYPE_I64, tcgv_i32_arg(ret),
+                tcgv_ptr_arg(a), tcgv_i64_arg(val), ofs, type);
+}

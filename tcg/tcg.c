@@ -2858,6 +2858,13 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_ld80d;
     case INDEX_op_rint_f64:
         return TCG_TARGET_HAS_rint_f64;
+    case INDEX_op_x87_arith:
+    case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_ld:
+    case INDEX_op_x87_st:
+    case INDEX_op_x87_cmp:
+    case INDEX_op_x87_cmp_m:
+        return TCG_TARGET_HAS_x87;
     case INDEX_op_quiet_f64:
         return TCG_TARGET_HAS_quiet_f64;
     case INDEX_op_movcond_f64:
