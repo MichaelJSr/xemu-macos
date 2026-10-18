@@ -855,6 +855,13 @@ void *pfifo_thread(void *arg)
 
 #if defined(__APPLE__)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    {
+        const char *e = getenv("XEMU_VCPU_QOS"); /* with the vCPU */
+        if (!(e && e[0] == '0')) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        }
+    }
 #endif
 
     pgraph_init_thread(d);

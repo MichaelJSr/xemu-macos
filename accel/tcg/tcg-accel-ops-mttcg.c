@@ -94,6 +94,19 @@ static void *mttcg_cpu_thread_fn(void *arg)
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         }
     }
+#elif defined(XBOX) && defined(_WIN32)
+    {
+        /*
+         * Windows doesn't decay a busy thread below its base priority, but
+         * at the same base it shares its core with every other runnable
+         * thread under host load. XEMU_VCPU_QOS=0 leaves it at normal, with
+         * PFIFO and the APU frame thread.
+         */
+        const char *e = getenv("XEMU_VCPU_QOS");
+        if (!(e && e[0] == '0')) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        }
+    }
 #endif
 
 #ifdef XBOX
