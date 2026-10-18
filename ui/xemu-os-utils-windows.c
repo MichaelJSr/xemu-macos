@@ -26,23 +26,28 @@
 static const char *get_windows_build_info(void)
 {
     WCHAR current_build[1024], product_name[1024];
-    WCHAR build_size = 1024, product_size = 1024;
+    /* Sizes in bytes, as DWORDs: RegGetValueW writes the size back. */
+    DWORD build_size = sizeof(current_build);
+    DWORD product_size = sizeof(product_name);
 
     if (RegGetValueW(HKEY_LOCAL_MACHINE,
                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
                      L"ProductName", RRF_RT_REG_SZ, (LPVOID)NULL, &product_name,
-                     (LPDWORD)&product_size) != ERROR_SUCCESS) {
+                     &product_size) != ERROR_SUCCESS) {
         return "Windows";
     }
 
-    if ((RegGetValueW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                      L"DisplayVersion", RRF_RT_REG_SZ, (LPVOID)NULL,
-                      &current_build, (LPDWORD)&build_size) == ERROR_SUCCESS) ||
-        (RegGetValueW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                      L"CSDVersion", RRF_RT_REG_SZ, (LPVOID)NULL,
-                      &current_build, (LPDWORD)&build_size) == ERROR_SUCCESS)) {
+    if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     L"DisplayVersion", RRF_RT_REG_SZ, (LPVOID)NULL,
+                     &current_build, &build_size) == ERROR_SUCCESS) {
+        return g_strdup_printf("%ls %ls", product_name, current_build);
+    }
+    build_size = sizeof(current_build);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     L"CSDVersion", RRF_RT_REG_SZ, (LPVOID)NULL,
+                     &current_build, &build_size) == ERROR_SUCCESS) {
         return g_strdup_printf("%ls %ls", product_name, current_build);
     }
 
