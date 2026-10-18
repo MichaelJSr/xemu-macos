@@ -21,7 +21,10 @@ PNG at each stop; --pages saves per-page hashes at each stop; --wav records
 the APU output (XEMU_AUDIO_WAV) and hashes it. Artifacts go to --save. One
 JSON line per run on stdout, appended to --out when given. Mcyc/frame comes
 from QueryProcessCycleTime (whole process, TSC-rate cycles: CPU time, not
-core clocks as on macOS).
+core clocks as on macOS, so it rises when hyperthread siblings are busy).
+--pmc adds instructions and core cycles per frame over the advances, from a
+kernel context-switch trace with hardware counters (elevated shell, Windows
+Performance Toolkit's xperf): Minsns/frame doesn't move with host load.
 """
 import argparse
 import ctypes
@@ -30,7 +33,6 @@ import importlib.util
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -38,7 +40,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-KIT = os.environ.get('XEMU_KIT') or r'C:\xemu-kit'
+KIT = os.environ.get('XEMU_KIT') or next(   # as kit.ps1: the kit beside the repo, else C:\xemu-kit
+    (d for d in (os.path.join(os.path.dirname(REPO), 'xemu-kit'), r'C:\xemu-kit')
+     if os.path.isfile(os.path.join(d, 'SHA256SUMS.txt'))), os.path.join(os.path.dirname(REPO), 'xemu-kit'))
 
 
 def _load(name, path):
@@ -56,6 +60,7 @@ _k32.OpenProcess.restype = ctypes.c_void_p
 _k32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
 _k32.QueryProcessCycleTime.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64))
 _k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+_k32.SetProcessAffinityMask.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
 
 
 def cycles(h):
@@ -63,12 +68,52 @@ def cycles(h):
     return c.value if h and _k32.QueryProcessCycleTime(h, ctypes.byref(c)) else 0
 
 
-def free_port():
-    s = socket.socket()
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+XPERF = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+                     'Windows Kits', '10', 'Windows Performance Toolkit', 'xperf.exe')
+
+
+def pmc_start(etl):
+    """Kernel trace of context switches with the instructions-retired and core-cycle counters
+    (needs an elevated shell and the Windows Performance Toolkit)."""
+    subprocess.run([XPERF, '-on', 'PROC_THREAD+CSWITCH', '-pmc', 'InstructionRetired,UnhaltedCoreCycles',
+                    'CSWITCH', 'strict', '-BufferSize', '1024', '-MinBuffers', '64', '-MaxBuffers', '1024',
+                    '-f', etl], check=True, capture_output=True)
+
+
+def pmc_stop(etl, pid):
+    """Stop the trace and sum the counters over pid's threads: each Pmc event holds its CPU's
+    running counts at a switch, so the delta to the CPU's previous switch belongs to the thread
+    switched out. Returns (instructions, core cycles, events lost)."""
+    subprocess.run([XPERF, '-stop'], check=True, capture_output=True)
+    txt = etl + '.txt'
+    subprocess.run([XPERF, '-i', etl, '-o', txt, '-a', 'dumper'], check=True, capture_output=True)
+    last, pend, ins, cyc, lost = {}, None, 0, 0, None
+    tag = '(%d)' % pid
+    with open(txt, errors='replace') as f:
+        for line in f:
+            s = line.lstrip()
+            if s.startswith('Pmc,'):
+                p = s.split(',')
+                pend = (int(p[3]), int(p[4])) if p[3].strip().isdigit() else None
+            elif s.startswith('CSwitch,') and pend:
+                p = s.split(',')
+                cpu = p[16].strip()
+                if cpu in last and tag in p[8].replace(' ', ''):
+                    ins += pend[0] - last[cpu][0]
+                    cyc += pend[1] - last[cpu][1]
+                last[cpu] = pend
+                pend = None
+            elif lost is None and 'Events Lost:' in s:
+                lost = int(s.split('Events Lost:')[1].split(',')[0])
+    for p in (etl, txt):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return ins, cyc, lost
+
+
+free_port = bw.free_port
 
 
 def run(a):
@@ -81,7 +126,7 @@ def run(a):
     res = {'label': a.label, 'exe': a.exe, 'tag': a.tag, 'input': a.input,
            'set': a.set, 'env': a.env, 'renderer': a.renderer}
     proc = h = log = hdd = None
-    rc = 1
+    rc, tracing = 1, False
     try:
         t = bw.TomlEdit(open(a.config, encoding='utf-8', errors='replace').read())
         hdd, eep = os.path.join(d, 'hdd.qcow2'), os.path.join(d, 'eeprom.bin')
@@ -118,7 +163,9 @@ def run(a):
                '-S', '-icount', a.icount] + pads
         log = open(os.path.join(d, 'stderr.log'), 'w')
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log, cwd=d, env=env)
-        h = _k32.OpenProcess(0x1000, False, proc.pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        h = _k32.OpenProcess(0x1000 | 0x0200, False, proc.pid)  # QUERY_LIMITED_INFORMATION | SET_INFORMATION
+        if a.affinity:
+            _k32.SetProcessAffinityMask(h, ctypes.c_size_t(int(a.affinity, 0)))
         q = ctl.QMP(port, 120)
         ctl.wait_ready(q, 180, proc)
         q.cmd('stop')
@@ -139,6 +186,10 @@ def run(a):
             time.sleep(0.3)
             res['queued'] = len(q.cmd('query-xemu-input').get('queued') or [])
         done, wall, cyc, hashes, dig = 0, 0.0, 0, [], {}
+        etl = os.path.join(d, 'pmc.etl')
+        if a.pmc:
+            pmc_start(etl)
+            tracing = True
         for s in stops:
             c0, t0 = cycles(h), time.time()
             adv = q.cmd('xemu-frame-advance', frames=s - done)
@@ -149,19 +200,30 @@ def run(a):
                 raise RuntimeError('advance to %d ended early: %r' % (s, adv))
             dig = q.cmd('xemu-ram-digest', pages=True) if a.pages else q.cmd('xemu-ram-digest')
             hashes.append('f%d=%s' % (s, dig['sha256'][:16]))
+            res['hashes'] = ' '.join(hashes)  # kept if a later stop or the quit fails
             if a.pages:
                 with open(os.path.join(a.save, '%s-f%d.pages' % (tag, s)), 'w') as f:
                     f.write(dig['page-hashes'])
             if a.shots:
                 q.cmd('screendump', filename=os.path.join(a.save, '%s-f%d.png' % (tag, s)), format='png')
+        res.update(hashes=' '.join(hashes), fps=round(done / wall, 1) if wall else None,
+                   mcyc_per_frame=round(cyc / done / 1e6, 2) if done else None,
+                   wall_s=round(wall, 1), ram_size=dig.get('ram-size'), run=tag)
+        if a.pmc:
+            tracing = False
+            ins, core, lost = pmc_stop(etl, proc.pid)
+            res.update(minsns_per_frame=round(ins / done / 1e6, 3), mcore_per_frame=round(core / done / 1e6, 2),
+                       pmc_events_lost=lost)
         try:
             q.cmd('quit')
         except (EOFError, OSError):
             pass
-        proc.wait(timeout=60)
-        res.update(hashes=' '.join(hashes), fps=round(done / wall, 1) if wall else None,
-                   mcyc_per_frame=round(cyc / done / 1e6, 2) if done else None,
-                   wall_s=round(wall, 1), ram_size=dig.get('ram-size'), run=tag)
+        # A crash or a debug-build assert during teardown must not pass as a clean run: a
+        # nonzero exit takes the failure path, which keeps the logs.
+        code = proc.wait(timeout=180)
+        res['exit_code'] = code
+        if code:
+            raise RuntimeError('xemu exited %#x after quit' % (code & 0xffffffff))
         if a.wav and os.path.exists(wav):
             with open(wav, 'rb') as f:
                 res['wav_sha256'] = hashlib.sha256(f.read()).hexdigest()[:16]
@@ -169,6 +231,8 @@ def run(a):
     except Exception as e:  # one JSON line either way
         res['error'] = '%s: %s' % (type(e).__name__, e)
     finally:
+        if tracing:
+            subprocess.run([XPERF, '-stop'], capture_output=True)
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait(timeout=30)
@@ -215,6 +279,10 @@ def main():
     ap.add_argument('--pages', action='store_true', help='save per-page hashes at each stop')
     ap.add_argument('--wav', action='store_true', help='record the APU output and hash it')
     ap.add_argument('--save', default=os.path.join(KIT, 'results', 'det'), help='artifact folder')
+    ap.add_argument('--pmc', action='store_true',
+                    help='instructions and core cycles per frame from a kernel trace (elevated, Windows Performance Toolkit)')
+    ap.add_argument('--affinity', default='',
+                    help='CPU mask for xemu (e.g. 0x0f), to keep it off the cores a parallel build uses')
     ap.add_argument('--label', default='')
     ap.add_argument('--out', default='', help='append the JSON line to this file')
     ap.add_argument('--keep', action='store_true',
