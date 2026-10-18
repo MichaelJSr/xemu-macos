@@ -127,6 +127,8 @@ function Start-Xemu([string]$Exe, [string]$Dir, [hashtable]$Vars = @{}, [string[
     $proc = Start-Process -FilePath $Exe -ArgumentList $argv -WorkingDirectory $Dir -PassThru `
       -RedirectStandardOutput (Join-Path $Dir 'stdout.log') -RedirectStandardError (Join-Path $Dir 'stderr.log')
     $null = $proc.Handle   # keep a handle open so ExitCode survives the exit
+    # $env:XEMU_KIT_AFFINITY (e.g. 0xF0) keeps functional runs off the cores a det A/B uses.
+    if ($env:XEMU_KIT_AFFINITY) { $proc.ProcessorAffinity = [IntPtr][Convert]::ToInt64($env:XEMU_KIT_AFFINITY, 16) }
     $proc
   } finally {
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
