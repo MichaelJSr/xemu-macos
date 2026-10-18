@@ -20,7 +20,12 @@ import socket
 import sys
 import time
 
-LONG = 3600  # seconds one QMP command may take (a long xemu-frame-advance)
+LONG = 3600  # seconds a long-running QMP command may take (a long xemu-frame-advance)
+SHORT = 120  # seconds any other command may take; a live xemu answers in well under one
+HANDSHAKE = 15  # seconds for the greeting and qmp_capabilities
+LONG_CMDS = ('xemu-frame-advance', 'xemu-run', 'xemu-run-until', 'xemu-dump-ram',
+             'xemu-checkpoint-save', 'xemu-checkpoint-restore')
+QUICK = {'quit': 10, 'screendump': 60}  # so Stop-Xemu's kill and Save-Shot don't wait on a hung xemu
 
 
 def die(msg, code=1):
@@ -39,13 +44,18 @@ class QMP:
                 if time.time() > end:
                     raise RuntimeError('no QMP listener on 127.0.0.1:%d' % port)
                 time.sleep(0.25)
-        self.s.settimeout(LONG)
+        self.s.settimeout(HANDSHAKE)
         self.f = self.s.makefile('rw', encoding='utf-8', newline='\n')
         if not self.f.readline():
             raise RuntimeError('QMP closed before its greeting')
-        self.cmd('qmp_capabilities')
+        self.cmd('qmp_capabilities', _timeout=HANDSHAKE)
 
-    def cmd(self, name, **args):
+    def cmd(self, name, /, _timeout=None, **args):
+        """One command; the socket timeout bounds the whole reply (TimeoutError past it).
+        name is positional-only, so commands with a 'name' argument (xemu-checkpoint-*) work."""
+        if _timeout is None:
+            _timeout = LONG if name in LONG_CMDS else QUICK.get(name, SHORT)
+        self.s.settimeout(_timeout)
         msg = {'execute': name}
         if args:
             msg['arguments'] = args
@@ -63,8 +73,8 @@ class QMP:
                 raise RuntimeError('%s: %s %s' % (name, err.get('class', ''), err.get('desc', err)))
             return r.get('return')
 
-    def hmp(self, line):
-        return self.cmd('human-monitor-command', **{'command-line': line})
+    def hmp(self, line, timeout=SHORT):
+        return self.cmd('human-monitor-command', _timeout=timeout, **{'command-line': line})
 
     def close(self):
         try:
@@ -84,11 +94,11 @@ def wait_ready(q, timeout, proc=None):
 
 
 def loadvm(q, tag, timeout):
+    end = time.time() + timeout
     before = q.cmd('query-xemu-status')['loads']
-    out = q.hmp('loadvm ' + tag)
+    out = q.hmp('loadvm ' + tag, timeout)
     if 'rror' in out:
         raise RuntimeError('loadvm %s: %s' % (tag, out.strip()))
-    end = time.time() + timeout
     while q.cmd('query-xemu-status')['loads'] <= before:
         if time.time() > end:
             raise RuntimeError('loadvm %s: no completed load after %ds' % (tag, timeout))
@@ -203,8 +213,8 @@ def main(argv):
                 args[k] = value(v)
             try:
                 print(json.dumps(q.cmd(rest[0], **args)))
-            except EOFError:
-                if rest[0] != 'quit':
+            except (EOFError, ConnectionError, TimeoutError):
+                if rest[0] != 'quit':  # a quit that closes, resets or stalls is left to the caller's kill
                     raise
         elif op == 'hmp':
             out = q.hmp(' '.join(rest))
