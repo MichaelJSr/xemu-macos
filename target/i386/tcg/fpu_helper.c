@@ -4098,9 +4098,11 @@ void helper_emms(CPUX86State *env)
  * the guest instructions — bit-perfect for every operand class
  * including NaN payload selection and (-0,+0) ordering — and the
  * MXCSR bracket can match FTZ and DAZ independently (no mixed-mode
- * fallback). Sticky-flag accumulation is still skipped (same
- * hard-fpu-family acceptance). Untested on real x86_64 hardware, so it
- * ships dark there: XEMU_SSE_HOST=1 opts in (requires perf.hard_fpu).
+ * fallback), and the ops raise the guest's sticky MXCSR flags exactly
+ * (aarch64 skips them: the hard-fpu-family acceptance). On by default
+ * with perf.hard_fpu since XEMU_SSE_HOST=2 ran clean on an i7-4770K
+ * (2026-10-18: det heavy-f1 and stream-e2 hashes equal softfloat's, a
+ * 5 min live walk).
  *
  * XEMU_SSE_HOST=2, on any host, runs BOTH paths with strict brackets
  * and aborts on any non-NaN-class divergence (differential self-check;
@@ -4114,11 +4116,7 @@ static int xemu_sse_neon_mode(void)
         if (e && e[0] == '2') {
             mode = 2;
         } else {
-#if defined(__aarch64__)
             mode = g_config.perf.hard_fpu ? 1 : 0;
-#else
-            mode = (e && e[0] == '1' && g_config.perf.hard_fpu) ? 1 : 0;
-#endif
         }
     }
     return mode;
@@ -4208,6 +4206,27 @@ typedef float32x4_t xemu_v4f;
 #define XEMU_MXCSR_FZ  (1u << 15)
 #define XEMU_MXCSR_DAZ (1u << 6)
 #define XEMU_MXCSR_RC_MASK (3u << 13)
+#define XEMU_MXCSR_FLAGS 0x3fu
+
+/*
+ * The host MXCSR's exception flags hold the guest's sticky SSE flags while
+ * an op runs, so the op's own flags land on top of them and the leave adds
+ * the result to sse_status exactly; with the guest's PE already set (the
+ * usual case) neither side writes MXCSR.
+ */
+static inline uint32_t xemu_mxcsr_flags(const float_status *st)
+{
+    int f = get_float_exception_flags(st);
+
+    return (f & float_flag_invalid ? FPUS_IE : 0) |
+           (f & float_flag_input_denormal_used ? FPUS_DE : 0) |
+           (f & float_flag_divbyzero ? FPUS_ZE : 0) |
+           (f & float_flag_overflow ? FPUS_OE : 0) |
+           (f & (float_flag_underflow | float_flag_output_denormal_flushed) ?
+            FPUS_UE : 0) |
+           (f & (float_flag_inexact | float_flag_output_denormal_flushed) ?
+            FPUS_PE : 0);
+}
 
 static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
@@ -4215,7 +4234,8 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
     /* Same RN forcing as the aarch64 bracket: usable() verified the
      * guest wants RN; clear any rounding mode leaked into MXCSR by
      * the x87 hard-FPU path. */
-    want = csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ | XEMU_MXCSR_RC_MASK);
+    want = (csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ | XEMU_MXCSR_RC_MASK |
+                    XEMU_MXCSR_FLAGS)) | xemu_mxcsr_flags(&env->sse_status);
     if (env->sse_status.flush_to_zero) {
         want |= XEMU_MXCSR_FZ;
     }
@@ -4253,7 +4273,7 @@ static inline void xemu_hostfp_leave(uint64_t saved)
 #define XEMU_FP_PIN(x) __asm__ volatile("" : "+x"(x))
 #endif
 
-static inline void xemu_hostfp_leave_lazy(uint64_t saved)
+static inline void xemu_hostfp_leave_lazy(CPUX86State *env, uint64_t saved)
 {
     /*
      * The x87 hard-FPU helpers and write-through ops round with whatever
@@ -4264,7 +4284,31 @@ static inline void xemu_hostfp_leave_lazy(uint64_t saved)
      * guest x87 and SSE agree (Azurik: FCW nearest, MXCSR without FTZ);
      * only directed x87 rounding windows and FTZ titles pay the writes.
      */
+#if defined(__aarch64__)
     xemu_hostfp_leave(saved);
+#else
+    /*
+     * x86_64: the host op raised the guest's own MXCSR flags, so add them
+     * to sse_status as softfloat would (a guest STMXCSR or FXSAVE stores
+     * them), and give the host its control bits back; the flags stay.
+     */
+    uint32_t csr = _mm_getcsr();
+    uint32_t want = ((uint32_t)saved & ~XEMU_MXCSR_FLAGS) |
+                    (csr & XEMU_MXCSR_FLAGS);
+
+    if (csr & XEMU_MXCSR_FLAGS) {
+        env->sse_status.float_exception_flags |=
+            (csr & FPUS_IE ? float_flag_invalid : 0) |
+            (csr & FPUS_DE ? float_flag_input_denormal_used : 0) |
+            (csr & FPUS_ZE ? float_flag_divbyzero : 0) |
+            (csr & FPUS_OE ? float_flag_overflow : 0) |
+            (csr & FPUS_UE ? float_flag_underflow : 0) |
+            (csr & FPUS_PE ? float_flag_inexact : 0);
+    }
+    if (csr != want) {
+        _mm_setcsr(want);
+    }
+#endif
 }
 
 #if !defined(__aarch64__)
@@ -4298,7 +4342,7 @@ static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     XEMU_FP_PIN(a); XEMU_FP_PIN(b);                                         \
     xemu_v4f r = (EXPR);                                                    \
     XEMU_FP_PIN(r);                                                         \
-    xemu_hostfp_leave_lazy(saved);                                          \
+    xemu_hostfp_leave_lazy(env, saved);                                     \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         ZMMReg sv = *v, ss2 = *s;                                           \
         uint32_t got[4];                                                    \
@@ -4340,7 +4384,7 @@ static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     XEMU_FP_PIN(fa); XEMU_FP_PIN(fb);                                       \
     fr = (SEXPR);                                                           \
     XEMU_FP_PIN(fr);                                                        \
-    xemu_hostfp_leave_lazy(saved);                                          \
+    xemu_hostfp_leave_lazy(env, saved);                                     \
     memcpy(&out, &fr, 4);                                                   \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \

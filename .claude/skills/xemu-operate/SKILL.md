@@ -292,7 +292,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | *Off by default* | | |
 | `XEMU_GUEST_MO=1` | Keep every guest memory-order barrier (normal mode drops the load-load ones and icount all, until a network backend attaches) | top-level `tcg/tcg-op-ldst.c` |
 | `XEMU_SUBPAGE_FAST=1` | Non-Apple aarch64 opt-in for the sub-page store prefilter (arm b), unvalidated there; always on in Apple builds, inert on x86_64 | `tcg/xemu-subpage-fast.c` |
-| `XEMU_SSE_HOST=1`, `=2` | x86_64: host SSE fast path (always on for aarch64 with `hard_fpu`); `=2`: differential self-check, any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
+| `XEMU_SSE_HOST=2` | Differential self-check of the host SSE fast path (on by default with `hard_fpu` on every host), any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
 | `XEMU_STRICT_CPUID=1` | Instructions the guest CPU model lacks raise #UD (pentium3: SSE2, SSE3's FISTTP, LFENCE), reported on stderr and as QMP `XEMU_CPUID_FAULT`; by default TCG runs them. A new legacy 0F-map SSE opcode from an upstream merge needs a row in its table | `i386/xemu_strict_cpuid.c` (table: `i386/xemu-strict-cpuid.c.inc`) |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_PFIFO_STALL_DOORBELL=0` | Normal mode: a DMA_PUT doorbell inside a flip stall wakes the PFIFO thread again (by default it only publishes PUT) | `hw/xbox/nv2a/nv2a.c` |

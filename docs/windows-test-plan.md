@@ -615,7 +615,7 @@ Also run the heavy-f1 golden once with the debug build (`--exe $XNewDbg`). Its a
 
 ### 3.8 `XEMU_SSE_HOST=2` differential [agent, P1, 15 min]
 
-Mode 2 runs the host SSE path and softfloat side by side and aborts on any divergence that isn't NaN-class. It's the gate before `XEMU_SSE_HOST=1` can stop being dark on x86_64. Roadmap item 5 notes one un-root-caused ±0 sign divergence that only showed under Rosetta.
+Mode 2 runs the host SSE path and softfloat side by side and aborts on any divergence that isn't NaN-class. It was the gate that turned the host path on for x86_64 (2026-10-18). Roadmap item 5 notes one un-root-caused ±0 sign divergence that only showed under Rosetta.
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -628,7 +628,7 @@ Start-Sleep 300; $alive = -not $p.HasExited; Stop-Xemu $p; "alive after 5 min: $
 Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'SSE|diverg' | Select-Object -Last 5
 ```
 
-Pass: no abort, the process is alive after 5 minutes, and on x86_64 the det hash equals the default-config hash from 3.7 for the same frames (softfloat is the default there). If it's clean, run the `XEMU_SSE_HOST=1` speed A/B in 4.5.
+Pass: no abort, the process is alive after 5 minutes, and on x86_64 the det hash equals the default-config hash from 3.7 for the same frames (softfloat is the default there). Builds before 2026-10-18 ran softfloat by default on x86_64; later ones run the host path, and mode 2 checks it.
 
 ### 3.9 Windows ARM64 only [agent, P1, 45 min]
 
@@ -858,7 +858,7 @@ $env:XEMU_LOADVM_ADD_PADS = '1'
 py -3 $Bench azurik-heavy-f1 XEMU_BQL_SPIN 3 60 "$Res\bench-bqlspin" --exe $XNew              # B no spin, E spin (default)
 py -3 $Bench azurik-heavy-f1 XEMU_KI_IDLE_HALT 3 60 "$Res\bench-kiidle" --exe $XNew          # B spin in KiIdleLoop, E halt (default)
 py -3 $Bench azurik-heavy-f1 XEMU_PFIFO_STALL_DOORBELL 3 60 "$Res\bench-stalldb" --exe $XNew # B always wake, E default
-py -3 $Bench azurik-heavy-f1 XEMU_SSE_HOST 3 60 "$Res\bench-ssehost" --exe $XNew             # x86_64, only after 3.8 passed
+py -3 $Bench azurik-heavy-f1 XEMU_SSE_HOST 3 60 "$Res\bench-ssehost" --exe $XNew             # x86_64 v0.15.1 only; later builds have it on
 ```
 
 Pass for each default: E is no slower than B within noise, and CPU% isn't worse. The KiIdle halt depends on Windows condition-variable wake latency and the BQL spin on QueryPerformanceCounter cost, so a regression is a plausible Windows-only finding. For the DSP engine (audit batch 21, most useful on ARM64), the bench can't vary the config between arms. Run the 4.3 heavy-f1 baseline twice instead: once with the default template, and once with `--config-template` pointing at a copy that has `Set-TomlKey <copy> 'audio' 'use_dsp_jit' 'false'`. Set `$env:XEMU_APU_PROF = '1'` in the session for both, and compare fps, CPU% and the `apu: utilization` lines in the run logs.
@@ -881,7 +881,7 @@ Get-Content $o | ConvertFrom-Json | Group-Object label | ForEach-Object {
     hashes = ($_.Group.hashes | Select-Object -Unique) -join ' | ' } } | Format-Table -AutoSize
 ```
 
-Pass: one unique hash per arm, and the same hash across arms (`XEMU_SSE_HOST=1` must be exact). Quote the Mcyc/frame delta and how many pairs favour each arm.
+Pass: one unique hash per arm. Quote the Mcyc/frame delta and how many pairs favour each arm. On v0.15.1 the `sse1` arm's hash differs (its host path dropped the sticky MXCSR flags; later builds raise them and have it on by default, so use this recipe with another variable there), and `--pmc` adds instructions and core cycles per frame.
 
 ### 4.7 Upstream xemu as a reference [owner, 10 min, P2]
 
