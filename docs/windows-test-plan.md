@@ -838,7 +838,7 @@ Set-TomlKey $t2 'input.bindings' 'port1' (Q (Get-TomlKey "$Work\xemu-personal.to
 py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 3 60 "$Res\bench-v014-v015-f1" --b-exe $XOld --e-exe $XNew --config-template $t2
 ```
 
-v0.14 predates `XEMU_BASE_PATH`, so the bench isolates both arms' caches. Its warmup run absorbs the first, cold-cache pass. The receipt refuses the delta when draws per flip differ by more than 15%.
+v0.14 predates `XEMU_BASE_PATH`, so the bench isolates both arms' caches. Each binary gets its own warmup run, which absorbs its cold-cache pass. The receipt refuses the delta when draws per flip differ by more than 15%.
 
 ### 4.5 Normal-mode switch A/Bs [agent, 15 min each]
 

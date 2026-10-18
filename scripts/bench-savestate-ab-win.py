@@ -936,7 +936,14 @@ class Bench:
                 "this is a plumbing check, not a citable number.")
 
         if not a.no_warmup:
-            self.run_one("warmup", "E", a.warmup_secs, warmup=True)
+            # One warmup per distinct binary: with isolated caches (automatic
+            # for v0.14) each staged copy has its own base path, and two
+            # versions never share a spirv_cache_v<ver> dir, so E's warmup
+            # alone would leave B1 compiling its shaders inside its dwell.
+            arms = ["E"] if self.exe["B"] == self.exe["E"] else ["B", "E"]
+            for arm in arms:
+                self.run_one("warmup" if len(arms) == 1 else "warmup" + arm,
+                             arm, a.warmup_secs, warmup=True)
         for k in range(1, a.pairs + 1):
             self.run_one("B%d" % k, "B", a.secs)
             self.run_one("E%d" % k, "E", a.secs)
