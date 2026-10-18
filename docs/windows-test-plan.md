@@ -1016,7 +1016,7 @@ Copy-Dist local-O2
 Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING
 ```
 
-Native `build.sh` writes `dist\xemu.exe` and copies the DLLs it needs (`get_deps.py`). CI's x86_64 release adds GCC LTO (`-Db_lto=true` plus `-flto-incremental`). Natively that's `./build.sh -Db_lto=true`: it's slower, so use it only when the build itself is under test. Traps a fresh MSYS2 hits: CRLF (fixed by `core.autocrlf false`), Python 3.13's prefix check and MSYS tar (both handled in build.sh), and a missing `USERPROFILE` when bash is driven from another tool (export it first). On ARM64 hardware, use the release zips. A native CLANGARM64 build is untested.
+Native `build.sh` writes `dist\xemu.exe` and copies the DLLs it needs (`get_deps.py`). It links SDL3 statically from the meson wrap, which carries the fork's SDL patches (`subprojects/packagefiles`), as CI does; MSYS2's SDL3 package isn't used. CI's x86_64 release adds GCC LTO (`-Db_lto=true` plus `-flto-incremental`). Natively that's `./build.sh -Db_lto=true`: it's slower, so use it only when the build itself is under test. Traps a fresh MSYS2 hits: CRLF (fixed by `core.autocrlf false`), Python 3.13's prefix check and MSYS tar (both handled in build.sh), and a missing `USERPROFILE` when bash is driven from another tool (export it first). On ARM64 hardware, use the release zips. A native CLANGARM64 build is untested.
 
 ### 7.2 CI's exact recipe (Docker, cross)
 

@@ -868,6 +868,11 @@ case "$platform" in # Adjust compilation options based on platform
         if ! echo "$@" | grep -q -- '--prefix' && command -v cygpath >/dev/null 2>&1; then
           opts="$opts --prefix=$(cygpath -m /qemu)"
         fi
+        # Static SDL3 from the wrap, as in CI: it carries the fork's SDL
+        # patches (subprojects/packagefiles), which MSYS2's SDL3.dll lacks.
+        if ! echo "$@" | grep -q 'force_fallback_for'; then
+          opts="$opts -Dforce_fallback_for=sdl3"
+        fi
         # PGO: same two-stage flow as Darwin/Linux. This arm does not
         # set CC, so the family is whatever "cc" resolves to in the
         # MSYS2 shell — GCC on a stock MINGW64 install, clang if the

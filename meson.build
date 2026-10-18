@@ -1688,7 +1688,11 @@ endif
 
 sdl = not_found
 if not get_option('sdl').auto() or have_system
-  sdl = dependency('sdl3', required: false, allow_fallback: false)
+  # -Dforce_fallback_for=sdl3 skips the system SDL3 for the patched wrap
+  # (build.sh's MSYS2 branch, like the static CI cross builds).
+  if 'sdl3' not in get_option('force_fallback_for')
+    sdl = dependency('sdl3', required: false, allow_fallback: false)
+  endif
   if not sdl.found() and not get_option('sdl').disabled()
     sdl3_cmake_opts = cmake.subproject_options()
     sdl3_cmake_opts.add_cmake_defines({
