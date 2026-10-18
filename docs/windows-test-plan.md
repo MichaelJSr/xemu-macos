@@ -897,7 +897,7 @@ For every batch: the printed receipt block, plus `meta.json` and `receipt.json` 
 
 ## 5. Upstream CI signal: Roswell tests (P2)
 
-The fork's CI (`.github/workflows/ci.yml`) now calls upstream's `xemu-project/xemu-test` Roswell workflow (`test-roswell.yml@wheel-202610142116`) against the fork's own build artifacts on Ubuntu, Windows and macOS. On master `ca351a6b21` (run 39013910935) the Windows and Ubuntu jobs pass, and macOS fails (being worked on in `fix/roswell-fpu`). CI's Windows job uses Mesa llvmpipe (software GL), `--no-hard-fpu` and `failure_filters/windows_roswell_softfpu.json`. Running it locally adds a real GPU driver.
+The fork's CI (`.github/workflows/ci.yml`) now calls upstream's `xemu-project/xemu-test` Roswell workflow (`test-roswell.yml`, pinned by commit since its `wheel-202610142116` tag was deleted on 2026-10-18) against the fork's own build artifacts on Ubuntu, Windows and macOS. On master `ca351a6b21` (run 39013910935) the Windows and Ubuntu jobs pass, and macOS fails (being worked on in `fix/roswell-fpu`). CI's Windows job uses Mesa llvmpipe (software GL), `--no-hard-fpu` and `failure_filters/windows_roswell_softfpu.json`. Running it locally adds a real GPU driver.
 
 The test data (`tester.iso`) is built with Docker in CI. The easy route is to download the artifacts of a fresh CI run of the `windows` branch; they expire after 1 day. Pushing the branch (6.3) triggers that run.
 
