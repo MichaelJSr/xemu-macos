@@ -443,7 +443,7 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   pops are constant env offsets wherever the TOP is static; the tracking
   already covered every block. `XEMU_X87_REFUTE=1`: 5.0G TOP-key checks,
   0 violations. Instructions −8.3%, core cycles −6.4%, 4/4.
-- **fist, fsqrt and frndint inline too ({X2_SHA}).** The hard `fist`
+- **fist, fsqrt and frndint inline too (`67e48b43b2`).** The hard `fist`
   helpers are `fistp` m16/m32/m64 under the guest RC, integer indefinite
   and all (m16 sign-extended, as the helper returns it), `frndint` is
   `frndint`, and `fsqrt` is `fsqrt` after QEMU's C2-on-negative fpus
@@ -455,6 +455,15 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   Azurik's `fld`/`fld`/`fucomi`/`fcmov` min/max idiom. It is now a
   `setcond` and `movcond` on the image's 8+2 bytes (`gen_fcmov_hw`).
   Core cycles −3.0%, instructions −0.11%, det fps +3.3%, 4/4.
+- **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
+  core cycles −0.85% median, 3/4.
+- **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions
+  −5.5% (4/4), cycles within the spread.
+- **file-win32 block I/O in coroutines (`4e50b583d4`).** Det cold boot
+  −6.1% core cycles (3/3); stream-e2 −1.2%.
+- **vCPU, PFIFO and APU threads above normal priority on Windows
+  (`f96f00ba9d`, `XEMU_VCPU_QOS=0` opts out).** Windowed heavy-f1 under an
+  all-core busy loop 6.8 → 9.3 fps (+36%, 3/3); idle −0.8% (mixed signs).
 
 ### CPU / JIT (ARM64)
 
@@ -3835,6 +3844,8 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| x86_64 inline fld/fst/fild as TCG integer ops (2026-10-18) | Converting m32fp/m64fp/m32int to and from floatx80 with clz, shifts and deposits, with a brcond for the special classes: det heavy-f1 +10% instructions, +9% cycles. Each brcond ends the TCG basic block, so the live globals were synced and reloaded around every load. The host x87 instructions (`x87_ld`, `aae214c27a`) do it in two instructions without a branch |
+| CNG (BCrypt) SHA-256 for `xemu-ram-digest` on Windows (2026-10-18) | 551 vs 548 ms for 128 MiB on a CPU without SHA-NI (Haswell): SymCrypt has no faster SHA-256 there. xxh3-128 takes 29-41 ms |
 | Surface-callback reuse pool default-on (`XEMU_SURFACE_CB_REUSE`, 2026-08-04) | The mechanism receipt was real — the zeta ping-pong's ~200 register/unregister events/s are 0.95:1 with ALL in-scene guest TLB flushes, each with a jump-cache wipe that also clears the near-return memo (`tcg_flush_jmp_cache` → `xemu_i386_ras_flush`) — and the pool survived every correctness gate (loadvm cycles clean, coverage audit 23,003/0, movement probe `tb_flush` flat). The fps A/B then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%** (idle-gated pairs, bar was ≥ +0.25): post-candoio-elision the vCPU's flush/refill cost was already off the critical path — the audit's +0.35..+1.5 band was priced against the PRE-wave profile — while the pool's park/reattach bookkeeping bills the render thread on every shape swap. That explanation was never measured: the bookkeeping is a 4-entry scan, and the A/B's pair order is not on record. Kept dark in-tree as the record until 2026-10-10, when the code was removed; restore it by reverting the removal commit, never `804bc5d87e`, which also carries `XEMU_PFIFO_KICK_STATS` and the SPIR-V cache key. `XEMU_SURFACE_CB_STATS` stayed, minus the pool counters and audit, until 2026-10-15 (Retired diagnostics). The live shape was the ranged-flush FIXME in `physmem.c`/`cputlb.c`, landed 2026-10-15 as `tlb_flush_host_range` |
 | x87 clean-ST(i) write-back elision default-on (`XEMU_X87_ELIDE_CLEAN`, 2026-08-04) | Refuter said safe: it re-read memory for every clean slot at each flush and compared it with the cached double, 3.49e9 checks, 0 violations. That certifies the dirty marks were complete for every ST(i) writer the soak reached. It could not see the 80-bit residue the elision keeps, so the truncation signal was absent by construction. The idle-gated A/B read **−0.23 fps, 3/3 negative** vs the ≥ +0.20 bar. The original explanation here (the elidable flush population too thin to pay for the per-slot dirty tracking) was wrong. The dirty tracking ran at translate time and was identical in both arms, so the omitted store was the only runtime difference. The kill is an under-powered read: 3 pairs (one-sided sign p = 0.125), and the in-tree harness of that day ran B before E in every pair. **Code removed on 2026-10-10.** It changed numerics, it put a dirty-mark duty on every future ST(i) writer (21 sites in `ops_fpu.h` plus FXCH), and its reopen bar (clean-ST census ≥ 8M/s on some other title) did not hold together: the 7.04M/s census reading came from a run whose fps was not recorded, so the bar was never tied to a measured population at the ~48 fps shape the kill ran on. Restore it by reverting the removal commit, never `8da40e6fed`, which also carries the shipped `ELIDE_FT0` and `DEFER_FIP` mechanisms. Reopening needs per-op host-PC attribution tooling (`XEMU_GUEST_PROF` resolves only to whole TBs) plus the artifact A/B on a title that exercises the x87 transcendentals, which promotion always required and never got |
 | Reports idle-budget 300 → 50 µs (2026-08-04) | The deferred pinned-value scan ran: **−12.1 fps unanimous, draws/s −21.4%** — 50 µs qualifies far more idle episodes for early submits and lands on the arch-1.1 submit-storm side of the cliff, exactly as the scan's guard predicted. 300 µs validated as correctly above the cliff; scan closed permanently, and the knob was hardcoded at 300 µs on 2026-10-15 |

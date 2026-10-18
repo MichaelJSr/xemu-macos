@@ -496,7 +496,7 @@ Stop-Xemu $p
 'digest f300 {0}; replay same = {1}; dump file matches = {2}; digest took {3} us' -f $a.sha256.Substring(0, 16), ($a.sha256 -eq $b.sha256), ($fileHash -eq $a.sha256), $a.'elapsed-us'
 ```
 
-Pass: replay same = True, the dump file matches, the restore with `verify=true` reports 0 missed pages, `elapsed-us` is roughly 50-150 ms for 128 MiB (macOS: about 55 ms), and every command returns. This is also the first in-process determinism check on Windows.
+Pass: replay same = True, the dump file matches, the restore with `verify=true` reports 0 missed pages, and every command returns. `elapsed-us` for 128 MiB is about 50-150 ms on a CPU with SHA instructions (Apple silicon about 55 ms); without SHA-NI (Haswell) expect several hundred ms. This is also the first in-process determinism check on Windows.
 
 ### 3.4 `XEMU_INPUT_PIPE` named pipe [agent, P0, 10 min]
 
@@ -1067,7 +1067,7 @@ With 6 clean runs at the observed failure rate of about 5 in 6, P < 1e-4. Open a
 
 ### 7.4 GCC PGO on Windows
 
-The committed `pgo/default.profdata` is a clang profile. Windows x86_64 builds with GCC, so `build.sh` drives `.gcda` profiles instead (gating-audit D7; never exercised). `scripts/pgo-train.py` is macOS-only, so this loop replays its corpus:
+The committed `pgo/default.profdata` is a clang profile. Windows x86_64 builds with GCC, so `build.sh` drives `.gcda` profiles instead (gating-audit D7; first run 2026-10-18: 1187 profiles from this corpus, det heavy-f1 -3.1% core cycles and -3.9% instructions against the same source without PGO, goldens unchanged). `scripts/pgo-train.py` is macOS-only, so this loop replays its corpus:
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1

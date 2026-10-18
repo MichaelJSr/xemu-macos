@@ -92,19 +92,33 @@ lockless doorbell, vCPU QoS); re-profile before ranking work from it.
    correctness item).** Windows/Linux runtime proof for the shipped
    cross-platform wins: the gating-audit needs-real-HW list
    (`docs/windows-gating-audit.md`), an in-game `XEMU_DSP_JIT_DIFF`
-   run on non-Apple aarch64, `XEMU_SSE_HOST=2` clean on real x86_64
-   silicon (one un-root-caused ±0-sign divergence under Rosetta keeps
-   that arm dark), and per-platform savestate baselines before any
-   perf claim there. Excluded from the 2026-07-18 session scope by
-   owner decision. The shipped BQL-free MMIO dispatch belongs on this
-   list too: Windows/Linux take the identical lockless path for
-   PFB/USER/APU-VP/PGRAPH and no non-VM soak exists
-   (`docs/Finished/pgraph-lockless-audit.md` §I.3). The runtime switches
-   that put the BQL back (`XEMU_MMIO_BQL`, `XEMU_PGRAPH_LOCKLESS`) were
-   removed 2026-10-15, so bisecting a lockless-suspected failure there
-   takes a rebuild without the `memory_region_enable_lockless_io` calls
-   (three in `nv2a_realize`, one in `mcpx_apu_realize`) or a revert of
-   the removal commit; `XEMU_PFIFO_PUT_LOCK=1` still covers the separate
+   run on non-Apple aarch64, and per-platform savestate baselines
+   before any perf claim there. **Windows x86_64 had its first
+   plan-driven run on 2026-10-18** (i7-4770K, NVIDIA TITAN Xp; the
+   audit's 2026-10-18 report). Settled there: `XEMU_SSE_HOST=2` runs
+   clean on real x86_64 silicon, so the host SSE path is on by default
+   on x86_64 (`57cfe4fb51`; the ±0-sign divergence seen only under
+   Rosetta stays un-root-caused); the zeta-quarantine and texture
+   retirement gates soak clean and the validation layers report 0
+   VUIDs on NVIDIA; det and windowed Windows baselines exist. The run
+   fixed an SDL startup crash (`058431f83b`, also the 2026-09 crash
+   blamed on `-O3`), the null-mode quit crash and two x86_64 hard-FPU
+   defects (the guest rounding mode, `cfcc8e68ab`; the vCPU thread's
+   x87 precision, `deb98ee93f`), and its optimization pass took
+   windowed heavy-f1 from 10.7 fps to 38.7 fps (W2 8.5 → 40.7) on that CPU (the
+   x87 helpers inline on the host x87 unit, TOP-keyed TBs, a
+   waitable-timer main loop). Still owed: AMD and Intel GPUs, Windows
+   ARM64, Linux, a CI-trained Windows PGO profile. The shipped BQL-free MMIO dispatch belongs on
+   this list too: Windows/Linux take the identical lockless path for
+   PFB/USER/APU-VP/PGRAPH
+   (`docs/Finished/pgraph-lockless-audit.md` §I.3); Windows passed its
+   first non-VM soak on 2026-10-18 (plan 3.11, 30 of 30 cycles), Linux
+   has none. The runtime switches that put the BQL back
+   (`XEMU_MMIO_BQL`, `XEMU_PGRAPH_LOCKLESS`) were removed 2026-10-15,
+   so bisecting a lockless-suspected failure there takes a rebuild
+   without the `memory_region_enable_lockless_io` calls (three in
+   `nv2a_realize`, one in `mcpx_apu_realize`) or a revert of the
+   removal commit; `XEMU_PFIFO_PUT_LOCK=1` still covers the separate
    DMA_PUT doorbell. Converting the *remaining*
    blocks is closed by written verdict —
    [`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md) (2026-08-04):
