@@ -1,0 +1,15 @@
+--- a/src/video/windows/SDL_windowsclipboard.c
++++ b/src/video/windows/SDL_windowsclipboard.c
+@@ -50,7 +50,11 @@
+     int attempt;
+     HWND hwnd = NULL;
+ 
+-    if (_this->windows) {
++    /* The newest window heads the list before WIN_CreateWindow sets its
++     * internal data, and WIN_CreateWindow pumps messages in between: a
++     * focus change on another window then gets here through
++     * WIN_UpdateFocus -> WIN_CheckClipboardUpdate. */
++    if (_this->windows && _this->windows->internal) {
+         hwnd = _this->windows->internal->hwnd;
+     }
+     for (attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
