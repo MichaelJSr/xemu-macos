@@ -741,8 +741,9 @@ hardening_flags = [
 # https://github.com/llvm/llvm-project/issues/75168
 #
 # xemu-macos: skipped on macOS arm64, where the zeroing is 3.2% of the
-# emulation's host instructions and costs the helpers their tail calls.
-if not (host_os == 'darwin' and cpu == 'aarch64') and \
+# emulation's host instructions and costs the helpers their tail calls,
+# and on Windows.
+if not (host_os == 'darwin' and cpu == 'aarch64') and host_os != 'windows' and \
    cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
                name: '-fzero-call-used-regs=used-gpr',
                args: ['-O2', '-fzero-call-used-regs=used-gpr'])
