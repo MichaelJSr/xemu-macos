@@ -423,7 +423,7 @@ These are fork features that take a Windows-specific branch (found by `git diff 
 | `include/qemu/cacheflush.h` | batched icache flush off on Windows ARM64 | 3.9 |
 | `dsp56k_jit_arm64.h` | the fork's DSP JIT exists only on aarch64 POSIX; Windows runs upstream's dsp56300 JIT (`use_dsp_jit = true`) or the interpreter | 3.7, 3.9, 4.5 |
 | `hw/xbox/mcpx/apu` `fpconv.h`, `vp.c` | SSE2 mix kernels on x86_64, NEON on aarch64 | 3.7 (WAV), 2.1 |
-| `vk/instance.c` | strict non-Apple device features (geometryShader, occlusionQueryPrecise, fillModeNonSolid, depthClamp, shaderClipDistance); `VK_KHR_external_semaphore_win32` optional; Win32 external memory VK-to-GL present | 2.1, 2.4, 3.9, 3.10 |
+| `vk/instance.c` | strict non-Apple device features (geometryShader, occlusionQueryPrecise, fillModeNonSolid, depthClamp, shaderClipDistance); `VK_KHR_external_semaphore_win32` not used; Win32 external memory VK-to-GL present | 2.1, 2.4, 3.9, 3.10 |
 | gating audit B1-B8, F1 | occlusion rework, deferred reports, vertex refinement, bind skips, PFIFO untimed wait, surface expiry, 5 s/60 s fence watchdog, zeta quarantine, texture LRU retirement | 3.10, 3.11 |
 | `system/cpus.c` | BQL spin paced on `get_clock()` (QueryPerformanceCounter) on x86_64, `cntvct_el0` on Windows ARM64 | 4.5 |
 | `target/i386/tcg/system/misc_helper.c` | KiIdleLoop halt paced on `get_clock()` | 4.5 |

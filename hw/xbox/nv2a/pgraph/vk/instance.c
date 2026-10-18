@@ -43,13 +43,8 @@ static char const *const required_device_extensions[] = {
 #ifdef WIN32
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     /*
-     * VK_KHR_external_semaphore_win32 is deliberately NOT required: the
-     * Windows GL-interop present path exports only memory
-     * (vkGetMemoryWin32HandleKHR + glImportMemoryWin32HandleEXT) and
-     * synchronises on the Vulkan side with fences; nothing in the tree
-     * imports or exports a semaphore handle, so a device lacking it must
-     * not be rejected. It is still enabled when present, see
-     * add_optional_device_extension_names().
+     * No VK_KHR_external_semaphore_win32 (upstream requires it): the GL
+     * interop present syncs with fences, and no semaphore handle crosses.
      */
 #else
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
@@ -389,17 +384,6 @@ static void add_optional_device_extension_names(
     r->metal_objects_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
-#endif
-
-#if HAVE_EXTERNAL_MEMORY && defined(WIN32)
-    /*
-     * Unused today (see required_device_extensions), but keep enabling it
-     * where the ICD offers it so device creation is byte-identical to the
-     * old required-list behaviour on every device that has it.
-     */
-    (void)add_extension_if_available(
-        available_extensions, enabled_extension_names,
-        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
 #endif
 }
 
