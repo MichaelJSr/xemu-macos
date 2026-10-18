@@ -89,10 +89,10 @@ function New-Scratch([string]$Name = 'run', [string]$Template = $env:XEMU_TEST_C
   $d = Join-Path $Work ('{0}-{1:MMdd-HHmmss}' -f $Name, (Get-Date))
   New-Item -ItemType Directory -Force $d | Out-Null
   Copy-Item -LiteralPath (Get-TomlKey $Template 'sys.files' 'hdd_path') (Join-Path $d 'hdd.qcow2')
-  (Get-Item -LiteralPath (Join-Path $d 'hdd.qcow2')).LastWriteTime = Get-Date   # the 2-minute guard above must see a fresh copy
   Copy-Item -LiteralPath (Get-TomlKey $Template 'sys.files' 'eeprom_path') (Join-Path $d 'eeprom.bin')
   Copy-Item -LiteralPath $Template (Join-Path $d 'xemu.toml')
-  Get-ChildItem -LiteralPath $d -File | ForEach-Object { $_.IsReadOnly = $false }
+  Get-ChildItem -LiteralPath $d -File | ForEach-Object { $_.IsReadOnly = $false }   # copies of the read-only fixtures are read-only
+  (Get-Item -LiteralPath (Join-Path $d 'hdd.qcow2')).LastWriteTime = Get-Date   # the 2-minute guard above must see a fresh copy
   $cfg = Join-Path $d 'xemu.toml'
   Set-TomlKey $cfg 'sys.files' 'hdd_path' (Q (Join-Path $d 'hdd.qcow2'))
   Set-TomlKey $cfg 'sys.files' 'eeprom_path' (Q (Join-Path $d 'eeprom.bin'))
