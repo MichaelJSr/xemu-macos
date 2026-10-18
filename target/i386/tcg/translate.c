@@ -2214,6 +2214,10 @@ static TCGv_i32 gen_st_index(int opreg)
         }
         return gen_top_index(x87_wt_top(s), (s->fpstt_delta + opreg) & 7);
     }
+    if (g_x87_hw && s->x87_top >= 0) {
+        /* the fpstt global holds x87_top (x87_top_check) */
+        return tcg_constant_i32((s->x87_top + opreg) & 7);
+    }
 #endif
     return gen_top_index(fpstt, opreg);
 }
@@ -2225,10 +2229,10 @@ static X87Ptr gen_stn_ptr(int opreg)
 #if defined(XBOX)
     DisasContext *s = tcg_ctx->disas_ctx;
 
-    if (x87_wt(s) && s->x87_top >= 0) {
+    if ((x87_wt(s) || g_x87_hw) && s->x87_top >= 0) {
         int r = (s->x87_top + opreg) & 7;
 
-        if (unlikely(xemu_x87_refute_on())) {
+        if (x87_wt(s) && unlikely(xemu_x87_refute_on())) {
             x87_wt_top(s);
         }
         return (X87Ptr){ tcg_env, offsetof(CPUX86State, fpregs[0].d) +
@@ -2248,7 +2252,19 @@ static X87Ptr gen_ft0_ptr(void)
 /* env->fptags[(env->fpstt + opreg) & 7] = value */
 static void gen_set_fptag_stn(int opreg, int value)
 {
-    TCGv_ptr p = tcg_temp_new_ptr();
+    TCGv_ptr p;
+
+#if defined(XBOX)
+    DisasContext *s = tcg_ctx->disas_ctx;
+
+    if (g_x87_hw && s->x87_top >= 0) {
+        tcg_gen_st8_i32(tcg_constant_i32(value), tcg_env,
+                        offsetof(CPUX86State, fptags[0]) +
+                        ((s->x87_top + opreg) & 7));
+        return;
+    }
+#endif
+    p = tcg_temp_new_ptr();
     tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_st_index(opreg), 0);
     tcg_gen_st8_i32(tcg_constant_i32(value), p,
                     offsetof(CPUX86State, fptags[0]));
@@ -3415,14 +3431,20 @@ static void gen_fpush(DisasContext *s)
         return;
     }
 #endif
-    tcg_gen_subi_i32(fpstt, fpstt, 1);
-    tcg_gen_andi_i32(fpstt, fpstt, 7);
+#if defined(XBOX)
+    /* before the tag, which a static TOP addresses from x87_top */
+    x87_top_move(s, -1);
+    if (g_x87_hw && s->x87_top >= 0) {
+        tcg_gen_movi_i32(fpstt, s->x87_top);
+    } else
+#endif
+    {
+        tcg_gen_subi_i32(fpstt, fpstt, 1);
+        tcg_gen_andi_i32(fpstt, fpstt, 7);
+    }
     gen_set_fptag_stn(0, 0); /* validate stack entry */
 
     s->fpstt_delta -= 1;
-#if defined(XBOX)
-    x87_top_move(s, -1);
-#endif
 }
 
 static void gen_fpop(DisasContext *s)
@@ -3440,8 +3462,15 @@ static void gen_fpop(DisasContext *s)
     }
 #endif
     gen_set_fptag_stn(0, 1); /* invalidate stack entry */
-    tcg_gen_addi_i32(fpstt, fpstt, 1);
-    tcg_gen_andi_i32(fpstt, fpstt, 7);
+#if defined(XBOX)
+    if (g_x87_hw && s->x87_top >= 0) {
+        tcg_gen_movi_i32(fpstt, (s->x87_top + 1) & 7);
+    } else
+#endif
+    {
+        tcg_gen_addi_i32(fpstt, fpstt, 1);
+        tcg_gen_andi_i32(fpstt, fpstt, 7);
+    }
 
     fp_pc_wrapper(gen_fpop)(s);
     s->fpstt_delta += 1;
@@ -7323,6 +7352,10 @@ void tcg_x86_init(void)
      */
     g_x87_hw = g_use_hard_fpu &&
                tcg_op_supported(INDEX_op_x87_arith, TCG_TYPE_I64, 0);
+#if !defined(TARGET_X86_64)
+    /* ... on registers at fixed env offsets: TB keys carry TOP (x87_top). */
+    xemu_x87_top_key = g_x87_hw;
+#endif
 #endif
 #if defined(__aarch64__)
     /*
