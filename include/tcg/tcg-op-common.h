@@ -660,19 +660,23 @@ void tcg_gen_sub_f64(TCGv_f64 ret, TCGv_f64 arg1, TCGv_f64 arg2);
  * tcg-opc.h). op is an x87 arithmetic /digit: 0 add, 1 mul, 4 sub, 5 subr,
  * 6 div, 7 divr. A memory operand's type is a TCG_X87_M* value.
  */
-enum { TCG_X87_M32F, TCG_X87_M32I, TCG_X87_M64F, TCG_X87_M64I };
+enum { TCG_X87_M32F, TCG_X87_M32I, TCG_X87_M64F, TCG_X87_M64I, TCG_X87_M16I };
+enum { TCG_X87_FRNDINT, TCG_X87_FSQRT };
 void tcg_gen_x87_arith(int op, TCGv_ptr a, tcg_target_long aofs,
                        TCGv_ptr b, tcg_target_long bofs);
 void tcg_gen_x87_arith_i32(int op, int type, TCGv_ptr a, tcg_target_long ofs,
                            TCGv_i32 val);
 void tcg_gen_x87_arith_i64(int op, int type, TCGv_ptr a, tcg_target_long ofs,
                            TCGv_i64 val);
+void tcg_gen_x87_unary(int kind, TCGv_ptr a, tcg_target_long ofs);
 void tcg_gen_x87_ld_i32(int type, TCGv_ptr d, tcg_target_long ofs,
                         TCGv_i32 val);
 void tcg_gen_x87_ld_i64(int type, TCGv_ptr d, tcg_target_long ofs,
                         TCGv_i64 val);
-void tcg_gen_x87_st_i32(TCGv_i32 ret, TCGv_ptr s, tcg_target_long ofs);
-void tcg_gen_x87_st_i64(TCGv_i64 ret, TCGv_ptr s, tcg_target_long ofs);
+void tcg_gen_x87_st_i32(TCGv_i32 ret, int type, TCGv_ptr s,
+                        tcg_target_long ofs);
+void tcg_gen_x87_st_i64(TCGv_i64 ret, int type, TCGv_ptr s,
+                        tcg_target_long ofs);
 void tcg_gen_x87_cmp(TCGv_i32 ret, TCGv_ptr a, tcg_target_long aofs,
                      TCGv_ptr b, tcg_target_long bofs);
 void tcg_gen_x87_cmp_i32(TCGv_i32 ret, int type, TCGv_ptr a,

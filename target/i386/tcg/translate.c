@@ -3960,7 +3960,7 @@ static void gen_fsts_ST0(DisasContext *s, TCGv_i32 arg)
     if (g_x87_hw) {
         X87Ptr p = gen_stn_ptr(0);
 
-        tcg_gen_x87_st_i32(arg, p.base, p.ofs);
+        tcg_gen_x87_st_i32(arg, TCG_X87_M32F, p.base, p.ofs);
         return;
     }
 #endif
@@ -3980,7 +3980,7 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
     if (g_x87_hw) {
         X87Ptr p = gen_stn_ptr(0);
 
-        tcg_gen_x87_st_i64(arg, p.base, p.ofs);
+        tcg_gen_x87_st_i64(arg, TCG_X87_M64F, p.base, p.ofs);
         return;
     }
 #endif
@@ -4022,6 +4022,13 @@ static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
                             tcg_constant_i32(-32768), arg);
         return;
     }
+    if (g_x87_hw) {
+        /* the __hard fist helpers are fistp, integer indefinite and all */
+        X87Ptr p = gen_stn_ptr(0);
+
+        tcg_gen_x87_st_i32(arg, TCG_X87_M16I, p.base, p.ofs);
+        return;
+    }
 #endif
     gen_helper_fist_ST0(arg, tcg_env);
 }
@@ -4031,6 +4038,12 @@ static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
 #if defined(XBOX)
     if (x87_wt(s)) {
         tcg_gen_extrl_i64_i32(arg, x87_wt_fist(s));
+        return;
+    }
+    if (g_x87_hw) {
+        X87Ptr p = gen_stn_ptr(0);
+
+        tcg_gen_x87_st_i32(arg, TCG_X87_M32I, p.base, p.ofs);
         return;
     }
 #endif
@@ -4043,6 +4056,12 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 #if defined(XBOX)
     if (x87_wt(s)) {
         tcg_gen_mov_i64(arg, x87_wt_fist(s));
+        return;
+    }
+    if (g_x87_hw) {
+        X87Ptr p = gen_stn_ptr(0);
+
+        tcg_gen_x87_st_i64(arg, TCG_X87_M64I, p.base, p.ofs);
         return;
     }
 #endif
@@ -4202,6 +4221,23 @@ static void gen_fsqrt(DisasContext *s)
         x87_wt_set_st(s, 0, r);
         return;
     }
+    if (g_x87_hw) {
+        X87Ptr p = gen_stn_ptr(0);
+        TCGv_i32 neg = tcg_temp_new_i32();
+        TCGv_i32 fpus = tcg_temp_new_i32();
+        TCGv_i32 t = tcg_temp_new_i32();
+
+        tcg_gen_ld16u_i32(neg, p.base, p.ofs + 8);
+        tcg_gen_andi_i32(neg, neg, 0x8000);
+        tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
+        tcg_gen_andi_i32(t, fpus, ~0x4700);
+        tcg_gen_ori_i32(t, t, 0x400);
+        tcg_gen_movcond_i32(TCG_COND_NE, fpus, neg, tcg_constant_i32(0),
+                            t, fpus);
+        tcg_gen_st16_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
+        tcg_gen_x87_unary(TCG_X87_FSQRT, p.base, p.ofs);
+        return;
+    }
 #endif
     GEN_HELPER_FALLBACK_v_v(fsqrt);
     fp_pc_wrapper(gen_fsqrt)(s);
@@ -4216,6 +4252,12 @@ static void gen_frndint(DisasContext *s)
 
         tcg_gen_rint_f64(r, x87_wt_get_st(s, 0));
         x87_wt_set_st(s, 0, r);
+        return;
+    }
+    if (g_x87_hw) {
+        X87Ptr p = gen_stn_ptr(0);
+
+        tcg_gen_x87_unary(TCG_X87_FRNDINT, p.base, p.ofs);
         return;
     }
 #endif

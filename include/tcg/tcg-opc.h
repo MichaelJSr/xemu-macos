@@ -195,12 +195,14 @@ DEF(sub_f64, 1, 2, 0, TCG_OPF_FP)
  * hosts, TCG_TARGET_HAS_x87): the instructions the x86_64 __hard helpers
  * run, without the call. [base + ofs] are the images; X87_OP_* kinds.
  * x87_arith: [a] = [a] op [b]. x87_arith_m: [a] = [a] op val, val an m32fp,
- * m64fp or m32int. x87_ld: [d] = val converted. x87_st: ret = [s] as
- * m32fp or m64fp. x87_cmp(_m): ret = fpus C3|C2|C0 (0x4500) of [a]
- * against [b] (val).
+ * m64fp or m32int. x87_unary: [a] = frndint or fsqrt of [a]. x87_ld: [d] =
+ * val converted. x87_st: ret = [s] as an m32fp, m64fp (fst) or integer
+ * (fist, m16int sign-extended). x87_cmp(_m): ret = fpus C3|C2|C0 (0x4500)
+ * of [a] against [b] (val).
  */
 DEF(x87_arith, 0, 2, 3, TCG_OPF_SIDE_EFFECTS)
 DEF(x87_arith_m, 0, 2, 2, TCG_OPF_SIDE_EFFECTS)
+DEF(x87_unary, 0, 1, 2, TCG_OPF_SIDE_EFFECTS)
 DEF(x87_ld, 0, 2, 2, TCG_OPF_SIDE_EFFECTS)
 DEF(x87_st, 1, 1, 2, 0)
 DEF(x87_cmp, 1, 2, 2, 0)

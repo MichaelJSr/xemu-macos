@@ -397,6 +397,59 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   non-Apple aarch64. Gated to `__APPLE__`; `XEMU_SUBPAGE_FAST=1` opts in
   elsewhere. (x86_64 unaffected — the i386 backend emits no stub.)
 
+### CPU / JIT (x86_64 hosts, 2026-10-18)
+
+Measured on the Windows box (i7-4770K Haswell, MSYS2 GCC 16) with
+`scripts/win/det_golden.py --pmc`: instructions and core cycles per det
+frame from ETW hardware counters, interleaved cross-binary pairs, det
+heavy-f1 to frame 1200 unless noted. Every row kept the Windows goldens
+(heavy-f1 f300 `37fe3d839c4be757` f1200 `ec2e9596cc9dfa9c`, stream-e2
+f600 `38b50b4c6f35ac02`, cold boot f900 `d6381be67430024d` f1800
+`1daeb1149976062c`) unless it says otherwise. Together the x87 rows took
+det heavy-f1 from 38.8 to 76 fps on that CPU.
+
+- **x87 hard helpers on the registers in place (`66a991d060`).** The
+  x86_64 hard FPU computed through `floatx80` unions passed by value:
+  under the Win64 ABI each operand and result went through memory, and
+  the 16-byte copy of a 10-byte `fstpt` result stalled store forwarding
+  (a microbenchmark: 27 cycles against 12 for an 8+2-byte read). The hot
+  helpers now `fldt` the registers in env, compute and `fstpt` back.
+  Core cycles −26.1%, instructions −6.2%, det fps 38.8 → 52.8, 4/4.
+- **x87 helpers without the global sync, fused memory operands
+  (`acecea21c8`).** The hard x87 helpers touch only env's FPU state, so
+  they are `TCG_CALL_NO_WG` on x86_64; `fadd`..`fdivr` with an m32fp,
+  m64fp or m32int operand is one helper call, not a load into FT0 plus
+  the op; register copies move 8+2 bytes. Core cycles −1.9%, 4/4.
+- **The host x87 control word is the guest's (`deb98ee93f`).** Windows
+  starts threads with CW `0x27f` (53-bit), and nothing set the vCPU
+  thread's: extended-precision guest math ran at double precision,
+  single precision rounded twice, and the guest's RC was ignored by the
+  arithmetic. `update_fp_status` loads the guest's PC and RC on the vCPU
+  thread and `x86_cpu_exec_enter` re-applies it after main-thread FCW
+  writes, as aarch64 does for FPCR; `pack` went, `frndint` takes the RC
+  from the CW, and libm's sin/cos/tan run under `0x37f`. Azurik runs PC
+  double, RC nearest, so its goldens held; instructions −2.35%.
+- **Hot x87 ops inline on the host x87 unit (`aae214c27a`).** New TCG
+  ops (`x87_arith`, `x87_arith_m`, `x87_ld`, `x87_st`, `x87_cmp`,
+  `TCG_TARGET_HAS_x87`, tcg/i386 only) emit the instructions the hard
+  helpers run (`fldt`, the op, `fstpt`; `fucompp`/`fcomp` plus `fnstsw`
+  for the compares) in the TB, under the same control word, so they are
+  bit for bit the helpers. A memory operand goes through `(%rsp)`, the
+  outgoing-argument area. `fist`, `fsqrt`, `frndint` and the
+  transcendentals keep their helpers. Core cycles −23.5%, instructions
+  −15.3%, det fps 54.4 → 72.4, 4/4.
+- **TBs keyed by the x87 TOP on x86_64 (`873ab92ed4`).** With the inline
+  ops, `xemu_x87_top_key` is on, so ST(i), its tag and the pushes and
+  pops are constant env offsets wherever the TOP is static; the tracking
+  already covered every block. `XEMU_X87_REFUTE=1`: 5.0G TOP-key checks,
+  0 violations. Instructions −8.3%, core cycles −6.4%, 4/4.
+- **fist, fsqrt and frndint inline too ({X2_SHA}).** The hard `fist`
+  helpers are `fistp` m16/m32/m64 under the guest RC, integer indefinite
+  and all (m16 sign-extended, as the helper returns it), `frndint` is
+  `frndint`, and `fsqrt` is `fsqrt` after QEMU's C2-on-negative fpus
+  update, so they join the inline ops (`x87_st` integer kinds,
+  `x87_unary`). Instructions −0.25% (4/4), cycles within noise: a cheap-helper deletion.
+
 ### CPU / JIT (ARM64)
 
 - **Sub-page code dirty tracking (default on, 2026-07-11).** A

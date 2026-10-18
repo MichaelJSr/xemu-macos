@@ -2860,6 +2860,7 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         return TCG_TARGET_HAS_rint_f64;
     case INDEX_op_x87_arith:
     case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_unary:
     case INDEX_op_x87_ld:
     case INDEX_op_x87_st:
     case INDEX_op_x87_cmp:

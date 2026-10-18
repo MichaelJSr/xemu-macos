@@ -2795,6 +2795,9 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
     /* flds, fildl, fldl (/0), fildll (/5) */
     static const uint8_t ld_opc[4] = { 0xd9, 0xdb, 0xdd, 0xdf };
     static const uint8_t ld_ext[4] = { 0, 0, 0, 5 };
+    /* fstps, fistpl, fstpl (/3), fistpll (/7), fistps (/3) */
+    static const uint8_t st_opc[5] = { 0xd9, 0xdb, 0xdd, 0xdf, 0xdf };
+    static const uint8_t st_ext[5] = { 3, 3, 3, 7, 3 };
     int op;
 
     switch (opc) {
@@ -2813,6 +2816,13 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
         tcg_out_x87_mem_op(s, args[3] & 7, args[3] >> 3);
         tcg_out_fstp(s, args[0], args[2]);
         break;
+    case INDEX_op_x87_unary:
+        /* fldt a; frndint or fsqrt; fstpt a */
+        tcg_out_fld(s, args[0], args[1]);
+        tcg_out8(s, 0xd9);
+        tcg_out8(s, args[2] == TCG_X87_FSQRT ? 0xfa : 0xfc);
+        tcg_out_fstp(s, args[0], args[1]);
+        break;
     case INDEX_op_x87_ld:
         tcg_out_x87_scratch(s, args[1], args[3]);
         tcg_out_modrm_offset(s, ld_opc[args[3]], ld_ext[args[3]],
@@ -2821,10 +2831,14 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
         break;
     case INDEX_op_x87_st:
         tcg_out_fld(s, args[1], args[2]);
-        tcg_out_modrm_offset(s, args[3] == TCG_X87_M64F ? OPC_FSTP_m64fp
-                             : OPC_FSTP_m32fp, 3, TCG_REG_ESP, 0);
-        tcg_out_ld(s, args[3] == TCG_X87_M64F ? TCG_TYPE_I64 : TCG_TYPE_I32,
-                   args[0], TCG_REG_ESP, 0);
+        tcg_out_modrm_offset(s, st_opc[args[3]], st_ext[args[3]],
+                             TCG_REG_ESP, 0);
+        if (args[3] == TCG_X87_M16I) {
+            tcg_out_modrm_offset(s, OPC_MOVSWL, args[0], TCG_REG_ESP, 0);
+        } else {
+            tcg_out_ld(s, args[3] >= TCG_X87_M64F ? TCG_TYPE_I64
+                       : TCG_TYPE_I32, args[0], TCG_REG_ESP, 0);
+        }
         break;
     case INDEX_op_x87_cmp:
         /* fldt b; fldt a; fucompp */
@@ -3187,6 +3201,7 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     switch (opc) {
     case INDEX_op_x87_arith:
     case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_unary:
     case INDEX_op_x87_ld:
     case INDEX_op_x87_st:
     case INDEX_op_x87_cmp:
@@ -4535,6 +4550,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_x87_arith_m:
     case INDEX_op_x87_ld:
         return C_O0_I2(r, r);
+    case INDEX_op_x87_unary:
+        return C_O0_I1(r);
     case INDEX_op_x87_st:
         return C_O1_I1(r, r);
     case INDEX_op_x87_cmp:
