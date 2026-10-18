@@ -4414,6 +4414,55 @@ static bool gen_fcmov_wt(DisasContext *s, int b, int opreg)
 }
 #endif
 
+#if defined(XBOX)
+/*
+ * fcmov on x86_64 hosts (g_x87_hw): ST0 = jcc(b) ? ST0 : ST(i) as a select
+ * of the 10 image bytes, not a branch around the move: a branch ends the
+ * TCG basic block, so every live global was synced around each fcmov of
+ * the fld/fld/fucomi/fcmov min/max idiom. False off that path.
+ */
+static bool gen_fcmov_hw(DisasContext *s, int b, int opreg)
+{
+    CCPrepare cc;
+    TCGv t;
+    TCGv_i64 t64, lo0, loi;
+    TCGv_i32 t32, hi0, hii;
+    X87Ptr p0, pi;
+
+    if (!g_x87_hw) {
+        return false;
+    }
+    cc = gen_prepare_cc(s, b, NULL);
+    t = tcg_temp_new();
+    tcg_gen_setcond_tl(cc.cond, t, cc.reg,
+                       cc.use_reg2 ? cc.reg2 : tcg_constant_tl(cc.imm));
+    t64 = tcg_temp_new_i64();
+    t32 = tcg_temp_new_i32();
+    tcg_gen_extu_tl_i64(t64, t);
+    tcg_gen_trunc_tl_i32(t32, t);
+    p0 = gen_stn_ptr(0);
+    pi = gen_stn_ptr(opreg);
+    lo0 = tcg_temp_new_i64();
+    loi = tcg_temp_new_i64();
+    hi0 = tcg_temp_new_i32();
+    hii = tcg_temp_new_i32();
+    tcg_gen_ld_i64(lo0, p0.base, p0.ofs);
+    tcg_gen_ld16u_i32(hi0, p0.base, p0.ofs + 8);
+    tcg_gen_ld_i64(loi, pi.base, pi.ofs);
+    tcg_gen_ld16u_i32(hii, pi.base, pi.ofs + 8);
+    tcg_gen_movcond_i64(TCG_COND_NE, lo0, t64, tcg_constant_i64(0), lo0, loi);
+    tcg_gen_movcond_i32(TCG_COND_NE, hi0, t32, tcg_constant_i32(0), hi0, hii);
+    tcg_gen_st_i64(lo0, p0.base, p0.ofs);
+    tcg_gen_st16_i32(hi0, p0.base, p0.ofs + 8);
+    return true;
+}
+#else
+static bool gen_fcmov_hw(DisasContext *s, int b, int opreg)
+{
+    return false;
+}
+#endif
+
 /* fcomi/fucomi ST0, ST(i): EFLAGS ZF/PF/CF, CC_OP_EFLAGS. */
 static void gen_fcomi_ST0_STN(DisasContext *s, int opreg, bool quiet)
 {
@@ -6604,7 +6653,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     goto illegal_op;
                 }
                 op1 = fcmov_cc[op & 3] | (((op >> 3) & 1) ^ 1);
-                if (gen_fcmov_wt(s, op1, opreg)) {
+                if (gen_fcmov_wt(s, op1, opreg) ||
+                    gen_fcmov_hw(s, op1, opreg)) {
                     break;
                 }
                 l1 = gen_new_label();

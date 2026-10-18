@@ -449,6 +449,12 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   `frndint`, and `fsqrt` is `fsqrt` after QEMU's C2-on-negative fpus
   update, so they join the inline ops (`x87_st` integer kinds,
   `x87_unary`). Instructions −0.25% (4/4), cycles within noise: a cheap-helper deletion.
+- **fcmov as a select, not a branch.** On the inline path `fcmov` was a
+  conditional jump around the 10-byte move, and a branch ends the TCG
+  basic block, so every live global was synced around each `fcmov` of
+  Azurik's `fld`/`fld`/`fucomi`/`fcmov` min/max idiom. It is now a
+  `setcond` and `movcond` on the image's 8+2 bytes (`gen_fcmov_hw`).
+  Core cycles −3.0%, instructions −0.11%, det fps +3.3%, 4/4.
 
 ### CPU / JIT (ARM64)
 
