@@ -34,8 +34,6 @@
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
 #endif
 
-static bool enable_validation = false;
-
 static char const *const validation_layers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
@@ -242,7 +240,7 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     }
 #endif
 
-    enable_validation = g_config.display.vulkan.validation_layers;
+    bool enable_validation = g_config.display.vulkan.validation_layers;
 
     VkValidationFeatureEnableEXT enables[] = {
         VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
@@ -264,7 +262,6 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
             create_info.pNext = &validationFeatures;
         } else {
             fprintf(stderr, "Warning: validation layers not available\n");
-            enable_validation = false;
         }
     }
 
@@ -732,11 +729,6 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
             &g_array_index(enabled_extension_names, const char *, 0),
         .pNext = next_struct,
     };
-
-    if (enable_validation) {
-        device_create_info.enabledLayerCount = ARRAY_SIZE(validation_layers);
-        device_create_info.ppEnabledLayerNames = validation_layers;
-    }
 
     result = vkCreateDevice(r->physical_device, &device_create_info, NULL,
                             &r->device);
