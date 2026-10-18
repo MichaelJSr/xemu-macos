@@ -1145,7 +1145,8 @@ deleting and recompiling anything that fails. Measured over all 2.4M
 word-aligned truncations of a warm 394-entry cache: none reached the
 driver and none aborted the launch. Deleting the `spirv_cache_v*/`
 directory in the xemu data dir is still a valid manual reset, and
-`XEMU_SPIRV_CACHE=0` bypasses the cache entirely.
+turning off Settings > Cache shaders to disk (`perf.cache_shaders`)
+bypasses the cache entirely, for the Vulkan renderer too.
 
 **Abort with `<file>:<line>: bounds check failed: <expr>`.** Since
 2026-09-08 the Vulkan renderer's guest-driven bounds checks are real

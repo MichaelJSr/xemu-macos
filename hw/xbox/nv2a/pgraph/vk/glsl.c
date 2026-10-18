@@ -61,18 +61,13 @@ static const char *get_spirv_compiler_id(void)
 }
 
 /*
- * XEMU_SPIRV_CACHE=0 (read once) bypasses the on-disk cache entirely (no
- * loads, no stores), for cold-compile A/B measurement or if the cache
- * directory is unusable on some host.
+ * Settings > "Cache shaders to disk" (perf.cache_shaders), as in the GL
+ * renderer: off, no loads and no stores (a cold-compile A/B sets it in the
+ * scratch config).
  */
 static bool spirv_cache_enabled(void)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("XEMU_SPIRV_CACHE");
-        on = !(e && e[0] == '0');
-    }
-    return on == 1;
+    return g_config.perf.cache_shaders;
 }
 
 /*
