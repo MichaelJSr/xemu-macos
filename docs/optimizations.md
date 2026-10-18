@@ -381,10 +381,14 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   such hosts use the helper-based hard FPU. (2) On x86_64 hosts,
   `gen_flcr` programs MXCSR but not the x87 control word, so `FIST`/`FISTP`
   under round-toward-±∞ and `FRNDINT` under any non-nearest mode silently
-  rounded to nearest; those cases now fall back to the softfloat helper
-  (nearest/truncate stay inline; aarch64 unchanged). The gate in (1) in
-  fact turned the cache off on every host; its fork layers were removed
-  on 2026-10-15.
+  rounded to nearest; those cases were meant to fall back to the softfloat
+  helper, but under `hard_fpu` that "softfloat" helper is the x86_64
+  long-double one, which rounded to nearest too (rintl/llrintl with the
+  thread's nearest RC). Fixed 2026-10-18: the x86_64 hard conversions take
+  the guest RC (floorl/ceill/truncl/rintl) and saturate out-of-range values
+  with invalid, as softfloat does; it moved every Windows det hash, so
+  Azurik's floor()/_ftol paths ran it. The gate in (1) in fact turned the
+  cache off on every host; its fork layers were removed on 2026-10-15.
 
 - **Sub-page dirty-tracking default gated to Apple (2026-08-09).** Its
   default was on unconditionally, contradicting the feature's own

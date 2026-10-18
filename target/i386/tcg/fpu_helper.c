@@ -192,28 +192,65 @@ floatx80 floatx80_sqrt__hard(floatx80 a, float_status *status)
     return pack((floatx80){ .fval = sqrtl(a.fval) }, status);
 }
 
+/*
+ * The guest's rounding control. Nothing programs this thread's x87 control
+ * word (its RC is nearest), so pick the rounding by hand: mingw's floorl,
+ * ceill and truncl set their own RC. A guest floor() (fldcw RC down,
+ * frndint) or _ftol (fldcw chop, fistp) otherwise rounded to nearest.
+ */
+static inline long double hard_round(long double x, float_status *status)
+{
+    switch (status->float_rounding_mode) {
+    case float_round_down:
+        return floorl(x);
+    case float_round_up:
+        return ceill(x);
+    case float_round_to_zero:
+        return truncl(x);
+    default:
+        return rintl(x);
+    }
+}
+
 static inline
 floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
 {
-    return (floatx80){ .fval = rintl(a.fval) };
+    return (floatx80){ .fval = hard_round(a.fval, status) };
+}
+
+/* Out of range (NaN too): invalid, saturated as softfloat does. */
+static inline
+int32_t hard_to_int32(long double r, float_status *status)
+{
+    if (likely(r >= -2147483648.0L && r <= 2147483647.0L)) {
+        return (int32_t)r;
+    }
+    float_raise(float_flag_invalid, status);
+    return r < 0 ? INT32_MIN : INT32_MAX;
 }
 
 static inline
 int32_t floatx80_to_int32__hard(floatx80 a, float_status *status)
 {
-    return (int32_t)llrintl(a.fval);
+    return hard_to_int32(hard_round(a.fval, status), status);
 }
 
 static inline
 int32_t floatx80_to_int32_round_to_zero__hard(floatx80 a, float_status *status)
 {
-    return (int32_t)a.fval;
+    return hard_to_int32(truncl(a.fval), status);
 }
 
 static inline
 int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
 {
-    return (int64_t)llrintl(a.fval);
+    long double r = hard_round(a.fval, status);
+
+    if (likely(r >= -9223372036854775808.0L && r < 9223372036854775808.0L)) {
+        return (int64_t)r;
+    }
+    float_raise(float_flag_invalid, status);
+    return r < 0 ? INT64_MIN : INT64_MAX;
 }
 
 #elif defined(__aarch64__)
@@ -4246,14 +4283,6 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
         _mm_setcsr(want);
     }
     return csr;
-}
-
-static inline void xemu_hostfp_leave(uint64_t saved)
-{
-    uint32_t csr = _mm_getcsr();
-    if (csr != (uint32_t)saved) {
-        _mm_setcsr((uint32_t)saved);
-    }
 }
 #endif
 
