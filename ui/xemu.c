@@ -2782,16 +2782,14 @@ int main(int argc, char **argv)
         if (logfile != INVALID_HANDLE_VALUE) {
             freopen("xemu.log", "a", stdout);
             freopen("xemu.log", "a", stderr);
+            /*
+             * freopen() gives stderr the CRT default, which msvcrt fully
+             * buffers for a disk file (mingw's startup had made it
+             * unbuffered), so xemu.log lost its last 4 KiB in a crash.
+             */
+            setvbuf(stderr, NULL, _IONBF, 0);
         }
     }
-
-    /*
-     * The CRT fully buffers a stderr that goes to a file or pipe (4 KiB
-     * blocks), so a redirected log (stderr.log under the harnesses, or
-     * xemu.log) stayed empty while xemu ran and lost its tail in a crash.
-     * Unbuffered, as stderr is on macOS and Linux.
-     */
-    setvbuf(stderr, NULL, _IONBF, 0);
 
     _set_error_mode(_OUT_TO_STDERR);
 #endif

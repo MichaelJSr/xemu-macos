@@ -197,7 +197,7 @@ The kit ships `C:\xemu-kit\tools\kit.ps1`, byte-identical to the repo's `scripts
 
 The kit and the repo don't have to sit at `C:\xemu-kit` and `%USERPROFILE%\xemu-macos`: `kit.ps1` finds them from its own location (the kit's `tools\` or the repo's `scripts\win\`) or as siblings of each other (for example `Documents\xemu-kit` next to `Documents\xemu-macos`), and `$env:XEMU_KIT` / `$env:XEMU_REPO` override both. Every `C:\xemu-kit` in this plan then means `$Kit`.
 
-It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to. The C runtime buffers a redirected stderr in 4 KiB blocks, so while xemu runs `stderr.log` only fills when nsprof or the heartbeat flushes it; everything is there after the quit. Grep a run's log after its `Stop-Xemu`, as the blocks below do.
+It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to. `stderr.log` fills as xemu runs (the inherited stderr is unbuffered); `xemu.log` was fully buffered by the C runtime before the fix that unbuffers it, so on such builds read it after the quit. The blocks below grep after `Stop-Xemu`, which works either way.
 
 ### 1.7 Write the two Windows configs [agent]
 
@@ -366,7 +366,7 @@ The log prints in this PowerShell window. Go through the checklist below and wri
 }
 ```
 
-Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of the run's log (`Get-Content (Get-XemuLog $d) -Tail 30`; after a crash it stops at the last flushed 4 KiB block or is empty, because the C runtime's buffer dies with the process, so read the dump). Repeat with `$XNewDbg`, then go to section 7.3.
+Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of the run's log (`Get-Content (Get-XemuLog $d) -Tail 30`; with no console, a v0.15.1 `xemu.log` can stop at its last flushed 4 KiB block, so also read the dump). Repeat with `$XNewDbg`, then go to section 7.3.
 
 ### 2.3 The fixture savestates load [agent, 10 min]
 
@@ -459,7 +459,7 @@ py -3 $Ctl wait 4444 180
 (Get-Process -Id $p.Id).MainWindowHandle        # 0 = no visible window
 py -3 $Ctl loadvm 4444 azurik-heavy-f1; Start-Sleep 10
 Save-Shot "$d\offscreen.png"; Stop-Xemu $p
-Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'   # after the quit, which flushes stderr
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'
 
 $d = New-Scratch -Name headless-null
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_HEADLESS = 'null' }
@@ -538,7 +538,7 @@ $p2 = Start-Xemu -Exe $XNew -Dir $d2 -Stub -Qmp 4446 -Mon 4447 -Vars @{ XEMU_RAM
 py -3 $Ctl wait 4446 180
 "second alive: $(-not $p2.HasExited)"
 Stop-Xemu $p2 -Qmp 4446; Stop-Xemu $p
-Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'shared memory'          # logs after the quits
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'shared memory'
 Select-String -LiteralPath (Get-XemuLog $d2) -Pattern 'XEMU_RAM_SHM|shared memory'
 # the name is free again once both have exited
 $d3 = New-Scratch -Name shm3
