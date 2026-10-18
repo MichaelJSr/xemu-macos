@@ -924,7 +924,7 @@ void *pfifo_thread(void *arg)
                  * vkQueueSubmit is hung; if waiting_for_flip stays stuck
                  * the game is waiting on NV_PGRAPH_INCREMENT READ_3D.
                  */
-                fprintf(stderr,
+                g_autofree char *line = g_strdup_printf(
                         "xemu: pfifo heartbeat "
                         "iters=%" PRIu64 " halt=%d "
                         "flush=%d sync=%d "
@@ -937,17 +937,7 @@ void *pfifo_thread(void *arg)
                         qatomic_read(&d->pgraph.waiting_for_flip),
                         qatomic_read(&d->pgraph.waiting_for_nop),
                         qatomic_read(&d->pgraph.waiting_for_context_switch));
-#ifdef _WIN32
-                /*
-                 * ui/xemu.c reopens stderr onto CONOUT$ / xemu.log at startup;
-                 * freopen gives the stream the CRT default buffering for its
-                 * new target, which for the log file is full buffering. This
-                 * diagnostic exists to be read after a freeze is force-killed,
-                 * i.e. exactly when a buffered tail is lost, so flush it. One
-                 * flush per ~2 s, only when XEMU_PFIFO_HEARTBEAT=1.
-                 */
-                fflush(stderr);
-#endif
+                fputs(line, stderr); /* one write, as in nsprof */
             }
         }
 

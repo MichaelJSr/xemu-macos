@@ -410,15 +410,15 @@ These are fork features that take a Windows-specific branch (found by `git diff 
 
 | Code | Windows behaviour | Test |
 |---|---|---|
-| `ui/xemu.c` console attach | stderr goes to the parent console, else to `xemu.log` in the working directory | 3.1 |
-| `hw/xbox/nv2a/pfifo.c`, `nsprof.c` | Windows flushes stderr after each heartbeat or nsprof print | 3.1 |
+| `ui/xemu.c` console attach | stderr goes to the parent console or to the file the parent redirected it to, else to `xemu.log` in the working directory | 3.1 |
+| `hw/xbox/nv2a/pfifo.c`, `nsprof.c` | each heartbeat or nsprof report goes out in one write (stderr is unbuffered, and mingw's printf writes a character at a time) | 3.1 |
 | `ui/xemu.c` headless (`SDL_WINDOW_HIDDEN`) | hidden window, no host audio | 3.2 |
 | `ui/xemu-ram-digest.c` | non-Apple uses the thread pool plus qcrypto (Apple uses GCD and CommonCrypto) | 3.3 |
 | `ui/xemu-input.c` `_WIN32` arm | `XEMU_INPUT_PIPE` is a Win32 named pipe (`\\.\pipe\<name>`), PIPE_NOWAIT, one instance, recycled per writer | 3.4 |
 | `hw/xbox/xbox.c` | `XEMU_RAM_SHM` is a named file mapping; no lock file; a name that exists always has a live holder | 3.5 |
 | gdbstub (`gdbstub/xemu-gdb.c`) | portable; never run on Windows | 3.6 |
 | icount, block I/O | deterministic I/O: macOS and Linux run qcow2 I/O inline on the vCPU; Windows' file-win32 still hands it to worker threads (the IDE settle covers it) | 3.7 |
-| `target/i386/tcg/fpu_helper.c` | x86_64 hard FPU uses host `long double` (x87); aarch64 uses `double`; the SSE host path is dark on x86_64 (`XEMU_SSE_HOST=1` opts in) | 3.7, 3.8 |
+| `target/i386/tcg/fpu_helper.c` | x86_64 hard FPU uses host `long double` (x87); aarch64 uses `double`; the SSE host path is on by default with `hard_fpu` (since 2026-10-18; `XEMU_SSE_HOST=2` is the differential) | 3.7, 3.8 |
 | `tcg/aarch64/tcg-target-has.h` | Windows ARM64: `TCG_TARGET_HAS_fpu 0` (helper hard FPU, no inline x87 or SSE), but pinned registers, the TLB memo and hot/cold TB code are active | 3.9 |
 | `include/qemu/cacheflush.h` | batched icache flush off on Windows ARM64 | 3.9 |
 | `dsp56k_jit_arm64.h` | the fork's DSP JIT exists only on aarch64 POSIX; Windows runs upstream's dsp56300 JIT (`use_dsp_jit = true`) or the interpreter | 3.7, 3.9, 4.5 |

@@ -169,13 +169,19 @@ void nsprof_flip_tick(void)
     }
 
     double secs = (double)(now - interval_start_ns) / 1e9;
-    fprintf(stderr, "nsprof: %.1fs interval, %llu flips (%.1f/s)\n", secs,
-            (unsigned long long)flips, (double)flips / secs);
+    /*
+     * One write per report: stderr is unbuffered, and mingw's printf
+     * (__USE_MINGW_ANSI_STDIO) writes a stream one character at a time.
+     */
+    g_autoptr(GString) out = g_string_sized_new(4096);
+    g_string_append_printf(out, "nsprof: %.1fs interval, %llu flips (%.1f/s)\n",
+                           secs, (unsigned long long)flips,
+                           (double)flips / secs);
     for (int i = 0; i < NSPROF__COUNT; i++) {
         if (!counters[i].events) {
             continue;
         }
-        fprintf(stderr,
+        g_string_append_printf(out,
                 "nsprof:   %-12s ev=%-7llu total=%7.2fms "
                 "per_flip=%7.1fus max=%7.1fus\n",
                 counter_names[i], (unsigned long long)counters[i].events,
@@ -190,22 +196,12 @@ void nsprof_flip_tick(void)
         if (!events[i]) {
             continue;
         }
-        fprintf(stderr, "nsprof:   %-19s ev=%-8llu per_flip=%7.1f\n",
+        g_string_append_printf(out, "nsprof:   %-19s ev=%-8llu per_flip=%7.1f\n",
                 event_names[i], (unsigned long long)events[i],
                 (double)events[i] / (double)flips);
         events[i] = 0;
     }
-#ifdef _WIN32
-    /*
-     * ui/xemu.c reopens stderr onto CONOUT$ or xemu.log at startup; freopen
-     * gives the stream the CRT default buffering for its new target, which for
-     * the log file is full buffering. A run that ends in a hang + force-kill
-     * (the exact case this profiler is used to triage) would otherwise lose
-     * the last partial 4 KiB block. One flush per ~5 s interval, and only when
-     * the profiler is enabled at all.
-     */
-    fflush(stderr);
-#endif
+    fwrite(out->str, 1, out->len, stderr);
     flips = 0;
     interval_start_ns = now;
 }
