@@ -195,6 +195,8 @@ The kit ships `C:\xemu-kit\tools\kit.ps1`, byte-identical to the repo's `scripts
 . C:\xemu-kit\tools\kit.ps1
 ```
 
+The kit and the repo don't have to sit at `C:\xemu-kit` and `%USERPROFILE%\xemu-macos`: `kit.ps1` finds them from its own location (the kit's `tools\` or the repo's `scripts\win\`) or as siblings of each other (for example `Documents\xemu-kit` next to `Documents\xemu-macos`), and `$env:XEMU_KIT` / `$env:XEMU_REPO` override both. Every `C:\xemu-kit` in this plan then means `$Kit`.
+
 It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to.
 
 ### 1.7 Write the two Windows configs [agent]

@@ -3,8 +3,18 @@
 # Reload PATH from the registry, so tools installed after this shell (or Claude Code) started are found.
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 $Ver     = 'v0.15.1'          # fork release under test (set a newer one if it exists)
-$Kit     = 'C:\xemu-kit'
-$Repo    = Join-Path $env:USERPROFILE 'xemu-macos'
+# The repo and the kit: $env:XEMU_REPO / $env:XEMU_KIT if set, else found from this file's place
+# (the kit's tools\kit.ps1 or the repo's scripts\win\kit.ps1) or as siblings of each other,
+# else %USERPROFILE%\xemu-macos and C:\xemu-kit.
+function Find-Dir([string[]]$Dirs, [string]$Marker) {
+  foreach ($d in $Dirs) { if ($d -and (Test-Path -LiteralPath (Join-Path $d $Marker))) { return $d } }
+}
+$here    = Split-Path -Parent $PSScriptRoot
+$Repo    = Find-Dir @($env:XEMU_REPO, (Split-Path -Parent $here), (Join-Path (Split-Path -Parent $here) 'xemu-macos'),
+                      (Join-Path $env:USERPROFILE 'xemu-macos')) 'scripts\win\kit.ps1'
+if (-not $Repo) { $Repo = Join-Path $env:USERPROFILE 'xemu-macos' }
+$Kit     = Find-Dir @($env:XEMU_KIT, $here, (Join-Path (Split-Path -Parent $Repo) 'xemu-kit'), 'C:\xemu-kit') 'SHA256SUMS.txt'
+if (-not $Kit) { $Kit = 'C:\xemu-kit' }
 $Work    = Join-Path $Kit 'work'
 $Res     = Join-Path $Kit 'results'
 $Ctl     = Join-Path $Repo 'scripts\win\xemu_ctl.py'
