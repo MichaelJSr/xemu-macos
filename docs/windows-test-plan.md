@@ -197,7 +197,7 @@ The kit ships `C:\xemu-kit\tools\kit.ps1`, byte-identical to the repo's `scripts
 
 The kit and the repo don't have to sit at `C:\xemu-kit` and `%USERPROFILE%\xemu-macos`: `kit.ps1` finds them from its own location (the kit's `tools\` or the repo's `scripts\win\`) or as siblings of each other (for example `Documents\xemu-kit` next to `Documents\xemu-macos`), and `$env:XEMU_KIT` / `$env:XEMU_REPO` override both. Every `C:\xemu-kit` in this plan then means `$Kit`.
 
-It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to.
+It defines `$Kit $Repo $Work $Res $XNew $XNewDbg $XOld $XUp $Ctl $Det $Inj $Score $Bench`, sets `XEMU_TEST_CONFIG` and `XEMU_BENCH_CACHE`, and provides `Q`, `Get-TomlKey`, `Set-TomlKey`, `Remove-TomlKey`, `New-Scratch`, `Start-Xemu`, `Stop-Xemu`, `Save-Shot`, `Get-XemuLog`, `Show-Nsprof`, `Copy-Dist` and `Stop-AutoXemu`. `New-Scratch` deletes the HDD copy of every earlier run dir whose xemu has exited (logs, configs and screenshots stay), so scratch runs don't fill the disk. `Start-Xemu` refuses to launch when its QMP or monitor port is already taken (a leftover xemu: run `Stop-AutoXemu`), and the process it returns keeps its `ExitCode` after xemu exits. `Get-XemuLog <dir>` names the run's log: `stderr.log`, or `xemu.log` when xemu had no console to attach to. The C runtime buffers a redirected stderr in 4 KiB blocks, so while xemu runs `stderr.log` only fills when nsprof or the heartbeat flushes it; everything is there after the quit. Grep a run's log after its `Stop-Xemu`, as the blocks below do.
 
 ### 1.7 Write the two Windows configs [agent]
 
@@ -366,7 +366,7 @@ The log prints in this PowerShell window. Go through the checklist below and wri
 }
 ```
 
-Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of the run's log (`Get-Content (Get-XemuLog $d) -Tail 30`). Repeat with `$XNewDbg`, then go to section 7.3.
+Pass: 5 of 5 alive at 40 s (the 2026-09 crash came at 6-10 s), and each screenshot is PASS or shows the intro or title. On FAIL, record the exit code (`-1073741819` = 0xC0000005 access violation, `-1073740791` = 0xC0000409 fail-fast), the dump in `results\dumps` and the last 30 lines of the run's log (`Get-Content (Get-XemuLog $d) -Tail 30`; after a crash it stops at the last flushed 4 KiB block or is empty, because the C runtime's buffer dies with the process, so read the dump). Repeat with `$XNewDbg`, then go to section 7.3.
 
 ### 2.3 The fixture savestates load [agent, 10 min]
 
@@ -456,17 +456,19 @@ Pass: `xemu_version:` and `xemu_commit:` sit at the top, the last heartbeat or n
 $d = New-Scratch -Name headless-offscreen
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_HEADLESS = '1' }
 py -3 $Ctl wait 4444 180
-Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'
 (Get-Process -Id $p.Id).MainWindowHandle        # 0 = no visible window
 py -3 $Ctl loadvm 4444 azurik-heavy-f1; Start-Sleep 10
 Save-Shot "$d\offscreen.png"; Stop-Xemu $p
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'   # after the quit, which flushes stderr
 
 $d = New-Scratch -Name headless-null
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_HEADLESS = 'null' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-heavy-f1; Start-Sleep 5
 py -3 $Ctl qmp 4444 screendump "filename=$d\null.png" format=png
 Stop-Xemu $p
-Get-TomlKey "$d\xemu.toml" 'display' 'renderer'     # still VULKAN: null mode never saves over it
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'headless mode'
+$r = Get-TomlKey "$d\xemu.toml" 'display' 'renderer'   # null mode never saves over it; xemu writes only non-default keys
+'renderer after the null run: ' + $(if ($r) { $r } else { 'VULKAN (the default, so not written)' })   # NULL is a failure
 ```
 
 Pass: `xemu: headless mode: offscreen` (or `null`), window handle 0, no taskbar button, no focus steal (the owner types in another window meanwhile), no xemu entry in the Volume Mixer, the offscreen screenshot is PASS showing the scene, and the null screendump returns a PNG (usually blank).
@@ -503,7 +505,6 @@ Pass: replay same = True, the dump file matches, the restore with `verify=true` 
 $d = New-Scratch -Name pipe
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_INPUT_PIPE = 'xemu-kit-pipe'; XEMU_NV2A_NSPROF = '1' }
 py -3 $Ctl wait 4444 180; py -3 $Ctl loadvm 4444 azurik-stream-e2
-Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'test-input pipe'
 Save-Shot "$d\before.png"
 py -3 $Inj down xemu-kit-pipe W; Start-Sleep 1
 py -3 $Ctl qmp 4444 query-xemu-input              # keys contains 26, port 2 ly > 0
@@ -514,6 +515,7 @@ py -3 $Ctl qmp 4444 query-xemu-input              # queued: both lines, with fra
 $fail = 0; 1..100 | ForEach-Object { py -3 $Inj tap xemu-kit-pipe D 20 2>$null; if ($LASTEXITCODE) { $fail++ } }
 "one-shot writer failures: $fail of 100"
 Stop-Xemu $p
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'test-input pipe'
 ```
 
 Run it while another window has focus. Pass: `xemu: test-input pipe listening on \\.\pipe\xemu-kit-pipe`, the input state shows the key and stick, the character walks (the two screenshots differ and draws per flip change), both frame-tagged lines appear in `queued`, and there are 0 failures out of 100 writers. A failure count above 0 points at the disconnect/reconnect window that the comment in `ui/xemu-input.c` describes.
@@ -525,7 +527,6 @@ Run it while another window has focus. Pass: `xemu: test-input pipe listening on
 $d = New-Scratch -Name shm
 $p = Start-Xemu -Exe $XNew -Dir $d -Stub -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' } -Extra '-S'
 py -3 $Ctl wait 4444 180
-Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'shared memory'
 py -3 $Ctl loadvm 4444 azurik-heavy-f1
 py -3 $Ctl qmp 4444 xemu-frame-advance frames=60
 $dig = py -3 $Ctl qmp 4444 xemu-ram-digest | ConvertFrom-Json
@@ -535,12 +536,14 @@ $shm = py -3 $Ctl shmhash xemu-kit-shm $dig.'ram-size'
 $d2 = New-Scratch -Name shm2
 $p2 = Start-Xemu -Exe $XNew -Dir $d2 -Stub -Qmp 4446 -Mon 4447 -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' }
 py -3 $Ctl wait 4446 180
-Select-String -LiteralPath (Get-XemuLog $d2) -Pattern 'XEMU_RAM_SHM|shared memory'
+"second alive: $(-not $p2.HasExited)"
 Stop-Xemu $p2 -Qmp 4446; Stop-Xemu $p
+Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'shared memory'          # logs after the quits
+Select-String -LiteralPath (Get-XemuLog $d2) -Pattern 'XEMU_RAM_SHM|shared memory'
 # the name is free again once both have exited
 $d3 = New-Scratch -Name shm3
 $p3 = Start-Xemu -Exe $XNew -Dir $d3 -Stub -Vars @{ XEMU_RAM_SHM = 'xemu-kit-shm'; XEMU_HEADLESS = 'null' }
-py -3 $Ctl wait 4444 180; Select-String -LiteralPath (Get-XemuLog $d3) -Pattern 'shared memory'; Stop-Xemu $p3
+py -3 $Ctl wait 4444 180; Stop-Xemu $p3; Select-String -LiteralPath (Get-XemuLog $d3) -Pattern 'shared memory'
 ```
 
 Pass: `xemu: guest RAM in shared memory xemu-kit-shm`, the hashes match, the second xemu prints that the name is held and that guest RAM stays private, without exiting, and the third launch gets the name. The README says a reader that keeps the mapping open across a relaunch makes the new xemu keep private RAM. That's expected, not a bug.

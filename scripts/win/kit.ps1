@@ -144,10 +144,12 @@ function Save-Shot([string]$Path, [int]$Qmp = 4444) {
 }
 
 # The run's log: stderr.log, or xemu.log when xemu found no console to attach to (ui/xemu.c
-# then sends both streams to xemu.log in its working directory).
+# then sends both streams to xemu.log in its working directory, created at startup). Decide by
+# xemu.log, not by stderr.log's size: the CRT buffers a redirected stderr in 4 KiB blocks, so
+# stderr.log can be empty while xemu runs (nsprof and the heartbeat flush it; exit does too).
 function Get-XemuLog([string]$Dir) {
-  $e = Join-Path $Dir 'stderr.log'
-  if ((Test-Path -LiteralPath $e) -and (Get-Item -LiteralPath $e).Length) { $e } else { Join-Path $Dir 'xemu.log' }
+  $x = Join-Path $Dir 'xemu.log'
+  if (Test-Path -LiteralPath $x) { $x } else { Join-Path $Dir 'stderr.log' }
 }
 
 function Show-Nsprof([string]$Dir, [int]$Last = 12) {
