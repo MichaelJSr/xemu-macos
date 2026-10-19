@@ -71,6 +71,8 @@ extern int xemu_sse_vfp;
 #if defined(XBOX) && defined(__x86_64__)
 /* fpu_helper.c: the guest's x87 PC and RC into this thread's x87 CW. */
 void xemu_sync_host_x87_cw(CPUX86State *env);
+/* tcg-cpu.c: the same after a longjmp (accel/tcg/cpu-exec.c). */
+void x86_cpu_resync_host_fp(CPUState *cs);
 #endif
 #if defined(XBOX) && defined(__aarch64__)
 /* fpu_helper.c: re-apply the x87 RC to this (vCPU) thread's FPCR. */

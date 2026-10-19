@@ -1466,8 +1466,10 @@ void xemu_sync_host_rounding(CPUX86State *env)
  * extended-precision guest math ran at double precision, and the hard ops
  * rounded to nearest whatever the guest's RC. update_fp_status sets it on
  * the vCPU thread; reset, loadvm and the gdbstub write FCW from the main
- * thread, so x86_cpu_exec_enter re-applies it. Reserved PC 01 runs as
- * extended, as softfloat's does.
+ * thread, so x86_cpu_exec_enter re-applies it, and so does
+ * cpu_exec_longjmp_cleanup, since Win64's and Darwin's longjmp restore the
+ * control word sigsetjmp saved. Reserved PC 01 runs as extended, as
+ * softfloat's does.
  */
 void xemu_sync_host_x87_cw(CPUX86State *env)
 {

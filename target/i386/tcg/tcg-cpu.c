@@ -48,6 +48,18 @@ static void x86_cpu_exec_enter(CPUState *cs)
 #endif
 }
 
+#if defined(XBOX) && defined(__x86_64__)
+/*
+ * cpu_exec_longjmp_cleanup: Win64's and Darwin's longjmp put back the x87
+ * control word sigsetjmp saved, the guest's PC and RC at this cpu_exec's
+ * entry, not those of a FLDCW since.
+ */
+void x86_cpu_resync_host_fp(CPUState *cs)
+{
+    xemu_sync_host_x87_cw(cpu_env(cs));
+}
+#endif
+
 static void x86_cpu_exec_exit(CPUState *cs)
 {
     X86CPU *cpu = X86_CPU(cs);

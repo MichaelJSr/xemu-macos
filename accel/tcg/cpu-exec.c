@@ -64,6 +64,9 @@
  */
 TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs);
 #define xemu_get_tb_cpu_state(cpu) x86_get_tb_cpu_state(cpu)
+#if defined(__x86_64__)
+void x86_cpu_resync_host_fp(CPUState *cs);
+#endif
 #else
 #define xemu_get_tb_cpu_state(cpu) ((cpu)->cc->tcg_ops->get_tb_cpu_state(cpu))
 #endif
@@ -1167,6 +1170,10 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
     assert_no_pages_locked();
     /* A fault inside tb_gen_code's write bracket lands here. */
     qemu_thread_jit_execute();
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY) && defined(__x86_64__)
+    /* The guest's x87 PC and RC back in the host control word. */
+    x86_cpu_resync_host_fp(cpu);
+#endif
 }
 
 void cpu_exec_step_atomic(CPUState *cpu)
