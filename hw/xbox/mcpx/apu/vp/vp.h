@@ -116,6 +116,8 @@ typedef struct {
     uint8_t submix_headroom[NUM_MIXBINS];
     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
     uint64_t voice_locked[4];
+    /* voice_work_dispatch waits for an unlock (d->lock; host state) */
+    bool unlock_waiter;
 
     struct {
         int current_entry;

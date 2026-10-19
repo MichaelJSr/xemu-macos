@@ -505,7 +505,15 @@ static void voice_lock_locked(MCPXAPUState *d, uint16_t v, bool lock)
         qatomic_and(&d->vp.voice_locked[v / 64], ~mask);
     }
 
-    qemu_cond_signal(&d->cond);
+    /*
+     * Only voice_work_dispatch waits for this, and only for an unlock;
+     * waking the frame thread otherwise (its pacing wait, or its park in
+     * deterministic mode) makes it take d->lock while the guest's next
+     * VP method in the same burst needs it.
+     */
+    if (!lock && d->vp.unlock_waiter) {
+        qemu_cond_signal(&d->cond);
+    }
 }
 
 static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
@@ -2392,7 +2400,9 @@ voice_work_dispatch(MCPXAPUState *d,
             break;
         }
 
+        d->vp.unlock_waiter = true;
         qemu_cond_timedwait(&d->cond, &d->lock, 1);
+        d->vp.unlock_waiter = false;
     }
 
     /*

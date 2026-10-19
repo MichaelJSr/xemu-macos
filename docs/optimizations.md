@@ -2687,6 +2687,37 @@ x86_64 host (Windows, Linux, Intel macOS).
   loop of two blocks ran to its end in the first `dsp_run` after a
   restore instead of stopping where the first pass did (xbox suite
   `/corpus/budget-replay`).
+- **A voice unlock wakes the frame thread only when it waits for one
+  (2026-10-18).** `voice_lock_locked` signalled `d->cond` on every
+  voice lock and unlock (`fe_method`, on the vCPU under `d->lock`), but
+  only `voice_work_dispatch`'s 1 ms wait for a locked voice needs it;
+  the other waits on `d->cond` loop on time or `pause_requested` and keep
+  their own signals. Each spurious wake made the frame thread (parked,
+  or in its pacing wait) take `d->lock` while the guest's next VP method
+  in the same burst needed it. The dispatch wait now sets
+  `vp.unlock_waiter` under the lock, and only an unlock with it set
+  signals. Counter builds, det heavy-f1: 23 signals a guest frame woke
+  the parked thread 6.2 times; that thread 23-24 → 1.2-1.3 µs a frame,
+  the vCPU's `vp_write` wait and hold 37-55 → 4 µs. Normal mode
+  (headless offscreen heavy-f1, 30 s, load 78-104): contended
+  `vp_write` locks 10,415 → 187, the vCPU's `vp_write` time 0.90% →
+  0.14% of wall. The cycle gain is small: it meets the vetting gate
+  (cycles better in ≥3/4 of pairs) in 5 of 7 heavy-f1 sessions and 2
+  of 8 on stream-e2. Det, fork engine, RAM equal, base built alike:
+  heavy-f1 1200 cycles per frame −1.1 to −2.3% (PGO: −2.30% 6/6 and
+  −1.93% 5/6 base first, vetting −1.26% 5/6, a review run new first
+  −1.35% 2/4, ABBA −1.65% 5/6; no PGO, both orders: −1.07%, 9/16);
+  stream-e2 1200 unresolved, −1.5 to +1.0% (PGO, base first: 4/6, 4/8,
+  4/10, means +0.3 to +0.5%; vetting −1.52% 5/6; ABBA −0.80% 5/6; no
+  PGO +0.09%, 11/20); instructions −0.07 to −0.29% (82/84 pairs); load
+  14-70. The second arm of a pair ran faster in either order, so
+  base-first sessions overstate the gain. Until the next retrain the
+  committed PGO profile misses `voice_lock_locked`, which `fe_method`
+  then calls instead of inlining. Upstream engine (PGO): heavy-f1
+  cycles −0.10% (5/6), stream-e2 −1.53% (4/6), instructions −0.16% and
+  −0.10% (6/6). Normal-mode sittings (this change alone on the upstream
+  engine, with the next one on both) hold 1500 APU frames/s with
+  gapless `XEMU_AUDIO_WAV` captures.
 
 ### Input
 
