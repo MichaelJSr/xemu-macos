@@ -1320,9 +1320,14 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
      * require a pipeline rebuild (e.g. shader key depending on
      * bound sampler format), shader_bindings_changed fires and
      * that branch catches it.
+     *
+     * A bound clear pipeline (create_clear_pipeline) is always dirty: the
+     * checks below compare against the previous draw, not against the
+     * bound key, so a draw after a clear that changed none of them would
+     * otherwise run on the clear pipeline and its empty layout.
      */
-    if (!r->pipeline_binding || r->shader_bindings_changed ||
-        check_render_pass_dirty(pg)) {
+    if (!r->pipeline_binding || r->pipeline_binding->key.clear ||
+        r->shader_bindings_changed || check_render_pass_dirty(pg)) {
         return true;
     }
 

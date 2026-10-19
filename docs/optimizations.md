@@ -1596,7 +1596,9 @@ x86_64 host (Windows, Linux, Intel macOS).
   dynamic state and `NV_PGRAPH_CONTROL_3` (routed via `ShaderState` /
   `PROVOKING_VERTEX`). `check_pipeline_dirty` ignores
   `texture_bindings_changed`; set-1 refresh via
-  `pgraph_vk_update_descriptor_sets` handles rebinds.
+  `pgraph_vk_update_descriptor_sets` handles rebinds. It compares
+  against the previous draw, so it treats a bound clear pipeline as
+  dirty: the next draw's keyed lookup rebinds its own pipeline.
 - **Flight slots (N=2) + single-submit fast path.** CPU records
   slot 1 while GPU runs slot 0; aux CB skipped when staging is empty.
 - **Texture upload.** Batched + bump-allocator staging; parallel CPU
