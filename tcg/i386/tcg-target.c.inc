@@ -2133,9 +2133,9 @@ static void tcg_out_pair_to_vec(TCGContext *s, TCGType type,
  * xemu: st_f64_slow stores (tcg_reg_alloc_st_f64_slow), first on a slow
  * path, where L0 is free scratch, or in line (tmp < 0: L0 is saved around
  * its use). A held value never sits where the access writes before its
- * slow-path branch: L0 and L1, the TLB lookup's.
+ * slow-path branch: L0 and L1 (the TLB lookup) or EAX (x87_cmp_g).
  */
-#define TCG_TARGET_SLOW_ST_AVOID  SOFTMMU_RESERVE_REGS
+#define TCG_TARGET_SLOW_ST_AVOID  (SOFTMMU_RESERVE_REGS | (1 << TCG_REG_EAX))
 
 static void tcg_out_slow_st_tmp(TCGContext *s, const TCGSlowSt *e,
                                 unsigned n, int tmp)
@@ -2816,8 +2816,9 @@ static inline void tcg_out_fstp_xmm(TCGContext *s, TCGArg a0, bool dp)
 /*
  * xemu: x87_* (tcg-opc.h), the instructions the x86_64 __hard helpers run,
  * under the guest's control word (xemu_sync_host_x87_cw). The x87 stack is
- * empty between ops. A memory operand goes through (%rsp), the start of the
- * outgoing-argument area, which nothing holds outside a call.
+ * empty between ops. A memory operand is the guest page (x87_*_g) or goes
+ * through (%rsp), the start of the outgoing-argument area, which nothing
+ * holds outside a call.
  */
 static void tcg_out_x87_scratch(TCGContext *s, TCGReg val, int type)
 {
@@ -2825,13 +2826,25 @@ static void tcg_out_x87_scratch(TCGContext *s, TCGReg val, int type)
                TCG_REG_ESP, 0);
 }
 
-/* fop m32fp, m32int, m64fp (D8, DA, DC /op) on (%rsp) */
-static void tcg_out_x87_mem_op(TCGContext *s, int op, int type)
-{
-    static const uint8_t opc[3] = { 0xd8, 0xda, 0xdc };
+/* By TCG_X87_M* type: flds, fildl, fldl (/0), fildll (/5) */
+static const uint8_t x87_ld_opc[4] = { 0xd9, 0xdb, 0xdd, 0xdf };
+static const uint8_t x87_ld_ext[4] = { 0, 0, 0, 5 };
+/* fstps, fistpl, fstpl (/3), fistpll (/7), fistps (/3) */
+static const uint8_t x87_st_opc[5] = { 0xd9, 0xdb, 0xdd, 0xdf, 0xdf };
+static const uint8_t x87_st_ext[5] = { 3, 3, 3, 7, 3 };
+/* fop m32fp, m32int, m64fp (D8, DA, DC /op) */
+static const uint8_t x87_op_opc[3] = { 0xd8, 0xda, 0xdc };
 
-    tcg_debug_assert(type < TCG_X87_M64I);
-    tcg_out_modrm_offset(s, opc[type], op, TCG_REG_ESP, 0);
+/* An x87 insn on the guest operand at h, or on (%rsp) without one */
+static void tcg_out_x87_m(TCGContext *s, int opc, int ext,
+                          const HostAddress *h)
+{
+    if (h) {
+        tcg_out_modrm_sib_offset(s, opc + h->seg, ext, h->base, h->index, 0,
+                                 h->ofs);
+    } else {
+        tcg_out_modrm_offset(s, opc, ext, TCG_REG_ESP, 0);
+    }
 }
 
 /* fnstsw %ax; and $0x4500, %eax: C3|C2|C0 */
@@ -2843,15 +2856,110 @@ static void tcg_out_x87_cc(TCGContext *s, TCGReg ret)
     tgen_arithi(s, ARITH_AND, ret, 0x4500, 0);
 }
 
+/*
+ * The memory forms on the image at [base + ofs], the operand at h or
+ * (%rsp): the push's load, the op (kind op | type << 3), fcomp (C3|C2|C0
+ * in EAX), and the store, which leaves the value at the operand.
+ */
+static void tcg_out_x87_mform(TCGContext *s, TCGOpcode opc, int kind,
+                              TCGReg base, intptr_t ofs, const HostAddress *h)
+{
+    switch (opc) {
+    case INDEX_op_x87_ld:
+    case INDEX_op_x87_ld_g:
+        tcg_out_x87_m(s, x87_ld_opc[kind], x87_ld_ext[kind], h);
+        tcg_out_fstp(s, base, ofs);
+        break;
+    case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_arith_g:
+        tcg_debug_assert(kind >> 3 < TCG_X87_M64I);
+        tcg_out_fld(s, base, ofs);
+        tcg_out_x87_m(s, x87_op_opc[kind >> 3], kind & 7, h);
+        tcg_out_fstp(s, base, ofs);
+        break;
+    case INDEX_op_x87_cmp_m:
+    case INDEX_op_x87_cmp_g:
+        /* fldt a; fcomp m */
+        tcg_debug_assert(kind < TCG_X87_M64I);
+        tcg_out_fld(s, base, ofs);
+        tcg_out_x87_m(s, x87_op_opc[kind], 3, h);
+        tcg_out_x87_cc(s, TCG_REG_EAX);
+        break;
+    case INDEX_op_x87_st:
+    case INDEX_op_x87_st_g:
+        tcg_out_fld(s, base, ofs);
+        tcg_out_x87_m(s, x87_st_opc[kind], x87_st_ext[kind], h);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+/*
+ * x87_*_g's slow path: the load helper's value, or the store helper's,
+ * through (%rsp), with the fast path's instructions; ST(i)'s image is at
+ * env + stub_ofs, the op and its kind in stub_op.
+ */
+static bool tcg_out_x87_g_slow(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    TCGOpcode opc = l->stub_op >> 8;
+    int kind = l->stub_op & 0xff;
+    MemOp mop = get_memop(l->oi);
+    TCGType vt = (mop & MO_SIZE) == MO_64 ? TCG_TYPE_I64 : TCG_TYPE_I32;
+
+    tcg_patch32(l->label_ptr[0], s->code_ptr - l->label_ptr[0] - 4);
+    if (l->label_ptr[1]) {
+        tcg_patch32(l->label_ptr[1], s->code_ptr - l->label_ptr[1] - 4);
+    }
+    tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
+    if (opc == INDEX_op_x87_st_g) {
+        TCGLabelQemuLdst st = *l;
+
+        tcg_out_x87_mform(s, opc, kind, TCG_AREG0, l->stub_ofs, NULL);
+        tcg_out_ld(s, vt, TCG_REG_L0, TCG_REG_ESP, 0);
+        st.type = vt;
+        st.datalo_reg = TCG_REG_L0;
+        st.datahi_reg = -1;
+        tcg_out_st_helper_args(s, &st, &ldst_helper_param);
+        tcg_out_branch(s, 1, qemu_st_helpers[mop & MO_SIZE]);
+    } else {
+        tcg_out_ld_helper_args(s, l, &ldst_helper_param);
+        tcg_out_branch(s, 1, qemu_ld_helpers[mop & MO_SIZE]);
+        tcg_out_st(s, vt, TCG_REG_EAX, TCG_REG_ESP, 0);
+        tcg_out_x87_mform(s, opc, kind, TCG_AREG0, l->stub_ofs, NULL);
+    }
+    tcg_out_jmp(s, l->raddr);
+    return true;
+}
+
+/*
+ * x87_*_g: ST(i)'s image at env + ofs, the guest operand on its page
+ * behind prepare_host_addr's TLB check, which a miss takes to
+ * tcg_out_x87_g_slow.
+ */
+static void tcg_out_x87_g(TCGContext *s, TCGOpcode opc,
+                          const TCGArg args[TCG_MAX_OP_ARGS])
+{
+    int i = opc == INDEX_op_x87_cmp_g;   /* past x87_cmp_g's output */
+    intptr_t ofs = args[i + 1];
+    int kind = args[i + 2];
+    TCGLabelQemuLdst *ldst;
+    HostAddress h;
+
+    ldst = prepare_host_addr(s, &h, args[i], args[i + 3],
+                             opc != INDEX_op_x87_st_g);
+    tcg_out_x87_mform(s, opc, kind, TCG_AREG0, ofs, &h);
+    if (ldst) {
+        ldst->raddr = tcg_splitwx_to_rx(s->code_ptr);
+        ldst->out_stub = tcg_out_x87_g_slow;
+        ldst->stub_op = opc << 8 | kind;
+        ldst->stub_ofs = ofs;
+    }
+}
+
 static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
                            const TCGArg args[TCG_MAX_OP_ARGS])
 {
-    /* flds, fildl, fldl (/0), fildll (/5) */
-    static const uint8_t ld_opc[4] = { 0xd9, 0xdb, 0xdd, 0xdf };
-    static const uint8_t ld_ext[4] = { 0, 0, 0, 5 };
-    /* fstps, fistpl, fstpl (/3), fistpll (/7), fistps (/3) */
-    static const uint8_t st_opc[5] = { 0xd9, 0xdb, 0xdd, 0xdf, 0xdf };
-    static const uint8_t st_ext[5] = { 3, 3, 3, 7, 3 };
     int op;
 
     switch (opc) {
@@ -2866,9 +2974,7 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
         break;
     case INDEX_op_x87_arith_m:
         tcg_out_x87_scratch(s, args[1], args[3] >> 3);
-        tcg_out_fld(s, args[0], args[2]);
-        tcg_out_x87_mem_op(s, args[3] & 7, args[3] >> 3);
-        tcg_out_fstp(s, args[0], args[2]);
+        tcg_out_x87_mform(s, opc, args[3], args[0], args[2], NULL);
         break;
     case INDEX_op_x87_unary:
         /* fldt a; frndint or fsqrt; fstpt a */
@@ -2879,14 +2985,10 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
         break;
     case INDEX_op_x87_ld:
         tcg_out_x87_scratch(s, args[1], args[3]);
-        tcg_out_modrm_offset(s, ld_opc[args[3]], ld_ext[args[3]],
-                             TCG_REG_ESP, 0);
-        tcg_out_fstp(s, args[0], args[2]);
+        tcg_out_x87_mform(s, opc, args[3], args[0], args[2], NULL);
         break;
     case INDEX_op_x87_st:
-        tcg_out_fld(s, args[1], args[2]);
-        tcg_out_modrm_offset(s, st_opc[args[3]], st_ext[args[3]],
-                             TCG_REG_ESP, 0);
+        tcg_out_x87_mform(s, opc, args[3], args[1], args[2], NULL);
         if (args[3] == TCG_X87_M16I) {
             tcg_out_modrm_offset(s, OPC_MOVSWL, args[0], TCG_REG_ESP, 0);
         } else {
@@ -2903,11 +3005,15 @@ static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
         tcg_out_x87_cc(s, args[0]);
         break;
     case INDEX_op_x87_cmp_m:
-        /* fldt a; fcomp m */
+        tcg_debug_assert(args[0] == TCG_REG_EAX);
         tcg_out_x87_scratch(s, args[2], args[4]);
-        tcg_out_fld(s, args[1], args[3]);
-        tcg_out_x87_mem_op(s, 3, args[4]);
-        tcg_out_x87_cc(s, args[0]);
+        tcg_out_x87_mform(s, opc, args[4], args[1], args[3], NULL);
+        break;
+    case INDEX_op_x87_ld_g:
+    case INDEX_op_x87_arith_g:
+    case INDEX_op_x87_cmp_g:
+    case INDEX_op_x87_st_g:
+        tcg_out_x87_g(s, opc, args);
         break;
     default:
         g_assert_not_reached();
@@ -3260,6 +3366,10 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     case INDEX_op_x87_st:
     case INDEX_op_x87_cmp:
     case INDEX_op_x87_cmp_m:
+    case INDEX_op_x87_ld_g:
+    case INDEX_op_x87_arith_g:
+    case INDEX_op_x87_cmp_g:
+    case INDEX_op_x87_st_g:
         tcg_out_x87_op(s, opc, args);
         break;
     /* FIXME: Exceptions */
@@ -4611,6 +4721,12 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_x87_cmp:
     case INDEX_op_x87_cmp_m:
         return C_O1_I2(a, r, r);
+    case INDEX_op_x87_ld_g:
+    case INDEX_op_x87_arith_g:
+    case INDEX_op_x87_st_g:
+        return C_O0_I1(L);
+    case INDEX_op_x87_cmp_g:
+        return C_O1_I1(a, L);
     case INDEX_op_ld80f_f32:
     case INDEX_op_ld80f_f64:
         return C_O1_I1(x, L);

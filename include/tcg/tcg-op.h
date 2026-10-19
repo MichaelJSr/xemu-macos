@@ -144,6 +144,14 @@ tcg_gen_qemu_st_f64(TCGv_f64 v, TCGv a, TCGArg i, MemOp m)
 {
     tcg_gen_qemu_st_f64_chk(v, tcgv_tl_temp(a), i, m, TCG_TYPE_TL);
 }
+
+static inline bool
+tcg_gen_qemu_x87(TCGOpcode opc, TCGv_i32 ret, int kind, tcg_target_long ofs,
+                 TCGv a, TCGArg i)
+{
+    return tcg_gen_qemu_x87_chk(opc, ret, kind, ofs, tcgv_tl_temp(a), i,
+                                TCG_TYPE_TL);
+}
 #endif
 
 #define DEF_ATOMIC2(N, S)                                               \

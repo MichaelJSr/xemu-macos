@@ -3293,6 +3293,18 @@ void tcg_optimize(TCGContext *s)
             }
             done = finish_folding(&ctx, op);
             break;
+        case INDEX_op_x87_ld_g:
+        case INDEX_op_x87_arith_g:
+            /* A guest access that stores an image at env + args[1]. */
+            remove_mem_copy_in(&ctx, op->args[1], op->args[1] + 9);
+            done = fold_qemu_ld_2reg(&ctx, op);
+            break;
+        case INDEX_op_x87_cmp_g:
+            done = fold_qemu_ld_2reg(&ctx, op);
+            break;
+        case INDEX_op_x87_st_g:
+            done = fold_qemu_st(&ctx, op);
+            break;
         case INDEX_op_st:
         case INDEX_op_st_vec:
             done = fold_tcg_st_memcopy(&ctx, op);

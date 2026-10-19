@@ -3837,6 +3837,54 @@ static void gen_x87_hw_st(int type, TCGv_i32 r32, TCGv_i64 r64)
         tcg_gen_x87_st_i32(r32, type, p.base, p.ofs);
     }
 }
+
+/*
+ * g_x87_hw with a static TOP, ST(i) a fixed env offset: the x87 op on the
+ * m32fp/m64fp/m32int/m64int at A0 fused with its guest access (x87_*_g),
+ * the host x87 insn on the guest page. False where it can't be: then the
+ * access and the (%rsp) form.
+ */
+static bool gen_x87_hw_g(DisasContext *s, TCGOpcode opc, TCGv_i32 ret,
+                         int kind, int i)
+{
+    X87Ptr p;
+
+    if (!g_x87_hw || s->x87_top < 0) {
+        return false;
+    }
+    p = gen_stn_ptr(i);
+    tcg_debug_assert(p.base == tcg_env);
+    return tcg_gen_qemu_x87(opc, ret, kind, p.ofs, s->A0, s->mem_index);
+}
+
+/*
+ * Push ST0 = the operand at A0. The access writes the image the push
+ * makes ST0, ST(7), before the push: none may come first (x87_wt_spill).
+ */
+static bool gen_x87_hw_push_ld_g(DisasContext *s, int type)
+{
+    if (!gen_x87_hw_g(s, INDEX_op_x87_ld_g, NULL, type, 7)) {
+        return false;
+    }
+    gen_fpush(s);
+    return true;
+}
+
+/* ST0 op= the operand at A0, as gen_x87_hw_fop */
+static bool gen_x87_hw_fop_g(DisasContext *s, int op, int type)
+{
+    TCGv_i32 cc;
+
+    if (op != 2 && op != 3) {
+        return gen_x87_hw_g(s, INDEX_op_x87_arith_g, NULL, op | type << 3, 0);
+    }
+    cc = tcg_temp_new_i32();
+    if (!gen_x87_hw_g(s, INDEX_op_x87_cmp_g, cc, type, 0)) {
+        return false;
+    }
+    gen_x87_hw_fpus_cc(cc);
+    return true;
+}
 #endif
 
 static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
@@ -5932,6 +5980,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
                     switch (op >> 4) {
                     case 0:
+                        if (gen_x87_hw_fop_g(s, op1, TCG_X87_M32F)) {
+                            break;
+                        }
                         tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                             s->mem_index, MO_LEUL);
                         if (g_x87_hw) {
@@ -5942,6 +5993,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         }
                         break;
                     case 2:
+                        if (gen_x87_hw_fop_g(s, op1, TCG_X87_M64F)) {
+                            break;
+                        }
                         tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
                                             s->mem_index, MO_LEUQ);
                         if (g_x87_hw) {
@@ -5952,6 +6006,10 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         }
                         break;
                     default:
+                        if (op >> 4 == 1 &&
+                            gen_x87_hw_fop_g(s, op1, TCG_X87_M32I)) {
+                            break;
+                        }
                         /* m32int, or m16int sign-extended to it */
                         tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                             s->mem_index,
@@ -6032,12 +6090,20 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         x87_wt_set_st(s, 0, d);
                         break;
                     }
+                    if (gen_x87_hw_push_ld_g(s, TCG_X87_M32F)) {
+                        break;
+                    }
 #endif
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     gen_flds_ST0(s, s->tmp2_i32);
                     break;
                 case 1:
+#if defined(XBOX)
+                    if (gen_x87_hw_push_ld_g(s, TCG_X87_M32I)) {
+                        break;
+                    }
+#endif
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     gen_fildl_ST0(s, s->tmp2_i32);
@@ -6049,6 +6115,9 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
                         gen_fpush(s);
                         x87_wt_set_st(s, 0, d);
+                        break;
+                    }
+                    if (gen_x87_hw_push_ld_g(s, TCG_X87_M64F)) {
                         break;
                     }
 #endif
@@ -6094,12 +6163,22 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         x87_wt_st_f32(s);
                         break;
                     }
+                    if (gen_x87_hw_g(s, INDEX_op_x87_st_g, NULL,
+                                     TCG_X87_M32F, 0)) {
+                        break;
+                    }
 #endif
                     gen_fsts_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     break;
                 case 1:
+#if defined(XBOX)
+                    if (gen_x87_hw_g(s, INDEX_op_x87_st_g, NULL,
+                                     TCG_X87_M32I, 0)) {
+                        break;
+                    }
+#endif
                     gen_fistl_ST0(s, s->tmp2_i32);
                     tcg_gen_qemu_st_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
@@ -6110,6 +6189,10 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                         /* The double's bits, from its FP register */
                         tcg_gen_qemu_st_f64(x87_wt_get_st(s, 0), s->A0,
                                             s->mem_index, MO_LEUQ);
+                        break;
+                    }
+                    if (gen_x87_hw_g(s, INDEX_op_x87_st_g, NULL,
+                                     TCG_X87_M64F, 0)) {
                         break;
                     }
 #endif
@@ -6237,14 +6320,24 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             gen_fpop(s);
             break;
         case 0x3d: /* fildll */
+#if defined(XBOX)
+            if (gen_x87_hw_push_ld_g(s, TCG_X87_M64I)) {
+                break;
+            }
+#endif
             tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
                                 s->mem_index, MO_LEUQ);
             gen_fildll_ST0(s, s->tmp1_i64);
             break;
         case 0x3f: /* fistpll */
-            gen_fistll_ST0(s, s->tmp1_i64);
-            tcg_gen_qemu_st_i64(s->tmp1_i64, s->A0,
-                                s->mem_index, MO_LEUQ);
+#if defined(XBOX)
+            if (!gen_x87_hw_g(s, INDEX_op_x87_st_g, NULL, TCG_X87_M64I, 0))
+#endif
+            {
+                gen_fistll_ST0(s, s->tmp1_i64);
+                tcg_gen_qemu_st_i64(s->tmp1_i64, s->A0,
+                                    s->mem_index, MO_LEUQ);
+            }
             gen_fpop(s);
             break;
         default:

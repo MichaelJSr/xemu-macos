@@ -342,6 +342,8 @@ void tcg_gen_qemu_ld_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_ld_f64_chk(TCGv_f64, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_st_f32_chk(TCGv_f32, TCGTemp *, TCGArg, MemOp, TCGType);
 void tcg_gen_qemu_st_f64_chk(TCGv_f64, TCGTemp *, TCGArg, MemOp, TCGType);
+bool tcg_gen_qemu_x87_chk(TCGOpcode, TCGv_i32, int, tcg_target_long,
+                          TCGTemp *, TCGArg, TCGType);
 #endif
 
 /* Atomic ops */

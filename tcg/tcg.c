@@ -109,6 +109,8 @@ struct TCGLabelQemuLdst {
     /* A backend's own out-of-line stub, emitted instead of a slow path */
     bool (*out_stub)(TCGContext *s, TCGLabelQemuLdst *l);
     intptr_t addr_ofs;      /* out_stub: the access's offset from addr_reg */
+    int stub_op;            /* out_stub: its own operands (i386 x87_*_g) */
+    intptr_t stub_ofs;
     /* st_f64_slow stores the slow path performs first */
     unsigned nb_slow_st;
     TCGSlowSt *slow_st;
@@ -2865,6 +2867,10 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_x87_st:
     case INDEX_op_x87_cmp:
     case INDEX_op_x87_cmp_m:
+    case INDEX_op_x87_ld_g:
+    case INDEX_op_x87_arith_g:
+    case INDEX_op_x87_cmp_g:
+    case INDEX_op_x87_st_g:
         return TCG_TARGET_HAS_x87;
     case INDEX_op_quiet_f64:
         return TCG_TARGET_HAS_quiet_f64;
@@ -7688,7 +7694,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
             opc != INDEX_op_qemu_ld && opc != INDEX_op_qemu_st &&
             opc != INDEX_op_qemu_ld2 && opc != INDEX_op_qemu_st2 &&
             opc != INDEX_op_qemu_ld_v128 && opc != INDEX_op_qemu_ld_fp &&
-            opc != INDEX_op_qemu_st_fp) {
+            opc != INDEX_op_qemu_st_fp && opc != INDEX_op_x87_ld_g &&
+            opc != INDEX_op_x87_arith_g && opc != INDEX_op_x87_cmp_g &&
+            opc != INDEX_op_x87_st_g) {
             tcg_out_slow_st_now(s);
         }
 

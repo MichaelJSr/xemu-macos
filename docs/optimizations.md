@@ -487,6 +487,23 @@ x86_64 host (Windows, Linux, Intel macOS).
   (`scripts/win/det_golden.py --pmc`, interleaved pairs on the i7-4770K);
   expect det instructions −1.5..−2%, about half that in normal mode,
   which already deferred FDP.
+- **x87 memory operands straight from the guest page.** An m32fp, m64fp,
+  m32int or m64int operand went through a GPR and `(%rsp)`: `qemu_ld`
+  into a register, a store to `(%rsp)`, the x87 insn on that (and the
+  reverse for `fst`/`fist`). Fused ops (`x87_ld_g`, `x87_arith_g`,
+  `x87_cmp_g`, `x87_st_g`) do the access's TLB check and run the x87
+  insn on the guest page itself; their slow path passes the helper's
+  value through `(%rsp)` to the same insns (a store's the other way)
+  after the held `st_f64_slow` stores. Only with a static TOP, where
+  ST(i) is a fixed env offset; m16int and m80 keep the old forms. A
+  tcg/i386 TLB memo must count these ops with qemu_ld/st. Census as
+  above: `(%rsp)` moves per x87 insn 0.63 → 0, TB host instructions per
+  frame 47.1M → 45.8M (48.9M before both rows, −6.5%). Rosetta 2:
+  goldens unchanged, refuter clean, and 2000 gdb access-watchpoint stops
+  on a hot x87 block's stack (mid-block restores through these ops'
+  slow path) leave the parent's registers at every stop and its RAM.
+  **The Windows number is owed**; expect det instructions −1.3..−1.6%
+  in both modes.
 - **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
   core cycles −0.85% median, 3/4.
 - **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions

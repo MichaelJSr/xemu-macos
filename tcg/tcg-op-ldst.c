@@ -495,6 +495,48 @@ void tcg_gen_qemu_ld_f32_chk(TCGv_f32 val, TCGTemp *addr, TCGArg idx,
     }
 }
 
+/*
+ * xemu: an x87 op on the m32fp/m64fp/m32int/m64int guest operand at addr
+ * fused with its access (x87_*_g: x87_ld_g, x87_arith_g, x87_cmp_g with
+ * ret, x87_st_g), ST(i)'s image at env + ofs; kind as for x87_*_g. False,
+ * emitting nothing, without the ops or under plugin instrumentation.
+ */
+bool tcg_gen_qemu_x87_chk(TCGOpcode opc, TCGv_i32 ret, int kind,
+                          tcg_target_long ofs, TCGTemp *addr, TCGArg idx,
+                          TCGType addr_type)
+{
+    int type = opc == INDEX_op_x87_arith_g ? kind >> 3 : kind;
+    bool st = opc == INDEX_op_x87_st_g;
+    bool is64 = type == TCG_X87_M64F || type == TCG_X87_M64I;
+    MemOp memop = is64 ? MO_LEUQ : MO_LEUL;
+    TCGTemp *addr_new;
+    MemOpIdx oi;
+
+    tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+    tcg_debug_assert(type <= TCG_X87_M64I);
+    if (!TCG_TARGET_HAS_x87 || TCG_TARGET_REG_BITS != 64) {
+        return false;
+    }
+#ifdef CONFIG_PLUGIN
+    if (tcg_ctx->plugin_insn != NULL) {
+        return false;
+    }
+#endif
+    tcg_gen_req_mo(st ? TCG_MO_LD_ST | TCG_MO_ST_ST
+                      : TCG_MO_LD_LD | TCG_MO_ST_LD);
+    oi = make_memop_idx(tcg_canonicalize_memop(memop, is64, st), idx);
+    addr_new = tci_extend_addr(addr);
+    gen_ldst_prologue();
+    if (ret) {
+        tcg_gen_op5(opc, TCG_TYPE_I64, tcgv_i32_arg(ret), temp_arg(addr_new),
+                    ofs, kind, oi);
+    } else {
+        tcg_gen_op4(opc, TCG_TYPE_I64, temp_arg(addr_new), ofs, kind, oi);
+    }
+    maybe_free_addr(addr, addr_new);
+    return true;
+}
+
 void tcg_gen_qemu_st_f32_chk(TCGv_f32 val, TCGTemp *addr, TCGArg idx,
                              MemOp memop, TCGType addr_type)
 {

@@ -209,6 +209,17 @@ DEF(x87_ld, 0, 2, 2, 0)
 DEF(x87_st, 1, 1, 2, 0)
 DEF(x87_cmp, 1, 2, 2, 0)
 DEF(x87_cmp_m, 1, 2, 2, 0)
+/*
+ * xemu: x87_ld, x87_arith_m, x87_cmp_m and x87_st on the m32fp, m64fp,
+ * m32int or m64int at guest address addr (args: addr; ofs, kind, oi),
+ * ST(i)'s image at env + ofs: a guest access, as qemu_ld/st, whose host
+ * x87 instruction reads or writes the guest page. kind is the type
+ * (x87_arith_g: op | type << 3).
+ */
+DEF(x87_ld_g, 0, 1, 3, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS)
+DEF(x87_arith_g, 0, 1, 3, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS)
+DEF(x87_cmp_g, 1, 1, 3, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS)
+DEF(x87_st_g, 0, 1, 3, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS)
 
 /* Host vector support.  */
 
