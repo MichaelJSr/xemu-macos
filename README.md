@@ -817,15 +817,17 @@ Other automation interfaces (windowed or headless):
   per instruction (2^N ns): 1 is about a 733 MHz Pentium III, 2 runs
   ~1.5x faster and suits games that are not CPU-bound.
   Offscreen Vulkan (`XEMU_HEADLESS=1`) is deterministic too, screendumps
-  included when taken paused, at about 60% of the null renderer's speed:
+  included when taken paused, at about half the null renderer's speed:
   a GPU report reaches RAM when the guest or a device first touches its
   slot, when a hook, trace sample or value stop reads it, or at a pause,
   save or load, so hooks that read no pending report slot don't slow a
   run or change its pictures. Hash an offscreen run's RAM with
-  `xemu-dump-ram` `"gpu-sync": false` (`gpu-sync` and `pmemsave` write
-  GPU surfaces back, which changes later RAM), and expect matches only
-  on the same Mac, macOS and MoltenVK. A cheap reproducible screenshot
-  of frame F of a null run: savevm there, load it in a short
+  `xemu-dump-ram` `"gpu-sync": false` (`gpu-sync`, `pmemsave` and
+  `xemu-checkpoint-save` write GPU surfaces back, which changes later
+  RAM: a checkpoint's restores agree with each other, but not with the
+  run that went on from the save or one that never saved), and expect
+  matches only on the same Mac, macOS and MoltenVK. A cheap reproducible
+  screenshot of frame F of a null run: savevm there, load it in a short
   `XEMU_HEADLESS=1` icount run, advance a few frames, screendump. OpenGL
   is not deterministic.
   Keep the network off and bind no XMU.

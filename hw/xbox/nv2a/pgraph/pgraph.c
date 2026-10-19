@@ -202,8 +202,8 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
 /*
  * Take the BQL from method context, with pg->lock dropped. The vCPU runs
- * methods itself in deterministic null mode (pfifo_icount_sync), maybe
- * under the BQL already; without it, it also drops pfifo.lock, which it
+ * methods itself in deterministic null and Vulkan mode (pfifo_icount_sync),
+ * maybe under the BQL already; without it, it also drops pfifo.lock, which it
  * holds for the whole inline run, so the BQL is never taken under it.
  * Returns whether the BQL was already held.
  */
@@ -3490,7 +3490,7 @@ void pgraph_process_pending(NV2AState *d)
      * present (the window has no GL surface) and its GL contexts were
      * never created (nv2a_context_init). Defer the switch to the next
      * launch — the settings UI already tells the user to restart. Always
-     * under icount: the null renderer's pusher then runs inline on the
+     * under icount: the null and Vulkan pushers then run inline on the
      * vCPU (pfifo.c), a choice made once at startup.
      */
     bool switch_deferred_to_restart =

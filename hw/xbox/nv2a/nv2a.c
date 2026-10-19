@@ -487,6 +487,7 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
     qemu_mutex_init(&d->pfifo.lock);
     qemu_cond_init(&d->pfifo.fifo_cond);
     qemu_cond_init(&d->pfifo.fifo_idle_cond);
+    d->pfifo.kick_seq = 1; /* renderer init (nv2a_int.h) */
 
     if (icount_enabled()) {
         icount_add_sync_hook(nv2a_icount_sync_hook, d);

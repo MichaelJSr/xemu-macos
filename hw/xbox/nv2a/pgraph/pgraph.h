@@ -336,6 +336,7 @@ void pfifo_guest_kick(NV2AState *d);
 void pfifo_put_doorbell(NV2AState *d, uint32_t put);
 void pfifo_freeze_unread(NV2AState *d, uint32_t old_put, uint32_t new_put);
 void pfifo_icount_sync(NV2AState *d);
+bool pfifo_in_inline_run(void);
 
 void pgraph_renderer_register(const PGRAPHRenderer *renderer);
 

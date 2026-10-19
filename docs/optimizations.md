@@ -971,13 +971,15 @@ x86_64 host (Windows, Linux, Intel macOS).
   `physical_memory_dirty_bits_cleared` (the only path to the one
   cross-thread TLB writer, `tlb_reset_dirty`) found no re-arm that can
   land while the vCPU runs TB code under icount: the renderer's texture
-  and vertex dirty clears run on the PFIFO thread only while the vCPU
-  waits in `pfifo_icount_sync` (an MMIO slow path, or before the slice),
-  the VGA scan runs on the vCPU (the vblank is a virtual timer, and the
-  main loop runs no virtual timers under icount), checkpoints and loads
-  stop the VM, and migration's bitmap sync waits for the vCPU to leave
-  the TB (`memory_global_after_dirty_log_sync`) before it reads the
-  pages it cleared. One same-thread path did break the old addend-only
+  and vertex dirty clears run inside `pfifo_icount_sync` (an MMIO slow
+  path, or before the slice), on the vCPU itself since 2026-10-19 (GL:
+  on the PFIFO thread while the vCPU waits there), or on the main loop
+  with the VM stopped, the VGA scan runs on the vCPU (the vblank is a
+  virtual timer, and the main loop runs no virtual timers under
+  icount), checkpoints and loads stop the VM, and migration's bitmap
+  sync waits for the vCPU to leave the TB
+  (`memory_global_after_dirty_log_sync`) before it reads the pages it
+  cleared. One same-thread path did break the old addend-only
   form: the sub-page prefilter's inline store returns to the TB after a
   walk that met TLB_NOTDIRTY, which left the slot holding that page, so
   the segment's later stores skipped the trap and its per-sub-block code
@@ -2171,11 +2173,18 @@ x86_64 host (Windows, Linux, Intel macOS).
   recording command buffer clears it to depth 1.0, stencil 0
   (`clear_discarded_zeta`), which is just as deterministic. Offscreen
   det heavy-f1 600: `supload_zeta` and `finish_surf_create` 2 → 0 a
-  flip, aux fence waits 207 → 5 a run. RAM could change only where a
-  draw reads the new zeta before the guest's clear, and on the anchors
-  none does: heavy-f1 600 `adcf86bd78fd71f9` (f300 `e1e78c2b7aafcdab`),
-  stream-e2 600 `3b986ed5d3acf666` and heavy-w2 600 `14af161a59baea25`
-  in every run of both arms, heavy-f1's screendump byte-identical.
+  flip, aux fence waits 207 → 5 a run. Offscreen RAM changes where the
+  guest neither clears nor draws part of a re-shaped zeta before that
+  part is read (a depth test, a texture fetch) or written back (a CPU
+  access, savevm, `xemu-checkpoint-save`, a `gpu-sync` RAM dump): it now
+  holds depth 1.0 and stencil 0 there instead of the bytes RAM held.
+  Still deterministic, but such a scene's offscreen RAM differs from
+  references taken on older builds. None of the anchors does: heavy-f1
+  600 `adcf86bd78fd71f9` (f300 `e1e78c2b7aafcdab`), stream-e2 600
+  `3b986ed5d3acf666` and heavy-w2 600 `14af161a59baea25` in every run of
+  both arms, heavy-f1's screendump byte-identical, and pack 05's d2
+  (`tests/azurik`, F2 + 900, one run each) ends on v0.15's offscreen
+  `10b5a35aa66b` on base and with both steps (load 36-40).
   Offscreen bench-det 600, load 54-83: on the threaded pusher (11, 11
   and 7 pairs) Minsns/frame −0.99% heavy-f1, −1.65% stream-e2, −0.96%
   W2 (every pair), Mcyc/frame medians −1.8% (6/11), −5.5% (8/11),
@@ -3228,6 +3237,65 @@ x86_64 host (Windows, Linux, Intel macOS).
   (paired median, 10/10), Mcycles/frame −2.9% (8/10, range
   −21.8..+6.8%); stream-e2 Minsns −1.64% (4/4), Mcycles −1.1% (2/4,
   unresolved).
+- **The det Vulkan pusher runs inline too (2026-10-19).** Only the null
+  renderer's pusher ran on the vCPU (`ed21e852cf`: it "keeps no
+  per-thread state", a choice nobody measured with Vulkan), so offscreen
+  det kicked the PFIFO thread at every guest PFIFO, USER or PGRAPH write
+  and the vCPU waited for it to park: ~23K thread iterations a second
+  (~350 a frame), the vCPU in that wait 46% of wall and a third of
+  process CPU in the kernel (vet sample). Vulkan now runs inline as well;
+  GL keeps the thread, which owns its contexts. Every sync first waits
+  until the thread has acted on every kick so far, so a pause's or a
+  load's report delivery (`nv2a_vm_state_change`) lands before a run;
+  `kick_seq` starts at 1, so the first sync also waits for renderer init
+  and the mode it then reads is final (the RUNNING notifier's
+  `nv2a_lock_fifo` already held the VM until the thread's first park,
+  but on a wait with no predicate; a 1 s sleep in `pgraph_vk_init` left
+  the offscreen cold boot's f900/f1800 RAM unchanged, with and without
+  this). Each run ends with the drain the thread did before it parked
+  (`pgraph_process_pending_reports`). The thread no longer drains in
+  inline mode, since its drain holds only `pfifo.lock` and could land
+  while a run has dropped both locks for the BQL; it stays for the other
+  threads' requests (present and screendump syncs, surface downloads,
+  report deliveries) under `pgraph.lock`. A report trap inside a run
+  delivers in place (`pfifo_in_inline_run`, thread-local), a guard no
+  run has taken: the pusher touches guest RAM by pointer, past the
+  traps, and no anchor, cold boot or d2 run printed its warning. The
+  main loop runs the same path at a pause or before a load, where the
+  pusher is at rest. No autorelease pool: the PFIFO thread has none
+  either, and offscreen heavy-f1 frames 600-3600 grew the physical
+  footprint alike, +31.8 and +30.7 MiB on base, +31.0 and +30.7 MiB
+  inline (load 25-31).
+  Same RAM in every run of every arm: heavy-f1 f300 `e1e78c2b7aafcdab`
+  f600 `adcf86bd78fd71f9`, stream-e2 600 `3b986ed5d3acf666`, heavy-w2
+  600 `14af161a59baea25`, the cold-boot timeline's phases, and pack 05's
+  d2 at F2 + 900 (`10b5a35aa66b`, v0.15's offscreen reference). A
+  heavy-f1 run paused 60 times, a second loadvm in one process and 6
+  checkpoint restores (3 incremental) give the base's hashes, hash for
+  hash, including the base's mismatch: a checkpoint's restores agree
+  with each other but not with the run that went on from the save, and
+  neither matches a run that never saved (null agrees everywhere; the
+  lazy-reports Open note in xemu-internals). heavy-f1's screendump is
+  byte-identical. PFIFO heartbeat ~23K → ~50 iterations a second. Null
+  goldens exact; null-mode cost unresolved, 16 pairs per anchor in both
+  orders at load 29-39: Mcyc/frame paired median +0.31% heavy-f1 (9/16
+  slower), −0.33% stream-e2 (7/16), Minsns/frame +0.04% and +0.02%
+  (each binary bimodal within 0.15%); `pfifo_icount_sync` runs at every
+  null-mode PFIFO, USER or PGRAPH write and lost its PGO profile until
+  the next retrain. xbox suite 9/9; windowed heavy-f1 at the 60 fps cap
+  with 575 draws a flip on the threaded pusher. Offscreen bench-det 600,
+  against the zeta step, load 66-83: heavy-f1 **Mcyc/frame −40.6%,
+  Minsns/frame −20.8%, wall fps +72%** (8/8), stream-e2 −34.8%, −16.9%,
+  +55% (8/8), heavy-w2 −24.9%, −8.9%, +36% (4/4). Cold-boot
+  `--timeline` against base (both steps, 4 runs each): at load 26-33
+  boot to steady −10.3% (4/4), steady phase −22.3%, level load −3.3%;
+  at load 69-83 −17% (4/4), −32%, −10%; a 2-run session beside this
+  track's own benches read +4.7% (1/2), steady +12%. Offscreen det now
+  runs at about half the null renderer's speed (heavy-f1 57%, stream-e2
+  49%; ~30% before). All receipts are macOS arm64 with MoltenVK 1.4.3:
+  Windows offscreen det is unverified, and its driver code now runs on
+  the vCPU under `xbox_host_fp_enter`'s x87 control word 0x37f. Normal
+  mode is untouched; this is harness and replay throughput.
 - **Headless null mode scans VGA only for a screendump (2026-10-15).**
   Every vblank ran `vga_update_display` for a surface that nothing shows
   under `XEMU_HEADLESS=null`. Its dirty-bitmap clear re-arms

@@ -136,9 +136,9 @@ void pfifo_kick(NV2AState *d)
 }
 
 /*
- * A kick for a guest register write. In deterministic null mode the vCPU
- * pushes inline right after the write (pfifo_icount_sync), so waking the
- * thread would only make it contend for the locks.
+ * A kick for a guest register write. In deterministic null and Vulkan mode
+ * the vCPU pushes inline right after the write (pfifo_icount_sync), so
+ * waking the thread would only make it contend for the locks.
  */
 void pfifo_guest_kick(NV2AState *d)
 {
@@ -234,54 +234,20 @@ void pfifo_put_doorbell(NV2AState *d, uint32_t put)
     }
 }
 
-/*
- * Deterministic mode (icount): guest state that PFIFO changes (DMA_GET,
- * semaphores, notifiers, reports, PGRAPH interrupts) must change at a fixed
- * guest instruction count, not whenever the thread gets to it. So after any
- * guest PFIFO, USER or PGRAPH register write, and before the vCPU runs again
- * after a VM start (the icount sync hook), the vCPU brings PFIFO to rest:
- * out of pushbuffer, or stalled on something only the guest can clear.
- *
- * With the null renderer, which keeps no per-thread state, the vCPU runs the
- * pusher itself (inline_pusher, set by the thread once the renderer is up)
- * and no thread handoff is needed. Otherwise it waits until the thread has
- * acted on every kick so far and parked. Call without d->pfifo.lock.
- */
-void pfifo_icount_sync(NV2AState *d)
-{
-    if (qatomic_read(&d->pfifo.inline_pusher)) {
-        /*
-         * Nothing to push: the pusher would only read registers. Only the
-         * vCPU writes DMA_GET/DMA_PUT in this mode (reset and loads run
-         * with it parked).
-         */
-        if (d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] ==
-            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT]) {
-            return;
-        }
-        /* As on the PFIFO thread, not under the guest's x87 rounding
-         * mode, which TCG leaves in the host FPCR (see mcpx_apu_det_tick). */
-        XboxHostFp guest_fp;
-        xbox_host_fp_enter(&guest_fp);
-        /*
-         * Hold both locks for the whole run instead of swapping them around
-         * every method (pfifo_run_puller): same order as pgraph_write. The
-         * method paths that take the BQL drop pfifo.lock first unless the
-         * BQL is already held (pgraph_inline_bql_lock).
-         */
-        qemu_mutex_lock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
-        if (!qatomic_read(&d->pfifo.halt)) {
-            d->pfifo.inline_locked = true;
-            pfifo_run_pusher(d);
-            d->pfifo.inline_locked = false;
-        }
-        qemu_mutex_unlock(&d->pgraph.lock);
-        qemu_mutex_unlock(&d->pfifo.lock);
-        xbox_host_fp_leave(&guest_fp);
-        return;
-    }
+/* Whether this thread is inside an inline run (report traps, see reports.c). */
+static __thread bool pfifo_inline_self;
 
+bool pfifo_in_inline_run(void)
+{
+    return pfifo_inline_self;
+}
+
+/*
+ * Wait until the thread has acted on every kick so far and parked. Call
+ * without d->pfifo.lock.
+ */
+static void pfifo_icount_wait_thread(NV2AState *d)
+{
     if (qatomic_load_acquire(&d->pfifo.idle_seq) ==
         qatomic_read(&d->pfifo.kick_seq)) {
         return;
@@ -301,6 +267,73 @@ void pfifo_icount_sync(NV2AState *d)
     if (had_bql) {
         bql_lock();
     }
+}
+
+/*
+ * Deterministic mode (icount): guest state that PFIFO changes (DMA_GET,
+ * semaphores, notifiers, reports, PGRAPH interrupts) must change at a fixed
+ * guest instruction count, not whenever the thread gets to it. So after any
+ * guest PFIFO, USER or PGRAPH register write, and before the vCPU runs again
+ * after a VM start (the icount sync hook), the vCPU brings PFIFO to rest:
+ * out of pushbuffer, or stalled on something only the guest can clear.
+ *
+ * With the null and Vulkan renderers the vCPU runs the pusher itself
+ * (inline_pusher, set by the thread once the renderer is up), so no thread
+ * handoff is needed; the GL renderer's contexts belong to the thread, which
+ * keeps the pusher there, and the vCPU waits until it has acted on every
+ * kick so far and parked. The thread still serves the other threads'
+ * requests (present and screendump syncs, surface downloads, report
+ * deliveries), under pgraph.lock. nv2a_vm_state_change also calls this, on
+ * the main loop at a pause or before a load: the pusher is at rest then, so
+ * that run only waits for the delivery the state change asked for and
+ * finds nothing to push. Call without d->pfifo.lock.
+ */
+void pfifo_icount_sync(NV2AState *d)
+{
+    /*
+     * A request still with the thread lands first (pause, RESTORE_VM).
+     * The first sync also waits for renderer init (kick_seq starts one
+     * ahead), so the mode read next is final.
+     */
+    pfifo_icount_wait_thread(d);
+    if (!qatomic_read(&d->pfifo.inline_pusher)) {
+        return;
+    }
+    /*
+     * Nothing to push: the pusher would only read registers. Only the
+     * vCPU writes DMA_GET/DMA_PUT in this mode (reset and loads run with
+     * it parked).
+     */
+    if (d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] ==
+        d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT]) {
+        return;
+    }
+    /* As on the PFIFO thread, not under the guest's x87 rounding
+     * mode, which TCG leaves in the host FPCR (see mcpx_apu_det_tick). */
+    XboxHostFp guest_fp;
+    xbox_host_fp_enter(&guest_fp);
+    /*
+     * Hold both locks for the whole run instead of swapping them around
+     * every method (pfifo_run_puller): same order as pgraph_write. The
+     * method paths that take the BQL drop pfifo.lock first unless the
+     * BQL is already held (pgraph_inline_bql_lock). A run entered with
+     * the BQL (the icount sync hook, PFIFO MMIO, the main loop) keeps it
+     * across fence waits, which need no other thread.
+     */
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_mutex_lock(&d->pgraph.lock);
+    if (!qatomic_read(&d->pfifo.halt)) {
+        d->pfifo.inline_locked = true;
+        pfifo_inline_self = true;
+        pfifo_run_pusher(d);
+        /* What the thread did before it parked: deliver due reports. */
+        pgraph_process_pending_reports(d);
+        pfifo_inline_self = false;
+        d->pfifo.inline_locked = false;
+    }
+    qemu_mutex_unlock(&d->pgraph.lock);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    xbox_host_fp_leave(&guest_fp);
 }
 
 static bool can_fifo_access(NV2AState *d) {
@@ -570,13 +603,14 @@ static bool pfifo_pusher_should_stall(NV2AState *d)
 
 /*
  * inl: the deterministic inline run (pfifo_icount_sync, pfifo.inline_locked).
- * The vCPU is then the only thread that touches PFIFO and PGRAPH state for
- * the whole run: it holds both locks (it drops them only to take the BQL,
- * and no other thread writes this state then either), and no guest access
- * comes in until it returns. So nothing else moves DMA_PUT or reads DMA_GET
- * mid-run, and the release/acquire pair the threaded pusher needs (the
- * lockless doorbell and USER reads) guards nothing. pfifo_run_pusher builds
- * one copy of this loop per mode.
+ * Its thread (the vCPU, or the main loop at a state change) is then the only
+ * one that touches PFIFO and PGRAPH registers for the whole run: it holds
+ * both locks (it drops them only to take the BQL, and no other thread writes
+ * them then either), and no guest access comes in until it returns. So
+ * nothing else moves DMA_PUT or reads DMA_GET mid-run, and the
+ * release/acquire pair the threaded pusher needs (the lockless doorbell and
+ * USER reads) guards nothing. pfifo_run_pusher builds one copy of this loop
+ * per mode.
  */
 static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
                                                             const bool inl)
@@ -870,7 +904,8 @@ void *pfifo_thread(void *arg)
 
     qemu_mutex_lock(&d->pfifo.lock);
     if (icount_enabled() &&
-        d->pgraph.renderer->type == CONFIG_DISPLAY_RENDERER_NULL) {
+        (d->pgraph.renderer->type == CONFIG_DISPLAY_RENDERER_NULL ||
+         d->pgraph.renderer->type == CONFIG_DISPLAY_RENDERER_VULKAN)) {
         qatomic_set(&d->pfifo.inline_pusher, true);
     }
     qemu_mutex_unlock(&d->pfifo.lock);
@@ -905,12 +940,17 @@ void *pfifo_thread(void *arg)
          * so TSAN is quiet and future refactors that drop the lock don't
          * silently tear.
          */
-        if (!qatomic_read(&d->pfifo.halt) &&
-            !qatomic_read(&d->pfifo.inline_pusher)) {
-            pfifo_run_pusher(d);
+        if (!qatomic_read(&d->pfifo.inline_pusher)) {
+            if (!qatomic_read(&d->pfifo.halt)) {
+                pfifo_run_pusher(d);
+            }
+            /*
+             * Inline, each run drains as it ends; a drain here, under
+             * pfifo.lock alone, could land while a run has dropped both
+             * locks to take the BQL.
+             */
+            pgraph_process_pending_reports(d);
         }
-
-        pgraph_process_pending_reports(d);
 
         pfifo_loop_iters++;
         if (pfifo_heartbeat) {

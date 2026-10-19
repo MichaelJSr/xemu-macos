@@ -107,10 +107,11 @@ typedef struct NV2AState {
         /*
          * Every kick bumps kick_seq; the thread copies it to idle_seq when
          * it parks with nothing left to do. Equal = caught up (icount sync).
+         * kick_seq starts at 1, so the first sync waits for renderer init.
          */
         uint64_t kick_seq;
         uint64_t idle_seq;
-        /* Deterministic null mode: the vCPU runs the pusher (pfifo.c). */
+        /* Deterministic null and Vulkan modes: the vCPU runs the pusher. */
         bool inline_pusher;
         /* the vCPU runs the inline pusher holding pfifo and pgraph locks */
         bool inline_locked;

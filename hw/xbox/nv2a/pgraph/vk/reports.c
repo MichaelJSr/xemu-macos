@@ -198,7 +198,7 @@ static void det_report_page_init(NV2AState *d, DetReportPage *p,
                           RUN_ON_CPU_HOST_PTR(p));
 }
 
-/* PFIFO thread, at GET_REPORT, with pgraph.lock held. */
+/* The pusher's thread, at GET_REPORT, with pgraph.lock held. */
 static void det_report_track(NV2AState *d, QueryReport *report)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
@@ -287,7 +287,7 @@ static bool det_reports_overlap(PGRAPHVkState *r, hwaddr addr, hwaddr len)
     return hit;
 }
 
-/* PFIFO thread, pgraph.lock held, outside a draw. */
+/* The renderer's thread, pgraph.lock held, outside a draw. */
 static void det_reports_deliver_all(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -340,6 +340,12 @@ static void report_access_callback(void *opaque, MemoryRegion *mr,
     }
     if (qemu_thread_is_self(&d->pfifo.thread)) {
         warn_report_once("nv2a: PFIFO touched an undelivered report");
+        return;
+    }
+    if (pfifo_in_inline_run()) {
+        /* The thread that would deliver waits for the locks this one holds. */
+        warn_report_once("nv2a: an inline run touched an undelivered report");
+        det_reports_deliver_all(d);
         return;
     }
     nsprof_event(NSPROF_EV_REP_TRAP);
