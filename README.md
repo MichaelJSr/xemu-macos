@@ -119,9 +119,10 @@ loader trampoline. On macOS MoltenVK is the ICD and there is no
 trampoline to bypass; KosmicKrisp hands out per-device trampolines, so
 it gets `volkLoadDevice()` too.
 
-**Vulkan driver on macOS.** `[display.vulkan] driver` picks it once per
-launch (restart to change; a fallback never rewrites it): `auto` (the
-default) and `moltenvk` run MoltenVK; `kosmickrisp` opts in to Mesa
+**Vulkan driver on macOS.** `[display.vulkan] driver` (Settings >
+Display > Vulkan driver on Apple silicon) picks it once per launch
+(restart to change; a fallback never rewrites it): `auto` (the default)
+and `moltenvk` run MoltenVK; `kosmickrisp` opts in to Mesa
 KosmicKrisp from `Contents/Libraries/arm64/libvulkan_kosmickrisp.dylib`
 on macOS 26 or later with a Metal 4 GPU and the Metal presentation
 backend, and otherwise runs MoltenVK with a toast that says why.
@@ -139,13 +140,19 @@ commits to it; any failure falls back to MoltenVK in the same launch
 (`-icount`) and offscreen (`XEMU_HEADLESS=1`) runs always use MoltenVK.
 stderr names the choice and the device: `xemu: Vulkan driver: MoltenVK
 (auto)` or `KosmicKrisp (kosmickrisp)`, then `- Driver: MoltenVK, 1.4.3
-(id 14)`.
+(id 14)`. The Settings line names the driver in use (`In use: MoltenVK,
+1.4.3`; `, restart to apply` after a change). Where KosmicKrisp can't
+run, the line ends with why instead (`(KosmicKrisp: needs macOS 26)`,
+`needs a Metal 4 GPU`, `needs Metal presentation`), and the combo is
+greyed unless it is set to KosmicKrisp. Help > About has a `Vulkan:`
+line.
 
 With the setting at `kosmickrisp`, a fatal Vulkan error on KosmicKrisp,
 or a crash while it starts or in its first frames, leaves a strike,
 `kosmickrisp-strike.txt` in the data folder: until xemu or the bundled
 KosmicKrisp changes, later launches start MoltenVK and say so in a
-toast. Building KosmicKrisp, and `XEMU_VK_DRIVER` (a diagnostic that
+toast. Picking KosmicKrisp in Settings again removes the strike, for one
+more try. Building KosmicKrisp, and `XEMU_VK_DRIVER` (a diagnostic that
 overrides the setting and the pin):
 [docs/kosmickrisp.md](docs/kosmickrisp.md).
 

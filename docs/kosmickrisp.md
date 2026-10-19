@@ -31,6 +31,7 @@ the opportunity and risk tables) are in this file at tag
 | CPU triangle fans, every Apple driver | Guest fans go out as CPU-built triangle lists: KK's GPU unroll splits the render pass and mangled Azurik's HUD gauges, and MoltenVK's own conversion restarts it per fan draw (heavy-f1: 101 Metal encoders a flip instead of 38) |
 | Copy-present, by capability | A driver without `VK_EXT_metal_objects` but with `VK_EXT_external_memory_metal` (stock KK) gets its frames to Metal through a buffer exported as an MTLHeap, plus a forwarder thread that turns each compositor timeline value into an xemu-owned MTLSharedEvent |
 | MoltenVK-only paths, by driver ID | The visibility primer query (MoltenVK's per-command-buffer visibility flag) and the Apple surface-upload fast path (it leans on MoltenVK's tracked queue; KK heaps are untracked) |
+| Settings > Display > Vulkan driver | Apple silicon builds (`main-menu.cc`). Its line says `In use: <driver, version>`, plus `, restart to apply` while the choice differs from the one this launch read (`nv2a_vk_driver_setting()`); a change toasts. Where KK can't run, the line ends `(KosmicKrisp: <nv2a_vk_kk_ineligible_reason()>)` instead and the combo is greyed, unless it is set to KosmicKrisp (it must stay possible to move off that). Picking KosmicKrisp removes a strike marker (`nv2a_vk_driver_retry()`). Help > About shows the full `nv2a_vk_driver_desc()` as its `Vulkan:` line |
 
 Still to come: scaled Z16 through compute (KK has no `BLIT_DST` on D16),
 and GS-less wireframe.
