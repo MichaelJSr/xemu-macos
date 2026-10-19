@@ -819,6 +819,61 @@ void MainMenuDisplayView::Draw()
         }
 #endif
     }
+#if defined(__APPLE__) && defined(__aarch64__) && defined(CONFIG_VULKAN)
+    /*
+     * Read once per launch (instance.c). Greyed where this process can't
+     * run KosmicKrisp whatever the setting says (the reason doesn't
+     * change while it runs), unless it is set to KosmicKrisp: that would
+     * toast every launch, so it must stay possible to move off it.
+     */
+    static const char *kk_why_not = nv2a_vk_kk_ineligible_reason();
+    const char *vk_desc = nv2a_vk_driver_desc();
+    int vk_latched = nv2a_vk_driver_setting();
+    /* "KosmicKrisp, Mesa 26.3.0 (git-…) (auto)": driver and version */
+    g_autofree char *vk_in_use =
+        vk_desc ? g_strchomp(g_strndup(vk_desc, strcspn(vk_desc, "("))) :
+                  g_strdup("none");
+    int *vk_driver = &g_config.display.vulkan.driver;
+    g_autofree char *vk_line =
+        kk_why_not ? g_strdup_printf("In use: %s (%s)", vk_in_use, kk_why_not) :
+        vk_latched >= 0 && vk_latched != *vk_driver ?
+                     g_strdup_printf("In use: %s, restart to apply", vk_in_use) :
+                     g_strdup_printf("In use: %s", vk_in_use);
+    bool vk_locked =
+        kk_why_not && *vk_driver != CONFIG_DISPLAY_VULKAN_DRIVER_KOSMICKRISP;
+    if (vk_locked) {
+        ImGui::BeginDisabled();
+    }
+    if (ChevronCombo("Vulkan driver", vk_driver,
+                     "Auto\0"
+                     "KosmicKrisp\0"
+                     "MoltenVK\0",
+                     vk_line)) {
+        /* Picking KosmicKrisp, even again, is the retry after a strike */
+        bool retry = *vk_driver == CONFIG_DISPLAY_VULKAN_DRIVER_KOSMICKRISP &&
+                     nv2a_vk_driver_retry();
+        if (vk_latched >= 0 && vk_latched != *vk_driver) {
+            xemu_queue_notification(
+                "Restart xemu to apply: the Vulkan driver is chosen at launch.");
+        } else if (retry) {
+            xemu_queue_notification("Restart xemu to retry KosmicKrisp.");
+        }
+    }
+    if (vk_locked) {
+        ImGui::EndDisabled();
+    }
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::Text("In use: %s", vk_desc ? vk_desc : "none");
+        ImGui::TextUnformatted(
+            "Auto runs KosmicKrisp on macOS 26 and later and MoltenVK when "
+            "KosmicKrisp can't start. After a KosmicKrisp failure Auto "
+            "stays on MoltenVK until xemu or KosmicKrisp changes; each pick "
+            "of KosmicKrisp gives it one more try.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+#endif
     int rendering_scale = nv2a_get_surface_scale_factor() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"
@@ -1728,7 +1783,18 @@ void MainMenuAboutView::Draw()
                             xemu_version, xemu_commit, xemu_date);
     }
 
-    static const char *sys_info_text = NULL;
+    static char *sys_info_text = NULL;
+    static int sys_info_lines;
+    /* The Vulkan line fills in once the renderer has chosen a driver. */
+    static bool sys_info_has_vk = false;
+    const char *vk_desc = NULL;
+#ifdef CONFIG_VULKAN
+    vk_desc = nv2a_vk_driver_desc();
+#endif
+    if (sys_info_text && !sys_info_has_vk && vk_desc) {
+        g_free(sys_info_text);
+        sys_info_text = NULL;
+    }
     if (sys_info_text == NULL) {
         const char *gl_shader_version;
         const char *gl_version;
@@ -1749,12 +1815,20 @@ void MainMenuAboutView::Draw()
             gl_renderer = (const char *)glGetString(GL_RENDERER);
             gl_vendor = (const char *)glGetString(GL_VENDOR);
         }
+        g_autofree char *vk_line = NULL;
+#ifdef CONFIG_VULKAN
+        vk_line = g_strdup_printf("\nVulkan:       %s",
+                                  vk_desc ? vk_desc : "not in use");
+#endif
         sys_info_text = g_strdup_printf(
             "CPU:          %s\nOS Platform:  %s\nOS Version:   "
             "%s\nManufacturer: %s\n"
-            "GPU Model:    %s\nDriver:       %s\nShader:       %s",
+            "GPU Model:    %s\nDriver:       %s\nShader:       %s%s",
             xemu_get_cpu_info(), SDL_GetPlatform(), xemu_get_os_info(),
-            gl_vendor, gl_renderer, gl_version, gl_shader_version);
+            gl_vendor, gl_renderer, gl_version, gl_shader_version,
+            vk_line ? vk_line : "");
+        sys_info_has_vk = vk_desc != NULL;
+        sys_info_lines = vk_line ? 8 : 7;
     }
 
     if (m_config_info_text == NULL) {
@@ -1773,9 +1847,10 @@ void MainMenuAboutView::Draw()
 
     SectionTitle("System Information");
     ImGui::PushFont(g_font_mgr.m_fixed_width_font);
-    ImGui::InputTextMultiline("###systeminformation", (char *)sys_info_text,
+    ImGui::InputTextMultiline("###systeminformation", sys_info_text,
                               strlen(sys_info_text) + 1,
-                              ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 8),
+                              ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() *
+                                                   (sys_info_lines + 1)),
                               ImGuiInputTextFlags_ReadOnly);
     ImGui::PopFont();
 
