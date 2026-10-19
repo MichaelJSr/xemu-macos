@@ -27,6 +27,7 @@ xemu-history), not here.
 | [`roadmap.md`](roadmap.md) | The open candidates, each with its decision inputs and bar. Closed entries leave it for the ledger and `Finished/`. |
 | [`RELEASING-macos.md`](RELEASING-macos.md) | The release runbook, used every release. |
 | [`windows-gating-audit.md`](windows-gating-audit.md) | The cross-platform gating register and the list of changes that still need real-hardware validation. The release runbook and roadmap item 5 depend on it. |
+| [`kosmickrisp.md`](kosmickrisp.md) | KosmicKrisp, the default Vulkan driver on macOS 26 with MoltenVK as fallback: how the driver is chosen, the strike marker, `XEMU_VK_DRIVER`, building KK, the gate, open items and the measurements. |
 | `README.md` | This index. |
 
 ## Campaigns

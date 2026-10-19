@@ -544,6 +544,14 @@ typedef struct PGRAPHVkDisplayState {
      * directly by MetalFX and the UI present pass.
      */
     void *mtl_texture;
+    /*
+     * Copy-present mode (metal_copy_present): the compositor image is
+     * copied into this buffer, whose dedicated memory is exported as an
+     * MTLHeap; mtl_texture is then a linear texture over that heap.
+     */
+    VkBuffer copy_buffer;
+    VkDeviceMemory copy_memory;
+    uint32_t copy_row_texels;
 
 
 #if HAVE_IOSURFACE_SHARING
@@ -629,15 +637,33 @@ typedef struct PGRAPHVkState {
     bool memory_budget_extension_enabled;
 #if HAVE_IOSURFACE_SHARING
     bool metal_objects_extension_enabled;
+    /*
+     * No VK_EXT_metal_objects but VK_EXT_external_memory_metal (stock
+     * Mesa KosmicKrisp): the compositor output reaches Metal through a
+     * per-frame copy into an MTLHeap-exported buffer (display.c), and
+     * a forwarder thread turns each compositor timeline value into an
+     * xemu-owned MTLSharedEvent signal (present_forward below).
+     */
+    bool metal_copy_present;
+    void *get_memory_metal_handle_fn; /* PFN_vkGetMemoryMetalHandleEXT */
 #endif
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
     bool supports_geom_point_size;
+    /*
+     * Triangle fans (and filled polygons) go out as CPU-built triangle
+     * lists through the emulated-index path instead of TRIANGLE_FAN.
+     */
+    bool emulate_triangle_fans;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
     VkPhysicalDeviceProperties device_props;
+    VkDriverId driver_id; /* 0 when the device predates Vulkan 1.2 */
+    bool driver_is_moltenvk;
+    /* "<driverName>, <driverInfo>": "MoltenVK, 1.4.3" (the - Driver: line) */
+    char driver_desc[VK_MAX_DRIVER_NAME_SIZE + VK_MAX_DRIVER_INFO_SIZE + 2];
     VkDevice device;
     VmaAllocator allocator;
     uint32_t allocator_last_submit_index;
@@ -766,6 +792,17 @@ typedef struct PGRAPHVkState {
     VkSemaphore present_timeline;
     uint64_t present_timeline_value;
     void *present_timeline_event; /* id<MTLSharedEvent>, retained */
+    /*
+     * Copy-present (no VK_EXT_metal_objects): present_timeline is a plain
+     * timeline and present_timeline_event an xemu-owned MTLSharedEvent a
+     * helper thread signals once vkWaitSemaphores sees each value.
+     */
+    bool present_forward;
+    QemuThread present_forward_thread;
+    QemuMutex present_forward_lock;
+    QemuCond present_forward_cond;
+    uint64_t present_forward_target;
+    bool present_forward_quit;
 
     /*
      * Direct MTLTexture export of the compositor image (Metal
@@ -1087,6 +1124,14 @@ typedef struct PGRAPHVkState {
     uint32_t expire_updates;
 } PGRAPHVkState;
 
+#if HAVE_IOSURFACE_SHARING
+/* The compositor output can be handed to Metal (texture export or copy). */
+static inline bool pgraph_vk_metal_present_interop(PGRAPHVkState *r)
+{
+    return r->metal_objects_extension_enabled || r->metal_copy_present;
+}
+#endif
+
 // renderer.c
 void pgraph_vk_check_memory_budget(PGRAPHState *pg);
 
@@ -1108,6 +1153,16 @@ void pgraph_vk_end_debug_marker(PGRAPHVkState *r, VkCommandBuffer cmd);
 // instance.c
 void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp);
 void pgraph_vk_finalize_instance(PGRAPHState *pg);
+/*
+ * A fatal error on KosmicKrisp the settings chose, or in the start window
+ * after a KosmicKrisp attempt: the next launch on Auto uses MoltenVK until
+ * the build changes (instance.c). Any thread.
+ */
+void pgraph_vk_driver_strike(const char *reason);
+/* Every guest flip (PFIFO thread): closes the start window after a while. */
+void pgraph_vk_driver_flip(void);
+/* Renderer teardown: closes the start window. */
+void pgraph_vk_driver_stopped(void);
 QueueFamilyIndices pgraph_vk_find_queue_families(VkPhysicalDevice device);
 uint32_t pgraph_vk_get_memory_type(PGRAPHState *pg, uint32_t type_bits,
                                    VkMemoryPropertyFlags properties);
@@ -1187,6 +1242,8 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 // surface.c
 void pgraph_vk_init_surfaces(PGRAPHState *pg);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
+/* Every surface and texture format works on the device (driver acceptance). */
+bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp);
 /* XEMU_MFX_REAL_DEPTH: 0 = synthetic (default), 2 = flip-time zeta
  * snapshot. Cached env parse; safe on all platforms. */
 int pgraph_vk_mfx_real_depth_mode(void);
@@ -1241,6 +1298,8 @@ void pgraph_vk_init_display(PGRAPHState *pg);
 void pgraph_vk_finalize_display(PGRAPHState *pg);
 void pgraph_vk_render_display(PGRAPHState *pg);
 #if HAVE_IOSURFACE_SHARING
+/* A small copy-present target works (driver acceptance; device only). */
+bool pgraph_vk_copy_present_probe(PGRAPHState *pg, Error **errp);
 /* Push-model present; Metal backend only. */
 bool pgraph_vk_push_present_enabled(NV2AState *d);
 void pgraph_vk_present_schedule_publish(PGRAPHState *pg);

@@ -18,9 +18,21 @@
  */
 
 #include "qemu/osdep.h"
+#include "exec/icount.h"
+#include "ui/xemu-notifications.h"
+#include "ui/xemu-present.h"
 #include "ui/xemu-settings.h"
+#include "hw/xbox/nv2a/nv2a.h"
 #include "renderer.h"
 #include "xemu-version.h"
+
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include "metalfx_upscale.h"
+#endif
 
 #define VkExtensionPropertiesArray GArray
 #define StringArray GArray
@@ -108,15 +120,21 @@ get_available_instance_extensions(PGRAPHState *pg)
 {
     uint32_t num_extensions = 0;
 
-    VK_CHECK(
-        vkEnumerateInstanceExtensionProperties(NULL, &num_extensions, NULL));
+    if (vkEnumerateInstanceExtensionProperties(NULL, &num_extensions, NULL) !=
+        VK_SUCCESS) {
+        return NULL;
+    }
 
     VkExtensionPropertiesArray *extensions = g_array_sized_new(
         FALSE, FALSE, sizeof(VkExtensionProperties), num_extensions);
 
     g_array_set_size(extensions, num_extensions);
-    VK_CHECK(vkEnumerateInstanceExtensionProperties(
-        NULL, &num_extensions, (VkExtensionProperties *)extensions->data));
+    if (vkEnumerateInstanceExtensionProperties(
+            NULL, &num_extensions, (VkExtensionProperties *)extensions->data) !=
+        VK_SUCCESS) {
+        g_array_free(extensions, TRUE);
+        return NULL;
+    }
 
     return extensions;
 }
@@ -173,15 +191,69 @@ add_optional_instance_extension_names(PGRAPHState *pg,
 #endif
 }
 
-static bool create_instance(PGRAPHState *pg, Error **errp)
+#ifndef _WIN32
+typedef VkResult(VKAPI_PTR *IcdNegotiateFn)(uint32_t *version);
+
+/*
+ * Loads a Vulkan driver from a dylib path in dlopen() syntax and calls it
+ * directly, with no Vulkan loader in between: through its
+ * vkGetInstanceProcAddr when it exports one (MoltenVK, a loader),
+ * otherwise through the loader-ICD entry vk_icdGetInstanceProcAddr after
+ * the interface negotiation a loader would do (Mesa KosmicKrisp exports
+ * only the vk_icd* entry points). The module is never closed, like the one
+ * volkInitialize() opens: KosmicKrisp registers Objective-C classes and
+ * atexit handlers.
+ */
+static bool load_vk_driver(const char *path, Error **errp)
+{
+    void *module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!module) {
+        error_setg(errp, "dlopen: %s", dlerror());
+        return false;
+    }
+
+    PFN_vkGetInstanceProcAddr gipa =
+        (PFN_vkGetInstanceProcAddr)dlsym(module, "vkGetInstanceProcAddr");
+    if (!gipa) {
+        IcdNegotiateFn negotiate = (IcdNegotiateFn)dlsym(
+            module, "vk_icdNegotiateLoaderICDInterfaceVersion");
+        uint32_t version = 7;
+        if (!negotiate || negotiate(&version) != VK_SUCCESS || version < 5) {
+            error_setg(errp, "%s: no loader-ICD interface 5 or later", path);
+            return false;
+        }
+        gipa = (PFN_vkGetInstanceProcAddr)dlsym(module,
+                                                "vk_icdGetInstanceProcAddr");
+    }
+    if (!gipa) {
+        error_setg(errp, "%s exports no vkGetInstanceProcAddr", path);
+        return false;
+    }
+
+    volkInitializeCustom(gipa);
+    return true;
+}
+#endif
+
+/* path: the driver's dylib (load_vk_driver), or NULL for volkInitialize(). */
+static bool create_instance(PGRAPHState *pg, const char *path, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
-    result = volkInitialize();
-    if (result != VK_SUCCESS) {
-        error_setg(errp, "volkInitialize failed");
-        return false;
+#ifndef _WIN32
+    if (path) {
+        if (!load_vk_driver(path, errp)) {
+            return false;
+        }
+    } else
+#endif
+    {
+        result = volkInitialize();
+        if (result != VK_SUCCESS) {
+            error_setg(errp, "volkInitialize failed");
+            return false;
+        }
     }
 
     uint32_t instance_version = VK_API_VERSION_1_0;
@@ -207,6 +279,10 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
 
     g_autoptr(VkExtensionPropertiesArray) available_extensions =
         get_available_instance_extensions(pg);
+    if (!available_extensions) {
+        error_setg(errp, "Failed to enumerate instance extensions");
+        return false;
+    }
 
     g_autoptr(StringArray) enabled_extension_names =
         g_array_new(FALSE, FALSE, sizeof(char *));
@@ -279,8 +355,13 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
                            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
             .pfnUserCallback = debugCallback,
         };
-        VK_CHECK(vkCreateDebugUtilsMessengerEXT(r->instance, &messenger_info,
-                                                NULL, &r->debug_messenger));
+        result = vkCreateDebugUtilsMessengerEXT(r->instance, &messenger_info,
+                                                NULL, &r->debug_messenger);
+        if (result != VK_SUCCESS) {
+            r->debug_messenger = VK_NULL_HANDLE;
+            error_setg(errp, "Failed to create debug messenger (%d)", result);
+            return false;
+        }
     }
 
     return true;
@@ -324,16 +405,21 @@ get_available_device_extensions(VkPhysicalDevice device)
 {
     uint32_t num_extensions = 0;
 
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(device, NULL, &num_extensions,
-                                                  NULL));
+    if (vkEnumerateDeviceExtensionProperties(device, NULL, &num_extensions,
+                                             NULL) != VK_SUCCESS) {
+        return NULL;
+    }
 
     VkExtensionPropertiesArray *extensions = g_array_sized_new(
         FALSE, FALSE, sizeof(VkExtensionProperties), num_extensions);
 
     g_array_set_size(extensions, num_extensions);
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(
-        device, NULL, &num_extensions,
-        (VkExtensionProperties *)extensions->data));
+    if (vkEnumerateDeviceExtensionProperties(
+            device, NULL, &num_extensions,
+            (VkExtensionProperties *)extensions->data) != VK_SUCCESS) {
+        g_array_free(extensions, TRUE);
+        return NULL;
+    }
 
     return extensions;
 }
@@ -384,6 +470,16 @@ static void add_optional_device_extension_names(
     r->metal_objects_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+    /*
+     * Without metal_objects (stock Mesa KosmicKrisp),
+     * VK_EXT_external_memory_metal's MTLHeap export still gets the
+     * compositor output to Metal (copy-present, display.c).
+     */
+    r->metal_copy_present =
+        !r->metal_objects_extension_enabled &&
+        add_extension_if_available(available_extensions,
+                                   enabled_extension_names,
+                                   VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
 #endif
 }
 
@@ -391,6 +487,9 @@ static bool check_device_support_required_extensions(VkPhysicalDevice device)
 {
     g_autoptr(VkExtensionPropertiesArray) available_extensions =
         get_available_device_extensions(device);
+    if (!available_extensions) {
+        return false;
+    }
 
     for (int i = 0; i < ARRAY_SIZE(required_device_extensions); i++) {
         if (!is_extension_available(available_extensions,
@@ -473,8 +572,6 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
     }
 
     vkGetPhysicalDeviceProperties(r->physical_device, &r->device_props);
-    xemu_settings_set_string(&g_config.display.vulkan.preferred_physical_device,
-                             r->device_props.deviceName);
     r->vk_api_version = MIN(r->vk_api_version, r->device_props.apiVersion);
 
     fprintf(stderr,
@@ -489,10 +586,16 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
             VK_VERSION_PATCH(r->device_props.driverVersion));
 
     /*
-     * Which driver, for logs and bench receipts: "- Driver: MoltenVK,
-     * 1.4.3 (id 14)". Core in 1.2 (vk_api_version is already capped by
-     * both the instance and the device).
+     * Which driver, for logs and bench receipts ("- Driver: MoltenVK,
+     * 1.4.3 (id 14)", printed once the device is accepted) and for the few
+     * paths that depend on one driver's behaviour rather than on the
+     * Vulkan spec: those test driver_id, never display.vulkan.driver. Core
+     * in 1.2 (vk_api_version is already capped by both the instance and
+     * the device).
      */
+    r->driver_id = 0;
+    snprintf(r->driver_desc, sizeof(r->driver_desc), "%s",
+             r->device_props.deviceName);
     if (r->vk_api_version >= VK_API_VERSION_1_2) {
         VkPhysicalDeviceDriverProperties driver_props = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
@@ -502,12 +605,14 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
             .pNext = &driver_props,
         };
         vkGetPhysicalDeviceProperties2(r->physical_device, &props2);
-        fprintf(stderr, "- Driver: %s, %s (id %d)\n", driver_props.driverName,
-                driver_props.driverInfo, driver_props.driverID);
+        r->driver_id = driver_props.driverID;
+        snprintf(r->driver_desc, sizeof(r->driver_desc), "%s, %s",
+                 driver_props.driverName, driver_props.driverInfo);
         /* MoltenVK caches shader stages, never whole pipelines (draw.c). */
         r->pipeline_cache_stage_hits_suffice =
             driver_props.driverID == VK_DRIVER_ID_MOLTENVK;
     }
+    r->driver_is_moltenvk = r->driver_id == VK_DRIVER_ID_MOLTENVK;
 
     return true;
 }
@@ -522,6 +627,10 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
 
     g_autoptr(VkExtensionPropertiesArray) available_extensions =
         get_available_device_extensions(r->physical_device);
+    if (!available_extensions) {
+        error_setg(errp, "Failed to enumerate device extensions");
+        return false;
+    }
 
     g_autoptr(StringArray) enabled_extension_names =
         get_required_device_extension_names();
@@ -621,6 +730,22 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
     r->supports_geometry_shaders =
         r->enabled_physical_device_features.geometryShader == VK_TRUE;
+
+    /*
+     * Metal has no triangle fans, so every Apple driver gets CPU-built
+     * triangle lists. MoltenVK would convert each fan draw in a compute
+     * encoder that restarts the render pass (heavy-f1: 101 Metal encoders
+     * a flip instead of 38); Mesa KosmicKrisp unrolls it in a compute pass
+     * that ends the render encoder too and, as of Mesa 27.0-devel
+     * 335d5698dc, mangles some of them (Azurik's HUD gauges in
+     * azurik-heavy-w2 / -stream-e2).
+     */
+#ifdef __APPLE__
+    r->emulate_triangle_fans = true;
+#else
+    r->emulate_triangle_fans = false;
+#endif
+
     /*
      * Whether a geometry shader may write gl_PointSize. Emitting that write
      * makes glslang declare the GeometryPointSize SPIR-V capability, which
@@ -717,11 +842,17 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     result = vkCreateDevice(r->physical_device, &device_create_info, NULL,
                             &r->device);
     if (result != VK_SUCCESS) {
+        r->device = VK_NULL_HANDLE;
         error_setg(errp, "Failed to create logical device (%d)", result);
         return false;
     }
+#if HAVE_IOSURFACE_SHARING
+    r->get_memory_metal_handle_fn =
+        r->metal_copy_present ?
+            (void *)vkGetDeviceProcAddr(r->device, "vkGetMemoryMetalHandleEXT") :
+            NULL;
+#endif
 
-#ifndef __APPLE__
     /*
      * With volkLoadInstance() alone, every device-level entry point
      * (vkCmdDraw, vkCmdBindDescriptorSets, ...) is the pointer
@@ -740,12 +871,18 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
      * is resolved separately via vkGetDeviceProcAddr; and VMA builds its own
      * table with volkLoadDeviceTable() regardless.
      *
-     * Skipped on Apple, where MoltenVK is linked as the ICD and there is no
-     * loader trampoline to bypass, so the Apple dispatch stays exactly as
-     * volkLoadInstance() left it.
+     * Skipped for MoltenVK, which is loaded as the ICD with no loader
+     * trampoline to bypass, so its dispatch stays exactly as
+     * volkLoadInstance() left it. Not for other Apple drivers: Mesa
+     * KosmicKrisp hands out per-device trampolines through
+     * vk_icdGetInstanceProcAddr.
      */
-    volkLoadDevice(r->device);
+#ifdef __APPLE__
+    if (!r->driver_is_moltenvk)
 #endif
+    {
+        volkLoadDevice(r->device);
+    }
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
 
@@ -800,16 +937,451 @@ static bool init_allocator(PGRAPHState *pg, Error **errp)
     return true;
 }
 
-void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp)
+/*
+ * The Vulkan driver, chosen at the first renderer init and kept for the
+ * process (a later init, after a renderer switch, loads the same one):
+ *
+ * 1. XEMU_VK_DRIVER (diagnostic; POSIX): "kosmickrisp", "moltenvk" (the
+ *    copies bundled beside the other dylibs) or a dylib path. Overrides
+ *    the setting and the pin; if it fails, xemu exits rather than let
+ *    pgraph.c persist renderer = OPENGL.
+ * 2. Not Apple: volkInitialize(), the system loader.
+ * 3. Apple: KosmicKrisp unless display.vulkan.driver is moltenvk,
+ *    nv2a_vk_kk_ineligible_reason() names a reason (the pin among them),
+ *    or a strike names this build (an explicit kosmickrisp honors only
+ *    one from its own start); it must pass kk_accept(), else MoltenVK
+ *    runs.
+ *    MoltenVK loads by its bundled path, never volk's search, so a Vulkan
+ *    loader in /usr/local can't take its place.
+ *
+ * Paths that depend on one driver's behaviour test r->driver_id, never
+ * the setting.
+ */
+static struct {
+    bool resolved;
+    int setting;        /* display.vulkan.driver as resolve_driver read it */
+    const char *path;   /* what this process loads; NULL: volkInitialize() */
+    bool kk_strikable;  /* KosmicKrisp in use, chosen by the setting */
+    bool start_open;    /* the start window (strike marker, below) is open */
+    int start_flips;    /* guest flips since it opened (PFIFO thread) */
+    char start_tag[48]; /* " (pid N, auto)", set before start_open */
+    char *desc;         /* nv2a_vk_driver_desc() */
+} vk_driver;
+
+#ifdef __APPLE__
+#define KK_DYLIB "@rpath/libvulkan_kosmickrisp.dylib"
+#define MVK_DYLIB "@rpath/libMoltenVK.dylib"
+
+/*
+ * What KosmicKrisp must show before xemu commits to it; past this point a
+ * failure can only end the process. Copy-present (display.c) is its only
+ * present path: VK_EXT_external_memory_metal, vkGetMemoryMetalHandleEXT,
+ * timeline semaphores (the forwarder) and one small target, made and
+ * freed. Every surface and texture format, which would otherwise abort
+ * later in vkCreateImage.
+ */
+static bool kk_accept(PGRAPHState *pg, Error **errp)
 {
-    if (create_instance(pg, errp) &&
-        select_physical_device(pg, errp) &&
-        create_logical_device(pg, errp) &&
-        init_allocator(pg, errp)) {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!r->metal_copy_present || !r->get_memory_metal_handle_fn) {
+        error_setg(errp, "no VK_EXT_external_memory_metal");
+        return false;
+    }
+    if (!r->timeline_semaphore_enabled) {
+        error_setg(errp, "no timeline semaphores");
+        return false;
+    }
+    return pgraph_vk_formats_supported(r, errp) &&
+           pgraph_vk_copy_present_probe(pg, errp);
+}
+
+const char *nv2a_vk_kk_ineligible_reason(void)
+{
+#ifndef __aarch64__
+    return "needs Apple silicon";
+#else
+    if (icount_enabled()) {
+        return "pinned: deterministic";
+    }
+    if (xemu_headless_mode() == XEMU_HEADLESS_OFFSCREEN) {
+        return "pinned: offscreen";
+    }
+    if (!xemu_present_is_metal()) {
+        return "needs Metal presentation";
+    }
+    if (__builtin_available(macOS 26.0, *)) {
+        return metalfx_device_is_metal4() ? NULL : "needs a Metal 4 GPU";
+    }
+    return "needs macOS 26";
+#endif
+}
+
+/*
+ * The strike marker, <base>kosmickrisp-strike.txt: the build it applies to
+ * (kk_build_id), then why. A launch that tries KosmicKrisp opens a start
+ * window: it writes "crashed while starting" before the attempt (after a
+ * clean refusal with the dylib loaded, "MoltenVK crashed after a
+ * KosmicKrisp attempt" before MoltenVK starts), tagged " (pid N, auto)" or
+ * " (pid N, kosmickrisp)". Only that process removes its tagged line,
+ * after KK_START_FLIPS guest flips, at a clean exit or at renderer
+ * teardown, so a crash in the driver's start or first frames (a signal, a
+ * Mesa abort, a Metal assertion) leaves it. A fatal error writes its
+ * reason (pgraph_vk_driver_strike), tagged while the window is open. A
+ * tagged line whose pid still runs belongs to another xemu on the same
+ * data folder and doesn't count.
+ *
+ * Auto honors any line that names the running build. An explicit
+ * kosmickrisp honors only a line tagged under kosmickrisp (its own start
+ * failed, and would again on every launch) and otherwise retries; picking
+ * KosmicKrisp in Settings removes the marker (nv2a_vk_driver_retry), so
+ * each pick gets one more attempt.
+ */
+#define KK_STARTING "crashed while starting"
+#define KK_MVK_AFTER "MoltenVK crashed after a KosmicKrisp attempt"
+#define KK_START_FLIPS 600 /* about 10 s of play */
+
+static char *kk_strike_path(void)
+{
+    return g_strdup_printf("%skosmickrisp-strike.txt",
+                           xemu_settings_get_base_path());
+}
+
+/* The xemu version and the bundled dylib's size and mtime. */
+static char *kk_build_id(void)
+{
+    char exe[PATH_MAX];
+    uint32_t len = sizeof(exe);
+    struct stat st;
+    if (_NSGetExecutablePath(exe, &len) == 0) {
+        g_autofree char *dir = g_path_get_dirname(exe);
+        g_autofree char *dylib = g_build_filename(
+            dir, "../Libraries/arm64/libvulkan_kosmickrisp.dylib", NULL);
+        if (stat(dylib, &st) == 0) {
+            return g_strdup_printf("xemu %s, KosmicKrisp %lld bytes, mtime %lld",
+                                   xemu_version, (long long)st.st_size,
+                                   (long long)st.st_mtime);
+        }
+    }
+    return g_strdup_printf("xemu %s, no bundled KosmicKrisp", xemu_version);
+}
+
+static void kk_strike_write(const char *reason)
+{
+    g_autofree char *path = kk_strike_path();
+    g_autofree char *id = kk_build_id();
+    g_autofree char *text = g_strdup_printf(
+        "%s\n%s%s\n", id, reason,
+        qatomic_read(&vk_driver.start_open) ? vk_driver.start_tag : "");
+    g_file_set_contents(path, text, -1, NULL);
+}
+
+/*
+ * The marker's reason, without its tag, if it names this build, else
+ * NULL; *pid and setting[] from the tag (0 and "" without one).
+ */
+static char *kk_strike_load(int *pid, char setting[16])
+{
+    g_autofree char *path = kk_strike_path();
+    g_autofree char *id = kk_build_id();
+    g_autofree char *text = NULL;
+    *pid = 0;
+    setting[0] = '\0';
+    if (!g_file_get_contents(path, &text, NULL, NULL) ||
+        !g_str_has_prefix(text, id) || text[strlen(id)] != '\n') {
+        return NULL;
+    }
+    char *why = g_strstrip(g_strdup(text + strlen(id) + 1));
+    char *tag = g_strrstr(why, " (pid ");
+    if (tag && sscanf(tag, " (pid %d, %15[a-z])", pid, setting) == 2) {
+        *tag = '\0';
+    } else {
+        *pid = 0;
+        setting[0] = '\0';
+    }
+    return why;
+}
+
+static bool pid_alive(int pid)
+{
+    return pid > 0 && (kill(pid, 0) == 0 || errno == EPERM);
+}
+
+/* Why KosmicKrisp shouldn't start in this launch, or NULL (above). */
+static char *kk_strike_read(bool explicit_kk)
+{
+    int pid;
+    char setting[16];
+    char *why = kk_strike_load(&pid, setting);
+    if (why && ((pid != getpid() && pid_alive(pid)) ||
+                (explicit_kk && strcmp(setting, "kosmickrisp")))) {
+        g_clear_pointer(&why, g_free);
+    }
+    return why;
+}
+
+/* Close the start window: remove the marker if it is still our line. */
+static void kk_start_window_close(void)
+{
+    if (!qatomic_xchg(&vk_driver.start_open, false)) {
         return;
     }
+    int pid;
+    char setting[16];
+    g_autofree char *why = kk_strike_load(&pid, setting);
+    if (why && pid == getpid() &&
+        (g_str_has_prefix(why, KK_STARTING) ||
+         g_str_has_prefix(why, KK_MVK_AFTER))) {
+        g_autofree char *path = kk_strike_path();
+        g_unlink(path);
+    }
+}
 
-    pgraph_vk_finalize_instance(pg);
+static void kk_start_window_open(bool auto_kk)
+{
+    snprintf(vk_driver.start_tag, sizeof(vk_driver.start_tag),
+             " (pid %d, %s)", (int)getpid(), auto_kk ? "auto" : "kosmickrisp");
+    qatomic_set(&vk_driver.start_open, true);
+    /* A quit or SIGTERM is no crash; SIGKILL still counts as one */
+    atexit(kk_start_window_close);
+    kk_strike_write(KK_STARTING);
+}
+
+/* A toast, in the log too (only headless notifications are). */
+static void kk_notify(const char *msg)
+{
+    if (!xemu_headless_mode()) {
+        fprintf(stderr, "xemu: notification: %s\n", msg);
+    }
+    xemu_queue_notification(msg);
+}
+#endif
+
+void pgraph_vk_driver_strike(const char *reason)
+{
+#ifdef __APPLE__
+    /* The window also covers MoltenVK's first frames after a KK attempt */
+    if (vk_driver.kk_strikable || qatomic_read(&vk_driver.start_open)) {
+        kk_strike_write(reason);
+    }
+#endif
+}
+
+void pgraph_vk_driver_flip(void)
+{
+#ifdef __APPLE__
+    if (unlikely(qatomic_read(&vk_driver.start_open)) &&
+        ++vk_driver.start_flips >= KK_START_FLIPS) {
+        kk_start_window_close();
+    }
+#endif
+}
+
+void pgraph_vk_driver_stopped(void)
+{
+#ifdef __APPLE__
+    kk_start_window_close();
+#endif
+}
+
+bool nv2a_vk_driver_retry(void)
+{
+#ifdef __APPLE__
+    int pid;
+    char setting[16];
+    g_autofree char *why = kk_strike_load(&pid, setting);
+    /* A live process's start line still guards that launch */
+    if (why && !pid_alive(pid)) {
+        g_autofree char *path = kk_strike_path();
+        return g_unlink(path) == 0;
+    }
+#endif
+    return false;
+}
+
+const char *nv2a_vk_driver_desc(void)
+{
+    return qatomic_load_acquire(&vk_driver.desc);
+}
+
+int nv2a_vk_driver_setting(void)
+{
+    /* Written before desc's release store */
+    return nv2a_vk_driver_desc() ? vk_driver.setting : -1;
+}
+
+/* One driver, instance to allocator; a failure leaves r as it found it. */
+static bool init_on(PGRAPHState *pg, const char *path, bool want_kk,
+                    Error **errp)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    bool ok = create_instance(pg, path, errp) &&
+              select_physical_device(pg, errp);
+#ifdef __APPLE__
+    if (ok && want_kk && r->driver_id != VK_DRIVER_ID_MESA_KOSMICKRISP) {
+        error_setg(errp, "not a KosmicKrisp device (driver id %d)",
+                   r->driver_id);
+        ok = false;
+    }
+    ok = ok && create_logical_device(pg, errp) &&
+         (r->driver_id != VK_DRIVER_ID_MESA_KOSMICKRISP ||
+          kk_accept(pg, errp));
+#else
+    ok = ok && create_logical_device(pg, errp);
+#endif
+    ok = ok && init_allocator(pg, errp);
+    if (!ok) {
+        /* Nothing writes r before this init (renderer.c) */
+        pgraph_vk_finalize_instance(pg);
+        memset(r, 0, sizeof(*r));
+    }
+    return ok;
+}
+
+/* why: the resolver line's reason, NULL on later inits and off Apple */
+static void driver_accepted(PGRAPHState *pg, const char *why)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (why) {
+        const char *name = r->driver_desc;
+#ifdef __APPLE__
+        if (r->driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP) {
+            name = "KosmicKrisp";
+        } else if (r->driver_is_moltenvk) {
+            name = "MoltenVK";
+        }
+#endif
+        fprintf(stderr, "xemu: Vulkan driver: %s (%s)\n", name, why);
+    }
+    fprintf(stderr, "- Driver: %s (id %d)\n", r->driver_desc, r->driver_id);
+    xemu_settings_set_string(&g_config.display.vulkan.preferred_physical_device,
+                             r->device_props.deviceName);
+    if (!vk_driver.desc) {
+        qatomic_store_release(&vk_driver.desc,
+                              why ? g_strdup_printf("%s (%s)", r->driver_desc,
+                                                    why) :
+                                    g_strdup(r->driver_desc));
+    }
+}
+
+static bool resolve_driver(PGRAPHState *pg, Error **errp)
+{
+    vk_driver.setting = g_config.display.vulkan.driver;
+#ifndef _WIN32
+    const char *env = getenv("XEMU_VK_DRIVER");
+    if (env && *env) {
+        const char *path = env;
+#ifdef __APPLE__
+        path = !strcmp(env, "kosmickrisp") ? KK_DYLIB :
+               !strcmp(env, "moltenvk")    ? MVK_DYLIB :
+                                             env;
+#endif
+        vk_driver.path = g_strdup(path);
+        if (!init_on(pg, vk_driver.path, false, errp)) {
+            fprintf(stderr, "xemu: XEMU_VK_DRIVER=%s: %s\n", env,
+                    error_get_pretty(*errp));
+            exit(1);
+        }
+        g_autofree char *why = g_strdup_printf("XEMU_VK_DRIVER=%s", env);
+        driver_accepted(pg, why);
+        return true;
+    }
+#endif
+
+#ifndef __APPLE__
+    if (!init_on(pg, NULL, false, errp)) {
+        return false;
+    }
+    driver_accepted(pg, NULL);
+    return true;
+#else
+    int setting = vk_driver.setting;
+    bool auto_kk = setting == CONFIG_DISPLAY_VULKAN_DRIVER_AUTO;
+    const char *why = setting == CONFIG_DISPLAY_VULKAN_DRIVER_MOLTENVK ?
+                          "moltenvk" :
+                          nv2a_vk_kk_ineligible_reason();
+    g_autofree char *why_buf = NULL;
+    g_autofree char *strike = NULL;
+    bool kk_loaded = false;
+
+    if (!why && (strike = kk_strike_read(!auto_kk))) {
+        why = why_buf = g_strdup_printf(
+            "KosmicKrisp failed in an earlier launch: %s", strike);
+        kk_notify("KosmicKrisp failed in an earlier launch; using MoltenVK. "
+                  "Pick KosmicKrisp in Settings > Display to retry.");
+    } else {
+        if (!why) {
+            Error *kk_err = NULL;
+            kk_start_window_open(auto_kk);
+            if (init_on(pg, KK_DYLIB, true, &kk_err)) {
+                vk_driver.path = KK_DYLIB;
+                vk_driver.kk_strikable = true;
+                driver_accepted(pg, auto_kk ? "auto" : "kosmickrisp");
+                return true;
+            }
+            why = "KosmicKrisp unavailable";
+            why_buf = g_strdup_printf("%s (%s)", why, error_get_pretty(kk_err));
+            error_free(kk_err);
+            fprintf(stderr, "xemu: %s; using MoltenVK\n", why_buf);
+            /*
+             * A dylib that loaded stays loaded (never closed), so MoltenVK
+             * shares the process with it: the window then covers
+             * MoltenVK's start and first frames. Otherwise MoltenVK runs
+             * alone, as with the setting at moltenvk.
+             */
+            void *kk = dlopen(KK_DYLIB, RTLD_NOLOAD);
+            kk_loaded = kk != NULL;
+            if (kk_loaded) {
+                dlclose(kk);
+                kk_strike_write(KK_MVK_AFTER);
+            } else {
+                kk_start_window_close();
+            }
+        }
+#ifdef __aarch64__
+        if (setting == CONFIG_DISPLAY_VULKAN_DRIVER_KOSMICKRISP) {
+            g_autofree char *msg = g_strdup_printf(
+                "%s%s; using MoltenVK", why_buf ? "" : "KosmicKrisp: ",
+                why_buf ? why_buf : why);
+            kk_notify(msg);
+        }
+#endif
+    }
+
+    vk_driver.path = MVK_DYLIB;
+    if (!init_on(pg, MVK_DYLIB, false, errp)) {
+        if (kk_loaded) {
+            /* Not pgraph.c's OPENGL fallback: KosmicKrisp may be to blame. */
+            kk_strike_write("MoltenVK failed after a KosmicKrisp attempt");
+            qatomic_set(&vk_driver.start_open, false); /* exit keeps it */
+            fprintf(stderr, "xemu: MoltenVK after KosmicKrisp: %s\n",
+                    error_get_pretty(*errp));
+            exit(1);
+        }
+        return false;
+    }
+    driver_accepted(pg, why);
+    return true;
+#endif
+}
+
+void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp)
+{
+    bool ok;
+    if (vk_driver.resolved) {
+        ok = init_on(pg, vk_driver.path, false, errp);
+        if (ok) {
+            driver_accepted(pg, NULL);
+        }
+    } else {
+        vk_driver.resolved = true;
+        ok = resolve_driver(pg, errp);
+    }
+    if (ok) {
+        return;
+    }
 
     const char *msg = "Failed to initialize Vulkan renderer";
     if (*errp) {

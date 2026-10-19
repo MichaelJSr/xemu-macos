@@ -72,6 +72,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
 | `XEMU_APU_PROF` | Per-second APU-thread utilization to stderr (deterministic mode measures it only when this is set) |
+| `XEMU_VK_DRIVER` | Diagnostic (POSIX): the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin of deterministic and offscreen runs: `kosmickrisp` or `moltenvk` (the bundled copies) or a dylib path (a dev KosmicKrisp, a Vulkan loader for validation layers). A failure exits 1 instead of falling back. The launchers drop an inherited one (`AUTOMATION_ENV`). `docs/kosmickrisp.md` |
 
 ### Build-time and harness knobs
 
@@ -1491,6 +1492,45 @@ x86_64 host (Windows, Linux, Intel macOS).
   `VK_EXT_metal_objects` zero-copy IOSurfaces, CPU-side quads /
   line loops / triangle fans / provoking-vertex emulation,
   fragment-shader depth fallback.
+- **Vulkan driver choice (macOS).**
+  `display.vulkan.driver = auto | kosmickrisp | moltenvk`, latched once
+  per process: Auto runs Mesa KosmicKrisp on macOS 26 with a Metal 4 GPU
+  and Metal presentation once it passes acceptance (copy-present, every
+  surface and texture format), else MoltenVK, loaded by its bundled path;
+  `-icount` and offscreen runs pin MoltenVK (offscreen det digests equal
+  master's: heavy-f1 f300 `e1e78c2b7aafcdab`, stream-e2 f300
+  `69490c302ed37f1a`, 2026-10-18; since CPU fans on MoltenVK, next
+  bullet, standing stream-e2 is `dc7c25c4a00d5723`). A KosmicKrisp fatal error, or a crash
+  in its start or first 600 flips, leaves a strike that keeps Auto on
+  MoltenVK until the build changes. One pipeline cache file per driver.
+  Driver-specific paths test the driver ID, never the setting;
+  copy-present engages on capability (no `VK_EXT_metal_objects`, but
+  `VK_EXT_external_memory_metal`). `docs/kosmickrisp.md`.
+- **CPU triangle fans on MoltenVK too (2026-10-18).**
+  `emulate_triangle_fans` is on for every Apple driver: guest fans go out
+  as CPU-built triangle lists through draw.c's emulated-index path (as
+  quads and polygons already do), instead of MoltenVK's per-draw compute
+  conversion, which restarts the render pass (heavy-f1: 101 Metal encoders
+  a flip → 38). Windowed at the 60 fps cap (MoltenVK 1.4.3, per-thread CPU
+  deltas over 25 s, ABBA), PGO cross-binary (load 15-57): process CPU
+  heavy-f1 119.9 → 109.4% of a core (4/4 pairs), W2 106.9 → 101.4% (4/4),
+  outside the vCPU and PFIFO threads −7.9 and −3.5 points; the vetting run
+  (non-PGO 910f37c028 plus a local toggle, load 35-100) read 139.0 →
+  126.8% and 111.8 → 100.0%; fps and draws/flip unchanged. Offscreen det,
+  pooled over four sessions (the vetting toggle, then PGO cross-binary;
+  load 24-77): heavy-f1 600 frames Minsns/frame −2.6 to −3.0% (14/14
+  pairs), Mcyc/frame median −2.2% (11/14); stream-e2 walk Minsns −4.0 to
+  −4.4% (9/9), Mcyc median −5.2% (8/9); W2 300 frames Minsns −1.5 to −1.7%
+  (6/6), Mcyc median −2.4% (4/6). Same RAM on heavy-f1 (f300, f600), the
+  stream-e2 walk (`-i "axis ly 1.0"`, f300, f600) and W2 (f300). Standing
+  stream-e2 (no input) moves from f60: 22 occlusion report values differ
+  by 1-3 of ~61,800, at f300 19 by 1-4, nothing else in RAM (f300
+  `69490c302ed37f1a` → `dc7c25c4a00d5723`, each arm 5/5 the same over two
+  sessions), the AGX pass-split class; heavy-f1 f300 screendumps differ in
+  14 pixels by ≤3 levels, W2 none. Null goldens unchanged. On v0.16's
+  default KosmicKrisp path nothing changes; the gain reaches MoltenVK runs
+  (macOS 14/15, Intel, GL presentation, a KosmicKrisp fallback or strike,
+  `driver = 'moltenvk'`, every pinned harness run).
 - **Descriptor / pipeline.** Split sets (UBOs vs textures) with
   last-bound tracking; coalesced multi-binding writes. Dynamic
   blend / depth bias / viewport / scissor / line width / blend
@@ -3660,12 +3700,28 @@ x86_64 host (Windows, Linux, Intel macOS).
   and the interleaved fps A/B half of the pin-bump gauntlet are all
   **deferred** to a quiet box — the host ran a load-70 ffmpeg batch
   throughout 2026-10-10, so no fps number from that session is citable.
+- **KosmicKrisp bundled beside MoltenVK on arm64 (2026-10-18).**
+  `build.sh`'s `resolve_kk` takes `XEMU_KK_PREFIX` (a dev build), else
+  the pinned CI asset `kosmickrisp-mesa-26.3.0-rc1-arm64.tar.xz`
+  (`kk_asset_sha256`), cached in `macos-libs/arm64` and checked on every
+  build, downloaded when missing or different; never a system copy.
+  `package_macos` copies the dylib into `Contents/Libraries/arm64` (never
+  x86_64), keeps its `@rpath` install name, signs it and logs
+  `Bundling KosmicKrisp from … (Mesa 26.3.0-rc1 (git-4706512989))`.
+  macOS CI asserts that line against the pins, the dylib's place, name,
+  arch and signature, its absence from x86_64 bundles, and the Universal
+  bundle's layout, per-dylib and `--deep --strict` signatures and
+  `LICENSE.txt`, which gains MoltenVK and Mesa (MIT, BSL-1.0, plus the
+  SPIRV-Tools it links). The arm64 zip grows 11.7 → 13.9 MiB.
 
 ### MoltenVK runtime config
 
 Set in `main()` before MoltenVK loads (launch-path independent;
 explicit env overrides win) and mirrored in `Info.plist`
-`LSEnvironment`. The two homes must stay in sync.
+`LSEnvironment`. The two homes must stay in sync. They are set whatever
+`display.vulkan.driver` says: the driver is chosen later, MoltenVK may
+load as a fallback in a process that tried KosmicKrisp, and KosmicKrisp
+ignores them.
 
 Driver-source review at the v1.4.2 pin (2026-08-04): the per-CB
 visibility primer stays (its target mechanism is verbatim in 1.4.2 —

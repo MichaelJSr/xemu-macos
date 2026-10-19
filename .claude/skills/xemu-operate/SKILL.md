@@ -38,7 +38,8 @@ are in `xemu-history`.
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
-  pads: `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. Every
+  pads, `XEMU_VK_DRIVER`: `AUTOMATION_ENV` in `xemu_lease.py`); set them
+  per run. Every
   launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu
@@ -88,7 +89,10 @@ windows), rebuild with `use` and commit `pgo/default.profdata`.
 `macos-libs/<arch>/opt/local/lib`, `/usr/local/lib` or `/opt/homebrew/lib`,
 and otherwise downloads `XEMU_MOLTENVK_VERSION` (1.4.2, which CI ships).
 This Mac uses `/usr/local/lib` from `scripts/build-moltenvk.sh` (1.4.3, no
-LTO). Look for `Bundling MoltenVK from …` in the log.
+LTO). Look for `Bundling MoltenVK from …` in the log. arm64 builds also
+bundle KosmicKrisp: the pinned release asset (`kk_asset_sha256`, cached
+in `macos-libs/arm64`), or `XEMU_KK_PREFIX=../kk/install-<tag>`; look for
+`Bundling KosmicKrisp from … (Mesa …)`.
 
 | Failure | Fix |
 |---|---|
@@ -219,7 +223,7 @@ the other arm does too).
 
 | Script | Use |
 |---|---|
-| `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, CPU and runnable seconds (runnable well above CPU: the run waited for a core), RAM hash per run. Also runs the goldens. Each start removes the `/tmp/xbd.*` run dirs (HDD clones) killed runs left |
+| `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, CPU and runnable seconds (runnable well above CPU: the run waited for a core), RAM hash per run. Also runs the goldens. `--renderer offscreen`: Vulkan on a portable clone with cold caches, the driver named per line (an arm without `XEMU_VK_DRIVER` must run MoltenVK). Arm values may hold commas (a comma splits only before `NAME=`). Each start removes the `/tmp/xbd.*` run dirs (HDD clones) killed runs left |
 | `bench-det.py --timeline [-n runs] [--renderer offscreen] NAME=APP …` | Cold boot to steady play under icount, per phase (kernel, logos, prophecy, title, save list, level load, steady): frames, host ms, vCPU/translate/APU/disk/other split; per-phase deltas across arms. Replays must report `same RAM`. `--block-log DIR` adds `XEMU_BLOCK_LOG` per run and checks its rows against each phase's blockstats |
 | `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | B `VAR=0` vs E `VAR=1` (`--e-value`); takes `--app`, `--isolate-caches`. Exit 3 = artifact |
 | `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V"]` | Cross-binary, multi-var or numeric baseline |
@@ -244,6 +248,25 @@ when null mode's vCPU ran squashed to legacy QoS) and use Minsns/frame
 XEMU_FOO 2 45` (~6 min), windowed wall fps. Go by the verdict, mean ± sd
 and sign tally, quote the load, and add pairs (3-6 × 75 s) when the delta
 is under ~2% or signs are mixed: there's no quiet box to wait for.
+
+**Vulkan driver** (macOS; `docs/kosmickrisp.md`): icount and offscreen
+runs pin MoltenVK; windowed runs follow `[display.vulkan] driver` (Auto:
+KosmicKrisp from the arm64 bundle's `Contents/Libraries/arm64`; another
+build into a clone: docs/kosmickrisp.md, Building). Headless KK needs
+`XEMU_VK_DRIVER=kosmickrisp` (bench-det arm
+`kk=APP:XEMU_VK_DRIVER=kosmickrisp` with `--renderer offscreen`; bench-det
+stops when a run's driver isn't the arm's); a windowed MoltenVK-vs-KK A/B
+sets it on both arms (`--b-env XEMU_VK_DRIVER=moltenvk --e-env
+XEMU_VK_DRIVER=kosmickrisp`). stderr's `xemu: Vulkan driver: <name>
+(<why>)` and `- Driver: <name>, <version> (id N)` say which ran; the
+windowed receipts list every driver an arm ran and refuse a mix. Each
+driver keeps its own pipeline cache (`pipeline_cache.bin`,
+`pipeline_cache-kosmickrisp.bin`), so no `--isolate-caches` for driver
+A/Bs; offscreen RAM hashes are per driver. A KK run killed in its first
+600 flips, or a strike test, leaves `kosmickrisp-strike.txt` in the base
+path, which moves every later Auto run of that build to MoltenVK: the
+launchers warn when the bench cache has one (remove it), and a strike
+test gets its own `XEMU_BASE_PATH`.
 
 **Goldens** (deterministic, `bench-det.py -n 1` on the final binary;
 see the README's deterministic mode): `-f 300` (azurik-heavy-f1)
@@ -306,6 +329,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
+| `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (headless KK runs); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |
@@ -324,6 +348,7 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 | `audio.dsp_jit.enabled` | true | The only switch for the fork's DSP JIT (both cores, GP and EP; AArch64 POSIX hosts). Off falls back to `use_dsp_jit` |
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
+| `display.vulkan.driver` | auto | macOS arm64: KosmicKrisp on macOS 26 (Metal 4, Metal presentation), else or on failure MoltenVK; icount and offscreen pin MoltenVK; restart to change |
 | `automation.ram_shm`, `.qmp`, `.enabled` | "", "", true | The player's tracker endpoints (as `XEMU_RAM_SHM`, `-qmp`); applied only to the pref dir's config with no `-config_path`, `XEMU_BASE_PATH` or marker (README) |
 
 Add a knob only for a normal-mode change the det goldens can't verify, a

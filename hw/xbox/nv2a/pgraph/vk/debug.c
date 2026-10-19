@@ -36,6 +36,7 @@ int nv2a_vk_dgroup_indent = 0;
 
 void pgraph_vk_fatal_error(void)
 {
+    pgraph_vk_driver_strike("Vulkan call failed");
     /*
      * Headless runs belong to a harness: a fixed line and status 1, no
      * crash report. A crash also makes macOS ask the next launch of any
