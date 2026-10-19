@@ -69,6 +69,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_PIPELINE_BIND] = "pipeline_bind",
     [NSPROF_EV_VK_DRAW_CALL] = "vk_draw_call",
     [NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE] = "da_multi_subrange",
+    [NSPROF_EV_VK_FAN_DRAW] = "vk_fan_draw",
     [NSPROF_EV_DRAW_MERGE_IDENTICAL] = "merge_identical",
     [NSPROF_EV_DRAW_MERGE_CANDIDATE] = "merge_candidate",
     [NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF] = "merge_cand_udiff",

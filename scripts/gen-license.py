@@ -61,6 +61,7 @@ class Lib:
         pkg_win=None,
         pkg_mac=None,
         pkg_ubuntu=None,
+        optional=False,
     ):
         self.name = name
         self.url = url
@@ -79,6 +80,7 @@ class Lib:
         self.pkg_win = pkg_win
         self.pkg_mac = pkg_mac
         self.pkg_ubuntu = pkg_ubuntu
+        self.optional = optional  # ships only where the version file lists pkg_mac
 
     @property
     def version(self):
@@ -127,6 +129,13 @@ class Lib:
 
     @property
     def license_text(self):
+        if os.path.isdir(self.license_path):
+            # A component's own notices, one file each, kept verbatim
+            parts = []
+            for n in sorted(os.listdir(self.license_path)):
+                with open(os.path.join(self.license_path, n), "r", encoding="utf-8") as f:
+                    parts.append(n + ":\n\n" + f.read().rstrip("\n"))
+            return ("\n\n" + "-" * 72 + "\n\n").join(parts)
         if os.path.exists(self.license_path):
             with open(self.license_path, "r", encoding="utf-8") as f:
                 return f.read()
@@ -136,7 +145,7 @@ class Lib:
         if self.license_lines:
             start, end = self.license_lines
             d = "\n".join(d.splitlines()[start - 1 : end + 1])
-        with open(fname, "w") as f:
+        with open(self.license_path, "w") as f:
             f.write(d)
         return d
 
@@ -154,6 +163,8 @@ class Lib:
 
     @property
     def does_ship(self):
+        if self.optional and self.pkg_mac not in versions:
+            return False
         return self.is_active and (self.does_ship_static or self.does_ship_dynamic)
 
 
@@ -370,6 +381,28 @@ LIBS = [
         pkg_mac="sdl3",
         pkg_ubuntu="libsdl3-dev",
         version="3.4.8",
+    ),
+    Lib(
+        "MoltenVK",
+        "https://github.com/KhronosGroup/MoltenVK",
+        apache2,
+        "https://raw.githubusercontent.com/KhronosGroup/MoltenVK/main/LICENSE",
+        ships_dynamic={macos},
+        platform={macos},
+        pkg_mac="MoltenVK",
+    ),
+    # arm64 bundles only; build.sh lists it in the version file when it
+    # bundles it. licenses/kosmickrisp is the pinned asset's
+    # share/kosmickrisp/LICENSES (resolve_kk checks it still is).
+    Lib(
+        "Mesa (KosmicKrisp)",
+        "https://mesa3d.org/",
+        multi,
+        license_path="licenses/kosmickrisp",
+        ships_dynamic={macos},
+        platform={macos},
+        pkg_mac="KosmicKrisp",
+        optional=True,
     ),
     Lib(
         "glib-2.0",

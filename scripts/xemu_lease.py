@@ -24,7 +24,9 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     ~/Library/Caches/xemu-fork-bench), never in the owner's pref dir;
   - never inherits AUTOMATION_ENV: the variables that name something
     another xemu or the harness may own (the owner's XEMU_RAM_SHM name,
-    a pipe, a record or log file) or that bind host pads. A launcher
+    a pipe, a record or log file), that bind host pads, or that pick the
+    Vulkan driver (an exported XEMU_VK_DRIVER would silently take every
+    deterministic and offscreen run off its MoltenVK pin). A launcher
     drops them from its own environment; a value it sets itself stays;
   - never starts while an owner demo runs: while /tmp/xemu-leases/
     owner-demo.json (or, under a moved lease dir, its owner-demo.json)
@@ -73,18 +75,20 @@ LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or DEFAULT_LEASE_DIR
 AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
-                  'XEMU_ICOUNT_LIVE_PADS')
+                  'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER')
 OWNER_DEMO = 'owner-demo.json'
 _dropped = set()
+_warned = set()
 
 
-def environ(env=None):
+def environ(env=None, keep=()):
     """env (default os.environ) for an automated xemu: without the
     AUTOMATION_ENV values it inherited from this process's environment.
-    A value the caller set itself (not the inherited one) stays."""
+    A value the caller set itself stays: a different one, or any key in
+    keep (the caller's own, even when it equals the inherited value)."""
     e = dict(os.environ if env is None else env)
     for k in AUTOMATION_ENV:
-        if k in os.environ and e.get(k) == os.environ[k]:
+        if k in os.environ and k not in keep and e.get(k) == os.environ[k]:
             del e[k]
             if k not in _dropped:
                 _dropped.add(k)
@@ -94,10 +98,20 @@ def environ(env=None):
 
 
 def bench_cache():
-    """The benches' own data base path (created on first use)."""
+    """The benches' own data base path (created on first use). Warns once
+    when it holds a KosmicKrisp strike marker (runs whose config says
+    driver = 'kosmickrisp' then use MoltenVK for that build;
+    docs/kosmickrisp.md)."""
     d = os.environ.get('XEMU_BENCH_CACHE') or os.path.expanduser(
         '~/Library/Caches/xemu-fork-bench')
     os.makedirs(d, exist_ok=True)
+    strike = os.path.join(d, 'kosmickrisp-strike.txt')
+    if strike not in _warned and os.path.exists(strike):
+        _warned.add(strike)
+        with contextlib.suppress(OSError):
+            build = open(strike, errors='replace').readline().strip()
+            print(f"lease: {strike} exists: runs with driver = 'kosmickrisp' use MoltenVK for {build}; "
+                  'remove it if a killed run left it', file=sys.stderr, flush=True)
     return d
 
 
@@ -286,12 +300,12 @@ def auto_cmd(cmd):
 
 
 @contextlib.contextmanager
-def popen(cmd, purpose, expected_secs, **kw):
+def popen(cmd, purpose, expected_secs, keep=(), **kw):
     """subprocess.Popen(auto_cmd(cmd), **kw) inside a slot and a lease,
-    with environ(kw's env). nice execs xemu, so proc.pid is xemu's pid,
-    and xemu inherits the slot's descriptor. On exit a still-running
+    with environ(kw's env, keep). nice execs xemu, so proc.pid is xemu's
+    pid, and xemu inherits the slot's descriptor. On exit a still-running
     xemu is killed, then the lease goes."""
-    kw['env'] = environ(kw.get('env'))
+    kw['env'] = environ(kw.get('env'), keep)
     slot = Slot()
     proc = None
     try:

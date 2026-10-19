@@ -83,13 +83,58 @@ vendor_moltenvk() {
 # KosmicKrisp pins: the Mesa tag, its commit, and the sha256 of the
 # kosmickrisp-<tag>[-<respin>]-arm64.tar.xz asset that
 # kosmickrisp-asset.yml publishes from them.
-# scripts/build-kosmickrisp.sh reads the tag, sha and respin.
-# Nothing bundles KosmicKrisp yet. Bump them together in one commit
-# (docs/RELEASING-macos.md).
+# scripts/build-kosmickrisp.sh reads the tag, sha and respin; arm64
+# builds bundle the asset (resolve_kk). Bump them together in one
+# commit (docs/RELEASING-macos.md).
 kk_mesa_tag=mesa-26.3.0-rc1
 kk_mesa_sha=470651298910062f5ad5c4e7fb480c60c6943bc9
 kk_respin=
-kk_asset_sha256=
+kk_asset_sha256=9f8a91d110e8bbef482238961ae7a70f636a1516293ce10a9f8c1c40dd5f75ce
+
+# The KosmicKrisp dylib an arm64 bundle ships beside MoltenVK, into
+# kk_dylib (kk_from: where it came from, for the provenance line):
+# $XEMU_KK_PREFIX/lib (a dev build, e.g. ../kk/install-<tag>), else the
+# pinned release asset, cached in macos-libs/arm64 and checked against
+# kk_asset_sha256 on every build, downloaded when missing or different.
+# Never a system copy.
+resolve_kk() {
+    if [ -n "${XEMU_KK_PREFIX}" ]; then
+        kk_dylib="${XEMU_KK_PREFIX}/lib/libvulkan_kosmickrisp.dylib"
+        kk_from="${kk_dylib}"
+        if [ ! -f "${kk_dylib}" ]; then
+            echo "Error: XEMU_KK_PREFIX has no lib/libvulkan_kosmickrisp.dylib" >&2
+            exit 1
+        fi
+        return 0
+    fi
+    local release="kosmickrisp-${kk_mesa_tag}${kk_respin:+-${kk_respin}}"
+    local dir="${PWD}/macos-libs/arm64"
+    kk_from="${dir}/${release}-arm64.tar.xz"
+    local sum
+    sum=$(shasum -a 256 "${kk_from}" 2>/dev/null | awk '{ print $1 }' || true)
+    if [ "${sum}" != "${kk_asset_sha256}" ]; then
+        echo "Downloading ${release}-arm64.tar.xz..."
+        curl -fsSL --retry 3 -o "${kk_from}.part" \
+            "https://github.com/MichaelJSr/xemu-macos/releases/download/${release}/${release}-arm64.tar.xz"
+        sum=$(shasum -a 256 "${kk_from}.part" | awk '{ print $1 }')
+        if [ "${sum}" != "${kk_asset_sha256}" ]; then
+            echo "Error: ${release}-arm64.tar.xz has sha256 ${sum}, not the pinned ${kk_asset_sha256}" >&2
+            rm -f "${kk_from}.part"
+            exit 1
+        fi
+        mv "${kk_from}.part" "${kk_from}"
+    fi
+    rm -rf "${dir}/${release}"
+    mkdir -p "${dir}/${release}"
+    tar -xJf "${kk_from}" -C "${dir}/${release}" lib/libvulkan_kosmickrisp.dylib \
+        share/kosmickrisp/LICENSES
+    kk_dylib="${dir}/${release}/lib/libvulkan_kosmickrisp.dylib"
+    # LICENSE.txt's Mesa section is licenses/kosmickrisp (gen-license.py)
+    if ! diff -r "${dir}/${release}/share/kosmickrisp/LICENSES" licenses/kosmickrisp >/dev/null; then
+        echo "Error: licenses/kosmickrisp differs from ${release}'s share/kosmickrisp/LICENSES; copy the asset's over" >&2
+        exit 1
+    fi
+}
 
 # --- PGO (clang and GCC) ---
 # Optional two-stage flow:
@@ -460,6 +505,20 @@ package_macos() {
       exit 1
     fi
 
+    # KosmicKrisp, arm64 only (resolve_kk). The asset's install name is
+    # @rpath already; a dev install's is absolute.
+    if [ "$target_arch" == "arm64" ]; then
+      kk_dst="${lib_path}/libvulkan_kosmickrisp.dylib"
+      kk_ver=$(strings "$kk_dylib" | \
+          awk '/^Mesa [0-9]/ && !v {v=$0} END {print (v ? v : "unknown")}')
+      echo "Bundling KosmicKrisp from ${kk_from} (${kk_ver})"
+      cp "$kk_dylib" "$kk_dst"
+      if [ "$(otool -D "$kk_dst" | tail -n 1)" != "@rpath/libvulkan_kosmickrisp.dylib" ]; then
+        install_name_tool -id "@rpath/libvulkan_kosmickrisp.dylib" "$kk_dst"
+      fi
+      codesign -s - -f "$kk_dst"
+    fi
+
     # Copy in runtime resources
     mkdir -p dist/xemu.app/Contents/Resources
 
@@ -514,7 +573,11 @@ package_macos() {
                --preserve-metadata=entitlements,requirements,flags,runtime \
                --sign - "${exe_path}"
     fi
-    python3 ./scripts/gen-license.py --version-file=macos-libs/$target_arch/INSTALLED > dist/LICENSE.txt
+    { cat "macos-libs/${target_arch}/INSTALLED"
+      echo "MoltenVK=${moltenvk_bundled_ver}"
+      [ "$target_arch" != "arm64" ] || echo "KosmicKrisp=${kk_ver#Mesa }"
+    } > build/license-versions.txt
+    python3 ./scripts/gen-license.py --version-file=build/license-versions.txt > dist/LICENSE.txt
 }
 
 package_linux() {
@@ -730,6 +793,10 @@ case "$platform" in # Adjust compilation options based on platform
            [ ! -f /opt/homebrew/include/vulkan/vulkan.h ] && \
            [ ! -f /usr/local/include/vulkan/vulkan.h ]; then
             vendor_moltenvk headers
+        fi
+        # Before the compile, so a bad pin or download fails fast.
+        if [ "$target_arch" == "arm64" ]; then
+            resolve_kk
         fi
         export CFLAGS="${CFLAGS} \
                        -arch ${target_arch} \

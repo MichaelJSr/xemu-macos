@@ -233,6 +233,18 @@ display:
     debug_shaders: bool
     assert_on_validation_msg: bool
     preferred_physical_device: string
+    # macOS on Apple silicon: the Vulkan driver. `auto` and `moltenvk`
+    # run MoltenVK; `kosmickrisp` opts in to Mesa KosmicKrisp on macOS 26
+    # and later (Metal presentation, Metal 4 GPU) and falls back to
+    # MoltenVK when it can't load or start, or after it failed in an
+    # earlier launch, until picked again in Settings; deterministic
+    # (-icount) and offscreen runs always use MoltenVK. Read once at
+    # launch (changing it requires a restart); a fallback never rewrites
+    # it.
+    driver:
+      type: enum
+      values: [auto, kosmickrisp, moltenvk]
+      default: auto
   metalfx_mode:
     type: enum
     values: ["off", spatial, temporal]

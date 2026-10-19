@@ -364,8 +364,10 @@ done
 
 # ---- receipt ---------------------------------------------------------------
 # The Vulkan driver the runs used, as the renderer logs it beside
-# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)").
-VK_DRIVER=$(grep -h '^- Driver: ' $OUT/ab_*.log(N) 2>/dev/null | head -1 | cut -c11-)
+# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)"); every
+# distinct one, joined with " + " (the receipt refuses an arm that ran two).
+VK_DRIVER=$(grep -h '^- Driver: ' $OUT/ab_*.log(N) 2>/dev/null | cut -c11- | sort -u |
+            awk 'NR > 1 { printf " + " } { printf "%s", $0 }')
 META=$OUT/meta.json
 python3 - "$META" <<EOF
 import json, os, platform, subprocess, sys

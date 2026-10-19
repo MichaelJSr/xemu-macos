@@ -67,20 +67,52 @@ typedef struct RenderPass {
     VkRenderPass render_pass;
 } RenderPass;
 
+/*
+ * The rasterizer, depth-stencil and colour-blend state a draw pipeline is
+ * built from, derived from BLEND, CONTROL_0-2 and SETUPRASTER by
+ * pgraph_vk_get_raster_state (draw.c). A field its enable turns off stays
+ * zero, as does depth write without depth test (the spec disables it
+ * then), so register bits no pipeline reads don't split the key. Each
+ * value is a Vulkan enum, flag or 8-bit stencil value; init checks that
+ * the enum maps fit (check_raster_state_maps in draw.c).
+ */
+typedef struct RasterState {
+    uint8_t cull_mode;              /* VkCullModeFlags */
+    uint8_t front_face;             /* VkFrontFace, always: gl_FrontFacing */
+    uint8_t depth_bias_enable;
+    uint8_t depth_test_enable;
+    uint8_t depth_write_enable;
+    uint8_t depth_compare_op;       /* VkCompareOp */
+    uint8_t stencil_test_enable;
+    uint8_t stencil_fail_op;        /* VkStencilOp, front and back */
+    uint8_t stencil_pass_op;
+    uint8_t stencil_depth_fail_op;
+    uint8_t stencil_compare_op;     /* VkCompareOp */
+    uint8_t stencil_compare_mask;
+    uint8_t stencil_write_mask;
+    uint8_t stencil_reference;
+    uint8_t color_write_mask;       /* VkColorComponentFlags, always */
+    uint8_t blend_enable;
+    uint8_t blend_src_factor;       /* VkBlendFactor, colour and alpha */
+    uint8_t blend_dst_factor;
+    uint8_t blend_op;               /* VkBlendOp, colour and alpha */
+    uint8_t reserved;               /* zero */
+} RasterState;
+
 typedef struct PipelineKey {
     bool clear;
+    uint32_t clear_parameter; /* clear keys only */
     RenderPassState render_pass_state;
     ShaderState shader_state;
     /*
-     * 5 pipeline-affecting regs (CONTROL_0/1/2, BLEND, SETUPRASTER).
-     * NV_PGRAPH_CONTROL_3 was previously included but its bits
+     * Draw keys only. NV_PGRAPH_CONTROL_3 feeds none of it: its bits
      * (SHADEMODE, FOG_MODE, FOGENABLE, POINTPARAMSENABLE,
-     * PROVOKING_VERTEX) are already captured by ShaderState or
-     * consumed CPU-side — see init_pipeline_key / check_pipeline_dirty
-     * in draw.c and pgraph_glsl_check_shader_state_dirty in
-     * glsl/shaders.c.
+     * PROVOKING_VERTEX) are captured by ShaderState or consumed CPU-side
+     * (check_pipeline_dirty in draw.c, pgraph_glsl_check_shader_state_dirty
+     * in glsl/shaders.c). create_pipeline hashes it with the bytes after
+     * shader_state, whose own hash it caches.
      */
-    uint32_t regs[5];
+    RasterState raster;
     VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
 } PipelineKey;
@@ -92,9 +124,30 @@ typedef struct PipelineBinding {
     VkPipeline pipeline;
     VkRenderPass render_pass;
     unsigned int draw_time;
-    bool has_dynamic_line_width;
-    bool has_dynamic_depth_bias;
 } PipelineBinding;
+
+/* The dynamic states of r->frame_dynamic_states, one DynShadow bit each */
+enum {
+    DYN_VIEWPORT = 1 << 0,
+    DYN_SCISSOR = 1 << 1,
+    DYN_BLEND_CONSTANTS = 1 << 2,
+    DYN_DEPTH_BIAS = 1 << 3,
+    DYN_LINE_WIDTH = 1 << 4,
+};
+
+/*
+ * What r->command_buffer holds of the frame pipelines' dynamic state:
+ * a value counts only while its DYN_* bit is in valid.
+ */
+typedef struct DynShadow {
+    uint32_t valid;
+    VkViewport viewport;
+    VkRect2D scissor;
+    float blend_constants[4];
+    float depth_bias_constant;
+    float depth_bias_slope;
+    float line_width;
+} DynShadow;
 
 enum Buffer {
     BUFFER_STAGING_DST,
@@ -544,6 +597,14 @@ typedef struct PGRAPHVkDisplayState {
      * directly by MetalFX and the UI present pass.
      */
     void *mtl_texture;
+    /*
+     * Copy-present mode (metal_copy_present): the compositor image is
+     * copied into this buffer, whose dedicated memory is exported as an
+     * MTLHeap; mtl_texture is then a linear texture over that heap.
+     */
+    VkBuffer copy_buffer;
+    VkDeviceMemory copy_memory;
+    uint32_t copy_row_texels;
 
 
 #if HAVE_IOSURFACE_SHARING
@@ -629,15 +690,33 @@ typedef struct PGRAPHVkState {
     bool memory_budget_extension_enabled;
 #if HAVE_IOSURFACE_SHARING
     bool metal_objects_extension_enabled;
+    /*
+     * No VK_EXT_metal_objects but VK_EXT_external_memory_metal (stock
+     * Mesa KosmicKrisp): the compositor output reaches Metal through a
+     * per-frame copy into an MTLHeap-exported buffer (display.c), and
+     * a forwarder thread turns each compositor timeline value into an
+     * xemu-owned MTLSharedEvent signal (present_forward below).
+     */
+    bool metal_copy_present;
+    void *get_memory_metal_handle_fn; /* PFN_vkGetMemoryMetalHandleEXT */
 #endif
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     bool supports_geometry_shaders;
     bool supports_geom_point_size;
+    /*
+     * Triangle fans (and filled polygons) go out as CPU-built triangle
+     * lists through the emulated-index path instead of TRIANGLE_FAN.
+     */
+    bool emulate_triangle_fans;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
     VkPhysicalDeviceProperties device_props;
+    VkDriverId driver_id; /* 0 when the device predates Vulkan 1.2 */
+    bool driver_is_moltenvk;
+    /* "<driverName>, <driverInfo>": "MoltenVK, 1.4.3" (the - Driver: line) */
+    char driver_desc[VK_MAX_DRIVER_NAME_SIZE + VK_MAX_DRIVER_INFO_SIZE + 2];
     VkDevice device;
     VmaAllocator allocator;
     uint32_t allocator_last_submit_index;
@@ -766,6 +845,17 @@ typedef struct PGRAPHVkState {
     VkSemaphore present_timeline;
     uint64_t present_timeline_value;
     void *present_timeline_event; /* id<MTLSharedEvent>, retained */
+    /*
+     * Copy-present (no VK_EXT_metal_objects): present_timeline is a plain
+     * timeline and present_timeline_event an xemu-owned MTLSharedEvent a
+     * helper thread signals once vkWaitSemaphores sees each value.
+     */
+    bool present_forward;
+    QemuThread present_forward_thread;
+    QemuMutex present_forward_lock;
+    QemuCond present_forward_cond;
+    uint64_t present_forward_target;
+    bool present_forward_quit;
 
     /*
      * Direct MTLTexture export of the compositor image (Metal
@@ -834,19 +924,23 @@ typedef struct PGRAPHVkState {
     QemuThread pipeline_cache_save_thread;
 
     /*
-     * Per-command-buffer dynamic-state cache. Vulkan dynamic state is
-     * scoped to the command buffer, so these are reset in
-     * pgraph_vk_begin_command_buffer. Skipping a redundant vkCmdSet*
-     * saves a few host instructions per draw; at ~20-50k draws/frame
-     * this aggregates visibly.
+     * The dynamic states every frame pipeline (create_pipeline,
+     * create_clear_pipeline) declares, fixed at init: a bind never
+     * replaces a value the command buffer holds, so r->dyn stays exact
+     * across binds. frame_dynamic_mask has their DYN_* bits.
      */
-    bool dynstate_cache_valid;
-    VkViewport cached_viewport;
-    VkRect2D cached_scissor;
-    float cached_blend_constants[4];
-    float cached_depth_bias_constant;
-    float cached_depth_bias_slope;
-    float cached_line_width;
+    VkDynamicState frame_dynamic_states[5];
+    uint32_t num_frame_dynamic_states;
+    uint32_t frame_dynamic_mask;
+
+    /*
+     * Shadow of r->command_buffer's dynamic state (draw.c dyn_set_*),
+     * reset only in pgraph_vk_begin_command_buffer: dynamic state is
+     * command-buffer scoped, and survives render passes, clears and
+     * other pipeline binds within it. Skipping a redundant set saves a
+     * few host instructions per draw.
+     */
+    DynShadow dyn;
 
     /*
      * Cache of pg->surface_binding_dim.{width,height} scaled by
@@ -1087,6 +1181,14 @@ typedef struct PGRAPHVkState {
     uint32_t expire_updates;
 } PGRAPHVkState;
 
+#if HAVE_IOSURFACE_SHARING
+/* The compositor output can be handed to Metal (texture export or copy). */
+static inline bool pgraph_vk_metal_present_interop(PGRAPHVkState *r)
+{
+    return r->metal_objects_extension_enabled || r->metal_copy_present;
+}
+#endif
+
 // renderer.c
 void pgraph_vk_check_memory_budget(PGRAPHState *pg);
 
@@ -1108,6 +1210,17 @@ void pgraph_vk_end_debug_marker(PGRAPHVkState *r, VkCommandBuffer cmd);
 // instance.c
 void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp);
 void pgraph_vk_finalize_instance(PGRAPHState *pg);
+/*
+ * A fatal error on KosmicKrisp the settings chose, or in the start window
+ * after a KosmicKrisp attempt: later launches use MoltenVK until the build
+ * changes or KosmicKrisp is picked again in Settings (instance.c). Any
+ * thread.
+ */
+void pgraph_vk_driver_strike(const char *reason);
+/* Every guest flip (PFIFO thread): closes the start window after a while. */
+void pgraph_vk_driver_flip(void);
+/* Renderer teardown: closes the start window. */
+void pgraph_vk_driver_stopped(void);
 QueueFamilyIndices pgraph_vk_find_queue_families(VkPhysicalDevice device);
 uint32_t pgraph_vk_get_memory_type(PGRAPHState *pg, uint32_t type_bits,
                                    VkMemoryPropertyFlags properties);
@@ -1187,6 +1300,8 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 // surface.c
 void pgraph_vk_init_surfaces(PGRAPHState *pg);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
+/* Every surface and texture format works on the device (driver acceptance). */
+bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp);
 /* XEMU_MFX_REAL_DEPTH: 0 = synthetic (default), 2 = flip-time zeta
  * snapshot. Cached env parse; safe on all platforms. */
 int pgraph_vk_mfx_real_depth_mode(void);
@@ -1241,6 +1356,8 @@ void pgraph_vk_init_display(PGRAPHState *pg);
 void pgraph_vk_finalize_display(PGRAPHState *pg);
 void pgraph_vk_render_display(PGRAPHState *pg);
 #if HAVE_IOSURFACE_SHARING
+/* A small copy-present target works (driver acceptance; device only). */
+bool pgraph_vk_copy_present_probe(PGRAPHState *pg, Error **errp);
 /* Push-model present; Metal backend only. */
 bool pgraph_vk_push_present_enabled(NV2AState *d);
 void pgraph_vk_present_schedule_publish(PGRAPHState *pg);

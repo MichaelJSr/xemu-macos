@@ -18,6 +18,7 @@
 #include "ui/xemu-present.h"
 #include "ui/xemu-metal.h"
 
+#import <objc/runtime.h>
 #import <os/lock.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -375,6 +376,80 @@ void metalfx_texture_dims(void *texture, int *w, int *h)
     id<MTLTexture> t = (id<MTLTexture>)texture;
     if (w) *w = t ? (int)t.width : 0;
     if (h) *h = t ? (int)t.height : 0;
+}
+
+bool metalfx_device_is_metal4(void)
+{
+    @autoreleasepool {
+        /* Mesa KosmicKrisp's own device filter (mtl_device.m). The
+         * protocol and family raw values need no SDK 26: a binary linked
+         * against an older SDK still asks a macOS 26 system. */
+        if (!objc_getProtocol("MTL4CommandQueue")) {
+            return false;
+        }
+        id<MTLDevice> device = (id<MTLDevice>)xemu_metal_get_device();
+        bool own = !device;
+        if (own) {
+            device = MTLCreateSystemDefaultDevice();
+        }
+        bool ok = device && [device supportsFamily:(MTLGPUFamily)5002];
+        if (own) {
+            [device release];
+        }
+        return ok;
+    }
+}
+
+void *metalfx_new_shared_event(void)
+{
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        id<MTLSharedEvent> event = [device newSharedEvent];
+        [device release];
+        return event; /* +1 */
+    }
+}
+
+void metalfx_shared_event_signal(void *event, uint64_t value)
+{
+    ((id<MTLSharedEvent>)event).signaledValue = value;
+}
+
+uint32_t metalfx_heap_linear_alignment(void *heap)
+{
+    return (uint32_t)[((id<MTLHeap>)heap).device
+        minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+}
+
+void *metalfx_heap_linear_texture(void *heap_ptr, uint32_t width,
+                                  uint32_t height, uint32_t row_bytes)
+{
+    @autoreleasepool {
+        id<MTLHeap> heap = (id<MTLHeap>)heap_ptr;
+        if (!heap || heap.type != MTLHeapTypePlacement) {
+            return NULL;
+        }
+        /* Aliases the driver's own view of the same placement heap. */
+        id<MTLBuffer> buf =
+            [heap newBufferWithLength:(NSUInteger)row_bytes * height
+                              options:heap.resourceOptions
+                               offset:0];
+        if (!buf) {
+            return NULL;
+        }
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:width
+                                        height:height
+                                     mipmapped:NO];
+        desc.resourceOptions = buf.resourceOptions;
+        desc.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> tex = [buf newTextureWithDescriptor:desc
+                                                    offset:0
+                                               bytesPerRow:row_bytes];
+        [buf release]; /* the texture keeps its buffer alive */
+        return tex; /* +1 */
+    }
 }
 
 

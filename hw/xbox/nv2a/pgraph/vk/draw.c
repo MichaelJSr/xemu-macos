@@ -52,6 +52,14 @@ void pgraph_vk_draw_begin(NV2AState *d)
     }
 }
 
+/* A guest triangle fan or filled polygon: one fan of triangles. */
+static bool is_fan_draw(int primitive_mode, int polygon_mode)
+{
+    return primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+           (primitive_mode == PRIM_TYPE_POLYGON &&
+            polygon_mode == POLY_MODE_FILL);
+}
+
 static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -82,6 +90,10 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
         default:
             break;
         }
+    }
+
+    if (r->emulate_triangle_fans && is_fan_draw(primitive_mode, polygon_mode)) {
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
 
     // FIXME: Replace with LUT
@@ -119,13 +131,21 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
     }
 }
 
+/* nsprof: one per Vulkan draw of a guest triangle fan or filled polygon
+ * (native TRIANGLE_FAN, or its CPU triangle list). */
+static void count_fan_draw(PGRAPHState *pg)
+{
+    if (nsprof_enabled() &&
+        is_fan_draw(pg->primitive_mode,
+                    GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
+                             NV_PGRAPH_SETUPRASTER_FRONTFACEMODE))) {
+        nsprof_event(NSPROF_EV_VK_FAN_DRAW);
+    }
+}
+
 static bool draw_needs_primitive_emulation(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-
-    if (r->supports_geometry_shaders) {
-        return false;
-    }
 
     // Read primitive and polygon modes directly from hardware registers instead
     // of relying on r->shader_binding. This prevents stale shader state from
@@ -134,6 +154,14 @@ static bool draw_needs_primitive_emulation(PGRAPHState *pg)
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
+
+    if (r->emulate_triangle_fans && is_fan_draw(primitive_mode, polygon_mode)) {
+        return true;
+    }
+
+    if (r->supports_geometry_shaders) {
+        return false;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -193,8 +221,16 @@ static size_t get_max_emulated_index_count(PGRAPHState *pg, uint32_t in_count)
         result = in_count;
         break;
     case PRIM_TYPE_POLYGON:
-        result =
-            (polygon_mode == POLY_MODE_LINE && in_count > 1) ? in_count * 2 : 0;
+        if (polygon_mode == POLY_MODE_FILL) {
+            result = in_count >= 3 ? (in_count - 2) * 3 : 0;
+        } else {
+            result = (polygon_mode == POLY_MODE_LINE && in_count > 1) ?
+                         in_count * 2 :
+                         0;
+        }
+        break;
+    case PRIM_TYPE_TRIANGLE_FAN:
+        result = in_count >= 3 ? (in_count - 2) * 3 : 0;
         break;
     default:
         result = 0;
@@ -241,6 +277,15 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (is_fan_draw(primitive_mode, polygon_mode)) {
+        /* Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order:
+         * same winding, same provoking vertex. */
+        for (uint32_t i = 0; i + 2 < count; i++) {
+            EMIT3(start + i + 1, start + i + 2, start);
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -312,6 +357,7 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
@@ -346,6 +392,26 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (is_fan_draw(primitive_mode, polygon_mode)) {
+        /*
+         * Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order. The
+         * native path enabled primitive restart for fans, so a
+         * 0xFFFFFFFF index starts a new fan here too.
+         */
+        uint32_t first = 0;
+        while (first < in_count) {
+            uint32_t end = first;
+            while (end < in_count && in[end] != 0xFFFFFFFF) {
+                end++;
+            }
+            for (uint32_t i = first; i + 2 < end; i++) {
+                EMIT3(in[i + 1], in[i + 2], in[first]);
+            }
+            first = end + 1;
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -414,6 +480,7 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
@@ -427,8 +494,6 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
     snode->draw_time = 0;
-    snode->has_dynamic_line_width = false;
-    snode->has_dynamic_depth_bias = false;
 }
 
 static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -454,20 +519,30 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
     return memcmp(&snode->key, key, sizeof(PipelineKey));
 }
 
-static char *get_pipeline_cache_path(void)
+/*
+ * One file per driver: each rejects the other's blob (its header carries
+ * the driver's pipelineCacheUUID), so a shared file would go cold at every
+ * switch or fallback. MoltenVK keeps the name it always had.
+ */
+static char *get_pipeline_cache_path(PGRAPHVkState *r)
 {
     const char *base = xemu_settings_get_base_path();
+#ifdef __APPLE__
+    if (r->driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP) {
+        return g_strdup_printf("%spipeline_cache-kosmickrisp.bin", base);
+    }
+#endif
     return g_strdup_printf("%spipeline_cache.bin", base);
 }
 
-static void load_pipeline_cache_from_disk(void **data, size_t *size)
+static void load_pipeline_cache_from_disk(PGRAPHVkState *r, void **data,
+                                          size_t *size)
 {
     *data = NULL;
     *size = 0;
 
-    char *path = get_pipeline_cache_path();
+    g_autofree char *path = get_pipeline_cache_path(r);
     FILE *f = qemu_fopen(path, "rb");
-    g_free(path);
     if (!f) {
         return;
     }
@@ -480,6 +555,8 @@ static void load_pipeline_cache_from_disk(void **data, size_t *size)
         *data = g_malloc(file_size);
         if (fread(*data, 1, file_size, f) == file_size) {
             *size = file_size;
+            fprintf(stderr, "Loaded pipeline cache (%zu bytes) from %s\n",
+                    *size, path);
         } else {
             g_free(*data);
             *data = NULL;
@@ -488,9 +565,10 @@ static void load_pipeline_cache_from_disk(void **data, size_t *size)
     fclose(f);
 }
 
-static void save_pipeline_cache_to_disk(VkDevice device,
-                                        VkPipelineCache cache)
+static void save_pipeline_cache_to_disk(PGRAPHVkState *r)
 {
+    VkDevice device = r->device;
+    VkPipelineCache cache = r->vk_pipeline_cache;
     int64_t t0 = g_get_monotonic_time();
     size_t size = 0;
     VkResult result = vkGetPipelineCacheData(device, cache, &size, NULL);
@@ -501,7 +579,7 @@ static void save_pipeline_cache_to_disk(VkDevice device,
     void *data = g_malloc(size);
     result = vkGetPipelineCacheData(device, cache, &size, data);
     if (result == VK_SUCCESS) {
-        char *path = get_pipeline_cache_path();
+        char *path = get_pipeline_cache_path(r);
         /* Write-then-rename so a kill mid-write can't leave a torn
          * cache file for the next boot to ingest. The temp name carries
          * the pid so instances sharing one cache (the benches run up to
@@ -543,7 +621,7 @@ static void *pipeline_cache_save_thread(void *opaque)
 {
     PGRAPHVkState *r = opaque;
 
-    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    save_pipeline_cache_to_disk(r);
     qatomic_store_release(&r->pipeline_cache_save_busy, false);
     return NULL;
 }
@@ -681,12 +759,13 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
 
 /*
  * A kill between the temp write and the rename in
- * save_pipeline_cache_to_disk leaves a pipeline_cache.bin.<pid>.tmp that
+ * save_pipeline_cache_to_disk leaves a pipeline_cache*.bin.<pid>.tmp that
  * no later run reads or overwrites (the pid differs), so sweep them once
- * at init, before this process writes its own; the glob also takes the
- * fixed pipeline_cache.bin.tmp of older builds. Only files untouched for
- * a minute go: a sibling sharing the folder writes its temp file in well
- * under a second, and a younger orphan is swept by a later launch.
+ * at init, before this process writes its own, whichever driver wrote
+ * them; the glob also takes the fixed pipeline_cache.bin.tmp of older
+ * builds. Only files untouched for a minute go: a sibling sharing the
+ * folder writes its temp file in well under a second, and a younger
+ * orphan is swept by a later launch.
  */
 static void sweep_stale_pipeline_cache_temp_files(void)
 {
@@ -699,8 +778,8 @@ static void sweep_stale_pipeline_cache_temp_files(void)
     gint64 now = g_get_real_time() / G_USEC_PER_SEC;
     const char *name;
     while ((name = g_dir_read_name(d)) != NULL) {
-        if (!g_str_has_prefix(name, "pipeline_cache.bin.") ||
-            !g_str_has_suffix(name, ".tmp")) {
+        if (!g_str_has_prefix(name, "pipeline_cache") ||
+            !strstr(name, ".bin.") || !g_str_has_suffix(name, ".tmp")) {
             continue;
         }
         char *path = g_build_filename(base, name, NULL);
@@ -721,12 +800,7 @@ static void init_pipeline_cache(PGRAPHState *pg)
 
     void *cache_data = NULL;
     size_t cache_size = 0;
-    load_pipeline_cache_from_disk(&cache_data, &cache_size);
-
-    if (cache_data) {
-        fprintf(stderr, "Loaded pipeline cache (%zu bytes) from disk\n",
-                cache_size);
-    }
+    load_pipeline_cache_from_disk(r, &cache_data, &cache_size);
 
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
@@ -767,7 +841,7 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
 
     pipeline_cache_save_join(r);
     if (r->pipeline_cache_unsaved) {
-        save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+        save_pipeline_cache_to_disk(r);
     }
 
     lru_flush(&r->pipeline_cache);
@@ -835,8 +909,64 @@ static void finalize_render_passes(PGRAPHVkState *r)
     r->render_passes = NULL;
 }
 
+/*
+ * The dynamic states of every frame pipeline, draw and clear alike. A
+ * pipeline that left one of them static would replace the command
+ * buffer's value at bind (Mesa drivers apply that; MoltenVK keeps the two
+ * apart), and r->dyn would skip the set that restores it. Line width is
+ * dynamic only with wideLines: without it the width is always 1.0.
+ */
+static void init_frame_dynamic_states(PGRAPHVkState *r)
+{
+    static const struct {
+        VkDynamicState state;
+        uint32_t bit;
+    } states[] = {
+        { VK_DYNAMIC_STATE_VIEWPORT, DYN_VIEWPORT },
+        { VK_DYNAMIC_STATE_SCISSOR, DYN_SCISSOR },
+        { VK_DYNAMIC_STATE_BLEND_CONSTANTS, DYN_BLEND_CONSTANTS },
+        { VK_DYNAMIC_STATE_DEPTH_BIAS, DYN_DEPTH_BIAS },
+        { VK_DYNAMIC_STATE_LINE_WIDTH, DYN_LINE_WIDTH },
+    };
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(states) > ARRAY_SIZE(r->frame_dynamic_states));
+
+    r->num_frame_dynamic_states = 0;
+    r->frame_dynamic_mask = 0;
+    for (int i = 0; i < ARRAY_SIZE(states); i++) {
+        if (states[i].bit == DYN_LINE_WIDTH &&
+            !r->enabled_physical_device_features.wideLines) {
+            continue;
+        }
+        r->frame_dynamic_states[r->num_frame_dynamic_states++] =
+            states[i].state;
+        r->frame_dynamic_mask |= states[i].bit;
+    }
+}
+
+/*
+ * RasterState keeps these maps' values in uint8_t, and create_pipeline
+ * builds from the key: an entry past 255 (an extension enum) would build
+ * wrong pipelines, so it aborts here instead.
+ */
+static void check_raster_state_maps(void)
+{
+#define CHECK_U8_MAP(map)                                \
+    for (int i = 0; i < ARRAY_SIZE(map); i++) {          \
+        assert((uint64_t)(map)[i] <= UINT8_MAX);         \
+    }
+    CHECK_U8_MAP(pgraph_cull_face_vk_map);
+    CHECK_U8_MAP(pgraph_depth_func_vk_map);
+    CHECK_U8_MAP(pgraph_stencil_func_vk_map);
+    CHECK_U8_MAP(pgraph_stencil_op_vk_map);
+    CHECK_U8_MAP(pgraph_blend_factor_vk_map);
+    CHECK_U8_MAP(pgraph_blend_equation_vk_map);
+#undef CHECK_U8_MAP
+}
+
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
+    check_raster_state_maps();
+    init_frame_dynamic_states(pg->vk_renderer_state);
     init_pipeline_cache(pg);
     init_clear_shaders(pg);
     init_render_passes(pg->vk_renderer_state);
@@ -1030,7 +1160,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
     key.clear = true;
     init_render_pass_state(pg, &key.render_pass_state);
 
-    key.regs[0] = r->clear_parameter;
+    key.clear_parameter = r->clear_parameter;
 
     uint64_t hash = fast_hash((void *)&key, sizeof(key));
     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
@@ -1160,13 +1290,10 @@ static void create_clear_pipeline(PGRAPHState *pg)
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
     };
 
-    VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                        VK_DYNAMIC_STATE_SCISSOR,
-                                        VK_DYNAMIC_STATE_BLEND_CONSTANTS };
     VkPipelineDynamicStateCreateInfo dynamic_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = partial_color_clear ? 3 : 2,
-        .pDynamicStates = dynamic_states,
+        .dynamicStateCount = r->num_frame_dynamic_states,
+        .pDynamicStates = r->frame_dynamic_states,
     };
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
@@ -1211,8 +1338,6 @@ static void create_clear_pipeline(PGRAPHState *pg)
     snode->layout = layout;
     snode->render_pass = pipeline_info.renderPass;
     snode->draw_time = pg->draw_time;
-    snode->has_dynamic_line_width = false;
-    snode->has_dynamic_depth_bias = false;
 
     r->pipeline_binding = snode;
     r->pipeline_binding_changed = true;
@@ -1235,18 +1360,23 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     /*
      * texture_bindings_changed is deliberately NOT included here.
      * PipelineKey (renderer.h) contains no texture identity —
-     * render_pass_state, shader_state, the 5 raster / blend regs,
-     * and the vertex binding / attribute descriptions. Rebinding
-     * a different VkImage / VkSampler only affects descriptor set
-     * 1, which is rewritten independently by
+     * render_pass_state, shader_state, the raster state derived from
+     * the 5 raster / blend regs, and the vertex binding / attribute
+     * descriptions. Rebinding a different VkImage / VkSampler only
+     * affects descriptor set 1, which is rewritten independently by
      * pgraph_vk_update_descriptor_sets (keyed off
      * texture_bindings_changed). If a texture change were to
      * require a pipeline rebuild (e.g. shader key depending on
      * bound sampler format), shader_bindings_changed fires and
      * that branch catches it.
+     *
+     * A bound clear pipeline (create_clear_pipeline) is always dirty: the
+     * checks below compare against the previous draw, not against the
+     * bound key, so a draw after a clear that changed none of them would
+     * otherwise run on the clear pipeline and its empty layout.
      */
-    if (!r->pipeline_binding || r->shader_bindings_changed ||
-        check_render_pass_dirty(pg)) {
+    if (!r->pipeline_binding || r->pipeline_binding->key.clear ||
+        r->shader_bindings_changed || check_render_pass_dirty(pg)) {
         return true;
     }
 
@@ -1258,6 +1388,10 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
      * is consumed CPU-side (draw.c:145,293,398). Dropping it from
      * the fast-dirty check avoids spurious pipeline rehash +
      * cache lookups on every fog/shade-mode toggle.
+     *
+     * The key holds only what pgraph_vk_get_raster_state derives from
+     * these registers, so a write that leaves it unchanged costs a
+     * keyed lookup that finds the bound pipeline, and no rebind.
      */
     const unsigned int regs[] = {
         NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
@@ -1279,6 +1413,99 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     return false;
 }
 
+/*
+ * The draw pipeline's raster state from BLEND, CONTROL_0-2 and SETUPRASTER
+ * (RasterState in renderer.h), which create_pipeline builds its create
+ * info from: every field its enable turns off stays zero.
+ */
+static void pgraph_vk_get_raster_state(PGRAPHState *pg, RasterState *rs)
+{
+    memset(rs, 0, sizeof(*rs));
+
+    uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+    rs->front_face = (setupraster & NV_PGRAPH_SETUPRASTER_FRONTFACE) ?
+                         VK_FRONT_FACE_COUNTER_CLOCKWISE :
+                         VK_FRONT_FACE_CLOCKWISE;
+    if (setupraster & NV_PGRAPH_SETUPRASTER_CULLENABLE) {
+        uint32_t cull_face =
+            GET_MASK(setupraster, NV_PGRAPH_SETUPRASTER_CULLCTRL);
+        nv2a_vk_bounds_check(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
+        rs->cull_mode = pgraph_cull_face_vk_map[cull_face];
+    }
+    uint32_t polygon_mode =
+        GET_MASK(setupraster, NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    rs->depth_bias_enable =
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_FILL &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_LINE &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_POINT &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE));
+
+    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    if (control_0 & NV_PGRAPH_CONTROL_0_ZENABLE) {
+        rs->depth_test_enable = VK_TRUE;
+        /* Without the test the spec disables depth writes anyway */
+        rs->depth_write_enable =
+            !!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE);
+        uint32_t depth_func = GET_MASK(control_0, NV_PGRAPH_CONTROL_0_ZFUNC);
+        nv2a_vk_bounds_check(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
+        rs->depth_compare_op = pgraph_depth_func_vk_map[depth_func];
+    }
+
+    uint32_t control_1 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1);
+    if (control_1 & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE) {
+        uint32_t control_2 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2);
+        uint32_t stencil_func =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_FUNC);
+        uint32_t op_fail = GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL);
+        uint32_t op_zfail =
+            GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL);
+        uint32_t op_zpass =
+            GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
+        nv2a_vk_bounds_check(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
+        nv2a_vk_bounds_check(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+
+        rs->stencil_test_enable = VK_TRUE;
+        rs->stencil_fail_op = pgraph_stencil_op_vk_map[op_fail];
+        rs->stencil_pass_op = pgraph_stencil_op_vk_map[op_zpass];
+        rs->stencil_depth_fail_op = pgraph_stencil_op_vk_map[op_zfail];
+        rs->stencil_compare_op = pgraph_stencil_func_vk_map[stencil_func];
+        rs->stencil_compare_mask =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_READ);
+        rs->stencil_write_mask =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE);
+        rs->stencil_reference =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_REF);
+    }
+
+    if (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_R_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_G_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_B_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_A_BIT;
+
+    uint32_t blend = pgraph_reg_r(pg, NV_PGRAPH_BLEND);
+    if (blend & NV_PGRAPH_BLEND_EN) {
+        uint32_t sfactor = GET_MASK(blend, NV_PGRAPH_BLEND_SFACTOR);
+        uint32_t dfactor = GET_MASK(blend, NV_PGRAPH_BLEND_DFACTOR);
+        uint32_t equation = GET_MASK(blend, NV_PGRAPH_BLEND_EQN);
+        nv2a_vk_bounds_check(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
+
+        rs->blend_enable = VK_TRUE;
+        rs->blend_src_factor = pgraph_blend_factor_vk_map[sfactor];
+        rs->blend_dst_factor = pgraph_blend_factor_vk_map[dfactor];
+        rs->blend_op = pgraph_blend_equation_vk_map[equation];
+    }
+}
+
 static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1293,17 +1520,8 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
            sizeof(key->attribute_descriptions[0]) *
                r->num_active_vertex_attribute_descriptions);
 
-    // FIXME: Register masking
     // FIXME: Use more dynamic state updates
-    /* CONTROL_3 intentionally omitted — see PipelineKey in renderer.h. */
-    const int regs[] = {
-        NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
-        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_SETUPRASTER,
-    };
-    nv2a_vk_assert(ARRAY_SIZE(regs) == ARRAY_SIZE(key->regs));
-    for (int i = 0; i < ARRAY_SIZE(regs); i++) {
-        key->regs[i] = pgraph_reg_r(pg, regs[i]);
-    }
+    pgraph_vk_get_raster_state(pg, &key->raster);
 }
 
 static void create_pipeline(PGRAPHState *pg)
@@ -1375,11 +1593,8 @@ static void create_pipeline(PGRAPHState *pg)
 
     memcpy(&snode->key, &key, sizeof(key));
 
-    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
-    bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
-    bool depth_write = !!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE);
-    bool stencil_test =
-        pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+    /* Raster, depth-stencil and blend state come from the key only */
+    const RasterState *rs = &key.raster;
 
     int num_active_shader_stages = 0;
     VkPipelineShaderStageCreateInfo shader_stages[3];
@@ -1454,38 +1669,14 @@ static void create_pipeline(PGRAPHState *pg)
         .polygonMode = pgraph_polygon_mode_vk_map[r->shader_binding->state.geom
                                                       .polygon_front_mode],
         .lineWidth = 1.0f,
-        .frontFace = (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-                      NV_PGRAPH_SETUPRASTER_FRONTFACE) ?
-                         VK_FRONT_FACE_COUNTER_CLOCKWISE :
-                         VK_FRONT_FACE_CLOCKWISE,
-        .depthBiasEnable = VK_FALSE,
+        .cullMode = rs->cull_mode,
+        .frontFace = rs->front_face,
+        .depthBiasEnable = rs->depth_bias_enable,
         .pNext = rasterizer_next_struct,
     };
     if (!r->enabled_physical_device_features.fillModeNonSolid &&
         rasterizer.polygonMode != VK_POLYGON_MODE_FILL) {
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    }
-
-    uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
-    uint32_t polygon_mode = GET_MASK(setupraster,
-                                     NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
-    if ((polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_FILL &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE)) ||
-        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_LINE &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE)) ||
-        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_POINT &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE))) {
-        rasterizer.depthBiasEnable = VK_TRUE;
-    }
-
-    if (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-        NV_PGRAPH_SETUPRASTER_CULLENABLE) {
-        uint32_t cull_face = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
-                                      NV_PGRAPH_SETUPRASTER_CULLCTRL);
-        nv2a_vk_bounds_check(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
-        rasterizer.cullMode = pgraph_cull_face_vk_map[cull_face];
-    } else {
-        rasterizer.cullMode = VK_CULL_MODE_NONE;
     }
 
     VkPipelineMultisampleStateCreateInfo multisampling = {
@@ -1494,93 +1685,35 @@ static void create_pipeline(PGRAPHState *pg)
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
+    VkStencilOpState stencil = {
+        .failOp = rs->stencil_fail_op,
+        .passOp = rs->stencil_pass_op,
+        .depthFailOp = rs->stencil_depth_fail_op,
+        .compareOp = rs->stencil_compare_op,
+        .compareMask = rs->stencil_compare_mask,
+        .writeMask = rs->stencil_write_mask,
+        .reference = rs->stencil_reference,
+    };
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE,
+        .depthTestEnable = rs->depth_test_enable,
+        .depthWriteEnable = rs->depth_write_enable,
+        .depthCompareOp = rs->depth_compare_op,
+        .stencilTestEnable = rs->stencil_test_enable,
+        .front = stencil,
+        .back = stencil,
     };
-
-    if (depth_test) {
-        depth_stencil.depthTestEnable = VK_TRUE;
-        uint32_t depth_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
-                                       NV_PGRAPH_CONTROL_0_ZFUNC);
-        nv2a_vk_bounds_check(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
-        depth_stencil.depthCompareOp = pgraph_depth_func_vk_map[depth_func];
-    }
-
-    if (stencil_test) {
-        depth_stencil.stencilTestEnable = VK_TRUE;
-        uint32_t stencil_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                         NV_PGRAPH_CONTROL_1_STENCIL_FUNC);
-        uint32_t stencil_ref = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                        NV_PGRAPH_CONTROL_1_STENCIL_REF);
-        uint32_t mask_read = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                      NV_PGRAPH_CONTROL_1_STENCIL_MASK_READ);
-        uint32_t mask_write = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                       NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE);
-        uint32_t op_fail = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                    NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL);
-        uint32_t op_zfail = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                     NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL);
-        uint32_t op_zpass = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                     NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
-
-        nv2a_vk_bounds_check(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
-        nv2a_vk_bounds_check(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_bounds_check(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_bounds_check(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-
-        depth_stencil.front.failOp = pgraph_stencil_op_vk_map[op_fail];
-        depth_stencil.front.passOp = pgraph_stencil_op_vk_map[op_zpass];
-        depth_stencil.front.depthFailOp = pgraph_stencil_op_vk_map[op_zfail];
-        depth_stencil.front.compareOp =
-            pgraph_stencil_func_vk_map[stencil_func];
-        depth_stencil.front.compareMask = mask_read;
-        depth_stencil.front.writeMask = mask_write;
-        depth_stencil.front.reference = stencil_ref;
-        depth_stencil.back = depth_stencil.front;
-    }
-
-    VkColorComponentFlags write_mask = 0;
-    if (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_R_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_G_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_B_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_A_BIT;
 
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
-        .colorWriteMask = write_mask,
+        .blendEnable = rs->blend_enable,
+        .srcColorBlendFactor = rs->blend_src_factor,
+        .dstColorBlendFactor = rs->blend_dst_factor,
+        .colorBlendOp = rs->blend_op,
+        .srcAlphaBlendFactor = rs->blend_src_factor,
+        .dstAlphaBlendFactor = rs->blend_dst_factor,
+        .alphaBlendOp = rs->blend_op,
+        .colorWriteMask = rs->color_write_mask,
     };
-
-    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
-        color_blend_attachment.blendEnable = VK_TRUE;
-
-        uint32_t sfactor =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_SFACTOR);
-        uint32_t dfactor =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_DFACTOR);
-        nv2a_vk_bounds_check(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
-        nv2a_vk_bounds_check(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
-        color_blend_attachment.srcColorBlendFactor =
-            pgraph_blend_factor_vk_map[sfactor];
-        color_blend_attachment.dstColorBlendFactor =
-            pgraph_blend_factor_vk_map[dfactor];
-        color_blend_attachment.srcAlphaBlendFactor =
-            pgraph_blend_factor_vk_map[sfactor];
-        color_blend_attachment.dstAlphaBlendFactor =
-            pgraph_blend_factor_vk_map[dfactor];
-
-        uint32_t equation =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_EQN);
-        nv2a_vk_bounds_check(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
-
-        color_blend_attachment.colorBlendOp =
-            pgraph_blend_equation_vk_map[equation];
-        color_blend_attachment.alphaBlendOp =
-            pgraph_blend_equation_vk_map[equation];
-    }
 
     VkPipelineColorBlendStateCreateInfo color_blending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -1590,30 +1723,10 @@ static void create_pipeline(PGRAPHState *pg)
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
     };
 
-    VkDynamicState dynamic_states[5] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                         VK_DYNAMIC_STATE_SCISSOR,
-                                         VK_DYNAMIC_STATE_BLEND_CONSTANTS };
-    int num_dynamic_states = 3;
-
-    snode->has_dynamic_depth_bias = rasterizer.depthBiasEnable == VK_TRUE;
-    if (snode->has_dynamic_depth_bias) {
-        dynamic_states[num_dynamic_states++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
-    }
-
-    snode->has_dynamic_line_width =
-        (r->enabled_physical_device_features.wideLines == VK_TRUE) &&
-        (r->shader_binding->state.geom.polygon_front_mode == POLY_MODE_LINE ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINES ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINE_LOOP ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINE_STRIP);
-    if (snode->has_dynamic_line_width) {
-        dynamic_states[num_dynamic_states++] = VK_DYNAMIC_STATE_LINE_WIDTH;
-    }
-
     VkPipelineDynamicStateCreateInfo dynamic_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = num_dynamic_states,
-        .pDynamicStates = dynamic_states,
+        .dynamicStateCount = r->num_frame_dynamic_states,
+        .pDynamicStates = r->frame_dynamic_states,
     };
 
     VkDescriptorSetLayout set_layouts[2] = {
@@ -2304,8 +2417,9 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
      * a frame whose FIRST pass contains the first zpass draw got
      * an encoder with a nil visibility buffer and crashed in AGX
      * setVisibilityResultMode (user-reported, real gameplay).
+     * MoltenVK only: other drivers have no such flag.
      */
-    {
+    if (r->driver_is_moltenvk) {
         int primer_index =
             pgraph_vk_slot_query_base(r, r->current_flight) +
             r->num_queries_in_flight;
@@ -2317,30 +2431,12 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     }
 
     /*
-     * Vulkan dynamic state is command-buffer-scoped. Invalidate the
-     * dynstate cache so the first draw re-issues vkCmdSet*.
-     * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
+     * Dynamic state, vertex and index buffer binds and push constants
+     * are command-buffer scoped: a new command buffer holds none of them.
+     * This is the only place r->dyn resets, so the first draw sets every
+     * frame dynamic state (begin_draw).
      */
-    r->dynstate_cache_valid = false;
-    /*
-     * Viewport/scissor are re-issued on the first draw of every CB via the
-     * dynstate_cache_valid=false gate above. Line width, depth bias and
-     * blend constants are conditional (line width only on pipelines with
-     * that dynamic state; depth bias/blend only on non-clear draws), so the
-     * shared valid flag can be set true by a draw that didn't emit them,
-     * letting a later draw skip vkCmdSet* against a value cached in a
-     * PREVIOUS command buffer — reusing undefined CB-scoped dynamic state
-     * (black/z-fighting/wrong blend on native drivers; MoltenVK retains
-     * state across CBs and hides it). Poison the conditional caches so the
-     * first draw that actually evaluates each one is forced to re-issue.
-     */
-    r->cached_line_width = NAN;
-    r->cached_depth_bias_constant = NAN;
-    r->cached_depth_bias_slope = NAN;
-    r->cached_blend_constants[0] = NAN;
-    r->cached_blend_constants[1] = NAN;
-    r->cached_blend_constants[2] = NAN;
-    r->cached_blend_constants[3] = NAN;
+    r->dyn.valid = 0;
     r->last_vertex_bind_valid = false;
     r->last_index_bind_valid = false;
     r->last_push_constants_valid = false;
@@ -2464,6 +2560,93 @@ static float clamp_line_width_to_device_limits(PGRAPHState *pg, float width)
     return fminf(fmaxf(min_width, width), max_width);
 }
 
+/*
+ * The only setters of r->command_buffer's dynamic state. Each skips a
+ * value the command buffer already holds (r->dyn), so a value set any
+ * other way would leave the shadow stale.
+ */
+static void dyn_set_viewport(PGRAPHVkState *r, const VkViewport *viewport)
+{
+    if ((r->dyn.valid & DYN_VIEWPORT) &&
+        !memcmp(viewport, &r->dyn.viewport, sizeof(*viewport))) {
+        return;
+    }
+    vkCmdSetViewport(r->command_buffer, 0, 1, viewport);
+    r->dyn.viewport = *viewport;
+    r->dyn.valid |= DYN_VIEWPORT;
+}
+
+static void dyn_set_scissor(PGRAPHVkState *r, const VkRect2D *scissor)
+{
+    if ((r->dyn.valid & DYN_SCISSOR) &&
+        !memcmp(scissor, &r->dyn.scissor, sizeof(*scissor))) {
+        return;
+    }
+    vkCmdSetScissor(r->command_buffer, 0, 1, scissor);
+    r->dyn.scissor = *scissor;
+    r->dyn.valid |= DYN_SCISSOR;
+}
+
+static void dyn_set_blend_constants(PGRAPHVkState *r, const float constants[4])
+{
+    if ((r->dyn.valid & DYN_BLEND_CONSTANTS) &&
+        !memcmp(constants, r->dyn.blend_constants,
+                sizeof(r->dyn.blend_constants))) {
+        return;
+    }
+    vkCmdSetBlendConstants(r->command_buffer, constants);
+    memcpy(r->dyn.blend_constants, constants, sizeof(r->dyn.blend_constants));
+    r->dyn.valid |= DYN_BLEND_CONSTANTS;
+}
+
+static void dyn_set_depth_bias(PGRAPHVkState *r, float constant, float slope)
+{
+    if ((r->dyn.valid & DYN_DEPTH_BIAS) &&
+        !memcmp(&constant, &r->dyn.depth_bias_constant, sizeof(constant)) &&
+        !memcmp(&slope, &r->dyn.depth_bias_slope, sizeof(slope))) {
+        return;
+    }
+    vkCmdSetDepthBias(r->command_buffer, constant, 0.0f, slope);
+    r->dyn.depth_bias_constant = constant;
+    r->dyn.depth_bias_slope = slope;
+    r->dyn.valid |= DYN_DEPTH_BIAS;
+}
+
+static void dyn_set_line_width(PGRAPHVkState *r, float width)
+{
+    if ((r->dyn.valid & DYN_LINE_WIDTH) &&
+        !memcmp(&width, &r->dyn.line_width, sizeof(width))) {
+        return;
+    }
+    vkCmdSetLineWidth(r->command_buffer, width);
+    r->dyn.line_width = width;
+    r->dyn.valid |= DYN_LINE_WIDTH;
+}
+
+/*
+ * A guest draw's depth bias factors and blend constants, from the
+ * registers. The bias goes in whether or not the pipeline enables it:
+ * a disabled bias ignores the factors.
+ */
+static void dyn_set_guest_draw_state(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
+    uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
+    float depth_bias_constant, depth_bias_slope;
+    memcpy(&depth_bias_constant, &zbias_reg, sizeof(depth_bias_constant));
+    memcpy(&depth_bias_slope, &zfactor_reg, sizeof(depth_bias_slope));
+    dyn_set_depth_bias(r, depth_bias_constant, depth_bias_slope);
+
+    float blend_constants[4] = { 0, 0, 0, 0 };
+    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
+        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
+        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
+    }
+    dyn_set_blend_constants(r, blend_constants);
+}
+
 static void begin_draw(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -2526,11 +2709,7 @@ static void begin_draw(PGRAPHState *pg)
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
-        if (!r->dynstate_cache_valid ||
-            memcmp(&viewport, &r->cached_viewport, sizeof(viewport)) != 0) {
-            vkCmdSetViewport(r->command_buffer, 0, 1, &viewport);
-            r->cached_viewport = viewport;
-        }
+        dyn_set_viewport(r, &viewport);
 
         /* Surface clip */
         /* FIXME: Consider moving to PSH w/ window clip */
@@ -2552,64 +2731,28 @@ static void begin_draw(PGRAPHState *pg)
             .extent.width = scissor_width,
             .extent.height = scissor_height,
         };
-        if (!r->dynstate_cache_valid ||
-            memcmp(&scissor, &r->cached_scissor, sizeof(scissor)) != 0) {
-            vkCmdSetScissor(r->command_buffer, 0, 1, &scissor);
-            r->cached_scissor = scissor;
-        }
+        dyn_set_scissor(r, &scissor);
 
-        if (r->pipeline_binding->has_dynamic_line_width) {
-            float line_width =
-                clamp_line_width_to_device_limits(pg, pg->surface_scale_factor);
-            if (!r->dynstate_cache_valid ||
-                line_width != r->cached_line_width) {
-                vkCmdSetLineWidth(r->command_buffer, line_width);
-                r->cached_line_width = line_width;
-            }
+        if (r->frame_dynamic_mask & DYN_LINE_WIDTH) {
+            dyn_set_line_width(r, clamp_line_width_to_device_limits(
+                                      pg, pg->surface_scale_factor));
         }
     }
 
     if (!pg->clearing) {
-        if (r->pipeline_binding->has_dynamic_depth_bias) {
-            uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
-            uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
-            float depth_bias_constant = *(float *)&zbias_reg;
-            float depth_bias_slope = *(float *)&zfactor_reg;
-            if (!r->dynstate_cache_valid ||
-                depth_bias_constant != r->cached_depth_bias_constant ||
-                depth_bias_slope != r->cached_depth_bias_slope) {
-                vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
-                                  depth_bias_slope);
-                r->cached_depth_bias_constant = depth_bias_constant;
-                r->cached_depth_bias_slope = depth_bias_slope;
-            }
-        }
-
-        float blend_constants[4] = { 0, 0, 0, 0 };
-        if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
-            uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
-            pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
-        }
-        if (!r->dynstate_cache_valid ||
-            memcmp(blend_constants, r->cached_blend_constants,
-                   sizeof(blend_constants)) != 0) {
-            vkCmdSetBlendConstants(r->command_buffer, blend_constants);
-            memcpy(r->cached_blend_constants, blend_constants,
-                   sizeof(blend_constants));
-        }
-
+        dyn_set_guest_draw_state(pg);
         bind_descriptor_sets(pg);
         push_vertex_attr_values(pg);
+    } else if (r->dyn.valid != r->frame_dynamic_mask) {
+        /*
+         * A clear opened this command buffer. Set the rest now: a partial
+         * clear draws, and older validation layers want every dynamic
+         * state the pipeline declares set before a draw, whatever the
+         * enables.
+         */
+        dyn_set_guest_draw_state(pg);
     }
-
-    /*
-     * Once any branch above has committed state for this CB, the
-     * cache is valid for the rest of the CB regardless of which
-     * dynamic fields were touched — the un-touched fields still hold
-     * their last-cached values because Vulkan preserves dynamic
-     * state across draws within a single command buffer.
-     */
-    r->dynstate_cache_valid = true;
+    nv2a_vk_assert(r->dyn.valid == r->frame_dynamic_mask);
 
     r->in_draw = true;
 }
@@ -2856,28 +2999,12 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
                 pg, attachments[num_attachments].clearValue.color.float32);
             num_attachments++;
         } else {
+            /* Through r->dyn, so the next draw restores both */
             float blend_constants[4];
             pgraph_get_clear_color(pg, blend_constants);
-            vkCmdSetScissor(r->command_buffer, 0, 1, &clear_rect.rect);
-            vkCmdSetBlendConstants(r->command_buffer, blend_constants);
+            dyn_set_scissor(r, &clear_rect.rect);
+            dyn_set_blend_constants(r, blend_constants);
             vkCmdDraw(r->command_buffer, 3, 1, 0, 0);
-
-            /*
-             * The partial-channel clear bypasses begin_draw's dynstate
-             * path, so scissor / blend constants were pushed directly
-             * to the CB without updating the cached values. Mirror the
-             * GPU state in the cache so any subsequent draw in the
-             * same CB that hits begin_draw's !must_bind_pipeline path
-             * won't skip re-setting these and inherit the clear's
-             * overrides. Cleanest way is to update the cache (so the
-             * next matching draw can still skip) rather than blindly
-             * invalidate.
-             */
-            if (r->dynstate_cache_valid) {
-                r->cached_scissor = clear_rect.rect;
-                memcpy(r->cached_blend_constants, blend_constants,
-                       sizeof(r->cached_blend_constants));
-            }
         }
     }
 
@@ -3296,6 +3423,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   buffer_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
                                  -(int32_t)min_start, 0);
             }
@@ -3308,6 +3436,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                          count = pg->draw_arrays_count[i];
                 NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDraw(r->command_buffer, count, 1, start - min_start, 0);
             }
         }
@@ -3374,6 +3503,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                               r->storage_buffers[BUFFER_INDEX].buffer,
                               buffer_offset, VK_INDEX_TYPE_UINT32);
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
                              -(int32_t)min_element, 0);
         }
@@ -3433,10 +3563,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
         }
         end_draw(pg);
@@ -3502,11 +3634,13 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, actual_index_count, 1, 0, 0,
                                  0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
         }
         end_draw(pg);
