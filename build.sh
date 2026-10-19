@@ -601,46 +601,20 @@ else
         # forced here, the arm64 release link failed exactly that
         # way. The LTO-independent knobs are kept.
         opts="$opts -Dqom_cast_debug=false -Dtrace_backends=nop"
-        # Experiment, opt-in only (XEMU_WIN_O3=1): raise the NATIVE
-        # MSYS2/MinGW release to the same -O3 + disabled stack
-        # protector pair the Darwin/Linux arm uses. Both Windows arms
-        # otherwise stay at meson's project default (-O2) with the
-        # probed stack protector, which is what every CI Windows leg
-        # and every previous native build shipped.
-        #
-        # This stays opt-in because the 2026-09-08 wave-1 review names
-        # exactly this flip as the differential behind the
-        # intermittent exit-139 on the Windows box: it is the only
-        # change that reaches every translation unit of both renderers
-        # with every runtime hatch unset, and no CI leg builds this
-        # configuration. Settle it on the box with a full reconfigure
-        # (not rebuild-quick.sh, which keeps the old configure flags)
-        # and >=6 runs per arm before considering a default change.
-        #
-        # -Dstack_protector=disabled is NOT cosmetic here, contrary to
-        # what this comment said when the flip was first written:
-        # meson.build's probe is a real compile+link of a test program
-        # with -fstack-protector-strong, and mingw-w64 supplies the SSP
-        # runtime, so a stock MSYS2 MINGW64 toolchain passes it and
-        # gets -fstack-protector-strong on every object. Disabling the
-        # option therefore strips the canary from the whole tree,
-        # removing the guard that turns a stack overrun into a
-        # controlled abort. (Confirm per-toolchain with
-        # `grep -c fstack-protector build/compile_commands.json`.)
-        #
-        # The cross arm is excluded deliberately: it builds the
-        # release artifacts and the elision noted above is
-        # optimization-sensitive.
-        if [ "${XEMU_WIN_O3:-0}" = "1" ]; then
-            case "$platform" in
-            win64-cross)
-                echo "Windows: XEMU_WIN_O3 ignored on the win64-cross arm (release-artifact leg stays at the default optimization)"
-                ;;
-            *)
-                opts="$opts -Doptimization=3 -Dstack_protector=disabled"
-                echo "Windows: experimental -O3 build with the stack protector disabled (XEMU_WIN_O3=1; not covered by CI)"
-                ;;
-            esac
+        # x86_64 builds take the Darwin/Linux -O3 and no stack
+        # protector, native and cross. The 2026-09 "6-10 s after
+        # launch" crash once blamed on this flip was SDL's
+        # WIN_OpenClipboard race (subprojects/packagefiles); the plan's
+        # 7.3 protocol was clean on both -O2 and -O3 (6 launches each,
+        # 2026-10-18). arm64 (llvm-mingw, untested on hardware here)
+        # stays at -O2.
+        case "$platform" in
+        win64-cross) win_arch="${CROSSPREFIX%%-*}" ;;
+        # MSYS2's own runtime is x86_64 even in a CLANGARM64 shell
+        *) win_arch="${MSYSTEM_CARCH:-$(uname -m)}" ;;
+        esac
+        if [ "$win_arch" = "x86_64" ]; then
+            opts="$opts -Doptimization=3 -Dstack_protector=disabled"
         fi
         ;;
     *)
@@ -867,6 +841,11 @@ case "$platform" in # Adjust compilation options based on platform
         # CONFIG_PREFIX against CONFIG_BINDIR, so behaviour is unchanged.
         if ! echo "$@" | grep -q -- '--prefix' && command -v cygpath >/dev/null 2>&1; then
           opts="$opts --prefix=$(cygpath -m /qemu)"
+        fi
+        # Static SDL3 from the wrap, as in CI: it carries the fork's SDL
+        # patches (subprojects/packagefiles), which MSYS2's SDL3.dll lacks.
+        if ! echo "$@" | grep -q 'force_fallback_for'; then
+          opts="$opts -Dforce_fallback_for=sdl3"
         fi
         # PGO: same two-stage flow as Darwin/Linux. This arm does not
         # set CC, so the family is whatever "cc" resolves to in the

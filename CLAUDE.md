@@ -4,6 +4,8 @@ The fork's main branch is `master`; commit straight to it.
 `AGENTS.md` applies only to pull requests aimed at upstream
 xemu-project/xemu.
 
+On the `windows` branch (the Windows test machine): commit to `windows` only. Never commit to, merge into or push `master`, and never tag. `docs/windows-test-plan.md` maps the macOS rules below to Windows.
+
 ## Keep the loop fast
 
 - Build with `ninja -C build qemu-system-i386`. Use `./build.sh` only for

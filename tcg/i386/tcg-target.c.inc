@@ -2759,6 +2759,107 @@ static inline void tcg_out_fstp_xmm(TCGContext *s, TCGArg a0, bool dp)
     tcg_out_unstash_xmm(s, a0);
 }
 
+/*
+ * xemu: x87_* (tcg-opc.h), the instructions the x86_64 __hard helpers run,
+ * under the guest's control word (xemu_sync_host_x87_cw). The x87 stack is
+ * empty between ops. A memory operand goes through (%rsp), the start of the
+ * outgoing-argument area, which nothing holds outside a call.
+ */
+static void tcg_out_x87_scratch(TCGContext *s, TCGReg val, int type)
+{
+    tcg_out_st(s, type >= TCG_X87_M64F ? TCG_TYPE_I64 : TCG_TYPE_I32, val,
+               TCG_REG_ESP, 0);
+}
+
+/* fop m32fp, m32int, m64fp (D8, DA, DC /op) on (%rsp) */
+static void tcg_out_x87_mem_op(TCGContext *s, int op, int type)
+{
+    static const uint8_t opc[3] = { 0xd8, 0xda, 0xdc };
+
+    tcg_debug_assert(type < TCG_X87_M64I);
+    tcg_out_modrm_offset(s, opc[type], op, TCG_REG_ESP, 0);
+}
+
+/* fnstsw %ax; and $0x4500, %eax: C3|C2|C0 */
+static void tcg_out_x87_cc(TCGContext *s, TCGReg ret)
+{
+    tcg_debug_assert(ret == TCG_REG_EAX);
+    tcg_out8(s, 0xdf);
+    tcg_out8(s, 0xe0);
+    tgen_arithi(s, ARITH_AND, ret, 0x4500, 0);
+}
+
+static void tcg_out_x87_op(TCGContext *s, TCGOpcode opc,
+                           const TCGArg args[TCG_MAX_OP_ARGS])
+{
+    /* flds, fildl, fldl (/0), fildll (/5) */
+    static const uint8_t ld_opc[4] = { 0xd9, 0xdb, 0xdd, 0xdf };
+    static const uint8_t ld_ext[4] = { 0, 0, 0, 5 };
+    /* fstps, fistpl, fstpl (/3), fistpll (/7), fistps (/3) */
+    static const uint8_t st_opc[5] = { 0xd9, 0xdb, 0xdd, 0xdf, 0xdf };
+    static const uint8_t st_ext[5] = { 3, 3, 3, 7, 3 };
+    int op;
+
+    switch (opc) {
+    case INDEX_op_x87_arith:
+        /* fldt a; fldt b; f<op>p %st, %st(1); fstpt a */
+        op = args[4];
+        tcg_out_fld(s, args[0], args[2]);
+        tcg_out_fld(s, args[1], args[3]);
+        tcg_out8(s, 0xde);
+        tcg_out8(s, 0xc1 + ((op >= 4 ? op ^ 1 : op) << 3));
+        tcg_out_fstp(s, args[0], args[2]);
+        break;
+    case INDEX_op_x87_arith_m:
+        tcg_out_x87_scratch(s, args[1], args[3] >> 3);
+        tcg_out_fld(s, args[0], args[2]);
+        tcg_out_x87_mem_op(s, args[3] & 7, args[3] >> 3);
+        tcg_out_fstp(s, args[0], args[2]);
+        break;
+    case INDEX_op_x87_unary:
+        /* fldt a; frndint or fsqrt; fstpt a */
+        tcg_out_fld(s, args[0], args[1]);
+        tcg_out8(s, 0xd9);
+        tcg_out8(s, args[2] == TCG_X87_FSQRT ? 0xfa : 0xfc);
+        tcg_out_fstp(s, args[0], args[1]);
+        break;
+    case INDEX_op_x87_ld:
+        tcg_out_x87_scratch(s, args[1], args[3]);
+        tcg_out_modrm_offset(s, ld_opc[args[3]], ld_ext[args[3]],
+                             TCG_REG_ESP, 0);
+        tcg_out_fstp(s, args[0], args[2]);
+        break;
+    case INDEX_op_x87_st:
+        tcg_out_fld(s, args[1], args[2]);
+        tcg_out_modrm_offset(s, st_opc[args[3]], st_ext[args[3]],
+                             TCG_REG_ESP, 0);
+        if (args[3] == TCG_X87_M16I) {
+            tcg_out_modrm_offset(s, OPC_MOVSWL, args[0], TCG_REG_ESP, 0);
+        } else {
+            tcg_out_ld(s, args[3] >= TCG_X87_M64F ? TCG_TYPE_I64
+                       : TCG_TYPE_I32, args[0], TCG_REG_ESP, 0);
+        }
+        break;
+    case INDEX_op_x87_cmp:
+        /* fldt b; fldt a; fucompp */
+        tcg_out_fld(s, args[2], args[4]);
+        tcg_out_fld(s, args[1], args[3]);
+        tcg_out8(s, 0xda);
+        tcg_out8(s, 0xe9);
+        tcg_out_x87_cc(s, args[0]);
+        break;
+    case INDEX_op_x87_cmp_m:
+        /* fldt a; fcomp m */
+        tcg_out_x87_scratch(s, args[2], args[4]);
+        tcg_out_fld(s, args[1], args[3]);
+        tcg_out_x87_mem_op(s, 3, args[4]);
+        tcg_out_x87_cc(s, args[0]);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static inline void tcg_out_fsin(TCGContext *s)
 {
     tcg_out8(s, 0xd9);
@@ -3098,6 +3199,15 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     a2 = args[2];
 
     switch (opc) {
+    case INDEX_op_x87_arith:
+    case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_unary:
+    case INDEX_op_x87_ld:
+    case INDEX_op_x87_st:
+    case INDEX_op_x87_cmp:
+    case INDEX_op_x87_cmp_m:
+        tcg_out_x87_op(s, opc, args);
+        break;
     /* FIXME: Exceptions */
     case INDEX_op_flcr:
         tcg_out_st(s, TCG_TYPE_I32, a0, TCG_REG_ESP, -8);
@@ -4436,6 +4546,17 @@ static TCGConstraintSetIndex
 tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
 {
     switch (op) {
+    case INDEX_op_x87_arith:
+    case INDEX_op_x87_arith_m:
+    case INDEX_op_x87_ld:
+        return C_O0_I2(r, r);
+    case INDEX_op_x87_unary:
+        return C_O0_I1(r);
+    case INDEX_op_x87_st:
+        return C_O1_I1(r, r);
+    case INDEX_op_x87_cmp:
+    case INDEX_op_x87_cmp_m:
+        return C_O1_I2(a, r, r);
     case INDEX_op_ld80f_f32:
     case INDEX_op_ld80f_f64:
         return C_O1_I1(x, L);

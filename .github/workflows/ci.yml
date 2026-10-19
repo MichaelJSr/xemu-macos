@@ -25,7 +25,10 @@ jobs:
   roswell:
     name: Roswell tests
     needs: build
-    uses: xemu-project/xemu-test/.github/workflows/test-roswell.yml@wheel-202610142116
+    # Pinned by commit (tag wheel-202610182103): upstream rotates its wheel-* tags and deletes
+    # the old ones, and a deleted ref fails every run at startup. The workflow checks out
+    # xemu_test_repository at xemu_test_ref and never its own tag.
+    uses: xemu-project/xemu-test/.github/workflows/test-roswell.yml@113add3d76dfe703944df97a804d1a1751aba234
     with:
       xemu_build_configuration: release
       # Test sources from the fork's branch: macos_roswell.json also expects the arm64 hard FPU's TestFloat failures.

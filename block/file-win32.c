@@ -496,6 +496,73 @@ static BlockAIOCB *raw_aio_pwritev(BlockDriverState *bs,
     }
 }
 
+#ifdef XBOX
+/*
+ * xemu: reads and writes as coroutines, so thread_pool_submit_co() can run
+ * them inline on the vCPU in deterministic mode (thread_pool_set_inline),
+ * as file-posix does: a worker only added two thread wakeups and the
+ * completion's notifications to each request the IDE settle waits for.
+ */
+typedef struct RawWin32Co {
+    Coroutine *co;
+    int ret;
+} RawWin32Co;
+
+static void raw_co_aio_cb(void *opaque, int ret)
+{
+    RawWin32Co *c = opaque;
+
+    c->ret = ret;
+    aio_co_wake(c->co);
+}
+
+static int coroutine_fn raw_co_prw(BlockDriverState *bs, int64_t offset,
+                                   int64_t bytes, QEMUIOVector *qiov, int type)
+{
+    BDRVRawState *s = bs->opaque;
+    RawWin32AIOData *acb;
+
+    if (s->aio) {
+        RawWin32Co c = { .co = qemu_coroutine_self(), .ret = -EINPROGRESS };
+
+        if (!win32_aio_submit(bs, s->aio, s->hfile, offset, bytes, qiov,
+                              raw_co_aio_cb, &c, type)) {
+            return -EIO;
+        }
+        qemu_coroutine_yield();
+        return c.ret;
+    }
+
+    assert(qiov->size == bytes);
+    acb = g_new(RawWin32AIOData, 1);
+    *acb = (RawWin32AIOData) {
+        .bs = bs,
+        .hfile = s->hfile,
+        .aio_iov = qiov->iov,
+        .aio_niov = qiov->niov,
+        .aio_nbytes = bytes,
+        .aio_offset = offset,
+        .aio_type = type,
+    };
+    trace_file_paio_submit(acb, NULL, offset, bytes, type);
+    return thread_pool_submit_co(aio_worker, acb); /* aio_worker frees acb */
+}
+
+static int coroutine_fn raw_co_preadv(BlockDriverState *bs, int64_t offset,
+                                      int64_t bytes, QEMUIOVector *qiov,
+                                      BdrvRequestFlags flags)
+{
+    return raw_co_prw(bs, offset, bytes, qiov, QEMU_AIO_READ);
+}
+
+static int coroutine_fn raw_co_pwritev(BlockDriverState *bs, int64_t offset,
+                                       int64_t bytes, QEMUIOVector *qiov,
+                                       BdrvRequestFlags flags)
+{
+    return raw_co_prw(bs, offset, bytes, qiov, QEMU_AIO_WRITE);
+}
+#endif
+
 static BlockAIOCB *raw_aio_flush(BlockDriverState *bs,
                          BlockCompletionFunc *cb, void *opaque)
 {
@@ -792,6 +859,10 @@ BlockDriver bdrv_file = {
     .bdrv_reopen_commit  = raw_reopen_commit,
     .bdrv_reopen_abort   = raw_reopen_abort,
 
+#ifdef XBOX
+    .bdrv_co_preadv     = raw_co_preadv,
+    .bdrv_co_pwritev    = raw_co_pwritev,
+#endif
     .bdrv_aio_preadv    = raw_aio_preadv,
     .bdrv_aio_pwritev   = raw_aio_pwritev,
     .bdrv_aio_flush     = raw_aio_flush,
@@ -966,6 +1037,10 @@ static BlockDriver bdrv_host_device = {
     .bdrv_close             = raw_close,
     .bdrv_refresh_limits    = hdev_refresh_limits,
 
+#ifdef XBOX
+    .bdrv_co_preadv     = raw_co_preadv,
+    .bdrv_co_pwritev    = raw_co_pwritev,
+#endif
     .bdrv_aio_preadv    = raw_aio_preadv,
     .bdrv_aio_pwritev   = raw_aio_pwritev,
     .bdrv_aio_flush     = raw_aio_flush,

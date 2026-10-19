@@ -174,7 +174,16 @@ bool Win32DxgiPresenter::LoadWglInteropFunctions()
 
 void Win32DxgiPresenter::ReleaseSharedResources()
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    /*
+     * Cleanup also runs from the static destructor at exit, after the GL
+     * context is gone, and under XEMU_HEADLESS=null, which never had one.
+     * With no GL object to delete there is nothing to unbind, and the
+     * call would go through an unresolved (NULL) epoxy pointer: every
+     * null-mode run crashed at quit.
+     */
+    if (m_render_fbo || m_interop_fbo) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 
     if (m_render_fbo) {
         glDeleteFramebuffers(1, &m_render_fbo);

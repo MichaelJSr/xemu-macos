@@ -3274,6 +3274,25 @@ void tcg_optimize(TCGContext *s)
             }
             done = finish_folding(&ctx, op);
             break;
+        case INDEX_op_x87_arith:
+        case INDEX_op_x87_arith_m:
+        case INDEX_op_x87_ld:
+            /* They store an image at [args[0] + args[2]], as st80f. */
+            if (op->args[0] == tcgv_ptr_arg(tcg_env)) {
+                remove_mem_copy_in(&ctx, op->args[2], op->args[2] + 9);
+            } else {
+                remove_mem_copy_all(&ctx);
+            }
+            done = finish_folding(&ctx, op);
+            break;
+        case INDEX_op_x87_unary:
+            if (op->args[0] == tcgv_ptr_arg(tcg_env)) {
+                remove_mem_copy_in(&ctx, op->args[1], op->args[1] + 9);
+            } else {
+                remove_mem_copy_all(&ctx);
+            }
+            done = finish_folding(&ctx, op);
+            break;
         case INDEX_op_st:
         case INDEX_op_st_vec:
             done = fold_tcg_st_memcopy(&ctx, op);

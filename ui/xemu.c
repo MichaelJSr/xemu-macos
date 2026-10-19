@@ -2775,13 +2775,35 @@ int main(int argc, char **argv)
             freopen("CONOUT$", "w+", stderr);
         }
     } else {
-        // Launched without a console. Redirect stdout and stderr to a log file.
-        HANDLE logfile = CreateFileA("xemu.log",
-            GENERIC_WRITE, FILE_SHARE_WRITE|FILE_SHARE_READ,
-            NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        /*
+         * Launched without a console. Keep a file the parent redirected a
+         * stream to (a launcher's log); send the others to xemu.log. Pipes
+         * still go to xemu.log: a launcher that never drains one would
+         * block the first write once its buffer fills.
+         */
+        bool keep_out = _fileno(stdout) >= 0 &&
+            GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_DISK;
+        bool keep_err = _fileno(stderr) >= 0 &&
+            GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_DISK;
+        HANDLE logfile = keep_out && keep_err ? INVALID_HANDLE_VALUE :
+            CreateFileA("xemu.log", GENERIC_WRITE,
+                        FILE_SHARE_WRITE | FILE_SHARE_READ, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (logfile != INVALID_HANDLE_VALUE) {
-            freopen("xemu.log", "a", stdout);
-            freopen("xemu.log", "a", stderr);
+            CloseHandle(logfile); /* it only truncates */
+            if (!keep_out) {
+                freopen("xemu.log", "a", stdout);
+            }
+            if (!keep_err) {
+                freopen("xemu.log", "a", stderr);
+                /*
+                 * freopen() gives stderr the CRT default, which msvcrt
+                 * fully buffers for a disk file (mingw's startup had made
+                 * it unbuffered), so xemu.log lost its last 4 KiB in a
+                 * crash.
+                 */
+                setvbuf(stderr, NULL, _IONBF, 0);
+            }
         }
     }
 
@@ -2876,6 +2898,16 @@ int main(int argc, char **argv)
         if (headless) {
             /* Nothing to present; keep input and screendump responsive. */
             SDL_DelayNS(vblank_interval_ns);
+#ifdef _WIN32
+        } else if (SDL_GetWindowFlags(scon->real_window) &
+                   SDL_WINDOW_MINIMIZED) {
+            /*
+             * Minimized, flip-model Present returns DXGI_STATUS_OCCLUDED
+             * at once, so the loop spun: a PFIFO round trip, the HUD under
+             * the BQL and the interop copies, unpaced. Nothing shows.
+             */
+            SDL_DelayNS(vblank_interval_ns);
+#endif
         } else {
             render_frame(scon);
         }

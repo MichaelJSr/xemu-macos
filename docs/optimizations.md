@@ -26,7 +26,8 @@ can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE` and
 `XEMU_VTX_SPAN_FINISH`, the first nine rows. The
-other `=0` row, `XEMU_SPIRV_CACHE`, is a cold-compile A/B bypass.
+former `=0` row, `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass, became
+the `perf.cache_shaders` setting on 2026-10-18.
 Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
@@ -46,7 +47,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
-| `XEMU_SPIRV_CACHE` | `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
+| `XEMU_SPIRV_CACHE` | **Removed 2026-10-18**: Settings > Cache shaders to disk (`perf.cache_shaders`) now gates the Vulkan SPIR-V cache too, as it does GL's. Was: `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
@@ -56,7 +57,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low), the backstop's unlink walks (events, dests, cost), the jumps those walks reset split by `tb_add_jump`'s predicate (same-page, an emitter's jump onto its own page, cross-page), the link patches per second and the link flush queue (stale-slot exits and the patches drained there, at `cpu_exec` returns and in full queues); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). x86_64 hosts: `=1` opts in, dark until `=2` runs clean on real silicon. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
+| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). On by default on x86_64 too since 2026-10-18 (`=2` ran clean on an i7-4770K; det heavy-f1 -8.8% instructions, -3.4% core cycles per frame), where the host ops also raise the guest's sticky MXCSR flags exactly, so the hashes equal softfloat's. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the x87 exception-pointer deferral: keeps every legacy store, computes the deferral anyway, and counts every runtime point where the deferred state could have been observed (deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. It also runs the write-through x87 path for real with every pending or stale register image poisoned (`wt-*`, `wt-stack-*`), and checks TOP-keyed translation (`top-key-*`) and MMX entry (`mmx-*`); the gate is every `*violations=` field at 0. Its checks emit ~1 KB of host code per guest insn, so a clean run covers TBs up to ~260 guest bytes (production TBs reach ~800). **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **On since 2026-07-18, and always on in Apple builds** (the `=0` off switch was removed on 2026-10-15; on non-Apple aarch64, where it is unvalidated, `=1` opts in): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). **Until 2026-10-15 the stub read the wrong bitmaps**: it indexed the dirty bitmaps and its code-block mirror from ram_addr 0, but the PC machine's unused `pc.ram` backend occupies ram_addr 0-128 MiB and `xbox.ram` starts at 0x8000000. It saw `pc.ram`'s always-set bits and an empty code map, so it completed every pure-NOTDIRTY store inline, including stores into translated code (no TB invalidation) and onto renderer-watched pages (no NV2A/VGA mark), and the refuter made the same offset mistake. The receipts above came from that build. Fixed by rebasing both to `xbox.ram`'s offset: heavy-f1 offscreen, 40 s, now skips 78% of 3.3M stub entries, demoting 87 code-block stores and 709k dirty-clean stores (it was 100% of 13.0M), and the refuter reports 0 violations on 2.46M decisions. Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04). The prefilter is emitted only by the aarch64 TCG backend, so on any other host (x86_64 Windows/Linux) this knob and its refuter are inert — since 2026-09-08 an explicit `=1` says so once on stderr from the `XEMU_SUBPAGE_REFUTE` latch in `accel/tcg/tb-maint.c` |
@@ -81,7 +82,7 @@ build knobs.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_WIN_O3` | **Added 2026-09-08. Default off.** `=1` opts the *native* MSYS2/MinGW release into `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:634-644`), the pair the Darwin/Linux arm already uses. Unset, both Windows arms keep meson's project default `optimization=2` (`meson.build:3`) and the probed `-fstack-protector-strong` — exactly what every CI Windows leg and every previous native build shipped. **The polarity is deliberate**: the 2026-09-08 review names this flip as the differential behind the wave-1 exit-139 on the Windows box (it reaches every translation unit of both renderers with every runtime hatch unset), and no CI leg builds it. `-Dstack_protector=disabled` is not cosmetic on mingw: `meson.build:512-536` probes by compiling *and linking* a test program with `-fstack-protector-strong`, which a stock MSYS2 MINGW64 toolchain passes, so the option really does strip the canary from the whole tree. Ignored (with a message) on `win64-cross`, which builds the release artifacts |
+| `XEMU_WIN_O3` | **Removed 2026-10-18**: x86_64 Windows builds (native and cross) default to `-O3` with the stack protector off, after the 7.3 protocol ran clean on both arms and the 2026-09 crash turned out to be SDL's clipboard race. Was: **added 2026-09-08, default off.** `=1` opts the *native* MSYS2/MinGW release into `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:634-644`), the pair the Darwin/Linux arm already uses. Unset, both Windows arms keep meson's project default `optimization=2` (`meson.build:3`) and the probed `-fstack-protector-strong` — exactly what every CI Windows leg and every previous native build shipped. **The polarity is deliberate**: the 2026-09-08 review names this flip as the differential behind the wave-1 exit-139 on the Windows box (it reaches every translation unit of both renderers with every runtime hatch unset), and no CI leg builds it. `-Dstack_protector=disabled` is not cosmetic on mingw: `meson.build:512-536` probes by compiling *and linking* a test program with `-fstack-protector-strong`, which a stock MSYS2 MINGW64 toolchain passes, so the option really does strip the canary from the whole tree. Ignored (with a message) on `win64-cross`, which builds the release artifacts |
 | `XEMU_PGO_STALE_FATAL` | `0` (warn only). With `XEMU_PGO=use`, `1` turns a PGO CFG-hash mismatch on a hot-path function name (`cpu_exec*` / `helper_*` / `tlb_*` / `tcg_*` / `pgraph_*`) into a build failure instead of a loud warning (`build.sh:303-306`). Deliberately NOT enabled in CI: flip it on once the gate is proven quiet on a freshly-retrained tree |
 | `XEMU_BENCH_ISOLATE_CACHES` | `0`: shader/pipeline caches live in the bench cache every bench shares (`XEMU_BASE_PATH` = `$XEMU_BENCH_CACHE`, since 2026-10-15), warm across benches and never the owner's pref dir. `1` — equivalently `--isolate-caches` — plants the scratch config as a portable-mode marker inside the cloned bundle's `Contents/Resources`, moving xemu's data base path (`spirv_cache_v*/`, `pipeline_cache.bin`) into the disposable work dir, so caches start cold at batch start, warm during the warmup run, and are shared identically by both arms; a binary older than `XEMU_BASE_PATH` gets this automatically (`scripts/bench-savestate-ab.sh:108,215`). Recorded as `cache_isolation` in `meta.json` / `receipt.json` |
 | `XEMU_BENCH_CACHE` | Bench cache folder that every macOS bench and probe launcher passes as `XEMU_BASE_PATH` (default `~/Library/Caches/xemu-fork-bench`; `scripts/xemu_lease.py`, `scripts/xemu-lease.zsh`). Cold the first time, then shared by every bench. The Windows bench (`bench-savestate-ab-win.py`) passes it too, default `%LOCALAPPDATA%\xemu-fork-bench` |
@@ -381,16 +382,88 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   such hosts use the helper-based hard FPU. (2) On x86_64 hosts,
   `gen_flcr` programs MXCSR but not the x87 control word, so `FIST`/`FISTP`
   under round-toward-±∞ and `FRNDINT` under any non-nearest mode silently
-  rounded to nearest; those cases now fall back to the softfloat helper
-  (nearest/truncate stay inline; aarch64 unchanged). The gate in (1) in
-  fact turned the cache off on every host; its fork layers were removed
-  on 2026-10-15.
+  rounded to nearest; those cases were meant to fall back to the softfloat
+  helper, but under `hard_fpu` that "softfloat" helper is the x86_64
+  long-double one, which rounded to nearest too (rintl/llrintl with the
+  thread's nearest RC). Fixed 2026-10-18: the x86_64 hard conversions take
+  the guest RC (floorl/ceill/truncl/rintl) and saturate out-of-range values
+  with invalid, as softfloat does; it moved every Windows det hash, so
+  Azurik's floor()/_ftol paths ran it. The gate in (1) in fact turned the
+  cache off on every host; its fork layers were removed on 2026-10-15.
 
 - **Sub-page dirty-tracking default gated to Apple (2026-08-09).** Its
   default was on unconditionally, contradicting the feature's own
   documented "Apple 1, elsewhere 0" and running unvalidated default-on on
   non-Apple aarch64. Gated to `__APPLE__`; `XEMU_SUBPAGE_FAST=1` opts in
   elsewhere. (x86_64 unaffected — the i386 backend emits no stub.)
+
+### CPU / JIT (x86_64 hosts, 2026-10-18)
+
+Measured on the Windows box (i7-4770K Haswell, MSYS2 GCC 16) with
+`scripts/win/det_golden.py --pmc`: instructions and core cycles per det
+frame from ETW hardware counters, interleaved cross-binary pairs, det
+heavy-f1 to frame 1200 unless noted. Every row kept the Windows goldens
+(heavy-f1 f300 `37fe3d839c4be757` f1200 `ec2e9596cc9dfa9c`, stream-e2
+f600 `38b50b4c6f35ac02`, cold boot f900 `d6381be67430024d` f1800
+`1daeb1149976062c`) unless it says otherwise. Together the x87 rows took
+det heavy-f1 from 38.8 to 76 fps on that CPU.
+
+- **x87 hard helpers on the registers in place (`66a991d060`).** The
+  x86_64 hard FPU computed through `floatx80` unions passed by value:
+  under the Win64 ABI each operand and result went through memory, and
+  the 16-byte copy of a 10-byte `fstpt` result stalled store forwarding
+  (a microbenchmark: 27 cycles against 12 for an 8+2-byte read). The hot
+  helpers now `fldt` the registers in env, compute and `fstpt` back.
+  Core cycles −26.1%, instructions −6.2%, det fps 38.8 → 52.8, 4/4.
+- **x87 helpers without the global sync, fused memory operands
+  (`acecea21c8`).** The hard x87 helpers touch only env's FPU state, so
+  they are `TCG_CALL_NO_WG` on x86_64; `fadd`..`fdivr` with an m32fp,
+  m64fp or m32int operand is one helper call, not a load into FT0 plus
+  the op; register copies move 8+2 bytes. Core cycles −1.9%, 4/4.
+- **The host x87 control word is the guest's (`deb98ee93f`).** Windows
+  starts threads with CW `0x27f` (53-bit), and nothing set the vCPU
+  thread's: extended-precision guest math ran at double precision,
+  single precision rounded twice, and the guest's RC was ignored by the
+  arithmetic. `update_fp_status` loads the guest's PC and RC on the vCPU
+  thread and `x86_cpu_exec_enter` re-applies it after main-thread FCW
+  writes, as aarch64 does for FPCR; `pack` went, `frndint` takes the RC
+  from the CW, and libm's sin/cos/tan run under `0x37f`. Azurik runs PC
+  double, RC nearest, so its goldens held; instructions −2.35%.
+- **Hot x87 ops inline on the host x87 unit (`aae214c27a`).** New TCG
+  ops (`x87_arith`, `x87_arith_m`, `x87_ld`, `x87_st`, `x87_cmp`,
+  `TCG_TARGET_HAS_x87`, tcg/i386 only) emit the instructions the hard
+  helpers run (`fldt`, the op, `fstpt`; `fucompp`/`fcomp` plus `fnstsw`
+  for the compares) in the TB, under the same control word, so they are
+  bit for bit the helpers. A memory operand goes through `(%rsp)`, the
+  outgoing-argument area. `fist`, `fsqrt`, `frndint` and the
+  transcendentals keep their helpers. Core cycles −23.5%, instructions
+  −15.3%, det fps 54.4 → 72.4, 4/4.
+- **TBs keyed by the x87 TOP on x86_64 (`873ab92ed4`).** With the inline
+  ops, `xemu_x87_top_key` is on, so ST(i), its tag and the pushes and
+  pops are constant env offsets wherever the TOP is static; the tracking
+  already covered every block. `XEMU_X87_REFUTE=1`: 5.0G TOP-key checks,
+  0 violations. Instructions −8.3%, core cycles −6.4%, 4/4.
+- **fist, fsqrt and frndint inline too (`67e48b43b2`).** The hard `fist`
+  helpers are `fistp` m16/m32/m64 under the guest RC, integer indefinite
+  and all (m16 sign-extended, as the helper returns it), `frndint` is
+  `frndint`, and `fsqrt` is `fsqrt` after QEMU's C2-on-negative fpus
+  update, so they join the inline ops (`x87_st` integer kinds,
+  `x87_unary`). Instructions −0.25% (4/4), cycles within noise: a cheap-helper deletion.
+- **fcmov as a select, not a branch.** On the inline path `fcmov` was a
+  conditional jump around the 10-byte move, and a branch ends the TCG
+  basic block, so every live global was synced around each `fcmov` of
+  Azurik's `fld`/`fld`/`fucomi`/`fcmov` min/max idiom. It is now a
+  `setcond` and `movcond` on the image's 8+2 bytes (`gen_fcmov_hw`).
+  Core cycles −3.0%, instructions −0.11%, det fps +3.3%, 4/4.
+- **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
+  core cycles −0.85% median, 3/4.
+- **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions
+  −5.5% (4/4), cycles within the spread.
+- **file-win32 block I/O in coroutines (`4e50b583d4`).** Det cold boot
+  −6.1% core cycles (3/3); stream-e2 −1.2%.
+- **vCPU, PFIFO and APU threads above normal priority on Windows
+  (`f96f00ba9d`, `XEMU_VCPU_QOS=0` opts out).** Windowed heavy-f1 under an
+  all-core busy loop 6.8 → 9.3 fps (+36%, 3/3); idle −0.8% (mixed signs).
 
 ### CPU / JIT (ARM64)
 
@@ -2629,6 +2702,26 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
 
 ### Threads + runtime
 
+- **Windows main loop sleeps on a high-resolution waitable timer
+  (2026-10-18).** `g_poll` takes milliseconds, so `qemu_poll_ns`
+  busy-waited every sub-millisecond deadline (the PIT and both OHCI frame
+  timers tick at 1 kHz): 95% of a logical CPU on the main thread in
+  windowed heavy-f1. The timer handle (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
+  Windows 10 1803+) now joins the poll set, as the kqueue timer does on
+  macOS, and only the last 50 µs are spun; it wakes on the kernel's
+  ~0.5 ms grid, and the timers re-arm from their own deadlines, so
+  nothing drifts. Whole process 245.9% → 147.5% of one core. Windowed
+  heavy-f1, native builds running on CPUs 4-7 (load 26%): 16.9 → 29.3 fps,
+  3/3 pairs (one busy-waiting run fell to 3.9 fps); the quieter warmups
+  tie (28.9 / 28.9). The goldens are unchanged.
+- **Minimized on Windows, the UI loop waits a vblank (2026-10-18).** A
+  minimized flip-model swap chain returns `DXGI_STATUS_OCCLUDED` at once,
+  so the loop spun unpaced: a PFIFO round trip, the HUD under the BQL and
+  the interop copies, for nothing on screen. It now sleeps a vblank
+  interval instead of rendering. Minimized heavy-f1: process CPU 176% →
+  158% of one core (3.13a, a CI build with the waitable timer against
+  one with both); the guest vblank stays at 60.4/s in every window state.
+
 - **Memory-access callback list is RCU-protected (2026-10-11).** Fixes
   the recurring SIGSEGV in `flatview_read_continue` under
   `ohci_frame_boundary` / `ohci_service_ed_list`, most often just after
@@ -2833,10 +2926,18 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   writes each time. `hw/xbox/host_fp.h` reads FPCR and writes the
   default only when TCG left another x87 rounding mode in it (0 of
   430k pusher runs on heavy-f1 1200), puts it back only if it changed,
-  and leaves FPSR alone: nothing on the vCPU thread reads it. Other
-  hosts keep `fenv`. A pusher run costs ~75 fewer cycles (thread
-  counters around it, both arm orders, 8/8 pairs), ~0.1% of det
-  heavy-f1 cycles.
+  and leaves FPSR alone: nothing on the vCPU thread reads it. A pusher
+  run costs ~75 fewer cycles (thread counters around it, both arm
+  orders, 8/8 pairs), ~0.1% of det heavy-f1 cycles. x86_64 hosts do the
+  same with the x87 control word and MXCSR (2026-10-18): `fnstcw` and
+  `stmxcsr`, then FE_DFL_ENV's control state (CW `0x37f`, which mingw's
+  `fesetenv(FE_DFL_ENV)` sets, and MXCSR's `0x1f80` control bits) only
+  where they differ, put back exactly. The CW always differs there now
+  that it holds the guest's precision (Azurik: PC double), but two
+  `fldcw` cost far less than mingw's `fegetenv`/`fesetenv`
+  (`fnstenv`/`fldenv` plus encoding, ~0.9% of the det vCPU): det
+  heavy-f1 instructions −0.58% (4/4), core cycles −2.0% (3/4), goldens
+  unchanged. Other hosts keep `fenv`.
 - **BQL discipline.** `surface_access_callback` drops BQL before
   blocking so the vblank thread can still fire interrupts.
 - **PFIFO wait.** Untimed `qemu_cond_wait`; kick-check +
@@ -3743,6 +3844,8 @@ Lessons worth preserving so they aren't re-attempted.
 
 | Attempt | Reason |
 |---|---|
+| x86_64 inline fld/fst/fild as TCG integer ops (2026-10-18) | Converting m32fp/m64fp/m32int to and from floatx80 with clz, shifts and deposits, with a brcond for the special classes: det heavy-f1 +10% instructions, +9% cycles. Each brcond ends the TCG basic block, so the live globals were synced and reloaded around every load. The host x87 instructions (`x87_ld`, `aae214c27a`) do it in two instructions without a branch |
+| CNG (BCrypt) SHA-256 for `xemu-ram-digest` on Windows (2026-10-18) | 551 vs 548 ms for 128 MiB on a CPU without SHA-NI (Haswell): SymCrypt has no faster SHA-256 there. xxh3-128 takes 29-41 ms |
 | Surface-callback reuse pool default-on (`XEMU_SURFACE_CB_REUSE`, 2026-08-04) | The mechanism receipt was real — the zeta ping-pong's ~200 register/unregister events/s are 0.95:1 with ALL in-scene guest TLB flushes, each with a jump-cache wipe that also clears the near-return memo (`tcg_flush_jmp_cache` → `xemu_i386_ras_flush`) — and the pool survived every correctness gate (loadvm cycles clean, coverage audit 23,003/0, movement probe `tb_flush` flat). The fps A/B then read **−0.66 fps, 3/3 unanimous negative, draws/s −1.9%** (idle-gated pairs, bar was ≥ +0.25): post-candoio-elision the vCPU's flush/refill cost was already off the critical path — the audit's +0.35..+1.5 band was priced against the PRE-wave profile — while the pool's park/reattach bookkeeping bills the render thread on every shape swap. That explanation was never measured: the bookkeeping is a 4-entry scan, and the A/B's pair order is not on record. Kept dark in-tree as the record until 2026-10-10, when the code was removed; restore it by reverting the removal commit, never `804bc5d87e`, which also carries `XEMU_PFIFO_KICK_STATS` and the SPIR-V cache key. `XEMU_SURFACE_CB_STATS` stayed, minus the pool counters and audit, until 2026-10-15 (Retired diagnostics). The live shape was the ranged-flush FIXME in `physmem.c`/`cputlb.c`, landed 2026-10-15 as `tlb_flush_host_range` |
 | x87 clean-ST(i) write-back elision default-on (`XEMU_X87_ELIDE_CLEAN`, 2026-08-04) | Refuter said safe: it re-read memory for every clean slot at each flush and compared it with the cached double, 3.49e9 checks, 0 violations. That certifies the dirty marks were complete for every ST(i) writer the soak reached. It could not see the 80-bit residue the elision keeps, so the truncation signal was absent by construction. The idle-gated A/B read **−0.23 fps, 3/3 negative** vs the ≥ +0.20 bar. The original explanation here (the elidable flush population too thin to pay for the per-slot dirty tracking) was wrong. The dirty tracking ran at translate time and was identical in both arms, so the omitted store was the only runtime difference. The kill is an under-powered read: 3 pairs (one-sided sign p = 0.125), and the in-tree harness of that day ran B before E in every pair. **Code removed on 2026-10-10.** It changed numerics, it put a dirty-mark duty on every future ST(i) writer (21 sites in `ops_fpu.h` plus FXCH), and its reopen bar (clean-ST census ≥ 8M/s on some other title) did not hold together: the 7.04M/s census reading came from a run whose fps was not recorded, so the bar was never tied to a measured population at the ~48 fps shape the kill ran on. Restore it by reverting the removal commit, never `8da40e6fed`, which also carries the shipped `ELIDE_FT0` and `DEFER_FIP` mechanisms. Reopening needs per-op host-PC attribution tooling (`XEMU_GUEST_PROF` resolves only to whole TBs) plus the artifact A/B on a title that exercises the x87 transcendentals, which promotion always required and never got |
 | Reports idle-budget 300 → 50 µs (2026-08-04) | The deferred pinned-value scan ran: **−12.1 fps unanimous, draws/s −21.4%** — 50 µs qualifies far more idle episodes for early submits and lands on the arch-1.1 submit-storm side of the cliff, exactly as the scan's guard predicted. 300 µs validated as correctly above the cliff; scan closed permanently, and the knob was hardcoded at 300 µs on 2026-10-15 |

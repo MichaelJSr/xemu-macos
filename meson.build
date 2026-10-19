@@ -741,8 +741,9 @@ hardening_flags = [
 # https://github.com/llvm/llvm-project/issues/75168
 #
 # xemu-macos: skipped on macOS arm64, where the zeroing is 3.2% of the
-# emulation's host instructions and costs the helpers their tail calls.
-if not (host_os == 'darwin' and cpu == 'aarch64') and \
+# emulation's host instructions and costs the helpers their tail calls,
+# and on Windows.
+if not (host_os == 'darwin' and cpu == 'aarch64') and host_os != 'windows' and \
    cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
                name: '-fzero-call-used-regs=used-gpr',
                args: ['-O2', '-fzero-call-used-regs=used-gpr'])
@@ -1688,7 +1689,11 @@ endif
 
 sdl = not_found
 if not get_option('sdl').auto() or have_system
-  sdl = dependency('sdl3', required: false, allow_fallback: false)
+  # -Dforce_fallback_for=sdl3 skips the system SDL3 for the patched wrap
+  # (build.sh's MSYS2 branch, like the static CI cross builds).
+  if 'sdl3' not in get_option('force_fallback_for')
+    sdl = dependency('sdl3', required: false, allow_fallback: false)
+  endif
   if not sdl.found() and not get_option('sdl').disabled()
     sdl3_cmake_opts = cmake.subproject_options()
     sdl3_cmake_opts.add_cmake_defines({

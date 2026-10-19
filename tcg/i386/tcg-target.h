@@ -88,4 +88,13 @@ typedef enum {
     TCG_REG_CALL_STACK = TCG_REG_ESP
 } TCGReg;
 
+/*
+ * Hot/cold TB layout (tcg/region.c), as on aarch64. Every reference from
+ * a body to its cold part is rel32 (Jcc, JMP, CALL, RIP-relative pool
+ * loads), so a 1 MiB chunk is in reach; rel8 branches only go to TCG
+ * labels, which are always in the body.
+ */
+#define TCG_TARGET_COLD_CODE 1
+#define TCG_COLD_CHUNK_SIZE (1 << 20)
+
 #endif

@@ -394,6 +394,13 @@ static void *mcpx_apu_frame_thread(void *arg)
      * vCPU waited for it to be scheduled again.
      */
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    {
+        const char *e = getenv("XEMU_VCPU_QOS"); /* with the vCPU */
+        if (!(e && e[0] == '0')) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        }
+    }
 #endif
 
     qemu_mutex_lock(&d->lock);

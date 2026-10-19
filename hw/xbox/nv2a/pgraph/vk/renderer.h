@@ -1035,6 +1035,7 @@ typedef struct PGRAPHVkState {
 
     VkQueryPool query_pool;
     int max_queries_in_flight;
+    int max_reports_in_flight;
     int num_queries_in_flight;
     bool new_query_needed;
     /* First wall-clock instant the FIFO was seen idle with reports

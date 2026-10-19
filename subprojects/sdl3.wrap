@@ -3,6 +3,7 @@ url = https://github.com/libsdl-org/SDL
 revision = 829a65d769d935c4852f8159e964312c0957260a
 depth = 1
 method = cmake
+diff_files = sdl-win32-clipboard-new-window.diff
 
 [provide]
 dependency_names = sdl3

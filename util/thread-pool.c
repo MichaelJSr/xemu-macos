@@ -289,8 +289,7 @@ static void thread_pool_co_cb(void *opaque, int ret)
  * request: about 90 us against a 5 us pread of a cached 4 KiB block on a
  * loaded host. Work submitted from a thread @fn accepts runs in that thread.
  * Only thread_pool_submit_co() checks, which is what file-posix (macOS,
- * Linux) and qcow2's threads use; file-win32 submits through
- * thread_pool_submit_aio(), so Windows hosts keep their workers.
+ * Linux), file-win32's coroutine reads and writes and qcow2's threads use.
  */
 static bool (*thread_pool_inline_fn)(void);
 

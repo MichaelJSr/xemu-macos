@@ -417,3 +417,156 @@ the DSP56300 arm64 JIT non-Apple W^X/icache path, audio/APU portable
 (all host-arch-independent). Remaining suspected-latent items (not fixed,
 don't fire on desktop): compute workgroup size 256 unclamped, `BUFFER_COMPUTE`
 256 MiB cap, surface-upload compute-descriptor partition guard.
+
+---
+
+# Windows real-hardware report — 2026-10-18 (v0.15.1 + windows branch, NVIDIA TITAN Xp, i7-4770K)
+
+The first run of [`windows-test-plan.md`](windows-test-plan.md) on real
+hardware, 2026-10-17 to 18, driven by the agent on the owner's PC and
+mostly unattended. Results are in the kit's `results/RESULTS.md`; fixes
+and optimizations went to `windows` (`ad7188d177..18638975a3`). **Honest
+scope: one x86_64 CPU and one NVIDIA Pascal driver.** "Settled" below
+means settled on this configuration; AMD and Intel GPUs, Windows ARM64
+and Linux stay as open as before. Plan step ids (2.3, 3.11, ...) name
+the evidence.
+
+## S. Machine and builds
+
+- Windows 10 Pro 22H2 (10.0.19045); Intel Core i7-4770K (Haswell, 4C/8T,
+  not hybrid, no SHA-NI), 32 GB; 2x NVIDIA TITAN Xp (Pascal; xemu picks
+  GPU0, which drives both monitors), driver 561.09, Vulkan 1.3.280 (the
+  SDK 1.4.363 loader replaced the system one during 2.3); 3840x2160@60 +
+  1920x1080@180 at 100 %; Balanced power plan (High performance around
+  benchmark batches). Same box and driver as the 2026-09-07 session.
+- Builds: v0.15.1 release (sha256[:16] `e68e784be6fdbd7f`) and its -dbg
+  build, v0.14, upstream v0.8.137, CI builds of the branch, and native
+  MSYS2 GCC 16 builds.
+
+## T. Needs-real-HW items
+
+| Item | Status | Evidence |
+|---|---|---|
+| D1 occlusion rework, report values under deferred delivery (B1/B2) | Partly | The anchors render (2.3) and the 3.11 soak is clean; report values were not compared against a reference, and B2's guest-poll timing ran under TCG only (no WHPX) |
+| D2 primer-query cost, validation cleanliness (B1) | Partly | 3.10a, five scenes on SDK 1.4.363: one VUID (device-level layers, not query-related), 0 after `699bbd0d38` (3.10a-r2). The `QUERIES_FULL` guard ran for the first time once `54671ac359` stopped `XEMU_MAX_QUERIES` shrinking the report pool: ~18 trips/flip at 64, renders, clean exit (3.10b-r2). Primer cost not measured |
+| D3 zeta quarantine/reuse soak (B8) | Settled (NVIDIA) | 3.11 soak; 3.10c F1→F6→F1 walk-ins ×3 and movie-e2; 0 VUIDs (3.10a-r2) |
+| D4 byte-exact vertex refinement under guest-write timing (B3) | Partly | 3.10c walk-ins and the 3.11 walks: screenshots PASS, no errors, TCG only; 3.10d offscreen frames await the Mac comparison |
+| D5 fence-or-die margin on a loaded system (B7) | Partly | No `vkWaitForFences` warning in 2.3, 3.10c, 3.11 or the windowed benches, some under native builds on half the CPUs; fence_wait 0.1-0.6 ms/flip at v0.15.1 rates, 1-5 ms/flip at the optimized build's 30-40 fps. A fast GPU: slow or GPU-bound systems open |
+| D6 Windows baselines before any perf claim | Settled (this box) | Det: instructions and core cycles per frame from ETW counters (`c783af41ca`), §V. Windowed (4.2-4.4): A/A floor 0.1%; v0.15.1 heavy-f1 10.7 fps quiet; the headline A/Bs in §V |
+| D7 Windows PGO | Settled (native GCC) | 7.4: the `.gcda` flow works natively: an `XEMU_PGO=generate` build, the plan's corpus (5 loadvm sessions, a walk, 2 det runs: 1187 profiles), a `use` build. Det heavy-f1 against the same source without PGO, quiet: core cycles −3.1 %, instructions −3.9 % (4/4), goldens identical. Not in CI: CI's cross GCC cannot read a native profile; a CI `generate` binary trained here with `GCOV_PREFIX` is the way |
+| D8 / I.11 DSP56K JIT on non-Apple aarch64 | Open | Not reachable from x86_64 |
+| I.9 texture/sampler retirement gate (F1) | Settled (NVIDIA) | 3.11 soak; 0 VUIDs (3.10a-r2) |
+| I.10 FPCR cache on Windows ARM64 | Open | Historical since §G's 2026-10-15 note; plan 3.9 needs ARM64 hardware |
+| B5 PFIFO untimed idle wait | Settled (this box) | 3.11: heartbeat `iters` still rising at the end (4.44M) |
+| B6 surface expiry on monotonic time | Settled (NVIDIA) | 3.10c walk-ins, 3.11 |
+| Lockless MMIO and DMA_PUT doorbell, first non-VM soak (roadmap 5) | Settled (Windows x86_64) | 3.11, 30/30 cycles over heavy-f1, W2, stream-e2 (walking), F5, transition-f1 (walking): every screenshot PASS, the frame counter rising every cycle, no fence warnings, errors or asserts, exit 0. Linux open |
+| `XEMU_SSE_HOST=2` on real x86_64 silicon (roadmap 5) | Settled | 3.8: no divergence; det heavy-f1 f300/f1200 and stream-e2 f600/f1200 equal the default (softfloat) hashes; 5 min live walk. The host path is now the x86_64 default (`57cfe4fb51`) |
+| §K/§L Vulkan default, strict non-Apple features | Settled (NVIDIA) | No `preferred_physical_device`: Vulkan init passes and picks GPU0 (2.3). `VK_KHR_external_semaphore_win32` is no longer enabled (`6e2accff54`): windowed benches render |
+| §N/§Q Win32 external-memory VK→GL present | Settled (NVIDIA) | "External memory sharing: enabled", DXGI presenter in flip mode with tearing, every scene renders (2.3, 3.10a, the windowed benches). AMD, the v0.13.1 reporter's vendor, unchecked |
+| §M OpenGL renderer | Settled (NVIDIA) | heavy-f1 renders on v0.15.1 and the fixed build, exit 0 (2.4 rerun); the VM crash does not reproduce |
+| v0.14+ Windows-only paths (plan §0) | Settled | 3.1 logs, 3.2 headless offscreen and null, 3.3 QMP, 3.4 input pipe (0 of 100 writer failures), 3.5 `XEMU_RAM_SHM`, 3.6 gdbstub, 3.7 det goldens, 3.12 refuters (SUBPAGE, XPAGE, TLB_WCLEAN, TB_REVAL: 0 violations), 3.15 busy QMP port |
+| 2026-09 "6-10 s after launch" native crash | Settled | The SDL race in §U, not `-O3`: 7.3 clean, 6 of 6 launches at native `-O2` and `-O3`, and 6 of 6 on the CI `-O3` build (cross GCC + LTO); x86_64 builds now default to `-O3` (`6a58566a54`) |
+
+## U. Defects found and fixed
+
+| Defect | Found | Fix |
+|---|---|---|
+| **P0** startup crash, either renderer, 7-9 s after launch, 3 of ~25 launches: SDL 3.4.18's `WIN_CreateWindow` pumps messages before it sets the new window's `internal`, so an activation of xemu's main window then sends `WIN_OpenClipboard` through NULL. The GL renderer's three hidden gloffscreen windows are created in every renderer mode. Upstream v0.8.137: 0 of 5 | 2.4, 3.6 (-dbg dumps) | `058431f83b` (wrap `diff_files` patch, CI builds); `d1b99ddb42` (native builds link it statically) |
+| **P1** every `XEMU_HEADLESS=null` quit crashed: the DXGI presenter cleanup called `glBindFramebuffer` through an unresolved epoxy pointer | 3.2, 3.3, 3.5 | `e40df3fae7` |
+| x86_64 hard FPU: `frndint`, `fist`, `fistp` and the int64 forms rounded to nearest under any guest RC. **Corrects §R**: its 2026-08 "softfloat fallback" never ran under `hard_fpu` (that helper is the long-double one). Every Windows det hash moves | optimization pass, reading the hard helpers | `cfcc8e68ab` |
+| x86_64 hard FPU: the vCPU thread's x87 control word was never set, and Windows starts threads at `0x27f` (53-bit): guest extended-precision math ran at double precision, single precision rounded twice (53-bit, then a cast that also clamped the exponent range), and the arithmetic ignored the guest's RC. Azurik runs PC double, RC nearest, so no golden moved | optimization pass (a `_beginthreadex` probe) | `deb98ee93f` (the guest's PC and RC in the host control word) |
+| The Windows main loop busy-waited every sub-millisecond timer deadline: 95% of a logical CPU, and under host load the vCPU starved (windowed heavy-f1 once 3.9 fps) | per-thread probe | `e8e260186d` (high-resolution waitable timer) |
+| Minimized, flip-model Present returns at once, so the UI loop spun unpaced | 3.13a | `9778d93ad5` (a vblank sleep; minimized process CPU 176 % → 158 % of one core) |
+| The no-console `xemu.log` was fully buffered (lost its tail in a crash), and a stderr the parent had redirected to a file was replaced by `xemu.log` | 3.1b, 3.1-r2 | `a150d08571` + `7d5a2e6cc6`; `06d375729f` |
+| `VUID-VkDeviceCreateInfo-enabledLayerCount-12384`: validation layers passed as device layers | 3.10a | `699bbd0d38` |
+| `XEMU_MAX_QUERIES` shrank the report pool too, so `REPORTS_FULL` always fired first and the `QUERIES_FULL` guard never ran | 3.10b | `54671ac359` |
+| `XEMU_TB_REVAL_REFUTE` armed only on incremental restores, so 3.12 printed nothing | 3.12 | `2568477fd8` |
+| The OS info line read `OS_Version:  22H2`: `RegGetValueW` got WCHAR sizes and wrote 4 bytes into a 2-byte variable | logs | `47b506ad18` |
+| nsprof and heartbeat reports went out one character per write (mingw printf on an unbuffered stderr) | 3.1b follow-up | `c25a93771b` |
+| The Vulkan SPIR-V cache ignored Settings > Cache shaders to disk (its own `XEMU_SPIRV_CACHE` hatch) | review | `a922602c75` |
+
+§A6 changed: 3.13b measured the cost of normal priority under host load
+(§V), and `f96f00ba9d` now runs the vCPU, PFIFO and APU threads at
+`THREAD_PRIORITY_ABOVE_NORMAL` on Windows (`XEMU_VCPU_QOS=0` leaves all
+three at normal); the main loop stays at normal. Harness fixes:
+`07fb7a811d`, `a0aff4866d`, `f1595e0c5e`, `7a9589adcb`, `39592145d7`,
+`c783af41ca`, `d3ea0ee8af`, `06ebdace13`.
+
+## V. Performance
+
+v0.15.1 on this box (2.3 smoke, windowed nsprof flips/s): heavy-f1
+8.3-10.1, W2 7.9-8.1, stream-e2 23.9-25.3, F5 19.9-21.1, fence_wait
+0.1-0.56 ms/flip: CPU-bound on the vCPU. The det profile put ~47% of the
+vCPU in x87 helpers, mostly store-forwarding stalls on `floatx80` copies.
+
+**Headline (windowed, v0.15.1 against the branch):** heavy-f1 11.1 → 38.7 fps (3.5×), W2 8.5 → 40.7 fps (4.8×), v0.15.1 against the final CI release (`18638975a3`), 3 interleaved 60 s pairs each, 3/3, on a quiet box (load 1-3 %). The vCPU is still the limit there (94 % of a core at ~30 fps in a per-thread probe); the Mac M2 Ultra runs both at its 60 fps cap.
+
+Det A/Bs: `det_golden.py`, cross-binary unless noted, interleaved pairs,
+instructions and core cycles per frame from ETW counters (the TSC-based
+Mcyc/frame rises with hyperthread contention). Det heavy-f1 to frame 1200
+unless noted. The x87 rows took det heavy-f1 from 38.8 to 88 (native `-O2`) and 91 (native PGO) on a quiet box
+fps; `docs/optimizations.md` (CPU / JIT, x86_64 hosts) has the details.
+
+| Change | Delta | Signs | Load | Verdict |
+|---|---|---|---|---|
+| `66a991d060` x87 hard helpers on the registers in place | core cycles −26.1 %, insns −6.2 %, det fps 38.8 → 52.8 (+36 %) | 4/4 | PGO builds on CPUs 4-7 | kept, hash identical |
+| `acecea21c8` x87 helpers `TCG_CALL_NO_WG`, fused memory operands | core cycles −1.9 %, insns −0.37 % | 4/4 | quiet | kept, hash identical |
+| `deb98ee93f` host x87 control word = guest PC/RC, no `pack` | insns −2.35 %, cycles −2.2 % min to min | 4/4 | worktree build on CPUs 4-7 | kept, goldens identical |
+| `aae214c27a` hot x87 ops inline on the host x87 unit (`x87_*` TCG ops) | core cycles −23.5 %, insns −15.3 %, det fps 54.4 → 72.4 (+33 %) | 4/4 | worktree build on CPUs 4-7 | kept, goldens identical |
+| `873ab92ed4` TBs keyed by the x87 TOP, registers at fixed offsets | insns −8.3 %, core cycles −6.4 %, det fps 69.2 → 74.1 | 4/4 | quiet | kept, goldens identical; refuter 0 of 5.0G |
+| `bfdf7572d2` det-mode FP brackets compare and skip (`fnstcw`/`stmxcsr` instead of mingw's fenv) | insns −0.58 %, core cycles −2.0 % median | 4/4, 3/4 | PGO training on CPUs 4-7 | kept, det mode only; goldens identical |
+| `67e48b43b2` `fist`/`fsqrt`/`frndint` inline | insns −0.25 %, cycles within noise | 4/4, 2/4 | PGO training on CPUs 4-7 | kept (exact); goldens identical |
+| `e8a32939e5` `fcmov` as a select, not a branch | core cycles −3.0 %, insns −0.11 %, det fps +3.3 % | 4/4 | quiet | kept; goldens identical |
+| `57cfe4fb51` SSE host path (softfloat vs `XEMU_SSE_HOST=1`, same binary) | insns −8.8 %, cycles −3.4 %, det fps 35.6 → 38.0 (+3.6 %) | 4/4 | quiet, xemu on CPUs 0-3 | kept, default; hash moves |
+| its MXCSR flag mirror (without vs with) | insns +2.0 %, cycles −0.3 % median | 0/4, 2/4 | build on CPUs 4-7 | kept (exact flags) |
+| `baf5e0c100` no `-fzero-call-used-regs` | insns −5.47 %, cycles −0.9 % median | 4/4, 2/4 | quiet | kept |
+| `4e50b583d4` file-win32 coroutine I/O (cold boot 1800, stream-e2 600) | cold boot cycles −6.1 %, insns −1.3 %; stream-e2 cycles −1.2 % | 3/3, 3/3 | functional runs on CPUs 4-7 | kept, hashes unchanged |
+| `6d0e98c828` hot/cold TB layout on tcg/i386 | cycles −0.85 % median (mean −1.7 %), insns −0.13 % | 3/4 | build on CPUs 4-7 | kept, same hash |
+| native `-O2` vs `-O3` (058431f + static SDL) | cycles −1.4 %, insns −1.1 % | 3/4, 4/4 | functional runs on CPUs 4-7 | kept: `6a58566a54` |
+| `6a58566a54` CI release `-O2` vs `-O3` without the stack protector (cross GCC + LTO) | insns −2.31 %, core cycles +0.26 % median | 4/4, 1/4 | PGO build on CPUs 4-7 | kept: matches the macOS/Linux arms; cycles neutral under LTO; 7.3 6/6 |
+| native GCC 16 `-O2` vs CI cross GCC + LTO (same source) | CI cycles −2.8 %, insns −6.1 % | 4/4 | functional runs on CPUs 4-7 | LTO pays: bench LTO or CI builds |
+| 7.4 GCC PGO, native (`-O2` vs the same source + PGO) | core cycles −3.08 %, insns −3.93 %, det fps 88.3 → 91.3 | 4/4 | quiet | works natively; not in CI (cross GCC) |
+
+Windowed (bench-savestate-ab-win.py, interleaved, 45-60 s arms): the 4.2
+A/A floor is +0.06 % (2/2). `f96f00ba9d` (3.13b): heavy-f1
+`XEMU_VCPU_QOS=0` vs `1`, 3 pairs: with a busy loop on all 8 logical CPUs
+6.8 → 9.3 fps (+36 %, 3/3); idle 20.0 vs 19.8 (−0.8 %, signs mixed).
+`e8e260186d` (W1): the whole process 245.9 % → 147.5 % of one core; with
+native builds on CPUs 4-7, 16.9 → 29.3 fps (3/3), where a busy-waiting
+run fell to 3.9 fps; the quieter warmups tie at 28.9. 4.3/4.4 (v0.15.1, windowed): heavy-f1 10.7 fps on a quiet box; F5 14.4 fps against v0.14's 12.4 (+15.9 %, 2/2). 4.5's switch A/Bs on v0.15.1 at 9-11 fps, two under build load: `XEMU_BQL_SPIN` default −2.0 % (2/2), `XEMU_KI_IDLE_HALT` +6.1 % (1/2), `XEMU_PFIFO_STALL_DOORBELL` −1.3 % (1/2, quiet); no default changed on that evidence.
+
+Goldens (3.7): Windows det is deterministic in every config (r1 = r2;
+dsp56300 JIT = interpreter; `XEMU_SSE_HOST=2` = default) and, as
+expected, matches no macOS hash (x87 long double vs double, SSE2 vs NEON
+kernels). Windows goldens since `cfcc8e68ab` (unchanged through every
+later commit): heavy-f1 f300 `37fe3d839c4be757` f1200 `ec2e9596cc9dfa9c`,
+stream-e2 f600 `38b50b4c6f35ac02`, cold boot f900 `d6381be67430024d`
+f1800 `1daeb1149976062c`. The debug vs release split: worktree builds of one commit settle part of it. GCC's FMA contraction in the x86-64-v3 release moves heavy-f1 and stream-e2: with `-ffp-contract=off`, or an x86-64-v1 build, the release hashes equal each other (heavy-f1 f300 `0d82336084feb76d` f1200 `599aceace7f41529`, stream-e2 `3808ce768eeb4123`), so nothing else in the v3 ISA matters. The debug build differs from both (`654eee348901d236` / `6938665a5124a399` / `48aeac8dabb00a8e`): a debug-only effect (`-O0`, `CONFIG_DEBUG_TCG`, or undefined behaviour `-O0` exposes), not found yet. Cold boot is equal in every build.
+
+## W. Still open
+
+- Hardware not covered: AMD and Intel GPUs (D1-D5, I.9, §Q), Windows
+  ARM64 (plan 3.9, I.10), Linux (its lockless soak, D8, I.11).
+- x86_64 JIT gaps against aarch64, each a backend port: guest registers
+  pinned in host registers (aarch64 measured −3.9 % cycles; x86_64 has
+  half the registers, and the all-call-saved layout lost there), shared
+  softmmu TLB walks, inline packed-single SSE (exact MXCSR flags need a
+  design: host code pollutes the host flags), and the double-based x87
+  write-through path (on x86_64 it would trade the long double helpers'
+  precision for doubles).
+- Needs a person: 2.1 audio, controller, fullscreen, UI scale and
+  thumbnails; 3.14 menu loads (synthesized keys don't reach the window
+  from a background process); 3.15 live pads under icount. 4.7's fps readout: Debug > Video opens only with a click (the agent's part is in RESULTS.md).
+- Findings left open: `xemu-ram-digest` sha256 takes 655 ms for 128 MiB
+  without SHA-NI (CNG is no faster; xxh3-128 takes 29-41 ms); the disc
+  fingerprint takes 7.3 s at the first save after a disc insert (disk
+  I/O for 2.7 GB; computing it at disc load would hide it but read every
+  image on every load); 3.10d frames to compare on the Mac; an empty tray
+  on the play HDD shows "Please insert an Xbox disc..." instead of a
+  dashboard (compare on the Mac). Thread names are empty unless
+  `-name ...,debug-threads=on`, as on every host.
+- Upstream: `xemu-project/xemu` is 2 commits ahead (`5c6c5501c7` nv2a X1A7
+  clear formats, `8fc3208697` AppImage GLib), for the next upstream sync
+  on master.
+- Operations: Windows Update restarted the PC at 03:08 mid-run; pause
+  updates before an unattended run.

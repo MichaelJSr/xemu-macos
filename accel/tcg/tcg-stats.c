@@ -100,6 +100,7 @@ static void print_qht_statistics(struct qht_stats hst, GString *buf)
 struct tb_tree_stats {
     size_t nb_tbs;
     size_t host_size;
+    size_t body_size;
     size_t target_size;
     size_t max_target_size;
     size_t direct_jmp_count;
@@ -114,6 +115,7 @@ static gboolean tb_tree_stats_iter(gpointer key, gpointer value, gpointer data)
 
     tst->nb_tbs++;
     tst->host_size += tb->tc.size;
+    tst->body_size += tb->tc.size;
 #ifdef TCG_TARGET_COLD_CODE
     tst->host_size += tb->xemu_cold.size;
 #endif
@@ -191,6 +193,14 @@ static void dump_exec_info(GString *buf)
                            nb_tbs ? tst.host_size / nb_tbs : 0,
                            tst.target_size ?
                            (double)tst.host_size / tst.target_size : 0);
+#ifdef TCG_TARGET_COLD_CODE
+    /* The hot part of a chunk holds the bodies (tcg/region.c). */
+    g_string_append_printf(buf, "TB avg body size    %zu bytes hot, "
+                           "%zu + %zu (TranslationBlock) + search data cold\n",
+                           nb_tbs ? tst.body_size / nb_tbs : 0,
+                           nb_tbs ? (tst.host_size - tst.body_size) / nb_tbs : 0,
+                           sizeof(TranslationBlock));
+#endif
     g_string_append_printf(buf, "cross page TB count %zu (%zu%%)\n",
                            tst.cross_page,
                            nb_tbs ? (tst.cross_page * 100) / nb_tbs : 0);

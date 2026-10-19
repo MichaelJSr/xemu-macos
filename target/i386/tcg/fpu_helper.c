@@ -98,41 +98,93 @@ static inline floatx80 *x87_reg(CPUX86State *env, int i)
 
 #if defined(__x86_64__)
 /*
- * x86_64 hard FPU: use host long double (80-bit x87) via union overlay.
+ * x86_64 hard FPU: use host long double (80-bit x87) via union overlay. The
+ * x87 unit runs under the guest's precision and rounding control
+ * (xemu_sync_host_x87_cw), so each op rounds once to the guest's precision
+ * over the full exponent range, as the guest's x87 does.
  */
-static inline
-floatx80 pack(floatx80 v, float_status *status)
+
+/*
+ * The hot helpers compute on each register's long double in place: fldt
+ * and fstpt on env. Through the floatx80 union, every op copied its
+ * operands and its result as 16 bytes around 10-byte x87 loads and
+ * stores, a store-forwarding stall each (about half of the det vCPU's
+ * time was in these helpers). Same values; the padding is never read.
+ */
+static inline long double ld_from_f32(float32 v)
 {
-    switch (status->floatx80_rounding_precision) {
-    case floatx80_precision_s: return (floatx80){ .fval = (float)v.fval };
-    case floatx80_precision_d: return (floatx80){ .fval = (double)v.fval };
-    default: return v; /* floatx80_precision_x */
-    }
+    float f;
+    memcpy(&f, &v, sizeof(f));
+    return f;
 }
+
+static inline long double ld_from_f64(float64 v)
+{
+    double d;
+    memcpy(&d, &v, sizeof(d));
+    return d;
+}
+
+static inline float32 ld_to_f32(long double v)
+{
+    float f = v;
+    float32 r;
+    memcpy(&r, &f, sizeof(r));
+    return r;
+}
+
+static inline float64 ld_to_f64(long double v)
+{
+    double d = v;
+    float64 r;
+    memcpy(&r, &d, sizeof(r));
+    return r;
+}
+
+static inline FloatRelation ld_compare(long double a, long double b)
+{
+    if (a < b) return float_relation_less;
+    if (a > b) return float_relation_greater;
+    if (a == b) return float_relation_equal;
+    return float_relation_unordered;
+}
+
+#define X87_ADD(d, a, b)       ((d).fval = (a).fval + (b).fval)
+#define X87_SUB(d, a, b)       ((d).fval = (a).fval - (b).fval)
+#define X87_MUL(d, a, b)       ((d).fval = (a).fval * (b).fval)
+#define X87_DIV(d, a, b)       ((d).fval = (a).fval / (b).fval)
+#define X87_CMP(a, b)          ld_compare((a).fval, (b).fval)
+/* the x87 compare orders denormals and makes unnormals unordered, as softfloat */
+#define X87_UCMP(a, b)         ld_compare((a).fval, (b).fval)
+#define X87_FROM_I32(d, v)     ((d).fval = (v))
+#define X87_FROM_F32(d, v)     ((d).fval = ld_from_f32(v))
+#define X87_FROM_F64(d, v)     ((d).fval = ld_from_f64(v))
+#define X87_TO_F32(a)          ld_to_f32((a).fval)
+#define X87_TO_F64(a)          ld_to_f64((a).fval)
 
 static inline
 floatx80 floatx80_add__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval + b.fval) }, status);
+    return (floatx80){ .fval = a.fval + b.fval };
 }
 
 static inline
 floatx80 floatx80_sub__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval - b.fval) }, status);
+    return (floatx80){ .fval = a.fval - b.fval };
 }
 
 static inline
 floatx80 floatx80_mul__hard(floatx80 a, floatx80 b, float_status *status)
 {
-    return pack((floatx80){ .fval = (a.fval * b.fval) }, status);
+    return (floatx80){ .fval = a.fval * b.fval };
 }
 
 static inline
 floatx80 floatx80_div__hard(floatx80 a, floatx80 b, float_status *status)
 {
     /* FIXME: Exceptions */
-    return pack((floatx80){ .fval = (a.fval / b.fval) }, status);
+    return (floatx80){ .fval = a.fval / b.fval };
 }
 
 static inline
@@ -189,31 +241,55 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
 static inline
 floatx80 floatx80_sqrt__hard(floatx80 a, float_status *status)
 {
-    return pack((floatx80){ .fval = sqrtl(a.fval) }, status);
+    return (floatx80){ .fval = sqrtl(a.fval) };
+}
+
+/* frndint, under the guest's rounding control (the thread's x87 RC) */
+static inline long double hard_round(long double x, float_status *status)
+{
+    __asm__("frndint" : "+t"(x));
+    return x;
 }
 
 static inline
 floatx80 floatx80_round_to_int__hard(floatx80 a, float_status *status)
 {
-    return (floatx80){ .fval = rintl(a.fval) };
+    return (floatx80){ .fval = hard_round(a.fval, status) };
+}
+
+/* Out of range (NaN too): invalid, saturated as softfloat does. */
+static inline
+int32_t hard_to_int32(long double r, float_status *status)
+{
+    if (likely(r >= -2147483648.0L && r <= 2147483647.0L)) {
+        return (int32_t)r;
+    }
+    float_raise(float_flag_invalid, status);
+    return r < 0 ? INT32_MIN : INT32_MAX;
 }
 
 static inline
 int32_t floatx80_to_int32__hard(floatx80 a, float_status *status)
 {
-    return (int32_t)llrintl(a.fval);
+    return hard_to_int32(hard_round(a.fval, status), status);
 }
 
 static inline
 int32_t floatx80_to_int32_round_to_zero__hard(floatx80 a, float_status *status)
 {
-    return (int32_t)a.fval;
+    return hard_to_int32(truncl(a.fval), status);
 }
 
 static inline
 int64_t floatx80_to_int64__hard(floatx80 a, float_status *status)
 {
-    return (int64_t)llrintl(a.fval);
+    long double r = hard_round(a.fval, status);
+
+    if (likely(r >= -9223372036854775808.0L && r < 9223372036854775808.0L)) {
+        return (int64_t)r;
+    }
+    float_raise(float_flag_invalid, status);
+    return r < 0 ? INT64_MIN : INT64_MAX;
 }
 
 #elif defined(__aarch64__)
@@ -527,6 +603,9 @@ floatx80_compare_quiet__hard(floatx80 a, floatx80 b, float_status *status)
 #endif
 
 #define helper_flds_FT0       MAP_HELPER_SOFT_HARD(flds_FT0)
+#define helper_fop_ST0_m32    MAP_HELPER_SOFT_HARD(fop_ST0_m32)
+#define helper_fop_ST0_m64    MAP_HELPER_SOFT_HARD(fop_ST0_m64)
+#define helper_fop_ST0_i32    MAP_HELPER_SOFT_HARD(fop_ST0_i32)
 #define helper_fldl_FT0       MAP_HELPER_SOFT_HARD(fldl_FT0)
 #define helper_fildl_FT0      MAP_HELPER_SOFT_HARD(fildl_FT0)
 #define helper_flds_ST0       MAP_HELPER_SOFT_HARD(flds_ST0)
@@ -755,6 +834,24 @@ static void merge_exception_flags(CPUX86State *env, int old_flags)
 #endif
 }
 
+/*
+ * x87 arithmetic, loads and stores on a register, as statements; the
+ * x86_64 hard TU defines them to work on the long double in place.
+ */
+#ifndef X87_ADD
+#define X87_ADD(d, a, b)   ((d) = floatx80_add((a), (b), &env->fp_status))
+#define X87_SUB(d, a, b)   ((d) = floatx80_sub((a), (b), &env->fp_status))
+#define X87_MUL(d, a, b)   ((d) = floatx80_mul((a), (b), &env->fp_status))
+#define X87_DIV(d, a, b)   ((d) = helper_fdiv(env, (a), (b)))
+#define X87_CMP(a, b)      floatx80_compare((a), (b), &env->fp_status)
+#define X87_UCMP(a, b)     floatx80_compare_quiet((a), (b), &env->fp_status)
+#define X87_FROM_I32(d, v) ((d) = int32_to_floatx80((v), &env->fp_status))
+#define X87_FROM_F32(d, v) ((d) = float32_to_floatx80((v), &env->fp_status))
+#define X87_FROM_F64(d, v) ((d) = float64_to_floatx80((v), &env->fp_status))
+#define X87_TO_F32(a)      floatx80_to_float32((a), &env->fp_status)
+#define X87_TO_F64(a)      floatx80_to_float64((a), &env->fp_status)
+#endif
+
 static inline floatx80 helper_fdiv(CPUX86State *env, floatx80 a, floatx80 b)
 {
     int old_flags = save_exception_flags(env);
@@ -784,7 +881,7 @@ void helper_flds_FT0(CPUX86State *env, uint32_t val)
     } u;
 
     u.i = val;
-    FT0 = float32_to_floatx80(u.f, &env->fp_status);
+    X87_FROM_F32(FT0, u.f);
     merge_exception_flags(env, old_flags);
 }
 
@@ -797,13 +894,13 @@ void helper_fldl_FT0(CPUX86State *env, uint64_t val)
     } u;
 
     u.i = val;
-    FT0 = float64_to_floatx80(u.f, &env->fp_status);
+    X87_FROM_F64(FT0, u.f);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fildl_FT0(CPUX86State *env, int32_t val)
 {
-    FT0 = int32_to_floatx80(val, &env->fp_status);
+    X87_FROM_I32(FT0, val);
 }
 
 void helper_flds_ST0(CPUX86State *env, uint32_t val)
@@ -817,7 +914,7 @@ void helper_flds_ST0(CPUX86State *env, uint32_t val)
 
     new_fpstt = (env->fpstt - 1) & 7;
     u.i = val;
-    FPR(new_fpstt) = float32_to_floatx80(u.f, &env->fp_status);
+    X87_FROM_F32(FPR(new_fpstt), u.f);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
     merge_exception_flags(env, old_flags);
@@ -834,7 +931,7 @@ void helper_fldl_ST0(CPUX86State *env, uint64_t val)
 
     new_fpstt = (env->fpstt - 1) & 7;
     u.i = val;
-    FPR(new_fpstt) = float64_to_floatx80(u.f, &env->fp_status);
+    X87_FROM_F64(FPR(new_fpstt), u.f);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
     merge_exception_flags(env, old_flags);
@@ -853,7 +950,7 @@ void helper_fildl_ST0(CPUX86State *env, int32_t val)
     FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
-    FPR(new_fpstt) = int32_to_floatx80(val, &env->fp_status);
+    X87_FROM_I32(FPR(new_fpstt), val);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
 
@@ -881,7 +978,7 @@ uint32_t helper_fsts_ST0(CPUX86State *env)
         uint32_t i;
     } u;
 
-    u.f = floatx80_to_float32(ST0, &env->fp_status);
+    u.f = X87_TO_F32(ST0);
     merge_exception_flags(env, old_flags);
     return u.i;
 }
@@ -894,7 +991,7 @@ uint64_t helper_fstl_ST0(CPUX86State *env)
         uint64_t i;
     } u;
 
-    u.f = floatx80_to_float64(ST0, &env->fp_status);
+    u.f = X87_TO_F64(ST0);
     merge_exception_flags(env, old_flags);
     return u.i;
 }
@@ -1055,7 +1152,7 @@ void helper_fcom_ST0_FT0(CPUX86State *env)
     int old_flags = save_exception_flags(env);
     FloatRelation ret;
 
-    ret = floatx80_compare(ST0, FT0, &env->fp_status);
+    ret = X87_CMP(ST0, FT0);
     env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
     merge_exception_flags(env, old_flags);
 }
@@ -1065,7 +1162,7 @@ void helper_fucom_ST0_FT0(CPUX86State *env)
     int old_flags = save_exception_flags(env);
     FloatRelation ret;
 
-    ret = floatx80_compare_quiet(ST0, FT0, &env->fp_status);
+    ret = X87_UCMP(ST0, FT0);
     env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
     merge_exception_flags(env, old_flags);
 }
@@ -1078,7 +1175,7 @@ void helper_fcomi_ST0_FT0(CPUX86State *env)
     int eflags;
     FloatRelation ret;
 
-    ret = floatx80_compare(ST0, FT0, &env->fp_status);
+    ret = X87_CMP(ST0, FT0);
     eflags = cpu_cc_compute_all(env) & ~(CC_Z | CC_P | CC_C);
     CC_SRC = eflags | fcomi_ccval[ret + 1];
     CC_OP = CC_OP_EFLAGS;
@@ -1091,7 +1188,7 @@ void helper_fucomi_ST0_FT0(CPUX86State *env)
     int eflags;
     FloatRelation ret;
 
-    ret = floatx80_compare_quiet(ST0, FT0, &env->fp_status);
+    ret = X87_UCMP(ST0, FT0);
     eflags = cpu_cc_compute_all(env) & ~(CC_Z | CC_P | CC_C);
     CC_SRC = eflags | fcomi_ccval[ret + 1];
     CC_OP = CC_OP_EFLAGS;
@@ -1101,39 +1198,86 @@ void helper_fucomi_ST0_FT0(CPUX86State *env)
 void helper_fadd_ST0_FT0(CPUX86State *env)
 {
     int old_flags = save_exception_flags(env);
-    ST0 = floatx80_add(ST0, FT0, &env->fp_status);
+    X87_ADD(ST0, ST0, FT0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fmul_ST0_FT0(CPUX86State *env)
 {
     int old_flags = save_exception_flags(env);
-    ST0 = floatx80_mul(ST0, FT0, &env->fp_status);
+    X87_MUL(ST0, ST0, FT0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fsub_ST0_FT0(CPUX86State *env)
 {
     int old_flags = save_exception_flags(env);
-    ST0 = floatx80_sub(ST0, FT0, &env->fp_status);
+    X87_SUB(ST0, ST0, FT0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fsubr_ST0_FT0(CPUX86State *env)
 {
     int old_flags = save_exception_flags(env);
-    ST0 = floatx80_sub(FT0, ST0, &env->fp_status);
+    X87_SUB(ST0, FT0, ST0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fdiv_ST0_FT0(CPUX86State *env)
 {
-    ST0 = helper_fdiv(env, ST0, FT0);
+    X87_DIV(ST0, ST0, FT0);
 }
 
 void helper_fdivr_ST0_FT0(CPUX86State *env)
 {
-    ST0 = helper_fdiv(env, FT0, ST0);
+    X87_DIV(ST0, FT0, ST0);
+}
+
+/* fxxx with a memory operand: the load into FT0 and the op in one call */
+static inline void fop_ST0_FT0(CPUX86State *env, uint32_t op)
+{
+    switch (op) {
+    case 0:
+        helper_fadd_ST0_FT0(env);
+        break;
+    case 1:
+        helper_fmul_ST0_FT0(env);
+        break;
+    case 2:
+    case 3:
+        helper_fcom_ST0_FT0(env);
+        break;
+    case 4:
+        helper_fsub_ST0_FT0(env);
+        break;
+    case 5:
+        helper_fsubr_ST0_FT0(env);
+        break;
+    case 6:
+        helper_fdiv_ST0_FT0(env);
+        break;
+    default:
+        helper_fdivr_ST0_FT0(env);
+        break;
+    }
+}
+
+void helper_fop_ST0_m32(CPUX86State *env, uint32_t val, uint32_t op)
+{
+    helper_flds_FT0(env, val);
+    fop_ST0_FT0(env, op);
+}
+
+void helper_fop_ST0_m64(CPUX86State *env, uint64_t val, uint32_t op)
+{
+    helper_fldl_FT0(env, val);
+    fop_ST0_FT0(env, op);
+}
+
+void helper_fop_ST0_i32(CPUX86State *env, int32_t val, uint32_t op)
+{
+    helper_fildl_FT0(env, val);
+    fop_ST0_FT0(env, op);
 }
 
 /* fp operations between STN and ST0 */
@@ -1141,28 +1285,28 @@ void helper_fdivr_ST0_FT0(CPUX86State *env)
 void helper_fadd_STN_ST0(CPUX86State *env, int st_index)
 {
     int old_flags = save_exception_flags(env);
-    ST(st_index) = floatx80_add(ST(st_index), ST0, &env->fp_status);
+    X87_ADD(ST(st_index), ST(st_index), ST0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fmul_STN_ST0(CPUX86State *env, int st_index)
 {
     int old_flags = save_exception_flags(env);
-    ST(st_index) = floatx80_mul(ST(st_index), ST0, &env->fp_status);
+    X87_MUL(ST(st_index), ST(st_index), ST0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fsub_STN_ST0(CPUX86State *env, int st_index)
 {
     int old_flags = save_exception_flags(env);
-    ST(st_index) = floatx80_sub(ST(st_index), ST0, &env->fp_status);
+    X87_SUB(ST(st_index), ST(st_index), ST0);
     merge_exception_flags(env, old_flags);
 }
 
 void helper_fsubr_STN_ST0(CPUX86State *env, int st_index)
 {
     int old_flags = save_exception_flags(env);
-    ST(st_index) = floatx80_sub(ST0, ST(st_index), &env->fp_status);
+    X87_SUB(ST(st_index), ST0, ST(st_index));
     merge_exception_flags(env, old_flags);
 }
 
@@ -1171,7 +1315,7 @@ void helper_fdiv_STN_ST0(CPUX86State *env, int st_index)
     floatx80 *p;
 
     p = &ST(st_index);
-    *p = helper_fdiv(env, *p, ST0);
+    X87_DIV(*p, *p, ST0);
 }
 
 void helper_fdivr_STN_ST0(CPUX86State *env, int st_index)
@@ -1179,7 +1323,7 @@ void helper_fdivr_STN_ST0(CPUX86State *env, int st_index)
     floatx80 *p;
 
     p = &ST(st_index);
-    *p = helper_fdiv(env, ST0, *p);
+    X87_DIV(*p, ST0, *p);
 }
 
 /* misc FPU operations */
@@ -1313,6 +1457,32 @@ void xemu_sync_host_rounding(CPUX86State *env)
 }
 #endif
 
+#if defined(XBOX) && defined(__x86_64__)
+/*
+ * x86_64 hosts: the hard FPU's x87 math runs on the vCPU thread's x87 unit
+ * under its control word, so that takes the guest's precision and rounding
+ * control, exceptions masked: each op then rounds once, as the guest's x87
+ * does. Windows starts threads at 0x27f (53-bit) and nothing set it, so
+ * extended-precision guest math ran at double precision, and the hard ops
+ * rounded to nearest whatever the guest's RC. update_fp_status sets it on
+ * the vCPU thread; reset, loadvm and the gdbstub write FCW from the main
+ * thread, so x86_cpu_exec_enter re-applies it. Reserved PC 01 runs as
+ * extended, as softfloat's does.
+ */
+void xemu_sync_host_x87_cw(CPUX86State *env)
+{
+    uint16_t cw, want = (env->fpuc & 0x0f00) | 0x007f;
+
+    if ((want & 0x0300) == 0x0100) {
+        want |= 0x0300;
+    }
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    if (unlikely(cw != want)) {
+        __asm__ volatile("fldcw %0" : : "m"(want));
+    }
+}
+#endif
+
 void update_fp_status(CPUX86State *env)
 {
     int rnd_mode;
@@ -1341,6 +1511,10 @@ void update_fp_status(CPUX86State *env)
      * thread's follows at its next cpu_exec entry (xemu_sync_host_rounding).
      */
     fesetround(xemu_host_round_mode[rnd_mode]);
+#elif defined(XBOX) && defined(__x86_64__)
+    if (current_cpu && cpu_env(current_cpu) == env) {
+        xemu_sync_host_x87_cw(env);
+    }
 #endif
 
     switch ((env->fpuc >> 8) & 3) {
@@ -1861,6 +2035,28 @@ void helper_f2xm1(CPUX86State *env)
     merge_exception_flags(env, old_flags);
 }
 
+#if defined(XBOX) && defined(__x86_64__)
+/*
+ * libm, which may use the x87 unit, under the default control word, not the
+ * guest's (xemu_sync_host_x87_cw): the transcendentals it stands in for
+ * ignore precision control.
+ */
+static double xemu_libm(double (*fn)(double), double x)
+{
+    uint16_t cw, dflt = 0x037f;
+    double r;
+
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    __asm__ volatile("fldcw %0" : : "m"(dflt));
+    r = fn(x);
+    __asm__ volatile("fldcw %0" : : "m"(cw));
+    return r;
+}
+#define XEMU_LIBM(fn, x) xemu_libm(fn, (x))
+#else
+#define XEMU_LIBM(fn, x) fn(x)
+#endif
+
 void helper_fptan(CPUX86State *env)
 {
     double fptemp = floatx80_to_double(env, ST0);
@@ -1872,7 +2068,7 @@ void helper_fptan(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        fptemp = tan(fptemp);
+        fptemp = XEMU_LIBM(tan, fptemp);
         ST0 = double_to_floatx80(env, fptemp);
         fpush(env);
         ST0 = floatx80_one;
@@ -3020,9 +3216,9 @@ void helper_fsincos(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, sin(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(sin, fptemp));
         fpush(env);
-        ST0 = double_to_floatx80(env, cos(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(cos, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**63 only */
     }
@@ -3093,7 +3289,7 @@ void helper_fsin(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, sin(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(sin, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**53 only */
     }
@@ -3106,7 +3302,7 @@ void helper_fcos(CPUX86State *env)
     if ((fptemp > MAXTAN) || (fptemp < -MAXTAN)) {
         env->fpus |= 0x400;
     } else {
-        ST0 = double_to_floatx80(env, cos(fptemp));
+        ST0 = double_to_floatx80(env, XEMU_LIBM(cos, fptemp));
         env->fpus &= ~0x400;  /* C2 <-- 0 */
         /* the above code is for |arg| < 2**63 only */
     }
@@ -4098,9 +4294,11 @@ void helper_emms(CPUX86State *env)
  * the guest instructions — bit-perfect for every operand class
  * including NaN payload selection and (-0,+0) ordering — and the
  * MXCSR bracket can match FTZ and DAZ independently (no mixed-mode
- * fallback). Sticky-flag accumulation is still skipped (same
- * hard-fpu-family acceptance). Untested on real x86_64 hardware, so it
- * ships dark there: XEMU_SSE_HOST=1 opts in (requires perf.hard_fpu).
+ * fallback), and the ops raise the guest's sticky MXCSR flags exactly
+ * (aarch64 skips them: the hard-fpu-family acceptance). On by default
+ * with perf.hard_fpu since XEMU_SSE_HOST=2 ran clean on an i7-4770K
+ * (2026-10-18: det heavy-f1 and stream-e2 hashes equal softfloat's, a
+ * 5 min live walk).
  *
  * XEMU_SSE_HOST=2, on any host, runs BOTH paths with strict brackets
  * and aborts on any non-NaN-class divergence (differential self-check;
@@ -4114,11 +4312,7 @@ static int xemu_sse_neon_mode(void)
         if (e && e[0] == '2') {
             mode = 2;
         } else {
-#if defined(__aarch64__)
             mode = g_config.perf.hard_fpu ? 1 : 0;
-#else
-            mode = (e && e[0] == '1' && g_config.perf.hard_fpu) ? 1 : 0;
-#endif
         }
     }
     return mode;
@@ -4208,6 +4402,27 @@ typedef float32x4_t xemu_v4f;
 #define XEMU_MXCSR_FZ  (1u << 15)
 #define XEMU_MXCSR_DAZ (1u << 6)
 #define XEMU_MXCSR_RC_MASK (3u << 13)
+#define XEMU_MXCSR_FLAGS 0x3fu
+
+/*
+ * The host MXCSR's exception flags hold the guest's sticky SSE flags while
+ * an op runs, so the op's own flags land on top of them and the leave adds
+ * the result to sse_status exactly; with the guest's PE already set (the
+ * usual case) neither side writes MXCSR.
+ */
+static inline uint32_t xemu_mxcsr_flags(const float_status *st)
+{
+    int f = get_float_exception_flags(st);
+
+    return (f & float_flag_invalid ? FPUS_IE : 0) |
+           (f & float_flag_input_denormal_used ? FPUS_DE : 0) |
+           (f & float_flag_divbyzero ? FPUS_ZE : 0) |
+           (f & float_flag_overflow ? FPUS_OE : 0) |
+           (f & (float_flag_underflow | float_flag_output_denormal_flushed) ?
+            FPUS_UE : 0) |
+           (f & (float_flag_inexact | float_flag_output_denormal_flushed) ?
+            FPUS_PE : 0);
+}
 
 static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
 {
@@ -4215,7 +4430,8 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
     /* Same RN forcing as the aarch64 bracket: usable() verified the
      * guest wants RN; clear any rounding mode leaked into MXCSR by
      * the x87 hard-FPU path. */
-    want = csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ | XEMU_MXCSR_RC_MASK);
+    want = (csr & ~(XEMU_MXCSR_FZ | XEMU_MXCSR_DAZ | XEMU_MXCSR_RC_MASK |
+                    XEMU_MXCSR_FLAGS)) | xemu_mxcsr_flags(&env->sse_status);
     if (env->sse_status.flush_to_zero) {
         want |= XEMU_MXCSR_FZ;
     }
@@ -4226,14 +4442,6 @@ static inline uint64_t xemu_hostfp_enter(CPUX86State *env)
         _mm_setcsr(want);
     }
     return csr;
-}
-
-static inline void xemu_hostfp_leave(uint64_t saved)
-{
-    uint32_t csr = _mm_getcsr();
-    if (csr != (uint32_t)saved) {
-        _mm_setcsr((uint32_t)saved);
-    }
 }
 #endif
 
@@ -4253,7 +4461,7 @@ static inline void xemu_hostfp_leave(uint64_t saved)
 #define XEMU_FP_PIN(x) __asm__ volatile("" : "+x"(x))
 #endif
 
-static inline void xemu_hostfp_leave_lazy(uint64_t saved)
+static inline void xemu_hostfp_leave_lazy(CPUX86State *env, uint64_t saved)
 {
     /*
      * The x87 hard-FPU helpers and write-through ops round with whatever
@@ -4264,7 +4472,31 @@ static inline void xemu_hostfp_leave_lazy(uint64_t saved)
      * guest x87 and SSE agree (Azurik: FCW nearest, MXCSR without FTZ);
      * only directed x87 rounding windows and FTZ titles pay the writes.
      */
+#if defined(__aarch64__)
     xemu_hostfp_leave(saved);
+#else
+    /*
+     * x86_64: the host op raised the guest's own MXCSR flags, so add them
+     * to sse_status as softfloat would (a guest STMXCSR or FXSAVE stores
+     * them), and give the host its control bits back; the flags stay.
+     */
+    uint32_t csr = _mm_getcsr();
+    uint32_t want = ((uint32_t)saved & ~XEMU_MXCSR_FLAGS) |
+                    (csr & XEMU_MXCSR_FLAGS);
+
+    if (csr & XEMU_MXCSR_FLAGS) {
+        env->sse_status.float_exception_flags |=
+            (csr & FPUS_IE ? float_flag_invalid : 0) |
+            (csr & FPUS_DE ? float_flag_input_denormal_used : 0) |
+            (csr & FPUS_ZE ? float_flag_divbyzero : 0) |
+            (csr & FPUS_OE ? float_flag_overflow : 0) |
+            (csr & FPUS_UE ? float_flag_underflow : 0) |
+            (csr & FPUS_PE ? float_flag_inexact : 0);
+    }
+    if (csr != want) {
+        _mm_setcsr(want);
+    }
+#endif
 }
 
 #if !defined(__aarch64__)
@@ -4298,7 +4530,7 @@ static void xemu_neon_##name##_ps(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     XEMU_FP_PIN(a); XEMU_FP_PIN(b);                                         \
     xemu_v4f r = (EXPR);                                                    \
     XEMU_FP_PIN(r);                                                         \
-    xemu_hostfp_leave_lazy(saved);                                          \
+    xemu_hostfp_leave_lazy(env, saved);                                     \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         ZMMReg sv = *v, ss2 = *s;                                           \
         uint32_t got[4];                                                    \
@@ -4340,7 +4572,7 @@ static void xemu_neon_##name##_ss(CPUX86State *env, ZMMReg *d, ZMMReg *v,   \
     XEMU_FP_PIN(fa); XEMU_FP_PIN(fb);                                       \
     fr = (SEXPR);                                                           \
     XEMU_FP_PIN(fr);                                                        \
-    xemu_hostfp_leave_lazy(saved);                                          \
+    xemu_hostfp_leave_lazy(env, saved);                                     \
     memcpy(&out, &fr, 4);                                                   \
     if (unlikely(xemu_sse_neon_mode() == 2)) {                              \
         float32 ref = SOFT(v->ZMM_S(0), s->ZMM_S(0), &env->sse_status);     \
