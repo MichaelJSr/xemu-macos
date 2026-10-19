@@ -1,4 +1,5 @@
 specific_ss.add(files(
+	'debug.c',
 	'nsprof.c',
 	'nv2a.c',
 	'pbus.c',

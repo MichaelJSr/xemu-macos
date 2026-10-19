@@ -68,6 +68,7 @@
 
 #include "hw/xbox/smbus.h" // For eject, drive tray
 #include "hw/xbox/nv2a/nv2a.h"
+#include "hw/xbox/nv2a/debug_gl.h"
 #include "ui/xemu-notifications.h"
 
 #include <stb_image.h>

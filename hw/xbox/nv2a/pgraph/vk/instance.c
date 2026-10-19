@@ -235,6 +235,12 @@ static bool load_vk_driver(const char *path, Error **errp)
 }
 #endif
 
+#ifdef VK_API_VERSION_1_4
+#define MAX_VK_API_VERSION VK_API_VERSION_1_4
+#else
+#define MAX_VK_API_VERSION VK_API_VERSION_1_3
+#endif
+
 /* path: the driver's dylib (load_vk_driver), or NULL for volkInitialize(). */
 static bool create_instance(PGRAPHState *pg, const char *path, Error **errp)
 {
@@ -259,7 +265,7 @@ static bool create_instance(PGRAPHState *pg, const char *path, Error **errp)
     uint32_t instance_version = VK_API_VERSION_1_0;
     if (vkEnumerateInstanceVersion) {
         vkEnumerateInstanceVersion(&instance_version);
-        instance_version = MIN(instance_version, VK_API_VERSION_1_3);
+        instance_version = MIN(instance_version, MAX_VK_API_VERSION);
     }
     if (instance_version < VK_API_VERSION_1_1) {
         error_setg(errp, "Vulkan 1.1 or higher is required");
@@ -790,11 +796,12 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
 
     /*
-     * glsl.c compiles for Vulkan 1.3 / SPIR-V 1.6, where glslang lowers
-     * discard to OpDemoteToHelperInvocation, and that capability needs
-     * this feature enabled: without it the validation layer flags every
-     * fragment shader (MoltenVK and KosmicKrisp alike). Core in 1.3;
-     * enabled only when the device reports it.
+     * On Vulkan 1.3 and later glsl.c compiles for SPIR-V 1.6
+     * (glsl_target_for), where glslang lowers discard to
+     * OpDemoteToHelperInvocation, and that capability needs this feature
+     * enabled: without it the validation layer flags every fragment
+     * shader (MoltenVK and KosmicKrisp alike). Core in 1.3; enabled only
+     * when the device reports it.
      */
     VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures demote_features = {
         .sType =

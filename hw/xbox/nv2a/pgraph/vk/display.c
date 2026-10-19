@@ -23,6 +23,8 @@
 #include "ui/xemu-settings.h"
 #include <math.h>
 
+#include "hw/xbox/nv2a/debug_gl.h"
+
 #ifndef NDEBUG
 #define DISPLAY_DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 #else
@@ -1410,7 +1412,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 
     glCreateMemoryObjectsEXT(1, &d->gl_memory_obj);
     glImportMemoryWin32HandleEXT(d->gl_memory_obj, memory_requirements.size, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, d->handle);
-    assert(glGetError() == GL_NO_ERROR);
+    ASSERT_NO_GL_ERROR();
 
 #else
 
@@ -1425,7 +1427,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     glImportMemoryFdEXT(d->gl_memory_obj, memory_requirements.size,
                         GL_HANDLE_TYPE_OPAQUE_FD_EXT, d->fd);
     assert(glIsMemoryObjectEXT(d->gl_memory_obj));
-    assert(glGetError() == GL_NO_ERROR);
+    ASSERT_NO_GL_ERROR();
 
 #endif // WIN32
 
@@ -1439,7 +1441,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, gl_internal_format,
                          image_create_info.extent.width,
                          image_create_info.extent.height, d->gl_memory_obj, 0);
-    assert(glGetError() == GL_NO_ERROR);
+    ASSERT_NO_GL_ERROR();
 
 #elif HAVE_IOSURFACE_SHARING
     if (export_texture_mode) {

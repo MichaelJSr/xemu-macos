@@ -234,6 +234,28 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
     }
 }
 
+unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
+                                                         hwaddr start,
+                                                         hwaddr size)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    hwaddr range_end = start + size;
+    unsigned int num_marked = 0;
+
+    for (int i = 0; i < r->surface_range_count; i++) {
+        if (r->surface_ranges[i].start >= range_end) {
+            break;
+        }
+        if (r->surface_ranges[i].end <= start) {
+            continue;
+        }
+        r->surface_ranges[i].surface->upload_pending = true;
+        ++num_marked;
+    }
+
+    return num_marked;
+}
+
 void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
                                                    hwaddr start, hwaddr size,
                                                    int nsprof_ev)
@@ -2015,7 +2037,7 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
         if (host_fmt.host_bytes_per_pixel == 0) {
             fprintf(stderr, "nv2a: unimplemented color surface format 0x%x\n",
                     pg->surface_shape.color_format);
-            abort();
+            assert(!"unimplemented color surface format");
         }
     } else {
         surface = &pg->surface_zeta;

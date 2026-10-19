@@ -101,7 +101,7 @@ static void sweep_stale_spirv_temp_files(const char *dir)
     g_dir_close(d);
 }
 
-static char *get_spirv_cache_dir(void)
+static char *get_spirv_cache_dir(glslang_target_language_version_t spv)
 {
     static gsize swept;
     const char *base = xemu_settings_get_base_path();
@@ -116,10 +116,24 @@ static char *get_spirv_cache_dir(void)
      * existing default-config caches warm on both platforms.
      */
     const char *variant = g_config.display.vulkan.debug_shaders ? "-dbg" : "";
-    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s%s", base,
+    /*
+     * So is the SPIR-V version the blob targets (glsl_target_for: 1.6 on
+     * Vulkan 1.3 and later, older on older devices), or a cache filled on
+     * one device would hand another modules it need not accept. The
+     * Vulkan client version beside it (1.3 or 1.4 with SPIR-V 1.6)
+     * changes no word of the output but debug_shaders' OpModuleProcessed
+     * notes, so only the SPIR-V version keys the cache, and only off 1.6,
+     * which keeps the caches from before per-device targets warm.
+     */
+    char spv_variant[16] = "";
+    if (spv != GLSLANG_TARGET_SPV_1_6) {
+        snprintf(spv_variant, sizeof(spv_variant), "-spv%d.%d",
+                 (int)(spv >> 16), (int)((spv >> 8) & 0xff));
+    }
+    char *dir = g_strdup_printf("%sspirv_cache_v%d.%d.%d-%s%s%s", base,
                                 xemu_version_major, xemu_version_minor,
                                 xemu_version_patch, get_spirv_compiler_id(),
-                                variant);
+                                spv_variant, variant);
     /* Portable (Windows mkdir takes one argument). */
     g_mkdir_with_parents(dir, 0755);
 
@@ -131,18 +145,20 @@ static char *get_spirv_cache_dir(void)
     return dir;
 }
 
-static char *get_spirv_cache_path(uint64_t hash)
+static char *get_spirv_cache_path(glslang_target_language_version_t spv,
+                                   uint64_t hash)
 {
-    char *dir = get_spirv_cache_dir();
+    char *dir = get_spirv_cache_dir(spv);
     char *path = g_strdup_printf("%s/%016llx.spv", dir,
                                  (unsigned long long)hash);
     g_free(dir);
     return path;
 }
 
-static void delete_spirv_cache_entry(uint64_t hash)
+static void delete_spirv_cache_entry(glslang_target_language_version_t spv,
+                                     uint64_t hash)
 {
-    char *path = get_spirv_cache_path(hash);
+    char *path = get_spirv_cache_path(spv, hash);
     g_unlink(path);
     g_free(path);
 }
@@ -223,13 +239,14 @@ static bool spirv_blob_is_valid(const guint8 *data, size_t size)
     return last_op == SPIRV_OP_FUNCTION_END;
 }
 
-static GByteArray *load_spirv_from_cache(uint64_t hash)
+static GByteArray *load_spirv_from_cache(glslang_target_language_version_t spv,
+                                         uint64_t hash)
 {
     if (!spirv_cache_enabled()) {
         return NULL;
     }
 
-    char *path = get_spirv_cache_path(hash);
+    char *path = get_spirv_cache_path(spv, hash);
     /* qemu_fopen, not fopen: the path comes from SDL_GetPrefPath and is
      * UTF-8, but Windows fopen() reads it in the process ANSI code page,
      * so a non-ASCII profile path silently never hits the cache. */
@@ -272,13 +289,14 @@ static GByteArray *load_spirv_from_cache(uint64_t hash)
     return g_byte_array_new_take(data, size);
 }
 
-static void save_spirv_to_cache(uint64_t hash, GByteArray *spv)
+static void save_spirv_to_cache(glslang_target_language_version_t target,
+                                uint64_t hash, GByteArray *spv)
 {
     if (!spirv_cache_enabled() || !spv || spv->len == 0) {
         return;
     }
 
-    char *path = get_spirv_cache_path(hash);
+    char *path = get_spirv_cache_path(target, hash);
 
     /* Write-then-rename, same discipline as the pipeline cache in draw.c:
      * a kill mid-write must not leave a torn .spv for the next boot to
@@ -406,22 +424,59 @@ static const glslang_resource_t
                             .general_constant_matrix_vector_indexing = 1,
                         } };
 
+typedef struct GlslTarget {
+    glslang_target_client_version_t client;
+    glslang_target_language_version_t spv;
+} GlslTarget;
+
+/*
+ * The Vulkan client and SPIR-V versions to compile for: those of
+ * r->vk_api_version, the version the device was created with (the
+ * minimum of the instance's and the device's).
+ */
+static GlslTarget glsl_target_for(PGRAPHVkState *r)
+{
+#ifdef VK_API_VERSION_1_4
+    if (r->vk_api_version >= VK_API_VERSION_1_4) {
+        return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_4,
+                             GLSLANG_TARGET_SPV_1_6 };
+    }
+#endif
+    if (r->vk_api_version >= VK_API_VERSION_1_3) {
+        return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_3,
+                             GLSLANG_TARGET_SPV_1_6 };
+    } else if (r->vk_api_version >= VK_API_VERSION_1_2) {
+        return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_2,
+                             GLSLANG_TARGET_SPV_1_5 };
+    }
+    return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_1, GLSLANG_TARGET_SPV_1_3 };
+}
+
+static GByteArray *compile_glsl_to_spv(GlslTarget target,
+                                       glslang_stage_t stage,
+                                       const char *glsl_source);
+
 /*
  * glslang builds its built-in symbol tables on the first compile for each
- * (version, profile, SPIR-V, source), all stages at once, under a global
- * lock: ~57 ms that every process used to pay on the PFIFO thread at its
- * first SPIR-V cache miss, mid-game. Every Vulkan shader here is
+ * (version, profile, client API, source), all stages at once, under a
+ * global lock: ~57 ms that every process used to pay on the PFIFO thread
+ * at its first SPIR-V cache miss, mid-game. Every Vulkan shader here is
  * #version 450 with the same inputs, so one throwaway compile at renderer
- * init, on its own thread, builds the only tables they use. A miss that
- * comes while it runs waits on glslang's lock for the rest of it.
+ * init, on its own thread, builds the only tables they use. The tables
+ * are keyed on Vulkan versus OpenGL only (MapSpvVersionToIndex), not on
+ * the client or SPIR-V version, so a fixed target warms every device's,
+ * and the thread reads no renderer state. A miss that comes while it runs
+ * waits on glslang's lock for the rest of it.
  */
 static QemuThread glsl_warm_thread;
 static bool glsl_warm_started;
 
 static void *glsl_warm_thread_fn(void *opaque)
 {
-    g_byte_array_unref(pgraph_vk_compile_glsl_to_spv(
-        GLSLANG_STAGE_VERTEX, "#version 450\nvoid main() {}\n"));
+    const GlslTarget target = { GLSLANG_TARGET_VULKAN_1_3,
+                                GLSLANG_TARGET_SPV_1_6 };
+    g_byte_array_unref(compile_glsl_to_spv(
+        target, GLSLANG_STAGE_VERTEX, "#version 450\nvoid main() {}\n"));
     return NULL;
 }
 
@@ -442,16 +497,24 @@ void pgraph_vk_finalize_glsl_compiler(void)
     glslang_finalize_process();
 }
 
-GByteArray *pgraph_vk_compile_glsl_to_spv(glslang_stage_t stage,
+GByteArray *pgraph_vk_compile_glsl_to_spv(PGRAPHVkState *r,
+                                          glslang_stage_t stage,
                                           const char *glsl_source)
+{
+    return compile_glsl_to_spv(glsl_target_for(r), stage, glsl_source);
+}
+
+static GByteArray *compile_glsl_to_spv(GlslTarget target,
+                                       glslang_stage_t stage,
+                                       const char *glsl_source)
 {
     const glslang_input_t input = {
         .language = GLSLANG_SOURCE_GLSL,
         .stage = stage,
         .client = GLSLANG_CLIENT_VULKAN,
-        .client_version = GLSLANG_TARGET_VULKAN_1_3,
+        .client_version = target.client,
         .target_language = GLSLANG_TARGET_SPV,
-        .target_language_version = GLSLANG_TARGET_SPV_1_6,
+        .target_language_version = target.spv,
         .code = glsl_source,
         .default_version = 460,
         .default_profile = GLSLANG_NO_PROFILE,
@@ -693,8 +756,9 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     info->glsl = strdup(glsl);
 
     uint64_t glsl_hash = fast_hash((const uint8_t *)glsl, strlen(glsl));
+    glslang_target_language_version_t spv = glsl_target_for(r).spv;
 
-    info->spirv = load_spirv_from_cache(glsl_hash);
+    info->spirv = load_spirv_from_cache(spv, glsl_hash);
     if (info->spirv) {
         /* Reflect the cached blob before it can reach the driver: a bad
          * entry must be a miss that regenerates itself, not an abort. */
@@ -707,14 +771,14 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
                     (unsigned long long)glsl_hash);
             g_byte_array_unref(info->spirv);
             info->spirv = NULL;
-            delete_spirv_cache_entry(glsl_hash);
+            delete_spirv_cache_entry(spv, glsl_hash);
         }
     }
 
     if (!info->spirv) {
         info->spirv = pgraph_vk_compile_glsl_to_spv(
-            vk_shader_stage_to_glslang_stage(stage), glsl);
-        save_spirv_to_cache(glsl_hash, info->spirv);
+            r, vk_shader_stage_to_glslang_stage(stage), glsl);
+        save_spirv_to_cache(spv, glsl_hash, info->spirv);
         bool reflected = init_layout_from_spv(info);
         assert(reflected && "Failed to create SPIR-V shader module");
         (void)reflected;

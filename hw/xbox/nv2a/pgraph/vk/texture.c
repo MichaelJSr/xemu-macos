@@ -1924,10 +1924,10 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
      * a CPU write landing between two binds of the same texture in
      * the same frame: it now takes effect one frame later
      * (render-to-texture content is unaffected — surfaces don't take
-     * this path).
+     * this path, nor does a binding last filled from one).
      */
     bool content_check_skipped = binding_found && !surface_to_texture &&
-                                 !snode->possibly_dirty &&
+                                 !snode->possibly_dirty && !snode->draw_time &&
                                  snode->verified_frame_time ==
                                      pg->frame_time;
     if (content_check_skipped) {
@@ -1971,7 +1971,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             possibly_dirty |= check_texture_possibly_dirty(
                 d, texture_vram_offset, texture_length,
                 texture_palette_vram_offset, texture_palette_data_size);
-            if (possibly_dirty) {
+            if (possibly_dirty || snode->draw_time) {
                 content_hash = fast_hash(texture_data, texture_length);
                 if (is_indexed) {
                     content_hash ^= fast_hash(palette_data,
@@ -2026,9 +2026,13 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
              * texture hash whenever possibly_dirty was set from any
              * source. Without this, shared-page textures (frequently
              * the case for HUD / translucent / LOD-streamed content)
-             * show stale frames intermittently.
+             * show stale frames intermittently. A binding last filled
+             * from a surface (draw_time set) re-hashes in full as well:
+             * its image holds that surface's pixels, and the bind below
+             * uploads it from VRAM whatever the chunks say.
              */
-            bool externally_marked = binding_found && snode->possibly_dirty;
+            bool externally_marked =
+                binding_found && (snode->possibly_dirty || snode->draw_time);
 
             bool any_chunk_dirty = false;
             for (uint32_t i = 0; i < expected_chunks; i++) {
@@ -2095,7 +2099,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     texture_palette_data_size);
             }
 
-            if (possibly_dirty) {
+            if (possibly_dirty || snode->draw_time) {
                 for (uint32_t i = 0; i < expected_chunks; i++) {
                     content_hash ^= snode->chunk_hashes[i];
                 }
@@ -2138,7 +2142,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     bool will_upload_data =
         !surface_to_texture &&
-        (!binding_found || (possibly_dirty && content_hash != snode->hash));
+        (!binding_found || snode->draw_time ||
+         (possibly_dirty && content_hash != snode->hash));
 
     if (will_upload_data) {
         int64_t nsprof_snap_t0 = nsprof_begin();
@@ -2207,11 +2212,20 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
+            snode->possibly_dirty = false;
         } else {
-            if (will_upload_data && snapshot_hash != snode->hash) {
+            /*
+             * A binding last filled from a surface (draw_time set) holds
+             * that surface's pixels, not VRAM's, so it uploads even when
+             * VRAM hashes as its last upload did (a swizzled texture
+             * cleared through a linear surface: Tron 2.0).
+             */
+            if (will_upload_data &&
+                (snode->draw_time || snapshot_hash != snode->hash)) {
                 upload_texture_image(pg, texture_idx, snode,
                                      texture_snapshot, palette_snapshot);
                 snode->hash = snapshot_hash;
+                snode->draw_time = 0;
             }
             /*
              * This bind either verified the cached hash against
@@ -2400,6 +2414,9 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->palette_hash = 0;
     snode->verified_frame_time = -1;
     snode->submit_time = 0;
+    snode->draw_time = 0;
+    snode->hash = 0;
+    snode->possibly_dirty = false;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)

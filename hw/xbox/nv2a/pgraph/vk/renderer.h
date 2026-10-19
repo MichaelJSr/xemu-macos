@@ -1228,7 +1228,8 @@ uint32_t pgraph_vk_get_memory_type(PGRAPHState *pg, uint32_t type_bits,
 // glsl.c
 void pgraph_vk_init_glsl_compiler(void);
 void pgraph_vk_finalize_glsl_compiler(void);
-GByteArray *pgraph_vk_compile_glsl_to_spv(glslang_stage_t stage,
+GByteArray *pgraph_vk_compile_glsl_to_spv(PGRAPHVkState *r,
+                                          glslang_stage_t stage,
                                           const char *glsl_source);
 VkShaderModule pgraph_vk_create_shader_module_from_spv(PGRAPHVkState *r,
                                                        GByteArray *spv);
@@ -1317,6 +1318,9 @@ void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
+unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
+                                                         hwaddr start,
+                                                         hwaddr size);
 void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start,
                                                    hwaddr size, int nsprof_ev);
 void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
