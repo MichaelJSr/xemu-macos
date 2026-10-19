@@ -366,6 +366,12 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   (VUID-vkCmdDraw-None-07833/07834/07835) — z-fighting / wrong blend on
   native drivers; MoltenVK retains dynamic state across CBs and hid it.
   The conditional caches are now poisoned at command-buffer begin.
+  Within a command buffer, binding a pipeline that held one of those
+  states statically (full clears: blend constants; no polygon offset:
+  depth bias; non-line draws: line width) replaced the value on Mesa
+  drivers behind the cache. Since 2026-10-19 every frame pipeline, draw
+  and clear, declares one dynamic-state list (`frame_dynamic_states`) and
+  the `r->dyn` shadow resets only at command-buffer begin.
 
 - **Texture-upload `bufferOffset` aligned to texel block size
   (2026-08-09).** The staging bump allocator advanced by unpadded decoded

@@ -92,9 +92,30 @@ typedef struct PipelineBinding {
     VkPipeline pipeline;
     VkRenderPass render_pass;
     unsigned int draw_time;
-    bool has_dynamic_line_width;
-    bool has_dynamic_depth_bias;
 } PipelineBinding;
+
+/* The dynamic states of r->frame_dynamic_states, one DynShadow bit each */
+enum {
+    DYN_VIEWPORT = 1 << 0,
+    DYN_SCISSOR = 1 << 1,
+    DYN_BLEND_CONSTANTS = 1 << 2,
+    DYN_DEPTH_BIAS = 1 << 3,
+    DYN_LINE_WIDTH = 1 << 4,
+};
+
+/*
+ * What r->command_buffer holds of the frame pipelines' dynamic state:
+ * a value counts only while its DYN_* bit is in valid.
+ */
+typedef struct DynShadow {
+    uint32_t valid;
+    VkViewport viewport;
+    VkRect2D scissor;
+    float blend_constants[4];
+    float depth_bias_constant;
+    float depth_bias_slope;
+    float line_width;
+} DynShadow;
 
 enum Buffer {
     BUFFER_STAGING_DST,
@@ -871,19 +892,23 @@ typedef struct PGRAPHVkState {
     QemuThread pipeline_cache_save_thread;
 
     /*
-     * Per-command-buffer dynamic-state cache. Vulkan dynamic state is
-     * scoped to the command buffer, so these are reset in
-     * pgraph_vk_begin_command_buffer. Skipping a redundant vkCmdSet*
-     * saves a few host instructions per draw; at ~20-50k draws/frame
-     * this aggregates visibly.
+     * The dynamic states every frame pipeline (create_pipeline,
+     * create_clear_pipeline) declares, fixed at init: a bind never
+     * replaces a value the command buffer holds, so r->dyn stays exact
+     * across binds. frame_dynamic_mask has their DYN_* bits.
      */
-    bool dynstate_cache_valid;
-    VkViewport cached_viewport;
-    VkRect2D cached_scissor;
-    float cached_blend_constants[4];
-    float cached_depth_bias_constant;
-    float cached_depth_bias_slope;
-    float cached_line_width;
+    VkDynamicState frame_dynamic_states[5];
+    uint32_t num_frame_dynamic_states;
+    uint32_t frame_dynamic_mask;
+
+    /*
+     * Shadow of r->command_buffer's dynamic state (draw.c dyn_set_*),
+     * reset only in pgraph_vk_begin_command_buffer: dynamic state is
+     * command-buffer scoped, and survives render passes, clears and
+     * other pipeline binds within it. Skipping a redundant set saves a
+     * few host instructions per draw.
+     */
+    DynShadow dyn;
 
     /*
      * Cache of pg->surface_binding_dim.{width,height} scaled by

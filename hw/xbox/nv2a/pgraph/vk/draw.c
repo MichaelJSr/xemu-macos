@@ -494,8 +494,6 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
     snode->draw_time = 0;
-    snode->has_dynamic_line_width = false;
-    snode->has_dynamic_depth_bias = false;
 }
 
 static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -911,8 +909,43 @@ static void finalize_render_passes(PGRAPHVkState *r)
     r->render_passes = NULL;
 }
 
+/*
+ * The dynamic states of every frame pipeline, draw and clear alike. A
+ * pipeline that left one of them static would replace the command
+ * buffer's value at bind (Mesa drivers apply that; MoltenVK keeps the two
+ * apart), and r->dyn would skip the set that restores it. Line width is
+ * dynamic only with wideLines: without it the width is always 1.0.
+ */
+static void init_frame_dynamic_states(PGRAPHVkState *r)
+{
+    static const struct {
+        VkDynamicState state;
+        uint32_t bit;
+    } states[] = {
+        { VK_DYNAMIC_STATE_VIEWPORT, DYN_VIEWPORT },
+        { VK_DYNAMIC_STATE_SCISSOR, DYN_SCISSOR },
+        { VK_DYNAMIC_STATE_BLEND_CONSTANTS, DYN_BLEND_CONSTANTS },
+        { VK_DYNAMIC_STATE_DEPTH_BIAS, DYN_DEPTH_BIAS },
+        { VK_DYNAMIC_STATE_LINE_WIDTH, DYN_LINE_WIDTH },
+    };
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(states) > ARRAY_SIZE(r->frame_dynamic_states));
+
+    r->num_frame_dynamic_states = 0;
+    r->frame_dynamic_mask = 0;
+    for (int i = 0; i < ARRAY_SIZE(states); i++) {
+        if (states[i].bit == DYN_LINE_WIDTH &&
+            !r->enabled_physical_device_features.wideLines) {
+            continue;
+        }
+        r->frame_dynamic_states[r->num_frame_dynamic_states++] =
+            states[i].state;
+        r->frame_dynamic_mask |= states[i].bit;
+    }
+}
+
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
+    init_frame_dynamic_states(pg->vk_renderer_state);
     init_pipeline_cache(pg);
     init_clear_shaders(pg);
     init_render_passes(pg->vk_renderer_state);
@@ -1236,13 +1269,10 @@ static void create_clear_pipeline(PGRAPHState *pg)
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
     };
 
-    VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                        VK_DYNAMIC_STATE_SCISSOR,
-                                        VK_DYNAMIC_STATE_BLEND_CONSTANTS };
     VkPipelineDynamicStateCreateInfo dynamic_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = partial_color_clear ? 3 : 2,
-        .pDynamicStates = dynamic_states,
+        .dynamicStateCount = r->num_frame_dynamic_states,
+        .pDynamicStates = r->frame_dynamic_states,
     };
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
@@ -1287,8 +1317,6 @@ static void create_clear_pipeline(PGRAPHState *pg)
     snode->layout = layout;
     snode->render_pass = pipeline_info.renderPass;
     snode->draw_time = pg->draw_time;
-    snode->has_dynamic_line_width = false;
-    snode->has_dynamic_depth_bias = false;
 
     r->pipeline_binding = snode;
     r->pipeline_binding_changed = true;
@@ -1671,30 +1699,10 @@ static void create_pipeline(PGRAPHState *pg)
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
     };
 
-    VkDynamicState dynamic_states[5] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                         VK_DYNAMIC_STATE_SCISSOR,
-                                         VK_DYNAMIC_STATE_BLEND_CONSTANTS };
-    int num_dynamic_states = 3;
-
-    snode->has_dynamic_depth_bias = rasterizer.depthBiasEnable == VK_TRUE;
-    if (snode->has_dynamic_depth_bias) {
-        dynamic_states[num_dynamic_states++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
-    }
-
-    snode->has_dynamic_line_width =
-        (r->enabled_physical_device_features.wideLines == VK_TRUE) &&
-        (r->shader_binding->state.geom.polygon_front_mode == POLY_MODE_LINE ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINES ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINE_LOOP ||
-         r->shader_binding->state.geom.primitive_mode == PRIM_TYPE_LINE_STRIP);
-    if (snode->has_dynamic_line_width) {
-        dynamic_states[num_dynamic_states++] = VK_DYNAMIC_STATE_LINE_WIDTH;
-    }
-
     VkPipelineDynamicStateCreateInfo dynamic_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = num_dynamic_states,
-        .pDynamicStates = dynamic_states,
+        .dynamicStateCount = r->num_frame_dynamic_states,
+        .pDynamicStates = r->frame_dynamic_states,
     };
 
     VkDescriptorSetLayout set_layouts[2] = {
@@ -2399,30 +2407,12 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     }
 
     /*
-     * Vulkan dynamic state is command-buffer-scoped. Invalidate the
-     * dynstate cache so the first draw re-issues vkCmdSet*.
-     * vkCmdBindVertexBuffers and push constants are likewise CB-scoped.
+     * Dynamic state, vertex and index buffer binds and push constants
+     * are command-buffer scoped: a new command buffer holds none of them.
+     * This is the only place r->dyn resets, so the first draw sets every
+     * frame dynamic state (begin_draw).
      */
-    r->dynstate_cache_valid = false;
-    /*
-     * Viewport/scissor are re-issued on the first draw of every CB via the
-     * dynstate_cache_valid=false gate above. Line width, depth bias and
-     * blend constants are conditional (line width only on pipelines with
-     * that dynamic state; depth bias/blend only on non-clear draws), so the
-     * shared valid flag can be set true by a draw that didn't emit them,
-     * letting a later draw skip vkCmdSet* against a value cached in a
-     * PREVIOUS command buffer — reusing undefined CB-scoped dynamic state
-     * (black/z-fighting/wrong blend on native drivers; MoltenVK retains
-     * state across CBs and hides it). Poison the conditional caches so the
-     * first draw that actually evaluates each one is forced to re-issue.
-     */
-    r->cached_line_width = NAN;
-    r->cached_depth_bias_constant = NAN;
-    r->cached_depth_bias_slope = NAN;
-    r->cached_blend_constants[0] = NAN;
-    r->cached_blend_constants[1] = NAN;
-    r->cached_blend_constants[2] = NAN;
-    r->cached_blend_constants[3] = NAN;
+    r->dyn.valid = 0;
     r->last_vertex_bind_valid = false;
     r->last_index_bind_valid = false;
     r->last_push_constants_valid = false;
@@ -2546,6 +2536,93 @@ static float clamp_line_width_to_device_limits(PGRAPHState *pg, float width)
     return fminf(fmaxf(min_width, width), max_width);
 }
 
+/*
+ * The only setters of r->command_buffer's dynamic state. Each skips a
+ * value the command buffer already holds (r->dyn), so a value set any
+ * other way would leave the shadow stale.
+ */
+static void dyn_set_viewport(PGRAPHVkState *r, const VkViewport *viewport)
+{
+    if ((r->dyn.valid & DYN_VIEWPORT) &&
+        !memcmp(viewport, &r->dyn.viewport, sizeof(*viewport))) {
+        return;
+    }
+    vkCmdSetViewport(r->command_buffer, 0, 1, viewport);
+    r->dyn.viewport = *viewport;
+    r->dyn.valid |= DYN_VIEWPORT;
+}
+
+static void dyn_set_scissor(PGRAPHVkState *r, const VkRect2D *scissor)
+{
+    if ((r->dyn.valid & DYN_SCISSOR) &&
+        !memcmp(scissor, &r->dyn.scissor, sizeof(*scissor))) {
+        return;
+    }
+    vkCmdSetScissor(r->command_buffer, 0, 1, scissor);
+    r->dyn.scissor = *scissor;
+    r->dyn.valid |= DYN_SCISSOR;
+}
+
+static void dyn_set_blend_constants(PGRAPHVkState *r, const float constants[4])
+{
+    if ((r->dyn.valid & DYN_BLEND_CONSTANTS) &&
+        !memcmp(constants, r->dyn.blend_constants,
+                sizeof(r->dyn.blend_constants))) {
+        return;
+    }
+    vkCmdSetBlendConstants(r->command_buffer, constants);
+    memcpy(r->dyn.blend_constants, constants, sizeof(r->dyn.blend_constants));
+    r->dyn.valid |= DYN_BLEND_CONSTANTS;
+}
+
+static void dyn_set_depth_bias(PGRAPHVkState *r, float constant, float slope)
+{
+    if ((r->dyn.valid & DYN_DEPTH_BIAS) &&
+        !memcmp(&constant, &r->dyn.depth_bias_constant, sizeof(constant)) &&
+        !memcmp(&slope, &r->dyn.depth_bias_slope, sizeof(slope))) {
+        return;
+    }
+    vkCmdSetDepthBias(r->command_buffer, constant, 0.0f, slope);
+    r->dyn.depth_bias_constant = constant;
+    r->dyn.depth_bias_slope = slope;
+    r->dyn.valid |= DYN_DEPTH_BIAS;
+}
+
+static void dyn_set_line_width(PGRAPHVkState *r, float width)
+{
+    if ((r->dyn.valid & DYN_LINE_WIDTH) &&
+        !memcmp(&width, &r->dyn.line_width, sizeof(width))) {
+        return;
+    }
+    vkCmdSetLineWidth(r->command_buffer, width);
+    r->dyn.line_width = width;
+    r->dyn.valid |= DYN_LINE_WIDTH;
+}
+
+/*
+ * A guest draw's depth bias factors and blend constants, from the
+ * registers. The bias goes in whether or not the pipeline enables it:
+ * a disabled bias ignores the factors.
+ */
+static void dyn_set_guest_draw_state(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
+    uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
+    float depth_bias_constant, depth_bias_slope;
+    memcpy(&depth_bias_constant, &zbias_reg, sizeof(depth_bias_constant));
+    memcpy(&depth_bias_slope, &zfactor_reg, sizeof(depth_bias_slope));
+    dyn_set_depth_bias(r, depth_bias_constant, depth_bias_slope);
+
+    float blend_constants[4] = { 0, 0, 0, 0 };
+    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
+        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
+        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
+    }
+    dyn_set_blend_constants(r, blend_constants);
+}
+
 static void begin_draw(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -2608,11 +2685,7 @@ static void begin_draw(PGRAPHState *pg)
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
-        if (!r->dynstate_cache_valid ||
-            memcmp(&viewport, &r->cached_viewport, sizeof(viewport)) != 0) {
-            vkCmdSetViewport(r->command_buffer, 0, 1, &viewport);
-            r->cached_viewport = viewport;
-        }
+        dyn_set_viewport(r, &viewport);
 
         /* Surface clip */
         /* FIXME: Consider moving to PSH w/ window clip */
@@ -2634,64 +2707,28 @@ static void begin_draw(PGRAPHState *pg)
             .extent.width = scissor_width,
             .extent.height = scissor_height,
         };
-        if (!r->dynstate_cache_valid ||
-            memcmp(&scissor, &r->cached_scissor, sizeof(scissor)) != 0) {
-            vkCmdSetScissor(r->command_buffer, 0, 1, &scissor);
-            r->cached_scissor = scissor;
-        }
+        dyn_set_scissor(r, &scissor);
 
-        if (r->pipeline_binding->has_dynamic_line_width) {
-            float line_width =
-                clamp_line_width_to_device_limits(pg, pg->surface_scale_factor);
-            if (!r->dynstate_cache_valid ||
-                line_width != r->cached_line_width) {
-                vkCmdSetLineWidth(r->command_buffer, line_width);
-                r->cached_line_width = line_width;
-            }
+        if (r->frame_dynamic_mask & DYN_LINE_WIDTH) {
+            dyn_set_line_width(r, clamp_line_width_to_device_limits(
+                                      pg, pg->surface_scale_factor));
         }
     }
 
     if (!pg->clearing) {
-        if (r->pipeline_binding->has_dynamic_depth_bias) {
-            uint32_t zbias_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
-            uint32_t zfactor_reg = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
-            float depth_bias_constant = *(float *)&zbias_reg;
-            float depth_bias_slope = *(float *)&zfactor_reg;
-            if (!r->dynstate_cache_valid ||
-                depth_bias_constant != r->cached_depth_bias_constant ||
-                depth_bias_slope != r->cached_depth_bias_slope) {
-                vkCmdSetDepthBias(r->command_buffer, depth_bias_constant, 0.0f,
-                                  depth_bias_slope);
-                r->cached_depth_bias_constant = depth_bias_constant;
-                r->cached_depth_bias_slope = depth_bias_slope;
-            }
-        }
-
-        float blend_constants[4] = { 0, 0, 0, 0 };
-        if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
-            uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
-            pgraph_argb_pack32_to_rgba_float(blend_color, blend_constants);
-        }
-        if (!r->dynstate_cache_valid ||
-            memcmp(blend_constants, r->cached_blend_constants,
-                   sizeof(blend_constants)) != 0) {
-            vkCmdSetBlendConstants(r->command_buffer, blend_constants);
-            memcpy(r->cached_blend_constants, blend_constants,
-                   sizeof(blend_constants));
-        }
-
+        dyn_set_guest_draw_state(pg);
         bind_descriptor_sets(pg);
         push_vertex_attr_values(pg);
+    } else if (r->dyn.valid != r->frame_dynamic_mask) {
+        /*
+         * A clear opened this command buffer. Set the rest now: a partial
+         * clear draws, and older validation layers want every dynamic
+         * state the pipeline declares set before a draw, whatever the
+         * enables.
+         */
+        dyn_set_guest_draw_state(pg);
     }
-
-    /*
-     * Once any branch above has committed state for this CB, the
-     * cache is valid for the rest of the CB regardless of which
-     * dynamic fields were touched — the un-touched fields still hold
-     * their last-cached values because Vulkan preserves dynamic
-     * state across draws within a single command buffer.
-     */
-    r->dynstate_cache_valid = true;
+    nv2a_vk_assert(r->dyn.valid == r->frame_dynamic_mask);
 
     r->in_draw = true;
 }
@@ -2938,28 +2975,12 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
                 pg, attachments[num_attachments].clearValue.color.float32);
             num_attachments++;
         } else {
+            /* Through r->dyn, so the next draw restores both */
             float blend_constants[4];
             pgraph_get_clear_color(pg, blend_constants);
-            vkCmdSetScissor(r->command_buffer, 0, 1, &clear_rect.rect);
-            vkCmdSetBlendConstants(r->command_buffer, blend_constants);
+            dyn_set_scissor(r, &clear_rect.rect);
+            dyn_set_blend_constants(r, blend_constants);
             vkCmdDraw(r->command_buffer, 3, 1, 0, 0);
-
-            /*
-             * The partial-channel clear bypasses begin_draw's dynstate
-             * path, so scissor / blend constants were pushed directly
-             * to the CB without updating the cached values. Mirror the
-             * GPU state in the cache so any subsequent draw in the
-             * same CB that hits begin_draw's !must_bind_pipeline path
-             * won't skip re-setting these and inherit the clear's
-             * overrides. Cleanest way is to update the cache (so the
-             * next matching draw can still skip) rather than blindly
-             * invalidate.
-             */
-            if (r->dynstate_cache_valid) {
-                r->cached_scissor = clear_rect.rect;
-                memcpy(r->cached_blend_constants, blend_constants,
-                       sizeof(r->cached_blend_constants));
-            }
         }
     }
 
