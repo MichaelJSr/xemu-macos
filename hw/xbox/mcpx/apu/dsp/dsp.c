@@ -198,13 +198,15 @@ void dsp_write_memory(DSPState *dsp, char space, uint32_t address,
 bool dsp_write_mixbuffer_bulk(DSPState *dsp, const uint32_t *data,
                               size_t n_words)
 {
-    if (dsp->ops == &c_dsp_ops) {
-        dsp_core_t *core = dsp->backend;
-        assert(n_words <= DSP_MIXBUFFER_SIZE);
-        memcpy(core->mixbuffer, data, n_words * sizeof(uint32_t));
-        return true;
+    /* Each engine's DMA span hook maps the window to its array */
+    uint32_t *dst = dsp->dma.mem_span ?
+        dsp->dma.mem_span(dsp->dma.mem_opaque, DSP_SPACE_X,
+                          DSP_MIXBUFFER_BASE, n_words) : NULL;
+    if (!dst) {
+        return false;
     }
-    return false;
+    memcpy(dst, data, n_words * sizeof(uint32_t));
+    return true;
 }
 
 bool dsp_get_halt_requested(DSPState *dsp)

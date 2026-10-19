@@ -47,15 +47,43 @@ static JitBackend *jit_be(DSPState *dsp)
 
 static uint32_t jit_dma_mem_read(void *opaque, int space, uint32_t addr)
 {
-    return dsp56300_read_memory((const Dsp56300Jit *)opaque,
+    return dsp56300_read_memory(((JitBackend *)opaque)->jit,
                                 (Dsp56300MemSpace)space, addr);
 }
 
 static void jit_dma_mem_write(void *opaque, int space, uint32_t addr,
                               uint32_t value)
 {
-    dsp56300_write_memory((Dsp56300Jit *)opaque, (Dsp56300MemSpace)space, addr,
-                          value);
+    dsp56300_write_memory(((JitBackend *)opaque)->jit,
+                          (Dsp56300MemSpace)space, addr, value);
+}
+
+/*
+ * X and Y RAM are buffers the C side owns (dsp_create_jit_backend), so a
+ * range that lies in one is indexed directly; P stays per word, because
+ * dsp56300_write_memory marks the JIT's dirty bitmap there.
+ */
+static uint32_t *jit_dma_mem_span(void *opaque, int space, uint32_t addr,
+                                  uint32_t count)
+{
+    JitBackend *be = opaque;
+    uint32_t end = addr + count;
+
+    if (space == DSP_SPACE_Y) {
+        return end <= DSP_YRAM_SIZE ? &be->yram[addr] : NULL;
+    }
+    if (space != DSP_SPACE_X) {
+        return NULL;
+    }
+    if (end <= DSP_XRAM_SIZE) {
+        return &be->xram[addr];
+    }
+    /* The mixbuffer window aliases xram[0xC00] (the X region map) */
+    if (addr >= DSP_MIXBUFFER_BASE &&
+        end <= DSP_MIXBUFFER_BASE + DSP_MIXBUFFER_SIZE) {
+        return &be->xram[0xC00 + addr - DSP_MIXBUFFER_BASE];
+    }
+    return NULL;
 }
 
 static uint32_t jit_read_peripheral(void *opaque, uint32_t address)
@@ -331,10 +359,10 @@ void dsp_jit_init(DSPState *dsp)
     dsp->backend = be;
     dsp->ops = &jit_dsp_ops;
 
-    dsp->dma.mem_opaque = be->jit;
+    dsp->dma.mem_opaque = be;
     dsp->dma.mem_read = jit_dma_mem_read;
     dsp->dma.mem_write = jit_dma_mem_write;
-    dsp->dma.mem_span = NULL;
+    dsp->dma.mem_span = jit_dma_mem_span;
 }
 
 static void dsp_jit_finalize(DSPState *dsp)

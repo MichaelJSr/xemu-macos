@@ -488,8 +488,8 @@ const MemoryRegionOps ep_ops = {
 void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
     /* Write VP results to the GP DSP MIXBUF (bulk NEON convert; direct
-     * memcpy into the interpreter engine's mixbuffer window, per-sample
-     * engine API otherwise). */
+     * memcpy into the engine's mixbuffer window, per-sample engine API
+     * otherwise). */
     {
         uint32_t converted[NUM_MIXBINS * NUM_SAMPLES_PER_FRAME];
         for (int i = 0; i < NUM_MIXBINS; i++) {

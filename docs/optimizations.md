@@ -2718,6 +2718,26 @@ x86_64 host (Windows, Linux, Intel macOS).
   −0.10% (6/6). Normal-mode sittings (this change alone on the upstream
   engine, with the next one on both) hold 1500 APU frames/s with
   gapless `XEMU_AUDIO_WAV` captures.
+- **Upstream's DSP engine gets DMA spans and the bulk mixbuffer copy
+  (2026-10-18).** The DMA span hook (`b0c863b4a5`) and the per-frame
+  bulk mixbuffer write served only the interpreter engine, so hosts
+  that run upstream's `dsp56300` engine (Windows x86_64 and ARM64,
+  Linux x86_64, Intel Macs; Apple Silicon and Linux arm64 run the fork
+  JIT) paid a backend call per DMA word and per mixbuffer sample. Its
+  X and Y RAM are buffers the C side owns, so `jit_dma_mem_span` indexes
+  them (the mixbuffer window aliases `xram[0xC00]`, as in the region
+  map); P stays per word for the dirty bitmap. `dsp_write_mixbuffer_bulk`
+  copies through either engine's span hook. Det with
+  `[audio.dsp_jit] enabled = false`, RAM and WAV equal (heavy-f1 1200,
+  stream-e2 600, cold boot 1800): heavy-f1 1200 cycles per frame −3.06%
+  (5/6), instructions −5.30% (6/6), wall fps +3.3%; stream-e2 1200
+  −2.83% (6/6), −5.38% (6/6), +2.9%; cold boot instructions −6.7%
+  (load 72-90). Normal mode, upstream engine, against the previous
+  commit (headless heavy-f1, two 30 s sittings each, load 39-65): APU
+  utilization 5.3-6.0% → 4.0-5.3% at 1500 frames/s. An x86_64 build
+  under Rosetta (upstream engine; the Windows debug-build hashes) keeps
+  its goldens. The fork engine runs the same copy: instructions −0.03%
+  (3/6), cycles +0.7% (2/6), both within noise.
 
 ### Input
 
