@@ -38,7 +38,8 @@ are in `xemu-history`.
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
-  pads: `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. Every
+  pads, `XEMU_VK_DRIVER`: `AUTOMATION_ENV` in `xemu_lease.py`); set them
+  per run. Every
   launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu
@@ -219,7 +220,7 @@ the other arm does too).
 
 | Script | Use |
 |---|---|
-| `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, CPU and runnable seconds (runnable well above CPU: the run waited for a core), RAM hash per run. Also runs the goldens. Each start removes the `/tmp/xbd.*` run dirs (HDD clones) killed runs left |
+| `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, CPU and runnable seconds (runnable well above CPU: the run waited for a core), RAM hash per run. Also runs the goldens. `--renderer offscreen`: Vulkan on a portable clone with cold caches, the driver named per line (an arm without `XEMU_VK_DRIVER` must run MoltenVK). Arm values may hold commas (a comma splits only before `NAME=`). Each start removes the `/tmp/xbd.*` run dirs (HDD clones) killed runs left |
 | `bench-det.py --timeline [-n runs] [--renderer offscreen] NAME=APP …` | Cold boot to steady play under icount, per phase (kernel, logos, prophecy, title, save list, level load, steady): frames, host ms, vCPU/translate/APU/disk/other split; per-phase deltas across arms. Replays must report `same RAM`. `--block-log DIR` adds `XEMU_BLOCK_LOG` per run and checks its rows against each phase's blockstats |
 | `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | B `VAR=0` vs E `VAR=1` (`--e-value`); takes `--app`, `--isolate-caches`. Exit 3 = artifact |
 | `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V"]` | Cross-binary, multi-var or numeric baseline |

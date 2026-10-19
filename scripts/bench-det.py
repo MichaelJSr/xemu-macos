@@ -2,7 +2,8 @@
 """Deterministic-mode A/B with load-robust host counters.
 
     bench-det.py [-n PAIRS] [-f FRAMES] [-t TAG] [-i LINE]... [--hash-at F,F]
-                 [--icount ARGS] [--out FILE] NAME=APP[:K=V,K=V] ...
+                 [--icount ARGS] [--renderer null|offscreen] [--out FILE]
+                 NAME=APP[:K=V,K=V] ...
 
 Each run clones the source config ($XEMU_TEST_CONFIG, else
 ../fixtures/xemu.toml) and the HDD and EEPROM it names into a fresh temp
@@ -11,6 +12,19 @@ null renderer under `-S -icount shift=2,align=off,sleep=off`, loads TAG
 (`-` boots cold), writes the -i pipe lines, advances FRAMES frames and
 hashes guest RAM (sha256[:16]: QMP xemu-ram-digest, or xemu-dump-ram's
 file on builds without it). Arms run interleaved, PAIRS times.
+
+--renderer offscreen runs Vulkan instead (XEMU_HEADLESS=1) on a portable
+clone of APP whose shader and pipeline caches stay in the run dir (cold
+every run). Each line (and --timeline's) then names the driver from the
+run's `- Driver:` line, and bench-det stops when it isn't the one the arm
+asked for: MoltenVK (the deterministic pin) without XEMU_VK_DRIVER,
+KosmicKrisp or MoltenVK with XEMU_VK_DRIVER=kosmickrisp|moltenvk. Surface
+downloads write rendered pixels into guest RAM, so offscreen hashes are
+per driver.
+
+An arm's K=V list splits at a comma only where NAME= follows it, so a
+value may hold commas as long as none is followed by NAME=:
+kk=/tmp/e.app:XEMU_VK_DRIVER=kosmickrisp,MESA_KK_DISABLE_WORKAROUNDS=2,6,17
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
 and instructions per guest frame across the whole process, and its CPU
@@ -30,8 +44,9 @@ killed bench-det left (owner gone and no live process naming the dir).
 Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
 marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
 in /tmp/xemu-leases, XEMU_BASE_PATH set to the bench cache, and none of
-the automation variables this process inherited (XEMU_RAM_SHM, ...; an
-arm's own K=V stays).
+the automation variables this process inherited (XEMU_RAM_SHM,
+XEMU_VK_DRIVER, ...; an arm's own K=V stays, even when it equals the
+exported value).
 
 Example: bench-det.py -n 4 base=/tmp/b.app new=/tmp/e.app
 (an arm can add env: new=/tmp/e.app:XEMU_GUEST_MO=1)
@@ -222,17 +237,55 @@ def ram_sha256(q, d):
     return h
 
 
+def renderer_target(app, a, d):
+    """(app, base path, XEMU_HEADLESS) for a run in d. Offscreen Vulkan
+    writes shader and pipeline caches to the base path: keep them in d
+    (cold every run). The portable clone covers binaries that predate
+    XEMU_BASE_PATH."""
+    if a.renderer != 'offscreen':
+        return app, lease.bench_cache(), 'null'
+    clone = os.path.join(d, 'xemu.app')
+    subprocess.run(['cp', '-Rc', app, clone], check=True)
+    open(os.path.join(clone, 'Contents/Resources/xemu.toml'), 'w').close()
+    return clone, d, '1'
+
+
+def run_env(env, headless, fifo, base):
+    """The run's environment: the arm's K=V win over bench-det's own."""
+    e = dict(os.environ, XEMU_HEADLESS=headless, XEMU_INPUT_PIPE=fifo, XEMU_BASE_PATH=base)
+    e.update(env)
+    return e
+
+
+def vk_driver(log):
+    """The `- Driver: <name>, <info> (id N)` of the run, or '' (null renderer)."""
+    m = re.search(r'(?m)^- Driver: (.*?) \(id \d+\)$', open(log, errors='replace').read())
+    return m.group(1) if m else ''
+
+
+def check_driver(name, env, driver):
+    """An offscreen run's driver must be the one its arm asked for: MoltenVK
+    (the deterministic pin) without XEMU_VK_DRIVER, KosmicKrisp or MoltenVK
+    for those names (a dylib path is taken as is)."""
+    want = env.get('XEMU_VK_DRIVER') or 'moltenvk'
+    expect = {'kosmickrisp': 'KosmicKrisp', 'moltenvk': 'MoltenVK'}.get(want)
+    if driver and expect and not driver.startswith(expect):
+        sys.exit(f'bench-det: {name} ran {driver}, not {expect} '
+                 f'(XEMU_VK_DRIVER={env.get("XEMU_VK_DRIVER", "")!r}; '
+                 'deterministic runs without it must pin MoltenVK)')
+
+
 def run_once(app, env, a, purpose=''):
     d = scratch_dir()
     try:
         toml, pads, fifo, sock, log = scratch(d)
-        e = dict(os.environ, XEMU_HEADLESS='null', XEMU_INPUT_PIPE=fifo,
-                 XEMU_BASE_PATH=lease.bench_cache(), **env)
+        app, base, headless = renderer_target(app, a, d)
+        e = run_env(env, headless, fifo, base)
         cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
                '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
         stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
         with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
-                         30 + stops[-1] // 20, env=e, stdout=subprocess.DEVNULL,
+                         30 + stops[-1] // 20, keep=env, env=e, stdout=subprocess.DEVNULL,
                          stderr=open(log, 'w')) as proc:
             wait_log(log, 'xemu: ready', 1, proc)
             q = QMP(sock, proc)
@@ -261,7 +314,8 @@ def run_once(app, env, a, purpose=''):
                 pass
             proc.wait(timeout=30)
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
-                'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes)}
+                'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes),
+                'driver': vk_driver(log)}
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -397,18 +451,8 @@ def tl_launch(app, env, a, d, gdb, stack):
     """Start a timeline xemu in d: cold, paused, under icount, via lease.popen
     (marker, nice, slot, lease); stack.close() ends it."""
     toml, pads, fifo, sock, log = scratch(d)
-    base = lease.bench_cache()
-    if a.renderer == 'offscreen':
-        # Offscreen Vulkan writes shader caches to the base path: keep them
-        # in d (cold every run). The portable clone covers binaries that
-        # predate XEMU_BASE_PATH.
-        base = d
-        clone = os.path.join(d, 'xemu.app')
-        subprocess.run(['cp', '-Rc', app, clone], check=True)
-        open(os.path.join(clone, 'Contents/Resources/xemu.toml'), 'w').close()
-        app = clone
-    e = dict(os.environ, XEMU_HEADLESS='null' if a.renderer == 'null' else '1',
-             XEMU_INPUT_PIPE=fifo, XEMU_BASE_PATH=base, **env)
+    app, base, headless = renderer_target(app, a, d)
+    e = run_env(env, headless, fifo, base)
     cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
            '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
     if a.dvd:
@@ -417,7 +461,7 @@ def tl_launch(app, env, a, d, gdb, stack):
         cmd += ['-gdb', f'unix:{os.path.join(d, "gdb.sock")},server=on,wait=off']
     proc = stack.enter_context(lease.popen(
         cmd, f'bench-det --timeline {"markers" if gdb else "timing"} ({a.renderer})', 180,
-        env=e, stdout=subprocess.DEVNULL, stderr=open(log, 'w')))
+        keep=env, env=e, stdout=subprocess.DEVNULL, stderr=open(log, 'w')))
     wait_log(log, 'xemu: ready', 1, proc)
     q = QMP(sock, proc)
     q.cmd('stop')
@@ -545,6 +589,7 @@ def tl_markers(app, env, a, va):
         r = q.cmd('xemu-frame-advance', frames=1)     # on to a vblank
         info['end'] = r['frame']
         info['ram'] = tl_ram(q, d)
+        info['driver'] = vk_driver(log)
         return marks, info, schedule
     finally:
         stack.close()   # kills a xemu still running, drops its lease and slot
@@ -626,7 +671,7 @@ def tl_timing(app, env, a, marks, info, schedule):
             thr = r.pop('thr')
             r['vcpu_ms'] = thr.get(vcpu, 0) / 1e6
             r['other_ms'] = (sum(thr.values()) - thr.get(vcpu, 0)) / 1e6
-        return rows, ram
+        return rows, ram, vk_driver(log)
     finally:
         stack.close()   # kills a xemu still running, drops its lease and slot
         shutil.rmtree(d, ignore_errors=True)
@@ -723,9 +768,12 @@ def timeline(a, arms):
           f'{va["xbe_entry"] and hex(va["xbe_entry"])} ({release} VAs)', flush=True)
     t = time.time()
     marks, info, schedule = tl_markers(app, env, a, va)
+    check_driver(name, env, info['driver'])
     print(f'  level {info.get("level")}; end frame {info["end"]} ram {info["ram"]}; '
-          f'{len(schedule) // 2} presses; {time.time() - t:.1f} s', flush=True)
+          f'{len(schedule) // 2} presses; {time.time() - t:.1f} s'
+          + (f' ({info["driver"]})' if info['driver'] else ''), flush=True)
     res = {n: [] for n, _, _ in arms}
+    drivers = {}
     out = open(a.out, 'a') if a.out else None
     first_log = None
     if a.block_log:
@@ -735,11 +783,14 @@ def timeline(a, arms):
             if a.block_log:
                 blog = os.path.join(a.block_log, f'{n}-{i + 1}.tsv')
                 env = dict(env, XEMU_BLOCK_LOG=blog)
-            rows, ram = tl_timing(app, env, a, marks, info, schedule)
+            rows, ram, drv = tl_timing(app, env, a, marks, info, schedule)
+            check_driver(n, env, drv)
+            drivers[n] = drv
             res[n].append(rows)
             tot = sum(r['ms'] for p, r in rows.items() if p != 'tail')
             same = 'same RAM' if ram == info['ram'] else f'RAM {ram} DIFFERS from the marker pass'
-            print(f'{i + 1} {n}: boot to steady {tot / 1e3:.2f} s host, {same}', flush=True)
+            print(f'{i + 1} {n}: boot to steady {tot / 1e3:.2f} s host, {same}'
+                  + (f' ({drv})' if drv else ''), flush=True)
             if out:
                 out.write(json.dumps({'pair': i + 1, 'arm': n, 'marks': marks, 'info': info,
                                       'ram': ram, 'rows': {p: {k: v for k, v in r.items() if k != 'thr'}
@@ -762,7 +813,7 @@ def timeline(a, arms):
           'flush: count/ms')
     base = None
     for n, _, _ in arms:
-        means = tl_print(n, res[n], base)
+        means = tl_print(n + (f' ({drivers[n]})' if drivers.get(n) else ''), res[n], base)
         base = base or (n, means)
 
 
@@ -775,10 +826,11 @@ def main():
     p.add_argument('--hash-at', default='')
     p.add_argument('--icount', default='shift=2,align=off,sleep=off')
     p.add_argument('--out', default='')
+    p.add_argument('--renderer', choices=('null', 'offscreen'), default='null',
+                   help='offscreen: Vulkan on a portable clone with cold caches')
     t = p.add_argument_group('boot timeline (--timeline)')
     t.add_argument('--timeline', action='store_true',
                    help='cold boot to steady play, phase by phase (-n timing runs per arm)')
-    t.add_argument('--renderer', choices=('null', 'offscreen'), default='null')
     t.add_argument('--dvd', default='', help='disc to boot (default: the fixture config\'s)')
     t.add_argument('--route', default='a',
                    help='save-list presses, comma-separated (dpad_left,a: new game); each key '
@@ -804,7 +856,8 @@ def main():
     for spec in a.arms:
         name, rest = spec.split('=', 1)
         app, _, envs = rest.partition(':')
-        arms.append((name, app, dict(kv.split('=', 1) for kv in envs.split(',') if kv)))
+        kvs = re.split(r',(?=[A-Za-z_][A-Za-z0-9_]*=)', envs)   # see the docstring
+        arms.append((name, app, dict(kv.split('=', 1) for kv in kvs if kv)))
     if a.timeline:
         a.route = a.route.split(',')
         if a.tag == 'azurik-heavy-f1':
@@ -819,10 +872,11 @@ def main():
             res[name].append(r)
             line = (f'{i + 1} {name}: {r["fps"]:.1f} fps  {r["mcyc"]:.3f} Mcyc/f  '
                     f'{r["mins"]:.3f} Mins/f  {r["cpu_s"]:.2f}/{r["runnable_s"]:.2f} cpu/runnable s  '
-                    f'{r["ram"]}')
+                    f'{r["ram"]}' + (f'  ({r["driver"]})' if r['driver'] else ''))
             print(line, flush=True)
             if out:
                 out.write(json.dumps({'pair': i + 1, 'arm': name, **r}) + '\n')
+            check_driver(name, env, r['driver'])
     load = os.getloadavg()
     print(f'load {load[0]:.1f} {load[1]:.1f} {load[2]:.1f}')
     base = arms[0][0]

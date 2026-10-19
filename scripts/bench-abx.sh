@@ -325,11 +325,13 @@ done
 
 # ---- receipt ---------------------------------------------------------------
 # The Vulkan driver each arm ran, as the renderer logs it beside
-# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)").
+# "Selected physical device" ("- Driver: MoltenVK, 1.4.3 (id 14)"); every
+# distinct one, joined with " + " (the receipt refuses an arm that ran two).
 typeset -A IDENT_DRV
 for arm in B E; do
   IDENT_DRV[$arm]=$(grep -h '^- Driver: ' $OUT/ab_warmup$arm.log $OUT/ab_$arm<->.log(N) \
-                    2>/dev/null | head -1 | cut -c11-)
+                    2>/dev/null | cut -c11- | sort -u |
+                    awk 'NR > 1 { printf " + " } { printf "%s", $0 }')
 done
 META=$OUT/meta.json
 python3 - "$META" <<EOF

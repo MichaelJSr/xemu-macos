@@ -16,8 +16,12 @@ the harness instead of left to operator discipline:
             per-arm mean +/- sd, per-pair deltas and sign tally,
             cross-arm draws/flip identity check (>15% = INVALID,
             >5% = composition warning + draws/s throughput, the 1.18
-            correction), binary identity, and a machine-readable JSON
-            receipt. Exit code carries the verdict.
+            correction), the Vulkan driver of every run (an arm whose
+            runs name more than one `- Driver:` is INVALID: with
+            driver = 'kosmickrisp' a KosmicKrisp strike marker in the
+            shared data folder switches later runs to MoltenVK), binary
+            identity, and a
+            machine-readable JSON receipt. Exit code carries the verdict.
 
   selftest  --dry-run backend: builds synthetic nsprof fixtures (a
             clean 3-pair A/B, a bimodal run, an out-of-band menu run),
@@ -34,6 +38,7 @@ import json
 import math
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -61,6 +66,16 @@ def run_summarizer(summarizer, log_path):
     if not isinstance(data, list) or not data:
         raise RuntimeError(f"summarizer returned no results for {log_path}")
     return data[0]
+
+
+def log_vk_driver(log_path):
+    """The run's `- Driver: <name>, <version> (id N)`, or '' (none logged)."""
+    try:
+        text = open(log_path, errors="replace").read()
+    except OSError:
+        return ""
+    m = re.search(r"(?m)^- Driver: (.*?) \(id \d+\)$", text)
+    return m.group(1) if m else ""
 
 
 def mean_sd(vals):
@@ -137,6 +152,7 @@ def cmd_gate(args):
         "bimodal": bimodal,
         "cv_max": args.cv_max,
         "valid": valid,
+        "vk_driver": log_vk_driver(args.log),
     }
     with open(args.out, "w") as f:
         json.dump(run, f, indent=2)
@@ -251,10 +267,17 @@ def cmd_receipt(args):
         else:
             scene["verdict"] = "ok"
 
+    # One driver per arm: a strike marker can switch runs whose setting is
+    # kosmickrisp to MoltenVK mid-session.
+    drivers = {arm: sorted({r.get("vk_driver") for r in runs_
+                            if r.get("vk_driver")})
+               for arm, runs_ in (("B", arm_b), ("E", arm_e))}
+    driver_mixed = [arm for arm, d in drivers.items() if len(d) > 1]
+
     gates_ok = bool(live) and all(r["valid"] for r in live)
     if dead or not live:
         verdict = "dead-runs"
-    elif not gates_ok or scene["verdict"] == "invalid":
+    elif not gates_ok or scene["verdict"] == "invalid" or driver_mixed:
         verdict = "invalid"
     else:
         verdict = "valid"
@@ -284,6 +307,8 @@ def cmd_receipt(args):
         "sign_tally": {**tally, "n_pairs": len(pairs),
                        "unanimous": unanimous},
         "scene_identity": scene,
+        "drivers": drivers,
+        "driver_mixed_arms": driver_mixed,
         "throughput": throughput,
         "fps_delta": fps_delta,
         "dead_runs": [r["label"] for r in dead],
@@ -352,6 +377,9 @@ def print_receipt_block(r):
               f"({r['fps_delta']['pct']:+.2f}%)")
     if r["dead_runs"]:
         print(f"dead runs     : {', '.join(r['dead_runs'])}")
+    for arm in r.get("driver_mixed_arms", []):
+        print(f"driver mix    : arm {arm} ran {' and '.join(r['drivers'][arm])} "
+              "(a KosmicKrisp strike marker?): verdict REFUSED")
     print(f"VERDICT       : {r['verdict'].upper()}")
     print("===============================================================================")
 
@@ -496,6 +524,33 @@ def cmd_selftest(args):
            receipt2["scene_identity"]["verdict"] == "invalid" and
            receipt2["fps_delta"] is None,
            "receipt REFUSES fps delta across mismatched scenes (>15%)")
+
+    # 6. ... and when an arm's runs name more than one Vulkan driver
+    #    (a strike marker switched driver = 'kosmickrisp' mid-session)
+    mixed = []
+    for i, rj in enumerate(run_jsons):
+        with open(rj) as f:
+            run = json.load(f)
+        first_b = run["label"] == "B1"
+        run["vk_driver"] = ("KosmicKrisp, Mesa 26.3.0" if first_b
+                            else "MoltenVK, 1.4.3")
+        path = os.path.join(outdir, f"run_mixed_{i}.json")
+        with open(path, "w") as f:
+            json.dump(run, f, indent=2)
+        mixed.append(path)
+    meta3 = dict(meta)
+    meta3["run_jsons"] = mixed
+    meta3_path = os.path.join(outdir, "meta-mixed.json")
+    with open(meta3_path, "w") as f:
+        json.dump(meta3, f, indent=2)
+    ns3 = argparse.Namespace(meta=meta3_path,
+                             out=os.path.join(outdir, "receipt-mixed.json"))
+    rc3 = cmd_receipt(ns3)
+    with open(ns3.out) as f:
+        receipt3 = json.load(f)
+    expect(rc3 == RECEIPT_EXIT_INVALID and
+           receipt3["driver_mixed_arms"] == ["B"],
+           "receipt REFUSES an arm whose runs ran two drivers")
 
     print()
     if failures:

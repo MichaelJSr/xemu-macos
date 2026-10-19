@@ -872,10 +872,11 @@ Other automation interfaces (windowed or headless):
   none of the automation variables they inherited: `XEMU_RAM_SHM`,
   `XEMU_INPUT_PIPE`, `XEMU_INPUT_RECORD` and `_PORT`,
   `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
-  `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS` (stderr:
-  `lease: not passing the inherited ...`), so a bench never takes the
-  owner's shared-RAM name, pipe or files; set one per run (`VAR=V`
-  arguments, an arm's `K=V`) to use it.
+  `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS`,
+  `XEMU_VK_DRIVER` (stderr: `lease: not passing the inherited ...`), so
+  a bench never takes the owner's shared-RAM name, pipe or files, or
+  leaves the MoltenVK pin; set one per run (`VAR=V` arguments, an arm's
+  `K=V`) to use it.
 - **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one
