@@ -119,14 +119,24 @@ last xemu release passes `--exclude-pre-releases`.
    the sha256 in its body. Both refuse a tag that already exists,
    because published tags are immutable.
 3. **One commit** that updates the tag, sha and sha256 together in
-   `build.sh`.
+   `build.sh` and copies the asset's `share/kosmickrisp/LICENSES` over
+   `licenses/kosmickrisp` (`LICENSE.txt`'s Mesa section; `build.sh`
+   refuses an asset whose notices differ). arm64 builds then download
+   that asset (cached in `macos-libs/arm64`, sha256-checked on every
+   build) and bundle its dylib in `Contents/Libraries/arm64`; x86_64
+   builds carry none. CI asserts the `Bundling KosmicKrisp from <asset>
+   (Mesa <ver> (git-<sha10>))` line against the pins, the dylib's place,
+   install name, system-only deps, minos 26.0 and signature, its absence
+   on x86_64, and the Universal bundle's layout, signatures and
+   `LICENSE.txt`.
 
 **Respin.** To rebuild a Mesa tag that's already published (a script,
 LLVM or SPIR-V pin change, or a bad asset), add `-f respin=<n>`,
 counting from 2: the release is then `kosmickrisp-<mesa-tag>-<n>`,
 holding `kosmickrisp-<mesa-tag>-<n>-arm64.tar.xz`, and PROVENANCE's
-`release=` line names it. Step 3 then changes only `kk_asset_sha256`;
-its commit body names the release.
+`release=` line names it. Step 3 then changes only `kk_asset_sha256`
+(and `licenses/kosmickrisp`, if the notices moved); its commit body
+names the release.
 
 `scripts/build-kosmickrisp.sh package` builds the same tarball
 locally (in `../kk` by default, with source, build and install kept
@@ -188,11 +198,12 @@ Only for when CI is unavailable. `build.sh`'s `package_macos` is the
 recipe: fix packaging bugs there, never by hand.
 
 1. `XEMU_ARM_CPU=apple-m1 XEMU_PGO=use ./build.sh` builds `dist/xemu.app`
-   and `dist/LICENSE.txt`; check its `Bundling MoltenVK from …` line.
+   and `dist/LICENSE.txt`; check its `Bundling MoltenVK from …` and
+   `Bundling KosmicKrisp from …` lines.
 2. `codesign --verify --deep --strict dist/xemu.app`, then
    `cd dist && zip -r -y -q xemu-vX.Y.Z-macos-arm64.zip xemu.app LICENSE.txt`.
-   Expect the zip at ~12–13 MiB; much smaller means a dylib or MoltenVK
-   wasn't bundled.
+   Expect the zip at ~14 MiB (KosmicKrisp is ~2.3 MiB of it); much
+   smaller means a dylib, MoltenVK or KosmicKrisp wasn't bundled.
 3. For the universal zip, keep that bundle, run `./build.sh -a x86_64`
    (it reconfigures `build/` and rewrites `dist/`), then merge the two
    as `build-macos.yml`'s `build_universal` job does: unzip both into
