@@ -80,6 +80,17 @@ vendor_moltenvk() {
     rm -rf "${tmp}"
 }
 
+# KosmicKrisp pins: the Mesa tag, its commit, and the sha256 of the
+# kosmickrisp-<tag>[-<respin>]-arm64.tar.xz asset that
+# kosmickrisp-asset.yml publishes from them.
+# scripts/build-kosmickrisp.sh reads the tag, sha and respin.
+# Nothing bundles KosmicKrisp yet. Bump them together in one commit
+# (docs/RELEASING-macos.md).
+kk_mesa_tag=mesa-26.3.0-rc1
+kk_mesa_sha=470651298910062f5ad5c4e7fb480c60c6943bc9
+kk_respin=
+kk_asset_sha256=
+
 # --- PGO (clang and GCC) ---
 # Optional two-stage flow:
 #   XEMU_PGO=generate ./build.sh   # build with -fprofile-generate

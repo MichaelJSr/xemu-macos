@@ -113,7 +113,7 @@ Set-Location xemu-macos
 git fetch origin
 git switch master                            # or the branch the owner names for this run
 git remote add upstream https://github.com/xemu-project/xemu.git
-git log --oneline -3; git describe --tags    # the release under test, or later
+git log --oneline -3; git describe --tags --match 'v*'    # the release under test, or later
 ```
 
 Fallback if there's no network. Clone from the kit's bundle instead:
@@ -159,7 +159,7 @@ Pass: `problems: 0`. `SHA256SUMS.txt` is authoritative. `fixtures\README.md`'s m
 
 ### 1.5 Unzip the release builds [agent]
 
-Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. The 2026-10-17 kit held every x86_64 zip (matching GitHub's digests) and the v0.15.1 arm64 ones: the fork's v0.15.1 and v0.14 zips in `releases\`, upstream's v0.8.137 in `releases\upstream-v0.8.137\`. The `gh release download` lines below only run when `gh auth status` passes, and with `--skip-existing` they only fetch what's missing (a kit without the release under test needs them). If `gh release list --repo MichaelJSr/xemu-macos --limit 3` shows a release newer than v0.15.2, set `$Ver` here and in `kit.ps1`.
+Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. The 2026-10-17 kit held every x86_64 zip (matching GitHub's digests) and the v0.15.1 arm64 ones: the fork's v0.15.1 and v0.14 zips in `releases\`, upstream's v0.8.137 in `releases\upstream-v0.8.137\`. The `gh release download` lines below only run when `gh auth status` passes, and with `--skip-existing` they only fetch what's missing (a kit without the release under test needs them). If `gh release list --repo MichaelJSr/xemu-macos --exclude-pre-releases --limit 3` shows a release newer than v0.15.2, set `$Ver` here and in `kit.ps1`.
 
 ```powershell
 $Kit = 'C:\xemu-kit'

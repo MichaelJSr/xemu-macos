@@ -10,6 +10,9 @@ on:
       - '**'
     tags-ignore:
       - "v*"
+      # Dependency prereleases (kosmickrisp-asset.yml) and archive tags.
+      - "kosmickrisp-*"
+      - "archive/*"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

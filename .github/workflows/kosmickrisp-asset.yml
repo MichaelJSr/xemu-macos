@@ -1,0 +1,224 @@
+name: KosmicKrisp asset
+
+# Builds Mesa's KosmicKrisp driver from a pinned Mesa tag and publishes
+# it as the prerelease kosmickrisp-<mesa-tag> (kosmickrisp-<mesa-tag>-<n>
+# for a respin), for build.sh to bundle. Dispatch-only: a cold build
+# takes most of an hour on a 7 GB runner, and the published bytes are
+# what gets gated and shipped. The build job runs third-party code with
+# a read-only token; only the publish job, which runs none, can write.
+# Pin-bump flow: docs/RELEASING-macos.md, "KosmicKrisp pin bump".
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_tag:
+        description: Mesa tag, e.g. mesa-26.3.0 (empty = build.sh's kk_mesa_tag)
+        type: string
+        default: ''
+      mesa_sha:
+        description: Full commit sha of that tag (empty = build.sh's kk_mesa_sha)
+        type: string
+        default: ''
+      respin:
+        description: Respin number n, publishing kosmickrisp-<mesa-tag>-<n> (empty = first build of the tag)
+        type: string
+        default: ''
+
+permissions: {}
+
+concurrency:
+  group: kosmickrisp-asset
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build KosmicKrisp (arm64)
+    runs-on: macos-26
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.pins.outputs.release }}
+      mesa_tag: ${{ steps.pins.outputs.mesa_tag }}
+      mesa_sha: ${{ steps.pins.outputs.mesa_sha }}
+      asset: ${{ steps.pins.outputs.asset }}
+      sha256: ${{ steps.check.outputs.sha256 }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      JOBS: 3
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      with:
+        persist-credentials: false
+    - name: Resolve the pins
+      # The script's own resolution (inputs, else build.sh), exported as
+      # MESA_TAG, MESA_SHA, KK_RESPIN, KK_RELEASE, KK_DIR, KK_PREFIX and KK_ASSET.
+      # The script validates every value before printing it.
+      id: pins
+      env:
+        MESA_TAG: ${{ inputs.mesa_tag }}
+        MESA_SHA: ${{ inputs.mesa_sha }}
+        KK_RESPIN: ${{ inputs.respin }}
+      run: |
+        [[ -z "$KK_RESPIN" || "$KK_RESPIN" =~ ^[1-9][0-9]*$ ]] ||
+          { echo "::error::respin '${KK_RESPIN}' is not a number"; exit 1; }
+        out=$(scripts/build-kosmickrisp.sh -n package "$RUNNER_TEMP/kk")
+        printf '%s\n' "$out" | tee -a "$GITHUB_ENV"
+        val() { sed -n "s/^$1=//p" <<< "$out"; }
+        {
+          echo "release=$(val KK_RELEASE)"
+          echo "mesa_tag=$(val MESA_TAG)"
+          echo "mesa_sha=$(val MESA_SHA)"
+          echo "asset=$(basename "$(val KK_ASSET)")"
+        } >> "$GITHUB_OUTPUT"
+    - name: Refuse an existing release
+      # Published tags are immutable: never replace an asset. The publish
+      # job checks again; this one saves the hour of building.
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        fail() { echo "::error::$*"; exit 1; }
+        # 0 if tag or release $1 exists, 1 if neither; any other answer fails.
+        taken() {
+          local out
+          out=$(gh api "repos/${GH_REPO}/git/ref/tags/$1" 2>&1) && return 0
+          [[ "$out" == *"(HTTP 404)"* ]] || fail "could not look up tag $1: ${out}"
+          out=$(gh release view "$1" --json tagName 2>&1) && return 0
+          [[ "$out" == "release not found" ]] || fail "could not look up release $1: ${out}"
+          return 1
+        }
+        if taken "$KK_RELEASE"; then
+          fail "${KK_RELEASE} already exists; dispatch with the next respin"
+        fi
+    - name: Build and package
+      run: |
+        df -h "$RUNNER_TEMP"
+        xcodebuild -version
+        scripts/build-kosmickrisp.sh package
+        df -h "$RUNNER_TEMP"
+    - name: Assert provenance
+      # On the extracted tarball, i.e. the bytes that get published.
+      # Every reader takes the whole output (no grep -q in a pipe).
+      id: check
+      run: |
+        fail() { echo "::error::$*"; exit 1; }
+        [[ -f "$KK_ASSET" ]] || fail "no ${KK_ASSET}: the build packaged another name"
+        d="$RUNNER_TEMP/check"
+        rm -rf "$d"
+        mkdir -p "$d"
+        tar -xJf "$KK_ASSET" -C "$d"
+        lib="$d/lib/libvulkan_kosmickrisp.dylib"
+        want="Mesa ${MESA_TAG#mesa-} (git-${MESA_SHA:0:10})"
+        got=$(strings "$lib" | awk '/^Mesa [0-9]/ && !v { v = $0 } END { print v }')
+        echo "version: ${got}"
+        [[ "$got" == "$want" ]] || fail "version string '${got}', expected '${want}'"
+        archs=$(lipo -archs "$lib")
+        [[ "$archs" == arm64 ]] || fail "architectures '${archs}', expected arm64"
+        id=$(otool -D "$lib" | awk 'NR == 2')
+        [[ "$id" == "@rpath/libvulkan_kosmickrisp.dylib" ]] || fail "install name ${id}"
+        otool -L "$lib"
+        bad=$(otool -L "$lib" | awk 'NR > 2 && $1 !~ /^\/(usr\/lib|System\/Library)\// { print $1 }')
+        [[ -z "$bad" ]] || fail "non-system dependencies: ${bad}"
+        bv() { otool -l "$lib" | awk -v k="$1" '/LC_BUILD_VERSION/ { f = 1 } f && $1 == k && v == "" { v = $2 } END { print v }'; }
+        minos=$(bv minos)
+        sdk=$(bv sdk)
+        echo "minos ${minos}, sdk ${sdk}"
+        [[ "$minos" == 26.0 ]] || fail "minos ${minos}, expected 26.0"
+        # A runner-image rotation must not silently change the SDK.
+        [[ "${sdk%%.*}" == 26 ]] || fail "built against SDK ${sdk}, expected the macOS 26 SDK"
+        # The loader's entry points must be there; Mesa exports more.
+        exports=$(nm -gU "$lib" | awk '{ print $NF }')
+        for s in _vk_icdGetInstanceProcAddr _vk_icdGetPhysicalDeviceProcAddr \
+                 _vk_icdNegotiateLoaderICDInterfaceVersion; do
+          grep -qxF "$s" <<< "$exports" || fail "${s} is not exported"
+        done
+        codesign --verify --strict "$lib" || fail "codesign --verify failed"
+        prov="$d/share/kosmickrisp/PROVENANCE"
+        cat "$prov"
+        grep -qxF "mesa_commit=${MESA_SHA}" "$prov" || fail "PROVENANCE names another commit"
+        grep -qxF "release=${KK_RELEASE}" "$prov" || fail "PROVENANCE names another release"
+        ls "$d"/share/vulkan/icd.d/*.json "$d"/share/kosmickrisp/LICENSES/*
+        sum=$(shasum -a 256 "$KK_ASSET" | awk '{ print $1 }')
+        echo "sha256 ${sum}"
+        echo "sha256=${sum}" >> "$GITHUB_OUTPUT"
+    - name: Upload the tarball
+      # For the publish job, and for inspection when an assert fails.
+      if: always() && env.KK_ASSET != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+      with:
+        name: kosmickrisp-arm64
+        path: ${{ env.KK_ASSET }}
+        if-no-files-found: ignore
+        compression-level: 0
+        retention-days: 14
+
+  publish:
+    name: Publish the prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.build.outputs.release }}
+      MESA_TAG: ${{ needs.build.outputs.mesa_tag }}
+      MESA_SHA: ${{ needs.build.outputs.mesa_sha }}
+      ASSET: ${{ needs.build.outputs.asset }}
+      BUILD_SHA256: ${{ needs.build.outputs.sha256 }}
+      RESPIN: ${{ inputs.respin }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Download the tarball
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+      with:
+        name: kosmickrisp-arm64
+        path: ${{ runner.temp }}/dist
+    - name: Publish prerelease
+      run: |
+        fail() { echo "::error::$*"; exit 1; }
+        [[ -n "$RELEASE_TAG" && -n "$ASSET" && -n "$BUILD_SHA256" ]] || fail "the build job left no outputs"
+        # As in the build job: 0 if tag or release $1 exists, 1 if neither.
+        taken() {
+          local out
+          out=$(gh api "repos/${GH_REPO}/git/ref/tags/$1" 2>&1) && return 0
+          [[ "$out" == *"(HTTP 404)"* ]] || fail "could not look up tag $1: ${out}"
+          out=$(gh release view "$1" --json tagName 2>&1) && return 0
+          [[ "$out" == "release not found" ]] || fail "could not look up release $1: ${out}"
+          return 1
+        }
+        if taken "$RELEASE_TAG"; then
+          fail "${RELEASE_TAG} already exists"
+        fi
+        file="$RUNNER_TEMP/dist/${ASSET}"
+        sum=$(sha256sum "$file" | awk '{ print $1 }')
+        [[ "$sum" == "$BUILD_SHA256" ]] || fail "downloaded sha256 ${sum}, the build job had ${BUILD_SHA256}"
+        prov=$(tar -xJOf "$file" share/kosmickrisp/PROVENANCE)
+        grep -qxF "mesa_commit=${MESA_SHA}" <<< "$prov" || fail "PROVENANCE names another commit"
+        grep -qxF "release=${RELEASE_TAG}" <<< "$prov" || fail "PROVENANCE names another release"
+        run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        {
+          echo "Mesa's KosmicKrisp Vulkan driver, built from \`${MESA_TAG}\` (${MESA_SHA}) for xemu-macos on Apple Silicon with macOS 26. A build dependency, not an xemu release."
+          echo
+          echo "sha256 of \`${ASSET}\`: \`${sum}\`"
+          echo
+          echo "Pin in build.sh: \`kk_mesa_tag=${MESA_TAG}\`, \`kk_mesa_sha=${MESA_SHA}\`, \`kk_asset_sha256=${sum}\`."
+          echo
+          echo "Built by ${run_url}."
+          echo
+          echo '```'
+          printf '%s\n' "$prov"
+          echo '```'
+        } > "$RUNNER_TEMP/notes.md"
+        gh release create "$RELEASE_TAG" "$file" \
+          --prerelease --latest=false --target "$GITHUB_SHA" \
+          --title "KosmicKrisp ${MESA_TAG#mesa-}${RESPIN:+ respin ${RESPIN}} (arm64)" \
+          --notes-file "$RUNNER_TEMP/notes.md"
+        echo "${RELEASE_TAG}: \`${ASSET}\` sha256 \`${sum}\`" >> "$GITHUB_STEP_SUMMARY"

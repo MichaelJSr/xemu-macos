@@ -43,7 +43,7 @@ local `build.sh` packaging fallback is at the end.
    git status
    git log origin/master..HEAD --oneline   # must be empty
    LAST=$(gh release list --repo MichaelJSr/xemu-macos --limit 1 \
-          --json tagName --jq '.[0].tagName')
+          --exclude-pre-releases --json tagName --jq '.[0].tagName')
    git log "$LAST"..HEAD --oneline                      # must be non-empty
    ```
 
@@ -94,6 +94,44 @@ MoltenVK from …`) precisely so this tested-vs-shipped driver gap
 stays visible. Treat any MoltenVK pin bump as a renderer-behavior
 change: run the `xemu-operate` skill's Test section before trusting
 it for release.
+
+### KosmicKrisp pin bump
+
+KosmicKrisp is built from a pinned Mesa tag, never on a push. The
+pins live in `build.sh` (`kk_mesa_tag`, `kk_mesa_sha`,
+`kk_asset_sha256`), and the asset is the prerelease
+`kosmickrisp-<mesa-tag>` holding `kosmickrisp-<mesa-tag>-arm64.tar.xz`
+(dylib, ICD manifest, `share/kosmickrisp/PROVENANCE`, `LICENSES/`).
+These prereleases are never `latest`; release tooling that wants the
+last xemu release passes `--exclude-pre-releases`.
+
+1. **Resolve the tag's commit:** `git ls-remote
+   https://gitlab.freedesktop.org/mesa/mesa.git
+   'refs/tags/<tag>^{}'`. GitLab sometimes answers 504; retry.
+2. **Dispatch:** `gh workflow run kosmickrisp-asset.yml --repo
+   MichaelJSr/xemu-macos -f mesa_tag=<tag> -f mesa_sha=<sha>`. Its
+   `build` job (`macos-26`, read-only token) builds with
+   `scripts/build-kosmickrisp.sh package` and asserts the provenance
+   (`Mesa <ver> (git-<sha10>)`, arm64, system-only deps, minos 26.0,
+   SDK 26, the `vk_icd` entry points). Its `publish` job (Ubuntu, the
+   only one that can write) checks the sha256 and PROVENANCE again and
+   publishes the prerelease, tagged at the dispatching commit, with
+   the sha256 in its body. Both refuse a tag that already exists,
+   because published tags are immutable.
+3. **One commit** that updates the tag, sha and sha256 together in
+   `build.sh`.
+
+**Respin.** To rebuild a Mesa tag that's already published (a script,
+LLVM or SPIR-V pin change, or a bad asset), add `-f respin=<n>`,
+counting from 2: the release is then `kosmickrisp-<mesa-tag>-<n>`,
+holding `kosmickrisp-<mesa-tag>-<n>-arm64.tar.xz`, and PROVENANCE's
+`release=` line names it. Step 3 then changes only `kk_asset_sha256`;
+its commit body names the release.
+
+`scripts/build-kosmickrisp.sh package` builds the same tarball
+locally (in `../kk` by default, with source, build and install kept
+per tag), but with the local Xcode. Gate on the published asset, not
+on a local build.
 
 ## Release title format
 
