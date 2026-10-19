@@ -466,6 +466,27 @@ x86_64 host (Windows, Linux, Intel macOS).
   Azurik's `fld`/`fld`/`fucomi`/`fcmov` min/max idiom. It is now a
   `setcond` and `movcond` on the image's 8+2 bytes (`gen_fcmov_hw`).
   Core cycles −3.0%, instructions −0.11%, det fps +3.3%, 4/4.
+- **x87 stack bookkeeping and FDP deferred, as on aarch64.** The host x87
+  ops store their results at once, which left the bookkeeping eager:
+  every push, pop, `ffree`, `fdecstp` and `fincstp` stored the fpstt
+  global and a tag byte, and under icount every x87 memory insn stored
+  FDP and FDS. x86_64 blocks of every precision now defer them as the
+  write-through path does (`x87_defer`): push and pop move a
+  translate-time fpstt delta and note tag bytes, env catches up at the
+  flush and a mid-block exit lands them from insn_start word 2
+  (`x87_wt_land`); under icount FDP and FDS wait for the flush too
+  (`xemu_x87_defer_fdp`), with tcg/i386 storing the held FDP at the head
+  of each qemu_ld/st slow path (`st_f64_slow`, never held in the TLB
+  lookup's L0/L1). The fpstt global is unused on x86_64. Execution-weighted
+  census (3 det heavy-f1 frames, `-d exec,nochain`): tag, fpstt, FDP and
+  FDS stores per x87 insn 0.63/0.53/0.63/0.24 → 0.01/0.00/0.01/0.01, TB
+  host instructions per frame 48.9M → 47.1M. Checked under Rosetta 2,
+  whose x86_64 macOS build reproduces the Windows debug hashes: goldens
+  unchanged, `XEMU_X87_REFUTE=1` heavy-f1 600 frames 0 violations (1.05G
+  stack checks, 546M access checks). **The Windows number is owed**
+  (`scripts/win/det_golden.py --pmc`, interleaved pairs on the i7-4770K);
+  expect det instructions −1.5..−2%, about half that in normal mode,
+  which already deferred FDP.
 - **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
   core cycles −0.85% median, 3/4.
 - **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions

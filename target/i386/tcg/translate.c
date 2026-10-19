@@ -1998,6 +1998,7 @@ typedef struct X87Ptr {
 
 static bool x87_wt(DisasContext *s);
 #if defined(XBOX)
+static bool x87_defer(DisasContext *s);
 static TCGv_i32 x87_wt_top(DisasContext *s);
 static bool xemu_x87_refute_on(void);
 #endif
@@ -2018,14 +2019,15 @@ static TCGv_i32 gen_top_index(TCGv_i32 top, int opreg)
 
 #if defined(XBOX)
 /*
- * TOP-keyed translation. While the write-through path is on
- * (xemu_x87_top_key), x86_get_tb_cpu_state puts env->fpstt in the lookup
- * key (cs_base bits 32-34), so a TB starts at a known TOP and x87_top
- * follows it: every push and pop, the helpers that move fpstt by a fixed
- * amount (fld*_ST0 and fbld push; fpatan, fyl2x, fyl2xp1 pop; fxtract
- * pushes; fninit, fnsave and the MMX entry set 0) and nothing else, as
- * env->fpstt moves at runtime. Write-through blocks then address ST(i)
- * and the tags as fixed env offsets (gen_stn_ptr, x87_wt_gen_land).
+ * TOP-keyed translation. While the write-through path or the host x87
+ * ops are on (xemu_x87_top_key), x86_get_tb_cpu_state puts env->fpstt in
+ * the lookup key (cs_base bits 32-34), so a TB starts at a known TOP and
+ * x87_top follows it: every push and pop, the helpers that move fpstt by
+ * a fixed amount (fld*_ST0 and fbld push; fpatan, fyl2x, fyl2xp1 pop;
+ * fxtract pushes; fninit, fnsave and the MMX entry set 0) and nothing
+ * else, as env->fpstt moves at runtime. Blocks that defer the stack
+ * (x87_defer) then address ST(i) and the tags as fixed env offsets
+ * (gen_stn_ptr, x87_wt_gen_land).
  *
  * A TB exit hands its TOP to the next TB's key: goto_tb chaining and the
  * inline jump-cache probe and ret memo use x87_top as a constant
@@ -2081,7 +2083,7 @@ static uint64_t x87_key_cs_base(DisasContext *s)
 }
 
 /*
- * Write-through blocks: env->fpstt as the flush interval found it
+ * Deferring blocks (x87_defer): env->fpstt as the flush interval found it
  * (x87_wt_land), if static, else -1. x87_top and fpstt_delta move
  * together inside an interval (x87_wt_move), so this does not change.
  */
@@ -2196,16 +2198,16 @@ static void x87_wt_copy_dbl(DisasContext *s, int d, int src, bool swap)
 #endif
 
 /*
- * (fpstt + opreg) & 7. Write-through blocks defer fpstt (x87_wt_land):
- * there it is the interval's starting fpstt plus fpstt_delta, a constant
- * when the TOP is static (x87_top).
+ * (fpstt + opreg) & 7. Deferring blocks defer fpstt (x87_wt_land): there
+ * it is the interval's starting fpstt plus fpstt_delta, a constant when
+ * the TOP is static (x87_top).
  */
 static TCGv_i32 gen_st_index(int opreg)
 {
 #if defined(XBOX)
     DisasContext *s = tcg_ctx->disas_ctx;
 
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         if (s->x87_top >= 0) {
             if (unlikely(xemu_x87_refute_on())) {
                 x87_wt_top(s);
@@ -2213,10 +2215,6 @@ static TCGv_i32 gen_st_index(int opreg)
             return tcg_constant_i32((s->x87_top + opreg) & 7);
         }
         return gen_top_index(x87_wt_top(s), (s->fpstt_delta + opreg) & 7);
-    }
-    if (g_x87_hw && s->x87_top >= 0) {
-        /* the fpstt global holds x87_top (x87_top_check) */
-        return tcg_constant_i32((s->x87_top + opreg) & 7);
     }
 #endif
     return gen_top_index(fpstt, opreg);
@@ -2229,10 +2227,10 @@ static X87Ptr gen_stn_ptr(int opreg)
 #if defined(XBOX)
     DisasContext *s = tcg_ctx->disas_ctx;
 
-    if ((x87_wt(s) || g_x87_hw) && s->x87_top >= 0) {
+    if (x87_defer(s) && s->x87_top >= 0) {
         int r = (s->x87_top + opreg) & 7;
 
-        if (x87_wt(s) && unlikely(xemu_x87_refute_on())) {
+        if (unlikely(xemu_x87_refute_on())) {
             x87_wt_top(s);
         }
         return (X87Ptr){ tcg_env, offsetof(CPUX86State, fpregs[0].d) +
@@ -2252,19 +2250,8 @@ static X87Ptr gen_ft0_ptr(void)
 /* env->fptags[(env->fpstt + opreg) & 7] = value */
 static void gen_set_fptag_stn(int opreg, int value)
 {
-    TCGv_ptr p;
+    TCGv_ptr p = tcg_temp_new_ptr();
 
-#if defined(XBOX)
-    DisasContext *s = tcg_ctx->disas_ctx;
-
-    if (g_x87_hw && s->x87_top >= 0) {
-        tcg_gen_st8_i32(tcg_constant_i32(value), tcg_env,
-                        offsetof(CPUX86State, fptags[0]) +
-                        ((s->x87_top + opreg) & 7));
-        return;
-    }
-#endif
-    p = tcg_temp_new_ptr();
     tcg_gen_add_zext_shl_ptr(p, tcg_env, gen_st_index(opreg), 0);
     tcg_gen_st8_i32(tcg_constant_i32(value), p,
                     offsetof(CPUX86State, fptags[0]));
@@ -2560,6 +2547,18 @@ static bool x87_wt(DisasContext *s)
 }
 
 /*
+ * Blocks that defer the x87 stack bookkeeping (x87_wt_land) and, under
+ * icount, FDP and FDS (xemu_x87_defer_fdp): the write-through ones, and
+ * on x86_64 hosts every block, at any precision, since the host x87 ops
+ * (g_x87_hw) write their results to env at once and only push, pop and
+ * the tags are left to defer.
+ */
+static bool x87_defer(DisasContext *s)
+{
+    return x87_wt(s) || g_x87_hw;
+}
+
+/*
  * canon = floatx80_to_double_fast(double_to_floatx80_fast(bits)): bits
  * itself, but a NaN comes back with the quiet bit set.
  */
@@ -2795,11 +2794,12 @@ static void x87_wt_pend(DisasContext *s, int slot, TCGv_f64 r)
 }
 
 /*
- * Deferred stack bookkeeping. Push and pop only move fpstt_delta and note
- * the tag byte (x87_wt_set_tag); env->fpstt and env->fptags catch up at
- * the next flush (x87_wt_land), from wt_top, env->fpstt as the flush
- * interval found it. Nothing else in a write-through block writes
- * env->fpstt (the fpstt global is unused there), so it holds wt_top at
+ * Deferred stack bookkeeping (x87_defer: write-through blocks, and every
+ * block with the host x87 ops). Push and pop only move fpstt_delta and
+ * note the tag byte (x87_wt_set_tag); env->fpstt and env->fptags catch up
+ * at the next flush (x87_wt_land), from wt_top, env->fpstt as the flush
+ * interval found it. Nothing else in such a block writes env->fpstt
+ * (the fpstt global is unused there), so it holds wt_top at
  * every exit, and an insn's first guest access before any flush puts the
  * insn's starting delta and tags in word 2 (x87_wt_spill), which a
  * restore lands (xemu_x87_restore_stack).
@@ -2995,7 +2995,7 @@ static void x87_wt_chk_view(DisasContext *s)
 /* The flush's half: land the tags and fpstt, then start a new interval. */
 static void x87_wt_land(DisasContext *s)
 {
-    if (!x87_wt(s)) {
+    if (!x87_defer(s)) {
         return;
     }
     if (s->wt_tag_mask || (s->fpstt_delta & 7)) {
@@ -3167,7 +3167,12 @@ static void x87_wt_flush(DisasContext *s)
  */
 static void x87_wt_boundary_check(DisasContext *s)
 {
-    if (!xemu_x87_refute_on() || !x87_wt(s)) {
+    if (!xemu_x87_refute_on() || !x87_defer(s)) {
+        return;
+    }
+    if (!x87_wt(s)) {
+        /* Host x87 ops: their results are in env already. */
+        x87_wt_chk_view(s);
         return;
     }
     for (int r = 0; r < 8; r++) {
@@ -3190,7 +3195,7 @@ static void x87_wt_boundary_check(DisasContext *s)
 
 /*
  * Refuter, at the top of every insn of a TOP-keyed TB: x87_top is the TOP
- * env holds. Write-through blocks keep env->fpstt at the interval's base
+ * env holds. Deferring blocks keep env->fpstt at the interval's base
  * (x87_wt_land); other blocks move the fpstt global eagerly. At a TB's
  * first insn this checks the exit that chose it (goto_tb, the probes).
  */
@@ -3202,7 +3207,7 @@ static void x87_top_check(DisasContext *s)
         return;
     }
     t = tcg_temp_ebb_new_i32();
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         tcg_gen_ld_i32(t, tcg_env, offsetof(CPUX86State, fpstt));
         xemu_x87_gen_ne_count_i32(&xemu_x87_key_viol, t,
                                   tcg_constant_i32(x87_wt_base(s)));
@@ -3425,26 +3430,20 @@ static void gen_fpush(DisasContext *s)
 #endif
 
 #if defined(XBOX)
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         x87_wt_move(s, -1);
         x87_wt_set_tag(s, 0, 0); /* validate stack entry */
         return;
     }
 #endif
-#if defined(XBOX)
-    /* before the tag, which a static TOP addresses from x87_top */
-    x87_top_move(s, -1);
-    if (g_x87_hw && s->x87_top >= 0) {
-        tcg_gen_movi_i32(fpstt, s->x87_top);
-    } else
-#endif
-    {
-        tcg_gen_subi_i32(fpstt, fpstt, 1);
-        tcg_gen_andi_i32(fpstt, fpstt, 7);
-    }
+    tcg_gen_subi_i32(fpstt, fpstt, 1);
+    tcg_gen_andi_i32(fpstt, fpstt, 7);
     gen_set_fptag_stn(0, 0); /* validate stack entry */
 
     s->fpstt_delta -= 1;
+#if defined(XBOX)
+    x87_top_move(s, -1);
+#endif
 }
 
 static void gen_fpop(DisasContext *s)
@@ -3454,7 +3453,7 @@ static void gen_fpop(DisasContext *s)
 #endif
 
 #if defined(XBOX)
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         x87_wt_set_tag(s, 0, 1); /* invalidate stack entry */
         fp_pc_wrapper(gen_fpop)(s);
         x87_wt_move(s, 1);
@@ -3462,15 +3461,8 @@ static void gen_fpop(DisasContext *s)
     }
 #endif
     gen_set_fptag_stn(0, 1); /* invalidate stack entry */
-#if defined(XBOX)
-    if (g_x87_hw && s->x87_top >= 0) {
-        tcg_gen_movi_i32(fpstt, (s->x87_top + 1) & 7);
-    } else
-#endif
-    {
-        tcg_gen_addi_i32(fpstt, fpstt, 1);
-        tcg_gen_andi_i32(fpstt, fpstt, 7);
-    }
+    tcg_gen_addi_i32(fpstt, fpstt, 1);
+    tcg_gen_andi_i32(fpstt, fpstt, 7);
 
     fp_pc_wrapper(gen_fpop)(s);
     s->fpstt_delta += 1;
@@ -3577,7 +3569,7 @@ static void gen_ffree_STN(DisasContext *s, int st_index)
      * no env fpus change (ffree only marks the tag slot empty).
      */
 #if defined(XBOX)
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         x87_wt_set_tag(s, st_index, 1);
         return;
     }
@@ -3698,7 +3690,7 @@ static void gen_enter_mmx(DisasContext *s)
      * 0 too. The flush lands the write-through x87 results and FIP first,
      * as the helper call's gen_bb_epilogue did; nothing becomes pending
      * again before such an insn, so no double is stored before the next
-     * entry either. Write-through blocks keep fpstt in env and leave the
+     * entry either. Deferring blocks keep fpstt in env and leave the
      * fpstt global unused (x87_wt_land), so they store env->fpstt; the
      * flush started a new interval, whose wt_top reads it back.
      */
@@ -3728,7 +3720,7 @@ static void gen_enter_mmx(DisasContext *s)
         s->mmx_synced = true;
     }
     gen_mmx_stale_check();
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
                        offsetof(CPUX86State, fpstt));
     } else {
@@ -4492,7 +4484,7 @@ static void gen_fnstsw_inline(DisasContext *s, TCGv_i32 result)
     tcg_gen_ld16u_i32(fpus, tcg_env, offsetof(CPUX86State, fpus));
     tcg_gen_andi_i32(fpus, fpus, ~0x3800);
     TCGv_i32 top = tcg_temp_new_i32();
-    if (x87_wt(s)) {
+    if (x87_defer(s)) {
         /* fpstt is deferred (x87_wt_land) */
         tcg_gen_shli_i32(top, gen_st_index(0), 11);
     } else {
@@ -6412,7 +6404,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             case 6: /* fdecstp */
             {
 #if defined(XBOX)
-                if (x87_wt(s)) {
+                if (x87_defer(s)) {
                     x87_wt_move(s, -1);
                 } else
 #endif
@@ -6434,7 +6426,7 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             case 7: /* fincstp */
             {
 #if defined(XBOX)
-                if (x87_wt(s)) {
+                if (x87_defer(s)) {
                     x87_wt_move(s, 1);
                 } else
 #endif
@@ -7628,7 +7620,8 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     dc->wt_insn_delta = dc->fpstt_delta;
     dc->wt_insn_tag_mask = dc->wt_tag_mask;
     dc->wt_insn_tag_val = dc->wt_tag_val;
-    dc->wt_insn_fp = x87_wt(dc) && ((dc->fpstt_delta & 7) || dc->wt_tag_mask);
+    dc->wt_insn_fp = x87_defer(dc) &&
+                     ((dc->fpstt_delta & 7) || dc->wt_tag_mask);
     dc->wt_insn_flushed = false;
     dc->wt_w2_land = 0;
     dc->wt_w2_fp = false;

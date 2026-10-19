@@ -2130,6 +2130,54 @@ static void tcg_out_pair_to_vec(TCGContext *s, TCGType type,
 }
 
 /*
+ * xemu: st_f64_slow stores (tcg_reg_alloc_st_f64_slow), first on a slow
+ * path, where L0 is free scratch, or in line (tmp < 0: L0 is saved around
+ * its use). A held value never sits where the access writes before its
+ * slow-path branch: L0 and L1, the TLB lookup's.
+ */
+#define TCG_TARGET_SLOW_ST_AVOID  SOFTMMU_RESERVE_REGS
+
+static void tcg_out_slow_st_tmp(TCGContext *s, const TCGSlowSt *e,
+                                unsigned n, int tmp)
+{
+    for (; n; n--, e++) {
+        TCGType itype = e->type == TCG_TYPE_F64 ? TCG_TYPE_I64 : e->type;
+        TCGReg t = tmp < 0 ? TCG_REG_L0 : tmp;
+        intptr_t adj = 0;
+
+        if (e->kind == TEMP_VAL_REG) {
+            tcg_out_st(s, e->type, e->reg, TCG_AREG0, e->ofs);
+            continue;
+        }
+        tcg_debug_assert(e->kind == TEMP_VAL_MEM ||
+                         e->kind == TEMP_VAL_CONST);
+        if (e->kind == TEMP_VAL_CONST &&
+            tcg_out_sti(s, itype, e->val, TCG_AREG0, e->ofs)) {
+            continue;
+        }
+        if (tmp < 0) {
+            tcg_out_push(s, t);
+            adj = e->kind == TEMP_VAL_MEM && e->reg == TCG_REG_CALL_STACK
+                  ? 8 : 0;
+        }
+        if (e->kind == TEMP_VAL_MEM) {
+            tcg_out_ld(s, itype, t, e->reg, e->val + adj);
+        } else {
+            tcg_out_movi(s, itype, t, e->val);
+        }
+        tcg_out_st(s, itype, t, TCG_AREG0, e->ofs);
+        if (tmp < 0) {
+            tcg_out_pop(s, t);
+        }
+    }
+}
+
+static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
+{
+    tcg_out_slow_st_tmp(s, e, n, -1);
+}
+
+/*
  * Generate code for the slow path for a load at the end of block
  */
 static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
@@ -2143,6 +2191,7 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
     }
 
+    tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
     tcg_out_ld_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_ld_helpers[opc & MO_SIZE]);
     tcg_out_ld_helper_ret(s, l, false, &ldst_helper_param);
@@ -2165,6 +2214,7 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
     }
 
+    tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
     tcg_out_st_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_st_helpers[opc & MO_SIZE]);
 
@@ -2230,6 +2280,9 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         h->seg = 0;
     } else {
         *h = x86_guest_base;
+        /* xemu: no slow path to hold them */
+        tcg_out_slow_st(s, s->slow_st, s->nb_slow_st);
+        s->nb_slow_st = 0;
     }
     h->base = addr;
     h->aa = atom_and_align_for_opc(s, opc, MO_ATOM_IFALIGN, s_bits == MO_128);
@@ -2250,6 +2303,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         ldst->is_ld = is_ld;
         ldst->oi = oi;
         ldst->addr_reg = addr;
+        ldst_take_slow_st(s, ldst);
 
         if (TCG_TARGET_REG_BITS == 64) {
             ttype = s->addr_type;

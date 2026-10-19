@@ -34,6 +34,8 @@
 #define TCG_TARGET_HAS_fpu              (TCG_TARGET_REG_BITS == 64)
 /* xemu: x87_* ops, scratch in the outgoing-argument area at (%rsp) */
 #define TCG_TARGET_HAS_x87              (TCG_TARGET_REG_BITS == 64)
+/* xemu: st_f64_slow stores on qemu_ld/st slow paths (tcg_out_slow_st) */
+#define TCG_TARGET_HAS_st_f64_slow      (TCG_TARGET_REG_BITS == 64)
 
 #define TCG_TARGET_HAS_qemu_ldst_i128 \
     (TCG_TARGET_REG_BITS == 64 && (cpuinfo & CPUINFO_ATOMIC_VMOVDQA))

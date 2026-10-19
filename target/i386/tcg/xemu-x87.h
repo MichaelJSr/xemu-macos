@@ -21,11 +21,11 @@
  *       insn_start word 2 (xemu_x87_restore_fip). FDP is a runtime value,
  *       so under icount, where a mid-block MMIO access is routine, a
  *       deferred FDP is stored by the slow path of every guest access
- *       while it is pending (write-through blocks, xemu_x87_defer_fdp;
- *       per-insn elsewhere). FDS is deferred with it there, landed by the
- *       flush and at a mid-block exit from insn_start word 2's segment
- *       (xemu_x87_defer_fds); elsewhere it is stored only when its
- *       segment changes.
+ *       while it is pending (blocks that defer the x87 stack,
+ *       xemu_x87_defer_fdp; per-insn elsewhere). FDS is deferred with it
+ *       there, landed by the flush and at a mid-block exit from
+ *       insn_start word 2's segment (xemu_x87_defer_fds); elsewhere it is
+ *       stored only when its segment changes.
  *   (3) XEMU_X87_REFUTE=1 puts (2) in shadow mode: the legacy stores all
  *       still happen, the deferral is computed anyway, and every point where
  *       the deferred state could be observed is checked at runtime (every
@@ -421,18 +421,18 @@ static void xemu_x87_record_fdp(DisasContext *s, int seg, TCGv addr)
 }
 
 /*
- * Under icount, on the write-through path: defer an insn's FDP like FIP (FDS
- * stays eager, on segment change, so a pending FDP and env's FDS always
- * come from the same insn). Its value is a runtime one, so every guest
- * access while it is pending stores it on its slow path
- * (gen_ldst_prologue), the one way that access leaves the TB, and the
- * flush stores it in line. XEMU_X87_REFUTE also stores the per-insn value
- * to xemu_x87_fdp_chk, which restores at an insn that started with an
- * FDP pending compare (XEMU_X87_W2_FDP). False: store it now.
+ * Under icount, in blocks that defer the x87 stack (translate.c x87_defer):
+ * defer an insn's FDP like FIP (its FDS with it, xemu_x87_defer_fds). Its
+ * value is a runtime one, so every guest access while it is pending
+ * stores it on its slow path (gen_ldst_prologue), the one way that access
+ * leaves the TB, and the flush stores it in line. XEMU_X87_REFUTE also
+ * stores the per-insn value to xemu_x87_fdp_chk, which restores at an
+ * insn that started with an FDP pending compare (XEMU_X87_W2_FDP).
+ * False: store it now.
  */
 static bool xemu_x87_defer_fdp(DisasContext *s, TCGv addr)
 {
-    if (!x87_wt(s)) {
+    if (!x87_defer(s)) {
         return false;
     }
     s->xemu_fdp_sel = NULL;
@@ -738,9 +738,9 @@ static void xemu_x87_restore_pend(CPUX86State *env, unsigned pend,
 /*
  * Stack half: the tag bytes and the fpstt move still deferred at the
  * start of the insn (translate.c x87_wt_land). env->fpstt is still the
- * flush interval's, which nothing in a write-through block writes before
- * the flush: tag slot r is register (fpstt + top + r) & 7, as for the
- * stores, then fpstt moves.
+ * flush interval's, which nothing in a deferring block (translate.c
+ * x87_defer) writes before the flush: tag slot r is register
+ * (fpstt + top + r) & 7, as for the stores, then fpstt moves.
  */
 static void xemu_x87_restore_stack(CPUX86State *env, uint64_t word2,
                                    unsigned top)

@@ -5662,6 +5662,17 @@ static void tcg_reg_alloc_st_f64_slow(TCGContext *s, const TCGOp *op)
     e->ofs = op->args[1];
     switch (ts->val_type) {
     case TEMP_VAL_REG:
+#ifdef TCG_TARGET_SLOW_ST_AVOID
+        /* A register the access writes before its slow-path branch. */
+        if (tcg_regset_test_reg(TCG_TARGET_SLOW_ST_AVOID, ts->reg)) {
+            TCGReg r = tcg_reg_alloc(s, tcg_target_available_regs[ts->type] &
+                                     ~TCG_TARGET_SLOW_ST_AVOID,
+                                     s->reserved_regs, 0, ts->indirect_base);
+
+            tcg_out_mov(s, ts->type, r, ts->reg);
+            set_temp_val_reg(s, ts, r);
+        }
+#endif
         e->reg = ts->reg;
         /*
          * A reserved register needs no hold and must not get one: the
