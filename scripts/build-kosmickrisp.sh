@@ -27,10 +27,9 @@
 # (build-<tag>) and install. An older install such as kk-dir/install
 # is never touched unless KK_PREFIX names it.
 #
-# Nothing on master loads the driver yet. On the kosmickrisp branch, run
-# xemu on it with XEMU_VK_DRIVER=<prefix>/lib/libvulkan_kosmickrisp.dylib;
-# once that branch merges, the display.vulkan.driver setting picks the
-# bundled driver.
+# Run xemu on it with XEMU_VK_DRIVER=<prefix>/lib/libvulkan_kosmickrisp.dylib,
+# or copy it into a clone's Contents/Libraries/arm64, where the
+# display.vulkan.driver setting finds it (docs/kosmickrisp.md).
 #
 # Needs Apple Silicon, macOS 26 and Xcode 26 or later (Metal 4 headers),
 # git, curl, cmake, ninja and pkg-config on PATH, Homebrew's zstd (the

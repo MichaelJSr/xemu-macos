@@ -86,6 +86,7 @@ AArch64 inline x87 FPU) compile out.
 | `XEMU_PGO` / `XEMU_PGO_DIR` | unset / `./pgo` | `generate` then `use`. A trained profile is committed at `pgo/default.profdata` and applied by CI to arm64 release builds (+9.4% fps). Retrain after large code churn: `generate` build → `scripts/pgo-train.py` on a clone of the bundle → `use` build → commit the regenerated profdata. A `use` build prints a staleness summary (hot-path CFG-hash mismatches + commits since retrain) and warns when the profile has drifted — see the ledger |
 | `XEMU_CODESIGN_ENTITLEMENTS` | `0` | Hardened-runtime codesign via `xemu.entitlements` |
 | `XEMU_MOLTENVK_VERSION` | `1.4.2` | MoltenVK release auto-vendored into `macos-libs` when no usable system copy exists. This default is the single home for the expected version — macOS CI asserts the packaged bundle's provenance line matches it |
+| `XEMU_KK_PREFIX` | unset | arm64: bundle `$XEMU_KK_PREFIX/lib/libvulkan_kosmickrisp.dylib` (a local `scripts/build-kosmickrisp.sh` install) instead of the pinned KosmicKrisp release asset |
 | `XEMU_MVK_MCPU` | `apple-m2` | `-mcpu` for `scripts/build-moltenvk.sh` (the maintained optimized MoltenVK) |
 
 Runtime diagnostic and tuning env vars (`XEMU_*`), and the few
@@ -106,7 +107,11 @@ nothing links against a Vulkan library at build time.
   counts only if it has the target arch slice; when none exists the
   pinned official release is vendored automatically. `build.sh` logs
   the bundled version + UUID so tested-vs-shipped driver drift is
-  visible. End users need nothing installed.
+  visible. arm64 builds also bundle `libvulkan_kosmickrisp.dylib` from
+  the pinned CI-built release asset (`kk_asset_sha256` in `build.sh`,
+  cached in `macos-libs/arm64` and checked on every build) and log
+  `Bundling KosmicKrisp from … (Mesa …)`. End users need nothing
+  installed.
 - **Windows:** volk loads the system `vulkan-1.dll` (ships with GPU
   drivers). No Vulkan ICD in a VM → automatic OpenGL fallback with a
   notification; test Vulkan on real hardware.
@@ -152,8 +157,8 @@ or a crash while it starts or in its first frames, leaves a strike,
 `kosmickrisp-strike.txt` in the data folder: until xemu or the bundled
 KosmicKrisp changes, later launches start MoltenVK and say so in a
 toast. Picking KosmicKrisp in Settings again removes the strike, for one
-more try. Building KosmicKrisp, and `XEMU_VK_DRIVER` (a diagnostic that
-overrides the setting and the pin):
+more try. Building and bundling KosmicKrisp, and `XEMU_VK_DRIVER` (a
+diagnostic that overrides the setting and the pin):
 [docs/kosmickrisp.md](docs/kosmickrisp.md).
 
 ### Recommended `xemu.toml`

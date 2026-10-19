@@ -3758,6 +3758,19 @@ x86_64 host (Windows, Linux, Intel macOS).
   and the interleaved fps A/B half of the pin-bump gauntlet are all
   **deferred** to a quiet box — the host ran a load-70 ffmpeg batch
   throughout 2026-10-10, so no fps number from that session is citable.
+- **KosmicKrisp bundled beside MoltenVK on arm64 (2026-10-18).**
+  `build.sh`'s `resolve_kk` takes `XEMU_KK_PREFIX` (a dev build), else
+  the pinned CI asset `kosmickrisp-mesa-26.3.0-rc1-arm64.tar.xz`
+  (`kk_asset_sha256`), cached in `macos-libs/arm64` and checked on every
+  build, downloaded when missing or different; never a system copy.
+  `package_macos` copies the dylib into `Contents/Libraries/arm64` (never
+  x86_64), keeps its `@rpath` install name, signs it and logs
+  `Bundling KosmicKrisp from … (Mesa 26.3.0-rc1 (git-4706512989))`.
+  macOS CI asserts that line against the pins, the dylib's place, name,
+  arch and signature, its absence from x86_64 bundles, and the Universal
+  bundle's layout, per-dylib and `--deep --strict` signatures and
+  `LICENSE.txt`, which gains MoltenVK and Mesa (MIT, BSL-1.0, plus the
+  SPIRV-Tools it links). The arm64 zip grows 11.7 → 13.9 MiB.
 
 ### MoltenVK runtime config
 

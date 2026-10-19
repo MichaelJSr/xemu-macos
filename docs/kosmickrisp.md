@@ -33,8 +33,11 @@ the opportunity and risk tables) are in this file at tag
 | MoltenVK-only paths, by driver ID | The visibility primer query (MoltenVK's per-command-buffer visibility flag) and the Apple surface-upload fast path (it leans on MoltenVK's tracked queue; KK heaps are untracked) |
 | Settings > Display > Vulkan driver | Apple silicon builds (`main-menu.cc`). Its line says `In use: <driver, version>`, plus `, restart to apply` while the choice differs from the one this launch read (`nv2a_vk_driver_setting()`); a change toasts. Where KK can't run, the line ends `(KosmicKrisp: <nv2a_vk_kk_ineligible_reason()>)` instead and the combo is greyed, unless it is set to KosmicKrisp (it must stay possible to move off that). Picking KosmicKrisp removes a strike marker (`nv2a_vk_driver_retry()`). Help > About shows the full `nv2a_vk_driver_desc()` as its `Vulkan:` line |
 
-Still to come: scaled Z16 through compute (KK has no `BLIT_DST` on D16),
-and GS-less wireframe.
+arm64 bundles carry KK beside MoltenVK in `Contents/Libraries/arm64`
+(`build.sh` `resolve_kk`: the pinned CI-built asset, or
+`XEMU_KK_PREFIX`; Building, below); x86_64 bundles don't. Still to
+come: scaled Z16 through compute (KK has no `BLIT_DST` on D16), and
+GS-less wireframe.
 
 ## How the driver is chosen
 
@@ -169,13 +172,23 @@ pins and the CI asset: the script's header and `docs/RELEASING-macos.md`
 (KosmicKrisp pin bump). The prototype's measurements below used Mesa
 `335d5698dc` (main, 27.0.0-devel).
 
-The rc1 dylib exports more than the loader's three `_vk_icd*` entry
-points: 268 symbols, the rest SPIRV-Tools' C and C++ API (40 weak, which
-dyld may bind across images; nothing else xemu loads carries SPIRV-Tools
-today). The next asset (26.3.0 or a respin) links with an
-`-exported_symbols_list` of `_vk_icd*`, and its asset and bundle asserts
-check `nm -gU` in the same commit. An installed dylib's install name is
-absolute, so to drop one into an existing clone:
+`build.sh` (arm64) bundles the pinned asset
+(`kosmickrisp-<tag>[-<respin>]-arm64.tar.xz` from this repository's
+releases, cached in `macos-libs/arm64` and checked against
+`kk_asset_sha256` on every build, downloaded when missing or different)
+and logs `Bundling KosmicKrisp from <tarball> (Mesa 26.3.0-rc1
+(git-4706512989))`. `LICENSE.txt`'s Mesa section is
+`licenses/kosmickrisp`, a copy of the asset's `share/kosmickrisp/LICENSES`
+that `build.sh` checks. The rc1 dylib exports more than the loader's
+three `_vk_icd*` entry points: 268 symbols, the rest SPIRV-Tools' C and
+C++ API (40 weak, which dyld may bind across images; nothing else xemu
+loads carries SPIRV-Tools today). The next asset (26.3.0 or a respin)
+links with an `-exported_symbols_list` of `_vk_icd*`, and its asset and
+bundle asserts check `nm -gU` in the same commit.
+`XEMU_KK_PREFIX=../kk/install-<tag> ./build.sh` bundles a local build
+instead (its install name is set to `@rpath`); nothing else is ever
+picked up, `/usr/local` and Homebrew included. An installed dylib's
+install name is absolute, so to drop one into an existing clone:
 
 ```
 D=<clone>.app/Contents/Libraries/arm64/libvulkan_kosmickrisp.dylib

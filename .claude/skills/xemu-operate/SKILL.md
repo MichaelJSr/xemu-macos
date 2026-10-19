@@ -89,7 +89,10 @@ windows), rebuild with `use` and commit `pgo/default.profdata`.
 `macos-libs/<arch>/opt/local/lib`, `/usr/local/lib` or `/opt/homebrew/lib`,
 and otherwise downloads `XEMU_MOLTENVK_VERSION` (1.4.2, which CI ships).
 This Mac uses `/usr/local/lib` from `scripts/build-moltenvk.sh` (1.4.3, no
-LTO). Look for `Bundling MoltenVK from …` in the log.
+LTO). Look for `Bundling MoltenVK from …` in the log. arm64 builds also
+bundle KosmicKrisp: the pinned release asset (`kk_asset_sha256`, cached
+in `macos-libs/arm64`), or `XEMU_KK_PREFIX=../kk/install-<tag>`; look for
+`Bundling KosmicKrisp from … (Mesa …)`.
 
 | Failure | Fix |
 |---|---|
