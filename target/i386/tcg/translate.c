@@ -2549,9 +2549,10 @@ static bool x87_wt(DisasContext *s)
 /*
  * Blocks that defer the x87 stack bookkeeping (x87_wt_land) and, under
  * icount, FDP and FDS (xemu_x87_defer_fdp): the write-through ones, and
- * on x86_64 hosts every block, at any precision, since the host x87 ops
- * (g_x87_hw) write their results to env at once and only push, pop and
- * the tags are left to defer.
+ * on x86_64 hosts with the hard FPU every block, at any precision, since
+ * the host x87 ops (g_x87_hw) write their results to env at once and only
+ * push, pop and the tags are left to defer. The soft FPU keeps the eager
+ * path.
  */
 static bool x87_defer(DisasContext *s)
 {

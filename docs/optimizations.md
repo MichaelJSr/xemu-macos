@@ -470,20 +470,27 @@ x86_64 host (Windows, Linux, Intel macOS).
   ops store their results at once, which left the bookkeeping eager:
   every push, pop, `ffree`, `fdecstp` and `fincstp` stored the fpstt
   global and a tag byte, and under icount every x87 memory insn stored
-  FDP and FDS. x86_64 blocks of every precision now defer them as the
+  FDP and FDS. Hard-FPU x86_64 blocks of every precision now defer them as the
   write-through path does (`x87_defer`): push and pop move a
   translate-time fpstt delta and note tag bytes, env catches up at the
   flush and a mid-block exit lands them from insn_start word 2
   (`x87_wt_land`); under icount FDP and FDS wait for the flush too
   (`xemu_x87_defer_fdp`), with tcg/i386 storing the held FDP at the head
   of each qemu_ld/st slow path (`st_f64_slow`, never held in the TLB
-  lookup's L0/L1). The fpstt global is unused on x86_64. Execution-weighted
+  lookup's L0/L1). The fpstt global is unused in hard-FPU x86_64 blocks
+  (the soft FPU keeps the eager path). Execution-weighted
   census (3 det heavy-f1 frames, `-d exec,nochain`): tag, fpstt, FDP and
   FDS stores per x87 insn 0.63/0.53/0.63/0.24 → 0.01/0.00/0.01/0.01, TB
   host instructions per frame 48.9M → 47.1M. Checked under Rosetta 2,
   whose x86_64 macOS build reproduces the Windows debug hashes: goldens
   unchanged, `XEMU_X87_REFUTE=1` heavy-f1 600 frames 0 violations (1.05G
-  stack checks, 546M access checks). **The Windows number is owed**
+  stack checks, 546M access checks; no exit there met a pending FDP).
+  Mid-block exits, from gdb access watchpoints on a hot x87 block's
+  stack: 2000 stops leave the parent's GPRs, ST0-7, FCW and FSW/TOP
+  (the `g` packet, which reports the tags and FIP/FDP as 0) and FTW, FPRs
+  and XMM (HMP `info registers`) at every stop, and its RAM; with the
+  refuter on, such runs landed 476 + 171 deferred stacks and 8 + 170
+  deferred FDPs, 0 violations. **The Windows number is owed**
   (`scripts/win/det_golden.py --pmc`, interleaved pairs on the i7-4770K);
   expect det instructions −1.5..−2%, about half that in normal mode,
   which already deferred FDP.
@@ -499,9 +506,9 @@ x86_64 host (Windows, Linux, Intel macOS).
   tcg/i386 TLB memo must count these ops with qemu_ld/st. Census as
   above: `(%rsp)` moves per x87 insn 0.63 → 0, TB host instructions per
   frame 47.1M → 45.8M (48.9M before both rows, −6.5%). Rosetta 2:
-  goldens unchanged, refuter clean, and 2000 gdb access-watchpoint stops
-  on a hot x87 block's stack (mid-block restores through these ops'
-  slow path) leave the parent's registers at every stop and its RAM.
+  goldens unchanged, refuter clean, and the 2000 gdb stops above
+  (mid-block restores through these ops' slow path) leave the same
+  `g` and `info registers` state at every stop and the same RAM.
   **The Windows number is owed**; expect det instructions −1.3..−1.6%
   in both modes.
 - **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
