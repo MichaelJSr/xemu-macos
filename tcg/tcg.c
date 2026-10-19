@@ -2169,7 +2169,7 @@ bool tcg_pin_env_global(intptr_t offset, bool call_saved)
         g_assert(tcg_pinned[i].offset != offset);
         used += tcg_pinned[i].call_saved == call_saved;
     }
-    if (used == pool_n || tcg_nb_pinned == TCG_MAX_PINNED) {
+    if (used >= pool_n || tcg_nb_pinned == TCG_MAX_PINNED) {
         return false;
     }
 

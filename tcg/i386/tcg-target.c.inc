@@ -2181,6 +2181,127 @@ static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
     tcg_out_slow_st_tmp(s, e, n, -1);
 }
 
+#if TCG_TARGET_HAS_pinned_globals
+/*
+ * Host registers for tcg_pin_env_global(), x86_64 hosts: R15 alone,
+ * call-saved on SysV and Win64, so tcg_x86_pin_globals gets EIP and the
+ * GPRs and CC_* stay in env. Each call-saved register taken from the
+ * allocator spills the temps that live across qemu_ld/st, which free
+ * every call-clobbered one (SysV pressure probe, static det heavy-f1
+ * body insns: +0.25% for one, +0.8%, +1.9%, +3.45% for two to four), and
+ * CC_* stores are mostly immediates or computed values that would only
+ * become movs. No call-clobbered register is spare: R8-R11 hold the TLB
+ * memo. tcg_pin_env_global's `used >= pool_n` keeps every index into the
+ * empty pool dead, also to GCC's -Warray-bounds after LTO inlining.
+ */
+static const TCGReg tcg_target_pin_regs_clobbered[] = { };
+static const TCGReg tcg_target_pin_regs_saved[] = { TCG_REG_R15 };
+
+/* Store (or load) the pinned globals in @mask to (from) env. */
+static void tcg_out_pinned(TCGContext *s, uint32_t mask, bool load)
+{
+    for (int i = 0; i < tcg_nb_pinned; i++) {
+        if (!(mask & (1u << i))) {
+            continue;
+        }
+        if (load) {
+            tcg_out_ld(s, TCG_TYPE_I32, tcg_pinned[i].reg, TCG_AREG0,
+                       tcg_pinned[i].offset);
+        } else {
+            tcg_out_st(s, TCG_TYPE_I32, tcg_pinned[i].reg, TCG_AREG0,
+                       tcg_pinned[i].offset);
+        }
+    }
+}
+
+#ifdef CONFIG_DEBUG_TCG
+/*
+ * Debug builds poison the env homes of the pinned globals whenever TB
+ * code owns them, as on aarch64. No scratch register: the checks run
+ * right after helper calls, whose results are still in RAX/RDX.
+ */
+#define PIN_POISON 0xdeadbeefu
+
+static void tcg_out_pinned_poison(TCGContext *s)
+{
+    for (int i = 0; i < tcg_nb_pinned; i++) {
+        tcg_out_sti(s, TCG_TYPE_I32, PIN_POISON, TCG_AREG0,
+                    tcg_pinned[i].offset);
+    }
+}
+
+static G_NORETURN void tcg_pinned_lost_write(intptr_t offset)
+{
+    fprintf(stderr, "tcg: a helper without a reload wrote the pinned env "
+            "field at +%" PRIdPTR " (see TCG_CALL_NO_RW_PINNED)\n", offset);
+    abort();
+}
+
+/* The env homes in @check must still hold the stored value or the poison. */
+static void tcg_out_pinned_check(TCGContext *s, uint32_t check,
+                                 uint32_t stored)
+{
+    for (int i = 0; i < tcg_nb_pinned; i++) {
+        tcg_insn_unit *ok;
+
+        if (!(check & (1u << i))) {
+            continue;
+        }
+        if (stored & (1u << i)) {
+            tcg_out_modrm_offset(s, OPC_CMP_GvEv, tcg_pinned[i].reg,
+                                 TCG_AREG0, tcg_pinned[i].offset);
+        } else {
+            tcg_out_modrm_offset(s, OPC_ARITH_EvIz, ARITH_CMP, TCG_AREG0,
+                                 tcg_pinned[i].offset);
+            tcg_out32(s, PIN_POISON);
+        }
+        tcg_out_opc(s, OPC_JCC_short + JCC_JE, 0, 0, 0);
+        ok = s->code_ptr++;
+        tcg_out_movi(s, TCG_TYPE_PTR, tcg_target_call_iarg_regs[0],
+                     tcg_pinned[i].offset);
+        tcg_out_branch(s, 1, (const tcg_insn_unit *)tcg_pinned_lost_write);
+        tcg_patch8(ok, s->code_ptr - ok - 1);
+    }
+}
+#endif
+
+/*
+ * After a helper call that had the pinned globals in @stored synced to
+ * env: reload those in @loaded.
+ */
+static void tcg_out_pinned_after_call(TCGContext *s, uint32_t stored,
+                                      uint32_t loaded)
+{
+    tcg_out_pinned(s, loaded, true);
+#ifdef CONFIG_DEBUG_TCG
+    tcg_out_pinned_check(s, tcg_pinned_all & ~loaded, stored);
+    tcg_out_pinned_poison(s);
+#endif
+}
+#else
+static void tcg_out_pinned(TCGContext *s, uint32_t mask, bool load);
+#endif
+
+/* Around a slow-path helper: it may fault or reach device code. */
+static void tcg_out_pinned_slow_store(TCGContext *s)
+{
+    if (tcg_nb_pinned) {
+        tcg_out_pinned(s, tcg_pinned_all, false);
+    }
+}
+
+static void tcg_out_pinned_slow_reload(TCGContext *s)
+{
+    if (tcg_nb_pinned) {
+        tcg_out_pinned(s, tcg_pinned_clobbered, true);
+#if TCG_TARGET_HAS_pinned_globals && defined(CONFIG_DEBUG_TCG)
+        tcg_out_pinned_check(s, tcg_pinned_all & ~tcg_pinned_clobbered,
+                             tcg_pinned_all);
+        tcg_out_pinned_poison(s);
+#endif
+    }
+}
+
 /*
  * Softmmu TLB memo (the plan: tcg/tcg-tlbm.c.inc), x86_64 hosts. The load
  * slot keeps {ntag = -page, addend} in R10/R11, the store slot {ntag,
@@ -2489,8 +2610,10 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 
     tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
+    tcg_out_pinned_slow_store(s);
     tcg_out_ld_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_ld_helpers[opc & MO_SIZE]);
+    tcg_out_pinned_slow_reload(s);
     tlbm_out_invalidate(s);
     tcg_out_ld_helper_ret(s, l, false, &ldst_helper_param);
 
@@ -2514,8 +2637,10 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 
     tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
+    tcg_out_pinned_slow_store(s);
     tcg_out_st_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_st_helpers[opc & MO_SIZE]);
+    tcg_out_pinned_slow_reload(s);
     tlbm_out_invalidate(s);
 
     tcg_out_jmp(s, l->raddr);
@@ -3179,6 +3304,7 @@ static bool tcg_out_x87_g_slow(TCGContext *s, TCGLabelQemuLdst *l)
     }
     tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
+    tcg_out_pinned_slow_store(s);
     if (opc == INDEX_op_x87_st_g) {
         TCGLabelQemuLdst st = *l;
 
@@ -3189,10 +3315,12 @@ static bool tcg_out_x87_g_slow(TCGContext *s, TCGLabelQemuLdst *l)
         st.datahi_reg = -1;
         tcg_out_st_helper_args(s, &st, &ldst_helper_param);
         tcg_out_branch(s, 1, qemu_st_helpers[mop & MO_SIZE]);
+        tcg_out_pinned_slow_reload(s);
         tlbm_out_invalidate(s);
     } else {
         tcg_out_ld_helper_args(s, l, &ldst_helper_param);
         tcg_out_branch(s, 1, qemu_ld_helpers[mop & MO_SIZE]);
+        tcg_out_pinned_slow_reload(s);
         tlbm_out_invalidate(s);
         tcg_out_st(s, vt, TCG_REG_EAX, TCG_REG_ESP, 0);
         tcg_out_x87_mform(s, opc, kind, TCG_AREG0, l->stub_ofs, NULL);
@@ -5703,6 +5831,13 @@ static void tcg_target_qemu_prologue(TCGContext *s)
                              + stack_addend);
     } else {
         tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);
+        /* TB code keeps the pinned globals in registers, never in env. */
+        if (tcg_nb_pinned) {
+            tcg_out_pinned(s, tcg_pinned_all, true);
+#if TCG_TARGET_HAS_pinned_globals && defined(CONFIG_DEBUG_TCG)
+            tcg_out_pinned_poison(s);
+#endif
+        }
         tcg_out_addi(s, TCG_REG_ESP, -stack_addend);
         /* jmp *tb.  */
         tcg_out_modrm(s, OPC_GRP5, EXT5_JMPN_Ev, tcg_target_call_iarg_regs[1]);
@@ -5717,6 +5852,9 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
     /* TB epilogue */
     tb_ret_addr = tcg_splitwx_to_rx(s->code_ptr);
+    if (tcg_nb_pinned) {
+        tcg_out_pinned(s, tcg_pinned_all, false);
+    }
 
     tcg_out_addi(s, TCG_REG_CALL_STACK, stack_addend);
 

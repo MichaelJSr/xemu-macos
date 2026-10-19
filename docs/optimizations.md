@@ -560,6 +560,61 @@ x86_64 host (Windows, Linux, Intel macOS).
   over heavy-f1, stream-e2 and heavy-w2, which runs Win64's R8/R9
   reservation); the vet expects det instructions −3..−6% and core cycles
   −2..−4%.
+- **EIP pinned in R15.** `tcg_pin_env_global` as on aarch64, with one
+  register: tcg/i386's pools hold R15 alone (call-saved on SysV and
+  Win64), so `tcg_x86_pin_globals` gets EIP while the GPRs and CC_* stay
+  in env. EIP is nearly all a pin saves here: each update was a load, an
+  add and a store, while 99% of CC_OP stores are immediates and CC_DST/
+  CC_SRC stores of computed values would only become movs. Each
+  call-saved register the allocator loses spills the temps that live
+  across qemu_ld/st, which free every call-clobbered one (the vet's SysV
+  reservation probe, static body insns: +0.25% for one register, +0.8%,
+  +1.9% and +3.45% for two to four), so no CC_* or ESP pins (the
+  pinned-layouts lesson). env->eip is stored before every helper that may
+  read globals or raise and on every qemu_ld/st and `x87_*_g` slow path,
+  and reloaded after helpers that may write globals; a `--debug` build
+  poisons it while TB code owns it and checks it after every call, with
+  no scratch register (the call's results are live in RAX/RDX).
+  `tcg_pin_env_global` now gives up at `used >= pool_n`, so no index into
+  the empty call-clobbered pool is live to GCC's `-Warray-bounds` (the
+  Windows CI build is GCC with LTO and `-Werror`); that branch is aarch64's
+  only change (`b.eq` → `b.ge`; the rest of its `__text` is byte-identical,
+  and the PGO profile still reports only the same two stale tcg.c
+  functions). Static out_asm census against the memo commit (60 det
+  heavy-f1 frames, 22,942 TBs): EIP loads 28,171 → 410, stores 29,894 →
+  3,887, frame accesses +1,956 (the probe measured +2,456 on the older
+  base), GPR env reloads +2.8%, body insns −3.7%. Execution-weighted (3
+  frames, same RAM): TB host insns per frame 40.0M → 38.7M (−3.2%), EIP
+  loads 850K → 17K and stores 905K → 158K per frame, frame accesses
+  +107K. Rosetta 2: goldens unchanged on the release and `--debug` builds
+  (the pin and memo checks silent over heavy-f1 1200, stream-e2 600 and
+  the cold boot); `XEMU_X87_REFUTE=1` heavy-f1 600 frames 0 violations;
+  `XEMU_TLB_WCLEAN_REFUTE=1` stream-e2 600 clean; offscreen normal mode
+  renders right on both builds, the `--debug` one over 346, 412 and 234
+  flips of heavy-f1, the stream-e2 walk and heavy-w2; det Minsns/frame
+  −0.15% heavy-f1, −0.60% stream-e2 (2/2 each, load 20-26, same RAM;
+  Rosetta's own translation dilutes it and its cycles say nothing).
+  With `ROSETTA_ADVERTISE_AVX=1` too (load 22-37): goldens unchanged on
+  both builds and the checks silent, the `--debug` build also over 120 s
+  normal-mode passes (304, 330 and 254 flips). The check fires: in a
+  scratch build (not shipped), dropping the reload after helpers that
+  write globals aborts in det heavy-f1 at the first such helper that
+  moved EIP ("a helper without a reload wrote the pinned env field at
+  +32", the value compare), and treating those helpers as
+  `TCG_CALL_NO_RW_PINNED` aborts at the poison compare. Dropping the
+  qemu_st slow path's EIP store aborts seconds after a normal-mode
+  launch, at the first slow store that returns; det heavy-f1 instead ran
+  its 30 frames to another RAM hash with no abort: a helper that leaves
+  by longjmp (a fault, an I/O recompile) rebuilds EIP from the poisoned
+  field's page before any check runs, so a store missing there is the
+  goldens' to catch.
+  **The Windows numbers are owed**: a Win64 out_asm census of this commit
+  against the memo commit first (Win64 has seven call-saved registers and
+  RCX/RDX as L0/L1, so its spill curve is its own; frame accesses and GPR
+  reloads should stay near the SysV figures), the goldens on a `--debug`
+  build (the pin check on Win64's sync points), then `det_golden.py
+  --pmc`, 6 pairs; the vet expects det instructions −1.5..−2.5% and core
+  cycles −0.5..−2%.
 - **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
   core cycles −0.85% median, 3/4.
 - **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions

@@ -36,6 +36,8 @@
 #define TCG_TARGET_HAS_x87              (TCG_TARGET_REG_BITS == 64)
 /* xemu: st_f64_slow stores on qemu_ld/st slow paths (tcg_out_slow_st) */
 #define TCG_TARGET_HAS_st_f64_slow      (TCG_TARGET_REG_BITS == 64)
+/* xemu: tcg_pin_env_global, R15 only (tcg_target_pin_regs_saved) */
+#define TCG_TARGET_HAS_pinned_globals   (TCG_TARGET_REG_BITS == 64)
 
 #define TCG_TARGET_HAS_qemu_ldst_i128 \
     (TCG_TARGET_REG_BITS == 64 && (cpuinfo & CPUINFO_ATOMIC_VMOVDQA))

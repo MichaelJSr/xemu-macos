@@ -199,9 +199,11 @@ static vaddr x86_pointer_wrap(CPUState *cs, int mmu_idx,
 /*
  * The guest GPRs live in call-clobbered host registers across TBs, saved
  * to env around every call; EIP and CC_DST/CC_SRC/CC_OP in call-saved
- * ones, synced only around the helpers that may touch them. C code reads
- * or writes these fields only at a sync point (tcg_pin_env_global), so a
- * new helper that touches them must not claim TCG_CALL_NO_RW_PINNED.
+ * ones, synced only around the helpers that may touch them. The backend
+ * grants what its pools hold: aarch64 all of them, x86_64 EIP alone (the
+ * rest stay in env). C code reads or writes these fields only at a sync
+ * point (tcg_pin_env_global), so a new helper that touches them must not
+ * claim TCG_CALL_NO_RW_PINNED.
  */
 static void tcg_x86_pin_globals(void)
 {
