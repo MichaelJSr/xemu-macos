@@ -2,7 +2,7 @@
 # Dot-source it at the start of every PowerShell session:  . C:\xemu-kit\tools\kit.ps1
 # Reload PATH from the registry, so tools installed after this shell (or Claude Code) started are found.
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
-$Ver     = 'v0.15.1'          # fork release under test (set a newer one if it exists)
+$Ver     = 'v0.15.2'          # fork release under test (set a newer one if it exists)
 # The repo and the kit: $env:XEMU_REPO / $env:XEMU_KIT if set, else found from this file's place
 # (the kit's tools\kit.ps1 or the repo's scripts\win\kit.ps1) or as siblings of each other,
 # else %USERPROFILE%\xemu-macos and C:\xemu-kit.

@@ -105,7 +105,7 @@ lockless doorbell, vCPU QoS); re-profile before ranking work from it.
    blamed on `-O3`), the null-mode quit crash and two x86_64 hard-FPU
    defects (the guest rounding mode, `cfcc8e68ab`; the vCPU thread's
    x87 precision, `deb98ee93f`), and its optimization pass took
-   windowed heavy-f1 from 10.7 fps to 38.7 fps (W2 8.5 → 40.7) on that CPU (the
+   windowed heavy-f1 from 11.1 fps to 38.7 fps (W2 8.5 → 40.7) on that CPU (the
    x87 helpers inline on the host x87 unit, TOP-keyed TBs, a
    waitable-timer main loop). Still owed: AMD and Intel GPUs, Windows
    ARM64, Linux, a CI-trained Windows PGO profile. The shipped BQL-free MMIO dispatch belongs on

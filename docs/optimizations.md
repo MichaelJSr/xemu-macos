@@ -34,7 +34,7 @@ and tag `archive/windows-wave1-wip`.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it (applied in null mode only since 2026-10-17, which gives the process the role UI: `xemu_os_set_app_role`). Threads + runtime, P-core QoS |
+| `XEMU_VCPU_QOS` | macOS normal mode, **default on since 2026-10-15** (`94a722acd8`): the MTTCG vCPU thread runs at `QOS_CLASS_USER_INTERACTIVE`, and since 2026-10-16 the main-loop thread (`qemu_main`) too; `0` leaves both at the default class (less P-core time and power, slower under load). Deterministic mode's RR and main-loop threads always request it (applied in null mode only since 2026-10-17, which gives the process the role UI: `xemu_os_set_app_role`); PFIFO and the APU frame thread are `USER_INTERACTIVE` regardless. On Windows since 2026-10-18 (`f96f00ba9d`) the normal-mode vCPU, PFIFO and APU frame threads run at `THREAD_PRIORITY_ABOVE_NORMAL`, and `0` leaves all three at normal (the Windows main loop and det RR thread stay at normal). Threads + runtime, P-core QoS |
 | `XEMU_PFIFO_PUT_LOCK` | Normal mode: `1` makes the DMA_PUT doorbell and USER reads take `pfifo.lock` again (lockless doorbell, 2026-10-15, `3391b92357`). Deterministic mode always locks, because `kick_seq` feeds `pfifo_icount_sync`. Threads + runtime |
 | `XEMU_PFIFO_STALL_DOORBELL` | Normal mode, **default on since 2026-10-16**: a DMA_PUT doorbell inside a flip stall (FLIP_STALL waiting, READ_3D == WRITE_3D) publishes PUT but doesn't wake the PFIFO thread, which could only stall again; `0` wakes it on every doorbell as before. Deterministic mode never takes the lockless doorbell. Threads + runtime |
 | `XEMU_PFIFO_RING_FREEZE` | Normal mode, **default on since 2026-10-17**: a DMA_PUT write that moves PUT back behind DMA_GET (a pushbuffer ring restart) copies the words from DMA_GET through the old PUT's (at most 256, CACHE1's worth) and the threaded pusher reads them from the copy (`pfifo_frozen.h`), so a guest that rewrites the ring head before DMA_GET gets there doesn't change commands the pusher hasn't read; `0` reads guest RAM as before. pbkit's `pb_reset()` waits only 100 ticks for DMA_GET: when PFIFO lagged longer on the macOS CI runner, the next frame overwrote the unread tail (Roswell FpuTestXiso hang, "Reserved pb command" aborts). Deterministic mode never freezes: its pusher runs at every guest write. Threads + runtime |
@@ -57,7 +57,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
 | `XEMU_XPAGE_PROF` | Cross-page-direct exit census: runtime taken-rate counter split by target region (kernel-identity vs low), the backstop's unlink walks (events, dests, cost), the jumps those walks reset split by `tb_add_jump`'s predicate (same-page, an emitter's jump onto its own page, cross-page), the link patches per second and the link flush queue (stale-slot exits and the patches drained there, at `cpu_exec` returns and in full queues); also armed by `XEMU_INV_PROF`. Dark; atexit summary |
 | `XEMU_XPAGE_REFUTE` | `1` = cross-page-chaining refuter: routes every cross-page-direct exit through the safe lookup path plus a page-table-walk check that the target's live phys is unchanged since last seen (loud + counted on violation). Slow; falsification only |
-| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). On by default on x86_64 too since 2026-10-18 (`=2` ran clean on an i7-4770K; det heavy-f1 -8.8% instructions, -3.4% core cycles per frame), where the host ops also raise the guest's sticky MXCSR flags exactly, so the hashes equal softfloat's. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
+| `XEMU_SSE_HOST` | Host fast path for single-precision SSE arithmetic. Always on for aarch64 with `perf.hard_fpu` (+1.90 fps — see CPU / JIT changes). On by default on x86_64 too since 2026-10-18 (`=2` ran clean on an i7-4770K; det heavy-f1 -8.8% instructions, -3.4% core cycles per frame), where the host ops also raise the guest's sticky MXCSR flags exactly. Turning it on moved the Windows det hashes once (`57cfe4fb51`: heavy-f1 f1200 `05b0af304a933676` → `acb930ea329c99d6`); only the `=2` differential matches softfloat's hashes. `=2`, on any host, runs both paths with strict brackets and aborts on divergence; it also keeps packed add/sub/mul/div in the helpers instead of the inline vector ops. The `XEMU_SSE_NEON` alias was removed on 2026-10-15 and is ignored on every host, so an `XEMU_SSE_NEON=2` run is not a differential receipt |
 | `XEMU_X87_CENSUS` | `1` arms the x87/SSE Gate-0 census (audit §1.4) and its atexit dump: per-instruction FIP/FDP store pairs vs deferred updates emitted, x87 runs + insns (mean run length), and SSE scalar compares split `ss`/`sd`. Emits counter RMWs into generated code — measurement mode only, never for an fps run |
 | `XEMU_X87_REFUTE` | `1` runs the adversarial shadow-checker for the x87 exception-pointer deferral: keeps every legacy store, computes the deferral anyway, and counts every runtime point where the deferred state could have been observed (deferred FIP/FCS/FDP/FDS ≠ what the legacy stores left at a consumer or helper boundary). Implies the census dump. Promotion gate is zero violations. It also runs the write-through x87 path for real with every pending or stale register image poisoned (`wt-*`, `wt-stack-*`), and checks TOP-keyed translation (`top-key-*`) and MMX entry (`mmx-*`); the gate is every `*violations=` field at 0. Its checks emit ~1 KB of host code per guest insn, so a clean run covers TBs up to ~260 guest bytes (production TBs reach ~800). **Do not combine with `XEMU_SUBPAGE_FAST_REFUTE` *and* `XEMU_DSP_JIT_DIFF` in one run** — the 3-way combination deadlocks the guest during boot (Failed table) |
 | `XEMU_SUBPAGE_FAST` | Sub-page arm (b): the aarch64 store slow-path stub completes a store inline when the slow path is a provable no-op (mismatch exactly `TLB_NOTDIRTY`, non-code 64 B sub-block, all NOCODE dirty clients already set). **On since 2026-07-18, and always on in Apple builds** (the `=0` off switch was removed on 2026-10-15; on non-Apple aarch64, where it is unvalidated, `=1` opts in): quiet-machine receipts measured ~2M inline completions/s on the F8 heavy scene — the eligible population is dominated by renderer-watched pages, ~20x the code-page trap count the +0.3-0.7 fps prediction was sized on — for **+12% draws/s throughput (6/6 interleaved pairs, two independent 3-pair batches)**; fps stays ~flat because Azurik's effect-load feedback re-saturates frame time at ~815 vs ~727 draws/flip. Refuter: ~19.5M validated decisions, 0 violations (static + loadvm-cycling + first-visit-streaming soaks). **Until 2026-10-15 the stub read the wrong bitmaps**: it indexed the dirty bitmaps and its code-block mirror from ram_addr 0, but the PC machine's unused `pc.ram` backend occupies ram_addr 0-128 MiB and `xbox.ram` starts at 0x8000000. It saw `pc.ram`'s always-set bits and an empty code map, so it completed every pure-NOTDIRTY store inline, including stores into translated code (no TB invalidation) and onto renderer-watched pages (no NV2A/VGA mark), and the refuter made the same offset mistake. The receipts above came from that build. Fixed by rebasing both to `xbox.ram`'s offset: heavy-f1 offscreen, 40 s, now skips 78% of 3.3M stub entries, demoting 87 code-block stores and 709k dirty-clean stores (it was 100% of 13.0M), and the refuter reports 0 violations on 2.46M decisions. Cold-stub only; the tag-match fast path is byte-identical. Atexit dump: seen/skips/demote-reason histogram, but only under `XEMU_SUBPAGE_FAST_STATS=1` (counters default-OFF since 2026-08-04). The prefilter is emitted only by the aarch64 TCG backend, so on any other host (x86_64 Windows/Linux) this knob and its refuter are inert — since 2026-09-08 an explicit `=1` says so once on stderr from the `XEMU_SUBPAGE_REFUTE` latch in `accel/tcg/tb-maint.c` |
@@ -385,11 +385,15 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   rounded to nearest; those cases were meant to fall back to the softfloat
   helper, but under `hard_fpu` that "softfloat" helper is the x86_64
   long-double one, which rounded to nearest too (rintl/llrintl with the
-  thread's nearest RC). Fixed 2026-10-18: the x86_64 hard conversions take
-  the guest RC (floorl/ceill/truncl/rintl) and saturate out-of-range values
-  with invalid, as softfloat does; it moved every Windows det hash, so
-  Azurik's floor()/_ftol paths ran it. The gate in (1) in fact turned the
-  cache off on every host; its fork layers were removed on 2026-10-15.
+  thread's nearest RC). Fixed 2026-10-18 (`cfcc8e68ab`): the x86_64 hard
+  conversions take the guest RC and saturate out-of-range values with
+  invalid, as softfloat does; it moved every Windows det hash, so Azurik's
+  floor()/_ftol paths ran it. They first picked floorl/ceill/truncl/rintl
+  by hand; since `deb98ee93f` they round with `frndint` under the host x87
+  control word, which holds the guest's RC (`truncl` for the truncating
+  forms), and `fist`/`frndint` run inline since `67e48b43b2`. The gate in
+  (1) in fact turned the cache off on every host; its fork layers were
+  removed on 2026-10-15.
 
 - **Sub-page dirty-tracking default gated to Apple (2026-08-09).** Its
   default was on unconditionally, contradicting the feature's own
@@ -406,7 +410,9 @@ heavy-f1 to frame 1200 unless noted. Every row kept the Windows goldens
 (heavy-f1 f300 `37fe3d839c4be757` f1200 `ec2e9596cc9dfa9c`, stream-e2
 f600 `38b50b4c6f35ac02`, cold boot f900 `d6381be67430024d` f1800
 `1daeb1149976062c`) unless it says otherwise. Together the x87 rows took
-det heavy-f1 from 38.8 to 76 fps on that CPU.
+det heavy-f1 from 38.8 to 76 fps on that CPU. The code gates on
+`__x86_64__`, not Windows: every row but the last three runs on every
+x86_64 host (Windows, Linux, Intel macOS).
 
 - **x87 hard helpers on the registers in place (`66a991d060`).** The
   x86_64 hard FPU computed through `floatx80` unions passed by value:
@@ -419,7 +425,11 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   (`acecea21c8`).** The hard x87 helpers touch only env's FPU state, so
   they are `TCG_CALL_NO_WG` on x86_64; `fadd`..`fdivr` with an m32fp,
   m64fp or m32int operand is one helper call, not a load into FT0 plus
-  the op; register copies move 8+2 bytes. Core cycles −1.9%, 4/4.
+  the op; register copies move 8+2 bytes. Core cycles −1.9%, 4/4. The
+  fused helpers (`fop_ST0_m32`/`m64`/`i32`, used outside write-through
+  blocks: PC single, `perf.hard_fpu` off, Windows ARM64) and the 8+2-byte
+  register copies and `fxch` apply on every host, aarch64 included;
+  guest-invisible, and the macOS goldens are unchanged.
 - **The host x87 control word is the guest's (`deb98ee93f`).** Windows
   starts threads with CW `0x27f` (53-bit), and nothing set the vCPU
   thread's: extended-precision guest math ran at double precision,
@@ -1798,8 +1808,10 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   puts function definitions last and any module with an entry point has
   at least one function, so a complete module always ends in
   `OpFunctionEnd`. The reflect parse stays, as the second gate for a
-  blob that is structurally well-formed but wrong. Hatch:
-  `XEMU_SPIRV_CACHE=0` (bypass); validation is unconditional by design — a cache the
+  blob that is structurally well-formed but wrong. Bypass: Settings >
+  Cache shaders to disk off (`perf.cache_shaders`; the
+  `XEMU_SPIRV_CACHE=0` hatch was removed 2026-10-18, `a922602c75`);
+  validation is unconditional by design — a cache the
   process cannot trust is worse than no cache. No base-tag bump, so
   existing valid entries stay warm on every platform; only a `-dbg` run
   starts cold. Not a perf change: the added work is one linear pass over
@@ -1884,9 +1896,12 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   imports or exports a semaphore handle, so a device lacking the
   extension must not be rejected. It moved out of
   `required_device_extensions[]` and into
-  `add_optional_device_extension_names()` (`instance.c:383-392`), which
-  keeps device creation byte-identical on every ICD that does offer it.
-  Windows only.
+  `add_optional_device_extension_names()`, which kept device creation
+  byte-identical on every ICD that does offer it. Since 2026-10-18
+  (`6e2accff54`) it is not enabled at all: the GL-interop present's
+  compositor submit waits on the aux fence
+  (`pgraph_vk_end_single_time_commands`) before GL reads the shared
+  memory, and no semaphore handle crosses. Windows only.
 - **LRU eviction skips out-of-use nodes again (2026-09-08).**
   `lru_try_evict_one()` regained the `lru_is_node_in_use()` predicate
   (`include/qemu/lru.h:156`), which is now semantically identical to
@@ -1912,11 +1927,16 @@ det heavy-f1 from 38.8 to 76 fps on that CPU.
   `QUERIES_FULL` (counter `NV2A_PROF_FINISH_QUERIES_FULL`, nsprof
   `finish_queries_full`), which drains like `REPORTS_FULL`, so a
   forced-capacity run (`XEMU_MAX_QUERIES=64`) shows which of the two
-  guards fired. The 2026-07 validation count covered both and most
-  likely never reached this path, which would almost certainly have
-  crashed. Found by the 2026-09 Windows audit (confirmed finding 1, plan
-  batch 3; the batch's other items are still open). With the default
-  4096-query pool the guard did not fire in normal play.
+  guards fired. Since 2026-10-18 (`54671ac359`) `XEMU_MAX_QUERIES`
+  shrinks only the occlusion query pool, so `=64` exercises
+  `QUERIES_FULL`; the report pool stays at 4096 or more
+  (`max_reports_in_flight`), and `REPORTS_FULL` has no shrink knob
+  (with both pools shrunk it always fired first). The 2026-07 validation
+  count covered both and most likely never reached this path, which
+  would almost certainly have crashed. Found by the 2026-09 Windows audit
+  (confirmed finding 1, plan batch 3; the batch's other items are still
+  open). With the default 4096-query pool the guard did not fire in
+  normal play.
 
 - **`nv2a_vk_assert()` is live in debug builds (2026-10-10).** Since
   `9834214c58` (2026-04) the header hardcoded `NV2A_VK_PERF_BUILD 1`,

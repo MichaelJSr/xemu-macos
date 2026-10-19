@@ -4,7 +4,9 @@ The fork's main branch is `master`; commit straight to it.
 `AGENTS.md` applies only to pull requests aimed at upstream
 xemu-project/xemu.
 
-On the `windows` branch (the Windows test machine): commit to `windows` only. Never commit to, merge into or push `master`, and never tag. `docs/windows-test-plan.md` maps the macOS rules below to Windows.
+On a Windows test machine, `docs/windows-test-plan.md` maps the rules
+below to Windows paths and tools. The `windows` branch is kept frozen
+as the 2026-10-18 comparison point.
 
 ## Keep the loop fast
 

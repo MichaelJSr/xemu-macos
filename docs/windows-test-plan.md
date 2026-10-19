@@ -1,6 +1,6 @@
 # xemu-macos on real Windows hardware: test plan
 
-Written 2026-10-17 on the Mac; branch `windows` starts at master `42900e676d` (v0.15.1). It is meant for a fresh Claude Code session on the Windows machine, working with the owner; the kit's `AGENT-START.md` is the one-page brief to read first. Work top to bottom. Every step has exact PowerShell and a pass/fail line. Write results into `C:\xemu-kit\results\RESULTS.md` as you go (template in section 6).
+Written 2026-10-17 on the Mac and first run on 2026-10-17 to 18, on the `windows` branch (from master `42900e676d`, v0.15.1), which stays frozen as that run's comparison point. The next run works from `master` at the release under test, or from a branch the owner names. It is meant for a fresh Claude Code session on the Windows machine, working with the owner; the kit's `AGENT-START.md` is the one-page brief to read first. Work top to bottom. Every step has exact PowerShell and a pass/fail line. Write results into `C:\xemu-kit\results\RESULTS.md` as you go (template in section 6).
 
 Tags used below: **[owner]** means a person has to look, listen or hold the controller. **[agent]** means Claude can run it alone. **P0** = do first, **P1** = do this session, **P2** = only if there's time.
 
@@ -9,9 +9,9 @@ Tags used below: **[owner]** means a person has to look, listen or hold the cont
 ### What is already known about this fork on Windows
 
 - The only earlier real-hardware session was 2026-09-07: Windows 10, i7-4770K, NVIDIA TITAN Xp. The Vulkan renderer rendered correctly. Upstream's DXGI presenter was fixed there (`2182baec46`). Audio picked `dsound`. The title screen ran at 21-25 fps, below its 30 fps cap, so that CPU had headroom to recover. Details are in `docs/Campaigns/windows-port-2026-09.md`.
-- One problem from that session is still open: native MSYS2 builds of the "wave-1" branch crashed intermittently (about 5 runs in 6) 6-10 s after launch. Review blamed the `-O3 -Dstack_protector=disabled` flags, but that was never confirmed on hardware. 2026-10-18: it was SDL's WIN_OpenClipboard race (fixed in the SDL wrap); the 7.3 protocol ran clean on both `-O2` and `-O3`, and x86_64 builds now default to `-O3`.
+- One problem from that session stayed open until 2026-10-18: native MSYS2 builds of the "wave-1" branch crashed intermittently (about 5 runs in 6) 6-10 s after launch. Review blamed the `-O3 -Dstack_protector=disabled` flags, but that was never confirmed on hardware. 2026-10-18: it was SDL's WIN_OpenClipboard race (fixed in the SDL wrap); the 7.3 protocol ran clean on both `-O2` and `-O3`, and x86_64 builds now default to `-O3`.
 - v0.13.1 gave a black screen on an AMD GPU. It was fixed in v0.13.2 (two Vulkan spec violations that MoltenVK tolerated). The current renderer has never been checked on AMD or Intel hardware.
-- Everything that shipped from v0.14 onward has never run on real Windows. That covers headless mode, the QMP automation commands, deterministic mode and its goldens, `XEMU_RAM_SHM` (a Windows named file mapping), the `XEMU_INPUT_PIPE` named pipe in a full run, the normal-mode BQL spin and KiIdle halt, and the fork's aarch64 TCG backend on Windows ARM64. `scripts/bench-savestate-ab-win.py` has never driven a full A/B, so expect rough edges and fix them as commits (section 6.3).
+- Everything that shipped from v0.14 onward ran on real Windows once, on 2026-10-18 (one x86_64 CPU, one NVIDIA GPU: the gating audit's report): headless mode, the QMP automation commands, deterministic mode and its goldens, `XEMU_RAM_SHM` (a Windows named file mapping), the `XEMU_INPUT_PIPE` named pipe in a full run, the normal-mode BQL spin and KiIdle halt. The fork's aarch64 TCG backend on Windows ARM64 has still never run. `scripts/bench-savestate-ab-win.py` drove its first full A/Bs then; fix new rough edges as commits (section 6.3).
 - `docs/windows-gating-audit.md` lists what CI compile alone has validated: the B-list, D1-D8 and I.9-I.11. `docs/roadmap.md` item 5 and xemu-history's frontier item 4 ("Real-hardware validation debt") track the same debt.
 
 ### Ground rules on Windows (CLAUDE.md, mapped)
@@ -20,7 +20,7 @@ Tags used below: **[owner]** means a person has to look, listen or hold the cont
 - Always pass `-config_path`. Without it xemu reads and rewrites `%APPDATA%\xemu\xemu\xemu.toml`. Never put an `xemu.toml` next to an `xemu.exe` under `C:\xemu-kit\bin`, because that turns on portable mode.
 - Mute every agent run (`[audio] volume_limit = 0`, or headless). The helpers force it.
 - Mark every automated launch with `-name xemu-fork-auto` and set `XEMU_BASE_PATH` to the bench cache (`%LOCALAPPDATA%\xemu-fork-bench`). `Start-Xemu`, the bench and `det_golden.py` already do this.
-- Commit to the `windows` branch only. Use `<subsystem>: <short description>` with one logical change per commit and docs in the same commit. Never touch `master` or any tag.
+- Commit to `master`, or to the branch the owner names for the run; never to the frozen `windows` branch. Use `<subsystem>: <short description>` with one logical change per commit and docs in the same commit. Never tag.
 - Run at most two refuters at once. Never set `XEMU_X87_REFUTE`, `XEMU_SUBPAGE_FAST_REFUTE` and `XEMU_DSP_JIT_DIFF` together. Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or `XEMU_MMIO_PROF` set.
 - Don't wait for an idle machine. Quote the load, and add pairs instead.
 - Personal set (`kit\personal`): use it for playing and for smoke-testing the owner's real setup. Fixture set (`kit\fixtures`): use it for benchmarks, goldens and savestate tests. Never mix them.
@@ -96,11 +96,11 @@ git --version; py -3 --version; gh --version; claude --version
 gh auth login
 ```
 
-`gh auth login` is an [owner] step: pick GitHub.com, HTTPS, "Authenticate Git with your GitHub credentials" = Yes, and the browser login. It's needed to push `windows` and for `gh run`. The repo is public, so the clone and the kit's zips need no login.
+`gh auth login` is an [owner] step: pick GitHub.com, HTTPS, "Authenticate Git with your GitHub credentials" = Yes, and the browser login. It's needed to push and for `gh run`. The repo is public, so the clone and the kit's zips need no login.
 
 Pass: every `--version` prints and `gh auth status` says you're logged in. Use `py -3` for every script. MSYS2's own python must not run the bench: it refuses, because it needs `os.name == 'nt'`.
 
-### 1.3 Clone the fork and check out `windows` [owner]
+### 1.3 Clone the fork and check out `master` [owner]
 
 ```powershell
 git config --global core.autocrlf false      # build.sh dies on CRLF checkouts
@@ -111,17 +111,16 @@ Set-Location $env:USERPROFILE
 git clone https://github.com/MichaelJSr/xemu-macos.git
 Set-Location xemu-macos
 git fetch origin
-git switch windows
-if ($LASTEXITCODE -ne 0) { git fetch C:\xemu-kit\repo\xemu-macos.bundle windows:windows; git switch windows }
+git switch master                            # or the branch the owner names for this run
 git remote add upstream https://github.com/xemu-project/xemu.git
-git log --oneline -3; git describe --tags
+git log --oneline -3; git describe --tags    # the release under test, or later
 ```
 
-Fallback if GitHub has no `windows` branch, or there's no network. Clone from the kit's bundle instead:
+Fallback if there's no network. Clone from the kit's bundle instead:
 
 ```powershell
 git bundle list-heads C:\xemu-kit\repo\xemu-macos.bundle
-git clone -b windows C:\xemu-kit\repo\xemu-macos.bundle "$env:USERPROFILE\xemu-macos"
+git clone -b master C:\xemu-kit\repo\xemu-macos.bundle "$env:USERPROFILE\xemu-macos"
 Set-Location "$env:USERPROFILE\xemu-macos"
 git remote set-url origin https://github.com/MichaelJSr/xemu-macos.git
 ```
@@ -160,12 +159,12 @@ Pass: `problems: 0`. `SHA256SUMS.txt` is authoritative. `fixtures\README.md`'s m
 
 ### 1.5 Unzip the release builds [agent]
 
-Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. The kit already holds every x86_64 zip (matching GitHub's digests) and the v0.15.1 arm64 ones: the fork's v0.15.1 and v0.14 zips in `releases\`, upstream's v0.8.137 in `releases\upstream-v0.8.137\`. The `gh release download` lines below only run when `gh auth status` passes, and with `--skip-existing` they only fetch what's missing. If `gh release list --repo MichaelJSr/xemu-macos --limit 3` shows a release newer than v0.15.1, set `$Ver` here and in `kit.ps1`.
+Use the arm64 zips on Windows on ARM and the x86_64 zips everywhere else. The 2026-10-17 kit held every x86_64 zip (matching GitHub's digests) and the v0.15.1 arm64 ones: the fork's v0.15.1 and v0.14 zips in `releases\`, upstream's v0.8.137 in `releases\upstream-v0.8.137\`. The `gh release download` lines below only run when `gh auth status` passes, and with `--skip-existing` they only fetch what's missing (a kit without the release under test needs them). If `gh release list --repo MichaelJSr/xemu-macos --limit 3` shows a release newer than v0.15.2, set `$Ver` here and in `kit.ps1`.
 
 ```powershell
 $Kit = 'C:\xemu-kit'
 $Arch = if ((Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture -eq 12) { 'arm64' } else { 'x86_64' }
-$Ver = 'v0.15.1'; $V = $Ver.TrimStart('v')
+$Ver = 'v0.15.2'; $V = $Ver.TrimStart('v')
 $Rel = "$Kit\releases"; $Up = "$Rel\upstream-v0.8.137"
 gh auth status *> $null
 if ($LASTEXITCODE -eq 0) {
@@ -265,7 +264,7 @@ Pass: every `_path` names a file that exists (`Test-Path`), both configs have `v
 
 ### 1.8 Kit helper scripts in the repo [agent]
 
-The helpers are already in the `windows` branch: `scripts\win\xemu_ctl.py` (one-shot QMP, HMP and gdbstub calls, plus a shared-memory hash) and `scripts\win\det_golden.py` (the Windows stand-in for `scripts/bench-det.py`, which is macOS-only because it uses libproc, AF_UNIX and `.app` bundles). They were only tested against fake servers on the Mac, so fix them on their first real run and commit the fixes to `windows` (section 6.3).
+The helpers are in the repo: `scripts\win\xemu_ctl.py` (one-shot QMP, HMP and gdbstub calls, plus a shared-memory hash) and `scripts\win\det_golden.py` (the Windows stand-in for `scripts/bench-det.py`, which is macOS-only because it uses libproc, AF_UNIX and `.app` bundles). They were fixed on their first real run (2026-10-18); commit any new fixes as in section 6.3.
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -292,7 +291,7 @@ winget install --accept-source-agreements --accept-package-agreements -e --id Mi
 # Add-MpPreference -ExclusionPath 'C:\xemu-kit'
 ```
 
-To read a dump: `windbg -z <dump> -y C:\xemu-kit\bin\v0.15.1` (the PDB sits next to `xemu.exe`), then `!analyze -v` and `~*k`. To see crashes and GPU resets afterwards:
+To read a dump: `windbg -z <dump> -y C:\xemu-kit\bin\v0.15.2` (the PDB sits next to `xemu.exe`), then `!analyze -v` and `~*k`. To see crashes and GPU resets afterwards:
 
 ```powershell
 Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error' } -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object Message -like '*xemu*' | Format-List TimeCreated, Message
@@ -314,7 +313,7 @@ claude            # log in, check that it starts in the repo, then /exit
 Get-ChildItem "$env:USERPROFILE\.claude\projects" | Select-Object Name
 ```
 
-Check after the first `claude` run. If the folder Claude created differs from `$proj` (for example a lower-case drive letter), move the files: `Move-Item "$mem\*" "$env:USERPROFILE\.claude\projects\<created-name>\memory\"`. Then start Claude Code in the repo with the kit as an extra working directory, `claude --add-dir C:\xemu-kit` (CLAUDE.md, the skills and the memory load only for a session started in the repo), and ask "what do you remember about this project?". It should mention the golden hashes, the lean dev process and the `windows-session` memory (commit to `windows` only). If Claude Code can't find Git Bash, set `CLAUDE_CODE_GIT_BASH_PATH` to `C:\Program Files\Git\bin\bash.exe` (in the `env` block of `%USERPROFILE%\.claude\settings.json`, or in the environment before starting `claude`).
+Check after the first `claude` run. If the folder Claude created differs from `$proj` (for example a lower-case drive letter), move the files: `Move-Item "$mem\*" "$env:USERPROFILE\.claude\projects\<created-name>\memory\"`. Then start Claude Code in the repo with the kit as an extra working directory, `claude --add-dir C:\xemu-kit` (CLAUDE.md, the skills and the memory load only for a session started in the repo), and ask "what do you remember about this project?". It should mention the golden hashes, the lean dev process and the `windows-session` memory (written for the 2026-10-18 run: where it says to commit to `windows` only, section 0's branch rule wins). If Claude Code can't find Git Bash, set `CLAUDE_CODE_GIT_BASH_PATH` to `C:\Program Files\Git\bin\bash.exe` (in the `env` block of `%USERPROFILE%\.claude\settings.json`, or in the environment before starting `claude`).
 
 How Claude runs this plan's PowerShell: Claude Code on Windows has a PowerShell tool, on by default with Git for Windows (claude.ai and Console accounts). It uses `pwsh` 7 if installed, else Windows PowerShell 5.1, with `-ExecutionPolicy Bypass`; the Bash tool (Git Bash) stays for POSIX commands. Each call is a fresh process, so functions, `$p` and `$env:` changes don't carry over: start every call with `. C:\xemu-kit\tools\kit.ps1`, and keep each `Start-Xemu` and its `Stop-Xemu` in the same call. Foreground calls time out after 2 min by default (10 min at most). Run longer blocks (2.2, 2.3, 3.7, 3.8, 3.10a, 3.10d, 3.11, 3.12, 3.13, section 4) in the background: write the block to `C:\xemu-kit\work\step-<id>.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass -File C:\xemu-kit\work\step-<id>.ps1 *> C:\xemu-kit\results\step-<id>.log` with `run_in_background`, then read the log when it finishes. After any interrupted call, run `Stop-AutoXemu` before the next launch.
 
@@ -402,7 +401,7 @@ foreach ($r in 'VULKAN', 'OPENGL') {
 }
 ```
 
-Pass: both render the scene. Record flips/s for each. Section M of the gating audit says OpenGL crashed right after the PFIFO thread started in a Parallels VM, and real hardware has never confirmed or cleared that. A crash here is a P0 finding.
+Pass: both render the scene. Record flips/s for each. Section M of the gating audit says OpenGL crashed right after the PFIFO thread started in a Parallels VM; on 2026-10-18 it did not reproduce on the TITAN Xp (gating audit §T), so a crash here, on any GPU, is a P0 finding.
 
 ## 3. The fork's Windows-specific paths
 
@@ -416,8 +415,8 @@ These are fork features that take a Windows-specific branch (found by `git diff 
 | `ui/xemu-ram-digest.c` | non-Apple uses the thread pool plus qcrypto (Apple uses GCD and CommonCrypto) | 3.3 |
 | `ui/xemu-input.c` `_WIN32` arm | `XEMU_INPUT_PIPE` is a Win32 named pipe (`\\.\pipe\<name>`), PIPE_NOWAIT, one instance, recycled per writer | 3.4 |
 | `hw/xbox/xbox.c` | `XEMU_RAM_SHM` is a named file mapping; no lock file; a name that exists always has a live holder | 3.5 |
-| gdbstub (`gdbstub/xemu-gdb.c`) | portable; never run on Windows | 3.6 |
-| icount, block I/O | deterministic I/O: macOS and Linux run qcow2 I/O inline on the vCPU; Windows' file-win32 still hands it to worker threads (the IDE settle covers it) | 3.7 |
+| gdbstub (`gdbstub/xemu-gdb.c`) | portable; first run on Windows 2026-10-18 | 3.6 |
+| icount, block I/O | deterministic I/O runs inline on the vCPU: file-posix on macOS and Linux, and since `4e50b583d4` file-win32's coroutine reads and writes on Windows (normal mode keeps its worker threads) | 3.7 |
 | `target/i386/tcg/fpu_helper.c` | x86_64 hard FPU uses host `long double` (x87); aarch64 uses `double`; the SSE host path is on by default with `hard_fpu` (since 2026-10-18; `XEMU_SSE_HOST=2` is the differential) | 3.7, 3.8 |
 | `tcg/aarch64/tcg-target-has.h` | Windows ARM64: `TCG_TARGET_HAS_fpu 0` (helper hard FPU, no inline x87 or SSE), but pinned registers, the TLB memo and hot/cold TB code are active | 3.9 |
 | `include/qemu/cacheflush.h` | batched icache flush off on Windows ARM64 | 3.9 |
@@ -427,8 +426,8 @@ These are fork features that take a Windows-specific branch (found by `git diff 
 | gating audit B1-B8, F1 | occlusion rework, deferred reports, vertex refinement, bind skips, PFIFO untimed wait, surface expiry, 5 s/60 s fence watchdog, zeta quarantine, texture LRU retirement | 3.10, 3.11 |
 | `system/cpus.c` | BQL spin paced on `get_clock()` (QueryPerformanceCounter) on x86_64, `cntvct_el0` on Windows ARM64 | 4.5 |
 | `target/i386/tcg/system/misc_helper.c` | KiIdleLoop halt paced on `get_clock()` | 4.5 |
-| no `QOS_CLASS` equivalent (audit A6) | vCPU, PFIFO and vblank run at normal Windows priority | 3.13 |
-| `util/qemu-timer.c` | macOS kqueue timer is Darwin-only; Windows uses upstream timers; vblank uses `SDL_DelayPrecise` | 3.13 |
+| `tcg-accel-ops-mttcg.c`, `pfifo.c`, `apu.c` (audit A6) | the normal-mode vCPU, PFIFO and APU frame threads run at `THREAD_PRIORITY_ABOVE_NORMAL` since `f96f00ba9d` (`XEMU_VCPU_QOS=0` leaves them at normal); vblank, the main loop and the det RR thread at normal | 3.13 |
+| `util/qemu-timer.c` | macOS kqueue timer is Darwin-only; the Windows main loop sleeps on a high-resolution waitable timer (`e8e260186d`); vblank uses `SDL_DelayPrecise` | 3.13 |
 | `accel/tcg/tb-maint.c` | `XEMU_SUBPAGE_FAST=1` prints "inert" on x86_64 (the store prefilter is aarch64-only); sub-page code tracking itself is portable | 3.12 |
 | `ui/xemu-disc-fingerprint.c` | no inode change time on Windows, so snapshots without a fingerprint always ask | 3.14 |
 | `util/qemu-sockets.c`, `io/channel-socket.c`, `migration/savevm.c` | the unix-listener guard is POSIX-only; Windows keeps upstream behaviour | 3.15 |
@@ -566,7 +565,7 @@ Pass: `stop=T05 ... eip=0x8c230 ... PASS` within a second or two, and the game r
 
 ### 3.7 Deterministic mode and the golden hashes [agent, P1, 45 min, mostly unattended]
 
-The goldens below are from `scripts/bench-det.py` on macOS arm64, and they are bit-exact on master through v0.15. The recipe is: fixture HDD, EEPROM and config; player 1 stubbed; muted; `XEMU_HEADLESS=null`; `-S -icount shift=2,align=off,sleep=off`; then `loadvm`; then `xemu-frame-advance`; then the first 16 hex digits of the sha256 of guest RAM. `det_golden.py` repeats that recipe exactly.
+The goldens below are from `scripts/bench-det.py` on macOS arm64, and they are bit-exact on master through v0.15. The recipe is: fixture HDD, EEPROM and config; player 1 stubbed; muted; `XEMU_HEADLESS=null`; `-S -icount shift=2,align=off,sleep=off`; then `loadvm`; then `xemu-frame-advance`; then the first 16 hex digits of the sha256 of guest RAM. `det_golden.py` repeats that recipe exactly. The Windows x86_64 hashes from the 2026-10-18 run, and what moves them (GCC's FMA contraction, debug against release), are in `docs/windows-gating-audit.md` §V.
 
 | Golden | Command | macOS hash |
 |---|---|---|
@@ -578,10 +577,10 @@ The goldens below are from `scripts/bench-det.py` on macOS arm64, and they are b
 In principle the guest computation doesn't depend on the host. A match on Windows would therefore be a strong cross-host check. In practice there are known reasons a hash can differ, so first separate "Windows is deterministic" (must pass) from "Windows matches macOS" (a finding either way):
 
 1. The DSP engine. On macOS the fork's DSP JIT runs inside the C interpreter. On Windows the default config runs upstream's dsp56300 JIT, a different engine that may differ in timing or results. `audio.use_dsp_jit = false` gives Windows the plain interpreter, the closest thing to macOS.
-2. The x87 hard FPU. x86_64 uses host `long double` arithmetic on the x87 unit (64-bit mantissa, or 53-bit on threads that keep Windows' default control word) and rounds with `pack()`. aarch64 uses `double`. NaN payload rules also differ between ARM and x86. `perf.hard_fpu = false` (softfloat everywhere) removes this axis, but the macOS goldens were computed with `hard_fpu = true`, so that run needs a fresh macOS reference.
-3. The SSE fast path. It's on by default on aarch64, where it follows ARM's NaN priority. It's off on x86_64, where softfloat runs.
+2. The x87 hard FPU. x86_64 uses host `long double` arithmetic on the x87 unit under the guest's precision and rounding control (since `deb98ee93f`; the hot ops inline since `aae214c27a`). aarch64 uses `double`. NaN payload rules also differ between ARM and x86. `perf.hard_fpu = false` (softfloat everywhere) removes this axis, but the macOS goldens were computed with `hard_fpu = true`, so that run needs a fresh macOS reference.
+3. The SSE fast path. It's on by default on aarch64, where it follows ARM's NaN priority, and on x86_64 since `57cfe4fb51` (before that softfloat ran there).
 4. APU float code generation. The goldens are known to move with code generation alone ("APU float under `-ffp-contract=fast`"). Windows x86_64 is GCC at x86-64-v3, which has FMA and different contraction than clang arm64, and it runs SSE2 kernels instead of NEON.
-5. The cold boot, and only the cold boot, also passes through Windows' worker-thread block I/O (the icount settle is meant to make it deterministic anyway).
+5. The cold boot, and only the cold boot, does heavy block I/O; since `4e50b583d4` Windows runs it inline on the vCPU under icount, as macOS does.
 
 Windows ARM64 is the closest host to macOS: it uses `double` helpers and NEON SSE, though not the fork's DSP JIT.
 
@@ -611,7 +610,7 @@ py -3 $Det --exe $XNew --label 'wav default' --tag azurik-heavy-f1 --hash-at 300
 
 Bring back `results\det\*.pages` and `*.wav`. On the Mac, the same `--hash-at` list with `xemu-ram-digest pages=true` names the first frame and the pages that differ. Audio buffers versus game state tells you whether the APU or the CPU diverged. Also compare the WAV hashes, which are deterministic under icount.
 
-Also run the heavy-f1 golden once with the debug build (`--exe $XNewDbg`). Its asserts must stay silent and its hashes must equal the release build's for the same config.
+Also run the heavy-f1 golden once with the debug build (`--exe $XNewDbg`). Its asserts must stay silent. On 2026-10-18 its hashes differed from the GCC release build's (gating audit §V), so record both rather than expect a match.
 
 ### 3.8 `XEMU_SSE_HOST=2` differential [agent, P1, 15 min]
 
@@ -628,7 +627,7 @@ Start-Sleep 300; $alive = -not $p.HasExited; Stop-Xemu $p; "alive after 5 min: $
 Select-String -LiteralPath (Get-XemuLog $d) -Pattern 'SSE|diverg' | Select-Object -Last 5
 ```
 
-Pass: no abort, the process is alive after 5 minutes, and on x86_64 the det hash equals the default-config hash from 3.7 for the same frames (softfloat is the default there). Builds before 2026-10-18 ran softfloat by default on x86_64; later ones run the host path, and mode 2 checks it.
+Pass: no abort, and the process is alive after 5 minutes. Record mode 2's det hashes next to 3.7's. Since `57cfe4fb51` they are expected to differ from the default's: on 2026-10-18 mode 2 matched the softfloat default of that time. No current switch gives a softfloat-only reference.
 
 ### 3.9 Windows ARM64 only [agent, P1, 45 min]
 
@@ -691,7 +690,7 @@ Bring back `results\det\*.png`. Small rasterization differences are normal; miss
 
 ### 3.11 Lockless MMIO and PFIFO soak [agent, P1, 35 min unattended]
 
-There has never been a non-VM soak of the BQL-free MMIO dispatch (PFB, USER, APU-VP, PGRAPH), the lockless DMA_PUT doorbell or the PFIFO untimed wait.
+The first non-VM soak of the BQL-free MMIO dispatch (PFB, USER, APU-VP, PGRAPH), the lockless DMA_PUT doorbell and the PFIFO untimed wait ran on 2026-10-18 (one x86_64 CPU, one NVIDIA GPU, 30 of 30 cycles: gating audit §T); repeat it on new hardware.
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -749,7 +748,7 @@ Pass: no line containing `VIOLATION`, `tlb-wclean refute ... misses=0 unset=0`, 
 
 ### 3.13 Threads, timers and priority [agent, P1, 30 min]
 
-Windows has no equivalent of the macOS QoS bumps (audit A6). On macOS, putting the vCPU at user-interactive QoS took heavy-f1 under load from 37 to 58 fps. These checks show whether Windows needs a `SetThreadPriority` or MMCSS change (audit batch 17).
+Since `f96f00ba9d` the vCPU, PFIFO and APU frame threads run above normal priority on Windows, the counterpart of the macOS QoS bumps (audit A6), and `XEMU_VCPU_QOS=0` leaves them at normal. On macOS, putting the vCPU at user-interactive QoS took heavy-f1 under load from 37 to 58 fps. These checks show whether Windows needs more than that, such as MMCSS (audit batch 17).
 
 a) Vblank rate in each window state. In each state the guest must see 60.0 vblanks/s:
 
@@ -819,7 +818,7 @@ py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 2 45 "$Res\bench-aa-f1" --exe $XNew
 
 Pass: a receipt is printed, no run is DEAD or INVALID, and both arms agree within the spread. INVALID runs with empty logs mean the console problem from 3.1.
 
-### 4.3 v0.15.1 baselines on the anchors [agent, 30 min]
+### 4.3 v0.15.2 baselines on the anchors [agent, 30 min]
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -829,9 +828,9 @@ foreach ($t in 'azurik-heavy-f1', 'azurik-heavy-w2', 'vm-20260704032357') {
 }
 ```
 
-Record, per anchor: fps mean ± sd over all 6 runs, draws/flip, passes/flip, fence_wait ms/flip, CPU%, and whether it's capped. These are the first Windows baselines: gating-audit D6 says no macOS number transfers.
+Record, per anchor: fps mean ± sd over all 6 runs, draws/flip, passes/flip, fence_wait ms/flip, CPU%, and whether it's capped. Compare them with the 2026-10-18 v0.15.1 baselines (gating audit §V); gating-audit D6 says no macOS number transfers.
 
-### 4.4 v0.14 versus v0.15.1 [agent, 20-40 min]
+### 4.4 v0.14 versus v0.15.2 [agent, 20-40 min]
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -889,7 +888,7 @@ Upstream v0.8.137 most likely can't load the fork's savestates, because the fork
 
 ### 4.8 Local builds [P2]
 
-Builds go through section 7. The cross-binary A/Bs worth having are the CI release against a native MSYS2 `-O2` build (toolchain effect), native `-O2` (`./build.sh -Doptimization=2 -Dstack_protector=auto`) against the default `-O3`, and native against GCC PGO. Run each with `py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 4 75 <out> --b-exe <B> --e-exe <E>`, plus 4.6 with `--exe` swapped per arm.
+Builds go through section 7. The cross-binary A/Bs worth having are the CI release against a native MSYS2 build of the same commit (toolchain and LTO effect), native `-O2` (`./build.sh -Doptimization=2 -Dstack_protector=auto`) against the default `-O3`, and native against GCC PGO. Run each with `py -3 $Bench azurik-heavy-f1 XEMU_NOOP_AB 4 75 <out> --b-exe <B> --e-exe <E>`, plus 4.6 with `--exe` swapped per arm.
 
 ### Numbers to bring back
 
@@ -899,7 +898,7 @@ For every batch: the printed receipt block, plus `meta.json` and `receipt.json` 
 
 The fork's CI (`.github/workflows/ci.yml`) now calls upstream's `xemu-project/xemu-test` Roswell workflow (`test-roswell.yml`, pinned by commit since its `wheel-202610142116` tag was deleted on 2026-10-18) against the fork's own build artifacts on Ubuntu, Windows and macOS. On master `ca351a6b21` (run 39013910935) the Windows and Ubuntu jobs pass, and macOS fails (being worked on in `fix/roswell-fpu`). CI's Windows job uses Mesa llvmpipe (software GL), `--no-hard-fpu` and `failure_filters/windows_roswell_softfpu.json`. Running it locally adds a real GPU driver.
 
-The test data (`tester.iso`) is built with Docker in CI. The easy route is to download the artifacts of a fresh CI run of the `windows` branch; they expire after 1 day. Pushing the branch (6.3) triggers that run.
+The test data (`tester.iso`) is built with Docker in CI. The easy route is to download the artifacts of a fresh CI run of the branch under test (`master` by default); they expire after 1 day. Pushing it (6.3) triggers that run.
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
@@ -909,7 +908,7 @@ Set-Location C:\xemu-test
 py -3.12 -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install git+https://github.com/abaire/xemu-pgraph-ci-tools.git
 pip install .
-$run = gh run list --repo MichaelJSr/xemu-macos --branch windows --workflow CI --limit 1 --json databaseId --jq '.[0].databaseId'
+$run = gh run list --repo MichaelJSr/xemu-macos --branch master --workflow CI --limit 1 --json databaseId --jq '.[0].databaseId'
 gh run download $run --repo MichaelJSr/xemu-macos -n test-data -D xemutest\data
 gh run download $run --repo MichaelJSr/xemu-macos -n roswell-bios -D private
 Move-Item private\roswell.bin private\bios.bin -Force
@@ -969,7 +968,7 @@ $tmpl = @'
 
 ## Findings (one line each: severity, symptom, repro, suspected area, evidence)
 
-## Commits pushed to windows
+## Commits pushed (branch, hashes)
 '@
 [IO.File]::WriteAllText('C:\xemu-kit\results\RESULTS.md', $tmpl.Replace("`r`n", "`n"))
 ```
@@ -983,24 +982,24 @@ Compress-Archive -Path C:\xemu-kit\results\* -DestinationPath "C:\xemu-kit\windo
 
 Leave out `results\dumps` if it's large (full dumps are GBs); copy those separately. The zip holds RESULTS.md, machine.json, dxdiag.txt, the det-*.jsonl files, `results\det` (page hashes, WAVs, PNGs), the bench out dirs, the soak log and every interesting `stderr.log` or `xemu.log` (copy them in from `C:\xemu-kit\work\<run>`). `New-Scratch` already deletes each finished run's HDD copy and `det_golden.py` drops a failed run's, so the run dirs left in `work` are small. Once you've copied out what you need, clear them with `Get-ChildItem C:\xemu-kit\work -Directory | Where-Object Name -ne 'shots' | Remove-Item -Recurse -Force` (it keeps the two configs and the `shots` folder).
 
-### 6.3 Filing findings as commits on `windows`
+### 6.3 Filing findings as commits
 
 - One logical change per commit, titled `<subsystem>: <short description>` (see `git log --oneline -- <path>` for the prefixes: `nv2a/vk:`, `ui:`, `scripts/win:`, `tcg:`, `target/i386:`, `build:`, `docs:`). The body says why, what and the numbers. End it with the `Co-Authored-By:` trailer the session's harness supplies.
 - Docs go in the same commit as the change. Put a README line only for user-visible behaviour (for example a Windows troubleshooting entry). Wrap platform-only code in `#ifdef _WIN32`, because CI builds macOS and Linux too.
-- A finding that motivates a fix rides in that fix's commit; measurements with no code change can go in one results commit on `windows`. Add a dated section to `docs/windows-gating-audit.md` ("Windows real-hardware report: <date> (v0.15, <GPU>, <CPU>)") that marks the needs-real-hardware items it settled, and update `docs/roadmap.md` item 5 in the same commit. No measurement logs go in skills.
+- A finding that motivates a fix rides in that fix's commit; measurements with no code change can go in one results commit. Add a dated section to `docs/windows-gating-audit.md` ("Windows real-hardware report: <date> (<release>, <GPU>, <CPU>)") that marks the needs-real-hardware items it settled, and update `docs/roadmap.md` item 5 in the same commit. No measurement logs go in skills.
 - Harness fixes (bench-win, `scripts/win/*`) are their own `scripts/win:` commits.
 
 ```powershell
 Set-Location "$env:USERPROFILE\xemu-macos"
-git switch windows
+git switch master                            # or the branch the owner named
 git status --short
 git add <changed files>
 git commit -m '<subsystem>: <short description>' -m '<why, what, numbers>' -m 'Co-Authored-By: <exact trailer from your system prompt>'
-git push -u origin windows
-gh run list --repo MichaelJSr/xemu-macos --branch windows --limit 3
+git push origin HEAD
+gh run list --repo MichaelJSr/xemu-macos --branch (git branch --show-current) --limit 3
 ```
 
-CI runs on every branch (`branches: ['**']`), so each push builds Windows x86_64 and arm64 and runs the Roswell tests. To test a fix without a local toolchain, push it and wait for the run. Then download the build with `gh run download <id> --repo MichaelJSr/xemu-macos -n xemu-windows-x86_64-release -D C:\xemu-kit\bin\ci-<sha>` (use `-arm64-` on ARM) and rerun the failing step with `-Exe C:\xemu-kit\bin\ci-<sha>\xemu.exe`. Never merge `windows` into `master` and never tag; the owner decides that on the Mac.
+CI runs on every branch (`branches: ['**']`), so each push builds Windows x86_64 and arm64 and runs the Roswell tests. To test a fix without a local toolchain, push it and wait for the run. Then download the build with `gh run download <id> --repo MichaelJSr/xemu-macos -n xemu-windows-x86_64-release -D C:\xemu-kit\bin\ci-<sha>` (use `-arm64-` on ARM) and rerun the failing step with `-Exe C:\xemu-kit\bin\ci-<sha>\xemu.exe`. Never tag or publish a release, and leave the frozen `windows` branch alone; the owner decides releases on the Mac.
 
 ## 7. Local builds (optional, P2)
 
@@ -1016,9 +1015,9 @@ $msys = 'C:\msys64\usr\bin\bash.exe'
 & $msys -lc 'pacman -S --needed --noconfirm --disable-download-timeout git make patch diffutils mingw-w64-x86_64-toolchain mingw-w64-x86_64-clang mingw-w64-x86_64-lld mingw-w64-x86_64-compiler-rt mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf mingw-w64-x86_64-python mingw-w64-x86_64-python-yaml mingw-w64-x86_64-python-requests mingw-w64-x86_64-ccache mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman mingw-w64-x86_64-libepoxy mingw-w64-x86_64-libsamplerate mingw-w64-x86_64-sdl3 mingw-w64-x86_64-libslirp mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-validation-layers mingw-w64-x86_64-zlib mingw-w64-x86_64-zstd mingw-w64-x86_64-libusb mingw-w64-x86_64-curl mingw-w64-x86_64-openssl mingw-w64-x86_64-gdb'
 $env:MSYSTEM = 'MINGW64'; $env:CHERE_INVOKING = '1'
 Set-Location $Repo
-& $msys -lc './build.sh 2>&1 | tail -n 30'                 # release: -O2, -Dx86_version=3 (same as CI's x86_64 release)
+& $msys -lc './build.sh 2>&1 | tail -n 30'                 # release: -O3, no stack protector, -Dx86_version=3 (CI's x86_64 release adds LTO)
 & $msys -lc 'grep -c -- " -O3 " build/compile_commands.json; grep -c fstack-protector build/compile_commands.json'
-Copy-Dist local-O2
+Copy-Dist local-O3
 # incremental after an edit:
 & $msys -lc 'ninja -C build qemu-system-i386w.exe && cp build/qemu-system-i386w.exe dist/xemu.exe'
 Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING
@@ -1032,7 +1031,7 @@ CI doesn't build on Windows. It cross-builds in a Linux container (`.github/work
 
 ```powershell
 winget install --accept-source-agreements --accept-package-agreements -e --id Docker.DockerDesktop   # start Docker Desktop once
-git clone -b windows https://github.com/MichaelJSr/xemu-macos.git C:\xemu-cross
+git clone -b master https://github.com/MichaelJSr/xemu-macos.git C:\xemu-cross
 docker run --rm -v 'C:\xemu-cross:/src' -w /src `
   -e CROSSPREFIX=x86_64-w64-mingw32.static- -e CROSSAR=x86_64-w64-mingw32.static-gcc-ar `
   ghcr.io/xemu-project/xemu-win64-toolchain-gcc:sha-2881edd `
@@ -1047,7 +1046,7 @@ C:\xemu-cross\cv2pdb\cv2pdb64.exe C:\xemu-cross\dist\xemu.exe     # writes xemu.
 
 Only run this if section 2.2 or any native build crashed. Pre-commit the interpretation:
 
-- If A is clean and B crashes, the flags are convicted. Keep `-O3` opt-in and hunt the latent bug from the dump.
+- If A is clean and B crashes, the flags are convicted. Make `-O2` the x86_64 default again (`build.sh`) and hunt the latent bug from the dump.
 - If A also crashes, the flags are cleared. Bisect by reverting whole commits, with 5 or more runs each, never single runs.
 
 ```powershell
@@ -1088,7 +1087,7 @@ Copy-Dist local-pgouse
 Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING
 ```
 
-Every session must end in a clean QMP `quit` (`Stop-Xemu` sends one) so the counters get written. Then A/B `local-O2` against `local-pgouse` (4.8) and check that the goldens didn't move unexpectedly. Don't commit `.gcda` files: they're tied to the GCC version, and CI's cross GCC differs. A CI-usable Windows profile would need a `generate` binary from CI's own toolchain, trained here, with `GCOV_PREFIX` redirecting its baked-in Linux profile path. Write that up as future work.
+Every session must end in a clean QMP `quit` (`Stop-Xemu` sends one) so the counters get written. Then A/B `local-O3` against `local-pgouse` (4.8) and check that the goldens didn't move unexpectedly. Don't commit `.gcda` files: they're tied to the GCC version, and CI's cross GCC differs. A CI-usable Windows profile would need a `generate` binary from CI's own toolchain, trained here, with `GCOV_PREFIX` redirecting its baked-in Linux profile path. Write that up as future work.
 
 ## Quick triage on Windows
 
@@ -1111,4 +1110,4 @@ The helpers live in the repo so they can't get lost:
 - `scripts\win\xemu_ctl.py`: QMP and gdbstub control for Windows test runs (loadvm, screendump, frame advance, RAM digest).
 - `scripts\win\det_golden.py`: deterministic golden runs on Windows (the macOS `bench-det.py` doesn't run there).
 
-The two Python helpers were tested against fake QMP and gdbstub servers on the Mac only; expect small fixes on their first real run, and commit them to `windows`.
+The two Python helpers were first tested against fake QMP and gdbstub servers on the Mac and fixed on their first real run (2026-10-18); commit new fixes as in section 6.3.

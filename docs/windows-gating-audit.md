@@ -486,11 +486,11 @@ the evidence.
 | The Vulkan SPIR-V cache ignored Settings > Cache shaders to disk (its own `XEMU_SPIRV_CACHE` hatch) | review | `a922602c75` |
 
 §A6 changed: 3.13b measured the cost of normal priority under host load
-(§V), and `f96f00ba9d` now runs the vCPU, PFIFO and APU threads at
-`THREAD_PRIORITY_ABOVE_NORMAL` on Windows (`XEMU_VCPU_QOS=0` leaves all
-three at normal); the main loop stays at normal. Harness fixes:
-`07fb7a811d`, `a0aff4866d`, `f1595e0c5e`, `7a9589adcb`, `39592145d7`,
-`c783af41ca`, `d3ea0ee8af`, `06ebdace13`.
+(§V), and `f96f00ba9d` now runs the normal-mode vCPU, PFIFO and APU
+threads at `THREAD_PRIORITY_ABOVE_NORMAL` on Windows (`XEMU_VCPU_QOS=0`
+leaves all three at normal); the main loop and the det RR thread stay at
+normal. Harness fixes: `07fb7a811d`, `a0aff4866d`, `f1595e0c5e`,
+`7a9589adcb`, `39592145d7`, `c783af41ca`, `d3ea0ee8af`, `06ebdace13`.
 
 ## V. Performance
 
@@ -504,8 +504,9 @@ vCPU in x87 helpers, mostly store-forwarding stalls on `floatx80` copies.
 Det A/Bs: `det_golden.py`, cross-binary unless noted, interleaved pairs,
 instructions and core cycles per frame from ETW counters (the TSC-based
 Mcyc/frame rises with hyperthread contention). Det heavy-f1 to frame 1200
-unless noted. The x87 rows took det heavy-f1 from 38.8 to 88 (native `-O2`) and 91 (native PGO) on a quiet box
-fps; `docs/optimizations.md` (CPU / JIT, x86_64 hosts) has the details.
+unless noted. The x87 rows took det heavy-f1 from 38.8 to ~76 fps; a
+final native `-O2` build measured 88 on a quiet box, and 91 with GCC PGO
+(7.4). `docs/optimizations.md` (CPU / JIT, x86_64 hosts) has the details.
 
 | Change | Delta | Signs | Load | Verdict |
 |---|---|---|---|---|
@@ -536,12 +537,12 @@ native builds on CPUs 4-7, 16.9 → 29.3 fps (3/3), where a busy-waiting
 run fell to 3.9 fps; the quieter warmups tie at 28.9. 4.3/4.4 (v0.15.1, windowed): heavy-f1 10.7 fps on a quiet box; F5 14.4 fps against v0.14's 12.4 (+15.9 %, 2/2). 4.5's switch A/Bs on v0.15.1 at 9-11 fps, two under build load: `XEMU_BQL_SPIN` default −2.0 % (2/2), `XEMU_KI_IDLE_HALT` +6.1 % (1/2), `XEMU_PFIFO_STALL_DOORBELL` −1.3 % (1/2, quiet); no default changed on that evidence.
 
 Goldens (3.7): Windows det is deterministic in every config (r1 = r2;
-dsp56300 JIT = interpreter; `XEMU_SSE_HOST=2` = default) and, as
-expected, matches no macOS hash (x87 long double vs double, SSE2 vs NEON
-kernels). Windows goldens since `cfcc8e68ab` (unchanged through every
-later commit): heavy-f1 f300 `37fe3d839c4be757` f1200 `ec2e9596cc9dfa9c`,
-stream-e2 f600 `38b50b4c6f35ac02`, cold boot f900 `d6381be67430024d`
-f1800 `1daeb1149976062c`. The debug vs release split: worktree builds of one commit settle part of it. GCC's FMA contraction in the x86-64-v3 release moves heavy-f1 and stream-e2: with `-ffp-contract=off`, or an x86-64-v1 build, the release hashes equal each other (heavy-f1 f300 `0d82336084feb76d` f1200 `599aceace7f41529`, stream-e2 `3808ce768eeb4123`), so nothing else in the v3 ISA matters. The debug build differs from both (`654eee348901d236` / `6938665a5124a399` / `48aeac8dabb00a8e`): a debug-only effect (`-O0`, `CONFIG_DEBUG_TCG`, or undefined behaviour `-O0` exposes), not found yet. Cold boot is equal in every build.
+dsp56300 JIT = interpreter; `XEMU_SSE_HOST=2` = the v0.15.1 default,
+softfloat) and, as expected, matches no macOS hash (x87 long double vs
+double, SSE2 vs NEON kernels). Windows goldens since `cfcc8e68ab`
+(unchanged through every later commit): heavy-f1 f300 `37fe3d839c4be757`
+f1200 `ec2e9596cc9dfa9c`, stream-e2 f600 `38b50b4c6f35ac02`, cold boot
+f900 `d6381be67430024d` f1800 `1daeb1149976062c`. The debug vs release split: worktree builds of one commit settle part of it. GCC's FMA contraction in the x86-64-v3 release moves heavy-f1 and stream-e2: with `-ffp-contract=off`, or an x86-64-v1 build, the release hashes equal each other (heavy-f1 f300 `0d82336084feb76d` f1200 `599aceace7f41529`, stream-e2 `3808ce768eeb4123`), so nothing else in the v3 ISA matters. The debug build differs from both (`654eee348901d236` / `6938665a5124a399` / `48aeac8dabb00a8e`), which looked like a debug-only effect (`-O0`, `CONFIG_DEBUG_TCG`, or undefined behaviour `-O0` exposes). Cold boot is equal in every build. A macOS x86_64 clang `-O3` release build of the merge (`8c5f3851bc`) under Rosetta 2 on the M2 Ultra reproduces the Windows debug hashes exactly (heavy-f1 f300 `654eee348901d236` f1200 `6938665a5124a399`, stream-e2 f600 `48aeac8dabb00a8e`, cold boot f900 `d6381be67430024d` f1800 `1daeb1149976062c`), and its x87 refuter reports 0 violations (2.5G TOP-key checks). So the debug/release split is specific to GCC's optimized builds, not `-O0`, `CONFIG_DEBUG_TCG` or the CRT, and Rosetta is a Mac-side check of the x86_64 path (Intel Mac builds run the same code).
 
 ## W. Still open
 
@@ -554,6 +555,17 @@ f1800 `1daeb1149976062c`. The debug vs release split: worktree builds of one com
   design: host code pollutes the host flags), and the double-based x87
   write-through path (on x86_64 it would trade the long double helpers'
   precision for doubles).
+- On x86_64 the `__hard` internals of `f2xm1`, `fyl2x`, `fyl2xp1` and
+  `fpatan` now run at the guest's precision control: they ask softfloat
+  for extended precision, which the host x87 ops ignore, and since
+  `deb98ee93f` the host control word holds the guest's PC. PC-single
+  titles get ~24-bit internals, and PC-double titles on hosts that start
+  threads at `0x37f` (Linux, macOS) 53-bit instead of 64. The fix, a
+  `0x37f` bracket around those four helpers (as `XEMU_LIBM` does), moves
+  the Windows goldens, so it waits for the next Windows session to
+  re-baseline.
+- An Intel macOS build runs this x86_64 path too; it was checked only
+  under Rosetta (§V).
 - Needs a person: 2.1 audio, controller, fullscreen, UI scale and
   thumbnails; 3.14 menu loads (synthesized keys don't reach the window
   from a background process); 3.15 live pads under icount. 4.7's fps readout: Debug > Video opens only with a click (the agent's part is in RESULTS.md).

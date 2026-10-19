@@ -20,9 +20,13 @@ What it checks:
   4. NVIDIA GPU utilization via nvidia-smi, when present.
 
 Usage:
-  quiet_check.py [--json] [--cpu-max 15] [--gpu-max 15] [--info]
-Exit 0 = quiet, 1 = not quiet (the harness refuses to time a run), 2 =
-the check itself could not run (treated as not quiet by the harness).
+  quiet_check.py [--json] [--cpu-max 15] [--gpu-max 15] [--allow-pid PID]
+                 [--info]
+Exit 0 = quiet, 1 = not quiet, 2 = the check itself could not run.
+bench-savestate-ab-win.py reads the --json result (since 2026-10-18): it
+stops only for a leftover xemu, or when the check failed and so could not
+see one, and logs the rest (build/harness processes, CPU and GPU load)
+into its receipt instead of refusing a busy machine.
 
 stdlib only. Also used by scripts/bench-savestate-ab-win.py to collect the
 CPU/GPU identity recorded in the receipt (--info).

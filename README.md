@@ -45,9 +45,10 @@ harnesses run bundle clones marked `-name xemu-fork-auto`, with
 
 The upstream Windows build paths are preserved and CI-tested. All
 portable optimizations (the Vulkan renderer and APU work, the
-pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, the helper-based
-hard FPU on x86_64) apply automatically; macOS-only pieces (MetalFX,
-Metal/IOSurface presentation, vDSP, the ARM64 DSP JIT, the
+pfifo / BQL fixes, the `XEMU_NV2A_NSPROF` profiler, the hard FPU on
+x86_64, whose hot x87 ops run inline on the host x87 unit under the
+guest's precision and rounding) apply automatically; macOS-only pieces
+(MetalFX, Metal/IOSurface presentation, vDSP, the ARM64 DSP JIT, the
 AArch64 inline x87 FPU) compile out.
 
 - **Native (MSYS2/MINGW64):** `./build.sh` from a MINGW64 shell. Release
@@ -57,9 +58,10 @@ AArch64 inline x87 FPU) compile out.
   `XEMU_PGO` works on the stock MSYS2 GCC toolchain since 2026-09-08:
   `build.sh` probes the compiler family and drives gcov `.gcda` profiles
   (`-fprofile-generate` / `-fprofile-use`) instead of `llvm-profdata`,
-  which cannot read them — but that arm has not been exercised on
-  Windows yet, and the committed `pgo/default.profdata` is a clang
-  profile, so a Windows `use` build needs its own `generate` run.
+  which cannot read them. The native flow was validated on 2026-10-18
+  (det heavy-f1 −3.1% core cycles); CI's cross GCC cannot use a native
+  profile, so `pgo/default.profdata` stays clang/arm64 only and a Windows
+  `use` build needs its own `generate` run.
   Preferred route — first done for real on 2026-09-07 (Windows 10,
   NVIDIA TITAN Xp, Vulkan renderer renders correctly). The exact
   `pacman` package list, the traps a fresh MSYS2 hits (CRLF checkout,
