@@ -1165,6 +1165,9 @@ static bool tcg_pinned_frozen;
 static uint32_t tcg_pinned_all;         /* every entry */
 static uint32_t tcg_pinned_clobbered;   /* entries in call-clobbered regs */
 
+#ifdef TCG_TARGET_TLB_MEMO
+#include "tcg-tlbm.c.inc"
+#endif
 #include "tcg-target.c.inc"
 
 #if !TCG_TARGET_HAS_pinned_globals

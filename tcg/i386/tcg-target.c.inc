@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 
+#include "exec/icount.h"
+
 /* Used for function call generation. */
 #define TCG_TARGET_STACK_ALIGN 16
 #if defined(_WIN64)
@@ -1606,6 +1608,7 @@ static void tcg_out_jxx(TCGContext *s, int opc, TCGLabel *l, bool small)
 static void tcg_out_br(TCGContext *s, TCGLabel *l)
 {
     tcg_out_jxx(s, JCC_JMP, l, 0);
+    tcg_tlbm_forget(s);
 }
 
 static int tcg_out_cmp(TCGContext *s, TCGCond cond, TCGArg arg1,
@@ -2015,6 +2018,7 @@ static void tcg_out_call(TCGContext *s, const tcg_insn_unit *dest,
                          const TCGHelperInfo *info)
 {
     tcg_out_branch(s, 1, dest);
+    tcg_tlbm_forget(s);
 
 #ifndef _WIN32
     if (TCG_TARGET_REG_BITS == 32 && info->out_kind == TCG_CALL_RET_BY_REF) {
@@ -2178,6 +2182,298 @@ static void tcg_out_slow_st(TCGContext *s, const TCGSlowSt *e, unsigned n)
 }
 
 /*
+ * Softmmu TLB memo (the plan: tcg/tcg-tlbm.c.inc), x86_64 hosts. The load
+ * slot keeps {ntag = -page, addend} in R10/R11, the store slot {ntag,
+ * &CPUTLBEntry} in R8/R9, or {ntag, addend} with tlbm_st_addend (icount).
+ * All four are call-clobbered on SysV and Win64, and qemu_ld/st are
+ * TCG_OPF_CALL_CLOBBER, so reserving them costs the allocator almost
+ * nothing; R8/R9 are argument registers on both ABIs (SysV 5-6, Win64
+ * 3-4), which tcg_reg_alloc_call takes back for a call's arguments
+ * (tlbm_call_regs). A filling walk masks the address in the slot's ntag
+ * register and negates it on the hit. A shared load is
+ *     lea L1, [addr + R10]; (ror L1, align bits;) cmp L1, bound; ja slow
+ * and the access through [addr + R11]: no load. A shared store in normal
+ * mode re-reads addr_write and the addend through R9, because other
+ * threads re-arm TLB_NOTDIRTY at any time (tlb_reset_dirty, for nv2a's
+ * dirty tracking), and a store that missed the re-arm would leave the
+ * page clean: after the bound check, mov L1d, [R9 + addr_write]; add
+ * L1d, R8d; jne slow; mov L0, [R9 + addend], and the access through
+ * [addr + L0]. Under icount (tlbm_st_addend) no re-arm lands while TB
+ * code runs (the aarch64 comment has the audit), so a shared store takes
+ * the load's form through R8/R9. A shared access's slow path re-walks,
+ * refilling the slot, and goes back to the access on a hit; every slow
+ * path sets the filled slots' ntags to TLBM_NONE after its helper call.
+ * x86_64 has no store prefilter, so no TB-side path comes back from a
+ * missed walk without that. CONFIG_DEBUG_TCG builds walk the TLB behind
+ * every shared access and abort if it disagrees.
+ */
+static const TCGReg tlbm_regs[TLBM_SLOTS][2] = {
+    { TCG_REG_R10, TCG_REG_R11 }, { TCG_REG_R8, TCG_REG_R9 },
+};
+#define TLBM_NTAG(i)  tlbm_regs[i][0]
+#define TLBM_ENT      TCG_REG_R9
+
+/* No zero-extended address matches it; a 32-bit mov sets it. */
+#define TLBM_NONE     0x80000000u
+
+/* Where a walk that fills or re-walks @slot leaves the addend. */
+static TCGReg tlbm_addend_reg(int slot)
+{
+    return slot == 0 ? TCG_REG_R11
+         : slot == 1 && tlbm_st_addend ? TCG_REG_R9 : TCG_REG_L0;
+}
+
+/* Where the walk leaves the CPUTLBEntry address. */
+static TCGReg tlbm_ent_reg(int slot)
+{
+    return slot == 1 && !tlbm_st_addend ? TLBM_ENT : TCG_REG_L0;
+}
+
+/* After a slow path's helper call, which may change the TLB. */
+static void tlbm_out_invalidate(TCGContext *s)
+{
+    for (int i = 0; i < TLBM_SLOTS; i++) {
+        if (s->tlbm_filled & (1u << i)) {
+            tcg_out_movi(s, TCG_TYPE_I32, TLBM_NTAG(i), TLBM_NONE);
+        }
+    }
+}
+
+/* A long Jcc to patch later: its rel32. */
+static tcg_insn_unit *tlbm_out_jcc(TCGContext *s, int jcc)
+{
+    tcg_insn_unit *p;
+
+    tcg_out_opc(s, OPC_JCC_long + jcc, 0, 0, 0);
+    p = s->code_ptr;
+    s->code_ptr += 4;
+    return p;
+}
+
+/*
+ * The TLB load and compare, flags NE on a miss: the entry's address in
+ * tlbm_ent_reg(slot), the masked address in L1, or in the slot's ntag
+ * register when the walk fills @slot.
+ */
+static void tcg_out_tlb_walk(TCGContext *s, TCGReg addr, MemOpIdx oi,
+                             bool is_ld, unsigned a_mask, int slot)
+{
+    int cmp_ofs = is_ld ? offsetof(CPUTLBEntry, addr_read)
+                        : offsetof(CPUTLBEntry, addr_write);
+    TCGType ttype = TCG_TYPE_I32;
+    TCGType tlbtype = TCG_TYPE_I32;
+    int trexw = 0, hrexw = 0, tlbrexw = 0;
+    unsigned s_mask = (1 << (get_memop(oi) & MO_SIZE)) - 1;
+    int fast_ofs = tlb_mask_table_ofs(s, get_mmuidx(oi));
+    TCGReg ent = tlbm_ent_reg(slot);
+    TCGReg cmp = slot >= 0 ? TLBM_NTAG(slot) : TCG_REG_L1;
+    int tlb_mask;
+
+    if (TCG_TARGET_REG_BITS == 64) {
+        ttype = s->addr_type;
+        trexw = (ttype == TCG_TYPE_I32 ? 0 : P_REXW);
+        if (TCG_TYPE_PTR == TCG_TYPE_I64) {
+            hrexw = P_REXW;
+            tlbtype = TCG_TYPE_I64;
+            tlbrexw = P_REXW;
+        }
+    }
+
+    tcg_out_mov(s, tlbtype, ent, addr);
+    tcg_out_shifti(s, SHIFT_SHR + tlbrexw, ent,
+                   TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+
+    tcg_out_modrm_offset(s, OPC_AND_GvEv + trexw, ent, TCG_AREG0,
+                         fast_ofs + offsetof(CPUTLBDescFast, mask));
+
+    tcg_out_modrm_offset(s, OPC_ADD_GvEv + hrexw, ent, TCG_AREG0,
+                         fast_ofs + offsetof(CPUTLBDescFast, table));
+
+    /*
+     * If the required alignment is at least as large as the access,
+     * simply copy the address and mask.  For lesser alignments,
+     * check that we don't cross pages for the complete access.
+     */
+    if (a_mask >= s_mask) {
+        tcg_out_mov(s, ttype, cmp, addr);
+    } else {
+        tcg_out_modrm_offset(s, OPC_LEA + trexw, cmp, addr, s_mask - a_mask);
+    }
+    tlb_mask = TARGET_PAGE_MASK | a_mask;
+    tgen_arithi(s, ARITH_AND + trexw, cmp, tlb_mask, 0);
+
+    /* cmp 0(ent), cmp */
+    tcg_out_modrm_offset(s, OPC_CMP_GvEv + trexw, cmp, ent, cmp_ofs);
+}
+
+/* The hit side of a walk: the addend, and a filled slot's ntag = -page. */
+static void tlbm_out_hit(TCGContext *s, int slot)
+{
+    tcg_out_ld(s, TCG_TYPE_PTR, tlbm_addend_reg(slot), tlbm_ent_reg(slot),
+               offsetof(CPUTLBEntry, addend));
+    if (slot >= 0) {
+        tcg_out_modrm(s, OPC_GRP3_Ev + P_REXW, EXT3_NEG, TLBM_NTAG(slot));
+    }
+}
+
+#ifdef CONFIG_DEBUG_TCG
+#include "exec/tlb-flags.h"
+#include "system/memory.h"   /* global_dirty_tracking */
+
+static G_NORETURN void tlbm_lost(uint64_t addr)
+{
+    fprintf(stderr, "tcg: the TLB entry changed under a TLB memo "
+            "(guest address 0x%" PRIx64 ")\n", addr);
+    abort();
+}
+
+static void tlbm_patch_here(TCGContext *s, tcg_insn_unit *p)
+{
+    tcg_patch32(p, s->code_ptr - p - 4);
+}
+
+/*
+ * Behind a shared access, before a normal-mode store loads its addend:
+ * the TLB must still map the page with the memo's addend, or for such a
+ * store, through the entry the share check read, whose live addr_write
+ * may have gained TLB_NOTDIRTY since (tlb_reset_dirty re-arms it from
+ * other threads: the fast path's usual compare-then-store race; the
+ * share check itself saw the bare page). tlbm_st_addend's stores read no
+ * addr_write, and rely on no re-arm landing while the TB runs, so the
+ * live entry must still be the bare page, except while a migration
+ * runs: its bitmap sync re-arms from its own thread and then waits for
+ * the TB to end before it reads the pages. Clobbers L0 and L1.
+ */
+static void tlbm_out_check(TCGContext *s, TCGReg addr, MemOpIdx oi,
+                           bool is_ld, unsigned a_mask)
+{
+    int aw = offsetof(CPUTLBEntry, addr_write);
+    tcg_insn_unit *bad[5], *bare = NULL, *ok;
+    int nbad = 0;
+
+    if (a_mask) {
+        /* The share check let no misaligned address through. */
+        bad[nbad++] = tlbm_out_jcc(s, tcg_out_cmp(s, TCG_COND_TSTNE, addr,
+                                                  a_mask, true, 0));
+    }
+    tcg_out_tlb_walk(s, addr, oi, is_ld, 0, -1);
+    if (is_ld) {
+        bad[nbad++] = tlbm_out_jcc(s, JCC_JNE);
+        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L1, TCG_REG_L0,
+                   offsetof(CPUTLBEntry, addend));
+        tgen_arithr(s, ARITH_CMP + P_REXW, TCG_REG_L1, TCG_REG_R11);
+        bad[nbad++] = tlbm_out_jcc(s, JCC_JNE);
+    } else if (!tlbm_st_addend) {
+        tgen_arithr(s, ARITH_CMP + P_REXW, TCG_REG_L0, TLBM_ENT);
+        bad[nbad++] = tlbm_out_jcc(s, JCC_JNE);
+        tcg_out_modrm_offset(s, OPC_ARITH_GvEv | (ARITH_XOR << 3),
+                             TCG_REG_L1, TCG_REG_L0, aw);
+        bad[nbad++] = tlbm_out_jcc(s, tcg_out_cmp(s, TCG_COND_TSTNE,
+                                                  TCG_REG_L1,
+                                                  (uint32_t)~TLB_NOTDIRTY,
+                                                  true, 0));
+    } else {
+        /* The bare page; or TLB_NOTDIRTY alone, with a migration running. */
+        bare = tlbm_out_jcc(s, JCC_JE);
+        tcg_out_modrm_offset(s, OPC_ARITH_GvEv | (ARITH_XOR << 3),
+                             TCG_REG_L1, TCG_REG_L0, aw);
+        tgen_arithi(s, ARITH_CMP, TCG_REG_L1, TLB_NOTDIRTY, 0);
+        bad[nbad++] = tlbm_out_jcc(s, JCC_JNE);
+        tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_L1,
+                     (intptr_t)&global_dirty_tracking);
+        tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_L1, TCG_REG_L1, 0);
+        bad[nbad++] = tlbm_out_jcc(s, tcg_out_cmp(s, TCG_COND_TSTEQ,
+                                                  TCG_REG_L1,
+                                                  GLOBAL_DIRTY_MIGRATION,
+                                                  true, 0));
+        tlbm_patch_here(s, bare);
+        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L1, TCG_REG_L0,
+                   offsetof(CPUTLBEntry, addend));
+        tgen_arithr(s, ARITH_CMP + P_REXW, TCG_REG_L1, TCG_REG_R9);
+        bad[nbad++] = tlbm_out_jcc(s, JCC_JNE);
+    }
+    tcg_out8(s, OPC_JMP_long);
+    ok = s->code_ptr;
+    s->code_ptr += 4;
+    for (int i = 0; i < nbad; i++) {
+        tlbm_patch_here(s, bad[i]);
+    }
+    tcg_out_mov(s, TCG_TYPE_I32, tcg_target_call_iarg_regs[0], addr);
+    tcg_out_branch(s, 1, (const tcg_insn_unit *)tlbm_lost);
+    tlbm_patch_here(s, ok);
+}
+#endif
+
+/*
+ * A shared access: both ends on the slot's page, and for a normal-mode
+ * store the live addr_write still the bare page; the slow path re-walks.
+ */
+static void tlbm_out_share(TCGContext *s, TCGLabelQemuLdst *ldst,
+                           TCGReg addr, MemOpIdx oi, bool is_ld,
+                           unsigned a_bits, int slot)
+{
+    unsigned s_mask = (1 << (get_memop(oi) & MO_SIZE)) - 1;
+
+    /* L1 = the offset on the page, or huge */
+    tcg_out_modrm_sib_offset(s, OPC_LEA + P_REXW, TCG_REG_L1, addr,
+                             TLBM_NTAG(slot), 0, 0);
+    if (a_bits) {
+        /* Misaligned, the low bits land on top and fail the bound. */
+        tcg_out_shifti(s, SHIFT_ROR + P_REXW, TCG_REG_L1, a_bits);
+    }
+    tgen_arithi(s, ARITH_CMP + P_REXW, TCG_REG_L1,
+                (TARGET_PAGE_SIZE - 1 - s_mask) >> a_bits, 0);
+    ldst->label_ptr[0] = tlbm_out_jcc(s, JCC_JA);
+    if (!is_ld && !tlbm_st_addend) {
+        /* addr_write + ntag == 0 */
+        tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_L1, TLBM_ENT,
+                   offsetof(CPUTLBEntry, addr_write));
+        tgen_arithr(s, ARITH_ADD, TCG_REG_L1, TLBM_NTAG(1));
+        ldst->label_ptr[1] = tlbm_out_jcc(s, JCC_JNE);
+    }
+#ifdef CONFIG_DEBUG_TCG
+    tlbm_out_check(s, addr, oi, is_ld, (1 << a_bits) - 1);
+#endif
+    if (!is_ld && !tlbm_st_addend) {
+        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TLBM_ENT,
+                   offsetof(CPUTLBEntry, addend));
+    }
+    ldst->memo_shared = true;
+}
+
+/* The alignment bits prepare_host_addr checks for @oi. */
+static unsigned tlbm_a_mask(TCGContext *s, MemOpIdx oi)
+{
+    MemOp opc = get_memop(oi);
+
+    return (1 << atom_and_align_for_opc(s, opc, MO_ATOM_IFALIGN,
+                                        (opc & MO_SIZE) == MO_128).align) - 1;
+}
+
+/*
+ * Slow-path entry. After a shared access's memo check failed, walk the
+ * TLB here, refilling the slot, and go back to the access on a hit. The
+ * walk checks the access's alignment too, so a misaligned address that
+ * the memo check sent here goes on to the helper, which faults.
+ */
+static void tlbm_out_slow_entry(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    int slot = l->memo_slot - 1;
+    tcg_insn_unit *miss;
+
+    if (!l->memo_shared) {
+        return;
+    }
+    tcg_out_tlb_walk(s, l->addr_reg, l->oi, l->is_ld, tlbm_a_mask(s, l->oi),
+                     slot);
+    tcg_out_opc(s, OPC_JCC_short + JCC_JNE, 0, 0, 0);
+    miss = s->code_ptr++;
+    tlbm_out_hit(s, slot);
+    tcg_out_jmp(s, l->memo_access);
+    tcg_patch8(miss, s->code_ptr - miss - 1);
+}
+
+/*
  * Generate code for the slow path for a load at the end of block
  */
 static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
@@ -2191,9 +2487,11 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
     }
 
+    tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
     tcg_out_ld_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_ld_helpers[opc & MO_SIZE]);
+    tlbm_out_invalidate(s);
     tcg_out_ld_helper_ret(s, l, false, &ldst_helper_param);
 
     tcg_out_jmp(s, l->raddr);
@@ -2214,9 +2512,11 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
         tcg_patch32(label_ptr[1], s->code_ptr - label_ptr[1] - 4);
     }
 
+    tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
     tcg_out_st_helper_args(s, l, &ldst_helper_param);
     tcg_out_branch(s, 1, qemu_st_helpers[opc & MO_SIZE]);
+    tlbm_out_invalidate(s);
 
     tcg_out_jmp(s, l->raddr);
     return true;
@@ -2275,7 +2575,6 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     unsigned a_mask;
 
     if (tcg_use_softmmu) {
-        h->index = TCG_REG_L0;
         h->ofs = 0;
         h->seg = 0;
     } else {
@@ -2289,68 +2588,32 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     a_mask = (1 << h->aa.align) - 1;
 
     if (tcg_use_softmmu) {
-        int cmp_ofs = is_ld ? offsetof(CPUTLBEntry, addr_read)
-                            : offsetof(CPUTLBEntry, addr_write);
-        TCGType ttype = TCG_TYPE_I32;
-        TCGType tlbtype = TCG_TYPE_I32;
-        int trexw = 0, hrexw = 0, tlbrexw = 0;
-        unsigned mem_index = get_mmuidx(oi);
-        unsigned s_mask = (1 << s_bits) - 1;
-        int fast_ofs = tlb_mask_table_ofs(s, mem_index);
-        int tlb_mask;
+        int mmu = get_mmuidx(oi);
+        int hint = tlbm_take_hint(s);
+        int slot = hint == TLBM_WALK ? -1 : !is_ld;
 
         ldst = new_ldst_label(s);
         ldst->is_ld = is_ld;
         ldst->oi = oi;
         ldst->addr_reg = addr;
         ldst_take_slow_st(s, ldst);
+        ldst->memo_slot = slot + 1;
 
-        if (TCG_TARGET_REG_BITS == 64) {
-            ttype = s->addr_type;
-            trexw = (ttype == TCG_TYPE_I32 ? 0 : P_REXW);
-            if (TCG_TYPE_PTR == TCG_TYPE_I64) {
-                hrexw = P_REXW;
-                tlbtype = TCG_TYPE_I64;
-                tlbrexw = P_REXW;
+        if (hint == TLBM_SHARE && s->tlbm_mmu[slot] == mmu) {
+            tlbm_out_share(s, ldst, addr, oi, is_ld, h->aa.align, slot);
+        } else {
+            tcg_out_tlb_walk(s, addr, oi, is_ld, a_mask, slot);
+            /* jne slow_path */
+            ldst->label_ptr[0] = tlbm_out_jcc(s, JCC_JNE);
+            /* TLB Hit.  */
+            tlbm_out_hit(s, slot);
+            if (slot >= 0) {
+                s->tlbm_mmu[slot] = mmu;
+                s->tlbm_filled |= 1u << slot;
             }
         }
-
-        tcg_out_mov(s, tlbtype, TCG_REG_L0, addr);
-        tcg_out_shifti(s, SHIFT_SHR + tlbrexw, TCG_REG_L0,
-                       TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
-
-        tcg_out_modrm_offset(s, OPC_AND_GvEv + trexw, TCG_REG_L0, TCG_AREG0,
-                             fast_ofs + offsetof(CPUTLBDescFast, mask));
-
-        tcg_out_modrm_offset(s, OPC_ADD_GvEv + hrexw, TCG_REG_L0, TCG_AREG0,
-                             fast_ofs + offsetof(CPUTLBDescFast, table));
-
-        /*
-         * If the required alignment is at least as large as the access,
-         * simply copy the address and mask.  For lesser alignments,
-         * check that we don't cross pages for the complete access.
-         */
-        if (a_mask >= s_mask) {
-            tcg_out_mov(s, ttype, TCG_REG_L1, addr);
-        } else {
-            tcg_out_modrm_offset(s, OPC_LEA + trexw, TCG_REG_L1,
-                                 addr, s_mask - a_mask);
-        }
-        tlb_mask = TARGET_PAGE_MASK | a_mask;
-        tgen_arithi(s, ARITH_AND + trexw, TCG_REG_L1, tlb_mask, 0);
-
-        /* cmp 0(TCG_REG_L0), TCG_REG_L1 */
-        tcg_out_modrm_offset(s, OPC_CMP_GvEv + trexw,
-                             TCG_REG_L1, TCG_REG_L0, cmp_ofs);
-
-        /* jne slow_path */
-        tcg_out_opc(s, OPC_JCC_long + JCC_JNE, 0, 0, 0);
-        ldst->label_ptr[0] = s->code_ptr;
-        s->code_ptr += 4;
-
-        /* TLB Hit.  */
-        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TCG_REG_L0,
-                   offsetof(CPUTLBEntry, addend));
+        h->index = tlbm_addend_reg(slot);
+        ldst->memo_access = tcg_splitwx_to_rx(s->code_ptr);
     } else if (a_mask) {
         int jcc;
 
@@ -2746,6 +3009,7 @@ static void tcg_out_exit_tb(TCGContext *s, uintptr_t a0)
         tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_EAX, a0);
         tcg_out_jmp(s, tb_ret_addr);
     }
+    tcg_tlbm_forget(s);
 }
 
 static void tcg_out_goto_tb(TCGContext *s, int which)
@@ -2762,12 +3026,14 @@ static void tcg_out_goto_tb(TCGContext *s, int which)
     set_jmp_insn_offset(s, which);
     tcg_out32(s, 0);
     set_jmp_reset_offset(s, which);
+    tcg_tlbm_forget(s);
 }
 
 static void tcg_out_goto_ptr(TCGContext *s, TCGReg a0)
 {
     /* Jump to the given host address (could be epilogue) */
     tcg_out_modrm(s, OPC_GRP5, EXT5_JMPN_Ev, a0);
+    tcg_tlbm_forget(s);
 }
 
 void tb_target_set_jmp_target(const TranslationBlock *tb, int n,
@@ -2911,6 +3177,7 @@ static bool tcg_out_x87_g_slow(TCGContext *s, TCGLabelQemuLdst *l)
     if (l->label_ptr[1]) {
         tcg_patch32(l->label_ptr[1], s->code_ptr - l->label_ptr[1] - 4);
     }
+    tlbm_out_slow_entry(s, l);
     tcg_out_slow_st_tmp(s, l->slow_st, l->nb_slow_st, TCG_REG_L0);
     if (opc == INDEX_op_x87_st_g) {
         TCGLabelQemuLdst st = *l;
@@ -2922,9 +3189,11 @@ static bool tcg_out_x87_g_slow(TCGContext *s, TCGLabelQemuLdst *l)
         st.datahi_reg = -1;
         tcg_out_st_helper_args(s, &st, &ldst_helper_param);
         tcg_out_branch(s, 1, qemu_st_helpers[mop & MO_SIZE]);
+        tlbm_out_invalidate(s);
     } else {
         tcg_out_ld_helper_args(s, l, &ldst_helper_param);
         tcg_out_branch(s, 1, qemu_ld_helpers[mop & MO_SIZE]);
+        tlbm_out_invalidate(s);
         tcg_out_st(s, vt, TCG_REG_EAX, TCG_REG_ESP, 0);
         tcg_out_x87_mform(s, opc, kind, TCG_AREG0, l->stub_ofs, NULL);
     }
@@ -5462,7 +5731,7 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
 static void tcg_out_tb_start(TCGContext *s)
 {
-    /* nothing to do */
+    tcg_tlbm_forget(s);
 }
 
 static void tcg_out_nop_fill(tcg_insn_unit *p, int count)
@@ -5504,6 +5773,20 @@ static void tcg_target_init(TCGContext *s)
     s->reserved_regs = 0;
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_CALL_STACK);
     tcg_regset_set_reg(s->reserved_regs, TCG_TMP_VEC);
+
+    /* The TLB memo's register pairs (tcg_tlbm_plan), x86_64 hosts. */
+    if (TCG_TARGET_REG_BITS == 64 && tcg_use_softmmu) {
+        for (int i = 0; i < TLBM_SLOTS; i++) {
+            tcg_regset_set_reg(tlbm_call_regs, tlbm_regs[i][0]);
+            tcg_regset_set_reg(tlbm_call_regs, tlbm_regs[i][1]);
+        }
+        s->reserved_regs |= tlbm_call_regs;
+        /*
+         * Before the first TB: icount is configured ahead of the
+         * accelerator (configure_accelerators), and never changes.
+         */
+        tlbm_st_addend = icount_enabled();
+    }
 #ifdef _WIN64
     /* These are call saved, and we don't save them, so don't use them. */
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_XMM6);
