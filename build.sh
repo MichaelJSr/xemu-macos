@@ -627,6 +627,17 @@ fi
 
 most_recent_macosx_sdk_ver () {
   local min_ver="${1}"
+  # The active toolchain's own SDK first: a newer one beside it (the
+  # macos-26 runner image ships a beta Command Line Tools SDK 27) can
+  # hold .tbd files its linker can't read ("tapi error: malformed file").
+  local xc_path xc_ver
+  xc_path="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null)"
+  xc_ver="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null)"
+  if [ -n "${xc_ver}" ] && test -d "${xc_path}" && \
+     LC_ALL=C awk 'BEGIN {exit ('${xc_ver}' < '${min_ver}')}'; then
+    echo "${xc_path}"
+    return
+  fi
   local macos_sdk_base=/Library/Developer/CommandLineTools/SDKs
   local sdks=("${macos_sdk_base}"/MacOSX[0-9]*.[0-9]*.sdk)
   for i in "${!sdks[@]}"; do
