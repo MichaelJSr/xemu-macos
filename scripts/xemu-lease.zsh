@@ -18,7 +18,9 @@
 #       XEMU_BASE_PATH, and XEMU_BENCH_PORTABLE=1 when the caller must
 #       plant its scratch config in the clone's Contents/Resources: for
 #       --isolate-caches, and for a binary that predates XEMU_BASE_PATH
-#       (it would otherwise write the owner's pref dir)
+#       (it would otherwise write the owner's pref dir). Warns when that
+#       folder holds a KosmicKrisp strike marker: Auto runs then use
+#       MoltenVK until the build changes (docs/kosmickrisp.md)
 
 zmodload zsh/datetime
 setopt no_bg_nice   # background launches get exactly nice 10, not zsh's +5 on top
@@ -33,7 +35,7 @@ typeset -g XEMU_SLOT="" XEMU_SLOT_FD="" XEMU_LEASE_PID="" XEMU_BENCH_BASE="" XEM
 # the caller passes them per run (VAR=V arguments, --b-env/--e-env).
 XEMU_AUTOMATION_ENV=(XEMU_RAM_SHM XEMU_INPUT_PIPE XEMU_INPUT_RECORD XEMU_INPUT_RECORD_PORT
   XEMU_TRACE_RECORD XEMU_TRACE_REGIONS XEMU_BLOCK_LOG XEMU_VOICE_LOG XEMU_AUDIO_WAV
-  XEMU_ICOUNT_LIVE_PADS)
+  XEMU_ICOUNT_LIVE_PADS XEMU_VK_DRIVER)
 () {
   local v
   for v in $XEMU_AUTOMATION_ENV; do
@@ -167,5 +169,10 @@ xemu_bench_cache() {   # <xemu binary> <isolate 0|1>
   else
     XEMU_BENCH_PORTABLE=0 XEMU_BENCH_BASE=${XEMU_BENCH_CACHE:-$HOME/Library/Caches/xemu-fork-bench}/
     mkdir -p $XEMU_BENCH_BASE
+  fi
+  if [[ -f ${XEMU_BENCH_BASE}kosmickrisp-strike.txt ]]; then
+    echo "lease: ${XEMU_BENCH_BASE}kosmickrisp-strike.txt exists: windowed runs on Auto use MoltenVK" \
+         "for the build it names ($(head -1 ${XEMU_BENCH_BASE}kosmickrisp-strike.txt));" \
+         "remove it if a killed run left it" >&2
   fi
 }
