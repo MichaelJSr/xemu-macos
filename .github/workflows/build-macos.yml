@@ -11,7 +11,10 @@ on:
 jobs:
   build:
     name: Build for macOS (${{ matrix.arch }}, ${{ matrix.configuration }})
-    runs-on: macos-15
+    # The macOS 26 SDK: frame interpolation (MTLFXFrameInterpolator) is
+    # compiled out under older SDKs (metalfx_upscale.m), which every
+    # release through v0.15.2 was, on macos-15's SDK 15.5.
+    runs-on: macos-26
     strategy:
       matrix:
         arch: [x86_64, arm64]
@@ -129,8 +132,22 @@ jobs:
           echo "::error::bundled MoltenVK ${got} does not match the expected ${MVK_EXPECTED}"
           exit 1
         fi
+    - name: Assert the macOS 26 SDK
+      # A runner-image rotation must not silently ship an older SDK.
+      run: |
+        bin=dist/xemu.app/Contents/MacOS/xemu
+        sdk=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f&&/ sdk /{print $2; exit}')
+        echo "SDK ${sdk}"
+        if [[ "${sdk%%.*}" -lt 26 ]]; then
+          echo "::error::built against SDK ${sdk}; frame interpolation needs the macOS 26 SDK"
+          exit 1
+        fi
+        nm -m "$bin" | grep -qF 'weak external _OBJC_CLASS_$_MTLFXFrameInterpolatorDescriptor' || {
+          echo "::error::MTLFXFrameInterpolatorDescriptor is not weak-linked"
+          exit 1
+        }
     - name: Run xbox test suite
-      # arm64 legs only: macos-15 runners are arm64-native, so only the
+      # arm64 legs only: macos-26 runners are arm64-native, so only the
       # arm64 build's test binaries execute natively (the x86_64 leg is a
       # cross-build), and the DSP JIT differential arms are aarch64-only
       # anyway (DSP56K_JIT_SUPPORTED). Covers: the restored DSP unit test,
@@ -168,7 +185,7 @@ jobs:
 
   build_universal:
     name: Build macOS Universal bundle (${{ matrix.configuration }})
-    runs-on: macos-15
+    runs-on: macos-26
     needs: build
     strategy:
       matrix:
@@ -206,3 +223,27 @@ jobs:
         name: xemu-macos-universal-${{ matrix.configuration }}
         path: ${{ steps.package.outputs.pkg_filename }}
         compression-level: 0
+
+  smoke:
+    # The release bundle links against the macOS 26 SDK with a 14.0 floor:
+    # a symbol newer than the floor that isn't weak-linked fails here at
+    # launch, on the oldest arm64 macOS and on Intel.
+    name: Launch on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    needs: build_universal
+    strategy:
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    steps:
+    - name: Download Universal bundle
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+      with:
+        name: xemu-macos-universal-release
+    - name: Launch
+      run: |
+        unzip -q xemu-*-macos-universal-unsigned.zip -d bundle
+        d=$(mktemp -d)
+        touch "$d/xemu.toml"
+        XEMU_BASE_PATH="$d" XEMU_HEADLESS=null \
+          bundle/xemu.app/Contents/MacOS/xemu -config_path "$d/xemu.toml" --version | tee out.txt
+        grep -q 'QEMU emulator version' out.txt

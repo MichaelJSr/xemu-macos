@@ -1193,10 +1193,10 @@ void metalfx_temporal_destroy(void)
  * MTLFXFrameInterpolator and its descriptor exist only in the
  * macOS 26 SDK. Runtime @available checks are not enough — the
  * type names must exist at compile time — so the whole
- * interpolation implementation is compiled out on older SDKs
- * (e.g. CI runners) and replaced by inert stubs below. Frame
- * interpolation then simply reports unsupported at runtime,
- * matching pre-macOS-26 hosts.
+ * interpolation implementation is compiled out on older SDKs and
+ * replaced by inert stubs below. Frame interpolation then simply
+ * reports unsupported at runtime, matching pre-macOS-26 hosts.
+ * Releases build on the macOS 26 SDK, which CI asserts.
  */
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && \
     __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
