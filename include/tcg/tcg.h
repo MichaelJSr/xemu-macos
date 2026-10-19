@@ -483,7 +483,7 @@ struct TCGContext {
     MemOp riscv_cur_vsew;
     TCGType riscv_cur_type;
 #endif
-#ifdef __aarch64__
+#ifdef TCG_TARGET_TLB_MEMO
     /* The softmmu TLB memo: the TB's plan, the mmu_idx each slot holds. */
     uint8_t *tlbm_hint;
     int tlbm_nhint, tlbm_ihint;

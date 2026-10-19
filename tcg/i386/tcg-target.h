@@ -97,4 +97,10 @@ typedef enum {
 #define TCG_TARGET_COLD_CODE 1
 #define TCG_COLD_CHUNK_SIZE (1 << 20)
 
+/*
+ * Softmmu TLB walks shared within straight-line code (tcg/tcg-tlbm.c.inc);
+ * tcg_target_init reserves its slots on x86_64 hosts only.
+ */
+#define TCG_TARGET_TLB_MEMO 1
+
 #endif

@@ -511,6 +511,55 @@ x86_64 host (Windows, Linux, Intel macOS).
   `g` and `info registers` state at every stop and the same RAM.
   **The Windows number is owed**; expect det instructions −1.3..−1.6%
   in both modes.
+- **Softmmu TLB walks shared within straight-line code, as on aarch64.**
+  The plan (`tcg_tlbm_plan`) moved to `tcg/tcg-tlbm.c.inc`, which tcg.c
+  includes, so aarch64 is unchanged: its whole `__text` disassembles the
+  same as master's apart from assert line numbers and string addresses,
+  and the committed PGO profile reports the same two stale tcg.c
+  functions as on master. tcg/i386 takes the same hints, with `x87_*_g`
+  counted beside qemu_ld/st. The load slot keeps {ntag = -page, addend}
+  in R10/R11, the store slot {ntag, &CPUTLBEntry} in R8/R9 ({ntag,
+  addend} under icount, `tlbm_st_addend`). All four are call-clobbered on
+  SysV and Win64, so reserving them costs the allocator nothing
+  measurable (static census below: frame spills −0.3%, GPR env reloads
+  +0.1%), and `tcg_reg_alloc_call` takes R8/R9 back as argument registers
+  on both ABIs (a pressure probe without that crashed at the first
+  loadvm). A shared load is `lea`, `cmp`, `ja` (plus a `ror` when aligned)
+  and the access through R11, with no load; a normal-mode shared store
+  also re-reads `addr_write` and the addend through R9; a fill adds a
+  `neg` to the walk; every slow path's helper call is followed by
+  ntag = 0x80000000. Static out_asm census of 60 det heavy-f1 frames
+  (22,942 TBs): walks −44.3%, TB body insns −11.3%. Execution-weighted
+  (3 frames): walks per frame 2.24M → 1.22M with 1.02M shares, TB host
+  insns per frame 45.8M → 40.0M (−12.6%). Rosetta 2: goldens unchanged
+  on the release and `--debug` builds (the debug memo check walks the
+  TLB behind every shared access) over heavy-f1 1200, stream-e2 600 and
+  the cold boot; `XEMU_X87_REFUTE=1` heavy-f1 600 frames 0 violations;
+  `XEMU_TLB_WCLEAN_REFUTE=1` stream-e2 600 `misses=0 unset=0`; offscreen
+  normal-mode heavy-f1, stream-e2 walk and heavy-w2 render right, and the
+  `--debug` build ran 337, 383 and 229 flips of them without a memo
+  abort; det Minsns/frame −2.1% on heavy-f1 and stream-e2 (2/2 each,
+  load 28-36; Rosetta's own translation dilutes it, so cycles say
+  nothing there). Rosetta 2 advertises AVX only under
+  `ROSETTA_ADVERTISE_AVX=1`. Without it 16-byte SSE accesses are helper
+  calls; with it TB code runs the qemu_ld2/st2 shares and the aligned
+  (`ror`) form (2 frames of det heavy-f1 code: 12 16-byte accesses, 9 of
+  them aligned shares; none without it), and the goldens stay unchanged
+  on the release and `--debug` builds, the memo check silent, also over
+  90 s `--debug` normal-mode passes of heavy-f1, the stream-e2 walk and
+  heavy-w2 (230, 230 and 182 flips; load 22-37). It moves the det base
+  (release Minsns/frame −4.0% heavy-f1, −3.0% stream-e2), so both arms
+  of an A/B set it or neither. The check fires: in a scratch build (not
+  shipped), adding 64 to R11 at a load fill aborts at the first shared
+  load of det heavy-f1 ("the TLB entry changed under a TLB memo"), store
+  fills that compare `addr_read` abort at the first shared store to a
+  page whose `addr_write` differs (icount form), and a normal-mode store
+  slot pointing at a copy of its entry, as a stale table pointer would,
+  aborts seconds after launch. **The Windows numbers are owed**
+  (`det_golden.py --pmc`, 6 pairs; a `--debug` offscreen loadvm pass
+  over heavy-f1, stream-e2 and heavy-w2, which runs Win64's R8/R9
+  reservation); the vet expects det instructions −3..−6% and core cycles
+  −2..−4%.
 - **Hot/cold TB layout on tcg/i386 (`6d0e98c828`)**, as on aarch64:
   core cycles −0.85% median, 3/4.
 - **No `-fzero-call-used-regs` on Windows (`baf5e0c100`).** Instructions
