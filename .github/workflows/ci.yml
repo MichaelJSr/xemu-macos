@@ -37,3 +37,66 @@ jobs:
       # Test sources from the fork's branch: macos_roswell.json also expects the arm64 hard FPU's TestFloat failures.
       xemu_test_repository: MichaelJSr/xemu-test
       xemu_test_ref: xemu-macos
+
+  # Upstream's Linux and Windows legs run --no-hard-fpu, so nothing above runs the x86_64
+  # hard FPU (the host x87 ops, tcg/i386 x87_*). This leg does, on Windows, with the roswell
+  # job's test data and its own failure filter: the soft-FPU Windows filter's MMX, SSE and
+  # M2MF entries, plus TestFloat's (the hard FPU raises no x87 exception flags), taken from
+  # an x86_64 macOS build under Rosetta 2. Regenerate it from this leg's results.json if
+  # a TestFloat ISO update or a real CPU disagrees.
+  roswell-hard-fpu:
+    name: Roswell tests (windows-latest, hard FPU)
+    needs: [build, roswell]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # The filter has not met a real CPU or the GCC build yet: drop this after the first green run.
+    continue-on-error: true
+    runs-on: windows-latest
+    steps:
+      - name: Checkout xemu-test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          repository: MichaelJSr/xemu-test
+          ref: xemu-macos
+          submodules: recursive
+      - name: Checkout the failure filter
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          path: xemu
+          sparse-checkout: .github/roswell
+      - name: Download test data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: test-data
+          path: xemutest/data
+      - name: Download xemu and the Roswell BIOS
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: xemu-windows-x86_64-release
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: roswell-bios
+          path: private
+      - name: Setup Mesa
+        uses: f3d-app/install-mesa-windows-action@v3
+        with:
+          path: ${{ github.workspace }}/assets
+      - name: Setup venv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          activate-environment: true
+          python-version: "3.12"
+      - name: Run tests
+        run: |
+          Move-Item private/roswell.bin private/bios.bin
+          uv pip install .
+          python -m xemutest --no-mcpx --sysram 128 `
+            --failure-filter xemu/.github/roswell/windows_roswell_hardfpu.json `
+            --ci-summary-omit-innermost-passed-subtests -v `
+            assets/xemu.exe private results
+      - name: Upload results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
+        if: '!cancelled()'
+        with:
+          name: results-windows-latest-hard-fpu
+          path: results
