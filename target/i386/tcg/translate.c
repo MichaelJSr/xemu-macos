@@ -3818,6 +3818,35 @@ static void x87_wt_st_f32(DisasContext *s)
 }
 #endif
 
+#if defined(XBOX)
+/* g_x87_hw: push ST0 = the m32fp/m64fp/m32int/m64int in v32 or v64 */
+static void gen_x87_hw_push_ld(DisasContext *s, int type, TCGv_i32 v32,
+                               TCGv_i64 v64)
+{
+    X87Ptr p;
+
+    gen_fpush(s);
+    p = gen_stn_ptr(0);
+    if (v64) {
+        tcg_gen_x87_ld_i64(type, p.base, p.ofs, v64);
+    } else {
+        tcg_gen_x87_ld_i32(type, p.base, p.ofs, v32);
+    }
+}
+
+/* g_x87_hw: r32 or r64 = ST0 as a TCG_X87_M* type (fst, fist) */
+static void gen_x87_hw_st(int type, TCGv_i32 r32, TCGv_i64 r64)
+{
+    X87Ptr p = gen_stn_ptr(0);
+
+    if (r64) {
+        tcg_gen_x87_st_i64(r64, type, p.base, p.ofs);
+    } else {
+        tcg_gen_x87_st_i32(r32, type, p.base, p.ofs);
+    }
+}
+#endif
+
 static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
 {
 #if defined(XBOX)
@@ -3839,14 +3868,8 @@ static void gen_flds_ST0(DisasContext *s, TCGv_i32 arg)
         x87_wt_set_st(s, 0, d);
         return;
     }
-#endif
-#if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p;
-
-        gen_fpush(s);
-        p = gen_stn_ptr(0);
-        tcg_gen_x87_ld_i32(TCG_X87_M32F, p.base, p.ofs, arg);
+        gen_x87_hw_push_ld(s, TCG_X87_M32F, arg, NULL);
         return;
     }
 #endif
@@ -3875,14 +3898,8 @@ static void gen_fldl_ST0(DisasContext *s, TCGv_i64 arg)
         x87_wt_set_st_bits(s, 0, arg);
         return;
     }
-#endif
-#if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p;
-
-        gen_fpush(s);
-        p = gen_stn_ptr(0);
-        tcg_gen_x87_ld_i64(TCG_X87_M64F, p.base, p.ofs, arg);
+        gen_x87_hw_push_ld(s, TCG_X87_M64F, NULL, arg);
         return;
     }
 #endif
@@ -3912,14 +3929,8 @@ static void gen_fildl_ST0(DisasContext *s, TCGv_i32 arg)
         x87_wt_set_st(s, 0, d);
         return;
     }
-#endif
-#if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p;
-
-        gen_fpush(s);
-        p = gen_stn_ptr(0);
-        tcg_gen_x87_ld_i32(TCG_X87_M32I, p.base, p.ofs, arg);
+        gen_x87_hw_push_ld(s, TCG_X87_M32I, arg, NULL);
         return;
     }
 #endif
@@ -3932,11 +3943,7 @@ static void gen_fildll_ST0(DisasContext *s, TCGv_i64 arg)
 {
 #if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p;
-
-        gen_fpush(s);
-        p = gen_stn_ptr(0);
-        tcg_gen_x87_ld_i64(TCG_X87_M64I, p.base, p.ofs, arg);
+        gen_x87_hw_push_ld(s, TCG_X87_M64I, NULL, arg);
         return;
     }
 #endif
@@ -3955,12 +3962,8 @@ static void gen_fsts_ST0(DisasContext *s, TCGv_i32 arg)
         tcg_gen_mov32f_i32(arg, t);
         return;
     }
-#endif
-#if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p = gen_stn_ptr(0);
-
-        tcg_gen_x87_st_i32(arg, TCG_X87_M32F, p.base, p.ofs);
+        gen_x87_hw_st(TCG_X87_M32F, arg, NULL);
         return;
     }
 #endif
@@ -3975,12 +3978,8 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
         tcg_gen_mov64f_i64(arg, x87_wt_get_st(s, 0));
         return;
     }
-#endif
-#if defined(XBOX)
     if (g_x87_hw) {
-        X87Ptr p = gen_stn_ptr(0);
-
-        tcg_gen_x87_st_i64(arg, TCG_X87_M64F, p.base, p.ofs);
+        gen_x87_hw_st(TCG_X87_M64F, NULL, arg);
         return;
     }
 #endif
@@ -4024,9 +4023,7 @@ static void gen_fist_ST0(DisasContext *s, TCGv_i32 arg)
     }
     if (g_x87_hw) {
         /* the __hard fist helpers are fistp, integer indefinite and all */
-        X87Ptr p = gen_stn_ptr(0);
-
-        tcg_gen_x87_st_i32(arg, TCG_X87_M16I, p.base, p.ofs);
+        gen_x87_hw_st(TCG_X87_M16I, arg, NULL);
         return;
     }
 #endif
@@ -4041,9 +4038,7 @@ static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
         return;
     }
     if (g_x87_hw) {
-        X87Ptr p = gen_stn_ptr(0);
-
-        tcg_gen_x87_st_i32(arg, TCG_X87_M32I, p.base, p.ofs);
+        gen_x87_hw_st(TCG_X87_M32I, arg, NULL);
         return;
     }
 #endif
@@ -4059,9 +4054,7 @@ static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
         return;
     }
     if (g_x87_hw) {
-        X87Ptr p = gen_stn_ptr(0);
-
-        tcg_gen_x87_st_i64(arg, TCG_X87_M64I, p.base, p.ofs);
+        gen_x87_hw_st(TCG_X87_M64I, NULL, arg);
         return;
     }
 #endif

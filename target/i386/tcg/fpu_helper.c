@@ -4299,8 +4299,8 @@ void helper_emms(CPUX86State *env)
  * fallback), and the ops raise the guest's sticky MXCSR flags exactly
  * (aarch64 skips them: the hard-fpu-family acceptance). On by default
  * with perf.hard_fpu since XEMU_SSE_HOST=2 ran clean on an i7-4770K
- * (2026-10-18: det heavy-f1 and stream-e2 hashes equal softfloat's, a
- * 5 min live walk).
+ * (2026-10-18: the =2 run's det heavy-f1 and stream-e2 hashes equal
+ * softfloat's, and a 5 min live walk; turning mode 1 on moved them once).
  *
  * XEMU_SSE_HOST=2, on any host, runs BOTH paths with strict brackets
  * and aborts on any non-NaN-class divergence (differential self-check;
@@ -4412,6 +4412,7 @@ typedef float32x4_t xemu_v4f;
  * the result to sse_status exactly; with the guest's PE already set (the
  * usual case) neither side writes MXCSR.
  */
+/* The flag half of update_mxcsr_from_sse_status's mapping; keep them equal. */
 static inline uint32_t xemu_mxcsr_flags(const float_status *st)
 {
     int f = get_float_exception_flags(st);
@@ -4487,6 +4488,7 @@ static inline void xemu_hostfp_leave_lazy(CPUX86State *env, uint64_t saved)
                     (csr & XEMU_MXCSR_FLAGS);
 
     if (csr & XEMU_MXCSR_FLAGS) {
+        /* update_mxcsr_status's flag mapping */
         env->sse_status.float_exception_flags |=
             (csr & FPUS_IE ? float_flag_invalid : 0) |
             (csr & FPUS_DE ? float_flag_input_denormal_used : 0) |
