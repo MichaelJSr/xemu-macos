@@ -36,6 +36,11 @@ as the 2026-10-18 comparison point.
 - Never touch the personal setup (`~/Documents/Xemu`,
   `~/Library/Application Support/xemu`) or the `../fixtures` baselines.
   Never launch `dist/xemu.app` itself for tests; launch a clone.
+- Never execute an xemu binary without `-config_path <scratch toml>`,
+  not even `--version`, `-help` or a bare path left in a compound
+  command: it boots the owner's config and HDD and re-saves the toml.
+  Inspect a binary with `strings`/`otool`; launch it through
+  `scripts/xemu_lease.py` or the bench scripts.
 - Mute every test run (`[audio] volume_limit = 0`), or run it headless.
 - `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` stays `0`. Published tags
   are immutable.
