@@ -1110,6 +1110,35 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     nv2a_profile_inc_counter(NV2A_PROF_SURF_CREATE);
 }
 
+/* Deterministic content for a re-shaped zeta (update_surface_part). */
+static void clear_discarded_zeta(PGRAPHState *pg, SurfaceBinding *surface)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
+
+    pgraph_vk_transition_image_layout(
+        pg, cmd, surface->image, surface->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearDepthStencilValue value = { .depth = 1.0f, .stencil = 0 };
+    VkImageSubresourceRange range = {
+        .aspectMask = surface->host_fmt.aspect,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+    vkCmdClearDepthStencilImage(cmd, surface->image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value,
+                                1, &range);
+    pgraph_vk_transition_image_layout(
+        pg, cmd, surface->image, surface->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+}
+
 static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
 {
     dst->image = src->image;
@@ -2201,10 +2230,6 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
              * twice per flip on ping-pong titles.
              */
             /*
-             * Not under icount: the discarded image would keep whatever a
-             * recycled one held, which depends on prune and retirement
-             * timing; uploading from RAM is deterministic.
-             *
              * The skipped upload is what marks a surface initialized, so
              * mark it here: the image (new, or recycled from an invalid
              * surface) already rests in its attachment layout, and its
@@ -2213,8 +2238,15 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
              * every debug normal-mode run (the first ping-pong switch
              * after a heavy-f1 load), and the MetalFX real-depth snapshot
              * never took such a zeta.
+             *
+             * Under icount a recycled image would keep whatever it held,
+             * which depends on prune and retirement timing, so the
+             * command buffer clears it to a fixed value instead. That is
+             * as deterministic as the upload from RAM it replaces, and
+             * needs no finish or aux fence.
              */
-            if (zeta_shape_discard && !target.color && !icount_enabled()) {
+            bool zeta_discard = zeta_shape_discard && !target.color;
+            if (zeta_discard) {
                 target.upload_pending = false;
                 target.initialized = true;
             }
@@ -2227,6 +2259,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             }
 
             *surface = target;
+            if (zeta_discard && icount_enabled()) {
+                clear_discarded_zeta(pg, surface);
+            }
             set_surface_label(pg, surface);
             surface_put(d, surface);
 

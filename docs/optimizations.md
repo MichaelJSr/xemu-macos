@@ -2161,6 +2161,29 @@ x86_64 host (Windows, Linux, Intel macOS).
   Windowed heavy-f1 bench-abx 2×45 s, load ~50: both arms at the 60 fps
   cap (60.13 vs 60.08), process CPU ~121% vs ~118%, screenshots PASS.
 
+- **Det zeta shape switches clear in the command buffer (2026-10-19).**
+  Under icount a re-shaped zeta still took the upload from RAM that the
+  shape-switch fast path skips in normal mode (`fa860ee510`, so that a
+  recycled image's content couldn't depend on prune and retirement
+  timing): an aux command buffer and its fence wait plus a
+  `SURFACE_CREATE` finish, twice a flip on Azurik's ping-pong. Both modes
+  now mark the discarded zeta initialized, and under icount the
+  recording command buffer clears it to depth 1.0, stencil 0
+  (`clear_discarded_zeta`), which is just as deterministic. Offscreen
+  det heavy-f1 600: `supload_zeta` and `finish_surf_create` 2 → 0 a
+  flip, aux fence waits 207 → 5 a run. RAM could change only where a
+  draw reads the new zeta before the guest's clear, and on the anchors
+  none does: heavy-f1 600 `adcf86bd78fd71f9` (f300 `e1e78c2b7aafcdab`),
+  stream-e2 600 `3b986ed5d3acf666` and heavy-w2 600 `14af161a59baea25`
+  in every run of both arms, heavy-f1's screendump byte-identical.
+  Offscreen bench-det 600, load 54-83: on the threaded pusher (11, 11
+  and 7 pairs) Minsns/frame −0.99% heavy-f1, −1.65% stream-e2, −0.96%
+  W2 (every pair), Mcyc/frame medians −1.8% (6/11), −5.5% (8/11),
+  −1.3% (6/7), wall fps +1.3%, +9.8%, +3.8%: the vCPU's waits for the
+  PFIFO thread bury most of it. With the inline pusher (Threads +
+  runtime, 2026-10-19) underneath, 4 pairs: heavy-f1 Mcyc/frame −4.2%,
+  wall fps +9.6%, stream-e2 −5.1%, +11.9% (4/4). Normal mode unchanged.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New
