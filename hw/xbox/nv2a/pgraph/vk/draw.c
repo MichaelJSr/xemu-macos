@@ -943,8 +943,29 @@ static void init_frame_dynamic_states(PGRAPHVkState *r)
     }
 }
 
+/*
+ * RasterState keeps these maps' values in uint8_t, and create_pipeline
+ * builds from the key: an entry past 255 (an extension enum) would build
+ * wrong pipelines, so it aborts here instead.
+ */
+static void check_raster_state_maps(void)
+{
+#define CHECK_U8_MAP(map)                                \
+    for (int i = 0; i < ARRAY_SIZE(map); i++) {          \
+        assert((uint64_t)(map)[i] <= UINT8_MAX);         \
+    }
+    CHECK_U8_MAP(pgraph_cull_face_vk_map);
+    CHECK_U8_MAP(pgraph_depth_func_vk_map);
+    CHECK_U8_MAP(pgraph_stencil_func_vk_map);
+    CHECK_U8_MAP(pgraph_stencil_op_vk_map);
+    CHECK_U8_MAP(pgraph_blend_factor_vk_map);
+    CHECK_U8_MAP(pgraph_blend_equation_vk_map);
+#undef CHECK_U8_MAP
+}
+
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
+    check_raster_state_maps();
     init_frame_dynamic_states(pg->vk_renderer_state);
     init_pipeline_cache(pg);
     init_clear_shaders(pg);
@@ -1139,7 +1160,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
     key.clear = true;
     init_render_pass_state(pg, &key.render_pass_state);
 
-    key.regs[0] = r->clear_parameter;
+    key.clear_parameter = r->clear_parameter;
 
     uint64_t hash = fast_hash((void *)&key, sizeof(key));
     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
@@ -1339,10 +1360,10 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     /*
      * texture_bindings_changed is deliberately NOT included here.
      * PipelineKey (renderer.h) contains no texture identity —
-     * render_pass_state, shader_state, the 5 raster / blend regs,
-     * and the vertex binding / attribute descriptions. Rebinding
-     * a different VkImage / VkSampler only affects descriptor set
-     * 1, which is rewritten independently by
+     * render_pass_state, shader_state, the raster state derived from
+     * the 5 raster / blend regs, and the vertex binding / attribute
+     * descriptions. Rebinding a different VkImage / VkSampler only
+     * affects descriptor set 1, which is rewritten independently by
      * pgraph_vk_update_descriptor_sets (keyed off
      * texture_bindings_changed). If a texture change were to
      * require a pipeline rebuild (e.g. shader key depending on
@@ -1367,6 +1388,10 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
      * is consumed CPU-side (draw.c:145,293,398). Dropping it from
      * the fast-dirty check avoids spurious pipeline rehash +
      * cache lookups on every fog/shade-mode toggle.
+     *
+     * The key holds only what pgraph_vk_get_raster_state derives from
+     * these registers, so a write that leaves it unchanged costs a
+     * keyed lookup that finds the bound pipeline, and no rebind.
      */
     const unsigned int regs[] = {
         NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
@@ -1388,6 +1413,99 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     return false;
 }
 
+/*
+ * The draw pipeline's raster state from BLEND, CONTROL_0-2 and SETUPRASTER
+ * (RasterState in renderer.h), which create_pipeline builds its create
+ * info from: every field its enable turns off stays zero.
+ */
+static void pgraph_vk_get_raster_state(PGRAPHState *pg, RasterState *rs)
+{
+    memset(rs, 0, sizeof(*rs));
+
+    uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+    rs->front_face = (setupraster & NV_PGRAPH_SETUPRASTER_FRONTFACE) ?
+                         VK_FRONT_FACE_COUNTER_CLOCKWISE :
+                         VK_FRONT_FACE_CLOCKWISE;
+    if (setupraster & NV_PGRAPH_SETUPRASTER_CULLENABLE) {
+        uint32_t cull_face =
+            GET_MASK(setupraster, NV_PGRAPH_SETUPRASTER_CULLCTRL);
+        nv2a_vk_bounds_check(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
+        rs->cull_mode = pgraph_cull_face_vk_map[cull_face];
+    }
+    uint32_t polygon_mode =
+        GET_MASK(setupraster, NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    rs->depth_bias_enable =
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_FILL &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_LINE &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE)) ||
+        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_POINT &&
+         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE));
+
+    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    if (control_0 & NV_PGRAPH_CONTROL_0_ZENABLE) {
+        rs->depth_test_enable = VK_TRUE;
+        /* Without the test the spec disables depth writes anyway */
+        rs->depth_write_enable =
+            !!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE);
+        uint32_t depth_func = GET_MASK(control_0, NV_PGRAPH_CONTROL_0_ZFUNC);
+        nv2a_vk_bounds_check(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
+        rs->depth_compare_op = pgraph_depth_func_vk_map[depth_func];
+    }
+
+    uint32_t control_1 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1);
+    if (control_1 & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE) {
+        uint32_t control_2 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2);
+        uint32_t stencil_func =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_FUNC);
+        uint32_t op_fail = GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL);
+        uint32_t op_zfail =
+            GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL);
+        uint32_t op_zpass =
+            GET_MASK(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
+        nv2a_vk_bounds_check(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
+        nv2a_vk_bounds_check(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+        nv2a_vk_bounds_check(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
+
+        rs->stencil_test_enable = VK_TRUE;
+        rs->stencil_fail_op = pgraph_stencil_op_vk_map[op_fail];
+        rs->stencil_pass_op = pgraph_stencil_op_vk_map[op_zpass];
+        rs->stencil_depth_fail_op = pgraph_stencil_op_vk_map[op_zfail];
+        rs->stencil_compare_op = pgraph_stencil_func_vk_map[stencil_func];
+        rs->stencil_compare_mask =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_READ);
+        rs->stencil_write_mask =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE);
+        rs->stencil_reference =
+            GET_MASK(control_1, NV_PGRAPH_CONTROL_1_STENCIL_REF);
+    }
+
+    if (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_R_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_G_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_B_BIT;
+    if (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE)
+        rs->color_write_mask |= VK_COLOR_COMPONENT_A_BIT;
+
+    uint32_t blend = pgraph_reg_r(pg, NV_PGRAPH_BLEND);
+    if (blend & NV_PGRAPH_BLEND_EN) {
+        uint32_t sfactor = GET_MASK(blend, NV_PGRAPH_BLEND_SFACTOR);
+        uint32_t dfactor = GET_MASK(blend, NV_PGRAPH_BLEND_DFACTOR);
+        uint32_t equation = GET_MASK(blend, NV_PGRAPH_BLEND_EQN);
+        nv2a_vk_bounds_check(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
+        nv2a_vk_bounds_check(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
+
+        rs->blend_enable = VK_TRUE;
+        rs->blend_src_factor = pgraph_blend_factor_vk_map[sfactor];
+        rs->blend_dst_factor = pgraph_blend_factor_vk_map[dfactor];
+        rs->blend_op = pgraph_blend_equation_vk_map[equation];
+    }
+}
+
 static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1402,17 +1520,8 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
            sizeof(key->attribute_descriptions[0]) *
                r->num_active_vertex_attribute_descriptions);
 
-    // FIXME: Register masking
     // FIXME: Use more dynamic state updates
-    /* CONTROL_3 intentionally omitted — see PipelineKey in renderer.h. */
-    const int regs[] = {
-        NV_PGRAPH_BLEND,       NV_PGRAPH_CONTROL_0,   NV_PGRAPH_CONTROL_1,
-        NV_PGRAPH_CONTROL_2,   NV_PGRAPH_SETUPRASTER,
-    };
-    nv2a_vk_assert(ARRAY_SIZE(regs) == ARRAY_SIZE(key->regs));
-    for (int i = 0; i < ARRAY_SIZE(regs); i++) {
-        key->regs[i] = pgraph_reg_r(pg, regs[i]);
-    }
+    pgraph_vk_get_raster_state(pg, &key->raster);
 }
 
 static void create_pipeline(PGRAPHState *pg)
@@ -1484,11 +1593,8 @@ static void create_pipeline(PGRAPHState *pg)
 
     memcpy(&snode->key, &key, sizeof(key));
 
-    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
-    bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
-    bool depth_write = !!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE);
-    bool stencil_test =
-        pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+    /* Raster, depth-stencil and blend state come from the key only */
+    const RasterState *rs = &key.raster;
 
     int num_active_shader_stages = 0;
     VkPipelineShaderStageCreateInfo shader_stages[3];
@@ -1563,38 +1669,14 @@ static void create_pipeline(PGRAPHState *pg)
         .polygonMode = pgraph_polygon_mode_vk_map[r->shader_binding->state.geom
                                                       .polygon_front_mode],
         .lineWidth = 1.0f,
-        .frontFace = (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-                      NV_PGRAPH_SETUPRASTER_FRONTFACE) ?
-                         VK_FRONT_FACE_COUNTER_CLOCKWISE :
-                         VK_FRONT_FACE_CLOCKWISE,
-        .depthBiasEnable = VK_FALSE,
+        .cullMode = rs->cull_mode,
+        .frontFace = rs->front_face,
+        .depthBiasEnable = rs->depth_bias_enable,
         .pNext = rasterizer_next_struct,
     };
     if (!r->enabled_physical_device_features.fillModeNonSolid &&
         rasterizer.polygonMode != VK_POLYGON_MODE_FILL) {
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    }
-
-    uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
-    uint32_t polygon_mode = GET_MASK(setupraster,
-                                     NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
-    if ((polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_FILL &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE)) ||
-        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_LINE &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE)) ||
-        (polygon_mode == NV_PGRAPH_SETUPRASTER_FRONTFACEMODE_POINT &&
-         (setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE))) {
-        rasterizer.depthBiasEnable = VK_TRUE;
-    }
-
-    if (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
-        NV_PGRAPH_SETUPRASTER_CULLENABLE) {
-        uint32_t cull_face = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
-                                      NV_PGRAPH_SETUPRASTER_CULLCTRL);
-        nv2a_vk_bounds_check(cull_face < ARRAY_SIZE(pgraph_cull_face_vk_map));
-        rasterizer.cullMode = pgraph_cull_face_vk_map[cull_face];
-    } else {
-        rasterizer.cullMode = VK_CULL_MODE_NONE;
     }
 
     VkPipelineMultisampleStateCreateInfo multisampling = {
@@ -1603,93 +1685,35 @@ static void create_pipeline(PGRAPHState *pg)
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
+    VkStencilOpState stencil = {
+        .failOp = rs->stencil_fail_op,
+        .passOp = rs->stencil_pass_op,
+        .depthFailOp = rs->stencil_depth_fail_op,
+        .compareOp = rs->stencil_compare_op,
+        .compareMask = rs->stencil_compare_mask,
+        .writeMask = rs->stencil_write_mask,
+        .reference = rs->stencil_reference,
+    };
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE,
+        .depthTestEnable = rs->depth_test_enable,
+        .depthWriteEnable = rs->depth_write_enable,
+        .depthCompareOp = rs->depth_compare_op,
+        .stencilTestEnable = rs->stencil_test_enable,
+        .front = stencil,
+        .back = stencil,
     };
-
-    if (depth_test) {
-        depth_stencil.depthTestEnable = VK_TRUE;
-        uint32_t depth_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
-                                       NV_PGRAPH_CONTROL_0_ZFUNC);
-        nv2a_vk_bounds_check(depth_func < ARRAY_SIZE(pgraph_depth_func_vk_map));
-        depth_stencil.depthCompareOp = pgraph_depth_func_vk_map[depth_func];
-    }
-
-    if (stencil_test) {
-        depth_stencil.stencilTestEnable = VK_TRUE;
-        uint32_t stencil_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                         NV_PGRAPH_CONTROL_1_STENCIL_FUNC);
-        uint32_t stencil_ref = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                        NV_PGRAPH_CONTROL_1_STENCIL_REF);
-        uint32_t mask_read = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                      NV_PGRAPH_CONTROL_1_STENCIL_MASK_READ);
-        uint32_t mask_write = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
-                                       NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE);
-        uint32_t op_fail = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                    NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL);
-        uint32_t op_zfail = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                     NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL);
-        uint32_t op_zpass = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2),
-                                     NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
-
-        nv2a_vk_bounds_check(stencil_func < ARRAY_SIZE(pgraph_stencil_func_vk_map));
-        nv2a_vk_bounds_check(op_fail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_bounds_check(op_zfail < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-        nv2a_vk_bounds_check(op_zpass < ARRAY_SIZE(pgraph_stencil_op_vk_map));
-
-        depth_stencil.front.failOp = pgraph_stencil_op_vk_map[op_fail];
-        depth_stencil.front.passOp = pgraph_stencil_op_vk_map[op_zpass];
-        depth_stencil.front.depthFailOp = pgraph_stencil_op_vk_map[op_zfail];
-        depth_stencil.front.compareOp =
-            pgraph_stencil_func_vk_map[stencil_func];
-        depth_stencil.front.compareMask = mask_read;
-        depth_stencil.front.writeMask = mask_write;
-        depth_stencil.front.reference = stencil_ref;
-        depth_stencil.back = depth_stencil.front;
-    }
-
-    VkColorComponentFlags write_mask = 0;
-    if (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_R_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_G_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_B_BIT;
-    if (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE)
-        write_mask |= VK_COLOR_COMPONENT_A_BIT;
 
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
-        .colorWriteMask = write_mask,
+        .blendEnable = rs->blend_enable,
+        .srcColorBlendFactor = rs->blend_src_factor,
+        .dstColorBlendFactor = rs->blend_dst_factor,
+        .colorBlendOp = rs->blend_op,
+        .srcAlphaBlendFactor = rs->blend_src_factor,
+        .dstAlphaBlendFactor = rs->blend_dst_factor,
+        .alphaBlendOp = rs->blend_op,
+        .colorWriteMask = rs->color_write_mask,
     };
-
-    if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
-        color_blend_attachment.blendEnable = VK_TRUE;
-
-        uint32_t sfactor =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_SFACTOR);
-        uint32_t dfactor =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_DFACTOR);
-        nv2a_vk_bounds_check(sfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
-        nv2a_vk_bounds_check(dfactor < ARRAY_SIZE(pgraph_blend_factor_vk_map));
-        color_blend_attachment.srcColorBlendFactor =
-            pgraph_blend_factor_vk_map[sfactor];
-        color_blend_attachment.dstColorBlendFactor =
-            pgraph_blend_factor_vk_map[dfactor];
-        color_blend_attachment.srcAlphaBlendFactor =
-            pgraph_blend_factor_vk_map[sfactor];
-        color_blend_attachment.dstAlphaBlendFactor =
-            pgraph_blend_factor_vk_map[dfactor];
-
-        uint32_t equation =
-            GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND), NV_PGRAPH_BLEND_EQN);
-        nv2a_vk_bounds_check(equation < ARRAY_SIZE(pgraph_blend_equation_vk_map));
-
-        color_blend_attachment.colorBlendOp =
-            pgraph_blend_equation_vk_map[equation];
-        color_blend_attachment.alphaBlendOp =
-            pgraph_blend_equation_vk_map[equation];
-    }
 
     VkPipelineColorBlendStateCreateInfo color_blending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,

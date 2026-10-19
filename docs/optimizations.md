@@ -1600,7 +1600,11 @@ x86_64 host (Windows, Linux, Intel macOS).
   blend / depth bias / viewport / scissor / line width / blend
   constants cached per-CB, skipped on match. Pipeline key excludes
   dynamic state and `NV_PGRAPH_CONTROL_3` (routed via `ShaderState` /
-  `PROVOKING_VERTEX`). `check_pipeline_dirty` ignores
+  `PROVOKING_VERTEX`), and since 2026-10-19 holds the state derived from
+  BLEND, CONTROL_0-2 and SETUPRASTER (`RasterState`), not the registers:
+  bits no pipeline reads and fields an off enable ignores no longer
+  split it (600 det frames, draw pipelines 67 → 66 heavy-f1, 73 → 73
+  W2, 172 → 117 stream-e2 walk). `check_pipeline_dirty` ignores
   `texture_bindings_changed`; set-1 refresh via
   `pgraph_vk_update_descriptor_sets` handles rebinds. It compares
   against the previous draw, so it treats a bound clear pipeline as
