@@ -49,8 +49,6 @@ jobs:
     name: Roswell tests (windows-latest, hard FPU)
     needs: [build, roswell]
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    # The filter has not met a real CPU or the GCC build yet: drop this after the first green run.
-    continue-on-error: true
     runs-on: windows-latest
     steps:
       - name: Checkout xemu-test
