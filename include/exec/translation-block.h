@@ -250,10 +250,20 @@ TranslationBlock *xemu_lookup_tb(CPUState *cpu);
  * the jump cache: wholesale, or one virtual page. */
 void xemu_i386_ras_flush(CPUState *cpu);
 void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr);
+/* xemu: start the i386 TLB fill log over at a full TLB flush
+ * (target/i386/tcg/system/excp_helper.c, xemu_tlb_reval). */
+void xemu_i386_tlb_log_reset(CPUState *cpu);
 /* xemu: drop the TBs on @addr's page, and keep the recycler from reviving
  * any TB of that page (guest PC hooks; accel/tcg/tb-maint.c). The vCPU
  * must be stopped. */
 void xemu_tb_invalidate_page_norecycle(tb_page_addr_t addr);
+/* xemu: whether the RAM page at @addr holds a TB, or one whose incoming
+ * jumps another thread's invalidation hasn't unlinked yet (only the vCPU
+ * thread adds TBs). Takes the page lock: call it holding none. */
+bool xemu_tb_page_has_tbs(tb_page_addr_t addr);
+/* xemu: XEMU_TLB_REVAL_REFUTE: abort if a cross-page chain still enters a
+ * live TB on the RAM page at @addr; returns the registered TBs checked. */
+uint64_t xemu_xpage_refute_frame(tb_page_addr_t addr);
 #endif
 
 #endif /* EXEC_TRANSLATION_BLOCK_H */

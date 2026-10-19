@@ -1467,6 +1467,29 @@ void xemu_xpage_link_note_cross(TranslationBlock *dest, bool phys_only)
     qemu_spin_unlock(&xpage_reg_lock);
 }
 
+uint64_t xemu_xpage_refute_frame(tb_page_addr_t addr)
+{
+    unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
+    uint64_t n = 0;
+
+    qemu_spin_lock(&xpage_reg_lock);
+    for (unsigned i = 0; xpage_reg_gen == gen && i < xpage_reg_count; i++) {
+        TranslationBlock *dest = xpage_reg[i];
+
+        if (!(tb_cflags(dest) & CF_INVALID) &&
+            !((tb_page_addr0(dest) ^ addr) & TARGET_PAGE_MASK) &&
+            qatomic_read(&dest->jmp_list_head)) {
+            fprintf(stderr, "xemu: tlb-reval refute: a cross-page chain "
+                    "still enters TB %p on ram page 0x%" PRIx64 ", whose "
+                    "mapping changed\n", dest, (uint64_t)addr);
+            abort();
+        }
+        n++;
+    }
+    qemu_spin_unlock(&xpage_reg_lock);
+    return n;
+}
+
 bool xemu_xpage_unlink_registered(CPUState *cs)
 {
     unsigned gen = qatomic_read(&tb_ctx.tb_flush_count);
@@ -1553,6 +1576,23 @@ bool xemu_xpage_unlink_registered(CPUState *cs)
 #endif /* XBOX */
 
 #if defined(XBOX)
+bool xemu_tb_page_has_tbs(tb_page_addr_t addr)
+{
+    PageDesc *pd = page_find(addr >> TARGET_PAGE_BITS);
+    bool has = false;
+
+    /*
+     * Under the page lock, so that a TB another thread is invalidating
+     * counts until its incoming jumps are unlinked.
+     */
+    if (pd) {
+        page_lock(pd);
+        has = pd->first_tb != 0;
+        page_unlock(pd);
+    }
+    return has;
+}
+
 /*
  * Set while xemu_tb_revalidate_after_load invalidates with the vCPUs
  * stopped. It clears every jump cache once afterwards, instead of once per

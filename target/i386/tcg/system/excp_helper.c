@@ -26,6 +26,11 @@
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
 #include "tcg/helper-tcg.h"
+#if defined(XBOX)
+#include "exec/translation-block.h" /* xemu_tb_page_has_tbs */
+#include "qemu/timer.h"
+#include "system/memory.h"
+#endif
 
 typedef struct TranslateParams {
     target_ulong addr;
@@ -40,6 +45,16 @@ typedef struct TranslateResult {
     hwaddr paddr;
     int prot;
     int page_size;
+#if defined(XBOX)
+    /*
+     * xemu: by host pointer and as the walk's A/D update left them, the
+     * 32-bit walk's PDE of a 4 KB page and every walk's leaf
+     * (xemu_tlb_log_fill). Plain stores: no branch in mmu_translate,
+     * whose PGO profile is hot.
+     */
+    uint32_t *pde, *leaf;
+    uint32_t pde_val, leaf_val;
+#endif
 } TranslateResult;
 
 typedef enum TranslateFaultStage2 {
@@ -335,6 +350,10 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         if (!ptw_setl(&pte_trans, pte, PG_ACCESSED_MASK)) {
             goto restart_2_nopae;
         }
+#if defined(XBOX)
+        out->pde = pte_trans.haddr;
+        out->pde_val = pte | PG_ACCESSED_MASK;
+#endif
 
         /*
          * Page table level 1
@@ -437,6 +456,10 @@ do_check_protect_pse36:
 
     /* merge offset within page */
     paddr = (pte & PG_ADDRESS_MASK & ~(page_size - 1)) | (addr & (page_size - 1));
+#if defined(XBOX)
+    out->leaf = pte_trans.haddr;
+    out->leaf_val = pte;                /* before the A/D update */
+#endif
  stage2:
 
     /*
@@ -553,6 +576,9 @@ static bool get_physical_address(CPUX86State *env, vaddr addr,
 
     in.addr = addr;
     in.access_type = access_type;
+#if defined(XBOX)
+    out->pde = out->leaf = NULL;
+#endif
 
     switch (mmu_idx) {
     case MMU_PHYS_IDX:
@@ -610,6 +636,348 @@ static bool get_physical_address(CPUX86State *env, vaddr addr,
     return true;
 }
 
+#if defined(XBOX)
+/*
+ * xemu: same-value CR3 reloads. The Xbox kernel never sets CR4.PGE, so its
+ * only TLB flush is a reload of the CR3 it always holds, which runs several
+ * times a second while a level streams, almost always over unchanged page
+ * tables, and cost every TLB fill, jump-cache, step-cache and ret-memo
+ * entry and cross-page chain it dropped. Each of those was made after the
+ * last full flush through a TLB fill of its page (lookups fill code pages),
+ * so the log covers every page filled since then: a fill of the 32-bit
+ * two-level walk records its PDE in a copy of the page directory and its
+ * PTE in a copy of the page table, by virtual page (directory and table
+ * slot), as the walk's A/D update left them, with the mmu_idx it filled. A
+ * reload compares the copies with the guest's tables through the walk's
+ * host pointers and flushes only the logged pages whose PTE changed or was
+ * refilled from other bits (tlb_flush_page_by_mmuidx drops their jump-cache,
+ * step-cache and ret-memo entries too); the caller severs the cross-page
+ * chains only if one of them held TBs. A changed PDE, a fill the log can't
+ * record (another paging mode, a table outside RAM), more tables than it
+ * holds or too many changed pages leave a full flush; every full flush
+ * starts the log over (xemu_i386_tlb_log_reset). XEMU_TLB_REVAL_REFUTE=1
+ * checks what a reload keeps against a fresh walk.
+ */
+#define XEMU_PT_WORDS 1024
+#define XEMU_TLB_LOG_TABLES 64
+
+typedef struct XemuPtCopy {
+    uint32_t *host;                     /* the guest's table */
+    uint32_t words[XEMU_PT_WORDS];      /* as in guest RAM (little-endian) */
+    uint64_t logged[XEMU_PT_WORDS / 64];
+    uint64_t stale[XEMU_PT_WORDS / 64]; /* refilled from other bits */
+    uint8_t idx[XEMU_PT_WORDS];         /* mmu_idx bits filled through it */
+} XemuPtCopy;
+
+typedef struct XemuTlbLog {
+    bool lost;                          /* a fill it couldn't record */
+    unsigned n;                         /* tables in use */
+    XemuPtCopy dir;                     /* in use while dir.host is set */
+    uint8_t table_of[XEMU_PT_WORDS];    /* directory slot: 1 + table, or 0 */
+    uint16_t slot[XEMU_TLB_LOG_TABLES];
+    XemuPtCopy *tables[XEMU_TLB_LOG_TABLES];    /* kept across resets */
+} XemuTlbLog;
+
+static struct {
+    uint64_t reloads, full, lost, changed, pages, sever, refute_checks, ns;
+    unsigned tables_max;
+} xemu_reval;
+
+static bool xemu_reval_prof_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_TB_PROF");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
+static bool xemu_reval_refute_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_TLB_REVAL_REFUTE");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
+static void xemu_reval_dump(void)
+{
+    fprintf(stderr, "xemu: tlb-reval reloads=%" PRIu64 " kept=%" PRIu64
+            " changed=%" PRIu64 " pages=%" PRIu64 " sever=%" PRIu64
+            " full=%" PRIu64 " (lost %" PRIu64 ") tables_max=%u mean=%.1fus",
+            xemu_reval.reloads, xemu_reval.reloads - xemu_reval.full,
+            xemu_reval.changed, xemu_reval.pages, xemu_reval.sever,
+            xemu_reval.full, xemu_reval.lost, xemu_reval.tables_max,
+            xemu_reval.reloads ? xemu_reval.ns / 1e3 / xemu_reval.reloads : 0);
+    if (xemu_reval_refute_on()) {
+        fprintf(stderr, " refute checks=%" PRIu64, xemu_reval.refute_checks);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void xemu_pt_start(XemuPtCopy *t, uint32_t *host)
+{
+    t->host = host;
+    memcpy(t->words, host, sizeof(t->words));
+    memset(t->logged, 0, sizeof(t->logged));
+    memset(t->stale, 0, sizeof(t->stale));
+    memset(t->idx, 0, sizeof(t->idx));
+}
+
+/*
+ * Log word @w of @t as a fill left it. False when the log held other bits
+ * for it than the walk's A/D additions: an entry it covers may then come
+ * from the old word.
+ */
+static bool xemu_pt_note(XemuPtCopy *t, unsigned w, uint32_t val, int mmu_idx)
+{
+    uint32_t old = le32_to_cpu(t->words[w]);
+    uint64_t bit = 1ull << (w % 64);
+    bool was = t->logged[w / 64] & bit;
+
+    t->words[w] = cpu_to_le32(val);
+    t->logged[w / 64] |= bit;
+    t->idx[w] |= 1 << mmu_idx;
+    return !was ||
+           !((old ^ val) & ~(val & (PG_ACCESSED_MASK | PG_DIRTY_MASK)));
+}
+
+/* Out of line, so x86_cpu_tlb_fill keeps its PGO profile. */
+static void __attribute__((noinline))
+xemu_tlb_log_fill(CPUX86State *env, vaddr addr, int mmu_idx,
+                  MMUAccessType access_type, const TranslateResult *out)
+{
+    XemuTlbLog *log = env->xemu_tlb_log;
+    unsigned s = (uint32_t)addr >> 22, w = (uint32_t)addr >> 12 & 1023;
+    bool large = out->page_size != 4096;
+    uint32_t *pde = large ? out->leaf : out->pde;
+    uint32_t *pte = large ? NULL : out->leaf;
+    /* The walk's A/D update, as mmu_translate made it. */
+    uint32_t leaf = out->leaf_val | PG_ACCESSED_MASK |
+                    (access_type == MMU_DATA_STORE ? PG_DIRTY_MASK : 0);
+    XemuPtCopy *t;
+
+    if (!(env->hflags2 & HF2_NPT_MASK) &&
+        (mmu_idx >= MMU_PHYS_IDX || !(env->cr[0] & CR0_PG_MASK))) {
+        return;                         /* no page tables */
+    }
+    if (!log) {
+        log = env->xemu_tlb_log = g_new0(XemuTlbLog, 1);
+        if (xemu_reval_prof_on() || xemu_reval_refute_on()) {
+            atexit(xemu_reval_dump);
+        }
+    }
+    if (log->lost) {
+        return;
+    }
+    if ((env->cr[4] & CR4_PAE_MASK) || (env->hflags2 & HF2_NPT_MASK) ||
+        !pde || (!large && !pte)) {
+        goto lost;
+    }
+    if (!log->dir.host) {
+        xemu_pt_start(&log->dir, pde - s);
+    } else if (log->dir.host != pde - s) {
+        goto lost;
+    }
+    if (!xemu_pt_note(&log->dir, s, large ? leaf : out->pde_val, mmu_idx)) {
+        goto lost;
+    }
+    if (large) {
+        return;
+    }
+    if (log->table_of[s]) {
+        t = log->tables[log->table_of[s] - 1];
+        if (t->host != pte - w) {
+            goto lost;
+        }
+    } else {
+        if (log->n == XEMU_TLB_LOG_TABLES) {
+            goto lost;
+        }
+        if (!log->tables[log->n]) {
+            log->tables[log->n] = g_new(XemuPtCopy, 1);
+        }
+        t = log->tables[log->n];
+        xemu_pt_start(t, pte - w);
+        log->slot[log->n++] = s;
+        log->table_of[s] = log->n;
+        xemu_reval.tables_max = MAX(xemu_reval.tables_max, log->n);
+    }
+    if (!xemu_pt_note(t, w, leaf, mmu_idx)) {
+        t->stale[w / 64] |= 1ull << (w % 64);
+    }
+    return;
+
+lost:
+    log->lost = true;
+}
+
+void xemu_i386_tlb_log_reset(CPUState *cs)
+{
+    XemuTlbLog *log = cpu_env(cs)->xemu_tlb_log;
+
+    if (log) {
+        for (unsigned i = 0; i < log->n; i++) {
+            log->table_of[log->slot[i]] = 0;
+        }
+        log->n = 0;
+        log->dir.host = NULL;
+        log->lost = false;
+    }
+}
+
+/*
+ * Whether the guest-physical page @pa holds a TB, which a cross-page chain
+ * may have reached through a page that maps it no longer. TBs off RAM are
+ * never chained to.
+ */
+static bool xemu_frame_has_tbs(CPUState *cs, hwaddr pa)
+{
+    hwaddr xlat, len = TARGET_PAGE_SIZE;
+    MemoryRegion *mr;
+    ram_addr_t ra;
+
+    RCU_READ_LOCK_GUARD();
+    mr = address_space_translate(cs->as, pa, &xlat, &len, false,
+                                 MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr) && !memory_region_is_romd(mr)) {
+        return false;
+    }
+    ra = memory_region_get_ram_addr(mr) + xlat;
+    if (xemu_tb_page_has_tbs(ra)) {
+        return true;
+    }
+    if (xemu_reval_refute_on()) {
+        xemu_reval.refute_checks += xemu_xpage_refute_frame(ra);
+    }
+    return false;
+}
+
+/*
+ * Bring @t's copy up to the guest's table. A logged word that changed or
+ * is stale leaves the log, and its page (@base + word) is flushed for the
+ * mmu_idx it filled while *@budget lasts; past it the scan returns -1.
+ * Returns the pages flushed; sets *@sever if one mapped (or may have
+ * mapped, when stale) a page with TBs.
+ */
+static int xemu_pt_reval(CPUState *cs, XemuPtCopy *t, uint32_t base,
+                         int *budget, bool *sever)
+{
+    int n = 0;
+
+    for (unsigned c = 0; c < XEMU_PT_WORDS / 64; c++) {
+        uint64_t drop = 0;
+
+        if (!t->stale[c] &&
+            !memcmp(&t->words[c * 64], &t->host[c * 64], 64 * 4)) {
+            continue;
+        }
+        for (unsigned j = 0; j < 64; j++) {
+            unsigned w = c * 64 + j;
+            uint32_t now = qatomic_read(&t->host[w]);
+            uint32_t old = le32_to_cpu(t->words[w]);
+
+            if (now == t->words[w] && !(t->stale[c] >> j & 1)) {
+                continue;
+            }
+            t->words[w] = now;
+            if (t->logged[c] >> j & 1) {
+                if (--*budget < 0) {
+                    return -1;
+                }
+                tlb_flush_page_by_mmuidx(cs, base | w << 12, t->idx[w]);
+                *sever = *sever || (t->stale[c] >> j & 1) ||
+                         xemu_frame_has_tbs(cs, old & TARGET_PAGE_MASK);
+                t->idx[w] = 0;
+                drop |= 1ull << j;
+                n++;
+            }
+        }
+        t->logged[c] &= ~drop;
+        t->stale[c] = 0;
+    }
+    return n;
+}
+
+/* XEMU_TLB_REVAL_REFUTE: is @page logged for @mmu_idx (-1: any)? */
+static bool xemu_tlb_log_covers(CPUState *cs, vaddr page, int mmu_idx)
+{
+    XemuTlbLog *log = cpu_env(cs)->xemu_tlb_log;
+    unsigned s = (uint32_t)page >> 22, w = (uint32_t)page >> 12 & 1023;
+    uint8_t bits = mmu_idx < 0 ? 0xff : 1 << mmu_idx;
+    XemuPtCopy *t;
+
+    if (!log->dir.host || page >> 32 ||
+        !(log->dir.logged[s / 64] >> (s % 64) & 1) ||
+        !(log->dir.idx[s] & bits)) {
+        return false;
+    }
+    if (!log->table_of[s]) {
+        return true;                    /* a 4 MB page */
+    }
+    t = log->tables[log->table_of[s] - 1];
+    return (t->logged[w / 64] >> (w % 64) & 1) && (t->idx[w] & bits);
+}
+
+int xemu_tlb_reval(CPUX86State *env)
+{
+    CPUState *cs = env_cpu(env);
+    XemuTlbLog *log = env->xemu_tlb_log;
+    int64_t t0 = xemu_reval_prof_on() ? get_clock() : 0;
+    bool sever = false;
+    int budget = 0, n = 0;
+
+    if (!log) {
+        return 0;                       /* nothing walked yet */
+    }
+    xemu_reval.reloads++;
+    if (log->lost || (log->dir.host &&
+                      xemu_pt_reval(cs, &log->dir, 0, &budget, &sever) < 0)) {
+        goto full;
+    }
+    /* Past this many pages (~0.4 us each) a full flush and its refills
+     * cost less: a streaming reload rarely changes more than 16, a boot
+     * frees up to ~1600 at once. */
+    budget = 1024;
+    for (unsigned i = 0; i < log->n; i++) {
+        int r = xemu_pt_reval(cs, log->tables[i],
+                              (uint32_t)log->slot[i] << 22, &budget, &sever);
+        if (r < 0) {
+            goto full;
+        }
+        n += r;
+    }
+    xemu_reval.changed += n > 0;
+    xemu_reval.pages += n;
+    xemu_reval.sever += sever;
+    if (xemu_reval_refute_on()) {
+        const MMUIdxMap paging = MAKE_64BIT_MASK(0, MMU_PHYS_IDX);
+
+        xemu_reval.refute_checks +=
+            tlb_xemu_refute_kept(cs, paging, xemu_tlb_log_covers);
+        for (unsigned i = 0; i < XEMU_RETC_SIZE; i++) {
+            struct XemuRetcEntry *e = &env->xemu_retc[i];
+
+            xemu_reval.refute_checks += e->tb &&
+                tlb_xemu_refute_tb(cs, (uint32_t)(e->cs_base + e->eip),
+                                   e->tb, xemu_tlb_log_covers);
+        }
+    }
+    if (t0) {
+        xemu_reval.ns += get_clock() - t0;
+    }
+    return sever;
+
+full:
+    xemu_reval.full++;
+    xemu_reval.lost += log->lost;
+    return -1;
+}
+#endif
+
 bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       MMUAccessType access_type, int mmu_idx,
                       bool probe, uintptr_t retaddr)
@@ -629,6 +997,9 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                                 out.paddr & TARGET_PAGE_MASK,
                                 cpu_get_mem_attrs(env),
                                 out.prot, mmu_idx, out.page_size);
+#if defined(XBOX)
+        xemu_tlb_log_fill(env, addr, mmu_idx, access_type, &out);
+#endif
         return true;
     }
 

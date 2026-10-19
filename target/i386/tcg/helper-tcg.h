@@ -67,6 +67,13 @@ void xemu_x87_materialize_reg(CPUX86State *env, int i);
 int xemu_sse_host_mode(void);
 /* translate.c: inline packed-single add/sub/mul/div on (HF_SSE_DFL kept). */
 extern int xemu_sse_vfp;
+#ifndef CONFIG_USER_ONLY
+/* system/excp_helper.c: a reload of the same CR3 with paging on. Flushes
+ * the pages whose page-table words changed since their fill; returns 1
+ * when cross-page chains must be severed too, -1 when only a full flush
+ * will do. */
+int xemu_tlb_reval(CPUX86State *env);
+#endif
 #endif
 #if defined(XBOX) && defined(__x86_64__)
 /* fpu_helper.c: the guest's x87 PC and RC into this thread's x87 CW. */

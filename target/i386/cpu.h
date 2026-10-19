@@ -2263,6 +2263,12 @@ typedef struct CPUArchState {
      */
     int64_t xemu_idle_t0;
     int64_t xemu_idle_last;
+    /*
+     * The page-table words of every TLB fill since the last full flush,
+     * which a reload of the same CR3 compares (excp_helper.c,
+     * xemu_tlb_reval). Not migrated: a load flushes the TLB.
+     */
+    struct XemuTlbLog *xemu_tlb_log;
 #endif
 } CPUX86State;
 

@@ -34,6 +34,18 @@ void tlb_unprotect_code(ram_addr_t ram_addr);
 void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length);
 #ifdef XBOX
 void tlb_flush_host_range(CPUState *cpu, uintptr_t start, uintptr_t length);
+/*
+ * XEMU_TLB_REVAL_REFUTE (target/i386 xemu_tlb_reval): abort unless every
+ * valid TLB entry of @idxmap, and every jump-cache and step-cache TB, maps
+ * what the guest's page tables map now and is on a page @logged covers
+ * (mmu_idx -1: any). Return the entries checked; _tb checks one TB found
+ * by @pc and returns whether it was live.
+ */
+typedef bool XemuTlbLogged(CPUState *cpu, vaddr page, int mmu_idx);
+uint64_t tlb_xemu_refute_kept(CPUState *cpu, MMUIdxMap idxmap,
+                              XemuTlbLogged *logged);
+bool tlb_xemu_refute_tb(CPUState *cpu, vaddr pc, TranslationBlock *tb,
+                        XemuTlbLogged *logged);
 #endif
 void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
 #endif

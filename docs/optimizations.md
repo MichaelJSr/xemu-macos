@@ -51,7 +51,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
-| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), and under icount the step cuts, steps and step-cache hits |
+| `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), under icount the step cuts, steps and step-cache hits, and the same-value CR3 reloads (`tlb-reval`: kept, changed, pages flushed, chain severs, full flushes, page tables, mean wall µs) |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, the recompiles/s rate over the measured window, and the icount io-retaddr cache's misses — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
 | `XEMU_SUBPAGE_REFUTE` | `1` runs the sub-page skip decision against a ground-truth live-TB byte-overlap scan (both pages of spanning TBs) and counts violations (design falsified if > 0) while the skip stays live. Soak: **0 violations over 28.6M filter-skips across 33 loadvm cycles** (~12 min) |
@@ -64,6 +64,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_FAST_REFUTE` | `1` routes every would-skip decision to a C validator (independent `probe_access` re-derivation, live-TB overlap scan, NOCODE dirty ground truth) that counts violations and performs the real store — falsification mode, not perf. Forces `XEMU_SUBPAGE_FAST_STATS=1` so soaks keep their population histogram |
 | `XEMU_SUBPAGE_FAST_STATS` | `1` re-enables the arm-(b) prefilter's six diagnostic counter RMWs (`xemu_sf_seen`, `xemu_sf_skips`, and the four `xemu_sf_demote` reasons) that the aarch64 store slow-path stub emits inline. **Default OFF since 2026-08-04**: the counters are baked into generated code at translate time and the stub completes ~2M stores/s, so production now emits ~39 fewer instructions per store stub (12 of them on the inline-skip path itself, the four demote landing pads collapsing into direct branches) and the atexit dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` in place of the histogram — so a zeroed histogram can't be mistaken for a dead mechanism. Latched once at first stub emission, before the first TB (a mid-run flip would leave TBs disagreeing). Diagnostics only: the decision logic and the refuter oracle are identical either way, which is what makes this knob its own A/B lever. Measured cost of the counters: **−0.32% draws/s / −0.57 fps, 3/3 pairs unanimous** |
 | `XEMU_TLB_WCLEAN_REFUTE` | `1` re-runs the full TLB scan after every `tlb_reset_dirty` bitmap pass, arms whatever the writable-clean bitmaps missed (so the run stays correct) and prints `xemu: tlb-wclean refute checks= entries= misses= unset= (calls= arming=)` at exit: `misses` counts eligible entries in the range left unarmed, `unset` eligible entries anywhere missing a bit. The gate is `misses=0 unset=0`. Diagnostic only (a full scan per dirty clear); never for an fps run |
+| `XEMU_TLB_REVAL_REFUTE` | `1` checks what each same-value CR3 reload keeps (`xemu_tlb_reval`, CPU / JIT): every valid TLB entry of the paging mmu_idx and every jump-cache, step-cache and ret-memo TB against a fresh page walk (`cpu_get_phys_page_debug`) and the fill log, and the xpage registry against each frame a reload dropped without severing; aborts on a mismatch. The `xemu: tlb-reval` exit line (also printed under `XEMU_TB_PROF`) counts reloads, kept, changed, pages, sever, full and its checks. Diagnostic only (a TLB walk per reload); never for an fps run |
 | `XEMU_UI_FRAME_CAP_NS` | Test-only: floor the UI present period in ns (`16666666` ≈ a 60 Hz consumer). Unfocused/occluded bench windows present unpaced (~200 Hz observed), so ring-pacing behavior is invisible headless without it. Zero cost unset |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
 | `XEMU_VTX_SPAN_REFUTE` | `1` checks every vertex finish or fence wait a copy skips (`vk/vertex.c`) against an independent record of what each flight slot's draws read of the vertex RAM mirror, taken from the vertex buffer bindings themselves (offset, stride, element size, the draw's vertex count) rather than the syncs that feed the read spans; a recorded read whose bytes the copy changes is a violation (a GPU reader the spans miss; the first 8 print). Exit line `xemu: vtx-span refute checks=N violations=M` (checks = skips whose copy overlapped a recorded read). With `XEMU_VTX_SPAN_FINISH=0` it also counts the page-wide check's blind spot |
@@ -497,7 +498,9 @@ x86_64 host (Windows, Linux, Intel macOS).
   makes it sound by construction with three backstops — INVLPG
   invalidates the flushed code page; CR3 writes and every remaining
   full-TLB-flush class (generic `tlb_flush_by_mmuidx` hook) sever the
-  registered cross-page chains. Refuter (`XEMU_XPAGE_REFUTE`:
+  registered cross-page chains (since 2026-10-19 a reload of the same
+  CR3 severs them only when a page that held TBs changed: same-value
+  CR3 reloads, below). Refuter (`XEMU_XPAGE_REFUTE`:
   page-table-walk, closing the stale-chain fetch-bypass hole): 0
   violations over 3.15B+1.71B checks across 20 reload cycles.
   Interleaved A/B: **+1.30±0.29 fps F8 (7/7 pairs) pre-subpage;
@@ -563,6 +566,51 @@ x86_64 host (Windows, Linux, Intel macOS).
   3.0, over 33 ms 13 → 11 in all (P(fewer) 0.56: no change resolved).
   `XEMU_XPAGE_REFUTE`: 140M checks, 0 violations. A 1000-restore loop
   digests as the base binary does.
+- **Same-value CR3 reloads revalidate instead of flushing
+  (2026-10-19).** The Xbox kernel never sets CR4.PGE, so its only TLB
+  flush is a reload of the CR3 it always holds: 509 per 600 det
+  stream-e2 frames, 299 in transition-f1, 95 in a cold boot, none in
+  heavy-f1. Each was a full flush (every TLB entry, the jump cache, step
+  cache and ret memo, and the xpage backstop's unlink of every
+  cross-page chain), refilled and relinked within the frame. Now each
+  TLB fill of the 32-bit walk logs the page-table words it used
+  (`xemu_tlb_log_fill`: its PDE in a copy of the page directory, its
+  PTE in a copy of the page table, by host pointer, as the walk's A/D
+  update left them, with the mmu_idx), so the log covers every page
+  filled since the last full flush, which alone resets it. A reload
+  (`xemu_tlb_reval`) compares the copies with the guest's tables in
+  256-byte chunks and flushes only the logged pages whose PTE changed or
+  was refilled from other bits than A/D (`tlb_flush_page_by_mmuidx`,
+  which drops their jump-cache, step-cache and memo entries), severs the
+  cross-page chains only when such a page's old frame held TBs, and
+  falls back to a full flush on a changed PDE, a fill it can't log (PAE,
+  NPT, a table outside RAM), a 65th page table or more than 1024
+  changed pages. Stream-e2: 327 of 509 reloads change logged PTEs (the
+  guest moves frames between its kernel pool at 0x82000000 and the
+  title's heap: 1,640 pages, 1,090 of them now not present), 5 of them a
+  frame with TBs; 44 page tables at most; ~12 µs a reload. The sweep's
+  prototype compared resident entries' physical pages only, and kept
+  jump-cache and memo entries and chains of pages that had left the TLB.
+  The changed-frame check reads the frame's TB list under its page
+  lock, so a TB another thread is invalidating (DMA) counts until its
+  incoming jumps are unlinked.
+  Det cross-binary against c3327bc088, both arms PGO, three sessions of
+  the final code (two of them on a build without that lock, same
+  decisions; load 36-86): stream-e2 Mcycles/frame −6.6% median (13/14
+  pairs; sessions −5.5%, −5.9%, −9.0%), Minsns −1.8% (14/14);
+  transition-f1 −2.5% median (14/18; sessions 0.0% 4/6 at load 67-75,
+  −3.2% 5/6 at 37-45, −2.9% 5/6 at 51-59), Minsns −0.65% (18/18); cold
+  boot flat (−0.1% median, 7/12; sessions −0.6%, +0.3%, +0.6%), Minsns
+  ±0.2%; heavy-f1 flat (no reloads). Normal mode, headless offscreen
+  stream-e2 walk (10 s): process CPU −2.2% (6/9 counter-free pairs, load
+  34-72); a counters-on pair shows backstop unlink walks 663 → 9 and
+  htable lookups −57%; the windowed movement probe keeps `tb_flush` at
+  0. Goldens exact, x86_64 (Rosetta) too. `XEMU_TLB_REVAL_REFUTE=1`:
+  6.5M checks over stream-e2 1200, 1.9M over transition-f1, 2.1M over a
+  cold boot, 4.8M over a 30 s normal-mode walk, clean;
+  `XEMU_TLB_WCLEAN_REFUTE=1` (entries now outlive the reloads):
+  misses=0 unset=0 on det stream-e2 600 and on the normal-mode walk
+  (336K dirty-clear passes).
 - **Inline hard FPU (retired).** The inline x87 cache (native AArch64
   FP with values held in D-regs across instructions; inline `fucomi`,
   `frndint`, the FPU constant loads, 16-bit `FIST` and `FISTTP`; "~30%

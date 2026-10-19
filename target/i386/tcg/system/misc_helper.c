@@ -88,6 +88,39 @@ target_ulong helper_read_cr8(CPUX86State *env)
     }
 }
 
+#if defined(XBOX)
+/*
+ * The kernel flushes the TLB by reloading the CR3 it holds, several times
+ * a second while a level streams. Such a reload keeps every page whose
+ * page-table words are unchanged since its fill (xemu_tlb_reval), with its
+ * jump-cache, step-cache and ret-memo entries and the cross-page chains
+ * into it, which the backstop severs only when a page that held TBs
+ * changed. Out of line, so helper_write_crN keeps its PGO profile.
+ */
+static void __attribute__((noinline))
+xemu_write_cr3(CPUX86State *env, target_ulong t0)
+{
+    if (t0 == env->cr[3] && (env->cr[0] & CR0_PG_MASK)) {
+        int sever = xemu_tlb_reval(env);
+
+        if (sever >= 0) {
+            if (sever) {
+                xemu_xpage_note_full_flush(env_cpu(env));
+            }
+            return;
+        }
+    }
+    cpu_x86_update_cr3(env, t0);
+    /*
+     * A new CR3, or a reload the log can't vouch for, can change any
+     * mapping, so sever every cross-page chain. Routed through the shared
+     * backstop: the link-registry unlink (cheap, keeps translations);
+     * registry overflow falls back to the v0.11 queued tb_flush.
+     */
+    xemu_xpage_note_full_flush(env_cpu(env));
+}
+#endif
+
 void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
 {
     switch (reg) {
@@ -111,17 +144,10 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
         if (!(env->efer & MSR_EFER_LMA)) {
             t0 &= 0xffffffffUL;
         }
-        cpu_x86_update_cr3(env, t0);
 #if defined(XBOX)
-        /*
-         * A CR3 reload can change any mapping, so sever every cross-page
-         * chain. Routed through the shared backstop: the link-registry
-         * unlink (cheap, keeps translations — CR3 writes turned out NOT to
-         * be rare during level streaming, contrary to the original
-         * single-address-space assumption); registry overflow falls back
-         * to the v0.11 queued tb_flush.
-         */
-        xemu_xpage_note_full_flush(env_cpu(env));
+        xemu_write_cr3(env, t0);
+#else
+        cpu_x86_update_cr3(env, t0);
 #endif
         break;
     case 4:

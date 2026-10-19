@@ -614,10 +614,128 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
      * thread (assert above). The per-page INVLPG path stays on its
      * finer helper backstop. */
     xemu_xpage_note_full_flush(cpu);
+    /* Nothing a same-value CR3 reload could keep survives a full flush. */
+    if (idxmap == ALL_MMUIDX_BITS) {
+        xemu_i386_tlb_log_reset(cpu);
+    }
 #endif
 
     tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(idxmap));
 }
+
+#if defined(XBOX)
+/*
+ * xemu: XEMU_TLB_REVAL_REFUTE (target/i386 xemu_tlb_reval). What a
+ * same-value CR3 reload kept must map what the guest's page tables map
+ * now, as after the full flush it replaces, and its page must be in the
+ * fill log. Aborts on a mismatch.
+ */
+static ram_addr_t xemu_refute_ram_page(CPUState *cpu, vaddr page)
+{
+    MemTxAttrs attrs;
+    hwaddr phys = cpu_get_phys_page_attrs_debug(cpu, page, &attrs);
+    ram_addr_t ra = -1;
+
+    if (phys != -1) {
+        WITH_RCU_READ_LOCK_GUARD() {
+            AddressSpace *as =
+                cpu_get_address_space(cpu, cpu_asidx_from_attrs(cpu, attrs));
+            hwaddr xlat, len = 1;
+            MemoryRegion *mr = address_space_translate(as, phys, &xlat, &len,
+                                                       false, attrs);
+            if (memory_region_is_ram(mr) || memory_region_is_romd(mr)) {
+                ra = (memory_region_get_ram_addr(mr) + xlat) &
+                     TARGET_PAGE_MASK;
+            }
+        }
+    }
+    return ra;
+}
+
+bool tlb_xemu_refute_tb(CPUState *cpu, vaddr pc, TranslationBlock *tb,
+                        XemuTlbLogged *logged)
+{
+    vaddr page = pc & TARGET_PAGE_MASK;
+    tb_page_addr_t a1;
+
+    if (!tb || (tb_cflags(tb) & CF_INVALID) || tb_page_addr0(tb) == -1) {
+        return false;
+    }
+    a1 = tb_page_addr1(tb);
+    if (xemu_refute_ram_page(cpu, page) !=
+            (tb_page_addr0(tb) & TARGET_PAGE_MASK) ||
+        !logged(cpu, page, -1) ||
+        (a1 != -1 &&
+         (xemu_refute_ram_page(cpu, page + TARGET_PAGE_SIZE) !=
+              (a1 & TARGET_PAGE_MASK) ||
+          !logged(cpu, page + TARGET_PAGE_SIZE, -1)))) {
+        fprintf(stderr, "xemu: tlb-reval refute: kept TB for pc 0x%"
+                VADDR_PRIx " (ram 0x%" PRIx64 ", 0x%" PRIx64 ") now maps "
+                "ram 0x%" PRIx64 ", logged %d\n", pc,
+                (uint64_t)tb_page_addr0(tb), (uint64_t)a1,
+                (uint64_t)xemu_refute_ram_page(cpu, page),
+                logged(cpu, page, -1));
+        abort();
+    }
+    return true;
+}
+
+uint64_t tlb_xemu_refute_kept(CPUState *cpu, MMUIdxMap idxmap,
+                              XemuTlbLogged *logged)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    uint64_t n = 0;
+
+    for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
+        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+        size_t size = tlb_n_entries(fast);
+
+        if (!(idxmap >> mmu_idx & 1)) {
+            continue;
+        }
+        for (size_t i = 0; i < size + CPU_VTLB_SIZE; i++) {
+            CPUTLBEntry *e = i < size ? &fast->table[i]
+                                      : &desc->vtable[i - size];
+            CPUTLBEntryFull *f = i < size ? &desc->fulltlb[i]
+                                          : &desc->vfulltlb[i - size];
+            uint64_t a = e->addr_read != -1 ? e->addr_read :
+                         e->addr_code != -1 ? e->addr_code :
+                         tlb_addr_write(e);
+            vaddr page = a & TARGET_PAGE_MASK;
+            hwaddr phys;
+
+            if (a == -1) {
+                continue;
+            }
+            phys = cpu_get_phys_page_debug(cpu, page);
+            if (phys == -1 || (phys & TARGET_PAGE_MASK) != f->phys_addr ||
+                !logged(cpu, page, mmu_idx)) {
+                fprintf(stderr, "xemu: tlb-reval refute: kept TLB entry "
+                        "mmu_idx=%d vaddr 0x%" VADDR_PRIx " phys 0x%"
+                        HWADDR_PRIx " now maps 0x%" HWADDR_PRIx
+                        ", logged %d\n", mmu_idx, page,
+                        (hwaddr)f->phys_addr, phys,
+                        logged(cpu, page, mmu_idx));
+                abort();
+            }
+            n++;
+        }
+    }
+    for (int i = 0; jc && i < TB_JMP_CACHE_SIZE; i++) {
+        n += tlb_xemu_refute_tb(cpu, jc->array[i].pc,
+                                qatomic_read(&jc->array[i].tb), logged);
+    }
+    for (int i = 0; jc && i < XEMU_STEPC_SIZE; i++) {
+        typeof(jc->step[0]) *e = &jc->step[i];
+
+        if (e->at && e->at >= jc->step_page_at[xemu_stepc_page(e->pc)]) {
+            n += tlb_xemu_refute_tb(cpu, e->pc, e->tb, logged);
+        }
+    }
+    return n;
+}
+#endif
 
 void tlb_flush(CPUState *cpu)
 {
