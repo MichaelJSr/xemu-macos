@@ -52,6 +52,14 @@ void pgraph_vk_draw_begin(NV2AState *d)
     }
 }
 
+/* A guest triangle fan or filled polygon: one fan of triangles. */
+static bool is_fan_draw(int primitive_mode, int polygon_mode)
+{
+    return primitive_mode == PRIM_TYPE_TRIANGLE_FAN ||
+           (primitive_mode == PRIM_TYPE_POLYGON &&
+            polygon_mode == POLY_MODE_FILL);
+}
+
 static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -82,6 +90,10 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
         default:
             break;
         }
+    }
+
+    if (r->emulate_triangle_fans && is_fan_draw(primitive_mode, polygon_mode)) {
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
 
     // FIXME: Replace with LUT
@@ -119,13 +131,21 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
     }
 }
 
+/* nsprof: one per Vulkan draw of a guest triangle fan or filled polygon
+ * (native TRIANGLE_FAN, or its CPU triangle list). */
+static void count_fan_draw(PGRAPHState *pg)
+{
+    if (nsprof_enabled() &&
+        is_fan_draw(pg->primitive_mode,
+                    GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
+                             NV_PGRAPH_SETUPRASTER_FRONTFACEMODE))) {
+        nsprof_event(NSPROF_EV_VK_FAN_DRAW);
+    }
+}
+
 static bool draw_needs_primitive_emulation(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-
-    if (r->supports_geometry_shaders) {
-        return false;
-    }
 
     // Read primitive and polygon modes directly from hardware registers instead
     // of relying on r->shader_binding. This prevents stale shader state from
@@ -134,6 +154,14 @@ static bool draw_needs_primitive_emulation(PGRAPHState *pg)
     int polygon_mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
                                 NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
     int primitive_mode = pg->primitive_mode;
+
+    if (r->emulate_triangle_fans && is_fan_draw(primitive_mode, polygon_mode)) {
+        return true;
+    }
+
+    if (r->supports_geometry_shaders) {
+        return false;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -193,8 +221,16 @@ static size_t get_max_emulated_index_count(PGRAPHState *pg, uint32_t in_count)
         result = in_count;
         break;
     case PRIM_TYPE_POLYGON:
-        result =
-            (polygon_mode == POLY_MODE_LINE && in_count > 1) ? in_count * 2 : 0;
+        if (polygon_mode == POLY_MODE_FILL) {
+            result = in_count >= 3 ? (in_count - 2) * 3 : 0;
+        } else {
+            result = (polygon_mode == POLY_MODE_LINE && in_count > 1) ?
+                         in_count * 2 :
+                         0;
+        }
+        break;
+    case PRIM_TYPE_TRIANGLE_FAN:
+        result = in_count >= 3 ? (in_count - 2) * 3 : 0;
         break;
     default:
         result = 0;
@@ -241,6 +277,15 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (is_fan_draw(primitive_mode, polygon_mode)) {
+        /* Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order:
+         * same winding, same provoking vertex. */
+        for (uint32_t i = 0; i + 2 < count; i++) {
+            EMIT3(start + i + 1, start + i + 2, start);
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -312,6 +357,7 @@ static size_t build_emulated_indices_from_array(PGRAPHState *pg, uint32_t start,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
@@ -346,6 +392,26 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         out[j++] = (c);   \
         out[j++] = (d);   \
     } while (0)
+
+    if (is_fan_draw(primitive_mode, polygon_mode)) {
+        /*
+         * Fan triangle i is (v[i+1], v[i+2], v0), the Vulkan order. The
+         * native path enabled primitive restart for fans, so a
+         * 0xFFFFFFFF index starts a new fan here too.
+         */
+        uint32_t first = 0;
+        while (first < in_count) {
+            uint32_t end = first;
+            while (end < in_count && in[end] != 0xFFFFFFFF) {
+                end++;
+            }
+            for (uint32_t i = first; i + 2 < end; i++) {
+                EMIT3(in[i + 1], in[i + 2], in[first]);
+            }
+            first = end + 1;
+        }
+        goto out;
+    }
 
     switch (primitive_mode) {
     case PRIM_TYPE_LINE_LOOP:
@@ -414,6 +480,7 @@ static size_t build_emulated_indices_from_elements(PGRAPHState *pg,
         break;
     }
 
+out:
 #undef EMIT4
 #undef EMIT3
 #undef EMIT2
@@ -454,20 +521,30 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
     return memcmp(&snode->key, key, sizeof(PipelineKey));
 }
 
-static char *get_pipeline_cache_path(void)
+/*
+ * One file per driver: each rejects the other's blob (its header carries
+ * the driver's pipelineCacheUUID), so a shared file would go cold at every
+ * switch or fallback. MoltenVK keeps the name it always had.
+ */
+static char *get_pipeline_cache_path(PGRAPHVkState *r)
 {
     const char *base = xemu_settings_get_base_path();
+#ifdef __APPLE__
+    if (r->driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP) {
+        return g_strdup_printf("%spipeline_cache-kosmickrisp.bin", base);
+    }
+#endif
     return g_strdup_printf("%spipeline_cache.bin", base);
 }
 
-static void load_pipeline_cache_from_disk(void **data, size_t *size)
+static void load_pipeline_cache_from_disk(PGRAPHVkState *r, void **data,
+                                          size_t *size)
 {
     *data = NULL;
     *size = 0;
 
-    char *path = get_pipeline_cache_path();
+    g_autofree char *path = get_pipeline_cache_path(r);
     FILE *f = qemu_fopen(path, "rb");
-    g_free(path);
     if (!f) {
         return;
     }
@@ -480,6 +557,8 @@ static void load_pipeline_cache_from_disk(void **data, size_t *size)
         *data = g_malloc(file_size);
         if (fread(*data, 1, file_size, f) == file_size) {
             *size = file_size;
+            fprintf(stderr, "Loaded pipeline cache (%zu bytes) from %s\n",
+                    *size, path);
         } else {
             g_free(*data);
             *data = NULL;
@@ -488,9 +567,10 @@ static void load_pipeline_cache_from_disk(void **data, size_t *size)
     fclose(f);
 }
 
-static void save_pipeline_cache_to_disk(VkDevice device,
-                                        VkPipelineCache cache)
+static void save_pipeline_cache_to_disk(PGRAPHVkState *r)
 {
+    VkDevice device = r->device;
+    VkPipelineCache cache = r->vk_pipeline_cache;
     int64_t t0 = g_get_monotonic_time();
     size_t size = 0;
     VkResult result = vkGetPipelineCacheData(device, cache, &size, NULL);
@@ -501,7 +581,7 @@ static void save_pipeline_cache_to_disk(VkDevice device,
     void *data = g_malloc(size);
     result = vkGetPipelineCacheData(device, cache, &size, data);
     if (result == VK_SUCCESS) {
-        char *path = get_pipeline_cache_path();
+        char *path = get_pipeline_cache_path(r);
         /* Write-then-rename so a kill mid-write can't leave a torn
          * cache file for the next boot to ingest. The temp name carries
          * the pid so instances sharing one cache (the benches run up to
@@ -543,7 +623,7 @@ static void *pipeline_cache_save_thread(void *opaque)
 {
     PGRAPHVkState *r = opaque;
 
-    save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+    save_pipeline_cache_to_disk(r);
     qatomic_store_release(&r->pipeline_cache_save_busy, false);
     return NULL;
 }
@@ -681,12 +761,13 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
 
 /*
  * A kill between the temp write and the rename in
- * save_pipeline_cache_to_disk leaves a pipeline_cache.bin.<pid>.tmp that
+ * save_pipeline_cache_to_disk leaves a pipeline_cache*.bin.<pid>.tmp that
  * no later run reads or overwrites (the pid differs), so sweep them once
- * at init, before this process writes its own; the glob also takes the
- * fixed pipeline_cache.bin.tmp of older builds. Only files untouched for
- * a minute go: a sibling sharing the folder writes its temp file in well
- * under a second, and a younger orphan is swept by a later launch.
+ * at init, before this process writes its own, whichever driver wrote
+ * them; the glob also takes the fixed pipeline_cache.bin.tmp of older
+ * builds. Only files untouched for a minute go: a sibling sharing the
+ * folder writes its temp file in well under a second, and a younger
+ * orphan is swept by a later launch.
  */
 static void sweep_stale_pipeline_cache_temp_files(void)
 {
@@ -699,8 +780,8 @@ static void sweep_stale_pipeline_cache_temp_files(void)
     gint64 now = g_get_real_time() / G_USEC_PER_SEC;
     const char *name;
     while ((name = g_dir_read_name(d)) != NULL) {
-        if (!g_str_has_prefix(name, "pipeline_cache.bin.") ||
-            !g_str_has_suffix(name, ".tmp")) {
+        if (!g_str_has_prefix(name, "pipeline_cache") ||
+            !strstr(name, ".bin.") || !g_str_has_suffix(name, ".tmp")) {
             continue;
         }
         char *path = g_build_filename(base, name, NULL);
@@ -721,12 +802,7 @@ static void init_pipeline_cache(PGRAPHState *pg)
 
     void *cache_data = NULL;
     size_t cache_size = 0;
-    load_pipeline_cache_from_disk(&cache_data, &cache_size);
-
-    if (cache_data) {
-        fprintf(stderr, "Loaded pipeline cache (%zu bytes) from disk\n",
-                cache_size);
-    }
+    load_pipeline_cache_from_disk(r, &cache_data, &cache_size);
 
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
@@ -767,7 +843,7 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
 
     pipeline_cache_save_join(r);
     if (r->pipeline_cache_unsaved) {
-        save_pipeline_cache_to_disk(r->device, r->vk_pipeline_cache);
+        save_pipeline_cache_to_disk(r);
     }
 
     lru_flush(&r->pipeline_cache);
@@ -2304,8 +2380,9 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
      * a frame whose FIRST pass contains the first zpass draw got
      * an encoder with a nil visibility buffer and crashed in AGX
      * setVisibilityResultMode (user-reported, real gameplay).
+     * MoltenVK only: other drivers have no such flag.
      */
-    {
+    if (r->driver_is_moltenvk) {
         int primer_index =
             pgraph_vk_slot_query_base(r, r->current_flight) +
             r->num_queries_in_flight;
@@ -3296,6 +3373,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   buffer_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, all_offset, 1, 0,
                                  -(int32_t)min_start, 0);
             }
@@ -3308,6 +3386,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                          count = pg->draw_arrays_count[i];
                 NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDraw(r->command_buffer, count, 1, start - min_start, 0);
             }
         }
@@ -3374,6 +3453,7 @@ void pgraph_vk_flush_draw(NV2AState *d)
                               r->storage_buffers[BUFFER_INDEX].buffer,
                               buffer_offset, VK_INDEX_TYPE_UINT32);
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,
                              -(int32_t)min_element, 0);
         }
@@ -3433,10 +3513,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0, 0, 0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
         }
         end_draw(pg);
@@ -3502,11 +3584,13 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                   r->storage_buffers[BUFFER_INDEX].buffer,
                                   index_offset, VK_INDEX_TYPE_UINT32);
                 nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+                count_fan_draw(pg);
                 vkCmdDrawIndexed(r->command_buffer, actual_index_count, 1, 0, 0,
                                  0);
             }
         } else {
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
+            count_fan_draw(pg);
             vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
         }
         end_draw(pg);

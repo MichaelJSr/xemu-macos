@@ -1,9 +1,10 @@
 # xemu-macos: Optimized Xbox Emulator for Apple Silicon
 
 Fork of [xemu](https://github.com/xemu-project/xemu) tuned for Apple Silicon
-(M1/M2+) on macOS 14+ (best on macOS 26 Tahoe). Adds MoltenVK support
-(unsupported upstream), an inline ARM64 x87 FPU, full DSP JIT, MetalFX
-upscaling + frame interpolation, and Accelerate-backed audio.
+(M1/M2+) on macOS 14+ (best on macOS 26 Tahoe). Adds Vulkan on macOS
+(MoltenVK, with Mesa KosmicKrisp as an opt-in on macOS 26; unsupported
+upstream), an inline ARM64 x87 FPU, full DSP JIT, MetalFX upscaling +
+frame interpolation, and Accelerate-backed audio.
 
 - Upstream: [xemu-project/xemu](https://github.com/xemu-project/xemu)
 - MoltenVK seed: [CosmicSnow/xemu](https://github.com/CosmicSnow/xemu)
@@ -96,8 +97,10 @@ to in [docs/optimizations.md](docs/optimizations.md).
 The NV2A Vulkan renderer loads Vulkan at runtime through **volk** —
 nothing links against a Vulkan library at build time.
 
-- **macOS:** volk dlopens `libMoltenVK.dylib`, which `build.sh` bundles
-  into `xemu.app/Contents/Libraries/<arch>/`. One resolution rule
+- **macOS:** xemu dlopens the driver bundled in
+  `xemu.app/Contents/Libraries/<arch>/` by path (`@rpath/…`, never a
+  Vulkan loader's search): Mesa KosmicKrisp or MoltenVK (below).
+  `build.sh` bundles `libMoltenVK.dylib`; one resolution rule
   (`resolve_moltenvk`): `macos-libs` (vendored), then `/usr/local`
   (Vulkan SDK / `scripts/build-moltenvk.sh`), then Homebrew — a dylib
   counts only if it has the target arch slice; when none exists the
@@ -112,8 +115,39 @@ nothing links against a Vulkan library at build time.
 On Windows and Linux the renderer additionally calls `volkLoadDevice()`
 after creating its `VkDevice` (since 2026-09-08), so `vkCmd*` and
 friends enter the driver's ICD directly instead of going through the
-loader trampoline. On macOS nothing changes — MoltenVK is the ICD and
-there is no trampoline to bypass.
+loader trampoline. On macOS MoltenVK is the ICD and there is no
+trampoline to bypass; KosmicKrisp hands out per-device trampolines, so
+it gets `volkLoadDevice()` too.
+
+**Vulkan driver on macOS.** `[display.vulkan] driver` picks it once per
+launch (restart to change; a fallback never rewrites it): `auto` (the
+default) and `moltenvk` run MoltenVK; `kosmickrisp` opts in to Mesa
+KosmicKrisp from `Contents/Libraries/arm64/libvulkan_kosmickrisp.dylib`
+on macOS 26 or later with a Metal 4 GPU and the Metal presentation
+backend, and otherwise runs MoltenVK with a toast that says why.
+MoltenVK stays bundled, so macOS 14/15 and Intel Macs keep working.
+Against MoltenVK, KosmicKrisp peaks 0.4-0.6 GB lower in memory and
+applies the NV2A texture LOD bias that MoltenVK drops; but xemu as a
+whole uses no less CPU at the 60 fps cap, and KosmicKrisp hitches more
+on shaders and pipeline states it hasn't seen yet, starts slower, draws
+wireframe filled, can lose occlusion results under heavy host load, and
+a lost device ends xemu ([docs/kosmickrisp.md](docs/kosmickrisp.md)).
+KosmicKrisp must load, start and pass an acceptance check (its
+copy-present path and every surface and texture format) before xemu
+commits to it; any failure falls back to MoltenVK in the same launch
+(`xemu: KosmicKrisp unavailable (<why>); using MoltenVK`). Deterministic
+(`-icount`) and offscreen (`XEMU_HEADLESS=1`) runs always use MoltenVK.
+stderr names the choice and the device: `xemu: Vulkan driver: MoltenVK
+(auto)` or `KosmicKrisp (kosmickrisp)`, then `- Driver: MoltenVK, 1.4.3
+(id 14)`.
+
+With the setting at `kosmickrisp`, a fatal Vulkan error on KosmicKrisp,
+or a crash while it starts or in its first frames, leaves a strike,
+`kosmickrisp-strike.txt` in the data folder: until xemu or the bundled
+KosmicKrisp changes, later launches start MoltenVK and say so in a
+toast. Building KosmicKrisp, and `XEMU_VK_DRIVER` (a diagnostic that
+overrides the setting and the pin):
+[docs/kosmickrisp.md](docs/kosmickrisp.md).
 
 ### Recommended `xemu.toml`
 
@@ -127,6 +161,9 @@ frame_interpolation = '2x'      # off | 2x | 4x (see Performance)
 
 [display.quality]
 surface_scale = 2               # 1 = 640x480 ... 4 = 2560x1920
+
+[display.vulkan]
+driver = 'auto'                 # auto (MoltenVK) | kosmickrisp (opt-in) | moltenvk
 
 [display.window]
 presentation_backend = 'auto'   # auto | opengl | metal (auto = Metal w/ Vulkan renderer)
@@ -826,8 +863,9 @@ Other automation interfaces (windowed or headless):
   `xemu-checkpoint-save` write GPU surfaces back, which changes later
   RAM: a checkpoint's restores agree with each other, but not with the
   run that went on from the save or one that never saved), and expect
-  matches only on the same Mac, macOS and MoltenVK. A cheap reproducible
-  screenshot of frame F of a null run: savevm there, load it in a short
+  matches only on the same Mac, macOS and MoltenVK (offscreen runs
+  always use it). A cheap reproducible screenshot of frame F of a null
+  run: savevm there, load it in a short
   `XEMU_HEADLESS=1` icount run, advance a few frames, screendump. OpenGL
   is not deterministic.
   Keep the network off and bind no XMU.
@@ -1194,10 +1232,10 @@ Xbox game (30fps, x87 FPU, MCPX APU)
        ├─ CPU: ARM64 TCG, inline x87 → AArch64 FP
        │  floatx80↔double inline
        │
-       ├─ GPU: NV2A Vulkan (MoltenVK)
+       ├─ GPU: NV2A Vulkan (MoltenVK; KosmicKrisp opt-in on macOS 26)
        │  flight slots · bump-alloc staging · VRAM spatial dirty index
        │  compute unswizzle + YUV · zero-copy display
-       │  (Metal: exported MTLTexture, async timeline submit ·
+       │  (Metal: exported MTLTexture or MTLHeap copy, async timeline submit ·
        │   GL: IOSurface + CGL)
        │        │
        │        └─ MetalFX Spatial / Temporal (async, MTLSharedEvent)

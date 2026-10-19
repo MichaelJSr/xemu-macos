@@ -55,7 +55,9 @@ extern int nv2a_vk_dgroup_indent;
  * A failed Vulkan call ends xemu at once. Headless runs belong to a
  * harness: they exit with status 1 after a fixed line ("xemu: Vulkan device
  * lost; exiting" for a lost device, else "xemu: Vulkan call failed;
- * exiting"). Windowed runs abort with a crash report. Never
+ * exiting"). Windowed runs abort with a crash report. On KosmicKrisp the
+ * settings chose, it first leaves a strike, so later launches run MoltenVK
+ * until KosmicKrisp is picked again (pgraph_vk_driver_strike). Never
  * __builtin_trap(): on macOS a trap on a thread that blocks SIGTRAP (as
  * QEMU threads did) re-executes forever, so the PFIFO thread spun in
  * pgraph_vk_finish holding pgraph.lock and the process ignored SIGTERM

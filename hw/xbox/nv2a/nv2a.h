@@ -83,6 +83,30 @@ bool nv2a_get_present_frame_peek(NV2APresentFrame *frame);
 void nv2a_release_framebuffer_surface(void);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);
+/*
+ * The Vulkan driver in use and why, e.g. "MoltenVK, 1.4.3 (auto)",
+ * "KosmicKrisp, Mesa 26.3.0 (kosmickrisp)" or "MoltenVK, 1.4.3 (needs
+ * macOS 26)"; NULL before the Vulkan renderer first initializes. Vulkan
+ * builds only.
+ */
+const char *nv2a_vk_driver_desc(void);
+/*
+ * display.vulkan.driver as the Vulkan renderer read it at its first init
+ * (CONFIG_DISPLAY_VULKAN_DRIVER_*; a change applies at the next launch),
+ * or -1 before then. Vulkan builds only.
+ */
+int nv2a_vk_driver_setting(void);
+/*
+ * macOS: why this process won't try KosmicKrisp whatever the setting says
+ * ("needs macOS 26", "pinned: deterministic", ...), or NULL.
+ */
+const char *nv2a_vk_kk_ineligible_reason(void);
+/*
+ * Settings picked KosmicKrisp: remove a strike marker (unless a running
+ * xemu's start wrote it), so the next launch tries KosmicKrisp once more.
+ * True if one was removed. Vulkan builds only.
+ */
+bool nv2a_vk_driver_retry(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
 uint32_t nv2a_get_crtc_start(void); /* BQL held; 0 before the device exists */

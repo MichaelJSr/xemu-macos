@@ -1533,10 +1533,12 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
      * a native driver may overlap an in-flight slot's reads/writes of
      * this surface's image with the aux-CB upload (visible under WHPX,
      * where render_display force-uploads every present). Keep the
-     * upstream full-finish semantics on non-Apple hosts.
+     * upstream full-finish semantics on non-Apple hosts, and on Apple
+     * drivers other than MoltenVK (KosmicKrisp's heaps are untracked).
      */
 #ifdef __APPLE__
     bool target_is_active =
+        !r->driver_is_moltenvk ||
         (surface == r->color_binding) ||
         (surface == r->zeta_binding) ||
         r->in_command_buffer;
@@ -2456,6 +2458,42 @@ static bool check_surface_internal_formats_supported(
         }
     }
     return all_supported;
+}
+
+bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
+{
+    for (int i = 0; i < ARRAY_SIZE(kelvin_surface_color_format_vk_map); i++) {
+        if (!check_surface_internal_formats_supported(
+                r, &kelvin_surface_color_format_vk_map[i], 1)) {
+            error_setg(errp, "surface color format %d (VkFormat %d) unsupported",
+                       i, kelvin_surface_color_format_vk_map[i].vk_format);
+            return false;
+        }
+    }
+    if (!check_surface_internal_formats_supported(r, &zeta_d16, 1) ||
+        (!check_surface_internal_formats_supported(r, &zeta_d24_unorm_s8_uint,
+                                                   1) &&
+         !check_surface_internal_formats_supported(r, &zeta_d32_sfloat_s8_uint,
+                                                   1))) {
+        error_setg(errp, "no D16 or D24S8/D32S8 depth attachments");
+        return false;
+    }
+    /*
+     * Not R6G5B5's R8G8B8_SNORM: Metal has no 3-byte formats, so neither
+     * Apple driver samples it (such textures fail on MoltenVK as well).
+     */
+    for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
+        VkFormat f = kelvin_color_format_vk_map[i].vk_format;
+        if (f != VK_FORMAT_UNDEFINED && f != VK_FORMAT_R8G8B8_SNORM &&
+            !check_format_and_usage_supported(
+                r, f, VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                          VK_IMAGE_USAGE_SAMPLED_BIT)) {
+            error_setg(errp, "texture format %d (VkFormat %d) unsupported", i,
+                       f);
+            return false;
+        }
+    }
+    return true;
 }
 
 void pgraph_vk_init_surfaces(PGRAPHState *pg)

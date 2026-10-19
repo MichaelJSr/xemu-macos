@@ -246,6 +246,26 @@ XEMU_FOO 2 45` (~6 min), windowed wall fps. Go by the verdict, mean ± sd
 and sign tally, quote the load, and add pairs (3-6 × 75 s) when the delta
 is under ~2% or signs are mixed: there's no quiet box to wait for.
 
+**Vulkan driver** (macOS; `docs/kosmickrisp.md`): icount and offscreen
+runs pin MoltenVK; windowed runs follow `[display.vulkan] driver` (Auto:
+MoltenVK; the opt-in `kosmickrisp`: KK from the arm64 bundle's
+`Contents/Libraries/arm64`; another build into a clone: docs/kosmickrisp.md,
+Building). KK runs set `XEMU_VK_DRIVER=kosmickrisp` (headless: bench-det arm
+`kk=APP:XEMU_VK_DRIVER=kosmickrisp` with `--renderer offscreen`; bench-det
+stops when a run's driver isn't the arm's); a windowed MoltenVK-vs-KK A/B
+sets it on both arms (`--b-env XEMU_VK_DRIVER=moltenvk --e-env
+XEMU_VK_DRIVER=kosmickrisp`). stderr's `xemu: Vulkan driver: <name>
+(<why>)` and `- Driver: <name>, <version> (id N)` say which ran; the
+windowed receipts list every driver an arm ran and refuse a mix. Each
+driver keeps its own pipeline cache (`pipeline_cache.bin`,
+`pipeline_cache-kosmickrisp.bin`), so no `--isolate-caches` for driver
+A/Bs; offscreen RAM hashes are per driver. A KK run killed in its first
+600 flips with `driver = 'kosmickrisp'`, or a strike test, leaves
+`kosmickrisp-strike.txt` in the base path, which moves every later
+`kosmickrisp` run of that build to MoltenVK (`XEMU_VK_DRIVER` runs ignore
+it): the launchers warn when the bench cache has one (remove it), and a
+strike test gets its own `XEMU_BASE_PATH`.
+
 **Goldens** (deterministic, `bench-det.py -n 1` on the final binary;
 see the README's deterministic mode): `-f 300` (azurik-heavy-f1)
 `f300=6a553d8c7727c6c6`; `-t azurik-stream-e2 -f 600 -i "axis ly 1.0"`
@@ -307,6 +327,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
+| `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (KK benches, windowed or headless; no strike marker); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
 | `XEMU_APU_PROF=1`, `XEMU_PFIFO_HEARTBEAT=1` | APU load; PFIFO liveness | `mcpx/apu/apu.c`, `hw/xbox/nv2a/pfifo.c` |
@@ -325,6 +346,7 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 | `audio.dsp_jit.enabled` | true | The only switch for the fork's DSP JIT (both cores, GP and EP; AArch64 POSIX hosts). Off falls back to `use_dsp_jit` |
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
+| `display.vulkan.driver` | auto | macOS arm64: Auto runs MoltenVK; `kosmickrisp` opts in to KosmicKrisp on macOS 26 (Metal 4, Metal presentation), else or on failure (or after a strike, until picked again) MoltenVK; icount and offscreen pin MoltenVK; restart to change |
 | `automation.ram_shm`, `.qmp`, `.enabled` | "", "", true | The player's tracker endpoints (as `XEMU_RAM_SHM`, `-qmp`); applied only to the pref dir's config with no `-config_path`, `XEMU_BASE_PATH` or marker (README) |
 
 Add a knob only for a normal-mode change the det goldens can't verify, a
