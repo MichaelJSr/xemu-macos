@@ -27,6 +27,7 @@
 #include "io/channel-socket.h"
 #include "io/channel-websock.h"
 #include "qemu/error-report.h"
+#include "qemu/cutils.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qapi/error.h"
@@ -1228,6 +1229,35 @@ static gboolean socket_reconnect_timeout(gpointer opaque)
 }
 
 
+/*
+ * xemu: XEMU_SOCKET_BACKLOG=<n> (1-4096, read once): the listen backlog of
+ * every socket chardev that listens (-qmp, -monitor, XEMU_QMP_WATCH, -gdb,
+ * -serial ... server=on). Default 1, as upstream: a monitor serves one
+ * client, and a harness may read ECONNREFUSED as "held by a client". With
+ * more, connects made while a client holds the monitor wait in the queue
+ * (each gets its greeting when the ones before it close) instead of
+ * failing. The kernel may cap it (macOS: kern.ipc.somaxconn).
+ */
+static int xemu_socket_backlog(void)
+{
+    static int backlog;
+
+    if (!backlog) {
+        const char *s = g_getenv("XEMU_SOCKET_BACKLOG");
+        int64_t n;
+
+        backlog = 1;
+        if (s && s[0]) {
+            if (qemu_strtoi64(s, NULL, 10, &n) == 0 && n >= 1 && n <= 4096) {
+                backlog = n;
+            } else {
+                warn_report("XEMU_SOCKET_BACKLOG=%s: not 1-4096; using 1", s);
+            }
+        }
+    }
+    return backlog;
+}
+
 static int qmp_chardev_open_socket_server(Chardev *chr,
                                           bool is_telnet,
                                           bool is_waitconnect,
@@ -1248,7 +1278,8 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
         goto skip_listen;
     }
 
-    if (qio_net_listener_open_sync(s->listener, s->addr, 1, errp) < 0) {
+    if (qio_net_listener_open_sync(s->listener, s->addr,
+                                   xemu_socket_backlog(), errp) < 0) {
         object_unref(OBJECT(s->listener));
         s->listener = NULL;
         return -1;

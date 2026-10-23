@@ -1025,8 +1025,18 @@ Other automation interfaces (windowed or headless):
   closes, it unlinks the path only if the path is still its own socket
   file. On macOS the QMP monitor serves one client at a time and queues
   one more connection, so further connects fail with `ECONNREFUSED`
-  while a client holds it. That means busy, not gone: the file is still
-  there.
+  while a client holds it (unless `XEMU_SOCKET_BACKLOG`, below). That
+  means busy, not gone: the file is still there.
+- **Listen backlog** (opt-in): `XEMU_SOCKET_BACKLOG=<n>` (1-4096)
+  queues up to n connections (the kernel may cap it: macOS
+  `kern.ipc.somaxconn`, 128 by default) on every socket chardev that
+  listens (`-qmp`, `-monitor`, `XEMU_QMP_WATCH`, `-gdb`, a `server=on`
+  `-serial` or `-chardev`) instead of 1, so connects made while a client
+  holds a monitor wait instead of failing with `ECONNREFUSED`. Each
+  queued connection is served, greeting first, once the ones before it
+  close, including connections whose client gave up and closed while
+  queued (their greeting goes nowhere). Unset, or a value outside
+  1-4096 (stderr warns), keeps 1.
 - **A watch monitor for queries during an advance** (opt-in):
   `XEMU_QMP_WATCH=<spec>` (what `-qmp` takes, e.g.
   `unix:/tmp/w.sock,server=on,wait=off`) opens one more QMP monitor
