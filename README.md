@@ -702,6 +702,15 @@ Other automation interfaces (windowed or headless):
     windowed one aborts). `where` names
     the fence wait, if a wait saw it. Best effort: the event is lost
     if the client left earlier output unread.
+  - `XEMU_PRESENT_STALL {waited-ms, count}` (xemu-macos 0.16.1), windowed
+    Metal presentation only: once per stall, when a present has waited
+    past `XEMU_PRESENT_STALL_MS` (default 100 ms) for a CAMetalLayer
+    drawable. The window drops frames until one comes, and every stall
+    prints `xemu: present stall N: no drawable for M ms; dropping frames
+    until one comes` and `xemu: present stall N over after M ms, F
+    frames dropped` on stderr; emulation, input and `screendump` go on,
+    the menus wait for the next drawable (see Performance, frame
+    interpolation).
 - **Park and resume a machine** without touching the HDD's snapshots:
   QMP `stop`, then `migrate {"uri": "file:/path"}` (poll `query-migrate`
   for `completed`). Resume in a new xemu started with `-incoming defer`
@@ -1432,6 +1441,18 @@ holds the real frame back longer: 2x is the smoother setting wherever
 both fit. With an unknown refresh rate, or on the OpenGL presentation
 backend, the configured mode runs every frame, as it does with
 `XEMU_INTERP_GATE=0` (which also drops the whole-refresh holds).
+
+The window never waits long for the display: a helper thread asks
+CAMetalLayer for each drawable and the UI thread, which also feeds the
+pads and the input pipe and runs `screendump`, waits for it at most
+100 ms (diagnostic: `XEMU_PRESENT_STALL_MS=<ms>` sets the bound, `0`
+waits on the UI thread unbounded as v0.16 did, up to a second per frame
+when the layer starves). A frame with no drawable in time is dropped (a
+paced interpolation step or a real frame) and the loop keeps polling
+input and serving `screendump` at about 60 Hz until drawables come back
+(the menus and notifications draw into a drawable, so they wait).
+Every stall is reported on stderr (a start and an end line) and as QMP
+`XEMU_PRESENT_STALL`; nsprof counts the drops as `present_drop`.
 
 The remaining wall is still guest-TCG throughput. The
 superblock/region-formation campaign against the measured ~40%

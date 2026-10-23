@@ -625,6 +625,30 @@
             'vk-result': 'int' } }
 
 ##
+# @XEMU_PRESENT_STALL:
+#
+# Emitted when a windowed present (Metal presentation backend) has
+# waited past the drawable bound, XEMU_PRESENT_STALL_MS (default 100
+# ms), for a CAMetalLayer drawable, once per stall: the UI thread
+# drops frames (with push present the step it consumed, a frame
+# interpolation midpoint or a real frame) and keeps polling input
+# (pads and the input pipe) and serving screendumps at about 60 Hz
+# until a drawable comes; the HUD and menus wait for it.  For every
+# stall stderr gets "xemu: present stall N: no drawable for M ms;
+# dropping frames until one comes" at the start and "xemu: present
+# stall N over after M ms, F frames dropped" at the end.  Emulation
+# never waits for the present (xemu-macos 0.16.1).
+#
+# @waited-ms: how long the frame that started the stall waited
+#
+# @count: stalls since launch, this one included
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_PRESENT_STALL',
+  'data': { 'waited-ms': 'int', 'count': 'int' } }
+
+##
 # Strict CPUID
 # ============
 ##

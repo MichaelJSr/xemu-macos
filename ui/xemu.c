@@ -38,6 +38,7 @@
 #include "qapi/qapi-commands-block.h"
 #include "qapi/qapi-commands-ui.h"
 #include "qapi/qapi-commands-xemu.h"
+#include "qapi/qapi-events-xemu.h"
 #include "qemu/coroutine.h"
 #include "qobject/qdict.h"
 #include "ui/console.h"
@@ -1884,6 +1885,52 @@ static uint64_t present_hold_ns(uint64_t hold_ns)
     return n * r - MIN(r / 4, 1000000);
 }
 
+/*
+ * A present that waited past the drawable bound (XEMU_PRESENT_STALL_MS,
+ * xemu-metal.m) dropped its frame: one stall per run of such frames, with
+ * a stderr line and XEMU_PRESENT_STALL at its start and a line at its end,
+ * for every stall (each one waited at least the bound, so at most ten a
+ * second at the default). UI thread only.
+ */
+static void present_stall_note(bool got_drawable)
+{
+    static bool in_stall;
+    static uint64_t stall_t0_ns, dropped, stalls;
+    uint64_t bound = xemu_metal_drawable_bound_ns();
+    uint64_t waited = xemu_metal_last_drawable_wait_ns();
+    uint64_t now = SDL_GetTicksNS();
+
+    if (!bound) {
+        return;
+    }
+    if (got_drawable) {
+        if (in_stall) {
+            in_stall = false;
+            fprintf(stderr, "xemu: present stall %llu over after %llu ms, "
+                    "%llu frames dropped\n", (unsigned long long)stalls,
+                    (unsigned long long)((now - stall_t0_ns) / 1000000),
+                    (unsigned long long)dropped);
+        }
+        return;
+    }
+    if (!in_stall && waited < bound) {
+        return;   /* nextDrawable returned nil at once: nothing waited */
+    }
+    nsprof_event(NSPROF_EV_PRESENT_DROP);
+    dropped++;
+    if (!in_stall) {
+        in_stall = true;
+        stalls++;
+        dropped = 1;
+        stall_t0_ns = now - waited;
+        fprintf(stderr, "xemu: present stall %llu: no drawable for %llu "
+                "ms; dropping frames until one comes\n",
+                (unsigned long long)stalls,
+                (unsigned long long)(waited / 1000000));
+        qapi_event_send_xemu_present_stall(waited / 1000000, stalls);
+    }
+}
+
 /**
  * Metal-native sibling of gl_render_frame: same structure (pull the
  * NV2A present frame, run the HUD, release, present), but the game
@@ -2028,13 +2075,15 @@ static void metal_render_frame(struct xemu_console *scon)
     /* The renderer's frame waits for its producer; a VGA upload doesn't. */
     uint64_t tex_wait_value = tex ? frame.event_value : 0;
     if (!xemu_metal_begin_frame(frame.event, tex_wait_value)) {
-        /* No drawable available (e.g. window fully occluded). */
+        /* No drawable in time (e.g. window fully occluded): drop it. */
+        present_stall_note(false);
         if (frame.mtl_texture) {
             xemu_metal_release_handle(frame.mtl_texture);
         }
         qatomic_set(&rendering, false);
         return;
     }
+    present_stall_note(true);
 
     /* GPU-enforced hold time for paced interpolation steps */
     xemu_metal_set_present_duration(

@@ -85,6 +85,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_INTERP_GATED] = "interp_gated",
     [NSPROF_EV_INTERP_DEGRADED] = "interp_degraded",
     [NSPROF_EV_UI_PRESENT] = "ui_present",
+    [NSPROF_EV_PRESENT_DROP] = "present_drop",
     [NSPROF_EV_MFX_SCALER_REBUILD] = "mfx_scaler_rebuild",
     [NSPROF_EV_REP_TRAP] = "rep_trap",
     [NSPROF_EV_REP_GPU_TOUCH] = "rep_gpu_touch",

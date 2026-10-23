@@ -68,6 +68,16 @@ bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value);
 void xemu_metal_end_frame(void);
 
 /*
+ * The drawable wait: begin_frame waits at most the bound for a drawable
+ * (XEMU_PRESENT_STALL_MS, default 100 ms; a vblank while the previous
+ * request is still in flight) and returns false when it runs out. 0 before
+ * the first frame and with XEMU_PRESENT_STALL_MS=0 (unbounded, on the UI
+ * thread). last_drawable_wait: the UI's wait in the latest begin_frame.
+ */
+uint64_t xemu_metal_drawable_bound_ns(void);
+uint64_t xemu_metal_last_drawable_wait_ns(void);
+
+/*
  * GPU-enforced minimum on-screen duration for the frame presented by
  * the next end_frame (presentDrawable:afterMinimumDuration:). One
  * shot; 0 = present normally. Used to pace interpolation steps

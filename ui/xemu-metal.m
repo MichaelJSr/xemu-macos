@@ -24,8 +24,11 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <IOSurface/IOSurfaceRef.h>
 #include <SDL3/SDL.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
 #include "xemu-metal.h"
 #include "hw/xbox/nv2a/nsprof.h"
@@ -70,6 +73,164 @@ static id<MTLTexture> g_vga_tex;
 static _Atomic int g_layer_pw, g_layer_ph;
 
 static void update_drawable_size(void);
+
+/*
+ * Bounded drawable wait. [CAMetalLayer nextDrawable] blocks until the
+ * compositor hands a drawable back, up to a second (allowsNextDrawableTimeout)
+ * and again on the next call, and it ran on the UI thread, which also feeds
+ * the pads and the input pipe in real time and runs screendumps: a starved
+ * layer (an owner demo blamed MetalFX 2x steps on a small background window)
+ * froze all of that, not just the picture. So a helper thread calls
+ * nextDrawable and the UI waits for it at most g_acq_bound_ns
+ * (XEMU_PRESENT_STALL_MS, default 100 ms; 0, or a failed thread start, calls
+ * it on the UI thread as before). A wait that runs out drops that frame (with
+ * push present the consumed step: an interpolated midpoint or a real frame)
+ * and leaves the request in flight; until the thread brings a drawable, later
+ * frames wait at most a vblank each, so the loop keeps polling input and
+ * serving screendumps at ~60 Hz (the HUD draws only into a drawable, so it
+ * waits). xemu's own resize (update_drawable_size) runs only while no
+ * nextDrawable call is in flight. SDL's metal view also sets drawableSize
+ * from its event watch when the window resizes, on the UI thread, which can
+ * now overlap a stalled call: a late drawable may keep the old size for one
+ * frame, which is harmless because a frame takes its size from its drawable.
+ */
+static uint64_t g_acq_bound_ns;         /* 0: nextDrawable on the UI thread */
+static bool g_acq_started;
+static pthread_t g_acq_thread;
+static pthread_mutex_t g_acq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_acq_cond = PTHREAD_COND_INITIALIZER;
+static bool g_acq_want;                 /* UI asked; the thread hasn't begun */
+static bool g_acq_busy;                 /* the thread is inside nextDrawable */
+static bool g_acq_nil;                  /* its last call returned nil */
+static bool g_acq_quit;
+static id<CAMetalDrawable> g_acq_ready; /* retained, waiting for the UI */
+static uint64_t g_acq_last_wait_ns;     /* UI's wait in the last begin_frame */
+
+#define XEMU_PRESENT_STALL_DEFAULT_MS 100
+#define XEMU_VBLANK_NS 16666666ull
+
+static uint64_t mono_ns(void)
+{
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+static void *drawable_thread_fn(void *opaque)
+{
+    pthread_setname_np("xemu-drawable");
+    pthread_mutex_lock(&g_acq_lock);
+    while (!g_acq_quit) {
+        if (!g_acq_want) {
+            pthread_cond_wait(&g_acq_cond, &g_acq_lock);
+            continue;
+        }
+        g_acq_want = false;
+        g_acq_busy = true;
+        pthread_mutex_unlock(&g_acq_lock);
+
+        id<CAMetalDrawable> d = nil;
+        @autoreleasepool {
+            int64_t nsprof_t0 = nsprof_begin();
+            d = [[g_layer nextDrawable] retain];
+            nsprof_end(NSPROF_DRAWABLE_ACQUIRE, nsprof_t0);
+        }
+
+        pthread_mutex_lock(&g_acq_lock);
+        g_acq_busy = false;
+        if (g_acq_ready) {
+            [g_acq_ready release];
+        }
+        g_acq_ready = d;
+        g_acq_nil = d == nil;
+        pthread_cond_broadcast(&g_acq_cond);
+    }
+    pthread_mutex_unlock(&g_acq_lock);
+    return NULL;
+}
+
+static void drawable_thread_start(void)
+{
+    const char *e = getenv("XEMU_PRESENT_STALL_MS");
+    long ms = e && *e ? strtol(e, NULL, 10) : XEMU_PRESENT_STALL_DEFAULT_MS;
+    g_acq_started = true;
+    if (ms <= 0) {
+        return;
+    }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+    if (pthread_create(&g_acq_thread, &attr, drawable_thread_fn, NULL) == 0) {
+        g_acq_bound_ns = (uint64_t)ms * 1000000ull;
+    } else {
+        fprintf(stderr, "xemu-metal: no drawable thread; nextDrawable "
+                "stays on the UI thread\n");
+    }
+    pthread_attr_destroy(&attr);
+}
+
+static void drawable_thread_stop(void)
+{
+    if (!g_acq_bound_ns) {
+        return;
+    }
+    pthread_mutex_lock(&g_acq_lock);
+    g_acq_quit = true;
+    pthread_cond_broadcast(&g_acq_cond);
+    pthread_mutex_unlock(&g_acq_lock);
+    pthread_join(g_acq_thread, NULL);
+    [g_acq_ready release];
+    g_acq_ready = nil;
+    g_acq_bound_ns = 0;
+}
+
+/*
+ * The next drawable within the bound, or nil: the wait ran out (the request
+ * stays in flight for the next frame) or nextDrawable returned nil.
+ */
+static id<CAMetalDrawable> drawable_acquire_bounded(void)
+{
+    uint64_t t0 = mono_ns();
+    id<CAMetalDrawable> d = nil;
+
+    pthread_mutex_lock(&g_acq_lock);
+    bool stalled = g_acq_busy || g_acq_want;   /* last frame's request */
+    if (!stalled && !g_acq_ready) {
+        pthread_mutex_unlock(&g_acq_lock);
+        update_drawable_size();   /* no nextDrawable call in flight */
+        pthread_mutex_lock(&g_acq_lock);
+        g_acq_nil = false;
+        g_acq_want = true;
+        pthread_cond_broadcast(&g_acq_cond);
+    }
+    uint64_t deadline = t0 + (stalled ? MIN(g_acq_bound_ns, XEMU_VBLANK_NS)
+                                      : g_acq_bound_ns);
+    while (!g_acq_ready && !g_acq_nil) {
+        uint64_t now = mono_ns();
+        if (now >= deadline) {
+            break;
+        }
+        struct timespec rel = {
+            .tv_sec = (deadline - now) / 1000000000ull,
+            .tv_nsec = (deadline - now) % 1000000000ull,
+        };
+        pthread_cond_timedwait_relative_np(&g_acq_cond, &g_acq_lock, &rel);
+    }
+    d = g_acq_ready;
+    g_acq_ready = nil;
+    g_acq_nil = false;
+    pthread_mutex_unlock(&g_acq_lock);
+    g_acq_last_wait_ns = mono_ns() - t0;
+    return d;   /* +1 */
+}
+
+uint64_t xemu_metal_last_drawable_wait_ns(void)
+{
+    return g_acq_last_wait_ns;
+}
+
+uint64_t xemu_metal_drawable_bound_ns(void)
+{
+    return g_acq_bound_ns;
+}
 
 bool xemu_metal_init(SDL_Window *window)
 {
@@ -146,6 +307,7 @@ void xemu_metal_watch_command_buffer(void *command_buffer, const char *what)
 
 void xemu_metal_finalize(void)
 {
+    drawable_thread_stop();
     /* Drain any in-flight work before tearing the queue down. */
     if (g_queue) {
         id<MTLCommandBuffer> cb = [g_queue commandBuffer];
@@ -210,18 +372,32 @@ bool xemu_metal_begin_frame(void *wait_event, uint64_t wait_value)
 {
     g_frame_pool = objc_autoreleasePoolPush();
 
-    @autoreleasepool {
-        update_drawable_size();
-
-        int64_t nsprof_t0 = nsprof_begin();
-        id<CAMetalDrawable> drawable = [g_layer nextDrawable];
-        nsprof_end(NSPROF_DRAWABLE_ACQUIRE, nsprof_t0);
-        if (!drawable) {
+    if (!g_acq_started) {
+        drawable_thread_start();
+    }
+    if (g_acq_bound_ns) {
+        g_drawable = drawable_acquire_bounded();
+        if (!g_drawable) {
             objc_autoreleasePoolPop(g_frame_pool);
             g_frame_pool = NULL;
             return false;
         }
-        g_drawable = [drawable retain];
+    } else {
+        @autoreleasepool {
+            update_drawable_size();
+
+            uint64_t t0 = mono_ns();
+            int64_t nsprof_t0 = nsprof_begin();
+            id<CAMetalDrawable> drawable = [g_layer nextDrawable];
+            nsprof_end(NSPROF_DRAWABLE_ACQUIRE, nsprof_t0);
+            g_acq_last_wait_ns = mono_ns() - t0;
+            if (!drawable) {
+                objc_autoreleasePoolPop(g_frame_pool);
+                g_frame_pool = NULL;
+                return false;
+            }
+            g_drawable = [drawable retain];
+        }
     }
 
     g_drawable_w = (int)g_drawable.texture.width;

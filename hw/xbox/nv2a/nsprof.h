@@ -76,9 +76,12 @@ enum NsprofCounter {
                              zeta->snapshot depth blit (XEMU_MFX_REAL_DEPTH=2).
                              CPU record time only; the copy's GPU cost lands
                              indirectly in the FLIP_STALL finish. */
-    NSPROF_DRAWABLE_ACQUIRE, /* UI-thread block in [CAMetalLayer nextDrawable]
-                                (Metal presentation backend). Accumulated
-                                off-thread — see the header comment above. */
+    NSPROF_DRAWABLE_ACQUIRE, /* time in [CAMetalLayer nextDrawable] (Metal
+                                presentation backend): the xemu-drawable
+                                thread's, which the UI waits for at most
+                                XEMU_PRESENT_STALL_MS (the UI thread's own
+                                with 0). Accumulated off-thread — see the
+                                header comment above. */
     NSPROF_UI_HUD_LOCK,   /* UI-thread main-loop-mutex + BQL acquire and hold
                              across the ImGui HUD build. Off-thread. */
     NSPROF_UI_PRESENT_PERIOD, /* UI-thread interval between consecutive
@@ -158,6 +161,7 @@ enum NsprofEvent {
     NSPROF_EV_INTERP_GATED,        /* flip without midpoints: none fit */
     NSPROF_EV_INTERP_DEGRADED,     /* flip at 2x: 4x steps don't fit */
     NSPROF_EV_UI_PRESENT,          /* completed UI present (end_frame) */
+    NSPROF_EV_PRESENT_DROP,        /* UI frame dropped: no drawable in time */
     /* MetalFX output-shape change: the (in_w,in_h,out_w,out_h) tuple the
      * scaler + its texture ring are rebuilt for (display.c). */
     NSPROF_EV_MFX_SCALER_REBUILD,
