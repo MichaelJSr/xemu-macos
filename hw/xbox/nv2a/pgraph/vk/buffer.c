@@ -126,8 +126,6 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .buffer_size = memory_region_size(d->vram),
     };
 
-    const char *span_env = getenv("XEMU_VTX_SPAN_FINISH");
-    r->vtx_span_finish = !(span_env && !strcmp(span_env, "0"));
     pgraph_vk_init_vtx_span_refute(r);
 
     r->bitmap_size = memory_region_size(d->vram) / 4096;

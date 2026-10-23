@@ -92,37 +92,6 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 }
 
 /*
- * XEMU_VTX_SPAN_FINISH=0 only (the page-wide finish policy): guest dirty
- * bits are page-granular, so vertex-stream sync writes arrive padded to
- * page boundaries and consecutive writes false-share their boundary
- * page. A conflict with the recording command buffer counts when the
- * incoming bytes DIFFER from the mirror somewhere on a page the
- * recording window uploaded (each upload covers whole pages).
- */
-static bool uploaded_page_content_differs(PGRAPHVkState *r, int slot,
-                                          hwaddr offset, VkDeviceSize size,
-                                          const uint8_t *data,
-                                          size_t start_bit, size_t end_bit)
-{
-    const unsigned long *bm = r->flight[slot].uploaded_bitmap;
-    const uint8_t *mirror = r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
-
-    for (size_t bit = start_bit;; bit++) {
-        bit = find_next_bit(bm, end_bit, bit);
-        if (bit >= end_bit) {
-            return false;
-        }
-        hwaddr page_base = (hwaddr)bit * TARGET_PAGE_SIZE;
-        hwaddr lo = MAX(offset, page_base);
-        hwaddr hi = MIN(offset + size, page_base + TARGET_PAGE_SIZE);
-        if (lo < hi &&
-            memcmp(mirror + lo, data + (lo - offset), hi - lo) != 0) {
-            return true;
-        }
-    }
-}
-
-/*
  * Whether the incoming bytes differ from the mirror anywhere a draw
  * recorded in @slot's window reads (its read spans). When they don't, no
  * draw of that slot still on the GPU reads a byte the copy changes, so
@@ -340,59 +309,13 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
             }
             continue;
         }
-        if (!r->vtx_span_finish) {
-            /*
-             * XEMU_VTX_SPAN_FINISH=0: finish when the copy changes a
-             * page the recording window uploaded, anywhere on it; the
-             * fence wait after it still follows the read spans.
-             */
-            unsigned long slot_first = r->flight[i].uploaded_first_dirty_bit;
-            if (slot_first == ULONG_MAX ||
-                start_bit > r->flight[i].uploaded_last_dirty_bit ||
-                end_bit <= slot_first ||
-                find_next_bit(r->flight[i].uploaded_bitmap, end_bit,
-                              start_bit) >= end_bit) {
-                if (r->vtx_span_refute) {
-                    vtx_refute_skip(r, i, offset, size,
-                                    (const uint8_t *)data);
-                }
-                continue;
-            }
-            if (!uploaded_page_content_differs(r, i, offset, size,
-                                               (const uint8_t *)data,
-                                               start_bit, end_bit)) {
-                if (r->vtx_span_refute) {
-                    vtx_refute_skip(r, i, offset, size,
-                                    (const uint8_t *)data);
-                }
-                nsprof_event(NSPROF_EV_VTX_EXACT_SKIP);
-                continue;
-            }
-            int submitted_slot = r->current_flight;
-            bool reads_changed =
-                read_span_content_differs(r, submitted_slot, offset, size,
-                                          (const uint8_t *)data, start_bit,
-                                          end_bit);
-            pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
-            if (reads_changed) {
-                pgraph_vk_wait_slot_fence(pg, submitted_slot);
-                forget_slot_vertex_ram(r, submitted_slot);
-            } else {
-                if (r->vtx_span_refute) {
-                    vtx_refute_skip(r, submitted_slot, offset, size,
-                                    (const uint8_t *)data);
-                }
-                nsprof_event(NSPROF_EV_VTX_WAIT_SKIP);
-            }
-            break;
-        }
         /*
          * The recording command buffer: a conflict is only real if the
          * copy changes a byte one of its draws reads (its read spans).
-         * The page-wide check this replaced (XEMU_VTX_SPAN_FINISH=0)
-         * finished whenever an uploaded page changed anywhere, ~34 times
-         * a flip in d2 under icount, where every streamed batch's upload
-         * carries the next batch's bytes.
+         * The page-wide check this replaced finished whenever an
+         * uploaded page changed anywhere, ~34 times a flip in d2 under
+         * icount, where every streamed batch's upload carried the next
+         * batch's bytes.
          */
         if (!read_span_content_differs(r, i, offset, size,
                                        (const uint8_t *)data, start_bit,

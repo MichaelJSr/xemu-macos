@@ -25,9 +25,10 @@ switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
-`XEMU_VTX_SPAN_FINISH`, `XEMU_VK_CLEAR_IN_PASS` and `XEMU_NV2A_RESET_IRQ`, the first eleven rows. The
+`XEMU_VK_CLEAR_IN_PASS` and `XEMU_NV2A_RESET_IRQ`, the first ten rows. The
 former `=0` row, `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass, became
-the `perf.cache_shaders` setting on 2026-10-18.
+the `perf.cache_shaders` setting on 2026-10-18. `XEMU_VTX_SPAN_FINISH`
+(`=0`, the page-wide vertex finish) was removed on 2026-10-23 (v0.16.1).
 Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
 and tag `archive/windows-wave1-wip`.
@@ -42,7 +43,6 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_KI_IDLE_HALT` | Normal mode, **default on since 2026-10-16**: the vCPU halts in the Xbox kernel's idle loop after spinning 50 µs per idle span (`helper_xemu_ki_idle`); `0` keeps the spin, which burns the vCPU's core until the next interrupt. Deterministic mode always halts there at once. Threads + runtime |
 | `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |
 | `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
-| `XEMU_VTX_SPAN_FINISH` | Vulkan renderer, **default on since 2026-10-17**: a copy into the vertex RAM mirror finishes the recording command buffer only when it changes a byte one of that buffer's draws reads (the slot's read spans, on every page they read); `0` restores the page-wide check (finish when the copy changes a page the recording window uploaded, anywhere on it). Pass splits move a few pixels on AGX, so the null-renderer goldens can't see it; RAM is the same either way. Refuter: `XEMU_VTX_SPAN_REFUTE` |
 | `XEMU_VK_CLEAR_IN_PASS` | Vulkan renderer, **default on since 2026-10-23**: an NV097_CLEAR_SURFACE records into the open render pass (it ends the occlusion query, never the pass); `0` ends the pass before and after every clear again, so each clear pays a full-surface load and store. Pass splits can move pixels on AGX and the null-renderer goldens never reach `vk/draw.c`. nsprof `clears` counts clears, `rpcause_clear` the passes they end under `0`. Vulkan renderer (pgraph/vk) |
 | `XEMU_NV2A_RESET_IRQ` | Both modes, **default on since 2026-10-23** (v0.16.1): a machine reset (`system_reset`, and the reset every load runs first) clears the NV2A interrupt enables and PGRAPH's pending bits and recomputes the line, as power-on does; `0` keeps them, as v0.16 did. Kept, a GPU interrupt the stopped game left pending re-raised IRQ 3 before the guest ran, the kernel's 8259 setup lost the request, and about 1 windowed reset in 100 after a load hung in the kernel's GPU fence wait (0x800426d4). A correctness fix, not a speedup; the goldens don't reset after running, so they can't verify it. Reset lane, Part 11 |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
@@ -69,7 +69,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_TLB_REVAL_REFUTE` | `1` checks what each same-value CR3 reload keeps (`xemu_tlb_reval`, CPU / JIT): every valid TLB entry of the paging mmu_idx and every jump-cache, step-cache and ret-memo TB against a fresh page walk (`cpu_get_phys_page_debug`) and the fill log, and the xpage registry against each frame a reload dropped without severing; aborts on a mismatch. The `xemu: tlb-reval` exit line (also printed under `XEMU_TB_PROF`) counts reloads, kept, changed, pages, sever, full and its checks. Diagnostic only (a TLB walk per reload); never for an fps run |
 | `XEMU_UI_FRAME_CAP_NS` | Test-only: floor the UI present period in ns (`16666666` ≈ a 60 Hz consumer). Unfocused/occluded bench windows present unpaced (~200 Hz observed), so ring-pacing behavior is invisible headless without it. Zero cost unset |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
-| `XEMU_VTX_SPAN_REFUTE` | `1` checks every vertex finish or fence wait a copy skips (`vk/vertex.c`) against an independent record of what each flight slot's draws read of the vertex RAM mirror, taken from the vertex buffer bindings themselves (offset, stride, element size, the draw's vertex count) rather than the syncs that feed the read spans; a recorded read whose bytes the copy changes is a violation (a GPU reader the spans miss; the first 8 print). Exit line `xemu: vtx-span refute checks=N violations=M` (checks = skips whose copy overlapped a recorded read). With `XEMU_VTX_SPAN_FINISH=0` it also counts the page-wide check's blind spot |
+| `XEMU_VTX_SPAN_REFUTE` | `1` checks every vertex finish or fence wait a copy skips (`vk/vertex.c`) against an independent record of what each flight slot's draws read of the vertex RAM mirror, taken from the vertex buffer bindings themselves (offset, stride, element size, the draw's vertex count) rather than the syncs that feed the read spans; a recorded read whose bytes the copy changes is a violation (a GPU reader the spans miss; the first 8 print). Exit line `xemu: vtx-span refute checks=N violations=M` (checks = skips whose copy overlapped a recorded read) |
 | `XEMU_UI_LOCK_STATS` | `1` prints the once-per-second UI main-loop-mutex + BQL occupancy line (`[[ vblank @NHz avg - bql Nns/iter, N% time avg ]]`) in a normal build; previously it needed a `DEBUG_XEMU_C=1` build (which still forces it on). One predictable branch per lock when off. Compiled in on macOS and in `DEBUG_XEMU_C` builds only — Windows/Linux release paths preprocess away to today's code |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_DIFF_MAX` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
@@ -2259,14 +2259,14 @@ x86_64 host (Windows, Linux, Intel macOS).
   draws/flip.
 
 - **Read spans decide vertex finishes too (2026-10-17, default on;
-  `XEMU_VTX_SPAN_FINISH=0` restores the page-wide check).** The recording
+  its `XEMU_VTX_SPAN_FINISH=0` page-wide fallback was removed in v0.16.1).** The recording
   command buffer now finishes only when a copy changes a byte one of
   its draws reads, on any page they read (the page-wide check finished
   whenever the page changed anywhere, and only for pages the recording
   window had uploaded, so a copy changing bytes a recorded draw read
   from an older upload landed before that draw ran; a counting build
   saw none on d2, heavy-f1 or stream-e2). The byte-exact refinement
-  (`uploaded_page_content_differs`) now serves only the `=0` path; nsprof
+  (`uploaded_page_content_differs`) served only the `=0` path and went with it; nsprof
   `vtx_exact_skip` counts finishes the read spans skipped on pages the
   window uploaded. Same RAM everywhere (d2 F2+900 `10b5a35aa66b`,
   heavy-f1 600 `adcf86bd78fd71f9` and stream-e2 600 `3b986ed5d3acf666`
@@ -2305,7 +2305,7 @@ x86_64 host (Windows, Linux, Intel macOS).
   normal-mode offscreen heavy-f1 40 s 2027 → 1 in ~2100 flips. RAM
   identical; heavy-f1's screendump is one span's, stream-e2's moves 10
   pixels by 1 level from base (one span: 1); `XEMU_VTX_SPAN_FINISH=0`
-  still gives base's screendumps byte for byte; null goldens exact,
+  still gave base's screendumps byte for byte; null goldens exact,
   xbox suite 9/9. Refuter 0 violations (det heavy-f1 27083 checks,
   stream-e2 15753; normal-mode heavy-f1 40 s 30630). Offscreen
   bench-det 600, base / one span / four spans, 4 pairs in both arm
