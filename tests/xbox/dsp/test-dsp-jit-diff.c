@@ -1031,7 +1031,6 @@ static GBytes *run_arm(const char *prog_name, const char *jit_value)
     /* Hermetic children: no diff/stats knobs leaking in. */
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_SYNC");
-    envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_DIFF_MAX");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_STATS");
     envp = g_environ_unsetenv(envp, "XEMU_DSP_JIT_PIN_AUDIT");
 

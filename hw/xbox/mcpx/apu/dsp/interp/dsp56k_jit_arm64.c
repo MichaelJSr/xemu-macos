@@ -82,7 +82,6 @@ static bool g_jit_enabled;
 static bool g_jit_diff;
 static bool g_jit_diff_sync;         /* XEMU_DSP_JIT_DIFF_SYNC=1: on-thread compare */
 static uint32_t g_jit_diff_sample;   /* 1 = every block; N>1 = every Nth. */
-static uint64_t g_jit_diff_max;      /* 0 = unlimited; else stop after N checks */
 static bool g_jit_stats;
 
 /*
@@ -180,24 +179,6 @@ static void parse_flags_once(void)
         if (n >= 1 && n <= 1000000) {
             g_jit_diff = true;
             g_jit_diff_sample = (uint32_t)n;
-        }
-    }
-
-    /*
-     * Optional total-validation cap. The per-translation gate
-     * (DspJitBlock.diff_checked) already bounds validator work to
-     * ~N_unique_block_translations — typically a few hundred — so
-     * most users never need a cap. Unset by default. Set
-     * XEMU_DSP_JIT_DIFF_MAX=N to stop validating after N enqueues
-     * (useful for CI "validate first N blocks, then run free"
-     * gating). The recommended knob for day-to-day runs is
-     * XEMU_DSP_JIT_DIFF=N sampling.
-     */
-    e = getenv("XEMU_DSP_JIT_DIFF_MAX");
-    if (e && e[0]) {
-        long long n = strtoll(e, NULL, 0);
-        if (n > 0) {
-            g_jit_diff_max = (uint64_t)n;
         }
     }
 
@@ -11180,8 +11161,8 @@ static void *diff_worker_fn(void *opaque)
         qemu_mutex_unlock(&q->mu);
 
         /* Drain as many slots as are available, even when exiting,
-         * so CI runs that set a small DIFF_MAX and then quit still
-         * see any divergence the validator would have caught.
+         * so a run that quits with snapshots still queued sees any
+         * divergence the validator would have caught.
          * Acquire-load on tail pairs with the producer's
          * release-store in diff_queue_finish_push, ensuring we see
          * the fully-written slot contents. */
@@ -11555,22 +11536,6 @@ unsigned int dsp56k_jit_execute_block(dsp_core_t *dsp, int budget)
             goto normal_path;
         }
 
-        /* Hard cap: once the JIT has successfully enqueued
-         * g_jit_diff_max blocks, turn off diff mode for the rest of
-         * the session. Useful for CI that wants "validate first N
-         * then run free"; usually unset because the per-translation
-         * gate above already bounds the work. */
-        if (g_jit_diff_max != 0 &&
-            s->diff_ops_checked >= g_jit_diff_max) {
-            if (s->diff_ops_checked == g_jit_diff_max) {
-                fprintf(stderr,
-                        "xemu: DSP JIT diff cap reached (%" PRIu64
-                        " checks), disabling diff mode\n",
-                        g_jit_diff_max);
-                s->diff_ops_checked++; /* only print once */
-            }
-            goto normal_path;
-        }
         /* Sampling: if N > 1, only diff-check roughly 1 of every N
          * not-yet-checked block executions. Recommended for
          * day-to-day runs (XEMU_DSP_JIT_DIFF=10 is a good default):
