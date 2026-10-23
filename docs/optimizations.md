@@ -3561,7 +3561,8 @@ x86_64 host (Windows, Linux, Intel macOS).
   adds the single correct one.
 - **No `-fzero-call-used-regs` on macOS arm64 (2026-10-15).**
   `meson.build` skips upstream's `used-gpr` ROP hardening when the host
-  is Darwin aarch64; Linux, Windows and macOS x86_64 keep it. The
+  is Darwin aarch64; Linux and macOS x86_64 kept it until 2026-10-23
+  (below). The
   register-zeroing movs before every `ret`, plus the tail calls the
   flag turns into `bl`+`ret`, were 3.2% of the deterministic run's host
   instructions (`helper_shufps_xmm`: 19 → 11 instructions).
@@ -3573,6 +3574,22 @@ x86_64 host (Windows, Linux, Intel macOS).
   8,746,604 → 7,977,728 B. Goldens stay bit-identical and the IR PGO
   profile stays valid. It reopens the Failed row, whose fps sign tests
   could not resolve a ~1% change.
+- **No `-fzero-call-used-regs` on any host (2026-10-23).** macOS
+  x86_64, Linux x86_64 and Linux aarch64 were the last builds with
+  upstream's `used-gpr` (Windows dropped it in `baf5e0c100`), so
+  `meson.build` no longer has the block. Hardening parity, decided
+  against fewer ROP mitigations there: the zeroing is a narrow
+  mitigation in a process that runs guest code through a JIT, three of
+  the six release builds (macOS arm64, Windows x86_64 and arm64)
+  already shipped without it (the macOS universal bundle's x86_64
+  slice had it), and `-ftrivial-auto-var-init=zero` stays. Build-only
+  on this Mac: every arm64 compile command is unchanged (3049 of 3049,
+  none with the flag), so no rebuild and no PGO retrain; the v0.16 CI
+  logs (run 39296135264) show the check that added it on the macOS
+  x86_64 and Ubuntu x86_64/aarch64 legs only. No x86_64 configure ran
+  here: check those legs and the Windows mingw-gcc compile on the next
+  CI run. Expected on clang x86_64 hosts: instructions −3..−6%
+  (Windows/GCC measured −5.5%); no cycle claim.
 - Ad-hoc codesign by default (MAP_JIT works);
   `XEMU_CODESIGN_ENTITLEMENTS=1` opts into hardened runtime +
   `xemu.entitlements`. For notarized distribution use

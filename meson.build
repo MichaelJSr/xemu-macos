@@ -733,22 +733,11 @@ hardening_flags = [
     '-ftrivial-auto-var-init=zero',
 ]
 
-# Zero out registers used during a function call
-# upon its return. This makes it harder to assemble
-# ROP gadgets into something usable
-#
-# NB: Clang 17 is broken and SEGVs
-# https://github.com/llvm/llvm-project/issues/75168
-#
-# xemu-macos: skipped on macOS arm64, where the zeroing is 3.2% of the
-# emulation's host instructions and costs the helpers their tail calls,
-# and on Windows.
-if not (host_os == 'darwin' and cpu == 'aarch64') and host_os != 'windows' and \
-   cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
-               name: '-fzero-call-used-regs=used-gpr',
-               args: ['-O2', '-fzero-call-used-regs=used-gpr'])
-    hardening_flags += '-fzero-call-used-regs=used-gpr'
-endif
+# xemu-macos: no upstream -fzero-call-used-regs=used-gpr (register zeroing
+# at every return against ROP gadgets) on any host. It was 3.2% of the
+# emulation's host instructions on macOS arm64 and 5.5% on Windows, cost
+# the helpers their tail calls under clang, and the process runs a JIT,
+# which offers more than gadgets do.
 
 qemu_common_flags += cc.get_supported_arguments(hardening_flags)
 
