@@ -633,6 +633,9 @@ static void download_surface(NV2AState *d, SurfaceBinding *surface, bool force)
     memory_region_set_client_dirty(d->vram, surface->vram_addr,
                                    surface->pitch * surface->height,
                                    DIRTY_MEMORY_NV2A_TEX);
+    memory_region_set_client_dirty(d->vram, surface->vram_addr,
+                                   surface->pitch * surface->height,
+                                   DIRTY_MEMORY_NV2A);
 
     surface->download_pending = false;
     surface->draw_dirty = false;
@@ -2450,8 +2453,9 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
     }
 }
 
-static bool check_format_and_usage_supported(PGRAPHVkState *r, VkFormat format,
-                                             VkImageUsageFlags usage)
+bool pgraph_vk_is_image_format_supported(VkPhysicalDevice device,
+                                         VkFormat format,
+                                         VkImageUsageFlags usage)
 {
     VkPhysicalDeviceImageFormatInfo2 pdif2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
@@ -2463,8 +2467,8 @@ static bool check_format_and_usage_supported(PGRAPHVkState *r, VkFormat format,
     VkImageFormatProperties2 props = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
     };
-    VkResult result = vkGetPhysicalDeviceImageFormatProperties2(
-        r->physical_device, &pdif2, &props);
+    VkResult result =
+        vkGetPhysicalDeviceImageFormatProperties2(device, &pdif2, &props);
     return result == VK_SUCCESS;
 }
 
@@ -2475,8 +2479,8 @@ static bool check_surface_internal_formats_supported(
     for (int i = 0; i < count; i++) {
         const SurfaceFormatInfo *f = &fmts[i];
         if (f->host_bytes_per_pixel) {
-            all_supported &=
-                check_format_and_usage_supported(r, f->vk_format, f->usage);
+            all_supported &= pgraph_vk_is_image_format_supported(
+                r->physical_device, f->vk_format, f->usage);
         }
     }
     return all_supported;
@@ -2500,16 +2504,13 @@ bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
         error_setg(errp, "no D16 or D24S8/D32S8 depth attachments");
         return false;
     }
-    /*
-     * Not R6G5B5's R8G8B8_SNORM: Metal has no 3-byte formats, so neither
-     * Apple driver samples it (such textures fail on MoltenVK as well).
-     */
     for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
         VkFormat f = kelvin_color_format_vk_map[i].vk_format;
-        if (f != VK_FORMAT_UNDEFINED && f != VK_FORMAT_R8G8B8_SNORM &&
-            !check_format_and_usage_supported(
-                r, f, VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                          VK_IMAGE_USAGE_SAMPLED_BIT)) {
+        if (f != VK_FORMAT_UNDEFINED &&
+            !pgraph_vk_is_image_format_supported(
+                r->physical_device, f,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    VK_IMAGE_USAGE_SAMPLED_BIT)) {
             error_setg(errp, "texture format %d (VkFormat %d) unsupported", i,
                        f);
             return false;
@@ -2521,12 +2522,6 @@ bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
 void pgraph_vk_init_surfaces(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-
-    // Make sure all surface format types are supported. We don't expect issue
-    // with these, and therefore have no fallback mechanism.
-    nv2a_vk_assert(check_surface_internal_formats_supported(
-        r, kelvin_surface_color_format_vk_map,
-        ARRAY_SIZE(kelvin_surface_color_format_vk_map)));
 
     // Check if the device supports preferred VK_FORMAT_D24_UNORM_S8_UINT
     // format, fall back to D32_SFLOAT_S8_UINT otherwise.

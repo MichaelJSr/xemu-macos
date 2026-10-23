@@ -442,10 +442,13 @@ static GlslTarget glsl_target_for(PGRAPHVkState *r)
                              GLSLANG_TARGET_SPV_1_6 };
     }
 #endif
+#ifdef VK_API_VERSION_1_3
     if (r->vk_api_version >= VK_API_VERSION_1_3) {
         return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_3,
                              GLSLANG_TARGET_SPV_1_6 };
-    } else if (r->vk_api_version >= VK_API_VERSION_1_2) {
+    }
+#endif
+    if (r->vk_api_version >= VK_API_VERSION_1_2) {
         return (GlslTarget){ GLSLANG_TARGET_VULKAN_1_2,
                              GLSLANG_TARGET_SPV_1_5 };
     }

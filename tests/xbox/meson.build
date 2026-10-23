@@ -9,5 +9,6 @@ subdir('dsp')
 subdir('pfifo')
 subdir('ptimer')
 subdir('swizzle')
+subdir('vsh_carryover')
 
 alias_target('test-xbox', xbox_test_exes)

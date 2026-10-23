@@ -854,15 +854,6 @@ static void xb_surface_gl_create_texture(DisplaySurface *surface)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 }
 
-static void xb_surface_gl_destroy_texture(DisplaySurface *surface)
-{
-    if (!surface || !surface->texture) {
-        return;
-    }
-    glDeleteTextures(1, &surface->texture);
-    surface->texture = 0;
-}
-
 static bool xb_console_gl_check_format(DisplayChangeListener *dcl,
                                        pixman_format_code_t format)
 {
@@ -1558,6 +1549,7 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_main_loop_lock();
         xb_surface_gl_create_texture(scon->surface);
         tex = scon->surface->texture;
+        scon->surface->texture = 0;
         flip_required = true;
         release_surface_texture = true;
         xemu_main_loop_unlock();
@@ -1584,13 +1576,15 @@ static void gl_render_frame(struct xemu_console *scon)
 
     xemu_main_loop_lock();
     xemu_hud_update();
-    if (release_surface_texture) {
-        xb_surface_gl_destroy_texture(scon->surface);
-    }
     xemu_main_loop_unlock();
 
     xemu_hud_render();
     glFlush();
+
+    /* GL defers the delete until the commands that read it complete. */
+    if (release_surface_texture) {
+        glDeleteTextures(1, &tex);
+    }
 
     nv2a_release_framebuffer_surface();
 
@@ -2226,7 +2220,8 @@ static void screendump_service(struct xemu_console *scon)
             }
         } else
 #endif
-        {
+        if (g_config.display.renderer != CONFIG_DISPLAY_RENDERER_NULL) {
+            /* The null renderer's frame is a blank 1x1: dump VGA instead. */
             SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
             GLuint tex = nv2a_get_framebuffer_surface();
             if (tex) {

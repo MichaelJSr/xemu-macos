@@ -1462,9 +1462,8 @@ static unsigned int vk_format_texel_size(VkFormat format)
     case VK_FORMAT_R8G8_UNORM:              return 2;
     case VK_FORMAT_A1R5G5B5_UNORM_PACK16:   return 2;
     case VK_FORMAT_R5G6B5_UNORM_PACK16:     return 2;
-    case VK_FORMAT_A4R4G4B4_UNORM_PACK16:   return 2;
+    case VK_FORMAT_B4G4R4A4_UNORM_PACK16:   return 2;
     case VK_FORMAT_R16_UNORM:               return 2;
-    case VK_FORMAT_R8G8B8_SNORM:            return 3;
     case VK_FORMAT_B8G8R8A8_UNORM:          return 4;
     case VK_FORMAT_R8G8B8A8_UNORM:          return 4;
     case VK_FORMAT_R32_UINT:                return 4;
@@ -1485,6 +1484,10 @@ static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
 
     if (!surface->color) {
         return true;
+    }
+
+    if (shape->color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5) {
+        return false;
     }
 
     VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
