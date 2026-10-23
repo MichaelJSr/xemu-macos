@@ -93,15 +93,10 @@
 #define DEBUG_XEMU_C 0
 #endif
 
-/*
- * The lock-occupancy stat is runtime-enableable on macOS (where it is
- * measured) and stays compile-time-only elsewhere, so the Windows/Linux
- * release paths are unchanged.
- */
-#if DEBUG_XEMU_C || defined(__APPLE__)
-#define XEMU_LOCK_STATS 1
+#if DEBUG_XEMU_C
+#define DPRINTF(...) fprintf(stderr, __VA_ARGS__)
 #else
-#define XEMU_LOCK_STATS 0
+#define DPRINTF(...)
 #endif
 
 /*
@@ -256,49 +251,24 @@ static void show_error_box(const char *title, const char *msg)
 
 void tcg_register_init_ctx(void); // tcg.c
 
-#if XEMU_LOCK_STATS
+#if DEBUG_XEMU_C
 static uint64_t lock_held_acc;
 static uint64_t lock_start;
-
-/*
- * Main-loop-mutex + BQL occupancy accounting. DEBUG_XEMU_C keeps it
- * unconditional as before; otherwise XEMU_UI_LOCK_STATS=1 turns it on in a
- * normal build. Latched on first use; the racing writers all store the same
- * value. lock_start is only touched between lock and unlock, i.e. under the
- * locks it measures.
- */
-static bool lock_stats_enabled(void)
-{
-    static int cached = -1;
-    if (unlikely(cached < 0)) {
-#if DEBUG_XEMU_C
-        cached = 1;
-#else
-        const char *e = getenv("XEMU_UI_LOCK_STATS");
-        cached = (e && e[0] && e[0] != '0') ? 1 : 0;
-#endif
-    }
-    return cached == 1;
-}
 #endif
 
 void xemu_main_loop_lock(void)
 {
     qemu_mutex_lock_main_loop();
     bql_lock();
-#if XEMU_LOCK_STATS
-    if (unlikely(lock_stats_enabled())) {
-        lock_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    }
+#if DEBUG_XEMU_C
+    lock_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 #endif
 }
 
 void xemu_main_loop_unlock(void)
 {
-#if XEMU_LOCK_STATS
-    if (unlikely(lock_stats_enabled())) {
-        lock_held_acc += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lock_start;
-    }
+#if DEBUG_XEMU_C
+    lock_held_acc += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lock_start;
 #endif
     bql_unlock();
     qemu_mutex_unlock_main_loop();
@@ -1589,23 +1559,19 @@ static void *vblank_timer_thread(void *opaque)
     return NULL;
 }
 
-#if XEMU_LOCK_STATS
+#if DEBUG_XEMU_C
 static void report_stats(void)
 {
-    if (!lock_stats_enabled()) {
-        return;
-    }
-
     uint64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     static uint64_t last_reported = 0;
     static int num_frames = 0;
     uint64_t delta_ms = now - last_reported;
     num_frames += 1;
     if (delta_ms >= 1000) {
-        fprintf(stderr,
-                "[[ vblank @%fHz avg - bql %"PRIu64"ns/iter, %g%% time avg ]]\n",
-                fps, lock_held_acc / num_frames,
-                (double)lock_held_acc / (double)(delta_ms * 10000.0));
+        DPRINTF("[[ ");
+        DPRINTF("vblank @%fHz avg", fps);
+        DPRINTF(" - bql %"PRId64"ns/iter, %g%% time avg", lock_held_acc/num_frames, (double)lock_held_acc/(double)(delta_ms * 10000.0));
+        DPRINTF(" ]]\n");
         lock_held_acc = 0;
         last_reported = now;
         num_frames = 0;
@@ -1715,7 +1681,7 @@ static void gl_render_frame(struct xemu_console *scon)
 
     qatomic_set(&rendering, false);
 
-#if XEMU_LOCK_STATS
+#if DEBUG_XEMU_C
     report_stats();
 #endif
 }
@@ -1950,31 +1916,6 @@ static void metal_render_frame(struct xemu_console *scon)
         return;
     }
 
-    /*
-     * XEMU_UI_FRAME_CAP_NS (test-only, zero cost unset): floor the UI
-     * frame period to simulate a vsynced display from an unfocused
-     * bench window (occluded/background windows present unpaced here,
-     * so push-present ring pacing cannot be reproduced without it —
-     * e.g. 16666666 simulates a 60 Hz consumer).
-     */
-    static int64_t ui_cap_ns = -1;
-    if (unlikely(ui_cap_ns < 0)) {
-        const char *e = getenv("XEMU_UI_FRAME_CAP_NS");
-        ui_cap_ns = e ? atoll(e) : 0;
-        if (ui_cap_ns < 0) {
-            ui_cap_ns = 0;
-        }
-    }
-    if (unlikely(ui_cap_ns > 0)) {
-        static uint64_t last_present_ns;
-        uint64_t now_ns = SDL_GetTicksNS();
-        if (now_ns - last_present_ns < (uint64_t)ui_cap_ns) {
-            qatomic_set(&rendering, false);
-            return;
-        }
-        last_present_ns = now_ns;
-    }
-
     present_refresh_update();
 
     if (push_present_refute_enabled()) {
@@ -2152,7 +2093,7 @@ static void metal_render_frame(struct xemu_console *scon)
 
     qatomic_set(&rendering, false);
 
-#if XEMU_LOCK_STATS
+#if DEBUG_XEMU_C
     report_stats();
 #endif
 }
