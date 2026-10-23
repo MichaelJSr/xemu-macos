@@ -1213,6 +1213,9 @@ void mem_check_access_callback_ramaddr(CPUState *cpu,
                                        hwaddr ram_addr, vaddr len, int flags);
 void mem_check_access_callback_vaddr(CPUState *cpu, vaddr addr, vaddr len,
                                      int flags, void *iotlbentry);
+extern bool xemu_agp_full_decode;
+hwaddr xemu_phys_ram_offset(hwaddr addr, hwaddr len, const void *ram,
+                            uint64_t ram_size);
 #endif
 
 /**

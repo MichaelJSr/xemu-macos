@@ -800,7 +800,8 @@ Other automation interfaces (windowed or headless):
   reached (its offset in `XEMU_RAM_SHM` and in `xemu-dump-ram`'s file),
   while `physical` stays the bus address: a store at `0xF4100000` on 128
   MiB logs `physical` `0xf4100000`, `ram-address` `0x4100000`. Hits at
-  RAM's own addresses have no `ram-address`, as before. Hits past
+  RAM's own addresses have no `ram-address`, as before (on 128 MiB the
+  window's upper half needs the bridge widened: next item). Hits past
   `"max"` (default 100000, up to 1000000) are only counted, in
   `dropped`. Under icount the log is the same in every run and
   the guest's RAM is the same as without it. Start the log while paused
@@ -813,6 +814,31 @@ Other automation interfaces (windowed or headless):
   included. Example: Azurik's player entity, `+0x18` (event
   clock, virtual): two dword stores every frame, from `pc` `0xab8a1` and
   `0xab8a4`.
+- **NV2A BAR1's window onto RAM** (128 MiB): the kernel maps VA
+  `0xF0000000`-`0xF7FFFFFF` onto NV2A BAR1, an alias of all of guest
+  RAM, so VA `0xF4000000`-`0xF7FFFFFF` could reach RAM
+  `0x04000000`-`0x07FFFFFF`, which the stock 4627 kernel never uses.
+  But the AGP bridge in front of the NV2A (`00:1e.0`) forwards only its
+  windows: the X-codes set the prefetchable one to
+  `0xF0000000`-`0xF7FFFFFF`, then the kernel cuts it to
+  `0xF0000000`-`0xF3FFFFFF` at any RAM size, so stores to the upper half
+  reach nothing and are dropped (gdbstub reads there fail). Either the guest
+  widens it again (PCI config `0x8000F024` = `0xF7F0F000`, which
+  savestates keep), or `XEMU_AGP_FULL_DECODE=1` makes the bridge also
+  forward what the NV2A decodes outside its windows (stderr: `xemu:
+  XEMU_AGP_FULL_DECODE: ...`; real hardware doesn't, so it is off by
+  default). The opt-in changes nothing where a window or another device
+  decodes, nor the bridge's registers, savestates or deterministic
+  replays. Through the window a store is a store to RAM for everything
+  that tracks RAM: the dirty log (checkpoints, savevm), `xemu-ram-digest`,
+  `xemu-dump-ram`, `XEMU_RAM_SHM`, translated code on the page, and
+  `xemu-watch` physical ranges (with `ram-address`). Readers that follow
+  the guest's page tables (hook `collect`, `key` and `cond` reads,
+  `xemu-run` value stops, frame-advance and `XEMU_TRACE_RECORD` virtual
+  regions, a virtual `xemu-dump-ram`) report the whole window unmapped,
+  as before 0.16.1; with `XEMU_AGP_FULL_DECODE=1` they read the RAM it
+  reaches, in the lower half `0xF0000000`-`0xF3FFFFFF` too and at 64 MiB
+  as well. Without the opt-in, read such data at its RAM address.
 - **Fixed clock**: `-rtc base=2001-01-01T00:00:00` pins the RTC on a
   fresh boot. After `loadvm` the RTC is the snapshot's plus the wall time
   since it was saved; with `-rtc clock=vm` a load continues from the

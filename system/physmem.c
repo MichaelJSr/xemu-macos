@@ -845,6 +845,41 @@ AddressSpace *cpu_get_address_space(CPUState *cpu, int asidx)
 
 #ifdef XBOX
 
+/* Set by the AGP bridge's realize under XEMU_AGP_FULL_DECODE=1 (opt-in). */
+bool xemu_agp_full_decode;
+
+/*
+ * The offset in the RAM at @ram (@ram_size bytes) of guest physical
+ * [@addr, @addr + @len), or -1 when that RAM doesn't back all of it. For
+ * readers that copy guest RAM by physical address, when @addr is not one of
+ * RAM's own addresses: another mapping of the RAM, NV2A BAR1 at 0xF0000000
+ * (an alias of all of it, as far as the AGP bridge forwards), resolves to
+ * the RAM it reaches. Only with XEMU_AGP_FULL_DECODE=1: without it these
+ * readers report the window unmapped, as they always have.
+ */
+hwaddr xemu_phys_ram_offset(hwaddr addr, hwaddr len, const void *ram,
+                            uint64_t ram_size)
+{
+    hwaddr xlat, l = len;
+    uintptr_t host;
+    MemoryRegion *mr;
+
+    if (!xemu_agp_full_decode || !ram || len > ram_size) {
+        return -1;
+    }
+    RCU_READ_LOCK_GUARD();
+    mr = address_space_translate(&address_space_memory, addr, &xlat, &l,
+                                 false, MEMTXATTRS_UNSPECIFIED);
+    if (l < len || !memory_region_is_ram(mr)) {
+        return -1;
+    }
+    host = (uintptr_t)memory_region_get_ram_ptr(mr) + xlat;
+    if (host < (uintptr_t)ram || host - (uintptr_t)ram > ram_size - len) {
+        return -1;
+    }
+    return host - (uintptr_t)ram;
+}
+
 static inline bool access_callback_address_matches(MemAccessCallback *cb,
                                                    hwaddr addr, hwaddr len)
 {

@@ -495,14 +495,23 @@ bool xemu_hook_read(XemuHookCtx *ctx, vaddr va, void *buf, unsigned len)
         vaddr in_page = va & ~TARGET_PAGE_MASK;
         unsigned chunk = MIN(len, TARGET_PAGE_SIZE - in_page);
         hwaddr pa = cpu_get_phys_page_debug(cs, va - in_page);
+        hwaddr ra = pa + in_page;
 
-        if (pa == -1 || !hook_ram || pa + in_page + chunk > hook_ram_size) {
+        if (pa == -1 || !hook_ram) {
             return false;
         }
-        if (!ctx->raw) {
-            nv2a_det_reports_sync_read(pa + in_page, chunk);
+        if (pa + in_page + chunk > hook_ram_size) {
+            /* Another mapping of RAM (NV2A BAR1's window), or none. */
+            ra = xemu_phys_ram_offset(pa + in_page, chunk, hook_ram,
+                                      hook_ram_size);
+            if (ra == -1) {
+                return false;
+            }
         }
-        memcpy(out, hook_ram + pa + in_page, chunk);
+        if (!ctx->raw) {
+            nv2a_det_reports_sync_read(ra, chunk);
+        }
+        memcpy(out, hook_ram + ra, chunk);
         out += chunk;
         va = (uint32_t)(va + chunk);
         len -= chunk;

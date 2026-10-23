@@ -1321,9 +1321,15 @@ static void dump_virtual(uint8_t *out, const uint8_t *ram, uint64_t ram_size,
         uint64_t in_page = va & (page - 1);
         uint64_t chunk = MIN(size - off, page - in_page);
         hwaddr pa = cpu_get_phys_page_debug(cpu, va - in_page);
+        hwaddr ra;
 
         if (pa != -1 && pa < ram_size && in_page + chunk <= ram_size - pa) {
             memcpy(out + off, ram + pa + in_page, chunk);
+        } else if (pa != -1 &&
+                   (ra = xemu_phys_ram_offset(pa + in_page, chunk, ram,
+                                              ram_size)) != -1) {
+            /* Another mapping of RAM: NV2A BAR1's window. */
+            memcpy(out + off, ram + ra, chunk);
         } else {
             memset(out + off, 0, chunk);
             (*unmapped)++;

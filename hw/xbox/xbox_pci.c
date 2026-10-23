@@ -27,6 +27,8 @@
 #include "hw/sysbus.h"
 #include "qapi/error.h"
 #include "qemu/range.h"
+#include "qemu/units.h"
+#include "hw/core/cpu.h"
 #include "hw/xen/xen.h"
 #include "hw/pci-host/pam.h"
 #include "system/system.h"
@@ -418,11 +420,78 @@ static const TypeInfo xbox_lpc_info = {
     },
 };
 
+/*
+ * XEMU_AGP_FULL_DECODE=1 (opt-in, harness interface): the AGP bridge also
+ * forwards whatever its secondary bus decodes outside the windows it was
+ * programmed with, below everything else in PCI space. The X-codes set the
+ * prefetchable window to 0xF0000000-0xF7FFFFFF and the 4627 kernel cuts it
+ * to 0xF0000000-0xF3FFFFFF whatever the RAM size (its PCI setup), so with
+ * 128 MiB the upper half of NV2A BAR1, VA 0xF4000000-0xF7FFFFFF in the
+ * kernel's map, reaches no RAM; with the opt-in it reaches xbox.ram
+ * 0x04000000-0x07FFFFFF (route B of the Azurik harness), and the readers
+ * that follow the guest's page tables (xemu_phys_ram_offset) read the
+ * RAM the window reaches. Real hardware forwards only the windows. The
+ * bridge's registers, and so every savestate, stay as the guest wrote
+ * them; nothing changes where a window or another device already decodes.
+ */
+typedef struct XboxAGPState {
+    PCIBridge parent_obj;
+    MemoryRegion full_decode;
+    bool full_decode_on;
+} XboxAGPState;
+
+static bool xbox_agp_full_decode_wanted(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("XEMU_AGP_FULL_DECODE");
+        on = v && *v && strcmp(v, "0") != 0;
+        if (on) {
+            fprintf(stderr, "xemu: XEMU_AGP_FULL_DECODE: the AGP bridge "
+                    "forwards all of NV2A BAR1, outside its windows too\n");
+        }
+    }
+    return on;
+}
+
 static void xbox_agp_realize(PCIDevice *d, Error **errp)
 {
+    XboxAGPState *s = container_of(PCI_BRIDGE(d), XboxAGPState, parent_obj);
+
     pci_set_word(d->config + PCI_PREF_MEMORY_BASE, PCI_PREF_RANGE_TYPE_32);
     pci_set_word(d->config + PCI_PREF_MEMORY_LIMIT, PCI_PREF_RANGE_TYPE_32);
     pci_bridge_initfn(d, TYPE_PCI_BUS);
+
+    if (xbox_agp_full_decode_wanted()) {
+        /*
+         * An alias of the secondary bus's (container) memory space claims
+         * only what a device there maps; gaps stay transparent, so the
+         * flash mirror and the MCPX ROM keep their addresses.
+         */
+        memory_region_init_alias(&s->full_decode, OBJECT(d),
+                                 "xbox-agp-full-decode",
+                                 &PCI_BRIDGE(d)->address_space_mem, 0,
+                                 4 * GiB);
+        memory_region_add_subregion_overlap(pci_get_bus(d)->address_space_mem,
+                                            0, &s->full_decode, -1);
+        s->full_decode_on = true;
+        /* Page-table readers (hooks, traces, dumps) follow it too. */
+        xemu_agp_full_decode = true;
+    }
+}
+
+static void xbox_agp_exit(PCIDevice *d)
+{
+    XboxAGPState *s = container_of(PCI_BRIDGE(d), XboxAGPState, parent_obj);
+
+    if (s->full_decode_on) {
+        memory_region_del_subregion(pci_get_bus(d)->address_space_mem,
+                                    &s->full_decode);
+        s->full_decode_on = false;
+        xemu_agp_full_decode = false;
+    }
+    pci_bridge_exitfn(d);
 }
 
 static void xbox_agp_class_init(ObjectClass *klass, const void *data)
@@ -431,7 +500,7 @@ static void xbox_agp_class_init(ObjectClass *klass, const void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     k->realize = xbox_agp_realize;
-    k->exit = pci_bridge_exitfn;
+    k->exit = xbox_agp_exit;
     k->config_write = pci_bridge_write_config;
     k->vendor_id = PCI_VENDOR_ID_NVIDIA;
     k->device_id = PCI_DEVICE_ID_NVIDIA_NFORCE_AGP;
@@ -445,7 +514,7 @@ static void xbox_agp_class_init(ObjectClass *klass, const void *data)
 static const TypeInfo xbox_agp_info = {
     .name          = "xbox-agp",
     .parent        = TYPE_PCI_BRIDGE,
-    .instance_size = sizeof(PCIBridge),
+    .instance_size = sizeof(XboxAGPState),
     .class_init    = xbox_agp_class_init,
     .interfaces = (InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
