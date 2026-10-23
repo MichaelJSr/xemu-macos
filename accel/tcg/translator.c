@@ -177,6 +177,37 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
     return false;
 }
 
+/*
+ * tb->ihash is fast_hash() of the TB's guest bytes [pc_first, +size),
+ * the value tb_code_hash_func() computes, which the recycler
+ * (inv_tb_lookup_cmp) and the load-time revalidation (tb-maint.c)
+ * compare against. Hash the bytes the translator read instead of
+ * reading each one back through the code TLB: in place on the first
+ * page, or, for a TB that crosses onto a second page (a single insn:
+ * advance_pc ends a TB before an insn that would leave the first page)
+ * or runs from MMIO, a copy from translator_st(), which takes MMIO
+ * bytes from db->record without a second device read. host_addr[0] is
+ * trusted only while page 0 is RAM, as translator_access() does (an MMIO
+ * first page leaves it NULL: do_tb_gen_code clears host_pc). Out of
+ * line, so translator_loop's control flow (and its PGO profile) stays as
+ * it was.
+ */
+static G_GNUC_NO_INLINE uint64_t
+translator_code_hash(CPUState *cpu, DisasContextBase *db, size_t size)
+{
+    uint8_t buf[16];
+
+    if (db->host_addr[0] && tb_page_addr0(db->tb) != -1 &&
+        size <= (size_t)-(db->pc_first | TARGET_PAGE_MASK)) {
+        return fast_hash(db->host_addr[0], size);
+    }
+    if (size <= sizeof(buf) && !db->fake_insn &&
+        translator_st(db, buf, db->pc_first, size)) {
+        return fast_hash(buf, size);
+    }
+    return tb_code_hash_func(cpu_env(cpu), db->pc_first, size);
+}
+
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
                      vaddr pc, void *host_pc, const TranslatorOps *ops,
                      DisasContextBase *db)
@@ -303,7 +334,14 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
     /* May be used by disas_log or plugin callbacks. */
     tb->size = db->pc_next - db->pc_first;
     tb->icount = db->num_insns;
-    tb->ihash = tb_code_hash_func(cpu_env(cpu), db->pc_first, tb->size);
+    tb->ihash = translator_code_hash(cpu, db, tb->size);
+#ifdef CONFIG_DEBUG_TCG
+    if (tb_page_addr0(tb) != -1) {
+        tcg_debug_assert(tb->ihash == tb_code_hash_func(cpu_env(cpu),
+                                                        db->pc_first,
+                                                        tb->size));
+    }
+#endif
 
     if (plugin_enabled) {
         plugin_gen_tb_end(cpu, db->num_insns);

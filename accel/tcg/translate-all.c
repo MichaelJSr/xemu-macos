@@ -279,7 +279,11 @@ static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     uint8_t *search_data;
     int gen_code_size, search_size, max_insns;
     int64_t ti;
-    void *host_pc;
+    /*
+     * Unset by get_page_addr_code_hostp() for an MMIO page, and
+     * translator_st() (the TB hash's copy) reads through it when set.
+     */
+    void *host_pc = NULL;
     bool recycled = false;
 #if defined(XBOX)
     XEMU_HOSTPROF_SCOPE(xemu_hostprof_translate_end);
