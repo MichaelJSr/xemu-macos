@@ -1694,6 +1694,52 @@
 { 'command': 'query-xemu-input', 'returns': 'XemuInputState' }
 
 ##
+# @XemuInputQueueInfo:
+#
+# @accepted: lines taken: queued for a vblank, or applied at once (an
+#     untagged line in normal mode)
+#
+# @skipped: blank lines and '#' comments, which the pipe ignores too
+#
+# @queued: lines now waiting for a vblank (@query-xemu-input lists
+#     them)
+#
+# @frame: the frame counter (see @query-xemu-frame) the call's "+N"
+#     lines count from: they apply at @frame + N ("+0" and "+1" both
+#     at @frame + 1, the next vblank)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuInputQueueInfo',
+  'data': { 'accepted': 'int', 'skipped': 'int', 'queued': 'int',
+            'frame': 'int' } }
+
+##
+# @xemu-input-queue:
+#
+# Queue XEMU_INPUT_PIPE lines over QMP, as if written to the pipe now:
+# the same grammar ("down N", "up N", "clear", "axis lx|ly|rx|ry V",
+# "trigger lt|rt V", each optionally tagged "@N" or "+N") and the same
+# semantics, with no pipe and no 8 KiB pipe window (xemu-macos
+# 0.16.1).  Lines written to the pipe before the call are read first,
+# so both keep their order.  They drive the keyboard pad, on the port
+# the keyboard source is bound to (see @xemu-input-bind: "keyboard" or
+# "pipe"), whether or not XEMU_INPUT_PIPE is set.  An untagged "clear"
+# drops every line queued before it, this call's earlier lines too, as
+# on the pipe.  Every line is checked first: one that isn't valid
+# refuses the call with its number (counting from 1) and nothing is
+# queued.  Blank lines and '#' comments (as XEMU_INPUT_RECORD writes)
+# are skipped.  A load or checkpoint restore drops lines still queued,
+# as it drops the pipe's.
+#
+# @lines: the lines, in order (at most 262,144 per call)
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-input-queue', 'data': { 'lines': ['str'] },
+  'returns': 'XemuInputQueueInfo' }
+
+##
 # Host-time profile
 # =================
 ##

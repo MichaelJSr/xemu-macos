@@ -759,10 +759,21 @@ static int16_t test_axis_override[CONTROLLER_AXIS__COUNT];
 
 typedef struct TestInputPending {
     uint64_t frame;
+    uint64_t due;   /* the vblank that applies it, fixed when queued */
     char *line;
 } TestInputPending;
 
+/*
+ * Kept in the order the vblanks apply the lines: by due frame, and in
+ * arrival order within one, so a vblank takes its lines off the head.
+ * A line due no earlier than the tail's appends in O(1); one due earlier
+ * is appended too and marks the queue unsorted, and the next reader sorts
+ * it once (a stable merge sort by due: arrival order holds within a
+ * frame), so a batch in any order costs O(n log n) (QMP
+ * xemu-input-queue takes up to 262,144 lines a call).
+ */
 static GQueue test_input_pending = G_QUEUE_INIT;
+static bool test_input_unsorted;
 static uint64_t test_input_frame;
 static char test_input_partial[256];
 static size_t test_input_partial_len;
@@ -821,6 +832,42 @@ static void test_input_drop_queued(void)
         g_free(p->line);
         g_free(p);
     }
+    test_input_unsorted = false;
+}
+
+/*
+ * A line applies at the first vblank whose counter reaches its frame,
+ * and never before the next one; vblanks count up one at a time, so that
+ * frame is known now.
+ */
+static void test_input_enqueue(TestInputPending *p)
+{
+    TestInputPending *tail = g_queue_peek_tail(&test_input_pending);
+
+    p->due = MAX(p->frame, test_input_frame + 1);
+    if (tail && tail->due > p->due) {
+        test_input_unsorted = true;
+    }
+    g_queue_push_tail(&test_input_pending, p);
+}
+
+static gint test_input_due_cmp(gconstpointer a, gconstpointer b,
+                               gpointer opaque)
+{
+    uint64_t fa = ((const TestInputPending *)a)->due;
+    uint64_t fb = ((const TestInputPending *)b)->due;
+
+    return fa < fb ? -1 : fa > fb;
+}
+
+/* Before reading the queue in order. */
+static void test_input_sort(void)
+{
+    if (test_input_unsorted) {
+        /* g_queue_sort is g_list_sort_with_data: a stable merge sort. */
+        g_queue_sort(&test_input_pending, test_input_due_cmp, NULL);
+        test_input_unsorted = false;
+    }
 }
 
 static void test_input_line(char *line)
@@ -837,7 +884,7 @@ static void test_input_line(char *line)
         TestInputPending *p = g_new(TestInputPending, 1);
         p->frame = test_input_frame;
         p->line = g_strdup(line);
-        g_queue_push_tail(&test_input_pending, p);
+        test_input_enqueue(p);
         return;
     }
 
@@ -851,7 +898,7 @@ static void test_input_line(char *line)
                 n, test_input_frame);
     }
     p->line = g_strdup(g_strchug(rest));
-    g_queue_push_tail(&test_input_pending, p);
+    test_input_enqueue(p);
 }
 
 /* Split pipe data into lines; a line cut across reads waits for its end. */
@@ -951,15 +998,65 @@ bool xemu_input_check_line(const char *line, Error **errp)
     return false;
 }
 
-void xemu_input_queue_line(const char *line);
-void xemu_input_queue_line(const char *line)
+/* Queue one checked line as the pipe would; false for a blank or comment. */
+static bool input_queue_line(const char *line)
 {
     g_autofree char *copy = g_strstrip(g_strdup(line));
     const char *body = input_line_body(copy, NULL);
 
     if (body && !input_line_ignored(body)) {
         test_input_line(copy);
+        return true;
     }
+    return false;
+}
+
+void xemu_input_queue_line(const char *line);
+void xemu_input_queue_line(const char *line)
+{
+    input_queue_line(line);
+}
+
+/*
+ * QMP xemu-input-queue (BQL held): pipe lines in one call, with no pipe
+ * window. All are checked first: a bad one refuses the call, naming its
+ * number, with nothing queued. Then the pipe is read, so lines written to
+ * it before the call keep their place, and the lines go in as if the pipe
+ * had delivered them now. They drive the keyboard pad whether or not
+ * XEMU_INPUT_PIPE is set.
+ */
+#define INPUT_QUEUE_MAX_LINES (256 * 1024)
+
+XemuInputQueueInfo *qmp_xemu_input_queue(strList *lines, Error **errp)
+{
+    XemuInputQueueInfo *info;
+    int64_t n = 0, accepted = 0;
+
+    for (strList *l = lines; l; l = l->next) {
+        Error *err = NULL;
+
+        if (++n > INPUT_QUEUE_MAX_LINES) {
+            error_setg(errp, "at most %d lines per call",
+                       INPUT_QUEUE_MAX_LINES);
+            return NULL;
+        }
+        if (!xemu_input_check_line(l->value, &err)) {
+            error_setg(errp, "line %" PRId64 ": %s", n,
+                       error_get_pretty(err));
+            error_free(err);
+            return NULL;
+        }
+    }
+    test_input_poll();
+    for (strList *l = lines; l; l = l->next) {
+        accepted += input_queue_line(l->value);
+    }
+    info = g_new0(XemuInputQueueInfo, 1);
+    info->accepted = accepted;
+    info->skipped = n - accepted;
+    info->queued = g_queue_get_length(&test_input_pending);
+    info->frame = test_input_frame;
+    return info;
 }
 
 #ifdef _WIN32
@@ -1422,16 +1519,16 @@ static void input_frame_tick(uint64_t frame)
         test_input_poll();
     }
     test_input_frame = frame;
-    for (GList *l = test_input_pending.head, *next; l; l = next) {
-        TestInputPending *p = l->data;
-        next = l->next;
-        if (p->frame <= frame) {
-            test_input_apply(p->line, test_input_override, test_axis_override);
-            g_free(p->line);
-            g_free(p);
-            g_queue_delete_link(&test_input_pending, l);
-            applied = true;
-        }
+    test_input_sort();
+    while (!g_queue_is_empty(&test_input_pending) &&
+           ((TestInputPending *)g_queue_peek_head(&test_input_pending))->due
+               <= frame) {
+        TestInputPending *p = g_queue_pop_head(&test_input_pending);
+
+        test_input_apply(p->line, test_input_override, test_axis_override);
+        g_free(p->line);
+        g_free(p);
+        applied = true;
     }
     ControllerState *iter;
     if (input_at_vblanks()) {
@@ -1950,20 +2047,6 @@ void xemu_input_reset_input_mapping(ControllerState *state)
  * readers). Read-only, apart from reading what was written to the pipe.
  */
 
-/* A line applies at the first vblank whose counter reaches its frame. */
-static uint64_t test_input_due(const TestInputPending *p)
-{
-    return MAX(p->frame, test_input_frame + 1);
-}
-
-static gint test_input_due_cmp(gconstpointer a, gconstpointer b,
-                               gpointer opaque)
-{
-    uint64_t fa = test_input_due(a), fb = test_input_due(b);
-
-    return fa < fb ? -1 : fa > fb;
-}
-
 static XemuInputPadState *pad_state_info(const ControllerState *c)
 {
     XemuInputPadState *s = g_new0(XemuInputPadState, 1);
@@ -1992,28 +2075,25 @@ XemuInputState *qmp_query_xemu_input(Error **errp)
     intList **keys = &st->keys;
     uint8_t next_keys[SDL_SCANCODE_COUNT];
     int16_t next_axes[CONTROLLER_AXIS__COUNT];
-    GList *lines;
 
     test_input_poll();
     st->frame = test_input_frame;
 
-    /* The vblank applies its due lines in queue order: a stable sort. */
+    /* The queue is in the order the vblanks apply it. */
+    test_input_sort();
     memcpy(next_keys, test_input_override, sizeof(next_keys));
     memcpy(next_axes, test_axis_override, sizeof(next_axes));
-    lines = g_list_sort_with_data(g_list_copy(test_input_pending.head),
-                                  test_input_due_cmp, NULL);
-    for (GList *l = lines; l; l = l->next) {
+    for (GList *l = test_input_pending.head; l; l = l->next) {
         TestInputPending *p = l->data;
         XemuInputQueuedLine *q = g_new0(XemuInputQueuedLine, 1);
 
-        q->frame = test_input_due(p);
+        q->frame = p->due;
         q->line = g_strdup(p->line);
         QAPI_LIST_APPEND(queued, q);
         if (q->frame == test_input_frame + 1) {
             test_input_apply(p->line, next_keys, next_axes);
         }
     }
-    g_list_free(lines);
 
     for (int sc = 0; sc < SDL_SCANCODE_COUNT; sc++) {
         if (next_keys[sc]) {

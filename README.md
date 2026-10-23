@@ -242,6 +242,22 @@ Other automation interfaces (windowed or headless):
   every line still queued, so nothing written before it lands later
   (under icount it releases at the next vblank). Earlier builds kept the
   queue; `+0 clear` still does, releasing at the next vblank.
+- **Pipe lines over QMP**: `xemu-input-queue {"lines": [...]}` queues
+  the same lines with the same meaning as if written to the pipe at
+  that moment, in one call of up to 262,144 lines (and under QEMU's
+  64 MiB limit on one JSON request), so a long recording needs no 8 KiB
+  pipe windows. Lines already written to the pipe are
+  read first, so both keep their order; `XEMU_INPUT_PIPE` need not be
+  set (the lines drive the keyboard pad, on whichever port
+  `xemu-input-bind` gave the `keyboard` source; port 2 in the
+  fixtures). Every line is checked first: one that isn't valid refuses
+  the whole call as `line <n>: <why>` (n from 1) and queues nothing.
+  Blank lines and `#` comments (as `XEMU_INPUT_RECORD` writes them)
+  are skipped. It returns `{accepted, skipped, queued, frame}`: lines
+  taken, lines skipped, the queue's length after the call, and the
+  frame counter its `+N` lines count from. The queue is kept in the
+  order the vblanks apply it (a batch in any order is sorted once), so
+  a vblank costs the same however many lines wait behind it.
 - **Input state**: QMP `query-xemu-input` returns `{frame, ports, keys,
   queued}`. `ports` gives each port's source and the `buttons` (`a`,
   `dpad-up`, `white`, ...), sticks `lx`/`ly`/`rx`/`ry` and triggers
