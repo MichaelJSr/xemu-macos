@@ -107,6 +107,57 @@
 { 'command': 'query-xemu-frame', 'returns': 'XemuFrameInfo' }
 
 ##
+# @XemuLanguage:
+#
+# The console language a run gives the guest, as @xemu-set-language
+# reports it (xemu-macos 0.16.1).
+#
+# @language: the language the guest reads: its code (en ja de fr es
+#     it ko zh pt), the number for another value, or "off" when the
+#     guest reads the EEPROM's own
+#
+# @value: its XC_LANGUAGE number (1 English, 2 Japanese, 3 German,
+#     4 French, 5 Spanish, 6 Italian, 7 Korean, 8 Chinese,
+#     9 Portuguese), 0 when off
+#
+# @eeprom: the language the machine's EEPROM holds
+#
+# @kernel-copies: copies of the EEPROM image in guest RAM (the
+#     kernel's cache) this call set the language in
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuLanguage',
+  'data': { 'language': 'str', 'value': 'int', 'eeprom': 'int',
+            'kernel-copies': 'int' } }
+
+##
+# @xemu-set-language:
+#
+# Set the console language the guest reads for the rest of the run,
+# as XEMU_LANGUAGE does from launch (xemu-macos 0.16.1).  The guest's
+# EEPROM reads return it (the device keeps the EEPROM's own: a guest
+# EEPROM write lands with the EEPROM's language and a checksum of its
+# own, and stays out of the EEPROM file while the language is set),
+# and this call and every later load (loadvm,
+# xemu-checkpoint-restore, an incoming migration) set it in the
+# kernel's copy of the EEPROM in guest RAM, so every language query
+# returns it.  That copy is guest RAM: a load whose state holds
+# another language then ends on other RAM than a plain load.  A title
+# that asks once per boot (Azurik) keeps what it asked until the next
+# boot.  The VM must be stopped.
+#
+# @language: a code (en ja de fr es it ko zh pt), a name (french,
+#     German...), an XC_LANGUAGE number, or "off" to give the guest
+#     the EEPROM's own again (also set in the kernel's copy); absent:
+#     only report
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-set-language', 'data': { '*language': 'str' },
+  'returns': 'XemuLanguage' }
+
+##
 # @xemu-frame-advance:
 #
 # Run the VM for @frames vblanks, then pause it.  Returns once it is

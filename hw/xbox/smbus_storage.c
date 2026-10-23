@@ -31,6 +31,8 @@
 #include "qapi/error.h"
 #include "hw/loader.h"
 #include "migration/vmstate.h"
+#include "system/reset.h"
+#include "eeprom-fields.h"
 
 #define TYPE_SMBUS_STORAGE "smbus-storage"
 #define SMBUS_STORAGE(obj) OBJECT_CHECK(SMBusStorageDevice, (obj), \
@@ -53,9 +55,70 @@ typedef struct SMBusStorageDevice {
     bool persist;
 } SMBusStorageDevice;
 
+/*
+ * xemu: the console language the guest reads from the EEPROM at 0x54, or
+ * 0 for the EEPROM's own (XEMU_LANGUAGE, QMP xemu-set-language). The
+ * device's contents stay the EEPROM's, in snapshots too: only the guest's
+ * reads of the language and the user section's checksum see the override
+ * (xbox_eeprom_move_language), a guest write, which the guest builds from
+ * its own copy of what it read, lands on that view and moves back to the
+ * EEPROM's own language (xbox_eeprom_write_viewed), and while it is set
+ * guest writes stay in the machine instead of reaching the file.
+ * eeprom_guest_language is the language the guest's copy holds: the
+ * override from a boot (the guest reads it), a load or a set (they put
+ * it in the kernel's copy), else what the guest last wrote itself.
+ */
+static uint32_t eeprom_language;
+static uint32_t eeprom_guest_language;
+
+uint32_t xbox_eeprom_language(void)
+{
+    return qatomic_read(&eeprom_language);
+}
+
+void xbox_eeprom_set_language(uint32_t lang)
+{
+    qatomic_set(&eeprom_language, lang);
+    eeprom_guest_language = lang;
+}
+
+static void eeprom_language_reset(void *opaque)
+{
+    eeprom_guest_language = eeprom_language;
+}
+
+static bool eeprom_is_xbox(SMBusStorageDevice *s)
+{
+    return s->addr == 0x54 && s->size == XBOX_EEPROM_SIZE;
+}
+
 static void smbus_storage_realize(DeviceState *dev, Error **errp)
 {
     SMBusStorageDevice *s = SMBUS_STORAGE(dev);
+    const char *lang = getenv("XEMU_LANGUAGE");
+
+    if (lang && lang[0] && eeprom_is_xbox(s)) {
+        uint32_t v;
+        const char *name;
+
+        if (!xbox_language_parse(lang, &v)) {
+            error_setg(errp, "XEMU_LANGUAGE='%s': not a language (en ja de "
+                       "fr es it ko zh pt, a name such as french, or an "
+                       "XC_LANGUAGE number)", lang);
+            return;
+        }
+        xbox_eeprom_set_language(v);
+        name = xbox_language_name(v, false);
+        if (v) {
+            fprintf(stderr, "xemu: language: %s (%u) from XEMU_LANGUAGE: "
+                    "the guest reads it from the EEPROM, every load sets it "
+                    "in the kernel's copy, and EEPROM writes stay out of "
+                    "the file\n", name ? name : "XC_LANGUAGE", v);
+        }
+    }
+    if (eeprom_is_xbox(s)) {
+        qemu_register_reset(eeprom_language_reset, NULL);
+    }
     qdev_prop_set_uint8(dev, "address", s->addr);
     s->data = g_malloc0(s->size);
     s->offset = 0;
@@ -99,16 +162,30 @@ static int smbus_storage_write_data(SMBusDevice *dev, uint8_t *buf, uint8_t len)
     buf++;
     len--;
 
-    bool changed = false;
+    bool changed = len > 0;
+    uint32_t lang = xbox_eeprom_language();
+    if (unlikely(lang) && changed && eeprom_is_xbox(s)) {
+        /* Built from the guest's copy: keep the EEPROM's own language. */
+        xbox_eeprom_write_viewed(s->data, &eeprom_guest_language, s->offset,
+                                 buf, len);
+        s->offset = (s->offset + len) % s->size;
+        len = 0;
+    }
     for (; len > 0; len--) {
-        changed = true;
         s->data[s->offset] = *buf++;
         DPRINTF("%s: addr=0x%02x off=0x%02x, data=0x%02x\n",
             __func__, s->addr, s->offset, s->data[s->offset]);
         s->offset = (s->offset + 1) % s->size;
     }
 
-    if (changed && s->file && s->persist) {
+    if (changed && s->file && s->persist && lang && eeprom_is_xbox(s)) {
+        static bool said;
+        if (!said) {
+            said = true;
+            fprintf(stderr, "xemu: language: a guest EEPROM write stays out "
+                    "of '%s' while the language is set\n", s->file);
+        }
+    } else if (changed && s->file && s->persist) {
         int fd = qemu_open(s->file, O_WRONLY | O_BINARY, NULL);
         if (fd < 0) {
             DPRINTF("%s: file '%s' could not be opened\n", __func__, s->file);
@@ -132,6 +209,19 @@ static uint8_t smbus_storage_receive_byte(SMBusDevice *dev)
     SMBusStorageDevice *s = SMBUS_STORAGE(dev);
 
     uint8_t val = s->data[s->offset];
+    uint32_t lang = xbox_eeprom_language();
+
+    if (unlikely(lang) && eeprom_is_xbox(s) &&
+        ((s->offset >= XBOX_EEPROM_USER_CHECKSUM &&
+          s->offset < XBOX_EEPROM_USER_CHECKSUM + 4) ||
+         (s->offset >= XBOX_EEPROM_LANGUAGE &&
+          s->offset < XBOX_EEPROM_LANGUAGE + 4))) {
+        uint8_t view[XBOX_EEPROM_SIZE];
+
+        memcpy(view, s->data, sizeof(view));
+        xbox_eeprom_move_language(view, lang);
+        val = view[s->offset];
+    }
     DPRINTF("%s: addr=0x%02x off=0x%02x val=0x%02x\n",
         __func__, s->addr, s->offset, val);
     s->offset = (s->offset + 1) % s->size;

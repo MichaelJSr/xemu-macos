@@ -25,9 +25,10 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
   - never inherits AUTOMATION_ENV: the variables that name something
     another xemu or the harness may own (the owner's XEMU_RAM_SHM name,
     a pipe, a record or log file, an XEMU_QMP_WATCH socket), that bind
-    host pads, or that pick the
+    host pads, that pick the
     Vulkan driver (an exported XEMU_VK_DRIVER would silently take every
-    deterministic and offscreen run off its MoltenVK pin). A launcher
+    deterministic and offscreen run off its MoltenVK pin), or that change
+    what the guest reads (XEMU_LANGUAGE). A launcher
     drops them from its own environment; a value it sets itself stays;
   - never starts while an owner demo runs: while /tmp/xemu-leases/
     owner-demo.json (or, under a moved lease dir, its owner-demo.json)
@@ -76,7 +77,8 @@ LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or DEFAULT_LEASE_DIR
 AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
-                  'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER', 'XEMU_QMP_WATCH')
+                  'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER', 'XEMU_QMP_WATCH',
+                  'XEMU_LANGUAGE')
 OWNER_DEMO = 'owner-demo.json'
 _dropped = set()
 _warned = set()

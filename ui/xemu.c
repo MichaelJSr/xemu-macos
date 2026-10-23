@@ -64,6 +64,7 @@
 #include "xemu-os-utils.h"
 #include "xemu-present.h"
 #include "xemu-events.h"
+#include "xemu-language.h"
 
 #include "data/xemu_64x64.png.h"
 
@@ -1391,6 +1392,7 @@ void xemu_state_loaded(void)
 {
     vblank_virtual_rearm = true;
     vblank_rate_latch("load");
+    xemu_language_state_loaded();
     xemu_input_state_loaded();
     xemu_hooks_state_loaded();
     xemu_trace_record_load(frame_count);

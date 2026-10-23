@@ -39,5 +39,7 @@ void xbox_smc_eject_button(void);
 void xbox_smc_update_tray_state(void);
 
 bool xbox_eeprom_read(uint32_t offset, void *buf, uint32_t len);
+uint32_t xbox_eeprom_language(void);
+void xbox_eeprom_set_language(uint32_t lang);
 
 #endif

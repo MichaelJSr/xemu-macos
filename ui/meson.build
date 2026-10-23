@@ -37,6 +37,7 @@ xemu_ss.add(files(
   'xemu-checkpoint-ram.c',
   'xemu-ram-digest.c',
   'xemu-load-verify.c',
+  'xemu-language.c',
   'xemu-input-bind.c',
   'xemu-trace-record.c',
   'xemu-hostprof.c',

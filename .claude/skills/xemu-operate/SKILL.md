@@ -38,7 +38,7 @@ are in `xemu-history`.
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
-  pads, `XEMU_VK_DRIVER`: `AUTOMATION_ENV` in `xemu_lease.py`); set them
+  pads, `XEMU_VK_DRIVER`, `XEMU_LANGUAGE`: `AUTOMATION_ENV` in `xemu_lease.py`); set them
   per run. Every
   launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
@@ -329,6 +329,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_VK_CLEAR_IN_PASS=0` | Vulkan: each clear ends the render pass and gets one of its own again, instead of recording into the open pass (pbkit text frames: ~1700 passes a flip again) | `vk/draw.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
+| `XEMU_LANGUAGE=<fr\|de\|…\|n>` | The console language the guest reads (EEPROM reads; every load sets it in the kernel's EEPROM copy in RAM, so a load in another language differs from a plain one); QMP `xemu-set-language` while stopped; the EEPROM file stays untouched | `hw/xbox/smbus_storage.c`, `ui/xemu-language.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
 | `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (KK benches, windowed or headless; no strike marker); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |

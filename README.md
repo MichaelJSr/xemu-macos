@@ -441,6 +441,33 @@ Other automation interfaces (windowed or headless):
   the tray keeps <tray>; not loaded`), and a saved image that no longer
   exists is marked missing and gets no Yes (Load Anyway or Cancel, with
   Cancel focused).
+- **The console language for a run**: `XEMU_LANGUAGE=<lang>` (from
+  launch) or QMP `xemu-set-language {"language": "<lang>"}` (VM
+  stopped; `"off"` gives the guest the EEPROM's own again; no argument
+  only reports) sets the language the guest reads, where `<lang>` is
+  `en ja de fr es it ko zh pt`, a name (`french`) or an XC_LANGUAGE
+  number. The guest's EEPROM reads return it with a matching checksum,
+  so a boot (cold, or a reset) reads it; and since the kernel keeps a
+  copy of the EEPROM in guest RAM from its first read, the call and
+  every later load (`loadvm`, `xemu-checkpoint-restore`, an incoming
+  migration) set the language in that copy too, so every language
+  query after a load returns it. That copy is guest RAM: a load of a
+  state saved in another language then ends on other RAM than a plain
+  load (8 bytes on one page; the same in every process, so replays stay
+  exact), and a state already in that language loads unchanged. The
+  device's contents, and with them savestates, stay the EEPROM's: a
+  guest EEPROM write (the guest builds it from what it reads) lands
+  with the EEPROM's own language and a checksum of its own, unless it
+  sets another language itself. The EEPROM file is never written while
+  the language is set (a guest EEPROM write stays in the machine;
+  stderr says so once), and stderr names the language at launch and
+  the copy a load set. A title that
+  asks once per boot keeps what it got: Azurik asks in its `main()`
+  (USA `0x58EA8`, Europe `0x58EC8`), and Europe also when it starts
+  each Bink movie (`0xD03BC`, to pick the movie's audio track), so a
+  loaded state's speech stays the language its session booted with
+  until the next boot, while Europe's movies follow the setting.
+  `XEMU_LANGUAGE` is a launcher automation variable: set it per run.
 - **Demos as played (live pads under icount)**: with
   `XEMU_ICOUNT_LIVE_PADS=1` and `-icount shift=2,align=on,sleep=on`
   (windowed or headless), host gamepads, and the host keyboard on the
