@@ -160,6 +160,20 @@ typedef struct {
      */
     bool watch;
     QEMUBH *watch_bh;
+    /*
+     * xemu: bytes read but not yet parsed because a request suspended
+     * the monitor partway through a chunk (monitor_qmp_feed); parsed
+     * first when it resumes. @in_pending and @in_pending_gen are touched
+     * only in the monitor's chardev context (the I/O thread, or the main
+     * loop for a monitor without one): monitor_qmp_read and
+     * monitor_accept_input. CHR_EVENT_OPENED and _CLOSED may run on
+     * another thread (a failed write on the main loop disconnects there),
+     * so they only bump @in_drop_gen (atomic), and the chardev context
+     * drops bytes stashed under an older value.
+     */
+    GByteArray *in_pending;
+    unsigned in_pending_gen;
+    unsigned in_drop_gen;
 } MonitorQMP;
 
 /**
@@ -185,6 +199,7 @@ void monitor_data_init(Monitor *mon, bool is_qmp, bool skip_flush,
                        bool use_io_thread);
 void monitor_data_destroy(Monitor *mon);
 int monitor_can_read(void *opaque);
+void monitor_qmp_feed_pending(MonitorQMP *mon);
 void monitor_list_append(Monitor *mon);
 void monitor_fdsets_cleanup(void);
 

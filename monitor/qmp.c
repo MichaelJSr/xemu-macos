@@ -536,11 +536,81 @@ static void monitor_qmp_watch_bh(void *opaque)
     }
 }
 
-static void monitor_qmp_read(void *opaque, const uint8_t *buf, int size)
+/*
+ * xemu: QMP input is read in chunks of up to MONITOR_QMP_READ_MAX bytes
+ * instead of one byte per chardev read (monitor_can_read's 1), which
+ * cost a main-loop or I/O-thread iteration per byte: a 70 KB
+ * xemu-input-queue request took 0.9 s to arrive. The parser still gets
+ * one byte at a time and stops at the byte where a request suspends the
+ * monitor, exactly where the one-byte reads stopped; the rest waits in
+ * in_pending and is parsed first when the monitor resumes, ahead of any
+ * new read. So requests are queued and dispatched as before.
+ *
+ * Only the chardev context touches in_pending (see monitor-internal.h).
+ * A connect or disconnect, which may run on another thread (a write that
+ * fails on the main loop disconnects there), only bumps in_drop_gen; the
+ * chardev context then stops feeding and drops what it read before.
+ */
+#define MONITOR_QMP_READ_MAX 4096
+
+static int monitor_qmp_can_read(void *opaque)
 {
     MonitorQMP *mon = opaque;
 
-    json_message_parser_feed(&mon->parser, (const char *) buf, size);
+    return qatomic_read(&mon->common.suspend_cnt) ? 0 : MONITOR_QMP_READ_MAX;
+}
+
+static void monitor_qmp_feed(MonitorQMP *mon, unsigned gen,
+                             const uint8_t *buf, size_t size)
+{
+    for (size_t i = 0; i < size; i++) {
+        if (qatomic_read(&mon->in_drop_gen) != gen) {
+            return;   /* the connection ended under us: drop the rest */
+        }
+        if (qatomic_read(&mon->common.suspend_cnt)) {
+            assert(!mon->in_pending);
+            mon->in_pending = g_byte_array_sized_new(size - i);
+            g_byte_array_append(mon->in_pending, buf + i, size - i);
+            mon->in_pending_gen = gen;
+            return;
+        }
+        json_message_parser_feed(&mon->parser, (const char *)buf + i, 1);
+    }
+}
+
+/* Chardev context: feed what a suspend left over, unless it is stale. */
+void monitor_qmp_feed_pending(MonitorQMP *mon)
+{
+    GByteArray *p = mon->in_pending;
+
+    if (!p) {
+        return;
+    }
+    mon->in_pending = NULL;
+    if (mon->in_pending_gen == qatomic_read(&mon->in_drop_gen)) {
+        monitor_qmp_feed(mon, mon->in_pending_gen, p->data, p->len);
+    }
+    g_byte_array_unref(p);
+}
+
+static void monitor_qmp_read(void *opaque, const uint8_t *buf, int size)
+{
+    MonitorQMP *mon = opaque;
+    unsigned gen = qatomic_read(&mon->in_drop_gen);
+
+    if (mon->in_pending) {
+        /*
+         * Read after a resume, before monitor_accept_input fed the rest:
+         * the older bytes go first (or are dropped if stale).
+         */
+        if (mon->in_pending_gen == gen) {
+            g_byte_array_append(mon->in_pending, buf, size);
+            monitor_qmp_feed_pending(mon);
+            return;
+        }
+        monitor_qmp_feed_pending(mon);
+    }
+    monitor_qmp_feed(mon, gen, buf, size);
 }
 
 static QDict *qmp_greeting(MonitorQMP *mon)
@@ -572,6 +642,7 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
 
     switch (event) {
     case CHR_EVENT_OPENED:
+        qatomic_inc(&mon->in_drop_gen);   /* xemu: drop bytes read before */
         mon->commands = &qmp_cap_negotiation_commands;
         monitor_qmp_caps_reset(mon);
         data = qmp_greeting(mon);
@@ -585,6 +656,7 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
          * stdio, it's possible that stdout is still open when stdin
          * is closed.
          */
+        qatomic_inc(&mon->in_drop_gen);   /* xemu: drop bytes read before */
         monitor_qmp_cleanup_queue_and_resume(mon);
         json_message_parser_destroy(&mon->parser);
         json_message_parser_init(&mon->parser, handle_qmp_command,
@@ -605,6 +677,11 @@ void monitor_data_destroy_qmp(MonitorQMP *mon)
         qemu_bh_delete(mon->watch_bh);
         mon->watch_bh = NULL;
     }
+    /* The I/O thread has stopped (monitor_cleanup). */
+    if (mon->in_pending) {
+        g_byte_array_unref(mon->in_pending);
+        mon->in_pending = NULL;
+    }
     json_message_parser_destroy(&mon->parser);
     qemu_mutex_destroy(&mon->qmp_queue_lock);
     monitor_qmp_cleanup_req_queue_locked(mon);
@@ -619,7 +696,7 @@ static void monitor_qmp_setup_handlers_bh(void *opaque)
     assert(mon->common.use_io_thread);
     context = iothread_get_g_main_context(mon_iothread);
     assert(context);
-    qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
+    qemu_chr_fe_set_handlers(&mon->common.chr, monitor_qmp_can_read,
                              monitor_qmp_read, monitor_qmp_event,
                              NULL, &mon->common, context, true);
     monitor_list_append(&mon->common);
@@ -666,7 +743,7 @@ static void monitor_init_qmp_common(Chardev *chr, bool pretty, bool watch,
                                 monitor_qmp_setup_handlers_bh, mon);
         /* The bottom half will add @mon to @mon_list */
     } else {
-        qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
+        qemu_chr_fe_set_handlers(&mon->common.chr, monitor_qmp_can_read,
                                  monitor_qmp_read, monitor_qmp_event,
                                  NULL, &mon->common, NULL, true);
         monitor_list_append(&mon->common);

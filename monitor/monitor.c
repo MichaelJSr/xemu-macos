@@ -565,6 +565,10 @@ static void monitor_accept_input(void *opaque)
         qemu_mutex_unlock(&mon->mon_lock);
     }
 
+    /* xemu: what a QMP monitor read before it was suspended goes first. */
+    if (monitor_is_qmp(mon)) {
+        monitor_qmp_feed_pending(container_of(mon, MonitorQMP, common));
+    }
     qemu_chr_fe_accept_input(&mon->chr);
 }
 
