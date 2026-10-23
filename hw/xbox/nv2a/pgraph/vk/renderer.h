@@ -812,6 +812,7 @@ typedef struct PGRAPHVkState {
      */
     bool null_ram;
     bool render_skipping;
+    bool skip_nop_draw; /* the skipped draw would have been a nop draw */
     uint32_t submit_count;
     /*
      * Highest submit_count whose fence has been observed signaled.

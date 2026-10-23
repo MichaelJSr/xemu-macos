@@ -521,17 +521,44 @@ static bool null_ram_skip(NV2AState *d)
     return r->render_skipping;
 }
 
+/* pgraph_vk_draw_begin's nop-draw test: nothing would be written. */
+static bool null_ram_is_nop_draw(PGRAPHState *pg)
+{
+    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    bool color_write = control_0 & (NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE |
+                                    NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE |
+                                    NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE |
+                                    NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE);
+    bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
+    bool stencil_test = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) &
+                        NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+    return !(color_write || depth_test || stencil_test);
+}
+
 static void null_ram_draw_begin(NV2AState *d)
 {
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
     if (!null_ram_skip(d)) {
         pgraph_vk_draw_begin(d);
+    } else {
+        r->skip_nop_draw = null_ram_is_nop_draw(&d->pgraph);
     }
 }
 
 static void null_ram_draw_end(NV2AState *d)
 {
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
     if (!null_ram_skip(d)) {
         pgraph_vk_draw_end(d);
+    } else if (!r->skip_nop_draw) {
+        /*
+         * A skipped draw still carries its provoking vertex's oFog into the
+         * next draw, as pgraph_vk_draw_end does after its flush, so the
+         * first requested frame starts from an every-frame run's value.
+         */
+        pgraph_vsh_carryover_update(&d->pgraph);
     }
 }
 
