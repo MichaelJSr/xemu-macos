@@ -125,24 +125,12 @@ enum NsprofEvent {
     NSPROF_EV_RENDERPASS,     /* vkCmdBeginRenderPass on the main CB */
     NSPROF_EV_PIPELINE_BIND,  /* vkCmdBindPipeline (graphics) */
     /*
-     * Draw-merge attribution (GPU frame-cost campaign, Phase 1).
-     * VK_DRAW_CALL counts actual vkCmdDraw/vkCmdDrawIndexed calls in
-     * pgraph_vk_flush_draw (vs NSPROF_EV_DRAW's guest begin/end
-     * blocks); the MERGE_* buckets classify each non-clear guest
-     * block against the previous one: fully deduped already
-     * (IDENTICAL), mergeable into one draw call if only vertex
-     * offsets differ (CANDIDATE, with the CAND_UNIF_DIFF subset
-     * flagging a changed inline-uniform-attr payload — the untracked
-     * state axis a cross-block merge must compare explicitly), or
-     * unmergeable (STATE_CHANGED).
+     * vkCmdDraw/vkCmdDrawIndexed calls in pgraph_vk_flush_draw
+     * (NSPROF_EV_DRAW counts guest begin/end blocks; vk_draw_call -
+     * draws ~ the extra calls of multi-subrange draw arrays).
      */
     NSPROF_EV_VK_DRAW_CALL,
-    NSPROF_EV_DRAW_ARRAYS_MULTI_SUBRANGE, /* draw_arrays_length > 1, non-emulated */
     NSPROF_EV_VK_FAN_DRAW, /* VK_DRAW_CALL of a guest fan / filled polygon */
-    NSPROF_EV_DRAW_MERGE_IDENTICAL,
-    NSPROF_EV_DRAW_MERGE_CANDIDATE,
-    NSPROF_EV_DRAW_MERGE_CAND_UNIF_DIFF,
-    NSPROF_EV_DRAW_STATE_CHANGED,
     /*
      * Render-pass-end cause tags (campaign Mechanism C). Fired at the
      * sites that end a live render pass mid-frame; the submit path
