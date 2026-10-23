@@ -274,9 +274,9 @@ setup_pgo() {
 # mismatch" grep is not a detector — straight-line edits leave the
 # IR-PGO CFG hash unchanged, so small-but-real drift reads as zero —
 # so weight the diagnostics against the hot-function set and pair them
-# with a commits-since-retrain age on the hot paths. Warning only;
-# XEMU_PGO_STALE_FATAL=1 promotes a hot-path mismatch to a build
-# failure once the signal is known quiet.
+# with a commits-since-retrain age on the hot paths. Warning only: the
+# profile drifts with every hot-path commit, so a fatal gate would fail
+# every build between retrains.
 #
 # awk reads build.log directly and carries every counter to END: no
 # pipe and no early-exit reader, so pipefail has nothing to misreport
@@ -356,10 +356,6 @@ check_pgo_staleness() {
     if [ "${hotmism:-0}" -gt 0 ]; then
         echo "*** PGO WARNING: hot-path functions lost their profile to a CFG-hash mismatch:${hotnames}"
         echo "*** Retrain before shipping: XEMU_PGO=generate ./build.sh, run the corpus, XEMU_PGO=use ./build.sh"
-        if [ "${XEMU_PGO_STALE_FATAL:-0}" = "1" ]; then
-            echo "*** XEMU_PGO_STALE_FATAL=1 -> failing the build." >&2
-            exit 1
-        fi
     fi
 }
 
