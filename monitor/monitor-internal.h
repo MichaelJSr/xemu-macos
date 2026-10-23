@@ -151,6 +151,15 @@ typedef struct {
     QemuMutex qmp_queue_lock;
     /* Input queue that holds all the parsed QMP requests */
     GQueue *qmp_requests;
+    /*
+     * xemu: a watch monitor (XEMU_QMP_WATCH) answers only the read-only
+     * queries in qmp_watch_commands, from @watch_bh on the main loop
+     * (iohandler context, BQL held), never through the dispatcher
+     * coroutine, so it answers while another monitor's command waits
+     * (xemu-frame-advance). It offers no OOB.
+     */
+    bool watch;
+    QEMUBH *watch_bh;
 } MonitorQMP;
 
 /**
@@ -166,6 +175,7 @@ extern IOThread *mon_iothread;
 extern Coroutine *qmp_dispatcher_co;
 extern bool qmp_dispatcher_co_shutdown;
 extern QmpCommandList qmp_commands, qmp_cap_negotiation_commands;
+extern QmpCommandList qmp_watch_commands;
 extern QemuMutex monitor_lock;
 extern MonitorList mon_list;
 
@@ -180,6 +190,7 @@ void monitor_fdsets_cleanup(void);
 
 void qmp_send_response(MonitorQMP *mon, const QDict *rsp);
 void monitor_data_destroy_qmp(MonitorQMP *mon);
+void monitor_init_qmp_watch(Chardev *chr, Error **errp);
 void coroutine_fn monitor_qmp_dispatcher_co(void *data);
 void qmp_dispatcher_co_wake(void);
 

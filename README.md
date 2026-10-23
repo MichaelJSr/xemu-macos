@@ -1011,10 +1011,10 @@ Other automation interfaces (windowed or headless):
   `XEMU_INPUT_PIPE`, `XEMU_INPUT_RECORD` and `_PORT`,
   `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
   `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS`,
-  `XEMU_VK_DRIVER` (stderr: `lease: not passing the inherited ...`), so
-  a bench never takes the owner's shared-RAM name, pipe or files, or
-  leaves the MoltenVK pin; set one per run (`VAR=V` arguments, an arm's
-  `K=V`) to use it.
+  `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH` (stderr: `lease: not passing the
+  inherited ...`), so a bench never takes the owner's shared-RAM name,
+  pipe, files or watch socket, or leaves the MoltenVK pin; set one per
+  run (`VAR=V` arguments, an arm's `K=V`) to use it.
 - **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one
@@ -1027,6 +1027,24 @@ Other automation interfaces (windowed or headless):
   one more connection, so further connects fail with `ECONNREFUSED`
   while a client holds it. That means busy, not gone: the file is still
   there.
+- **A watch monitor for queries during an advance** (opt-in):
+  `XEMU_QMP_WATCH=<spec>` (what `-qmp` takes, e.g.
+  `unix:/tmp/w.sock,server=on,wait=off`) opens one more QMP monitor
+  (stderr: `xemu: QMP watch monitor on <spec>`; a spec that can't open
+  ends xemu with status 1, as `-qmp` does). Every other monitor's
+  commands run one at a time, and `xemu-frame-advance`, `xemu-run-until`
+  and `xemu-run` hold them while they wait for vblanks, so a client on a
+  second `-qmp` socket gets its greeting but no reply until the advance
+  ends. The watch monitor answers at once instead, from the main loop:
+  it negotiates as usual (it offers no `oob`), then answers only
+  `qmp_capabilities`, `query-commands` (which lists just these),
+  `query-version`, `query-status`, `query-xemu-frame`,
+  `query-xemu-status`, `query-xemu-display`, `query-xemu-input` and
+  `query-xemu-host-profile`, none of which waits, changes guest state or
+  RAM, or reads guest time. Any other command gets `CommandNotFound`
+  with a desc that names them. It receives events like any QMP monitor.
+  Commands on the other monitors keep their order, so
+  `xemu-hooks-drain` still never cuts into an advance.
 - **Host-time profile**: QMP `query-xemu-host-profile` returns counters
   cumulative since launch: `translate-ns`/`translations` (host time
   translating guest code), `apu-ns`/`apu-ticks` (the APU's ticks under

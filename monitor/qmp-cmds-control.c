@@ -78,7 +78,7 @@ void qmp_qmp_capabilities(bool has_enable, QMPCapabilityList *enable,
     assert(monitor_is_qmp(cur_mon));
     mon = container_of(cur_mon, MonitorQMP, common);
 
-    if (mon->commands == &qmp_commands) {
+    if (mon->commands != &qmp_cap_negotiation_commands) {
         error_set(errp, ERROR_CLASS_COMMAND_NOT_FOUND,
                   "Capabilities negotiation is already complete, command "
                   "ignored");
@@ -89,7 +89,8 @@ void qmp_qmp_capabilities(bool has_enable, QMPCapabilityList *enable,
         return;
     }
 
-    mon->commands = &qmp_commands;
+    /* xemu: a watch monitor (XEMU_QMP_WATCH) gets its whitelist. */
+    mon->commands = mon->watch ? &qmp_watch_commands : &qmp_commands;
 }
 
 VersionInfo *qmp_query_version(Error **errp)

@@ -5,6 +5,7 @@ system_ss.add(files(
   'hmp-cmds.c',
   'hmp.c',
   'qemu-config-qmp.c',
+  'xemu-qmp-watch.c',
 ))
 system_ss.add([spice_headers, files('qmp-cmds.c')])
 

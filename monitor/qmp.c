@@ -31,6 +31,7 @@
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
+#include "qemu/main-loop.h"
 #include "trace.h"
 
 /*
@@ -71,6 +72,27 @@ typedef struct QMPRequest QMPRequest;
 
 QmpCommandList qmp_commands, qmp_cap_negotiation_commands;
 
+/*
+ * xemu: what a watch monitor (XEMU_QMP_WATCH) answers once negotiated:
+ * read-only queries that never block, change guest state, a RAM digest or
+ * guest time, so they can run from the main loop while another monitor's
+ * command holds the dispatcher (xemu-frame-advance waiting for vblanks).
+ * None may be a coroutine command. A new name must meet the same bar.
+ */
+QmpCommandList qmp_watch_commands;
+
+static const char *const qmp_watch_names[] = {
+    "qmp_capabilities",
+    "query-commands",
+    "query-version",
+    "query-status",
+    "query-xemu-frame",
+    "query-xemu-status",
+    "query-xemu-display",
+    "query-xemu-input",
+    "query-xemu-host-profile",
+};
+
 static bool qmp_oob_enabled(MonitorQMP *mon)
 {
     return mon->capab[QMP_CAPABILITY_OOB];
@@ -80,7 +102,9 @@ static void monitor_qmp_caps_reset(MonitorQMP *mon)
 {
     memset(mon->capab_offered, 0, sizeof(mon->capab_offered));
     memset(mon->capab, 0, sizeof(mon->capab));
-    mon->capab_offered[QMP_CAPABILITY_OOB] = mon->common.use_io_thread;
+    /* A watch monitor answers at once anyway: it offers no OOB. */
+    mon->capab_offered[QMP_CAPABILITY_OOB] = mon->common.use_io_thread &&
+                                             !mon->watch;
 }
 
 static void qmp_request_free(QMPRequest *req)
@@ -111,8 +135,20 @@ static void monitor_qmp_cleanup_queue_and_resume(MonitorQMP *mon)
     bool need_resume = (!qmp_oob_enabled(mon) ||
         mon->qmp_requests->length == QMP_REQ_QUEUE_LEN_MAX)
         && !g_queue_is_empty(mon->qmp_requests);
+    /*
+     * A watch monitor suspended once per queued request (one read can
+     * hold several): give every one back.
+     */
+    guint watch_resumes = mon->watch ? mon->qmp_requests->length : 0;
 
     monitor_qmp_cleanup_req_queue_locked(mon);
+
+    if (mon->watch) {
+        while (watch_resumes--) {
+            monitor_resume(&mon->common);
+        }
+        return;
+    }
 
     if (need_resume) {
         /*
@@ -178,6 +214,28 @@ static void monitor_qmp_dispatch(MonitorQMP *mon, QObject *req)
             qdict_put_str(error, "desc", "Expecting capabilities negotiation"
                           " with 'qmp_capabilities'");
         }
+    } else if (mon->watch) {
+        /* Name the whitelist when a command isn't on it. */
+        QDict *dict = qobject_to(QDict, req);
+        const char *name = dict ? qdict_get_try_str(dict, "execute") : NULL;
+
+        error = qdict_get_qdict(rsp, "error");
+        if (error && name
+            && !g_strcmp0(qdict_get_try_str(error, "class"),
+                    QapiErrorClass_str(ERROR_CLASS_COMMAND_NOT_FOUND))
+            && !qmp_find_command(&qmp_watch_commands, name)) {
+            g_autoptr(GString) desc = g_string_new(NULL);
+
+            g_string_printf(desc, "The command %s is not available on a "
+                            "watch monitor (XEMU_QMP_WATCH), which answers "
+                            "only", name);
+            for (size_t i = 0; i < ARRAY_SIZE(qmp_watch_names); i++) {
+                g_string_append_printf(desc, "%s %s", i ? "," : "",
+                                       qmp_watch_names[i]);
+            }
+            qdict_del(error, "desc");
+            qdict_put_str(error, "desc", desc->str);
+        }
     }
 
     monitor_qmp_respond(mon, rsp);
@@ -208,6 +266,9 @@ static QMPRequest *monitor_qmp_requests_pop_any_with_lock(void)
         }
 
         qmp_mon = container_of(mon, MonitorQMP, common);
+        if (qmp_mon->watch) {
+            continue;   /* served by its own BH, monitor_qmp_watch_bh */
+        }
         qemu_mutex_lock(&qmp_mon->qmp_queue_lock);
         req_obj = g_queue_pop_head(qmp_mon->qmp_requests);
         if (req_obj) {
@@ -422,8 +483,57 @@ static void handle_qmp_command(void *opaque, QObject *req, Error *err)
         g_queue_push_tail(mon->qmp_requests, req_obj);
     }
 
+    if (mon->watch) {
+        qemu_bh_schedule(mon->watch_bh);
+        return;
+    }
+
     /* Kick the dispatcher routine */
     qmp_dispatcher_co_wake();
+}
+
+/*
+ * xemu: a watch monitor's requests, in order, on the main loop's
+ * iohandler context (BQL held; only the main loop polls it, so no nested
+ * event loop in a block job or a vCPU wait runs this), outside any
+ * coroutine and outside the dispatcher: the dispatcher may be parked in
+ * another monitor's command (xemu-frame-advance) for as long as that
+ * runs. Only qmp_watch_commands are found here, none a coroutine
+ * command, so qmp_dispatch calls each handler directly.
+ */
+static void monitor_qmp_watch_bh(void *opaque)
+{
+    MonitorQMP *mon = opaque;
+    QMPRequest *req_obj;
+
+    for (;;) {
+        WITH_QEMU_LOCK_GUARD(&mon->qmp_queue_lock) {
+            req_obj = g_queue_pop_head(mon->qmp_requests);
+        }
+        if (!req_obj) {
+            return;
+        }
+        if (req_obj->req) {
+            /*
+             * qmp_dispatch asserts that no monitor is current for this
+             * (the main loop's) coroutine; a caller up the stack that set
+             * one keeps it.
+             */
+            Monitor *outer = monitor_set_cur(qemu_coroutine_self(), NULL);
+
+            monitor_qmp_dispatch(mon, req_obj->req);
+            monitor_set_cur(qemu_coroutine_self(), outer);
+        } else {
+            QDict *rsp = qmp_error_response(req_obj->err);
+
+            req_obj->err = NULL;
+            monitor_qmp_respond(mon, rsp);
+            qobject_unref(rsp);
+        }
+        /* handle_qmp_command suspended once for it (no OOB here). */
+        monitor_resume(&mon->common);
+        qmp_request_free(req_obj);
+    }
 }
 
 static void monitor_qmp_read(void *opaque, const uint8_t *buf, int size)
@@ -491,6 +601,10 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
 
 void monitor_data_destroy_qmp(MonitorQMP *mon)
 {
+    if (mon->watch_bh) {
+        qemu_bh_delete(mon->watch_bh);
+        mon->watch_bh = NULL;
+    }
     json_message_parser_destroy(&mon->parser);
     qemu_mutex_destroy(&mon->qmp_queue_lock);
     monitor_qmp_cleanup_req_queue_locked(mon);
@@ -511,13 +625,19 @@ static void monitor_qmp_setup_handlers_bh(void *opaque)
     monitor_list_append(&mon->common);
 }
 
-void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
+static void monitor_init_qmp_common(Chardev *chr, bool pretty, bool watch,
+                                    Error **errp)
 {
     MonitorQMP *mon = g_new0(MonitorQMP, 1);
 
     if (!qemu_chr_fe_init(&mon->common.chr, chr, errp)) {
         g_free(mon);
         return;
+    }
+    if (watch) {
+        mon->watch = true;
+        mon->watch_bh = aio_bh_new(iohandler_get_aio_context(),
+                                   monitor_qmp_watch_bh, mon);
     }
     qemu_chr_fe_set_echo(&mon->common.chr, true);
 
@@ -551,4 +671,31 @@ void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
                                  NULL, &mon->common, NULL, true);
         monitor_list_append(&mon->common);
     }
+}
+
+void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
+{
+    monitor_init_qmp_common(chr, pretty, false, errp);
+}
+
+/*
+ * xemu: a QMP monitor that negotiates and then answers only
+ * qmp_watch_commands, at once, whatever another monitor's command is
+ * doing (XEMU_QMP_WATCH, monitor/xemu-qmp-watch.c).
+ */
+void monitor_init_qmp_watch(Chardev *chr, Error **errp)
+{
+    if (QTAILQ_EMPTY(&qmp_watch_commands)) {
+        QTAILQ_INIT(&qmp_watch_commands);
+        for (size_t i = 0; i < ARRAY_SIZE(qmp_watch_names); i++) {
+            const QmpCommand *cmd = qmp_find_command(&qmp_commands,
+                                                     qmp_watch_names[i]);
+
+            /* The handlers run outside coroutine context. */
+            assert(cmd && !(cmd->options & QCO_COROUTINE));
+            qmp_register_command(&qmp_watch_commands, cmd->name, cmd->fn,
+                                 cmd->options, cmd->features);
+        }
+    }
+    monitor_init_qmp_common(chr, false, true, errp);
 }

@@ -150,6 +150,7 @@
 #include "ui/xemu-loadvm-pads.h"
 #include "ui/xemu-present.h"
 #include "ui/xemu-automation.h"
+#include "monitor/xemu-qmp-watch.h"
 #include "hw/xbox/eeprom_generation.h"
 
 #define MAX_VIRTIO_CONSOLES 1
@@ -4137,6 +4138,8 @@ void qemu_init(int argc, char **argv)
 #ifdef XBOX
     /* xemu.toml's [automation] (QMP now; its shared RAM name at board init) */
     xemu_automation_apply();
+    /* XEMU_QMP_WATCH: a monitor for read-only queries during an advance */
+    xemu_qmp_watch_open();
 #endif
 
     /*

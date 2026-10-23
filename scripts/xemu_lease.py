@@ -24,7 +24,8 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     ~/Library/Caches/xemu-fork-bench), never in the owner's pref dir;
   - never inherits AUTOMATION_ENV: the variables that name something
     another xemu or the harness may own (the owner's XEMU_RAM_SHM name,
-    a pipe, a record or log file), that bind host pads, or that pick the
+    a pipe, a record or log file, an XEMU_QMP_WATCH socket), that bind
+    host pads, or that pick the
     Vulkan driver (an exported XEMU_VK_DRIVER would silently take every
     deterministic and offscreen run off its MoltenVK pin). A launcher
     drops them from its own environment; a value it sets itself stays;
@@ -75,7 +76,7 @@ LEASE_DIR = os.environ.get('XEMU_LEASE_DIR') or DEFAULT_LEASE_DIR
 AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
-                  'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER')
+                  'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER', 'XEMU_QMP_WATCH')
 OWNER_DEMO = 'owner-demo.json'
 _dropped = set()
 _warned = set()
