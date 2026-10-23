@@ -40,6 +40,7 @@ public:
     void Refresh();
     void LoadSnapshot(const char *name);
     void LoadSnapshotChecked(const char *name);
+    void LoadSnapshotWithTrayDisc();
 
     void Draw();
     void DrawSnapshotDiscLoadDialog();

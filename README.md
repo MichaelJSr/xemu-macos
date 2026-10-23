@@ -440,7 +440,13 @@ Other automation interfaces (windowed or headless):
   disc comes out, so a Yes that fails leaves the tray as it was (`...;
   the tray keeps <tray>; not loaded`), and a saved image that no longer
   exists is marked missing and gets no Yes (Load Anyway or Cancel, with
-  Cancel focused).
+  Cancel focused). With a disc in the tray the dialog also says what a
+  load without the saved image means (the snapshot's RAM still runs the
+  code the game loaded from the saved image while it reads files from
+  the tray's disc, until a reset boots the tray's disc) and offers Load
+  With Tray Disc, which loads as No does and says so on stderr: `xemu:
+  snapshot '<tag>': loading with the tray's disc <tray> instead of its
+  disc <saved>; RAM keeps that disc's code until a reset`.
 - **The console language for a run**: `XEMU_LANGUAGE=<lang>` (from
   launch) or QMP `xemu-set-language {"language": "<lang>"}` (VM
   stopped; `"off"` gives the guest the EEPROM's own again; no argument

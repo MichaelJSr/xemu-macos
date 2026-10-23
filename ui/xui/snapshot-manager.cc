@@ -138,6 +138,20 @@ void SnapshotManager::LoadSnapshot(const char *name)
     }
 }
 
+/*
+ * The dialog's "Load With Tray Disc": the pending snapshot with the disc in
+ * the tray left there, as No does, said on stderr for harness logs.
+ */
+void SnapshotManager::LoadSnapshotWithTrayDisc()
+{
+    fprintf(stderr,
+            "xemu: snapshot '%s': loading with the tray's disc %s instead of "
+            "its disc %s; RAM keeps that disc's code until a reset\n",
+            m_pending_load_name.c_str(), m_current_disc_path.c_str(),
+            m_target_disc_path.c_str());
+    LoadSnapshot(m_pending_load_name.c_str());
+}
+
 void SnapshotManager::Draw()
 {
     DrawSnapshotDiscLoadDialog();
@@ -167,6 +181,17 @@ void SnapshotManager::DrawSnapshotDiscLoadDialog()
     } else {
         ImGui::Text("The expected image no longer exists, so it can't be loaded.");
         ImGui::Text("Load the snapshot with the current image anyway?");
+    }
+    bool tray_disc = m_current_disc_path.length() > 0;
+    if (tray_disc) {
+        /* What a load without the expected image means (No, Load Anyway) */
+        const ImVec4 warn(1.0f, 0.8f, 0.3f, 1.0f);
+        ImGui::Spacing();
+        ImGui::TextColored(warn, "Loading with the disc in the tray keeps the "
+                                 "snapshot's memory: the game in it still runs");
+        ImGui::TextColored(warn, "the code it loaded from the expected image "
+                                 "while it reads files from the current one.");
+        ImGui::TextColored(warn, "A reset boots the current image.");
     }
 
     ImGui::Dummy(ImVec2(0,16));
@@ -198,6 +223,14 @@ void SnapshotManager::DrawSnapshotDiscLoadDialog()
                       ImVec2(m_target_disc_exists ? 120 : 0, 0))) {
         LoadSnapshot(m_pending_load_name.c_str());
         ImGui::CloseCurrentPopup();
+    }
+
+    if (tray_disc) {
+        ImGui::SameLine();
+        if (ImGui::Button("Load With Tray Disc")) {
+            LoadSnapshotWithTrayDisc();
+            ImGui::CloseCurrentPopup();
+        }
     }
 
     ImGui::SameLine();
