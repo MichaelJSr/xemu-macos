@@ -22,6 +22,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "nv2a_vsh_emulator.h"
 #include "nv2a_vsh_disassembler.h"
+#include "gpu_counters.h"
 
 void pgraph_update_inline_value(PGRAPHState *pg, VertexAttribute *attr,
                                 const uint8_t *data)
@@ -148,6 +149,9 @@ void pgraph_allocate_inline_buffer_vertices(PGRAPHState *pg, unsigned int attr)
 void pgraph_finish_inline_buffer_vertex(PGRAPHState *pg)
 {
     pgraph_check_within_begin_end_block(pg);
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_immediate_vertex(pg);
+    }
     assert(pg->inline_buffer_length < NV2A_MAX_BATCH_LENGTH);
 
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {

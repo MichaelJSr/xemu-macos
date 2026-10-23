@@ -75,12 +75,16 @@
 #     that carried them (only from @xemu-frame-advance, while a hook
 #     is installed or records are waiting)
 #
+# @gpu-counters: the NV2A work of the advance (only from
+#     @xemu-frame-advance with @gpu-counters; xemu-macos 0.16.1)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
   'data': { 'frame': 'int', 'running': 'bool',
             '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
-            '*stopped': 'RunState', '*hooks': 'XemuHookTrace' } }
+            '*stopped': 'RunState', '*hooks': 'XemuHookTrace',
+            '*gpu-counters': 'XemuGpuCounters' } }
 
 ##
 # @query-xemu-frame:
@@ -107,11 +111,20 @@
 #
 # @trace-every: vblanks between samples (default 1)
 #
+# @gpu-counters: count the NV2A work of the advance, from its start to
+#     its stop, and return it in @gpu-counters (as
+#     @xemu-gpu-counters-start and -stop around it would; fails while
+#     those count; xemu-macos 0.16.1)
+#
+# @gpu-counters-per-flip: with @gpu-counters, also return one set per
+#     flip (xemu-macos 0.16.1)
+#
 # Since: 10.2
 ##
 { 'command': 'xemu-frame-advance',
   'data': { '*frames': 'int', '*trace': ['XemuTraceRegion'],
-            '*trace-every': 'int' },
+            '*trace-every': 'int', '*gpu-counters': 'bool',
+            '*gpu-counters-per-flip': 'bool' },
   'returns': 'XemuFrameInfo', 'coroutine': true }
 
 ##
@@ -1856,3 +1869,227 @@
 # Since: 10.2
 ##
 { 'command': 'xemu-audio-wav-stop', 'returns': 'XemuAudioWavInfo' }
+
+##
+# NV2A workload counters
+# ======================
+##
+
+##
+# @XemuGpuCounterSet:
+#
+# NV2A work, counted in PGRAPH's method path and the PFIFO pusher, so
+# the null and Vulkan renderers count the same work for the same
+# commands (xemu-macos 0.16.1).  Addresses are guest physical; "high"
+# means at or above 64 MiB (0x04000000), and a span that crosses it
+# is split there.  Nothing here is written to guest RAM, registers or
+# timers.
+#
+# @begin-end: begin/end pairs (SET_BEGIN_END END after a BEGIN; the
+#     pusher's squash of repeated BEGIN, DRAW_ARRAYS, END counts each)
+#
+# @vertices: the sum of the five vertices-* paths
+#
+# @vertices-draw-arrays: DRAW_ARRAYS counts
+#
+# @vertices-inline-array: INLINE_ARRAY vertices (its words times 4
+#     over the vertex size the enabled attributes give)
+#
+# @vertices-array-element16: ARRAY_ELEMENT16 indices (two per word)
+#
+# @vertices-array-element32: ARRAY_ELEMENT32 indices
+#
+# @vertices-immediate: vertices finished by SET_VERTEX3F/4F and
+#     SET_VERTEX_DATA* (immediate mode)
+#
+# @prim-points: points, one per vertex of a POINTS pair
+#
+# @prim-lines: lines of LINES pairs (n / 2)
+#
+# @prim-line-loop: segments of LINE_LOOP pairs (n, for n >= 2)
+#
+# @prim-line-strip: segments of LINE_STRIP pairs (n - 1)
+#
+# @prim-triangles: triangles of TRIANGLES pairs (n / 3)
+#
+# @prim-triangle-strip: triangles of TRIANGLE_STRIP pairs (n - 2)
+#
+# @prim-triangle-fan: triangles of TRIANGLE_FAN pairs (n - 2)
+#
+# @prim-quads: quads of QUADS pairs (n / 4)
+#
+# @prim-quad-strip: quads of QUAD_STRIP pairs ((n - 2) / 2)
+#
+# @prim-polygon: POLYGON pairs with at least 3 vertices
+#
+# @triangles: the triangles all of these make: triangles, strip and
+#     fan triangles, two per quad, n - 2 per polygon
+#
+# @pushbuffer-bytes: bytes of pushbuffer words the pusher consumed
+#     (headers, data, jumps), at the pushbuffer DMA object's address
+#
+# @pushbuffer-bytes-high: those at or above 64 MiB
+#
+# @vertex-bytes: vertex attribute bytes read from arrays: per draw
+#     (a DRAW_ARRAYS, or a pair's array elements) and enabled array
+#     attribute, stride times (last - first vertex) plus the element
+#     size, at the vertex DMA object's address plus the attribute
+#     offset.  Index and inline data come in the pushbuffer.
+#
+# @vertex-bytes-high: those at or above 64 MiB
+#
+# @texture-binds: enabled texture stages per begin/end pair, summed
+#
+# @texture-bytes-bound: those stages' texture sizes (all levels, cube
+#     faces, palette), summed per pair
+#
+# @texture-bytes: the distinct textures bound in the flip (same
+#     address, size, format and palette), each once, at their
+#     addresses: the texture bytes the flip reads at most
+#
+# @texture-bytes-high: those at or above 64 MiB
+#
+# @texture-bytes-uploaded: bytes of the distinct textures whose
+#     content (a hash of their guest RAM bytes at their first bind in
+#     the flip) differs from their content at their previous bind in
+#     this counting run: what any renderer must upload again
+#
+# @texture-bytes-new: bytes of the distinct textures first bound in
+#     this counting run (their content is not known from earlier)
+#
+# @surface-bytes: the distinct render targets begin/end pairs drew to
+#     in the flip, each once (color with any color write mask bit,
+#     zeta with depth or stencil writes on): height times pitch (or
+#     width times bytes per pixel when larger), anti-aliasing included
+#
+# @surface-bytes-high: those at or above 64 MiB
+#
+# @clears: CLEAR_SURFACE methods
+#
+# @clear-pixels: their rectangles' pixels, clamped to the surface,
+#     anti-aliasing samples included
+#
+# @clear-bytes: those pixels times the bytes per pixel of each
+#     surface cleared (color and zeta)
+#
+# @clear-bytes-high: those at or above 64 MiB
+#
+# @reports: GET_REPORT methods
+#
+# @report-bytes: bytes GET_REPORT (16 each) and semaphore releases (4
+#     each) write
+#
+# @report-bytes-high: those at or above 64 MiB
+#
+# @blits: image blits (NV_IMAGE_BLIT SIZE with a non-empty size)
+#
+# @blit-pixels: their pixels
+#
+# @read-bytes-low: bytes the GPU reads below 64 MiB: pushbuffer,
+#     vertex and texture bytes, and blit sources
+#
+# @read-bytes-high: the same at or above 64 MiB
+#
+# @write-bytes-low: bytes the GPU writes below 64 MiB: surface, clear
+#     and report bytes, and blit destinations
+#
+# @write-bytes-high: the same at or above 64 MiB
+#
+# @occlusion-samples: the zpass pixel counts the renderer wrote to
+#     reports (always 0 under the null renderer), counted when the
+#     report reaches guest RAM: a fill estimate that differs between
+#     renderers, drivers and surface scales
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuGpuCounterSet',
+  'data': { 'begin-end': 'int',
+            'vertices': 'int', 'vertices-draw-arrays': 'int',
+            'vertices-inline-array': 'int',
+            'vertices-array-element16': 'int',
+            'vertices-array-element32': 'int',
+            'vertices-immediate': 'int',
+            'prim-points': 'int', 'prim-lines': 'int',
+            'prim-line-loop': 'int', 'prim-line-strip': 'int',
+            'prim-triangles': 'int', 'prim-triangle-strip': 'int',
+            'prim-triangle-fan': 'int', 'prim-quads': 'int',
+            'prim-quad-strip': 'int', 'prim-polygon': 'int',
+            'triangles': 'int',
+            'pushbuffer-bytes': 'int', 'pushbuffer-bytes-high': 'int',
+            'vertex-bytes': 'int', 'vertex-bytes-high': 'int',
+            'texture-binds': 'int', 'texture-bytes-bound': 'int',
+            'texture-bytes': 'int', 'texture-bytes-high': 'int',
+            'texture-bytes-uploaded': 'int', 'texture-bytes-new': 'int',
+            'surface-bytes': 'int', 'surface-bytes-high': 'int',
+            'clears': 'int', 'clear-pixels': 'int',
+            'clear-bytes': 'int', 'clear-bytes-high': 'int',
+            'reports': 'int', 'report-bytes': 'int',
+            'report-bytes-high': 'int',
+            'blits': 'int', 'blit-pixels': 'int',
+            'read-bytes-low': 'int', 'read-bytes-high': 'int',
+            'write-bytes-low': 'int', 'write-bytes-high': 'int',
+            'occlusion-samples': 'int' } }
+
+##
+# @XemuGpuCounters:
+#
+# NV2A work over a counting run (xemu-macos 0.16.1).  A flip is a
+# guest FLIP_STALL; the first holds only the work since the run began.
+#
+# @flips: flips counted
+#
+# @total: all work counted, @tail included
+#
+# @max: each counter's largest value in one flip (each counter on its
+#     own; @tail is not a flip)
+#
+# @tail: work counted after the last flip
+#
+# @per-flip: one set per flip, oldest first (only when asked for; at
+#     most 65536, later flips are counted in @per-flip-dropped)
+#
+# @per-flip-dropped: flips past that limit (only with @per-flip)
+#
+# Since: 10.2
+##
+{ 'struct': 'XemuGpuCounters',
+  'data': { 'flips': 'int', 'total': 'XemuGpuCounterSet',
+            'max': 'XemuGpuCounterSet', 'tail': 'XemuGpuCounterSet',
+            '*per-flip': ['XemuGpuCounterSet'],
+            '*per-flip-dropped': 'int' } }
+
+##
+# @xemu-gpu-counters-start:
+#
+# Start counting NV2A work (see @XemuGpuCounterSet) from zero, until
+# @xemu-gpu-counters-stop (xemu-macos 0.16.1).  Under -icount, started
+# and stopped while the VM is paused, the counts are deterministic:
+# the same commands from the same state give the same counts in any
+# process.  Otherwise the PFIFO thread may still be behind the guest
+# when they are read.  Fails while counting runs (here or by
+# @xemu-frame-advance's @gpu-counters).
+#
+# @per-flip: also keep one set per flip
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-gpu-counters-start', 'data': { '*per-flip': 'bool' } }
+
+##
+# @xemu-gpu-counters-stop:
+#
+# Stop counting and return the counts (xemu-macos 0.16.1).
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-gpu-counters-stop', 'returns': 'XemuGpuCounters' }
+
+##
+# @query-xemu-gpu-counters:
+#
+# Return the counts so far, counting on (xemu-macos 0.16.1).  Fails
+# when no counting runs.
+#
+# Since: 10.2
+##
+{ 'command': 'query-xemu-gpu-counters', 'returns': 'XemuGpuCounters' }

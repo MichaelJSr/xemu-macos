@@ -1060,6 +1060,77 @@ Other automation interfaces (windowed or headless):
   `--watch-movie` lets prophecy.bik play instead of skipping it with
   START (the fixture's disc ends it at once; the retail disc plays 5,542
   frames).
+- **NV2A workload counters** (GPU cost under the null renderer):
+  `xemu-frame-advance {"frames": N, "gpu-counters": true}` adds
+  `gpu-counters` to its reply: the NV2A work of the advance, from its
+  start to its stop (`"gpu-counters-per-flip": true` adds one set per
+  flip). `xemu-gpu-counters-start` (`{"per-flip": true}` optional),
+  `query-xemu-gpu-counters` and `xemu-gpu-counters-stop` count across
+  any run instead; one counting run at a time. The reply is `{flips,
+  total, max, tail, per-flip, per-flip-dropped}`: a flip is a guest
+  `FLIP_STALL` (the first holds only the work since counting began),
+  `total` sums everything counted, `max` is each counter's largest
+  value in one flip, `tail` the work after the last flip (in `total`,
+  not a flip), `per-flip` at most 65,536 sets. Each set counts, per
+  flip or summed:
+  - `begin-end`: begin/end pairs (the pusher's squash of repeated
+    BEGIN, DRAW_ARRAYS, END counts each);
+  - `vertices` and its paths `vertices-draw-arrays` (DRAW_ARRAYS
+    counts), `vertices-inline-array` (INLINE_ARRAY words × 4 over the
+    vertex size of the enabled attributes), `vertices-array-element16`
+    (two indices per word), `vertices-array-element32`,
+    `vertices-immediate` (SET_VERTEX3F/4F, SET_VERTEX_DATA*);
+  - primitives from each pair's vertex count n: `prim-points` (n),
+    `prim-lines` (n/2), `prim-line-loop` (n segments), `prim-line-strip`
+    (n-1), `prim-triangles` (n/3), `prim-triangle-strip` and
+    `prim-triangle-fan` (n-2 triangles), `prim-quads` (n/4),
+    `prim-quad-strip` ((n-2)/2 quads), `prim-polygon` (1), and
+    `triangles`, the triangles they all make (two per quad, n-2 per
+    polygon);
+  - `pushbuffer-bytes`: pushbuffer words the pusher consumed (headers,
+    data, jumps) × 4;
+  - `vertex-bytes`: per draw and enabled array attribute, stride ×
+    (last − first vertex) + element size (index and inline data come
+    in the pushbuffer);
+  - `texture-binds` and `texture-bytes-bound`: enabled texture stages
+    per pair and their sizes (all levels, cube faces, palette), summed
+    per pair; `texture-bytes`: the distinct textures (address, size,
+    format, palette) bound in the flip, each once;
+    `texture-bytes-uploaded`: those whose guest bytes (hashed at their
+    first bind in the flip) changed since their previous bind in this
+    counting run, what any renderer must upload again;
+    `texture-bytes-new`: those first bound in this counting run;
+  - `surface-bytes`: the distinct render targets pairs drew to in the
+    flip (color with a color write mask bit set, zeta with depth or
+    stencil writes on), each once, pitch × height with anti-aliasing;
+  - `clears`, `clear-pixels` (the clear rectangle clamped to the
+    surface, anti-aliasing samples included) and `clear-bytes` (pixels ×
+    bytes per pixel of each surface cleared);
+  - `reports` (GET_REPORT), `report-bytes` (16 per report, 4 per
+    semaphore release), `blits` and `blit-pixels` (NV_IMAGE_BLIT);
+  - `read-bytes-low`/`-high` (pushbuffer, vertex and texture bytes,
+    blit sources) and `write-bytes-low`/`-high` (surface, clear and
+    report bytes, blit destinations), split at 64 MiB physical, and
+    `-high` for each source: data placed above 64 MiB shows there, not
+    under a 26-bit alias (mem_limit 128, vanilla-ig-a1 with four bound
+    textures' headers moved up 64 MiB: 92,888 bytes a flip in
+    `texture-bytes-high` and `read-bytes-high`, nothing else high).
+    Addresses come from the DMA objects as the renderers compute them;
+  - `occlusion-samples`: the zpass pixel counts the renderer wrote into
+    reports, when they reached guest RAM (always 0 under the null
+    renderer; a fill estimate under Vulkan that depends on the driver
+    and the surface scale).
+
+  Everything but `occlusion-samples` is counted in PGRAPH's method path
+  and the pusher, never in a renderer, so the null and Vulkan renderers
+  count the same for the same command stream; but where the game reads
+  zpass reports (Azurik's visibility tests) the values Vulkan writes
+  change what it draws next, so Vulkan runs can count differently from
+  null ones. Under icount, counting started and stopped while paused
+  gives the same counts in every process (vanilla-ig-a1, 600 frames:
+  identical in two null processes and under Vulkan). Counting writes
+  nothing the guest sees: RAM digests are the same on and off. Off, it
+  costs one predicted branch per pusher command and per counted method.
 - **Per-drive I/O log**: `XEMU_BLOCK_LOG=<file>` (from launch) or QMP
   `xemu-block-log-start {"filename": F}` (`"append": true` keeps F's rows)
   and `xemu-block-log-stop` (returns `{filename, rows}`) write one

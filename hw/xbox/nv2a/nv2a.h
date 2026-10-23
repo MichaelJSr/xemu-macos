@@ -113,4 +113,13 @@ uint32_t nv2a_get_crtc_start(void); /* BQL held; 0 before the device exists */
 /* A full redraw of the VGA surface from guest RAM before reading it (BQL held). */
 void nv2a_vga_refresh(void);
 
+/*
+ * xemu-frame-advance's gpu-counters (pgraph/gpu_counters.c), BQL held:
+ * start a counting run owned by the advance, then stop it and return the
+ * counts (a QAPI XemuGpuCounters).
+ */
+struct XemuGpuCounters;
+bool nv2a_gpu_counters_advance_begin(bool per_flip, Error **errp);
+struct XemuGpuCounters *nv2a_gpu_counters_advance_end(void);
+
 #endif

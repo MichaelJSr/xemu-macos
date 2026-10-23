@@ -29,6 +29,7 @@
 #include "ui/xemu-settings.h"
 #include "util.h"
 #include "swizzle.h"
+#include "gpu_counters.h"
 #include "nv2a_vsh_emulator.h"
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
@@ -286,6 +287,7 @@ void pgraph_init(NV2AState *d)
     pg->frame_time = 0;
     pg->draw_time = 0;
     pg->ctx_switch_subch = -1;
+    nv2a_gc_init();
 
     /* Force the first shader bind after init to populate uniforms. */
     pg->shader_uniform_inputs_dirty = true;
@@ -995,6 +997,11 @@ pgraph_kelvin_method(NV2AState *d, unsigned int subchannel,
         LAM(2, NV097_DRAW_ARRAYS)) {
         num_words_consumed += 4;
         pg->draw_arrays_prevent_connect = true;
+        if (unlikely(pg->gc_on)) {
+            /* The squashed END and BEGIN: a pair ends, the next begins. */
+            nv2a_gc_end(pg);
+            nv2a_gc_begin(pg);
+        }
     }
 
     #undef LAM
@@ -1146,6 +1153,9 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
             image_blit->height = parameter >> 16;
 
             if (image_blit->width && image_blit->height) {
+                if (unlikely(pg->gc_on)) {
+                    nv2a_gc_blit(pg);
+                }
                 d->pgraph.renderer->ops.image_blit(d);
             }
             break;
@@ -1257,6 +1267,9 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
 
 DEF_METHOD(NV097, FLIP_STALL)
 {
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_flip(pg);
+    }
     trace_nv2a_pgraph_flip_stall();
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
@@ -2771,6 +2784,9 @@ DEF_METHOD(NV097, GET_REPORT)
     uint8_t type = GET_MASK(parameter, NV097_GET_REPORT_TYPE);
     assert(type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT);
 
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_report(pg, pgraph_report_vram_offset(d, parameter));
+    }
     d->pgraph.renderer->ops.get_report(d, parameter);
 }
 
@@ -2791,6 +2807,9 @@ DEF_METHOD(NV097, SET_BEGIN_END)
             return;
         }
         nv2a_profile_inc_counter(NV2A_PROF_BEGIN_ENDS);
+        if (unlikely(pg->gc_on)) {
+            nv2a_gc_end(pg);
+        }
         d->pgraph.renderer->ops.draw_end(d);
         pgraph_reset_inline_buffers(pg);
         pg->primitive_mode = PRIM_TYPE_INVALID;
@@ -2800,6 +2819,9 @@ DEF_METHOD(NV097, SET_BEGIN_END)
             return;
         }
         assert(parameter <= NV097_SET_BEGIN_END_OP_POLYGON);
+        if (unlikely(pg->gc_on)) {
+            nv2a_gc_begin(pg);
+        }
         pg->primitive_mode = parameter;
         pgraph_reset_inline_buffers(pg);
         d->pgraph.renderer->ops.draw_begin(d);
@@ -2972,6 +2994,9 @@ void pgraph_check_within_begin_end_block(PGRAPHState *pg)
 DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT16)
 {
     pgraph_check_within_begin_end_block(pg);
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_array_element(pg, parameter, true);
+    }
 
     if (pg->draw_arrays_length) {
         pgraph_expand_draw_arrays(d);
@@ -2985,6 +3010,9 @@ DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT16)
 DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT32)
 {
     pgraph_check_within_begin_end_block(pg);
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_array_element(pg, parameter, false);
+    }
 
     if (pg->draw_arrays_length) {
         pgraph_expand_draw_arrays(d);
@@ -3000,6 +3028,10 @@ DEF_METHOD(NV097, DRAW_ARRAYS)
 
     int32_t start = GET_MASK(parameter, NV097_DRAW_ARRAYS_START_INDEX);
     int32_t count = GET_MASK(parameter, NV097_DRAW_ARRAYS_COUNT) + 1;
+
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_draw_arrays(pg, start, count);
+    }
 
     if (pg->inline_elements_length) {
         /* FIXME: HW throws an exception if the start index is > 0xFFFF. This
@@ -3042,6 +3074,9 @@ DEF_METHOD(NV097, DRAW_ARRAYS)
 DEF_METHOD_NON_INC(NV097, INLINE_ARRAY)
 {
     pgraph_check_within_begin_end_block(pg);
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_inline_array_word(pg);
+    }
     assert(pg->inline_array_length < NV2A_MAX_BATCH_LENGTH);
     pg->inline_array[pg->inline_array_length++] = parameter;
 }
@@ -3149,6 +3184,9 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
             d, semaphore_data - d->vram_ptr, 4);
     }
     stl_le_p((uint32_t*)semaphore_data, parameter);
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_semaphore(pg, semaphore_data - d->vram_ptr);
+    }
     if (unlikely(global_dirty_tracking)) {
         memory_region_set_client_dirty(d->vram, semaphore_data - d->vram_ptr,
                                        4, DIRTY_MEMORY_MIGRATION);
@@ -3197,6 +3235,9 @@ DEF_METHOD(NV097, SET_COLOR_CLEAR_VALUE)
 
 DEF_METHOD(NV097, CLEAR_SURFACE)
 {
+    if (unlikely(pg->gc_on)) {
+        nv2a_gc_clear(pg, parameter);
+    }
     d->pgraph.renderer->ops.clear_surface(d, parameter);
 }
 
@@ -3463,6 +3504,9 @@ void pgraph_write_zpass_pixel_cnt_report_at(NV2AState *d, hwaddr vram_offset,
     stq_le_p((uint64_t *)&report_data[0], timestamp);
     stl_le_p((uint32_t *)&report_data[8], result);
     stl_le_p((uint32_t *)&report_data[12], done);
+    if (unlikely(qatomic_read(&d->pgraph.gc_on))) {
+        nv2a_gc_occlusion(&d->pgraph, result);
+    }
     if (unlikely(global_dirty_tracking)) {
         memory_region_set_client_dirty(d->vram, vram_offset, 16,
                                        DIRTY_MEMORY_MIGRATION);

@@ -151,7 +151,8 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
 
     XemuFrameInfo *info = qmp_xemu_frame_advance(true, frames, has_trace,
                                                  trace, has_trace_every,
-                                                 trace_every, errp);
+                                                 trace_every, false, false,
+                                                 false, false, errp);
     qatomic_set(&until.armed, false);
     for (int i = 0; i < set->n; i++) {
         xemu_hooks_remove(set->e[i].hook_id);

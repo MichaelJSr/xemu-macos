@@ -1,4 +1,5 @@
 specific_ss.add(files(
+	'gpu_counters.c',
 	'pgraph.c',
 	'profile.c',
 	'rdi.c',

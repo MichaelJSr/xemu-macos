@@ -261,6 +261,8 @@ typedef struct PGRAPHState {
     DECLARE_BITMAP(regs_dirty, 0x2000 / sizeof(uint32_t));
 
     bool clearing; // FIXME: Internal
+    /* QMP GPU counters on (gpu_counters.c): the method path's one test */
+    bool gc_on;
     bool waiting_for_nop;
     bool waiting_for_flip;
     /* deterministic mode: the next flush discards renderer state (load) */

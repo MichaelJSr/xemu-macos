@@ -21,6 +21,7 @@
 
 #include "nv2a_int.h"
 #include "nsprof.h"
+#include "pgraph/gpu_counters.h"
 #include "qemu/timer.h"
 #include "hw/xbox/host_fp.h"
 #if defined(__APPLE__)
@@ -682,6 +683,8 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         assert(num_words_available % 4 == 0);
         num_words_available /= 4;
 
+        /* The word this iteration starts at (GPU counters) */
+        const uint32_t it_get = dma_get_v;
         uint32_t *word_ptr = (uint32_t*)(dma + dma_get_v);
         uint32_t word = ldl_le_p(word_ptr);
         if (!inl) {
@@ -852,6 +855,10 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         } else {
             /* The words before GET are consumed (lockless user_read). */
             qatomic_store_release(dma_get, dma_get_v);
+        }
+        if (unlikely(d->pgraph.gc_on)) {
+            nv2a_gc_pushbuf(d, dma - d->vram_ptr, it_get, dma_get_v, word,
+                            method_count);
         }
 
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {

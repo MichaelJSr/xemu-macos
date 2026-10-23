@@ -1206,6 +1206,10 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
                                                    XemuTraceRegionList *trace,
                                                    bool has_trace_every,
                                                    int64_t trace_every,
+                                                   bool has_gpu_counters,
+                                                   bool gpu_counters,
+                                                   bool has_gpu_counters_per_flip,
+                                                   bool gpu_counters_per_flip,
                                                    Error **errp)
 {
     if (!has_frames) {
@@ -1213,6 +1217,16 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     }
     if (!xemu_frame_advance_check(frames, trace, has_trace_every, trace_every,
                                   errp)) {
+        return NULL;
+    }
+    /*
+     * NV2A counters for the advance: started paused (under icount the
+     * pusher is at rest), stopped once the advance has paused the VM.
+     */
+    gpu_counters = has_gpu_counters && gpu_counters;
+    if (gpu_counters &&
+        !nv2a_gpu_counters_advance_begin(has_gpu_counters_per_flip &&
+                                         gpu_counters_per_flip, errp)) {
         return NULL;
     }
     if (!has_trace_every) {
@@ -1247,6 +1261,9 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         info->has_trace = true;
     }
     info->hooks = xemu_hooks_take_trace();
+    if (gpu_counters) {
+        info->gpu_counters = nv2a_gpu_counters_advance_end();
+    }
     if (frame_advance_stopped != RUN_STATE__MAX) {
         info->has_stopped = true;
         info->stopped = frame_advance_stopped;
