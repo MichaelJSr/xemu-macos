@@ -1242,6 +1242,15 @@ Other automation interfaces (windowed or headless):
   `--watch-movie` lets prophecy.bik play instead of skipping it with
   START (the fixture's disc ends it at once; the retail disc plays 5,542
   frames).
+  `--from-state TAG` times a harness's boot-build path instead of
+  power-on: launch on the config's disc, `loadvm TAG` paused, `--dvd`
+  into the tray (`blockdev-change-medium`, as the Azurik harness's
+  `reset_into` does), `--hdd-io` (after the load, whose disk revert
+  would undo it), `system_reset`, then the same phases from the reset,
+  with a `load` row (no frames) for the load, swap and reset. Each run
+  is a fresh process, so its first-boot translation (0.6-0.9 s of the
+  Azurik boot) is paid every time; a sandbox that boots again in the
+  same process translates about a tenth of that.
 - **NV2A workload counters** (GPU cost under the null renderer):
   `xemu-frame-advance {"frames": N, "gpu-counters": true}` adds
   `gpu-counters` to its reply: the NV2A work of the advance, from its

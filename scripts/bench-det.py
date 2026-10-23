@@ -67,7 +67,13 @@ a portable clone of APP (cold caches); --hdd-io runs qemu-io commands on
 the scratch HDD first ("write -z 0x800 0x200": the game rebuilds its HDD
 cache); --block-log DIR sets XEMU_BLOCK_LOG on each timing run and checks
 its rows against every phase's query-blockstats deltas and the first run.
+--from-state TAG boots the harness's boot-build path instead of power-on:
+launch on the config's disc, loadvm TAG (paused), put --dvd in the tray
+(blockdev-change-medium, as the Azurik harness's reset_into does),
+run --hdd-io, system_reset, then the same phases from the reset; a
+"load" row (no frames) times the loadvm, swap and reset.
 Example: bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
+         bench-det.py --timeline --from-state vanilla-ig-w1 --dvd grown.iso -n 20 base=/tmp/a.app
 """
 import argparse, bisect, contextlib, csv, ctypes, ctypes.util, hashlib, importlib.util, json
 import os, re, shutil
@@ -134,6 +140,7 @@ class QMP:
                     raise RuntimeError('xemu exited before QMP came up')
                 time.sleep(0.05)
         self.f = self.s.makefile('rw')
+        self.events = []
         self.f.readline()
         self.cmd('qmp_capabilities')
 
@@ -143,10 +150,28 @@ class QMP:
         while True:
             r = json.loads(self.f.readline() or '{"error": "EOF"}')
             if 'event' in r:
+                self.events.append(r['event'])
                 continue
             if 'error' in r:
                 raise RuntimeError(f'{name}: {r["error"]}')
             return r.get('return')
+
+    def wait_event(self, name, timeout=30):
+        """Until event name arrives (or came during an earlier command)."""
+        end = time.time() + timeout
+        self.s.settimeout(timeout)
+        try:
+            while name not in self.events:
+                if time.time() > end:
+                    raise RuntimeError(f'no {name} event')
+                r = json.loads(self.f.readline() or '{"error": "EOF"}')
+                if 'error' in r:
+                    raise RuntimeError(f'waiting for {name}: {r["error"]}')
+                if 'event' in r:
+                    self.events.append(r['event'])
+        finally:
+            self.s.settimeout(None)
+        self.events.remove(name)
 
 
 def wait_log(log, text, count, proc, timeout=120):
@@ -449,13 +474,15 @@ def thread_cpu(pid):
 
 def tl_launch(app, env, a, d, gdb, stack):
     """Start a timeline xemu in d: cold, paused, under icount, via lease.popen
-    (marker, nice, slot, lease); stack.close() ends it."""
+    (marker, nice, slot, lease); stack.close() ends it. With --from-state,
+    on the config's disc, then loadvm, the swap to --dvd, --hdd-io and a
+    reset, all paused; the returned row times them (else None)."""
     toml, pads, fifo, sock, log = scratch(d)
     app, base, headless = renderer_target(app, a, d)
     e = run_env(env, headless, fifo, base)
     cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
            '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
-    if a.dvd:
+    if a.dvd and not a.from_state:
         cmd += ['-dvd_path', a.dvd]
     if gdb:
         cmd += ['-gdb', f'unix:{os.path.join(d, "gdb.sock")},server=on,wait=off']
@@ -465,9 +492,25 @@ def tl_launch(app, env, a, d, gdb, stack):
     wait_log(log, 'xemu: ready', 1, proc)
     q = QMP(sock, proc)
     q.cmd('stop')
-    for c in a.hdd_io:   # on the scratch clone, before power-on
+    load = None
+    if a.from_state:
+        hdd = os.path.join(d, 'hdd.qcow2')
+        s0 = tl_snap(q, proc.pid, hdd)
+        r = q.cmd('human-monitor-command', **{'command-line': f'loadvm {a.from_state}'})
+        if r and 'rror' in r:
+            raise RuntimeError(f'loadvm {a.from_state}: {r.strip()}')
+        wait_log(log, 'xemu: state loaded', 1, proc)
+        if a.dvd:   # the build into the tray (Azurik harness: Sandbox.insert)
+            q.cmd('blockdev-change-medium', device='ide0-cd1', filename=os.path.abspath(a.dvd),
+                  format='raw')
+    for c in a.hdd_io:   # on the scratch clone, before power-on (after the load's disk revert)
         q.cmd('human-monitor-command', **{'command-line': f'qemu-io ide0-hd0 "{c}"'})
-    return proc, q, fifo, log
+    if a.from_state:
+        q.cmd('system_reset')
+        q.wait_event('RESET')
+        load = tl_row(s0, tl_snap(q, proc.pid, hdd), 0)
+        load['start'] = 0
+    return proc, q, fifo, log, load
 
 
 def tl_ram(q, d):
@@ -479,7 +522,7 @@ def tl_markers(app, env, a, va):
     d = scratch_dir()
     stack = contextlib.ExitStack()
     try:
-        proc, q, fifo, log = tl_launch(app, env, a, d, True, stack)
+        proc, q, fifo, log, _ = tl_launch(app, env, a, d, True, stack)
         g = RSP(os.path.join(d, 'gdb.sock'), proc)
         fd = os.open(fifo, os.O_RDWR)
         marks, info, schedule, armed = {'reset': 0}, {}, [], set()
@@ -631,11 +674,13 @@ def tl_timing(app, env, a, marks, info, schedule):
     d = scratch_dir()
     stack = contextlib.ExitStack()
     try:
-        proc, q, fifo, log = tl_launch(app, env, a, d, False, stack)
+        proc, q, fifo, log, load = tl_launch(app, env, a, d, False, stack)
         fd = os.open(fifo, os.O_RDWR)
-        os.write(fd, ('\n'.join(schedule) + '\n').encode())
+        os.write(fd, ('\n'.join(schedule) + '\n').encode())   # after the load, which drops queued lines
         time.sleep(0.2)
         rows, frame, phases, names, start = {}, 0, [], [], 'reset'
+        if load:
+            rows['load'] = load
         for n, _, e in TL_PHASES:   # a phase whose end wasn't marked joins the next
             names.append(n)
             if e in marks:
@@ -728,7 +773,7 @@ def tl_print(name, runs, base=None):
           f'{"dvd rd n/MiB/ms":>16s}' + (f'  {"vs " + base[0]:>8s}' if base else ''))
     for p in phases + ['total']:
         r, frames, start = means[p], means[p]['frames'], int(means[p]['start'])
-        if not frames:
+        if not frames and p != 'load':
             print(f'  {p:12s} {start:6d} {0:6d}       -')
             continue
         def io(dev, op):
@@ -737,9 +782,11 @@ def tl_print(name, runs, base=None):
         hp = lambda k: r.get(f'hp.{k}', 0)
         xlate, apu = hp('translate-ns') / 1e6, hp('apu-ns') / 1e6
         grow = r['qcow2_grow'] / 2**20
-        line = (f'  {p:12s} {start:6d} {frames:6.0f} {r["ms"]:7.0f} {r["ms"] / frames:6.2f} '
+        msf = f'{r["ms"] / frames:6.2f}' if frames else f'{"-":>6s}'
+        idle = f'{hp("idle-ns") / (frames * 1e9 / 60) * 100:5.1f}' if frames else f'{"-":>5s}'
+        line = (f'  {p:12s} {start:6d} {frames:6.0f} {r["ms"]:7.0f} {msf} '
                 f'{r["vcpu_ms"]:6.0f} {r["vcpu_ms"] - xlate - apu:6.0f} {xlate:6.0f} {apu:5.0f} '
-                f'{r["other_ms"]:6.0f} {hp("idle-ns") / (frames * 1e9 / 60) * 100:5.1f}  '
+                f'{r["other_ms"]:6.0f} {idle}  '
                 f'{io("hdd", "rd"):>16s} {io("hdd", "wr"):>16s} {grow:5.1f} '
                 f'{r["hdd.flush_operations"]:.0f}/{r["hdd.flush_total_time_ns"] / 1e6:<4.0f} '
                 f'{io("dvd", "rd"):>16s}')
@@ -751,7 +798,8 @@ def tl_print(name, runs, base=None):
 
 def timeline(a, arms):
     if a.tag != '-':
-        sys.exit('--timeline boots cold: leave -t at its default or pass -t -')
+        sys.exit('--timeline boots cold: leave -t at its default or pass -t - '
+                 '(--from-state TAG for the loadvm, swap and reset path)')
     va = dict(TL_VAS)
     if not a.dvd:
         iso = cfg_path('dvd_path')
@@ -764,6 +812,9 @@ def timeline(a, arms):
         k, v = kv.split('=', 1)
         va[k] = int(v, 0)
     name, app, env = arms[0]
+    if a.from_state:
+        print(f'timeline: from state {a.from_state}: loadvm, '
+              + (f'{iso} into the tray, ' if a.dvd else '') + 'system_reset', flush=True)
     print(f'timeline: markers on {name} ({a.renderer}); disc {iso}; XBE entry '
           f'{va["xbe_entry"] and hex(va["xbe_entry"])} ({release} VAs)', flush=True)
     t = time.time()
@@ -831,7 +882,11 @@ def main():
     t = p.add_argument_group('boot timeline (--timeline)')
     t.add_argument('--timeline', action='store_true',
                    help='cold boot to steady play, phase by phase (-n timing runs per arm)')
-    t.add_argument('--dvd', default='', help='disc to boot (default: the fixture config\'s)')
+    t.add_argument('--dvd', default='', help='disc to boot (default: the fixture config\'s); '
+                   'with --from-state, the disc put in the tray after the load')
+    t.add_argument('--from-state', default='', metavar='TAG',
+                   help='boot from a loaded state instead of power-on: loadvm TAG, --dvd into the '
+                        'tray, --hdd-io, system_reset (the Azurik harness\'s boot-build path)')
     t.add_argument('--route', default='a',
                    help='save-list presses, comma-separated (dpad_left,a: new game); each key '
                         'but the last waits for its save preview, at most %d frames' % TL_PREVIEW_WAIT)
