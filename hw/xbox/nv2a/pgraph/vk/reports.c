@@ -23,6 +23,7 @@
 #include "system/tcg.h"
 #include "qemu/main-loop.h"
 #include "hw/xbox/nv2a/nsprof.h"
+#include "hw/xbox/nv2a/pgraph/gpu_counters.h"
 
 void pgraph_vk_init_reports(PGRAPHState *pg)
 {
@@ -466,7 +467,7 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     report->parameter = parameter;
     report->query_count = r->num_queries_in_flight;
     report->det_tracked = false;
-    if (icount_enabled()) {
+    if (icount_enabled() && !r->null_ram) {
         report->ram_addr = pgraph_report_vram_offset(d, parameter);
         det_report_track(d, report);
     }
@@ -504,6 +505,12 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
         if (report->clear) {
             NV2A_VK_DPRINTF("Cleared");
             r->zpass_pixel_count_result = 0;
+        } else if (r->null_ram) {
+            /* RAM got the null renderer's 0 at GET_REPORT (renderer.c). */
+            if (qatomic_read(&pg->gc_on)) {
+                nv2a_gc_occlusion(pg,
+                                  r->zpass_pixel_count_result / result_divisor);
+            }
         } else if (icount_enabled()) {
             /* The slot as of GET_REPORT; dropped if RAM was reloaded. */
             if (!r->det_reports.discard) {

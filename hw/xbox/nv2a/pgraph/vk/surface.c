@@ -625,6 +625,14 @@ static void download_surface(NV2AState *d, SurfaceBinding *surface, bool force)
 
     // FIXME: Respect write enable at last TOU?
 
+    if (d->pgraph.vk_renderer_state->null_ram) {
+        /* XEMU_RENDER_NULL_RAM: guest RAM keeps what the null renderer
+         * would leave there (no rendered pixels). */
+        surface->download_pending = false;
+        surface->draw_dirty = false;
+        return;
+    }
+
     download_surface_to_buffer(d, surface, d->vram_ptr + surface->vram_addr);
 
     memory_region_set_client_dirty(d->vram, surface->vram_addr,

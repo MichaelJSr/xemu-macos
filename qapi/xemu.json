@@ -78,13 +78,19 @@
 # @gpu-counters: the NV2A work of the advance (only from
 #     @xemu-frame-advance with @gpu-counters; xemu-macos 0.16.1)
 #
+# @render-flips: frames drawn since the request, up to the stop
+#     (only from @xemu-render-next; more than its @flips when the
+#     guest drew another first, fewer when its @frames ran out;
+#     xemu-macos 0.16.1)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
   'data': { 'frame': 'int', 'running': 'bool',
             '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
             '*stopped': 'RunState', '*hooks': 'XemuHookTrace',
-            '*gpu-counters': 'XemuGpuCounters' } }
+            '*gpu-counters': 'XemuGpuCounters',
+            '*render-flips': 'int' } }
 
 ##
 # @query-xemu-frame:
@@ -1998,7 +2004,9 @@
 # @occlusion-samples: the zpass pixel counts the renderer wrote to
 #     reports (always 0 under the null renderer), counted when the
 #     report reaches guest RAM: a fill estimate that differs between
-#     renderers, drivers and surface scales
+#     renderers, drivers and surface scales (under
+#     XEMU_RENDER_NULL_RAM, the counts the renderer measured; RAM
+#     gets 0)
 #
 # Since: 10.2
 ##
@@ -2093,3 +2101,34 @@
 # Since: 10.2
 ##
 { 'command': 'query-xemu-gpu-counters', 'returns': 'XemuGpuCounters' }
+
+##
+# @xemu-render-next:
+#
+# With XEMU_RENDER_NULL_RAM=request (the Vulkan renderer skipping
+# draws, guest RAM kept as the null renderer leaves it; xemu-macos
+# 0.16.1): draw the guest's frames from its next flip, until the VM's
+# run after the next one starts.  Given while paused, that is through
+# the next run and the pause after it, so a screendump then shows a
+# drawn frame; given while the VM runs, until it is paused and started
+# again.  A load or save restarts the VM, so it counts as a run.
+# Guest RAM stays the null renderer's throughout.  Fails in any other
+# mode, and where @xemu-frame-advance would fail (the VM neither
+# running, paused, in prelaunch nor stopped by the debugger), with
+# nothing armed.
+#
+# @flips: also run the VM, as @xemu-frame-advance does, until this
+#     many frames are drawn and the last is on screen, then pause
+#     (default 0: return at once).  The first frame drawn lacks render
+#     targets earlier frames would have drawn.
+#
+# @frames: with @flips, vblanks the run may take at most (default 120)
+#
+# Returns: the frame counter, as @xemu-frame-advance returns it, with
+#     @render-flips
+#
+# Since: 10.2
+##
+{ 'command': 'xemu-render-next',
+  'data': { '*flips': 'int', '*frames': 'int' },
+  'returns': 'XemuFrameInfo', 'coroutine': true }

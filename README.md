@@ -1119,18 +1119,59 @@ Other automation interfaces (windowed or headless):
   - `occlusion-samples`: the zpass pixel counts the renderer wrote into
     reports, when they reached guest RAM (always 0 under the null
     renderer; a fill estimate under Vulkan that depends on the driver
-    and the surface scale).
+    and the surface scale; under `XEMU_RENDER_NULL_RAM` the counts the
+    renderer measured, while RAM gets the null renderer's 0).
 
   Everything but `occlusion-samples` is counted in PGRAPH's method path
   and the pusher, never in a renderer, so the null and Vulkan renderers
   count the same for the same command stream; but where the game reads
   zpass reports (Azurik's visibility tests) the values Vulkan writes
   change what it draws next, so Vulkan runs can count differently from
-  null ones. Under icount, counting started and stopped while paused
-  gives the same counts in every process (vanilla-ig-a1, 600 frames:
-  identical in two null processes and under Vulkan). Counting writes
+  null ones. With `XEMU_RENDER_NULL_RAM=1` (next item) Vulkan keeps the
+  null run's RAM and counts exactly what null counts, flip by flip,
+  with real `occlusion-samples` (pack 03's e7 fight, 600 frames).
+  Under icount, counting started and stopped while paused gives the
+  same counts in every process (vanilla-ig-a1, 600 frames: identical
+  in two null processes and under Vulkan). Counting writes
   nothing the guest sees: RAM digests are the same on and off. Off, it
   costs one predicted branch per pusher command and per counted method.
+- **Pictures with a null run's RAM**: `XEMU_RENDER_NULL_RAM=1` (with
+  the Vulkan renderer: offscreen `XEMU_HEADLESS=1`, or windowed) draws
+  every frame but leaves guest RAM exactly as the null renderer does:
+  each zpass report is 0 in RAM at its GET_REPORT, no rendered pixels
+  are written back to RAM (also not at `savevm`), and image blits don't
+  run. RAM digests then equal a null run's at every frame, and
+  `screendump` shows the frames that state draws. stderr says `xemu:
+  render null RAM: all`; any value but `1` and `request` is ignored,
+  with a line saying so. A texture the game samples from a render target
+  the renderer can't bind directly reads guest RAM, which holds no
+  rendered pixels here, and blitted pictures are missing, as under null.
+  In Azurik's e6 and e7 field states (the e7 fight included) the
+  pictures equal plain offscreen's to the pixel (frames 294-611).
+  `XEMU_RENDER_NULL_RAM=request` also skips draws, as the null renderer
+  does, so a run costs about what a null run costs, until QMP
+  `xemu-render-next {"flips": N}` (`render null RAM: request`): from the
+  guest's next flip it draws whole frames and runs the VM, as
+  `xemu-frame-advance` does, until N of them are drawn and the last is on
+  screen, then pauses and returns the frame info with `render-flips`,
+  the frames drawn by then (more than N when the guest drew another
+  before the stop, as in normal mode). `"frames"` caps the vblanks
+  (default 120); `render-flips` below N means the cap came first, as
+  on a first request with cold shader caches in normal mode (a windowed
+  KosmicKrisp run on fresh caches drew none in 120): raise it. Take the
+  `screendump` then; the next run skips draws again. Without `flips` it
+  only arms the draws for the VM's next run and the pause after it (or,
+  given while the VM runs, until it is paused and started again; a load
+  or save restarts the VM). A request the VM can't run (a failed load
+  left in restore-vm, shutdown, an error state) fails and arms nothing.
+  The first frame drawn lacks render targets earlier frames would have
+  drawn; for Azurik `"flips": 2` matches a run that drew every frame to
+  the pixel (e7 and e6 field states, 4-7 vblanks), `"flips": 1` within
+  23-48 pixels by one level on a process's first request and to the
+  pixel on later ones. RAM stays the null run's throughout (e7, e6, w1:
+  the same digest at 600 frames from null, every-frame and request runs;
+  checkpoint restores in e6, e7 and f3). A request needs `request` mode
+  and the Vulkan renderer; under null (`XEMU_HEADLESS=null`) it fails.
 - **Per-drive I/O log**: `XEMU_BLOCK_LOG=<file>` (from launch) or QMP
   `xemu-block-log-start {"filename": F}` (`"append": true` keeps F's rows)
   and `xemu-block-log-stop` (returns `{filename, rows}`) write one

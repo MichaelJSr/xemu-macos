@@ -263,6 +263,15 @@ typedef struct PGRAPHState {
     bool clearing; // FIXME: Internal
     /* QMP GPU counters on (gpu_counters.c): the method path's one test */
     bool gc_on;
+    /*
+     * XEMU_RENDER_NULL_RAM=request (vk/renderer.c): render_skip (qatomic)
+     * asks the renderer to skip draws; QMP xemu-render-next clears it for
+     * the VM's next run (render_armed_runs, main loop), pgraph.c.
+     */
+    bool render_on_request;
+    bool render_skip;
+    int render_armed_runs;
+    unsigned int render_drawn_flips;  /* qatomic: frames drawn, ever */
     bool waiting_for_nop;
     bool waiting_for_flip;
     /* deterministic mode: the next flush discards renderer state (load) */

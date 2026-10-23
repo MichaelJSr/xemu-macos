@@ -805,6 +805,13 @@ typedef struct PGRAPHVkState {
     VkFence command_buffer_fence;
     unsigned int command_buffer_start_time;
     bool in_command_buffer;
+    /*
+     * XEMU_RENDER_NULL_RAM: guest RAM stays as the null renderer leaves it
+     * (reports 0 at GET_REPORT, no surface write-backs, no blits);
+     * render_skipping: draws skipped until xemu-render-next (renderer.c).
+     */
+    bool null_ram;
+    bool render_skipping;
     uint32_t submit_count;
     /*
      * Highest submit_count whose fence has been observed signaled.

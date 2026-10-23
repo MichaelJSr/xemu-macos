@@ -49,6 +49,8 @@ static void early_context_init(void)
 #endif
 }
 
+static void null_ram_setup(NV2AState *d);
+
 static void pgraph_vk_init(NV2AState *d, Error **errp)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -100,6 +102,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     fprintf(stderr, "Display sharing: none (CPU fallback)\n");
 #endif
     (void)r;
+    null_ram_setup(d);
 }
 
 static void pgraph_vk_finalize(NV2AState *d)
@@ -449,6 +452,186 @@ static bool pgraph_vk_get_present_frame_peek(NV2AState *d,
 #else
     return false;
 #endif
+}
+
+/*
+ * XEMU_RENDER_NULL_RAM (xemu-macos 0.16.1): the Vulkan renderer draws, but
+ * guest RAM stays exactly as the null renderer leaves it, so a run's RAM
+ * digests are a null run's and pictures come from the same guest state.
+ * The null renderer writes each zpass report as 0 at GET_REPORT, writes no
+ * rendered pixels back to RAM and runs no blits; so does this mode (the
+ * report is still queried, for the GPU counters' occlusion-samples).
+ * "request" also skips draws, as the null renderer does, except in the VM
+ * run after QMP xemu-render-next (pgraph.c), which starts drawing at the
+ * next flip; a skip drops all renderer state, as a load does, and so does
+ * the start of drawing. Both modes ("1" and "request") replace the op
+ * table with the wrapped ops (null_ram_setup); runs without the variable
+ * keep the plain table.
+ */
+static PGRAPHRenderer pgraph_vk_renderer;
+static PGRAPHRenderer pgraph_vk_null_ram_renderer;
+
+/* 0: off, 1: every frame drawn ("1"), 2: draws on request ("request") */
+static int null_ram_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("XEMU_RENDER_NULL_RAM");
+        if (e && !strcmp(e, "1")) {
+            mode = 1;
+        } else if (e && !strcmp(e, "request")) {
+            mode = 2;
+        } else {
+            mode = 0;
+            if (e && *e && strcmp(e, "0")) {
+                fprintf(stderr, "xemu: ignoring XEMU_RENDER_NULL_RAM=%s "
+                        "(use 1 or request)\n", e);
+            }
+        }
+    }
+    return mode;
+}
+
+/* Renderer state from before a skip, or kept while skipping, is stale. */
+static void null_ram_drop_state(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+
+    pgraph_vk_finish(pg, VK_FINISH_REASON_FLUSH);
+    pgraph_vk_surface_flush(d);
+    pgraph_vk_mark_textures_possibly_dirty(d, 0, memory_region_size(d->vram));
+    pgraph_vk_update_vertex_ram_buffer(pg, 0, d->vram_ptr,
+                                       memory_region_size(d->vram));
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        pg->texture_dirty[i] = true;
+    }
+    pgraph_mark_all_state_dirty(pg);
+}
+
+/* Whether this op skips; a skip asked for takes effect at once. */
+static bool null_ram_skip(NV2AState *d)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (unlikely(!r->render_skipping &&
+                 qatomic_read(&d->pgraph.render_skip))) {
+        r->render_skipping = true;
+        null_ram_drop_state(d);
+    }
+    return r->render_skipping;
+}
+
+static void null_ram_draw_begin(NV2AState *d)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_draw_begin(d);
+    }
+}
+
+static void null_ram_draw_end(NV2AState *d)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_draw_end(d);
+    }
+}
+
+static void null_ram_flush_draw(NV2AState *d)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_flush_draw(d);
+    }
+}
+
+static void null_ram_clear_surface(NV2AState *d, uint32_t parameter)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_clear_surface(d, parameter);
+    }
+}
+
+static void null_ram_surface_update(NV2AState *d, bool upload,
+                                    bool color_write, bool zeta_write)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_surface_update(d, upload, color_write, zeta_write);
+    }
+}
+
+static void null_ram_clear_report_value(NV2AState *d)
+{
+    if (!null_ram_skip(d)) {
+        pgraph_vk_clear_report_value(d);
+    }
+}
+
+static void null_ram_get_report(NV2AState *d, uint32_t parameter)
+{
+    /* As the null renderer: 0, in RAM at once. */
+    pgraph_write_zpass_pixel_cnt_report(d, parameter, 0);
+    if (!null_ram_skip(d)) {
+        pgraph_vk_get_report(d, parameter);
+    }
+}
+
+static void null_ram_image_blit(NV2AState *d)
+{
+    /* As the null renderer: no blit reaches RAM. */
+}
+
+static void pgraph_vk_flip_stall(NV2AState *d);
+
+static void null_ram_flip_stall(NV2AState *d)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (!null_ram_skip(d)) {
+        pgraph_vk_flip_stall(d);
+        qatomic_inc(&d->pgraph.render_drawn_flips);
+        return;
+    }
+    if (!qatomic_read(&d->pgraph.render_skip)) {
+        /* xemu-render-next: draw from the next frame on, a whole frame. */
+        r->render_skipping = false;
+        null_ram_drop_state(d);
+    }
+    /*
+     * A skipped flip still counts as one for what pgraph_vk_flip_stall
+     * does besides drawing and presenting: the KosmicKrisp start window
+     * closes after its 600 flips (or a crash hours later is a strike),
+     * pipelines built in a short render window still get saved, and nsprof
+     * counts the guest's frames.
+     */
+    pgraph_vk_maybe_save_pipeline_cache(&d->pgraph);
+    pgraph_vk_driver_flip();
+    nsprof_flip_tick();
+}
+
+static void null_ram_setup(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int mode = null_ram_mode();
+
+    r->null_ram = mode != 0;
+    if (!mode) {
+        return;
+    }
+    PGRAPHRenderer *nr = &pgraph_vk_null_ram_renderer;
+    *nr = pgraph_vk_renderer;
+    nr->ops.draw_begin = null_ram_draw_begin;
+    nr->ops.draw_end = null_ram_draw_end;
+    nr->ops.flush_draw = null_ram_flush_draw;
+    nr->ops.clear_surface = null_ram_clear_surface;
+    nr->ops.surface_update = null_ram_surface_update;
+    nr->ops.clear_report_value = null_ram_clear_report_value;
+    nr->ops.get_report = null_ram_get_report;
+    nr->ops.image_blit = null_ram_image_blit;
+    nr->ops.flip_stall = null_ram_flip_stall;
+    pg->render_on_request = mode == 2;
+    qatomic_set(&pg->render_skip, mode == 2);
+    pg->renderer = nr;
+    fprintf(stderr, "xemu: render null RAM: %s\n",
+            mode == 2 ? "request" : "all");
 }
 
 static PGRAPHRenderer pgraph_vk_renderer = {

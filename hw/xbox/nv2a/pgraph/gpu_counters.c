@@ -8,7 +8,8 @@
  * method handlers (pgraph.c, vertex.c) and the PFIFO pusher (pfifo.c),
  * never in a renderer, so the null and Vulkan renderers count the same
  * work for the same command stream; only occlusion-samples comes from the
- * renderer (the values it writes into reports).
+ * renderer (the values it writes into reports, or under
+ * XEMU_RENDER_NULL_RAM the values it measured, vk/reports.c).
  *
  * Off (the default), every hook site costs one predicted branch on
  * pg->gc_on. On, the hooks read PGRAPH state and guest RAM (texture

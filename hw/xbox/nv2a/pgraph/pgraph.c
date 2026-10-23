@@ -30,6 +30,8 @@
 #include "util.h"
 #include "swizzle.h"
 #include "gpu_counters.h"
+#include "qapi/qapi-commands-xemu.h"
+#include "system/runstate.h"
 #include "nv2a_vsh_emulator.h"
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
@@ -3648,6 +3650,110 @@ void pgraph_report_sync_read(NV2AState *d, hwaddr addr, hwaddr len)
     if (pg->renderer->ops.report_sync_read) {
         pg->renderer->ops.report_sync_read(d, addr, len);
     }
+}
+
+/*
+ * XEMU_RENDER_NULL_RAM=request (vk/renderer.c): xemu-render-next lets the
+ * renderer draw (from the next flip) until the VM's run after the next one
+ * starts, and with flips runs the VM until that many frames are drawn and
+ * on screen. Main loop, BQL held.
+ */
+static void render_next_vm_state(void *opaque, bool running, RunState state)
+{
+    PGRAPHState *pg = opaque;
+
+    if (!running) {
+        return;
+    }
+    if (pg->render_armed_runs > 0) {
+        pg->render_armed_runs--;
+    } else {
+        qatomic_set(&pg->render_skip, true);
+    }
+}
+
+/* xemu-run's vblank stops (ui/xemu.c), here the drawn-frames stop. */
+void xemu_frame_advance_set_vblank_stop(bool (*fn)(void));
+/* The advance's run-state checks (ui/xemu.c). */
+bool xemu_frame_advance_check(int64_t frames, XemuTraceRegionList *trace,
+                              bool has_trace_every, int64_t trace_every,
+                              Error **errp);
+
+static unsigned int render_next_start, render_next_flips;
+static int render_next_after;
+
+/*
+ * At each vblank of the run, before the guest sees it: once the frames are
+ * drawn, the guest's handler for the next vblank puts the last on screen
+ * (Azurik writes the CRTC start there), so stop at the one after.
+ */
+static bool render_next_vblank_stop(void)
+{
+    unsigned int drawn =
+        qatomic_read(&g_nv2a->pgraph.render_drawn_flips) - render_next_start;
+    return drawn >= render_next_flips && ++render_next_after >= 2;
+}
+
+XemuFrameInfo *coroutine_fn qmp_xemu_render_next(bool has_flips, int64_t flips,
+                                                 bool has_frames,
+                                                 int64_t frames, Error **errp)
+{
+    static bool handler;
+    NV2AState *d = g_nv2a;
+    PGRAPHState *pg = d ? &d->pgraph : NULL;
+
+    if (!pg || !pg->render_on_request) {
+        error_setg(errp, "xemu-render-next needs XEMU_RENDER_NULL_RAM=request "
+                   "and the Vulkan renderer");
+        return NULL;
+    }
+    flips = has_flips ? flips : 0;
+    frames = has_frames ? frames : 120;
+    if (flips < 0 || frames < 1) {
+        error_setg(errp, "flips must not be negative, frames must be positive");
+        return NULL;
+    }
+    /*
+     * Refused before anything is armed: a request the VM can't run (a
+     * failed load left in restore-vm, shutdown, an error state) leaves the
+     * draws as they were, also without flips, which only arm the next run.
+     */
+    if (!xemu_frame_advance_check(frames, NULL, false, 0, errp)) {
+        return NULL;
+    }
+    if (!handler) {
+        qemu_add_vm_change_state_handler(render_next_vm_state, pg);
+        handler = true;
+    }
+    const int old_armed_runs = pg->render_armed_runs;
+    const bool old_skip = qatomic_read(&pg->render_skip);
+    pg->render_armed_runs = runstate_is_running() ? 0 : 1;
+    qatomic_set(&pg->render_skip, false);
+    render_next_start = qatomic_read(&pg->render_drawn_flips);
+    if (!flips) {
+        XemuFrameInfo *info = qmp_query_xemu_frame(errp);
+        info->has_render_flips = true;
+        info->render_flips = 0;
+        return info;
+    }
+
+    render_next_flips = flips;
+    render_next_after = 0;
+    xemu_frame_advance_set_vblank_stop(render_next_vblank_stop);
+    XemuFrameInfo *info = qmp_xemu_frame_advance(true, frames, false, NULL,
+                                                 false, 0, false, false,
+                                                 false, false, errp);
+    xemu_frame_advance_set_vblank_stop(NULL);
+    if (!info) {
+        /* Refused, nothing ran: put the draws back as they were. */
+        pg->render_armed_runs = old_armed_runs;
+        qatomic_set(&pg->render_skip, old_skip);
+        return NULL;
+    }
+    info->has_render_flips = true;
+    info->render_flips =
+        qatomic_read(&pg->render_drawn_flips) - render_next_start;
+    return info;
 }
 
 void pgraph_pre_savevm_trigger(NV2AState *d)
