@@ -326,6 +326,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_KI_IDLE_HALT=0` | Normal mode: the vCPU spins in the guest kernel's idle loop again instead of halting after 50 µs (icount always halts) | `i386/translate.c` |
 | `XEMU_BQL_SPIN=0` | Normal mode: the vCPU sleeps on a contended BQL at once instead of polling it for up to 10 µs first (icount never spins) | `system/cpus.c` |
 | `XEMU_VTX_SPAN_FINISH=0` | Vulkan: a vertex copy finishes the recording command buffer whenever it changes an uploaded page anywhere again, instead of only when it changes a byte a recorded draw reads (moves a few pixels by ≤2 levels on AGX, never RAM) | `vk/vertex.c` |
+| `XEMU_VK_CLEAR_IN_PASS=0` | Vulkan: each clear ends the render pass and gets one of its own again, instead of recording into the open pass (pbkit text frames: ~1700 passes a flip again) | `vk/draw.c` |
 | `XEMU_BASE_PATH=<dir>` | Data folder (shader/pipeline caches; `xemu.toml`/`eeprom.bin` when nothing names them), ahead of portable mode. The benches set it | `ui/xemu-settings.cc` |
 | `XEMU_LOADVM_ADD_PADS=1` | A load or checkpoint restore that stops at a pad (hub) the machine lacks plugs it and loads again | `ui/xemu-input-bind.c`, `migration/savevm.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |

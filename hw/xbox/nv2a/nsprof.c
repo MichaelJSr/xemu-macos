@@ -78,6 +78,7 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_RENDERPASS_CAUSE_CLEAR] = "rpcause_clear",
     [NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD] = "rpcause_texupload",
     [NSPROF_EV_RENDERPASS_CAUSE_OTHER] = "rpcause_other",
+    [NSPROF_EV_CLEAR] = "clears",
     [NSPROF_EV_PUSH_STEP_PUBLISH] = "push_step_publish",
     [NSPROF_EV_PUSH_RING_DROP] = "push_ring_drop",
     [NSPROF_EV_PUSH_POLICY_SKIP] = "push_policy_skip",

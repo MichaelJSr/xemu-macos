@@ -965,6 +965,10 @@ static void check_raster_state_maps(void)
 
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
+    const char *clear_env = getenv("XEMU_VK_CLEAR_IN_PASS");
+    pg->vk_renderer_state->clear_in_pass =
+        !(clear_env && !strcmp(clear_env, "0"));
+
     check_raster_state_maps();
     init_frame_dynamic_states(pg->vk_renderer_state);
     init_pipeline_cache(pg);
@@ -2665,8 +2669,12 @@ static void begin_draw(PGRAPHState *pg)
      * Visibility testing: rotate / stop occlusion queries inside the
      * render pass. Ending or beginning a query no longer ends the
      * pass (see the bulk vkCmdResetQueryPool at command-buffer
-     * begin); the pass now only ends for clears, render-target
-     * changes, non-draw commands and submits.
+     * begin). A clear ends the query, never the pass: it records into
+     * the open pass, in rasterization order with the draws around it
+     * (vkCmdClearAttachments, or the clear pipeline's draw for a
+     * partial color mask), so the pass ends only for render-target
+     * changes, non-draw commands and submits. XEMU_VK_CLEAR_IN_PASS=0
+     * gives each clear a pass of its own again.
      */
     if (r->query_in_flight &&
         (pg->clearing || !pg->zpass_pixel_count_enable ||
@@ -2674,7 +2682,7 @@ static void begin_draw(PGRAPHState *pg)
         end_query(r);
     }
 
-    if (pg->clearing) {
+    if (pg->clearing && !r->clear_in_pass) {
         if (r->in_render_pass) {
             nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_CLEAR);
         }
@@ -2766,7 +2774,7 @@ static void end_draw(PGRAPHState *pg)
 
     nsprof_merge_classify(pg);
 
-    if (pg->clearing) {
+    if (pg->clearing && !r->clear_in_pass) {
         if (r->in_render_pass) {
             nsprof_event(NSPROF_EV_RENDERPASS_CAUSE_CLEAR);
         }
@@ -2938,6 +2946,7 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
     }
 
     r->clear_parameter = parameter;
+    nsprof_event(NSPROF_EV_CLEAR);
 
     uint32_t clearrectx = pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTX);
     uint32_t clearrecty = pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTY);

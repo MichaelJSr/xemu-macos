@@ -24,8 +24,8 @@ Since 2026-10-15 (owner decision) a shipped change keeps a behavior
 switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
-`XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE` and
-`XEMU_VTX_SPAN_FINISH`, the first nine rows. The
+`XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
+`XEMU_VTX_SPAN_FINISH` and `XEMU_VK_CLEAR_IN_PASS`, the first ten rows. The
 former `=0` row, `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass, became
 the `perf.cache_shaders` setting on 2026-10-18.
 Knobs that exist only in the retired wave-1 work are recorded in
@@ -43,6 +43,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_BQL_SPIN` | Normal mode, **default on since 2026-10-16**: the vCPU polls a contended BQL with trylock for up to 10 µs before it sleeps on it (`bql_lock_spin`); `0` sleeps at once. Deterministic mode's RR thread never spins. Threads + runtime |
 | `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
 | `XEMU_VTX_SPAN_FINISH` | Vulkan renderer, **default on since 2026-10-17**: a copy into the vertex RAM mirror finishes the recording command buffer only when it changes a byte one of that buffer's draws reads (the slot's read spans, on every page they read); `0` restores the page-wide check (finish when the copy changes a page the recording window uploaded, anywhere on it). Pass splits move a few pixels on AGX, so the null-renderer goldens can't see it; RAM is the same either way. Refuter: `XEMU_VTX_SPAN_REFUTE` |
+| `XEMU_VK_CLEAR_IN_PASS` | Vulkan renderer, **default on since 2026-10-23**: an NV097_CLEAR_SURFACE records into the open render pass (it ends the occlusion query, never the pass); `0` ends the pass before and after every clear again, so each clear pays a full-surface load and store. Pass splits can move pixels on AGX and the null-renderer goldens never reach `vk/draw.c`. nsprof `clears` counts clears, `rpcause_clear` the passes they end under `0`. Vulkan renderer (pgraph/vk) |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -2347,6 +2348,47 @@ x86_64 host (Windows, Linux, Intel macOS).
   PFIFO thread bury most of it. With the inline pusher (Threads +
   runtime, 2026-10-19) underneath, 4 pairs: heavy-f1 Mcyc/frame −4.2%,
   wall fps +9.6%, stream-e2 −5.1%, +11.9% (4/4). Normal mode unchanged.
+- **Clears stay in the open render pass (2026-10-23, default on;
+  `XEMU_VK_CLEAR_IN_PASS=0` restores a pass per clear).** `begin_draw`
+  and `end_draw` ended the render pass around every NV097_CLEAR_SURFACE
+  (upstream `ca42f0f2df`, "for now", from when queries forced pass
+  breaks), so each clear paid a full-surface LOAD/STORE pass. A clear
+  now ends the occlusion query, never the pass: `vkCmdClearAttachments`
+  (or the clear pipeline's draw for a partial color mask) records into
+  the open pass in rasterization order, and the primer query is the only
+  first-pass guard left. nsprof `clears` counts clears. pbkit/nxdk text
+  frames draw with clears. On v0.16 here (headless offscreen, MoltenVK
+  1.4.3, load 110-140), the nxdk FPU test's text frames ran 1700 passes
+  a flip, all made by clears, with no draws: fence_wait 64-93 ms a flip,
+  9-15 flips/s at surface_scale 1 and 2 alike (a fixed cost per pass).
+  MMX: 2471 passes, 112-119 ms, 8.6 flips/s. With the change both run 2
+  passes a flip, fence_wait 3 µs, at the 60 fps vblank cap, and xemu's
+  GPU-busy share drops from 39-78% to 3%. The M2MF test, which aborted
+  v0.16 here every time (a command buffer of clear passes failed with
+  `kIOGPUCommandBufferCallbackErrorOutOfMemory`, then MoltenVK's device
+  loss), now runs to its results screen; its notifier tests fail as on
+  CI. Azurik, windowed `bench-savestate-ab` (2 pairs × 45 s, scene gate,
+  load 70-130), steady-scene means: heavy-f1 9.8 → 6.2 passes a flip and
+  W2 9.1 → 6.1, `rpcause_clear` 5.0 → 0 and `rpcause_surface` 2.0 → 4.0
+  in both (a clear followed by a target change now ends its pass there),
+  clears 4.0 a flip and draws/flip equal in both arms, fps at the cap in
+  both, screenshots PASS. Of heavy-f1's 4 clears a flip, 3 clear colour
+  and depth and 1 depth only, through `vkCmdClearAttachments`; none
+  takes the partial-colour-mask clear pipeline, which no compared scene
+  exercises (heavy-f1, W2, stream-e2 counted). Det offscreen RAM and
+  screendumps are identical in every arm run (base, `0`, default):
+  MoltenVK heavy-f1 f300/f600, stream-e2 and W2 f600, and the FPU
+  (f1500), MMX (f2400), SSE and TestFloat (f3600) tests from cold boot;
+  KosmicKrisp heavy-f1 and stream-e2 f600 (RAM in 4/4 runs per arm, and
+  screendumps). KosmicKrisp windowed heavy-f1, same binary (4 pairs × 60
+  s): 9.4 → 6.5 passes a flip, fps at the cap in both arms (+0.15%,
+  signs 2/2), screenshots PASS. `XEMU_MAX_QUERIES=64` runs clean for 60
+  s windowed (heavy-f1, W2) and headless (heavy-f1, W2), with
+  `finish_queries_full` 15 a flip on heavy-f1 (as with `0`) and 5 on W2,
+  and det offscreen heavy-f1 keeps its RAM. Det offscreen Minsns/frame
+  vs `0`: heavy-f1 −0.69%, stream-e2 −0.57%, W2 −0.27% (2/2 each). No
+  Azurik fps claim: its GPU work is slack at the cap. Not run: the
+  xemu-test harness itself (Roswell BIOS; CI runs it on every push).
 
 ### MetalFX + presentation
 

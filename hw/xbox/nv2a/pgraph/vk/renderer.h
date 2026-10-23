@@ -1028,6 +1028,11 @@ typedef struct PGRAPHVkState {
      * (default); XEMU_VTX_SPAN_FINISH=0 restores the page-wide check.
      */
     bool vtx_span_finish;
+    /*
+     * A clear records into the open render pass (default);
+     * XEMU_VK_CLEAR_IN_PASS=0 gives each clear a pass of its own again.
+     */
+    bool clear_in_pass;
     /* XEMU_VTX_SPAN_REFUTE=1; vertices the next bound draw reads. */
     bool vtx_span_refute;
     uint32_t refute_draw_vertices;

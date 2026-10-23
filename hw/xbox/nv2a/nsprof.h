@@ -150,6 +150,7 @@ enum NsprofEvent {
     NSPROF_EV_RENDERPASS_CAUSE_CLEAR,     /* NV097_CLEAR_SURFACE boundary */
     NSPROF_EV_RENDERPASS_CAUSE_TEXUPLOAD, /* compute-unswizzle interleave */
     NSPROF_EV_RENDERPASS_CAUSE_OTHER,     /* surface create / RTT nondraw */
+    NSPROF_EV_CLEAR,          /* NV097_CLEAR_SURFACE reaching the renderer */
     /* push-present ring pacing (see display.c) */
     NSPROF_EV_PUSH_STEP_PUBLISH,   /* schedule step pushed into the ring */
     NSPROF_EV_PUSH_RING_DROP,      /* producer overwrote an unread entry */
