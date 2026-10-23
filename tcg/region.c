@@ -46,9 +46,25 @@
 #define PROT_EXEC   4
 #endif
 
+/*
+ * A region's TBs by host address, for tcg_tb_lookup. A thread gets whole
+ * regions and allocates bodies upwards in them (the hot parts of their
+ * chunks, with TCG_TARGET_COLD_CODE), so an insert is nearly always an
+ * append to a sorted array, where a balanced tree spent a node allocation
+ * and a walk of ~16 levels per TB; lookups bisect.
+ */
+typedef struct TBTreeEntry {
+    const void *ptr;            /* tb->tc.ptr */
+    TranslationBlock *tb;
+} TBTreeEntry;
+
 struct tcg_region_tree {
     QemuMutex lock;
-    QTree *tree;
+    TBTreeEntry *tbs;           /* ascending ptr */
+    size_t n, cap;
+#ifdef CONFIG_DEBUG_TCG
+    QTree *tree;                /* the old tree, to check every lookup */
+#endif
     /* padding to avoid false sharing is computed at run-time */
 };
 
@@ -129,6 +145,7 @@ void *tcg_splitwx_to_rw(const void *rx)
 }
 #endif /* CONFIG_DEBUG_TCG */
 
+#ifdef CONFIG_DEBUG_TCG
 /* compare a pointer @ptr and a tb_tc @s */
 static int ptr_cmp_tb_tc(const void *ptr, const struct tb_tc *s)
 {
@@ -170,11 +187,29 @@ static gint tb_tc_cmp(gconstpointer ap, gconstpointer bp, gpointer userdata)
     }
     return ptr_cmp_tb_tc(b->ptr, a);
 }
+#endif
 
 static void tb_destroy(gpointer value)
 {
     TranslationBlock *tb = value;
     qemu_spin_destroy(&tb->jmp_lock);
+}
+
+/* The number of entries whose ptr is <= @p. */
+static size_t tb_tree_upper(const struct tcg_region_tree *rt, const void *p)
+{
+    size_t lo = 0, hi = rt->n;
+
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+
+        if (rt->tbs[mid].ptr <= p) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
 }
 
 static void tcg_region_trees_init(void)
@@ -187,7 +222,11 @@ static void tcg_region_trees_init(void)
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
         qemu_mutex_init(&rt->lock);
-        rt->tree = q_tree_new_full(tb_tc_cmp, NULL, NULL, tb_destroy);
+        rt->tbs = NULL;
+        rt->n = rt->cap = 0;
+#ifdef CONFIG_DEBUG_TCG
+        rt->tree = q_tree_new_full(tb_tc_cmp, NULL, NULL, NULL);
+#endif
     }
 }
 
@@ -223,20 +262,53 @@ static struct tcg_region_tree *tc_ptr_to_region_tree(const void *p)
 void tcg_tb_insert(TranslationBlock *tb)
 {
     struct tcg_region_tree *rt = tc_ptr_to_region_tree(tb->tc.ptr);
+    size_t i;
 
     g_assert(rt != NULL);
     qemu_mutex_lock(&rt->lock);
+    i = rt->n;
+    if (unlikely(i && rt->tbs[i - 1].ptr >= (const void *)tb->tc.ptr)) {
+        i = tb_tree_upper(rt, tb->tc.ptr);
+        if (i && rt->tbs[i - 1].ptr == tb->tc.ptr) {
+            /* A recycled TB, still here: replace, as the tree's insert did */
+            g_assert(rt->tbs[i - 1].tb->tc.size == tb->tc.size);
+            tb_destroy(rt->tbs[i - 1].tb);
+            rt->tbs[i - 1].tb = tb;
+            goto out;
+        }
+    }
+    if (rt->n == rt->cap) {
+        rt->cap = rt->cap ? rt->cap * 2 : 1024;
+        rt->tbs = g_renew(TBTreeEntry, rt->tbs, rt->cap);
+    }
+    memmove(&rt->tbs[i + 1], &rt->tbs[i], (rt->n - i) * sizeof(*rt->tbs));
+    rt->tbs[i] = (TBTreeEntry){ tb->tc.ptr, tb };
+    rt->n++;
+ out:
+#ifdef CONFIG_DEBUG_TCG
     q_tree_insert(rt->tree, &tb->tc, tb);
+    g_assert(q_tree_nnodes(rt->tree) == rt->n);
+#endif
     qemu_mutex_unlock(&rt->lock);
 }
 
 void tcg_tb_remove(TranslationBlock *tb)
 {
     struct tcg_region_tree *rt = tc_ptr_to_region_tree(tb->tc.ptr);
+    size_t i;
 
     g_assert(rt != NULL);
     qemu_mutex_lock(&rt->lock);
+    i = tb_tree_upper(rt, tb->tc.ptr);
+    if (i && rt->tbs[i - 1].ptr == tb->tc.ptr) {
+        tb_destroy(rt->tbs[i - 1].tb);
+        memmove(&rt->tbs[i - 1], &rt->tbs[i], (rt->n - i) * sizeof(*rt->tbs));
+        rt->n--;
+    }
+#ifdef CONFIG_DEBUG_TCG
     q_tree_remove(rt->tree, &tb->tc);
+    g_assert(q_tree_nnodes(rt->tree) == rt->n);
+#endif
     qemu_mutex_unlock(&rt->lock);
 }
 
@@ -248,15 +320,25 @@ void tcg_tb_remove(TranslationBlock *tb)
 TranslationBlock *tcg_tb_lookup(uintptr_t tc_ptr)
 {
     struct tcg_region_tree *rt = tc_ptr_to_region_tree((void *)tc_ptr);
-    TranslationBlock *tb;
-    struct tb_tc s = { .ptr = (void *)tc_ptr };
+    TranslationBlock *tb = NULL;
+    const void *p = (const void *)tc_ptr;
+    size_t i;
 
     if (rt == NULL) {
         return NULL;
     }
 
     qemu_mutex_lock(&rt->lock);
-    tb = q_tree_lookup(rt->tree, &s);
+    i = tb_tree_upper(rt, p);
+    if (i && p < rt->tbs[i - 1].ptr + rt->tbs[i - 1].tb->tc.size) {
+        tb = rt->tbs[i - 1].tb;
+    }
+#ifdef CONFIG_DEBUG_TCG
+    {
+        struct tb_tc s = { .ptr = (void *)tc_ptr };
+        g_assert(q_tree_lookup(rt->tree, &s) == tb);
+    }
+#endif
     qemu_mutex_unlock(&rt->lock);
     return tb;
 }
@@ -291,7 +373,14 @@ void tcg_tb_foreach(GTraverseFunc func, gpointer user_data)
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
-        q_tree_foreach(rt->tree, func, user_data);
+        /* In address order; a true return ends this region's walk. */
+        for (size_t j = 0; j < rt->n; j++) {
+            TranslationBlock *tb = rt->tbs[j].tb;
+
+            if (func(&tb->tc, tb, user_data)) {
+                break;
+            }
+        }
     }
     tcg_region_tree_unlock_all();
 }
@@ -305,7 +394,7 @@ size_t tcg_nb_tbs(void)
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
-        nb_tbs += q_tree_nnodes(rt->tree);
+        nb_tbs += rt->n;
     }
     tcg_region_tree_unlock_all();
     return nb_tbs;
@@ -319,9 +408,15 @@ static void tcg_region_tree_reset_all(void)
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
+        for (size_t j = 0; j < rt->n; j++) {
+            tb_destroy(rt->tbs[j].tb);
+        }
+        rt->n = 0;
+#ifdef CONFIG_DEBUG_TCG
         /* Increment the refcount first so that destroy acts as a reset */
         q_tree_ref(rt->tree);
         q_tree_destroy(rt->tree);
+#endif
     }
     tcg_region_tree_unlock_all();
 }
