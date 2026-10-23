@@ -60,6 +60,7 @@
 #define WATCH_PEND_MAX 16
 /* Virtual pages flushed one by one at start and stop; more: a full flush. */
 #define WATCH_FLUSH_PAGES 1024
+#define WATCH_NO_RAM UINT64_MAX
 
 int64_t xemu_frame_count(void);
 
@@ -73,6 +74,7 @@ typedef struct WatchRange {
 typedef struct WatchHit {
     int64_t frame;
     uint64_t pc, addr, paddr;
+    uint64_t ram;               /* offset in xbox.ram, or WATCH_NO_RAM */
     uint32_t size;
     uint32_t voff;              /* value bytes in watch_values */
     uint8_t vlen;               /* 0: no value (I/O) */
@@ -96,6 +98,9 @@ static WatchRange *watch_ranges;
 static int watch_nranges;
 static int64_t watch_max;
 static WatchLog watch_log;
+/* xbox.ram's host bytes: a hit's RAM address (BAR1 reaches it at 0xF0000000). */
+static uintptr_t watch_ram_host;
+static uint64_t watch_ram_size;
 static uint32_t watch_pend[WATCH_PEND_MAX];
 static int watch_npend;
 static bool watch_fill_queued;
@@ -280,6 +285,8 @@ void xemu_watch_check(CPUState *cpu, vaddr addr, vaddr len, int flags,
         .pc = watch_pc(cpu, ra),
         .addr = addr,
         .paddr = paddr,
+        .ram = h8 && (uintptr_t)h8 - watch_ram_host < watch_ram_size ?
+               (uintptr_t)h8 - watch_ram_host : WATCH_NO_RAM,
         .size = len,
         .access = match,
         .host = h8,
@@ -356,6 +363,8 @@ typedef struct WatchStart {
     WatchRange *ranges;
     int n;
     int64_t max;
+    uintptr_t ram;
+    uint64_t ram_size;
 } WatchStart;
 
 static void watch_start_work(CPUState *cpu, run_on_cpu_data data)
@@ -366,6 +375,8 @@ static void watch_start_work(CPUState *cpu, run_on_cpu_data data)
     watch_ranges = s->ranges;
     watch_nranges = s->n;
     watch_max = s->max;
+    watch_ram_host = s->ram;
+    watch_ram_size = s->ram_size;
     watch_rerun = WATCH_RERUN_NONE;
     watch_log_new();
     qatomic_set(&xemu_watch_active, true);
@@ -411,6 +422,11 @@ static XemuWatchLog *watch_log_to_qapi(WatchLog *l)
         q->pc = h->pc;
         q->address = h->addr;
         q->physical = h->paddr;
+        if (h->ram != WATCH_NO_RAM && h->ram != h->paddr) {
+            /* An alias of RAM: NV2A BAR1 at 0xF0000000. */
+            q->has_ram_address = true;
+            q->ram_address = h->ram;
+        }
         q->size = h->size;
         q->access = h->access == BP_MEM_READ ? XEMU_WATCH_ACCESS_R :
                     h->access == BP_MEM_WRITE ? XEMU_WATCH_ACCESS_W :
@@ -461,6 +477,8 @@ void qmp_xemu_watch_start(XemuWatchRangeList *ranges, bool has_max,
     }
     s.ranges = g_new0(WatchRange, s.n);
     s.max = max;
+    s.ram = ram;
+    s.ram_size = ram_size;
     int i = 0;
     for (XemuWatchRangeList *l = ranges; l; l = l->next, i++) {
         XemuWatchRange *q = l->value;

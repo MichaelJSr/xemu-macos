@@ -794,8 +794,15 @@ Other automation interfaces (windowed or headless):
   `{frame, pc, address, physical, size, access, value}`: `pc` is the
   accessing instruction, and `value` holds the bytes in hex (at most 64),
   that is, what a read read and what a write left. MMIO hits have no
-  `value`. Hits past `"max"` (default 100000, up to 1000000) are only
-  counted, in `dropped`. Under icount the log is the same in every run and
+  `value`. A hit that reached RAM through another mapping of it, NV2A
+  BAR1's window at `0xF0000000` (all of RAM), matches a physical range
+  at its RAM address and also carries `ram-address`, the RAM address it
+  reached (its offset in `XEMU_RAM_SHM` and in `xemu-dump-ram`'s file),
+  while `physical` stays the bus address: a store at `0xF4100000` on 128
+  MiB logs `physical` `0xf4100000`, `ram-address` `0x4100000`. Hits at
+  RAM's own addresses have no `ram-address`, as before. Hits past
+  `"max"` (default 100000, up to 1000000) are only counted, in
+  `dropped`. Under icount the log is the same in every run and
   the guest's RAM is the same as without it. Start the log while paused
   for an exact first instruction. Not logged: device DMA and page-table
   walks. An access that crosses a page boundary gives one hit per page.
