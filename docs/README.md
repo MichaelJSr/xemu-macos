@@ -27,13 +27,14 @@ xemu-history), not here.
 | [`roadmap.md`](roadmap.md) | The open candidates, each with its decision inputs and bar. Closed entries leave it for the ledger and `Finished/`. |
 | [`RELEASING-macos.md`](RELEASING-macos.md) | The release runbook, used every release. |
 | [`windows-gating-audit.md`](windows-gating-audit.md) | The cross-platform gating register and the list of changes that still need real-hardware validation. The release runbook and roadmap item 5 depend on it. |
+| [`windows-test-plan.md`](windows-test-plan.md) | The runbook for real-Windows-hardware sessions: CLAUDE.md's rules mapped to Windows paths and tools, the kit setup and helpers, the test blocks (smoke, the fork's Windows paths, deterministic goldens, performance, Roswell) and the results template. CLAUDE.md sends Windows sessions to it; the gating audit records its runs. |
 | [`kosmickrisp.md`](kosmickrisp.md) | KosmicKrisp, the opt-in Vulkan driver on macOS 26 beside the default MoltenVK: how the driver is chosen, the strike marker, `XEMU_VK_DRIVER`, building KK, the gate and its v0.16 results, what flips Auto back, open items and the measurements. |
 | `README.md` | This index. |
 
 ## Campaigns
 
-- [`windows-port-2026-09.md`](Campaigns/windows-port-2026-09.md): the native Windows port. Paused since 2026-09-08.
-- [`windows-audit-2026-09-summary.md`](Campaigns/windows-audit-2026-09-summary.md) and its source data [`windows-audit-2026-09.json`](Campaigns/windows-audit-2026-09.json): the port's audit backlog.
+- [`windows-port-2026-09.md`](Campaigns/windows-port-2026-09.md): the native Windows port: setup recipe, the 2026-09 session, and the audit batch plan with per-batch status (2026-10-18); the live Windows debt is in `windows-gating-audit.md` §W.
+- [`windows-audit-2026-09-summary.md`](Campaigns/windows-audit-2026-09-summary.md) and its source data [`windows-audit-2026-09.json`](Campaigns/windows-audit-2026-09.json): the port's audit backlog (2026-09-07 snapshot).
 
 ## Future
 

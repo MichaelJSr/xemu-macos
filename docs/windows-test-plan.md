@@ -857,7 +857,6 @@ $env:XEMU_LOADVM_ADD_PADS = '1'
 py -3 $Bench azurik-heavy-f1 XEMU_BQL_SPIN 3 60 "$Res\bench-bqlspin" --exe $XNew              # B no spin, E spin (default)
 py -3 $Bench azurik-heavy-f1 XEMU_KI_IDLE_HALT 3 60 "$Res\bench-kiidle" --exe $XNew          # B spin in KiIdleLoop, E halt (default)
 py -3 $Bench azurik-heavy-f1 XEMU_PFIFO_STALL_DOORBELL 3 60 "$Res\bench-stalldb" --exe $XNew # B always wake, E default
-py -3 $Bench azurik-heavy-f1 XEMU_SSE_HOST 3 60 "$Res\bench-ssehost" --exe $XNew             # x86_64 v0.15.1 only; later builds have it on
 ```
 
 Pass for each default: E is no slower than B within noise, and CPU% isn't worse. The KiIdle halt depends on Windows condition-variable wake latency and the BQL spin on QueryPerformanceCounter cost, so a regression is a plausible Windows-only finding. For the DSP engine (audit batch 21, most useful on ARM64), the bench can't vary the config between arms. Run the 4.3 heavy-f1 baseline twice instead: once with the default template, and once with `--config-template` pointing at a copy that has `Set-TomlKey <copy> 'audio' 'use_dsp_jit' 'false'`. Set `$env:XEMU_APU_PROF = '1'` in the session for both, and compare fps, CPU% and the `apu: utilization` lines in the run logs.
@@ -868,10 +867,10 @@ Pass for each default: E is no slower than B within noise, and CPU% isn't worse.
 
 ```powershell
 . C:\xemu-kit\tools\kit.ps1
-$o = "$Res\det-ab-sse.jsonl"
+$o = "$Res\det-ab-hardfpu.jsonl"
 1..4 | ForEach-Object {
   py -3 $Det --exe $XNew --label base --hash-at 1200 --out $o
-  py -3 $Det --exe $XNew --label sse1 --hash-at 1200 --env XEMU_SSE_HOST=1 --out $o
+  py -3 $Det --exe $XNew --label softfpu --hash-at 1200 --set perf.hard_fpu=false --out $o
 }
 Get-Content $o | ConvertFrom-Json | Group-Object label | ForEach-Object {
   [pscustomobject]@{ arm = $_.Name; n = $_.Count
@@ -880,7 +879,7 @@ Get-Content $o | ConvertFrom-Json | Group-Object label | ForEach-Object {
     hashes = ($_.Group.hashes | Select-Object -Unique) -join ' | ' } } | Format-Table -AutoSize
 ```
 
-Pass: one unique hash per arm. Quote the Mcyc/frame delta and how many pairs favour each arm. On v0.15.1 the `sse1` arm's hash differs (its host path dropped the sticky MXCSR flags; later builds raise them and have it on by default, so use this recipe with another variable there), and `--pmc` adds instructions and core cycles per frame.
+Pass: one unique hash per arm. Quote the Mcyc/frame delta and how many pairs favour each arm. The `softfpu` arm's hash differs from `base` by design. Other CPU-side A/Bs swap the `--set` or `--env` arm, or pass `--exe` per arm for cross-binary pairs (4.8); the 4.5 normal-mode switches do nothing under icount, so they don't belong in this recipe. `--pmc` adds instructions and core cycles per frame.
 
 ### 4.7 Upstream xemu as a reference [owner, 10 min, P2]
 

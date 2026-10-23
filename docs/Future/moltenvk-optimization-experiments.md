@@ -7,6 +7,9 @@
 > on a ≥ 16 ms compile that survives a warm rerun). Driver
 > versions below are as of 2026-07-21: releases now bundle MoltenVK 1.4.2
 > and local builds use the pin in `scripts/build-moltenvk.sh`.
+> Experiment B's current flow was updated 2026-10-23 for the
+> pipeline-cache save thread (v0.15.1, `42900e676d`) and the fatal
+> `VK_CHECK` (v0.15, `3147640b9b`); code is cited by symbol.
 
 Research record for two MoltenVK optimizations that came out of the
 2026-07-21 deep audit of the fork's bundled MoltenVK on Apple Silicon
@@ -249,21 +252,24 @@ they clear on *correctness value*, not fps.
 
 ### Current flow
 
-Pipeline creation is **fully synchronous on the single PFIFO emulation
-thread**, on the hot draw path. Chain:
-`pfifo_thread` → `pgraph_method` → `pgraph_vk_flush_draw/draw_end`
-(`draw.c:3020/2444`) → `begin_pre_draw` → `create_pipeline`
-(`draw.c:1131`) → `vkCreateGraphicsPipelines` (`draw.c:1489`, blocking).
-The invariant is explicit (`draw.c:530-532`: *"All pipeline creation
-happens on this thread, so no external synchronization of the
-VkPipelineCache is needed."*).
+Pipeline creation is **fully synchronous**, on the hot draw path. Chain:
+`pfifo_thread` → `pgraph_method` → `pgraph_vk_flush_draw` /
+`pgraph_vk_draw_end` → `begin_pre_draw` → `create_pipeline` →
+`vkCreateGraphicsPipelines` (blocking). Creation is serialized by
+`pgraph.lock`: on the PFIFO thread in normal mode, and under icount on
+the thread running the inline pusher (`pfifo_icount_sync`, usually the
+vCPU). Since v0.15.1 the `VkPipelineCache` is shared with a background
+saver (`pipeline_cache_save_thread`, `vkGetPipelineCacheData`), so it
+stays internally synchronized (never
+`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`), and a creation
+can wait on a running save's serialization.
 
 Two-tier cache makes steady state compile-free: an in-memory LRU
-(`r->pipeline_cache`, 4096 entries) keyed by `PipelineKey`
-(`renderer.h:70-86`), backed by a driver `VkPipelineCache` persisted to
-disk (`pipeline_cache.bin`, load `draw.c:559-574`, flush at flips
-`draw.c:534-551`). On an LRU hit the handle is reused with **zero
-compile** (`draw.c:1186-1192`).
+(`r->pipeline_cache`, 4096 entries) keyed by `PipelineKey`, backed by
+a driver `VkPipelineCache` persisted to disk (`pipeline_cache.bin`,
+loaded in `init_pipeline_cache`, saved off-thread at flips once it grew,
+`pgraph_vk_maybe_save_pipeline_cache`). On an LRU hit (the `lru_lookup`
+hit in `create_pipeline`) the handle is reused with **zero compile**.
 
 ### Hitch cost
 
@@ -274,7 +280,7 @@ thread. SPIRV-Cross runs single-threaded there; the Metal steps
 (`MVKSync.mm:455`, timeout `metalCompileTimeout` default `INT64_MAX`).
 This does not corrupt an in-flight present (present is on the UI thread)
 but **stalls production of the new frame and the flip ack**
-(`renderer.c:320-347`), i.e. a frame-time spike / dropped frame. Misses
+(`pgraph_vk_flip_stall`), i.e. a frame-time spike / dropped frame. Misses
 **serialize on one thread**, so entering a scene with N first-encounter
 pipelines is an N× multi-frame hitch. xemu already instruments this:
 `NSPROF_PIPELINE_GEN` / `NV2A_PROF_PIPELINE_GEN`.
@@ -298,8 +304,8 @@ substitutes.
 
 | Option | MoltenVK support (this pin) | Verdict |
 |---|---|---|
-| (a) Parallel prewarm at startup/idle | thread-safe: cache guarded by `_shaderCacheLock`, compilers `@synchronized(getMTLDevice())` | **Best if anything.** Persist the `PipelineKey` set from prior sessions; a worker recreates them concurrently into the shared `VkPipelineCache`; hand finished handles to the PFIFO thread for LRU insertion at flip boundaries. xemu-side caches must stay single-threaded. ~200–400 LOC. Moderate risk. |
-| (b) `pipeline_creation_cache_control` + `FAIL_ON_COMPILE_REQUIRED` | **supported** (`MVKExtensions.def:164`); fail-fast confirmed (`MVKShaderModule.mm:326`, `MVKPipeline.mm:2385`) | **Rejected for live draws.** Dropping an NV2A draw for a frame can leave a render-to-texture surface stale and cascade into corruption — unacceptable for frame-accurate emulation. Keep only as a cheap "is-cached?" probe building block for (a). Also requires replacing `VK_CHECK` at `draw.c:1489` (it `__builtin_trap()`s on the positive `VK_PIPELINE_COMPILE_REQUIRED`). |
+| (a) Parallel prewarm at startup/idle | thread-safe: cache guarded by `_shaderCacheLock`, compilers `@synchronized(getMTLDevice())` | **Best if anything.** Persist the `PipelineKey` set from prior sessions; a worker recreates them concurrently into the shared `VkPipelineCache` (already shared with the save thread); hand finished handles to the PFIFO thread for LRU insertion at flip boundaries. xemu-side caches must stay single-threaded. ~200–400 LOC. Moderate risk. |
+| (b) `pipeline_creation_cache_control` + `FAIL_ON_COMPILE_REQUIRED` | **supported** (`MVKExtensions.def:164`); fail-fast confirmed (`MVKShaderModule.mm:326`, `MVKPipeline.mm:2385`) | **Rejected for live draws.** Dropping an NV2A draw for a frame can leave a render-to-texture surface stale and cascade into corruption — unacceptable for frame-accurate emulation. Keep only as a cheap "is-cached?" probe building block for (a). Also requires replacing the `VK_CHECK` on `create_pipeline`'s `vkCreateGraphicsPipelines` (any result but `VK_SUCCESS`, including the positive `VK_PIPELINE_COMPILE_REQUIRED`, ends the process through `pgraph_vk_fatal_error`). |
 | (c) `VK_EXT_graphics_pipeline_library` | **absent** from `MVKExtensions.def` | Off the table without patching MoltenVK; poor fit for NV2A's monolithic dynamic-state pipelines anyway. |
 | (d) Do nothing more | — | **Honest default.** Two-tier + on-disk cache already makes steady state and warm boots cheap. |
 

@@ -24,13 +24,13 @@ section moved there in the 2026-07-18 README split).
 | A3 | `vk/instance.c` ~540 | Apple relaxes device features (`geometryShader`, `occlusionQueryPrecise`, … off) | `#else` requires the strict upstream feature set |
 | A4 | `vk/instance.c` 55/167/233 | MoltenVK portability-subset/enumeration extensions | not requested; standard Vulkan init |
 | A5 | `pgraph.c get_default_renderer` | Vulkan is default on Apple only | non-Apple order identical to upstream (OpenGL, then Vulkan) — verified against `upstream/master` |
-| A6 | `pfifo.c` (`pfifo_thread`), `ui/xemu.c` (vblank thread; `qemu_main` under icount), `tcg-accel-ops-mttcg.c` (vCPU), `tcg-accel-ops-rr.c` (vCPU under icount) | `QOS_CLASS_USER_INTERACTIVE` bumps | compiled out; no scheduling change |
+| A6 | `pfifo.c` (`pfifo_thread`), `ui/xemu.c` (vblank thread; `qemu_main` under icount), `tcg-accel-ops-mttcg.c` (vCPU), `tcg-accel-ops-rr.c` (vCPU under icount) | `QOS_CLASS_USER_INTERACTIVE` bumps | compiled out. **Changed 2026-10-18 (`f96f00ba9d`, v0.15.2; see §U):** the normal-mode vCPU (mttcg) and `pfifo_thread`, and the APU frame thread, run at `THREAD_PRIORITY_ABOVE_NORMAL` on Windows instead (`XEMU_VCPU_QOS=0` leaves them at normal); the vblank thread, `qemu_main` under icount and the RR vCPU keep normal priority |
 | A7 | `ui/xemu.c` MVK_CONFIG `setenv` block (~1897) | `#ifdef __APPLE__` | absent — MoltenVK config vars are meaningless off macOS |
 | A8 | Metal present / MetalFX / IOSurface (`ui/xemu-metal.m`, `vk/metalfx_upscale.m`, `ui/xui/metal-helpers.mm`) | Objective-C sources added only under `host_os == 'darwin'` in meson | not compiled at all; GL presentation path as upstream |
 | A9 | `hw/xbox/mcpx/apu/vp/vp.c` | vDSP (Accelerate) FIR path | `#else` portable C path (autovectorized) |
 | A10 | `hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h` | `DSP56K_JIT_SUPPORTED = __aarch64__ && !_WIN32` (was `__APPLE__ && __aarch64__` when audited; Linux arm64 since) | fork inline JIT absent; interpreter or upstream external JIT engine per `dsp_want_external_jit_engine()` — precedence key (`audio.dsp_jit.enabled`) is inert when unsupported |
 | A11 | `tcg/aarch64/tcg-target-has.h:65` | `TCG_TARGET_HAS_fpu 0` under `_WIN32` | helper-based hard FPU (bit-equivalent), avoiding the llvm-mingw `qemu_build_not_reached` link failure |
-| A12 | `ui/xemu-input.c:522` | `XEMU_INPUT_PIPE` FIFO harness | `#ifdef _WIN32` stub — facility absent by design |
+| A12 | `ui/xemu-input.c` (`test_input_open`/`test_input_poll`, `_WIN32` branch) | `XEMU_INPUT_PIPE` test-input harness | **Superseded 2026-09-08 (`164fd4c876`, v0.13.3):** a Win32 named pipe (`CreateNamedPipeA`, `PIPE_NOWAIT`, one instance recycled per writer; `\\.\pipe\<name>` or the value's last path component) replaces the stub; ran in a full Windows run 2026-10-18 (windows-test-plan 3.4, §T). Was: an `#ifdef _WIN32` stub, facility absent by design |
 | A13 | `ui/thirdparty/fpng/fpng.cpp` | ARM CRC32 intrinsics | gated on `__ARM_FEATURE_CRC32` |
 | A14 | `util/cutils.c`, `util/miniz`, `system/exit-with-parent.c`, `include/qemu/osdep.h` `__APPLE__` hits | — | upstream-inherited QEMU portability; zero fork-changed `__APPLE__` lines (verified via `git diff upstream/master...HEAD`) |
 
@@ -100,7 +100,8 @@ None of this can be exercised on this machine (VMs expose no Vulkan ICD):
 
 ```sh
 grep -n "target_is_active" hw/xbox/nv2a/pgraph/vk/surface.c        # A1: both branches
-grep -n "ifdef _WIN32" ui/xemu-input.c tcg/aarch64/tcg-target-has.h # A11/A12
+grep -n "ifdef _WIN32" tcg/aarch64/tcg-target-has.h                 # A11
+grep -n "CreateNamedPipeA" ui/xemu-input.c                           # A12: Windows named-pipe transport
 grep -n "DSP56K_JIT_SUPPORTED" hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h
 grep -n "host_os == 'darwin'" hw/xbox/nv2a/pgraph/vk/meson.build ui/meson.build
 grep -n "evict_submit_seq\|retired_submit_count" hw/xbox/nv2a/pgraph/vk/*.c hw/xbox/nv2a/pgraph/vk/renderer.h

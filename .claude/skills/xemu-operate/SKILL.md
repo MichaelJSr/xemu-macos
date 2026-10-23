@@ -33,7 +33,7 @@ are in `xemu-history`.
   [--env K=V] -- <xemu> -config_path <toml> …` (nice, marker, bench
   cache, slot, lease; it execs the xemu, which holds the slot until it
   exits, even if the launcher is killed; it refuses a binary without
-  `XEMU_BASE_PATH` (no such string in it, e.g. today's `dist/xemu.app`)
+  `XEMU_BASE_PATH` (no such string in it: a build older than v0.15)
   unless its clone is portable, since that one keeps its caches in the
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
@@ -108,8 +108,9 @@ in `macos-libs/arm64`), or `XEMU_KK_PREFIX=../kk/install-<tag>`; look for
 The direct binary inherits only the shell env. `open` passes none of it:
 `open -n -a <clone> --env XEMU_BASE_PATH=<bench cache> --env K=V --stdout F
 --stderr G --args -name xemu-fork-auto -config_path <scratch toml> …` adds
-`LSEnvironment` (no nice: `renice 10` the pid; no slot; a binary without
-`XEMU_BASE_PATH` needs the portable clone below), but then xemu hangs on
+`LSEnvironment` (no nice: `renice 10` the pid; no slot; a pre-v0.15
+binary ignores `XEMU_BASE_PATH` and needs a portable clone,
+`Contents/Resources/xemu.toml`, below), but then xemu hangs on
 a hidden TCC prompt if its ROM/HDD paths are under `~/Documents` (the
 fixtures are), so clone them to `/tmp`. The title
 (`xemu | v<git describe>`) names the build.
@@ -121,8 +122,6 @@ sed -e "s|^hdd_path = .*|hdd_path = '$W/hdd.qcow2'|;s|^eeprom_path = .*|eeprom_p
     -e "s|^fullscreen_on_startup = .*|fullscreen_on_startup = false|;s|^screenshot_dir = .*|screenshot_dir = '$W'|" \
     $F/xemu.toml > $W/xemu.toml   # the fixture's screenshot_dir is personal
 PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml)"})   # mute + pad stubs (zsh)
-grep -qa XEMU_BASE_PATH $W/xemu.app/Contents/MacOS/xemu ||   # an older build ignores it:
-  : > $W/xemu.app/Contents/Resources/xemu.toml               # portable clone keeps its caches
 XEMU_NV2A_NSPROF=1 python3 -I scripts/xemu_lease.py run -- $W/xemu.app/Contents/MacOS/xemu \
   -config_path $W/xemu.toml -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error
@@ -309,14 +308,14 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 `XEMU_*` vars are read once at launch. `vk/` is `hw/xbox/nv2a/pgraph/vk/`,
 `mcpx/` is `hw/xbox/mcpx/`, `tcg/` is `accel/tcg/` (the top-level
 `tcg/` is written out), `i386/` is `target/i386/tcg/`. To list them all:
-`grep -rn 'getenv("XEMU_' accel target tcg hw ui audio system`.
+`git grep -n 'getenv("XEMU_' -- '*.c' '*.cc' '*.m' '*.h'`.
 
 | Var | Effect | Read in |
 |---|---|---|
 | *Off by default* | | |
 | `XEMU_GUEST_MO=1` | Keep every guest memory-order barrier (normal mode drops the load-load ones and icount all, until a network backend attaches) | top-level `tcg/tcg-op-ldst.c` |
 | `XEMU_SUBPAGE_FAST=1` | Non-Apple aarch64 opt-in for the sub-page store prefilter (arm b), unvalidated there; always on in Apple builds, inert on x86_64 | `tcg/xemu-subpage-fast.c` |
-| `XEMU_SSE_HOST=2` | Differential self-check of the host SSE fast path (on by default with `hard_fpu` on every host), any host, which also keeps packed add/sub/mul/div off the inline path. The `XEMU_SSE_NEON` alias is gone on every host | `i386/fpu_helper.c` |
+| `XEMU_SSE_HOST=2` | Differential self-check of the host SSE fast path (on by default with `hard_fpu` on every host), any host, which also keeps packed add/sub/mul/div off the inline path | `i386/fpu_helper.c` |
 | `XEMU_STRICT_CPUID=1` | Instructions the guest CPU model lacks raise #UD (pentium3: SSE2, SSE3's FISTTP, LFENCE), reported on stderr and as QMP `XEMU_CPUID_FAULT`; by default TCG runs them. A new legacy 0F-map SSE opcode from an upstream merge needs a row in its table | `i386/xemu_strict_cpuid.c` (table: `i386/xemu-strict-cpuid.c.inc`) |
 | `XEMU_PFIFO_PUT_LOCK=1` | Normal mode: the DMA_PUT doorbell and USER reads take `pfifo.lock` again | `hw/xbox/nv2a/nv2a.c` |
 | `XEMU_PFIFO_STALL_DOORBELL=0` | Normal mode: a DMA_PUT doorbell inside a flip stall wakes the PFIFO thread again (by default it only publishes PUT) | `hw/xbox/nv2a/nv2a.c` |

@@ -25,9 +25,11 @@ switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
-`XEMU_VK_CLEAR_IN_PASS` and `XEMU_NV2A_RESET_IRQ`, the first ten rows. The
-former `=0` row, `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass, became
-the `perf.cache_shaders` setting on 2026-10-18. `XEMU_VTX_SPAN_FINISH`
+`XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ` and `XEMU_OHCI_HCCA_FIRST`,
+the first eleven rows.
+The former `=0` knob `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass,
+became the `perf.cache_shaders` setting on 2026-10-18 (`a922602c75`).
+`XEMU_VTX_SPAN_FINISH`
 (`=0`, the page-wide vertex finish) was removed on 2026-10-23 (v0.16.1).
 Knobs that exist only in the retired wave-1 work are recorded in
 [`Finished/windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md)
@@ -45,14 +47,15 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
 | `XEMU_VK_CLEAR_IN_PASS` | Vulkan renderer, **default on since 2026-10-23**: an NV097_CLEAR_SURFACE records into the open render pass (it ends the occlusion query, never the pass); `0` ends the pass before and after every clear again, so each clear pays a full-surface load and store. Pass splits can move pixels on AGX and the null-renderer goldens never reach `vk/draw.c`. nsprof `clears` counts clears, `rpcause_clear` the passes they end under `0`. Vulkan renderer (pgraph/vk) |
 | `XEMU_NV2A_RESET_IRQ` | Both modes, **default on since 2026-10-23** (v0.16.1): a machine reset (`system_reset`, and the reset every load runs first) clears the NV2A interrupt enables and PGRAPH's pending bits and recomputes the line, as power-on does; `0` keeps them, as v0.16 did. Kept, a GPU interrupt the stopped game left pending re-raised IRQ 3 before the guest ran, the kernel's 8259 setup lost the request, and about 1 windowed reset in 100 after a load hung in the kernel's GPU fence wait (0x800426d4). A correctness fix, not a speedup; the goldens don't reset after running, so they can't verify it. Reset lane, Part 11 |
+| `XEMU_OHCI_HCCA_FIRST` | Normal mode, **default on since 2026-10-23** (v0.16.1, `858e2af19f`): an OHCI frame writes HccaFrameNumber and Pad1 back every frame and HccaDoneHead only with a done queue, then raises FNO, WDH and SF, as OHCI 1.0a 7.1.4 orders it; `0` raises them before the write-back and rewrites HccaDoneHead every frame, as v0.16 did. The order matters only when a DMA access drops the BQL inside a frame (nv2a's surface access callback does): the XDK USB driver then read HccaDoneHead before the frame wrote it, lost the done queue and bugchecked 0x0A 5 s later (Azurik's V22 boot hang, about 3% of real-time boots). Under icount the frame runs on the vCPU thread, so the goldens can't verify it. USB (`hw/usb/hcd-ohci.c`, `ohci_hcca_first`) |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (the `begin_pre_draw` guard submits before exhaustion) |
-| `XEMU_SPIRV_CACHE` | **Removed 2026-10-18**: Settings > Cache shaders to disk (`perf.cache_shaders`) now gates the Vulkan SPIR-V cache too, as it does GL's. Was: `=0` bypasses the on-disk SPIR-V cache entirely (no loads, no stores) — cold-compile A/B without deleting the cache dir. Landed on main 2026-09-08 with the rest of the cache hardening; note that blob validation is *not* gated by the hatch: every entry read from disk is checked (size ≥ 5 words and a multiple of 4, SPIR-V magic, an instruction-stream walk whose word counts land exactly on the last word, and a final `OpFunctionEnd`) and then parsed by SPIRV-Reflect before it can reach `vkCreateShaderModule`; a blob that fails any of those is deleted and recompiled. Measured 2026-09-08 over all 2,416,107 word-aligned truncations of the dev Mac's 394 warm entries: the in-tree rules reject 99.85%, SPIRV-Reflect returns an error for the remaining 0.15% (cuts landing on a function boundary), so none reached `vkCreateShaderModule` and none aborted the launch |
 | `XEMU_INPUT_PIPE` | Test-input channel: lines `down <sdl_scancode>` / `up <sdl_scancode>` / `clear` are OR'd into the keyboard-controller state, so injected keys flow through the user's normal bindings and work with the window unfocused (test automation). **POSIX:** the value is a FIFO path, opened `O_NONBLOCK` — unchanged. **Windows (transport landed 2026-09-08):** a value that starts `\\` is used as the pipe name verbatim (`\\.\pipe\<name>`), anything else contributes only its last `/`, `\` or `:` component, so one `/tmp/xemu.fifo` value works on both hosts; `\r` is a line delimiter too, so CRLF writers (PowerShell `Add-Content`, `cmd echo`) parse. Client: `scripts/win/inject_input.py` (POSIX: `scripts/inject_input.sh`) |
 | `XEMU_MFX_REAL_DEPTH` | Feed real zeta depth to the temporal scaler (A/B): `2` = flip-time snapshot (temporally correct; any other non-empty value also selects it); unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Measurement-run only (not benchmark-neutral). The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal commit to restore it) |
+| `XEMU_GUEST_BUGCHECK` | `1` hooks the kernel's KeBugCheckEx and reports dead halts (HLT with interrupts disabled): stderr lines and QMP `XEMU_GUEST_BUGCHECK` / `XEMU_GUEST_HALTED`; reads guest state only, so the goldens match with it on (`target/i386/tcg/system/xemu-bugcheck.c`; README, Guest bugchecks) |
 | `XEMU_TB_PROF` | Prints TB jump-cache totals at exit (lookups, hit%, way-1 hits, htable walks, translations, tb_flush count), under icount the step cuts, steps and step-cache hits, and the same-value CR3 reloads (`tlb-reval`: kept, changed, pages flushed, chain severs, full flushes, page tables, mean wall µs) |
 | `XEMU_INV_PROF` | Prints SMC / TB-invalidation-churn counters at exit: invalidations by source (notdirty vs explicit vs single-TB), the false-invalidation share a byte-range overlap check would skip, inv-htable recycle hit-rate (false-sharing vs true SMC), and translate-time exit census; plus an `(f)` MMIO line — `io_prepare` calls, `cpu_io_recompile` calls, the recompiles/s rate over the measured window, and the icount io-retaddr cache's misses — which sized the `can_do_io` elision (normal-mode runs read ~0 by construction since the elision is unconditional there, so only icount or replay runs populate it; the `io_prepare` count is 2x-inflated by recompile re-execution) |
 | `XEMU_INV_TIMING` | `1` adds a cycle-counter split of the `notdirty_write` body (invalidation+scan+recycle vs preamble+tail) to the `XEMU_INV_PROF` dump — sized the sub-page dirty-tracking arms. The tick source is per host (`accel/tcg/xemu-inv-prof.h`): `cntvct_el0` on aarch64 (Apple Silicon), `CLOCK_UPTIME_RAW` on Apple non-aarch64, `lfence` + `rdtsc` with a one-time ~10 ms ns/tick calibration against `g_get_monotonic_time()` on non-Apple x86 (MSYS2 Windows, x86_64 Linux — **added 2026-09-08**; the dump printed all zeros there before), and no source at all on any other host (still zeros). Timings are order-of-magnitude; counts are load-immune |
@@ -67,7 +70,9 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_SUBPAGE_FAST_STATS` | `1` re-enables the arm-(b) prefilter's six diagnostic counter RMWs (`xemu_sf_seen`, `xemu_sf_skips`, and the four `xemu_sf_demote` reasons) that the aarch64 store slow-path stub emits inline. **Default OFF since 2026-08-04**: the counters are baked into generated code at translate time and the stub completes ~2M stores/s, so production now emits ~39 fewer instructions per store stub (12 of them on the inline-skip path itself, the four demote landing pads collapsing into direct branches) and the atexit dump prints `subpage-fast counters disabled (set XEMU_SUBPAGE_FAST_STATS=1)` in place of the histogram — so a zeroed histogram can't be mistaken for a dead mechanism. Latched once at first stub emission, before the first TB (a mid-run flip would leave TBs disagreeing). Diagnostics only: the decision logic and the refuter oracle are identical either way, which is what makes this knob its own A/B lever. Measured cost of the counters: **−0.32% draws/s / −0.57 fps, 3/3 pairs unanimous** |
 | `XEMU_TLB_WCLEAN_REFUTE` | `1` re-runs the full TLB scan after every `tlb_reset_dirty` bitmap pass, arms whatever the writable-clean bitmaps missed (so the run stays correct) and prints `xemu: tlb-wclean refute checks= entries= misses= unset= (calls= arming=)` at exit: `misses` counts eligible entries in the range left unarmed, `unset` eligible entries anywhere missing a bit. The gate is `misses=0 unset=0`. Diagnostic only (a full scan per dirty clear); never for an fps run |
 | `XEMU_TLB_REVAL_REFUTE` | `1` checks what each same-value CR3 reload keeps (`xemu_tlb_reval`, CPU / JIT): every valid TLB entry of the paging mmu_idx and every jump-cache, step-cache and ret-memo TB against a fresh page walk (`cpu_get_phys_page_debug`) and the fill log, and the xpage registry against each frame a reload dropped without severing; aborts on a mismatch. The `xemu: tlb-reval` exit line (also printed under `XEMU_TB_PROF`) counts reloads, kept, changed, pages, sever, full and its checks. Diagnostic only (a TLB walk per reload); never for an fps run |
+| `XEMU_TB_REVAL_REFUTE` | `1` runs the full TB check after each scoped one of an incremental checkpoint restore (`xemu_tb_revalidate_pages`, `accel/tcg/tb-maint.c`) and prints `xemu: reval refute: ...` at exit (and every 256 scoped loads): extra drops, unprotected pages and untailed pages must stay 0; the full check's results are kept, so a violation doesn't spread. Diagnostic only (CPU / JIT, the scoped restore check, `82567106f6`) |
 | `XEMU_PUSH_PRESENT_REFUTE` | Debug: peek the ring (non-consuming) and cross-check the consumed-step stream vs the pull path — monotonic `frame_seq`, no skipped-then-resurrected step, and identical texture/event/dims where comparable (interp steps compare event object + dims; the pixel-equivalent interp outputs live in distinct allocations). Prints `peeked`/`compared`/`mismatches`/`resurrections` every ~5 s. Re-adds the pull round trip — measure perf with it off |
+| `XEMU_PRESENT_STALL_MS` | Windowed Metal: how long the UI thread waits for the `xemu-drawable` thread's `nextDrawable` before it drops the frame (default 100); `0` calls it on the UI thread unbounded, as v0.16 did. Stalls print on stderr and send QMP `XEMU_PRESENT_STALL`; nsprof counts `present_drop` (`ui/xemu-metal.m` `drawable_thread_start`, `188ff96260`; README, frame interpolation) |
 | `XEMU_VTX_SPAN_REFUTE` | `1` checks every vertex finish or fence wait a copy skips (`vk/vertex.c`) against an independent record of what each flight slot's draws read of the vertex RAM mirror, taken from the vertex buffer bindings themselves (offset, stride, element size, the draw's vertex count) rather than the syncs that feed the read spans; a recorded read whose bytes the copy changes is a violation (a GPU reader the spans miss; the first 8 print). Exit line `xemu: vtx-span refute checks=N violations=M` (checks = skips whose copy overlapped a recorded read) |
 | `XEMU_DSP_JIT_STATS` / `XEMU_DSP_JIT_DIFF=N` | DSP JIT counters / bit-exact validation |
 | `XEMU_DSP_JIT_DIFF_SYNC` / `_PIN_AUDIT` | JIT bring-up harnesses (see `docs/Finished/dsp-jit-design.md`) |
@@ -80,11 +85,13 @@ Not runtime env vars — these are read by `build.sh` at configure time or
 by the bench harness, and are catalogued here because each belongs to a
 Changes bullet below. The README's `### Build knobs` table
 carries the user-facing subset; `build.sh` itself is the full list of
-build knobs.
+build knobs. `XEMU_WIN_O3`, the native-Windows `-O3` opt-in, was removed
+on 2026-10-18 (`6a58566a54`): x86_64 Windows builds, native and cross,
+now default to `-O3` without the stack protector, as Darwin and Linux
+do.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_WIN_O3` | **Removed 2026-10-18**: x86_64 Windows builds (native and cross) default to `-O3` with the stack protector off, after the 7.3 protocol ran clean on both arms and the 2026-09 crash turned out to be SDL's clipboard race. Was: **added 2026-09-08, default off.** `=1` opts the *native* MSYS2/MinGW release into `-Doptimization=3 -Dstack_protector=disabled` (`build.sh:634-644`), the pair the Darwin/Linux arm already uses. Unset, both Windows arms keep meson's project default `optimization=2` (`meson.build:3`) and the probed `-fstack-protector-strong` — exactly what every CI Windows leg and every previous native build shipped. **The polarity is deliberate**: the 2026-09-08 review names this flip as the differential behind the wave-1 exit-139 on the Windows box (it reaches every translation unit of both renderers with every runtime hatch unset), and no CI leg builds it. `-Dstack_protector=disabled` is not cosmetic on mingw: `meson.build:512-536` probes by compiling *and linking* a test program with `-fstack-protector-strong`, which a stock MSYS2 MINGW64 toolchain passes, so the option really does strip the canary from the whole tree. Ignored (with a message) on `win64-cross`, which builds the release artifacts |
 | `XEMU_BENCH_ISOLATE_CACHES` | `0`: shader/pipeline caches live in the bench cache every bench shares (`XEMU_BASE_PATH` = `$XEMU_BENCH_CACHE`, since 2026-10-15), warm across benches and never the owner's pref dir. `1` — equivalently `--isolate-caches` — plants the scratch config as a portable-mode marker inside the cloned bundle's `Contents/Resources`, moving xemu's data base path (`spirv_cache_v*/`, `pipeline_cache.bin`) into the disposable work dir, so caches start cold at batch start, warm during the warmup run, and are shared identically by both arms; a binary older than `XEMU_BASE_PATH` gets this automatically (`scripts/bench-savestate-ab.sh:108,215`). Recorded as `cache_isolation` in `meta.json` / `receipt.json` |
 | `XEMU_BENCH_CACHE` | Bench cache folder that every macOS bench and probe launcher passes as `XEMU_BASE_PATH` (default `~/Library/Caches/xemu-fork-bench`; `scripts/xemu_lease.py`, `scripts/xemu-lease.zsh`). Cold the first time, then shared by every bench. The Windows bench (`bench-savestate-ab-win.py`) passes it too, default `%LOCALAPPDATA%\xemu-fork-bench` |
 | `XEMU_TEST_CONFIG` | Unset = `../fixtures/xemu.toml` beside the checkout. The source config every macOS harness clones its HDD, EEPROM and scratch config from (`bench-det.py`, `bench-savestate-ab.sh`, `bench-abx.sh`, `boot-smoke-corpus.sh`, `probe-run.sh`, `soak-cycles.sh`, `movement-probe.sh`; `bench-det.py` read a fixture folder from `XEMU_FIXTURES` until 2026-10-16); `--config-src` still wins where a script takes it. There is no fallback to the personal `xemu.toml`, so personal play cannot delete a test savestate. Added 2026-10-10. The Windows bench's config template is `--config-template`, else this, else `%APPDATA%`'s `xemu.toml` (only ever copied) |
@@ -123,7 +130,8 @@ build knobs.
 
 First run of the fork on real Windows hardware (Windows 10, i7-4770K,
 NVIDIA TITAN Xp 561.09, MSYS2 MINGW64 gcc 16). Full recipe, traps,
-results and the open work list: `docs/Campaigns/windows-port-2026-09.md`; the
+results and the audit batch status: `docs/Campaigns/windows-port-2026-09.md`
+(the 2026-10-17/18 follow-up: `docs/windows-gating-audit.md` §S-§W); the
 ranked static audit (60 confirmed / 19 plausible / 10 refuted findings,
 22-batch plan): `docs/Campaigns/windows-audit-2026-09-summary.md` +
 `docs/Campaigns/windows-audit-2026-09.json`; the review that corrected this
@@ -191,16 +199,18 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   verdict is that the differential is the **build flags**, not a
   source hunk: `fb42bce22e` flipped the native MSYS2 release arm from
   `-O2` to `-O3 -Dstack_protector=disabled` (the re-cut that landed on
-  main 2026-09-08 keeps that flip **opt-in** behind `XEMU_WIN_O3=1`, so
-  main's native default is still `-O2` with the probed stack
-  protector), every crashing binary was
+  main 2026-09-08 kept that flip **opt-in** behind `XEMU_WIN_O3=1`, so
+  main's native default stayed `-O2` with the probed stack
+  protector until 2026-10-18, `6a58566a54`), every crashing binary was
   produced by an incremental `ninja` rebuild that keeps those
   configure-time flags, and the only passing binary (the control) was
   configured by main's `build.sh` at `-O2`; the runtime hatches that
   were toggled change no codegen. Five of six independent crash
   hunters converged on it and none was refuted — but this is *verified
   by review 2026-09-08, not yet confirmed on the box*, and it names a
-  class (latent UB exposed by the vectoriser), not a line. The
+  class (latent UB exposed by the vectoriser), not a line. (Settled
+  2026-10-18: the crash was SDL's `WIN_OpenClipboard` race
+  (`058431f83b`), not `-O3`; `docs/windows-gating-audit.md` §T, §U.) The
   apu/xid commit is **not** the leading suspect: it was exonerated on
   four independent grounds. The full protocol for the next Windows
   session — freeze the control, WER LocalDumps, full-reconfigure `-O2`
@@ -282,9 +292,9 @@ win64-cross, in-game F5 smoke with 0 artifacts and 0 asserts;
   `XEMU_HARDENING` reachable on all arms (knob removed 2026-10-10).
   The `-O3` hunk was **inverted** before landing — the branch made
   `-Doptimization=3
-  -Dstack_protector=disabled` the native-Windows default, main makes it
-  opt-in behind `XEMU_WIN_O3=1`, because that flip is the review's
-  crash differential. The tar `--force-local` rekey landed separately in
+  -Dstack_protector=disabled` the native-Windows default, main made it
+  opt-in behind `XEMU_WIN_O3=1` (until 2026-10-18, `6a58566a54`),
+  because that flip was the review's crash differential. The tar `--force-local` rekey landed separately in
   `eeb992dcd2`. (8) Windows
   benchmark harness `scripts/bench-savestate-ab-win.py` + `scripts/win/`
   (TCP monitor, PowerShell capture, receipts) — **landed on main
@@ -3766,7 +3776,12 @@ x86_64 host (Windows, Linux, Intel macOS).
   in `fb42bce22e`; that commit's second hunk (`run_command(tar, ...)` →
   `find_program('tar')`) was deliberately left on the branch.
 - **GCC PGO works on native Windows; the `-O3` flip is opt-in
-  (2026-09-08).** Re-cut of the wave-1 build commit `fb42bce22e`. The
+  (2026-09-08).** (Superseded 2026-10-18, `6a58566a54`: the 2026-09
+  crash was SDL's clipboard race, the 7.3 protocol ran clean at `-O2`
+  and `-O3`, and native det heavy-f1 `-O2` → `-O3` measured core cycles
+  −1.4%, instructions −1.1%, so x86_64 Windows builds default to `-O3`
+  and `XEMU_WIN_O3` is gone; the GCC PGO flow ran natively the same
+  week, gating audit §T D7.) Re-cut of the wave-1 build commit `fb42bce22e`. The
   MSYS2 arm inherited a clang/`llvm-profdata`-only `setup_pgo` but never
   selects clang, so on a stock MINGW64 install (`cc` = GCC)
   `XEMU_PGO=use` handed GCC the committed *clang* `pgo/default.profdata`,
@@ -3912,7 +3927,9 @@ confirmed) and async/prewarm pipeline creation — are recorded in
 
 
 - **Sub-page arm (b): inline NOTDIRTY store-skip (default-on
-  2026-07-18, +12% heavy-scene throughput).** The aarch64 store
+  2026-07-18, +12% heavy-scene throughput).** (Receipts from the build
+  that indexed `pc.ram`'s bitmaps; void since the 2026-10-15 fix
+  `f25bb789f2`, see the `XEMU_SUBPAGE_FAST` row.) The aarch64 store
   slow-path stub gains a pre-filter that completes a guest store inline
   when the slow path is a PROVABLE no-op: the TLB mismatch is exactly
   `TLB_NOTDIRTY` (a 2-insn XOR discriminator — every hard flag implies

@@ -64,12 +64,13 @@ AArch64 inline x87 FPU) compile out.
   profile, so `pgo/default.profdata` stays clang/arm64 only and a Windows
   `use` build needs its own `generate` run.
   Preferred route — first done for real on 2026-09-07 (Windows 10,
-  NVIDIA TITAN Xp, Vulkan renderer renders correctly). The exact
-  `pacman` package list, the traps a fresh MSYS2 hits (CRLF checkout,
-  Python ≥ 3.13 prefix, MSYS tar, `USERPROFILE`), the validation-layer
-  recipe and the open work list are in [docs/Campaigns/windows-port-2026-09.md](docs/Campaigns/windows-port-2026-09.md);
-  the ranked real-hardware audit is
-  [docs/Campaigns/windows-audit-2026-09-summary.md](docs/Campaigns/windows-audit-2026-09-summary.md).
+  NVIDIA TITAN Xp, Vulkan renderer renders correctly) and run again on
+  2026-10-17/18. The exact `pacman` package list, the traps a fresh
+  MSYS2 hits (CRLF checkout, Python ≥ 3.13 prefix, MSYS tar,
+  `USERPROFILE`) and the validation-layer recipe are in
+  [docs/Campaigns/windows-port-2026-09.md](docs/Campaigns/windows-port-2026-09.md)
+  §1 (also `docs/windows-test-plan.md` §7.1); what still needs real
+  hardware is [docs/windows-gating-audit.md](docs/windows-gating-audit.md) §W.
 - **Cross (Docker):** `./build.sh -p win64-cross` from a Linux
   container with the `xemu-win64-toolchain` image and
   `CROSSPREFIX=x86_64-w64-mingw32.static-` set — see
@@ -1168,10 +1169,11 @@ Other automation interfaces (windowed or headless):
   `XEMU_INPUT_PIPE`, `XEMU_INPUT_RECORD` and `_PORT`,
   `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
   `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS`,
-  `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH` (stderr: `lease: not passing the
-  inherited ...`), so a bench never takes the owner's shared-RAM name,
-  pipe, files or watch socket, or leaves the MoltenVK pin; set one per
-  run (`VAR=V` arguments, an arm's `K=V`) to use it.
+  `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH`, `XEMU_LANGUAGE` (stderr: `lease:
+  not passing the inherited ...`), so a bench never takes the owner's
+  shared-RAM name, pipe, files or watch socket, leaves the MoltenVK pin,
+  or sets the guest's console language; set one per run (`VAR=V`
+  arguments, an arm's `K=V`) to use it.
 - **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one
@@ -1466,14 +1468,13 @@ nsprof intervals, mid-run visual artifact checks, receipts) — full
 numbers and methods live in the
 [optimization ledger](docs/optimizations.md).
 
-Headline arc on the heavy in-game bench scene (the retired F8 Azurik
-savestate, M2 Ultra, real fps — no interpolation): **15.8 → ~48.1
-fps** across the fork's campaigns — the occlusion/report rework
-(+144%), PGO (+9.4%), sub-page code dirty tracking (+14%), cross-page
-TB chaining, inline dispatch probes, the sticky SSE/NEON bracket, the
-async Metal present chain, the inline NOTDIRTY store-skip (+12%
-heavy-scene rendering throughput at equal fps), and the 2026-08-04
-optimization wave.
+Headline arc on the heavy in-game bench scene of the 2026-07/08
+campaigns (the retired F8 Azurik savestate, M2 Ultra, real fps — no
+interpolation): **15.8 → ~48.1 fps** across them — the
+occlusion/report rework (+144%), PGO (+9.4%), sub-page code dirty
+tracking (+14%), cross-page TB chaining, inline dispatch probes, the
+sticky SSE/NEON bracket, the async Metal present chain, the inline
+NOTDIRTY store-skip, and the 2026-08-04 optimization wave.
 Lighter scenes hold the 60 fps vblank cap.
 
 MetalFX frame interpolation (`frame_interpolation`, Metal backend)

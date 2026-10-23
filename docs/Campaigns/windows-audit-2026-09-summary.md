@@ -24,6 +24,8 @@ Known supersessions:
   retracted in `40f0a01ad3`; the 2026-09-08 review's verdict is the
   `-O2` → `-O3` build-flag flip on the native MSYS2 arm, unconfirmed on
   the box. Protocol: `docs/Campaigns/windows-port-2026-09.md` §9.
+  Settled 2026-10-18 as SDL's `WIN_OpenClipboard` race (`058431f83b`),
+  not the flags: `docs/windows-gating-audit.md` §T.
 - **Batch 10's approach item (1) is superseded as of 2026-09-08.**
   Its "do NOT add a second call in gl/renderer.c (double counting)"
   is wrong: only one renderer ops table is installed at a time, so

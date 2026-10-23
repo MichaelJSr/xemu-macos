@@ -1,10 +1,16 @@
 # Native Windows port — status and handoff (2026-09-07, revised 2026-09-08)
 
-> **Campaign, paused since 2026-09-08** (last Windows-side commit
-> `5dfde3356d`). Open work: the §6 batch table, the §9 exit-139 protocol
-> and the policy questions. Since this was written, v0.13.3 shipped (so
-> §8's pre-tag list is history) and the wave-1 branch §9 arm (A) builds
-> from survives only as tag `archive/windows-wave1-wip`.
+> **Campaign, status 2026-10-18.** A second session on the same box
+> (2026-10-17/18, run from [`../windows-test-plan.md`](../windows-test-plan.md);
+> results in [`../windows-gating-audit.md`](../windows-gating-audit.md)
+> §S-§W) closed §9: the 2026-09 crash was SDL's `WIN_OpenClipboard` race
+> (`058431f83b`, `d1b99ddb42`), not `-O3`, and x86_64 Windows builds now
+> default to `-O3` (`6a58566a54`; `XEMU_WIN_O3` removed). §6 gives each
+> audit batch's status; its open rows are this campaign's remaining
+> work, and the live Windows debt is gating audit §W and roadmap item 5.
+> §8's pre-tag list is history (v0.13.3 shipped), and the wave-1 branch
+> survives only as tag `archive/windows-wave1-wip`. The body below is
+> the 2026-09 text.
 
 First session of this fork on real Windows hardware. Everything below was
 done on a Windows 10 Pro 22H2 box: Intel i7-4770K (Haswell, 4C/8T, AVX2),
@@ -197,7 +203,7 @@ the commits that never landed on main are recorded in
 `archive/windows-wave1-wip`; none of them has a `getenv` on main, so
 they do nothing on a main build.
 
-## 6. Remaining plan (batches not yet implemented)
+## 6. Audit batch plan (status 2026-10-18)
 
 From the planner (`docs/Campaigns/windows-audit-2026-09.json` → `plan.batches`),
 in recommended order. Batches marked *savestate* need the Azurik in-game
@@ -205,19 +211,18 @@ savestate benchmark (not yet created on this box; the protocol is
 `scripts/bench-savestate-ab-win.py`, and the Mac's fixtures are listed
 in `../fixtures/README.md`).
 
-| # | Batch | Needs |
-|---|---|---|
-| 3 | draw.c pipeline / dynamic-state / query-capacity correctness (REPORTS_FULL guard move, CLEAR-pipeline early return, static-vs-dynamic state) | validation layer + savestate A/B; re-run `XEMU_MAX_QUERIES=64` on both platforms |
-| 4 | Surface/texture upload correctness (flight-slot staging offset, swizzled Z24S8 zeta upload, compute-set reservation loop) | same |
-| 5 (rest) | surface.c prune order, texture.c barrier ranges, draw.c query-reset range | validation layer |
-| 6 | Shader-key / uniform dirty-tracking (7 unmarked VSH uniform writers; `use_hw_depth` for POINTS on native) | a point-sprite title |
-| 8 | x87/FP correctness on x86_64 (program host x87 CW or route directed-rounding FIST/FRNDINT to softfloat; MXCSR-after-longjmp) | `XEMU_X87_REFUTE` harness on Windows |
-| 13–16 | perf: `-O3` parity A/B, CVTSD2SI FIST path, host-SSE fast path (`XEMU_SSE_HOST=2` soak first), i386 sub-page store pre-filter | savestate |
-| 17 | perf: Windows thread scheduling (pfifo/vblank/APU `SetThreadPriority`/MMCSS), UI frame cap on the GL/DXGI path | savestate |
-| 18–20 | perf: renderer micro-costs, 1 GiB persistently-mapped staging, GL texture thread pool, async VK→GL handoff via external semaphores (measure `aux_fence` first; kill if < 0.3 ms/present) | savestate |
-| 21 | measure DSP engine choice on Windows (interpreter vs upstream JIT) | savestate + audio soak |
-| 22 | docs reconciliation (architecture-contract Invariant 2 text vs the REPORTS_FULL finding, windows-gating-audit rows) | none — the `use_dsp_jit` default claims were corrected 2026-09-08 (§2) |
-
+| # | Batch | Needs | Status 2026-10-18 |
+|---|---|---|---|
+| 3 | draw.c pipeline / dynamic-state / query-capacity correctness (REPORTS_FULL guard move, CLEAR-pipeline early return, static-vs-dynamic state) | validation layer + savestate A/B; re-run `XEMU_MAX_QUERIES=64` on both platforms | Mostly landed: the guard move `a825c1ff07` (reachable since `54671ac359`, gating audit §T D2), the clear pipeline `a3f158b495`, one dynamic-state list `848c45ba58`. Open: strip/fan primitive restart |
+| 4 | Surface/texture upload correctness (flight-slot staging offset, swizzled Z24S8 zeta upload, compute-set reservation loop) | same | Partial: flight-slot staging `1182827158`. Open: swizzled Z24S8 zeta upload, the compute-set reservation loop |
+| 5 (rest) | surface.c prune order, texture.c barrier ranges, draw.c query-reset range | validation layer | Open |
+| 6 | Shader-key / uniform dirty-tracking (7 unmarked VSH uniform writers; `use_hw_depth` for POINTS on native) | a point-sprite title | Open (`use_hw_depth = !need_geometry_shader` in `vk/shaders.c`; `SET_MATERIAL_ALPHA` and the other writers still unmarked) |
+| 8 | x87/FP correctness on x86_64 (program host x87 CW or route directed-rounding FIST/FRNDINT to softfloat; MXCSR-after-longjmp) | `XEMU_X87_REFUTE` harness on Windows | Landed: `deb98ee93f` (host x87 control word), `cfcc8e68ab` (directed rounding); the longjmp item is moot (`cached_fpuc_rc` deleted in `238e5d8114`) |
+| 13–16 | perf: `-O3` parity A/B, CVTSD2SI FIST path, host-SSE fast path (`XEMU_SSE_HOST=2` soak first), i386 sub-page store pre-filter | savestate | 13 landed (`6a58566a54`); 14 superseded by the inline host x87 ops (`aae214c27a`, `67e48b43b2`); 15 landed (`57cfe4fb51`); 16 open (no tcg/i386 sub-page store pre-filter) |
+| 17 | perf: Windows thread scheduling (pfifo/vblank/APU `SetThreadPriority`/MMCSS), UI frame cap on the GL/DXGI path | savestate | Partial: vCPU, PFIFO and APU priority `f96f00ba9d`, waitable-timer main loop `e8e260186d`, minimized-window sleep `9778d93ad5`; the vblank thread stays at normal priority. Open: the GL/DXGI UI frame cap, now new code: the plan hoists the `XEMU_UI_FRAME_CAP_NS` block out of `metal_render_frame`, but that Metal test knob (`78c4573dfb`) was removed on 2026-10-23 (v0.16.1); read it at `858e2af19f:ui/xemu.c` |
+| 18–20 | perf: renderer micro-costs, 1 GiB persistently-mapped staging, GL texture thread pool, async VK→GL handoff via external semaphores (measure `aux_fence` first; kill if < 0.3 ms/present) | savestate | 20's unused `VK_KHR_external_semaphore_win32` requirement dropped (`6e2accff54`), the async handoff unbuilt; 18 and 19 open |
+| 21 | measure DSP engine choice on Windows (interpreter vs upstream JIT) | savestate + audio soak | Open: det hashes match across DSP engines (test plan 3.7), no perf A/B |
+| 22 | docs reconciliation (architecture-contract Invariant 2 text vs the REPORTS_FULL finding, windows-gating-audit rows) | none — the `use_dsp_jit` default claims were corrected 2026-09-08 (§2) | Partial: the `use_dsp_jit` claims were corrected 2026-09-08 (§2); the rest open |
 Open policy questions for the maintainer: keep `renderer = VULKAN` as the
 first-run default on Windows/Linux (works on this NVIDIA box; upstream
 defaults to OpenGL there)? Add a native-MSYS2 CI job (~30–45 min cold)?
@@ -285,7 +290,12 @@ guest interrupt source, so parity is not free), and release notes that
 name the forward-incompatible vmstate v4, the DSP default, and the
 glslang 16.5.0 SPIR-V cache-key roll.
 
-## 9. Next Windows session: the exit-139 protocol
+## 9. The exit-139 protocol (closed 2026-10-18)
+
+> Run as windows-test-plan §7.3: 6 of 6 launches clean at native `-O2`
+> and `-O3`, and 6 of 6 on the CI `-O3` build; the cause was SDL's
+> clipboard race (gating audit §T, §U). The steps below are the
+> 2026-09-08 text.
 
 Replaces the wave-1 hatch-bisect recipe that used to sit here. That
 recipe assumed the crash was a source hunk isolable by toggling
