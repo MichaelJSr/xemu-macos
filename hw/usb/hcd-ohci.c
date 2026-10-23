@@ -501,12 +501,16 @@ static inline int ohci_put_iso_td(OHCIState *ohci,
 }
 
 static inline int ohci_put_hcca(OHCIState *ohci,
-                                dma_addr_t addr, struct ohci_hcca *hcca)
+                                dma_addr_t addr, struct ohci_hcca *hcca,
+                                bool done)
 {
+    /* HccaDoneHead goes with a done queue only (OHCI 1.0a 4.4) */
     return dma_memory_write(ohci->as,
                             addr + ohci->localmem_base + HCCA_WRITEBACK_OFFSET,
                             (char *)hcca + HCCA_WRITEBACK_OFFSET,
-                            HCCA_WRITEBACK_SIZE, MEMTXATTRS_UNSPECIFIED);
+                            done ? HCCA_WRITEBACK_SIZE :
+                            offsetof(struct ohci_hcca, done) -
+                            HCCA_WRITEBACK_OFFSET, MEMTXATTRS_UNSPECIFIED);
 }
 
 /* Read/Write the contents of a TD from/to main memory.  */
@@ -1205,11 +1209,45 @@ static void ohci_eof_timer(OHCIState *ohci)
     timer_mod(ohci->eof_timer, ohci->sof_time + usb_frame_time);
 }
 /* Set a timer for EOF and generate a SOF event */
-static void ohci_sof(OHCIState *ohci)
+static void ohci_sof(OHCIState *ohci, bool raise_sf)
 {
     ohci->sof_time += usb_frame_time;
     ohci_eof_timer(ohci);
-    ohci_set_interrupt(ohci, OHCI_INTR_SF);
+    if (raise_sf) {
+        ohci_set_interrupt(ohci, OHCI_INTR_SF);
+    }
+}
+
+/*
+ * The HCCA write-back as OHCI 1.0a has it: a frame writes HccaFrameNumber
+ * and Pad1, HccaDoneHead only when it hands over a done queue (4.4), and
+ * raises FrameNumberOverflow, WritebackDoneHead and StartofFrame only once
+ * that write is in guest memory (7.1.4: WDH is set "immediately after HC
+ * has written HcDoneHead to HccaDoneHead"; SF and FNO go with the frame
+ * number). The frame runs on the main loop with the BQL held, so the vCPU
+ * can take an OHCI interrupt or touch OHCI registers only when the frame is
+ * over, unless a DMA access drops the BQL on the way: nv2a's surface access
+ * callback does, for any access to a page a surface binding covers, and a
+ * binding can outlive the guest's use of that memory (Azurik's boot puts
+ * the USB driver's HCCA in such a page for its first second).
+ * With the interrupts raised first, the XDK driver's DPC could then read
+ * HccaDoneHead before this frame wrote it, find 0 and acknowledge WDH, and
+ * the done queue landed after it: its transfers never completed, and at
+ * the 5 s timeout the driver's cancel walk took the empty endpoint's dummy
+ * TD for the URB's and bugchecked (0x0A at 0x18D0FC, Azurik's V22 boot
+ * hang). And a frame that read HccaDoneHead before the DPC zeroed it wrote
+ * the old head back. XEMU_OHCI_HCCA_FIRST=0 brings back both (v0.16).
+ * Under icount nothing runs beside a frame, so neither changes a byte.
+ */
+static bool ohci_hcca_first(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("XEMU_OHCI_HCCA_FIRST");
+        on = !(e && e[0] == '0');
+    }
+    return on;
 }
 
 /* Process Control and Bulk lists. */
@@ -1238,6 +1276,8 @@ static void ohci_frame_boundary(void *opaque)
 {
     OHCIState *ohci = opaque;
     struct ohci_hcca hcca;
+    bool hcca_first = ohci_hcca_first();
+    uint32_t intr = 0;
 
     /*
      * A late EOF timer tick can race ohci_bus_stop() / HC reset and reach us
@@ -1289,31 +1329,39 @@ static void ohci_frame_boundary(void *opaque)
     hcca.pad = 0;
     /* FrameNumberOverflow happens when bit 15 of frame number changes */
     if (ohci->frame_number == 0x8000 || ohci->frame_number == 0) {
-        ohci_set_interrupt(ohci, OHCI_INTR_FNO);
+        intr |= OHCI_INTR_FNO;
     }
 
     if (ohci->done_count == 0 && !(ohci->intr_status & OHCI_INTR_WD)) {
         if (!ohci->done) {
             abort();
         }
-        if (ohci->intr & ohci->intr_status) {
+        if (ohci->intr & (ohci->intr_status | intr)) {
             ohci->done |= 1;
         }
         hcca.done = cpu_to_le32(ohci->done);
         ohci->done = 0;
         ohci->done_count = 7;
-        ohci_set_interrupt(ohci, OHCI_INTR_WD);
+        intr |= OHCI_INTR_WD;
     }
 
     if (ohci->done_count != 7 && ohci->done_count != 0) {
         ohci->done_count--;
     }
+    if (!hcca_first && intr) {
+        ohci_set_interrupt(ohci, intr);
+    }
     /* Do SOF stuff here */
-    ohci_sof(ohci);
+    ohci_sof(ohci, !hcca_first);
 
     /* Writeback HCCA */
-    if (ohci_put_hcca(ohci, ohci->hcca, &hcca)) {
+    if (ohci_put_hcca(ohci, ohci->hcca, &hcca,
+                      !hcca_first || (intr & OHCI_INTR_WD))) {
         ohci_die(ohci);
+        return;
+    }
+    if (hcca_first) {
+        ohci_set_interrupt(ohci, intr | OHCI_INTR_SF);
     }
 }
 
