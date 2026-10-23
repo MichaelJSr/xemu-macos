@@ -2993,20 +2993,54 @@ void pgraph_check_within_begin_end_block(PGRAPHState *pg)
     }
 }
 
-DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT16)
+/*
+ * A command's index pairs in one call: pgraph_method_non_inc ran the body
+ * per word, which re-read draw_arrays_length and stored
+ * inline_elements_length between the two index stores (a uint32 store
+ * may alias it). Nothing below sets draw_arrays_length, so one expansion
+ * up front is the per-word test's, and the bound covers the whole run.
+ * An inc command's one word is `parameter`, the value the threaded pusher
+ * read before its frozen-ring check (pfifo_frozen_lookup), as the
+ * per-word path used; a non-inc run reads parameters[0..n), as it did.
+ * Per-word work added here (counters, logging) loops over all n words.
+ */
+DEF_METHOD(NV097, ARRAY_ELEMENT16)
 {
-    pgraph_check_within_begin_end_block(pg);
-    if (unlikely(pg->gc_on)) {
-        nv2a_gc_array_element(pg, parameter, true);
+    size_t n = inc ? 1 : num_words_available;
+    if (n == 0) {
+        *num_words_consumed = 0;
+        return;
     }
 
+    pgraph_check_within_begin_end_block(pg);
+    if (unlikely(pg->gc_on)) {
+        for (size_t i = 0; i < n; i++) {
+            nv2a_gc_array_element(pg, inc ? parameter : ldl_le_p(parameters + i),
+                                  true);
+        }
+    }
     if (pg->draw_arrays_length) {
         pgraph_expand_draw_arrays(d);
     }
 
-    assert(pg->inline_elements_length < NV2A_MAX_BATCH_LENGTH);
-    pg->inline_elements[pg->inline_elements_length++] = parameter & 0xFFFF;
-    pg->inline_elements[pg->inline_elements_length++] = parameter >> 16;
+    uint32_t len = pg->inline_elements_length;
+    assert(len + 2 * n <= NV2A_MAX_BATCH_LENGTH);
+    uint32_t *restrict dst = &pg->inline_elements[len];
+    if (inc) {
+        dst[0] = parameter & 0xFFFF;
+        dst[1] = parameter >> 16;
+    } else {
+        for (size_t i = 1; i < n; i++) {
+            pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method,
+                              ldl_le_p(parameters + i));
+        }
+        const uint8_t *restrict src = (const uint8_t *)parameters;
+        for (size_t j = 0; j < 2 * n; j++) {
+            dst[j] = lduw_le_p(src + 2 * j);
+        }
+    }
+    pg->inline_elements_length = len + 2 * n;
+    *num_words_consumed = n;
 }
 
 DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT32)

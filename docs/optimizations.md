@@ -3392,6 +3392,33 @@ x86_64 host (Windows, Linux, Intel macOS).
   (paired median, 10/10), Mcycles/frame −2.9% (8/10, range
   −21.8..+6.8%); stream-e2 Minsns −1.64% (4/4), Mcycles −1.1% (2/4,
   unresolved).
+- **ARRAY_ELEMENT16 stores a command's indices in one loop
+  (2026-10-23).** stream-e2's hottest handler ran its body per word
+  through `pgraph_method_non_inc`: 15 instructions per word, re-reading
+  `draw_arrays_length` and storing `inline_elements_length` between the
+  two index stores, since a uint32 store may alias it. The handler now
+  expands a pending DRAW_ARRAYS once, bounds the whole run
+  (`len + 2n <= NV2A_MAX_BATCH_LENGTH`; the old per-word `<` let the
+  word starting at MAX−1 write one past the array), widens the run's
+  u16 indices in one loop (clang: `ushll`/`ushll2`, `stp q`) and stores
+  the length once. An inc command's one word is still `parameter`, the
+  value the threaded pusher read before its frozen-ring check; a non-inc
+  run reads its words from the pushbuffer, as the per-word loop did.
+  Both pushers share it; nothing else changed. Per-word work added to
+  the handler later (counters) must loop over all n words. Goldens
+  unchanged; det offscreen RAM and screendumps equal to base (heavy-f1
+  f300 and f600, stream-e2 f600, W2 f600); xbox suite 9/9; the four
+  tests/azurik pack 03 scenes keep their v0.15 RAM. Load 70-170: null
+  stream-e2 Minsns/frame −1.00% (16/16), Mcycles paired median −0.51%
+  (9/16, CI −2.1..+0.8%). So Stage 2 ran, a same-binary alternate-chunk
+  A/B (old body in alternate 20-frame chunks, 30 chunks a run), whose
+  pre-registered bar was mean ≤ −0.5% with se ≤ 0.25 over 6 pairs:
+  Mcycles −1.46% (se 0.26) in the first 6 pairs, −1.97% (se 0.30) in 6
+  more, −1.45% (se 0.43, load 55-127) in a fresh 6 on the final code;
+  all 18 pairs −1.62% (se 0.19, 17/18 lower). No 6-pair block met the
+  se bar alone. Minsns −1.01% in every block. heavy-f1 Minsns −0.27%
+  (4/4), Mcycles −1.1% (3/4); offscreen stream-e2 Minsns −0.94% (4/4),
+  Mcycles −1.4% (3/4). The cycle claim is macOS arm64 only.
 - **The det Vulkan pusher runs inline too (2026-10-19).** Only the null
   renderer's pusher ran on the vCPU (`ed21e852cf`: it "keeps no
   per-thread state", a choice nobody measured with Vulkan), so offscreen
