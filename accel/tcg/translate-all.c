@@ -270,6 +270,33 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
+/*
+ * Point goto_tb slot @n at its reset target. A backend that emits the
+ * jump in its reset form (TCG_TARGET_GOTO_TB_EMITS_RESET) leaves a fresh
+ * TB nothing to patch: its code, flushed by tcg_gen_code, already holds
+ * what tb_reset_jump would write, so only the target address is set. A
+ * recycled TB may still hold links made before its invalidation.
+ */
+static inline void tb_init_jump(TranslationBlock *tb, int n, bool recycled)
+{
+#ifdef TCG_TARGET_GOTO_TB_EMITS_RESET
+    if (!recycled) {
+        tb->jmp_target_addr[n] =
+            (uintptr_t)tb->tc.ptr + tb->jmp_reset_offset[n];
+#ifdef CONFIG_DEBUG_TCG
+        /* aarch64: B +8, from the jump to the reset offset right behind it */
+        tcg_debug_assert(tb->jmp_reset_offset[n] ==
+                         tb->jmp_insn_offset[n] + 8);
+        tcg_debug_assert(*(const uint32_t *)(tb->tc.ptr +
+                                             tb->jmp_insn_offset[n]) ==
+                         0x14000002);
+#endif
+        return;
+    }
+#endif
+    tb_reset_jump(tb, n);
+}
+
 static TranslationBlock *do_tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 {
     CPUArchState *env = cpu_env(cpu);
@@ -567,10 +594,10 @@ recycle_tb:
 
     /* init original jump addresses which have been set during tcg_gen_code() */
     if (tb->jmp_reset_offset[0] != TB_JMP_OFFSET_INVALID) {
-        tb_reset_jump(tb, 0);
+        tb_init_jump(tb, 0, recycled);
     }
     if (tb->jmp_reset_offset[1] != TB_JMP_OFFSET_INVALID) {
-        tb_reset_jump(tb, 1);
+        tb_init_jump(tb, 1, recycled);
     }
 
     /*

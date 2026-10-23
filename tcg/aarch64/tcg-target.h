@@ -62,4 +62,12 @@ typedef enum {
 /* Softmmu TLB walks shared within straight-line code (tcg/tcg-tlbm.c.inc) */
 #define TCG_TARGET_TLB_MEMO 1
 
+/*
+ * tcg_out_goto_tb emits the direct jump already in its reset form (B to
+ * the reset offset), so a fresh TB needs no tb_reset_jump patch and its
+ * per-slot icache flush: the code flush at the end of tcg_gen_code
+ * covers it (accel/tcg/translate-all.c).
+ */
+#define TCG_TARGET_GOTO_TB_EMITS_RESET 1
+
 #endif /* AARCH64_TCG_TARGET_H */
