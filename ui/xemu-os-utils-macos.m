@@ -75,10 +75,10 @@ void xemu_os_set_background_app(void)
 	/*
 	 * A windowless app is an App Nap candidate: its timers get coalesced,
 	 * the vblank thread oversleeps and the guest crawls. Opt out for the
-	 * life of the process.
+	 * life of the process: the retained token is leaked deliberately, as
+	 * the activity ends when it is deallocated.
 	 */
-	static id activity;
-	activity = [[[NSProcessInfo processInfo]
+	(void)[[[NSProcessInfo processInfo]
 		beginActivityWithOptions:NSActivityUserInitiated |
 		                         NSActivityLatencyCritical
 		                  reason:@"xemu headless emulation"] retain];
