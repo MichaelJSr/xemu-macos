@@ -169,6 +169,7 @@ static void gen_ldst1(TCGOpcode opc, TCGType type, TCGTemp *v,
 #if defined(XBOX)
     gen_ldst_prologue();
 #endif
+    tcg_ctx->nb_guest_access++;
     op = tcg_gen_op3(opc, type, temp_arg(v), temp_arg(addr), oi);
     TCGOP_FLAGS(op) = get_memop(oi) & MO_SIZE;
 }
@@ -181,6 +182,7 @@ static void gen_ldst2(TCGOpcode opc, TCGType type, TCGTemp *vl, TCGTemp *vh,
 #if defined(XBOX)
     gen_ldst_prologue();
 #endif
+    tcg_ctx->nb_guest_access++;
     op = tcg_gen_op4(opc, type, temp_arg(vl), temp_arg(vh), temp_arg(addr), oi);
     TCGOP_FLAGS(op) = get_memop(oi) & MO_SIZE;
 }
@@ -527,6 +529,7 @@ bool tcg_gen_qemu_x87_chk(TCGOpcode opc, TCGv_i32 ret, int kind,
     oi = make_memop_idx(tcg_canonicalize_memop(memop, is64, st), idx);
     addr_new = tci_extend_addr(addr);
     gen_ldst_prologue();
+    tcg_ctx->nb_guest_access++;
     if (ret) {
         tcg_gen_op5(opc, TCG_TYPE_I64, tcgv_i32_arg(ret), temp_arg(addr_new),
                     ofs, kind, oi);
@@ -955,6 +958,7 @@ void tcg_gen_qemu_ld_env_i128_chk(intptr_t env_ofs, TCGTemp *addr,
 #if defined(XBOX)
         gen_ldst_prologue();
 #endif
+        tcg_ctx->nb_guest_access++;
         op = tcg_gen_op3(INDEX_op_qemu_ld_v128, TCG_TYPE_V128,
                          tcgv_vec_arg(v), temp_arg(addr_new),
                          make_memop_idx(m, idx));

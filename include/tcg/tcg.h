@@ -412,6 +412,11 @@ struct TCGContext {
     int nb_temps;
     int nb_indirects;
     int nb_ops;
+    /*
+     * Guest access ops emitted (tcg-op-ldst.c): an upper bound on those
+     * left once the optimizer and liveness remove ops; the TLB memo plan
+     */
+    int nb_guest_access;
     TCGType addr_type;            /* TCG_TYPE_I32 or TCG_TYPE_I64 */
     TCGBar guest_mo;
 

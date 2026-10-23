@@ -34,7 +34,8 @@
  * hint per counted access op, in op order (tlbm_take_hint), so every op
  * that looks up the TLB with the memo on is counted here: qemu_ld/st,
  * qemu_ld2/st2, qemu_ld_v128, qemu_ld_fp/qemu_st_fp, and on x86_64 the
- * host x87 ops on the guest page (x87_*_g).
+ * host x87 ops on the guest page (x87_*_g); their emitters in
+ * tcg-op-ldst.c count them in nb_guest_access too.
  */
 #define TLBM_SLOTS 2
 
@@ -60,11 +61,12 @@ typedef struct {
     uint8_t size;
 } TLBMAccess;
 
-static void tlbm_val(int *vroot, uint32_t *voff, int *next, TCGArg a,
-                     int *r, uint32_t *o)
+/* Temps are indexed from @s, not through the thread-local tcg_ctx. */
+static void tlbm_val(TCGContext *s, int *vroot, uint32_t *voff, int *next,
+                     TCGArg a, int *r, uint32_t *o)
 {
     TCGTemp *ts = arg_temp(a);
-    size_t i = temp_idx(ts);
+    size_t i = ts - s->temps;
 
     if (ts->kind == TEMP_CONST) {
         *r = -1;
@@ -79,9 +81,10 @@ static void tlbm_val(int *vroot, uint32_t *voff, int *next, TCGArg a,
     *o = voff[i];
 }
 
-static void tlbm_def(int *vroot, uint32_t *voff, TCGArg a, int r, uint32_t o)
+static void tlbm_def(TCGContext *s, int *vroot, uint32_t *voff, TCGArg a,
+                     int r, uint32_t o)
 {
-    size_t i = temp_idx(arg_temp(a));
+    size_t i = arg_temp(a) - s->temps;
 
     vroot[i] = r;
     voff[i] = o;
@@ -113,10 +116,42 @@ static int tlbm_next_use(const TLBMAccess *acc, int n, int i, int f)
     return n;
 }
 
+#ifdef CONFIG_DEBUG_TCG
+/* The access ops left in the TB, the ones the planner's walk counts. */
+static int tlbm_count_accesses(TCGContext *s)
+{
+    TCGOp *op;
+    int n = 0;
+
+    QTAILQ_FOREACH(op, &s->ops, link) {
+        switch (op->opc) {
+        case INDEX_op_qemu_ld:
+        case INDEX_op_qemu_st:
+        case INDEX_op_qemu_ld2:
+        case INDEX_op_qemu_st2:
+        case INDEX_op_qemu_ld_v128:
+        case INDEX_op_qemu_ld_fp:
+        case INDEX_op_qemu_st_fp:
+#if TCG_TARGET_HAS_x87
+        case INDEX_op_x87_ld_g:
+        case INDEX_op_x87_arith_g:
+        case INDEX_op_x87_cmp_g:
+        case INDEX_op_x87_st_g:
+#endif
+            n++;
+            break;
+        default:
+            break;
+        }
+    }
+    return n;
+}
+#endif
+
 static void tcg_tlbm_plan(TCGContext *s)
 {
     TCGOp *op;
-    int n = 0, next = 1, k = 0, seg = 0, cur[TLBM_SLOTS] = { -1, -1 };
+    int n, next = 1, k = 0, seg = 0, cur[TLBM_SLOTS] = { -1, -1 };
     int *vroot;
     uint32_t *voff;
     TLBMAccess *acc;
@@ -128,25 +163,23 @@ static void tcg_tlbm_plan(TCGContext *s)
         || TARGET_PAGE_BITS > 12) {
         return;
     }
-    QTAILQ_FOREACH(op, &s->ops, link) {
-        n += op->opc == INDEX_op_qemu_ld || op->opc == INDEX_op_qemu_st ||
-             op->opc == INDEX_op_qemu_ld2 || op->opc == INDEX_op_qemu_st2 ||
-             op->opc == INDEX_op_qemu_ld_v128 ||
-             op->opc == INDEX_op_qemu_ld_fp || op->opc == INDEX_op_qemu_st_fp
-#if TCG_TARGET_HAS_x87
-             || op->opc == INDEX_op_x87_ld_g || op->opc == INDEX_op_x87_arith_g
-             || op->opc == INDEX_op_x87_cmp_g || op->opc == INDEX_op_x87_st_g
+    /*
+     * No hints means every access walks (tlbm_take_hint), which is all a
+     * TB with fewer than two accesses gets: a lone fill has no sharer
+     * (the last pass below). nb_guest_access is an upper bound on the
+     * accesses, and nb_ops an exact bound that sizes the arrays, so no
+     * walk has to count them first. An undercount only loses sharing,
+     * which nothing else would show, so a debug build counts them here,
+     * ahead of the return.
+     */
+#ifdef CONFIG_DEBUG_TCG
+    tcg_debug_assert(tlbm_count_accesses(s) <= s->nb_guest_access);
 #endif
-             ;
-    }
-    if (!n) {
+    if (s->nb_guest_access < 2) {
         return;
     }
-    s->tlbm_hint = tcg_malloc(n);
-    s->tlbm_nhint = n;
-    acc = tcg_malloc(sizeof(*acc) * n);
-    used = tcg_malloc(n);
-    memset(used, 0, n);
+    s->tlbm_hint = tcg_malloc(s->nb_ops);
+    acc = tcg_malloc(sizeof(*acc) * s->nb_ops);
     vroot = tcg_malloc(sizeof(int) * s->nb_temps);
     voff = tcg_malloc(sizeof(uint32_t) * s->nb_temps);
     memset(vroot, 0, sizeof(int) * s->nb_temps);
@@ -172,17 +205,17 @@ static void tcg_tlbm_plan(TCGContext *s)
             seg++;
             memset(vroot, 0, sizeof(int) * s->nb_globals);
             for (int i = 0; i < TCGOP_CALLO(op); i++) {
-                tlbm_def(vroot, voff, op->args[i], next++, 0);
+                tlbm_def(s, vroot, voff, op->args[i], next++, 0);
             }
             break;
         case INDEX_op_mov:
-            tlbm_val(vroot, voff, &next, op->args[1], &r, &o);
-            tlbm_def(vroot, voff, op->args[0], r, o);
+            tlbm_val(s, vroot, voff, &next, op->args[1], &r, &o);
+            tlbm_def(s, vroot, voff, op->args[0], r, o);
             break;
         case INDEX_op_add:
         case INDEX_op_sub:
-            tlbm_val(vroot, voff, &next, op->args[1], &r, &o);
-            tlbm_val(vroot, voff, &next, op->args[2], &r2, &o2);
+            tlbm_val(s, vroot, voff, &next, op->args[1], &r, &o);
+            tlbm_val(s, vroot, voff, &next, op->args[2], &r2, &o2);
             if (r2 == -1) {
                 o = opc == INDEX_op_add ? o + o2 : o - o2;
             } else if (r == -1 && opc == INDEX_op_add) {
@@ -192,7 +225,7 @@ static void tcg_tlbm_plan(TCGContext *s)
                 r = next++;
                 o = 0;
             }
-            tlbm_def(vroot, voff, op->args[0], r, o);
+            tlbm_def(s, vroot, voff, op->args[0], r, o);
             break;
         case INDEX_op_qemu_ld:
         case INDEX_op_qemu_st:
@@ -210,14 +243,14 @@ static void tcg_tlbm_plan(TCGContext *s)
             MemOp mop = get_memop(oi);
             TLBMAccess *x = &acc[k++];
 
-            tlbm_val(vroot, voff, &next, op->args[nd], &x->root, &x->off);
+            tlbm_val(s, vroot, voff, &next, op->args[nd], &x->root, &x->off);
             x->seg = seg;
             x->slot = is_st;
             x->mmu = get_mmuidx(oi);
             x->size = 1u << (mop & MO_SIZE);
             if (!is_st) {
                 for (int i = 0; i < nd; i++) {
-                    tlbm_def(vroot, voff, op->args[i], next++, 0);
+                    tlbm_def(s, vroot, voff, op->args[i], next++, 0);
                 }
             }
             break;
@@ -232,24 +265,29 @@ static void tcg_tlbm_plan(TCGContext *s)
             MemOpIdx oi = op->args[nd + 3];
             TLBMAccess *x = &acc[k++];
 
-            tlbm_val(vroot, voff, &next, op->args[nd], &x->root, &x->off);
+            tlbm_val(s, vroot, voff, &next, op->args[nd], &x->root, &x->off);
             x->seg = seg;
             x->slot = opc == INDEX_op_x87_st_g;
             x->mmu = get_mmuidx(oi);
             x->size = 1u << (get_memop(oi) & MO_SIZE);
             if (nd) {
-                tlbm_def(vroot, voff, op->args[0], next++, 0);
+                tlbm_def(s, vroot, voff, op->args[0], next++, 0);
             }
             break;
         }
 #endif
         default:
             for (int i = 0; i < tcg_op_defs[opc].nb_oargs; i++) {
-                tlbm_def(vroot, voff, op->args[i], next++, 0);
+                tlbm_def(s, vroot, voff, op->args[i], next++, 0);
             }
             break;
         }
     }
+    tcg_debug_assert(k <= s->nb_guest_access);
+    n = k;
+    s->tlbm_nhint = n;
+    used = tcg_malloc(n);
+    memset(used, 0, n);
 
     /* Share, fill or plain walk; a fill replaces the page needed later. */
     for (int i = 0; i < n; i++) {

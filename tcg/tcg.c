@@ -2080,6 +2080,7 @@ void tcg_func_start(TCGContext *s)
     }
 
     s->nb_ops = 0;
+    s->nb_guest_access = 0;
     s->nb_labels = 0;
     s->nb_slow_st = 0;
     /* An aborted tcg_gen_code may have left some held. */
