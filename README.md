@@ -711,6 +711,23 @@ Other automation interfaces (windowed or headless):
     frames dropped` on stderr; emulation, input and `screendump` go on,
     the menus wait for the next drawable (see Performance, frame
     interpolation).
+- **Background priority** (macOS): a headless xemu started under
+  `taskpolicy -b` stays in the background whatever it asks for. In null
+  and offscreen mode alike every thread runs at priority 4, almost only
+  on the efficiency cores, and its CPU time bills to background QoS:
+  neither xemu's user-interactive thread requests nor null mode's app
+  role lift it, so it takes no performance-core time from a windowed
+  session beside it. Deterministic runs
+  (`-icount shift=2,align=off,sleep=off`) give the same RAM as at normal
+  priority, since their vblanks are virtual, but they and their QMP
+  replies go only as fast as idle efficiency cores allow: on a host
+  loaded on every core (load 95-150), a 6000-frame advance that took 3 s
+  at normal priority took 3-16 minutes, launch to `xemu: ready` 1-111 s
+  (null mode at normal priority: under 0.5 s), a `loadvm` 0.3-25 s
+  (normal: 0.05 s) and QMP round trips up to 0.56 s, so give background
+  runs longer timeouts. Real-time runs drop vblanks when starved.
+  `taskpolicy -c utility` is the middle ground (priority 20,
+  performance cores allowed).
 - **Park and resume a machine** without touching the HDD's snapshots:
   QMP `stop`, then `migrate {"uri": "file:/path"}` (poll `query-migrate`
   for `completed`). Resume in a new xemu started with `-incoming defer`
