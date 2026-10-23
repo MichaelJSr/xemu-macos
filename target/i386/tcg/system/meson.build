@@ -11,4 +11,5 @@ i386_system_ss.add(when: ['CONFIG_TCG', 'CONFIG_SYSTEM_ONLY'], if_true: files(
   'xemu-hook-pred.c',
   'xemu-hooks-qmp.c',
   'xemu-run-until.c',
+  'xemu-bugcheck.c',
 ))

@@ -1038,6 +1038,29 @@ Other automation interfaces (windowed or headless):
   where translation is unchanged. Retail Azurik and the cold boot never
   trip it (the deterministic goldens match with it on), and it is
   deterministic under icount.
+- **Guest bugchecks**: `XEMU_GUEST_BUGCHECK=1` names a boot that stops
+  in the kernel's halt (the 4627 kernel's `cli; hlt; jmp` at
+  0x800151ED, where KeBugCheckEx and the double-fault handler end, so
+  EIP reads 0x800151EF with every I/O counter frozen). xemu finds
+  KeBugCheckEx (export 96; KeBugCheck, 95, calls it) in the export table
+  of the image at 0x80010000 (`xemu: guest bugcheck: KeBugCheckEx at
+  0x80019442 hooked` on the 4627 kernel) at each load, before the guest
+  runs on, and in a boot at the second vblank that finds the image in
+  place (a fixed frame under icount), and hooks it: each call prints
+  `xemu: guest bugcheck 0x<code> (<p1>, <p2>, <p3>, <p4>) from <return
+  address>` and sends QMP
+  `XEMU_GUEST_BUGCHECK {code, params, caller, count}`; a HLT with
+  interrupts disabled prints `xemu: guest halted with interrupts
+  disabled at <eip> (esp <esp>)` and sends `XEMU_GUEST_HALTED {eip, esp,
+  count}` (the first 16 of each per launch). Both only read guest
+  state: the deterministic goldens match with it on. Without it, a
+  halted 4627 guest still holds the bugcheck in RAM: KeBugCheckEx
+  stores the code and parameters at 0x8003AB20-0x8003AB33 (five
+  dwords, zero until a bugcheck) and halts with EAX = code, ECX/EDX/ESI/
+  EDI = p1-p4 (read them with `qxemu.read` or `g` at the halt). A
+  planted SSE2 instruction under `XEMU_STRICT_CPUID=1` gives 0x1E
+  (KMODE_EXCEPTION_NOT_HANDLED: 0xC000001D, the instruction's address,
+  ...).
 - **Deterministic fast-forward**: add
   `-icount shift=2,align=off,sleep=off` (with `XEMU_HEADLESS=null`).
   Guest time then follows executed instructions, not the host clock, and

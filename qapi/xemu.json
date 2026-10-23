@@ -697,6 +697,57 @@
             'count': 'int' } }
 
 ##
+# @XEMU_GUEST_BUGCHECK:
+#
+# Emitted when xemu runs with XEMU_GUEST_BUGCHECK=1 and the guest
+# kernel enters KeBugCheckEx (export 96, which KeBugCheck, export 95,
+# calls), before its first instruction, with the stderr line "xemu:
+# guest bugcheck 0x<code> (<p1>, <p2>, <p3>, <p4>) from <caller>".
+# xemu finds the function in the export table of the kernel image at
+# 0x80010000 ("xemu: guest bugcheck: KeBugCheckEx at ... hooked") at
+# each load, before the guest runs on, and in a boot at the second
+# vblank that finds the image in place.  The 4627 kernel then halts
+# with interrupts disabled (see XEMU_GUEST_HALTED).  Reported for the
+# first 16 bugchecks of a launch.  (xemu-macos 0.16.1)
+#
+# @code: the bug check code
+#
+# @params: its four parameters
+#
+# @caller: the return address KeBugCheckEx was called with
+#
+# @count: bugchecks since launch, this one included
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_GUEST_BUGCHECK',
+  'data': { 'code': 'uint32', 'params': [ 'uint32' ], 'caller': 'uint32',
+            'count': 'int' } }
+
+##
+# @XEMU_GUEST_HALTED:
+#
+# Emitted when xemu runs with XEMU_GUEST_BUGCHECK=1 and the guest
+# executes HLT with interrupts disabled, which only a reset or an NMI
+# ends: the kernel's halt after a bugcheck (the 4627 kernel's "cli;
+# hlt; jmp" at 0x800151ED, which also ends its double-fault handler),
+# with the stderr line "xemu: guest halted with interrupts disabled at
+# <eip>".  Reported for the first 16 such halts of a launch.
+# (xemu-macos 0.16.1)
+#
+# @eip: EIP after the HLT, where the guest stays (0x800151EF on the
+#     4627 kernel)
+#
+# @esp: ESP
+#
+# @count: such halts since launch, this one included
+#
+# Since: 10.2
+##
+{ 'event': 'XEMU_GUEST_HALTED',
+  'data': { 'eip': 'uint32', 'esp': 'uint32', 'count': 'int' } }
+
+##
 # Guest PC hooks: run-until
 # =========================
 ##

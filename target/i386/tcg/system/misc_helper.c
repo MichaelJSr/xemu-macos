@@ -34,6 +34,7 @@
 #include "hw/core/cpu.h"            /* cpu_get_phys_page_debug */
 #include "exec/icount.h"            /* icount_enabled */
 #include "qemu/timer.h"             /* get_clock */
+#include "tcg/xemu-bugcheck.h"      /* xemu_guest_dead_halt */
 /*
  * Cross-page direct-chaining guest-flush backstops live inside the guest's
  * own INVLPG / CR3 helpers below. Function-local extern idiom:
@@ -582,6 +583,12 @@ G_NORETURN void helper_hlt(CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
 
+#if defined(XBOX)
+    /* Only a reset or an NMI ends it: the kernel's bugcheck halt. */
+    if (unlikely(!(env->eflags & IF_MASK)) && xemu_guest_bugcheck_enabled()) {
+        xemu_guest_dead_halt(env);
+    }
+#endif
     do_end_instruction(env);
     cs->halted = 1;
     cs->exception_index = EXCP_HLT;

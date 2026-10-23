@@ -982,6 +982,10 @@ static void frame_stop_bh(void *opaque)
 XemuHookTrace *xemu_hooks_take_trace(void);
 /* After a load no hook-stopped arrival resumes (xemu-hooks.c). */
 void xemu_hooks_state_loaded(void);
+/* XEMU_GUEST_BUGCHECK (target/i386/tcg/system/xemu-bugcheck.c). */
+void xemu_guest_bugcheck_init(void);
+void xemu_guest_bugcheck_frame(void);
+void xemu_guest_bugcheck_state_loaded(void);
 
 /*
  * Guest PC hooks (xemu-run-until, target/i386/tcg/xemu-hooks.h). The
@@ -1123,6 +1127,7 @@ static void process_vblank(struct xemu_console *scon)
             frame_trace_sample();
         }
         xemu_trace_record_frame(frame_count);
+        xemu_guest_bugcheck_frame();
     }
 
     graphic_hw_update(scon->dcl.con);
@@ -1397,6 +1402,7 @@ void xemu_state_loaded(void)
     xemu_input_state_loaded();
     xemu_hooks_state_loaded();
     xemu_trace_record_load(frame_count);
+    xemu_guest_bugcheck_state_loaded();
 }
 
 /*
@@ -3032,6 +3038,7 @@ int main(int argc, char **argv)
     xemu_main_loop_lock();
     xemu_input_init();
     xemu_trace_record_init();
+    xemu_guest_bugcheck_init();   /* XEMU_GUEST_BUGCHECK */
     xemu_loadvm_run_deferred(); /* CLI -loadvm under XEMU_LOADVM_ADD_PADS */
     xemu_events_ready();   /* QMP XEMU_READY */
     xemu_main_loop_unlock();
