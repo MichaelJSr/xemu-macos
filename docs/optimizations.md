@@ -25,7 +25,7 @@ switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
-`XEMU_VTX_SPAN_FINISH` and `XEMU_VK_CLEAR_IN_PASS`, the first ten rows. The
+`XEMU_VTX_SPAN_FINISH`, `XEMU_VK_CLEAR_IN_PASS` and `XEMU_NV2A_RESET_IRQ`, the first eleven rows. The
 former `=0` row, `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass, became
 the `perf.cache_shaders` setting on 2026-10-18.
 Knobs that exist only in the retired wave-1 work are recorded in
@@ -44,6 +44,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_INTERP_GATE` | Metal backend, **default on since 2026-10-16**: frame interpolation runs a mode only while a guest frame lasts `mode` refreshes of the window's display (4x drops to 2x, then off) and holds paced steps whole refreshes; `0` runs the configured mode every flip with the computed holds. Headless, the GL backend and an unknown refresh rate keep the configured mode. MetalFX + presentation |
 | `XEMU_VTX_SPAN_FINISH` | Vulkan renderer, **default on since 2026-10-17**: a copy into the vertex RAM mirror finishes the recording command buffer only when it changes a byte one of that buffer's draws reads (the slot's read spans, on every page they read); `0` restores the page-wide check (finish when the copy changes a page the recording window uploaded, anywhere on it). Pass splits move a few pixels on AGX, so the null-renderer goldens can't see it; RAM is the same either way. Refuter: `XEMU_VTX_SPAN_REFUTE` |
 | `XEMU_VK_CLEAR_IN_PASS` | Vulkan renderer, **default on since 2026-10-23**: an NV097_CLEAR_SURFACE records into the open render pass (it ends the occlusion query, never the pass); `0` ends the pass before and after every clear again, so each clear pays a full-surface load and store. Pass splits can move pixels on AGX and the null-renderer goldens never reach `vk/draw.c`. nsprof `clears` counts clears, `rpcause_clear` the passes they end under `0`. Vulkan renderer (pgraph/vk) |
+| `XEMU_NV2A_RESET_IRQ` | Both modes, **default on since 2026-10-23** (v0.16.1): a machine reset (`system_reset`, and the reset every load runs first) clears the NV2A interrupt enables and PGRAPH's pending bits and recomputes the line, as power-on does; `0` keeps them, as v0.16 did. Kept, a GPU interrupt the stopped game left pending re-raised IRQ 3 before the guest ran, the kernel's 8259 setup lost the request, and about 1 windowed reset in 100 after a load hung in the kernel's GPU fence wait (0x800426d4). A correctness fix, not a speedup; the goldens don't reset after running, so they can't verify it. Reset lane, Part 11 |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |

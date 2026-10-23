@@ -134,6 +134,8 @@ typedef struct NV2AState {
 
     /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */
     bool save_quiesced;
+    /* nv2a_reset clears the interrupt state (XEMU_NV2A_RESET_IRQ=0 keeps it) */
+    bool reset_irq;
 
     struct {
         uint32_t regs[0x1000];

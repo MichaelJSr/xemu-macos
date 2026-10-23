@@ -1577,6 +1577,14 @@ fifth to two thirds of a core at the 60 fps cap. Waking it can take a
 millisecond or more when no core is free; `XEMU_KI_IDLE_HALT=0`
 restores the spin.
 
+**A reset hangs on a black screen (v0.16 and older).** About 1 reset in
+100 after loading a state (the Reset menu item, `system_reset`) never got
+past the Xbox kernel: a GPU interrupt the stopped game had left pending
+raised IRQ 3 again before the kernel set up its interrupt controller,
+which lost it, so the kernel waited for the GPU forever. Since v0.16.1 a
+reset clears the GPU's interrupt state as a cold boot does;
+`XEMU_NV2A_RESET_IRQ=0` restores the old behaviour.
+
 **FPU precision bug.** `[perf] hard_fpu = false`. Inline FPU uses IEEE
 double (52-bit mantissa) vs x87 extended (64-bit); extremely rare.
 

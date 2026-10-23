@@ -464,6 +464,29 @@ static void nv2a_reset(NV2AState *d)
     ptimer_reset(d);
     d->pcrtc.pending_interrupts = 0;
 
+    /*
+     * The interrupt enables and PGRAPH's pending bits reset too, as at power
+     * on, and the line follows. Kept, an interrupt the last session left
+     * pending (a NOP notify the stopped guest never acked) raised IRQ 3
+     * again at the next vblank, which ticks on through the reset and a
+     * paused VM, long before the kernel programs the 8259: its ICW1 drops
+     * the request while the line stays high, and the ELCR write that makes
+     * IRQ 3 level-triggered doesn't resample it. Unless the line fell again
+     * before the next GPU interrupt, the kernel never saw one: PFIFO waited
+     * forever on its first context switch and the kernel spun in its fence
+     * wait (0x800426d4 on the 4627 kernel). XEMU_NV2A_RESET_IRQ=0 keeps
+     * them, as v0.16 did.
+     */
+    if (d->reset_irq) {
+        d->pmc.enabled_interrupts = 0;
+        d->pfifo.enabled_interrupts = 0;
+        qatomic_set(&d->pgraph.pending_interrupts, 0);
+        qatomic_set(&d->pgraph.enabled_interrupts, 0);
+        d->ptimer.enabled_interrupts = 0;
+        d->pcrtc.enabled_interrupts = 0;
+        nv2a_update_irq(d);
+    }
+
     for (int i = 0; i < 256; i++) {
         d->puserdac.palette[i*3]   = i;
         d->puserdac.palette[i*3+1] = i;
@@ -543,6 +566,9 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
         /* Normal mode only: icount's pusher runs at every guest write. */
         e = getenv("XEMU_PFIFO_RING_FREEZE");
         d->pfifo.ring_freeze = !icount_enabled() && !(e && e[0] == '0');
+        /* nv2a_reset: clear the interrupt enables */
+        e = getenv("XEMU_NV2A_RESET_IRQ");
+        d->reset_irq = !(e && e[0] == '0');
     }
 
     qemu_mutex_init(&d->pfifo.lock);
