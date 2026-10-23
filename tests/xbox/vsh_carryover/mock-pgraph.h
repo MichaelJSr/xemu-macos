@@ -5,5 +5,6 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 
 void pgraph_check_within_begin_end_block(PGRAPHState *pg);
+void nv2a_gc_immediate_vertex(PGRAPHState *pg);
 
 #endif /* MOCK_PGRAPH_H */
