@@ -296,7 +296,11 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
 
         /* Stop translation if the output buffer is full,
            or we have executed all of the allowed instructions.  */
-        if (tcg_op_buf_full() || db->num_insns >= db->max_insns) {
+        if (tcg_op_buf_full() || db->num_insns >= db->max_insns
+#if defined(XBOX)
+            || tcg_temps_nearly_full()
+#endif
+            ) {
             db->is_jmp = DISAS_TOO_MANY;
             break;
         }

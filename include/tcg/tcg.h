@@ -763,6 +763,20 @@ static inline bool tcg_op_buf_full(void)
     return tcg_ctx->nb_ops >= 4000;
 }
 
+/*
+ * Test for whether to end the TB before the next insn may run out of
+ * temps: reaching TCG_MAX_TEMPS throws the whole translation away and
+ * starts over with half as many insns (tcg_raise_tb_overflow). The margin
+ * is twice the most temps one x86 insn was seen to add (85); an insn
+ * that adds more still restarts.
+ */
+#define TCG_TEMPS_MARGIN 170
+
+static inline bool tcg_temps_nearly_full(void)
+{
+    return tcg_ctx->nb_temps > TCG_MAX_TEMPS - TCG_TEMPS_MARGIN;
+}
+
 /* pool based memory allocation */
 
 /* user-mode: mmap_lock must be held for tcg_malloc_internal. */
