@@ -196,6 +196,12 @@ enabled = true                  # ARM64 inline DSP JIT (the default)
 
 In-app Settings covers the main toggles.
 
+**Guest RAM.** `[sys] mem_limit` (Settings > System > System Memory) is
+`'64'` (the default) or `'128'`, plus two experimental values, `'256'`
+and `'512'` (see "More than 128 MiB" under Headless mode): stock kernels
+use 64 MiB, the NV2A reaches only the first 128 MiB, and a savestate
+loads only into the RAM size it was saved with.
+
 ### Headless mode (automation)
 
 For harnesses that drive xemu only through QMP, the gdbstub and
@@ -647,6 +653,35 @@ Other automation interfaces (windowed or headless):
   the last, held about 200 MB from the 8th save to the 120th. 16-frame
   candidate runs from one checkpoint (incremental restore, then advance)
   reach about 140 frames per CPU second on Azurik's heavy scene.
+- **Guest RAM size per launch**: `-m 64` or `-m 128` on the command
+  line overrides `[sys] mem_limit` for that run (a later `-m` wins), and
+  `xemu-ram-digest`'s `ram-size` reports what the machine got. Stock
+  retail kernels manage 64 MiB on either size; a 128 MiB machine just
+  leaves the upper half to the BIOS memory test.
+- **More than 128 MiB (experimental)**: `mem_limit` `'256'` or `'512'`
+  (Settings > System > System Memory, rows marked experimental), or `-m`
+  above 128 in multiples of 16 MiB up to 3840 MiB (where NV2A BAR1 and
+  the other PCI devices start; `-m 192`, `256`, `512`, `1024` and `3840`
+  tested), gives the CPU that much RAM, mapped from physical 0. Other
+  sizes exit 1 with `-m N MiB: guest RAM above 128 MiB must be a
+  multiple of 16 MiB, 3840 MiB at most`. It is useful only with a kernel
+  that manages it. None is known: stock kernels use 64 MiB, and the NV2A
+  reaches 128 MiB (its 27-bit addresses), so the extra RAM can hold only
+  CPU-side data. To the guest the machine looks like 128 MiB hardware:
+  NV2A BAR1 (the GPU aperture), the VGA window and `NV_PFB_CSTATUS` cover
+  the first 128 MiB. `XEMU_CSTATUS_FULL_RAM=1` makes `NV_PFB_CSTATUS`
+  report the full size. The flash's X-codes program the NV2A through BAR0
+  at `0x0F000000`, where RAM above 240 MiB lies, so BAR0 is mapped over
+  that RAM until they move it. Stderr says `xemu: guest RAM N MiB
+  (experimental above 128 MiB): ...`. The harness's 4627 flash
+  (`Complex_4627v1.03.bin`, 1de4c87effe4) cold-boots Azurik to its title
+  at 192, 256, 512, 1024 and 3840 MiB. Its kernel still counts 0x4000
+  pages, and the first 128 MiB of RAM at the title are byte for byte a
+  128 MiB run's (deterministic mode, null and offscreen); 256 and 512
+  MiB also reach the title windowed. The Vulkan renderer's vertex mirror
+  stays as big as guest RAM (host memory, touched only where vertices
+  are). Savestates load only into a machine of the size they were saved
+  on.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

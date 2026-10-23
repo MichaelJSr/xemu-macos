@@ -1705,14 +1705,33 @@ void MainMenuSystemView::Draw()
         ImGui::TextColored(ImVec4(1,0,0,1), "Setting AV Pack to NONE disables video output.");
     }
 
+    static const char mem_hint[] =
+        "256 and 512 MiB are experimental: stock kernels use 64 MiB and the "
+        "NV2A reaches only the first 128 MiB, so the extra RAM helps only a "
+        "kernel that manages it. Savestates are tied to the RAM size: one "
+        "loads only into the size it was saved with.";
+    if ((int)g_config.sys.mem_limit >= CONFIG_SYS_MEM_LIMIT_256) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.75f, 0, 1));
+        ImGui::TextWrapped("%s", mem_hint);
+        ImGui::PopStyleColor();
+    }
+
     SectionTitle("System Configuration");
 
     if (ChevronCombo(
             "System Memory", &g_config.sys.mem_limit,
             "64 MiB (Default)\0"
-            "128 MiB\0",
+            "128 MiB\0"
+            "256 MiB (experimental)\0"
+            "512 MiB (experimental)\0",
             "Increase to 128 MiB for debug or homebrew applications")) {
         m_dirty = true;
+    }
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::TextUnformatted(mem_hint);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
     }
 
     if (ChevronCombo(

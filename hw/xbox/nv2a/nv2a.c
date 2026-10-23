@@ -252,14 +252,60 @@ static void nv2a_vga_gfx_update(void *opaque)
     nv2a_update_irq(d);
 }
 
+/*
+ * The X-codes program the NV2A's memory controller (NV_PFB_CFG0/1 and the
+ * rest) through BAR0 at 0x0F000000, then move BAR0 to 0xFD000000. Guest
+ * RAM above 240 MiB (an experimental -m) covers 0x0F000000, and RAM wins
+ * over the PCI hole, so those writes would land in RAM instead. While
+ * BAR0 decodes inside guest RAM, this window maps it over that RAM. It
+ * exists only above 128 MiB; at 64 and 128 MiB BAR0 is reached through
+ * the PCI hole as before.
+ */
+static void nv2a_update_boot_window(NV2AState *d)
+{
+    if (!d->has_boot_window) {
+        return;
+    }
+    pcibus_t bar0 = pci_get_bar_addr(PCI_DEVICE(d), 0);
+    bool on = bar0 != PCI_BAR_UNMAPPED && bar0 < memory_region_size(d->vram);
+
+    memory_region_transaction_begin();
+    if (on) {
+        memory_region_set_address(&d->boot_window, bar0);
+    }
+    memory_region_set_enabled(&d->boot_window, on);
+    memory_region_transaction_commit();
+}
+
+static void nv2a_config_write(PCIDevice *dev, uint32_t addr, uint32_t val,
+                              int len)
+{
+    pci_default_write_config(dev, addr, val, len);
+    nv2a_update_boot_window(NV2A_DEVICE(dev));
+}
+
+static void nv2a_init_boot_window(NV2AState *d)
+{
+    if (memory_region_size(d->vram) <= NV2A_APERTURE_MAX) {
+        return;
+    }
+    memory_region_init_alias(&d->boot_window, OBJECT(d), "nv2a-boot-window",
+                             &d->mmio, 0, memory_region_size(&d->mmio));
+    memory_region_set_enabled(&d->boot_window, false);
+    memory_region_add_subregion_overlap(get_system_memory(), 0x0F000000,
+                                        &d->boot_window, 1);
+    d->has_boot_window = true;
+    nv2a_update_boot_window(d);
+}
+
 static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)
 {
     /* xbox is UMA - vram *is* ram */
     d->vram = ram;
 
-     /* PCI exposed vram */
+     /* PCI exposed vram: all of RAM, or its first 128 MiB above that */
     memory_region_init_alias(&d->vram_pci, OBJECT(d), "nv2a-vram-pci", d->vram,
-                             0, memory_region_size(d->vram));
+                             0, nv2a_aperture_size(d));
     pci_register_bar(PCI_DEVICE(d), 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &d->vram_pci);
 
 
@@ -286,7 +332,7 @@ static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)
 static void nv2a_init_vga(NV2AState *d)
 {
     VGACommonState *vga = &d->vga;
-    vga->vram_size_mb = memory_region_size(d->vram) / MiB;
+    vga->vram_size_mb = nv2a_aperture_size(d) / MiB;
 
     vga_common_init(vga, OBJECT(d), &error_fatal);
     vga->get_bpp = nv2a_get_bpp;
@@ -300,7 +346,7 @@ static void nv2a_init_vga(NV2AState *d)
     /* hacky. swap out vga's vram */
     memory_region_destroy(&vga->vram);
     memory_region_init_alias(&vga->vram, OBJECT(d), "vga.vram",
-                             d->vram, 0, memory_region_size(d->vram));
+                             d->vram, 0, nv2a_aperture_size(d));
     vga->vram_ptr = memory_region_get_ram_ptr(&vga->vram);
     vga_dirty_log_start(vga);
 }
@@ -451,10 +497,11 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
      * 4.85M ops / 70 s — dominated by NV_PFB_WBC write-combine flush
      * polling — and USER 1.58M doorbell stores; together 78% of all
      * MMIO traffic). Audit per handler:
-     *   - pfb.c: reads return a constant (CSTATUS = vram size), 0
-     *     (WBC), or a plain regs[] load; writes are plain regs[]
-     *     stores. No IRQs, no cross-thread state beyond the PFIFO
-     *     thread's tile-config reads, which were never BQL-protected.
+     *   - pfb.c: reads return a constant (CSTATUS, set at init: the
+     *     RAM size, 128 MiB at most), 0 (WBC), or a plain regs[] load;
+     *     writes are plain regs[] stores. No IRQs, no cross-thread
+     *     state beyond the PFIFO thread's tile-config reads, which were
+     *     never BQL-protected.
      *   - user.c: both handlers take d->pfifo.lock for their entire
      *     body and pfifo_kick() under it (the Invariant-10 kick
      *     discipline), or, in normal mode, run lockless
@@ -523,6 +570,10 @@ static void nv2a_reset_hold(Object *obj, ResetType type)
 {
     NV2AState *s = NV2A_DEVICE(obj);
     nv2a_reset(s);
+    if (s->has_boot_window) {
+        /* A reset clears the command register: BAR0 decodes nothing. */
+        memory_region_set_enabled(&s->boot_window, false);
+    }
 }
 
 // Note: This is handled as a VM state change and not as a `pre_save` callback
@@ -646,6 +697,7 @@ static int nv2a_post_load(void *opaque, int version_id)
     }
     /* The loaded pusher position belongs to the loaded RAM. */
     pfifo_frozen_drop(&d->pfifo.frozen);
+    nv2a_update_boot_window(d);
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);
     return 0;
@@ -912,6 +964,7 @@ static void nv2a_class_init(ObjectClass *klass, const void *data)
     k->subsystem_id = 0;
     k->realize   = nv2a_realize;
     k->exit      = nv2a_exitfn;
+    k->config_write = nv2a_config_write;
 
     rc->phases.hold = nv2a_reset_hold;
 
@@ -941,7 +994,9 @@ void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram)
     PCIDevice *dev = pci_create_simple(bus, devfn, "nv2a");
     NV2AState *d = NV2A_DEVICE(dev);
     nv2a_init_memory(d, ram);
+    nv2a_init_boot_window(d);
     nv2a_init_vga(d);
+    pfb_init(d);
     ptimer_init(d);
     qemu_add_vm_change_state_handler(nv2a_vm_state_change, d);
 }

@@ -82,6 +82,8 @@ typedef struct NV2AState {
 
     MemoryRegion *vram;
     MemoryRegion vram_pci;
+    MemoryRegion boot_window; /* BAR0 over RAM above 128 MiB, see nv2a.c */
+    bool has_boot_window;
     uint8_t *vram_ptr;
     MemoryRegion ramin;
     uint8_t *ramin_ptr;
@@ -149,6 +151,7 @@ typedef struct NV2AState {
 
     struct {
         uint32_t regs[0x1000];
+        uint32_t cstatus; /* NV_PFB_CSTATUS: RAM size, see pfb_init */
     } pfb;
 
     struct PGRAPHState pgraph;
@@ -252,6 +255,21 @@ void *nv_dma_map(NV2AState *d, hwaddr dma_obj_address, hwaddr *len);
 hwaddr nv_clip_gpu_tile_blit(NV2AState *d, hwaddr blit_base_address,
                              hwaddr len);
 
+/*
+ * The NV2A reaches 128 MiB (27-bit addresses: the 0x07FFFFFF masks), and
+ * BAR1, its real aperture, is that big at most. Guest RAM above it (an
+ * experimental -m above 128) is CPU-only, so BAR1 and the VGA window
+ * cover its first 128 MiB. At 64 and 128 MiB this is all of xbox.ram, as
+ * it always was.
+ */
+#define NV2A_APERTURE_MAX (128 * MiB)
+
+static inline uint64_t nv2a_aperture_size(NV2AState *d)
+{
+    return MIN(memory_region_size(d->vram), NV2A_APERTURE_MAX);
+}
+
+void pfb_init(NV2AState *d);
 void ptimer_init(NV2AState *d);
 void ptimer_reset(NV2AState *d);
 

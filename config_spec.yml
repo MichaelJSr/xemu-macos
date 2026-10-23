@@ -399,7 +399,7 @@ net:
 sys:
   mem_limit:
     type: enum
-    values: ['64', '128']
+    values: ['64', '128', '256', '512']   # 256 and 512: experimental
     default: '64'
   avpack:
     type: enum

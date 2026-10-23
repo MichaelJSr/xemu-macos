@@ -21,6 +21,28 @@
 
 #include "nv2a_int.h"
 
+/*
+ * NV_PFB_CSTATUS reports the RAM size. Above 128 MiB (an experimental -m)
+ * it reports 128 MiB, the most the NV2A reaches and a 128 MiB console has,
+ * unless XEMU_CSTATUS_FULL_RAM=1 asks for the full size. At 64 and 128
+ * MiB both are the RAM size.
+ */
+void pfb_init(NV2AState *d)
+{
+    const char *full = getenv("XEMU_CSTATUS_FULL_RAM");
+    bool want_full = full && !strcmp(full, "1");
+    uint64_t ram = memory_region_size(d->vram);
+
+    d->pfb.cstatus = want_full ? ram : nv2a_aperture_size(d);
+    if (ram > NV2A_APERTURE_MAX) {
+        fprintf(stderr, "xemu: guest RAM %" PRIu64 " MiB (experimental above "
+                "128 MiB): NV2A BAR1 and VGA cover the first 128 MiB, "
+                "NV_PFB_CSTATUS reports %u MiB%s\n", ram / MiB,
+                (unsigned)(d->pfb.cstatus / MiB),
+                want_full ? " (XEMU_CSTATUS_FULL_RAM=1)" : "");
+    }
+}
+
 uint64_t pfb_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
@@ -28,7 +50,7 @@ uint64_t pfb_read(void *opaque, hwaddr addr, unsigned int size)
     uint64_t r = 0;
     switch (addr) {
     case NV_PFB_CSTATUS:
-        r = memory_region_size(d->vram);
+        r = d->pfb.cstatus;
         break;
     case NV_PFB_WBC:
         r = 0; /* Flush not pending. */

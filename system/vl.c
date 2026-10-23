@@ -3066,7 +3066,19 @@ void qemu_init(int argc, char **argv)
         fake_argv[fake_argc++] = strdup(flashrom_path);
     }
 
-    int mem = ((int)g_config.sys.mem_limit + 1) * 64;
+    /*
+     * mem_limit's values in MiB. 256 and 512 are experimental: the NV2A
+     * sees the first 128 MiB (hw/xbox/xbox.c, nv2a_aperture_size).
+     */
+    static const int mem_limit_mib[CONFIG_SYS_MEM_LIMIT__COUNT] = {
+        [CONFIG_SYS_MEM_LIMIT_64] = 64,
+        [CONFIG_SYS_MEM_LIMIT_128] = 128,
+        [CONFIG_SYS_MEM_LIMIT_256] = 256,
+        [CONFIG_SYS_MEM_LIMIT_512] = 512,
+    };
+    int mem_index = g_config.sys.mem_limit;
+    int mem = mem_index >= 0 && mem_index < CONFIG_SYS_MEM_LIMIT__COUNT &&
+              mem_limit_mib[mem_index] ? mem_limit_mib[mem_index] : 64;
     fake_argv[fake_argc++] = strdup("-m");
     fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
 

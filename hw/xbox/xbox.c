@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "qemu/option.h"
 #include "qemu/datadir.h"
+#include "qemu/units.h"
 #include "hw/hw.h"
 #include "hw/loader.h"
 #include "hw/i386/pc.h"
@@ -508,6 +509,9 @@ static bool xbox_ram_shm_init(MemoryRegion *ram, uint64_t size)
     return false;
 }
 
+/* The most guest RAM: up to NV2A BAR1 at 0xF0000000 (3840 MiB) */
+#define XBOX_RAM_SIZE_MAX 0xF0000000ULL
+
 static void xbox_memory_init(PCMachineState *pcms,
                              MemoryRegion *system_memory,
                              MemoryRegion *rom_memory,
@@ -520,6 +524,25 @@ static void xbox_memory_init(PCMachineState *pcms,
     // PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
 
     // linux_boot = (machine->kernel_filename != NULL);
+
+    /*
+     * More than 128 MiB is experimental (mem_limit '256'/'512', or -m,
+     * which wins over mem_limit): CPU-side RAM for a kernel that manages
+     * it; the NV2A sees the first 128 MiB (nv2a_aperture_size). Such a
+     * size must be a multiple of 16 MiB: the aarch64 sub-page store
+     * prefilter compares page indexes with the RAM's page count as an
+     * arithmetic immediate. RAM must also end below 0xF0000000, where the
+     * kernel puts NV2A BAR1 and, above it, the other PCI devices and the
+     * flash: RAM sits over the PCI hole, so it would hide them.
+     */
+    if (machine->ram_size > 128 * MiB &&
+        (machine->ram_size % (16 * MiB) ||
+         machine->ram_size > XBOX_RAM_SIZE_MAX)) {
+        error_report("-m %" PRIu64 " MiB: guest RAM above 128 MiB must be "
+                     "a multiple of 16 MiB, %" PRIu64 " MiB at most",
+                     machine->ram_size / MiB, XBOX_RAM_SIZE_MAX / MiB);
+        exit(1);
+    }
 
     /* Allocate RAM.  We allocate it as a single memory region and use
      * aliases to address portions of it, mostly for backwards compatibility
