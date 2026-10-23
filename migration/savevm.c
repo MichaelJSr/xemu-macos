@@ -3682,11 +3682,18 @@ retry:
     }
 #ifdef XBOX
     xemu_events_load_source(XEMU_LOAD_SOURCE_LOADVM, name);
+    xemu_ram_size_note_reset();
     ret = qemu_loadvm_state(f, &load_err);
     whole_buf_release(g_steal_pointer(&whole));
     migration_incoming_state_destroy();
     if (ret < 0 && xemu_loadvm_retry(attempt++, &load_err)) {
         goto retry;
+    }
+    if (ret < 0) {
+        /* A RAM size mismatch: name both sizes and mem_limit / -m */
+        xemu_ram_size_note_append(&load_err);
+    } else {
+        xemu_ram_size_note_loaded();
     }
     error_propagate(errp, load_err);
 #else

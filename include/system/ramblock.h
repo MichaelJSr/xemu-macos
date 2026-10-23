@@ -99,6 +99,11 @@ struct RAMBlock {
      * with qemu_ram_xemu_zero().
      */
     bool xemu_zero;
+    /*
+     * xemu: the saved length of a block the current load shrinks into a
+     * smaller machine (XEMU_LOADVM_SHRINK_RAM, migration/ram.c), else 0.
+     */
+    ram_addr_t xemu_shrink_len;
 };
 
 static inline bool qemu_ram_xemu_zero(RAMBlock *rb)

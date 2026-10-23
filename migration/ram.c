@@ -28,6 +28,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/units.h"
 #include "qemu/bitops.h"
 #include "qemu/bitmap.h"
 #include "qemu/madvise.h"
@@ -4197,6 +4198,158 @@ static void parse_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
     qemu_set_offset(f, block->pages_offset + length, SEEK_SET);
 }
 
+#ifdef XBOX
+/*
+ * xemu: a snapshot saved with another guest RAM size fails in
+ * parse_ramblock's resize ("Size mismatch: pc.ram: ..."; pc.ram, the PC
+ * machine's unused backend, comes before xbox.ram). The first mismatch of
+ * the machine's RAM is noted, and load_snapshot adds a line naming both
+ * sizes and the settings that make them (xemu_ram_size_note_append).
+ *
+ * XEMU_LOADVM_SHRINK_RAM=1 loads a snapshot saved with more RAM into a
+ * smaller machine, if its RAM above the machine's size is unused: every
+ * page there must be zero, except that xbox.ram may hold the BIOS memory
+ * test's footprints (16 bytes in each of 0x04555548-0x0455557B and
+ * 0x06555548-0x0655557B, written as the X-codes size RAM). Anything else
+ * refuses the load. The device state must suit the smaller machine too;
+ * a 128 MiB Xbox state does, as a stock kernel uses 64 MiB of it.
+ */
+static uint64_t xemu_ram_note_saved, xemu_ram_note_have;
+static uint64_t xemu_shrink_zero, xemu_shrink_footprint;
+/* The shrink took the larger RAM, and no page of it was refused */
+static bool xemu_shrink_took, xemu_shrink_refused;
+
+void xemu_ram_size_note_reset(void)
+{
+    xemu_ram_note_saved = xemu_ram_note_have = 0;
+    xemu_shrink_zero = xemu_shrink_footprint = 0;
+    xemu_shrink_took = xemu_shrink_refused = false;
+}
+
+static bool xemu_shrink_ram_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("XEMU_LOADVM_SHRINK_RAM");
+        on = e && !strcmp(e, "1");
+    }
+    return on;
+}
+
+void xemu_ram_size_note_append(Error **errp)
+{
+    uint64_t saved = xemu_ram_note_saved / MiB;
+    uint64_t have = xemu_ram_note_have / MiB;
+    g_autofree char *how = NULL;
+    Error *e = NULL;
+
+    if (!saved || !errp || !*errp) {
+        return;
+    }
+    if (xemu_shrink_took && !xemu_shrink_refused) {
+        /* The RAM loaded; something else failed, so don't blame the size */
+        xemu_ram_size_note_reset();
+        return;
+    }
+    how = saved == 64 || saved == 128 || saved == 256 || saved == 512 ?
+          g_strdup_printf("set mem_limit '%" PRIu64 "' in xemu.toml or pass "
+                          "-m %" PRIu64, saved, saved) :
+          g_strdup_printf("pass -m %" PRIu64, saved);
+    error_setg(&e, "%s\nxemu: this snapshot was saved with %" PRIu64
+               " MiB of guest RAM; this machine has %" PRIu64 " MiB "
+               "(mem_limit in xemu.toml, or -m on the command line). To "
+               "load it, %s%s", error_get_pretty(*errp), saved, have, how,
+               saved > have && !xemu_shrink_ram_enabled() ?
+               ", or set XEMU_LOADVM_SHRINK_RAM=1 if nothing uses its RAM "
+               "above the machine's size" : "");
+    error_free(*errp);
+    *errp = e;
+    xemu_ram_size_note_reset();
+}
+
+void xemu_ram_size_note_loaded(void)
+{
+    if (xemu_shrink_zero || xemu_shrink_footprint) {
+        fprintf(stderr, "xemu: XEMU_LOADVM_SHRINK_RAM: loaded a %" PRIu64
+                " MiB snapshot into %" PRIu64 " MiB of guest RAM (above it: "
+                "%" PRIu64 " zero pages, %" PRIu64 " with the BIOS memory "
+                "test's footprints)\n", xemu_ram_note_saved / MiB,
+                xemu_ram_note_have / MiB, xemu_shrink_zero,
+                xemu_shrink_footprint);
+    }
+    xemu_ram_size_note_reset();
+}
+
+/*
+ * A saved length that differs from @block's: note it for the machine's
+ * RAM, and return true if the load goes on with the larger saved block
+ * shrunk into this one.
+ */
+static bool xemu_ram_size_mismatch(RAMBlock *block, ram_addr_t length)
+{
+    if (strcmp(block->idstr, "xbox.ram") && strcmp(block->idstr, "pc.ram")) {
+        return false;
+    }
+    if (!xemu_ram_note_saved) {
+        xemu_ram_note_saved = length;
+        xemu_ram_note_have = block->used_length;
+    }
+    if (length > block->used_length && xemu_shrink_ram_enabled()) {
+        block->xemu_shrink_len = length;
+        xemu_shrink_took = true;
+        return true;
+    }
+    return false;
+}
+
+/* A page of a shrunk block above this machine's RAM: check, then drop. */
+static int xemu_load_shrunk_page(QEMUFile *f, RAMBlock *block,
+                                 ram_addr_t addr, int flags)
+{
+    size_t page = qemu_target_page_size();
+    g_autofree uint8_t *buf = NULL;
+    size_t lo = page, hi = page;
+
+    if (addr >= block->xemu_shrink_len) {
+        error_report("Illegal RAM offset " RAM_ADDR_FMT, addr);
+        return -EINVAL;
+    }
+    switch (flags & ~RAM_SAVE_FLAG_CONTINUE) {
+    case RAM_SAVE_FLAG_ZERO:
+        if (qemu_get_byte(f) == 0) {
+            xemu_shrink_zero++;
+            return qemu_file_get_error(f);
+        }
+        break;
+    case RAM_SAVE_FLAG_PAGE:
+        buf = g_malloc(page);
+        qemu_get_buffer(f, buf, page);
+        if (!strcmp(block->idstr, "xbox.ram") &&
+            ((addr & ~(ram_addr_t)0xfff) == 0x04555000 ||
+             (addr & ~(ram_addr_t)0xfff) == 0x06555000)) {
+            lo = 0x548;
+            hi = 0x57c;
+        }
+        if (buffer_is_zero(buf, lo) && buffer_is_zero(buf + hi, page - hi)) {
+            if (buffer_is_zero(buf + lo, hi - lo)) {
+                xemu_shrink_zero++;
+            } else {
+                xemu_shrink_footprint++;
+            }
+            return qemu_file_get_error(f);
+        }
+        break;
+    }
+    xemu_shrink_refused = true;
+    error_report("XEMU_LOADVM_SHRINK_RAM: %s holds data at 0x"
+                 RAM_ADDR_FMT ", above this machine's %" PRIu64 " MiB; "
+                 "not loaded", block->idstr, addr,
+                 (uint64_t)block->used_length / MiB);
+    return -EINVAL;
+}
+#endif
+
 static int parse_ramblock(QEMUFile *f, RAMBlock *block, ram_addr_t length)
 {
     int ret = 0;
@@ -4221,7 +4374,13 @@ static int parse_ramblock(QEMUFile *f, RAMBlock *block, ram_addr_t length)
         return -EINVAL;
     }
 
+#ifdef XBOX
+    block->xemu_shrink_len = 0;
+    if (length != block->used_length &&
+        !xemu_ram_size_mismatch(block, length)) {
+#else
     if (length != block->used_length) {
+#endif
         ret = qemu_ram_resize(block, length, &local_err);
         if (local_err) {
             error_report_err(local_err);
@@ -4378,6 +4537,15 @@ static int ram_load_precopy(QEMUFile *f)
                 }
             }
             if (!host) {
+#ifdef XBOX
+                if (block && block->xemu_shrink_len) {
+                    ret = xemu_load_shrunk_page(f, block, addr, flags);
+                    if (ret) {
+                        break;
+                    }
+                    continue;
+                }
+#endif
                 error_report("Illegal RAM offset " RAM_ADDR_FMT, addr);
                 ret = -EINVAL;
                 break;

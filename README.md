@@ -681,7 +681,27 @@ Other automation interfaces (windowed or headless):
   MiB also reach the title windowed. The Vulkan renderer's vertex mirror
   stays as big as guest RAM (host memory, touched only where vertices
   are). Savestates load only into a machine of the size they were saved
-  on.
+  on (but see the next item).
+- **Savestates and RAM size**: `loadvm` of a snapshot saved with another
+  RAM size fails as before (`Size mismatch: pc.ram: 0x8000000 !=
+  0x4000000 ...`). The error now ends with a line that names both sizes
+  and how to get the right one: `xemu: this snapshot was saved with 128
+  MiB of guest RAM; this machine has 64 MiB (mem_limit in xemu.toml, or
+  -m on the command line). To load it, set mem_limit '128' in xemu.toml
+  or pass -m 128, ...`. The line reaches the monitor reply, stderr for
+  `-loadvm`, and the error popup for a menu load. With
+  `XEMU_LOADVM_SHRINK_RAM=1`, a snapshot saved with more RAM loads into
+  a smaller machine if nothing uses its RAM above the machine's size:
+  every page there must be zero, except the 16 bytes the BIOS memory
+  test leaves in each of `0x04555548-0x0455557B` and
+  `0x06555548-0x0655557B`. Stderr then says `xemu:
+  XEMU_LOADVM_SHRINK_RAM: loaded a 128 MiB snapshot into 64 MiB of guest
+  RAM (above it: N zero pages, M with the BIOS memory test's
+  footprints)`. Any other data refuses the load and names the first page
+  that holds it. A stock kernel uses 64 MiB of a 128 MiB machine, so
+  Azurik's 128 MiB states load this way into 64 MiB. Replayed
+  deterministically, they reach the same RAM as the low 64 MiB of the
+  128 MiB run.
 - **Bulk RAM dumps**: QMP `xemu-dump-ram {"filename": "/tmp/ram.bin"}`
   writes all of guest RAM (64 or 128 MiB) in one write, ~20-60 ms for
   128 MiB, pausing the VM for the copy unless `"pause": false`. Add

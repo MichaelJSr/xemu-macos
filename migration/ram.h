@@ -115,6 +115,13 @@ void colo_release_ram_cache(void);
 void colo_incoming_start_dirty_log(void);
 void colo_record_bitmap(RAMBlock *block, ram_addr_t *normal, uint32_t pages);
 
+#ifdef XBOX
+/* Guest RAM size mismatches on load (ram.c) */
+void xemu_ram_size_note_reset(void);
+void xemu_ram_size_note_append(Error **errp);
+void xemu_ram_size_note_loaded(void);
+#endif
+
 /* Background snapshot */
 bool ram_write_tracking_available(void);
 bool ram_write_tracking_compatible(void);
