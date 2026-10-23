@@ -54,6 +54,11 @@
 #
 # @running: whether the VM is running
 #
+# @vblank-ns: the guest vblank period in nanoseconds: 16666666 (60
+#     Hz), or 20000000 (50 Hz) while the opt-in [sys] vblank_rate
+#     picks 50 Hz; @frame counts these vblanks (since 10.2, xemu-macos
+#     0.16.1)
+#
 # @trace: the samples @xemu-frame-advance took (only when it was
 #     given @trace)
 #
@@ -86,7 +91,7 @@
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
-  'data': { 'frame': 'int', 'running': 'bool',
+  'data': { 'frame': 'int', 'running': 'bool', '*vblank-ns': 'int',
             '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
             '*stopped': 'RunState', '*hooks': 'XemuHookTrace',
             '*gpu-counters': 'XemuGpuCounters',

@@ -202,6 +202,40 @@ and `'512'` (see "More than 128 MiB" under Headless mode): stock kernels
 use 64 MiB, the NV2A reaches only the first 128 MiB, and a savestate
 loads only into the RAM size it was saved with.
 
+### PAL 50 Hz (opt-in)
+
+The guest vblank runs at 60 Hz by default, for every disc and EEPROM.
+`[sys] vblank_rate` in `xemu.toml` (Settings > System > Guest Vblank)
+changes that:
+
+| `vblank_rate` | Guest vblank |
+|---|---|
+| `'60hz'` (default) | 60 Hz (16,666,666 ns), as before |
+| `'eeprom'` | 50 Hz (20,000,000 ns) while the machine's EEPROM is a PAL50 console's: video standard PAL-I (`0x00800300`) without the PAL-60 flag (`0x00400000` in the video flags at `0x94`); 60 Hz otherwise |
+| `'50hz'` | 50 Hz always |
+
+PAL titles then run at PAL speed: Azurik's Europe release on a PAL50
+EEPROM sets its frame-rate latch to 25 and plays about 25 player ticks
+per guest second, as on a PAL50 console, instead of about 30. xemu
+generates NTSC-M EEPROMs, so `'eeprom'` changes nothing until you use a
+PAL EEPROM. The rate is latched when the machine starts, at every reset
+and at every load (`loadvm`, `xemu-checkpoint-restore`, an incoming
+migration: the EEPROM is in every snapshot, so a PAL50 state runs at 50
+Hz under `'eeprom'` whatever EEPROM the launch named), never mid-run, so
+deterministic replays stay exact; a guest that rewrites its EEPROM's
+video standard gets the new rate at its next reboot. Everything that
+counts frames counts these vblanks: `xemu-frame-advance` frames, `+N`
+pipe input, the live pads' sampling, value stops. QMP
+`query-xemu-frame` (and the `xemu-frame-advance` reply) report the
+period as `vblank-ns`, so a harness converts frames to guest seconds
+with it instead of assuming 60. stderr says `xemu: vblank 50 Hz
+(sys.vblank_rate ...)` at launch whenever the key isn't `'60hz'`, and
+again with `at load` or `at reset` whenever the rate changes, also
+after a Settings change, which takes effect at the next reset or load
+(back to `'60hz'` included). Present
+pacing and the frame interpolation gate follow the guest's measured
+frame rate already.
+
 ### Headless mode (automation)
 
 For harnesses that drive xemu only through QMP, the gdbstub and

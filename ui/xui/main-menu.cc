@@ -1741,6 +1741,14 @@ void MainMenuSystemView::Draw()
         m_dirty = true;
     }
 
+    /* Latched at every reset and load (ui/xemu.c vblank_rate_latch). */
+    ChevronCombo("Guest Vblank", &g_config.sys.vblank_rate,
+                 "60 Hz (Default)\0"
+                 "50 Hz on a PAL50 EEPROM\0"
+                 "50 Hz\0",
+                 "50 Hz runs PAL titles at PAL speed; applies at the next "
+                 "reset or load");
+
     SectionTitle("Files");
     FilePicker("MCPX Boot ROM", g_config.sys.files.bootrom_path,
                rom_file_filters, 3, false, [this](const char *path) {

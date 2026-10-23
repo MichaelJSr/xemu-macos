@@ -171,6 +171,24 @@ static void smbus_storage_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, smbus_storage_props);
 }
 
+/*
+ * xemu: the Xbox EEPROM, the smbus-storage device at 0x54 (vl.c adds it):
+ * len bytes of its contents as the machine holds them (a load restores
+ * them; guest writes change them). False with no such device.
+ */
+bool xbox_eeprom_read(uint32_t offset, void *buf, uint32_t len)
+{
+    Object *obj = object_resolve_path_type("", TYPE_SMBUS_STORAGE, NULL);
+    SMBusStorageDevice *s = obj ? SMBUS_STORAGE(obj) : NULL;
+
+    if (!s || !s->data || s->addr != 0x54 || offset > s->size ||
+        len > s->size - offset) {
+        return false;
+    }
+    memcpy(buf, s->data + offset, len);
+    return true;
+}
+
 static TypeInfo smbus_storage_info = {
     .name = TYPE_SMBUS_STORAGE,
     .parent = TYPE_SMBUS_DEVICE,

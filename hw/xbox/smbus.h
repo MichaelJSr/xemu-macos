@@ -38,4 +38,6 @@ void xbox_smc_power_button(void);
 void xbox_smc_eject_button(void);
 void xbox_smc_update_tray_state(void);
 
+bool xbox_eeprom_read(uint32_t offset, void *buf, uint32_t len);
+
 #endif

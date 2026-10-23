@@ -405,6 +405,13 @@ sys:
     type: enum
     values: [scart, hdtv, vga, rfu, svideo, composite, none]
     default: hdtv
+  # Guest vblank rate: 60hz always (the default), eeprom (50 Hz on a
+  # PAL-I EEPROM without PAL-60, else 60), or 50hz always. Latched at
+  # launch, at every reset and at every load (README, PAL 50 Hz).
+  vblank_rate:
+    type: enum
+    values: ['60hz', eeprom, '50hz']
+    default: '60hz'
   files:
     bootrom_path: string
     flashrom_path: string

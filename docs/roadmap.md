@@ -140,14 +140,12 @@ real flips.
   interception point (`surface-compute.c` YUV handling is the closest
   existing hook) before considering HLE. Stays needs-theory until that
   number exists.
-- **PAL 50 Hz guest vblank.** The dedicated vblank timer thread is
-  fixed at 60 Hz (`ui/xemu.c` `vblank_interval_ns`); deriving 50 Hz
-  from the guest video mode would serve PAL titles. The precondition
-  the old host-refresh-alignment revert demanded (archaeology 3.2) —
-  a guest-vblank source decoupled from host present — **is now met**
-  (the Metal present path never references the vblank timer). Needs
-  guest region detection + an A/B on an NTSC title proving zero
-  behavior change there. No PAL title is currently in the fixture set.
+- **PAL 50 Hz guest vblank: shipped opt-in** (`[sys] vblank_rate`,
+  README "PAL 50 Hz"). `'eeprom'` derives 50 Hz from a PAL50 EEPROM,
+  `'50hz'` forces it; the default stays 60 Hz. Open: a PAL title that
+  picks 50 Hz on a PAL-60 console, or 60 Hz modes on a PAL50 one
+  (HDTV packs), would need the guest's programmed video timing
+  (encoder and CRTC registers), which no snapshot holds today.
 - **Real-depth engagement on AA / super-width titles**
   (`XEMU_MFX_REAL_DEPTH=2` is temporally correct but disengages when
   no zeta matches the scaler input dims — AA titles render 3D at 2×

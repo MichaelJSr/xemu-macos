@@ -45,6 +45,7 @@
 #include "ui/kbd-state.h"
 #include "system/runstate.h"
 #include "system/runstate-action.h"
+#include "system/reset.h"
 #include "system/system.h"
 #include "system/cpus.h"
 #include "exec/icount.h"
@@ -66,7 +67,8 @@
 
 #include "data/xemu_64x64.png.h"
 
-#include "hw/xbox/smbus.h" // For eject, drive tray
+#include "hw/xbox/smbus.h" // For eject, drive tray, EEPROM
+#include "hw/xbox/eeprom-fields.h"
 #include "hw/xbox/nv2a/nv2a.h"
 #include "hw/xbox/nv2a/debug_gl.h"
 #include "ui/xemu-notifications.h"
@@ -100,7 +102,12 @@
 #define XEMU_LOCK_STATS 0
 #endif
 
-uint64_t vblank_interval_ns = 16666666LL;
+/*
+ * The guest vblank period: 60 Hz unless [sys] vblank_rate picks 50 Hz
+ * (vblank_rate_latch). Written with the BQL held, read by the vblank
+ * thread without it.
+ */
+uint64_t vblank_interval_ns = XBOX_VBLANK_NS_60HZ;
 bool use_vblank_timer_thread = true;
 
 /*
@@ -1150,6 +1157,8 @@ static XemuFrameInfo *frame_info(void)
     XemuFrameInfo *info = g_new0(XemuFrameInfo, 1);
     info->frame = frame_count;
     info->running = runstate_is_running();
+    info->has_vblank_ns = true;
+    info->vblank_ns = qatomic_read(&vblank_interval_ns);
     return info;
 }
 
@@ -1287,7 +1296,71 @@ static bool vblank_virtual;
 static int64_t vblank_virtual_next(void)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    return (now / vblank_interval_ns + 1) * vblank_interval_ns;
+    int64_t period = qatomic_read(&vblank_interval_ns);
+    return (now / period + 1) * period;
+}
+
+/*
+ * PAL 50 Hz, opt-in ([sys] vblank_rate): '60hz' (the default) runs at
+ * 60 Hz; '50hz' runs at 50 Hz; 'eeprom' runs at 50 Hz while the
+ * machine's EEPROM is a PAL50 console's (PAL-I without PAL-60), as the
+ * console's video mode follows its EEPROM. The period is latched when
+ * the vblank source starts (the machine exists, no guest instruction has
+ * run), at every machine reset (a guest that changed the EEPROM reboots
+ * to apply it; a Settings change applies then too) and at every load
+ * (the EEPROM is in every snapshot), never in the middle of a run.
+ * Under icount the vblank deadline is not in the snapshot, so it must
+ * follow from the virtual clock and the period alone: a load re-arms
+ * the timer on the new grid when the VM starts (vblank_virtual_rearm),
+ * and a reset that changes the period re-arms it on the new grid at
+ * once (the vCPU is paused there, so the clock is exact), so a save made
+ * at any point after the reset restores onto the grid the straight run
+ * follows. Under '60hz' the period never changes from today's, and the
+ * line is printed only when it does (back from 50 Hz).
+ */
+static void vblank_rate_latch(const char *when)
+{
+    int64_t period = XBOX_VBLANK_NS_60HZ;
+    const char *why = "sys.vblank_rate '60hz'";
+    uint8_t e[XBOX_EEPROM_SIZE];
+    bool changed;
+
+    switch (g_config.sys.vblank_rate) {
+    case CONFIG_SYS_VBLANK_RATE_50HZ:
+        period = XBOX_VBLANK_NS_50HZ;
+        why = "sys.vblank_rate '50hz'";
+        break;
+    case CONFIG_SYS_VBLANK_RATE_EEPROM:
+        if (!xbox_eeprom_read(0, e, sizeof(e))) {
+            why = "sys.vblank_rate 'eeprom': no EEPROM";
+        } else if (xbox_eeprom_is_pal50(e)) {
+            period = XBOX_VBLANK_NS_50HZ;
+            why = "sys.vblank_rate 'eeprom': PAL-I without PAL-60";
+        } else {
+            why = "sys.vblank_rate 'eeprom': not a PAL50 EEPROM";
+        }
+        break;
+    default:
+        break; /* '60hz' */
+    }
+    changed = period != (int64_t)qatomic_read(&vblank_interval_ns);
+    if (changed) {
+        qatomic_set(&vblank_interval_ns, period);
+        if (vblank_virtual && vblank_timer && !strcmp(when, "reset")) {
+            timer_mod_ns(vblank_timer, vblank_virtual_next());
+        }
+    }
+    if (changed || (!when[0] &&
+                    g_config.sys.vblank_rate != CONFIG_SYS_VBLANK_RATE_60HZ)) {
+        fprintf(stderr, "xemu: vblank %d Hz (%s%s%s)\n",
+                period == XBOX_VBLANK_NS_50HZ ? 50 : 60, why,
+                when[0] ? ", at " : "", when);
+    }
+}
+
+static void vblank_rate_reset(void *opaque)
+{
+    vblank_rate_latch("reset");
 }
 
 static void vblank_virtual_callback(void *opaque)
@@ -1317,6 +1390,7 @@ void xemu_state_loaded(void);
 void xemu_state_loaded(void)
 {
     vblank_virtual_rearm = true;
+    vblank_rate_latch("load");
     xemu_input_state_loaded();
     xemu_hooks_state_loaded();
     xemu_trace_record_load(frame_count);
@@ -1468,7 +1542,7 @@ static void vblank_timer_callback(void *opaque)
 
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     process_vblank(scon);
-    timer_mod_ns(vblank_timer, now + vblank_interval_ns);
+    timer_mod_ns(vblank_timer, now + qatomic_read(&vblank_interval_ns));
 }
 
 static void *vblank_timer_thread(void *opaque)
@@ -1483,13 +1557,14 @@ static void *vblank_timer_thread(void *opaque)
 
     while (!qatomic_read(&qemu_exiting)) {
         // Schedule next vblank at fixed interval (absolute deadline)
-        next_vblank += vblank_interval_ns;
+        int64_t period = qatomic_read(&vblank_interval_ns);
+        next_vblank += period;
 
         // Wait until deadline
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < next_vblank) {
             SDL_DelayPrecise(next_vblank - now);
-        } else if (now > next_vblank + vblank_interval_ns) {
+        } else if (now > next_vblank + period) {
             // We've fallen behind by more than one frame, reset to avoid
             // rapid-fire catch-up
             next_vblank = now;
@@ -2570,6 +2645,8 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     // Register event watch to handle rendering during these operations.
     SDL_AddEventWatch(event_watch_callback, &scon_list[0]);
 
+    vblank_rate_latch("");
+    qemu_register_reset(vblank_rate_reset, NULL);
     if (icount_enabled()) {
         vblank_virtual = true;
         vblank_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -2916,7 +2993,7 @@ int main(int argc, char **argv)
         screendump_service(scon);
         if (headless) {
             /* Nothing to present; keep input and screendump responsive. */
-            SDL_DelayNS(vblank_interval_ns);
+            SDL_DelayNS(qatomic_read(&vblank_interval_ns));
 #ifdef _WIN32
         } else if (SDL_GetWindowFlags(scon->real_window) &
                    SDL_WINDOW_MINIMIZED) {
@@ -2925,7 +3002,7 @@ int main(int argc, char **argv)
              * at once, so the loop spun: a PFIFO round trip, the HUD under
              * the BQL and the interop copies, unpaced. Nothing shows.
              */
-            SDL_DelayNS(vblank_interval_ns);
+            SDL_DelayNS(qatomic_read(&vblank_interval_ns));
 #endif
         } else {
             render_frame(scon);
