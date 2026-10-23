@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "ui/xemu-events.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #include "ui/xemu-settings.h"
 #include <glib/gstdio.h>
@@ -3167,6 +3168,11 @@ void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta)
         r->color_binding->draw_dirty |= color;
         r->color_binding->frame_time = pg->frame_time;
         r->color_binding->cleared = false;
+        if (color) {
+            /* Dates the frame on screen (query-xemu-display). */
+            xemu_events_gpu_write(r->color_binding->vram_addr,
+                                  r->color_binding->size);
+        }
     }
 
     if (r->zeta_binding) {

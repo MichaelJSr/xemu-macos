@@ -303,6 +303,28 @@ Other automation interfaces (windowed or headless):
   into it, then flips) shows that frame to a screendump taken in
   between, and windowed frame interpolation can show a step between
   the last two flips. It only reads counters.
+  Since 0.16.1 it also returns `picture-stale`, `picture-loads` and
+  `picture-frame`. `picture-stale` (present whenever a renderer that
+  draws runs, from the first query on, so a harness can detect the
+  feature by the key) is true while the picture on screen predates the
+  last load: no GPU write (a draw, clear or 2D blit) into the buffer on
+  screen has counted since, where writes count only once a frame the
+  guest began after the load has ended. `picture-loads` and
+  `picture-frame` are the load count and frame counter at the last
+  counted write (absent before the first since launch, and with the
+  null renderer). Date a picture by `picture-stale`, not by
+  `flip-loads`. A checkpoint restore is a load here, as in `loads`. The
+  case `flip-loads` misses: a load drops the renderer's surfaces, and
+  Azurik writes the same CRTC start every vblank and resolves each
+  frame into it as the next begins, so for 1-3 vblanks after a restore
+  it flips (so `flip-loads` equals `loads`) a frame built from the
+  loaded RAM: the save's frame, upscaled from guest resolution at
+  surface scale 2, older and softer than the one the run that went on
+  from the save shows. A fresh process that restores the same
+  checkpoint shows the same picture. A buffer on screen that only the
+  CPU or the video overlay writes stays stale after a load until the
+  GPU writes it, so bound a loop that advances until the picture is
+  fresh.
 - **Input recording**: `XEMU_INPUT_RECORD=<file>` writes, at every
   vblank, the changes in what one pad gave the guest
   (`XEMU_INPUT_RECORD_PORT=1-4`, default the first bound port) as

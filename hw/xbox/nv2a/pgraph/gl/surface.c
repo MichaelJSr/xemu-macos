@@ -26,6 +26,7 @@
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "debug.h"
 #include "renderer.h"
+#include "ui/xemu-events.h"
 
 static void surface_download(NV2AState *d, SurfaceBinding *surface, bool force);
 static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
@@ -108,6 +109,11 @@ void pgraph_gl_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta)
         r->color_binding->draw_dirty |= color;
         r->color_binding->frame_time = pg->frame_time;
         r->color_binding->cleared = false;
+        if (color) {
+            /* Dates the frame on screen (query-xemu-display). */
+            xemu_events_gpu_write(r->color_binding->vram_addr,
+                                  r->color_binding->size);
+        }
 
     }
 

@@ -23,6 +23,7 @@
 #include "qemu/main-loop.h"
 #include "ui/xemu-present.h"
 #include "ui/xemu-settings.h"
+#include "ui/xemu-events.h"
 
 void nv2a_update_irq(NV2AState *d)
 {
@@ -209,6 +210,14 @@ int nv2a_get_screen_off(void)
 uint32_t nv2a_get_crtc_start(void)
 {
     return g_nv2a ? g_nv2a->pcrtc.start : 0;
+}
+
+bool nv2a_renderer_draws(void)
+{
+    const PGRAPHRenderer *r =
+        g_nv2a ? qatomic_read(&g_nv2a->pgraph.renderer) : NULL;
+
+    return r && r->type != CONFIG_DISPLAY_RENDERER_NULL;
 }
 
 /*
@@ -694,6 +703,10 @@ static int nv2a_post_load(void *opaque, int version_id)
         pgraph_mark_all_state_dirty(&d->pgraph);
         /* Drop, not write back, the previous session's GPU state. */
         qatomic_set(&d->pgraph.flush_discard, true);
+    }
+    /* Saved after its frame ended: the next one starts after the load. */
+    if (qatomic_read(&d->pgraph.waiting_for_flip)) {
+        xemu_events_load_frame_ended();
     }
     /* The loaded pusher position belongs to the loaded RAM. */
     pfifo_frozen_drop(&d->pfifo.frozen);

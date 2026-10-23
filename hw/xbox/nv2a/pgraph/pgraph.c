@@ -27,6 +27,7 @@
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-present.h"
 #include "ui/xemu-settings.h"
+#include "ui/xemu-events.h"
 #include "util.h"
 #include "swizzle.h"
 #include "gpu_counters.h"
@@ -1275,6 +1276,7 @@ DEF_METHOD(NV097, FLIP_STALL)
     trace_nv2a_pgraph_flip_stall();
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
+    xemu_events_frame_end();   /* dates pictures (query-xemu-display) */
     nv2a_profile_flip_stall();
     nsprof_flip_wait_begin();
     /* Release: the DMA_PUT doorbell reads WRITE_3D after this. */

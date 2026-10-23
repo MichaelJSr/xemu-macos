@@ -21,6 +21,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "renderer.h"
+#include "ui/xemu-events.h"
 
 static void perform_blit(int operation, uint8_t *source, uint8_t *dest,
                          size_t width, size_t height, size_t width_bytes,
@@ -248,6 +249,7 @@ void pgraph_gl_image_blit(NV2AState *d)
 
     memory_region_set_client_dirty(d->vram, dest_addr, clipped_dest_size,
                                    DIRTY_MEMORY_VGA);
+    xemu_events_gpu_write(dest_addr, clipped_dest_size);
     memory_region_set_client_dirty(d->vram, dest_addr, clipped_dest_size,
                                    DIRTY_MEMORY_NV2A_TEX);
     memory_region_set_client_dirty(d->vram, dest_addr, clipped_dest_size,

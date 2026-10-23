@@ -40,6 +40,30 @@ void xemu_events_load_done(bool ok);
 void xemu_events_flip(void);
 
 /*
+ * The GPU wrote the colour surface at VRAM [start, start + size): a draw,
+ * clear or 2D blit, from whichever thread runs the renderer (it holds
+ * pgraph.lock). query-xemu-display's picture-loads and picture-frame
+ * date the frame on screen by the last such write into it.
+ */
+void xemu_events_gpu_write(uint64_t start, uint64_t size);
+
+/*
+ * The guest ended a frame (NV097_FLIP_STALL), on the renderer's thread.
+ * GPU writes count toward a picture's age only from the first frame end
+ * after a load: until then they finish the frame the load caught under
+ * way, drawn partly before the save, or resolve one drawn wholly before
+ * it.
+ */
+void xemu_events_frame_end(void);
+
+/*
+ * The state being loaded was saved after its frame ended (nv2a's
+ * post_load: PGRAPH waits for the flip), so the next frame starts after
+ * the load. Applies if the load succeeds.
+ */
+void xemu_events_load_frame_ended(void);
+
+/*
  * The Vulkan renderer lost its device; xemu ends next. Any thread; only
  * the first call emits. @where may be NULL.
  */

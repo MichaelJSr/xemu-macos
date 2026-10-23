@@ -110,6 +110,8 @@ bool nv2a_vk_driver_retry(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
 uint32_t nv2a_get_crtc_start(void); /* BQL held; 0 before the device exists */
+/* A renderer that draws (not the null one) runs; false before the device. */
+bool nv2a_renderer_draws(void);
 /* A full redraw of the VGA surface from guest RAM before reading it (BQL held). */
 void nv2a_vga_refresh(void);
 

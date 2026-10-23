@@ -440,12 +440,37 @@
 #
 # @scanout: the guest physical address on screen (the CRTC start)
 #
+# @picture-loads: @loads at the GPU's last write (a draw, clear or 2D
+#     blit) into the buffer on screen, the colour surface holding
+#     @scanout, counting writes only once a frame begun after that
+#     load has ended (absent before the first such write since launch,
+#     and with the null renderer) (xemu-macos 0.16.1).  The frame on
+#     screen changes when the GPU writes that buffer, which a flip
+#     need not do (Azurik writes the same CRTC start every vblank).
+#     Less than @loads until the guest draws into the buffer on screen
+#     after the last load or @xemu-checkpoint-restore: until then
+#     @screendump writes the loaded state's own frame, as the loaded
+#     RAM holds it, whatever @flip-loads says
+#
+# @picture-frame: the frame counter at that write (xemu-macos 0.16.1)
+#
+# @picture-stale: true while the picture on screen predates the last
+#     load: no GPU write into the buffer on screen has counted since
+#     that load (@picture-loads less than @loads, or absent after a
+#     load).  Present whenever a renderer that draws runs (not the
+#     null one), from the first query on (xemu-macos 0.16.1).  Date a
+#     picture by this, not by @flip-loads.  A buffer on screen that
+#     only the CPU or the video overlay writes stays stale after a
+#     load until the GPU writes it
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuDisplayInfo',
   'data': { 'frame': 'int', 'loads': 'int', 'flips': 'int',
             '*flip-frame': 'int', '*flip-loads': 'int',
-            'scanout': 'uint64' } }
+            'scanout': 'uint64',
+            '*picture-loads': 'int', '*picture-frame': 'int',
+            '*picture-stale': 'bool' } }
 
 ##
 # @query-xemu-display:
