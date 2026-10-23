@@ -254,9 +254,16 @@ void xemu_i386_ras_flush_page(CPUState *cpu, vaddr page_addr);
  * (target/i386/tcg/system/excp_helper.c, xemu_tlb_reval). */
 void xemu_i386_tlb_log_reset(CPUState *cpu);
 /* xemu: drop the TBs on @addr's page, and keep the recycler from reviving
- * any TB of that page (guest PC hooks; accel/tcg/tb-maint.c). The vCPU
- * must be stopped. */
+ * any TB of that page (guest PC hooks; accel/tcg/tb-maint.c). Call on the
+ * vCPU thread or with the vCPU stopped. */
 void xemu_tb_invalidate_page_norecycle(tb_page_addr_t addr);
+/* xemu: guest PC hooks (target/i386/tcg/system/xemu-hooks.c). A TB lookup
+ * by physical address at a pc whose virtual page may hold a site with
+ * hooks (its bit in the bloom) has the RAM page it found covered: TBs
+ * translated there before the site existed must not run at the site. */
+extern uint64_t xemu_hooks_page_bloom;
+#define XEMU_HOOKS_PAGE_BIT(pc) (1ull << (((pc) >> TARGET_PAGE_BITS) & 63))
+void xemu_hooks_lookup_cover(CPUState *cpu, vaddr pc, tb_page_addr_t phys);
 /* xemu: whether the RAM page at @addr holds a TB, or one whose incoming
  * jumps another thread's invalidation hasn't unlinked yet (only the vCPU
  * thread adds TBs). Takes the page lock: call it holding none. */

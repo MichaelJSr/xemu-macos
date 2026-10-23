@@ -233,6 +233,19 @@ tb_htable_lookup_common(CPUState *cpu, TCGTBCPUState s, const struct qht *ht,
     if (phys_pc == -1) {
         return NULL;
     }
+#if defined(XBOX)
+    /*
+     * Guest PC hooks: the page a hooked site's PC maps to now may be new
+     * to the site (its TBs from before the site would run without the
+     * call). The hash-table lookup checks, and covers it before it looks;
+     * the recycler's lookup in tb_gen_code always follows one.
+     */
+    if (ht == &tb_ctx.htable &&
+        unlikely(qatomic_read(&xemu_hooks_page_bloom) &
+                 XEMU_HOOKS_PAGE_BIT(s.pc))) {
+        xemu_hooks_lookup_cover(cpu, s.pc, phys_pc);
+    }
+#endif
     desc.page_addr0 = phys_pc;
     h = tb_hash_func(phys_pc, (s.cflags & CF_PCREL ? 0 : s.pc),
                      s.flags, s.cs_base, s.cflags);

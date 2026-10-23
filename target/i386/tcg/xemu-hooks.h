@@ -26,7 +26,11 @@
  *    TBs need invalidating: at each commit and each VM start, for every
  *    site with hooks, the TBs on the physical page its PC maps to then,
  *    once per page (a load may map the PC elsewhere), or all TBs when it
- *    is unmapped, as for a gdb breakpoint. A CF_PCREL TB runs at every
+ *    is unmapped, as for a gdb breakpoint; and a mapping that appears
+ *    while the VM runs (paging is off after a reset) at the first TB
+ *    lookup by physical address on the site's page, which covers the
+ *    page it found before it looks (xemu_hooks_lookup_cover, from
+ *    tb_htable_lookup on the vCPU thread). A CF_PCREL TB runs at every
  *    mapping of its code, so the translator also cuts and calls at each
  *    address whose RAM address a site's PC has mapped to (those pages);
  *    the call reads the running PC, so elsewhere it finds no site and a

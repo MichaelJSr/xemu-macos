@@ -537,7 +537,10 @@ Other automation interfaces (windowed or headless):
   one straight advance. The hooks are compiled into the translated code,
   so the fast paths stay on; gdbstub breakpoints are built the same way
   and keep working beside them. The first call at a PC retranslates its
-  page once; later calls there cost about 1-2 ms each.
+  page once, and so does the first run through each page the PC maps to
+  later (after a reset the guest maps its XBE only as it loads it, often
+  over pages an earlier boot used); later calls there cost about 1-2 ms
+  each.
 - **Collect at guest PCs**: `xemu-hooks-set {"hooks": [{"pcs": [P,
   ...], "cond": [...], "key": {"addr": E, "size": N}, "collect":
   [{"addr": E, "size": N}, ...], "regs": true, "expect": [...]}]}`

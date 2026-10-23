@@ -82,6 +82,8 @@ typedef struct XemuHookTable {
 
 static XemuHookTable *hook_table;
 unsigned xemu_hooks_nsites;
+/* The virtual pages of the sites with hooks (exec/translation-block.h). */
+uint64_t xemu_hooks_page_bloom;
 
 /* vCPU thread only. */
 static uint64_t hook_calls;
@@ -105,7 +107,8 @@ static struct {
 static const uint8_t *hook_ram;
 static uint64_t hook_ram_size;
 
-static XemuHookSite *site_find(XemuHookTable *t, vaddr pc)
+/* The index of the first site at or after @pc. */
+static uint32_t site_lower_bound(XemuHookTable *t, vaddr pc)
 {
     uint32_t lo = 0, hi = t->nsites;
 
@@ -117,6 +120,13 @@ static XemuHookSite *site_find(XemuHookTable *t, vaddr pc)
             hi = mid;
         }
     }
+    return lo;
+}
+
+static XemuHookSite *site_find(XemuHookTable *t, vaddr pc)
+{
+    uint32_t lo = site_lower_bound(t, pc);
+
     return lo < t->nsites && t->sites[lo].pc == pc ? &t->sites[lo] : NULL;
 }
 
@@ -174,6 +184,7 @@ static void table_publish(void)
 {
     XemuHookTable *old = hook_table;
     XemuHookTable *t = g_new0(XemuHookTable, 1);
+    uint64_t bloom = 0;
     uint32_t r = 0;
 
     g_array_sort(hook_recs, rec_cmp);
@@ -200,6 +211,7 @@ static void table_publish(void)
         }
         if (s->n) {
             s->idle = 0;
+            bloom |= XEMU_HOOKS_PAGE_BIT(s->pc);
         }
     }
     assert(r == hook_recs->len);
@@ -225,6 +237,9 @@ static void table_publish(void)
         qatomic_rcu_set(&hook_table, NULL);
         table_free(t);
     }
+    /* A lookup that sees a site's bit finds the table that holds it. */
+    smp_wmb();
+    qatomic_set(&xemu_hooks_page_bloom, bloom);
     if (old) {
         call_rcu(old, table_free, rcu);
     }
@@ -332,6 +347,72 @@ static bool sites_cover(bool running)
         queue_tb_flush(cpu);
     }
     return added;
+}
+
+/*
+ * A PC's mapping can appear or change while the VM runs, where no start
+ * walks it: right after a reset paging is off, and the guest maps its XBE
+ * (often at the RAM pages an earlier boot used, whose old TBs sit in the
+ * hash table or the recycler) only later. So the vCPU covers a page the
+ * first time it looks a TB up by physical address there: a lookup at @pc,
+ * on the virtual page of a site with hooks, that finds the page mapped to
+ * RAM page @phys which a site's PC there never mapped to drops that page's
+ * TBs past the recycler and records it, as sites_cover() does, so the
+ * lookup goes on to translate the site afresh with its call. Every TB
+ * that holds the site starts on its page (a TB ends before an insn on
+ * another page), and after a mapping change the first TB to run there
+ * comes from such a lookup: the jump cache, the step cache and the return
+ * memo drop the page's entries with its TLB entry, and a link into the
+ * page comes from a lookup there (cross-page links go at the reset's TLB
+ * flush). vCPU thread, no lock held, outside a TB translation (the
+ * invalidation brackets its own code writes).
+ */
+void xemu_hooks_lookup_cover(CPUState *cpu, vaddr pc, tb_page_addr_t phys)
+{
+    vaddr page = pc & TARGET_PAGE_MASK;
+    ram_addr_t ra = phys & TARGET_PAGE_MASK;
+    bool covered = true;
+    bool added = false;
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        XemuHookTable *t = qatomic_rcu_read(&hook_table);
+
+        for (uint32_t i = t ? site_lower_bound(t, page) : 0;
+             t && i < t->nsites && t->sites[i].pc < page + TARGET_PAGE_SIZE;
+             i++) {
+            if (t->sites[i].n &&
+                !phys_find(t, ra | (t->sites[i].pc & ~TARGET_PAGE_MASK))) {
+                covered = false;
+                break;
+            }
+        }
+    }
+    if (covered) {
+        return;
+    }
+
+    BQL_LOCK_GUARD();
+    for (guint i = 0; i < sites->len; i++) {
+        SiteRec *s = &g_array_index(sites, SiteRec, i);
+        guint j;
+
+        if ((s->pc & TARGET_PAGE_MASK) != page || !site_has_hooks(s->pc)) {
+            continue;
+        }
+        for (j = 0; j < s->pages->len; j++) {
+            if (g_array_index(s->pages, ram_addr_t, j) == ra) {
+                break;
+            }
+        }
+        if (j == s->pages->len) {
+            g_array_append_val(s->pages, ra);
+            added = true;
+        }
+    }
+    if (added) {
+        xemu_tb_invalidate_page_norecycle(ra);
+        table_publish();
+    }
 }
 
 /* Drop the site at index @i; its TBs are invalidated (only for speed). */
