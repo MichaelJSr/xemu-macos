@@ -1122,10 +1122,12 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
             context_surfaces_2d->dest_pitch = parameter >> 16;
             break;
         case NV062_SET_OFFSET_SOURCE:
-            context_surfaces_2d->source_offset = parameter & 0x07FFFFFF;
+            context_surfaces_2d->source_offset =
+                parameter & nv2a_dma_addr_mask(d);
             break;
         case NV062_SET_OFFSET_DESTIN:
-            context_surfaces_2d->dest_offset = parameter & 0x07FFFFFF;
+            context_surfaces_2d->dest_offset =
+                parameter & nv2a_dma_addr_mask(d);
             break;
         default:
             goto unhandled;

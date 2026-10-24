@@ -170,7 +170,7 @@ void pfifo_freeze_unread(NV2AState *d, uint32_t old_put, uint32_t new_put)
         return;
     }
     DMAObject dma = nv_dma_load(d, dma_instance);
-    uint64_t address = dma.address & 0x07FFFFFF;
+    uint64_t address = dma.address & nv2a_dma_addr_mask(d);
     uint64_t vram_size = memory_region_size(d->vram);
     if (address >= vram_size) {
         return;

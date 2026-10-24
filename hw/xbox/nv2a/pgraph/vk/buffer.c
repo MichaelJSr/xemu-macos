@@ -117,8 +117,9 @@ void pgraph_vk_init_buffers(NV2AState *d)
     /*
      * The mirror covers all of guest RAM, also above the NV2A's 128 MiB
      * (an experimental -m): a vertex array's offset is added after the
-     * 27-bit DMA mask (nv_dma_map), so a draw can name any RAM address,
-     * and the per-draw paths index the mirror and its bitmaps unchecked.
+     * DMA base mask (nv_dma_map, nv2a_dma_addr_mask), so a draw can name
+     * any RAM address, and the per-draw paths index the mirror and its
+     * bitmaps unchecked.
      */
     r->storage_buffers[BUFFER_VERTEX_RAM] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,

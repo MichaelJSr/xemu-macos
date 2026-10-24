@@ -84,6 +84,7 @@ typedef struct NV2AState {
     MemoryRegion vram_pci;
     MemoryRegion boot_window; /* BAR0 over RAM above 128 MiB, see nv2a.c */
     bool has_boot_window;
+    uint32_t dma_addr_mask; /* nv2a_dma_addr_mask, latched at init (nv2a.c) */
     uint8_t *vram_ptr;
     MemoryRegion ramin;
     uint8_t *ramin_ptr;
@@ -166,6 +167,9 @@ typedef struct NV2AState {
         bool raster_loaded; /* nv2a/pcrtc-raster came with a load */
     } pcrtc;
     bool pgraph_methods_loaded; /* nv2a/pgraph-methods came with a load */
+    /* nv2a/dma-addr-mask's value: the saved mask, 27 bits if absent */
+    uint32_t dma_addr_mask_saved;
+    unsigned dma_addr_mask_refusals; /* nv2a_load_refusals */
 
     struct {
         uint32_t core_clock_coeff;
@@ -258,17 +262,33 @@ hwaddr nv_clip_gpu_tile_blit(NV2AState *d, hwaddr blit_base_address,
                              hwaddr len);
 
 /*
- * The NV2A reaches 128 MiB (27-bit addresses: the 0x07FFFFFF masks), and
- * BAR1, its real aperture, is that big at most. Guest RAM above it (an
- * experimental -m above 128) is CPU-only, so BAR1 and the VGA window
- * cover its first 128 MiB. At 64 and 128 MiB this is all of xbox.ram, as
- * it always was.
+ * BAR1, the NV2A's real aperture, is 128 MiB at most, so BAR1 and the VGA
+ * window cover the first 128 MiB of guest RAM: at 64 and 128 MiB all of
+ * xbox.ram, as it always was. RAM above it (an experimental -m above 128)
+ * is not CPU-only: DMA object bases are cut to 27 bits (28 with
+ * XEMU_NV2A_WIDE, nv2a_dma_addr_mask), but the offsets added to them
+ * reach all of RAM.
  */
 #define NV2A_APERTURE_MAX (128 * MiB)
 
 static inline uint64_t nv2a_aperture_size(NV2AState *d)
 {
     return MIN(memory_region_size(d->vram), NV2A_APERTURE_MAX);
+}
+
+/*
+ * The mask on a DMA object's base, the PCRTC start and the NV062 offsets:
+ * 27 bits, as the hardware's, unless XEMU_NV2A_WIDE=1 at -m 256 or more
+ * widens it to 28 (experimental; nv2a_dma_addr_mask_latch). Offsets added
+ * after it (textures, vertices, 3D surfaces, reports) are never cut to 27
+ * bits. Fixed per process: a load whose mask differs is refused.
+ */
+#define NV2A_DMA_ADDR_MASK      0x07FFFFFFu
+#define NV2A_DMA_ADDR_MASK_WIDE 0x0FFFFFFFu
+
+static inline uint32_t nv2a_dma_addr_mask(const NV2AState *d)
+{
+    return d->dma_addr_mask;
 }
 
 void pfb_init(NV2AState *d);

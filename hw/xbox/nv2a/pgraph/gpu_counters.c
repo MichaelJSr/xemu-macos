@@ -199,7 +199,7 @@ static bool gc_dma_base(NV2AState *d, hwaddr obj, hwaddr *base)
         return false;
     }
     DMAObject dma = nv_dma_load(d, obj);
-    *base = dma.address & 0x07FFFFFF;
+    *base = dma.address & nv2a_dma_addr_mask(d);
     return true;
 }
 

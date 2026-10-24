@@ -1103,7 +1103,7 @@ static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
     assert(surface->offset <= dma.limit);
     assert(surface->offset + surface->pitch * height <= dma.limit + 1);
     assert(surface->pitch % fmt.bytes_per_pixel == 0);
-    assert((dma.address & ~0x07FFFFFF) == 0);
+    assert((dma.address & ~(hwaddr)nv2a_dma_addr_mask(d)) == 0);
 
     entry->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;

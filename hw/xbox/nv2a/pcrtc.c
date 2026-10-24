@@ -64,7 +64,8 @@ void pcrtc_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         nv2a_update_irq(d);
         break;
     case NV_PCRTC_START:
-        val &= 0x07FFFFFF;
+        /* XEMU_NV2A_WIDE=1: VGA's 128 MiB window still wraps a start above */
+        val &= nv2a_dma_addr_mask(d);
         // assert(val < memory_region_size(d->vram));
         d->pcrtc.start = val;
         xemu_events_flip();

@@ -2069,7 +2069,7 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     nv2a_vk_bounds_check(surface->offset <= dma.limit);
     nv2a_vk_bounds_check(surface->offset + surface->pitch * height <= dma.limit + 1);
     nv2a_vk_bounds_check(surface->pitch % fmt.bytes_per_pixel == 0);
-    nv2a_vk_bounds_check((dma.address & ~0x07FFFFFF) == 0);
+    nv2a_vk_bounds_check((dma.address & ~(hwaddr)nv2a_dma_addr_mask(d)) == 0);
 
     target->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;
