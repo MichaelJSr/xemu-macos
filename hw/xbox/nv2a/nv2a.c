@@ -308,44 +308,36 @@ static void nv2a_init_boot_window(NV2AState *d)
 }
 
 /*
- * XEMU_NV2A_WIDE=1 (experimental, -m 256 and up) widens nv2a_dma_addr_mask
- * to 28 bits, so a DMA object's base can lie in RAM's second 128 MiB; the
- * hardware's memory controller drives 128 MiB at most. 28 bits at any size
- * from 256 MiB: from 1 GiB up a wider mask would keep bit 30, which D3D's
- * AGP form (a & 0x0FFFFFFF) | 0x40000000 would then read as +1 GiB. Below
- * 256 MiB a 28-bit base could pass the end of RAM, so it stays 27 bits.
- * BAR1, VGA and NV_PFB_CSTATUS keep the 128 MiB aperture either way.
- * Latched before the PFIFO thread starts (its creation publishes it) and
- * never written again: nv2a/dma-addr-mask is compared on load, not taken.
- * These helpers stay out of line, so their callers keep their PGO profile.
+ * nv2a_dma_addr_mask is 27 bits, as the hardware's (its memory controller
+ * drives 128 MiB at most), or 28 at 256 MiB of guest RAM or more
+ * (experimental: mem_limit '256'/'512' or -m), so a DMA object's base can
+ * lie in RAM's second 128 MiB. 28 bits at any size from 256 MiB: a wider
+ * mask would keep bit 28 of the BAR1 form 0xF0000000 | phys (+256 MiB) at
+ * 512 MiB, and above 1 GiB bit 30 of D3D's AGP form
+ * (a & 0x0FFFFFFF) | 0x40000000. Below 256 MiB a 28-bit base could pass
+ * the end of RAM, so it stays 27 bits. BAR1, VGA
+ * and NV_PFB_CSTATUS keep the 128 MiB aperture either way. Latched before
+ * the PFIFO thread starts (its creation publishes it) and never written
+ * again. It follows the RAM size alone, which a savestate already fixes (a
+ * state loads only into its size), so the stream needs no field for it and
+ * states load across releases at every size. A 27-bit machine running a
+ * state made at 256 MiB or more (v0.16.1, or XEMU_LOADVM_SHRINK_RAM into
+ * 144-240 MiB) wraps a base above 128 MiB, or aborts on it as a render
+ * target (the surface base checks). These
+ * helpers stay out of line, so their callers keep their PGO profile.
  */
-static bool nv2a_wide_wanted(void)
-{
-    const char *e = getenv("XEMU_NV2A_WIDE");
-    return e && !strcmp(e, "1");
-}
-
 static void __attribute__((noinline)) nv2a_dma_addr_mask_latch(NV2AState *d)
 {
-    bool wide = nv2a_wide_wanted() && memory_region_size(d->vram) >= 256 * MiB;
-
-    d->dma_addr_mask = wide ? NV2A_DMA_ADDR_MASK_WIDE : NV2A_DMA_ADDR_MASK;
-    d->dma_addr_mask_saved = d->dma_addr_mask;
+    d->dma_addr_mask = memory_region_size(d->vram) >= 256 * MiB ?
+                       NV2A_DMA_ADDR_MASK_WIDE : NV2A_DMA_ADDR_MASK;
 }
 
 /* After pfb_init's RAM line */
 static void __attribute__((noinline)) nv2a_dma_addr_mask_note(NV2AState *d)
 {
-    uint64_t ram = memory_region_size(d->vram) / MiB;
-
     if (d->dma_addr_mask == NV2A_DMA_ADDR_MASK_WIDE) {
-        fprintf(stderr,
-                "xemu: NV2A wide addressing: 28 bits (XEMU_NV2A_WIDE=1)\n");
-    } else if (nv2a_wide_wanted()) {
-        fprintf(stderr, "xemu: XEMU_NV2A_WIDE=1 ignored: guest RAM is %"
-                PRIu64 " MiB, %s (it needs -m 256 or more)\n", ram,
-                ram <= 128 ? "which 27-bit NV2A addresses already reach" :
-                "whose end a 28-bit NV2A address could pass");
+        fprintf(stderr, "xemu: NV2A wide addressing: 28 bits (guest RAM 256 "
+                "MiB or more)\n");
     }
 }
 
@@ -744,57 +736,11 @@ static int nv2a_post_save(void *opaque)
 static int nv2a_pre_load(void *opaque)
 {
     NV2AState *d = opaque;
-    /* Stays so unless the save carries nv2a/dma-addr-mask */
-    d->dma_addr_mask_saved = NV2A_DMA_ADDR_MASK;
     nv2a_lock_fifo(d);
     return 0;
 }
 
-static const char *nv2a_dma_addr_mask_how(uint32_t mask)
-{
-    return mask == NV2A_DMA_ADDR_MASK      ? "27 bits" :
-           mask == NV2A_DMA_ADDR_MASK_WIDE ? "28 bits, XEMU_NV2A_WIDE=1" :
-                                             "unknown";
-}
-
-/*
- * Last in nv2a_post_load, after the unlock: an error before it would leave
- * the FIFO locked. The saved DMA objects, PCRTC start and NV062 offsets
- * are addresses under the saved mask, which would read other RAM here.
- */
-static bool __attribute__((noinline))
-nv2a_dma_addr_mask_check(NV2AState *d, Error **errp)
-{
-    uint32_t saved = d->dma_addr_mask_saved;
-
-    d->dma_addr_mask_saved = d->dma_addr_mask;
-    if (saved == d->dma_addr_mask) {
-        return true;
-    }
-    d->dma_addr_mask_refusals++;
-    error_setg(errp, "NV2A address mask mismatch\nxemu: this state was "
-               "saved with NV2A addressing 0x%08" PRIx32 " (%s); this "
-               "machine uses 0x%08" PRIx32 " (%s)%s", saved,
-               nv2a_dma_addr_mask_how(saved), d->dma_addr_mask,
-               nv2a_dma_addr_mask_how(d->dma_addr_mask),
-               saved == NV2A_DMA_ADDR_MASK_WIDE ?
-               ". To load it, set XEMU_NV2A_WIDE=1 at -m 256 or more" :
-               saved == NV2A_DMA_ADDR_MASK ?
-               ". To load it, unset XEMU_NV2A_WIDE" : "");
-    return false;
-}
-
-/*
- * nv2a.h. The refusal comes after RAM, the CPU and nv2a itself have
- * loaded, so a caller that would resume after a failed load (the
- * Snapshots menu) resets the machine instead.
- */
-unsigned nv2a_load_refusals(void)
-{
-    return g_nv2a ? g_nv2a->dma_addr_mask_refusals : 0;
-}
-
-static bool nv2a_post_load(void *opaque, int version_id, Error **errp)
+static int nv2a_post_load(void *opaque, int version_id)
 {
     NV2AState *d = opaque;
     if (version_id < 5) {
@@ -828,7 +774,7 @@ static bool nv2a_post_load(void *opaque, int version_id, Error **errp)
     nv2a_update_boot_window(d);
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);
-    return nv2a_dma_addr_mask_check(d, errp);
+    return 0;
 }
 
 /*
@@ -917,39 +863,6 @@ static const VMStateDescription vmstate_nv2a_pgraph_methods = {
     },
 };
 
-/*
- * XEMU_NV2A_WIDE: the mask the state was saved with, only when it isn't
- * 27 bits, so 27-bit saves stay v0.16.1's stream. Registered in every
- * build, so a 27-bit machine refuses a wide state by name
- * (nv2a_dma_addr_mask_check) rather than as an unknown subsection. No
- * load hooks: a failure here would skip nv2a_post_load and leave the FIFO
- * locked.
- */
-static bool nv2a_dma_addr_mask_needed(void *opaque)
-{
-    NV2AState *d = opaque;
-    return d->dma_addr_mask != NV2A_DMA_ADDR_MASK;
-}
-
-static int nv2a_dma_addr_mask_pre_save(void *opaque)
-{
-    NV2AState *d = opaque;
-    d->dma_addr_mask_saved = d->dma_addr_mask;
-    return 0;
-}
-
-static const VMStateDescription vmstate_nv2a_dma_addr_mask = {
-    .name = "nv2a/dma-addr-mask",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .needed = nv2a_dma_addr_mask_needed,
-    .pre_save = nv2a_dma_addr_mask_pre_save,
-    .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(dma_addr_mask_saved, NV2AState),
-        VMSTATE_END_OF_LIST()
-    },
-};
-
 static const VMStateDescription vmstate_nv2a_raster = {
     .name = "nv2a/pcrtc-raster",
     .version_id = 1,
@@ -977,7 +890,7 @@ static const VMStateDescription vmstate_nv2a = {
     .version_id = 5,
     .minimum_version_id = 1,
     .post_save = nv2a_post_save,
-    .post_load_errp = nv2a_post_load,
+    .post_load = nv2a_post_load,
     .pre_load = nv2a_pre_load,
     .fields = (VMStateField[]) {
         // FIXME: Split this up into subsections
@@ -1104,7 +1017,6 @@ static const VMStateDescription vmstate_nv2a = {
     .subsections = (const VMStateDescription * const []) {
         &vmstate_nv2a_raster,
         &vmstate_nv2a_pgraph_methods,
-        &vmstate_nv2a_dma_addr_mask,
         NULL
     },
 };

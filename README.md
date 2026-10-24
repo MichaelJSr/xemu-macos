@@ -200,8 +200,9 @@ In-app Settings covers the main toggles.
 **Guest RAM.** `[sys] mem_limit` (Settings > System > System Memory) is
 `'64'` (the default) or `'128'`, plus two experimental values, `'256'`
 and `'512'` (see "More than 128 MiB" under Headless mode): stock kernels
-use 64 MiB, the NV2A reaches only the first 128 MiB, and a savestate
-loads only into the RAM size it was saved with.
+use 64 MiB, NV2A DMA objects can then start anywhere in the first 256 MiB
+(see "NV2A reads above 128 MiB"), and a savestate loads only into the RAM
+size it was saved with.
 
 ### PAL 50 Hz (opt-in)
 
@@ -800,9 +801,8 @@ Other automation interfaces (windowed or headless):
   tested), gives the CPU that much RAM, mapped from physical 0. Other
   sizes exit 1 with `-m N MiB: guest RAM above 128 MiB must be a
   multiple of 16 MiB, 3840 MiB at most`. It is useful only with a kernel
-  that manages it. None is known: stock kernels use 64 MiB, and the NV2A
-  reaches 128 MiB (its 27-bit addresses), so the extra RAM can hold only
-  CPU-side data (but see "NV2A reads above 128 MiB"). To the guest the
+  or mod that uses it: stock kernels use 64 MiB (for GPU data placed
+  there, see "NV2A reads above 128 MiB"). To the guest the
   machine looks like 128 MiB hardware: NV2A BAR1 (the GPU aperture), the
   VGA window and `NV_PFB_CSTATUS` cover the first 128 MiB.
   `XEMU_CSTATUS_FULL_RAM=1` makes `NV_PFB_CSTATUS`
@@ -818,31 +818,26 @@ Other automation interfaces (windowed or headless):
   stays as big as guest RAM (host memory, touched only where vertices
   are). Savestates load only into a machine of the size they were saved
   on (but see "Savestates and RAM size").
-- **NV2A reads above 128 MiB (experimental)**: `XEMU_NV2A_WIDE=1` at
-  `-m 256` or more widens the NV2A's mask on DMA object bases, the PCRTC
-  start and the 2D blit offsets from 27 to 28 bits, so a DMA object can
-  sit in RAM's second 128 MiB, which real hardware can't do. Offsets
-  added to a base (textures, vertices, 3D surfaces) were never cut to 27
-  bits, so a base-0 object whose limit covers them reaches past 128 MiB
-  without it. The mask stays 28 bits above 256 MiB (from 1 GiB up a
-  wider one would turn D3D's AGP addresses into +1 GiB); BAR1, the VGA
-  window (which wraps a scanout above 128 MiB) and `NV_PFB_CSTATUS` stay
-  as above. Stderr says `xemu: NV2A wide addressing: 28 bits
-  (XEMU_NV2A_WIDE=1)`, or below 256 MiB that the variable is ignored and
-  why. A state saved in the mode carries its mask (subsection
-  `nv2a/dma-addr-mask`) and loads only where the mask is the same;
-  otherwise, either way round, the load is refused with `xemu: this
-  state was saved with NV2A addressing 0x0fffffff (28 bits,
-  XEMU_NV2A_WIDE=1); this machine uses 0x07ffffff (27 bits). ...`, in
-  the same places as the RAM size line below. The refusal comes after
-  the state has loaded over RAM, the CPU and most devices, so a menu
-  load, which otherwise resumes after a failed load, resets the machine
-  (stderr: `xemu: snapshot '<name>': refused after it loaded over the
-  machine; resetting it`); monitor `loadvm` leaves it stopped, as after
-  any failed load. States saved without the
-  mode keep v0.16.1's format. v0.16.1 and older refuse a wide state as
-  an unknown subsection and then hang at the next reset: don't load one
-  there.
+- **NV2A reads above 128 MiB (experimental)**: at 256 MiB of guest RAM
+  or more (`mem_limit` `'256'`/`'512'` or `-m`) the NV2A's mask on DMA
+  object bases, the PCRTC start and the 2D blit offsets is 28 bits
+  instead of 27, so a DMA object can sit in RAM's second 128 MiB, which
+  real hardware can't do. Offsets added to a base (textures, vertices,
+  3D surfaces) were never cut to 27 bits, so a base-0 object whose
+  limit covers them reaches past 128 MiB at any size. The mask stays 28
+  bits above 256 MiB (a wider one would shift the GPU's 0xF0000000 and
+  D3D's AGP address forms) and 27 below it (a 28-bit base could pass the
+  end of RAM); BAR1, the VGA window (which wraps a scanout above 128
+  MiB) and `NV_PFB_CSTATUS` stay as above. Stderr says `xemu: NV2A wide
+  addressing: 28 bits (guest RAM 256 MiB or more)`. A stock kernel
+  manages 64 MiB, so a game's DMA objects lie below it and run as at 27
+  bits (cold boots at 256 MiB reach the same RAM either way). The mask
+  follows the RAM size alone, so savestates carry nothing new and load
+  across releases at every size. v0.16.1 and older run a 256 MiB state
+  at 27 bits, as does a state shrunk from 256 MiB or more into 144-240
+  MiB (`XEMU_LOADVM_SHRINK_RAM`, below): a DMA base above 128 MiB then
+  wraps for textures, vertices, the pushbuffer and 2D blits, and aborts
+  the process as a render target.
 - **Savestates and RAM size**: `loadvm` of a snapshot saved with another
   RAM size fails as before (`Size mismatch: pc.ram: 0x8000000 !=
   0x4000000 ...`). The error now ends with a line that names both sizes

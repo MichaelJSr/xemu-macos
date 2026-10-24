@@ -1706,10 +1706,11 @@ void MainMenuSystemView::Draw()
     }
 
     static const char mem_hint[] =
-        "256 and 512 MiB are experimental: stock kernels use 64 MiB and the "
-        "NV2A reaches only the first 128 MiB, so the extra RAM helps only a "
-        "kernel that manages it. Savestates are tied to the RAM size: one "
-        "loads only into the size it was saved with.";
+        "256 and 512 MiB are experimental: stock kernels use 64 MiB, so the "
+        "extra RAM helps only a kernel or mod that uses it. At these sizes "
+        "NV2A DMA objects can start anywhere in the first 256 MiB (the "
+        "hardware: 128 MiB). Savestates are tied to the RAM size: one loads "
+        "only into the size it was saved with.";
     if ((int)g_config.sys.mem_limit >= CONFIG_SYS_MEM_LIMIT_256) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.75f, 0, 1));
         ImGui::TextWrapped("%s", mem_hint);

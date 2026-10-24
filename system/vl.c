@@ -3068,8 +3068,9 @@ void qemu_init(int argc, char **argv)
     }
 
     /*
-     * mem_limit's values in MiB. 256 and 512 are experimental: the NV2A
-     * sees the first 128 MiB (hw/xbox/xbox.c, nv2a_aperture_size).
+     * mem_limit's values in MiB. 256 and 512 are experimental: BAR1 and VGA
+     * cover the first 128 MiB (hw/xbox/xbox.c, nv2a_aperture_size), NV2A
+     * DMA bases the first 256 (nv2a_dma_addr_mask).
      */
     static const int mem_limit_mib[CONFIG_SYS_MEM_LIMIT__COUNT] = {
         [CONFIG_SYS_MEM_LIMIT_64] = 64,

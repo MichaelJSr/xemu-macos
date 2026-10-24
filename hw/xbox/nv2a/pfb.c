@@ -23,7 +23,8 @@
 
 /*
  * NV_PFB_CSTATUS reports the RAM size. Above 128 MiB (an experimental -m)
- * it reports 128 MiB, the most the NV2A reaches and a 128 MiB console has,
+ * it reports 128 MiB, the most the hardware's NV2A reaches and a 128 MiB
+ * console has,
  * unless XEMU_CSTATUS_FULL_RAM=1 asks for the full size. At 64 and 128
  * MiB both are the RAM size.
  */

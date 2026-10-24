@@ -37,7 +37,6 @@
 
 #include "ui/console.h"
 #include "ui/input.h"
-#include "hw/xbox/nv2a/nv2a.h"
 
 static QEMUSnapshotInfo *xemu_snapshots_metadata = NULL;
 static XemuSnapshotData *xemu_snapshots_extra_data = NULL;
@@ -254,7 +253,6 @@ char *xemu_get_currently_loaded_disc_path(void)
 void xemu_snapshots_load(const char *vm_name, Error **err)
 {
     bool vm_running = runstate_is_running();
-    unsigned refusals = nv2a_load_refusals();
     vm_stop(RUN_STATE_RESTORE_VM);
     if (!load_snapshot(vm_name, NULL, false, NULL, err)) {
         /*
@@ -263,16 +261,7 @@ void xemu_snapshots_load(const char *vm_name, Error **err)
          * stopped — to the player, a hard freeze with only a
          * transient error toast. Resume so the session continues
          * from where it was; the caller surfaces the error.
-         *
-         * A state refused for its NV2A address mask (XEMU_NV2A_WIDE)
-         * has loaded over RAM, the CPU and nv2a by then: reset, so it
-         * never runs under this machine's mask, even after a Resume.
          */
-        if (nv2a_load_refusals() != refusals) {
-            fprintf(stderr, "xemu: snapshot '%s': refused after it loaded "
-                    "over the machine; resetting it\n", vm_name);
-            qemu_system_reset(SHUTDOWN_CAUSE_HOST_UI);
-        }
         if (vm_running) {
             vm_start();
         }

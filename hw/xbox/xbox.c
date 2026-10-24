@@ -529,7 +529,7 @@ static void xbox_memory_init(PCMachineState *pcms,
      * More than 128 MiB is experimental (mem_limit '256'/'512', or -m,
      * which wins over mem_limit): RAM for a kernel that manages it; BAR1
      * and VGA cover the first 128 MiB (nv2a_aperture_size), NV2A DMA
-     * offsets all of it (nv2a_dma_addr_mask). Such a size must be a
+     * reaches past it (nv2a_dma_addr_mask). Such a size must be a
      * multiple of 16 MiB: the aarch64 sub-page store prefilter compares
      * page indexes with the RAM's page count as an arithmetic immediate.
      * RAM must also end below 0xF0000000, where the kernel puts NV2A BAR1

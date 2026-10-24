@@ -28,11 +28,6 @@ void nv2a_sync_ram(void);
 void nv2a_det_reports_sync_read(uint64_t addr, uint64_t len);
 void nv2a_save_quiesce_paused(void);
 void nv2a_save_done(void);
-/*
- * Loads refused for their NV2A address mask (XEMU_NV2A_WIDE) after they
- * had loaded over the machine, counted per process. BQL.
- */
-unsigned nv2a_load_refusals(void);
 
 /*
  * Metal-native presentation: pull the current present frame as an
