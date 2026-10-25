@@ -12,53 +12,20 @@ until it graduates into a design doc or a landing.
 These are the candidates the 2026-08-04 wave produced or reopened.
 Each has its measurement; none is planned work. Every entry is now a
 one-line stub kept under its number so citations elsewhere still
-resolve: item 1 landed on 2026-10-15, item 2 is parked behind its bar,
-items 3 and 4 are closed. The older ranked list below follows the same
-convention: items 1-3 are closed stubs, item 4 is parked below its bar,
-item 5 is the standing correctness debt. Full write-ups are in
+resolve: item 1 landed on 2026-10-15, item 2's prewarm shipped on
+2026-10-24, items 3 and 4 are closed. The older ranked list below
+follows the same convention: items 1-3 are closed stubs, item 4 is
+parked below its bar, item 5 is the standing correctness debt. Full
+write-ups are in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)
 (moved 2026-10-10; items 1 and 2 on 2026-10-15).
 
-**Profile at the new primary anchor (2026-10-11).** One `probe-run.sh`
-session on `azurik-heavy-f1` (80 s, release bundle `91D280C7`, retrained
-PGO) with `XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF` and
-`XEMU_NV2A_NSPROF`, plus a 20 s `/usr/bin/sample` of a second session,
-on a box loaded by other jobs:
-- **Where vCPU time goes.** 32.3% in translated guest code, 67.7% in
-  host code. x87 hard-float helpers ≈ 24% together (`fmul` 5.1, `flds`
-  3.7 + 2.6, `fcom` 2.5, `fsts` 2.4, `fadd` 1.8 + 1.7, `fpop` 1.5,
-  `fucomi` 1.0, `fsub` 0.9 + 0.4); `pthread_jit_write_protect_np` 10.9%
-  (the barrier-skid attribution of archaeology 1.17, not real W^X cost);
-  mutex waits 8.3%; `cpu_exec_loop` 2.3, `helper_enter_mmx` 2.2,
-  `helper_cc_compute_all` 1.1. `sample` shows where the mutex waits
-  come from: `helper_stl_mmu` is 12.8% of vCPU samples inclusive, and
-  three quarters of that is `user_write` (the PFIFO doorbell) blocked in
-  `qemu_mutex_lock_impl` on `pfifo.lock` while the PFIFO thread holds it
-  (~9.6% of vCPU samples); `vp_write` is another ~2%. The lockless
-  DMA_PUT doorbell (2026-10-15, `3391b92357`) cut the doorbell from 12%
-  to 2.2% of vCPU samples; the REPORTS_SUBMIT valve behind that wait is
-  parked in the `xemu-history` skill (0 submits per flip with both
-  heavy anchors at the 60 fps cap, 2026-10-16).
-- **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
-  `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
-  `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
-  load helpers add at most ~0.3%. Item 1 was parked on this number and
-  landed on 2026-10-15 anyway: instructions per frame showed what
-  samples missed.
-- **x87 store traffic:** `helper_fsts_ST0__hard` 2.4% (plus
-  `helper_fmov_FT0_STN__hard` 0.4%).
-- **Ret-memo:** `xemu: ras hits=45901 (0.5%) fills=10089110` over
-  110 s. The counter only sees the helper path, which runs after the
-  inline probe at the ret site has missed, so it is the hit rate of
-  misses, not of the memo. The v0.13.3 build (before the per-page memo
-  flush) reads 45013 / 9945329 on the same scene: the flush costs
-  nothing measurable.
-- **`da_multi_subrange`: 0** in all 21 intervals (nsprof prints only
-  non-zero events), as on F5. The GPU campaign's open fact is closed:
-  multi-subrange draws do not occur on the heavy anchor either.
+The 2026-10-11 profile at the primary anchor moved to
+[Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md#profile-at-the-primary-anchor-2026-10-11)
+on 2026-10-25.
 
 1. **Surface CPU-access-callback churn — ranged flush landed 2026-10-15** (`tlb_flush_host_range`). Deterministic offscreen heavy-f1 runs 2.3% fewer host instructions per frame: the ~0.2% sample estimate that parked it missed the refills and the jump-cache and near-return-memo wipes each full flush caused. The reuse-pool shape stays killed (−0.66 fps, 3/3, 2026-08-04). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
-2. **Async/prewarm pipeline creation — parked 2026-10-11; prewarm reopened and shipped 2026-10-24** (ledger: Pipeline prewarm). The 45-53 ms first-visit compile is a persistent pipeline-cache coverage miss, gone once warm; what reopened it was an effect's first use after an update or with cold driver caches (Azurik's fire-armor cast: 1.9-2.3 s of compiling). Async compile stays closed. Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
+2. **Async/prewarm pipeline creation — parked 2026-10-11; prewarm reopened and shipped 2026-10-24** (ledger: Pipeline prewarm). The 45-53 ms first-visit compile is a persistent pipeline-cache coverage miss, gone once warm; what reopened it was an effect's first use after an update or with cold driver caches (Azurik's fire-armor cast: 1.9-2.3 s of compiling). It runs on up to 4 workers since 2026-10-24; the parallel compile of first-use miss bursts, the owner's other hitch fix, was gated on that scaling test and closed by it (Metal-cold 1.68× at 8 workers against 3×; `xemu-history`). Async compile stays closed. Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md).
 3. **x87 clean-ST(i) write-back elision — closed 2026-08-04** (−0.23 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments, which corrects the stated mechanism. The code was removed on 2026-10-10.
 4. **Reports idle-budget scan below 300 µs — closed 2026-08-04** (50 µs: −12.1 fps, 3/3). Write-up: [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md); ledger: Failed / reverted experiments.
 
@@ -68,7 +35,7 @@ Historical ranking (2026-07-19). Items 1-3 are closed (write-ups in
 [Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md)), item 4 is parked below its bar, and
 item 5 is the standing correctness debt, still open. The live
 frontier is the `xemu-history` skill's Open frontier. The 2026-10-11
-profile above predates the 2026-10-15/16 TCG, x87 and threading work
+profile ([Finished/roadmap-closed-items.md](Finished/roadmap-closed-items.md#profile-at-the-primary-anchor-2026-10-11)) predates the 2026-10-15/16 TCG, x87 and threading work
 (inline MMX entry, x87 doubles and write-through, no per-TB W^X flip,
 lockless doorbell, vCPU QoS); re-profile before ranking work from it.
 

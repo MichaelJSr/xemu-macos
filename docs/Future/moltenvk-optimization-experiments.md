@@ -1,10 +1,21 @@
 # MoltenVK optimization experiments (M2 Ultra audit — Tier 3 research)
 
 > **Future.** Experiment A (`MVK_USE_METAL_PRIVATE_API`) was never built.
-> Experiment B's option (d) shipped (`ui/xemu.c`), and option (a),
-> pipeline prewarm, was parked 2026-10-11 ([roadmap](../roadmap.md)
-> top candidate 2: the hitch is a pipeline-cache coverage miss; reopen
-> on a ≥ 16 ms compile that survives a warm rerun). Driver
+> Experiment B's option (d) shipped (`ui/xemu.c`). Option (a), pipeline
+> prewarm, was parked 2026-10-11 ([roadmap](../roadmap.md) top candidate
+> 2: the hitch is a pipeline-cache coverage miss) and shipped 2026-10-24
+> (`prewarm.c`, `d106c5ca25`; Apple-only per `6c37968b0c`; ledger
+> "Pipeline prewarm"), reopened by an effect's first use with cold driver
+> caches: it rebuilds the recorded keys at launch, destroys each
+> pipeline and hands no handles to the LRU. Its concurrent half is the
+> prewarm itself since `d13fe7859c` (up to 4 workers); the parallel
+> compile of first-use miss bursts that the owner picked on 2026-10-24
+> was gated on that N-worker scaling test and closed by it (Metal-cold
+> 1.68× at 8 workers against the 3× bar; `xemu-history`). The
+> `SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` knob (below) was to return
+> with a concurrent-compile producer; with the 4 workers it is untested
+> (V1: macOS 26's ceiling is already 24). Async compile and option (b)
+> stay closed. The body below is as written. Driver
 > versions below are as of 2026-07-21: releases now bundle MoltenVK 1.4.2
 > and local builds use the pin in `scripts/build-moltenvk.sh`.
 > Experiment B's current flow was updated 2026-10-23 for the

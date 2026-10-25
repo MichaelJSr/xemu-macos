@@ -4222,6 +4222,8 @@ they could land — building the driver with `MVK_USE_METAL_PRIVATE_API`
 (unlocks `wideLines`/`logicOp`/`VK_EXT_provoking_vertex`, empirically
 confirmed) and async/prewarm pipeline creation — are recorded in
 [moltenvk-optimization-experiments.md](Future/moltenvk-optimization-experiments.md).
+The prewarm has since shipped (2026-10-24, Pipeline prewarm above); the
+private-API build is still unbuilt.
 
 
 - **Sub-page arm (b): inline NOTDIRTY store-skip (default-on

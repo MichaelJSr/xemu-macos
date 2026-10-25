@@ -4,10 +4,13 @@
 > 2026-10-10 because they are closed, except top candidates 1 and 2,
 > which followed on 2026-10-15 because they were parked with reopen bars
 > (ranged TLB flush: ~0.2% of vCPU vs a 1.5% gate; prewarm: a ≥ 16 ms
-> compile that survives a warm rerun). Top candidate 1 landed the same
-> day anyway (see its 2026-10-15 note). "Above" in those two means the
-> roadmap's 2026-10-11 profile. The roadmap keeps a one-line stub
-> under the same number so citations still resolve. Each is also
+> compile that survives a warm rerun; parked 2026-10-11, prewarm shipped
+> 2026-10-24). Top candidate 1 landed the same day anyway (see its
+> 2026-10-15 note). "Above" in those two means the roadmap's 2026-10-11
+> profile, moved here on 2026-10-25 as [Profile at the primary anchor
+> (2026-10-11)](#profile-at-the-primary-anchor-2026-10-11). The roadmap
+> keeps a one-line stub under the same number so citations still
+> resolve; the profile has a one-line pointer there. Each is also
 > recorded in the [ledger](../optimizations.md). Text is moved verbatim;
 > figures are as of the date in each heading, and relative links are
 > re-pointed from this folder. The ranked item 1 machinery, and the two
@@ -16,6 +19,46 @@
 > `XEMU_RETC_BITS` knob (the width is fixed at 12) and top candidate 3's
 > `XEMU_X87_ELIDE_CLEAN` (the ledger's Failed row corrects its stated
 > mechanism); the figures stand as recorded.
+
+## Profile at the primary anchor (2026-10-11)
+
+**Profile at the new primary anchor (2026-10-11).** One `probe-run.sh`
+session on `azurik-heavy-f1` (80 s, release bundle `91D280C7`, retrained
+PGO) with `XEMU_GUEST_PROF`, `XEMU_INV_PROF`, `XEMU_TB_PROF` and
+`XEMU_NV2A_NSPROF`, plus a 20 s `/usr/bin/sample` of a second session,
+on a box loaded by other jobs:
+- **Where vCPU time goes.** 32.3% in translated guest code, 67.7% in
+  host code. x87 hard-float helpers ≈ 24% together (`fmul` 5.1, `flds`
+  3.7 + 2.6, `fcom` 2.5, `fsts` 2.4, `fadd` 1.8 + 1.7, `fpop` 1.5,
+  `fucomi` 1.0, `fsub` 0.9 + 0.4); `pthread_jit_write_protect_np` 10.9%
+  (the barrier-skid attribution of archaeology 1.17, not real W^X cost);
+  mutex waits 8.3%; `cpu_exec_loop` 2.3, `helper_enter_mmx` 2.2,
+  `helper_cc_compute_all` 1.1. `sample` shows where the mutex waits
+  come from: `helper_stl_mmu` is 12.8% of vCPU samples inclusive, and
+  three quarters of that is `user_write` (the PFIFO doorbell) blocked in
+  `qemu_mutex_lock_impl` on `pfifo.lock` while the PFIFO thread holds it
+  (~9.6% of vCPU samples); `vp_write` is another ~2%. The lockless
+  DMA_PUT doorbell (2026-10-15, `3391b92357`) cut the doorbell from 12%
+  to 2.2% of vCPU samples; the REPORTS_SUBMIT valve behind that wait is
+  parked in the `xemu-history` skill (0 submits per flip with both
+  heavy anchors at the 60 fps cap, 2026-10-16).
+- **Guest TLB flush + refill: ~0.2%, under item 1's 1.5% gate.**
+  `tlb_flush_by_mmuidx_async_work` 0.07%, `x86_cpu_tlb_fill` 0.05%,
+  `get_page_addr_code_hostp` 0.11% of vCPU samples; the slow-path
+  load helpers add at most ~0.3%. Item 1 was parked on this number and
+  landed on 2026-10-15 anyway: instructions per frame showed what
+  samples missed.
+- **x87 store traffic:** `helper_fsts_ST0__hard` 2.4% (plus
+  `helper_fmov_FT0_STN__hard` 0.4%).
+- **Ret-memo:** `xemu: ras hits=45901 (0.5%) fills=10089110` over
+  110 s. The counter only sees the helper path, which runs after the
+  inline probe at the ret site has missed, so it is the hit rate of
+  misses, not of the memo. The v0.13.3 build (before the per-page memo
+  flush) reads 45013 / 9945329 on the same scene: the flush costs
+  nothing measurable.
+- **`da_multi_subrange`: 0** in all 21 intervals (nsprof prints only
+  non-zero events), as on F5. The GPU campaign's open fact is closed:
+  multi-subrange draws do not occur on the heavy anchor either.
 
 ## Top candidate 1 — surface CPU-access-callback churn (parked 2026-10-11)
 
@@ -57,7 +100,7 @@ Measurement gotcha, recorded so nobody re-derives it: HMP `info jit`'s
 has `NB_MMU_MODES=22` vs plain i386's 8) — use the partial + elided
 counters.
 
-## Top candidate 2 — async/prewarm pipeline creation (parked 2026-10-11)
+## Top candidate 2 — async/prewarm pipeline creation (parked 2026-10-11; prewarm shipped 2026-10-24)
 
 **Async/prewarm pipeline creation — arch 1.12 REOPENED 2026-08-04.**
 The original kill measured steady state only. The audit's zero-code
@@ -89,6 +132,11 @@ burst. The hitch is a first-visit miss in the persistent pipeline
 cache, gone once warm, so by this item's own bar it is a
 cache-coverage problem and prewarm is not the fix. Parked; reopen
 only on a forward-phase compile ≥ 16 ms that survives a warm rerun.
+**2026-10-24:** reopened by Azurik's fire-armor cast (an effect's first
+use with cold driver caches, as after an update: 1.9-2.3 s of
+compiling) and shipped (`prewarm.c`; up to 4 workers); the parallel
+compile of first-use bursts was closed by its scaling gate. See the
+ledger, Pipeline prewarm.
 
 ## Top candidate 3 — x87 clean-ST(i) write-back elision (closed 2026-08-04)
 

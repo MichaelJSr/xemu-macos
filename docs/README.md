@@ -38,7 +38,7 @@ xemu-history), not here.
 
 ## Future
 
-- [`moltenvk-optimization-experiments.md`](Future/moltenvk-optimization-experiments.md): the MoltenVK private-API build and pipeline prewarm experiments.
+- [`moltenvk-optimization-experiments.md`](Future/moltenvk-optimization-experiments.md): the MoltenVK private-API build, still unbuilt, and the pipeline prewarm experiment, shipped 2026-10-24 (its parallel compile of first-use bursts closed by its gate).
 
 ## Finished
 
