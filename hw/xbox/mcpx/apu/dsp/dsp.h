@@ -115,6 +115,10 @@ void dsp_reset(DSPState *dsp);
 void dsp_step(DSPState *dsp);
 void dsp_run(DSPState *dsp, int cycles);
 
+/* Silicon's DSP cycles a 667 us SE frame (the $FFFFB3 counter) */
+#define DSP_FRAME_CYCLES 88875
+bool dsp_run_frame(DSPState *dsp, uint32_t bound, bool realtime);
+
 void dsp_bootstrap(DSPState *dsp);
 void dsp_start_frame(DSPState *dsp);
 

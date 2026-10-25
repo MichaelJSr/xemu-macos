@@ -485,6 +485,23 @@ const MemoryRegionOps ep_ops = {
     .write = ep_write,
 };
 
+/*
+ * A frame's cycle bound: twice silicon's, as the fork's engine counts about
+ * 2 cycles an instruction (Azurik peaks at ~5,200 a GP frame and ~10,800 an
+ * EP kick, 2026-10-24).
+ */
+#define DSP_FRAME_BOUND (2 * DSP_FRAME_CYCLES)
+
+static void dsp_frame_cut(const char *core)
+{
+    static bool warned;
+    if (!qatomic_xchg(&warned, true)) {
+        fprintf(stderr, "mcpx apu: the %s ran a frame to its cycle bound "
+                "without signalling frame-complete; it resumes next frame "
+                "(reported once per run)\n", core);
+    }
+}
+
 void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
     /* Write VP results to the GP DSP MIXBUF (bulk NEON convert; direct
@@ -521,9 +538,10 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
         dsp_start_frame(d->gp.dsp);
         dsp_set_halt_requested(d->gp.dsp, false);
         dsp_set_cycle_count(d->gp.dsp, 0);
-        do {
-            dsp_run(d->gp.dsp, 1000);
-        } while (!dsp_get_halt_requested(d->gp.dsp) && d->gp.realtime);
+        if (!dsp_run_frame(d->gp.dsp, DSP_FRAME_BOUND, d->gp.realtime) &&
+            d->gp.realtime) {
+            dsp_frame_cut("GP");
+        }
         g_dbg.gp.cycles = dsp_get_cycle_count(d->gp.dsp);
 
         if ((d->monitor.point == MCPX_APU_DEBUG_MON_GP) ||
@@ -546,9 +564,12 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_
             dsp_start_frame(d->ep.dsp);
             dsp_set_halt_requested(d->ep.dsp, false);
             dsp_set_cycle_count(d->ep.dsp, 0);
-            do {
-                dsp_run(d->ep.dsp, 1000);
-            } while (!dsp_get_halt_requested(d->ep.dsp) && d->ep.realtime);
+            /* The EP runs one frame in 8: 8 frames' worth */
+            if (!dsp_run_frame(d->ep.dsp, 8 * DSP_FRAME_BOUND,
+                               d->ep.realtime) &&
+                d->ep.realtime) {
+                dsp_frame_cut("EP");
+            }
             g_dbg.ep.cycles = dsp_get_cycle_count(d->ep.dsp);
         }
     }

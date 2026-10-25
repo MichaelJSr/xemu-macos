@@ -941,6 +941,33 @@ static void budget_replay_trace(DSPState *s, uint32_t *t)
     }
 }
 
+/*
+ * dsp_run_frame: a program that never signals frame-complete stops at the
+ * cycle bound (within one slice) instead of spinning forever; one that
+ * signals it returns halted.
+ */
+static void test_frame_bound(void)
+{
+    DSPState *s = make_dsp();
+    Prog p;
+    begin_prog(&p, s);
+    emit(&p, 0x0C0000 | here(&p));          /* jmp * */
+
+    dsp_set_cycle_count(s, 0);
+    dsp_set_halt_requested(s, false);
+    g_assert_false(dsp_run_frame(s, 20000, true));
+    g_assert_cmpuint(dsp_get_cycle_count(s), >=, 20000);
+    g_assert_cmpuint(dsp_get_cycle_count(s), <, 20000 + 4000);
+    dsp_destroy(s);
+
+    s = make_dsp();
+    build_y_unmapped(s);
+    dsp_set_cycle_count(s, 0);
+    dsp_set_halt_requested(s, false);
+    g_assert_true(dsp_run_frame(s, 4 * DSP_FRAME_CYCLES, true));
+    dsp_destroy(s);
+}
+
 static void test_budget_replay(void)
 {
     DSPState *s = make_dsp();
@@ -1184,6 +1211,7 @@ int main(int argc, char **argv)
     g_test_add_data_func("/corpus/budget-poll-jclr", GINT_TO_POINTER(1),
                          test_budget_poll);
     g_test_add_func("/corpus/budget-replay", test_budget_replay);
+    g_test_add_func("/corpus/frame-bound", test_frame_bound);
 
     return g_test_run();
 }

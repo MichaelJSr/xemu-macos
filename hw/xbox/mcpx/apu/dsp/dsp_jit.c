@@ -108,7 +108,24 @@ static void dsp_jit_step(DSPState *dsp)
 
 static void dsp_jit_run(DSPState *dsp, int cycles)
 {
-    dsp56300_run(jit_be(dsp)->jit, cycles);
+    Dsp56300Jit *jit = jit_be(dsp)->jit;
+    uint32_t before = dsp56300_cycle_count(jit);
+
+    dsp56300_run(jit, cycles);
+    /*
+     * A core parked in WAIT/STOP consumes no cycles, and nothing here can
+     * raise the interrupt that would wake it: report the frame complete
+     * rather than spin the frame loop (upstream PR #3047, a4bc0542d6).
+     * get_state copies ~600 B, so only after a slice that ran nothing.
+     */
+    if (dsp56300_cycle_count(jit) == before &&
+        !dsp56300_halt_requested(jit)) {
+        Dsp56300State ss;
+        dsp56300_get_state(jit, &ss);
+        if (ss.power_state) {
+            dsp56300_set_halt_requested(jit, true);
+        }
+    }
 }
 
 static void dsp_jit_bootstrap(DSPState *dsp)

@@ -171,6 +171,23 @@ void dsp_run(DSPState *dsp, int cycles)
     dsp->ops->run(dsp, cycles);
 }
 
+/*
+ * One frame's run, from a cycle count the caller zeroed: until the program
+ * writes frame-complete ($FFFFC4 bit 0), or, in real time, until bound
+ * cycles. A core that never writes it (a program bug, a WAIT/STOP idle
+ * loop, a Dolby EP handshake) used to spin here for good, holding the APU
+ * lock (upstream #2901); cut off, it resumes at its next frame. Returns
+ * whether it halted. Not realtime: one slice a frame, as before.
+ */
+bool dsp_run_frame(DSPState *dsp, uint32_t bound, bool realtime)
+{
+    do {
+        dsp_run(dsp, 1000);
+    } while (!dsp_get_halt_requested(dsp) && realtime &&
+             dsp_get_cycle_count(dsp) < bound);
+    return dsp_get_halt_requested(dsp);
+}
+
 void dsp_bootstrap(DSPState *dsp)
 {
     dsp->ops->bootstrap(dsp);
