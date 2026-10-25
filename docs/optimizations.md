@@ -25,8 +25,8 @@ switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
-`XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ` and `XEMU_OHCI_HCCA_FIRST`,
-the first eleven rows.
+`XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ`, `XEMU_OHCI_HCCA_FIRST`
+and `XEMU_VBLANK_KQUEUE`, the first twelve rows.
 The former `=0` knob `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass,
 became the `perf.cache_shaders` setting on 2026-10-18 (`a922602c75`).
 `XEMU_VTX_SPAN_FINISH`
@@ -48,6 +48,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_VK_CLEAR_IN_PASS` | Vulkan renderer, **default on since 2026-10-23**: an NV097_CLEAR_SURFACE records into the open render pass (it ends the occlusion query, never the pass); `0` ends the pass before and after every clear again, so each clear pays a full-surface load and store. Pass splits can move pixels on AGX and the null-renderer goldens never reach `vk/draw.c`. nsprof `clears` counts clears, `rpcause_clear` the passes they end under `0`. Vulkan renderer (pgraph/vk) |
 | `XEMU_NV2A_RESET_IRQ` | Both modes, **default on since 2026-10-23** (v0.16.1): a machine reset (`system_reset`, and the reset every load runs first) clears the NV2A interrupt enables and PGRAPH's pending bits and recomputes the line, as power-on does; `0` keeps them, as v0.16 did. Kept, a GPU interrupt the stopped game left pending re-raised IRQ 3 before the guest ran, the kernel's 8259 setup lost the request, and about 1 windowed reset in 100 after a load hung in the kernel's GPU fence wait (0x800426d4). A correctness fix, not a speedup; the goldens don't reset after running, so they can't verify it. Reset lane, Part 11 |
 | `XEMU_OHCI_HCCA_FIRST` | Normal mode, **default on since 2026-10-23** (v0.16.1, `858e2af19f`): an OHCI frame writes HccaFrameNumber and Pad1 back every frame and HccaDoneHead only with a done queue, then raises FNO, WDH and SF, as OHCI 1.0a 7.1.4 orders it; `0` raises them before the write-back and rewrites HccaDoneHead every frame, as v0.16 did. The order matters only when a DMA access drops the BQL inside a frame (nv2a's surface access callback does): the XDK USB driver then read HccaDoneHead before the frame wrote it, lost the done queue and bugchecked 0x0A 5 s later (Azurik's V22 boot hang, about 3% of real-time boots). Under icount the frame runs on the vCPU thread, so the goldens can't verify it. USB (`hw/usb/hcd-ohci.c`, `ohci_hcca_first`) |
+| `XEMU_VBLANK_KQUEUE` | macOS normal mode, **default on since 2026-10-24**: the vblank thread waits for each deadline on one kqueue timer (`NOTE_CRITICAL`) and spins the last 25 µs, instead of `SDL_DelayPrecise`'s 1 ms nanosleep chunks (stretched ~25% by timer coalescing) and its overshoot spin. `=0` restores SDL's wait. The thread's CPU 1.0% → 0.25% of a core at a 30 fps cap; frame rate unchanged |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -1549,6 +1550,18 @@ x86_64 host (Windows, Linux, Intel macOS).
   Minsns −0.17% (10/10); stream-e2 +0.9% (5/12, pairs −12..+11%),
   Minsns −0.44% (12/12). The changed functions run without PGO counts
   until the next profile retrain.
+
+- **The vblank thread waits on one kqueue timer (2026-10-24, macOS).**
+  `SDL_DelayPrecise` slept to each vblank in 1 ms nanosleep chunks,
+  which macOS stretches ~25% by timer coalescing, then spun its worst
+  overshoot: ~13 wakeups and 0.2-0.3 ms of spin every vblank, in every
+  scene, menus and pause included. One kqueue timer (`NOTE_CRITICAL`) to
+  25 µs before the deadline, then a spin, as the main loop already
+  waits; the timer re-arms on an early return and has a backstop.
+  Offscreen vanilla-rz-w1-dark at its 30 fps cap, 8 pairs: the
+  vblank-timer thread 1.0% → 0.25% of a core (every pair), 30.00
+  frame-ends/s in both; process CPU within noise. `XEMU_VBLANK_KQUEUE=0`
+  keeps SDL's wait (det runs use the virtual vblank and never reach it).
 
 - **tlb_set_dirty visits only dirty MMU indexes (2026-10-24).** A
   first guest store to a clean page that holds no code clears

@@ -80,6 +80,7 @@
 #include <math.h>
 #ifdef __APPLE__
 #include <pthread.h>
+#include <sys/event.h>
 #include "xemu-metal.h"
 #include "hw/xbox/nv2a/nsprof.h"
 #endif
@@ -1524,12 +1525,55 @@ static void vblank_timer_callback(void *opaque)
     timer_mod_ns(vblank_timer, now + qatomic_read(&vblank_interval_ns));
 }
 
+#ifdef __APPLE__
+/*
+ * The vblank thread's wait on macOS: one kqueue timer to the deadline less
+ * VBLANK_SPIN_NS (NOTE_CRITICAL: no coalescing leeway), then a spin on the
+ * deadline's clock, as the main loop waits (xbox_poll_timed). SDL's
+ * SDL_DelayPrecise slept in 1 ms nanosleep chunks that macOS stretches by
+ * ~25%, then spun its worst overshoot: ~13 wakeups and 0.2-0.3 ms of spin
+ * a vblank. XEMU_VBLANK_KQUEUE=0 keeps SDL's wait. False: kqueue failed.
+ */
+#define VBLANK_SPIN_NS 25000
+
+static bool vblank_wait_kqueue(int kq, int64_t deadline)
+{
+    for (;;) {
+        int64_t left = deadline - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (left <= VBLANK_SPIN_NS) {
+            break;
+        }
+        /*
+         * Arm and wait in one call (EV_ADD replaces the last timer); an
+         * early return (EINTR, the backstop, a stale event) waits again.
+         * The backstop keeps a lost timer from blocking exit.
+         */
+        struct kevent64_s kev, out;
+        EV_SET64(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+                 NOTE_NSECONDS | NOTE_CRITICAL, left - VBLANK_SPIN_NS, 0, 0,
+                 0);
+        int64_t backstop = left + 1000000;
+        struct timespec ts = { .tv_sec = backstop / 1000000000,
+                               .tv_nsec = backstop % 1000000000 };
+        if (kevent64(kq, &kev, 1, &out, 1, 0, &ts) < 0 && errno != EINTR) {
+            return false;
+        }
+    }
+    while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < deadline) {
+        /* spin */
+    }
+    return true;
+}
+#endif
+
 static void *vblank_timer_thread(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
 
 #ifdef __APPLE__
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    const char *kq_env = getenv("XEMU_VBLANK_KQUEUE");
+    int kq = kq_env && !strcmp(kq_env, "0") ? -1 : kqueue();
 #endif
 
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1542,7 +1586,16 @@ static void *vblank_timer_thread(void *opaque)
         // Wait until deadline
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < next_vblank) {
-            SDL_DelayPrecise(next_vblank - now);
+#ifdef __APPLE__
+            if (kq >= 0 && !vblank_wait_kqueue(kq, next_vblank)) {
+                close(kq);
+                kq = -1;
+            }
+            if (kq < 0)
+#endif
+            {
+                SDL_DelayPrecise(next_vblank - now);
+            }
         } else if (now > next_vblank + period) {
             // We've fallen behind by more than one frame, reset to avoid
             // rapid-fire catch-up
@@ -1556,6 +1609,11 @@ static void *vblank_timer_thread(void *opaque)
         }
     }
 
+#ifdef __APPLE__
+    if (kq >= 0) {
+        close(kq);
+    }
+#endif
     return NULL;
 }
 
