@@ -1418,7 +1418,22 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         hwaddr addr = qatomic_read(&d->regs[NV_PAPU_VPSSLADDR]) + page * 8;
         segment_offset = ram_ldl(d, addr);
         segment_length = ram_ldl(d, addr + 4);
-        assert(segment_offset != 0);
+        if (segment_offset == 0) {
+            /*
+             * An SSL entry the guest hasn't written yet (Top Spin, Advent
+             * Rising, upstream #380 and PR #3072): play silence this frame
+             * and read it again next frame, instead of aborting.
+             */
+            static bool warned;
+            if (!qatomic_xchg(&warned, true)) {
+                fprintf(stderr,
+                        "mcpx apu: voice %u SSL page %d not populated "
+                        "(offset 0, length 0x%x); voice silent until "
+                        "written (reported once per run)\n",
+                        v, page, segment_length);
+            }
+            return -1;
+        }
         assert(segment_length != 0);
         seg_len = (segment_length >> 0) & 0xffff;
         seg_cs = (segment_length >> 16) & 3;
