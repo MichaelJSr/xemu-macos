@@ -245,6 +245,13 @@ typedef struct PGRAPHState {
 
     unsigned int inline_elements_length;
     uint32_t inline_elements[NV2A_MAX_BATCH_LENGTH];
+    /*
+     * The range of inline_elements[0..length) while length > 0, kept by
+     * its writers (pgraph_note_inline_elements) and rescanned after a load
+     * (pgraph_rescan_inline_elements), so renderers need no pass over a
+     * draw's indices to find it.
+     */
+    uint32_t inline_elements_min, inline_elements_max;
 
     unsigned int inline_buffer_length;
 
@@ -476,6 +483,20 @@ void pgraph_get_clear_depth_stencil_value(PGRAPHState *pg, float *depth, int *st
 void pgraph_allocate_inline_buffer_vertices(PGRAPHState *pg, unsigned int attr);
 void pgraph_finish_inline_buffer_vertex(PGRAPHState *pg);
 void pgraph_reset_inline_buffers(PGRAPHState *pg);
+void pgraph_rescan_inline_elements(PGRAPHState *pg);
+
+/* Values in [lo, hi] appended to inline_elements, which held len before. */
+static inline void pgraph_note_inline_elements(PGRAPHState *pg, uint32_t len,
+                                               uint32_t lo, uint32_t hi)
+{
+    if (len == 0) {
+        pg->inline_elements_min = lo;
+        pg->inline_elements_max = hi;
+    } else {
+        pg->inline_elements_min = MIN(pg->inline_elements_min, lo);
+        pg->inline_elements_max = MAX(pg->inline_elements_max, hi);
+    }
+}
 void pgraph_reset_draw_arrays(PGRAPHState *pg);
 void pgraph_update_inline_value(PGRAPHState *pg, VertexAttribute *attr,
                                 const uint8_t *data);

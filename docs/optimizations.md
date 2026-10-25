@@ -2412,6 +2412,16 @@ x86_64 host (Windows, Linux, Intel macOS).
   `XEMU_VTX_SPAN_REFUTE=1` 0 violations in ~34K checks. Det offscreen
   probe Minsns/frame −1.40% (3/3).
 
+- **The method handlers keep each batch's index range (2026-10-24).**
+  The Vulkan inline-elements draw scanned every index of its batch for
+  its min and max: 13M indices a flip for Azurik's l256_120 probe.
+  Every writer of `inline_elements` now folds the range of what it
+  appends (`pgraph_note_inline_elements`; ARRAY_ELEMENT16 inside its
+  vectorized widening loop), a load rescans (saves don't hold it), and
+  the draw reads it. Det offscreen RAM and screendumps equal to base;
+  det offscreen probe Minsns/frame −1.7% on top of the read-span fast
+  path (3/3).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

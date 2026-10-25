@@ -3399,12 +3399,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
 
         ensure_buffer_space(pg, BUFFER_INDEX_STAGING, index_data_size);
 
-        uint32_t min_element = (uint32_t)-1;
-        uint32_t max_element = 0;
-        for (int i = 0; i < pg->inline_elements_length; i++) {
-            max_element = MAX(pg->inline_elements[i], max_element);
-            min_element = MIN(pg->inline_elements[i], min_element);
-        }
+        /* Kept by the method handlers as they fill inline_elements. */
+        uint32_t min_element = pg->inline_elements_min;
+        uint32_t max_element = pg->inline_elements_max;
         pgraph_vk_bind_vertex_attributes(
             d, min_element, max_element, false, 0,
             pg->inline_elements[pg->inline_elements_length - 1]);

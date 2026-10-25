@@ -2983,6 +2983,10 @@ static void pgraph_expand_draw_arrays(NV2AState *d)
         pgraph_reset_inline_buffers(pg);
     }
     assert((pg->inline_elements_length + count) < NV2A_MAX_BATCH_LENGTH);
+    if (count) {
+        pgraph_note_inline_elements(pg, pg->inline_elements_length, start,
+                                    start + count - 1);
+    }
     for (unsigned int i = 0; i < count; i++) {
         pg->inline_elements[pg->inline_elements_length++] = start + i;
     }
@@ -3032,19 +3036,29 @@ DEF_METHOD(NV097, ARRAY_ELEMENT16)
     uint32_t len = pg->inline_elements_length;
     assert(len + 2 * n <= NV2A_MAX_BATCH_LENGTH);
     uint32_t *restrict dst = &pg->inline_elements[len];
+    uint16_t lo, hi;
     if (inc) {
         dst[0] = parameter & 0xFFFF;
         dst[1] = parameter >> 16;
+        lo = MIN(dst[0], dst[1]);
+        hi = MAX(dst[0], dst[1]);
     } else {
         for (size_t i = 1; i < n; i++) {
             pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method,
                               ldl_le_p(parameters + i));
         }
+        /* The range folds into the widening loop (vectorized) */
         const uint8_t *restrict src = (const uint8_t *)parameters;
+        lo = UINT16_MAX;
+        hi = 0;
         for (size_t j = 0; j < 2 * n; j++) {
-            dst[j] = lduw_le_p(src + 2 * j);
+            uint16_t v = lduw_le_p(src + 2 * j);
+            dst[j] = v;
+            lo = MIN(lo, v);
+            hi = MAX(hi, v);
         }
     }
+    pgraph_note_inline_elements(pg, len, lo, hi);
     pg->inline_elements_length = len + 2 * n;
     *num_words_consumed = n;
 }
@@ -3061,6 +3075,8 @@ DEF_METHOD_NON_INC(NV097, ARRAY_ELEMENT32)
     }
 
     assert(pg->inline_elements_length < NV2A_MAX_BATCH_LENGTH);
+    pgraph_note_inline_elements(pg, pg->inline_elements_length, parameter,
+                                parameter);
     pg->inline_elements[pg->inline_elements_length++] = parameter;
 }
 
@@ -3084,6 +3100,8 @@ DEF_METHOD(NV097, DRAW_ARRAYS)
         assert((pg->inline_elements_length + count) < NV2A_MAX_BATCH_LENGTH);
         assert(!pg->draw_arrays_prevent_connect);
 
+        pgraph_note_inline_elements(pg, pg->inline_elements_length, start,
+                                    start + count - 1);
         for (unsigned int i = 0; i < count; i++) {
             pg->inline_elements[pg->inline_elements_length++] = start + i;
         }

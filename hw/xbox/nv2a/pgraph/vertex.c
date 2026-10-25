@@ -165,6 +165,19 @@ void pgraph_finish_inline_buffer_vertex(PGRAPHState *pg)
     pg->inline_buffer_length++;
 }
 
+/* After a load: the saved indices' range, which the save doesn't hold. */
+void pgraph_rescan_inline_elements(PGRAPHState *pg)
+{
+    uint32_t lo = UINT32_MAX, hi = 0;
+
+    for (unsigned int i = 0; i < pg->inline_elements_length; i++) {
+        lo = MIN(lo, pg->inline_elements[i]);
+        hi = MAX(hi, pg->inline_elements[i]);
+    }
+    pg->inline_elements_min = lo;
+    pg->inline_elements_max = hi;
+}
+
 void pgraph_reset_inline_buffers(PGRAPHState *pg)
 {
     pg->inline_elements_length = 0;

@@ -750,6 +750,7 @@ static int nv2a_post_load(void *opaque, int version_id)
         d->pgraph.vsh_carry_fog[3] = 1.0f;
     }
     d->pgraph.vsh_carry_cache_dirty = true;
+    pgraph_rescan_inline_elements(&d->pgraph);
     pgraph_mark_uniforms_dirty(&d->pgraph);
     if (icount_enabled()) {
         /* Counts reads since the last vblank; older saves lack it. */
