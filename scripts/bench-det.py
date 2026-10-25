@@ -50,8 +50,16 @@ exported value).
 
 Example: bench-det.py -n 4 base=/tmp/b.app new=/tmp/e.app
 (an arm can add env: new=/tmp/e.app:XEMU_GUEST_MO=1)
-Goldens: `-n 1 -f 300` (azurik-heavy-f1), `-t azurik-stream-e2 -f 600
--i "axis ly 1.0"`, `-t - -f 1800 --hash-at 900,1800`.
+
+--check goldens NAME=APP ...: runs every golden of scripts/det-goldens.json
+(heavy-f1 to 300 and 1200, stream-e2 600 walking, cold boot 900 and 1800),
+each in a fresh process, up to -j (default 3) at once, and asserts the
+hashes for the binary's arch and the config's mem_limit; arms with no
+golden key (or a refuter in their env) only have to agree. --check
+tags:FILE runs each tag in FILE (one a line) for -f frames (default 300)
+and asserts the arms agree. One line per run, then exit 0 (all OK), 2
+(arms disagree), 4 (a golden moved) or 1 (a run failed). Wall and cycle
+numbers from parallel runs contend: --check is a gate, not an A/B.
 
 --timeline: a cold boot of the fixture disc (or --dvd) from power-on to
 steady play, cut into phases: kernel, logos, prophecy (0x5F748 to
@@ -300,6 +308,9 @@ def check_driver(name, env, driver):
                  'deterministic runs without it must pin MoltenVK)')
 
 
+LIVE = set()   # running xemus (--check kills them on an interrupt)
+
+
 def run_once(app, env, a, purpose=''):
     d = scratch_dir()
     try:
@@ -312,6 +323,7 @@ def run_once(app, env, a, purpose=''):
         with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
                          30 + stops[-1] // 20, keep=env, env=e, stdout=subprocess.DEVNULL,
                          stderr=open(log, 'w')) as proc:
+            LIVE.add(proc)
             wait_log(log, 'xemu: ready', 1, proc)
             q = QMP(sock, proc)
             q.cmd('stop')
@@ -338,6 +350,7 @@ def run_once(app, env, a, purpose=''):
             except Exception:
                 pass
             proc.wait(timeout=30)
+            LIVE.discard(proc)
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
                 'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes),
                 'driver': vk_driver(log)}
@@ -868,6 +881,90 @@ def timeline(a, arms):
         base = base or (n, means)
 
 
+def golden_key(app, env):
+    """(arch, mem_limit) a golden is kept for, or None (a refuter arm)."""
+    if any('REFUTE' in k for k in env):
+        return None
+    archs = subprocess.run(['lipo', '-archs', os.path.join(app, 'Contents/MacOS/xemu')],
+                           capture_output=True, text=True).stdout.split()
+    m = re.search(r"(?m)^\s*mem_limit\s*=\s*'?(\d+)", open(CFG).read())
+    return ('arm64' if 'arm64' in archs else 'x86_64', m.group(1) if m else '64')
+
+
+def check(a, arms):
+    """--check: run the sets' runs in parallel, assert goldens and agreement."""
+    import concurrent.futures
+    gold = json.load(open(os.path.join(REPO, 'scripts/det-goldens.json')))
+    runs = []
+    for name in a.check.split(','):
+        if name == 'goldens':
+            runs += [(k, v['tag'], v['frames'], v['hash_at'], v['input'])
+                     for k, v in gold['runs'].items()]
+        elif name.startswith('tags:'):
+            tags = [t.strip() for t in open(name[5:]) if t.strip() and not t.startswith('#')]
+            f = a.frames if a.frames != 1200 else 300
+            runs += [(t, t, f, '', a.input) for t in tags]
+        else:
+            sys.exit(f'bench-det: unknown --check set {name}')
+    jobs = [(r, arm) for r in runs for arm in arms]
+    results, failed = {}, False
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    import signal
+    signal.signal(signal.SIGINT, stop)     # also when started in the background
+    signal.signal(signal.SIGTERM, stop)
+
+    def one(job):
+        (key, tag, frames, hash_at, inp), (name, app, env) = job
+        ns = argparse.Namespace(**vars(a))
+        ns.tag, ns.frames, ns.hash_at, ns.input = tag, frames, hash_at, list(inp)
+        return run_once(app, env, ns, f'bench-det --check {key} {name}')
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs or min(len(jobs), 3))
+    try:
+        futs = {pool.submit(one, j): j for j in jobs}
+        for fut in concurrent.futures.as_completed(futs):
+            (key, *_), (name, app, env) = futs[fut]
+            try:
+                r = fut.result()
+            except Exception as e:
+                print(f'{key:12s} {name:10s} FAIL  {e}', flush=True)
+                failed = True
+                continue
+            results[(key, name)] = r['ram']
+            gk = golden_key(app, env)
+            want = gold.get(gk[0], {}).get(gk[1], {}).get(key) if gk else None
+            got = dict(h.split('=') for h in r['ram'].split())
+            if want is None:
+                verdict = 'n-a'
+            elif all(got.get(s) == v for s, v in want.items()):
+                verdict = 'OK'
+            else:
+                verdict = 'MOVED (want ' + ' '.join(f'{s}={v}' for s, v in want.items()) + ')'
+            print(f'{key:12s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f', flush=True)
+    except KeyboardInterrupt:
+        for p in list(LIVE):
+            p.kill()
+        pool.shutdown(wait=False, cancel_futures=True)
+        print('bench-det: interrupted; runs killed')
+        sys.exit(1)
+    pool.shutdown()
+    for (key, *_) in runs:
+        hs = {results[(key, n)] for n, _, _ in arms if (key, n) in results}
+        if len(hs) > 1:
+            print(f'{key}: arms disagree: {", ".join(sorted(hs))}')
+            sys.exit(2)
+    for (key, *_) in runs:
+        for name, app, env in arms:
+            gk = golden_key(app, env)
+            want = gold.get(gk[0], {}).get(gk[1], {}).get(key) if gk else None
+            got = dict(h.split('=') for h in results.get((key, name), '').split() if '=' in h)
+            if want and (key, name) in results and any(got.get(s) != v for s, v in want.items()):
+                sys.exit(4)
+    sys.exit(1 if failed else 0)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('-n', '--pairs', type=int, default=4)
@@ -904,6 +1001,9 @@ def main():
                         'against each phase\'s query-blockstats deltas and against the first run')
     t.add_argument('--va', action='append', default=[],
                    help='NAME=ADDR override: ' + ', '.join(TL_VAS) + ', xbe_entry')
+    p.add_argument('--check', default='', metavar='SET[,SET]',
+                   help='goldens, tags:FILE: run in parallel and assert (see the docstring)')
+    p.add_argument('-j', '--jobs', type=int, default=0, help='--check runs at once (default 3)')
     p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')
     a = p.parse_args()
     sweep_scratch()
@@ -913,6 +1013,8 @@ def main():
         app, _, envs = rest.partition(':')
         kvs = re.split(r',(?=[A-Za-z_][A-Za-z0-9_]*=)', envs)   # see the docstring
         arms.append((name, app, dict(kv.split('=', 1) for kv in kvs if kv)))
+    if a.check:
+        return check(a, arms)
     if a.timeline:
         a.route = a.route.split(',')
         if a.tag == 'azurik-heavy-f1':

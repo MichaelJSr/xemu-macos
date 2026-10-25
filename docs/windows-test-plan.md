@@ -565,7 +565,7 @@ Pass: `stop=T05 ... eip=0x8c230 ... PASS` within a second or two, and the game r
 
 ### 3.7 Deterministic mode and the golden hashes [agent, P1, 45 min, mostly unattended]
 
-The goldens below are from `scripts/bench-det.py` on macOS arm64, and they are bit-exact on master through v0.15. The recipe is: fixture HDD, EEPROM and config; player 1 stubbed; muted; `XEMU_HEADLESS=null`; `-S -icount shift=2,align=off,sleep=off`; then `loadvm`; then `xemu-frame-advance`; then the first 16 hex digits of the sha256 of guest RAM. `det_golden.py` repeats that recipe exactly. The Windows x86_64 hashes from the 2026-10-18 run, and what moves them (GCC's FMA contraction, debug against release), are in `docs/windows-gating-audit.md` §V.
+The goldens below are from `scripts/bench-det.py` on macOS arm64 (`--check goldens` asserts them; `scripts/det-goldens.json` is the reference to compare `det_golden.py` output against), and they are bit-exact on master through v0.15. The recipe is: fixture HDD, EEPROM and config; player 1 stubbed; muted; `XEMU_HEADLESS=null`; `-S -icount shift=2,align=off,sleep=off`; then `loadvm`; then `xemu-frame-advance`; then the first 16 hex digits of the sha256 of guest RAM. `det_golden.py` repeats that recipe exactly. The Windows x86_64 hashes from the 2026-10-18 run, and what moves them (GCC's FMA contraction, debug against release), are in `docs/windows-gating-audit.md` §V.
 
 | Golden | Command | macOS hash |
 |---|---|---|

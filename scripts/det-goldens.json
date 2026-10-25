@@ -1,0 +1,15 @@
+{
+  "_doc": "Deterministic golden RAM hashes (sha256[:16]) that bench-det --check asserts, by the binary's host arch and the config's mem_limit. Each run is a fresh process. Arms on any other key, or with a refuter in their env, are checked for agreement only.",
+  "runs": {
+    "heavy-f1": {"tag": "azurik-heavy-f1", "frames": 1200, "hash_at": "300,1200", "input": []},
+    "stream-e2": {"tag": "azurik-stream-e2", "frames": 600, "hash_at": "", "input": ["axis ly 1.0"]},
+    "cold-boot": {"tag": "-", "frames": 1800, "hash_at": "900,1800", "input": []}
+  },
+  "arm64": {
+    "128": {
+      "heavy-f1": {"f300": "6a553d8c7727c6c6", "f1200": "037271ebadb297c5"},
+      "stream-e2": {"f600": "1e98a85ee122f87c"},
+      "cold-boot": {"f900": "9ffd0e1d2e1f36ea", "f1800": "85dec4a26bcb49e9"}
+    }
+  }
+}

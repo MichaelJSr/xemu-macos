@@ -268,12 +268,13 @@ A/Bs; offscreen RAM hashes are per driver. A KK run killed in its first
 it): the launchers warn when the bench cache has one (remove it), and a
 strike test gets its own `XEMU_BASE_PATH`.
 
-**Goldens** (deterministic, `bench-det.py -n 1` on the final binary;
-see the README's deterministic mode): `-f 300` (azurik-heavy-f1)
-`f300=6a553d8c7727c6c6`; `-t azurik-stream-e2 -f 600 -i "axis ly 1.0"`
-`f600=1e98a85ee122f87c`; `-t - -f 1800 --hash-at 900,1800` (cold boot)
-`f900=9ffd0e1d2e1f36ea f1800=85dec4a26bcb49e9`. Re-check after any TCG,
-x87, APU, PFIFO or timer change and after a PGO retrain.
+**Goldens** (deterministic; see the README's deterministic mode):
+`python3 -I scripts/bench-det.py --check goldens x=APP` runs all of them
+(heavy-f1 f300/f1200, stream-e2 f600, cold boot f900/f1800) in parallel
+fresh processes, ~10 s, and asserts the hashes in `scripts/det-goldens.json`
+(exit 0 OK, 4 moved, 2 arms disagree); `base=B.app new=E.app` gates two
+binaries, `--check tags:FILE` sweeps tags. Re-check after any TCG, x87,
+APU, PFIFO or timer change and after a PGO retrain.
 
 Traps:
 
