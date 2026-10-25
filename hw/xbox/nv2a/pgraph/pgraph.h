@@ -281,7 +281,7 @@ typedef struct PGRAPHState {
     unsigned int render_drawn_flips;  /* qatomic: frames drawn, ever */
     bool waiting_for_nop;
     bool waiting_for_flip;
-    /* deterministic mode: the next flush discards renderer state (load) */
+    /* after a load: the next flush drops renderer state, no write-back */
     bool flush_discard;
     bool waiting_for_context_switch;
     /*

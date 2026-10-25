@@ -763,9 +763,12 @@ static int nv2a_post_load(void *opaque, int version_id)
         }
         d->pgraph_methods_loaded = false;
         pgraph_mark_all_state_dirty(&d->pgraph);
-        /* Drop, not write back, the previous session's GPU state. */
-        qatomic_set(&d->pgraph.flush_discard, true);
     }
+    /*
+     * Drop, not write back, the previous session's GPU state: its surfaces
+     * and reports belong to the RAM the load replaced.
+     */
+    qatomic_set(&d->pgraph.flush_discard, true);
     /* Saved after its frame ended: the next one starts after the load. */
     if (qatomic_read(&d->pgraph.waiting_for_flip)) {
         xemu_events_load_frame_ended();

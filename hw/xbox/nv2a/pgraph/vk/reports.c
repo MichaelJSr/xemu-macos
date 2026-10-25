@@ -521,7 +521,7 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
             if (report->det_tracked) {
                 det_report_untrack(r, report);
             }
-        } else {
+        } else if (!r->det_reports.discard) {
             pgraph_write_zpass_pixel_cnt_report(
                 d, report->parameter,
                 r->zpass_pixel_count_result / result_divisor);
