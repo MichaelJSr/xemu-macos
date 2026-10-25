@@ -38,8 +38,10 @@ are in `xemu-history`.
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
-  pads, `XEMU_VK_DRIVER`, `XEMU_LANGUAGE`: `AUTOMATION_ENV` in `xemu_lease.py`); set them
-  per run. Every
+  pads, `XEMU_VK_DRIVER`, `XEMU_LANGUAGE`, the run-changing harness
+  opt-ins such as `XEMU_RENDER_NULL_RAM` and `XEMU_STRICT_CPUID`:
+  `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. The kept
+  normal-mode switches pass through. Every
   launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
 - **Every launch** uses a `cp -Rc` bundle clone, `cp -c` HDD and EEPROM
   clones, and `-config_path <scratch copy of ../fixtures/xemu.toml>`. xemu
@@ -164,7 +166,8 @@ with `verify` (`pages-missed` 0) after touching any device that writes RAM.
 A demo played in real time yet deterministic: `XEMU_ICOUNT_LIVE_PADS=1` with
 `-icount shift=2,align=on,sleep=on` (host pads read at vblanks); its
 `XEMU_INPUT_RECORD` replays under `sleep=off` to the same RAM (it holds one
-port: keep live sources on it; windowed replays are exact on macOS).
+port, `XEMU_INPUT_RECORD_PORT=1-4`, default the first bound one: keep live
+sources on it; windowed replays are exact on macOS).
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
 README "Headless mode (automation)" lists the harness interfaces:
@@ -326,8 +329,8 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_INTERP_GATE=0` | Metal backend: run the configured frame-interpolation mode every flip again, even when the display can't show its steps, with step holds as computed (by default a mode runs only while a guest frame lasts `mode` refreshes, e.g. 2x at ≤33 fps on 60 Hz; 4x drops to 2x, then off; steps held whole refreshes; nsprof `interp_degraded`, `interp_gated`) | `vk/display.c`, `ui/xemu.c` |
 | `XEMU_OHCI_HCCA_FIRST=0` | Normal mode: an OHCI frame raises FNO/WDH/SF before its HCCA write-back and rewrites HccaDoneHead every frame again (the order behind Azurik's V22 boot hang; by default the write-back lands first and HccaDoneHead goes only with a done queue) | `hw/usb/hcd-ohci.c` |
 | `XEMU_VBLANK_KQUEUE=0` | macOS normal mode: the vblank thread waits with `SDL_DelayPrecise` again (1 ms nanosleep chunks plus an overshoot spin) instead of one kqueue timer and a 25 µs spin | `ui/xemu.c` |
-| `XEMU_PFIFO_LOCK_BATCH=0` | Normal mode: the threaded puller swaps `pfifo.lock` and `pgraph.lock` around every command again instead of keeping `pgraph.lock` across a batch | `nv2a/pfifo.c` |
-| `XEMU_PFIFO_FUSE=0` | Normal mode: the threaded pusher runs every command per word again instead of running leaf kelvin methods back to back under both locks | `nv2a/nv2a.c` (the fusing: `nv2a/pfifo.c`) |
+| `XEMU_PFIFO_LOCK_BATCH=0` | Normal mode: the threaded puller swaps `pfifo.lock` and `pgraph.lock` around every command again instead of keeping `pgraph.lock` across a batch | `hw/xbox/nv2a/nv2a.c` (the batching: `hw/xbox/nv2a/pfifo.c`) |
+| `XEMU_PFIFO_FUSE=0` | Normal mode: the threaded pusher runs every command per word again instead of running leaf kelvin methods back to back under both locks | `hw/xbox/nv2a/nv2a.c` (the fusing: `hw/xbox/nv2a/pfifo.c`) |
 | `XEMU_KI_IDLE_HALT=0` | Normal mode: the vCPU spins in the guest kernel's idle loop again instead of halting after 50 µs (icount always halts) | `i386/translate.c` |
 | `XEMU_BQL_SPIN=0` | Normal mode: the vCPU sleeps on a contended BQL at once instead of polling it for up to 10 µs first (icount never spins) | `system/cpus.c` |
 | `XEMU_VK_CLEAR_IN_PASS=0` | Vulkan: each clear ends the render pass and gets one of its own again, instead of recording into the open pass (pbkit text frames: ~1700 passes a flip again) | `vk/draw.c` |
@@ -336,6 +339,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LANGUAGE=<fr\|de\|…\|n>` | The console language the guest reads (EEPROM reads; every load sets it in the kernel's EEPROM copy in RAM, so a load in another language differs from a plain one); QMP `xemu-set-language` while stopped; the EEPROM file stays untouched | `hw/xbox/smbus_storage.c`, `ui/xemu-language.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
+| `XEMU_RENDER_NULL_RAM`, `XEMU_QMP_WATCH`, `XEMU_SOCKET_BACKLOG`, `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`, `XEMU_CSTATUS_FULL_RAM` | Harness opt-ins that change a run (README; `RENDER_NULL_RAM` and `QMP_WATCH` also in xemu-internals). Launchers drop inherited ones | `vk/renderer.c`, `monitor/xemu-qmp-watch.c`, `chardev/char-socket.c`, `migration/ram.c`, `hw/xbox/xbox_pci.c`, `hw/xbox/nv2a/pfb.c` |
 | `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (KK benches, windowed or headless; no strike marker); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |

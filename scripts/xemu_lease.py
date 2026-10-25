@@ -27,8 +27,13 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
     a pipe, a record or log file, an XEMU_QMP_WATCH socket), that bind
     host pads, that pick the
     Vulkan driver (an exported XEMU_VK_DRIVER would silently take every
-    deterministic and offscreen run off its MoltenVK pin), or that change
-    what the guest reads (XEMU_LANGUAGE). A launcher
+    deterministic and offscreen run off its MoltenVK pin), that change
+    what the guest reads (XEMU_LANGUAGE), or that opt a run into a
+    harness interface that changes it (XEMU_RENDER_NULL_RAM,
+    XEMU_LOADVM_SHRINK_RAM, XEMU_AGP_FULL_DECODE, XEMU_CSTATUS_FULL_RAM,
+    XEMU_SOCKET_BACKLOG, XEMU_STRICT_CPUID, XEMU_GUEST_BUGCHECK: an
+    inherited one would change both arms of a bench). The normal-mode
+    switches an A/B sets per arm are not in it. A launcher
     drops them from its own environment; a value it sets itself stays;
   - never starts while an owner demo runs: while /tmp/xemu-leases/
     owner-demo.json (or, under a moved lease dir, its owner-demo.json)
@@ -78,7 +83,9 @@ AUTOMATION_ENV = ('XEMU_RAM_SHM', 'XEMU_INPUT_PIPE', 'XEMU_INPUT_RECORD',
                   'XEMU_INPUT_RECORD_PORT', 'XEMU_TRACE_RECORD', 'XEMU_TRACE_REGIONS',
                   'XEMU_BLOCK_LOG', 'XEMU_VOICE_LOG', 'XEMU_AUDIO_WAV',
                   'XEMU_ICOUNT_LIVE_PADS', 'XEMU_VK_DRIVER', 'XEMU_QMP_WATCH',
-                  'XEMU_LANGUAGE')
+                  'XEMU_LANGUAGE', 'XEMU_RENDER_NULL_RAM', 'XEMU_LOADVM_SHRINK_RAM',
+                  'XEMU_AGP_FULL_DECODE', 'XEMU_CSTATUS_FULL_RAM', 'XEMU_SOCKET_BACKLOG',
+                  'XEMU_STRICT_CPUID', 'XEMU_GUEST_BUGCHECK')
 OWNER_DEMO = 'owner-demo.json'
 _dropped = set()
 _warned = set()

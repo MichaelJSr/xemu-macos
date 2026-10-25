@@ -1195,11 +1195,17 @@ Other automation interfaces (windowed or headless):
   `XEMU_INPUT_PIPE`, `XEMU_INPUT_RECORD` and `_PORT`,
   `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
   `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS`,
-  `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH`, `XEMU_LANGUAGE` (stderr: `lease:
-  not passing the inherited ...`), so a bench never takes the owner's
-  shared-RAM name, pipe, files or watch socket, leaves the MoltenVK pin,
-  or sets the guest's console language; set one per run (`VAR=V`
-  arguments, an arm's `K=V`) to use it.
+  `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH`, `XEMU_LANGUAGE`, and the harness
+  opt-ins that change a run: `XEMU_RENDER_NULL_RAM`,
+  `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`,
+  `XEMU_CSTATUS_FULL_RAM`, `XEMU_SOCKET_BACKLOG`, `XEMU_STRICT_CPUID`,
+  `XEMU_GUEST_BUGCHECK` (stderr: `lease: not passing the inherited
+  ...`), so a bench never takes the owner's shared-RAM name, pipe, files
+  or watch socket, leaves the MoltenVK pin, sets the guest's console
+  language, or runs both arms under an opt-in someone exported; set one
+  per run (`VAR=V` arguments, an arm's `K=V`) to use it. The normal-mode
+  switches (`XEMU_VCPU_QOS` and the rest) pass through, because an A/B
+  sets them per arm.
 - **Unix socket paths** (`-qmp unix:`, `-monitor unix:`, `-gdb unix:`,
   `-chardev socket,path=`, `chardev-add`) are never taken from a live
   process. If a socket at the path still has a listener, the new one
