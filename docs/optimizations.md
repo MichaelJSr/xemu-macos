@@ -2551,6 +2551,18 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **Constant uploads compare and store whole rows (2026-10-24).**
+  SET_TRANSFORM_CONSTANT ran its body once per word: read CONST_LD_PTR,
+  assert, compare, branch, store, and every 4th word the CHEOPS_OFFSET
+  write, ~14K words a flip for a skinned 3.7M-triangle model. Aligned
+  rows of 4 words now compare (XOR-OR of host-order words) and store as
+  one, with the same per-row CONST_LD_PTR advance and dirty marks;
+  unaligned heads and tails take the word path. A check build replayed
+  the word path on a shadow copy for 12.6M calls in normal mode (commands
+  split at PUT) with no difference. Det offscreen RAM and screendumps
+  equal to base on four anchors (skinned characters on heavy-f1 and
+  stream-e2); l256_120 probe Minsns/frame −1.92% (4/4).
+
 - **The pipeline-cache save waits for a quiet second (2026-10-24).**
   The 30 s fallback counted from the last save, so it fired at the first
   flip of nearly every in-play compile burst and of the first load after

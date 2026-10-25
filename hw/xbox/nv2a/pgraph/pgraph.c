@@ -2303,24 +2303,80 @@ DEF_METHOD_INC(NV097, SET_TRANSFORM_PROGRAM)
     }
 }
 
-DEF_METHOD_INC(NV097, SET_TRANSFORM_CONSTANT)
+/* One constant word: CONST_LD_PTR's row, element slot % 4 */
+static inline void set_transform_constant_word(PGRAPHState *pg, int slot,
+                                               uint32_t parameter)
 {
-    int slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
     int const_load = PG_GET_MASK(NV_PGRAPH_CHEOPS_OFFSET,
-                              NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR);
+                                 NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR);
 
     assert(const_load < NV2A_VERTEXSHADER_CONSTANTS);
-    // VertexShaderConstant *constant = &pg->constants[const_load];
-    if (parameter != pg->vsh_constants[const_load][slot%4]) {
+    if (parameter != pg->vsh_constants[const_load][slot % 4]) {
         pg->vsh_constants_dirty[const_load] = true;
         pgraph_mark_uniforms_dirty(pg);
     }
-    pg->vsh_constants[const_load][slot%4] = parameter;
+    pg->vsh_constants[const_load][slot % 4] = parameter;
 
     if (slot % 4 == 3) {
         PG_SET_MASK(NV_PGRAPH_CHEOPS_OFFSET,
-                 NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR, const_load+1);
+                    NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR, const_load + 1);
     }
+}
+
+/*
+ * Constant uploads come 32 words a command, and skinning rewrites most
+ * rows every draw: a large model's ~14K words a flip went one at a time
+ * with a compare and branch each. Whole rows (4 aligned words) compare and
+ * store as one, with the word path's CONST_LD_PTR advance and dirty marks
+ * per row; unaligned heads and tails take the word path.
+ */
+DEF_METHOD(NV097, SET_TRANSFORM_CONSTANT)
+{
+    if (!inc) {
+        set_transform_constant_word(
+            pg, (method - NV097_SET_TRANSFORM_CONSTANT) / 4, parameter);
+        return;
+    }
+    size_t count = MIN(num_words_available,
+                       (METHOD_RANGE_END_NAME(NV097, SET_TRANSFORM_CONSTANT) -
+                        method) / 4);
+    size_t i = 0;
+    while (i < count) {
+        int slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
+        if (slot % 4 || count - i < 4) {
+            uint32_t word = ldl_le_p(parameters + i);
+            if (i) {
+                pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method, word);
+            }
+            set_transform_constant_word(pg, slot, word);
+            i++;
+            method += 4;
+            continue;
+        }
+        int const_load = PG_GET_MASK(NV_PGRAPH_CHEOPS_OFFSET,
+                                     NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR);
+        assert(const_load < NV2A_VERTEXSHADER_CONSTANTS);
+        uint32_t v[4];
+        for (int k = 0; k < 4; k++) {
+            v[k] = ldl_le_p(parameters + i + k);
+            if (i + k) {
+                pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE,
+                                  method + 4 * k, v[k]);
+            }
+        }
+        uint32_t *row = pg->vsh_constants[const_load];
+        if ((v[0] ^ row[0]) | (v[1] ^ row[1]) | (v[2] ^ row[2]) |
+            (v[3] ^ row[3])) {
+            pg->vsh_constants_dirty[const_load] = true;
+            pgraph_mark_uniforms_dirty(pg);
+            memcpy(row, v, sizeof(v));
+        }
+        PG_SET_MASK(NV_PGRAPH_CHEOPS_OFFSET,
+                    NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR, const_load + 1);
+        i += 4;
+        method += 16;
+    }
+    *num_words_consumed = count;
 }
 
 DEF_METHOD_INC(NV097, SET_VERTEX3F)
