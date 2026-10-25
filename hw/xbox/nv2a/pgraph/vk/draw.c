@@ -2302,25 +2302,29 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         }
         VK_CHECK(vkEndCommandBuffer(r->command_buffer));
 
-        bool aux_has_work =
+        bool staged_index =
             r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset >
-                get_staging_slot_base(r, BUFFER_INDEX_STAGING) ||
+            get_staging_slot_base(r, BUFFER_INDEX_STAGING);
+        bool staged = !r->direct_staging && (
             r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset >
                 get_staging_slot_base(r, BUFFER_VERTEX_INLINE_STAGING) ||
             r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset >
-                get_staging_slot_base(r, BUFFER_UNIFORM_STAGING) ||
-            r->flight[r->current_flight].uploaded_first_dirty_bit !=
-                ULONG_MAX;
+                get_staging_slot_base(r, BUFFER_UNIFORM_STAGING));
+        bool aux_has_work =
+            staged || staged_index ||
+            r->flight[r->current_flight].uploaded_first_dirty_bit != ULONG_MAX;
 
         int slot = r->current_flight;
 
         if (aux_has_work) {
             VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
             sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING, BUFFER_INDEX);
-            sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
+            if (staged) {
+                sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
                                     BUFFER_VERTEX_INLINE);
-            sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING,
+                sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING,
                                     BUFFER_UNIFORM);
+            }
             flush_memory_buffer(pg, cmd);
             VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
             r->in_aux_command_buffer = false;
@@ -3236,6 +3240,9 @@ static bool ensure_buffer_space(PGRAPHState *pg, int index, VkDeviceSize size)
 {
     if (!pgraph_vk_buffer_has_space_for(pg, index, size, 1, 1)) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        if (!pgraph_vk_buffer_has_space_for(pg, index, size, 1, 1)) {
+            pgraph_vk_grow_staging(pg, index, size);
+        }
         return true;
     }
 
@@ -3362,8 +3369,8 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
         return;
     }
 
-    nv2a_vk_assert(pgraph_vk_buffer_has_space_for(pg, BUFFER_VERTEX_INLINE_STAGING,
-                                          remap.buffer_space_required, 1, 16));
+    nv2a_vk_bounds_check(pgraph_vk_buffer_has_space_for(
+        pg, BUFFER_VERTEX_INLINE_STAGING, remap.buffer_space_required, 1, 16));
 
     // FIXME: Caching
     /*

@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "qemu/error-report.h"
 #include <limits.h>
 
 static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
@@ -40,6 +41,7 @@ static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
     vkGetPhysicalDeviceMemoryProperties(r->physical_device, &mem_props);
     VkMemoryPropertyFlags mem_flags =
         mem_props.memoryTypes[ai.memoryType].propertyFlags;
+    buffer->properties = mem_flags;
     buffer->is_coherent =
         (mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 }
@@ -70,16 +72,17 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT
     };
 
+    /* Surface downloads; grows on demand (pgraph_vk_reserve_staging_dst) */
     r->storage_buffers[BUFFER_STAGING_DST] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .buffer_size = 512 * 1024 * 1024,
+        .buffer_size = 16 * 1024 * 1024,
     };
 
     r->storage_buffers[BUFFER_STAGING_SRC] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .buffer_size = r->storage_buffers[BUFFER_STAGING_DST].buffer_size,
+        .buffer_size = 512 * 1024 * 1024,
     };
 
     /*
@@ -143,17 +146,24 @@ void pgraph_vk_init_buffers(NV2AState *d)
         r->flight[i].page_span_count = g_malloc_n(r->bitmap_size, 1);
     }
 
+    /*
+     * A slot holds the largest inline buffer one batch can make (every
+     * attribute, a full batch of float4s); a larger request, only a remap
+     * of a huge vertex range, grows the buffer (pgraph_vk_grow_staging).
+     */
     r->storage_buffers[BUFFER_VERTEX_INLINE] = (StorageBuffer){
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .buffer_size = NV2A_VERTEXSHADER_ATTRIBUTES * NV2A_MAX_BATCH_LENGTH *
-                       4 * sizeof(float) * 10,
+        .buffer_size = NV2A_VERTEXSHADER_ATTRIBUTES *
+                       (NV2A_MAX_BATCH_LENGTH + 1) * 4 * sizeof(float) *
+                       NUM_FLIGHT_SLOTS,
     };
 
     r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         .buffer_size = r->storage_buffers[BUFFER_VERTEX_INLINE].buffer_size,
     };
 
@@ -166,13 +176,50 @@ void pgraph_vk_init_buffers(NV2AState *d)
 
     r->storage_buffers[BUFFER_UNIFORM_STAGING] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .buffer_size = r->storage_buffers[BUFFER_UNIFORM].buffer_size,
+    };
+
+    /*
+     * Index, inline-vertex and uniform data are written into staging and
+     * copied at each finish into a device-local twin that draws bind.
+     * Where the staging memory is device-local and coherent (unified
+     * memory: MoltenVK's shared type, KosmicKrisp), the inline-vertex and
+     * uniform twins would be second copies in the same RAM, so they alias
+     * their staging buffers instead: the slot discipline already keeps the
+     * CPU off a slot's partition until its fence retires, and host writes
+     * before vkQueueSubmit are visible to it. The index twin stays (an
+     * alias read ~1% slower, within noise, on a 3.7M-triangle model).
+     */
+    static const int twins[][2] = {
+        { BUFFER_VERTEX_INLINE, BUFFER_VERTEX_INLINE_STAGING },
+        { BUFFER_UNIFORM, BUFFER_UNIFORM_STAGING },
     };
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
         r->storage_buffers[i].buffer_limit = r->storage_buffers[i].buffer_size;
-        create_buffer(pg, &r->storage_buffers[i]);
+        if (i != BUFFER_VERTEX_INLINE && i != BUFFER_UNIFORM) {
+            create_buffer(pg, &r->storage_buffers[i]);
+        }
+    }
+
+    r->direct_staging = true;
+    for (int i = 0; i < ARRAY_SIZE(twins); i++) {
+        StorageBuffer *s = &r->storage_buffers[twins[i][1]];
+        if (!(s->properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+            !s->is_coherent) {
+            r->direct_staging = false;
+        }
+    }
+    for (int i = 0; i < ARRAY_SIZE(twins); i++) {
+        StorageBuffer *t = &r->storage_buffers[twins[i][0]];
+        if (r->direct_staging) {
+            t->buffer = r->storage_buffers[twins[i][1]].buffer;
+            t->allocation = VK_NULL_HANDLE;   /* an alias: never destroyed */
+        } else {
+            create_buffer(pg, t);
+        }
     }
 
     // FIXME: Add fallback path for device using host mapped memory
@@ -191,6 +238,84 @@ void pgraph_vk_init_buffers(NV2AState *d)
     }
 }
 
+/*
+ * A request that no empty slot of index or inline-vertex staging holds:
+ * wait for the GPU to drain, then recreate the buffer (and its device twin,
+ * unless aliased) with slots big enough. Only a remap of a huge vertex range
+ * or an emulated draw of a huge one gets here; a stall beats overrunning
+ * the slot. Call with no command buffer open, before the slot is written.
+ */
+void pgraph_vk_grow_staging(PGRAPHState *pg, int index, VkDeviceSize size)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    int twin = index == BUFFER_INDEX_STAGING ? BUFFER_INDEX :
+                                               BUFFER_VERTEX_INLINE;
+    StorageBuffer *s = &r->storage_buffers[index];
+    StorageBuffer *t = &r->storage_buffers[twin];
+
+    nv2a_vk_assert(index == BUFFER_INDEX_STAGING ||
+                   index == BUFFER_VERTEX_INLINE_STAGING);
+    nv2a_vk_assert(!r->in_command_buffer);
+
+    VkDeviceSize per_slot = s->buffer_size / NUM_FLIGHT_SLOTS;
+    while (per_slot < size) {
+        per_slot *= 2;
+    }
+    nv2a_vk_bounds_check(per_slot <= 2048ull * 1024 * 1024);
+    warn_report("nv2a: a draw needs %" PRIu64 " MiB of %s staging; growing "
+                "it to %" PRIu64 " MiB a slot", (uint64_t)(size >> 20),
+                index == BUFFER_INDEX_STAGING ? "index" : "inline vertex",
+                (uint64_t)(per_slot >> 20));
+
+    for (int slot = 0; slot < NUM_FLIGHT_SLOTS; slot++) {
+        pgraph_vk_wait_slot_fence(pg, slot);
+    }
+
+    vmaUnmapMemory(r->allocator, s->allocation);
+    destroy_buffer(pg, s);
+    if (t->allocation) {
+        destroy_buffer(pg, t);
+    }
+    s->buffer_size = t->buffer_size = per_slot * NUM_FLIGHT_SLOTS;
+    s->buffer_limit = t->buffer_limit = s->buffer_size;
+    create_buffer(pg, s);
+    VK_CHECK(vmaMapMemory(r->allocator, s->allocation, (void **)&s->mapped));
+    if (r->direct_staging && twin != BUFFER_INDEX) {
+        t->buffer = s->buffer;
+    } else {
+        create_buffer(pg, t);
+    }
+
+    /* The current slot is empty: every offset goes back to its base. */
+    pgraph_vk_init_flight_partitions(pg);
+}
+
+/*
+ * Surface downloads' host staging (BUFFER_STAGING_DST) holds at least size
+ * bytes. Its only user records into a single-time command buffer and waits
+ * for it, so the buffer is idle whenever that user starts one.
+ */
+void pgraph_vk_reserve_staging_dst(PGRAPHState *pg, VkDeviceSize size)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    StorageBuffer *b = &r->storage_buffers[BUFFER_STAGING_DST];
+
+    if (size <= b->buffer_size) {
+        return;
+    }
+    VkDeviceSize n = b->buffer_size;
+    while (n < size) {
+        n *= 2;
+    }
+    nv2a_vk_bounds_check(n <= 2048ull * 1024 * 1024);
+
+    vmaUnmapMemory(r->allocator, b->allocation);
+    destroy_buffer(pg, b);
+    b->buffer_size = b->buffer_limit = n;
+    create_buffer(pg, b);
+    VK_CHECK(vmaMapMemory(r->allocator, b->allocation, (void **)&b->mapped));
+}
+
 void pgraph_vk_finalize_buffers(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -198,6 +323,10 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
         StorageBuffer *b = &r->storage_buffers[i];
+        if (!b->allocation) {
+            b->buffer = VK_NULL_HANDLE;   /* a direct_staging alias */
+            continue;
+        }
         if (b->mapped) {
             vmaUnmapMemory(r->allocator, b->allocation);
         }

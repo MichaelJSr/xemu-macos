@@ -2476,6 +2476,25 @@ x86_64 host (Windows, Linux, Intel macOS).
   none: clean exits, no marker left. Det offscreen RAM and screendumps
   equal to base.
 
+- **2.8 GB less preallocated Vulkan buffer memory (2026-10-24).** xemu's
+  footprint was 5.3 GB in an Azurik scene, 4.6 GB of it fixed Vulkan
+  buffers sized for worst cases times ten. On unified memory
+  (MoltenVK, KosmicKrisp) the inline-vertex and uniform data are bound
+  in the staging buffers they are written to, so their device-local
+  twins, and the copy into them at every finish, are gone. Inline-vertex
+  staging holds one maximal inline batch a slot (1280 → 256 MiB) and
+  grows past that after a GPU drain (`pgraph_vk_grow_staging`; before,
+  a remap larger than a slot overran it in release builds); the surface
+  download staging starts at 16 MiB instead of 512 and grows on demand.
+  Footprint at vanilla-rz-w1-dark 5303 → 2490 MiB. Det offscreen RAM
+  and screendumps equal to base on heavy-f1, stream-e2, the l256_120
+  probe and the fire-armor cast, on MoltenVK and KosmicKrisp; builds
+  forced to grow (64 KiB slots) ran both growth paths clean. heavy-f1
+  det offscreen Minsns/frame −0.40% (4/4), Mcycles/frame −1.46% (3/4).
+  The index buffer keeps its twin: aliasing it too read −1.3%, within
+  noise, on the l256_120 probe's uncapped real-time rate (12 pairs,
+  load 50-72), and large models come first.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

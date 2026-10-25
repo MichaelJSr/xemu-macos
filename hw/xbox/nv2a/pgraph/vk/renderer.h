@@ -958,6 +958,12 @@ typedef struct PGRAPHVkState {
     int last_bound_descriptor_set_index;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
+    /*
+     * Unified memory: BUFFER_VERTEX_INLINE and BUFFER_UNIFORM alias their
+     * staging buffers, which draws bind directly (no device twin, no copy
+     * at finish).
+     */
+    bool direct_staging;
 
     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
     /* The bytes each sync's draw reads (vertex_ram_buffer_syncs' index). */
@@ -1195,6 +1201,8 @@ bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
 VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
                                         VkDeviceSize *sizes, size_t count,
                                         VkDeviceAddress alignment);
+void pgraph_vk_grow_staging(PGRAPHState *pg, int index, VkDeviceSize size);
+void pgraph_vk_reserve_staging_dst(PGRAPHState *pg, VkDeviceSize size);
 
 // command.c
 void pgraph_vk_init_command_buffers(PGRAPHState *pg);

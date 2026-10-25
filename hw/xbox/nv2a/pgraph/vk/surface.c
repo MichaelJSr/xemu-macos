@@ -431,9 +431,9 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     // Copy image to staging buffer, or to compute_dst if we need to pack it
     //
 
-    nv2a_vk_bounds_check((surface->host_fmt.host_bytes_per_pixel *
-                    surface->width * surface->height) <=
-           r->storage_buffers[BUFFER_STAGING_DST].buffer_size);
+    size_t host_size = (size_t)surface->host_fmt.host_bytes_per_pixel *
+                       surface->width * surface->height;
+    pgraph_vk_reserve_staging_dst(pg, MAX(host_size, image_copy_size));
 
     int copy_buffer_idx = use_compute_to_convert_depth_stencil_format ?
                              BUFFER_COMPUTE_DST :
