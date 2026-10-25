@@ -1153,7 +1153,8 @@ Other automation interfaces (windowed or headless):
   is not deterministic.
   Keep the network off and bind no XMU.
 - **Data folder**: `XEMU_BASE_PATH=<dir>` moves xemu's data folder (the
-  `spirv_cache_v*/` shader cache and `pipeline_cache.bin`, plus
+  `spirv_cache_v*/` shader cache, `pipeline_cache.bin` and the
+  `vk_prewarm-*.bin` list of pipelines rebuilt at launch, plus
   `xemu.toml` and `eeprom.bin` when no `-config_path` or `eeprom_path`
   names them) to `<dir>`, created if missing, ahead of portable mode.
   Unset, it stays the portable folder or the SDL pref dir

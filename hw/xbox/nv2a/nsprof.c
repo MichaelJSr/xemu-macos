@@ -124,9 +124,16 @@ bool nsprof_enabled(void)
     return cached == 1;
 }
 
+static __thread bool thread_excluded;
+
+void nsprof_exclude_thread(void)
+{
+    thread_excluded = true;
+}
+
 int64_t nsprof_begin(void)
 {
-    if (!nsprof_enabled()) {
+    if (!nsprof_enabled() || thread_excluded) {
         return -1;
     }
     return qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -147,7 +154,7 @@ void nsprof_end(enum NsprofCounter c, int64_t t0)
 
 void nsprof_add(enum NsprofCounter c, int64_t ns)
 {
-    if (!nsprof_enabled()) {
+    if (!nsprof_enabled() || thread_excluded) {
         return;
     }
     counters[c].total_ns += ns;
@@ -159,7 +166,7 @@ void nsprof_add(enum NsprofCounter c, int64_t ns)
 
 void nsprof_event(enum NsprofEvent e)
 {
-    if (!nsprof_enabled()) {
+    if (!nsprof_enabled() || thread_excluded) {
         return;
     }
     events[e]++;

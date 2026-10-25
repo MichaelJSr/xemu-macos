@@ -372,6 +372,62 @@ get_and_ref_shader_module_for_key(PGRAPHVkState *r,
     return module->module_info;
 }
 
+/*
+ * The module keys of a shader state: vertex, geometry (kind 0 when none is
+ * needed) and fragment. Reads only init-time renderer fields, so any thread
+ * may derive them (the prewarm).
+ */
+void pgraph_vk_shader_module_keys(PGRAPHVkState *r, const ShaderState *state,
+                                  ShaderModuleCacheKey keys[3])
+{
+    memset(keys, 0, 3 * sizeof(keys[0]));
+
+    // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
+    // The r->supports_geometry_shaders flag is false on macOS since Metal
+    // lacks native Geometry Shaders. This safely skips building and binding
+    // the Z-buffer calculations via geom shaders on Apple chips.
+    bool need_geometry_shader = r->supports_geometry_shaders &&
+                                pgraph_glsl_need_geom(&state->geom);
+    if (need_geometry_shader) {
+        keys[1].kind = VK_SHADER_STAGE_GEOMETRY_BIT;
+        keys[1].geom.state = state->geom;
+        keys[1].geom.glsl_opts.vulkan = true;
+        keys[1].geom.glsl_opts.omit_point_size = !r->supports_geom_point_size;
+    }
+
+    keys[0].kind = VK_SHADER_STAGE_VERTEX_BIT;
+    keys[0].vsh.state = state->vsh;
+    keys[0].vsh.glsl_opts.vulkan = true;
+    keys[0].vsh.glsl_opts.prefix_outputs = need_geometry_shader;
+    keys[0].vsh.glsl_opts.use_push_constants_for_uniform_attrs =
+        r->use_push_constants_for_uniform_attrs;
+    keys[0].vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
+
+    keys[2].kind = VK_SHADER_STAGE_FRAGMENT_BIT;
+    keys[2].psh.state = state->psh;
+    // Tell the fragment shader to fallback to hardware depth interpolation
+    // (gl_FragCoord.z) if Geometry Shaders were bypassed (like on macOS).
+    keys[2].psh.state.use_hw_depth = !need_geometry_shader;
+    keys[2].psh.glsl_opts.vulkan = true;
+    keys[2].psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
+}
+
+/* A module key's GLSL (pure: any thread) */
+MString *pgraph_vk_gen_glsl_for_module_key(const ShaderModuleCacheKey *key)
+{
+    switch (key->kind) {
+    case VK_SHADER_STAGE_VERTEX_BIT:
+        return pgraph_glsl_gen_vsh(&key->vsh.state, key->vsh.glsl_opts);
+    case VK_SHADER_STAGE_GEOMETRY_BIT:
+        return pgraph_glsl_gen_geom(&key->geom.state, key->geom.glsl_opts);
+    case VK_SHADER_STAGE_FRAGMENT_BIT:
+        return pgraph_glsl_gen_psh(&key->psh.state, key->psh.glsl_opts);
+    default:
+        assert(!"Invalid shader module kind");
+        return NULL;
+    }
+}
+
 static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 {
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, shader_cache);
@@ -382,44 +438,13 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
     int64_t nsprof_t0 = nsprof_begin();
 
-    ShaderModuleCacheKey key;
-
-    // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
-    // The r->supports_geometry_shaders flag is false on macOS since Metal
-    // lacks native Geometry Shaders. This safely skips building and binding
-    // the Z-buffer calculations via geom shaders on Apple chips.
-    bool need_geometry_shader = r->supports_geometry_shaders &&
-                                pgraph_glsl_need_geom(&binding->state.geom);
-    if (need_geometry_shader) {
-        memset(&key, 0, sizeof(key));
-        key.kind = VK_SHADER_STAGE_GEOMETRY_BIT;
-        key.geom.state = binding->state.geom;
-        key.geom.glsl_opts.vulkan = true;
-        key.geom.glsl_opts.omit_point_size = !r->supports_geom_point_size;
-        binding->geom.module_info = get_and_ref_shader_module_for_key(r, &key);
-    } else {
-        binding->geom.module_info = NULL;
-    }
-
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_VERTEX_BIT;
-    key.vsh.state = binding->state.vsh;
-    key.vsh.glsl_opts.vulkan = true;
-    key.vsh.glsl_opts.prefix_outputs = need_geometry_shader;
-    key.vsh.glsl_opts.use_push_constants_for_uniform_attrs =
-        r->use_push_constants_for_uniform_attrs;
-    key.vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
-    binding->vsh.module_info = get_and_ref_shader_module_for_key(r, &key);
-
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_FRAGMENT_BIT;
-    key.psh.state = binding->state.psh;
-    // Tell the fragment shader to fallback to hardware depth interpolation
-    // (gl_FragCoord.z) if Geometry Shaders were bypassed (like on macOS).
-    key.psh.state.use_hw_depth = !need_geometry_shader;
-    key.psh.glsl_opts.vulkan = true;
-    key.psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
-    binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
+    ShaderModuleCacheKey keys[3];
+    pgraph_vk_prewarm_note_activity(r);
+    pgraph_vk_shader_module_keys(r, &binding->state, keys);
+    binding->vsh.module_info = get_and_ref_shader_module_for_key(r, &keys[0]);
+    binding->geom.module_info =
+        keys[1].kind ? get_and_ref_shader_module_for_key(r, &keys[1]) : NULL;
+    binding->psh.module_info = get_and_ref_shader_module_for_key(r, &keys[2]);
 
     update_shader_uniform_locs(binding);
     nsprof_end(NSPROF_SHADER_GEN, nsprof_t0);
@@ -461,24 +486,7 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
 
     nsprof_event(NSPROF_EV_MODULE_MISS);
     int64_t nsprof_t0 = nsprof_begin();
-    switch (module->key.kind) {
-    case VK_SHADER_STAGE_VERTEX_BIT:
-        code = pgraph_glsl_gen_vsh(&module->key.vsh.state,
-                                   module->key.vsh.glsl_opts);
-        break;
-    case VK_SHADER_STAGE_GEOMETRY_BIT:
-        code = pgraph_glsl_gen_geom(&module->key.geom.state,
-                                    module->key.geom.glsl_opts);
-        break;
-    case VK_SHADER_STAGE_FRAGMENT_BIT:
-        code = pgraph_glsl_gen_psh(&module->key.psh.state,
-                                   module->key.psh.glsl_opts);
-        break;
-    default:
-        assert(!"Invalid shader module kind");
-        code = NULL;
-    }
-
+    code = pgraph_vk_gen_glsl_for_module_key(&module->key);
     nsprof_end(NSPROF_GLSL_GEN, nsprof_t0);
 
     module->module_info = pgraph_vk_create_shader_module_from_glsl(

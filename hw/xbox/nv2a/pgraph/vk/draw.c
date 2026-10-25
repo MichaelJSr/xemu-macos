@@ -670,6 +670,7 @@ void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    pgraph_vk_prewarm_flip(pg);
     if (r->pipeline_cache_unsaved == 0) {
         return;
     }
@@ -731,10 +732,11 @@ pgraph_vk_pipeline_cache_feedback_chain(PGRAPHVkState *r, const void **pnext,
  * Both helpers stay out of line so begin_pre_draw, which inlines the
  * creation paths, keeps its PGO profile.
  */
-__attribute__((noinline)) void
-pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
-                                      uint32_t stage_count,
-                                      const PipelineCacheFeedback *fb)
+/* Whether a creation added to the pipeline cache (any thread: pure) */
+bool pgraph_vk_pipeline_cache_feedback_is_miss(PGRAPHVkState *r,
+                                               const void *pnext,
+                                               uint32_t stage_count,
+                                               const PipelineCacheFeedback *fb)
 {
     const VkPipelineCreationFeedbackFlags hit =
         VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
@@ -742,7 +744,7 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
     if (pnext == &fb->info) {
         if ((fb->pipeline.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) &&
             (fb->pipeline.flags & hit)) {
-            return;
+            return false;
         }
         bool all_hit = r->pipeline_cache_stage_hits_suffice && stage_count > 0;
         for (uint32_t i = 0; all_hit && i < stage_count; i++) {
@@ -752,8 +754,20 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
             }
         }
         if (all_hit) {
-            return;
+            return false;
         }
+    }
+    return true;
+}
+
+__attribute__((noinline)) void
+pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
+                                      uint32_t stage_count,
+                                      const PipelineCacheFeedback *fb)
+{
+    if (!pgraph_vk_pipeline_cache_feedback_is_miss(r, pnext, stage_count,
+                                                   fb)) {
+        return;
     }
     r->pipeline_cache_unsaved++;
     r->pipeline_cache_last_miss_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1140,6 +1154,14 @@ static VkRenderPass add_new_render_pass(PGRAPHVkState *r, RenderPassState *state
                         render_pass_state_to_key(state),
                         GSIZE_TO_POINTER((gsize)new_pass.render_pass));
     return new_pass.render_pass;
+}
+
+/* A render pass of @state the caller owns (any thread: the prewarm) */
+VkRenderPass pgraph_vk_create_render_pass(PGRAPHVkState *r,
+                                          const RenderPassState *state)
+{
+    RenderPassState s = *state;
+    return create_render_pass(r, &s);
 }
 
 static VkRenderPass get_render_pass(PGRAPHVkState *r, RenderPassState *state)
@@ -1580,14 +1602,14 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
  * goes in @feedback (*@pnext_out, *@stages_out for
  * pgraph_vk_pipeline_cache_note_created). On failure nothing is left.
  */
-static VkResult build_draw_pipeline(PGRAPHVkState *r, const PipelineKey *key,
-                                    const VkShaderModule mods[3],
-                                    VkRenderPass render_pass,
-                                    PipelineCacheFeedback *feedback,
-                                    const void **pnext_out,
-                                    uint32_t *stages_out,
-                                    VkPipeline *pipeline_out,
-                                    VkPipelineLayout *layout_out)
+VkResult pgraph_vk_build_draw_pipeline(PGRAPHVkState *r, const PipelineKey *key,
+                                       const VkShaderModule mods[3],
+                                       VkRenderPass render_pass,
+                                       PipelineCacheFeedback *feedback,
+                                       const void **pnext_out,
+                                       uint32_t *stages_out,
+                                       VkPipeline *pipeline_out,
+                                       VkPipelineLayout *layout_out)
 {
     bool color = key->render_pass_state.color_format != VK_FORMAT_UNDEFINED;
     bool zeta = key->render_pass_state.zeta_format != VK_FORMAT_UNDEFINED;
@@ -1888,9 +1910,11 @@ static void create_pipeline(PGRAPHState *pg)
     uint32_t stages;
     VkPipeline pipeline;
     VkPipelineLayout layout;
-    VK_CHECK(build_draw_pipeline(r, &key, mods, render_pass, &feedback,
-                                 &pnext, &stages, &pipeline, &layout));
+    VK_CHECK(pgraph_vk_build_draw_pipeline(r, &key, mods, render_pass,
+                                           &feedback, &pnext, &stages,
+                                           &pipeline, &layout));
     pgraph_vk_pipeline_cache_note_created(r, pnext, stages, &feedback);
+    pgraph_vk_prewarm_note_miss(r, &key);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
     nsprof_pipeline_created(pnext, stages, &feedback, nsprof_t0, "draw");
 

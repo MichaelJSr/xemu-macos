@@ -175,6 +175,8 @@ enum NsprofEvent {
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY
 
 bool nsprof_enabled(void);
+/* The calling thread records nothing (a helper thread off the PFIFO one). */
+void nsprof_exclude_thread(void);
 
 /* Returns a start timestamp, or -1 when disabled. */
 int64_t nsprof_begin(void);

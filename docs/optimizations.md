@@ -2451,6 +2451,31 @@ x86_64 host (Windows, Linux, Intel macOS).
   hitch (both builds compile the same 129 shaders a first cast: its
   variants are the title's own vertex programs and combiners).
 
+- **Pipeline prewarm (2026-10-24).** An effect's first use compiles its
+  pipelines: Azurik's fire-armor cast builds ~130 shaders and ~160
+  pipelines, 1.9-2.3 s of compiling with empty caches (fps 19-22 for
+  seconds) and 45-190 ms with warm ones, and every update starts the
+  driver caches cold. Each draw pipeline built on a real miss now
+  records its key in `<base>vk_prewarm-<driver>-<schema>.bin` (up to
+  2048, newest first, appended at flips once misses settle). At the
+  next launch a `vk.prewarm` worker rebuilds them from the keys alone
+  through the renderer's own builder and destroys each at once: what
+  stays is MoltenVK's and Metal's caches and the on-disk SPIR-V and
+  pipeline caches. It yields while the renderer compiles, never runs
+  under icount, and nothing it builds draws, so pictures and RAM can't
+  change. The schema is a build-time hash of the key headers
+  (`scripts/nv2a-key-schema.py`), so a build that changes what a key
+  means starts a new manifest; a launch that dies while the worker runs
+  sets its manifest aside. Off with Settings > Cache shaders to disk.
+  Cast probe (`scripts/cast-probe.py`) at vanilla-rz-w1-dark,
+  offscreen, a base holding only the manifest (driver caches cold, as
+  after an update): the worker rebuilt 224 pipelines in 1.5 s after
+  launch; the first cast's pipeline creation 198 → 47 ms, its worst
+  frame 186 → 87 ms; the second cast 109 → 36 ms. Quit and SIGTERM
+  while the worker runs, a truncated manifest, an old-schema one and
+  none: clean exits, no marker left. Det offscreen RAM and screendumps
+  equal to base.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

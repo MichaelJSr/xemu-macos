@@ -102,6 +102,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     fprintf(stderr, "Display sharing: none (CPU fallback)\n");
 #endif
     (void)r;
+    pgraph_vk_prewarm_init(pg);
     null_ram_setup(d);
 }
 
@@ -110,6 +111,7 @@ static void pgraph_vk_finalize(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
 
     pgraph_vk_driver_stopped();
+    pgraph_vk_prewarm_finalize(pg->vk_renderer_state);
     pgraph_vk_finalize_display(pg);
     pgraph_vk_finalize_compute(pg);
     pgraph_vk_finalize_reports(pg);
@@ -307,10 +309,12 @@ static void pgraph_vk_pre_savevm_wait(NV2AState *d)
 
 static void pgraph_vk_pre_shutdown_trigger(NV2AState *d)
 {
+    pgraph_vk_prewarm_stop(d->pgraph.vk_renderer_state);
 }
 
 static void pgraph_vk_pre_shutdown_wait(NV2AState *d)
 {
+    pgraph_vk_prewarm_shutdown_wait(d->pgraph.vk_renderer_state);
 }
 
 static int pgraph_vk_get_framebuffer_surface(NV2AState *d)

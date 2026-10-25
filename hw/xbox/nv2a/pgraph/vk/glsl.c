@@ -301,12 +301,14 @@ static void save_spirv_to_cache(glslang_target_language_version_t target,
 
     /* Write-then-rename, same discipline as the pipeline cache in draw.c:
      * a kill mid-write must not leave a torn .spv for the next boot to
-     * ingest. The temp name carries the pid so two instances compiling the
-     * same shader cannot truncate each other's partial file, and g_rename
-     * replaces an existing target on Windows too (plain rename() fails
-     * there once the file exists). */
-    char *tmp_path =
-        g_strdup_printf("%s.%u.tmp", path, (unsigned)getpid());
+     * ingest. The temp name carries the pid and a per-process sequence
+     * number, so two instances, or two threads of one (the prewarm), that
+     * compile the same shader cannot truncate each other's partial file,
+     * and g_rename replaces an existing target on Windows too (plain
+     * rename() fails there once the file exists). */
+    static unsigned tmp_seq;
+    char *tmp_path = g_strdup_printf("%s.%u.%u.tmp", path, (unsigned)getpid(),
+                                     qatomic_fetch_inc(&tmp_seq));
     FILE *f = qemu_fopen(tmp_path, "wb");
     if (f) {
         bool ok = fwrite(spv->data, 1, spv->len, f) == spv->len;

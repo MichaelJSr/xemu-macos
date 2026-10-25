@@ -40,6 +40,7 @@
 #include "debug.h"
 #include "constants.h"
 #include "glsl.h"
+#include "keys.h"
 
 #if defined(__APPLE__)
 #define HAVE_EXTERNAL_MEMORY 0
@@ -57,70 +58,13 @@ typedef struct MemorySyncRequirement {
     hwaddr addr, size;
 } MemorySyncRequirement;
 
-typedef struct RenderPassState {
-    VkFormat color_format;
-    VkFormat zeta_format;
-} RenderPassState;
 
 typedef struct RenderPass {
     RenderPassState state;
     VkRenderPass render_pass;
 } RenderPass;
 
-/*
- * The rasterizer, depth-stencil and colour-blend state a draw pipeline is
- * built from, derived from BLEND, CONTROL_0-2 and SETUPRASTER by
- * pgraph_vk_get_raster_state (draw.c). A field its enable turns off stays
- * zero, as does depth write without depth test (the spec disables it
- * then), so register bits no pipeline reads don't split the key. Each
- * value is a Vulkan enum, flag or 8-bit stencil value; init checks that
- * the enum maps fit (check_raster_state_maps in draw.c).
- */
-typedef struct RasterState {
-    uint8_t cull_mode;              /* VkCullModeFlags */
-    uint8_t front_face;             /* VkFrontFace, always: gl_FrontFacing */
-    uint8_t depth_bias_enable;
-    uint8_t depth_test_enable;
-    uint8_t depth_write_enable;
-    uint8_t depth_compare_op;       /* VkCompareOp */
-    uint8_t stencil_test_enable;
-    uint8_t stencil_fail_op;        /* VkStencilOp, front and back */
-    uint8_t stencil_pass_op;
-    uint8_t stencil_depth_fail_op;
-    uint8_t stencil_compare_op;     /* VkCompareOp */
-    uint8_t stencil_compare_mask;
-    uint8_t stencil_write_mask;
-    uint8_t stencil_reference;
-    uint8_t color_write_mask;       /* VkColorComponentFlags, always */
-    uint8_t blend_enable;
-    uint8_t blend_src_factor;       /* VkBlendFactor, colour and alpha */
-    uint8_t blend_dst_factor;
-    uint8_t blend_op;               /* VkBlendOp, colour and alpha */
-    uint8_t reserved;               /* zero */
-} RasterState;
 
-typedef struct PipelineKey {
-    bool clear;
-    /* Draw keys: the active vertex input counts (padding before) */
-    uint8_t num_vertex_bindings;
-    uint8_t num_vertex_attributes;
-    uint32_t clear_parameter; /* clear keys only */
-    RenderPassState render_pass_state;
-    ShaderState shader_state;
-    /*
-     * Draw keys only. NV_PGRAPH_CONTROL_3 feeds none of it: its bits
-     * (SHADEMODE, FOG_MODE, FOGENABLE, POINTPARAMSENABLE,
-     * PROVOKING_VERTEX) are captured by ShaderState or consumed CPU-side
-     * (check_pipeline_dirty in draw.c, pgraph_glsl_check_shader_state_dirty
-     * in glsl/shaders.c). create_pipeline hashes it with the bytes after
-     * shader_state, whose own hash it caches.
-     */
-    RasterState raster;
-    VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
-    VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
-} PipelineKey;
-
-QEMU_BUILD_BUG_ON(offsetof(PipelineKey, clear_parameter) != 4);
 
 typedef struct PipelineBinding {
     LruNode node;
@@ -256,23 +200,6 @@ typedef struct ShaderModuleInfo {
     ShaderUniformLayout push_constants;
 } ShaderModuleInfo;
 
-typedef struct ShaderModuleCacheKey {
-    VkShaderStageFlagBits kind;
-    union {
-        struct {
-            VshState state;
-            GenVshGlslOptions glsl_opts;
-        } vsh;
-        struct {
-            GeomState state;
-            GenGeomGlslOptions glsl_opts;
-        } geom;
-        struct {
-            PshState state;
-            GenPshGlslOptions glsl_opts;
-        } psh;
-    };
-} ShaderModuleCacheKey;
 
 typedef struct ShaderModuleCacheEntry {
     LruNode node;
@@ -725,6 +652,7 @@ typedef struct PGRAPHVkState {
     VkPhysicalDeviceFeatures enabled_physical_device_features;
     VkPhysicalDeviceProperties device_props;
     VkDriverId driver_id; /* 0 when the device predates Vulkan 1.2 */
+    struct VkPrewarm *prewarm; /* vk/prewarm.c, NULL when off */
     bool driver_is_moltenvk;
     /* "<driverName>, <driverInfo>": "MoltenVK, 1.4.3" (the - Driver: line) */
     char driver_desc[VK_MAX_DRIVER_NAME_SIZE + VK_MAX_DRIVER_INFO_SIZE + 2];
@@ -1313,6 +1241,10 @@ void pgraph_vk_refute_note_read(PGRAPHVkState *r, hwaddr offset,
 void pgraph_vk_refute_forget(PGRAPHVkState *r, int slot);
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size);
+void pgraph_vk_shader_module_keys(PGRAPHVkState *r, const ShaderState *state,
+                                  ShaderModuleCacheKey keys[3]);
+
+MString *pgraph_vk_gen_glsl_for_module_key(const ShaderModuleCacheKey *key);
 VkDeviceSize pgraph_vk_update_index_buffer_u16(PGRAPHState *pg,
                                                const uint32_t *indices,
                                                size_t count);
@@ -1472,6 +1404,31 @@ typedef struct PipelineCacheFeedback {
     VkPipelineCreationFeedback pipeline;
     VkPipelineCreationFeedback stages[4];
 } PipelineCacheFeedback;
+
+/* draw.c, also for the prewarm thread */
+VkResult pgraph_vk_build_draw_pipeline(PGRAPHVkState *r, const PipelineKey *key,
+                                       const VkShaderModule mods[3],
+                                       VkRenderPass render_pass,
+                                       PipelineCacheFeedback *feedback,
+                                       const void **pnext_out,
+                                       uint32_t *stages_out,
+                                       VkPipeline *pipeline_out,
+                                       VkPipelineLayout *layout_out);
+VkRenderPass pgraph_vk_create_render_pass(PGRAPHVkState *r,
+                                          const RenderPassState *state);
+bool pgraph_vk_pipeline_cache_feedback_is_miss(PGRAPHVkState *r,
+                                               const void *pnext,
+                                               uint32_t stage_count,
+                                               const PipelineCacheFeedback *fb);
+
+/* prewarm.c */
+void pgraph_vk_prewarm_init(PGRAPHState *pg);
+void pgraph_vk_prewarm_note_activity(PGRAPHVkState *r);
+void pgraph_vk_prewarm_note_miss(PGRAPHVkState *r, const PipelineKey *key);
+void pgraph_vk_prewarm_flip(PGRAPHState *pg);
+void pgraph_vk_prewarm_stop(PGRAPHVkState *r);
+void pgraph_vk_prewarm_shutdown_wait(PGRAPHVkState *r);
+void pgraph_vk_prewarm_finalize(PGRAPHVkState *r);
 void pgraph_vk_pipeline_cache_feedback_chain(PGRAPHVkState *r,
                                              const void **pnext,
                                              uint32_t stage_count,
