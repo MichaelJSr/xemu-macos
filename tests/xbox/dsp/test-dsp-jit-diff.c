@@ -958,6 +958,17 @@ static void test_frame_bound(void)
     g_assert_false(dsp_run_frame(s, 20000, true));
     g_assert_cmpuint(dsp_get_cycle_count(s), >=, 20000);
     g_assert_cmpuint(dsp_get_cycle_count(s), <, 20000 + 4000);
+
+    /*
+     * A budget banked by frames that halted early is capped at the bound:
+     * the first slice runs at most twice the bound (the JIT's chain limit
+     * counts instructions), not the bank.
+     */
+    s->save_cycles = 1 << 30;
+    dsp_set_cycle_count(s, 0);
+    dsp_set_halt_requested(s, false);
+    g_assert_false(dsp_run_frame(s, 20000, true));
+    g_assert_cmpuint(dsp_get_cycle_count(s), <, 2 * (20000 + 4000));
     dsp_destroy(s);
 
     s = make_dsp();

@@ -178,9 +178,16 @@ void dsp_run(DSPState *dsp, int cycles)
  * loop, a Dolby EP handshake) used to spin here for good, holding the APU
  * lock (upstream #2901); cut off, it resumes at its next frame. Returns
  * whether it halted. Not realtime: one slice a frame, as before.
+ *
+ * A core that halts mid-slice keeps the rest of the slice for its next
+ * frame, so one that halts in under a slice frame after frame banks the
+ * difference without limit, and the first slice of a frame that then never
+ * halts would run all of it. The bank is capped at the bound; a normal
+ * frame never carries more than about two slices.
  */
 bool dsp_run_frame(DSPState *dsp, uint32_t bound, bool realtime)
 {
+    dsp->ops->cap_budget(dsp, bound);
     do {
         dsp_run(dsp, 1000);
     } while (!dsp_get_halt_requested(dsp) && realtime &&

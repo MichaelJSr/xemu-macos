@@ -38,6 +38,8 @@ typedef struct DSPOps {
     void (*reset)(DSPState *dsp);
     void (*step)(DSPState *dsp);
     void (*run)(DSPState *dsp, int cycles);
+    /* Lower the carried run budget to max if above it */
+    void (*cap_budget)(DSPState *dsp, int max);
     void (*bootstrap)(DSPState *dsp);
     void (*start_frame)(DSPState *dsp);
     uint32_t (*read_memory)(DSPState *dsp, char space, uint32_t addr);

@@ -124,6 +124,11 @@ static void dsp_c_run(DSPState *dsp, int cycles)
     }
 }
 
+static void dsp_c_cap_budget(DSPState *dsp, int max)
+{
+    dsp->save_cycles = MIN(dsp->save_cycles, max);
+}
+
 static void dsp_c_bootstrap(DSPState *dsp)
 {
     dsp_core_t *core = c_core(dsp);
@@ -335,6 +340,7 @@ static void dsp_c_finalize(DSPState *dsp)
 
 const DSPOps c_dsp_ops = {
     .bootstrap = dsp_c_bootstrap,
+    .cap_budget = dsp_c_cap_budget,
     .finalize = dsp_c_finalize,
     .get_cycle_count = dsp_c_get_cycle_count,
     .get_halt_requested = dsp_c_get_halt_requested,

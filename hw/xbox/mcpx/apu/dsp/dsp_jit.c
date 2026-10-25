@@ -38,6 +38,13 @@ typedef struct JitBackend {
     uint32_t *xram;
     uint32_t *yram;
     uint32_t *pram;
+    /*
+     * At least the library's cycle_budget, which only get_state reads: run
+     * adds its slice and takes off at most the cycles it ran (cycle_count
+     * moves with every charge). Unknown after a reset, step or load.
+     */
+    int64_t budget_max;
+    bool budget_known;
 } JitBackend;
 
 static JitBackend *jit_be(DSPState *dsp)
@@ -99,19 +106,23 @@ static void jit_write_peripheral(void *opaque, uint32_t address, uint32_t value)
 static void dsp_jit_reset(DSPState *dsp)
 {
     dsp56300_reset(jit_be(dsp)->jit);
+    jit_be(dsp)->budget_known = false;
 }
 
 static void dsp_jit_step(DSPState *dsp)
 {
     dsp56300_step(jit_be(dsp)->jit);
+    jit_be(dsp)->budget_known = false;
 }
 
 static void dsp_jit_run(DSPState *dsp, int cycles)
 {
-    Dsp56300Jit *jit = jit_be(dsp)->jit;
+    JitBackend *be = jit_be(dsp);
+    Dsp56300Jit *jit = be->jit;
     uint32_t before = dsp56300_cycle_count(jit);
 
     dsp56300_run(jit, cycles);
+    be->budget_max += cycles - (int64_t)(dsp56300_cycle_count(jit) - before);
     /*
      * A core parked in WAIT/STOP consumes no cycles, and nothing here can
      * raise the interrupt that would wake it: report the frame complete
@@ -126,6 +137,23 @@ static void dsp_jit_run(DSPState *dsp, int cycles)
             dsp56300_set_halt_requested(jit, true);
         }
     }
+}
+
+static void dsp_jit_cap_budget(DSPState *dsp, int max)
+{
+    JitBackend *be = jit_be(dsp);
+    Dsp56300State ss;
+
+    if (be->budget_known && be->budget_max <= max) {
+        return;
+    }
+    dsp56300_get_state(be->jit, &ss);
+    if (ss.cycle_budget > max) {
+        ss.cycle_budget = max;
+        dsp56300_set_state(be->jit, &ss);
+    }
+    be->budget_max = ss.cycle_budget;
+    be->budget_known = true;
 }
 
 static void dsp_jit_bootstrap(DSPState *dsp)
@@ -312,6 +340,7 @@ static void dsp_jit_sync_from_vm(DSPState *dsp)
     }
 
     dsp56300_set_state(jit, &ss);
+    be->budget_known = false;
 
     dsp56300_invalidate_cache(jit);
 }
@@ -405,6 +434,7 @@ const DSPOps jit_dsp_ops = {
     .reset = dsp_jit_reset,
     .step = dsp_jit_step,
     .run = dsp_jit_run,
+    .cap_budget = dsp_jit_cap_budget,
     .bootstrap = dsp_jit_bootstrap,
     .start_frame = dsp_start_frame_impl,
     .read_memory = dsp_jit_read_memory,
