@@ -1550,6 +1550,16 @@ x86_64 host (Windows, Linux, Intel macOS).
   Minsns −0.44% (12/12). The changed functions run without PGO counts
   until the next profile retrain.
 
+- **tlb_set_dirty visits only dirty MMU indexes (2026-10-24).** A
+  first guest store to a clean page that holds no code clears
+  TLB_NOTDIRTY in every TLB that maps it: tlb_set_dirty probed all 22
+  fast tables and 176 victim entries, though the Xbox fills 2 indexes
+  and a clean one holds no valid entry (tlb_reset_dirty and
+  tlb_flush_host_range already skip them). Normal-mode profiles put
+  the loop at ~1% of vCPU busy on heavy-f1 (33 samples in 6 s), most of
+  it cold cache lines in the 20 unused tables; no det A/B resolves it.
+  Goldens unchanged; `XEMU_TLB_WCLEAN_REFUTE=1` misses=0 unset=0.
+
 ### Vulkan renderer (pgraph/vk)
 
 - **MoltenVK compatibility.** `VK_KHR_portability_subset`,

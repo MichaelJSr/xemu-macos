@@ -1537,7 +1537,14 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, hwaddr xlat_section)
 
     addr &= TARGET_PAGE_MASK;
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+    /*
+     * xemu: a clean mmu_idx holds no valid entry (filling one marks it
+     * dirty, only a full flush clears the mark), so visit only dirty ones:
+     * the Xbox uses 2 of the 22 (each probe of another was a cold line).
+     */
+    MMUIdxMap dirty = cpu->neg.tlb.c.dirty;
+    for (MMUIdxMap w = dirty; w; w &= w - 1) {
+        mmu_idx = ctz32(w);
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         uintptr_t index = tlb_index(cpu, mmu_idx, addr);
 
@@ -1549,7 +1556,8 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, hwaddr xlat_section)
         }
     }
 
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+    for (MMUIdxMap w = dirty; w; w &= w - 1) {
+        mmu_idx = ctz32(w);
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         int k;
         for (k = 0; k < CPU_VTLB_SIZE; k++) {
