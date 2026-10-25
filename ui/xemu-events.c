@@ -57,10 +57,13 @@ void xemu_events_load_source(XemuLoadSource source, const char *name)
 static int64_t frame_end_loads;
 static int frame_ends;
 static bool load_frame_ended;   /* set by the load in progress */
+static int64_t frame_ends_total;   /* since launch (query-xemu-display) */
 
 void xemu_events_frame_end(void)
 {
     int64_t l = qatomic_read(&loads);
+
+    qatomic_set(&frame_ends_total, frame_ends_total + 1);
 
     if (qatomic_read(&frame_end_loads) != l) {
         qatomic_set(&frame_ends, 0);
@@ -274,6 +277,7 @@ XemuDisplayInfo *qmp_query_xemu_display(Error **errp)
         info->flip_loads = flip_loads;
     }
     info->scanout = nv2a_get_crtc_start();
+    info->frame_ends = qatomic_read(&frame_ends_total);
     info->has_picture_loads = info->has_picture_frame =
         picture_age(info->scanout, &info->picture_loads,
                     &info->picture_frame);

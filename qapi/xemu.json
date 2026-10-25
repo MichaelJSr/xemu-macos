@@ -510,6 +510,12 @@
 #
 # @picture-frame: the frame counter at that write (xemu-macos 0.16.1)
 #
+# @frame-ends: the guest's frame ends since launch (NV097 FLIP_STALL:
+#     the frames it renders, which @xemu-frame-advance's @gpu-counters
+#     count as flips), counted whether or not the GPU counters run;
+#     their difference over a span of @frame is the frame rate, at no
+#     counting cost (xemu-macos 0.16.3)
+#
 # @picture-stale: true while the picture on screen predates the last
 #     load: no GPU write into the buffer on screen has counted since
 #     that load (@picture-loads less than @loads, or absent after a
@@ -526,7 +532,7 @@
             '*flip-frame': 'int', '*flip-loads': 'int',
             'scanout': 'uint64',
             '*picture-loads': 'int', '*picture-frame': 'int',
-            '*picture-stale': 'bool' } }
+            '*picture-stale': 'bool', 'frame-ends': 'int' } }
 
 ##
 # @query-xemu-display:

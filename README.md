@@ -339,6 +339,10 @@ Other automation interfaces (windowed or headless):
   into it, then flips) shows that frame to a screendump taken in
   between, and windowed frame interpolation can show a step between
   the last two flips. It only reads counters.
+  Since 0.16.3 it also returns `frame-ends`: the guest's frame ends
+  since launch (NV097 `FLIP_STALL`, what the GPU counters' `flips`
+  count), kept whether or not counting runs, so the difference over
+  a span of `frame` is the frame rate at no counting cost.
   Since 0.16.1 it also returns `picture-stale`, `picture-loads` and
   `picture-frame`. `picture-stale` (present whenever a renderer that
   draws runs, from the first query on, so a harness can detect the
