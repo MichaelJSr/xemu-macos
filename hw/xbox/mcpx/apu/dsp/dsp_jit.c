@@ -250,6 +250,13 @@ static void dsp_jit_sync_from_vm(DSPState *dsp)
     Dsp56300Jit *jit = be->jit;
     DspCoreState *vm = &dsp->core;
 
+    /*
+     * dsp56300 1.0.0 keeps core-fault state get_state/set_state don't carry
+     * (the parked interrupt pipeline, a fault budget): start from a reset
+     * core, as a fresh process would, then load what was saved.
+     */
+    dsp56300_reset(jit);
+
     /* Memory arrays into C-side owned buffers */
     memcpy(be->pram, vm->pram, DSP_PRAM_SIZE * sizeof(uint32_t));
     memcpy(be->xram, vm->xram, DSP_XRAM_SIZE * sizeof(uint32_t));

@@ -2531,6 +2531,18 @@ x86_64 host (Windows, Linux, Intel macOS).
   none: clean exits, no marker left. Det offscreen RAM and screendumps
   equal to base.
 
+- **dsp56300 0.1.3 → 1.0.0, the DSP engine of hosts without the fork's
+  JIT (2026-10-24).** Windows, x86_64 macOS and Linux, and arm64 with
+  `[audio.dsp_jit] enabled = false`, run the upstream library; 1.0.0
+  brings its Cranelift register-allocation and flag work plus silicon
+  semantics fixes. On this Mac with that engine: det heavy-f1
+  Mcycles/frame −3.50%, Minsns −1.79% (4/4); the goldens (heavy-f1,
+  stream-e2, cold boot) still equal the fork engine's, so none of the
+  fixes touch Azurik's programs. Translation costs ~2× (the backtracking
+  allocator), seen once per load: the worst GP frame after a load 4.1-5.8
+  ms → 8.5-12.5 ms, under one vblank. A load now resets the core before
+  set_state, since 1.0.0 keeps core-fault state get_state doesn't carry.
+
 - **The prewarm runs on up to 4 workers (2026-10-24).** It rebuilt a
   manifest on one thread. With Metal's compile cache cold (a fresh
   bundle identifier, as after an OS or driver update) 226 pipelines took
