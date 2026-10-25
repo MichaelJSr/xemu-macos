@@ -96,6 +96,9 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_SHADER_EVICT] = "shader_evict",
     [NSPROF_EV_PG_TRYFAIL] = "pg_tryfail",
     [NSPROF_EV_PG_CAP] = "pg_cap",
+    [NSPROF_EV_FUSE_CALL] = "fuse_call",
+    [NSPROF_EV_FUSE_YIELD] = "fuse_yield",
+    [NSPROF_EV_FUSE_FROZEN] = "fuse_frozen",
     [NSPROF_EV_TEX_SET_WRITE] = "tex_set_write",
     [NSPROF_EV_TEX_SET_REUSE] = "tex_set_reuse",
     [NSPROF_EV_PIPELINE_EVICT] = "pipeline_evict",
@@ -175,6 +178,14 @@ void nsprof_event(enum NsprofEvent e)
         return;
     }
     events[e]++;
+}
+
+void nsprof_event_n(enum NsprofEvent e, unsigned int n)
+{
+    if (!nsprof_enabled() || thread_excluded) {
+        return;
+    }
+    events[e] += n;
 }
 
 void nsprof_flip_wait_begin(void)

@@ -351,6 +351,23 @@ size_t pgraph_inline_kelvin_method(NV2AState *d, unsigned int subchannel,
                                    uint32_t *parameters,
                                    size_t num_words_available,
                                    size_t max_lookahead_words, bool inc);
+
+/* pgraph_kelvin_leaf[method >> 2]: may the threaded pusher run the kelvin
+ * method under pfifo.lock (pgraph.c, the leaf rule)? */
+enum {
+    PGRAPH_LEAF_NO,
+    PGRAPH_LEAF_ALWAYS,
+    PGRAPH_LEAF_ONE_DRAW_ARRAY,  /* while draw_arrays_length <= 1 */
+    PGRAPH_LEAF_SHORT_INLINE,    /* while inline_buffer_length <= the max */
+    PGRAPH_LEAF_NO_GC,           /* while the GPU counters are off */
+};
+#define PGRAPH_LEAF_INLINE_MAX 1024
+extern uint8_t pgraph_kelvin_leaf[0x800];
+size_t pgraph_leaf_kelvin_method(NV2AState *d, unsigned int subchannel,
+                                 unsigned int method, uint32_t parameter,
+                                 uint32_t *parameters,
+                                 size_t num_words_available,
+                                 size_t max_lookahead_words, bool inc);
 void pgraph_check_within_begin_end_block(PGRAPHState *pg);
 
 void *pfifo_thread(void *arg);

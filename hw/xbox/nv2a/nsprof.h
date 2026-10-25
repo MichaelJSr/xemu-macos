@@ -175,6 +175,10 @@ enum NsprofEvent {
     /* threaded puller batches (pfifo.lock_batch): why a batch ended */
     NSPROF_EV_PG_TRYFAIL,      /* pfifo.lock was held (pgraph_write, a kick) */
     NSPROF_EV_PG_CAP,          /* PFIFO_PG_RUN commands */
+    /* the fused leaf run (pfifo.fuse) */
+    NSPROF_EV_FUSE_CALL,       /* a leaf handler call under both locks */
+    NSPROF_EV_FUSE_YIELD,      /* a run let both locks go: a waiter or a cap */
+    NSPROF_EV_FUSE_FROZEN,     /* a ring freeze ended a run */
     /* texture descriptor sets (vk/shaders.c) */
     NSPROF_EV_TEX_SET_WRITE,   /* a set written */
     NSPROF_EV_TEX_SET_REUSE,   /* rebound textures resolved to the set's handles */
@@ -193,6 +197,7 @@ void nsprof_end(enum NsprofCounter c, int64_t t0);
 void nsprof_add(enum NsprofCounter c, int64_t ns);
 
 void nsprof_event(enum NsprofEvent e);
+void nsprof_event_n(enum NsprofEvent e, unsigned int n);
 
 /* FLIP_STALL -> vblank-release idle gap (both on the PFIFO thread). */
 void nsprof_flip_wait_begin(void);

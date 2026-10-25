@@ -397,7 +397,7 @@ static void nv2a_init_vga(NV2AState *d)
 
 static void nv2a_lock_fifo(NV2AState *d)
 {
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
     bql_unlock();
     qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
@@ -604,6 +604,9 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
         /* Normal mode: the threaded puller batches commands (pfifo.c) */
         e = getenv("XEMU_PFIFO_LOCK_BATCH");
         d->pfifo.lock_batch = !icount_enabled() && !(e && e[0] == '0');
+        /* ... and runs leaf kelvin methods under both locks */
+        e = getenv("XEMU_PFIFO_FUSE");
+        d->pfifo.fuse = d->pfifo.lock_batch && !(e && e[0] == '0');
         /* nv2a_reset: clear the interrupt enables */
         e = getenv("XEMU_NV2A_RESET_IRQ");
         d->reset_irq = !(e && e[0] == '0');

@@ -143,9 +143,18 @@ typedef struct NV2AState {
         bool lock_batch;
         bool pg_held;
         uint32_t pg_run;
+        /*
+         * ... and runs leaf kelvin methods back to back holding pfifo.lock
+         * too (pfifo_threaded_command), unless XEMU_PFIFO_FUSE=0 clears
+         * fuse. Every pfifo.lock taker off the PFIFO thread goes through
+         * nv2a_pfifo_lock_ext, whose lock_waiters count ends such a run.
+         */
+        bool fuse;
+        bool fusing;   /* inside a run: debug builds assert on non-leaf work */
         char ext_waiters_pad0[128];
         uint32_t ext_waiters;
-        char ext_waiters_pad1[124];
+        uint32_t lock_waiters;
+        char ext_waiters_pad1[120];
     } pfifo;
 
     /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */
@@ -216,6 +225,27 @@ static inline void nv2a_pgraph_lock_ext(NV2AState *d)
         qatomic_inc(&d->pfifo.ext_waiters);
         qemu_mutex_lock(&d->pgraph.lock);
         qatomic_dec(&d->pfifo.ext_waiters);
+    }
+}
+
+/*
+ * Debug builds: what a leaf handler must never reach (pgraph.c, the leaf
+ * rule) asserts that no fused run is inside one.
+ */
+static inline void nv2a_assert_not_fusing(NV2AState *d)
+{
+#ifdef XEMU_DEBUG_BUILD
+    assert(!qatomic_read(&d->pfifo.fusing));
+#endif
+}
+
+/* ... and every pfifo.lock taker off the PFIFO thread, in normal mode. */
+static inline void nv2a_pfifo_lock_ext(NV2AState *d)
+{
+    if (qemu_mutex_trylock(&d->pfifo.lock) != 0) {
+        qatomic_inc(&d->pfifo.lock_waiters);
+        qemu_mutex_lock(&d->pfifo.lock);
+        qatomic_dec(&d->pfifo.lock_waiters);
     }
 }
 

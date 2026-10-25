@@ -96,7 +96,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
 
-    qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
+    nv2a_pfifo_lock_ext(d); // FIXME: Factor out fifo lock here
     nv2a_pgraph_lock_ext(d);
 
     switch (addr) {
@@ -213,6 +213,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
  */
 static bool pgraph_inline_bql_lock(NV2AState *d)
 {
+    nv2a_assert_not_fusing(d);
     bool had_bql = bql_locked();
     if (!had_bql) {
         if (d->pfifo.inline_locked) {
@@ -232,6 +233,8 @@ static void pgraph_inline_bql_unlock(NV2AState *d, bool had_bql)
         }
     }
 }
+
+static void pgraph_kelvin_leaf_init(void);
 
 void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
 {
@@ -326,6 +329,7 @@ void pgraph_init(NV2AState *d)
 
     pgraph_clear_dirty_reg_map(pg);
     pgraph_vsh_carryover_reset(pg);
+    pgraph_kelvin_leaf_init();
 }
 
 void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
@@ -790,6 +794,130 @@ static const struct {
 #undef DEF_METHOD_CASE_4_OFFSET
 #undef DEF_METHOD_CASE_4
 
+/*
+ * Leaf kelvin methods, which the threaded pusher runs back to back holding
+ * pfifo.lock as well as pgraph.lock (pfifo.c, pfifo_threaded_command). A
+ * leaf handler, with everything it calls, touches only PGRAPH state, the
+ * vertex and inline buffers, and RAMIN and guest RAM by pointer: it takes
+ * no lock (the BQL included), event or cond, calls no renderer op, never
+ * kicks PFIFO, writes no pfifo register or waiting_for_* flag, and never
+ * waits. A BQL taker there deadlocks against the vCPU, which takes
+ * pfifo.lock under the BQL; a renderer finish would hold the vCPU's PFIFO
+ * accesses for its whole wait. Matched by handler pointer, so a handler
+ * that is new or renamed after an upstream merge runs per word until
+ * scripts/nv2a-leaf-audit.py has checked it and it is listed here.
+ */
+#define LEAF(name) METHOD_FUNC_NAME(NV097, name),
+static const MethodFunc pgraph_leaf_always[] = {
+    LEAF(FLIP_INCREMENT_WRITE) LEAF(INLINE_ARRAY) LEAF(SET_ALPHA_FUNC)
+    LEAF(SET_ALPHA_REF) LEAF(SET_ALPHA_TEST_ENABLE)
+    LEAF(SET_ANTI_ALIASING_CONTROL) LEAF(SET_BACK_LIGHT_AMBIENT_COLOR)
+    LEAF(SET_BACK_POLYGON_MODE) LEAF(SET_BLEND_COLOR) LEAF(SET_BLEND_ENABLE)
+    LEAF(SET_BLEND_EQUATION) LEAF(SET_BLEND_FUNC_DFACTOR)
+    LEAF(SET_BLEND_FUNC_SFACTOR) LEAF(SET_CLEAR_RECT_HORIZONTAL)
+    LEAF(SET_CLEAR_RECT_VERTICAL) LEAF(SET_CLIP_MAX) LEAF(SET_CLIP_MIN)
+    LEAF(SET_COLOR_CLEAR_VALUE) LEAF(SET_COLOR_KEY_COLOR) LEAF(SET_COLOR_MASK)
+    LEAF(SET_COLOR_MATERIAL) LEAF(SET_COMBINER_ALPHA_ICW)
+    LEAF(SET_COMBINER_ALPHA_OCW) LEAF(SET_COMBINER_COLOR_ICW)
+    LEAF(SET_COMBINER_COLOR_OCW) LEAF(SET_COMBINER_CONTROL)
+    LEAF(SET_COMBINER_FACTOR0) LEAF(SET_COMBINER_FACTOR1)
+    LEAF(SET_COMBINER_SPECULAR_FOG_CW0) LEAF(SET_COMBINER_SPECULAR_FOG_CW1)
+    LEAF(SET_COMPOSITE_MATRIX) LEAF(SET_CULL_FACE) LEAF(SET_CULL_FACE_ENABLE)
+    LEAF(SET_DEPTH_FUNC) LEAF(SET_DEPTH_MASK) LEAF(SET_DEPTH_TEST_ENABLE)
+    LEAF(SET_DITHER_ENABLE) LEAF(SET_DOT_RGBMAPPING) LEAF(SET_EYE_DIRECTION)
+    LEAF(SET_EYE_POSITION) LEAF(SET_EYE_VECTOR) LEAF(SET_FLIP_MODULO)
+    LEAF(SET_FLIP_READ) LEAF(SET_FLIP_WRITE) LEAF(SET_FOG_COLOR)
+    LEAF(SET_FOG_ENABLE) LEAF(SET_FOG_GEN_MODE) LEAF(SET_FOG_MODE)
+    LEAF(SET_FOG_PARAMS) LEAF(SET_FOG_PLANE) LEAF(SET_FRONT_FACE)
+    LEAF(SET_FRONT_POLYGON_MODE) LEAF(SET_INVERSE_MODEL_VIEW_MATRIX)
+    LEAF(SET_LIGHTING_ENABLE) LEAF(SET_LIGHT_AMBIENT_COLOR)
+    LEAF(SET_LIGHT_CONTROL) LEAF(SET_LIGHT_ENABLE_MASK)
+    LEAF(SET_LINE_SMOOTH_ENABLE) LEAF(SET_LOGIC_OP) LEAF(SET_LOGIC_OP_ENABLE)
+    LEAF(SET_MATERIAL_ALPHA) LEAF(SET_MATERIAL_EMISSION)
+    LEAF(SET_MODEL_VIEW_MATRIX) LEAF(SET_NORMALIZATION_ENABLE)
+    LEAF(SET_POINT_PARAMS) LEAF(SET_POINT_PARAMS_ENABLE) LEAF(SET_POINT_SIZE)
+    LEAF(SET_POINT_SMOOTH_ENABLE) LEAF(SET_POLYGON_OFFSET_BIAS)
+    LEAF(SET_POLYGON_OFFSET_SCALE_FACTOR) LEAF(SET_POLY_OFFSET_FILL_ENABLE)
+    LEAF(SET_POLY_OFFSET_LINE_ENABLE) LEAF(SET_POLY_OFFSET_POINT_ENABLE)
+    LEAF(SET_POLY_SMOOTH_ENABLE) LEAF(SET_PROJECTION_MATRIX)
+    LEAF(SET_PROVOKING_VERTEX) LEAF(SET_SCENE_AMBIENT_COLOR)
+    LEAF(SET_SEMAPHORE_OFFSET) LEAF(SET_SHADER_CLIP_PLANE_MODE)
+    LEAF(SET_SHADER_OTHER_STAGE_INPUT) LEAF(SET_SHADER_STAGE_PROGRAM)
+    LEAF(SET_SHADE_MODE) LEAF(SET_SHADOW_DEPTH_FUNC)
+    LEAF(SET_SHADOW_ZSLOPE_THRESHOLD) LEAF(SET_SKIN_MODE)
+    LEAF(SET_SPECULAR_ENABLE) LEAF(SET_SPECULAR_FOG_FACTOR)
+    LEAF(SET_SPECULAR_PARAMS) LEAF(SET_SPECULAR_PARAMS_BACK)
+    LEAF(SET_STENCIL_FUNC) LEAF(SET_STENCIL_FUNC_MASK)
+    LEAF(SET_STENCIL_FUNC_REF) LEAF(SET_STENCIL_MASK) LEAF(SET_STENCIL_OP_FAIL)
+    LEAF(SET_STENCIL_OP_ZFAIL) LEAF(SET_STENCIL_OP_ZPASS)
+    LEAF(SET_STENCIL_TEST_ENABLE) LEAF(SET_TEXGEN_PLANE_S) LEAF(SET_TEXGEN_Q)
+    LEAF(SET_TEXGEN_R) LEAF(SET_TEXGEN_S) LEAF(SET_TEXGEN_T)
+    LEAF(SET_TEXGEN_VIEW_MODEL) LEAF(SET_TEXTURE_ADDRESS)
+    LEAF(SET_TEXTURE_BORDER_COLOR) LEAF(SET_TEXTURE_CONTROL0)
+    LEAF(SET_TEXTURE_CONTROL1) LEAF(SET_TEXTURE_FILTER)
+    LEAF(SET_TEXTURE_FORMAT) LEAF(SET_TEXTURE_IMAGE_RECT)
+    LEAF(SET_TEXTURE_MATRIX) LEAF(SET_TEXTURE_MATRIX_ENABLE)
+    LEAF(SET_TEXTURE_OFFSET) LEAF(SET_TEXTURE_PALETTE)
+    LEAF(SET_TEXTURE_SET_BUMP_ENV_MAT) LEAF(SET_TEXTURE_SET_BUMP_ENV_OFFSET)
+    LEAF(SET_TEXTURE_SET_BUMP_ENV_SCALE) LEAF(SET_TRANSFORM_CONSTANT)
+    LEAF(SET_TRANSFORM_CONSTANT_LOAD) LEAF(SET_TRANSFORM_DATA)
+    LEAF(SET_TRANSFORM_EXECUTION_MODE) LEAF(SET_TRANSFORM_PROGRAM)
+    LEAF(SET_TRANSFORM_PROGRAM_CXT_WRITE_EN) LEAF(SET_TRANSFORM_PROGRAM_LOAD)
+    LEAF(SET_TRANSFORM_PROGRAM_START) LEAF(SET_VERTEX_DATA_ARRAY_FORMAT)
+    LEAF(SET_VERTEX_DATA_ARRAY_OFFSET) LEAF(SET_VIEWPORT_OFFSET)
+    LEAF(SET_VIEWPORT_SCALE) LEAF(SET_WINDOW_CLIP_HORIZONTAL)
+    LEAF(SET_WINDOW_CLIP_TYPE) LEAF(SET_WINDOW_CLIP_VERTICAL)
+    LEAF(SET_ZMIN_MAX_CONTROL) LEAF(SET_ZPASS_PIXEL_COUNT_ENABLE)
+    LEAF(SET_ZSTENCIL_CLEAR_VALUE)
+};
+/* pgraph_allocate_inline_buffer_vertices backfills every buffered vertex */
+static const MethodFunc pgraph_leaf_short_inline[] = {
+    LEAF(SET_DIFFUSE_COLOR3F) LEAF(SET_DIFFUSE_COLOR4F)
+    LEAF(SET_DIFFUSE_COLOR4UB) LEAF(SET_FOG_COORD) LEAF(SET_NORMAL3F)
+    LEAF(SET_NORMAL3S) LEAF(SET_SPECULAR_COLOR3F) LEAF(SET_SPECULAR_COLOR4F)
+    LEAF(SET_SPECULAR_COLOR4UB) LEAF(SET_TEXCOORD0_2F) LEAF(SET_TEXCOORD0_2S)
+    LEAF(SET_TEXCOORD0_4F) LEAF(SET_TEXCOORD0_4S) LEAF(SET_TEXCOORD1_2F)
+    LEAF(SET_TEXCOORD1_2S) LEAF(SET_TEXCOORD1_4F) LEAF(SET_TEXCOORD1_4S)
+    LEAF(SET_TEXCOORD2_2F) LEAF(SET_TEXCOORD2_2S) LEAF(SET_TEXCOORD2_4F)
+    LEAF(SET_TEXCOORD2_4S) LEAF(SET_TEXCOORD3_2F) LEAF(SET_TEXCOORD3_2S)
+    LEAF(SET_TEXCOORD3_4F) LEAF(SET_TEXCOORD3_4S) LEAF(SET_VERTEX3F)
+    LEAF(SET_VERTEX4F) LEAF(SET_VERTEX_DATA2F_M) LEAF(SET_VERTEX_DATA2S)
+    LEAF(SET_VERTEX_DATA4F_M) LEAF(SET_VERTEX_DATA4S_M)
+    LEAF(SET_VERTEX_DATA4UB) LEAF(SET_WEIGHT1F) LEAF(SET_WEIGHT2F)
+    LEAF(SET_WEIGHT3F) LEAF(SET_WEIGHT4F)
+};
+#undef LEAF
+
+uint8_t pgraph_kelvin_leaf[ARRAY_SIZE(pgraph_kelvin_methods)];
+
+static void pgraph_kelvin_leaf_init(void)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(pgraph_kelvin_methods); i++) {
+        MethodFunc h = pgraph_kelvin_methods[i].handler;
+        uint8_t kind = h ? PGRAPH_LEAF_NO : PGRAPH_LEAF_ALWAYS;
+        for (size_t j = 0; h && j < ARRAY_SIZE(pgraph_leaf_always); j++) {
+            if (h == pgraph_leaf_always[j]) {
+                kind = PGRAPH_LEAF_ALWAYS;
+            }
+        }
+        for (size_t j = 0; h && j < ARRAY_SIZE(pgraph_leaf_short_inline); j++) {
+            if (h == pgraph_leaf_short_inline[j]) {
+                kind = PGRAPH_LEAF_SHORT_INLINE;
+            }
+        }
+        /* pgraph_expand_draw_arrays draws what earlier squashes queued */
+        if (h == METHOD_FUNC_NAME(NV097, ARRAY_ELEMENT16) ||
+            h == METHOD_FUNC_NAME(NV097, ARRAY_ELEMENT32)) {
+            kind = PGRAPH_LEAF_ONE_DRAW_ARRAY;
+        }
+        /* The squash's nv2a_gc_end hashes the bound textures */
+        if (h == METHOD_FUNC_NAME(NV097, DRAW_ARRAYS)) {
+            kind = PGRAPH_LEAF_NO_GC;
+        }
+        pgraph_kelvin_leaf[i] = kind;
+    }
+}
+
 static void pgraph_method_log(unsigned int subchannel,
                               unsigned int graphics_class,
                               unsigned int method, uint32_t parameter)
@@ -1043,6 +1171,41 @@ size_t pgraph_inline_kelvin_method(NV2AState *d, unsigned int subchannel,
     return pgraph_kelvin_method(d, subchannel, method, parameter, parameters,
                                 num_words_available, max_lookahead_words,
                                 inc);
+}
+
+/* ... for the threaded pusher's leaf run: 0 when the call is no leaf. */
+size_t pgraph_leaf_kelvin_method(NV2AState *d, unsigned int subchannel,
+                                 unsigned int method, uint32_t parameter,
+                                 uint32_t *parameters,
+                                 size_t num_words_available,
+                                 size_t max_lookahead_words, bool inc)
+{
+    PGRAPHState *pg = &d->pgraph;
+
+    switch (pgraph_kelvin_leaf[METHOD_ADDR_TO_INDEX(method)]) {
+    case PGRAPH_LEAF_ALWAYS:
+        break;
+    case PGRAPH_LEAF_ONE_DRAW_ARRAY:
+        if (pg->draw_arrays_length > 1) {
+            return 0;
+        }
+        break;
+    case PGRAPH_LEAF_SHORT_INLINE:
+        if (pg->inline_buffer_length > PGRAPH_LEAF_INLINE_MAX) {
+            return 0;
+        }
+        break;
+    case PGRAPH_LEAF_NO_GC:
+        if (pg->gc_on) {
+            return 0;
+        }
+        break;
+    default:
+        return 0;
+    }
+    return pgraph_inline_kelvin_method(d, subchannel, method, parameter,
+                                       parameters, num_words_available,
+                                       max_lookahead_words, inc);
 }
 
 /*
@@ -3643,7 +3806,7 @@ static void do_wait_for_renderer_switch(CPUState *cpu, run_on_cpu_data data)
 {
     NV2AState *d = (NV2AState *)data.host_ptr;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
     d->pgraph.renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_CPU_WAITING;
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);

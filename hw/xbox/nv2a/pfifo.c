@@ -45,7 +45,7 @@ uint64_t pfifo_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
 
     uint64_t r = 0;
     switch (addr) {
@@ -79,7 +79,7 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_PFIFO, addr, size, val);
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
 
     switch (addr) {
     case NV_PFIFO_INTR_0:
@@ -131,6 +131,7 @@ void pfifo_kick(NV2AState *d)
      * can no longer slip between the reader's kick-check and its
      * atomic release-wait.
      */
+    nv2a_assert_not_fusing(d);
     d->pfifo.fifo_kick = true;
     qatomic_set(&d->pfifo.kick_seq, d->pfifo.kick_seq + 1);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
@@ -229,7 +230,7 @@ void pfifo_put_doorbell(NV2AState *d, uint32_t put)
     }
     if (qatomic_read(&d->pfifo.parked) &&
         qatomic_xchg(&d->pfifo.parked, false)) {
-        qemu_mutex_lock(&d->pfifo.lock);
+        nv2a_pfifo_lock_ext(d);
         pfifo_kick(d);
         qemu_mutex_unlock(&d->pfifo.lock);
     }
@@ -653,6 +654,153 @@ pfifo_inline_command(NV2AState *d, uint8_t *dma, hwaddr dma_len,
     return get + 4 * done;
 }
 
+static inline bool pfifo_fuse_waiters(NV2AState *d)
+{
+    return qatomic_read(&d->pfifo.ext_waiters) |
+           qatomic_read(&d->pfifo.lock_waiters);
+}
+
+/*
+ * Normal mode (pfifo.fuse): the threaded pusher's leaf run, the counterpart
+ * of pfifo_inline_command. The per-word path lets pfifo.lock go around
+ * every command (pfifo_run_puller); this keeps it, with pgraph.lock
+ * (pg_held), and runs the command's calls back to back while they are
+ * leaves (pgraph_leaf_kelvin_method; the leaf rule is in pgraph.c),
+ * storing DMA_GET after each as that path does. A call that is no leaf
+ * ends the run, and so do a waiter for either lock and PFIFO_PG_RUN calls
+ * since both locks were let go (*yield: the pusher lets them go at the end
+ * of its iteration), and a ring freeze, whose copy the per-word lookup then
+ * reads. A waiter waits for one call at most, so there's no word cap: an
+ * index run of 2047 words is one call. The command's words are at start,
+ * in RAM or in the frozen copy (frozen), avail of them up to PUT or the
+ * copy's end.
+ * Returns get, having run nothing, when the first call can't be fused.
+ */
+static uint32_t pfifo_threaded_command(NV2AState *d, uint32_t *start,
+                                       size_t avail, bool frozen,
+                                       hwaddr dma_len, uint32_t get,
+                                       uint32_t method, bool inc,
+                                       unsigned int subchannel,
+                                       uint32_t method_count, int *fused_subch,
+                                       bool *yield)
+{
+    PGRAPHState *pg = &d->pgraph;
+    uint32_t *dma_state = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    uint32_t end = inc ? method + 4 * method_count : method + 4;
+    size_t words = MIN(method_count, avail);
+
+    *yield = false;
+    if (method < 0x100 || end > 0x2000 || (method < 0x200 && end > 0x180) ||
+        pgraph_kelvin_leaf[method >> 2] == PGRAPH_LEAF_NO ||
+        (!frozen && (hwaddr)get + 4 * (hwaddr)words > dma_len) ||
+        pfifo_fuse_waiters(d) ||
+        (pg->waiting_for_flip | pg->waiting_for_context_switch)) {
+        return get;
+    }
+    /* Never wait for pgraph.lock holding pfifo.lock */
+    if (!d->pfifo.pg_held) {
+        if (qemu_mutex_trylock(&pg->lock) != 0) {
+            return get;
+        }
+        d->pfifo.pg_held = true;
+    }
+    if (unlikely((int)subchannel != *fused_subch)) {
+        if (!GET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_PULL0],
+                      NV_PFIFO_CACHE1_PULL0_ACCESS) ||
+            GET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_ENGINE],
+                     3 << (4 * subchannel)) != ENGINE_GRAPHICS) {
+            return get;
+        }
+        SET_MASK(d->pfifo.regs[NV_PFIFO_CACHE1_PULL1],
+                 NV_PFIFO_CACHE1_PULL1_ENGINE, ENGINE_GRAPHICS);
+        if (pgraph_inline_command_class(d, subchannel, method) !=
+            NV_KELVIN_PRIMITIVE) {
+            return get;
+        }
+        *fused_subch = subchannel;
+    }
+
+    uint32_t *const limit = start + words;
+    uint32_t *p = start;
+    uint32_t word = 0;
+    unsigned int calls = 0;
+    qatomic_set(&d->pfifo.fusing, true);
+    do {
+        uint32_t w = ldl_le_p(p);
+        if (!frozen) {
+            /* As pfifo_frozen_lookup: the word is read before the test */
+            smp_rmb();
+            if (unlikely(qatomic_load_acquire(&d->pfifo.frozen.valid))) {
+                nsprof_event(NSPROF_EV_FUSE_FROZEN);
+                break;
+            }
+        }
+        size_t n = pgraph_leaf_kelvin_method(d, subchannel, method, w, p,
+                                             limit - p,
+                                             avail - (size_t)(p - start), inc);
+        if (!n) {
+            break;
+        }
+#ifdef XEMU_DEBUG_BUILD
+        assert(!(pg->waiting_for_nop | pg->waiting_for_flip |
+                 pg->waiting_for_context_switch));
+#endif
+        word = w;
+        p += n;
+        if (inc) {
+            method += 4 * n;
+        }
+        /* The words before GET are consumed (lockless user_read, freezes) */
+        qatomic_store_release(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+                              get + 4 * (uint32_t)(p - start));
+        d->pfifo.pg_run++;
+        calls++;
+    } while (p < limit && d->pfifo.pg_run < PFIFO_PG_RUN &&
+             !pfifo_fuse_waiters(d));
+    qatomic_set(&d->pfifo.fusing, false);
+
+    if (!calls) {
+        return get;
+    }
+    nsprof_event_n(NSPROF_EV_FUSE_CALL, calls);
+    *yield = d->pfifo.pg_run >= PFIFO_PG_RUN || pfifo_fuse_waiters(d);
+
+    /* As pfifo_inline_command leaves them */
+    uint32_t done = p - start;
+    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DATA_SHADOW] = word;
+    if (inc) {
+        SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD, method >> 2);
+    }
+    SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT,
+             done < method_count ? method_count - done : 0);
+    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DCOUNT] += done;
+    d->pfifo.regs[NV_PFIFO_CACHE1_STATUS] |= NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+    return get + 4 * done;
+}
+
+/*
+ * After a leaf run's iteration (DMA_GET stored): let both locks go, give a
+ * counted waiter ~20 us to take one, and come back. The pusher's loop top
+ * then reads GET, PUT and the stall flags again.
+ */
+static void pfifo_fuse_yield(NV2AState *d)
+{
+    nsprof_event(NSPROF_EV_FUSE_YIELD);
+    if (d->pfifo.pg_held) {
+        pfifo_pg_release(d, false);
+    }
+    qemu_mutex_unlock(&d->pfifo.lock);
+    if (pfifo_fuse_waiters(d)) {
+        int64_t t0 = nsprof_begin();
+        int64_t end = get_clock() + 20000;
+        while (pfifo_fuse_waiters(d) && get_clock() < end) {
+            /* the waiter's wake is a few microseconds */
+        }
+        nsprof_end(NSPROF_PG_HANDOFF, t0);
+    }
+    qemu_mutex_lock(&d->pfifo.lock);
+}
+
 static bool pfifo_pusher_should_stall(NV2AState *d)
 {
     return !can_fifo_access(d) ||
@@ -744,6 +892,7 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         const uint32_t it_get = dma_get_v;
         uint32_t *word_ptr = (uint32_t*)(dma + dma_get_v);
         uint32_t word = ldl_le_p(word_ptr);
+        bool from_frozen = false;
         if (!inl) {
             /* Words frozen at a ring restart (pfifo_freeze_unread) */
             uint32_t *frozen = pfifo_frozen_lookup(
@@ -751,6 +900,7 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
             if (unlikely(frozen)) {
                 word_ptr = frozen;
                 word = ldl_le_p(word_ptr);
+                from_frozen = true;
             }
         }
         dma_get_v += 4;
@@ -768,6 +918,7 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
             GET_MASK(*dma_subroutine, NV_PFIFO_CACHE1_DMA_SUBROUTINE_STATE);
 
         uint32_t fused_get;
+        bool fuse_yield = false;
         if (method_count && inl &&
             (fused_get = pfifo_inline_command(
                  d, dma, dma_len, put, dma_get_v - 4, method,
@@ -776,11 +927,22 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
                 dma_get_v - 4) {
             /* The rest of the command, or up to a stall or PUT. */
             dma_get_v = fused_get;
+        } else if (method_count && !inl && d->pfifo.fuse &&
+                   (fused_get = pfifo_threaded_command(
+                        d, word_ptr, num_words_available, from_frozen,
+                        dma_len, dma_get_v - 4, method,
+                        method_type ==
+                            NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC,
+                        method_subchannel, method_count, &fused_subch,
+                        &fuse_yield)) != dma_get_v - 4) {
+            /* Leaves, until a non-leaf, a waiter, a cap or a freeze. */
+            dma_get_v = fused_get;
         } else if (method_count) {
-            if (inl) {
-                /* It may run method 0, which binds a new context. */
-                fused_subch = -1;
-            }
+            /*
+             * It may run method 0, which binds a new context, and the
+             * threaded puller lets pfifo.lock go.
+             */
+            fused_subch = -1;
 
             /* data word of methods command */
             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_DATA_SHADOW] = word;
@@ -920,6 +1082,10 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
 
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
             break;
+        }
+        if (!inl && unlikely(fuse_yield)) {
+            pfifo_fuse_yield(d);
+            fused_subch = -1;
         }
     }
 

@@ -44,7 +44,7 @@ uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
      */
     bool locked = !d->pfifo.lockless_put;
     if (locked) {
-        qemu_mutex_lock(&d->pfifo.lock);
+        nv2a_pfifo_lock_ext(d);
     }
 
     uint32_t channel_modes = d->pfifo.regs[NV_PFIFO_MODE];
@@ -127,7 +127,7 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         return;
     }
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
 
     bool handled = false;
     uint32_t channel_modes = d->pfifo.regs[NV_PFIFO_MODE];

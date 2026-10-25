@@ -322,7 +322,7 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
 
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
@@ -383,7 +383,7 @@ static bool pgraph_vk_get_present_frame(NV2AState *d, NV2APresentFrame *frame)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
 
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);

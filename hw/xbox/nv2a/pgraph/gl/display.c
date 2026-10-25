@@ -418,7 +418,7 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_pfifo_lock_ext(d);
     // FIXME: Possible race condition with pgraph, consider lock
 
     VGADisplayParams vga_display_params;

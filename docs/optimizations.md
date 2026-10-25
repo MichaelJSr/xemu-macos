@@ -26,7 +26,8 @@ can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
 `XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ`, `XEMU_OHCI_HCCA_FIRST`,
-`XEMU_VBLANK_KQUEUE` and `XEMU_PFIFO_LOCK_BATCH`, the first thirteen rows.
+`XEMU_VBLANK_KQUEUE`, `XEMU_PFIFO_LOCK_BATCH` and `XEMU_PFIFO_FUSE`, the
+first fourteen rows.
 The former `=0` knob `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass,
 became the `perf.cache_shaders` setting on 2026-10-18 (`a922602c75`).
 `XEMU_VTX_SPAN_FINISH`
@@ -50,6 +51,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_OHCI_HCCA_FIRST` | Normal mode, **default on since 2026-10-23** (v0.16.1, `858e2af19f`): an OHCI frame writes HccaFrameNumber and Pad1 back every frame and HccaDoneHead only with a done queue, then raises FNO, WDH and SF, as OHCI 1.0a 7.1.4 orders it; `0` raises them before the write-back and rewrites HccaDoneHead every frame, as v0.16 did. The order matters only when a DMA access drops the BQL inside a frame (nv2a's surface access callback does): the XDK USB driver then read HccaDoneHead before the frame wrote it, lost the done queue and bugchecked 0x0A 5 s later (Azurik's V22 boot hang, about 3% of real-time boots). Under icount the frame runs on the vCPU thread, so the goldens can't verify it. USB (`hw/usb/hcd-ohci.c`, `ohci_hcca_first`) |
 | `XEMU_VBLANK_KQUEUE` | macOS normal mode, **default on since 2026-10-24**: the vblank thread waits for each deadline on one kqueue timer (`NOTE_CRITICAL`) and spins the last 25 µs, instead of `SDL_DelayPrecise`'s 1 ms nanosleep chunks (stretched ~25% by timer coalescing) and its overshoot spin. `=0` restores SDL's wait. The thread's CPU 1.0% → 0.25% of a core at a 30 fps cap; frame rate unchanged |
 | `XEMU_PFIFO_LOCK_BATCH` | Normal mode, **default on since 2026-10-24**: the threaded puller keeps `pgraph.lock` from one command to the next and takes `pfifo.lock` back by trylock, ending a batch on a failed trylock, a counted waiter (`nv2a_pgraph_lock_ext`), 256 commands or the pusher's exit (nsprof `pg_handoff`, `pg_tryfail`, `pg_cap`). `=0` swaps both locks around every command again. Icount runs never batch |
+| `XEMU_PFIFO_FUSE` | Normal mode, **default on since 2026-10-25**: the threaded pusher runs leaf kelvin methods (pgraph.c's list: no lock, BQL, renderer op, kick or stall flag) back to back holding `pfifo.lock` as well as `pgraph.lock`, ending a run on a non-leaf, a counted waiter for either lock (`nv2a_pgraph_lock_ext`, `nv2a_pfifo_lock_ext`), 256 calls or a ring freeze (nsprof `fuse_call`, `fuse_yield`, `fuse_frozen`). `=0` runs every command per word again. Off with `XEMU_PFIFO_LOCK_BATCH=0`; icount runs never fuse |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -1570,6 +1572,29 @@ x86_64 host (Windows, Linux, Intel macOS).
   PFIFO thread 31.3% → 28.8% of a core and process cycles −2.7% (4/4);
   windowed heavy-f1 stays at the cap. Goldens unchanged (icount never
   batches); the w4 hop sequence (loads, DMA callbacks, lock_fifo) clean.
+
+- **The PFIFO thread runs leaf methods under both locks (2026-10-25).**
+  Batching left one `pfifo.lock` unlock and trylock and the puller's
+  per-command checks around every command. Now the threaded pusher keeps
+  `pfifo.lock` too while a command's calls are leaves: handlers that,
+  with all they call, take no lock or BQL, call no renderer op, kick
+  nothing and set no stall flag (174 of 201, by handler pointer;
+  `scripts/nv2a-leaf-audit.py` checks the list against the LLVM IR of
+  everything they reach). A run ends on a non-leaf, a counted waiter
+  (every `pfifo.lock` taker off the thread now counts itself:
+  `nv2a_pfifo_lock_ext`), 256 calls or a ring freeze, and stores DMA_GET
+  after each call as before. On the l256_120 probe 217K calls a flip
+  fuse, with ~800 yields a flip and handoffs rare. Offscreen real time,
+  same binary, `XEMU_PFIFO_FUSE=0` vs default, load 82-105: the probe's
+  120 fps build 0.5942 → 0.6404 frames a vblank (+7.8%, 3 pairs better,
+  1 even) and process CPU per frame −5.4% (4/4); heavy-f1 at its 60 fps
+  cap, PFIFO thread 28.7% → 26.4% of a core and process CPU 98.5% →
+  96.3% (4/4); windowed heavy-f1 at the cap on both arms. A first cut
+  also capped a run at 1024 words, which let both locks go after every
+  2047-word index run (7.3K yields a flip) and gave no frame-rate gain.
+  Goldens unchanged (icount never fuses); a debug build's no-fusing
+  asserts (kicks, BQL takes, finishes) clean on heavy-f1, the stream-e2
+  walk, the probe and 8 w4 hops.
 
 - **The vblank thread waits on one kqueue timer (2026-10-24, macOS).**
   `SDL_DelayPrecise` slept to each vblank in 1 ms nanosleep chunks,

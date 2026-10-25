@@ -2300,6 +2300,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    nv2a_assert_not_fusing(container_of(pg, NV2AState, pgraph));
     nv2a_vk_assert(!r->in_draw);
     nv2a_vk_assert(r->debug_depth == 0);
 
