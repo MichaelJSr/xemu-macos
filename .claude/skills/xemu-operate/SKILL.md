@@ -226,7 +226,7 @@ the other arm does too).
 | `movement-probe.sh <out> [--app P] [VAR=V…]` | Streaming walk; a healthy TB-flush delta is 0-1 |
 | `cast-probe.py [--app P] [--base DIR] [--keep DIR] [--casts N]` | First-use hitches: Azurik's fire-armor cast (LT + B) from `vanilla-rz-w1-dark` (D98 config and drive: `--config`, `--hdd`), real time; per cast the worst frame gap, shader/pipeline creation and their parts, slow creations. Empty caches unless `--base` (a `--keep` base: warm) |
 | `probe-run.sh <app> <out> <tag>`, `soak-cycles.sh <app> <out>`, `boot-smoke-corpus.sh <iso>…` | atexit dumps; `loadvm` cycling; boot smoke |
-| `nsprof_summarize.py`, `score_frames.py`, `bench-screenshot.py` | nsprof tables and A/B; magenta scoring; window capture |
+| `nsprof_summarize.py`, `win/score_shot_win.py`, `bench-screenshot.py` | nsprof tables and A/B; magenta/white/stuck scoring of any PNG, QMP screendumps included (stdlib only, any OS); window capture |
 
 No-game tests: `cd build && ninja test-xbox && ./pyvenv/bin/meson test --suite xbox --no-rebuild`.
 Pre-release correctness pass (never per change): `tests/azurik/README.md`, the Azurik harness's replays, physics, heavy scenes and Bink checks on the Modkit's D98 fixtures, with v0.15's results. Its vanilla scenes sit at their 30 fps cap windowed, so they don't replace heavy-f1/W2.

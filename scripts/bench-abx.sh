@@ -38,16 +38,6 @@
 #                      whenever the arms differ in glslang or MoltenVK: a
 #                      shared pipeline_cache.bin is rejected and rewritten
 #                      on every arm switch.
-#   --fullscreen       keep fullscreen_on_startup = true. macOS Game Mode
-#                      then engages ~2 s after launch (verified 2026-10-10)
-#                      and lifts xemu's CPU/GPU priority over background
-#                      work, which is the only way to prioritize xemu
-#                      without root. Any focus change (a click, another
-#                      app activating) PAUSES it, so every run's gamepolicyd
-#                      log is recorded (gm_<label>.txt) and pairs where Game
-#                      Mode did not hold are reported separately. Mid-run
-#                      screenshots are skipped: window captures of an active
-#                      fullscreen Space come back black.
 #   --config-src PATH  config to clone (default: $XEMU_TEST_CONFIG, else
 #                      ../fixtures/xemu.toml beside the checkout)
 #   --hdd PATH         qcow2 to clone (default: hdd_path from config-src)
@@ -69,7 +59,7 @@ SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
 
 typeset -a pos
 B_APP_SRC=""; E_APP_SRC=""; B_ENV=""; E_ENV=""
-ISOLATE=0; FULLSCREEN=0; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0
+ISOLATE=0; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0
 CONFIG_SRC=""; HDD_SRC=""; BOOT_WAIT=25; DRAWS_BAND=100; CV_MAX=0.10
 while (( $# > 0 )); do
   case "$1" in
@@ -78,7 +68,6 @@ while (( $# > 0 )); do
     --b-env)          B_ENV=$2; shift ;;
     --e-env)          E_ENV=$2; shift ;;
     --isolate-caches) ISOLATE=1 ;;
-    --fullscreen)     FULLSCREEN=1 ;;
     --config-src)     CONFIG_SRC=$2; shift ;;
     --hdd)            HDD_SRC=$2; shift ;;
     --boot-wait)      BOOT_WAIT=$2; shift ;;
@@ -107,7 +96,6 @@ OUT=${pos[4]:-./bench-out-abx}
 # reads and the guest keeps running the boot workload, which then gets
 # benchmarked silently.
 [[ $SNAP != [Ff][5-8] ]] || { echo "snapshot must be the qcow2 tag, not an F-key name" >&2; exit 2; }
-(( FULLSCREEN )) && SCREENSHOT=0
 
 read_toml_path() {
   python3 - "$CONFIG_SRC" "$1" <<'EOF'
@@ -145,8 +133,7 @@ for arm in B E; do
     echo "abx: arm $arm's binary predates XEMU_BASE_PATH; isolating both arms' caches"
   fi
 done
-echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, cache isolation $( (( ISOLATE )) && echo per-arm || echo off)," \
-     "fullscreen $( (( FULLSCREEN )) && echo on || echo off)"
+echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, cache isolation $( (( ISOLATE )) && echo per-arm || echo off)"
 
 # ---- quiet-machine report (warn, never block) ------------------------------
 # A loaded box is legitimate for a best-effort run, but the receipt needs
@@ -175,9 +162,9 @@ if [[ -n $EEPROM_SRC && -f $EEPROM_SRC ]]; then
   cp -c $EEPROM_SRC $EEPROM 2>/dev/null || cp $EEPROM_SRC $EEPROM
 fi
 BASECONF=$WORK/xemu.toml
-python3 - "$CONFIG_SRC" "$BASECONF" "$HDD" "$EEPROM" "$FULLSCREEN" <<'EOF'
+python3 - "$CONFIG_SRC" "$BASECONF" "$HDD" "$EEPROM" <<'EOF'
 import re, sys
-src, dst, hdd, eeprom, fullscreen = sys.argv[1:6]
+src, dst, hdd, eeprom = sys.argv[1:5]
 out = []
 for line in open(src, errors="replace"):
     if re.match(r"\s*hdd_path\s*=", line):
@@ -185,7 +172,7 @@ for line in open(src, errors="replace"):
     elif eeprom and re.match(r"\s*eeprom_path\s*=", line):
         line = "eeprom_path = '%s'\n" % eeprom
     elif re.match(r"\s*fullscreen_on_startup\s*=", line):
-        line = "fullscreen_on_startup = %s\n" % ("true" if fullscreen == "1" else "false")
+        line = "fullscreen_on_startup = false\n"
     out.append(line)
 open(dst, "w").writelines(out)
 EOF
@@ -226,7 +213,6 @@ run_one_xemu() {
   local log=$OUT/ab_$label.log cpul=$OUT/ab_$label.cpu
   local sock=/tmp/xemu-abx.$$.$label.sock runjson=$OUT/run_$label.json
   RUN_JSONS+=($runjson); INTERLEAVE+=($label); rm -f $sock
-  local t0=$(date '+%Y-%m-%d %H:%M:%S') tload="" t1=""
   echo "$(date +%H:%M:%S) $label start (load $(sysctl -n vm.loadavg | awk '{print $2}'))" >> $OUT/timeline.txt
 
   $XEMU_NICE env XEMU_BASE_PATH=${BASE[$arm]} ${=ENVSET[$arm]} XEMU_NV2A_NSPROF=1 \
@@ -268,7 +254,6 @@ EOF
         --reason "loadvm failed (see log tail)" ${warmupflag:+--warmup} --var-value $arm || true
     return 0
   fi
-  tload=$(date '+%Y-%m-%d %H:%M:%S')
 
   : > $cpul
   local j n=$((secs / 5))
@@ -283,7 +268,6 @@ EOF
   done
   local alive=1
   kill -0 $pid 2>/dev/null || { alive=0; echo "$(date +%H:%M:%S) $label: xemu exited early" >> $OUT/timeline.txt; }
-  t1=$(date '+%Y-%m-%d %H:%M:%S')
   kill $pid 2>/dev/null || true
   sleep 2
   kill -9 $pid 2>/dev/null || true
@@ -296,15 +280,6 @@ EOF
         ${warmupflag:+--warmup} --var-value $arm || true
     echo "$label DEAD: xemu exited mid-run"
     return 0
-  fi
-
-  if (( FULLSCREEN )); then
-    # /usr/bin/log explicitly: zsh has a `log` builtin.
-    { echo "launch $t0 loadvm $tload end $t1"
-      /usr/bin/log show --start "$t0" --end "$t1" --info --debug --style compact \
-          --predicate 'process == "gamepolicyd" AND category == "Common"' 2>/dev/null \
-        | grep -E "Game mode status is now|gaming session is now" || true
-    } > $OUT/gm_$label.txt
   fi
 
   python3 $RECEIPT_PY gate --label $label --log $log --out $runjson \
@@ -347,7 +322,6 @@ json.dump({
     "boot_wait": int("$BOOT_WAIT"),
     "cache_isolation": "per-arm" if "$ISOLATE" == "1" else "off",
     "cache_base": {"B": "${BASE[B]}", "E": "${BASE[E]}"},
-    "fullscreen": "$FULLSCREEN" == "1",
     "interleave": "${(j:,:)INTERLEAVE}".split(","),
   },
   "binary": {
@@ -371,60 +345,6 @@ EOF
 RC=0
 python3 $RECEIPT_PY receipt --meta $META --out $OUT/receipt.json || RC=$?
 echo "abx: receipt at $OUT/receipt.json"
-
-# ---- Game Mode continuity (fullscreen only) --------------------------------
-# A run is clean when Game Mode was on at loadvm and nothing paused or
-# ended it before the measurement stopped. Pairs with an unclean run are
-# reported apart; the receipt above still covers every pair.
-if (( FULLSCREEN )); then
-  python3 - "$OUT" <<'EOF'
-import glob, json, os, re, sys
-out = sys.argv[1]
-state_re = re.compile(r"Game mode status is now (\w+)")
-clean = {}
-for f in sorted(glob.glob(os.path.join(out, "gm_*.txt"))):
-    label = os.path.basename(f)[3:-4]
-    lines = open(f).read().splitlines()
-    m = re.match(r"launch (\S+ \S+) loadvm (\S* ?\S*) end (\S+ \S+)", lines[0]) if lines else None
-    if not m or not m.group(2).strip():
-        clean[label] = (False, "no loadvm"); continue
-    t_load, t_end = m.group(2), m.group(3)
-    state, changes = None, []
-    for l in lines[1:]:
-        s = state_re.search(l)
-        if not s:
-            continue
-        ts = l[:19]
-        if ts <= t_load:
-            state = s.group(1)
-        elif ts < t_end:
-            changes.append("%s %s" % (ts[11:], s.group(1)))
-    ok = state == "on" and not changes
-    clean[label] = (ok, "on at loadvm" if ok else "at loadvm=%s; %s" % (state, ", ".join(changes) or "-"))
-print("abx: Game Mode continuity per run:")
-for label, (ok, why) in sorted(clean.items()):
-    print("  %-8s %s  %s" % (label, "clean" if ok else "PAUSED", why))
-runs = {}
-for f in glob.glob(os.path.join(out, "run_*.json")):
-    r = json.load(open(f))
-    if not r.get("warmup") and not r.get("dead"):
-        runs[r["label"]] = r
-ks = sorted({int(l[1:]) for l in runs if l[1:].isdigit()})
-pairs = [(k, runs["B%d" % k]["fps_mean"], runs["E%d" % k]["fps_mean"]) for k in ks
-         if "B%d" % k in runs and "E%d" % k in runs
-         and clean.get("B%d" % k, (False,))[0] and clean.get("E%d" % k, (False,))[0]]
-if not pairs:
-    print("abx: no pair held Game Mode throughout")
-else:
-    mb = sum(p[1] for p in pairs) / len(pairs)
-    me = sum(p[2] for p in pairs) / len(pairs)
-    pos = sum(1 for p in pairs if p[2] > p[1])
-    print("abx: Game-Mode-clean pairs %s: B %.2f vs E %.2f fps (%+.2f, %+.2f%%), sign +%d/-%d"
-          % ([p[0] for p in pairs], mb, me, me - mb, (me - mb) / mb * 100, pos, len(pairs) - pos))
-json.dump({k: {"clean": v[0], "detail": v[1]} for k, v in clean.items()},
-          open(os.path.join(out, "gamemode.json"), "w"), indent=2)
-EOF
-fi
 
 # ---- visual-check summary --------------------------------------------------
 if (( SCREENSHOT )); then
