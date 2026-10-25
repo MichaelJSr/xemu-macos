@@ -337,6 +337,38 @@ void nv2a_gc_array_element(PGRAPHState *pg, uint32_t parameter, bool pair16)
     }
 }
 
+/*
+ * A non-inc run of n ARRAY_ELEMENT16 words (two little-endian u16 indices
+ * each): what n calls of nv2a_gc_array_element(pg, word, true) count, in
+ * one call. The counts are sums and the index range a min and max, so a
+ * run's totals and its range fold in as the per-word calls' would; the
+ * loop vectorizes. Per word, those calls cost ~11 cycles on the method
+ * thread: ~20 ms a flip for a title pushing 6.5M index words a flip.
+ */
+void nv2a_gc_array_element16_run(PGRAPHState *pg, const uint8_t *words,
+                                 size_t n)
+{
+    NV2AGpuCounters *gc = gc_get();
+    uint16_t lo = UINT16_MAX, hi = 0;
+
+    for (size_t j = 0; j < 2 * n; j++) {
+        uint16_t v = lduw_le_p(words + 2 * j);
+        lo = MIN(lo, v);
+        hi = MAX(hi, v);
+    }
+    GC_ADD(gc, GC_VTX_AE16, 2 * n);
+    GC_ADD(gc, GC_VERTICES, 2 * n);
+    gc->pair_vtx += 2 * n;
+    if (!gc->ae_any) {
+        gc->ae_min = lo;
+        gc->ae_max = hi;
+        gc->ae_any = true;
+    } else {
+        gc->ae_min = MIN(gc->ae_min, lo);
+        gc->ae_max = MAX(gc->ae_max, hi);
+    }
+}
+
 void nv2a_gc_inline_array_word(PGRAPHState *pg)
 {
     gc_get()->pair_ia_words++;

@@ -3006,7 +3006,8 @@ void pgraph_check_within_begin_end_block(PGRAPHState *pg)
  * An inc command's one word is `parameter`, the value the threaded pusher
  * read before its frozen-ring check (pfifo_frozen_lookup), as the
  * per-word path used; a non-inc run reads parameters[0..n), as it did.
- * Per-word work added here (counters, logging) loops over all n words.
+ * Per-word work added here (logging) loops over all n words; the GPU
+ * counters take the run in one call.
  */
 DEF_METHOD(NV097, ARRAY_ELEMENT16)
 {
@@ -3018,9 +3019,10 @@ DEF_METHOD(NV097, ARRAY_ELEMENT16)
 
     pgraph_check_within_begin_end_block(pg);
     if (unlikely(pg->gc_on)) {
-        for (size_t i = 0; i < n; i++) {
-            nv2a_gc_array_element(pg, inc ? parameter : ldl_le_p(parameters + i),
-                                  true);
+        if (inc) {
+            nv2a_gc_array_element(pg, parameter, true);
+        } else {
+            nv2a_gc_array_element16_run(pg, (const uint8_t *)parameters, n);
         }
     }
     if (pg->draw_arrays_length) {

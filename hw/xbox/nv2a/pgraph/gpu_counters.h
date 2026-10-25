@@ -30,6 +30,9 @@ void nv2a_gc_begin(PGRAPHState *pg);
 void nv2a_gc_end(PGRAPHState *pg);
 void nv2a_gc_draw_arrays(PGRAPHState *pg, uint32_t start, uint32_t count);
 void nv2a_gc_array_element(PGRAPHState *pg, uint32_t parameter, bool pair16);
+/* n > 0 ARRAY_ELEMENT16 words at @words, as n nv2a_gc_array_element calls */
+void nv2a_gc_array_element16_run(PGRAPHState *pg, const uint8_t *words,
+                                 size_t n);
 void nv2a_gc_inline_array_word(PGRAPHState *pg);
 void nv2a_gc_immediate_vertex(PGRAPHState *pg);
 void nv2a_gc_clear(PGRAPHState *pg, uint32_t parameter);

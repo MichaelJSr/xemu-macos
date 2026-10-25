@@ -4200,6 +4200,20 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   `verify` restores found `pages-missed` 0, and 300 candidates matched a
   full restore's reply, trace and RAM sha256.
 
+- **GPU counters count an ARRAY_ELEMENT16 run in one call (2026-10-24).**
+  With counting on, the handler called `nv2a_gc_array_element` once per
+  index word: ~76 host instructions, about 20 ms a flip on the method
+  thread for Azurik's l256_120 probe (a 3.7M-triangle player body drawn
+  twice a flip: 6.5M index words). The Azurik harness took its
+  real-time rates with counting on, so the probe read 35% under vanilla
+  at w1 run_stop (FRAME-8bffffeb0243): the counting, not the renderer.
+  `nv2a_gc_array_element16_run` counts a non-inc run in one call, the
+  sums in one add each and the index range by a vectorized min/max.
+  Same counts: 300 det frames of the probe's state give identical
+  per-flip counter JSON and RAM. Real time, offscreen, counters on, 3
+  pairs (load 41-57): 0.3256 → 0.4911 frames a vblank, vanilla 0.4994;
+  with counters off the base already ran 0.4913.
+
 ### Retired diagnostics and dark experiments (2026-10-10)
 
 Each removal is its own commit; to bring one back for a re-measurement,
