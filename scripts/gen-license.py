@@ -551,7 +551,7 @@ LIBS = [
         # the dsp56300 license as well as its dependencies.
         "https://raw.githubusercontent.com/mborgerson/dsp56300/refs/heads/main/LICENSE",
         ships_static=all_platforms,
-        version="0.1.3",
+        version="1.0.0",
     ),
 ]
 
