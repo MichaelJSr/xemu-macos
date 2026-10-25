@@ -91,7 +91,8 @@ typedef struct VkPrewarm {
     unsigned int num_keys;
     QemuThread threads[PREWARM_MAX_WORKERS];
     int num_workers;
-    bool thread_live;        /* PFIFO/teardown side: started, not joined */
+    QemuMutex join_lock;     /* one joiner: a flip, shutdown or teardown */
+    bool thread_live;        /* started, not joined; joiners hold join_lock */
     int64_t started_ns;
 
     /* Shared, atomic */
@@ -437,14 +438,28 @@ static void *prewarm_thread(void *opaque)
 
 /* ---- the renderer's side ------------------------------------------------- */
 
-static void prewarm_join(VkPrewarm *p)
+static void prewarm_join_locked(VkPrewarm *p)
 {
-    if (p && p->thread_live) {
+    if (p->thread_live) {
         qatomic_set(&p->stop, true);
         for (int i = 0; i < p->num_workers; i++) {
             qemu_thread_join(&p->threads[i]);
         }
-        p->thread_live = false;
+        qatomic_set(&p->thread_live, false);
+    }
+}
+
+/*
+ * Waits for the workers to be gone. At quit the PFIFO thread can still run
+ * a queued flip, whose join raced the shutdown wait's: a second
+ * pthread_join of a worker aborts.
+ */
+static void prewarm_join(VkPrewarm *p)
+{
+    if (p) {
+        qemu_mutex_lock(&p->join_lock);
+        prewarm_join_locked(p);
+        qemu_mutex_unlock(&p->join_lock);
     }
 }
 
@@ -465,6 +480,7 @@ void pgraph_vk_prewarm_init(PGRAPHState *pg)
     }
 
     VkPrewarm *p = g_new0(VkPrewarm, 1);
+    qemu_mutex_init(&p->join_lock);
     p->r = r;
     p->path = g_strdup_printf("%svk_prewarm-%s-%016" PRIx64 ".bin",
                               xemu_settings_get_base_path(), driver,
@@ -498,7 +514,7 @@ void pgraph_vk_prewarm_init(PGRAPHState *pg)
         qemu_thread_create(&p->threads[i], "vk.prewarm", prewarm_thread, p,
                            QEMU_THREAD_JOINABLE);
     }
-    p->thread_live = true;
+    qatomic_set(&p->thread_live, true);
     qatomic_set(&prewarm_live, p);
     static bool registered;
     if (!registered) {
@@ -557,8 +573,11 @@ void pgraph_vk_prewarm_flip(PGRAPHState *pg)
         }
         r->pipeline_cache_unsaved += misses;
     }
-    if (p->thread_live && qatomic_load_acquire(&p->done)) {
-        prewarm_join(p);
+    /* Reap finished workers, unless a shutdown is joining them already */
+    if (qatomic_read(&p->thread_live) && qatomic_load_acquire(&p->done) &&
+        qemu_mutex_trylock(&p->join_lock) == 0) {
+        prewarm_join_locked(p);
+        qemu_mutex_unlock(&p->join_lock);
     }
     if (!p->pending->len) {
         return;
@@ -594,6 +613,7 @@ void pgraph_vk_prewarm_finalize(PGRAPHVkState *r)
     g_free(p->keys);
     g_free(p->marker);
     g_free(p->path);
+    qemu_mutex_destroy(&p->join_lock);
     g_free(p);
     r->prewarm = NULL;
 }
