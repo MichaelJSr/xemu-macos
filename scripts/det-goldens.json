@@ -11,5 +11,16 @@
       "stream-e2": {"f600": "1e98a85ee122f87c"},
       "cold-boot": {"f900": "9ffd0e1d2e1f36ea", "f1800": "85dec4a26bcb49e9"}
     }
+  },
+  "d98": {
+    "_doc": "bench-det --check d98 (AZURIK_FX): tests/azurik pack 03's scenes (tests/azurik/03-heavy-scenes/scenes.json) at +300/+600 on the Modkit's D98 config, drive and vanilla.iso. v0.15's oracles (tests/azurik/README.md); all four reproduced on v0.16.3-20-g3cacaf5678 on 2026-10-25, as on v0.16.x in October's lane runs.",
+    "arm64": {
+      "128": {
+        "vanilla-rz-new": {"f300": "6279ea3c0b21c696", "f600": "846baeb5cb4fa7a1"},
+        "vanilla-rz-e6-song": {"f300": "7a3f20f0ba7d0671", "f600": "6835875d7dd0ed2e"},
+        "vanilla-rz-e7-keylord": {"f300": "6f17e002086d441b", "f600": "b9cd6a0527ced223"},
+        "vanilla-rz-e2-cart": {"f300": "2b6adc99d21bf19c", "f600": "7f0156a86e5f6454"}
+      }
+    }
   }
 }

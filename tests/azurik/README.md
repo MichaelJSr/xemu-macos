@@ -124,6 +124,13 @@ End RAM per case on v0.15. These are reference values, not oracles:
 | `vanilla-rz-e7-keylord` (fight) | `d9e66aad9afc` | `6f17e002086d441b` | `b9cd6a0527ced223` | 34.4 |
 | `vanilla-rz-e2-cart` (ride) | `5d322a1f90fb` | `2b6adc99d21bf19c` | `7f0156a86e5f6454` | 33.3 |
 
+**As one command** (2026-10-25): `AZURIK_FX=<the D98 folder> python3 -I scripts/bench-det.py --check d98
+NAME=$APP ...` builds the four runs from `scenes.json` (the fight's 70 lines included), clones `vanilla.iso` once
+per batch, runs them in fresh processes, up to 3 at once (about 5 s at load 106), and asserts the f300/f600
+above from `scripts/det-goldens.json`: exit 0 OK, 4 moved, 2 arms disagree. On v0.16.3-20 every hash
+matched, at 45.3 (new), 19.5 (e6), 33.0 (e7) and 31.5 (e2) Minsns/frame; an arm with `XEMU_LANGUAGE=fr` moves
+all four. It skips the start12 check and the scenes' checks.
+
 **Checks** (run over QMP with `check_hooks`, which only collect):
 - **e2:** `0x53750` gets one path, `levels/earth/e5`, at +245.
 - **e7:** `apply_damage` is called 0 times on the player and 12 times on other critters. The first is at +207.

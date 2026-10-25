@@ -68,9 +68,15 @@ each in a fresh process, up to -j (default 3) at once, and asserts the
 hashes for the binary's arch and the config's mem_limit; arms with no
 golden key (or a refuter in their env) only have to agree. --check
 tags:FILE runs each tag in FILE (one a line) for -f frames (default 300)
-and asserts the arms agree. One line per run, then exit 0 (all OK), 2
-(arms disagree), 4 (a golden moved) or 1 (a run failed). Wall and cycle
-numbers from parallel runs contend: --check is a gate, not an A/B.
+and asserts the arms agree. --check d98 runs tests/azurik pack 03 (the
+four scenes of tests/azurik/03-heavy-scenes/scenes.json, RAM at +300 and
++600, the fight scene on its first candidate's 70 lines) on the Modkit's
+D98 fixtures: AZURIK_FX names their folder (never a committed path); its
+xemu.toml is each run's source config, and one cp -c clone of its
+vanilla.iso per batch is every run's -dvd_path. Its hashes are asserted
+from det-goldens.json's "d98" table. One line per run, then exit 0 (all
+OK), 2 (arms disagree), 4 (a golden moved) or 1 (a run failed). Wall and
+cycle numbers from parallel runs contend: --check is a gate, not an A/B.
 
 --timeline: a cold boot of the fixture disc (or --dvd) from power-on to
 steady play, cut into phases: kernel, logos, prophecy (0x5F748 to
@@ -201,29 +207,33 @@ def wait_log(log, text, count, proc, timeout=120):
         time.sleep(0.01)
 
 
-def cfg_path(key):
-    """A path the source config names (hdd_path, eeprom_path, dvd_path), or None."""
-    m = re.search(rf"""(?m)^\s*{key}\s*=\s*['"](.*)['"]\s*$""", open(CFG).read())
+def cfg_path(key, cfg=None):
+    """A path the source config (default CFG) names (hdd_path, eeprom_path,
+    dvd_path), or None."""
+    m = re.search(rf"""(?m)^\s*{key}\s*=\s*['"](.*)['"]\s*$""", open(cfg or CFG).read())
     return m and m.group(1)
 
 
-def harness_config(toml, d, hdd, eeprom):
+def harness_config(toml, d, hdd, eeprom, dvd=''):
     """scripts/harness-config.py --workdir d on the scratch toml (the clones,
     screenshots in d, fullscreen off, muted, pads stubbed): its pad args."""
     return subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'),
-                           toml, '--workdir', d, '--hdd', hdd, '--eeprom', eeprom],
+                           toml, '--workdir', d, '--hdd', hdd, '--eeprom', eeprom]
+                          + (['--dvd', os.path.abspath(dvd)] if dvd else []),
                           stdout=subprocess.PIPE, text=True, check=True).stdout.split()
 
 
-def scratch(d):
-    """Clone the fixture HDD, EEPROM and config (muted, pads stubbed) into d."""
+def scratch(d, cfg=None, dvd=''):
+    """Clone the source config's (default CFG) HDD, EEPROM and config (muted,
+    pads stubbed; dvd_path = dvd when given) into d."""
+    cfg = cfg or CFG
     for key, name, dst in (('hdd_path', 'xbox_hdd.qcow2', 'hdd.qcow2'),
                            ('eeprom_path', 'eeprom.bin', 'eeprom.bin')):
-        src = cfg_path(key) or os.path.join(os.path.dirname(CFG), name)
+        src = cfg_path(key, cfg) or os.path.join(os.path.dirname(cfg), name)
         subprocess.run(['cp', '-c', src, os.path.join(d, dst)], check=True)
     toml = os.path.join(d, 'xemu.toml')
-    shutil.copyfile(CFG, toml)
-    pads = harness_config(toml, d, f'{d}/hdd.qcow2', f'{d}/eeprom.bin')
+    shutil.copyfile(cfg, toml)
+    pads = harness_config(toml, d, f'{d}/hdd.qcow2', f'{d}/eeprom.bin', dvd)
     fifo, sock, log = (os.path.join(d, n) for n in ('in.fifo', 'qmp.sock', 'log'))
     os.mkfifo(fifo)
     return toml, pads, fifo, sock, log
@@ -328,7 +338,7 @@ def run_once(app, env, a, purpose='', label='run'):
     shot, dvd = getattr(a, 'shot', ''), getattr(a, 'dvd', '')   # pgo-train's Namespace has neither
     d = scratch_dir()
     try:
-        toml, pads, fifo, sock, log = scratch(d)
+        toml, pads, fifo, sock, log = scratch(d, getattr(a, 'config', '') or None, dvd)
         app, base, headless = renderer_target(app, a, d)
         e = run_env(env, headless, fifo, base)
         cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
@@ -903,31 +913,81 @@ def timeline(a, arms):
         base = base or (n, means)
 
 
-def golden_key(app, env):
+D98_SCENES = os.path.join(REPO, 'tests/azurik/03-heavy-scenes/scenes.json')
+
+
+def d98_runs(fx, iso):
+    """tests/azurik pack 03 as --check runs: (key, tag, frames, hash_at, input,
+    golden table name, config, disc). scenes.json is read, never written;
+    its fight input is null, so the first candidate of fight_candidates
+    (heading (0, 1), W 60: 70 lines) is built by its rule, as
+    tests/azurik/README.md does."""
+    sj = json.load(open(D98_SCENES))
+    stops = sj['stops']
+    fc = sj['fight_candidates']
+    (lx, ly), w = fc['headings_lx_ly'][0], fc['walks_W'][0]
+    axes = [(n, v) for n, v in (('lx', lx), ('ly', ly)) if v != 0]
+    fight = ([f'+2 axis {n} {v:.6f}' for n, v in axes] +
+             [f'+{2 + w} axis {n} 0.000000' for n, _ in axes])
+    for k in range(4 + w, stops[-1], 16):     # A (81) down 4 vblanks every 16
+        if k + 4 >= stops[-1]:
+            break
+        fight += [f'+{k} down 81', f'+{k + 4} up 81']
+    inputs = dict(sj['inputs'], fight=fight)
+    return [(s['tag'], s['tag'], stops[-1], ','.join(map(str, stops)), inputs[s['input']],
+             'd98', os.path.join(fx, 'xemu.toml'), iso) for s in sj['scenes']]
+
+
+def golden_key(app, env, cfg=None):
     """(arch, mem_limit) a golden is kept for, or None (a refuter arm)."""
     if any('REFUTE' in k for k in env):
         return None
     archs = subprocess.run(['lipo', '-archs', os.path.join(app, 'Contents/MacOS/xemu')],
                            capture_output=True, text=True).stdout.split()
-    m = re.search(r"(?m)^\s*mem_limit\s*=\s*'?(\d+)", open(CFG).read())
+    m = re.search(r"(?m)^\s*mem_limit\s*=\s*'?(\d+)", open(cfg or CFG).read())
     return ('arm64' if 'arm64' in archs else 'x86_64', m.group(1) if m else '64')
 
 
 def check(a, arms):
     """--check: run the sets' runs in parallel, assert goldens and agreement."""
-    import concurrent.futures
     gold = json.load(open(os.path.join(REPO, 'scripts/det-goldens.json')))
-    runs = []
+    runs, batch = [], None
     for name in a.check.split(','):
         if name == 'goldens':
-            runs += [(k, v['tag'], v['frames'], v['hash_at'], v['input'])
+            runs += [(k, v['tag'], v['frames'], v['hash_at'], v['input'], '', '', a.dvd)
                      for k, v in gold['runs'].items()]
         elif name.startswith('tags:'):
             tags = [t.strip() for t in open(name[5:]) if t.strip() and not t.startswith('#')]
             f = a.frames if a.frames != 1200 else 300
-            runs += [(t, t, f, '', a.input) for t in tags]
+            runs += [(t, t, f, '', a.input, None, '', a.dvd) for t in tags]
+        elif name == 'd98':
+            fx = os.environ.get('AZURIK_FX', '')
+            if not os.path.isfile(os.path.join(fx, 'xemu.toml')):
+                sys.exit('bench-det: --check d98 needs AZURIK_FX, the Modkit\'s D98 fixtures folder '
+                         '(xemu.toml, the drive, eeprom.bin, vanilla.iso)')
+            batch = batch or scratch_dir()   # the ISO clone: removed with the batch
+            iso = os.path.join(batch, 'dvd.iso')
+            subprocess.run(['cp', '-c', os.path.join(fx, 'vanilla.iso'), iso], check=True)
+            runs += d98_runs(fx, iso)
         else:
             sys.exit(f'bench-det: unknown --check set {name}')
+    try:
+        check_runs(a, arms, gold, runs)
+    finally:
+        if batch:
+            shutil.rmtree(batch, ignore_errors=True)
+
+
+def check_runs(a, arms, gold, runs):
+    import concurrent.futures
+
+    def want_of(key, table, cfg, app, env):
+        """The golden hashes for key ({stop: hash}), or None (agreement only)."""
+        gk = golden_key(app, env, cfg or None) if table is not None else None
+        root = gold if table == '' else gold.get(table, {}) if table else {}
+        return root.get(gk[0], {}).get(gk[1], {}).get(key) if gk else None
+
+    width = max([12] + [len(r[0]) for r in runs])
     jobs = [(r, arm) for r in runs for arm in arms]
     results, failed = {}, False
 
@@ -938,25 +998,25 @@ def check(a, arms):
     signal.signal(signal.SIGTERM, stop)
 
     def one(job):
-        (key, tag, frames, hash_at, inp), (name, app, env) = job
+        (key, tag, frames, hash_at, inp, _, cfg, dvd), (name, app, env) = job
         ns = argparse.Namespace(**vars(a))
         ns.tag, ns.frames, ns.hash_at, ns.input = tag, frames, hash_at, list(inp)
+        ns.config, ns.dvd = cfg, dvd
         return run_once(app, env, ns, f'bench-det --check {key} {name}', f'{name}-{key}')
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs or min(len(jobs), 3))
     try:
         futs = {pool.submit(one, j): j for j in jobs}
         for fut in concurrent.futures.as_completed(futs):
-            (key, *_), (name, app, env) = futs[fut]
+            (key, _, _, _, _, table, cfg, _), (name, app, env) = futs[fut]
             try:
                 r = fut.result()
             except Exception as e:
-                print(f'{key:12s} {name:10s} FAIL  {e}', flush=True)
+                print(f'{key:{width}s} {name:10s} FAIL  {e}', flush=True)
                 failed = True
                 continue
             results[(key, name)] = r['ram']
-            gk = golden_key(app, env)
-            want = gold.get(gk[0], {}).get(gk[1], {}).get(key) if gk else None
+            want = want_of(key, table, cfg, app, env)
             got = dict(h.split('=') for h in r['ram'].split())
             if want is None:
                 verdict = 'n-a'
@@ -964,7 +1024,7 @@ def check(a, arms):
                 verdict = 'OK'
             else:
                 verdict = 'MOVED (want ' + ' '.join(f'{s}={v}' for s, v in want.items()) + ')'
-            print(f'{key:12s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f'
+            print(f'{key:{width}s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f'
                   + (f'  png={r["png"]}' if r['png'] else ''), flush=True)
     except KeyboardInterrupt:
         for p in list(LIVE):
@@ -978,10 +1038,9 @@ def check(a, arms):
         if len(hs) > 1:
             print(f'{key}: arms disagree: {", ".join(sorted(hs))}')
             sys.exit(2)
-    for (key, *_) in runs:
+    for (key, _, _, _, _, table, cfg, _) in runs:
         for name, app, env in arms:
-            gk = golden_key(app, env)
-            want = gold.get(gk[0], {}).get(gk[1], {}).get(key) if gk else None
+            want = want_of(key, table, cfg, app, env)
             got = dict(h.split('=') for h in results.get((key, name), '').split() if '=' in h)
             if want and (key, name) in results and any(got.get(s) != v for s, v in want.items()):
                 sys.exit(4)
@@ -1028,7 +1087,8 @@ def main():
     t.add_argument('--va', action='append', default=[],
                    help='NAME=ADDR override: ' + ', '.join(TL_VAS) + ', xbe_entry')
     p.add_argument('--check', default='', metavar='SET[,SET]',
-                   help='goldens, tags:FILE: run in parallel and assert (see the docstring)')
+                   help='goldens, tags:FILE, d98 (AZURIK_FX): run in parallel and assert '
+                        '(see the docstring)')
     p.add_argument('-j', '--jobs', type=int, default=0, help='--check runs at once (default 3)')
     p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')
     a = p.parse_args()
