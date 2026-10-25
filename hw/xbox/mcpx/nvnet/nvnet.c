@@ -30,6 +30,7 @@
 #include "qemu/bswap.h"
 #include "qemu/iov.h"
 #include "migration/vmstate.h"
+#include "system/runstate.h"
 #include "nvnet_regs.h"
 
 #define IOPORT_SIZE 0x8
@@ -401,16 +402,18 @@ static bool nvnet_can_receive(NetClientState *nc)
  * Deliver what the net layer queued while the NIC couldn't receive: after a
  * refusal nothing reaches the NIC until it flushes (the socket backend stops
  * reading), so a system-link peer went deaf for good (upstream #2350, PR
- * #3107). Only with a backend behind the hub (qemu_can_send_packet asks the
- * hub's other ports), so a run without networking never reads the RX ring
- * here or arms the poll.
+ * #3107). Only with a backend (xemu_net_disable takes the NIC's link down),
+ * so a run without networking never reads the RX ring here or arms the
+ * poll, and only while running (a flush DMAs into guest RAM). Not
+ * qemu_can_send_packet: it also fails while the backend can't take a send
+ * (a full UDP socket buffer), and a poll that fired then was never re-armed.
  */
 static void nvnet_flush_rx(NvNetState *s)
 {
     NetClientState *nc = qemu_get_queue(s->nic);
 
-    if (!qemu_can_send_packet(nc) || !link_up(s) || !rx_enabled(s) ||
-        !dma_enabled(s)) {
+    if (!runstate_is_running() || nc->link_down || !link_up(s) ||
+        !rx_enabled(s) || !dma_enabled(s)) {
         return;
     }
     if (rx_buf_available(s)) {
