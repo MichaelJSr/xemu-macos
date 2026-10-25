@@ -502,6 +502,7 @@ static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, pipeline_cache);
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
 
+    nsprof_event(NSPROF_EV_PIPELINE_EVICT);
     nv2a_vk_assert((!r->in_command_buffer ||
             snode->draw_time < r->command_buffer_start_time) &&
            "Pipeline evicted while in use!");
@@ -756,6 +757,42 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
     }
     r->pipeline_cache_unsaved++;
     r->pipeline_cache_last_miss_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+}
+
+/*
+ * nsprof: the driver's share of a draw or clear pipeline creation begun at
+ * @t0 (from its creation feedback), and a stderr line for each creation of
+ * 10 ms or more: when it ended, how long, and which stages hit the cache.
+ */
+__attribute__((noinline)) static void
+nsprof_pipeline_created(const void *pnext, uint32_t stage_count,
+                        const PipelineCacheFeedback *fb, int64_t t0,
+                        const char *kind)
+{
+    if (t0 < 0) {
+        return;
+    }
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    double drv_ms = -1;
+    char stages[8] = "-";
+    if (pnext == &fb->info &&
+        (fb->pipeline.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)) {
+        nsprof_add(NSPROF_DRV_PIPELINE, fb->pipeline.duration);
+        drv_ms = fb->pipeline.duration / 1e6;
+        uint32_t n = MIN(stage_count, (uint32_t)sizeof(stages) - 1);
+        for (uint32_t i = 0; i < n; i++) {
+            stages[i] = (fb->stages[i].flags &
+                         VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ?
+                            'h' : 'm';
+        }
+        stages[n] = 0;
+    }
+    if (now - t0 >= 10000000) {
+        fprintf(stderr,
+                "nsprof: slow %s pipeline %.1f ms (driver %.1f ms, stage "
+                "cache hits %s) at %" PRId64 "\n",
+                kind, (now - t0) / 1e6, drv_ms, stages, now);
+    }
 }
 
 /*
@@ -1338,6 +1375,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
     pgraph_vk_pipeline_cache_note_created(r, pipeline_info.pNext,
                                           pipeline_info.stageCount, &feedback);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
+    nsprof_pipeline_created(pipeline_info.pNext, pipeline_info.stageCount,
+                            &feedback, nsprof_t0, "clear");
 
     snode->pipeline = pipeline;
     snode->layout = layout;
@@ -1792,6 +1831,9 @@ static void create_pipeline(PGRAPHState *pg)
                                           pipeline_create_info.stageCount,
                                           &feedback);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
+    nsprof_pipeline_created(pipeline_create_info.pNext,
+                            pipeline_create_info.stageCount, &feedback,
+                            nsprof_t0, "draw");
 
     snode->pipeline = pipeline;
     snode->layout = layout;

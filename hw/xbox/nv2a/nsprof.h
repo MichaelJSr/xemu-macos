@@ -9,7 +9,8 @@
  * waits, surface readbacks, and the guest flip -> vblank idle gap.
  *
  * Enable with XEMU_NV2A_NSPROF=1; a summary (total / avg-per-flip /
- * max single event) prints to stderr every ~5 s. Both renderers drive
+ * max single event) prints to stderr every ~5 s (=<ms>, 100 or more:
+ * that often). Both renderers drive
  * the interval (pgraph_vk_flip_stall / pgraph_gl_flip_stall each tick
  * once per guest flip), but most cost centres are instrumented only at
  * Vulkan call sites: under the OpenGL renderer expect just the flips
@@ -87,6 +88,16 @@ enum NsprofCounter {
     NSPROF_UI_PRESENT_PERIOD, /* UI-thread interval between consecutive
                                  completed presents (end_frame -> end_frame).
                                  Off-thread. */
+    /* Parts of shader_gen (vk/shaders.c, vk/glsl.c), every module: */
+    NSPROF_GLSL_GEN,      /* GLSL text generation */
+    NSPROF_SPV_LOAD,      /* SPIR-V cache file read and check */
+    NSPROF_SPV_REFLECT,   /* SPIRV-Reflect uniform layout pass */
+    NSPROF_GLSLANG,       /* GLSL -> SPIR-V compile (SPIR-V cache miss) */
+    NSPROF_VK_MODULE,     /* vkCreateShaderModule */
+    NSPROF_DRV_PIPELINE,  /* within pipeline_gen: the driver's own creation
+                             time (pipeline creation feedback) */
+    NSPROF_FLIP_GAP,      /* flip to flip (PFIFO thread): max is the
+                             interval's longest frame */
     NSPROF__COUNT,
 };
 
@@ -156,6 +167,9 @@ enum NsprofEvent {
     /* deterministic lazy reports (vk/reports.c) */
     NSPROF_EV_REP_TRAP,      /* guest/DMA touched an undelivered report */
     NSPROF_EV_REP_GPU_TOUCH, /* the renderer read an undelivered report */
+    NSPROF_EV_MODULE_MISS,     /* shader module cache miss (vk/shaders.c) */
+    NSPROF_EV_SHADER_EVICT,    /* shader binding LRU eviction */
+    NSPROF_EV_PIPELINE_EVICT,  /* draw pipeline LRU eviction */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY
@@ -165,6 +179,8 @@ bool nsprof_enabled(void);
 /* Returns a start timestamp, or -1 when disabled. */
 int64_t nsprof_begin(void);
 void nsprof_end(enum NsprofCounter c, int64_t t0);
+/* One event of @ns measured elsewhere (e.g. driver feedback). */
+void nsprof_add(enum NsprofCounter c, int64_t ns);
 
 void nsprof_event(enum NsprofEvent e);
 

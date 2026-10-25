@@ -18,6 +18,7 @@
  */
 
 #include "ui/xemu-settings.h"
+#include "hw/xbox/nv2a/nsprof.h"
 #include "renderer.h"
 #include "qemu/fast-hash.h"
 
@@ -761,11 +762,16 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     uint64_t glsl_hash = fast_hash((const uint8_t *)glsl, strlen(glsl));
     glslang_target_language_version_t spv = glsl_target_for(r).spv;
 
+    int64_t t0 = nsprof_begin();
     info->spirv = load_spirv_from_cache(spv, glsl_hash);
+    nsprof_end(NSPROF_SPV_LOAD, t0);
     if (info->spirv) {
         /* Reflect the cached blob before it can reach the driver: a bad
          * entry must be a miss that regenerates itself, not an abort. */
-        if (init_layout_from_spv(info)) {
+        t0 = nsprof_begin();
+        bool reflected = init_layout_from_spv(info);
+        nsprof_end(NSPROF_SPV_REFLECT, t0);
+        if (reflected) {
             nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
         } else {
             fprintf(stderr,
@@ -779,15 +785,21 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     }
 
     if (!info->spirv) {
+        t0 = nsprof_begin();
         info->spirv = pgraph_vk_compile_glsl_to_spv(
             r, vk_shader_stage_to_glslang_stage(stage), glsl);
+        nsprof_end(NSPROF_GLSLANG, t0);
         save_spirv_to_cache(spv, glsl_hash, info->spirv);
+        t0 = nsprof_begin();
         bool reflected = init_layout_from_spv(info);
+        nsprof_end(NSPROF_SPV_REFLECT, t0);
         assert(reflected && "Failed to create SPIR-V shader module");
         (void)reflected;
     }
 
+    t0 = nsprof_begin();
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
+    nsprof_end(NSPROF_VK_MODULE, t0);
 
     free(info->glsl);
     info->glsl = NULL;

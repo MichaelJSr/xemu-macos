@@ -427,6 +427,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 
 static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
 {
+    nsprof_event(NSPROF_EV_SHADER_EVICT);
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, shader_cache);
     ShaderBinding *snode = container_of(node, ShaderBinding, node);
 
@@ -458,6 +459,8 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
 
     MString *code;
 
+    nsprof_event(NSPROF_EV_MODULE_MISS);
+    int64_t nsprof_t0 = nsprof_begin();
     switch (module->key.kind) {
     case VK_SHADER_STAGE_VERTEX_BIT:
         code = pgraph_glsl_gen_vsh(&module->key.vsh.state,
@@ -475,6 +478,8 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
         assert(!"Invalid shader module kind");
         code = NULL;
     }
+
+    nsprof_end(NSPROF_GLSL_GEN, nsprof_t0);
 
     module->module_info = pgraph_vk_create_shader_module_from_glsl(
         r, module->key.kind, mstring_get_str(code));

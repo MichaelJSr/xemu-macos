@@ -37,6 +37,13 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_DRAWABLE_ACQUIRE] = "drawable_acq",
     [NSPROF_UI_HUD_LOCK] = "ui_hud_lock",
     [NSPROF_UI_PRESENT_PERIOD] = "ui_frame_dt",
+    [NSPROF_GLSL_GEN] = "glsl_gen",
+    [NSPROF_SPV_LOAD] = "spv_load",
+    [NSPROF_SPV_REFLECT] = "spv_reflect",
+    [NSPROF_GLSLANG] = "glslang",
+    [NSPROF_VK_MODULE] = "vk_module",
+    [NSPROF_DRV_PIPELINE] = "drv_pipeline",
+    [NSPROF_FLIP_GAP] = "flip_gap",
 };
 
 static const char *const event_names[NSPROF_EV__COUNT] = {
@@ -84,6 +91,9 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_MFX_SCALER_REBUILD] = "mfx_scaler_rebuild",
     [NSPROF_EV_REP_TRAP] = "rep_trap",
     [NSPROF_EV_REP_GPU_TOUCH] = "rep_gpu_touch",
+    [NSPROF_EV_MODULE_MISS] = "module_miss",
+    [NSPROF_EV_SHADER_EVICT] = "shader_evict",
+    [NSPROF_EV_PIPELINE_EVICT] = "pipeline_evict",
 };
 
 static struct {
@@ -97,13 +107,19 @@ static uint64_t events[NSPROF_EV__COUNT];
 static uint64_t flips;
 static int64_t interval_start_ns;
 static int64_t flip_wait_start_ns = -1;
+static int64_t last_flip_ns;
+static int64_t interval_ns = 5000000000ll;
 
+/* XEMU_NV2A_NSPROF=1: a summary every 5 s; =<ms>, 100 or more: that often. */
 bool nsprof_enabled(void)
 {
     static int cached = -1;
     if (cached < 0) {
         const char *env = getenv("XEMU_NV2A_NSPROF");
         cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+        if (cached && atoi(env) >= 100) {
+            interval_ns = (int64_t)atoi(env) * 1000000;
+        }
     }
     return cached == 1;
 }
@@ -126,6 +142,18 @@ void nsprof_end(enum NsprofCounter c, int64_t t0)
     counters[c].events++;
     if (dt > counters[c].max_ns) {
         counters[c].max_ns = dt;
+    }
+}
+
+void nsprof_add(enum NsprofCounter c, int64_t ns)
+{
+    if (!nsprof_enabled()) {
+        return;
+    }
+    counters[c].total_ns += ns;
+    counters[c].events++;
+    if (ns > counters[c].max_ns) {
+        counters[c].max_ns = ns;
     }
 }
 
@@ -160,9 +188,13 @@ void nsprof_flip_tick(void)
     if (!interval_start_ns) {
         interval_start_ns = now;
     }
+    if (last_flip_ns) {
+        nsprof_add(NSPROF_FLIP_GAP, now - last_flip_ns);
+    }
+    last_flip_ns = now;
     flips++;
 
-    if (now - interval_start_ns < 5000000000ll) {
+    if (now - interval_start_ns < interval_ns) {
         return;
     }
 
