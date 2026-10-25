@@ -61,12 +61,12 @@ static bool is_fan_draw(int primitive_mode, int polygon_mode)
             polygon_mode == POLY_MODE_FILL);
 }
 
-static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
+/* From the draw's geometry state and init-time renderer fields only */
+static VkPrimitiveTopology get_primitive_topology(PGRAPHVkState *r,
+                                                  const GeomState *geom)
 {
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    int polygon_mode = r->shader_binding->state.geom.polygon_front_mode;
-    int primitive_mode = r->shader_binding->state.geom.primitive_mode;
+    int polygon_mode = geom->polygon_front_mode;
+    int primitive_mode = geom->primitive_mode;
 
     // TODO: MoltenVK Fix: change this when there's a better solution for MoltenVK.
     if (!r->supports_geometry_shaders) {
@@ -1563,9 +1563,235 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
     memcpy(key->attribute_descriptions, r->vertex_attribute_descriptions,
            sizeof(key->attribute_descriptions[0]) *
                r->num_active_vertex_attribute_descriptions);
+    key->num_vertex_bindings = r->num_active_vertex_binding_descriptions;
+    key->num_vertex_attributes = r->num_active_vertex_attribute_descriptions;
 
     // FIXME: Use more dynamic state updates
     pgraph_vk_get_raster_state(pg, &key->raster);
+}
+
+/*
+ * A draw pipeline from its key alone, with init-time renderer fields: the
+ * vertex input, topology, rasterizer, depth-stencil and blend state, the
+ * attachments (from the render pass formats) and the push-constant range
+ * all come from @key. @mods: vertex, geometry (VK_NULL_HANDLE if none) and
+ * fragment modules of the key's shader state; @render_pass:
+ * get_render_pass(key->render_pass_state). The creation feedback chain
+ * goes in @feedback (*@pnext_out, *@stages_out for
+ * pgraph_vk_pipeline_cache_note_created). On failure nothing is left.
+ */
+static VkResult build_draw_pipeline(PGRAPHVkState *r, const PipelineKey *key,
+                                    const VkShaderModule mods[3],
+                                    VkRenderPass render_pass,
+                                    PipelineCacheFeedback *feedback,
+                                    const void **pnext_out,
+                                    uint32_t *stages_out,
+                                    VkPipeline *pipeline_out,
+                                    VkPipelineLayout *layout_out)
+{
+    bool color = key->render_pass_state.color_format != VK_FORMAT_UNDEFINED;
+    bool zeta = key->render_pass_state.zeta_format != VK_FORMAT_UNDEFINED;
+
+    /* Raster, depth-stencil and blend state come from the key only */
+    const RasterState *rs = &key->raster;
+
+    int num_active_shader_stages = 0;
+    VkPipelineShaderStageCreateInfo shader_stages[3];
+
+    shader_stages[num_active_shader_stages++] =
+        (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = mods[0],
+            .pName = "main",
+        };
+    if (mods[1] != VK_NULL_HANDLE) {
+        shader_stages[num_active_shader_stages++] =
+            (VkPipelineShaderStageCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_GEOMETRY_BIT,
+                .module = mods[1],
+                .pName = "main",
+            };
+    }
+    shader_stages[num_active_shader_stages++] =
+        (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = mods[2],
+            .pName = "main",
+        };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = key->num_vertex_bindings,
+        .pVertexBindingDescriptions = key->binding_descriptions,
+        .vertexAttributeDescriptionCount = key->num_vertex_attributes,
+        .pVertexAttributeDescriptions = key->attribute_descriptions,
+    };
+
+    /*
+     * NV2A supports an "index restart" marker in indexed draws (matching
+     * Vulkan's 0xFFFF / 0xFFFFFFFF semantics). Enable primitive restart
+     * for strip/fan topologies so titles that rely on the marker render
+     * correctly. Vulkan only permits restart with list topologies when
+     * VK_EXT_primitive_topology_list_restart is enabled; we don't, so
+     * gate to strip/fan only.
+     */
+    VkPrimitiveTopology topology =
+        get_primitive_topology(r, &key->shader_state.geom);
+    bool restart_enable =
+        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+        topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = topology,
+        .primitiveRestartEnable = restart_enable ? VK_TRUE : VK_FALSE,
+    };
+
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1,
+    };
+
+    void *rasterizer_next_struct = NULL;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable =
+            r->enabled_physical_device_features.depthClamp ? VK_TRUE : VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = pgraph_polygon_mode_vk_map[key->shader_state.geom
+                                                      .polygon_front_mode],
+        .lineWidth = 1.0f,
+        .cullMode = rs->cull_mode,
+        .frontFace = rs->front_face,
+        .depthBiasEnable = rs->depth_bias_enable,
+        .pNext = rasterizer_next_struct,
+    };
+    if (!r->enabled_physical_device_features.fillModeNonSolid &&
+        rasterizer.polygonMode != VK_POLYGON_MODE_FILL) {
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    }
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+
+    VkStencilOpState stencil = {
+        .failOp = rs->stencil_fail_op,
+        .passOp = rs->stencil_pass_op,
+        .depthFailOp = rs->stencil_depth_fail_op,
+        .compareOp = rs->stencil_compare_op,
+        .compareMask = rs->stencil_compare_mask,
+        .writeMask = rs->stencil_write_mask,
+        .reference = rs->stencil_reference,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = rs->depth_test_enable,
+        .depthWriteEnable = rs->depth_write_enable,
+        .depthCompareOp = rs->depth_compare_op,
+        .stencilTestEnable = rs->stencil_test_enable,
+        .front = stencil,
+        .back = stencil,
+    };
+
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = rs->blend_enable,
+        .srcColorBlendFactor = rs->blend_src_factor,
+        .dstColorBlendFactor = rs->blend_dst_factor,
+        .colorBlendOp = rs->blend_op,
+        .srcAlphaBlendFactor = rs->blend_src_factor,
+        .dstAlphaBlendFactor = rs->blend_dst_factor,
+        .alphaBlendOp = rs->blend_op,
+        .colorWriteMask = rs->color_write_mask,
+    };
+
+    VkPipelineColorBlendStateCreateInfo color_blending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .logicOp = VK_LOGIC_OP_COPY,
+        .attachmentCount = color ? 1 : 0,
+        .pAttachments = color ? &color_blend_attachment : NULL,
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamic_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = r->num_frame_dynamic_states,
+        .pDynamicStates = r->frame_dynamic_states,
+    };
+
+    VkDescriptorSetLayout set_layouts[2] = {
+        r->ubo_descriptor_set_layout,
+        r->descriptor_set_layout,
+    };
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 2,
+        .pSetLayouts = set_layouts,
+    };
+
+    VkPushConstantRange push_constant_range;
+    if (r->use_push_constants_for_uniform_attrs) {
+        int num_uniform_attributes =
+            __builtin_popcount(key->shader_state.vsh.uniform_attrs);
+        if (num_uniform_attributes) {
+            push_constant_range = (VkPushConstantRange){
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                .offset = 0,
+                // FIXME: Minimize push constants
+                .size = num_uniform_attributes * 4 * sizeof(float),
+            };
+            pipeline_layout_info.pushConstantRangeCount = 1;
+            pipeline_layout_info.pPushConstantRanges = &push_constant_range;
+        }
+    }
+
+    VkPipelineLayout layout;
+    VkResult res =
+        vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL, &layout);
+    if (res != VK_SUCCESS) {
+        return res;
+    }
+
+    VkGraphicsPipelineCreateInfo pipeline_create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = num_active_shader_stages,
+        .pStages = shader_stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = zeta ? &depth_stencil : NULL,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = layout,
+        .renderPass = render_pass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+    };
+    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_create_info.pNext,
+                                            pipeline_create_info.stageCount,
+                                            feedback);
+    VkPipeline pipeline;
+    res = vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                    &pipeline_create_info, NULL, &pipeline);
+    if (res != VK_SUCCESS) {
+        vkDestroyPipelineLayout(r->device, layout, NULL);
+        return res;
+    }
+    *pnext_out = pipeline_create_info.pNext;
+    *stages_out = pipeline_create_info.stageCount;
+    *pipeline_out = pipeline;
+    *layout_out = layout;
+    return VK_SUCCESS;
 }
 
 static void create_pipeline(PGRAPHState *pg)
@@ -1637,207 +1863,40 @@ static void create_pipeline(PGRAPHState *pg)
 
     memcpy(&snode->key, &key, sizeof(key));
 
-    /* Raster, depth-stencil and blend state come from the key only */
-    const RasterState *rs = &key.raster;
+    /* The builder reads the key; the live state it was made from agrees */
+    nv2a_vk_assert(key.num_vertex_bindings ==
+                   r->num_active_vertex_binding_descriptions);
+    nv2a_vk_assert(key.num_vertex_attributes ==
+                   r->num_active_vertex_attribute_descriptions);
+    nv2a_vk_assert(!memcmp(&key.shader_state, &r->shader_binding->state,
+                           sizeof(ShaderState)));
+    nv2a_vk_assert((key.render_pass_state.color_format !=
+                    VK_FORMAT_UNDEFINED) == (r->color_binding != NULL));
+    nv2a_vk_assert((key.render_pass_state.zeta_format !=
+                    VK_FORMAT_UNDEFINED) == (r->zeta_binding != NULL));
 
-    int num_active_shader_stages = 0;
-    VkPipelineShaderStageCreateInfo shader_stages[3];
-
-    shader_stages[num_active_shader_stages++] =
-        (VkPipelineShaderStageCreateInfo){
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = r->shader_binding->vsh.module_info->module,
-            .pName = "main",
-        };
-    if (r->shader_binding->geom.module_info) {
-        shader_stages[num_active_shader_stages++] =
-            (VkPipelineShaderStageCreateInfo){
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .stage = VK_SHADER_STAGE_GEOMETRY_BIT,
-                .module = r->shader_binding->geom.module_info->module,
-                .pName = "main",
-            };
-    }
-    shader_stages[num_active_shader_stages++] =
-        (VkPipelineShaderStageCreateInfo){
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = r->shader_binding->psh.module_info->module,
-            .pName = "main",
-        };
-
-    VkPipelineVertexInputStateCreateInfo vertex_input = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount =
-            r->num_active_vertex_binding_descriptions,
-        .pVertexBindingDescriptions = r->vertex_binding_descriptions,
-        .vertexAttributeDescriptionCount =
-            r->num_active_vertex_attribute_descriptions,
-        .pVertexAttributeDescriptions = r->vertex_attribute_descriptions,
+    const VkShaderModule mods[3] = {
+        r->shader_binding->vsh.module_info->module,
+        r->shader_binding->geom.module_info ?
+            r->shader_binding->geom.module_info->module :
+            VK_NULL_HANDLE,
+        r->shader_binding->psh.module_info->module,
     };
-
-    /*
-     * NV2A supports an "index restart" marker in indexed draws (matching
-     * Vulkan's 0xFFFF / 0xFFFFFFFF semantics). Enable primitive restart
-     * for strip/fan topologies so titles that rely on the marker render
-     * correctly. Vulkan only permits restart with list topologies when
-     * VK_EXT_primitive_topology_list_restart is enabled; we don't, so
-     * gate to strip/fan only.
-     */
-    VkPrimitiveTopology topology = get_primitive_topology(pg);
-    bool restart_enable =
-        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
-        topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
-        topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
-
-    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = topology,
-        .primitiveRestartEnable = restart_enable ? VK_TRUE : VK_FALSE,
-    };
-
-    VkPipelineViewportStateCreateInfo viewport_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount = 1,
-    };
-
-    void *rasterizer_next_struct = NULL;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .depthClampEnable =
-            r->enabled_physical_device_features.depthClamp ? VK_TRUE : VK_FALSE,
-        .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode = pgraph_polygon_mode_vk_map[r->shader_binding->state.geom
-                                                      .polygon_front_mode],
-        .lineWidth = 1.0f,
-        .cullMode = rs->cull_mode,
-        .frontFace = rs->front_face,
-        .depthBiasEnable = rs->depth_bias_enable,
-        .pNext = rasterizer_next_struct,
-    };
-    if (!r->enabled_physical_device_features.fillModeNonSolid &&
-        rasterizer.polygonMode != VK_POLYGON_MODE_FILL) {
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    }
-
-    VkPipelineMultisampleStateCreateInfo multisampling = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .sampleShadingEnable = VK_FALSE,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-
-    VkStencilOpState stencil = {
-        .failOp = rs->stencil_fail_op,
-        .passOp = rs->stencil_pass_op,
-        .depthFailOp = rs->stencil_depth_fail_op,
-        .compareOp = rs->stencil_compare_op,
-        .compareMask = rs->stencil_compare_mask,
-        .writeMask = rs->stencil_write_mask,
-        .reference = rs->stencil_reference,
-    };
-    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = rs->depth_test_enable,
-        .depthWriteEnable = rs->depth_write_enable,
-        .depthCompareOp = rs->depth_compare_op,
-        .stencilTestEnable = rs->stencil_test_enable,
-        .front = stencil,
-        .back = stencil,
-    };
-
-    VkPipelineColorBlendAttachmentState color_blend_attachment = {
-        .blendEnable = rs->blend_enable,
-        .srcColorBlendFactor = rs->blend_src_factor,
-        .dstColorBlendFactor = rs->blend_dst_factor,
-        .colorBlendOp = rs->blend_op,
-        .srcAlphaBlendFactor = rs->blend_src_factor,
-        .dstAlphaBlendFactor = rs->blend_dst_factor,
-        .alphaBlendOp = rs->blend_op,
-        .colorWriteMask = rs->color_write_mask,
-    };
-
-    VkPipelineColorBlendStateCreateInfo color_blending = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .logicOpEnable = VK_FALSE,
-        .logicOp = VK_LOGIC_OP_COPY,
-        .attachmentCount = r->color_binding ? 1 : 0,
-        .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
-    };
-
-    VkPipelineDynamicStateCreateInfo dynamic_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = r->num_frame_dynamic_states,
-        .pDynamicStates = r->frame_dynamic_states,
-    };
-
-    VkDescriptorSetLayout set_layouts[2] = {
-        r->ubo_descriptor_set_layout,
-        r->descriptor_set_layout,
-    };
-    VkPipelineLayoutCreateInfo pipeline_layout_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 2,
-        .pSetLayouts = set_layouts,
-    };
-
-    VkPushConstantRange push_constant_range;
-    if (r->use_push_constants_for_uniform_attrs) {
-        int num_uniform_attributes =
-            __builtin_popcount(r->shader_binding->state.vsh.uniform_attrs);
-        if (num_uniform_attributes) {
-            push_constant_range = (VkPushConstantRange){
-                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-                .offset = 0,
-                // FIXME: Minimize push constants
-                .size = num_uniform_attributes * 4 * sizeof(float),
-            };
-            pipeline_layout_info.pushConstantRangeCount = 1;
-            pipeline_layout_info.pPushConstantRanges = &push_constant_range;
-        }
-    }
-
-    VkPipelineLayout layout;
-    VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
-                                    &layout));
-
-    VkGraphicsPipelineCreateInfo pipeline_create_info = {
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .stageCount = num_active_shader_stages,
-        .pStages = shader_stages,
-        .pVertexInputState = &vertex_input,
-        .pInputAssemblyState = &input_assembly,
-        .pViewportState = &viewport_state,
-        .pRasterizationState = &rasterizer,
-        .pMultisampleState = &multisampling,
-        .pDepthStencilState = r->zeta_binding ? &depth_stencil : NULL,
-        .pColorBlendState = &color_blending,
-        .pDynamicState = &dynamic_state,
-        .layout = layout,
-        .renderPass = get_render_pass(r, &key.render_pass_state),
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-    };
+    VkRenderPass render_pass = get_render_pass(r, &key.render_pass_state);
     PipelineCacheFeedback feedback;
-    pgraph_vk_pipeline_cache_feedback_chain(r, &pipeline_create_info.pNext,
-                                            pipeline_create_info.stageCount,
-                                            &feedback);
+    const void *pnext;
+    uint32_t stages;
     VkPipeline pipeline;
-    VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
-                                       &pipeline_create_info, NULL, &pipeline));
-    pgraph_vk_pipeline_cache_note_created(r, pipeline_create_info.pNext,
-                                          pipeline_create_info.stageCount,
-                                          &feedback);
+    VkPipelineLayout layout;
+    VK_CHECK(build_draw_pipeline(r, &key, mods, render_pass, &feedback,
+                                 &pnext, &stages, &pipeline, &layout));
+    pgraph_vk_pipeline_cache_note_created(r, pnext, stages, &feedback);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
-    nsprof_pipeline_created(pipeline_create_info.pNext,
-                            pipeline_create_info.stageCount, &feedback,
-                            nsprof_t0, "draw");
+    nsprof_pipeline_created(pnext, stages, &feedback, nsprof_t0, "draw");
 
     snode->pipeline = pipeline;
     snode->layout = layout;
-    snode->render_pass = pipeline_create_info.renderPass;
+    snode->render_pass = render_pass;
     snode->draw_time = pg->draw_time;
 
     r->pipeline_binding = snode;

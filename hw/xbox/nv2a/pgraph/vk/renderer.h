@@ -101,6 +101,9 @@ typedef struct RasterState {
 
 typedef struct PipelineKey {
     bool clear;
+    /* Draw keys: the active vertex input counts (padding before) */
+    uint8_t num_vertex_bindings;
+    uint8_t num_vertex_attributes;
     uint32_t clear_parameter; /* clear keys only */
     RenderPassState render_pass_state;
     ShaderState shader_state;
@@ -116,6 +119,8 @@ typedef struct PipelineKey {
     VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
 } PipelineKey;
+
+QEMU_BUILD_BUG_ON(offsetof(PipelineKey, clear_parameter) != 4);
 
 typedef struct PipelineBinding {
     LruNode node;
