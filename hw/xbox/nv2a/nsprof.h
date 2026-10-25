@@ -175,6 +175,9 @@ enum NsprofEvent {
     /* threaded puller batches (pfifo.lock_batch): why a batch ended */
     NSPROF_EV_PG_TRYFAIL,      /* pfifo.lock was held (pgraph_write, a kick) */
     NSPROF_EV_PG_CAP,          /* PFIFO_PG_RUN commands */
+    /* texture descriptor sets (vk/shaders.c) */
+    NSPROF_EV_TEX_SET_WRITE,   /* a set written */
+    NSPROF_EV_TEX_SET_REUSE,   /* rebound textures resolved to the set's handles */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

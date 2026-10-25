@@ -183,6 +183,37 @@ static void destroy_descriptor_sets(PGRAPHState *pg)
     }
 }
 
+/* The image view and sampler a texture slot's descriptor gets */
+static void texture_slot_handles(PGRAPHVkState *r, int i, VkImageView *view,
+                                 VkSampler *sampler)
+{
+    TextureBinding *tex_binding = r->texture_bindings[i];
+    SamplerCacheEntry *sampler_binding = r->sampler_bindings[i];
+
+    *view = (tex_binding ? tex_binding : &r->dummy_texture)->image_view;
+    *sampler = sampler_binding ? sampler_binding->sampler
+                               : r->dummy_sampler.sampler;
+}
+
+/*
+ * The guest re-sends texture state nearly every draw, so bindings are
+ * marked changed far more often than the handles they resolve to change:
+ * compare with the set this command buffer last wrote.
+ */
+static bool texture_set_differs(PGRAPHVkState *r)
+{
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        VkImageView view;
+        VkSampler sampler;
+        texture_slot_handles(r, i, &view, &sampler);
+        if (view != r->tex_set_views[i] || sampler != r->tex_set_samplers[i]) {
+            return true;
+        }
+    }
+    nsprof_event(NSPROF_EV_TEX_SET_REUSE);
+    return false;
+}
+
 void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -199,9 +230,9 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
             r->flight[r->current_flight].ubo_descriptor_set_base;
     bool need_tex_advance =
         r->shader_bindings_changed ||
-        r->texture_bindings_changed ||
         r->descriptor_set_index ==
-            r->flight[r->current_flight].descriptor_set_base;
+            r->flight[r->current_flight].descriptor_set_base ||
+        (r->texture_bindings_changed && texture_set_differs(r));
 
     if (!need_ubo_advance && !need_tex_advance) {
         return; /* Nothing changed; reuse currently-bound sets */
@@ -308,19 +339,12 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
     if (need_tex_advance) {
         VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
         for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
-            TextureBinding *tex_binding = r->texture_bindings[i];
-            if (!tex_binding) {
-                tex_binding = &r->dummy_texture;
-            }
-
-            SamplerCacheEntry *sampler_binding = r->sampler_bindings[i];
-            VkSampler sampler = sampler_binding ? sampler_binding->sampler
-                                                : r->dummy_sampler.sampler;
-
+            texture_slot_handles(r, i, &r->tex_set_views[i],
+                                 &r->tex_set_samplers[i]);
             image_infos[i] = (VkDescriptorImageInfo){
                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .imageView = tex_binding->image_view,
-                .sampler = sampler,
+                .imageView = r->tex_set_views[i],
+                .sampler = r->tex_set_samplers[i],
             };
         }
         /*
@@ -343,6 +367,7 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
             .pImageInfo = image_infos,
         };
         vkUpdateDescriptorSets(r->device, 1, &tex_write, 0, NULL);
+        nsprof_event(NSPROF_EV_TEX_SET_WRITE);
         r->descriptor_set_index++;
     }
 }

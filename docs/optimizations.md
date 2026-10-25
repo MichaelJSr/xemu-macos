@@ -2551,6 +2551,22 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **Texture descriptor sets are reused while their handles match
+  (2026-10-24).** The guest re-sends texture state nearly every draw,
+  so `texture_bindings_changed` was set on almost every draw and each
+  wrote a 4-image descriptor set (MoltenVK argument-buffer writes) and
+  rebound set 1, though the views and samplers rarely change. A draw
+  now compares its handles with the set the command buffer last wrote
+  and reuses it when they match; the first draw of each command buffer
+  still writes, and handles can't be recycled within one (textures and
+  samplers retire on the submission watermark). The uniform pull keeps
+  its own gate. On the l256_120 probe 176 sets written a flip instead
+  of ~1,740 (90% reused). Det offscreen RAM and screendumps equal to
+  base on four anchors; det offscreen Mcycles/frame −2.75% on the
+  probe, −2.07% on heavy-f1 (2/3), Minsns −0.8% (3/3 on heavy-f1).
+  Real time on the probe's 120 fps build +6.3% frames a vblank (3/4 at
+  load 50-60; noisy). nsprof `tex_set_write`, `tex_set_reuse`.
+
 - **Remapped vertex attributes copy in fixed sizes (2026-10-24).** An
   attribute whose offset or stride Metal can't fetch is repacked per
   vertex into inline staging, and each vertex was a `memcpy` of a

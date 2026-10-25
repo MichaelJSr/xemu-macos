@@ -1023,6 +1023,16 @@ typedef struct PGRAPHVkState {
     TextureBinding *texture_bindings[NV2A_MAX_TEXTURES];
     TextureBinding dummy_texture;
     bool texture_bindings_changed;
+    /*
+     * The image views and samplers in the texture set the current command
+     * buffer last wrote (descriptor_sets[descriptor_set_index - 1]): a draw
+     * whose bindings resolve to the same handles reuses that set. Handles
+     * can't be recycled within a command buffer (textures and samplers are
+     * destroyed only once their submission retires), and the first draw of
+     * each command buffer writes a set.
+     */
+    VkImageView tex_set_views[NV2A_MAX_TEXTURES];
+    VkSampler tex_set_samplers[NV2A_MAX_TEXTURES];
     VkFormatProperties *texture_format_properties;
     GThreadPool *decode_thread_pool;
 

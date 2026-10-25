@@ -96,6 +96,8 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_SHADER_EVICT] = "shader_evict",
     [NSPROF_EV_PG_TRYFAIL] = "pg_tryfail",
     [NSPROF_EV_PG_CAP] = "pg_cap",
+    [NSPROF_EV_TEX_SET_WRITE] = "tex_set_write",
+    [NSPROF_EV_TEX_SET_REUSE] = "tex_set_reuse",
     [NSPROF_EV_PIPELINE_EVICT] = "pipeline_evict",
 };
 
