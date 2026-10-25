@@ -245,9 +245,12 @@ and sign tally, quote the load, and add pairs (3-6 × 75 s) when the delta
 is under ~2% or signs are mixed: there's no quiet box to wait for.
 A change to the shader generators or renderer must also pass a det
 offscreen cold boot (`bench-det.py --renderer offscreen -n 1 -t - -f 1800
---hash-at 900,1800`, base against new): Azurik's gameplay states draw with
+--hash-at 900,1800 --shot DIR`, base against new; `--shot` saves the
+f1800 picture from the same run, after its RAM hash; an f900 picture is a
+separate `-f 900 --shot` run): Azurik's gameplay states draw with
 vertex programs, and only the boot reaches fixed-function shaders (a GLSL
-that fails to compile aborts there).
+that fails to compile aborts there). Compare pictures only from the same
+`-f`/`--hash-at` schedule, by pixel-difference counts rather than sha.
 
 **Vulkan driver** (macOS; `docs/kosmickrisp.md`): icount and offscreen
 runs pin MoltenVK; windowed runs follow `[display.vulkan] driver` (Auto:

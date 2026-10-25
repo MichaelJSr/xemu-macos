@@ -3,7 +3,7 @@
 
     bench-det.py [-n PAIRS] [-f FRAMES] [-t TAG] [-i LINE]... [--hash-at F,F]
                  [--icount ARGS] [--renderer null|offscreen] [--out FILE]
-                 NAME=APP[:K=V,K=V] ...
+                 [--shot DIR] [--dvd ISO] NAME=APP[:K=V,K=V] ...
 
 Each run clones the source config ($XEMU_TEST_CONFIG, else
 ../fixtures/xemu.toml) and the HDD and EEPROM it names into a fresh temp
@@ -25,6 +25,17 @@ per driver.
 An arm's K=V list splits at a comma only where NAME= follows it, so a
 value may hold commas as long as none is followed by NAME=:
 kk=/tmp/e.app:XEMU_VK_DRIVER=kosmickrisp,MESA_KK_DISABLE_WORKAROUNDS=2,6,17
+
+--shot DIR saves each run's picture at its final stop: after the last
+xemu-frame-advance and the RAM hash, a QMP screendump (PNG) to
+DIR/<arm>-<pair>-f<N>.png (--check: DIR/<arm>-<run>-f<N>.png), then
+quit. Never at an earlier stop: a screendump can finish the frame
+(pgraph_vk_finish) and add a split, which moves later report sums and
+pixels. Its sha256[:12] prints as png=, beside the RAM hash, and never
+counts as a RAM difference. Compare pictures only from the same
+-f/--hash-at schedule, by pixel-difference counts rather than sha (an
+f900 picture of a 900,1800 schedule is a separate `-f 900 --shot` run).
+--dvd ISO passes -dvd_path ISO to every run (no clone: pass a clone).
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
 and instructions per guest frame across the whole process, and its CPU
@@ -313,7 +324,8 @@ def check_driver(name, env, driver):
 LIVE = set()   # running xemus (--check kills them on an interrupt)
 
 
-def run_once(app, env, a, purpose=''):
+def run_once(app, env, a, purpose='', label='run'):
+    shot, dvd = getattr(a, 'shot', ''), getattr(a, 'dvd', '')   # pgo-train's Namespace has neither
     d = scratch_dir()
     try:
         toml, pads, fifo, sock, log = scratch(d)
@@ -321,6 +333,8 @@ def run_once(app, env, a, purpose=''):
         e = run_env(env, headless, fifo, base)
         cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
                '-qmp', f'unix:{sock},server,nowait', '-S', '-icount', a.icount] + pads
+        if dvd:
+            cmd += ['-dvd_path', os.path.abspath(dvd)]
         stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
         with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
                          30 + stops[-1] // 20, keep=env, env=e, stdout=subprocess.DEVNULL,
@@ -347,6 +361,12 @@ def run_once(app, env, a, purpose=''):
                 ins, cyc, done = ins + i1 - i0, cyc + c1 - c0, s
                 cpu, run = cpu + u1 - u0, run + r1 - r0
                 hashes.append(f'f{s}=' + ram_sha256(q, d)[:16])
+            png = ''
+            if shot:   # the final stop only, after its RAM hash (see the docstring)
+                os.makedirs(shot, exist_ok=True)
+                f = os.path.join(os.path.abspath(shot), f'{label}-f{done}.png')
+                q.cmd('screendump', filename=f, format='png')
+                png = hashlib.sha256(open(f, 'rb').read()).hexdigest()[:12]
             try:
                 q.cmd('quit')
             except Exception:
@@ -354,7 +374,7 @@ def run_once(app, env, a, purpose=''):
             proc.wait(timeout=30)
             LIVE.discard(proc)
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
-                'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes),
+                'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes), 'png': png,
                 'driver': vk_driver(log)}
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -921,7 +941,7 @@ def check(a, arms):
         (key, tag, frames, hash_at, inp), (name, app, env) = job
         ns = argparse.Namespace(**vars(a))
         ns.tag, ns.frames, ns.hash_at, ns.input = tag, frames, hash_at, list(inp)
-        return run_once(app, env, ns, f'bench-det --check {key} {name}')
+        return run_once(app, env, ns, f'bench-det --check {key} {name}', f'{name}-{key}')
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs or min(len(jobs), 3))
     try:
@@ -944,7 +964,8 @@ def check(a, arms):
                 verdict = 'OK'
             else:
                 verdict = 'MOVED (want ' + ' '.join(f'{s}={v}' for s, v in want.items()) + ')'
-            print(f'{key:12s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f', flush=True)
+            print(f'{key:12s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f'
+                  + (f'  png={r["png"]}' if r['png'] else ''), flush=True)
     except KeyboardInterrupt:
         for p in list(LIVE):
             p.kill()
@@ -978,11 +999,14 @@ def main():
     p.add_argument('--out', default='')
     p.add_argument('--renderer', choices=('null', 'offscreen'), default='null',
                    help='offscreen: Vulkan on a portable clone with cold caches')
+    p.add_argument('--shot', default='', metavar='DIR',
+                   help='QMP screendump at the final stop to DIR/<arm>-<pair>-f<N>.png')
     t = p.add_argument_group('boot timeline (--timeline)')
     t.add_argument('--timeline', action='store_true',
                    help='cold boot to steady play, phase by phase (-n timing runs per arm)')
     t.add_argument('--dvd', default='', help='disc to boot (default: the fixture config\'s); '
-                   'with --from-state, the disc put in the tray after the load')
+                   'with --from-state, the disc put in the tray after the load; plain and '
+                   '--check runs get -dvd_path ISO (no clone)')
     t.add_argument('--from-state', default='', metavar='TAG',
                    help='boot from a loaded state instead of power-on: loadvm TAG, --dvd into the '
                         'tray, --hdd-io, system_reset (the Azurik harness\'s boot-build path)')
@@ -1027,11 +1051,13 @@ def main():
     for i in range(a.pairs):
         for name, app, env in arms:
             r = run_once(app, env, a, f'bench-det {name} pair {i + 1}/{a.pairs} '
-                                      f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames')
+                                      f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames',
+                         f'{name}-{i + 1}')
             res[name].append(r)
             line = (f'{i + 1} {name}: {r["fps"]:.1f} fps  {r["mcyc"]:.3f} Mcyc/f  '
                     f'{r["mins"]:.3f} Mins/f  {r["cpu_s"]:.2f}/{r["runnable_s"]:.2f} cpu/runnable s  '
-                    f'{r["ram"]}' + (f'  ({r["driver"]})' if r['driver'] else ''))
+                    f'{r["ram"]}' + (f'  png={r["png"]}' if r['png'] else '')
+                    + (f'  ({r["driver"]})' if r['driver'] else ''))
             print(line, flush=True)
             if out:
                 out.write(json.dumps({'pair': i + 1, 'arm': name, **r}) + '\n')
