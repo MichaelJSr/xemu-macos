@@ -2510,6 +2510,18 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **Read spans skip pages already read whole (2026-10-24).** A large
+  model's draws note ~350K vertex RAM pages a flip into the slot's read
+  spans, nearly all whole, and the body is drawn twice (with its
+  shadow), so most pages come back within one window. Once a page's
+  span 0 is the whole page every later note to it is a no-op until the
+  window resets, so a per-slot `whole_bitmap` (reset with
+  `read_bitmap`) now skips runs of such pages a bitmap word at a time.
+  A check build verified the no-op precondition on every skipped page
+  (25.5M on the l256_120 probe's 300 det frames); `XEMU_VTX_SPAN_REFUTE`
+  0 violations; det offscreen RAM and screendumps equal to base. l256_120
+  probe Minsns/frame −2.06% (4/4), Mcycles −1.01% (3/4); heavy-f1 flat.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

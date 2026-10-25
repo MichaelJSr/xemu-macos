@@ -715,6 +715,12 @@ typedef struct PGRAPHVkState {
          * draw reads.
          */
         unsigned long *read_bitmap;
+        /*
+         * Pages a draw read whole in this window: their span 0 is the
+         * page, so every later note is a no-op until the window resets
+         * (cleared with read_bitmap). Lets the noting skip them.
+         */
+        unsigned long *whole_bitmap;
         uint16_t *page_span_min;
         uint16_t *page_span_max;
         uint8_t *page_span_count;

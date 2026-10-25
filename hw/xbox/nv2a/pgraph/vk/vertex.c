@@ -288,6 +288,7 @@ static void forget_slot_vertex_ram(PGRAPHVkState *r, int slot)
 {
     bitmap_clear(r->flight[slot].uploaded_bitmap, 0, r->bitmap_size);
     bitmap_clear(r->flight[slot].read_bitmap, 0, r->bitmap_size);
+    bitmap_clear(r->flight[slot].whole_bitmap, 0, r->bitmap_size);
     r->flight[slot].uploaded_first_dirty_bit = ULONG_MAX;
     r->flight[slot].uploaded_last_dirty_bit = 0;
     pgraph_vk_refute_forget(r, slot);
@@ -438,6 +439,7 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
     int slot = r->current_flight;
     unsigned long *rb = r->flight[slot].read_bitmap;
+    unsigned long *wb = r->flight[slot].whole_bitmap;
     uint16_t *smin = r->flight[slot].page_span_min;
     uint16_t *smax = r->flight[slot].page_span_max;
     uint8_t *count = r->flight[slot].page_span_count;
@@ -459,6 +461,18 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
             uint16_t *mx = &smax[b * VTX_PAGE_SPANS];
 
             if (plo == 0 && phi == TARGET_PAGE_SIZE) {
+                if (test_bit(b, wb)) {
+                    /*
+                     * Whole already in this window: skip the run of such
+                     * pages, a bitmap word at a time ([b, hi's page) are
+                     * all whole reads). The model draws its body twice
+                     * a flip, so most of its pages come back.
+                     */
+                    size_t nb = find_next_zero_bit(wb, hi / TARGET_PAGE_SIZE,
+                                                   b);
+                    page = (hwaddr)nb * TARGET_PAGE_SIZE - TARGET_PAGE_SIZE;
+                    continue;
+                }
                 /*
                  * A whole page, what the search below would leave: every
                  * span lies within it (gap 0), so span 0 widens to the
@@ -471,7 +485,11 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
                     set_bit(b, rb);
                     count[b] = 1;
                 }
+                set_bit(b, wb);
                 continue;
+            }
+            if (test_bit(b, wb)) {
+                continue;   /* span 0 holds the page: a no-op */
             }
             if (!test_bit(b, rb)) {
                 set_bit(b, rb);

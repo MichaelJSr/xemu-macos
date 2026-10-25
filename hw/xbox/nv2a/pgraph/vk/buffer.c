@@ -139,6 +139,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
         r->flight[i].uploaded_first_dirty_bit = ULONG_MAX;
         r->flight[i].uploaded_last_dirty_bit = 0;
         r->flight[i].read_bitmap = bitmap_new(r->bitmap_size);
+        r->flight[i].whole_bitmap = bitmap_new(r->bitmap_size);
         r->flight[i].page_span_min =
             g_malloc_n(r->bitmap_size * VTX_PAGE_SPANS, sizeof(uint16_t));
         r->flight[i].page_span_max =
@@ -338,6 +339,8 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
         r->flight[i].uploaded_bitmap = NULL;
         g_free(r->flight[i].read_bitmap);
         r->flight[i].read_bitmap = NULL;
+        g_free(r->flight[i].whole_bitmap);
+        r->flight[i].whole_bitmap = NULL;
         g_free(r->flight[i].page_span_min);
         r->flight[i].page_span_min = NULL;
         g_free(r->flight[i].page_span_max);
