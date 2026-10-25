@@ -79,6 +79,38 @@ VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
     return res;
 }
 
+/*
+ * @count u32 indices, every one below 0xFFFF, appended as u16. The run is
+ * padded to an even count, so every index append stays 4-byte aligned for
+ * the u32 binds around it (an index buffer offset is a multiple of its
+ * index size).
+ */
+VkDeviceSize pgraph_vk_update_index_buffer_u16(PGRAPHState *pg,
+                                               const uint32_t *indices,
+                                               size_t count)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    StorageBuffer *b = &r->storage_buffers[BUFFER_INDEX_STAGING];
+    size_t padded = ROUND_UP(count, 2);
+
+    nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_2);
+    int64_t nsprof_t0 = nsprof_begin();
+    assert(pgraph_vk_buffer_has_space_for(pg, BUFFER_INDEX_STAGING,
+                                          padded * sizeof(uint16_t), 1, 1));
+    VkDeviceSize offset = b->buffer_offset;
+    nv2a_vk_assert(offset % 4 == 0);
+    uint16_t *restrict dst = (uint16_t *)(b->mapped + offset);
+    for (size_t i = 0; i < count; i++) {
+        dst[i] = indices[i];
+    }
+    if (padded != count) {
+        dst[count] = 0;
+    }
+    b->buffer_offset = offset + padded * sizeof(uint16_t);
+    nsprof_end(NSPROF_GEOM_UPDATE, nsprof_t0);
+    return offset;
+}
+
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                                    VkDeviceSize *sizes,
                                                    size_t count)

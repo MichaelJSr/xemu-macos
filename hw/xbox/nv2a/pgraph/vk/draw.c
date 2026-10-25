@@ -3432,11 +3432,24 @@ void pgraph_vk_flush_draw(NV2AState *d)
         r->refute_draw_vertices = range_vertices;
         bind_vertex_buffer(pg, remap.attributes, 0);
         if (index_count > 0) {
-            VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
-                pg, (void *)indices, index_count * sizeof(indices[0]));
+            /*
+             * u16 when no index can be 0xFFFF, the u16 strip restart
+             * (always on under Metal): half the staging copy and index
+             * fetch. ARRAY_ELEMENT16 batches always qualify but one
+             * holding index 0xFFFF.
+             */
+            bool u16 = !emulate_primitives && max_element < 0xFFFF;
+            VkDeviceSize buffer_offset =
+                u16 ? pgraph_vk_update_index_buffer_u16(pg, indices,
+                                                        index_count) :
+                      pgraph_vk_update_index_buffer(
+                          pg, (void *)indices,
+                          index_count * sizeof(indices[0]));
             bind_index_buffer(pg,
                               r->storage_buffers[BUFFER_INDEX].buffer,
-                              buffer_offset, VK_INDEX_TYPE_UINT32);
+                              buffer_offset,
+                              u16 ? VK_INDEX_TYPE_UINT16 :
+                                    VK_INDEX_TYPE_UINT32);
             nsprof_event(NSPROF_EV_VK_DRAW_CALL);
             count_fan_draw(pg);
             vkCmdDrawIndexed(r->command_buffer, index_count, 1, 0,

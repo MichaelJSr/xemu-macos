@@ -1302,6 +1302,9 @@ void pgraph_vk_refute_note_read(PGRAPHVkState *r, hwaddr offset,
 void pgraph_vk_refute_forget(PGRAPHVkState *r, int slot);
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size);
+VkDeviceSize pgraph_vk_update_index_buffer_u16(PGRAPHState *pg,
+                                               const uint32_t *indices,
+                                               size_t count);
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                                    VkDeviceSize *sizes,
                                                    size_t count);

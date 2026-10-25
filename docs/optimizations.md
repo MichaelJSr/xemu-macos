@@ -2422,6 +2422,19 @@ x86_64 host (Windows, Linux, Intel macOS).
   det offscreen probe Minsns/frame −1.7% on top of the read-span fast
   path (3/3).
 
+- **Index batches upload as u16 when no index can be 0xFFFF
+  (2026-10-24).** Inline-element indices went into staging as u32, so
+  ARRAY_ELEMENT16 batches doubled in size on the way: 52 MB a flip for
+  Azurik's l256_120 probe, copied by the PFIFO thread, blitted to
+  `BUFFER_INDEX` and fetched. A batch whose max is below 0xFFFF (every
+  ARRAY_ELEMENT16 batch but one holding 0xFFFF, the u16 restart value
+  Metal can't disable) now goes up as u16, padded to an even count so
+  appends stay 4-byte aligned; emulated fans stay u32. Det offscreen
+  RAM and screendumps equal to base; probe Minsns/frame −1.1% on top of
+  the range change (3/3). The three renderer changes together, real
+  time on the probe's 120 fps build (no frame cap, 3 pairs, load
+  42-52): 0.573 → 0.605 frames a vblank.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New
