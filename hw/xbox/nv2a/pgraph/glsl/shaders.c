@@ -48,10 +48,10 @@ bool pgraph_glsl_check_shader_state_dirty(PGRAPHState *pg,
         NV_PGRAPH_COMBINESPECFOG1, NV_PGRAPH_CONTROL_0,
         NV_PGRAPH_CONTROL_3,       NV_PGRAPH_CSV0_C,
         NV_PGRAPH_CSV0_D,          NV_PGRAPH_CSV1_A,
-        NV_PGRAPH_CSV1_B,          NV_PGRAPH_POINTSIZE,
-        NV_PGRAPH_SETUPRASTER,     NV_PGRAPH_SHADERCLIPMODE,
-        NV_PGRAPH_SHADERCTL,       NV_PGRAPH_SHADERPROG,
-        NV_PGRAPH_SHADOWCTL,       NV_PGRAPH_ZCOMPRESSOCCLUDE,
+        NV_PGRAPH_CSV1_B,          NV_PGRAPH_SETUPRASTER,
+        NV_PGRAPH_SHADERCLIPMODE,  NV_PGRAPH_SHADERCTL,
+        NV_PGRAPH_SHADERPROG,      NV_PGRAPH_SHADOWCTL,
+        NV_PGRAPH_ZCOMPRESSOCCLUDE,
     };
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {
         if (pgraph_is_reg_dirty(pg, regs[i])) {

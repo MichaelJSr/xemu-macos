@@ -501,8 +501,11 @@ void pgraph_vsh_carryover_update(PGRAPHState *pg)
      * constants in place; the upstream path keeps upstream's struct, since
      * an out-of-range register reads past its array.
      */
-    Nv2aVshCPUFullExecutionState full;
-    float inputs[16 * 4], outputs[13 * 4], temps[12 * 4] = { 0 };
+    /* Written in full below before any read: not auto-zeroed per draw */
+    QEMU_UNINITIALIZED Nv2aVshCPUFullExecutionState full;
+    QEMU_UNINITIALIZED float inputs[16 * 4];
+    QEMU_UNINITIALIZED float outputs[13 * 4];
+    float temps[12 * 4] = { 0 };
     float address[4] = { 0 };
     Nv2aVshExecutionState state;
     if (cs->upstream_path) {

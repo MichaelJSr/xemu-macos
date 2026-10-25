@@ -641,7 +641,9 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
 
     if (!r->shader_binding ||
         pgraph_glsl_check_shader_state_dirty(pg, &r->shader_binding->state)) {
-        ShaderState new_state = pgraph_glsl_get_shader_state(pg);
+        /* Not auto-zeroed: get_shader_state memsets it (padding too) */
+        QEMU_UNINITIALIZED ShaderState new_state =
+            pgraph_glsl_get_shader_state(pg);
         if (!r->shader_binding || memcmp(&r->shader_binding->state, &new_state,
                                          sizeof(ShaderState))) {
             r->shader_binding = get_shader_binding_for_state(r, &new_state);

@@ -2495,6 +2495,21 @@ x86_64 host (Windows, Linux, Intel macOS).
   noise, on the l256_120 probe's uncapped real-time rate (12 pairs,
   load 50-72), and large models come first.
 
+- **Uniform pulls compare packed arrays in one memcmp (2026-10-24).**
+  Every draw after a constant upload pulls the shader uniforms, and
+  `uniform_copy` compared them a vec4 at a time with two asserts and
+  reloads per element: ~320 elements (c[192] and the light and
+  combiner arrays), ~3.3K instructions a draw. Tightly packed arrays
+  (stride equal to the element size) now compare and copy as one run,
+  same bytes and same dirty flag. Also not auto-zeroed per draw any
+  more: `ShaderState` in `pgraph_vk_bind_shaders` (get_shader_state
+  memsets it) and the fog carryover's inputs, outputs and full state
+  (written in full before any read); and NV_PGRAPH_POINTSIZE leaves the
+  shader-state dirty list (no key field reads it since the point size
+  became a uniform). Det offscreen RAM and screendumps equal to base on
+  four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
+  −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

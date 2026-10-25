@@ -134,6 +134,23 @@ static inline void uniform_copy(ShaderUniformLayout *layout, int idx,
     char *p_max = p_out + layout->total_size;
     char *p_in = (char *)values;
 
+    if (u->stride == element_size) {
+        /*
+         * Tightly packed (std140 vec4 arrays such as c[192], and single
+         * values): one compare for the run. Copying every element when one
+         * differs leaves the same bytes and the same dirty flag as the
+         * per-element loop.
+         */
+        assert(bytes_remaining % element_size == 0);
+        assert(bytes_remaining / element_size <= u->dim_a);
+        assert(p_out + bytes_remaining <= p_max);
+        if (memcmp(p_out, p_in, bytes_remaining) != 0) {
+            memcpy(p_out, p_in, bytes_remaining);
+            layout->dirty = true;
+        }
+        return;
+    }
+
     int index = 0;
     while (bytes_remaining) {
         assert((p_out + element_size) <= p_max);
