@@ -966,9 +966,9 @@ typedef struct PGRAPHVkState {
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
     /*
-     * Unified memory: BUFFER_VERTEX_INLINE and BUFFER_UNIFORM alias their
-     * staging buffers, which draws bind directly (no device twin, no copy
-     * at finish).
+     * Unified memory: BUFFER_INDEX, BUFFER_VERTEX_INLINE and BUFFER_UNIFORM
+     * alias their staging buffers, which draws bind directly (no device
+     * twin, no copy at finish).
      */
     bool direct_staging;
 

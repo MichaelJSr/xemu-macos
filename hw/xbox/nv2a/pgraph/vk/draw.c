@@ -2312,30 +2312,40 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         }
         VK_CHECK(vkEndCommandBuffer(r->command_buffer));
 
-        bool staged_index =
-            r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset >
-            get_staging_slot_base(r, BUFFER_INDEX_STAGING);
+        /*
+         * Aliased (unified memory) staging needs no copy, and on coherent
+         * memory the vertex mirror needs no flush or barrier either: host
+         * writes before vkQueueSubmit are visible to it. Then a finish
+         * submits its command buffer alone.
+         */
         bool staged = !r->direct_staging && (
+            r->storage_buffers[BUFFER_INDEX_STAGING].buffer_offset >
+                get_staging_slot_base(r, BUFFER_INDEX_STAGING) ||
             r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_offset >
                 get_staging_slot_base(r, BUFFER_VERTEX_INLINE_STAGING) ||
             r->storage_buffers[BUFFER_UNIFORM_STAGING].buffer_offset >
                 get_staging_slot_base(r, BUFFER_UNIFORM_STAGING));
-        bool aux_has_work =
-            staged || staged_index ||
+        bool vram_sync =
+            (!r->direct_staging ||
+             !r->storage_buffers[BUFFER_VERTEX_RAM].is_coherent) &&
             r->flight[r->current_flight].uploaded_first_dirty_bit != ULONG_MAX;
+        bool aux_has_work = staged || vram_sync;
 
         int slot = r->current_flight;
 
         if (aux_has_work) {
             VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
-            sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING, BUFFER_INDEX);
             if (staged) {
+                sync_staging_buffer(pg, cmd, BUFFER_INDEX_STAGING,
+                                    BUFFER_INDEX);
                 sync_staging_buffer(pg, cmd, BUFFER_VERTEX_INLINE_STAGING,
                                     BUFFER_VERTEX_INLINE);
                 sync_staging_buffer(pg, cmd, BUFFER_UNIFORM_STAGING,
                                     BUFFER_UNIFORM);
             }
-            flush_memory_buffer(pg, cmd);
+            if (vram_sync) {
+                flush_memory_buffer(pg, cmd);
+            }
             VK_CHECK(vkEndCommandBuffer(r->aux_command_buffer));
             r->in_aux_command_buffer = false;
 

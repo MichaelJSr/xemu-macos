@@ -112,7 +112,8 @@ void pgraph_vk_init_buffers(NV2AState *d)
 
     r->storage_buffers[BUFFER_INDEX_STAGING] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         .buffer_size = r->storage_buffers[BUFFER_INDEX].buffer_size,
     };
 
@@ -186,21 +187,23 @@ void pgraph_vk_init_buffers(NV2AState *d)
      * Index, inline-vertex and uniform data are written into staging and
      * copied at each finish into a device-local twin that draws bind.
      * Where the staging memory is device-local and coherent (unified
-     * memory: MoltenVK's shared type, KosmicKrisp), the inline-vertex and
-     * uniform twins would be second copies in the same RAM, so they alias
-     * their staging buffers instead: the slot discipline already keeps the
-     * CPU off a slot's partition until its fence retires, and host writes
-     * before vkQueueSubmit are visible to it. The index twin stays (an
-     * alias read ~1% slower, within noise, on a 3.7M-triangle model).
+     * memory: MoltenVK's shared type, KosmicKrisp), the twins would be
+     * second copies in the same RAM, so they alias their staging buffers
+     * instead: the slot discipline already keeps the CPU off a slot's
+     * partition until its fence retires, and host writes before
+     * vkQueueSubmit are visible to it. With nothing to copy, a finish then
+     * submits one command buffer, not an extra one for the copies.
      */
     static const int twins[][2] = {
+        { BUFFER_INDEX, BUFFER_INDEX_STAGING },
         { BUFFER_VERTEX_INLINE, BUFFER_VERTEX_INLINE_STAGING },
         { BUFFER_UNIFORM, BUFFER_UNIFORM_STAGING },
     };
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
         r->storage_buffers[i].buffer_limit = r->storage_buffers[i].buffer_size;
-        if (i != BUFFER_VERTEX_INLINE && i != BUFFER_UNIFORM) {
+        if (i != BUFFER_INDEX && i != BUFFER_VERTEX_INLINE &&
+            i != BUFFER_UNIFORM) {
             create_buffer(pg, &r->storage_buffers[i]);
         }
     }
@@ -281,7 +284,7 @@ void pgraph_vk_grow_staging(PGRAPHState *pg, int index, VkDeviceSize size)
     s->buffer_limit = t->buffer_limit = s->buffer_size;
     create_buffer(pg, s);
     VK_CHECK(vmaMapMemory(r->allocator, s->allocation, (void **)&s->mapped));
-    if (r->direct_staging && twin != BUFFER_INDEX) {
+    if (r->direct_staging) {
         t->buffer = s->buffer;
     } else {
         create_buffer(pg, t);

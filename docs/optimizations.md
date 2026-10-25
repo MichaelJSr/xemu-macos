@@ -2551,6 +2551,23 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **One command buffer per finish on unified memory (2026-10-24).**
+  Every finish also submitted an aux command buffer: the index staging
+  copy into its device twin and a HOST_WRITE barrier for the vertex
+  mirror, which on coherent memory guards nothing (host writes before
+  vkQueueSubmit are visible). MoltenVK turns each into its own
+  MTLCommandBuffer with an event signal and wait, fence sync, commit and
+  kernel trap. The index twin now aliases its staging buffer too, and a
+  coherent mirror records nothing, so a finish submits its command
+  buffer alone; non-coherent or non-unified drivers keep the aux path.
+  Footprint at vanilla-rz-w1-dark 2490 → 2287 MiB. Det offscreen RAM and
+  screendumps equal to base on four anchors and on KosmicKrisp; a forced
+  64 KiB index slot re-points the alias on growth. Offscreen at the caps,
+  4 pairs each: vanilla process CPU 42.5 → 41.8% of a core (cycles
+  −0.3%), heavy-f1 86.8 → 85.6% (cycles −1.0%, instructions −3.0%).
+  (The earlier −1.3% large-model reading of an index-only alias kept the
+  aux command buffer alive through the mirror barrier.)
+
 - **Constant uploads compare and store whole rows (2026-10-24).**
   SET_TRANSFORM_CONSTANT ran its body once per word: read CONST_LD_PTR,
   assert, compare, branch, store, and every 4th word the CHEOPS_OFFSET

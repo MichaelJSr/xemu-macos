@@ -2269,9 +2269,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
      * tex_dirty_buckets_ensure() if it's never been run: the insert
      * no-ops when the buckets array is NULL, and the first dirty call
      * will ensure() + populate from scratch. Current callers call
-     * pgraph_vk_mark_textures_possibly_dirty via update_surfaces /
-     * flush_memory_buffer routinely, so ensure() runs well before any
-     * texture-miss path.
+     * pgraph_vk_mark_textures_possibly_dirty via update_surfaces
+     * routinely, so ensure() runs well before any texture-miss path.
      */
     tex_dirty_buckets_insert(r, snode);
 

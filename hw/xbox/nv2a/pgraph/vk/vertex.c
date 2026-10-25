@@ -393,7 +393,7 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     bitmap_set(r->flight[r->current_flight].uploaded_bitmap, start_bit, nbits);
 
     /*
-     * Track dirty-page min/max so aux_has_work() and flush_memory_buffer()
+     * Track dirty-page min/max so pgraph_vk_finish and flush_memory_buffer
      * can skip scanning the whole VRAM page bitmap when work is small.
      */
     if (nbits > 0) {
