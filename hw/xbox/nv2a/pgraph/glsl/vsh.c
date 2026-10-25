@@ -303,7 +303,7 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
             VSH_VERSION_XVS, (uint32_t *)state->programmable.program_data,
             state->programmable.program_length, header, body);
         if (!state->point_params_enable) {
-            mstring_append_fmt(body, "  oPts.x = pointSize * %d;\n",
+            mstring_append_fmt(body, "  oPts.x = pointSizeReg * %d;\n",
                                state->surface_scale_factor);
         }
     }
@@ -501,10 +501,10 @@ void pgraph_glsl_set_vsh_uniform_values(PGRAPHState *pg, const VshState *state,
         memcpy(values->pointParams, pg->point_params, sizeof(pg->point_params));
     }
 
-    if (locs[VshUniform_pointSize] != -1) {
+    if (locs[VshUniform_pointSizeReg] != -1) {
         /* NV_PGRAPH_POINTSIZE is 1/8 units: exact as the %f literal was */
         float size = pgraph_reg_r(pg, NV_PGRAPH_POINTSIZE) / 8.0f;
-        values->pointSize[0] = state->is_fixed_function ? MAX(1.f, size) :
+        values->pointSizeReg[0] = state->is_fixed_function ? MAX(1.f, size) :
                                size <= 0.f              ? 1.f :
                                                           size;
     }

@@ -2440,7 +2440,10 @@ x86_64 host (Windows, Linux, Intel macOS).
   vertex shader (all draws, not only points) as a `%f` literal, and the 8
   point params, which the shader already read from the `pointParams`
   uniform: a title that animates sprite sizes built a shader and a
-  pipeline per size. The size is now the `pointSize` uniform, same
+  pipeline per size. The size is now the `pointSizeReg` uniform (not
+  `pointSize`, which the fixed-function prelude defines as attribute
+  v6: that name broke every fixed-function shader until 2026-10-24's
+  rename), same
   formula (1/8 units, exact as the literal was), and SET_POINT_PARAMS
   marks the uniforms dirty, which it didn't: a params change with no
   other register write left the uniform stale. Det offscreen RAM and
