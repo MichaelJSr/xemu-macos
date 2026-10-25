@@ -929,8 +929,8 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
             }
         }
     } else if (space == DSP_SPACE_Y) {
-        assert(address < DSP_YRAM_SIZE);
-        return dsp->yram[address];
+        /* Unmapped Y reads 0 (silicon probe, upstream PR #3047) */
+        return address < DSP_YRAM_SIZE ? dsp->yram[address] : 0;
     } else if (space == DSP_SPACE_P) {
         return read_memory_p(dsp, address);
     } else {
@@ -995,8 +995,10 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
             dsp->xram[address] = value;
         }
     } else if (space == DSP_SPACE_Y) {
-        assert(address < DSP_YRAM_SIZE);
-        dsp->yram[address] = value;
+        /* Unmapped Y ignores writes (silicon probe, upstream PR #3047) */
+        if (address < DSP_YRAM_SIZE) {
+            dsp->yram[address] = value;
+        }
     } else if (space == DSP_SPACE_P) {
         assert(address < DSP_PRAM_SIZE);
         /*

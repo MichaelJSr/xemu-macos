@@ -732,6 +732,42 @@ static void check_epi_paths(DSPState *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* Program 7: unmapped Y ($0800 up) reads 0 and drops writes           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * yram[] is DSP_YRAM_SIZE words and pram[] follows it in dsp_core_t: the
+ * JIT's inline Y path once took addresses up to $0BFF, so y:$0800 read and
+ * wrote pram[0] (no invalidation), while the interpreter aborted.
+ */
+static void build_y_unmapped(DSPState *s)
+{
+    Prog p;
+    begin_prog(&p, s);
+
+    emit(&p, 0x64F400); emit(&p, 0x000800); /* move #$000800,r4 */
+    emit(&p, 0x65F400); emit(&p, 0x0007FF); /* move #$0007ff,r5 */
+    emit(&p, 0x44F400); emit(&p, 0xABCDEF); /* move #$abcdef,x0 */
+    emit(&p, 0x4C6400);                     /* move x0,y:(r4)  unmapped */
+    emit(&p, 0x4FE400);                     /* move y:(r4),y1  -> 0 */
+    emit(&p, 0x4C6500);                     /* move x0,y:(r5)  last word */
+    emit(&p, 0x4EE500);                     /* move y:(r5),y0 */
+
+    emit(&p, 0x0A8420);                        /* bset #0,x:$ffffc4 */
+    emit(&p, move_imm8_reg(DSP_REG_N7, 0x66)); /* poison */
+    emit(&p, 0x0C0000 | here(&p));             /* jmp self */
+}
+
+static void check_y_unmapped(DSPState *s)
+{
+    check_no_poison(s);
+    g_assert_cmphex(REG(s, DSP_REG_Y1), ==, 0);
+    g_assert_cmphex(REG(s, DSP_REG_Y0), ==, 0xABCDEF);
+    g_assert_cmphex(YMEM(s, 0x7FF), ==, 0xABCDEF);
+    g_assert_cmphex(s->core.pram[0], ==, 0x0C0040); /* the reset jmp */
+}
+
+/* ------------------------------------------------------------------ */
 /* Corpus table + runners                                              */
 /* ------------------------------------------------------------------ */
 
@@ -748,6 +784,7 @@ static const TestProg progs[] = {
     { "smc",         build_smc,         check_smc },
     { "lazy-flags",  build_lazy_flags,  check_lazy_flags },
     { "epi-paths",   build_epi_paths,   check_epi_paths },
+    { "y-unmapped",  build_y_unmapped,  check_y_unmapped },
 };
 
 static const TestProg *find_prog(const char *name)

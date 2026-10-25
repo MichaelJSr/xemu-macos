@@ -1916,6 +1916,12 @@ static void emit_calc_ea_inline(ArmEmit *e, uint32_t ea_mode,
  *
  * Clobbers: w0, w1, x2, x3. Preserves: x19-x25 except value_reg.
  */
+/* Addresses below this take the inline xram[]/yram[] access */
+static uint32_t xy_fast_bound(int memspace)
+{
+    return memspace == DSP_SPACE_Y ? DSP_YRAM_SIZE : 0xc00u;
+}
+
 static void emit_mem_read_xy(ArmEmit *e, int memspace,
                              int addr_reg, int value_reg)
 {
@@ -1924,11 +1930,13 @@ static void emit_mem_read_xy(ArmEmit *e, int memspace,
     assert(value_reg != 0 && value_reg != 1 && value_reg != 2 && value_reg != 3);
     assert(addr_reg  != 0 && addr_reg  != 1 && addr_reg  != 2 && addr_reg  != 3);
 
-    /* Fast path: if addr < 0xc00, direct array access.
-     *   cmp addr, #0xc00
+    /* Fast path: if addr < the space's RAM (X 0xc00, below the mixbuffer
+     * alias; Y DSP_YRAM_SIZE, as yram[] ends there and pram[] follows it
+     * in dsp_core_t), direct array access.
+     *   cmp addr, #bound
      *   b.hs slow
      *   (shift, add, ldr at OFF_XRAM/OFF_YRAM) */
-    emit_mov_imm32(e, /*rd=*/0, 0xc00u);
+    emit_mov_imm32(e, /*rd=*/0, xy_fast_bound(memspace));
     emit_cmp_w_reg(e, /*rn=*/addr_reg, /*rm=*/0);
     uint32_t *to_slow = e->buf;
     emit_bcond(e, 0x2 /* HS = unsigned >= */, 0);   /* patched below */
@@ -1979,7 +1987,7 @@ static void emit_mem_write_xy(ArmEmit *e, int memspace,
     assert(value_reg != 0 && value_reg != 1 && value_reg != 2 && value_reg != 3);
     assert(addr_reg  != 0 && addr_reg  != 1 && addr_reg  != 2 && addr_reg  != 3);
 
-    emit_mov_imm32(e, /*rd=*/0, 0xc00u);
+    emit_mov_imm32(e, /*rd=*/0, xy_fast_bound(memspace));
     emit_cmp_w_reg(e, /*rn=*/addr_reg, /*rm=*/0);
     uint32_t *to_slow = e->buf;
     emit_bcond(e, 0x2 /* HS */, 0);
