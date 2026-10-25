@@ -29,73 +29,16 @@ jobs:
     name: Roswell tests
     needs: build
     # The fork's workflow, pinned by commit: upstream's (113add3, tag wheel-202610182103) with
-    # Linux taking ffmpeg from apt, since setup-ffmpeg's download fails at times. Upstream
-    # rotates its wheel-* tags and deletes the old ones, and a deleted ref fails every run at
-    # startup. The workflow checks out xemu_test_repository at xemu_test_ref, not its own commit.
-    uses: MichaelJSr/xemu-test/.github/workflows/test-roswell.yml@799b09bc2858641524c4c72d2456bdf4c3633f82
+    # Linux taking ffmpeg from apt, since setup-ffmpeg's download fails at times, and a Windows
+    # hard-FPU leg (upstream's x86_64 legs run --no-hard-fpu, so nothing else runs the host x87
+    # ops, tcg/i386 x87_*; its filter failure_filters/windows_roswell_hardfpu.json came from an
+    # x86_64 macOS build under Rosetta 2: regenerate it from that leg's results.json if a
+    # TestFloat ISO update or a real CPU disagrees). Upstream rotates its wheel-* tags and
+    # deletes the old ones, and a deleted ref fails every run at startup. The workflow checks
+    # out xemu_test_repository at xemu_test_ref, not its own commit.
+    uses: MichaelJSr/xemu-test/.github/workflows/test-roswell.yml@184f197617014afae34a1bbe76d1f9de739599f9
     with:
       xemu_build_configuration: release
       # Test sources from the fork's branch: macos_roswell.json also expects the arm64 hard FPU's TestFloat failures.
       xemu_test_repository: MichaelJSr/xemu-test
       xemu_test_ref: xemu-macos
-
-  # Upstream's Linux and Windows legs run --no-hard-fpu, so nothing above runs the x86_64
-  # hard FPU (the host x87 ops, tcg/i386 x87_*). This leg does, on Windows, with the roswell
-  # job's test data and its own failure filter: the soft-FPU Windows filter's MMX, SSE and
-  # M2MF entries, plus TestFloat's (the hard FPU raises no x87 exception flags), taken from
-  # an x86_64 macOS build under Rosetta 2. Regenerate it from this leg's results.json if
-  # a TestFloat ISO update or a real CPU disagrees.
-  roswell-hard-fpu:
-    name: Roswell tests (windows-latest, hard FPU)
-    needs: [build, roswell]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: windows-latest
-    steps:
-      - name: Checkout xemu-test
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          repository: MichaelJSr/xemu-test
-          ref: xemu-macos
-          submodules: recursive
-      - name: Checkout the failure filter
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          path: xemu
-          sparse-checkout: .github/roswell
-      - name: Download test data
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
-        with:
-          name: test-data
-          path: xemutest/data
-      - name: Download xemu and the Roswell BIOS
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
-        with:
-          name: xemu-windows-x86_64-release
-          path: assets
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
-        with:
-          name: roswell-bios
-          path: private
-      - name: Setup Mesa
-        uses: f3d-app/install-mesa-windows-action@v3
-        with:
-          path: ${{ github.workspace }}/assets
-      - name: Setup venv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          activate-environment: true
-          python-version: "3.12"
-      - name: Run tests
-        run: |
-          Move-Item private/roswell.bin private/bios.bin
-          uv pip install .
-          python -m xemutest --no-mcpx --sysram 128 `
-            --failure-filter xemu/.github/roswell/windows_roswell_hardfpu.json `
-            --ci-summary-omit-innermost-passed-subtests -v `
-            assets/xemu.exe private results
-      - name: Upload results
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
-        if: '!cancelled()'
-        with:
-          name: results-windows-latest-hard-fpu
-          path: results

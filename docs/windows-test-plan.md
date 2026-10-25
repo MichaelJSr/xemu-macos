@@ -916,7 +916,7 @@ python -m xemutest --no-mcpx --sysram 128 --no-hard-fpu --failure-filter failure
 deactivate
 ```
 
-Pass: the same pass/fail set as CI's `results-windows-latest` artifact (`gh run download $run -n results-windows-latest`). Differences on a real GPU, in either direction, are findings. Optionally run it once without `--no-hard-fpu`, and once with `$XUp` as a control.
+Pass: the same pass/fail set as CI's `results-windows-latest-default` artifact (`gh run download $run -n results-windows-latest-default`; the hard-FPU leg's is `results-windows-latest-hard-fpu`). Differences on a real GPU, in either direction, are findings. Optionally run it once without `--no-hard-fpu`, and once with `$XUp` as a control.
 
 Queued for the next kit (2026-10-23, clears stay in the open render pass): run the suite once more with the Vulkan renderer on the real GPU, default and with `$env:XEMU_VK_CLEAR_IN_PASS = '0'`. Pass: the same pass/fail set in both, and the FPU and MMX text frames run near 2 render passes a flip with `XEMU_NV2A_NSPROF=1` (about 1700 and 2471 with `0`).
 
