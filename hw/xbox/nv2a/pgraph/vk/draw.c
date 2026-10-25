@@ -3356,6 +3356,22 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
     return remap;
 }
 
+/*
+ * Repack num vertices of n bytes each; n is a constant at each call, so the
+ * copy is a load/store pair or two instead of a call into memmove's
+ * small-size path per vertex (the 2-16 bytes of a remapped attribute).
+ */
+static inline QEMU_ALWAYS_INLINE void
+remap_copy_fixed(uint8_t *out, const uint8_t *in, size_t n, size_t old_stride,
+                 uint32_t num)
+{
+    for (uint32_t v = 0; v < num; v++) {
+        memcpy(out, in, n);
+        out += n;
+        in += old_stride;
+    }
+}
+
 static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
                                                       VertexBufferRemap remap,
                                                       uint32_t start_vertex,
@@ -3400,10 +3416,31 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
         if (new_stride == old_stride) {
             memcpy(out_ptr, in_ptr, new_stride * num_vertices);
         } else {
-            for (int vertex_id = 0; vertex_id < num_vertices; vertex_id++) {
-                memcpy(out_ptr, in_ptr, new_stride);
-                out_ptr += new_stride;
-                in_ptr += old_stride;
+            switch (new_stride) {
+            case 2:
+                remap_copy_fixed(out_ptr, in_ptr, 2, old_stride, num_vertices);
+                break;
+            case 4:
+                remap_copy_fixed(out_ptr, in_ptr, 4, old_stride, num_vertices);
+                break;
+            case 6:
+                remap_copy_fixed(out_ptr, in_ptr, 6, old_stride, num_vertices);
+                break;
+            case 8:
+                remap_copy_fixed(out_ptr, in_ptr, 8, old_stride, num_vertices);
+                break;
+            case 12:
+                remap_copy_fixed(out_ptr, in_ptr, 12, old_stride,
+                                 num_vertices);
+                break;
+            case 16:
+                remap_copy_fixed(out_ptr, in_ptr, 16, old_stride,
+                                 num_vertices);
+                break;
+            default:
+                remap_copy_fixed(out_ptr, in_ptr, new_stride, old_stride,
+                                 num_vertices);
+                break;
             }
         }
 

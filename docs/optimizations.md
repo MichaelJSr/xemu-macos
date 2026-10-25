@@ -2551,6 +2551,16 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **Remapped vertex attributes copy in fixed sizes (2026-10-24).** An
+  attribute whose offset or stride Metal can't fetch is repacked per
+  vertex into inline staging, and each vertex was a `memcpy` of a
+  runtime size: a call into memmove's small-size path for 2-16 bytes.
+  Azurik remaps ~14K vertices a frame on heavy-f1 (almost all 4-byte,
+  some 8). The common sizes (2, 4, 6, 8, 12, 16) now copy with a
+  constant size, a load/store pair. Same bytes: det offscreen RAM and
+  screendumps equal to base on four anchors. Det offscreen heavy-f1
+  Mcycles/frame −1.73%, Minsns −0.28% (3/4).
+
 - **Read spans skip pages already read whole (2026-10-24).** A large
   model's draws note ~350K vertex RAM pages a flip into the slot's read
   spans, nearly all whole, and the body is drawn twice (with its
