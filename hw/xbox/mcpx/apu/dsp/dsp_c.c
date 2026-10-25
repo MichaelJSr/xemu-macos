@@ -228,6 +228,7 @@ static void dsp_c_sync_to_vm(DSPState *dsp)
 
     vm->pc = core->pc;
     vm->cycle_count = core->cycle_count;
+    dsp->save_power_state = 0;    /* WAIT and STOP don't park this core */
     vm->instr_cycle = core->instr_cycle;
     vm->halt_requested = core->is_idle;
     vm->is_gp = core->is_gp;

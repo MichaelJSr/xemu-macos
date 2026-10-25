@@ -554,6 +554,13 @@ static int mcpx_apu_pre_load(void *opaque)
     MCPXAPUState *d = opaque;
     qemu_mutex_lock(&d->lock);
     mcpx_apu_reset_locked(d);
+    /* The stop before the load saved the old session's WAIT/STOP state */
+    if (d->gp.dsp) {
+        d->gp.dsp->save_power_state = 0;
+    }
+    if (d->ep.dsp) {
+        d->ep.dsp->save_power_state = 0;
+    }
     if (d->det.enabled) {
         /*
          * Not in the savestate: XGSCNT and the EP phase, and the DSP

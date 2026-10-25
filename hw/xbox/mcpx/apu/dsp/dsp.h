@@ -101,6 +101,11 @@ struct DSPState {
     DspCoreState core;
     DSPDMAState dma;
     int save_cycles;
+    /*
+     * dsp56300's WAIT/STOP state across a pause (sync_to_vm, then
+     * sync_from_vm). Not in the savestate: a load starts the core awake.
+     */
+    uint8_t save_power_state;
 
     uint32_t interrupts;
 

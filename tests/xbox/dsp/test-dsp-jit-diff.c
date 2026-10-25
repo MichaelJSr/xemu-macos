@@ -979,6 +979,37 @@ static void test_frame_bound(void)
     dsp_destroy(s);
 }
 
+/*
+ * dsp56300 engine: a core parked in WAIT stays parked across a pause, as on
+ * silicon, where only an interrupt wakes it (the resume used to wake it).
+ */
+static void test_wait_survives_pause(void)
+{
+    struct config saved = g_config;
+    g_config.audio.dsp_jit.enabled = false;
+    g_config.audio.use_dsp_jit = true;
+    DSPState *s = make_dsp();
+    g_config = saved;
+    Prog p;
+    begin_prog(&p, s);
+    emit(&p, 0x000086);                        /* wait */
+    emit(&p, 0x56F400); emit(&p, 0x000064);    /* move #100,a */
+    emit(&p, 0x0C0000 | here(&p));             /* jmp * */
+
+    for (int frame = 0; frame < 2; frame++) {
+        if (frame) {
+            dsp_sync_to_vm(s);
+            dsp_sync_from_vm(s);
+        }
+        dsp_set_cycle_count(s, 0);
+        dsp_set_halt_requested(s, false);
+        g_assert_true(dsp_run_frame(s, 20000, true));
+    }
+    dsp_sync_to_vm(s);
+    g_assert_cmphex(REG(s, DSP_REG_A1), ==, 0);
+    dsp_destroy(s);
+}
+
 static void test_budget_replay(void)
 {
     DSPState *s = make_dsp();
@@ -1223,6 +1254,7 @@ int main(int argc, char **argv)
                          test_budget_poll);
     g_test_add_func("/corpus/budget-replay", test_budget_replay);
     g_test_add_func("/corpus/frame-bound", test_frame_bound);
+    g_test_add_func("/corpus/dsp56300-wait-pause", test_wait_survives_pause);
 
     return g_test_run();
 }

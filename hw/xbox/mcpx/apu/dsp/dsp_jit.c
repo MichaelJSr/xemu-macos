@@ -245,6 +245,7 @@ static void dsp_jit_sync_to_vm(DSPState *dsp)
         vm->interrupt_counter += vm->interrupt_is_pending[i];
     }
     dsp->save_cycles = ss.cycle_budget;
+    dsp->save_power_state = ss.power_state;
 
     /* Register/stack arrays from bulk state */
     memcpy(vm->registers, ss.registers, DSP_REG_MAX * sizeof(uint32_t));
@@ -302,7 +303,7 @@ static void dsp_jit_sync_from_vm(DSPState *dsp)
         .cycle_budget = dsp->save_cycles,
         .loop_rep = (bool)vm->loop_rep,
         .halt_requested = vm->halt_requested,
-        .power_state = 0,
+        .power_state = dsp->save_power_state,
         .registers = {0},
         .stack = {{0}},
         .interrupts = {
