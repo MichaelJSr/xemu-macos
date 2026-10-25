@@ -2401,6 +2401,17 @@ x86_64 host (Windows, Linux, Intel macOS).
   Azurik fps claim: its GPU work is slack at the cap. Not run: the
   xemu-test harness itself (Roswell BIOS; CI runs it on every push).
 
+- **Whole pages skip the read-span search (2026-10-24).**
+  `pgraph_vk_note_vertex_ram_reads` ran every page of every attribute
+  read through the span join/widen search: ~350K pages a flip for a
+  large model (Azurik's l256_120 probe reads 1.43 GB of index range a
+  flip). On a whole page every span has gap 0, so the search always
+  widens span 0 to the page and keeps the count; that state is now
+  stored directly. Exact: det offscreen RAM and screendumps equal to
+  base (heavy-f1 f300, stream-e2 f600, the probe's w1 run_stop f300),
+  `XEMU_VTX_SPAN_REFUTE=1` 0 violations in ~34K checks. Det offscreen
+  probe Minsns/frame −1.40% (3/3).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New

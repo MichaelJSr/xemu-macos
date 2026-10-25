@@ -426,6 +426,21 @@ void pgraph_vk_note_vertex_ram_reads(PGRAPHState *pg)
             uint16_t *mn = &smin[b * VTX_PAGE_SPANS];
             uint16_t *mx = &smax[b * VTX_PAGE_SPANS];
 
+            if (plo == 0 && phi == TARGET_PAGE_SIZE) {
+                /*
+                 * A whole page, what the search below would leave: every
+                 * span lies within it (gap 0), so span 0 widens to the
+                 * page and the count stays. A large model's draws read
+                 * ~350K pages a flip, nearly all of them whole.
+                 */
+                mn[0] = 0;
+                mx[0] = TARGET_PAGE_SIZE;
+                if (!test_bit(b, rb)) {
+                    set_bit(b, rb);
+                    count[b] = 1;
+                }
+                continue;
+            }
             if (!test_bit(b, rb)) {
                 set_bit(b, rb);
                 mn[0] = plo;
