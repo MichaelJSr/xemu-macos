@@ -1,4 +1,4 @@
-vp_deps = [libsamplerate]
+vp_deps = []
 
 if host_os == 'darwin'
   # Use Accelerate.framework (vDSP) for vectorized FIR/mix on Apple Silicon

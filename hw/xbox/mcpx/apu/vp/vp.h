@@ -21,7 +21,6 @@
 #ifndef HW_XBOX_MCPX_VP_H
 #define HW_XBOX_MCPX_VP_H
 
-#include <samplerate.h>
 #include "linear_src.h"
 
 #include "qemu/osdep.h"

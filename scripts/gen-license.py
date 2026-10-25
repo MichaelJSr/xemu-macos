@@ -488,11 +488,10 @@ LIBS = [
         "https://github.com/libsndfile/libsamplerate",
         bsd_2clause,
         "https://raw.githubusercontent.com/libsndfile/libsamplerate/master/COPYING",
-        ships_static={windows},
-        ships_dynamic={macos},
-        pkgconfig=PkgConfig("samplerate"),
-        pkg_win="libsamplerate",
-        pkg_mac="libsamplerate",
+        # hw/xbox/mcpx/apu/vp/linear_src.h and fpconv.h's
+        # float_to_s16_array are taken from it
+        ships_static=all_platforms,
+        version="0.2.2",
     ),
     Lib(
         "zlib",

@@ -257,7 +257,6 @@ def main():
 	li.install_pkgs([
 		'SDL3',
 		'glib2',
-		'libsamplerate',
 		'libpixman',
 		'libepoxy',
 		'libpcap',

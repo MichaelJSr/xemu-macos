@@ -58,6 +58,21 @@ static inline float int24_to_float(int32_t value)
     return int32_to_float((uint32_t)value << 8);
 }
 
+/* libsamplerate's src_float_to_short_array, bit for bit */
+static inline void float_to_s16_array(const float *in, int16_t *out, int n)
+{
+    for (int i = 0; i < n; i++) {
+        float s = in[i] * 32768.0f;
+        if (s >= 32767.0f) {
+            out[i] = 32767;
+        } else if (s <= -32768.0f) {
+            out[i] = -32768;
+        } else {
+            out[i] = (int16_t)lrintf(s);
+        }
+    }
+}
+
 static inline uint32_t float_to_24b(float value)
 {
     double scaled_value = value * (8.0 * 0x100000);
