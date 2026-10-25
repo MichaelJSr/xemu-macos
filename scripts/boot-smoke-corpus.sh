@@ -119,20 +119,11 @@ for iso in $ISOS; do
   fifo=/tmp/xemu-smoke.$$.$name.fifo
   rm -f $sock $fifo; mkfifo $fifo
   cfg=$WORK/xemu-$name.toml
-  python3 - "$CONFIG_SRC" "$cfg" "$HDD" "$EEPROM" "$iso" <<'EOF'
-import re, sys
-src, dst, hdd, eeprom, iso = sys.argv[1:6]
-out = []
-for line in open(src, errors="replace"):
-    if re.match(r"\s*hdd_path\s*=", line): line = "hdd_path = '%s'\n" % hdd
-    elif eeprom and re.match(r"\s*eeprom_path\s*=", line): line = "eeprom_path = '%s'\n" % eeprom
-    elif re.match(r"\s*dvd_path\s*=", line): line = "dvd_path = '%s'\n" % iso
-    elif re.match(r"\s*fullscreen_on_startup\s*=", line): line = "fullscreen_on_startup = false\n"
-    out.append(line)
-open(dst, "w").writelines(out)
-EOF
-  # Mute the run (scripts/harness-config.py); no loadvm, so no pad stubs.
-  python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs
+  cp $CONFIG_SRC $cfg
+  # The clones and the disc, screenshots in $WORK, fullscreen off, muted
+  # (scripts/harness-config.py); no loadvm, so no pad stubs.
+  python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs --workdir $WORK --hdd $HDD \
+      ${EEPROM:+--eeprom} $EEPROM --dvd $iso
   if (( XEMU_BENCH_PORTABLE )); then   # binary predates XEMU_BASE_PATH
     cp $cfg $APP/Contents/Resources/xemu.toml; cfg=$APP/Contents/Resources/xemu.toml
   fi

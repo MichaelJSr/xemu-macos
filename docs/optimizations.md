@@ -4275,7 +4275,13 @@ confirmed) and async/prewarm pipeline creation — are recorded in
   `auto_bind = false`. The 2026-10-11 `azurik-*` fixture tags carry the
   owner's pad on player 1, so with it switched off every `loadvm` of
   them failed (a whole 20-run batch DEAD); `auto_bind` off keeps a pad
-  connecting mid-run from aborting xemu on the occupied port. Bench
+  connecting mid-run from aborting xemu on the occupied port. Since
+  2026-10-25 `--workdir D` writes the rest of every harness's scratch
+  config too, each key in its table: the run's HDD, EEPROM and disc
+  clones, `fullscreen_on_startup = false` and `screenshot_dir = D` (the
+  fixture's names the owner's pictures folder, so an F12 or a menu
+  screenshot during a windowed zsh bench landed there); it refuses a
+  toml outside D or a source config, and never clones. Bench
   runs whose xemu exits mid-run are now recorded DEAD instead of being
   gated on a truncated log (one such crashed run had printed a VALID
   receipt). `movement-probe.sh` takes `--app` and `--isolate-caches`

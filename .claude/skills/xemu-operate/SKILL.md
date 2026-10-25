@@ -114,10 +114,9 @@ fixtures are), so clone them to `/tmp`. The title
 ```sh
 W=$(mktemp -d /tmp/xr.XXXX) F=../fixtures
 cp -Rc dist/xemu.app $W/; cp -c $F/xbox_hdd.qcow2 $W/hdd.qcow2; cp -c $F/eeprom.bin $W/eeprom.bin
-sed -e "s|^hdd_path = .*|hdd_path = '$W/hdd.qcow2'|;s|^eeprom_path = .*|eeprom_path = '$W/eeprom.bin'|" \
-    -e "s|^fullscreen_on_startup = .*|fullscreen_on_startup = false|;s|^screenshot_dir = .*|screenshot_dir = '$W'|" \
-    $F/xemu.toml > $W/xemu.toml   # the fixture's screenshot_dir is personal
-PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml)"})   # mute + pad stubs (zsh)
+cp $F/xemu.toml $W/xemu.toml   # the clones, screenshots in $W (the fixture's dir is personal),
+PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml --workdir $W \
+    --hdd $W/hdd.qcow2 --eeprom $W/eeprom.bin)"})   # fullscreen off, mute, pad stubs (zsh)
 XEMU_NV2A_NSPROF=1 python3 -I scripts/xemu_lease.py run -- $W/xemu.app/Contents/MacOS/xemu \
   -config_path $W/xemu.toml -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error

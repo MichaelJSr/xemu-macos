@@ -194,23 +194,11 @@ if [[ -n $EEPROM_SRC && -f $EEPROM_SRC ]]; then
   cp -c $EEPROM_SRC $EEPROM 2>/dev/null || cp $EEPROM_SRC $EEPROM
 fi
 BASECONF=$WORK/xemu.toml
-python3 - "$CONFIG_SRC" "$BASECONF" "$HDD" "$EEPROM" <<'EOF'
-import re, sys
-src, dst, hdd, eeprom = sys.argv[1:5]
-out = []
-for line in open(src, errors="replace"):
-    if re.match(r"\s*hdd_path\s*=", line):
-        line = "hdd_path = '%s'\n" % hdd
-    elif eeprom and re.match(r"\s*eeprom_path\s*=", line):
-        line = "eeprom_path = '%s'\n" % eeprom
-    elif re.match(r"\s*fullscreen_on_startup\s*=", line):
-        line = "fullscreen_on_startup = false\n"
-    out.append(line)
-open(dst, "w").writelines(out)
-EOF
-# Mute the run, and stub the pads the savestates expect but this machine
-# may lack (an absent bound controller): see scripts/harness-config.py.
-PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $BASECONF)"})
+cp $CONFIG_SRC $BASECONF
+# The clones, screenshots in $WORK, fullscreen off, muted, and stubs for the
+# pads the savestates expect but this machine may lack (an absent bound
+# controller): see scripts/harness-config.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $BASECONF --workdir $WORK --hdd $HDD ${EEPROM:+--eeprom} $EEPROM)"})
 
 typeset -A APPBIN CONF BASE
 APP_CLONE=$WORK/xemu-{B,E}.app

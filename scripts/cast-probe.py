@@ -39,17 +39,15 @@ def cast_lines():
 
 
 def scratch(cfg_src, hdd_src, d):
-    cfg = open(cfg_src).read()
-    eeprom = re.search(r"(?m)^eeprom_path = '(.*)'", cfg).group(1)
+    eeprom = re.search(r"(?m)^eeprom_path = '(.*)'", open(cfg_src).read()).group(1)
     subprocess.run(['cp', '-c', hdd_src, f'{d}/hdd.qcow2'], check=True)
     subprocess.run(['cp', '-c', eeprom, f'{d}/eeprom.bin'], check=True)
-    for k, v in (('hdd_path', f'{d}/hdd.qcow2'), ('eeprom_path', f'{d}/eeprom.bin'), ('screenshot_dir', d)):
-        cfg = re.sub(rf'(?m)^{k} = .*$', f"{k} = '{v}'", cfg)
-    cfg = re.sub(r'(?m)^fullscreen_on_startup = .*$', 'fullscreen_on_startup = false', cfg)
     toml = f'{d}/xemu.toml'
-    open(toml, 'w').write(cfg)
-    pads = subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'), toml],
-                          capture_output=True, text=True, check=True).stdout.split()
+    shutil.copyfile(cfg_src, toml)
+    # The clones, screenshots in d, fullscreen off, muted, pads stubbed.
+    pads = subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'), toml,
+                           '--workdir', d, '--hdd', f'{d}/hdd.qcow2', '--eeprom', f'{d}/eeprom.bin'],
+                          stdout=subprocess.PIPE, text=True, check=True).stdout.split()
     return toml, pads
 
 

@@ -196,21 +196,23 @@ def cfg_path(key):
     return m and m.group(1)
 
 
+def harness_config(toml, d, hdd, eeprom):
+    """scripts/harness-config.py --workdir d on the scratch toml (the clones,
+    screenshots in d, fullscreen off, muted, pads stubbed): its pad args."""
+    return subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'),
+                           toml, '--workdir', d, '--hdd', hdd, '--eeprom', eeprom],
+                          stdout=subprocess.PIPE, text=True, check=True).stdout.split()
+
+
 def scratch(d):
     """Clone the fixture HDD, EEPROM and config (muted, pads stubbed) into d."""
     for key, name, dst in (('hdd_path', 'xbox_hdd.qcow2', 'hdd.qcow2'),
                            ('eeprom_path', 'eeprom.bin', 'eeprom.bin')):
         src = cfg_path(key) or os.path.join(os.path.dirname(CFG), name)
         subprocess.run(['cp', '-c', src, os.path.join(d, dst)], check=True)
-    cfg = open(CFG).read()
-    for k, v in (('hdd_path', f'{d}/hdd.qcow2'), ('eeprom_path', f'{d}/eeprom.bin'),
-                 ('screenshot_dir', d)):
-        cfg = re.sub(rf'(?m)^{k} = .*$', f"{k} = '{v}'", cfg)
-    cfg = re.sub(r'(?m)^fullscreen_on_startup = .*$', 'fullscreen_on_startup = false', cfg)
     toml = os.path.join(d, 'xemu.toml')
-    open(toml, 'w').write(cfg)
-    pads = subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'),
-                           toml], capture_output=True, text=True, check=True).stdout.split()
+    shutil.copyfile(CFG, toml)
+    pads = harness_config(toml, d, f'{d}/hdd.qcow2', f'{d}/eeprom.bin')
     fifo, sock, log = (os.path.join(d, n) for n in ('in.fifo', 'qmp.sock', 'log'))
     os.mkfifo(fifo)
     return toml, pads, fifo, sock, log

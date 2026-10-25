@@ -43,21 +43,10 @@ HDD_SRC=$(grep -E "^\s*hdd_path\s*=" $CONFIG_SRC | sed -E "s/.*'(.*)'.*/\1/")
 HDD=$WORK/hdd.qcow2; cp -c $HDD_SRC $HDD 2>/dev/null || cp $HDD_SRC $HDD
 EEPROM_SRC=$(grep -E "^\s*eeprom_path\s*=" $CONFIG_SRC | sed -E "s/.*'(.*)'.*/\1/")
 EEPROM=""; [[ -f $EEPROM_SRC ]] && { EEPROM=$WORK/eeprom.bin; cp -c $EEPROM_SRC $EEPROM; }
-CONFIG=$WORK/xemu.toml
-python3 - "$CONFIG_SRC" "$CONFIG" "$HDD" "$EEPROM" <<'EOF'
-import re, sys
-src, dst, hdd, eeprom = sys.argv[1:5]
-out = []
-for line in open(src, errors="replace"):
-    if re.match(r"\s*hdd_path\s*=", line): line = "hdd_path = '%s'\n" % hdd
-    elif eeprom and re.match(r"\s*eeprom_path\s*=", line): line = "eeprom_path = '%s'\n" % eeprom
-    elif re.match(r"\s*fullscreen_on_startup\s*=", line): line = "fullscreen_on_startup = false\n"
-    out.append(line)
-open(dst, "w").writelines(out)
-EOF
-# Mute the run, and stub the pads the savestates expect but this machine
-# may lack (an absent bound controller): see scripts/harness-config.py.
-PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG)"})
+CONFIG=$WORK/xemu.toml; cp $CONFIG_SRC $CONFIG
+# The clones, screenshots in $WORK, fullscreen off, muted, pad stubs:
+# see scripts/harness-config.py.
+PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $CONFIG --workdir $WORK --hdd $HDD ${EEPROM:+--eeprom} $EEPROM)"})
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
 export MVK_CONFIG_FAST_MATH_ENABLED=1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_RESUME_LOST_DEVICE=1
 
