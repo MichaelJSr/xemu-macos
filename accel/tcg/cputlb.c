@@ -352,7 +352,9 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
  * in a steady scene (MemAccessCallback changes use tlb_flush_host_range;
  * loadvm's flush skips clean mmu_idx), so a start would keep tlb_init's
  * 256 entries for good. The TLB starts at, and never shrinks below, this
- * size; the guest cannot observe it.
+ * size; the guest cannot observe it. 15 bits measured flat on a large model
+ * whose fills are compulsory (det offscreen -0.1% Minsns/frame) and +1% on
+ * heavy-f1 from the longer whole-table walks (2026-10-24).
  */
 #define XEMU_TLB_FLOOR_BITS 13
 

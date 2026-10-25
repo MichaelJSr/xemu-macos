@@ -3463,6 +3463,14 @@ x86_64 host (Windows, Linux, Intel macOS).
   heartbeat advancing) and a 9-minute windowed heavy-f1 → transition →
   movie session ran clean. `XEMU_KI_IDLE_HALT=0` keeps the spin
   (normal-mode switch: the goldens never take the budget path).
+  A span census (2026-10-24, offscreen real time, temporary build) keeps
+  the post-wake rehalt closed: 7-13% of spans that open within 20 µs of
+  a halt wake end short (work within 50 µs) at the vanilla and heavy-f1
+  caps, 32-42% on a large model below the cap, so halting them at once
+  would add a halt wake to that share. The spin is 6-9% of a core at
+  the caps, 1,200-1,650 halts a second; a 20 µs budget would save ~3-4
+  points there for ~90-180 more halt wakes a second (~460 on the large
+  model), untested against the hitch guard.
 - **The normal-mode vCPU spins for a contended BQL (2026-10-16).** The
   macOS mutex sleeps in the kernel at once. After the KiIdleLoop halt
   the vCPU still waited 1.0-2.7% of its wall time for the BQL (heavy-f1
