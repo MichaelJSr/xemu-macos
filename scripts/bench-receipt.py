@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""bench-receipt.py — gate + receipt engine for scripts/bench-savestate-ab.sh.
+"""bench-receipt.py — gate + receipt engine for scripts/bench-abx.sh (and
+bench-savestate-ab.sh, its one-knob wrapper) and the Windows bench.
 
 Encodes the validity disciplines the interleaved savestate A/B method
 demands (see the xemu-operate and xemu-history skills) so they are ENFORCED by
@@ -330,7 +331,9 @@ def print_receipt_block(r):
     print(f"experiment    : {experiment}, "
           f"snapshot '{c.get('snapshot', '?')}', {c.get('pairs', '?')} pairs x "
           f"{c.get('secs', '?')} s, interleaved {c.get('interleave', [])}")
-    # bench-abx.sh: one bundle per arm, each with its own identity.
+    # bench-abx.sh (bench-savestate-ab.sh too): binary.arms, each arm's own
+    # identity (one bundle for both arms repeats it); the Windows bench
+    # writes one flat binary block instead.
     for arm, a in sorted(b.get('arms', {}).items()):
         print(f"binary {arm}      : {a.get('git_describe', '?')}  "
               f"sha256 {str(a.get('binary_sha256', '?'))[:16]}...  "

@@ -221,8 +221,7 @@ the other arm does too).
 |---|---|
 | `bench-det.py [-n pairs] [-f frames] [-t tag] [-i line] NAME=APP[:K=V,…] …` | Deterministic headless A/B: host Mcycles and Minsns per frame (load-robust), wall fps, CPU and runnable seconds (runnable well above CPU: the run waited for a core), RAM hash per run. Also runs the goldens. `--renderer offscreen`: Vulkan on a portable clone with cold caches, the driver named per line (an arm without `XEMU_VK_DRIVER` must run MoltenVK). Arm values may hold commas (a comma splits only before `NAME=`). Each start removes the `/tmp/xbd.*` run dirs (HDD clones) killed runs left |
 | `bench-det.py --timeline [-n runs] [--renderer offscreen] NAME=APP …` | Cold boot to steady play under icount, per phase (kernel, logos, prophecy, title, save list, level load, steady): frames, host ms, vCPU/translate/APU/disk/other split; per-phase deltas across arms. Replays must report `same RAM`. `--block-log DIR` adds `XEMU_BLOCK_LOG` per run and checks its rows against each phase's blockstats; `--from-state TAG [--dvd ISO]` boots from a loaded state (loadvm, the disc into the tray, reset: the Azurik harness's boot-build path) |
-| `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | B `VAR=0` vs E `VAR=1` (`--e-value`); takes `--app`, `--isolate-caches`. Exit 3 = artifact |
-| `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V"]` | Cross-binary, multi-var or numeric baseline |
+| `bench-abx.sh <tag> [pairs] [secs] [out] --b-app P --e-app P [--b-env/--e-env "K=V …"]`, `bench-savestate-ab.sh <tag> <VAR> [pairs=3] [secs=75] [out]` | The windowed A/B: cross-binary, multi-var, numeric baseline or one knob; pairs run B,E then E,B; one bundle for both arms means one clone, config and cache (with `--isolate-caches`, one cold cache both share). bench-savestate-ab is its wrapper: `--app` (default `dist/xemu.app`, only cloned) for both arms, B `VAR=0` vs E `VAR=1` (`--e-value`), and `--one-warmup` (one warmup, on E; ignored with a warning when the bundles or the arms' `XEMU_VK_DRIVER` differ). Identity comes from the binary's embedded strings; the receipt has `config.experiment` and `binary.arms`, `cache_isolation` is `off`, `shared` or `per-arm`. Exit 3 = artifact |
 | `movement-probe.sh <out> [--app P] [VAR=V…]` | Streaming walk; a healthy TB-flush delta is 0-1 |
 | `cast-probe.py [--app P] [--base DIR] [--keep DIR] [--casts N]` | First-use hitches: Azurik's fire-armor cast (LT + B) from `vanilla-rz-w1-dark` (D98 config and drive: `--config`, `--hdd`), real time; per cast the worst frame gap, shader/pipeline creation and their parts, slow creations. Empty caches unless `--base` (a `--keep` base: warm) |
 | `probe-run.sh <app> <out> <tag>`, `soak-cycles.sh <app> <out>`, `boot-smoke-corpus.sh <iso>…` | atexit dumps; `loadvm` cycling; boot smoke |
@@ -258,8 +257,9 @@ MoltenVK; the opt-in `kosmickrisp`: KK from the arm64 bundle's
 Building). KK runs set `XEMU_VK_DRIVER=kosmickrisp` (headless: bench-det arm
 `kk=APP:XEMU_VK_DRIVER=kosmickrisp` with `--renderer offscreen`; bench-det
 stops when a run's driver isn't the arm's); a windowed MoltenVK-vs-KK A/B
-sets it on both arms (`--b-env XEMU_VK_DRIVER=moltenvk --e-env
-XEMU_VK_DRIVER=kosmickrisp`). stderr's `xemu: Vulkan driver: <name>
+is bench-abx with one bundle that sets it on both arms (`--b-env
+XEMU_VK_DRIVER=moltenvk --e-env XEMU_VK_DRIVER=kosmickrisp`; each arm
+warms its own driver's cache). stderr's `xemu: Vulkan driver: <name>
 (<why>)` and `- Driver: <name>, <version> (id N)` say which ran; the
 windowed receipts list every driver an arm ran and refuse a mix. Each
 driver keeps its own pipeline cache (`pipeline_cache.bin`,
@@ -281,7 +281,8 @@ APU, PFIFO or timer change and after a PGO retrain.
 
 Traps:
 
-- bench-savestate-ab's B arm is always `0`; numeric knobs need bench-abx.
+- bench-savestate-ab's B arm is always `VAR=0`; a numeric baseline or two
+  knobs: bench-abx `--b-env`/`--e-env` with one bundle for both arms.
 - Build cross-binary bases locally, never from CI, which adds PGO and
   stock MoltenVK.
 - A crashed run voids its pair.

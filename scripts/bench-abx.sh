@@ -1,20 +1,24 @@
 #!/bin/zsh
-# Cross-binary / multi-variable interleaved savestate A/B for xemu.
+# The windowed interleaved savestate A/B for xemu: cross-binary,
+# multi-variable or one knob.
 #
 #   scripts/bench-abx.sh <snapshot> [pairs] [secs] [outdir]
 #                        --b-app PATH --e-app PATH [flags]
 #
-# Same protocol, gates and receipt engine as scripts/bench-savestate-ab.sh
-# (scene-identity gate, dead-run records, protocol receipt), for the shapes
-# that harness cannot hold: it pins B to VAR=0 and runs one bundle. Here
-# each arm has its OWN bundle (--b-app / --e-app) and its own env SET
-# (--b-env "A=1 B=2" / --e-env ...), so it covers
+# Scene-identity gate, dead-run records and protocol receipt
+# (scripts/bench-receipt.py). Each arm has its own bundle (--b-app /
+# --e-app) and its own env SET (--b-env "A=1 B=2" / --e-env ...), so it
+# covers
 #   - cross-binary  (release vs release, before vs after a dependency bump)
 #   - multi-variable arms (two knobs toggled together)
 #   - pinned non-zero baselines (--b-env "KNOB=300" --e-env "KNOB=50")
-# Point both --b-app and --e-app at one bundle for the last two.
+#   - one knob, B VAR=0 vs E VAR=1: scripts/bench-savestate-ab.sh, a wrapper
+#     that passes one bundle for both arms and --one-warmup
+# Point both --b-app and --e-app at one bundle for the last three: when
+# they resolve to the same real path, the bundle is cloned once and both
+# arms run that clone, config and cache base.
 #
-# Isolation is the stock harness's: both bundles APFS-cloned into a work
+# Isolation: the bundle(s) APFS-cloned into a work
 # dir, the qcow2 and eeprom cloned once (the arms run sequentially),
 # a scratch xemu.toml passed with -config_path, monitor socket in /tmp
 # (104-byte unix-socket path cap). Never runs dist/xemu.app or the
@@ -27,17 +31,24 @@
 # /tmp/xemu-leases lease (scripts/xemu-lease.zsh).
 #
 # Pair order alternates (B,E) / (E,B) to cancel monotone drift. Each arm
-# gets its own 40 s warmup run.
+# gets its own 40 s warmup run, unless --one-warmup.
 #
 # Flags:
 #   --b-app PATH / --e-app PATH   bundles to clone (required)
 #   --b-env "K=V ..." / --e-env   extra environment per arm
 #   --isolate-caches   plant the scratch config as a portable marker in
-#                      EACH cloned bundle, so every arm owns its shader and
-#                      pipeline caches (cold at batch start). Use it
-#                      whenever the arms differ in glslang or MoltenVK: a
-#                      shared pipeline_cache.bin is rejected and rewritten
-#                      on every arm switch.
+#                      each cloned bundle, so its shader and pipeline caches
+#                      start cold at batch start: per arm with two bundles
+#                      (use it whenever the arms differ in glslang or
+#                      MoltenVK: a shared pipeline_cache.bin is rejected and
+#                      rewritten on every arm switch), one cache both arms
+#                      share with one bundle (the shader compiler or pipeline
+#                      creation under test)
+#   --one-warmup       one 40 s warmup, on the E arm, instead of one per arm
+#                      (bench-savestate-ab.sh passes it). Valid only on one
+#                      shared clone with one driver: ignored, with a warning,
+#                      when the bundles differ or the arms' XEMU_VK_DRIVER
+#                      values do (each driver has its own pipeline cache)
 #   --config-src PATH  config to clone (default: $XEMU_TEST_CONFIG, else
 #                      ../fixtures/xemu.toml beside the checkout)
 #   --hdd PATH         qcow2 to clone (default: hdd_path from config-src)
@@ -59,7 +70,7 @@ SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
 
 typeset -a pos
 B_APP_SRC=""; E_APP_SRC=""; B_ENV=""; E_ENV=""
-ISOLATE=0; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0
+ISOLATE=0; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0; ONE_WARMUP=0
 CONFIG_SRC=""; HDD_SRC=""; BOOT_WAIT=25; DRAWS_BAND=100; CV_MAX=0.10
 while (( $# > 0 )); do
   case "$1" in
@@ -68,6 +79,7 @@ while (( $# > 0 )); do
     --b-env)          B_ENV=$2; shift ;;
     --e-env)          E_ENV=$2; shift ;;
     --isolate-caches) ISOLATE=1 ;;
+    --one-warmup)     ONE_WARMUP=1 ;;
     --config-src)     CONFIG_SRC=$2; shift ;;
     --hdd)            HDD_SRC=$2; shift ;;
     --boot-wait)      BOOT_WAIT=$2; shift ;;
@@ -133,7 +145,27 @@ for arm in B E; do
     echo "abx: arm $arm's binary predates XEMU_BASE_PATH; isolating both arms' caches"
   fi
 done
-echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, cache isolation $( (( ISOLATE )) && echo per-arm || echo off)"
+# One bundle for both arms: one clone, config and cache base.
+SHARED=0
+[[ ${B_APP_SRC:A} == ${E_APP_SRC:A} ]] && SHARED=1
+CACHE_ISO=off
+(( ISOLATE )) && { (( SHARED )) && CACHE_ISO=shared || CACHE_ISO=per-arm; }
+vk_driver_of() {   # the XEMU_VK_DRIVER value in an env set ("" when unset)
+  local kv
+  for kv in ${=1}; do [[ $kv == XEMU_VK_DRIVER=* ]] && print -r -- ${kv#*=}; done
+  return 0
+}
+if (( ONE_WARMUP )); then
+  if (( ! SHARED )); then
+    echo "abx: WARNING --one-warmup ignored: the arms run different bundles; warming each arm" >&2
+    ONE_WARMUP=0
+  elif [[ $(vk_driver_of "$B_ENV") != $(vk_driver_of "$E_ENV") ]]; then
+    echo "abx: WARNING --one-warmup ignored: the arms' XEMU_VK_DRIVER differ; warming each arm" >&2
+    ONE_WARMUP=0
+  fi
+fi
+echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, $( (( SHARED )) && echo 'one bundle' || echo 'two bundles')," \
+     "cache isolation $CACHE_ISO, $( (( ONE_WARMUP )) && echo 'one warmup (E)' || echo 'a warmup per arm')"
 
 # ---- quiet-machine report (warn, never block) ------------------------------
 # A loaded box is legitimate for a best-effort run, but the receipt needs
@@ -181,9 +213,17 @@ EOF
 PAD_ARGS=(${(f)"$(python3 -I ${0:a:h}/harness-config.py $BASECONF)"})
 
 typeset -A APPBIN CONF BASE
+APP_CLONE=$WORK/xemu-{B,E}.app
+(( SHARED )) && APP_CLONE=$WORK/xemu.app
 for arm in B E; do
+  if [[ $arm == E ]] && (( SHARED )); then
+    APPBIN[E]=${APPBIN[B]} CONF[E]=${CONF[B]} BASE[E]=${BASE[B]}
+    echo "abx: arm E runs arm B's clone $APP_CLONE"
+    break
+  fi
   vn=${arm}_APP_SRC
   app=$WORK/xemu-$arm.app
+  (( SHARED )) && app=$APP_CLONE
   cp -Rc ${(P)vn} $app 2>/dev/null || cp -R ${(P)vn} $app
   APPBIN[$arm]=$app/Contents/MacOS/xemu
   xemu_bench_cache ${APPBIN[$arm]} $ISOLATE
@@ -291,8 +331,12 @@ EOF
   echo "$label done (arm $arm, asserts=$(grep -c Assertion $log || true))${shotline:+ [$shotline]}"
 }
 
-run_one warmupB B 40 warmup
-run_one warmupE E 40 warmup
+if (( ONE_WARMUP )); then
+  run_one warmupE E 40 warmup
+else
+  run_one warmupB B 40 warmup
+  run_one warmupE E 40 warmup
+fi
 for (( k = 1; k <= PAIRS; k++ )); do
   if (( k % 2 )); then run_one B$k B $SECS ""; run_one E$k E $SECS ""
   else                 run_one E$k E $SECS ""; run_one B$k B $SECS ""; fi
@@ -304,7 +348,7 @@ done
 # distinct one, joined with " + " (the receipt refuses an arm that ran two).
 typeset -A IDENT_DRV
 for arm in B E; do
-  IDENT_DRV[$arm]=$(grep -h '^- Driver: ' $OUT/ab_warmup$arm.log $OUT/ab_$arm<->.log(N) \
+  IDENT_DRV[$arm]=$(grep -h '^- Driver: ' $OUT/ab_warmup$arm.log(N) $OUT/ab_$arm<->.log(N) \
                     2>/dev/null | cut -c11- | sort -u |
                     awk 'NR > 1 { printf " + " } { printf "%s", $0 }')
 done
@@ -316,11 +360,14 @@ arm = lambda a, d, s, m, e, v: {"git_describe": d, "binary_sha256": s,
                                 "env": e, "app_source": a}
 json.dump({
   "config": {
-    "experiment": "cross-binary arms B vs E",
+    "experiment": ("one bundle, B '$B_ENV' vs E '$E_ENV'" if "$SHARED" == "1"
+                   else "cross-binary arms B vs E" + (", env B '$B_ENV' / E '$E_ENV'"
+                                                      if "$B_ENV$E_ENV" else "")),
     "snapshot": "$SNAP", "env_var": "(per-arm env sets)", "pairs": int("$PAIRS"),
     "secs": int("$SECS"), "draws_band": "$DRAWS_BAND", "cv_max": float("$CV_MAX"),
     "boot_wait": int("$BOOT_WAIT"),
-    "cache_isolation": "per-arm" if "$ISOLATE" == "1" else "off",
+    "warmups": 1 if "$ONE_WARMUP" == "1" else 2,
+    "cache_isolation": "$CACHE_ISO",
     "cache_base": {"B": "${BASE[B]}", "E": "${BASE[E]}"},
     "interleave": "${(j:,:)INTERLEAVE}".split(","),
   },
@@ -331,7 +378,7 @@ json.dump({
       "E": arm("$E_APP_SRC", "${IDENT_DESC[E]}", "${IDENT_SHA[E]}", "${IDENT_MVK[E]}", "${ENVSET[E]}",
                "${IDENT_DRV[E]:-unknown}"),
     },
-    "app_clone": "$WORK/xemu-{B,E}.app", "config_path": "${CONF[E]}",
+    "app_clone": "$APP_CLONE", "config_path": "${CONF[E]}",
     "hdd_clone": "$HDD", "hdd_source": "$HDD_SRC",
   },
   "session": {

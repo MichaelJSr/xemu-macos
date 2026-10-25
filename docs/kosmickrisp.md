@@ -142,7 +142,7 @@ now every line comes from the explicit setting, which honours them all.)
 It overrides the pin, so headless KK runs (offscreen det, the C1 work)
 set it. The launchers drop an inherited one (`AUTOMATION_ENV` in
 `scripts/xemu_lease.py`); an arm or `--env` sets it per run, even to the
-exported value. Windowed launchers (bench-savestate-ab, bench-abx,
+exported value. Windowed launchers (bench-abx and its bench-savestate-ab wrapper,
 movement-probe, soak-cycles, boot-smoke-corpus, pgo-train's windowed
 sessions) follow the setting, so they run MoltenVK on Auto; a windowed
 KK run sets `XEMU_VK_DRIVER=kosmickrisp` (pgo-train's second heavy-f1
@@ -207,8 +207,8 @@ copy-present matches it).
   mvk=APP kk=APP:XEMU_VK_DRIVER=kosmickrisp`; windowed `bench-abx.sh
   <tag> N S OUT --b-app A --e-app A --b-env "XEMU_VK_DRIVER=moltenvk"
   --e-env "XEMU_VK_DRIVER=kosmickrisp"` (windowed Auto is MoltenVK on
-  both arms; the per-driver caches make `--isolate-caches`
-  unnecessary). Read `- Driver:` from stderr; bench-det prints it per
+  both arms; one bundle is cloned once, and each arm still gets its own
+  warmup: the per-driver caches make `--isolate-caches` unnecessary). Read `- Driver:` from stderr; bench-det prints it per
   line (and per timeline run) and stops when a run's driver isn't the one
   its arm asked for (MoltenVK without `XEMU_VK_DRIVER`); the windowed
   receipts list every driver an arm ran and refuse an arm that ran two.

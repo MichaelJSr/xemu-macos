@@ -16,7 +16,7 @@
 # Exit code: 0 all titles alive + no ARTIFACT; 2 a title died or asserted;
 # 3 an ARTIFACT verdict; 1 usage/plumbing.
 #
-# Isolation rules are the harness's (scripts/bench-savestate-ab.sh): never
+# Isolation rules are the harness's (scripts/bench-abx.sh): never
 # points at dist/xemu.app's config, never opens the user's qcow2. The
 # source config defaults to $XEMU_TEST_CONFIG, else ../fixtures/xemu.toml
 # beside the checkout. Caches live in the bench cache; every xemu runs

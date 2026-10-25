@@ -22,12 +22,12 @@
 # Extra env (e.g. XEMU_INV_PROF=1) is passed through to xemu.
 # --app PATH clones that bundle instead of dist/xemu.app.
 # --isolate-caches gives the run its own cold shader/pipeline cache, the
-# same way bench-savestate-ab.sh does (portable-mode marker in the CLONED
+# same way bench-abx.sh does (portable-mode marker in the CLONED
 # bundle); without it the run uses the benches' warm cache
 # (XEMU_BASE_PATH=$XEMU_BENCH_CACHE, default ~/Library/Caches/xemu-fork-bench).
 # xemu runs under nice -n 10 with the argv marker `-name xemu-fork-auto`,
 # a fork-xemu slot and a lease (scripts/xemu-lease.zsh).
-# Isolation matches bench-savestate-ab.sh: bundle/hdd/eeprom cloned,
+# Isolation matches bench-abx.sh: bundle/hdd/eeprom cloned,
 # scratch config via -config_path, fullscreen forced off, source files
 # only ever clone sources. The source config is $XEMU_TEST_CONFIG, else
 # ../fixtures/xemu.toml beside the checkout. Monitor socket + input
