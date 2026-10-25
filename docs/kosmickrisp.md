@@ -143,7 +143,7 @@ It overrides the pin, so headless KK runs (offscreen det, the C1 work)
 set it. The launchers drop an inherited one (`AUTOMATION_ENV` in
 `scripts/xemu_lease.py`); an arm or `--env` sets it per run, even to the
 exported value. Windowed launchers (bench-abx and its bench-savestate-ab wrapper,
-movement-probe, soak-cycles, boot-smoke-corpus, pgo-train's windowed
+movement-probe, probe-run, boot-smoke-corpus, pgo-train's windowed
 sessions) follow the setting, so they run MoltenVK on Auto; a windowed
 KK run sets `XEMU_VK_DRIVER=kosmickrisp` (pgo-train's second heavy-f1
 session does, so KK's paths keep a profile) or, to exercise the opt-in
@@ -252,7 +252,9 @@ screendumps against MoltenVK (PSNR ≥ 45 dB, ≤ 0.01% of pixels off by
 more than 32); sync validation 0 messages; windowed cross-binary A/Bs
 (`kosmickrisp` and `moltenvk` against the release, scale 3-4 with
 MetalFX and interpolation); C2's bar; a 30-minute soak with a flat
-footprint, the 8-anchor loadvm cycle, `soak-cycles.sh` and
+footprint, the 8-anchor loadvm cycle, the refuter soak
+(`PROBE_CYCLES=3 scripts/probe-run.sh APP OUT
+azurik-heavy-f1,vm-20260704032357 10 XEMU_SUBPAGE_FAST_REFUTE=1`) and
 `boot-smoke-corpus.sh`; the meson xbox suite; a launch smoke on macOS 15
 and Intel. Quote the load for every number.
 

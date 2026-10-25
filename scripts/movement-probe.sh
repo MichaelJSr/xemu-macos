@@ -194,7 +194,7 @@ inject up $BWD_SC
 phase backward-end
 inject clear || true
 
-# Quit through the monitor, as probe-run.sh and soak-cycles.sh do, so
+# Quit through the monitor, as probe-run.sh does, so
 # xemu runs its atexit handlers (counter dumps, a PGO generate build's
 # .profraw); a SIGTERM + 2 s SIGKILL could cut them off.
 mon quit > /dev/null 2>&1 || true
