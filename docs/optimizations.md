@@ -1581,6 +1581,20 @@ x86_64 host (Windows, Linux, Intel macOS).
   frame-ends/s in both; process CPU within noise. `XEMU_VBLANK_KQUEUE=0`
   keeps SDL's wait (det runs use the virtual vblank and never reach it).
 
+- **A code-page write flushes the jump cache once, not once per TB
+  (2026-10-24).** A guest store to a code page drops every TB on it
+  (dozens), and each CF_PCREL TB's invalidation cleared every jump cache
+  and the 128 KiB near-return memo: ~2.7 µs a TB, ~165 samples in 6 s
+  on a mod that writes its own code lines ~260 times a second. The page
+  pass now marks the flush owed and clears every jump cache and memo
+  once at its end, before any TB runs on its thread (every reader
+  already rejects a CF_INVALID TB); other callers flush per TB as
+  before. Goldens unchanged; `XEMU_TLB_REVAL_REFUTE` 4.1M checks clean
+  on stream-e2; det offscreen RAM and screendumps equal to base. Det
+  offscreen l256_120 probe Minsns/frame −1.25% (4/4), Mcycles −1.98%
+  (2/4). (The mod has since moved those variables off its code lines;
+  this stays for other self-modifying code and load-time DMA.)
+
 - **tlb_set_dirty visits only dirty MMU indexes (2026-10-24).** A
   first guest store to a clean page that holds no code clears
   TLB_NOTDIRTY in every TLB that maps it: tlb_set_dirty probed all 22

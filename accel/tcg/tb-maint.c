@@ -1601,12 +1601,23 @@ bool xemu_tb_page_has_tbs(tb_page_addr_t addr)
 static bool tb_jmp_cache_inval_deferred;
 #endif
 
-static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
+/*
+ * @owed (XBOX, may be NULL): a page pass that clears every jump cache once
+ * when it ends; a CF_PCREL TB just marks it, instead of clearing every jump
+ * cache and the 128 KiB return memo per TB (a written code page drops
+ * dozens). The pass clears before any TB runs on its thread; every reader
+ * already rejects a CF_INVALID TB.
+ */
+static void tb_jmp_cache_inval_tb(TranslationBlock *tb, bool *owed)
 {
     CPUState *cpu;
 
 #if defined(XBOX)
     if (qatomic_read(&tb_jmp_cache_inval_deferred)) {
+        return;
+    }
+    if (owed && (tb_cflags(tb) & CF_PCREL)) {
+        *owed = true;
         return;
     }
 #endif
@@ -1646,7 +1657,8 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
  * In !user-mode, if @rm_from_page_list is set, call with the TB's pages'
  * locks held.
  */
-static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
+static void do_tb_phys_invalidate_owed(TranslationBlock *tb,
+                                       bool rm_from_page_list, bool *jc_owed)
 {
     uint32_t h;
     tb_page_addr_t phys_pc;
@@ -1683,7 +1695,7 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     }
 
     /* remove the TB from the hash list */
-    tb_jmp_cache_inval_tb(tb);
+    tb_jmp_cache_inval_tb(tb, jc_owed);
 
     /* suppress this TB from the two jump lists */
     tb_remove_from_jmp_list(tb, 0);
@@ -1703,6 +1715,12 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
 #endif
 }
 
+static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
+{
+    do_tb_phys_invalidate_owed(tb, rm_from_page_list, NULL);
+}
+
+#if !defined(XBOX) || defined(CONFIG_USER_ONLY)
 static void tb_phys_invalidate__locked(TranslationBlock *tb)
 {
     /*
@@ -1722,8 +1740,17 @@ static void tb_phys_invalidate__locked(TranslationBlock *tb)
     do_tb_phys_invalidate(tb, true);
     qemu_thread_jit_execute();
 }
+#endif
 
 #if defined(XBOX)
+/* tb_phys_invalidate__locked within a page pass (tb_jmp_cache_inval_tb) */
+static void tb_phys_invalidate__locked_owed(TranslationBlock *tb, bool *owed)
+{
+    qemu_thread_jit_write();
+    do_tb_phys_invalidate_owed(tb, true, owed);
+    qemu_thread_jit_execute();
+}
+
 /*
  * For cpu_io_recompile (icount): drop a TB whose MMIO access is not its
  * last instruction, so translator_loop retranslates it to end at the access
@@ -1934,6 +1961,7 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     TranslationBlock *current_tb = NULL;
 #if defined(XBOX)
     bool still_code = true;
+    bool jc_owed = false;
 #endif
 
     /* Range may not cross a page. */
@@ -1993,9 +2021,21 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
                 current_tb_modified = true;
                 cpu_restore_state_from_tb(cpu, current_tb, retaddr);
             }
+#if defined(XBOX)
+            tb_phys_invalidate__locked_owed(tb, &jc_owed);
+#else
             tb_phys_invalidate__locked(tb);
+#endif
         }
     }
+#if defined(XBOX)
+    if (jc_owed) {
+        CPUState *c;
+        CPU_FOREACH(c) {
+            xemu_flush_jmp_cache(c, false);
+        }
+    }
+#endif
 
     /* if no code remaining, no need to continue to use slow writes */
     if (!p->first_tb) {
