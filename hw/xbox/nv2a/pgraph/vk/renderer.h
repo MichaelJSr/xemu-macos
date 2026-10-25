@@ -237,10 +237,16 @@ typedef struct SurfaceBinding {
 typedef struct ShaderModuleInfo {
     int refcnt;
     char *glsl;
+    /*
+     * The SPIR-V and its reflection live only while the module is made:
+     * the uniform layouts below copy what they need and the driver copies
+     * the code (pgraph_vk_create_shader_module_from_glsl).
+     */
     GByteArray *spirv;
     VkShaderModule module;
     SpvReflectShaderModule reflect_module;
     SpvReflectDescriptorSet **descriptor_sets;
+    bool reflect_live;
     ShaderUniformLayout uniforms;
     ShaderUniformLayout push_constants;
 } ShaderModuleInfo;

@@ -153,6 +153,9 @@ def main():
                 offs.append(os.path.getsize(log))
                 q.cmd('xemu-input-queue', lines=cast_lines())
                 time.sleep(a.every)
+            ru = bd._RusageV4()
+            fp = (ru.phys_footprint / 2**20
+                  if bd._libproc.proc_pid_rusage(proc.pid, 4, bd.ctypes.byref(ru)) == 0 else None)
             try:
                 q.cmd('quit')
             except Exception:
@@ -161,7 +164,8 @@ def main():
         text = open(log, errors='replace').read()
         load = os.getloadavg()
         print(f'cast-probe: {a.state}, {a.casts} casts {a.every:g} s apart, '
-              f'{"warm" if a.base else "cold"} caches, load {load[0]:.1f}')
+              f'{"warm" if a.base else "cold"} caches, load {load[0]:.1f}'
+              + (f', footprint {fp:.0f} MiB at the end' if fp else ''))
         for i, off in enumerate(offs):
             w = window(intervals(text[off:]), a.window)
             parts = ', '.join(f'{k} {w[k]["ms"]:.1f}' for k in

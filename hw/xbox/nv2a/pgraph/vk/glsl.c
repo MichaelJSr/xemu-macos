@@ -685,6 +685,16 @@ static void block_to_uniforms(const SpvReflectBlockVariable *block, ShaderUnifor
  * ids, unparseable types. On failure it self-destroys the module, so
  * there is nothing to free here.
  */
+static void drop_reflection(ShaderModuleInfo *info)
+{
+    free(info->descriptor_sets);
+    info->descriptor_sets = NULL;
+    if (info->reflect_live) {
+        spvReflectDestroyShaderModule(&info->reflect_module);
+        info->reflect_live = false;
+    }
+}
+
 static bool init_layout_from_spv(ShaderModuleInfo *info)
 {
     SpvReflectResult result = spvReflectCreateShaderModule(
@@ -692,6 +702,7 @@ static bool init_layout_from_spv(ShaderModuleInfo *info)
     if (result != SPV_REFLECT_RESULT_SUCCESS) {
         return false;
     }
+    info->reflect_live = true;
 
     uint32_t descriptor_set_count = 0;
     result = spvReflectEnumerateDescriptorSets(&info->reflect_module,
@@ -801,6 +812,15 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
     nsprof_end(NSPROF_VK_MODULE, t0);
 
+    /*
+     * The layouts hold copies and the driver its own code: drop the
+     * SPIR-V and the reflection, ~60-110 KB a module, for the module's
+     * life (hundreds live in a long session).
+     */
+    drop_reflection(info);
+    g_byte_array_unref(info->spirv);
+    info->spirv = NULL;
+
     free(info->glsl);
     info->glsl = NULL;
 
@@ -842,9 +862,10 @@ void pgraph_vk_destroy_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info)
     }
     finalize_uniform_layout(&info->uniforms);
     finalize_uniform_layout(&info->push_constants);
-    free(info->descriptor_sets);
-    spvReflectDestroyShaderModule(&info->reflect_module);
+    drop_reflection(info);
     vkDestroyShaderModule(r->device, info->module, NULL);
-    g_byte_array_unref(info->spirv);
+    if (info->spirv) {
+        g_byte_array_unref(info->spirv);
+    }
     g_free(info);
 }
