@@ -25,8 +25,8 @@ switch only when it is a normal-mode change the deterministic goldens
 can't verify: `XEMU_VCPU_QOS`, `XEMU_PFIFO_PUT_LOCK`,
 `XEMU_PFIFO_STALL_DOORBELL`, `XEMU_PFIFO_RING_FREEZE`, `XEMU_GUEST_MO`,
 `XEMU_KI_IDLE_HALT`, `XEMU_BQL_SPIN`, `XEMU_INTERP_GATE`,
-`XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ`, `XEMU_OHCI_HCCA_FIRST`
-and `XEMU_VBLANK_KQUEUE`, the first twelve rows.
+`XEMU_VK_CLEAR_IN_PASS`, `XEMU_NV2A_RESET_IRQ`, `XEMU_OHCI_HCCA_FIRST`,
+`XEMU_VBLANK_KQUEUE` and `XEMU_PFIFO_LOCK_BATCH`, the first thirteen rows.
 The former `=0` knob `XEMU_SPIRV_CACHE`, a cold-compile A/B bypass,
 became the `perf.cache_shaders` setting on 2026-10-18 (`a922602c75`).
 `XEMU_VTX_SPAN_FINISH`
@@ -49,6 +49,7 @@ and tag `archive/windows-wave1-wip`.
 | `XEMU_NV2A_RESET_IRQ` | Both modes, **default on since 2026-10-23** (v0.16.1): a machine reset (`system_reset`, and the reset every load runs first) clears the NV2A interrupt enables and PGRAPH's pending bits and recomputes the line, as power-on does; `0` keeps them, as v0.16 did. Kept, a GPU interrupt the stopped game left pending re-raised IRQ 3 before the guest ran, the kernel's 8259 setup lost the request, and about 1 windowed reset in 100 after a load hung in the kernel's GPU fence wait (0x800426d4). A correctness fix, not a speedup; the goldens don't reset after running, so they can't verify it. Reset lane, Part 11 |
 | `XEMU_OHCI_HCCA_FIRST` | Normal mode, **default on since 2026-10-23** (v0.16.1, `858e2af19f`): an OHCI frame writes HccaFrameNumber and Pad1 back every frame and HccaDoneHead only with a done queue, then raises FNO, WDH and SF, as OHCI 1.0a 7.1.4 orders it; `0` raises them before the write-back and rewrites HccaDoneHead every frame, as v0.16 did. The order matters only when a DMA access drops the BQL inside a frame (nv2a's surface access callback does): the XDK USB driver then read HccaDoneHead before the frame wrote it, lost the done queue and bugchecked 0x0A 5 s later (Azurik's V22 boot hang, about 3% of real-time boots). Under icount the frame runs on the vCPU thread, so the goldens can't verify it. USB (`hw/usb/hcd-ohci.c`, `ohci_hcca_first`) |
 | `XEMU_VBLANK_KQUEUE` | macOS normal mode, **default on since 2026-10-24**: the vblank thread waits for each deadline on one kqueue timer (`NOTE_CRITICAL`) and spins the last 25 µs, instead of `SDL_DelayPrecise`'s 1 ms nanosleep chunks (stretched ~25% by timer coalescing) and its overshoot spin. `=0` restores SDL's wait. The thread's CPU 1.0% → 0.25% of a core at a 30 fps cap; frame rate unchanged |
+| `XEMU_PFIFO_LOCK_BATCH` | Normal mode, **default on since 2026-10-24**: the threaded puller keeps `pgraph.lock` from one command to the next and takes `pfifo.lock` back by trylock, ending a batch on a failed trylock, a counted waiter (`nv2a_pgraph_lock_ext`), 256 commands or the pusher's exit (nsprof `pg_handoff`, `pg_tryfail`, `pg_cap`). `=0` swaps both locks around every command again. Icount runs never batch |
 | `XEMU_NV2A_NSPROF` | Wall-time frame profiler, 5 s summaries to stderr. Since 2026-08-04 it also reports three UI-thread buckets — `drawable_acq` (block inside `nextDrawable`), `ui_hud_lock` (main-loop-mutex + BQL acquire and hold around the ImGui HUD build), `ui_frame_dt` (present-to-present interval) — plus the `ui_present` and `mfx_scaler_rebuild` event counters. UI buckets are normalized per *flip*, not per present |
 | `XEMU_PFIFO_HEARTBEAT` | 2-second pfifo diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) + BQL acquire-wait totals |
@@ -1550,6 +1551,23 @@ x86_64 host (Windows, Linux, Intel macOS).
   Minsns −0.17% (10/10); stream-e2 +0.9% (5/12, pairs −12..+11%),
   Minsns −0.44% (12/12). The changed functions run without PGO counts
   until the next profile retrain.
+
+- **The PFIFO thread keeps pgraph.lock between commands (2026-10-24).**
+  The threaded puller dropped pfifo.lock and took pgraph.lock around
+  every command, four uncontended mutex operations (~60 ns), ~1 µs a draw
+  in every scene and 12.5% of PFIFO's busy time on a large model. It now
+  keeps pgraph.lock across commands and takes pfifo.lock back by
+  trylock, so a command costs one unlock and one trylock; handlers still
+  run with pfifo.lock free, and other pgraph.lock takers count
+  themselves (`nv2a_pgraph_lock_ext`) so PFIFO hands over after its
+  current command. Contention stays rare: on the l256_120 probe 16-28
+  handoffs (max 10 µs) and ~140 failed trylocks in 5 s. Offscreen real
+  time, same binary, `XEMU_PFIFO_LOCK_BATCH=0` vs default: the
+  l256_120 probe's 120 fps build 0.6208 → 0.6383 frames a vblank (4/4,
+  +2.8%; +5.6% against the build before); heavy-f1 at its 60 fps cap,
+  PFIFO thread 31.3% → 28.8% of a core and process cycles −2.7% (4/4);
+  windowed heavy-f1 stays at the cap. Goldens unchanged (icount never
+  batches); the w4 hop sequence (loads, DMA callbacks, lock_fifo) clean.
 
 - **The vblank thread waits on one kqueue timer (2026-10-24, macOS).**
   `SDL_DelayPrecise` slept to each vblank in 1 ms nanosleep chunks,

@@ -131,6 +131,21 @@ typedef struct NV2AState {
          */
         bool ring_freeze;
         PFIFOFrozen frozen;
+        /*
+         * Normal mode: the threaded puller keeps pgraph.lock from one
+         * command to the next (pg_held, the PFIFO thread's alone) and takes
+         * pfifo.lock back by trylock, unless XEMU_PFIFO_LOCK_BATCH=0 clears
+         * lock_batch. Every other pgraph.lock taker goes through
+         * nv2a_pgraph_lock_ext, whose ext_waiters count has PFIFO hand the
+         * lock over after its current command (on its own cache line: the
+         * vCPU writes doorbell and parked at every DMA_PUT).
+         */
+        bool lock_batch;
+        bool pg_held;
+        uint32_t pg_run;
+        char ext_waiters_pad0[128];
+        uint32_t ext_waiters;
+        char ext_waiters_pad1[124];
     } pfifo;
 
     /* nv2a_save_quiesce ran and holds the FIFO locks until post_save */
@@ -189,6 +204,20 @@ typedef struct NV2AState {
     } puserdac;
 
 } NV2AState;
+
+/*
+ * Every pgraph.lock taker but the PFIFO thread's command path: a waiter
+ * counts itself, so a threaded puller batching commands under pgraph.lock
+ * (pfifo.lock_batch) lets go after its current command.
+ */
+static inline void nv2a_pgraph_lock_ext(NV2AState *d)
+{
+    if (qemu_mutex_trylock(&d->pgraph.lock) != 0) {
+        qatomic_inc(&d->pfifo.ext_waiters);
+        qemu_mutex_lock(&d->pgraph.lock);
+        qatomic_dec(&d->pfifo.ext_waiters);
+    }
+}
 
 typedef struct NV2ABlockInfo {
     const char *name;

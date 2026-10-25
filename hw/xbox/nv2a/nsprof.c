@@ -44,6 +44,7 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_VK_MODULE] = "vk_module",
     [NSPROF_DRV_PIPELINE] = "drv_pipeline",
     [NSPROF_FLIP_GAP] = "flip_gap",
+    [NSPROF_PG_HANDOFF] = "pg_handoff",
 };
 
 static const char *const event_names[NSPROF_EV__COUNT] = {
@@ -93,6 +94,8 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_REP_GPU_TOUCH] = "rep_gpu_touch",
     [NSPROF_EV_MODULE_MISS] = "module_miss",
     [NSPROF_EV_SHADER_EVICT] = "shader_evict",
+    [NSPROF_EV_PG_TRYFAIL] = "pg_tryfail",
+    [NSPROF_EV_PG_CAP] = "pg_cap",
     [NSPROF_EV_PIPELINE_EVICT] = "pipeline_evict",
 };
 

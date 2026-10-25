@@ -98,6 +98,8 @@ enum NsprofCounter {
                              time (pipeline creation feedback) */
     NSPROF_FLIP_GAP,      /* flip to flip (PFIFO thread): max is the
                              interval's longest frame */
+    NSPROF_PG_HANDOFF,    /* PFIFO letting a counted pgraph.lock waiter in
+                             (pfifo_pg_release's wait) */
     NSPROF__COUNT,
 };
 
@@ -170,6 +172,9 @@ enum NsprofEvent {
     NSPROF_EV_MODULE_MISS,     /* shader module cache miss (vk/shaders.c) */
     NSPROF_EV_SHADER_EVICT,    /* shader binding LRU eviction */
     NSPROF_EV_PIPELINE_EVICT,  /* draw pipeline LRU eviction */
+    /* threaded puller batches (pfifo.lock_batch): why a batch ended */
+    NSPROF_EV_PG_TRYFAIL,      /* pfifo.lock was held (pgraph_write, a kick) */
+    NSPROF_EV_PG_CAP,          /* PFIFO_PG_RUN commands */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

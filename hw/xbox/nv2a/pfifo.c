@@ -369,7 +369,7 @@ static bool pfifo_stall_for_flip(NV2AState *d)
     bool should_stall = false;
 
     if (qatomic_read(&d->pgraph.waiting_for_flip)) {
-        bool locked = d->pfifo.inline_locked;
+        bool locked = d->pfifo.inline_locked || d->pfifo.pg_held;
         if (!locked) {
             qemu_mutex_lock(&d->pgraph.lock);
         }
@@ -393,6 +393,67 @@ static bool pfifo_puller_should_stall(NV2AState *d)
            qatomic_read(&d->pgraph.waiting_for_nop) ||
            qatomic_read(&d->pgraph.waiting_for_context_switch) ||
            !can_fifo_access(d);
+}
+
+/*
+ * Threaded puller, before a command (holding pfifo.lock): let go of it and
+ * hold pgraph.lock, which a batch may hold already.
+ */
+static inline void pfifo_puller_lock(NV2AState *d)
+{
+    qemu_mutex_unlock(&d->pfifo.lock);
+    if (!d->pfifo.pg_held) {
+        qemu_mutex_lock(&d->pgraph.lock);
+    }
+}
+
+/* Threaded puller: let go of a batch's pgraph.lock (holding pfifo.lock or
+ * not); a counted waiter gets ~20 us to take it first. */
+static void pfifo_pg_release(NV2AState *d, bool handoff)
+{
+    qemu_mutex_unlock(&d->pgraph.lock);
+    d->pfifo.pg_held = false;
+    d->pfifo.pg_run = 0;
+    if (handoff && qatomic_read(&d->pfifo.ext_waiters)) {
+        int64_t t0 = nsprof_begin();
+        int64_t end = get_clock() + 20000;
+        while (qatomic_read(&d->pfifo.ext_waiters) && get_clock() < end) {
+            /* the waiter's wake is a few microseconds */
+        }
+        nsprof_end(NSPROF_PG_HANDOFF, t0);
+    }
+}
+
+/*
+ * Threaded puller, after a command (holding pgraph.lock): take pfifo.lock
+ * back. With lock_batch, keep pgraph.lock for the next command while
+ * pfifo.lock is free and no other thread waits for pgraph.lock, for up to
+ * PFIFO_PG_RUN commands: one lock pair less per command (~28K a flip for a
+ * large model). The trylock never waits, so the pfifo -> pgraph order
+ * holds; on a failure pgraph_write (or a kicker) holds pfifo.lock, and
+ * pgraph.lock goes as before.
+ */
+#define PFIFO_PG_RUN 256
+
+static inline void pfifo_puller_relock(NV2AState *d)
+{
+    if (!d->pfifo.lock_batch) {
+        qemu_mutex_unlock(&d->pgraph.lock);
+        qemu_mutex_lock(&d->pfifo.lock);
+        return;
+    }
+    if (!qatomic_read(&d->pfifo.ext_waiters)) {
+        if (++d->pfifo.pg_run >= PFIFO_PG_RUN) {
+            nsprof_event(NSPROF_EV_PG_CAP);
+        } else if (qemu_mutex_trylock(&d->pfifo.lock) == 0) {
+            d->pfifo.pg_held = true;
+            return;
+        } else {
+            nsprof_event(NSPROF_EV_PG_TRYFAIL);
+        }
+    }
+    pfifo_pg_release(d, true);
+    qemu_mutex_lock(&d->pfifo.lock);
 }
 
 /* inl: the deterministic inline run (pfifo.inline_locked), see the pusher. */
@@ -443,8 +504,7 @@ pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, entry.engine);
 
         if (!locked) {
-            qemu_mutex_unlock(&d->pfifo.lock);
-            qemu_mutex_lock(&d->pgraph.lock);
+            pfifo_puller_lock(d);
         }
 
         if (inl || can_fifo_access(d)) {
@@ -457,8 +517,7 @@ pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
         }
 
         if (!locked) {
-            qemu_mutex_unlock(&d->pgraph.lock);
-            qemu_mutex_lock(&d->pfifo.lock);
+            pfifo_puller_relock(d);
         }
 
     } else if (method >= 0x100) {
@@ -486,8 +545,7 @@ pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, engine);
 
         if (!locked) {
-            qemu_mutex_unlock(&d->pfifo.lock);
-            qemu_mutex_lock(&d->pgraph.lock);
+            pfifo_puller_lock(d);
         }
 
         if (inl || can_fifo_access(d)) {
@@ -497,8 +555,7 @@ pfifo_run_puller(NV2AState *d, uint32_t method_entry, uint32_t parameter,
         }
 
         if (!locked) {
-            qemu_mutex_unlock(&d->pgraph.lock);
-            qemu_mutex_lock(&d->pfifo.lock);
+            pfifo_puller_relock(d);
         }
     } else {
         assert(!"Unrecognized pfifo puller method");
@@ -864,6 +921,10 @@ static inline QEMU_ALWAYS_INLINE void pfifo_run_pusher_impl(NV2AState *d,
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
             break;
         }
+    }
+
+    if (!inl && d->pfifo.pg_held) {
+        pfifo_pg_release(d, false);
     }
 
     // NV2A_DPRINTF("DMA pusher done: max 0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx " - 0x%" HWADDR_PRIx "\n",

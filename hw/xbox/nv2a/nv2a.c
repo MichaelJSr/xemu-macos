@@ -402,7 +402,7 @@ static void nv2a_lock_fifo(NV2AState *d)
     bql_unlock();
     qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
     bql_lock();
-    qemu_mutex_lock(&d->pgraph.lock);
+    nv2a_pgraph_lock_ext(d);
 }
 
 static void nv2a_unlock_fifo(NV2AState *d)
@@ -601,6 +601,9 @@ static void nv2a_realize(PCIDevice *dev, Error **errp)
         /* Normal mode only: icount's pusher runs at every guest write. */
         e = getenv("XEMU_PFIFO_RING_FREEZE");
         d->pfifo.ring_freeze = !icount_enabled() && !(e && e[0] == '0');
+        /* Normal mode: the threaded puller batches commands (pfifo.c) */
+        e = getenv("XEMU_PFIFO_LOCK_BATCH");
+        d->pfifo.lock_batch = !icount_enabled() && !(e && e[0] == '0');
         /* nv2a_reset: clear the interrupt enables */
         e = getenv("XEMU_NV2A_RESET_IRQ");
         d->reset_irq = !(e && e[0] == '0');
