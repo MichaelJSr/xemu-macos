@@ -38,8 +38,9 @@ are in `xemu-history`.
   owner's pref dir). Never mark an xemu the owner
   plays. Launchers pass xemu none of the automation variables they
   inherited (`XEMU_RAM_SHM`, the input pipe, record and log files, live
-  pads, `XEMU_VK_DRIVER`, `XEMU_LANGUAGE`, the run-changing harness
-  opt-ins such as `XEMU_RENDER_NULL_RAM` and `XEMU_STRICT_CPUID`:
+  pads, `XEMU_VK_DRIVER`, `XEMU_LANGUAGE`, the harness opt-ins that
+  change a run's RAM, cycles or QMP events, such as `XEMU_RENDER_NULL_RAM`
+  and `XEMU_STRICT_CPUID`:
   `AUTOMATION_ENV` in `xemu_lease.py`); set them per run. The kept
   normal-mode switches pass through. Every
   launch line in a doc or skill carries the marker or `XEMU_BASE_PATH`.
@@ -115,8 +116,9 @@ fixtures are), so clone them to `/tmp`. The title
 W=$(mktemp -d /tmp/xr.XXXX) F=../fixtures
 cp -Rc dist/xemu.app $W/; cp -c $F/xbox_hdd.qcow2 $W/hdd.qcow2; cp -c $F/eeprom.bin $W/eeprom.bin
 cp $F/xemu.toml $W/xemu.toml   # the clones, screenshots in $W (the fixture's dir is personal),
+# fullscreen off, mute, pad stubs (zsh); && because a failed rewrite leaves the fixture's paths
 PADS=(${(f)"$(python3 -I scripts/harness-config.py $W/xemu.toml --workdir $W \
-    --hdd $W/hdd.qcow2 --eeprom $W/eeprom.bin)"})   # fullscreen off, mute, pad stubs (zsh)
+    --hdd $W/hdd.qcow2 --eeprom $W/eeprom.bin)"}) &&
 XEMU_NV2A_NSPROF=1 python3 -I scripts/xemu_lease.py run -- $W/xemu.app/Contents/MacOS/xemu \
   -config_path $W/xemu.toml -monitor unix:$W/mon.sock,server,nowait $PADS > $W/log 2>&1 &
 sleep 25; (echo 'loadvm azurik-heavy-f1'; sleep 3) | nc -U $W/mon.sock | grep -i error
@@ -224,7 +226,7 @@ the other arm does too).
 | `movement-probe.sh <out> [--app P] [VAR=V…]` | Streaming walk; a healthy TB-flush delta is 0-1 |
 | `cast-probe.py [--app P] [--base DIR] [--keep DIR] [--casts N]` | First-use hitches: Azurik's fire-armor cast (LT + B) from `vanilla-rz-w1-dark` (D98 config and drive: `--config`, `--hdd`), real time; per cast the worst frame gap, shader/pipeline creation and their parts, slow creations. Empty caches unless `--base` (a `--keep` base: warm) |
 | `[PROBE_CYCLES=N] probe-run.sh <app> <out> <tag[,tag…]> [dwell=80] [K=V…]`, `boot-smoke-corpus.sh <iso>…` | atexit dumps after a dwell per load, every tag loaded each cycle (the refuter soak: `PROBE_CYCLES=3 … azurik-heavy-f1,vm-20260704032357 10 XEMU_SUBPAGE_FAST_REFUTE=1`; a dead xemu or failed load exits 1, a nonzero `VIOLATIONS=` 3); boot smoke |
-| `nsprof_summarize.py`, `win/score_shot_win.py`, `bench-screenshot.py` | nsprof tables and A/B; magenta/white/stuck scoring of any PNG, QMP screendumps included (stdlib only, any OS); window capture |
+| `nsprof_summarize.py`, `win/score_shot_win.py`, `bench-screenshot.py` | nsprof tables and A/B; magenta/white/stuck scoring of 8-bit non-interlaced PNGs, QMP screendumps included (stdlib only, any OS; another PNG prints `SKIP`); window capture |
 
 No-game tests: `cd build && ninja test-xbox && ./pyvenv/bin/meson test --suite xbox --no-rebuild`.
 Pre-release correctness pass (never per change): `tests/azurik/README.md`, the Azurik harness's replays, physics, heavy scenes and Bink checks on the Modkit's D98 fixtures, with v0.15's results. Its vanilla scenes sit at their 30 fps cap windowed, so they don't replace heavy-f1/W2.
@@ -247,7 +249,7 @@ A change to the shader generators or renderer must also pass a det
 offscreen cold boot (`bench-det.py --renderer offscreen -n 1 -t - -f 1800
 --hash-at 900,1800 --shot DIR`, base against new; `--shot` saves the
 f1800 picture from the same run, after its RAM hash; an f900 picture is a
-separate `-f 900 --shot` run): Azurik's gameplay states draw with
+separate `-f 900 --shot` run without `--hash-at`): Azurik's gameplay states draw with
 vertex programs, and only the boot reaches fixed-function shaders (a GLSL
 that fails to compile aborts there). Compare pictures only from the same
 `-f`/`--hash-at` schedule, by pixel-difference counts rather than sha.
@@ -342,7 +344,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LANGUAGE=<fr\|de\|…\|n>` | The console language the guest reads (EEPROM reads; every load sets it in the kernel's EEPROM copy in RAM, so a load in another language differs from a plain one); QMP `xemu-set-language` while stopped; the EEPROM file stays untouched | `hw/xbox/smbus_storage.c`, `ui/xemu-language.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
-| `XEMU_RENDER_NULL_RAM`, `XEMU_QMP_WATCH`, `XEMU_SOCKET_BACKLOG`, `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`, `XEMU_CSTATUS_FULL_RAM` | Harness opt-ins that change a run (README; `RENDER_NULL_RAM` and `QMP_WATCH` also in xemu-internals). Launchers drop inherited ones | `vk/renderer.c`, `monitor/xemu-qmp-watch.c`, `chardev/char-socket.c`, `migration/ram.c`, `hw/xbox/xbox_pci.c`, `hw/xbox/nv2a/pfb.c` |
+| `XEMU_RENDER_NULL_RAM`, `XEMU_QMP_WATCH`, `XEMU_SOCKET_BACKLOG`, `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`, `XEMU_CSTATUS_FULL_RAM` | Harness opt-ins that change a run's RAM, cycles or QMP events (README; `RENDER_NULL_RAM` and `QMP_WATCH` also in xemu-internals). Launchers drop inherited ones | `vk/renderer.c`, `monitor/xemu-qmp-watch.c`, `chardev/char-socket.c`, `migration/ram.c`, `hw/xbox/xbox_pci.c`, `hw/xbox/nv2a/pfb.c` |
 | `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (KK benches, windowed or headless; no strike marker); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |

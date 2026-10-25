@@ -25,8 +25,9 @@ while (( $# > 0 )); do
     --app) APP=$2; shift ;;
     --e-value) E_VALUE=$2; shift ;;
     --draws-band|--cv-max|--config-src|--hdd|--boot-wait) rest+=($1 $2); shift ;;
+    --isolate-caches|--keep-work|--no-screenshot) rest+=($1) ;;
     -h|--help) awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
-    --*) rest+=($1) ;;
+    -*) print -u2 "bench-savestate-ab: unknown flag $1 (two bundles or envs: bench-abx.sh)"; exit 2 ;;
     *) pos+=($1) ;;
   esac
   shift

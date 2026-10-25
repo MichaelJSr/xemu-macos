@@ -122,8 +122,12 @@ for iso in $ISOS; do
   cp $CONFIG_SRC $cfg
   # The clones and the disc, screenshots in $WORK, fullscreen off, muted
   # (scripts/harness-config.py); no loadvm, so no pad stubs.
-  python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs --workdir $WORK --hdd $HDD \
-      ${EEPROM:+--eeprom} $EEPROM --dvd $iso
+  # A failed rewrite leaves the fixture's own paths and volume: never launch on it.
+  if ! python3 -I ${0:a:h}/harness-config.py $cfg --no-pad-stubs --workdir $WORK --hdd $HDD \
+      ${EEPROM:+--eeprom} $EEPROM --dvd $iso; then
+    echo "$name: SKIPPED: harness-config.py failed"
+    rm -f $fifo; RC=1; continue
+  fi
   if (( XEMU_BENCH_PORTABLE )); then   # binary predates XEMU_BASE_PATH
     cp $cfg $APP/Contents/Resources/xemu.toml; cfg=$APP/Contents/Resources/xemu.toml
   fi

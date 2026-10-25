@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """bench-savestate-ab-win.py - reproducible in-game perf A/B for xemu on Windows.
 
-Windows port of the protocol in scripts/bench-savestate-ab.sh (which stays
-macOS-only: zsh, dist/xemu.app, APFS clones, AF_UNIX monitor socket,
-screencapture). Same protocol, same gates, same receipt engine
-(scripts/bench-receipt.py) and the same nsprof summarizer, so a Windows
-receipt is structurally comparable to a macOS one - but ONLY within its own
-platform: never compare absolute fps across hosts.
+Windows port of the one-knob protocol scripts/bench-savestate-ab.sh ran
+before it became a wrapper over bench-abx.sh (macOS-only: zsh,
+dist/xemu.app, APFS clones, AF_UNIX monitor socket, screencapture). Same
+gates, same receipt engine (scripts/bench-receipt.py) and the same nsprof
+summarizer, but the older protocol: pairs B,E,B,E, a flat binary block with
+env_var, and cache isolation on/off, where the macOS wrapper now runs
+B,E,E,B and writes config.experiment, binary.arms and cache_isolation
+off/shared/per-arm. Compare receipts only within one platform, and never
+absolute fps across hosts.
 
   bench-savestate-ab-win.py <snapshot> <ENV_VAR> [pairs] [secs] [outdir] [flags]
   bench-savestate-ab-win.py --menu - <ENV_VAR> [pairs] [secs] [outdir] [flags]

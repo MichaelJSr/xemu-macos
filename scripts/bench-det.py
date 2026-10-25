@@ -26,7 +26,9 @@ An arm's K=V list splits at a comma only where NAME= follows it, so a
 value may hold commas as long as none is followed by NAME=:
 kk=/tmp/e.app:XEMU_VK_DRIVER=kosmickrisp,MESA_KK_DISABLE_WORKAROUNDS=2,6,17
 
---shot DIR saves each run's picture at its final stop: after the last
+--shot DIR saves each run's picture at its final stop (a rendered one
+needs --renderer offscreen: the null renderer's is the VGA scanout, mostly
+blank): after the last
 xemu-frame-advance and the RAM hash, a QMP screendump (PNG) to
 DIR/<arm>-<pair>-f<N>.png (--check: DIR/<arm>-<run>-f<N>.png), then
 quit. Never at an earlier stop: a screendump can finish the frame
@@ -34,7 +36,8 @@ quit. Never at an earlier stop: a screendump can finish the frame
 pixels. Its sha256[:12] prints as png=, beside the RAM hash, and never
 counts as a RAM difference. Compare pictures only from the same
 -f/--hash-at schedule, by pixel-difference counts rather than sha (an
-f900 picture of a 900,1800 schedule is a separate `-f 900 --shot` run).
+f900 picture of a 900,1800 schedule is a separate `-f 900 --shot` run,
+without --hash-at, whose last stop would set the picture).
 --dvd ISO passes -dvd_path ISO to every run (no clone: pass a clone).
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
@@ -952,26 +955,26 @@ def check(a, arms):
     """--check: run the sets' runs in parallel, assert goldens and agreement."""
     gold = json.load(open(os.path.join(REPO, 'scripts/det-goldens.json')))
     runs, batch = [], None
-    for name in a.check.split(','):
-        if name == 'goldens':
-            runs += [(k, v['tag'], v['frames'], v['hash_at'], v['input'], '', '', a.dvd)
-                     for k, v in gold['runs'].items()]
-        elif name.startswith('tags:'):
-            tags = [t.strip() for t in open(name[5:]) if t.strip() and not t.startswith('#')]
-            f = a.frames if a.frames != 1200 else 300
-            runs += [(t, t, f, '', a.input, None, '', a.dvd) for t in tags]
-        elif name == 'd98':
-            fx = os.environ.get('AZURIK_FX', '')
-            if not os.path.isfile(os.path.join(fx, 'xemu.toml')):
-                sys.exit('bench-det: --check d98 needs AZURIK_FX, the Modkit\'s D98 fixtures folder '
-                         '(xemu.toml, the drive, eeprom.bin, vanilla.iso)')
-            batch = batch or scratch_dir()   # the ISO clone: removed with the batch
-            iso = os.path.join(batch, 'dvd.iso')
-            subprocess.run(['cp', '-c', os.path.join(fx, 'vanilla.iso'), iso], check=True)
-            runs += d98_runs(fx, iso)
-        else:
-            sys.exit(f'bench-det: unknown --check set {name}')
     try:
+        for name in a.check.split(','):
+            if name == 'goldens':
+                runs += [(k, v['tag'], v['frames'], v['hash_at'], v['input'], '', '', a.dvd)
+                         for k, v in gold['runs'].items()]
+            elif name.startswith('tags:'):
+                tags = [t.strip() for t in open(name[5:]) if t.strip() and not t.startswith('#')]
+                f = a.frames if a.frames != 1200 else 300
+                runs += [(t, t, f, '', a.input, None, '', a.dvd) for t in tags]
+            elif name == 'd98':
+                fx = os.environ.get('AZURIK_FX', '')
+                if not fx or not os.path.isfile(os.path.join(fx, 'xemu.toml')):
+                    sys.exit('bench-det: --check d98 needs AZURIK_FX, the Modkit\'s D98 fixtures folder '
+                             '(xemu.toml, the drive, eeprom.bin, vanilla.iso)')
+                batch = batch or scratch_dir()   # the ISO clone: removed with the batch
+                iso = os.path.join(batch, 'dvd.iso')
+                subprocess.run(['cp', '-c', os.path.join(fx, 'vanilla.iso'), iso], check=True)
+                runs += d98_runs(fx, iso)
+            else:
+                sys.exit(f'bench-det: unknown --check set {name}')
         check_runs(a, arms, gold, runs)
     finally:
         if batch:
@@ -1059,7 +1062,8 @@ def main():
     p.add_argument('--renderer', choices=('null', 'offscreen'), default='null',
                    help='offscreen: Vulkan on a portable clone with cold caches')
     p.add_argument('--shot', default='', metavar='DIR',
-                   help='QMP screendump at the final stop to DIR/<arm>-<pair>-f<N>.png')
+                   help='QMP screendump at the final stop to DIR/<arm>-<pair>-f<N>.png '
+                        '(rendered with --renderer offscreen)')
     t = p.add_argument_group('boot timeline (--timeline)')
     t.add_argument('--timeline', action='store_true',
                    help='cold boot to steady play, phase by phase (-n timing runs per arm)')

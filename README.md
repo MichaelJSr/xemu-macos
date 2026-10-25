@@ -1196,7 +1196,8 @@ Other automation interfaces (windowed or headless):
   `XEMU_TRACE_RECORD` and `_REGIONS`, `XEMU_BLOCK_LOG`,
   `XEMU_VOICE_LOG`, `XEMU_AUDIO_WAV`, `XEMU_ICOUNT_LIVE_PADS`,
   `XEMU_VK_DRIVER`, `XEMU_QMP_WATCH`, `XEMU_LANGUAGE`, and the harness
-  opt-ins that change a run: `XEMU_RENDER_NULL_RAM`,
+  opt-ins that change what a run does or costs (its RAM, cycles or QMP
+  events): `XEMU_RENDER_NULL_RAM`,
   `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`,
   `XEMU_CSTATUS_FULL_RAM`, `XEMU_SOCKET_BACKLOG`, `XEMU_STRICT_CPUID`,
   `XEMU_GUEST_BUGCHECK` (stderr: `lease: not passing the inherited
