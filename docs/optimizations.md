@@ -939,9 +939,11 @@ x86_64 host (Windows, Linux, Intel macOS).
   `cpu_set_mxcsr`.
 - **Misc.** `fnstcw` is one load; `insertion_sort_syncs` replaces
   `qsort` for N ≤ 16. (Retired with the cache on 2026-10-15: `gen_flcr`
-  materializing rc-bits from `tb->flags`. The `flcr` op and its 5-insn
-  `RBIT` lowering stay in the aarch64 backend for upstream's `gen_flcr`
-  skeleton; nothing has emitted the op since 3eb1b2de10.)
+  materializing rc-bits from `tb->flags`. On 2026-10-24 the aarch64
+  backend dropped the `flcr` op, its `RBIT` lowering and every f32,
+  sin/cos and unused conversion arm, which only upstream's inline x87
+  cache emitted; that cache is inexact and stays off, and can no longer
+  be switched on for aarch64.)
 - **3-MOVK constant materialization.** `tcg_out_movi` now emits
   MOVZ/MOVN + up to 3 MOVK for 3- and 4-chunk constants instead of
   dumping them into the literal pool (LDR + D-cache pressure).

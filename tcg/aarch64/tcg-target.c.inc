@@ -664,31 +664,23 @@ typedef enum {
     BTI_JC          = 0xd50324df,
 
     /* Scalar floating-point arithmetic (two source). */
-    INSN_FADD_S     = 0x1e202800,
     INSN_FADD_D     = 0x1e602800,
-    INSN_FSUB_S     = 0x1e203800,
     INSN_FSUB_D     = 0x1e603800,
-    INSN_FMUL_S     = 0x1e200800,
     INSN_FMUL_D     = 0x1e600800,
-    INSN_FDIV_S     = 0x1e201800,
     INSN_FDIV_D     = 0x1e601800,
     INSN_FMAX_D     = 0x1e604800,
 
     /* Scalar floating-point (one source). */
     INSN_FMOV_S     = 0x1e204000,
     INSN_FMOV_D     = 0x1e604000,
-    INSN_FABS_S     = 0x1e20c000,
     INSN_FABS_D     = 0x1e60c000,
-    INSN_FNEG_S     = 0x1e214000,
     INSN_FNEG_D     = 0x1e614000,
-    INSN_FSQRT_S    = 0x1e21c000,
     INSN_FSQRT_D    = 0x1e61c000,
     INSN_FRINTX_D   = 0x1e674000, /* round per FPCR.RMode */
     INSN_FCVT_SD    = 0x1e624000, /* double -> single */
     INSN_FCVT_DS    = 0x1e22c000, /* single -> double */
 
     /* Scalar FP compare and select. */
-    INSN_FCMP_S     = 0x1e202000,
     INSN_FCMP_D     = 0x1e602000,
     INSN_FCSEL_D    = 0x1e600c00,
 
@@ -699,20 +691,11 @@ typedef enum {
     INSN_FMOV_XD    = 0x9e660000,
 
     /* Int -> FP conversion. */
-    INSN_SCVTF_SW   = 0x1e220000,
-    INSN_SCVTF_SX   = 0x9e220000,
     INSN_SCVTF_DW   = 0x1e620000,
-    INSN_SCVTF_DX   = 0x9e620000,
 
     /* FP -> Int conversion (round toward zero). */
-    INSN_FCVTZS_WS  = 0x1e380000,
-    INSN_FCVTZS_XS  = 0x9e380000,
-    INSN_FCVTZS_WD  = 0x1e780000,
     INSN_FCVTZS_XD  = 0x9e780000,
 
-    /* System register access. */
-    INSN_MSR_FPCR   = 0xd51b4400,
-    INSN_MRS_NZCV   = 0xd53b4200,
 } AArch64Insn;
 
 static inline uint32_t tcg_in32(TCGContext *s)
@@ -4265,14 +4248,7 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
     TCGArg a0 = args[0];
     TCGArg a1 = args[1];
     TCGArg a2 = args[2];
-    bool dp;
 
-#define OP_f32_f64(x) \
-        case glue(glue(INDEX_op_, x), _f64): \
-            dp = true; /* FALLTHRU */    \
-        case glue(glue(INDEX_op_, x), _f32)
-
-    dp = false;
     switch (opc) {
     case INDEX_op_qemu_ld_v128:
         tcg_out_qemu_ld_v128(s, a0, a1, a2);
@@ -4291,73 +4267,38 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_insn(s, 3501, ADD, TCG_TYPE_I64, a0, a1, a2, MO_32, args[3]);
         break;
 
-    case INDEX_op_flcr:
-        /*
-         * a0 = MXCSR-like value with RC in bits [14:13].
-         * Map to ARM64 FPCR RMode (bits [23:22]) with bit swap:
-         * x86 RC {bit14,bit13} → ARM RMode {bit13,bit14}.
-         * RBIT reverses all 32 bits, placing [1:0] at [31:30],
-         * then LSR 8 moves [31:30] to [23:22].
-         *
-         * Note: we do NOT set the FPCR DN bit (bit 25). x87 propagates
-         * the source NaN operand, matching AArch64's DN=0 behavior.
-         * Setting DN=1 would force a fixed default NaN and diverge from
-         * x87 semantics on NaN-producing ops. FZ (bit 24) is also left
-         * at zero so denormals follow IEEE rules.
-         */
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP0, a0, 13, 14);
-        tcg_out_insn(s, 3507, RBIT, TCG_TYPE_I32,
-                     TCG_REG_TMP0, TCG_REG_TMP0);
-        tcg_out_ubfm(s, TCG_TYPE_I32,
-                     TCG_REG_TMP0, TCG_REG_TMP0, 8, 31);
-        tcg_out32(s, INSN_MSR_FPCR | (TCG_REG_TMP0 & 0x1f));
-        break;
-
-    OP_f32_f64(ld80f):
-        if (dp) {
-            tcg_out_ld80f_f64(s, a0, a1, a2);
-        } else {
-            /* f32: load as f64 into VEC_TMP0, then FCVT Sd, Dn */
-            tcg_out_ld80f_f64(s, TCG_VEC_TMP0, a1, a2);
-            tcg_out_fp_1src(s, INSN_FCVT_SD, a0, TCG_VEC_TMP0);
-        }
+    case INDEX_op_ld80f_f64:
+        tcg_out_ld80f_f64(s, a0, a1, a2);
         break;
 
     case INDEX_op_ld80d_f64:
         tcg_out_ld80d_f64(s, a0, a1, a2, args[3], args[4]);
         break;
 
-    OP_f32_f64(st80f):
-        if (dp) {
-            tcg_out_st80f_f64(s, a0, a1, a2);
-        } else {
-            /* f32: FCVT Dd, Sn into VEC_TMP0, then store as f64 */
-            tcg_out_fp_1src(s, INSN_FCVT_DS, TCG_VEC_TMP0, a0);
-            tcg_out_st80f_f64(s, TCG_VEC_TMP0, a1, a2);
-        }
+    case INDEX_op_st80f_f64:
+        tcg_out_st80f_f64(s, a0, a1, a2);
         break;
 
-    OP_f32_f64(add):
-        tcg_out_fp_2src(s, dp ? INSN_FADD_D : INSN_FADD_S, a0, a1, a2);
+    case INDEX_op_add_f64:
+        tcg_out_fp_2src(s, INSN_FADD_D, a0, a1, a2);
         break;
-    OP_f32_f64(sub):
-        tcg_out_fp_2src(s, dp ? INSN_FSUB_D : INSN_FSUB_S, a0, a1, a2);
+    case INDEX_op_sub_f64:
+        tcg_out_fp_2src(s, INSN_FSUB_D, a0, a1, a2);
         break;
-    OP_f32_f64(mul):
-        tcg_out_fp_2src(s, dp ? INSN_FMUL_D : INSN_FMUL_S, a0, a1, a2);
+    case INDEX_op_mul_f64:
+        tcg_out_fp_2src(s, INSN_FMUL_D, a0, a1, a2);
         break;
-    OP_f32_f64(div):
-        tcg_out_fp_2src(s, dp ? INSN_FDIV_D : INSN_FDIV_S, a0, a1, a2);
+    case INDEX_op_div_f64:
+        tcg_out_fp_2src(s, INSN_FDIV_D, a0, a1, a2);
         break;
-    OP_f32_f64(abs):
-        tcg_out_fp_1src(s, dp ? INSN_FABS_D : INSN_FABS_S, a0, a1);
+    case INDEX_op_abs_f64:
+        tcg_out_fp_1src(s, INSN_FABS_D, a0, a1);
         break;
-    OP_f32_f64(chs):
-        tcg_out_fp_1src(s, dp ? INSN_FNEG_D : INSN_FNEG_S, a0, a1);
+    case INDEX_op_chs_f64:
+        tcg_out_fp_1src(s, INSN_FNEG_D, a0, a1);
         break;
-    OP_f32_f64(sqrt):
-        tcg_out_fp_1src(s, dp ? INSN_FSQRT_D : INSN_FSQRT_S, a0, a1);
+    case INDEX_op_sqrt_f64:
+        tcg_out_fp_1src(s, INSN_FSQRT_D, a0, a1);
         break;
     case INDEX_op_rint_f64:
         tcg_out_fp_1src(s, INSN_FRINTX_D, a0, a1);
@@ -4377,10 +4318,6 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         break;
 
     case INDEX_op_mov_f64:
-        dp = true; /* FALLTHRU */
-    case INDEX_op_mov_f32:
-        tcg_out_mov(s, dp ? TCG_TYPE_F64 : TCG_TYPE_F32, a0, a1);
-        break;
     case INDEX_op_mov64i_f64:
     case INDEX_op_mov64f_i64:
         tcg_out_mov(s, TCG_TYPE_F64, a0, a1);
@@ -4390,7 +4327,7 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_mov(s, TCG_TYPE_F32, a0, a1);
         break;
 
-    OP_f32_f64(com): {
+    case INDEX_op_com_f64: {
         /*
          * Quiet FCMP sets NZCV to exactly one of: less N, equal ZC,
          * greater C, unordered CV. x86 wants CF for less, ZF for equal,
@@ -4400,8 +4337,8 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
          */
         unsigned sh = args[3];
 
-        tcg_out32(s, (dp ? INSN_FCMP_D : INSN_FCMP_S)
-                  | (((a2 - 32) & 0x1f) << 16) | (((a1 - 32) & 0x1f) << 5));
+        tcg_out32(s, INSN_FCMP_D | (((a2 - 32) & 0x1f) << 16)
+                  | (((a1 - 32) & 0x1f) << 5));
         if (sh == 0) {
             /* CSINC a0, wzr, wzr, PL: 1 on MI */
             tcg_out32(s, I3506_CSINC | TCG_REG_XZR << 16 | COND_PL << 12
@@ -4428,25 +4365,8 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                   | ((args[3] - 32) & 0x1f) << 5 | ((a0 - 32) & 0x1f));
         break;
 
-    OP_f32_f64(cvt32i):
-        tcg_out32(s, (dp ? INSN_SCVTF_DW : INSN_SCVTF_SW)
-                  | ((a0 - 32) & 0x1f) | ((a1 & 0x1f) << 5));
-        break;
-    OP_f32_f64(cvt64i):
-        tcg_out32(s, (dp ? INSN_SCVTF_DX : INSN_SCVTF_SX)
-                  | ((a0 - 32) & 0x1f) | ((a1 & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt32f_i32:
-        tcg_out32(s, INSN_FCVTZS_WS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt32f_i64:
-        tcg_out32(s, INSN_FCVTZS_XS
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
-        break;
-    case INDEX_op_cvt64f_i32:
-        tcg_out32(s, INSN_FCVTZS_WD
-                  | (a0 & 0x1f) | (((a1 - 32) & 0x1f) << 5));
+    case INDEX_op_cvt32i_f64:
+        tcg_out32(s, INSN_SCVTF_DW | ((a0 - 32) & 0x1f) | ((a1 & 0x1f) << 5));
         break;
     case INDEX_op_cvt64f_i64:
         tcg_out32(s, INSN_FCVTZS_XD
@@ -4461,17 +4381,9 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_fp_1src(s, INSN_FCVT_SD, a0, a1);
         break;
 
-    OP_f32_f64(sin):
-    OP_f32_f64(cos):
-        /* ARM64 has no hardware sin/cos; these should never be emitted
-         * because translate.c flushes + calls the full helper instead. */
-        g_assert_not_reached();
-
     default:
         g_assert_not_reached();
     }
-
-#undef OP_f32_f64
 }
 
 static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
@@ -4994,57 +4906,34 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O0_I2(W, r);
 
     /* Scalar floating-point ops */
-    case INDEX_op_flcr:
-        return C_O0_I1(r);
-    case INDEX_op_ld80f_f32:
     case INDEX_op_ld80f_f64:
     case INDEX_op_ld80d_f64:
         return C_O1_I1(W, r);
-    case INDEX_op_st80f_f32:
     case INDEX_op_st80f_f64:
     case INDEX_op_st_f64:
         return C_O0_I2(W, r);
-    case INDEX_op_add_f32:
     case INDEX_op_add_f64:
-    case INDEX_op_sub_f32:
     case INDEX_op_sub_f64:
-    case INDEX_op_mul_f32:
     case INDEX_op_mul_f64:
-    case INDEX_op_div_f32:
     case INDEX_op_div_f64:
         return C_O1_I2(W, W, W);
-    case INDEX_op_abs_f32:
     case INDEX_op_abs_f64:
-    case INDEX_op_chs_f32:
     case INDEX_op_chs_f64:
-    case INDEX_op_sqrt_f32:
     case INDEX_op_sqrt_f64:
     case INDEX_op_rint_f64:
     case INDEX_op_quiet_f64:
-    case INDEX_op_mov_f32:
     case INDEX_op_mov_f64:
     case INDEX_op_cvt32f_f64:
     case INDEX_op_cvt64f_f32:
-    case INDEX_op_sin_f32:
-    case INDEX_op_sin_f64:
-    case INDEX_op_cos_f32:
-    case INDEX_op_cos_f64:
         return C_O1_I1(W, W);
-    case INDEX_op_cvt32i_f32:
     case INDEX_op_cvt32i_f64:
-    case INDEX_op_cvt64i_f32:
-    case INDEX_op_cvt64i_f64:
     case INDEX_op_mov32i_f32:
     case INDEX_op_mov64i_f64:
         return C_O1_I1(W, r);
-    case INDEX_op_cvt32f_i32:
-    case INDEX_op_cvt32f_i64:
-    case INDEX_op_cvt64f_i32:
     case INDEX_op_cvt64f_i64:
     case INDEX_op_mov32f_i32:
     case INDEX_op_mov64f_i64:
         return C_O1_I1(r, W);
-    case INDEX_op_com_f32:
     case INDEX_op_com_f64:
         return C_O1_I2(r, W, W);
     case INDEX_op_movcond_f64:
