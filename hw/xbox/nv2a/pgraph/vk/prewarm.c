@@ -63,6 +63,7 @@
 #define PREWARM_MAX_AGE_NS 30000000000ll /* or once a record is 30 s old */
 #define PREWARM_YIELD_NS 10000000ll      /* worker waits out 10 ms of misses */
 #define PREWARM_MAX_FAILURES 8
+#define PREWARM_MAX_WORKERS 4
 
 typedef struct PrewarmHeader {
     char magic[8];
@@ -85,14 +86,17 @@ typedef struct VkPrewarm {
     GByteArray *pending;     /* records not appended yet */
     int64_t oldest_pending_ns;
 
-    /* The worker's: set before it starts, read-only after */
+    /* The workers': set before they start, read-only after */
     PipelineKey *keys;
     unsigned int num_keys;
-    QemuThread thread;
+    QemuThread threads[PREWARM_MAX_WORKERS];
+    int num_workers;
     bool thread_live;        /* PFIFO/teardown side: started, not joined */
     int64_t started_ns;
 
     /* Shared, atomic */
+    int next_worker;         /* each worker takes keys worker, + num_workers */
+    int workers_live;        /* the last one out reports */
     bool stop;
     bool done;
     int64_t activity_ns;     /* last renderer shader/pipeline creation */
@@ -350,21 +354,18 @@ static void *prewarm_thread(void *opaque)
 {
     VkPrewarm *p = opaque;
     PGRAPHVkState *r = p->r;
+    int worker = qatomic_fetch_inc(&p->next_worker);
 
 #ifdef __APPLE__
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 #endif
     nsprof_exclude_thread();
 
-    if (p->marker) {
-        g_file_set_contents(p->marker, "", 0, NULL);
-    }
-
     GHashTable *mods = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                              g_free, NULL);
     GArray *passes = g_array_new(FALSE, FALSE, sizeof(WorkerPass));
 
-    for (unsigned int i = 0; i < p->num_keys; i++) {
+    for (unsigned int i = worker; i < p->num_keys; i += p->num_workers) {
         worker_yield(p);
         if (qatomic_read(&p->stop)) {
             break;
@@ -419,6 +420,9 @@ static void *prewarm_thread(void *opaque)
     }
     g_array_free(passes, TRUE);
 
+    if (qatomic_fetch_dec(&p->workers_live) != 1) {
+        return NULL;
+    }
     if (p->marker) {
         g_unlink(p->marker);
     }
@@ -437,7 +441,9 @@ static void prewarm_join(VkPrewarm *p)
 {
     if (p && p->thread_live) {
         qatomic_set(&p->stop, true);
-        qemu_thread_join(&p->thread);
+        for (int i = 0; i < p->num_workers; i++) {
+            qemu_thread_join(&p->threads[i]);
+        }
         p->thread_live = false;
     }
 }
@@ -477,10 +483,21 @@ void pgraph_vk_prewarm_init(PGRAPHState *pg)
     }
 #ifndef _WIN32
     p->marker = g_strdup_printf("%s.%d.running", p->path, (int)getpid());
+    g_file_set_contents(p->marker, "", 0, NULL);
 #endif
+    /*
+     * Metal's compiler scales only so far: 226 pipelines rebuilt with the
+     * Metal cache cold took 10.4 s on 1 worker, 7.6 on 2, 6.6 on 4 and 6.2
+     * on 8 (M2 Ultra, 2026-10-24). Up to 4 workers, 2 on an 8-core Mac.
+     */
+    p->num_workers = MIN(PREWARM_MAX_WORKERS,
+                         MAX(1, (int)g_get_num_processors() / 4));
+    p->workers_live = p->num_workers;
     p->started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    qemu_thread_create(&p->thread, "vk.prewarm", prewarm_thread, p,
-                       QEMU_THREAD_JOINABLE);
+    for (int i = 0; i < p->num_workers; i++) {
+        qemu_thread_create(&p->threads[i], "vk.prewarm", prewarm_thread, p,
+                           QEMU_THREAD_JOINABLE);
+    }
     p->thread_live = true;
     qatomic_set(&prewarm_live, p);
     static bool registered;

@@ -2531,6 +2531,17 @@ x86_64 host (Windows, Linux, Intel macOS).
   none: clean exits, no marker left. Det offscreen RAM and screendumps
   equal to base.
 
+- **The prewarm runs on up to 4 workers (2026-10-24).** It rebuilt a
+  manifest on one thread. With Metal's compile cache cold (a fresh
+  bundle identifier, as after an OS or driver update) 226 pipelines took
+  10.4 s on 1 worker, 7.6 on 2, 6.6 on 4 and 6.2 on 8; with Metal warm
+  1.3, 0.8, 0.7 and 0.6 s. Workers take every Nth key, each with its own
+  modules and render passes; the last one out reports. 4 on a Mac with
+  16 or more cores, 2 on an 8-core one. The same test gated parallel
+  compile of first-use bursts (the owner's other hitch fix): it needed
+  3× at 8 threads and read 1.68×, so it isn't built. Quit and SIGTERM
+  mid-replay, a truncated manifest and none: clean exits, no marker.
+
 - **2.8 GB less preallocated Vulkan buffer memory (2026-10-24).** xemu's
   footprint was 5.3 GB in an Azurik scene, 4.6 GB of it fixed Vulkan
   buffers sized for worst cases times ten. On unified memory
