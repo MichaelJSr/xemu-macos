@@ -50,6 +50,7 @@
 #include "hw/xbox/nv2a/nsprof.h"
 #include "hw/xbox/nv2a/pgraph/vk/nv2a-key-schema.h"
 #include "ui/xemu-settings.h"
+#include <glib/gstdio.h>
 
 #ifdef __APPLE__
 #include <pthread/qos.h>
@@ -106,8 +107,10 @@ static const char *driver_name(PGRAPHVkState *r)
     switch (r->driver_id) {
     case VK_DRIVER_ID_MOLTENVK:
         return "moltenvk";
+#ifdef __APPLE__   /* older Vulkan headers elsewhere lack the id */
     case VK_DRIVER_ID_MESA_KOSMICKRISP:
         return "kosmickrisp";
+#endif
     default:
         return NULL;
     }
