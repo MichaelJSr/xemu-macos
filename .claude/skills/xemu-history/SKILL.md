@@ -143,7 +143,7 @@ Outcomes: **reverted** (landed, then removed) · **fenced** (removed; probe or h
 | Deleting or re-pushing a published tag | incident | The release flips to draft; tags are immutable | `docs/RELEASING-macos.md` |
 | build.sh shell traps (PGO merge-skip, `set -e` glob, pipefail) | fixed | Test edits under `bash -e` | `fcb874d256` |
 | `-a x86_64` failure chain | fixed | Run `file` on the artifact | `e5134cc906`, `ae94399cd3` |
-| cp+codesign bundle refresh | incident | Dies at dyld; replay the `package_macos` fixups | `8db8f61b4d` |
+| cp+codesign bundle refresh | incident | Dies at dyld; replay the `package_macos` fixups | `scripts/refresh-clone.sh` |
 | Three refuters at once | incident | Wedges boot; use two at most, or `XEMU_DSP_JIT_DIFF=10` | ledger |
 | Bundle binary run with `-machine help` and no `-config_path` (2026-10-15) | incident | The exit-time save rewrote the personal `xemu.toml` (same settings). Even `-help` runs need `-config_path` | — |
 | x86_64: CNG SHA-256 for xemu-ram-digest | closed | 551 vs 548 ms for 128 MiB without SHA-NI | — |

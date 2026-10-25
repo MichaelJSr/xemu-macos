@@ -68,16 +68,10 @@ Needs macOS 14+, Xcode CLT, `brew install pkg-config ninja cmake dylibbundler`,
 space, `-p <platform>` and `-a <arch>` do. Other args go to configure.
 
 Incremental: `ninja -C build qemu-system-i386` (it tracks `config_spec.yml`
-and `meson.build`) doesn't update any bundle. To refresh a clone's binary
-(a bare `cp` dies in dyld):
-
-```sh
-B=$W/xemu.app/Contents/MacOS/xemu L=@executable_path/../Libraries/arm64   # zsh
-cp build/qemu-system-i386 $B && xattr -c $B
-otool -L $B | awk '/\/opt\/local\//{print $1}' | while read d; do install_name_tool -change $d $L/${d:t} $B; done
-otool -l $B | awk '/LC_RPATH/{f=1} f&&/path /{print $2;f=0}' | while read r; do install_name_tool -delete_rpath $r $B 2>/dev/null; done
-install_name_tool -add_rpath $L/ $B && codesign -f --deep --preserve-metadata=entitlements,requirements,flags,runtime -s - $B
-```
+and `meson.build`) doesn't update any bundle. To put the new binary in a
+clone (a bare `cp` dies in dyld): `scripts/refresh-clone.sh <dst.app>
+build/qemu-system-i386 [--from dist/xemu.app]` (re-points the MacPorts
+dylibs, resets rpaths, re-signs; refuses `dist/`).
 
 **PGO:** CI arm64 releases use the committed `pgo/default.profdata`;
 locally, set `XEMU_PGO=use`. To retrain, build with `XEMU_PGO=generate`,
@@ -98,7 +92,7 @@ in `macos-libs/arm64`), or `XEMU_KK_PREFIX=../kk/install-<tag>`; look for
 |---|---|
 | `GLIB_SIZEOF_SIZE_T` mismatch | `rm -rf macos-libs macos-pkgs build dist && ./build.sh` |
 | `libintl.h` missing at an old path (repo moved from `~/Documents/Xemu/tools/xemu-macos`) | `python3 scripts/download-macos-libs.py arm64` (build.sh runs it). Otherwise fix the include in `macos-libs/arm64/opt/local/include/glib-2.0/glib/gi18n.h`, or `rm -rf macos-libs macos-pkgs` |
-| dyld: duplicate `LC_RPATH` | Rebuild, or use the refresh recipe |
+| dyld: duplicate `LC_RPATH` | Rebuild, or `scripts/refresh-clone.sh` |
 | No `libMoltenVK.dylib` | Network, or `scripts/build-moltenvk.sh` |
 | `SDK >= 14.0 not found` | Install a CLT with a `MacOSX<N>.<M>.sdk` |
 | Moved wrap pin ignored | `rm -rf subprojects/<name>` (a dirty `roms/edk2` is harmless) |
