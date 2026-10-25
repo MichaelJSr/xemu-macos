@@ -534,6 +534,10 @@ void pgraph_vk_prewarm_flip(PGRAPHState *pg)
     }
     uint32_t misses = qatomic_xchg(&p->cache_misses, 0);
     if (misses) {
+        if (!r->pipeline_cache_unsaved) {
+            r->pipeline_cache_first_miss_ns =
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
         r->pipeline_cache_unsaved += misses;
     }
     if (p->thread_live && qatomic_load_acquire(&p->done)) {

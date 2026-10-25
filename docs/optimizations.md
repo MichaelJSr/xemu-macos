@@ -2551,6 +2551,14 @@ x86_64 host (Windows, Linux, Intel macOS).
   four anchors; det offscreen heavy-f1 Mcycles/frame −2.44%, Minsns
   −1.26% (4/4); l256_120 probe Minsns −1.23% (4/4).
 
+- **The pipeline-cache save waits for a quiet second (2026-10-24).**
+  The 30 s fallback counted from the last save, so it fired at the first
+  flip of nearly every in-play compile burst and of the first load after
+  launch: a 20-45 ms serialization of the cache under MoltenVK's lock in
+  the middle of the burst. It now also waits for 1 s without a miss,
+  unless the oldest unsaved miss is 120 s old (a crash still loses at
+  most that). A cold cast probe still saves twice, after its bursts.
+
 - **Texture descriptor sets are reused while their handles match
   (2026-10-24).** The guest re-sends texture state nearly every draw,
   so `texture_bindings_changed` was set on almost every draw and each

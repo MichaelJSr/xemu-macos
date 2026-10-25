@@ -870,6 +870,7 @@ typedef struct PGRAPHVkState {
     int64_t pipeline_cache_last_save_ns;
     int64_t pipeline_cache_loadvm_ns;
     int64_t pipeline_cache_last_miss_ns;
+    int64_t pipeline_cache_first_miss_ns; /* oldest unsaved miss */
     bool pipeline_creation_feedback_enabled;
     bool pipeline_cache_stage_hits_suffice;
     bool pipeline_cache_save_thread_live;

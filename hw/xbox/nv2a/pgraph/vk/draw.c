@@ -657,14 +657,19 @@ static bool pipeline_cache_save_start(PGRAPHVkState *r)
  * PIPELINE_CACHE_SAVE_QUIET_NS without a miss (so the save doesn't make
  * the rest of a burst wait on the cache) and never twice within
  * PIPELINE_CACHE_SAVE_MIN_NS; anything left over goes after
- * PIPELINE_CACHE_SAVE_INTERVAL_NS. A warm run (every stage a cache hit)
- * never saves, so it can't clobber a sibling's fuller cache either.
+ * PIPELINE_CACHE_SAVE_INTERVAL_NS, also once quiet (counted from the last
+ * save, that rule used to fire at the first flip of nearly every in-play
+ * burst, serializing the cache under MoltenVK's lock mid-burst), unless the
+ * oldest unsaved miss is PIPELINE_CACHE_SAVE_BACKSTOP_NS old. A warm run
+ * (every stage a cache hit) never saves, so it can't clobber a sibling's
+ * fuller cache either.
  */
 #define PIPELINE_CACHE_SAVE_INTERVAL_NS (30ll * 1000000000ll)
 #define PIPELINE_CACHE_SAVE_MIN_NS (5ll * 1000000000ll)
 #define PIPELINE_CACHE_SAVE_SETTLE_NS (3ll * 1000000000ll)
 #define PIPELINE_CACHE_SAVE_QUIET_NS (1ll * 1000000000ll)
 #define PIPELINE_CACHE_SAVE_BATCH 16
+#define PIPELINE_CACHE_SAVE_BACKSTOP_NS (120ll * 1000000000ll)
 
 void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
 {
@@ -681,10 +686,13 @@ void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
                        PIPELINE_CACHE_SAVE_SETTLE_NS;
     bool quiet = now - r->pipeline_cache_last_miss_ns >=
                  PIPELINE_CACHE_SAVE_QUIET_NS;
-    if (since < PIPELINE_CACHE_SAVE_INTERVAL_NS &&
-        (since < PIPELINE_CACHE_SAVE_MIN_NS || !quiet ||
-         (r->pipeline_cache_unsaved < PIPELINE_CACHE_SAVE_BATCH &&
-          !settled))) {
+    bool batch = since >= PIPELINE_CACHE_SAVE_MIN_NS && quiet &&
+                 (r->pipeline_cache_unsaved >= PIPELINE_CACHE_SAVE_BATCH ||
+                  settled);
+    bool leftover = since >= PIPELINE_CACHE_SAVE_INTERVAL_NS &&
+                    (quiet || now - r->pipeline_cache_first_miss_ns >=
+                                  PIPELINE_CACHE_SAVE_BACKSTOP_NS);
+    if (!batch && !leftover) {
         return;
     }
     if (!pipeline_cache_save_start(r)) {
@@ -769,8 +777,10 @@ pgraph_vk_pipeline_cache_note_created(PGRAPHVkState *r, const void *pnext,
                                                    fb)) {
         return;
     }
-    r->pipeline_cache_unsaved++;
     r->pipeline_cache_last_miss_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (r->pipeline_cache_unsaved++ == 0) {
+        r->pipeline_cache_first_miss_ns = r->pipeline_cache_last_miss_ns;
+    }
 }
 
 /*
