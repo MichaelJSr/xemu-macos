@@ -2236,6 +2236,7 @@ DEF_METHOD_INC(NV097, SET_POINT_PARAMS)
 {
     int slot = (method - NV097_SET_POINT_PARAMS) / 4;
     pg->point_params[slot] = *(float *)&parameter; /* FIXME: Where? */
+    pgraph_mark_uniforms_dirty(pg);   /* the pointParams uniform */
 }
 
 DEF_METHOD_INC(NV097, SET_EYE_POSITION)

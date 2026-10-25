@@ -62,9 +62,12 @@ typedef struct {
     bool separate_specular;
     bool ignore_specular_alpha;
 
+    /*
+     * The point size and parameters are uniforms (pointSize, pointParams),
+     * not key fields: a title that animates sprite sizes would otherwise
+     * build a new shader and pipeline per size, for every draw.
+     */
     bool point_params_enable;
-    float point_size;
-    float point_params[8];
 
     bool smooth_shading;
     bool z_perspective;
@@ -90,6 +93,7 @@ void pgraph_glsl_set_vsh_state(PGRAPHState *pg, VshState *state);
     DECL(S, ltctxb, vec4, NV2A_LTCTXB_COUNT)                 \
     DECL(S, material_alpha, float, 1)                        \
     DECL(S, pointParams, float, 8)                           \
+    DECL(S, pointSize, float, 1)                             \
     DECL(S, specularParams, vec3, 1)                         \
     DECL(S, specularParamsBack, vec3, 1)                     \
     DECL(S, surfaceSize, vec2, 1)                            \

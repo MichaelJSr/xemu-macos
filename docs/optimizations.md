@@ -2435,6 +2435,19 @@ x86_64 host (Windows, Linux, Intel macOS).
   time on the probe's 120 fps build (no frame cap, 3 pairs, load
   42-52): 0.573 → 0.605 frames a vblank.
 
+- **Point size and params are uniforms, not shader key fields
+  (2026-10-24).** `VshState` held NV_PGRAPH_POINTSIZE, baked into every
+  vertex shader (all draws, not only points) as a `%f` literal, and the 8
+  point params, which the shader already read from the `pointParams`
+  uniform: a title that animates sprite sizes built a shader and a
+  pipeline per size. The size is now the `pointSize` uniform, same
+  formula (1/8 units, exact as the literal was), and SET_POINT_PARAMS
+  marks the uniforms dirty, which it didn't: a params change with no
+  other register write left the uniform stale. Det offscreen RAM and
+  screendumps equal to base. No change in Azurik's fire-armor cast
+  hitch (both builds compile the same 129 shaders a first cast: its
+  variants are the title's own vertex programs and combiners).
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New
