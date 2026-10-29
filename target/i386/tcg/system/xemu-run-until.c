@@ -129,6 +129,8 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
                                                 XemuTraceRegionList *trace,
                                                 bool has_trace_every,
                                                 int64_t trace_every,
+                                                bool has_timeout_ms,
+                                                int64_t timeout_ms,
                                                 Error **errp)
 {
     memset(&until, 0, sizeof(until));
@@ -152,7 +154,8 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
     XemuFrameInfo *info = qmp_xemu_frame_advance(true, frames, has_trace,
                                                  trace, has_trace_every,
                                                  trace_every, false, false,
-                                                 false, false, errp);
+                                                 false, false, has_timeout_ms,
+                                                 timeout_ms, errp);
     qatomic_set(&until.armed, false);
     for (int i = 0; i < set->n; i++) {
         xemu_hooks_remove(set->e[i].hook_id);
@@ -188,6 +191,8 @@ static XemuRunUntilInfo *coroutine_fn until_run(UntilSet *set, int64_t hits,
             r->index = until.stop_index;
         }
         r->regs = xemu_hook_regs_qapi(xemu_hooks_last_stop()->regs);
+    } else if (info->has_timed_out && info->timed_out) {
+        r->reason = XEMU_RUN_UNTIL_REASON_TIMEOUT;
     } else if (info->has_stopped) {
         r->reason = info->stopped == RUN_STATE_DEBUG
                     ? XEMU_RUN_UNTIL_REASON_DEBUG
@@ -232,12 +237,18 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
                                                   XemuTraceRegionList *trace,
                                                   bool has_trace_every,
                                                   int64_t trace_every,
+                                                  bool has_timeout_ms,
+                                                  int64_t timeout_ms,
                                                   Error **errp)
 {
     int n = 0;
 
     if (!has_hits) {
         hits = 1;
+    }
+    if (has_timeout_ms && timeout_ms < 1) {
+        error_setg(errp, "timeout-ms must be at least 1");
+        return NULL;
     }
     if (hits < 1) {
         error_setg(errp, "hits must be at least 1");
@@ -265,7 +276,7 @@ XemuRunUntilInfo *coroutine_fn qmp_xemu_run_until(XemuUntilList *list,
         }
     }
     return until_run(set, hits, frames, has_trace, trace, has_trace_every,
-                     trace_every, errp);
+                     trace_every, has_timeout_ms, timeout_ms, errp);
 }
 
 /*
@@ -412,6 +423,7 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
                                        bool has_stop_when,
                                        XemuRunStopList *stop_when,
                                        bool has_hits, int64_t hits,
+                                       bool has_timeout_ms, int64_t timeout_ms,
                                        Error **errp)
 {
     int npc = 0, nwatch = 0, nstop = 0, ninput = 0;
@@ -420,6 +432,10 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
 
     if (!has_hits) {
         hits = 1;
+    }
+    if (has_timeout_ms && timeout_ms < 1) {
+        error_setg(errp, "timeout-ms must be at least 1");
+        return NULL;
     }
     if (hits < 1) {
         error_setg(errp, "hits must be at least 1");
@@ -512,7 +528,8 @@ XemuRunInfo *coroutine_fn qmp_xemu_run(const char *checkpoint,
         xemu_frame_advance_set_vblank_stop(run_vblank_stop);
     }
     XemuRunUntilInfo *u = until_run(set, hits, frames, has_trace, trace,
-                                    has_trace_every, trace_every, errp);
+                                    has_trace_every, trace_every,
+                                    has_timeout_ms, timeout_ms, errp);
     set = NULL;
     int fired = -1;
     if (nwatch) {

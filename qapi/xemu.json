@@ -88,6 +88,10 @@
 #     guest drew another first, fewer when its @frames ran out;
 #     xemu-macos 0.16.1)
 #
+# @timed-out: true when @xemu-frame-advance's @timeout-ms ran out
+#     before its frame; the VM is paused where it was (xemu-macos
+#     0.16.5)
+#
 # Since: 10.2
 ##
 { 'struct': 'XemuFrameInfo',
@@ -95,7 +99,7 @@
             '*trace': ['XemuTraceSample'], '*debug-stop': 'bool',
             '*stopped': 'RunState', '*hooks': 'XemuHookTrace',
             '*gpu-counters': 'XemuGpuCounters',
-            '*render-flips': 'int' } }
+            '*render-flips': 'int', '*timed-out': 'bool' } }
 
 ##
 # @query-xemu-frame:
@@ -181,12 +185,19 @@
 # @gpu-counters-per-flip: with @gpu-counters, also return one set per
 #     flip (xemu-macos 0.16.1)
 #
+# @timeout-ms: host milliseconds after which an advance that hasn't
+#     reached its frame pauses the VM wherever it is and returns with
+#     @timed-out (at a host-time point, so not a deterministic one).
+#     A stalled advance then returns instead of holding every later
+#     QMP command; a host deadlock that holds the BQL still holds it.
+#     At least 1 (xemu-macos 0.16.5)
+#
 # Since: 10.2
 ##
 { 'command': 'xemu-frame-advance',
   'data': { '*frames': 'int', '*trace': ['XemuTraceRegion'],
             '*trace-every': 'int', '*gpu-counters': 'bool',
-            '*gpu-counters-per-flip': 'bool' },
+            '*gpu-counters-per-flip': 'bool', '*timeout-ms': 'int' },
   'returns': 'XemuFrameInfo', 'coroutine': true }
 
 ##
@@ -909,11 +920,14 @@
 # @value: (@xemu-run only) an @addr stop's check fired; the VM is
 #     paused on that vblank, before the guest sees it
 #
+# @timeout: @timeout-ms ran out first; the VM is paused wherever it
+#     was (xemu-macos 0.16.5)
+#
 # Since: 10.2
 ##
 { 'enum': 'XemuRunUntilReason',
   'data': [ 'hit', 'budget', 'debug', 'stopped', 'mismatch', 'empty',
-            'value' ] }
+            'value', 'timeout' ] }
 
 ##
 # @XemuRegs:
@@ -1014,11 +1028,14 @@
 #
 # @trace-every: as for @xemu-frame-advance
 #
+# @timeout-ms: as for @xemu-frame-advance (xemu-macos 0.16.5)
+#
 # Since: 10.2
 ##
 { 'command': 'xemu-run-until',
   'data': { 'until': ['XemuUntil'], '*hits': 'int', 'frames': 'int',
-            '*trace': ['XemuTraceRegion'], '*trace-every': 'int' },
+            '*trace': ['XemuTraceRegion'], '*trace-every': 'int',
+            '*timeout-ms': 'int' },
   'returns': 'XemuRunUntilInfo', 'coroutine': true }
 
 ##
@@ -1390,13 +1407,16 @@
 #
 # @hits: @pc stop hits to count, across all @pc entries (default 1)
 #
+# @timeout-ms: as for @xemu-frame-advance (xemu-macos 0.16.5)
+#
 # Since: 10.2
 ##
 { 'command': 'xemu-run',
   'data': { '*checkpoint': 'str', '*incremental': 'bool',
             '*input': ['str'], 'frames': 'int',
             '*trace': ['XemuTraceRegion'], '*trace-every': 'int',
-            '*stop-when': ['XemuRunStop'], '*hits': 'int' },
+            '*stop-when': ['XemuRunStop'], '*hits': 'int',
+            '*timeout-ms': 'int' },
   'returns': 'XemuRunInfo', 'coroutine': true }
 
 ##

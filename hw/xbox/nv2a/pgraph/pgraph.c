@@ -4020,7 +4020,8 @@ XemuFrameInfo *coroutine_fn qmp_xemu_render_next(bool has_flips, int64_t flips,
     xemu_frame_advance_set_vblank_stop(render_next_vblank_stop);
     XemuFrameInfo *info = qmp_xemu_frame_advance(true, frames, false, NULL,
                                                  false, 0, false, false,
-                                                 false, false, errp);
+                                                 false, false, false, 0,
+                                                 errp);
     xemu_frame_advance_set_vblank_stop(NULL);
     if (!info) {
         /* Refused, nothing ran: put the draws back as they were. */

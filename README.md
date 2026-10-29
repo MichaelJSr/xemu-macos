@@ -323,7 +323,12 @@ Other automation interfaces (windowed or headless):
   starts the VM again before it returns, unless it fails and leaves the
   VM stopped, as a failed HMP `loadvm` or `snapshot-load` does: the
   advance then ends with `stopped: restore-vm`, and the VM stays there
-  until `cont` or a load that works. In real time, replays
+  until `cont` or a load that works. `"timeout-ms": T` (also on
+  `xemu-run-until` and `xemu-run`, whose `reason` is then `timeout`)
+  bounds an advance in host time: one still short of its frame after T
+  ms pauses the VM wherever it is and returns with `timed-out: true`
+  (not a deterministic point; a host deadlock holding the BQL still
+  hangs). In real time, replays
   land within a frame or two: guest work per vblank depends on host
   speed. Deterministic mode (below) makes them bit-exact.
 - **Picture age**: QMP `query-xemu-display` returns `{frame, loads,

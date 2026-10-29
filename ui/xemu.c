@@ -997,6 +997,25 @@ void xemu_frame_advance_set_vblank_stop(bool (*fn)(void))
 static uintptr_t frame_advance_gen;
 
 /*
+ * xemu-frame-advance timeout-ms: a host-time timer on the iohandler
+ * context (vm_stop must not run in coroutine context, see frame_run_bh)
+ * that ends an advance still short of its frame as a hook stop does,
+ * leaving the VM paused wherever the vCPU was.
+ */
+static QEMUTimer *frame_timeout_timer;
+static bool frame_advance_timed_out;
+
+static void frame_timeout_cb(void *opaque)
+{
+    if (!frame_advance_co || frame_advance_stopping) {
+        return;
+    }
+    frame_advance_stopping = true;
+    frame_advance_timed_out = true;
+    frame_stop_bh(NULL);
+}
+
+/*
  * After a save or load stop, once the code that stopped the VM has
  * returned: a BH on the iohandler context runs only from the main loop (or
  * monitor_cleanup's poll), after the HMP command, menu action or job BH. A
@@ -1197,6 +1216,8 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
                                                    bool gpu_counters,
                                                    bool has_gpu_counters_per_flip,
                                                    bool gpu_counters_per_flip,
+                                                   bool has_timeout_ms,
+                                                   int64_t timeout_ms,
                                                    Error **errp)
 {
     if (!has_frames) {
@@ -1204,6 +1225,10 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     }
     if (!xemu_frame_advance_check(frames, trace, has_trace_every, trace_every,
                                   errp)) {
+        return NULL;
+    }
+    if (has_timeout_ms && timeout_ms < 1) {
+        error_setg(errp, "timeout-ms must be at least 1");
         return NULL;
     }
     /*
@@ -1225,6 +1250,7 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
         state_handler = true;
     }
     frame_advance_stopped = RUN_STATE__MAX;
+    frame_advance_timed_out = false;
     frame_advance_gen++;
 
     frame_advance_co = qemu_coroutine_self();
@@ -1240,9 +1266,25 @@ XemuFrameInfo *coroutine_fn qmp_xemu_frame_advance(bool has_frames,
     } else {
         frame_advance_target = frame_count + frames;
         aio_bh_schedule_oneshot(iohandler_get_aio_context(), frame_run_bh, NULL);
+        if (has_timeout_ms) {
+            if (!frame_timeout_timer) {
+                frame_timeout_timer = aio_timer_new(iohandler_get_aio_context(),
+                                                    QEMU_CLOCK_REALTIME,
+                                                    SCALE_MS, frame_timeout_cb,
+                                                    NULL);
+            }
+            timer_mod(frame_timeout_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + timeout_ms);
+        }
     }
     qemu_coroutine_yield();
+    if (frame_timeout_timer) {
+        timer_del(frame_timeout_timer);
+    }
     XemuFrameInfo *info = frame_info();
+    if (frame_advance_timed_out) {
+        info->has_timed_out = info->timed_out = true;
+    }
     if (trace) {
         info->trace = frame_trace_samples;
         info->has_trace = true;
