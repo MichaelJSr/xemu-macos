@@ -962,6 +962,9 @@ static uint64_t physical_memory_sync_dirty_bitmap(RAMBlock *rb,
 
         src = qatomic_rcu_read(
                 &ram_list.dirty_memory[DIRTY_MEMORY_MIGRATION])->blocks;
+#ifdef XBOX
+        unsigned long taken = 0;
+#endif
 
         for (k = page; k < page + nr; k++) {
             if (src[idx][offset]) {
@@ -971,6 +974,9 @@ static uint64_t physical_memory_sync_dirty_bitmap(RAMBlock *rb,
                 dest[k] |= bits;
                 new_dirty &= bits;
                 num_dirty += ctpopl(new_dirty);
+#ifdef XBOX
+                taken |= bits;
+#endif
             }
 
             if (++offset >= BITS_TO_LONGS(DIRTY_MEMORY_BLOCK_SIZE)) {
@@ -978,9 +984,24 @@ static uint64_t physical_memory_sync_dirty_bitmap(RAMBlock *rb,
                 idx++;
             }
         }
+#ifdef XBOX
+        /*
+         * xemu: re-arm the store traps of every page whose bit went, by
+         * ram_addr (upstream passes the block-relative start, which for
+         * xbox.ram, above pc.ram, re-armed pc.ram's range), and also when
+         * none was new to the bitmap: a first sync finds it all ones, and
+         * with the checkpoint log already running no topology commit
+         * flushed the TLB, so writable entries kept skipping the log
+         * (AZ-822: a restore after a savevm missed 1-2k pages).
+         */
+        if (taken) {
+            physical_memory_dirty_bits_cleared(rb->offset + start, length);
+        }
+#else
         if (num_dirty) {
             physical_memory_dirty_bits_cleared(start, length);
         }
+#endif
 
         if (rb->clear_bmap) {
             /*

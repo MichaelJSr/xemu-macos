@@ -32,7 +32,8 @@
  *  - the small blocks (BIOS, MCPX shadow, nv2a RAMIN, which PFIFO writes
  *    through its own pointer) are compared whole every time.
  * Migration takes the log's bits too, so they are copied first
- * (log_sync_global). A load that isn't a checkpoint restore (loadvm, an
+ * (log_sync_global), and its sync re-arms the traps of every page it took
+ * (migration/ram.c; a savevm left them disarmed until AZ-822). A load that isn't a checkpoint restore (loadvm, an
  * incoming migration) or a restore that fails leaves RAM unknown, and the
  * next one compares every page. Not seen: another process writing guest
  * RAM through XEMU_RAM_SHM's mapping.
