@@ -724,11 +724,22 @@
 #
 # @count: bugchecks since launch, this one included
 #
+# @regs: the registers at KeBugCheckEx's first instruction (EIP is
+#     KeBugCheckEx; ESP points at @caller), also on stderr as "xemu:
+#     guest bugcheck registers: ..." (xemu-macos 0.16.5)
+#
+# @stack: guest memory from that ESP up, in lowercase hex: 4 KiB, or
+#     up to the first page that isn't readable RAM.  For a
+#     KMODE_EXCEPTION_NOT_HANDLED (0x1E) the trap frame and the
+#     exception's context record are in it, each where the faulting
+#     EIP (the second parameter) is followed by CS 0x0008.  Never on
+#     stderr (xemu-macos 0.16.5)
+#
 # Since: 10.2
 ##
 { 'event': 'XEMU_GUEST_BUGCHECK',
   'data': { 'code': 'uint32', 'params': [ 'uint32' ], 'caller': 'uint32',
-            'count': 'int' } }
+            'count': 'int', '*regs': 'XemuRegs', '*stack': 'str' } }
 
 ##
 # @XEMU_GUEST_HALTED:

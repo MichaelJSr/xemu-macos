@@ -1083,8 +1083,11 @@ Other automation interfaces (windowed or headless):
   runs on, and in a boot at the second vblank that finds the image in
   place (a fixed frame under icount), and hooks it: each call prints
   `xemu: guest bugcheck 0x<code> (<p1>, <p2>, <p3>, <p4>) from <return
-  address>` and sends QMP
-  `XEMU_GUEST_BUGCHECK {code, params, caller, count}`; a HLT with
+  address>` and a line of the registers at the call, and sends QMP
+  `XEMU_GUEST_BUGCHECK {code, params, caller, count, regs, stack}`,
+  where `stack` is 4 KiB of guest memory from ESP in hex (only in the
+  event): for a 0x1E it holds the trap frame and the context record,
+  each where the faulting EIP (p2) is followed by CS 0x0008; a HLT with
   interrupts disabled prints `xemu: guest halted with interrupts
   disabled at <eip> (esp <esp>)` and sends `XEMU_GUEST_HALTED {eip, esp,
   count}` (the first 16 of each per launch). Both only read guest

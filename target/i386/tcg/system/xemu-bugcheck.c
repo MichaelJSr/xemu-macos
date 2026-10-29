@@ -17,7 +17,9 @@
  *    kernel may still be loading (a fixed frame under icount, so replays
  *    report alike); each call prints
  *    "xemu: guest bugcheck 0x<code> (<p1>, <p2>, <p3>, <p4>) from <ret>"
- *    and emits XEMU_GUEST_BUGCHECK;
+ *    and a line of the registers, and emits XEMU_GUEST_BUGCHECK with
+ *    those and the stack (STACK_BYTES from ESP, which holds a 0x1E's
+ *    trap frame: guest data, so the event alone carries it);
  *  - a HLT with interrupts disabled (it can only end in a reset or an
  *    NMI) prints "xemu: guest halted with interrupts disabled at <eip>"
  *    and emits XEMU_GUEST_HALTED (helper_hlt).
@@ -29,14 +31,17 @@
 #include "qemu/main-loop.h"
 #include "cpu.h"
 #include "exec/cpu-common.h"
+#include "exec/target_page.h"
 #include "hw/core/cpu.h"
 #include "qapi/qapi-events-xemu.h"
+#include "qapi/qapi-types-xemu.h"
 #include "tcg/xemu-hooks.h"
 #include "tcg/xemu-bugcheck.h"
 
 #define KERNEL_BASE 0x80010000u
 #define KEBUGCHECKEX_ORDINAL 96
 #define REPORT_MAX 16
+#define STACK_BYTES 4096
 
 static uint32_t cand_pc;
 static uint8_t cand_bytes[16];
@@ -109,8 +114,12 @@ static void bugcheck_hook(XemuHookCtx *ctx, void *opaque)
 {
     uint8_t s[24];
     uint32_t esp = xemu_hook_reg(ctx, R_ESP);
-    unsigned n;
+    uint32_t r[XEMU_HREG_COUNT];
+    g_autofree uint8_t *stack = g_malloc(STACK_BYTES);
+    g_autofree char *hex = NULL;
+    unsigned n, len = 0;
     uint32List *params = NULL, **tail = &params;
+    XemuRegs *regs;
 
     if (!xemu_hook_read(ctx, esp, s, sizeof(s))) {
         return;
@@ -119,16 +128,38 @@ static void bugcheck_hook(XemuHookCtx *ctx, void *opaque)
     if (n > REPORT_MAX) {
         return;
     }
+    for (int i = 0; i < XEMU_HREG_COUNT; i++) {
+        r[i] = xemu_hook_reg(ctx, i);
+    }
+    /* A page at a time, up to the first that isn't readable RAM. */
+    while (len < STACK_BYTES) {
+        unsigned chunk = MIN(STACK_BYTES - len,
+                             TARGET_PAGE_SIZE - ((esp + len) &
+                                                 ~TARGET_PAGE_MASK));
+        if (!xemu_hook_read(ctx, esp + len, stack + len, chunk)) {
+            break;
+        }
+        len += chunk;
+    }
+    hex = xemu_hook_hex(stack, len);
     fprintf(stderr, "xemu: guest bugcheck 0x%08x (0x%08x, 0x%08x, 0x%08x, "
             "0x%08x) from 0x%08x%s\n", u32(s + 4), u32(s + 8), u32(s + 12),
             u32(s + 16), u32(s + 20), u32(s),
             n == REPORT_MAX ? " (further bugchecks not reported)" : "");
+    fprintf(stderr, "xemu: guest bugcheck registers: eax=%08x ecx=%08x "
+            "edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x "
+            "eflags=%08x (stack: %u bytes in the event)\n", r[R_EAX],
+            r[R_ECX], r[R_EDX], r[R_EBX], r[R_ESP], r[R_EBP], r[R_ESI],
+            r[R_EDI], r[XEMU_HREG_EFLAGS], len);
     for (int i = 0; i < 4; i++) {
         QAPI_LIST_APPEND(tail, u32(s + 8 + i * 4));
     }
+    regs = xemu_hook_regs_qapi(r);
     /* vCPU thread, no BQL: as XEMU_CPUID_FAULT, only the monitor locks. */
-    qapi_event_send_xemu_guest_bugcheck(u32(s + 4), params, u32(s), n);
+    qapi_event_send_xemu_guest_bugcheck(u32(s + 4), params, u32(s), n, regs,
+                                        hex);
     qapi_free_uint32List(params);
+    qapi_free_XemuRegs(regs);
 }
 
 void xemu_guest_dead_halt(CPUX86State *env)
