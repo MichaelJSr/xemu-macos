@@ -310,13 +310,15 @@ jobs:
   smoke:
     # The release bundle links against the macOS 26 SDK with a 14.0 floor:
     # a symbol newer than the floor that isn't weak-linked fails here at
-    # launch, on the oldest arm64 macOS and on Intel.
+    # launch, on the oldest arm64 macOS GitHub still offers and on Intel.
+    # macos-14 runners were retired in November 2026, so 14 itself goes
+    # untested.
     name: Launch on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     needs: build_universal
     strategy:
       matrix:
-        runner: [macos-14, macos-15-intel]
+        runner: [macos-15, macos-15-intel]
     steps:
     - name: Download Universal bundle
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
