@@ -693,6 +693,15 @@ static void handle_windowevent(SDL_Event *ev)
             win32_dxgi_present_resize(ev->window.data1, ev->window.data2);
         }
         break;
+    case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+        /*
+         * Windows can move the window in or out of fullscreen without
+         * set_full_screen (a Win+arrow snap, a display change): follow the
+         * window, or the next F11 or menu toggle only repeats its state.
+         */
+        gui_fullscreen = ev->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN;
+        break;
 #endif
 
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
@@ -2575,6 +2584,36 @@ static void display_very_early_init(DisplayOptions *o)
         SDL_SetWindowSize(m_window, min_window_width, min_window_height);
         SDL_SetWindowPosition(m_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
+
+#ifdef _WIN32
+    /*
+     * The check above passes a window exactly as large as the display and
+     * ignores the frame and the taskbar. Such a window's client area covers
+     * the monitor with its title bar above the screen: it looks fullscreen,
+     * and leaving fullscreen seems to do nothing (a 1920x1080 startup size
+     * on a 1080p monitor). Fit the window, frame included, into the
+     * display's usable area. A last_used size saves the fitted one.
+     */
+    SDL_Rect usable;
+    if (!headless &&
+        SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(m_window),
+                                   &usable)) {
+        int top = 0, left = 0, bottom = 0, right = 0, w, h;
+        SDL_GetWindowBordersSize(m_window, &top, &left, &bottom, &right);
+        SDL_GetWindowSize(m_window, &w, &h);
+        int max_w = usable.w - left - right;
+        int max_h = usable.h - top - bottom;
+        if (w > max_w || h > max_h) {
+            w = MAX(MIN(w, max_w), min_window_width);
+            h = MAX(MIN(h, max_h), min_window_height);
+            SDL_SetWindowSize(m_window, w, h);
+            /* SDL places the client area; the title bar goes above it. */
+            SDL_SetWindowPosition(m_window,
+                                  usable.x + left + MAX((max_w - w) / 2, 0),
+                                  usable.y + top + MAX((max_h - h) / 2, 0));
+        }
+    }
+#endif
 
 #ifdef __APPLE__
     if (use_metal) {

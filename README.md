@@ -180,9 +180,6 @@ driver = 'auto'                 # auto (MoltenVK) | kosmickrisp (opt-in) | molte
 
 [display.window]
 presentation_backend = 'auto'   # auto | opengl | metal (auto = Metal w/ Vulkan renderer)
-fullscreen_on_startup = true
-fullscreen_exclusive = true
-startup_size = '1920x1080'
 
 [display.ui]
 fit = 'stretch'
