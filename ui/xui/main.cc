@@ -50,9 +50,6 @@
 #include "welcome.hh"
 #include "menubar.hh"
 #include "compat.hh"
-#if defined(_WIN32)
-#include "update.hh"
-#endif
 
 #ifdef __APPLE__
 #include "metal-helpers.hh"
@@ -166,11 +163,6 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
     }
     ImPlot::CreateContext();
 
-#if defined(_WIN32)
-    if (!g_config.general.show_welcome && g_config.general.updates.check) {
-        update_window.CheckForUpdates();
-    }
-#endif
     g_last_scale = g_viewport_mgr.m_scale;
     InitializeStyle();
     g_main_menu.SetNextViewIndex(g_config.general.last_viewed_menu_index);
@@ -346,9 +338,6 @@ void xemu_hud_update(void)
     apu_window.Draw();
     video_window.Draw();
     compatibility_reporter_window.Draw();
-#if defined(_WIN32)
-    update_window.Draw();
-#endif
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();

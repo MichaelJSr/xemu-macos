@@ -27,7 +27,6 @@
 #include "actions.hh"
 #include "compat.hh"
 #include "github-issue.hh"
-#include "update.hh"
 #include "../xemu-os-utils.h"
 
 extern float g_main_menu_height; // FIXME
@@ -246,9 +245,6 @@ void ShowMainMenu()
                             &compatibility_reporter_window.is_open);
 
             ShowReportGitHubIssueMenuItem();
-#if defined(_WIN32)
-            ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
-#endif
 
             ImGui::Separator();
             if (ImGui::MenuItem("About")) g_main_menu.ShowAbout();

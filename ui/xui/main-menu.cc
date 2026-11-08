@@ -59,12 +59,6 @@ void MainMenuTabView::Draw()
 
 void MainMenuGeneralView::Draw()
 {
-#if defined(_WIN32)
-    SectionTitle("Updates");
-    Toggle("Check for updates", &g_config.general.updates.check,
-           "Check for updates whenever xemu is opened");
-#endif
-
 #if defined(__x86_64__) || defined(__aarch64__)
     SectionTitle("Performance");
     Toggle("Hard FPU emulation", &g_config.perf.hard_fpu,
