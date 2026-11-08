@@ -389,8 +389,8 @@ silently diverge, which is how the pink-tile bug hid. Exported values win.
   same commit.
 - **Release** (when the owner asks):
   `git tag -a vX.Y.Z -m "vX.Y.Z — <headline>" && git push origin vX.Y.Z`.
-  `release-on-tag.yml` builds a **draft** release (8 assets; no
-  `-dbg` builds or `-pdb` zips). The owner
+  `release-on-tag.yml` builds a **draft** release (6 assets; no
+  `-dbg` builds, `-pdb` zips or `xemu-win-*-release.zip` aliases). The owner
   writes short notes (`docs/RELEASING-macos.md`) and publishes.
 - **Never delete, move, force-push or reuse a published tag.** Deleting one
   turns its release back into a draft. Moving one re-runs the workflow,
