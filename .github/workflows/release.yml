@@ -50,6 +50,10 @@ jobs:
       with:
         path: dist
         merge-multiple: true
+    - name: Drop debug builds and Windows symbol packages
+      # CI still builds them (asserts, crash triage); a release carries
+      # only what players run.
+      run: rm -fv dist/*-dbg[-.]* dist/*-pdb.zip
     - name: Add transitionary package aliases
       if: ${{ !inputs.pre-release }}
       run: |

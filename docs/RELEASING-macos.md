@@ -66,7 +66,9 @@ local `build.sh` packaging fallback is at the end.
    and creates a **draft** release named after the tag, with the
    body seeded from `.github/scripts/gen-changelog.py` and these
    assets attached: source `.tar.zst`, Windows x86_64/arm64 zips,
-   the macOS **universal** zip, and Linux AppImages.
+   the macOS **universal** zip, and Linux AppImages. CI also builds
+   `-dbg` packages and Windows `-pdb` symbol zips; the release job
+   drops them (they stay as workflow artifacts for crash triage).
 
 4. **Rewrite the notes.** Replace the generated changelog with notes
    in the format below, keeping the title `vX.Y.Z — <headline>`.
