@@ -27,6 +27,7 @@
 #include "actions.hh"
 #include "compat.hh"
 #include "github-issue.hh"
+#include "xbox-drive-explorer.hh"
 #include "../xemu-os-utils.h"
 
 extern float g_main_menu_height; // FIXME
@@ -141,6 +142,10 @@ void ShowMainMenu()
 
             if (ImGui::MenuItem("Eject Disc", SHORTCUT_MENU_TEXT(E))) ActionEjectDisc();
             if (ImGui::MenuItem("Load Disc...", SHORTCUT_MENU_TEXT(O))) ActionLoadDisc();
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Xbox Hard Drive...")) XboxExplorerOpenWindow();
 
             ImGui::Separator();
 

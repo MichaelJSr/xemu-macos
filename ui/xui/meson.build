@@ -21,6 +21,11 @@ xemu_ss.add(files(
   'viewport-manager.cc',
   'welcome.cc',
   'widgets.cc',
+  'xbox-drive.cc',
+  'xbox-drive-explorer.cc',
+  'xbox-drive-qemu.cc',
+  'xbox-hdd-blk.c',
+  'xiso.cc',
 ))
 
 xemu_ss.add([curl, files('github-issue.cc')])

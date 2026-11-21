@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <functional>
+#include <vector>
 #include <SDL3/SDL_dialog.h>
 #include "common.hh"
 #include "xemu-hud.h"
@@ -38,6 +39,11 @@ void ShowSaveFileDialog(const SDL_DialogFileFilter *filters, int nfilters,
 
 void ShowOpenFolderDialog(const char *default_location,
                           FileDialogCallback callback);
+
+// Pick several files at once
+using FilesDialogCallback = std::function<void(const std::vector<std::string> &paths)>;
+void ShowOpenFilesDialog(const char *default_location,
+                         FilesDialogCallback callback);
 
 template<typename ... Args>
 std::string string_format( const std::string& format, Args ... args )
