@@ -527,6 +527,11 @@ package_macos() {
 
     if [[ -e "${project_source_dir}/XEMU_VERSION" ]]; then
       xemu_version="$(cat ${project_source_dir}/XEMU_VERSION | cut -f1 -d-)"
+    elif [[ -d "${project_source_dir}/.git" ]]; then
+      # Git checkout without a release tarball: mirror scripts/xemu-version.sh
+      # so the bundle reports the tag it was built from instead of 0.0.0.
+      xemu_version="$(git -C "${project_source_dir}" describe --tags --match 'v*' 2>/dev/null | cut -c 2- | cut -f1 -d- || true)"
+      [[ -n "${xemu_version}" ]] || xemu_version="0.0.0"
     else
       xemu_version="0.0.0"
     fi
