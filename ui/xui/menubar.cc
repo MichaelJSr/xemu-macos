@@ -214,7 +214,23 @@ void ShowMainMenu()
             HelpMarker("Controls how the rendered content should be scaled "
                        "into the window");
             ImGui::Combo("Filter Method", &g_config.display.filtering,
-                         "Linear\0Nearest\0");
+                         "Linear\0"
+                         "Nearest\0"
+                         "AMD FidelityFX FSR 1.0\0"
+                         "Bicubic (Catmull-Rom)\0"
+                         "Lanczos\0");
+            ImGui::SameLine();
+            HelpMarker("How the frame is scaled up to the window. FSR, "
+                       "bicubic and Lanczos are only used when the image is "
+                       "actually enlarged; otherwise the blit is unchanged.");
+            if (g_config.display.filtering == CONFIG_DISPLAY_FILTERING_FSR) {
+                ImGui::SliderFloat("FSR Sharpening",
+                                   &g_config.display.fsr_sharpness, 0.0f, 1.0f,
+                                   "%.2f");
+                ImGui::SameLine();
+                HelpMarker("RCAS sharpening applied after FSR upscaling. "
+                           "0 disables it.");
+            }
             ImGui::Combo("Aspect Ratio", &g_config.display.ui.aspect_ratio,
                          "Native\0Auto\0""4:3\0""16:9\0");
 #ifdef __APPLE__

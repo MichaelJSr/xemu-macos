@@ -273,9 +273,16 @@ display:
       type: integer
       default: 1
   filtering:
+    # How the guest frame is scaled up to the window. linear/nearest are
+    # the classic blits; fsr/bicubic/lanczos are upscalers that only do
+    # anything when the frame is actually enlarged.
     type: enum
-    values: [linear, nearest]
+    values: [linear, nearest, fsr, bicubic, lanczos]
     default: linear
+  # RCAS sharpening strength for the fsr filter, 0 (off) to 1 (maximum)
+  fsr_sharpness:
+    type: number
+    default: 0.8
   window:
     # macOS only: which API presents the final frame + UI. `auto`
     # selects Metal when the Vulkan renderer is configured, OpenGL
