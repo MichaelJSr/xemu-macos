@@ -28,3 +28,9 @@ struct DiscInfo {
 
 // Read the title id, name and region of the game on a disc image
 bool ReadDiscInfo(const std::string &image_path, DiscInfo &out);
+
+// "MS-004" style title id string
+std::string FormatTitleId(uint32_t title_id);
+
+// "NTSC-U", "PAL", "NTSC-J / NTSC-U", "Region free", ...
+std::string FormatRegion(uint32_t region);

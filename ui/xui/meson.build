@@ -5,6 +5,8 @@ xemu_ss.add(files(
   'debug.cc',
   'disc-image.cc',
   'font-manager.cc',
+  'game-library.cc',
+  'game-library-window.cc',
   'game-patches.cc',
   'game-patches-window.cc',
   'gl-helpers.cc',

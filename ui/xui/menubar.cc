@@ -27,6 +27,7 @@
 #include "actions.hh"
 #include "compat.hh"
 #include "github-issue.hh"
+#include "game-library-window.hh"
 #include "game-patches-window.hh"
 #include "xbox-drive-explorer.hh"
 #include "../xemu-os-utils.h"
@@ -151,6 +152,7 @@ void ShowMainMenu()
             ImGui::Separator();
 
             if (ImGui::MenuItem("Game Patches...")) GamePatchesOpenWindow();
+            if (ImGui::MenuItem("Game Library...")) GameLibraryOpenWindow();
 
             ImGui::Separator();
 

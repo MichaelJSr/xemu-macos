@@ -50,6 +50,7 @@
 #include "welcome.hh"
 #include "menubar.hh"
 #include "compat.hh"
+#include "game-library-window.hh"
 #include "game-patches-window.hh"
 #include "xbox-drive-explorer.hh"
 
@@ -350,6 +351,7 @@ void xemu_hud_update(void)
     XboxExplorerUpdate();
     XboxExplorerWindowDraw();
     GamePatchesWindowDraw();
+    GameLibraryWindowDraw();
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();

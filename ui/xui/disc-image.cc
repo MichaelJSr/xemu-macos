@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -245,4 +246,36 @@ bool ReadDiscInfo(const std::string &image_path, DiscInfo &out)
     out.image_size = loc.image_size;
     out.ok = true;
     return true;
+}
+
+std::string FormatTitleId(uint32_t title_id)
+{
+    char a = (char)((title_id >> 24) & 0xFF);
+    char b = (char)((title_id >> 16) & 0xFF);
+    char buf[32];
+    if (isalnum((unsigned char)a) && isalnum((unsigned char)b)) {
+        snprintf(buf, sizeof(buf), "%c%c-%03u", a, b, title_id & 0xFFFF);
+    } else {
+        snprintf(buf, sizeof(buf), "%08X", title_id);
+    }
+    return buf;
+}
+
+std::string FormatRegion(uint32_t region)
+{
+    region &= 0x7;
+    if (region == 0x7) {
+        return "Region free";
+    }
+    std::string s;
+    if (region & 0x1) {
+        s += "NTSC-U";
+    }
+    if (region & 0x2) {
+        s += s.empty() ? "NTSC-J" : " / NTSC-J";
+    }
+    if (region & 0x4) {
+        s += s.empty() ? "PAL" : " / PAL";
+    }
+    return s.empty() ? "Unknown" : s;
 }
