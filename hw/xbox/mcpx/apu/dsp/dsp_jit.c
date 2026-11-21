@@ -413,6 +413,18 @@ void dsp_jit_init(DSPState *dsp)
     dsp->backend = be;
     dsp->ops = &jit_dsp_ops;
 
+    /*
+     * Announce once, like the inline backends do (interp/dsp56k_jit_*.c).
+     * This engine is the default on x86_64, and without this line the
+     * only JIT messages came from the inline backends, which made it look
+     * as though no JIT were active there at all.
+     */
+    static bool announced;
+    if (!announced) {
+        announced = true;
+        fprintf(stderr, "xemu: DSP JIT enabled (dsp56300 backend)\n");
+    }
+
     dsp->dma.mem_opaque = be;
     dsp->dma.mem_read = jit_dma_mem_read;
     dsp->dma.mem_write = jit_dma_mem_write;
