@@ -28,6 +28,28 @@
 #endif
 
 /*
+ * Portable LLVM backend (dsp56k_jit_llvm.c). The build defines
+ * DSP56K_JIT_LLVM only when libLLVM and its C API are available AND the
+ * hand-written AArch64 emitter is not built (i.e. DSP56K_JIT_SUPPORTED is
+ * 0). The two backends implement the same API symbols, so exactly one of
+ * them may be compiled into a given binary.
+ */
+#if defined(DSP56K_JIT_LLVM)
+#define DSP56K_JIT_LLVM_SUPPORTED 1
+#else
+#define DSP56K_JIT_LLVM_SUPPORTED 0
+#endif
+
+/*
+ * True when either backend provides the JIT API. Gates the public
+ * declarations below; the no-op inline stubs are used only when neither
+ * backend exists, so callers (dsp_c.c, dsp_cpu.c, gp_ep.c, the DSP
+ * tests) compile and link unchanged.
+ */
+#define DSP56K_JIT_ANY_SUPPORTED \
+    (DSP56K_JIT_SUPPORTED || DSP56K_JIT_LLVM_SUPPORTED)
+
+/*
  * XEMU_DSP_JIT_DIFF validator outcomes for one core (dsp56k_jit_diff_counts).
  * Each enqueued snapshot ends up checked (compared; failures among them) or
  * skipped: the live block hit DMA_CONTROL (skipped_io) or the interpreter
@@ -43,7 +65,7 @@ typedef struct Dsp56kJitDiffCounts {
     uint64_t dropped;
 } Dsp56kJitDiffCounts;
 
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
 
 /*
  * Initialize / finalize per-core JIT state (code buffer, block
@@ -369,7 +391,7 @@ enum {
 };
 int dsp56k_jit_helper_classify_long_imm(void *fn);
 
-#else  /* !DSP56K_JIT_SUPPORTED */
+#else  /* !DSP56K_JIT_ANY_SUPPORTED */
 
 static inline void dsp56k_jit_init(dsp_core_t *dsp) { (void)dsp; }
 static inline void dsp56k_jit_finalize(dsp_core_t *dsp) { (void)dsp; }
@@ -393,6 +415,6 @@ static inline bool dsp56k_jit_diff_counts(dsp_core_t *dsp,
     (void)dsp; (void)out; return false;
 }
 
-#endif  /* DSP56K_JIT_SUPPORTED */
+#endif  /* DSP56K_JIT_ANY_SUPPORTED */
 
 #endif  /* HW_XBOX_MCPX_APU_DSP56K_JIT_ARM64_H */

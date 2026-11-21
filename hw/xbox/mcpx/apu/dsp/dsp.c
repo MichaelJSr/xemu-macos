@@ -112,16 +112,31 @@ void dsp_start_frame_impl(DSPState *dsp)
 
 /*
  * Engine selection. The C interpreter engine embeds its own inline
- * basic-block JIT on Apple Silicon (interp/dsp56k_jit_arm64.c,
- * audio.dsp_jit.enabled) for both the GP and the EP; when that is
- * supported and enabled it is this fork's preferred engine and takes
- * precedence over the dsp56300-subproject JIT engine
- * (audio.use_dsp_jit).
+ * basic-block JIT — the hand-written AArch64 emitter on Apple Silicon
+ * (interp/dsp56k_jit_arm64.c), the portable LLVM backend elsewhere
+ * (interp/dsp56k_jit_llvm.c) — for both the GP and the EP, both selected
+ * by audio.dsp_jit.enabled. They differ in precedence:
+ *
+ *   - On AArch64 the emitter is this fork's preferred engine: when
+ *     enabled it takes precedence over the dsp56300 JIT
+ *     (audio.use_dsp_jit).
+ *   - The LLVM backend is Phase 1: each block wraps the interpreter, so
+ *     it is *slower* than the dsp56300 JIT. It is therefore an opt-in
+ *     alternative — used only when the external JIT is switched off
+ *     (audio.use_dsp_jit = false) — not a default.
+ *
+ * DSP56K_JIT_ANY_SUPPORTED is what lets the LLVM backend reach this code
+ * at all; without it the x86_64 build would silently leave the inline
+ * JIT unused.
  */
 static bool dsp_want_external_jit_engine(void)
 {
 #if DSP56K_JIT_SUPPORTED
     if (g_config.audio.dsp_jit.enabled) {
+        return false;
+    }
+#elif DSP56K_JIT_LLVM_SUPPORTED
+    if (g_config.audio.dsp_jit.enabled && !g_config.audio.use_dsp_jit) {
         return false;
     }
 #endif
@@ -260,7 +275,7 @@ void dsp_invalidate_opcache(DSPState *dsp)
 
 void dsp_reset_jit_throttle(DSPState *dsp)
 {
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
     if (dsp->ops == &c_dsp_ops) {
         dsp56k_jit_reset_throttle(dsp->backend);
     }
@@ -281,7 +296,10 @@ void dsp_set_engine(DSPState *dsp, bool use_jit)
 {
 #if DSP56K_JIT_SUPPORTED
     /* Inline-JIT interp engine active: the UI toggle for the external
-     * JIT engine is a no-op while audio.dsp_jit.enabled is set. */
+     * JIT engine is a no-op while audio.dsp_jit.enabled is set. This
+     * precedence is AArch64-only; on the LLVM backend the external JIT
+     * stays the default and use_jit is honored as-is (see
+     * dsp_want_external_jit_engine). */
     if (g_config.audio.dsp_jit.enabled) {
         use_jit = false;
     }
