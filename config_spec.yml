@@ -299,6 +299,11 @@ display:
     use_animations:
       type: bool
       default: true
+    # Pause the guest when the window loses focus and resume it on return
+    # (only the pause this option makes is undone, a manual pause stays).
+    pause_on_focus_loss:
+      type: bool
+      default: false
     fit:
       type: enum
       values: [center, scale, stretch]

@@ -941,6 +941,10 @@ void MainMenuDisplayView::Draw()
     }
     Toggle("Vertical refresh sync", &g_config.display.window.vsync,
            "Sync to screen vertical refresh to reduce tearing artifacts");
+    Toggle("Pause when window loses focus",
+           &g_config.display.ui.pause_on_focus_loss,
+           "Pause the game when another window takes focus and resume it "
+           "when xemu comes back");
 
     SectionTitle("Interface");
     Toggle("Show main menu bar", &g_config.display.ui.show_menubar,

@@ -649,6 +649,35 @@ static void handle_mousewheel(SDL_Event *ev)
     qemu_input_event_sync();
 }
 
+/*
+ * Optional pause-on-focus-loss (Settings > Display). Only a pause this
+ * feature itself made is undone on return: a pause the player asked for
+ * (or one that was already in effect) is left alone.
+ */
+static bool focus_loss_paused;
+
+static void xemu_focus_loss_pause(void)
+{
+    if (!g_config.display.ui.pause_on_focus_loss || focus_loss_paused) {
+        return;
+    }
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_PAUSED);
+        focus_loss_paused = true;
+    }
+}
+
+static void xemu_focus_loss_resume(void)
+{
+    if (!focus_loss_paused) {
+        return;
+    }
+    focus_loss_paused = false;
+    if (!runstate_is_running()) {
+        vm_start();
+    }
+}
+
 static void handle_windowevent(SDL_Event *ev)
 {
     struct xemu_console *scon = get_scon_from_window(ev->window.windowID);
@@ -717,11 +746,15 @@ static void handle_windowevent(SDL_Event *ev)
          * key is released.
          */
         scon->ignore_hotkeys = get_mod_state();
+        if (ev->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+            xemu_focus_loss_resume();
+        }
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         if (gui_grab && !gui_fullscreen) {
             grab_end(scon);
         }
+        xemu_focus_loss_pause();
         break;
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         if (qemu_console_is_graphic(scon->dcl.con)) {
