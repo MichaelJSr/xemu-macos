@@ -4,7 +4,8 @@ Downloads required libraries for xemu builds on macOS from MacPorts repositories
 """
 # Based on https://github.com/tpoechtrager/osxcross/blob/master/tools/osxcross-macports
 # which is based on https://github.com/maci0/pmmacports
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
+import gzip
 import glob
 import re
 import os.path
@@ -17,6 +18,20 @@ MIRROR = 'https://packages.macports.org'
 # FIXME: Inline macports key
 # FIXME: Move packages to archive directory to track used vs unused
 # FIXME: Support multiple mirrors
+
+def urlopen_listing(url):
+	"""urlopen() that survives the packages.macports.org Fastly 501.
+
+	The CDN in front of the mirror answers a directory listing with HTTP
+	501 unless the request declares an Accept-Encoding it can honour
+	(gzip works, identity and * do not), and it then serves the index
+	gzipped, so the body needs inflating.
+	"""
+	resp = urlopen(Request(url, headers={'Accept-Encoding': 'gzip'}))
+	if resp.headers.get('Content-Encoding') == 'gzip':
+		return gzip.GzipFile(fileobj=resp)
+	return resp
+
 
 class LibInstaller:
 	DARWIN_TARGET_X64="darwin_21" # macOS 11
@@ -43,7 +58,7 @@ class LibInstaller:
 
 	def get_latest_pkg_filename_url(self, pkg_name):
 		pkg_base_url = f'{MIRROR}/{pkg_name}'
-		pkg_list = urlopen(pkg_base_url).read().decode('utf-8')
+		pkg_list = urlopen_listing(pkg_base_url).read().decode('utf-8')
 		pkgs = re.findall(pkg_name + r'[\w\.\-\_\+]*?\.(?:any_any|darwin_any|' + self._darwin_target + r')\.(?:noarch|' + self._arch + r')\.tbz2', pkg_list)
 		if len(pkgs) < 1:
 			print(f'    [*] [ERROR] Unable to find version of {pkg_name} compatible with {self._darwin_target}.{self._arch}')
