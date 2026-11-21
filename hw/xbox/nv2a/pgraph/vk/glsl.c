@@ -290,13 +290,60 @@ static GByteArray *load_spirv_from_cache(glslang_target_language_version_t spv,
     return g_byte_array_new_take(data, size);
 }
 
+/*
+ * Background save. A cold session compiles SPIR-V for every module and
+ * used to write each blob on the calling thread: the PFIFO thread for a
+ * normal draw, the prewarm and async-compile workers for theirs. A few
+ * small writes are cheap in total, but each is a synchronous filesystem
+ * round trip on a frame path, so queue them to one saver instead.
+ * Write-then-rename still keeps the cache valid if a kill lands mid-write.
+ */
+typedef struct SpirvSaveJob {
+    glslang_target_language_version_t target;
+    uint64_t hash;
+    GByteArray *spv;
+} SpirvSaveJob;
+
+static GAsyncQueue *spirv_save_queue;
+static QemuThread spirv_save_thread;
+static bool spirv_save_started;
+
+static void write_spirv_to_cache(glslang_target_language_version_t target,
+                                 uint64_t hash, GByteArray *spv);
+
+static void *spirv_save_thread_fn(void *opaque)
+{
+    for (;;) {
+        SpirvSaveJob *job = g_async_queue_pop(spirv_save_queue);
+        if (!job) { /* the sentinel queued by the compiler's finalize */
+            break;
+        }
+        write_spirv_to_cache(job->target, job->hash, job->spv);
+        g_byte_array_unref(job->spv);
+        g_free(job);
+    }
+    return NULL;
+}
+
 static void save_spirv_to_cache(glslang_target_language_version_t target,
                                 uint64_t hash, GByteArray *spv)
 {
-    if (!spirv_cache_enabled() || !spv || spv->len == 0) {
+    if (!spirv_cache_enabled() || !spv || spv->len == 0 ||
+        !spirv_save_queue) {
         return;
     }
 
+    /* The caller drops its SPIR-V right after building the VkShaderModule */
+    SpirvSaveJob *job = g_new(SpirvSaveJob, 1);
+    job->target = target;
+    job->hash = hash;
+    job->spv = g_byte_array_ref(spv);
+    g_async_queue_push(spirv_save_queue, job);
+}
+
+static void write_spirv_to_cache(glslang_target_language_version_t target,
+                                 uint64_t hash, GByteArray *spv)
+{
     char *path = get_spirv_cache_path(target, hash);
 
     /* Write-then-rename, same discipline as the pipeline cache in draw.c:
@@ -489,6 +536,10 @@ static void *glsl_warm_thread_fn(void *opaque)
 void pgraph_vk_init_glsl_compiler(void)
 {
     glslang_initialize_process();
+    spirv_save_queue = g_async_queue_new();
+    qemu_thread_create(&spirv_save_thread, "vk.spirv_save",
+                       spirv_save_thread_fn, NULL, QEMU_THREAD_JOINABLE);
+    spirv_save_started = true;
     qemu_thread_create(&glsl_warm_thread, "glslang warm", glsl_warm_thread_fn,
                        NULL, QEMU_THREAD_JOINABLE);
     glsl_warm_started = true;
@@ -499,6 +550,13 @@ void pgraph_vk_finalize_glsl_compiler(void)
     if (glsl_warm_started) {
         qemu_thread_join(&glsl_warm_thread);
         glsl_warm_started = false;
+    }
+    if (spirv_save_started) {
+        g_async_queue_push(spirv_save_queue, NULL);
+        qemu_thread_join(&spirv_save_thread);
+        spirv_save_started = false;
+        g_async_queue_unref(spirv_save_queue);
+        spirv_save_queue = NULL;
     }
     glslang_finalize_process();
 }
