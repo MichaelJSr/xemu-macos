@@ -269,9 +269,12 @@ display:
     values: ["off", 2x, 4x]
     default: "off"
   quality:
+    # Internal render resolution relative to the guest's. Above 1 renders
+    # larger than native (supersampling); below 1 (0.25/0.5/0.75) renders
+    # smaller, which trades image detail for a real frame-rate gain.
     surface_scale:
-      type: integer
-      default: 1
+      type: number
+      default: 1.0
   filtering:
     # How the guest frame is scaled up to the window. linear/nearest are
     # the classic blits; fsr/bicubic/lanczos are upscalers that only do

@@ -143,9 +143,10 @@ static SurfaceBinding *surface_ranges_find_containing(PGRAPHVkState *r,
     return NULL;
 }
 
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
+void pgraph_vk_set_surface_scale_factor(NV2AState *d, float scale)
 {
-    g_config.display.quality.surface_scale = scale < 1 ? 1 : scale;
+    g_config.display.quality.surface_scale =
+        scale < NV2A_SURFACE_SCALE_MIN ? NV2A_SURFACE_SCALE_MIN : scale;
 
     nv2a_pfifo_lock_ext(d);
     qatomic_set(&d->pfifo.halt, true);
@@ -176,15 +177,15 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
-unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d)
+float pgraph_vk_get_surface_scale_factor(NV2AState *d)
 {
     return d->pgraph.surface_scale_factor; // FIXME: Move internal to renderer
 }
 
 void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg)
 {
-    int factor = g_config.display.quality.surface_scale;
-    pg->surface_scale_factor = MAX(factor, 1);
+    float factor = g_config.display.quality.surface_scale;
+    pg->surface_scale_factor = MAX(factor, NV2A_SURFACE_SCALE_MIN);
 
     /* Scale changed underneath the cached scaled dims. */
     if (pg->vk_renderer_state) {
@@ -635,7 +636,10 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
     }
 
-    bool downscale = (pg->surface_scale_factor != 1);
+    /* The surface image holds `scaled` pixels while the guest's VRAM holds
+     * `surface->width/height`; true whenever the two differ, in either
+     * direction (upscale for factor > 1, downscale for factor < 1). */
+    bool downscale = (pg->surface_scale_factor != 1.0f);
 
     trace_nv2a_pgraph_surface_download(
         surface->color ? "COLOR" : "ZETA",
@@ -649,7 +653,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     uint8_t *swizzle_buf = pixels;
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
-        nv2a_vk_assert(pg->surface_scale_factor == 1 || downscale);
+        nv2a_vk_assert(pg->surface_scale_factor == 1.0f || downscale);
         swizzle_buf = (uint8_t *)g_malloc(surface->size);
         gl_read_buf = swizzle_buf;
     }
@@ -1440,10 +1444,22 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
                             &alloc_create_info, &surface->image,
                             &surface->allocation, NULL));
 
+    /* The scratch is the transfer staging for readback and upload, and
+     * must fit both the scaled image and the guest's own pixels: readback
+     * blits scaled->native into it, upload blits native->scaled out of it,
+     * and the depth/stencil compute path copies whole images through it.
+     * With an upscale the scaled side is larger, with a downscale the
+     * native one is, so it is the larger of the two. */
+    VkImageCreateInfo scratch_create_info = image_create_info;
+    scratch_create_info.extent.width =
+        MAX(width, surface->width ? surface->width : 1);
+    scratch_create_info.extent.height =
+        MAX(height, surface->height ? surface->height : 1);
+
 #if defined(__APPLE__)
-    if (pg->surface_scale_factor > 1) {
+    if (pg->surface_scale_factor != 1.0f) {
 #endif
-        VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+        VK_CHECK(vmaCreateImage(r->allocator, &scratch_create_info,
                                 &alloc_create_info, &surface->image_scratch,
                                 &surface->allocation_scratch, NULL));
 #if defined(__APPLE__)
@@ -2256,7 +2272,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                          VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    bool upscale = pg->surface_scale_factor > 1 &&
+    bool rescale = pg->surface_scale_factor != 1.0f &&
                    !use_compute_to_convert_depth_stencil_format;
 
     if (surface->image_scratch != VK_NULL_HANDLE) {
@@ -2295,7 +2311,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         surface->image_scratch_current_layout =
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
-        if (upscale) {
+        if (rescale) {
             VkImageBlit blitRegion = {
                 .srcSubresource.aspectMask = surface->host_fmt.aspect,
                 .srcSubresource.mipLevel = 0,

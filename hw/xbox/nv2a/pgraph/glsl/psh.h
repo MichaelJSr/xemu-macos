@@ -92,7 +92,7 @@ void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state);
     DECL(S, depthFactor, float, 1)  \
     DECL(S, depthOffset, float, 1)  \
     DECL(S, fogColor, vec4, 1)      \
-    DECL(S, surfaceScale, ivec2, 1) \
+    DECL(S, surfaceScale, vec2, 1) \
     DECL(S, texScale, float, 4)
 
 DECL_UNIFORM_TYPES(PshUniform, PSH_UNIFORM_DECL_X)

@@ -193,15 +193,17 @@ const char *yuv_to_rgba_glsl =
     "}\n";
 
 const char *pack_d24_unorm_s8_uint_to_z24s8_glsl =
-    "layout(push_constant) uniform PushConstants { uint width_in, width_out; };\n"
+    "layout(push_constant) uniform PushConstants { uint width_in, width_out, height_in, height_out; };\n"
     "layout(set = 0, binding = 0) buffer DepthIn { uint depth_in[]; };\n"
     "layout(set = 0, binding = 1) buffer StencilIn { uint stencil_in[]; };\n"
     "layout(set = 0, binding = 2) buffer DepthStencilOut { uint depth_stencil_out[]; };\n"
+    // Nearest-neighbour mapping that also covers a fractional ratio, so the
+    // depth/stencil buffers can be resampled down as well as up (the old
+    // integer `width_in / width_out` was zero when downscaling).
     "uint get_input_idx(uint idx_out) {\n"
-    "    uint scale = width_in / width_out;\n"
-    "    uint y = (idx_out / width_out) * scale;\n"
-    "    uint x = (idx_out % width_out) * scale;\n"
-    "    return y * width_in + x;\n"
+    "    uint x_out = idx_out % width_out;\n"
+    "    uint y_out = idx_out / width_out;\n"
+    "    return (y_out * height_in / height_out) * width_in + (x_out * width_in / width_out);\n"
     "}\n"
     "void main() {\n"
     "    uint idx_out = gl_GlobalInvocationID.x;\n"
@@ -212,15 +214,14 @@ const char *pack_d24_unorm_s8_uint_to_z24s8_glsl =
     "}\n";
 
 const char *unpack_z24s8_to_d24_unorm_s8_uint_glsl =
-    "layout(push_constant) uniform PushConstants { uint width_in, width_out; };\n"
+    "layout(push_constant) uniform PushConstants { uint width_in, width_out, height_in, height_out; };\n"
     "layout(set = 0, binding = 0) buffer DepthOut { uint depth_out[]; };\n"
     "layout(set = 0, binding = 1) buffer StencilOut { uint stencil_out[]; };\n"
     "layout(set = 0, binding = 2) buffer DepthStencilIn { uint depth_stencil_in[]; };\n"
     "uint get_input_idx(uint idx_out) {\n"
-    "    uint scale = width_out / width_in;\n"
-    "    uint y = (idx_out / width_out) / scale;\n"
-    "    uint x = (idx_out % width_out) / scale;\n"
-    "    return y * width_in + x;\n"
+    "    uint x_out = idx_out % width_out;\n"
+    "    uint y_out = idx_out / width_out;\n"
+    "    return (y_out * height_in / height_out) * width_in + (x_out * width_in / width_out);\n"
     "}\n"
     "void main() {\n"
     "    uint idx_out = gl_GlobalInvocationID.x;\n"
@@ -237,15 +238,14 @@ const char *unpack_z24s8_to_d24_unorm_s8_uint_glsl =
     "}\n";
 
 const char *pack_d32_sfloat_s8_uint_to_z24s8_glsl =
-    "layout(push_constant) uniform PushConstants { uint width_in, width_out; };\n"
+    "layout(push_constant) uniform PushConstants { uint width_in, width_out, height_in, height_out; };\n"
     "layout(set = 0, binding = 0) buffer DepthIn { float depth_in[]; };\n"
     "layout(set = 0, binding = 1) buffer StencilIn { uint stencil_in[]; };\n"
     "layout(set = 0, binding = 2) buffer DepthStencilOut { uint depth_stencil_out[]; };\n"
     "uint get_input_idx(uint idx_out) {\n"
-    "    uint scale = width_in / width_out;\n"
-    "    uint y = (idx_out / width_out) * scale;\n"
-    "    uint x = (idx_out % width_out) * scale;\n"
-    "    return y * width_in + x;\n"
+    "    uint x_out = idx_out % width_out;\n"
+    "    uint y_out = idx_out / width_out;\n"
+    "    return (y_out * height_in / height_out) * width_in + (x_out * width_in / width_out);\n"
     "}\n"
     "void main() {\n"
     "    uint idx_out = gl_GlobalInvocationID.x;\n"
@@ -256,15 +256,14 @@ const char *pack_d32_sfloat_s8_uint_to_z24s8_glsl =
     "}\n";
 
 const char *unpack_z24s8_to_d32_sfloat_s8_uint_glsl =
-    "layout(push_constant) uniform PushConstants { uint width_in, width_out; };\n"
+    "layout(push_constant) uniform PushConstants { uint width_in, width_out, height_in, height_out; };\n"
     "layout(set = 0, binding = 0) buffer DepthOut { float depth_out[]; };\n"
     "layout(set = 0, binding = 1) buffer StencilOut { uint stencil_out[]; };\n"
     "layout(set = 0, binding = 2) buffer DepthStencilIn { uint depth_stencil_in[]; };\n"
     "uint get_input_idx(uint idx_out) {\n"
-    "    uint scale = width_out / width_in;\n"
-    "    uint y = (idx_out / width_out) / scale;\n"
-    "    uint x = (idx_out % width_out) / scale;\n"
-    "    return y * width_in + x;\n"
+    "    uint x_out = idx_out % width_out;\n"
+    "    uint y_out = idx_out / width_out;\n"
+    "    return (y_out * height_in / height_out) * width_in + (x_out * width_in / width_out);\n"
     "}\n"
     "void main() {\n"
     "    uint idx_out = gl_GlobalInvocationID.x;\n"
@@ -613,8 +612,9 @@ void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
         &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
         NULL);
 
-    uint32_t push_constants[2] = { input_width, output_width };
-    assert(sizeof(push_constants) == 8);
+    uint32_t push_constants[4] = { input_width, output_width, input_height,
+                                   output_height };
+    assert(sizeof(push_constants) == 16);
     vkCmdPushConstants(cmd, r->compute.pipeline_layout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);
@@ -686,9 +686,9 @@ void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
         &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
         NULL);
 
-    assert(output_width >= input_width);
-    uint32_t push_constants[2] = { input_width, output_width };
-    assert(sizeof(push_constants) == 8);
+    uint32_t push_constants[4] = { input_width, output_width, input_height,
+                                   output_height };
+    assert(sizeof(push_constants) == 16);
     vkCmdPushConstants(cmd, r->compute.pipeline_layout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
                        push_constants);

@@ -34,12 +34,13 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                        uint8_t *pixels);
 static void surface_get_dimensions(PGRAPHState *pg, unsigned int *width, unsigned int *height);
 
-void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
+void pgraph_gl_set_surface_scale_factor(NV2AState *d, float scale)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
-    g_config.display.quality.surface_scale = scale < 1 ? 1 : scale;
+    g_config.display.quality.surface_scale =
+        scale < NV2A_SURFACE_SCALE_MIN ? NV2A_SURFACE_SCALE_MIN : scale;
 
     nv2a_pfifo_lock_ext(d);
     qatomic_set(&d->pfifo.halt, true);
@@ -69,15 +70,16 @@ void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
-unsigned int pgraph_gl_get_surface_scale_factor(NV2AState *d)
+float pgraph_gl_get_surface_scale_factor(NV2AState *d)
 {
     return d->pgraph.surface_scale_factor;
 }
 
 void pgraph_gl_reload_surface_scale_factor(PGRAPHState *pg)
 {
-    int factor = g_config.display.quality.surface_scale;
-    pg->surface_scale_factor = factor < 1 ? 1 : factor;
+    float factor = g_config.display.quality.surface_scale;
+    pg->surface_scale_factor = factor < NV2A_SURFACE_SCALE_MIN ?
+                                   NV2A_SURFACE_SCALE_MIN : factor;
 }
 
 // FIXME: Move to common
@@ -705,28 +707,32 @@ static void bind_current_surface(NV2AState *d)
     }
 }
 
-static void surface_copy_shrink_row(uint8_t *out, uint8_t *in,
-                                    unsigned int width,
-                                    unsigned int bytes_per_pixel,
-                                    unsigned int factor)
+/*
+ * Nearest-neighbour resample of a tightly packed `in_w` x `in_h` image
+ * into `out`, whose rows are `out_pitch` bytes apart. The mapping handles
+ * any ratio, so one helper covers both the integer upscale (factor > 1)
+ * and the fractional downscale (factor < 1).
+ */
+static void surface_resample(uint8_t *out, unsigned int out_pitch,
+                             const uint8_t *in, unsigned int in_w,
+                             unsigned int in_h, unsigned int out_w,
+                             unsigned int out_h, unsigned int bytes_per_pixel)
 {
-    if (bytes_per_pixel == 4) {
-        for (unsigned int x = 0; x < width; x++) {
-            *(uint32_t *)out = *(uint32_t *)in;
-            out += 4;
-            in += 4 * factor;
-        }
-    } else if (bytes_per_pixel == 2) {
-        for (unsigned int x = 0; x < width; x++) {
-            *(uint16_t *)out = *(uint16_t *)in;
-            out += 2;
-            in += 2 * factor;
-        }
-    } else {
-        for (unsigned int x = 0; x < width; x++) {
-            memcpy(out, in, bytes_per_pixel);
-            out += bytes_per_pixel;
-            in += bytes_per_pixel * factor;
+    for (unsigned int y = 0; y < out_h; y++) {
+        unsigned int sy = (unsigned int)((uint64_t)y * in_h / out_h);
+        const uint8_t *in_row = in + (size_t)sy * in_w * bytes_per_pixel;
+        uint8_t *dst = out + (size_t)y * out_pitch;
+        for (unsigned int x = 0; x < out_w; x++) {
+            unsigned int sx = (unsigned int)((uint64_t)x * in_w / out_w);
+            const uint8_t *src = in_row + (size_t)sx * bytes_per_pixel;
+            if (bytes_per_pixel == 4) {
+                *(uint32_t *)dst = *(const uint32_t *)src;
+            } else if (bytes_per_pixel == 2) {
+                *(uint16_t *)dst = *(const uint16_t *)src;
+            } else {
+                memcpy(dst, src, bytes_per_pixel);
+            }
+            dst += bytes_per_pixel;
         }
     }
 }
@@ -738,7 +744,7 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
     PGRAPHState *pg = &d->pgraph;
 
     swizzle &= surface->swizzle;
-    downscale &= (pg->surface_scale_factor != 1);
+    bool rescale = downscale && (pg->surface_scale_factor != 1.0f);
 
     if (!surface->width || !surface->height) {
         return;
@@ -762,6 +768,12 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     ASSERT_FRAMEBUFFER_COMPLETE();
 
+    /* The GL texture is at the scaled resolution; the guest's memory is at
+     * the surface's own. Read the scaled image, then resample it back. */
+    unsigned int scaled_width = surface->width, scaled_height = surface->height;
+    pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
+    bool scaled_read = (pg->surface_scale_factor != 1.0f);
+
     /* Read surface into memory */
     uint8_t *gl_read_buf = pixels;
 
@@ -770,36 +782,35 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
         /* FIXME: Allocate big buffer up front and re-alloc if necessary.
          * FIXME: Consider swizzle in shader
          */
-        assert(pg->surface_scale_factor == 1 || downscale);
+        assert(pg->surface_scale_factor == 1.0f || rescale);
         swizzle_buf = (uint8_t *)g_malloc(surface->size);
         gl_read_buf = swizzle_buf;
     }
 
-    if (downscale) {
-        pg->scale_buf = (uint8_t *)g_realloc(
-            pg->scale_buf, pg->surface_scale_factor * pg->surface_scale_factor *
-                               surface->size);
-        gl_read_buf = pg->scale_buf;
+    unsigned int read_stride = surface->pitch;
+    if (scaled_read) {
+        read_stride = scaled_width * surface->fmt.bytes_per_pixel;
+        if (rescale) {
+            pg->scale_buf = (uint8_t *)g_realloc(
+                pg->scale_buf,
+                (size_t)scaled_width * scaled_height *
+                    surface->fmt.bytes_per_pixel);
+            gl_read_buf = pg->scale_buf;
+        } else {
+            gl_read_buf = pixels;
+        }
     }
 
-    glo_readpixels(
-        surface->fmt.gl_format, surface->fmt.gl_type, surface->fmt.bytes_per_pixel,
-        pg->surface_scale_factor * surface->pitch,
-        pg->surface_scale_factor * surface->width,
-        pg->surface_scale_factor * surface->height, flip, gl_read_buf);
+    glo_readpixels(surface->fmt.gl_format, surface->fmt.gl_type,
+                   surface->fmt.bytes_per_pixel, read_stride, scaled_width,
+                   scaled_height, flip, gl_read_buf);
 
     /* FIXME: Replace this with a hw accelerated version */
-    if (downscale) {
+    if (rescale) {
         assert(surface->pitch >= (surface->width * surface->fmt.bytes_per_pixel));
-        uint8_t *out = swizzle_buf, *in = pg->scale_buf;
-        for (unsigned int y = 0; y < surface->height; y++) {
-            surface_copy_shrink_row(out, in, surface->width,
-                                    surface->fmt.bytes_per_pixel,
-                                    pg->surface_scale_factor);
-            in += surface->pitch * pg->surface_scale_factor *
-                  pg->surface_scale_factor;
-            out += surface->pitch;
-        }
+        surface_resample(swizzle_buf, surface->pitch, pg->scale_buf,
+                         scaled_width, scaled_height, surface->width,
+                         surface->height, surface->fmt.bytes_per_pixel);
     }
 
     if (swizzle) {
@@ -868,57 +879,6 @@ void pgraph_gl_download_dirty_surfaces(NV2AState *d)
 
     qatomic_set(&r->download_dirty_surfaces_pending, false);
     qemu_event_set(&r->dirty_surfaces_download_complete);
-}
-
-static void surface_copy_expand_row(uint8_t *out, uint8_t *in,
-                                    unsigned int width,
-                                    unsigned int bytes_per_pixel,
-                                    unsigned int factor)
-{
-    if (bytes_per_pixel == 4) {
-        for (unsigned int x = 0; x < width; x++) {
-            for (unsigned int i = 0; i < factor; i++) {
-                *(uint32_t *)out = *(uint32_t *)in;
-                out += bytes_per_pixel;
-            }
-            in += bytes_per_pixel;
-        }
-    } else if (bytes_per_pixel == 2) {
-        for (unsigned int x = 0; x < width; x++) {
-            for (unsigned int i = 0; i < factor; i++) {
-                *(uint16_t *)out = *(uint16_t *)in;
-                out += bytes_per_pixel;
-            }
-            in += bytes_per_pixel;
-        }
-    } else {
-        for (unsigned int x = 0; x < width; x++) {
-            for (unsigned int i = 0; i < factor; i++) {
-                memcpy(out, in, bytes_per_pixel);
-                out += bytes_per_pixel;
-            }
-            in += bytes_per_pixel;
-        }
-    }
-}
-
-static void surface_copy_expand(uint8_t *out, uint8_t *in, unsigned int width,
-                                unsigned int height,
-                                unsigned int bytes_per_pixel,
-                                unsigned int factor)
-{
-    size_t out_pitch = width * bytes_per_pixel * factor;
-
-    for (unsigned int y = 0; y < height; y++) {
-        surface_copy_expand_row(out, in, width, bytes_per_pixel, factor);
-        uint8_t *row_in = out;
-        for (unsigned int i = 1; i < factor; i++) {
-            out += out_pitch;
-            memcpy(out, row_in, out_pitch);
-        }
-        in += width * bytes_per_pixel;
-        out += out_pitch;
-    }
 }
 
 void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
@@ -991,15 +951,23 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     uint8_t *gl_read_buf = optimal_buf;
     unsigned int width = surface->width, height = surface->height;
 
-    if (pg->surface_scale_factor > 1) {
-        pgraph_apply_scaling_factor(pg, &width, &height);
+    if (pg->surface_scale_factor != 1.0f) {
+        /* The guest's pixels are at the surface's own resolution; the GL
+         * texture is at the scaled one. Resample in either direction. */
+        unsigned int scaled_width = width, scaled_height = height;
+        pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
         pg->scale_buf = (uint8_t *)g_realloc(
-            pg->scale_buf, width * height * surface->fmt.bytes_per_pixel);
+            pg->scale_buf,
+            (size_t)scaled_width * scaled_height *
+                surface->fmt.bytes_per_pixel);
+        surface_resample(pg->scale_buf,
+                         scaled_width * surface->fmt.bytes_per_pixel,
+                         optimal_buf, surface->width, surface->height,
+                         scaled_width, scaled_height,
+                         surface->fmt.bytes_per_pixel);
         gl_read_buf = pg->scale_buf;
-        uint8_t *out = gl_read_buf, *in = optimal_buf;
-        surface_copy_expand(out, in, surface->width, surface->height,
-                            surface->fmt.bytes_per_pixel,
-                            d->pgraph.surface_scale_factor);
+        width = scaled_width;
+        height = scaled_height;
     }
 
     int prev_unpack_alignment;

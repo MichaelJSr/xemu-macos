@@ -137,8 +137,8 @@ typedef struct PGRAPHRenderer {
         void (*report_sync_read)(NV2AState *d, hwaddr addr, hwaddr len);
         void (*surface_flush)(NV2AState *d);
         void (*surface_update)(NV2AState *d, bool upload, bool color_write, bool zeta_write);
-        void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
-        unsigned int (*get_surface_scale_factor)(NV2AState *d);
+        void (*set_surface_scale_factor)(NV2AState *d, float scale);
+        float (*get_surface_scale_factor)(NV2AState *d);
         int (*get_framebuffer_surface)(NV2AState *d);
         /* Metal-native presentation: IOSurface handoff instead of a
          * GL texture name. Optional; NULL when unsupported. */
@@ -308,7 +308,10 @@ typedef struct PGRAPHState {
     } renderer_switch_phase;
     QemuEvent renderer_switch_complete;
 
-    unsigned int surface_scale_factor;
+    /* Internal render resolution relative to the guest's, and the
+     * matching scratch buffer for the CPU readback path. A value below 1
+     * renders the guest's surfaces smaller than native (downscale). */
+    float surface_scale_factor;
     uint8_t *scale_buf;
 
     /*
@@ -490,12 +493,29 @@ static inline void pgraph_apply_anti_aliasing_factor(PGRAPHState *pg,
     }
 }
 
+/* Lowest internal resolution scale the UI offers; below 1 the renderer
+ * draws the guest's surfaces smaller than native (downscale). */
+#define NV2A_SURFACE_SCALE_MIN 0.25f
+
 static inline void pgraph_apply_scaling_factor(PGRAPHState *pg,
                                         unsigned int *width,
                                         unsigned int *height)
 {
-    *width *= pg->surface_scale_factor;
-    *height *= pg->surface_scale_factor;
+    /* The factor may be fractional (downscale), so round to the nearest
+     * pixel and never collapse a nonzero dimension to zero. */
+    float factor = pg->surface_scale_factor;
+    if (width && *width) {
+        *width = (unsigned int)(*width * factor + 0.5f);
+        if (*width < 1) {
+            *width = 1;
+        }
+    }
+    if (height && *height) {
+        *height = (unsigned int)(*height * factor + 0.5f);
+        if (*height < 1) {
+            *height = 1;
+        }
+    }
 }
 
 void pgraph_get_clear_color(PGRAPHState *pg, float rgba[4]);

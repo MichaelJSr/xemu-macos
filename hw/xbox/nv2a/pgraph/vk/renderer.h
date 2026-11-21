@@ -1311,8 +1311,8 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
                               bool zeta_write);
 SurfaceBinding *pgraph_vk_surface_get(NV2AState *d, hwaddr addr);
 void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta);
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale);
-unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d);
+void pgraph_vk_set_surface_scale_factor(NV2AState *d, float scale);
+float pgraph_vk_get_surface_scale_factor(NV2AState *d);
 void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg);
 
 // surface-compute.c

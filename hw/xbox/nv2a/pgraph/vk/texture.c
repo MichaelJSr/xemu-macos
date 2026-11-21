@@ -1771,7 +1771,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             NSPROF_EV_SDOWN_TEXBIND);
     }
 
-    if (surface_to_texture && pg->surface_scale_factor > 1) {
+    if (surface_to_texture && pg->surface_scale_factor != 1.0f) {
         key.scale = pg->surface_scale_factor;
     }
 

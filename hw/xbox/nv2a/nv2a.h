@@ -81,8 +81,8 @@ bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame);
 bool nv2a_get_present_frame_peek(NV2APresentFrame *frame);
 
 void nv2a_release_framebuffer_surface(void);
-void nv2a_set_surface_scale_factor(unsigned int scale);
-unsigned int nv2a_get_surface_scale_factor(void);
+void nv2a_set_surface_scale_factor(float scale);
+float nv2a_get_surface_scale_factor(void);
 /*
  * The Vulkan driver in use and why, e.g. "MoltenVK, 1.4.3 (auto)",
  * "KosmicKrisp, Mesa 26.3.0 (kosmickrisp)" or "MoltenVK, 1.4.3 (needs

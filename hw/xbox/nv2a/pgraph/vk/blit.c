@@ -195,8 +195,12 @@ void pgraph_vk_image_blit(NV2AState *d)
      * GPU image copy, VRAM to VRAM as on the hardware, instead of a
      * download, memmove and upload. Anything the guards reject takes the
      * CPU path below.
+     *
+     * VkImageCopy cannot resample, so the fast path only covers scales at
+     * or above native (its offsets and extents are integer multiples).
+     * A fractional downscale falls through to the CPU path.
      */
-    if (pgraph_gpu_boost()) {
+    if (pgraph_gpu_boost() && pg->surface_scale_factor >= 1.0f) {
         SurfaceBinding *surf_src = pgraph_vk_surface_get(d, source_addr);
         SurfaceBinding *gdst = pgraph_vk_surface_get(d, dest_addr);
 
@@ -235,7 +239,7 @@ void pgraph_vk_image_blit(NV2AState *d)
                 }
             }
 
-            unsigned int scale = pg->surface_scale_factor;
+            unsigned int scale = (unsigned int)pg->surface_scale_factor;
             VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 
             pgraph_vk_transition_image_layout(
