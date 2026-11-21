@@ -2252,11 +2252,21 @@ static void render_frame(struct xemu_console *scon)
     gl_render_frame(scon);
 }
 
+/*
+ * Rendering from the event watch is only safe once main() holds the main
+ * loop without also running input setup. During xemu_input_init() SDL
+ * spins a nested run loop to enumerate HID devices, and a window
+ * "exposed" notification delivered there would call render_frame() while
+ * the main loop lock is already held, deadlocking on the non-recursive
+ * lock.
+ */
+static bool event_watch_ready;
+
 static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
-    if (xemu_headless_mode()) {
+    if (xemu_headless_mode() || !event_watch_ready) {
         return true;
     }
 
@@ -3155,6 +3165,9 @@ int main(int argc, char **argv)
     xemu_loadvm_run_deferred(); /* CLI -loadvm under XEMU_LOADVM_ADD_PADS */
     xemu_events_ready();   /* QMP XEMU_READY */
     xemu_main_loop_unlock();
+    /* The main loop lock is free again: it is now safe to render from the
+     * event watch during blocking SDL_PollEvent calls (resize/drag). */
+    event_watch_ready = true;
     /* Machine and pads exist: a harness may loadvm or migrate-incoming now. */
     fprintf(stderr, "xemu: ready\n");
 
