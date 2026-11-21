@@ -120,6 +120,11 @@ void MainMenuGeneralView::Draw()
            "Let the renderer keep GPU work in VRAM instead of round-tripping "
            "it through the CPU (currently the surface blit; requires restart)");
 
+    Toggle("Async pipeline compilation", &g_config.perf.async_pipeline_compile,
+           "Compile a first-seen draw pipeline on a worker thread and skip "
+           "that draw for the frames until it is ready, keeping a long "
+           "compile off the frame (MoltenVK/KosmicKrisp; requires restart)");
+
     SectionTitle("Miscellaneous");
     Toggle("Skip startup animation", &g_config.general.skip_boot_anim,
            "Skip the full Xbox boot animation sequence");

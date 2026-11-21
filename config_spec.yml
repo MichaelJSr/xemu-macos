@@ -467,6 +467,17 @@ perf:
   optimizations:
     type: bool
     default: true
+  # Async pipeline compilation: a draw whose pipeline is a first-encounter
+  # miss compiles on a worker thread and the draw is skipped for the frames
+  # until the build lands, keeping the PFIFO thread (and the flip) off the
+  # driver's 30-90 ms SPIR-V -> MSL -> Metal lowering. Repeat content is
+  # already covered by the two-tier cache and the prewarm, so only a key's
+  # first encounter reaches it. A key is built synchronously if the worker
+  # has not answered within 200 ms. MoltenVK/KosmicKrisp only, and off under
+  # icount. Read once at start; Settings > Performance.
+  async_pipeline_compile:
+    type: bool
+    default: true
 
 # Endpoints for a tool that reads the running game (ui/xemu-automation.c),
 # applied only to the player's own launch: the SDL pref dir's xemu.toml,

@@ -1,6 +1,7 @@
 if vulkan.found()
 
 vk_sources = files(
+	'async.c',
 	'blit.c',
 	'buffer.c',
 	'command.c',
