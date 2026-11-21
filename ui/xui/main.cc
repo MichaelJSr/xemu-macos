@@ -50,6 +50,7 @@
 #include "welcome.hh"
 #include "menubar.hh"
 #include "compat.hh"
+#include "game-patches-window.hh"
 #include "xbox-drive-explorer.hh"
 
 #ifdef __APPLE__
@@ -348,6 +349,7 @@ void xemu_hud_update(void)
     compatibility_reporter_window.Draw();
     XboxExplorerUpdate();
     XboxExplorerWindowDraw();
+    GamePatchesWindowDraw();
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();

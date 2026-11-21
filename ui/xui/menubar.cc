@@ -27,6 +27,7 @@
 #include "actions.hh"
 #include "compat.hh"
 #include "github-issue.hh"
+#include "game-patches-window.hh"
 #include "xbox-drive-explorer.hh"
 #include "../xemu-os-utils.h"
 
@@ -146,6 +147,10 @@ void ShowMainMenu()
             ImGui::Separator();
 
             if (ImGui::MenuItem("Xbox Hard Drive...")) XboxExplorerOpenWindow();
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Game Patches...")) GamePatchesOpenWindow();
 
             ImGui::Separator();
 
