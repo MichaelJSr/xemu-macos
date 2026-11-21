@@ -20,9 +20,9 @@
 
 #import <objc/runtime.h>
 #import <os/lock.h>
+#include <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 #ifndef NDEBUG
 #define METALFX_DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -61,16 +61,39 @@ static _Atomic int g_spatial_inflight  = 0;
 static _Atomic int g_temporal_inflight = 0;
 static _Atomic int g_interp_inflight   = 0;
 
+/*
+ * One semaphore for all three counters. Every completion handler signals
+ * after decrementing its counter; a waiter loops until the counter it
+ * cares about is zero, so signals belonging to another subsystem (or to
+ * an earlier, already-drained buffer) are harmless spurious wakeups.
+ * Created once for the process lifetime, like the shared Metal device:
+ * a completion handler may be the first thing that needs it.
+ */
+static dispatch_semaphore_t g_inflight_sem;
+
+static dispatch_semaphore_t metalfx_inflight_sem(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        g_inflight_sem = dispatch_semaphore_create(0);
+    });
+    return g_inflight_sem;
+}
+
+static void metalfx_inflight_signal(void)
+{
+    dispatch_semaphore_signal(metalfx_inflight_sem());
+}
+
 static void metalfx_wait_inflight(_Atomic int *counter)
 {
     /* Caller must not hold g_metalfx_lock (completion handlers run off-thread). */
-    int spins = 0;
+    dispatch_semaphore_t sem = metalfx_inflight_sem();
+    dispatch_time_t deadline =
+        dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC);
+
     while (atomic_load_explicit(counter, memory_order_acquire) > 0) {
-        if (++spins < 1000) {
-            /* Tight spin for the common case (<1ms) */
-        } else if (spins < 1000 + 20000) {
-            usleep(100);
-        } else {
+        if (dispatch_semaphore_wait(sem, deadline) != 0) {
             /*
              * ~2 s: a command buffer that waits on an event a faulted
              * submission never signals does not complete. Give up rather
@@ -676,6 +699,7 @@ bool metalfx_upscale(IOSurfaceRef inputSurface)
             (void)_;
             atomic_fetch_sub_explicit(&g_spatial_inflight, 1,
                                       memory_order_acq_rel);
+            metalfx_inflight_signal();
         }];
         metalfx_submit(cb);
         os_unfair_lock_unlock(&g_metalfx_lock);
@@ -712,6 +736,7 @@ bool metalfx_upscale_tex(void *inputTexture)
             (void)_;
             atomic_fetch_sub_explicit(&g_spatial_inflight, 1,
                                       memory_order_acq_rel);
+            metalfx_inflight_signal();
         }];
         metalfx_submit(cb);
         os_unfair_lock_unlock(&g_metalfx_lock);
@@ -1145,6 +1170,7 @@ bool metalfx_temporal_upscale(IOSurfaceRef colorSurface)
             (void)_;
             atomic_fetch_sub_explicit(&g_temporal_inflight, 1,
                                       memory_order_acq_rel);
+            metalfx_inflight_signal();
         }];
         metalfx_submit(cb);
         os_unfair_lock_unlock(&g_metalfx_lock);
@@ -1246,6 +1272,7 @@ bool metalfx_temporal_upscale_tex(void *inputTexture, void *depthTexture)
             (void)_;
             atomic_fetch_sub_explicit(&g_temporal_inflight, 1,
                                       memory_order_acq_rel);
+            metalfx_inflight_signal();
         }];
         metalfx_submit(cb);
         os_unfair_lock_unlock(&g_metalfx_lock);
@@ -1690,6 +1717,7 @@ bool metalfx_interpolation_generate(IOSurfaceRef colorA,
                 (void)_;
                 atomic_fetch_sub_explicit(&g_interp_inflight, 1,
                                           memory_order_acq_rel);
+                metalfx_inflight_signal();
             }];
             metalfx_submit(cb);
             os_unfair_lock_unlock(&g_metalfx_lock);
@@ -1761,6 +1789,7 @@ bool metalfx_interpolation_generate_tex(void *prevTexture,
                 (void)_;
                 atomic_fetch_sub_explicit(&g_interp_inflight, 1,
                                           memory_order_acq_rel);
+                metalfx_inflight_signal();
             }];
             metalfx_submit(cb);
             os_unfair_lock_unlock(&g_metalfx_lock);
