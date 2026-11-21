@@ -234,6 +234,112 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
     }
 }
 
+/*
+ * Converted color surfaces. The guest packs these formats at two bytes
+ * per pixel, but no host VkFormat for them is usable as a render target
+ * on Metal (no packed 16-bit attachment), so the host image is RGBA8
+ * (see kelvin_surface_color_format_vk_map, "Converted"). The
+ * guest-visible bytes stay packed; the helpers below translate at the
+ * upload/download boundary. Only the formats listed there reach them.
+ */
+static bool surface_host_format_converted(const SurfaceBinding *surface)
+{
+    return surface->color &&
+           surface->host_fmt.host_bytes_per_pixel != surface->fmt.bytes_per_pixel;
+}
+
+static uint16_t surface_pack_rgba8(const SurfaceBinding *surface,
+                                   const uint8_t *pixel)
+{
+    uint8_t r = pixel[0], g = pixel[1], b = pixel[2], a = pixel[3];
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0] */
+        return ((a & 0x80) << 8) | ((r & 0xF8) << 7) | ((g & 0xF8) << 2) |
+               (b >> 3);
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        /* R5G6B5: R[15:11], G[10:5], B[4:0] */
+        return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    default:
+        nv2a_vk_assert(!"unconverted surface format");
+        return 0;
+    }
+}
+
+static void surface_unpack_rgba8(const SurfaceBinding *surface, uint8_t *pixel,
+                                 uint16_t packed)
+{
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5: {
+        /* A1R5G5B5 */
+        uint8_t a1 = (packed >> 15) & 0x01;
+        uint8_t r5 = (packed >> 10) & 0x1F;
+        uint8_t g5 = (packed >> 5) & 0x1F;
+        uint8_t b5 = packed & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g5 << 3) | (g5 >> 2);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = a1 ? 0xFF : 0x00;
+        break;
+    }
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+        /* R5G6B5 */
+        uint8_t r5 = (packed >> 11) & 0x1F;
+        uint8_t g6 = (packed >> 5) & 0x3F;
+        uint8_t b5 = packed & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g6 << 2) | (g6 >> 4);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = 0xFF;
+        break;
+    }
+    default:
+        nv2a_vk_assert(!"unconverted surface format");
+        pixel[0] = pixel[1] = pixel[2] = 0;
+        pixel[3] = 0xFF;
+        break;
+    }
+}
+
+/* RGBA8 (host, tightly packed) -> guest packed 16-bit at dst_stride */
+static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
+                                            uint8_t *dst, int dst_stride,
+                                            const uint8_t *src, int src_stride,
+                                            unsigned int width,
+                                            unsigned int height)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        uint8_t *dst_row = dst + (size_t)y * dst_stride;
+        const uint8_t *src_row = src + (size_t)y * src_stride;
+
+        for (unsigned int x = 0; x < width; x++) {
+            ((uint16_t *)dst_row)[x] =
+                surface_pack_rgba8(surface, src_row + x * 4);
+        }
+    }
+}
+
+/* guest packed 16-bit -> RGBA8 (host, tightly packed) at dst_stride */
+static void surface_convert_to_host_rgba8(const SurfaceBinding *surface,
+                                          uint8_t *dst, int dst_stride,
+                                          const uint8_t *src, int src_stride,
+                                          unsigned int width,
+                                          unsigned int height)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        uint8_t *dst_row = dst + (size_t)y * dst_stride;
+        const uint8_t *src_row = src + (size_t)y * src_stride;
+
+        for (unsigned int x = 0; x < width; x++) {
+            surface_unpack_rgba8(surface, dst_row + x * 4,
+                                 ((const uint16_t *)src_row)[x]);
+        }
+    }
+}
+
 unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
                                                          hwaddr start,
                                                          hwaddr size)
@@ -294,6 +400,8 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
     int64_t nsprof_t0 = nsprof_begin();
+
+    bool converted = surface_host_format_converted(surface);
 
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -576,8 +684,10 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     // Download image data to host
     //
 
-    size_t download_size = (size_t)surface->width *
-                           surface->fmt.bytes_per_pixel * surface->height;
+    size_t download_size =
+        (size_t)surface->width * surface->height *
+        (converted ? surface->host_fmt.host_bytes_per_pixel
+                   : surface->fmt.bytes_per_pixel);
 
     VkBufferMemoryBarrier post_copy_dst_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -601,10 +711,18 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                 0, download_size);
     }
 
-    memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
-                 surface->pitch,
-                 surface->width * surface->fmt.bytes_per_pixel,
-                 surface->height);
+    if (converted) {
+        surface_convert_from_host_rgba8(
+            surface, gl_read_buf, surface->pitch,
+            r->storage_buffers[BUFFER_STAGING_DST].mapped,
+            surface->width * surface->host_fmt.host_bytes_per_pixel,
+            surface->width, surface->height);
+    } else {
+        memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
+                     surface->pitch,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->height);
+    }
 
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
@@ -1606,13 +1724,18 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     g_autofree uint8_t *swizzle_buf = NULL;
     uint8_t *gl_read_buf = NULL;
 
+    bool converted = surface_host_format_converted(surface);
+
     /*
      * GPU unswizzle (surface-compute.c) accepts any power-of-two
      * dimensions via CPU-computed mask_x / mask_y push constants
      * (Phase 3.2). The POT test is defensive: swizzled Xbox surfaces
-     * are always POT by hardware constraint.
+     * are always POT by hardware constraint. Converted surfaces take
+     * the CPU path: the compute shader works on packed guest data and
+     * the conversion happens after unswizzle.
      */
     bool use_gpu_unswizzle =
+        !converted &&
         surface->swizzle &&
         (surface->fmt.bytes_per_pixel == 4 ||
          surface->fmt.bytes_per_pixel == 2) &&
@@ -1656,8 +1779,10 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     VkDeviceSize staging_limit =
         r->flight[r->current_flight].staging_buffer_limit;
 
-    size_t uploaded_image_size = surface->height * surface->width *
-                                 surface->fmt.bytes_per_pixel;
+    size_t uploaded_image_size =
+        surface->height * surface->width *
+        (converted ? surface->host_fmt.host_bytes_per_pixel
+                   : surface->fmt.bytes_per_pixel);
     nv2a_vk_bounds_check(uploaded_image_size <=
                          staging_limit - staging_slot_base);
     VkDeviceSize staging_base =
@@ -1671,9 +1796,16 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                    surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
                    use_compute_to_convert_depth_stencil_format);
 
-    memcpy_image(copy_buffer->mapped + staging_base, gl_read_buf,
-                 surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
-                 surface->height);
+    if (converted) {
+        surface_convert_to_host_rgba8(
+            surface, copy_buffer->mapped + staging_base,
+            surface->width * surface->host_fmt.host_bytes_per_pixel, gl_read_buf,
+            surface->pitch, surface->width, surface->height);
+    } else {
+        memcpy_image(copy_buffer->mapped + staging_base, gl_read_buf,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->pitch, surface->height);
+    }
 
     if (!copy_buffer->is_coherent) {
         vmaFlushAllocation(r->allocator, copy_buffer->allocation, staging_base,

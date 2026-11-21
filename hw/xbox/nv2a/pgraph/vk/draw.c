@@ -3308,6 +3308,8 @@ typedef struct VertexBufferRemap {
     struct {
         VkDeviceAddress offset;
         VkDeviceSize old_stride;
+        /* Packed element size and the (possibly padded) output stride. */
+        VkDeviceSize copy_size;
         VkDeviceSize new_stride;
     } map[NV2A_VERTEXSHADER_ATTRIBUTES];
 } VertexBufferRemap;
@@ -3337,7 +3339,15 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
 
         bool offset_valid =
             (r->vertex_attribute_offsets[attr_id] % element_size == 0);
-        bool stride_valid = (desc->stride % element_size == 0);
+        /*
+         * Besides the element-size multiple every backend needs, Metal
+         * (MoltenVK, via VK_KHR_portability_subset) rejects a vertex
+         * binding whose stride is not a multiple of 4
+         * (VK_ERROR_INITIALIZATION_FAILED: "vertex attribute binding
+         * strides must be aligned to 4 bytes"). Repack those too.
+         */
+        bool stride_valid = (desc->stride % element_size == 0) &&
+                            (desc->stride % 4 == 0);
 
         if (offset_valid && stride_valid) {
             continue;
@@ -3346,7 +3356,10 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
         remap.attributes |= 1 << attr_id;
         remap.map[attr_id].offset = ROUND_UP(output_offset, element_size);
         remap.map[attr_id].old_stride = desc->stride;
-        remap.map[attr_id].new_stride = element_size * element_count;
+        remap.map[attr_id].copy_size = element_size * element_count;
+        /* Pad the packed stride out to Metal's 4-byte requirement. */
+        remap.map[attr_id].new_stride =
+            ROUND_UP(remap.map[attr_id].copy_size, 4);
 
         // fprintf(stderr,
         //         "attr %02d remapped: "
@@ -3383,12 +3396,12 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
  * small-size path per vertex (the 2-16 bytes of a remapped attribute).
  */
 static inline QEMU_ALWAYS_INLINE void
-remap_copy_fixed(uint8_t *out, const uint8_t *in, size_t n, size_t old_stride,
-                 uint32_t num)
+remap_copy_fixed(uint8_t *out, const uint8_t *in, size_t n, size_t new_stride,
+                 size_t old_stride, uint32_t num)
 {
     for (uint32_t v = 0; v < num; v++) {
         memcpy(out, in, n);
-        out += n;
+        out += new_stride;
         in += old_stride;
     }
 }
@@ -3431,36 +3444,41 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
 
         uint8_t *out_ptr = buffer->mapped + attr_buffer_offset;
         uint8_t *in_ptr = d->vram_ptr + r->vertex_attribute_offsets[attr_id];
+        VkDeviceSize copy_size = remap.map[attr_id].copy_size;
         VkDeviceSize new_stride = remap.map[attr_id].new_stride;
         VkDeviceSize old_stride = remap.map[attr_id].old_stride;
 
         if (new_stride == old_stride) {
             memcpy(out_ptr, in_ptr, new_stride * num_vertices);
         } else {
-            switch (new_stride) {
+            switch (copy_size) {
             case 2:
-                remap_copy_fixed(out_ptr, in_ptr, 2, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 2, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 4:
-                remap_copy_fixed(out_ptr, in_ptr, 4, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 4, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 6:
-                remap_copy_fixed(out_ptr, in_ptr, 6, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 6, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 8:
-                remap_copy_fixed(out_ptr, in_ptr, 8, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 8, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 12:
-                remap_copy_fixed(out_ptr, in_ptr, 12, old_stride,
+                remap_copy_fixed(out_ptr, in_ptr, 12, new_stride, old_stride,
                                  num_vertices);
                 break;
             case 16:
-                remap_copy_fixed(out_ptr, in_ptr, 16, old_stride,
+                remap_copy_fixed(out_ptr, in_ptr, 16, new_stride, old_stride,
                                  num_vertices);
                 break;
             default:
-                remap_copy_fixed(out_ptr, in_ptr, new_stride, old_stride,
-                                 num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, copy_size, new_stride,
+                                 old_stride, num_vertices);
                 break;
             }
         }
