@@ -1760,7 +1760,15 @@ void xemu_input_update_rumble(ControllerState *state)
         return;
     }
 
-    SDL_RumbleGamepad(state->sdl_gamepad, state->rumble_l, state->rumble_r, 250);
+    float strength = g_config.input.rumble_strength;
+    if (strength < 0.0f) {
+        strength = 0.0f;
+    } else if (strength > 1.0f) {
+        strength = 1.0f;
+    }
+    SDL_RumbleGamepad(state->sdl_gamepad,
+                      (uint16_t)(state->rumble_l * strength),
+                      (uint16_t)(state->rumble_r * strength), 250);
     state->last_rumble_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 }
 

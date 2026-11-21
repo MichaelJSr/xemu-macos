@@ -604,6 +604,10 @@ void MainMenuInputView::Draw()
            "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
     Slider("Right stick dead zone", &g_config.input.deadzone_right,
            "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
+
+    SectionTitle("Rumble");
+    Slider("Rumble strength", &g_config.input.rumble_strength,
+           "Scale controller vibration (0 = off, 1 = full strength)");
 }
 
 void MainMenuInputView::Hide()

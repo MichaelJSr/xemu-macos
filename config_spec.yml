@@ -65,6 +65,11 @@ input:
   deadzone_right:
     type: number
     default: 0.0
+  # Multiplier applied to every rumble command (0 = off, 1 = full
+  # strength). The per-controller 'enable_rumble' switch still gates it.
+  rumble_strength:
+    type: number
+    default: 1.0
   # Deprecated: use 'enable_rumble' on the controller mapping settings instead
   allow_vibration:
     type: bool
