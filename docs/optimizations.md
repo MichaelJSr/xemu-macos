@@ -2691,6 +2691,25 @@ x86_64 host (Windows, Linux, Intel macOS).
   0 violations; det offscreen RAM and screendumps equal to base. l256_120
   probe Minsns/frame −2.06% (4/4), Mcycles −1.01% (3/4); heavy-f1 flat.
 
+- **NV09F surface blits copy on the GPU (2026-11-18).** An NV09F
+  SRCCOPY between two surfaces went through the CPU: the source surface
+  was downloaded from its `VkImage` to RAM, the rows were `memmove`'d
+  into the destination's RAM, and the destination was uploaded again.
+  The hardware copies VRAM to VRAM, and both surfaces already live in
+  `VkImage`s, so a `vkCmdCopyImage` between their transfer layouts is
+  enough. The fast path runs only when the whole blit stays inside two
+  distinct, unswizzled colour surfaces of one format and of the blit's
+  pixel size, at the pitches the surfaces were made with, and fits the
+  GPU tile limit; the Y8 boot-video blit, X8 formats whose alpha the
+  CPU path patches, and swizzled or uncached surfaces take the existing
+  path unchanged. Pending CPU writes are uploaded first, and the
+  pending zpass reports the blit can clobber are delivered first. Gated
+  by `perf.optimizations` (Settings > General), on by default and read
+  at start. No `NV09F` blit appeared in 240 s on the `h.iso` boot (its
+  one blit is the Y8 boot video, `op=3`, refused for the format
+  mismatch), so the change is neutral there; it serves titles that
+  SRCCOPY between colour surfaces.
+
 ### MetalFX + presentation
 
 - **Metal-native presentation backend** (macOS). New
