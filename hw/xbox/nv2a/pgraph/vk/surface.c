@@ -36,6 +36,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+
 const int num_invalid_surfaces_to_keep = 128;
 const int max_surface_frame_time_delta = 5;
 
@@ -332,6 +336,139 @@ static void surface_unpack_rgba8(const SurfaceBinding *surface, uint8_t *pixel,
     }
 }
 
+/*
+ * The conversion loops are the whole cost of a converted-surface upload or
+ * download, and clang does not vectorize them (the per-pixel clamp becomes
+ * a branchy cmov chain). Do it by hand for the two packed layouts, eight
+ * pixels at a time, and fall back to the scalar helpers above for the tail
+ * and for anything the SIMD path does not cover. The helpers are written
+ * with SSE2 intrinsics (emmintrin.h) rather than the SSE4.1 ones the host
+ * also has, so the source stays valid if the build ever tightens its
+ * baseline; the compiler still picks the wider instruction where it helps
+ * (the clamp comes out as PMINSD, and the narrow as PACKSSDW).
+ */
+#ifdef __SSE2__
+static bool surface_format_simd(const SurfaceBinding *surface)
+{
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Per-lane min of non-negative 32-bit values (PMINUD is SSE4.1). */
+static inline __m128i surface_min_epi32(__m128i v, __m128i hi)
+{
+    __m128i gt = _mm_cmpgt_epi32(v, hi);
+    return _mm_or_si128(_mm_andnot_si128(gt, v), _mm_and_si128(gt, hi));
+}
+
+/* Narrow eight 32-bit lanes (0..65535) to sixteen 16-bit ones. PACKUSDW
+ * is SSE4.1 and PACKSSDW saturates, so bias the values into the signed
+ * range, pack exactly, then undo the bias. */
+static inline __m128i surface_narrow_epi32(__m128i lo, __m128i hi)
+{
+    __m128i bias = _mm_set1_epi32(0x8000);
+    __m128i p = _mm_packs_epi32(_mm_sub_epi32(lo, bias),
+                                _mm_sub_epi32(hi, bias));
+    return _mm_add_epi16(p, _mm_set1_epi16((short)0x8000));
+}
+
+static inline __m128i surface_pack8_rgba8(const SurfaceBinding *surface,
+                                          __m128i vlo, __m128i vhi,
+                                          __m128i d5v, __m128i d6v)
+{
+    const __m128i maskff = _mm_set1_epi32(0xFF);
+    const __m128i sat255 = _mm_set1_epi32(255);
+    __m128i rlo = _mm_and_si128(vlo, maskff);
+    __m128i glo = _mm_and_si128(_mm_srli_epi32(vlo, 8), maskff);
+    __m128i blo = _mm_and_si128(_mm_srli_epi32(vlo, 16), maskff);
+    __m128i rhi = _mm_and_si128(vhi, maskff);
+    __m128i ghi = _mm_and_si128(_mm_srli_epi32(vhi, 8), maskff);
+    __m128i bhi = _mm_and_si128(_mm_srli_epi32(vhi, 16), maskff);
+    __m128i outlo, outhi;
+
+    rlo = surface_min_epi32(_mm_add_epi32(rlo, d5v), sat255);
+    blo = surface_min_epi32(_mm_add_epi32(blo, d5v), sat255);
+    rhi = surface_min_epi32(_mm_add_epi32(rhi, d5v), sat255);
+    bhi = surface_min_epi32(_mm_add_epi32(bhi, d5v), sat255);
+
+    if (surface->shape.color_format ==
+        NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5) {
+        glo = surface_min_epi32(_mm_add_epi32(glo, d6v), sat255);
+        ghi = surface_min_epi32(_mm_add_epi32(ghi, d6v), sat255);
+        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 11);
+        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 11);
+        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 2), 5);
+        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 2), 5);
+        blo = _mm_srli_epi32(blo, 3);
+        bhi = _mm_srli_epi32(bhi, 3);
+    } else {
+        /* A1R5G5B5: the 1-bit alpha is bit 7 of the source byte. */
+        __m128i alo =
+            _mm_and_si128(_mm_srli_epi32(vlo, 24), _mm_set1_epi32(0x80));
+        __m128i ahi =
+            _mm_and_si128(_mm_srli_epi32(vhi, 24), _mm_set1_epi32(0x80));
+        glo = surface_min_epi32(_mm_add_epi32(glo, d5v), sat255);
+        ghi = surface_min_epi32(_mm_add_epi32(ghi, d5v), sat255);
+        alo = _mm_slli_epi32(alo, 8);
+        ahi = _mm_slli_epi32(ahi, 8);
+        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 10);
+        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 10);
+        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 3), 5);
+        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 3), 5);
+        blo = _mm_srli_epi32(blo, 3);
+        bhi = _mm_srli_epi32(bhi, 3);
+        rlo = _mm_or_si128(rlo, alo);
+        rhi = _mm_or_si128(rhi, ahi);
+    }
+
+    outlo = _mm_or_si128(_mm_or_si128(rlo, glo), blo);
+    outhi = _mm_or_si128(_mm_or_si128(rhi, ghi), bhi);
+    return surface_narrow_epi32(outlo, outhi);
+}
+
+static inline void surface_unpack8_rgba8(const SurfaceBinding *surface,
+                                         __m128i p, __m128i *out_lo,
+                                         __m128i *out_hi)
+{
+    const __m128i mask31 = _mm_set1_epi16(0x1F);
+    const __m128i ff = _mm_set1_epi16(0xFF);
+    __m128i r5, g, b5, a8, r8, g8, b8, rg, ba;
+
+    if (surface->shape.color_format ==
+        NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5) {
+        r5 = _mm_and_si128(_mm_srli_epi16(p, 11), mask31);
+        g = _mm_and_si128(_mm_srli_epi16(p, 5), _mm_set1_epi16(0x3F));
+        b5 = _mm_and_si128(p, mask31);
+        a8 = ff;
+        r8 = _mm_or_si128(_mm_slli_epi16(r5, 3), _mm_srli_epi16(r5, 2));
+        g8 = _mm_or_si128(_mm_slli_epi16(g, 2), _mm_srli_epi16(g, 4));
+    } else {
+        /* A1R5G5B5: bit 15 expands to a 0x00/0xFF alpha byte. */
+        r5 = _mm_and_si128(_mm_srli_epi16(p, 10), mask31);
+        g = _mm_and_si128(_mm_srli_epi16(p, 5), mask31);
+        b5 = _mm_and_si128(p, mask31);
+        a8 = _mm_and_si128(
+            _mm_cmpeq_epi16(
+                _mm_and_si128(_mm_srli_epi16(p, 15), _mm_set1_epi16(1)),
+                _mm_set1_epi16(1)),
+            ff);
+        r8 = _mm_or_si128(_mm_slli_epi16(r5, 3), _mm_srli_epi16(r5, 2));
+        g8 = _mm_or_si128(_mm_slli_epi16(g, 3), _mm_srli_epi16(g, 2));
+    }
+    b8 = _mm_or_si128(_mm_slli_epi16(b5, 3), _mm_srli_epi16(b5, 2));
+    rg = _mm_or_si128(r8, _mm_slli_epi16(g8, 8));
+    ba = _mm_or_si128(b8, _mm_slli_epi16(a8, 8));
+    *out_lo = _mm_unpacklo_epi16(rg, ba);
+    *out_hi = _mm_unpackhi_epi16(rg, ba);
+}
+#endif /* __SSE2__ */
+
 /* RGBA8 (host, tightly packed) -> guest packed 16-bit at dst_stride */
 static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
                                             uint8_t *dst, int dst_stride,
@@ -339,11 +476,40 @@ static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
                                             unsigned int width,
                                             unsigned int height, bool dither)
 {
+    bool simd = false;
+#ifdef __SSE2__
+    simd = surface_format_simd(surface);
+#endif
+
     for (unsigned int y = 0; y < height; y++) {
         uint8_t *dst_row = dst + (size_t)y * dst_stride;
         const uint8_t *src_row = src + (size_t)y * src_stride;
+        unsigned int x = 0;
 
-        for (unsigned int x = 0; x < width; x++) {
+        if (simd) {
+#ifdef __SSE2__
+            for (; x + 8 <= width; x += 8) {
+                __m128i d5v = _mm_setzero_si128();
+                __m128i d6v = _mm_setzero_si128();
+                if (dither) {
+                    const uint8_t *d = surface_dither_matrix[y & 3];
+                    d5v = _mm_setr_epi32(d[0] >> 1, d[1] >> 1, d[2] >> 1,
+                                         d[3] >> 1);
+                    d6v = _mm_setr_epi32(d[0] >> 2, d[1] >> 2, d[2] >> 2,
+                                         d[3] >> 2);
+                }
+                __m128i vlo =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 4));
+                __m128i vhi =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 4 + 16));
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 2),
+                                 surface_pack8_rgba8(surface, vlo, vhi, d5v,
+                                                     d6v));
+            }
+#endif
+        }
+
+        for (; x < width; x++) {
             ((uint16_t *)dst_row)[x] =
                 surface_pack_rgba8(surface, src_row + x * 4, x, y, dither);
         }
@@ -357,11 +523,31 @@ static void surface_convert_to_host_rgba8(const SurfaceBinding *surface,
                                           unsigned int width,
                                           unsigned int height)
 {
+    bool simd = false;
+#ifdef __SSE2__
+    simd = surface_format_simd(surface);
+#endif
+
     for (unsigned int y = 0; y < height; y++) {
         uint8_t *dst_row = dst + (size_t)y * dst_stride;
         const uint8_t *src_row = src + (size_t)y * src_stride;
+        unsigned int x = 0;
 
-        for (unsigned int x = 0; x < width; x++) {
+        if (simd) {
+#ifdef __SSE2__
+            for (; x + 8 <= width; x += 8) {
+                __m128i p =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 2));
+                __m128i lo, hi;
+                surface_unpack8_rgba8(surface, p, &lo, &hi);
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 4), lo);
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 4 + 16),
+                                 hi);
+            }
+#endif
+        }
+
+        for (; x < width; x++) {
             surface_unpack_rgba8(surface, dst_row + x * 4,
                                  ((const uint16_t *)src_row)[x]);
         }
