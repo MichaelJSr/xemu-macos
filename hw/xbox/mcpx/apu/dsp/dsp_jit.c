@@ -58,6 +58,13 @@ static uint32_t jit_dma_mem_read(void *opaque, int space, uint32_t addr)
                                 (Dsp56300MemSpace)space, addr);
 }
 
+static void jit_dma_mem_read_run(void *opaque, int space, uint32_t addr,
+                                 uint32_t *out, uint32_t count)
+{
+    dsp56300_read_memory_run(((JitBackend *)opaque)->jit,
+                             (Dsp56300MemSpace)space, addr, out, count);
+}
+
 static void jit_dma_mem_write(void *opaque, int space, uint32_t addr,
                               uint32_t value)
 {
@@ -427,6 +434,7 @@ void dsp_jit_init(DSPState *dsp)
 
     dsp->dma.mem_opaque = be;
     dsp->dma.mem_read = jit_dma_mem_read;
+    dsp->dma.mem_read_run = jit_dma_mem_read_run;
     dsp->dma.mem_write = jit_dma_mem_write;
     dsp->dma.mem_span = jit_dma_mem_span;
 }

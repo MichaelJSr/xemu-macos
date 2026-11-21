@@ -110,10 +110,23 @@ static uint32_t *dma_span(DSPDMAState *s, int space, uint32_t addr,
     return s->mem_span ? s->mem_span(s->mem_opaque, space, addr, count) : NULL;
 }
 
-static inline uint32_t dma_mem_read(DSPDMAState *s, const uint32_t *span,
-                                    int space, uint32_t addr, uint32_t i)
+/*
+ * A run of words with no span still goes out through the backend. The DMA
+ * descriptor chain in particular sits in P RAM, which never has a span
+ * (writes there must mark the JIT's dirty bitmap), so a block header costs
+ * seven backend calls; ask the backend for the whole run in one call when
+ * it offers the batch hook.
+ */
+static void dma_mem_read_run(DSPDMAState *s, int space, uint32_t addr,
+                             uint32_t *out, uint32_t count)
 {
-    return span ? span[i] : s->mem_read(s->mem_opaque, space, addr + i);
+    if (s->mem_read_run) {
+        s->mem_read_run(s->mem_opaque, space, addr, out, count);
+        return;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        out[i] = s->mem_read(s->mem_opaque, space, addr + i);
+    }
 }
 
 static void dsp_dma_run(DSPDMAState *s)
@@ -145,14 +158,19 @@ static void dsp_dma_run(DSPDMAState *s)
         }
 
         const uint32_t *blk = dma_span(s, block_space, block_addr, 7);
-        uint32_t next_block = dma_mem_read(s, blk, block_space, block_addr, 0);
-        uint32_t control = dma_mem_read(s, blk, block_space, block_addr, 1);
-        uint32_t count = dma_mem_read(s, blk, block_space, block_addr, 2);
+        uint32_t hdr[7];
+        if (!blk) {
+            dma_mem_read_run(s, block_space, block_addr, hdr, ARRAY_SIZE(hdr));
+            blk = hdr;
+        }
+        uint32_t next_block = blk[0];
+        uint32_t control = blk[1];
+        uint32_t count = blk[2];
 
-        uint32_t dsp_offset = dma_mem_read(s, blk, block_space, block_addr, 3);
-        uint32_t scratch_offset = dma_mem_read(s, blk, block_space, block_addr, 4);
-        uint32_t scratch_base = dma_mem_read(s, blk, block_space, block_addr, 5);
-        uint32_t scratch_size = dma_mem_read(s, blk, block_space, block_addr, 6)+1;
+        uint32_t dsp_offset = blk[3];
+        uint32_t scratch_offset = blk[4];
+        uint32_t scratch_base = blk[5];
+        uint32_t scratch_size = blk[6]+1;
 
         s->next_block = next_block;
         if (s->next_block & NODE_POINTER_EOL) {
