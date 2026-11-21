@@ -5,8 +5,9 @@
 
 ## Overview
 
-Experimental fork of [xemu](https://xemu.app), the QEMU-based Xbox emulator,
-with macOS-specific graphics work on top of the full upstream history.
+This is a fork of [MichaelJSr/xemu-macos](https://github.com/MichaelJSr/xemu-macos),
+the macOS port of [xemu](https://xemu.app), the QEMU-based Xbox emulator.
+It preserves that upstream history and adds macOS graphics work.
 Targets: macOS `x86_64` and `arm64`. Other platforms are untested.
 
 ## Highlights
@@ -47,4 +48,5 @@ metadata is unchanged.
 
 ## Credits
 
-Upstream xemu and QEMU contributors.
+Fork of [MichaelJSr/xemu-macos](https://github.com/MichaelJSr/xemu-macos);
+thanks to its author and to all upstream xemu and QEMU contributors.
