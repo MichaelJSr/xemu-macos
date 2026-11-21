@@ -1,55 +1,92 @@
 # xemu macOS fork
 
+> [!WARNING]
 > THIS IS ONLY FOR MACOS X86_64 AND ARM AND ITS HIGLY EXPERIMNETAL. IDK IF I WILL MAKE ANY WINDOWNS OR LINUX VERSION OR IDK IF IT COMPILES ON OTHER PLATFORMS
 
-## What this is
+---
 
-A fork of [xemu](https://xemu.app), the QEMU-based Xbox emulator, with
-macOS-specific graphics work. The upstream QEMU/xemu history is preserved;
-the changes in this fork are on top of it.
+## Overview
 
-The target platforms are macOS on Intel (x86_64) and Apple Silicon (arm64).
+This is an experimental fork of [xemu](https://xemu.app), the QEMU-based Xbox
+emulator. It contains macOS-specific graphics work on top of the upstream
+QEMU/xemu history, which is preserved in full.
 
-## What is different here
+| | |
+| --- | --- |
+| **Base** | upstream xemu / QEMU |
+| **Targets** | macOS `x86_64` and `arm64` |
+| **Status** | highly experimental |
+| **Other platforms** | untested, not planned, no guarantees |
 
-- Vulkan renderer on macOS through MoltenVK, with Metal/MetalFX integration.
-- Asynchronous pipeline compilation on first encounter of a draw state.
-- SPIR-V cache blobs written on a background thread.
-- MetalFX completion waits that do not spin.
-- Fractional render scale below native resolution.
-- assorted macOS build and packaging fixes.
+---
 
-## What is NOT included
+## Highlights
 
-For legal and practical reasons this repository does not contain:
+| Area | Change |
+| --- | --- |
+| Renderer | Vulkan on macOS via MoltenVK, with Metal/MetalFX integration |
+| Pipelines | asynchronous compilation on first encounter of a draw state |
+| SPIR-V cache | cache blobs written on a background thread |
+| Frame pacing | MetalFX completion waits that do not spin |
+| Display | fractional render scale below native resolution |
+| Build | assorted macOS build and packaging fixes |
 
-- Xbox BIOS/ROM dumps (`mcpx_1.0.bin`, `Complex_4627.bin`, …)
-- EEPROM images (`eeprom.bin`)
-- Xbox HDD images (`xbox_hdd.qcow2`)
-- game ISOs or other game images
-- proprietary binary libraries (MoltenVK, KosmicKrisp) downloaded by `build.sh`
+---
 
-You must supply those yourself, from your own legally owned copies. The
-`pc-bios/*.bin`, `*.rom` and `*.img` files already tracked in the tree are
-upstream QEMU blobs with their own licenses, not Xbox ROMs.
+## What is not included
 
-No PS2 controller driver/configuration work is part of this fork. The
-`hw/input/ps2.c`, `ps2.h`, `lasips2.c` and `mps2*` files in the tree are
-upstream QEMU device emulation, not a custom PS2 controller driver.
+For legal and practical reasons, the following are **not** part of this
+repository and must be supplied manually from your own legally owned copies:
+
+- Xbox BIOS/ROM dumps — `mcpx_1.0.bin`, `Complex_4627.bin`, …
+- EEPROM images — `eeprom.bin`
+- Xbox HDD images — `xbox_hdd.qcow2`
+- Game ISOs or other game images
+- Proprietary binary libraries — MoltenVK, KosmicKrisp — downloaded by `build.sh`
+
+The `pc-bios/*.bin`, `*.rom` and `*.img` files already tracked in the tree are
+upstream QEMU blobs with their own licenses, **not** Xbox ROMs.
+
+No PS2 controller driver or configuration work is included. Files such as
+`hw/input/ps2.c`, `ps2.h`, `lasips2.c` and `mps2*` are upstream QEMU device
+emulation, not a custom PS2 controller driver.
+
+---
 
 ## Building from source
 
-1. Install the Xcode Command Line Tools, Python 3, Meson, Ninja and pkg-config.
-2. Run `./build.sh` to download the pinned third-party macOS libraries into
-   `macos-libs/`. They are intentionally not tracked by Git.
-3. Initialise the submodules: `git submodule update --init --recursive`.
-4. Configure a build directory with Meson (see `docs/RELEASING-macos.md` for the
-   exact flags used by the validated build), then compile with Ninja.
-5. Package with `./build.sh package` if you want the `.app` bundle.
+Requirements: Xcode Command Line Tools, Python 3, Meson, Ninja, pkg-config.
+
+```sh
+# 1. Get the source and its submodules
+git clone <this-repository-url> xemu-fork
+cd xemu-fork
+git submodule update --init --recursive
+
+# 2. Download the pinned third-party macOS libraries (not tracked by Git)
+./build.sh
+
+# 3. Configure and build (see docs/RELEASING-macos.md for the exact flags
+#    used by the validated build)
+meson setup build -Dcocoa=disabled -Dauto_features=disabled -Ddocs=disabled
+ninja -C build
+
+# 4. Optional: produce the .app bundle
+./build.sh package
+```
+
+---
 
 ## Privacy
 
-The commits authored for this fork use the neutral identity
+Commits authored for this fork use the neutral identity
 `xemu fork <noreply@users.noreply.github.com>`. No personal e-mail addresses,
 home-directory paths, gamepad IDs or local configuration files are included.
 Upstream QEMU commit metadata is preserved unchanged.
+
+---
+
+## Credits
+
+All upstream xemu and QEMU contributors. The macOS Vulkan/Metal changes in this
+fork are the work of this fork's authors.
