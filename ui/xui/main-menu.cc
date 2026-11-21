@@ -598,6 +598,12 @@ void MainMenuInputView::Draw()
     Toggle("Background controller input capture",
            &g_config.input.background_input_capture,
            "Capture even if window is unfocused (requires restart)");
+
+    SectionTitle("Analog Sticks");
+    Slider("Left stick dead zone", &g_config.input.deadzone_left,
+           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
+    Slider("Right stick dead zone", &g_config.input.deadzone_right,
+           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
 }
 
 void MainMenuInputView::Hide()
