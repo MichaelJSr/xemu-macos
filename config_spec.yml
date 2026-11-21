@@ -450,6 +450,13 @@ perf:
   cache_shaders:
     type: bool
     default: true
+  # GPU boost: renderer-side fast paths that keep work the GPU can do in
+  # VRAM off the CPU. Currently the NV09F surface blit, which becomes a
+  # VRAM-to-VRAM image copy instead of a download, memmove and upload.
+  # Read once at start; Settings > General.
+  optimizations:
+    type: bool
+    default: true
 
 # Endpoints for a tool that reads the running game (ui/xemu-automation.c),
 # applied only to the player's own launch: the SDL pref dir's xemu.toml,

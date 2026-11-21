@@ -380,6 +380,11 @@ bool pfifo_in_inline_run(void);
 
 void pgraph_renderer_register(const PGRAPHRenderer *renderer);
 
+/* GPU boost (perf.optimizations), read once at start: lets the renderer
+ * take fast paths that keep GPU work in VRAM instead of round-tripping it
+ * through the CPU. Off, those paths fall back to the stock behaviour. */
+bool pgraph_gpu_boost(void);
+
 // FIXME: Move from here
 
 extern NV2AState *g_nv2a;

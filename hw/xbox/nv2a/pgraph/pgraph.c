@@ -277,6 +277,17 @@ void pgraph_renderer_register(const PGRAPHRenderer *renderer)
     renderers[renderer->type] = renderer;
 }
 
+bool pgraph_gpu_boost(void)
+{
+    /* Read once: the Settings toggle takes effect at the next start, so a
+     * path chosen mid-frame can never disagree with itself. */
+    static int on = -1;
+    if (on < 0) {
+        on = g_config.perf.optimizations;
+    }
+    return on;
+}
+
 void pgraph_init(NV2AState *d)
 {
     g_nv2a = d;
