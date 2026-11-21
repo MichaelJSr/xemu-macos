@@ -248,20 +248,48 @@ static bool surface_host_format_converted(const SurfaceBinding *surface)
            surface->host_fmt.host_bytes_per_pixel != surface->fmt.bytes_per_pixel;
 }
 
+/*
+ * 4x4 ordered dither matrix (Bayer). The Xbox GPU dithers color writes
+ * to the destination format when NV_PGRAPH_CONTROL_0_DITHERENABLE is set;
+ * the OpenGL renderer honours that with glEnable(GL_DITHER). Vulkan hosts
+ * the packed 16-bit formats as RGBA8 and quantizes only here, on download,
+ * so it has to reproduce the dither itself, or the result bands
+ * differently from GL (and from hardware). The exact matrix is
+ * implementation-defined; this is the classic 4x4 one.
+ */
+static const uint8_t surface_dither_matrix[4][4] = {
+    {  0,  8,  2, 10 },
+    { 12,  4, 14,  6 },
+    {  3, 11,  1,  9 },
+    { 15,  7, 13,  5 },
+};
+
 static uint16_t surface_pack_rgba8(const SurfaceBinding *surface,
-                                   const uint8_t *pixel)
+                                   const uint8_t *pixel,
+                                   unsigned int x, unsigned int y, bool dither)
 {
     uint8_t r = pixel[0], g = pixel[1], b = pixel[2], a = pixel[3];
+
+    /*
+     * Dither offsets sit one quantization step wide, centred on
+     * round-to-nearest: 0..7 before the 5-bit >>3, 0..3 before the
+     * 6-bit >>2. With dither off d is 0 and the shift is the plain
+     * truncation the conversion always used.
+     */
+    unsigned int d = dither ? surface_dither_matrix[y & 3][x & 3] : 0;
+    unsigned int d5 = d >> 1, d6 = d >> 2;
 
     switch (surface->shape.color_format) {
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
-        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0] */
-        return ((a & 0x80) << 8) | ((r & 0xF8) << 7) | ((g & 0xF8) << 2) |
-               (b >> 3);
+        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0]. Dither the 5-bit
+         * channels; the 1-bit alpha has no room for it. */
+        return ((a & 0x80) << 8) | (MIN(31, (r + d5) >> 3) << 10) |
+               (MIN(31, (g + d5) >> 3) << 5) | MIN(31, (b + d5) >> 3);
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
         /* R5G6B5: R[15:11], G[10:5], B[4:0] */
-        return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        return (MIN(31, (r + d5) >> 3) << 11) | (MIN(63, (g + d6) >> 2) << 5) |
+               MIN(31, (b + d5) >> 3);
     default:
         nv2a_vk_assert(!"unconverted surface format");
         return 0;
@@ -309,7 +337,7 @@ static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
                                             uint8_t *dst, int dst_stride,
                                             const uint8_t *src, int src_stride,
                                             unsigned int width,
-                                            unsigned int height)
+                                            unsigned int height, bool dither)
 {
     for (unsigned int y = 0; y < height; y++) {
         uint8_t *dst_row = dst + (size_t)y * dst_stride;
@@ -317,7 +345,7 @@ static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
 
         for (unsigned int x = 0; x < width; x++) {
             ((uint16_t *)dst_row)[x] =
-                surface_pack_rgba8(surface, src_row + x * 4);
+                surface_pack_rgba8(surface, src_row + x * 4, x, y, dither);
         }
     }
 }
@@ -712,11 +740,20 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     }
 
     if (converted) {
+        /*
+         * Dither at the pack, where the host RGBA8 image is quantized to
+         * the guest 16-bit format, mirroring glEnable(GL_DITHER). Read the
+         * register here rather than at draw time: the download is when the
+         * quantization happens, and games set DITHERENABLE once.
+         */
+        bool dither =
+            pgraph_reg_r(&d->pgraph, NV_PGRAPH_CONTROL_0) &
+            NV_PGRAPH_CONTROL_0_DITHERENABLE;
         surface_convert_from_host_rgba8(
             surface, gl_read_buf, surface->pitch,
             r->storage_buffers[BUFFER_STAGING_DST].mapped,
             surface->width * surface->host_fmt.host_bytes_per_pixel,
-            surface->width, surface->height);
+            surface->width, surface->height, dither);
     } else {
         memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
                      surface->pitch,
