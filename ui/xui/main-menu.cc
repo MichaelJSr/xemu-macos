@@ -953,6 +953,8 @@ void MainMenuDisplayView::Draw()
            "Display notifications in upper-right corner");
     Toggle("Hide mouse cursor", &g_config.display.ui.hide_cursor,
            "Hide the mouse cursor when it is not moving");
+    Toggle("Show FPS counter", &g_config.display.ui.show_fps,
+           "Draw a frame-rate readout over the top-left corner of the view");
 
     int ui_scale_idx;
     if (g_config.display.ui.auto_scale) {

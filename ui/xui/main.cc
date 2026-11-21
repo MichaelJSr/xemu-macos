@@ -209,6 +209,8 @@ void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip,
     g_tex_wait_value = wait_value;
 }
 
+static void DrawPerformanceOverlay();
+
 void xemu_hud_update(void)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -341,9 +343,37 @@ void xemu_hud_update(void)
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();
+    if (!first_boot_window.is_open) DrawPerformanceOverlay();
 
     // static bool show_demo = true;
     // if (show_demo) ImGui::ShowDemoWindow(&show_demo);
+}
+
+/*
+ * Optional frame-rate readout (Settings > Display). Drawn as a small,
+ * input-transparent window in the top-left corner, below the menu bar so
+ * the two never overlap.
+ */
+static void DrawPerformanceOverlay()
+{
+    if (!g_config.display.ui.show_fps) {
+        return;
+    }
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoInputs;
+
+    ImVec2 offset = g_viewport_mgr.Scale(ImVec2(10.0f, 10.0f));
+    ImGui::SetNextWindowPos(ImVec2(offset.x, offset.y + g_main_menu_height),
+                            ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.45f);
+    if (ImGui::Begin("###xemu_performance_overlay", nullptr, flags)) {
+        ImGui::Text("%u FPS", g_nv2a_stats.increment_fps);
+    }
+    ImGui::End();
 }
 
 void xemu_hud_render()

@@ -304,6 +304,10 @@ display:
     pause_on_focus_loss:
       type: bool
       default: false
+    # Draw a small frame-rate readout over the top-left of the viewport.
+    show_fps:
+      type: bool
+      default: false
     fit:
       type: enum
       values: [center, scale, stretch]
