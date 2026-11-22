@@ -1,6 +1,7 @@
-# xemu-macos: Optimized Xbox Emulator for Apple Silicon
+#Better-xemu4macOS: Optimized Xbox Emulator for Apple Silicon (And Intel)
+NOTE: i have tested this fork only on MacOS intel i haven't tested it on Linux/Windows or Apple silicon
 
-Fork of [xemu](https://github.com/xemu-project/xemu) tuned for Apple Silicon
+Fork of [xemu](https://github.com/xemu-project/xemu) tuned for Apple Silicon (And intel)
 (M1/M2+) on macOS 14+ (best on macOS 26 Tahoe). Adds Vulkan on macOS
 (MoltenVK, with Mesa KosmicKrisp as an opt-in on macOS 26; unsupported
 upstream), an inline ARM64 x87 FPU, full DSP JIT, MetalFX upscaling +
@@ -24,17 +25,17 @@ frame interpolation, and Accelerate-backed audio.
 ## Quick start
 
 Prerequisites: macOS 14.0+ (macOS 26 for MetalFX + frame interpolation),
-Apple Silicon, Xcode Command Line Tools,
-`brew install pkg-config ninja cmake dylibbundler`,
+Apple Silicon/Intel, Xcode Command Line Tools,
+`brew install pkg-config ninja cmake dylibbundler`, (or MacPorts)
 `pip3 install pyyaml requests`, and network on the first build.
-
+[
 ```bash
-git clone --recurse-submodules https://github.com/MichaelJSr/xemu-macos.git
-cd xemu-macos
+git clone --recurse-submodules https://github.com/Yuri4Darwin/Better-xemu4macOS.git
+cd Better-xemu4macOS
 git submodule update --init --recursive
 ./build.sh
-open dist/xemu.app   # your own interactive launch: it reads your xemu.toml
-```
+open dist/xemu.app
+```]
 
 Clean rebuild: `rm -rf macos-libs macos-pkgs build dist && ./build.sh`.
 Automation never launches xemu this way: agents, benches and test
@@ -42,7 +43,7 @@ harnesses run bundle clones marked `-name xemu-fork-auto`, with
 `XEMU_BASE_PATH` and their own `-config_path` (Headless mode
 (automation), "Automated-run marker").
 
-### Building for Windows
+### Building for Windows (if it works)
 
 The upstream Windows build paths are preserved and CI-tested. All
 portable optimizations (the Vulkan renderer and APU work, the
