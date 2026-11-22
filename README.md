@@ -23,9 +23,7 @@ Targets: macOS `x86_64` and `arm64`. Other platforms are untested.
 
 - Xbox BIOS/ROM dumps, EEPROM images, HDD images and game ISOs — supply your own legally owned copies.
 - Proprietary binaries (MoltenVK, KosmicKrisp) downloaded by `build.sh`, not tracked by Git.
-- Tracked `pc-bios/*.bin`, `*.rom`, `*.img` are upstream QEMU blobs, not Xbox ROMs.
-- No PS2 controller driver: `ps2.c`, `lasips2.c`, `mps2*` are upstream QEMU device code.
-
+- 
 ## Build
 
 Needs Xcode Command Line Tools, Python 3, Meson, Ninja and pkg-config.
@@ -40,13 +38,6 @@ ninja -C build
 See `docs/RELEASING-macos.md` for the validated flags; `./build.sh package`
 produces the `.app` bundle.
 
-## Privacy
-
-Fork commits use `xemu fork <noreply@users.noreply.github.com>`. No personal
-e-mails, home paths, gamepad IDs or local config are included. Upstream
-metadata is unchanged.
-
 ## Credits
-
 Fork of [MichaelJSr/xemu-macos](https://github.com/MichaelJSr/xemu-macos);
 thanks to its author and to all upstream xemu and QEMU contributors.
