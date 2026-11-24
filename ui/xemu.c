@@ -2081,7 +2081,14 @@ static void metal_render_frame(struct xemu_console *scon)
      * backend, or before the first publish (startup / post-resize) —
      * `pushed` stays false and the pull path runs exactly as before.
      */
-    bool pushed = nv2a_get_present_frame_pushed(&frame);
+    /*
+     * Once no flip has published for a while (a movie written straight to
+     * the framebuffer or shown through the PVIDEO overlay, a loading
+     * screen), pull a fresh composite instead of re-presenting the last
+     * pushed frame. Push resumes at the next flip.
+     */
+    bool pushed = !nv2a_push_present_stale() &&
+                  nv2a_get_present_frame_pushed(&frame);
     if (!pushed) {
         nv2a_get_present_frame(&frame);
     }

@@ -291,6 +291,7 @@ static void pgraph_vk_flip_stall(NV2AState *d)
             pgraph_vk_render_display(&d->pgraph);
             pgraph_vk_present_schedule_publish(&d->pgraph);
             last_push_publish_ns = now;
+            nv2a_note_push_publish();
         }
     }
 #endif

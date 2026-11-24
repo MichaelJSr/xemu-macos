@@ -176,20 +176,23 @@ const char *yuv_to_rgba_glsl =
     "    uint row = pair_idx / (width / 2u);\n"
     "    uint col = (pair_idx % (width / 2u)) * 2u;\n"
     "    if (row >= height || col >= width) return;\n"
+    /* YUY2 bytes are Y0 U Y1 V, so the little-endian word is
+     * Y0 | U << 8 | Y1 << 16 | V << 24. BT.601 limited range, the same
+     * integer math as convert_yuy2_to_rgb() in pgraph/util.h. */
     "    uint packed = yuv_in[pair_idx];\n"
-    "    float y0 = float((packed >> 8u) & 0xffu);\n"
-    "    float u  = float(packed & 0xffu) - 128.0;\n"
-    "    float y1 = float((packed >> 24u) & 0xffu);\n"
-    "    float v  = float((packed >> 16u) & 0xffu) - 128.0;\n"
-    "    float r0 = clamp(y0 + 1.402 * v, 0.0, 255.0);\n"
-    "    float g0 = clamp(y0 - 0.344 * u - 0.714 * v, 0.0, 255.0);\n"
-    "    float b0 = clamp(y0 + 1.772 * u, 0.0, 255.0);\n"
-    "    float r1 = clamp(y1 + 1.402 * v, 0.0, 255.0);\n"
-    "    float g1 = clamp(y1 - 0.344 * u - 0.714 * v, 0.0, 255.0);\n"
-    "    float b1 = clamp(y1 + 1.772 * u, 0.0, 255.0);\n"
+    "    int c0 = int(packed & 0xffu) - 16;\n"
+    "    int d  = int((packed >> 8u) & 0xffu) - 128;\n"
+    "    int c1 = int((packed >> 16u) & 0xffu) - 16;\n"
+    "    int e  = int((packed >> 24u) & 0xffu) - 128;\n"
+    "    uint r0 = uint(clamp((298 * c0 + 409 * e + 128) >> 8, 0, 255));\n"
+    "    uint g0 = uint(clamp((298 * c0 - 100 * d - 208 * e + 128) >> 8, 0, 255));\n"
+    "    uint b0 = uint(clamp((298 * c0 + 516 * d + 128) >> 8, 0, 255));\n"
+    "    uint r1 = uint(clamp((298 * c1 + 409 * e + 128) >> 8, 0, 255));\n"
+    "    uint g1 = uint(clamp((298 * c1 - 100 * d - 208 * e + 128) >> 8, 0, 255));\n"
+    "    uint b1 = uint(clamp((298 * c1 + 516 * d + 128) >> 8, 0, 255));\n"
     "    uint pixel_idx = row * width + col;\n"
-    "    rgba_out[pixel_idx]     = uint(r0) | (uint(g0) << 8u) | (uint(b0) << 16u) | 0xff000000u;\n"
-    "    rgba_out[pixel_idx + 1u] = uint(r1) | (uint(g1) << 8u) | (uint(b1) << 16u) | 0xff000000u;\n"
+    "    rgba_out[pixel_idx]     = r0 | (g0 << 8u) | (b0 << 16u) | 0xff000000u;\n"
+    "    rgba_out[pixel_idx + 1u] = r1 | (g1 << 8u) | (b1 << 16u) | 0xff000000u;\n"
     "}\n";
 
 const char *pack_d24_unorm_s8_uint_to_z24s8_glsl =

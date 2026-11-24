@@ -638,6 +638,21 @@ bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame)
     return ok;
 }
 
+static int64_t push_publish_last_ns;
+
+void nv2a_note_push_publish(void)
+{
+    qatomic_set(&push_publish_last_ns,
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+}
+
+bool nv2a_push_present_stale(void)
+{
+    int64_t last = qatomic_read(&push_publish_last_ns);
+    return last != 0 &&
+           qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - last > 100 * SCALE_MS;
+}
+
 bool nv2a_get_present_frame_peek(NV2APresentFrame *frame)
 {
     NV2AState *d = g_nv2a;

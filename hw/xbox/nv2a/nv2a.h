@@ -80,6 +80,17 @@ bool nv2a_get_present_frame_pushed(NV2APresentFrame *frame);
  */
 bool nv2a_get_present_frame_peek(NV2APresentFrame *frame);
 
+/*
+ * Push-present staleness. The push ring is only fed at guest flips, so a
+ * title that changes the screen without flipping (movie players writing
+ * the framebuffer with the CPU or driving the PVIDEO overlay) would leave
+ * the UI re-presenting the last pushed frame. nv2a_note_push_publish()
+ * records each publish; nv2a_push_present_stale() is true once no flip has
+ * published for a while, and the UI then pulls a fresh composite instead.
+ */
+void nv2a_note_push_publish(void);
+bool nv2a_push_present_stale(void);
+
 void nv2a_release_framebuffer_surface(void);
 void nv2a_set_surface_scale_factor(float scale);
 float nv2a_get_surface_scale_factor(void);

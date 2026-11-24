@@ -520,6 +520,16 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     create_pvideo_image(pg, state.in_width, state.in_height);
 
+    /*
+     * The YUV conversion below takes a compute descriptor set from the
+     * current flight. Those are only recycled by a finish, and while a
+     * movie plays through the overlay the guest issues no draws or flips
+     * that would finish, so check the limit like the other compute users.
+     */
+    if (pgraph_vk_compute_needs_finish(r)) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+    }
+
     VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
     if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > staging_base) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
@@ -1759,11 +1769,16 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
         "Display Surface %08"HWADDR_PRIx, surface->vram_addr);
     if (disp->pvideo.state.enabled) {
-        if (memcmp(&disp->pvideo.state, &disp->pvideo.last_uploaded_state,
-                   sizeof(PvideoState)) != 0) {
-            upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
-            disp->pvideo.last_uploaded_state = disp->pvideo.state;
-        }
+        /*
+         * Upload the overlay every present, as upstream does. The PVIDEO
+         * registers (base, offset, size, pitch) can stay identical while
+         * the guest decodes each new movie frame into the same buffer
+         * (e.g. Midtown Madness 3's XMV movies), so skipping the upload
+         * when the register state is unchanged froze the overlay on its
+         * first, usually black, frame.
+         */
+        upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
+        disp->pvideo.last_uploaded_state = disp->pvideo.state;
     }
 
     update_descriptor_set(pg, surface);
@@ -2419,9 +2434,15 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     PGRAPHVkDisplayState *disp = &r->display;
-    /* Not under icount: PVIDEO may have changed with draw_time the same. */
+    /*
+     * Not under icount, and not when the displayed image can have changed
+     * without a draw: draw_time only advances on NV2A draws, but a movie
+     * player can write frames straight into the framebuffer with the CPU
+     * (upload_pending) or show them through the PVIDEO overlay.
+     */
+    bool pvideo_on = get_pvideo_state(pg).enabled;
     if (disp->image && surface->draw_time == disp->draw_time &&
-        !icount_enabled()) {
+        !icount_enabled() && !pvideo_on && !surface->upload_pending) {
 #if HAVE_IOSURFACE_SHARING
         /*
          * No new frame.
