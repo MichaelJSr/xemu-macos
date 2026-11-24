@@ -266,6 +266,14 @@ static bool texture_format_needs_data_conversion(int color_format)
     case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_YB8CR8YA8CB8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5:
         return true;
     default:
         return false;
@@ -1763,7 +1771,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             NSPROF_EV_SDOWN_TEXBIND);
     }
 
-    if (surface_to_texture && pg->surface_scale_factor > 1) {
+    if (surface_to_texture && pg->surface_scale_factor != 1.0f) {
         key.scale = pg->surface_scale_factor;
     }
 

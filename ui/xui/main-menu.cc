@@ -50,6 +50,54 @@ extern "C" {
 
 #define DEFAULT_XMU_SIZE 8388608
 
+const char *const kSurfaceScaleItems =
+    "0.25x\0"
+    "0.5x\0"
+    "0.75x\0"
+    "1x\0"
+    "2x\0"
+    "3x\0"
+    "4x\0"
+    "5x\0"
+    "6x\0"
+    "7x\0"
+    "8x\0"
+    "9x\0"
+    "10x\0";
+
+static const float kSurfaceScales[] = {
+    0.25f, 0.5f, 0.75f, 1.0f, 2.0f, 3.0f, 4.0f,
+    5.0f,  6.0f, 7.0f,  8.0f, 9.0f, 10.0f,
+};
+
+float SurfaceScaleFromComboIndex(int index)
+{
+    int count = (int)(sizeof(kSurfaceScales) / sizeof(kSurfaceScales[0]));
+    if (index < 0) {
+        index = 0;
+    }
+    if (index >= count) {
+        index = count - 1;
+    }
+    return kSurfaceScales[index];
+}
+
+int SurfaceScaleToComboIndex(float scale)
+{
+    int count = (int)(sizeof(kSurfaceScales) / sizeof(kSurfaceScales[0]));
+    int best = 0;
+    float best_dist = 0.0f;
+    for (int i = 0; i < count; i++) {
+        float dist = kSurfaceScales[i] > scale ? kSurfaceScales[i] - scale
+                                               : scale - kSurfaceScales[i];
+        if (i == 0 || dist < best_dist) {
+            best_dist = dist;
+            best = i;
+        }
+    }
+    return best;
+}
+
 MainMenuScene g_main_menu;
 
 MainMenuTabView::~MainMenuTabView() {}
@@ -67,6 +115,15 @@ void MainMenuGeneralView::Draw()
 
     Toggle("Cache shaders to disk", &g_config.perf.cache_shaders,
            "Reduce stutter in games by caching previously generated shaders");
+
+    Toggle("GPU optimizations", &g_config.perf.optimizations,
+           "Let the renderer keep GPU work in VRAM instead of round-tripping "
+           "it through the CPU (currently the surface blit; requires restart)");
+
+    Toggle("Async pipeline compilation", &g_config.perf.async_pipeline_compile,
+           "Compile a first-seen draw pipeline on a worker thread and skip "
+           "that draw for the frames until it is ready, keeping a long "
+           "compile off the frame (MoltenVK/KosmicKrisp; requires restart)");
 
     SectionTitle("Miscellaneous");
     Toggle("Skip startup animation", &g_config.general.skip_boot_anim,
@@ -598,6 +655,16 @@ void MainMenuInputView::Draw()
     Toggle("Background controller input capture",
            &g_config.input.background_input_capture,
            "Capture even if window is unfocused (requires restart)");
+
+    SectionTitle("Analog Sticks");
+    Slider("Left stick dead zone", &g_config.input.deadzone_left,
+           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
+    Slider("Right stick dead zone", &g_config.input.deadzone_right,
+           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
+
+    SectionTitle("Rumble");
+    Slider("Rumble strength", &g_config.input.rumble_strength,
+           "Scale controller vibration (0 = off, 1 = full strength)");
 }
 
 void MainMenuInputView::Hide()
@@ -872,20 +939,15 @@ void MainMenuDisplayView::Draw()
         ImGui::EndTooltip();
     }
 #endif
-    int rendering_scale = nv2a_get_surface_scale_factor() - 1;
+    int rendering_scale =
+        SurfaceScaleToComboIndex(nv2a_get_surface_scale_factor());
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
-                     "1x\0"
-                     "2x\0"
-                     "3x\0"
-                     "4x\0"
-                     "5x\0"
-                     "6x\0"
-                     "7x\0"
-                     "8x\0"
-                     "9x\0"
-                     "10x\0",
-                     "Increase surface scaling factor for higher quality")) {
-        nv2a_set_surface_scale_factor(rendering_scale+1);
+                     kSurfaceScaleItems,
+                     "Render at a fraction of the Xbox's resolution "
+                     "(0.25x-0.75x) for a higher frame rate, or above it "
+                     "(2x-10x) for sharper output")) {
+        nv2a_set_surface_scale_factor(
+            SurfaceScaleFromComboIndex(rendering_scale));
     }
 
 #ifdef __APPLE__
@@ -941,6 +1003,10 @@ void MainMenuDisplayView::Draw()
     }
     Toggle("Vertical refresh sync", &g_config.display.window.vsync,
            "Sync to screen vertical refresh to reduce tearing artifacts");
+    Toggle("Pause when window loses focus",
+           &g_config.display.ui.pause_on_focus_loss,
+           "Pause the game when another window takes focus and resume it "
+           "when xemu comes back");
 
     SectionTitle("Interface");
     Toggle("Show main menu bar", &g_config.display.ui.show_menubar,
@@ -949,6 +1015,8 @@ void MainMenuDisplayView::Draw()
            "Display notifications in upper-right corner");
     Toggle("Hide mouse cursor", &g_config.display.ui.hide_cursor,
            "Hide the mouse cursor when it is not moving");
+    Toggle("Show FPS counter", &g_config.display.ui.show_fps,
+           "Draw a frame-rate readout over the top-left corner of the view");
 
     int ui_scale_idx;
     if (g_config.display.ui.auto_scale) {

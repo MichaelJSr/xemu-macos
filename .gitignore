@@ -34,3 +34,26 @@ bench-out*/
 # Claude Code per-clone state (worktrees from EnterWorktree, local settings)
 .claude/worktrees/
 .claude/settings.local.json
+
+# Build outputs and locally downloaded/proprietary macOS dependencies
+/build/
+
+# Xbox BIOS/ROM/EEPROM/HDD/game images and private keys: supply manually.
+# (Tracked upstream QEMU pc-bios blobs are unaffected by these rules.)
+*.bin
+*.rom
+*.img
+*.iso
+*.xiso
+*.chd
+*.qcow2
+*.dylib
+*.framework
+*.key
+*.pem
+/eeprom.bin
+/mcpx_1.0.bin
+/Complex_4627.bin
+
+# Local xemu configuration
+/xemu.toml

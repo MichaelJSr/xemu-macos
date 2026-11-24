@@ -36,6 +36,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+
 const int num_invalid_surfaces_to_keep = 128;
 const int max_surface_frame_time_delta = 5;
 
@@ -139,9 +143,10 @@ static SurfaceBinding *surface_ranges_find_containing(PGRAPHVkState *r,
     return NULL;
 }
 
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
+void pgraph_vk_set_surface_scale_factor(NV2AState *d, float scale)
 {
-    g_config.display.quality.surface_scale = scale < 1 ? 1 : scale;
+    g_config.display.quality.surface_scale =
+        scale < NV2A_SURFACE_SCALE_MIN ? NV2A_SURFACE_SCALE_MIN : scale;
 
     nv2a_pfifo_lock_ext(d);
     qatomic_set(&d->pfifo.halt, true);
@@ -172,15 +177,15 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
-unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d)
+float pgraph_vk_get_surface_scale_factor(NV2AState *d)
 {
     return d->pgraph.surface_scale_factor; // FIXME: Move internal to renderer
 }
 
 void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg)
 {
-    int factor = g_config.display.quality.surface_scale;
-    pg->surface_scale_factor = MAX(factor, 1);
+    float factor = g_config.display.quality.surface_scale;
+    pg->surface_scale_factor = MAX(factor, NV2A_SURFACE_SCALE_MIN);
 
     /* Scale changed underneath the cached scaled dims. */
     if (pg->vk_renderer_state) {
@@ -231,6 +236,322 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
         memcpy(dst_ptr, src_ptr, copy_stride);
         dst_ptr += dst_stride;
         src_ptr += src_stride;
+    }
+}
+
+/*
+ * Converted color surfaces. The guest packs these formats at two bytes
+ * per pixel, but no host VkFormat for them is usable as a render target
+ * on Metal (no packed 16-bit attachment), so the host image is RGBA8
+ * (see kelvin_surface_color_format_vk_map, "Converted"). The
+ * guest-visible bytes stay packed; the helpers below translate at the
+ * upload/download boundary. Only the formats listed there reach them.
+ */
+static bool surface_host_format_converted(const SurfaceBinding *surface)
+{
+    return surface->color &&
+           surface->host_fmt.host_bytes_per_pixel != surface->fmt.bytes_per_pixel;
+}
+
+/*
+ * 4x4 ordered dither matrix (Bayer). The Xbox GPU dithers color writes
+ * to the destination format when NV_PGRAPH_CONTROL_0_DITHERENABLE is set;
+ * the OpenGL renderer honours that with glEnable(GL_DITHER). Vulkan hosts
+ * the packed 16-bit formats as RGBA8 and quantizes only here, on download,
+ * so it has to reproduce the dither itself, or the result bands
+ * differently from GL (and from hardware). The exact matrix is
+ * implementation-defined; this is the classic 4x4 one.
+ */
+static const uint8_t surface_dither_matrix[4][4] = {
+    {  0,  8,  2, 10 },
+    { 12,  4, 14,  6 },
+    {  3, 11,  1,  9 },
+    { 15,  7, 13,  5 },
+};
+
+static uint16_t surface_pack_rgba8(const SurfaceBinding *surface,
+                                   const uint8_t *pixel,
+                                   unsigned int x, unsigned int y, bool dither)
+{
+    uint8_t r = pixel[0], g = pixel[1], b = pixel[2], a = pixel[3];
+
+    /*
+     * Dither offsets sit one quantization step wide, centred on
+     * round-to-nearest: 0..7 before the 5-bit >>3, 0..3 before the
+     * 6-bit >>2. With dither off d is 0 and the shift is the plain
+     * truncation the conversion always used.
+     */
+    unsigned int d = dither ? surface_dither_matrix[y & 3][x & 3] : 0;
+    unsigned int d5 = d >> 1, d6 = d >> 2;
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0]. Dither the 5-bit
+         * channels; the 1-bit alpha has no room for it. */
+        return ((a & 0x80) << 8) | (MIN(31, (r + d5) >> 3) << 10) |
+               (MIN(31, (g + d5) >> 3) << 5) | MIN(31, (b + d5) >> 3);
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        /* R5G6B5: R[15:11], G[10:5], B[4:0] */
+        return (MIN(31, (r + d5) >> 3) << 11) | (MIN(63, (g + d6) >> 2) << 5) |
+               MIN(31, (b + d5) >> 3);
+    default:
+        nv2a_vk_assert(!"unconverted surface format");
+        return 0;
+    }
+}
+
+static void surface_unpack_rgba8(const SurfaceBinding *surface, uint8_t *pixel,
+                                 uint16_t packed)
+{
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5: {
+        /* A1R5G5B5 */
+        uint8_t a1 = (packed >> 15) & 0x01;
+        uint8_t r5 = (packed >> 10) & 0x1F;
+        uint8_t g5 = (packed >> 5) & 0x1F;
+        uint8_t b5 = packed & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g5 << 3) | (g5 >> 2);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = a1 ? 0xFF : 0x00;
+        break;
+    }
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+        /* R5G6B5 */
+        uint8_t r5 = (packed >> 11) & 0x1F;
+        uint8_t g6 = (packed >> 5) & 0x3F;
+        uint8_t b5 = packed & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g6 << 2) | (g6 >> 4);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = 0xFF;
+        break;
+    }
+    default:
+        nv2a_vk_assert(!"unconverted surface format");
+        pixel[0] = pixel[1] = pixel[2] = 0;
+        pixel[3] = 0xFF;
+        break;
+    }
+}
+
+/*
+ * The conversion loops are the whole cost of a converted-surface upload or
+ * download, and clang does not vectorize them (the per-pixel clamp becomes
+ * a branchy cmov chain). Do it by hand for the two packed layouts, eight
+ * pixels at a time, and fall back to the scalar helpers above for the tail
+ * and for anything the SIMD path does not cover. The helpers are written
+ * with SSE2 intrinsics (emmintrin.h) rather than the SSE4.1 ones the host
+ * also has, so the source stays valid if the build ever tightens its
+ * baseline; the compiler still picks the wider instruction where it helps
+ * (the clamp comes out as PMINSD, and the narrow as PACKSSDW).
+ */
+#ifdef __SSE2__
+static bool surface_format_simd(const SurfaceBinding *surface)
+{
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Per-lane min of non-negative 32-bit values (PMINUD is SSE4.1). */
+static inline __m128i surface_min_epi32(__m128i v, __m128i hi)
+{
+    __m128i gt = _mm_cmpgt_epi32(v, hi);
+    return _mm_or_si128(_mm_andnot_si128(gt, v), _mm_and_si128(gt, hi));
+}
+
+/* Narrow eight 32-bit lanes (0..65535) to sixteen 16-bit ones. PACKUSDW
+ * is SSE4.1 and PACKSSDW saturates, so bias the values into the signed
+ * range, pack exactly, then undo the bias. */
+static inline __m128i surface_narrow_epi32(__m128i lo, __m128i hi)
+{
+    __m128i bias = _mm_set1_epi32(0x8000);
+    __m128i p = _mm_packs_epi32(_mm_sub_epi32(lo, bias),
+                                _mm_sub_epi32(hi, bias));
+    return _mm_add_epi16(p, _mm_set1_epi16((short)0x8000));
+}
+
+static inline __m128i surface_pack8_rgba8(const SurfaceBinding *surface,
+                                          __m128i vlo, __m128i vhi,
+                                          __m128i d5v, __m128i d6v)
+{
+    const __m128i maskff = _mm_set1_epi32(0xFF);
+    const __m128i sat255 = _mm_set1_epi32(255);
+    __m128i rlo = _mm_and_si128(vlo, maskff);
+    __m128i glo = _mm_and_si128(_mm_srli_epi32(vlo, 8), maskff);
+    __m128i blo = _mm_and_si128(_mm_srli_epi32(vlo, 16), maskff);
+    __m128i rhi = _mm_and_si128(vhi, maskff);
+    __m128i ghi = _mm_and_si128(_mm_srli_epi32(vhi, 8), maskff);
+    __m128i bhi = _mm_and_si128(_mm_srli_epi32(vhi, 16), maskff);
+    __m128i outlo, outhi;
+
+    rlo = surface_min_epi32(_mm_add_epi32(rlo, d5v), sat255);
+    blo = surface_min_epi32(_mm_add_epi32(blo, d5v), sat255);
+    rhi = surface_min_epi32(_mm_add_epi32(rhi, d5v), sat255);
+    bhi = surface_min_epi32(_mm_add_epi32(bhi, d5v), sat255);
+
+    if (surface->shape.color_format ==
+        NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5) {
+        glo = surface_min_epi32(_mm_add_epi32(glo, d6v), sat255);
+        ghi = surface_min_epi32(_mm_add_epi32(ghi, d6v), sat255);
+        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 11);
+        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 11);
+        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 2), 5);
+        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 2), 5);
+        blo = _mm_srli_epi32(blo, 3);
+        bhi = _mm_srli_epi32(bhi, 3);
+    } else {
+        /* A1R5G5B5: the 1-bit alpha is bit 7 of the source byte. */
+        __m128i alo =
+            _mm_and_si128(_mm_srli_epi32(vlo, 24), _mm_set1_epi32(0x80));
+        __m128i ahi =
+            _mm_and_si128(_mm_srli_epi32(vhi, 24), _mm_set1_epi32(0x80));
+        glo = surface_min_epi32(_mm_add_epi32(glo, d5v), sat255);
+        ghi = surface_min_epi32(_mm_add_epi32(ghi, d5v), sat255);
+        alo = _mm_slli_epi32(alo, 8);
+        ahi = _mm_slli_epi32(ahi, 8);
+        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 10);
+        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 10);
+        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 3), 5);
+        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 3), 5);
+        blo = _mm_srli_epi32(blo, 3);
+        bhi = _mm_srli_epi32(bhi, 3);
+        rlo = _mm_or_si128(rlo, alo);
+        rhi = _mm_or_si128(rhi, ahi);
+    }
+
+    outlo = _mm_or_si128(_mm_or_si128(rlo, glo), blo);
+    outhi = _mm_or_si128(_mm_or_si128(rhi, ghi), bhi);
+    return surface_narrow_epi32(outlo, outhi);
+}
+
+static inline void surface_unpack8_rgba8(const SurfaceBinding *surface,
+                                         __m128i p, __m128i *out_lo,
+                                         __m128i *out_hi)
+{
+    const __m128i mask31 = _mm_set1_epi16(0x1F);
+    const __m128i ff = _mm_set1_epi16(0xFF);
+    __m128i r5, g, b5, a8, r8, g8, b8, rg, ba;
+
+    if (surface->shape.color_format ==
+        NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5) {
+        r5 = _mm_and_si128(_mm_srli_epi16(p, 11), mask31);
+        g = _mm_and_si128(_mm_srli_epi16(p, 5), _mm_set1_epi16(0x3F));
+        b5 = _mm_and_si128(p, mask31);
+        a8 = ff;
+        r8 = _mm_or_si128(_mm_slli_epi16(r5, 3), _mm_srli_epi16(r5, 2));
+        g8 = _mm_or_si128(_mm_slli_epi16(g, 2), _mm_srli_epi16(g, 4));
+    } else {
+        /* A1R5G5B5: bit 15 expands to a 0x00/0xFF alpha byte. */
+        r5 = _mm_and_si128(_mm_srli_epi16(p, 10), mask31);
+        g = _mm_and_si128(_mm_srli_epi16(p, 5), mask31);
+        b5 = _mm_and_si128(p, mask31);
+        a8 = _mm_and_si128(
+            _mm_cmpeq_epi16(
+                _mm_and_si128(_mm_srli_epi16(p, 15), _mm_set1_epi16(1)),
+                _mm_set1_epi16(1)),
+            ff);
+        r8 = _mm_or_si128(_mm_slli_epi16(r5, 3), _mm_srli_epi16(r5, 2));
+        g8 = _mm_or_si128(_mm_slli_epi16(g, 3), _mm_srli_epi16(g, 2));
+    }
+    b8 = _mm_or_si128(_mm_slli_epi16(b5, 3), _mm_srli_epi16(b5, 2));
+    rg = _mm_or_si128(r8, _mm_slli_epi16(g8, 8));
+    ba = _mm_or_si128(b8, _mm_slli_epi16(a8, 8));
+    *out_lo = _mm_unpacklo_epi16(rg, ba);
+    *out_hi = _mm_unpackhi_epi16(rg, ba);
+}
+#endif /* __SSE2__ */
+
+/* RGBA8 (host, tightly packed) -> guest packed 16-bit at dst_stride */
+static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
+                                            uint8_t *dst, int dst_stride,
+                                            const uint8_t *src, int src_stride,
+                                            unsigned int width,
+                                            unsigned int height, bool dither)
+{
+    bool simd = false;
+#ifdef __SSE2__
+    simd = surface_format_simd(surface);
+#endif
+
+    for (unsigned int y = 0; y < height; y++) {
+        uint8_t *dst_row = dst + (size_t)y * dst_stride;
+        const uint8_t *src_row = src + (size_t)y * src_stride;
+        unsigned int x = 0;
+
+        if (simd) {
+#ifdef __SSE2__
+            for (; x + 8 <= width; x += 8) {
+                __m128i d5v = _mm_setzero_si128();
+                __m128i d6v = _mm_setzero_si128();
+                if (dither) {
+                    const uint8_t *d = surface_dither_matrix[y & 3];
+                    d5v = _mm_setr_epi32(d[0] >> 1, d[1] >> 1, d[2] >> 1,
+                                         d[3] >> 1);
+                    d6v = _mm_setr_epi32(d[0] >> 2, d[1] >> 2, d[2] >> 2,
+                                         d[3] >> 2);
+                }
+                __m128i vlo =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 4));
+                __m128i vhi =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 4 + 16));
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 2),
+                                 surface_pack8_rgba8(surface, vlo, vhi, d5v,
+                                                     d6v));
+            }
+#endif
+        }
+
+        for (; x < width; x++) {
+            ((uint16_t *)dst_row)[x] =
+                surface_pack_rgba8(surface, src_row + x * 4, x, y, dither);
+        }
+    }
+}
+
+/* guest packed 16-bit -> RGBA8 (host, tightly packed) at dst_stride */
+static void surface_convert_to_host_rgba8(const SurfaceBinding *surface,
+                                          uint8_t *dst, int dst_stride,
+                                          const uint8_t *src, int src_stride,
+                                          unsigned int width,
+                                          unsigned int height)
+{
+    bool simd = false;
+#ifdef __SSE2__
+    simd = surface_format_simd(surface);
+#endif
+
+    for (unsigned int y = 0; y < height; y++) {
+        uint8_t *dst_row = dst + (size_t)y * dst_stride;
+        const uint8_t *src_row = src + (size_t)y * src_stride;
+        unsigned int x = 0;
+
+        if (simd) {
+#ifdef __SSE2__
+            for (; x + 8 <= width; x += 8) {
+                __m128i p =
+                    _mm_loadu_si128((const __m128i *)(src_row + x * 2));
+                __m128i lo, hi;
+                surface_unpack8_rgba8(surface, p, &lo, &hi);
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 4), lo);
+                _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 4 + 16),
+                                 hi);
+            }
+#endif
+        }
+
+        for (; x < width; x++) {
+            surface_unpack_rgba8(surface, dst_row + x * 4,
+                                 ((const uint16_t *)src_row)[x]);
+        }
     }
 }
 
@@ -295,6 +616,8 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
     int64_t nsprof_t0 = nsprof_begin();
 
+    bool converted = surface_host_format_converted(surface);
+
     bool use_compute_to_convert_depth_stencil_format =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
         surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -313,7 +636,10 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
     }
 
-    bool downscale = (pg->surface_scale_factor != 1);
+    /* The surface image holds `scaled` pixels while the guest's VRAM holds
+     * `surface->width/height`; true whenever the two differ, in either
+     * direction (upscale for factor > 1, downscale for factor < 1). */
+    bool downscale = (pg->surface_scale_factor != 1.0f);
 
     trace_nv2a_pgraph_surface_download(
         surface->color ? "COLOR" : "ZETA",
@@ -327,7 +653,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     uint8_t *swizzle_buf = pixels;
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
-        nv2a_vk_assert(pg->surface_scale_factor == 1 || downscale);
+        nv2a_vk_assert(pg->surface_scale_factor == 1.0f || downscale);
         swizzle_buf = (uint8_t *)g_malloc(surface->size);
         gl_read_buf = swizzle_buf;
     }
@@ -576,8 +902,10 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     // Download image data to host
     //
 
-    size_t download_size = (size_t)surface->width *
-                           surface->fmt.bytes_per_pixel * surface->height;
+    size_t download_size =
+        (size_t)surface->width * surface->height *
+        (converted ? surface->host_fmt.host_bytes_per_pixel
+                   : surface->fmt.bytes_per_pixel);
 
     VkBufferMemoryBarrier post_copy_dst_barrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -601,10 +929,27 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                 0, download_size);
     }
 
-    memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
-                 surface->pitch,
-                 surface->width * surface->fmt.bytes_per_pixel,
-                 surface->height);
+    if (converted) {
+        /*
+         * Dither at the pack, where the host RGBA8 image is quantized to
+         * the guest 16-bit format, mirroring glEnable(GL_DITHER). Read the
+         * register here rather than at draw time: the download is when the
+         * quantization happens, and games set DITHERENABLE once.
+         */
+        bool dither =
+            pgraph_reg_r(&d->pgraph, NV_PGRAPH_CONTROL_0) &
+            NV_PGRAPH_CONTROL_0_DITHERENABLE;
+        surface_convert_from_host_rgba8(
+            surface, gl_read_buf, surface->pitch,
+            r->storage_buffers[BUFFER_STAGING_DST].mapped,
+            surface->width * surface->host_fmt.host_bytes_per_pixel,
+            surface->width, surface->height, dither);
+    } else {
+        memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
+                     surface->pitch,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->height);
+    }
 
     if (surface->swizzle) {
         // FIXME: Swizzle in shader
@@ -1099,10 +1444,22 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
                             &alloc_create_info, &surface->image,
                             &surface->allocation, NULL));
 
+    /* The scratch is the transfer staging for readback and upload, and
+     * must fit both the scaled image and the guest's own pixels: readback
+     * blits scaled->native into it, upload blits native->scaled out of it,
+     * and the depth/stencil compute path copies whole images through it.
+     * With an upscale the scaled side is larger, with a downscale the
+     * native one is, so it is the larger of the two. */
+    VkImageCreateInfo scratch_create_info = image_create_info;
+    scratch_create_info.extent.width =
+        MAX(width, surface->width ? surface->width : 1);
+    scratch_create_info.extent.height =
+        MAX(height, surface->height ? surface->height : 1);
+
 #if defined(__APPLE__)
-    if (pg->surface_scale_factor > 1) {
+    if (pg->surface_scale_factor != 1.0f) {
 #endif
-        VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+        VK_CHECK(vmaCreateImage(r->allocator, &scratch_create_info,
                                 &alloc_create_info, &surface->image_scratch,
                                 &surface->allocation_scratch, NULL));
 #if defined(__APPLE__)
@@ -1606,13 +1963,18 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     g_autofree uint8_t *swizzle_buf = NULL;
     uint8_t *gl_read_buf = NULL;
 
+    bool converted = surface_host_format_converted(surface);
+
     /*
      * GPU unswizzle (surface-compute.c) accepts any power-of-two
      * dimensions via CPU-computed mask_x / mask_y push constants
      * (Phase 3.2). The POT test is defensive: swizzled Xbox surfaces
-     * are always POT by hardware constraint.
+     * are always POT by hardware constraint. Converted surfaces take
+     * the CPU path: the compute shader works on packed guest data and
+     * the conversion happens after unswizzle.
      */
     bool use_gpu_unswizzle =
+        !converted &&
         surface->swizzle &&
         (surface->fmt.bytes_per_pixel == 4 ||
          surface->fmt.bytes_per_pixel == 2) &&
@@ -1656,8 +2018,10 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     VkDeviceSize staging_limit =
         r->flight[r->current_flight].staging_buffer_limit;
 
-    size_t uploaded_image_size = surface->height * surface->width *
-                                 surface->fmt.bytes_per_pixel;
+    size_t uploaded_image_size =
+        surface->height * surface->width *
+        (converted ? surface->host_fmt.host_bytes_per_pixel
+                   : surface->fmt.bytes_per_pixel);
     nv2a_vk_bounds_check(uploaded_image_size <=
                          staging_limit - staging_slot_base);
     VkDeviceSize staging_base =
@@ -1671,9 +2035,16 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                    surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
                    use_compute_to_convert_depth_stencil_format);
 
-    memcpy_image(copy_buffer->mapped + staging_base, gl_read_buf,
-                 surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
-                 surface->height);
+    if (converted) {
+        surface_convert_to_host_rgba8(
+            surface, copy_buffer->mapped + staging_base,
+            surface->width * surface->host_fmt.host_bytes_per_pixel, gl_read_buf,
+            surface->pitch, surface->width, surface->height);
+    } else {
+        memcpy_image(copy_buffer->mapped + staging_base, gl_read_buf,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->pitch, surface->height);
+    }
 
     if (!copy_buffer->is_coherent) {
         vmaFlushAllocation(r->allocator, copy_buffer->allocation, staging_base,
@@ -1901,7 +2272,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                          VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    bool upscale = pg->surface_scale_factor > 1 &&
+    bool rescale = pg->surface_scale_factor != 1.0f &&
                    !use_compute_to_convert_depth_stencil_format;
 
     if (surface->image_scratch != VK_NULL_HANDLE) {
@@ -1940,7 +2311,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         surface->image_scratch_current_layout =
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
-        if (upscale) {
+        if (rescale) {
             VkImageBlit blitRegion = {
                 .srcSubresource.aspectMask = surface->host_fmt.aspect,
                 .srcSubresource.mipLevel = 0,

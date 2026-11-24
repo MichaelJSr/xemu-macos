@@ -55,6 +55,21 @@ input:
   auto_bind:
     type: bool
     default: true
+  # Radial dead zone applied to each analog stick, as a fraction of full
+  # deflection (0 = off, 0.4 = 40%). Stick input inside the zone reads as
+  # centred; beyond it the remaining travel is rescaled to the full range,
+  # so the outer edge still reaches 100%.
+  deadzone_left:
+    type: number
+    default: 0.0
+  deadzone_right:
+    type: number
+    default: 0.0
+  # Multiplier applied to every rumble command (0 = off, 1 = full
+  # strength). The per-controller 'enable_rumble' switch still gates it.
+  rumble_strength:
+    type: number
+    default: 1.0
   # Deprecated: use 'enable_rumble' on the controller mapping settings instead
   allow_vibration:
     type: bool
@@ -254,13 +269,23 @@ display:
     values: ["off", 2x, 4x]
     default: "off"
   quality:
+    # Internal render resolution relative to the guest's. Above 1 renders
+    # larger than native (supersampling); below 1 (0.25/0.5/0.75) renders
+    # smaller, which trades image detail for a real frame-rate gain.
     surface_scale:
-      type: integer
-      default: 1
+      type: number
+      default: 1.0
   filtering:
+    # How the guest frame is scaled up to the window. linear/nearest are
+    # the classic blits; fsr/bicubic/lanczos are upscalers that only do
+    # anything when the frame is actually enlarged.
     type: enum
-    values: [linear, nearest]
+    values: [linear, nearest, fsr, bicubic, lanczos]
     default: linear
+  # RCAS sharpening strength for the fsr filter, 0 (off) to 1 (maximum)
+  fsr_sharpness:
+    type: number
+    default: 0.8
   window:
     # macOS only: which API presents the final frame + UI. `auto`
     # selects Metal when the Vulkan renderer is configured, OpenGL
@@ -299,6 +324,15 @@ display:
     use_animations:
       type: bool
       default: true
+    # Pause the guest when the window loses focus and resume it on return
+    # (only the pause this option makes is undone, a manual pause stays).
+    pause_on_focus_loss:
+      type: bool
+      default: false
+    # Draw a small frame-rate readout over the top-left of the viewport.
+    show_fps:
+      type: bool
+      default: false
     fit:
       type: enum
       values: [center, scale, stretch]
@@ -424,6 +458,24 @@ perf:
     type: bool
     default: true
   cache_shaders:
+    type: bool
+    default: true
+  # GPU boost: renderer-side fast paths that keep work the GPU can do in
+  # VRAM off the CPU. Currently the NV09F surface blit, which becomes a
+  # VRAM-to-VRAM image copy instead of a download, memmove and upload.
+  # Read once at start; Settings > General.
+  optimizations:
+    type: bool
+    default: true
+  # Async pipeline compilation: a draw whose pipeline is a first-encounter
+  # miss compiles on a worker thread and the draw is skipped for the frames
+  # until the build lands, keeping the PFIFO thread (and the flip) off the
+  # driver's 30-90 ms SPIR-V -> MSL -> Metal lowering. Repeat content is
+  # already covered by the two-tier cache and the prewarm, so only a key's
+  # first encounter reaches it. A key is built synchronously if the worker
+  # has not answered within 200 ms. MoltenVK/KosmicKrisp only, and off under
+  # icount. Read once at start; Settings > Performance.
+  async_pipeline_compile:
     type: bool
     default: true
 

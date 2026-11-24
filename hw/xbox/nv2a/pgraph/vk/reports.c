@@ -489,7 +489,10 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     int num_results_counted = 0;
-    const int result_divisor =
+    /* The queries count pixels at the internal resolution; the guest wants
+     * them at its own, so divide by the scale factor squared. Fractional
+     * for a downscale, hence the round back to an integer. */
+    const float result_divisor =
         pg->surface_scale_factor * pg->surface_scale_factor;
 
     QueryReport *report;
@@ -502,29 +505,29 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
                 query_results[num_results_counted++];
         }
 
+        uint32_t guest_pixels =
+            (uint32_t)(r->zpass_pixel_count_result / result_divisor + 0.5f);
+
         if (report->clear) {
             NV2A_VK_DPRINTF("Cleared");
             r->zpass_pixel_count_result = 0;
         } else if (r->null_ram) {
             /* RAM got the null renderer's 0 at GET_REPORT (renderer.c). */
             if (qatomic_read(&pg->gc_on)) {
-                nv2a_gc_occlusion(pg,
-                                  r->zpass_pixel_count_result / result_divisor);
+                nv2a_gc_occlusion(pg, guest_pixels);
             }
         } else if (icount_enabled()) {
             /* The slot as of GET_REPORT; dropped if RAM was reloaded. */
             if (!r->det_reports.discard) {
-                pgraph_write_zpass_pixel_cnt_report_at(
-                    d, report->ram_addr,
-                    r->zpass_pixel_count_result / result_divisor);
+                pgraph_write_zpass_pixel_cnt_report_at(d, report->ram_addr,
+                                                       guest_pixels);
             }
             if (report->det_tracked) {
                 det_report_untrack(r, report);
             }
         } else if (!r->det_reports.discard) {
-            pgraph_write_zpass_pixel_cnt_report(
-                d, report->parameter,
-                r->zpass_pixel_count_result / result_divisor);
+            pgraph_write_zpass_pixel_cnt_report(d, report->parameter,
+                                                guest_pixels);
         }
 
         QSIMPLEQ_REMOVE_HEAD(queue, entry);

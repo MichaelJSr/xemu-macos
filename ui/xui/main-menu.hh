@@ -33,6 +33,12 @@ extern "C" {
 #undef snprintf  // FIXME
 }
 
+// Internal resolution scale, shared by the settings tab and the menu bar:
+// the fractional downscales (0.25x/0.5x/0.75x) followed by 1x..10x.
+extern const char *const kSurfaceScaleItems;
+float SurfaceScaleFromComboIndex(int index);
+int SurfaceScaleToComboIndex(float scale);
+
 class MainMenuTabView
 {
 public:

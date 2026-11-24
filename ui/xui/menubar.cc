@@ -27,6 +27,9 @@
 #include "actions.hh"
 #include "compat.hh"
 #include "github-issue.hh"
+#include "game-library-window.hh"
+#include "game-patches-window.hh"
+#include "xbox-drive-explorer.hh"
 #include "../xemu-os-utils.h"
 
 extern float g_main_menu_height; // FIXME
@@ -144,6 +147,15 @@ void ShowMainMenu()
 
             ImGui::Separator();
 
+            if (ImGui::MenuItem("Xbox Hard Drive...")) XboxExplorerOpenWindow();
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Game Patches...")) GamePatchesOpenWindow();
+            if (ImGui::MenuItem("Game Library...")) GameLibraryOpenWindow();
+
+            ImGui::Separator();
+
             if (ImGui::MenuItem("Settings...")) g_main_menu.ShowSettings();
 
             ImGui::Separator();
@@ -183,19 +195,12 @@ void ShowMainMenu()
 #endif
                 );
 
-            int rendering_scale = nv2a_get_surface_scale_factor() - 1;
+            int rendering_scale =
+                SurfaceScaleToComboIndex(nv2a_get_surface_scale_factor());
             if (ImGui::Combo("Int. Resolution Scale", &rendering_scale,
-                             "1x\0"
-                             "2x\0"
-                             "3x\0"
-                             "4x\0"
-                             "5x\0"
-                             "6x\0"
-                             "7x\0"
-                             "8x\0"
-                             "9x\0"
-                             "10x\0")) {
-                nv2a_set_surface_scale_factor(rendering_scale + 1);
+                             kSurfaceScaleItems)) {
+                nv2a_set_surface_scale_factor(
+                    SurfaceScaleFromComboIndex(rendering_scale));
             }
 
             ImGui::Combo("Display Mode", &g_config.display.ui.fit,
@@ -204,7 +209,23 @@ void ShowMainMenu()
             HelpMarker("Controls how the rendered content should be scaled "
                        "into the window");
             ImGui::Combo("Filter Method", &g_config.display.filtering,
-                         "Linear\0Nearest\0");
+                         "Linear\0"
+                         "Nearest\0"
+                         "AMD FidelityFX FSR 1.0\0"
+                         "Bicubic (Catmull-Rom)\0"
+                         "Lanczos\0");
+            ImGui::SameLine();
+            HelpMarker("How the frame is scaled up to the window. FSR, "
+                       "bicubic and Lanczos are only used when the image is "
+                       "actually enlarged; otherwise the blit is unchanged.");
+            if (g_config.display.filtering == CONFIG_DISPLAY_FILTERING_FSR) {
+                ImGui::SliderFloat("FSR Sharpening",
+                                   &g_config.display.fsr_sharpness, 0.0f, 1.0f,
+                                   "%.2f");
+                ImGui::SameLine();
+                HelpMarker("RCAS sharpening applied after FSR upscaling. "
+                           "0 disables it.");
+            }
             ImGui::Combo("Aspect Ratio", &g_config.display.ui.aspect_ratio,
                          "Native\0Auto\0""4:3\0""16:9\0");
 #ifdef __APPLE__

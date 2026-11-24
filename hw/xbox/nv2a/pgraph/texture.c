@@ -395,6 +395,90 @@ uint8_t *pgraph_convert_texture_data(const TextureShape s, const uint8_t *data,
                 pixel[3] = 0xFF;
             }
         }
+    } else if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5 ||
+               s.color_format ==
+                   NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5) {
+        /* ARGB1555 -> RGBA8 */
+        assert(depth == 1); /* FIXME */
+        size = width * height * 4;
+        converted_data = g_malloc(size);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint16_t argb1555 =
+                    *(uint16_t *)(data + y * row_pitch + x * 2);
+                uint8_t *pixel = &converted_data[(y * width + x) * 4];
+                uint8_t a1 = (argb1555 >> 15) & 0x01;
+                uint8_t r5 = (argb1555 >> 10) & 0x1F;
+                uint8_t g5 = (argb1555 >> 5) & 0x1F;
+                uint8_t b5 = argb1555 & 0x1F;
+                pixel[0] = (r5 << 3) | (r5 >> 2);
+                pixel[1] = (g5 << 3) | (g5 >> 2);
+                pixel[2] = (b5 << 3) | (b5 >> 2);
+                pixel[3] = a1 ? 0xFF : 0x00;
+            }
+        }
+    } else if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5 ||
+               s.color_format ==
+                   NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5) {
+        /* XRGB1555 -> RGBA8 (alpha forced to opaque) */
+        assert(depth == 1); /* FIXME */
+        size = width * height * 4;
+        converted_data = g_malloc(size);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint16_t xrgb1555 =
+                    *(uint16_t *)(data + y * row_pitch + x * 2);
+                uint8_t *pixel = &converted_data[(y * width + x) * 4];
+                uint8_t r5 = (xrgb1555 >> 10) & 0x1F;
+                uint8_t g5 = (xrgb1555 >> 5) & 0x1F;
+                uint8_t b5 = xrgb1555 & 0x1F;
+                pixel[0] = (r5 << 3) | (r5 >> 2);
+                pixel[1] = (g5 << 3) | (g5 >> 2);
+                pixel[2] = (b5 << 3) | (b5 >> 2);
+                pixel[3] = 0xFF;
+            }
+        }
+    } else if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4 ||
+               s.color_format ==
+                   NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4) {
+        /* ARGB4444 -> RGBA8 */
+        assert(depth == 1); /* FIXME */
+        size = width * height * 4;
+        converted_data = g_malloc(size);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint16_t argb4444 =
+                    *(uint16_t *)(data + y * row_pitch + x * 2);
+                uint8_t *pixel = &converted_data[(y * width + x) * 4];
+                uint8_t a4 = (argb4444 >> 12) & 0x0F;
+                uint8_t r4 = (argb4444 >> 8) & 0x0F;
+                uint8_t g4 = (argb4444 >> 4) & 0x0F;
+                uint8_t b4 = argb4444 & 0x0F;
+                pixel[0] = (r4 << 4) | r4;
+                pixel[1] = (g4 << 4) | g4;
+                pixel[2] = (b4 << 4) | b4;
+                pixel[3] = (a4 << 4) | a4;
+            }
+        }
+    } else if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5 ||
+               s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5) {
+        /* RGB565 -> RGBA8 (alpha forced to opaque) */
+        assert(depth == 1); /* FIXME */
+        size = width * height * 4;
+        converted_data = g_malloc(size);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint16_t rgb565 = *(uint16_t *)(data + y * row_pitch + x * 2);
+                uint8_t *pixel = &converted_data[(y * width + x) * 4];
+                uint8_t r5 = (rgb565 >> 11) & 0x1F;
+                uint8_t g6 = (rgb565 >> 5) & 0x3F;
+                uint8_t b5 = rgb565 & 0x1F;
+                pixel[0] = (r5 << 3) | (r5 >> 2);
+                pixel[1] = (g6 << 2) | (g6 >> 4);
+                pixel[2] = (b5 << 3) | (b5 >> 2);
+                pixel[3] = 0xFF;
+            }
+        }
     } else {
         return NULL;
     }

@@ -45,11 +45,17 @@ typedef void (*dsp_dma_mem_write_func)(void *opaque, int space, uint32_t addr, u
 /* Optional: @count words at @addr if they are plain RAM in one array, else NULL */
 typedef uint32_t *(*dsp_dma_mem_span_func)(void *opaque, int space, uint32_t addr,
                                            uint32_t count);
+/* Optional: fill @out with @count words at @addr in one backend call. NULL
+ * makes the caller fall back to @count mem_read calls. */
+typedef void (*dsp_dma_mem_read_run_func)(void *opaque, int space,
+                                          uint32_t addr, uint32_t *out,
+                                          uint32_t count);
 
 typedef struct DSPDMAState {
     /* DSP memory access (backend-agnostic) */
     void *mem_opaque;
     dsp_dma_mem_read_func mem_read;
+    dsp_dma_mem_read_run_func mem_read_run;
     dsp_dma_mem_write_func mem_write;
     dsp_dma_mem_span_func mem_span;
 

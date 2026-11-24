@@ -45,6 +45,7 @@ static const char *const counter_names[NSPROF__COUNT] = {
     [NSPROF_DRV_PIPELINE] = "drv_pipeline",
     [NSPROF_FLIP_GAP] = "flip_gap",
     [NSPROF_PG_HANDOFF] = "pg_handoff",
+    [NSPROF_ASYNC_BUILD] = "async_build",
 };
 
 static const char *const event_names[NSPROF_EV__COUNT] = {
@@ -102,6 +103,12 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_TEX_SET_WRITE] = "tex_set_write",
     [NSPROF_EV_TEX_SET_REUSE] = "tex_set_reuse",
     [NSPROF_EV_PIPELINE_EVICT] = "pipeline_evict",
+    [NSPROF_EV_ASYNC_SUBMIT] = "async_submit",
+    [NSPROF_EV_ASYNC_SKIP] = "async_skip",
+    [NSPROF_EV_ASYNC_INSTALL] = "async_install",
+    [NSPROF_EV_ASYNC_DROP] = "async_drop",
+    [NSPROF_EV_ASYNC_FAIL] = "async_fail",
+    [NSPROF_EV_ASYNC_FALLBACK] = "async_fallback",
 };
 
 static struct {

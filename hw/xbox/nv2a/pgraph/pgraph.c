@@ -277,6 +277,17 @@ void pgraph_renderer_register(const PGRAPHRenderer *renderer)
     renderers[renderer->type] = renderer;
 }
 
+bool pgraph_gpu_boost(void)
+{
+    /* Read once: the Settings toggle takes effect at the next start, so a
+     * path chosen mid-frame can never disagree with itself. */
+    static int on = -1;
+    if (on < 0) {
+        on = g_config.perf.optimizations;
+    }
+    return on;
+}
+
 void pgraph_init(NV2AState *d)
 {
     g_nv2a = d;
@@ -661,7 +672,7 @@ void nv2a_release_framebuffer_surface(void)
     qemu_mutex_unlock(&pg->renderer_lock);
 }
 
-void nv2a_set_surface_scale_factor(unsigned int scale)
+void nv2a_set_surface_scale_factor(float scale)
 {
     NV2AState *d = g_nv2a;
 
@@ -674,10 +685,10 @@ void nv2a_set_surface_scale_factor(unsigned int scale)
     bql_lock();
 }
 
-unsigned int nv2a_get_surface_scale_factor(void)
+float nv2a_get_surface_scale_factor(void)
 {
     NV2AState *d = g_nv2a;
-    int s = 1;
+    float s = 1.0f;
 
     bql_unlock();
     qemu_mutex_lock(&d->pgraph.renderer_lock);

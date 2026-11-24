@@ -495,6 +495,8 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
     snode->draw_time = 0;
+    snode->pending = false;
+    snode->pending_since_ns = 0;
 }
 
 static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -1826,12 +1828,15 @@ VkResult pgraph_vk_build_draw_pipeline(PGRAPHVkState *r, const PipelineKey *key,
     return VK_SUCCESS;
 }
 
-static void create_pipeline(PGRAPHState *pg)
+static bool create_pipeline(PGRAPHState *pg)
 {
     NV2A_VK_DGROUP_BEGIN("Creating pipeline");
 
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    /* Install any finished async builds before this draw's own lookup */
+    pgraph_vk_async_drain(pg);
 
     pgraph_vk_bind_textures(d);
     pgraph_vk_bind_shaders(pg);
@@ -1846,7 +1851,7 @@ static void create_pipeline(PGRAPHState *pg)
         NV2A_VK_DPRINTF("Cache hit");
         r->pipeline_binding_changed = false;
         NV2A_VK_DGROUP_END();
-        return;
+        return true;
     }
 
     PipelineKey key;
@@ -1886,14 +1891,35 @@ static void create_pipeline(PGRAPHState *pg)
         r->pipeline_binding_changed = r->pipeline_binding != snode;
         r->pipeline_binding = snode;
         NV2A_VK_DGROUP_END();
-        return;
+        return true;
     }
 
     NV2A_VK_DPRINTF("Cache miss");
+
+    /*
+     * Key the node before anything can observe it: the async worker's build
+     * is matched back to it by this key, and a later lookup must find the
+     * pending node again (lru_lookup compares the stored key).
+     */
+    memcpy(&snode->key, &key, sizeof(key));
+
+    VkRenderPass render_pass = get_render_pass(r, &key.render_pass_state);
+
+    /*
+     * First encounter with this key (the two-tier cache and the prewarm cover
+     * every repeat): hand the build to the async worker and skip the draw
+     * (perf.async_pipeline_compile). The draw returns the frame the build
+     * lands. A failed submit or a late build falls through to the synchronous
+     * path below.
+     */
+    if (pgraph_vk_async_miss(r, snode, &key, hash, render_pass) == ASYNC_SKIP) {
+        r->pipeline_binding = NULL;
+        NV2A_VK_DGROUP_END();
+        return false;
+    }
+
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
     int64_t nsprof_t0 = nsprof_begin();
-
-    memcpy(&snode->key, &key, sizeof(key));
 
     /* The builder reads the key; the live state it was made from agrees */
     nv2a_vk_assert(key.num_vertex_bindings ==
@@ -1914,7 +1940,6 @@ static void create_pipeline(PGRAPHState *pg)
             VK_NULL_HANDLE,
         r->shader_binding->psh.module_info->module,
     };
-    VkRenderPass render_pass = get_render_pass(r, &key.render_pass_state);
     PipelineCacheFeedback feedback;
     const void *pnext;
     uint32_t stages;
@@ -1932,11 +1957,13 @@ static void create_pipeline(PGRAPHState *pg)
     snode->layout = layout;
     snode->render_pass = render_pass;
     snode->draw_time = pg->draw_time;
+    snode->pending = false;
 
     r->pipeline_binding = snode;
     r->pipeline_binding_changed = true;
 
     NV2A_VK_DGROUP_END();
+    return true;
 }
 
 static void push_vertex_attr_values(PGRAPHState *pg)
@@ -2578,7 +2605,7 @@ void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 // buffer. For other reasons though (like descriptor set amount, surface
 // changes, etc) we do flush often.
 
-static void begin_pre_draw(PGRAPHState *pg)
+static bool begin_pre_draw(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -2613,8 +2640,9 @@ static void begin_pre_draw(PGRAPHState *pg)
 
     if (pg->clearing) {
         create_clear_pipeline(pg);
-    } else {
-        create_pipeline(pg);
+    } else if (!create_pipeline(pg)) {
+        /* A first-encounter miss handed to the async worker: skip this draw */
+        return false;
     }
 
     bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
@@ -2640,6 +2668,7 @@ static void begin_pre_draw(PGRAPHState *pg)
     }
 
     pgraph_vk_ensure_command_buffer(pg);
+    return true;
 }
 
 static float clamp_line_width_to_device_limits(PGRAPHState *pg, float width)
@@ -3051,7 +3080,12 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
                          ymax, write_color ? " color" : "",
                          write_zeta ? " zeta" : "");
 
-    begin_pre_draw(pg);
+    if (!begin_pre_draw(pg)) {
+        /* Unreachable for a clear (create_clear_pipeline can't skip), kept
+         * for the caller contract. */
+        NV2A_VK_DGROUP_END();
+        return;
+    }
     pgraph_vk_begin_debug_marker(r, r->command_buffer,
         RGBA_BLUE, "Clear %08" HWADDR_PRIx,
         binding->vram_addr);
@@ -3308,6 +3342,8 @@ typedef struct VertexBufferRemap {
     struct {
         VkDeviceAddress offset;
         VkDeviceSize old_stride;
+        /* Packed element size and the (possibly padded) output stride. */
+        VkDeviceSize copy_size;
         VkDeviceSize new_stride;
     } map[NV2A_VERTEXSHADER_ATTRIBUTES];
 } VertexBufferRemap;
@@ -3337,7 +3373,15 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
 
         bool offset_valid =
             (r->vertex_attribute_offsets[attr_id] % element_size == 0);
-        bool stride_valid = (desc->stride % element_size == 0);
+        /*
+         * Besides the element-size multiple every backend needs, Metal
+         * (MoltenVK, via VK_KHR_portability_subset) rejects a vertex
+         * binding whose stride is not a multiple of 4
+         * (VK_ERROR_INITIALIZATION_FAILED: "vertex attribute binding
+         * strides must be aligned to 4 bytes"). Repack those too.
+         */
+        bool stride_valid = (desc->stride % element_size == 0) &&
+                            (desc->stride % 4 == 0);
 
         if (offset_valid && stride_valid) {
             continue;
@@ -3346,7 +3390,10 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
         remap.attributes |= 1 << attr_id;
         remap.map[attr_id].offset = ROUND_UP(output_offset, element_size);
         remap.map[attr_id].old_stride = desc->stride;
-        remap.map[attr_id].new_stride = element_size * element_count;
+        remap.map[attr_id].copy_size = element_size * element_count;
+        /* Pad the packed stride out to Metal's 4-byte requirement. */
+        remap.map[attr_id].new_stride =
+            ROUND_UP(remap.map[attr_id].copy_size, 4);
 
         // fprintf(stderr,
         //         "attr %02d remapped: "
@@ -3383,12 +3430,12 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
  * small-size path per vertex (the 2-16 bytes of a remapped attribute).
  */
 static inline QEMU_ALWAYS_INLINE void
-remap_copy_fixed(uint8_t *out, const uint8_t *in, size_t n, size_t old_stride,
-                 uint32_t num)
+remap_copy_fixed(uint8_t *out, const uint8_t *in, size_t n, size_t new_stride,
+                 size_t old_stride, uint32_t num)
 {
     for (uint32_t v = 0; v < num; v++) {
         memcpy(out, in, n);
-        out += n;
+        out += new_stride;
         in += old_stride;
     }
 }
@@ -3431,36 +3478,41 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
 
         uint8_t *out_ptr = buffer->mapped + attr_buffer_offset;
         uint8_t *in_ptr = d->vram_ptr + r->vertex_attribute_offsets[attr_id];
+        VkDeviceSize copy_size = remap.map[attr_id].copy_size;
         VkDeviceSize new_stride = remap.map[attr_id].new_stride;
         VkDeviceSize old_stride = remap.map[attr_id].old_stride;
 
         if (new_stride == old_stride) {
             memcpy(out_ptr, in_ptr, new_stride * num_vertices);
         } else {
-            switch (new_stride) {
+            switch (copy_size) {
             case 2:
-                remap_copy_fixed(out_ptr, in_ptr, 2, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 2, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 4:
-                remap_copy_fixed(out_ptr, in_ptr, 4, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 4, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 6:
-                remap_copy_fixed(out_ptr, in_ptr, 6, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 6, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 8:
-                remap_copy_fixed(out_ptr, in_ptr, 8, old_stride, num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, 8, new_stride, old_stride,
+                                 num_vertices);
                 break;
             case 12:
-                remap_copy_fixed(out_ptr, in_ptr, 12, old_stride,
+                remap_copy_fixed(out_ptr, in_ptr, 12, new_stride, old_stride,
                                  num_vertices);
                 break;
             case 16:
-                remap_copy_fixed(out_ptr, in_ptr, 16, old_stride,
+                remap_copy_fixed(out_ptr, in_ptr, 16, new_stride, old_stride,
                                  num_vertices);
                 break;
             default:
-                remap_copy_fixed(out_ptr, in_ptr, new_stride, old_stride,
-                                 num_vertices);
+                remap_copy_fixed(out_ptr, in_ptr, copy_size, new_stride,
+                                 old_stride, num_vertices);
                 break;
             }
         }
@@ -3523,7 +3575,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                    total_emulated_index_count * sizeof(uint32_t));
         }
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            /* First-encounter miss handed to the async worker: skip this
+             * draw; the next one with this key draws normally. */
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, range_vertices);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Draw Arrays");
@@ -3605,7 +3662,10 @@ void pgraph_vk_flush_draw(NV2AState *d)
         uint32_t range_vertices = max_element - min_element + 1;
         VertexBufferRemap remap = remap_unaligned_attributes(pg, range_vertices);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, range_vertices);
         const uint32_t *indices = pg->inline_elements;
         uint32_t *emulated_indices = NULL;
@@ -3682,7 +3742,10 @@ void pgraph_vk_flush_draw(NV2AState *d)
         }
         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, offset);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, data, sizes, r->num_active_vertex_attribute_descriptions);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
@@ -3752,7 +3815,10 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                 emulated_index_count * sizeof(uint32_t));
         }
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         void *inline_array_data = pg->inline_array;
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, &inline_array_data, &inline_array_data_size, 1);

@@ -3,7 +3,12 @@ xemu_ss.add(files(
   'animation.cc',
   'compat.cc',
   'debug.cc',
+  'disc-image.cc',
   'font-manager.cc',
+  'game-library.cc',
+  'game-library-window.cc',
+  'game-patches.cc',
+  'game-patches-window.cc',
   'gl-helpers.cc',
   'input-manager.cc',
   'main-menu.cc',
@@ -21,6 +26,11 @@ xemu_ss.add(files(
   'viewport-manager.cc',
   'welcome.cc',
   'widgets.cc',
+  'xbox-drive.cc',
+  'xbox-drive-explorer.cc',
+  'xbox-drive-qemu.cc',
+  'xbox-hdd-blk.c',
+  'xiso.cc',
 ))
 
 xemu_ss.add([curl, files('github-issue.cc')])

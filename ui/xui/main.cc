@@ -50,6 +50,9 @@
 #include "welcome.hh"
 #include "menubar.hh"
 #include "compat.hh"
+#include "game-library-window.hh"
+#include "game-patches-window.hh"
+#include "xbox-drive-explorer.hh"
 
 #ifdef __APPLE__
 #include "metal-helpers.hh"
@@ -57,6 +60,11 @@ extern "C" {
 #include "ui/xemu-present.h"
 #include "ui/xemu-metal.h"
 }
+#include <mach/mach.h>
+#include <sys/resource.h>
+#include <time.h>
+#include <IOKit/IOKitLib.h>
+#include <CoreFoundation/CoreFoundation.h>
 #endif
 
 bool g_screenshot_pending;
@@ -209,6 +217,8 @@ void xemu_hud_set_framebuffer_texture(uintptr_t tex, bool flip,
     g_tex_wait_value = wait_value;
 }
 
+static void DrawPerformanceOverlay();
+
 void xemu_hud_update(void)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -338,12 +348,156 @@ void xemu_hud_update(void)
     apu_window.Draw();
     video_window.Draw();
     compatibility_reporter_window.Draw();
+    XboxExplorerUpdate();
+    XboxExplorerWindowDraw();
+    GamePatchesWindowDraw();
+    GameLibraryWindowDraw();
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();
+    if (!first_boot_window.is_open) DrawPerformanceOverlay();
 
     // static bool show_demo = true;
     // if (show_demo) ImGui::ShowDemoWindow(&show_demo);
+}
+
+#ifdef __APPLE__
+/*
+ * GPU utilization published by the accelerator driver through IOKit.
+ * Intel and AMD drivers expose it as "Device Utilization %"; other
+ * drivers use different keys, so probe the common ones. Returns a
+ * negative value when the driver does not report it.
+ */
+static double macos_gpu_utilization(void)
+{
+    io_iterator_t iter;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+                                     IOServiceMatching("IOAccelerator"),
+                                     &iter) != KERN_SUCCESS) {
+        return -1.0;
+    }
+
+    static const CFStringRef keys[] = {
+        CFSTR("Device Utilization %"),
+        CFSTR("GPU Activity(%)"),
+        CFSTR("GPU Core Utilization"),
+    };
+
+    double util = -1.0;
+    io_registry_entry_t entry;
+    while ((entry = IOIteratorNext(iter)) != 0) {
+        CFMutableDictionaryRef props = NULL;
+        if (IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS &&
+            props != NULL) {
+            CFDictionaryRef stats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
+            if (stats != NULL && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
+                for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+                    CFNumberRef num = (CFNumberRef)CFDictionaryGetValue(stats, keys[i]);
+                    int v;
+                    if (num != NULL && CFGetTypeID(num) == CFNumberGetTypeID() &&
+                        CFNumberGetValue(num, kCFNumberIntType, &v)) {
+                        util = v;
+                        break;
+                    }
+                }
+            }
+            CFRelease(props);
+        }
+        IOObjectRelease(entry);
+        if (util >= 0.0) {
+            break;
+        }
+    }
+    IOObjectRelease(iter);
+    return util;
+}
+
+/*
+ * CPU time consumed by the whole process (every emulation thread) since
+ * the previous call, as a percentage of one core, matching how Activity
+ * Monitor reports it.
+ */
+static double macos_process_cpu_percent(uint64_t *prev_cpu_ns, uint64_t *prev_wall_ns)
+{
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+        return -1.0;
+    }
+
+    uint64_t cpu_ns = (uint64_t)ru.ru_utime.tv_sec * 1000000000ULL + (uint64_t)ru.ru_utime.tv_usec * 1000ULL +
+                      (uint64_t)ru.ru_stime.tv_sec * 1000000000ULL + (uint64_t)ru.ru_stime.tv_usec * 1000ULL;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t wall_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+    double percent = -1.0;
+    if (*prev_wall_ns != 0 && wall_ns > *prev_wall_ns) {
+        percent = 100.0 * (double)(cpu_ns - *prev_cpu_ns) / (double)(wall_ns - *prev_wall_ns);
+    }
+
+    *prev_cpu_ns = cpu_ns;
+    *prev_wall_ns = wall_ns;
+    return percent;
+}
+#endif
+
+/*
+ * Optional performance readout (Settings > Display). Drawn as a small,
+ * input-transparent window in the top-left corner, below the menu bar so
+ * the two never overlap. CPU and GPU load are sampled at most twice a
+ * second: reading the accelerator's utilization walks the IORegistry, so
+ * doing it every frame would be wasteful and jittery.
+ */
+static void DrawPerformanceOverlay()
+{
+    if (!g_config.display.ui.show_fps) {
+        return;
+    }
+
+#ifdef __APPLE__
+    static uint64_t prev_cpu_ns;
+    static uint64_t prev_wall_ns;
+    static uint64_t last_sample_ns;
+    static double cpu_percent = 0.0;
+    static double gpu_percent = -1.0;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    if (last_sample_ns == 0 || now_ns - last_sample_ns >= 500000000ULL) {
+        last_sample_ns = now_ns;
+        double cpu = macos_process_cpu_percent(&prev_cpu_ns, &prev_wall_ns);
+        if (cpu >= 0.0) {
+            cpu_percent = cpu;
+        }
+        double gpu = macos_gpu_utilization();
+        if (gpu >= 0.0) {
+            gpu_percent = gpu;
+        }
+    }
+#endif
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoInputs;
+
+    ImVec2 offset = g_viewport_mgr.Scale(ImVec2(10.0f, 10.0f));
+    ImGui::SetNextWindowPos(ImVec2(offset.x, offset.y + g_main_menu_height),
+                            ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.45f);
+    if (ImGui::Begin("###xemu_performance_overlay", nullptr, flags)) {
+        ImGui::Text("%u FPS", g_nv2a_stats.increment_fps);
+#ifdef __APPLE__
+        ImGui::Text("CPU %3.0f%%", cpu_percent);
+        if (gpu_percent >= 0.0) {
+            ImGui::Text("GPU %3.0f%%", gpu_percent);
+        }
+#endif
+    }
+    ImGui::End();
 }
 
 void xemu_hud_render()

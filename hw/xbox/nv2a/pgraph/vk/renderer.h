@@ -73,6 +73,13 @@ typedef struct PipelineBinding {
     VkPipeline pipeline;
     VkRenderPass render_pass;
     unsigned int draw_time;
+    /*
+     * A first-encounter miss handed to the async-compile worker (vk/async.c):
+     * pipeline is still NULL and a draw that wants this key is skipped until
+     * the build is installed or ASYNC_DEADLINE_NS passes.
+     */
+    bool pending;
+    int64_t pending_since_ns;
 } PipelineBinding;
 
 /* The dynamic states of r->frame_dynamic_states, one DynShadow bit each */
@@ -653,6 +660,7 @@ typedef struct PGRAPHVkState {
     VkPhysicalDeviceProperties device_props;
     VkDriverId driver_id; /* 0 when the device predates Vulkan 1.2 */
     struct VkPrewarm *prewarm; /* vk/prewarm.c, NULL when off */
+    struct VkAsyncPipeline *async_compile; /* vk/async.c, NULL when off */
     bool driver_is_moltenvk;
     /* "<driverName>, <driverInfo>": "MoltenVK, 1.4.3" (the - Driver: line) */
     char driver_desc[VK_MAX_DRIVER_NAME_SIZE + VK_MAX_DRIVER_INFO_SIZE + 2];
@@ -1311,8 +1319,8 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
                               bool zeta_write);
 SurfaceBinding *pgraph_vk_surface_get(NV2AState *d, hwaddr addr);
 void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta);
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale);
-unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d);
+void pgraph_vk_set_surface_scale_factor(NV2AState *d, float scale);
+float pgraph_vk_get_surface_scale_factor(NV2AState *d);
 void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg);
 
 // surface-compute.c
@@ -1454,6 +1462,21 @@ void pgraph_vk_prewarm_flip(PGRAPHState *pg);
 void pgraph_vk_prewarm_stop(PGRAPHVkState *r);
 void pgraph_vk_prewarm_shutdown_wait(PGRAPHVkState *r);
 void pgraph_vk_prewarm_finalize(PGRAPHVkState *r);
+
+/* async.c */
+enum AsyncMissVerdict {
+    ASYNC_BUILD_NOW, /* no worker, queue full, or the build is late */
+    ASYNC_SKIP,      /* the build is in the worker's hands: skip the draw */
+};
+void pgraph_vk_async_init(PGRAPHState *pg);
+enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHVkState *r,
+                                           PipelineBinding *snode,
+                                           const PipelineKey *key, uint64_t hash,
+                                           VkRenderPass render_pass);
+void pgraph_vk_async_drain(PGRAPHState *pg);
+void pgraph_vk_async_stop(PGRAPHVkState *r);
+void pgraph_vk_async_shutdown_wait(PGRAPHVkState *r);
+void pgraph_vk_async_finalize(PGRAPHVkState *r);
 void pgraph_vk_pipeline_cache_feedback_chain(PGRAPHVkState *r,
                                              const void **pnext,
                                              uint32_t stage_count,

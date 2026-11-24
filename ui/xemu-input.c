@@ -1641,6 +1641,34 @@ static void kbd_pad_state(ControllerState *state, const bool *kbd,
     }
 }
 
+/*
+ * Radial dead zone for one analog stick: input inside the zone reads as
+ * centred, and the travel left beyond it is rescaled back to the full
+ * range so the outer edge still reaches 100%. 'dz' is a fraction of full
+ * deflection (0 = off). Applied after the per-controller inversion, so it
+ * is symmetric whichever way the axes point.
+ */
+static void xemu_input_apply_deadzone(int16_t *x, int16_t *y, float dz)
+{
+    if (dz <= 0.0f) {
+        return;
+    }
+
+    const float full = 32767.0f;
+    float fx = *x, fy = *y;
+    float mag = sqrtf(fx * fx + fy * fy) / full;
+
+    if (mag <= dz) {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+
+    float scale = (mag - dz) / ((1.0f - dz) * mag);
+    *x = (int16_t)(fx * scale);
+    *y = (int16_t)(fy * scale);
+}
+
 void xemu_input_update_sdl_controller_state(ControllerState *state)
 {
     state->buttons = 0;
@@ -1706,6 +1734,13 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
 
 #undef INVERT_AXIS
 
+    xemu_input_apply_deadzone(&state->axis[CONTROLLER_AXIS_LSTICK_X],
+                              &state->axis[CONTROLLER_AXIS_LSTICK_Y],
+                              g_config.input.deadzone_left);
+    xemu_input_apply_deadzone(&state->axis[CONTROLLER_AXIS_RSTICK_X],
+                              &state->axis[CONTROLLER_AXIS_RSTICK_Y],
+                              g_config.input.deadzone_right);
+
     // xemu_input_print_controller_state(state);
 }
 
@@ -1725,7 +1760,15 @@ void xemu_input_update_rumble(ControllerState *state)
         return;
     }
 
-    SDL_RumbleGamepad(state->sdl_gamepad, state->rumble_l, state->rumble_r, 250);
+    float strength = g_config.input.rumble_strength;
+    if (strength < 0.0f) {
+        strength = 0.0f;
+    } else if (strength > 1.0f) {
+        strength = 1.0f;
+    }
+    SDL_RumbleGamepad(state->sdl_gamepad,
+                      (uint16_t)(state->rumble_l * strength),
+                      (uint16_t)(state->rumble_r * strength), 250);
     state->last_rumble_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 }
 

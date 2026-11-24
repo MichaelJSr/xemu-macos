@@ -100,6 +100,9 @@ enum NsprofCounter {
                              interval's longest frame */
     NSPROF_PG_HANDOFF,    /* PFIFO letting a counted pgraph.lock waiter in
                              (pfifo_pg_release's wait) */
+    NSPROF_ASYNC_BUILD,   /* async worker's whole pipeline build (vk/async.c);
+                             accumulated on the PFIFO thread at install, so the
+                             worker's own nsprof_exclude_thread does not hide it */
     NSPROF__COUNT,
 };
 
@@ -182,6 +185,13 @@ enum NsprofEvent {
     /* texture descriptor sets (vk/shaders.c) */
     NSPROF_EV_TEX_SET_WRITE,   /* a set written */
     NSPROF_EV_TEX_SET_REUSE,   /* rebound textures resolved to the set's handles */
+    /* async draw-pipeline compile (vk/async.c) */
+    NSPROF_EV_ASYNC_SUBMIT,    /* first-encounter miss handed to the worker */
+    NSPROF_EV_ASYNC_SKIP,      /* draw skipped while its build is in flight */
+    NSPROF_EV_ASYNC_INSTALL,   /* finished build installed into the LRU */
+    NSPROF_EV_ASYNC_DROP,      /* finished build superseded by a sync one */
+    NSPROF_EV_ASYNC_FAIL,      /* worker's build failed; key stays pending */
+    NSPROF_EV_ASYNC_FALLBACK,  /* deadline passed: built synchronously */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

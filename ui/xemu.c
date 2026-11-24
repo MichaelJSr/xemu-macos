@@ -649,6 +649,35 @@ static void handle_mousewheel(SDL_Event *ev)
     qemu_input_event_sync();
 }
 
+/*
+ * Optional pause-on-focus-loss (Settings > Display). Only a pause this
+ * feature itself made is undone on return: a pause the player asked for
+ * (or one that was already in effect) is left alone.
+ */
+static bool focus_loss_paused;
+
+static void xemu_focus_loss_pause(void)
+{
+    if (!g_config.display.ui.pause_on_focus_loss || focus_loss_paused) {
+        return;
+    }
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_PAUSED);
+        focus_loss_paused = true;
+    }
+}
+
+static void xemu_focus_loss_resume(void)
+{
+    if (!focus_loss_paused) {
+        return;
+    }
+    focus_loss_paused = false;
+    if (!runstate_is_running()) {
+        vm_start();
+    }
+}
+
 static void handle_windowevent(SDL_Event *ev)
 {
     struct xemu_console *scon = get_scon_from_window(ev->window.windowID);
@@ -717,11 +746,15 @@ static void handle_windowevent(SDL_Event *ev)
          * key is released.
          */
         scon->ignore_hotkeys = get_mod_state();
+        if (ev->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+            xemu_focus_loss_resume();
+        }
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         if (gui_grab && !gui_fullscreen) {
             grab_end(scon);
         }
+        xemu_focus_loss_pause();
         break;
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         if (qemu_console_is_graphic(scon->dcl.con)) {
@@ -2219,11 +2252,21 @@ static void render_frame(struct xemu_console *scon)
     gl_render_frame(scon);
 }
 
+/*
+ * Rendering from the event watch is only safe once main() holds the main
+ * loop without also running input setup. During xemu_input_init() SDL
+ * spins a nested run loop to enumerate HID devices, and a window
+ * "exposed" notification delivered there would call render_frame() while
+ * the main loop lock is already held, deadlocking on the non-recursive
+ * lock.
+ */
+static bool event_watch_ready;
+
 static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
-    if (xemu_headless_mode()) {
+    if (xemu_headless_mode() || !event_watch_ready) {
         return true;
     }
 
@@ -3122,6 +3165,9 @@ int main(int argc, char **argv)
     xemu_loadvm_run_deferred(); /* CLI -loadvm under XEMU_LOADVM_ADD_PADS */
     xemu_events_ready();   /* QMP XEMU_READY */
     xemu_main_loop_unlock();
+    /* The main loop lock is free again: it is now safe to render from the
+     * event watch during blocking SDL_PollEvent calls (resize/drag). */
+    event_watch_ready = true;
     /* Machine and pads exist: a harness may loadvm or migrate-incoming now. */
     fprintf(stderr, "xemu: ready\n");
 

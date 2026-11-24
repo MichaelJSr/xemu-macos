@@ -38,9 +38,11 @@
  * Four consumers, wired in meson.build:
  *   1. /corpus — golden-value regression of the interpreter (all
  *      platforms).
- *   2. /corpus --jit — the same goldens through the inline ARM64 JIT,
- *      plus an assertion that the JIT actually engaged
- *      (dsp56k_jit_blocks_executed > 0). aarch64 POSIX only.
+ *   2. /corpus --jit — the same goldens through the inline JIT (the
+ *      hand-written ARM64 emitter on aarch64 POSIX hosts, or the
+ *      portable LLVM backend wherever DSP56K_JIT_LLVM is built), plus an
+ *      assertion that the JIT actually engaged
+ *      (dsp56k_jit_blocks_executed > 0).
  *   3. /corpus --jit under XEMU_DSP_JIT_DIFF=1, with and without
  *      XEMU_DSP_JIT_DIFF_SYNC=1 — the in-engine per-block bit-exact
  *      validator replays every translated block through the interpreter
@@ -797,7 +799,7 @@ static const TestProg *find_prog(const char *name)
     return NULL;
 }
 
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
 /*
  * Under XEMU_DSP_JIT_DIFF (the jit-diff-sync and jit-diff-async arms): once
  * the validator has drained, every snapshot it was handed ended checked or
@@ -832,7 +834,7 @@ static void test_corpus_prog(gconstpointer arg)
     run_to_halt(s);
     tp->check(s);
 
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
     /*
      * In the JIT arm, prove the translator actually ran translated
      * blocks — otherwise a translator that bails out of everything
@@ -864,7 +866,7 @@ static void test_corpus_prog(gconstpointer arg)
 
 static void check_jit_engaged(DSPState *s)
 {
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
     dsp_core_t *core = (dsp_core_t *)s->backend;
     if (dsp56k_jit_enabled() && core->jit_state) {
         g_assert_cmpuint(dsp56k_jit_blocks_executed(core), >, 0);
@@ -1098,7 +1100,7 @@ static int dump_state_main(const char *prog_name, const char *out_path)
     return n == sizeof(s->core) ? 0 : 5;
 }
 
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
 /* Describe a byte offset within DspCoreState for failure messages. */
 static const char *core_state_region(size_t off)
 {
@@ -1200,15 +1202,16 @@ static void test_jit_differential(gconstpointer arg)
     g_bytes_unref(interp);
     g_bytes_unref(jit);
 }
-#else  /* !DSP56K_JIT_SUPPORTED */
+#else  /* !DSP56K_JIT_ANY_SUPPORTED */
 
 static void test_jit_differential_unsupported(gconstpointer arg)
 {
     (void)arg;
-    g_test_skip("DSP56K JIT not supported on this host (aarch64 POSIX only)");
+    g_test_skip("DSP56K JIT not supported on this host "
+                "(no aarch64 emitter and no LLVM backend)");
 }
 
-#endif /* DSP56K_JIT_SUPPORTED */
+#endif /* DSP56K_JIT_ANY_SUPPORTED */
 
 int main(int argc, char **argv)
 {
@@ -1240,7 +1243,7 @@ int main(int argc, char **argv)
         g_free(path);
 
         path = g_strdup_printf("/jit-differential/%s", progs[i].name);
-#if DSP56K_JIT_SUPPORTED
+#if DSP56K_JIT_ANY_SUPPORTED
         g_test_add_data_func(path, &progs[i], test_jit_differential);
 #else
         g_test_add_data_func(path, &progs[i],

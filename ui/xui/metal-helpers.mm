@@ -132,6 +132,253 @@ fragment float4 gamma_fs(VSOut in [[stage_in]],
                   col.a);
 }
 
+// Upscaling filters (ports of the GLSL in gl-helpers.cc): FSR 1 EASU and
+// RCAS (from ffx_fsr1.h, (c) 2021 Advanced Micro Devices, Inc., MIT
+// License), Lanczos-3, and Catmull-Rom bicubic. Taps are read with
+// texture.read() rather than sampled, so they line up with the integer
+// texel grid exactly as the GLSL texelFetch versions do.
+struct ScalerUniforms {
+    float2 in_size;
+    float2 out_size;
+    float sharpness;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+static float4 scaler_tap(texture2d<float> tex, int2 p, int2 isz)
+{
+    return tex.read(uint2(clamp(p, int2(0), isz - 1)));
+}
+
+static float fsr_luma(float3 c)
+{
+    return c.b * 0.5 + (c.r * 0.5 + c.g);
+}
+
+static void easu_set(thread float2 &dir, thread float &len, float w,
+                     float lA, float lB, float lC, float lD, float lE)
+{
+    float dc = lD - lC;
+    float cb = lC - lB;
+    float lenX = max(abs(dc), abs(cb));
+    lenX = lenX > 0.0 ? 1.0 / lenX : 0.0;
+    float dirX = lD - lB;
+    dir.x += dirX * w;
+    lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+    lenX *= lenX;
+    len += lenX * w;
+
+    float ec = lE - lC;
+    float ca = lC - lA;
+    float lenY = max(abs(ec), abs(ca));
+    lenY = lenY > 0.0 ? 1.0 / lenY : 0.0;
+    float dirY = lE - lA;
+    dir.y += dirY * w;
+    lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+    lenY *= lenY;
+    len += lenY * w;
+}
+
+static void easu_tap(thread float3 &aC, thread float &aW, float2 off,
+                     float2 dir, float2 len, float lob, float clp, float3 c)
+{
+    float2 v;
+    v.x = (off.x * dir.x) + (off.y * dir.y);
+    v.y = (off.x * -dir.y) + (off.y * dir.x);
+    v *= len;
+    float d2 = min(v.x * v.x + v.y * v.y, clp);
+    float wB = (2.0 / 5.0) * d2 - 1.0;
+    float wA = lob * d2 - 1.0;
+    wB *= wB;
+    wA *= wA;
+    wB = (25.0 / 16.0) * wB - (25.0 / 16.0 - 1.0);
+    float w = wB * wA;
+    aC += c * w;
+    aW += w;
+}
+
+fragment float4 fsr_easu_fs(VSOut in [[stage_in]],
+                            constant ScalerUniforms &u [[buffer(0)]],
+                            texture2d<float> tex [[texture(0)]])
+{
+    int2 isz = int2(u.in_size);
+    float2 pp = in.texcoord * u.in_size - 0.5;
+    float2 fp = floor(pp);
+    pp -= fp;
+    int2 i0 = int2(fp);
+
+    float3 b = scaler_tap(tex, i0 + int2( 0, -1), isz).rgb;
+    float3 c = scaler_tap(tex, i0 + int2( 1, -1), isz).rgb;
+    float3 e = scaler_tap(tex, i0 + int2(-1,  0), isz).rgb;
+    float4 f4 = scaler_tap(tex, i0, isz);
+    float3 f = f4.rgb;
+    float3 g = scaler_tap(tex, i0 + int2( 1,  0), isz).rgb;
+    float3 h = scaler_tap(tex, i0 + int2( 2,  0), isz).rgb;
+    float3 i = scaler_tap(tex, i0 + int2(-1,  1), isz).rgb;
+    float3 j = scaler_tap(tex, i0 + int2( 0,  1), isz).rgb;
+    float3 k = scaler_tap(tex, i0 + int2( 1,  1), isz).rgb;
+    float3 l = scaler_tap(tex, i0 + int2( 2,  1), isz).rgb;
+    float3 n = scaler_tap(tex, i0 + int2( 0,  2), isz).rgb;
+    float3 o = scaler_tap(tex, i0 + int2( 1,  2), isz).rgb;
+
+    float bL = fsr_luma(b), cL = fsr_luma(c), eL = fsr_luma(e), fL = fsr_luma(f);
+    float gL = fsr_luma(g), hL = fsr_luma(h), iL = fsr_luma(i), jL = fsr_luma(j);
+    float kL = fsr_luma(k), lL = fsr_luma(l), nL = fsr_luma(n), oL = fsr_luma(o);
+
+    float2 dir = float2(0.0);
+    float len = 0.0;
+    easu_set(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
+    easu_set(dir, len, pp.x * (1.0 - pp.y),         cL, fL, gL, hL, kL);
+    easu_set(dir, len, (1.0 - pp.x) * pp.y,         fL, iL, jL, kL, nL);
+    easu_set(dir, len, pp.x * pp.y,                 gL, jL, kL, lL, oL);
+
+    float2 dir2 = dir * dir;
+    float dirR = dir2.x + dir2.y;
+    bool zro = dirR < (1.0 / 32768.0);
+    dirR = zro ? 1.0 : rsqrt(dirR);
+    dir.x = zro ? 1.0 : dir.x;
+    dir *= dirR;
+
+    len = len * 0.5;
+    len *= len;
+    float stretch = (dir.x * dir.x + dir.y * dir.y) /
+                    max(abs(dir.x), abs(dir.y));
+    float2 len2 = float2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    float clp = 1.0 / lob;
+
+    float3 aC = float3(0.0);
+    float aW = 0.0;
+    easu_tap(aC, aW, float2( 0.0, -1.0) - pp, dir, len2, lob, clp, b);
+    easu_tap(aC, aW, float2( 1.0, -1.0) - pp, dir, len2, lob, clp, c);
+    easu_tap(aC, aW, float2(-1.0,  1.0) - pp, dir, len2, lob, clp, i);
+    easu_tap(aC, aW, float2( 0.0,  1.0) - pp, dir, len2, lob, clp, j);
+    easu_tap(aC, aW, float2( 0.0,  0.0) - pp, dir, len2, lob, clp, f);
+    easu_tap(aC, aW, float2(-1.0,  0.0) - pp, dir, len2, lob, clp, e);
+    easu_tap(aC, aW, float2( 1.0,  1.0) - pp, dir, len2, lob, clp, k);
+    easu_tap(aC, aW, float2( 2.0,  1.0) - pp, dir, len2, lob, clp, l);
+    easu_tap(aC, aW, float2( 2.0,  0.0) - pp, dir, len2, lob, clp, h);
+    easu_tap(aC, aW, float2( 1.0,  0.0) - pp, dir, len2, lob, clp, g);
+    easu_tap(aC, aW, float2( 1.0,  2.0) - pp, dir, len2, lob, clp, o);
+    easu_tap(aC, aW, float2( 0.0,  2.0) - pp, dir, len2, lob, clp, n);
+
+    float3 mn = min(min(f, g), min(j, k));
+    float3 mx = max(max(f, g), max(j, k));
+    return float4(min(mx, max(mn, aC / aW)), f4.a);
+}
+
+fragment float4 fsr_rcas_fs(VSOut in [[stage_in]],
+                            constant ScalerUniforms &u [[buffer(0)]],
+                            texture2d<float> tex [[texture(0)]])
+{
+    int2 isz = int2(u.in_size);
+    int2 ip = int2(in.texcoord * u.in_size);
+
+    float3 b = scaler_tap(tex, ip + int2( 0, -1), isz).rgb;
+    float3 d = scaler_tap(tex, ip + int2(-1,  0), isz).rgb;
+    float4 e4 = scaler_tap(tex, ip, isz);
+    float3 e = e4.rgb;
+    float3 f = scaler_tap(tex, ip + int2( 1,  0), isz).rgb;
+    float3 h = scaler_tap(tex, ip + int2( 0,  1), isz).rgb;
+
+    float3 mn4 = min(min(b, d), min(f, h));
+    float3 mx4 = max(max(b, d), max(f, h));
+    float3 hitMin = min(mn4, e) / max(4.0 * mx4, float3(1.0 / 65536.0));
+    float3 hitMax = (1.0 - max(mx4, e)) /
+                    min(4.0 * mn4 - 4.0, float3(-1.0 / 65536.0));
+    float3 lobeRGB = max(-hitMin, hitMax);
+    float lobe = max(-(0.25 - (1.0 / 16.0)),
+                     min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) *
+                 u.sharpness;
+
+    float rcpL = 1.0 / (4.0 * lobe + 1.0);
+    float3 c = (lobe * b + lobe * d + lobe * h + lobe * f + e) * rcpL;
+    return float4(c, e4.a);
+}
+
+static float lanczos3(float x)
+{
+    x = abs(x);
+    if (x < 1e-5) {
+        return 1.0;
+    }
+    if (x >= 3.0) {
+        return 0.0;
+    }
+    float px = M_PI_F * x;
+    return 3.0 * sin(px) * sin(px / 3.0) / (px * px);
+}
+
+fragment float4 lanczos_fs(VSOut in [[stage_in]],
+                           constant ScalerUniforms &u [[buffer(0)]],
+                           texture2d<float> tex [[texture(0)]])
+{
+    int2 isz = int2(u.in_size);
+    float2 pp = in.texcoord * u.in_size - 0.5;
+    float2 fp = floor(pp);
+    float2 f = pp - fp;
+    int2 i0 = int2(fp);
+
+    float wx[6], wy[6];
+    for (int k = 0; k < 6; k++) {
+        wx[k] = lanczos3(float(k - 2) - f.x);
+        wy[k] = lanczos3(float(k - 2) - f.y);
+    }
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    for (int y = 0; y < 6; y++) {
+        for (int x = 0; x < 6; x++) {
+            float w = wx[x] * wy[y];
+            acc += scaler_tap(tex, i0 + int2(x - 2, y - 2), isz) * w;
+            wsum += w;
+        }
+    }
+    float4 c = acc / wsum;
+    float4 a = scaler_tap(tex, i0, isz);
+    float4 b = scaler_tap(tex, i0 + int2(1, 0), isz);
+    float4 d = scaler_tap(tex, i0 + int2(0, 1), isz);
+    float4 e = scaler_tap(tex, i0 + int2(1, 1), isz);
+    float4 mn = min(min(a, b), min(d, e));
+    float4 mx = max(max(a, b), max(d, e));
+    return clamp(c, mn, mx);
+}
+
+static float catmull_rom(float x)
+{
+    x = abs(x);
+    if (x < 1.0) {
+        return 1.5 * x * x * x - 2.5 * x * x + 1.0;
+    }
+    if (x < 2.0) {
+        return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
+    }
+    return 0.0;
+}
+
+fragment float4 bicubic_fs(VSOut in [[stage_in]],
+                           constant ScalerUniforms &u [[buffer(0)]],
+                           texture2d<float> tex [[texture(0)]])
+{
+    int2 isz = int2(u.in_size);
+    float2 pp = in.texcoord * u.in_size - 0.5;
+    float2 fp = floor(pp);
+    float2 f = pp - fp;
+    int2 i0 = int2(fp);
+
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    for (int y = -1; y <= 2; y++) {
+        float wy = catmull_rom(float(y) - f.y);
+        for (int x = -1; x <= 2; x++) {
+            float w = catmull_rom(float(x) - f.x) * wy;
+            acc += scaler_tap(tex, i0 + int2(x, y), isz) * w;
+            wsum += w;
+        }
+    }
+    return clamp(acc / wsum, 0.0, 1.0);
+}
+
 // Animated SDF logo (port of ui/shader/xemu-logo.frag)
 constant float pxRange         = 6.0;
 constant float4 textPos        = float4(0.01, 0.0, 0.98, 0.125);
@@ -350,10 +597,24 @@ typedef struct FragUniforms {
     float pad1;
 } FragUniforms;
 
+// Must match ScalerUniforms in kShaderSource (MSL).
+typedef struct ScalerUniforms {
+    float in_size[2];
+    float out_size[2];
+    float sharpness;
+    float pad0;
+    float pad1;
+    float pad2;
+} ScalerUniforms;
+
 enum FragKind {
     FRAG_MASK = 0,
     FRAG_GAMMA,
     FRAG_LOGO,
+    FRAG_FSR_EASU,
+    FRAG_FSR_RCAS,
+    FRAG_LANCZOS,
+    FRAG_BICUBIC,
     FRAG_KIND_COUNT,
 };
 
@@ -475,8 +736,14 @@ bool MetalHelpersInit()
     g_frag_fns[FRAG_MASK] = [g_library newFunctionWithName:@"mask_fs"];
     g_frag_fns[FRAG_GAMMA] = [g_library newFunctionWithName:@"gamma_fs"];
     g_frag_fns[FRAG_LOGO] = [g_library newFunctionWithName:@"logo_fs"];
+    g_frag_fns[FRAG_FSR_EASU] = [g_library newFunctionWithName:@"fsr_easu_fs"];
+    g_frag_fns[FRAG_FSR_RCAS] = [g_library newFunctionWithName:@"fsr_rcas_fs"];
+    g_frag_fns[FRAG_LANCZOS] = [g_library newFunctionWithName:@"lanczos_fs"];
+    g_frag_fns[FRAG_BICUBIC] = [g_library newFunctionWithName:@"bicubic_fs"];
     assert(g_vert_fn && g_frag_fns[FRAG_MASK] && g_frag_fns[FRAG_GAMMA] &&
-           g_frag_fns[FRAG_LOGO]);
+           g_frag_fns[FRAG_LOGO] && g_frag_fns[FRAG_FSR_EASU] &&
+           g_frag_fns[FRAG_FSR_RCAS] && g_frag_fns[FRAG_LANCZOS] &&
+           g_frag_fns[FRAG_BICUBIC]);
 
     MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
     sd.minFilter = MTLSamplerMinMagFilterLinear;
@@ -850,6 +1117,130 @@ static void render_framebuffer_to(id<MTLRenderCommandEncoder> enc,
     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip
             vertexStart:0
             vertexCount:4];
+}
+
+// One scaler pass: draws `src` into the current target (FBO or drawable)
+// using the given fragment function. `in_size` is the source size, and
+// `out_size` the target size (RCAS ignores it). `flip_ndc`/`flip` follow
+// the same conventions as render_framebuffer_to.
+static void render_scaler_to(id<MTLRenderCommandEncoder> enc,
+                             enum FragKind kind, enum TargetFmt fmt,
+                             bool flip_ndc, id<MTLTexture> src, float in_w,
+                             float in_h, float out_w, float out_h,
+                             float sharpness, const float scale[2], bool flip)
+{
+    VertUniforms vu = {};
+    vu.scale_offset[0] = scale[0];
+    vu.scale_offset[1] = scale[1];
+    vu.scale_offset[2] = 0;
+    vu.scale_offset[3] = 0;
+    vu.tex_scale_offset[0] = 1.0f;
+    vu.tex_scale_offset[1] = 1.0f;
+    vu.tex_scale_offset[2] = 0;
+    vu.tex_scale_offset[3] = 0;
+    vu.flip_y = flip ? 1 : 0;
+    vu.flip_ndc = flip_ndc ? 1 : 0;
+
+    ScalerUniforms su = {};
+    su.in_size[0] = in_w;
+    su.in_size[1] = in_h;
+    su.out_size[0] = out_w;
+    su.out_size[1] = out_h;
+    su.sharpness = sharpness;
+
+    [enc setRenderPipelineState:get_pipeline(kind, MetalBlendMode::None, fmt)];
+    [enc setVertexBytes:&vu length:sizeof(vu) atIndex:0];
+    [enc setFragmentBytes:&su length:sizeof(su) atIndex:0];
+    [enc setFragmentTexture:src atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip
+            vertexStart:0
+            vertexCount:4];
+}
+
+// Intermediate targets for the advanced upscaling path, recreated when the
+// frame or window size changes.
+static MetalFbo *g_upscale_gamma_fbo, *g_upscale_out_fbo;
+
+static MetalFbo *ensure_fbo(MetalFbo *fbo, int w, int h)
+{
+    if (fbo && fbo->w == w && fbo->h == h) {
+        return fbo;
+    }
+    MetalFboDestroy(fbo);
+    return MetalFboCreate(w, h);
+}
+
+bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
+                                    bool flip, const float scale[2],
+                                    MetalUpscaleFilter filter, float sharpness)
+{
+    if (nv2a_get_screen_off()) {
+        return true; // pass was cleared at begin_frame
+    }
+
+    id<MTLTexture> src = (id<MTLTexture>)tex;
+    if (!src) {
+        return false;
+    }
+
+    enum FragKind scaler;
+    switch (filter) {
+    case MetalUpscaleFilter::Fsr: scaler = FRAG_FSR_EASU; break;
+    case MetalUpscaleFilter::Lanczos: scaler = FRAG_LANCZOS; break;
+    case MetalUpscaleFilter::Bicubic: scaler = FRAG_BICUBIC; break;
+    default: return false;
+    }
+
+    int tw = (int)src.width, th = (int)src.height;
+    int dw = (int)(scale[0] * width + 0.5f);
+    int dh = (int)(scale[1] * height + 0.5f);
+    if (tw < 1 || th < 1 || dw < 1 || dh < 1 || (dw <= tw && dh <= th)) {
+        return false;
+    }
+
+    g_upscale_gamma_fbo = ensure_fbo(g_upscale_gamma_fbo, tw, th);
+    g_upscale_out_fbo = ensure_fbo(g_upscale_out_fbo, dw, dh);
+
+    const float one[2] = { 1.0f, 1.0f };
+
+    // Pass 1: DAC gamma + orientation at native resolution, into a target
+    // whose row 0 is the scene bottom (the FBO flip_ndc convention), so the
+    // scaler reads it exactly as the GL path does.
+    MetalFboTarget(g_upscale_gamma_fbo);
+    {
+        int w, h;
+        bool flip_ndc;
+        enum TargetFmt fmt;
+        id<MTLRenderCommandEncoder> enc =
+            current_encoder(&w, &h, &flip_ndc, &fmt);
+        render_framebuffer_to(enc, fmt, flip_ndc, tex, flip, one, false);
+    }
+    MetalFboRestore(g_upscale_gamma_fbo);
+
+    // Pass 2: upscale to the exact on-screen size.
+    MetalFboTarget(g_upscale_out_fbo);
+    {
+        int w, h;
+        bool flip_ndc;
+        enum TargetFmt fmt;
+        id<MTLRenderCommandEncoder> enc =
+            current_encoder(&w, &h, &flip_ndc, &fmt);
+        render_scaler_to(enc, scaler, fmt, flip_ndc, g_upscale_gamma_fbo->tex,
+                         (float)tw, (float)th, (float)dw, (float)dh, 0.0f, one,
+                         false);
+    }
+    MetalFboRestore(g_upscale_out_fbo);
+
+    // Pass 3: RCAS sharpen into the drawable with the usual letterboxing.
+    // The orientation was fixed in pass 1, so this pass does not flip.
+    id<MTLRenderCommandEncoder> enc =
+        (id<MTLRenderCommandEncoder>)xemu_metal_get_render_encoder();
+    float sharp = sharpness;
+    sharp = sharp < 0.0f ? 0.0f : (sharp > 1.0f ? 1.0f : sharp);
+    render_scaler_to(enc, FRAG_FSR_RCAS, FMT_BGRA, false,
+                     g_upscale_out_fbo->tex, (float)dw, (float)dh, (float)dw,
+                     (float)dh, sharp, scale, false);
+    return true;
 }
 
 void MetalRenderFramebuffer(uintptr_t tex, int width, int height, bool flip,

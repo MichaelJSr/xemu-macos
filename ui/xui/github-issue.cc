@@ -138,7 +138,7 @@ static std::string BuildSystemInformation()
 static std::string BuildAdditionalInformation()
 {
     char buf[64];
-    snprintf(buf, sizeof(buf), "* Resolution scale: %dx\n",
+    snprintf(buf, sizeof(buf), "* Resolution scale: %gx\n",
              nv2a_get_surface_scale_factor());
 
     std::string ret = buf;
