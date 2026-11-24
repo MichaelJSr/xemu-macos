@@ -90,6 +90,8 @@ unsigned int nv2a_get_surface_scale_factor(void);
  * builds only.
  */
 const char *nv2a_vk_driver_desc(void);
+/* The Vulkan device's name; NULL before the first init. Vulkan builds only. */
+const char *nv2a_vk_device_name(void);
 /*
  * display.vulkan.driver as the Vulkan renderer read it at its first init
  * (CONFIG_DISPLAY_VULKAN_DRIVER_*; a change applies at the next launch),

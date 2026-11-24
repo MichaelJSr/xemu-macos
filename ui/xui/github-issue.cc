@@ -86,8 +86,10 @@ static std::string BuildSystemInformation()
     ret += "GPU Info:";
     /* The Vulkan driver in use and why; NULL until the renderer first ran */
     const char *vk_desc = nullptr;
+    const char *vk_device = nullptr;
 #ifdef CONFIG_VULKAN
     vk_desc = nv2a_vk_driver_desc();
+    vk_device = nv2a_vk_device_name();
 #endif
     bool vk_lines = g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN;
 #ifdef __APPLE__
@@ -104,7 +106,8 @@ static std::string BuildSystemInformation()
         vk_lines = vk_desc != nullptr;
     } else
 #endif
-    if (!vk_lines) {
+    {
+        /* Off Metal the GL context runs on the Vulkan device's GPU */
         ret += "\n* GL Vendor: ";
         ret += safe_gl_str(GL_VENDOR);
         ret += "\n* GL Renderer: ";
@@ -114,10 +117,14 @@ static std::string BuildSystemInformation()
         ret += "\n* GLSL Version: ";
         ret += safe_gl_str(GL_SHADING_LANGUAGE_VERSION);
     }
+    const char *forced_device = g_config.display.vulkan.force_physical_device;
+    if (forced_device && *forced_device) {
+        ret += "\n* Forced Vulkan device: ";
+        ret += forced_device;
+    }
     if (vk_lines) {
-        const char *device = g_config.display.vulkan.preferred_physical_device;
         ret += "\n* Vulkan device: ";
-        ret += (device && *device) ? device : "<<Unknown>>";
+        ret += (vk_device && *vk_device) ? vk_device : "<<Unknown>>";
         if (vk_desc) {
             ret += "\n* Vulkan driver: ";
             ret += vk_desc;

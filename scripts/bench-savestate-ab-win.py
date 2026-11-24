@@ -36,10 +36,10 @@ What it enforces (the Windows equivalents of the macOS disciplines):
                  than XEMU_BASE_PATH) plants a portable marker in the copy.
   muted          every scratch config sets [audio] volume_limit = 0, as
                  scripts/harness-config.py does on macOS.
-  config parity  xemu REWRITES its toml on exit (it drops default-valued keys
-                 and adds display.vulkan.preferred_physical_device), so the
-                 scratch config is regenerated from the template BEFORE EVERY
-                 RUN and patched by [section] + key, never by key alone.
+  config parity  xemu REWRITES its toml on exit (it drops default-valued
+                 keys), so the scratch config is regenerated from the
+                 template BEFORE EVERY RUN and patched by [section] + key,
+                 never by key alone.
   load check     scripts/win/quiet_check.py runs before the batch: a leftover
                  xemu stops it (ports, GPU, qcow2); build/harness processes
                  matched by COMMAND LINE, CPU load and nvidia-smi GPU
@@ -211,9 +211,8 @@ def parse_env_set(text):
 # ---------------------------------------------------------------------------
 # section-aware TOML patcher
 #
-# xemu rewrites its config on exit (default-valued keys disappear,
-# display.vulkan.preferred_physical_device appears), so the scratch config is
-# rebuilt from the template for every run. Keys must be matched under their
+# xemu rewrites its config on exit (default-valued keys disappear), so the
+# scratch config is rebuilt from the template for every run. Keys must be matched under their
 # [section] header: hdd_path lives in [sys.files], and a key-only match would
 # happily rewrite a same-named key in another table.
 # ---------------------------------------------------------------------------

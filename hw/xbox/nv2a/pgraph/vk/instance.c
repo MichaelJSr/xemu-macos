@@ -587,6 +587,55 @@ static bool is_device_compatible(VkPhysicalDevice device)
     // FIXME: Check vram
 }
 
+#if HAVE_EXTERNAL_MEMORY
+/*
+ * The display image is shared with the GL contexts through external
+ * memory, which only works on the GPU those contexts run on, so the
+ * Vulkan device must be the one with the GL context's device UUID. Read
+ * it before the instance exists: loading a Vulkan driver can unbind the
+ * current GL context. Apple shares through IOSurface/Metal instead (its
+ * GL has no GL_EXT_memory_object), so it skips this.
+ */
+static bool get_display_device_uuid(uint8_t *uuid)
+{
+    GLint num_uuids = 0;
+
+    if (epoxy_has_gl_extension("GL_EXT_memory_object")) {
+        glGetIntegerv(GL_NUM_DEVICE_UUIDS_EXT, &num_uuids);
+    }
+    if (num_uuids < 1) {
+        return false;
+    }
+    glGetUnsignedBytei_vEXT(GL_DEVICE_UUID_EXT, 0, uuid);
+
+    return true;
+}
+
+static bool is_display_device(VkPhysicalDevice device,
+                              const uint8_t *display_uuid)
+{
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(device, &props);
+    if (!display_uuid || props.apiVersion < VK_API_VERSION_1_1) {
+        return false;
+    }
+
+    VkPhysicalDeviceIDProperties id_props = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 props2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &id_props,
+    };
+    vkGetPhysicalDeviceProperties2(device, &props2);
+
+    return !memcmp(id_props.deviceUUID, display_uuid, VK_UUID_SIZE);
+}
+
+static uint8_t display_uuid_buf[VK_UUID_SIZE];
+static const uint8_t *display_uuid; /* NULL: the GL context has none */
+#endif
+
 static bool select_physical_device(PGRAPHState *pg, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -605,37 +654,50 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
         g_malloc_n(num_physical_devices, sizeof(VkPhysicalDevice));
     vkEnumeratePhysicalDevices(r->instance, &num_physical_devices, devices);
 
-    const char *preferred_device = g_config.display.vulkan.preferred_physical_device;
-    int preferred_device_index = -1;
+    /*
+     * display.vulkan.force_physical_device names a device regardless of
+     * detection; xemu never writes it. Otherwise the display's GPU where
+     * the display is shared through external memory, else the first
+     * compatible device.
+     */
+    const char *forced_device = g_config.display.vulkan.force_physical_device;
+    bool force = forced_device && *forced_device;
+    bool match_display = !force && HAVE_EXTERNAL_MEMORY;
+
+    r->physical_device = VK_NULL_HANDLE;
 
     fprintf(stderr, "Available physical devices:\n");
     for (int i = 0; i < num_physical_devices; i++) {
         vkGetPhysicalDeviceProperties(devices[i], &r->device_props);
-        bool is_preferred =
-            preferred_device &&
-            !strcmp(r->device_props.deviceName, preferred_device);
-        if (is_preferred) {
-            preferred_device_index = i;
+        bool is_wanted = true;
+        if (force) {
+            is_wanted = !strcmp(r->device_props.deviceName, forced_device);
         }
+#if HAVE_EXTERNAL_MEMORY
+        if (match_display) {
+            is_wanted = is_display_device(devices[i], display_uuid);
+        }
+#endif
         fprintf(stderr, "- %s%s\n", r->device_props.deviceName,
-                is_preferred ? " *" : "");
-    }
-
-    r->physical_device = VK_NULL_HANDLE;
-
-    if (preferred_device_index >= 0 &&
-        is_device_compatible(devices[preferred_device_index])) {
-        r->physical_device = devices[preferred_device_index];
-    } else {
-        for (int i = 0; i < num_physical_devices; i++) {
-            if (is_device_compatible(devices[i])) {
-                r->physical_device = devices[i];
-                break;
-            }
+                is_wanted && (force || match_display) ? " *" : "");
+        if (is_wanted && r->physical_device == VK_NULL_HANDLE &&
+            is_device_compatible(devices[i])) {
+            r->physical_device = devices[i];
         }
     }
+
     if (r->physical_device == VK_NULL_HANDLE) {
-        error_setg(errp, "Failed to find a suitable GPU");
+        if (force) {
+            error_setg(errp, "Forced device \"%s\" not found or unsupported",
+                       forced_device);
+        } else if (match_display) {
+            error_setg(errp,
+                       "No supported Vulkan device found for the GPU driving "
+                       "the display. To override, set "
+                       "display.vulkan.force_physical_device.");
+        } else {
+            error_setg(errp, "Failed to find a suitable GPU");
+        }
         return false;
     }
 
@@ -1035,6 +1097,7 @@ static struct {
     int start_flips;    /* guest flips since it opened (PFIFO thread) */
     char start_tag[24]; /* " (pid N)", set before start_open */
     char *desc;         /* nv2a_vk_driver_desc() */
+    char *device;       /* nv2a_vk_device_name(), written before desc */
 } vk_driver;
 
 #ifdef __APPLE__
@@ -1267,6 +1330,11 @@ const char *nv2a_vk_driver_desc(void)
     return qatomic_load_acquire(&vk_driver.desc);
 }
 
+const char *nv2a_vk_device_name(void)
+{
+    return nv2a_vk_driver_desc() ? vk_driver.device : NULL;
+}
+
 int nv2a_vk_driver_setting(void)
 {
     /* Written before desc's release store */
@@ -1319,8 +1387,9 @@ static void driver_accepted(PGRAPHState *pg, const char *why)
         fprintf(stderr, "xemu: Vulkan driver: %s (%s)\n", name, why);
     }
     fprintf(stderr, "- Driver: %s (id %d)\n", r->driver_desc, r->driver_id);
-    xemu_settings_set_string(&g_config.display.vulkan.preferred_physical_device,
-                             r->device_props.deviceName);
+    if (!vk_driver.device) {
+        vk_driver.device = g_strdup(r->device_props.deviceName);
+    }
     if (!vk_driver.desc) {
         qatomic_store_release(&vk_driver.desc,
                               why ? g_strdup_printf("%s (%s)", r->driver_desc,
@@ -1442,6 +1511,10 @@ static bool resolve_driver(PGRAPHState *pg, Error **errp)
 void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp)
 {
     bool ok;
+#if HAVE_EXTERNAL_MEMORY
+    display_uuid = get_display_device_uuid(display_uuid_buf) ?
+                       display_uuid_buf : NULL;
+#endif
     if (vk_driver.resolved) {
         ok = init_on(pg, vk_driver.path, false, errp);
         if (ok) {
