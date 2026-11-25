@@ -4,6 +4,7 @@ Downloads required libraries for xemu builds on macOS from MacPorts repositories
 """
 # Based on https://github.com/tpoechtrager/osxcross/blob/master/tools/osxcross-macports
 # which is based on https://github.com/maci0/pmmacports
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import gzip
 import glob
@@ -25,7 +26,7 @@ class LibInstaller:
 
 	def __init__(self, arch):
 		self._queue = []
-		self._installed = []
+		self._installed = [] # fetched by this run
 		if arch == 'x86_64':
 			self._darwin_target = self.DARWIN_TARGET_X64
 		elif arch == 'arm64':
@@ -42,15 +43,19 @@ class LibInstaller:
 		if not os.path.exists(self._pkgs_path):
 			os.makedirs(self._pkgs_path)
 
-	def get_latest_pkg_filename_url(self, pkg_name):
-		pkg_base_url = f'{MIRROR}/{pkg_name}'
-		req = Request(f'{pkg_base_url}/', headers={'Accept-Encoding': 'gzip'})
-		with urlopen(req) as response:
+	def list_pkgs(self, pkg_name, timeout=None):
+		"""The mirror's builds of pkg_name for this target, as file names."""
+		req = Request(f'{MIRROR}/{pkg_name}/', headers={'Accept-Encoding': 'gzip'})
+		with urlopen(req, timeout=timeout) as response:
 			pkg_list = response.read()
 			if response.headers.get('Content-Encoding', '').strip().lower() in ('gzip', 'x-gzip'):
 				pkg_list = gzip.decompress(pkg_list)
 		pkg_list = pkg_list.decode('utf-8')
-		pkgs = re.findall(pkg_name + r'[\w\.\-\_\+]*?\.(?:any_any|darwin_any|' + self._darwin_target + r')\.(?:noarch|' + self._arch + r')\.tbz2', pkg_list)
+		return set(re.findall(pkg_name + r'[\w\.\-\_\+]*?\.(?:any_any|darwin_any|' + self._darwin_target + r')\.(?:noarch|' + self._arch + r')\.tbz2', pkg_list))
+
+	def get_latest_pkg_filename_url(self, pkg_name):
+		pkg_base_url = f'{MIRROR}/{pkg_name}'
+		pkgs = self.list_pkgs(pkg_name)
 		if len(pkgs) < 1:
 			print(f'    [*] [ERROR] Unable to find version of {pkg_name} compatible with {self._darwin_target}.{self._arch}')
 			exit(1)
@@ -62,7 +67,7 @@ class LibInstaller:
 		# build with the fewest +variants win, so a newer revision is never
 		# skipped for its variant set (glib2 2.88.3_2 exists only as
 		# +dbus+x11; its dbus dependency is extracted but nothing links it).
-		pkg_filename = max(set(pkgs), key=lambda f: self.pkg_sort_key(pkg_name, f))
+		pkg_filename = max(pkgs, key=lambda f: self.pkg_sort_key(pkg_name, f))
 		return pkg_filename, f'{pkg_base_url}/{pkg_filename}'
 
 	@staticmethod
@@ -204,6 +209,48 @@ class LibInstaller:
 				f.write(lines)
 
 		self.mark_pkg_installed(pkg_name, pkg_version)
+		self._installed.append(pkg_name)
+
+	def check_installed_drift(self):
+		"""Warn when the mirror has a newer build of an installed package.
+
+		install_pkg() keeps whatever INSTALLED lists, while CI starts empty and
+		takes the newest builds, so a local tree silently falls behind what
+		releases ship. This walks INSTALLED, dependencies included, and only
+		warns: refreshing under a developer would change the libraries
+		between the two arms of an A/B.
+		"""
+		if not os.path.exists(self._installed_path):
+			return
+		with open(self._installed_path) as f:
+			installed = [l.strip().split('=', 1) for l in f if '=' in l]
+		behind = []
+		for name, ver in installed:
+			if name in self._installed:
+				continue
+			try:
+				pkgs = self.list_pkgs(name, timeout=5)
+			except HTTPError as e:
+				# The mirror answered: only this port is missing or renamed
+				print(f'[*] Skipping the MacPorts version check of {name}: {e}')
+				continue
+			except Exception as e:
+				# Offline or a slow mirror: one timeout, not one per package
+				print(f'[*] Skipping the MacPorts version check: {e}')
+				return
+			if not pkgs:
+				continue
+			newest = max(pkgs, key=lambda f: self.pkg_sort_key(name, f))
+			have = self.pkg_sort_key(name, f'{name}-{ver}.{self._darwin_target}.{self._arch}.tbz2')
+			# Version and revision only: a variant set is not a newer build
+			if self.pkg_sort_key(name, newest)[:2] > have[:2]:
+				newest_ver = re.sub(r'\.(?:any_any|darwin_any|darwin_\d+)\.\w+\.tbz2$', '', newest)[len(name) + 1:]
+				behind.append(f'{name} {ver} -> {newest_ver}')
+		if behind:
+			print(f'*** Warning: macos-libs/{self._arch} is behind the MacPorts mirror CI builds from: '
+			      + ', '.join(behind)
+			      + f'; refresh with: rm macos-libs/{self._arch}/INSTALLED and rerun ./build.sh'
+			      ' (between A/B campaigns, not between the arms of one)')
 
 	def repair_pc_prefixes(self):
 		"""Rewrite stale prefix= lines in .pc files when the tree has moved."""
@@ -253,6 +300,7 @@ class LibInstaller:
 		while len(self._queue) > 0:
 			pkg_name = self._queue.pop(0)
 			self.install_pkg(pkg_name)
+		self.check_installed_drift()
 
 def main():
 	import argparse

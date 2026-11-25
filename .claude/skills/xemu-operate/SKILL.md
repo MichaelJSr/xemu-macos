@@ -77,10 +77,18 @@ build/qemu-system-i386 [--from dist/xemu.app]` (re-points the MacPorts
 dylibs, resets rpaths, re-signs; refuses `dist/`).
 
 **PGO:** CI arm64 releases use the committed `pgo/default.profdata`;
-locally, set `XEMU_PGO=use`. To retrain, build with `XEMU_PGO=generate`,
-`rm -f pgo/*.profraw`, run `scripts/pgo-train.py` on a clone of
-`dist/xemu.app` (~15 min; its windowed sessions open muted, unfocused
-windows), rebuild with `use` and commit `pgo/default.profdata`.
+locally, set `XEMU_PGO=use`. To retrain, export
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` (a
+MacOSX26.5.sdk, the SDK version CI builds with; CI's copy is Xcode
+26.6's), build with `XEMU_PGO=generate` (it records
+`pgo/PROVENANCE.pending`), `rm -f pgo/*.profraw`, run
+`scripts/pgo-train.py` on a clone of `dist/xemu.app` (~15 min; its
+windowed sessions open muted, unfocused windows), rebuild with `use` in
+the same shell (its merge moves the record to `pgo/PROVENANCE`) and
+commit `pgo/default.profdata` and `pgo/PROVENANCE`.
+The SDK's libc++ headers enter the C++ profile hashes: a `use` build on
+another SDK than `pgo/PROVENANCE` names warns and runs glslang and the
+other C++ unprofiled; C code keeps its profile.
 
 **MoltenVK:** build.sh bundles the first arm64 dylib in
 `macos-libs/<arch>/opt/local/lib`, `/usr/local/lib` or `/opt/homebrew/lib`,

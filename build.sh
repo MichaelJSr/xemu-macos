@@ -180,6 +180,15 @@ pgo_compiler_family() {
     esac
 }
 
+# One key out of the profile's PROVENANCE (sdk, date, commit), which a
+# Darwin XEMU_PGO=generate run records and the use build's merge of its
+# profiles moves into place. The SDK's libc++ headers enter every C++
+# function's CFG hash, so a profile trained on another SDK leaves
+# glslang and the rest of the C++ unprofiled; C is unaffected.
+pgo_provenance() {
+    awk -F= -v key="${2}" '{ sub(/\r$/, "") } $1 == key { print $2; exit }' "${1}"
+}
+
 setup_pgo() {
     [ -n "${XEMU_PGO}" ] || return 0
     local pgo_dir="${XEMU_PGO_DIR:-${PWD}/pgo}"
@@ -200,6 +209,17 @@ setup_pgo() {
         sys_cflags="${sys_cflags} ${gen_flags}"
         sys_ldflags="${sys_ldflags:-} ${gen_flags}"
         echo "PGO: profile-generate build (${family}); profiles will land in ${pgo_dir}"
+        # The record stays pending until a use build merges this run's
+        # profiles, so an abandoned retrain leaves PROVENANCE describing
+        # the profile actually in default.profdata. macos_sdk_ver is set
+        # by the Darwin arm only: Linux and Windows runs write nothing.
+        if [ "${family}" = "clang" ] && [ -n "${macos_sdk_ver:-}" ]; then
+            printf 'sdk=%s\ndate=%s\ncommit=%s\n' "${macos_sdk_ver}" \
+                "$(date +%Y-%m-%d)" \
+                "$(git -C "${project_source_dir}" describe --always --dirty 2>/dev/null || echo unknown)" \
+                > "${pgo_dir}/PROVENANCE.pending"
+            echo "PGO: wrote ${pgo_dir}/PROVENANCE.pending (SDK ${macos_sdk_ver}); the use build's merge moves it to PROVENANCE"
+        fi
         ;;
     use)
         if [ "${family}" = "gcc" ]; then
@@ -244,6 +264,13 @@ setup_pgo() {
              [ "${newest_raw}" -nt "${pgo_dir}/default.profdata" ]; }; then
             ${profdata_prefix}llvm-profdata merge \
                 -output="${pgo_dir}/default.profdata" "${pgo_dir}"/*.profraw
+            # Merged (set -e stops on a failed merge): the generate
+            # run's record now describes default.profdata.
+            if [ -n "${macos_sdk_ver:-}" ] && \
+               [ -f "${pgo_dir}/PROVENANCE.pending" ]; then
+                mv -f "${pgo_dir}/PROVENANCE.pending" "${pgo_dir}/PROVENANCE"
+                echo "PGO: ${pgo_dir}/PROVENANCE updated for the merged profile"
+            fi
         fi
         if [ ! -f "${pgo_dir}/default.profdata" ]; then
             echo "PGO: no clang profiles found in ${pgo_dir}"
@@ -260,6 +287,16 @@ setup_pgo() {
         sys_cflags="${sys_cflags} -fprofile-use=${pgo_dir}/default.profdata"
         sys_ldflags="${sys_ldflags:-} -fprofile-use=${pgo_dir}/default.profdata"
         echo "PGO: profile-use build using ${pgo_dir}/default.profdata"
+        local prof_sdk=""
+        if [ -n "${macos_sdk_ver:-}" ] && [ -f "${pgo_dir}/PROVENANCE" ]; then
+            prof_sdk="$(pgo_provenance "${pgo_dir}/PROVENANCE" sdk)"
+        fi
+        if [ -n "${prof_sdk}" ] && [ "${prof_sdk}" != "${macos_sdk_ver}" ]; then
+            local msg="PGO: profile trained on SDK ${prof_sdk}, building with ${macos_sdk_ver}: C++ (glslang, ui/xui, toml++, VMA) loses its profile; build with SDKROOT set to a MacOSX${prof_sdk}.sdk, or retrain on this SDK"
+            echo "*** ${msg}"
+            # A runner-image SDK bump shows on the CI run page
+            [ -z "${GITHUB_ACTIONS:-}" ] || echo "::warning::${msg}"
+        fi
         ;;
     *)
         echo "PGO: unknown XEMU_PGO value '${XEMU_PGO}' (want 'generate' or 'use')"
@@ -331,11 +368,17 @@ check_pgo_staleness() {
     ' build.log)
     read -r mism hotmism unpro hotunpro hotnames <<<"${summary}"
 
-    # Retrain point: the commit that last touched the committed profile.
+    # Retrain point: the commit that last touched the committed profile
+    # (the profile itself: a commit to pgo/PROVENANCE alone is no retrain).
     local retrain_ref="" retrain_desc="unknown" commits="n/a"
     if git -C "${project_source_dir}" rev-parse --git-dir >/dev/null 2>&1; then
         retrain_ref=$(git -C "${project_source_dir}" log -1 --format=%H \
-                      -- pgo 2>/dev/null || true)
+                      -- pgo/default.profdata 2>/dev/null || true)
+    fi
+    # No git (CI builds from a source tarball): the merged profile's record.
+    local prov="${XEMU_PGO_DIR:-${PWD}/pgo}/PROVENANCE"
+    if [ -z "${retrain_ref}" ] && [ -f "${prov}" ]; then
+        retrain_desc="$(pgo_provenance "${prov}" commit) $(pgo_provenance "${prov}" date)"
     fi
     if [ -n "${retrain_ref}" ]; then
         retrain_desc=$(git -C "${project_source_dir}" log -1 \
@@ -770,10 +813,31 @@ case "$platform" in # Adjust compilation options based on platform
             exit 1
         fi
 
-        sdk="$(most_recent_macosx_sdk_ver ${macos_min_ver})"
+        # SDKROOT (Apple's own variable) wins when it names an SDK: a PGO
+        # retrain sets it to CI's SDK so the C++ profile hashes match.
+        sdk_from=""
+        if [ -n "${SDKROOT:-}" ] && [ -f "${SDKROOT}/SDKSettings.plist" ]; then
+          sdk="${SDKROOT}"
+          sdk_from=" (from SDKROOT)"
+        else
+          [ -z "${SDKROOT:-}" ] || echo "Ignoring SDKROOT=${SDKROOT}: no SDKSettings.plist there"
+          sdk="$(most_recent_macosx_sdk_ver ${macos_min_ver})"
+        fi
         if [[ -z "${sdk}" ]]; then
           echo "SDK >= ${macos_min_ver} not found. Install Xcode Command Line Tools"
           exit 1
+        fi
+        # plutil, not xcrun: xcrun --show-sdk-version can't look up a
+        # Command Line Tools SDK by path.
+        macos_sdk_ver="$(plutil -extract Version raw "${sdk}/SDKSettings.plist" 2>/dev/null || true)"
+        echo "macOS SDK ${macos_sdk_ver:-unknown}: ${sdk}${sdk_from}"
+        if [ -n "${sdk_from}" ] && [ -n "${macos_sdk_ver}" ] && \
+           ! LC_ALL=C awk 'BEGIN {exit ('${macos_sdk_ver}' < '${macos_min_ver}')}'; then
+          echo "SDKROOT's SDK ${macos_sdk_ver} is older than ${macos_min_ver}"
+          exit 1
+        fi
+        if [ -n "${macos_sdk_ver}" ] && [ "${macos_sdk_ver%%.*}" -lt 26 ] 2>/dev/null; then
+          echo "*** Warning: SDK ${macos_sdk_ver} predates macOS 26: MetalFX frame interpolation is compiled out"
         fi
 
         python3 ./scripts/download-macos-libs.py ${target_arch}

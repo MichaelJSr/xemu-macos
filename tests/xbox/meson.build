@@ -7,6 +7,7 @@ xbox_test_exes = []
 
 subdir('dsp')
 subdir('eeprom')
+subdir('fatx')
 subdir('pfifo')
 subdir('ptimer')
 subdir('swizzle')

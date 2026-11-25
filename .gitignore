@@ -29,6 +29,7 @@ build.log
 .DS_Store
 /pgo/*.profraw
 /pgo/*.gcda
+/pgo/PROVENANCE.pending
 bench-out*/
 
 # Claude Code per-clone state (worktrees from EnterWorktree, local settings)

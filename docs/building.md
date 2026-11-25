@@ -36,15 +36,25 @@ rm -rf macos-libs macos-pkgs build dist && ./build.sh   # clean rebuild
 **PGO.** CI applies the committed `pgo/default.profdata` to arm64
 release builds (+9.4% fps); locally use `XEMU_PGO=use ./build.sh`. A
 `use` build warns when the profile has drifted (hot-path CFG-hash
-mismatches, commits since the retrain). Retrain after large churn:
+mismatches, commits since the retrain) or was trained on another macOS
+SDK than the build's (`pgo/PROVENANCE`). Retrain after large churn,
+against a MacOSX26.5.sdk, the SDK version CI builds with (CI's copy is
+Xcode 26.6's):
 
 ```bash
-XEMU_PGO=generate ./build.sh
+export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+XEMU_PGO=generate ./build.sh             # records pgo/PROVENANCE.pending
 rm -f pgo/*.profraw                      # keep pgo/default.profdata
 cp -Rc dist/xemu.app /tmp/xemu-pgo.app   # never run dist/xemu.app itself
 scripts/pgo-train.py /tmp/xemu-pgo.app   # ~15 min, muted windows
-XEMU_PGO=use ./build.sh                  # then commit pgo/default.profdata
+XEMU_PGO=use ./build.sh                  # merges, updates pgo/PROVENANCE
 ```
+
+Then commit `pgo/default.profdata` and `pgo/PROVENANCE`.
+
+The SDK's libc++ headers enter every C++ function's profile hash, so a
+`use` build on another SDK than the one `pgo/PROVENANCE` names warns and
+runs glslang and the other C++ unprofiled; C code keeps its profile.
 
 **MoltenVK.** `build.sh` bundles the first `libMoltenVK.dylib` with the
 target arch slice from `macos-libs` (vendored), `/usr/local` (Vulkan SDK
