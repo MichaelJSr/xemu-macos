@@ -88,6 +88,11 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
         parameter, xmin, ymin, xmax, ymax,
         d->pgraph.regs_[NV_PGRAPH_COLORCLEARVALUE]);
 
+    /* FIXME: What does hardware do when min > max? Clamp as Vulkan does:
+     * one pixel at min, where the unsigned width would wrap. */
+    xmax = MAX(xmin, xmax);
+    ymax = MAX(ymin, ymax);
+
     unsigned int scissor_width = xmax - xmin + 1,
                  scissor_height = ymax - ymin + 1;
     pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
@@ -100,8 +105,14 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
                       scissor_width >= pg->surface_binding_dim.width &&
                       scissor_height >= pg->surface_binding_dim.height;
 
-    pgraph_apply_scaling_factor(pg, &xmin, &ymin);
-    pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+    /* Scale by edges and clip to the scaled surface, as Vulkan does, so
+     * rects that share a guest edge share a scaled one below 1x. An empty
+     * rect gives glScissor a zero extent, which clears nothing. */
+    unsigned int area_width = pg->surface_binding_dim.width,
+                 area_height = pg->surface_binding_dim.height;
+    pgraph_apply_scaling_factor(pg, &area_width, &area_height);
+    pgraph_apply_scaling_factor_rect(pg, area_width, area_height, &xmin, &ymin,
+                                     &scissor_width, &scissor_height);
 
     /* FIXME: Respect window clip?!?! */
     glEnable(GL_SCISSOR_TEST);
@@ -309,8 +320,8 @@ void pgraph_gl_draw_begin(NV2AState *d)
 
     pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
     pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
-    pgraph_apply_scaling_factor(pg, &xmin, &ymin);
-    pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+    pgraph_apply_scaling_factor_rect(pg, vp_width, vp_height, &xmin, &ymin,
+                                     &scissor_width, &scissor_height);
 
     glEnable(GL_SCISSOR_TEST);
     glScissor(xmin, ymin, scissor_width, scissor_height);

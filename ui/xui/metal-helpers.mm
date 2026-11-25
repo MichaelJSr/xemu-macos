@@ -1197,7 +1197,7 @@ static void render_scaler_to(id<MTLRenderCommandEncoder> enc,
 }
 
 // Intermediate targets for the advanced upscaling path, recreated when the
-// frame or window size changes.
+// frame or window size changes. The out target exists only while RCAS runs.
 static MetalFbo *g_upscale_gamma_fbo, *g_upscale_out_fbo;
 
 static MetalFbo *ensure_fbo(MetalFbo *fbo, int w, int h)
@@ -1238,8 +1238,22 @@ bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
         return false;
     }
 
+    // Sharpening strength 0..1 (0 = off, 1 = AMD's maximum). RCAS belongs
+    // to FSR, and at 0 it is an exact copy (lobe = 0, so c = e): without it
+    // the scaler draws straight into the drawable and the drawable-sized
+    // intermediate goes. A NaN sharpness skips RCAS too.
+    float sharp = sharpness;
+    sharp = sharp < 0.0f ? 0.0f : (sharp > 1.0f ? 1.0f : sharp);
+    bool rcas = scaler == FRAG_FSR_EASU && sharp > 0.0f;
+
     g_upscale_gamma_fbo = ensure_fbo(g_upscale_gamma_fbo, tw, th);
-    g_upscale_out_fbo = ensure_fbo(g_upscale_out_fbo, dw, dh);
+    if (rcas) {
+        g_upscale_out_fbo = ensure_fbo(g_upscale_out_fbo, dw, dh);
+    } else if (g_upscale_out_fbo) {
+        // Committed command buffers keep their own reference to the texture
+        MetalFboDestroy(g_upscale_out_fbo);
+        g_upscale_out_fbo = NULL;
+    }
 
     const float one[2] = { 1.0f, 1.0f };
 
@@ -1247,8 +1261,8 @@ bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
     // whose row 0 is the scene bottom (the FBO flip_ndc convention), so the
     // scaler reads it exactly as the GL path does. It samples the frame
     // and commits before the present command buffer, so it waits for the
-    // frame's producer itself. Passes 2 and 3 read only targets this queue
-    // wrote.
+    // frame's producer itself. The later passes read only targets this
+    // queue wrote.
     fbo_target_wait(g_upscale_gamma_fbo, wait_event, wait_value);
     {
         int w, h;
@@ -1260,7 +1274,19 @@ bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
     }
     MetalFboRestore(g_upscale_gamma_fbo);
 
-    // Pass 2: upscale to the exact on-screen size.
+    if (!rcas) {
+        // Pass 2 alone, into the drawable with the usual letterboxing. The
+        // Metal scalers take their taps from in.texcoord only (unlike the
+        // GL ones, which use gl_FragCoord), and the gamma target has the
+        // row order pass 3 reads, so this pass does not flip either.
+        render_scaler_to(
+            (id<MTLRenderCommandEncoder>)xemu_metal_get_render_encoder(),
+            scaler, FMT_BGRA, false, g_upscale_gamma_fbo->tex, (float)tw,
+            (float)th, (float)dw, (float)dh, 0.0f, scale, false);
+        return true;
+    }
+
+    // Pass 2: upscale to the exact on-screen size, for RCAS.
     MetalFboTarget(g_upscale_out_fbo);
     {
         int w, h;
@@ -1278,8 +1304,6 @@ bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
     // The orientation was fixed in pass 1, so this pass does not flip.
     id<MTLRenderCommandEncoder> enc =
         (id<MTLRenderCommandEncoder>)xemu_metal_get_render_encoder();
-    float sharp = sharpness;
-    sharp = sharp < 0.0f ? 0.0f : (sharp > 1.0f ? 1.0f : sharp);
     render_scaler_to(enc, FRAG_FSR_RCAS, FMT_BGRA, false,
                      g_upscale_out_fbo->tex, (float)dw, (float)dh, (float)dw,
                      (float)dh, sharp, scale, false);

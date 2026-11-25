@@ -74,7 +74,7 @@ typedef struct DecalShader_
     GLint in_size_loc;
     GLint out_size_loc;
     GLint sharpness_loc;
-    GLint palette_loc[256];
+    GLint palette_loc; // palette[0]; glUniform1uiv fills the whole array
 } DecalShader;
 
 static DecalShader *g_decal_shader,
@@ -759,11 +759,7 @@ void main()
     s->in_size_loc = glGetUniformLocation(s->prog, "in_InSize");
     s->out_size_loc = glGetUniformLocation(s->prog, "in_OutSize");
     s->sharpness_loc = glGetUniformLocation(s->prog, "in_Sharpness");
-    for (int i = 0; i < 256; i++) {
-        char name[64];
-        snprintf(name, sizeof(name), "palette[%d]", i);
-        s->palette_loc[i] = glGetUniformLocation(s->prog, name);
-    }
+    s->palette_loc = glGetUniformLocation(s->prog, "palette[0]");
 
     const GLfloat verts[6][4] = {
         //  x      y      s      t
@@ -1461,7 +1457,7 @@ static void UploadPalette(DecalShader *s)
         entries[i] = (palette[i * 3 + 2] << 16) | (palette[i * 3 + 1] << 8) |
                      palette[i * 3];
     }
-    glUniform1uiv(s->palette_loc[0], 256, entries);
+    glUniform1uiv(s->palette_loc, 256, entries);
 }
 
 static Fbo *EnsureFbo(Fbo *fbo, int w, int h)
@@ -1679,13 +1675,7 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip,
     glUniform4f(s->scale_offset_loc, scale[0], scale[1], 0, 0);
     glUniform4f(s->tex_scale_offset_loc, 1.0, 1.0, 0, 0);
     glUniform1i(s->tex_loc, 0);
-
-    const uint8_t *palette = nv2a_get_dac_palette();
-    for (int i = 0; i < 256; i++) {
-        uint32_t e = (palette[i * 3 + 2] << 16) | (palette[i * 3 + 1] << 8) |
-                     palette[i * 3];
-        glUniform1ui(s->palette_loc[i], e);
-    }
+    UploadPalette(s);
 
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
