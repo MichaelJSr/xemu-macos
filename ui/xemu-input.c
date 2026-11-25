@@ -1127,7 +1127,7 @@ static void test_input_recycle(void)
      * calls CreateFile between the disconnect and the next poll's
      * ConnectNamedPipe gets ERROR_PIPE_BUSY and gives up. This is polled
      * once per UI event-pump iteration (~16 ms at 60 Hz) and the writers
-     * are one-shot (scripts/win/inject_input.py opens, writes, closes), so
+     * are one-shot (scripts/inject_input.py opens, writes, closes), so
      * that window swallows keystrokes. On a PIPE_NOWAIT
      * instance ConnectNamedPipe never blocks: TRUE means "listening again,
      * no client yet" (the common case, and what leaves test_input_connected

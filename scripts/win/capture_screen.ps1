@@ -18,7 +18,7 @@ Usage:
 -ProcessId  crop to that process's main window rect (falls back to the
             whole primary screen, reported as mode=screen).
 -Thumb      also write a downscaled copy; the pure-Python artifact scorer
-            (score_shot_win.py) decodes that instead of a 1080p PNG, which
+            (scripts/score_shot.py) decodes that instead of a 1080p PNG, which
             keeps post-run scoring off the benchmark's CPU budget.
 
 The process declares itself DPI-aware before any screen query (otherwise a

@@ -5,14 +5,10 @@ Usage: bench-screenshot.py <xemu-pid> <out.png>
 
 Finds the xemu window belonging to <pid> (Quartz window list — works
 unfocused and across Spaces), captures it with `screencapture -l`, and
-scores the frame for the two artifact classes the fork's history says
-matter (plus a stuck-frame catch-all):
-
-  WHITE_SCREEN   near-uniform bright frame (>=90% of pixels near-white)
-  MAGENTA_TILES  screen-aligned magenta blocks / Morton-tile corruption
-                 (the fork's texture/present corruption signature)
-  UNIFORM_FRAME  flat frame of any color (luma stddev ~0) — a stuck or
-                 black presentation mid-scene
+scores a 320-wide `sips` thumbnail of it with scripts/score_shot.py
+(WHITE_SCREEN, MAGENTA_TILES, UNIFORM_FRAME; the same scorer and
+thresholds as every other harness). The thumbnail keeps the pure-Python
+decode to ~0.1 s, since callers score in the middle of a timed dwell.
 
 Prints exactly one line to stdout:
   screenshot: PASS <stats> <path>
@@ -25,8 +21,17 @@ capturable (e.g. headless CI). Known benign class to keep in mind when
 reviewing a flagged PNG: the Azurik death flash is a single-frame
 full-screen magenta wash with the HUD intact.
 """
+import importlib.util
+import os
 import subprocess
 import sys
+
+# By path, so `python3 -I` (no script dir on sys.path) still finds it.
+_spec = importlib.util.spec_from_file_location(
+    'score_shot', os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'score_shot.py'))
+score_shot = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(score_shot)
 
 
 def find_window(pid):
@@ -49,47 +54,20 @@ def find_window(pid):
 
 
 def score(path):
-    from PIL import Image
-    im = Image.open(path).convert('RGB')
-    w, h = im.size
-    if w > 320:
-        im = im.resize((320, max(1, h * 320 // w)))
-        w, h = im.size
-    px = list(im.getdata())
-    n = len(px)
-
-    lumas = [(r * 299 + g * 587 + b * 114) // 1000 for r, g, b in px]
-    mean = sum(lumas) / n
-    var = sum((l - mean) ** 2 for l in lumas) / n
-    std = var ** 0.5
-
-    white = sum(1 for r, g, b in px if min(r, g, b) > 235) / n
-
-    # Magenta test + coarse-grid clustering (screen-aligned blocks).
-    gx, gy = 16, 12
-    cells = [0] * (gx * gy)
-    counts = [0] * (gx * gy)
-    magenta = 0
-    for i, (r, g, b) in enumerate(px):
-        cx = (i % w) * gx // w
-        cy = (i // w) * gy // h
-        counts[cy * gx + cx] += 1
-        if r > 170 and b > 140 and g < 0.55 * min(r, b):
-            magenta += 1
-            cells[cy * gx + cx] += 1
-    mag_frac = magenta / n
-    hot_cells = sum(1 for c, t in zip(cells, counts) if t and c / t > 0.35)
-
-    classes = []
-    if white >= 0.90:
-        classes.append('WHITE_SCREEN')
-    if std < 4.0 and white < 0.90:
-        classes.append('UNIFORM_FRAME')
-    if hot_cells >= 1 or mag_frac > 0.02:
-        classes.append('MAGENTA_TILES')
-    stats = ('luma_mean=%.0f luma_std=%.1f white=%.2f magenta=%.4f '
-             'hot_cells=%d' % (mean, std, white, mag_frac, hot_cells))
-    return classes, stats
+    """(classes, stats) for a PNG, scored on a sips thumbnail when sips
+    can make one (a full Retina capture decodes in seconds)."""
+    thumb = os.path.splitext(path)[0] + '.small.png'
+    try:
+        made = subprocess.run(
+            ['sips', '--resampleWidth', str(score_shot.TARGET_W), path,
+             '--out', thumb], capture_output=True).returncode == 0
+    except OSError:
+        made = False
+    try:
+        return score_shot.score_file(thumb if made else path)
+    finally:
+        if made:
+            os.unlink(thumb)
 
 
 def main():

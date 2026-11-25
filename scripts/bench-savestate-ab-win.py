@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """bench-savestate-ab-win.py - reproducible in-game perf A/B for xemu on Windows.
 
-Windows port of the one-knob protocol scripts/bench-savestate-ab.sh ran
-before it became a wrapper over bench-abx.sh (macOS-only: zsh,
-dist/xemu.app, APFS clones, AF_UNIX monitor socket, screencapture). Same
+Windows port of the one-knob protocol the macOS bench ran before
+scripts/bench-abx.sh replaced it (macOS-only: zsh, dist/xemu.app, APFS
+clones, AF_UNIX monitor socket, screencapture). Same
 gates, same receipt engine (scripts/bench-receipt.py) and the same nsprof
 summarizer, but the older protocol: pairs B,E,B,E, a flat binary block with
-env_var, and cache isolation on/off, where the macOS wrapper now runs
+env_var, and cache isolation on/off, where bench-abx.sh now runs
 B,E,E,B and writes config.experiment, binary.arms and cache_isolation
 off/shared/per-arm. Compare receipts only within one platform, and never
 absolute fps across hosts.
@@ -62,7 +62,7 @@ What it enforces (the Windows equivalents of the macOS disciplines):
                  recorded as a DEAD run and the batch continues. Unique work
                  dir and monitor port per invocation.
   visual check   one screenshot mid-dwell (scripts/win/capture_screen.ps1),
-                 SCORED AFTER the run ends (scripts/win/score_shot_win.py) so
+                 SCORED AFTER the run ends (scripts/score_shot.py) so
                  the scorer's CPU never lands inside a timed window. Any
                  ARTIFACT sets exit code 3.
 
@@ -109,7 +109,7 @@ SUMMARIZER = os.path.join(ROOT, "scripts", "nsprof_summarize.py")
 LIST_SNAPSHOTS = os.path.join(ROOT, "scripts", "list_snapshots.py")
 WIN_DIR = os.path.join(ROOT, "scripts", "win")
 CAPTURE_PS1 = os.path.join(WIN_DIR, "capture_screen.ps1")
-SCORER = os.path.join(WIN_DIR, "score_shot_win.py")
+SCORER = os.path.join(ROOT, "scripts", "score_shot.py")
 QUIET_CHECK = os.path.join(WIN_DIR, "quiet_check.py")
 _spec = importlib.util.spec_from_file_location(
     "xemu_lease", os.path.join(ROOT, "scripts", "xemu_lease.py"))
@@ -1125,7 +1125,7 @@ def main():
         # MSYS2's /usr/bin/python is a POSIX build (os.name == 'posix') even
         # though it runs on Windows: it has no ctypes.WinDLL for the
         # GetProcessTimes sampler and it hands xemu MSYS-style paths.
-        hint = ("on macOS/Linux use scripts/bench-savestate-ab.sh instead"
+        hint = ("on macOS use scripts/bench-abx.sh instead"
                 if not (os.environ.get("MSYSTEM") or
                         sys.platform.startswith(("msys", "cygwin")))
                 else "you are running MSYS2's POSIX python (MSYSTEM=%s); "

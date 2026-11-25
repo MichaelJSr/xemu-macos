@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""score_shot_win.py - visual artifact oracle for the Windows bench harness.
+"""score_shot.py - screenshot artifact oracle and pixel diff, any OS.
 
-Windows port of the scoring half of scripts/bench-screenshot.py (the
-capture half lives in scripts/win/capture_screen.ps1, because Quartz and
-`screencapture -l` do not exist here). Same three artifact classes, same
-thresholds, same one-line verdict format, so a Windows verdict line means
-exactly what a macOS one means:
+The one scorer behind bench-screenshot.py (macOS window capture),
+bench-savestate-ab-win.py (scripts/win/capture_screen.ps1) and QMP
+screendumps. Artifact classes:
 
   WHITE_SCREEN   >=90% of pixels near-white
   MAGENTA_TILES  screen-aligned magenta blocks (the fork's texture /
@@ -13,46 +11,57 @@ exactly what a macOS one means:
   UNIFORM_FRAME  luma stddev ~0: stuck or black presentation mid-scene
 
 Usage:
-  score_shot_win.py <shot.png> [--thumb <shot.small.png>] [--label L]
-  score_shot_win.py --selftest
+  score_shot.py <shot.png> [--thumb <shot.small.png>] [--report-path P]
+  score_shot.py --diff A.png B.png
+  score_shot.py --selftest [OUTDIR]
 
-Prints exactly one line:
+Scoring prints exactly one line:
   screenshot: PASS <stats> <path>
   screenshot: ARTIFACT(<classes>) <stats> <path>
   screenshot: SKIP (<reason>)
 Exit code 0 on PASS/SKIP, 3 on ARTIFACT. A SKIP is never an error: a
 bench must not die because a frame was not capturable.
 
-stdlib only, by design. The macOS scorer needs Pillow; this one carries a
-minimal PNG reader (8-bit, non-interlaced - what System.Drawing writes)
-so the artifact gate cannot silently degrade to "skipped, no Pillow" on a
-fresh machine, which is exactly how the ARTIFACT exit-3 net went missing
-on Windows in the first place. Decode the small thumbnail written by
-capture_screen.ps1 rather than the full 1080p PNG: pure-Python unfiltering
-of 2M pixels would cost seconds of CPU, and the harness scores AFTER the
-timed dwell precisely so scoring can never perturb a measurement.
+--diff compares two same-size pictures and prints one line:
+  diff: PASS|FAIL WxH pixels=N (P%) off_gt_32=N (P%) max_delta=D
+        psnr=X bbox=x0,y0,x1,y1|none A B
+pixels counts the pixels whose largest channel delta is nonzero,
+off_gt_32 those off by more than 32, bbox boxes them (right and bottom
+exclusive), and PSNR is over the RGB samples (inf when identical). PASS
+is the KosmicKrisp screendump bar (docs/kosmickrisp.md): PSNR >= 45 dB
+and at most 0.01% of pixels off by more than 32. Exit 0 on PASS, 3 on
+FAIL, 2 when a file doesn't decode or the sizes differ. A base-vs-new
+renderer change is judged by the counts, not by the bar.
+
+stdlib only, so the gate can't quietly degrade to "skipped, no Pillow" on
+a fresh machine. The reader takes 8- and 16-bit non-interlaced PNGs
+(System.Drawing, screencapture, sips and QEMU's screendump all qualify);
+any other PNG scores SKIP. Pure-Python decoding of a full-resolution
+capture costs seconds, so the window capturers score a 320-wide thumbnail
+(capture_screen.ps1 -Thumb, sips in bench-screenshot.py).
 
 Known benign class when reviewing a flagged PNG: the Azurik death flash is
 a single-frame full-screen magenta wash with the HUD intact.
 """
 
 import argparse
+import math
 import struct
 import sys
 import zlib
 
 
 # ---------------------------------------------------------------------------
-# minimal PNG reader (8-bit, non-interlaced)
+# minimal PNG reader (8- or 16-bit, non-interlaced)
 # ---------------------------------------------------------------------------
 
-class PngError(Exception):
+class PngError(ValueError):
     pass
 
 
 def read_png(path):
     """Return (width, height, pixels) where pixels is a flat bytearray of
-    RGB triples."""
+    RGB triples (alpha dropped, 16-bit samples cut to their high byte)."""
     with open(path, "rb") as f:
         data = f.read()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
@@ -67,7 +76,7 @@ def read_png(path):
         ctype = data[pos + 4:pos + 8]
         body = data[pos + 8:pos + 8 + length]
         pos += 12 + length  # length + type + body + crc
-        if ctype == b"IHDR":
+        if ctype == b"IHDR" and len(body) >= 13:
             ihdr = struct.unpack(">IIBBBBB", body[:13])
         elif ctype == b"PLTE":
             plte = body
@@ -78,7 +87,7 @@ def read_png(path):
     if ihdr is None:
         raise PngError("no IHDR")
     w, h, depth, color, comp, filt, interlace = ihdr
-    if depth != 8:
+    if depth not in (8, 16) or (depth == 16 and color == 3):
         raise PngError("unsupported bit depth %d" % depth)
     if interlace != 0:
         raise PngError("interlaced PNG unsupported")
@@ -90,8 +99,12 @@ def read_png(path):
     if color == 3 and plte is None:
         raise PngError("palette image without PLTE")
 
-    raw = zlib.decompress(b"".join(idat))
-    stride = w * channels
+    try:
+        raw = zlib.decompress(b"".join(idat))
+    except zlib.error as e:
+        raise PngError("bad IDAT stream: %s" % e)
+    bpp = channels * depth // 8
+    stride = w * bpp
     if len(raw) < h * (stride + 1):
         raise PngError("short IDAT stream")
 
@@ -106,7 +119,6 @@ def read_png(path):
         src += 1
         line = bytearray(raw[src:src + stride])
         src += stride
-        bpp = channels
         if ft == 1:
             for i in range(bpp, stride):
                 line[i] = (line[i] + line[i - bpp]) & 0xFF
@@ -135,6 +147,8 @@ def read_png(path):
             raise PngError("bad filter type %d on row %d" % (ft, y))
         out[y * stride:(y + 1) * stride] = line
         prev = line
+    if depth == 16:
+        out = out[0::2]  # big-endian samples: keep the high byte
 
     rgb = bytearray(w * h * 3)
     if color == 2:
@@ -159,7 +173,7 @@ def read_png(path):
 
 
 # ---------------------------------------------------------------------------
-# scoring (thresholds mirror scripts/bench-screenshot.py score())
+# scoring
 # ---------------------------------------------------------------------------
 
 TARGET_W = 320
@@ -171,9 +185,8 @@ MAGENTA_FRAC = 0.02
 
 
 def downsample(w, h, rgb, target_w=TARGET_W):
-    """Box-average down to <= target_w wide (matches the BOX filter the
-    macOS scorer's Pillow resize uses; averaging, not sampling, is what
-    makes a small artifact block survive the shrink)."""
+    """Box-average down to <= target_w wide (averaging, not sampling, is
+    what makes a small artifact block survive the shrink)."""
     if w <= target_w:
         return w, h, rgb
     nw = target_w
@@ -247,6 +260,79 @@ def score_file(path):
     w, h, rgb = read_png(path)
     w, h, rgb = downsample(w, h, rgb)
     return score(w, h, rgb)
+
+
+# ---------------------------------------------------------------------------
+# pixel diff (the KosmicKrisp screendump bar, docs/kosmickrisp.md)
+# ---------------------------------------------------------------------------
+
+KK_PSNR_DB = 45.0
+KK_OFF_DELTA = 32       # a pixel is "off" when a channel moves by more
+KK_OFF_PER_10K = 1      # at most 0.01% of the pixels may be off
+
+
+def diff(a_path, b_path):
+    """Compare two same-size PNGs. Returns {pixels, off_gt_32, max_delta,
+    psnr, bbox, pass_kk_bar, total, size}: pixels whose largest channel
+    delta is nonzero / > 32, the largest delta, PSNR over the RGB samples
+    (inf when identical), the differing pixels' (x0, y0, x1, y1) box with
+    x1/y1 exclusive (None when identical), the KK bar verdict, the pixel
+    count and (w, h). Raises OSError when a file can't be read and
+    ValueError (PngError included) when one doesn't decode or the sizes
+    differ."""
+    wa, ha, a = read_png(a_path)
+    wb, hb, b = read_png(b_path)
+    if (wa, ha) != (wb, hb):
+        raise ValueError("size mismatch: %dx%d vs %dx%d" % (wa, ha, wb, hb))
+    stride = wa * 3
+    pixels = off = max_delta = sse = 0
+    x0, y0, x1, y1 = wa, None, 0, 0
+    for y in range(ha):
+        ra = a[y * stride:(y + 1) * stride]
+        rb = b[y * stride:(y + 1) * stride]
+        if ra == rb:
+            continue
+        d = [abs(p - q) for p, q in zip(ra, rb)]
+        sse += sum(v * v for v in d)
+        m = list(map(max, d[0::3], d[1::3], d[2::3]))
+        hit = [x for x, v in enumerate(m) if v]
+        pixels += len(hit)
+        off += sum(1 for v in m if v > KK_OFF_DELTA)
+        max_delta = max(max_delta, max(m))
+        if y0 is None:
+            y0 = y
+        y1 = y + 1
+        x0 = min(x0, hit[0])
+        x1 = max(x1, hit[-1] + 1)
+    total = wa * ha
+    psnr = (float("inf") if sse == 0 else
+            10.0 * math.log10(255.0 * 255.0 * total * 3 / sse))
+    return {
+        "pixels": pixels,
+        "off_gt_32": off,
+        "max_delta": max_delta,
+        "psnr": psnr,
+        "bbox": None if y0 is None else (x0, y0, x1, y1),
+        "pass_kk_bar": (psnr >= KK_PSNR_DB and
+                        off * 10000 <= KK_OFF_PER_10K * total),
+        "total": total,
+        "size": (wa, ha),
+    }
+
+
+def diff_line(r, a_path="", b_path=""):
+    """The one-line form of a diff() result (see the module docstring)."""
+    total = r["total"] or 1
+    line = ("diff: %s %dx%d pixels=%d (%.4f%%) off_gt_32=%d (%.4f%%) "
+            "max_delta=%d psnr=%s bbox=%s" % (
+                "PASS" if r["pass_kk_bar"] else "FAIL",
+                r["size"][0], r["size"][1],
+                r["pixels"], 100.0 * r["pixels"] / total,
+                r["off_gt_32"], 100.0 * r["off_gt_32"] / total,
+                r["max_delta"],
+                "inf" if math.isinf(r["psnr"]) else "%.2f" % r["psnr"],
+                ",".join(str(v) for v in r["bbox"]) if r["bbox"] else "none"))
+    return " ".join(s for s in (line, a_path, b_path) if s)
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +413,46 @@ def selftest(outdir):
            stats))
     if not ok:
         failures.append(p)
+
+    # The diff must count exactly what changed and hold the KK bar.
+    def base(x, y):
+        return (40 + (x * 3) % 160, 120 + (y * 5) % 100, 50 + (x + y * 2) % 150)
+
+    def nudge(x, y):  # +2 green on a 20x20 block: well inside the bar
+        r, g, b = base(x, y)
+        return (r, g + 2, b) if 50 <= x < 70 and 40 <= y < 60 else (r, g, b)
+
+    def patch(x, y):  # 12 magenta pixels: 0.0625% off by > 32, over the bar
+        return (255, 0, 255) if 10 <= x < 14 and 20 <= y < 23 else base(x, y)
+    pa = os.path.join(outdir, "sel_diff_a.png")
+    write_png(pa, 160, 120, base)
+    diff_cases = [
+        ("identical", base, (0, 0, 0, None, True)),
+        ("nudge", nudge, (400, 0, 2, (50, 40, 70, 60), True)),
+        ("patch", patch, (12, 12, 185, (10, 20, 14, 23), False)),
+    ]
+    for name, fn, expect in diff_cases:
+        pb = os.path.join(outdir, "sel_diff_%s.png" % name)
+        write_png(pb, 160, 120, fn)
+        r = diff(pa, pb)
+        got = (r["pixels"], r["off_gt_32"], r["max_delta"], r["bbox"],
+               r["pass_kk_bar"])
+        ok = got == expect
+        print("  %s  %-14s -> %s" % ("ok   " if ok else "FAIL ",
+                                      "diff " + name, diff_line(r)))
+        if not ok:
+            failures.append(pb)
+    pb = os.path.join(outdir, "sel_diff_small.png")
+    write_png(pb, 80, 60, base)
+    try:
+        diff(pa, pb)
+        ok = False
+    except ValueError:
+        ok = True
+    print("  %s  %-14s -> %s" % ("ok   " if ok else "FAIL ", "diff size",
+                                  "ValueError" if ok else "no error"))
+    if not ok:
+        failures.append(pb)
     return 0 if not failures else 1
 
 
@@ -337,15 +463,33 @@ def main():
                     help="decode this downscaled copy instead (cheaper)")
     ap.add_argument("--report-path", default=None,
                     help="path to print in the verdict (default: image)")
-    ap.add_argument("--selftest", metavar="OUTDIR", default=None)
+    ap.add_argument("--diff", nargs=2, metavar=("A.png", "B.png"),
+                    help="pixel diff against the KK bar (exit 0 PASS, 3 FAIL)")
+    ap.add_argument("--selftest", nargs="?", const="", default=None,
+                    metavar="OUTDIR",
+                    help="prove the nets fire (fixtures to OUTDIR, else a "
+                         "temporary dir)")
     args = ap.parse_args()
 
-    if args.selftest:
-        print("== score_shot_win selftest: the artifact net must FIRE ==")
-        return selftest(args.selftest)
+    if args.selftest is not None:
+        print("== score_shot selftest: the artifact net must FIRE ==")
+        if args.selftest:
+            return selftest(args.selftest)
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="score_shot-") as d:
+            return selftest(d)
+
+    if args.diff:
+        try:
+            r = diff(*args.diff)
+        except (OSError, ValueError) as e:
+            print("diff: ERROR (%s)" % e)
+            return 2
+        print(diff_line(r, *args.diff))
+        return 0 if r["pass_kk_bar"] else 3
 
     if not args.image:
-        print("screenshot: SKIP (usage: score_shot_win.py <shot.png>)")
+        print("screenshot: SKIP (usage: score_shot.py <shot.png>)")
         return 0
     src = args.thumb or args.image
     shown = args.report_path or args.image
